@@ -25,6 +25,18 @@ export interface RigidBodyState {
   contactCount: number;
   maxPenetration_m: number;
   quaternionNormError: number;
+  buoyantForce_N: Vec3;
+  hydrodynamicForce_N: Vec3;
+  hydrodynamicTorque_N_m: Vec3;
+  displacedFluidVolume_m3: number;
+}
+
+export interface RigidExternalLoad {
+  force_N: Vec3;
+  torque_N_m: Vec3;
+  buoyantForce_N?: Vec3;
+  hydrodynamicForce_N?: Vec3;
+  displacedFluidVolume_m3?: number;
 }
 
 export interface RigidStepDiagnostics {
@@ -150,6 +162,7 @@ export function initializeRigidBody(description: RigidBodyDescription): RigidBod
     contactCount: 0,
     maxPenetration_m: 0,
     quaternionNormError: 0
+    , buoyantForce_N: ZERO(), hydrodynamicForce_N: ZERO(), hydrodynamicTorque_N_m: ZERO(), displacedFluidVolume_m3: 0
   };
   partial.angularMomentum_kg_m2_s = bodyInertiaMultiply(partial, partial.angularVelocity_rad_s);
   return partial;
@@ -167,7 +180,8 @@ export function cloneRigidBodies(bodies: RigidBodyState[]): RigidBodyState[] {
     linearVelocity_m_s: { ...body.linearVelocity_m_s }, angularVelocity_rad_s: { ...body.angularVelocity_rad_s },
     angularMomentum_kg_m2_s: { ...body.angularMomentum_kg_m2_s }, inertiaBody_kg_m2: { ...body.inertiaBody_kg_m2 },
     inverseInertiaBody_kg_m2: { ...body.inverseInertiaBody_kg_m2 }, netForce_N: { ...body.netForce_N },
-    netTorque_N_m: { ...body.netTorque_N_m }, collisionImpulse_N_s: { ...body.collisionImpulse_N_s }, collisionAngularImpulse_N_m_s: { ...body.collisionAngularImpulse_N_m_s }
+    netTorque_N_m: { ...body.netTorque_N_m }, collisionImpulse_N_s: { ...body.collisionImpulse_N_s }, collisionAngularImpulse_N_m_s: { ...body.collisionAngularImpulse_N_m_s },
+    buoyantForce_N: { ...body.buoyantForce_N }, hydrodynamicForce_N: { ...body.hydrodynamicForce_N }, hydrodynamicTorque_N_m: { ...body.hydrodynamicTorque_N_m }
   }));
 }
 
@@ -308,13 +322,20 @@ export function rigidDiagnostics(bodies: RigidBodyState[], gravity: Vec3): Rigid
   return { contactCount: contacts, maxPenetration_m: penetration, kineticEnergy_J: kinetic, potentialEnergy_J: potential, linearMomentum_kg_m_s: linearMomentum, angularMomentum_kg_m2_s: angularMomentum, nanCount, quaternionMaxNormError: quaternionError };
 }
 
-export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDescription, "container" | "fluid">, dt: number, collisionIterations = 6): RigidStepDiagnostics {
+export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDescription, "container" | "fluid">, dt: number, collisionIterations = 6, externalLoads?: ReadonlyMap<string, RigidExternalLoad>): RigidStepDiagnostics {
   if (!(dt > 0) || !Number.isFinite(dt)) throw new Error("Rigid-body time step must be finite and positive");
   for (const body of bodies) {
     body.contactCount = 0; body.maxPenetration_m = 0; body.quaternionNormError = 0;
-    body.collisionImpulse_N_s = ZERO(); body.collisionAngularImpulse_N_m_s = ZERO(); body.netTorque_N_m = ZERO();
-    body.netForce_N = scale(scene.fluid.gravity_m_s2, body.mass_kg);
-    body.linearVelocity_m_s = add(body.linearVelocity_m_s, scale(scene.fluid.gravity_m_s2, dt));
+    body.collisionImpulse_N_s = ZERO(); body.collisionAngularImpulse_N_m_s = ZERO();
+    const load = externalLoads?.get(body.description.id);
+    body.buoyantForce_N = load?.buoyantForce_N ? { ...load.buoyantForce_N } : ZERO();
+    body.hydrodynamicForce_N = load?.hydrodynamicForce_N ? { ...load.hydrodynamicForce_N } : ZERO();
+    body.hydrodynamicTorque_N_m = load?.torque_N_m ? { ...load.torque_N_m } : ZERO();
+    body.displacedFluidVolume_m3 = load?.displacedFluidVolume_m3 ?? 0;
+    body.netForce_N = add(scale(scene.fluid.gravity_m_s2, body.mass_kg), load?.force_N ?? ZERO());
+    body.netTorque_N_m = load?.torque_N_m ? { ...load.torque_N_m } : ZERO();
+    body.linearVelocity_m_s = add(body.linearVelocity_m_s, scale(body.netForce_N, body.inverseMass_kg * dt));
+    if (load) body.angularMomentum_kg_m2_s = add(body.angularMomentum_kg_m2_s, scale(load.torque_N_m, dt));
     body.position_m = add(body.position_m, scale(body.linearVelocity_m_s, dt));
     body.angularVelocity_rad_s = bodyInverseInertiaMultiply(body, body.angularMomentum_kg_m2_s);
     const omegaQuaternion = { w: 0, ...body.angularVelocity_rad_s };
@@ -344,7 +365,7 @@ export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDe
   }
   for (const body of bodies) {
     body.netForce_N = add(body.netForce_N, scale(body.collisionImpulse_N_s, 1 / dt));
-    body.netTorque_N_m = scale(body.collisionAngularImpulse_N_m_s, 1 / dt);
+    body.netTorque_N_m = add(body.netTorque_N_m, scale(body.collisionAngularImpulse_N_m_s, 1 / dt));
   }
   return rigidDiagnostics(bodies, scene.fluid.gravity_m_s2);
 }

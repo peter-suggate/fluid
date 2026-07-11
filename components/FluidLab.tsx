@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FluidLabRenderer, type GPUStatus } from "@/lib/webgpu-renderer";
+import { FluidLabRenderer, type GPUStatus, type SimulationBackend } from "@/lib/webgpu-renderer";
 import { length, orbit, pan, zoom } from "@/lib/math";
 import {
   BUILD_ID,
@@ -22,6 +22,9 @@ import {
 import { runShellValidation, type ValidationResult } from "@/lib/validation";
 import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBody, initializeRigidBodies, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "@/lib/rigid-body";
 import { EulerianFluidSolver, type EulerianDiagnostics, type EulerianRenderState } from "@/lib/eulerian-solver";
+import { ParticleFluidSolver, type ParticleDiagnostics, type ParticleRenderState } from "@/lib/particle-solver";
+import { applyFluidReactions, computeFluidLoads, type CouplingDiagnostics } from "@/lib/fluid-rigid-coupling";
+import type { GPUEulerianInfo, GPUQuality } from "@/lib/webgpu-eulerian";
 
 const modeNames: Record<SolverMode, string> = {
   eulerian: "Eulerian",
@@ -102,7 +105,7 @@ function Sparkline({ samples }: { samples: MetricSample[] }) {
   return <canvas ref={canvasRef} className="sparkline" aria-label="Presentation frame time history" />;
 }
 
-function WebGPUViewport({ scene, camera, setCamera, mode, view, simulationTime, bodies, selectedBodyId, fluid, onFrame, onGPUStatus }: {
+function WebGPUViewport({ scene, camera, setCamera, mode, view, simulationTime, bodies, selectedBodyId, fluid, particles, backend, quality, onFrame, onGPUStatus, onGPUInfo }: {
   scene: SceneDescription;
   camera: CameraState;
   setCamera: React.Dispatch<React.SetStateAction<CameraState>>;
@@ -112,22 +115,26 @@ function WebGPUViewport({ scene, camera, setCamera, mode, view, simulationTime, 
   bodies: RigidBodyState[];
   selectedBodyId?: string;
   fluid: EulerianRenderState;
+  particles: ParticleRenderState;
+  backend: SimulationBackend;
+  quality: GPUQuality;
   onFrame: (frameMs: number, resolution: string) => void;
   onGPUStatus: (status: GPUStatus) => void;
+  onGPUInfo: (info: GPUEulerianInfo) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<FluidLabRenderer | null>(null);
-  const stateRef = useRef({ scene, camera, mode, view, simulationTime, bodies, selectedBodyId, fluid });
+  const stateRef = useRef({ scene, camera, mode, view, simulationTime, bodies, selectedBodyId, fluid, particles, backend, quality });
   const pointerRef = useRef<{ id: number; x: number; y: number; action: "orbit" | "pan" } | null>(null);
 
   useEffect(() => {
-    stateRef.current = { scene, camera, mode, view, simulationTime, bodies, selectedBodyId, fluid };
-  }, [scene, camera, mode, view, simulationTime, bodies, selectedBodyId, fluid]);
+    stateRef.current = { scene, camera, mode, view, simulationTime, bodies, selectedBodyId, fluid, particles, backend, quality };
+  }, [scene, camera, mode, view, simulationTime, bodies, selectedBodyId, fluid, particles, backend, quality]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const renderer = new FluidLabRenderer(canvas, onGPUStatus);
+    const renderer = new FluidLabRenderer(canvas, onGPUStatus, onGPUInfo);
     rendererRef.current = renderer;
     let frame = 0;
     let alive = true;
@@ -135,14 +142,14 @@ function WebGPUViewport({ scene, camera, setCamera, mode, view, simulationTime, 
       const render = () => {
         if (!alive) return;
         const state = stateRef.current;
-        const frameMs = renderer.draw(state.simulationTime, state.scene, state.camera, state.mode, state.view, state.bodies, state.selectedBodyId, state.fluid);
+        const frameMs = renderer.draw(state.simulationTime, state.scene, state.camera, state.mode, state.view, state.bodies, state.selectedBodyId, state.fluid, state.backend, state.quality, state.particles);
         onFrame(frameMs, `${canvas.width} × ${canvas.height}`);
         frame = requestAnimationFrame(render);
       };
       render();
     }).catch((error: unknown) => onGPUStatus({ state: "unavailable", label: error instanceof Error ? error.message : "WebGPU initialization failed" }));
     return () => { alive = false; cancelAnimationFrame(frame); rendererRef.current = null; };
-  }, [onFrame, onGPUStatus]);
+  }, [onFrame, onGPUInfo, onGPUStatus]);
 
   const pointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -198,14 +205,14 @@ function ValidationPanel({ results, onClose, gpuStatus }: { results: ValidationR
           </article>
         ))}
       </div>
-      <p className="validation-note">Rigid bodies and the Eulerian MAC-grid water solve are active. The automated suite additionally gates pressure convergence, divergence reduction, wall flux, marker volume, dam-front motion, and deterministic replay. Two-way fluid/body coupling and DFSPH remain later stages.</p>
+      <p className="validation-note">The regression suite gates rigid bodies, the Eulerian MAC oracle, PBF neighbours and density, buoyancy, sinking, and conservative two-way impulse exchange. WebGPU supplies the high-resolution interactive Eulerian path.</p>
     </section>
   );
 }
 
 export function FluidLab() {
   const [scene, setScene] = useState<SceneDescription>(() => cloneScene(defaultScene));
-  const [mode, setMode] = useState<SolverMode>("compare");
+  const [mode, setMode] = useState<SolverMode>("eulerian");
   const [view, setView] = useState<ViewMode>("scientific");
   const [runState, setRunState] = useState<"paused" | "running">("running");
   const [simulationTime, setSimulationTime] = useState(0);
@@ -217,6 +224,14 @@ export function FluidLab() {
   const fluidSolverRef = useRef(initialFluidSolver);
   const [fluidState, setFluidState] = useState<EulerianDiagnostics>(() => initialFluidSolver.diagnostics);
   const [fluidRenderState, setFluidRenderState] = useState<EulerianRenderState>(() => initialFluidSolver.getRenderState());
+  const [initialParticleSolver] = useState(() => new ParticleFluidSolver(defaultScene, 650));
+  const particleSolverRef = useRef(initialParticleSolver);
+  const [particleState, setParticleState] = useState<ParticleDiagnostics>(() => initialParticleSolver.diagnostics);
+  const [particleRenderState, setParticleRenderState] = useState<ParticleRenderState>(() => initialParticleSolver.getRenderState());
+  const [backend, setBackend] = useState<SimulationBackend>("webgpu");
+  const [gpuQuality, setGPUQuality] = useState<GPUQuality>("balanced");
+  const [gpuInfo, setGPUInfo] = useState<GPUEulerianInfo | null>(null);
+  const [couplingState, setCouplingState] = useState<CouplingDiagnostics>({ displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 });
   const [camera, setCamera] = useState<CameraState>(defaultCamera);
   const [gpuStatus, setGPUStatus] = useState<GPUStatus>({ state: "initializing", label: "Initializing WebGPU" });
   const [frameMs, setFrameMs] = useState(0);
@@ -245,9 +260,14 @@ export function FluidLab() {
         let steps = 0;
         let diagnostics: RigidStepDiagnostics | undefined;
         let fluidDiagnostics: EulerianDiagnostics | undefined;
+        let latestCoupling: CouplingDiagnostics | undefined;
         while (accumulatorRef.current >= dt && steps < 2 && simulationTimeRef.current + dt <= scene.duration_s) {
-          diagnostics = advanceRigidBodies(bodiesRef.current, scene, dt);
+          const couplingFluid = mode === "particle" ? particleSolverRef.current : fluidSolverRef.current;
+          const coupling = computeFluidLoads(scene, couplingFluid, bodiesRef.current);
+          latestCoupling = applyFluidReactions(couplingFluid, bodiesRef.current, coupling.loads, dt);
+          diagnostics = advanceRigidBodies(bodiesRef.current, scene, dt, 6, coupling.loads);
           fluidDiagnostics = fluidSolverRef.current.step(dt);
+          if (mode !== "eulerian") particleSolverRef.current.step(dt);
           accumulatorRef.current -= dt;
           simulationTimeRef.current += dt;
           steps += 1;
@@ -258,6 +278,9 @@ export function FluidLab() {
           setRigidState(diagnostics ?? rigidDiagnostics(bodiesRef.current, scene.fluid.gravity_m_s2));
           setFluidState(fluidDiagnostics ?? fluidSolverRef.current.diagnostics);
           setFluidRenderState(fluidSolverRef.current.getRenderState());
+          setParticleState(particleSolverRef.current.diagnostics);
+          setParticleRenderState(particleSolverRef.current.getRenderState());
+          if (latestCoupling) setCouplingState(latestCoupling);
           setSimulationTime(simulationTimeRef.current);
         }
         if (simulationTimeRef.current + dt > scene.duration_s) setRunState("paused");
@@ -266,7 +289,7 @@ export function FluidLab() {
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [runState, scene]);
+  }, [mode, runState, scene]);
 
   const handleFrame = useCallback((value: number, size: string) => {
     setFrameMs(value);
@@ -295,6 +318,8 @@ export function FluidLab() {
     fluidSolverRef.current = new EulerianFluidSolver(source);
     setFluidState(fluidSolverRef.current.diagnostics);
     setFluidRenderState(fluidSolverRef.current.getRenderState());
+    particleSolverRef.current = new ParticleFluidSolver(source, backend === "cpu-reference" ? 650 : 900);
+    setParticleState(particleSolverRef.current.diagnostics); setParticleRenderState(particleSolverRef.current.getRenderState());
     simulationTimeRef.current = 0; accumulatorRef.current = 0;
     setSimulationTime(0); setRunState("paused"); setSamples([]);
     setSelectedBodyId(source.rigidBodies[0]?.id);
@@ -320,7 +345,7 @@ export function FluidLab() {
   };
   const exportMetrics = () => {
     const adapter = gpuStatus.state === "ready" ? gpuStatus.adapter : gpuStatus.label;
-    const payload = { manifest: createRunManifest(scene, mode, adapter), shellMetrics: { presentationFrame_ms: frameMs, canvasResolution: resolution, samples }, rigidBodyState: bodies, rigidBodyDiagnostics: rigidState, fluidMetrics: fluidState };
+    const payload = { manifest: createRunManifest(scene, mode, adapter), backend, gpuQuality, gpuInfo, shellMetrics: { presentationFrame_ms: frameMs, canvasResolution: resolution, samples }, rigidBodyState: bodies, rigidBodyDiagnostics: rigidState, eulerianMetrics: fluidState, particleMetrics: particleState, couplingMetrics: couplingState };
     downloadText(`fluid-lab-run-${Date.now()}.json`, JSON.stringify(payload, null, 2) + "\n");
     setNotice("Run manifest and shell metrics exported");
   };
@@ -371,17 +396,20 @@ export function FluidLab() {
     });
     setRuntimeBodies(next);
     setRunState("running");
-    setNotice("Body released under gravity; fluid force is disabled");
+    setNotice("Body released with buoyancy, drag, torque, and fluid reaction enabled");
   };
   const singleRigidStep = () => {
     setRunState("paused");
     if (simulationTimeRef.current + scene.numerics.fixedDt_s > scene.duration_s) return;
-    const diagnostics = advanceRigidBodies(bodiesRef.current, scene, scene.numerics.fixedDt_s);
-    const fluidDiagnostics = fluidSolverRef.current.step(scene.numerics.fixedDt_s);
+    const activeFluid = mode === "particle" ? particleSolverRef.current : fluidSolverRef.current;
+    const coupling = computeFluidLoads(scene, activeFluid, bodiesRef.current); const couplingDiagnostics = applyFluidReactions(activeFluid, bodiesRef.current, coupling.loads, scene.numerics.fixedDt_s);
+    const diagnostics = advanceRigidBodies(bodiesRef.current, scene, scene.numerics.fixedDt_s, 6, coupling.loads);
+    const fluidDiagnostics = fluidSolverRef.current.step(scene.numerics.fixedDt_s); const particleDiagnostics = particleSolverRef.current.step(scene.numerics.fixedDt_s);
     simulationTimeRef.current += scene.numerics.fixedDt_s;
     setSimulationTime(simulationTimeRef.current);
     setBodies(cloneRigidBodies(bodiesRef.current)); setRigidState(diagnostics);
     setFluidState(fluidDiagnostics); setFluidRenderState(fluidSolverRef.current.getRenderState());
+    setParticleState(particleDiagnostics); setParticleRenderState(particleSolverRef.current.getRenderState()); setCouplingState(couplingDiagnostics);
   };
 
   const estimatedCells = Math.ceil(scene.container.width_m / scene.nominalResolution.length_m) * Math.ceil(scene.container.height_m / scene.nominalResolution.length_m) * Math.ceil(scene.container.depth_m / scene.nominalResolution.length_m);
@@ -447,20 +475,24 @@ export function FluidLab() {
           </div>}
         </section>
         <section className="panel-section">
-          <div className="section-heading"><h2>Discretization</h2><span>comparison mapping</span></div>
+          <div className="section-heading"><h2>Compute &amp; resolution</h2><span>active backend</span></div>
+          <div className="segmented compact" aria-label="Simulation backend"><button className={backend === "webgpu" ? "active" : ""} onClick={() => { setBackend("webgpu"); setNotice("WebGPU compute selected; reset to rebuild fields"); }}>WebGPU</button><button className={backend === "cpu-reference" ? "active" : ""} onClick={() => { setBackend("cpu-reference"); setNotice("CPU binary64 reference selected"); }}>CPU reference</button></div>
+          <label className="select-control"><span>GPU quality</span><select aria-label="GPU quality" value={gpuQuality} onChange={(event) => { setGPUQuality(event.target.value as GPUQuality); setSimulationTime(0); simulationTimeRef.current = 0; setRunState("paused"); }}><option value="balanced">Balanced · ~110k cells</option><option value="high">High · ~500k cells</option><option value="ultra">Ultra · ~1.2m cells</option></select></label>
           <RangeControl label="Nominal length" unit="m" value={scene.nominalResolution.length_m} min={0.0125} max={0.08} step={0.0025} onChange={(value) => setScene((current) => ({ ...current, nominalResolution: { length_m: value } }))} displayDigits={4} />
+          <RangeControl label="Particle spacing" unit="m" value={scene.numerics.particleSpacing_m} min={0.0125} max={0.08} step={0.0025} onChange={(value) => setScene((current) => ({ ...current, numerics: { ...current.numerics, particleSpacing_m: value } }))} displayDigits={4} />
+          <RangeControl label="Pressure iterations" unit="iterations" value={scene.numerics.pressureMaxIterations} min={20} max={1000} step={20} onChange={(value) => setScene((current) => ({ ...current, numerics: { ...current.numerics, pressureMaxIterations: value } }))} displayDigits={0} />
           <div className="estimate-grid"><div><small>MAC allocation</small><strong>{estimatedCells.toLocaleString()}</strong><span>cells</span></div><div><small>SPH estimate</small><strong>{estimatedParticles.toLocaleString()}</strong><span>particles</span></div></div>
         </section>
       </aside>
 
       <section className="viewport-shell">
-        <WebGPUViewport scene={scene} camera={camera} setCamera={setCamera} mode={mode} view={view} simulationTime={simulationTime} bodies={bodies} selectedBodyId={selectedBodyId} fluid={fluidRenderState} onFrame={handleFrame} onGPUStatus={handleGPUStatus} />
+        <WebGPUViewport scene={scene} camera={camera} setCamera={setCamera} mode={mode} view={view} simulationTime={simulationTime} bodies={bodies} selectedBodyId={selectedBodyId} fluid={fluidRenderState} particles={particleRenderState} backend={backend} quality={gpuQuality} onFrame={handleFrame} onGPUStatus={handleGPUStatus} onGPUInfo={setGPUInfo} />
         <div className="viewport-topline">
           <div className={`gpu-badge state-${gpuStatus.state}`}><span className={`status-dot ${gpuStatus.state === "ready" ? "online" : "warning"}`} /><strong>{gpuStatus.state === "ready" ? "WEBGPU" : gpuStatus.state.toUpperCase()}</strong><span>{gpuStatus.label}</span></div>
           <div className="segmented"><button className={view === "scientific" ? "active" : ""} onClick={() => setView("scientific")}>Scientific</button><button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button></div>
         </div>
-        {mode === "compare" && <div className="compare-labels"><span><b>01</b> MAC GRID · ACTIVE</span><span><b>02</b> PARTICLE VIEW · DFSPH PENDING</span></div>}
-        <div className="physics-stage-badge"><strong>STAGE 4</strong><span>3D MAC-grid water active</span><small>RK2 advection · PCG projection · marker surface</small></div>
+        {mode === "compare" && <div className="compare-labels"><span><b>01</b> GPU GRID</span><span><b>02</b> PBF PARTICLES</span></div>}
+        <div className="physics-stage-badge"><strong>STAGE 8</strong><span>{backend === "webgpu" ? "WebGPU fluid compute active" : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} cells · f32 · 40 Jacobi` : "MAC · binary64 · PCG"}</small></div>
         {view === "scientific" && <>
           <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
           <div className="probe-label probe-a"><i />P-01 · surface</div>
@@ -485,6 +517,10 @@ export function FluidLab() {
           <MetricCard label="Rigid bodies" value={String(bodies.length)} unit={`${rigidState.contactCount} contact solves`} />
           <MetricCard label="MAC grid" value={`${fluidRenderState.nx} × ${fluidRenderState.ny} × ${fluidRenderState.nz}`} unit={`${fluidState.pressureIterations} PCG iterations`} tone={fluidState.pressureConverged ? "good" : "warn"} />
           <MetricCard label="Dam front" value={fluidState.damFront_m.toFixed(3)} unit="m" />
+          <MetricCard label="GPU grid" value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.ny} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
+          <MetricCard label="GPU dam front" value={gpuInfo?.front_m !== undefined ? gpuInfo.front_m.toFixed(3) : "—"} unit="m · volume-fraction threshold" />
+          <MetricCard label="GPU max speed" value={gpuInfo?.maxSpeed_m_s !== undefined ? gpuInfo.maxSpeed_m_s.toFixed(3) : "—"} unit={`m/s · ${gpuInfo?.encodedSteps ?? 0} encoded steps`} />
+          <MetricCard label="PBF particles" value={particleState.particleCount.toLocaleString()} unit={`${particleState.meanNeighbourCount.toFixed(1)} mean neighbours`} />
         </section>
         {selectedBody && <section className="panel-section selected-diagnostics" data-testid="selected-body-diagnostics">
           <div className="section-heading"><h2>{selectedBody.description.name}</h2><span>selected state</span></div>
@@ -499,8 +535,11 @@ export function FluidLab() {
             <div><small>Net force</small><strong>{length(selectedBody.netForce_N).toFixed(2)}</strong><span>N</span></div>
             <div><small>Net torque</small><strong>{length(selectedBody.netTorque_N_m).toFixed(3)}</strong><span>N·m</span></div>
             <div><small>Collision force*</small><strong>{(length(selectedBody.collisionImpulse_N_s) / scene.numerics.fixedDt_s).toFixed(1)}</strong><span>N</span></div>
+            <div><small>Buoyancy</small><strong>{length(selectedBody.buoyantForce_N).toFixed(2)}</strong><span>N</span></div>
+            <div><small>Hydrodynamic force</small><strong>{length(selectedBody.hydrodynamicForce_N).toFixed(2)}</strong><span>N</span></div>
+            <div><small>Displaced volume</small><strong>{selectedBody.displacedFluidVolume_m3.toExponential(2)}</strong><span>m³</span></div>
           </div>
-          <small className="diagnostic-footnote">* impulse divided by the current fixed step · hydrodynamic force and buoyancy: not implemented</small>
+          <small className="diagnostic-footnote">* collision impulse divided by the current fixed step · coupling uses deterministic primitive quadrature</small>
         </section>}
         <section className="panel-section chart-section">
           <div className="section-heading"><h2>Presentation frame</h2><span>CPU encode · ms</span></div>
@@ -527,11 +566,19 @@ export function FluidLab() {
             <div><span>Time-step bound</span><strong>{fluidState.limitingCondition}</strong><small>dt {fluidState.dt_s.toFixed(4)} s</small></div>
             <div><span>NaN / infinity</span><strong>{fluidState.nanCount}</strong><small>acceptance = 0</small></div>
           </div>
-          <p>Active: gravity, RK2 semi-Lagrangian advection, explicit viscosity, marker free surface, closed-wall flux enforcement, and matrix-free Jacobi-PCG pressure projection. Not yet active: DFSPH and two-way hydrodynamic force coupling to rigid bodies.</p>
+          <p>CPU oracle: staggered MAC, RK2 semi-Lagrangian advection, explicit viscosity, marker free surface, closed-wall flux enforcement, and matrix-free Jacobi-PCG projection. The WebGPU path uses a higher-resolution collocated volume field with weighted Jacobi projection.</p>
+        </section>
+        <section className="panel-section">
+          <div className="section-heading"><h2>Particle fluid</h2><span>PBF CPU oracle</span></div>
+          <div className="invariant-list"><div><span>Mean density</span><strong>{particleState.meanDensity_kg_m3.toFixed(1)}</strong><small>kg/m³ · target {scene.fluid.density_kg_m3.toFixed(1)}</small></div><div><span>Interior density error</span><strong>{(particleState.interiorMeanDensityError * 100).toFixed(2)}</strong><small>%</small></div><div><span>Neighbour range</span><strong>{particleState.minNeighbourCount}–{particleState.maxNeighbourCount}</strong><small>mean {particleState.meanNeighbourCount.toFixed(1)}</small></div><div><span>Volume drift</span><strong>{(particleState.volumeDrift * 100).toExponential(2)}</strong><small>%</small></div><div><span>Constraint iterations</span><strong>{particleState.densityIterations}</strong><small>max error {particleState.maxConstraintError.toFixed(3)}</small></div><div><span>NaN / infinity</span><strong>{particleState.nanCount}</strong><small>acceptance = 0</small></div></div>
+        </section>
+        <section className="panel-section">
+          <div className="section-heading"><h2>Fluid–rigid exchange</h2><span>two-way impulses</span></div>
+          <div className="invariant-list"><div><span>Displaced volume</span><strong>{couplingState.displacedVolume_m3.toExponential(2)}</strong><small>m³</small></div><div><span>Coupled bodies</span><strong>{couplingState.coupledBodyCount}</strong><small>of {bodies.length}</small></div><div><span>Momentum closure</span><strong>{couplingState.momentumClosureError_N_s.toExponential(2)}</strong><small>N·s</small></div></div>
         </section>
         <section className="panel-section">
           <div className="section-heading"><h2>Run identity</h2><span>reproducibility</span></div>
-          <dl className="run-identity"><div><dt>Build</dt><dd>{BUILD_ID}</dd></div><div><dt>Fluid CPU</dt><dd>binary64 MAC active</dd></div><div><dt>Rigid CPU</dt><dd>binary64 active</dd></div><div><dt>Render GPU</dt><dd>f32 WebGPU</dd></div><div><dt>Random seed</dt><dd>{scene.randomSeed}</dd></div></dl>
+          <dl className="run-identity"><div><dt>Build</dt><dd>{BUILD_ID}</dd></div><div><dt>Active backend</dt><dd>{backend}</dd></div><div><dt>Eulerian GPU</dt><dd>f32 collocated Jacobi</dd></div><div><dt>Eulerian CPU</dt><dd>binary64 MAC PCG</dd></div><div><dt>Particle CPU</dt><dd>binary64 PBF</dd></div><div><dt>Random seed</dt><dd>{scene.randomSeed}</dd></div></dl>
         </section>
       </aside>
 
