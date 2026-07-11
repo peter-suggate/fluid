@@ -8,6 +8,29 @@ export interface Vec3 {
   z: number;
 }
 
+export interface Quaternion {
+  w: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
+export type RigidShape = "sphere" | "box" | "capsule" | "cylinder";
+
+export interface RigidBodyDescription {
+  id: string;
+  name: string;
+  shape: RigidShape;
+  dimensions_m: Vec3;
+  density_kg_m3: number;
+  position_m: Vec3;
+  orientation: Quaternion;
+  linearVelocity_m_s: Vec3;
+  angularVelocity_rad_s: Vec3;
+  restitution: number;
+  friction: number;
+}
+
 export interface SceneDescription {
   schemaVersion: "1.0.0";
   sceneId: string;
@@ -36,6 +59,7 @@ export interface SceneDescription {
     pressureMaxIterations: number;
     particleSpacing_m: number;
   };
+  rigidBodies: RigidBodyDescription[];
 }
 
 export interface CameraState {
@@ -53,7 +77,7 @@ export interface MetricSample {
   kinetic_energy_J: number;
 }
 
-export const BUILD_ID = "web-stage2-0.1.0";
+export const BUILD_ID = "web-stage3-0.2.0";
 
 export const defaultScene: SceneDescription = {
   schemaVersion: "1.0.0",
@@ -80,7 +104,35 @@ export const defaultScene: SceneDescription = {
     pressureRelativeTolerance: 1e-8,
     pressureMaxIterations: 1000,
     particleSpacing_m: 0.025
-  }
+  },
+  rigidBodies: [
+    {
+      id: "body-sphere-1",
+      name: "Cork sphere",
+      shape: "sphere",
+      dimensions_m: { x: 0.09, y: 0.09, z: 0.09 },
+      density_kg_m3: 240,
+      position_m: { x: -0.16, y: 1.18, z: 0 },
+      orientation: { w: 1, x: 0, y: 0, z: 0 },
+      linearVelocity_m_s: { x: 0.18, y: 0, z: 0 },
+      angularVelocity_rad_s: { x: 0, y: 0, z: 2.2 },
+      restitution: 0.42,
+      friction: 0.38
+    },
+    {
+      id: "body-box-1",
+      name: "Dense box",
+      shape: "box",
+      dimensions_m: { x: 0.17, y: 0.13, z: 0.14 },
+      density_kg_m3: 1450,
+      position_m: { x: 0.17, y: 1.34, z: 0.02 },
+      orientation: { w: 0.965925826, x: 0, y: 0, z: 0.258819045 },
+      linearVelocity_m_s: { x: -0.1, y: -0.1, z: 0 },
+      angularVelocity_rad_s: { x: 1.2, y: 0.4, z: -0.7 },
+      restitution: 0.24,
+      friction: 0.55
+    }
+  ]
 };
 
 export const defaultCamera: CameraState = {
@@ -111,6 +163,7 @@ export function serializeScene(scene: SceneDescription): string {
 
 export function parseScene(input: string): SceneDescription {
   const parsed = JSON.parse(input) as SceneDescription;
+  parsed.rigidBodies ??= [];
   const errors = validateScene(parsed);
   if (errors.length > 0) throw new Error(errors.join("; "));
   return parsed;
@@ -130,6 +183,19 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");
   if (!scene.numerics || !(scene.numerics.fixedDt_s > 0) || !(scene.numerics.maxDt_s > 0)) errors.push("Time steps must be positive");
   if (scene.numerics && scene.numerics.fixedDt_s > scene.numerics.maxDt_s) errors.push("Fixed time step exceeds maximum time step");
+  if (!Array.isArray(scene.rigidBodies)) errors.push("Rigid bodies must be an array");
+  else {
+    const ids = new Set<string>();
+    for (const body of scene.rigidBodies) {
+      if (!body.id || ids.has(body.id)) errors.push("Rigid body IDs must be unique and non-empty");
+      ids.add(body.id);
+      if (!(["sphere", "box", "capsule", "cylinder"] as string[]).includes(body.shape)) errors.push(`Unsupported rigid shape ${body.shape}`);
+      if (!(body.dimensions_m.x > 0) || !(body.dimensions_m.y > 0) || !(body.dimensions_m.z > 0)) errors.push(`Body ${body.id} dimensions must be positive`);
+      if (!(body.density_kg_m3 > 0)) errors.push(`Body ${body.id} density must be positive`);
+      if (body.restitution < 0 || body.restitution > 1) errors.push(`Body ${body.id} restitution must be in [0, 1]`);
+      if (body.friction < 0) errors.push(`Body ${body.id} friction cannot be negative`);
+    }
+  }
   return errors;
 }
 

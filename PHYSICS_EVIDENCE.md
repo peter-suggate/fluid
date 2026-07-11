@@ -1,7 +1,7 @@
 # Physics Evidence Ledger
 
-Contract: `docs/PHYSICS_CONTRACT.json` version 0.1.0 (proposed)<br>
-Current stage: Stage 2 browser shell passed; Stage 3 physics not started<br>
+Contract: `docs/PHYSICS_CONTRACT.json` version 0.2.0 (active through Stage 3)<br>
+Current stage: Stage 3 rigid-body CPU reference passed; Stage 4 fluid not started<br>
 Measured simulation evidence: none
 
 This ledger records measurements, not intentions. A specification or plausible
@@ -206,3 +206,94 @@ Environment: Apple Silicon macOS, WebGPU browser adapter
 - Live WebGPU renderer: **PASS**
 - Browser console: **PASS**, zero final warnings/errors
 - Physics claims: **NONE** — Eulerian and DFSPH solvers remain unimplemented
+
+## Claim R3-001 — Primitive rigid-body mass properties are analytic
+
+- Governing equations: solid sphere, cuboid, cylinder, and composite
+  cylinder-plus-hemispheres volume/inertia integrals
+- Implementation: `lib/rigid-body.ts` (`primitiveVolume`, `massProperties`)
+- Validation: `tests/rigid-body.test.ts` R3-01/R3-02
+- Configuration: all four primitive shapes; SI density and dimensions
+- Measured result: benchmark sphere mass `4.188790204786391 kg`, analytic
+  `4.188790204786391 kg`, relative error `0`
+- Acceptance: relative error `<1e-12`
+- Result: **PASS**
+- Resolution dependence: not applicable (analytic primitive geometry)
+- CPU/GPU difference: mass properties remain CPU binary64
+- Known limitation: imported meshes are not supported
+
+## Claim R3-002 — Rigid free fall converges to constant-acceleration motion
+
+- Governing equations: `y=y0+v0 t+0.5 g t²`, `v=v0+g t`
+- Implementation: `advanceRigidBodies` velocity-first symplectic Euler
+- Validation: R3-03 and R3-04
+- Configuration: `y0=10 m`, `v0=0.7 m/s`, `g=-9.80665 m/s²`, duration
+  `0.5 s`, no contact
+- Expected final Y: `9.12416875 m`
+- Measured absolute errors: `0.00980665 m` at `dt=0.004 s`, `0.00490333 m`
+  at `dt=0.002 s`, `0.00245166 m` at `dt=0.001 s`
+- Acceptance: relative position/velocity error `<1%`; error decreases for each
+  halving of `dt`
+- Result: **PASS**; observed first-order position convergence ratio `2.0`
+- CPU/GPU difference: GPU integration not implemented
+- Known limitation: symplectic Euler is first-order accurate in position
+
+## Claim R3-003 — Sphere contact exchanges equal and opposite momentum
+
+- Governing equation: normal/friction impulse equation in
+  `docs/STAGE3_ACCEPTANCE.md`
+- Implementation: `solveBodyContact`, `applyImpulse`
+- Validation: R3-06/R3-10, unequal-mass sphere impact, gravity off
+- Measured momentum before/after: `2.0943951023931957 kg m/s` / same
+- Relative momentum drift: `0`
+- Kinetic energy before/after: `2.3561944901923453 J` /
+  `0.7199483164476598 J` (ratio `0.3055555556` under restitution `0.5`)
+- Acceptance: momentum relative drift `<1e-12`; no energy creation
+- Result: **PASS**
+- Resolution dependence: not applicable
+- CPU/GPU difference: GPU rigid solver not implemented
+- Known limitation: sphere–sphere narrow phase is exact; other body pairs use a
+  conservative bounding-sphere proxy and can collide early
+
+## Claim R3-004 — Container contacts prevent persistent floor penetration
+
+- Governing condition: analytic primitive support point must remain in the
+  inward half-space of every closed container plane
+- Implementation: `supportRadius`, `solvePlaneContact`
+- Validation: R3-07, sphere dropped for `3 s` at `dt=0.001 s`
+- Measured final centre Y: `0.1000000001 m` for radius `0.1 m`
+- Final penetration: `0 m`; final vertical speed: `0 m/s`
+- Acceptance: final penetration `<1e-6 m`
+- Result: **PASS**
+- Resolution dependence: not applicable; time-step convergence still required
+  for impact trajectories
+- CPU/GPU difference: GPU rigid solver not implemented
+- Known limitation: positional correction is non-energy-conserving and its raw
+  pre-correction penetration remains a diagnostic
+
+## Claim R3-005 — Rigid CPU replay remains finite and deterministic
+
+- Governing conditions: unit quaternion, finite state, deterministic traversal
+- Implementation: quaternion integration/normalization and fixed pair ordering
+- Validation: R3-05, R3-08, R3-09
+- Measured final quaternion norm: `1`
+- Deterministic replay: byte-identical
+- NaN/infinity count: `0`
+- Acceptance: norm error `<1e-12`, byte-identical replay, invalid count `0`
+- Result: **PASS**
+- Known limitation: same-build JavaScript binary64 determinism is demonstrated;
+  cross-browser bitwise identity is not yet claimed
+
+## Stage 3 interactive evidence
+
+- WebGPU shader compiled with all four analytic render intersections.
+- Browser added capsule and cylinder bodies, increasing count from `2` to `4`.
+- Drop action changed selected sphere position from `(-0.160, 1.180, 0.000) m`
+  to a dynamically integrated contact state.
+- Single-step advanced simulation time by `0.0010000000000012221 s` (displayed
+  fixed step `0.001 s`).
+- Final browser console warnings/errors: `0`; in-app Stage 3 report: `8/8` pass.
+- Physics boundary: water remains presentation-only; no buoyancy, drag, or
+  two-way fluid momentum claim is made.
+
+Raw benchmark: `benchmarks/results/stage3-rigid-reference.json`

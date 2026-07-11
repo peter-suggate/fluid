@@ -1,6 +1,6 @@
 {
-  "contractVersion": "0.1.0",
-  "status": "proposed-bring-up-thresholds",
+  "contractVersion": "0.2.0",
+  "status": "active-through-stage-3",
   "unitSystem": "SI",
   "rules": {
     "nanCount": {"operator": "eq", "threshold": 0},
@@ -16,6 +16,10 @@
     "staticFluidVolumeRelativeDrift": {"operator": "lt", "threshold": 0.01},
     "hydrostaticPressureL2RelativeError": {"operator": "lt", "threshold": 0.05},
     "rigidFreeFallRelativeError": {"operator": "lt", "threshold": 0.01},
+    "rigidPrimitiveMassRelativeError": {"operator": "lt", "threshold": 1e-12},
+    "rigidPrimitiveInertiaRelativeError": {"operator": "lt", "threshold": 1e-12},
+    "rigidQuaternionNormError": {"operator": "lt", "threshold": 1e-12},
+    "rigidClosedMomentumRelativeDrift": {"operator": "lt", "threshold": 1e-12},
     "floatingSubmergedFractionRelativeError": {"operator": "lt", "threshold": 0.05},
     "cpuClosedMomentumRelativeDrift": {"operator": "lt", "threshold": 0.001},
     "optimizedNeighbourMissingCount": {"operator": "eq", "threshold": 0},
