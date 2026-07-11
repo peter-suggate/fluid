@@ -26,7 +26,7 @@ reflection, and Beer–Lambert absorption.
 - [`docs/STAGE3_ACCEPTANCE.md`](docs/STAGE3_ACCEPTANCE.md) — rigid-body equations,
   collision approximations, and quantitative gates.
 - [`docs/STAGE4_ACCEPTANCE.md`](docs/STAGE4_ACCEPTANCE.md) — Eulerian equations,
-  free-surface choices, dam-break initialization, and quantitative gates.
+  free-surface choices, volume-preserving corner dam-break initialization, and quantitative gates.
 - [`docs/STAGE5_ACCEPTANCE.md`](docs/STAGE5_ACCEPTANCE.md) — PBF kernel,
   neighbour-search, density, boundary, and stability gates.
 - [`docs/STAGE6_7_ACCEPTANCE.md`](docs/STAGE6_7_ACCEPTANCE.md) — buoyancy, drag,

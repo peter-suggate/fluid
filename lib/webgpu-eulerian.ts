@@ -1,4 +1,5 @@
 import type { SceneDescription } from "./model";
+import { damBreakFractions } from "./initial-fluid";
 
 export type GPUQuality = "balanced" | "high" | "ultra";
 
@@ -184,8 +185,8 @@ export class WebGPUEulerianSolver {
 
   get volumeTexture(){return this.volumeA;}
   private initializeVolume(){
-    const {nx,ny,nz}=this.info,c=this.scene.container,data=new Float32Array(nx*ny*nz),damWidth=.32,damHeight=Math.min(.92,c.fillFraction/damWidth);
-    let initialSum=0;for(let k=0;k<nz;k++)for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const fill=this.scene.fluid.initialCondition==="dam-break"?(i+.5)/nx<=damWidth&&(j+.5)/ny<=damHeight:(j+.5)/ny<=c.fillFraction;data[i+nx*(j+ny*k)]=fill?1:0;if(fill)initialSum+=1;}this.info.initialVolumeCellSum=initialSum;this.info.volumeCellSum=initialSum;this.info.volumeDrift=0;this.info.rawVolumeDrift=0;this.info.maxSpeed_m_s=0;this.info.front_m=this.scene.fluid.initialCondition==="dam-break"?-c.width_m/2+damWidth*c.width_m:c.width_m/2;
+    const {nx,ny,nz}=this.info,c=this.scene.container,data=new Float32Array(nx*ny*nz),dam=damBreakFractions(c.fillFraction);
+    let initialSum=0;for(let k=0;k<nz;k++)for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const fill=this.scene.fluid.initialCondition==="dam-break"?(i+.5)/nx<=dam.width&&(j+.5)/ny<=dam.height&&(k+.5)/nz<=dam.depth:(j+.5)/ny<=c.fillFraction;data[i+nx*(j+ny*k)]=fill?1:0;if(fill)initialSum+=1;}this.info.initialVolumeCellSum=initialSum;this.info.volumeCellSum=initialSum;this.info.volumeDrift=0;this.info.rawVolumeDrift=0;this.info.maxSpeed_m_s=0;this.info.front_m=this.scene.fluid.initialCondition==="dam-break"?-c.width_m/2+dam.width*c.width_m:c.width_m/2;
     const rowBytes=nx*4,padded=Math.ceil(rowBytes/256)*256,packed=new Uint8Array(padded*ny*nz),source=new Uint8Array(data.buffer);
     for(let k=0;k<nz;k++)for(let j=0;j<ny;j++)packed.set(source.subarray(rowBytes*(j+ny*k),rowBytes*(j+ny*k+1)),padded*(j+ny*k));
     this.device.queue.writeTexture({texture:this.volumeA},packed,{bytesPerRow:padded,rowsPerImage:ny},{width:nx,height:ny,depthOrArrayLayers:nz});
