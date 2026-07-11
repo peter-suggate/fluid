@@ -125,3 +125,19 @@ test("E4-09 effective grid resolution increases monotonically", () => {
   assert.ok(coarse.effectiveCellSize_m > medium.effectiveCellSize_m);
   assert.ok(medium.effectiveCellSize_m > fine.effectiveCellSize_m);
 });
+
+test("E4-10 dam-break reservoir occupies one corner rather than a full-depth wall", () => {
+  const solver = new EulerianFluidSolver(testScene(), 5000);
+  let nearCornerWet = 0;
+  let farDepthWet = 0;
+  for (let j = 0; j < solver.ny; j += 1) for (let i = 0; i < solver.nx; i += 1) {
+    if (solver.fluid[i + solver.nx * j]) nearCornerWet += 1;
+    const far = i + solver.nx * (j + solver.ny * (solver.nz - 1));
+    if (solver.fluid[far]) farDepthWet += 1;
+  }
+  assert.ok(nearCornerWet > 0);
+  assert.equal(farDepthWet, 0);
+  const tankVolume = defaultScene.container.width_m * defaultScene.container.height_m * defaultScene.container.depth_m;
+  const representedFill = solver.diagnostics.occupiedVolume_m3 / tankVolume;
+  assert.ok(Math.abs(representedFill - defaultScene.container.fillFraction) < 0.04, String(representedFill));
+});

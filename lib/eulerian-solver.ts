@@ -1,4 +1,5 @@
 import type { SceneDescription, Vec3 } from "./model";
+import { damBreakFractions } from "./initial-fluid";
 
 export interface EulerianDiagnostics {
   step: number;
@@ -95,10 +96,11 @@ export class EulerianFluidSolver {
 
   private initializeOccupancy() {
     const fill = this.scene.container.fillFraction;
-    const damWidth = 0.32;
-    const damHeight = Math.min(0.92, fill / damWidth);
+    const dam = damBreakFractions(fill);
     for (let k = 0; k < this.nz; k += 1) for (let j = 0; j < this.ny; j += 1) for (let i = 0; i < this.nx; i += 1) {
-      const occupied = this.scene.fluid.initialCondition === "dam-break" ? (i + 0.5) / this.nx <= damWidth && (j + 0.5) / this.ny <= damHeight : (j + 0.5) / this.ny <= fill;
+      const occupied = this.scene.fluid.initialCondition === "dam-break"
+        ? (i + 0.5) / this.nx <= dam.width && (j + 0.5) / this.ny <= dam.height && (k + 0.5) / this.nz <= dam.depth
+        : (j + 0.5) / this.ny <= fill;
       this.fluid[this.cidx(i, j, k)] = occupied ? 255 : 0;
     }
   }

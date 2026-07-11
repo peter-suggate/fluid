@@ -14,7 +14,7 @@ both reported.
 - eight deterministic marker particles per initially occupied cell;
 - marker advection and cell reconstruction for the free surface;
 - free-slip impermeable container walls and zero-gauge-pressure air cells;
-- dam-break initial column at the left wall by default.
+- volume-preserving dam-break column in the lower `−X/−Z` corner by default.
 
 This is dissipative, first-order in the interface reconstruction, and not
 strictly volume-conservative on the reconstructed grid. Marker volume and raw

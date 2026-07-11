@@ -1,4 +1,5 @@
 import type { SceneDescription, Vec3 } from "./model";
+import { damBreakFractions } from "./initial-fluid";
 
 export interface ParticleDiagnostics {
   step: number;
@@ -68,13 +69,14 @@ export class ParticleFluidSolver {
     this.smoothingLength_m = 2 * this.spacing_m;
     this.particleMass_kg = scene.fluid.density_kg_m3 * this.spacing_m ** 3;
     const points: number[] = [];
-    const damWidth = 0.32;
-    const damHeight = Math.min(0.92, c.fillFraction / damWidth);
+    const dam = damBreakFractions(c.fillFraction);
     for (let z = -c.depth_m / 2 + this.spacing_m / 2; z < c.depth_m / 2; z += this.spacing_m) {
       for (let y = this.spacing_m / 2; y < c.height_m; y += this.spacing_m) {
         for (let x = -c.width_m / 2 + this.spacing_m / 2; x < c.width_m / 2; x += this.spacing_m) {
           const fill = scene.fluid.initialCondition === "dam-break"
-            ? x <= -c.width_m / 2 + damWidth * c.width_m && y <= damHeight * c.height_m
+            ? x <= -c.width_m / 2 + dam.width * c.width_m
+              && y <= dam.height * c.height_m
+              && z <= -c.depth_m / 2 + dam.depth * c.depth_m
             : y <= c.fillFraction * c.height_m;
           if (fill) points.push(x, y, z);
         }
