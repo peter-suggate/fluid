@@ -38,6 +38,7 @@ struct Params {
   cellGravity: vec4f,
   container: vec4f,
   physical: vec4f,
+  boundary: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
@@ -108,17 +109,44 @@ fn interfaceNormal(id:vec3i)->vec3f{
   let gradient=volumeGradient(id);
   return gradient/max(length(gradient),1e-6);
 }
-fn advectedVolume(id:vec3i,dt:f32)->f32{
-  let h=params.cellGravity.xyz;let centre=volume(id);
+fn rawVolumeFlux(id:vec3i,axis:u32,dt:f32)->f32{
+  if(!valid(id)){return 0.0;}
+  let neighbor=id+select(select(vec3i(0,0,1),vec3i(0,1,0),axis==1u),vec3i(1,0,0),axis==0u);
+  let speed=faceVelocity(id)[axis];
+  return dt/params.cellGravity.xyz[axis]*upwind(speed,volume(id),volume(neighbor));
+}
+fn outwardFlux(id:vec3i,dt:f32)->f32{
+  if(!valid(id)){return 0.0;}
   let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
-  let uxp=faceVelocity(id).x;let uxm=faceVelocity(id-ex).x;let uyp=faceVelocity(id).y;let uym=faceVelocity(id-ey).y;let uzp=faceVelocity(id).z;let uzm=faceVelocity(id-ez).z;
-  let fxp=upwind(uxp,centre,volume(id+ex));let fxm=upwind(uxm,volume(id-ex),centre);
-  let fyp=upwind(uyp,centre,volume(id+ey));let fym=upwind(uym,volume(id-ey),centre);
-  let fzp=upwind(uzp,centre,volume(id+ez));let fzm=upwind(uzm,volume(id-ez),centre);
-  return clamp(centre-dt*((fxp-fxm)/h.x+(fyp-fym)/h.y+(fzp-fzm)/h.z),0.0,1.0);
+  return max(rawVolumeFlux(id,0u,dt),0.0)+max(-rawVolumeFlux(id-ex,0u,dt),0.0)
+       + max(rawVolumeFlux(id,1u,dt),0.0)+max(-rawVolumeFlux(id-ey,1u,dt),0.0)
+       + max(rawVolumeFlux(id,2u,dt),0.0)+max(-rawVolumeFlux(id-ez,2u,dt),0.0);
+}
+fn inwardFlux(id:vec3i,dt:f32)->f32{
+  if(!valid(id)){return 0.0;}
+  let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
+  return max(-rawVolumeFlux(id,0u,dt),0.0)+max(rawVolumeFlux(id-ex,0u,dt),0.0)
+       + max(-rawVolumeFlux(id,1u,dt),0.0)+max(rawVolumeFlux(id-ey,1u,dt),0.0)
+       + max(-rawVolumeFlux(id,2u,dt),0.0)+max(rawVolumeFlux(id-ez,2u,dt),0.0);
+}
+fn donorScale(id:vec3i,dt:f32)->f32{return min(1.0,volume(id)/max(outwardFlux(id,dt),1e-9));}
+fn receiverScale(id:vec3i,dt:f32)->f32{return min(1.0,(1.0-volume(id))/max(inwardFlux(id,dt),1e-9));}
+fn limitedVolumeFlux(id:vec3i,axis:u32,dt:f32)->f32{
+  let offset=select(select(vec3i(0,0,1),vec3i(0,1,0),axis==1u),vec3i(1,0,0),axis==0u);
+  let neighbor=id+offset;let flux=rawVolumeFlux(id,axis,dt);
+  if(flux>=0.0){return flux*min(donorScale(id,dt),receiverScale(neighbor,dt));}
+  return flux*min(donorScale(neighbor,dt),receiverScale(id,dt));
+}
+fn advectedVolume(id:vec3i,dt:f32)->f32{
+  let centre=volume(id);
+  let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
+  let fxp=limitedVolumeFlux(id,0u,dt);let fxm=limitedVolumeFlux(id-ex,0u,dt);
+  let fyp=limitedVolumeFlux(id,1u,dt);let fym=limitedVolumeFlux(id-ey,1u,dt);
+  let fzp=limitedVolumeFlux(id,2u,dt);let fzm=limitedVolumeFlux(id-ez,2u,dt);
+  return centre-(fxp-fxm+fyp-fym+fzp-fzm);
 }
 
-fn diffusionVelocity(p:vec3i)->vec3f{let v=textureLoad(velocityIn,clampCell(p),0).xyz;if(params.container.w>=0.0&&!valid(p)){return -v;}return v;}
+fn diffusionVelocity(p:vec3i)->vec3f{let v=textureLoad(velocityIn,clampCell(p),0).xyz;if(params.boundary.y>0.5&&!valid(p)){return -v;}return v;}
 fn strainMagnitude(id:vec3i)->f32{
   let h=params.cellGravity.xyz;let dx=(diffusionVelocity(id+vec3i(1,0,0))-diffusionVelocity(id-vec3i(1,0,0)))/(2.0*h.x);let dy=(diffusionVelocity(id+vec3i(0,1,0))-diffusionVelocity(id-vec3i(0,1,0)))/(2.0*h.y);let dz=(diffusionVelocity(id+vec3i(0,0,1))-diffusionVelocity(id-vec3i(0,0,1)))/(2.0*h.z);let sxy=0.5*(dx.y+dy.x);let sxz=0.5*(dx.z+dz.x);let syz=0.5*(dy.z+dz.y);
   return sqrt(2.0*(dx.x*dx.x+dy.y*dy.y+dz.z*dz.z+2.0*(sxy*sxy+sxz*sxz+syz*syz)));
@@ -139,7 +167,7 @@ fn advect(@builtin(global_invocation_id) gid: vec3u) {
   if (liquid(id)||liquid(id+vec3i(0,1,0))) { v.y += params.cellGravity.w*dt; }
   // Balanced-force CSF: pressure and capillary acceleration use the same
   // positive-face locations and alpha differences.
-  let sigmaOverRho=abs(params.container.w)/params.physical.x;
+  let sigmaOverRho=params.boundary.x/params.physical.x;
   if(valid(id+vec3i(1,0,0))){v.x+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(1,0,0)))*(volume(id+vec3i(1,0,0))-phi)/h.x;}
   if(valid(id+vec3i(0,1,0))){v.y+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(0,1,0)))*(volume(id+vec3i(0,1,0))-phi)/h.y;}
   if(valid(id+vec3i(0,0,1))){v.z+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(0,0,1)))*(volume(id+vec3i(0,0,1))-phi)/h.z;}
@@ -209,7 +237,7 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
 fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}let phi=volume(id);var v=velocity(id);let h=params.cellGravity.xyz;
   let world=vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);
-  let bodyCount=u32(round(params.physical.w));let cellMass=params.physical.x*h.x*h.y*h.z*phi;let blend=clamp(45.0*params.dimsDt.w,0.0,1.0);
+  let bodyCount=u32(round(params.boundary.z));let cellMass=params.physical.x*h.x*h.y*h.z*phi;let blend=clamp(45.0*params.dimsDt.w,0.0,1.0);
   for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}let body=rigidBodies[bodyIndex];if(!insideRigid(body,world)){continue;}
     let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let fluidImpulse=cellMass*(solidVelocity-v)*blend;v+=fluidImpulse/max(cellMass,1e-9);
     let reaction=-fluidImpulse;let torque=cross(arm,reaction);let base=bodyIndex*8u;
@@ -221,9 +249,7 @@ fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
 }
 
 @compute @workgroup_size(4,4,4)
-fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let phi=volume(id);atomicAdd(&reductions[0],u32(clamp(phi,0.0,1.0)*2048.0));if(phi>0.5){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));}
-@compute @workgroup_size(4,4,4)
-fn correctVolume(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let measured=max(1.0,f32(atomicLoad(&reductions[0])));if(all(id==vec3i(0))){atomicStore(&reductions[3],u32(measured));}let correction=clamp(params.physical.z/measured,0.8,1.25);textureStore(volumeOut,id,vec4f(clamp(volume(id)*correction,0.0,1.0)));}
+fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let phi=volume(id);atomicAdd(&reductions[0],u32(clamp(phi,0.0,1.0)*2048.0+0.5));if(phi>0.5){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));}
 `;
 
 export class WebGPUEulerianSolver {
@@ -234,8 +260,8 @@ export class WebGPUEulerianSolver {
   private heightA: GPUTexture; private heightB: GPUTexture;
   private params: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
-  private advectPipeline: GPUComputePipeline; private jacobiPipeline: GPUComputePipeline; private projectPipeline: GPUComputePipeline; private rigidPipeline:GPUComputePipeline;private reductionPipeline:GPUComputePipeline;private correctionPipeline:GPUComputePipeline;
-  private advectGroup: GPUBindGroup; private jacobiABGroup: GPUBindGroup; private jacobiBAGroup: GPUBindGroup; private projectGroup: GPUBindGroup;private rigidGroup:GPUBindGroup; private reductionGroup:GPUBindGroup;private correctionGroup:GPUBindGroup;
+  private advectPipeline: GPUComputePipeline; private jacobiPipeline: GPUComputePipeline; private projectPipeline: GPUComputePipeline; private rigidPipeline:GPUComputePipeline;private reductionPipeline:GPUComputePipeline;
+  private advectGroup: GPUBindGroup; private jacobiABGroup: GPUBindGroup; private jacobiBAGroup: GPUBindGroup; private projectGroup: GPUBindGroup;private rigidGroup:GPUBindGroup; private reductionGroup:GPUBindGroup;
   private reductionBuffer:GPUBuffer;private rigidBuffer:GPUBuffer;private rigidExchangeBuffer:GPUBuffer;private querySet?:GPUQuerySet;private queryResolve?:GPUBuffer;
   private lastTime = 0;
   private readbackPending = false;
@@ -249,7 +275,7 @@ export class WebGPUEulerianSolver {
     const texture=(format: GPUTextureFormat)=>device.createTexture({size:[nx,ny,nz],dimension:"3d",format,usage});
     this.velocityA=texture("rgba32float"); this.velocityB=texture("rgba32float"); this.pressureA=texture("r32float"); this.pressureB=texture("r32float"); this.volumeA=texture("r32float"); this.volumeB=texture("r32float");
     this.heightA=device.createTexture({size:[nx,nz],format:"r32float",usage});this.heightB=device.createTexture({size:[nx,nz],format:"r32float",usage});
-    this.params=device.createBuffer({size:64,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    this.params=device.createBuffer({size:80,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.reductionBuffer=device.createBuffer({size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.rigidBuffer=device.createBuffer({size:12*80,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     this.rigidExchangeBuffer=device.createBuffer({size:12*8*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
@@ -276,7 +302,6 @@ export class WebGPUEulerianSolver {
     this.projectPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"project"}});
     this.rigidPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"coupleRigid"}});
     this.reductionPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"reduceDiagnostics"}});
-    this.correctionPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"correctVolume"}});
     const pressureIterations=quality==="balanced"?64:quality==="high"?80:96;this.info={nx,ny,nz,cellCount:nx*ny*nz,cellSize_m:Math.max(c.width_m/nx,c.height_m/ny,c.depth_m/nz),pressureIterations,allocatedBytes:nx*ny*nz*(4*8+4*4),quality,encodedSteps:0};
     this.initializeVolume();
     this.advectGroup=this.group(this.velocityA,this.velocityB,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
@@ -285,7 +310,6 @@ export class WebGPUEulerianSolver {
     this.projectGroup=this.group(this.velocityB,this.velocityA,this.pressureA,this.pressureB,this.volumeB,this.volumeA,this.heightB,this.heightA);
     this.rigidGroup=this.group(this.velocityA,this.velocityB,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightB,this.heightA);
     this.reductionGroup=this.group(this.velocityA,this.velocityB,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightB,this.heightA);
-    this.correctionGroup=this.group(this.velocityA,this.velocityB,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightB,this.heightA);
   }
 
   get volumeTexture(){return this.volumeA;}
@@ -304,7 +328,7 @@ export class WebGPUEulerianSolver {
   advanceTo(time_s:number,bodies:RigidBodyState[]=[]){
     if(time_s<this.lastTime)return false; const delta=Math.min(this.scene.numerics.maxDt_s,time_s-this.lastTime);if(delta<1e-6)return true;this.lastTime=time_s;const c=this.scene.container,rho=this.scene.fluid.density_kg_m3,sigma=this.scene.fluid.surfaceTension_N_m,waveSpeed=Math.sqrt(Math.abs(this.scene.fluid.gravity_m_s2.y)*c.height_m*Math.max(c.fillFraction,0.01)),characteristicSpeed=Math.max(waveSpeed,this.info.maxSpeed_m_s??0,0.1),advectiveDt=0.45*this.info.cellSize_m/characteristicSpeed,capillaryDt=sigma>0?0.4*Math.sqrt(rho*this.info.cellSize_m**3/(Math.PI*sigma)):Infinity,stableDt=Math.min(advectiveDt,capillaryDt),substeps=Math.min(16,Math.max(1,Math.ceil(delta/stableDt))),dt=delta/substeps;
     const activeBodies=bodies.slice(0,12),bodyData=new Float32Array(12*20),shapeIndex={sphere:0,box:1,capsule:2,cylinder:3} as const;activeBodies.forEach((body,index)=>{const o=index*20,d=body.description.dimensions_m,q=body.orientation;bodyData.set([body.position_m.x,body.position_m.y,body.position_m.z,shapeIndex[body.description.shape],d.x,d.y,d.z,0,q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,0,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,0],o);});this.device.queue.writeBuffer(this.rigidBuffer,0,bodyData);
-    const encodedSurfaceTension=c.fluidWallMode==="no-slip"?sigma:-sigma-1e-6;this.info.encodedSteps=(this.info.encodedSteps??0)+substeps;this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.ny,this.info.nz,dt,c.width_m/this.info.nx,c.height_m/this.info.ny,c.depth_m/this.info.nz,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,encodedSurfaceTension,rho,this.scene.fluid.dynamicViscosity_Pa_s,(this.info.initialVolumeCellSum??1)*2048,activeBodies.length]));
+    this.info.encodedSteps=(this.info.encodedSteps??0)+substeps;this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.ny,this.info.nz,dt,c.width_m/this.info.nx,c.height_m/this.info.ny,c.depth_m/this.info.nz,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,0,rho,this.scene.fluid.dynamicViscosity_Pa_s,0,0,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,0]));
     if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"});encoder.clearBuffer(this.rigidExchangeBuffer);
     for(let substep=0;substep<substeps;substep+=1){
       {const pass=encoder.beginComputePass(this.querySet&&substep===0?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:0}}:undefined);this.dispatch(pass,this.advectPipeline,this.advectGroup);pass.end();}
@@ -312,7 +336,7 @@ export class WebGPUEulerianSolver {
       {const pass=encoder.beginComputePass();this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();}
       if(activeBodies.length>0){{const pass=encoder.beginComputePass();this.dispatch(pass,this.rigidPipeline,this.rigidGroup);pass.end();}encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.ny,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.ny,this.info.nz]);}
     }
-    encoder.clearBuffer(this.reductionBuffer);{const pass=encoder.beginComputePass();this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}{const pass=encoder.beginComputePass();this.dispatch(pass,this.correctionPipeline,this.correctionGroup);pass.end();}encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.ny,this.info.nz]);encoder.clearBuffer(this.reductionBuffer,0,12);{const pass=encoder.beginComputePass(this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:1}}:undefined);this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}if(this.querySet&&this.queryResolve)encoder.resolveQuerySet(this.querySet,0,2,this.queryResolve,0);
+    encoder.clearBuffer(this.reductionBuffer);{const pass=encoder.beginComputePass(this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:1}}:undefined);this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}if(this.querySet&&this.queryResolve)encoder.resolveQuerySet(this.querySet,0,2,this.queryResolve,0);
     let exchangeReadback:GPUBuffer|undefined;if(activeBodies.length>0&&this.onRigidLoads&&!this.rigidReadbackPending){this.rigidReadbackPending=true;exchangeReadback=this.device.createBuffer({size:12*8*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.rigidExchangeBuffer,0,exchangeReadback,0,12*8*4);}
     this.device.queue.submit([encoder.finish()]);if(exchangeReadback){const readback=exchangeReadback,elapsed=delta,cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);void readback.mapAsync(GPUMapMode.READ).then(()=>{const words=new Int32Array(readback.getMappedRange());const loads=activeBodies.map((body,index)=>{const b=index*8,impulse={x:words[b]/1e6,y:words[b+1]/1e6,z:words[b+2]/1e6};return{bodyId:body.description.id,force_N:{x:impulse.x/elapsed,y:impulse.y/elapsed,z:impulse.z/elapsed},torque_N_m:{x:words[b+3]/1e6/elapsed,y:words[b+4]/1e6/elapsed,z:words[b+5]/1e6/elapsed},displacedVolume_m3:words[b+6]/65536*cellVolume};});readback.unmap();readback.destroy();this.onRigidLoads?.(loads);}).catch(()=>readback.destroy()).finally(()=>{this.rigidReadbackPending=false;});}
     if(!this.validationChecked){this.validationChecked=true;void this.device.popErrorScope().then(error=>{if(error)console.error(`GPU fluid validation: ${error.message}`);});}return true;
@@ -320,7 +344,7 @@ export class WebGPUEulerianSolver {
 
   async readStats(){
     if((this.info.encodedSteps??0)===0)return this.info;
-    if(this.readbackPending)return this.info;this.readbackPending=true;const size=this.queryResolve?32:16,buffer=this.device.createBuffer({size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const encoder=this.device.createCommandEncoder();encoder.copyBufferToBuffer(this.reductionBuffer,0,buffer,0,16);if(this.queryResolve)encoder.copyBufferToBuffer(this.queryResolve,0,buffer,16,16);this.device.queue.submit([encoder.finish()]);await buffer.mapAsync(GPUMapMode.READ);const words=new Uint32Array(buffer.getMappedRange(0,16)),initial=Math.max(1,this.info.initialVolumeCellSum??1);this.info.volumeCellSum=words[0]/2048;this.info.volumeDrift=(this.info.volumeCellSum-initial)/initial;this.info.rawVolumeDrift=(words[3]/2048-initial)/initial;this.info.front_m=-this.scene.container.width_m/2+words[1]*this.scene.container.width_m/this.info.nx;this.info.maxSpeed_m_s=new Float32Array(new Uint32Array([words[2]]).buffer)[0];if(this.queryResolve){const times=new BigUint64Array(buffer.getMappedRange(16,16));this.info.gpuStep_ms=Number(times[1]-times[0])/1e6;}buffer.unmap();buffer.destroy();this.readbackPending=false;return this.info;
+    if(this.readbackPending)return this.info;this.readbackPending=true;const size=this.queryResolve?32:16,buffer=this.device.createBuffer({size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const encoder=this.device.createCommandEncoder();encoder.copyBufferToBuffer(this.reductionBuffer,0,buffer,0,16);if(this.queryResolve)encoder.copyBufferToBuffer(this.queryResolve,0,buffer,16,16);this.device.queue.submit([encoder.finish()]);await buffer.mapAsync(GPUMapMode.READ);const words=new Uint32Array(buffer.getMappedRange(0,16)),initial=Math.max(1,this.info.initialVolumeCellSum??1);this.info.volumeCellSum=words[0]/2048;this.info.volumeDrift=(this.info.volumeCellSum-initial)/initial;this.info.rawVolumeDrift=this.info.volumeDrift;this.info.front_m=-this.scene.container.width_m/2+words[1]*this.scene.container.width_m/this.info.nx;this.info.maxSpeed_m_s=new Float32Array(new Uint32Array([words[2]]).buffer)[0];if(this.queryResolve){const times=new BigUint64Array(buffer.getMappedRange(16,16));this.info.gpuStep_ms=Number(times[1]-times[0])/1e6;}buffer.unmap();buffer.destroy();this.readbackPending=false;return this.info;
   }
 
   destroy(){for(const t of [this.velocityA,this.velocityB,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB])t.destroy();this.params.destroy();this.reductionBuffer.destroy();this.rigidBuffer.destroy();this.rigidExchangeBuffer.destroy();this.querySet?.destroy();this.queryResolve?.destroy();}

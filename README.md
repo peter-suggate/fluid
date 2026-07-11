@@ -14,9 +14,10 @@ resolution WebGPU Eulerian path. WebGPU quality presets allocate approximately
 The presentation renderer reconstructs a trilinear implicit surface with
 subcell root refinement, gradient normals, front/back thickness, Fresnel
 reflection, and Beer–Lambert absorption.
-The GPU transport path uses bounded compressive VOF fluxes, midpoint RK2
-backtracing, resolution-scaled vorticity confinement, compact reductions, and
-quality-aware CFL substepping.
+The GPU transport path uses conservative bounded donor-cell VOF fluxes,
+midpoint RK2 velocity backtracing on packed staggered faces, ghost-fluid
+free-surface pressure, balanced-force continuum surface tension, Smagorinsky
+LES viscosity, compact reductions, and quality-aware CFL/capillary substepping.
 
 ## Stage 1 documents
 
@@ -57,8 +58,10 @@ Use `npm test` for the deterministic shell contract and production build.
 ## Current numerical boundary
 
 The CPU MAC/PCG path remains the pressure-validation oracle. The GPU path uses
-a collocated f32 volume field, compatible difference operators, weighted
-Jacobi, conservative upwind volume transport, and an explicitly approximate
-hydrostatic column predictor. The particle mode is PBF, not DFSPH. Resolved
+an f32 cell-centred VOF field with packed staggered positive-face velocities,
+compatible divergence/gradient operators, a ghost-fluid atmospheric boundary,
+weighted Jacobi, and conservative upwind volume transport. The renderer reads
+the physical VOF field directly; no equilibrium blend, presentation smoothing,
+or global volume rescaling is applied. The particle mode is PBF, not DFSPH. Resolved
 cut-cell traction, GPU PBF, and asynchronously reduced GPU pressure residuals
 remain research/optimization work and are not claimed as validated.

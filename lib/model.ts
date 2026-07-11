@@ -79,7 +79,7 @@ export interface MetricSample {
   kinetic_energy_J: number;
 }
 
-export const BUILD_ID = "web-stage10-1.0.0";
+export const BUILD_ID = "web-stage10.2-1.0.2";
 
 export const defaultScene: SceneDescription = {
   schemaVersion: "1.0.0",

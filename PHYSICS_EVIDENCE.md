@@ -416,3 +416,51 @@ Build: `web-stage9-0.9.1`
   above a 60 Hz budget in exchange for stable 1.2-million-cell transport.
 - Final local browser console warnings/errors: `0`; the scene was restored to
   Balanced, paused at the corner dam-break initial condition.
+
+## Stage 10.1 unified free-surface evidence
+
+Recorded: 2026-07-12<br>
+Build: `web-stage10.1-1.0.1`
+
+- Replaced cell-classification pressure and projection with one packed-MAC
+  ghost-fluid formulation. Liquid–air pressure gradients terminate at the
+  reconstructed `alpha = 0.5` interface; liquid–liquid gradients retain the
+  standard staggered operator and solid-wall normal flux remains zero.
+- Corrected lower-wall indexing: the first positive interior face is no longer
+  mistaken for a boundary face. Removed the low-speed velocity retention branch,
+  algebraic compression flux, hydrostatic predictor pass, presentation-volume
+  smoothing, and global VOF integral rescaling.
+- Replaced per-cell post-advection clamping with a conservative multidimensional
+  face-flux limiter. Every shared face receives one donor/receiver capacity
+  factor, so `0 <= alpha <= 1` is enforced locally while the global flux sum
+  still telescopes; no deleted overshoot is hidden by a later correction.
+- Applied gravity and continuum surface force at the same staggered face
+  locations used by pressure projection. Molecular and Smagorinsky viscosity,
+  advection, pressure, surface tension, and wall conditions run continuously;
+  there is no impact/settling phase switch or equilibrium blend.
+- Local Balanced corner dam-break at `60 × 45 × 40`: at `t = 19.144 s`, maximum
+  speed was `0.087 m/s`, unmodified VOF drift rounded to `0.00%`, and measured
+  GPU step time was `4.26 ms`. The physical `alpha = 0.5` surface was visually
+  smooth and nearly horizontal without a separate display field.
+- Local Balanced tank-fill from rest used the identical kernels: at
+  `t = 2.512 s`, maximum speed was `0.004 m/s`, unmodified VOF drift rounded to
+  `-0.00%`, and measured GPU step time was `3.80 ms`.
+- Production build and all `39` deterministic tests passed. Live WebGPU shader
+  compilation, execution, diagnostics, and both initial conditions produced
+  zero browser warnings/errors.
+
+## Stage 10.2 rigid-body reintegration evidence
+
+Recorded: 2026-07-12<br>
+Build: `web-stage10.2-1.0.2`
+
+- Re-enabled rigid-body creation, selection, editing, direct viewport dragging,
+  rendering, contact diagnostics, and two-way WebGPU immersed-body exchange.
+- A live two-body corner dam-break coupled both bodies, reported finite force,
+  torque, velocity, orientation, and displaced volume, and closed the displayed
+  body/fluid impulse balance to `0.00 N s`.
+- At the sampled checkpoint the unmodified VOF drift rounded to `-0.00%` and the
+  measured coupled Balanced GPU step was `4.39 ms`; the browser emitted no
+  warnings or errors.
+- Production build, lint, and all `39` deterministic tests passed. The local
+  page was restored to the paused two-body corner dam-break at `t = 0`.
