@@ -5,12 +5,13 @@ three-dimensional Eulerian free-surface solver with a particle solver under a
 shared physical scene. The current application is React, TypeScript, WGSL, and
 WebGPU; it runs locally and requires no cloud simulation service.
 
-Implementation is intentionally gated by quantitative evidence. **Stage 3 is
-now implemented:** deterministic CPU-binary64 rigid bodies with analytic mass
-properties, gravity, quaternion integration, container and body impulses, all
-four primitive renderers, interactive add/drop/edit controls, diagnostics, and
-regression benchmarks. The animated water remains a presentation field, not a
-numerical fluid solution.
+Implementation is intentionally gated by quantitative evidence. **Stage 4 is
+now implemented:** the Stage 3 deterministic rigid-body reference plus a
+three-dimensional CPU-binary64 staggered MAC-grid fluid with RK2 advection,
+explicit viscosity, marker free surface, closed-wall flux enforcement,
+matrix-free Jacobi-PCG pressure projection, adaptive time-step diagnostics, and
+a dam-break default. WebGPU renders the solver occupancy directly; the water is
+no longer a decorative plane.
 
 ## Stage 1 documents
 
@@ -22,6 +23,8 @@ numerical fluid solution.
   contract and interaction gates.
 - [`docs/STAGE3_ACCEPTANCE.md`](docs/STAGE3_ACCEPTANCE.md) — rigid-body equations,
   collision approximations, and quantitative gates.
+- [`docs/STAGE4_ACCEPTANCE.md`](docs/STAGE4_ACCEPTANCE.md) — Eulerian equations,
+  free-surface choices, dam-break initialization, and quantitative gates.
 - [`docs/SCENE_FORMAT.md`](docs/SCENE_FORMAT.md) — canonical SI scene and run
   record format.
 - [`docs/COMPARABILITY.md`](docs/COMPARABILITY.md) — resolution, workload, and
@@ -40,10 +43,10 @@ npm run dev
 
 Use `npm test` for the deterministic shell contract and production build.
 
-## Gate to Stage 4
+## Gate to Stage 5
 
-Stage 4 introduces the Eulerian CPU reference fluid: MAC storage and operators,
-free surface, advection, viscosity, pressure projection, boundaries, adaptive
-time stepping, and diagnostics. It must pass manufactured projection, static
-water, hydrostatic pressure, volume, resolution, and time-step tests before any
-fluid force is applied to the Stage 3 rigid bodies.
+Stage 5 introduces the independent DFSPH particle reference. Two-way
+fluid/rigid coupling remains Stage 7 and is deliberately not claimed by this
+build. The interactive CPU grid is resolution-capped and reports its effective
+dimensions; later stages move verified kernels to WebGPU without changing the
+physical scene contract.

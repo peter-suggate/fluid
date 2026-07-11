@@ -1,6 +1,7 @@
 import { cameraPosition } from "./math";
 import type { CameraState, SceneDescription, SolverMode, ViewMode } from "./model";
 import type { RigidBodyState } from "./rigid-body";
+import type { EulerianRenderState } from "./eulerian-solver";
 
 export type GPUStatus =
   | { state: "initializing"; label: string }
@@ -15,6 +16,7 @@ struct Uniforms {
   cameraTarget: vec4f,
   container: vec4f,
   options: vec4f,
+  gridInfo: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -27,6 +29,7 @@ struct BodyGPU {
 }
 
 @group(0) @binding(1) var<storage, read> bodies: array<BodyGPU, 12>;
+@group(0) @binding(2) var fluidField: texture_3d<f32>;
 
 struct VertexOutput {
   @builtin(position) position: vec4f,
@@ -165,6 +168,38 @@ fn nearestBody(ro: vec3f, rd: vec3f) -> BodyHit {
   return result;
 }
 
+fn fluidSample(cell: vec3i) -> f32 {
+  let dims = vec3i(u.gridInfo.xyz);
+  return textureLoad(fluidField, clamp(cell, vec3i(0), dims - vec3i(1)), 0).x;
+}
+
+fn fluidRayHit(ro: vec3f, rd: vec3f, nearT: f32, farT: f32, boundsMin: vec3f, size: vec3f) -> vec4f {
+  let dims = vec3i(u.gridInfo.xyz);
+  let span = max(farT - nearT, 0.0);
+  let stepSize = max(span / 128.0, 0.001);
+  var previous = 0.0;
+  var t = nearT;
+  for (var sampleIndex: u32 = 0u; sampleIndex < 160u; sampleIndex += 1u) {
+    if (t > farT) { break; }
+    let point = ro + rd * t;
+    let uvw = clamp((point - boundsMin) / size, vec3f(0.0), vec3f(0.999999));
+    let cell = clamp(vec3i(uvw * vec3f(dims)), vec3i(0), dims - vec3i(1));
+    let occupied = fluidSample(cell);
+    if (occupied > 0.5 && previous <= 0.5) {
+      let gradient = vec3f(
+        fluidSample(cell - vec3i(1, 0, 0)) - fluidSample(cell + vec3i(1, 0, 0)),
+        fluidSample(cell - vec3i(0, 1, 0)) - fluidSample(cell + vec3i(0, 1, 0)),
+        fluidSample(cell - vec3i(0, 0, 1)) - fluidSample(cell + vec3i(0, 0, 1))
+      );
+      let normal = select(-rd, normalize(gradient), length(gradient) > 0.001);
+      return vec4f(t, normal);
+    }
+    previous = occupied;
+    t += stepSize;
+  }
+  return vec4f(1e20, 0.0, 1.0, 0.0);
+}
+
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let resolution = max(u.viewport.xy, vec2f(1.0));
@@ -213,20 +248,27 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
                    + 0.006 * sin(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
     waterT = (waterBase + secondWave - ro.y) / rd.y;
     waterPoint = ro + rd * waterT;
+    let solverHit = fluidRayHit(ro, rd, nearT, hit.y, boundsMin, size);
+    if (u.gridInfo.w > 0.5) {
+      waterT = solverHit.x;
+      waterPoint = ro + rd * waterT;
+    }
 
     var localMode = mode;
     if (mode == 2) {
       localMode = select(1, 0, input.uv.x < 0.5);
     }
 
-    let insideWater = waterT >= nearT && waterT <= hit.y
+    var insideWater = waterT >= nearT && waterT <= hit.y
       && abs(waterPoint.x) <= halfSize.x && abs(waterPoint.z) <= halfSize.z;
+    if (u.gridInfo.w > 0.5) { insideWater = solverHit.x < 1e19; }
     if (insideWater) {
       let dx = 0.088 * cos(waterPoint.x * 8.0 + time * 0.72) * cos(waterPoint.z * 7.0 - time * 0.47)
              + 0.102 * cos(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
       let dz = -0.077 * sin(waterPoint.x * 8.0 + time * 0.72) * sin(waterPoint.z * 7.0 - time * 0.47)
              - 0.066 * cos(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
-      let normal = normalize(vec3f(-dx, 1.0, -dz));
+      var normal = normalize(vec3f(-dx, 1.0, -dz));
+      if (u.gridInfo.w > 0.5) { normal = normalize(solverHit.yzw); }
       let fresnel = 0.035 + 0.62 * pow(1.0 - max(dot(normal, -rd), 0.0), 5.0);
       let depth = clamp((hit.y - waterT) / max(size.y, 0.001), 0.0, 1.0);
       var waterColor = mix(vec3f(0.018, 0.19, 0.19), vec3f(0.02, 0.42, 0.39), max(dot(normal, normalize(vec3f(-0.3, 0.8, 0.2))), 0.0));
@@ -289,6 +331,9 @@ export class FluidLabRenderer {
   private pipeline?: GPURenderPipeline;
   private uniformBuffer?: GPUBuffer;
   private bodyBuffer?: GPUBuffer;
+  private fluidTexture?: GPUTexture;
+  private fluidTextureKey = "";
+  private fluidRevision = -1;
   private bindGroup?: GPUBindGroup;
   private format?: GPUTextureFormat;
 
@@ -328,17 +373,43 @@ export class FluidLabRenderer {
       fragment: { module: shaderModule, entryPoint: "fragmentMain", targets: [{ format: this.format }] },
       primitive: { topology: "triangle-list" }
     });
-    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.bindGroup = device.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.bodyBuffer } }]
-    });
+    this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.rebuildBindGroup();
 
     device.lost.then((info) => this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` }));
     const info = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     const adapterName = info ? [info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter" : "WebGPU adapter";
     this.onStatus({ state: "ready", label: "WebGPU renderer ready", adapter: adapterName });
+  }
+
+  private rebuildBindGroup() {
+    if (!this.device || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.fluidTexture) return;
+    this.bindGroup = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: this.uniformBuffer } },
+      { binding: 1, resource: { buffer: this.bodyBuffer } },
+      { binding: 2, resource: this.fluidTexture.createView({ dimension: "3d" }) }
+    ] });
+  }
+
+  private uploadFluid(fluid?: EulerianRenderState) {
+    if (!this.device || !fluid) return;
+    const key = `${fluid.nx}x${fluid.ny}x${fluid.nz}`;
+    if (key !== this.fluidTextureKey) {
+      this.fluidTexture?.destroy();
+      this.fluidTexture = this.device.createTexture({ label: "Eulerian occupied cells", size: [fluid.nx, fluid.ny, fluid.nz], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.fluidTextureKey = key; this.fluidRevision = -1; this.rebuildBindGroup();
+    }
+    if (fluid.revision === this.fluidRevision || !this.fluidTexture) return;
+    const bytesPerRow = Math.ceil(fluid.nx / 256) * 256;
+    const packed = new Uint8Array(bytesPerRow * fluid.ny * fluid.nz);
+    for (let k = 0; k < fluid.nz; k += 1) for (let j = 0; j < fluid.ny; j += 1) {
+      const source = fluid.nx * (j + fluid.ny * k);
+      packed.set(fluid.occupancy.subarray(source, source + fluid.nx), bytesPerRow * (j + fluid.ny * k));
+    }
+    this.device.queue.writeTexture({ texture: this.fluidTexture }, packed, { bytesPerRow, rowsPerImage: fluid.ny }, { width: fluid.nx, height: fluid.ny, depthOrArrayLayers: fluid.nz });
+    this.fluidRevision = fluid.revision;
   }
 
   resize(): void {
@@ -351,18 +422,20 @@ export class FluidLabRenderer {
     }
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, mode: SolverMode, view: ViewMode, bodies: RigidBodyState[], selectedBodyId?: string): number {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, mode: SolverMode, view: ViewMode, bodies: RigidBodyState[], selectedBodyId?: string, fluid?: EulerianRenderState): number {
     if (!this.device || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return 0;
     this.resize();
     const start = performance.now();
     const position = cameraPosition(camera);
     const modeValue = mode === "eulerian" ? 0 : mode === "particle" ? 1 : 2;
+    this.uploadFluid(fluid);
     const uniform = new Float32Array([
       this.canvas.width, this.canvas.height, time_s, modeValue,
       position.x, position.y, position.z, 0,
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
-      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), 0
+      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), 0,
+      fluid?.nx ?? 1, fluid?.ny ?? 1, fluid?.nz ?? 1, fluid ? 1 : 0
     ]);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
     const bodyData = new Float32Array(12 * 16);

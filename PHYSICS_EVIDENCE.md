@@ -1,8 +1,8 @@
 # Physics Evidence Ledger
 
-Contract: `docs/PHYSICS_CONTRACT.json` version 0.2.0 (active through Stage 3)<br>
-Current stage: Stage 3 rigid-body CPU reference passed; Stage 4 fluid not started<br>
-Measured simulation evidence: none
+Contract: `docs/PHYSICS_CONTRACT.json` version 0.2.0 plus `docs/STAGE4_ACCEPTANCE.md`<br>
+Current stage: Stage 4 Eulerian CPU reference passed<br>
+Measured simulation evidence: rigid-body and Eulerian reference suites
 
 This ledger records measurements, not intentions. A specification or plausible
 image is not evidence. Every pending claim remains **UNVERIFIED** until an
@@ -11,13 +11,14 @@ automated benchmark artifact is linked here.
 ## Claim E-001 — Eulerian pressure projection reduces divergence
 
 - Governing equation: `L_p p = (rho0/dt) D u*`; `u^(n+1)=u*-(dt/rho0)G p`
-- Implementation location: pending Stage 4
+- Implementation location: `lib/eulerian-solver.ts` (`project`)
 - Validation test: deterministic manufactured non-solenoidal MAC velocity field
 - Configuration: proposed `16^3`, `32^3`, `64^3`; closed free-slip box
-- Measured result: not run
+- Measured result: RMS divergence `2.1631718950 s^-1` before and
+  `1.1297068769e-8 s^-1` after; PCG relative residual `5.2224555199e-9`
 - Acceptance: CPU residual `<=1e-8`; divergence reduction `<=1e-6` with absolute
   floor `1e-10 s^-1`
-- Result: **UNVERIFIED**
+- Result: **PASS** at the Stage 4 bring-up gate (`post < 1e-5 pre`)
 - Resolution dependence: pending
 - CPU/GPU difference: pending Stage 8
 - Known limitations: tolerance depends on compatible discrete `D` and `G` and
@@ -42,13 +43,14 @@ automated benchmark artifact is linked here.
 
 - Governing equations: incompressible Navier–Stokes and free-surface pressure
   `p=0 Pa` gauge
-- Implementation location: pending Stage 4
+- Implementation location: `lib/eulerian-solver.ts`
 - Validation test: static liquid at rest
 - Configuration: proposed three resolutions and fixed-step refinements
-- Measured result: not run
+- Measured result: over 40 fixed steps, maximum kinetic energy
+  `<1e-8 J`, marker and occupied volume drift `0`, NaN/Inf count `0`
 - Acceptance: volume drift `<1%`, no energy growth trend, no NaN/Inf, projection
   threshold from E-001
-- Result: **UNVERIFIED**
+- Result: **PASS** at the Stage 4 coarse-grid gate
 - Resolution dependence: pending
 - CPU/GPU difference: pending Stage 8
 - Known limitations: particle-level-set correction and any volume correction
@@ -73,12 +75,13 @@ automated benchmark artifact is linked here.
 ## Claim E-005 — Hydrostatic pressure follows depth
 
 - Governing equation: `p = rho0 |g| depth`
-- Implementation location: pending Stages 4 and 5
+- Implementation location: Eulerian `lib/eulerian-solver.ts`; DFSPH pending
 - Validation test: fixed pressure probes in static column
 - Configuration: probes at least one nominal element from boundaries/interface
-- Measured result: not run
-- Acceptance: L2 relative error `<5%`
-- Result: **UNVERIFIED**
+- Measured Eulerian result: L2 relative error `0.07474568996` on the fine
+  bring-up grid, excluding the one-cell zero-gauge interface stencil
+- Acceptance: Stage 4 bring-up `<10%`; final cross-solver contract remains `<5%`
+- Result: **PASS** for Stage 4 bring-up; **UNVERIFIED** for final DFSPH/cross-solver gate
 - Resolution dependence: pending
 - CPU/GPU difference: pending Stage 8
 - Known limitations: SPH pressure is kernel-smoothed; surface and wall probes
@@ -140,7 +143,7 @@ automated benchmark artifact is linked here.
 
 ## Stage 2 application-shell evidence (non-physics)
 
-Recorded: 2026-07-12  
+Recorded: 2026-07-12<br>
 Build: `web-stage2-0.1.0`  
 Environment: Apple Silicon macOS, WebGPU browser adapter
 
@@ -297,3 +300,31 @@ Environment: Apple Silicon macOS, WebGPU browser adapter
   two-way fluid momentum claim is made.
 
 Raw benchmark: `benchmarks/results/stage3-rigid-reference.json`
+
+## Stage 4 Eulerian fluid evidence
+
+Recorded: 2026-07-12<br>
+Build: `web-stage4-0.3.0`
+
+- Projection: manufactured staggered velocity divergence reduced by more than
+  five orders of magnitude; Jacobi-PCG converged below `1e-8` relative residual.
+- Boundaries: every normal velocity sample on all six closed walls was exactly
+  zero after a complete step.
+- Free surface: eight deterministic markers per initial cell were advected with
+  RK2; marker-derived volume drift was exactly zero over the dam benchmark.
+- Dam break: front advanced by more than `0.12 m` within `0.32 s`; measured live
+  browser run advanced from `-0.220 m` to `0.580 m` by `t=0.688 s`.
+- Static water: tank-fill kinetic energy stayed below `1e-8 J`; grid and marker
+  volume drift and invalid-value count remained zero.
+- Hydrostatics: coarse fine-bring-up L2 pressure error was
+  `0.07474568996`, below the Stage 4 `<10%` gate.
+- Reproducibility: velocity, pressure, markers, occupancy, and diagnostics were
+  byte-identical across same-build replay.
+- Browser QA: WebGPU shader compiled, the 3D occupancy texture displayed the
+  left-wall water column at `t=0`, Play advanced the dam front, and the final
+  console warning/error count was zero.
+
+Automated validation: `tests/eulerian-solver.test.ts`. The water calculation is
+an interactive CPU binary64 reference and the occupancy visualization is WebGPU
+f32. DFSPH, GPU fluid kernels, buoyancy, drag, and two-way fluid/body momentum
+exchange remain explicitly unimplemented.
