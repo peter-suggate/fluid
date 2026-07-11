@@ -11,6 +11,9 @@ PBF particle CPU oracle with exact hashed-neighbour regression, deterministic
 buoyancy/drag quadrature with paired fluid reaction impulses, and a high-
 resolution WebGPU Eulerian path. WebGPU quality presets allocate approximately
 110k, 500k, or 1.2m cells and render the evolving volume fraction directly.
+The presentation renderer reconstructs a trilinear implicit surface with
+subcell root refinement, gradient normals, front/back thickness, Fresnel
+reflection, and Beer–Lambert absorption.
 
 ## Stage 1 documents
 
