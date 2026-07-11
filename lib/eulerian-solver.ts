@@ -132,6 +132,38 @@ export class EulerianFluidSolver {
 
   sampleVelocity(pos: Vec3): Vec3 { return this.sampleWith(pos, this); }
 
+  sampleOccupancy(pos: Vec3): number {
+    const c = this.scene.container;
+    const i = Math.floor((pos.x + c.width_m / 2) / this.hx), j = Math.floor(pos.y / this.hy), k = Math.floor((pos.z + c.depth_m / 2) / this.hz);
+    if (i < 0 || i >= this.nx || j < 0 || j >= this.ny || k < 0 || k >= this.nz) return 0;
+    return this.fluid[this.cidx(i, j, k)] ? 1 : 0;
+  }
+
+  samplePressure(pos: Vec3): number {
+    const c = this.scene.container;
+    const gx = (pos.x + c.width_m / 2) / this.hx - 0.5, gy = pos.y / this.hy - 0.5, gz = (pos.z + c.depth_m / 2) / this.hz - 0.5;
+    return this.trilinear(this.pressure, this.nx, this.ny, this.nz, gx, gy, gz);
+  }
+
+  applyImpulseAt(pos: Vec3, impulse_N_s: Vec3, radius_m = 2 * this.effectiveCellSize_m) {
+    const c = this.scene.container; const cells: Array<{ i: number; j: number; k: number; w: number }> = []; let sum = 0;
+    for (let k = 0; k < this.nz; k += 1) for (let j = 0; j < this.ny; j += 1) for (let i = 0; i < this.nx; i += 1) {
+      if (!this.fluid[this.cidx(i, j, k)]) continue;
+      const center = { x: -c.width_m / 2 + (i + 0.5) * this.hx, y: (j + 0.5) * this.hy, z: -c.depth_m / 2 + (k + 0.5) * this.hz };
+      const distance = Math.hypot(center.x - pos.x, center.y - pos.y, center.z - pos.z); if (distance >= radius_m) continue;
+      const w = (1 - distance / radius_m) ** 2; cells.push({ i, j, k, w }); sum += w;
+    }
+    if (sum <= 0) return false;
+    const mass = this.scene.fluid.density_kg_m3 * this.cellVolume;
+    for (const cell of cells) {
+      const dv = { x: impulse_N_s.x * cell.w / (sum * mass), y: impulse_N_s.y * cell.w / (sum * mass), z: impulse_N_s.z * cell.w / (sum * mass) };
+      this.u[this.uidx(cell.i, cell.j, cell.k)] += 0.5 * dv.x; this.u[this.uidx(cell.i + 1, cell.j, cell.k)] += 0.5 * dv.x;
+      this.v[this.vidx(cell.i, cell.j, cell.k)] += 0.5 * dv.y; this.v[this.vidx(cell.i, cell.j + 1, cell.k)] += 0.5 * dv.y;
+      this.w[this.widx(cell.i, cell.j, cell.k)] += 0.5 * dv.z; this.w[this.widx(cell.i, cell.j, cell.k + 1)] += 0.5 * dv.z;
+    }
+    this.enforceBoundaries(); return true;
+  }
+
   applyExternalForces(dt: number) {
     const g = this.scene.fluid.gravity_m_s2;
     for (let k = 0; k < this.nz; k += 1) for (let j = 1; j < this.ny; j += 1) for (let i = 0; i < this.nx; i += 1) {

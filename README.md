@@ -5,13 +5,12 @@ three-dimensional Eulerian free-surface solver with a particle solver under a
 shared physical scene. The current application is React, TypeScript, WGSL, and
 WebGPU; it runs locally and requires no cloud simulation service.
 
-Implementation is intentionally gated by quantitative evidence. **Stage 4 is
-now implemented:** the Stage 3 deterministic rigid-body reference plus a
-three-dimensional CPU-binary64 staggered MAC-grid fluid with RK2 advection,
-explicit viscosity, marker free surface, closed-wall flux enforcement,
-matrix-free Jacobi-PCG pressure projection, adaptive time-step diagnostics, and
-a dam-break default. WebGPU renders the solver occupancy directly; the water is
-no longer a decorative plane.
+Implementation is intentionally gated by quantitative evidence. The current
+browser build includes the deterministic rigid-body and MAC-grid CPU oracles, a
+PBF particle CPU oracle with exact hashed-neighbour regression, deterministic
+buoyancy/drag quadrature with paired fluid reaction impulses, and a high-
+resolution WebGPU Eulerian path. WebGPU quality presets allocate approximately
+110k, 500k, or 1.2m cells and render the evolving volume fraction directly.
 
 ## Stage 1 documents
 
@@ -25,6 +24,12 @@ no longer a decorative plane.
   collision approximations, and quantitative gates.
 - [`docs/STAGE4_ACCEPTANCE.md`](docs/STAGE4_ACCEPTANCE.md) — Eulerian equations,
   free-surface choices, dam-break initialization, and quantitative gates.
+- [`docs/STAGE5_ACCEPTANCE.md`](docs/STAGE5_ACCEPTANCE.md) — PBF kernel,
+  neighbour-search, density, boundary, and stability gates.
+- [`docs/STAGE6_7_ACCEPTANCE.md`](docs/STAGE6_7_ACCEPTANCE.md) — buoyancy, drag,
+  displaced volume, torque, and conservative reaction-impulse gates.
+- [`docs/STAGE8_GPU_ACCEPTANCE.md`](docs/STAGE8_GPU_ACCEPTANCE.md) — WebGPU
+  texture layout, projection baseline, quality presets, and limitations.
 - [`docs/SCENE_FORMAT.md`](docs/SCENE_FORMAT.md) — canonical SI scene and run
   record format.
 - [`docs/COMPARABILITY.md`](docs/COMPARABILITY.md) — resolution, workload, and
@@ -43,10 +48,11 @@ npm run dev
 
 Use `npm test` for the deterministic shell contract and production build.
 
-## Gate to Stage 5
+## Current numerical boundary
 
-Stage 5 introduces the independent DFSPH particle reference. Two-way
-fluid/rigid coupling remains Stage 7 and is deliberately not claimed by this
-build. The interactive CPU grid is resolution-capped and reports its effective
-dimensions; later stages move verified kernels to WebGPU without changing the
-physical scene contract.
+The CPU MAC/PCG path remains the pressure-validation oracle. The GPU path uses
+a collocated f32 volume field, compatible difference operators, weighted
+Jacobi, conservative upwind volume transport, and an explicitly approximate
+hydrostatic column predictor. The particle mode is PBF, not DFSPH. Resolved
+cut-cell traction, GPU PBF, and asynchronously reduced GPU pressure residuals
+remain research/optimization work and are not claimed as validated.

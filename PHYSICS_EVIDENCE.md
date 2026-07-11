@@ -1,8 +1,8 @@
 # Physics Evidence Ledger
 
 Contract: `docs/PHYSICS_CONTRACT.json` version 0.2.0 plus `docs/STAGE4_ACCEPTANCE.md`<br>
-Current stage: Stage 4 Eulerian CPU reference passed<br>
-Measured simulation evidence: rigid-body and Eulerian reference suites
+Current stage: Stage 8 browser bring-up; CPU oracles and coupling gates passed<br>
+Measured simulation evidence: rigid, Eulerian, particle, coupling, and live WebGPU suites
 
 This ledger records measurements, not intentions. A specification or plausible
 image is not evidence. Every pending claim remains **UNVERIFIED** until an
@@ -328,3 +328,39 @@ Automated validation: `tests/eulerian-solver.test.ts`. The water calculation is
 an interactive CPU binary64 reference and the occupancy visualization is WebGPU
 f32. DFSPH, GPU fluid kernels, buoyancy, drag, and two-way fluid/body momentum
 exchange remain explicitly unimplemented.
+
+## Stages 5–8 evidence
+
+Recorded: 2026-07-12<br>
+Build: `web-stage8-0.8.0`
+
+- Particle neighbour search: deterministic uniform-grid neighbour IDs exactly
+  matched the brute-force oracle for every sampled particle; zero missing,
+  extra, or duplicate neighbours.
+- Particle density: initial poly6 lattice interior mean relative density error
+  was below `2%`; free-surface density deficiency is reported separately.
+- Particle invariants: particle count, mass-derived volume, and same-build state
+  replay were exact; all tested states remained finite and inside the container.
+- One-way coupling: a fully immersed neutral-density primitive had net vertical
+  force below `1e-10 N`; a twice-water-density primitive accelerated downward;
+  a half-wet axis-aligned box displaced half its analytic volume within `5%`.
+- Two-way coupling: body impulse and distributed particle-fluid reaction impulse
+  closed below `1e-12 N s` in the gravity-free benchmark; multiple body loads
+  remained finite and independently keyed.
+- WebGPU: the balanced path allocated `60 × 45 × 40 = 108,000` cells and the
+  high preset allocated `100 × 75 × 67 = 502,500` cells. Live readback measured
+  the dam front moving from `-0.220 m` to `0.600 m`, finite maximum speed, and
+  hundreds of encoded simulation steps with zero browser warnings/errors.
+- Comparison view: the same clock and camera displayed GPU volume fraction on
+  the left and PBF particle positions/density error on the right.
+
+Automated validation: `tests/particle-solver.test.ts` and
+`tests/fluid-rigid-coupling.test.ts`. Live WebGPU tests cover shader compilation,
+storage-texture writes, conservative volume transport, quality reallocation,
+readback diagnostics, reset/play, and comparison rendering.
+
+Limitations: PBF is the selected browser particle reference, not DFSPH. Its
+surface density error and correction/CFL limiters are visible. GPU pressure uses
+fixed weighted-Jacobi iterations without a reduced residual; its collocated
+layout and hydrostatic predictor are an interactive approximation, not the MAC
+oracle. GPU PBF and resolved cut-cell traction are not claimed.

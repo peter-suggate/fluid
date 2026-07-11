@@ -1,6 +1,6 @@
 {
   "contractVersion": "0.2.0",
-  "status": "active-through-stage-3",
+  "status": "active-through-stage-8-bring-up",
   "unitSystem": "SI",
   "rules": {
     "nanCount": {"operator": "eq", "threshold": 0},
