@@ -32,7 +32,7 @@ const modeNames: Record<SolverMode, string> = {
   compare: "Compare"
 };
 
-const RIGID_BODIES_ENABLED = false;
+const RIGID_BODIES_ENABLED = true;
 
 function downloadText(name: string, text: string, mime = "application/json") {
   const url = URL.createObjectURL(new Blob([text], { type: mime }));
@@ -591,7 +591,7 @@ export function FluidLab() {
           <div className="segmented"><button className={view === "scientific" ? "active" : ""} onClick={() => setView("scientific")}>Scientific</button><button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button></div>
         </div>
         {mode === "compare" && <div className="compare-labels"><span><b>01</b> GPU GRID</span><span><b>02</b> PBF PARTICLES</span></div>}
-        <div className="physics-stage-badge"><strong>STAGE 10</strong><span>{backend === "webgpu" ? "TVD–LES free surface" : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} cells · f32 · ${gpuInfo?.pressureIterations ?? "…"} Jacobi` : "MAC · binary64 · PCG"}</small></div>
+        <div className="physics-stage-badge"><strong>STAGE 10.2</strong><span>{backend === "webgpu" ? "VOF · MAC · immersed bodies" : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} cells · f32 · ${gpuInfo?.pressureIterations ?? "…"} Jacobi` : "MAC · binary64 · PCG"}</small></div>
         {view === "scientific" && <>
           <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
           <div className="probe-label probe-a"><i />P-01 · surface</div>
@@ -607,7 +607,7 @@ export function FluidLab() {
       <aside className="right-panel panel-scroll">
         <section className="panel-section diagnostics-head">
           <p className="eyebrow">LIVE DIAGNOSTICS</p>
-          <div className="state-line"><span className={`status-dot ${runState === "running" ? "online pulse" : "idle"}`} /><strong>{runState === "running" ? "FLUID RUNNING" : "PAUSED"}</strong><span>{modeNames[mode]}</span></div>
+          <div className="state-line"><span className={`status-dot ${runState === "running" ? "online pulse" : "idle"}`} /><strong>{runState === "running" ? "COUPLED RUNNING" : "PAUSED"}</strong><span>{modeNames[mode]}</span></div>
         </section>
         <section className="metric-grid panel-section">
           <MetricCard label="Simulation time" value={simulationTime.toFixed(3)} unit="s" />
@@ -620,8 +620,8 @@ export function FluidLab() {
           <MetricCard label="GPU dam front" value={gpuInfo?.front_m !== undefined ? gpuInfo.front_m.toFixed(3) : "—"} unit="m · volume-fraction threshold" />
           <MetricCard label="GPU max speed" value={gpuInfo?.maxSpeed_m_s !== undefined ? gpuInfo.maxSpeed_m_s.toFixed(3) : "—"} unit={`m/s · ${gpuInfo?.encodedSteps ?? 0} encoded steps`} />
           <MetricCard label="GPU step" value={gpuInfo?.gpuStep_ms !== undefined ? gpuInfo.gpuStep_ms.toFixed(2) : "—"} unit="ms · timestamp query" tone={gpuInfo?.gpuStep_ms !== undefined && gpuInfo.gpuStep_ms < 16.7 ? "good" : "neutral"} />
-          <MetricCard label="GPU volume drift" value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit="% · corrected VOF integral" tone={gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
-          <MetricCard label="Raw transport drift" value={gpuInfo?.rawVolumeDrift !== undefined ? (gpuInfo.rawVolumeDrift * 100).toFixed(2) : "—"} unit="% · before bounded correction" tone="neutral" />
+          <MetricCard label="GPU volume drift" value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit="% · unmodified VOF integral" tone={gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
+          <MetricCard label="Volume correction" value="None" unit="physical VOF rendered directly" tone="good" />
           <MetricCard label="PBF particles" value={particleState.particleCount.toLocaleString()} unit={`${particleState.meanNeighbourCount.toFixed(1)} mean neighbours`} />
         </section>
         {RIGID_BODIES_ENABLED && selectedBody && <section className="panel-section selected-diagnostics" data-testid="selected-body-diagnostics">
@@ -668,7 +668,7 @@ export function FluidLab() {
             <div><span>Time-step bound</span><strong>{fluidState.limitingCondition}</strong><small>dt {fluidState.dt_s.toFixed(4)} s</small></div>
             <div><span>NaN / infinity</span><strong>{fluidState.nanCount}</strong><small>acceptance = 0</small></div>
           </div>
-          <p>CPU oracle: staggered MAC, RK2 semi-Lagrangian advection, explicit viscosity, marker free surface, closed-wall flux enforcement, and matrix-free Jacobi-PCG projection. The WebGPU path uses a higher-resolution collocated volume field with weighted Jacobi projection.</p>
+          <p>CPU oracle: staggered MAC, RK2 semi-Lagrangian advection, explicit viscosity, marker free surface, closed-wall flux enforcement, and matrix-free Jacobi-PCG projection. The WebGPU path packs staggered positive-face velocities with a conservative VOF field, ghost-fluid free-surface pressure, and weighted Jacobi projection.</p>
         </section>
         <section className="panel-section">
           <div className="section-heading"><h2>Particle fluid</h2><span>PBF CPU oracle</span></div>
@@ -680,7 +680,7 @@ export function FluidLab() {
         </section>}
         <section className="panel-section">
           <div className="section-heading"><h2>Run identity</h2><span>reproducibility</span></div>
-          <dl className="run-identity"><div><dt>Build</dt><dd>{BUILD_ID}</dd></div><div><dt>Active backend</dt><dd>{backend}</dd></div><div><dt>Eulerian GPU</dt><dd>f32 collocated Jacobi</dd></div><div><dt>Eulerian CPU</dt><dd>binary64 MAC PCG</dd></div><div><dt>Particle CPU</dt><dd>binary64 PBF</dd></div><div><dt>Random seed</dt><dd>{scene.randomSeed}</dd></div></dl>
+          <dl className="run-identity"><div><dt>Build</dt><dd>{BUILD_ID}</dd></div><div><dt>Active backend</dt><dd>{backend}</dd></div><div><dt>Eulerian GPU</dt><dd>f32 VOF ghost-fluid MAC</dd></div><div><dt>Eulerian CPU</dt><dd>binary64 MAC PCG</dd></div><div><dt>Particle CPU</dt><dd>binary64 PBF</dd></div><div><dt>Random seed</dt><dd>{scene.randomSeed}</dd></div></dl>
         </section>
       </aside>
 
