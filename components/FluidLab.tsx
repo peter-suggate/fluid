@@ -21,6 +21,7 @@ import {
 } from "@/lib/model";
 import { runShellValidation, type ValidationResult } from "@/lib/validation";
 import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBody, initializeRigidBodies, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "@/lib/rigid-body";
+import { EulerianFluidSolver, type EulerianDiagnostics, type EulerianRenderState } from "@/lib/eulerian-solver";
 
 const modeNames: Record<SolverMode, string> = {
   eulerian: "Eulerian",
@@ -101,7 +102,7 @@ function Sparkline({ samples }: { samples: MetricSample[] }) {
   return <canvas ref={canvasRef} className="sparkline" aria-label="Presentation frame time history" />;
 }
 
-function WebGPUViewport({ scene, camera, setCamera, mode, view, simulationTime, bodies, selectedBodyId, onFrame, onGPUStatus }: {
+function WebGPUViewport({ scene, camera, setCamera, mode, view, simulationTime, bodies, selectedBodyId, fluid, onFrame, onGPUStatus }: {
   scene: SceneDescription;
   camera: CameraState;
   setCamera: React.Dispatch<React.SetStateAction<CameraState>>;
@@ -110,17 +111,18 @@ function WebGPUViewport({ scene, camera, setCamera, mode, view, simulationTime, 
   simulationTime: number;
   bodies: RigidBodyState[];
   selectedBodyId?: string;
+  fluid: EulerianRenderState;
   onFrame: (frameMs: number, resolution: string) => void;
   onGPUStatus: (status: GPUStatus) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<FluidLabRenderer | null>(null);
-  const stateRef = useRef({ scene, camera, mode, view, simulationTime, bodies, selectedBodyId });
+  const stateRef = useRef({ scene, camera, mode, view, simulationTime, bodies, selectedBodyId, fluid });
   const pointerRef = useRef<{ id: number; x: number; y: number; action: "orbit" | "pan" } | null>(null);
 
   useEffect(() => {
-    stateRef.current = { scene, camera, mode, view, simulationTime, bodies, selectedBodyId };
-  }, [scene, camera, mode, view, simulationTime, bodies, selectedBodyId]);
+    stateRef.current = { scene, camera, mode, view, simulationTime, bodies, selectedBodyId, fluid };
+  }, [scene, camera, mode, view, simulationTime, bodies, selectedBodyId, fluid]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -133,7 +135,7 @@ function WebGPUViewport({ scene, camera, setCamera, mode, view, simulationTime, 
       const render = () => {
         if (!alive) return;
         const state = stateRef.current;
-        const frameMs = renderer.draw(state.simulationTime, state.scene, state.camera, state.mode, state.view, state.bodies, state.selectedBodyId);
+        const frameMs = renderer.draw(state.simulationTime, state.scene, state.camera, state.mode, state.view, state.bodies, state.selectedBodyId, state.fluid);
         onFrame(frameMs, `${canvas.width} × ${canvas.height}`);
         frame = requestAnimationFrame(render);
       };
@@ -179,9 +181,9 @@ function WebGPUViewport({ scene, camera, setCamera, mode, view, simulationTime, 
 function ValidationPanel({ results, onClose, gpuStatus }: { results: ValidationResult[]; onClose: () => void; gpuStatus: GPUStatus }) {
   const passed = results.filter((result) => result.passed).length;
   return (
-    <section className="validation-panel" aria-label="Stage 3 validation report" data-testid="validation-panel">
+    <section className="validation-panel" aria-label="Numerical validation report" data-testid="validation-panel">
       <header>
-        <div><p className="eyebrow">STAGE 3 · RIGID-BODY CONTRACT</p><h2>{passed}/{results.length} in-app checks passed</h2></div>
+        <div><p className="eyebrow">STAGES 3–4 · NUMERICAL CONTRACT</p><h2>{passed}/{results.length} in-app checks passed</h2></div>
         <button className="icon-button" onClick={onClose} aria-label="Close validation report">×</button>
       </header>
       <div className="validation-summary">
@@ -196,7 +198,7 @@ function ValidationPanel({ results, onClose, gpuStatus }: { results: ValidationR
           </article>
         ))}
       </div>
-      <p className="validation-note">Rigid-body equations are active and unit-tested. The water remains a presentation field: buoyancy, drag, pressure, fluid volume, divergence, and density are still unmeasured until their solver stages.</p>
+      <p className="validation-note">Rigid bodies and the Eulerian MAC-grid water solve are active. The automated suite additionally gates pressure convergence, divergence reduction, wall flux, marker volume, dam-front motion, and deterministic replay. Two-way fluid/body coupling and DFSPH remain later stages.</p>
     </section>
   );
 }
@@ -211,13 +213,17 @@ export function FluidLab() {
   const [selectedBodyId, setSelectedBodyId] = useState<string | undefined>(defaultScene.rigidBodies[0]?.id);
   const [newBodyShape, setNewBodyShape] = useState<RigidShape>("sphere");
   const [rigidState, setRigidState] = useState<RigidStepDiagnostics>(() => rigidDiagnostics(initializeRigidBodies(defaultScene.rigidBodies), defaultScene.fluid.gravity_m_s2));
+  const [initialFluidSolver] = useState(() => new EulerianFluidSolver(defaultScene));
+  const fluidSolverRef = useRef(initialFluidSolver);
+  const [fluidState, setFluidState] = useState<EulerianDiagnostics>(() => initialFluidSolver.diagnostics);
+  const [fluidRenderState, setFluidRenderState] = useState<EulerianRenderState>(() => initialFluidSolver.getRenderState());
   const [camera, setCamera] = useState<CameraState>(defaultCamera);
   const [gpuStatus, setGPUStatus] = useState<GPUStatus>({ state: "initializing", label: "Initializing WebGPU" });
   const [frameMs, setFrameMs] = useState(0);
   const [resolution, setResolution] = useState("—");
   const [samples, setSamples] = useState<MetricSample[]>([]);
   const [validationOpen, setValidationOpen] = useState(false);
-  const [notice, setNotice] = useState("Stage 3 rigid bodies · fluid coupling disabled");
+  const [notice, setNotice] = useState("Dam-break initialized · Eulerian projection active");
   const fileRef = useRef<HTMLInputElement>(null);
   const lastClockRef = useRef<number | null>(null);
   const sampleClockRef = useRef(0);
@@ -238,16 +244,20 @@ export function FluidLab() {
         const dt = scene.numerics.fixedDt_s;
         let steps = 0;
         let diagnostics: RigidStepDiagnostics | undefined;
-        while (accumulatorRef.current >= dt && steps < 64 && simulationTimeRef.current + dt <= scene.duration_s) {
+        let fluidDiagnostics: EulerianDiagnostics | undefined;
+        while (accumulatorRef.current >= dt && steps < 2 && simulationTimeRef.current + dt <= scene.duration_s) {
           diagnostics = advanceRigidBodies(bodiesRef.current, scene, dt);
+          fluidDiagnostics = fluidSolverRef.current.step(dt);
           accumulatorRef.current -= dt;
           simulationTimeRef.current += dt;
           steps += 1;
         }
-        if (steps === 64 && accumulatorRef.current > dt * 64) accumulatorRef.current = dt * 64;
+        if (steps === 2 && accumulatorRef.current > dt * 2) accumulatorRef.current = dt * 2;
         if (steps > 0) {
           setBodies(cloneRigidBodies(bodiesRef.current));
           setRigidState(diagnostics ?? rigidDiagnostics(bodiesRef.current, scene.fluid.gravity_m_s2));
+          setFluidState(fluidDiagnostics ?? fluidSolverRef.current.diagnostics);
+          setFluidRenderState(fluidSolverRef.current.getRenderState());
           setSimulationTime(simulationTimeRef.current);
         }
         if (simulationTimeRef.current + dt > scene.duration_s) setRunState("paused");
@@ -264,7 +274,7 @@ export function FluidLab() {
     const now = performance.now();
     if (now - sampleClockRef.current > 250) {
       sampleClockRef.current = now;
-      setSamples((current) => [...current.slice(-79), { t: now / 1000, frame_ms: value, volume_drift_pct: Number.NaN, constraint_error: Number.NaN, kinetic_energy_J: Number.NaN }]);
+      setSamples((current) => [...current.slice(-79), { t: now / 1000, frame_ms: value, volume_drift_pct: fluidSolverRef.current.diagnostics.markerVolumeDrift * 100, constraint_error: fluidSolverRef.current.diagnostics.divergenceAfter_s, kinetic_energy_J: fluidSolverRef.current.diagnostics.kineticEnergy_J }]);
     }
   }, []);
   const handleGPUStatus = useCallback((status: GPUStatus) => setGPUStatus(status), []);
@@ -282,10 +292,13 @@ export function FluidLab() {
   const resetSimulation = (source = scene) => {
     const next = initializeRigidBodies(source.rigidBodies);
     setRuntimeBodies(next, source.fluid.gravity_m_s2);
+    fluidSolverRef.current = new EulerianFluidSolver(source);
+    setFluidState(fluidSolverRef.current.diagnostics);
+    setFluidRenderState(fluidSolverRef.current.getRenderState());
     simulationTimeRef.current = 0; accumulatorRef.current = 0;
     setSimulationTime(0); setRunState("paused"); setSamples([]);
     setSelectedBodyId(source.rigidBodies[0]?.id);
-    setNotice("Rigid-body state reset to scene initial conditions");
+    setNotice(`${source.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
   };
   const saveScene = () => {
     localStorage.setItem("fluid-lab.scene.v1", serializeScene(scene));
@@ -307,7 +320,7 @@ export function FluidLab() {
   };
   const exportMetrics = () => {
     const adapter = gpuStatus.state === "ready" ? gpuStatus.adapter : gpuStatus.label;
-    const payload = { manifest: createRunManifest(scene, mode, adapter), shellMetrics: { presentationFrame_ms: frameMs, canvasResolution: resolution, samples }, rigidBodyState: bodies, rigidBodyDiagnostics: rigidState, fluidMetrics: null };
+    const payload = { manifest: createRunManifest(scene, mode, adapter), shellMetrics: { presentationFrame_ms: frameMs, canvasResolution: resolution, samples }, rigidBodyState: bodies, rigidBodyDiagnostics: rigidState, fluidMetrics: fluidState };
     downloadText(`fluid-lab-run-${Date.now()}.json`, JSON.stringify(payload, null, 2) + "\n");
     setNotice("Run manifest and shell metrics exported");
   };
@@ -364,9 +377,11 @@ export function FluidLab() {
     setRunState("paused");
     if (simulationTimeRef.current + scene.numerics.fixedDt_s > scene.duration_s) return;
     const diagnostics = advanceRigidBodies(bodiesRef.current, scene, scene.numerics.fixedDt_s);
+    const fluidDiagnostics = fluidSolverRef.current.step(scene.numerics.fixedDt_s);
     simulationTimeRef.current += scene.numerics.fixedDt_s;
     setSimulationTime(simulationTimeRef.current);
     setBodies(cloneRigidBodies(bodiesRef.current)); setRigidState(diagnostics);
+    setFluidState(fluidDiagnostics); setFluidRenderState(fluidSolverRef.current.getRenderState());
   };
 
   const estimatedCells = Math.ceil(scene.container.width_m / scene.nominalResolution.length_m) * Math.ceil(scene.container.height_m / scene.nominalResolution.length_m) * Math.ceil(scene.container.depth_m / scene.nominalResolution.length_m);
@@ -402,9 +417,11 @@ export function FluidLab() {
         </section>
         <section className="panel-section">
           <div className="section-heading"><h2>Water</h2><span>20 °C default</span></div>
+          <div className="segmented compact" aria-label="Fluid initial condition"><button className={scene.fluid.initialCondition === "dam-break" ? "active" : ""} onClick={() => patchFluid({ initialCondition: "dam-break" })}>Dam break</button><button className={scene.fluid.initialCondition === "tank-fill" ? "active" : ""} onClick={() => patchFluid({ initialCondition: "tank-fill" })}>Tank fill</button></div>
           <RangeControl label="Density" unit="kg/m³" value={scene.fluid.density_kg_m3} min={700} max={1300} step={0.1} onChange={(value) => patchFluid({ density_kg_m3: value })} displayDigits={1} />
           <RangeControl label="Dynamic viscosity" unit="Pa·s" value={scene.fluid.dynamicViscosity_Pa_s} min={0} max={0.02} step={0.000001} onChange={(value) => patchFluid({ dynamicViscosity_Pa_s: value })} displayDigits={6} />
           <RangeControl label="Gravity Y" unit="m/s²" value={scene.fluid.gravity_m_s2.y} min={-20} max={0} step={0.01} onChange={(value) => patchFluid({ gravity_m_s2: { ...scene.fluid.gravity_m_s2, y: value } })} displayDigits={3} />
+          <button className="drop-button" onClick={() => resetSimulation()}>Apply &amp; reset fluid</button>
         </section>
         <section className="panel-section rigid-editor" data-testid="rigid-editor">
           <div className="section-heading"><h2>Rigid bodies</h2><span>{bodies.length}/12 active</span></div>
@@ -437,13 +454,13 @@ export function FluidLab() {
       </aside>
 
       <section className="viewport-shell">
-        <WebGPUViewport scene={scene} camera={camera} setCamera={setCamera} mode={mode} view={view} simulationTime={simulationTime} bodies={bodies} selectedBodyId={selectedBodyId} onFrame={handleFrame} onGPUStatus={handleGPUStatus} />
+        <WebGPUViewport scene={scene} camera={camera} setCamera={setCamera} mode={mode} view={view} simulationTime={simulationTime} bodies={bodies} selectedBodyId={selectedBodyId} fluid={fluidRenderState} onFrame={handleFrame} onGPUStatus={handleGPUStatus} />
         <div className="viewport-topline">
           <div className={`gpu-badge state-${gpuStatus.state}`}><span className={`status-dot ${gpuStatus.state === "ready" ? "online" : "warning"}`} /><strong>{gpuStatus.state === "ready" ? "WEBGPU" : gpuStatus.state.toUpperCase()}</strong><span>{gpuStatus.label}</span></div>
           <div className="segmented"><button className={view === "scientific" ? "active" : ""} onClick={() => setView("scientific")}>Scientific</button><button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button></div>
         </div>
-        {mode === "compare" && <div className="compare-labels"><span><b>01</b> MAC GRID</span><span><b>02</b> DFSPH PARTICLES</span></div>}
-        <div className="physics-stage-badge"><strong>STAGE 3</strong><span>Rigid-body CPU reference active</span><small>Fluid coupling disabled</small></div>
+        {mode === "compare" && <div className="compare-labels"><span><b>01</b> MAC GRID · ACTIVE</span><span><b>02</b> PARTICLE VIEW · DFSPH PENDING</span></div>}
+        <div className="physics-stage-badge"><strong>STAGE 4</strong><span>3D MAC-grid water active</span><small>RK2 advection · PCG projection · marker surface</small></div>
         {view === "scientific" && <>
           <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
           <div className="probe-label probe-a"><i />P-01 · surface</div>
@@ -459,13 +476,15 @@ export function FluidLab() {
       <aside className="right-panel panel-scroll">
         <section className="panel-section diagnostics-head">
           <p className="eyebrow">LIVE DIAGNOSTICS</p>
-          <div className="state-line"><span className={`status-dot ${runState === "running" ? "online pulse" : "idle"}`} /><strong>{runState === "running" ? "RIGID PHYSICS RUNNING" : "PAUSED"}</strong><span>{modeNames[mode]}</span></div>
+          <div className="state-line"><span className={`status-dot ${runState === "running" ? "online pulse" : "idle"}`} /><strong>{runState === "running" ? "CFD + RIGID RUNNING" : "PAUSED"}</strong><span>{modeNames[mode]}</span></div>
         </section>
         <section className="metric-grid panel-section">
           <MetricCard label="Simulation time" value={simulationTime.toFixed(3)} unit="s" />
           <MetricCard label="Fixed validation dt" value={scene.numerics.fixedDt_s.toFixed(4)} unit="s" />
           <MetricCard label="Render encode" value={frameMs.toFixed(2)} unit="ms CPU" tone={frameMs < 4 ? "good" : "warn"} />
           <MetricCard label="Rigid bodies" value={String(bodies.length)} unit={`${rigidState.contactCount} contact solves`} />
+          <MetricCard label="MAC grid" value={`${fluidRenderState.nx} × ${fluidRenderState.ny} × ${fluidRenderState.nz}`} unit={`${fluidState.pressureIterations} PCG iterations`} tone={fluidState.pressureConverged ? "good" : "warn"} />
+          <MetricCard label="Dam front" value={fluidState.damFront_m.toFixed(3)} unit="m" />
         </section>
         {selectedBody && <section className="panel-section selected-diagnostics" data-testid="selected-body-diagnostics">
           <div className="section-heading"><h2>{selectedBody.description.name}</h2><span>selected state</span></div>
@@ -499,19 +518,27 @@ export function FluidLab() {
           </div>
         </section>
         <section className="panel-section fluid-pending">
-          <div className="section-heading"><h2>Fluid invariants</h2><span>pending stages 4–7</span></div>
-          <p>No buoyancy, drag, pressure projection, density constraint, or momentum exchange is claimed in this build. Bodies interact with gravity, each other, and the glass container only.</p>
+          <div className="section-heading"><h2>Eulerian fluid</h2><span>CPU binary64 reference</span></div>
+          <div className="invariant-list">
+            <div><span>RMS divergence</span><strong>{fluidState.divergenceAfter_s.toExponential(2)}</strong><small>s⁻¹ · before {fluidState.divergenceBefore_s.toExponential(2)}</small></div>
+            <div><span>PCG relative residual</span><strong>{fluidState.pressureRelativeResidual.toExponential(2)}</strong><small>{fluidState.pressureIterations} iterations · {fluidState.pressureConverged ? "converged" : "not converged"}</small></div>
+            <div><span>Marker volume drift</span><strong>{(fluidState.markerVolumeDrift * 100).toExponential(2)}</strong><small>% · marker mass exactly conserved</small></div>
+            <div><span>Kinetic energy</span><strong>{fluidState.kineticEnergy_J.toFixed(2)}</strong><small>J</small></div>
+            <div><span>Time-step bound</span><strong>{fluidState.limitingCondition}</strong><small>dt {fluidState.dt_s.toFixed(4)} s</small></div>
+            <div><span>NaN / infinity</span><strong>{fluidState.nanCount}</strong><small>acceptance = 0</small></div>
+          </div>
+          <p>Active: gravity, RK2 semi-Lagrangian advection, explicit viscosity, marker free surface, closed-wall flux enforcement, and matrix-free Jacobi-PCG pressure projection. Not yet active: DFSPH and two-way hydrodynamic force coupling to rigid bodies.</p>
         </section>
         <section className="panel-section">
           <div className="section-heading"><h2>Run identity</h2><span>reproducibility</span></div>
-          <dl className="run-identity"><div><dt>Build</dt><dd>{BUILD_ID}</dd></div><div><dt>Rigid CPU</dt><dd>binary64 active</dd></div><div><dt>Render GPU</dt><dd>f32</dd></div><div><dt>Narrow phase</dt><dd>sphere exact / proxy general</dd></div><div><dt>Random seed</dt><dd>{scene.randomSeed}</dd></div></dl>
+          <dl className="run-identity"><div><dt>Build</dt><dd>{BUILD_ID}</dd></div><div><dt>Fluid CPU</dt><dd>binary64 MAC active</dd></div><div><dt>Rigid CPU</dt><dd>binary64 active</dd></div><div><dt>Render GPU</dt><dd>f32 WebGPU</dd></div><div><dt>Random seed</dt><dd>{scene.randomSeed}</dd></div></dl>
         </section>
       </aside>
 
       <footer className="transport-bar">
         <div className="transport-controls">
           <button className="transport-main" onClick={() => setRunState((state) => state === "running" ? "paused" : "running")} aria-label={runState === "running" ? "Pause simulation" : "Play simulation"}>{runState === "running" ? "Ⅱ" : "▶"}</button>
-          <button onClick={singleRigidStep} aria-label="Single rigid-body step">STEP</button>
+          <button onClick={singleRigidStep} aria-label="Single coupled clock step">STEP</button>
           <button onClick={() => resetSimulation()}>RESET</button>
         </div>
         <div className="time-readout"><span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small><div className="timeline"><i style={{ width: `${(simulationTime / scene.duration_s) * 100}%` }} /></div><span>{scene.duration_s.toFixed(1)} s</span></div>

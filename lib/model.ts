@@ -48,6 +48,7 @@ export interface SceneDescription {
     density_kg_m3: number;
     dynamicViscosity_Pa_s: number;
     gravity_m_s2: Vec3;
+    initialCondition: "dam-break" | "tank-fill";
   };
   nominalResolution: {
     length_m: number;
@@ -77,7 +78,7 @@ export interface MetricSample {
   kinetic_energy_J: number;
 }
 
-export const BUILD_ID = "web-stage3-0.2.0";
+export const BUILD_ID = "web-stage4-0.3.0";
 
 export const defaultScene: SceneDescription = {
   schemaVersion: "1.0.0",
@@ -88,19 +89,20 @@ export const defaultScene: SceneDescription = {
     width_m: 1.2,
     height_m: 0.9,
     depth_m: 0.8,
-    fillFraction: 0.54,
+    fillFraction: 0.22,
     top: "open",
     fluidWallMode: "free-slip"
   },
   fluid: {
     density_kg_m3: 998.2,
     dynamicViscosity_Pa_s: 0.001002,
-    gravity_m_s2: { x: 0, y: -9.80665, z: 0 }
+    gravity_m_s2: { x: 0, y: -9.80665, z: 0 },
+    initialCondition: "dam-break"
   },
   nominalResolution: { length_m: 0.025 },
   numerics: {
-    fixedDt_s: 0.001,
-    maxDt_s: 0.01,
+    fixedDt_s: 0.004,
+    maxDt_s: 0.008,
     pressureRelativeTolerance: 1e-8,
     pressureMaxIterations: 1000,
     particleSpacing_m: 0.025
@@ -164,6 +166,7 @@ export function serializeScene(scene: SceneDescription): string {
 export function parseScene(input: string): SceneDescription {
   const parsed = JSON.parse(input) as SceneDescription;
   parsed.rigidBodies ??= [];
+  parsed.fluid.initialCondition ??= "dam-break";
   const errors = validateScene(parsed);
   if (errors.length > 0) throw new Error(errors.join("; "));
   return parsed;
@@ -180,6 +183,7 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!scene.fluid || !(scene.fluid.density_kg_m3 > 0)) errors.push("Fluid density must be positive");
   if (!scene.fluid || scene.fluid.dynamicViscosity_Pa_s < 0) errors.push("Dynamic viscosity cannot be negative");
+  if (!scene.fluid || !["dam-break", "tank-fill"].includes(scene.fluid.initialCondition)) errors.push("Unsupported fluid initial condition");
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");
   if (!scene.numerics || !(scene.numerics.fixedDt_s > 0) || !(scene.numerics.maxDt_s > 0)) errors.push("Time steps must be positive");
   if (scene.numerics && scene.numerics.fixedDt_s > scene.numerics.maxDt_s) errors.push("Fixed time step exceeds maximum time step");
