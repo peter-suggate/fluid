@@ -1,0 +1,33 @@
+{
+  "contractVersion": "0.1.0",
+  "status": "proposed-bring-up-thresholds",
+  "unitSystem": "SI",
+  "rules": {
+    "nanCount": {"operator": "eq", "threshold": 0},
+    "infinityCount": {"operator": "eq", "threshold": 0},
+    "persistentBoundaryPenetrationCount": {"operator": "eq", "threshold": 0},
+    "maxTransientBoundaryPenetrationFractionOfResolution": {"operator": "lt", "threshold": 0.01},
+    "cpuPressureRelativeResidual": {"operator": "le", "threshold": 1e-8},
+    "gpuPressureRelativeResidual": {"operator": "le", "threshold": 1e-5},
+    "cpuProjectionDivergenceReductionFactor": {"operator": "le", "threshold": 1e-6},
+    "gpuProjectionDivergenceReductionFactor": {"operator": "le", "threshold": 1e-4},
+    "particleMeanDensityRelativeError": {"operator": "lt", "threshold": 0.02},
+    "particleInteriorMaxDensityRelativeError": {"operator": "lt", "threshold": 0.05},
+    "staticFluidVolumeRelativeDrift": {"operator": "lt", "threshold": 0.01},
+    "hydrostaticPressureL2RelativeError": {"operator": "lt", "threshold": 0.05},
+    "rigidFreeFallRelativeError": {"operator": "lt", "threshold": 0.01},
+    "floatingSubmergedFractionRelativeError": {"operator": "lt", "threshold": 0.05},
+    "cpuClosedMomentumRelativeDrift": {"operator": "lt", "threshold": 0.001},
+    "optimizedNeighbourMissingCount": {"operator": "eq", "threshold": 0},
+    "optimizedNeighbourExtraCount": {"operator": "eq", "threshold": 0},
+    "optimizedNeighbourDuplicateCount": {"operator": "eq", "threshold": 0},
+    "sameBuildDeterministicCpuReplayByteDifferences": {"operator": "eq", "threshold": 0}
+  },
+  "policy": {
+    "failureMayNotAutoRelaxThreshold": true,
+    "contractChangesRequireVersionRationale": true,
+    "resolutionConvergenceMustBeReported": true,
+    "timeStepConvergenceMustBeReported": true,
+    "rawAndCorrectedConservationMetricsMustBothBeReported": true
+  }
+}
