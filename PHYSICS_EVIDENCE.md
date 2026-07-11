@@ -396,3 +396,23 @@ Marching-cubes allocation was not activated because the measured direct
 implicit-surface path remained within the interactive budget. Geometric
 multigrid remains the next pressure-solver replacement if projection iterations
 become dominant at resolutions above the current ultra preset.
+
+## Stage 9.1 transport-retention evidence
+
+Recorded: 2026-07-12<br>
+Build: `web-stage9-0.9.1`
+
+- Removed the projection-stage `1%` volume-fraction deletion that caused real
+  interface mass loss while the later global rescaling concealed it.
+- Added a conservative VOF interface-compression flux, midpoint RK2 velocity
+  backtracing, and resolution-scaled vorticity confinement to counter numerical
+  diffusion without applying an arbitrary global velocity multiplier.
+- Increased diagnostic fixed-point precision from 10 to 11 fractional bits.
+- Made CFL prediction quality-aware and allowed up to 16 bounded substeps so
+  fine grids remain stable when velocity rises before the next GPU reduction.
+- Balanced retained `1.11 m/s` maximum speed after `9.05 s`, with corrected and
+  raw drift both rounding to `0.00%`. High measured `6.88 ms` with `-0.01%` raw
+  drift. Ultra measured `35.06 ms` with `-0.01%` raw drift; this is intentionally
+  above a 60 Hz budget in exchange for stable 1.2-million-cell transport.
+- Final local browser console warnings/errors: `0`; the scene was restored to
+  Balanced, paused at the corner dam-break initial condition.
