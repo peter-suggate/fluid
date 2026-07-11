@@ -11,6 +11,7 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --import tsx --test tests/*.test.ts",
     "test:unit": "node --import tsx --test tests/*.test.ts",
+    "benchmark:rigid": "node --import tsx tools/run-rigid-benchmarks.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {

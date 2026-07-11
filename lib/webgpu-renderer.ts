@@ -1,5 +1,6 @@
 import { cameraPosition } from "./math";
 import type { CameraState, SceneDescription, SolverMode, ViewMode } from "./model";
+import type { RigidBodyState } from "./rigid-body";
 
 export type GPUStatus =
   | { state: "initializing"; label: string }
@@ -17,6 +18,15 @@ struct Uniforms {
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
+
+struct BodyGPU {
+  positionRadius: vec4f,
+  halfSizeShape: vec4f,
+  orientation: vec4f,
+  colorSelected: vec4f,
+}
+
+@group(0) @binding(1) var<storage, read> bodies: array<BodyGPU, 12>;
 
 struct VertexOutput {
   @builtin(position) position: vec4f,
@@ -53,6 +63,108 @@ fn gridLine(value: vec2f, scale: f32) -> f32 {
   return 1.0 - smoothstep(0.0, 0.085, min(g.x, g.y));
 }
 
+struct BodyHit {
+  t: f32,
+  normal: vec3f,
+  color: vec3f,
+  selected: f32,
+}
+
+fn quatRotate(q: vec4f, v: vec3f) -> vec3f {
+  let uv = cross(q.yzw, v);
+  let uuv = cross(q.yzw, uv);
+  return v + 2.0 * (q.x * uv + uuv);
+}
+
+fn quatInverseRotate(q: vec4f, v: vec3f) -> vec3f {
+  return quatRotate(vec4f(q.x, -q.yzw), v);
+}
+
+fn sphereLocalHit(ro: vec3f, rd: vec3f, center: vec3f, radius: f32) -> vec4f {
+  let oc = ro - center;
+  let b = dot(oc, rd);
+  let discriminant = b * b - dot(oc, oc) + radius * radius;
+  if (discriminant < 0.0) { return vec4f(1e20, 0.0, 1.0, 0.0); }
+  let root = sqrt(discriminant);
+  var t = -b - root;
+  if (t <= 0.0001) { t = -b + root; }
+  if (t <= 0.0001) { return vec4f(1e20, 0.0, 1.0, 0.0); }
+  return vec4f(t, normalize(ro + rd * t - center));
+}
+
+fn cylinderLocalHit(ro: vec3f, rd: vec3f, radius: f32, halfHeight: f32, capped: bool) -> vec4f {
+  var best = vec4f(1e20, 0.0, 1.0, 0.0);
+  let a = rd.x * rd.x + rd.z * rd.z;
+  if (a > 1e-8) {
+    let b = ro.x * rd.x + ro.z * rd.z;
+    let c = ro.x * ro.x + ro.z * ro.z - radius * radius;
+    let discriminant = b * b - a * c;
+    if (discriminant >= 0.0) {
+      var t = (-b - sqrt(discriminant)) / a;
+      if (t <= 0.0001) { t = (-b + sqrt(discriminant)) / a; }
+      let y = ro.y + rd.y * t;
+      if (t > 0.0001 && abs(y) <= halfHeight) {
+        let p = ro + rd * t;
+        best = vec4f(t, normalize(vec3f(p.x, 0.0, p.z)));
+      }
+    }
+  }
+  if (capped && abs(rd.y) > 1e-8) {
+    let tTop = (halfHeight - ro.y) / rd.y;
+    let pTop = ro + rd * tTop;
+    if (tTop > 0.0001 && tTop < best.x && dot(pTop.xz, pTop.xz) <= radius * radius) { best = vec4f(tTop, 0.0, 1.0, 0.0); }
+    let tBottom = (-halfHeight - ro.y) / rd.y;
+    let pBottom = ro + rd * tBottom;
+    if (tBottom > 0.0001 && tBottom < best.x && dot(pBottom.xz, pBottom.xz) <= radius * radius) { best = vec4f(tBottom, 0.0, -1.0, 0.0); }
+  }
+  return best;
+}
+
+fn intersectBody(ro: vec3f, rd: vec3f, body: BodyGPU) -> vec4f {
+  let localOrigin = quatInverseRotate(body.orientation, ro - body.positionRadius.xyz);
+  let localDirection = quatInverseRotate(body.orientation, rd);
+  let shape = i32(round(body.halfSizeShape.w));
+  var localHit = vec4f(1e20, 0.0, 1.0, 0.0);
+  if (shape == 0) {
+    localHit = sphereLocalHit(localOrigin, localDirection, vec3f(0.0), body.halfSizeShape.x);
+  } else if (shape == 1) {
+    let boxHit = boxIntersection(localOrigin, localDirection, -body.halfSizeShape.xyz, body.halfSizeShape.xyz);
+    var t = boxHit.x;
+    if (t <= 0.0001) { t = boxHit.y; }
+    if (t > 0.0001 && boxHit.x <= boxHit.y) {
+      let p = localOrigin + localDirection * t;
+      let q = abs(p / max(body.halfSizeShape.xyz, vec3f(1e-6)));
+      var n = vec3f(0.0, 0.0, sign(p.z));
+      if (q.x >= q.y && q.x >= q.z) { n = vec3f(sign(p.x), 0.0, 0.0); }
+      else if (q.y >= q.z) { n = vec3f(0.0, sign(p.y), 0.0); }
+      localHit = vec4f(t, n);
+    }
+  } else if (shape == 2) {
+    let side = cylinderLocalHit(localOrigin, localDirection, body.halfSizeShape.x, body.halfSizeShape.y, false);
+    let upper = sphereLocalHit(localOrigin, localDirection, vec3f(0.0, body.halfSizeShape.y, 0.0), body.halfSizeShape.x);
+    let lower = sphereLocalHit(localOrigin, localDirection, vec3f(0.0, -body.halfSizeShape.y, 0.0), body.halfSizeShape.x);
+    localHit = side;
+    if (upper.x < localHit.x) { localHit = upper; }
+    if (lower.x < localHit.x) { localHit = lower; }
+  } else {
+    localHit = cylinderLocalHit(localOrigin, localDirection, body.halfSizeShape.x, body.halfSizeShape.y, true);
+  }
+  return vec4f(localHit.x, quatRotate(body.orientation, localHit.yzw));
+}
+
+fn nearestBody(ro: vec3f, rd: vec3f) -> BodyHit {
+  var result = BodyHit(1e20, vec3f(0.0, 1.0, 0.0), vec3f(0.7), 0.0);
+  let bodyCount = u32(round(u.options.z));
+  for (var index: u32 = 0u; index < 12u; index += 1u) {
+    if (index >= bodyCount) { break; }
+    let hit = intersectBody(ro, rd, bodies[index]);
+    if (hit.x < result.t) {
+      result = BodyHit(hit.x, normalize(hit.yzw), bodies[index].colorSelected.xyz, bodies[index].colorSelected.w);
+    }
+  }
+  return result;
+}
+
 @fragment
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let resolution = max(u.viewport.xy, vec2f(1.0));
@@ -78,6 +190,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let boundsMin = center - halfSize;
   let boundsMax = center + halfSize;
   let hit = boxIntersection(ro, rd, boundsMin, boundsMax);
+  let rigidHit = nearestBody(ro, rd);
 
   let floorT = (-0.025 - ro.y) / rd.y;
   if (floorT > 0.0) {
@@ -143,6 +256,20 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
     color = mix(color, glass, 0.035 + glassFresnel * 0.035 + edgeAlpha * 0.54);
   }
 
+  if (rigidHit.t < 1e19 && (floorT <= 0.0 || rigidHit.t < floorT)) {
+    let rigidPoint = ro + rd * rigidHit.t;
+    let light = normalize(vec3f(-0.45, 0.8, 0.3));
+    let diffuse = 0.22 + 0.78 * max(dot(rigidHit.normal, light), 0.0);
+    let rim = pow(1.0 - max(dot(-rd, rigidHit.normal), 0.0), 3.0);
+    var rigidColor = rigidHit.color * diffuse + vec3f(0.18, 0.42, 0.37) * rim;
+    if (rigidPoint.y < u.container.w) {
+      let submergence = clamp((u.container.w - rigidPoint.y) / max(size.y, 0.001), 0.0, 1.0);
+      rigidColor = mix(rigidColor, rigidColor * vec3f(0.35, 0.72, 0.7) + vec3f(0.01, 0.11, 0.1), 0.4 + submergence * 0.32);
+    }
+    rigidColor += rigidHit.selected * vec3f(0.18, 0.55, 0.43) * (0.28 + rim);
+    color = rigidColor;
+  }
+
   if (mode == 2) {
     let divider = 1.0 - smoothstep(0.0, 1.8 / resolution.x, abs(input.uv.x - 0.5));
     color = mix(color, vec3f(0.45, 0.96, 0.84), divider * 0.55);
@@ -161,6 +288,7 @@ export class FluidLabRenderer {
   private context?: GPUCanvasContext;
   private pipeline?: GPURenderPipeline;
   private uniformBuffer?: GPUBuffer;
+  private bodyBuffer?: GPUBuffer;
   private bindGroup?: GPUBindGroup;
   private format?: GPUTextureFormat;
 
@@ -201,9 +329,10 @@ export class FluidLabRenderer {
       primitive: { topology: "triangle-list" }
     });
     this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.bindGroup = device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }]
+      entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.bodyBuffer } }]
     });
 
     device.lost.then((info) => this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` }));
@@ -222,8 +351,8 @@ export class FluidLabRenderer {
     }
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, mode: SolverMode, view: ViewMode): number {
-    if (!this.device || !this.context || !this.pipeline || !this.uniformBuffer || !this.bindGroup) return 0;
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, mode: SolverMode, view: ViewMode, bodies: RigidBodyState[], selectedBodyId?: string): number {
+    if (!this.device || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return 0;
     this.resize();
     const start = performance.now();
     const position = cameraPosition(camera);
@@ -233,9 +362,23 @@ export class FluidLabRenderer {
       position.x, position.y, position.z, 0,
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
-      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, 0, 0
+      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), 0
     ]);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
+    const bodyData = new Float32Array(12 * 16);
+    const shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
+    const palette = [[0.95, 0.63, 0.29], [0.48, 0.66, 0.96], [0.84, 0.42, 0.48], [0.66, 0.52, 0.92]];
+    bodies.slice(0, 12).forEach((body, index) => {
+      const offset = index * 16;
+      const d = body.description.dimensions_m;
+      const half = body.description.shape === "box" ? [d.x / 2, d.y / 2, d.z / 2] : body.description.shape === "sphere" ? [d.x, d.x, d.x] : [d.x, d.y / 2, d.x];
+      const color = palette[shapeIndex[body.description.shape]];
+      bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, 0], offset);
+      bodyData.set([half[0], half[1], half[2], shapeIndex[body.description.shape]], offset + 4);
+      bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
+      bodyData.set([color[0], color[1], color[2], body.description.id === selectedBodyId ? 1 : 0], offset + 12);
+    });
+    this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     const pass = encoder.beginRenderPass({
       colorAttachments: [{ view: this.context.getCurrentTexture().createView(), clearValue: { r: 0.01, g: 0.025, b: 0.024, a: 1 }, loadOp: "clear", storeOp: "store" }]
