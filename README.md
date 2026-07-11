@@ -14,6 +14,9 @@ resolution WebGPU Eulerian path. WebGPU quality presets allocate approximately
 The presentation renderer reconstructs a trilinear implicit surface with
 subcell root refinement, gradient normals, front/back thickness, Fresnel
 reflection, and Beer–Lambert absorption.
+The GPU transport path uses bounded compressive VOF fluxes, midpoint RK2
+backtracing, resolution-scaled vorticity confinement, compact reductions, and
+quality-aware CFL substepping.
 
 ## Stage 1 documents
 

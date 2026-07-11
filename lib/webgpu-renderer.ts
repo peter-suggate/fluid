@@ -2,7 +2,7 @@ import { cameraPosition } from "./math";
 import type { CameraState, SceneDescription, SolverMode, ViewMode } from "./model";
 import type { RigidBodyState } from "./rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
-import { WebGPUEulerianSolver, type GPUEulerianInfo, type GPUQuality } from "./webgpu-eulerian";
+import { WebGPUEulerianSolver, type GPUEulerianInfo, type GPURigidLoad, type GPUQuality } from "./webgpu-eulerian";
 import type { ParticleRenderState } from "./particle-solver";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
@@ -182,7 +182,7 @@ fn fluidValue(uvw:vec3f)->f32{
   return mix(mix(mix(fluidSample(b),fluidSample(b+vec3i(1,0,0)),f.x),mix(fluidSample(b+vec3i(0,1,0)),fluidSample(b+vec3i(1,1,0)),f.x),f.y),mix(mix(fluidSample(b+vec3i(0,0,1)),fluidSample(b+vec3i(1,0,1)),f.x),mix(fluidSample(b+vec3i(0,1,1)),fluidSample(b+vec3i(1,1,1)),f.x),f.y),f.z);
 }
 
-fn refineFluidHit(ro:vec3f,rd:vec3f,a0:f32,b0:f32,boundsMin:vec3f,size:vec3f,entering:bool)->f32{var a=a0;var b=b0;for(var i=0;i<6;i+=1){let m=0.5*(a+b);let value=fluidValue((ro+rd*m-boundsMin)/size);if((value>0.18)==entering){b=m;}else{a=m;}}return 0.5*(a+b);}
+fn refineFluidHit(ro:vec3f,rd:vec3f,a0:f32,b0:f32,boundsMin:vec3f,size:vec3f,entering:bool)->f32{var a=a0;var b=b0;for(var i=0;i<6;i+=1){let m=0.5*(a+b);let value=fluidValue((ro+rd*m-boundsMin)/size);if((value>0.5)==entering){b=m;}else{a=m;}}return 0.5*(a+b);}
 
 struct FluidHit{entry:f32,exit:f32,normal:vec3f}
 fn fluidRayHit(ro: vec3f, rd: vec3f, nearT: f32, farT: f32, boundsMin: vec3f, size: vec3f) -> FluidHit {
@@ -197,11 +197,11 @@ fn fluidRayHit(ro: vec3f, rd: vec3f, nearT: f32, farT: f32, boundsMin: vec3f, si
     let point = ro + rd * t;
     let uvw = clamp((point - boundsMin) / size, vec3f(0.0), vec3f(0.999999));
     let occupied = fluidValue(uvw);
-    if (entry>1e19&&occupied>0.18&&previous<=0.18) {
+    if (entry>1e19&&occupied>0.5&&previous<=0.5) {
       entry=refineFluidHit(ro,rd,previousT,t,boundsMin,size,true);let hitUVW=(ro+rd*entry-boundsMin)/size;let e=1.0/vec3f(dims);
       let gradient=vec3f(fluidValue(hitUVW-e*vec3f(1,0,0))-fluidValue(hitUVW+e*vec3f(1,0,0)),fluidValue(hitUVW-e*vec3f(0,1,0))-fluidValue(hitUVW+e*vec3f(0,1,0)),fluidValue(hitUVW-e*vec3f(0,0,1))-fluidValue(hitUVW+e*vec3f(0,0,1)));
       if(length(gradient)>0.0001){surfaceNormal=normalize(gradient);}else{surfaceNormal=-rd;}
-    }else if(entry<1e19&&occupied<=0.18&&previous>0.18){let exit=refineFluidHit(ro,rd,previousT,t,boundsMin,size,false);return FluidHit(entry,exit,surfaceNormal);}
+    }else if(entry<1e19&&occupied<=0.5&&previous>0.5){let exit=refineFluidHit(ro,rd,previousT,t,boundsMin,size,false);return FluidHit(entry,exit,surfaceNormal);}
     previous = occupied;
     previousT=t;
     t += stepSize;
@@ -368,11 +368,12 @@ export class FluidLabRenderer {
   private gpuFluid?: WebGPUEulerianSolver;
   private gpuFluidKey = "";
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
+  private gpuRigidLoadCallback?: (loads: GPURigidLoad[]) => void;
   private lastGPUReadbackSecond = -1;
   private bindGroup?: GPUBindGroup;
   private format?: GPUTextureFormat;
 
-  constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void) { this.gpuInfoCallback = onGPUInfo; }
+  constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; }
 
   async initialize(): Promise<void> {
     this.onStatus({ state: "initializing", label: "Requesting WebGPU adapter" });
@@ -418,6 +419,7 @@ export class FluidLabRenderer {
     this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.rebuildBindGroup();
 
+    device.addEventListener("uncapturederror", (event) => console.error(`WebGPU validation: ${event.error.message}`));
     device.lost.then((info) => this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` }));
     const info = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     const adapterName = info ? [info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter" : "WebGPU adapter";
@@ -433,15 +435,15 @@ export class FluidLabRenderer {
     ] });
   }
 
-  private ensureGPUFluid(scene: SceneDescription, quality: GPUQuality, time_s: number) {
+  private ensureGPUFluid(scene: SceneDescription, quality: GPUQuality, time_s: number, bodies: RigidBodyState[]) {
     if (!this.device) return undefined;
-    const key = `${quality}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.gravity_m_s2.y}`;
+    const key = `${quality}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}`;
     if (!this.gpuFluid || key !== this.gpuFluidKey) {
-      this.gpuFluid?.destroy(); this.gpuFluid = new WebGPUEulerianSolver(this.device, scene, quality); this.gpuFluidKey = key;
+      this.gpuFluid?.destroy(); this.gpuFluid = new WebGPUEulerianSolver(this.device, scene, quality, this.gpuRigidLoadCallback); this.gpuFluidKey = key;
       this.rebuildBindGroup(this.gpuFluid.volumeTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
     }
-    if (!this.gpuFluid.advanceTo(time_s)) {
-      this.gpuFluid.destroy(); this.gpuFluid = new WebGPUEulerianSolver(this.device, scene, quality); this.rebuildBindGroup(this.gpuFluid.volumeTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
+    if (!this.gpuFluid.advanceTo(time_s, bodies)) {
+      this.gpuFluid.destroy(); this.gpuFluid = new WebGPUEulerianSolver(this.device, scene, quality, this.gpuRigidLoadCallback); this.rebuildBindGroup(this.gpuFluid.volumeTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
     }
     const second=Math.floor(time_s);if(second!==this.lastGPUReadbackSecond){this.lastGPUReadbackSecond=second;void this.gpuFluid.readStats().then(info=>this.gpuInfoCallback?.({...info}));}
     return this.gpuFluid.info;
@@ -482,7 +484,7 @@ export class FluidLabRenderer {
     const start = performance.now();
     const position = cameraPosition(camera);
     const modeValue = mode === "eulerian" ? 0 : mode === "particle" ? 1 : 2;
-    const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, quality, time_s) : undefined;
+    const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, quality, time_s, bodies) : undefined;
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const uniform = new Float32Array([
       this.canvas.width, this.canvas.height, time_s, modeValue,
