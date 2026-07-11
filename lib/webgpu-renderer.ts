@@ -177,31 +177,36 @@ fn fluidSample(cell: vec3i) -> f32 {
   return textureLoad(fluidField, clamp(cell, vec3i(0), dims - vec3i(1)), 0).x;
 }
 
-fn fluidRayHit(ro: vec3f, rd: vec3f, nearT: f32, farT: f32, boundsMin: vec3f, size: vec3f) -> vec4f {
+fn fluidValue(uvw:vec3f)->f32{
+  let dims=vec3i(u.gridInfo.xyz);let q=clamp(uvw*vec3f(dims)-vec3f(0.5),vec3f(0.0),vec3f(dims-vec3i(1)));let b=vec3i(floor(q));let f=fract(q);
+  return mix(mix(mix(fluidSample(b),fluidSample(b+vec3i(1,0,0)),f.x),mix(fluidSample(b+vec3i(0,1,0)),fluidSample(b+vec3i(1,1,0)),f.x),f.y),mix(mix(fluidSample(b+vec3i(0,0,1)),fluidSample(b+vec3i(1,0,1)),f.x),mix(fluidSample(b+vec3i(0,1,1)),fluidSample(b+vec3i(1,1,1)),f.x),f.y),f.z);
+}
+
+fn refineFluidHit(ro:vec3f,rd:vec3f,a0:f32,b0:f32,boundsMin:vec3f,size:vec3f,entering:bool)->f32{var a=a0;var b=b0;for(var i=0;i<6;i+=1){let m=0.5*(a+b);let value=fluidValue((ro+rd*m-boundsMin)/size);if((value>0.18)==entering){b=m;}else{a=m;}}return 0.5*(a+b);}
+
+struct FluidHit{entry:f32,exit:f32,normal:vec3f}
+fn fluidRayHit(ro: vec3f, rd: vec3f, nearT: f32, farT: f32, boundsMin: vec3f, size: vec3f) -> FluidHit {
   let dims = vec3i(u.gridInfo.xyz);
   let span = max(farT - nearT, 0.0);
-  let stepSize = max(span / 128.0, 0.001);
-  var previous = 0.0;
+  let stepSize = max(span / 192.0, min(min(size.x/f32(dims.x),size.y/f32(dims.y)),size.z/f32(dims.z))*0.45);
+  var previous = fluidValue((ro+rd*nearT-boundsMin)/size);
+  var previousT=nearT;var entry=1e20;var surfaceNormal=vec3f(0.0,1.0,0.0);
   var t = nearT;
-  for (var sampleIndex: u32 = 0u; sampleIndex < 160u; sampleIndex += 1u) {
+  for (var sampleIndex: u32 = 0u; sampleIndex < 224u; sampleIndex += 1u) {
     if (t > farT) { break; }
     let point = ro + rd * t;
     let uvw = clamp((point - boundsMin) / size, vec3f(0.0), vec3f(0.999999));
-    let cell = clamp(vec3i(uvw * vec3f(dims)), vec3i(0), dims - vec3i(1));
-    let occupied = fluidSample(cell);
-    if (occupied > 0.08 && previous <= 0.08) {
-      let gradient = vec3f(
-        fluidSample(cell - vec3i(1, 0, 0)) - fluidSample(cell + vec3i(1, 0, 0)),
-        fluidSample(cell - vec3i(0, 1, 0)) - fluidSample(cell + vec3i(0, 1, 0)),
-        fluidSample(cell - vec3i(0, 0, 1)) - fluidSample(cell + vec3i(0, 0, 1))
-      );
-      let normal = select(-rd, normalize(gradient), length(gradient) > 0.001);
-      return vec4f(t, normal);
-    }
+    let occupied = fluidValue(uvw);
+    if (entry>1e19&&occupied>0.18&&previous<=0.18) {
+      entry=refineFluidHit(ro,rd,previousT,t,boundsMin,size,true);let hitUVW=(ro+rd*entry-boundsMin)/size;let e=1.0/vec3f(dims);
+      let gradient=vec3f(fluidValue(hitUVW-e*vec3f(1,0,0))-fluidValue(hitUVW+e*vec3f(1,0,0)),fluidValue(hitUVW-e*vec3f(0,1,0))-fluidValue(hitUVW+e*vec3f(0,1,0)),fluidValue(hitUVW-e*vec3f(0,0,1))-fluidValue(hitUVW+e*vec3f(0,0,1)));
+      if(length(gradient)>0.0001){surfaceNormal=normalize(gradient);}else{surfaceNormal=-rd;}
+    }else if(entry<1e19&&occupied<=0.18&&previous>0.18){let exit=refineFluidHit(ro,rd,previousT,t,boundsMin,size,false);return FluidHit(entry,exit,surfaceNormal);}
     previous = occupied;
+    previousT=t;
     t += stepSize;
   }
-  return vec4f(1e20, 0.0, 1.0, 0.0);
+  if(entry<1e19){return FluidHit(entry,farT,surfaceNormal);}return FluidHit(1e20,1e20,vec3f(0.0,1.0,0.0));
 }
 
 @fragment
@@ -254,7 +259,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
     waterPoint = ro + rd * waterT;
     let solverHit = fluidRayHit(ro, rd, nearT, hit.y, boundsMin, size);
     if (u.gridInfo.w > 0.5) {
-      waterT = solverHit.x;
+      waterT = solverHit.entry;
       waterPoint = ro + rd * waterT;
     }
 
@@ -265,18 +270,20 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
 
     var insideWater = waterT >= nearT && waterT <= hit.y
       && abs(waterPoint.x) <= halfSize.x && abs(waterPoint.z) <= halfSize.z;
-    if (u.gridInfo.w > 0.5) { insideWater = solverHit.x < 1e19; }
+    if (u.gridInfo.w > 0.5) { insideWater = solverHit.entry < 1e19; }
     if (insideWater) {
       let dx = 0.088 * cos(waterPoint.x * 8.0 + time * 0.72) * cos(waterPoint.z * 7.0 - time * 0.47)
              + 0.102 * cos(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
       let dz = -0.077 * sin(waterPoint.x * 8.0 + time * 0.72) * sin(waterPoint.z * 7.0 - time * 0.47)
              - 0.066 * cos(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
       var normal = normalize(vec3f(-dx, 1.0, -dz));
-      if (u.gridInfo.w > 0.5) { normal = normalize(solverHit.yzw); }
-      let fresnel = 0.035 + 0.62 * pow(1.0 - max(dot(normal, -rd), 0.0), 5.0);
+      if (u.gridInfo.w > 0.5) { normal = normalize(solverHit.normal); }
+      let fresnel = 0.0204 + 0.9796 * pow(1.0 - max(dot(normal, -rd), 0.0), 5.0);
       let depth = clamp((hit.y - waterT) / max(size.y, 0.001), 0.0, 1.0);
-      var waterColor = mix(vec3f(0.018, 0.19, 0.19), vec3f(0.02, 0.42, 0.39), max(dot(normal, normalize(vec3f(-0.3, 0.8, 0.2))), 0.0));
-      waterColor = mix(waterColor, color, fresnel);
+      let thickness=max(0.0,solverHit.exit-solverHit.entry);let transmission=exp(-vec3f(0.95,0.28,0.16)*thickness);let scatter=vec3f(0.018,0.34,0.29)*(vec3f(1.0)-transmission);
+      let refracted=color*transmission+scatter;let reflected=mix(vec3f(0.025,0.07,0.07),vec3f(0.19,0.38,0.34),clamp(reflect(rd,normal).y*0.5+0.5,0.0,1.0));
+      var waterColor = mix(refracted,reflected,fresnel);
+      waterColor+=vec3f(0.025,0.12,0.105)*(1.0-exp(-thickness*7.0));
       waterColor += vec3f(0.16, 0.72, 0.64) * pow(max(dot(reflect(rd, normal), normalize(vec3f(-0.5, 0.8, 0.25))), 0.0), 64.0);
 
       if (scientific && localMode == 0) {
@@ -378,7 +385,8 @@ export class FluidLabRenderer {
       this.onStatus({ state: "unavailable", label: "No compatible GPU adapter was found" });
       return;
     }
-    const device = await adapter.requestDevice();
+    const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
+    const device = await adapter.requestDevice({ requiredFeatures });
     const context = this.canvas.getContext("webgpu");
     if (!context) {
       this.onStatus({ state: "unavailable", label: "WebGPU canvas context could not be created" });

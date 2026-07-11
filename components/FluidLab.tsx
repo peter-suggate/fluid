@@ -245,6 +245,7 @@ export function FluidLab() {
   const accumulatorRef = useRef(0);
   const simulationTimeRef = useRef(0);
   const bodiesRef = useRef<RigidBodyState[]>(initializeRigidBodies(defaultScene.rigidBodies));
+  const cpuOracleStepRef = useRef(0);
   const validationResults = useMemo(() => runShellValidation(), []);
 
   useEffect(() => {
@@ -266,7 +267,9 @@ export function FluidLab() {
           const coupling = computeFluidLoads(scene, couplingFluid, bodiesRef.current);
           latestCoupling = applyFluidReactions(couplingFluid, bodiesRef.current, coupling.loads, dt);
           diagnostics = advanceRigidBodies(bodiesRef.current, scene, dt, 6, coupling.loads);
-          fluidDiagnostics = fluidSolverRef.current.step(dt);
+          cpuOracleStepRef.current += 1;
+          const oracleStride = backend === "webgpu" ? 4 : 1;
+          if (cpuOracleStepRef.current % oracleStride === 0) fluidDiagnostics = fluidSolverRef.current.step(dt * oracleStride);
           if (mode !== "eulerian") particleSolverRef.current.step(dt);
           accumulatorRef.current -= dt;
           simulationTimeRef.current += dt;
@@ -276,8 +279,10 @@ export function FluidLab() {
         if (steps > 0) {
           setBodies(cloneRigidBodies(bodiesRef.current));
           setRigidState(diagnostics ?? rigidDiagnostics(bodiesRef.current, scene.fluid.gravity_m_s2));
-          setFluidState(fluidDiagnostics ?? fluidSolverRef.current.diagnostics);
-          setFluidRenderState(fluidSolverRef.current.getRenderState());
+          if (fluidDiagnostics) {
+            setFluidState(fluidDiagnostics);
+            if (backend === "cpu-reference") setFluidRenderState(fluidSolverRef.current.getRenderState());
+          }
           setParticleState(particleSolverRef.current.diagnostics);
           setParticleRenderState(particleSolverRef.current.getRenderState());
           if (latestCoupling) setCouplingState(latestCoupling);
@@ -289,7 +294,7 @@ export function FluidLab() {
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [mode, runState, scene]);
+  }, [backend, mode, runState, scene]);
 
   const handleFrame = useCallback((value: number, size: string) => {
     setFrameMs(value);
@@ -321,6 +326,7 @@ export function FluidLab() {
     particleSolverRef.current = new ParticleFluidSolver(source, backend === "cpu-reference" ? 650 : 900);
     setParticleState(particleSolverRef.current.diagnostics); setParticleRenderState(particleSolverRef.current.getRenderState());
     simulationTimeRef.current = 0; accumulatorRef.current = 0;
+    cpuOracleStepRef.current = 0;
     setSimulationTime(0); setRunState("paused"); setSamples([]);
     setSelectedBodyId(source.rigidBodies[0]?.id);
     setNotice(`${source.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
@@ -492,7 +498,7 @@ export function FluidLab() {
           <div className="segmented"><button className={view === "scientific" ? "active" : ""} onClick={() => setView("scientific")}>Scientific</button><button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button></div>
         </div>
         {mode === "compare" && <div className="compare-labels"><span><b>01</b> GPU GRID</span><span><b>02</b> PBF PARTICLES</span></div>}
-        <div className="physics-stage-badge"><strong>STAGE 8</strong><span>{backend === "webgpu" ? "WebGPU fluid compute active" : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} cells · f32 · 40 Jacobi` : "MAC · binary64 · PCG"}</small></div>
+        <div className="physics-stage-badge"><strong>STAGE 9</strong><span>{backend === "webgpu" ? "WebGPU fluid + implicit surface" : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} cells · f32 · ${gpuInfo?.pressureIterations ?? "…"} Jacobi` : "MAC · binary64 · PCG"}</small></div>
         {view === "scientific" && <>
           <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
           <div className="probe-label probe-a"><i />P-01 · surface</div>
@@ -520,6 +526,9 @@ export function FluidLab() {
           <MetricCard label="GPU grid" value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.ny} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
           <MetricCard label="GPU dam front" value={gpuInfo?.front_m !== undefined ? gpuInfo.front_m.toFixed(3) : "—"} unit="m · volume-fraction threshold" />
           <MetricCard label="GPU max speed" value={gpuInfo?.maxSpeed_m_s !== undefined ? gpuInfo.maxSpeed_m_s.toFixed(3) : "—"} unit={`m/s · ${gpuInfo?.encodedSteps ?? 0} encoded steps`} />
+          <MetricCard label="GPU step" value={gpuInfo?.gpuStep_ms !== undefined ? gpuInfo.gpuStep_ms.toFixed(2) : "—"} unit="ms · timestamp query" tone={gpuInfo?.gpuStep_ms !== undefined && gpuInfo.gpuStep_ms < 16.7 ? "good" : "neutral"} />
+          <MetricCard label="GPU volume drift" value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit="% · corrected VOF integral" tone={gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
+          <MetricCard label="Raw transport drift" value={gpuInfo?.rawVolumeDrift !== undefined ? (gpuInfo.rawVolumeDrift * 100).toFixed(2) : "—"} unit="% · before bounded correction" tone="neutral" />
           <MetricCard label="PBF particles" value={particleState.particleCount.toLocaleString()} unit={`${particleState.meanNeighbourCount.toFixed(1)} mean neighbours`} />
         </section>
         {selectedBody && <section className="panel-section selected-diagnostics" data-testid="selected-body-diagnostics">

@@ -364,3 +364,35 @@ surface density error and correction/CFL limiters are visible. GPU pressure uses
 fixed weighted-Jacobi iterations without a reduced residual; its collocated
 layout and hydrostatic predictor are an interactive approximation, not the MAC
 oracle. GPU PBF and resolved cut-cell traction are not claimed.
+
+## Stage 9 surface and performance evidence
+
+Recorded: 2026-07-12<br>
+Build: `web-stage9-0.9.0`
+
+- Removed full 3D velocity/volume copies from the main simulation loop except
+  the scalar VOF correction copy; cached all stable texture views and bind
+  groups; reduced the live CPU oracle to one quarter rate in WebGPU mode.
+- Replaced per-voxel vertical scans with one 2D GPU column-height reduction per
+  substep.
+- Replaced full-field diagnostic readback with a 16-byte atomic reduction and
+  optional timestamp-query readback.
+- Added CFL-controlled conservative transport substeps and an explicitly
+  bounded GPU volume correction. At the measured checkpoints, corrected volume
+  drift was `-0.00%` balanced, `-0.01%` high, and `-0.02%` ultra; raw transport
+  drift remained between `-0.08%` and `-0.12%`.
+- Measured complete GPU simulation time on the local Apple WebGPU adapter:
+  balanced `60×45×40` at `1.64 ms`, high `100×75×67` at `4.33 ms`, and ultra
+  `134×100×89` at `17.24 ms`. Timestamp availability and quantization remain
+  adapter/browser dependent.
+- Replaced nearest-cell surface hits with trilinear volume sampling, six-step
+  subcell root refinement, volume-gradient normals, front/back thickness,
+  dielectric Fresnel (`IOR≈1.333`), Beer–Lambert absorption, scattering, and
+  reflected-environment approximation.
+- Final local browser console warnings/errors: `0`; all three quality presets
+  allocated, advanced, reduced diagnostics, and reset successfully.
+
+Marching-cubes allocation was not activated because the measured direct
+implicit-surface path remained within the interactive budget. Geometric
+multigrid remains the next pressure-solver replacement if projection iterations
+become dominant at resolutions above the current ultra preset.
