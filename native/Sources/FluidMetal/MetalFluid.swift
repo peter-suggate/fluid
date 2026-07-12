@@ -169,6 +169,27 @@ final class MetalFluidSolver: @unchecked Sendable {
         bodies[selectedBodyIndex].position += (right * dx + up * dy) * 0.0025
         bodies[selectedBodyIndex].linearVelocity = .zero
     }
+    func pickBody(ndc: SIMD2<Float>, aspect: Float) -> Bool {
+        let target = SIMD3<Float>(0, scene.container.height_m * 0.42, 0)
+        let origin = target + SIMD3(cos(elevation) * sin(azimuth), sin(elevation), cos(elevation) * cos(azimuth)) * distance
+        let forward = simd_normalize(target - origin)
+        let right = simd_normalize(simd_cross(forward, SIMD3<Float>(0, 1, 0)))
+        let up = simd_normalize(simd_cross(right, forward))
+        let direction = simd_normalize(forward + right * ndc.x * aspect * 0.72 + up * ndc.y * 0.72)
+        var bestDistance = Float.greatestFiniteMagnitude
+        var bestIndex: Int?
+        for index in bodies.indices {
+            let offset = origin - bodies[index].position
+            let projected = simd_dot(offset, direction)
+            let discriminant = projected * projected - simd_dot(offset, offset) + bodies[index].supportRadius * bodies[index].supportRadius
+            guard discriminant >= 0 else { continue }
+            let distance = -projected - sqrt(discriminant)
+            if distance > 0, distance < bestDistance { bestDistance = distance; bestIndex = index }
+        }
+        guard let bestIndex else { return false }
+        selectedBodyIndex = bestIndex
+        return true
+    }
     func cameraPreset(_ name: String) {
         switch name {
         case "front": azimuth = 0; elevation = 0.08
