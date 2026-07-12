@@ -185,34 +185,97 @@ fn fluidSample(cell: vec3i) -> f32 {
   return textureLoad(fluidField, clamp(cell, vec3i(0), dims - vec3i(1)), 0).x;
 }
 
-fn fluidValue(uvw:vec3f)->f32{
-  let dims=vec3i(u.gridInfo.xyz);let q=clamp(uvw*vec3f(dims)-vec3f(0.5),vec3f(0.0),vec3f(dims-vec3i(1)));let b=vec3i(floor(q));let f=fract(q);
-  return mix(mix(mix(fluidSample(b),fluidSample(b+vec3i(1,0,0)),f.x),mix(fluidSample(b+vec3i(0,1,0)),fluidSample(b+vec3i(1,1,0)),f.x),f.y),mix(mix(fluidSample(b+vec3i(0,0,1)),fluidSample(b+vec3i(1,0,1)),f.x),mix(fluidSample(b+vec3i(0,1,1)),fluidSample(b+vec3i(1,1,1)),f.x),f.y),f.z);
+struct InterfaceCell {
+  base: vec3f,
+  lower: vec4f,
+  upper: vec4f,
 }
 
-fn refineFluidHit(ro:vec3f,rd:vec3f,a0:f32,b0:f32,boundsMin:vec3f,size:vec3f,entering:bool)->f32{var a=a0;var b=b0;for(var i=0;i<6;i+=1){let m=0.5*(a+b);let value=fluidValue((ro+rd*m-boundsMin)/size);if((value>0.5)==entering){b=m;}else{a=m;}}return 0.5*(a+b);}
+fn loadInterfaceCell(uvw: vec3f) -> InterfaceCell {
+  let dims = vec3i(u.gridInfo.xyz);
+  let q = clamp(uvw * vec3f(dims) - vec3f(0.5), vec3f(0.0), vec3f(dims - vec3i(1)));
+  let base = clamp(vec3i(floor(q)), vec3i(0), dims - vec3i(2));
+  return InterfaceCell(
+    vec3f(base),
+    vec4f(fluidSample(base), fluidSample(base + vec3i(1, 0, 0)), fluidSample(base + vec3i(0, 1, 0)), fluidSample(base + vec3i(1, 1, 0))),
+    vec4f(fluidSample(base + vec3i(0, 0, 1)), fluidSample(base + vec3i(1, 0, 1)), fluidSample(base + vec3i(0, 1, 1)), fluidSample(base + vec3i(1, 1, 1)))
+  );
+}
+
+fn interfaceValue(cell: InterfaceCell, q: vec3f) -> f32 {
+  let f = clamp(q - cell.base, vec3f(0.0), vec3f(1.0));
+  let z0 = mix(mix(cell.lower.x, cell.lower.y, f.x), mix(cell.lower.z, cell.lower.w, f.x), f.y);
+  let z1 = mix(mix(cell.upper.x, cell.upper.y, f.x), mix(cell.upper.z, cell.upper.w, f.x), f.y);
+  return mix(z0, z1, f.z);
+}
+
+fn interfaceGradient(cell: InterfaceCell, q: vec3f, size: vec3f) -> vec3f {
+  let dims = vec3f(u.gridInfo.xyz);
+  let f = clamp(q - cell.base, vec3f(0.0), vec3f(1.0));
+  let dx0 = mix(cell.lower.y - cell.lower.x, cell.lower.w - cell.lower.z, f.y);
+  let dx1 = mix(cell.upper.y - cell.upper.x, cell.upper.w - cell.upper.z, f.y);
+  let dy0 = mix(cell.lower.z - cell.lower.x, cell.lower.w - cell.lower.y, f.x);
+  let dy1 = mix(cell.upper.z - cell.upper.x, cell.upper.w - cell.upper.y, f.x);
+  let z0 = mix(mix(cell.lower.x, cell.lower.y, f.x), mix(cell.lower.z, cell.lower.w, f.x), f.y);
+  let z1 = mix(mix(cell.upper.x, cell.upper.y, f.x), mix(cell.upper.z, cell.upper.w, f.x), f.y);
+  return vec3f(mix(dx0, dx1, f.z), mix(dy0, dy1, f.z), z1 - z0) * dims / size;
+}
+
+fn refineFluidHit(ro: vec3f, rd: vec3f, a: f32, b: f32, valueA: f32, valueB: f32, boundsMin: vec3f, size: vec3f) -> vec4f {
+  let dims = vec3f(u.gridInfo.xyz);
+  let denominator = valueB - valueA;
+  let fraction = select(0.5, clamp((0.5 - valueA) / denominator, 0.05, 0.95), abs(denominator) > 1e-6);
+  var t = mix(a, b, fraction);
+  let cell = loadInterfaceCell((ro + rd * t - boundsMin) / size);
+  for (var iteration = 0u; iteration < 4u; iteration += 1u) {
+    let q = (ro + rd * t - boundsMin) * dims / size - vec3f(0.5);
+    let gradient = interfaceGradient(cell, q, size);
+    let derivative = dot(gradient, rd);
+    if (abs(derivative) < 1e-6) { break; }
+    t = clamp(t - (interfaceValue(cell, q) - 0.5) / derivative, a, b);
+  }
+  let hitQ = (ro + rd * t - boundsMin) * dims / size - vec3f(0.5);
+  let gradient = interfaceGradient(cell, hitQ, size);
+  let normal = select(-rd, -normalize(gradient), length(gradient) > 1e-5);
+  return vec4f(t, normal);
+}
 
 struct FluidHit{entry:f32,exit:f32,normal:vec3f}
 fn fluidRayHit(ro: vec3f, rd: vec3f, nearT: f32, farT: f32, boundsMin: vec3f, size: vec3f) -> FluidHit {
   let dims = vec3i(u.gridInfo.xyz);
-  let span = max(farT - nearT, 0.0);
-  let stepSize = max(span / 192.0, min(min(size.x/f32(dims.x),size.y/f32(dims.y)),size.z/f32(dims.z))*0.45);
-  var previous = fluidValue((ro+rd*nearT-boundsMin)/size);
-  var previousT=nearT;var entry=1e20;var surfaceNormal=vec3f(0.0,1.0,0.0);
-  var t = nearT;
-  for (var sampleIndex: u32 = 0u; sampleIndex < 224u; sampleIndex += 1u) {
-    if (t > farT) { break; }
-    let point = ro + rd * t;
-    let uvw = clamp((point - boundsMin) / size, vec3f(0.0), vec3f(0.999999));
-    let occupied = fluidValue(uvw);
-    if (entry>1e19&&occupied>0.5&&previous<=0.5) {
-      entry=refineFluidHit(ro,rd,previousT,t,boundsMin,size,true);let hitUVW=(ro+rd*entry-boundsMin)/size;let e=1.0/vec3f(dims);
-      let gradient=vec3f(fluidValue(hitUVW-e*vec3f(1,0,0))-fluidValue(hitUVW+e*vec3f(1,0,0)),fluidValue(hitUVW-e*vec3f(0,1,0))-fluidValue(hitUVW+e*vec3f(0,1,0)),fluidValue(hitUVW-e*vec3f(0,0,1))-fluidValue(hitUVW+e*vec3f(0,0,1)));
-      if(length(gradient)>0.0001){surfaceNormal=normalize(gradient);}else{surfaceNormal=-rd;}
-    }else if(entry<1e19&&occupied<=0.5&&previous>0.5){let exit=refineFluidHit(ro,rd,previousT,t,boundsMin,size,false);return FluidHit(entry,exit,surfaceNormal);}
+  let cellSize = size / vec3f(dims);
+  let startPoint = ro + rd * (nearT + 1e-5);
+  var cell = clamp(vec3i(floor((startPoint - boundsMin) / cellSize)), vec3i(0), dims - vec3i(1));
+  let step = vec3i(select(vec3f(-1.0), vec3f(1.0), rd >= vec3f(0.0)));
+  let boundary = boundsMin + (vec3f(cell) + select(vec3f(0.0), vec3f(1.0), step > vec3i(0))) * cellSize;
+  var nextT = select(vec3f(1e20), (boundary - ro) / rd, abs(rd) > vec3f(1e-8));
+  let deltaT = select(vec3f(1e20), abs(cellSize / rd), abs(rd) > vec3f(1e-8));
+  var cellEnterT = nearT;
+  var cellExitT = min(min(nextT.x, nextT.y), min(nextT.z, farT));
+  var previousT = 0.5 * (cellEnterT + cellExitT);
+  var previous = fluidSample(cell);
+  var entry = select(1e20, nearT, previous > 0.5);
+  var surfaceNormal = -rd;
+  for (var sampleIndex = 0u; sampleIndex < 512u; sampleIndex += 1u) {
+    if (cellExitT >= farT) { break; }
+    cellEnterT = cellExitT;
+    if (nextT.x <= cellEnterT + 1e-6) { cell.x += step.x; nextT.x += deltaT.x; }
+    if (nextT.y <= cellEnterT + 1e-6) { cell.y += step.y; nextT.y += deltaT.y; }
+    if (nextT.z <= cellEnterT + 1e-6) { cell.z += step.z; nextT.z += deltaT.z; }
+    if (any(cell < vec3i(0)) || any(cell >= dims)) { break; }
+    cellExitT = min(min(nextT.x, nextT.y), min(nextT.z, farT));
+    let t = 0.5 * (cellEnterT + cellExitT);
+    let occupied = fluidSample(cell);
+    if (entry > 1e19 && occupied > 0.5 && previous <= 0.5) {
+      let refined = refineFluidHit(ro, rd, previousT, t, previous, occupied, boundsMin, size);
+      entry = refined.x;
+      surfaceNormal = refined.yzw;
+    } else if (entry < 1e19 && occupied <= 0.5 && previous > 0.5) {
+      let refined = refineFluidHit(ro, rd, previousT, t, previous, occupied, boundsMin, size);
+      return FluidHit(entry, refined.x, surfaceNormal);
+    }
     previous = occupied;
-    previousT=t;
-    t += stepSize;
+    previousT = t;
   }
   if(entry<1e19){return FluidHit(entry,farT,surfaceNormal);}return FluidHit(1e20,1e20,vec3f(0.0,1.0,0.0));
 }
@@ -265,8 +328,10 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
                    + 0.006 * sin(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
     waterT = (waterBase + secondWave - ro.y) / rd.y;
     waterPoint = ro + rd * waterT;
-    let solverHit = fluidRayHit(ro, rd, nearT, hit.y, boundsMin, size);
-    if (u.gridInfo.w > 0.5) {
+    var solverHit = FluidHit(waterT, hit.y, vec3f(0.0, 1.0, 0.0));
+    let shouldMarch = u.gridInfo.w > 0.5 && mode != 1 && (mode != 2 || input.uv.x < 0.5);
+    if (shouldMarch) {
+      solverHit = fluidRayHit(ro, rd, nearT, hit.y, boundsMin, size);
       waterT = solverHit.entry;
       waterPoint = ro + rd * waterT;
     }
@@ -278,14 +343,14 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
 
     var insideWater = waterT >= nearT && waterT <= hit.y
       && abs(waterPoint.x) <= halfSize.x && abs(waterPoint.z) <= halfSize.z;
-    if (u.gridInfo.w > 0.5) { insideWater = solverHit.entry < 1e19; }
+    if (shouldMarch) { insideWater = solverHit.entry < 1e19; }
     if (insideWater) {
       let dx = 0.088 * cos(waterPoint.x * 8.0 + time * 0.72) * cos(waterPoint.z * 7.0 - time * 0.47)
              + 0.102 * cos(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
       let dz = -0.077 * sin(waterPoint.x * 8.0 + time * 0.72) * sin(waterPoint.z * 7.0 - time * 0.47)
              - 0.066 * cos(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
       var normal = normalize(vec3f(-dx, 1.0, -dz));
-      if (u.gridInfo.w > 0.5) { normal = normalize(solverHit.normal); }
+      if (shouldMarch) { normal = normalize(solverHit.normal); }
       let fresnel = 0.0204 + 0.9796 * pow(1.0 - max(dot(normal, -rd), 0.0), 5.0);
       let depth = clamp((hit.y - waterT) / max(size.y, 0.001), 0.0, 1.0);
       let thickness=max(0.0,solverHit.exit-solverHit.entry);let transmission=exp(-vec3f(0.95,0.28,0.16)*thickness);let scatter=vec3f(0.018,0.34,0.29)*(vec3f(1.0)-transmission);
@@ -360,11 +425,29 @@ struct Out{@builtin(position) position:vec4f,@location(0) local:vec2f,@location(
   let error=clamp(abs(input.density-1.0)*2.0,0.0,1.0);let color=mix(vec3f(0.27,0.94,0.82),vec3f(0.98,0.46,0.31),error);let edge=1.0-smoothstep(0.72,1.0,length(input.local));return vec4f(color,0.28+0.62*edge);
 }`;
 
+const upscaleShader = /* wgsl */ `
+@group(0) @binding(0) var source: texture_2d<f32>;
+@group(0) @binding(1) var sourceSampler: sampler;
+struct Out { @builtin(position) position: vec4f, @location(0) uv: vec2f }
+@vertex fn vertexMain(@builtin(vertex_index) index: u32) -> Out {
+  var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var out: Out; out.position = vec4f(positions[index], 0.0, 1.0); out.uv = positions[index] * 0.5 + 0.5; return out;
+}
+@fragment fn fragmentMain(input: Out) -> @location(0) vec4f { return textureSample(source, sourceSampler, input.uv); }
+`;
+
 export class FluidLabRenderer {
   private device?: GPUDevice;
   private context?: GPUCanvasContext;
   private pipeline?: GPURenderPipeline;
   private particlePipeline?: GPURenderPipeline;
+  private upscalePipeline?: GPURenderPipeline;
+  private upscaleSampler?: GPUSampler;
+  private upscaleBindGroup?: GPUBindGroup;
+  private presentationTexture?: GPUTexture;
+  private presentationTextureKey = "";
+  private renderScale = 1;
+  private lastRenderScaleUpdateAt = -Infinity;
   private uniformBuffer?: GPUBuffer;
   private bodyBuffer?: GPUBuffer;
   private particleBuffer?: GPUBuffer;
@@ -426,6 +509,9 @@ export class FluidLabRenderer {
     });
     const particleModule=device.createShaderModule({label:"Particle debug shader",code:particleShader});
     this.particlePipeline=device.createRenderPipeline({label:"Fluid particles",layout:"auto",vertex:{module:particleModule,entryPoint:"vertexMain"},fragment:{module:particleModule,entryPoint:"fragmentMain",targets:[{format:this.format,blend:{color:{srcFactor:"src-alpha",dstFactor:"one-minus-src-alpha",operation:"add"},alpha:{srcFactor:"one",dstFactor:"one-minus-src-alpha",operation:"add"}}}]},primitive:{topology:"triangle-list"}});
+    const upscaleModule=device.createShaderModule({label:"Presentation upscale shader",code:upscaleShader});
+    this.upscalePipeline=device.createRenderPipeline({label:"Presentation upscale",layout:"auto",vertex:{module:upscaleModule,entryPoint:"vertexMain"},fragment:{module:upscaleModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
+    this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
     this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.particleBuffer=device.createBuffer({label:"Fluid particles",size:this.particleCapacity*16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
@@ -490,11 +576,37 @@ export class FluidLabRenderer {
       this.canvas.width = width;
       this.canvas.height = height;
     }
+    if (!this.device || !this.format || !this.upscalePipeline || !this.upscaleSampler) return;
+    const renderWidth = Math.max(1, Math.floor(width * this.renderScale));
+    const renderHeight = Math.max(1, Math.floor(height * this.renderScale));
+    const key = `${renderWidth}x${renderHeight}`;
+    if (key === this.presentationTextureKey) return;
+    this.presentationTexture?.destroy();
+    this.presentationTexture = this.device.createTexture({label:"Raymarch presentation target",size:[renderWidth,renderHeight],format:this.format,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+    this.upscaleBindGroup=this.device.createBindGroup({layout:this.upscalePipeline.getBindGroupLayout(0),entries:[{binding:0,resource:this.presentationTexture.createView()},{binding:1,resource:this.upscaleSampler}]});
+    this.presentationTextureKey=key;
+  }
+
+  get presentationResolution(): string {
+    if (!this.presentationTexture) return `${this.canvas.width} × ${this.canvas.height}`;
+    return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.renderScale * 100)}%)`;
+  }
+
+  private updateRenderScale(now: number) {
+    if (this.gpuRender_ms === undefined || now - this.lastRenderScaleUpdateAt < 1500) return;
+    let next = this.renderScale;
+    if (this.gpuRender_ms > 8.0) next = Math.max(0.5, this.renderScale - 0.1);
+    else if (this.gpuRender_ms < 4.0) next = Math.min(1, this.renderScale + 0.1);
+    if (Math.abs(next - this.renderScale) < 0.001) return;
+    this.renderScale = Math.round(next * 10) / 10;
+    this.lastRenderScaleUpdateAt = now;
   }
 
   draw(time_s: number, scene: SceneDescription, camera: CameraState, mode: SolverMode, view: ViewMode, bodies: RigidBodyState[], selectedBodyId?: string, fluid?: EulerianRenderState, backend: SimulationBackend = "webgpu", quality: GPUQuality = "balanced", particles?: ParticleRenderState): RendererFrameMetrics {
     if (!this.device || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
+    this.updateRenderScale(performance.now());
     this.resize();
+    if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     const start = performance.now();
     const position = cameraPosition(camera);
     const modeValue = mode === "eulerian" ? 0 : mode === "particle" ? 1 : 2;
@@ -503,7 +615,7 @@ export class FluidLabRenderer {
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const uniform = new Float32Array([
-      this.canvas.width, this.canvas.height, time_s, modeValue,
+      this.presentationTexture.width, this.presentationTexture.height, time_s, modeValue,
       position.x, position.y, position.z, 0,
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
@@ -530,14 +642,16 @@ export class FluidLabRenderer {
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     const sampleRenderGPU=Boolean(this.renderQuerySet&&this.renderQueryResolve&&!this.renderReadbackPending&&renderStart-this.lastRenderQueryAt>=250);
     const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: this.context.getCurrentTexture().createView(), clearValue: { r: 0.01, g: 0.025, b: 0.024, a: 1 }, loadOp: "clear", storeOp: "store" }],
-      ...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1}}:{})
+      colorAttachments: [{ view: this.presentationTexture.createView(), clearValue: { r: 0.01, g: 0.025, b: 0.024, a: 1 }, loadOp: "clear", storeOp: "store" }],
+      ...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:0}}:{})
     });
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.draw(3);
     if((mode==="particle"||mode==="compare")&&particles&&this.particlePipeline&&this.particleBindGroup){pass.setPipeline(this.particlePipeline);pass.setBindGroup(0,this.particleBindGroup);pass.draw(6,Math.min(particles.count,this.particleCapacity));}
     pass.end();
+    const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}],...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,endOfPassWriteIndex:1}}:{})});
+    upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();
     let renderReadback:GPUBuffer|undefined;if(sampleRenderGPU&&this.renderQuerySet&&this.renderQueryResolve){this.lastRenderQueryAt=renderStart;this.renderReadbackPending=true;encoder.resolveQuerySet(this.renderQuerySet,0,2,this.renderQueryResolve,0);renderReadback=this.device.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.renderQueryResolve,0,renderReadback,0,16);}
     this.device.queue.submit([encoder.finish()]);
     if(renderReadback){const readback=renderReadback;void readback.mapAsync(GPUMapMode.READ).then(()=>{const times=new BigUint64Array(readback.getMappedRange());this.gpuRender_ms=Number(times[1]-times[0])/1e6;readback.unmap();readback.destroy();}).catch(()=>readback.destroy()).finally(()=>{this.renderReadbackPending=false;});}

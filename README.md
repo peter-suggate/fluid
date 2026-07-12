@@ -11,9 +11,11 @@ PBF particle CPU oracle with exact hashed-neighbour regression, deterministic
 buoyancy/drag quadrature with paired fluid reaction impulses, and a high-
 resolution WebGPU Eulerian path. WebGPU quality presets allocate approximately
 110k, 500k, or 1.2m cells and render the evolving volume fraction directly.
-The presentation renderer reconstructs a trilinear implicit surface with
-subcell root refinement, gradient normals, front/back thickness, Fresnel
-reflection, and Beer–Lambert absorption.
+The presentation renderer traverses the VOF grid cell-by-cell, reconstructs
+interface cells from eight cached samples, and uses subcell Newton refinement
+with analytic trilinear normals, front/back thickness, Fresnel reflection, and
+Beer–Lambert absorption. Adaptive presentation resolution holds the raymarch
+within its GPU budget while preserving full canvas resolution for the UI.
 The live performance drawer separates hardware-timestamped GPU advection,
 pressure, projection, immersed-body coupling, reductions, queue/copy overhead,
 and raymarch rendering from wall-clock CPU simulation, upload, encoding, and
