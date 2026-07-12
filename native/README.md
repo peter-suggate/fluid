@@ -46,18 +46,23 @@ shared JSON scene + physics contract
                   compute raymarch -> CAMetalDrawable
 ```
 
-The Metal backend uses linear private buffers for the solver, cached limiter
-and curvature auxiliaries, three in-flight frame contexts, compact asynchronous
-diagnostics, and shared body impulse buffers. A frame uses one command buffer
+The Metal backend uses linear private buffers for the solver, cached limiter,
+curvature, and analytic cut-cell auxiliaries, serialized GPU simulation frames,
+compact asynchronous diagnostics, and shared body impulse buffers. A frame uses one command buffer
 and no full simulation-state readback. The drawable is written by compute, so
 there is no intermediate render target or fullscreen copy. MSL fast math is
 enabled for the interactive `f32` path.
 
 Physics includes midpoint RK2 transport, conservative donor/receiver VOF
 limiting, molecular and Smagorinsky viscosity, balanced-force surface tension,
-ghost-fluid pressure coefficients, weighted Jacobi projection, CFL/capillary
-step limiting, and immersed moving solids with paired linear/angular impulses.
-Rigid bodies use native quaternion integration and container contacts.
+ghost-fluid pressure coefficients, weighted cut-cell Jacobi projection,
+CFL/capillary step limiting, exact plane/cube and plane/face fractions for
+moving sphere/box/capsule/cylinder SDFs, aperture-aware VOF transport, and a
+bounded conservative cover/uncover remap. Pressure traction and torque use the
+same embedded geometry as projection and feed an entirely GPU-resident rigid
+integrator. Grabbed bodies become kinematic moving boundaries during mouse
+gestures, retaining swept velocity so they displace liquid rather than passing
+through it silently. Rigid bodies use quaternion integration and container contacts.
 
 Presentation includes the glass tank, floor grid, front/back water thickness,
 analytic normals, Fresnel reflection, Beer–Lambert absorption, scattering,
@@ -80,10 +85,10 @@ npm run native:smoke
 
 `native:test` checks the shared scene/schema and M1 Max preset contract without
 requiring an external test framework. `native:smoke` creates the Metal device,
-compiles all MSL, creates every pipeline, runs three headless Eulerian steps
-including rigid coupling and diagnostics, and gates finite state plus volume
-drift below one percent. The interactive launch additionally validates drawable
-presentation.
+compiles every runtime MSL pipeline, advances submerged light and dense bodies,
+and rejects non-finite state, excessive speed, volume drift, or inverted
+buoyancy response.
+The interactive launch additionally validates drawable presentation.
 
 The product is intentionally Eulerian-only. The CPU Eulerian oracle remains in
 the browser test suite; no particle fluid code is compiled or exposed by either

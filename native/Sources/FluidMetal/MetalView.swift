@@ -50,6 +50,6 @@ final class FluidMetalView: MTKView, MTKViewDelegate {
         }
         lastPoint = point
     }
-    override func mouseUp(with event: NSEvent) { lastPoint = nil; draggingBody = false }
+    override func mouseUp(with event: NSEvent) { if draggingBody { solver?.endBodyDrag() }; lastPoint = nil; draggingBody = false }
     override func scrollWheel(with event: NSEvent) { solver?.zoom(delta: Float(event.scrollingDeltaY)) }
 }
