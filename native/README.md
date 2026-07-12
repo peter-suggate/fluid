@@ -20,8 +20,8 @@ open "native/.build/Fluid Lab Metal.app"
 ```
 
 The app defaults to the `Ultra` preset (about 1.2 million cells on the standard
-scene); the 2-million-cell `M1 Max` tier remains available. Drag to orbit,
-Option-drag the selected rigid body, scroll to zoom, and use File > Open Scene
+scene); the 2-million-cell `M1 Max` tier remains available. Drag empty space to
+orbit, directly drag a rigid body to select and move it, scroll to zoom, and use File > Open Scene
 to load any version 1.0.0 browser scene JSON.
 
 The scrollable inspector exposes container dimensions, fill, gravity,

@@ -85,6 +85,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     format: "GPU frame  %.2f ms\nCPU frame  %.2f ms\nSimulation  %.3f s\nSimulation rate  %.2f×\nVolume drift  %.3f%%\nMax speed  %.2f m/s\n\n%@",
                     value.renderMS, value.frameMS, value.simulationTime, value.simulatedPerWallSecond, value.volumeDrift * 100, value.maxSpeed, grid.label
                 )
+                if let solver = self?.metalView.solver, self?.bodyPopup.indexOfSelectedItem != solver.selectedBodyIndex {
+                    self?.bodyPopup.selectItem(at: solver.selectedBodyIndex)
+                    self?.updateBodyFields()
+                }
             }
         }
         window.makeKeyAndOrderFront(nil)
