@@ -59,9 +59,9 @@ test("S2-06 invalid physical fields are rejected without changing thresholds", (
 });
 
 test("S2-10 exported run manifest carries reproducibility identity", () => {
-  const manifest = createRunManifest(defaultScene, "compare", "test-adapter");
+  const manifest = createRunManifest(defaultScene, "test-adapter");
   assert.equal(manifest.runSchemaVersion, "1.0.0");
-  assert.equal(manifest.solverMode, "compare");
+  assert.equal(manifest.solverMode, "eulerian");
   assert.deepEqual(manifest.precision, { cpu: "binary64", gpu: "f32" });
   assert.equal(manifest.webgpuAdapter, "test-adapter");
   assert.equal(manifest.scene.randomSeed, defaultScene.randomSeed);

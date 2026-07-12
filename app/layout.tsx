@@ -8,11 +8,11 @@ export async function generateMetadata(): Promise<Metadata> {
   const protocol = incoming.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const image = `${protocol}://${host}/og.png`;
   const title = "Fluid Lab — WebGPU CFD Workbench";
-  const description = "A validation-first interactive laboratory for comparing Eulerian and particle water solvers.";
+  const description = "A validation-first interactive Eulerian free-surface fluid laboratory powered by WebGPU.";
   return {
     title,
     description,
-    openGraph: { title, description, type: "website", images: [{ url: image, width: 1536, height: 1024, alt: "Fluid Lab Eulerian and particle water solver comparison" }] },
+    openGraph: { title, description, type: "website", images: [{ url: image, width: 1536, height: 1024, alt: "Fluid Lab Eulerian free-surface simulation" }] },
     twitter: { card: "summary_large_image", title, description, images: [image] }
   };
 }

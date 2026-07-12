@@ -3,7 +3,7 @@ import test from "node:test";
 import { applyFluidReactions, computeFluidLoads, type CouplingFluid } from "../lib/fluid-rigid-coupling";
 import { cloneScene, defaultScene, type Vec3 } from "../lib/model";
 import { advanceRigidBodies, initializeRigidBody, primitiveVolume } from "../lib/rigid-body";
-import { ParticleFluidSolver } from "../lib/particle-solver";
+import { EulerianFluidSolver } from "../lib/eulerian-solver";
 
 const zero = (): Vec3 => ({ x: 0, y: 0, z: 0 });
 
@@ -37,9 +37,9 @@ test("C6-03 half-wet axis-aligned box displaces half its volume", () => {
   assert.ok(Math.abs(fraction - 0.5) < 0.05, String(fraction));
 });
 
-test("C7-01 paired particle/body impulses conserve closed-system momentum", () => {
+test("C7-01 paired Eulerian/body impulses conserve closed-system momentum", () => {
   const scene = cloneScene(defaultScene); scene.fluid.initialCondition = "tank-fill"; scene.container.fillFraction = 0.8; scene.fluid.gravity_m_s2 = zero();
-  const fluid = new ParticleFluidSolver(scene, 600), description = { ...scene.rigidBodies[0], position_m: { x: 0, y: 0.25, z: 0 }, linearVelocity_m_s: { x: 0.8, y: 0, z: 0 }, angularVelocity_rad_s: zero() };
+  const fluid = new EulerianFluidSolver(scene), description = { ...scene.rigidBodies[0], position_m: { x: 0, y: 0.25, z: 0 }, linearVelocity_m_s: { x: 0.8, y: 0, z: 0 }, angularVelocity_rad_s: zero() };
   const body = initializeRigidBody(description), { loads } = computeFluidLoads(scene, fluid, [body], 7);
   const coupling = applyFluidReactions(fluid, [body], loads, 0.002);
   assert.ok(coupling.coupledBodyCount === 1);

@@ -36,14 +36,7 @@ mode and preserved-but-ignored only by an explicit migration tool.
       "pressureRelativeTolerance": 1e-8,
       "pressureMaxIterations": 1000,
       "advection": "semi-lagrangian-rk2",
-      "interface": "particle-level-set"
-    },
-    "dfsph": {
-      "particleSpacing_m": 0.025,
-      "kernelSupportToSpacing": 2.0,
-      "densityRelativeTolerance": 0.001,
-      "divergenceRelativeTolerance": 0.001,
-      "maxIterations": 100
+      "interface": "volume-of-fluid"
     }
   }
 }
@@ -56,8 +49,8 @@ friction. If mass is authoritative, density is derived from analytic primitive
 volume; inconsistent redundant fields are rejected.
 
 Solver-specific numerical settings cannot override container, gravity, fluid
-properties, bodies, duration, seed, or initial fluid regions. A comparison run
-records the exact scene content hash before either solver initializes.
+properties, bodies, duration, seed, or initial fluid regions. Every run records
+the exact scene content hash before the solver initializes.
 
 ## Run record
 

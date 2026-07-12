@@ -1,9 +1,8 @@
 import { cameraPosition } from "./math";
-import type { CameraState, SceneDescription, SolverMode, ViewMode } from "./model";
+import type { CameraState, SceneDescription, ViewMode } from "./model";
 import type { RigidBodyState } from "./rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
 import { WebGPUEulerianSolver, type GPUEulerianInfo, type GPURigidLoad, type GPUQuality } from "./webgpu-eulerian";
-import type { ParticleRenderState } from "./particle-solver";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 
@@ -66,11 +65,6 @@ fn boxIntersection(ro: vec3f, rd: vec3f, boundsMin: vec3f, boundsMax: vec3f) -> 
   let near3 = min(t0, t1);
   let far3 = max(t0, t1);
   return vec2f(max(max(near3.x, near3.y), near3.z), min(min(far3.x, far3.y), far3.z));
-}
-
-fn hash21(p: vec2f) -> f32 {
-  let q = fract(p * vec2f(123.34, 456.21));
-  return fract((q.x + 45.32) * (q.y + 45.32));
 }
 
 fn gridLine(value: vec2f, scale: f32) -> f32 {
@@ -285,7 +279,6 @@ fn fluidRayHit(ro: vec3f, rd: vec3f, nearT: f32, farT: f32, boundsMin: vec3f, si
 fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let resolution = max(u.viewport.xy, vec2f(1.0));
   let time = u.viewport.z;
-  let mode = i32(round(u.viewport.w));
   let scientific = u.options.x > 0.5;
   let ndc = input.uv * 2.0 - 1.0;
   let aspect = resolution.x / resolution.y;
@@ -330,16 +323,11 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
     waterT = (waterBase + secondWave - ro.y) / rd.y;
     waterPoint = ro + rd * waterT;
     var solverHit = FluidHit(waterT, hit.y, vec3f(0.0, 1.0, 0.0));
-    let shouldMarch = u.gridInfo.w > 0.5 && mode != 1 && (mode != 2 || input.uv.x < 0.5);
+    let shouldMarch = u.gridInfo.w > 0.5;
     if (shouldMarch) {
       solverHit = fluidRayHit(ro, rd, nearT, hit.y, boundsMin, size);
       waterT = solverHit.entry;
       waterPoint = ro + rd * waterT;
-    }
-
-    var localMode = mode;
-    if (mode == 2) {
-      localMode = select(1, 0, input.uv.x < 0.5);
     }
 
     var insideWater = waterT >= nearT && waterT <= hit.y
@@ -360,17 +348,9 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
       waterColor+=vec3f(0.025,0.12,0.105)*(1.0-exp(-thickness*7.0));
       waterColor += vec3f(0.16, 0.72, 0.64) * pow(max(dot(reflect(rd, normal), normalize(vec3f(-0.5, 0.8, 0.25))), 0.0), 64.0);
 
-      if (scientific && localMode == 0) {
+      if (scientific) {
         let grid = gridLine(waterPoint.xz, max(u.options.y, 0.01));
         waterColor = mix(waterColor, vec3f(0.42, 0.96, 0.82), grid * 0.58);
-      }
-      if (localMode == 1) {
-        let particleUV = waterPoint.xz / max(u.options.y, 0.01);
-        let cell = floor(particleUV);
-        let local = fract(particleUV) - 0.5;
-        let jitter = vec2f(hash21(cell), hash21(cell + 19.7)) - 0.5;
-        let particle = 1.0 - smoothstep(0.11, 0.22, length(local - jitter * 0.38));
-        waterColor = mix(waterColor * 0.58, vec3f(0.42, 0.98, 0.86), particle * 0.92);
       }
       color = mix(color, waterColor, 0.82 + depth * 0.1);
     }
@@ -397,11 +377,6 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
     color = rigidColor;
   }
 
-  if (mode == 2) {
-    let divider = 1.0 - smoothstep(0.0, 1.8 / resolution.x, abs(input.uv.x - 0.5));
-    color = mix(color, vec3f(0.45, 0.96, 0.84), divider * 0.55);
-  }
-
   let vignette = 1.0 - 0.22 * dot(ndc * 0.58, ndc * 0.58);
   color *= vignette;
   color = color / (color + vec3f(1.0));
@@ -409,22 +384,6 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   return vec4f(color, 1.0);
 }
 `;
-
-const particleShader = /* wgsl */ `
-struct Uniforms { viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f }
-@group(0) @binding(0) var<uniform> u:Uniforms;
-@group(0) @binding(1) var<storage,read> particles:array<vec4f>;
-struct Out{@builtin(position) position:vec4f,@location(0) local:vec2f,@location(1) density:f32,@location(2) clipX:f32}
-@vertex fn vertexMain(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->Out{
-  var corners=array<vec2f,6>(vec2f(-1.0,-1.0),vec2f(1.0,-1.0),vec2f(-1.0,1.0),vec2f(-1.0,1.0),vec2f(1.0,-1.0),vec2f(1.0,1.0));
-  let p=particles[instance];let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));let up=normalize(cross(right,forward));let rel=p.xyz-u.cameraPosition.xyz;let depth=max(dot(rel,forward),0.001);let aspect=u.viewport.x/u.viewport.y;
-  let centre=vec2f(dot(rel,right)/(depth*0.72*aspect),dot(rel,up)/(depth*0.72));let radius=max(u.options.w/depth,0.0025);let clip=centre+corners[vertex]*radius*vec2f(1.0/aspect,1.0);
-  var out:Out;out.position=vec4f(clip,0.1,1.0);out.local=corners[vertex];out.density=p.w;out.clipX=clip.x;return out;
-}
-@fragment fn fragmentMain(input:Out)->@location(0) vec4f{
-  if(length(input.local)>1.0){discard;} let mode=i32(round(u.viewport.w));if(mode==2&&input.clipX<0.0){discard;}
-  let error=clamp(abs(input.density-1.0)*2.0,0.0,1.0);let color=mix(vec3f(0.27,0.94,0.82),vec3f(0.98,0.46,0.31),error);let edge=1.0-smoothstep(0.72,1.0,length(input.local));return vec4f(color,0.28+0.62*edge);
-}`;
 
 const upscaleShader = /* wgsl */ `
 @group(0) @binding(0) var source: texture_2d<f32>;
@@ -441,7 +400,6 @@ export class FluidLabRenderer {
   private device?: GPUDevice;
   private context?: GPUCanvasContext;
   private pipeline?: GPURenderPipeline;
-  private particlePipeline?: GPURenderPipeline;
   private upscalePipeline?: GPURenderPipeline;
   private upscaleSampler?: GPUSampler;
   private upscaleBindGroup?: GPUBindGroup;
@@ -450,9 +408,6 @@ export class FluidLabRenderer {
   private readonly renderScale = 1;
   private uniformBuffer?: GPUBuffer;
   private bodyBuffer?: GPUBuffer;
-  private particleBuffer?: GPUBuffer;
-  private particleBindGroup?: GPUBindGroup;
-  private particleCapacity = 20_000;
   private fluidTexture?: GPUTexture;
   private fluidTextureKey = "";
   private fluidRevision = -1;
@@ -507,15 +462,11 @@ export class FluidLabRenderer {
       fragment: { module: shaderModule, entryPoint: "fragmentMain", targets: [{ format: this.format }] },
       primitive: { topology: "triangle-list" }
     });
-    const particleModule=device.createShaderModule({label:"Particle debug shader",code:particleShader});
-    this.particlePipeline=device.createRenderPipeline({label:"Fluid particles",layout:"auto",vertex:{module:particleModule,entryPoint:"vertexMain"},fragment:{module:particleModule,entryPoint:"fragmentMain",targets:[{format:this.format,blend:{color:{srcFactor:"src-alpha",dstFactor:"one-minus-src-alpha",operation:"add"},alpha:{srcFactor:"one",dstFactor:"one-minus-src-alpha",operation:"add"}}}]},primitive:{topology:"triangle-list"}});
     const upscaleModule=device.createShaderModule({label:"Presentation upscale shader",code:upscaleShader});
     this.upscalePipeline=device.createRenderPipeline({label:"Presentation upscale",layout:"auto",vertex:{module:upscaleModule,entryPoint:"vertexMain"},fragment:{module:upscaleModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
     this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.particleBuffer=device.createBuffer({label:"Fluid particles",size:this.particleCapacity*16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-    this.particleBindGroup=device.createBindGroup({layout:this.particlePipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:{buffer:this.particleBuffer}}]});
     this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.rebuildBindGroup();
 
@@ -592,23 +543,22 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.renderScale * 100)}%)`;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, mode: SolverMode, view: ViewMode, bodies: RigidBodyState[], selectedBodyId?: string, fluid?: EulerianRenderState, backend: SimulationBackend = "webgpu", quality: GPUQuality = "balanced", particles?: ParticleRenderState): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, view: ViewMode, bodies: RigidBodyState[], selectedBodyId?: string, fluid?: EulerianRenderState, backend: SimulationBackend = "webgpu", quality: GPUQuality = "balanced"): RendererFrameMetrics {
     if (!this.device || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     this.resize();
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     const start = performance.now();
     const position = cameraPosition(camera);
-    const modeValue = mode === "eulerian" ? 0 : mode === "particle" ? 1 : 2;
     const physicsStart=performance.now();
     const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, quality, time_s, bodies) : undefined;
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const uniform = new Float32Array([
-      this.presentationTexture.width, this.presentationTexture.height, time_s, modeValue,
+      this.presentationTexture.width, this.presentationTexture.height, time_s, 0,
       position.x, position.y, position.z, 0,
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
-      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), particles?.radius_m ?? 0.01,
+      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), 0,
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo || fluid ? 1 : 0
     ]);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
@@ -626,7 +576,6 @@ export class FluidLabRenderer {
       bodyData.set([color[0], color[1], color[2], body.description.id === selectedBodyId ? 1 : 0], offset + 12);
     });
     this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
-    if(particles&&this.particleBuffer){const count=Math.min(particles.count,this.particleCapacity),data=new Float32Array(count*4);for(let i=0;i<count;i+=1)data.set([particles.positions[3*i],particles.positions[3*i+1],particles.positions[3*i+2],particles.densityRatio[i]],4*i);this.device.queue.writeBuffer(this.particleBuffer,0,data);}
     const cpuDataUpload_ms=performance.now()-uploadStart,renderStart=performance.now();
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     const sampleRenderGPU=Boolean(this.renderQuerySet&&this.renderQueryResolve&&!this.renderReadbackPending&&renderStart-this.lastRenderQueryAt>=250);
@@ -637,7 +586,6 @@ export class FluidLabRenderer {
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.draw(3);
-    if((mode==="particle"||mode==="compare")&&particles&&this.particlePipeline&&this.particleBindGroup){pass.setPipeline(this.particlePipeline);pass.setBindGroup(0,this.particleBindGroup);pass.draw(6,Math.min(particles.count,this.particleCapacity));}
     pass.end();
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}],...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,endOfPassWriteIndex:1}}:{})});
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();

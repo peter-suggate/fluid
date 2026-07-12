@@ -11,8 +11,6 @@
     "gpuPressureRelativeResidual": {"operator": "le", "threshold": 1e-5},
     "cpuProjectionDivergenceReductionFactor": {"operator": "le", "threshold": 1e-6},
     "gpuProjectionDivergenceReductionFactor": {"operator": "le", "threshold": 1e-4},
-    "particleMeanDensityRelativeError": {"operator": "lt", "threshold": 0.02},
-    "particleInteriorMaxDensityRelativeError": {"operator": "lt", "threshold": 0.05},
     "staticFluidVolumeRelativeDrift": {"operator": "lt", "threshold": 0.01},
     "hydrostaticPressureL2RelativeError": {"operator": "lt", "threshold": 0.05},
     "rigidFreeFallRelativeError": {"operator": "lt", "threshold": 0.01},
@@ -22,9 +20,6 @@
     "rigidClosedMomentumRelativeDrift": {"operator": "lt", "threshold": 1e-12},
     "floatingSubmergedFractionRelativeError": {"operator": "lt", "threshold": 0.05},
     "cpuClosedMomentumRelativeDrift": {"operator": "lt", "threshold": 0.001},
-    "optimizedNeighbourMissingCount": {"operator": "eq", "threshold": 0},
-    "optimizedNeighbourExtraCount": {"operator": "eq", "threshold": 0},
-    "optimizedNeighbourDuplicateCount": {"operator": "eq", "threshold": 0},
     "sameBuildDeterministicCpuReplayByteDifferences": {"operator": "eq", "threshold": 0}
   },
   "policy": {

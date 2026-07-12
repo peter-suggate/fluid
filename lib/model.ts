@@ -1,4 +1,5 @@
-export type SolverMode = "eulerian" | "particle" | "compare";
+import sharedDefaultScene from "../native/Sources/FluidMetal/Resources/default-scene.json";
+
 export type ViewMode = "scientific" | "presentation";
 export type RunState = "paused" | "running";
 
@@ -59,7 +60,6 @@ export interface SceneDescription {
     maxDt_s: number;
     pressureRelativeTolerance: number;
     pressureMaxIterations: number;
-    particleSpacing_m: number;
   };
   rigidBodies: RigidBodyDescription[];
 }
@@ -81,63 +81,7 @@ export interface MetricSample {
 
 export const BUILD_ID = "web-stage10.5-1.0.5";
 
-export const defaultScene: SceneDescription = {
-  schemaVersion: "1.0.0",
-  sceneId: "interactive-water-box",
-  randomSeed: 20260712,
-  duration_s: 20,
-  container: {
-    width_m: 1.2,
-    height_m: 0.9,
-    depth_m: 0.8,
-    fillFraction: 0.22,
-    top: "open",
-    fluidWallMode: "no-slip"
-  },
-  fluid: {
-    density_kg_m3: 998.2,
-    dynamicViscosity_Pa_s: 0.001002,
-    surfaceTension_N_m: 0.072,
-    gravity_m_s2: { x: 0, y: -9.80665, z: 0 },
-    initialCondition: "dam-break"
-  },
-  nominalResolution: { length_m: 0.025 },
-  numerics: {
-    fixedDt_s: 0.004,
-    maxDt_s: 0.008,
-    pressureRelativeTolerance: 1e-8,
-    pressureMaxIterations: 1000,
-    particleSpacing_m: 0.025
-  },
-  rigidBodies: [
-    {
-      id: "body-sphere-1",
-      name: "Cork sphere",
-      shape: "sphere",
-      dimensions_m: { x: 0.09, y: 0.09, z: 0.09 },
-      density_kg_m3: 240,
-      position_m: { x: -0.16, y: 1.18, z: 0 },
-      orientation: { w: 1, x: 0, y: 0, z: 0 },
-      linearVelocity_m_s: { x: 0.18, y: 0, z: 0 },
-      angularVelocity_rad_s: { x: 0, y: 0, z: 2.2 },
-      restitution: 0.42,
-      friction: 0.38
-    },
-    {
-      id: "body-box-1",
-      name: "Dense box",
-      shape: "box",
-      dimensions_m: { x: 0.17, y: 0.13, z: 0.14 },
-      density_kg_m3: 1450,
-      position_m: { x: 0.17, y: 1.34, z: 0.02 },
-      orientation: { w: 0.965925826, x: 0, y: 0, z: 0.258819045 },
-      linearVelocity_m_s: { x: -0.1, y: -0.1, z: 0 },
-      angularVelocity_rad_s: { x: 1.2, y: 0.4, z: -0.7 },
-      restitution: 0.24,
-      friction: 0.55
-    }
-  ]
-};
+export const defaultScene: SceneDescription = sharedDefaultScene as SceneDescription;
 
 export const defaultCamera: CameraState = {
   azimuth_rad: 0.72,
@@ -209,12 +153,12 @@ export function validateScene(scene: SceneDescription): string[] {
   return errors;
 }
 
-export function createRunManifest(scene: SceneDescription, mode: SolverMode, adapter: string) {
+export function createRunManifest(scene: SceneDescription, adapter: string) {
   return {
     runSchemaVersion: "1.0.0",
     buildId: BUILD_ID,
     createdAt: new Date().toISOString(),
-    solverMode: mode,
+    solverMode: "eulerian",
     precision: { cpu: "binary64", gpu: "f32" },
     browser: typeof navigator === "undefined" ? "node" : navigator.userAgent,
     webgpuAdapter: adapter,
