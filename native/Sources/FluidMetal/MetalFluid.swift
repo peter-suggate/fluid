@@ -41,22 +41,24 @@ final class MetalFluidSolver: @unchecked Sendable {
     private let velocityA, velocityB: MTLBuffer
     private let pressureA, pressureB: MTLBuffer
     private let volumeA, volumeB: MTLBuffer
-    private let auxiliary: MTLBuffer
+    private let auxiliary, remapScale: MTLBuffer
+    private let solidCell, solidFace: MTLBuffer
     private let params: MTLBuffer
-    private let buildAuxiliary, advect, jacobi, project, couple, reduce, render: MTLComputePipelineState
+    private let buildSolid, prepareRemap, limitRemap, applyRemap, buildAuxiliary, advect, jacobi, project, pressureTraction, integrateBodies, reduce, render: MTLComputePipelineState
     private let bodyBuffers: [MTLBuffer]
     private let exchangeBuffers: [MTLBuffer]
     private let reductionBuffers: [MTLBuffer]
-    private let inFlight = DispatchSemaphore(value: 3)
+    private let inFlight = DispatchSemaphore(value: 1)
     private let stateLock = NSLock()
     private var frameIndex = 0
     private var accumulator: Double = 0
     private var lastWallTime = CACurrentMediaTime()
     private var initialVolumeSum: Float = 1
-    private var pendingImpulses: [(SIMD3<Float>, SIMD3<Float>, Float)] = []
     private(set) var bodies: [RigidBodyState]
     private(set) var metrics = FluidMetrics()
     private var lastFrame = CACurrentMediaTime()
+    private var activelyDraggedBody: Int?
+    private var lastDragTime = CACurrentMediaTime()
     private var azimuth: Float = 0.72
     private var elevation: Float = 0.42
     private var distance: Float = 2.65
@@ -93,6 +95,9 @@ final class MetalFluidSolver: @unchecked Sendable {
         volumeA = try buffer(grid.count * MemoryLayout<Float>.stride, "volume A")
         volumeB = try buffer(grid.count * MemoryLayout<Float>.stride, "volume B")
         auxiliary = try buffer(grid.count * MemoryLayout<SIMD4<Float>>.stride, "VOF limiter and curvature")
+        remapScale = try buffer(grid.count * MemoryLayout<Float>.stride, "cut-cell remap receiver scale")
+        solidCell = try buffer(grid.count * MemoryLayout<SIMD4<Float>>.stride, "cut-cell open volume and owner")
+        solidFace = try buffer(grid.count * MemoryLayout<SIMD4<Float>>.stride, "cut-cell open face apertures")
         guard let params = device.makeBuffer(length: MemoryLayout<SolverParams>.stride, options: .storageModeShared) else { throw MetalError.resource("parameters") }
         self.params = params
         func sharedBuffer(_ bytes: Int, _ label: String) throws -> MTLBuffer {
@@ -114,11 +119,16 @@ final class MetalFluidSolver: @unchecked Sendable {
             guard let function = library.makeFunction(name: name) else { throw MetalError.shader("kernel \(name) missing") }
             return try device.makeComputePipelineState(function: function)
         }
+        buildSolid = try pipeline("buildSolidGeometry")
+        prepareRemap = try pipeline("prepareSolidRemap")
+        limitRemap = try pipeline("limitSolidRemap")
+        applyRemap = try pipeline("applySolidRemap")
         buildAuxiliary = try pipeline("buildAuxiliary")
         advect = try pipeline("advect")
         jacobi = try pipeline("jacobi")
         project = try pipeline("projectAndCommit")
-        couple = try pipeline("coupleRigid")
+        pressureTraction = try pipeline("accumulatePressureTraction")
+        integrateBodies = try pipeline("integrateRigidBodies")
         reduce = try pipeline("reduceDiagnostics")
         render = try pipeline("raymarch")
         try initializeVolume()
@@ -166,8 +176,15 @@ final class MetalFluidSolver: @unchecked Sendable {
         guard bodies.indices.contains(selectedBodyIndex) else { return }
         let right = SIMD3<Float>(cos(azimuth), 0, -sin(azimuth))
         let up = SIMD3<Float>(-sin(elevation)*sin(azimuth), cos(elevation), -sin(elevation)*cos(azimuth))
-        bodies[selectedBodyIndex].position += (right * dx + up * dy) * 0.0025
-        bodies[selectedBodyIndex].linearVelocity = .zero
+        let displacement = (right * dx + up * dy) * 0.0025
+        let now = CACurrentMediaTime(), dt = Float(max(1.0 / 240.0, min(now - lastDragTime, 1.0 / 20.0)))
+        lastDragTime = now
+        stateLock.lock()
+        bodies[selectedBodyIndex].position += displacement
+        let sweptVelocity = displacement / dt
+        let speed = simd_length(sweptVelocity)
+        bodies[selectedBodyIndex].linearVelocity = speed > 8 ? sweptVelocity * (8 / speed) : sweptVelocity
+        stateLock.unlock()
     }
     func pickBody(ndc: SIMD2<Float>, aspect: Float) -> Bool {
         let target = SIMD3<Float>(0, scene.container.height_m * 0.42, 0)
@@ -187,9 +204,10 @@ final class MetalFluidSolver: @unchecked Sendable {
             if distance > 0, distance < bestDistance { bestDistance = distance; bestIndex = index }
         }
         guard let bestIndex else { return false }
-        selectedBodyIndex = bestIndex
+        selectedBodyIndex = bestIndex; activelyDraggedBody = bestIndex; lastDragTime = CACurrentMediaTime()
         return true
     }
+    func endBodyDrag() { activelyDraggedBody = nil }
     func cameraPreset(_ name: String) {
         switch name {
         case "front": azimuth = 0; elevation = 0.08
@@ -240,10 +258,6 @@ final class MetalFluidSolver: @unchecked Sendable {
         let wallDelta = min(max(now - lastWallTime, 0), 0.05); lastWallTime = now
         if singleStepRequested { accumulator = max(accumulator, Double(scene.numerics.fixedDt_s)); singleStepRequested = false }
         else if isRunning { accumulator = min(accumulator + wallDelta, Double(scene.numerics.fixedDt_s) * 4) }
-        stateLock.lock(); let impulses = pendingImpulses; pendingImpulses.removeAll(keepingCapacity: true); stateLock.unlock()
-        for index in bodies.indices {
-            if impulses.indices.contains(index) { bodies[index].applyGPUImpulse(linear: impulses[index].0, angular: impulses[index].1, displaced: impulses[index].2) }
-        }
         let target = SIMD3<Float>(0, scene.container.height_m * 0.42, 0)
         let camera = target + SIMD3(cos(elevation) * sin(azimuth), sin(elevation), cos(elevation) * cos(azimuth)) * distance
         let minimumCell = min(grid.cellSize.x, grid.cellSize.y, grid.cellSize.z)
@@ -263,7 +277,14 @@ final class MetalFluidSolver: @unchecked Sendable {
         ), as: SolverParams.self)
         let bodyBuffer = bodyBuffers[frame], exchange = exchangeBuffers[frame], reductions = reductionBuffers[frame]
         let bodyPointer = bodyBuffer.contents().bindMemory(to: BodyGPU.self, capacity: 12)
-        for index in bodies.indices { bodyPointer[index] = bodies[index].gpuValue }
+        stateLock.lock()
+        let draggedBody = activelyDraggedBody
+        for index in bodies.indices {
+            var value = bodies[index].gpuValue
+            value.angularVelocity.w = index == draggedBody ? 1 : 0
+            bodyPointer[index] = value
+        }
+        stateLock.unlock()
         guard let command = queue.makeCommandBuffer() else { inFlight.signal(); return }
         command.label = "Fluid frame"
         if let blit = command.makeBlitCommandEncoder() {
@@ -275,15 +296,24 @@ final class MetalFluidSolver: @unchecked Sendable {
         var encodedSteps = 0
         if isRunning || accumulator >= Double(stepDt) {
             while accumulator >= Double(stepDt), encodedSteps < 1 {
-                encode3D(command, pipeline: buildAuxiliary, buffers: [velocityA, volumeA, auxiliary, params])
-                encode3D(command, pipeline: advect, buffers: [velocityA, velocityB, volumeA, volumeB, auxiliary, params])
+                encode3D(command, pipeline: buildSolid, buffers: [bodyBuffer, solidCell, solidFace, params])
+                // Two conservative cover/uncover sweeps move displaced liquid through
+                // neighboring open cells without atomics or volume loss.
+                encode3D(command, pipeline: prepareRemap, buffers: [volumeA, solidCell, auxiliary, params])
+                encode3D(command, pipeline: limitRemap, buffers: [auxiliary, remapScale, params])
+                encode3D(command, pipeline: applyRemap, buffers: [volumeA, volumeB, auxiliary, remapScale, params])
+                encode3D(command, pipeline: prepareRemap, buffers: [volumeB, solidCell, auxiliary, params])
+                encode3D(command, pipeline: limitRemap, buffers: [auxiliary, remapScale, params])
+                encode3D(command, pipeline: applyRemap, buffers: [volumeB, volumeA, auxiliary, remapScale, params])
+                encode3D(command, pipeline: buildAuxiliary, buffers: [velocityA, volumeA, auxiliary, solidCell, solidFace, params])
+                encode3D(command, pipeline: advect, buffers: [velocityA, velocityB, volumeA, volumeB, auxiliary, solidFace, params])
                 for iteration in 0..<quality.pressureIterations {
-                    encode3D(command, pipeline: jacobi, buffers: [velocityB, volumeB, iteration.isMultiple(of: 2) ? pressureA : pressureB, iteration.isMultiple(of: 2) ? pressureB : pressureA, params])
+                    encode3D(command, pipeline: jacobi, buffers: [velocityB, volumeB, iteration.isMultiple(of: 2) ? pressureA : pressureB, iteration.isMultiple(of: 2) ? pressureB : pressureA, solidCell, solidFace, bodyBuffer, params])
                 }
                 let finalPressure = quality.pressureIterations.isMultiple(of: 2) ? pressureA : pressureB
-                encode3D(command, pipeline: project, buffers: [velocityB, velocityA, finalPressure, volumeB, volumeA, params])
-                if !bodies.isEmpty { encode3D(command, pipeline: couple, buffers: [velocityA, volumeA, bodyBuffer, exchange, params]) }
-                for index in bodies.indices { bodies[index].step(dt: stepDt, scene: scene) }
+                encode3D(command, pipeline: project, buffers: [velocityB, velocityA, finalPressure, volumeB, volumeA, solidCell, solidFace, bodyBuffer, params])
+                if !bodies.isEmpty { encode3D(command, pipeline: pressureTraction, buffers: [finalPressure, volumeA, solidCell, solidFace, bodyBuffer, exchange, params]) }
+                if !bodies.isEmpty { encodeBodies(command, pipeline: integrateBodies, buffers: [bodyBuffer, exchange, params], count: bodies.count) }
                 metrics.simulationTime += stepDt
                 if metrics.simulationTime >= scene.duration_s { isRunning = false }
                 accumulator -= Double(stepDt); encodedSteps += 1
@@ -314,14 +344,14 @@ final class MetalFluidSolver: @unchecked Sendable {
             metrics.simulatedPerWallSecond = wallDelta > 0 ? Float(completedSteps) * stepDt / Float(wallDelta) : 0
             if bodyCount > 0 {
                 let words = exchange.contents().bindMemory(to: Int32.self, capacity: 12 * 8)
-                var next: [(SIMD3<Float>, SIMD3<Float>, Float)] = []
+                let gpuBodies = bodyBuffer.contents().bindMemory(to: BodyGPU.self, capacity: 12)
+                stateLock.lock()
                 for index in 0..<bodyCount {
                     let base = index * 8
-                    next.append((SIMD3(Float(words[base]),Float(words[base+1]),Float(words[base+2])) / 1e6,
-                                 SIMD3(Float(words[base+3]),Float(words[base+4]),Float(words[base+5])) / 1e6,
-                                 Float(words[base+6]) / 65536 * grid.cellSize.x * grid.cellSize.y * grid.cellSize.z))
+                    if index != activelyDraggedBody { bodies[index].synchronize(from: gpuBodies[index]) }
+                    bodies[index].displacedVolume = Float(words[base+6]) / 65536 * grid.cellSize.x * grid.cellSize.y * grid.cellSize.z
                 }
-                stateLock.lock(); pendingImpulses = next; stateLock.unlock()
+                stateLock.unlock()
             }
             inFlight.signal()
         }
@@ -340,6 +370,14 @@ final class MetalFluidSolver: @unchecked Sendable {
         encoder.endEncoding()
     }
 
+    private func encodeBodies(_ command: MTLCommandBuffer, pipeline: MTLComputePipelineState, buffers: [MTLBuffer], count: Int) {
+        guard let encoder = command.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(pipeline)
+        for (index, buffer) in buffers.enumerated() { encoder.setBuffer(buffer, offset: 0, index: index) }
+        encoder.dispatchThreads(MTLSize(width: count, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(max(1, count), pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
     func runHeadlessValidation(steps: Int = 3) throws -> (volumeDrift: Float, maxSpeed: Float) {
         let bodyBuffer = bodyBuffers[0], exchange = exchangeBuffers[0], reductions = reductionBuffers[0]
         let bodyPointer = bodyBuffer.contents().bindMemory(to: BodyGPU.self, capacity: 12)
@@ -355,16 +393,28 @@ final class MetalFluidSolver: @unchecked Sendable {
         for _ in 0..<max(1, steps) {
             guard let command = queue.makeCommandBuffer(), let blit = command.makeBlitCommandEncoder() else { throw MetalError.resource("validation command") }
             blit.fill(buffer: exchange, range: 0..<exchange.length, value: 0); blit.fill(buffer: reductions, range: 0..<reductions.length, value: 0); blit.endEncoding()
-            encode3D(command, pipeline: buildAuxiliary, buffers: [velocityA, volumeA, auxiliary, params])
-            encode3D(command, pipeline: advect, buffers: [velocityA, velocityB, volumeA, volumeB, auxiliary, params])
-            for iteration in 0..<quality.pressureIterations { encode3D(command, pipeline: jacobi, buffers: [velocityB, volumeB, iteration.isMultiple(of: 2) ? pressureA : pressureB, iteration.isMultiple(of: 2) ? pressureB : pressureA, params]) }
+            encode3D(command, pipeline: buildSolid, buffers: [bodyBuffer, solidCell, solidFace, params])
+            encode3D(command, pipeline: prepareRemap, buffers: [volumeA, solidCell, auxiliary, params])
+            encode3D(command, pipeline: limitRemap, buffers: [auxiliary, remapScale, params])
+            encode3D(command, pipeline: applyRemap, buffers: [volumeA, volumeB, auxiliary, remapScale, params])
+            encode3D(command, pipeline: prepareRemap, buffers: [volumeB, solidCell, auxiliary, params])
+            encode3D(command, pipeline: limitRemap, buffers: [auxiliary, remapScale, params])
+            encode3D(command, pipeline: applyRemap, buffers: [volumeB, volumeA, auxiliary, remapScale, params])
+            encode3D(command, pipeline: buildAuxiliary, buffers: [velocityA, volumeA, auxiliary, solidCell, solidFace, params])
+            encode3D(command, pipeline: advect, buffers: [velocityA, velocityB, volumeA, volumeB, auxiliary, solidFace, params])
+            for iteration in 0..<quality.pressureIterations { encode3D(command, pipeline: jacobi, buffers: [velocityB, volumeB, iteration.isMultiple(of: 2) ? pressureA : pressureB, iteration.isMultiple(of: 2) ? pressureB : pressureA, solidCell, solidFace, bodyBuffer, params]) }
             let finalPressure = quality.pressureIterations.isMultiple(of: 2) ? pressureA : pressureB
-            encode3D(command, pipeline: project, buffers: [velocityB, velocityA, finalPressure, volumeB, volumeA, params])
-            if !bodies.isEmpty { encode3D(command, pipeline: couple, buffers: [velocityA, volumeA, bodyBuffer, exchange, params]) }
+            encode3D(command, pipeline: project, buffers: [velocityB, velocityA, finalPressure, volumeB, volumeA, solidCell, solidFace, bodyBuffer, params])
+            if !bodies.isEmpty { encode3D(command, pipeline: pressureTraction, buffers: [finalPressure, volumeA, solidCell, solidFace, bodyBuffer, exchange, params]) }
+            if !bodies.isEmpty { encodeBodies(command, pipeline: integrateBodies, buffers: [bodyBuffer, exchange, params], count: bodies.count) }
             encode3D(command, pipeline: reduce, buffers: [velocityA, volumeA, reductions, params])
             command.commit(); command.waitUntilCompleted()
             if command.status == .error { throw command.error ?? MetalError.resource("validation GPU execution") }
         }
+        stateLock.lock()
+        let gpuBodies = bodyBuffer.contents().bindMemory(to: BodyGPU.self, capacity: 12)
+        for index in bodies.indices { bodies[index].synchronize(from: gpuBodies[index]) }
+        stateLock.unlock()
         let values = reductions.contents().bindMemory(to: UInt32.self, capacity: 4)
         let drift = (Float(values[0]) / 2048 - initialVolumeSum) / initialVolumeSum
         return (drift, Float(bitPattern: values[1]))

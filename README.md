@@ -81,5 +81,9 @@ an f32 cell-centred VOF field with packed staggered positive-face velocities,
 compatible divergence/gradient operators, a ghost-fluid atmospheric boundary,
 weighted Jacobi, and conservative upwind volume transport. The renderer reads
 the physical VOF field directly; no equilibrium blend, presentation smoothing,
-or global volume rescaling is applied. Resolved cut-cell traction and asynchronously reduced GPU pressure residuals
-remain research/optimization work and are not claimed as validated.
+or global volume rescaling is applied. The native Metal path additionally uses
+analytic moving cut-cell volume/face fractions, aperture-aware pressure and VOF
+fluxes, conservative cover/uncover remapping, and equal-and-opposite pressure
+traction integrated into GPU-resident rigid-body motion. The native smoke gate
+checks both liquid-volume drift and the buoyancy contrast between submerged
+light and dense bodies.

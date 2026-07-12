@@ -89,6 +89,8 @@ struct BodyGPU {
     var orientation: SIMD4<Float>
     var linearVelocity: SIMD4<Float>
     var angularVelocity: SIMD4<Float>
+    var inverseMassRestitutionFriction: SIMD4<Float>
+    var inverseInertia: SIMD4<Float>
 }
 
 extension RigidBodyState {
@@ -97,7 +99,15 @@ extension RigidBodyState {
         let q = orientation.vector
         return BodyGPU(
             positionShape: SIMD4(position, shape), dimensions: SIMD4(description.dimensions_m.simd, 0),
-            orientation: SIMD4(q.w, q.x, q.y, q.z), linearVelocity: SIMD4(linearVelocity, 0), angularVelocity: SIMD4(angularVelocity, 0)
+            orientation: SIMD4(q.w, q.x, q.y, q.z), linearVelocity: SIMD4(linearVelocity, 0), angularVelocity: SIMD4(angularVelocity, 0),
+            inverseMassRestitutionFriction: SIMD4(inverseMass, description.restitution, description.friction, mass), inverseInertia: SIMD4(inverseInertia, 0)
         )
+    }
+
+    mutating func synchronize(from value: BodyGPU) {
+        position = SIMD3(value.positionShape.x, value.positionShape.y, value.positionShape.z)
+        orientation = simd_normalize(simd_quatf(ix: value.orientation.y, iy: value.orientation.z, iz: value.orientation.w, r: value.orientation.x))
+        linearVelocity = SIMD3(value.linearVelocity.x, value.linearVelocity.y, value.linearVelocity.z)
+        angularVelocity = SIMD3(value.angularVelocity.x, value.angularVelocity.y, value.angularVelocity.z)
     }
 }

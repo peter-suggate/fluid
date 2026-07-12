@@ -280,10 +280,20 @@ enum Benchmark {
     static func run() {
         guard let device = MTLCreateSystemDefaultDevice() else { fputs("Metal unavailable\n", stderr); exit(1) }
         do {
-            let solver = try MetalFluidSolver(device: device, scene: .browserDefault, quality: .balanced)
-            let result = try solver.runHeadlessValidation()
-            guard result.volumeDrift.isFinite, result.maxSpeed.isFinite, abs(result.volumeDrift) < 0.01 else { throw MetalError.resource("numerical acceptance") }
-            print(String(format: "FluidMetal smoke PASS · %@ · %@ · drift %.4f%% · vmax %.3f m/s", device.name, solver.grid.label, result.volumeDrift * 100, result.maxSpeed))
+            var scene = SceneDescription.browserDefault
+            scene.container.fillFraction = 0.75
+            let surface = scene.container.height_m * scene.container.fillFraction
+            scene.rigidBodies[0].position_m = Vec3(x: -0.16, y: surface - 0.02, z: 0)
+            scene.rigidBodies[0].linearVelocity_m_s = Vec3(x: 0, y: 0, z: 0)
+            scene.rigidBodies[1].position_m = Vec3(x: 0.17, y: surface - 0.05, z: 0.02)
+            scene.rigidBodies[1].linearVelocity_m_s = Vec3(x: 0, y: 0, z: 0)
+            let solver = try MetalFluidSolver(device: device, scene: scene, quality: .balanced)
+            let result = try solver.runHeadlessValidation(steps: 12)
+            let corkVelocity = solver.bodies[0].linearVelocity.y, denseVelocity = solver.bodies[1].linearVelocity.y
+            guard result.volumeDrift.isFinite, result.maxSpeed.isFinite, abs(result.volumeDrift) < 0.01,
+                  result.maxSpeed < 20, corkVelocity.isFinite, denseVelocity.isFinite, corkVelocity > denseVelocity
+            else { throw MetalError.resource("coupled numerical acceptance") }
+            print(String(format: "FluidMetal coupling PASS · %@ · %@ · drift %.4f%% · vmax %.3f m/s · Δvy %.3f m/s", device.name, solver.grid.label, result.volumeDrift * 100, result.maxSpeed, corkVelocity - denseVelocity))
         } catch { fputs("\(error)\n", stderr); exit(1) }
     }
 }
