@@ -14,6 +14,10 @@ resolution WebGPU Eulerian path. WebGPU quality presets allocate approximately
 The presentation renderer reconstructs a trilinear implicit surface with
 subcell root refinement, gradient normals, front/back thickness, Fresnel
 reflection, and Beer–Lambert absorption.
+The live performance drawer separates hardware-timestamped GPU advection,
+pressure, projection, immersed-body coupling, reductions, queue/copy overhead,
+and raymarch rendering from wall-clock CPU simulation, upload, encoding, and
+orchestration costs, with a shared 60 Hz budget and recent-frame history.
 The GPU transport path uses conservative bounded donor-cell VOF fluxes,
 midpoint RK2 velocity backtracing on packed staggered faces, ghost-fluid
 free-surface pressure, balanced-force continuum surface tension, Smagorinsky

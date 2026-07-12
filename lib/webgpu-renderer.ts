@@ -13,6 +13,14 @@ export type GPUStatus =
   | { state: "unavailable"; label: string }
   | { state: "lost"; label: string };
 
+export interface RendererFrameMetrics {
+  cpuFrame_ms: number;
+  cpuPhysicsSubmit_ms: number;
+  cpuDataUpload_ms: number;
+  cpuRenderEncode_ms: number;
+  gpuRender_ms?: number;
+}
+
 const shader = /* wgsl */ `
 struct Uniforms {
   viewport: vec4f,
@@ -372,6 +380,11 @@ export class FluidLabRenderer {
   private lastGPUReadbackSecond = -1;
   private bindGroup?: GPUBindGroup;
   private format?: GPUTextureFormat;
+  private renderQuerySet?: GPUQuerySet;
+  private renderQueryResolve?: GPUBuffer;
+  private renderReadbackPending = false;
+  private lastRenderQueryAt = -Infinity;
+  private gpuRender_ms?: number;
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; }
 
@@ -396,6 +409,7 @@ export class FluidLabRenderer {
     this.device = device;
     this.context = context;
     this.format = navigator.gpu.getPreferredCanvasFormat();
+    if(device.features.has("timestamp-query")){this.renderQuerySet=device.createQuerySet({type:"timestamp",count:2});this.renderQueryResolve=device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
     context.configure({ device, format: this.format, alphaMode: "opaque" });
 
     const shaderModule = device.createShaderModule({ label: "Fluid Lab presentation shader", code: shader });
@@ -478,13 +492,15 @@ export class FluidLabRenderer {
     }
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, mode: SolverMode, view: ViewMode, bodies: RigidBodyState[], selectedBodyId?: string, fluid?: EulerianRenderState, backend: SimulationBackend = "webgpu", quality: GPUQuality = "balanced", particles?: ParticleRenderState): number {
-    if (!this.device || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return 0;
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, mode: SolverMode, view: ViewMode, bodies: RigidBodyState[], selectedBodyId?: string, fluid?: EulerianRenderState, backend: SimulationBackend = "webgpu", quality: GPUQuality = "balanced", particles?: ParticleRenderState): RendererFrameMetrics {
+    if (!this.device || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     this.resize();
     const start = performance.now();
     const position = cameraPosition(camera);
     const modeValue = mode === "eulerian" ? 0 : mode === "particle" ? 1 : 2;
+    const physicsStart=performance.now();
     const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, quality, time_s, bodies) : undefined;
+    const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const uniform = new Float32Array([
       this.canvas.width, this.canvas.height, time_s, modeValue,
@@ -510,16 +526,21 @@ export class FluidLabRenderer {
     });
     this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     if(particles&&this.particleBuffer){const count=Math.min(particles.count,this.particleCapacity),data=new Float32Array(count*4);for(let i=0;i<count;i+=1)data.set([particles.positions[3*i],particles.positions[3*i+1],particles.positions[3*i+2],particles.densityRatio[i]],4*i);this.device.queue.writeBuffer(this.particleBuffer,0,data);}
+    const cpuDataUpload_ms=performance.now()-uploadStart,renderStart=performance.now();
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
+    const sampleRenderGPU=Boolean(this.renderQuerySet&&this.renderQueryResolve&&!this.renderReadbackPending&&renderStart-this.lastRenderQueryAt>=250);
     const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: this.context.getCurrentTexture().createView(), clearValue: { r: 0.01, g: 0.025, b: 0.024, a: 1 }, loadOp: "clear", storeOp: "store" }]
+      colorAttachments: [{ view: this.context.getCurrentTexture().createView(), clearValue: { r: 0.01, g: 0.025, b: 0.024, a: 1 }, loadOp: "clear", storeOp: "store" }],
+      ...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1}}:{})
     });
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.draw(3);
     if((mode==="particle"||mode==="compare")&&particles&&this.particlePipeline&&this.particleBindGroup){pass.setPipeline(this.particlePipeline);pass.setBindGroup(0,this.particleBindGroup);pass.draw(6,Math.min(particles.count,this.particleCapacity));}
     pass.end();
+    let renderReadback:GPUBuffer|undefined;if(sampleRenderGPU&&this.renderQuerySet&&this.renderQueryResolve){this.lastRenderQueryAt=renderStart;this.renderReadbackPending=true;encoder.resolveQuerySet(this.renderQuerySet,0,2,this.renderQueryResolve,0);renderReadback=this.device.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.renderQueryResolve,0,renderReadback,0,16);}
     this.device.queue.submit([encoder.finish()]);
-    return performance.now() - start;
+    if(renderReadback){const readback=renderReadback;void readback.mapAsync(GPUMapMode.READ).then(()=>{const times=new BigUint64Array(readback.getMappedRange());this.gpuRender_ms=Number(times[1]-times[0])/1e6;readback.unmap();readback.destroy();}).catch(()=>readback.destroy()).finally(()=>{this.renderReadbackPending=false;});}
+    return {cpuFrame_ms:performance.now()-start,cpuPhysicsSubmit_ms,cpuDataUpload_ms,cpuRenderEncode_ms:performance.now()-renderStart,gpuRender_ms:this.gpuRender_ms};
   }
 }
