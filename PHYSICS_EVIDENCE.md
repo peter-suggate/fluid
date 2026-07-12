@@ -464,3 +464,26 @@ Build: `web-stage10.2-1.0.2`
   warnings or errors.
 - Production build, lint, and all `39` deterministic tests passed. The local
   page was restored to the paused two-body corner dam-break at `t = 0`.
+
+## Stage 10.3 pipeline performance profiler
+
+Recorded: 2026-07-12<br>
+Build: `web-stage10.3-1.0.3`
+
+- Added timestamp ranges around every GPU physics substep: conservative VOF
+  advection, Jacobi pressure solve, projection, immersed-body coupling, and
+  diagnostic reductions. A full-physics range exposes uncategorized copies and
+  queue gaps instead of silently omitting them.
+- Added an independent timestamp-query readback around the complete presentation
+  raymarch/particle render pass, sampled asynchronously without blocking the
+  render loop.
+- Added wall-clock CPU ranges for rigid/oracle stepping, GPU physics command
+  encoding, data upload, render encoding/submission, and residual frame
+  orchestration.
+- The collapsible bottom drawer presents a 16.67 ms budget bar, directly labeled
+  contribution rows with milliseconds and percentages, largest-stage summary,
+  and aligned recent GPU/CPU history. Exported run records include the latest
+  breakdown and profiler history.
+- Live Balanced validation reported populated hardware timestamps, identified
+  the raymarch as the largest sampled GPU stage, and produced zero browser
+  warnings/errors.
