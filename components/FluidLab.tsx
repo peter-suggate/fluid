@@ -654,7 +654,7 @@ export function FluidLab() {
           <div className="segmented"><button className={view === "scientific" ? "active" : ""} onClick={() => setView("scientific")}>Scientific</button><button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button></div>
         </div>
         {mode === "compare" && <div className="compare-labels"><span><b>01</b> GPU GRID</span><span><b>02</b> PBF PARTICLES</span></div>}
-        <div className="physics-stage-badge"><strong>STAGE 10.4</strong><span>{backend === "webgpu" ? "VOF · MAC · immersed bodies" : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} cells · f32 · ${gpuInfo?.pressureIterations ?? "…"} Jacobi` : "MAC · binary64 · PCG"}</small></div>
+        <div className="physics-stage-badge"><strong>STAGE 10.5</strong><span>{backend === "webgpu" ? "VOF · MAC · immersed bodies" : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} cells · f32 · ${gpuInfo?.pressureIterations ?? "…"} Jacobi` : "MAC · binary64 · PCG"}</small></div>
         {view === "scientific" && <>
           <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
           <div className="probe-label probe-a"><i />P-01 · surface</div>
