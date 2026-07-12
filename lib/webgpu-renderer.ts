@@ -185,6 +185,18 @@ fn fluidSample(cell: vec3i) -> f32 {
   return textureLoad(fluidField, clamp(cell, vec3i(0), dims - vec3i(1)), 0).x;
 }
 
+fn fluidValue(uvw: vec3f) -> f32 {
+  let dims = vec3i(u.gridInfo.xyz);
+  let q = clamp(uvw * vec3f(dims) - vec3f(0.5), vec3f(0.0), vec3f(dims - vec3i(1)));
+  let base = vec3i(floor(q));
+  let f = fract(q);
+  let lower = vec4f(fluidSample(base), fluidSample(base + vec3i(1, 0, 0)), fluidSample(base + vec3i(0, 1, 0)), fluidSample(base + vec3i(1, 1, 0)));
+  let upper = vec4f(fluidSample(base + vec3i(0, 0, 1)), fluidSample(base + vec3i(1, 0, 1)), fluidSample(base + vec3i(0, 1, 1)), fluidSample(base + vec3i(1, 1, 1)));
+  let z0 = mix(mix(lower.x, lower.y, f.x), mix(lower.z, lower.w, f.x), f.y);
+  let z1 = mix(mix(upper.x, upper.y, f.x), mix(upper.z, upper.w, f.x), f.y);
+  return mix(z0, z1, f.z);
+}
+
 struct InterfaceCell {
   base: vec3f,
   lower: vec4f,
@@ -243,29 +255,16 @@ fn refineFluidHit(ro: vec3f, rd: vec3f, a: f32, b: f32, valueA: f32, valueB: f32
 struct FluidHit{entry:f32,exit:f32,normal:vec3f}
 fn fluidRayHit(ro: vec3f, rd: vec3f, nearT: f32, farT: f32, boundsMin: vec3f, size: vec3f) -> FluidHit {
   let dims = vec3i(u.gridInfo.xyz);
-  let cellSize = size / vec3f(dims);
-  let startPoint = ro + rd * (nearT + 1e-5);
-  var cell = clamp(vec3i(floor((startPoint - boundsMin) / cellSize)), vec3i(0), dims - vec3i(1));
-  let step = vec3i(select(vec3f(-1.0), vec3f(1.0), rd >= vec3f(0.0)));
-  let boundary = boundsMin + (vec3f(cell) + select(vec3f(0.0), vec3f(1.0), step > vec3i(0))) * cellSize;
-  var nextT = select(vec3f(1e20), (boundary - ro) / rd, abs(rd) > vec3f(1e-8));
-  let deltaT = select(vec3f(1e20), abs(cellSize / rd), abs(rd) > vec3f(1e-8));
-  var cellEnterT = nearT;
-  var cellExitT = min(min(nextT.x, nextT.y), min(nextT.z, farT));
-  var previousT = 0.5 * (cellEnterT + cellExitT);
-  var previous = fluidSample(cell);
+  let span = max(farT - nearT, 0.0);
+  let cellSize = min(min(size.x / f32(dims.x), size.y / f32(dims.y)), size.z / f32(dims.z));
+  let stepSize = max(span / 144.0, cellSize * 0.65);
+  var previousT = nearT;
+  var previous = fluidValue((ro + rd * previousT - boundsMin) / size);
   var entry = select(1e20, nearT, previous > 0.5);
   var surfaceNormal = -rd;
-  for (var sampleIndex = 0u; sampleIndex < 512u; sampleIndex += 1u) {
-    if (cellExitT >= farT) { break; }
-    cellEnterT = cellExitT;
-    if (nextT.x <= cellEnterT + 1e-6) { cell.x += step.x; nextT.x += deltaT.x; }
-    if (nextT.y <= cellEnterT + 1e-6) { cell.y += step.y; nextT.y += deltaT.y; }
-    if (nextT.z <= cellEnterT + 1e-6) { cell.z += step.z; nextT.z += deltaT.z; }
-    if (any(cell < vec3i(0)) || any(cell >= dims)) { break; }
-    cellExitT = min(min(nextT.x, nextT.y), min(nextT.z, farT));
-    let t = 0.5 * (cellEnterT + cellExitT);
-    let occupied = fluidSample(cell);
+  var t = min(nearT + stepSize, farT);
+  for (var sampleIndex = 0u; sampleIndex < 176u; sampleIndex += 1u) {
+    let occupied = fluidValue((ro + rd * t - boundsMin) / size);
     if (entry > 1e19 && occupied > 0.5 && previous <= 0.5) {
       let refined = refineFluidHit(ro, rd, previousT, t, previous, occupied, boundsMin, size);
       entry = refined.x;
@@ -276,6 +275,8 @@ fn fluidRayHit(ro: vec3f, rd: vec3f, nearT: f32, farT: f32, boundsMin: vec3f, si
     }
     previous = occupied;
     previousT = t;
+    if (t >= farT) { break; }
+    t = min(t + stepSize, farT);
   }
   if(entry<1e19){return FluidHit(entry,farT,surfaceNormal);}return FluidHit(1e20,1e20,vec3f(0.0,1.0,0.0));
 }
@@ -433,7 +434,7 @@ struct Out { @builtin(position) position: vec4f, @location(0) uv: vec2f }
   var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
   var out: Out; out.position = vec4f(positions[index], 0.0, 1.0); out.uv = positions[index] * 0.5 + 0.5; return out;
 }
-@fragment fn fragmentMain(input: Out) -> @location(0) vec4f { return textureSample(source, sourceSampler, input.uv); }
+@fragment fn fragmentMain(input: Out) -> @location(0) vec4f { return textureSample(source, sourceSampler, vec2f(input.uv.x, 1.0-input.uv.y)); }
 `;
 
 export class FluidLabRenderer {
@@ -446,8 +447,7 @@ export class FluidLabRenderer {
   private upscaleBindGroup?: GPUBindGroup;
   private presentationTexture?: GPUTexture;
   private presentationTextureKey = "";
-  private renderScale = 1;
-  private lastRenderScaleUpdateAt = -Infinity;
+  private readonly renderScale = 1;
   private uniformBuffer?: GPUBuffer;
   private bodyBuffer?: GPUBuffer;
   private particleBuffer?: GPUBuffer;
@@ -592,19 +592,8 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.renderScale * 100)}%)`;
   }
 
-  private updateRenderScale(now: number) {
-    if (this.gpuRender_ms === undefined || now - this.lastRenderScaleUpdateAt < 1500) return;
-    let next = this.renderScale;
-    if (this.gpuRender_ms > 8.0) next = Math.max(0.5, this.renderScale - 0.1);
-    else if (this.gpuRender_ms < 4.0) next = Math.min(1, this.renderScale + 0.1);
-    if (Math.abs(next - this.renderScale) < 0.001) return;
-    this.renderScale = Math.round(next * 10) / 10;
-    this.lastRenderScaleUpdateAt = now;
-  }
-
   draw(time_s: number, scene: SceneDescription, camera: CameraState, mode: SolverMode, view: ViewMode, bodies: RigidBodyState[], selectedBodyId?: string, fluid?: EulerianRenderState, backend: SimulationBackend = "webgpu", quality: GPUQuality = "balanced", particles?: ParticleRenderState): RendererFrameMetrics {
     if (!this.device || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
-    this.updateRenderScale(performance.now());
     this.resize();
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     const start = performance.now();

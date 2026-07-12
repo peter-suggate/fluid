@@ -507,3 +507,20 @@ Build: `web-stage10.4-1.0.4`
   scaling engaged; the browser emitted zero shader or validation warnings.
 - Production build, lint, and all `39` deterministic tests passed. Eulerian,
   particle, and split compare presentation paths remained live and finite.
+
+## Stage 10.5 surface-fidelity correction
+
+Recorded: 2026-07-12<br>
+Build: `web-stage10.5-1.0.5`
+
+- Removed adaptive downscaling and restored native-resolution presentation.
+  Corrected the intermediate-target Y orientation so rigid bodies and fluid are
+  displayed in the same world-space vertical direction as the direct render.
+- Replaced nearest-cell DDA classification with a reduced-count trilinear march:
+  at most `144` span-controlled intervals with a `0.65` cell minimum stride.
+  This restores fractional-VOF continuity while retaining cached eight-corner
+  Newton refinement, analytic normals, and mode-specific traversal skipping.
+- Live Balanced validation showed a smooth evolving surface and correct initial
+  corner reservoir with zero WebGPU warnings. The sampled native-resolution
+  presentation pass measured `2.163 ms`, making pressure Jacobi the largest GPU
+  stage in that frame.
