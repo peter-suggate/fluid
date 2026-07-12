@@ -487,3 +487,23 @@ Build: `web-stage10.3-1.0.3`
 - Live Balanced validation reported populated hardware timestamps, identified
   the raymarch as the largest sampled GPU stage, and produced zero browser
   warnings/errors.
+
+## Stage 10.4 raymarch optimization
+
+Recorded: 2026-07-12<br>
+Build: `web-stage10.4-1.0.4`
+
+- Replaced fixed sub-cell trilinear sampling with exact grid-cell DDA traversal.
+  Empty traversal cells now require one VOF load instead of eight, while a
+  detected interface fetches its eight corners once for four Newton iterations
+  and an analytic trilinear normal.
+- Particle presentation skips the Eulerian volume traversal, and compare mode
+  restricts it to the GPU-grid half of the viewport.
+- Added a linearly upscaled intermediate presentation target with hysteretic
+  `50–100%` adaptive resolution. The exported presentation resolution reports
+  the actual raymarch dimensions and active scale.
+- On the local Balanced WebGPU run, the live raymarch timestamp fell from a
+  sampled `9.241 ms` at full presentation load to `4.653 ms` after adaptive
+  scaling engaged; the browser emitted zero shader or validation warnings.
+- Production build, lint, and all `39` deterministic tests passed. Eulerian,
+  particle, and split compare presentation paths remained live and finite.
