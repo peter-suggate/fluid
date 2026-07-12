@@ -48,12 +48,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .brand div { display: grid; gap: 3px; }
 .brand strong { font-size: 15px; letter-spacing: -.02em; }
 .brand small { color: var(--muted); font: 600 8px/1 var(--mono); letter-spacing: .14em; }
-.solver-tabs { justify-self: center; height: 36px; padding: 3px; display: flex; gap: 2px; background: rgba(133, 198, 186, .06); border: 1px solid var(--line); }
-.solver-tabs button, .segmented button { border: 0; background: transparent; color: var(--muted); cursor: pointer; transition: .18s ease; }
-.solver-tabs button { min-width: 100px; padding: 0 15px; font-size: 12px; font-weight: 600; }
-.solver-tabs button:hover, .segmented button:hover { color: var(--ink); }
-.solver-tabs button.active, .segmented button.active { background: rgba(131, 241, 209, .12); color: var(--accent-strong); box-shadow: inset 0 0 0 1px rgba(131,241,209,.16); }
-.beta { margin-left: 7px; padding: 2px 4px; color: var(--accent); background: rgba(131,241,209,.1); font: 600 7px/1 var(--mono); letter-spacing: .06em; }
+.solver-identity { justify-self: center; padding: 8px 14px; border: 1px solid var(--line); color: var(--accent-strong); background: rgba(131, 241, 209, .08); font: 600 10px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.segmented button { border: 0; background: transparent; color: var(--muted); cursor: pointer; transition: .18s ease; }
+.segmented button:hover { color: var(--ink); }
+.segmented button.active { background: rgba(131, 241, 209, .12); color: var(--accent-strong); box-shadow: inset 0 0 0 1px rgba(131,241,209,.16); }
 .top-actions { height: 100%; padding: 0 14px; display: flex; align-items: center; gap: 7px; }
 .quiet-button, .primary-button, .icon-button { border: 1px solid var(--line); cursor: pointer; }
 .quiet-button { height: 34px; padding: 0 12px; background: transparent; color: #b8cac7; }
@@ -83,7 +81,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .segmented button { padding: 0 11px; font-size: 10px; }
 .segmented.compact { width: 100%; }
 .segmented.compact button { flex: 1; }
-.estimate-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.estimate-grid { display: grid; grid-template-columns: 1fr; gap: 7px; }
 .estimate-grid > div { min-width: 0; padding: 10px; border: 1px solid var(--line); background: rgba(0,0,0,.12); display: grid; gap: 4px; }
 .estimate-grid small { color: var(--dim); font: 7px/1 var(--mono); text-transform: uppercase; }
 .estimate-grid strong { overflow: hidden; color: var(--accent-strong); font: 12px/1.3 var(--mono); text-overflow: ellipsis; }
@@ -125,10 +123,6 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .status-dot.warning { background: var(--amber); box-shadow: 0 0 9px rgba(247,198,109,.4); }
 .status-dot.idle { background: var(--muted); }
 .status-dot.pulse { animation: status-pulse 2s ease-in-out infinite; }
-.compare-labels { position: absolute; inset: 58px 0 auto; display: grid; grid-template-columns: 1fr 1fr; pointer-events: none; }
-.compare-labels span { padding: 0 20px; color: rgba(205,238,232,.72); font: 600 8px/1 var(--mono); letter-spacing: .1em; }
-.compare-labels span:last-child { text-align: right; }
-.compare-labels b { margin-right: 7px; color: var(--accent); font-weight: 500; }
 .camera-toolbar { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--line); background: rgba(5,18,16,.78); backdrop-filter: blur(16px); white-space: nowrap; }
 .camera-toolbar button { height: 27px; padding: 0 9px; border: 0; background: transparent; color: #afc4bf; font-size: 9px; cursor: pointer; }
 .camera-toolbar button:hover { background: rgba(131,241,209,.1); color: var(--accent); }
@@ -279,7 +273,6 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 @media (max-width: 1180px) {
   .lab-shell { grid-template-columns: 252px minmax(380px, 1fr) 270px; }
   .topbar { grid-template-columns: 252px 1fr auto; }
-  .solver-tabs button { min-width: 82px; }
   .quiet-button:first-child { display: none; }
   .transport-bar { grid-template-columns: 252px 1fr 300px; }
   .notice { display: none; }

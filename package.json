@@ -12,6 +12,11 @@
     "test": "npm run build && node --import tsx --test tests/*.test.ts",
     "test:unit": "node --import tsx --test tests/*.test.ts",
     "benchmark:rigid": "node --import tsx tools/run-rigid-benchmarks.ts",
+    "native:run": "cd native && swift run -c release FluidMetal",
+    "native:build": "cd native && swift build -c release",
+    "native:app": "native/build-app.sh",
+    "native:test": "cd native && swift run FluidMetal --self-test",
+    "native:smoke": "cd native && swift run FluidMetal --benchmark",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {

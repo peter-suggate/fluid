@@ -10,3 +10,5 @@ coverage/
 *.tsbuildinfo
 .env*
 !.env.example
+.build/
+native/.build/

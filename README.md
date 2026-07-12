@@ -1,21 +1,19 @@
 # Fluid Solver Laboratory
 
-This repository is for a validation-first browser laboratory comparing a
-three-dimensional Eulerian free-surface solver with a particle solver under a
-shared physical scene. The current application is React, TypeScript, WGSL, and
+This repository is a validation-first three-dimensional Eulerian free-surface
+fluid laboratory. The current application is React, TypeScript, WGSL, and
 WebGPU; it runs locally and requires no cloud simulation service.
 
 Implementation is intentionally gated by quantitative evidence. The current
-browser build includes the deterministic rigid-body and MAC-grid CPU oracles, a
-PBF particle CPU oracle with exact hashed-neighbour regression, deterministic
-buoyancy/drag quadrature with paired fluid reaction impulses, and a high-
-resolution WebGPU Eulerian path. WebGPU quality presets allocate approximately
+browser build includes the deterministic rigid-body and MAC-grid CPU oracles,
+deterministic buoyancy/drag quadrature with paired fluid reaction impulses, and
+a high-resolution WebGPU Eulerian path. WebGPU quality presets allocate approximately
 110k, 500k, or 1.2m cells and render the evolving volume fraction directly.
 The presentation renderer samples the VOF field trilinearly at a quality-aware
 stride, reconstructs an interface cell from eight cached samples, and uses
 subcell Newton refinement with analytic trilinear normals, front/back thickness,
 Fresnel reflection, and Beer–Lambert absorption. It renders at native canvas
-resolution; mode-specific traversal skipping and cached interface work keep the
+resolution; traversal skipping and cached interface work keep the
 raymarch within its GPU budget without reducing surface fidelity.
 The live performance drawer separates hardware-timestamped GPU advection,
 pressure, projection, immersed-body coupling, reductions, queue/copy overhead,
@@ -38,8 +36,6 @@ LES viscosity, compact reductions, and quality-aware CFL/capillary substepping.
   collision approximations, and quantitative gates.
 - [`docs/STAGE4_ACCEPTANCE.md`](docs/STAGE4_ACCEPTANCE.md) — Eulerian equations,
   free-surface choices, volume-preserving corner dam-break initialization, and quantitative gates.
-- [`docs/STAGE5_ACCEPTANCE.md`](docs/STAGE5_ACCEPTANCE.md) — PBF kernel,
-  neighbour-search, density, boundary, and stability gates.
 - [`docs/STAGE6_7_ACCEPTANCE.md`](docs/STAGE6_7_ACCEPTANCE.md) — buoyancy, drag,
   displaced volume, torque, and conservative reaction-impulse gates.
 - [`docs/STAGE8_GPU_ACCEPTANCE.md`](docs/STAGE8_GPU_ACCEPTANCE.md) — WebGPU
@@ -62,6 +58,22 @@ npm run dev
 
 Use `npm test` for the deterministic shell contract and production build.
 
+## Native macOS / Metal
+
+The repository also includes an Eulerian-only native Metal application tuned
+for Apple Silicon. It shares the canonical default scene with the browser but
+keeps Swift/AppKit and MSL backend code isolated under [`native/`](native/).
+
+```bash
+npm run native:run       # build and launch
+npm run native:app       # create native/.build/Fluid Lab Metal.app
+npm run native:test      # native schema tests
+npm run native:smoke     # Metal device, shader, pipeline, and allocation test
+```
+
+See [`native/README.md`](native/README.md) for architecture and performance
+details.
+
 ## Current numerical boundary
 
 The CPU MAC/PCG path remains the pressure-validation oracle. The GPU path uses
@@ -69,6 +81,5 @@ an f32 cell-centred VOF field with packed staggered positive-face velocities,
 compatible divergence/gradient operators, a ghost-fluid atmospheric boundary,
 weighted Jacobi, and conservative upwind volume transport. The renderer reads
 the physical VOF field directly; no equilibrium blend, presentation smoothing,
-or global volume rescaling is applied. The particle mode is PBF, not DFSPH. Resolved
-cut-cell traction, GPU PBF, and asynchronously reduced GPU pressure residuals
+or global volume rescaling is applied. Resolved cut-cell traction and asynchronously reduced GPU pressure residuals
 remain research/optimization work and are not claimed as validated.
