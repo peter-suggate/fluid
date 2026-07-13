@@ -79,7 +79,7 @@ export interface MetricSample {
   kinetic_energy_J: number;
 }
 
-export const BUILD_ID = "web-stage10.5-1.0.5";
+export const BUILD_ID = "web-tall-cell-ab-1.1.0";
 
 export const defaultScene: SceneDescription = sharedDefaultScene as SceneDescription;
 
