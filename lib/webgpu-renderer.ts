@@ -510,7 +510,7 @@ export class FluidLabRenderer {
     device.lost.then((info) => this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` }));
     const info = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     const adapterName = info ? [info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter" : "WebGPU adapter";
-    this.onStatus({state:"ready",label:this.computeAvailable?"WebGPU compute and renderer ready":`GPU compute/readback self-test failed (${computeProbe.detail}) · CPU fluid fallback`,adapter:adapterName,computeAvailable:this.computeAvailable});
+    this.onStatus({state:"ready",label:this.computeAvailable?"WebGPU compute and renderer ready":`WebGPU compute unavailable (${computeProbe.detail}) · simulation paused`,adapter:adapterName,computeAvailable:this.computeAvailable});
   }
 
   private rebuildBindGroup(texture = this.fluidTexture) {
@@ -560,6 +560,10 @@ export class FluidLabRenderer {
     this.fluidRevision = fluid.revision;
   }
 
+  private clearCPUFluid():void {
+    if(!this.device||!this.pipeline||this.fluidTextureKey==="")return;this.fluidTexture?.destroy();this.fluidTexture=this.device.createTexture({size:[1,1,1],dimension:"3d",format:"r8unorm",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});this.fluidTextureKey="";this.fluidRevision=-1;this.rebuildBindGroup();
+  }
+
   resize(): void {
     const ratio = Math.min(window.devicePixelRatio || 1, 2);
     const width = Math.max(1, Math.floor(this.canvas.clientWidth * ratio));
@@ -594,7 +598,7 @@ export class FluidLabRenderer {
     const useGPUFluid=backend==="webgpu"&&this.computeAvailable,gpuInfo=useGPUFluid?this.ensureGPUFluid(scene,quality,time_s,bodies):undefined;
     if(useGPUFluid)this.rebuildHierarchyBindGroup();
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
-    if(!useGPUFluid)this.uploadFluid(fluid);
+    if(backend==="cpu-reference")this.uploadFluid(fluid);else if(!useGPUFluid)this.clearCPUFluid();
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, 0,
       position.x, position.y, position.z, 0,
