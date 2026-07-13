@@ -128,19 +128,21 @@ interface PerformanceSnapshot {
   gpuDiagnostics_ms: number;
   gpuOverhead_ms: number;
   gpuRender_ms: number;
+  gpuComputeSampleAvailable: boolean;
+  gpuRenderSampleAvailable: boolean;
 }
 
-const emptyPerformance: PerformanceSnapshot = {cpuSimulation_ms:0,cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0,cpuTopology_ms:0,gpuAdvection_ms:0,gpuPressure_ms:0,gpuProjection_ms:0,gpuRigid_ms:0,gpuDiagnostics_ms:0,gpuOverhead_ms:0,gpuRender_ms:0};
+const emptyPerformance: PerformanceSnapshot = {cpuSimulation_ms:0,cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0,cpuTopology_ms:0,gpuAdvection_ms:0,gpuPressure_ms:0,gpuProjection_ms:0,gpuRigid_ms:0,gpuDiagnostics_ms:0,gpuOverhead_ms:0,gpuRender_ms:0,gpuComputeSampleAvailable:false,gpuRenderSampleAvailable:false};
 
-function PerformanceDrawer({snapshot,history,onClose,timestampsAvailable}:{snapshot:PerformanceSnapshot;history:PerformanceSnapshot[];onClose:()=>void;timestampsAvailable:boolean}) {
+function PerformanceDrawer({snapshot,history,onClose,timestampsSupported}:{snapshot:PerformanceSnapshot;history:PerformanceSnapshot[];onClose:()=>void;timestampsSupported:boolean}) {
   const gpuStages=[
-    {key:"advection",label:"Advection + VOF",value:snapshot.gpuAdvection_ms,className:"stage-advection"},
-    {key:"pressure",label:"Pressure PCG",value:snapshot.gpuPressure_ms,className:"stage-pressure"},
-    {key:"projection",label:"Projection",value:snapshot.gpuProjection_ms,className:"stage-projection"},
-    {key:"rigid",label:"Rigid coupling",value:snapshot.gpuRigid_ms,className:"stage-rigid"},
-    {key:"diagnostics",label:"Reductions",value:snapshot.gpuDiagnostics_ms,className:"stage-diagnostics"},
-    {key:"overhead",label:"Copies + queue gaps",value:snapshot.gpuOverhead_ms,className:"stage-overhead"},
-    {key:"render",label:"Raymarch render",value:snapshot.gpuRender_ms,className:"stage-render"}
+    {key:"advection",label:"Hierarchical VOF",value:snapshot.gpuAdvection_ms,className:"stage-advection",available:snapshot.gpuComputeSampleAvailable},
+    {key:"pressure",label:"Composite PCG",value:snapshot.gpuPressure_ms,className:"stage-pressure",available:snapshot.gpuComputeSampleAvailable},
+    {key:"projection",label:"Face projection",value:snapshot.gpuProjection_ms,className:"stage-projection",available:snapshot.gpuComputeSampleAvailable},
+    {key:"rigid",label:"Rigid coupling",value:snapshot.gpuRigid_ms,className:"stage-rigid",available:snapshot.gpuComputeSampleAvailable},
+    {key:"diagnostics",label:"Reductions",value:snapshot.gpuDiagnostics_ms,className:"stage-diagnostics",available:snapshot.gpuComputeSampleAvailable},
+    {key:"overhead",label:"Copies + queue gaps",value:snapshot.gpuOverhead_ms,className:"stage-overhead",available:snapshot.gpuComputeSampleAvailable},
+    {key:"render",label:"Hierarchy raymarch",value:snapshot.gpuRender_ms,className:"stage-render",available:snapshot.gpuRenderSampleAvailable}
   ];
   const cpuOther=Math.max(0,snapshot.cpuFrame_ms-snapshot.cpuPhysicsSubmit_ms-snapshot.cpuDataUpload_ms-snapshot.cpuRenderEncode_ms);
   const cpuStages=[
@@ -151,17 +153,18 @@ function PerformanceDrawer({snapshot,history,onClose,timestampsAvailable}:{snaps
     {label:"Adaptive topology rebuild",value:snapshot.cpuTopology_ms},
     {label:"Frame orchestration",value:cpuOther}
   ];
-  const gpuTotal=gpuStages.reduce((sum,stage)=>sum+stage.value,0),cpuTotal=snapshot.cpuSimulation_ms+snapshot.cpuFrame_ms+snapshot.cpuTopology_ms,budget=16.67;
-  const bottleneck=timestampsAvailable?[...gpuStages].sort((a,b)=>b.value-a.value)[0]:undefined;
-  const historyValues=history.map((sample)=>({gpu:sample.gpuAdvection_ms+sample.gpuPressure_ms+sample.gpuProjection_ms+sample.gpuRigid_ms+sample.gpuDiagnostics_ms+sample.gpuOverhead_ms+sample.gpuRender_ms,cpu:sample.cpuSimulation_ms+sample.cpuFrame_ms+sample.cpuTopology_ms}));
+  const sampledGPUStages=gpuStages.filter((stage)=>stage.available),gpuTotal=sampledGPUStages.reduce((sum,stage)=>sum+stage.value,0),cpuTotal=snapshot.cpuSimulation_ms+snapshot.cpuFrame_ms+snapshot.cpuTopology_ms,budget=16.67;
+  const bottleneck=sampledGPUStages.length>0?[...sampledGPUStages].sort((a,b)=>b.value-a.value)[0]:undefined;
+  const historyValues=history.map((sample)=>({gpu:(sample.gpuComputeSampleAvailable?sample.gpuAdvection_ms+sample.gpuPressure_ms+sample.gpuProjection_ms+sample.gpuRigid_ms+sample.gpuDiagnostics_ms+sample.gpuOverhead_ms:0)+(sample.gpuRenderSampleAvailable?sample.gpuRender_ms:0),cpu:sample.cpuSimulation_ms+sample.cpuFrame_ms+sample.cpuTopology_ms}));
   const historyMax=Math.max(budget,...historyValues.flatMap((sample)=>[sample.gpu,sample.cpu]));
   const points=(key:"gpu"|"cpu")=>historyValues.map((sample,index)=>`${historyValues.length<2?0:index/(historyValues.length-1)*100},${48-Math.min(sample[key]/historyMax,1)*44}`).join(" ");
-  const gpuTime=(value:number)=>!timestampsAvailable?"—":value>0?`${value.toFixed(3)} ms`:"< timer resolution";
+  const gpuTime=(value:number,available:boolean)=>!timestampsSupported?"—":!available?"sampling…":value>0?`${value.toFixed(3)} ms`:"< timer resolution";
   const cpuTime=(value:number)=>value>0?`${value.toFixed(3)} ms`:"< 0.1 ms";
+  const timingLabel=!timestampsSupported?"timestamps unavailable":snapshot.gpuComputeSampleAvailable&&snapshot.gpuRenderSampleAvailable?"hardware timestamps":sampledGPUStages.length>0?"partial hardware sample":"awaiting first sample";
   return <section id="performance-drawer" className="performance-drawer" aria-label="Performance profiler" data-testid="performance-drawer">
-    <header className="performance-header"><div><p className="eyebrow">FRAME PROFILER · LIVE</p><h2>GPU and CPU pipeline contribution</h2></div><div className="performance-summary"><span><small>GPU work</small><strong>{timestampsAvailable?`${gpuTotal.toFixed(2)} ms`:"—"}</strong></span><span><small>CPU work</small><strong>{cpuTotal.toFixed(2)} ms</strong></span><span><small>Largest GPU stage</small><strong>{bottleneck?.label ?? "Unavailable"}</strong></span><span><small>60 Hz budget</small><strong>{budget.toFixed(2)} ms</strong></span></div><button className="icon-button" onClick={onClose} aria-label="Close performance profiler">×</button></header>
+    <header className="performance-header"><div><p className="eyebrow">FRAME PROFILER · LIVE</p><h2>GPU and CPU pipeline contribution</h2></div><div className="performance-summary"><span><small>GPU work</small><strong>{sampledGPUStages.length>0?`${gpuTotal.toFixed(2)} ms`:timestampsSupported?"sampling…":"—"}</strong></span><span><small>CPU work</small><strong>{cpuTotal.toFixed(2)} ms</strong></span><span><small>Largest GPU stage</small><strong>{bottleneck?.label ?? (timestampsSupported?"Sampling…":"Unavailable")}</strong></span><span><small>60 Hz budget</small><strong>{budget.toFixed(2)} ms</strong></span></div><button className="icon-button" onClick={onClose} aria-label="Close performance profiler">×</button></header>
     <div className="performance-body">
-      <section className="performance-lane"><div className="performance-lane-heading"><strong>GPU queue</strong><span>{timestampsAvailable?"hardware timestamps":"timestamps unavailable"}</span></div><div className="performance-stack" aria-label={`GPU work ${gpuTotal.toFixed(2)} milliseconds of a 16.67 millisecond frame budget`}>{gpuStages.map((stage)=><i key={stage.key} className={stage.className} style={{width:`${Math.min(stage.value/budget*100,100)}%`}} />)}<b style={{left:`${Math.min(gpuTotal/budget*100,100)}%`}} /></div><div className="performance-rows">{gpuStages.map((stage)=><div className="performance-row" key={stage.key}><span><i className={stage.className}/>{stage.label}</span><div><i className={stage.className} style={{width:`${gpuTotal>0?stage.value/gpuTotal*100:0}%`}} /></div><strong>{gpuTime(stage.value)}</strong><small>{gpuTotal>0?(stage.value/gpuTotal*100).toFixed(1):"0.0"}%</small></div>)}</div></section>
+      <section className="performance-lane"><div className="performance-lane-heading"><strong>GPU queue</strong><span>{timingLabel}</span></div><div className="performance-stack" aria-label={`Sampled GPU work ${gpuTotal.toFixed(2)} milliseconds of a 16.67 millisecond frame budget`}>{gpuStages.map((stage)=><i key={stage.key} className={stage.className} style={{width:`${stage.available?Math.min(stage.value/budget*100,100):0}%`}} />)}<b style={{left:`${Math.min(gpuTotal/budget*100,100)}%`}} /></div><div className="performance-rows">{gpuStages.map((stage)=><div className="performance-row" key={stage.key}><span><i className={stage.className}/>{stage.label}</span><div><i className={stage.className} style={{width:`${stage.available&&gpuTotal>0?stage.value/gpuTotal*100:0}%`}} /></div><strong>{gpuTime(stage.value,stage.available)}</strong><small>{stage.available&&gpuTotal>0?`${(stage.value/gpuTotal*100).toFixed(1)}%`:"—"}</small></div>)}</div></section>
       <section className="performance-lane"><div className="performance-lane-heading"><strong>CPU main thread</strong><span>wall-clock instrumentation</span></div><div className="performance-rows cpu-rows">{cpuStages.map((stage)=><div className="performance-row" key={stage.label}><span>{stage.label}</span><div><i style={{width:`${cpuTotal>0?stage.value/cpuTotal*100:0}%`}} /></div><strong>{cpuTime(stage.value)}</strong><small>{cpuTotal>0?(stage.value/cpuTotal*100).toFixed(1):"0.0"}%</small></div>)}</div><div className="performance-history"><div><strong>Recent frames</strong><span><i className="history-gpu"/>GPU <i className="history-cpu"/>CPU</span></div><svg viewBox="0 0 100 50" preserveAspectRatio="none" role="img" aria-label={`Recent GPU and CPU timing history; vertical scale zero to ${historyMax.toFixed(1)} milliseconds`}><line x1="0" y1={48-budget/historyMax*44} x2="100" y2={48-budget/historyMax*44}/><polyline className="history-gpu" points={points("gpu")}/><polyline className="history-cpu" points={points("cpu")}/></svg><small>0</small><small>{historyMax.toFixed(1)} ms</small></div></section>
     </div>
   </section>;
@@ -464,7 +467,7 @@ export function FluidLab() {
     const now = performance.now();
     if (now - sampleClockRef.current > 250) {
       sampleClockRef.current = now;
-      const gpuState=gpuInfoRef.current,gpu=gpuState?.gpuTimings,snapshot:PerformanceSnapshot={cpuSimulation_ms:cpuSimulationMsRef.current,cpuFrame_ms:metrics.cpuFrame_ms,cpuPhysicsSubmit_ms:metrics.cpuPhysicsSubmit_ms,cpuDataUpload_ms:metrics.cpuDataUpload_ms,cpuRenderEncode_ms:metrics.cpuRenderEncode_ms,cpuTopology_ms:gpuState?.cpuRegrid_ms??0,gpuAdvection_ms:gpu?.advection_ms??0,gpuPressure_ms:gpu?.pressure_ms??0,gpuProjection_ms:gpu?.projection_ms??0,gpuRigid_ms:gpu?.rigidCoupling_ms??0,gpuDiagnostics_ms:gpu?.diagnostics_ms??0,gpuOverhead_ms:gpu?.overhead_ms??0,gpuRender_ms:metrics.gpuRender_ms??0};
+      const gpuState=gpuInfoRef.current,gpu=gpuState?.gpuTimings,snapshot:PerformanceSnapshot={cpuSimulation_ms:cpuSimulationMsRef.current,cpuFrame_ms:metrics.cpuFrame_ms,cpuPhysicsSubmit_ms:metrics.cpuPhysicsSubmit_ms,cpuDataUpload_ms:metrics.cpuDataUpload_ms,cpuRenderEncode_ms:metrics.cpuRenderEncode_ms,cpuTopology_ms:gpuState?.cpuRegrid_ms??0,gpuAdvection_ms:gpu?.advection_ms??0,gpuPressure_ms:gpu?.pressure_ms??0,gpuProjection_ms:gpu?.projection_ms??0,gpuRigid_ms:gpu?.rigidCoupling_ms??0,gpuDiagnostics_ms:gpu?.diagnostics_ms??0,gpuOverhead_ms:gpu?.overhead_ms??0,gpuRender_ms:metrics.gpuRender_ms??0,gpuComputeSampleAvailable:Boolean(gpu),gpuRenderSampleAvailable:metrics.gpuRender_ms!=null};
       performanceRef.current=snapshot;setPerformanceSnapshot(snapshot);setPerformanceHistory((current)=>[...current.slice(-119),snapshot]);
       const oracle=fluidSolverRef.current?.diagnostics;setSamples((current) => [...current.slice(-79), { t: now / 1000, frame_ms: metrics.cpuFrame_ms, volume_drift_pct: (oracle?.markerVolumeDrift??gpuInfoRef.current?.volumeDrift??0) * 100, constraint_error: oracle?.divergenceAfter_s??gpuInfoRef.current?.divergenceMax_s??0, kinetic_energy_J: oracle?.kineticEnergy_J??0 }]);
     }
@@ -835,7 +838,7 @@ export function FluidLab() {
         <div className="file-actions"><span className="notice">{notice}</span><button onClick={loadLocal}>Load</button><button onClick={() => fileRef.current?.click()}>Import</button><input ref={fileRef} type="file" accept="application/json,.json" onChange={importScene} hidden /></div>
       </footer>
 
-      {performanceOpen&&<PerformanceDrawer snapshot={performanceSnapshot} history={performanceHistory} onClose={()=>setPerformanceOpen(false)} timestampsAvailable={gpuStatus.state==="ready"&&Boolean(gpuInfo?.gpuTimings)}/>}
+      {performanceOpen&&<PerformanceDrawer snapshot={performanceSnapshot} history={performanceHistory} onClose={()=>setPerformanceOpen(false)} timestampsSupported={gpuStatus.state==="ready"&&gpuStatus.timestampQueriesAvailable}/>}
 
       {validationOpen&&validationResults&&<ValidationPanel results={validationResults} onClose={() => setValidationOpen(false)} gpuStatus={gpuStatus} />}
     </main>

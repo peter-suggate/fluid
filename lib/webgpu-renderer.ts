@@ -9,7 +9,7 @@ export type SimulationBackend = "webgpu" | "cpu-reference";
 
 export type GPUStatus =
   | { state: "initializing"; label: string }
-  | { state: "ready"; label: string; adapter: string; computeAvailable: boolean }
+  | { state: "ready"; label: string; adapter: string; computeAvailable: boolean; timestampQueriesAvailable: boolean }
   | { state: "unavailable"; label: string }
   | { state: "lost"; label: string };
 
@@ -22,14 +22,14 @@ export interface RendererFrameMetrics {
 }
 
 async function verifyComputeExecution(device:GPUDevice):Promise<{available:boolean;detail:string}>{
-  const uploadExpected=0x13572468,expected=0x5a17c0de,output=device.createBuffer({label:"WebGPU compute capability output",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}),readback=device.createBuffer({label:"WebGPU compute capability readback",size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  const uploadExpected=0x13572468,expected=0x5a17c0de,output=device.createBuffer({label:"WebGPU compute capability output",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}),uploadReadback=device.createBuffer({label:"WebGPU upload capability readback",size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}),computeReadback=device.createBuffer({label:"WebGPU compute capability readback",size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   try{
     device.queue.writeBuffer(output,0,new Uint32Array([uploadExpected]));
-    const copyEncoder=device.createCommandEncoder({label:"WebGPU buffer-copy capability commands"});copyEncoder.copyBufferToBuffer(output,0,readback,0,16);device.queue.submit([copyEncoder.finish()]);await readback.mapAsync(GPUMapMode.READ);const uploaded=new Uint32Array(readback.getMappedRange())[0];readback.unmap();if(uploaded!==uploadExpected)return{available:false,detail:`buffer copy mismatch (${uploaded.toString(16)})`};
+    const copyEncoder=device.createCommandEncoder({label:"WebGPU buffer-copy capability commands"});copyEncoder.copyBufferToBuffer(output,0,uploadReadback,0,16);device.queue.submit([copyEncoder.finish()]);await uploadReadback.mapAsync(GPUMapMode.READ);const uploaded=new Uint32Array(uploadReadback.getMappedRange())[0];uploadReadback.unmap();if(uploaded!==uploadExpected)return{available:false,detail:`buffer copy mismatch (${uploaded.toString(16)})`};
     device.pushErrorScope("validation");
     const shaderModule=device.createShaderModule({label:"WebGPU compute capability shader",code:`@group(0) @binding(0) var<storage,read_write> result:array<vec4u>;@compute @workgroup_size(1) fn main(){result[0]=vec4u(${expected}u,1u,2u,3u);}`});const compilation=await shaderModule.getCompilationInfo();const shaderError=compilation.messages.find(message=>message.type==="error");if(shaderError){await device.popErrorScope();return{available:false,detail:`shader error: ${shaderError.message}`};}const pipeline=await device.createComputePipelineAsync({label:"WebGPU compute capability pipeline",layout:"auto",compute:{module:shaderModule,entryPoint:"main"}}),group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:output}}]}),encoder=device.createCommandEncoder({label:"WebGPU compute capability commands"}),pass=encoder.beginComputePass();
-    pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);pass.end();encoder.copyBufferToBuffer(output,0,readback,0,16);device.queue.submit([encoder.finish()]);const validation=await device.popErrorScope();if(validation)return{available:false,detail:validation.message};await device.queue.onSubmittedWorkDone();await readback.mapAsync(GPUMapMode.READ);const actual=new Uint32Array(readback.getMappedRange())[0];readback.unmap();return{available:actual===expected,detail:actual===expected?"sentinel matched":`sentinel mismatch (${actual.toString(16)})`};
-  }catch(error){return{available:false,detail:error instanceof Error?error.message:String(error)};}finally{output.destroy();readback.destroy();}
+    pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);pass.end();encoder.copyBufferToBuffer(output,0,computeReadback,0,16);device.queue.submit([encoder.finish()]);const validation=await device.popErrorScope();if(validation)return{available:false,detail:validation.message};await device.queue.onSubmittedWorkDone();await computeReadback.mapAsync(GPUMapMode.READ);const actual=new Uint32Array(computeReadback.getMappedRange())[0];computeReadback.unmap();return{available:actual===expected,detail:actual===expected?"sentinel matched":`sentinel mismatch (${actual.toString(16)})`};
+  }catch(error){return{available:false,detail:error instanceof Error?error.message:String(error)};}finally{output.destroy();uploadReadback.destroy();computeReadback.destroy();}
 }
 
 const shader = /* wgsl */ `
@@ -510,7 +510,7 @@ export class FluidLabRenderer {
     device.lost.then((info) => this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` }));
     const info = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     const adapterName = info ? [info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter" : "WebGPU adapter";
-    this.onStatus({state:"ready",label:this.computeAvailable?"WebGPU compute and renderer ready":`WebGPU compute unavailable (${computeProbe.detail}) · simulation paused`,adapter:adapterName,computeAvailable:this.computeAvailable});
+    this.onStatus({state:"ready",label:this.computeAvailable?"WebGPU compute and renderer ready":`WebGPU compute unavailable (${computeProbe.detail}) · simulation paused`,adapter:adapterName,computeAvailable:this.computeAvailable,timestampQueriesAvailable:device.features.has("timestamp-query")});
   }
 
   private rebuildBindGroup(texture = this.fluidTexture) {
