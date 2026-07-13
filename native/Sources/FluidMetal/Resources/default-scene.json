@@ -19,6 +19,18 @@
     "initialCondition": "dam-break"
   },
   "nominalResolution": { "length_m": 0.025 },
+  "hierarchy": {
+    "levels": 3,
+    "brickSize": 4,
+    "maxActiveBricks": 32768,
+    "interfaceHaloCells": 3,
+    "solidHaloCells": 3,
+    "regridInterval": 12,
+    "coarsenDelay": 3,
+    "velocityErrorTolerance": 0.08,
+    "vorticityTolerance": 0.12,
+    "minimumFluidLevel": 0
+  },
   "numerics": {
     "fixedDt_s": 0.004,
     "maxDt_s": 0.008,

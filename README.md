@@ -7,8 +7,12 @@ WebGPU; it runs locally and requires no cloud simulation service.
 Implementation is intentionally gated by quantitative evidence. The current
 browser build includes the deterministic rigid-body and MAC-grid CPU oracles,
 deterministic buoyancy/drag quadrature with paired fluid reaction impulses, and
-a high-resolution WebGPU Eulerian path. WebGPU quality presets allocate approximately
-110k, 500k, or 1.2m cells and render the evolving volume fraction directly.
+a sparse hierarchical WebGPU Eulerian path. The workbench starts with five
+reproducible scenarios—dam break, wave tank, buoyancy contrast, splash impact,
+and hydrostatic still water—and exposes hierarchy depth and quality as its
+primary comparison controls. Detailed scene, body, solver, and diagnostic
+controls use progressive disclosure. WebGPU quality presets scale the finest
+resolution while sparse leaf bricks avoid allocating the full equivalent grid.
 The presentation renderer samples the VOF field trilinearly at a quality-aware
 stride, reconstructs an interface cell from eight cached samples, and uses
 subcell Newton refinement with analytic trilinear normals, front/back thickness,
@@ -76,12 +80,15 @@ details.
 
 ## Current numerical boundary
 
-The CPU MAC/PCG path remains the pressure-validation oracle. The GPU path uses
-an f32 cell-centred VOF field with packed staggered positive-face velocities,
-compatible divergence/gradient operators, a ghost-fluid atmospheric boundary,
-weighted Jacobi, and conservative upwind volume transport. The renderer reads
-the physical VOF field directly; no equilibrium blend, presentation smoothing,
-or global volume rescaling is applied. The native Metal path additionally uses
+The CPU MAC/PCG path remains the pressure-validation oracle. The WebGPU path
+uses one sparse 2:1 leaf-brick hierarchy with packed staggered face velocities,
+a ghost-fluid atmospheric boundary, matrix-free composite PCG, conservative
+bounded VOF transport, and pressure-level rigid coupling. Setting hierarchy
+depth to one produces a uniform grid through that same implementation. The
+renderer reads leaf buffers directly; no dense presentation volume, equilibrium
+blend, presentation smoothing, or global volume rescaling is applied. See
+[`HIERARCHICAL_WEBGPU.md`](HIERARCHICAL_WEBGPU.md) for its invariants and tuning
+contract. The native Metal path additionally uses
 analytic moving cut-cell volume/face fractions, aperture-aware pressure and VOF
 fluxes, conservative cover/uncover remapping, and equal-and-opposite pressure
 traction integrated into GPU-resident rigid-body motion. The native smoke gate
