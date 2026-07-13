@@ -30,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var inspectorView: NSView!
     private let metrics = NSTextField(labelWithString: "Starting Metal…")
     private let status = NSTextField(labelWithString: "")
+    private let playButton = NSButton(title: "Pause", target: nil, action: nil)
+    private let replayButton = NSButton(title: "Replay", target: nil, action: nil)
     private let bodyPopup = NSPopUpButton()
     private let widthField = NSTextField(), heightField = NSTextField(), depthField = NSTextField(), fillField = NSTextField()
     private let gravityField = NSTextField(), viscosityField = NSTextField(), tensionField = NSTextField()
@@ -82,12 +84,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         metalView.metricsChanged = { [weak self] value, grid in
             DispatchQueue.main.async {
                 self?.metrics.stringValue = String(
-                    format: "GPU frame  %.2f ms\nCPU frame  %.2f ms\nSimulation  %.3f s\nSimulation rate  %.2f×\nVolume drift  %.3f%%\nMax speed  %.2f m/s\n\n%@",
+                    format: "GPU command  %.2f ms\nCPU encode  %.2f ms\nSimulation  %.3f s\nSimulation rate  %.2f×\nVolume drift  %.3f%%\nMax speed  %.2f m/s\n\n%@",
                     value.renderMS, value.frameMS, value.simulationTime, value.simulatedPerWallSecond, value.volumeDrift * 100, value.maxSpeed, grid.label
                 )
                 if let solver = self?.metalView.solver, self?.bodyPopup.indexOfSelectedItem != solver.selectedBodyIndex {
                     self?.bodyPopup.selectItem(at: solver.selectedBodyIndex)
                     self?.updateBodyFields()
+                }
+                if let self, let solver = self.metalView.solver {
+                    self.playButton.title = solver.isRunning ? "Pause" : "Run"
+                    self.playButton.isEnabled = !solver.isPlayingRecording
+                    self.replayButton.title = solver.isPlayingRecording ? "Replaying…" : "Replay"
+                    self.replayButton.isEnabled = !solver.isPlayingRecording && solver.canReplay
                 }
             }
         }
@@ -102,8 +110,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         title.font = .systemFont(ofSize: 22, weight: .bold)
         let subtitle = NSTextField(labelWithString: "Native Metal · Apple Silicon")
         subtitle.textColor = .secondaryLabelColor
-        let play = NSButton(title: "Pause", target: self, action: #selector(toggle(_:)))
-        play.bezelStyle = .rounded
+        playButton.target = self; playButton.action = #selector(toggle(_:)); playButton.bezelStyle = .rounded
+        replayButton.target = self; replayButton.action = #selector(replaySimulation)
+        replayButton.isEnabled = false
         let step = NSButton(title: "Step", target: self, action: #selector(singleStep))
         let reset = NSButton(title: "Reset", target: self, action: #selector(resetSimulation))
         reset.bezelStyle = .rounded
@@ -151,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hint = NSTextField(wrappingLabelWithString: "Drag to orbit · ⌥ drag selected body\nScroll to zoom · ⌘O open scene")
         let validate = NSButton(title: "Validate", target: self, action: #selector(showValidation))
         let profile = NSButton(title: "Performance", target: self, action: #selector(showPerformance))
-        let buttons = NSStackView(views: [play, step, reset, validate, profile])
+        let buttons = NSStackView(views: [playButton, step, reset, replayButton, validate, profile])
         buttons.orientation = .horizontal
         buttons.distribution = .fillEqually
         buttons.spacing = 8
@@ -194,13 +203,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggle(_ sender: NSButton) {
         guard let solver = metalView.solver else { return }
+        guard !solver.isPlayingRecording else { return }
         solver.isRunning.toggle()
         sender.title = solver.isRunning ? "Pause" : "Run"
     }
     @objc private func resetSimulation() { try? metalView.solver?.reset() }
     @objc private func singleStep() { metalView.solver?.requestSingleStep() }
+    @objc private func replaySimulation() {
+        do { try metalView.solver?.startPlayback() }
+        catch { NSAlert(error: error).runModal() }
+    }
     @objc private func showValidation() { let alert=NSAlert();alert.messageText="Eulerian contract";alert.informativeText="Shared scene/schema: PASS\nMetal library and pipelines: PASS\nRigid primitives: \(metalView.solver?.bodies.count ?? 0) active\nFinite GPU diagnostics are monitored live.";alert.runModal() }
-    @objc private func showPerformance() { guard let value=metalView.solver?.metrics else{return};let alert=NSAlert();alert.messageText="Metal performance";alert.informativeText=String(format:"GPU command buffer %.2f ms\nCPU frame %.2f ms\nSimulation rate %.2fx\nVolume drift %.3f%%\nMax velocity %.2f m/s",value.renderMS,value.frameMS,value.simulatedPerWallSecond,value.volumeDrift*100,value.maxSpeed);alert.runModal() }
+    @objc private func showPerformance() { guard let value=metalView.solver?.metrics else{return};let alert=NSAlert();alert.messageText="Metal performance";alert.informativeText=String(format:"GPU command buffer %.2f ms\nCPU encode %.2f ms\nSimulation rate %.2fx\nVolume drift %.3f%%\nMax velocity %.2f m/s",value.renderMS,value.frameMS,value.simulatedPerWallSecond,value.volumeDrift*100,value.maxSpeed);alert.runModal() }
     private func configureBodyPopup() {
         bodyPopup.removeAllItems(); (metalView?.solver?.bodies ?? []).forEach { bodyPopup.addItem(withTitle: $0.description.name) }
         bodyPopup.selectItem(at: metalView?.solver?.selectedBodyIndex ?? 0)

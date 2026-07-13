@@ -256,6 +256,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .performance-row > strong { text-align: right; color: var(--ink); font: 9px/1 var(--mono); }
 .performance-row > small { text-align: right; color: var(--dim); font: 7px/1 var(--mono); }
 .stage-advection { background: #61d9bc; }
+.stage-control { background: #d6c66a; }
 .stage-pressure { background: #73aef5; }
 .stage-projection { background: #b38af2; }
 .stage-rigid { background: #efb65c; }

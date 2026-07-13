@@ -11,7 +11,7 @@ import {
   restrictVolumeFractions
 } from "../lib/hierarchical-grid";
 import { cloneScene, defaultScene } from "../lib/model";
-import { createGPUHierarchyLayout, GPU_BRICK_META_WORDS, GPU_CELLS_PER_BRICK, GPU_CELL_FLOATS, rebuildGPUHierarchyLayout } from "../lib/webgpu-hierarchy-layout";
+import { createGPUHierarchyLayout, GPU_BRICK_META_WORDS, GPU_CELLS_PER_BRICK, GPU_CELL_FLOATS, rebuildGPUHierarchyFromTags, rebuildGPUHierarchyLayout } from "../lib/webgpu-hierarchy-layout";
 import { initializeRigidBodies } from "../lib/rigid-body";
 
 test("H11-01 one hierarchy level is exactly a uniform leaf-brick covering", () => {
@@ -124,4 +124,11 @@ test("H11-09 pressure-level rigid Schur term is symmetric positive semidefinite"
   assert.ok(Math.abs(dot(x,ay)-dot(y,ax))<1e-12);
   assert.ok(dot(x,ax)>=-1e-12);
   assert.ok(dot(y,ay)>=-1e-12);
+});
+
+test("H11-10 GPU page tags produce deterministic balanced CPU topology",()=>{
+  const scene=cloneScene(defaultScene);scene.hierarchy.levels=3;scene.rigidBodies=[];const before=createGPUHierarchyLayout(scene,"balanced"),tags=new Uint32Array(before.pageTable.length),dims=before.topology.finestBrickDims,centre=Math.floor(dims.x/2)+dims.x*(Math.floor(dims.y/2)+dims.y*Math.floor(dims.z/2));tags[centre]=scene.hierarchy.levels-1;
+  const a=rebuildGPUHierarchyFromTags(scene,"balanced",before,tags,[],true),b=rebuildGPUHierarchyFromTags(scene,"balanced",before,tags,[],true);
+  assert.deepEqual(a.leafMetadata,b.leafMetadata);assert.equal(a.topology.pageTable.levels[centre],scene.hierarchy.levels-1);
+  for(const leaf of a.topology.leaves)for(const axis of [0,1,2] as const)for(const sign of [-1,1] as const)for(const id of leafFaceNeighbors(a.topology,leaf,axis,sign))assert.ok(Math.abs(leaf.level-a.topology.bricks[id].level)<=1);
 });

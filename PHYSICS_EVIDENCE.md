@@ -641,3 +641,26 @@ Build: `web-stage12.4-1.2.4`
 - Switching between GPU, CPU reference, and live comparison resets fields so an
   explicit opt-in always starts from a synchronized initial condition.
 - Production build, lint, and all `49` deterministic tests pass.
+
+## Stage 12.5 extracted refractive surface
+
+Recorded: 2026-07-13<br>
+Build: `web-stage12.5-1.2.5`
+
+- Replaced the normal per-pixel hierarchical volume traversal with a GPU-
+  extracted `alpha = 0.5` surface. A compact classification pass includes each
+  brick's positive neighbor planes so it retains interfaces aligned exactly to
+  brick boundaries while skipping bulk liquid and empty air.
+- Marching tetrahedra write through a bounded vertex buffer and indirect draw.
+  Workgroup prefix allocation reduces vertex reservation to one global atomic
+  per interface brick, and topology changes invalidate the extraction bindings
+  before old hierarchy buffers are destroyed.
+- Added front/back surface passes, screen-space Snell refraction, Fresnel
+  reflection, Beer–Lambert attenuation and scattering, and analytic foreground
+  rigid-body occlusion. The sparse trilinear ray march remains available if
+  surface shader creation fails.
+- Production build, lint, and all `52` deterministic tests pass. The final WGSL
+  modules compile without browser console or validation errors. The Codex
+  in-app browser's independent compute sentinel returned zero before simulation
+  startup, so final hardware timing is intentionally left for a working Chrome
+  adapter rather than inferred from that environment.

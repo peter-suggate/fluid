@@ -13,16 +13,25 @@ and hydrostatic still water—and exposes hierarchy depth and quality as its
 primary comparison controls. Detailed scene, body, solver, and diagnostic
 controls use progressive disclosure. WebGPU quality presets scale the finest
 resolution while sparse leaf bricks avoid allocating the full equivalent grid.
-The presentation renderer samples the VOF field trilinearly at a quality-aware
-stride, reconstructs an interface cell from eight cached samples, and uses
-subcell Newton refinement with analytic trilinear normals, front/back thickness,
-Fresnel reflection, and Beer–Lambert absorption. It renders at native canvas
-resolution; traversal skipping and cached interface work keep the
-raymarch within its GPU budget without reducing surface fidelity.
-The live performance drawer separates hardware-timestamped GPU advection,
-pressure, projection, immersed-body coupling, reductions, queue/copy overhead,
-and raymarch rendering from wall-clock CPU simulation, upload, encoding, and
-orchestration costs, with a shared 60 Hz budget and recent-frame history.
+The presentation renderer classifies sparse bricks whose VOF range crosses the
+free surface, extracts their `alpha = 0.5` interface on the GPU, and draws the
+result through bounded indirect buffers. Front/back surface passes provide
+thickness for screen-space refraction, Fresnel reflection, and Beer–Lambert
+absorption at native canvas resolution. The former hierarchical volume march is
+retained as a shader-compilation fallback but is not used by the normal WebGPU
+surface path.
+The live performance drawer reports queue-safe end-to-end latency, completed
+simulation throughput, solver lag, presentation interval, blocked frames, and
+wall-clock CPU simulation, upload, encoding, and orchestration costs. Render
+timestamps remain available. Intrusive multi-pass compute timestamps are
+disabled by default because Chrome's Metal backend can serialize the queue for
+seconds; the dormant stage markers separate advection, PCG control and copies,
+pressure, projection, immersed-body coupling, reductions, and unattributed
+compute when explicitly enabled for controlled profiling.
+The web preview starts with a queue-safe uniform Balanced profile: a compact GPU
+grid, an ordered Jacobi pressure pass, an 8 ms interactive clock, idle-time
+diagnostic readbacks, and no adaptive remap stalls. Adaptive depths and the
+composite PCG detail path remain explicitly selectable for fidelity work.
 The GPU transport path uses conservative bounded donor-cell VOF fluxes,
 midpoint RK2 velocity backtracing on packed staggered faces, ghost-fluid
 free-surface pressure, balanced-force continuum surface tension, Smagorinsky
