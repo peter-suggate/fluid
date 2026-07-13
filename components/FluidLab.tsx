@@ -22,7 +22,7 @@ import { runShellValidation, type ValidationResult } from "@/lib/validation";
 import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBody, initializeRigidBodies, rigidDiagnostics, type RigidBodyState, type RigidExternalLoad, type RigidStepDiagnostics } from "@/lib/rigid-body";
 import { EulerianFluidSolver, type EulerianDiagnostics, type EulerianRenderState } from "@/lib/eulerian-solver";
 import { applyFluidReactions, computeFluidLoads, type CouplingDiagnostics } from "@/lib/fluid-rigid-coupling";
-import { consumeGPURigidLoad, mergeGPURigidLoads, type GPUEulerianInfo, type GPURigidLoad, type GPUQuality } from "@/lib/webgpu-eulerian";
+import { consumeGPURigidLoad, mergeGPURigidLoads, type GPUEulerianInfo, type GPURigidLoad, type GPUGridMethod, type GPUQuality } from "@/lib/webgpu-eulerian";
 
 const RIGID_BODIES_ENABLED = true;
 
@@ -42,15 +42,21 @@ function formatNumber(value: number, digits = 3) {
 
 function externalLoadsFromGPU(scene: SceneDescription, gpuLoads: GPURigidLoad[], dt: number) {
   const loads = new Map<string, RigidExternalLoad>();
-  let displaced = 0, bodyImpulse = { x: 0, y: 0, z: 0 };
+  let displaced = 0, bodyImpulse = { x: 0, y: 0, z: 0 }, fluidReactionImpulse = { x: 0, y: 0, z: 0 };
   for (const load of gpuLoads) {
     const { impulse_N_s: stepImpulse, angularImpulse_N_m_s: stepAngularImpulse } = consumeGPURigidLoad(load, dt);
     const hydrodynamicForce = scale(stepImpulse, 1 / dt), hydrodynamicTorque = scale(stepAngularImpulse, 1 / dt);
     const buoyant = scale(scene.fluid.gravity_m_s2, -scene.fluid.density_kg_m3 * load.displacedVolume_m3), force = add(hydrodynamicForce, buoyant);
     loads.set(load.bodyId, { force_N: force, torque_N_m: hydrodynamicTorque, buoyantForce_N: buoyant, hydrodynamicForce_N: hydrodynamicForce, displacedFluidVolume_m3: load.displacedVolume_m3 });
-    displaced += load.displacedVolume_m3; bodyImpulse = add(bodyImpulse, add(stepImpulse, scale(buoyant, dt)));
+    displaced += load.displacedVolume_m3;
+    bodyImpulse = add(bodyImpulse, add(stepImpulse, scale(buoyant, dt)));
+    // The VOS velocity blend applies the opposite of the sampled drag impulse
+    // to the fluid.  Buoyancy is a separate pressure approximation and is not
+    // present in the GPU exchange buffer, so do not fabricate its reaction in
+    // the diagnostic.
+    fluidReactionImpulse = add(fluidReactionImpulse, scale(stepImpulse, -1));
   }
-  const diagnostics: CouplingDiagnostics = { displacedVolume_m3: displaced, bodyImpulse_N_s: bodyImpulse, fluidReactionImpulse_N_s: scale(bodyImpulse, -1), momentumClosureError_N_s: 0, coupledBodyCount: gpuLoads.filter((load) => load.displacedVolume_m3 > 0).length };
+  const diagnostics: CouplingDiagnostics = { displacedVolume_m3: displaced, bodyImpulse_N_s: bodyImpulse, fluidReactionImpulse_N_s: fluidReactionImpulse, momentumClosureError_N_s: length(add(bodyImpulse, fluidReactionImpulse)), coupledBodyCount: gpuLoads.filter((load) => load.displacedVolume_m3 > 0).length };
   return { loads, diagnostics };
 }
 
@@ -166,7 +172,7 @@ function PerformanceDrawer({snapshot,history,onClose,timestampsAvailable}:{snaps
 
 type BodyDragPhase = "start" | "move" | "end";
 
-function WebGPUViewport({ scene, camera, setCamera, view, simulationTime, bodies, selectedBodyId, fluid, backend, quality, onFrame, onGPUStatus, onGPUInfo, onGPURigidLoads, onSelectBody, onDragBody }: {
+function WebGPUViewport({ scene, camera, setCamera, view, simulationTime, bodies, selectedBodyId, fluid, backend, quality, gridMethod, onFrame, onGPUStatus, onGPUInfo, onGPURigidLoads, onSelectBody, onDragBody }: {
   scene: SceneDescription;
   camera: CameraState;
   setCamera: React.Dispatch<React.SetStateAction<CameraState>>;
@@ -177,6 +183,7 @@ function WebGPUViewport({ scene, camera, setCamera, view, simulationTime, bodies
   fluid: EulerianRenderState;
   backend: SimulationBackend;
   quality: GPUQuality;
+  gridMethod: GPUGridMethod;
   onFrame: (metrics: RendererFrameMetrics, resolution: string) => void;
   onGPUStatus: (status: GPUStatus) => void;
   onGPUInfo: (info: GPUEulerianInfo) => void;
@@ -186,7 +193,7 @@ function WebGPUViewport({ scene, camera, setCamera, view, simulationTime, bodies
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<FluidLabRenderer | null>(null);
-  const stateRef = useRef({ scene, camera, view, simulationTime, bodies, selectedBodyId, fluid, backend, quality });
+  const stateRef = useRef({ scene, camera, view, simulationTime, bodies, selectedBodyId, fluid, backend, quality, gridMethod });
   const pointerRef = useRef<
     | { id: number; x: number; y: number; action: "orbit" | "pan" }
     | { id: number; action: "body"; bodyId: string; planePoint: RigidBodyState["position_m"]; planeNormal: RigidBodyState["position_m"]; grabOffset: RigidBodyState["position_m"]; lastPosition: RigidBodyState["position_m"]; lastTime: number }
@@ -194,8 +201,8 @@ function WebGPUViewport({ scene, camera, setCamera, view, simulationTime, bodies
   >(null);
 
   useEffect(() => {
-    stateRef.current = { scene, camera, view, simulationTime, bodies, selectedBodyId, fluid, backend, quality };
-  }, [scene, camera, view, simulationTime, bodies, selectedBodyId, fluid, backend, quality]);
+    stateRef.current = { scene, camera, view, simulationTime, bodies, selectedBodyId, fluid, backend, quality, gridMethod };
+  }, [scene, camera, view, simulationTime, bodies, selectedBodyId, fluid, backend, quality, gridMethod]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -208,7 +215,7 @@ function WebGPUViewport({ scene, camera, setCamera, view, simulationTime, bodies
       const render = () => {
         if (!alive) return;
         const state = stateRef.current;
-        const metrics = renderer.draw(state.simulationTime, state.scene, state.camera, state.view, state.bodies, state.selectedBodyId, state.fluid, state.backend, state.quality);
+        const metrics = renderer.draw(state.simulationTime, state.scene, state.camera, state.view, state.bodies, state.selectedBodyId, state.fluid, state.backend, state.quality, state.gridMethod);
         onFrame(metrics, renderer.presentationResolution);
         frame = requestAnimationFrame(render);
       };
@@ -326,6 +333,7 @@ export function FluidLab() {
   const [fluidRenderState, setFluidRenderState] = useState<EulerianRenderState>(() => initialFluidSolver.getRenderState());
   const [backend, setBackend] = useState<SimulationBackend>("webgpu");
   const [gpuQuality, setGPUQuality] = useState<GPUQuality>("balanced");
+  const [gpuGridMethod, setGPUGridMethod] = useState<GPUGridMethod>("tall-cell");
   const [gpuInfo, setGPUInfo] = useState<GPUEulerianInfo | null>(null);
   const [couplingState, setCouplingState] = useState<CouplingDiagnostics>({ displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 });
   const [camera, setCamera] = useState<CameraState>(defaultCamera);
@@ -467,6 +475,22 @@ export function FluidLab() {
     setSelectedBodyId(source.rigidBodies[0]?.id);
     setNotice(`${source.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
   };
+  const loadDeepComparison = () => {
+    const deep = cloneScene(scene);
+    deep.sceneId = "deep-water-grid-comparison";
+    deep.container.height_m = 20;
+    deep.container.fillFraction = 0.8;
+    deep.fluid.initialCondition = "tank-fill";
+    // The tall-cell paper does not include a capillary-force discretization.
+    // Keep the A/B preset within that shared physical scope so the grid and
+    // pressure methods are the only variables in the comparison.
+    deep.fluid.surfaceTension_N_m = 0;
+    deep.numerics.fixedDt_s = 1 / 30;
+    deep.numerics.maxDt_s = 1 / 30;
+    deep.rigidBodies = [];
+    setScene(deep); resetSimulation(deep);
+    setNotice("Deep-water A/B loaded · 20 m tank · 80% fill · 1/30 s paper step · σ = 0");
+  };
   const saveScene = () => {
     localStorage.setItem("fluid-lab.scene.v1", serializeScene(scene));
     downloadText(`${scene.sceneId}.fluid.json`, serializeScene(scene));
@@ -487,7 +511,7 @@ export function FluidLab() {
   };
   const exportMetrics = () => {
     const adapter = gpuStatus.state === "ready" ? gpuStatus.adapter : gpuStatus.label;
-    const payload = { manifest: createRunManifest(scene, adapter), backend, gpuQuality, gpuInfo, shellMetrics: { presentationFrame_ms: frameMs, canvasResolution: resolution, samples, performance: performanceSnapshot, performanceHistory }, rigidBodyState: bodies, rigidBodyDiagnostics: rigidState, eulerianMetrics: fluidState, couplingMetrics: couplingState };
+    const payload = { manifest: createRunManifest(scene, adapter), backend, gpuQuality, gpuGridMethod, gpuInfo, shellMetrics: { presentationFrame_ms: frameMs, canvasResolution: resolution, samples, performance: performanceSnapshot, performanceHistory }, rigidBodyState: bodies, rigidBodyDiagnostics: rigidState, eulerianMetrics: fluidState, couplingMetrics: couplingState };
     downloadText(`fluid-lab-run-${Date.now()}.json`, JSON.stringify(payload, null, 2) + "\n");
     setNotice("Run manifest and shell metrics exported");
   };
@@ -561,7 +585,7 @@ export function FluidLab() {
     <main className="lab-shell" data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={RIGID_BODIES_ENABLED ? bodies.length : 0}>
       <header className="topbar">
         <div className="brand"><span className="brand-mark">FL</span><div><strong>Fluid Lab</strong><small>WEBGPU CFD WORKBENCH</small></div></div>
-        <div className="solver-identity">Eulerian VOF</div>
+        <div className="solver-identity">{gpuGridMethod === "tall-cell" ? "Tall-cell VOF" : "Uniform VOF"}</div>
         <div className="top-actions">
           <button className="quiet-button" onClick={() => setValidationOpen(true)}><span className={`status-dot ${validationResults.every((result) => result.passed) ? "online" : "warning"}`} />Validation</button>
           <button className="quiet-button" onClick={saveScene}>Save scene</button>
@@ -578,7 +602,7 @@ export function FluidLab() {
         <section className="panel-section">
           <div className="section-heading"><h2>Container</h2><span>rectangular glass</span></div>
           <RangeControl label="Width" unit="m" value={scene.container.width_m} min={0.4} max={2.5} step={0.05} onChange={(value) => patchContainer({ width_m: value })} displayDigits={2} />
-          <RangeControl label="Height" unit="m" value={scene.container.height_m} min={0.4} max={1.8} step={0.05} onChange={(value) => patchContainer({ height_m: value })} displayDigits={2} />
+          <RangeControl label="Height" unit="m" value={scene.container.height_m} min={0.4} max={5} step={0.05} onChange={(value) => patchContainer({ height_m: value })} displayDigits={2} />
           <RangeControl label="Depth" unit="m" value={scene.container.depth_m} min={0.4} max={2} step={0.05} onChange={(value) => patchContainer({ depth_m: value })} displayDigits={2} />
           <RangeControl label="Water fill" unit="%" value={scene.container.fillFraction * 100} min={5} max={90} step={1} onChange={(value) => patchContainer({ fillFraction: value / 100 })} displayDigits={0} />
           <div className="segmented compact"><button className={scene.container.top === "open" ? "active" : ""} onClick={() => patchContainer({ top: "open" })}>Open top</button><button className={scene.container.top === "closed" ? "active" : ""} onClick={() => patchContainer({ top: "closed" })}>Closed</button></div>
@@ -619,7 +643,9 @@ export function FluidLab() {
         <section className="panel-section">
           <div className="section-heading"><h2>Compute &amp; resolution</h2><span>active backend</span></div>
           <div className="segmented compact" aria-label="Simulation backend"><button className={backend === "webgpu" ? "active" : ""} onClick={() => { setBackend("webgpu"); setNotice("WebGPU compute selected; reset to rebuild fields"); }}>WebGPU</button><button className={backend === "cpu-reference" ? "active" : ""} onClick={() => { setBackend("cpu-reference"); setNotice("CPU binary64 reference selected"); }}>CPU reference</button></div>
-          <label className="select-control"><span>GPU quality</span><select aria-label="GPU quality" value={gpuQuality} onChange={(event) => { setGPUQuality(event.target.value as GPUQuality); setSimulationTime(0); simulationTimeRef.current = 0; setRunState("paused"); }}><option value="balanced">Balanced · ~110k cells</option><option value="high">High · ~500k cells</option><option value="ultra">Ultra · ~1.2m cells</option></select></label>
+          <div className="segmented compact" aria-label="GPU grid method"><button className={gpuGridMethod === "tall-cell" ? "active" : ""} onClick={() => { setGPUGridMethod("tall-cell"); resetSimulation(); setNotice("Restricted tall-cell grid selected"); }}>Tall cells</button><button className={gpuGridMethod === "uniform" ? "active" : ""} onClick={() => { setGPUGridMethod("uniform"); resetSimulation(); setNotice("Uniform cubic comparison grid selected"); }}>Uniform</button></div>
+          <label className="select-control"><span>GPU quality</span><select aria-label="GPU quality" value={gpuQuality} onChange={(event) => { setGPUQuality(event.target.value as GPUQuality); setSimulationTime(0); simulationTimeRef.current = 0; setRunState("paused"); }}>{gpuGridMethod === "tall-cell" ? <><option value="balanced">Balanced · ~2.5k columns · 24 layers</option><option value="high">High · ~7k columns · 32 layers</option><option value="ultra">Ultra · ~12.5k columns · 40 layers</option></> : <><option value="balanced">Balanced · matched cubic grid</option><option value="high">High · matched cubic grid</option><option value="ultra">Ultra · matched cubic grid</option></>}</select></label>
+          <button className="drop-button" onClick={loadDeepComparison}>Load deep-water A/B scene</button>
           <RangeControl label="Nominal length" unit="m" value={scene.nominalResolution.length_m} min={0.0125} max={0.08} step={0.0025} onChange={(value) => setScene((current) => ({ ...current, nominalResolution: { length_m: value } }))} displayDigits={4} />
           <RangeControl label="Pressure iterations" unit="iterations" value={scene.numerics.pressureMaxIterations} min={20} max={1000} step={20} onChange={(value) => setScene((current) => ({ ...current, numerics: { ...current.numerics, pressureMaxIterations: value } }))} displayDigits={0} />
           <div className="estimate-grid"><div><small>MAC allocation</small><strong>{estimatedCells.toLocaleString()}</strong><span>cells</span></div></div>
@@ -627,12 +653,12 @@ export function FluidLab() {
       </aside>
 
       <section className="viewport-shell">
-        <WebGPUViewport scene={scene} camera={camera} setCamera={setCamera} view={view} simulationTime={simulationTime} bodies={RIGID_BODIES_ENABLED ? bodies : []} selectedBodyId={RIGID_BODIES_ENABLED ? selectedBodyId : undefined} fluid={fluidRenderState} backend={backend} quality={gpuQuality} onFrame={handleFrame} onGPUStatus={handleGPUStatus} onGPUInfo={handleGPUInfo} onGPURigidLoads={handleGPURigidLoads} onSelectBody={setSelectedBodyId} onDragBody={handleBodyDrag} />
+        <WebGPUViewport scene={scene} camera={camera} setCamera={setCamera} view={view} simulationTime={simulationTime} bodies={RIGID_BODIES_ENABLED ? bodies : []} selectedBodyId={RIGID_BODIES_ENABLED ? selectedBodyId : undefined} fluid={fluidRenderState} backend={backend} quality={gpuQuality} gridMethod={gpuGridMethod} onFrame={handleFrame} onGPUStatus={handleGPUStatus} onGPUInfo={handleGPUInfo} onGPURigidLoads={handleGPURigidLoads} onSelectBody={setSelectedBodyId} onDragBody={handleBodyDrag} />
         <div className="viewport-topline">
           <div className={`gpu-badge state-${gpuStatus.state}`}><span className={`status-dot ${gpuStatus.state === "ready" ? "online" : "warning"}`} /><strong>{gpuStatus.state === "ready" ? "WEBGPU" : gpuStatus.state.toUpperCase()}</strong><span>{gpuStatus.label}</span></div>
           <div className="segmented"><button className={view === "scientific" ? "active" : ""} onClick={() => setView("scientific")}>Scientific</button><button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button></div>
         </div>
-        <div className="physics-stage-badge"><strong>STAGE 10.5</strong><span>{backend === "webgpu" ? "VOF · MAC · immersed bodies" : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} cells · f32 · ${gpuInfo?.pressureIterations ?? "…"} Jacobi` : "MAC · binary64 · PCG"}</small></div>
+        <div className="physics-stage-badge"><strong>{gpuGridMethod === "tall-cell" ? "TALL CELLS" : "UNIFORM GRID"}</strong><span>{backend === "webgpu" ? `${gpuGridMethod === "tall-cell" ? "restricted tall-cell · paper core σ=0" : "uniform cubic"} · VOF · immersed bodies` : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} stored samples · f32 · ${gpuInfo?.pressureSolver ?? `${gpuInfo?.pressureIterations ?? "…"} Jacobi`}` : "MAC · binary64 · PCG"}</small></div>
         {view === "scientific" && <>
           <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
           <div className="probe-label probe-a"><i />P-01 · surface</div>
@@ -657,10 +683,13 @@ export function FluidLab() {
           {RIGID_BODIES_ENABLED && <MetricCard label="Rigid bodies" value={String(bodies.length)} unit={`${rigidState.contactCount} contact solves`} />}
           <MetricCard label="MAC grid" value={`${fluidRenderState.nx} × ${fluidRenderState.ny} × ${fluidRenderState.nz}`} unit={`${fluidState.pressureIterations} PCG iterations`} tone={fluidState.pressureConverged ? "good" : "warn"} />
           <MetricCard label="Dam front" value={fluidState.damFront_m.toFixed(3)} unit="m" />
-          <MetricCard label="GPU grid" value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.ny} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
+          <MetricCard label={gpuInfo?.gridKind === "uniform" ? "GPU uniform grid" : "GPU tall grid"} value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.storedNy} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${gpuInfo.ny} cubic-equivalent Y · ${(gpuInfo.compressionRatio * 100).toFixed(0)}% stored` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
+          <MetricCard label={gpuInfo?.gridKind === "uniform" ? "Uniform allocation" : "Tall-cell span"} value={gpuInfo?.gridKind === "uniform" ? gpuInfo.cellCount.toLocaleString() : gpuInfo?.maximumTallCellHeight !== undefined ? String(gpuInfo.maximumTallCellHeight) : "—"} unit={gpuInfo ? `${gpuInfo.gridKind === "uniform" ? "cells" : "cells"} · ${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} />
           <MetricCard label="GPU dam front" value={gpuInfo?.front_m !== undefined ? gpuInfo.front_m.toFixed(3) : "—"} unit="m · volume-fraction threshold" />
           <MetricCard label="GPU max speed" value={gpuInfo?.maxSpeed_m_s !== undefined ? gpuInfo.maxSpeed_m_s.toFixed(3) : "—"} unit={`m/s · ${gpuInfo?.encodedSteps ?? 0} encoded steps`} />
+          <MetricCard label="GPU max divergence" value={gpuInfo?.maxDivergence_s !== undefined ? gpuInfo.maxDivergence_s.toExponential(2) : "—"} unit="s⁻¹ · post-projection" />
           <MetricCard label="GPU step" value={gpuInfo?.gpuStep_ms !== undefined ? gpuInfo.gpuStep_ms.toFixed(2) : "—"} unit="ms · timestamp query" tone={gpuInfo?.gpuStep_ms !== undefined && gpuInfo.gpuStep_ms < 16.7 ? "good" : "neutral"} />
+          <MetricCard label="GPU queue throughput" value={gpuInfo?.gpuQueueWall_ms && gpuInfo.gpuQueueSimulation_s ? (gpuInfo.gpuQueueSimulation_s * 1000 / gpuInfo.gpuQueueWall_ms).toFixed(2) : "—"} unit={gpuInfo?.gpuQueueWall_ms ? `× realtime · ${gpuInfo.gpuQueueWall_ms.toFixed(1)} ms queue wall` : "synchronized completion"} tone={gpuInfo?.gpuQueueWall_ms && gpuInfo.gpuQueueSimulation_s && gpuInfo.gpuQueueSimulation_s * 1000 >= gpuInfo.gpuQueueWall_ms ? "good" : "neutral"} />
           <MetricCard label="GPU volume drift" value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit="% · unmodified VOF integral" tone={gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
           <MetricCard label="Volume correction" value="None" unit="physical VOF rendered directly" tone="good" />
         </section>
@@ -708,7 +737,7 @@ export function FluidLab() {
             <div><span>Time-step bound</span><strong>{fluidState.limitingCondition}</strong><small>dt {fluidState.dt_s.toFixed(4)} s</small></div>
             <div><span>NaN / infinity</span><strong>{fluidState.nanCount}</strong><small>acceptance = 0</small></div>
           </div>
-          <p>CPU oracle: staggered MAC, RK2 semi-Lagrangian advection, explicit viscosity, marker free surface, closed-wall flux enforcement, and matrix-free Jacobi-PCG projection. The WebGPU path packs staggered positive-face velocities with a conservative VOF field, ghost-fluid free-surface pressure, and weighted Jacobi projection.</p>
+          <p>CPU oracle: staggered MAC, RK2 semi-Lagrangian advection, explicit viscosity, marker free surface, closed-wall flux enforcement, and matrix-free Jacobi-PCG projection. The selected WebGPU path uses {gpuGridMethod === "tall-cell" ? "one variable-height bottom cell per x/z column plus a moving band of cubic surface cells, bounded MacCormack velocity advection, narrow-band velocity extrapolation, and a restricted full-cycle multigrid pressure solve" : "the matched full-depth cubic comparison grid with conservative VOF transport and weighted Jacobi projection"}.</p>
         </section>
         {RIGID_BODIES_ENABLED && <section className="panel-section">
           <div className="section-heading"><h2>Fluid–rigid exchange</h2><span>two-way impulses</span></div>
@@ -716,7 +745,7 @@ export function FluidLab() {
         </section>}
         <section className="panel-section">
           <div className="section-heading"><h2>Run identity</h2><span>reproducibility</span></div>
-          <dl className="run-identity"><div><dt>Build</dt><dd>{BUILD_ID}</dd></div><div><dt>Active backend</dt><dd>{backend}</dd></div><div><dt>Eulerian GPU</dt><dd>f32 VOF ghost-fluid MAC</dd></div><div><dt>Eulerian CPU</dt><dd>binary64 MAC PCG</dd></div><div><dt>Random seed</dt><dd>{scene.randomSeed}</dd></div></dl>
+          <dl className="run-identity"><div><dt>Build</dt><dd>{BUILD_ID}</dd></div><div><dt>Active backend</dt><dd>{backend}</dd></div><div><dt>Eulerian GPU</dt><dd>{gpuGridMethod === "tall-cell" ? "f32 restricted tall-cell VOF" : "f32 uniform cubic VOF"}</dd></div><div><dt>Eulerian CPU</dt><dd>binary64 MAC PCG</dd></div><div><dt>Random seed</dt><dd>{scene.randomSeed}</dd></div></dl>
         </section>
       </aside>
 
