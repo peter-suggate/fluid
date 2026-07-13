@@ -624,3 +624,20 @@ Build: `web-stage12.3-1.2.3`
   hierarchical GPU surface quality.
 - All `49` deterministic tests pass, including a new surface-band allocation
   guard; lint and the production build pass.
+
+## Stage 12.4 GPU-only default execution
+
+Recorded: 2026-07-13<br>
+Build: `web-stage12.4-1.2.4`
+
+- Removed automatic CPU backend selection, CPU fluid stepping, and CPU fluid
+  texture upload. A failed WebGPU compute check now pauses with an empty fluid
+  field and disables run/step controls; it never substitutes another solver.
+- The binary64 Eulerian solver is no longer constructed during application
+  startup or ordinary WebGPU resets. It is created only after selecting `CPU
+  reference` or enabling `Live CPU comparison oracle` in Advanced controls.
+- Shell validation is likewise lazy and runs only when the user opens the
+  Validation panel. CPU diagnostics stay hidden while the CPU oracle is off.
+- Switching between GPU, CPU reference, and live comparison resets fields so an
+  explicit opt-in always starts from a synchronized initial condition.
+- Production build, lint, and all `49` deterministic tests pass.
