@@ -31,6 +31,11 @@ private struct SolverParams {
     var boundary: SIMD4<Float>
 }
 
+private struct SimulationRecordingFrame: Sendable {
+    let time: Float
+    let bodies: [RigidBodyState]
+}
+
 final class MetalFluidSolver: @unchecked Sendable {
     let device: MTLDevice
     let queue: MTLCommandQueue
@@ -44,7 +49,7 @@ final class MetalFluidSolver: @unchecked Sendable {
     private let auxiliary, remapScale: MTLBuffer
     private let solidCell, solidFace: MTLBuffer
     private let params: MTLBuffer
-    private let buildSolid, prepareRemap, limitRemap, applyRemap, buildAuxiliary, advect, jacobi, project, pressureTraction, integrateBodies, reduce, render: MTLComputePipelineState
+    private let buildSolid, prepareRemap, limitRemap, applyRemap, buildAuxiliary, advect, jacobi, project, pressureTraction, clearExchange, integrateBodies, reduce, render: MTLComputePipelineState
     private let bodyBuffers: [MTLBuffer]
     private let exchangeBuffers: [MTLBuffer]
     private let reductionBuffers: [MTLBuffer]
@@ -52,17 +57,21 @@ final class MetalFluidSolver: @unchecked Sendable {
     private let stateLock = NSLock()
     private var frameIndex = 0
     private var accumulator: Double = 0
+    private let maximumSimulationStepsPerFrame = 32
     private var lastWallTime = CACurrentMediaTime()
     private var initialVolumeSum: Float = 1
     private(set) var bodies: [RigidBodyState]
     private(set) var metrics = FluidMetrics()
-    private var lastFrame = CACurrentMediaTime()
     private var activelyDraggedBody: Int?
     private var lastDragTime = CACurrentMediaTime()
     private var azimuth: Float = 0.72
     private var elevation: Float = 0.42
     private var distance: Float = 2.65
     var isRunning = true
+    private(set) var isPlayingRecording = false
+    private(set) var recordingDuration: Float = 0
+    private var recordingFrames: [SimulationRecordingFrame] = []
+    private var playbackStartedAt = CACurrentMediaTime()
     private var singleStepRequested = false
     var scientificView = false
     var glassVisible = true
@@ -128,10 +137,12 @@ final class MetalFluidSolver: @unchecked Sendable {
         jacobi = try pipeline("jacobi")
         project = try pipeline("projectAndCommit")
         pressureTraction = try pipeline("accumulatePressureTraction")
+        clearExchange = try pipeline("clearRigidExchange")
         integrateBodies = try pipeline("integrateRigidBodies")
         reduce = try pipeline("reduceDiagnostics")
         render = try pipeline("raymarch")
         try initializeVolume()
+        recordingFrames = [SimulationRecordingFrame(time: 0, bodies: bodies)]
     }
 
     private func initializeVolume() throws {
@@ -163,9 +174,60 @@ final class MetalFluidSolver: @unchecked Sendable {
     func reset() throws {
         metrics = FluidMetrics(); accumulator = 0; lastWallTime = CACurrentMediaTime()
         bodies = scene.rigidBodies.prefix(12).map(RigidBodyState.init)
+        isPlayingRecording = false
+        recordingDuration = 0
+        recordingFrames = [SimulationRecordingFrame(time: 0, bodies: bodies)]
         try initializeVolume()
     }
-    func requestSingleStep() { singleStepRequested = true }
+    var canReplay: Bool { metrics.simulationTime > 0 || recordingDuration > 0 }
+    func requestSingleStep() { if !isPlayingRecording { singleStepRequested = true } }
+
+    func startPlayback() throws {
+        inFlight.wait()
+        defer { inFlight.signal() }
+        guard metrics.simulationTime > 0 else { return }
+        stateLock.lock()
+        let endpoint = SimulationRecordingFrame(time: metrics.simulationTime, bodies: bodies)
+        if abs(metrics.simulationTime - recordingDuration) < 1e-6, !recordingFrames.isEmpty { recordingFrames[recordingFrames.count - 1] = endpoint }
+        else if metrics.simulationTime > recordingDuration { recordingFrames.append(endpoint) }
+        recordingDuration = max(recordingDuration, metrics.simulationTime)
+        stateLock.unlock()
+        guard canReplay else { return }
+        isRunning = false
+        isPlayingRecording = true
+        activelyDraggedBody = nil
+        metrics = FluidMetrics()
+        accumulator = 0
+        bodies = recordingFrames[0].bodies
+        playbackStartedAt = CACurrentMediaTime()
+        lastWallTime = playbackStartedAt
+        try initializeVolume()
+    }
+
+    private func playbackBodies(at time: Float) -> [RigidBodyState] {
+        guard let first = recordingFrames.first else { return bodies }
+        if time <= first.time { return first.bodies }
+        guard let last = recordingFrames.last else { return first.bodies }
+        if time >= last.time { return last.bodies }
+        var low = 0, high = recordingFrames.count - 1
+        while low + 1 < high {
+            let middle = (low + high) / 2
+            if recordingFrames[middle].time <= time { low = middle } else { high = middle }
+        }
+        let a = recordingFrames[low], b = recordingFrames[high]
+        guard a.bodies.count == b.bodies.count, b.time > a.time else { return a.bodies }
+        let amount = max(0, min(1, (time - a.time) / (b.time - a.time)))
+        return zip(a.bodies, b.bodies).map { lower, upper in
+            guard lower.description.id == upper.description.id else { return lower }
+            var value = lower
+            value.position = simd_mix(lower.position, upper.position, SIMD3(repeating: amount))
+            value.orientation = simd_slerp(lower.orientation, upper.orientation, amount)
+            value.linearVelocity = simd_mix(lower.linearVelocity, upper.linearVelocity, SIMD3(repeating: amount))
+            value.angularVelocity = simd_mix(lower.angularVelocity, upper.angularVelocity, SIMD3(repeating: amount))
+            value.displacedVolume = lower.displacedVolume + (upper.displacedVolume - lower.displacedVolume) * amount
+            return value
+        }
+    }
     func orbit(dx: Float, dy: Float) { azimuth -= dx * 0.006; elevation = max(-1.3, min(1.3, elevation + dy * 0.006)) }
     func zoom(delta: Float) { distance = max(1.1, min(6, distance * exp(delta * 0.001))) }
     func moveBody(index: Int, to position: SIMD3<Float>, velocity: SIMD3<Float> = .zero) {
@@ -173,7 +235,7 @@ final class MetalFluidSolver: @unchecked Sendable {
         bodies[index].position = position; bodies[index].linearVelocity = velocity
     }
     func dragSelectedBody(dx: Float, dy: Float) {
-        guard bodies.indices.contains(selectedBodyIndex) else { return }
+        guard !isPlayingRecording, bodies.indices.contains(selectedBodyIndex) else { return }
         let right = SIMD3<Float>(cos(azimuth), 0, -sin(azimuth))
         let up = SIMD3<Float>(-sin(elevation)*sin(azimuth), cos(elevation), -sin(elevation)*cos(azimuth))
         let displacement = (right * dx + up * dy) * 0.0025
@@ -187,6 +249,7 @@ final class MetalFluidSolver: @unchecked Sendable {
         stateLock.unlock()
     }
     func pickBody(ndc: SIMD2<Float>, aspect: Float) -> Bool {
+        guard !isPlayingRecording else { return false }
         let target = SIMD3<Float>(0, scene.container.height_m * 0.42, 0)
         let origin = target + SIMD3(cos(elevation) * sin(azimuth), sin(elevation), cos(elevation) * cos(azimuth)) * distance
         let forward = simd_normalize(target - origin)
@@ -217,13 +280,14 @@ final class MetalFluidSolver: @unchecked Sendable {
         }
     }
     func dropSelectedBody() {
+        guard !isPlayingRecording else { return }
         guard bodies.indices.contains(selectedBodyIndex) else { return }
         bodies[selectedBodyIndex].position.y = scene.container.height_m + bodies[selectedBodyIndex].supportRadius + 0.2
         bodies[selectedBodyIndex].linearVelocity = .zero
         bodies[selectedBodyIndex].angularVelocity = SIMD3(0.8, 0.35, -0.5)
     }
     func addBody(shape: String) {
-        guard bodies.count < 12 else { return }
+        guard !isPlayingRecording, bodies.count < 12 else { return }
         let index = bodies.count + 1, sphere = shape == "sphere"
         let value = RigidBodyDescription(
             id: "native-\(shape)-\(index)", name: "\(shape.capitalized) \(index)", shape: shape,
@@ -235,12 +299,12 @@ final class MetalFluidSolver: @unchecked Sendable {
         scene.rigidBodies.append(value); bodies.append(RigidBodyState(value)); selectedBodyIndex = bodies.count - 1
     }
     func removeSelectedBody() {
-        guard bodies.indices.contains(selectedBodyIndex) else { return }
+        guard !isPlayingRecording, bodies.indices.contains(selectedBodyIndex) else { return }
         bodies.remove(at: selectedBodyIndex); scene.rigidBodies.remove(at: selectedBodyIndex)
         selectedBodyIndex = min(selectedBodyIndex, max(0, bodies.count - 1))
     }
     func updateSelectedBody(density: Float, size: Float) {
-        guard bodies.indices.contains(selectedBodyIndex) else { return }
+        guard !isPlayingRecording, bodies.indices.contains(selectedBodyIndex) else { return }
         var value = bodies[selectedBodyIndex].description
         value.density_kg_m3 = max(1, density)
         let old = max(value.dimensions_m.x, 1e-6), ratio = max(0.01, size) / old
@@ -255,14 +319,25 @@ final class MetalFluidSolver: @unchecked Sendable {
         let frameStart = CACurrentMediaTime()
         let frame = frameIndex % 3; frameIndex += 1
         let now = CACurrentMediaTime()
-        let wallDelta = min(max(now - lastWallTime, 0), 0.05); lastWallTime = now
+        let wallDelta = min(max(now - lastWallTime, 0), 0.25); lastWallTime = now
+        let playingRecording = isPlayingRecording
+        if playingRecording {
+            let playbackTime = min(recordingDuration, Float(now - playbackStartedAt))
+            bodies = playbackBodies(at: playbackTime)
+            accumulator = min(accumulator + wallDelta, 0.25)
+        }
         if singleStepRequested { accumulator = max(accumulator, Double(scene.numerics.fixedDt_s)); singleStepRequested = false }
-        else if isRunning { accumulator = min(accumulator + wallDelta, Double(scene.numerics.fixedDt_s) * 4) }
+        else if isRunning && !playingRecording {
+            // Preserve the stability-limited dt and catch up with GPU substeps.
+            accumulator = min(accumulator + wallDelta, 0.25)
+        }
         let target = SIMD3<Float>(0, scene.container.height_m * 0.42, 0)
         let camera = target + SIMD3(cos(elevation) * sin(azimuth), sin(elevation), cos(elevation) * cos(azimuth)) * distance
         let minimumCell = min(grid.cellSize.x, grid.cellSize.y, grid.cellSize.z)
         let waveSpeed = sqrt(abs(scene.fluid.gravity_m_s2.y) * scene.container.height_m * max(scene.container.fillFraction, 0.01))
-        let characteristicSpeed = max(waveSpeed, metrics.maxSpeed, 0.1)
+        let bodySpeed = bodies.reduce(Float.zero) { max($0, simd_length($1.linearVelocity)) }
+        let gravitySpeedGrowth = abs(scene.fluid.gravity_m_s2.y) * Float(min(accumulator, 0.25))
+        let characteristicSpeed = max(waveSpeed, metrics.maxSpeed + gravitySpeedGrowth, bodySpeed, 0.1)
         let advectiveDt = 0.45 * minimumCell / characteristicSpeed
         let capillaryDt = scene.fluid.surfaceTension_N_m > 0 ? 0.4 * sqrt(scene.fluid.density_kg_m3 * minimumCell * minimumCell * minimumCell / (.pi * scene.fluid.surfaceTension_N_m)) : scene.numerics.fixedDt_s
         let stepDt = min(scene.numerics.fixedDt_s, advectiveDt, capillaryDt)
@@ -281,7 +356,7 @@ final class MetalFluidSolver: @unchecked Sendable {
         let draggedBody = activelyDraggedBody
         for index in bodies.indices {
             var value = bodies[index].gpuValue
-            value.angularVelocity.w = index == draggedBody ? 1 : 0
+            value.angularVelocity.w = playingRecording || index == draggedBody ? 1 : 0
             bodyPointer[index] = value
         }
         stateLock.unlock()
@@ -289,40 +364,44 @@ final class MetalFluidSolver: @unchecked Sendable {
         command.label = "Fluid frame"
         if let blit = command.makeBlitCommandEncoder() {
             blit.fill(buffer: reductions, range: 0..<reductions.length, value: 0)
-            if !bodies.isEmpty { blit.fill(buffer: exchange, range: 0..<exchange.length, value: 0) }
             blit.endEncoding()
         }
-        let simulationStart = CACurrentMediaTime()
+        guard let encoder = command.makeComputeCommandEncoder() else { inFlight.signal(); return }
+        encoder.label = "Fluid simulation and raymarch"
         var encodedSteps = 0
-        if isRunning || accumulator >= Double(stepDt) {
-            while accumulator >= Double(stepDt), encodedSteps < 1 {
-                encode3D(command, pipeline: buildSolid, buffers: [bodyBuffer, solidCell, solidFace, params])
+        if isRunning || playingRecording || accumulator >= Double(stepDt) {
+            let playbackEnd = playingRecording ? recordingDuration : scene.duration_s
+            while accumulator >= Double(stepDt), metrics.simulationTime + stepDt <= playbackEnd + 1e-6, encodedSteps < maximumSimulationStepsPerFrame {
+                if !bodies.isEmpty { dispatchBodies(encoder, pipeline: clearExchange, buffers: [exchange, params], count: bodies.count) }
+                dispatch3D(encoder, pipeline: buildSolid, buffers: [bodyBuffer, solidCell, solidFace, params])
                 // Two conservative cover/uncover sweeps move displaced liquid through
                 // neighboring open cells without atomics or volume loss.
-                encode3D(command, pipeline: prepareRemap, buffers: [volumeA, solidCell, auxiliary, params])
-                encode3D(command, pipeline: limitRemap, buffers: [auxiliary, remapScale, params])
-                encode3D(command, pipeline: applyRemap, buffers: [volumeA, volumeB, auxiliary, remapScale, params])
-                encode3D(command, pipeline: prepareRemap, buffers: [volumeB, solidCell, auxiliary, params])
-                encode3D(command, pipeline: limitRemap, buffers: [auxiliary, remapScale, params])
-                encode3D(command, pipeline: applyRemap, buffers: [volumeB, volumeA, auxiliary, remapScale, params])
-                encode3D(command, pipeline: buildAuxiliary, buffers: [velocityA, volumeA, auxiliary, solidCell, solidFace, params])
-                encode3D(command, pipeline: advect, buffers: [velocityA, velocityB, volumeA, volumeB, auxiliary, solidFace, params])
+                dispatch3D(encoder, pipeline: prepareRemap, buffers: [volumeA, solidCell, auxiliary, params])
+                dispatch3D(encoder, pipeline: limitRemap, buffers: [auxiliary, remapScale, params])
+                dispatch3D(encoder, pipeline: applyRemap, buffers: [volumeA, volumeB, auxiliary, remapScale, params])
+                dispatch3D(encoder, pipeline: prepareRemap, buffers: [volumeB, solidCell, auxiliary, params])
+                dispatch3D(encoder, pipeline: limitRemap, buffers: [auxiliary, remapScale, params])
+                dispatch3D(encoder, pipeline: applyRemap, buffers: [volumeB, volumeA, auxiliary, remapScale, params])
+                dispatch3D(encoder, pipeline: buildAuxiliary, buffers: [velocityA, volumeA, auxiliary, solidCell, solidFace, params])
+                dispatch3D(encoder, pipeline: advect, buffers: [velocityA, velocityB, volumeA, volumeB, auxiliary, solidFace, params])
                 for iteration in 0..<quality.pressureIterations {
-                    encode3D(command, pipeline: jacobi, buffers: [velocityB, volumeB, iteration.isMultiple(of: 2) ? pressureA : pressureB, iteration.isMultiple(of: 2) ? pressureB : pressureA, solidCell, solidFace, bodyBuffer, params])
+                    dispatch3D(encoder, pipeline: jacobi, buffers: [velocityB, volumeB, iteration.isMultiple(of: 2) ? pressureA : pressureB, iteration.isMultiple(of: 2) ? pressureB : pressureA, solidCell, solidFace, bodyBuffer, params])
                 }
                 let finalPressure = quality.pressureIterations.isMultiple(of: 2) ? pressureA : pressureB
-                encode3D(command, pipeline: project, buffers: [velocityB, velocityA, finalPressure, volumeB, volumeA, solidCell, solidFace, bodyBuffer, params])
-                if !bodies.isEmpty { encode3D(command, pipeline: pressureTraction, buffers: [finalPressure, volumeA, solidCell, solidFace, bodyBuffer, exchange, params]) }
-                if !bodies.isEmpty { encodeBodies(command, pipeline: integrateBodies, buffers: [bodyBuffer, exchange, params], count: bodies.count) }
+                dispatch3D(encoder, pipeline: project, buffers: [velocityB, velocityA, finalPressure, volumeB, volumeA, solidCell, solidFace, bodyBuffer, params])
+                if !bodies.isEmpty { dispatch3D(encoder, pipeline: pressureTraction, buffers: [finalPressure, volumeA, solidCell, solidFace, bodyBuffer, exchange, params]) }
+                if !bodies.isEmpty { dispatchBodies(encoder, pipeline: integrateBodies, buffers: [bodyBuffer, exchange, params], count: bodies.count) }
                 metrics.simulationTime += stepDt
-                if metrics.simulationTime >= scene.duration_s { isRunning = false }
+                if !playingRecording, metrics.simulationTime >= scene.duration_s { isRunning = false }
                 accumulator -= Double(stepDt); encodedSteps += 1
             }
+            if playingRecording, metrics.simulationTime + stepDt > recordingDuration {
+                metrics.simulationTime = recordingDuration
+                accumulator = 0
+                isPlayingRecording = false
+            }
         }
-        encode3D(command, pipeline: reduce, buffers: [velocityA, volumeA, reductions, params])
-        let simulationEncoded = CACurrentMediaTime()
-        guard let encoder = command.makeComputeCommandEncoder() else { return }
-        encoder.label = "Volume raymarch"
+        dispatch3D(encoder, pipeline: reduce, buffers: [velocityA, volumeA, reductions, params])
         encoder.setComputePipelineState(render)
         encoder.setBuffer(volumeA, offset: 0, index: 0)
         encoder.setBuffer(params, offset: 0, index: 1)
@@ -333,10 +412,9 @@ final class MetalFluidSolver: @unchecked Sendable {
         encoder.dispatchThreads(MTLSize(width: texture.width, height: texture.height, depth: 1), threadsPerThreadgroup: MTLSize(width: tw, height: th, depth: 1))
         encoder.endEncoding()
         command.present(drawable)
-        let completedSteps = encodedSteps, bodyCount = bodies.count
+        let completedSteps = encodedSteps, bodyCount = bodies.count, completedSimulationTime = metrics.simulationTime
         command.addCompletedHandler { [weak self] buffer in
             guard let self else { return }
-            metrics.simulationMS = max(0, (simulationEncoded - simulationStart) * 1000)
             if buffer.gpuEndTime > buffer.gpuStartTime { metrics.renderMS = (buffer.gpuEndTime - buffer.gpuStartTime) * 1000 }
             let reduction = reductions.contents().bindMemory(to: UInt32.self, capacity: 4)
             metrics.volumeDrift = (Float(reduction[0]) / 2048 - initialVolumeSum) / initialVolumeSum
@@ -353,11 +431,23 @@ final class MetalFluidSolver: @unchecked Sendable {
                 }
                 stateLock.unlock()
             }
+            if !playingRecording, completedSteps > 0,
+               (completedSimulationTime - recordingDuration >= 1.0 / 60.0 || completedSimulationTime >= scene.duration_s) {
+                stateLock.lock()
+                if abs(completedSimulationTime - recordingDuration) < 1e-6, !recordingFrames.isEmpty {
+                    recordingFrames[recordingFrames.count - 1] = SimulationRecordingFrame(time: completedSimulationTime, bodies: bodies)
+                } else {
+                    recordingFrames.append(SimulationRecordingFrame(time: completedSimulationTime, bodies: bodies))
+                }
+                recordingDuration = max(recordingDuration, completedSimulationTime)
+                stateLock.unlock()
+            }
             inFlight.signal()
         }
         command.commit()
-        let frameNow = CACurrentMediaTime(); metrics.frameMS = (frameNow - lastFrame) * 1000; lastFrame = frameNow
-        _ = frameStart
+        let frameNow = CACurrentMediaTime()
+        metrics.simulationMS = Double(encodedSteps) * Double(stepDt) * 1000
+        metrics.frameMS = (frameNow - frameStart) * 1000
     }
 
     private func encode3D(_ command: MTLCommandBuffer, pipeline: MTLComputePipelineState, buffers: [MTLBuffer]) {
@@ -368,6 +458,19 @@ final class MetalFluidSolver: @unchecked Sendable {
         let tg = MTLSize(width: width, height: 4, depth: 4)
         encoder.dispatchThreads(MTLSize(width: grid.nx, height: grid.ny, depth: grid.nz), threadsPerThreadgroup: tg)
         encoder.endEncoding()
+    }
+
+    private func dispatch3D(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState, buffers: [MTLBuffer]) {
+        encoder.setComputePipelineState(pipeline)
+        for (index, buffer) in buffers.enumerated() { encoder.setBuffer(buffer, offset: 0, index: index) }
+        let width = min(8, pipeline.threadExecutionWidth)
+        encoder.dispatchThreads(MTLSize(width: grid.nx, height: grid.ny, depth: grid.nz), threadsPerThreadgroup: MTLSize(width: width, height: 4, depth: 4))
+    }
+
+    private func dispatchBodies(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState, buffers: [MTLBuffer], count: Int) {
+        encoder.setComputePipelineState(pipeline)
+        for (index, buffer) in buffers.enumerated() { encoder.setBuffer(buffer, offset: 0, index: index) }
+        encoder.dispatchThreads(MTLSize(width: count, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(max(1, count), pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
     }
 
     private func encodeBodies(_ command: MTLCommandBuffer, pipeline: MTLComputePipelineState, buffers: [MTLBuffer], count: Int) {

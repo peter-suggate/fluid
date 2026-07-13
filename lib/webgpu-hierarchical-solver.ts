@@ -1,7 +1,14 @@
 import type { SceneDescription } from "./model";
 import type { RigidBodyState } from "./rigid-body";
-import { createGPUHierarchyLayout, GPU_BRICK_META_WORDS, GPU_BRICK_SIZE, GPU_CELL_FLOATS, GPU_CELLS_PER_BRICK, rebuildGPUHierarchyLayout, type GPUHierarchyLayout } from "./webgpu-hierarchy-layout";
-import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
+import { createGPUHierarchyLayout, GPU_BRICK_META_WORDS, GPU_BRICK_SIZE, GPU_CELL_FLOATS, GPU_CELLS_PER_BRICK, rebuildGPUHierarchyFromTags, type GPUHierarchyLayout } from "./webgpu-hierarchy-layout";
+import { decodeGPUStageTimings, planGPUAdvance, type GPUEulerianInfo, type GPURigidLoad, type GPUQuality } from "./webgpu-eulerian";
+
+const MAX_SUBSTEPS = 16;
+const TIMESTAMPS_PER_SUBSTEP = 10;
+const TIMESTAMP_QUERY_COUNT = MAX_SUBSTEPS * TIMESTAMPS_PER_SUBSTEP + 2;
+// Chrome's Metal backend can serialize multi-pass timestamp sampling for seconds.
+// End-to-end queue latency remains enabled; intrusive stage sampling is opt-in work.
+const ENABLE_COMPUTE_TIMESTAMP_SAMPLING = false;
 
 const shader = /* wgsl */ `
 struct Cell {
@@ -16,6 +23,8 @@ struct Params {
   containerBodies: vec4f,
   topology: vec4f,
   boundary: vec4f,
+  regrid: vec4f,
+  regrid2: vec4f,
 }
 struct RigidBody {
   positionShape: vec4f,
@@ -40,6 +49,7 @@ struct BodyTerm { value:f32, diagonal:f32 }
 @group(0) @binding(7) var<storage,read_write> reductions:array<atomic<u32>>;
 @group(0) @binding(8) var presentation: texture_storage_3d<r32float,write>;
 @group(0) @binding(9) var<storage,read_write> pcg:array<PCGCell>;
+@group(0) @binding(10) var<storage,read_write> topologyTags:array<atomic<u32>>;
 var<workgroup> reductionScratch:array<f32,256>;
 
 const INVALID:u32=0xffffffffu;
@@ -166,10 +176,10 @@ fn initializePCG(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_in
 }
 
 @compute @workgroup_size(64)
-fn applyPCGOperator(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;let info=infoFromIndex(index);if(alphaAt(centreFine(info))<0.01){pcg[index].ap=0.0;return;}pcg[index].ap=applyOperator(info,2u);}
+fn applyPCGOperator(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){if(atomicLoad(&reductions[16u])==0u){return;}let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;let info=infoFromIndex(index);if(alphaAt(centreFine(info))<0.01){pcg[index].ap=0.0;return;}pcg[index].ap=applyOperator(info,2u);}
 
 fn accumulateBodyVector(info:LocatedCell,pressure:f32,impulseScale:f32,fixedScale:f32){if(alphaAt(centreFine(info))<0.01){return;}let centre=centreFine(info);let h=f32(info.scale)*params.originH.w;let area=h*h;for(var axis:u32=0u;axis<3u;axis+=1u){for(var side:i32=-1;side<=1;side+=2){let sign=f32(side);let normal=sign*axisVector(axis);let face=centre+0.5*sign*f32(info.scale)*axisVector(axis);let bodyIndex=bodyIndexAt(worldFromFine(face+0.25*sign*f32(info.scale)*axisVector(axis)));if(bodyIndex<0){continue;}let body=rigidBodies[u32(bodyIndex)];let force=pressure*area*normal*impulseScale;let torque=cross(worldFromFine(face)-body.positionShape.xyz,force);let base=u32(bodyIndex)*8u;atomicAdd(&rigidExchange[base],i32(round(force.x*fixedScale)));atomicAdd(&rigidExchange[base+1u],i32(round(force.y*fixedScale)));atomicAdd(&rigidExchange[base+2u],i32(round(force.z*fixedScale)));atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*fixedScale)));atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*fixedScale)));atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*fixedScale)));}}}
-@compute @workgroup_size(64) fn reduceBodyJp(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;accumulateBodyVector(infoFromIndex(index),pcg[index].p,1.0,1000.0);}
+@compute @workgroup_size(64) fn reduceBodyJp(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){if(atomicLoad(&reductions[16u])==0u){return;}let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;accumulateBodyVector(infoFromIndex(index),pcg[index].p,1.0,1000.0);}
 @compute @workgroup_size(64) fn accumulatePressureLoads(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;accumulateBodyVector(infoFromIndex(index),pcg[index].x,params.dimsDt.w,1e6);}
 
 fn reduceValue(index:u32,mode:u32)->f32{let q=pcg[index];if(mode==0u){let info=infoFromIndex(index);return q.r*q.r/max(diagonalAt(info),1e-9);}if(mode==1u){return q.p*q.ap;}return q.r*q.r;}
@@ -178,13 +188,13 @@ fn reduceSolver(mode:u32,localIndex:u32){var sum=0.0;let count=leafCount()*CELLS
 @compute @workgroup_size(256) fn reduceRZ(@builtin(local_invocation_index) localIndex:u32){reduceSolver(0u,localIndex);}
 @compute @workgroup_size(256) fn reducePAP(@builtin(local_invocation_index) localIndex:u32){reduceSolver(1u,localIndex);}
 @compute @workgroup_size(256) fn reduceResidual(@builtin(local_invocation_index) localIndex:u32){reduceSolver(2u,localIndex);}
-@compute @workgroup_size(1) fn computeAlpha(){storeScalar(3u,loadScalar(0u)/max(abs(loadScalar(2u)),1e-20));}
-@compute @workgroup_size(1) fn computeBeta(){let wasActive=atomicLoad(&reductions[16u])>0u;if(wasActive){atomicAdd(&reductions[14u],1u);}let rz=loadScalar(0u);storeScalar(4u,rz/max(abs(loadScalar(1u)),1e-20));let relative=sqrt(abs(rz)/max(abs(loadScalar(6u)),1e-20));atomicStore(&reductions[16u],select(0u,leafCount(),wasActive&&relative>max(params.boundary.x,1e-6)));atomicStore(&reductions[17u],1u);atomicStore(&reductions[18u],1u);}
+@compute @workgroup_size(1) fn computeAlpha(){if(atomicLoad(&reductions[16u])==0u){return;}storeScalar(3u,loadScalar(0u)/max(abs(loadScalar(2u)),1e-20));}
+@compute @workgroup_size(1) fn computeBeta(){let wasActive=atomicLoad(&reductions[16u])>0u;if(!wasActive){return;}atomicAdd(&reductions[14u],1u);let rz=loadScalar(0u);storeScalar(4u,rz/max(abs(loadScalar(1u)),1e-20));let relative=sqrt(abs(rz)/max(abs(loadScalar(6u)),1e-20));atomicStore(&reductions[16u],select(0u,leafCount(),relative>max(params.boundary.x,1e-6)));atomicStore(&reductions[17u],1u);atomicStore(&reductions[18u],1u);}
 
 @compute @workgroup_size(64)
-fn updateXR(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;let alpha=loadScalar(3u);pcg[index].x+=alpha*pcg[index].p;pcg[index].r-=alpha*pcg[index].ap;}
+fn updateXR(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){if(atomicLoad(&reductions[16u])==0u){return;}let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;let alpha=loadScalar(3u);pcg[index].x+=alpha*pcg[index].p;pcg[index].r-=alpha*pcg[index].ap;}
 @compute @workgroup_size(64)
-fn updateP(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;let info=infoFromIndex(index);let z=pcg[index].r/max(diagonalAt(info),1e-9);pcg[index].p=z+loadScalar(4u)*pcg[index].p;}
+fn updateP(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){if(atomicLoad(&reductions[16u])==0u){return;}let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;let info=infoFromIndex(index);let z=pcg[index].r/max(diagonalAt(info),1e-9);pcg[index].p=z+loadScalar(4u)*pcg[index].p;}
 @compute @workgroup_size(64)
 fn commitPressure(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;let cell=cellsIn[index];cellsOut[index]=Cell(cell.negAlpha,vec4f(cell.posPressure.xyz,pcg[index].x));}
 
@@ -206,8 +216,33 @@ fn coupleRigid(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_inde
 @compute @workgroup_size(64)
 fn reduceDiagnostics(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){let slot=group.x;if(slot>=leafCount()){return;}let index=slot*CELLS_PER_BRICK+localIndex;let info=infoFromIndex(index);let cell=cellsIn[index];let h=f32(info.scale)*params.originH.w;atomicAdd(&reductions[0],u32(clamp(cell.negAlpha.w*h*h*h*1e9,0.0,4294967295.0)));atomicMax(&reductions[1],bitcast<u32>(length(0.5*(cell.negAlpha.xyz+cell.posPressure.xyz))));atomicMax(&reductions[2],bitcast<u32>(abs(divergenceVolume(info)/max(h*h*h,1e-12))));}
 
+@compute @workgroup_size(64)
+fn classifyTopology(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){
+  let pd=pageDims();let pageCount=pd.x*pd.y*pd.z;if(group.x>=pageCount){return;}let page=vec3u(group.x%pd.x,(group.x/pd.x)%pd.y,group.x/(pd.x*pd.y));let fine=page*B+localFromLinear(localIndex);let here=locate(vec3f(fine)+0.5);if(here.index==INVALID){return;}let cell=cellsIn[here.index];let alpha=cell.negAlpha.w;if(alpha<=0.0001&&u32(params.regrid.z)==0u){return;}let velocity=0.5*(cell.negAlpha.xyz+cell.posPressure.xyz);var interfaceCell=alpha>0.0001&&alpha<0.9999;var velocityDetail=0.0;
+  for(var neighbor:u32=0u;neighbor<6u;neighbor+=1u){let axis=neighbor/2u;let sign=select(-1.0,1.0,neighbor%2u==0u);let other=locate(vec3f(fine)+0.5+sign*axisVector(axis));var otherAlpha=0.0;if(other.index!=INVALID){let otherCell=cellsIn[other.index];otherAlpha=otherCell.negAlpha.w;velocityDetail=max(velocityDetail,length(velocity-0.5*(otherCell.negAlpha.xyz+otherCell.posPressure.xyz)));}if(abs(alpha-otherAlpha)>0.05){interfaceCell=true;}}
+  let characteristic=max(0.1,length(velocity));let dynamicCell=velocityDetail/characteristic>params.regrid.w;let finest=u32(params.regrid.x)-1u;let desired=select(select(0u,u32(params.regrid.z),alpha>0.0001),finest,interfaceCell||dynamicCell);if(desired==0u){return;}let travel=min(2u,u32(ceil(characteristic*params.regrid2.x)));let radius=select(0u,u32(params.regrid.y)+travel,interfaceCell);
+  for(var dz:i32=-i32(radius);dz<=i32(radius);dz+=1){for(var dy:i32=-i32(radius);dy<=i32(radius);dy+=1){for(var dx:i32=-i32(radius);dx<=i32(radius);dx+=1){let taggedPage=vec3i(page)+vec3i(dx,dy,dz);if(any(taggedPage<vec3i(0))||any(taggedPage>=vec3i(pd))){continue;}let q=vec3u(taggedPage);atomicMax(&topologyTags[q.x+pd.x*(q.y+pd.y*q.z)],desired);}}}
+}
+
 @compute @workgroup_size(4,4,4)
 fn reconstructPresentation(@builtin(global_invocation_id) gid:vec3u){let d=vec3u(params.boundary.yzw);if(any(gid>=d)){return;}let scale=vec3f(fineDims())/vec3f(d);let p=(vec3f(gid)+0.5)*scale;textureStore(presentation,vec3i(gid),vec4f(alphaAt(p),0,0,0));}
+`;
+
+const remapShader=/* wgsl */`
+struct Cell { negAlpha:vec4f, posPressure:vec4f }
+struct RemapParams { page:vec4u, counts:vec4u }
+@group(0) @binding(0) var<storage,read> oldCells:array<Cell>;
+@group(0) @binding(1) var<storage,read> oldMeta:array<vec4u>;
+@group(0) @binding(2) var<storage,read> oldPages:array<u32>;
+@group(0) @binding(3) var<storage,read_write> newCells:array<Cell>;
+@group(0) @binding(4) var<storage,read> newMeta:array<vec4u>;
+@group(0) @binding(5) var<uniform> params:RemapParams;
+const B:u32=${GPU_BRICK_SIZE}u;
+const CELLS_PER_BRICK:u32=${GPU_CELLS_PER_BRICK}u;
+fn localFromLinear(value:u32)->vec3u{return vec3u(value%B,(value/B)%B,value/(B*B));}
+fn locateOld(fine:vec3u)->u32{let pd=params.page.xyz;let page=fine/B;let slot=oldPages[page.x+pd.x*(page.y+pd.y*page.z)];let brick=oldMeta[slot*2u];let local=min(vec3u(B-1u),(fine-brick.xyz)/brick.w);return slot*CELLS_PER_BRICK+local.x+B*(local.y+B*local.z);}
+@compute @workgroup_size(64)
+fn remap(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) localIndex:u32){let slot=group.x;if(slot>=params.counts.x){return;}let brick=newMeta[slot*2u];let local=localFromLinear(localIndex);let start=brick.xyz+local*brick.w;var neg=vec4f(0.0);var pos=vec4f(0.0);var count=0u;for(var z:u32=0u;z<brick.w;z+=1u){for(var y:u32=0u;y<brick.w;y+=1u){for(var x:u32=0u;x<brick.w;x+=1u){let old=oldCells[locateOld(start+vec3u(x,y,z))];neg+=old.negAlpha;pos+=old.posPressure;count+=1u;}}}let inverse=1.0/f32(max(count,1u));newCells[slot*CELLS_PER_BRICK+localIndex]=Cell(neg*inverse,pos*inverse);}
 `;
 
 export class WebGPUHierarchicalSolver {
@@ -223,6 +258,7 @@ export class WebGPUHierarchicalSolver {
   private readonly rigidExchangeBuffer: GPUBuffer;
   private readonly reductions: GPUBuffer;
   private readonly indirectDispatchBuffer:GPUBuffer;
+  private readonly topologyTags:GPUBuffer;
   private pcgBuffer: GPUBuffer;
   private readonly bindGroupLayout: GPUBindGroupLayout;
   private groups: [GPUBindGroup, GPUBindGroup];
@@ -246,6 +282,8 @@ export class WebGPUHierarchicalSolver {
   private readonly commitPressurePipeline: GPUComputePipeline;
   private readonly reduceBodyJpPipeline: GPUComputePipeline;
   private readonly pressureLoadsPipeline: GPUComputePipeline;
+  private readonly topologyPipeline:GPUComputePipeline;
+  private readonly remapPipeline:GPUComputePipeline;
   private readonly querySet?: GPUQuerySet;
   private readonly queryResolve?: GPUBuffer;
   private current = 0;
@@ -260,6 +298,14 @@ export class WebGPUHierarchicalSolver {
   private destroyed = false;
   private submissionsInFlight = 0;
   private parameterRevision = 0;
+  private simulationRevision = 0;
+  private latestRequestedTime = 0;
+  private completedSimulationTime = 0;
+  private lastCompletionAt?: number;
+  private lastCompletionSimulationTime = 0;
+  private timestampSubsteps = 0;
+  private timestampSamplePending = false;
+  private lastTimestampCompletedAt = -Infinity;
 
   constructor(private readonly device: GPUDevice, readonly scene: SceneDescription, private readonly quality: GPUQuality, private readonly onRigidLoads?: (loads: GPURigidLoad[]) => void) {
     this.layout = createGPUHierarchyLayout(scene, quality);
@@ -274,8 +320,9 @@ export class WebGPUHierarchicalSolver {
     this.rigidExchangeBuffer = device.createBuffer({ label: "Hierarchy rigid exchange", size: 12 * 8 * 4, usage: storage });
     this.reductions = device.createBuffer({ label: "Hierarchy diagnostics and PCG scalars", size: 256, usage: storage });
     this.indirectDispatchBuffer=device.createBuffer({label:"Hierarchy pressure indirect dispatch",size:12,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
+    this.topologyTags=device.createBuffer({label:"Hierarchy GPU topology tags",size:this.layout.pageTable.length*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.pcgBuffer = device.createBuffer({ label: "Hierarchy PCG vectors", size: this.layout.activeCellCount * 16, usage: storage });
-    if(device.features.has("timestamp-query")){this.querySet=device.createQuerySet({type:"timestamp",count:10});this.queryResolve=device.createBuffer({label:"Hierarchy timestamp resolve",size:80,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
+    if(ENABLE_COMPUTE_TIMESTAMP_SAMPLING&&device.features.has("timestamp-query")){this.querySet=device.createQuerySet({type:"timestamp",count:TIMESTAMP_QUERY_COUNT});this.queryResolve=device.createBuffer({label:"Hierarchy timestamp resolve",size:TIMESTAMP_QUERY_COUNT*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
     const pd = this.layout.physicalFinestCellDims;
     // Compatibility placeholder for the CPU presentation pipeline. The WebGPU
     // renderer reads leaf buffers directly and therefore does not allocate a
@@ -305,14 +352,17 @@ export class WebGPUHierarchicalSolver {
     this.initializePCGPipeline=pipeline("initializePCG");this.resetPCGPipeline=pipeline("resetPCG");this.applyPCGPipeline=pipeline("applyPCGOperator");this.reduceRZPipeline=pipeline("reduceRZ");this.reducePAPPipeline=pipeline("reducePAP");this.reduceResidualPipeline=pipeline("reduceResidual");this.computeAlphaPipeline=pipeline("computeAlpha");this.computeBetaPipeline=pipeline("computeBeta");this.updateXRPipeline=pipeline("updateXR");this.updatePPipeline=pipeline("updateP");this.commitPressurePipeline=pipeline("commitPressure");
     this.fluxScalePipeline=pipeline("computeFluxScales");
     this.reduceBodyJpPipeline=pipeline("reduceBodyJp");this.pressureLoadsPipeline=pipeline("accumulatePressureLoads");
+    this.topologyPipeline=device.createComputePipeline({label:"Hierarchy classifyTopology",layout:"auto",compute:{module:shaderModule,entryPoint:"classifyTopology"}});
+    this.remapPipeline=device.createComputePipeline({label:"Hierarchy GPU field remap",layout:"auto",compute:{module:device.createShaderModule({label:"Hierarchy remap kernel",code:remapShader}),entryPoint:"remap"}});
     void device.popErrorScope().then((error) => { if (error) throw new Error(`Hierarchical pipeline validation: ${error.message}`); });
     this.groups = [this.group(this.cellsA, this.cellsB), this.group(this.cellsB, this.cellsA)];
-    const pressureIterations = Math.min(scene.numerics.pressureMaxIterations,quality === "balanced" ? 48 : quality === "high" ? 64 : 80);
+    const pressureIterations = Math.min(scene.numerics.pressureMaxIterations,quality === "balanced" ? 32 : quality === "high" ? 32 : 64);
     this.info = {
       nx: pd.x, ny: pd.y, nz: pd.z,
       cellCount: this.layout.activeCellCount,
       cellSize_m: this.layout.topology.finestCellLength_m,
       pressureIterations,
+      pressureMethod:quality==="balanced"?"jacobi":"pcg",
       allocatedBytes: byteLength * 2 + this.layout.leafMetadata.byteLength + this.layout.pageTable.byteLength
         + this.layout.activeCellCount * 16 + 256 + 12 + 12 * (96 + 32) + 256,
       quality,
@@ -326,6 +376,13 @@ export class WebGPUHierarchicalSolver {
       encodedSteps: 0,
       simulatedTime_s:0,
       queuedSubmissions:0,
+      queueLatency_ms:0,
+      completedSimulationTime_s:0,
+      simulationLag_s:0,
+      simulationThroughput_x:0,
+      blockedFrames:0,
+      simulationRevision:0,
+      timestampSamplingEnabled:ENABLE_COMPUTE_TIMESTAMP_SAMPLING,
       substepsLast:0,
       initialVolumeCellSum: this.initialVolume_m3 / this.layout.topology.finestCellLength_m ** 3,
       volumeCellSum: this.initialVolume_m3 / this.layout.topology.finestCellLength_m ** 3,
@@ -347,7 +404,7 @@ export class WebGPUHierarchicalSolver {
   }
 
   get hierarchyRenderResources() {
-    return { cells: this.current === 0 ? this.cellsA : this.cellsB, metadata: this.metadata, pageTable: this.pageTable, params: this.params, revision: this.parameterRevision*2+this.current };
+    return { cells: this.current === 0 ? this.cellsA : this.cellsB, metadata: this.metadata, pageTable: this.pageTable, params: this.params, revision: this.parameterRevision*2+this.current, simulationRevision:this.simulationRevision };
   }
 
   private group(input: GPUBuffer, output: GPUBuffer): GPUBindGroup {
@@ -370,7 +427,9 @@ export class WebGPUHierarchicalSolver {
       this.scene.fluid.density_kg_m3, this.scene.fluid.dynamicViscosity_Pa_s, this.scene.fluid.surfaceTension_N_m, this.scene.fluid.gravity_m_s2.y,
       c.width_m, c.height_m, c.depth_m, bodyCount,
       t.leaves.length, t.settings.levels, this.layout.equivalentUniformCells, t.saturated ? 1 : 0,
-      this.scene.numerics.pressureRelativeTolerance, p.x, p.y, p.z
+      this.scene.numerics.pressureRelativeTolerance, p.x, p.y, p.z,
+      t.settings.levels,Math.ceil(t.settings.interfaceHaloCells/GPU_BRICK_SIZE),t.settings.minimumFluidLevel,t.settings.velocityErrorTolerance,
+      this.scene.numerics.fixedDt_s*t.settings.regridInterval/(t.finestCellLength_m*GPU_BRICK_SIZE),0,0,0
     ]);
   }
 
@@ -411,95 +470,92 @@ export class WebGPUHierarchicalSolver {
     pass.setPipeline(pipeline);pass.setBindGroup(0,this.groups[this.current]);pass.dispatchWorkgroupsIndirect(this.indirectDispatchBuffer,0);
   }
 
+  private dispatchPressureDirect(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void {
+    pass.setPipeline(pipeline);pass.setBindGroup(0,this.groups[this.current]);pass.dispatchWorkgroups(this.layout.topology.leaves.length);
+  }
+
   private reconstructPresentation(encoder?: GPUCommandEncoder): void {
     const owned = !encoder, command = encoder ?? this.device.createCommandEncoder({ label: "Hierarchy presentation reconstruction" });
     const pass = command.beginComputePass();pass.setPipeline(this.presentationPipeline);pass.setBindGroup(0, this.groups[this.current]);const d = this.layout.physicalFinestCellDims;pass.dispatchWorkgroups(Math.ceil(d.x / 4), Math.ceil(d.y / 4), Math.ceil(d.z / 4));pass.end();if(owned)this.device.queue.submit([command.finish()]);
   }
 
   private scheduleRegrid(bodies: RigidBodyState[]): void {
-    if (this.regridPending || this.destroyed) return;
-    this.regridPending = true;
-    const source = this.current === 0 ? this.cellsA : this.cellsB, bytes = this.layout.activeCellCount * GPU_CELL_FLOATS * 4;
-    const readback = this.device.createBuffer({ label: "Hierarchy topology readback", size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    const encoder = this.device.createCommandEncoder({ label: "Hierarchy regrid readback" });encoder.copyBufferToBuffer(source,0,readback,0,bytes);this.device.queue.submit([encoder.finish()]);
+    if (this.regridPending || this.destroyed || this.scene.hierarchy.levels<=1) return;
+    this.regridPending = true;const oldLayout=this.layout,bytes=oldLayout.pageTable.length*4;
+    const readback = this.device.createBuffer({ label: "Hierarchy topology tag readback", size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const source=this.current===0?this.cellsA:this.cellsB,tagGroup=this.device.createBindGroup({layout:this.topologyPipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:source}},{binding:2,resource:{buffer:this.metadata}},{binding:3,resource:{buffer:this.pageTable}},{binding:4,resource:{buffer:this.params}},{binding:10,resource:{buffer:this.topologyTags}}]}),encoder = this.device.createCommandEncoder({ label: "Hierarchy GPU topology classification" });encoder.clearBuffer(this.topologyTags);const tagPass=encoder.beginComputePass();tagPass.setPipeline(this.topologyPipeline);tagPass.setBindGroup(0,tagGroup);tagPass.dispatchWorkgroups(oldLayout.pageTable.length);tagPass.end();encoder.copyBufferToBuffer(this.topologyTags,0,readback,0,bytes);this.device.queue.submit([encoder.finish()]);
     const bodySnapshot = bodies.map((body) => ({ ...body, position_m: { ...body.position_m }, description: { ...body.description, dimensions_m: { ...body.description.dimensions_m } } }));
     void readback.mapAsync(GPUMapMode.READ).then(async () => {
       const cpuRegridStarted=performance.now();this.info.regridReadbackBytes=bytes;
-      const fields = new Float32Array(readback.getMappedRange().slice(0));readback.unmap();if (this.destroyed) return;
-      let volume=0,maxSpeed=0,maxPressure=0,nanCount=0,front=-this.scene.container.width_m/2;
-      for(let slot=0;slot<this.layout.topology.leaves.length;slot+=1){
-        const meta=slot*GPU_BRICK_META_WORDS,originX=this.layout.leafMetadata[meta],scale=this.layout.leafMetadata[meta+3],cellVolume=(scale*this.layout.topology.finestCellLength_m)**3;
-        for(let local=0;local<GPU_CELLS_PER_BRICK;local+=1){
-          const offset=(slot*GPU_CELLS_PER_BRICK+local)*GPU_CELL_FLOATS,alpha=fields[offset+3],vx=.5*(fields[offset]+fields[offset+4]),vy=.5*(fields[offset+1]+fields[offset+5]),vz=.5*(fields[offset+2]+fields[offset+6]);
-          for(let component=0;component<GPU_CELL_FLOATS;component+=1)if(!Number.isFinite(fields[offset+component]))nanCount+=1;
-          volume+=alpha*cellVolume;maxSpeed=Math.max(maxSpeed,Math.hypot(vx,vy,vz),Math.hypot(fields[offset],fields[offset+1],fields[offset+2]),Math.hypot(fields[offset+4],fields[offset+5],fields[offset+6]));maxPressure=Math.max(maxPressure,Math.abs(fields[offset+7]));
-          if(alpha>=0.5){const localX=local%GPU_BRICK_SIZE;front=Math.max(front,this.layout.topology.origin_m.x+(originX+(localX+.5)*scale)*this.layout.topology.finestCellLength_m);}
-        }
-      }
-      this.info.volumeCellSum=volume/this.info.cellSize_m**3;this.info.volumeDrift=(volume-this.initialVolume_m3)/Math.max(this.initialVolume_m3,1e-12);this.info.rawVolumeDrift=this.info.volumeDrift;this.info.maxSpeed_m_s=maxSpeed;this.info.pressureMax_Pa=maxPressure;this.info.nanCount=nanCount;this.info.front_m=front;
-      // A one-level hierarchy uses this exact readback path for diagnostics but
-      // has no topology to rebuild. This keeps uniform mode on the same solver
-      // and data representation without manufacturing no-op topology revisions.
-      if(this.scene.hierarchy.levels<=1){this.info.cpuRegrid_ms=performance.now()-cpuRegridStarted;return;}
+      const tags=new Uint32Array(readback.getMappedRange().slice(0));readback.unmap();if(this.destroyed)return;
       this.regridAttempt+=1;this.info.regridCount=(this.info.regridCount??0)+1;
-      const next = rebuildGPUHierarchyLayout(this.scene,this.quality,this.layout,fields,bodySnapshot,this.regridAttempt%this.scene.hierarchy.coarsenDelay===0);
-      const same = next.leafMetadata.length === this.layout.leafMetadata.length && next.leafMetadata.every((value,index) => value === this.layout.leafMetadata[index]);
+      const next=rebuildGPUHierarchyFromTags(this.scene,this.quality,oldLayout,tags,bodySnapshot,this.regridAttempt%this.scene.hierarchy.coarsenDelay===0);
+      const same = next.leafMetadata.length === oldLayout.leafMetadata.length && next.leafMetadata.every((value,index) => value === oldLayout.leafMetadata[index]);
       if (same || this.destroyed){this.info.cpuRegrid_ms=performance.now()-cpuRegridStarted;return;}
-      await this.device.queue.onSubmittedWorkDone();if(this.destroyed)return;
+      const cpuRegridBeforeQueueWait=performance.now()-cpuRegridStarted;
+      await this.device.queue.onSubmittedWorkDone();if(this.destroyed)return;const cpuRegridResumed=performance.now();
       const storage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC,cellBytes=next.initialCells.byteLength;
       const cellsA=this.device.createBuffer({label:"Hierarchy cells A regridded",size:cellBytes,usage:storage}),cellsB=this.device.createBuffer({label:"Hierarchy cells B regridded",size:cellBytes,usage:storage});
       const metadata=this.device.createBuffer({label:"Hierarchy leaf metadata regridded",size:next.leafMetadata.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
       const pageTable=this.device.createBuffer({label:"Hierarchy page table regridded",size:next.pageTable.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
       const pcg=this.device.createBuffer({label:"Hierarchy PCG vectors regridded",size:next.activeCellCount*16,usage:storage});
-      this.device.queue.writeBuffer(cellsA,0,next.initialCells);this.device.queue.writeBuffer(cellsB,0,next.initialCells);this.device.queue.writeBuffer(metadata,0,next.leafMetadata);this.device.queue.writeBuffer(pageTable,0,next.pageTable);
-      const old=[this.cellsA,this.cellsB,this.metadata,this.pageTable,this.pcgBuffer];this.cellsA=cellsA;this.cellsB=cellsB;this.metadata=metadata;this.pageTable=pageTable;this.pcgBuffer=pcg;this.layout=next;this.current=0;this.groups=[this.group(this.cellsA,this.cellsB),this.group(this.cellsB,this.cellsA)];this.parameterRevision+=1;
+      this.device.queue.writeBuffer(metadata,0,next.leafMetadata);this.device.queue.writeBuffer(pageTable,0,next.pageTable);
+      const remapSource=this.current===0?this.cellsA:this.cellsB,old=[this.cellsA,this.cellsB,this.metadata,this.pageTable,this.pcgBuffer],remapParams=this.device.createBuffer({label:"Hierarchy remap parameters",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST}),pd=oldLayout.topology.finestBrickDims;
+      this.device.queue.writeBuffer(remapParams,0,new Uint32Array([pd.x,pd.y,pd.z,oldLayout.topology.leaves.length,next.topology.leaves.length,0,0,0]));
+      const remapGroup=this.device.createBindGroup({layout:this.remapPipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:remapSource}},{binding:1,resource:{buffer:this.metadata}},{binding:2,resource:{buffer:this.pageTable}},{binding:3,resource:{buffer:cellsA}},{binding:4,resource:{buffer:metadata}},{binding:5,resource:{buffer:remapParams}}]}),remapEncoder=this.device.createCommandEncoder({label:"Hierarchy GPU field transfer"}),remapPass=remapEncoder.beginComputePass();remapPass.setPipeline(this.remapPipeline);remapPass.setBindGroup(0,remapGroup);remapPass.dispatchWorkgroups(next.topology.leaves.length);remapPass.end();remapEncoder.copyBufferToBuffer(cellsA,0,cellsB,0,cellBytes);this.device.queue.submit([remapEncoder.finish()]);
+      this.cellsA=cellsA;this.cellsB=cellsB;this.metadata=metadata;this.pageTable=pageTable;this.pcgBuffer=pcg;this.layout=next;this.current=0;this.groups=[this.group(this.cellsA,this.cellsB),this.group(this.cellsB,this.cellsA)];this.parameterRevision+=1;
       this.info.cellCount=next.activeCellCount;this.info.activeBrickCount=next.topology.leaves.length;this.info.equivalentUniformCells=next.equivalentUniformCells;this.info.compressionRatio=next.activeCellCount/next.equivalentUniformCells;this.info.topologySaturated=next.topology.saturated;this.info.allocatedBytes=cellBytes*2+next.leafMetadata.byteLength+next.pageTable.byteLength+next.activeCellCount*16+256+12+12*(96+32)+256;
       this.info.topologyRevision=(this.info.topologyRevision??0)+1;
-      this.writeParams(this.scene.numerics.fixedDt_s,bodySnapshot.length);for(const buffer of old)buffer.destroy();this.info.cpuRegrid_ms=performance.now()-cpuRegridStarted;
+      this.writeParams(this.scene.numerics.fixedDt_s,bodySnapshot.length);this.info.cpuRegrid_ms=cpuRegridBeforeQueueWait+performance.now()-cpuRegridResumed;void this.device.queue.onSubmittedWorkDone().then(()=>{for(const buffer of old)buffer.destroy();remapParams.destroy();});
     }).catch((error:unknown)=>console.error(`Hierarchy regrid failed: ${error instanceof Error?error.message:String(error)}`)).finally(()=>{readback.destroy();this.regridPending=false;});
   }
 
   advanceTo(time_s: number, bodies: RigidBodyState[] = []): boolean {
-    if(this.submissionsInFlight>=2)return true;
     if (time_s < this.lastTime) return false;
-    const elapsed = Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime);if (elapsed < 1e-6) return true;this.lastTime += elapsed;
+    this.latestRequestedTime=Math.max(this.latestRequestedTime,time_s);this.info.simulationLag_s=Math.max(0,this.latestRequestedTime-this.completedSimulationTime);
+    if(this.submissionsInFlight>=2){this.info.blockedFrames=(this.info.blockedFrames??0)+1;return true;}
+    const pending=time_s-this.lastTime;if(pending<1e-6)return true;
+    const cpuAdvanceStarted=performance.now();
     const activeBodies = this.uploadBodies(bodies), waveSpeed = Math.sqrt(Math.abs(this.scene.fluid.gravity_m_s2.y) * this.scene.container.height_m * Math.max(this.scene.container.fillFraction, 0.01));
     const speed = Math.max(waveSpeed, this.info.maxSpeed_m_s ?? 0, 0.1), h = this.info.cellSize_m, sigma = this.scene.fluid.surfaceTension_N_m, rho = this.scene.fluid.density_kg_m3;
-    const stable = Math.min(0.4 * h / speed, sigma > 0 ? 0.35 * Math.sqrt(rho * h ** 3 / (Math.PI * sigma)) : Infinity), substeps = Math.min(16, Math.max(1, Math.ceil(elapsed / stable))), dt = elapsed / substeps;
+    const stable = Math.min(0.4 * h / speed, sigma > 0 ? 0.35 * Math.sqrt(rho * h ** 3 / (Math.PI * sigma)) : Infinity),plan=planGPUAdvance(pending,this.scene.numerics.maxDt_s,stable,MAX_SUBSTEPS),elapsed=plan.elapsed_s,substeps=plan.substeps,dt=plan.dt_s;
+    if(substeps===0)return true;this.lastTime+=elapsed;
     this.writeParams(dt,activeBodies.length);if (!this.validationChecked) this.device.pushErrorScope("validation");
+    // A query set cannot be safely reused while an older sampled submission is
+    // still executing. Ordinary unsampled submissions may remain queued.
+    const sampleGPU=Boolean(this.querySet&&this.queryResolve&&!this.timestampSamplePending&&performance.now()-this.lastTimestampCompletedAt>=1000);if(sampleGPU){this.timestampSubsteps=substeps;this.timestampSamplePending=true;}
     const encoder = this.device.createCommandEncoder({ label: "Hierarchical Eulerian step" });encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductions,0,12);encoder.clearBuffer(this.reductions,40,20);
     for (let substep = 0; substep < substeps; substep += 1) {
-      const first=substep===0,last=substep===substeps-1;
-      let pass=encoder.beginComputePass(this.querySet&&first?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:0}}:undefined);this.dispatch(pass,this.fluxScalePipeline);pass.end();
-      pass = encoder.beginComputePass(this.querySet&&last?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:1}}:undefined);this.dispatch(pass, this.advectPipeline);pass.end();this.current = 1 - this.current;
-      pass=encoder.beginComputePass();this.dispatchSingle(pass,this.resetPCGPipeline);pass.end();
-      encoder.copyBufferToBuffer(this.reductions,64,this.indirectDispatchBuffer,0,12);
-      pass=encoder.beginComputePass(this.querySet&&first?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:2}}:undefined);this.dispatch(pass,this.initializePCGPipeline);pass.end();
-      pass=encoder.beginComputePass();this.dispatchSingle(pass,this.reduceRZPipeline);pass.end();
-      for (let iteration = 0; iteration < this.info.pressureIterations; iteration += 1) {
-        encoder.clearBuffer(this.rigidExchangeBuffer);
-        pass=encoder.beginComputePass();this.dispatchPressure(pass,this.reduceBodyJpPipeline);pass.end();
-        pass=encoder.beginComputePass();this.dispatchPressure(pass,this.applyPCGPipeline);pass.end();
-        pass=encoder.beginComputePass();this.dispatchSingle(pass,this.reducePAPPipeline);pass.end();
-        pass=encoder.beginComputePass();this.dispatchSingle(pass,this.computeAlphaPipeline);pass.end();
-        pass=encoder.beginComputePass();this.dispatchPressure(pass,this.updateXRPipeline);pass.end();
-        pass=encoder.beginComputePass();this.dispatchSingle(pass,this.reduceRZPipeline);pass.end();
-        pass=encoder.beginComputePass();this.dispatchSingle(pass,this.computeBetaPipeline);pass.end();
-        encoder.copyBufferToBuffer(this.reductions,64,this.indirectDispatchBuffer,0,12);
-        pass=encoder.beginComputePass();this.dispatchPressure(pass,this.updatePPipeline);pass.end();
+      const queryBase=substep*TIMESTAMPS_PER_SUBSTEP;
+      let pass=encoder.beginComputePass(sampleGPU?{timestampWrites:{querySet:this.querySet!,beginningOfPassWriteIndex:queryBase}}:undefined);this.dispatch(pass,this.fluxScalePipeline);pass.end();
+      pass = encoder.beginComputePass(sampleGPU?{timestampWrites:{querySet:this.querySet!,endOfPassWriteIndex:queryBase+1}}:undefined);this.dispatch(pass, this.advectPipeline);pass.end();this.current = 1 - this.current;
+      const useJacobiPressure=this.quality==="balanced"&&activeBodies.length===0;
+      if(useJacobiPressure){
+        this.info.pressureMethod="jacobi";
+        if(sampleGPU){pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet!,beginningOfPassWriteIndex:queryBase+2,endOfPassWriteIndex:queryBase+3}});pass.end();}
+        pass=encoder.beginComputePass(sampleGPU?{timestampWrites:{querySet:this.querySet!,beginningOfPassWriteIndex:queryBase+4,endOfPassWriteIndex:queryBase+5}}:undefined);for(let iteration=0;iteration<this.info.pressureIterations;iteration+=1){this.dispatch(pass,this.jacobiPipeline);this.current=1-this.current;}pass.end();this.info.pressureIterationsExecuted=this.info.pressureIterations;
+      }else{
+        this.info.pressureMethod="pcg";
+        if(sampleGPU||activeBodies.length>0){
+          pass=encoder.beginComputePass(sampleGPU?{timestampWrites:{querySet:this.querySet!,beginningOfPassWriteIndex:queryBase+2}}:undefined);this.dispatchSingle(pass,this.resetPCGPipeline);pass.end();encoder.copyBufferToBuffer(this.reductions,64,this.indirectDispatchBuffer,0,12);if(sampleGPU){pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet!,endOfPassWriteIndex:queryBase+3}});pass.end();}
+          pass=encoder.beginComputePass(sampleGPU?{timestampWrites:{querySet:this.querySet!,beginningOfPassWriteIndex:queryBase+4}}:undefined);this.dispatch(pass,this.initializePCGPipeline);this.dispatchSingle(pass,this.reduceRZPipeline);pass.end();
+          for(let iteration=0;iteration<this.info.pressureIterations;iteration+=1){if(activeBodies.length>0)encoder.clearBuffer(this.rigidExchangeBuffer);pass=encoder.beginComputePass();if(activeBodies.length>0)this.dispatchPressure(pass,this.reduceBodyJpPipeline);this.dispatchPressure(pass,this.applyPCGPipeline);this.dispatchSingle(pass,this.reducePAPPipeline);this.dispatchSingle(pass,this.computeAlphaPipeline);this.dispatchPressure(pass,this.updateXRPipeline);this.dispatchSingle(pass,this.reduceRZPipeline);this.dispatchSingle(pass,this.computeBetaPipeline);pass.end();encoder.copyBufferToBuffer(this.reductions,64,this.indirectDispatchBuffer,0,12);pass=encoder.beginComputePass();this.dispatchPressure(pass,this.updatePPipeline);if(iteration===this.info.pressureIterations-1)this.dispatchSingle(pass,this.reduceResidualPipeline);pass.end();}
+        }else{
+          pass=encoder.beginComputePass();this.dispatchSingle(pass,this.resetPCGPipeline);this.dispatch(pass,this.initializePCGPipeline);this.dispatchSingle(pass,this.reduceRZPipeline);
+          for(let iteration=0;iteration<this.info.pressureIterations;iteration+=1){this.dispatchPressureDirect(pass,this.applyPCGPipeline);this.dispatchSingle(pass,this.reducePAPPipeline);this.dispatchSingle(pass,this.computeAlphaPipeline);this.dispatchPressureDirect(pass,this.updateXRPipeline);this.dispatchSingle(pass,this.reduceRZPipeline);this.dispatchSingle(pass,this.computeBetaPipeline);this.dispatchPressureDirect(pass,this.updatePPipeline);if(iteration===this.info.pressureIterations-1)this.dispatchSingle(pass,this.reduceResidualPipeline);}pass.end();
+        }
+        if(activeBodies.length>0)encoder.clearBuffer(this.rigidExchangeBuffer);
+        pass=encoder.beginComputePass(sampleGPU?{timestampWrites:{querySet:this.querySet!,endOfPassWriteIndex:queryBase+5}}:undefined);if(activeBodies.length>0)this.dispatch(pass,this.pressureLoadsPipeline);this.dispatch(pass,this.commitPressurePipeline);pass.end();this.current=1-this.current;
       }
-      pass=encoder.beginComputePass();this.dispatchSingle(pass,this.reduceResidualPipeline);pass.end();
-      encoder.clearBuffer(this.rigidExchangeBuffer);pass=encoder.beginComputePass();this.dispatch(pass,this.pressureLoadsPipeline);pass.end();
-      pass=encoder.beginComputePass(this.querySet&&last?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:3}}:undefined);this.dispatch(pass,this.commitPressurePipeline);pass.end();this.current=1-this.current;
-      pass = encoder.beginComputePass(this.querySet&&(first||last)?{timestampWrites:{querySet:this.querySet,...(first?{beginningOfPassWriteIndex:4}:{}),...(last?{endOfPassWriteIndex:5}:{})}}:undefined);this.dispatch(pass, this.projectPipeline);pass.end();this.current = 1 - this.current;
-      if (activeBodies.length > 0) {pass = encoder.beginComputePass(this.querySet&&(first||last)?{timestampWrites:{querySet:this.querySet,...(first?{beginningOfPassWriteIndex:6}:{}),...(last?{endOfPassWriteIndex:7}:{})}}:undefined);this.dispatch(pass, this.rigidPipeline);pass.end();this.current = 1 - this.current;}
+      pass = encoder.beginComputePass(sampleGPU?{timestampWrites:{querySet:this.querySet!,beginningOfPassWriteIndex:queryBase+6,endOfPassWriteIndex:queryBase+7}}:undefined);this.dispatch(pass, this.projectPipeline);pass.end();this.current = 1 - this.current;
+      if (activeBodies.length > 0) {pass = encoder.beginComputePass(sampleGPU?{timestampWrites:{querySet:this.querySet!,beginningOfPassWriteIndex:queryBase+8,endOfPassWriteIndex:queryBase+9}}:undefined);this.dispatch(pass, this.rigidPipeline);pass.end();this.current = 1 - this.current;}
+      else if(sampleGPU){pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet!,beginningOfPassWriteIndex:queryBase+8,endOfPassWriteIndex:queryBase+9}});pass.end();}
     }
-    if(this.querySet&&activeBodies.length===0){const emptyRigidPass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:6,endOfPassWriteIndex:7}});emptyRigidPass.end();}
-    const diagnosticPass = encoder.beginComputePass(this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:8,endOfPassWriteIndex:9}}:undefined);this.dispatch(diagnosticPass, this.reductionPipeline);diagnosticPass.end();
-    if(this.querySet&&this.queryResolve)encoder.resolveQuerySet(this.querySet,0,10,this.queryResolve,0);
+    const diagnosticQuery=substeps*TIMESTAMPS_PER_SUBSTEP,diagnosticPass = encoder.beginComputePass(sampleGPU?{timestampWrites:{querySet:this.querySet!,beginningOfPassWriteIndex:diagnosticQuery,endOfPassWriteIndex:diagnosticQuery+1}}:undefined);this.dispatch(diagnosticPass, this.reductionPipeline);diagnosticPass.end();
+    if(sampleGPU)encoder.resolveQuerySet(this.querySet!,0,diagnosticQuery+2,this.queryResolve!,0);
     let rigidReadback: GPUBuffer | undefined;if(activeBodies.length > 0 && this.onRigidLoads && !this.rigidReadbackPending){this.rigidReadbackPending=true;rigidReadback=this.device.createBuffer({size:12*8*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.rigidExchangeBuffer,0,rigidReadback,0,12*8*4);}
-    this.device.queue.submit([encoder.finish()]);this.submissionsInFlight+=1;this.info.queuedSubmissions=this.submissionsInFlight;void this.device.queue.onSubmittedWorkDone().finally(()=>{this.submissionsInFlight=Math.max(0,this.submissionsInFlight-1);this.info.queuedSubmissions=this.submissionsInFlight;});this.info.encodedSteps = (this.info.encodedSteps ?? 0) + substeps;this.info.simulatedTime_s=this.lastTime;this.info.substepsLast=substeps;
-    this.stepsSinceRegrid+=substeps;if(this.stepsSinceRegrid>=this.scene.hierarchy.regridInterval){this.stepsSinceRegrid=0;this.scheduleRegrid(activeBodies);}
+    const commandBuffer=encoder.finish(),submitStarted=performance.now(),submittedAt=submitStarted,submittedSimulationTime=this.lastTime;this.info.cpuCommandEncode_ms=submitStarted-cpuAdvanceStarted;this.simulationRevision+=1;this.device.queue.submit([commandBuffer]);this.info.cpuQueueSubmit_ms=performance.now()-submitStarted;this.submissionsInFlight+=1;this.info.queuedSubmissions=this.submissionsInFlight;this.info.simulationRevision=this.simulationRevision;void this.device.queue.onSubmittedWorkDone().then(()=>{const completedAt=performance.now(),latency=Math.max(0,completedAt-submittedAt),wallDelta=this.lastCompletionAt===undefined?latency:completedAt-this.lastCompletionAt,simulationDelta=this.lastCompletionAt===undefined?elapsed:submittedSimulationTime-this.lastCompletionSimulationTime,rate=wallDelta>0?simulationDelta/(wallDelta/1000):0;this.lastCompletionAt=completedAt;this.lastCompletionSimulationTime=submittedSimulationTime;this.completedSimulationTime=Math.max(this.completedSimulationTime,submittedSimulationTime);this.info.queueLatency_ms=latency;this.info.completedSimulationTime_s=this.completedSimulationTime;this.info.simulationLag_s=Math.max(0,this.latestRequestedTime-this.completedSimulationTime);this.info.simulationThroughput_x=(this.info.simulationThroughput_x??0)>0?this.info.simulationThroughput_x!*0.75+rate*0.25:rate;}).finally(()=>{this.submissionsInFlight=Math.max(0,this.submissionsInFlight-1);this.info.queuedSubmissions=this.submissionsInFlight;if(sampleGPU){this.timestampSamplePending=false;this.lastTimestampCompletedAt=performance.now();}});this.info.encodedSteps = (this.info.encodedSteps ?? 0) + substeps;this.info.simulatedTime_s=this.lastTime;this.info.substepsLast=substeps;
+    this.stepsSinceRegrid+=substeps;if(this.stepsSinceRegrid>=this.layout.topology.settings.regridInterval){this.stepsSinceRegrid=0;this.scheduleRegrid(activeBodies);}
     if(rigidReadback){const buffer=rigidReadback;void buffer.mapAsync(GPUMapMode.READ).then(()=>{const words=new Int32Array(buffer.getMappedRange());const loads=activeBodies.map((body,index)=>{const b=index*8;return{bodyId:body.description.id,impulse_N_s:{x:words[b]/1e6,y:words[b+1]/1e6,z:words[b+2]/1e6},angularImpulse_N_m_s:{x:words[b+3]/1e6,y:words[b+4]/1e6,z:words[b+5]/1e6},couplingInterval_s:elapsed,displacedVolume_m3:words[b+6]/1e9};});buffer.unmap();buffer.destroy();this.onRigidLoads?.(loads);}).catch(()=>buffer.destroy()).finally(()=>{this.rigidReadbackPending=false;});}
     if(!this.validationChecked){this.validationChecked=true;void this.device.popErrorScope().then((error)=>{if(error)throw new Error(`Hierarchical GPU validation: ${error.message}`);});}
     return true;
@@ -507,12 +563,12 @@ export class WebGPUHierarchicalSolver {
 
   async readStats(): Promise<GPUEulerianInfo> {
     if (this.readbackPending || (this.info.encodedSteps ?? 0) === 0) return this.info;this.readbackPending = true;
-    const queryBytes=this.queryResolve?80:0,buffer = this.device.createBuffer({ size: 64+queryBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });const encoder = this.device.createCommandEncoder();encoder.copyBufferToBuffer(this.reductions, 0, buffer, 0, 64);if(this.queryResolve)encoder.copyBufferToBuffer(this.queryResolve,0,buffer,64,80);this.device.queue.submit([encoder.finish()]);
+    const queryBytes=this.queryResolve&&this.timestampSubsteps>0?(this.timestampSubsteps*TIMESTAMPS_PER_SUBSTEP+2)*8:0,buffer = this.device.createBuffer({ size: 64+queryBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });const encoder = this.device.createCommandEncoder();encoder.copyBufferToBuffer(this.reductions, 0, buffer, 0, 64);if(queryBytes)encoder.copyBufferToBuffer(this.queryResolve!,0,buffer,64,queryBytes);this.device.queue.submit([encoder.finish()]);
     try {
       await buffer.mapAsync(GPUMapMode.READ);
       const words=new Uint32Array(buffer.getMappedRange(0,64)),floats=new Float32Array(words.buffer,words.byteOffset,words.length);
-      const volume=words[0]/1e9;if(volume>0){this.info.volumeCellSum=volume/this.info.cellSize_m**3;this.info.volumeDrift=(volume-this.initialVolume_m3)/Math.max(this.initialVolume_m3,1e-12);this.info.rawVolumeDrift=this.info.volumeDrift;}if(floats[1]>0)this.info.maxSpeed_m_s=floats[1];this.info.divergenceMax_s=floats[2];this.info.divergenceBefore_s=floats[12];this.info.pressureResidual=Math.sqrt(Math.max(0,floats[9]));this.info.pressureIterationsExecuted=words[14];if(floats[13]>0)this.info.maxSpeed_m_s=Math.max(this.info.maxSpeed_m_s??0,floats[13]);
-      if(queryBytes){const times=new BigUint64Array(buffer.getMappedRange(64,80)),advection=Number(times[1]-times[0])/1e6,pressure=Number(times[3]-times[2])/1e6,projection=Number(times[5]-times[4])/1e6,rigid=Number(times[7]-times[6])/1e6,diagnostics=Number(times[9]-times[8])/1e6,total=advection+pressure+projection+rigid+diagnostics,span=Math.max(total,Number(times[9]-times[0])/1e6),overhead=Math.max(0,span-total);if(span>0){this.info.gpuTimings={advection_ms:advection,pressure_ms:pressure,projection_ms:projection,rigidCoupling_ms:rigid,diagnostics_ms:diagnostics,overhead_ms:overhead,total_ms:span};this.info.gpuStep_ms=span;}}
+      const volume=words[0]/1e9;if(volume>0){this.info.volumeCellSum=volume/this.info.cellSize_m**3;this.info.volumeDrift=(volume-this.initialVolume_m3)/Math.max(this.initialVolume_m3,1e-12);this.info.rawVolumeDrift=this.info.volumeDrift;}if(floats[1]>0)this.info.maxSpeed_m_s=floats[1];this.info.divergenceMax_s=floats[2];this.info.divergenceBefore_s=floats[12];this.info.pressureResidual=Math.sqrt(Math.max(0,floats[9]));this.info.pressureIterationsExecuted=this.info.pressureMethod==="jacobi"?this.info.pressureIterations:words[14];if(floats[13]>0)this.info.maxSpeed_m_s=Math.max(this.info.maxSpeed_m_s??0,floats[13]);
+      if(queryBytes){const timing=decodeGPUStageTimings(new BigUint64Array(buffer.getMappedRange(64,queryBytes)),this.timestampSubsteps);if(timing){this.info.gpuTimings=timing;this.info.gpuStep_ms=timing.total_ms;}}
       buffer.unmap();
     } finally {buffer.destroy();this.readbackPending=false;}
     return this.info;
@@ -520,6 +576,6 @@ export class WebGPUHierarchicalSolver {
 
   destroy(): void {
     this.destroyed=true;
-    for (const buffer of [this.cellsA,this.cellsB,this.metadata,this.pageTable,this.params,this.rigidBuffer,this.rigidExchangeBuffer,this.reductions,this.indirectDispatchBuffer,this.pcgBuffer]) buffer.destroy();this.querySet?.destroy();this.queryResolve?.destroy();this.volumeTexture.destroy();
+    for (const buffer of [this.cellsA,this.cellsB,this.metadata,this.pageTable,this.params,this.rigidBuffer,this.rigidExchangeBuffer,this.reductions,this.indirectDispatchBuffer,this.topologyTags,this.pcgBuffer]) buffer.destroy();this.querySet?.destroy();this.queryResolve?.destroy();this.volumeTexture.destroy();
   }
 }

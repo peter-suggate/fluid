@@ -4,12 +4,17 @@ import type { RigidBodyState } from "./rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
 import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
 import { WebGPUHierarchicalSolver } from "./webgpu-hierarchical-solver";
+import { WebGPUWaterSurface } from "./webgpu-water-surface";
+
+// Timestamp readbacks serialize the WebGPU queue for seconds in the embedded
+// Codex preview. Keep the default profiling path entirely queue-safe.
+const ENABLE_RENDER_TIMESTAMP_SAMPLING = false;
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 
 export type GPUStatus =
   | { state: "initializing"; label: string }
-  | { state: "ready"; label: string; adapter: string; computeAvailable: boolean; timestampQueriesAvailable: boolean }
+  | { state: "ready"; label: string; adapter: string; computeAvailable: boolean; timestampQueriesAvailable: boolean; renderTimestampSamplingEnabled: boolean }
   | { state: "unavailable"; label: string }
   | { state: "lost"; label: string };
 
@@ -345,7 +350,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
     var insideWater = waterT >= nearT && waterT <= hit.y
       && abs(waterPoint.x) <= halfSize.x && abs(waterPoint.z) <= halfSize.z;
     if (shouldMarch) { insideWater = solverHit.entry < 1e19; }
-    if (insideWater) {
+    if (insideWater && u.options.w < 0.5) {
       let dx = 0.088 * cos(waterPoint.x * 8.0 + time * 0.72) * cos(waterPoint.z * 7.0 - time * 0.47)
              + 0.102 * cos(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
       let dz = -0.077 * sin(waterPoint.x * 8.0 + time * 0.72) * sin(waterPoint.z * 7.0 - time * 0.47)
@@ -428,6 +433,7 @@ export class FluidLabRenderer {
   private context?: GPUCanvasContext;
   private pipeline?: GPURenderPipeline;
   private hierarchyPipeline?: GPURenderPipeline;
+  private waterSurface?: WebGPUWaterSurface;
   private upscalePipeline?: GPURenderPipeline;
   private upscaleSampler?: GPUSampler;
   private upscaleBindGroup?: GPUBindGroup;
@@ -443,7 +449,7 @@ export class FluidLabRenderer {
   private gpuFluidKey = "";
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
   private gpuRigidLoadCallback?: (loads: GPURigidLoad[]) => void;
-  private lastGPUReadbackSecond = -1;
+  private lastGPUStatsAt = -Infinity;
   private bindGroup?: GPUBindGroup;
   private hierarchyBindGroup?: GPUBindGroup;
   private hierarchyBindRevision = -1;
@@ -454,6 +460,7 @@ export class FluidLabRenderer {
   private lastRenderQueryAt = -Infinity;
   private gpuRender_ms?: number;
   private computeAvailable = true;
+  private lastGPUInfoAt = -Infinity;
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; }
 
@@ -468,7 +475,7 @@ export class FluidLabRenderer {
       this.onStatus({ state: "unavailable", label: "No compatible GPU adapter was found" });
       return;
     }
-    const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
+    const timestampQueriesAvailable=adapter.features.has("timestamp-query"),requiredFeatures: GPUFeatureName[] = ENABLE_RENDER_TIMESTAMP_SAMPLING&&timestampQueriesAvailable ? ["timestamp-query"] : [];
     if(adapter.limits.maxStorageBuffersPerShaderStage<9){this.onStatus({state:"unavailable",label:"Hierarchical WebGPU requires 9 storage buffers per shader stage"});return;}
     const device = await adapter.requestDevice({ requiredFeatures,requiredLimits:{maxStorageBuffersPerShaderStage:9} });
     const computeProbe=await verifyComputeExecution(device);this.computeAvailable=computeProbe.available;
@@ -480,7 +487,7 @@ export class FluidLabRenderer {
     this.device = device;
     this.context = context;
     this.format = navigator.gpu.getPreferredCanvasFormat();
-    if(device.features.has("timestamp-query")){this.renderQuerySet=device.createQuerySet({type:"timestamp",count:2});this.renderQueryResolve=device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
+    if(ENABLE_RENDER_TIMESTAMP_SAMPLING&&device.features.has("timestamp-query")){this.renderQuerySet=device.createQuerySet({type:"timestamp",count:2});this.renderQueryResolve=device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
     context.configure({ device, format: this.format, alphaMode: "opaque" });
 
     const shaderModule = device.createShaderModule({ label: "Fluid Lab presentation shader", code: shader });
@@ -506,11 +513,17 @@ export class FluidLabRenderer {
     this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.rebuildBindGroup();
 
+    try {
+      this.waterSurface = await WebGPUWaterSurface.create(device, this.format, this.uniformBuffer, this.bodyBuffer);
+    } catch (error) {
+      console.warn(`GPU surface extraction unavailable; retaining hierarchical raymarch: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
     device.addEventListener("uncapturederror", (event) => console.error(`WebGPU validation: ${event.error.message}`));
     device.lost.then((info) => this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` }));
     const info = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     const adapterName = info ? [info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter" : "WebGPU adapter";
-    this.onStatus({state:"ready",label:this.computeAvailable?"WebGPU compute and renderer ready":`WebGPU compute unavailable (${computeProbe.detail}) · simulation paused`,adapter:adapterName,computeAvailable:this.computeAvailable,timestampQueriesAvailable:device.features.has("timestamp-query")});
+    this.onStatus({state:"ready",label:this.computeAvailable?"WebGPU compute and renderer ready":`WebGPU compute unavailable (${computeProbe.detail}) · simulation paused`,adapter:adapterName,computeAvailable:this.computeAvailable,timestampQueriesAvailable,renderTimestampSamplingEnabled:ENABLE_RENDER_TIMESTAMP_SAMPLING});
   }
 
   private rebuildBindGroup(texture = this.fluidTexture) {
@@ -531,13 +544,14 @@ export class FluidLabRenderer {
     if (!this.device) return undefined;
     const key = `${quality}:${scene.nominalResolution.length_m}:${JSON.stringify(scene.hierarchy)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}`;
     if (!this.gpuFluid || key !== this.gpuFluidKey) {
-      this.gpuFluid?.destroy(); this.gpuFluid = new WebGPUHierarchicalSolver(this.device, scene, quality, this.gpuRigidLoadCallback); this.gpuFluidKey = key;this.hierarchyBindRevision=-1;this.hierarchyBindGroup=undefined;
+      this.gpuFluid?.destroy(); this.gpuFluid = new WebGPUHierarchicalSolver(this.device, scene, quality, this.gpuRigidLoadCallback); this.gpuFluidKey = key;this.hierarchyBindRevision=-1;this.hierarchyBindGroup=undefined;this.waterSurface?.invalidateResources();
       this.rebuildBindGroup(this.gpuFluid.volumeTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
     }
     if (!this.gpuFluid.advanceTo(time_s, bodies)) {
-      this.gpuFluid.destroy(); this.gpuFluid = new WebGPUHierarchicalSolver(this.device, scene, quality, this.gpuRigidLoadCallback);this.hierarchyBindRevision=-1;this.hierarchyBindGroup=undefined; this.rebuildBindGroup(this.gpuFluid.volumeTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
+      this.gpuFluid.destroy(); this.gpuFluid = new WebGPUHierarchicalSolver(this.device, scene, quality, this.gpuRigidLoadCallback);this.hierarchyBindRevision=-1;this.hierarchyBindGroup=undefined;this.waterSurface?.invalidateResources(); this.rebuildBindGroup(this.gpuFluid.volumeTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
     }
-    const diagnosticTick=Math.floor(time_s*10);if(diagnosticTick!==this.lastGPUReadbackSecond){this.lastGPUReadbackSecond=diagnosticTick;void this.gpuFluid.readStats().then(info=>this.gpuInfoCallback?.({...info}));}
+    const now=performance.now();if(now-this.lastGPUInfoAt>=100){this.lastGPUInfoAt=now;this.gpuInfoCallback?.({...this.gpuFluid.info});}
+    if(now-this.lastGPUStatsAt>=1000&&(this.gpuFluid.info.queuedSubmissions??0)===0){this.lastGPUStatsAt=now;void this.gpuFluid.readStats().then(info=>this.gpuInfoCallback?.({...info}));}
     return this.gpuFluid.info;
   }
 
@@ -578,9 +592,10 @@ export class FluidLabRenderer {
     const key = `${renderWidth}x${renderHeight}`;
     if (key === this.presentationTextureKey) return;
     this.presentationTexture?.destroy();
-    this.presentationTexture = this.device.createTexture({label:"Raymarch presentation target",size:[renderWidth,renderHeight],format:this.format,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+    this.presentationTexture = this.device.createTexture({label:"Water presentation target",size:[renderWidth,renderHeight],format:this.format,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC});
     this.upscaleBindGroup=this.device.createBindGroup({layout:this.upscalePipeline.getBindGroupLayout(0),entries:[{binding:0,resource:this.presentationTexture.createView()},{binding:1,resource:this.upscaleSampler}]});
     this.presentationTextureKey=key;
+    this.waterSurface?.resize(renderWidth,renderHeight);
   }
 
   get presentationResolution(): string {
@@ -599,13 +614,14 @@ export class FluidLabRenderer {
     if(useGPUFluid)this.rebuildHierarchyBindGroup();
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
     if(backend==="cpu-reference")this.uploadFluid(fluid);else if(!useGPUFluid)this.clearCPUFluid();
+    const useSurface=Boolean(useGPUFluid&&this.waterSurface&&gpuInfo?.activeBrickCount);
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, 0,
       position.x, position.y, position.z, 0,
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
-      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), 0,
-      gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo || fluid ? 1 : 0
+      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), useSurface ? 1 : 0,
+      gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, useSurface ? 0 : gpuInfo || fluid ? 1 : 0
     ]);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
     const bodyData = new Float32Array(12 * 16);
@@ -633,6 +649,7 @@ export class FluidLabRenderer {
     pass.setBindGroup(0,useGPUFluid&&this.hierarchyBindGroup?this.hierarchyBindGroup:this.bindGroup);
     pass.draw(3);
     pass.end();
+    if(useSurface&&this.waterSurface&&this.gpuFluid&&gpuInfo?.activeBrickCount){const resources=this.gpuFluid.hierarchyRenderResources;this.waterSurface.updateResources(resources);this.waterSurface.encode(encoder,gpuInfo.activeBrickCount,this.presentationTexture,resources.simulationRevision);}
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}],...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,endOfPassWriteIndex:1}}:{})});
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();
     let renderReadback:GPUBuffer|undefined;if(sampleRenderGPU&&this.renderQuerySet&&this.renderQueryResolve){this.lastRenderQueryAt=renderStart;this.renderReadbackPending=true;encoder.resolveQuerySet(this.renderQuerySet,0,2,this.renderQueryResolve,0);renderReadback=this.device.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.renderQueryResolve,0,renderReadback,0,16);}

@@ -36,6 +36,7 @@ final class FluidMetalView: MTKView, MTKViewDelegate {
     }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     override func mouseDown(with event: NSEvent) {
+        guard solver?.isPlayingRecording != true else { return }
         let point = convert(event.locationInWindow, from: nil)
         lastPoint = point
         let ndc = SIMD2<Float>(Float(point.x / max(bounds.width, 1) * 2 - 1), Float(point.y / max(bounds.height, 1) * 2 - 1))
@@ -43,6 +44,7 @@ final class FluidMetalView: MTKView, MTKViewDelegate {
         if event.modifierFlags.contains(.option) { draggingBody = true }
     }
     override func mouseDragged(with event: NSEvent) {
+        guard solver?.isPlayingRecording != true else { return }
         let point = convert(event.locationInWindow, from: nil)
         if let lastPoint {
             let dx = Float(point.x-lastPoint.x), dy = Float(point.y-lastPoint.y)
