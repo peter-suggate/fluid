@@ -49,15 +49,18 @@ The pressure path:
 - ignores out-of-grid prolongation samples and renormalizes their weights;
 - uses two damped red-black Gauss-Seidel pre/post sweeps;
 - clamps the hierarchy when its top level fits one 256-thread workgroup; and
-- executes one full cycle followed by one V-cycle, with 24 shared-memory top
-  iterations per visit.
+- executes one full cycle followed by two V-cycles, with 256 shared-memory
+  red-black Gauss-Seidel top iterations per visit.
 
 Divergence uses Equation (14)'s average of adjacent collocated velocities, or
 solid velocity when the adjacent cell is more than 90% solid. Projection uses
-Equations (16–18): ghost-fluid air pressure, solid-fraction pressure blending,
-and the difference of positive and negative pressure samples. As in the paper,
-the Laplacian is not the composition of this divergence and gradient, so the
-projection is not idempotent.
+Equation (16)'s ghost-fluid air pressure and solid-fraction pressure blending.
+For stability, the pressure difference is divided by the physical span between
+its samples: `2 dx` for an interior centered pair and `dx` at a one-sided wall.
+The paper prints `dx` in Equation (17) even though the samples are two cell
+centers apart. The literal form reflected each hydrostatic gravity impulse and
+caused the deep tank eruption. This compatibility correction is therefore a
+deliberate departure from the paper.
 
 ## Transport, remeshing, and conservation
 
@@ -70,6 +73,10 @@ and endpoint velocities use a least-squares fit. For VOF, the shader computes
 the old represented column amount and assigns the residual after copying the
 new regular band to the new tall cell. This preserves every representable
 column integral without a global volume correction.
+
+External force integration is restricted to the liquid domain. Extrapolated
+air samples support characteristic tracing but do not accumulate their own
+gravity impulse.
 
 The default moving-dam browser sample measured 0.07% raw VOF drift at 2.24 s
 after the adaptive uniform fallback. The matching uniform path measured
@@ -101,6 +108,18 @@ buoyancy that is not present in the explicit GPU exchange buffer.
 - Tall-face VOF evaluation is currently linear in tall-cell height. Packed
   pressure, projection, coupling, and advection dispatch counts remain
   independent of full domain depth.
+
+## Stability diagnostics
+
+The GPU readback reports liquid and extrapolated-air speed extrema, divergence
+before and after projection, exact finest-level pressure residual, relative
+residual, pressure maximum, component CFL, finite-state count, volume drift,
+and cubic-equivalent locations for each important extremum. It also separates
+requested UI time from encoded GPU simulation time and reports lag rather than
+silently discarding clamped time.
+
+See [`TALL_CELL_STABILITY.md`](TALL_CELL_STABILITY.md) for the full paper/code
+audit and the before/after deep tank measurements.
 
 Deep-scene performance must be remeasured whenever the smoother or cycle
 budget changes. At ordinary depth, multigrid overhead can make the tall path

@@ -36,6 +36,9 @@ the scene's surface-tension value.
 
 ## Stage 1 documents
 
+The interactive paper presets reproduce the tank inflow (Figure 3), dam break
+with boxes (Figure 4), and jet-past-sphere benchmark (Figure 6).
+
 - [`docs/STAGE1_ARCHITECTURE.md`](docs/STAGE1_ARCHITECTURE.md) — selected
   numerical methods, architecture, validation plan, risks, and decisions.
 - [`docs/WEB_ARCHITECTURE.md`](docs/WEB_ARCHITECTURE.md) — accepted browser
@@ -53,6 +56,11 @@ the scene's surface-tension value.
 - [`docs/TALL_CELL_WEBGPU.md`](docs/TALL_CELL_WEBGPU.md) — restricted tall-cell
   layout, conservative remeshing, performance model, and departures from the
   reference paper.
+- [`docs/TALL_CELLS_PAPER.md`](docs/TALL_CELLS_PAPER.md) — searchable technical
+  extraction of the paper's equations, algorithms, and stability constraints.
+- [`docs/TALL_CELL_STABILITY.md`](docs/TALL_CELL_STABILITY.md) — rigorous
+  paper-to-code audit, eruption reproduction, corrections, and live diagnostic
+  contract.
 - [`docs/TALL_CELL_BENCHMARK.md`](docs/TALL_CELL_BENCHMARK.md) — matched browser
   comparison against the retained uniform WebGPU solver.
 - [`docs/SCENE_FORMAT.md`](docs/SCENE_FORMAT.md) — canonical SI scene and run

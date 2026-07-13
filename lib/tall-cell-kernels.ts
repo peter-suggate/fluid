@@ -6,6 +6,9 @@ struct Params {
   physical: vec4f,
   boundary: vec4f,
   tall: vec4f,
+  inflowPositionRadius: vec4f,
+  inflowVelocityLength: vec4f,
+  inflowTiming: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
@@ -16,7 +19,7 @@ struct Params {
 @group(0) @binding(6) var<uniform> params: Params;
 @group(0) @binding(7) var columnBaseIn: texture_2d<f32>;
 @group(0) @binding(8) var columnBaseOut: texture_storage_2d<r32float, write>;
-@group(0) @binding(9) var<storage,read_write> reductions:array<atomic<u32>,8>;
+@group(0) @binding(9) var<storage,read_write> reductions:array<atomic<u32>,32>;
 struct RigidBody {
   positionShape: vec4f,
   dimensions: vec4f,
@@ -46,6 +49,15 @@ fn sampleY(id:vec3i)->f32{
 }
 fn samplePoint(id:vec3i)->vec3f{return vec3f(f32(id.x)+0.5,sampleY(id),f32(id.z)+0.5);}
 fn worldFromPoint(p:vec3f)->vec3f{let h=params.cellGravity.xyz;return vec3f(-0.5*params.container.x+p.x*h.x,p.y*h.y,-0.5*params.container.z+p.z*h.z);}
+fn inflowStrength()->f32{let time=params.inflowTiming.x;let start=params.inflowTiming.y;let end=params.inflowTiming.z;let ramp=params.inflowTiming.w;if(time<start||time>=end||end<=start){return 0.0;}if(ramp<=0.0){return 1.0;}return min(1.0,min((time-start)/ramp,(end-time)/ramp));}
+fn insideInflow(world:vec3f)->bool{let velocity=params.inflowVelocityLength.xyz;let speed=length(velocity);if(inflowStrength()<=0.0||speed<=1e-6){return false;}let direction=velocity/speed;let relative=world-params.inflowPositionRadius.xyz;let axial=dot(relative,direction);let radial=relative-axial*direction;return abs(axial)<=0.5*params.inflowVelocityLength.w&&length(radial)<=params.inflowPositionRadius.w;}
+fn finiteScalar(value:f32)->bool{return value==value&&abs(value)<=3.402823e38;}
+fn storeWorldLocation(id:vec3i,slot:u32){let q=vec3i(floor(samplePoint(id)));atomicStore(&reductions[slot],u32(max(q.x,0)));atomicStore(&reductions[slot+1u],u32(max(q.y,0)));atomicStore(&reductions[slot+2u],u32(max(q.z,0)));}
+fn updatePositiveMaximum(value:f32,valueSlot:u32,locationSlot:u32,id:vec3i){
+  if(!finiteScalar(value)||value<0.0){atomicAdd(&reductions[20],1u);return;}
+  let bits=bitcast<u32>(value);let previous=atomicMax(&reductions[valueSlot],bits);if(bits>previous){storeWorldLocation(id,locationSlot);}
+}
+fn updatePositiveMaximumOnly(value:f32,valueSlot:u32){if(!finiteScalar(value)||value<0.0){atomicAdd(&reductions[20],1u);return;}atomicMax(&reductions[valueSlot],bitcast<u32>(value));}
 
 fn volumeCell(q:vec3i)->f32{
   if(!validWorld(q)){return 0.0;}let base=baseAt(q.x,q.z);
@@ -158,7 +170,12 @@ fn boundedMacCormack(id:vec3i,p:vec3f)->vec3f{
 fn finishAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
 	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=boundedMacCormack(id,p);var alpha=advectedVolume(q,dt);if(id.y==0){alpha=advectedTallVolume(id.x,id.z,dt);}else if(id.y==1){alpha=textureLoad(volumeIn,vec3i(id.x,0,id.z),0).x;}
-  v.y+=params.cellGravity.w*dt;if(alpha>0.001){let nu=params.physical.y/params.physical.x;v+=dt*nu*velocityLaplacian(q);if(alpha<0.999){v+=dt*params.boundary.x/params.physical.x*curvature(q)*volumeGradient(q);}}
+  // Euler's momentum equation is integrated in the liquid domain. Air values
+  // are extrapolation support for the next trace and must not accumulate a
+  // separate gravity impulse; doing so feeds a falling-air mode back through
+  // the collocated interface stencil.
+  if(alpha>=0.5){v.y+=params.cellGravity.w*dt;}if(alpha>0.001){let nu=params.physical.y/params.physical.x;v+=dt*nu*velocityLaplacian(q);if(alpha<0.999){v+=dt*params.boundary.x/params.physical.x*curvature(q)*volumeGradient(q);}}
+  if(insideInflow(worldFromPoint(p))){alpha=max(alpha,inflowStrength());v=params.inflowVelocityLength.xyz;}
   let d=fineDims();if(q.x+1>=d.x){v.x=0.0;}if(q.y+1>=d.y){v.y=0.0;}if(q.z+1>=d.z){v.z=0.0;}
   textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(alpha));textureStore(pressureOut,id,vec4f(0.0));
 }
@@ -183,7 +200,7 @@ fn jacobi(@builtin(global_invocation_id) gid:vec3u){
 
 @compute @workgroup_size(4,4,4)
 fn project(@builtin(global_invocation_id) gid:vec3u){
-	  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(0.0));return;}let q=vec3i(floor(samplePoint(id)));let h=params.cellGravity.xyz;let scale=params.dimsDt.w/params.physical.x;let ownAlpha=volumeCell(q);let ownLiquid=ownAlpha>=0.5;var v=textureLoad(velocityIn,id,0).xyz;if(ownLiquid&&solidFractionCell(q)<=0.9){let ownPressure=pressureCell(q);let offsets=array<vec3i,3>(vec3i(1,0,0),vec3i(0,1,0),vec3i(0,0,1));for(var axis=0u;axis<3u;axis+=1u){let plus=q+offsets[axis];let minus=q-offsets[axis];var pPlus=ownPressure;var pMinus=ownPressure;if(validWorld(plus)){let alpha=volumeCell(plus);if(alpha>=0.5){let solid=solidFractionCell(plus);pPlus=solid*ownPressure+(1.0-solid)*pressureCell(plus);}else{let theta=interfaceFraction(ownAlpha,alpha);pPlus=ownPressure*(1.0-1.0/theta);}}if(validWorld(minus)){let alpha=volumeCell(minus);if(alpha>=0.5){let solid=solidFractionCell(minus);pMinus=solid*ownPressure+(1.0-solid)*pressureCell(minus);}else{let theta=interfaceFraction(ownAlpha,alpha);pMinus=ownPressure*(1.0-1.0/theta);}}v[axis]-=scale*(pPlus-pMinus)/h[axis];}}textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x));
+	  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(0.0));return;}let q=vec3i(floor(samplePoint(id)));let h=params.cellGravity.xyz;let scale=params.dimsDt.w/params.physical.x;let ownAlpha=volumeCell(q);let ownLiquid=ownAlpha>=0.5;var v=textureLoad(velocityIn,id,0).xyz;if(ownLiquid&&solidFractionCell(q)<=0.9){let ownPressure=pressureCell(q);let offsets=array<vec3i,3>(vec3i(1,0,0),vec3i(0,1,0),vec3i(0,0,1));for(var axis=0u;axis<3u;axis+=1u){let plus=q+offsets[axis];let minus=q-offsets[axis];let plusValid=validWorld(plus);let minusValid=validWorld(minus);var pPlus=ownPressure;var pMinus=ownPressure;if(plusValid){let alpha=volumeCell(plus);if(alpha>=0.5){let solid=solidFractionCell(plus);pPlus=solid*ownPressure+(1.0-solid)*pressureCell(plus);}else{let theta=interfaceFraction(ownAlpha,alpha);pPlus=ownPressure*(1.0-1.0/theta);}}if(minusValid){let alpha=volumeCell(minus);if(alpha>=0.5){let solid=solidFractionCell(minus);pMinus=solid*ownPressure+(1.0-solid)*pressureCell(minus);}else{let theta=interfaceFraction(ownAlpha,alpha);pMinus=ownPressure*(1.0-1.0/theta);}}let sampleSpan=select(1.0,2.0,plusValid&&minusValid);v[axis]-=scale*(pPlus-pMinus)/(sampleSpan*h[axis]);}}textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x));
 	}
 
 	@compute @workgroup_size(4,4,4)
@@ -192,6 +209,13 @@ fn project(@builtin(global_invocation_id) gid:vec3u){
 	  for(var corner:u32=0u;corner<8u;corner+=1u){let offset=vec3f(select(-0.4,0.4,(corner&1u)>0u),select(-0.4,0.4,(corner&2u)>0u),select(-0.4,0.4,(corner&4u)>0u))*h;let sample=world+offset;for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}if(insideRigid(rigidBodies[bodyIndex],sample)){solid+=0.125;owner=min(owner,bodyIndex);break;}}}
 	  if(owner<12u&&solid>0.0){let body=rigidBodies[owner];let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);v=mix(v,solidVelocity,solid);let solidDensity=max(body.angularVelocity.w,1.0);let reducedDensity=params.physical.x*solidDensity/(params.physical.x+solidDensity);let fluidImpulse=reducedDensity*h.x*h.y*h.z*alpha*solid*(solidVelocity-oldV);let reaction=-fluidImpulse;let torque=cross(arm,reaction);let base=owner*8u;atomicAdd(&rigidExchange[base],i32(round(reaction.x*1e6)));atomicAdd(&rigidExchange[base+1u],i32(round(reaction.y*1e6)));atomicAdd(&rigidExchange[base+2u],i32(round(reaction.z*1e6)));atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*1e6)));atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*1e6)));atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*1e6)));atomicAdd(&rigidExchange[base+6u],i32(round(alpha*solid*65536.0)));}
 	  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(alpha));textureStore(pressureOut,id,vec4f(solid));
+	}
+
+@compute @workgroup_size(4,4,4)
+fn reduceBeforeProjection(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!validPacked(id)||!activeSample(id)){return;}let alpha=textureLoad(volumeIn,id,0).x;let velocityValue=textureLoad(velocityIn,id,0).xyz;let speed=length(velocityValue);
+  if(!finiteScalar(alpha)||!all(velocityValue==velocityValue)||any(abs(velocityValue)>vec3f(3.402823e38))){atomicAdd(&reductions[20],1u);return;}
+  if(alpha>=0.5&&solidFractionCell(vec3i(floor(samplePoint(id))))<=0.9){updatePositiveMaximum(abs(divergenceAt(id)),4u,11u,id);}else if(id.y>=2){updatePositiveMaximum(speed,6u,17u,id);}
 }
 
 @compute @workgroup_size(8,8,1)
@@ -214,5 +238,13 @@ fn remap(@builtin(global_invocation_id) gid:vec3u){
 }
 
 @compute @workgroup_size(4,4,4)
-fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!validPacked(id)||!activeSample(id)){return;}let alpha=textureLoad(volumeIn,id,0).x;var weight=1.0;if(id.y==0){weight=f32(baseAt(id.x,id.z));}else if(id.y==1){weight=0.0;}atomicAdd(&reductions[0],u32(clamp(alpha*weight*2048.0,0.0,4294967295.0)));if(alpha>0.5){atomicMax(&reductions[1],u32(id.x+1));atomicMax(&reductions[2],bitcast<u32>(length(textureLoad(velocityIn,id,0).xyz)));if(solidFractionCell(vec3i(floor(samplePoint(id))))<=0.9){atomicMax(&reductions[4],bitcast<u32>(abs(divergenceAt(id))));}}atomicMax(&reductions[3],u32(baseAt(id.x,id.z)));}
+fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!validPacked(id)||!activeSample(id)){return;}let alpha=textureLoad(volumeIn,id,0).x;let velocityValue=textureLoad(velocityIn,id,0).xyz;
+  if(!finiteScalar(alpha)||!all(velocityValue==velocityValue)||any(abs(velocityValue)>vec3f(3.402823e38))){atomicAdd(&reductions[20],1u);return;}
+  var weight=1.0;if(id.y==0){weight=f32(baseAt(id.x,id.z));}else if(id.y==1){weight=0.0;}atomicAdd(&reductions[0],u32(clamp(alpha*weight*256.0,0.0,4294967295.0)));atomicMax(&reductions[3],u32(baseAt(id.x,id.z)));
+  if(alpha>=0.5){
+    atomicMax(&reductions[1],u32(id.x+1));updatePositiveMaximum(length(velocityValue),2u,8u,id);
+    if(solidFractionCell(vec3i(floor(samplePoint(id))))<=0.9){updatePositiveMaximum(abs(divergenceAt(id)),5u,14u,id);let h=params.cellGravity.xyz;let cfl=max(abs(velocityValue.x)*params.dimsDt.w/h.x,max(abs(velocityValue.y)*params.dimsDt.w/h.y,abs(velocityValue.z)*params.dimsDt.w/h.z));updatePositiveMaximumOnly(cfl,30u);if(cfl>1.0){atomicAdd(&reductions[31],1u);}}
+  }
+}
 `;

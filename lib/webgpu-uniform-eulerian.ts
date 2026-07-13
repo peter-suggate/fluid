@@ -8,6 +8,7 @@ import {
 } from "./webgpu-eulerian";
 import type { SceneDescription } from "./model";
 import { createTallCellLayout } from "./tall-cell-grid";
+import { planGPUAdvance } from "./tall-cell-diagnostics";
 
 /** The main-branch cubic solver retained as an A/B reference backend. */
 export class WebGPUUniformEulerianSolver {
@@ -46,7 +47,7 @@ export class WebGPUUniformEulerianSolver {
     this.volumeA = texture("r32float"); this.volumeB = texture("r32float");
     this.heightA = device.createTexture({ label: "Uniform column fallback A", size: [nx, nz], format: "r32float", usage });
     this.heightB = device.createTexture({ label: "Uniform column fallback B", size: [nx, nz], format: "r32float", usage });
-    this.params = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.reductionBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidBuffer = device.createBuffer({ size: 12 * 80, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.rigidExchangeBuffer = device.createBuffer({ size: 12 * 8 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
@@ -135,14 +136,15 @@ export class WebGPUUniformEulerianSolver {
   }
 
   advanceTo(time_s: number, bodies: RigidBodyState[] = []) {
-    if (time_s < this.lastTime) return false;
-    const delta = Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime); if (delta < 1e-6) return true;
-    this.lastTime = time_s; const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
+    const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s); if (!advance) return false;
+    const delta = advance.dt_s; if (delta < 1e-6) { this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; return true; }
+    this.lastTime = advance.nextTime_s; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
     const substeps = 1, dt = delta;
     const activeBodies = bodies.slice(0, 12), bodyData = new Float32Array(12 * 20), shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
     activeBodies.forEach((body, index) => { const o = index * 20, d = body.description.dimensions_m, q = body.orientation; bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, shapeIndex[body.description.shape], d.x, d.y, d.z, 0, q.w, q.x, q.y, q.z, body.linearVelocity_m_s.x, body.linearVelocity_m_s.y, body.linearVelocity_m_s.z, 0, body.angularVelocity_rad_s.x, body.angularVelocity_rad_s.y, body.angularVelocity_rad_s.z, 0], o); });
     this.device.queue.writeBuffer(this.rigidBuffer, 0, bodyData); this.info.encodedSteps = (this.info.encodedSteps ?? 0) + substeps;
-    this.device.queue.writeBuffer(this.params, 0, new Float32Array([this.info.nx, this.info.ny, this.info.nz, dt, c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz, this.scene.fluid.gravity_m_s2.y, c.width_m, c.height_m, c.depth_m, 0, rho, this.scene.fluid.dynamicViscosity_Pa_s, 0, 0, sigma, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodies.length, 0]));
+    const inflow=this.scene.fluid.inflow;
+    this.device.queue.writeBuffer(this.params, 0, new Float32Array([this.info.nx, this.info.ny, this.info.nz, dt, c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz, this.scene.fluid.gravity_m_s2.y, c.width_m, c.height_m, c.depth_m, 0, rho, this.scene.fluid.dynamicViscosity_Pa_s, 0, 0, sigma, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodies.length, 0,inflow?.center_m.x??0,inflow?.center_m.y??0,inflow?.center_m.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,inflow?.length_m??0,this.lastTime,inflow?.start_s??0,inflow?.end_s??0,inflow?.ramp_s??0]));
     this.querySegments = []; this.queryCount = 0; if (!this.validationChecked) this.device.pushErrorScope("validation");
     const encoder = this.device.createCommandEncoder({ label: "Uniform GPU fluid step" }), totalTiming = this.timing("total_ms");
     if (totalTiming && this.querySet) { const pass = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: totalTiming.start } }); pass.end(); }

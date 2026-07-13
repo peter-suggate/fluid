@@ -1,5 +1,5 @@
 import type { SceneDescription, Vec3 } from "./model";
-import { damBreakFractions } from "./initial-fluid";
+import { damBreakFractions, inflowStrength } from "./initial-fluid";
 
 export interface EulerianDiagnostics {
   step: number;
@@ -42,13 +42,14 @@ export class EulerianFluidSolver {
   readonly hx: number; readonly hy: number; readonly hz: number;
   readonly u: Float64Array; readonly v: Float64Array; readonly w: Float64Array;
   readonly pressure: Float64Array; readonly fluid: Uint8Array;
-  readonly markers: Float64Array;
+  markers: Float64Array;
   readonly markerVolume_m3: number;
   readonly initialMarkerVolume_m3: number;
   readonly initialOccupiedVolume_m3: number;
   private renderRevision = 0;
   private stepIndex = 0;
   private time = 0;
+  private inflowMarkerRemainder = 0;
   diagnostics: EulerianDiagnostics;
 
   constructor(readonly scene: SceneDescription, maxCells = 1800) {
@@ -80,7 +81,7 @@ export class EulerianFluidSolver {
     }
     this.markers = new Float64Array(points);
     this.initialOccupiedVolume_m3 = this.countFluidCells() * this.cellVolume;
-    this.markerVolume_m3 = this.initialOccupiedVolume_m3 / Math.max(1, this.markers.length / 3);
+    this.markerVolume_m3 = this.cellVolume / 8;
     this.initialMarkerVolume_m3 = this.markerVolume_m3 * (this.markers.length / 3);
     this.diagnostics = this.collectDiagnostics(0, "fixed", Infinity, Infinity, 0, 0, 0, 0, true, 0);
   }
@@ -174,6 +175,43 @@ export class EulerianFluidSolver {
     }
   }
 
+  private applyInflow(dt: number) {
+    const inflow = this.scene.fluid.inflow;
+    if (!inflow) return;
+    const strength = inflowStrength(this.time + dt, inflow.start_s, inflow.end_s, inflow.ramp_s);
+    const speed = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z);
+    if (strength <= 0 || speed <= 0) return;
+    const direction = { x: inflow.velocity_m_s.x / speed, y: inflow.velocity_m_s.y / speed, z: inflow.velocity_m_s.z / speed };
+    const helper = Math.abs(direction.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const tangentLength = Math.hypot(direction.y * helper.z - direction.z * helper.y, direction.z * helper.x - direction.x * helper.z, direction.x * helper.y - direction.y * helper.x);
+    const tangent = { x: (direction.y * helper.z - direction.z * helper.y) / tangentLength, y: (direction.z * helper.x - direction.x * helper.z) / tangentLength, z: (direction.x * helper.y - direction.y * helper.x) / tangentLength };
+    const bitangent = { x: direction.y * tangent.z - direction.z * tangent.y, y: direction.z * tangent.x - direction.x * tangent.z, z: direction.x * tangent.y - direction.y * tangent.x };
+    const requested = Math.PI * inflow.radius_m ** 2 * speed * strength * dt / this.markerVolume_m3 + this.inflowMarkerRemainder;
+    const count = Math.floor(requested); this.inflowMarkerRemainder = requested - count;
+    if (count <= 0) return;
+    const c = this.scene.container, added = new Float64Array(count * 3), golden = Math.PI * (3 - Math.sqrt(5));
+    for (let marker = 0; marker < count; marker += 1) {
+      const radius = inflow.radius_m * Math.sqrt((marker + 0.5) / count) * 0.9, angle = marker * golden;
+      const center = { x: inflow.center_m.x + direction.x * inflow.length_m / 2, y: inflow.center_m.y + direction.y * inflow.length_m / 2, z: inflow.center_m.z + direction.z * inflow.length_m / 2 };
+      const position = {
+        x: center.x + radius * (Math.cos(angle) * tangent.x + Math.sin(angle) * bitangent.x),
+        y: center.y + radius * (Math.cos(angle) * tangent.y + Math.sin(angle) * bitangent.y),
+        z: center.z + radius * (Math.cos(angle) * tangent.z + Math.sin(angle) * bitangent.z)
+      };
+      added[marker * 3] = Math.max(-c.width_m / 2 + 1e-7, Math.min(c.width_m / 2 - 1e-7, position.x));
+      added[marker * 3 + 1] = Math.max(1e-7, Math.min(c.height_m - 1e-7, position.y));
+      added[marker * 3 + 2] = Math.max(-c.depth_m / 2 + 1e-7, Math.min(c.depth_m / 2 - 1e-7, position.z));
+      const i = Math.max(0, Math.min(this.nx - 1, Math.floor((added[marker * 3] + c.width_m / 2) / this.hx)));
+      const j = Math.max(0, Math.min(this.ny - 1, Math.floor(added[marker * 3 + 1] / this.hy)));
+      const k = Math.max(0, Math.min(this.nz - 1, Math.floor((added[marker * 3 + 2] + c.depth_m / 2) / this.hz)));
+      this.fluid[this.cidx(i, j, k)] = 255;
+      this.u[this.uidx(i, j, k)] = this.u[this.uidx(i + 1, j, k)] = inflow.velocity_m_s.x;
+      this.v[this.vidx(i, j, k)] = this.v[this.vidx(i, j + 1, k)] = inflow.velocity_m_s.y;
+      this.w[this.widx(i, j, k)] = this.w[this.widx(i, j, k + 1)] = inflow.velocity_m_s.z;
+    }
+    const combined = new Float64Array(this.markers.length + added.length); combined.set(this.markers); combined.set(added, this.markers.length); this.markers = combined;
+  }
+
   advectVelocity(dt: number) {
     const old = { u: this.u.slice(), v: this.v.slice(), w: this.w.slice() };
     const trace = (p: Vec3) => { const a = this.sampleWith(p, old); const mid = { x: p.x - 0.5 * dt * a.x, y: p.y - 0.5 * dt * a.y, z: p.z - 0.5 * dt * a.z }; const b = this.sampleWith(mid, old); return { x: p.x - dt * b.x, y: p.y - dt * b.y, z: p.z - dt * b.z }; };
@@ -248,7 +286,7 @@ export class EulerianFluidSolver {
     let dt: number, limiting: EulerianDiagnostics["limitingCondition"];
     if (requestedDt !== undefined) { dt = requestedDt; limiting = "fixed"; }
     else { dt = Math.min(this.scene.numerics.maxDt_s, advective, viscous); limiting = dt === advective ? "advective-cfl" : dt === viscous ? "viscous" : "user-max"; }
-    this.applyExternalForces(dt); this.advectVelocity(dt); this.applyViscosity(dt);
+    this.applyInflow(dt); this.applyExternalForces(dt); this.advectVelocity(dt); this.applyViscosity(dt);
     const before = this.computeDivergenceNorm(); const pressure = this.project(dt); const after = this.computeDivergenceNorm(); const penetrations = this.advectMarkers(dt);
     this.stepIndex += 1; this.time += dt;
     this.diagnostics = this.collectDiagnostics(dt, limiting, advective, viscous, before, after, pressure.residual, pressure.iterations, pressure.converged, penetrations);

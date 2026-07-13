@@ -114,6 +114,16 @@ function requiredInitialRegularLayers(
     lowest = Math.min(lowest, y);
     highest = Math.max(highest, y);
   }
+  const inflow = scene.fluid.inflow;
+  if (inflow) {
+    const speed = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z);
+    const directionY = speed > 0 ? inflow.velocity_m_s.y / speed : 0;
+    const verticalRadius = Math.abs(directionY) * inflow.length_m / 2 + Math.sqrt(Math.max(0, 1 - directionY * directionY)) * inflow.radius_m;
+    const inletLowest = Math.max(0, Math.floor((inflow.center_m.y - verticalRadius) / scene.container.height_m * fineNy));
+    const inletHighest = Math.min(fineNy - 1, Math.floor((inflow.center_m.y + verticalRadius) / scene.container.height_m * fineNy));
+    lowest = Math.min(lowest, inletLowest);
+    highest = Math.max(highest, inletHighest);
+  }
   if (highest < 0) return settings.regularLayers;
 
   // The inequalities in chooseTallCellBase have a solution only when the
