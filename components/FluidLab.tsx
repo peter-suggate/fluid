@@ -8,7 +8,6 @@ import {
   cloneScene,
   createRunManifest,
   defaultCamera,
-  defaultScene,
   parseScene,
   serializeScene,
   type CameraState,
@@ -315,16 +314,18 @@ function ValidationPanel({ results, onClose, gpuStatus }: { results: ValidationR
   );
 }
 
+const initialWebScene=createScenarioScene("dam-break");
+
 export function FluidLab() {
-  const [scene, setScene] = useState<SceneDescription>(() => cloneScene(defaultScene));
+  const [scene, setScene] = useState<SceneDescription>(() => cloneScene(initialWebScene));
   const [view, setView] = useState<ViewMode>("scientific");
   const [runState, setRunState] = useState<"paused" | "running">("running");
   const [simulationTime, setSimulationTime] = useState(0);
-  const [bodies, setBodies] = useState<RigidBodyState[]>(() => initializeRigidBodies(defaultScene.rigidBodies));
-  const [selectedBodyId, setSelectedBodyId] = useState<string | undefined>(defaultScene.rigidBodies[0]?.id);
+  const [bodies, setBodies] = useState<RigidBodyState[]>(() => initializeRigidBodies(initialWebScene.rigidBodies));
+  const [selectedBodyId, setSelectedBodyId] = useState<string | undefined>(initialWebScene.rigidBodies[0]?.id);
   const [newBodyShape, setNewBodyShape] = useState<RigidShape>("sphere");
-  const [rigidState, setRigidState] = useState<RigidStepDiagnostics>(() => rigidDiagnostics(initializeRigidBodies(defaultScene.rigidBodies), defaultScene.fluid.gravity_m_s2));
-  const [initialFluidSolver] = useState(() => new EulerianFluidSolver(defaultScene));
+  const [rigidState, setRigidState] = useState<RigidStepDiagnostics>(() => rigidDiagnostics(initializeRigidBodies(initialWebScene.rigidBodies), initialWebScene.fluid.gravity_m_s2));
+  const [initialFluidSolver] = useState(() => new EulerianFluidSolver(initialWebScene));
   const fluidSolverRef = useRef(initialFluidSolver);
   const [fluidState, setFluidState] = useState<EulerianDiagnostics>(() => initialFluidSolver.diagnostics);
   const [fluidRenderState, setFluidRenderState] = useState<EulerianRenderState>(() => initialFluidSolver.getRenderState());
@@ -352,7 +353,7 @@ export function FluidLab() {
   const sampleClockRef = useRef(0);
   const accumulatorRef = useRef(0);
   const simulationTimeRef = useRef(0);
-  const bodiesRef = useRef<RigidBodyState[]>(initializeRigidBodies(defaultScene.rigidBodies));
+  const bodiesRef = useRef<RigidBodyState[]>(initializeRigidBodies(initialWebScene.rigidBodies));
   const gpuRigidLoadsRef = useRef<GPURigidLoad[]>([]);
   const kinematicDragRef = useRef<{ bodyId: string; position: RigidBodyState["position_m"]; velocity: RigidBodyState["linearVelocity_m_s"] } | null>(null);
   const cpuOracleStepRef = useRef(0);
@@ -360,7 +361,7 @@ export function FluidLab() {
   const gpuInfoRef = useRef<GPUEulerianInfo | null>(null);
   const performanceRef = useRef<PerformanceSnapshot>(emptyPerformance);
   const playbackActiveRef = useRef(false);
-  const [initialRecording] = useState(() => createSimulationRecording(defaultScene, "webgpu", "balanced", initializeRigidBodies(defaultScene.rigidBodies), initialFluidSolver.getRenderState()));
+  const [initialRecording] = useState(() => createSimulationRecording(initialWebScene, "webgpu", "balanced", initializeRigidBodies(initialWebScene.rigidBodies), initialFluidSolver.getRenderState()));
   const recordingRef = useRef<SimulationRecording | null>(initialRecording);
   const validationResults = useMemo(() => runShellValidation(), []);
 
@@ -737,6 +738,7 @@ export function FluidLab() {
           <span>{RIGID_BODIES_ENABLED ? "drag body to move · " : ""}drag to orbit · ⇧ drag pan · wheel zoom</span>
         </div>
         {gpuStatus.state === "unavailable" && <div className="gpu-fallback"><strong>3D renderer unavailable</strong><p>{gpuStatus.label}</p><small>The scene editor, serialization, and CPU validation remain available.</small></div>}
+        {gpuStatus.state === "ready"&&!gpuStatus.computeAvailable&&<div className="compute-fallback-warning"><strong>LOW-RESOLUTION CPU FALLBACK</strong><span>This is not hierarchical GPU output · WebGPU compute did not execute</span></div>}
       </section>
 
       <aside className="right-panel panel-scroll">
