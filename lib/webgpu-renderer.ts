@@ -9,7 +9,7 @@ export type SimulationBackend = "webgpu" | "cpu-reference";
 
 export type GPUStatus =
   | { state: "initializing"; label: string }
-  | { state: "ready"; label: string; adapter: string }
+  | { state: "ready"; label: string; adapter: string; computeAvailable: boolean }
   | { state: "unavailable"; label: string }
   | { state: "lost"; label: string };
 
@@ -19,6 +19,17 @@ export interface RendererFrameMetrics {
   cpuDataUpload_ms: number;
   cpuRenderEncode_ms: number;
   gpuRender_ms?: number;
+}
+
+async function verifyComputeExecution(device:GPUDevice):Promise<{available:boolean;detail:string}>{
+  const uploadExpected=0x13572468,expected=0x5a17c0de,output=device.createBuffer({label:"WebGPU compute capability output",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}),readback=device.createBuffer({label:"WebGPU compute capability readback",size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  try{
+    device.queue.writeBuffer(output,0,new Uint32Array([uploadExpected]));
+    const copyEncoder=device.createCommandEncoder({label:"WebGPU buffer-copy capability commands"});copyEncoder.copyBufferToBuffer(output,0,readback,0,16);device.queue.submit([copyEncoder.finish()]);await readback.mapAsync(GPUMapMode.READ);const uploaded=new Uint32Array(readback.getMappedRange())[0];readback.unmap();if(uploaded!==uploadExpected)return{available:false,detail:`buffer copy mismatch (${uploaded.toString(16)})`};
+    device.pushErrorScope("validation");
+    const shaderModule=device.createShaderModule({label:"WebGPU compute capability shader",code:`@group(0) @binding(0) var<storage,read_write> result:array<vec4u>;@compute @workgroup_size(1) fn main(){result[0]=vec4u(${expected}u,1u,2u,3u);}`});const compilation=await shaderModule.getCompilationInfo();const shaderError=compilation.messages.find(message=>message.type==="error");if(shaderError){await device.popErrorScope();return{available:false,detail:`shader error: ${shaderError.message}`};}const pipeline=await device.createComputePipelineAsync({label:"WebGPU compute capability pipeline",layout:"auto",compute:{module:shaderModule,entryPoint:"main"}}),group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:output}}]}),encoder=device.createCommandEncoder({label:"WebGPU compute capability commands"}),pass=encoder.beginComputePass();
+    pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);pass.end();encoder.copyBufferToBuffer(output,0,readback,0,16);device.queue.submit([encoder.finish()]);const validation=await device.popErrorScope();if(validation)return{available:false,detail:validation.message};await device.queue.onSubmittedWorkDone();await readback.mapAsync(GPUMapMode.READ);const actual=new Uint32Array(readback.getMappedRange())[0];readback.unmap();return{available:actual===expected,detail:actual===expected?"sentinel matched":`sentinel mismatch (${actual.toString(16)})`};
+  }catch(error){return{available:false,detail:error instanceof Error?error.message:String(error)};}finally{output.destroy();readback.destroy();}
 }
 
 const shader = /* wgsl */ `
@@ -442,6 +453,7 @@ export class FluidLabRenderer {
   private renderReadbackPending = false;
   private lastRenderQueryAt = -Infinity;
   private gpuRender_ms?: number;
+  private computeAvailable = true;
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; }
 
@@ -459,6 +471,7 @@ export class FluidLabRenderer {
     const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
     if(adapter.limits.maxStorageBuffersPerShaderStage<9){this.onStatus({state:"unavailable",label:"Hierarchical WebGPU requires 9 storage buffers per shader stage"});return;}
     const device = await adapter.requestDevice({ requiredFeatures,requiredLimits:{maxStorageBuffersPerShaderStage:9} });
+    const computeProbe=await verifyComputeExecution(device);this.computeAvailable=computeProbe.available;
     const context = this.canvas.getContext("webgpu");
     if (!context) {
       this.onStatus({ state: "unavailable", label: "WebGPU canvas context could not be created" });
@@ -497,7 +510,7 @@ export class FluidLabRenderer {
     device.lost.then((info) => this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` }));
     const info = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     const adapterName = info ? [info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter" : "WebGPU adapter";
-    this.onStatus({ state: "ready", label: "WebGPU renderer ready", adapter: adapterName });
+    this.onStatus({state:"ready",label:this.computeAvailable?"WebGPU compute and renderer ready":`GPU compute/readback self-test failed (${computeProbe.detail}) · CPU fluid fallback`,adapter:adapterName,computeAvailable:this.computeAvailable});
   }
 
   private rebuildBindGroup(texture = this.fluidTexture) {
@@ -578,10 +591,10 @@ export class FluidLabRenderer {
     const start = performance.now();
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
-    const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, quality, time_s, bodies) : undefined;
-    if(backend==="webgpu")this.rebuildHierarchyBindGroup();
+    const useGPUFluid=backend==="webgpu"&&this.computeAvailable,gpuInfo=useGPUFluid?this.ensureGPUFluid(scene,quality,time_s,bodies):undefined;
+    if(useGPUFluid)this.rebuildHierarchyBindGroup();
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
-    if (backend === "cpu-reference") this.uploadFluid(fluid);
+    if(!useGPUFluid)this.uploadFluid(fluid);
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, 0,
       position.x, position.y, position.z, 0,
@@ -612,8 +625,8 @@ export class FluidLabRenderer {
       colorAttachments: [{ view: this.presentationTexture.createView(), clearValue: { r: 0.01, g: 0.025, b: 0.024, a: 1 }, loadOp: "clear", storeOp: "store" }],
       ...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:0}}:{})
     });
-    pass.setPipeline(backend==="webgpu"&&this.hierarchyPipeline?this.hierarchyPipeline:this.pipeline);
-    pass.setBindGroup(0, backend==="webgpu"&&this.hierarchyBindGroup?this.hierarchyBindGroup:this.bindGroup);
+    pass.setPipeline(useGPUFluid&&this.hierarchyPipeline?this.hierarchyPipeline:this.pipeline);
+    pass.setBindGroup(0,useGPUFluid&&this.hierarchyBindGroup?this.hierarchyBindGroup:this.bindGroup);
     pass.draw(3);
     pass.end();
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}],...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,endOfPassWriteIndex:1}}:{})});

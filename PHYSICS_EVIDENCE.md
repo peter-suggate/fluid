@@ -565,3 +565,42 @@ Build: `web-stage12.0-1.2.0`
   impact, and equilibrium cases stress distinct numerical regimes. Every preset
   also initializes and advances a finite CPU oracle alongside a finite sparse
   GPU layout. The complete deterministic suite now contains `48` passing tests.
+
+## Stage 12.1 compute execution gate
+
+Recorded: 2026-07-13<br>
+Build: `web-stage12.1-1.2.1`
+
+- Added an end-to-end WebGPU startup check that dispatches a compute write,
+  copies its result to a mapped buffer, and verifies the exact sentinel value.
+- A renderer-only WebGPU adapter can no longer present a static initial field as
+  a running GPU simulation. Failed compute/readback verification automatically
+  selects the moving CPU MAC oracle while retaining GPU presentation, and the
+  interface reports the fallback explicitly.
+- The GPU backend control is disabled after a failed capability check, avoiding
+  accidental reselection of a known non-executing path.
+
+## Stage 12.2 GPU-residency and profiler pass
+
+Recorded: 2026-07-13<br>
+Build: `web-stage12.2-1.2.2`
+
+- Replaced per-step parameter-buffer allocation and bind-group reconstruction
+  with one persistent queue-updated parameter buffer, and bounded the GPU queue
+  at two submissions without imposing a full queue fence after every step.
+- Added GPU-controlled PCG convergence. A dedicated indirect-dispatch buffer is
+  updated by GPU-to-GPU copies, so converged pressure solves skip the remaining
+  cell-wide kernels without a CPU residual readback or synchronization point.
+- Disabled the continuously advancing binary64 comparison oracle by default on
+  the WebGPU backend. It remains available as an advanced live-comparison
+  switch; rigid integration and consumed pressure impulses remain active.
+- Expanded timestamp instrumentation to advection/VOF, PCG, projection, rigid
+  coupling, reductions, queue gaps, and raymarching. The profiler now identifies
+  PCG correctly, clears stale measurements, and exposes asynchronous CPU regrid
+  time, substeps, and queued submissions.
+- The complete forced GPU command stream compiled and passed browser validation
+  with zero errors. This machine's Chrome 149 adapter still left an isolated,
+  aligned compute sentinel unchanged while buffer copies and rendering worked,
+  so numerical GPU throughput and uniform/adaptive wall-time claims are not
+  recorded; the application correctly selected its moving CPU fallback.
+- Production build, lint, and all `48` deterministic physics/topology tests pass.

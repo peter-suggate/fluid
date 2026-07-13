@@ -8,6 +8,7 @@ export interface GPUEulerianInfo {
   cellCount: number;
   cellSize_m: number;
   pressureIterations: number;
+  pressureIterationsExecuted?: number;
   allocatedBytes: number;
   quality: GPUQuality;
   hierarchyLevels?: number;
@@ -22,10 +23,15 @@ export interface GPUEulerianInfo {
   nanCount?: number;
   topologyRevision?: number;
   regridCount?: number;
+  cpuRegrid_ms?: number;
+  regridReadbackBytes?: number;
   volumeCellSum?: number;
   front_m?: number;
   maxSpeed_m_s?: number;
   encodedSteps?: number;
+  simulatedTime_s?: number;
+  queuedSubmissions?: number;
+  substepsLast?: number;
   gpuStep_ms?: number;
   initialVolumeCellSum?: number;
   volumeDrift?: number;

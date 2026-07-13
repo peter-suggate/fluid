@@ -292,6 +292,8 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .validation-list strong { font-size: 10px; font-weight: 600; }
 .validation-list small { color: var(--muted); font: 8px/1.35 var(--mono); }
 .validation-note { margin: 9px 18px 20px; padding: 12px; color: var(--amber); background: rgba(247,198,109,.055); border: 1px solid rgba(247,198,109,.15); font-size: 9px; line-height: 1.5; }
+.check-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 9px/1.4 var(--mono); }
+.check-row input { accent-color: var(--accent); }
 
 @keyframes status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 
