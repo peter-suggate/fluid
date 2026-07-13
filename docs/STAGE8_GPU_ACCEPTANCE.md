@@ -1,37 +1,33 @@
 # Stage 8 — WebGPU Eulerian Interactive Path
 
-The verified CPU MAC solver remains the binary64 oracle. The interactive GPU
-path uses WebGPU `f32` storage textures at substantially higher resolution. It
-uses a collocated velocity/pressure/volume-fraction layout rather than claiming
-bitwise identity with the MAC oracle. A weighted-Jacobi pressure solve is the
-GPU baseline; the CPU PCG solve remains the acceptance reference.
+The verified CPU MAC solver remains the binary64 acceptance oracle. The
+interactive GPU path uses WebGPU `f32` storage textures and is not claimed to be
+bitwise identical to the staggered MAC discretization.
 
-One encoded step performs gravity plus a hydrostatic column-height predictor,
-semi-Lagrangian backtrace, conservative volume-fraction advection, 24–40
-quality-dependent pressure iterations,
-projection, and closed-wall normal velocity enforcement. The height-gradient
-predictor supplies the free-surface pressure acceleration that a low-iteration
-collocated solve otherwise under-resolves; it is explicitly an interactive
-approximation. Physics textures remain on the GPU and are sampled
-directly by the renderer; animation does not require a per-frame field
-readback.
+Each x/z column stores one variable-height bottom cell, represented by bottom
+and top samples, plus a band of cubic cells around the free surface. Balanced,
+high, and ultra request approximately 2,500, 7,000, and 12,500 surface columns
+with minimum bands of 24, 32, and 40 layers. The band expands to the uniform
+limit when a vertical interface cannot fit; otherwise horizontal resolution is
+independent of full water depth.
 
-A compact atomic GPU reduction measures volume, front position, and maximum
-speed without copying 3D fields to JavaScript. A bounded global
-volume-fraction correction restores the initial VOF integral after each accepted
-step; raw transport drift and corrected drift are separate diagnostics.
+One encoded step performs velocity extrapolation, bounded MacCormack velocity
+advection, conservative donor-limited VOF transport, gravity and molecular
+viscosity, periodic conservative remeshing, VOS rigid-body voxelization and
+velocity blending, a solid-aware pressure solve, and projection. The pressure
+hierarchy uses ghost-fluid and solid-fraction coefficients on every level, two
+damped red-black Gauss-Seidel pre/post sweeps, one full cycle plus one V-cycle,
+and the paper's collocated divergence and gradient definitions.
 
-Stable texture views and bind groups are cached. Advection and projection use
-fixed ping-pong roles without full velocity copies. A dedicated 2D reduction
-builds the column-height field once per substep. The finite-volume transport is
-substepped to a three-dimensional CFL bound. Optional timestamp queries report
-the complete GPU simulation step.
+A compact atomic reduction reports raw VOF volume, front position, maximum wet
+speed, maximum post-projection divergence, and maximum tall-cell height without
+copying the 3D fields to JavaScript. Exact packed and cubic-equivalent
+dimensions, compression, and allocated physics memory are shown in the UI.
+There is no global volume correction.
 
-Quality presets allocate approximately 110k, 500k, or 1.2m cells for the
-default tank. Exact effective dimensions and allocated physics memory are
-reported. `f16` is not used.
-
-Known limitations: the collocated Jacobi baseline is more dissipative than the
-CPU MAC/PCG oracle, may show pressure checkerboarding, and currently reports a
-fixed iteration budget rather than an asynchronously reduced residual. It is
-the high-resolution interactive path, not the validation oracle.
+Known limitations are persistent VOF rather than advected level set, fine-grid
+rather than hierarchical velocity extrapolation, amortized rather than
+per-frame remeshing, no in-solid `phi_s`, no resolved pressure traction, no
+terrain cut cells, and no particle thickening. The UI reports post-projection
+divergence rather than an asynchronously reduced linear residual. The native
+Metal backend remains its existing uniform-grid implementation.
