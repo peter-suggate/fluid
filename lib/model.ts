@@ -30,6 +30,7 @@ export interface RigidBodyDescription {
   angularVelocity_rad_s: Vec3;
   restitution: number;
   friction: number;
+  motion?: "dynamic" | "static";
 }
 
 export interface SceneDescription {
@@ -51,6 +52,7 @@ export interface SceneDescription {
     surfaceTension_N_m: number;
     gravity_m_s2: Vec3;
     initialCondition: "dam-break" | "tank-fill";
+    inflow?: FluidInflow;
   };
   nominalResolution: {
     length_m: number;
@@ -62,6 +64,16 @@ export interface SceneDescription {
     pressureMaxIterations: number;
   };
   rigidBodies: RigidBodyDescription[];
+}
+
+export interface FluidInflow {
+  center_m: Vec3;
+  radius_m: number;
+  length_m: number;
+  velocity_m_s: Vec3;
+  start_s: number;
+  end_s: number;
+  ramp_s: number;
 }
 
 export interface CameraState {
@@ -79,7 +91,7 @@ export interface MetricSample {
   kinetic_energy_J: number;
 }
 
-export const BUILD_ID = "web-tall-cell-ab-1.1.0";
+export const BUILD_ID = "web-tall-cell-ab-1.3.0";
 
 export const defaultScene: SceneDescription = sharedDefaultScene as SceneDescription;
 
@@ -134,6 +146,16 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!scene.fluid || scene.fluid.dynamicViscosity_Pa_s < 0) errors.push("Dynamic viscosity cannot be negative");
   if (!scene.fluid || scene.fluid.surfaceTension_N_m < 0) errors.push("Surface tension cannot be negative");
   if (!scene.fluid || !["dam-break", "tank-fill"].includes(scene.fluid.initialCondition)) errors.push("Unsupported fluid initial condition");
+  const inflow = scene.fluid?.inflow;
+  if (inflow) {
+    const speed = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z);
+    if (!(inflow.radius_m > 0) || !(inflow.length_m > 0)) errors.push("Inflow radius and length must be positive");
+    if (!(speed > 0)) errors.push("Inflow velocity must be non-zero");
+    if (!(inflow.start_s >= 0) || !(inflow.end_s > inflow.start_s) || !(inflow.ramp_s >= 0)) errors.push("Inflow timing is invalid");
+    if (inflow.center_m.x < -c.width_m / 2 || inflow.center_m.x > c.width_m / 2
+      || inflow.center_m.y < 0 || inflow.center_m.y > c.height_m
+      || inflow.center_m.z < -c.depth_m / 2 || inflow.center_m.z > c.depth_m / 2) errors.push("Inflow center must be inside the container");
+  }
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");
   if (!scene.numerics || !(scene.numerics.fixedDt_s > 0) || !(scene.numerics.maxDt_s > 0)) errors.push("Time steps must be positive");
   if (scene.numerics && scene.numerics.fixedDt_s > scene.numerics.maxDt_s) errors.push("Fixed time step exceeds maximum time step");
@@ -148,6 +170,7 @@ export function validateScene(scene: SceneDescription): string[] {
       if (!(body.density_kg_m3 > 0)) errors.push(`Body ${body.id} density must be positive`);
       if (body.restitution < 0 || body.restitution > 1) errors.push(`Body ${body.id} restitution must be in [0, 1]`);
       if (body.friction < 0) errors.push(`Body ${body.id} friction cannot be negative`);
+      if (body.motion && !["dynamic", "static"].includes(body.motion)) errors.push(`Unsupported motion type for body ${body.id}`);
     }
   }
   return errors;

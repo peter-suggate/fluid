@@ -500,7 +500,7 @@ export class FluidLabRenderer {
 
   private ensureGPUFluid(scene: SceneDescription, quality: GPUQuality, method: GPUGridMethod, time_s: number, bodies: RigidBodyState[]) {
     if (!this.device) return undefined;
-    const key = `${method}:${quality}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}`;
+    const key = `${method}:${quality}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
     const createSolver = () => method === "uniform"
       ? new WebGPUUniformEulerianSolver(this.device!, scene, quality, this.gpuRigidLoadCallback)
       : new WebGPUEulerianSolver(this.device!, scene, quality, this.gpuRigidLoadCallback);
@@ -511,7 +511,10 @@ export class FluidLabRenderer {
     if (!this.gpuFluid.advanceTo(time_s, bodies)) {
       this.gpuFluid.destroy(); this.gpuFluid = createSolver(); this.rebuildBindGroup(this.gpuFluid.volumeTexture,this.gpuFluid.columnBaseTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
     }
-    const second=Math.floor(time_s*4);if(second!==this.lastGPUReadbackSecond){this.lastGPUReadbackSecond=second;void this.gpuFluid.readStats().then(info=>this.gpuInfoCallback?.({...info}));}
+    // Sample at 30 Hz of simulation time so a paper-sized 1/30 s step cannot
+    // cross an instability threshold between diagnostic readbacks. The solver
+    // coalesces reads while a previous map is pending.
+    const diagnosticTick=Math.round(time_s*30);if(diagnosticTick!==this.lastGPUReadbackSecond){this.lastGPUReadbackSecond=diagnosticTick;void this.gpuFluid.readStats().then(info=>this.gpuInfoCallback?.({...info}));}
     return this.gpuFluid.info;
   }
 

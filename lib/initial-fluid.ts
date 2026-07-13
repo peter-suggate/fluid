@@ -18,3 +18,9 @@ export function damBreakFractions(fillFraction: number): DamBreakFractions {
   const footprint = Math.sqrt(fill / height);
   return { width: footprint, height, depth: footprint };
 }
+
+export function inflowStrength(time_s: number, start_s: number, end_s: number, ramp_s: number): number {
+  if (time_s < start_s || time_s >= end_s) return 0;
+  if (ramp_s <= 0) return 1;
+  return Math.min(1, (time_s - start_s) / ramp_s, (end_s - time_s) / ramp_s);
+}

@@ -15,7 +15,8 @@ Paper: <https://matthias-research.github.io/pages/publications/tallCells.pdf>
   core solver.
 - Raw VOF is reported without global mass rescaling.
 - Tall pressure uses solid-aware ghost-fluid multigrid, two damped RBGS
-  pre/post sweeps, one full cycle, and one V-cycle.
+  pre/post sweeps, one full cycle, two V-cycles, and a 256-iteration RBGS top
+  solve.
 
 ## Default moving-dam result
 
@@ -24,7 +25,9 @@ therefore selects the uniform-grid limit: 61 × 48 × 41 stored samples for a
 61 × 46 × 41 cubic-equivalent grid, with the two endpoint layers inactive.
 This is a representability requirement, not a performance regression.
 
-Controlled local samples produced:
+Historical controlled local samples produced the following before the current
+stability correction; they must not be treated as current performance or
+parity numbers:
 
 | Metric | Uniform cubic at 2.06 s | Tall solver at 2.24 s |
 | --- | ---: | ---: |
@@ -35,10 +38,11 @@ Controlled local samples produced:
 
 The earlier implementation lost about 95% of its VOF by 20 s and launched the
 cork to kilometre-scale positions. The corrected run remains finite and its
-volume is close to the uniform reference. Peak-speed parity is improved but is
-not claimed exact: the tall path intentionally uses the paper's collocated,
-non-idempotent projection, whereas the retained uniform comparator is the
-older composed weighted-Jacobi solver.
+volume is close to the uniform reference. Peak-speed parity was not claimed
+exact. The tall path now uses a physical two-cell pressure-gradient span to
+prevent the paper's printed collocated operator from reflecting hydrostatic
+impulses. See [`TALL_CELL_STABILITY.md`](TALL_CELL_STABILITY.md) for current
+stability measurements.
 
 ## Deep-water storage result
 

@@ -4,9 +4,16 @@ import { boundingRadius, type RigidBodyState } from "./rigid-body";
 import { tallCellComputeShader } from "./tall-cell-kernels";
 import { createTallCellLayout, type GPUQuality, type TallCellLayout } from "./tall-cell-grid";
 import { TallCellMultigrid } from "./tall-cell-multigrid";
+import { classifyTallCellStability, planGPUAdvance } from "./tall-cell-diagnostics";
 
 export type { GPUQuality } from "./tall-cell-grid";
 export type GPUGridMethod = "tall-cell" | "uniform";
+
+export interface GPUFieldLocation {
+  x: number;
+  y: number;
+  z: number;
+}
 
 export interface GPUEulerianInfo {
   nx: number;
@@ -28,6 +35,26 @@ export interface GPUEulerianInfo {
   front_m?: number;
   maxSpeed_m_s?: number;
   maxDivergence_s?: number;
+  maxDivergenceBefore_s?: number;
+  maxDivergenceAfter_s?: number;
+  projectionDivergenceRatio?: number;
+  maxAirSpeed_m_s?: number;
+  maxPressure_Pa?: number;
+  pressureResidual?: number;
+  pressureRelativeResidual?: number;
+  maxComponentCfl?: number;
+  highCflCellCount?: number;
+  nonFiniteCount?: number;
+  stabilityFlags?: string[];
+  maxSpeedLocation?: GPUFieldLocation;
+  maxDivergenceBeforeLocation?: GPUFieldLocation;
+  maxDivergenceAfterLocation?: GPUFieldLocation;
+  maxAirSpeedLocation?: GPUFieldLocation;
+  maxPressureLocation?: GPUFieldLocation;
+  maxPressureResidualLocation?: GPUFieldLocation;
+  lastDt_s?: number;
+  simulatedTime_s?: number;
+  simulationLag_s?: number;
   maximumTallCellHeight?: number;
   encodedSteps?: number;
   gpuStep_ms?: number;
@@ -90,6 +117,9 @@ struct Params {
   container: vec4f,
   physical: vec4f,
   boundary: vec4f,
+  inflowPositionRadius: vec4f,
+  inflowVelocityLength: vec4f,
+  inflowTiming: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
@@ -114,6 +144,9 @@ struct RigidBody {
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn valid(p: vec3i) -> bool { let d=dims(); return all(p >= vec3i(0)) && all(p < d); }
 fn clampCell(p: vec3i) -> vec3i { return clamp(p, vec3i(0), dims()-vec3i(1)); }
+fn worldCell(id:vec3i)->vec3f{let h=params.cellGravity.xyz;return vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);}
+fn inflowStrength()->f32{let time=params.inflowTiming.x;let start=params.inflowTiming.y;let end=params.inflowTiming.z;let ramp=params.inflowTiming.w;if(time<start||time>=end||end<=start){return 0.0;}if(ramp<=0.0){return 1.0;}return min(1.0,min((time-start)/ramp,(end-time)/ramp));}
+fn insideInflow(world:vec3f)->bool{let velocityValue=params.inflowVelocityLength.xyz;let speed=length(velocityValue);if(inflowStrength()<=0.0||speed<=1e-6){return false;}let direction=velocityValue/speed;let relative=world-params.inflowPositionRadius.xyz;let axial=dot(relative,direction);let radial=relative-axial*direction;return abs(axial)<=0.5*params.inflowVelocityLength.w&&length(radial)<=params.inflowPositionRadius.w;}
 fn volume(p: vec3i) -> f32 { if (!valid(p)) { return 0.0; } return textureLoad(volumeIn,p,0).x; }
 fn velocity(p: vec3i) -> vec3f { return textureLoad(velocityIn,clampCell(p),0).xyz; }
 fn faceVelocity(p:vec3i)->vec3f{if(!valid(p)){return vec3f(0.0);}return textureLoad(velocityIn,p,0).xyz;}
@@ -222,12 +255,13 @@ fn advect(@builtin(global_invocation_id) gid: vec3u) {
   if(valid(id+vec3i(1,0,0))){v.x+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(1,0,0)))*(volume(id+vec3i(1,0,0))-phi)/h.x;}
   if(valid(id+vec3i(0,1,0))){v.y+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(0,1,0)))*(volume(id+vec3i(0,1,0))-phi)/h.y;}
   if(valid(id+vec3i(0,0,1))){v.z+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(0,0,1)))*(volume(id+vec3i(0,0,1))-phi)/h.z;}
+  var advected=advectedVolume(id,dt);if(insideInflow(worldCell(id))){advected=max(advected,inflowStrength());v=params.inflowVelocityLength.xyz;}
   let d=dims();
   if (id.x==d.x-1) { v.x=0.0; }
   if (id.y==d.y-1) { v.y=0.0; }
   if (id.z==d.z-1) { v.z=0.0; }
   textureStore(velocityOut,id,vec4f(v,0.0));
-  textureStore(volumeOut,id,vec4f(advectedVolume(id,dt),0.0,0.0,0.0));
+  textureStore(volumeOut,id,vec4f(advected,0.0,0.0,0.0));
   textureStore(pressureOut,id,vec4f(0.0));
 }
 
@@ -312,7 +346,7 @@ export class WebGPUEulerianSolver {
   private heightA: GPUTexture; private heightB: GPUTexture;
   private params: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
-  private extrapolatePipeline:GPUComputePipeline;private predictPipeline:GPUComputePipeline;private reversePipeline:GPUComputePipeline;private advectPipeline: GPUComputePipeline;private buildRhsPipeline:GPUComputePipeline; private jacobiPipeline: GPUComputePipeline; private projectPipeline: GPUComputePipeline; private rigidPipeline:GPUComputePipeline;private reductionPipeline:GPUComputePipeline;private planRemeshPipeline:GPUComputePipeline;private remapPipeline:GPUComputePipeline;
+  private extrapolatePipeline:GPUComputePipeline;private predictPipeline:GPUComputePipeline;private reversePipeline:GPUComputePipeline;private advectPipeline: GPUComputePipeline;private buildRhsPipeline:GPUComputePipeline; private jacobiPipeline: GPUComputePipeline; private projectPipeline: GPUComputePipeline; private rigidPipeline:GPUComputePipeline;private preReductionPipeline:GPUComputePipeline;private reductionPipeline:GPUComputePipeline;private planRemeshPipeline:GPUComputePipeline;private remapPipeline:GPUComputePipeline;
   private extrapolateFirstGroup:GPUBindGroup;private extrapolateSecondGroup:GPUBindGroup;private extrapolateBackGroup:GPUBindGroup;private predictGroup:GPUBindGroup;private reverseGroup:GPUBindGroup;private advectGroup: GPUBindGroup;private pressureRhsGroup:GPUBindGroup; private jacobiABGroup: GPUBindGroup; private jacobiBAGroup: GPUBindGroup; private projectGroup: GPUBindGroup;private rigidGroup:GPUBindGroup; private reductionGroup:GPUBindGroup;private planRemeshGroup:GPUBindGroup;private remapGroup:GPUBindGroup;
   private multigrid:TallCellMultigrid;
   private reductionBuffer:GPUBuffer;private rigidBuffer:GPUBuffer;private rigidExchangeBuffer:GPUBuffer;private nextColumnBases:GPUBuffer;private querySet?:GPUQuerySet;private queryResolve?:GPUBuffer;
@@ -330,8 +364,8 @@ export class WebGPUEulerianSolver {
     const texture=(format: GPUTextureFormat)=>device.createTexture({size:[nx,packedNy,nz],dimension:"3d",format,usage});
     this.velocityA=texture("rgba32float"); this.velocityB=texture("rgba32float");this.velocityC=texture("rgba32float");this.velocityD=texture("rgba32float"); this.pressureA=texture("r32float"); this.pressureB=texture("r32float"); this.volumeA=texture("r32float"); this.volumeB=texture("r32float");this.solidA=texture("r32float");this.solidB=texture("r32float");
     this.heightA=device.createTexture({label:"Tall-cell column bases A",size:[nx,nz],format:"r32float",usage});this.heightB=device.createTexture({label:"Tall-cell column bases B",size:[nx,nz],format:"r32float",usage});
-    this.params=device.createBuffer({size:96,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    this.reductionBuffer=device.createBuffer({size:32,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+    this.params=device.createBuffer({size:144,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    this.reductionBuffer=device.createBuffer({size:128,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.rigidBuffer=device.createBuffer({size:12*80,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     this.rigidExchangeBuffer=device.createBuffer({size:12*8*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     if(device.features.has("timestamp-query")){this.querySet=device.createQuerySet({type:"timestamp",count:160});this.queryResolve=device.createBuffer({size:160*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
@@ -368,12 +402,13 @@ export class WebGPUEulerianSolver {
     this.jacobiPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"jacobi"}});
     this.projectPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"project"}});
     this.rigidPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"coupleRigid"}});
+    this.preReductionPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"reduceBeforeProjection"}});
     this.reductionPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"reduceDiagnostics"}});
     this.planRemeshPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"planRemesh"}});
     this.remapPipeline=device.createComputePipeline({layout:pipelineLayout,compute:{module:shaderModule,entryPoint:"remap"}});void device.popErrorScope().then(error=>{if(error)console.error(`Tall-cell pipeline creation: ${error.message}`);});
-    this.multigrid=new TallCellMultigrid(device,this.layout,{pressureA:this.pressureA,pressureB:this.pressureB,volume:this.volumeA,solid:this.solidA,base:this.heightA});
-    const pressureIterations=1,cellSize=this.layout.cellSize_m,columnCount=nx*nz,allocatedBytes=this.layout.packedSampleCount*80+columnCount*12+16+12*80+12*8*4+this.multigrid.allocatedBytes;
-    this.info={nx,ny:fineNy,nz,storedNy:packedNy,cellCount:this.layout.packedSampleCount,equivalentUniformCells:this.layout.equivalentUniformCellCount,compressionRatio:this.layout.compressionRatio,regularLayers:this.layout.settings.regularLayers,maximumNeighborDelta:this.layout.settings.maximumNeighborDelta,gridKind:"restricted-tall-cell",cellSize_m:Math.min(cellSize.x,cellSize.y,cellSize.z),pressureIterations,pressureSolver:`1 full + 1 V-cycle · ${this.multigrid.levelCount} levels · RBGS`,allocatedBytes,quality,encodedSteps:0};
+    this.multigrid=new TallCellMultigrid(device,this.layout,{pressureA:this.pressureA,pressureB:this.pressureB,volume:this.volumeA,solid:this.solidA,base:this.heightA,diagnostics:this.reductionBuffer});
+    const pressureIterations=1,cellSize=this.layout.cellSize_m,columnCount=nx*nz,allocatedBytes=this.layout.packedSampleCount*80+columnCount*12+128+12*80+12*8*4+this.multigrid.allocatedBytes;
+    this.info={nx,ny:fineNy,nz,storedNy:packedNy,cellCount:this.layout.packedSampleCount,equivalentUniformCells:this.layout.equivalentUniformCellCount,compressionRatio:this.layout.compressionRatio,regularLayers:this.layout.settings.regularLayers,maximumNeighborDelta:this.layout.settings.maximumNeighborDelta,gridKind:"restricted-tall-cell",cellSize_m:Math.min(cellSize.x,cellSize.y,cellSize.z),pressureIterations,pressureSolver:`1 full + 2 V-cycles · ${this.multigrid.levelCount} levels · RBGS`,allocatedBytes,quality,encodedSteps:0};
     this.initializeVolume();
     this.extrapolateFirstGroup=this.group(this.velocityA,this.velocityD,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
     this.extrapolateSecondGroup=this.group(this.velocityD,this.velocityC,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
@@ -386,7 +421,7 @@ export class WebGPUEulerianSolver {
     this.jacobiBAGroup=this.group(this.velocityA,this.velocityB,this.pressureB,this.pressureA,this.volumeA,this.volumeB,this.heightA,this.heightB);
     this.projectGroup=this.group(this.velocityA,this.velocityB,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
     this.rigidGroup=this.group(this.velocityA,this.velocityB,this.pressureA,this.solidA,this.volumeA,this.volumeB,this.heightA,this.heightB,this.velocityA,this.velocityA,this.solidB);
-    this.reductionGroup=this.group(this.velocityA,this.velocityB,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightB,this.heightA);
+    this.reductionGroup=this.group(this.velocityA,this.velocityB,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
     this.planRemeshGroup=this.group(this.velocityB,this.velocityA,this.pressureA,this.pressureB,this.volumeB,this.volumeA,this.heightA,this.heightB);
     this.remapGroup=this.group(this.velocityB,this.velocityA,this.pressureB,this.pressureA,this.volumeB,this.volumeA,this.heightA,this.heightB);
   }
@@ -395,7 +430,7 @@ export class WebGPUEulerianSolver {
   get columnBaseTexture(){return this.heightA;}
   private initializeVolume(){
     const {nx,nz,packedNy,initialVolume,columnBases,initialVolumeCellSum}=this.layout,c=this.scene.container,dam=damBreakFractions(c.fillFraction);
-    this.info.initialVolumeCellSum=initialVolumeCellSum;this.info.volumeCellSum=initialVolumeCellSum;this.info.volumeDrift=0;this.info.rawVolumeDrift=0;this.info.maxSpeed_m_s=0;this.info.maxDivergence_s=0;this.info.front_m=this.scene.fluid.initialCondition==="dam-break"?-c.width_m/2+dam.width*c.width_m:c.width_m/2;
+    this.info.initialVolumeCellSum=initialVolumeCellSum;this.info.volumeCellSum=initialVolumeCellSum;this.info.volumeDrift=0;this.info.rawVolumeDrift=0;this.info.maxSpeed_m_s=0;this.info.maxDivergence_s=0;this.info.maxDivergenceBefore_s=0;this.info.maxDivergenceAfter_s=0;this.info.maxAirSpeed_m_s=0;this.info.maxPressure_Pa=0;this.info.pressureResidual=0;this.info.pressureRelativeResidual=0;this.info.maxComponentCfl=0;this.info.highCflCellCount=0;this.info.nonFiniteCount=0;this.info.stabilityFlags=[];this.info.front_m=this.scene.fluid.initialCondition==="dam-break"?-c.width_m/2+dam.width*c.width_m:c.width_m/2;
     const rowBytes=nx*4,padded=Math.ceil(rowBytes/256)*256,packed=new Uint8Array(padded*packedNy*nz),source=new Uint8Array(initialVolume.buffer,initialVolume.byteOffset,initialVolume.byteLength);
     for(let k=0;k<nz;k++)for(let j=0;j<packedNy;j++)packed.set(source.subarray(rowBytes*(j+packedNy*k),rowBytes*(j+packedNy*k+1)),padded*(j+packedNy*k));
     for(const texture of [this.volumeA,this.volumeB])this.device.queue.writeTexture({texture},packed,{bytesPerRow:padded,rowsPerImage:packedNy},{width:nx,height:packedNy,depthOrArrayLayers:nz});
@@ -410,20 +445,21 @@ export class WebGPUEulerianSolver {
   private timing(name:keyof NonNullable<GPUEulerianInfo["gpuTimings"]>){if(!this.querySet)return undefined;const segment={name,start:this.queryCount++,end:this.queryCount++};this.querySegments.push(segment);return segment;}
 
   advanceTo(time_s:number,bodies:RigidBodyState[]=[]){
-    if(time_s<this.lastTime)return false; const delta=Math.min(this.scene.numerics.maxDt_s,time_s-this.lastTime);if(delta<1e-6)return true;this.lastTime=time_s;const c=this.scene.container,rho=this.scene.fluid.density_kg_m3,sigma=0,substeps=1,dt=delta;
+    const advance=planGPUAdvance(time_s,this.lastTime,this.scene.numerics.maxDt_s);if(!advance)return false;const delta=advance.dt_s;if(delta<1e-6){this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;return true;}this.lastTime=advance.nextTime_s;this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;const c=this.scene.container,rho=this.scene.fluid.density_kg_m3,sigma=0,substeps=1,dt=delta;
     const activeBodies=bodies.slice(0,12),bodyData=new Float32Array(12*20),shapeIndex={sphere:0,box:1,capsule:2,cylinder:3} as const;activeBodies.forEach((body,index)=>{const o=index*20,d=body.description.dimensions_m,q=body.orientation;bodyData.set([body.position_m.x,body.position_m.y,body.position_m.z,shapeIndex[body.description.shape],d.x,d.y,d.z,boundingRadius(body),q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,0,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3],o);});this.device.queue.writeBuffer(this.rigidBuffer,0,bodyData);
-    const h=this.layout.cellSize_m,s=this.layout.settings;this.info.encodedSteps=(this.info.encodedSteps??0)+substeps;this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,dt,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,0,rho,this.scene.fluid.dynamicViscosity_Pa_s,0,0,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta]));
-    this.querySegments=[];this.queryCount=0;if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"}),totalTiming=this.timing("total_ms");if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:totalTiming.start}});pass.end();}encoder.clearBuffer(this.rigidExchangeBuffer);
+    const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow;this.info.encodedSteps=(this.info.encodedSteps??0)+substeps;this.info.lastDt_s=dt;this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,dt,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,0,rho,this.scene.fluid.dynamicViscosity_Pa_s,0,0,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,inflow?.center_m.x??0,inflow?.center_m.y??0,inflow?.center_m.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,inflow?.length_m??0,this.lastTime,inflow?.start_s??0,inflow?.end_s??0,inflow?.ramp_s??0]));
+    this.querySegments=[];this.queryCount=0;if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"}),totalTiming=this.timing("total_ms");if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:totalTiming.start}});pass.end();}encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductionBuffer);
     for(let substep=0;substep<substeps;substep+=1){
       {const passes=Math.max(2,s.airHalo);for(let passIndex=0;passIndex<passes;passIndex+=1){const pass=encoder.beginComputePass();if(passIndex===0)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);else if(passIndex%2===1)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);else this.dispatch(pass,this.extrapolatePipeline,this.extrapolateBackGroup);pass.end();}encoder.copyTextureToTexture({texture:passes%2===0?this.velocityC:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
       {const timing=this.timing("advection_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatch(pass,this.predictPipeline,this.predictGroup);pass.end();const reverse=encoder.beginComputePass();this.dispatch(reverse,this.reversePipeline,this.reverseGroup);reverse.end();const finish=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(finish,this.advectPipeline,this.advectGroup);finish.end();encoder.copyTextureToTexture({texture:this.velocityD},{texture:this.velocityB},[this.info.nx,this.info.storedNy,this.info.nz]);}
       if(substep===substeps-1&&this.stepIndex>0&&this.stepIndex%s.remeshInterval===0){const plan=encoder.beginComputePass();this.dispatchColumns(plan,this.planRemeshPipeline,this.planRemeshGroup);plan.end();const remap=encoder.beginComputePass();this.dispatch(remap,this.remapPipeline,this.remapGroup);remap.end();encoder.copyTextureToTexture({texture:this.heightB},{texture:this.heightA},[this.info.nx,this.info.nz,1]);}else{const extent:[number,number,number]=[this.info.nx,this.info.storedNy,this.info.nz];encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},extent);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},extent);}
       {const timing=this.timing("rigidCoupling_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.rigidPipeline,this.rigidGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+      {const pass=encoder.beginComputePass();this.dispatch(pass,this.preReductionPipeline,this.reductionGroup);pass.end();}
       {const timing=this.timing("pressure_ms");const rhs=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder);if(timing&&this.querySet){const end=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}});end.end();}}
       {const timing=this.timing("projection_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}
     }
     this.stepIndex+=1;
-    encoder.clearBuffer(this.reductionBuffer);{const timing=this.timing("diagnostics_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:totalTiming.end}});pass.end();}if(this.querySet&&this.queryResolve&&this.queryCount>0)encoder.resolveQuerySet(this.querySet,0,this.queryCount,this.queryResolve,0);
+    {const timing=this.timing("diagnostics_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:totalTiming.end}});pass.end();}if(this.querySet&&this.queryResolve&&this.queryCount>0)encoder.resolveQuerySet(this.querySet,0,this.queryCount,this.queryResolve,0);
     let exchangeReadback:GPUBuffer|undefined;if(activeBodies.length>0&&this.onRigidLoads&&!this.rigidReadbackPending){this.rigidReadbackPending=true;exchangeReadback=this.device.createBuffer({size:12*8*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.rigidExchangeBuffer,0,exchangeReadback,0,12*8*4);}
     const submittedAt=performance.now();this.device.queue.submit([encoder.finish()]);if(!this.wallTimingPending){this.wallTimingPending=true;void this.device.queue.onSubmittedWorkDone().then(()=>{this.info.gpuQueueWall_ms=performance.now()-submittedAt;this.info.gpuQueueSimulation_s=delta;}).finally(()=>{this.wallTimingPending=false;});}if(exchangeReadback){const readback=exchangeReadback,elapsed=delta,cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);void readback.mapAsync(GPUMapMode.READ).then(()=>{const words=new Int32Array(readback.getMappedRange());const loads=activeBodies.map((body,index)=>{const b=index*8;return{bodyId:body.description.id,impulse_N_s:{x:words[b]/1e6,y:words[b+1]/1e6,z:words[b+2]/1e6},angularImpulse_N_m_s:{x:words[b+3]/1e6,y:words[b+4]/1e6,z:words[b+5]/1e6},couplingInterval_s:elapsed,displacedVolume_m3:words[b+6]/65536*cellVolume};});readback.unmap();readback.destroy();this.onRigidLoads?.(loads);}).catch(()=>readback.destroy()).finally(()=>{this.rigidReadbackPending=false;});}
     if(!this.validationChecked){this.validationChecked=true;void this.device.popErrorScope().then(error=>{if(error)console.error(`GPU fluid validation: ${error.message}`);});}return true;
@@ -433,7 +469,7 @@ export class WebGPUEulerianSolver {
     if((this.info.encodedSteps??0)===0)return this.info;
     if(this.readbackPending)return this.info;
     this.readbackPending=true;
-    const diagnosticBytes=32,querySegments=[...this.querySegments],queryBytes=this.queryResolve?this.queryCount*8:0;
+    const diagnosticBytes=128,querySegments=[...this.querySegments],queryBytes=this.queryResolve?this.queryCount*8:0;
     const buffer=this.device.createBuffer({size:diagnosticBytes+queryBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
     const encoder=this.device.createCommandEncoder();
     encoder.copyBufferToBuffer(this.reductionBuffer,0,buffer,0,diagnosticBytes);
@@ -443,13 +479,32 @@ export class WebGPUEulerianSolver {
       await buffer.mapAsync(GPUMapMode.READ);
       const words=new Uint32Array(buffer.getMappedRange(0,diagnosticBytes)),initial=Math.max(1,this.info.initialVolumeCellSum??1);
       const decodePositiveFloat=(word:number)=>new Float32Array(new Uint32Array([word]).buffer)[0];
-      this.info.volumeCellSum=words[0]/2048;
+      const location=(slot:number):GPUFieldLocation=>({x:words[slot],y:words[slot+1],z:words[slot+2]});
+      this.info.volumeCellSum=words[0]/256;
       this.info.volumeDrift=(this.info.volumeCellSum-initial)/initial;
       this.info.rawVolumeDrift=this.info.volumeDrift;
       this.info.front_m=-this.scene.container.width_m/2+words[1]*this.scene.container.width_m/this.info.nx;
       this.info.maxSpeed_m_s=decodePositiveFloat(words[2]);
       this.info.maximumTallCellHeight=words[3];
-      this.info.maxDivergence_s=decodePositiveFloat(words[4]);
+      this.info.maxDivergenceBefore_s=decodePositiveFloat(words[4]);
+      this.info.maxDivergenceAfter_s=decodePositiveFloat(words[5]);
+      this.info.maxDivergence_s=this.info.maxDivergenceAfter_s;
+      this.info.projectionDivergenceRatio=this.info.maxDivergenceAfter_s/Math.max(this.info.maxDivergenceBefore_s,1e-30);
+      this.info.maxAirSpeed_m_s=decodePositiveFloat(words[6]);
+      this.info.maxSpeedLocation=location(8);
+      this.info.maxDivergenceBeforeLocation=location(11);
+      this.info.maxDivergenceAfterLocation=location(14);
+      this.info.maxAirSpeedLocation=location(17);
+      this.info.nonFiniteCount=words[20];
+      this.info.maxPressure_Pa=decodePositiveFloat(words[21]);
+      this.info.pressureResidual=decodePositiveFloat(words[22]);
+      const rhsMaximum=decodePositiveFloat(words[23]);
+      this.info.pressureRelativeResidual=this.info.pressureResidual/Math.max(rhsMaximum,1e-30);
+      this.info.maxPressureLocation=location(24);
+      this.info.maxPressureResidualLocation=location(27);
+      this.info.maxComponentCfl=decodePositiveFloat(words[30]);
+      this.info.highCflCellCount=words[31];
+      this.info.stabilityFlags=classifyTallCellStability({nonFiniteCount:this.info.nonFiniteCount,pressureRelativeResidual:this.info.pressureRelativeResidual,maxComponentCfl:this.info.maxComponentCfl,maxDivergenceBefore_s:this.info.maxDivergenceBefore_s,maxDivergenceAfter_s:this.info.maxDivergenceAfter_s,dt_s:this.info.lastDt_s??0});
       if(queryBytes>0){const times=new BigUint64Array(buffer.getMappedRange(diagnosticBytes,queryBytes));const timings={advection_ms:0,pressure_ms:0,projection_ms:0,rigidCoupling_ms:0,diagnostics_ms:0,overhead_ms:0,total_ms:0};for(const segment of querySegments)timings[segment.name]+=Number(times[segment.end]-times[segment.start])/1e6;const categorized=timings.advection_ms+timings.pressure_ms+timings.projection_ms+timings.rigidCoupling_ms+timings.diagnostics_ms;timings.overhead_ms=Math.max(0,timings.total_ms-categorized);this.info.gpuTimings=timings;this.info.gpuStep_ms=timings.total_ms;}
       buffer.unmap();
     }catch(error){console.error("Tall-cell diagnostics readback failed",error);}finally{buffer.destroy();this.readbackPending=false;}

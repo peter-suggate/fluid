@@ -139,10 +139,11 @@ function bodyInverseInertiaMultiply(body: RigidBodyState, vectorWorld: Vec3): Ve
 export function initializeRigidBody(description: RigidBodyDescription): RigidBodyState {
   const normalized = { ...description, orientation: quaternionNormalize(description.orientation) };
   const properties = massProperties(normalized);
+  const fixed = normalized.motion === "static";
   const inverseInertia = {
-    x: 1 / properties.inertiaBody_kg_m2.x,
-    y: 1 / properties.inertiaBody_kg_m2.y,
-    z: 1 / properties.inertiaBody_kg_m2.z
+    x: fixed ? 0 : 1 / properties.inertiaBody_kg_m2.x,
+    y: fixed ? 0 : 1 / properties.inertiaBody_kg_m2.y,
+    z: fixed ? 0 : 1 / properties.inertiaBody_kg_m2.z
   };
   const partial: RigidBodyState = {
     description: JSON.parse(JSON.stringify(normalized)) as RigidBodyDescription,
@@ -152,7 +153,7 @@ export function initializeRigidBody(description: RigidBodyDescription): RigidBod
     angularVelocity_rad_s: { ...normalized.angularVelocity_rad_s },
     angularMomentum_kg_m2_s: ZERO(),
     mass_kg: properties.mass_kg,
-    inverseMass_kg: 1 / properties.mass_kg,
+    inverseMass_kg: fixed ? 0 : 1 / properties.mass_kg,
     inertiaBody_kg_m2: properties.inertiaBody_kg_m2,
     inverseInertiaBody_kg_m2: inverseInertia,
     netForce_N: ZERO(),
@@ -332,6 +333,10 @@ export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDe
     body.hydrodynamicForce_N = load?.hydrodynamicForce_N ? { ...load.hydrodynamicForce_N } : ZERO();
     body.hydrodynamicTorque_N_m = load?.torque_N_m ? { ...load.torque_N_m } : ZERO();
     body.displacedFluidVolume_m3 = load?.displacedFluidVolume_m3 ?? 0;
+    if (body.description.motion === "static") {
+      body.netForce_N = ZERO(); body.netTorque_N_m = ZERO(); body.linearVelocity_m_s = ZERO(); body.angularVelocity_rad_s = ZERO(); body.angularMomentum_kg_m2_s = ZERO();
+      continue;
+    }
     body.netForce_N = add(scale(scene.fluid.gravity_m_s2, body.mass_kg), load?.force_N ?? ZERO());
     body.netTorque_N_m = load?.torque_N_m ? { ...load.torque_N_m } : ZERO();
     body.linearVelocity_m_s = add(body.linearVelocity_m_s, scale(body.netForce_N, body.inverseMass_kg * dt));

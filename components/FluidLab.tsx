@@ -23,6 +23,7 @@ import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescrip
 import { EulerianFluidSolver, type EulerianDiagnostics, type EulerianRenderState } from "@/lib/eulerian-solver";
 import { applyFluidReactions, computeFluidLoads, type CouplingDiagnostics } from "@/lib/fluid-rigid-coupling";
 import { consumeGPURigidLoad, mergeGPURigidLoads, type GPUEulerianInfo, type GPURigidLoad, type GPUGridMethod, type GPUQuality } from "@/lib/webgpu-eulerian";
+import { createPaperScenario, paperScenarios, type PaperScenarioId } from "@/lib/paper-scenarios";
 
 const RIGID_BODIES_ENABLED = true;
 
@@ -38,6 +39,10 @@ function downloadText(name: string, text: string, mime = "application/json") {
 function formatNumber(value: number, digits = 3) {
   if (Math.abs(value) < 0.001 && value !== 0) return value.toExponential(2);
   return value.toFixed(digits);
+}
+
+function formatGridLocation(location?: { x: number; y: number; z: number }) {
+  return location ? `[${location.x}, ${location.y}, ${location.z}]` : "location pending";
 }
 
 function externalLoadsFromGPU(scene: SceneDescription, gpuLoads: GPURigidLoad[], dt: number) {
@@ -473,7 +478,13 @@ export function FluidLab() {
     gpuRigidLoadsRef.current = []; kinematicDragRef.current = null;
     setSimulationTime(0); setRunState("paused"); setSamples([]);
     setSelectedBodyId(source.rigidBodies[0]?.id);
-    setNotice(`${source.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
+    setNotice(`${source.fluid.inflow ? "Inflow scene" : source.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
+  };
+  const loadPaperScenario = (id: PaperScenarioId) => {
+    const preset = createPaperScenario(id, scene), metadata = paperScenarios.find((candidate) => candidate.id === id);
+    setScene(preset); resetSimulation(preset);
+    setCamera({ ...defaultCamera, distance_m: 2.45, target_m: { x: 0, y: 0.42, z: 0 } });
+    setNotice(`${metadata?.name ?? "Paper scenario"} loaded · ${metadata?.paperFigure ?? "paper"} · dt ${preset.numerics.fixedDt_s.toFixed(4)} s`);
   };
   const loadDeepComparison = () => {
     const deep = cloneScene(scene);
@@ -599,6 +610,12 @@ export function FluidLab() {
           <input aria-label="Scene name" value={scene.sceneId} onChange={(event) => patchScene("sceneId", event.target.value)} />
           <div className="scene-meta"><span>schema {scene.schemaVersion}</span><span>seed {scene.randomSeed}</span></div>
         </section>
+        <section className="panel-section" data-testid="paper-scenarios">
+          <div className="section-heading"><h2>Paper scenarios</h2><span>Figures 3, 4, 6</span></div>
+          <div className="body-list" aria-label="Restricted tall-cell paper scenarios">
+            {paperScenarios.map((preset) => <button key={preset.id} onClick={() => loadPaperScenario(preset.id)}><span>{preset.name}</span><small>{preset.paperFigure} · {preset.description}</small></button>)}
+          </div>
+        </section>
         <section className="panel-section">
           <div className="section-heading"><h2>Container</h2><span>rectangular glass</span></div>
           <RangeControl label="Width" unit="m" value={scene.container.width_m} min={0.4} max={2.5} step={0.05} onChange={(value) => patchContainer({ width_m: value })} displayDigits={2} />
@@ -611,6 +628,7 @@ export function FluidLab() {
         <section className="panel-section">
           <div className="section-heading"><h2>Water</h2><span>20 °C default</span></div>
           <div className="segmented compact" aria-label="Fluid initial condition"><button className={scene.fluid.initialCondition === "dam-break" ? "active" : ""} onClick={() => patchFluid({ initialCondition: "dam-break" })}>Dam break</button><button className={scene.fluid.initialCondition === "tank-fill" ? "active" : ""} onClick={() => patchFluid({ initialCondition: "tank-fill" })}>Tank fill</button></div>
+          {scene.fluid.inflow && <div className="estimate-grid"><div><small>Active inflow</small><strong>{Math.hypot(scene.fluid.inflow.velocity_m_s.x, scene.fluid.inflow.velocity_m_s.y, scene.fluid.inflow.velocity_m_s.z).toFixed(2)}</strong><span>m/s · r {scene.fluid.inflow.radius_m.toFixed(3)} m · {scene.fluid.inflow.start_s.toFixed(1)}–{scene.fluid.inflow.end_s.toFixed(1)} s</span></div></div>}
           <RangeControl label="Density" unit="kg/m³" value={scene.fluid.density_kg_m3} min={700} max={1300} step={0.1} onChange={(value) => patchFluid({ density_kg_m3: value })} displayDigits={1} />
           <RangeControl label="Dynamic viscosity" unit="Pa·s" value={scene.fluid.dynamicViscosity_Pa_s} min={0} max={0.02} step={0.000001} onChange={(value) => patchFluid({ dynamicViscosity_Pa_s: value })} displayDigits={6} />
           <RangeControl label="Surface tension" unit="N/m" value={scene.fluid.surfaceTension_N_m} min={0} max={0.15} step={0.001} onChange={(value) => patchFluid({ surfaceTension_N_m: value })} displayDigits={3} />
@@ -630,7 +648,7 @@ export function FluidLab() {
           </div>
           {selectedBody && <div className="selected-editor">
             <div className="selected-heading"><div><strong>{selectedBody.description.name}</strong><small>{selectedBody.description.shape} · {selectedBody.description.shape === "sphere" ? "exact sphere narrow phase" : "bounding proxy for body contacts"}</small></div><button onClick={removeSelectedBody} aria-label="Remove selected rigid body">Remove</button></div>
-            <div className="body-actions"><button className="drop-button" onClick={dropSelectedBody}>Drop selected</button><button onClick={() => { const resetBody = initializeRigidBody(selectedBody.description); setRuntimeBodies(bodiesRef.current.map((body) => body.description.id === selectedBodyId ? resetBody : body)); setRunState("paused"); }}>Reset body</button></div>
+            <div className="body-actions">{selectedBody.description.motion !== "static" && <button className="drop-button" onClick={dropSelectedBody}>Drop selected</button>}<button onClick={() => { const resetBody = initializeRigidBody(selectedBody.description); setRuntimeBodies(bodiesRef.current.map((body) => body.description.id === selectedBodyId ? resetBody : body)); setRunState("paused"); }}>Reset body</button></div>
             <RangeControl label="Density" unit="kg/m³" value={selectedBody.description.density_kg_m3} min={100} max={4000} step={10} onChange={(value) => updateSelectedDescription({ density_kg_m3: value })} displayDigits={0} />
             <RangeControl label="Characteristic size" unit="m" value={selectedBody.description.dimensions_m.x} min={0.035} max={0.18} step={0.005} onChange={(value) => { const d = selectedBody.description.dimensions_m; const ratio = value / d.x; updateSelectedDescription({ dimensions_m: { x: value, y: d.y * ratio, z: d.z * ratio } }); }} displayDigits={3} />
             <RangeControl label="Position X" unit="m" value={selectedBody.position_m.x} min={-scene.container.width_m / 2} max={scene.container.width_m / 2} step={0.01} onChange={(value) => updateSelectedDescription({ position_m: { ...selectedBody.position_m, x: value } })} displayDigits={2} />
@@ -678,6 +696,7 @@ export function FluidLab() {
         </section>
         <section className="metric-grid panel-section">
           <MetricCard label="Simulation time" value={simulationTime.toFixed(3)} unit="s" />
+          <MetricCard label="GPU simulated time" value={gpuInfo?.simulatedTime_s !== undefined ? gpuInfo.simulatedTime_s.toFixed(3) : "—"} unit={`s · lag ${gpuInfo?.simulationLag_s?.toFixed(3) ?? "—"} s`} tone={gpuInfo?.simulationLag_s !== undefined && gpuInfo.simulationLag_s <= scene.numerics.maxDt_s ? "good" : "warn"} />
           <MetricCard label="Fixed validation dt" value={scene.numerics.fixedDt_s.toFixed(4)} unit="s" />
           <MetricCard label="Render encode" value={frameMs.toFixed(2)} unit="ms CPU" tone={frameMs < 4 ? "good" : "warn"} />
           {RIGID_BODIES_ENABLED && <MetricCard label="Rigid bodies" value={String(bodies.length)} unit={`${rigidState.contactCount} contact solves`} />}
@@ -686,11 +705,17 @@ export function FluidLab() {
           <MetricCard label={gpuInfo?.gridKind === "uniform" ? "GPU uniform grid" : "GPU tall grid"} value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.storedNy} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${gpuInfo.ny} cubic-equivalent Y · ${(gpuInfo.compressionRatio * 100).toFixed(0)}% stored` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
           <MetricCard label={gpuInfo?.gridKind === "uniform" ? "Uniform allocation" : "Tall-cell span"} value={gpuInfo?.gridKind === "uniform" ? gpuInfo.cellCount.toLocaleString() : gpuInfo?.maximumTallCellHeight !== undefined ? String(gpuInfo.maximumTallCellHeight) : "—"} unit={gpuInfo ? `${gpuInfo.gridKind === "uniform" ? "cells" : "cells"} · ${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} />
           <MetricCard label="GPU dam front" value={gpuInfo?.front_m !== undefined ? gpuInfo.front_m.toFixed(3) : "—"} unit="m · volume-fraction threshold" />
-          <MetricCard label="GPU max speed" value={gpuInfo?.maxSpeed_m_s !== undefined ? gpuInfo.maxSpeed_m_s.toFixed(3) : "—"} unit={`m/s · ${gpuInfo?.encodedSteps ?? 0} encoded steps`} />
-          <MetricCard label="GPU max divergence" value={gpuInfo?.maxDivergence_s !== undefined ? gpuInfo.maxDivergence_s.toExponential(2) : "—"} unit="s⁻¹ · post-projection" />
+          <MetricCard label="GPU stability" value={gpuInfo?.stabilityFlags ? (gpuInfo.stabilityFlags.length === 0 ? "CLEAR" : "ALERT") : "—"} unit={gpuInfo?.stabilityFlags?.join(" · ") || "all instrumented gates clear"} tone={gpuInfo?.stabilityFlags?.length ? "warn" : gpuInfo?.stabilityFlags ? "good" : "neutral"} />
+          <MetricCard label="GPU liquid max speed" value={gpuInfo?.maxSpeed_m_s !== undefined ? gpuInfo.maxSpeed_m_s.toFixed(3) : "—"} unit={`m/s at ${formatGridLocation(gpuInfo?.maxSpeedLocation)} · ${gpuInfo?.encodedSteps ?? 0} steps`} />
+          <MetricCard label="GPU extrapolated-air speed" value={gpuInfo?.maxAirSpeed_m_s !== undefined ? gpuInfo.maxAirSpeed_m_s.toFixed(3) : "—"} unit={`m/s at ${formatGridLocation(gpuInfo?.maxAirSpeedLocation)}`} />
+          <MetricCard label="GPU divergence pre → post" value={gpuInfo?.maxDivergenceBefore_s !== undefined && gpuInfo.maxDivergenceAfter_s !== undefined ? `${gpuInfo.maxDivergenceBefore_s.toExponential(2)} → ${gpuInfo.maxDivergenceAfter_s.toExponential(2)}` : "—"} unit={`s⁻¹ · ratio ${gpuInfo?.projectionDivergenceRatio?.toExponential(2) ?? "—"} · post ${formatGridLocation(gpuInfo?.maxDivergenceAfterLocation)}`} tone={gpuInfo?.lastDt_s && gpuInfo?.maxDivergenceAfter_s !== undefined && gpuInfo.maxDivergenceAfter_s * gpuInfo.lastDt_s > 0.5 ? "warn" : "neutral"} />
+          <MetricCard label="GPU pressure residual" value={gpuInfo?.pressureRelativeResidual !== undefined ? gpuInfo.pressureRelativeResidual.toExponential(2) : "—"} unit={`relative L∞ · raw ${gpuInfo?.pressureResidual?.toExponential(2) ?? "—"} at ${formatGridLocation(gpuInfo?.maxPressureResidualLocation)}`} tone={gpuInfo?.pressureRelativeResidual !== undefined && gpuInfo.pressureRelativeResidual <= 0.1 ? "good" : "warn"} />
+          <MetricCard label="GPU pressure maximum" value={gpuInfo?.maxPressure_Pa !== undefined ? gpuInfo.maxPressure_Pa.toExponential(2) : "—"} unit={`Pa at ${formatGridLocation(gpuInfo?.maxPressureLocation)}`} />
+          <MetricCard label="GPU component CFL" value={gpuInfo?.maxComponentCfl !== undefined ? gpuInfo.maxComponentCfl.toFixed(3) : "—"} unit={`${gpuInfo?.highCflCellCount ?? 0} wet samples above 1`} tone={gpuInfo?.maxComponentCfl !== undefined && gpuInfo.maxComponentCfl <= 1 ? "good" : "warn"} />
+          <MetricCard label="GPU NaN / infinity" value={gpuInfo?.nonFiniteCount !== undefined ? String(gpuInfo.nonFiniteCount) : "—"} unit="across pre-pressure, pressure, and projected fields" tone={gpuInfo?.nonFiniteCount === 0 ? "good" : "warn"} />
           <MetricCard label="GPU step" value={gpuInfo?.gpuStep_ms !== undefined ? gpuInfo.gpuStep_ms.toFixed(2) : "—"} unit="ms · timestamp query" tone={gpuInfo?.gpuStep_ms !== undefined && gpuInfo.gpuStep_ms < 16.7 ? "good" : "neutral"} />
           <MetricCard label="GPU queue throughput" value={gpuInfo?.gpuQueueWall_ms && gpuInfo.gpuQueueSimulation_s ? (gpuInfo.gpuQueueSimulation_s * 1000 / gpuInfo.gpuQueueWall_ms).toFixed(2) : "—"} unit={gpuInfo?.gpuQueueWall_ms ? `× realtime · ${gpuInfo.gpuQueueWall_ms.toFixed(1)} ms queue wall` : "synchronized completion"} tone={gpuInfo?.gpuQueueWall_ms && gpuInfo.gpuQueueSimulation_s && gpuInfo.gpuQueueSimulation_s * 1000 >= gpuInfo.gpuQueueWall_ms ? "good" : "neutral"} />
-          <MetricCard label="GPU volume drift" value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit="% · unmodified VOF integral" tone={gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
+          <MetricCard label={scene.fluid.inflow ? "GPU net volume change" : "GPU volume drift"} value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit={scene.fluid.inflow ? "% · includes configured inflow" : "% · unmodified VOF integral"} tone={scene.fluid.inflow ? "neutral" : gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
           <MetricCard label="Volume correction" value="None" unit="physical VOF rendered directly" tone="good" />
         </section>
         {RIGID_BODIES_ENABLED && selectedBody && <section className="panel-section selected-diagnostics" data-testid="selected-body-diagnostics">
@@ -732,7 +757,7 @@ export function FluidLab() {
           <div className="invariant-list">
             <div><span>RMS divergence</span><strong>{fluidState.divergenceAfter_s.toExponential(2)}</strong><small>s⁻¹ · before {fluidState.divergenceBefore_s.toExponential(2)}</small></div>
             <div><span>PCG relative residual</span><strong>{fluidState.pressureRelativeResidual.toExponential(2)}</strong><small>{fluidState.pressureIterations} iterations · {fluidState.pressureConverged ? "converged" : "not converged"}</small></div>
-            <div><span>Marker volume drift</span><strong>{(fluidState.markerVolumeDrift * 100).toExponential(2)}</strong><small>% · marker mass exactly conserved</small></div>
+            <div><span>{scene.fluid.inflow ? "Marker volume change" : "Marker volume drift"}</span><strong>{(fluidState.markerVolumeDrift * 100).toExponential(2)}</strong><small>{scene.fluid.inflow ? "% · includes configured inflow" : "% · marker mass exactly conserved"}</small></div>
             <div><span>Kinetic energy</span><strong>{fluidState.kineticEnergy_J.toFixed(2)}</strong><small>J</small></div>
             <div><span>Time-step bound</span><strong>{fluidState.limitingCondition}</strong><small>dt {fluidState.dt_s.toFixed(4)} s</small></div>
             <div><span>NaN / infinity</span><strong>{fluidState.nanCount}</strong><small>acceptance = 0</small></div>
