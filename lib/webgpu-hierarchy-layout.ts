@@ -139,8 +139,9 @@ export function rebuildGPUHierarchyLayout(scene: SceneDescription, quality: GPUQ
       const other = locateLayoutCell(previous,{x:x+n.x,y:y+n.y,z:z+n.z});const otherAlpha=other?currentCells[other.index*GPU_CELL_FLOATS+3]:0;if(Math.abs(alpha-otherAlpha)>0.05)interfaceCell=true;if(other){const o=other.index*GPU_CELL_FLOATS,ov={x:0.5*(currentCells[o]+currentCells[o+4]),y:0.5*(currentCells[o+1]+currentCells[o+5]),z:0.5*(currentCells[o+2]+currentCells[o+6])};velocityDetail=Math.max(velocityDetail,Math.hypot(velocity.x-ov.x,velocity.y-ov.y,velocity.z-ov.z));}
     }
     const characteristic=Math.max(0.1,Math.hypot(velocity.x,velocity.y,velocity.z)),dynamicCell=velocityDetail/characteristic>effective.hierarchy.velocityErrorTolerance;
-    const desired = interfaceCell||dynamicCell ? levels - 1 : Math.max(effective.hierarchy.minimumFluidLevel, 0);
-    if (desired > 0) mark(tags,pageDims,{x:Math.floor(x/GPU_BRICK_SIZE),y:Math.floor(y/GPU_BRICK_SIZE),z:Math.floor(z/GPU_BRICK_SIZE)},desired,interfaceCell?halo:0);
+    const desired = interfaceCell||dynamicCell ? levels - 1 : alpha>1e-4?Math.max(effective.hierarchy.minimumFluidLevel,0):0;
+    const travelPages=Math.min(2,Math.ceil(characteristic*scene.numerics.fixedDt_s*effective.hierarchy.regridInterval/(previous.topology.finestCellLength_m*GPU_BRICK_SIZE)));
+    if (desired > 0) mark(tags,pageDims,{x:Math.floor(x/GPU_BRICK_SIZE),y:Math.floor(y/GPU_BRICK_SIZE),z:Math.floor(z/GPU_BRICK_SIZE)},desired,interfaceCell?halo+travelPages:0);
   }
   const h = previous.topology.finestCellLength_m;
   for (const body of bodies) {

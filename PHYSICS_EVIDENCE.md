@@ -604,3 +604,23 @@ Build: `web-stage12.2-1.2.2`
   so numerical GPU throughput and uniform/adaptive wall-time claims are not
   recorded; the application correctly selected its moving CPU fallback.
 - Production build, lint, and all `48` deterministic physics/topology tests pass.
+
+## Stage 12.3 surface-first refinement policy
+
+Recorded: 2026-07-13<br>
+Build: `web-stage12.3-1.2.3`
+
+- Expanded moving free-surface refinement from three finest cells (less than
+  one brick) to eight cells, with up to two additional brick layers predicted
+  from local interface speed and the time until the next regrid.
+- Occupied water now remains at least at hierarchy level one while empty bulk
+  air may still use the coarsest level. The dam-break preset initially uses
+  about `56%` of its equivalent uniform cells, retaining a meaningful sparse
+  advantage while assigning resolution to the visible surface.
+- The web app now boots from the actual dam-break preset rather than showing a
+  dam-break label over the unrelated two-body default scene.
+- A failed compute sentinel now produces a prominent `LOW-RESOLUTION CPU
+  FALLBACK` banner. The `15 × 11 × 10` CPU oracle can no longer be mistaken for
+  hierarchical GPU surface quality.
+- All `49` deterministic tests pass, including a new surface-band allocation
+  guard; lint and the production build pass.

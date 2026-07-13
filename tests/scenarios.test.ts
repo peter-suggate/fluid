@@ -23,3 +23,9 @@ test("H12-03 every scenario initializes finite CPU and hierarchical GPU state",(
     assert.equal(step.nanCount,0,preset.id);assert.ok(step.markerVolume_m3>0,preset.id);assert.ok(layout.activeCellCount>0,preset.id);assert.ok(layout.initialCells.every(Number.isFinite),preset.id);
   }
 });
+
+test("H12-04 visible free surfaces retain a finest-level predictive band",()=>{
+  for(const preset of SCENARIOS){const scene=createScenarioScene(preset.id);assert.ok(scene.hierarchy.interfaceHaloCells>=scene.hierarchy.brickSize,preset.id);assert.ok(scene.hierarchy.minimumFluidLevel>=1,preset.id);}
+  const dam=createGPUHierarchyLayout(createScenarioScene("dam-break"),"balanced"),ratio=dam.activeCellCount/dam.equivalentUniformCells;
+  assert.ok(ratio>=.5,"surface band must not be starved for cells");assert.ok(ratio<.7,"hierarchy should retain a useful initial compression advantage");
+});

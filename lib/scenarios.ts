@@ -14,7 +14,7 @@ export const SCENARIOS:readonly ScenarioPreset[]=[
 
 export function createScenarioScene(id:ScenarioId):SceneDescription {
   const scene=cloneScene(defaultScene),sphere={...scene.rigidBodies[0],dimensions_m:{...scene.rigidBodies[0].dimensions_m}},box={...scene.rigidBodies[1],dimensions_m:{...scene.rigidBodies[1].dimensions_m}};
-  scene.sceneId=`hierarchy-${id}`;scene.duration_s=16;scene.hierarchy.levels=3;scene.hierarchy.interfaceHaloCells=3;scene.hierarchy.solidHaloCells=3;
+  scene.sceneId=`hierarchy-${id}`;scene.duration_s=16;scene.hierarchy.levels=3;scene.hierarchy.interfaceHaloCells=8;scene.hierarchy.solidHaloCells=4;scene.hierarchy.minimumFluidLevel=1;
   if(id==="dam-break"){scene.container.fillFraction=.22;scene.fluid.initialCondition="dam-break";scene.rigidBodies=[];return scene;}
   scene.fluid.initialCondition="tank-fill";
   if(id==="wave-tank"){
@@ -27,10 +27,10 @@ export function createScenarioScene(id:ScenarioId):SceneDescription {
       {...sphere,id:"dense-sphere",name:"Dense sphere",density_kg_m3:1850,dimensions_m:{x:.085,y:.085,z:.085},position_m:{x:.2,y:.52,z:0},linearVelocity_m_s:{x:0,y:0,z:0}}
     ];
   }else if(id==="splash-impact"){
-    scene.container.fillFraction=.32;scene.hierarchy.interfaceHaloCells=4;scene.hierarchy.solidHaloCells=4;scene.hierarchy.regridInterval=6;
+    scene.container.fillFraction=.32;scene.hierarchy.interfaceHaloCells=8;scene.hierarchy.solidHaloCells=5;scene.hierarchy.regridInterval=6;
     scene.rigidBodies=[{...sphere,id:"impact-sphere",name:"Impact sphere",density_kg_m3:2400,dimensions_m:{x:.11,y:.11,z:.11},position_m:{x:0,y:1.18,z:0},linearVelocity_m_s:{x:.18,y:-2.8,z:0},angularVelocity_rad_s:{x:0,y:1.2,z:.4},restitution:.12}];
   }else{
-    scene.container.fillFraction=.62;scene.rigidBodies=[];scene.hierarchy.interfaceHaloCells=2;scene.hierarchy.regridInterval=16;
+    scene.container.fillFraction=.62;scene.rigidBodies=[];scene.hierarchy.interfaceHaloCells=6;scene.hierarchy.regridInterval=16;
   }
   return scene;
 }
