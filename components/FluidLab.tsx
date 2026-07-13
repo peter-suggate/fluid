@@ -23,6 +23,8 @@ import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescrip
 import { EulerianFluidSolver, type EulerianDiagnostics, type EulerianRenderState } from "@/lib/eulerian-solver";
 import { applyFluidReactions, computeFluidLoads, type CouplingDiagnostics } from "@/lib/fluid-rigid-coupling";
 import { consumeGPURigidLoad, mergeGPURigidLoads, type GPUEulerianInfo, type GPURigidLoad, type GPUQuality } from "@/lib/webgpu-eulerian";
+import { appendSimulationFrame, createSimulationRecording, simulationFrameAt, type SimulationRecording } from "@/lib/simulation-recording";
+import {createScenarioScene,SCENARIOS,type ScenarioId} from "@/lib/scenarios";
 
 const RIGID_BODIES_ENABLED = true;
 
@@ -69,7 +71,7 @@ function RangeControl({ label, unit, value, min, max, step, onChange, displayDig
   return (
     <label className="range-control">
       <span className="control-heading"><span>{label}</span><output>{formatNumber(value, displayDigits)} <small>{unit}</small></output></span>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
+      <input aria-label={label} type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
     </label>
   );
 }
@@ -337,6 +339,10 @@ export function FluidLab() {
   const [performanceSnapshot, setPerformanceSnapshot] = useState<PerformanceSnapshot>(emptyPerformance);
   const [performanceHistory, setPerformanceHistory] = useState<PerformanceSnapshot[]>([]);
   const [validationOpen, setValidationOpen] = useState(false);
+  const [activeScenario,setActiveScenario]=useState<ScenarioId>("dam-break");
+  const [playbackRecording, setPlaybackRecording] = useState<SimulationRecording | null>(null);
+  const [playbackTime, setPlaybackTime] = useState(0);
+  const [recordingDuration, setRecordingDuration] = useState(0);
   const [notice, setNotice] = useState("Dam-break initialized · Eulerian projection active");
   const fileRef = useRef<HTMLInputElement>(null);
   const lastClockRef = useRef<number | null>(null);
@@ -350,7 +356,18 @@ export function FluidLab() {
   const cpuSimulationMsRef = useRef(0);
   const gpuInfoRef = useRef<GPUEulerianInfo | null>(null);
   const performanceRef = useRef<PerformanceSnapshot>(emptyPerformance);
+  const playbackActiveRef = useRef(false);
+  const [initialRecording] = useState(() => createSimulationRecording(defaultScene, "webgpu", "balanced", initializeRigidBodies(defaultScene.rigidBodies), initialFluidSolver.getRenderState()));
+  const recordingRef = useRef<SimulationRecording | null>(initialRecording);
   const validationResults = useMemo(() => runShellValidation(), []);
+
+  const captureSimulationFrame = useCallback((force = false) => {
+    const recording = recordingRef.current;
+    if (!recording || playbackRecording) return;
+    if (appendSimulationFrame(recording, simulationTimeRef.current, bodiesRef.current, fluidSolverRef.current.getRenderState(), force)) {
+      setRecordingDuration(recording.duration_s);
+    }
+  }, [playbackRecording]);
 
   useEffect(() => {
     lastClockRef.current = null;
@@ -360,7 +377,7 @@ export function FluidLab() {
       if (lastClockRef.current === null) lastClockRef.current = now;
       const elapsed = Math.min((now - lastClockRef.current) / 1000, 0.05);
       lastClockRef.current = now;
-      if (runState === "running") {
+      if (runState === "running" && !playbackActiveRef.current) {
         accumulatorRef.current += elapsed;
         const dt = scene.numerics.fixedDt_s;
         let steps = 0;
@@ -404,6 +421,7 @@ export function FluidLab() {
           }
           if (latestCoupling) setCouplingState(latestCoupling);
           setSimulationTime(simulationTimeRef.current);
+          captureSimulationFrame();
         }
         if (simulationTimeRef.current + dt > scene.duration_s) setRunState("paused");
         cpuSimulationMsRef.current=performance.now()-tickStart;
@@ -412,7 +430,29 @@ export function FluidLab() {
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [backend, runState, scene]);
+  }, [backend, captureSimulationFrame, playbackRecording, runState, scene]);
+
+  useEffect(() => {
+    if (!playbackRecording) return;
+    const startedAt = performance.now();
+    let frame = 0;
+    let finishFrame = 0;
+    const tick = (now: number) => {
+      const time = Math.min((now - startedAt) / 1000, playbackRecording.duration_s);
+      setPlaybackTime(time);
+      if (time >= playbackRecording.duration_s) {
+        finishFrame = requestAnimationFrame(() => {
+          playbackActiveRef.current = false;
+          setPlaybackRecording(null);
+          setNotice(`Playback complete · ${playbackRecording.duration_s.toFixed(2)} s at realtime speed`);
+        });
+        return;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(finishFrame); };
+  }, [playbackRecording]);
 
   const handleFrame = useCallback((metrics: RendererFrameMetrics, size: string) => {
     setFrameMs(metrics.cpuFrame_ms);
@@ -428,9 +468,11 @@ export function FluidLab() {
   const handleGPUInfo=useCallback((info:GPUEulerianInfo)=>{gpuInfoRef.current=info;setGPUInfo(info);},[]);
   const handleGPUStatus = useCallback((status: GPUStatus) => setGPUStatus(status), []);
   const handleGPURigidLoads = useCallback((loads: GPURigidLoad[]) => {
+    if (playbackActiveRef.current) return;
     gpuRigidLoadsRef.current = mergeGPURigidLoads(gpuRigidLoadsRef.current, loads);
   }, []);
   const handleBodyDrag = useCallback((bodyId: string, position: RigidBodyState["position_m"], velocity: RigidBodyState["linearVelocity_m_s"], phase: BodyDragPhase) => {
+    if (playbackActiveRef.current) return;
     if (phase === "end") kinematicDragRef.current = null;
     else kinematicDragRef.current = { bodyId, position: { ...position }, velocity: { ...velocity } };
     const body = bodiesRef.current.find((candidate) => candidate.description.id === bodyId);
@@ -463,10 +505,14 @@ export function FluidLab() {
     cpuOracleStepRef.current = 0;
     cpuSimulationMsRef.current=0;performanceRef.current=emptyPerformance;setPerformanceSnapshot(emptyPerformance);setPerformanceHistory([]);
     gpuRigidLoadsRef.current = []; kinematicDragRef.current = null;
+    recordingRef.current = createSimulationRecording(source, backend, gpuQuality, next, fluidSolverRef.current.getRenderState());
+    playbackActiveRef.current = false;
+    setRecordingDuration(0); setPlaybackRecording(null); setPlaybackTime(0);
     setSimulationTime(0); setRunState("paused"); setSamples([]);
     setSelectedBodyId(source.rigidBodies[0]?.id);
     setNotice(`${source.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
   };
+  const loadScenario=(id:ScenarioId)=>{const next=createScenarioScene(id);setActiveScenario(id);setScene(next);setGPUInfo(null);setCamera(defaultCamera);resetSimulation(next);setNotice(`${SCENARIOS.find((preset)=>preset.id===id)?.name} ready · press play`);};
   const saveScene = () => {
     localStorage.setItem("fluid-lab.scene.v1", serializeScene(scene));
     downloadText(`${scene.sceneId}.fluid.json`, serializeScene(scene));
@@ -541,6 +587,7 @@ export function FluidLab() {
     setNotice("Body released with buoyancy, drag, torque, and fluid reaction enabled");
   };
   const singleRigidStep = () => {
+    setPlaybackRecording(null);
     setRunState("paused");
     if (simulationTimeRef.current + scene.numerics.fixedDt_s > scene.duration_s) return;
     const activeFluid = fluidSolverRef.current, simulationBodies = RIGID_BODIES_ENABLED ? bodiesRef.current : [];
@@ -554,11 +601,39 @@ export function FluidLab() {
     setBodies(cloneRigidBodies(bodiesRef.current)); setRigidState(diagnostics);
     setFluidState(fluidDiagnostics); setFluidRenderState(fluidSolverRef.current.getRenderState());
     setCouplingState(couplingDiagnostics);
+    captureSimulationFrame(true);
   };
+
+  const startPlayback = () => {
+    captureSimulationFrame(true);
+    const recording = recordingRef.current;
+    if (!recording || recording.duration_s <= 0) return;
+    setRunState("paused");
+    accumulatorRef.current = 0;
+    playbackActiveRef.current = true;
+    setPlaybackTime(0);
+    setPlaybackRecording(recording);
+    setNotice(`Playing latest capture · ${recording.duration_s.toFixed(2)} s at 1× realtime`);
+  };
+
+  const stopPlayback = () => {
+    playbackActiveRef.current = false;
+    setPlaybackRecording(null);
+    setPlaybackTime(0);
+    setNotice("Playback stopped · live simulation restored");
+  };
+
+  const playbackFrame = playbackRecording ? simulationFrameAt(playbackRecording, playbackTime) : null;
+  const displayedScene = playbackRecording?.scene ?? scene;
+  const displayedTime = playbackRecording ? playbackTime : simulationTime;
+  const displayedBodies = playbackFrame?.bodies ?? bodies;
+  const displayedFluid = playbackFrame?.fluid ?? fluidRenderState;
+  const displayedBackend = playbackRecording?.backend ?? backend;
+  const displayedQuality = playbackRecording?.quality ?? gpuQuality;
 
   const estimatedCells = Math.ceil(scene.container.width_m / scene.nominalResolution.length_m) * Math.ceil(scene.container.height_m / scene.nominalResolution.length_m) * Math.ceil(scene.container.depth_m / scene.nominalResolution.length_m);
   return (
-    <main className="lab-shell" data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={RIGID_BODIES_ENABLED ? bodies.length : 0}>
+    <main className="lab-shell" data-run-state={runState} data-playback-state={playbackRecording ? "playing" : "live"} data-solver-mode="eulerian" data-simulation-time={displayedTime.toFixed(6)} data-body-count={RIGID_BODIES_ENABLED ? displayedBodies.length : 0}>
       <header className="topbar">
         <div className="brand"><span className="brand-mark">FL</span><div><strong>Fluid Lab</strong><small>WEBGPU CFD WORKBENCH</small></div></div>
         <div className="solver-identity">Eulerian VOF</div>
@@ -570,6 +645,20 @@ export function FluidLab() {
       </header>
 
       <aside className="left-panel panel-scroll">
+        <section className="panel-section scenario-launcher">
+          <div className="section-heading"><h2>Choose a scenario</h2><span>reproducible presets</span></div>
+          <div className="scenario-grid" aria-label="Simulation scenarios">{SCENARIOS.map((preset)=><button key={preset.id} className={activeScenario===preset.id?"active":""} aria-pressed={activeScenario===preset.id} onClick={()=>loadScenario(preset.id)}><strong>{preset.name}</strong><span>{preset.description}</span><small>{preset.stress}</small></button>)}</div>
+          <div className="prime-controls"><button className="primary-button" onClick={()=>setRunState((state)=>state==="running"?"paused":"running")}>{runState==="running"?"Pause":"Run scenario"}</button><button onClick={()=>resetSimulation()}>Reset</button></div>
+        </section>
+        <section className="panel-section core-compute">
+          <div className="section-heading"><h2>Grid mode</h2><span>primary comparison</span></div>
+          <label className="select-control"><span>Hierarchy depth</span><select aria-label="Hierarchy depth" value={scene.hierarchy.levels} onChange={(event) => { const levels=Number(event.target.value);setScene((current) => ({ ...current, hierarchy: { ...current.hierarchy, levels, minimumFluidLevel: Math.min(current.hierarchy.minimumFluidLevel, levels - 1) } }));setSimulationTime(0);simulationTimeRef.current=0;setRunState("paused"); }}><option value={1}>1 · Uniform grid</option><option value={2}>2 · One adaptive split</option><option value={3}>3 · Balanced adaptive</option><option value={4}>4 · Fine adaptive</option><option value={5}>5 · Maximum depth</option></select></label>
+          <label className="select-control"><span>GPU quality</span><select aria-label="GPU quality" value={gpuQuality} onChange={(event) => { setGPUQuality(event.target.value as GPUQuality); setSimulationTime(0); simulationTimeRef.current = 0; setRunState("paused"); }}><option value="balanced">Balanced · interactive</option><option value="high">High · detailed</option><option value="ultra">Ultra · maximum</option></select></label>
+          <div className="estimate-grid"><div><small>Uniform equivalent</small><strong>{(gpuInfo?.equivalentUniformCells ?? estimatedCells).toLocaleString()}</strong><span>cells</span></div>{gpuInfo?.activeBrickCount != null&&<div><small>Active hierarchy</small><strong>{gpuInfo.cellCount.toLocaleString()}</strong><span>{((gpuInfo.compressionRatio??1)*100).toFixed(1)}% · {gpuInfo.activeBrickCount.toLocaleString()} bricks</span></div>}</div>
+        </section>
+        <details className="control-disclosure">
+          <summary><span>Scene &amp; fluid setup</span><small>container, water, files</small></summary>
+          <div className="disclosure-body">
         <section className="panel-section scene-title">
           <p className="eyebrow">SCENE DESCRIPTION · SI</p>
           <input aria-label="Scene name" value={scene.sceneId} onChange={(event) => patchScene("sceneId", event.target.value)} />
@@ -593,7 +682,9 @@ export function FluidLab() {
           <RangeControl label="Gravity Y" unit="m/s²" value={scene.fluid.gravity_m_s2.y} min={-20} max={0} step={0.01} onChange={(value) => patchFluid({ gravity_m_s2: { ...scene.fluid.gravity_m_s2, y: value } })} displayDigits={3} />
           <button className="drop-button" onClick={() => resetSimulation()}>Apply &amp; reset fluid</button>
         </section>
-        {RIGID_BODIES_ENABLED && <section className="panel-section rigid-editor" data-testid="rigid-editor">
+          </div>
+        </details>
+        {RIGID_BODIES_ENABLED&&<details className="control-disclosure"><summary><span>Rigid-body editor</span><small>{bodies.length}/12 bodies</small></summary><div className="disclosure-body"><section className="panel-section rigid-editor" data-testid="rigid-editor">
           <div className="section-heading"><h2>Rigid bodies</h2><span>{bodies.length}/12 active</span></div>
           <div className="body-list" aria-label="Rigid bodies">
             {bodies.map((body) => <button key={body.description.id} aria-pressed={selectedBodyId === body.description.id} className={selectedBodyId === body.description.id ? "active" : ""} onClick={() => setSelectedBodyId(body.description.id)}><i className={`shape-${body.description.shape}`} /><span>{body.description.name}</span><small>{body.description.shape}</small></button>)}
@@ -615,24 +706,25 @@ export function FluidLab() {
             <RangeControl label="Restitution" unit="—" value={selectedBody.description.restitution} min={0} max={1} step={0.01} onChange={(value) => updateSelectedDescription({ restitution: value })} displayDigits={2} />
             <RangeControl label="Friction" unit="—" value={selectedBody.description.friction} min={0} max={1.2} step={0.01} onChange={(value) => updateSelectedDescription({ friction: value })} displayDigits={2} />
           </div>}
-        </section>}
-        <section className="panel-section">
-          <div className="section-heading"><h2>Compute &amp; resolution</h2><span>active backend</span></div>
+        </section></div></details>}
+        <details className="control-disclosure"><summary><span>Advanced solver controls</span><small>backend, tolerances, halos</small></summary><div className="disclosure-body"><section className="panel-section">
+          <div className="section-heading"><h2>Solver tuning</h2><span>advanced</span></div>
           <div className="segmented compact" aria-label="Simulation backend"><button className={backend === "webgpu" ? "active" : ""} onClick={() => { setBackend("webgpu"); setNotice("WebGPU compute selected; reset to rebuild fields"); }}>WebGPU</button><button className={backend === "cpu-reference" ? "active" : ""} onClick={() => { setBackend("cpu-reference"); setNotice("CPU binary64 reference selected"); }}>CPU reference</button></div>
-          <label className="select-control"><span>GPU quality</span><select aria-label="GPU quality" value={gpuQuality} onChange={(event) => { setGPUQuality(event.target.value as GPUQuality); setSimulationTime(0); simulationTimeRef.current = 0; setRunState("paused"); }}><option value="balanced">Balanced · ~110k cells</option><option value="high">High · ~500k cells</option><option value="ultra">Ultra · ~1.2m cells</option></select></label>
           <RangeControl label="Nominal length" unit="m" value={scene.nominalResolution.length_m} min={0.0125} max={0.08} step={0.0025} onChange={(value) => setScene((current) => ({ ...current, nominalResolution: { length_m: value } }))} displayDigits={4} />
+          <RangeControl label="Interface halo" unit="cells" value={scene.hierarchy.interfaceHaloCells} min={1} max={8} step={1} onChange={(value) => setScene((current) => ({ ...current, hierarchy: { ...current.hierarchy, interfaceHaloCells: value } }))} displayDigits={0} />
+          <RangeControl label="Solid halo" unit="cells" value={scene.hierarchy.solidHaloCells} min={1} max={8} step={1} onChange={(value) => setScene((current) => ({ ...current, hierarchy: { ...current.hierarchy, solidHaloCells: value } }))} displayDigits={0} />
           <RangeControl label="Pressure iterations" unit="iterations" value={scene.numerics.pressureMaxIterations} min={20} max={1000} step={20} onChange={(value) => setScene((current) => ({ ...current, numerics: { ...current.numerics, pressureMaxIterations: value } }))} displayDigits={0} />
-          <div className="estimate-grid"><div><small>MAC allocation</small><strong>{estimatedCells.toLocaleString()}</strong><span>cells</span></div></div>
-        </section>
+          {gpuInfo?.activeBrickCount!=null&&<div className="advanced-readout">Topology revision {gpuInfo.topologyRevision??0} · {gpuInfo.regridCount??0} refinement checks</div>}
+        </section></div></details>
       </aside>
 
       <section className="viewport-shell">
-        <WebGPUViewport scene={scene} camera={camera} setCamera={setCamera} view={view} simulationTime={simulationTime} bodies={RIGID_BODIES_ENABLED ? bodies : []} selectedBodyId={RIGID_BODIES_ENABLED ? selectedBodyId : undefined} fluid={fluidRenderState} backend={backend} quality={gpuQuality} onFrame={handleFrame} onGPUStatus={handleGPUStatus} onGPUInfo={handleGPUInfo} onGPURigidLoads={handleGPURigidLoads} onSelectBody={setSelectedBodyId} onDragBody={handleBodyDrag} />
+        <WebGPUViewport scene={displayedScene} camera={camera} setCamera={setCamera} view={view} simulationTime={displayedTime} bodies={RIGID_BODIES_ENABLED ? displayedBodies : []} selectedBodyId={RIGID_BODIES_ENABLED ? selectedBodyId : undefined} fluid={displayedFluid} backend={displayedBackend} quality={displayedQuality} onFrame={handleFrame} onGPUStatus={handleGPUStatus} onGPUInfo={handleGPUInfo} onGPURigidLoads={handleGPURigidLoads} onSelectBody={setSelectedBodyId} onDragBody={handleBodyDrag} />
         <div className="viewport-topline">
           <div className={`gpu-badge state-${gpuStatus.state}`}><span className={`status-dot ${gpuStatus.state === "ready" ? "online" : "warning"}`} /><strong>{gpuStatus.state === "ready" ? "WEBGPU" : gpuStatus.state.toUpperCase()}</strong><span>{gpuStatus.label}</span></div>
           <div className="segmented"><button className={view === "scientific" ? "active" : ""} onClick={() => setView("scientific")}>Scientific</button><button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button></div>
         </div>
-        <div className="physics-stage-badge"><strong>STAGE 10.5</strong><span>{backend === "webgpu" ? "VOF · MAC · immersed bodies" : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} cells · f32 · ${gpuInfo?.pressureIterations ?? "…"} Jacobi` : "MAC · binary64 · PCG"}</small></div>
+        <div className="physics-stage-badge"><strong>HIERARCHICAL WEBGPU</strong><span>{backend === "webgpu" ? `VOF · composite MAC · strong rigid coupling · L${gpuInfo?.hierarchyLevels ?? scene.hierarchy.levels}` : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} active cells · f32 · ${gpuInfo?.pressureIterations ?? "…"} PCG` : "MAC · binary64 · PCG"}</small></div>
         {view === "scientific" && <>
           <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
           <div className="probe-label probe-a"><i />P-01 · surface</div>
@@ -648,20 +740,23 @@ export function FluidLab() {
       <aside className="right-panel panel-scroll">
         <section className="panel-section diagnostics-head">
           <p className="eyebrow">LIVE DIAGNOSTICS</p>
-          <div className="state-line"><span className={`status-dot ${runState === "running" ? "online pulse" : "idle"}`} /><strong>{runState === "running" ? "COUPLED RUNNING" : "PAUSED"}</strong><span>Eulerian</span></div>
+          <div className="state-line"><span className={`status-dot ${playbackRecording || runState === "running" ? "online pulse" : "idle"}`} /><strong>{playbackRecording ? "PLAYBACK · REALTIME" : runState === "running" ? "COUPLED RUNNING" : "PAUSED"}</strong><span>Eulerian</span></div>
         </section>
         <section className="metric-grid panel-section">
-          <MetricCard label="Simulation time" value={simulationTime.toFixed(3)} unit="s" />
+          <MetricCard label={playbackRecording ? "Playback time" : "Simulation time"} value={displayedTime.toFixed(3)} unit="s" />
+          <MetricCard label="GPU grid" value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.ny} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
+          <MetricCard label="GPU max speed" value={gpuInfo?.maxSpeed_m_s !== undefined ? gpuInfo.maxSpeed_m_s.toFixed(3) : "—"} unit={`m/s · ${gpuInfo?.encodedSteps ?? 0} encoded steps`} />
+          <MetricCard label="GPU volume drift" value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit="% · unmodified VOF integral" tone={gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
+        </section>
+        <details className="control-disclosure diagnostics-disclosure"><summary><span>Detailed diagnostics</span><small>pressure, bodies, invariants</small></summary><div className="disclosure-body">
+        <section className="metric-grid panel-section">
           <MetricCard label="Fixed validation dt" value={scene.numerics.fixedDt_s.toFixed(4)} unit="s" />
           <MetricCard label="Render encode" value={frameMs.toFixed(2)} unit="ms CPU" tone={frameMs < 4 ? "good" : "warn"} />
-          {RIGID_BODIES_ENABLED && <MetricCard label="Rigid bodies" value={String(bodies.length)} unit={`${rigidState.contactCount} contact solves`} />}
-          <MetricCard label="MAC grid" value={`${fluidRenderState.nx} × ${fluidRenderState.ny} × ${fluidRenderState.nz}`} unit={`${fluidState.pressureIterations} PCG iterations`} tone={fluidState.pressureConverged ? "good" : "warn"} />
-          <MetricCard label="Dam front" value={fluidState.damFront_m.toFixed(3)} unit="m" />
-          <MetricCard label="GPU grid" value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.ny} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
-          <MetricCard label="GPU dam front" value={gpuInfo?.front_m !== undefined ? gpuInfo.front_m.toFixed(3) : "—"} unit="m · volume-fraction threshold" />
-          <MetricCard label="GPU max speed" value={gpuInfo?.maxSpeed_m_s !== undefined ? gpuInfo.maxSpeed_m_s.toFixed(3) : "—"} unit={`m/s · ${gpuInfo?.encodedSteps ?? 0} encoded steps`} />
-          <MetricCard label="GPU step" value={gpuInfo?.gpuStep_ms !== undefined ? gpuInfo.gpuStep_ms.toFixed(2) : "—"} unit="ms · timestamp query" tone={gpuInfo?.gpuStep_ms !== undefined && gpuInfo.gpuStep_ms < 16.7 ? "good" : "neutral"} />
-          <MetricCard label="GPU volume drift" value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit="% · unmodified VOF integral" tone={gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
+          {RIGID_BODIES_ENABLED&&<MetricCard label="Rigid bodies" value={String(bodies.length)} unit={`${rigidState.contactCount} contact solves`} />}
+          <MetricCard label="CPU oracle grid" value={`${fluidRenderState.nx} × ${fluidRenderState.ny} × ${fluidRenderState.nz}`} unit={`${fluidState.pressureIterations} PCG iterations`} tone={fluidState.pressureConverged?"good":"warn"} />
+          <MetricCard label="CPU / GPU front" value={`${fluidState.damFront_m.toFixed(3)} / ${gpuInfo?.front_m?.toFixed(3)??"—"}`} unit="m" />
+          <MetricCard label="GPU pressure / finite" value={gpuInfo?.pressureMax_Pa!==undefined?gpuInfo.pressureMax_Pa.toFixed(1):"—"} unit={`Pa max · pre-div ${gpuInfo?.divergenceBefore_s?.toExponential(1)??"—"} · ${gpuInfo?.nanCount??0} non-finite`} tone={(gpuInfo?.nanCount??0)===0?"good":"warn"} />
+          <MetricCard label="GPU step" value={gpuInfo?.gpuStep_ms!==undefined?gpuInfo.gpuStep_ms.toFixed(2):"—"} unit="ms · timestamp query" />
           <MetricCard label="Volume correction" value="None" unit="physical VOF rendered directly" tone="good" />
         </section>
         {RIGID_BODIES_ENABLED && selectedBody && <section className="panel-section selected-diagnostics" data-testid="selected-body-diagnostics">
@@ -708,7 +803,7 @@ export function FluidLab() {
             <div><span>Time-step bound</span><strong>{fluidState.limitingCondition}</strong><small>dt {fluidState.dt_s.toFixed(4)} s</small></div>
             <div><span>NaN / infinity</span><strong>{fluidState.nanCount}</strong><small>acceptance = 0</small></div>
           </div>
-          <p>CPU oracle: staggered MAC, RK2 semi-Lagrangian advection, explicit viscosity, marker free surface, closed-wall flux enforcement, and matrix-free Jacobi-PCG projection. The WebGPU path packs staggered positive-face velocities with a conservative VOF field, ghost-fluid free-surface pressure, and weighted Jacobi projection.</p>
+          <p>CPU oracle: staggered MAC, RK2 semi-Lagrangian advection, explicit viscosity, marker free surface, closed-wall flux enforcement, and matrix-free Jacobi-PCG projection. The WebGPU path uses sparse 2:1 leaf bricks, conservative bounded VOF transfer, composite coarse–fine face fluxes, matrix-free PCG projection, and pressure-level rigid-body coupling.</p>
         </section>
         {RIGID_BODIES_ENABLED && <section className="panel-section">
           <div className="section-heading"><h2>Fluid–rigid exchange</h2><span>two-way impulses</span></div>
@@ -716,18 +811,20 @@ export function FluidLab() {
         </section>}
         <section className="panel-section">
           <div className="section-heading"><h2>Run identity</h2><span>reproducibility</span></div>
-          <dl className="run-identity"><div><dt>Build</dt><dd>{BUILD_ID}</dd></div><div><dt>Active backend</dt><dd>{backend}</dd></div><div><dt>Eulerian GPU</dt><dd>f32 VOF ghost-fluid MAC</dd></div><div><dt>Eulerian CPU</dt><dd>binary64 MAC PCG</dd></div><div><dt>Random seed</dt><dd>{scene.randomSeed}</dd></div></dl>
+          <dl className="run-identity"><div><dt>Build</dt><dd>{BUILD_ID}</dd></div><div><dt>Active backend</dt><dd>{backend}</dd></div><div><dt>Eulerian GPU</dt><dd>f32 hierarchical composite MAC PCG</dd></div><div><dt>Eulerian CPU</dt><dd>binary64 MAC PCG oracle</dd></div><div><dt>Random seed</dt><dd>{scene.randomSeed}</dd></div></dl>
         </section>
+        </div></details>
       </aside>
 
       <footer className="transport-bar">
         <div className="transport-controls">
-          <button className="transport-main" onClick={() => setRunState((state) => state === "running" ? "paused" : "running")} aria-label={runState === "running" ? "Pause simulation" : "Play simulation"}>{runState === "running" ? "Ⅱ" : "▶"}</button>
-          <button onClick={singleRigidStep} aria-label="Single fluid clock step">STEP</button>
+          <button className="transport-main" disabled={Boolean(playbackRecording)} onClick={() => setRunState((state) => state === "running" ? "paused" : "running")} aria-label={runState === "running" ? "Pause simulation" : "Play simulation"}>{runState === "running" ? "Ⅱ" : "▶"}</button>
+          <button disabled={Boolean(playbackRecording)} onClick={singleRigidStep} aria-label="Single fluid clock step">STEP</button>
           <button onClick={() => resetSimulation()}>RESET</button>
+          <button className={playbackRecording ? "active" : ""} disabled={!playbackRecording && recordingDuration <= 0} onClick={playbackRecording ? stopPlayback : startPlayback} aria-label={playbackRecording ? "Stop playback" : "Play latest simulation capture from the start"}>{playbackRecording ? "STOP" : "REPLAY"}</button>
           <button className={performanceOpen?"active":""} onClick={()=>setPerformanceOpen((open)=>!open)} aria-expanded={performanceOpen} aria-controls="performance-drawer">PERF</button>
         </div>
-        <div className="time-readout"><span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small><div className="timeline"><i style={{ width: `${(simulationTime / scene.duration_s) * 100}%` }} /></div><span>{scene.duration_s.toFixed(1)} s</span></div>
+        <div className="time-readout"><span>{playbackRecording ? "replay" : "t"}</span><strong>{displayedTime.toFixed(4)}</strong><small>s</small><div className="timeline"><i style={{ width: `${(displayedTime / (playbackRecording?.duration_s ?? scene.duration_s)) * 100}%` }} /></div><span>{(playbackRecording?.duration_s ?? scene.duration_s).toFixed(1)} s</span></div>
         <div className="file-actions"><span className="notice">{notice}</span><button onClick={loadLocal}>Load</button><button onClick={() => fileRef.current?.click()}>Import</button><input ref={fileRef} type="file" accept="application/json,.json" onChange={importScene} hidden /></div>
       </footer>
 

@@ -2,7 +2,8 @@ import { cameraPosition } from "./math";
 import type { CameraState, SceneDescription, ViewMode } from "./model";
 import type { RigidBodyState } from "./rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
-import { WebGPUEulerianSolver, type GPUEulerianInfo, type GPURigidLoad, type GPUQuality } from "./webgpu-eulerian";
+import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
+import { WebGPUHierarchicalSolver } from "./webgpu-hierarchical-solver";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 
@@ -385,6 +386,21 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+const hierarchyShader = shader
+  .replace("@group(0) @binding(2) var fluidField: texture_3d<f32>;", `
+struct HierarchyCell { negAlpha:vec4f, posPressure:vec4f }
+struct HierarchyParams { dimsDt:vec4f, pageBrick:vec4f, originH:vec4f, physical:vec4f, containerBodies:vec4f, topology:vec4f, boundary:vec4f }
+@group(0) @binding(2) var<storage,read> hierarchyCells:array<HierarchyCell>;
+@group(0) @binding(3) var<storage,read> hierarchyMeta:array<vec4u>;
+@group(0) @binding(4) var<storage,read> hierarchyPages:array<u32>;
+@group(0) @binding(5) var<storage,read> hierarchyParams:HierarchyParams;`)
+  .replace(`fn fluidSample(cell: vec3i) -> f32 {
+  let dims = vec3i(u.gridInfo.xyz);
+  return textureLoad(fluidField, clamp(cell, vec3i(0), dims - vec3i(1)), 0).x;
+}`, `fn fluidSample(cell:vec3i)->f32 {
+  let dims=vec3i(u.gridInfo.xyz);let q=vec3u(clamp(cell,vec3i(0),dims-vec3i(1)));let page=q/4u;let pd=vec3u(hierarchyParams.pageBrick.xyz);let slot=hierarchyPages[page.x+pd.x*(page.y+pd.y*page.z)];let brick=hierarchyMeta[slot*2u];let local=vec3u(clamp(floor((vec3f(q)-vec3f(brick.xyz))/f32(brick.w)),vec3f(0.0),vec3f(3.0)));let index=slot*64u+local.x+4u*(local.y+4u*local.z);return hierarchyCells[index].negAlpha.w;
+}`);
+
 const upscaleShader = /* wgsl */ `
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var sourceSampler: sampler;
@@ -400,6 +416,7 @@ export class FluidLabRenderer {
   private device?: GPUDevice;
   private context?: GPUCanvasContext;
   private pipeline?: GPURenderPipeline;
+  private hierarchyPipeline?: GPURenderPipeline;
   private upscalePipeline?: GPURenderPipeline;
   private upscaleSampler?: GPUSampler;
   private upscaleBindGroup?: GPUBindGroup;
@@ -411,12 +428,14 @@ export class FluidLabRenderer {
   private fluidTexture?: GPUTexture;
   private fluidTextureKey = "";
   private fluidRevision = -1;
-  private gpuFluid?: WebGPUEulerianSolver;
+  private gpuFluid?: WebGPUHierarchicalSolver;
   private gpuFluidKey = "";
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
   private gpuRigidLoadCallback?: (loads: GPURigidLoad[]) => void;
   private lastGPUReadbackSecond = -1;
   private bindGroup?: GPUBindGroup;
+  private hierarchyBindGroup?: GPUBindGroup;
+  private hierarchyBindRevision = -1;
   private format?: GPUTextureFormat;
   private renderQuerySet?: GPUQuerySet;
   private renderQueryResolve?: GPUBuffer;
@@ -438,7 +457,8 @@ export class FluidLabRenderer {
       return;
     }
     const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
-    const device = await adapter.requestDevice({ requiredFeatures });
+    if(adapter.limits.maxStorageBuffersPerShaderStage<9){this.onStatus({state:"unavailable",label:"Hierarchical WebGPU requires 9 storage buffers per shader stage"});return;}
+    const device = await adapter.requestDevice({ requiredFeatures,requiredLimits:{maxStorageBuffersPerShaderStage:9} });
     const context = this.canvas.getContext("webgpu");
     if (!context) {
       this.onStatus({ state: "unavailable", label: "WebGPU canvas context could not be created" });
@@ -462,6 +482,9 @@ export class FluidLabRenderer {
       fragment: { module: shaderModule, entryPoint: "fragmentMain", targets: [{ format: this.format }] },
       primitive: { topology: "triangle-list" }
     });
+    const hierarchyModule=device.createShaderModule({label:"Fluid Lab hierarchical presentation shader",code:hierarchyShader});
+    const hierarchyCompilation=await hierarchyModule.getCompilationInfo();const hierarchyErrors=hierarchyCompilation.messages.filter((message)=>message.type==="error");if(hierarchyErrors.length>0)throw new Error(hierarchyErrors.map((error)=>`${error.lineNum}:${error.linePos} ${error.message}`).join("\n"));
+    this.hierarchyPipeline=device.createRenderPipeline({label:"Fluid Lab hierarchical ray presentation",layout:"auto",vertex:{module:hierarchyModule,entryPoint:"vertexMain"},fragment:{module:hierarchyModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
     const upscaleModule=device.createShaderModule({label:"Presentation upscale shader",code:upscaleShader});
     this.upscalePipeline=device.createRenderPipeline({label:"Presentation upscale",layout:"auto",vertex:{module:upscaleModule,entryPoint:"vertexMain"},fragment:{module:upscaleModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
@@ -486,17 +509,22 @@ export class FluidLabRenderer {
     ] });
   }
 
+  private rebuildHierarchyBindGroup(): void {
+    if(!this.device||!this.hierarchyPipeline||!this.uniformBuffer||!this.bodyBuffer||!this.gpuFluid)return;const resources=this.gpuFluid.hierarchyRenderResources;if(resources.revision===this.hierarchyBindRevision)return;
+    this.hierarchyBindGroup=this.device.createBindGroup({layout:this.hierarchyPipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:{buffer:this.bodyBuffer}},{binding:2,resource:{buffer:resources.cells}},{binding:3,resource:{buffer:resources.metadata}},{binding:4,resource:{buffer:resources.pageTable}},{binding:5,resource:{buffer:resources.params}}]});this.hierarchyBindRevision=resources.revision;
+  }
+
   private ensureGPUFluid(scene: SceneDescription, quality: GPUQuality, time_s: number, bodies: RigidBodyState[]) {
     if (!this.device) return undefined;
-    const key = `${quality}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}`;
+    const key = `${quality}:${scene.nominalResolution.length_m}:${JSON.stringify(scene.hierarchy)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}`;
     if (!this.gpuFluid || key !== this.gpuFluidKey) {
-      this.gpuFluid?.destroy(); this.gpuFluid = new WebGPUEulerianSolver(this.device, scene, quality, this.gpuRigidLoadCallback); this.gpuFluidKey = key;
+      this.gpuFluid?.destroy(); this.gpuFluid = new WebGPUHierarchicalSolver(this.device, scene, quality, this.gpuRigidLoadCallback); this.gpuFluidKey = key;this.hierarchyBindRevision=-1;this.hierarchyBindGroup=undefined;
       this.rebuildBindGroup(this.gpuFluid.volumeTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
     }
     if (!this.gpuFluid.advanceTo(time_s, bodies)) {
-      this.gpuFluid.destroy(); this.gpuFluid = new WebGPUEulerianSolver(this.device, scene, quality, this.gpuRigidLoadCallback); this.rebuildBindGroup(this.gpuFluid.volumeTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
+      this.gpuFluid.destroy(); this.gpuFluid = new WebGPUHierarchicalSolver(this.device, scene, quality, this.gpuRigidLoadCallback);this.hierarchyBindRevision=-1;this.hierarchyBindGroup=undefined; this.rebuildBindGroup(this.gpuFluid.volumeTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
     }
-    const second=Math.floor(time_s);if(second!==this.lastGPUReadbackSecond){this.lastGPUReadbackSecond=second;void this.gpuFluid.readStats().then(info=>this.gpuInfoCallback?.({...info}));}
+    const diagnosticTick=Math.floor(time_s*10);if(diagnosticTick!==this.lastGPUReadbackSecond){this.lastGPUReadbackSecond=diagnosticTick;void this.gpuFluid.readStats().then(info=>this.gpuInfoCallback?.({...info}));}
     return this.gpuFluid.info;
   }
 
@@ -551,6 +579,7 @@ export class FluidLabRenderer {
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
     const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, quality, time_s, bodies) : undefined;
+    if(backend==="webgpu")this.rebuildHierarchyBindGroup();
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const uniform = new Float32Array([
@@ -583,8 +612,8 @@ export class FluidLabRenderer {
       colorAttachments: [{ view: this.presentationTexture.createView(), clearValue: { r: 0.01, g: 0.025, b: 0.024, a: 1 }, loadOp: "clear", storeOp: "store" }],
       ...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:0}}:{})
     });
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bindGroup);
+    pass.setPipeline(backend==="webgpu"&&this.hierarchyPipeline?this.hierarchyPipeline:this.pipeline);
+    pass.setBindGroup(0, backend==="webgpu"&&this.hierarchyBindGroup?this.hierarchyBindGroup:this.bindGroup);
     pass.draw(3);
     pass.end();
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}],...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,endOfPassWriteIndex:1}}:{})});

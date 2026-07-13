@@ -524,3 +524,44 @@ Build: `web-stage10.5-1.0.5`
   corner reservoir with zero WebGPU warnings. The sampled native-resolution
   presentation pass measured `2.163 ms`, making pressure Jacobi the largest GPU
   stage in that frame.
+
+## Stage 11 unified hierarchical WebGPU solver
+
+Recorded: 2026-07-13<br>
+Build: `web-stage11.0-1.1.0`
+
+- Replaced the dense WebGPU solver with a single sparse leaf-brick path. A
+  hierarchy depth of one allocates a complete uniform covering through the same
+  buffers, WGSL kernels, pressure operator, rigid coupling, and renderer used by
+  adaptive configurations.
+- Added deterministic 2:1 topology construction, a finest-brick page table,
+  surface/velocity/solid refinement tags, delayed coarsening, explicit brick
+  budget saturation, and conservative dynamic state transfer.
+- Added canonical coarse/fine sub-face flux integration, bounded conservative
+  VOF transport, matrix-free composite PCG, and the rank-six rigid-body Schur
+  term inside every pressure operator evaluation.
+- Sparse leaf buffers are rendered directly; the solver no longer allocates a
+  dense finest-grid physics or presentation field.
+- `45` deterministic tests pass, including exact one-level specialization,
+  page-table and 2:1 invariants, reciprocal coarse/fine faces, VOF conservation
+  under refinement/restriction and live regridding, and symmetry/positive
+  semidefiniteness of pressure-level rigid coupling. Lint and production build
+  also pass.
+
+## Stage 12 scenario workbench and progressive controls
+
+Recorded: 2026-07-13<br>
+Build: `web-stage12.0-1.2.0`
+
+- Added five immutable, reproducible scene factories: dam break, wave tank,
+  buoyancy contrast, splash impact, and hydrostatic still water. The wave case
+  launches an immersed paddle so it exercises hierarchical solid halos, wake
+  refinement, pressure coupling, and free-surface transport together.
+- Promoted scenario selection, run/reset, hierarchy depth, GPU quality, and the
+  uniform-versus-active allocation comparison to the top of the primary panel.
+- Moved scene/fluid editing, rigid-body editing, solver tolerances, and detailed
+  diagnostics into independently expandable disclosure sections.
+- Added contract tests for every scenario and checks that the wave, buoyancy,
+  impact, and equilibrium cases stress distinct numerical regimes. Every preset
+  also initializes and advances a finite CPU oracle alongside a finite sparse
+  GPU layout. The complete deterministic suite now contains `48` passing tests.
