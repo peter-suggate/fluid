@@ -170,6 +170,13 @@ struct RigidBody {
 @group(0) @binding(11) var<storage,read_write> rigidExchange:array<atomic<i32>>;
 @group(0) @binding(12) var predictedVelocityIn: texture_3d<f32>;
 @group(0) @binding(13) var reversedVelocityIn: texture_3d<f32>;
+// Precomputed transport velocity with a one-texel zero shell so hardware
+// trilinear sampling reproduces the zero wall-face boundary condition.
+@group(0) @binding(14) var transportIn: texture_3d<f32>;
+@group(0) @binding(15) var transportSampler: sampler;
+@group(0) @binding(16) var transportOut: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(17) var fluxScalesIn: texture_3d<f32>;
+@group(0) @binding(18) var fluxScalesOut: texture_storage_3d<rg32float, write>;
 
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn inflowGridDims()->vec3i{return dims();}
@@ -189,8 +196,9 @@ fn transportVelocity(id:vec3i)->vec3f{
 }
 fn sampledFaceVelocity(p:vec3i,component:u32)->f32{
   let d=dims();if(p[component]<0||p[component]>=d[component]){return 0.0;}
-  return transportVelocity(clampCell(p))[component];
+  return textureLoad(transportIn,clampCell(p)+vec3i(1),0)[component];
 }
+fn transportCoordinate(q:vec3f)->vec3f{return (q+vec3f(1.5))/vec3f(dims()+vec3i(2));}
 fn interfaceFraction(a:f32,b:f32)->f32{
   // Distance from the liquid cell centre to alpha=0.5 along a grid edge.
   return clamp((a-0.5)/max(abs(a-b),1e-6),0.05,1.0);
@@ -199,11 +207,17 @@ fn sampleVolume(p:vec3f)->f32{
   let q=clamp(p-vec3f(0.5),vec3f(0.0),vec3f(dims()-vec3i(1)));let b=vec3i(floor(q));let f=fract(q);let c000=volume(b);let c100=volume(b+vec3i(1,0,0));let c010=volume(b+vec3i(0,1,0));let c110=volume(b+vec3i(1,1,0));let c001=volume(b+vec3i(0,0,1));let c101=volume(b+vec3i(1,0,1));let c011=volume(b+vec3i(0,1,1));let c111=volume(b+vec3i(1,1,1));return mix(mix(mix(c000,c100,f.x),mix(c010,c110,f.x),f.y),mix(mix(c001,c101,f.x),mix(c011,c111,f.x),f.y),f.z);
 }
 fn sampleVelocityComponent(p:vec3f,component:u32)->f32{
-  var offset=vec3f(0.5);offset[component]=1.0;var lower=vec3f(0.0);lower[component]=-1.0;let q=clamp(p-offset,lower,vec3f(dims()-vec3i(1)));let b=vec3i(floor(q));let f=fract(q);
-  let c000=sampledFaceVelocity(b,component);let c100=sampledFaceVelocity(b+vec3i(1,0,0),component);let c010=sampledFaceVelocity(b+vec3i(0,1,0),component);let c110=sampledFaceVelocity(b+vec3i(1,1,0),component);let c001=sampledFaceVelocity(b+vec3i(0,0,1),component);let c101=sampledFaceVelocity(b+vec3i(1,0,1),component);let c011=sampledFaceVelocity(b+vec3i(0,1,1),component);let c111=sampledFaceVelocity(b+vec3i(1,1,1),component);return mix(mix(mix(c000,c100,f.x),mix(c010,c110,f.x),f.y),mix(mix(c001,c101,f.x),mix(c011,c111,f.x),f.y),f.z);
+  var offset=vec3f(0.5);offset[component]=1.0;var lower=vec3f(0.0);lower[component]=-1.0;let q=clamp(p-offset,lower,vec3f(dims()-vec3i(1)));
+  return textureSampleLevel(transportIn,transportSampler,transportCoordinate(q),0.0)[component];
 }
 fn sampleVelocity(p:vec3f)->vec3f{return vec3f(sampleVelocityComponent(p,0u),sampleVelocityComponent(p,1u),sampleVelocityComponent(p,2u));}
-fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{let first=sampleVelocity(position);let midpoint=position-0.5*first*dt/h;return position-sampleVelocity(midpoint)*dt/h;}
+// One collocated vector fetch per RK2 stage; the half-texel stagger error only
+// perturbs where the trace samples, not the sampled face values themselves.
+fn transportVectorEstimate(p:vec3f)->vec3f{
+  let q=clamp(p-vec3f(0.75),vec3f(-1.0),vec3f(dims()-vec3i(1)));
+  return textureSampleLevel(transportIn,transportSampler,transportCoordinate(q),0.0).xyz;
+}
+fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{let first=transportVectorEstimate(position);let midpoint=position-0.5*first*dt/h;return position-transportVectorEstimate(midpoint)*dt/h;}
 fn advectVelocityComponent(position:vec3f,component:u32,dt:f32,h:vec3f)->f32{
   return sampleVelocityComponent(departurePoint(position,dt,h),component);
 }
@@ -258,11 +272,15 @@ fn inwardFlux(id:vec3i,dt:f32)->f32{
 }
 fn donorScale(id:vec3i,dt:f32)->f32{return min(1.0,volume(id)/max(outwardFlux(id,dt),1e-9));}
 fn receiverScale(id:vec3i,dt:f32)->f32{return min(1.0,max(0.0,1.0-volume(id))/max(inwardFlux(id,dt),1e-9));}
+// Scales are precomputed once per cell by buildFluxScales; invalid neighbors
+// keep the historical donor 0 / receiver 1 limits.
+fn cellFluxScales(id:vec3i)->vec2f{if(!valid(id)){return vec2f(0.0,1.0);}return textureLoad(fluxScalesIn,id,0).xy;}
 fn limitedVolumeFlux(id:vec3i,axis:u32,dt:f32)->f32{
   let offset=select(select(vec3i(0,0,1),vec3i(0,1,0),axis==1u),vec3i(1,0,0),axis==0u);
   let neighbor=id+offset;let flux=rawVolumeFlux(id,axis,dt);
-  if(flux>=0.0){return flux*min(donorScale(id,dt),receiverScale(neighbor,dt));}
-  return flux*min(donorScale(neighbor,dt),receiverScale(id,dt));
+  let donor=cellFluxScales(id);let receiver=cellFluxScales(neighbor);
+  if(flux>=0.0){return flux*min(donor.x,receiver.y);}
+  return flux*min(receiver.x,donor.y);
 }
 fn advectedVolume(id:vec3i,dt:f32)->f32{
   let centre=volume(id);
@@ -298,8 +316,42 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
 }
 
 @compute @workgroup_size(4,4,4)
+fn buildTransport(@builtin(global_invocation_id) gid:vec3u){
+  let padded=vec3i(gid);let d=dims();if(any(padded>=d+vec3i(2))){return;}
+  let id=padded-vec3i(1);
+  if(!valid(id)){textureStore(transportOut,padded,vec4f(0.0));return;}
+  textureStore(transportOut,padded,vec4f(transportVelocity(id),0.0));
+}
+@compute @workgroup_size(4,4,4)
+fn buildFluxScales(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;
+  textureStore(fluxScalesOut,id,vec4f(donorScale(id,dt),receiverScale(id,dt),0.0,0.0));
+}
+// Highest cell holding any volume in each column; advection skips cells well
+// above every nearby column because projection already zeroed their faces.
+@compute @workgroup_size(8,8,1)
+fn buildOccupancy(@builtin(global_invocation_id) gid:vec3u){
+  let d=dims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}
+  var highest=-1.0;
+  for(var y:i32=d.y-1;y>=0;y-=1){if(volume(vec3i(i32(gid.x),y,i32(gid.y)))>0.0001){highest=f32(y);break;}}
+  textureStore(heightOut,vec2i(gid.xy),vec4f(highest));
+}
+fn nearInflow(id:vec3i)->bool{
+  if(inflowStrength()<=0.0){return false;}
+  let axis=inflowAxis();let face=inflowFaceIndex(axis);
+  return id[axis]>=face-1&&id[axis]<=face+2&&inflowApertureFraction(id)>0.0;
+}
+fn aboveOccupancy(id:vec3i)->bool{
+  let d=dims();var occupancy=-1.0;
+  for(var dz:i32=-1;dz<=1;dz+=1){for(var dx:i32=-1;dx<=1;dx+=1){
+    occupancy=max(occupancy,textureLoad(heightIn,vec2i(clamp(id.x+dx,0,d.x-1),clamp(id.z+dz,0,d.z-1)),0).x);
+  }}
+  return f32(id.y)>occupancy+4.0&&!nearInflow(id);
+}
+@compute @workgroup_size(4,4,4)
 fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
+  if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));v=applyVelocityForces(id,v,dt,h);
   let advected=advectedVolume(id,dt);textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(advected,0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));
 }
@@ -307,6 +359,7 @@ fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn advect(@builtin(global_invocation_id) gid: vec3u) {
   let id=vec3i(gid); if (!valid(id)) { return; }
+  if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
   let dt=params.dimsDt.w; let h=params.cellGravity.xyz;
   let cell=vec3f(id);var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
   let advected=advectedVolume(id,dt);let d=dims();
@@ -320,7 +373,9 @@ fn advect(@builtin(global_invocation_id) gid: vec3u) {
 
 @compute @workgroup_size(4,4,4)
 fn reverseAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
+  let id=vec3i(gid);if(!valid(id)){return;}
+  if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
+  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,-dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,-dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,-dt,h));let d=dims();
   if(id.x==d.x-1){v.x=0.0;}if(id.y==d.y-1){v.y=0.0;}if(id.z==d.z-1){v.z=0.0;}textureStore(velocityOut,id,vec4f(v,0.0));
 }
@@ -336,7 +391,9 @@ fn boundedMacCormack(id:vec3i,position:vec3f,component:u32,dt:f32,h:vec3f)->f32{
 
 @compute @workgroup_size(4,4,4)
 fn correctAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
+  let id=vec3i(gid);if(!valid(id)){return;}
+  if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
+  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(boundedMacCormack(id,cell+vec3f(1.0,0.5,0.5),0u,dt,h),boundedMacCormack(id,cell+vec3f(0.5,1.0,0.5),1u,dt,h),boundedMacCormack(id,cell+vec3f(0.5,0.5,1.0),2u,dt,h));v=applyVelocityForces(id,v,dt,h);
   textureStore(velocityOut,id,vec4f(v,0.0));
 }

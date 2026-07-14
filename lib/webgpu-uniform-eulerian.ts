@@ -23,6 +23,8 @@ export class WebGPUUniformEulerianSolver {
   private pressureA: GPUTexture; private pressureB: GPUTexture;
   private volumeA: GPUTexture; private volumeB: GPUTexture;
   private heightA: GPUTexture; private heightB: GPUTexture;
+  private transportA: GPUTexture; private transportB: GPUTexture; private fluxScales: GPUTexture;
+  private transportSampler: GPUSampler;
   private params: GPUBuffer; private reductionBuffer: GPUBuffer;
   private rigidBuffer: GPUBuffer; private rigidExchangeBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
@@ -30,10 +32,14 @@ export class WebGPUUniformEulerianSolver {
   private correctPipeline: GPUComputePipeline; private jacobiPipeline: GPUComputePipeline;
   private projectPipeline: GPUComputePipeline; private rigidPipeline: GPUComputePipeline;
   private reductionPipeline: GPUComputePipeline;
+  private buildTransportPipeline: GPUComputePipeline; private buildFluxScalesPipeline: GPUComputePipeline;
+  private buildOccupancyPipeline: GPUComputePipeline;
   private advectGroup: GPUBindGroup; private reverseGroup: GPUBindGroup; private correctGroup: GPUBindGroup;
   private jacobiABGroup: GPUBindGroup;
   private jacobiBAGroup: GPUBindGroup; private projectGroup: GPUBindGroup;
   private rigidGroup: GPUBindGroup; private reductionGroup: GPUBindGroup;
+  private occupancyGroup: GPUBindGroup; private transportFromCurrentGroup: GPUBindGroup;
+  private transportFromPredictedGroup?: GPUBindGroup;
   private querySet?: GPUQuerySet; private queryResolve?: GPUBuffer;
   private querySegments: Array<{ name: keyof NonNullable<GPUEulerianInfo["gpuTimings"]>; start: number; end: number }> = [];
   private queryCount = 0; private lastTime = 0; private readbackPending = false;
@@ -67,7 +73,14 @@ export class WebGPUUniformEulerianSolver {
     this.pressureA = texture("r32float"); this.pressureB = texture("r32float");
     this.volumeA = texture("r32float"); this.volumeB = texture("r32float");
     this.heightA = device.createTexture({ label: "Uniform column fallback A", size: [nx, nz], format: "r32float", usage });
-    this.heightB = device.createTexture({ label: "Uniform column fallback B", size: [nx, nz], format: "r32float", usage });
+    this.heightB = device.createTexture({ label: "Uniform column occupancy", size: [nx, nz], format: "r32float", usage });
+    // Filterable fp16 transport fields, padded with a zero shell so hardware
+    // clamp-to-edge sampling still reads zero at solid wall faces.
+    const transportTexture = (label: string) => device.createTexture({ label, size: [nx + 2, ny + 2, nz + 2], dimension: "3d", format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
+    this.transportA = transportTexture("Uniform transport velocity A");
+    this.transportB = this.velocityTransport === "maccormack" ? transportTexture("Uniform transport velocity B") : this.transportA;
+    this.fluxScales = device.createTexture({ label: "Uniform volume flux scales", size: [nx, ny, nz], dimension: "3d", format: "rg32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
+    this.transportSampler = device.createSampler({ minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
     this.params = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.reductionBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidBuffer = device.createBuffer({ size: 12 * 80, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -94,21 +107,44 @@ export class WebGPUUniformEulerianSolver {
       { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 12, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-      { binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
+      { binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+      { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "float", viewDimension: "3d" } },
+      { binding: 15, visibility: GPUShaderStage.COMPUTE, sampler: { type: "filtering" } },
+      { binding: 17, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
+    ] });
+    // The main layout already carries four storage textures (the per-stage
+    // limit), so the transport/flux-scale writers get their own layout.
+    const prepLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 16, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba16float", viewDimension: "3d" } },
+      { binding: 18, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rg32float", viewDimension: "3d" } }
     ] });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] });
+    const prepPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [prepLayout] });
     const pipeline = (entryPoint: string) => device.createComputePipeline({ layout: pipelineLayout, compute: { module: shaderModule, entryPoint } });
+    const prepPipeline = (entryPoint: string) => device.createComputePipeline({ layout: prepPipelineLayout, compute: { module: shaderModule, entryPoint } });
     this.advectPipeline = pipeline(this.velocityTransport === "maccormack" ? "advect" : "semiLagrangianAdvection"); this.reversePipeline = pipeline("reverseAdvection");
     this.correctPipeline = pipeline("correctAdvection"); this.jacobiPipeline = pipeline("jacobi");
     this.projectPipeline = pipeline("project"); this.rigidPipeline = pipeline("coupleRigid");
     this.reductionPipeline = pipeline("reduceDiagnostics");
+    this.buildOccupancyPipeline = pipeline("buildOccupancy");
+    this.buildTransportPipeline = prepPipeline("buildTransport"); this.buildFluxScalesPipeline = prepPipeline("buildFluxScales");
+    const prepGroup = (velocity: GPUTexture, transport: GPUTexture) => device.createBindGroup({ layout: prepLayout, entries: [
+      { binding: 0, resource: velocity.createView() }, { binding: 4, resource: this.volumeA.createView() },
+      { binding: 6, resource: { buffer: this.params } }, { binding: 16, resource: transport.createView() },
+      { binding: 18, resource: this.fluxScales.createView() }
+    ] });
+    this.transportFromCurrentGroup = prepGroup(this.velocityA, this.transportA);
+    if (this.velocityTransport === "maccormack") this.transportFromPredictedGroup = prepGroup(this.velocityC, this.transportB);
     const pressureIterations = Math.max(8, Math.min(400, Math.round(options.pressureIterations ?? (quality === "balanced" ? 64 : quality === "high" ? 80 : 96))));
     const count = nx * ny * nz;
     this.info = {
       nx, ny, nz, storedNy: ny, cellCount: count, equivalentUniformCells: count,
       compressionRatio: 1, activeCompressionRatio: 1, activeSampleCount: count, regularLayers: ny, maximumNeighborDelta: 0,
       gridKind: "uniform", cellSize_m: Math.max(c.width_m / nx, c.height_m / ny, c.depth_m / nz),
-      pressureIterations, allocatedBytes: count * (this.velocityTransport === "maccormack" ? 80 : 48), quality, encodedSteps: 0, maximumTallCellHeight: 0,
+      pressureIterations, allocatedBytes: count * (this.velocityTransport === "maccormack" ? 88 : 56) + (nx + 2) * (ny + 2) * (nz + 2) * 8 * (this.velocityTransport === "maccormack" ? 2 : 1), quality, encodedSteps: 0, maximumTallCellHeight: 0,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0, simulationLag_s: 0
     };
     this.baseAllocatedBytes = this.info.allocatedBytes;
@@ -124,10 +160,13 @@ export class WebGPUUniformEulerianSolver {
       });
       this.applyQuadtreeInfo(this.quadtreeProjection, pressureIterations);
     }
+    // Advection groups read the column occupancy from heightB; heightA stays
+    // zero for the renderer's uniform column-base fallback.
+    this.occupancyGroup = this.group(this.velocityA, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB);
     this.advectGroup = this.velocityTransport === "maccormack"
-      ? this.group(this.velocityA, this.velocityC, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB, this.velocityB, this.velocityD)
-      : this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB);
-    this.reverseGroup = this.velocityTransport === "maccormack" ? this.group(this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB, this.velocityA, this.velocityB) : this.advectGroup;
+      ? this.group(this.velocityA, this.velocityC, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityB, this.velocityD)
+      : this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
+    this.reverseGroup = this.velocityTransport === "maccormack" ? this.group(this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityB, this.transportB) : this.advectGroup;
     this.correctGroup = this.velocityTransport === "maccormack" ? this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityC, this.velocityD) : this.advectGroup;
     this.jacobiABGroup = this.group(this.velocityB, this.velocityA, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA);
     this.jacobiBAGroup = this.group(this.velocityB, this.velocityA, this.pressureB, this.pressureA, this.volumeB, this.volumeA, this.heightB, this.heightA);
@@ -161,7 +200,7 @@ export class WebGPUUniformEulerianSolver {
     for (const texture of [this.volumeA, this.volumeB]) this.device.queue.writeTexture({ texture }, packed, { bytesPerRow: padded, rowsPerImage: ny }, { width: nx, height: ny, depthOrArrayLayers: nz });
   }
 
-  private group(velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture, pressureOut: GPUTexture, volumeIn: GPUTexture, volumeOut: GPUTexture, heightIn: GPUTexture, heightOut: GPUTexture, predictedVelocity: GPUTexture = velocityIn, reversedVelocity: GPUTexture = velocityIn) {
+  private group(velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture, pressureOut: GPUTexture, volumeIn: GPUTexture, volumeOut: GPUTexture, heightIn: GPUTexture, heightOut: GPUTexture, predictedVelocity: GPUTexture = velocityIn, reversedVelocity: GPUTexture = velocityIn, transport: GPUTexture = this.transportA) {
     return this.device.createBindGroup({ layout: this.bindGroupLayout, entries: [
       { binding: 0, resource: velocityIn.createView() }, { binding: 1, resource: velocityOut.createView() },
       { binding: 2, resource: pressureIn.createView() }, { binding: 3, resource: pressureOut.createView() },
@@ -169,7 +208,9 @@ export class WebGPUUniformEulerianSolver {
       { binding: 6, resource: { buffer: this.params } }, { binding: 7, resource: heightIn.createView() },
       { binding: 8, resource: heightOut.createView() }, { binding: 9, resource: { buffer: this.reductionBuffer } },
       { binding: 10, resource: { buffer: this.rigidBuffer } }, { binding: 11, resource: { buffer: this.rigidExchangeBuffer } },
-      { binding: 12, resource: predictedVelocity.createView() }, { binding: 13, resource: reversedVelocity.createView() }
+      { binding: 12, resource: predictedVelocity.createView() }, { binding: 13, resource: reversedVelocity.createView() },
+      { binding: 14, resource: transport.createView() }, { binding: 15, resource: this.transportSampler },
+      { binding: 17, resource: this.fluxScales.createView() }
     ] });
   }
 
@@ -212,7 +253,29 @@ export class WebGPUUniformEulerianSolver {
     if (totalTiming && this.querySet) { const pass = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: totalTiming.start } }); pass.end(); }
     encoder.clearBuffer(this.rigidExchangeBuffer);
     for (let substep = 0; substep < substeps; substep += 1) {
-      { const timing = this.timing("advection_ms"), predict = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, ...(this.velocityTransport === "semi-lagrangian" ? { endOfPassWriteIndex: timing.end } : {}) } } : undefined); this.dispatch(predict, this.advectPipeline, this.advectGroup); predict.end(); if (this.velocityTransport === "maccormack") { const reverse = encoder.beginComputePass(); this.dispatch(reverse, this.reversePipeline, this.reverseGroup); reverse.end(); const correct = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(correct, this.correctPipeline, this.correctGroup); correct.end(); } }
+      {
+        const timing = this.timing("advection_ms");
+        const paddedWorkgroups: [number, number, number] = [Math.ceil((this.info.nx + 2) / 4), Math.ceil((this.info.ny + 2) / 4), Math.ceil((this.info.nz + 2) / 4)];
+        // Occupancy, transport extrapolation, and flux scales only read the
+        // projected state, so they share one pass ahead of the predictor.
+        const prep = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start } } : undefined);
+        prep.setPipeline(this.buildOccupancyPipeline); prep.setBindGroup(0, this.occupancyGroup);
+        prep.dispatchWorkgroups(Math.ceil(this.info.nx / 8), Math.ceil(this.info.nz / 8), 1);
+        prep.setPipeline(this.buildTransportPipeline); prep.setBindGroup(0, this.transportFromCurrentGroup);
+        prep.dispatchWorkgroups(...paddedWorkgroups);
+        prep.setPipeline(this.buildFluxScalesPipeline);
+        prep.dispatchWorkgroups(Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4));
+        prep.end();
+        const predict = encoder.beginComputePass(timing && this.querySet && this.velocityTransport === "semi-lagrangian" ? { timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.end } } : undefined);
+        this.dispatch(predict, this.advectPipeline, this.advectGroup); predict.end();
+        if (this.velocityTransport === "maccormack" && this.transportFromPredictedGroup) {
+          const predictedTransport = encoder.beginComputePass();
+          predictedTransport.setPipeline(this.buildTransportPipeline); predictedTransport.setBindGroup(0, this.transportFromPredictedGroup);
+          predictedTransport.dispatchWorkgroups(...paddedWorkgroups); predictedTransport.end();
+          const reverse = encoder.beginComputePass(); this.dispatch(reverse, this.reversePipeline, this.reverseGroup); reverse.end();
+          const correct = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(correct, this.correctPipeline, this.correctGroup); correct.end();
+        }
+      }
       if (this.quadtreeProjection) {
         encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
         this.quadtreeProjection.encode(encoder, this.info.nx, this.info.ny, this.info.nz);
@@ -266,7 +329,7 @@ export class WebGPUUniformEulerianSolver {
   destroy() {
     this.disposed = true;
     this.quadtreeProjection?.destroy();
-    for (const texture of new Set([this.velocityA, this.velocityB, this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB])) texture.destroy();
+    for (const texture of new Set([this.velocityA, this.velocityB, this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB, this.transportA, this.transportB, this.fluxScales])) texture.destroy();
     this.params.destroy(); this.reductionBuffer.destroy(); this.rigidBuffer.destroy(); this.rigidExchangeBuffer.destroy(); this.querySet?.destroy(); this.queryResolve?.destroy();
   }
 }
