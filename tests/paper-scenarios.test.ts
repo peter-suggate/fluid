@@ -41,6 +41,8 @@ test("hose layout retains a regular band spanning the receiving surface and nozz
   const fillTop = Math.floor(scene.container.fillFraction * layout.fineNy);
   const nozzle = Math.floor(scene.fluid.inflow!.center_m.y / scene.container.height_m * layout.fineNy);
   assert.ok(layout.settings.regularLayers >= nozzle - fillTop, `${layout.settings.regularLayers} < ${nozzle - fillTop}`);
+  assert.ok(layout.columnBases.every((base) => base === 0));
+  assert.equal(layout.settings.regularLayers, layout.fineNy, "ordinary-cell limit must retain every cubic row");
 });
 
 test("paper sphere obstacle remains fixed while dynamic bodies advance", () => {

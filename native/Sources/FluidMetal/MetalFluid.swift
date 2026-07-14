@@ -285,7 +285,6 @@ final class MetalFluidSolver: @unchecked Sendable {
                 if !bodies.isEmpty { encode3D(command, pipeline: couple, buffers: [velocityA, volumeA, bodyBuffer, exchange, params]) }
                 for index in bodies.indices { bodies[index].step(dt: stepDt, scene: scene) }
                 metrics.simulationTime += stepDt
-                if metrics.simulationTime >= scene.duration_s { isRunning = false }
                 accumulator -= Double(stepDt); encodedSteps += 1
             }
         }

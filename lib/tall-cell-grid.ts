@@ -36,6 +36,11 @@ export const tallCellSettings: Record<GPUQuality, TallCellSettings> = {
   ultra: { surfaceColumns: 12_500, regularLayers: 40, liquidHalo: 24, airHalo: 8, maximumNeighborDelta: 5, remeshInterval: 60 }
 };
 
+export function tallCellFluxSampleCount(height: number) {
+  const cells = Math.max(0, Math.floor(height));
+  return cells <= 48 ? cells : 48;
+}
+
 export function chooseTallCellBase(
   lowestSurfaceCell: number,
   highestSurfaceCell: number,
@@ -134,8 +139,8 @@ function requiredInitialRegularLayers(
   return highest - lowest + liquidHalo + airHalo;
 }
 
-export function createTallCellLayout(scene: SceneDescription, quality: GPUQuality, maximumTextureDimension = 2048): TallCellLayout {
-  const c = scene.container, settings = tallCellSettings[quality];
+export function createTallCellLayout(scene: SceneDescription, quality: GPUQuality, maximumTextureDimension = 2048, overrides?: Partial<TallCellSettings>): TallCellLayout {
+  const c = scene.container, settings = { ...tallCellSettings[quality], ...overrides };
   const targetH = Math.sqrt(c.width_m * c.depth_m / settings.surfaceColumns);
   const nx = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.width_m / targetH)));
   const nz = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.depth_m / targetH)));
@@ -147,9 +152,9 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
   // dropping liquid during remeshing.  Deep, horizontally stratified scenes
   // keep the requested compact band and therefore retain the paper's benefit.
   const requiredLayers = requiredInitialRegularLayers(scene, nx, fineNy, nz, settings);
-  const regularLayers = Math.min(fineNy, Math.max(settings.regularLayers, requiredLayers));
-  const effectiveSettings = { ...settings, regularLayers, liquidHalo: Math.min(settings.liquidHalo, regularLayers), airHalo: Math.min(settings.airHalo, regularLayers) };
-  const packedNy = regularLayers + 2;
+  let regularLayers = Math.min(fineNy, Math.max(settings.regularLayers, requiredLayers));
+  let effectiveSettings = { ...settings, regularLayers, liquidHalo: Math.min(settings.liquidHalo, regularLayers), airHalo: Math.min(settings.airHalo, regularLayers) };
+  let packedNy = regularLayers + 2;
   const maximumBase = Math.max(0, fineNy - regularLayers);
   const rawBases = new Float32Array(nx * nz);
 
@@ -170,7 +175,17 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
       : maximumBase;
   }
 
-  const columnBases = limitNeighboringTallCellBases(rawBases, nx, nz, effectiveSettings.maximumNeighborDelta, nx + nz);
+  let columnBases = limitNeighboringTallCellBases(rawBases, nx, nz, effectiveSettings.maximumNeighborDelta, nx + nz);
+  // A zero-height tall cell is the paper's ordinary-grid limit. If every
+  // column chooses that limit, the packed grid must contain every cubic row;
+  // keeping only the surface-band rows would silently turn the upper domain
+  // into an air boundary while still advertising a Tall solve.
+  if (regularLayers < fineNy && columnBases.every((base) => base === 0)) {
+    regularLayers = fineNy;
+    effectiveSettings = { ...effectiveSettings, regularLayers, liquidHalo: Math.min(settings.liquidHalo, regularLayers), airHalo: Math.min(settings.airHalo, regularLayers) };
+    packedNy = regularLayers + 2;
+    columnBases = new Float32Array(nx * nz);
+  }
   const initialVolume = new Float32Array(nx * packedNy * nz);
   let initialVolumeCellSum = 0;
   for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {

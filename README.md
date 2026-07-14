@@ -11,14 +11,15 @@ a high-resolution WebGPU Eulerian path. The GPU uses a restricted tall-cell
 grid: each x/z column has one variable-height bottom cell and a moving band of
 24–40 cubic cells around the free surface. Quality presets retain approximately
 the horizontal resolution of the former 110k, 500k, and 1.2m uniform grids
-while storing far fewer samples in deep domains. The evolving volume fraction
-is rendered directly.
-The compute panel exposes a **Tall cells / Uniform** A/B selector. The uniform
-reference uses the same x/z and cubic-equivalent y resolution, so timing and
-visual comparisons do not hide a resolution reduction. A one-click deep-water
-scene reproduces the depth-scaling benchmark.
-The presentation renderer samples the VOF field trilinearly at a quality-aware
-stride, reconstructs an interface cell from eight cached samples, and uses
+while storing far fewer samples in deep domains. The evolving surface-density
+field is rendered directly.
+The compute panel exposes an independent **Tall cells / Adaptive / Uniform**
+comparison. Adaptive reconstructs the paper's error-controlled optical layer
+on WebGPU every step; uniform uses the same x/z and cubic-equivalent y
+resolution, so timing and visual comparisons do not hide a resolution
+reduction. A one-click deep-water scene reproduces the depth-scaling benchmark.
+The presentation renderer samples the surface-density field trilinearly at a
+quality-aware stride, reconstructs an interface cell from eight cached samples, and uses
 subcell Newton refinement with analytic trilinear normals, front/back thickness,
 Fresnel reflection, and Beer–Lambert absorption. It renders at native canvas
 resolution; traversal skipping and cached interface work keep the
@@ -27,10 +28,13 @@ The live performance drawer separates hardware-timestamped GPU advection,
 pressure, projection, immersed-body coupling, reductions, queue/copy overhead,
 and raymarch rendering from wall-clock CPU simulation, upload, encoding, and
 orchestration costs, with a shared 60 Hz budget and recent-frame history.
-The GPU transport path uses bounded donor-cell VOF fluxes, bounded MacCormack
-velocity advection on packed samples, ghost-fluid free-surface pressure, a
-restricted full-cycle multigrid solve, physical molecular viscosity, and
-compact reductions. The tall-cell paper omits capillarity, so the tall method's
+The tall-cell, adaptive, and uniform GPU paths use the same donor/receiver
+limited conservative VOF face flux. Tall columns integrate the shared deep
+face with bounded stratified quadrature and expand only the `D`-bounded
+tall/regular mismatch, so opposing control volumes use the same flux without a
+global volume correction. Velocity uses bounded MacCormack advection
+on packed samples, ghost-fluid free-surface pressure, a restricted full-cycle
+multigrid solve, physical molecular viscosity, and compact reductions. The tall-cell paper omits capillarity, so the tall method's
 paper-core path uses `sigma=0`; the retained uniform path continues to support
 the scene's surface-tension value.
 
@@ -63,6 +67,14 @@ with boxes (Figure 4), and jet-past-sphere benchmark (Figure 6).
   contract.
 - [`docs/TALL_CELL_BENCHMARK.md`](docs/TALL_CELL_BENCHMARK.md) — matched browser
   comparison against the retained uniform WebGPU solver.
+- [`docs/ADAPTIVE_OPTICAL_LAYERS_PAPER.md`](docs/ADAPTIVE_OPTICAL_LAYERS_PAPER.md)
+  — searchable implementation reference for the 2026 adaptive-layer paper.
+- [`docs/ADAPTIVE_OPTICAL_LAYER_WEBGPU.md`](docs/ADAPTIVE_OPTICAL_LAYER_WEBGPU.md)
+  — independent mode architecture, paper-to-code map, verification contract,
+  and framework fidelity boundaries.
+- [`docs/ADAPTIVE_OPTICAL_LAYER_AUDIT.md`](docs/ADAPTIVE_OPTICAL_LAYER_AUDIT.md)
+  — repeated realism/stability measurements, corrections, and ranked gaps to
+  the paper.
 - [`docs/SCENE_FORMAT.md`](docs/SCENE_FORMAT.md) — canonical SI scene and run
   record format.
 - [`docs/COMPARABILITY.md`](docs/COMPARABILITY.md) — resolution, workload, and
@@ -100,9 +112,10 @@ details.
 ## Current numerical boundary
 
 The CPU MAC/PCG path remains the pressure-validation oracle. The GPU path uses
-an f32 restricted tall-cell VOF field, a ghost-fluid atmospheric boundary, a
-full-cycle multigrid hierarchy with a red-black Gauss-Seidel WebGPU smoother, bounded
-transport, and conservative remapping without global mass rescaling.
+an f32 restricted tall-cell surface-density field, a ghost-fluid atmospheric
+boundary, a full-cycle multigrid hierarchy with a red-black Gauss-Seidel WebGPU
+smoother, bounded transport, and conservative remapping without global mass
+rescaling.
 The renderer reconstructs the physical volume from the tall bottom cell and
 regular surface band; no equilibrium blend, presentation smoothing, or global
 volume rescaling is applied. Resolved cut-cell traction and an asynchronously

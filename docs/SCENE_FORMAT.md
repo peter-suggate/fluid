@@ -49,8 +49,10 @@ friction. If mass is authoritative, density is derived from analytic primitive
 volume; inconsistent redundant fields are rejected.
 
 Solver-specific numerical settings cannot override container, gravity, fluid
-properties, bodies, duration, seed, or initial fluid regions. Every run records
-the exact scene content hash before the solver initializes.
+properties, bodies, seed, or initial fluid regions. The legacy `duration_s`
+field remains in schema 1.0.0 for compatibility and fixed-duration benchmark
+metadata, but interactive simulations run continuously until paused or reset.
+Every run records the exact scene content hash before the solver initializes.
 
 ## Run record
 
