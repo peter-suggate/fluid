@@ -35,6 +35,7 @@ struct RigidBody {
 	@group(0) @binding(13) var predictedVelocityIn:texture_3d<f32>;
 	@group(0) @binding(14) var reversedVelocityIn:texture_3d<f32>;
 	@group(0) @binding(15) var solidFractionIn:texture_3d<f32>;
+@group(0) @binding(16) var<storage,read_write> smoothedColumnBases:array<u32>;
 
 fn packedDims()->vec3i{return vec3i(textureDimensions(volumeIn));}
 fn fineDims()->vec3i{let d=packedDims();return vec3i(d.x,i32(round(params.boundary.w)),d.z);}
@@ -46,6 +47,9 @@ fn validWorld(q:vec3i)->bool{let d=fineDims();return all(q>=vec3i(0))&&all(q<d);
 fn activeSample(id:vec3i)->bool{
   if(!validPacked(id)){return false;}let base=baseAt(id.x,id.z);
   if(id.y<2){return base>0;}return base+id.y-2<fineDims().y;
+}
+fn representedWorld(q:vec3i)->bool{
+  if(!validWorld(q)){return false;}return q.y<baseAt(q.x,q.z)+regularLayers();
 }
 fn sampleY(id:vec3i)->f32{
   let base=baseAt(id.x,id.z);if(id.y==0){return 0.5;}if(id.y==1){return max(0.5,f32(base)-0.5);}return f32(base+id.y-2)+0.5;
@@ -123,7 +127,7 @@ fn quaternionInverseRotate(q:vec4f,v:vec3f)->vec3f{return quaternionRotate(vec4f
 fn axisOffset(axis:u32)->vec3i{return select(select(vec3i(0,0,1),vec3i(0,1,0),axis==1u),vec3i(1,0,0),axis==0u);}
 fn upwind(face:f32,negative:f32,positive:f32)->f32{return face*select(positive,negative,face>=0.0);}
 fn rawVolumeFlux(q:vec3i,axis:u32,dt:f32)->f32{
-  if(!validWorld(q)){return 0.0;}let offset=axisOffset(axis);if(!validWorld(q+offset)){return 0.0;}let speed=0.5*(velocityCell(q)[axis]+velocityCell(q+offset)[axis]);return dt/params.cellGravity.xyz[axis]*upwind(speed,volumeCell(q),volumeCell(q+offset));
+  let offset=axisOffset(axis);if(!representedWorld(q)||!representedWorld(q+offset)){return 0.0;}let speed=0.5*(velocityCell(q)[axis]+velocityCell(q+offset)[axis]);return dt/params.cellGravity.xyz[axis]*upwind(speed,volumeCell(q),volumeCell(q+offset));
 }
 fn outwardFlux(q:vec3i,dt:f32)->f32{
   let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);return max(rawVolumeFlux(q,0u,dt),0.0)+max(-rawVolumeFlux(q-ex,0u,dt),0.0)+max(rawVolumeFlux(q,1u,dt),0.0)+max(-rawVolumeFlux(q-ey,1u,dt),0.0)+max(rawVolumeFlux(q,2u,dt),0.0)+max(-rawVolumeFlux(q-ez,2u,dt),0.0);
@@ -140,8 +144,12 @@ fn advectedVolume(q:vec3i,dt:f32)->f32{
 }
 fn integratedFluxSegment(q:vec3i,axis:u32,start:i32,count:i32,dt:f32)->f32{if(count<=0){return 0.0;}var total=0.0;for(var y=0;y<count;y+=1){total+=limitedInternalFlux(q+vec3i(0,start+y,0),axis,dt);}return total;}
 fn integratedSharedTallFlux(q:vec3i,axis:u32,height:i32,dt:f32)->f32{
-  if(height<=0){return 0.0;}if(height<=48){return integratedFluxSegment(q,axis,0,height,dt);}var total=integratedFluxSegment(q,axis,0,16,dt)+integratedFluxSegment(q,axis,height-16,16,dt);let width=f32(height-32)/16.0;
-  for(var sample=0;sample<16;sample+=1){let y=16+i32(floor((f32(sample)+0.5)*width));total+=width*limitedInternalFlux(q+vec3i(0,y,0),axis,dt);}return total;
+  if(height<=0){return 0.0;}if(height<=12){return integratedFluxSegment(q,axis,0,height,dt);}let width=f32(height)/12.0;var total=0.0;
+  // The tall-cell fields are reconstructed vertically, so stratified
+  // midpoint quadrature preserves a constant stencil as depth grows. Both
+  // columns call this same oriented face function, retaining exact pairwise
+  // cancellation even though the integral is approximated.
+  for(var sample=0;sample<12;sample+=1){let y=min(height-1,i32(floor((f32(sample)+0.5)*width)));total+=width*limitedInternalFlux(q+vec3i(0,y,0),axis,dt);}return total;
 }
 fn integratedFaceFlux(q:vec3i,axis:u32,height:i32,dt:f32)->f32{
   if(height<=0){return 0.0;}let offset=axisOffset(axis);let neighbor=q+offset;if(!validWorld(q)||!validWorld(neighbor)){return 0.0;}let split=clamp(min(baseAt(q.x,q.z),baseAt(neighbor.x,neighbor.z)),0,height);var total=integratedSharedTallFlux(q,axis,split,dt);
@@ -153,8 +161,14 @@ fn integratedFaceFlux(q:vec3i,axis:u32,height:i32,dt:f32)->f32{
 fn advectedTallVolume(x:i32,z:i32,dt:f32)->f32{
   let base=baseAt(x,z);if(base<=0){return 0.0;}let ex=vec3i(1,0,0);let ez=vec3i(0,0,1);let q=vec3i(x,0,z);var amount=textureLoad(volumeIn,vec3i(x,0,z),0).x*f32(base);
   amount-=integratedFaceFlux(q,0u,base,dt)-integratedFaceFlux(q-ex,0u,base,dt)+integratedFaceFlux(q,2u,base,dt)-integratedFaceFlux(q-ez,2u,base,dt);
-  amount-=limitedFlux(vec3i(x,base-1,z),1u,dt);return clamp(amount/f32(base),0.0,1.0);
+  // Remeshing may temporarily store density above one in the conservative
+  // tall-cell average. Preserve that mass here and let bounded face fluxes
+  // redistribute it; an upper clamp would erase the remap residual.
+  amount-=limitedFlux(vec3i(x,base-1,z),1u,dt);return max(0.0,amount/f32(base));
 }
+// The bottom sample owns tall-cell mass; the zero-weight top sample carries
+// the strongest overlying band topology for interpolation and pressure.
+fn advectedTallTopGuide(x:i32,z:i32,base:i32,dt:f32)->f32{var guide=0.0;for(var offset=0;offset<regularLayers();offset+=1){guide=max(guide,advectedVolume(vec3i(x,base+offset,z),dt));}return guide;}
 fn volumeGradient(q:vec3i)->vec3f{let h=params.cellGravity.xyz;return vec3f(volumeCell(q+vec3i(1,0,0))-volumeCell(q-vec3i(1,0,0)),volumeCell(q+vec3i(0,1,0))-volumeCell(q-vec3i(0,1,0)),volumeCell(q+vec3i(0,0,1))-volumeCell(q-vec3i(0,0,1)))/(2.0*h);}
 fn interfaceNormal(q:vec3i)->vec3f{let g=volumeGradient(q);return g/max(length(g),1e-6);}
 fn curvature(q:vec3i)->f32{let h=params.cellGravity.xyz;return -((interfaceNormal(q+vec3i(1,0,0)).x-interfaceNormal(q-vec3i(1,0,0)).x)/(2.0*h.x)+(interfaceNormal(q+vec3i(0,1,0)).y-interfaceNormal(q-vec3i(0,1,0)).y)/(2.0*h.y)+(interfaceNormal(q+vec3i(0,0,1)).z-interfaceNormal(q-vec3i(0,0,1)).z)/(2.0*h.z));}
@@ -182,7 +196,7 @@ fn boundedMacCormack(id:vec3i,p:vec3f)->vec3f{
 @compute @workgroup_size(4,4,4)
 fn finishAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
-	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=boundedMacCormack(id,p);var alpha=advectedVolume(q,dt);if(id.y==0){alpha=advectedTallVolume(id.x,id.z,dt);}else if(id.y==1){alpha=textureLoad(volumeIn,vec3i(id.x,0,id.z),0).x;}
+	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=boundedMacCormack(id,p);var alpha=advectedVolume(q,dt);if(id.y==0){alpha=advectedTallVolume(id.x,id.z,dt);}else if(id.y==1){alpha=advectedTallTopGuide(id.x,id.z,baseAt(id.x,id.z),dt);}
   // Euler's momentum equation is integrated in the liquid domain. Air values
   // are extrapolation support for the next trace and must not accumulate a
   // separate gravity impulse; doing so feeds a falling-air mode back through
@@ -190,6 +204,17 @@ fn finishAdvection(@builtin(global_invocation_id) gid:vec3u){
   if(alpha>=0.5){v.y+=params.cellGravity.w*dt;}if(alpha>0.001){let nu=params.physical.y/params.physical.x;v+=dt*nu*velocityLaplacian(q);if(alpha<0.999){v+=dt*params.boundary.x/params.physical.x*curvature(q)*volumeGradient(q);}}
   v=applyInflowVelocity(q,v);
   let d=fineDims();if(q.x+1>=d.x){v.x=0.0;}if(q.y+1>=d.y){v.y=0.0;}if(q.z+1>=d.z){v.z=0.0;}
+  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(alpha));textureStore(pressureOut,id,vec4f(0.0));
+}
+
+@compute @workgroup_size(4,4,4)
+fn finishSemiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
+	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=textureLoad(predictedVelocityIn,id,0).xyz;var alpha=advectedVolume(q,dt);if(id.y==0){alpha=advectedTallVolume(id.x,id.z,dt);}else if(id.y==1){alpha=advectedTallTopGuide(id.x,id.z,baseAt(id.x,id.z),dt);}
+  // Match finishAdvection exactly after choosing the transport estimate so
+  // the A/B option isolates MacCormack correction from all other physics.
+  if(alpha>=0.5){v.y+=params.cellGravity.w*dt;}if(alpha>0.001){let nu=params.physical.y/params.physical.x;v+=dt*nu*velocityLaplacian(q);if(alpha<0.999){v+=dt*params.boundary.x/params.physical.x*curvature(q)*volumeGradient(q);}}
+  v=applyInflowVelocity(q,v);let d=fineDims();if(q.x+1>=d.x){v.x=0.0;}if(q.y+1>=d.y){v.y=0.0;}if(q.z+1>=d.z){v.z=0.0;}
   textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(alpha));textureStore(pressureOut,id,vec4f(0.0));
 }
 
@@ -223,7 +248,7 @@ fn project(@builtin(global_invocation_id) gid:vec3u){
 	fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
 	  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
 	  let q=vec3i(floor(samplePoint(id)));let alpha=textureLoad(volumeIn,id,0).x;let oldV=textureLoad(velocityIn,id,0).xyz;var v=oldV;let h=params.cellGravity.xyz;let bodyCount=u32(round(params.boundary.z));var solid=0.0;
-	  // Adaptive optical-layer mode evaluates every virtual cubic cell inside a
+	  // The legacy full-height diagnostic mode evaluates every virtual cubic cell inside a
 	  // tall cell. Its contribution is mapped to the two endpoint unknowns with
 	  // the paper's (1-s) / s weights; exchange is accumulated once by id.y=0.
 	  if(params.physical.z>0.5&&id.y<2){
@@ -259,27 +284,38 @@ fn reduceBeforeProjection(@builtin(global_invocation_id) gid:vec3u){
 @compute @workgroup_size(8,8,1)
 fn planRemesh(@builtin(global_invocation_id) gid:vec3u){
   let d=packedDims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}let x=i32(gid.x);let z=i32(gid.y);let oldBase=baseAt(x,z);let layers=regularLayers();let fineY=fineDims().y;var lowest=fineY;var highest=-1;var previous=select(0.0,textureLoad(volumeIn,vec3i(x,0,z),0).x,oldBase>0);
-  if(oldBase>0){let bottom=textureLoad(volumeIn,vec3i(x,0,z),0).x;let wet=bottom>=0.5;let sideChange=(x>0&&wet!=(volumeCell(vec3i(x-1,0,z))>=0.5))||(x+1<d.x&&wet!=(volumeCell(vec3i(x+1,0,z))>=0.5))||(z>0&&wet!=(volumeCell(vec3i(x,0,z-1))>=0.5))||(z+1<d.z&&wet!=(volumeCell(vec3i(x,0,z+1))>=0.5));if(sideChange){lowest=0;highest=max(highest,oldBase-1);}}
-  for(var packedY:i32=2;packedY<d.y;packedY+=1){let worldY=oldBase+packedY-2;if(worldY>=fineY){break;}let alpha=textureLoad(volumeIn,vec3i(x,packedY,z),0).x;let wet=alpha>=0.5;let sideChange=(x>0&&wet!=(volumeCell(vec3i(x-1,worldY,z))>=0.5))||(x+1<d.x&&wet!=(volumeCell(vec3i(x+1,worldY,z))>=0.5))||(z>0&&wet!=(volumeCell(vec3i(x,worldY,z-1))>=0.5))||(z+1<d.z&&wet!=(volumeCell(vec3i(x,worldY,z+1))>=0.5));if(wet!=(previous>=0.5)||sideChange){lowest=min(lowest,worldY);highest=max(highest,worldY);}previous=alpha;}
+	  for(var packedY:i32=2;packedY<d.y;packedY+=1){let worldY=oldBase+packedY-2;if(worldY>=fineY){break;}let alpha=textureLoad(volumeIn,vec3i(x,packedY,z),0).x;let wet=alpha>=0.5;if(wet!=(previous>=0.5)){lowest=min(lowest,worldY);highest=max(highest,worldY);}previous=alpha;}
 	if(previous>=0.5&&oldBase+layers<fineY){let bandTop=oldBase+layers-1;lowest=min(lowest,bandTop);highest=max(highest,bandTop);}
-  let h=params.cellGravity.xyz;let worldX=-0.5*params.container.x+(f32(x)+0.5)*h.x;let worldZ=-0.5*params.container.z+(f32(z)+0.5)*h.z;let bodyCount=u32(round(params.boundary.z));let maxBase=max(0,fineY-layers);var bodyLower=0;var bodyUpper=maxBase;
+	  let h=params.cellGravity.xyz;let worldX=-0.5*params.container.x+(f32(x)+0.5)*h.x;let worldZ=-0.5*params.container.z+(f32(z)+0.5)*h.z;let bodyCount=u32(round(params.boundary.z));let maxBase=max(0,fineY-layers);var bodyLower=0;var bodyUpper=maxBase;
 	  for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}let body=rigidBodies[bodyIndex];let radius=body.dimensions.w;if(abs(worldX-body.positionShape.x)<=radius&&abs(worldZ-body.positionShape.z)<=radius){let bottom=i32(floor((body.positionShape.y-radius)/h.y));let top=i32(ceil((body.positionShape.y+radius)/h.y));let intersectsBand=top>=oldBase&&bottom<oldBase+layers;if(top>=0&&bottom<fineY&&intersectsBand){bodyLower=max(bodyLower,top+1-layers);bodyUpper=min(bodyUpper,bottom);}}}
 	  let delta=i32(round(params.tall.w));var desired=oldBase;if(highest>=0){let surfaceLower=highest+1+i32(round(params.tall.z))-layers;let surfaceUpper=lowest+1-i32(round(params.tall.y));let lower=max(surfaceLower,bodyLower);let upper=min(surfaceUpper,bodyUpper);desired=select(lower,clamp(oldBase,lower,upper),lower<=upper);}else if(bodyLower<=bodyUpper){desired=clamp(oldBase,bodyLower,bodyUpper);}desired=clamp(desired,max(0,oldBase-delta),min(maxBase,oldBase+delta));
-  var neighborLower=0;var neighborUpper=maxBase;for(var n:u32=0u;n<4u;n+=1u){let offset=select(select(vec2i(0,1),vec2i(0,-1),n==2u),select(vec2i(1,0),vec2i(-1,0),n==0u),n<2u);let q=vec2i(x,z)+offset;if(q.x<0||q.x>=d.x||q.y<0||q.y>=d.z){continue;}let b=baseAt(q.x,q.y);neighborLower=max(neighborLower,b-delta);neighborUpper=min(neighborUpper,b+delta);}if(neighborLower<=neighborUpper){desired=clamp(desired,neighborLower,neighborUpper);}nextColumnBases[u32(x+d.x*z)]=u32(max(0,desired));
+  // Propose from the advected interface first. The neighbour constraint is
+  // applied to this new field in separate Jacobi passes below.
+  if(maxBase>=2){desired=max(2,desired);}nextColumnBases[u32(x+d.x*z)]=u32(max(0,desired));
+}
+
+@compute @workgroup_size(8,8,1)
+fn smoothRemesh(@builtin(global_invocation_id) gid:vec3u){
+  let d=packedDims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}let x=i32(gid.x);let z=i32(gid.y);let index=u32(x+d.x*z);let delta=u32(round(params.tall.w));var base=nextColumnBases[index];
+  let offsets=array<vec2i,4>(vec2i(-1,0),vec2i(1,0),vec2i(0,-1),vec2i(0,1));
+  for(var n=0u;n<4u;n+=1u){let q=vec2i(x,z)+offsets[n];if(q.x<0||q.x>=d.x||q.y<0||q.y>=d.z){continue;}base=min(base,nextColumnBases[u32(q.x+d.x*q.y)]+delta);}
+  if(fineDims().y-regularLayers()>=2&&base<2u){base=2u;}smoothedColumnBases[index]=base;
 }
 
 @compute @workgroup_size(4,4,4)
 fn remap(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!validPacked(id)){return;}let d=packedDims();let newBase=i32(nextColumnBases[u32(id.x+d.x*id.z)]);var p=vec3f(f32(id.x)+0.5,0.5,f32(id.z)+0.5);if(id.y==1){p.y=max(0.5,f32(newBase)-0.5);}else if(id.y>=2){p.y=f32(newBase+id.y-2)+0.5;}let isActive=select(newBase>0,newBase+id.y-2<fineDims().y,id.y>=2);var alpha=0.0;var velocity=vec3f(0.0);if(isActive){if(id.y<2){let oldBase=baseAt(id.x,id.z);var oldAmount=select(0.0,textureLoad(volumeIn,vec3i(id.x,0,id.z),0).x*f32(oldBase),oldBase>0);for(var packedY:i32=2;packedY<d.y;packedY+=1){let worldY=oldBase+packedY-2;if(worldY>=fineDims().y){break;}oldAmount+=textureLoad(volumeIn,vec3i(id.x,packedY,id.z),0).x;}var regularAmount=0.0;for(var packedY:i32=2;packedY<d.y;packedY+=1){let worldY=newBase+packedY-2;if(worldY>=fineDims().y){break;}regularAmount+=volumeCell(vec3i(id.x,worldY,id.z));}alpha=max(0.0,(oldAmount-regularAmount)/f32(max(newBase,1)));}else{alpha=volumeCell(vec3i(id.x,newBase+id.y-2,id.z));}
+	  let id=vec3i(gid);if(!validPacked(id)){return;}let d=packedDims();let newBase=i32(nextColumnBases[u32(id.x+d.x*id.z)]);var p=vec3f(f32(id.x)+0.5,0.5,f32(id.z)+0.5);if(id.y==1){p.y=max(0.5,f32(newBase)-0.5);}else if(id.y>=2){p.y=f32(newBase+id.y-2)+0.5;}let isActive=select(newBase>0,newBase+id.y-2<fineDims().y,id.y>=2);var alpha=0.0;var velocity=vec3f(0.0);if(isActive){
+	    let oldBase=baseAt(id.x,id.z);var oldAmount=select(0.0,textureLoad(volumeIn,vec3i(id.x,0,id.z),0).x*f32(oldBase),oldBase>0);for(var packedY:i32=2;packedY<d.y;packedY+=1){let worldY=oldBase+packedY-2;if(worldY>=fineDims().y){break;}oldAmount+=textureLoad(volumeIn,vec3i(id.x,packedY,id.z),0).x;}
+	    if(id.y==0){var regularAmount=0.0;for(var packedY:i32=2;packedY<d.y;packedY+=1){let worldY=newBase+packedY-2;if(worldY>=fineDims().y){break;}regularAmount+=volumeCell(vec3i(id.x,worldY,id.z));}alpha=max(0.0,(oldAmount-regularAmount)/f32(max(newBase,1)));}else if(id.y==1){for(var offset=0;offset<regularLayers();offset+=1){alpha=max(alpha,volumeCell(vec3i(id.x,newBase+offset,id.z)));}}else{alpha=volumeCell(vec3i(id.x,newBase+id.y-2,id.z));}
     if(id.y<2&&newBase>0){var sumY=0.0;var sumYY=0.0;var sumV=vec3f(0.0);var sumYV=vec3f(0.0);for(var y:i32=0;y<newBase;y+=1){let fy=f32(y);let oldV=velocityCell(vec3i(id.x,y,id.z));sumY+=fy;sumYY+=fy*fy;sumV+=oldV;sumYV+=fy*oldV;}let n=f32(newBase);let denominator=n*sumYY-sumY*sumY;var slope=vec3f(0.0);if(denominator>1e-6){slope=(n*sumYV-sumY*sumV)/denominator;}let intercept=(sumV-slope*sumY)/n;let targetY=select(0.0,f32(newBase-1),id.y==1);velocity=intercept+slope*targetY;}else{velocity=sampleVelocity(p);}
   }textureStore(velocityOut,id,vec4f(velocity,0.0));textureStore(volumeOut,id,vec4f(alpha));textureStore(pressureOut,id,vec4f(0.0));if(id.y==0){textureStore(columnBaseOut,vec2i(id.x,id.z),vec4f(f32(newBase)));}
 }
 
 @compute @workgroup_size(4,4,4)
 fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!validPacked(id)||!activeSample(id)){return;}let alpha=textureLoad(volumeIn,id,0).x;let velocityValue=textureLoad(velocityIn,id,0).xyz;
+	  let id=vec3i(gid);if(!validPacked(id)||!activeSample(id)){return;}let alpha=textureLoad(volumeIn,id,0).x;let velocityValue=textureLoad(velocityIn,id,0).xyz;
   if(!finiteScalar(alpha)||!all(velocityValue==velocityValue)||any(abs(velocityValue)>vec3f(3.402823e38))){atomicAdd(&reductions[20],1u);return;}
-  var weight=1.0;if(id.y==0){weight=f32(baseAt(id.x,id.z));}else if(id.y==1){weight=0.0;}atomicAdd(&reductions[0],u32(clamp(alpha*weight*256.0,0.0,4294967295.0)));atomicAdd(&reductions[7],u32(clamp(alpha,0.0,1.0)*weight*256.0));atomicMax(&reductions[3],u32(baseAt(id.x,id.z)));
+	  var weight=1.0;if(id.y==0){weight=f32(baseAt(id.x,id.z));}else if(id.y==1){weight=0.0;}atomicAdd(&reductions[0],u32(clamp(alpha*weight*256.0,0.0,4294967295.0)));atomicAdd(&reductions[7],u32(clamp(alpha,0.0,1.0)*weight*256.0));atomicMax(&reductions[3],u32(baseAt(id.x,id.z)));
   if(alpha>=0.5){
     atomicMax(&reductions[1],u32(id.x+1));updatePositiveMaximum(length(velocityValue),2u,8u,id);
     if(solidFractionCell(vec3i(floor(samplePoint(id))))<=0.9){updatePositiveMaximum(abs(divergenceAt(id)),5u,14u,id);let h=params.cellGravity.xyz;let cfl=max(abs(velocityValue.x)*params.dimsDt.w/h.x,max(abs(velocityValue.y)*params.dimsDt.w/h.y,abs(velocityValue.z)*params.dimsDt.w/h.z));updatePositiveMaximumOnly(cfl,30u);if(cfl>1.0){atomicAdd(&reductions[31],1u);}}

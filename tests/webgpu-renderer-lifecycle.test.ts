@@ -16,6 +16,9 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
     addEventListener() {},
     createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
     createRenderPipeline: pipeline,
+    createComputePipeline: () => ({}),
+    createBindGroupLayout: () => ({}),
+    createPipelineLayout: () => ({}),
     createSampler: () => ({}),
     createBuffer: destroyable,
     createTexture: texture,
@@ -33,11 +36,13 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
   const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   const previousBufferUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
   const previousTextureUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUTextureUsage");
+  const previousShaderStage = Object.getOwnPropertyDescriptor(globalThis, "GPUShaderStage");
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu: { requestAdapter: async () => adapter, getPreferredCanvasFormat: () => "bgra8unorm" } } });
-  Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true, value: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4, QUERY_RESOLVE: 8, COPY_SRC: 16 } });
-  Object.defineProperty(globalThis, "GPUTextureUsage", { configurable: true, value: { TEXTURE_BINDING: 1, COPY_DST: 2 } });
+  Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true, value: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4, QUERY_RESOLVE: 8, COPY_SRC: 16, INDIRECT: 32 } });
+  Object.defineProperty(globalThis, "GPUTextureUsage", { configurable: true, value: { TEXTURE_BINDING: 1, COPY_DST: 2, RENDER_ATTACHMENT: 4 } });
+  Object.defineProperty(globalThis, "GPUShaderStage", { configurable: true, value: { VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 } });
   t.after(() => {
-    for (const [name, descriptor] of [["navigator", previousNavigator], ["GPUBufferUsage", previousBufferUsage], ["GPUTextureUsage", previousTextureUsage]] as const) {
+    for (const [name, descriptor] of [["navigator", previousNavigator], ["GPUBufferUsage", previousBufferUsage], ["GPUTextureUsage", previousTextureUsage], ["GPUShaderStage", previousShaderStage]] as const) {
       if (descriptor) Object.defineProperty(globalThis, name, descriptor);
       else Reflect.deleteProperty(globalThis, name);
     }
@@ -53,7 +58,7 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
   await Promise.resolve();
   assert.deepEqual(statuses.at(-1), { state: "lost", label: "GPU device lost: test device loss" });
 
-  const metrics = renderer.draw(0, {} as never, {} as never, "scientific", [], undefined, undefined, "webgpu", { methodId: "tall-cell", quality: "medium", values: {} });
+  const metrics = renderer.draw(0, {} as never, {} as never, "scientific", [], undefined, undefined, "webgpu", { methodId: "tall-cell", quality: "balanced", values: {} });
   assert.deepEqual(metrics, { cpuFrame_ms: 0, cpuPhysicsSubmit_ms: 0, cpuDataUpload_ms: 0, cpuRenderEncode_ms: 0 });
   assert.equal(submitCount, 0, "a lost device must never receive another queue submission");
 

@@ -3,13 +3,13 @@ import test from "node:test";
 import { chooseTallCellBase, createTallCellLayout, limitNeighboringTallCellBases, tallCellFluxSampleCount, tallCellSettings } from "../lib/tall-cell-grid";
 import { cloneScene, defaultScene } from "../lib/model";
 
-test("restricted tall-cell presets retain cubic resolution and use the uniform limit for a deep vertical surface", () => {
+test("restricted tall-cell presets retain cubic resolution and represent the vertical dam face with tall columns", () => {
   const expectedEquivalent = { balanced: 110_000, high: 500_000, ultra: 1_200_000 } as const;
   for (const quality of ["balanced", "high", "ultra"] as const) {
     const layout = createTallCellLayout(defaultScene, quality);
     assert.ok(Math.abs(layout.equivalentUniformCellCount / expectedEquivalent[quality] - 1) < 0.16);
-    assert.equal(layout.settings.regularLayers, layout.fineNy);
-    assert.ok(layout.columnBases.every((base) => base === 0));
+    assert.equal(layout.settings.regularLayers, tallCellSettings[quality].regularLayers);
+    assert.ok(layout.columnBases.some((base) => base >= 2));
     assert.equal(layout.packedNy, layout.settings.regularLayers + 2);
     assert.ok(Math.abs(layout.cellSize_m.x / layout.cellSize_m.y - 1) < 0.04);
     assert.ok(Math.abs(layout.cellSize_m.z / layout.cellSize_m.y - 1) < 0.04);
@@ -44,6 +44,12 @@ test("surface band satisfies the requested liquid and air halos when possible", 
   assert.ok(base + settings.regularLayers - 71 >= settings.airHalo);
 });
 
+test("restricted packed columns never use an incomplete base-zero ordinary limit", () => {
+  const settings = { ...tallCellSettings.balanced, regularLayers: 12 };
+  assert.equal(chooseTallCellBase(0, 0, 46, settings), 2);
+  assert.equal(chooseTallCellBase(0, 0, 13, settings), 0);
+});
+
 test("neighbor limiter bounds abrupt changes in tall-cell height", () => {
   const limited = limitNeighboringTallCellBases(new Float32Array([0, 0, 40, 40, 0, 0]), 6, 1, 4, 8);
   for (let x = 1; x < limited.length; x += 1) assert.ok(Math.abs(limited[x] - limited[x - 1]) <= 4);
@@ -54,8 +60,8 @@ test("empty dam-break columns keep an elevated surface band when its vertical su
   scene.container.height_m = 4.5;
   const layout = createTallCellLayout(scene, "balanced");
   const farDry = layout.columnBases[layout.nx - 1 + layout.nx * (layout.nz - 1)];
-  assert.equal(farDry, layout.fineNy - layout.settings.regularLayers);
   assert.ok(farDry > 0);
+  assert.ok(farDry <= layout.fineNy - layout.settings.regularLayers);
   for (let z = 0; z < layout.nz; z += 1) for (let x = 0; x < layout.nx; x += 1) {
     const here = layout.columnBases[x + layout.nx * z];
     if (x + 1 < layout.nx) assert.ok(Math.abs(here - layout.columnBases[x + 1 + layout.nx * z]) <= layout.settings.maximumNeighborDelta);
@@ -74,7 +80,7 @@ test("shallow domains use the uniform-grid limit safely", () => {
 test("deep tall-face integration is bounded independently of depth", () => {
   assert.equal(tallCellFluxSampleCount(0), 0);
   assert.equal(tallCellFluxSampleCount(12), 12);
-  assert.equal(tallCellFluxSampleCount(48), 48);
-  assert.equal(tallCellFluxSampleCount(806), 48);
-  assert.equal(tallCellFluxSampleCount(8_000), 48);
+  assert.equal(tallCellFluxSampleCount(48), 12);
+  assert.equal(tallCellFluxSampleCount(806), 12);
+  assert.equal(tallCellFluxSampleCount(8_000), 12);
 });

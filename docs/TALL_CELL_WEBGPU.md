@@ -23,13 +23,12 @@ endpoint samples followed by `regularLayers` cubic samples. Textures therefore
 have dimensions `nx × (regularLayers + 2) × nz`; a 2D texture stores each
 column's tall height.
 
-`regularLayers` is a minimum, not permission to discard geometry. If the
-initial vertical free-surface range and its available halos do not fit, the
-layout increases the band up to the uniform-grid limit. The default dam break
-therefore stores 104% of the cubic sample count (the two endpoint slots are
-inactive), whereas a deep tank with a mostly horizontal surface remains
-strongly compressed. A tall-cell interior cannot represent a vertical free
-surface.
+The requested `regularLayers` is the paper's construction-time `B_y`. The
+planner increases it when the vertical crossings within a column and their
+liquid/air halos do not fit. A vertical dam face is represented horizontally
+between neighbouring tall endpoint fields, so the balanced Figure 4 scene
+keeps 24 regular layers and starts with 2,408 tall columns rather than entering
+the ordinary-grid limit.
 
 The planner retains liquid and air halos, includes moving-body bounds, limits
 neighboring height differences by `D`, treats a wet band ceiling as unresolved
@@ -49,8 +48,12 @@ The pressure path:
 - ignores out-of-grid prolongation samples and renormalizes their weights;
 - uses two damped red-black Gauss-Seidel pre/post sweeps;
 - clamps the hierarchy when its top level fits one 256-thread workgroup; and
-- executes one full cycle followed by two V-cycles, with 256 shared-memory
-  red-black Gauss-Seidel top iterations per visit.
+- executes one full cycle followed by two V-cycles; uses 32 coarsest RBGS
+  iterations for ordinary-depth initial solves and 192 for extreme-depth
+  initial solves, with 16 and 144 iterations respectively for correction
+  visits; and
+- caches recurring bind groups and records the multigrid dispatch sequence in
+  one compute pass.
 
 Divergence uses Equation (14)'s average of adjacent collocated velocities, or
 solid velocity when the adjacent cell is more than 90% solid. Projection uses
@@ -76,17 +79,28 @@ ordinary face contribution is shared by its two adjacent control volumes, so
 the update conserves mass by pairwise cancellation rather than a post-step
 rescaling.
 
-A deep face shared by two tall cells is integrated with 16 bottom, 16 top, and
-16 stratified interior samples. Both columns evaluate the identical shared-face
-integral. Only the portion where one side is tall and the other is regular is
-expanded cell-by-cell; the paper's neighbor-height bound `D` keeps that work
-bounded. Dispatch and deep shared-face work therefore remain independent of
-the full domain depth.
+Pairwise transport is restricted to faces whose donor and receiver world cells
+are both represented by their packed columns. Treating an above-band location
+as an empty receiver lets the donor lose flux with no packed sample available
+to own it. The air halo and subsequent remesh move representable faces; the
+packed boundary itself remains conservative.
 
-If every planned tall height is zero, the layout enters the paper's ordinary
-cell limit and allocates every cubic row. The two endpoint slots are inactive;
-it is invalid to retain only a shortened surface band in this state because
-that would silently remove part of the domain.
+This transport is not the complete density method from *Mass-Conserving
+Eulerian Liquid Simulation*. That paper follows conservative advection with a
+local conservative density-sharpening stage. The current solver does not yet
+implement that stage, so a moving front can still diffuse into fractional VOF
+values even when its total represented mass is conserved.
+
+A deep face shared by two tall cells uses at most 12 stratified samples. Both
+columns evaluate the identical oriented face integral, so its approximation
+still cancels pairwise. Only the portion where one side is tall and the other
+is regular is expanded cell-by-cell; the paper's neighbor-height bound `D`
+keeps that work bounded. Dispatch and deep shared-face work therefore remain
+independent of full domain depth.
+
+The Tall method routes to the cubic backend when the construction-time surface
+range of vertical crossings makes a height-two tall cell geometrically
+impossible. Horizontal liquid/air faces do not trigger this limit.
 
 The band is remeshed after advection on every step, matching Algorithm 1.
 Regular values are copied or interpolated at their world positions
@@ -97,11 +111,35 @@ representable column integral without a global volume correction. The residual
 is no longer clamped to one: density above one is temporary stored mass, not
 volume to erase.
 
+The bottom density sample is the authoritative conservative average for the
+tall control volume. The top density endpoint is a zero-mass topology sample:
+advection and remapping fit it from the maximum density in the overlying stored
+regular band. Keeping these roles separate preserves the column integral while
+allowing the two tall endpoints to represent a vertical crossing. It prevents
+a sub-threshold average from appearing as a missing tall cell directly beneath
+threshold-liquid regular cells.
+
+Temporary bottom averages above one remain valid through the next advection;
+they are not clamped before bounded face fluxes can redistribute the remap
+residual. In a restricted packed layout every column retains a height-two or
+taller bottom cell. Base zero belongs only to the separately allocated full
+uniform backend: using it with a fixed surface band would discard the column
+residual above that band.
+
 Remesh surface bounds use liquid/air sign changes, matching the paper's
 reinitialized `phi` test, rather than treating every fractional VOF sample as a
 separate surface. When `G_L` and `G_A` conflict, the air constraint wins as in
-the paper. The neighbor-height bound `D` is applied to every proposed base,
-including the ordinary-cell limit.
+the paper. The neighbor-height bound `D` is applied to the newly proposed
+field with eight ping-pong Jacobi passes. A live dam-break readback showed that
+four passes left adjacent `22/16` bases when `D=4`; eight removes that incomplete
+propagation. The smoke runner reads back every split and fails if any adjacent
+delta exceeds `D`.
+
+The scientific grid overlay interpolates the bottom and top endpoint topology
+values and uses the same `0.5` liquid threshold as the pressure domain and
+surface extractor. The smoke runner separately checks the conservative bottom
+average and fails the dam case if both endpoints are dry while a stored regular
+cell above is liquid.
 
 An inflow is a one-sided face connected to a virtual upstream reservoir. Its
 bounded receiver source is separate from internal pairwise transport, and the
@@ -146,8 +184,10 @@ buoyancy that is not present in the explicit GPU exchange buffer.
   along each axis, and the optional particle-thickening extension protects thin
   features. Those mechanisms are not reproduced here, so matching pressure and
   inflow transport does not imply identical small-scale surface detail.
-- Packed pressure, projection, coupling, and transport dispatch counts remain
-  independent of full domain depth.
+- The compact pressure path remains substantially more expensive per stored
+  sample than the legacy Uniform Jacobi comparison. Balanced dam-break runs
+  are currently slower; deep aspect-ratio scenes are where compression
+  amortizes this overhead.
 
 ## Stability diagnostics
 

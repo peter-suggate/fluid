@@ -2,6 +2,7 @@ import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { createPaperScenario } from "../lib/paper-scenarios";
 
 export const smokeScenarioIds = [
+  "dam-break-ui",
   "settled-tank",
   "dam-break-boxes",
   "hose-tank",
@@ -43,6 +44,14 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
 
   const scene = cloneScene(defaultScene);
   scene.rigidBodies = [];
+  if (id === "dam-break-ui") {
+    scene.sceneId = "smoke-ui-dam-break";
+    scene.fluid.initialCondition = "dam-break";
+    delete scene.fluid.inflow;
+    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+    if (process.env.FLUID_SURFACE_TENSION !== undefined) scene.fluid.surfaceTension_N_m = Number(process.env.FLUID_SURFACE_TENSION);
+    return { id, description: "actual UI dam break with the default capillary and wall settings", scene, oracleSteps: 2, target_s: 0.2 };
+  }
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
   if (id === "settled-tank") {
@@ -132,6 +141,7 @@ export interface TallCellActivitySummary {
   minimumTallHeight: number;
   maximumTallHeight: number;
   meanTallHeight: number;
+  maximumAdjacentDelta?: number;
   maximumPermittedHeight: number;
   canRemeshToTall: boolean;
   classification: "none" | "mixed" | "all";
@@ -141,14 +151,21 @@ export interface TallCellActivitySummary {
 export function summarizeTallCellActivity(
   columnBases: ArrayLike<number>,
   fineNy: number,
-  regularLayers: number
+  regularLayers: number,
+  nx?: number,
+  nz?: number
 ): TallCellActivitySummary {
-  let tallColumns = 0, tallHeightSum = 0, minimumTallHeight = Infinity, maximumTallHeight = 0;
+  let tallColumns = 0, tallHeightSum = 0, minimumTallHeight = Infinity, maximumTallHeight = 0, maximumAdjacentDelta = 0;
   for (let index = 0; index < columnBases.length; index += 1) {
     const height = Math.round(columnBases[index]);
     if (height < 2) continue;
     tallColumns += 1; tallHeightSum += height;
     minimumTallHeight = Math.min(minimumTallHeight, height); maximumTallHeight = Math.max(maximumTallHeight, height);
+  }
+  if (nx && nz && nx * nz === columnBases.length) for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const height = Math.round(columnBases[x + nx * z]);
+    if (x + 1 < nx) maximumAdjacentDelta = Math.max(maximumAdjacentDelta, Math.abs(height - Math.round(columnBases[x + 1 + nx * z])));
+    if (z + 1 < nz) maximumAdjacentDelta = Math.max(maximumAdjacentDelta, Math.abs(height - Math.round(columnBases[x + nx * (z + 1)])));
   }
   const totalColumns = columnBases.length, maximumPermittedHeight = Math.max(0, fineNy - regularLayers);
   return {
@@ -156,6 +173,7 @@ export function summarizeTallCellActivity(
     tallFraction: totalColumns > 0 ? tallColumns / totalColumns : 0,
     minimumTallHeight: tallColumns > 0 ? minimumTallHeight : 0,
     maximumTallHeight, meanTallHeight: tallColumns > 0 ? tallHeightSum / tallColumns : 0,
+    ...(nx && nz ? { maximumAdjacentDelta } : {}),
     maximumPermittedHeight, canRemeshToTall: maximumPermittedHeight >= 2,
     classification: tallColumns === 0 ? "none" : tallColumns === totalColumns ? "all" : "mixed"
   };

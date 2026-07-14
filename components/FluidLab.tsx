@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useLayoutEffect, useMemo } from "react";
 import { runShellValidation } from "@/lib/validation";
 import { getMethod } from "@/lib/methods";
 import { defaultCamera } from "@/lib/model";
 import { simulation } from "@/lib/simulation/controller";
+import { startQueryStateSync } from "@/lib/url-state";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore } from "@/lib/stores/method-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
@@ -39,6 +40,8 @@ export function FluidLab() {
   const setGridOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
   const gridOverlaySlice = useUIStore((state) => state.gridOverlaySlice);
   const setGridOverlaySlice = useUIStore((state) => state.setGridOverlaySlice);
+  const waterRenderMode = useUIStore((state) => state.waterRenderMode);
+  const setWaterRenderMode = useUIStore((state) => state.setWaterRenderMode);
   const fluidState = useDiagnosticsStore((state) => state.fluidState);
   const validationResults = useMemo(() => runShellValidation(), []);
   const method = getMethod(methodId);
@@ -47,6 +50,8 @@ export function FluidLab() {
   const healthFlags = backend === "webgpu"
     ? [...(gpuInfo?.stabilityFlags ?? []), ...(gpuInfo?.nonFiniteCount ? ["non-finite-values"] : [])]
     : [...(fluidState?.nanCount ? ["non-finite-values"] : []), ...(fluidState && !fluidState.pressureConverged ? ["pressure-not-converged"] : [])];
+
+  useLayoutEffect(() => startQueryStateSync(() => simulation.reset()), []);
 
   useEffect(() => {
     let frame = 0;
@@ -98,6 +103,10 @@ export function FluidLab() {
             )}
           </div>
           <div className="topline-right">
+            <div className="segmented" title="Water rendering pipeline">
+              <button className={waterRenderMode === "rasterized" ? "active" : ""} onClick={() => setWaterRenderMode("rasterized")}>Raster optics</button>
+              <button className={waterRenderMode === "ray-marched" ? "active" : ""} onClick={() => setWaterRenderMode("ray-marched")}>Ray march</button>
+            </div>
             {view === "scientific" && <div className="grid-overlay-cluster" title="Overlay the solver grid on a cross-section slice (tall cells teal, regular cells outlined with sample dots)">
               {gridOverlayAxis !== "off" && <>
                 <input type="range" min={0} max={1} step={0.005} value={gridOverlaySlice} onChange={(event) => setGridOverlaySlice(Number(event.target.value))} aria-label="Grid slice position" />
@@ -113,12 +122,12 @@ export function FluidLab() {
           </div>
         </div>
         {scientific && <RigidBodyTray />}
-        {scientific && <div className="physics-stage-badge"><strong>{method.badge}</strong><span>{backend === "webgpu" ? `${method.description}` : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} allocated samples · f32 · ${gpuInfo?.pressureSolver ?? `${gpuInfo?.pressureIterations ?? "…"} Jacobi`}` : "MAC · binary64 · PCG"}</small></div>}
+        {scientific && <div className="physics-stage-badge"><strong>{method.badge}</strong><span>{backend === "webgpu" ? `${method.description}` : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} allocated · ${gpuInfo?.activeSampleCount?.toLocaleString() ?? "…"} active samples · f32 · ${gpuInfo?.pressureSolver ?? `${gpuInfo?.pressureIterations ?? "…"} Jacobi`}` : "MAC · binary64 · PCG"}</small></div>}
         {view === "scientific" && gridOverlayAxis !== "off" && (() => {
           const gridKind = method.backend === "cpu" ? "uniform" : gpuInfo?.gridKind ?? "uniform";
           const tall = gridKind !== "uniform";
           return <div className="grid-legend" data-testid="grid-legend">
-            <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "adaptive-optical-layer" ? "ADAPTIVE-LAYER GRID" : "UNIFORM GRID"} · {gridOverlayAxis.toUpperCase()} SLICE</strong>
+            <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : "UNIFORM GRID"} · {gridOverlayAxis.toUpperCase()} SLICE</strong>
             {tall && <span><i className="sw sw-tall" />tall cell · liquid (one per column)</span>}
             {tall && <span><i className="sw sw-tall-dry" />tall cell · air</span>}
             <span><i className="sw sw-wet" />{tall ? "regular cell · liquid" : "cell · liquid"}</span>

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { defaultCamera, type CameraState, type ViewMode } from "../model";
-import type { GridOverlayConfig } from "../webgpu-renderer";
+import type { GridOverlayConfig, WaterRenderMode } from "../webgpu-renderer";
 
 /** Presentation-only state: camera, view mode, selection, open panels. */
 interface UIStore {
@@ -14,6 +14,8 @@ interface UIStore {
   /** Fig. 2-style grid cross-section drawn on a slice plane in the scene. */
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
+  /** Optical presentation pipeline. The legacy ray marcher stays available for A/B comparisons. */
+  waterRenderMode: WaterRenderMode;
   setView: (view: ViewMode) => void;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   selectBody: (bodyId?: string) => void;
@@ -23,6 +25,7 @@ interface UIStore {
   setDiagnosticsOpen: (open: boolean) => void;
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
   setGridOverlaySlice: (slice: number) => void;
+  setWaterRenderMode: (mode: WaterRenderMode) => void;
 }
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -35,6 +38,7 @@ export const useUIStore = create<UIStore>((set) => ({
   diagnosticsOpen: false,
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
+  waterRenderMode: "rasterized",
   setView: (view) => set({ view }),
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   selectBody: (selectedBodyId) => set({ selectedBodyId }),
@@ -43,5 +47,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setValidationOpen: (validationOpen) => set({ validationOpen }),
   setDiagnosticsOpen: (diagnosticsOpen) => set({ diagnosticsOpen }),
   setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
-  setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) })
+  setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
+  setWaterRenderMode: (waterRenderMode) => set({ waterRenderMode })
 }));

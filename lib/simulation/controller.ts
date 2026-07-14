@@ -371,20 +371,36 @@ class SimulationController {
     // stage times; keep the previous sample rather than displaying garbage.
     const sane = (value: number | undefined, fallback: number) =>
       value !== undefined && Number.isFinite(value) && value >= 0 && value < 10_000 ? value : fallback;
+    const methodId = metrics.methodId ?? useMethodStore.getState().methodId;
+    const waterRenderMode = metrics.waterRenderMode ?? useUIStore.getState().waterRenderMode;
+    const samePhysicsMethod = previous.methodId === methodId;
+    const sameRenderMethod = samePhysicsMethod && previous.waterRenderMode === waterRenderMode;
+    const physicsFallback = samePhysicsMethod ? previous : emptyPerformance;
+    const renderFallback = sameRenderMethod ? previous : emptyPerformance;
     const snapshot: PerformanceSnapshot = {
+      methodId,
+      waterRenderMode,
+      gpuPhysicsTimingAvailable: Boolean(gpu),
+      gpuRenderTimestampSupported: Boolean(metrics.gpuRenderTimestampAvailable),
+      gpuRenderTimingAvailable: Boolean(metrics.gpuRenderTimestampAvailable && metrics.gpuRender_ms !== undefined),
       cpuSimulation_ms: this.cpuSimulationMs,
       cpuFrame_ms: metrics.cpuFrame_ms,
       cpuPhysicsSubmit_ms: metrics.cpuPhysicsSubmit_ms,
       cpuDataUpload_ms: metrics.cpuDataUpload_ms,
       cpuRenderEncode_ms: metrics.cpuRenderEncode_ms,
-      gpuLayerConstruction_ms: sane(gpu?.layerConstruction_ms, previous.gpuLayerConstruction_ms),
-      gpuAdvection_ms: sane(gpu?.advection_ms, previous.gpuAdvection_ms),
-      gpuPressure_ms: sane(gpu?.pressure_ms, previous.gpuPressure_ms),
-      gpuProjection_ms: sane(gpu?.projection_ms, previous.gpuProjection_ms),
-      gpuRigid_ms: sane(gpu?.rigidCoupling_ms, previous.gpuRigid_ms),
-      gpuDiagnostics_ms: sane(gpu?.diagnostics_ms, previous.gpuDiagnostics_ms),
-      gpuOverhead_ms: sane(gpu?.overhead_ms, previous.gpuOverhead_ms),
-      gpuRender_ms: sane(metrics.gpuRender_ms, previous.gpuRender_ms)
+      gpuLayerConstruction_ms: sane(gpu?.layerConstruction_ms, physicsFallback.gpuLayerConstruction_ms),
+      gpuAdvection_ms: sane(gpu?.advection_ms, physicsFallback.gpuAdvection_ms),
+      gpuPressure_ms: sane(gpu?.pressure_ms, physicsFallback.gpuPressure_ms),
+      gpuProjection_ms: sane(gpu?.projection_ms, physicsFallback.gpuProjection_ms),
+      gpuRigid_ms: sane(gpu?.rigidCoupling_ms, physicsFallback.gpuRigid_ms),
+      gpuDiagnostics_ms: sane(gpu?.diagnostics_ms, physicsFallback.gpuDiagnostics_ms),
+      gpuOverhead_ms: sane(gpu?.overhead_ms, physicsFallback.gpuOverhead_ms),
+      gpuRender_ms: sane(metrics.gpuRender_ms, renderFallback.gpuRender_ms),
+      gpuSurfaceExtraction_ms: sane(metrics.gpuSurfaceExtraction_ms, 0),
+      gpuDryScene_ms: sane(metrics.gpuDryScene_ms, renderFallback.gpuDryScene_ms),
+      gpuInterfaces_ms: sane(metrics.gpuInterfaces_ms, renderFallback.gpuInterfaces_ms),
+      gpuOpticalComposite_ms: sane(metrics.gpuOpticalComposite_ms, renderFallback.gpuOpticalComposite_ms),
+      gpuUpscale_ms: sane(metrics.gpuUpscale_ms, renderFallback.gpuUpscale_ms)
     };
     this.performance = snapshot;
     diagnostics.set({ frameMs: metrics.cpuFrame_ms, resolution });

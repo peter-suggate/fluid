@@ -43,9 +43,9 @@ still close to its initial value.
 | Velocity extrapolation | Full hierarchical known/unknown solve | `airHalo` fine-grid neighbor passes | Deliberate departure; retained and diagnosed via air-speed maximum |
 | Force domain | Euler equations are solved where `phi < 0` | Gravity was added to every active packed sample, including air | Corrected: force integration is limited to liquid samples |
 | Remeshing cadence | Every step | Every step | Aligned with Algorithm 1 |
-| Remesh constraints | `G_L`, `G_A`, and neighbor delta `D` | Fractional VOF samples broadened the surface range; base zero bypassed `D` | Corrected: sign crossings define surfaces, air wins conflicts, and every base obeys `D` |
+| Remesh constraints | `G_L`, `G_A`, and neighbor delta `D` | Fractional VOF samples broadened the surface range; base zero bypassed `D` | Corrected: sign crossings define surfaces, air wins conflicts, and four ping-pong passes enforce `D` on the proposed field |
 | Pressure cycles in examples | One full cycle plus two V-cycles | One full cycle plus one V-cycle | Corrected to the paper's example budget |
-| Coarsest solve | Shared-memory Gauss-Seidel to high precision | 24 iterations of weighted Jacobi | Corrected to 256 red-black Gauss-Seidel iterations |
+| Coarsest solve | Shared-memory Gauss-Seidel to high precision | 24 iterations of weighted Jacobi | Corrected to depth-dependent red-black Gauss-Seidel budgets; extreme depth uses 192 initial and 144 correction iterations |
 | Pressure convergence evidence | Residual convergence plot | No GPU pressure residual | Added exact finest-level `L-infinity` residual and relative residual |
 | Printed pressure gradient | Positive-minus-negative pressure divided by `Delta x` | Implemented literally | Stability departure: two valid samples use their physical `2 Delta x` span; walls remain one-sided |
 | Time advancement | One physical time step per algorithm step | Excess requested time was discarded while `lastTime` jumped forward | Corrected: advance by at most `maxDt` and report remaining lag |

@@ -69,14 +69,16 @@ the per-parameter override (sparse, per method, resettable to the preset).
 | Neighbor base delta | fine | max tall-cell base step between adjacent columns |
 | Remesh interval | fine | steps between band re-planning passes |
 
-### Adaptive optical-layer VOF (`adaptive-optical-layer`)
+### Quadtree tall cells (`quadtree-tall-cell`)
 | Parameter | Tier | Meaning |
 | --- | --- | --- |
-| Pressure V-cycles | coarse | multigrid refinement cycles (default 8; the moving layout converges slower) |
-| Surface columns | fine | target x/z column count (horizontal resolution) |
+| PCG iterations | coarse | maximum tall-column LDLᵀ-preconditioned CG iterations; convergence targets the scene relative tolerance |
+| Finest columns | fine | target finest x/z lattice size on which quadtree leaves are formed |
+| Adaptivity | fine | Ando--Batty Eq. 38 blend: 0 is uniform, 1 permits full quadtree coarsening |
 
-Dilation bounds, airborne offsets, and the stage mask are planned per step
-from Eq. 1 of the paper and grid height; they are diagnostics, not knobs.
+The optical depth remains the paper's chosen one quarter of liquid depth.
+The required 2:1 smoothing and corrected inner ghost volumes are invariants,
+not user controls.
 
 ### Uniform grid VOF (`uniform`)
 | Parameter | Tier | Meaning |

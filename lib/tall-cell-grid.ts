@@ -22,12 +22,15 @@ export interface TallCellLayout {
   initialVolume: Float32Array;
   initialVolumeCellSum: number;
   packedSampleCount: number;
+  activeSampleCount: number;
   equivalentUniformCellCount: number;
   compressionRatio: number;
+  activeCompressionRatio: number;
   settings: TallCellSettings;
   planning: {
     requestedRegularLayers: number;
     requiredInitialRegularLayers: number;
+    storedRegularLayers: number;
     regularLayersBeforeOrdinaryFallback: number;
     maximumBaseBeforeOrdinaryFallback: number;
     ordinaryGridFallback: boolean;
@@ -45,7 +48,7 @@ export const tallCellSettings: Record<GPUQuality, TallCellSettings> = {
 
 export function tallCellFluxSampleCount(height: number) {
   const cells = Math.max(0, Math.floor(height));
-  return cells <= 48 ? cells : 48;
+  return Math.min(cells, 12);
 }
 
 export function chooseTallCellBase(
@@ -59,13 +62,16 @@ export function chooseTallCellBase(
   const upperBound = lowestSurfaceCell + 1 - settings.liquidHalo;
   const desired = lowerBound <= upperBound
     ? Math.round((lowerBound + upperBound) / 2)
-    : upperBound;
+    // Section 8 gives the air-halo constraint priority when a vertically
+    // extended interface cannot satisfy both halos in the fixed B_y band.
+    : lowerBound;
   const clamped = Math.max(0, Math.min(maximumBase, desired));
-  // A one-subcell "tall" cell has coincident top and bottom samples.  That
-  // creates a duplicate pressure unknown and a zero endpoint distance.  The
-  // paper's two-endpoint reconstruction is meaningful only for h >= 2; use
-  // the ordinary-cell limit for h < 2.
-  return clamped < 2 ? 0 : clamped;
+  // A restricted packed column always owns one tall cell. A one-subcell tall
+  // cell has coincident endpoint samples, while base zero would retain only
+  // the fixed regular band rather than a complete ordinary column. The method
+  // selects its separately allocated uniform backend when h >= 2 is globally
+  // impossible, so every restricted column can safely keep this minimum.
+  return maximumBase >= 2 ? Math.max(2, clamped) : 0;
 }
 
 export function limitNeighboringTallCellBases(
@@ -100,16 +106,12 @@ function initialWet(scene: SceneDescription, x: number, y: number, z: number, nx
 
 function isInitialSurfaceCell(scene: SceneDescription, x: number, y: number, z: number, nx: number, fineNy: number, nz: number) {
   const wet = initialWet(scene, x, y, z, nx, fineNy, nz);
-  // The floor is a solid boundary, not a free surface.  All other wet/dry
-  // transitions must fit in the regular band: a tall cell cannot represent a
-  // vertical free surface through its interior (Chentanez & Mueller, sec. 3).
+  // The moving cubic band follows vertical crossings within a column. A
+  // vertical liquid face is represented by horizontal interpolation between
+  // neighbouring tall endpoint values and does not force B_y to the floor.
   const belowWet = y === 0 ? wet : initialWet(scene, x, y - 1, z, nx, fineNy, nz);
   const aboveWet = y + 1 < fineNy && initialWet(scene, x, y + 1, z, nx, fineNy, nz);
-  const sideSurface = (x > 0 && wet !== initialWet(scene, x - 1, y, z, nx, fineNy, nz))
-    || (x + 1 < nx && wet !== initialWet(scene, x + 1, y, z, nx, fineNy, nz))
-    || (z > 0 && wet !== initialWet(scene, x, y, z - 1, nx, fineNy, nz))
-    || (z + 1 < nz && wet !== initialWet(scene, x, y, z + 1, nx, fineNy, nz));
-  return wet !== belowWet || wet !== aboveWet || sideSurface;
+  return wet !== belowWet || wet !== aboveWet;
 }
 
 function requiredInitialRegularLayers(
@@ -153,18 +155,16 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
   const nz = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.depth_m / targetH)));
   const horizontalH = Math.sqrt((c.width_m / nx) * (c.depth_m / nz));
   const fineNy = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.height_m / horizontalH)));
-  // By is a restriction on representable geometry, not merely a quality
-  // knob.  If the free surface spans more vertical cells than the requested
-  // band, increase By up to the uniform-grid limit instead of silently
-  // dropping liquid during remeshing.  Deep, horizontally stratified scenes
-  // keep the requested compact band and therefore retain the paper's benefit.
+  // Grow B_y only when the vertical crossings and their halos do not fit. A
+  // vertical dam face is representable across neighbouring tall columns.
   const requiredLayers = requiredInitialRegularLayers(scene, nx, fineNy, nz, settings);
-  let regularLayers = Math.min(fineNy, Math.max(settings.regularLayers, requiredLayers));
+  const regularLayers = Math.min(fineNy, Math.max(settings.regularLayers, requiredLayers));
+  const storedRegularLayers = regularLayers;
   const regularLayersBeforeOrdinaryFallback = regularLayers;
   const maximumBaseBeforeOrdinaryFallback = Math.max(0, fineNy - regularLayers);
-  let ordinaryGridFallback = false;
-  let effectiveSettings = { ...settings, regularLayers, liquidHalo: Math.min(settings.liquidHalo, regularLayers), airHalo: Math.min(settings.airHalo, regularLayers) };
-  let packedNy = regularLayers + 2;
+  const ordinaryGridFallback = regularLayers >= fineNy;
+  const effectiveSettings = { ...settings, regularLayers, liquidHalo: Math.min(settings.liquidHalo, regularLayers), airHalo: Math.min(settings.airHalo, regularLayers) };
+  const packedNy = storedRegularLayers + 2;
   const maximumBase = Math.max(0, fineNy - regularLayers);
   const rawBases = new Float32Array(nx * nz);
 
@@ -176,6 +176,30 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
         highestSurface = Math.max(highestSurface, y);
       }
     }
+    const worldX = -c.width_m / 2 + (x + 0.5) * c.width_m / nx;
+    const worldZ = -c.depth_m / 2 + (z + 0.5) * c.depth_m / nz;
+    const inflow = scene.fluid.inflow;
+    if (inflow) {
+      const speed = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z);
+      const direction = speed > 0
+        ? { x: inflow.velocity_m_s.x / speed, y: inflow.velocity_m_s.y / speed, z: inflow.velocity_m_s.z / speed }
+        : { x: 1, y: 0, z: 0 };
+      const halfLength = inflow.length_m / 2;
+      const extentX = Math.abs(direction.x) * halfLength + Math.sqrt(Math.max(0, 1 - direction.x * direction.x)) * inflow.radius_m;
+      const extentY = Math.abs(direction.y) * halfLength + Math.sqrt(Math.max(0, 1 - direction.y * direction.y)) * inflow.radius_m;
+      const extentZ = Math.abs(direction.z) * halfLength + Math.sqrt(Math.max(0, 1 - direction.z * direction.z)) * inflow.radius_m;
+      if (Math.abs(worldX - inflow.center_m.x) <= extentX + c.width_m / nx / 2 && Math.abs(worldZ - inflow.center_m.z) <= extentZ + c.depth_m / nz / 2) {
+        lowestSurface = Math.min(lowestSurface, Math.max(0, Math.floor((inflow.center_m.y - extentY) / c.height_m * fineNy)));
+        highestSurface = Math.max(highestSurface, Math.min(fineNy - 1, Math.ceil((inflow.center_m.y + extentY) / c.height_m * fineNy)));
+      }
+    }
+    for (const body of scene.rigidBodies) {
+      const d = body.dimensions_m;
+      const radius = body.shape === "sphere" ? d.x : Math.hypot(d.x, d.y, d.z) / 2;
+      if (Math.hypot(worldX - body.position_m.x, worldZ - body.position_m.z) > radius + Math.max(c.width_m / nx, c.depth_m / nz) / 2) continue;
+      lowestSurface = Math.min(lowestSurface, Math.max(0, Math.floor((body.position_m.y - radius) / c.height_m * fineNy)));
+      highestSurface = Math.max(highestSurface, Math.min(fineNy - 1, Math.ceil((body.position_m.y + radius) / c.height_m * fineNy)));
+    }
     rawBases[x + nx * z] = highestSurface >= 0
       ? chooseTallCellBase(lowestSurface, highestSurface, fineNy, effectiveSettings)
       // An empty column still needs its regular band at the same elevation as
@@ -185,31 +209,26 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
       : maximumBase;
   }
 
-  let columnBases = limitNeighboringTallCellBases(rawBases, nx, nz, effectiveSettings.maximumNeighborDelta, nx + nz);
-  // A zero-height tall cell is the paper's ordinary-grid limit. If every
-  // column chooses that limit, the packed grid must contain every cubic row;
-  // keeping only the surface-band rows would silently turn the upper domain
-  // into an air boundary while still advertising a Tall solve.
-  if (regularLayers < fineNy && columnBases.every((base) => base === 0)) {
-    ordinaryGridFallback = true;
-    regularLayers = fineNy;
-    effectiveSettings = { ...effectiveSettings, regularLayers, liquidHalo: Math.min(settings.liquidHalo, regularLayers), airHalo: Math.min(settings.airHalo, regularLayers) };
-    packedNy = regularLayers + 2;
-    columnBases = new Float32Array(nx * nz);
-  }
+  const columnBases = limitNeighboringTallCellBases(rawBases, nx, nz, effectiveSettings.maximumNeighborDelta, nx + nz);
   const initialVolume = new Float32Array(nx * packedNy * nz);
   let initialVolumeCellSum = 0;
+  let activeSampleCount = 0;
   for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
     const base = columnBases[x + nx * z];
+    let tallAmount = 0;
+    for (let worldY = 0; worldY < base; worldY += 1) if (initialWet(scene, x, worldY, z, nx, fineNy, nz)) tallAmount += 1;
+    const tallFraction = base > 0 ? tallAmount / base : 0;
     for (let packedY = 0; packedY < packedNy; packedY += 1) {
       let worldY: number;
       if (packedY === 0) worldY = 0;
       else if (packedY === 1) worldY = Math.max(0, base - 1);
       else worldY = base + packedY - 2;
       const active = packedY >= 2 ? worldY < fineNy : base > 0;
-      const wet = active && initialWet(scene, x, worldY, z, nx, fineNy, nz);
-      initialVolume[x + nx * (packedY + packedNy * z)] = wet ? 1 : 0;
-      if (wet) initialVolumeCellSum += packedY === 0 ? base : packedY >= 2 ? 1 : 0;
+      if (active) activeSampleCount += 1;
+      const fraction = packedY < 2 ? tallFraction : active && initialWet(scene, x, worldY, z, nx, fineNy, nz) ? 1 : 0;
+      initialVolume[x + nx * (packedY + packedNy * z)] = fraction;
+      if (packedY === 0) initialVolumeCellSum += tallAmount;
+      else if (packedY >= 2) initialVolumeCellSum += fraction;
     }
   }
 
@@ -219,12 +238,14 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
     nx, fineNy, nz, packedNy,
     cellSize_m: { x: c.width_m / nx, y: c.height_m / fineNy, z: c.depth_m / nz },
     columnBases, initialVolume, initialVolumeCellSum,
-    packedSampleCount, equivalentUniformCellCount,
+    packedSampleCount, activeSampleCount, equivalentUniformCellCount,
     compressionRatio: packedSampleCount / equivalentUniformCellCount,
+    activeCompressionRatio: activeSampleCount / equivalentUniformCellCount,
     settings: effectiveSettings,
     planning: {
       requestedRegularLayers: settings.regularLayers,
       requiredInitialRegularLayers: requiredLayers,
+      storedRegularLayers,
       regularLayersBeforeOrdinaryFallback,
       maximumBaseBeforeOrdinaryFallback,
       ordinaryGridFallback
