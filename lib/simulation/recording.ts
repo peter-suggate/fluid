@@ -30,7 +30,7 @@ class SimulationRecordingController {
   get supported(): boolean {
     if (typeof window === "undefined") return false;
     const canvas = document.querySelector<HTMLCanvasElement>("[data-testid='gpu-viewport']");
-    return typeof MediaRecorder !== "undefined" && typeof canvas?.captureStream === "function";
+    return Boolean(canvas) && (typeof VideoEncoder !== "undefined" || (typeof MediaRecorder !== "undefined" && typeof canvas?.captureStream === "function"));
   }
 
   async start(simulationTime_s: number): Promise<boolean> {
@@ -68,10 +68,10 @@ class SimulationRecordingController {
       transform: { width, height, fit: "contain", alpha: "discard" }
     });
     output.addVideoTrack(source, { frameRate: SIMULATION_VIDEO_FRAME_RATE });
-    await output.start();
-
     this.frameOutput = output;
     this.frameSource = source;
+    await output.start();
+
     this.frameQueue = Promise.resolve();
     this.frameError = null;
     this.frameCount = 0;
