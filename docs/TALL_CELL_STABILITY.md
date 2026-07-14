@@ -42,8 +42,8 @@ still close to its initial value.
 | Surface field | Advected level set, periodic narrow-band reinitialization | Persistent VOF; pressure `phi` reconstructed each solve | Deliberate departure; retained |
 | Velocity extrapolation | Full hierarchical known/unknown solve | `airHalo` fine-grid neighbor passes | Deliberate departure; retained and diagnosed via air-speed maximum |
 | Force domain | Euler equations are solved where `phi < 0` | Gravity was added to every active packed sample, including air | Corrected: force integration is limited to liquid samples |
-| Remeshing cadence | Every step | Every 60 encoded steps | Deliberate performance departure; retained |
-| Remesh constraints | `G_L`, `G_A`, and neighbor delta `D` | Equivalent halos and `D`, plus temporal limiting | Largely aligned; explicit constraint counters remain future work |
+| Remeshing cadence | Every step | Every step | Aligned with Algorithm 1 |
+| Remesh constraints | `G_L`, `G_A`, and neighbor delta `D` | Fractional VOF samples broadened the surface range; base zero bypassed `D` | Corrected: sign crossings define surfaces, air wins conflicts, and every base obeys `D` |
 | Pressure cycles in examples | One full cycle plus two V-cycles | One full cycle plus one V-cycle | Corrected to the paper's example budget |
 | Coarsest solve | Shared-memory Gauss-Seidel to high precision | 24 iterations of weighted Jacobi | Corrected to 256 red-black Gauss-Seidel iterations |
 | Pressure convergence evidence | Residual convergence plot | No GPU pressure residual | Added exact finest-level `L-infinity` residual and relative residual |
@@ -71,18 +71,19 @@ correct linear hydrostatic pressure field, that produces twice the physical
 gradient: a downward gravity impulse is reflected into an equally large upward
 velocity rather than cancelled.
 
-The paper prints the same one-cell denominator and explicitly states that its
-Laplacian is not the composition of its divergence and gradient. The deep tank
-shows that this non-compatible form is not robust for the repository's VOF
-translation and extreme tall-cell aspect ratio.
+The paper prints the same one-cell denominator. Direct tests with the corrected
+remesher still reach `1.41 m/s` at `0.25 s` and `17.9 m/s` at `0.333 s` in a
+settled tank. The samples are physically `2 Delta x` apart, so the printed
+formula evaluates twice the centered derivative.
 
 The corrected kernel divides by the actual sample span:
 
 - `2 Delta x` when both positive and negative samples exist; and
 - `Delta x` for a one-sided physical wall.
 
-This is an intentional stability departure from the printed Equation 17. It is
-kept visible in both this audit and the implementation overview.
+This is retained as an explicit correction to the printed Equation 17. It is
+not attributed to a different storage layout: both implementations use
+collocated velocity samples.
 
 ### 3. The coarse pressure solve was under-converged
 
@@ -101,6 +102,51 @@ When requested time advanced by more than `maxDt`, the solver encoded one
 clamped step but assigned `lastTime = requestedTime`. The unencoded remainder
 was lost. The corrected clock advances `lastTime` only by the encoded `dt` and
 reports `simulationLag_s` until the GPU catches up.
+
+### 5. The VOF limiter admitted speculative replacement volume
+
+Receiver capacity previously included raw outward flux. Some of that outflow
+was later reduced by the donor/receiver limiter on the adjacent face, so the
+cell received more replacement liquid than it actually released. Clamping the
+result to one destroyed the excess. In the 20 m tank this gradually eroded a
+few tall-cell averages through the liquid threshold; the resulting remesh then
+triggered the eruption.
+
+Receiver capacity is now based only on current empty volume. Every internal
+face remains pairwise and bounded, so the closed deep tank has exactly zero
+measured volume drift through `4.4 s`.
+
+### 6. The remesher confused fractional density with surface topology
+
+The paper remeshes from zero crossings of reinitialized `phi`. The VOF
+translation instead treated every value in `[0.01, 0.99]` as a surface. Small
+transport diffusion eventually made most of a column appear to contain
+surfaces, creating contradictory `G_L`/`G_A` bounds. A special base-zero path
+then bypassed the neighbor bound and allowed a height collapse much larger
+than `D`.
+
+The remesher now uses liquid/air sign changes, prefers the air halo when bounds
+conflict, and applies `D` to every proposed height.
+
+### 7. The hose source and visible nozzle described different boundaries
+
+The analytic hose outlet originally ended `0.13 m` beyond the rendered nozzle,
+which is about 6.6 cells in the balanced grid. Replacing the old painted source
+with a conservative one-sided reservoir exposed that gap: the entering liquid
+was physically emitted in mid-air and appeared as a detached blob.
+
+The nozzle now terminates at the analytic outlet. Because the renderer's
+cylinder primitive is filled rather than hollow, the tall-cell solid mask also
+classified the prescribed reservoir cells as solid and suppressed their flux.
+Those cells are now treated as the nozzle's open channel: the reservoir
+velocity is imposed after rigid coupling and the opening is excluded from the
+pressure solid mask. This is a boundary-condition correction, not a density
+dilation or stream-shaping force.
+
+At `3.0 s`, native Metal execution admits `4877.8` cell-volumes through the
+tall path and `4765.5` through the matched uniform path, a `2.4%` difference.
+Maximum speeds are `1.78 m/s` and `1.84 m/s`, respectively, with bounded
+volume fractions and no stability flags.
 
 ## Corrected measurements
 
@@ -168,13 +214,16 @@ expected small non-idempotence from producing a constant false alarm.
 
 ## Verification
 
-- `npm run test:unit`: 42 tests pass, including GPU clock and stability-gate
-  regression tests.
-- `npm run lint`: passes.
+- `npm run test:unit`: 74 tests pass, including GPU clock, inflow-boundary,
+  remesh, and stability-gate regression tests.
 - `npm run build`: passes.
-- Browser WebGPU run: no validation errors after the shader changes.
+- Native Dawn/Metal WebGPU smoke: the `2.0 s` settled tank and `3.0 s` hose A/B
+  runs pass their invariants with no validation errors.
+- `npm run lint`: the modified solver paths pass; the repository command still
+  reports the pre-existing synchronous state update in
+  `components/RecordingPlaybackModal.tsx:39` (and its related hook-dependency
+  warning).
 
-The remaining gap is automated headless WebGPU regression. The deterministic
-CPU suite cannot execute browser GPU kernels, so the deep-tank measurement is
-currently an in-app acceptance procedure backed by live readback rather than a
-Node test.
+The deterministic Node runner can execute the real WGSL kernels when a Dawn
+WebGPU module is supplied through `WEBGPU_NODE_MODULE`; see
+[`WEBGPU_DIFFERENTIAL_SMOKE.md`](WEBGPU_DIFFERENTIAL_SMOKE.md).

@@ -48,9 +48,9 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
     };
     scene.rigidBodies = [{
       id: "paper-hose-nozzle", name: "Hose nozzle", shape: "cylinder",
-      dimensions_m: { x: 0.10, y: 0.12, z: 0.10 }, density_kg_m3: 5000,
+      dimensions_m: { x: 0.10, y: 0.26, z: 0.10 }, density_kg_m3: 5000,
       // Cylinder axis defaults to +y; rotate 90 degrees about z to lie along x.
-      position_m: { x: -0.53, y: 0.55, z: 0 }, orientation: { w: Math.SQRT1_2, x: 0, y: 0, z: Math.SQRT1_2 },
+      position_m: { x: -0.47, y: 0.55, z: 0 }, orientation: { w: Math.SQRT1_2, x: 0, y: 0, z: Math.SQRT1_2 },
       linearVelocity_m_s: { x: 0, y: 0, z: 0 }, angularVelocity_rad_s: { x: 0, y: 0, z: 0 },
       restitution: 0.05, friction: 0.8, motion: "static"
     }];

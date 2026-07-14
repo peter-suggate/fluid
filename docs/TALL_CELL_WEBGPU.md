@@ -59,13 +59,18 @@ For stability, the pressure difference is divided by the physical span between
 its samples: `2 dx` for an interior centered pair and `dx` at a one-sided wall.
 The paper prints `dx` in Equation (17) even though the samples are two cell
 centers apart. The literal form reflected each hydrostatic gravity impulse and
-caused the deep tank eruption. This compatibility correction is therefore a
-deliberate departure from the paper.
+caused the deep tank eruption even after the remesh constraints were enforced.
+The `2 dx` denominator is treated as a correction to that printed stencil, not
+as a consequence of using a different storage layout; the paper and this
+implementation both store collocated velocities.
 
 ## Transport, remeshing, and conservation
 
-Surface density uses the same donor/receiver-limited conservative VOF face flux
-as the matched cubic solver. A regular sample has unit control volume and the
+Surface density uses the same strictly donor/receiver-limited conservative VOF
+face flux as the matched cubic solver. Receiver capacity excludes speculative
+outflow: including raw outflow can permit more inflow than the eventually
+limited outgoing faces carry, after which a density clamp silently destroys
+mass. A regular sample has unit control volume and the
 bottom tall sample has volume equal to its covered cubic-cell height. Every
 ordinary face contribution is shared by its two adjacent control volumes, so
 the update conserves mass by pairwise cancellation rather than a post-step
@@ -83,13 +88,29 @@ cell limit and allocates every cubic row. The two endpoint slots are inactive;
 it is invalid to retain only a shortened surface band in this state because
 that would silently remove part of the domain.
 
-On remesh, regular values are copied or interpolated at their world positions
+The band is remeshed after advection on every step, matching Algorithm 1.
+Regular values are copied or interpolated at their world positions
 and endpoint velocities use a least-squares fit. For surface density, the
 shader computes the old represented column amount and assigns the residual
 after copying the new regular band to the new tall cell. This preserves every
 representable column integral without a global volume correction. The residual
 is no longer clamped to one: density above one is temporary stored mass, not
 volume to erase.
+
+Remesh surface bounds use liquid/air sign changes, matching the paper's
+reinitialized `phi` test, rather than treating every fractional VOF sample as a
+separate surface. When `G_L` and `G_A` conflict, the air constraint wins as in
+the paper. The neighbor-height bound `D` is applied to every proposed base,
+including the ordinary-cell limit.
+
+An inflow is a one-sided face connected to a virtual upstream reservoir. Its
+bounded receiver source is separate from internal pairwise transport, and the
+receiver/nozzle velocity samples remain known during extrapolation. This avoids
+both density accumulation at the outlet and erasure of a newly entering jet.
+The prescribed reservoir occupies the open channel through the displayed
+nozzle: inlet cells are excluded from the tall-cell solid mask, and the inlet
+velocity is restored after immersed-body coupling. The visible nozzle tip and
+analytic boundary face share the same position.
 
 External force integration is restricted to the liquid domain. Extrapolated
 air samples support characteristic tracing but do not accumulate their own
@@ -116,13 +137,15 @@ buoyancy that is not present in the explicit GPU exchange buffer.
   reinitializes it.
 - Velocity extrapolation uses repeated fine-grid neighbor passes rather than
   the paper's multigrid known/unknown hierarchy.
-- Remeshing is amortized every 60 encoded steps instead of every step.
 - The separately diffused in-solid `phi_s` field and resolved pressure traction
   are not implemented.
 - Terrain cut cells, particle level-set tracking, particle thickening, foam,
   spray, and mist are outside this browser core.
-- The paper's separate local interface-sharpening pass is not yet implemented.
-  The renderer continues to use the 0.5 surface-density isocontour.
+- The renderer continues to use the persistent VOF `0.5` isocontour. In the
+  paper's Tank example, surface tracking uses twice the simulation resolution
+  along each axis, and the optional particle-thickening extension protects thin
+  features. Those mechanisms are not reproduced here, so matching pressure and
+  inflow transport does not imply identical small-scale surface detail.
 - Packed pressure, projection, coupling, and transport dispatch counts remain
   independent of full domain depth.
 

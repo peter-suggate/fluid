@@ -33,7 +33,7 @@ export function DiagnosticsPanel() {
       </section>
       <section className="metric-grid panel-section">
         <MetricCard label="Simulation time" value={simulationTime.toFixed(3)} unit="s" />
-        <MetricCard label="GPU simulated time" value={gpuInfo?.simulatedTime_s !== undefined ? gpuInfo.simulatedTime_s.toFixed(3) : "—"} unit={`s · lag ${gpuInfo?.simulationLag_s?.toFixed(3) ?? "—"} s`} tone={gpuInfo?.simulationLag_s !== undefined && gpuInfo.simulationLag_s <= scene.numerics.maxDt_s ? "good" : "warn"} />
+        <MetricCard label="GPU completed time" value={gpuInfo?.completedTime_s !== undefined ? gpuInfo.completedTime_s.toFixed(3) : "—"} unit="s · queue-confirmed" tone={gpuInfo?.completedTime_s !== undefined && Math.abs(gpuInfo.completedTime_s - simulationTime) < 1e-6 ? "good" : "warn"} />
         <MetricCard label="Fixed validation dt" value={scene.numerics.fixedDt_s.toFixed(4)} unit="s" />
         <MetricCard label="Render encode" value={frameMs.toFixed(2)} unit="ms CPU" tone={frameMs < 4 ? "good" : "warn"} />
         <MetricCard label="Rigid bodies" value={String(bodies.length)} unit={`${rigidState?.contactCount ?? 0} contact solves`} />

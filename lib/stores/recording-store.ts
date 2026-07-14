@@ -10,6 +10,10 @@ export interface SimulationRecordingResult {
   simulationEnd_s: number;
   simulationDuration_s: number;
   recordedDuration_s: number;
+  timingMode: "simulation-frames" | "wall-clock";
+  frameRate: number;
+  frameCount: number | null;
+  fileExtension: "mp4" | "webm";
   createdAt: number;
 }
 

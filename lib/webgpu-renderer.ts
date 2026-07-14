@@ -550,6 +550,9 @@ export class FluidLabRenderer {
   private gpuFluidKey = "";
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
   private gpuRigidLoadCallback?: (loads: GPURigidLoad[]) => void;
+  private gpuAdvanceCompletedCallback?: (time_s: number) => void;
+  private gpuPhysicsPending = false;
+  private gpuFluidGeneration = 0;
   private lastGPUReadbackSecond = -1;
   private bindGroup?: GPUBindGroup;
   private format?: GPUTextureFormat;
@@ -559,7 +562,7 @@ export class FluidLabRenderer {
   private lastRenderQueryAt = -Infinity;
   private gpuRender_ms?: number;
 
-  constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; }
+  constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; }
 
   async initialize(): Promise<void> {
     this.onStatus({ state: "initializing", label: "Requesting WebGPU adapter" });
@@ -590,6 +593,8 @@ export class FluidLabRenderer {
       const fluid = this.gpuFluid;
       this.gpuFluid = undefined;
       this.gpuFluidKey = "";
+      this.gpuPhysicsPending = false;
+      this.gpuFluidGeneration += 1;
       try { fluid?.destroy(); } catch { /* Resources may already be invalid after device loss. */ }
       this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` });
     }).catch((error: unknown) => {
@@ -642,11 +647,33 @@ export class FluidLabRenderer {
     const key = `${config.methodId}:${config.quality}:${JSON.stringify(config.values)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
     const createSolver = () => method.createSolver!(this.device!, scene, config.quality, config.values, this.gpuRigidLoadCallback);
     if (!this.gpuFluid || key !== this.gpuFluidKey) {
-      this.gpuFluid?.destroy(); this.gpuFluid = createSolver(); this.gpuFluidKey = key; this.lastGPUReadbackSecond = -1;
+      this.gpuFluid?.destroy(); this.gpuFluid = createSolver(); this.gpuFluidKey = key; this.lastGPUReadbackSecond = -1; this.gpuPhysicsPending = false; this.gpuFluidGeneration += 1;
       this.rebuildBindGroup(this.gpuFluid.volumeTexture,this.gpuFluid.columnBaseTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
     }
-    if (!this.gpuFluid.advanceTo(time_s, bodies)) {
-      this.gpuFluid.destroy(); this.gpuFluid = createSolver(); this.rebuildBindGroup(this.gpuFluid.volumeTexture,this.gpuFluid.columnBaseTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
+    if (time_s < (this.gpuFluid.info.submittedTime_s ?? 0)) {
+      this.gpuFluid.destroy(); this.gpuFluid = createSolver(); this.gpuPhysicsPending = false; this.gpuFluidGeneration += 1; this.lastGPUReadbackSecond = -1;
+      this.rebuildBindGroup(this.gpuFluid.volumeTexture,this.gpuFluid.columnBaseTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
+    }
+    if (!this.gpuPhysicsPending) {
+      const previousSubmittedTime = this.gpuFluid.info.submittedTime_s ?? 0;
+      if (!this.gpuFluid.advanceTo(time_s, bodies)) {
+        this.gpuFluid.destroy(); this.gpuFluid = createSolver(); this.gpuPhysicsPending = false; this.gpuFluidGeneration += 1; this.rebuildBindGroup(this.gpuFluid.volumeTexture,this.gpuFluid.columnBaseTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
+      } else {
+        const submittedTime = this.gpuFluid.info.submittedTime_s ?? previousSubmittedTime;
+        if (submittedTime > previousSubmittedTime) {
+          const fluid = this.gpuFluid, generation = this.gpuFluidGeneration;
+          this.gpuPhysicsPending = true;
+          void this.device.queue.onSubmittedWorkDone().then(() => {
+            if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
+            fluid.info.completedTime_s = submittedTime;
+            fluid.info.simulatedTime_s = submittedTime;
+            fluid.info.simulationLag_s = Math.max(0, time_s - submittedTime);
+            this.gpuPhysicsPending = false;
+            this.gpuInfoCallback?.({ ...fluid.info });
+            this.gpuAdvanceCompletedCallback?.(submittedTime);
+          }).catch(() => { /* Device loss is reported by device.lost. */ });
+        }
+      }
     }
     // Sample at 30 Hz of simulation time so a paper-sized 1/30 s step cannot
     // cross an instability threshold between diagnostic readbacks. The solver
@@ -757,6 +784,8 @@ export class FluidLabRenderer {
     this.disposed = true;
     const fluid = this.gpuFluid;
     this.gpuFluid = undefined;
+    this.gpuPhysicsPending = false;
+    this.gpuFluidGeneration += 1;
     try { fluid?.destroy(); } catch { /* Device loss can invalidate solver resources first. */ }
     for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.uniformBuffer, this.bodyBuffer, this.renderQuerySet, this.renderQueryResolve]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }

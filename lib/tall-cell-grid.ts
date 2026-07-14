@@ -25,15 +25,22 @@ export interface TallCellLayout {
   equivalentUniformCellCount: number;
   compressionRatio: number;
   settings: TallCellSettings;
+  planning: {
+    requestedRegularLayers: number;
+    requiredInitialRegularLayers: number;
+    regularLayersBeforeOrdinaryFallback: number;
+    maximumBaseBeforeOrdinaryFallback: number;
+    ordinaryGridFallback: boolean;
+  };
 }
 
 // The presets retain approximately the x/z resolution of the former 110k,
 // 500k and 1.2m cubic grids for the default scene. Only the moving surface
 // band and two samples for each bottom tall cell are stored.
 export const tallCellSettings: Record<GPUQuality, TallCellSettings> = {
-  balanced: { surfaceColumns: 2_500, regularLayers: 24, liquidHalo: 8, airHalo: 8, maximumNeighborDelta: 4, remeshInterval: 60 },
-  high: { surfaceColumns: 7_000, regularLayers: 32, liquidHalo: 16, airHalo: 8, maximumNeighborDelta: 4, remeshInterval: 60 },
-  ultra: { surfaceColumns: 12_500, regularLayers: 40, liquidHalo: 24, airHalo: 8, maximumNeighborDelta: 5, remeshInterval: 60 }
+  balanced: { surfaceColumns: 2_500, regularLayers: 24, liquidHalo: 8, airHalo: 8, maximumNeighborDelta: 4, remeshInterval: 1 },
+  high: { surfaceColumns: 7_000, regularLayers: 32, liquidHalo: 16, airHalo: 8, maximumNeighborDelta: 4, remeshInterval: 1 },
+  ultra: { surfaceColumns: 12_500, regularLayers: 40, liquidHalo: 24, airHalo: 8, maximumNeighborDelta: 5, remeshInterval: 1 }
 };
 
 export function tallCellFluxSampleCount(height: number) {
@@ -153,6 +160,9 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
   // keep the requested compact band and therefore retain the paper's benefit.
   const requiredLayers = requiredInitialRegularLayers(scene, nx, fineNy, nz, settings);
   let regularLayers = Math.min(fineNy, Math.max(settings.regularLayers, requiredLayers));
+  const regularLayersBeforeOrdinaryFallback = regularLayers;
+  const maximumBaseBeforeOrdinaryFallback = Math.max(0, fineNy - regularLayers);
+  let ordinaryGridFallback = false;
   let effectiveSettings = { ...settings, regularLayers, liquidHalo: Math.min(settings.liquidHalo, regularLayers), airHalo: Math.min(settings.airHalo, regularLayers) };
   let packedNy = regularLayers + 2;
   const maximumBase = Math.max(0, fineNy - regularLayers);
@@ -181,6 +191,7 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
   // keeping only the surface-band rows would silently turn the upper domain
   // into an air boundary while still advertising a Tall solve.
   if (regularLayers < fineNy && columnBases.every((base) => base === 0)) {
+    ordinaryGridFallback = true;
     regularLayers = fineNy;
     effectiveSettings = { ...effectiveSettings, regularLayers, liquidHalo: Math.min(settings.liquidHalo, regularLayers), airHalo: Math.min(settings.airHalo, regularLayers) };
     packedNy = regularLayers + 2;
@@ -210,6 +221,13 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
     columnBases, initialVolume, initialVolumeCellSum,
     packedSampleCount, equivalentUniformCellCount,
     compressionRatio: packedSampleCount / equivalentUniformCellCount,
-    settings: effectiveSettings
+    settings: effectiveSettings,
+    planning: {
+      requestedRegularLayers: settings.regularLayers,
+      requiredInitialRegularLayers: requiredLayers,
+      regularLayersBeforeOrdinaryFallback,
+      maximumBaseBeforeOrdinaryFallback,
+      ordinaryGridFallback
+    }
   };
 }

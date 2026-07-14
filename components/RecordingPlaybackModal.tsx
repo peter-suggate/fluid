@@ -26,11 +26,12 @@ export function RecordingPlaybackModal() {
   const playbackAnchorRef = useRef<{ wall_ms: number; media_s: number } | null>(null);
   const [mode, setMode] = useState<PlaybackMode>("real-time");
   const [mediaDuration_s, setMediaDuration_s] = useState(0);
+  const simulationPaced = recording?.timingMode === "simulation-frames";
   const sourceDuration_s = useMemo(() => recording
     ? sourceDurationForPlayback(mediaDuration_s, recording.recordedDuration_s)
     : 0, [mediaDuration_s, recording]);
   const playbackRate = useMemo(() => recording
-    ? realTimePlaybackRate(sourceDuration_s, recording.simulationDuration_s)
+    ? simulationPaced ? 1 : realTimePlaybackRate(sourceDuration_s, recording.simulationDuration_s)
     : 1, [sourceDuration_s, recording]);
 
   useEffect(() => {
@@ -55,7 +56,7 @@ export function RecordingPlaybackModal() {
   // rate. Keep the media clock aligned to the requested simulation clock so a
   // slow solve still completes playback in exactly simulationDuration_s.
   useEffect(() => {
-    if (!open || mode !== "real-time" || !recording) return;
+    if (!open || mode !== "real-time" || !recording || simulationPaced) return;
     let frame = 0;
     const keepRealTime = (now: number) => {
       const video = videoRef.current;
@@ -69,7 +70,7 @@ export function RecordingPlaybackModal() {
     };
     frame = requestAnimationFrame(keepRealTime);
     return () => cancelAnimationFrame(frame);
-  }, [open, mode, playbackRate, recording, sourceDuration_s]);
+  }, [open, mode, playbackRate, recording, simulationPaced, sourceDuration_s]);
 
   const anchorPlayback = (video: HTMLVideoElement) => {
     const rate = mode === "real-time" ? playbackRate : 1;
@@ -87,7 +88,7 @@ export function RecordingPlaybackModal() {
         <header>
           <div>
             <p className="eyebrow">SIMULATION-TIME CAPTURE</p>
-            <h2 id="recording-title">Real-time playback</h2>
+            <h2 id="recording-title">Real-time playback{simulationPaced ? " · 30 fps" : ""}</h2>
           </div>
           <button className="icon-button" onClick={() => simulationRecording.close()} aria-label="Close recording playback" autoFocus>×</button>
         </header>
@@ -111,22 +112,25 @@ export function RecordingPlaybackModal() {
             onPause={() => { playbackAnchorRef.current = null; }}
             onSeeked={(event) => anchorPlayback(event.currentTarget)}
           />
-          <span className="recording-time-badge">1 VIDEO SECOND = 1 SIMULATION SECOND</span>
+          <span className="recording-time-badge">{simulationPaced ? "SIMULATION-SAMPLED · 30 FPS · NATIVE ×1" : "1 VIDEO SECOND = 1 SIMULATION SECOND"}</span>
         </div>
         <div className="recording-playback-controls">
           <div className="segmented" aria-label="Playback timing">
-            <button className={mode === "real-time" ? "active" : ""} onClick={() => setMode("real-time")}>Real time · ×{playbackRate.toFixed(2)}</button>
-            <button className={mode === "source" ? "active" : ""} onClick={() => setMode("source")}>Original capture · ×1</button>
+            {simulationPaced
+              ? <button className="active">Real time · 30 fps · ×1</button>
+              : <><button className={mode === "real-time" ? "active" : ""} onClick={() => setMode("real-time")}>Real time · ×{playbackRate.toFixed(2)}</button><button className={mode === "source" ? "active" : ""} onClick={() => setMode("source")}>Original capture · ×1</button></>}
           </div>
-          <button className="quiet-button" onClick={() => simulationRecording.download()} title="Download the original wall-clock-paced WebM">Download source</button>
+          <button className="quiet-button" onClick={() => simulationRecording.download()} title={simulationPaced ? "Download the simulation-paced MP4" : "Download the original wall-clock-paced WebM"}>Download {simulationPaced ? "MP4" : "source"}</button>
         </div>
         <dl className="recording-stats">
           <div><dt>Simulation interval</dt><dd>{recording.simulationStart_s.toFixed(2)}–{recording.simulationEnd_s.toFixed(2)} s</dd></div>
           <div><dt>Real-time result</dt><dd>{recording.simulationDuration_s.toFixed(2)} s</dd></div>
-          <div><dt>Source capture</dt><dd>{sourceDuration_s.toFixed(2)} s</dd></div>
-          <div><dt>Timing correction</dt><dd>×{playbackRate.toFixed(2)}</dd></div>
+          <div><dt>{simulationPaced ? "Captured frames" : "Source capture"}</dt><dd>{simulationPaced ? recording.frameCount?.toLocaleString() : `${sourceDuration_s.toFixed(2)} s`}</dd></div>
+          <div><dt>{simulationPaced ? "Frame pacing" : "Timing correction"}</dt><dd>{simulationPaced ? `${recording.frameRate} fps · ×1` : `×${playbackRate.toFixed(2)}`}</dd></div>
         </dl>
-        <p className="recording-note">Playback is paced from simulated seconds, not render time. Pauses are excluded, so motion under −9.8 m/s² is shown on a real-world clock even when the solver runs slowly. The downloaded WebM preserves the original capture timing; the calibrated view is available here whenever the capture remains open in this browser.</p>
+        <p className="recording-note">{simulationPaced
+          ? "Each frame was sampled at a 0.033 s simulation-time boundary and encoded consecutively at 30 fps. Playback and the downloaded MP4 therefore run natively at real-world speed without frame skipping or timeline seeking."
+          : "This browser used compatibility capture. In-app playback is calibrated from simulated seconds; the downloaded WebM preserves its original wall-clock timing."}</p>
       </section>
     </div>
   );
