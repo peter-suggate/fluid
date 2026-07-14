@@ -7,7 +7,7 @@ const params: MethodParamSpec[] = [
   { kind: "number", key: "surfaceColumns", label: "Surface columns", unit: "columns", min: 1_000, max: 20_000, step: 500, digits: 0, default: 2_500, tier: "fine", hint: "Target x/z column count; sets horizontal resolution." },
   { kind: "number", key: "regularLayers", label: "Surface band layers", unit: "cells", min: 12, max: 64, step: 4, digits: 0, default: 24, tier: "fine", hint: "Cubic cells kept around the free surface. The band grows automatically if the surface spans more." },
   { kind: "number", key: "maximumNeighborDelta", label: "Neighbor base delta", unit: "cells", min: 2, max: 6, step: 1, digits: 0, default: 4, tier: "fine", hint: "Maximum tall-cell base step between adjacent columns." },
-  { kind: "number", key: "remeshInterval", label: "Remesh interval", unit: "steps", min: 20, max: 240, step: 10, digits: 0, default: 60, tier: "fine", hint: "Steps between tall-cell band re-planning passes." }
+  { kind: "number", key: "remeshInterval", label: "Remesh interval", unit: "steps", min: 1, max: 60, step: 1, digits: 0, default: 1, tier: "fine", hint: "Paper Algorithm 1 remeshes after advection on every step; larger values are diagnostic departures." }
 ];
 
 export const tallCellMethod: SimulationMethod = {

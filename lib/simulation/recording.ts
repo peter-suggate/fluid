@@ -1,3 +1,5 @@
+import { BufferTarget, Mp4OutputFormat, Output, QUALITY_HIGH, VideoSample, VideoSampleSource, canEncodeVideo } from "mediabunny";
+import { SIMULATION_VIDEO_FRAME_DURATION_S, SIMULATION_VIDEO_FRAME_RATE, simulationFramesDue } from "../recording-timing";
 import { useRecordingStore, type SimulationRecordingResult } from "../stores/recording-store";
 import { useRuntimeStore } from "../stores/runtime-store";
 
@@ -17,6 +19,13 @@ class SimulationRecordingController {
   private activeCaptureDuration_ms = 0;
   private activeCaptureStartedAt: number | null = null;
   private unsubscribeRuntime: (() => void) | null = null;
+  private frameOutput: Output<Mp4OutputFormat, BufferTarget> | null = null;
+  private frameSource: VideoSampleSource | null = null;
+  private frameQueue: Promise<void> = Promise.resolve();
+  private frameError: unknown = null;
+  private frameCount = 0;
+  private nextFrameSimulation_s = 0;
+  private frameLoop = 0;
 
   get supported(): boolean {
     if (typeof window === "undefined") return false;
@@ -24,11 +33,93 @@ class SimulationRecordingController {
     return typeof MediaRecorder !== "undefined" && typeof canvas?.captureStream === "function";
   }
 
-  start(simulationTime_s: number): boolean {
+  async start(simulationTime_s: number): Promise<boolean> {
     if (this.recorder || useRecordingStore.getState().status === "processing") return false;
     const canvas = document.querySelector<HTMLCanvasElement>("[data-testid='gpu-viewport']");
-    if (!canvas || typeof MediaRecorder === "undefined" || typeof canvas.captureStream !== "function") {
+    if (!canvas) {
       this.fail("Video capture is not supported in this browser.");
+      return false;
+    }
+
+    useRecordingStore.getState().set({ status: "processing", startedAtSimulation_s: null, modalOpen: false, error: null });
+    try {
+      const width = Math.max(2, canvas.width - canvas.width % 2);
+      const height = Math.max(2, canvas.height - canvas.height % 2);
+      if (typeof VideoEncoder !== "undefined" && await canEncodeVideo("avc", { width, height, bitrate: QUALITY_HIGH })) {
+        await this.startSimulationFrameCapture(canvas, simulationTime_s, width, height);
+        return true;
+      }
+    } catch {
+      await this.releaseFrameCapture(true);
+      // Fall through to MediaRecorder on browsers whose WebCodecs stack is
+      // present but cannot encode this WebGPU-backed canvas.
+    }
+
+    return this.startWallClockCapture(canvas, simulationTime_s);
+  }
+
+  private async startSimulationFrameCapture(canvas: HTMLCanvasElement, simulationTime_s: number, width: number, height: number) {
+    const target = new BufferTarget();
+    const output = new Output({ format: new Mp4OutputFormat({ fastStart: "in-memory" }), target });
+    const source = new VideoSampleSource({
+      codec: "avc",
+      bitrate: QUALITY_HIGH,
+      keyFrameInterval: 1,
+      transform: { width, height, fit: "contain", alpha: "discard" }
+    });
+    output.addVideoTrack(source, { frameRate: SIMULATION_VIDEO_FRAME_RATE });
+    await output.start();
+
+    this.frameOutput = output;
+    this.frameSource = source;
+    this.frameQueue = Promise.resolve();
+    this.frameError = null;
+    this.frameCount = 0;
+    this.startedAtSimulation_s = simulationTime_s;
+    this.nextFrameSimulation_s = simulationTime_s + SIMULATION_VIDEO_FRAME_DURATION_S;
+    const capture = () => {
+      if (!this.frameOutput || !this.frameSource) return;
+      const currentSimulation_s = useRuntimeStore.getState().simulationTime;
+      const due = simulationFramesDue(currentSimulation_s, this.nextFrameSimulation_s);
+      for (let index = 0; index < due; index += 1) {
+        this.enqueueSimulationFrame(canvas);
+      }
+      this.nextFrameSimulation_s += due * SIMULATION_VIDEO_FRAME_DURATION_S;
+      this.frameLoop = requestAnimationFrame(capture);
+    };
+    this.frameLoop = requestAnimationFrame(capture);
+    useRecordingStore.getState().set({
+      status: "recording",
+      startedAtSimulation_s: simulationTime_s,
+      modalOpen: false,
+      error: null
+    });
+    useRuntimeStore.getState().setNotice("Capturing one frame every 0.033 simulated seconds · native 30 fps output");
+  }
+
+  private enqueueSimulationFrame(canvas: HTMLCanvasElement) {
+    const source = this.frameSource;
+    if (!source || this.frameError) return;
+    const frameIndex = this.frameCount++;
+    let sample: VideoSample;
+    try {
+      sample = new VideoSample(canvas, { timestamp: frameIndex / SIMULATION_VIDEO_FRAME_RATE, duration: SIMULATION_VIDEO_FRAME_DURATION_S });
+    } catch (error) {
+      this.frameError = error;
+      return;
+    }
+    this.frameQueue = this.frameQueue.then(async () => {
+      try {
+        await source.add(sample, { keyFrame: frameIndex % SIMULATION_VIDEO_FRAME_RATE === 0 });
+      } finally {
+        sample.close();
+      }
+    }).catch((error) => { this.frameError = error; });
+  }
+
+  private startWallClockCapture(canvas: HTMLCanvasElement, simulationTime_s: number): boolean {
+    if (typeof MediaRecorder === "undefined" || typeof canvas.captureStream !== "function") {
+      this.fail("This browser cannot encode simulation video.");
       return false;
     }
 
@@ -73,6 +164,10 @@ class SimulationRecordingController {
   }
 
   stop(simulationTime_s: number): void {
+    if (this.frameOutput) {
+      void this.stopSimulationFrameCapture();
+      return;
+    }
     const recorder = this.recorder;
     if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
     this.finishActiveSegment();
@@ -102,12 +197,59 @@ class SimulationRecordingController {
         simulationEnd_s,
         simulationDuration_s,
         recordedDuration_s: Math.max(recordedDuration_s, 0.001),
+        timingMode: "wall-clock",
+        frameRate: 60,
+        frameCount: null,
+        fileExtension: "webm",
         createdAt: Date.now()
       };
       useRecordingStore.getState().set({ status: "ready", recording, modalOpen: true, error: null });
       useRuntimeStore.getState().setNotice(`Captured ${simulationDuration_s.toFixed(2)} s of simulation · ready for real-time playback`);
     };
     recorder.stop();
+  }
+
+  private async stopSimulationFrameCapture() {
+    const output = this.frameOutput;
+    const source = this.frameSource;
+    if (!output || !source) return;
+    cancelAnimationFrame(this.frameLoop);
+    this.frameLoop = 0;
+    useRecordingStore.getState().set({ status: "processing", startedAtSimulation_s: null, error: null });
+    try {
+      await this.frameQueue;
+      if (this.frameError) throw this.frameError;
+      if (this.frameCount === 0) throw new Error("Record at least 0.033 simulation seconds before stopping.");
+      source.close();
+      await output.finalize();
+      const buffer = output.target.buffer;
+      if (!buffer) throw new Error("The 30 fps video encoder returned no data.");
+      const mimeType = await output.getMimeType();
+      const duration_s = this.frameCount / SIMULATION_VIDEO_FRAME_RATE;
+      const recording: SimulationRecordingResult = {
+        url: "",
+        blob: new Blob([buffer], { type: mimeType }),
+        mimeType,
+        simulationStart_s: this.startedAtSimulation_s,
+        simulationEnd_s: this.startedAtSimulation_s + duration_s,
+        simulationDuration_s: duration_s,
+        recordedDuration_s: duration_s,
+        timingMode: "simulation-frames",
+        frameRate: SIMULATION_VIDEO_FRAME_RATE,
+        frameCount: this.frameCount,
+        fileExtension: "mp4",
+        createdAt: Date.now()
+      };
+      recording.url = URL.createObjectURL(recording.blob);
+      const previous = useRecordingStore.getState().recording;
+      if (previous) URL.revokeObjectURL(previous.url);
+      await this.releaseFrameCapture(false);
+      useRecordingStore.getState().set({ status: "ready", recording, modalOpen: true, error: null });
+      useRuntimeStore.getState().setNotice(`Encoded ${recording.frameCount} simulation frames · ${duration_s.toFixed(2)} s at 30 fps`);
+    } catch (error) {
+      await this.releaseFrameCapture(true);
+      this.fail(error instanceof Error ? error.message : "Unable to encode the 30 fps simulation video.");
+    }
   }
 
   open(): void {
@@ -123,7 +265,7 @@ class SimulationRecordingController {
     if (!recording) return;
     const link = document.createElement("a");
     link.href = recording.url;
-    link.download = `fluid-lab-capture-${new Date(recording.createdAt).toISOString().replace(/[:.]/g, "-")}.webm`;
+    link.download = `fluid-lab-capture-${new Date(recording.createdAt).toISOString().replace(/[:.]/g, "-")}.${recording.fileExtension}`;
     link.click();
   }
 
@@ -141,6 +283,20 @@ class SimulationRecordingController {
     this.activeCaptureStartedAt = null;
   }
 
+  private async releaseFrameCapture(cancel: boolean): Promise<void> {
+    cancelAnimationFrame(this.frameLoop);
+    this.frameLoop = 0;
+    const output = this.frameOutput;
+    this.frameOutput = null;
+    this.frameSource = null;
+    this.frameQueue = Promise.resolve();
+    this.frameError = null;
+    this.frameCount = 0;
+    if (cancel && output && (output.state === "started" || output.state === "pending")) {
+      try { await output.cancel(); } catch { /* Best-effort encoder cleanup. */ }
+    }
+  }
+
   private fail(message: string): void {
     this.unsubscribeRuntime?.();
     this.unsubscribeRuntime = null;
@@ -149,6 +305,7 @@ class SimulationRecordingController {
       this.recorder.stop();
     }
     this.releaseRecorder();
+    void this.releaseFrameCapture(true);
     useRecordingStore.getState().set({ status: "error", startedAtSimulation_s: null, error: message });
     useRuntimeStore.getState().setNotice(message, "warn");
   }

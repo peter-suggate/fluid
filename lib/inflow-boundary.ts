@@ -24,8 +24,14 @@ fn isInflowBoundaryFace(q:vec3i,axis:u32)->bool{
 fn inflowBoundaryFlux(q:vec3i,axis:u32,dt:f32)->f32{
   let strength=inflowStrength();if(strength<=0.0||axis!=inflowAxis()||q[axis]!=inflowFaceIndex(axis)){return 0.0;}let fraction=inflowApertureFraction(q);if(fraction<=0.0){return 0.0;}let normalVelocity=params.inflowVelocityLength[axis]*strength*params.inflowVelocityLength.w;return dt/params.cellGravity.xyz[axis]*normalVelocity*fraction;
 }
+fn inflowReceiverSource(q:vec3i,dt:f32)->f32{
+  let axis=inflowAxis();if(q[axis]!=inflowReceiverIndex(axis)){return 0.0;}var face=q;face[axis]=inflowFaceIndex(axis);return abs(inflowBoundaryFlux(face,axis,dt));
+}
+fn isInflowVelocityCell(q:vec3i)->bool{
+  let axis=inflowAxis();let receiver=inflowReceiverIndex(axis);let donor=select(receiver+1,receiver-1,params.inflowVelocityLength[axis]>=0.0);return inflowStrength()>0.0&&(q[axis]==receiver||q[axis]==donor)&&inflowApertureFraction(q)>0.0;
+}
 fn applyInflowVelocity(q:vec3i,inputVelocity:vec3f)->vec3f{
-  let strength=inflowStrength();if(strength<=0.0){return inputVelocity;}let axis=inflowAxis();let receiver=inflowReceiverIndex(axis);let donor=select(receiver+1,receiver-1,params.inflowVelocityLength[axis]>=0.0);if(q[axis]!=receiver&&q[axis]!=donor){return inputVelocity;}let fraction=inflowApertureFraction(q);if(fraction<=0.0){return inputVelocity;}var velocity=inputVelocity;let desiredVelocity=params.inflowVelocityLength.xyz*strength;if(q[axis]==receiver){velocity=desiredVelocity;}velocity[axis]=desiredVelocity[axis];return velocity;
+  let strength=inflowStrength();if(strength<=0.0){return inputVelocity;}let axis=inflowAxis();let receiver=inflowReceiverIndex(axis);if(!isInflowVelocityCell(q)){return inputVelocity;}var desiredVelocity=params.inflowVelocityLength.xyz*strength;desiredVelocity[axis]*=params.inflowVelocityLength.w;var velocity=inputVelocity;if(q[axis]==receiver){velocity=desiredVelocity;}velocity[axis]=desiredVelocity[axis];return velocity;
 }
 `;
 

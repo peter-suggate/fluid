@@ -1,3 +1,14 @@
+export const SIMULATION_VIDEO_FRAME_RATE = 30;
+export const SIMULATION_VIDEO_FRAME_DURATION_S = 1 / SIMULATION_VIDEO_FRAME_RATE;
+
+/** Number of fixed-rate video samples whose simulation-time boundaries have
+ * been crossed by the latest rendered state. */
+export function simulationFramesDue(currentSimulation_s: number, nextFrameSimulation_s: number): number {
+  if (!Number.isFinite(currentSimulation_s) || !Number.isFinite(nextFrameSimulation_s)) return 0;
+  if (currentSimulation_s + 1e-9 < nextFrameSimulation_s) return 0;
+  return Math.floor((currentSimulation_s - nextFrameSimulation_s + 1e-9) / SIMULATION_VIDEO_FRAME_DURATION_S) + 1;
+}
+
 /**
  * Maps a wall-clock-paced canvas recording back onto the simulation clock.
  *

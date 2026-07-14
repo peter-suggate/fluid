@@ -88,7 +88,8 @@ export class WebGPUUniformEulerianSolver {
       nx, ny, nz, storedNy: ny, cellCount: count, equivalentUniformCells: count,
       compressionRatio: 1, regularLayers: ny, maximumNeighborDelta: 0,
       gridKind: "uniform", cellSize_m: Math.max(c.width_m / nx, c.height_m / ny, c.depth_m / nz),
-      pressureIterations, allocatedBytes: count * 48, quality, encodedSteps: 0, maximumTallCellHeight: 0
+      pressureIterations, allocatedBytes: count * 48, quality, encodedSteps: 0, maximumTallCellHeight: 0,
+      submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0, simulationLag_s: 0
     };
     this.initializeVolume();
     this.advectGroup = this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB);
@@ -142,7 +143,7 @@ export class WebGPUUniformEulerianSolver {
   advanceTo(time_s: number, bodies: RigidBodyState[] = []) {
     const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s); if (!advance) return false;
     const delta = advance.dt_s; if (delta < 1e-6) { this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; return true; }
-    this.lastTime = advance.nextTime_s; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
+    this.lastTime = advance.nextTime_s; this.info.submittedTime_s = this.lastTime; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
     const substeps = 1, dt = delta;
     const activeBodies = bodies.slice(0, 12), bodyData = new Float32Array(12 * 20), shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
     activeBodies.forEach((body, index) => { const o = index * 20, d = body.description.dimensions_m, q = body.orientation; bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, shapeIndex[body.description.shape], d.x, d.y, d.z, 0, q.w, q.x, q.y, q.z, body.linearVelocity_m_s.x, body.linearVelocity_m_s.y, body.linearVelocity_m_s.z, 0, body.angularVelocity_rad_s.x, body.angularVelocity_rad_s.y, body.angularVelocity_rad_s.z, 0], o); });

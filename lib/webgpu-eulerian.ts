@@ -58,7 +58,12 @@ export interface GPUEulerianInfo {
   maxPressureLocation?: GPUFieldLocation;
   maxPressureResidualLocation?: GPUFieldLocation;
   lastDt_s?: number;
+  /** Latest GPU step submitted to the device queue. */
+  submittedTime_s?: number;
+  /** Latest GPU step encoded by the solver. */
   simulatedTime_s?: number;
+  /** Latest GPU step confirmed complete by the device queue. */
+  completedTime_s?: number;
   simulationLag_s?: number;
   maximumTallCellHeight?: number;
   encodedSteps?: number;
@@ -244,7 +249,6 @@ fn inwardFlux(id:vec3i,dt:f32)->f32{
 fn donorScale(id:vec3i,dt:f32)->f32{return min(1.0,volume(id)/max(outwardFlux(id,dt),1e-9));}
 fn receiverScale(id:vec3i,dt:f32)->f32{return min(1.0,max(0.0,1.0-volume(id))/max(inwardFlux(id,dt),1e-9));}
 fn limitedVolumeFlux(id:vec3i,axis:u32,dt:f32)->f32{
-  let sourceFlux=inflowBoundaryFlux(id,axis,dt);if(sourceFlux!=0.0){return sourceFlux;}
   let offset=select(select(vec3i(0,0,1),vec3i(0,1,0),axis==1u),vec3i(1,0,0),axis==0u);
   let neighbor=id+offset;let flux=rawVolumeFlux(id,axis,dt);
   if(flux>=0.0){return flux*min(donorScale(id,dt),receiverScale(neighbor,dt));}
@@ -256,7 +260,7 @@ fn advectedVolume(id:vec3i,dt:f32)->f32{
   let fxp=limitedVolumeFlux(id,0u,dt);let fxm=limitedVolumeFlux(id-ex,0u,dt);
   let fyp=limitedVolumeFlux(id,1u,dt);let fym=limitedVolumeFlux(id-ey,1u,dt);
   let fzp=limitedVolumeFlux(id,2u,dt);let fzm=limitedVolumeFlux(id-ez,2u,dt);
-  return centre-(fxp-fxm+fyp-fym+fzp-fzm);
+  return clamp(centre-(fxp-fxm+fyp-fym+fzp-fzm)+inflowReceiverSource(id,dt),0.0,1.0);
 }
 
 fn diffusionVelocity(p:vec3i)->vec3f{let v=textureLoad(velocityIn,clampCell(p),0).xyz;if(params.boundary.y>0.5&&!valid(p)){return -v;}return v;}
@@ -328,7 +332,7 @@ fn jacobi(@builtin(global_invocation_id) gid: vec3u) {
   let old=textureLoad(pressureIn,id,0).x;let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
   let diagonal=stencilCoefficient(id,id-ex,0u)+stencilCoefficient(id,id+ex,0u)+stencilCoefficient(id,id-ey,1u)+stencilCoefficient(id,id+ey,1u)+stencilCoefficient(id,id-ez,2u)+stencilCoefficient(id,id+ez,2u);
   let sum=stencilPressure(id,id-ex,0u)+stencilPressure(id,id+ex,0u)+stencilPressure(id,id-ey,1u)+stencilPressure(id,id+ey,1u)+stencilPressure(id,id-ez,2u)+stencilPressure(id,id+ez,2u);
-  let hMin=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));let targetDivergence=min(0.5*max(volume(id)-1.0,0.0),1.0)/hMin;let rhs=params.physical.x*(divergenceAt(id)-targetDivergence)/params.dimsDt.w;
+  let rhs=params.physical.x*divergenceAt(id)/params.dimsDt.w;
   let next=(sum-rhs)/max(diagonal,1e-9);
   textureStore(pressureOut,id,vec4f(mix(old,next,0.8),0.0,0.0,0.0));
 }
@@ -359,6 +363,9 @@ fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
     atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*1000000.0)));atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*1000000.0)));atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*1000000.0)));
     atomicAdd(&rigidExchange[base+6u],i32(round(phi*65536.0)));break;
   }
+  // The nozzle mouth is an open boundary. Coupling the visual nozzle body
+  // must not replace the prescribed reservoir velocity at that opening.
+  v=applyInflowVelocity(id,v);
   textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phi));
 }
 
@@ -442,7 +449,7 @@ export class WebGPUEulerianSolver {
     this.multigrid=new TallCellMultigrid(device,this.layout,{pressureA:this.pressureA,pressureB:this.pressureB,volume:this.volumeA,solid:this.solidA,base:this.heightA,diagnostics:this.reductionBuffer},options.pressureCycles??(options.adaptiveOpticalLayer?8:2));
     const pressureIterations=1,cellSize=this.layout.cellSize_m,columnCount=nx*nz,allocatedBytes=this.layout.packedSampleCount*80+columnCount*12+128+12*80+12*8*4+this.multigrid.allocatedBytes+(this.adaptiveLayer?.allocatedBytes??0);
     const adaptiveSummary=options.adaptiveOpticalLayer?summarizeAdaptiveLayer(this.layout.columnBases,this.layout.columnBases,fineNy):undefined;
-    this.info={nx,ny:fineNy,nz,storedNy:packedNy,cellCount:this.layout.packedSampleCount,equivalentUniformCells:this.layout.equivalentUniformCellCount,compressionRatio:adaptiveSummary?adaptiveSummary.activePressureSamples/this.layout.equivalentUniformCellCount:this.layout.compressionRatio,regularLayers:this.layout.settings.regularLayers,maximumNeighborDelta:this.layout.settings.maximumNeighborDelta,gridKind:options.adaptiveOpticalLayer?"adaptive-optical-layer":"restricted-tall-cell",cellSize_m:Math.min(cellSize.x,cellSize.y,cellSize.z),pressureIterations,pressureSolver:`1 full + ${this.multigrid.refinementCycles} V-cycles · ${this.multigrid.levelCount} levels · RBGS`,allocatedBytes,quality,encodedSteps:0,adaptiveActivePressureSamples:adaptiveSummary?.activePressureSamples,adaptiveOpticalCellCount:adaptiveSummary?.opticalCellCount,adaptiveTallColumnCount:adaptiveSummary?.tallColumnCount,adaptiveSmoothingAddedCells:adaptiveSummary?.smoothingAddedCells};
+    this.info={nx,ny:fineNy,nz,storedNy:packedNy,cellCount:this.layout.packedSampleCount,equivalentUniformCells:this.layout.equivalentUniformCellCount,compressionRatio:adaptiveSummary?adaptiveSummary.activePressureSamples/this.layout.equivalentUniformCellCount:this.layout.compressionRatio,regularLayers:this.layout.settings.regularLayers,maximumNeighborDelta:this.layout.settings.maximumNeighborDelta,gridKind:options.adaptiveOpticalLayer?"adaptive-optical-layer":"restricted-tall-cell",cellSize_m:Math.min(cellSize.x,cellSize.y,cellSize.z),pressureIterations,pressureSolver:`1 full + ${this.multigrid.refinementCycles} V-cycles · ${this.multigrid.levelCount} levels · RBGS`,allocatedBytes,quality,encodedSteps:0,submittedTime_s:0,simulatedTime_s:0,completedTime_s:0,simulationLag_s:0,adaptiveActivePressureSamples:adaptiveSummary?.activePressureSamples,adaptiveOpticalCellCount:adaptiveSummary?.opticalCellCount,adaptiveTallColumnCount:adaptiveSummary?.tallColumnCount,adaptiveSmoothingAddedCells:adaptiveSummary?.smoothingAddedCells};
     this.initializeVolume();
     this.extrapolateFirstGroup=this.group(this.velocityA,this.velocityD,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
     this.extrapolateSecondGroup=this.group(this.velocityD,this.velocityC,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
@@ -480,7 +487,7 @@ export class WebGPUEulerianSolver {
   private timing(name:keyof NonNullable<GPUEulerianInfo["gpuTimings"]>){if(!this.querySet)return undefined;const segment={name,start:this.queryCount++,end:this.queryCount++};this.querySegments.push(segment);return segment;}
 
   advanceTo(time_s:number,bodies:RigidBodyState[]=[]){
-    const advance=planGPUAdvance(time_s,this.lastTime,this.scene.numerics.maxDt_s);if(!advance)return false;const delta=advance.dt_s;if(delta<1e-6){this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;return true;}this.lastTime=advance.nextTime_s;this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;const c=this.scene.container,rho=this.scene.fluid.density_kg_m3,sigma=0,substeps=1,dt=delta;
+    const advance=planGPUAdvance(time_s,this.lastTime,this.scene.numerics.maxDt_s);if(!advance)return false;const delta=advance.dt_s;if(delta<1e-6){this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;return true;}this.lastTime=advance.nextTime_s;this.info.submittedTime_s=this.lastTime;this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;const c=this.scene.container,rho=this.scene.fluid.density_kg_m3,sigma=0,substeps=1,dt=delta;
     const activeBodies=bodies.slice(0,12),bodyData=new Float32Array(12*20),shapeIndex={sphere:0,box:1,capsule:2,cylinder:3} as const;activeBodies.forEach((body,index)=>{const o=index*20,d=body.description.dimensions_m,q=body.orientation;bodyData.set([body.position_m.x,body.position_m.y,body.position_m.z,shapeIndex[body.description.shape],d.x,d.y,d.z,boundingRadius(body),q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,0,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3],o);});this.device.queue.writeBuffer(this.rigidBuffer,0,bodyData);
     const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;this.info.encodedSteps=(this.info.encodedSteps??0)+substeps;this.info.lastDt_s=dt;this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,dt,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,0,rho,this.scene.fluid.dynamicViscosity_Pa_s,this.adaptiveLayer?1:0,0,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,0,0,0]));
     this.querySegments=[];this.queryCount=0;if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"}),totalTiming=this.timing("total_ms");if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:totalTiming.start}});pass.end();}encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductionBuffer);

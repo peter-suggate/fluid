@@ -11,6 +11,7 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --import tsx --test tests/*.test.ts",
     "test:unit": "node --import tsx --test tests/*.test.ts",
+    "test:webgpu": "FLUID_SCENE=${FLUID_SCENE:-all} node --import tsx tools/run-webgpu-smoke.ts",
     "benchmark:rigid": "node --import tsx tools/run-rigid-benchmarks.ts",
     "native:run": "cd native && swift run -c release FluidMetal",
     "native:build": "cd native && swift build -c release",
@@ -20,6 +21,7 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
+    "mediabunny": "^1.50.8",
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6",

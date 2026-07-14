@@ -141,3 +141,13 @@ test("E4-10 dam-break reservoir occupies one corner rather than a full-depth wal
   const representedFill = solver.diagnostics.occupiedVolume_m3 / tankVolume;
   assert.ok(Math.abs(representedFill - defaultScene.container.fillFraction) < 0.04, String(representedFill));
 });
+
+test("CPU differential oracle can use exact GPU grid dimensions", () => {
+  const scene = testScene("tank-fill");
+  scene.container.fillFraction = 0.5;
+  const solver = new EulerianFluidSolver(scene, { dimensions: { nx: 7, ny: 8, nz: 9 }, markerSamplesPerAxis: 1 });
+  assert.deepEqual([solver.nx, solver.ny, solver.nz], [7, 8, 9]);
+  assert.equal(solver.fluid.length, 7 * 8 * 9);
+  assert.equal(solver.markerVolume_m3, solver.cellVolume);
+  assert.equal(solver.initialMarkerVolume_m3, solver.initialOccupiedVolume_m3);
+});

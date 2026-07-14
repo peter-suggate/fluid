@@ -35,7 +35,8 @@ export function WebGPUViewport() {
         useDiagnosticsStore.getState().set({ gpuStatus: status });
       },
       (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
-      (loads) => simulation.mergeGPULoads(loads)
+      (loads) => simulation.mergeGPULoads(loads),
+      (time_s) => simulation.gpuAdvanceCompleted(time_s)
     );
     let frame = 0;
     let alive = true;

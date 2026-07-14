@@ -35,6 +35,21 @@ export interface EulerianRenderState {
 
 type VelocityArrays = { u: Float64Array; v: Float64Array; w: Float64Array };
 
+export interface EulerianGridDimensions {
+  nx: number;
+  ny: number;
+  nz: number;
+}
+
+export interface EulerianGridOptions {
+  /** Approximate upper bound used by the interactive/background oracle. */
+  maxCells?: number;
+  /** Exact cubic-grid dimensions used by differential GPU tests. */
+  dimensions?: EulerianGridDimensions;
+  /** Marker samples along each cell axis. Production/reference default: 2. */
+  markerSamplesPerAxis?: number;
+}
+
 const sq = (x: number) => x * x;
 
 export class EulerianFluidSolver {
@@ -52,17 +67,28 @@ export class EulerianFluidSolver {
   private inflowMarkerRemainder = 0;
   diagnostics: EulerianDiagnostics;
 
-  constructor(readonly scene: SceneDescription, maxCells = 1800) {
+  constructor(readonly scene: SceneDescription, maxCellsOrOptions: number | EulerianGridOptions = 1800) {
     const c = scene.container;
-    let effective = scene.nominalResolution.length_m;
-    let nx = Math.max(4, Math.ceil(c.width_m / effective));
-    let ny = Math.max(4, Math.ceil(c.height_m / effective));
-    let nz = Math.max(4, Math.ceil(c.depth_m / effective));
-    if (nx * ny * nz > maxCells) {
-      effective *= Math.cbrt((nx * ny * nz) / maxCells);
-      nx = Math.max(4, Math.floor(c.width_m / effective));
-      ny = Math.max(4, Math.floor(c.height_m / effective));
-      nz = Math.max(4, Math.floor(c.depth_m / effective));
+    const options = typeof maxCellsOrOptions === "number" ? { maxCells: maxCellsOrOptions } : maxCellsOrOptions;
+    let nx: number, ny: number, nz: number;
+    if (options.dimensions) {
+      const dimensions = options.dimensions;
+      for (const [axis, value] of Object.entries(dimensions)) {
+        if (!Number.isInteger(value) || value < 4) throw new Error(`CPU oracle ${axis} must be an integer >= 4`);
+      }
+      ({ nx, ny, nz } = dimensions);
+    } else {
+      const maxCells = options.maxCells ?? 1800;
+      let effective = scene.nominalResolution.length_m;
+      nx = Math.max(4, Math.ceil(c.width_m / effective));
+      ny = Math.max(4, Math.ceil(c.height_m / effective));
+      nz = Math.max(4, Math.ceil(c.depth_m / effective));
+      if (nx * ny * nz > maxCells) {
+        effective *= Math.cbrt((nx * ny * nz) / maxCells);
+        nx = Math.max(4, Math.floor(c.width_m / effective));
+        ny = Math.max(4, Math.floor(c.height_m / effective));
+        nz = Math.max(4, Math.floor(c.depth_m / effective));
+      }
     }
     this.nx = nx; this.ny = ny; this.nz = nz;
     this.hx = c.width_m / nx; this.hy = c.height_m / ny; this.hz = c.depth_m / nz;
@@ -72,16 +98,22 @@ export class EulerianFluidSolver {
     this.pressure = new Float64Array(nx * ny * nz);
     this.fluid = new Uint8Array(nx * ny * nz);
     this.initializeOccupancy();
+    const markerSamplesPerAxis = options.markerSamplesPerAxis ?? 2;
+    if (!Number.isInteger(markerSamplesPerAxis) || markerSamplesPerAxis < 1 || markerSamplesPerAxis > 4) throw new Error("CPU oracle markerSamplesPerAxis must be an integer in [1, 4]");
     const points: number[] = [];
     for (let k = 0; k < nz; k += 1) for (let j = 0; j < ny; j += 1) for (let i = 0; i < nx; i += 1) {
       if (!this.fluid[this.cidx(i, j, k)]) continue;
-      for (let sz = 0; sz < 2; sz += 1) for (let sy = 0; sy < 2; sy += 1) for (let sx = 0; sx < 2; sx += 1) {
-        points.push(-c.width_m / 2 + (i + 0.25 + 0.5 * sx) * this.hx, (j + 0.25 + 0.5 * sy) * this.hy, -c.depth_m / 2 + (k + 0.25 + 0.5 * sz) * this.hz);
+      for (let sz = 0; sz < markerSamplesPerAxis; sz += 1) for (let sy = 0; sy < markerSamplesPerAxis; sy += 1) for (let sx = 0; sx < markerSamplesPerAxis; sx += 1) {
+        points.push(
+          -c.width_m / 2 + (i + (sx + 0.5) / markerSamplesPerAxis) * this.hx,
+          (j + (sy + 0.5) / markerSamplesPerAxis) * this.hy,
+          -c.depth_m / 2 + (k + (sz + 0.5) / markerSamplesPerAxis) * this.hz
+        );
       }
     }
     this.markers = new Float64Array(points);
     this.initialOccupiedVolume_m3 = this.countFluidCells() * this.cellVolume;
-    this.markerVolume_m3 = this.cellVolume / 8;
+    this.markerVolume_m3 = this.cellVolume / markerSamplesPerAxis ** 3;
     this.initialMarkerVolume_m3 = this.markerVolume_m3 * (this.markers.length / 3);
     this.diagnostics = this.collectDiagnostics(0, "fixed", Infinity, Infinity, 0, 0, 0, 0, true, 0);
   }
