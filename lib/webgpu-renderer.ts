@@ -2,10 +2,28 @@ import { cameraPosition } from "./math";
 import type { CameraState, SceneDescription, ViewMode } from "./model";
 import type { RigidBodyState } from "./rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
-import { WebGPUEulerianSolver, type GPUEulerianInfo, type GPURigidLoad, type GPUGridMethod, type GPUQuality } from "./webgpu-eulerian";
-import { WebGPUUniformEulerianSolver } from "./webgpu-uniform-eulerian";
+import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
+import { getMethod, type GPUSolverInstance, type MethodParamValues } from "./methods";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
+
+/**
+ * Debug cross-section of the solver grid, after Chentanez & Mueller Fig. 2:
+ * teal tall cells, outlined regular cells with centre sample dots, and the
+ * tall cell's top/bottom subcell samples. Uniform grids render as an
+ * all-regular band. `position` selects the slice layer as a 0..1 fraction.
+ */
+export interface GridOverlayConfig {
+  axis: "off" | "z" | "x";
+  position: number;
+}
+
+/** Everything the renderer needs to know about the selected method. */
+export interface SimulationRunConfig {
+  methodId: string;
+  quality: GPUQuality;
+  values: MethodParamValues;
+}
 
 export type GPUStatus =
   | { state: "initializing"; label: string }
@@ -29,6 +47,7 @@ struct Uniforms {
   container: vec4f,
   options: vec4f,
   gridInfo: vec4f,
+  debug: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -198,6 +217,77 @@ fn fluidValue(uvw: vec3f) -> f32 {
   let z0 = mix(mix(lower.x, lower.y, f.x), mix(lower.z, lower.w, f.x), f.y);
   let z1 = mix(mix(upper.x, upper.y, f.x), mix(upper.z, upper.w, f.x), f.y);
   return mix(z0, z1, f.z);
+}
+
+// Paper-style grid cross-section (Fig. 2): returns rgb + blend alpha for a
+// point on the slice plane. axis is 1 for a z-normal slice (x-y section),
+// 2 for an x-normal slice (z-y section). footprint is the world-space size
+// of one screen pixel at the slice, used for analytic line/dot antialiasing
+// (fwidth is unavailable here: the slice hit is non-uniform control flow).
+fn gridOverlaySample(p: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint: f32) -> vec4f {
+  let dims = vec3i(u.gridInfo.xyz);
+  let local3 = clamp((p - boundsMin) / size, vec3f(0.0), vec3f(0.99999)) * vec3f(dims);
+  let cell = clamp(vec3i(floor(local3)), vec3i(0), dims - vec3i(1));
+  var s = local3.xy;
+  var cellPerPixel = vec2f(footprint * f32(dims.x) / size.x, footprint * f32(dims.y) / size.y);
+  if (axis == 2) {
+    s.x = local3.z;
+    cellPerPixel.x = footprint * f32(dims.z) / size.z;
+  }
+  let d = max(cellPerPixel, vec2f(1e-5));
+  let pixelsPerCell = 1.0 / max(d.x, d.y);
+  let lineFade = smoothstep(2.5, 6.0, pixelsPerCell);
+  let dotFade = smoothstep(9.0, 18.0, pixelsPerCell);
+
+  let tallGrid = u.gridInfo.w > 1.5;
+  var base = 0.0;
+  if (tallGrid) { base = round(textureLoad(tallCellBases, cell.xz, 0).x); }
+  let stored = vec3i(textureDimensions(fluidField));
+  let bandLayers = select(dims.y, stored.y - 2, tallGrid);
+  let bandTop = min(i32(base) + bandLayers, dims.y);
+
+  let columnLine = 1.0 - smoothstep(0.4, 1.2, (0.5 - abs(fract(s.x) - 0.5)) / d.x);
+  var fill = vec3f(0.0);
+  var alpha = 0.0;
+  var line = 0.0;
+  var sampleDot = 0.0;
+  if (cell.y < i32(base)) {
+    // One tall cell per column, drawn as a single undivided element spanning
+    // 0..base with samples at its bottom (packed y = 0) and top (packed y = 1)
+    // subcells. Its outline (base edge + bottom) stays strong while interior
+    // column separators are muted so the cell reads as one tall rectangle.
+    let bottom = textureLoad(fluidField, vec3i(cell.x, 0, cell.z), 0).x;
+    let top = textureLoad(fluidField, vec3i(cell.x, 1, cell.z), 0).x;
+    let wet = mix(bottom, top, clamp(s.y / max(base, 1.0), 0.0, 1.0)) > 0.5;
+    fill = select(vec3f(0.10, 0.23, 0.22), vec3f(0.03, 0.52, 0.47), wet);
+    alpha = select(0.40, 0.78, wet);
+    let baseEdge = 1.0 - smoothstep(0.4, 1.4, min(s.y, abs(base - s.y)) / d.y);
+    line = max(columnLine * lineFade * 0.45, baseEdge);
+    let dy = min(abs(s.y - 0.5), abs(s.y - (base - 0.5)));
+    let dist = length(vec2f(fract(s.x) - 0.5, dy));
+    sampleDot = (1.0 - smoothstep(0.17, 0.17 + max(d.x, d.y) * 1.6, dist)) * dotFade;
+  } else if (cell.y < bandTop) {
+    // Regular cubic cells: fine outlines with a centre sample dot; wet cells
+    // are tinted so the surface band placement is visible at a glance.
+    let wet = fluidSample(cell) > 0.5;
+    fill = select(vec3f(0.85, 0.91, 0.89), vec3f(0.20, 0.50, 0.74), wet);
+    alpha = select(0.18, 0.55, wet);
+    line = max(columnLine, 1.0 - smoothstep(0.4, 1.2, (0.5 - abs(fract(s.y) - 0.5)) / d.y));
+    let dist = length(fract(s.xy) - vec2f(0.5));
+    sampleDot = (1.0 - smoothstep(0.17, 0.17 + max(d.x, d.y) * 1.6, dist)) * dotFade;
+  } else {
+    // Air above the regular band: unrepresented on the tall-cell grid. Faint
+    // warning hatching so liquid escaping the band is easy to spot.
+    let stripe = smoothstep(0.38, 0.5, abs(fract((s.x + s.y) * 0.25) - 0.5));
+    fill = vec3f(0.62, 0.24, 0.22);
+    alpha = 0.08 + 0.10 * stripe;
+    line = columnLine * 0.35;
+  }
+  line *= lineFade;
+  var color = mix(fill, vec3f(0.03, 0.08, 0.09), line);
+  color = mix(color, vec3f(0.02, 0.05, 0.06), sampleDot);
+  alpha = max(alpha, max(line * 0.85, sampleDot * 0.92));
+  return vec4f(color, alpha);
 }
 
 struct InterfaceCell {
@@ -386,6 +476,39 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
     color = rigidColor;
   }
 
+  let overlayAxis = i32(round(u.debug.x));
+  if (overlayAxis > 0 && u.gridInfo.w > 0.5) {
+    let dims = vec3f(u.gridInfo.xyz);
+    // Snap the slice to the centre of a fine layer so exactly one column of
+    // cells is sampled, exactly as the paper's 2D cross-section reads.
+    var denominator = rd.z;
+    var rayOrigin = ro.z;
+    var planeCoordinate: f32;
+    if (overlayAxis == 1) {
+      let layer = clamp(floor(u.debug.y * dims.z), 0.0, dims.z - 1.0);
+      planeCoordinate = boundsMin.z + (layer + 0.5) * size.z / dims.z;
+    } else {
+      let layer = clamp(floor(u.debug.y * dims.x), 0.0, dims.x - 1.0);
+      planeCoordinate = boundsMin.x + (layer + 0.5) * size.x / dims.x;
+      denominator = rd.x;
+      rayOrigin = ro.x;
+    }
+    if (abs(denominator) > 1e-5) {
+      let tPlane = (planeCoordinate - rayOrigin) / denominator;
+      let planePoint = ro + rd * tPlane;
+      let inside = all(planePoint >= boundsMin - vec3f(1e-4)) && all(planePoint <= boundsMax + vec3f(1e-4));
+      if (tPlane > 0.0 && inside && tPlane < rigidHit.t) {
+        let footprint = tPlane * 1.44 / max(resolution.y, 1.0);
+        let overlay = gridOverlaySample(planePoint, boundsMin, size, overlayAxis, footprint);
+        color = mix(color, overlay.xyz, overlay.w);
+        // Gripper: an accent bar along the slice's top edge; dragging it in
+        // the viewport sweeps the slice through the volume.
+        let grip = clamp(1.0 - (boundsMax.y - planePoint.y) / (0.03 * size.y), 0.0, 1.0);
+        color = mix(color, vec3f(0.51, 0.95, 0.82), grip * 0.8);
+      }
+    }
+  }
+
   let vignette = 1.0 - 0.22 * dot(ndc * 0.58, ndc * 0.58);
   color *= vignette;
   color = color / (color + vec3f(1.0));
@@ -407,6 +530,8 @@ struct Out { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 
 export class FluidLabRenderer {
   private device?: GPUDevice;
+  private disposed = false;
+  private deviceLost = false;
   private context?: GPUCanvasContext;
   private pipeline?: GPURenderPipeline;
   private upscalePipeline?: GPURenderPipeline;
@@ -421,7 +546,7 @@ export class FluidLabRenderer {
   private columnBaseTexture?: GPUTexture;
   private fluidTextureKey = "";
   private fluidRevision = -1;
-  private gpuFluid?: WebGPUEulerianSolver | WebGPUUniformEulerianSolver;
+  private gpuFluid?: GPUSolverInstance;
   private gpuFluidKey = "";
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
   private gpuRigidLoadCallback?: (loads: GPURigidLoad[]) => void;
@@ -449,6 +574,7 @@ export class FluidLabRenderer {
     }
     const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
     const device = await adapter.requestDevice({ requiredFeatures });
+    if (this.disposed) { device.destroy(); return; }
     const context = this.canvas.getContext("webgpu");
     if (!context) {
       this.onStatus({ state: "unavailable", label: "WebGPU canvas context could not be created" });
@@ -457,11 +583,24 @@ export class FluidLabRenderer {
     this.device = device;
     this.context = context;
     this.format = navigator.gpu.getPreferredCanvasFormat();
+    device.addEventListener("uncapturederror", (event) => console.error(`WebGPU validation: ${event.error.message}`));
+    void device.lost.then((info) => {
+      if (this.disposed || this.device !== device || this.deviceLost) return;
+      this.deviceLost = true;
+      const fluid = this.gpuFluid;
+      this.gpuFluid = undefined;
+      this.gpuFluidKey = "";
+      try { fluid?.destroy(); } catch { /* Resources may already be invalid after device loss. */ }
+      this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` });
+    }).catch((error: unknown) => {
+      if (!this.disposed) console.error("Unable to observe WebGPU device loss", error);
+    });
     if(device.features.has("timestamp-query")){this.renderQuerySet=device.createQuerySet({type:"timestamp",count:2});this.renderQueryResolve=device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
     context.configure({ device, format: this.format, alphaMode: "opaque" });
 
     const shaderModule = device.createShaderModule({ label: "Fluid Lab presentation shader", code: shader });
     const compilation = await shaderModule.getCompilationInfo();
+    if (this.disposed || this.deviceLost) return;
     const errors = compilation.messages.filter((message) => message.type === "error");
     if (errors.length > 0) throw new Error(errors.map((error) => `${error.lineNum}:${error.linePos} ${error.message}`).join("\n"));
 
@@ -475,21 +614,19 @@ export class FluidLabRenderer {
     const upscaleModule=device.createShaderModule({label:"Presentation upscale shader",code:upscaleShader});
     this.upscalePipeline=device.createRenderPipeline({label:"Presentation upscale",layout:"auto",vertex:{module:upscaleModule,entryPoint:"vertexMain"},fragment:{module:upscaleModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
-    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.columnBaseTexture = device.createTexture({ label: "Uniform-grid tall-cell fallback", size: [1, 1], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.rebuildBindGroup();
 
-    device.addEventListener("uncapturederror", (event) => console.error(`WebGPU validation: ${event.error.message}`));
-    device.lost.then((info) => this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` }));
     const info = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     const adapterName = info ? [info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter" : "WebGPU adapter";
     this.onStatus({ state: "ready", label: "WebGPU renderer ready", adapter: adapterName });
   }
 
   private rebuildBindGroup(texture = this.fluidTexture, columnBases = this.columnBaseTexture) {
-    if (!this.device || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !texture || !columnBases) return;
+    if (!this.device || this.disposed || this.deviceLost || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !texture || !columnBases) return;
     this.bindGroup = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } },
       { binding: 1, resource: { buffer: this.bodyBuffer } },
@@ -498,12 +635,12 @@ export class FluidLabRenderer {
     ] });
   }
 
-  private ensureGPUFluid(scene: SceneDescription, quality: GPUQuality, method: GPUGridMethod, time_s: number, bodies: RigidBodyState[]) {
-    if (!this.device) return undefined;
-    const key = `${method}:${quality}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
-    const createSolver = () => method === "uniform"
-      ? new WebGPUUniformEulerianSolver(this.device!, scene, quality, this.gpuRigidLoadCallback)
-      : new WebGPUEulerianSolver(this.device!, scene, quality, this.gpuRigidLoadCallback);
+  private ensureGPUFluid(scene: SceneDescription, config: SimulationRunConfig, time_s: number, bodies: RigidBodyState[]) {
+    if (!this.device || this.disposed || this.deviceLost) return undefined;
+    const method = getMethod(config.methodId);
+    if (!method.createSolver) return undefined;
+    const key = `${config.methodId}:${config.quality}:${JSON.stringify(config.values)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
+    const createSolver = () => method.createSolver!(this.device!, scene, config.quality, config.values, this.gpuRigidLoadCallback);
     if (!this.gpuFluid || key !== this.gpuFluidKey) {
       this.gpuFluid?.destroy(); this.gpuFluid = createSolver(); this.gpuFluidKey = key; this.lastGPUReadbackSecond = -1;
       this.rebuildBindGroup(this.gpuFluid.volumeTexture,this.gpuFluid.columnBaseTexture); this.gpuInfoCallback?.(this.gpuFluid.info);
@@ -514,12 +651,12 @@ export class FluidLabRenderer {
     // Sample at 30 Hz of simulation time so a paper-sized 1/30 s step cannot
     // cross an instability threshold between diagnostic readbacks. The solver
     // coalesces reads while a previous map is pending.
-    const diagnosticTick=Math.round(time_s*30);if(diagnosticTick!==this.lastGPUReadbackSecond){this.lastGPUReadbackSecond=diagnosticTick;void this.gpuFluid.readStats().then(info=>this.gpuInfoCallback?.({...info}));}
+    const diagnosticTick=Math.round(time_s*30);if(diagnosticTick!==this.lastGPUReadbackSecond){this.lastGPUReadbackSecond=diagnosticTick;void this.gpuFluid.readStats().then(info=>this.gpuInfoCallback?.({...info})).catch(()=>{ /* Device loss is reported by device.lost. */ });}
     return this.gpuFluid.info;
   }
 
   private uploadFluid(fluid?: EulerianRenderState) {
-    if (!this.device || !fluid) return;
+    if (!this.device || this.disposed || this.deviceLost || !fluid) return;
     const key = `${fluid.nx}x${fluid.ny}x${fluid.nz}`;
     if (key !== this.fluidTextureKey) {
       this.fluidTexture?.destroy();
@@ -538,6 +675,7 @@ export class FluidLabRenderer {
   }
 
   resize(): void {
+    if (this.disposed || this.deviceLost) return;
     const ratio = Math.min(window.devicePixelRatio || 1, 2);
     const width = Math.max(1, Math.floor(this.canvas.clientWidth * ratio));
     const height = Math.max(1, Math.floor(this.canvas.clientHeight * ratio));
@@ -561,14 +699,14 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.renderScale * 100)}%)`;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, view: ViewMode, bodies: RigidBodyState[], selectedBodyId?: string, fluid?: EulerianRenderState, backend: SimulationBackend = "webgpu", quality: GPUQuality = "balanced", method: GPUGridMethod = "tall-cell"): RendererFrameMetrics {
-    if (!this.device || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, view: ViewMode, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig): RendererFrameMetrics {
+    if (!this.device || this.disposed || this.deviceLost || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     this.resize();
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     const start = performance.now();
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
-    const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, quality, method, time_s, bodies) : undefined;
+    const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, config, time_s, bodies) : undefined;
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const uniform = new Float32Array([
@@ -577,7 +715,8 @@ export class FluidLabRenderer {
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
       view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), 0,
-      gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "restricted-tall-cell" ? 2 : 1) : fluid ? 1 : 0
+      gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "uniform" ? 1 : 2) : fluid ? 1 : 0,
+      gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : 0, gridOverlay?.position ?? 0.5, 0, 0
     ]);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
     const bodyData = new Float32Array(12 * 16);
@@ -611,5 +750,17 @@ export class FluidLabRenderer {
     this.device.queue.submit([encoder.finish()]);
     if(renderReadback){const readback=renderReadback;void readback.mapAsync(GPUMapMode.READ).then(()=>{const times=new BigUint64Array(readback.getMappedRange());this.gpuRender_ms=Number(times[1]-times[0])/1e6;readback.unmap();readback.destroy();}).catch(()=>readback.destroy()).finally(()=>{this.renderReadbackPending=false;});}
     return {cpuFrame_ms:performance.now()-start,cpuPhysicsSubmit_ms,cpuDataUpload_ms,cpuRenderEncode_ms:performance.now()-renderStart,gpuRender_ms:this.gpuRender_ms};
+  }
+
+  destroy(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    const fluid = this.gpuFluid;
+    this.gpuFluid = undefined;
+    try { fluid?.destroy(); } catch { /* Device loss can invalidate solver resources first. */ }
+    for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.uniformBuffer, this.bodyBuffer, this.renderQuerySet, this.renderQueryResolve]) {
+      try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }
+    }
+    try { this.device?.destroy(); } catch { /* The device may already be lost. */ }
   }
 }

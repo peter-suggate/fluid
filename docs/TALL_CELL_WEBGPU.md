@@ -8,7 +8,7 @@ Simulation Using a Restricted Tall Cell Grid” (SIGGRAPH 2011).
 Reference: <https://matthias-research.github.io/pages/publications/tallCells.pdf>
 
 Each x/z column contains one variable-height bottom cell and a moving band of
-ordinary cubic cells near the liquid surface. The browser retains VOF surface
+ordinary cubic cells near the liquid surface. The browser uses density-based surface
 tracking and immersed rigid bodies while implementing the paper's endpoint
 reconstruction, bounded MacCormack velocity advection, remeshing, ghost-fluid
 pressure boundary, collocated operators, and full-cycle multigrid hierarchy.
@@ -64,24 +64,40 @@ deliberate departure from the paper.
 
 ## Transport, remeshing, and conservation
 
-VOF transport exchanges top vertical flux with the first regular cell and
-integrates horizontal tall faces over every covered cubic subcell. Exposed
-height differences next to shorter columns are summed explicitly.
+Surface density uses the same donor/receiver-limited conservative VOF face flux
+as the matched cubic solver. A regular sample has unit control volume and the
+bottom tall sample has volume equal to its covered cubic-cell height. Every
+ordinary face contribution is shared by its two adjacent control volumes, so
+the update conserves mass by pairwise cancellation rather than a post-step
+rescaling.
+
+A deep face shared by two tall cells is integrated with 16 bottom, 16 top, and
+16 stratified interior samples. Both columns evaluate the identical shared-face
+integral. Only the portion where one side is tall and the other is regular is
+expanded cell-by-cell; the paper's neighbor-height bound `D` keeps that work
+bounded. Dispatch and deep shared-face work therefore remain independent of
+the full domain depth.
+
+If every planned tall height is zero, the layout enters the paper's ordinary
+cell limit and allocates every cubic row. The two endpoint slots are inactive;
+it is invalid to retain only a shortened surface band in this state because
+that would silently remove part of the domain.
 
 On remesh, regular values are copied or interpolated at their world positions
-and endpoint velocities use a least-squares fit. For VOF, the shader computes
-the old represented column amount and assigns the residual after copying the
-new regular band to the new tall cell. This preserves every representable
-column integral without a global volume correction.
+and endpoint velocities use a least-squares fit. For surface density, the
+shader computes the old represented column amount and assigns the residual
+after copying the new regular band to the new tall cell. This preserves every
+representable column integral without a global volume correction. The residual
+is no longer clamped to one: density above one is temporary stored mass, not
+volume to erase.
 
 External force integration is restricted to the liquid domain. Extrapolated
 air samples support characteristic tracing but do not accumulate their own
 gravity impulse.
 
-The default moving-dam browser sample measured 0.07% raw VOF drift at 2.24 s
-after the adaptive uniform fallback. The matching uniform path measured
-effectively zero drift. These are interactive measurements, not unit-test
-acceptance thresholds.
+The bounded deep-face quadrature and the ordinary-cell fallback are covered by
+layout tests. Long-run hose and deep-water measurements are required whenever
+the transport or remeshing rules change.
 
 ## Rigid-body coupling
 
@@ -95,8 +111,8 @@ buoyancy that is not present in the explicit GPU exchange buffer.
 
 ## Deliberate remaining departures
 
-- VOF is persistent. A narrow signed-distance field is reconstructed for
-  pressure; the paper advects level set `phi` directly and periodically
+- Surface density is persistent. A narrow signed-distance field is reconstructed
+  for pressure; the paper advects level set `phi` directly and periodically
   reinitializes it.
 - Velocity extrapolation uses repeated fine-grid neighbor passes rather than
   the paper's multigrid known/unknown hierarchy.
@@ -105,8 +121,9 @@ buoyancy that is not present in the explicit GPU exchange buffer.
   are not implemented.
 - Terrain cut cells, particle level-set tracking, particle thickening, foam,
   spray, and mist are outside this browser core.
-- Tall-face VOF evaluation is currently linear in tall-cell height. Packed
-  pressure, projection, coupling, and advection dispatch counts remain
+- The paper's separate local interface-sharpening pass is not yet implemented.
+  The renderer continues to use the 0.5 surface-density isocontour.
+- Packed pressure, projection, coupling, and transport dispatch counts remain
   independent of full domain depth.
 
 ## Stability diagnostics

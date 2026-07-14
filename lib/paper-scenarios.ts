@@ -28,9 +28,9 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
   scene.container.top = "open";
   scene.container.fluidWallMode = "free-slip";
   scene.fluid.surfaceTension_N_m = 0;
-  // The paper reports 1/30 s. This implementation's flux-form VOF and rigid
-  // proxy contacts require a smaller step to keep the instrumented CFL gate
-  // below one in these impact-heavy scenes.
+  // The paper reports 1/30 s. Conservative surface-density transport tolerates
+  // large CFL, but the collocated projection and rigid proxy contacts still use
+  // a smaller step in these impact-heavy validation scenes.
   scene.numerics.fixedDt_s = 1 / 180;
   scene.numerics.maxDt_s = 1 / 180;
   scene.nominalResolution.length_m = 0.025;
@@ -39,14 +39,18 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
     scene.sceneId = "paper-figure-3-hose-filled-tank";
     scene.container.fillFraction = 0.06;
     scene.fluid.initialCondition = "tank-fill";
+    // Horizontal hose: the jet enters from the left wall and arcs into the
+    // pool under gravity. Direction is carried entirely by velocity_m_s (the
+    // injection cylinder is oriented along it), adjustable in scene config.
     scene.fluid.inflow = {
-      center_m: { x: -0.40, y: 0.72, z: 0 }, radius_m: 0.08, length_m: 0.12,
-      velocity_m_s: { x: 0.08, y: -0.40, z: 0 }, start_s: 0, end_s: 14, ramp_s: 0.35
+      center_m: { x: -0.40, y: 0.55, z: 0 }, radius_m: 0.08, length_m: 0.12,
+      velocity_m_s: { x: 0.80, y: 0, z: 0 }, start_s: 0, end_s: 14, ramp_s: 0.35
     };
     scene.rigidBodies = [{
       id: "paper-hose-nozzle", name: "Hose nozzle", shape: "cylinder",
       dimensions_m: { x: 0.10, y: 0.12, z: 0.10 }, density_kg_m3: 5000,
-      position_m: { x: -0.41, y: 0.86, z: 0 }, orientation: { w: 1, x: 0, y: 0, z: 0 },
+      // Cylinder axis defaults to +y; rotate 90 degrees about z to lie along x.
+      position_m: { x: -0.53, y: 0.55, z: 0 }, orientation: { w: Math.SQRT1_2, x: 0, y: 0, z: Math.SQRT1_2 },
       linearVelocity_m_s: { x: 0, y: 0, z: 0 }, angularVelocity_rad_s: { x: 0, y: 0, z: 0 },
       restitution: 0.05, friction: 0.8, motion: "static"
     }];

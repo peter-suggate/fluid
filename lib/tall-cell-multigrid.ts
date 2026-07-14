@@ -106,7 +106,7 @@ export class TallCellMultigrid {
   private fineVolumeFraction:GPUTexture;private finePhiScratch:GPUTexture;private diagnostics:GPUBuffer;private clearPipeline:GPUComputePipeline;private smoothPipelines:GPUComputePipeline[];private topPipeline:GPUComputePipeline;private basePipeline:GPUComputePipeline;private finePhiPipeline:GPUComputePipeline;private reinitializePhiPipeline:GPUComputePipeline;private phiPipeline:GPUComputePipeline;private solidPipeline:GPUComputePipeline;private restrictPipeline:GPUComputePipeline;private prolongatePipeline:GPUComputePipeline;private residualPipeline:GPUComputePipeline;
   private dummy3D:[GPUTexture,GPUTexture,GPUTexture,GPUTexture];private dummy2D:GPUTexture;
 
-  constructor(private device:GPUDevice,geometry:TallCellLayout,fine:TallCellMultigridFineResources){
+  constructor(private device:GPUDevice,geometry:TallCellLayout,fine:TallCellMultigridFineResources,readonly refinementCycles=2){
     device.pushErrorScope("validation");
     const usage=GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST;
     const texture3=(nx:number,ny:number,nz:number)=>device.createTexture({size:[nx,ny,nz],dimension:"3d",format:"r32float",usage});
@@ -165,11 +165,10 @@ export class TallCellMultigrid {
       state=this.prolong(encoder,this.levels[index],0,this.levels[index+1],state);
       state=this.cycle(encoder,index,state);
     }
-    // The paper's examples use one full cycle followed by two V-cycles.
-    // Retaining both refinement cycles is important for the extreme aspect
-    // ratio of deep tank columns.
-    state=this.cycle(encoder,0,state);
-    state=this.cycle(encoder,0,state);
+    // Refinement depth is an explicit convergence control. The fixed method
+    // retains its historical two V-cycles; adaptive tall columns request more
+    // until a residual-controlled solve is available on the GPU.
+    for(let cycle=0;cycle<this.refinementCycles;cycle+=1)state=this.cycle(encoder,0,state);
     if(state!==0)encoder.copyTextureToTexture({texture:fine.pressure[state]},{texture:fine.pressure[0]},[fine.nx,fine.packedNy,fine.nz]);
     this.dispatch(encoder,this.residualPipeline,this.group(fine,fine,fine.pressure[0],fine.pressure[1]),fine);
   }

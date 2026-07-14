@@ -12,8 +12,9 @@ limit when a vertical interface cannot fit; otherwise horizontal resolution is
 independent of full water depth.
 
 One encoded step performs velocity extrapolation, bounded MacCormack velocity
-advection, conservative donor-limited VOF transport, gravity and molecular
-viscosity, periodic conservative remeshing, VOS rigid-body voxelization and
+advection, conservative semi-Lagrangian surface-density transport, paired gamma
+diffusion, bounded excess-density expansion, gravity and molecular viscosity,
+periodic conservative remeshing, VOS rigid-body voxelization and
 velocity blending, a solid-aware pressure solve, and projection. The pressure
 hierarchy uses ghost-fluid and solid-fraction coefficients on every level, two
 damped red-black Gauss-Seidel pre/post sweeps, one full cycle plus two V-cycles,
@@ -21,15 +22,15 @@ and a high-precision shared-memory RBGS top solve. Divergence remains
 collocated; the pressure gradient uses the physical two-cell interior sample
 span instead of the paper's printed one-cell denominator.
 
-A compact atomic reduction reports raw VOF volume, front position, liquid and
-air speed extrema, divergence before and after projection, exact pressure
+A compact atomic reduction reports raw surface-density mass, capacity-clamped
+represented volume, front position, liquid and air speed extrema, divergence before and after projection, exact pressure
 residual, pressure maximum, component CFL, finite-state count, extrema
 locations, and maximum tall-cell height without copying the 3D fields to
 JavaScript. Exact packed and cubic-equivalent dimensions, compression,
 allocated physics memory, encoded time, and clock lag are shown in the UI.
 There is no global volume correction.
 
-Known limitations are persistent VOF rather than advected level set, fine-grid
+Known limitations are persistent surface density rather than advected level set, fine-grid
 rather than hierarchical velocity extrapolation, amortized rather than
 per-frame remeshing, no in-solid `phi_s`, no resolved pressure traction, no
 terrain cut cells, and no particle thickening. The native Metal backend remains

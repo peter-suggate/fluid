@@ -524,3 +524,42 @@ Build: `web-stage10.5-1.0.5`
   corner reservoir with zero WebGPU warnings. The sampled native-resolution
   presentation pass measured `2.163 ms`, making pressure Jacobi the largest GPU
   stage in that frame.
+
+## Mass-conserving tall-cell transport
+
+Recorded: 2026-07-14
+
+Superseded later on 2026-07-14. A 15-second hose-fill audit showed that the
+fixed-point backward/forward scatter lost most of the expected density even
+with remeshing disabled. The same audit found that an all-zero tall-height
+layout retained only 41 of 46 cubic rows. Production transport now uses the
+shared donor/receiver-limited face flux, with physical tall-cell control
+volumes and bounded shared-face quadrature; the all-zero ordinary-cell limit
+allocates the full vertical grid. The bullets below are retained as historical
+evidence for the rejected implementation.
+
+- Replaced the tall solver's donor/receiver-limited VOF flux with the modified
+  conservative semi-Lagrangian surface-density scheme of Chentanez and Müller
+  (SCA 2012): cumulative-gamma advection, volume-weighted beta claims, limited
+  backward gather, and forward distribution of unclaimed source mass.
+- Tall samples use their physical covered height as control volume. Stratified
+  tall-cell quadrature keeps transport work bounded with depth, while gamma is
+  restricted to the cubic surface band and the deep cell remains a conservative
+  aggregate reservoir.
+- Removed the remap upper clamp that discarded temporary density above one. No
+  global volume rescaling or post-step volume correction is used.
+- A current-build dam-break reproduction exposed the distinction between mass
+  and volume: before gamma diffusion, raw mass drift was `-0.46%` while
+  capacity-clamped represented-volume drift reached `-27.56%` at `1.512 s`,
+  matching the visually disappearing liquid. Restoring the paper's paired
+  gamma/density diffusion and using the correct `div(u)-target` pressure RHS
+  reduced represented-volume drift to `-1.27%` at `1.440 s` and `-0.97%` at
+  `3.208 s`; the latter checkpoint had `-0.93%` raw mass drift, zero non-finite
+  values, and all stability gates clear.
+- The local deep-water run (`61 × 26 × 41` stored, `1021` equivalent Y, tall
+  span `806`) retained raw mass drift rounded to `-0.00%` through 60 steps even
+  after the pressure path reached component CFL `274.783`; all monitored fields
+  remained finite. The pressure/divergence alert at that point is a separate
+  projection limitation, not hidden by transport correction.
+- Production build, lint, all `61` deterministic tests, live WGSL compilation,
+  tall-cell execution, remeshing, and adaptive-path smoke testing passed.

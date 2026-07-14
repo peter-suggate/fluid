@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chooseTallCellBase, createTallCellLayout, limitNeighboringTallCellBases, tallCellSettings } from "../lib/tall-cell-grid";
+import { chooseTallCellBase, createTallCellLayout, limitNeighboringTallCellBases, tallCellFluxSampleCount, tallCellSettings } from "../lib/tall-cell-grid";
 import { cloneScene, defaultScene } from "../lib/model";
 
 test("restricted tall-cell presets retain cubic resolution and use the uniform limit for a deep vertical surface", () => {
@@ -69,4 +69,12 @@ test("shallow domains use the uniform-grid limit safely", () => {
   const layout = createTallCellLayout(scene, "balanced");
   assert.equal(layout.settings.regularLayers, layout.fineNy);
   assert.ok(layout.columnBases.every((base) => base === 0));
+});
+
+test("deep tall-face integration is bounded independently of depth", () => {
+  assert.equal(tallCellFluxSampleCount(0), 0);
+  assert.equal(tallCellFluxSampleCount(12), 12);
+  assert.equal(tallCellFluxSampleCount(48), 48);
+  assert.equal(tallCellFluxSampleCount(806), 48);
+  assert.equal(tallCellFluxSampleCount(8_000), 48);
 });
