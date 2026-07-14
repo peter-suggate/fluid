@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { GPUStatus } from "../webgpu-renderer";
+import type { GPUStatus, WaterRenderMode } from "../webgpu-renderer";
 import type { GPUEulerianInfo } from "../webgpu-eulerian";
 import type { EulerianDiagnostics, EulerianRenderState } from "../eulerian-solver";
 import type { RigidBodyState, RigidStepDiagnostics } from "../rigid-body";
@@ -7,6 +7,11 @@ import type { CouplingDiagnostics } from "../fluid-rigid-coupling";
 import type { MetricSample } from "../model";
 
 export interface PerformanceSnapshot {
+  methodId: string;
+  waterRenderMode: WaterRenderMode;
+  gpuPhysicsTimingAvailable: boolean;
+  gpuRenderTimestampSupported: boolean;
+  gpuRenderTimingAvailable: boolean;
   cpuSimulation_ms: number;
   cpuFrame_ms: number;
   cpuPhysicsSubmit_ms: number;
@@ -20,9 +25,22 @@ export interface PerformanceSnapshot {
   gpuDiagnostics_ms: number;
   gpuOverhead_ms: number;
   gpuRender_ms: number;
+  gpuSurfaceExtraction_ms: number;
+  gpuDryScene_ms: number;
+  gpuInterfaces_ms: number;
+  gpuOpticalComposite_ms: number;
+  gpuUpscale_ms: number;
 }
 
-export const emptyPerformance: PerformanceSnapshot = { cpuSimulation_ms: 0, cpuFrame_ms: 0, cpuPhysicsSubmit_ms: 0, cpuDataUpload_ms: 0, cpuRenderEncode_ms: 0, gpuLayerConstruction_ms: 0, gpuAdvection_ms: 0, gpuPressure_ms: 0, gpuProjection_ms: 0, gpuRigid_ms: 0, gpuDiagnostics_ms: 0, gpuOverhead_ms: 0, gpuRender_ms: 0 };
+export const emptyPerformance: PerformanceSnapshot = { methodId: "", waterRenderMode: "rasterized", gpuPhysicsTimingAvailable: false, gpuRenderTimestampSupported: false, gpuRenderTimingAvailable: false, cpuSimulation_ms: 0, cpuFrame_ms: 0, cpuPhysicsSubmit_ms: 0, cpuDataUpload_ms: 0, cpuRenderEncode_ms: 0, gpuLayerConstruction_ms: 0, gpuAdvection_ms: 0, gpuPressure_ms: 0, gpuProjection_ms: 0, gpuRigid_ms: 0, gpuDiagnostics_ms: 0, gpuOverhead_ms: 0, gpuRender_ms: 0, gpuSurfaceExtraction_ms: 0, gpuDryScene_ms: 0, gpuInterfaces_ms: 0, gpuOpticalComposite_ms: 0, gpuUpscale_ms: 0 };
+
+/** Sum only measurements that were actually produced by timestamp queries. */
+export function measuredGPUTime_ms(sample: PerformanceSnapshot) {
+  const physics = sample.gpuPhysicsTimingAvailable
+    ? sample.gpuLayerConstruction_ms + sample.gpuAdvection_ms + sample.gpuPressure_ms + sample.gpuProjection_ms + sample.gpuRigid_ms + sample.gpuDiagnostics_ms + sample.gpuOverhead_ms
+    : 0;
+  return physics + (sample.gpuRenderTimingAvailable ? sample.gpuRender_ms : 0);
+}
 
 export const emptyCoupling: CouplingDiagnostics = { displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 };
 

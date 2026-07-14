@@ -1,8 +1,10 @@
 import { WebGPUEulerianSolver } from "../webgpu-eulerian";
-import { tallCellSettings } from "../tall-cell-grid";
+import { createTallCellLayout, tallCellSettings } from "../tall-cell-grid";
+import { WebGPUUniformEulerianSolver } from "../webgpu-uniform-eulerian";
 import { numberValue, type MethodParamSpec, type SimulationMethod } from "./types";
 
 const params: MethodParamSpec[] = [
+  { kind: "select", key: "velocityTransport", label: "Velocity transport", default: "maccormack", tier: "coarse", options: [{ value: "maccormack", label: "Bounded MacCormack" }, { value: "semi-lagrangian", label: "Semi-Lagrangian" }], hint: "Switch transport schemes while retaining the same extrapolation, tall-cell VOF, remeshing, forces, and pressure solve." },
   { kind: "number", key: "pressureCycles", label: "Pressure V-cycles", unit: "cycles", min: 1, max: 12, step: 1, digits: 0, default: 2, tier: "coarse", hint: "Multigrid refinement cycles after the initial full cycle. More cycles tighten divergence at impacts." },
   { kind: "number", key: "surfaceColumns", label: "Surface columns", unit: "columns", min: 1_000, max: 20_000, step: 500, digits: 0, default: 2_500, tier: "fine", hint: "Target x/z column count; sets horizontal resolution." },
   { kind: "number", key: "regularLayers", label: "Surface band layers", unit: "cells", min: 12, max: 64, step: 4, digits: 0, default: 24, tier: "fine", hint: "Cubic cells kept around the free surface. The band grows automatically if the surface spans more." },
@@ -16,7 +18,7 @@ export const tallCellMethod: SimulationMethod = {
   shortLabel: "Tall cells",
   badge: "TALL CELLS",
   description: "Restricted fixed-band tall-cell grid: cubic cells at the surface, one variable-height cell below.",
-  detail: "one variable-height bottom cell per x/z column plus a fixed moving band of cubic surface cells, pairwise conservative VOF face transport, bounded MacCormack velocity advection, narrow-band velocity extrapolation, and a restricted full-cycle multigrid pressure solve",
+  detail: "one variable-height bottom cell per x/z column plus a fixed moving band of cubic surface cells, pairwise conservative VOF face transport, selectable velocity advection, narrow-band velocity extrapolation, and a restricted full-cycle multigrid pressure solve",
   backend: "webgpu",
   qualityLabels: { balanced: "~2.5k columns · 24 layers", high: "~7k columns · 32 layers", ultra: "~12.5k columns · 40 layers" },
   params,
@@ -25,13 +27,23 @@ export const tallCellMethod: SimulationMethod = {
     const preset = tallCellSettings[quality];
     return { pressureCycles: 2, surfaceColumns: preset.surfaceColumns, regularLayers: preset.regularLayers, maximumNeighborDelta: preset.maximumNeighborDelta, remeshInterval: preset.remeshInterval };
   },
-  createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUEulerianSolver(device, scene, quality, onRigidLoads, {
-    pressureCycles: numberValue(values, params, "pressureCycles"),
-    tallCellSettings: {
+  createSolver: (device, scene, quality, values, onRigidLoads) => {
+    const velocityTransport = values.velocityTransport === "semi-lagrangian" ? "semi-lagrangian" : "maccormack";
+    const settings = {
       surfaceColumns: numberValue(values, params, "surfaceColumns"),
       regularLayers: numberValue(values, params, "regularLayers"),
       maximumNeighborDelta: numberValue(values, params, "maximumNeighborDelta"),
       remeshInterval: numberValue(values, params, "remeshInterval")
-    }
-  })
+    };
+    const layout = createTallCellLayout(scene, quality, device.limits.maxTextureDimension3D, settings);
+    // Use the cubic backend only when h >= 2 is geometrically impossible.
+    // Otherwise retain dynamic remeshing even if the initial layout happens
+    // to be near the ordinary-cell limit; later frames may expose tall cells.
+    if (layout.planning.maximumBaseBeforeOrdinaryFallback < 2) return new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, { velocityTransport, tallCellSettings: settings });
+    return new WebGPUEulerianSolver(device, scene, quality, onRigidLoads, {
+      pressureCycles: numberValue(values, params, "pressureCycles"),
+      velocityTransport,
+      tallCellSettings: settings
+    });
+  }
 };

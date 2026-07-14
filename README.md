@@ -14,8 +14,8 @@ the horizontal resolution of the former 110k, 500k, and 1.2m uniform grids
 while storing far fewer samples in deep domains. The evolving surface-density
 field is rendered directly.
 The compute panel exposes an independent **Tall cells / Adaptive / Uniform**
-comparison. Adaptive reconstructs the paper's error-controlled optical layer
-on WebGPU every step; uniform uses the same x/z and cubic-equivalent y
+comparison. Adaptive uses Narita et al.'s horizontally adaptive quadtree tall
+cells and variational pressure projection; uniform uses the same finest x/z and cubic-equivalent y
 resolution, so timing and visual comparisons do not hide a resolution
 reduction. A one-click deep-water scene reproduces the depth-scaling benchmark.
 The presentation renderer samples the surface-density field trilinearly at a
@@ -67,14 +67,8 @@ with boxes (Figure 4), and jet-past-sphere benchmark (Figure 6).
   contract.
 - [`docs/TALL_CELL_BENCHMARK.md`](docs/TALL_CELL_BENCHMARK.md) — matched browser
   comparison against the retained uniform WebGPU solver.
-- [`docs/ADAPTIVE_OPTICAL_LAYERS_PAPER.md`](docs/ADAPTIVE_OPTICAL_LAYERS_PAPER.md)
-  — searchable implementation reference for the 2026 adaptive-layer paper.
-- [`docs/ADAPTIVE_OPTICAL_LAYER_WEBGPU.md`](docs/ADAPTIVE_OPTICAL_LAYER_WEBGPU.md)
-  — independent mode architecture, paper-to-code map, verification contract,
-  and framework fidelity boundaries.
-- [`docs/ADAPTIVE_OPTICAL_LAYER_AUDIT.md`](docs/ADAPTIVE_OPTICAL_LAYER_AUDIT.md)
-  — repeated realism/stability measurements, corrections, and ranked gaps to
-  the paper.
+- [`docs/QUADTREE_TALL_CELLS.md`](docs/QUADTREE_TALL_CELLS.md) — paper-to-code
+  specification, corrected discretization details, and verification contract.
 - [`docs/SCENE_FORMAT.md`](docs/SCENE_FORMAT.md) — canonical SI scene and run
   record format.
 - [`docs/COMPARABILITY.md`](docs/COMPARABILITY.md) — resolution, workload, and

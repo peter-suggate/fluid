@@ -38,11 +38,23 @@ test("hose source injects represented liquid into the CPU oracle", () => {
 
 test("hose layout retains a regular band spanning the receiving surface and nozzle", () => {
   const scene = createPaperScenario("hose-tank"), layout = createTallCellLayout(scene, "balanced");
-  const fillTop = Math.floor(scene.container.fillFraction * layout.fineNy);
-  const nozzle = Math.floor(scene.fluid.inflow!.center_m.y / scene.container.height_m * layout.fineNy);
-  assert.ok(layout.settings.regularLayers >= nozzle - fillTop, `${layout.settings.regularLayers} < ${nozzle - fillTop}`);
-  assert.ok(layout.columnBases.every((base) => base === 0));
-  assert.equal(layout.settings.regularLayers, layout.fineNy, "ordinary-cell limit must retain every cubic row");
+  const inflow = scene.fluid.inflow!, nozzle = Math.floor(inflow.center_m.y / scene.container.height_m * layout.fineNy);
+  const x = Math.max(0, Math.min(layout.nx - 1, Math.floor((inflow.center_m.x / scene.container.width_m + 0.5) * layout.nx)));
+  const z = Math.max(0, Math.min(layout.nz - 1, Math.floor((inflow.center_m.z / scene.container.depth_m + 0.5) * layout.nz)));
+  const base = layout.columnBases[x + layout.nx * z];
+  assert.ok(base <= nozzle && nozzle < base + layout.settings.regularLayers, `nozzle ${nozzle} is outside [${base}, ${base + layout.settings.regularLayers})`);
+  assert.equal(layout.packedNy, layout.settings.regularLayers + 2);
+  assert.ok(layout.planning.storedRegularLayers > layout.planning.requestedRegularLayers, "the disconnected inlet should select a larger construction-time B_y");
+  let expectedVolume = 0;
+  for (let y = 0; y < layout.fineNy; y += 1) if ((y + 0.5) / layout.fineNy <= scene.container.fillFraction) expectedVolume += layout.nx * layout.nz;
+  assert.equal(layout.initialVolumeCellSum, expectedVolume, "fractional tall cells must preserve the shallow pool volume");
+});
+
+test("paper dam break retains tall columns across its vertical liquid face", () => {
+  const layout = createTallCellLayout(createPaperScenario("dam-break-boxes"), "balanced");
+  assert.equal(layout.settings.regularLayers, layout.planning.requestedRegularLayers);
+  assert.equal(layout.planning.ordinaryGridFallback, false);
+  assert.ok(layout.columnBases.some((base) => base >= 2));
 });
 
 test("paper sphere obstacle remains fixed while dynamic bodies advance", () => {

@@ -15,15 +15,32 @@ Paper: <https://matthias-research.github.io/pages/publications/tallCells.pdf>
   core solver.
 - Raw VOF is reported without global mass rescaling.
 - Tall pressure uses solid-aware ghost-fluid multigrid, two damped RBGS
-  pre/post sweeps, one full cycle, two V-cycles, and a 256-iteration RBGS top
-  solve.
+  pre/post sweeps, one full cycle, two V-cycles, and depth-dependent converged
+  coarsest solves.
 
 ## Default moving-dam result
 
-The vertical reservoir face does not fit a 24-layer band. The corrected layout
-therefore selects the uniform-grid limit: 61 × 48 × 41 stored samples for a
-61 × 46 × 41 cubic-equivalent grid, with the two endpoint layers inactive.
-This is a representability requirement, not a performance regression.
+The vertical reservoir face does not fit both halos in a 24-layer band. Per
+the paper, the air constraint wins rather than expanding every column. The
+current balanced layout stores `61 x 26 x 41` samples for a
+`61 x 46 x 41` cubic-equivalent grid (56.5% allocated samples), with about 96%
+of columns using a tall cell.
+
+A current local Metal/Dawn smoke at `0.05 s` measured:
+
+| Metric | Tall | Uniform |
+| --- | ---: | ---: |
+| Runtime, 18 steps | 349 ms | 101 ms |
+| Last-step advection timestamp | 3.87 ms | 0.42 ms |
+| Last-step pressure timestamp | 11.27 ms | 1.00 ms |
+| Pressure relative residual | 0.011 | not reported by legacy solver |
+| Maximum adjacent split delta | 4 | n/a |
+
+The dam is therefore not a speedup at this small resolution. The Tall path is
+doing bounded MacCormack transport, velocity extrapolation, remeshing, signed
+distance reconstruction, and a full ghost-fluid multigrid cycle; the Uniform
+reference is a much leaner legacy VOF/Jacobi path. Storage compression alone
+does not erase those fixed costs.
 
 Historical controlled local samples produced the following before the current
 stability correction; they must not be treated as current performance or
@@ -46,11 +63,12 @@ stability measurements.
 
 ## Deep-water storage result
 
-A prior 1.2 m × 20 m × 0.8 m, 80%-full tank used dimensions
+A current 1.2 m × 20 m × 0.8 m, 80%-full tank uses dimensions
 61 × 1021 × 41. It stored 65,026 tall samples instead of 2,553,521 uniform
-samples, a 39.3× reduction, with no observed VOF drift over the short
-hydrostatic sample. Its old queue timings are not retained as a current
-performance claim because the pressure smoother and cycle budget changed.
+samples, a 39.3× reduction, with zero observed VOF drift in the smoke sample.
+The latest local run measured 386 ms Tall versus 423 ms Uniform; last-step
+pressure timestamps were 24.71 ms versus 41.62 ms. This is a modest measured
+speedup, not a claim that runtime scales directly with the sample-count ratio.
 
 ## Reproduction
 

@@ -38,7 +38,13 @@ Useful focused runs:
 FLUID_SCENE=settled-tank npm run test:webgpu
 FLUID_SCENE=dam-break-boxes,hose-tank npm run test:webgpu
 FLUID_METHOD=tall-cell FLUID_SCENE=deep-water npm run test:webgpu
+npm run test:webgpu:dam-conservation
 ```
+
+`test:webgpu:dam-conservation` runs the Figure 4 dam break for 5 seconds with
+only 12 regular surface layers. It requires exact reconstructed volume drift
+below 0.1%, zero base-zero columns, and zero missing tall cells beneath
+threshold-liquid regular samples.
 
 Environment controls:
 
@@ -54,6 +60,8 @@ Environment controls:
 | `FLUID_CPU_MARKERS_PER_AXIS` | `1` | CPU marker quadrature, from 1 to 4 |
 | `FLUID_FIELD_STATS` | `1` | Set to `0` to omit a second final field readback |
 | `FLUID_REPORT_EVERY` | `0` | Emit intermediate GPU diagnostics every N steps |
+| `FLUID_REMESH_INTERVAL` | method preset | Override the Tall remesh interval for diagnostic A/B runs |
+| `FLUID_REGULAR_LAYERS` | method preset | Override the Tall moving surface-band depth |
 
 The extreme deep-water grid commonly exceeds the default CPU safety budget.
 The output then contains an explicit `oracle-skipped` record with the exact
@@ -70,17 +78,35 @@ cubic volume-field statistics. `discrepancy` records contain:
 - wet-cell intersection-over-union; and
 - volume-centroid separation in grid cells.
 
+Each A/B scenario also emits a `performance-comparison` record. Uniform is the
+named baseline and Tall is the candidate; a speedup greater than one favors
+Tall. The record includes wall-runtime and construction ratios, timestamped
+GPU-stage ratios, active-sample reduction, both represented-volume drifts,
+their delta, finite-state counts, and available pressure residuals. Timing is
+reported but is not a pass/fail gate because short GPU samples are noisy.
+
 The `tall-cell-activity` interrogation is emitted before GPU construction and
-again in each tall-cell `result`. It reports how many columns actually have a
-tall base, the height distribution, whether the layout is entirely ordinary,
-and whether the allocated regular band leaves enough vertical space for later
-remeshing to create tall cells. In particular, `classification: "none"` plus
-`canRemeshToTall: false` means the selected Tall method is permanently running
-at its ordinary-grid limit for that scene.
+again in each restricted Tall result. It reports how many columns actually
+have a tall base, the height distribution, the maximum adjacent split delta,
+and whether the band leaves enough vertical space for later remeshing. The
+runner fails when the observed delta exceeds the configured `D`. The selected
+Tall method uses the ordinary-grid limit only when the initial range of
+vertical crossings needs so many regular layers that a height-two tall cell
+cannot fit. A vertical dam face remains representable across tall columns.
+
+The Figure 4 dam invariant additionally requires the selected Tall method to
+construct the restricted backend, retain a tall cell in every packed column,
+keep exact reconstructed volume drift below `0.1%`, and report zero dry tall
+endpoint pairs underneath threshold-liquid regular cells in the final packed
+field readback. The exact reconstruction is authoritative for this gate; the
+compact GPU reduction floors each weighted sample to `1/256` and remains a
+cheap live diagnostic.
 
 The runner fails on method-neutral invariants: WebGPU validation errors,
-non-finite state, materially unbounded volume fractions, mismatched comparison
-grids, or failure of deep-water tall-cell compression. Equilibrium scenarios
+non-finite state, closed-scene represented-volume drift above 1%, materially
+unbounded volume fractions, mismatched comparison grids, remesh deltas above
+`D`, or failure of deep-water tall-cell compression. Equilibrium scenarios
 also require one connected liquid component and less than `0.1%` exact volume
-drift. The hose A/B case gates admitted-volume and jet-speed parity while still
-reporting shape differences rather than declaring either method the oracle.
+drift. Inflow scenarios instead require that neither method loses more than 1%
+of its initial represented volume; admitted volume, speed, and shape
+differences are reported without declaring either method the oracle.

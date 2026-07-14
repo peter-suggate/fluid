@@ -1,5 +1,5 @@
 import { tallCellMethod } from "./tall-cell";
-import { adaptiveOpticalLayerMethod } from "./adaptive-optical-layer";
+import { quadtreeTallCellMethod } from "./quadtree-tall-cell";
 import { uniformMethod } from "./uniform";
 import { cpuReferenceMethod } from "./cpu-reference";
 import type { SimulationMethod } from "./types";
@@ -9,7 +9,7 @@ export * from "./types";
 /** Registry order defines picker order. Register new methods here. */
 export const simulationMethods: ReadonlyArray<SimulationMethod> = [
   tallCellMethod,
-  adaptiveOpticalLayerMethod,
+  quadtreeTallCellMethod,
   uniformMethod,
   cpuReferenceMethod
 ];
