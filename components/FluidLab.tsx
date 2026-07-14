@@ -18,6 +18,7 @@ import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PerformanceDrawer } from "./PerformanceDrawer";
 import { ValidationPanel } from "./ValidationPanel";
 import { TransportBar } from "./TransportBar";
+import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
 
 export function FluidLab() {
   const runState = useRuntimeStore((state) => state.runState);
@@ -142,6 +143,7 @@ export function FluidLab() {
 
       {performanceOpen && <PerformanceDrawer />}
       {validationOpen && <ValidationPanel results={validationResults} />}
+      <RecordingPlaybackModal />
       <SceneConfigPopover />
     </main>
   );

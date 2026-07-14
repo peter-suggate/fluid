@@ -2,7 +2,9 @@
 
 import { useRef } from "react";
 import { simulation } from "@/lib/simulation/controller";
+import { simulationRecording } from "@/lib/simulation/recording";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
+import { useRecordingStore } from "@/lib/stores/recording-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
@@ -18,6 +20,9 @@ export function TransportBar() {
   const gpuLag = useDiagnosticsStore((state) => state.gpuInfo?.simulationLag_s);
   const performanceOpen = useUIStore((state) => state.performanceOpen);
   const setPerformanceOpen = useUIStore((state) => state.setPerformanceOpen);
+  const recordingStatus = useRecordingStore((state) => state.status);
+  const recordingStart = useRecordingStore((state) => state.startedAtSimulation_s);
+  const recording = useRecordingStore((state) => state.recording);
   const fileRef = useRef<HTMLInputElement>(null);
   const lagged = simulation.backend === "webgpu" && gpuLag !== undefined && gpuLag > 2 * maxDt;
   const importScene = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -26,22 +31,41 @@ export function TransportBar() {
     simulation.importScene(file.name, await file.text());
     event.target.value = "";
   };
+  const toggleRecording = () => {
+    if (recordingStatus === "recording") simulationRecording.stop(simulation.time());
+    else {
+      setRunState("running");
+      simulationRecording.start(simulation.time());
+    }
+  };
   return (
     <footer className="transport-bar">
       <div className="transport-controls">
         <button className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={runState === "running" ? "Pause simulation" : "Play simulation"}>{runState === "running" ? "Ⅱ" : "▶"}</button>
         <button onClick={() => simulation.singleStep()} aria-label="Single fluid clock step">STEP</button>
-        <button onClick={() => simulation.reset()}>RESET</button>
+        <button onClick={() => {
+          if (recordingStatus === "recording") simulationRecording.stop(simulation.time());
+          simulation.reset();
+        }}>RESET</button>
+        <button
+          className={`record-button${recordingStatus === "recording" ? " active" : ""}`}
+          onClick={toggleRecording}
+          disabled={recordingStatus === "processing"}
+          aria-label={recordingStatus === "recording" ? "Stop simulation recording" : "Record simulation video"}
+          data-testid="record-simulation"
+        >{recordingStatus === "recording" ? "■ STOP" : recordingStatus === "processing" ? "WAIT" : "● REC"}</button>
         <button className={performanceOpen ? "active" : ""} onClick={() => setPerformanceOpen(!performanceOpen)} aria-expanded={performanceOpen} aria-controls="performance-drawer">PERF</button>
       </div>
       <div className="time-readout">
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
         {simRate !== null && <small className="sim-rate" title="Simulated seconds per wall-clock second">×{simRate.toFixed(2)}</small>}
         {lagged && <small className="lag-chip" title="The GPU solve is behind the transport clock; it advances at most one max-dt step per frame. RESET to resynchronize.">GPU −{gpuLag.toFixed(1)} s</small>}
+        {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
         <span className="continuous-run">CONTINUOUS · ∞</span>
       </div>
       <div className="file-actions">
         <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{notice}</span>
+        {recording && recordingStatus !== "recording" && <button onClick={() => simulationRecording.open()}>Playback</button>}
         <button onClick={() => { if (!simulation.loadLocalScene()) fileRef.current?.click(); }}>Load</button>
         <button onClick={() => fileRef.current?.click()}>Import</button>
         <input ref={fileRef} type="file" accept="application/json,.json" onChange={importScene} hidden />
