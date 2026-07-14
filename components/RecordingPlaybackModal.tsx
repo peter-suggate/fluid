@@ -1,21 +1,37 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { realTimePlaybackRate } from "@/lib/recording-timing";
+import { realTimePlaybackRate, sourceDurationForPlayback } from "@/lib/recording-timing";
 import { simulationRecording } from "@/lib/simulation/recording";
 import { useRecordingStore } from "@/lib/stores/recording-store";
 
 type PlaybackMode = "real-time" | "source";
 
+function applyPlaybackRate(video: HTMLVideoElement, rate: number) {
+  try {
+    video.defaultPlaybackRate = rate;
+    video.playbackRate = rate;
+  } catch {
+    // The clock synchronizer below still enforces the requested timing when a
+    // browser rejects unusually high native playback-rate values.
+    video.defaultPlaybackRate = 1;
+    video.playbackRate = 1;
+  }
+}
+
 export function RecordingPlaybackModal() {
   const open = useRecordingStore((state) => state.modalOpen);
   const recording = useRecordingStore((state) => state.recording);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const playbackAnchorRef = useRef<{ wall_ms: number; media_s: number } | null>(null);
   const [mode, setMode] = useState<PlaybackMode>("real-time");
   const [mediaDuration_s, setMediaDuration_s] = useState(0);
+  const sourceDuration_s = useMemo(() => recording
+    ? sourceDurationForPlayback(mediaDuration_s, recording.recordedDuration_s)
+    : 0, [mediaDuration_s, recording]);
   const playbackRate = useMemo(() => recording
-    ? realTimePlaybackRate(mediaDuration_s || recording.recordedDuration_s, recording.simulationDuration_s)
-    : 1, [mediaDuration_s, recording]);
+    ? realTimePlaybackRate(sourceDuration_s, recording.simulationDuration_s)
+    : 1, [sourceDuration_s, recording]);
 
   useEffect(() => {
     if (!open) return;
@@ -31,9 +47,35 @@ export function RecordingPlaybackModal() {
     const video = videoRef.current;
     if (!video) return;
     const rate = mode === "real-time" ? playbackRate : 1;
-    video.defaultPlaybackRate = rate;
-    video.playbackRate = rate;
+    applyPlaybackRate(video, rate);
+    playbackAnchorRef.current = video.paused ? null : { wall_ms: performance.now(), media_s: video.currentTime };
   }, [mode, playbackRate]);
+
+  // Some browsers accept a high playbackRate but silently decode at a lower
+  // rate. Keep the media clock aligned to the requested simulation clock so a
+  // slow solve still completes playback in exactly simulationDuration_s.
+  useEffect(() => {
+    if (!open || mode !== "real-time" || !recording) return;
+    let frame = 0;
+    const keepRealTime = (now: number) => {
+      const video = videoRef.current;
+      if (video && !video.paused && !video.ended) {
+        const anchor = playbackAnchorRef.current ?? { wall_ms: now, media_s: video.currentTime };
+        playbackAnchorRef.current = anchor;
+        const expected_s = Math.min(sourceDuration_s, anchor.media_s + (now - anchor.wall_ms) / 1000 * playbackRate);
+        if (Math.abs(video.currentTime - expected_s) > 0.25) video.currentTime = expected_s;
+      }
+      frame = requestAnimationFrame(keepRealTime);
+    };
+    frame = requestAnimationFrame(keepRealTime);
+    return () => cancelAnimationFrame(frame);
+  }, [open, mode, playbackRate, recording, sourceDuration_s]);
+
+  const anchorPlayback = (video: HTMLVideoElement) => {
+    const rate = mode === "real-time" ? playbackRate : 1;
+    applyPlaybackRate(video, rate);
+    playbackAnchorRef.current = { wall_ms: performance.now(), media_s: video.currentTime };
+  };
 
   if (!open || !recording) return null;
 
@@ -56,8 +98,18 @@ export function RecordingPlaybackModal() {
             controls
             autoPlay
             playsInline
-            onLoadedMetadata={(event) => setMediaDuration_s(event.currentTarget.duration)}
-            onPlay={(event) => { event.currentTarget.playbackRate = mode === "real-time" ? playbackRate : 1; }}
+            onLoadedMetadata={(event) => {
+              const duration = event.currentTarget.duration;
+              setMediaDuration_s(Number.isFinite(duration) && duration > 0 ? duration : 0);
+              anchorPlayback(event.currentTarget);
+            }}
+            onDurationChange={(event) => {
+              const duration = event.currentTarget.duration;
+              if (Number.isFinite(duration) && duration > 0) setMediaDuration_s(duration);
+            }}
+            onPlay={(event) => anchorPlayback(event.currentTarget)}
+            onPause={() => { playbackAnchorRef.current = null; }}
+            onSeeked={(event) => anchorPlayback(event.currentTarget)}
           />
           <span className="recording-time-badge">1 VIDEO SECOND = 1 SIMULATION SECOND</span>
         </div>
@@ -71,7 +123,7 @@ export function RecordingPlaybackModal() {
         <dl className="recording-stats">
           <div><dt>Simulation interval</dt><dd>{recording.simulationStart_s.toFixed(2)}–{recording.simulationEnd_s.toFixed(2)} s</dd></div>
           <div><dt>Real-time result</dt><dd>{recording.simulationDuration_s.toFixed(2)} s</dd></div>
-          <div><dt>Source capture</dt><dd>{(mediaDuration_s || recording.recordedDuration_s).toFixed(2)} s</dd></div>
+          <div><dt>Source capture</dt><dd>{sourceDuration_s.toFixed(2)} s</dd></div>
           <div><dt>Timing correction</dt><dd>×{playbackRate.toFixed(2)}</dd></div>
         </dl>
         <p className="recording-note">Playback is paced from simulated seconds, not render time. Pauses are excluded, so motion under −9.8 m/s² is shown on a real-world clock even when the solver runs slowly. The downloaded WebM preserves the original capture timing; the calibrated view is available here whenever the capture remains open in this browser.</p>
