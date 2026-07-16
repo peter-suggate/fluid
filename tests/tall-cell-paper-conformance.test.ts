@@ -29,14 +29,17 @@ test("level-set reinitialization keeps the paper safeguards", () => {
   assert.match(tallCellComputeShader, /clamp\(candidate,current-cell,current\+cell\)/);
 });
 
-test("pressure and projection use phi ghost fractions and endpoint divergence", () => {
-  assert.match(tallCellComputeShader, /return 0\.5\*\(velocityCell\(q\)\[axis\]\+velocityCell\(neighbor\)\[axis\]\)/);
+test("pressure and projection use one coherent positive-face operator", () => {
+  assert.match(tallCellComputeShader, /return velocityCell\(q\)\[axis\]/);
   assert.match(tallCellComputeShader, /fn interfaceFraction\(a:f32,b:f32\)->f32\{return clamp\(abs\(a\)\/max\(abs\(a\)\+abs\(b\)/);
   assert.match(tallCellComputeShader, /let wet=activeSample\(id\)&&pointSamplePhi\(id\)<=0\.0/);
   assert.match(tallCellComputeShader, /fn divergenceAt\(id:vec3i\)->f32\{\s*return pointDivergenceAt\(vec3i\(floor\(samplePoint\(id\)\)\)\);/);
   assert.match(tallCellComputeShader, /v\[axis\]-=scale\*pressureGradientAt\(q,axis\)/);
   assert.doesNotMatch(tallCellComputeShader, /storeControlVolumeDivergence/);
-  assert.doesNotMatch(tallCellComputeShader, /1\.0\/\(distance\*distance\)/);
+  assert.match(tallCellComputeShader, /1\.0\/\(distance\*distance\)/);
+  assert.match(tallCellComputeShader, /1\.0\/\(distance\*h\.y\)/);
+  assert.match(tallCellMultigridShaderForTests, /1\.0\/\(distance\*distance\)/);
+  assert.match(tallCellMultigridShaderForTests, /1\.0\/\(distance\*h\.y\)/);
 });
 
 test("level-set remesh follows zero crossings and uses least-squares endpoint transfer", () => {

@@ -271,9 +271,13 @@ fn finishSemiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   textureStore(velocityOut,id,vec4f(v,0.0));
 }
 
-	// Tall Cells Eq. 14: velocities are collocated at cell samples, so the
-	// velocity crossing a fluid-fluid face is the average of its two endpoints.
-	fn positiveFaceVelocity(q:vec3i,axis:u32)->f32{let offset=axisOffset(axis);let neighbor=q+offset;if(!validWorld(q)||!validWorld(neighbor)){return 0.0;}if(solidFractionCell(neighbor)>0.9){return solidVelocityCell(neighbor)[axis];}if(solidFractionCell(q)>0.9){return solidVelocityCell(q)[axis];}return 0.5*(velocityCell(q)[axis]+velocityCell(neighbor)[axis]);}
+		// Each stored velocity component is the positive-face degree of freedom
+		// corrected by project(). Keeping divergence on that same face convention
+		// makes the compact pressure matrix the composition div(grad p). Eq. 5
+		// interpolation remains the transport/reconstruction view inside a store;
+		// averaging adjacent samples here mixes the two representations and lets a
+		// converged pressure solve add divergence and kinetic energy.
+		fn positiveFaceVelocity(q:vec3i,axis:u32)->f32{let offset=axisOffset(axis);let neighbor=q+offset;if(!validWorld(q)||!validWorld(neighbor)){return 0.0;}if(solidFractionCell(neighbor)>0.9){return solidVelocityCell(neighbor)[axis];}if(solidFractionCell(q)>0.9){return solidVelocityCell(q)[axis];}return velocityCell(q)[axis];}
 	fn lateralDivergenceAt(q:vec3i)->f32{let h=params.cellGravity.xyz;return (positiveFaceVelocity(q,0u)-positiveFaceVelocity(q-vec3i(1,0,0),0u))/h.x+(positiveFaceVelocity(q,2u)-positiveFaceVelocity(q-vec3i(0,0,1),2u))/h.z;}
 	fn pointDivergenceAt(q:vec3i)->f32{let h=params.cellGravity.xyz;return lateralDivergenceAt(q)+(positiveFaceVelocity(q,1u)-positiveFaceVelocity(q-vec3i(0,1,0),1u))/h.y;}
 	// Paper Eq 13/19: divergence is measured as a POINT divergence at the top
@@ -316,26 +320,19 @@ fn jacobi(@builtin(global_invocation_id) gid:vec3u){
 	  if(q.x>0){let n=q-vec3i(1,0,0);stencil+=pressureTerm(ownAlpha,phiCell(n),pressureCell(n),solidFractionCell(n),1.0/(h.x*h.x));}if(q.x+1<d.x){let n=q+vec3i(1,0,0);stencil+=pressureTerm(ownAlpha,phiCell(n),pressureCell(n),solidFractionCell(n),1.0/(h.x*h.x));}if(q.z>0){let n=q-vec3i(0,0,1);stencil+=pressureTerm(ownAlpha,phiCell(n),pressureCell(n),solidFractionCell(n),1.0/(h.z*h.z));}if(q.z+1<d.z){let n=q+vec3i(0,0,1);stencil+=pressureTerm(ownAlpha,phiCell(n),pressureCell(n),solidFractionCell(n),1.0/(h.z*h.z));}
 	  }
 	  if(id.y==0){/* lateral and vertical terms assembled in the bottom sub-cell block above */}
-	  // Top endpoint row: the paper's Eq 15/16 coefficients (band at 1/h^2,
-	  // bottom through the Eq 5 interpolated below-pressure at 1/(distance*h)).
-	  // This row is NOT the exact adjoint of the staggered top-sub-cell point
-	  // divergence (whose vertical sensitivity carries s = 1/(base-1)), so a
-	  // converged solve retains an O(1-s) share of the interface-face
-	  // divergence — the paper's acknowledged non-idempotent projection. The
-	  // exact adjoint (band s/h^2, bottom s^2/h^2) was tried on 2026-07-16 and
-	  // closed that leak, but it anchors the top-dof layer so weakly at large
-	  // bases that the multigrid diverged outright on the 20 m deep-water
-	  // scene; the paper's strong row is the stable choice, and its residual
-	  // leak is bounded because the bottom row pins the store to the floor.
-	  // Hydrostatic fields satisfy this row exactly.
-	  else if(id.y==1){let distance=max(h.y,f32(base-1)*h.y);stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,0,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,0,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x,0,id.z),0).x,1.0/(distance*h.y));if(activeSample(vec3i(id.x,2,id.z))){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,2,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,2,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x,2,id.z),0).x,1.0/(h.y*h.y));}}
+		  // Top endpoint row of the composed div(grad p) operator for the Eq. 5
+		  // linear endpoint basis. With s=1/(base-1), the pressure correction of
+		  // the reconstructed downward face carries another factor s: bottom is
+		  // s^2/h^2 and the first band sample is s/h^2. Using the paper's stronger
+		  // 1/(distance*h), 1/h^2 row solves a different operator and pumps energy.
+		  else if(id.y==1){let distance=max(h.y,f32(base-1)*h.y);let composed=base<=regularLayers();let bottomCoefficient=select(1.0/(distance*h.y),1.0/(distance*distance),composed);let bandCoefficient=select(1.0/(h.y*h.y),1.0/(distance*h.y),composed);stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,0,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,0,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x,0,id.z),0).x,bottomCoefficient);if(activeSample(vec3i(id.x,2,id.z))){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,2,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,2,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x,2,id.z),0).x,bandCoefficient);}}
 	  else {if(id.y>2||base>=2){let below=id-vec3i(0,1,0);let belowPhi=select(textureLoad(volumeIn,below,0).x,textureLoad(volumeIn,vec3i(id.x,1,id.z),0).x,id.y==2&&base>0);stencil+=pressureTerm(ownAlpha,belowPhi,textureLoad(pressureIn,below,0).x,textureLoad(solidFractionIn,below,0).x,1.0/(h.y*h.y));}if(activeSample(id+vec3i(0,1,0))){let above=id+vec3i(0,1,0);stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,above,0).x,textureLoad(pressureIn,above,0).x,textureLoad(solidFractionIn,above,0).x,1.0/(h.y*h.y));}else if(q.y+1>=d.y){stencil+=pressureTerm(ownAlpha,h.y,0.0,1.0,1.0/(h.y*h.y));}}
   let rhs=params.physical.x*divergenceAt(id)/params.dimsDt.w;let old=textureLoad(pressureIn,id,0).x;let next=(stencil.y-rhs)/max(stencil.x,1e-9);textureStore(pressureOut,id,vec4f(mix(old,next,0.8),0.0,0.0,0.0));
 }
 
 @compute @workgroup_size(4,4,4)
 fn project(@builtin(global_invocation_id) gid:vec3u){
-	  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(0.0));return;}let q=vec3i(floor(samplePoint(id)));let h=params.cellGravity.xyz;let scale=params.dimsDt.w/params.physical.x;var v=textureLoad(velocityIn,id,0).xyz;let offsets=array<vec3i,3>(vec3i(1,0,0),vec3i(0,1,0),vec3i(0,0,1));
+		  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(0.0));return;}let q=vec3i(floor(samplePoint(id)));let h=params.cellGravity.xyz;let scale=params.dimsDt.w/params.physical.x;var v=textureLoad(velocityIn,id,0).xyz;let offsets=array<vec3i,3>(vec3i(1,0,0),vec3i(0,1,0),vec3i(0,0,1));
 	  let base=baseAt(id.x,id.z);
 	  if(id.y==0&&base>0){
 	    // The store is one lateral degree of freedom: its faces respond to the
