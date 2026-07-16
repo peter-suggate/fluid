@@ -113,6 +113,7 @@ export interface GPUEulerianInfo {
   quadtreeRebuildPending?: boolean;
   /** Render frames whose physics advance was blocked by the latest rebuild. */
   quadtreeRebuildBlockedFrames?: number;
+  quadtreeRebuildCompletedCount?: number;
   gpuTimings?: {
     layerConstruction_ms: number;
     advection_ms: number;
@@ -736,7 +737,7 @@ export class WebGPUEulerianSolver {
       ["Couple rigid bodies","coupleRigid"],["Pre-projection diagnostics","reduceBeforeProjection"],["Fluid diagnostics","reduceDiagnostics"],
       ["Plan tall-cell remesh","planRemesh"],["Smooth remesh plan","smoothRemesh"],["Remap tall cells","remap"]
     ] as const;
-    const total=definitions.length+12,compiled:GPUComputePipeline[]=[];
+    const total=definitions.length+11,compiled:GPUComputePipeline[]=[];
     for(let index=0;index<definitions.length;index+=1){const [label,entryPoint]=definitions[index];onProgress(label,index,total);compiled.push(await this.device.createComputePipelineAsync(this.pipelineDescriptor(entryPoint)));onProgress(label,index+1,total);}
     this.extrapolatePipeline=compiled[0];this.predictPipeline=compiled[1];this.reversePipeline=compiled[2];this.clampPhiPipeline=compiled[3];this.reinitializePhiPipeline=compiled[4];this.advectPipeline=compiled[5];this.buildRhsPipeline=compiled[6];this.jacobiPipeline=compiled[7];this.projectPipeline=compiled[8];this.rigidPipeline=compiled[9];this.preReductionPipeline=compiled[10];this.reductionPipeline=compiled[11];this.planRemeshPipeline=compiled[12];this.smoothRemeshPipeline=compiled[13];this.remapPipeline=compiled[14];
     await this.multigrid.initializePipelines(onProgress,definitions.length,total);
