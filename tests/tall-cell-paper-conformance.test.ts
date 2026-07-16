@@ -14,7 +14,7 @@ test("tall level set uses Eq 4 point samples and Eq 5 reconstruction", () => {
 });
 
 test("phi is semi-Lagrangian while velocity retains bounded MacCormack", () => {
-  assert.match(tallCellComputeShader, /var phi=samplePhi\(traceDeparture\(p,dt\)\)/);
+  assert.match(tallCellComputeShader, /var phi=volumeCorrectedPhi\(samplePhi\(traceDeparture\(p,dt\)\),dt\)/);
   assert.match(tallCellComputeShader, /var v=boundedMacCormack\(id,p\)/);
   assert.match(tallCellComputeShader, /corrected=predicted\+0\.5\*\(original-reversed\)/);
   assert.doesNotMatch(tallCellComputeShader, /correctedPhi|phiCorrector|boundedMacCormackPhi/);
@@ -50,10 +50,11 @@ test("level-set remesh follows zero crossings and uses least-squares endpoint tr
   assert.match(tallCellComputeShader, /bodyUpper=min\(bodyUpper,predictedBottom\)/);
 });
 
-test("global volume correction is bounded to interface samples", () => {
-  assert.match(tallCellComputeShader, /fn volumeCorrectionDivergence/);
-  assert.match(tallCellComputeShader, /abs\(pointSamplePhi\(id\)\)<band/);
-  assert.match(tallCellComputeShader, /divergenceAt\(id\)-volumeCorrectionDivergence\(id\)/);
+test("global volume correction offsets phi only in the interface band", () => {
+  assert.match(tallCellComputeShader, /fn volumeCorrectedPhi/);
+  assert.match(tallCellComputeShader, /value-params\.physical\.w\*h\*dt/);
+  assert.match(tallCellComputeShader, /abs\(value\)<1\.5\*h/);
+  assert.doesNotMatch(tallCellComputeShader, /volumeCorrectionDivergence/);
 });
 
 test("restricted level-set path has retired its VOF transport machinery", () => {

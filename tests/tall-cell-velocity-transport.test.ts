@@ -21,7 +21,7 @@ test("tall-cell semi-Lagrangian finish consumes the shared predictor", () => {
 });
 
 test("tall phi transport is independent of the velocity transport selector", () => {
-  assert.match(tallCellComputeShader, /var phi=samplePhi\(traceDeparture\(p,dt\)\)/);
+  assert.match(tallCellComputeShader, /var phi=volumeCorrectedPhi\(samplePhi\(traceDeparture\(p,dt\)\),dt\)/);
   assert.doesNotMatch(tallCellComputeShader, /correctedPhi|MacCormackPhi/);
   assert.match(tallCellComputeShader, /fn leastSquaresPhi/);
   assert.match(tallCellComputeShader, /if\(maxBase>=2\)\{desired=max\(2,desired\);\}/);

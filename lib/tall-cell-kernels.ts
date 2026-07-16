@@ -177,6 +177,11 @@ fn strainMagnitude(q:vec3i)->f32{let h=params.cellGravity.xyz;let dx=(diffusionV
 
 fn traceDeparture(p:vec3f,signedDt:f32)->vec3f{let h=params.cellGravity.xyz;let first=sampleVelocity(p);let midpoint=p-0.5*first*signedDt/h;return p-sampleVelocity(midpoint)*signedDt/h;}
 fn tracedVelocity(p:vec3f,signedDt:f32)->vec3f{return sampleVelocity(traceDeparture(p,signedDt));}
+// Global level-set volume control. params.physical.w is a normal correction
+// speed in cells/second: it is negative when reconstructed volume is high, so
+// subtracting it increases phi and shrinks the liquid region. Restrict the
+// offset to the interface band and retain the paper's ordinary SL advection.
+fn volumeCorrectedPhi(value:f32,dt:f32)->f32{let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));return select(value,value-params.physical.w*h*dt,abs(value)<1.5*h);}
 fn adjacentToInterface(q:vec3i,current:f32)->bool{let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));for(var index=0;index<6;index+=1){let other=phiCell(q+offsets[index]);if((current<=0.0)!=(other<=0.0)){return true;}}return false;}
 @compute @workgroup_size(4,4,4)
 fn clampPhi(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(volumeOut,id,vec4f(limit));return;}let current=textureLoad(volumeIn,id,0).x;let q=vec3i(floor(samplePoint(id)));let local=select(current,clamp(current,-min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z)),min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))),adjacentToInterface(q,current));textureStore(volumeOut,id,vec4f(clamp(local,-limit,limit)));}
@@ -202,7 +207,7 @@ fn boundedMacCormack(id:vec3i,p:vec3f)->vec3f{
 @compute @workgroup_size(4,4,4)
 fn finishAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))));textureStore(pressureOut,id,vec4f(0.0));return;}
-	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=boundedMacCormack(id,p);var phi=samplePhi(traceDeparture(p,dt));if(isInflowVelocityCell(q)){phi=min(phi,-0.5*min(h.x,min(h.y,h.z))*inflowApertureFraction(q)*inflowStrength());}
+	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=boundedMacCormack(id,p);var phi=volumeCorrectedPhi(samplePhi(traceDeparture(p,dt)),dt);if(isInflowVelocityCell(q)){phi=min(phi,-0.5*min(h.x,min(h.y,h.z))*inflowApertureFraction(q)*inflowStrength());}
   // Euler's momentum equation is integrated in the liquid domain. Air values
   // are extrapolation support for the next trace and must not accumulate a
   // separate gravity impulse; doing so feeds a falling-air mode back through
@@ -233,7 +238,7 @@ fn finishAdvection(@builtin(global_invocation_id) gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn finishSemiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))));textureStore(pressureOut,id,vec4f(0.0));return;}
-	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=textureLoad(predictedVelocityIn,id,0).xyz;var phi=samplePhi(traceDeparture(p,dt));if(isInflowVelocityCell(q)){phi=min(phi,-0.5*min(h.x,min(h.y,h.z))*inflowApertureFraction(q)*inflowStrength());}
+	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=textureLoad(predictedVelocityIn,id,0).xyz;var phi=volumeCorrectedPhi(samplePhi(traceDeparture(p,dt)),dt);if(isInflowVelocityCell(q)){phi=min(phi,-0.5*min(h.x,min(h.y,h.z))*inflowApertureFraction(q)*inflowStrength());}
   // Match finishAdvection exactly after choosing the transport estimate so
   // the A/B option isolates MacCormack correction from all other physics.
   // MAC gravity gate: the stored v.y is the face between q and q+y, so it
@@ -262,24 +267,8 @@ fn finishSemiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
 	fn divergenceAt(id:vec3i)->f32{
 	  return pointDivergenceAt(vec3i(floor(samplePoint(id))));
 	}
-// Mass-Conserving Eulerian Liquid Simulation Sec 3.7: cells holding more
-// density than they can represent (rho' > 1) receive artificial divergence
-// min(lambda (rho'-1), eta) with lambda=0.5, eta=1 so the pressure solve
-// pushes the excess out gradually. The paper applies the push per 1/30 s
-// step; expressing it as a rate keeps the drain speed independent of dt.
-// The tall store is base cells sharing one DENSITY, so its correction uses
-// the same density units as any band cell. Scaling by base (subcell units)
-// made the tall correction up to base times the paper rate, an artificial
-// source/sink violent enough to pump energy at every partial tall store.
-fn volumeCorrectionDivergence(id:vec3i)->f32{let band=1.5*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));return select(0.0,params.physical.w,abs(pointSamplePhi(id))<band);}
 @compute @workgroup_size(4,4,4)
-// The correction divergence must be SUBTRACTED from the measured divergence:
-// solving Lap p = rho (div - c)/dt and projecting v -= dt/rho grad p leaves
-// div_new = +c, the outward push that drains an overfull cell. Adding it
-// yields div_new = -c — inflow into the overfull cell, a positive feedback
-// that pumps pressure and energy at every rho > 1 site (the tall stores'
-// remap residuals fire this constantly; see the 2026-07-15 dam-break audit).
-fn buildPressureRhs(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!validPacked(id)){return;}let wet=activeSample(id)&&pointSamplePhi(id)<=0.0;let rhs=select(0.0,params.physical.x*(divergenceAt(id)-volumeCorrectionDivergence(id))/params.dimsDt.w,wet);textureStore(pressureOut,id,vec4f(rhs,0.0,0.0,0.0));}
+fn buildPressureRhs(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!validPacked(id)){return;}let wet=activeSample(id)&&pointSamplePhi(id)<=0.0;let rhs=select(0.0,params.physical.x*divergenceAt(id)/params.dimsDt.w,wet);textureStore(pressureOut,id,vec4f(rhs,0.0,0.0,0.0));}
 fn interfaceFraction(a:f32,b:f32)->f32{return clamp(abs(a)/max(abs(a)+abs(b),1e-6),0.05,1.0);}
 	fn pressureTerm(ownPhi:f32,otherPhi:f32,otherPressure:f32,solidFraction:f32,coefficient:f32)->vec2f{if(otherPhi<=0.0){let open=1.0-clamp(solidFraction,0.0,1.0);return vec2f(coefficient*open,coefficient*open*otherPressure);}return vec2f(coefficient/interfaceFraction(ownPhi,otherPhi),0.0);}
 
@@ -321,7 +310,7 @@ fn jacobi(@builtin(global_invocation_id) gid:vec3u){
 	  // Hydrostatic fields satisfy this row exactly.
 	  else if(id.y==1){let distance=max(h.y,f32(base-1)*h.y);stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,0,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,0,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x,0,id.z),0).x,1.0/(distance*h.y));if(activeSample(vec3i(id.x,2,id.z))){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,2,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,2,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x,2,id.z),0).x,1.0/(h.y*h.y));}}
 	  else {if(id.y>2||base>=2){let below=id-vec3i(0,1,0);let belowPhi=select(textureLoad(volumeIn,below,0).x,textureLoad(volumeIn,vec3i(id.x,1,id.z),0).x,id.y==2&&base>0);stencil+=pressureTerm(ownAlpha,belowPhi,textureLoad(pressureIn,below,0).x,textureLoad(solidFractionIn,below,0).x,1.0/(h.y*h.y));}if(activeSample(id+vec3i(0,1,0))){let above=id+vec3i(0,1,0);stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,above,0).x,textureLoad(pressureIn,above,0).x,textureLoad(solidFractionIn,above,0).x,1.0/(h.y*h.y));}else if(q.y+1>=d.y){stencil+=pressureTerm(ownAlpha,h.y,0.0,1.0,1.0/(h.y*h.y));}}
-  let rhs=params.physical.x*(divergenceAt(id)-volumeCorrectionDivergence(id))/params.dimsDt.w;let old=textureLoad(pressureIn,id,0).x;let next=(stencil.y-rhs)/max(stencil.x,1e-9);textureStore(pressureOut,id,vec4f(mix(old,next,0.8),0.0,0.0,0.0));
+  let rhs=params.physical.x*divergenceAt(id)/params.dimsDt.w;let old=textureLoad(pressureIn,id,0).x;let next=(stencil.y-rhs)/max(stencil.x,1e-9);textureStore(pressureOut,id,vec4f(mix(old,next,0.8),0.0,0.0,0.0));
 }
 
 @compute @workgroup_size(4,4,4)
