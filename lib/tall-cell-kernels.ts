@@ -10,6 +10,7 @@ struct Params {
   tall: vec4f,
   inflowPositionRadius: vec4f,
   inflowVelocityLength: vec4f,
+  // x: frame-averaged inflow strength; remaining lanes are reserved.
   inflowTiming: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
@@ -36,6 +37,11 @@ struct RigidBody {
 	@group(0) @binding(14) var reversedVelocityIn:texture_3d<f32>;
 	@group(0) @binding(15) var solidFractionIn:texture_3d<f32>;
 @group(0) @binding(16) var<storage,read_write> smoothedColumnBases:array<u32>;
+// Persistent across frames: max CFL, chosen phi substeps, chosen phi dt, and
+// cumulative executed phi steps.
+@group(0) @binding(17) var<storage,read_write> governor:array<atomic<u32>,4>;
+// Eight 16-byte indirect slots. The fourth word pads each slot for inspection.
+@group(0) @binding(18) var<storage,read_write> phiDispatchArgs:array<atomic<u32>,32>;
 
 fn packedDims()->vec3i{return vec3i(textureDimensions(volumeIn));}
 fn fineDims()->vec3i{let d=packedDims();return vec3i(d.x,i32(round(params.boundary.w)),d.z);}
@@ -183,6 +189,18 @@ fn tracedVelocity(p:vec3f,signedDt:f32)->vec3f{return sampleVelocity(traceDepart
 // offset to the interface band and retain the paper's ordinary SL advection.
 fn volumeCorrectedPhi(value:f32,dt:f32)->f32{let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));return select(value,value-params.physical.w*h*dt,abs(value)<1.5*h);}
 fn adjacentToInterface(q:vec3i,current:f32)->bool{let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));for(var index=0;index<6;index+=1){let other=phiCell(q+offsets[index]);if((current<=0.0)!=(other<=0.0)){return true;}}return false;}
+@compute @workgroup_size(1)
+fn planSubsteps(@builtin(global_invocation_id) gid:vec3u){
+  if(any(gid!=vec3u(0))){return;}let previousCfl=bitcast<f32>(atomicLoad(&governor[0]));let substeps=clamp(u32(ceil(previousCfl/2.0)),1u,8u);let dtPhi=params.dimsDt.w/f32(substeps);
+  atomicStore(&governor[0],0u);atomicStore(&governor[1],substeps);atomicStore(&governor[2],bitcast<u32>(dtPhi));atomicAdd(&governor[3],substeps);
+  let groups=vec3u((u32(round(params.dimsDt.x))+3u)/4u,(u32(round(params.dimsDt.y))+3u)/4u,(u32(round(params.dimsDt.z))+3u)/4u);
+  for(var slot=0u;slot<8u;slot+=1u){let base=slot*4u;let enabled=slot<substeps;atomicStore(&phiDispatchArgs[base],select(0u,groups.x,enabled));atomicStore(&phiDispatchArgs[base+1u],select(0u,groups.y,enabled));atomicStore(&phiDispatchArgs[base+2u],select(0u,groups.z,enabled));atomicStore(&phiDispatchArgs[base+3u],0u);}
+}
+@compute @workgroup_size(4,4,4)
+fn transportPhi(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);let h=params.cellGravity.xyz;let limit=5.0*min(h.x,min(h.y,h.z));if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(volumeOut,id,vec4f(limit));return;}
+  let dt=bitcast<f32>(atomicLoad(&governor[2]));let p=samplePoint(id);let q=vec3i(floor(p));var phi=volumeCorrectedPhi(samplePhi(traceDeparture(p,dt)),dt);if(isInflowVelocityCell(q)){phi=min(phi,-0.5*min(h.x,min(h.y,h.z))*inflowApertureFraction(q)*inflowStrength());}textureStore(volumeOut,id,vec4f(phi));
+}
 @compute @workgroup_size(4,4,4)
 fn clampPhi(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(volumeOut,id,vec4f(limit));return;}let current=textureLoad(volumeIn,id,0).x;let q=vec3i(floor(samplePoint(id)));let local=select(current,clamp(current,-min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z)),min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))),adjacentToInterface(q,current));textureStore(volumeOut,id,vec4f(clamp(local,-limit,limit)));}
 @compute @workgroup_size(4,4,4)
@@ -206,8 +224,8 @@ fn boundedMacCormack(id:vec3i,p:vec3f)->vec3f{
 
 @compute @workgroup_size(4,4,4)
 fn finishAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))));textureStore(pressureOut,id,vec4f(0.0));return;}
-	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=boundedMacCormack(id,p);var phi=volumeCorrectedPhi(samplePhi(traceDeparture(p,dt)),dt);if(isInflowVelocityCell(q)){phi=min(phi,-0.5*min(h.x,min(h.y,h.z))*inflowApertureFraction(q)*inflowStrength());}
+  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
+	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=boundedMacCormack(id,p);let phi=pointSamplePhi(id);
   // Euler's momentum equation is integrated in the liquid domain. Air values
   // are extrapolation support for the next trace and must not accumulate a
   // separate gravity impulse; doing so feeds a falling-air mode back through
@@ -232,13 +250,13 @@ fn finishAdvection(@builtin(global_invocation_id) gid:vec3u){
   // its normal here so the pressure RHS never sees phantom outflow through
   // a face no volume can cross.
   let d=fineDims();if(q.x+1>=d.x){v.x=0.0;}if(q.y+1>=d.y||!representedWorld(q+vec3i(0,1,0))){v.y=0.0;}if(q.z+1>=d.z){v.z=0.0;}
-  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phi));textureStore(pressureOut,id,vec4f(0.0));
+  textureStore(velocityOut,id,vec4f(v,0.0));
 }
 
 @compute @workgroup_size(4,4,4)
 fn finishSemiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z))));textureStore(pressureOut,id,vec4f(0.0));return;}
-	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=textureLoad(predictedVelocityIn,id,0).xyz;var phi=volumeCorrectedPhi(samplePhi(traceDeparture(p,dt)),dt);if(isInflowVelocityCell(q)){phi=min(phi,-0.5*min(h.x,min(h.y,h.z))*inflowApertureFraction(q)*inflowStrength());}
+  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
+	  let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let p=samplePoint(id);let q=vec3i(floor(p));var v=textureLoad(predictedVelocityIn,id,0).xyz;let phi=pointSamplePhi(id);
   // Match finishAdvection exactly after choosing the transport estimate so
   // the A/B option isolates MacCormack correction from all other physics.
   // MAC gravity gate: the stored v.y is the face between q and q+y, so it
@@ -250,7 +268,7 @@ fn finishSemiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   // Same absolute speed rail as finishAdvection (see the comment there).
   let speedCap=vec3f(params.container.w);v=clamp(v,-speedCap,speedCap);
   v=applyInflowVelocity(q,v);let d=fineDims();if(q.x+1>=d.x){v.x=0.0;}if(q.y+1>=d.y||!representedWorld(q+vec3i(0,1,0))){v.y=0.0;}if(q.z+1>=d.z){v.z=0.0;}
-  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phi));textureStore(pressureOut,id,vec4f(0.0));
+  textureStore(velocityOut,id,vec4f(v,0.0));
 }
 
 	// Tall Cells Eq. 14: velocities are collocated at cell samples, so the
@@ -395,8 +413,8 @@ fn leastSquaresPhi(x:i32,z:i32,newBase:i32)->vec2f{if(newBase<=1){let value=phiC
 fn leastSquaresVelocity(x:i32,z:i32,newBase:i32,top:bool)->vec3f{if(newBase<=1){return velocityCell(vec3i(x,0,z));}var st=0.0;var stt=0.0;var sv=vec3f(0.0);var stv=vec3f(0.0);for(var y=0;y<newBase;y+=1){let t=f32(y)/f32(newBase-1);let value=velocityCell(vec3i(x,y,z));st+=t;stt+=t*t;sv+=value;stv+=t*value;}let n=f32(newBase);let slope=(n*stv-st*sv)/max(n*stt-st*st,1e-6);let intercept=(sv-slope*st)/n;return select(intercept,intercept+slope,top);}
 @compute @workgroup_size(4,4,4)
 fn remap(@builtin(global_invocation_id) gid:vec3u){
-	  let id=vec3i(gid);if(!validPacked(id)){return;}let d=packedDims();let newBase=i32(nextColumnBases[u32(id.x+d.x*id.z)]);var p=vec3f(f32(id.x)+0.5,0.5,f32(id.z)+0.5);if(id.y==1){p.y=max(0.5,f32(newBase)-0.5);}else if(id.y>=2){p.y=f32(newBase+id.y-2)+0.5;}let isActive=select(newBase>0,newBase+id.y-2<fineDims().y,id.y>=2);let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var phi=limit;var velocity=vec3f(0.0);if(isActive){if(id.y<2){let fit=leastSquaresPhi(id.x,id.z,newBase);let crossing=(fit.x<=0.0)!=(fit.y<=0.0);phi=select(select(fit.x,fit.y,id.y==1),fit.y,crossing);velocity=leastSquaresVelocity(id.x,id.z,newBase,id.y==1);}else{phi=samplePhi(p);velocity=sampleVelocity(p);}}
-  textureStore(velocityOut,id,vec4f(velocity,0.0));textureStore(volumeOut,id,vec4f(clamp(phi,-limit,limit)));textureStore(pressureOut,id,vec4f(0.0));if(id.y==0){textureStore(columnBaseOut,vec2i(id.x,id.z),vec4f(f32(newBase)));}
+	  let id=vec3i(gid);if(!validPacked(id)){return;}let d=packedDims();let newBase=i32(nextColumnBases[u32(id.x+d.x*id.z)]);var p=vec3f(f32(id.x)+0.5,0.5,f32(id.z)+0.5);if(id.y==1){p.y=max(0.5,f32(newBase)-0.5);}else if(id.y>=2){p.y=f32(newBase+id.y-2)+0.5;}let isActive=select(newBase>0,newBase+id.y-2<fineDims().y,id.y>=2);let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var phi=limit;var velocity=vec3f(0.0);var pressure=0.0;if(isActive){pressure=samplePressure(p);if(id.y<2){let fit=leastSquaresPhi(id.x,id.z,newBase);let crossing=(fit.x<=0.0)!=(fit.y<=0.0);phi=select(select(fit.x,fit.y,id.y==1),fit.y,crossing);velocity=leastSquaresVelocity(id.x,id.z,newBase,id.y==1);}else{phi=samplePhi(p);velocity=sampleVelocity(p);}}
+  textureStore(velocityOut,id,vec4f(velocity,0.0));textureStore(volumeOut,id,vec4f(clamp(phi,-limit,limit)));textureStore(pressureOut,id,vec4f(pressure));if(id.y==0){textureStore(columnBaseOut,vec2i(id.x,id.z),vec4f(f32(newBase)));}
 }
 
 @compute @workgroup_size(4,4,4)
@@ -406,7 +424,7 @@ fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){
 	  let band=1.5*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var occupied=0.0;var interfaceCells=0.0;if(id.y==0){for(var y=0;y<baseAt(id.x,id.z);y+=1){let value=phiCell(vec3i(id.x,y,id.z));occupied+=occupancyFromPhi(value);if(abs(value)<band){interfaceCells+=1.0;}}}else if(id.y>=2){occupied=occupancyFromPhi(phi);interfaceCells=select(0.0,1.0,abs(phi)<band);}atomicAdd(&reductions[0],u32(clamp(occupied*256.0,0.0,4294967295.0)));atomicAdd(&reductions[7],u32(interfaceCells*256.0));atomicMax(&reductions[3],u32(baseAt(id.x,id.z)));
   if(pointSamplePhi(id)<=0.0){
     atomicMax(&reductions[1],u32(id.x+1));updatePositiveMaximum(length(velocityValue),2u,8u,id);
-	    if(solidFractionCell(vec3i(floor(samplePoint(id))))<=0.9){updatePositiveMaximum(abs(divergenceAt(id)),5u,14u,id);let h=params.cellGravity.xyz;let cfl=max(abs(velocityValue.x)*params.dimsDt.w/h.x,max(abs(velocityValue.y)*params.dimsDt.w/h.y,abs(velocityValue.z)*params.dimsDt.w/h.z));updatePositiveMaximumOnly(cfl,30u);if(cfl>1.0){atomicAdd(&reductions[31],1u);}}
+	    if(solidFractionCell(vec3i(floor(samplePoint(id))))<=0.9){updatePositiveMaximum(abs(divergenceAt(id)),5u,14u,id);let h=params.cellGravity.xyz;let cfl=max(abs(velocityValue.x)*params.dimsDt.w/h.x,max(abs(velocityValue.y)*params.dimsDt.w/h.y,abs(velocityValue.z)*params.dimsDt.w/h.z));updatePositiveMaximumOnly(cfl,30u);atomicMax(&governor[0],bitcast<u32>(cfl));if(cfl>1.0){atomicAdd(&reductions[31],1u);}}
   }
 }
 `;
