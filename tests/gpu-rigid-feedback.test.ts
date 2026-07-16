@@ -50,4 +50,10 @@ test("GPU coupling shaders publish twelve-word wet-velocity snapshots", () => {
   assert.match(tallCellComputeShader, /alpha\*solid\*ambientVelocity\.x\*1e4/);
   assert.match(tallCellComputeShader, /var phiNext=phi/);
   assert.match(tallCellComputeShader, /rigidVelocityAt\(neighborWorld\)\.w==0\.0/);
+  assert.match(tallCellComputeShader, /reaction=-fluidImpulse\*select\(0\.0,1\.0,solid>0\.9\)/,
+    "partially covered collocated cells must not feed their grid-phase impulse back to the body");
+  assert.match(tallCellComputeShader, /fluidOpen\*params\.cellGravity\.w\*dt/,
+    "body-interior liquid samples must not accumulate gravity before rigid coupling");
+  assert.match(tallCellComputeShader, /if\(solidFractionCell\(plus\)>0\.9\)\{v\[axis\]=solidVelocityCell\(plus\)\[axis\];\}else if\(solidFractionCell\(q\)>0\.9\)\{v\[axis\]=solidVelocityCell\(q\)\[axis\];\}/,
+    "projection must apply the same moving-solid face constraint as divergence");
 });
