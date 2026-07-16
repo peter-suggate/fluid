@@ -1,10 +1,9 @@
-import { add, length, scale } from "../math";
 import { BUILD_ID, cloneScene, createRunManifest, parseScene, serializeScene, type SceneDescription } from "../model";
 import { EulerianFluidSolver } from "../eulerian-solver";
 import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidExternalLoad, type RigidStepDiagnostics } from "../rigid-body";
 import type { RigidBodyDescription } from "../model";
 import { applyFluidReactions, computeFluidLoads, type CouplingDiagnostics } from "../fluid-rigid-coupling";
-import { consumeGPURigidLoad, mergeGPURigidLoads, type GPURigidLoad } from "../webgpu-eulerian";
+import { mergeGPURigidLoads, type GPURigidLoad } from "../webgpu-eulerian";
 import type { RigidShape } from "../model";
 import type { RendererFrameMetrics, SimulationBackend } from "../webgpu-renderer";
 import { getMethod } from "../methods";
@@ -16,6 +15,7 @@ import { useRuntimeStore } from "../stores/runtime-store";
 import { useDiagnosticsStore, emptyPerformance, type PerformanceSnapshot } from "../stores/diagnostics-store";
 import { useUIStore } from "../stores/ui-store";
 import { commitGPUCompletion, gpuBatchDepth, gpuCanAcceptNextStep } from "./gpu-clock";
+import { externalLoadsFromGPU } from "./gpu-loads";
 
 export type BodyDragPhase = "start" | "move" | "end";
 
@@ -28,26 +28,6 @@ function downloadText(name: string, text: string, mime = "application/json") {
   link.download = name;
   link.click();
   URL.revokeObjectURL(url);
-}
-
-function externalLoadsFromGPU(scene: SceneDescription, gpuLoads: GPURigidLoad[], dt: number) {
-  const loads = new Map<string, RigidExternalLoad>();
-  let displaced = 0, bodyImpulse = { x: 0, y: 0, z: 0 }, fluidReactionImpulse = { x: 0, y: 0, z: 0 };
-  for (const load of gpuLoads) {
-    const { impulse_N_s: stepImpulse, angularImpulse_N_m_s: stepAngularImpulse } = consumeGPURigidLoad(load, dt);
-    const hydrodynamicForce = scale(stepImpulse, 1 / dt), hydrodynamicTorque = scale(stepAngularImpulse, 1 / dt);
-    const buoyant = scale(scene.fluid.gravity_m_s2, -scene.fluid.density_kg_m3 * load.displacedVolume_m3), force = add(hydrodynamicForce, buoyant);
-    loads.set(load.bodyId, { force_N: force, torque_N_m: hydrodynamicTorque, buoyantForce_N: buoyant, hydrodynamicForce_N: hydrodynamicForce, displacedFluidVolume_m3: load.displacedVolume_m3 });
-    displaced += load.displacedVolume_m3;
-    bodyImpulse = add(bodyImpulse, add(stepImpulse, scale(buoyant, dt)));
-    // The VOS velocity blend applies the opposite of the sampled drag impulse
-    // to the fluid.  Buoyancy is a separate pressure approximation and is not
-    // present in the GPU exchange buffer, so do not fabricate its reaction in
-    // the diagnostic.
-    fluidReactionImpulse = add(fluidReactionImpulse, scale(stepImpulse, -1));
-  }
-  const diagnostics: CouplingDiagnostics = { displacedVolume_m3: displaced, bodyImpulse_N_s: bodyImpulse, fluidReactionImpulse_N_s: fluidReactionImpulse, momentumClosureError_N_s: length(add(bodyImpulse, fluidReactionImpulse)), coupledBodyCount: gpuLoads.filter((load) => load.displacedVolume_m3 > 0).length };
-  return { loads, diagnostics };
 }
 
 /**
@@ -129,9 +109,9 @@ class SimulationController {
     const methodId = useMethodStore.getState().methodId;
     this.accumulator += elapsed;
     const dt = scene.numerics.fixedDt_s;
-    // Uncoupled GPU methods may prepare a bounded queue batch. Rigid-body
-    // scenes retain the strict one-step handshake because each body step needs
-    // the preceding pressure impulse.
+    // Restricted tall cells use a frame-sized partitioned-coupling batch: all
+    // GPU impulses are accumulated over the batch and consumed over the next
+    // fixed rigid substeps. Other coupled methods retain a one-step handshake.
     const batchDepth = backend === "webgpu" ? gpuBatchDepth(methodId, dt, this.bodies.length > 0) : 1;
     const gpuCanQueue = () => backend !== "webgpu" || this.simulationTime < this.gpuCompletedTime + batchDepth * dt - 1e-9;
     let steps = 0;
@@ -142,7 +122,7 @@ class SimulationController {
       this.applyDragConstraint();
       let loads: ReadonlyMap<string, RigidExternalLoad>;
       if (backend === "webgpu") {
-        const gpuCoupling = externalLoadsFromGPU(scene, this.gpuRigidLoads, dt);
+        const gpuCoupling = externalLoadsFromGPU(scene, this.gpuRigidLoads, dt, this.bodies);
         loads = gpuCoupling.loads; latestCoupling = gpuCoupling.diagnostics;
       } else {
         const coupling = computeFluidLoads(scene, this.fluidSolver, this.bodies);
@@ -197,7 +177,7 @@ class SimulationController {
     const dt = scene.numerics.fixedDt_s;
     const backend = this.backend;
     if (backend === "webgpu" && !gpuCanAcceptNextStep(this.simulationTime, this.gpuCompletedTime)) return;
-    const gpuCoupling = backend === "webgpu" ? externalLoadsFromGPU(scene, this.gpuRigidLoads, dt) : undefined;
+    const gpuCoupling = backend === "webgpu" ? externalLoadsFromGPU(scene, this.gpuRigidLoads, dt, this.bodies) : undefined;
     const coupling = gpuCoupling ? undefined : computeFluidLoads(scene, this.fluidSolver, this.bodies);
     const couplingDiagnostics = gpuCoupling?.diagnostics ?? applyFluidReactions(this.fluidSolver, this.bodies, coupling!.loads, dt);
     const diagnostics = advanceRigidBodies(this.bodies, scene, dt, 6, gpuCoupling?.loads ?? coupling!.loads);
