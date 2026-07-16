@@ -20,15 +20,17 @@ test("tall-cell semi-Lagrangian finish consumes the shared predictor", () => {
   assert.match(tallCellComputeShader, /var v=boundedMacCormack\(id,p\)/);
 });
 
-test("tall velocity transport follows each positive MAC face", () => {
+test("regular-row velocity transport follows each positive MAC face", () => {
   assert.match(tallCellComputeShader, /fn sampleVelocityComponent\(p:vec3f,component:u32\)->f32/);
   assert.match(tallCellComputeShader, /offset\[component\]=1\.0/);
   assert.match(tallCellComputeShader, /lower\[component\]=-1\.0/);
   assert.match(tallCellComputeShader, /fn faceSampledVelocity[\s\S]*sampleVelocityComponent\(p,2u\)/);
-  assert.match(tallCellComputeShader, /fn traceDeparture[\s\S]*faceSampledVelocity\(midpoint\)/);
-  assert.match(tallCellComputeShader, /fn faceAdvectedVelocity[\s\S]*faceP=center\+0\.5\*vec3f\(axisOffset\(component\)\)[\s\S]*sampleVelocityComponent\(traceDeparture\(faceP,signedDt\),component\)/);
-  assert.match(tallCellComputeShader, /fn predictVelocity[\s\S]*faceAdvectedVelocity\(id,params\.dimsDt\.w\)/);
-  assert.match(tallCellComputeShader, /fn reverseVelocity[\s\S]*faceAdvectedVelocity\(id,-params\.dimsDt\.w\)/);
+  assert.match(tallCellComputeShader, /fn traceDeparture[\s\S]*sampleVelocity\(midpoint\)/);
+  assert.match(tallCellComputeShader, /fn traceFaceDeparture[\s\S]*faceSampledVelocity\(midpoint\)/);
+  assert.match(tallCellComputeShader, /fn faceAdvectedVelocity[\s\S]*faceP=center\+0\.5\*vec3f\(axisOffset\(component\)\)[\s\S]*sampleVelocityComponent\(traceFaceDeparture\(faceP,signedDt\),component\)/);
+  assert.match(tallCellComputeShader, /fn predictVelocity[\s\S]*select\(tracedVelocity[\s\S]*faceAdvectedVelocity\(id,params\.dimsDt\.w\),id\.y>=2\)/);
+  assert.match(tallCellComputeShader, /fn reverseVelocity[\s\S]*select\(tracedVelocity[\s\S]*faceAdvectedVelocity\(id,-params\.dimsDt\.w\),id\.y>=2\)/);
+  assert.match(tallCellComputeShader, /fn boundedMacCormack[\s\S]*if\(id\.y<2\)[\s\S]*traceDeparture\(p,params\.dimsDt\.w\)/);
   assert.match(tallCellComputeShader, /fn boundedMacCormack[\s\S]*departure-faceOffset[\s\S]*velocityCell\(b\+offset\)\[component\]/);
 });
 

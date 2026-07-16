@@ -137,6 +137,16 @@ fn sampleVelocity(p:vec3f)->vec3f{
   let a=mix(mix(velocityCell(b),velocityCell(b+vec3i(1,0,0)),f.x),mix(velocityCell(b+vec3i(0,1,0)),velocityCell(b+vec3i(1,1,0)),f.x),f.y);
   let c=mix(mix(velocityCell(b+vec3i(0,0,1)),velocityCell(b+vec3i(1,0,1)),f.x),mix(velocityCell(b+vec3i(0,1,1)),velocityCell(b+vec3i(1,1,1)),f.x),f.y);return mix(a,c,f.z);
 }
+// Regular-row components are the positive-face degrees of freedom consumed by
+// divergenceAt/project. Reconstruct them on their staggered lattices. The two
+// tall endpoint rows remain collocated Eq. 5 samples and bypass this path.
+fn sampleVelocityComponent(p:vec3f,component:u32)->f32{
+  var offset=vec3f(0.5);offset[component]=1.0;var lower=vec3f(0.0);lower[component]=-1.0;
+  let q=clamp(p-offset,lower,vec3f(fineDims()-vec3i(1)));let b=vec3i(floor(q));let f=fract(q);
+  let a=mix(mix(velocityCell(b)[component],velocityCell(b+vec3i(1,0,0))[component],f.x),mix(velocityCell(b+vec3i(0,1,0))[component],velocityCell(b+vec3i(1,1,0))[component],f.x),f.y);
+  let c=mix(mix(velocityCell(b+vec3i(0,0,1))[component],velocityCell(b+vec3i(1,0,1))[component],f.x),mix(velocityCell(b+vec3i(0,1,1))[component],velocityCell(b+vec3i(1,1,1))[component],f.x),f.y);return mix(a,c,f.z);
+}
+fn faceSampledVelocity(p:vec3f)->vec3f{return vec3f(sampleVelocityComponent(p,0u),sampleVelocityComponent(p,1u),sampleVelocityComponent(p,2u));}
 fn samplePressure(p:vec3f)->f32{
   let q=clamp(p-vec3f(0.5),vec3f(0.0),vec3f(fineDims()-vec3i(1)));let b=vec3i(floor(q));let f=fract(q);
   let a=mix(mix(pressureCell(b),pressureCell(b+vec3i(1,0,0)),f.x),mix(pressureCell(b+vec3i(0,1,0)),pressureCell(b+vec3i(1,1,0)),f.x),f.y);
@@ -200,8 +210,19 @@ fn curvature(q:vec3i)->f32{let h=params.cellGravity.xyz;return (interfaceNormal(
 fn velocityLaplacian(q:vec3i)->vec3f{let h=params.cellGravity.xyz;let c=diffusionVelocity(q);return (diffusionVelocity(q+vec3i(1,0,0))-2.0*c+diffusionVelocity(q-vec3i(1,0,0)))/(h.x*h.x)+(diffusionVelocity(q+vec3i(0,1,0))-2.0*c+diffusionVelocity(q-vec3i(0,1,0)))/(h.y*h.y)+(diffusionVelocity(q+vec3i(0,0,1))-2.0*c+diffusionVelocity(q-vec3i(0,0,1)))/(h.z*h.z);}
 fn strainMagnitude(q:vec3i)->f32{let h=params.cellGravity.xyz;let dx=(diffusionVelocity(q+vec3i(1,0,0))-diffusionVelocity(q-vec3i(1,0,0)))/(2.0*h.x);let dy=(diffusionVelocity(q+vec3i(0,1,0))-diffusionVelocity(q-vec3i(0,1,0)))/(2.0*h.y);let dz=(diffusionVelocity(q+vec3i(0,0,1))-diffusionVelocity(q-vec3i(0,0,1)))/(2.0*h.z);let sxy=0.5*(dx.y+dy.x);let sxz=0.5*(dx.z+dz.x);let syz=0.5*(dy.z+dz.y);return sqrt(2.0*(dx.x*dx.x+dy.y*dy.y+dz.z*dz.z+2.0*(sxy*sxy+sxz*sxz+syz*syz)));}
 
+// Phi follows the paper's collocated Semi-Lagrangian trajectory. Velocity
+// transport uses a separate component-staggered trace below; sharing that
+// trace would silently change the level-set method while fixing MAC advection.
 fn traceDeparture(p:vec3f,signedDt:f32)->vec3f{let h=params.cellGravity.xyz;let first=sampleVelocity(p);let midpoint=p-0.5*first*signedDt/h;return p-sampleVelocity(midpoint)*signedDt/h;}
+fn traceFaceDeparture(p:vec3f,signedDt:f32)->vec3f{let h=params.cellGravity.xyz;let first=faceSampledVelocity(p);let midpoint=p-0.5*first*signedDt/h;return p-faceSampledVelocity(midpoint)*signedDt/h;}
 fn tracedVelocity(p:vec3f,signedDt:f32)->vec3f{return sampleVelocity(traceDeparture(p,signedDt));}
+fn faceAdvectedVelocity(id:vec3i,signedDt:f32)->vec3f{
+  let center=samplePoint(id);var result=vec3f(0.0);
+  // The caller restricts this to regular rows. Adding the component half-
+  // offset lands each value on the face used by divergenceAt and project.
+  for(var component=0u;component<3u;component+=1u){let faceP=center+0.5*vec3f(axisOffset(component));result[component]=sampleVelocityComponent(traceFaceDeparture(faceP,signedDt),component);}
+  return result;
+}
 // Global level-set volume control. params.physical.w is a normal correction
 // speed in cells/second: it is negative when reconstructed volume is high, so
 // subtracting it increases phi and shrinks the liquid region. Restrict the
@@ -227,17 +248,19 @@ fn reinitializePhi(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);l
 @compute @workgroup_size(4,4,4)
 fn extrapolateVelocity(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));return;}let q=vec3i(floor(samplePoint(id)));if(isInflowVelocityCell(q)){textureStore(velocityOut,id,vec4f(applyInflowVelocity(q,textureLoad(velocityIn,id,0).xyz),1.0));return;}if(pointSamplePhi(id)<=0.0){textureStore(velocityOut,id,vec4f(textureLoad(velocityIn,id,0).xyz,1.0));return;}let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));var sum=vec3f(0.0);var weight=0.0;for(var index=0;index<6;index+=1){let state=velocityStateCell(q+offsets[index]);if(state.w>0.5){sum+=state.xyz;weight+=1.0;}}if(weight>0.0){textureStore(velocityOut,id,vec4f(sum/weight,1.0));}else{textureStore(velocityOut,id,vec4f(textureLoad(velocityIn,id,0).xyz,0.0));}}
 @compute @workgroup_size(4,4,4)
-fn predictVelocity(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));return;}textureStore(velocityOut,id,vec4f(tracedVelocity(samplePoint(id),params.dimsDt.w),0.0));}
+fn predictVelocity(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));return;}let value=select(tracedVelocity(samplePoint(id),params.dimsDt.w),faceAdvectedVelocity(id,params.dimsDt.w),id.y>=2);textureStore(velocityOut,id,vec4f(value,0.0));}
 @compute @workgroup_size(4,4,4)
-fn reverseVelocity(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));return;}textureStore(velocityOut,id,vec4f(tracedVelocity(samplePoint(id),-params.dimsDt.w),0.0));}
+fn reverseVelocity(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));return;}let value=select(tracedVelocity(samplePoint(id),-params.dimsDt.w),faceAdvectedVelocity(id,-params.dimsDt.w),id.y>=2);textureStore(velocityOut,id,vec4f(value,0.0));}
 
 fn boundedMacCormack(id:vec3i,p:vec3f)->vec3f{
-  let h=params.cellGravity.xyz;let first=sampleVelocity(p);let midpoint=p-0.5*first*params.dimsDt.w/h;let departure=p-sampleVelocity(midpoint)*params.dimsDt.w/h;
-  let sampleCoordinate=clamp(departure-vec3f(0.5),vec3f(0.0),vec3f(fineDims()-vec3i(1)));let b=vec3i(floor(sampleCoordinate));
-  var lower=velocityCell(b);var upper=lower;
-  for(var corner:u32=1u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let value=velocityCell(b+offset);lower=min(lower,value);upper=max(upper,value);}
   let predicted=textureLoad(predictedVelocityIn,id,0).xyz;let original=textureLoad(velocityIn,id,0).xyz;let reversed=textureLoad(reversedVelocityIn,id,0).xyz;var corrected=predicted+0.5*(original-reversed);
-  for(var component:u32=0u;component<3u;component+=1u){if(corrected[component]<lower[component]||corrected[component]>upper[component]){corrected[component]=predicted[component];}}
+  if(id.y<2){let departure=traceDeparture(p,params.dimsDt.w);let sampleCoordinate=clamp(departure-vec3f(0.5),vec3f(0.0),vec3f(fineDims()-vec3i(1)));let b=vec3i(floor(sampleCoordinate));var lower=velocityCell(b);var upper=lower;for(var corner:u32=1u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let value=velocityCell(b+offset);lower=min(lower,value);upper=max(upper,value);}for(var component:u32=0u;component<3u;component+=1u){if(corrected[component]<lower[component]||corrected[component]>upper[component]){corrected[component]=predicted[component];}}return corrected;}
+  for(var component:u32=0u;component<3u;component+=1u){
+    let faceP=p+0.5*vec3f(axisOffset(component));let departure=traceFaceDeparture(faceP,params.dimsDt.w);var faceOffset=vec3f(0.5);faceOffset[component]=1.0;var lowerCoordinate=vec3f(0.0);lowerCoordinate[component]=-1.0;
+    let sampleCoordinate=clamp(departure-faceOffset,lowerCoordinate,vec3f(fineDims()-vec3i(1)));let b=vec3i(floor(sampleCoordinate));var lower=velocityCell(b)[component];var upper=lower;
+    for(var corner:u32=1u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let value=velocityCell(b+offset)[component];lower=min(lower,value);upper=max(upper,value);}
+    if(corrected[component]<lower||corrected[component]>upper){corrected[component]=predicted[component];}
+  }
   return corrected;
 }
 
@@ -455,7 +478,7 @@ fn leastSquaresPhi(x:i32,z:i32,newBase:i32)->vec2f{if(newBase<=1){let value=phiC
 fn leastSquaresVelocity(x:i32,z:i32,newBase:i32,top:bool)->vec3f{if(newBase<=1){return velocityCell(vec3i(x,0,z));}var st=0.0;var stt=0.0;var sv=vec3f(0.0);var stv=vec3f(0.0);for(var y=0;y<newBase;y+=1){let t=f32(y)/f32(newBase-1);let value=velocityCell(vec3i(x,y,z));st+=t;stt+=t*t;sv+=value;stv+=t*value;}let n=f32(newBase);let slope=(n*stv-st*sv)/max(n*stt-st*st,1e-6);let intercept=(sv-slope*st)/n;return select(intercept,intercept+slope,top);}
 @compute @workgroup_size(4,4,4)
 fn remap(@builtin(global_invocation_id) gid:vec3u){
-	  let id=vec3i(gid);if(!validPacked(id)){return;}let d=packedDims();let newBase=i32(nextColumnBases[u32(id.x+d.x*id.z)]);var p=vec3f(f32(id.x)+0.5,0.5,f32(id.z)+0.5);if(id.y==1){p.y=max(0.5,f32(newBase)-0.5);}else if(id.y>=2){p.y=f32(newBase+id.y-2)+0.5;}let isActive=select(newBase>0,newBase+id.y-2<fineDims().y,id.y>=2);let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var phi=limit;var velocity=vec3f(0.0);var pressure=0.0;if(isActive){pressure=samplePressure(p);if(id.y<2){let fit=leastSquaresPhi(id.x,id.z,newBase);let crossing=(fit.x<=0.0)!=(fit.y<=0.0);phi=select(select(fit.x,fit.y,id.y==1),fit.y,crossing);velocity=leastSquaresVelocity(id.x,id.z,newBase,id.y==1);}else{phi=samplePhi(p);velocity=sampleVelocity(p);}}
+	  let id=vec3i(gid);if(!validPacked(id)){return;}let d=packedDims();let newBase=i32(nextColumnBases[u32(id.x+d.x*id.z)]);var p=vec3f(f32(id.x)+0.5,0.5,f32(id.z)+0.5);if(id.y==1){p.y=max(0.5,f32(newBase)-0.5);}else if(id.y>=2){p.y=f32(newBase+id.y-2)+0.5;}let isActive=select(newBase>0,newBase+id.y-2<fineDims().y,id.y>=2);let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var phi=limit;var velocity=vec3f(0.0);var pressure=0.0;if(isActive){pressure=samplePressure(p);if(id.y<2){let fit=leastSquaresPhi(id.x,id.z,newBase);let crossing=(fit.x<=0.0)!=(fit.y<=0.0);phi=select(select(fit.x,fit.y,id.y==1),fit.y,crossing);velocity=leastSquaresVelocity(id.x,id.z,newBase,id.y==1);}else{phi=samplePhi(p);for(var component=0u;component<3u;component+=1u){let faceP=p+0.5*vec3f(axisOffset(component));velocity[component]=sampleVelocityComponent(faceP,component);}}}
   textureStore(velocityOut,id,vec4f(velocity,0.0));textureStore(volumeOut,id,vec4f(clamp(phi,-limit,limit)));textureStore(pressureOut,id,vec4f(pressure));if(id.y==0){textureStore(columnBaseOut,vec2i(id.x,id.z),vec4f(f32(newBase)));}
 }
 
