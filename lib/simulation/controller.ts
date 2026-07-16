@@ -294,10 +294,14 @@ class SimulationController {
     const descriptions = sceneStore.scene.rigidBodies.map((body) => body.id === bodyId ? { ...body, ...patch } : body);
     sceneStore.patchScene({ rigidBodies: descriptions });
     const description = descriptions.find((item) => item.id === bodyId);
-    if (description) this.bodies = this.bodies.map((body) => body.description.id === bodyId ? initializeRigidBody(description) : body);
+    if (description) this.bodies = this.bodies.map((body) => {
+      if (body.description.id !== bodyId) return body;
+      const updated = initializeRigidBody(description);
+      updated.position_m = { ...(patch.position_m ?? body.position_m) };
+      return updated;
+    });
     this.publishBodies();
-    useRuntimeStore.getState().setRunState("paused");
-    useRuntimeStore.getState().setNotice("Body parameters updated; simulation paused");
+    useRuntimeStore.getState().setNotice("Body parameters updated");
   }
 
   resetBody(bodyId: string) {
