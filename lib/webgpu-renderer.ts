@@ -236,16 +236,30 @@ fn nearestBody(ro: vec3f, rd: vec3f) -> BodyHit {
   return result;
 }
 
+// Level-set fields become a smooth occupancy whose 0.5 contour is phi = 0.
+// The band spans four cells so no corner of a surface-crossing cube saturates
+// (the cube diagonal is under two cells); a saturated corner biases the linear
+// crossing estimate and renders as cell-pitch lattice artifacts.
+fn occupancyFromPhi(phi: f32) -> f32 {
+  let band = 4.0 * u.container.y / max(u.gridInfo.y, 1.0);
+  return clamp(0.5 - phi / band, 0.0, 1.0);
+}
+
 fn fluidSample(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz);
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
-  if (u.gridInfo.w < 1.5) { return textureLoad(fluidField, q, 0).x; }
+  let mode = u.gridInfo.w;
+  if (mode < 1.5) { return textureLoad(fluidField, q, 0).x; }
+  if (mode > 2.5) { return occupancyFromPhi(textureLoad(fluidField, q, 0).x); }
   let base = i32(round(textureLoad(tallCellBases, q.xz, 0).x));
-  if (q.y < base && base > 0) { return textureLoad(fluidField, vec3i(q.x, 0, q.z), 0).x; }
+  if (q.y < base && base > 0) {
+    let t = clamp(f32(q.y) / f32(max(base - 1, 1)), 0.0, 1.0);
+    return occupancyFromPhi(mix(textureLoad(fluidField, vec3i(q.x, 0, q.z), 0).x, textureLoad(fluidField, vec3i(q.x, 1, q.z), 0).x, t));
+  }
   let packedY = 2 + q.y - base;
   let stored = vec3i(textureDimensions(fluidField));
   if (packedY < 2 || packedY >= stored.y) { return 0.0; }
-  return textureLoad(fluidField, vec3i(q.x, packedY, q.z), 0).x;
+  return occupancyFromPhi(textureLoad(fluidField, vec3i(q.x, packedY, q.z), 0).x);
 }
 
 fn fluidValue(uvw: vec3f) -> f32 {
@@ -650,7 +664,7 @@ export class FluidLabRenderer {
       : new Promise<GPUSolverInstance>((resolve,reject)=>setTimeout(()=>{try{resolve(method.createSolver!(device,scene,config.quality,config.values,this.gpuRigidLoadCallback));}catch(error){reject(error);}},0));
     this.gpuFluidPending=create.then((solver)=>{
       if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration){solver.destroy();return;}
-      this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.rebuildBindGroup(solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture);this.gpuInfoCallback?.(solver.info);this.onStatus({state:"ready",label:"WebGPU solver ready",adapter:this.adapterName});
+      this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.rebuildBindGroup(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture);this.gpuInfoCallback?.(solver.info);this.onStatus({state:"ready",label:"WebGPU solver ready",adapter:this.adapterName});
     }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed"});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration)this.gpuFluidPending=undefined;});
   }
 
@@ -753,7 +767,7 @@ export class FluidLabRenderer {
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
     const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, config, time_s, bodies) : undefined;
-    if (gpuInfo && this.gpuFluid && this.gridCellTexture) this.gridOverlayPipeline?.setVolume(this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture);
+    if (gpuInfo && this.gpuFluid && this.gridCellTexture) this.gridOverlayPipeline?.setVolume(this.gpuFluid.surfaceFieldTexture ?? this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture);
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const uniform = new Float32Array([
@@ -762,7 +776,9 @@ export class FluidLabRenderer {
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
       view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), 0,
-      gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "restricted-tall-cell" ? 2 : 1) : fluid ? 1 : 0,
+      // Field mode: 1 = raw occupancy, 2 = packed tall-cell level set,
+      // 3 = uniform-layout level set (quadtree resident phi).
+      gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "restricted-tall-cell" ? 2 : gpuInfo.gridKind === "quadtree-tall-cell" ? 3 : 1) : fluid ? 1 : 0,
       gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "quadtree-tall-cell" ? 1 : 0, 0
     ]);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
