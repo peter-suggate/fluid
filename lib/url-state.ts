@@ -3,7 +3,7 @@ import { cloneScene, validateScene, type CameraState, type SceneDescription, typ
 import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets } from "./scenes";
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
-import { useUIStore } from "./stores/ui-store";
+import { useUIStore, type RightPanel } from "./stores/ui-store";
 import type { GPUQuality } from "./tall-cell-grid";
 import type { GridOverlayConfig, WaterRenderMode } from "./webgpu-renderer";
 
@@ -55,6 +55,7 @@ type UIQueryState = {
   performanceOpen: boolean;
   validationOpen: boolean;
   diagnosticsOpen: boolean;
+  rightPanel: RightPanel;
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
   waterRenderMode: WaterRenderMode;
@@ -162,6 +163,10 @@ export function parseQueryState(search: string): QueryState {
   const view = query.get("view");
   const grid = query.get("grid");
   const render = query.get("render");
+  const requestedPanel = query.get("panel");
+  const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "bodies" || requestedPanel === "diagnostics"
+    ? requestedPanel
+    : query.get("diagnostics") === "1" ? "diagnostics" : initialUI.rightPanel;
 
   return {
     methodId,
@@ -184,7 +189,8 @@ export function parseQueryState(search: string): QueryState {
       sceneModalOpen: query.get("sceneConfig") === "1",
       performanceOpen: query.get("performance") === "1",
       validationOpen: query.get("validation") === "1",
-      diagnosticsOpen: query.get("diagnostics") === "1",
+      diagnosticsOpen: rightPanel === "diagnostics",
+      rightPanel,
       gridOverlayAxis: grid === "off" || grid === "x" || grid === "z" ? grid : initialUI.gridOverlayAxis,
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode
@@ -193,7 +199,7 @@ export function parseQueryState(search: string): QueryState {
 }
 
 function isManagedKey(key: string) {
-  return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics"
+  return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "panel"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice"
     || key === "render" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
@@ -213,7 +219,9 @@ export function serializeQueryState(
   query.set("quality", methodState.quality);
   query.set("view", uiState.view);
   query.set("render", uiState.waterRenderMode);
-  if (uiState.diagnosticsOpen) query.set("diagnostics", "1");
+  const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
+  if (rightPanel === "diagnostics") query.set("diagnostics", "1");
+  else if (rightPanel) query.set("panel", rightPanel);
   if (uiState.performanceOpen) query.set("performance", "1");
   if (uiState.validationOpen) query.set("validation", "1");
   if (uiState.sceneModalOpen) query.set("sceneConfig", "1");

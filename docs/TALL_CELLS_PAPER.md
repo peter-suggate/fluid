@@ -249,8 +249,11 @@ Jacobi-style passes enforce the neighbor-height constraint:
 
 ```text
 y_tmp[i,k] = min(y_tmp[i,k],
-                 max over horizontal neighbors(y_tmp[neighbor] - D))  (10)
+                 max over horizontal neighbors(y_tmp[neighbor]) + D)  (10)
 ```
+
+(An earlier revision of this document printed `- D` inside the max; the
+paper's form is `+ D` outside it — see Appendix A.5.)
 
 The paper's examples use:
 
@@ -517,3 +520,442 @@ The primary files to audit are:
 
 The implementation-comparison table and measured instability findings belong
 in `docs/TALL_CELL_STABILITY.md` so this paper reference can remain stable.
+
+---
+
+## Appendix A. Verbatim transcription from the tall-cell PDF
+
+Source: `docs/papers/tallCells.pdf` (archived copy of
+<https://matthias-research.github.io/pages/publications/tallCells.pdf>).
+This appendix records the paper's exact equations and parameter statements.
+Where the paraphrase above disagrees, THIS APPENDIX IS AUTHORITATIVE and the
+disagreement is flagged.
+
+### A.1 Packed layout (Sec 3.1, Eq 4–6)
+
+Quantities are stored in a compressed array `q_{i,j,k}` of size
+`(B_x, B_y + 2, B_z)`. Terrain height `H_{i,k}` and tall-cell height `h_{i,k}`
+are 2D arrays. The uncompressed y of array element `q_{i,j,k}` (one-based j):
+
+```text
+y_{i,j,k} = H_{i,k} + 1              if j = 1 (tall cell bottom)
+            H_{i,k} + h_{i,k}        if j = 2 (tall cell top)
+            H_{i,j} + h_{i,k} + j-2  if j >= 3 (regular)             (4)
+```
+
+Evaluating `q` at uncompressed `(x,y,z)`:
+
+- `y <= H_{x,z}`: value below terrain.
+- `H_{x,z} < y <= H_{x,z}+h_{x,z}` (inside the tall cell):
+
+```text
+q_(x,y,z) = ((y - H_{x,z})/h_{x,z}) q_{x,2,z}
+            + (1 - (y - H_{x,z})/h_{x,z}) q_{x,1,z}                  (5)
+```
+
+- `H+h < y <= H+h+B_y`: `q_(x,y,z) = q_{x,(y-H_{x,z}-h_{x,z}-2),z}`   (6)
+  (paper's one-based j; the `-2`→`+2` shift depends on index convention).
+- otherwise: the above-air value.
+
+NOTE (A.1a): Eq 4 places the endpoint samples at the CENTERS of the bottommost
+(`H+1`) and topmost (`H+h`) subcells — separation `(h-1)Δx` — but Eq 5's
+interpolation parameter `(y-H)/h` treats the endpoint values as if they sat at
+`y=H` and `y=H+h`. The paper's interpolation is therefore not endpoint-exact
+at the stored sample positions (at `y=H+1` it returns
+`(1/h)q_top + (1-1/h)q_bottom`, not `q_bottom`). Any implementation must pick
+one convention and use it consistently in reconstruction, divergence,
+Laplacian, gradient, restriction, and prolongation.
+
+### A.2 Velocity extrapolation (Sec 3.3)
+
+Eq 7 (per component, fictitious time `tau`): `du/dtau = -(∇φ/|∇φ|)·∇u`.
+
+Exact procedure: "we apply the algorithm proposed in [Jeong et al. 2007] only
+in a narrow band of two cells. Outside this region we use a hierarchical grid
+for extrapolating the velocity field."
+
+Hierarchy (Sec 3.3.1): `L = log2 min(B_x, B_y, B_z)` levels; finest level L is
+the simulation grid. Coarser levels:
+
+```text
+H^l_{i,k} = floor( min_{i'=2i..2i+1, k'=2k..2k+1} H^{l+1}_{i',k'} / 2 )      (8)
+h^l_{i,k} = ceil( max_{i'=2i..2i+1, k'=2k..2k+1} (H^{l+1}_{i',k'} + h^{l+1}_{i',k'}) / 2 ) - H^l_{i,k}   (9)
+Δx^l = 2Δx^{l+1};  B^l_x = B^{l+1}_x/2, B^l_y = B^{l+1}_y/2, B^l_z = B^{l+1}_z/2
+```
+
+Sweep down then up: on the finest level a cell's velocity is "known" if the
+cell is liquid or already extrapolated (by the 2-cell PDE band). Fine→coarse:
+tri-linear interpolation using only known values, renormalizing weights; a
+coarse cell is known if at least one corresponding finer cell is known.
+Coarse→fine: fill fine unknowns by tri-linear interpolation from coarser
+grids. "After these two passes every cell of the finest grid has a known
+velocity."
+
+### A.3 Level set reinitialization (Sec 3.4) — exact stabilizations
+
+1. reinitialization runs "only every ten frames";
+2. during reinitialization, φ values of grid points next to the surface are
+   not modified (avoids moving the interface);
+3. "in every frame we clamp the value of φ next to the liquid surface to not
+   exceed the grid spacing Δx";
+4. all |φ| clamped below `5Δx`.
+
+### A.4 Advection (Sec 3.5)
+
+Velocity: modified MacCormack [Selle et al. 2008], reverting to
+semi-Lagrangian "if the new velocity component lies outside the bound of the
+values used for interpolation". φ: semi-Lagrangian. One ray trace shared by
+all quantities (collocated). External forces forward-Euler after advection.
+
+### A.5 Remeshing (Sec 3.6) — exact text
+
+Liquid cells: `φ <= 0`. Constraints: (1) at least `G_L` regular cells below
+the bottom-most liquid surface; (2) at least `G_A` regular cells above the
+top-most liquid surface; (3) adjacent tall-cell heights differ by ≤ `D`.
+
+Procedure: per column compute the maximum and minimum y of the tall-cell top
+satisfying (1) and (2) respectively; init `y_tmp` to their average; run
+several smoothing passes on `y_tmp`, clamping during smoothing to satisfy (1)
+and (2), "giving preference to condition (2) by enforcing it after condition
+(1)"; finally enforce (3) Jacobi-style:
+
+```text
+y'_tmp[i,k] = min( y_tmp[i,k],  max_{|i'-i|+|k'-k|=1} y_tmp[i',k'] + D )   (10)
+```
+
+Parameters: `8 <= G_L <= 32`, `G_A = 8`, `3 <= D <= 6`, one to two Jacobi
+iterations. Then `h_new = y_tmp - H`.
+
+FLAG (A.5a): the paraphrase in §8 above printed Eq 10 as
+`min(y, max_neighbors(y - D))`, which is a different (and collapsing) bound.
+The paper's form only lowers a column that pokes more than `D` above its
+HIGHEST neighbor. Verify what `limitNeighboringTallCellBases` /
+`smoothRemesh` actually implement before changing anything.
+
+Transfer: regular cells copy values at corresponding locations from the old
+grid "or interpolate linearly if the location was occupied by a tall cell in
+the previous time step". Tall cells: "we do a least square fit to obtain the
+values at the bottom and the top of the cell".
+
+The paper does NOT state any per-step limit on how far `h` may move between
+steps (no temporal clamp), and remeshing runs every step (Algorithm 1).
+
+### A.6 Pressure (Sec 3.7, Eq 11–18) — exact operators
+
+```text
+∇·(u* - (Δt/ρ)∇p) = 0                                                (11)
+∇²p = (ρ/Δt) ∇·u*                                                    (12)
+(∇·u)_{i,j,k} = (∂u/∂x) + (∂v/∂y) + (∂w/∂z)                          (13)
+(∂u/∂x)_{i,j,k} = (u+_{i,j,k} - u-_{i,j,k}) / Δx
+u+_{i,j,k} = (u_{i,j,k} + u_{(i+1,y,k)})/2   if cell (i+1,y,k) not solid
+             u_solid                          otherwise               (14)
+(∇²p)_{i,j,k} = (∂²p/∂x²) + (∂²p/∂y²) + (∂²p/∂z²)                    (15)
+(∂²p/∂x²)_{i,j,k} = (p*+_{i,j,k} - 2 p_{i,j,k} + p*-_{i,j,k}) / Δx²
+p*+_{i,j,k} = p_{i,j,k} · φ_{(i+1,y,k)} / φ_{i,j,k}     if cell (i+1,y,k) is air
+              s_{(i+1,y,k)} p_{i,j,k} + (1 - s_{(i+1,y,k)}) p_{(i+1,y,k)}  otherwise  (16)
+(∇p)_{i,j,k} = [(∂p/∂x), (∂p/∂y), (∂p/∂z)]^T                          (17)
+   with (∂p/∂x)_{i,j,k} = (p*+_{i,j,k} - p*-_{i,j,k}) / Δx
+u_{i,j,k} -= (Δt/ρ)(∇p)_{i,j,k}                                       (18)
+```
+
+`s_{i,j,k}` is the solid fraction; Eq 16's first line is the ghost-fluid
+method (p = 0 on the liquid surface, φ ratio form); the second line is valid
+for any s in [0,1].
+
+NOTE (A.6a): Eq 14's `u+` and `u-` are averages at ±Δx/2, so Eq 13 is a
+proper Δx-span centered divergence. Eq 17's `p*+` and `p*-` are (for liquid
+neighbors) the neighbor cell-center pressures at ±Δx, yet the printed
+denominator is `Δx`, not `2Δx` — the printed gradient is twice the centered
+estimate and is dimensionally inconsistent with Eq 14's construction. The
+repository's `2Δx` interior / `Δx` wall reading treats this as an erratum.
+This must be settled empirically (hydrostatic + projection-idempotency tests)
+after the endpoint-wetness fixes land; the paper text offers no further
+disambiguation.
+
+NOTE (A.6b): the paper states "the divergence is only measured at the top and
+the bottom of tall cells, in the center, the solver is only aware of water
+flow in adjacent cubic cells, not inside the tall cell, which results in
+slight water gain over time. …we chose speed over accuracy in this trade off.
+To mitigate the problem, we make sure that the heights of adjacent tall cells
+do not differ too much, using parameter D." And: "our pressure projection
+operator is not idempotent because the Laplacian is not a composition of
+gradient and divergence and hence may not eliminate divergence completely."
+
+### A.7 Multigrid (Sec 3.7.1, Eq 19, Alg 2–4)
+
+Algorithm 2: build `A^L`; for l = L-1 down to 1: downsample φ, s; build
+`A^l`. `b^L = -(Δt/ρ)(∇·u)` [as printed]; `p^L = 0`; run `num_Full_Cycles`
+full cycles then `num_V_Cycles` V-cycles.
+
+Downsampling: `s`: 8-to-1 average for regular cells and "a least square fit of
+the 8-to-1 averages of the sub cells for the tall cells". φ: 8-to-1 average if
+all 8 values share a sign or `l < L - C`; otherwise average of the positive
+φ-values only. `C = 2` in all simulations.
+
+Coefficients of `A^l` are recomputed from Eq 16 on EVERY level (sub-grid
+ghost-fluid + solid fraction on all levels).
+
+Smoother: Red-Black Gauss-Seidel, two parallel passes. Restriction:
+tri-linear interpolation of r where
+
+```text
+r_(x,y,z) = r_{x,1,z}                     if y = H_{x,z} + 1
+            r_{x,2,z}                     if y = H_{x,z} + h_{x,z}
+            r_{x,(y-H-h-2),z}             if H+h <= y < H+h+B_y
+            0                             otherwise                   (19)
+```
+
+"r_(x,y,z) is zero everywhere inside a tall cell except at the top and
+bottom." Prolongation: tri-linear; out-of-grid samples ignored with weight
+renormalization; if all samples are outside, pressure = 0.
+
+Three critical convergence requirements (verbatim list): (1) full-cycles;
+(2) preserving air bubbles in the finest levels; (3) ghost fluid and solid
+fraction methods. "Not considering any one of these leads to either stagnation
+or even divergence."
+
+Algorithm 3 V_Cycle(l): if l==1 solve `A¹p¹=b¹`; else num_Pre_Sweep smooths,
+`r = b - Ap`, restrict to `b^{l-1}`, `p^{l-1}=0`, V_Cycle(l-1),
+`p += Prolong(p^{l-1})`, num_Post_Sweep smooths.
+
+Algorithm 4 Full_Cycle(): save `p_imp = p^L`; `r^L = b^L - A p^L`; restrict r
+down to level 1; `b¹ = r¹`; solve level 1; for l = 2..L: `p^l = Prolong(p^{l-1})`,
+`b^l = r^l`, V_Cycle(l); finally `p^L = p_imp + p^L`.
+
+Results (Sec 4): Δt = 1/30 s everywhere; "executing two V-cycles and one full
+multigrid in the pressure solver is sufficient"; benchmark used
+`num_Pre_Sweep = num_Post_Sweep = 2`. Grids up to 128×(32+2)×128 sim.
+
+### A.8 Optimizations (Sec 3.8, verbatim highlights)
+
+- interpolate along y first (2 consecutive packed samples per column);
+- Gauss-Seidel obtains the pressure below a tall top via the compressed
+  neighbor `p_{i,1,k}` by modifying the Laplace stencil implicitly;
+- clamp the hierarchy at the level fitting GPU shared memory; solve the top
+  level with multiple Gauss-Seidel iterations in a single kernel;
+- build the hierarchical grid once per frame at the incompressibility stage
+  and reuse it for velocity extrapolation next step (remeshing happens after
+  extrapolation).
+
+### A.9 Rigid coupling (Sec 3.9.1)
+
+Voxelize bodies into solid fraction `s`; blend fluid/solid velocities by s;
+"the divergence calculation treats a cell as solid if s > 0.9". In-solid
+level set `φ^s` diffusion:
+
+```text
+φ^s_{i,j,k} = (1/S) Σ_{|i'-i|+|j'-j|+|k'-k|=1} (1 - s_{(i',j',k')}) φ_{(i',j',k')}   if S > 0
+φ^s_{i,j,k} = (1/6) Σ φ_{(i',j',k')}                                                 otherwise
+S = Σ (1 - s_{(i',j',k')})
+```
+
+Mixed cells blend `s φ^s + (1-s) φ`. Buoyancy from s and relative density;
+drag proportional to s and relative velocity.
+
+---
+
+## Appendix B. Verbatim transcription: Mass-Conserving Eulerian Liquid Simulation
+
+Source: `docs/papers/massConservingLiquids.pdf` (archived copy of
+<https://matthias-research.github.io/pages/publications/masscon_sca.pdf>,
+Chentanez & Müller, SCA 2012). This is the volume-loss-correction companion
+paper. Equation numbers below are THAT paper's.
+
+### B.1 Setting and discretization
+
+The liquid domain is `ρ > 0.5` of a *surface density* field ρ (not mass
+density), advected by `∂ρ/∂t = -u·∇ρ` (Eq 3) and "periodically sharpened to
+prevent the 0.5 iso-contour from being blurred by numerical damping."
+
+IMPORTANT (B.1a): this paper uses a REGULAR STAGGERED (MAC) grid — velocity
+components at face centers, p and ρ at cell centers (Sec 3.1). The tall-cell
+paper is collocated. Combining the two therefore requires adaptation by
+construction; the sharpening/correction machinery below is defined on cell
+centers and carries over, but face-based quantities (Eq 18–19 solid area
+fractions) need collocated translation.
+
+Algorithm 1 (time step): 1. Velocity extrapolation; 2. Density advection and
+density sharpening; 3. Velocity advection and external force addition;
+4. Incompressibility enforcement.
+
+Velocity extrapolation (Sec 3.3) cites the tall-cell paper's method verbatim
+(Jeong et al. a few cells from the interface, then the grid hierarchy).
+
+### B.2 Conservative density advection (Sec 3.4)
+
+Based on Lentine et al. [LGF11]/[LAF11] conservative semi-Lagrangian
+advection (`ρ^{n+1} = A ρ^n`, backward-trace weights `w-_{ij}`, forward-trace
+weights `w+_{ij}`, row sums γ_i, column sums β_j), modified to need only 3
+scatter passes. The paper's exact modified scheme:
+
+1. Advect γ_i using the backward semi-Lagrangian method (γ = 1 at first step).
+2. Initialize β ← 0.
+3. β_l += w-_{li} γ_i (backward trace, tri-linear).
+4. ρ^{n+1}_i = Σ_l (γ_l / max(1, β_l)) w-_{li} ρ^n_l ; γ'_i computed likewise.
+5. γ ← γ'.
+6. For each j with β_j < 1: ρ^{n+1}_k += ρ^n_j (1 - β_j) w+_{jk} (forward trace).
+7. Similarly γ^{n+1}_k += γ^n_j (1 - β_j) w+_{jk}.
+8. Apply diffusion as in the original approach [1 to 7 iterations: for
+   neighbors i,j with γ_j > γ_i move ρ_i(γ_j-γ_i)/(2γ_j) from j to i and set
+   both γ to (γ_j+γ_i)/2; does not change β].
+
+The scheme is unconditionally stable and fully conservative (paper runs
+CFL 25 at Δt = 1/30 s).
+
+NOTE (B.2a): this repository instead uses a flux-form donor/receiver-limited
+VOF transport (also conservative by pairwise cancellation, but CFL-limited).
+This is a DIFFERENT advection operator from the paper's. It is a departure to
+either replace or justify; at the repository's CFL ≤ 1 time steps the schemes
+serve the same role, but the departure must be recorded, not silent.
+
+### B.3 Density sharpening (Sec 3.5, Eq 4–17, Algorithm 2) — the missing stage
+
+Mass change of cell i due to unit velocity along ±x (ΔT = 3 × simulation Δt):
+
+```text
+δ^{x+}_i = ∫_{C_i} ∇·(ρ[1,0,0]^T ΔT) dV ≈ -(ρ_i - ρ_{i-(1,0,0)}) Δx ΔT     (4,6)
+δ^{x-}_i = ∫_{C_i} ∇·(ρ[-1,0,0]^T ΔT) dV ≈ -(ρ_{i+(1,0,0)} - ρ_i) Δx ΔT    (5,7)
+```
+
+(y and z analogous — upwind differences.) Maximum mass increase / decrease
+under any unit velocity:
+
+```text
+ΔT|∇ρ|+_i = (1/Δx²)( max(max(δ^{x+},0)², min(δ^{x-},0)²)
+                   + max(max(δ^{y+},0)², min(δ^{y-},0)²)
+                   + max(max(δ^{z+},0)², min(δ^{z-},0)²) )^{1/2}          (8–10)
+ΔT|∇ρ|-_i = (1/Δx²)( max(min(δ^{x+},0)², max(δ^{x-},0)²)
+                   + max(min(δ^{y+},0)², max(δ^{y-},0)²)
+                   + max(min(δ^{z+},0)², max(δ^{z-},0)²) )^{1/2}          (11–13)
+```
+
+Sharpening weight and density correction:
+
+```text
+w_i(ρ) = (ρ_i - 0.5)³ (1 - min(1, max_{j∈N(C_i)}(|ρ_i - ρ_j|) / τ))        (14)
+Δρ_i = w_i(ρ) ΔT|∇ρ|+_i   if w_i(ρ) >= 0
+       w_i(ρ) ΔT|∇ρ|-_i   if w_i(ρ) < 0                                    (15)
+ρ_i ← ρ_i + Δρ_i                                                           (16)
+```
+
+`N(C_i)` = adjacent cells; τ = 0.4 (limits the max density difference between
+adjacent cells; larger τ visually resembles surface tension).
+
+Local mass conservation (their novel contribution — Mullen et al.'s global
+redistribution moves mass across the whole domain and deletes small features):
+
+```text
+Δρ_i ← -ρ_i   if ρ_i + Δρ_i < 0 or ρ_i < ε        (ε = 1e-5)
+       0      if ρ_i > 0.5
+       Δρ_i   otherwise                                                     (17)
+```
+
+(second line: cells with ρ > 0.5 are not modified — "mass only moves from the
+air side to the liquid side"). Update ρ with the modified Δρ (Eq 16), then
+add back `-Δρ_i` locally via Algorithm 2:
+
+```text
+Algorithm 2: for each cell i:
+  p = TraceAlongField(Position(i), ρ, ∇ρ, D·Δx)
+  ScatterValue(p, -Δρ_i)
+```
+
+`TraceAlongField` starts at the cell center and follows ∇ρ (multiple forward
+Euler sub-steps) until it reaches the 0.5 iso-contour, a distance `D Δx` is
+covered, or a solid boundary is crossed. `ScatterValue` deposits `-Δρ_i` to
+nearby grid points with tri-linear weights; weights of solid grid points are
+zeroed and the rest renormalized. `D` between 1.1 and 3.1 (results use
+D = 2.1); increasing D visually resembles surface tension.
+
+### B.4 Solid boundaries (Sec 3.6, Eq 18–19)
+
+With face non-solid area fractions `V^f` and cell non-solid volume fraction
+`V_i`, the δ estimates become e.g.
+
+```text
+δ^{x+}_i ≈ -(ρ_i V^f_{i+(½,0,0)} - ρ_{i-(1,0,0)} V^f_{i-(½,0,0)}) Δx ΔT    (18)
+```
+
+If ρ_i grows beyond V_i: for partially solid cells compute excess
+`d = ρ_i - V_i`, follow the gradient of the solid signed-distance AWAY from
+the solid for distance `S Δx` (S = 1) and scatter `d` there, then subtract `d`
+from ρ_i. Fully solid cells (V_i = 1 non-valid case) are handled by the
+incompressibility step (below).
+
+### B.5 Incompressibility with volume correction (Sec 3.7, Eq 20) — the missing correction term
+
+Liquid fraction for the pressure solve (cannot use ρ directly, since a cell
+with non-solid fraction V < 0.5 would read as air):
+
+```text
+ρ'_i = 0            if V_i = 0 (fully solid)
+       ρ_i / V_i    otherwise                                              (20)
+```
+
+ρ' is extrapolated from cells with V > 0 into V = 0 cells so they can join
+the linear system. Signed distance for the ghost-fluid boundary:
+
+```text
+φ_i = -(ρ'_i - 0.5) Δx
+```
+
+**Volume-gain correction (verbatim):** "To handle the cells with ρ'_i > 1
+(whether or not V = 1 or V < 1), we add min(λ(ρ'_i - 1), η)/Δx to the
+divergence, where we use λ = 0.5 and η = 1 in all our examples. This
+artificial divergence pushes the excess density away from the cells whose
+ρ' > 1. Mullen et al. [MMTD07] also added this term to the divergence but
+with λ = 1 and η = ∞ which can cause stability problems when ρ' is much
+larger than 1. … Adding additional divergence is important because in our
+case, ρ' > 1 results in visual volume loss. With the method described above,
+this problem gets gradually corrected over time."
+
+Pressure is solved with the multigrid of [CM11a] (separating solid
+boundaries), then velocity is corrected.
+
+### B.6 Density post-processing for rendering (Sec 3.8, optional)
+
+γ_i = 2 min(ρ_i, 0.5); Gaussian-blur γ (σ = 2Δx); ρ''_i = ρ_i / min(max(γ_i, θ), 1)
+with θ = 0.01; render the 0.5 iso-surface of ρ''. Purely a rendering-side
+enhancement to reveal sub-grid thin features; does not feed back into
+simulation.
+
+### B.7 Parameters and results
+
+Δt = 1/30 s, Δx = 0.05 m, gravity 10 m/s², D = 2.1, grids up to
+256×128×128, CFL up to 32. Mass conserved to arithmetic error in all
+examples; volume (0.5 iso-contour) stays close but can dip when features
+thin below grid spacing.
+
+---
+
+## Appendix C. Repository gaps identified against the transcriptions
+
+1. Eq 10 paraphrase error (A.5a) — verify `limitNeighboringTallCellBases` /
+   `smoothRemesh` against the paper's `min(y, max_neighbor + D)` form.
+2. Endpoint sample semantics: the paper stores POINT samples at tall-cell
+   endpoints (A.1); the repository stores a column-average VOF in the bottom
+   sample and a band-max guide in the top sample and gates gravity, pressure
+   wetness, projection, and φ on those values as if they were point samples.
+3. Eq 5 parameterization (A.1a): `(y-H)/h` vs endpoint-center interpolation —
+   pick and enforce one convention everywhere.
+4. Eq 17 printed denominator (A.6a): settle by experiment after (2) lands.
+5. Extrapolation (A.2): implemented 2026-07-15 — two narrow-band neighbor
+   passes plus the Sec 3.3.1 hierarchical sweep
+   (`lib/tall-cell-extrapolation.ts`).
+6. Remeshing (A.5): repository seeds crossings only from the stored band and
+   rate-limits base movement per step; the paper scans the full column via φ
+   and has no temporal clamp.
+7. Density sharpening (B.3): implemented 2026-07-15 on both solver paths
+   (sharpenCompute/sharpenScatter/sharpenResolve kernels).
+8. Volume-gain correction divergence term (B.5): implemented 2026-07-15
+   (`volumeCorrectionDivergence`, λ=0.5, η=1 expressed as a rate against the
+   paper's 1/30 s step).
+9. Advection operator (B.2a): flux-form VOF vs the paper's conservative
+   semi-Lagrangian — departure must be recorded/justified or replaced.
+10. Grid layout (B.1a): mass-conserving paper is staggered; tall-cell paper
+    is collocated. The composition uses the tall-cell collocated layout; the
+    sharpening and correction terms are cell-centered and translate directly.
+11. Section 5 middle faces: the isolated probe shows error growing with tall
+    depth even when all height transitions are removed. Production currently
+    caps `maximumTallHeight=3` as a paper-compatible parity boundary; lifting
+    it is blocked on a coherent middle-face pressure representation.

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { runShellValidation } from "@/lib/validation";
 import { getMethod } from "@/lib/methods";
 import { defaultCamera } from "@/lib/model";
@@ -14,12 +14,32 @@ import { WebGPUViewport } from "./WebGPUViewport";
 import { ScenePanel } from "./ScenePanel";
 import { SceneConfigPopover } from "./SceneConfigPopover";
 import { MethodPanel } from "./MethodPanel";
-import { RigidBodyTray } from "./RigidBodyTray";
+import { RigidBodyPanel } from "./RigidBodyTray";
+import { VisualPanel } from "./VisualPanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PerformanceDrawer } from "./PerformanceDrawer";
 import { ValidationPanel } from "./ValidationPanel";
 import { TransportBar } from "./TransportBar";
 import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
+import type { GPUStatus } from "@/lib/webgpu-renderer";
+
+function GPUInitializationPanel({ status }: { status: Extract<GPUStatus, { state: "initializing" }> }) {
+  const [now, setNow] = useState(() => performance.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(performance.now()), 100); return () => window.clearInterval(timer); }, []);
+  const completed = status.completed ?? 0, total = Math.max(1, status.total ?? 1);
+  const elapsed_s = Math.max(0, now - (status.startedAt_ms ?? now)) / 1000;
+  return <div className="gpu-fallback gpu-initializing" role="status" aria-live="polite">
+    <strong>Initializing WebGPU…</strong>
+    <p>{status.label}</p>
+    <progress max={total} value={Math.min(completed, total)} aria-label="GPU initialization progress" />
+    <div className="gpu-progress-summary"><span>{completed} / {total} stages</span><span>{elapsed_s.toFixed(1)} s</span></div>
+    <details open>
+      <summary>Initialization details</summary>
+      <dl><div><dt>Phase</dt><dd>{status.phase ?? "renderer"}</dd></div><div><dt>Current stage</dt><dd>{status.label}</dd></div><div><dt>UI thread</dt><dd>Responsive · asynchronous compilation</dd></div></dl>
+    </details>
+    <small>You can continue using the controls while the GPU prepares this method.</small>
+  </div>;
+}
 
 export function FluidLab() {
   const runState = useRuntimeStore((state) => state.runState);
@@ -29,24 +49,20 @@ export function FluidLab() {
   const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const view = useUIStore((state) => state.view);
-  const setView = useUIStore((state) => state.setView);
   const setCamera = useUIStore((state) => state.setCamera);
   const performanceOpen = useUIStore((state) => state.performanceOpen);
   const validationOpen = useUIStore((state) => state.validationOpen);
   const setValidationOpen = useUIStore((state) => state.setValidationOpen);
   const diagnosticsOpen = useUIStore((state) => state.diagnosticsOpen);
   const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
-  const gridOverlayAxis = useUIStore((state) => state.gridOverlayAxis);
-  const setGridOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
-  const gridOverlaySlice = useUIStore((state) => state.gridOverlaySlice);
-  const setGridOverlaySlice = useUIStore((state) => state.setGridOverlaySlice);
-  const waterRenderMode = useUIStore((state) => state.waterRenderMode);
-  const setWaterRenderMode = useUIStore((state) => state.setWaterRenderMode);
+  const rightPanel = useUIStore((state) => state.rightPanel);
+  const setRightPanel = useUIStore((state) => state.setRightPanel);
   const fluidState = useDiagnosticsStore((state) => state.fluidState);
   const validationResults = useMemo(() => runShellValidation(), []);
   const method = getMethod(methodId);
   const backend = method.backend === "cpu" ? "cpu-reference" : "webgpu";
   const scientific = view === "scientific";
+  const visibleRightPanel = (rightPanel === "visual" || scientific) ? rightPanel : null;
   const healthFlags = backend === "webgpu"
     ? [...(gpuInfo?.stabilityFlags ?? []), ...(gpuInfo?.nonFiniteCount ? ["non-finite-values"] : [])]
     : [...(fluidState?.nanCount ? ["non-finite-values"] : []), ...(fluidState && !fluidState.pressureConverged ? ["pressure-not-converged"] : [])];
@@ -68,7 +84,7 @@ export function FluidLab() {
   };
 
   return (
-    <main className="lab-shell" data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-diagnostics-open={diagnosticsOpen}>
+    <main className="lab-shell" data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(visibleRightPanel)} data-right-panel={visibleRightPanel ?? "closed"}>
       <header className="topbar">
         <div className="brand"><span className="brand-mark">FL</span><div><strong>Fluid Lab</strong><small>WEBGPU CFD WORKBENCH</small></div></div>
         <div className="solver-identity">{method.label}</div>
@@ -102,52 +118,25 @@ export function FluidLab() {
               </button>
             )}
           </div>
-          <div className="topline-right">
-            <div className="segmented" title="Water rendering pipeline">
-              <button className={waterRenderMode === "rasterized" ? "active" : ""} onClick={() => setWaterRenderMode("rasterized")}>Raster optics</button>
-              <button className={waterRenderMode === "ray-marched" ? "active" : ""} onClick={() => setWaterRenderMode("ray-marched")}>Ray march</button>
-            </div>
-            {view === "scientific" && <div className="grid-overlay-cluster" title="Overlay the solver grid on a cross-section slice (tall cells teal, regular cells outlined with sample dots)">
-              {gridOverlayAxis !== "off" && <>
-                <input type="range" min={0} max={1} step={0.005} value={gridOverlaySlice} onChange={(event) => setGridOverlaySlice(Number(event.target.value))} aria-label="Grid slice position" />
-                <span className="slice-readout">{Math.round(gridOverlaySlice * 100)}%</span>
-              </>}
-              <div className="segmented">
-                <button className={gridOverlayAxis === "off" ? "active" : ""} onClick={() => setGridOverlayAxis("off")}>Grid off</button>
-                <button className={gridOverlayAxis === "z" ? "active" : ""} onClick={() => setGridOverlayAxis("z")}>Z slice</button>
-                <button className={gridOverlayAxis === "x" ? "active" : ""} onClick={() => setGridOverlayAxis("x")}>X slice</button>
-              </div>
-            </div>}
-            <div className="segmented"><button className={view === "scientific" ? "active" : ""} onClick={() => setView("scientific")}>Scientific</button><button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button></div>
-          </div>
         </div>
-        {scientific && <RigidBodyTray />}
         {scientific && <div className="physics-stage-badge"><strong>{method.badge}</strong><span>{backend === "webgpu" ? `${method.description}` : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} allocated · ${gpuInfo?.activeSampleCount?.toLocaleString() ?? "…"} active samples · f32 · ${gpuInfo?.pressureSolver ?? `${gpuInfo?.pressureIterations ?? "…"} Jacobi`}` : "MAC · binary64 · PCG"}</small></div>}
-        {view === "scientific" && gridOverlayAxis !== "off" && (() => {
-          const gridKind = method.backend === "cpu" ? "uniform" : gpuInfo?.gridKind ?? "uniform";
-          const tall = gridKind !== "uniform";
-          return <div className="grid-legend" data-testid="grid-legend">
-            <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : "UNIFORM GRID"} · {gridOverlayAxis.toUpperCase()} SLICE</strong>
-            {tall && <span><i className="sw sw-tall" />tall cell · liquid (one per column)</span>}
-            {tall && <span><i className="sw sw-tall-dry" />tall cell · air</span>}
-            <span><i className="sw sw-wet" />{tall ? "regular cell · liquid" : "cell · liquid"}</span>
-            <span><i className="sw sw-air" />{tall ? "regular cell · air" : "cell · air"}</span>
-            {tall && <span><i className="sw sw-outside" />above band · not stored</span>}
-            <span><i className="sw sw-dot" />stored samples (zoom in)</span>
-            <small>drag the bright top edge to sweep the slice</small>
-          </div>;
-        })()}
         {scientific && <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>}
         <div className="camera-toolbar" aria-label="Camera controls">
           <button onClick={() => setPresetCamera("reset")}>Reset</button><button onClick={() => setPresetCamera("front")}>Front</button><button onClick={() => setPresetCamera("side")}>Side</button><button onClick={() => setPresetCamera("top")}>Top</button>
-          {scientific && <span>drag a shape from the tray to add · drag body to move · drag to orbit · ⇧ drag pan · wheel zoom</span>}
+          {scientific && <span>drag body to move · drag to orbit · ⇧ drag pan · wheel zoom</span>}
         </div>
-        {scientific && <button className={`diagnostics-toggle${diagnosticsOpen ? " active" : ""}`} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Toggle live diagnostics">{diagnosticsOpen ? "›" : "‹"} DIAG</button>}
-        {gpuStatus.state === "initializing" && <div className="gpu-fallback gpu-initializing"><strong>Initializing WebGPU…</strong><p>{gpuStatus.label}</p><small>The first frame appears once the adapter and solver pipelines are ready.</small></div>}
+        <nav className="utility-panel-tabs" aria-label="Viewport panels">
+          <button className={rightPanel === "visual" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visual" ? null : "visual")} aria-expanded={rightPanel === "visual"} title="Render and debug controls">RENDER</button>
+          {scientific && <button className={rightPanel === "bodies" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "bodies" ? null : "bodies")} aria-expanded={rightPanel === "bodies"} title="Rigid body controls">BODIES</button>}
+          {scientific && <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAG</button>}
+        </nav>
+        {gpuStatus.state === "initializing" && <GPUInitializationPanel status={gpuStatus} />}
         {gpuStatus.state === "unavailable" && <div className="gpu-fallback"><strong>3D renderer unavailable</strong><p>{gpuStatus.label}</p><small>The scene editor, serialization, and CPU validation remain available.</small></div>}
       </section>
 
-      {diagnosticsOpen && <DiagnosticsPanel />}
+      {rightPanel === "visual" && <VisualPanel />}
+      {scientific && rightPanel === "bodies" && <RigidBodyPanel />}
+      {scientific && diagnosticsOpen && <DiagnosticsPanel />}
       <TransportBar />
 
       {performanceOpen && <PerformanceDrawer />}

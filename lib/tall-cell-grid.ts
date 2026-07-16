@@ -9,6 +9,9 @@ export interface TallCellSettings {
   liquidHalo: number;
   airHalo: number;
   maximumNeighborDelta: number;
+  /** Temporary parity boundary: Section 5's unmeasured interior lateral
+   * faces grow with tall-cell depth. Three leaves only one such layer. */
+  maximumTallHeight: number;
   remeshInterval: number;
 }
 
@@ -35,15 +38,38 @@ export interface TallCellLayout {
     maximumBaseBeforeOrdinaryFallback: number;
     ordinaryGridFallback: boolean;
   };
+  /** Diagnostic layout used by the cubic-vs-one-tall-cell differential
+   * probe. It is never selected by the interactive method. */
+  singleTallCellProbe?: {
+    x: number;
+    z: number;
+    height: number;
+    initialState: "liquid" | "air";
+    mutedHeight: 2;
+    supportRadius: number;
+    affectedColumns: number;
+    topologyFrozen: true;
+  };
+}
+
+export interface SingleTallCellProbeOptions {
+  /** Tall-cell height in cubic subcells. The paper uses 3 <= D <= 6; keeping
+   * this at or below D makes the isolated column satisfy its Eq. 10 bound. */
+  height?: number;
+  x?: number;
+  z?: number;
+  /** Optional Manhattan-radius support ring. Zero retains the single-cell
+   * differential; positive values diagnose Eq. 10 height transitions. */
+  supportRadius?: number;
 }
 
 // The presets retain approximately the x/z resolution of the former 110k,
 // 500k and 1.2m cubic grids for the default scene. Only the moving surface
 // band and two samples for each bottom tall cell are stored.
 export const tallCellSettings: Record<GPUQuality, TallCellSettings> = {
-  balanced: { surfaceColumns: 2_500, regularLayers: 24, liquidHalo: 8, airHalo: 8, maximumNeighborDelta: 4, remeshInterval: 1 },
-  high: { surfaceColumns: 7_000, regularLayers: 32, liquidHalo: 16, airHalo: 8, maximumNeighborDelta: 4, remeshInterval: 1 },
-  ultra: { surfaceColumns: 12_500, regularLayers: 40, liquidHalo: 24, airHalo: 8, maximumNeighborDelta: 5, remeshInterval: 1 }
+  balanced: { surfaceColumns: 2_500, regularLayers: 24, liquidHalo: 8, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
+  high: { surfaceColumns: 7_000, regularLayers: 32, liquidHalo: 16, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
+  ultra: { surfaceColumns: 12_500, regularLayers: 40, liquidHalo: 24, airHalo: 8, maximumNeighborDelta: 5, maximumTallHeight: 4096, remeshInterval: 1 }
 };
 
 export function tallCellFluxSampleCount(height: number) {
@@ -158,7 +184,11 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
   // Grow B_y only when the vertical crossings and their halos do not fit. A
   // vertical dam face is representable across neighbouring tall columns.
   const requiredLayers = requiredInitialRegularLayers(scene, nx, fineNy, nz, settings);
-  const regularLayers = Math.min(fineNy, Math.max(settings.regularLayers, requiredLayers));
+  // The paper's Section 5 attributes volume artifacts to lateral fluxes that
+  // enter unmeasured tall-cell interiors. Until those virtual faces are part
+  // of the pressure unknowns, retain only one omitted cubic layer by default.
+  const parityLayers = fineNy - Math.max(2, Math.round(settings.maximumTallHeight));
+  const regularLayers = Math.min(fineNy, Math.max(settings.regularLayers, requiredLayers, parityLayers));
   const storedRegularLayers = regularLayers;
   const regularLayersBeforeOrdinaryFallback = regularLayers;
   const maximumBaseBeforeOrdinaryFallback = Math.max(0, fineNy - regularLayers);
@@ -193,20 +223,36 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
         highestSurface = Math.max(highestSurface, Math.min(fineNy - 1, Math.ceil((inflow.center_m.y + extentY) / c.height_m * fineNy)));
       }
     }
+    let bodyUpper = maximumBase;
     for (const body of scene.rigidBodies) {
       const d = body.dimensions_m;
       const radius = body.shape === "sphere" ? d.x : Math.hypot(d.x, d.y, d.z) / 2;
       if (Math.hypot(worldX - body.position_m.x, worldZ - body.position_m.z) > radius + Math.max(c.width_m / nx, c.depth_m / nz) / 2) continue;
-      lowestSurface = Math.min(lowestSurface, Math.max(0, Math.floor((body.position_m.y - radius) / c.height_m * fineNy)));
-      highestSurface = Math.max(highestSurface, Math.min(fineNy - 1, Math.ceil((body.position_m.y + radius) / c.height_m * fineNy)));
+      // Rigid geometry is not a liquid interface and must never lift the
+      // regular band. Doing so makes the bottom tall store grow as soon as a
+      // body approaches the water, even though the surface band already
+      // contains every cell that can exchange momentum with that body.
+      // The body's bottom is only an upper bound: if the body is initially
+      // submerged, keep it out of the tall store by shortening that store.
+      const bodyBottom = Math.floor((body.position_m.y - radius) / c.height_m * fineNy);
+      let wetTop = -1;
+      for (let y = fineNy - 1; y >= 0; y -= 1) if (initialWet(scene, x, y, z, nx, fineNy, nz)) { wetTop = y; break; }
+      if (bodyBottom <= wetTop + 1 + effectiveSettings.airHalo) bodyUpper = Math.min(bodyUpper, bodyBottom);
     }
-    rawBases[x + nx * z] = highestSurface >= 0
+    const surfaceBase = highestSurface >= 0
       ? chooseTallCellBase(lowestSurface, highestSurface, fineNy, effectiveSettings)
       // An empty column still needs its regular band at the same elevation as
       // neighbouring water.  Setting it to zero discards the upper domain and
       // makes the D limiter pull every wet tall cell down a few cells per
       // frame.  The paper has one tall cell in every column, including air.
-      : maximumBase;
+      // In parity mode the near-full-height band already covers every dry
+      // column. Keep those columns at the height-two control and introduce
+      // h=3 only where liquid depth requires it; the one-cell jump satisfies
+      // Eq. 10 and avoids thousands of unnecessary endpoint perturbations.
+      : maximumBase <= 3 ? Math.min(2, maximumBase) : maximumBase;
+    rawBases[x + nx * z] = maximumBase >= 2
+      ? Math.max(2, Math.min(surfaceBase, bodyUpper))
+      : 0;
   }
 
   const columnBases = limitNeighboringTallCellBases(rawBases, nx, nz, effectiveSettings.maximumNeighborDelta, nx + nz);
@@ -250,5 +296,124 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
       maximumBaseBeforeOrdinaryFallback,
       ordinaryGridFallback
     }
+  };
+}
+
+/**
+ * Build the minimal differential layout used to identify the first operation
+ * that changes when a tall cell is introduced.
+ *
+ * The control columns use height two, the smallest distinct-endpoint tall
+ * cell and an exactly measured cubic-equivalent representation. Exactly one
+ * column is taller. This retains the paper's "one bottom tall cell per
+ * column" invariant while muting every non-probe candidate. Remeshing is
+ * frozen so Algorithm 1 cannot change the experiment before it is measured.
+ *
+ * Paper constraints retained by the probe:
+ * - the cell is at the bottom of its column (Sec. 3.1);
+ * - no liquid interface lies inside it (Sec. 3.6 constraints 1/2);
+ * - its height jump does not exceed D (Sec. 3.6, Eq. 10).
+ */
+export function createSingleTallCellProbeLayout(
+  scene: SceneDescription,
+  quality: GPUQuality,
+  maximumTextureDimension = 2048,
+  options: SingleTallCellProbeOptions = {}
+): TallCellLayout {
+  const requestedHeight = Math.round(options.height ?? 4);
+  const maximumNeighborDelta = Math.max(tallCellSettings[quality].maximumNeighborDelta, requestedHeight);
+  const layout = createTallCellLayout(scene, quality, maximumTextureDimension, {
+    regularLayers: maximumTextureDimension,
+    maximumNeighborDelta,
+    remeshInterval: Number.MAX_SAFE_INTEGER
+  });
+  const { nx, fineNy, nz, packedNy } = layout;
+  const height = Math.max(2, Math.min(fineNy, requestedHeight));
+  if (height > maximumNeighborDelta) throw new Error(`Single tall-cell height ${height} exceeds neighbor delta ${maximumNeighborDelta}`);
+  const x = Math.max(0, Math.min(nx - 1, Math.round(options.x ?? nx / 2)));
+  const z = Math.max(0, Math.min(nz - 1, Math.round(options.z ?? nz / 2)));
+  const supportRadius = Math.max(0, Math.round(options.supportRadius ?? 0));
+  const supported = (xx: number, zz: number) => Math.abs(xx - x) + Math.abs(zz - z) <= supportRadius;
+  const bottomWet = initialWet(scene, x, 0, z, nx, fineNy, nz);
+  let affectedColumns = 0;
+  for (let zz = 0; zz < nz; zz += 1) for (let xx = 0; xx < nx; xx += 1) {
+    if (!supported(xx, zz)) continue;
+    affectedColumns += 1;
+    const columnWet = initialWet(scene, xx, 0, zz, nx, fineNy, nz);
+    for (let y = 1; y < height; y += 1) {
+      if (initialWet(scene, xx, y, zz, nx, fineNy, nz) !== columnWet) {
+        throw new Error(`Tall-cell probe support column (${xx},${zz}) height ${height} contains the initial liquid interface at y=${y}`);
+      }
+    }
+  }
+
+  const columnBases = new Float32Array(nx * nz).fill(2);
+  for (let zz = 0; zz < nz; zz += 1) for (let xx = 0; xx < nx; xx += 1) {
+    if (supported(xx, zz)) columnBases[xx + nx * zz] = height;
+  }
+  const initialVolume = new Float32Array(nx * packedNy * nz);
+  let initialVolumeCellSum = 0;
+  let activeSampleCount = 0;
+  for (let zz = 0; zz < nz; zz += 1) for (let xx = 0; xx < nx; xx += 1) {
+    const base = columnBases[xx + nx * zz];
+    let tallAmount = 0;
+    for (let worldY = 0; worldY < base; worldY += 1) if (initialWet(scene, xx, worldY, zz, nx, fineNy, nz)) tallAmount += 1;
+    const tallFraction = base > 0 ? tallAmount / base : 0;
+    for (let packedY = 0; packedY < packedNy; packedY += 1) {
+      const worldY = packedY < 2 ? (packedY === 0 ? 0 : Math.max(0, base - 1)) : base + packedY - 2;
+      const active = packedY < 2 ? base > 0 : worldY < fineNy;
+      if (active) activeSampleCount += 1;
+      const fraction = packedY < 2 ? tallFraction : active && initialWet(scene, xx, worldY, zz, nx, fineNy, nz) ? 1 : 0;
+      initialVolume[xx + nx * (packedY + packedNy * zz)] = fraction;
+      if (packedY === 0) initialVolumeCellSum += tallAmount;
+      else if (packedY >= 2) initialVolumeCellSum += fraction;
+    }
+  }
+  const equivalentUniformCellCount = nx * fineNy * nz;
+  return {
+    ...layout,
+    columnBases,
+    initialVolume,
+    initialVolumeCellSum,
+    activeSampleCount,
+    activeCompressionRatio: activeSampleCount / equivalentUniformCellCount,
+    settings: { ...layout.settings, maximumNeighborDelta, remeshInterval: Number.MAX_SAFE_INTEGER },
+    singleTallCellProbe: {
+      x, z, height, initialState: bottomWet ? "liquid" : "air", mutedHeight: 2,
+      supportRadius, affectedColumns, topologyFrozen: true
+    }
+  };
+}
+
+/** Identical resources and solver path to createSingleTallCellProbeLayout,
+ * but with the probe column muted back to the cubic-equivalent height-two
+ * limit. The pair differs only in one column base and that column's packing. */
+export function createSingleTallCellProbeControlLayout(
+  scene: SceneDescription,
+  quality: GPUQuality,
+  maximumTextureDimension = 2048,
+  options: SingleTallCellProbeOptions = {}
+): TallCellLayout {
+  const candidate = createSingleTallCellProbeLayout(scene, quality, maximumTextureDimension, options);
+  const columnBases = new Float32Array(candidate.columnBases.length).fill(2);
+  const initialVolume = candidate.initialVolume.slice();
+  for (let zz = 0; zz < candidate.nz; zz += 1) for (let xx = 0; xx < candidate.nx; xx += 1) {
+    if (candidate.columnBases[xx + candidate.nx * zz] === 2) continue;
+    let tallAmount = 0;
+    for (let worldY = 0; worldY < 2; worldY += 1) if (initialWet(scene, xx, worldY, zz, candidate.nx, candidate.fineNy, candidate.nz)) tallAmount += 1;
+    for (let packedY = 0; packedY < candidate.packedNy; packedY += 1) {
+      const worldY = packedY;
+      const fraction = packedY < 2 ? tallAmount / 2 : worldY < candidate.fineNy
+        && initialWet(scene, xx, worldY, zz, candidate.nx, candidate.fineNy, candidate.nz) ? 1 : 0;
+      initialVolume[xx + candidate.nx * (packedY + candidate.packedNy * zz)] = fraction;
+    }
+  }
+  return {
+    ...candidate,
+    columnBases,
+    initialVolume,
+    activeSampleCount: candidate.equivalentUniformCellCount,
+    activeCompressionRatio: 1,
+    singleTallCellProbe: undefined
   };
 }

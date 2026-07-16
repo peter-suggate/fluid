@@ -31,10 +31,11 @@ function dropPosition(clientX: number, clientY: number, canvas: HTMLCanvasElemen
   return add(basis.position, scale(direction, dot(sub(planePoint, basis.position), basis.forward) / denominator));
 }
 
-export function RigidBodyTray() {
+export function RigidBodyPanel() {
   const bodies = useDiagnosticsStore((state) => state.bodies);
   const selectedBodyId = useUIStore((state) => state.selectedBodyId);
   const selectBody = useUIStore((state) => state.selectBody);
+  const setRightPanel = useUIStore((state) => state.setRightPanel);
   const [ghost, setGhost] = useState<{ x: number; y: number; shape: RigidShape } | null>(null);
   const dragRef = useRef<{ pointerId: number; shape: RigidShape; startX: number; startY: number; moved: boolean } | null>(null);
   const selected = bodies.find((body) => body.description.id === selectedBodyId);
@@ -62,12 +63,18 @@ export function RigidBodyTray() {
   };
 
   return (
-    <div className="rigid-tray" data-testid="rigid-editor">
-      <div className="tray-row" aria-label="Rigid bodies">
+    <aside className="right-panel panel-scroll rigid-body-panel" data-testid="rigid-editor">
+      <section className="panel-section utility-panel-head">
+        <div><p className="eyebrow">SCENE OBJECTS</p><strong>Rigid bodies</strong></div>
+        <button className="panel-close" onClick={() => setRightPanel(null)} aria-label="Close rigid bodies panel">×</button>
+      </section>
+      <section className="panel-section">
+        <div className="section-heading"><h2>Add body</h2><span>{bodies.length}/12 ACTIVE</span></div>
+        <div className="body-spawn-grid" aria-label="Rigid bodies">
         {shapes.map(({ shape, label }) => (
           <button
             key={shape}
-            className="tray-spawn"
+            className="body-spawn"
             title={`${label} · click to add, drag into the scene to place`}
             aria-label={`Add ${label.toLowerCase()}`}
             onPointerDown={spawnDown(shape)}
@@ -75,25 +82,32 @@ export function RigidBodyTray() {
             onPointerUp={spawnUp}
             onPointerCancel={() => { dragRef.current = null; setGhost(null); }}
           >
-            <i className={`shape-${shape}`} />
+            <i className={`body-shape-icon shape-${shape}`} /><span>{label}</span>
           </button>
         ))}
-        {bodies.length === 0 && <span className="tray-hint">drag into scene</span>}
-        {bodies.length > 0 && <span className="tray-divider" />}
+        </div>
+        <small className="control-hint">Click to add above the tank, or drag a shape directly into the viewport.</small>
+      </section>
+      <section className="panel-section">
+        <div className="section-heading"><h2>Body roster</h2><span>SELECT TO EDIT</span></div>
+        <div className="body-list">
         {bodies.map((body) => (
           <button
             key={body.description.id}
-            className={`tray-body${selectedBodyId === body.description.id ? " active" : ""}`}
+            className={selectedBodyId === body.description.id ? "active" : ""}
             title={body.description.name}
             aria-pressed={selectedBodyId === body.description.id}
             onClick={() => selectBody(selectedBodyId === body.description.id ? undefined : body.description.id)}
           >
             <i className={`shape-${body.description.shape}`} />
+            <span>{body.description.name}</span>
+            <small>{body.description.shape}</small>
           </button>
         ))}
-        {bodies.length > 0 && <span className="tray-count">{bodies.length}/12</span>}
-      </div>
-      {selected && <div className="tray-editor">
+        {bodies.length === 0 && <p className="panel-note">No rigid bodies in this scene.</p>}
+        </div>
+      </section>
+      {selected && <section className="panel-section selected-editor">
         <div className="selected-heading">
           <div><strong>{selected.description.name}</strong><small>{selected.description.shape}</small></div>
           <button onClick={() => simulation.removeBody(selected.description.id)} aria-label="Remove selected rigid body">Remove</button>
@@ -103,11 +117,11 @@ export function RigidBodyTray() {
           <button onClick={() => simulation.resetBody(selected.description.id)}>Reset body</button>
         </div>
         <RangeControl label="Density" unit="kg/m³" value={selected.description.density_kg_m3} min={100} max={4000} step={10} onChange={(value) => simulation.updateBody(selected.description.id, { density_kg_m3: value })} displayDigits={0} />
-        <RangeControl label="Size" unit="m" value={selected.description.dimensions_m.x} min={0.035} max={0.18} step={0.005} onChange={(value) => { const d = selected.description.dimensions_m; const ratio = value / d.x; simulation.updateBody(selected.description.id, { dimensions_m: { x: value, y: d.y * ratio, z: d.z * ratio } }); }} displayDigits={3} />
+        <RangeControl label="Size" unit="m" value={selected.description.dimensions_m.x} min={0.035} max={1} step={0.005} onChange={(value) => { const d = selected.description.dimensions_m; const ratio = value / d.x; simulation.updateBody(selected.description.id, { dimensions_m: { x: value, y: d.y * ratio, z: d.z * ratio } }); }} displayDigits={3} />
         <RangeControl label="Restitution" unit="—" value={selected.description.restitution} min={0} max={1} step={0.01} onChange={(value) => simulation.updateBody(selected.description.id, { restitution: value })} displayDigits={2} />
         <RangeControl label="Friction" unit="—" value={selected.description.friction} min={0} max={1.2} step={0.01} onChange={(value) => simulation.updateBody(selected.description.id, { friction: value })} displayDigits={2} />
-      </div>}
+      </section>}
       {ghost && <span className="spawn-ghost" style={{ left: ghost.x, top: ghost.y }}><i className={`shape-${ghost.shape}`} /></span>}
-    </div>
+    </aside>
   );
 }

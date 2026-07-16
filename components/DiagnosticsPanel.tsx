@@ -26,7 +26,7 @@ export function DiagnosticsPanel() {
   const backend = simulation.backend;
   const selectedBody = bodies.find((body) => body.description.id === selectedBodyId);
   return (
-    <aside className="right-panel panel-scroll">
+    <aside className="right-panel panel-scroll diagnostics-panel">
       <section className="panel-section diagnostics-head">
         <p className="eyebrow">LIVE DIAGNOSTICS</p>
         <div className="state-line"><span className={`status-dot ${runState === "running" ? "online pulse" : "idle"}`} /><strong>{runState === "running" ? "COUPLED RUNNING" : "PAUSED"}</strong><span>Eulerian</span></div>

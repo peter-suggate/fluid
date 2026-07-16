@@ -1,5 +1,5 @@
 import { damBreakFractions } from "./initial-fluid";
-import type { RigidBodyState } from "./rigid-body";
+import { initializeRigidBodies, type RigidBodyState } from "./rigid-body";
 import {
   legacyUniformComputeShader,
   type GPUEulerianInfo,
@@ -14,6 +14,7 @@ import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundar
 import { WebGPUQuadtreeTallCellProjection, type QuadtreeTallCellProjectionOptions } from "./webgpu-quadtree-tall-cell";
 
 export type UniformVelocityTransport = GPUVelocityTransport;
+export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyLagSteps?: number; deferPipelineCompilation?: boolean }
 
 /** The main-branch cubic solver retained as an A/B reference backend. */
 export class WebGPUUniformEulerianSolver {
@@ -25,20 +26,23 @@ export class WebGPUUniformEulerianSolver {
   private heightA: GPUTexture; private heightB: GPUTexture;
   private transportA: GPUTexture; private transportB: GPUTexture; private fluxScales: GPUTexture;
   private transportSampler: GPUSampler;
-  private params: GPUBuffer; private reductionBuffer: GPUBuffer;
+  private params: GPUBuffer; private reductionBuffer: GPUBuffer; private sharpenBuffer: GPUBuffer;
   private rigidBuffer: GPUBuffer; private rigidExchangeBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
-  private advectPipeline: GPUComputePipeline; private reversePipeline: GPUComputePipeline;
-  private correctPipeline: GPUComputePipeline; private jacobiPipeline: GPUComputePipeline;
-  private projectPipeline: GPUComputePipeline; private rigidPipeline: GPUComputePipeline;
-  private reductionPipeline: GPUComputePipeline;
-  private buildTransportPipeline: GPUComputePipeline; private buildFluxScalesPipeline: GPUComputePipeline;
-  private buildOccupancyPipeline: GPUComputePipeline;
+  private advectPipeline!: GPUComputePipeline; private reversePipeline!: GPUComputePipeline;
+  private correctPipeline!: GPUComputePipeline; private jacobiPipeline!: GPUComputePipeline;
+  private projectPipeline!: GPUComputePipeline; private rigidPipeline!: GPUComputePipeline;
+  private reductionPipeline!: GPUComputePipeline;
+  private buildTransportPipeline!: GPUComputePipeline; private buildFluxScalesPipeline!: GPUComputePipeline;
+  private buildOccupancyPipeline!: GPUComputePipeline;
+  private sharpenComputePipeline!: GPUComputePipeline; private sharpenScatterPipeline!: GPUComputePipeline; private sharpenResolvePipeline!: GPUComputePipeline;
+  private shaderModule:GPUShaderModule;private pipelineLayout:GPUPipelineLayout;private prepPipelineLayout:GPUPipelineLayout;
   private advectGroup: GPUBindGroup; private reverseGroup: GPUBindGroup; private correctGroup: GPUBindGroup;
   private jacobiABGroup: GPUBindGroup;
   private jacobiBAGroup: GPUBindGroup; private projectGroup: GPUBindGroup;
   private rigidGroup: GPUBindGroup; private reductionGroup: GPUBindGroup;
   private occupancyGroup: GPUBindGroup; private transportFromCurrentGroup: GPUBindGroup;
+  private sharpenComputeGroup: GPUBindGroup; private sharpenScatterGroup: GPUBindGroup; private sharpenResolveGroup: GPUBindGroup;
   private transportFromPredictedGroup?: GPUBindGroup;
   private querySet?: GPUQuerySet; private queryResolve?: GPUBuffer;
   private querySegments: Array<{ name: keyof NonNullable<GPUEulerianInfo["gpuTimings"]>; start: number; end: number }> = [];
@@ -47,9 +51,23 @@ export class WebGPUUniformEulerianSolver {
   private validationChecked = false;
   private readonly inflowBoundary?: InflowGridBoundary;
   private readonly velocityTransport: UniformVelocityTransport;
+  private readonly densitySharpening: boolean;
   private quadtreeProjection?: WebGPUQuadtreeTallCellProjection;
+  private readonly retiredQuadtreeProjections = new Set<WebGPUQuadtreeTallCellProjection>();
   private quadtreeRebuildPending = false;
+  private quadtreeRebuildBlockedFrames = 0;
   private readonly rebuildQuadtreeEachStep: boolean;
+  // Topology rebuilds are pipelined: steps keep running on the current tree
+  // while the next one builds, bounded by the lag limit so the moving surface
+  // cannot outrun its pressure topology.
+  private quadtreeStepsSinceTopology = 0;
+  private quadtreeStepsSinceKick = 0;
+  private quadtreeDtSinceKick = 0;
+  private quadtreeLastBodies: RigidBodyState[] = [];
+  private readonly quadtreeTopologyLagLimit: number;
+  private readonly quadtreeRebuildInterval: number;
+  private readonly adaptiveQuadtreeCadence: boolean;
+  private readonly quadtreeRebuildMinimumInterval: number;
   private disposed = false;
   private baseAllocatedBytes = 0;
 
@@ -58,12 +76,17 @@ export class WebGPUUniformEulerianSolver {
     readonly scene: SceneDescription,
     quality: GPUQuality,
     private onRigidLoads?: (loads: GPURigidLoad[]) => void,
-    options: { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; quadtreeRebuildTopology?: boolean } = {}
+    options: WebGPUUniformEulerianOptions = {}
   ) {
     const c = scene.container, matched = createTallCellLayout(scene, quality, device.limits.maxTextureDimension3D, options.tallCellSettings);
     const nx = matched.nx, ny = matched.fineNy, nz = matched.nz;
     this.velocityTransport = options.velocityTransport ?? "maccormack";
+    this.densitySharpening = options.densitySharpening ?? true;
     this.rebuildQuadtreeEachStep = options.quadtreeRebuildTopology ?? true;
+    this.adaptiveQuadtreeCadence = options.quadtreeRebuildIntervalSteps === undefined;
+    this.quadtreeRebuildMinimumInterval = this.adaptiveQuadtreeCadence ? 8 : Math.max(1, Math.round(options.quadtreeRebuildIntervalSteps!));
+    this.quadtreeRebuildInterval = this.adaptiveQuadtreeCadence ? 32 : this.quadtreeRebuildMinimumInterval;
+    this.quadtreeTopologyLagLimit = Math.max(1, Math.round(options.quadtreeTopologyLagSteps ?? 3));
     this.inflowBoundary=scene.fluid.inflow?createInflowGridBoundary(scene.fluid.inflow,scene.container,[nx,ny,nz]):undefined;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     const texture = (format: GPUTextureFormat) => device.createTexture({ size: [nx, ny, nz], dimension: "3d", format, usage });
@@ -84,15 +107,16 @@ export class WebGPUUniformEulerianSolver {
     this.params = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.reductionBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidBuffer = device.createBuffer({ size: 12 * 80, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.sharpenBuffer = device.createBuffer({ label: "Uniform sharpening deposits", size: nx * ny * nz * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.rigidExchangeBuffer = device.createBuffer({ size: 12 * 8 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     if (device.features.has("timestamp-query")) {
       this.querySet = device.createQuerySet({ type: "timestamp", count: 160 });
       this.queryResolve = device.createBuffer({ size: 160 * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
     }
-    const shaderModule = device.createShaderModule({ label: "Fluid Lab uniform reference kernels", code: legacyUniformComputeShader });
-    void shaderModule.getCompilationInfo().then((info) => {
+    this.shaderModule = device.createShaderModule({ label: "Fluid Lab uniform reference kernels", code: legacyUniformComputeShader });
+    void this.shaderModule.getCompilationInfo().then((info) => {
       for (const message of info.messages) if (message.type === "error") console.error(`Uniform GPU WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-    });
+    }).catch(()=>{/* Device loss is reported by the renderer. */});
     this.bindGroupLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
@@ -110,7 +134,8 @@ export class WebGPUUniformEulerianSolver {
       { binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "float", viewDimension: "3d" } },
       { binding: 15, visibility: GPUShaderStage.COMPUTE, sampler: { type: "filtering" } },
-      { binding: 17, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
+      { binding: 17, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+      { binding: 19, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
     ] });
     // The main layout already carries four storage textures (the per-stage
     // limit), so the transport/flux-scale writers get their own layout.
@@ -121,16 +146,9 @@ export class WebGPUUniformEulerianSolver {
       { binding: 16, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba16float", viewDimension: "3d" } },
       { binding: 18, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rg32float", viewDimension: "3d" } }
     ] });
-    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] });
-    const prepPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [prepLayout] });
-    const pipeline = (entryPoint: string) => device.createComputePipeline({ layout: pipelineLayout, compute: { module: shaderModule, entryPoint } });
-    const prepPipeline = (entryPoint: string) => device.createComputePipeline({ layout: prepPipelineLayout, compute: { module: shaderModule, entryPoint } });
-    this.advectPipeline = pipeline(this.velocityTransport === "maccormack" ? "advect" : "semiLagrangianAdvection"); this.reversePipeline = pipeline("reverseAdvection");
-    this.correctPipeline = pipeline("correctAdvection"); this.jacobiPipeline = pipeline("jacobi");
-    this.projectPipeline = pipeline("project"); this.rigidPipeline = pipeline("coupleRigid");
-    this.reductionPipeline = pipeline("reduceDiagnostics");
-    this.buildOccupancyPipeline = pipeline("buildOccupancy");
-    this.buildTransportPipeline = prepPipeline("buildTransport"); this.buildFluxScalesPipeline = prepPipeline("buildFluxScales");
+    this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] });
+    this.prepPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [prepLayout] });
+    if(!options.deferPipelineCompilation)this.createPipelinesSync();
     const prepGroup = (velocity: GPUTexture, transport: GPUTexture) => device.createBindGroup({ layout: prepLayout, entries: [
       { binding: 0, resource: velocity.createView() }, { binding: 4, resource: this.volumeA.createView() },
       { binding: 6, resource: { buffer: this.params } }, { binding: 16, resource: transport.createView() },
@@ -157,7 +175,7 @@ export class WebGPUUniformEulerianSolver {
         maximumLeafSize: options.quadtreeTallCells.maximumLeafSize ?? 16,
         opticalDepthFraction: options.quadtreeTallCells.opticalDepthFraction ?? 0.25,
         ...options.quadtreeTallCells
-      });
+      }, undefined, scene.rigidBodies.length > 0 ? { bodies: initializeRigidBodies(scene.rigidBodies), dynamic: !!onRigidLoads } : undefined,options.deferPipelineCompilation);
       this.applyQuadtreeInfo(this.quadtreeProjection, pressureIterations);
     }
     // Advection groups read the column occupancy from heightB; heightA stays
@@ -174,11 +192,32 @@ export class WebGPUUniformEulerianSolver {
     const sparePressure = pressureIterations % 2 === 0 ? this.pressureB : this.pressureA;
     this.projectGroup = this.group(this.velocityB, this.velocityA, finalPressure, sparePressure, this.volumeB, this.volumeA, this.heightB, this.heightA);
     this.rigidGroup = this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
+    this.sharpenComputeGroup = this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA);
+    this.sharpenScatterGroup = this.group(this.velocityA, this.velocityB, this.pressureB, this.pressureA, this.volumeA, this.volumeB, this.heightB, this.heightA);
+    this.sharpenResolveGroup = this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
     this.reductionGroup = this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
+  }
+
+  private pipelineDescriptor(entryPoint:string,prep=false):GPUComputePipelineDescriptor{return{layout:prep?this.prepPipelineLayout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};}
+  private createPipelinesSync(){const pipeline=(entryPoint:string,prep=false)=>this.device.createComputePipeline(this.pipelineDescriptor(entryPoint,prep));this.advectPipeline=pipeline(this.velocityTransport==="maccormack"?"advect":"semiLagrangianAdvection");this.reversePipeline=pipeline("reverseAdvection");this.correctPipeline=pipeline("correctAdvection");this.jacobiPipeline=pipeline("jacobi");this.projectPipeline=pipeline("project");this.rigidPipeline=pipeline("coupleRigid");this.reductionPipeline=pipeline("reduceDiagnostics");this.buildOccupancyPipeline=pipeline("buildOccupancy");this.buildTransportPipeline=pipeline("buildTransport",true);this.buildFluxScalesPipeline=pipeline("buildFluxScales",true);this.sharpenComputePipeline=pipeline("sharpenCompute");this.sharpenScatterPipeline=pipeline("sharpenScatter");this.sharpenResolvePipeline=pipeline("sharpenResolve");}
+  static async createAsync(device:GPUDevice,scene:SceneDescription,quality:GPUQuality,onRigidLoads:((loads:GPURigidLoad[])=>void)|undefined,options:WebGPUUniformEulerianOptions,onProgress:(label:string,completed:number,total:number)=>void){onProgress(options.quadtreeTallCells?"Building adaptive pressure topology":"Allocating uniform solver resources",0,options.quadtreeTallCells?24:10);await new Promise<void>(resolve=>setTimeout(resolve,0));const solver=new WebGPUUniformEulerianSolver(device,scene,quality,onRigidLoads,{...options,deferPipelineCompilation:true});await solver.initializePipelines(onProgress);return solver;}
+  private async initializePipelines(onProgress:(label:string,completed:number,total:number)=>void){
+    const definitions=[
+      ["Advect velocity",this.velocityTransport==="maccormack"?"advect":"semiLagrangianAdvection",false],["Reverse advection","reverseAdvection",false],
+      ["Correct advection","correctAdvection",false],["Relax pressure","jacobi",false],["Project velocity","project",false],
+      ["Couple rigid bodies","coupleRigid",false],["Reduce diagnostics","reduceDiagnostics",false],["Build occupancy","buildOccupancy",false],
+      ["Build transport field","buildTransport",true],["Build flux scales","buildFluxScales",true],
+      ["Sharpen density","sharpenCompute",false],["Scatter sharpened mass","sharpenScatter",false],["Resolve sharpened mass","sharpenResolve",false]
+    ] as const,compiled:GPUComputePipeline[]=[];
+    const total=definitions.length+(this.quadtreeProjection?14:0);
+    for(let index=0;index<definitions.length;index+=1){const [label,entryPoint,prep]=definitions[index];onProgress(label,index,total);compiled.push(await this.device.createComputePipelineAsync(this.pipelineDescriptor(entryPoint,prep)));onProgress(label,index+1,total);}
+    this.advectPipeline=compiled[0];this.reversePipeline=compiled[1];this.correctPipeline=compiled[2];this.jacobiPipeline=compiled[3];this.projectPipeline=compiled[4];this.rigidPipeline=compiled[5];this.reductionPipeline=compiled[6];this.buildOccupancyPipeline=compiled[7];this.buildTransportPipeline=compiled[8];this.buildFluxScalesPipeline=compiled[9];this.sharpenComputePipeline=compiled[10];this.sharpenScatterPipeline=compiled[11];this.sharpenResolvePipeline=compiled[12];
+    if(this.quadtreeProjection)await this.quadtreeProjection.initializePipelines((label,completed)=>onProgress(label,definitions.length+completed,total));
   }
 
   get volumeTexture() { return this.volumeA; }
   get columnBaseTexture() { return this.heightA; }
+  get gridCellTexture() { return this.quadtreeProjection?.topologyTexture; }
   get velocityTexture() { return this.velocityA; }
   /** Instrumentation view: velocity after advection/forces and before quadtree projection. */
   get preProjectionVelocityTexture() { return this.velocityB; }
@@ -210,7 +249,8 @@ export class WebGPUUniformEulerianSolver {
       { binding: 10, resource: { buffer: this.rigidBuffer } }, { binding: 11, resource: { buffer: this.rigidExchangeBuffer } },
       { binding: 12, resource: predictedVelocity.createView() }, { binding: 13, resource: reversedVelocity.createView() },
       { binding: 14, resource: transport.createView() }, { binding: 15, resource: this.transportSampler },
-      { binding: 17, resource: this.fluxScales.createView() }
+      { binding: 17, resource: this.fluxScales.createView() },
+      { binding: 19, resource: { buffer: this.sharpenBuffer } }
     ] });
   }
 
@@ -222,14 +262,29 @@ export class WebGPUUniformEulerianSolver {
     const quadtree = projection.info;
     Object.assign(this.info, {
       gridKind: "quadtree-tall-cell",
-      pressureSolver: `Modified ICCG(0) · ${pressureIterations} max · relative ${this.scene.numerics.pressureRelativeTolerance}`,
+      pressureSolver: `Modified ICCG(0) · ${pressureIterations} max · relative ${Math.max(this.scene.numerics.pressureRelativeTolerance, 1e-4)}`,
       compressionRatio: quadtree.compressionRatio, activeCompressionRatio: quadtree.compressionRatio,
       activeSampleCount: quadtree.liquidDofCount,
       allocatedBytes: this.baseAllocatedBytes + quadtree.allocatedBytes,
       quadtreeLeafCount: quadtree.leafCount, quadtreePressureSampleCount: quadtree.pressureSampleCount,
       quadtreeLiquidDofCount: quadtree.liquidDofCount, quadtreeFaceCount: quadtree.faceCount,
       quadtreeTallSegmentCount: quadtree.tallSegmentCount, quadtreeGhostFaceCount: quadtree.ghostFaceCount,
-      quadtreeMaximumNeighborRatio: quadtree.maximumNeighborRatio, quadtreeMaximumFluidScale: quadtree.maximumFluidScale
+      quadtreeMaximumNeighborRatio: quadtree.maximumNeighborRatio, quadtreeMaximumFluidScale: quadtree.maximumFluidScale,
+      quadtreeLevelSetMismatchFraction: projection.levelSetMismatchFraction ?? 0,
+      quadtreeGPUConstruction_ms: quadtree.gpuConstruction_ms,
+      quadtreeGPUConstructionKernel_ms: quadtree.gpuConstructionKernel_ms,
+      quadtreeCPUTopologyPack_ms: quadtree.cpuTopologyPack_ms,
+      quadtreeCPURedistance_ms: quadtree.cpuRedistance_ms,
+      quadtreeCPUQuadtreeDecode_ms: quadtree.cpuQuadtreeDecode_ms,
+      quadtreeCPUTallGrid_ms: quadtree.cpuTallGrid_ms,
+      quadtreeCPUVariationalAssembly_ms: quadtree.cpuVariationalAssembly_ms,
+      quadtreeCPUSystemPack_ms: quadtree.cpuSystemPack_ms,
+      quadtreeCPUResourceUpload_ms: quadtree.cpuResourceUpload_ms,
+      quadtreeTopologyReused: quadtree.topologyReused,
+      quadtreeTopologyReuseCount: quadtree.topologyReuseCount,
+      quadtreePressureIterationsUsed: quadtree.pressureIterationsUsed,
+      quadtreeRebuildCadenceSteps: this.quadtreeRebuildInterval,
+      quadtreeTopologyReadbackBytes: quadtree.topologyReadbackBytes
     });
   }
   private timing(name: keyof NonNullable<GPUEulerianInfo["gpuTimings"]>) {
@@ -237,8 +292,98 @@ export class WebGPUUniformEulerianSolver {
     const segment = { name, start: this.queryCount++, end: this.queryCount++ }; this.querySegments.push(segment); return segment;
   }
 
+  /**
+   * A rebuild may resolve between frame encoding and queue submission. Waiting
+   * on the queue immediately is therefore insufficient: onSubmittedWorkDone
+   * only covers work submitted before it was called. Retire on the following
+   * animation frame, after the frame loop has submitted every command buffer
+   * that could still reference the old projection, and then wait for the GPU.
+   */
+  private retireQuadtreeProjection(projection: WebGPUQuadtreeTallCellProjection) {
+    this.retiredQuadtreeProjections.add(projection);
+    const waitForSubmittedFrame = () => {
+      void this.device.queue.onSubmittedWorkDone().catch(() => { /* Device loss invalidates resources first. */ }).finally(() => {
+        if (this.retiredQuadtreeProjections.delete(projection)) projection.destroy();
+      });
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(waitForSubmittedFrame);
+    else setTimeout(waitForSubmittedFrame, 0);
+  }
+
+  /**
+   * Crossing the GPU/CPU sparse-graph boundary on a fixed eight-step clock is
+   * wasteful in slow water. The tree is still refreshed after at most 32
+   * steps, but can refresh from step eight onward once a conservative speed +
+   * gravity bound says the interface may have travelled half a finest cell.
+   * Explicit caller cadences remain exact for tests and comparisons.
+   */
+  private shouldKickQuadtreeRebuild() {
+    if (this.quadtreeStepsSinceTopology < this.quadtreeRebuildMinimumInterval) return false;
+    if (!this.adaptiveQuadtreeCadence) return true;
+    if (this.quadtreeStepsSinceTopology >= this.quadtreeRebuildInterval) return true;
+    const h = Math.min(
+      this.scene.container.width_m / this.info.nx,
+      this.scene.container.height_m / this.info.ny,
+      this.scene.container.depth_m / this.info.nz
+    );
+    const elapsed = this.quadtreeDtSinceKick;
+    const gravity = Math.abs(this.scene.fluid.gravity_m_s2.y);
+    const speed = Math.max(this.info.maxSpeed_m_s ?? 0, gravity * elapsed);
+    return speed * elapsed + 0.5 * gravity * elapsed * elapsed >= 0.5 * h;
+  }
+
+  /**
+   * Launch the next topology rebuild from the current GPU state. The advected
+   * level set must cover every substep since the in-flight base, so the
+   * accumulated dt is consumed here; after the swap the pipeline re-kicks
+   * immediately when steps ran in the meantime.
+   */
+  private kickQuadtreeRebuild() {
+    const previous = this.quadtreeProjection;
+    if (!previous || this.quadtreeRebuildPending) return;
+    const rebuildStartedAt = performance.now();
+    this.quadtreeRebuildPending = true;
+    this.quadtreeRebuildBlockedFrames = 0;
+    this.info.quadtreeRebuildPending = true;
+    const advectDt = this.quadtreeDtSinceKick;
+    this.quadtreeDtSinceKick = 0; this.quadtreeStepsSinceKick = 0;
+    void previous.rebuildFromState(advectDt, this.quadtreeLastBodies).then((next) => {
+      this.quadtreeRebuildPending = false;
+      this.info.quadtreeRebuildPending = false;
+      this.info.quadtreeRebuildWall_ms = performance.now() - rebuildStartedAt;
+      this.info.quadtreeRebuildBlockedFrames = this.quadtreeRebuildBlockedFrames;
+      if (this.disposed) { if (next !== previous) next.destroy(); return; }
+      this.quadtreeProjection = next; this.applyQuadtreeInfo(next);
+      // The new topology corresponds to the state at kick time; steps that ran
+      // during the rebuild are its initial staleness.
+      this.quadtreeStepsSinceTopology = this.quadtreeStepsSinceKick;
+      // The replaced projection's buffers may still be referenced by queued
+      // steps; only release them once the queue drains.
+      if (next !== previous) this.retireQuadtreeProjection(previous);
+      if (next.bodyPressureImpulses && this.onRigidLoads) {
+        this.onRigidLoads(next.bodyPressureImpulses.map((impulse) => ({
+          bodyId: impulse.bodyId, impulse_N_s: impulse.impulse_N_s, angularImpulse_N_m_s: impulse.angularImpulse_N_m_s,
+          couplingInterval_s: Math.max(advectDt, 1e-9), displacedVolume_m3: impulse.displacedVolume_m3
+        })));
+      }
+      if (this.shouldKickQuadtreeRebuild()) this.kickQuadtreeRebuild();
+    }).catch((error) => {
+      this.quadtreeRebuildPending = false;
+      this.info.quadtreeRebuildPending = false;
+      console.error("Quadtree tall-cell rebuild failed", error);
+    });
+  }
+
   advanceTo(time_s: number, bodies: RigidBodyState[] = []) {
-    if (this.quadtreeRebuildPending || this.disposed) return false;
+    if (this.disposed) return false;
+    // Bounded staleness: steps may run ahead of the asynchronous topology
+    // rebuild by at most the lag limit; beyond that the stale tree would
+    // mislabel the advancing surface, so the step waits for the swap.
+    if (this.quadtreeProjection && this.rebuildQuadtreeEachStep && this.quadtreeRebuildPending && this.quadtreeStepsSinceKick >= this.quadtreeTopologyLagLimit) {
+      this.quadtreeRebuildBlockedFrames += 1;
+      this.info.quadtreeRebuildBlockedFrames = this.quadtreeRebuildBlockedFrames;
+      return false;
+    }
     const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s); if (!advance) return false;
     const delta = advance.dt_s; if (delta < 1e-6) { this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; return true; }
     this.lastTime = advance.nextTime_s; this.info.submittedTime_s = this.lastTime; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
@@ -276,33 +421,52 @@ export class WebGPUUniformEulerianSolver {
           const correct = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(correct, this.correctPipeline, this.correctGroup); correct.end();
         }
       }
+      if (this.densitySharpening) {
+        // Mass-Conserving Eulerian Liquid Simulation Sec 3.5: sharpen the
+        // advected density before the pressure solve. volumeB -> volumeA
+        // (sharpened, deltas in pressureB) -> volumeB (resolved deposits).
+        encoder.clearBuffer(this.sharpenBuffer);
+        const computePass = encoder.beginComputePass(); this.dispatch(computePass, this.sharpenComputePipeline, this.sharpenComputeGroup); computePass.end();
+        const scatterPass = encoder.beginComputePass(); this.dispatch(scatterPass, this.sharpenScatterPipeline, this.sharpenScatterGroup); scatterPass.end();
+        const resolvePass = encoder.beginComputePass(); this.dispatch(resolvePass, this.sharpenResolvePipeline, this.sharpenResolveGroup); resolvePass.end();
+      }
       if (this.quadtreeProjection) {
+        const timing = this.timing("pressure_ms");
+        if (timing && this.querySet) {
+          const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.start } });
+          marker.end();
+        }
         encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
         this.quadtreeProjection.encode(encoder, this.info.nx, this.info.ny, this.info.nz);
+        if (timing && this.querySet) {
+          const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } });
+          marker.end();
+        }
       } else {
         { const timing = this.timing("pressure_ms"); for (let iteration = 0; iteration < this.info.pressureIterations; iteration += 1) { const first = iteration === 0, last = iteration === this.info.pressureIterations - 1; const pass = encoder.beginComputePass(timing && this.querySet && (first || last) ? { timestampWrites: { querySet: this.querySet, ...(first ? { beginningOfPassWriteIndex: timing.start } : {}), ...(last ? { endOfPassWriteIndex: timing.end } : {}) } } : undefined); this.dispatch(pass, this.jacobiPipeline, iteration % 2 === 0 ? this.jacobiABGroup : this.jacobiBAGroup); pass.end(); } }
         { const timing = this.timing("projection_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(pass, this.projectPipeline, this.projectGroup); pass.end(); }
       }
-      if (activeBodies.length > 0) {
+      // The quadtree method resolves rigid bodies monolithically inside the
+      // variational solve (Narita Sec. 4.4): [A] area fractions, the solid
+      // constraint flux, and the rank-6 K M^-1 K^T body compliance replace the
+      // legacy post-projection impulse pass and its re-projection.
+      if (activeBodies.length > 0 && !this.quadtreeProjection) {
         const timing = this.timing("rigidCoupling_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined);
         this.dispatch(pass, this.rigidPipeline, this.rigidGroup); pass.end();
         encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
-        if (this.quadtreeProjection) this.quadtreeProjection.encode(encoder, this.info.nx, this.info.ny, this.info.nz);
-        else encoder.copyTextureToTexture({ texture: this.velocityB }, { texture: this.velocityA }, [this.info.nx, this.info.ny, this.info.nz]);
+        encoder.copyTextureToTexture({ texture: this.velocityB }, { texture: this.velocityA }, [this.info.nx, this.info.ny, this.info.nz]);
       }
     }
     encoder.clearBuffer(this.reductionBuffer); { const timing = this.timing("diagnostics_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(pass, this.reductionPipeline, this.reductionGroup); pass.end(); }
     if (totalTiming && this.querySet) { const pass = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: totalTiming.end } }); pass.end(); }
     if (this.querySet && this.queryResolve && this.queryCount > 0) encoder.resolveQuerySet(this.querySet, 0, this.queryCount, this.queryResolve, 0);
     let exchangeReadback: GPUBuffer | undefined;
-    if (activeBodies.length > 0 && this.onRigidLoads && !this.rigidReadbackPending) { this.rigidReadbackPending = true; exchangeReadback = this.device.createBuffer({ size: 12 * 8 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }); encoder.copyBufferToBuffer(this.rigidExchangeBuffer, 0, exchangeReadback, 0, 12 * 8 * 4); }
+    if (activeBodies.length > 0 && this.onRigidLoads && !this.rigidReadbackPending && !this.quadtreeProjection) { this.rigidReadbackPending = true; exchangeReadback = this.device.createBuffer({ size: 12 * 8 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }); encoder.copyBufferToBuffer(this.rigidExchangeBuffer, 0, exchangeReadback, 0, 12 * 8 * 4); }
     const submittedAt = performance.now(); this.device.queue.submit([encoder.finish()]);
     if (this.quadtreeProjection && this.rebuildQuadtreeEachStep) {
-      const previous = this.quadtreeProjection; this.quadtreeRebuildPending = true;
-      void previous.rebuildFromState(delta).then((next) => {
-        if (this.disposed) { next.destroy(); return; }
-        this.quadtreeProjection = next; this.applyQuadtreeInfo(next); previous.destroy();
-      }).catch((error) => console.error("Quadtree tall-cell rebuild failed", error)).finally(() => { this.quadtreeRebuildPending = false; });
+      this.quadtreeStepsSinceTopology += 1; this.quadtreeStepsSinceKick += 1; this.quadtreeDtSinceKick += delta;
+      this.quadtreeLastBodies = activeBodies;
+      if (!this.quadtreeRebuildPending && this.shouldKickQuadtreeRebuild()) this.kickQuadtreeRebuild();
     }
     if (!this.wallTimingPending) { this.wallTimingPending = true; void this.device.queue.onSubmittedWorkDone().then(() => { this.info.gpuQueueWall_ms = performance.now() - submittedAt; this.info.gpuQueueSimulation_s = delta; }).catch(() => { /* Device loss is handled by the renderer. */ }).finally(() => { this.wallTimingPending = false; }); }
     if (exchangeReadback) { const readback = exchangeReadback, elapsed = delta, cellVolume = c.width_m * c.height_m * c.depth_m / (this.info.nx * this.info.ny * this.info.nz); void readback.mapAsync(GPUMapMode.READ).then(() => { const words = new Int32Array(readback.getMappedRange()); const loads = activeBodies.map((body, index) => { const b = index * 8; return { bodyId: body.description.id, impulse_N_s: { x: words[b] / 1e6, y: words[b + 1] / 1e6, z: words[b + 2] / 1e6 }, angularImpulse_N_m_s: { x: words[b + 3] / 1e6, y: words[b + 4] / 1e6, z: words[b + 5] / 1e6 }, couplingInterval_s: elapsed, displacedVolume_m3: words[b + 6] / 65536 * cellVolume }; }); readback.unmap(); readback.destroy(); this.onRigidLoads?.(loads); }).catch(() => readback.destroy()).finally(() => { this.rigidReadbackPending = false; }); }
@@ -329,7 +493,9 @@ export class WebGPUUniformEulerianSolver {
   destroy() {
     this.disposed = true;
     this.quadtreeProjection?.destroy();
+    for (const projection of this.retiredQuadtreeProjections) projection.destroy();
+    this.retiredQuadtreeProjections.clear();
     for (const texture of new Set([this.velocityA, this.velocityB, this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB, this.transportA, this.transportB, this.fluxScales])) texture.destroy();
-    this.params.destroy(); this.reductionBuffer.destroy(); this.rigidBuffer.destroy(); this.rigidExchangeBuffer.destroy(); this.querySet?.destroy(); this.queryResolve?.destroy();
+    this.params.destroy(); this.reductionBuffer.destroy(); this.sharpenBuffer.destroy(); this.rigidBuffer.destroy(); this.rigidExchangeBuffer.destroy(); this.querySet?.destroy(); this.queryResolve?.destroy();
   }
 }

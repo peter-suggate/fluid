@@ -1,0 +1,48 @@
+{"scenario":"dam-break-ui","phase":"scenario","description":"actual UI dam break with the default capillary and wall settings","target_s":5,"oracleSteps":2,"quality":"balanced","methods":["tall-cell"],"cpuOracle":false}
+{"scenario":"dam-break-ui","phase":"interrogation","interrogation":"tall-cell-activity","stage":"planned","cubicGrid":[61,46,41],"storedNy":26,"requestedRegularLayers":24,"effectiveRegularLayers":24,"compressionRatio":0.5652173913043478,"activeCompressionRatio":0.5652173913043478,"activeSampleCount":65026,"planning":{"requestedRegularLayers":24,"requiredInitialRegularLayers":12,"storedRegularLayers":24,"regularLayersBeforeOrdinaryFallback":24,"maximumBaseBeforeOrdinaryFallback":22,"ordinaryGridFallback":false},"activity":{"totalColumns":2501,"tallColumns":2501,"ordinaryColumns":0,"tallFraction":1,"minimumTallHeight":22,"maximumTallHeight":22,"meanTallHeight":22,"maximumAdjacentDelta":0,"maximumPermittedHeight":22,"canRemeshToTall":true,"classification":"all"}}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"extrapolateVelocity","elapsed_ms":412}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"predictVelocity","elapsed_ms":409}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"reverseVelocity","elapsed_ms":413}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"prepareTransportVolume","elapsed_ms":318}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"finishAdvection","elapsed_ms":14994}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"buildPressureRhs","elapsed_ms":470}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"jacobi","elapsed_ms":539}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"project","elapsed_ms":370}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"coupleRigid","elapsed_ms":392}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"reduceBeforeProjection","elapsed_ms":394}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"reduceDiagnostics","elapsed_ms":403}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"planRemesh","elapsed_ms":250}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"smoothRemesh","elapsed_ms":238}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"remap","elapsed_ms":501}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"sharpenCompute","elapsed_ms":372}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"sharpenScatter","elapsed_ms":323}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"sharpenResolve","elapsed_ms":321}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"downsampleExtrapolationBase","elapsed_ms":222}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"downsampleVelocity","elapsed_ms":329}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"fillUnknownVelocity","elapsed_ms":332}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"clearPressure","elapsed_ms":108}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"smoothRed","elapsed_ms":402}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"smoothBlack","elapsed_ms":397}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"solveTop","elapsed_ms":409}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"downsampleBase","elapsed_ms":224}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"buildFinePhi","elapsed_ms":334}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"reinitializePhi","elapsed_ms":338}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"downsamplePhi","elapsed_ms":350}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"downsampleSolid","elapsed_ms":362}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"restrictResidual","elapsed_ms":572}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"prolongateCorrection","elapsed_ms":337}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"pipeline","entryPoint":"reducePressureDiagnostics","elapsed_ms":332}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"constructed","construction_ms":26259,"grid":[61,26,41],"cubicGrid":[61,46,41]}
+{"scenario":"dam-break-ui","method":"tall-cell","phase":"result","construction_ms":26259,"runtime_ms":35641,"steps":1250,"simulatedTime_s":4.9999999999998925,"grid":[61,26,41],"cubicGrid":[61,46,41],"encodedSteps":1250,"gridKind":"restricted-tall-cell","compressionRatio":0.5652173913043478,"activeCompressionRatio":0.5652173913043478,"activeSampleCount":65026,"initialVolumeCellSum":25200,"volumeCellSum":0,"representedVolumeCellSum":0,"volumeDrift":-1,"representedVolumeDrift":-1,"front_m":-0.6,"maxSpeed_m_s":0,"maxDivergenceBefore_s":0,"maxDivergenceAfter_s":0,"pressureRelativeResidual":0,"pressureResidual":0,"nonFiniteCount":130036,"stabilityFlags":["non-finite-state"],"matchedFieldStats":{"minimum":0,"maximum":1,"cellSum":25200.000072654402,"wetCells":25201,"mixedCells":1023,"excessCells":0,"meanColumnAmount":10.075969641205278,"columnAmountStdDev":17.913354494329113,"componentCount":1,"largestComponent":25201,"centroidCells":{"x":15.000341586473331,"y":20.98139167462333,"z":10.000587931188912}},"volumeFieldStats":{"minimum":0,"maximum":0,"cellSum":0,"wetCells":0,"mixedCells":0,"excessCells":0,"meanColumnAmount":0,"columnAmountStdDev":0,"componentCount":0,"largestComponent":0,"centroidCells":null},"matchedTallCellActivity":{"totalColumns":2501,"tallColumns":2501,"ordinaryColumns":0,"tallFraction":1,"minimumTallHeight":2,"maximumTallHeight":22,"meanTallHeight":21.57936825269892,"maximumAdjacentDelta":16,"maximumPermittedHeight":22,"canRemeshToTall":true,"classification":"all"},"finalTallCellActivity":{"totalColumns":2501,"tallColumns":2501,"ordinaryColumns":0,"tallFraction":1,"minimumTallHeight":2,"maximumTallHeight":14,"meanTallHeight":2.5061975209916034,"maximumAdjacentDelta":4,"maximumPermittedHeight":22,"canRemeshToTall":true,"classification":"all"},"finalTallVolumeGaps":{"dryTallColumns":2501,"dryTallWithWetRegularAbove":0,"mixedEndpointColumns":0,"wetBandCeilingColumns":0,"unexcusedDeltaViolations":0,"examples":[]},"velocitySummary":{"maximum":0.05222024396061897,"liquidMaximum":0,"location":[60,34,40],"component":1,"nonFiniteCount":195667,"kineticEnergyProxy":0,"maximumComponentCfl":0.0106761387652821,"maximumLiquidDivergence_s":0,"rmsLiquidDivergence_s":0},"validationErrors":[]}
+{"scenario":"dam-break-ui","phase":"scenario-complete","passedInvariants":false}
+/Users/petersuggate/code/me/fluid/tools/run-webgpu-smoke.ts:811
+if (failures.length > 0) throw new Error(`WebGPU smoke invariant failures:\n${failures.map((failure) => `- ${failure}`).join("\n")}`);
+                               ^
+
+Error: WebGPU smoke invariant failures:
+- dam-break-ui: tall-cell reported 130036 non-finite values
+- dam-break-ui: tall-cell represented-volume drift -1 exceeds 1%
+- dam-break-ui: tall-cell dam break front did not cross the tank: -0.6 m
+    at <anonymous> (/Users/petersuggate/code/me/fluid/tools/run-webgpu-smoke.ts:811:32)
+
+Node.js v22.22.1
