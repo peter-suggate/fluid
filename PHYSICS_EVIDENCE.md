@@ -480,7 +480,7 @@ Build: `web-stage10.3-1.0.3`
 - Added wall-clock CPU ranges for rigid/oracle stepping, GPU physics command
   encoding, data upload, render encoding/submission, and residual frame
   orchestration.
-- The collapsible bottom drawer presents a 16.67 ms budget bar, directly labeled
+- The right-hand performance sidebar presents a 16.67 ms budget bar, directly labeled
   contribution rows with milliseconds and percentages, largest-stage summary,
   and aligned recent GPU/CPU history. Exported run records include the latest
   breakdown and profiler history.

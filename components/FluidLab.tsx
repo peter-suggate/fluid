@@ -17,7 +17,7 @@ import { MethodPanel } from "./MethodPanel";
 import { RigidBodyPanel } from "./RigidBodyTray";
 import { VisualPanel } from "./VisualPanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
-import { PerformanceDrawer } from "./PerformanceDrawer";
+import { PerformancePanel } from "./PerformancePanel";
 import { ValidationPanel } from "./ValidationPanel";
 import { TransportBar } from "./TransportBar";
 import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
@@ -50,7 +50,6 @@ export function FluidLab() {
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const view = useUIStore((state) => state.view);
   const setCamera = useUIStore((state) => state.setCamera);
-  const performanceOpen = useUIStore((state) => state.performanceOpen);
   const validationOpen = useUIStore((state) => state.validationOpen);
   const setValidationOpen = useUIStore((state) => state.setValidationOpen);
   const diagnosticsOpen = useUIStore((state) => state.diagnosticsOpen);
@@ -62,7 +61,7 @@ export function FluidLab() {
   const method = getMethod(methodId);
   const backend = method.backend === "cpu" ? "cpu-reference" : "webgpu";
   const scientific = view === "scientific";
-  const visibleRightPanel = (rightPanel === "visual" || scientific) ? rightPanel : null;
+  const visibleRightPanel = (rightPanel === "visual" || rightPanel === "performance" || scientific) ? rightPanel : null;
   const healthFlags = backend === "webgpu"
     ? [...(gpuInfo?.stabilityFlags ?? []), ...(gpuInfo?.nonFiniteCount ? ["non-finite-values"] : [])]
     : [...(fluidState?.nanCount ? ["non-finite-values"] : []), ...(fluidState && !fluidState.pressureConverged ? ["pressure-not-converged"] : [])];
@@ -129,6 +128,7 @@ export function FluidLab() {
           <button className={rightPanel === "visual" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visual" ? null : "visual")} aria-expanded={rightPanel === "visual"} title="Render and debug controls">RENDER</button>
           {scientific && <button className={rightPanel === "bodies" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "bodies" ? null : "bodies")} aria-expanded={rightPanel === "bodies"} title="Rigid body controls">BODIES</button>}
           {scientific && <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAG</button>}
+          <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Live performance profiler">PERF</button>
         </nav>
         {gpuStatus.state === "initializing" && <GPUInitializationPanel status={gpuStatus} />}
         {gpuStatus.state === "unavailable" && <div className="gpu-fallback"><strong>3D renderer unavailable</strong><p>{gpuStatus.label}</p><small>The scene editor, serialization, and CPU validation remain available.</small></div>}
@@ -137,9 +137,9 @@ export function FluidLab() {
       {rightPanel === "visual" && <VisualPanel />}
       {scientific && rightPanel === "bodies" && <RigidBodyPanel />}
       {scientific && diagnosticsOpen && <DiagnosticsPanel />}
+      {rightPanel === "performance" && <PerformancePanel />}
       <TransportBar />
 
-      {performanceOpen && <PerformanceDrawer />}
       {validationOpen && <ValidationPanel results={validationResults} />}
       <RecordingPlaybackModal />
       <SceneConfigPopover />
