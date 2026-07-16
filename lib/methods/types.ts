@@ -53,6 +53,8 @@ export interface GPUSolverInstance {
   readonly info: GPUEulerianInfo;
   readonly volumeTexture: GPUTexture;
   readonly columnBaseTexture: GPUTexture;
+  /** Adaptive pressure-cell ownership for scientific grid slices. */
+  readonly gridCellTexture?: GPUTexture;
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean;
   readStats(): Promise<GPUEulerianInfo>;
   destroy(): void;
@@ -100,7 +102,26 @@ export interface SimulationMethod {
     values: MethodParamValues,
     onRigidLoads?: (loads: GPURigidLoad[]) => void
   ): GPUSolverInstance;
+  /** Browser-safe construction path. Long shader compilation must use the
+   * asynchronous WebGPU pipeline APIs so the main thread can keep painting. */
+  createSolverAsync?(
+    device: GPUDevice,
+    scene: SceneDescription,
+    quality: GPUQuality,
+    values: MethodParamValues,
+    onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
+    onProgress: GPUInitializationReporter
+  ): Promise<GPUSolverInstance>;
 }
+
+export interface GPUInitializationProgress {
+  phase: string;
+  label: string;
+  completed: number;
+  total: number;
+}
+
+export type GPUInitializationReporter = (progress: GPUInitializationProgress) => void;
 
 export function resolveMethodValues(method: SimulationMethod, quality: GPUQuality, overrides: MethodParamValues): MethodParamValues {
   const defaults = Object.fromEntries(method.params.map((spec) => [spec.key, spec.default]));

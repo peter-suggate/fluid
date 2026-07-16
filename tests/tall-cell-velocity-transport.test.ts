@@ -23,7 +23,7 @@ test("tall-cell semi-Lagrangian finish consumes the shared predictor", () => {
 test("tall density keeps a conservative average and a separate top topology endpoint", () => {
   assert.match(tallCellComputeShader, /var amount=textureLoad\(volumeIn,vec3i\(x,0,z\),0\)\.x\*f32\(base\)/);
   assert.match(tallCellComputeShader, /fn advectedTallTopGuide[\s\S]*offset<regularLayers\(\)/);
-  assert.match(tallCellComputeShader, /if\(id\.y==0\)\{alpha=advectedTallVolume[\s\S]*id\.y==1\)\{alpha=advectedTallTopGuide/);
+  assert.match(tallCellComputeShader, /if\(id\.y<=1\)\{tallAlpha=advectedTallVolume[\s\S]*if\(id\.y==0\)\{alpha=tallAlpha[\s\S]*id\.y==1\)\{alpha=advectedTallTopGuide/);
   assert.match(tallCellComputeShader, /else if\(id\.y==1\)\{for\(var offset=0;offset<regularLayers\(\)/);
   assert.match(tallCellComputeShader, /advectedTallVolume[\s\S]*return max\(0\.0,amount\/f32\(base\)\)/);
   assert.doesNotMatch(tallCellComputeShader, /advectedTallVolume[\s\S]*return clamp\(amount\/f32\(base\),0\.0,1\.0\)/);

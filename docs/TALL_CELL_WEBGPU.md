@@ -30,7 +30,8 @@ between neighbouring tall endpoint fields, so the balanced Figure 4 scene
 keeps 24 regular layers and starts with 2,408 tall columns rather than entering
 the ordinary-grid limit.
 
-The planner retains liquid and air halos, includes moving-body bounds, limits
+The planner retains liquid and air halos, caps a tall store below a nearby
+moving body's projected bottom without lifting the surface band, limits
 neighboring height differences by `D`, treats a wet band ceiling as unresolved
 surface, and limits temporal height changes. It maps one-subcell tall cells to
 the ordinary-cell limit to avoid coincident endpoint unknowns.
@@ -55,17 +56,46 @@ The pressure path:
 - caches recurring bind groups and records the multigrid dispatch sequence in
   one compute pass.
 
-Divergence uses Equation (14)'s average of adjacent collocated velocities, or
-solid velocity when the adjacent cell is more than 90% solid. Projection uses
-Equation (16)'s ghost-fluid air pressure and solid-fraction pressure blending.
-For stability, the pressure difference is divided by the physical span between
-its samples: `2 dx` for an interior centered pair and `dx` at a one-sided wall.
-The paper prints `dx` in Equation (17) even though the samples are two cell
-centers apart. The literal form reflected each hydrostatic gravity impulse and
-caused the deep tank eruption even after the remesh constraints were enforced.
-The `2 dx` denominator is treated as a correction to that printed stencil, not
-as a consequence of using a different storage layout; the paper and this
-implementation both store collocated velocities.
+Divergence and the applied pressure gradient use the one-sided face pairing:
+each collocated sample's velocity acts as its positive-face value, divergence
+is the backward difference of those faces (solid velocity when a neighbor is
+more than 90% solid), and projection subtracts the forward difference
+`(p*(q+e) - p*(q)) / (h·θ)` with Equation (16)'s ghost-fluid and
+solid-fraction blending. The compact Laplacian solved by the multigrid is
+exactly the composition of this pair, so projection is idempotent.
+
+This replaces the paper's printed Equation (13/14) centered-average divergence
+and Equation (17) gradient. That pair is inconsistent with the paper's own
+compact Equation (15/16) Laplacian: the printed `dx` denominator (samples two
+cells apart) doubles every correction and erupts hydrostatic columns, while
+the corrected `2 dx` reading leaves a compact-solve/wide-apply mismatch that
+measurably pumped energy at ghost-fluid faces — the 24-layer dam break grew
+~1.2×/step at the dam-face bottom endpoints and destroyed all liquid by
+t≈1.8 s (see `TALL_CELL_STABILITY.md`, 2026-07-15 audit, and the verbatim
+transcription in `TALL_CELLS_PAPER.md` Appendix A.6a). The authors' successor
+paper (*Mass-Conserving Eulerian Liquid Simulation*, Sec 3.1) abandons the
+collocated pairing for a staggered grid outright.
+
+Tall-cell endpoint samples take their wetness from the settled point-sample
+reconstruction (paper Eq 4 stores point samples; the packed bottom texel is
+the conservative column average): the fill height is `alpha·base` subcells,
+the bottom endpoint is liquid when the fill covers it, and gravity, the
+pressure right-hand side, projection, extrapolation seeding, and the
+multigrid φ all read this view. Mass transport keeps the average as the
+column integral. The renderer and readback reconstruct the tall interior the
+same way, so a partially filled tall cell draws as bottom-settled water.
+
+Remeshing follows paper Section 8 over the full column: a settled surface
+inside the tall region is a crossing at the fill height, and there is no
+per-step limit on base movement. Two conservative-VOF safeguards go beyond
+the paper (whose level set silently deletes water a column cannot represent):
+a column may never take a base too low to represent its own water
+(representability outranks the neighbor bound `D` at such cliffs), and remap
+residuals beyond one full tall cell settle upward into the band's remaining
+capacity. Any remaining excess density is drained by the *Mass-Conserving
+Eulerian Liquid Simulation* Section 3.7 correction: cells holding more than
+they represent add `min(λ(ρ'-1), η)` artificial divergence (λ=0.5, η=1,
+expressed as a rate against the paper's 1/30 s step).
 
 ## Transport, remeshing, and conservation
 
@@ -85,11 +115,17 @@ as an empty receiver lets the donor lose flux with no packed sample available
 to own it. The air halo and subsequent remesh move representable faces; the
 packed boundary itself remains conservative.
 
-This transport is not the complete density method from *Mass-Conserving
-Eulerian Liquid Simulation*. That paper follows conservative advection with a
-local conservative density-sharpening stage. The current solver does not yet
-implement that stage, so a moving front can still diffuse into fractional VOF
-values even when its total represented mass is conserved.
+The density method also implements the *Mass-Conserving Eulerian Liquid
+Simulation* Section 3.5 sharpening stage after conservative advection, on both
+the tall and cubic paths (Eq 4–17 with τ=0.4, ε=1e-5, fictitious step 3Δt, and
+the Algorithm 2 local mass return tracing D=2.1 cells along ∇ρ; verbatim
+transcription in `TALL_CELLS_PAPER.md` Appendix B.3). Corrections are
+non-positive per Eq 17 — mass only moves from the air side to the liquid
+side — and the removed mass is deposited near the 0.5 iso-contour through a
+fixed-point atomic buffer, so the stage conserves mass locally to within
+rounding of 2⁻¹⁶ per deposit. The `densitySharpening` method parameter (env
+`FLUID_SHARPENING=0` in the smoke runner) disables it as a diagnostic
+departure.
 
 A deep face shared by two tall cells uses at most 12 stratified samples. Both
 columns evaluate the identical oriented face integral, so its approximation
@@ -173,8 +209,12 @@ buoyancy that is not present in the explicit GPU exchange buffer.
 - Surface density is persistent. A narrow signed-distance field is reconstructed
   for pressure; the paper advects level set `phi` directly and periodically
   reinitializes it.
-- Velocity extrapolation uses repeated fine-grid neighbor passes rather than
-  the paper's multigrid known/unknown hierarchy.
+- Velocity extrapolation follows the paper's Section 3.3.1 hierarchy: two
+  fine narrow-band neighbor passes (standing in for the Jeong et al. Eikonal
+  band), then Eq 8/9 coarse grids swept fine-to-coarse and back so every
+  sample carries a velocity (`lib/tall-cell-extrapolation.ts`). The
+  `hierarchicalExtrapolation` option (env `FLUID_HIERARCHY=0`) reverts to the
+  legacy repeated neighbor passes as a diagnostic departure.
 - The separately diffused in-solid `phi_s` field and resolved pressure traction
   are not implemented.
 - Terrain cut cells, particle level-set tracking, particle thickening, foam,

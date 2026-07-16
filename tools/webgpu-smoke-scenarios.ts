@@ -38,7 +38,10 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
           : "directed inlet jet past a fixed immersed sphere",
       scene,
       oracleSteps: 2,
-      target_s: Math.max(scene.numerics.maxDt_s * 8, 0.05)
+      // Inflow jets need time to establish before the frozen-scene gate is
+      // meaningful: at 0.05 s the stream is still entirely sub-threshold and
+      // the gate measured ambient equilibrium noise instead.
+      target_s: id === "dam-break-boxes" ? Math.max(scene.numerics.maxDt_s * 8, 0.05) : 0.5
     };
   }
 
@@ -48,7 +51,7 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
     scene.sceneId = "smoke-ui-dam-break";
     scene.fluid.initialCondition = "dam-break";
     delete scene.fluid.inflow;
-    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = process.env.FLUID_MAX_DT ? Number(process.env.FLUID_MAX_DT) : 0.004;
     if (process.env.FLUID_SURFACE_TENSION !== undefined) scene.fluid.surfaceTension_N_m = Number(process.env.FLUID_SURFACE_TENSION);
     return { id, description: "actual UI dam break with the default capillary and wall settings", scene, oracleSteps: 2, target_s: 0.2 };
   }
@@ -133,6 +136,20 @@ export interface ScalarFieldDifference {
   centroidDistanceCells: number | null;
 }
 
+export interface LocalScalarDifference {
+  sampleCount: number;
+  meanAbsoluteError: number;
+  rootMeanSquareError: number;
+  maximumAbsoluteError: number;
+  maximumLocation: { x: number; y: number; z: number } | null;
+}
+
+export interface SingleTallCellDifference {
+  probeColumn: LocalScalarDifference;
+  neighborColumns: LocalScalarDifference;
+  farField: LocalScalarDifference;
+}
+
 export interface TallCellActivitySummary {
   totalColumns: number;
   tallColumns: number;
@@ -206,4 +223,41 @@ export function compareScalarFields(
       ? Math.hypot(leftCenter.x - rightCenter.x, leftCenter.y - rightCenter.y, leftCenter.z - rightCenter.z)
       : null
   };
+}
+
+/** Split a differential field into the isolated tall column, its four
+ * face-neighbor columns, and everything else. This makes it obvious whether
+ * a defect begins in the paper's local tall stencil or arrives from a global
+ * stage such as extrapolation/remeshing. */
+export function compareSingleTallCellNeighborhood(
+  left: ArrayLike<number>,
+  right: ArrayLike<number>,
+  nx: number,
+  ny: number,
+  nz: number,
+  probeX: number,
+  probeZ: number
+): SingleTallCellDifference {
+  if (left.length !== right.length || left.length !== nx * ny * nz) throw new Error("Scalar fields must share the requested dimensions");
+  type Accumulator = { count: number; absolute: number; squared: number; maximum: number; location: LocalScalarDifference["maximumLocation"] };
+  const bins: Record<keyof SingleTallCellDifference, Accumulator> = {
+    probeColumn: { count: 0, absolute: 0, squared: 0, maximum: 0, location: null },
+    neighborColumns: { count: 0, absolute: 0, squared: 0, maximum: 0, location: null },
+    farField: { count: 0, absolute: 0, squared: 0, maximum: 0, location: null }
+  };
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    const distance = Math.abs(x - probeX) + Math.abs(z - probeZ);
+    const bin = bins[distance === 0 ? "probeColumn" : distance === 1 ? "neighborColumns" : "farField"];
+    const index = x + nx * (y + ny * z), delta = Math.abs(left[index] - right[index]);
+    bin.count += 1; bin.absolute += delta; bin.squared += delta * delta;
+    if (delta > bin.maximum) { bin.maximum = delta; bin.location = { x, y, z }; }
+  }
+  const finish = (bin: Accumulator): LocalScalarDifference => ({
+    sampleCount: bin.count,
+    meanAbsoluteError: bin.absolute / Math.max(1, bin.count),
+    rootMeanSquareError: Math.sqrt(bin.squared / Math.max(1, bin.count)),
+    maximumAbsoluteError: bin.maximum,
+    maximumLocation: bin.location
+  });
+  return { probeColumn: finish(bins.probeColumn), neighborColumns: finish(bins.neighborColumns), farField: finish(bins.farField) };
 }

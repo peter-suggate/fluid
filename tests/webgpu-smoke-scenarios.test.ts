@@ -3,6 +3,7 @@ import test from "node:test";
 import { validateScene } from "../lib/model";
 import {
   compareScalarFields,
+  compareSingleTallCellNeighborhood,
   createSmokeScenario,
   smokeScenarioIds,
   summarizeScalarField,
@@ -20,6 +21,19 @@ test("native WebGPU matrix covers the UI dam break, equilibrium, moving boundari
   assert.ok(createSmokeScenario("deep-water").scene.container.height_m >= 20);
   assert.ok(createSmokeScenario("hose-tank").scene.fluid.inflow);
   assert.ok(createSmokeScenario("sphere-jet").scene.rigidBodies.length > 0);
+});
+
+test("single-tall-cell differential separates the probe stencil from the far field", () => {
+  const left = new Float32Array(3 * 2 * 3), right = left.slice();
+  const index = (x: number, y: number, z: number) => x + 3 * (y + 2 * z);
+  right[index(1, 0, 1)] = 1;
+  right[index(0, 1, 1)] = 0.5;
+  right[index(0, 0, 0)] = 0.25;
+  const difference = compareSingleTallCellNeighborhood(left, right, 3, 2, 3, 1, 1);
+  assert.equal(difference.probeColumn.maximumAbsoluteError, 1);
+  assert.deepEqual(difference.probeColumn.maximumLocation, { x: 1, y: 0, z: 1 });
+  assert.equal(difference.neighborColumns.maximumAbsoluteError, 0.5);
+  assert.equal(difference.farField.maximumAbsoluteError, 0.25);
 });
 
 test("tall-cell activity explains ordinary-grid lock-in and mixed layouts", () => {

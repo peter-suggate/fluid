@@ -17,7 +17,7 @@ export interface CouplingDiagnostics {
   coupledBodyCount: number;
 }
 
-function insidePrimitive(body: RigidBodyState, point: Vec3) {
+export function insidePrimitive(body: RigidBodyState, point: Vec3) {
   const p = quaternionInverseRotate(body.orientation, sub(point, body.position_m)), d = body.description.dimensions_m;
   if (body.description.shape === "sphere") return length(p) <= d.x;
   if (body.description.shape === "box") return Math.abs(p.x) <= d.x / 2 && Math.abs(p.y) <= d.y / 2 && Math.abs(p.z) <= d.z / 2;

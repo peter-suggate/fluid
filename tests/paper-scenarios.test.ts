@@ -52,9 +52,10 @@ test("hose layout retains a regular band spanning the receiving surface and nozz
 
 test("paper dam break retains tall columns across its vertical liquid face", () => {
   const layout = createTallCellLayout(createPaperScenario("dam-break-boxes"), "balanced");
-  assert.equal(layout.settings.regularLayers, layout.planning.requestedRegularLayers);
+  assert.ok(layout.settings.regularLayers >= layout.planning.requestedRegularLayers);
   assert.equal(layout.planning.ordinaryGridFallback, false);
   assert.ok(layout.columnBases.some((base) => base >= 2));
+  assert.ok(layout.columnBases.every((base) => base <= layout.settings.maximumTallHeight));
 });
 
 test("paper sphere obstacle remains fixed while dynamic bodies advance", () => {
@@ -63,4 +64,11 @@ test("paper sphere obstacle remains fixed while dynamic bodies advance", () => {
   assert.deepEqual(bodies[0].position_m, before);
   assert.deepEqual(bodies[0].linearVelocity_m_s, { x: 0, y: 0, z: 0 });
   assert.equal(bodies[0].inverseMass_kg, 0);
+});
+
+test("sphere jet exits the hose at high speed", () => {
+  const inflow = createPaperScenario("sphere-jet").fluid.inflow!;
+  const speed = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z);
+  assert.ok(speed >= 1.2, `expected at least 1.2 m/s, received ${speed} m/s`);
+  assert.ok(inflow.velocity_m_s.x > 0, "sphere jet must travel out of the left-hand hose");
 });

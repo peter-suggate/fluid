@@ -1,0 +1,16 @@
+import { pathToFileURL } from "node:url";
+const { create, globals } = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as any;
+Object.assign(globalThis, globals);
+const gpu = create(["backend=metal", "verbose=1"]);
+const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+console.log("adapter info:", JSON.stringify(adapter?.info ?? {}, null, 0).slice(0, 300));
+console.log("features:", [...(adapter?.features ?? [])].slice(0, 8).join(","));
+const device = await adapter.requestDevice();
+let lost: any;
+device.lost.then((l: any) => { lost = l; console.log("DEVICE LOST:", l.reason, l.message); });
+const q = device.queue;
+await q.onSubmittedWorkDone();
+console.log("empty queue sync ok, lost:", lost ? "yes" : "no");
+await new Promise(r => setTimeout(r, 500));
+console.log("after 500ms, lost:", lost ? "yes" : "no");
+device.destroy();

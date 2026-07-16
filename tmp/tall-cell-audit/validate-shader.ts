@@ -1,0 +1,14 @@
+import { pathToFileURL } from "node:url";
+import { tallCellComputeShader } from "../../lib/tall-cell-kernels";
+const { create, globals } = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as any;
+Object.assign(globalThis, globals);
+const gpu = create(["backend=metal"]);
+const adapter = await gpu.requestAdapter();
+const device = await adapter.requestDevice();
+device.pushErrorScope("validation");
+const module = device.createShaderModule({ code: tallCellComputeShader });
+const info = await module.getCompilationInfo();
+for (const m of info.messages) if (m.type === "error") console.log(`WGSL ${m.lineNum}:${m.linePos} ${m.message}`);
+const err = await device.popErrorScope();
+console.log(err ? "SCOPE: " + err.message.slice(0, 300) : "module ok");
+device.destroy();

@@ -126,13 +126,20 @@ class SimulationController {
     }
     const scene = useSceneStore.getState().scene;
     const backend = this.backend;
+    const methodId = useMethodStore.getState().methodId;
     this.accumulator += elapsed;
     const dt = scene.numerics.fixedDt_s;
+    // An uncoupled adaptive fluid has no CPU state dependency between its GPU
+    // substeps, so let the renderer consume a bounded queue batch. Rigid-body
+    // scenes retain the strict one-step handshake because each body step needs
+    // the preceding pressure impulse.
+    const gpuBatchDepth = backend === "webgpu" && methodId === "quadtree-tall-cell" && this.bodies.length === 0 ? 8 : 1;
+    const gpuCanQueue = () => backend !== "webgpu" || this.simulationTime < this.gpuCompletedTime + gpuBatchDepth * dt - 1e-9;
     let steps = 0;
     let diagnostics: RigidStepDiagnostics | undefined;
     let fluidDiagnostics: ReturnType<EulerianFluidSolver["step"]> | undefined;
     let latestCoupling: CouplingDiagnostics | undefined;
-    while (this.accumulator >= dt && steps < 2 && (backend !== "webgpu" || gpuCanAcceptNextStep(this.simulationTime, this.gpuCompletedTime))) {
+    while (this.accumulator >= dt && steps < Math.max(2, gpuBatchDepth) && gpuCanQueue()) {
       this.applyDragConstraint();
       let loads: ReadonlyMap<string, RigidExternalLoad>;
       if (backend === "webgpu") {
@@ -145,13 +152,17 @@ class SimulationController {
       diagnostics = advanceRigidBodies(this.bodies, scene, dt, 6, loads);
       this.applyDragConstraint();
       this.cpuOracleStep += 1;
-      const oracleStride = backend === "webgpu" ? 4 : 1;
+      // The adaptive GPU method can enqueue several independent fluid steps;
+      // running the coarse CPU oracle every four of those steps becomes the
+      // main-thread bottleneck. It remains a low-rate diagnostic here and the
+      // explicit Validation workflow still runs its dedicated comparisons.
+      const oracleStride = backend === "webgpu" ? (methodId === "quadtree-tall-cell" ? 32 : 4) : 1;
       if (this.cpuOracleStep % oracleStride === 0) fluidDiagnostics = this.fluidSolver.step(dt * oracleStride);
       this.accumulator -= dt;
       this.simulationTime += dt;
       steps += 1;
     }
-    if (backend === "webgpu" && !gpuCanAcceptNextStep(this.simulationTime, this.gpuCompletedTime)) this.accumulator = Math.min(this.accumulator, dt);
+    if (backend === "webgpu" && !gpuCanQueue()) this.accumulator = Math.min(this.accumulator, dt);
     else if (steps === 2 && this.accumulator > dt * 2) this.accumulator = dt * 2;
     if (steps > 0) {
       this.publishBodies(diagnostics);
@@ -388,6 +399,9 @@ class SimulationController {
       cpuPhysicsSubmit_ms: metrics.cpuPhysicsSubmit_ms,
       cpuDataUpload_ms: metrics.cpuDataUpload_ms,
       cpuRenderEncode_ms: metrics.cpuRenderEncode_ms,
+      adaptiveRebuildWall_ms: sane(diagnostics.gpuInfo?.quadtreeRebuildWall_ms, physicsFallback.adaptiveRebuildWall_ms),
+      adaptiveRebuildPending: Boolean(diagnostics.gpuInfo?.quadtreeRebuildPending),
+      adaptiveRebuildBlockedFrames: diagnostics.gpuInfo?.quadtreeRebuildBlockedFrames ?? physicsFallback.adaptiveRebuildBlockedFrames,
       gpuLayerConstruction_ms: sane(gpu?.layerConstruction_ms, physicsFallback.gpuLayerConstruction_ms),
       gpuAdvection_ms: sane(gpu?.advection_ms, physicsFallback.gpuAdvection_ms),
       gpuPressure_ms: sane(gpu?.pressure_ms, physicsFallback.gpuPressure_ms),

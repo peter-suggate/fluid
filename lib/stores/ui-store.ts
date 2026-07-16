@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { defaultCamera, type CameraState, type ViewMode } from "../model";
 import type { GridOverlayConfig, WaterRenderMode } from "../webgpu-renderer";
 
+export type RightPanel = "visual" | "bodies" | "diagnostics" | null;
+
 /** Presentation-only state: camera, view mode, selection, open panels. */
 interface UIStore {
   view: ViewMode;
@@ -11,6 +13,7 @@ interface UIStore {
   performanceOpen: boolean;
   validationOpen: boolean;
   diagnosticsOpen: boolean;
+  rightPanel: RightPanel;
   /** Fig. 2-style grid cross-section drawn on a slice plane in the scene. */
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
@@ -23,6 +26,7 @@ interface UIStore {
   setPerformanceOpen: (open: boolean) => void;
   setValidationOpen: (open: boolean) => void;
   setDiagnosticsOpen: (open: boolean) => void;
+  setRightPanel: (panel: RightPanel) => void;
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
   setGridOverlaySlice: (slice: number) => void;
   setWaterRenderMode: (mode: WaterRenderMode) => void;
@@ -36,6 +40,7 @@ export const useUIStore = create<UIStore>((set) => ({
   performanceOpen: false,
   validationOpen: false,
   diagnosticsOpen: false,
+  rightPanel: null,
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
   waterRenderMode: "rasterized",
@@ -45,7 +50,11 @@ export const useUIStore = create<UIStore>((set) => ({
   setSceneModalOpen: (sceneModalOpen) => set({ sceneModalOpen }),
   setPerformanceOpen: (performanceOpen) => set({ performanceOpen }),
   setValidationOpen: (validationOpen) => set({ validationOpen }),
-  setDiagnosticsOpen: (diagnosticsOpen) => set({ diagnosticsOpen }),
+  setDiagnosticsOpen: (diagnosticsOpen) => set((state) => ({
+    diagnosticsOpen,
+    rightPanel: diagnosticsOpen ? "diagnostics" : state.rightPanel === "diagnostics" ? null : state.rightPanel
+  })),
+  setRightPanel: (rightPanel) => set({ rightPanel, diagnosticsOpen: rightPanel === "diagnostics" }),
   setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setWaterRenderMode: (waterRenderMode) => set({ waterRenderMode })

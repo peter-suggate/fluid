@@ -117,7 +117,13 @@ fn fieldCell(cell: vec3i) -> f32 {
   if (any(cell < vec3i(0)) || any(cell >= dims)) { return 0.0; }
   if (u.gridInfo.w < 1.5) { return textureLoad(volume, cell, 0).x; }
   let base = i32(round(textureLoad(columnBases, cell.xz, 0).x));
-  if (cell.y < base && base > 0) { return textureLoad(volume, vec3i(cell.x, 0, cell.z), 0).x; }
+  if (cell.y < base && base > 0) {
+    // The bottom texel is the tall-cell column-average VOF; every subcell
+    // shares that density, matching the solver's classification. Drawing a
+    // settled fill instead showed phantom air gaps the pressure solve never
+    // saw (2026-07-16 audit).
+    return clamp(textureLoad(volume, vec3i(cell.x, 0, cell.z), 0).x, 0.0, 1.0);
+  }
   let packedY = 2 + cell.y - base;
   let stored = vec3i(textureDimensions(volume));
   if (packedY < 2 || packedY >= stored.y) { return 0.0; }
@@ -646,7 +652,7 @@ export class RasterWaterPipeline {
     private readonly bodyBuffer: GPUBuffer
   ) {}
 
-  async initialize() {
+  async initialize(onProgress:(label:string,completed:number,total:number)=>void=()=>{}) {
     const [extract, prepare, surface, caustic, scene, composite] = await Promise.all([
       checkedModule(this.device, "Water isosurface extraction", surfaceExtractionShader),
       checkedModule(this.device, "Water extraction dispatch prepare", extractionPrepareShader),
@@ -685,12 +691,15 @@ export class RasterWaterPipeline {
       { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } }
     ] });
     const extractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.extractLayout] });
-    this.extractPipeline = this.device.createComputePipeline({ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractMain" } });
-    this.extractBandPipeline = this.device.createComputePipeline({ label: "Classify restricted water band", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractBandMain" } });
-    this.extractTallSidesPipeline = this.device.createComputePipeline({ label: "Classify tall-cell side interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractTallSidesMain" } });
-    this.extractWallPipeline = this.device.createComputePipeline({ label: "Classify water wall interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractWallMain" } });
-    this.polygonisePipeline = this.device.createComputePipeline({ label: "Polygonise surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "polygoniseMain" } });
-    this.preparePipeline = this.device.createComputePipeline({ label: "Prepare polygonise dispatch", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.prepareLayout] }), compute: { module: prepare, entryPoint: "prepareMain" } });
+    const total=11;let completed=0;
+    const compute=async(label:string,descriptor:GPUComputePipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createComputePipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
+    const render=async(label:string,descriptor:GPURenderPipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createRenderPipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
+    this.extractPipeline = await compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractMain" } });
+    this.extractBandPipeline = await compute("Classifying restricted water band",{ label: "Classify restricted water band", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractBandMain" } });
+    this.extractTallSidesPipeline = await compute("Classifying tall-cell interfaces",{ label: "Classify tall-cell side interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractTallSidesMain" } });
+    this.extractWallPipeline = await compute("Classifying water wall interfaces",{ label: "Classify water wall interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractWallMain" } });
+    this.polygonisePipeline = await compute("Building water surface mesh",{ label: "Polygonise surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "polygoniseMain" } });
+    this.preparePipeline = await compute("Preparing surface dispatch",{ label: "Prepare polygonise dispatch", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.prepareLayout] }), compute: { module: prepare, entryPoint: "prepareMain" } });
     this.extractionMetaBuffer = this.device.createBuffer({ label: "Water extraction worklist counters", size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.polygoniseDispatchBuffer = this.device.createBuffer({ label: "Water polygonise dispatch arguments", size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const surfacePipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.surfaceLayout] });
@@ -700,15 +709,15 @@ export class RasterWaterPipeline {
       primitive: { topology: "triangle-list", frontFace: "ccw", cullMode },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
     });
-    this.surfaceFrontPipeline = this.device.createRenderPipeline(surfaceDescriptor("Raster water front interfaces", "back"));
-    this.surfaceBackPipeline = this.device.createRenderPipeline(surfaceDescriptor("Raster water back interfaces", "front"));
-    this.causticPipeline = this.device.createRenderPipeline({
+    this.surfaceFrontPipeline = await render("Rendering front water interfaces",surfaceDescriptor("Raster water front interfaces", "back"));
+    this.surfaceBackPipeline = await render("Rendering back water interfaces",surfaceDescriptor("Raster water back interfaces", "front"));
+    this.causticPipeline = await render("Projecting water caustics",{
       label: "Project refracted caustics", layout: surfacePipelineLayout, vertex: { module: caustic, entryPoint: "causticVertex" },
       fragment: { module: caustic, entryPoint: "causticFragment", targets: [{ format: "rgba16float", blend: { color: { srcFactor: "one", dstFactor: "one" }, alpha: { srcFactor: "one", dstFactor: "one" } } }] },
       primitive: { topology: "triangle-list", cullMode: "none" }
     });
-    this.scenePipeline = this.device.createRenderPipeline({ label: "Render dry scene for water refraction", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.sceneLayout] }), vertex: { module: scene, entryPoint: "vertexMain" }, fragment: { module: scene, entryPoint: "fragmentMain", targets: [{ format: "rgba16float" }] }, primitive: { topology: "triangle-list" } });
-    this.compositePipeline = this.device.createRenderPipeline({ label: "Composite two-interface water optics", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeLayout] }), vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } });
+    this.scenePipeline = await render("Rendering the dry scene",{ label: "Render dry scene for water refraction", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.sceneLayout] }), vertex: { module: scene, entryPoint: "vertexMain" }, fragment: { module: scene, entryPoint: "fragmentMain", targets: [{ format: "rgba16float" }] }, primitive: { topology: "triangle-list" } });
+    this.compositePipeline = await render("Compositing water optics",{ label: "Composite two-interface water optics", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeLayout] }), vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } });
     this.sampler = this.device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
   }
 

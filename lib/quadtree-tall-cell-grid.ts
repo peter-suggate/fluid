@@ -57,6 +57,48 @@ export interface TallPressureGrid {
   samplesByLeaf: TallPressureSample[][];
 }
 
+/**
+ * Dense lookup used only by presentation/debug tooling. Every finest-grid
+ * voxel receives the id of the adaptive pressure cell that represents it, so
+ * a slice renderer can suppress backing-grid lines inside quadtree leaves and
+ * vertically merged tall segments.
+ */
+export function adaptivePressureCellIds(grid: TallPressureGrid) {
+  const { quadtree, ny } = grid, ids = new Uint32Array(quadtree.nx * ny * quadtree.nz);
+  for (const segment of grid.segments) {
+    const leaf = quadtree.leaves[segment.leaf], id = segment.id + 1;
+    for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let y = segment.firstY; y <= segment.lastY; y += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) {
+      ids[x + quadtree.nx * (y + ny * z)] = id;
+    }
+  }
+  return ids;
+}
+
+/**
+ * Compact per-voxel bounds for the scientific grid renderer.
+ *
+ * The two uints form a stable cell key as well as carrying the represented
+ * cell's complete extent. Components use ten bits, which comfortably covers
+ * the application's supported grid dimensions while keeping the debug
+ * texture at two channels instead of requiring an expensive RGBA texture.
+ */
+export function adaptivePressureCellTopology(grid: TallPressureGrid) {
+  const { quadtree, ny } = grid;
+  if (quadtree.nx > 1023 || quadtree.nz > 1023 || ny > 1023) throw new Error("Adaptive debug topology supports grid dimensions up to 1023");
+  const topology = new Uint32Array(quadtree.nx * ny * quadtree.nz * 2);
+  for (const segment of grid.segments) {
+    const leaf = quadtree.leaves[segment.leaf];
+    const horizontal = leaf.x | (leaf.z << 10) | (leaf.size << 20);
+    const vertical = segment.firstY | ((segment.lastY + 1) << 10);
+    for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let y = segment.firstY; y <= segment.lastY; y += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) {
+      const offset = 2 * (x + quadtree.nx * (y + ny * z));
+      topology[offset] = horizontal;
+      topology[offset + 1] = vertical;
+    }
+  }
+  return topology;
+}
+
 export interface VariationalFace {
   axis: 0 | 1 | 2;
   position: Vec3;
@@ -68,11 +110,35 @@ export interface VariationalFace {
   openFraction: number;
   /** Entry of [F], using the SPD free-surface treatment of Ando--Batty Eq. (25). */
   fluidScale: number;
-  /** Temporary face velocity used only by the pressure solve. */
+  /** Temporary constraint flux A u_fluid + (1-A) u_solid used only by the pressure solve. */
   velocity: number;
+  /** The (1-A) u_solid portion of the constraint flux (zero without moving solids). */
+  solidFlux: number;
   ghost: boolean;
   /** Background-face range collapsed into this variational velocity sample. */
   bounds: { x: number; z: number; y0: number; y1: number; span: number };
+}
+
+/** One rigid body seen by the variational system (world-space state). */
+export interface VariationalBody {
+  position: Vec3;
+  linearVelocity: Vec3;
+  angularVelocity: Vec3;
+  /** 1/mass with the fluid density folded in (rho/m); zero for static bodies. */
+  inverseMass: number;
+  /** World-space inverse inertia times fluid density (rho * R I^-1 R^T), row-major 3x3. */
+  inverseInertia: number[];
+}
+
+/**
+ * Narita Sec. 4.4 / Batty et al. 2007: per-body coupling K = [grad]^T [V] (1-[A]) [L],
+ * a rank-6 term. `rows` maps liquid DOF -> the 6 entries of that row of K
+ * (force then torque generators); the coupled matrix gains K M^-1 K^T and the
+ * right-hand side gains K [v*; omega*].
+ */
+export interface BodyCoupling {
+  body: number;
+  rows: Map<number, Float64Array>;
 }
 
 export interface VariationalSystem {
@@ -82,6 +148,7 @@ export interface VariationalSystem {
   faces: VariationalFace[];
   matrix: Float64Array;
   rhs: Float64Array;
+  couplings: BodyCoupling[];
 }
 
 const index2 = (x: number, z: number, nx: number) => x + nx * z;
@@ -106,11 +173,17 @@ function buildUnbalancedLeaves(sizing: ArrayLike<number>, nx: number, nz: number
   const alpha = clamp(options.adaptivityStrength ?? 1, 0, 1);
   const leaves: Omit<QuadtreeLeaf, "id">[] = [];
   const visit = (x: number, z: number, size: number, level: number) => {
-    const centerX = Math.min(nx - 1, x + Math.floor(size / 2));
-    const centerZ = Math.min(nz - 1, z + Math.floor(size / 2));
+    // The sizing demand is the maximum over the candidate leaf's footprint: a
+    // centre-point sample can never trigger the first split for a sub-leaf
+    // feature (an inflow blob, a droplet), and the dilation passes only expand
+    // refinement that already exists.
+    let demand = 0;
+    for (let sz = z; sz < Math.min(nz, z + size); sz += 1) for (let sx = x; sx < Math.min(nx, x + size); sx += 1) {
+      demand = Math.max(demand, Number(sizing[index2(sx, sz, nx)]));
+    }
     const physicalWidth = size * options.h;
     const testedWidth = pseudoCellWidth(physicalWidth, options.h, alpha);
-    const split = size > 1 && Number(sizing[index2(centerX, centerZ, nx)]) > 1 / testedWidth;
+    const split = size > 1 && demand > 1 / testedWidth;
     if (!split) { leaves.push({ x, z, size, level }); return; }
     const child = size / 2;
     visit(x, z, child, level + 1);
@@ -217,6 +290,49 @@ export function buildQuadtree(sizing: ArrayLike<number>, nx: number, nz: number,
   return { nx, nz, leaves: numbered, leafAt, maximumNeighborRatio };
 }
 
+/**
+ * Reconstruct the compact leaf list from the GPU's dense finest-cell map.
+ *
+ * Each word stores x in bits 0..9, z in bits 10..19, and the dyadic leaf
+ * width in bits 20..29. Keeping this readback to one word per x/z column is
+ * what makes GPU topology construction useful: no node pointers, per-level
+ * arrays, or 3D velocity field cross the GPU/CPU boundary.
+ */
+export function quadtreeFromPackedCells(packedCells: ArrayLike<number>, nx: number, nz: number): QuadtreeGrid {
+  if (nx <= 0 || nz <= 0 || nx > 1023 || nz > 1023 || packedCells.length !== nx * nz) throw new Error("Invalid packed quadtree topology");
+  const decoded = new Map<number, Omit<QuadtreeLeaf, "id" | "level">>();
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const word = Number(packedCells[index2(x, z, nx)]) >>> 0;
+    const leafX = word & 1023, leafZ = (word >>> 10) & 1023, size = (word >>> 20) & 1023;
+    if (size < 1 || (size & (size - 1)) !== 0 || leafX + size > nx || leafZ + size > nz || x < leafX || x >= leafX + size || z < leafZ || z >= leafZ + size) {
+      throw new Error(`Invalid packed quadtree leaf at (${x}, ${z})`);
+    }
+    const canonical = leafX | (leafZ << 10) | (size << 20);
+    if (canonical !== word) throw new Error(`Unsupported packed quadtree bits at (${x}, ${z})`);
+    decoded.set(word, { x: leafX, z: leafZ, size });
+  }
+  const maximumSize = Math.max(...[...decoded.values()].map((leaf) => leaf.size));
+  const leaves = [...decoded.values()]
+    .sort((a, b) => a.z - b.z || a.x - b.x || b.size - a.size)
+    .map((leaf, id) => ({ ...leaf, id, level: Math.max(0, Math.round(Math.log2(maximumSize / leaf.size))) }));
+  const leafAt = leafMap(leaves, nx, nz);
+  // A leaf descriptor must occupy every finest cell in its square. This also
+  // rejects overlapping descriptors that a simple coverage check can miss.
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const leaf = leaves[leafAt[index2(x, z, nx)]];
+    const expected = leaf.x | (leaf.z << 10) | (leaf.size << 20);
+    if ((Number(packedCells[index2(x, z, nx)]) >>> 0) !== expected) throw new Error("Packed quadtree leaf does not fill its declared square");
+  }
+  let maximumNeighborRatio = 1;
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) for (const [qx, qz] of [[x + 1, z], [x, z + 1]] as const) {
+    if (qx >= nx || qz >= nz) continue;
+    const a = leaves[leafAt[index2(x, z, nx)]], b = leaves[leafAt[index2(qx, qz, nx)]];
+    maximumNeighborRatio = Math.max(maximumNeighborRatio, a.size / b.size, b.size / a.size);
+  }
+  if (maximumNeighborRatio > 2) throw new Error(`GPU quadtree is not 2:1 balanced (ratio ${maximumNeighborRatio})`);
+  return { nx, nz, leaves, leafAt, maximumNeighborRatio };
+}
+
 function sampleLeafCenterScalar(field: ArrayLike<number>, leaf: QuadtreeLeaf, y: number, nx: number, ny: number) {
   // Narita et al.'s pressure samples lie at the horizontal centre of every
   // cubic or tall cell (the authors' July 2025 hindsight clarification).  The
@@ -266,8 +382,8 @@ export function populateTallPressureGrid(
     let y = 0;
     while (y < ny) {
       const firstY = y, isCubic = cubic[y] === 1, sign = columnPhi[y] < 0;
-      if (isCubic) y += 1;
-      else while (y + 1 < ny && cubic[y + 1] === 0 && (columnPhi[y + 1] < 0) === sign) y += 1;
+      // A cubic segment is exactly one retained cube; only uncut runs coalesce.
+      if (!isCubic) while (y + 1 < ny && cubic[y + 1] === 0 && (columnPhi[y + 1] < 0) === sign) y += 1;
       const lastY = y, segmentId = segments.length;
       const add = (sampleY: number, kind: TallPressureSample["kind"]) => {
         const sample: TallPressureSample = {
@@ -298,12 +414,22 @@ function interpolationAt(samples: TallPressureSample[], worldY: number) {
   return [{ sample: lower, weight: 1 - t }, { sample: upper, weight: t }];
 }
 
+/**
+ * Ando--Batty's Eq. 25 scale W = (sum c_i phi_i) / (sum_liquid c_i phi_i)
+ * degenerates as the liquid contribution approaches zero: a nearly-emptied
+ * surface sample can produce arbitrarily large face gradients that a converged
+ * pressure solve then injects as kinetic energy. The ceiling is the standard
+ * ghost-fluid interface-fraction floor theta >= 1/maximum (Bridson Ch. 5 uses
+ * theta >= 0.01); values above it carry no physical information.
+ */
+export const maximumFluidScale = 100;
+
 function spdFluidScale(nodes: Array<{ sample: TallPressureSample; coefficient: number }>) {
   const all = nodes.reduce((sum, node) => sum + node.coefficient * node.sample.phi, 0);
   const liquid = nodes.reduce((sum, node) => sum + (node.sample.liquid ? node.coefficient * node.sample.phi : 0), 0);
   if (nodes.every((node) => node.sample.liquid)) return 1;
   if (Math.abs(liquid) < 1e-12) return 0;
-  return Math.max(0, all / liquid);
+  return Math.min(maximumFluidScale, Math.max(0, all / liquid));
 }
 
 function squaredDistanceTransform1D(input: Float64Array, spacing: number) {
@@ -359,11 +485,11 @@ function redistanceSignedSamples(samples: ArrayLike<number>, nx: number, ny: num
       if (plus >= 0 && negative[plus] === sign) result = Math.min(result, distance[plus]);
       return result;
     };
-    const candidates: Array<[number, number]> = [
+    const candidates = ([
       [neighborMinimum(x > 0 ? index - 1 : -1, x + 1 < nx ? index + 1 : -1), h.x],
       [neighborMinimum(y > 0 ? index - nx : -1, y + 1 < ny ? index + nx : -1), h.y],
       [neighborMinimum(z > 0 ? index - nx * ny : -1, z + 1 < nz ? index + nx * ny : -1), h.z]
-    ].filter(([value]) => Number.isFinite(value)).sort((left, right) => left[0] - right[0]);
+    ] as Array<[number, number]>).filter(([value]) => Number.isFinite(value)).sort((left, right) => left[0] - right[0]);
     let sumInverseH2 = 0, sumAInverseH2 = 0, sumA2InverseH2 = 0, result = Infinity;
     for (let used = 0; used < candidates.length; used += 1) {
       const [a, spacing] = candidates[used], inverseH2 = 1 / (spacing * spacing);
@@ -444,6 +570,12 @@ export function signedDistanceFromVolume(volume: ArrayLike<number>, nx: number, 
 export function advectAndRedistanceLevelSet(
   phi: ArrayLike<number>, velocity: ArrayLike<Vec3>, nx: number, ny: number, nz: number, h: Vec3, dt_s: number
 ) {
+  return redistanceSignedSamples(advectLevelSetSamples(phi, velocity, nx, ny, nz, h, dt_s), nx, ny, nz, h);
+}
+
+function advectLevelSetSamples(
+  phi: ArrayLike<number>, velocity: ArrayLike<Vec3>, nx: number, ny: number, nz: number, h: Vec3, dt_s: number
+) {
   const count = nx * ny * nz;
   if (phi.length !== count || velocity.length !== count || !(dt_s >= 0)) throw new Error("Invalid level-set advection inputs");
   const scalarAt = (x: number, y: number, z: number) => {
@@ -470,26 +602,129 @@ export function advectAndRedistanceLevelSet(
     advected[index3(x, y, z, nx, ny)] = scalarAt(x - dt_s * u / h.x, y - dt_s * v / h.y, z - dt_s * w / h.z);
   }
 
-  return redistanceSignedSamples(advected, nx, ny, nz, h);
+  return advected;
+}
+
+/**
+ * Conservative VOF is the transported mass field; the level set is only the
+ * pressure geometry. Wherever the two disagree about wet/dry — inflow sources,
+ * splash merges, accumulated advection drift — the VOF is authoritative:
+ * conflicting cells are reseeded from its reconstructed signed distance while
+ * agreeing cells keep the advected sub-cell distances, and one redistancing
+ * restores |grad phi| = 1. The returned mismatch fraction is the drift
+ * diagnostic before reconciliation.
+ */
+export function reconcileLevelSetWithVolume(
+  phi: ArrayLike<number>, volume: ArrayLike<number>, nx: number, ny: number, nz: number, h: Vec3
+): { phi: Float32Array; mismatchFraction: number } {
+  const count = nx * ny * nz;
+  if (phi.length !== count || volume.length !== count) throw new Error("Invalid level-set reconciliation inputs");
+  // Sub-half-cell disagreement along the interface is legitimate ambiguity
+  // between the two surface representations; reseeding it would stamp the
+  // VOF's quantized offsets into phi and the resulting curvature noise drives
+  // the sizing to full refinement. Only decisive disagreement -- liquid the
+  // advected field never saw, or dry regions it still thinks are wet by more
+  // than half a cell -- is overruled.
+  const band = 0.5 * Math.min(h.x, h.y, h.z);
+  let mismatches = 0;
+  for (let index = 0; index < count; index += 1) {
+    if ((phi[index] < 0) !== (volume[index] >= 0.5) && Math.abs(phi[index]) > band) mismatches += 1;
+  }
+  if (mismatches === 0) return { phi: redistanceSignedSamples(phi, nx, ny, nz, h), mismatchFraction: 0 };
+  const volumePhi = signedDistanceFromVolume(volume, nx, ny, nz, h);
+  const merged = new Float64Array(count);
+  for (let index = 0; index < count; index += 1) {
+    const disagree = (phi[index] < 0) !== (volume[index] >= 0.5) && Math.abs(phi[index]) > band;
+    merged[index] = disagree ? volumePhi[index] : phi[index];
+  }
+  return { phi: redistanceSignedSamples(merged, nx, ny, nz, h), mismatchFraction: mismatches / count };
+}
+
+/** Advect the pressure level set and reconcile it against the conservative VOF in one redistancing pass. */
+export function advectAndReconcileLevelSet(
+  phi: ArrayLike<number>, velocity: ArrayLike<Vec3>, volume: ArrayLike<number>,
+  nx: number, ny: number, nz: number, h: Vec3, dt_s: number
+) {
+  return reconcileLevelSetWithVolume(advectLevelSetSamples(phi, velocity, nx, ny, nz, h, dt_s), volume, nx, ny, nz, h);
 }
 
 export interface VariationalFaceInputs {
-  velocity: ArrayLike<Vec3>;
+  /**
+   * Background-grid velocity used by the CPU reference assembly. The WebGPU
+   * path samples velocity directly from its 3D texture, so remeshing may omit
+   * this field and avoid a full velocity readback.
+   */
+  velocity?: ArrayLike<Vec3>;
   solidFraction?: ArrayLike<number>;
+  /** Per-cell owning body index into `bodies`, or -1 for static solid. */
+  solidOwner?: ArrayLike<number>;
+  bodies?: VariationalBody[];
 }
 
-/** Build [grad], [V], [A], [F], and the corrected temporary ghost velocities. */
+function applyInverseGeneralizedMass(body: VariationalBody, generalized: ArrayLike<number>) {
+  const inertia = body.inverseInertia;
+  return Float64Array.from([
+    body.inverseMass * generalized[0], body.inverseMass * generalized[1], body.inverseMass * generalized[2],
+    inertia[0] * generalized[3] + inertia[1] * generalized[4] + inertia[2] * generalized[5],
+    inertia[3] * generalized[3] + inertia[4] * generalized[4] + inertia[5] * generalized[5],
+    inertia[6] * generalized[3] + inertia[7] * generalized[4] + inertia[8] * generalized[5]
+  ]);
+}
+
+/** Build [grad], [V], [A], [F], the corrected temporary ghost velocities, and the rank-6 body couplings. */
 export function buildVariationalSystem(grid: TallPressureGrid, inputs: VariationalFaceInputs, options: { assembleDense?: boolean } = {}): VariationalSystem {
   const { quadtree, ny, h } = grid, count = quadtree.nx * ny * quadtree.nz;
-  if (inputs.velocity.length !== count || (inputs.solidFraction && inputs.solidFraction.length !== count)) throw new Error("Invalid variational face fields");
+  if ((inputs.velocity && inputs.velocity.length !== count) || (inputs.solidFraction && inputs.solidFraction.length !== count)) throw new Error("Invalid variational face fields");
   const liquidSampleIds = grid.samples.filter((sample) => sample.liquid).map((sample) => sample.id);
   const dofBySample = new Int32Array(grid.samples.length); dofBySample.fill(-1);
   liquidSampleIds.forEach((sample, dof) => { dofBySample[sample] = dof; });
   const faces: VariationalFace[] = [];
   const segmentsByLeaf: TallSegment[][] = quadtree.leaves.map(() => []);
   for (const segment of grid.segments) segmentsByLeaf[segment.leaf].push(segment);
-  const velocityAt = (x: number, y: number, z: number, axis: 0 | 1 | 2) => inputs.velocity[index3(clamp(x, 0, quadtree.nx - 1), clamp(y, 0, ny - 1), clamp(z, 0, quadtree.nz - 1), quadtree.nx, ny)][axis === 0 ? "x" : axis === 1 ? "y" : "z"];
+  const velocityAt: (x: number, y: number, z: number, axis: 0 | 1 | 2) => number = inputs.velocity
+    ? (x: number, y: number, z: number, axis: 0 | 1 | 2) => inputs.velocity![index3(clamp(x, 0, quadtree.nx - 1), clamp(y, 0, ny - 1), clamp(z, 0, quadtree.nz - 1), quadtree.nx, ny)][axis === 0 ? "x" : axis === 1 ? "y" : "z"]
+    : () => 0;
   const solidAt = (x: number, y: number, z: number) => inputs.solidFraction?.[index3(clamp(x, 0, quadtree.nx - 1), clamp(y, 0, ny - 1), clamp(z, 0, quadtree.nz - 1), quadtree.nx, ny)] ?? 0;
+  const ownerAt = (x: number, y: number, z: number) => inputs.solidOwner?.[index3(clamp(x, 0, quadtree.nx - 1), clamp(y, 0, ny - 1), clamp(z, 0, quadtree.nz - 1), quadtree.nx, ny)] ?? -1;
+  const bodies = inputs.bodies ?? [];
+  const couplings: BodyCoupling[] = bodies.map((_, body) => ({ body, rows: new Map<number, Float64Array>() }));
+  // Per-face scratch: sum of s_sub * L(x_sub) per body, where L = [n; arm x n]
+  // is the rigid velocity generator at the sub-face. c*V is the face area, so
+  // the K rows integrate pressure over the wetted solid surface exactly.
+  const bodySums = bodies.map(() => new Float64Array(6));
+  let bodyTouched: number[] = [];
+  const accumulateSolidSubface = (axis: 0 | 1 | 2, fraction: number, owner: number, position: Vec3) => {
+    if (fraction <= 0) return 0;
+    if (owner >= 0 && owner < bodies.length) {
+      const body = bodies[owner], sums = bodySums[owner];
+      if (sums[0] === 0 && sums[1] === 0 && sums[2] === 0 && sums[3] === 0 && sums[4] === 0 && sums[5] === 0) bodyTouched.push(owner);
+      const arm = { x: position.x - body.position.x, y: position.y - body.position.y, z: position.z - body.position.z };
+      // L = [e_axis; arm x e_axis]
+      sums[axis] += fraction;
+      if (axis === 0) { sums[4] += fraction * arm.z; sums[5] -= fraction * arm.y; }
+      else if (axis === 1) { sums[3] -= fraction * arm.z; sums[5] += fraction * arm.x; }
+      else { sums[3] += fraction * arm.y; sums[4] -= fraction * arm.x; }
+      const v = body.linearVelocity, w = body.angularVelocity;
+      const solidVelocity = axis === 0 ? v.x + w.y * arm.z - w.z * arm.y : axis === 1 ? v.y + w.z * arm.x - w.x * arm.z : v.z + w.x * arm.y - w.y * arm.x;
+      return fraction * solidVelocity;
+    }
+    return 0;
+  };
+  const attachCouplings = (face: VariationalFace, sampleCount: number) => {
+    if (bodyTouched.length === 0) return;
+    for (const owner of bodyTouched) {
+      const sums = bodySums[owner], scale = face.volume / Math.max(1, sampleCount);
+      for (let slot = 0; slot < face.nodes.length; slot += 1) {
+        const dof = dofBySample[face.nodes[slot]]; if (dof < 0) continue;
+        let row = couplings[owner].rows.get(dof);
+        if (!row) { row = new Float64Array(6); couplings[owner].rows.set(dof, row); }
+        const weight = face.coefficients[slot] * scale;
+        for (let component = 0; component < 6; component += 1) row[component] += weight * sums[component];
+      }
+      bodySums[owner].fill(0);
+    }
+    bodyTouched = [];
+  };
   const addHorizontal = (axis: 0 | 2) => {
     for (let z = 0; z < quadtree.nz; z += 1) for (let x = 0; x < quadtree.nx; x += 1) {
       const qx = x + (axis === 0 ? 1 : 0), qz = z + (axis === 2 ? 1 : 0);
@@ -522,23 +757,35 @@ export function buildVariationalSystem(grid: TallPressureGrid, inputs: Variation
           ...leftWeights.map((entry) => ({ sample: entry.sample, coefficient: -entry.weight / distance })),
           ...rightWeights.map((entry) => ({ sample: entry.sample, coefficient: entry.weight / distance }))
         ];
-        let velocity = 0, solid = 0, sampleCount = 0;
+        let flux = 0, solidFluxSum = 0, solid = 0, sampleCount = 0;
         for (let yy = y0; yy < y1; yy += 1) for (let transverse = transverseStart; transverse < transverseEnd; transverse += 1) {
           const lx = axis === 0 ? x : transverse, lz = axis === 2 ? z : transverse;
-          velocity += velocityAt(lx, yy, lz, axis);
           const rx = axis === 0 ? qx : transverse, rz = axis === 2 ? qz : transverse;
-          solid += Math.max(solidAt(lx, yy, lz), solidAt(rx, yy, rz)); sampleCount += 1;
+          const leftSolid = solidAt(lx, yy, lz), rightSolid = solidAt(rx, yy, rz);
+          const fraction = Math.max(leftSolid, rightSolid);
+          const owner = leftSolid >= rightSolid ? ownerAt(lx, yy, lz) : ownerAt(rx, yy, rz);
+          const position = {
+            x: axis === 0 ? (x + 1) * h.x : (transverse + 0.5) * h.x,
+            y: (yy + 0.5) * h.y,
+            z: axis === 2 ? (z + 1) * h.z : (transverse + 0.5) * h.z
+          };
+          // Constraint flux: A u_fluid + (1-A) u_solid per sub-face.
+          const solidPart = accumulateSolidSubface(axis, fraction, owner, position);
+          flux += (1 - fraction) * velocityAt(lx, yy, lz, axis) + solidPart;
+          solidFluxSum += solidPart; solid += fraction; sampleCount += 1;
         }
-        faces.push({
+        const face: VariationalFace = {
           axis,
           position: { x: (axis === 0 ? x + 1 : transverseStart + transverseSpan / 2) * h.x, y: worldY, z: (axis === 2 ? z + 1 : transverseStart + transverseSpan / 2) * h.z },
           nodes: terms.map((term) => term.sample.id), coefficients: terms.map((term) => term.coefficient),
           volume: distance * (y1 - y0) * h.y * transverseSpan * (axis === 0 ? h.z : h.x),
           openFraction: clamp(1 - solid / Math.max(1, sampleCount), 0, 1),
           fluidScale: spdFluidScale(terms),
-          velocity: velocity / Math.max(1, sampleCount), ghost: false,
+          velocity: flux / Math.max(1, sampleCount), solidFlux: solidFluxSum / Math.max(1, sampleCount), ghost: false,
           bounds: { x: axis === 0 ? x : transverseStart, z: axis === 2 ? z : transverseStart, y0, y1, span: transverseSpan }
-        });
+        };
+        faces.push(face);
+        attachCouplings(face, sampleCount);
         if (leftSegment.lastY + 1 === y1) li += 1;
         if (rightSegment.lastY + 1 === y1) ri += 1;
       }
@@ -553,35 +800,235 @@ export function buildVariationalSystem(grid: TallPressureGrid, inputs: Variation
     for (let index = 0; index + 1 < column.length; index += 1) {
       const bottom = column[index], top = column[index + 1], distance = top.position.y - bottom.position.y;
       if (!(distance > 0)) continue;
-      let velocity = 0, solid = 0, samples = 0;
+      let flux = 0, solidFluxSum = 0, solid = 0, samples = 0;
       for (let y = bottom.y; y < top.y; y += 1) for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) {
-        velocity += velocityAt(x, y, z, 1); solid += solidAt(x, y, z); samples += 1;
+        const lowerSolid = solidAt(x, y, z), upperSolid = solidAt(x, y + 1, z);
+        const fraction = Math.max(lowerSolid, upperSolid);
+        const owner = lowerSolid >= upperSolid ? ownerAt(x, y, z) : ownerAt(x, y + 1, z);
+        const position = { x: (x + 0.5) * h.x, y: (y + 1) * h.y, z: (z + 0.5) * h.z };
+        const solidPart = accumulateSolidSubface(1, fraction, owner, position);
+        flux += (1 - fraction) * velocityAt(x, y, z, 1) + solidPart;
+        solidFluxSum += solidPart; solid += fraction; samples += 1;
       }
       const terms = [{ sample: bottom, coefficient: -1 / distance }, { sample: top, coefficient: 1 / distance }];
-      faces.push({
+      const face: VariationalFace = {
         axis: 1, position: { x: bottom.position.x, y: 0.5 * (bottom.position.y + top.position.y), z: bottom.position.z }, nodes: [bottom.id, top.id], coefficients: [-1 / distance, 1 / distance],
         volume: distance * leaf.size * leaf.size * h.x * h.z,
         openFraction: clamp(1 - solid / Math.max(1, samples), 0, 1), fluidScale: spdFluidScale(terms),
-        velocity: velocity / Math.max(1, samples), ghost: top.y - bottom.y > 1,
+        velocity: flux / Math.max(1, samples), solidFlux: solidFluxSum / Math.max(1, samples), ghost: top.y - bottom.y > 1,
         bounds: { x: leaf.x, z: leaf.z, y0: bottom.y, y1: top.y, span: leaf.size }
-      });
+      };
+      faces.push(face);
+      attachCouplings(face, samples);
     }
   }
   const n = liquidSampleIds.length, assembleDense = options.assembleDense ?? true;
+  const activeCouplings = couplings.filter((coupling) => coupling.rows.size > 0);
   const matrix = new Float64Array(assembleDense ? n * n : 0), rhs = new Float64Array(assembleDense ? n : 0);
-  if (!assembleDense) return { grid, liquidSampleIds, dofBySample, faces, matrix, rhs };
+  if (!assembleDense) return { grid, liquidSampleIds, dofBySample, faces, matrix, rhs, couplings: activeCouplings };
   for (const face of faces) {
     const va = face.volume * face.openFraction;
     for (let a = 0; a < face.nodes.length; a += 1) {
       const row = dofBySample[face.nodes[a]]; if (row < 0) continue;
-      rhs[row] += face.coefficients[a] * va * face.velocity;
+      // face.velocity is the full constraint flux A u + (1-A) u_solid, so the
+      // divergence right-hand side weights it by [V] alone.
+      rhs[row] += face.coefficients[a] * face.volume * face.velocity;
       for (let b = 0; b < face.nodes.length; b += 1) {
         const column = dofBySample[face.nodes[b]]; if (column < 0) continue;
         matrix[row * n + column] += face.coefficients[a] * va * face.fluidScale * face.coefficients[b];
       }
     }
   }
-  return { grid, liquidSampleIds, dofBySample, faces, matrix, rhs };
+  // Narita Eq. (14): the monolithic system gains K M^-1 K^T per dynamic body.
+  // The solid-motion right-hand side K [v*; omega*] is already carried by the
+  // blended face flux above.
+  for (const coupling of activeCouplings) {
+    const body = bodies[coupling.body];
+    if (!(body.inverseMass > 0) && body.inverseInertia.every((value) => value === 0)) continue;
+    const entries = [...coupling.rows.entries()];
+    for (const [rowDof, rowGenerators] of entries) {
+      const accelerated = applyInverseGeneralizedMass(body, rowGenerators);
+      for (const [columnDof, columnGenerators] of entries) {
+        let sum = 0;
+        for (let component = 0; component < 6; component += 1) sum += accelerated[component] * columnGenerators[component];
+        matrix[rowDof * n + columnDof] += sum;
+      }
+    }
+  }
+  return { grid, liquidSampleIds, dofBySample, faces, matrix, rhs, couplings: activeCouplings };
+}
+
+/** One projected background sub-face whose correction row replaces constant prolongation. */
+export interface MlsProjectionRow {
+  cell: number;
+  axis: 0 | 1 | 2;
+  entries: Array<[dof: number, weight: number]>;
+}
+
+const MLS_EPSILON = 1e-2;
+const MLS_MAX_SUBFACES = 32;
+/** Global budget: deep cubic bands produce hundreds of thousands of eligible faces with no visible benefit. */
+const MLS_MAX_ROWS = 150_000;
+
+function mlsWeightsAt(
+  query: Vec3,
+  candidates: Array<{ sample: TallPressureSample; size: Vec3 }>
+): Array<{ sample: TallPressureSample; weight: number }> {
+  // Ando--Batty Eq. (33)-(35): linear MLS with per-axis trilinear-hat weights.
+  const weighted = candidates
+    .map(({ sample, size }) => {
+      const kernel = Math.max(1 - Math.abs(query.x - sample.position.x) / size.x, MLS_EPSILON)
+        * Math.max(1 - Math.abs(query.y - sample.position.y) / size.y, MLS_EPSILON)
+        * Math.max(1 - Math.abs(query.z - sample.position.z) / size.z, MLS_EPSILON);
+      return { sample, weight: kernel };
+    })
+    .filter((entry) => entry.weight > MLS_EPSILON ** 3);
+  if (weighted.length === 0) return [];
+  // Normal equations A = Z^T D Z with basis [x, y, z, 1]; the interpolation
+  // weights are w_i = D_i (Z_i . A^-1 b(query)).
+  const a = new Float64Array(16), rhs = [query.x, query.y, query.z, 1];
+  for (const { sample, weight } of weighted) {
+    const basis = [sample.position.x, sample.position.y, sample.position.z, 1];
+    for (let row = 0; row < 4; row += 1) for (let column = 0; column < 4; column += 1) a[4 * row + column] += weight * basis[row] * basis[column];
+  }
+  const solved = solve4x4(a, rhs);
+  if (!solved) {
+    // Degenerate support: fall back to normalized Shepard weights, which still
+    // reproduce constants.
+    const total = weighted.reduce((sum, entry) => sum + entry.weight, 0);
+    return weighted.map(({ sample, weight }) => ({ sample, weight: weight / total }));
+  }
+  return weighted.map(({ sample, weight }) => ({
+    sample,
+    weight: weight * (sample.position.x * solved[0] + sample.position.y * solved[1] + sample.position.z * solved[2] + solved[3])
+  }));
+}
+
+function solve4x4(matrix: Float64Array, rhs: number[]) {
+  const a = Float64Array.from(matrix), b = Float64Array.from(rhs);
+  for (let pivot = 0; pivot < 4; pivot += 1) {
+    let best = pivot;
+    for (let row = pivot + 1; row < 4; row += 1) if (Math.abs(a[4 * row + pivot]) > Math.abs(a[4 * best + pivot])) best = row;
+    if (Math.abs(a[4 * best + pivot]) < 1e-12) return undefined;
+    if (best !== pivot) {
+      for (let column = 0; column < 4; column += 1) { const swap = a[4 * pivot + column]; a[4 * pivot + column] = a[4 * best + column]; a[4 * best + column] = swap; }
+      const swap = b[pivot]; b[pivot] = b[best]; b[best] = swap;
+    }
+    for (let row = 0; row < 4; row += 1) {
+      if (row === pivot) continue;
+      const factor = a[4 * row + pivot] / a[4 * pivot + pivot];
+      for (let column = 0; column < 4; column += 1) a[4 * row + column] -= factor * a[4 * pivot + column];
+      b[row] -= factor * b[pivot];
+    }
+  }
+  return [b[0] / a[0], b[1] / a[5], b[2] / a[10], b[3] / a[15]];
+}
+
+/**
+ * Narita Algorithm 1 line 10 via Ando--Batty MLS, made conservative: for every
+ * variational face representing more than one background sub-face, each
+ * sub-face gets the MLS pressure gradient plus the additive shift that makes
+ * the sub-face corrections average exactly to the solved variational face
+ * value (Eq. (5)). Where the MLS reconstruction is flat this degenerates to
+ * the constant prolongation; single-sub-face faces are untouched.
+ */
+export function buildMlsProjectionRows(system: VariationalSystem): MlsProjectionRow[] {
+  const { grid } = system, { quadtree, ny, h } = grid;
+  const rows: MlsProjectionRow[] = [];
+  const candidatesForCell = (cellX: number, cellY: number, cellZ: number) => {
+    const leaves = new Set<number>();
+    const own = quadtree.leaves[quadtree.leafAt[index2(cellX, cellZ, quadtree.nx)]];
+    const reach = 2 * own.size;
+    for (const dx of [-reach, 0, reach]) for (const dz of [-reach, 0, reach]) {
+      const px = clamp(cellX + dx, 0, quadtree.nx - 1), pz = clamp(cellZ + dz, 0, quadtree.nz - 1);
+      leaves.add(quadtree.leafAt[index2(px, pz, quadtree.nx)]);
+    }
+    const query = { x: (cellX + 0.5) * h.x, y: (cellY + 0.5) * h.y, z: (cellZ + 0.5) * h.z };
+    const candidates: Array<{ sample: TallPressureSample; size: Vec3 }> = [];
+    for (const leafId of leaves) {
+      const leaf = quadtree.leaves[leafId];
+      const size = { x: Math.max(1, leaf.size) * h.x, y: h.y, z: Math.max(1, leaf.size) * h.z };
+      const column = grid.samplesByLeaf[leafId];
+      // Nearest sample in y always participates (the paper's one-ring rule);
+      // others join when their kernel support reaches the query.
+      let nearest = column[0];
+      for (const sample of column) {
+        if (Math.abs(sample.position.y - query.y) < Math.abs(nearest.position.y - query.y)) nearest = sample;
+        if (Math.abs(sample.position.y - query.y) <= 2 * size.y || sample.kind !== "cubic") candidates.push({ sample, size });
+      }
+      if (!candidates.some((entry) => entry.sample.id === nearest.id)) candidates.push({ sample: nearest, size });
+    }
+    return { query, candidates };
+  };
+  const cellWeights = new Map<number, Array<{ sample: TallPressureSample; weight: number }>>();
+  const weightsFor = (cellX: number, cellY: number, cellZ: number) => {
+    const key = index3(cellX, cellY, cellZ, quadtree.nx, ny);
+    let cached = cellWeights.get(key);
+    if (!cached) {
+      const { query, candidates } = candidatesForCell(cellX, cellY, cellZ);
+      cached = mlsWeightsAt(query, candidates);
+      cellWeights.set(key, cached);
+    }
+    return cached;
+  };
+  // A reconstruction that leans on Dirichlet air samples is not linear across
+  // the free surface: dropping the air values keeps the face average exact
+  // but turns the sub-face variation into noise that stirs a settled tank.
+  // Such faces keep the constant prolongation.
+  const surfaceContaminated = (weights: Array<{ sample: TallPressureSample; weight: number }>) =>
+    weights.length === 0 || weights.some((entry) => !entry.sample.liquid && Math.abs(entry.weight) > 1e-9);
+  for (const face of system.faces) {
+    const subFaces: Array<[number, number, number]> = [];
+    if (face.axis === 1) {
+      const leaf = quadtree.leaves[grid.samples[face.nodes[0]].leaf];
+      for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) for (let y = face.bounds.y0; y < face.bounds.y1 && y < ny; y += 1) subFaces.push([x, y, z]);
+    } else {
+      for (let y = face.bounds.y0; y < face.bounds.y1 && y < ny; y += 1) for (let transverse = 0; transverse < face.bounds.span; transverse += 1) {
+        const x = face.axis === 0 ? face.bounds.x : face.bounds.x + transverse;
+        const z = face.axis === 2 ? face.bounds.z : face.bounds.z + transverse;
+        if (x < quadtree.nx && z < quadtree.nz) subFaces.push([x, y, z]);
+      }
+    }
+    if (subFaces.length <= 1 || subFaces.length > MLS_MAX_SUBFACES) continue;
+    if (rows.length + subFaces.length > MLS_MAX_ROWS) break;
+    const spacing = face.axis === 0 ? h.x : face.axis === 1 ? h.y : h.z;
+    const subRows: Array<Map<number, number>> = [];
+    let contaminated = false;
+    for (const [x, y, z] of subFaces) {
+      const px = x + (face.axis === 0 ? 1 : 0), py = y + (face.axis === 1 ? 1 : 0), pz = z + (face.axis === 2 ? 1 : 0);
+      const plusWeights = weightsFor(clamp(px, 0, quadtree.nx - 1), clamp(py, 0, ny - 1), clamp(pz, 0, quadtree.nz - 1));
+      const minusWeights = weightsFor(x, y, z);
+      if (surfaceContaminated(plusWeights) || surfaceContaminated(minusWeights)) { contaminated = true; break; }
+      const row = new Map<number, number>();
+      for (const { sample, weight } of plusWeights) {
+        const dof = system.dofBySample[sample.id]; if (dof < 0) continue;
+        row.set(dof, (row.get(dof) ?? 0) + weight / spacing);
+      }
+      for (const { sample, weight } of minusWeights) {
+        const dof = system.dofBySample[sample.id]; if (dof < 0) continue;
+        row.set(dof, (row.get(dof) ?? 0) - weight / spacing);
+      }
+      subRows.push(row);
+    }
+    if (contaminated) continue;
+    // Additive conservation shift: subtract the sub-face mean, add the solved
+    // variational gradient row.
+    const meanRow = new Map<number, number>();
+    for (const row of subRows) for (const [dof, weight] of row) meanRow.set(dof, (meanRow.get(dof) ?? 0) + weight / subRows.length);
+    const faceRow = new Map<number, number>();
+    face.nodes.forEach((node, slot) => {
+      const dof = system.dofBySample[node]; if (dof < 0) return;
+      faceRow.set(dof, (faceRow.get(dof) ?? 0) + face.coefficients[slot]);
+    });
+    subFaces.forEach(([x, y, z], index) => {
+      const combined = new Map(subRows[index]);
+      for (const [dof, weight] of meanRow) combined.set(dof, (combined.get(dof) ?? 0) - weight);
+      for (const [dof, weight] of faceRow) combined.set(dof, (combined.get(dof) ?? 0) + weight);
+      const entries = [...combined.entries()].filter(([, weight]) => Math.abs(weight) > 1e-14) as Array<[number, number]>;
+      rows.push({ cell: index3(x, y, z, quadtree.nx, ny), axis: face.axis, entries });
+    });
+  }
+  return rows;
 }
 
 export function applyVariationalMatrix(system: VariationalSystem, values: ArrayLike<number>) {

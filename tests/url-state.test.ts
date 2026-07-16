@@ -22,6 +22,7 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
     ...initialUI,
     view: "presentation",
     diagnosticsOpen: true,
+    rightPanel: "diagnostics",
     performanceOpen: true,
     gridOverlayAxis: "z",
     gridOverlaySlice: 0.7,
@@ -36,6 +37,7 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   assert.equal(parsed.quality, "high");
   assert.equal(parsed.ui.view, "presentation");
   assert.equal(parsed.ui.diagnosticsOpen, true);
+  assert.equal(parsed.ui.rightPanel, "diagnostics");
   assert.equal(parsed.ui.performanceOpen, true);
   assert.equal(parsed.ui.gridOverlayAxis, "z");
   assert.equal(parsed.ui.gridOverlaySlice, 0.7);
@@ -78,4 +80,22 @@ test("invalid external query values fall back to validated defaults", () => {
   assert.equal(parsed.scene.fluid.gravity_m_s2.y, defaultScene.fluid.gravity_m_s2.y);
   assert.equal(parsed.ui.view, "scientific");
   assert.equal(parsed.ui.diagnosticsOpen, false);
+  assert.equal(parsed.ui.rightPanel, null);
+});
+
+test("viewport utility panels round-trip through one mutually exclusive query state", () => {
+  const initialUI = useUIStore.getInitialState();
+  const query = serializeQueryState("?diagnostics=1", {
+    presetId: "water-box-dam-break",
+    scene: getScenePreset("water-box-dam-break").create()
+  }, {
+    methodId: "tall-cell",
+    quality: "balanced",
+    overrides: {}
+  }, { ...initialUI, rightPanel: "visual", diagnosticsOpen: false });
+
+  const params = new URLSearchParams(query);
+  assert.equal(params.get("panel"), "visual");
+  assert.equal(params.has("diagnostics"), false);
+  assert.equal(parseQueryState(query).ui.rightPanel, "visual");
 });

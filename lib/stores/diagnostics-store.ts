@@ -17,6 +17,9 @@ export interface PerformanceSnapshot {
   cpuPhysicsSubmit_ms: number;
   cpuDataUpload_ms: number;
   cpuRenderEncode_ms: number;
+  adaptiveRebuildWall_ms: number;
+  adaptiveRebuildPending: boolean;
+  adaptiveRebuildBlockedFrames: number;
   gpuAdvection_ms: number;
   gpuLayerConstruction_ms: number;
   gpuPressure_ms: number;
@@ -32,7 +35,7 @@ export interface PerformanceSnapshot {
   gpuUpscale_ms: number;
 }
 
-export const emptyPerformance: PerformanceSnapshot = { methodId: "", waterRenderMode: "rasterized", gpuPhysicsTimingAvailable: false, gpuRenderTimestampSupported: false, gpuRenderTimingAvailable: false, cpuSimulation_ms: 0, cpuFrame_ms: 0, cpuPhysicsSubmit_ms: 0, cpuDataUpload_ms: 0, cpuRenderEncode_ms: 0, gpuLayerConstruction_ms: 0, gpuAdvection_ms: 0, gpuPressure_ms: 0, gpuProjection_ms: 0, gpuRigid_ms: 0, gpuDiagnostics_ms: 0, gpuOverhead_ms: 0, gpuRender_ms: 0, gpuSurfaceExtraction_ms: 0, gpuDryScene_ms: 0, gpuInterfaces_ms: 0, gpuOpticalComposite_ms: 0, gpuUpscale_ms: 0 };
+export const emptyPerformance: PerformanceSnapshot = { methodId: "", waterRenderMode: "rasterized", gpuPhysicsTimingAvailable: false, gpuRenderTimestampSupported: false, gpuRenderTimingAvailable: false, cpuSimulation_ms: 0, cpuFrame_ms: 0, cpuPhysicsSubmit_ms: 0, cpuDataUpload_ms: 0, cpuRenderEncode_ms: 0, adaptiveRebuildWall_ms: 0, adaptiveRebuildPending: false, adaptiveRebuildBlockedFrames: 0, gpuLayerConstruction_ms: 0, gpuAdvection_ms: 0, gpuPressure_ms: 0, gpuProjection_ms: 0, gpuRigid_ms: 0, gpuDiagnostics_ms: 0, gpuOverhead_ms: 0, gpuRender_ms: 0, gpuSurfaceExtraction_ms: 0, gpuDryScene_ms: 0, gpuInterfaces_ms: 0, gpuOpticalComposite_ms: 0, gpuUpscale_ms: 0 };
 
 /** Sum only measurements that were actually produced by timestamp queries. */
 export function measuredGPUTime_ms(sample: PerformanceSnapshot) {

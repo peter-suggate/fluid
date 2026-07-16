@@ -25,6 +25,13 @@ export const uniformMethod: SimulationMethod = {
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, {
     pressureIterations: numberValue(values, params, "jacobiIterations"),
     velocityTransport: values.velocityTransport === "semi-lagrangian" ? "semi-lagrangian" : "maccormack",
+    densitySharpening: values.densitySharpening !== "off",
     tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") }
-  })
+  }),
+  createSolverAsync: (device, scene, quality, values, onRigidLoads, onProgress) => WebGPUUniformEulerianSolver.createAsync(device, scene, quality, onRigidLoads, {
+    pressureIterations: numberValue(values, params, "jacobiIterations"),
+    velocityTransport: values.velocityTransport === "semi-lagrangian" ? "semi-lagrangian" : "maccormack",
+    densitySharpening: values.densitySharpening !== "off",
+    tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") }
+  }, (label, completed, total) => onProgress({ phase: "solver-pipelines", label, completed, total }))
 };

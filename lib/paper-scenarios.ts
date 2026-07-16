@@ -70,7 +70,7 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
     scene.fluid.initialCondition = "tank-fill";
     scene.fluid.inflow = {
       center_m: { x: -0.50, y: 0.58, z: 0 }, radius_m: 0.075, length_m: 0.12,
-      velocity_m_s: { x: 0.42, y: -0.05, z: 0 }, start_s: 0, end_s: 12, ramp_s: 0.25
+      velocity_m_s: { x: 1.20, y: -0.05, z: 0 }, start_s: 0, end_s: 12, ramp_s: 0.25
     };
     scene.rigidBodies = [{
       id: "paper-sphere", name: "Flow obstacle", shape: "sphere",

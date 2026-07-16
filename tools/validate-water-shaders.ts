@@ -10,6 +10,7 @@ import {
   surfaceExtractionShader,
   surfaceRasterShader
 } from "../lib/webgpu-water-pipeline";
+import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
 
 const naga = process.env.NAGA ?? "naga";
 const shaders = {
@@ -18,7 +19,8 @@ const shaders = {
   "surface-raster": surfaceRasterShader,
   caustics: causticShader,
   scene: sceneShader,
-  composite: compositeShader
+  composite: compositeShader,
+  "grid-overlay": gridOverlayShader
 };
 const directory = mkdtempSync(join(tmpdir(), "fluid-water-wgsl-"));
 try {
