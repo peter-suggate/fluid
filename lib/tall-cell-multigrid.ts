@@ -163,7 +163,10 @@ export class TallCellMultigrid {
     this.fineRhs=texture3(geometry.nx,geometry.packedNy,geometry.nz);
     this.fineVolumeFraction=fine.volume;
     this.diagnostics=fine.diagnostics;
-    const finePhi=texture3(geometry.nx,geometry.packedNy,geometry.nz);
+    // The restricted solver owns a true signed-distance field now; use it
+    // directly on the finest pressure level instead of rebuilding phi from a
+    // VOF proxy before every solve.
+    const finePhi=fine.volume;
     this.finePhiScratch=texture3(geometry.nx,geometry.packedNy,geometry.nz);
     const expandedInletBand=geometry.planning.storedRegularLayers>geometry.planning.requestedRegularLayers;
     const fullTopIterations=geometry.planning.ordinaryGridFallback||expandedInletBand?256:geometry.fineNy>geometry.settings.regularLayers*4?192:32;
@@ -213,11 +216,6 @@ export class TallCellMultigrid {
   encode(encoder:GPUCommandEncoder){
     this.activePass=encoder.beginComputePass({label:"Tall-cell full multigrid"});
     const fine=this.levels[0];
-    this.dispatch(encoder,this.finePhiPipeline,this.group(fine,fine,fine.pressure[0],this.dummy3D[0],{currentPhi:this.dummy3D[3],sourcePhi:this.fineVolumeFraction,phiOut:fine.phi}),fine);
-    for(let sweep=0;sweep<2;sweep+=1){
-      const input=sweep%2===0?fine.phi:this.finePhiScratch,output=sweep%2===0?this.finePhiScratch:fine.phi;
-      this.dispatch(encoder,this.reinitializePhiPipeline,this.group(fine,fine,fine.pressure[0],this.dummy3D[0],{currentPhi:input,sourcePhi:this.dummy3D[3],phiOut:output}),fine);
-    }
     for(let index=1;index<this.levels.length;index+=1){
       const source=this.levels[index-1],current=this.levels[index];
       this.dispatch(encoder,this.basePipeline,this.group(current,source,current.pressure[0],this.dummy3D[0],{currentPhi:this.dummy3D[3],currentBase:this.dummy2D,baseOut:current.base}),current,true);
@@ -242,5 +240,5 @@ export class TallCellMultigrid {
     if(state!==0)encoder.copyTextureToTexture({texture:fine.pressure[state]},{texture:fine.pressure[0]},[fine.nx,fine.packedNy,fine.nz]);
     this.dispatch(encoder,this.residualPipeline,this.group(fine,fine,fine.pressure[0],fine.pressure[1]),fine);
   }
-  destroy(){this.bindGroupCache.clear();for(const l of this.levels){l.params.destroy();l.correctionParams.destroy();l.rhs.destroy();if(l.owned){l.pressure[0].destroy();l.pressure[1].destroy();l.phi.destroy();l.solid.destroy();l.base.destroy();}}this.levels[0].phi.destroy();this.finePhiScratch.destroy();for(const texture of this.dummy3D)texture.destroy();this.dummy2D.destroy();}
+  destroy(){this.bindGroupCache.clear();for(const l of this.levels){l.params.destroy();l.correctionParams.destroy();l.rhs.destroy();if(l.owned){l.pressure[0].destroy();l.pressure[1].destroy();l.phi.destroy();l.solid.destroy();l.base.destroy();}}this.finePhiScratch.destroy();for(const texture of this.dummy3D)texture.destroy();this.dummy2D.destroy();}
 }

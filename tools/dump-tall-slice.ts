@@ -1,6 +1,5 @@
-// Dump a mid-z slice of the tall solver's packed volume state at a given
-// time: per-column base, store average, and band-cell alphas, rendered as
-// ASCII so classification (wet >= 0.5) can be inspected directly.
+// Dump a mid-z slice of the tall solver's packed level set at a given time.
+// Tall interiors use the paper's Eq. 5 endpoint interpolation; wet is phi<=0.
 // Usage: WEBGPU_NODE_MODULE=... FLUID_TARGET_S=0.224 npx tsx tools/dump-tall-slice.ts
 import { pathToFileURL } from "node:url";
 import { tallCellMethod } from "../lib/methods/tall-cell";
@@ -20,7 +19,7 @@ const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" }
 if (!adapter) throw new Error("no adapter");
 const device = await adapter.requestDevice({ requiredLimits: { maxTextureDimension3D: Math.min(2048, adapter.limits.maxTextureDimension3D) } });
 const values = Object.fromEntries(tallCellMethod.params.map((p) => [p.key, p.default])) as Record<string, string | number>;
-const solver = tallCellMethod.createSolver(device, scenario.scene, "balanced", values, () => {}) as import("../lib/webgpu-eulerian").WebGPUEulerianSolver;
+const solver = tallCellMethod.createSolver!(device, scenario.scene, "balanced", values, () => {}) as import("../lib/webgpu-eulerian").WebGPUEulerianSolver;
 const bodies = initializeRigidBodies(scenario.scene.rigidBodies);
 const dt = scenario.scene.numerics.maxDt_s;
 let t = 0;
@@ -49,6 +48,16 @@ async function readTexture2D(texture: GPUTexture, w: number, h: number) {
 const info = solver.info;
 const packed = await readTexture3D(solver.volumeTexture, info.nx, info.storedNy, info.nz);
 const bases = await readTexture2D(solver.columnBaseTexture, info.nx, info.nz);
+const phiAt = (x: number, y: number, z: number) => {
+  const base = Math.round(bases[x + info.nx * z]);
+  if (y < base && base > 0) {
+    const bottom = packed[x + info.nx * info.storedNy * z];
+    const top = packed[x + info.nx * (1 + info.storedNy * z)];
+    return bottom + (top - bottom) * y / Math.max(base - 1, 1);
+  }
+  const packedY = 2 + y - base;
+  return packedY >= 2 && packedY < info.storedNy ? packed[x + info.nx * (packedY + info.storedNy * z)] : Infinity;
+};
 const z = Math.floor(info.nz / 2);
 const rows: string[] = [];
 for (let y = info.ny - 1; y >= 0; y -= 1) {
@@ -57,32 +66,30 @@ for (let y = info.ny - 1; y >= 0; y -= 1) {
     const base = Math.round(bases[x + info.nx * z]);
     let ch = " ";
     if (y < base && base > 0) {
-      const avg = packed[x + info.nx * info.storedNy * z];
-      ch = avg >= 0.5 ? "T" : avg >= 0.05 ? "t" : ".";
+      ch = phiAt(x, y, z) <= 0 ? "T" : "t";
     } else {
       const packedY = 2 + y - base;
       if (packedY >= 2 && packedY < info.storedNy) {
-        const a = packed[x + info.nx * (packedY + info.storedNy * z)];
-        ch = a >= 0.5 ? "#" : a >= 0.05 ? "+" : "-";
+        ch = phiAt(x, y, z) <= 0 ? "#" : "-";
       }
     }
     row += ch;
   }
   rows.push(`${String(y).padStart(3)} ${row}`);
 }
-console.log(`t=${t.toFixed(3)}s z=${z}  T/t/.=tall store wet/partial/dry  #/+/-=band wet/partial/dry  (blank=unrepresented)`);
+console.log(`t=${t.toFixed(3)}s z=${z}  T/t=tall phi wet/dry  #/-=band phi wet/dry  (blank=unrepresented)`);
 console.log(rows.join("\n"));
-// Column diagnostics under the deep region: store average and band-bottom alpha
+// Column diagnostics under the deep region: tall-top and band-bottom phi.
 let dryUnderWet = 0, wetStores = 0, total = 0;
 const examples: string[] = [];
 for (let zz = 0; zz < info.nz; zz += 1) for (let x = 0; x < info.nx; x += 1) {
   const base = Math.round(bases[x + info.nx * zz]);
   if (base <= 0) continue;
   total += 1;
-  const avg = packed[x + info.nx * info.storedNy * zz];
+  const tallTop = packed[x + info.nx * (1 + info.storedNy * zz)];
   const bandBottom = packed[x + info.nx * (2 + info.storedNy * zz)];
-  if (avg >= 0.5) wetStores += 1;
-  else if (bandBottom >= 0.5) { dryUnderWet += 1; if (examples.length < 10) examples.push(`x=${x} z=${zz} base=${base} avg=${avg.toFixed(3)} bandBottom=${bandBottom.toFixed(3)}`); }
+  if (tallTop <= 0) wetStores += 1;
+  else if (bandBottom <= 0) { dryUnderWet += 1; if (examples.length < 10) examples.push(`x=${x} z=${zz} base=${base} tallTopPhi=${tallTop.toFixed(3)} bandBottomPhi=${bandBottom.toFixed(3)}`); }
 }
 console.log(`columns=${total} wetStores=${wetStores} dryUnderWetBand=${dryUnderWet}`);
 // Locate kinetic energy: alpha-weighted |v|^2 split by sample kind and base height.
@@ -110,7 +117,8 @@ console.log(`columns=${total} wetStores=${wetStores} dryUnderWetBand=${dryUnderW
     const base = Math.round(bases[x + info.nx * zz]);
     for (let py = 0; py < info.storedNy; py += 1) {
       const i = x + info.nx * (py + info.storedNy * zz);
-      const a = Math.max(0, Math.min(1, packed[i]));
+      const phi = packed[i];
+      const a = Math.max(0, Math.min(1, 0.5 - phi / info.cellSize_m));
       const speed2 = vel2(x, py, zz);
       if (py < 2) {
         const weight = a * (py === 0 ? Math.max(base - 1, 1) : 1);

@@ -122,11 +122,12 @@ fn fluidSample(cell: vec3i) -> f32 {
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
   if (u.gridInfo.w < 1.5) { return textureLoad(fluidField, q, 0).x; }
   let base = i32(round(textureLoad(tallCellBases, q.xz, 0).x));
-  if (q.y < base && base > 0) { return textureLoad(fluidField, vec3i(q.x, 0, q.z), 0).x; }
+  let cellSizeY = u.container.y / max(u.gridInfo.y, 1.0);
+  if (q.y < base && base > 0) { let t=clamp(f32(q.y)/f32(max(base-1,1)),0.0,1.0);let phi=mix(textureLoad(fluidField,vec3i(q.x,0,q.z),0).x,textureLoad(fluidField,vec3i(q.x,1,q.z),0).x,t);return clamp(0.5-phi/cellSizeY,0.0,1.0); }
   let packedY = 2 + q.y - base;
   let stored = vec3i(textureDimensions(fluidField));
   if (packedY < 2 || packedY >= stored.y) { return 0.0; }
-  return textureLoad(fluidField, vec3i(q.x, packedY, q.z), 0).x;
+  return clamp(0.5-textureLoad(fluidField, vec3i(q.x, packedY, q.z), 0).x/cellSizeY,0.0,1.0);
 }
 
 fn adaptiveCellKey(cell: vec3i, dims: vec3i) -> vec2u {
@@ -268,13 +269,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
     fill = select(select(vec3f(0.85, 0.91, 0.89), vec3f(0.20, 0.50, 0.74), wet), select(vec3f(0.10, 0.23, 0.22), vec3f(0.03, 0.52, 0.47), wet), isTall);
     alpha = select(select(0.18, 0.55, wet), select(0.40, 0.78, wet), isTall);
   } else if (cell.y < i32(base)) {
-    // The bottom texel is the tall store's column-average density and every
-    // subcell shares it (the solver's constant-density view). Interpolating
-    // toward the y=1 texel here drew phantom floor pockets: that texel is a
-    // remap guide tracking the band maximum, so partial front columns
-    // rendered dry at the floor and wet at the tall top — a state the
-    // pressure solve never sees.
-    let wet = textureLoad(fluidField, vec3i(cell.x, 0, cell.z), 0).x > 0.5;
+    let wet = fluidSample(cell) > 0.5;
     fill = select(vec3f(0.10, 0.23, 0.22), vec3f(0.03, 0.52, 0.47), wet);
     alpha = select(0.40, 0.78, wet);
     let baseEdge = 1.0 - smoothstep(0.4, 1.4, min(samplePosition.y, abs(base - samplePosition.y)) / derivative.y);
