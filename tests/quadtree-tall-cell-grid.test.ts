@@ -213,11 +213,28 @@ test("leaf-centre profile rebuilds reproduce dense phi tall-cell segmentation", 
     return y - 4.25 + 0.1 * x - 0.05 * z;
   });
   const dense = populateTallPressureGrid(quadtree, phi, ny, h, 1, 0.25);
-  const profiles = new Float32Array(quadtree.leaves.length * ny);
-  for (const leaf of quadtree.leaves) for (let y = 0; y < ny; y += 1) profiles[leaf.id * ny + y] = y - 4.25 + 0.1 * (leaf.x + leaf.size / 2 - 0.5) - 0.05 * (leaf.z + leaf.size / 2 - 0.5);
+  const profiles = new Float32Array(quadtree.leaves.length * ny * 3);
+  for (const leaf of quadtree.leaves) for (let y = 0; y < ny; y += 1) {
+    const offset = 3 * (leaf.id * ny + y);
+    profiles[offset] = y - 4.25 + 0.1 * (leaf.x + leaf.size / 2 - 0.5) - 0.05 * (leaf.z + leaf.size / 2 - 0.5);
+    profiles[offset + 1] = Number.POSITIVE_INFINITY; profiles[offset + 2] = Number.NEGATIVE_INFINITY;
+    for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) {
+      const value = phi[index3(x, y, z, nx, ny)]; profiles[offset + 1] = Math.min(profiles[offset + 1], value); profiles[offset + 2] = Math.max(profiles[offset + 2], value);
+    }
+  }
   const compact = populateTallPressureGridFromLeafProfiles(quadtree, profiles, ny, h, 0.25);
   assert.deepEqual(compact.segments, dense.segments);
   assert.deepEqual(compact.samples.map((sample) => ({ leaf: sample.leaf, y: sample.y, liquid: sample.liquid, kind: sample.kind })), dense.samples.map((sample) => ({ leaf: sample.leaf, y: sample.y, liquid: sample.liquid, kind: sample.kind })));
+});
+
+test("footprint-conservative profiles retain a cubic band around off-centre liquid", () => {
+  const nx = 4, ny = 8, nz = 4, h = { x: 1, y: 1, z: 1 };
+  const quadtree = buildQuadtree(new Float32Array(nx * nz), nx, nz, { h: 1, maximumLeafSize: 4 });
+  const phi = new Float32Array(nx * ny * nz).fill(4);
+  phi[index3(0, 5, 0, nx, ny)] = -0.25;
+  const grid = populateTallPressureGrid(quadtree, phi, ny, h, 1, 0.25);
+  const splash = grid.segments.find((segment) => segment.firstY === 5);
+  assert.ok(splash && !splash.tall, "off-centre liquid must force the represented row cubic even when the leaf-centre sample is air");
 });
 
 test("T-junction gradient uses vertically interpolated pressures and 1.5 dx", () => {
@@ -476,6 +493,61 @@ test("MLS sub-face corrections average exactly to the solved face value", () => 
   }
 });
 
+test("MLS mapping covers fine faces inside merged adaptive pressure cells", () => {
+  const system = tJunctionSystem(true), rows = buildMlsProjectionRows(system);
+  const { grid } = system, { quadtree, ny } = grid, ids = adaptivePressureCellIds(grid);
+  const byKey = new Map(rows.map((row) => [`${row.cell}:${row.axis}`, row]));
+  let horizontal = 0, vertical = 0;
+  for (let z = 0; z < quadtree.nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < quadtree.nx; x += 1) {
+    const cell = index3(x, y, z, quadtree.nx, ny), own = ids[cell];
+    for (const axis of [0, 1, 2] as const) {
+      const px = x + (axis === 0 ? 1 : 0), py = y + (axis === 1 ? 1 : 0), pz = z + (axis === 2 ? 1 : 0);
+      if (px >= quadtree.nx || py >= ny || pz >= quadtree.nz) continue;
+      if (own === 0 || ids[index3(px, py, pz, quadtree.nx, ny)] !== own) continue;
+      assert.ok(byKey.has(`${cell}:${axis}`), `merged-cell interior face ${x},${y},${z}:${axis} needs a pressure-mapping row`);
+      if (axis === 1) vertical += 1; else horizontal += 1;
+    }
+  }
+  assert.ok(horizontal > 0, "fixture must contain coarse-leaf interior faces");
+  assert.ok(vertical > 0, "fixture must contain tall-segment interior faces");
+
+  for (const face of system.faces) {
+    const subCells: number[] = [];
+    if (face.axis === 1) {
+      const leaf = quadtree.leaves[grid.samples[face.nodes[0]].leaf];
+      for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) for (let y = face.bounds.y0; y < face.bounds.y1 && y < ny; y += 1) {
+        subCells.push(index3(x, y, z, quadtree.nx, ny));
+      }
+    } else {
+      for (let y = face.bounds.y0; y < face.bounds.y1 && y < ny; y += 1) for (let transverse = 0; transverse < face.bounds.span; transverse += 1) {
+        const x = face.axis === 0 ? face.bounds.x : face.bounds.x + transverse;
+        const z = face.axis === 2 ? face.bounds.z : face.bounds.z + transverse;
+        if (x < quadtree.nx && z < quadtree.nz) subCells.push(index3(x, y, z, quadtree.nx, ny));
+      }
+    }
+    if (subCells.length <= 1) continue;
+    for (const cell of subCells) assert.ok(byKey.has(`${cell}:${face.axis}`), `adaptive boundary sub-face ${cell}:${face.axis} needs a pressure-mapping row`);
+  }
+});
+
+test("MLS mapping does not truncate adaptive faces larger than 32 sub-faces", () => {
+  const nx = 8, ny = 2, nz = 8, h = { x: 1, y: 1, z: 1 };
+  const quadtree = buildQuadtree(new Float32Array(nx * nz), nx, nz, { h: 1, maximumLeafSize: 8, smoothingDilations: 0 });
+  const phi = new Float32Array(nx * ny * nz).fill(-10);
+  const grid = populateTallPressureGrid(quadtree, phi, ny, h, ny);
+  const system = buildVariationalSystem(grid, { velocity: Array.from({ length: phi.length }, () => ({ x: 0, y: 0, z: 0 })) });
+  const rows = buildMlsProjectionRows(system), byKey = new Set(rows.map((row) => `${row.cell}:${row.axis}`));
+  const largeFace = system.faces.find((face) => face.axis === 1 && face.bounds.span * face.bounds.span * (face.bounds.y1 - face.bounds.y0) > 32);
+  assert.ok(largeFace, "fixture must contain a vertical adaptive face larger than the former cap");
+  const leaf = quadtree.leaves[grid.samples[largeFace.nodes[0]].leaf];
+  let covered = 0;
+  for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) for (let y = largeFace.bounds.y0; y < largeFace.bounds.y1; y += 1) {
+    assert.ok(byKey.has(`${index3(x, y, z, nx, ny)}:1`), `large adaptive sub-face ${x},${y},${z} must be mapped`);
+    covered += 1;
+  }
+  assert.ok(covered > 32);
+});
+
 test("paper sizing function flattens curvature and non-translation velocity maxima", () => {
   const nx = 3, ny = 5, nz = 3, h = { x: 1, y: 1, z: 1 }, count = nx * ny * nz;
   const phi = new Float32Array(count).fill(4), velocity = Array.from({ length: count }, () => ({ x: 1, y: 2, z: 3 }));
@@ -484,4 +556,14 @@ test("paper sizing function flattens curvature and non-translation velocity maxi
   velocity[index3(1, 2, 1, nx, ny)] = { x: 20, y: -10, z: 7 };
   const disturbed = quadtreeSizingFromVelocityAndSurface(phi, velocity, nx, ny, nz, h);
   assert.ok(disturbed.some((value, index) => value > translation[index]));
+});
+
+test("moving flat fronts receive a Froude-like finest-grid sizing demand", () => {
+  const nx = 3, ny = 5, nz = 3, h = { x: 0.1, y: 0.1, z: 0.1 }, count = nx * ny * nz;
+  const phi = Float32Array.from({ length: count }, (_, index) => (Math.floor(index / nx) % ny - 2) * h.y);
+  const still = Array.from({ length: count }, () => ({ x: 0, y: 0, z: 0 }));
+  const moving = Array.from({ length: count }, () => ({ x: 2, y: 0, z: 0 }));
+  const stationarySizing = quadtreeSizingFromVelocityAndSurface(phi, still, nx, ny, nz, h);
+  const movingSizing = quadtreeSizingFromVelocityAndSurface(phi, moving, nx, ny, nz, h);
+  assert.ok(movingSizing.every((value, index) => value > stationarySizing[index]), "uniform surge speed must refine even when curvature and speed gradient vanish");
 });

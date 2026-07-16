@@ -5,7 +5,7 @@ import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
 import { useUIStore, type RightPanel } from "./stores/ui-store";
 import type { GPUQuality } from "./tall-cell-grid";
-import type { GridOverlayConfig, WaterRenderMode } from "./webgpu-renderer";
+import type { GridOverlayConfig, GridOverlayMode, WaterRenderMode } from "./webgpu-renderer";
 import { isEnvironmentId, type EnvironmentId } from "./environments";
 
 const qualities: ReadonlyArray<GPUQuality> = ["balanced", "high", "ultra"];
@@ -58,6 +58,7 @@ type UIQueryState = {
   rightPanel: RightPanel;
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
+  gridOverlayMode: GridOverlayMode;
   waterRenderMode: WaterRenderMode;
   environmentId: EnvironmentId;
 };
@@ -163,6 +164,7 @@ export function parseQueryState(search: string): QueryState {
   const presetCamera = cameraForPreset(preset);
   const view = query.get("view");
   const grid = query.get("grid");
+  const gridMode = query.get("gridMode");
   const render = query.get("render");
   const environment = query.get("environment");
   const requestedPanel = query.get("panel");
@@ -197,6 +199,7 @@ export function parseQueryState(search: string): QueryState {
       rightPanel,
       gridOverlayAxis: grid === "off" || grid === "x" || grid === "z" ? grid : initialUI.gridOverlayAxis,
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
+      gridOverlayMode: gridMode === "structure" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
       waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode,
       environmentId: isEnvironmentId(environment) ? environment : initialUI.environmentId
     }
@@ -205,7 +208,7 @@ export function parseQueryState(search: string): QueryState {
 
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "panel"
-    || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice"
+    || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
     || key === "render" || key === "environment" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
@@ -232,6 +235,7 @@ export function serializeQueryState(
   if (uiState.sceneModalOpen) query.set("sceneConfig", "1");
   if (uiState.gridOverlayAxis !== "off") query.set("grid", uiState.gridOverlayAxis);
   if (uiState.gridOverlaySlice !== 0.5) query.set("gridSlice", String(uiState.gridOverlaySlice));
+  if (uiState.gridOverlayMode !== "structure") query.set("gridMode", uiState.gridOverlayMode);
 
   const presetCamera = cameraForPreset(getScenePreset(sceneState.presetId));
   const cameraValues: ReadonlyArray<[string, number, number]> = [

@@ -5,10 +5,11 @@ const params: MethodParamSpec[] = [
   { kind: "number", key: "pressureIterations", label: "Pressure iterations", unit: "iterations", min: 16, max: 1024, step: 16, digits: 0, default: 96, tier: "coarse", hint: "Hard CG safety budget; encoded work adapts to recent iterations-to-tolerance without changing the relative residual stop." },
   { kind: "number", key: "surfaceColumns", label: "Finest columns", unit: "columns", min: 1_000, max: 20_000, step: 500, digits: 0, default: 2_500, tier: "fine", hint: "Finest x/z lattice used by quadtree leaves and the cubic advection field." },
   { kind: "number", key: "adaptivityStrength", label: "Adaptivity", unit: "alpha", min: 0, max: 1, step: 0.05, digits: 2, default: 1, tier: "fine", hint: "Ando–Batty Eq. 38: 0 is the ordinary-grid limit; 1 permits full quadtree coarsening." },
-  { kind: "select", key: "preconditioner", label: "Preconditioner", default: "ic0", tier: "fine", options: [{ value: "ic0", label: "Paper IC(0)" }, { value: "blockic", label: "Block IC(0)" }, { value: "line", label: "Vertical line" }, { value: "poly", label: "Polynomial" }, { value: "jacobi", label: "Parallel Jacobi" }], hint: "IC(0) is the paper reference; block IC(0) drops couplings across column-aligned row blocks so independent per-block substitutions replace the serial triangular levels; line and polynomial paths preserve the operator and tolerance." }
+  { kind: "select", key: "preconditioner", label: "Preconditioner", default: "poly", tier: "fine", options: [{ value: "poly", label: "Polynomial" }, { value: "ic0", label: "Paper IC(0)" }, { value: "blockic", label: "Block IC(0)" }, { value: "line", label: "Vertical line" }, { value: "jacobi", label: "Parallel Jacobi" }], hint: "Polynomial is the parallel default; IC(0) remains the paper-reference path. All choices preserve the variational operator and relative-residual stop." },
+  { kind: "select", key: "vofReconciliation", label: "VOF safety net", default: "on", tier: "fine", options: [{ value: "on", label: "Armed" }, { value: "off", label: "Off (φ-only diagnostic)" }], hint: "W0 emergency fallback for catastrophic level-set loss. Healthy φ transport is untouched; proportional recovery activates below -10% represented volume and releases above -2%." }
 ];
 
-const preconditionerValue = (value: unknown) => value === "blockic" || value === "line" || value === "poly" || value === "jacobi" ? value : "ic0";
+const preconditionerValue = (value: unknown) => value === "ic0" || value === "blockic" || value === "line" || value === "jacobi" ? value : "poly";
 
 export const quadtreeTallCellMethod: SimulationMethod = {
   id: "quadtree-tall-cell",
@@ -21,7 +22,7 @@ export const quadtreeTallCellMethod: SimulationMethod = {
   qualityLabels: { balanced: "2.5k finest columns", high: "7k finest columns", ultra: "12.5k finest columns" },
   params,
   pressureMapping: "The iteration budget is the PCG maximum; convergence is measured against the scene's relative pressure tolerance (the paper uses 1e-4).",
-  presetFor: (quality) => ({ pressureIterations: quality === "balanced" ? 96 : quality === "high" ? 160 : 240, surfaceColumns: quality === "balanced" ? 2_500 : quality === "high" ? 7_000 : 12_500, adaptivityStrength: 1, preconditioner: "ic0" }),
+  presetFor: (quality) => ({ pressureIterations: quality === "balanced" ? 96 : quality === "high" ? 160 : 240, surfaceColumns: quality === "balanced" ? 2_500 : quality === "high" ? 7_000 : 12_500, adaptivityStrength: 1, preconditioner: "poly" }),
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, {
     // Narita Sec. 4.5 advects the level set from the saved previous grid.
     // It is authoritative for adaptive pressure geometry, while the shared
@@ -45,6 +46,8 @@ export const quadtreeTallCellMethod: SimulationMethod = {
       opticalDepthFraction: typeof values.opticalDepthFraction === "number" ? values.opticalDepthFraction : 0.25,
       preconditioner: preconditionerValue(values.preconditioner),
       polynomialDegree: typeof values.polynomialDegree === "number" ? values.polynomialDegree : 2,
+      vofReconciliation: values.vofReconciliation !== "off" && values.vofReconciliation !== false,
+      debrisCulling: values.debrisCulling !== false,
       debugPressureTimings: values.debugPressureTimings === true
     }
   }),
@@ -61,6 +64,8 @@ export const quadtreeTallCellMethod: SimulationMethod = {
       opticalDepthFraction: typeof values.opticalDepthFraction === "number" ? values.opticalDepthFraction : 0.25,
       preconditioner: preconditionerValue(values.preconditioner),
       polynomialDegree: typeof values.polynomialDegree === "number" ? values.polynomialDegree : 2,
+      vofReconciliation: values.vofReconciliation !== "off" && values.vofReconciliation !== false,
+      debrisCulling: values.debrisCulling !== false,
       debugPressureTimings: values.debugPressureTimings === true
     }
   }, (label, completed, total) => onProgress({ phase: label.startsWith("Building adaptive") ? "adaptive-topology" : "solver-pipelines", label, completed, total }))

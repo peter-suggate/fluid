@@ -1,10 +1,11 @@
-import { adaptivePressureCellTopology, buildMlsProjectionRows, buildQuadtree, buildVariationalSystem, populateTallPressureGrid, populateTallPressureGridFromLeafProfiles, quadtreeFromPackedCells, quadtreeSizingFromVelocityAndSurface, signedDistanceFromVolume, type QuadtreeGrid, type TallPressureGrid, type TallPressureSample, type VariationalBody, type VariationalSystem } from "./quadtree-tall-cell-grid";
+import { adaptivePressureCellTopology, buildQuadtree, buildVariationalSystem, maximumVelocityUpdateFluidScale, populateTallPressureGrid, populateTallPressureGridFromLeafProfiles, quadtreeFromPackedCells, quadtreeSizingFromVelocityAndSurface, signedDistanceFromVolume, type QuadtreeGrid, type TallPressureGrid, type TallPressureSample, type VariationalBody, type VariationalSystem } from "./quadtree-tall-cell-grid";
 import { damBreakFractions } from "./initial-fluid";
 import { insidePrimitive } from "./fluid-rigid-coupling";
 import { boundingRadius, quaternionRotate, type RigidBodyState } from "./rigid-body";
 import type { SceneDescription, Vec3 } from "./model";
 import { WebGPUQuadtreeBuilder, WebGPUQuadtreeSurfaceState, type SurfaceInflowState, type WebGPUQuadtreeConstructionCache, type WebGPUQuadtreeSurfaceCache } from "./webgpu-quadtree-builder";
 import { createInflowGridBoundary, inflowBoundaryWGSL, inflowOutletCenter } from "./inflow-boundary";
+import { WebGPUQuadtreePackBuilder, type GPUQuadtreeResidentResources } from "./webgpu-quadtree-pack-builder";
 
 export interface QuadtreeRigidCoupling {
   bodies: RigidBodyState[];
@@ -25,11 +26,18 @@ export interface QuadtreeGPUCache {
   pipelines?: Record<string, GPUComputePipeline>;
   dispatchLayout?: GPUBindGroupLayout;
   dispatchPipeline?: GPUComputePipeline;
+  velocityExtrapolationLayout?: GPUBindGroupLayout;
+  velocityExtrapolationPipeline?: GPUComputePipeline;
+  divergenceLayout?: GPUBindGroupLayout;
+  divergencePipeline?: GPUComputePipeline;
+  velocityClampLayout?: GPUBindGroupLayout;
+  velocityClampPipeline?: GPUComputePipeline;
   construction?: WebGPUQuadtreeConstructionCache;
   surface?: WebGPUQuadtreeSurfaceCache;
-  cpuWorker?: { postMessage(message: unknown): void; terminate(): unknown };
+  cpuWorker?: { postMessage(message: unknown, transfer?: ArrayBuffer[]): void; terminate(): unknown };
   cpuWorkerSequence?: number;
   cpuWorkerPending?: Map<number, { resolve: (value: PreparedProjectionCPU) => void; reject: (reason: unknown) => void }>;
+  gpuPack?: WebGPUQuadtreePackBuilder;
 }
 
 export interface QuadtreeBodyImpulse {
@@ -129,6 +137,10 @@ export interface QuadtreeTallCellProjectionOptions {
   /** Opt-in timestamp-query breakdown of setup / early iterations / remainder / projection. */
   debugPressureTimings?: boolean;
   debugPressureFirstIterations?: number;
+  /** Non-paper isolated-voxel hygiene; opt-in only. */
+  debrisCulling?: boolean;
+  /** W0 VOF sign-reconciliation safety net; retire only after the W7 ten-second φ-only gate. */
+  vofReconciliation?: boolean;
 }
 
 export interface QuadtreeIterationBudget {
@@ -163,6 +175,7 @@ export interface QuadtreeTallCellProjectionInfo {
   pressureSampleCount: number;
   liquidDofCount: number;
   faceCount: number;
+  mlsProjectionRowCount: number;
   tallSegmentCount: number;
   ghostFaceCount: number;
   maximumNeighborRatio: number;
@@ -173,6 +186,8 @@ export interface QuadtreeTallCellProjectionInfo {
   gpuConstruction_ms?: number;
   /** Timestamp-query duration of only the GPU sizing/subdivision kernels. */
   gpuConstructionKernel_ms?: number;
+  /** GPU wall time for Sec. 4.2 segmentation plus Sec. 4.4 face/CSR emission. */
+  gpuSparsePack_ms?: number;
   /** CPU time left for tall-cell/variational sparse packing after the tree exists. */
   cpuTopologyPack_ms?: number;
   cpuRedistance_ms?: number;
@@ -189,6 +204,7 @@ export interface QuadtreeTallCellProjectionInfo {
   pressureIterationHardBudget?: number;
   pressureConverged?: boolean;
   factorLevelCount?: number;
+  velocityClampCount?: number;
   pressurePhaseTimings?: { setup_ms: number; firstIterations_ms: number; remainingIterations_ms: number; project_ms: number };
   /** Bytes read back for an update (leaf-centre phi profiles + compact 2D leaves + diagnostics). */
   topologyReadbackBytes?: number;
@@ -197,6 +213,8 @@ export interface QuadtreeTallCellProjectionInfo {
 interface ProjectionResources {
   velocityIn: GPUTexture;
   velocityOut: GPUTexture;
+  /** Reused advection scratch; projection does not own its lifetime. */
+  velocityScratch: GPUTexture;
   volume: GPUTexture;
   levelSet?: WebGPUQuadtreeSurfaceState;
 }
@@ -216,14 +234,26 @@ export interface QuadtreeCPUPreparationInput {
   options: QuadtreeTallCellProjectionOptions;
   packedCells: Uint32Array;
   columnProfiles: Float32Array;
+  /** Current resident topology; matching rebuilds skip sparse/MLS repacking. */
+  reuseTopologyWords?: Uint32Array;
   coupling?: QuadtreeRigidCoupling;
 }
 
 export interface PreparedProjectionCPU {
-  quadtree: QuadtreeGrid;
-  pressureGrid: TallPressureGrid;
+  quadtree?: QuadtreeGrid;
+  pressureGrid?: TallPressureGrid;
+  /** Compact topology metadata retained after the worker discards its graph objects. */
+  leafCount: number;
+  pressureSampleCount: number;
+  maximumNeighborRatio: number;
   topologyWords: Uint32Array;
-  packed: ReturnType<typeof WebGPUQuadtreeTallCellProjection.packSystem>;
+  packed?: ReturnType<typeof WebGPUQuadtreeTallCellProjection.packSystem>;
+  /** GPU-owned sparse resources from W6's resident count-scan-emit path. */
+  resident?: GPUQuadtreeResidentResources;
+  reusedTopology?: boolean;
+  /** False when topologyWords is only the horizontal owner map, not the full pressure segmentation identity. */
+  topologyIdentityComplete?: boolean;
+  gpuPack_ms?: number;
   displacedVolumes: number[];
   dofCount: number;
   faceCount: number;
@@ -235,6 +265,19 @@ export interface PreparedProjectionCPU {
   variationalAssembly_ms: number;
   systemPack_ms: number;
   icFactorization_ms: number;
+}
+
+/** Zero-copy worker handoff for the large immutable projection pack. */
+export function preparedProjectionTransferables(value: PreparedProjectionCPU): ArrayBuffer[] {
+  const buffers = new Set<ArrayBuffer>();
+  const add = (view: ArrayBufferView | undefined) => { if (view?.buffer instanceof ArrayBuffer) buffers.add(view.buffer); };
+  add(value.topologyWords);
+  const packed = value.packed;
+  if (packed) for (const view of [
+    packed.faces, packed.rowOffsets, packed.rowEntries, packed.matrixWords, packed.cellProjection, packed.cellTopology,
+    packed.factorColumns, packed.factorEntries, packed.factorAuxWords, packed.cellPressureSamples
+  ]) add(view);
+  return [...buffers];
 }
 
 function pressureTopologyWords(grid: TallPressureGrid) {
@@ -332,7 +375,7 @@ function bufferWithData(device: GPUDevice, label: string, data: ArrayBufferView,
 
 export const quadtreeTallCellProjectionShader = /* wgsl */ `
 struct Params { dims: vec4u, cell: vec4f, counts: vec4u, solve: vec4f, coupling: vec4u, couplingCounts: vec4u, precondition: vec4u, cellGravity: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowVelocityLength: vec4f, inflowTiming: vec4f }
-struct Face { nodes: vec4u, coefficients: vec4f, bounds: vec4u, packed: u32, solidFlux: f32, weights: vec2f, sampleCells: vec4u, sampleSpans: vec4u, flux: f32 }
+struct Face { nodes: vec4u, coefficients: vec4f, bounds: vec4u, packed: u32, solidFlux: f32, weights: vec2f, sampleCells: vec4u, sampleSpans: vec4u, flux: f32, mlsMean: f32, volume: f32 }
 struct Entry { face: u32, coefficient: f32 }
 alias SolverField = u32;
 const PRESSURE: SolverField = 0u; const BEST_PRESSURE: SolverField = 1u;
@@ -353,8 +396,10 @@ const DIAGONAL: SolverField = 6u; const ACTIVE_FLAG: SolverField = 7u;
 @group(0) @binding(11) var<storage, read> factorEntries: array<Entry>;
 @group(0) @binding(12) var<uniform> params: Params;
 @group(0) @binding(13) var factorAux: texture_2d<u32>;
-@group(0) @binding(14) var mlsRowIndex: texture_3d<u32>;
+@group(0) @binding(14) var cellPressureSamples: texture_3d<u32>;
 @group(0) @binding(15) var levelSetIn: texture_3d<f32>;
+@group(0) @binding(16) var mappedPressureOut: texture_storage_3d<r32float, write>;
+@group(0) @binding(17) var mappedPressureIn: texture_3d<f32>;
 var<workgroup> reductionA: array<f32, 256>;
 var<workgroup> reductionB: array<f32, 256>;
 fn inflowGridDims() -> vec3i { return vec3i(params.dims.xyz); }
@@ -381,8 +426,7 @@ fn faceAxis(face: Face) -> u32 { return (face.packed >> 16u) & 0x3u; }
 fn faceNodeCount(face: Face) -> u32 { return (face.packed >> 18u) & 0x7u; }
 fn faceGhost(face: Face) -> bool { return ((face.packed >> 21u) & 0x1u) != 0u; }
 fn faceSlotLiquid(face: Face, slot: u32) -> bool { return ((face.packed >> (22u + slot)) & 0x1u) != 0u; }
-fn faceSamplePhi(face: Face, slot: u32) -> f32 {
-  let packed = face.sampleCells[slot]; let span = face.sampleSpans[slot];
+fn packedSamplePhi(packed: u32, span: u32) -> f32 {
   let origin = vec2u(packed & 1023u, (packed >> 10u) & 1023u); let y = (packed >> 20u) & 1023u;
   let position = vec2f(origin) + vec2f(f32(span) * 0.5 - 0.5);
   let a = vec2u(floor(position)); let b = min(a + vec2u(1), params.dims.xz - vec2u(1)); let t = fract(position);
@@ -391,6 +435,9 @@ fn faceSamplePhi(face: Face, slot: u32) -> f32 {
   let p01 = textureLoad(levelSetIn, vec3i(i32(a.x), i32(y), i32(b.y)), 0).x;
   let p11 = textureLoad(levelSetIn, vec3i(i32(b.x), i32(y), i32(b.y)), 0).x;
   return mix(mix(p00, p10, t.x), mix(p01, p11, t.x), t.y);
+}
+fn faceSamplePhi(face: Face, slot: u32) -> f32 {
+  return packedSamplePhi(face.sampleCells[slot], face.sampleSpans[slot]);
 }
 @compute @workgroup_size(128)
 fn refreshFaces(@builtin(global_invocation_id) gid: vec3u) {
@@ -443,12 +490,20 @@ fn faceGradient(face: Face) -> f32 {
 @compute @workgroup_size(128)
 fn refreshRows(@builtin(global_invocation_id) gid: vec3u) {
   let row = gid.x; if (row >= dofs()) { return; } var rowIsActive = false;
+  var openVolume = 0.0; var faceVolume = 0.0;
   for (var entry = rowOffsets[row]; entry < rowOffsets[row + 1u]; entry += 1u) {
     let face = faces[rowEntries[entry].face];
+    openVolume += face.weights.x; faceVolume += face.volume;
     for (var slot = 0u; slot < faceNodeCount(face); slot += 1u) {
       if (face.nodes[slot] == row && faceSlotLiquid(face, slot)) { rowIsActive = true; }
     }
   }
+  // Chentanez & Müller Sec. 3.9.1 treats a cell swallowed by a rigid body as
+  // solid. A row whose faces are (nearly) all closed by solid fractions has
+  // ~zero conductance yet keeps a finite (1-A) u_solid constraint flux, and
+  // solving that against the epsilon diagonal produced astronomic pressures
+  // around moving bodies. Drop such rows from the solve entirely.
+  if (openVolume <= 0.1 * faceVolume) { rowIsActive = false; }
   state[stateIndex(row, ACTIVE_FLAG)] = select(0u, 1u, rowIsActive);
   for (var entry = matrixStart(row); entry < matrixStart(row + 1u); entry += 1u) {
     let packed = matrixFaceSlot(entry); let face = faces[packed & 0x3fffffffu]; let slot = packed >> 30u;
@@ -733,39 +788,162 @@ fn solvedFaceGradient(face: Face) -> f32 {
   }
   return result;
 }
-// Ando--Batty MLS sub-face row: the precomputed weights already include the
-// conservation shift, so the sub-face corrections average exactly to the
-// solved variational face value.
-fn mlsRowGradient(slot: u32) -> f32 {
-  let base = params.couplingCounts.y;
-  let entries = base + params.couplingCounts.z + 1u;
-  var result = 0.0;
-  for (var cursor = auxWord(base + slot); cursor < auxWord(base + slot + 1u); cursor += 1u) {
-    result += bitcast<f32>(auxWord(entries + 2u * cursor + 1u)) * stateF(auxWord(entries + 2u * cursor), BEST_PRESSURE);
+fn sampleBasisAndSize(dof: u32, cell: vec3u) -> array<vec4f, 2> {
+  let base = params.couplingCounts.y + 4u * dof;
+  let packed = auxWord(base); let span = max(1u, auxWord(base + 1u)); let ySpan = max(1u, auxWord(base + 2u));
+  let origin = vec2u(packed & 1023u, (packed >> 10u) & 1023u); let sampleY = (packed >> 20u) & 1023u;
+  let delta = vec3f(
+    f32(origin.x) + 0.5 * f32(span) - (f32(cell.x) + 0.5),
+    f32(sampleY) - f32(cell.y),
+    f32(origin.y) + 0.5 * f32(span) - (f32(cell.z) + 0.5));
+  return array<vec4f, 2>(vec4f(delta, 1.0), vec4f(f32(span), f32(ySpan), f32(span), 0.0));
+}
+fn representedBasisAndSize(word: u32, packedY: u32, cell: vec3u) -> array<vec4f, 2> {
+  let origin = vec2u(word & 1023u, (word >> 10u) & 1023u); let span = max(1u, word >> 20u);
+  let first = packedY & 1023u; let last = (packedY >> 10u) & 1023u; let sampleY = select(first, last, cell.y - first > last - cell.y);
+  let delta = vec3f(
+    f32(origin.x) + 0.5 * f32(span) - (f32(cell.x) + 0.5),
+    f32(sampleY) - f32(cell.y),
+    f32(origin.y) + 0.5 * f32(span) - (f32(cell.z) + 0.5));
+  return array<vec4f, 2>(vec4f(delta, 1.0), vec4f(f32(span), f32(max(1u, last - first + 1u)), f32(span), f32(sampleY)));
+}
+fn dofSamplePhi(dof: u32) -> f32 {
+  let base = params.couplingCounts.y + 4u * dof;
+  return packedSamplePhi(auxWord(base), max(1u, auxWord(base + 1u)));
+}
+fn mlsKernel(basis: vec4f, size: vec4f) -> f32 {
+  return max(1.0 - abs(basis.x) / size.x, 0.01)
+    * max(1.0 - abs(basis.y) / size.y, 0.01)
+    * max(1.0 - abs(basis.z) / size.z, 0.01);
+}
+fn solveMls4(matrixIn: array<vec4f, 4>) -> vec4f {
+  var a = matrixIn; var b = vec4f(0.0, 0.0, 0.0, 1.0);
+  for (var pivot = 0u; pivot < 4u; pivot += 1u) {
+    var best = pivot;
+    for (var row = pivot + 1u; row < 4u; row += 1u) { if (abs(a[row][pivot]) > abs(a[best][pivot])) { best = row; } }
+    if (abs(a[best][pivot]) < 1e-8) { return vec4f(3.402823e38); }
+    if (best != pivot) { let swap = a[pivot]; a[pivot] = a[best]; a[best] = swap; let sb = b[pivot]; b[pivot] = b[best]; b[best] = sb; }
+    let inverse = 1.0 / a[pivot][pivot]; a[pivot] *= inverse; b[pivot] *= inverse;
+    for (var row = 0u; row < 4u; row += 1u) {
+      if (row == pivot) { continue; }
+      let factor = a[row][pivot]; a[row] -= factor * a[pivot]; b[row] -= factor * b[pivot];
+    }
   }
-  return result;
+  return b;
+}
+@compute @workgroup_size(4,4,4)
+fn mapPressure(@builtin(global_invocation_id) gid: vec3u) {
+  if (any(gid >= params.dims.xyz)) { return; }
+  let own = textureLoad(cellPressureSamples, vec3i(gid), 0);
+  let ownSpan = max(1u, own.w >> 20u); var ids: array<u32, 64>; var count = 0u;
+  var ghostWords: array<u32, 64>; var ghostPackedY: array<u32, 64>; var ghostCount = 0u;
+  for (var dz = -1; dz <= 1; dz += 1) { for (var dx = -1; dx <= 1; dx += 1) { for (var dy = -2; dy <= 2; dy += 1) {
+    let q = clamp(vec3i(gid) + vec3i(dx * i32(2u * ownSpan), dy, dz * i32(2u * ownSpan)), vec3i(0), vec3i(params.dims.xyz) - vec3i(1));
+    let endpoints = textureLoad(cellPressureSamples, q, 0);
+    for (var endpoint = 0u; endpoint < 2u; endpoint += 1u) {
+      let dof = endpoints[endpoint];
+      if (dof != 0xffffffffu && dofActive(dof)) {
+        var duplicate = false; for (var slot = 0u; slot < count; slot += 1u) { if (ids[slot] == dof) { duplicate = true; } }
+        if (!duplicate && count < 64u) { ids[count] = dof; count += 1u; }
+      } else {
+        let geometry = representedBasisAndSize(endpoints.w, endpoints.z, gid); let sampleY = u32(geometry[1].w);
+        let packed = (endpoints.w & 0x000fffffu) | (sampleY << 20u); let phiAir = packedSamplePhi(packed, max(1u, endpoints.w >> 20u));
+        if (phiAir >= 0.0 && phiAir <= 2.0 * min(params.cell.x, min(params.cell.y, params.cell.z))) {
+          var duplicateGhost = false; for (var slot = 0u; slot < ghostCount; slot += 1u) { if (ghostWords[slot] == endpoints.w && ghostPackedY[slot] == endpoints.z) { duplicateGhost = true; } }
+          if (!duplicateGhost && ghostCount < 64u) { ghostWords[ghostCount] = endpoints.w; ghostPackedY[ghostCount] = endpoints.z; ghostCount += 1u; }
+        }
+      }
+    }
+  } } }
+  var matrix: array<vec4f, 4>; var totalWeight = 0.0; var shepard = 0.0;
+  for (var slot = 0u; slot < count; slot += 1u) {
+    let geometry = sampleBasisAndSize(ids[slot], gid); let basis = geometry[0]; let weight = mlsKernel(basis, geometry[1]);
+    matrix[0] += weight * basis.x * basis; matrix[1] += weight * basis.y * basis;
+    matrix[2] += weight * basis.z * basis; matrix[3] += weight * basis.w * basis;
+    totalWeight += weight; shepard += weight * stateF(ids[slot], BEST_PRESSURE);
+  }
+  var ghostValues: array<f32, 64>;
+  for (var ghost = 0u; ghost < ghostCount; ghost += 1u) {
+    let geometry = representedBasisAndSize(ghostWords[ghost], ghostPackedY[ghost], gid); let basis = geometry[0]; let weight = mlsKernel(basis, geometry[1]);
+    var nearest = 0xffffffffu; var nearestDistance = 3.402823e38;
+    for (var slot = 0u; slot < count; slot += 1u) {
+      let liquidGeometry = sampleBasisAndSize(ids[slot], gid); let distance = dot(liquidGeometry[0].xyz - basis.xyz, liquidGeometry[0].xyz - basis.xyz);
+      let phiLiquid = dofSamplePhi(ids[slot]); if (phiLiquid < 0.0 && distance < nearestDistance) { nearest = ids[slot]; nearestDistance = distance; }
+    }
+    if (nearest == 0xffffffffu || nearestDistance > 4.01) { continue; }
+    let sampleY = u32(geometry[1].w); let packed = (ghostWords[ghost] & 0x000fffffu) | (sampleY << 20u);
+    let phiAir = packedSamplePhi(packed, max(1u, ghostWords[ghost] >> 20u)); let phiLiquid = min(dofSamplePhi(nearest), -1e-6);
+    // Linear ghost-fluid extrapolation places p=0 at phi=0. The ratio is
+    // negative because the resident level set is negative in liquid.
+    let ghostValue = clamp(phiAir / phiLiquid, -${maximumVelocityUpdateFluidScale.toFixed(1)}, 0.0) * stateF(nearest, BEST_PRESSURE);
+    ghostValues[ghost] = ghostValue;
+    matrix[0] += weight * basis.x * basis; matrix[1] += weight * basis.y * basis;
+    matrix[2] += weight * basis.z * basis; matrix[3] += weight * basis.w * basis;
+    totalWeight += weight; shepard += weight * ghostValue;
+  }
+  let solved = solveMls4(matrix); var mapped = 0.0;
+  if (solved.x > 1e30) { mapped = shepard / max(totalWeight, 1e-12); }
+  else {
+    for (var slot = 0u; slot < count; slot += 1u) { let geometry = sampleBasisAndSize(ids[slot], gid); mapped += mlsKernel(geometry[0], geometry[1]) * dot(geometry[0], solved) * stateF(ids[slot], BEST_PRESSURE); }
+    for (var ghost = 0u; ghost < ghostCount; ghost += 1u) { let geometry = representedBasisAndSize(ghostWords[ghost], ghostPackedY[ghost], gid); mapped += mlsKernel(geometry[0], geometry[1]) * dot(geometry[0], solved) * ghostValues[ghost]; }
+  }
+  textureStore(mappedPressureOut, vec3i(gid), vec4f(mapped));
+}
+fn mappedGradient(cell: vec3u, axis: u32) -> f32 {
+  var plus = cell; plus[axis] += 1u;
+  return (textureLoad(mappedPressureIn, vec3i(plus), 0).x - textureLoad(mappedPressureIn, vec3i(cell), 0).x) / params.cell[axis];
+}
+fn faceSubfaceCount(face: Face) -> u32 {
+  let ySpan = face.bounds.w - face.bounds.z;
+  return select(faceSpan(face) * ySpan, faceSpan(face) * faceSpan(face) * ySpan, faceAxis(face) == 1u);
+}
+@compute @workgroup_size(128)
+fn refreshFaceMls(@builtin(global_invocation_id) gid: vec3u) {
+  let faceId = gid.x; if (faceId >= params.counts.y) { return; }
+  var face = faces[faceId]; let axis = faceAxis(face); var sum = 0.0; var count = 0.0;
+  if (axis == 1u) {
+    for (var z = face.bounds.y; z < face.bounds.y + faceSpan(face); z += 1u) { for (var x = face.bounds.x; x < face.bounds.x + faceSpan(face); x += 1u) { for (var y = face.bounds.z; y < face.bounds.w; y += 1u) {
+      sum += mappedGradient(vec3u(x, y, z), axis); count += 1.0;
+    } } }
+  } else {
+    for (var y = face.bounds.z; y < face.bounds.w; y += 1u) { for (var transverse = 0u; transverse < faceSpan(face); transverse += 1u) {
+      var cell = vec3u(face.bounds.x, y, face.bounds.y); if (axis == 0u) { cell.z += transverse; } else { cell.x += transverse; }
+      sum += mappedGradient(cell, axis); count += 1.0;
+    } }
+  }
+  face.mlsMean = sum / max(1.0, count); faces[faceId] = face;
 }
 @compute @workgroup_size(4,4,4)
 fn project(@builtin(global_invocation_id) gid: vec3u) {
   if (any(gid >= params.dims.xyz)) { return; } let id = vec3i(gid);
   var value = textureLoad(velocityIn, id, 0).xyz; let projection = textureLoad(cellProjection, id, 0);
-  let ownLiquid = textureLoad(levelSetIn, id, 0).x < 0.0;
+  let ownPhi = textureLoad(levelSetIn, id, 0).x; let ownLiquid = ownPhi < 0.0;
+  let h = min(params.cell.x, min(params.cell.y, params.cell.z));
   for (var axis = 0u; axis < 3u; axis += 1u) {
     var plus = gid; plus[axis] += 1u;
     if (plus[axis] >= params.dims[axis]) { value[axis] = 0.0; continue; }
-    let otherLiquid = textureLoad(levelSetIn, vec3i(plus), 0).x < 0.0;
-    if (!ownLiquid && !otherLiquid) { value[axis] = 0.0; continue; }
-    let packedFace = u32(round(projection[axis]));
+    let otherPhi = textureLoad(levelSetIn, vec3i(plus), 0).x; let otherLiquid = otherPhi < 0.0;
+    // Air immediately outside the interface is the transport field used by
+    // the level-set backtrace. Only true far-field air is zeroed here; the
+    // three-ring pass following projection fills this narrow band from
+    // liquid-touching faces.
+    if (!ownLiquid && !otherLiquid && ownPhi > 2.0 * h && otherPhi > 2.0 * h) { value[axis] = 0.0; continue; }
+    let packedFace = u32(round(projection[axis])); var gradient = mappedGradient(gid, axis);
     if (packedFace > 0u) {
       let face = faces[packedFace - 1u];
-      // A variational face stores the area-average velocity constrained by
-      // Eq. (1). Sub-faces with an MLS row get the reconstructed gradient
-      // whose face average is exactly the solved value; the rest receive the
-      // constant, conservative prolongation.
-      let fluidScale = select(0.0, face.weights.y / face.weights.x, face.weights.x > 0.0);
-      let mlsSlot = textureLoad(mlsRowIndex, id, 0)[axis];
-      if (mlsSlot > 0u) { value[axis] -= fluidScale * mlsRowGradient(mlsSlot - 1u); }
-      else { value[axis] -= fluidScale * solvedFaceGradient(face); }
+      let fluidScale = min(${maximumVelocityUpdateFluidScale.toFixed(1)}, select(0.0, face.weights.y / face.weights.x, face.weights.x > 0.0));
+      let solved = solvedFaceGradient(face);
+      if (faceSubfaceCount(face) > 1u) {
+        // Eq. (5): preserve the adaptive area average while retaining the
+        // local Ando--Batty MLS variation across temporary cubical faces.
+        if (face.weights.x > 0.0) { value[axis] = (face.flux - face.solidFlux) / face.weights.x; }
+        gradient = gradient - face.mlsMean + solved;
+      } else { gradient = solved; }
+      value[axis] -= fluidScale * gradient;
+    } else {
+      let ownCell = textureLoad(cellPressureSamples, id, 0); let otherCell = textureLoad(cellPressureSamples, vec3i(plus), 0);
+      let sameAdaptiveCell = ownCell.z == otherCell.z && ownCell.w == otherCell.w;
+      if (sameAdaptiveCell && ownLiquid && otherLiquid) { value[axis] -= gradient; }
     }
   }
   // The nozzle is a prescribed boundary: re-impose its velocity after the
@@ -792,10 +970,94 @@ fn updateDispatch() {
 }
 `;
 
+/** Three-sweep narrow-band air-velocity extrapolation used after projection. */
+export const quadtreeVelocityExtrapolationShader = /* wgsl */ `
+struct Params { dims: vec4u, cell: vec4f }
+@group(0) @binding(0) var velocityIn: texture_3d<f32>;
+@group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
+@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var levelSetIn: texture_3d<f32>;
+
+fn valid(q: vec3i) -> bool { return all(q >= vec3i(0)) && all(q < vec3i(params.dims.xyz)); }
+fn phi(q: vec3i) -> f32 { return select(3.402823e38, textureLoad(levelSetIn, q, 0).x, valid(q)); }
+fn faceKnown(q: vec3i, axis: u32) -> bool {
+  var plus = q; plus[axis] += 1;
+  if (!valid(q) || !valid(plus)) { return false; }
+  let inherited = bitcast<u32>(textureLoad(velocityIn, q, 0).w);
+  return (inherited & (1u << axis)) != 0u || phi(q) < 0.0 || phi(plus) < 0.0;
+}
+@compute @workgroup_size(4, 4, 4)
+fn extrapolateVelocity(@builtin(global_invocation_id) gid: vec3u) {
+  if (any(gid >= params.dims.xyz)) { return; }
+  let q = vec3i(gid); var sample = textureLoad(velocityIn, q, 0); var value = sample.xyz;
+  var knownMask = bitcast<u32>(sample.w) & 7u;
+  let h = min(params.cell.x, min(params.cell.y, params.cell.z));
+  let offsets = array<vec3i, 6>(vec3i(-1, 0, 0), vec3i(1, 0, 0), vec3i(0, -1, 0), vec3i(0, 1, 0), vec3i(0, 0, -1), vec3i(0, 0, 1));
+  for (var axis = 0u; axis < 3u; axis += 1u) {
+    var plus = q; plus[axis] += 1;
+    if (!valid(plus)) { value[axis] = 0.0; continue; }
+    if (faceKnown(q, axis)) { knownMask |= 1u << axis; continue; }
+    let ownPhi = phi(q); let otherPhi = phi(plus);
+    if (!(ownPhi > 0.0 && otherPhi > 0.0 && min(ownPhi, otherPhi) < 3.0 * h)) { continue; }
+    var sum = 0.0; var count = 0.0;
+    for (var neighbour = 0u; neighbour < 6u; neighbour += 1u) {
+      let n = q + offsets[neighbour];
+      if (faceKnown(n, axis)) { sum += textureLoad(velocityIn, n, 0)[axis]; count += 1.0; }
+    }
+    if (count > 0.0) { value[axis] = sum / count; knownMask |= 1u << axis; }
+  }
+  textureStore(velocityOut, q, vec4f(value, bitcast<f32>(knownMask)));
+}
+`;
+
+/** Dense diagnostic sampled by the scientific divergence slice. */
+export const quadtreeDivergenceShader = /* wgsl */ `
+struct Params { dims: vec4u, cell: vec4f }
+@group(0) @binding(0) var velocityIn: texture_3d<f32>;
+@group(0) @binding(1) var divergenceOut: texture_storage_3d<r32float, write>;
+@group(0) @binding(2) var<uniform> params: Params;
+fn component(q: vec3i, axis: u32) -> f32 {
+  if (any(q < vec3i(0)) || any(q >= vec3i(params.dims.xyz))) { return 0.0; }
+  return textureLoad(velocityIn, q, 0)[axis];
+}
+@compute @workgroup_size(4, 4, 4)
+fn computeDivergence(@builtin(global_invocation_id) gid: vec3u) {
+  if (any(gid >= params.dims.xyz)) { return; }
+  let q = vec3i(gid);
+  let value = (component(q + vec3i(1, 0, 0), 0u) - component(q, 0u)) / params.cell.x
+    + (component(q + vec3i(0, 1, 0), 1u) - component(q, 1u)) / params.cell.y
+    + (component(q + vec3i(0, 0, 1), 2u) - component(q, 2u)) / params.cell.z;
+  textureStore(divergenceOut, q, vec4f(value));
+}
+`;
+
+/** Last-resort current-step CFL guard with an explicit intervention counter. */
+export const quadtreeVelocityClampShader = /* wgsl */ `
+struct Params { dims: vec4u, cell: vec4f }
+@group(0) @binding(0) var velocityIn: texture_3d<f32>;
+@group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
+@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var<storage, read_write> debugCounters: array<atomic<u32>>;
+@compute @workgroup_size(4, 4, 4)
+fn clampVelocity(@builtin(global_invocation_id) gid: vec3u) {
+  if (any(gid >= params.dims.xyz)) { return; }
+  var value = textureLoad(velocityIn, vec3i(gid), 0);
+  for (var axis = 0u; axis < 3u; axis += 1u) {
+    let limit = 0.9 * params.cell[axis] / max(params.cell.w, 1e-6);
+    if (abs(value[axis]) > limit) { value[axis] = clamp(value[axis], -limit, limit); atomicAdd(&debugCounters[0], 1u); }
+  }
+  let speedLimit = 0.9 * min(params.cell.x, min(params.cell.y, params.cell.z)) / max(params.cell.w, 1e-6);
+  let speed = length(value.xyz);
+  if (speed > speedLimit) { value = vec4f(value.xyz * speedLimit / speed, value.w); atomicAdd(&debugCounters[0], 1u); }
+  textureStore(velocityOut, vec3i(gid), value);
+}
+`;
+
 export class WebGPUQuadtreeTallCellProjection {
   readonly info: QuadtreeTallCellProjectionInfo;
   private readonly buffers: GPUBuffer[];
   private readonly bindGroup: GPUBindGroup;
+  private readonly mapPressureBindGroup: GPUBindGroup;
   private pipelines: Record<string, GPUComputePipeline>;
   private readonly shaderModule:GPUShaderModule;
   private readonly pipelineLayout:GPUPipelineLayout;
@@ -805,10 +1067,22 @@ export class WebGPUQuadtreeTallCellProjection {
   private readonly dispatchArgs: GPUBuffer;
   private readonly dispatchBindGroup: GPUBindGroup;
   private readonly dispatchPipeline: GPUComputePipeline;
+  private readonly velocityExtrapolationPipeline: GPUComputePipeline;
+  private readonly extrapolateOutToScratchGroup: GPUBindGroup;
+  private readonly extrapolateScratchToOutGroup: GPUBindGroup;
   private readonly cellProjection: GPUTexture;
   private readonly cellTopology: GPUTexture;
   private readonly factorAux: GPUTexture;
-  private readonly mlsRowIndex: GPUTexture;
+  private readonly cellPressureSamples: GPUTexture;
+  private readonly mappedPressure: GPUTexture;
+  private readonly mappedPressureStorageFallback: GPUTexture;
+  private readonly mappedPressureSampledFallback: GPUTexture;
+  private readonly divergence: GPUTexture;
+  private readonly divergencePipeline: GPUComputePipeline;
+  private readonly divergenceBindGroup: GPUBindGroup;
+  private readonly velocityClampCounter: GPUBuffer;
+  private readonly velocityClampPipeline: GPUComputePipeline;
+  private readonly velocityClampBindGroup: GPUBindGroup;
   private readonly dofCount: number;
   private readonly preconditionBlockGroups: number;
   private iterations: number;
@@ -838,36 +1112,48 @@ export class WebGPUQuadtreeTallCellProjection {
     // At this point velocityOut still contains the previous step's projected,
     // divergence-free field. velocityIn is the newly advected/gravity-forced
     // predictor and must not transport the resident interface.
-    this.surfaceState = resources.levelSet ?? (resources.levelSet = new WebGPUQuadtreeSurfaceState(device, dims, h, resources.velocityOut, initial.phi!, cache?.surface));
-    const explicitSizing = initialSizing(scene, nx, nz, h);
-    let quadtree = initial.quadtree;
-    if (!quadtree) {
-      if (!initial.velocity) throw new Error("Initial quadtree construction needs a velocity field");
-      if (!initial.phi) throw new Error("Initial quadtree sizing needs a level set");
-      const sizing = quadtreeSizingFromVelocityAndSurface(initial.phi, initial.velocity, nx, ny, nz, h);
-      for (let index = 0; index < sizing.length; index += 1) sizing[index] = Math.max(sizing[index], explicitSizing[index]);
-      quadtree = buildQuadtree(sizing, nx, nz, { h: Math.min(h.x, h.z), maximumLeafSize: options.maximumLeafSize, adaptivityStrength: options.adaptivityStrength, smoothingDilations: 3 });
-    }
+    this.surfaceState = resources.levelSet ?? (resources.levelSet = new WebGPUQuadtreeSurfaceState(device, dims, h, resources.velocityOut, initial.phi!, cache?.surface, resources.volume, options.debrisCulling === true, options.vofReconciliation === true));
     const tallGridStartedAt = performance.now();
-    if (!initial.pressureGrid && !initial.phi) throw new Error("Initial tall-grid population needs a level set");
-    const pressureGrid = initial.pressureGrid ?? populateTallPressureGrid(quadtree, initial.phi!, ny, h, 1, options.opticalDepthFraction);
-    this.topologyWords = initial.topologyWords ?? pressureTopologyWords(pressureGrid);
+    let pressureGrid: TallPressureGrid | undefined;
+    let leafCount: number, pressureSampleCount: number, maximumNeighborRatio: number;
+    if (initial.prepared) {
+      ({ leafCount, pressureSampleCount, maximumNeighborRatio } = initial.prepared);
+      this.topologyWords = initial.topologyWords ?? initial.prepared.topologyWords;
+    } else {
+      const explicitSizing = initialSizing(scene, nx, nz, h);
+      let quadtree = initial.quadtree;
+      if (!quadtree) {
+        if (!initial.velocity) throw new Error("Initial quadtree construction needs a velocity field");
+        if (!initial.phi) throw new Error("Initial quadtree sizing needs a level set");
+        const sizing = quadtreeSizingFromVelocityAndSurface(initial.phi, initial.velocity, nx, ny, nz, h);
+        for (let index = 0; index < sizing.length; index += 1) sizing[index] = Math.max(sizing[index], explicitSizing[index]);
+        quadtree = buildQuadtree(sizing, nx, nz, { h: Math.min(h.x, h.z), maximumLeafSize: options.maximumLeafSize, adaptivityStrength: options.adaptivityStrength, smoothingDilations: 3 });
+      }
+      if (!initial.pressureGrid && !initial.phi) throw new Error("Initial tall-grid population needs a level set");
+      pressureGrid = initial.pressureGrid ?? populateTallPressureGrid(quadtree, initial.phi!, ny, h, 1, options.opticalDepthFraction);
+      this.topologyWords = initial.topologyWords ?? pressureTopologyWords(pressureGrid);
+      leafCount = quadtree.leaves.length;
+      pressureSampleCount = pressureGrid.samples.length;
+      maximumNeighborRatio = quadtree.maximumNeighborRatio;
+    }
     const tallGrid_ms = initial.prepared?.tallGrid_ms ?? performance.now() - tallGridStartedAt;
     let variationalAssembly_ms: number, systemPack_ms: number;
     let packed: ReturnType<typeof WebGPUQuadtreeTallCellProjection.packSystem>;
     let faceCount: number, ghostFaceCount: number, maximumSystemFluidScale: number, tallSegmentCount: number;
     if (initial.prepared) {
-      ({ packed, displacedVolumes: this.displacedVolumes, dofCount: this.dofCount, faceCount, ghostFaceCount, maximumFluidScale: maximumSystemFluidScale, tallSegmentCount, variationalAssembly_ms, systemPack_ms } = initial.prepared);
+      if (!initial.prepared.packed) throw new Error("A reused topology cannot construct a new projection");
+      packed = initial.prepared.packed;
+      ({ displacedVolumes: this.displacedVolumes, dofCount: this.dofCount, faceCount, ghostFaceCount, maximumFluidScale: maximumSystemFluidScale, tallSegmentCount, variationalAssembly_ms, systemPack_ms } = initial.prepared);
     } else {
       const variationalStartedAt = performance.now();
       const solidFields = coupling ? solidFieldsFromBodies(scene, coupling.bodies, nx, ny, nz, h) : undefined;
       const variationalBodies = coupling ? variationalBodiesFrom(scene, coupling) : [];
-      const system = buildVariationalSystem(pressureGrid, {
+      const system = buildVariationalSystem(pressureGrid!, {
         velocity: initial.velocity,
         solidFraction: solidFields?.solidFraction, solidOwner: solidFields?.solidOwner, bodies: variationalBodies
       }, { assembleDense: false });
       variationalAssembly_ms = performance.now() - variationalStartedAt;
-      this.displacedVolumes = displacedVolumesForGrid(pressureGrid, initial.phi, solidFields, coupling?.bodies.length ?? 0, nx, ny, h);
+      this.displacedVolumes = displacedVolumesForGrid(pressureGrid!, initial.phi, solidFields, coupling?.bodies.length ?? 0, nx, ny, h);
       this.dofCount = system.liquidSampleIds.length;
       const packStartedAt = performance.now();
       packed = WebGPUQuadtreeTallCellProjection.packSystem(system, nx, ny, nz, coupling?.dynamic ? variationalBodies : [], options.preconditioner);
@@ -875,7 +1161,7 @@ export class WebGPUQuadtreeTallCellProjection {
       faceCount = system.faces.length;
       ghostFaceCount = system.faces.filter((face) => face.ghost).length;
       maximumSystemFluidScale = system.faces.reduce((maximum, face) => Math.max(maximum, face.fluidScale), 0);
-      tallSegmentCount = pressureGrid.segments.filter((segment) => segment.tall).length;
+      tallSegmentCount = pressureGrid!.segments.filter((segment) => segment.tall).length;
     }
     // The hard cap remains the paper-faithful worst case. Only the amount of
     // command stream encoded ahead of the tolerance stop follows recent solves.
@@ -883,31 +1169,45 @@ export class WebGPUQuadtreeTallCellProjection {
     this.iterations = this.iterationBudget.encodedBudget;
     this.parallelReductions = this.dofCount >= 4096;
     const uploadStartedAt = performance.now();
-    const faces = bufferWithData(device, "Quadtree tall-cell variational faces", packed.faces, GPUBufferUsage.STORAGE, 112);
-    const rowOffsets = bufferWithData(device, "Quadtree tall-cell row offsets", packed.rowOffsets);
-    const rowEntries = bufferWithData(device, "Quadtree tall-cell row entries", packed.rowEntries, GPUBufferUsage.STORAGE, 8);
-    const matrixBuffer = bufferWithData(device, "Quadtree tall-cell refreshed CSR matrix", packed.matrixWords, GPUBufferUsage.STORAGE, 4);
-    const factorColumns = bufferWithData(device, "Quadtree tall-cell IC(0) columns", packed.factorColumns, GPUBufferUsage.STORAGE, 8);
-    const factorEntries = bufferWithData(device, "Quadtree tall-cell IC(0) entries", packed.factorEntries, GPUBufferUsage.STORAGE, 8);
-    const factorAuxTexels = Math.max(1, Math.ceil(packed.factorAuxWords.length / 4)), factorAuxWidth = Math.min(2048, factorAuxTexels), factorAuxHeight = Math.ceil(factorAuxTexels / factorAuxWidth);
-    this.factorAux = device.createTexture({ label: "Quadtree tall-cell IC level data", size: [factorAuxWidth, factorAuxHeight], format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    const factorAuxRowBytes = factorAuxWidth * 16, factorAuxPitch = Math.ceil(factorAuxRowBytes / 256) * 256, factorAuxUpload = new Uint8Array(factorAuxPitch * factorAuxHeight), factorAuxSource = new Uint8Array(packed.factorAuxWords.buffer);
-    for (let row = 0; row < factorAuxHeight; row += 1) factorAuxUpload.set(factorAuxSource.subarray(row * factorAuxRowBytes, Math.min(factorAuxSource.length, (row + 1) * factorAuxRowBytes)), row * factorAuxPitch);
-    device.queue.writeTexture({ texture: this.factorAux }, factorAuxUpload, { bytesPerRow: factorAuxPitch, rowsPerImage: factorAuxHeight }, { width: factorAuxWidth, height: factorAuxHeight });
-    this.cellProjection = device.createTexture({ label: "Quadtree tall-cell projection field", size: [nx, ny, nz], dimension: "3d", format: "rgba32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    const resident = initial.prepared?.resident;
+    const faces = resident?.faces ?? bufferWithData(device, "Quadtree tall-cell variational faces", packed.faces, GPUBufferUsage.STORAGE, 112);
+    const rowOffsets = resident?.rowOffsets ?? bufferWithData(device, "Quadtree tall-cell row offsets", packed.rowOffsets);
+    const rowEntries = resident?.rowEntries ?? bufferWithData(device, "Quadtree tall-cell row entries", packed.rowEntries, GPUBufferUsage.STORAGE, 8);
+    const matrixBuffer = resident?.matrixBuffer ?? bufferWithData(device, "Quadtree tall-cell refreshed CSR matrix", packed.matrixWords, GPUBufferUsage.STORAGE, 4);
+    const factorColumns = resident?.factorColumns ?? bufferWithData(device, "Quadtree tall-cell IC(0) columns", packed.factorColumns, GPUBufferUsage.STORAGE, 8);
+    const factorEntries = resident?.factorEntries ?? bufferWithData(device, "Quadtree tall-cell IC(0) entries", packed.factorEntries, GPUBufferUsage.STORAGE, 8);
+    const factorAuxTexels = Math.max(1, Math.ceil(packed.factorAuxWords.length / 4)), factorAuxWidth = resident?.factorAuxWidth ?? Math.min(2048, factorAuxTexels), factorAuxHeight = Math.ceil(factorAuxTexels / factorAuxWidth);
+    this.factorAux = resident?.factorAux ?? device.createTexture({ label: "Quadtree tall-cell IC level data", size: [factorAuxWidth, factorAuxHeight], format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    if (!resident) {
+      const factorAuxRowBytes = factorAuxWidth * 16, factorAuxPitch = Math.ceil(factorAuxRowBytes / 256) * 256, factorAuxUpload = new Uint8Array(factorAuxPitch * factorAuxHeight), factorAuxSource = new Uint8Array(packed.factorAuxWords.buffer);
+      for (let row = 0; row < factorAuxHeight; row += 1) factorAuxUpload.set(factorAuxSource.subarray(row * factorAuxRowBytes, Math.min(factorAuxSource.length, (row + 1) * factorAuxRowBytes)), row * factorAuxPitch);
+      device.queue.writeTexture({ texture: this.factorAux }, factorAuxUpload, { bytesPerRow: factorAuxPitch, rowsPerImage: factorAuxHeight }, { width: factorAuxWidth, height: factorAuxHeight });
+    }
+    this.cellProjection = resident?.cellProjection ?? device.createTexture({ label: "Quadtree tall-cell projection field", size: [nx, ny, nz], dimension: "3d", format: "rgba32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     const projectionRowBytes = nx * 16, projectionPitch = Math.ceil(projectionRowBytes / 256) * 256;
-    const projectionBytes = new Uint8Array(projectionPitch * ny * nz), projectionSource = new Uint8Array(packed.cellProjection.buffer);
-    for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) projectionBytes.set(projectionSource.subarray(projectionRowBytes * (y + ny * z), projectionRowBytes * (y + ny * z + 1)), projectionPitch * (y + ny * z));
-    device.queue.writeTexture({ texture: this.cellProjection }, projectionBytes, { bytesPerRow: projectionPitch, rowsPerImage: ny }, { width: nx, height: ny, depthOrArrayLayers: nz });
-    this.cellTopology = device.createTexture({ label: "Quadtree tall-cell debug topology", size: [nx, ny, nz], dimension: "3d", format: "rg32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    const topologyRowBytes = nx * 8, topologyPitch = Math.ceil(topologyRowBytes / 256) * 256;
-    const topologyBytes = new Uint8Array(topologyPitch * ny * nz), topologySource = new Uint8Array(packed.cellTopology.buffer);
-    for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) topologyBytes.set(topologySource.subarray(topologyRowBytes * (y + ny * z), topologyRowBytes * (y + ny * z + 1)), topologyPitch * (y + ny * z));
-    device.queue.writeTexture({ texture: this.cellTopology }, topologyBytes, { bytesPerRow: topologyPitch, rowsPerImage: ny }, { width: nx, height: ny, depthOrArrayLayers: nz });
-    this.mlsRowIndex = device.createTexture({ label: "Quadtree tall-cell MLS row index", size: [nx, ny, nz], dimension: "3d", format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    const mlsBytes = new Uint8Array(projectionPitch * ny * nz), mlsSource = new Uint8Array(packed.mlsIndex.buffer);
-    for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) mlsBytes.set(mlsSource.subarray(projectionRowBytes * (y + ny * z), projectionRowBytes * (y + ny * z + 1)), projectionPitch * (y + ny * z));
-    device.queue.writeTexture({ texture: this.mlsRowIndex }, mlsBytes, { bytesPerRow: projectionPitch, rowsPerImage: ny }, { width: nx, height: ny, depthOrArrayLayers: nz });
+    if (!resident) {
+      const projectionBytes = new Uint8Array(projectionPitch * ny * nz), projectionSource = new Uint8Array(packed.cellProjection.buffer);
+      for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) projectionBytes.set(projectionSource.subarray(projectionRowBytes * (y + ny * z), projectionRowBytes * (y + ny * z + 1)), projectionPitch * (y + ny * z));
+      device.queue.writeTexture({ texture: this.cellProjection }, projectionBytes, { bytesPerRow: projectionPitch, rowsPerImage: ny }, { width: nx, height: ny, depthOrArrayLayers: nz });
+    }
+    this.cellTopology = resident?.cellTopology ?? device.createTexture({ label: "Quadtree tall-cell debug topology", size: [nx, ny, nz], dimension: "3d", format: "rg32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    if (!resident) {
+      const topologyRowBytes = nx * 8, topologyPitch = Math.ceil(topologyRowBytes / 256) * 256;
+      const topologyBytes = new Uint8Array(topologyPitch * ny * nz), topologySource = new Uint8Array(packed.cellTopology.buffer);
+      for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) topologyBytes.set(topologySource.subarray(topologyRowBytes * (y + ny * z), topologyRowBytes * (y + ny * z + 1)), topologyPitch * (y + ny * z));
+      device.queue.writeTexture({ texture: this.cellTopology }, topologyBytes, { bytesPerRow: topologyPitch, rowsPerImage: ny }, { width: nx, height: ny, depthOrArrayLayers: nz });
+    }
+    this.cellPressureSamples = resident?.cellPressureSamples ?? device.createTexture({ label: "Quadtree cubic pressure sample topology", size: [nx, ny, nz], dimension: "3d", format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    if (!resident) {
+      const sampleBytes = new Uint8Array(projectionPitch * ny * nz), sampleSource = new Uint8Array(packed.cellPressureSamples.buffer);
+      for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) sampleBytes.set(sampleSource.subarray(projectionRowBytes * (y + ny * z), projectionRowBytes * (y + ny * z + 1)), projectionPitch * (y + ny * z));
+      device.queue.writeTexture({ texture: this.cellPressureSamples }, sampleBytes, { bytesPerRow: projectionPitch, rowsPerImage: ny }, { width: nx, height: ny, depthOrArrayLayers: nz });
+    }
+    this.mappedPressure = device.createTexture({ label: "Quadtree transient cubical MLS pressure", size: [nx, ny, nz], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
+    this.mappedPressureStorageFallback = device.createTexture({ label: "Quadtree MLS storage fallback", size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.STORAGE_BINDING });
+    this.mappedPressureSampledFallback = device.createTexture({ label: "Quadtree MLS sampled fallback", size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING });
+    this.divergence = device.createTexture({ label: "Quadtree post-projection divergence", size: [nx, ny, nz], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
+    this.velocityClampCounter = device.createBuffer({ label: "Quadtree CFL safety telemetry", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const state = device.createBuffer({ label: "Quadtree tall-cell PCG SoA state", size: Math.max(32, this.dofCount * 32), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     // Words 0..11 are the CG scalars; words 12+ hold the per-body coupling
     // six-vectors (stride 8, up to 12 bodies).
@@ -923,7 +1223,7 @@ export class WebGPUQuadtreeTallCellProjection {
     const solveParams = new ArrayBuffer(16); new Float32Array(solveParams)[0] = options.relativeTolerance ** 2;
     new Uint32Array(solveParams).set([packed.levelsOffset, packed.rowOffsetsOffset, packed.rowEntriesOffset], 1); device.queue.writeBuffer(this.params, 48, solveParams);
     device.queue.writeBuffer(this.params, 64, new Uint32Array([packed.couplingByBodyOffset, packed.couplingByDofOffset, packed.couplingTableOffset, packed.couplingBodyCount]).buffer);
-    device.queue.writeBuffer(this.params, 80, new Uint32Array([packed.couplingDistinctDofs, packed.mlsOffsetsBase, packed.mlsRowCount, rowGroups]).buffer);
+    device.queue.writeBuffer(this.params, 80, new Uint32Array([packed.couplingDistinctDofs, packed.dofSamplesBase, 0, rowGroups]).buffer);
     // precondition.xy carry the line tables or the blockic tables; only the
     // active preconditioner's kernels are ever dispatched, so the overlay is
     // unambiguous per projection.
@@ -969,7 +1269,9 @@ export class WebGPUQuadtreeTallCellProjection {
         { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
         { binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "2d" } },
         { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
-        { binding: 15, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
+        { binding: 15, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        { binding: 16, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
+        { binding: 17, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
       ] });
       this.shaderModule = device.createShaderModule({ label: "Quadtree tall-cell variational PCG", code: quadtreeTallCellProjectionShader });
       void this.shaderModule.getCompilationInfo().then((result) => { for (const message of result.messages) if (message.type === "error") console.error(`Quadtree tall-cell WGSL ${message.lineNum}:${message.linePos} ${message.message}`); }).catch(()=>{/* Device loss is reported by the renderer. */});
@@ -990,34 +1292,289 @@ export class WebGPUQuadtreeTallCellProjection {
     this.dispatchBindGroup = device.createBindGroup({ layout: this.gpuCache.dispatchLayout, entries: [
       { binding: 0, resource: { buffer: scalars } }, { binding: 1, resource: { buffer: this.dispatchArgs } }
     ] });
-    const names = ["refreshFaces", "refreshRows", "initialize", "precondition", "preconditionBlockIC", "preconditionJacobi", "preconditionLine", "preconditionPolynomialStart", "preconditionPolynomialMultiply", "preconditionPolynomialUpdate", "startDirection", "reduceInitial", "multiply", "applyStep", "applyStepPartial", "applyStepFinalize", "applyStepUpdate", "finishIteration", "finishIterationPartial", "finishIterationFinalize", "finishIterationUpdate", "project", "coupleReduce", "coupleApply", "coupleImpulse"];
+    if (!this.gpuCache.velocityExtrapolationLayout || !this.gpuCache.velocityExtrapolationPipeline) {
+      this.gpuCache.velocityExtrapolationLayout = device.createBindGroupLayout({ entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
+      ] });
+      const extrapolationModule = device.createShaderModule({ label: "Quadtree narrow-band velocity extrapolation", code: quadtreeVelocityExtrapolationShader });
+      const extrapolationPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.velocityExtrapolationLayout] });
+      this.gpuCache.velocityExtrapolationPipeline = device.createComputePipeline({
+        label: "Quadtree narrow-band velocity extrapolation",
+        layout: extrapolationPipelineLayout,
+        compute: { module: extrapolationModule, entryPoint: "extrapolateVelocity" }
+      });
+    }
+    this.velocityExtrapolationPipeline = this.gpuCache.velocityExtrapolationPipeline;
+    const extrapolationGroup = (input: GPUTexture, output: GPUTexture) => device.createBindGroup({ layout: this.gpuCache.velocityExtrapolationLayout!, entries: [
+      { binding: 0, resource: input.createView() }, { binding: 1, resource: output.createView() },
+      { binding: 2, resource: { buffer: this.params } }, { binding: 3, resource: this.surfaceState.texture.createView() }
+    ] });
+    this.extrapolateOutToScratchGroup = extrapolationGroup(resources.velocityOut, resources.velocityScratch);
+    this.extrapolateScratchToOutGroup = extrapolationGroup(resources.velocityScratch, resources.velocityOut);
+    if (!this.gpuCache.velocityClampLayout || !this.gpuCache.velocityClampPipeline) {
+      this.gpuCache.velocityClampLayout = device.createBindGroupLayout({ entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
+      ] });
+      const module = device.createShaderModule({ label: "Quadtree CFL safety clamp", code: quadtreeVelocityClampShader });
+      this.gpuCache.velocityClampPipeline = device.createComputePipeline({ label: "Quadtree CFL safety clamp", layout: device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.velocityClampLayout] }), compute: { module, entryPoint: "clampVelocity" } });
+    }
+    this.velocityClampPipeline = this.gpuCache.velocityClampPipeline;
+    this.velocityClampBindGroup = device.createBindGroup({ layout: this.gpuCache.velocityClampLayout, entries: [
+      { binding: 0, resource: resources.velocityOut.createView() }, { binding: 1, resource: resources.velocityScratch.createView() },
+      { binding: 2, resource: { buffer: this.params } }, { binding: 3, resource: { buffer: this.velocityClampCounter } }
+    ] });
+    if (!this.gpuCache.divergenceLayout || !this.gpuCache.divergencePipeline) {
+      this.gpuCache.divergenceLayout = device.createBindGroupLayout({ entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
+      ] });
+      const module = device.createShaderModule({ label: "Quadtree divergence diagnostic", code: quadtreeDivergenceShader });
+      this.gpuCache.divergencePipeline = device.createComputePipeline({ label: "Quadtree divergence diagnostic", layout: device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.divergenceLayout] }), compute: { module, entryPoint: "computeDivergence" } });
+    }
+    this.divergencePipeline = this.gpuCache.divergencePipeline;
+    this.divergenceBindGroup = device.createBindGroup({ layout: this.gpuCache.divergenceLayout, entries: [
+      { binding: 0, resource: resources.velocityOut.createView() }, { binding: 1, resource: this.divergence.createView() }, { binding: 2, resource: { buffer: this.params } }
+    ] });
+    const names = ["refreshFaces", "refreshRows", "initialize", "precondition", "preconditionBlockIC", "preconditionJacobi", "preconditionLine", "preconditionPolynomialStart", "preconditionPolynomialMultiply", "preconditionPolynomialUpdate", "startDirection", "reduceInitial", "multiply", "applyStep", "applyStepPartial", "applyStepFinalize", "applyStepUpdate", "finishIteration", "finishIterationPartial", "finishIterationFinalize", "finishIterationUpdate", "mapPressure", "refreshFaceMls", "project", "coupleReduce", "coupleApply", "coupleImpulse"];
     this.pipelines = this.gpuCache.pipelines ?? (deferPipelineCompilation ? {} : Object.fromEntries(names.map((entryPoint) => [entryPoint, device.createComputePipeline(this.pipelineDescriptor(entryPoint))])));
     if (!this.gpuCache.pipelines && !deferPipelineCompilation) this.gpuCache.pipelines = this.pipelines;
     const all = [faces, rowOffsets, rowEntries, matrixBuffer, state, scalars, factorColumns, factorEntries];
-    this.bindGroup = device.createBindGroup({ layout, entries: [
+    const projectionEntries = (storagePressure: GPUTexture, sampledPressure: GPUTexture): GPUBindGroupEntry[] => [
       { binding: 0, resource: resources.velocityIn.createView() }, { binding: 1, resource: resources.velocityOut.createView() }, { binding: 2, resource: resources.volume.createView() },
       ...all.slice(0, 4).map((buffer, index) => ({ binding: index + 3, resource: { buffer } })),
       { binding: 7, resource: this.cellProjection.createView() },
       ...all.slice(4, 8).map((buffer, index) => ({ binding: index + 8, resource: { buffer } })), { binding: 12, resource: { buffer: this.params } },
       { binding: 13, resource: this.factorAux.createView() },
-      { binding: 14, resource: this.mlsRowIndex.createView() },
-      { binding: 15, resource: this.surfaceState.texture.createView() }
-    ] });
-    this.buffers = [...all, this.dispatchArgs];
+      { binding: 14, resource: this.cellPressureSamples.createView() },
+      { binding: 15, resource: this.surfaceState.texture.createView() },
+      { binding: 16, resource: storagePressure.createView() },
+      { binding: 17, resource: sampledPressure.createView() }
+    ];
+    this.bindGroup = device.createBindGroup({ layout, entries: projectionEntries(this.mappedPressureStorageFallback, this.mappedPressure) });
+    this.mapPressureBindGroup = device.createBindGroup({ layout, entries: projectionEntries(this.mappedPressure, this.mappedPressureSampledFallback) });
+    this.buffers = [...all, this.dispatchArgs, this.velocityClampCounter];
     if (options.debugPressureTimings && device.features.has("timestamp-query")) {
       this.phaseQuerySet = device.createQuerySet({ label: "Quadtree pressure phase timings", type: "timestamp", count: 8 });
       this.phaseQueryResolve = device.createBuffer({ label: "Quadtree pressure phase timing resolve", size: 64, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
     }
-    const allocatedBytes = this.buffers.reduce((sum, buffer) => sum + buffer.size, this.params.size + nx * ny * nz * 24);
+    const allocatedBytes = this.buffers.reduce((sum, buffer) => sum + buffer.size, this.params.size + nx * ny * nz * 28);
     const resourceUpload_ms = performance.now() - uploadStartedAt;
-    this.info = { leafCount: quadtree.leaves.length, pressureSampleCount: pressureGrid.samples.length, liquidDofCount: this.dofCount, faceCount, tallSegmentCount, ghostFaceCount, maximumNeighborRatio: quadtree.maximumNeighborRatio, compressionRatio: this.dofCount / Math.max(1, nx * ny * nz), maximumFluidScale: maximumSystemFluidScale, allocatedBytes, cpuTallGrid_ms: tallGrid_ms, cpuVariationalAssembly_ms: variationalAssembly_ms, cpuSystemPack_ms: systemPack_ms, cpuICFactorization_ms: packed.icFactorization_ms, cpuResourceUpload_ms: resourceUpload_ms, cpuTopologyPack_ms: performance.now() - constructorStartedAt, topologyReused: false, topologyReuseCount: 0, pressureIterationBudget: this.iterations, pressureIterationHardBudget: this.iterationBudget.hardBudget, factorLevelCount: packed.factorLevelCount };
+    this.info = { leafCount, pressureSampleCount, liquidDofCount: this.dofCount, faceCount, mlsProjectionRowCount: packed.mlsRowCount, tallSegmentCount, ghostFaceCount, maximumNeighborRatio, compressionRatio: this.dofCount / Math.max(1, nx * ny * nz), maximumFluidScale: maximumSystemFluidScale, allocatedBytes, cpuTallGrid_ms: tallGrid_ms, cpuVariationalAssembly_ms: variationalAssembly_ms, cpuSystemPack_ms: systemPack_ms, cpuICFactorization_ms: packed.icFactorization_ms, cpuResourceUpload_ms: resourceUpload_ms, cpuTopologyPack_ms: performance.now() - constructorStartedAt, topologyReused: false, topologyReuseCount: 0, pressureIterationBudget: this.iterations, pressureIterationHardBudget: this.iterationBudget.hardBudget, factorLevelCount: packed.factorLevelCount };
   }
 
   private pipelineDescriptor(entryPoint:string):GPUComputePipelineDescriptor{return{label:`Quadtree tall-cell ${entryPoint}`,layout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};}
   static async createAsync(device:GPUDevice,scene:SceneDescription,dims:{nx:number;ny:number;nz:number},resources:ProjectionResources,options:QuadtreeTallCellProjectionOptions,fields?:ProjectionFields,coupling?:QuadtreeRigidCoupling,onProgress:(label:string,completed:number,total:number)=>void=()=>{},cache?:QuadtreeGPUCache){const projection=new WebGPUQuadtreeTallCellProjection(device,scene,dims,resources,options,fields,coupling,true,cache);await projection.initializePipelines(onProgress);return projection;}
   async initializePipelines(onProgress:(label:string,completed:number,total:number)=>void=()=>{}){
     if(this.gpuCache.pipelines){this.pipelines=this.gpuCache.pipelines;return;}
-    const names=["refreshFaces","refreshRows","initialize","precondition","preconditionBlockIC","preconditionJacobi","preconditionLine","preconditionPolynomialStart","preconditionPolynomialMultiply","preconditionPolynomialUpdate","startDirection","reduceInitial","multiply","applyStep","applyStepPartial","applyStepFinalize","applyStepUpdate","finishIteration","finishIterationPartial","finishIterationFinalize","finishIterationUpdate","project","coupleReduce","coupleApply","coupleImpulse"];const pipelines:Record<string,GPUComputePipeline>={};for(let index=0;index<names.length;index+=1){const entryPoint=names[index];onProgress(`Adaptive pressure · ${entryPoint}`,index,names.length);pipelines[entryPoint]=await this.device.createComputePipelineAsync(this.pipelineDescriptor(entryPoint));onProgress(`Adaptive pressure · ${entryPoint}`,index+1,names.length);}this.pipelines=pipelines;this.gpuCache.pipelines=pipelines;
+    const names=["refreshFaces","refreshRows","initialize","precondition","preconditionBlockIC","preconditionJacobi","preconditionLine","preconditionPolynomialStart","preconditionPolynomialMultiply","preconditionPolynomialUpdate","startDirection","reduceInitial","multiply","applyStep","applyStepPartial","applyStepFinalize","applyStepUpdate","finishIteration","finishIterationPartial","finishIterationFinalize","finishIterationUpdate","mapPressure","refreshFaceMls","project","coupleReduce","coupleApply","coupleImpulse"];const pipelines:Record<string,GPUComputePipeline>={};for(let index=0;index<names.length;index+=1){const entryPoint=names[index];onProgress(`Adaptive pressure · ${entryPoint}`,index,names.length);pipelines[entryPoint]=await this.device.createComputePipelineAsync(this.pipelineDescriptor(entryPoint));onProgress(`Adaptive pressure · ${entryPoint}`,index+1,names.length);}this.pipelines=pipelines;this.gpuCache.pipelines=pipelines;
+  }
+
+  /**
+   * Count-scan-emit reference for Appendix A's resident rebuild path.
+   *
+   * The runtime polynomial/Jacobi/line preconditioners do not consume an
+   * incomplete factor.  For an uncoupled solve we can therefore emit the
+   * exact face graph and both CSR streams directly from the segmented grid,
+   * without first allocating a VariationalFace object graph and then walking
+   * it again in packSystem.  The same three phases map one-for-one to the GPU
+   * kernels; retaining this CPU implementation gives those kernels a compact
+   * byte-exact oracle.
+   */
+  static packUncoupledGrid(grid: TallPressureGrid, nx: number, ny: number, nz: number) {
+    const faceStride = 28, { quadtree, h } = grid, leafCount = quadtree.leaves.length;
+    const dofBySample = new Int32Array(grid.samples.length); dofBySample.fill(-1);
+    let dofCount = 0;
+    for (const sample of grid.samples) if (sample.liquid) dofBySample[sample.id] = dofCount++;
+
+    const segmentCounts = new Uint32Array(leafCount);
+    for (const segment of grid.segments) segmentCounts[segment.leaf] += 1;
+    const segmentStarts = new Uint32Array(leafCount + 1);
+    for (let leaf = 0; leaf < leafCount; leaf += 1) segmentStarts[leaf + 1] = segmentStarts[leaf] + segmentCounts[leaf];
+
+    type HorizontalVisitor = (axis: 0 | 2, x: number, z: number, transverseStart: number, transverseSpan: number, y0: number, y1: number, leftLeaf: number, rightLeaf: number) => void;
+    const visitHorizontal = (axis: 0 | 2, visitor?: HorizontalVisitor) => {
+      let count = 0;
+      for (let z = 0; z < quadtree.nz; z += 1) for (let x = 0; x < quadtree.nx; x += 1) {
+        const qx = x + (axis === 0 ? 1 : 0), qz = z + (axis === 2 ? 1 : 0);
+        if (qx >= quadtree.nx || qz >= quadtree.nz) continue;
+        const leftId = quadtree.leafAt[x + quadtree.nx * z], rightId = quadtree.leafAt[qx + quadtree.nx * qz];
+        if (leftId === rightId) continue;
+        const left = quadtree.leaves[leftId], right = quadtree.leaves[rightId];
+        if (axis === 0 && x + 1 !== left.x + left.size) continue;
+        if (axis === 2 && z + 1 !== left.z + left.size) continue;
+        if (axis === 0 && z > 0 && quadtree.leafAt[x + quadtree.nx * (z - 1)] === leftId && quadtree.leafAt[qx + quadtree.nx * (z - 1)] === rightId) continue;
+        if (axis === 2 && x > 0 && quadtree.leafAt[x - 1 + quadtree.nx * z] === leftId && quadtree.leafAt[x - 1 + quadtree.nx * qz] === rightId) continue;
+        const transverseStart = axis === 0 ? Math.max(left.z, right.z) : Math.max(left.x, right.x);
+        const transverseEnd = axis === 0 ? Math.min(left.z + left.size, right.z + right.size) : Math.min(left.x + left.size, right.x + right.size);
+        let li = segmentStarts[leftId], ri = segmentStarts[rightId];
+        const le = segmentStarts[leftId + 1], re = segmentStarts[rightId + 1];
+        while (li < le && ri < re) {
+          const leftSegment = grid.segments[li], rightSegment = grid.segments[ri];
+          const y0 = Math.max(leftSegment.firstY, rightSegment.firstY), y1 = Math.min(leftSegment.lastY + 1, rightSegment.lastY + 1);
+          if (y1 <= y0) { if (leftSegment.lastY < rightSegment.lastY) li += 1; else ri += 1; continue; }
+          count += 1; visitor?.(axis, x, z, transverseStart, transverseEnd - transverseStart, y0, y1, leftId, rightId);
+          if (leftSegment.lastY + 1 === y1) li += 1;
+          if (rightSegment.lastY + 1 === y1) ri += 1;
+        }
+      }
+      return count;
+    };
+    const horizontalFaceCount = visitHorizontal(0) + visitHorizontal(2);
+    let verticalFaceCount = 0;
+    for (const column of grid.samplesByLeaf) verticalFaceCount += Math.max(0, column.length - 1);
+    const faceCount = horizontalFaceCount + verticalFaceCount;
+    const faceBuffer = new ArrayBuffer(Math.max(1, faceCount * faceStride) * 4), faceU32 = new Uint32Array(faceBuffer), faceF32 = new Float32Array(faceBuffer);
+    const cellCount = nx * ny * nz, cellProjection = new Float32Array(cellCount * 4), cellTopology = adaptivePressureCellTopology(grid);
+    const cellPressureSamples = new Uint32Array(cellCount * 4); cellPressureSamples.fill(INVALID);
+    let faceIndex = 0, ghostFaceCount = 0, maximumSystemFluidScale = 0;
+    const sampleInterpolation = (column: TallPressureSample[], y: number) => {
+      let lower = column[0], upper = column[column.length - 1];
+      for (const sample of column) {
+        if (sample.y <= y) lower = sample;
+        if (sample.y >= y) { upper = sample; break; }
+      }
+      if (lower.id === upper.id) return [lower.id, INVALID, 1, 0] as const;
+      const t = (y - lower.y) / Math.max(1, upper.y - lower.y);
+      return [lower.id, upper.id, 1 - t, t] as const;
+    };
+    const emitFace = (axis: 0 | 1 | 2, boundsX: number, boundsZ: number, y0: number, y1: number, span: number, sampleIds: readonly number[], coefficients: readonly number[], volume: number, ghost: boolean) => {
+      const offset = faceIndex * faceStride, nodeCount = sampleIds.length;
+      let allPhi = 0, liquidPhi = 0, allLiquid = true;
+      for (let slot = 0; slot < 4; slot += 1) {
+        const sampleId = slot < nodeCount ? sampleIds[slot] : INVALID;
+        const dof = sampleId === INVALID ? -1 : dofBySample[sampleId];
+        faceU32[offset + slot] = dof < 0 ? INVALID : dof;
+        faceF32[offset + 4 + slot] = slot < nodeCount ? coefficients[slot] : 0;
+        if (sampleId !== INVALID) {
+          const sample = grid.samples[sampleId], leaf = quadtree.leaves[sample.leaf], coefficient = coefficients[slot];
+          faceU32[offset + 16 + slot] = leaf.x | (leaf.z << 10) | (sample.y << 20);
+          faceU32[offset + 20 + slot] = leaf.size;
+          allPhi += coefficient * sample.phi;
+          if (sample.liquid) liquidPhi += coefficient * sample.phi; else allLiquid = false;
+        }
+      }
+      const fluidScale = allLiquid ? 1 : Math.abs(liquidPhi) < 1e-12 ? 0 : Math.min(100, Math.max(0, allPhi / liquidPhi));
+      maximumSystemFluidScale = Math.max(maximumSystemFluidScale, fluidScale);
+      faceU32.set([boundsX, boundsZ, y0, y1], offset + 8);
+      faceU32[offset + 12] = span | (axis << 16) | (nodeCount << 18) | ((ghost ? 1 : 0) << 21);
+      faceF32[offset + 13] = 0; faceF32[offset + 14] = volume; faceF32[offset + 15] = volume * fluidScale; faceF32[offset + 26] = volume;
+      if (axis === 0 || axis === 2) {
+        for (let y = y0; y < y1; y += 1) for (let transverse = 0; transverse < span; transverse += 1) {
+          const x = axis === 0 ? boundsX : boundsX + transverse, z = axis === 2 ? boundsZ : boundsZ + transverse;
+          if (x < nx && z < nz) cellProjection[4 * (x + nx * (y + ny * z)) + axis] = faceIndex + 1;
+        }
+      } else {
+        const leaf = quadtree.leaves[grid.samples[sampleIds[0]].leaf];
+        for (let z = leaf.z; z < leaf.z + leaf.size && z < nz; z += 1) for (let x = leaf.x; x < leaf.x + leaf.size && x < nx; x += 1) for (let y = y0; y < y1 && y < ny; y += 1) cellProjection[4 * (x + nx * (y + ny * z)) + 1] = faceIndex + 1;
+      }
+      if (ghost) ghostFaceCount += 1;
+      faceIndex += 1;
+    };
+    const emitHorizontal: HorizontalVisitor = (axis, x, z, transverseStart, span, y0, y1, leftId, rightId) => {
+      const left = quadtree.leaves[leftId], right = quadtree.leaves[rightId], distance = axis === 0 ? (left.size + right.size) * h.x / 2 : (left.size + right.size) * h.z / 2;
+      const queryY = 0.5 * (y0 + y1) - 0.5;
+      const l = sampleInterpolation(grid.samplesByLeaf[leftId], queryY), r = sampleInterpolation(grid.samplesByLeaf[rightId], queryY);
+      const ids: number[] = [l[0]], coefficients: number[] = [-l[2] / distance];
+      if (l[1] !== INVALID) { ids.push(l[1]); coefficients.push(-l[3] / distance); }
+      ids.push(r[0]); coefficients.push(r[2] / distance);
+      if (r[1] !== INVALID) { ids.push(r[1]); coefficients.push(r[3] / distance); }
+      const volume = distance * (y1 - y0) * h.y * span * (axis === 0 ? h.z : h.x);
+      emitFace(axis, axis === 0 ? x : transverseStart, axis === 2 ? z : transverseStart, y0, y1, span, ids, coefficients, volume, false);
+    };
+    visitHorizontal(0, emitHorizontal); visitHorizontal(2, emitHorizontal);
+    for (const leaf of quadtree.leaves) {
+      const column = grid.samplesByLeaf[leaf.id];
+      for (let index = 0; index + 1 < column.length; index += 1) {
+        const bottom = column[index], top = column[index + 1], distance = (top.y - bottom.y) * h.y;
+        if (!(distance > 0)) continue;
+        emitFace(1, leaf.x, leaf.z, bottom.y, top.y, leaf.size, [bottom.id, top.id], [-1 / distance, 1 / distance], distance * leaf.size * leaf.size * h.x * h.z, top.y - bottom.y > 1);
+      }
+    }
+    if (faceIndex !== faceCount) throw new Error(`Direct variational face count mismatch: counted ${faceCount}, emitted ${faceIndex}`);
+
+    const incidentCounts = new Uint32Array(dofCount), matrixCounts = new Uint32Array(dofCount);
+    for (let face = 0; face < faceCount; face += 1) {
+      const offset = face * faceStride, nodeCount = (faceU32[offset + 12] >> 18) & 7;
+      let active = 0; for (let slot = 0; slot < nodeCount; slot += 1) if (faceU32[offset + slot] !== INVALID) active += 1;
+      for (let slot = 0; slot < nodeCount; slot += 1) { const dof = faceU32[offset + slot]; if (dof !== INVALID) { incidentCounts[dof] += 1; matrixCounts[dof] += active; } }
+    }
+    const rowOffsets = new Uint32Array(dofCount + 1), matrixOffsets = new Uint32Array(dofCount + 1);
+    for (let row = 0; row < dofCount; row += 1) { rowOffsets[row + 1] = rowOffsets[row] + incidentCounts[row]; matrixOffsets[row + 1] = matrixOffsets[row] + matrixCounts[row]; }
+    const entryCount = rowOffsets[dofCount], rowEntriesBuffer = new ArrayBuffer(Math.max(1, entryCount) * 8), rowEntryU32 = new Uint32Array(rowEntriesBuffer), rowEntryF32 = new Float32Array(rowEntriesBuffer);
+    const matrixEntryCount = matrixOffsets[dofCount], matrixWords = new Uint32Array(dofCount + 1 + 4 * matrixEntryCount), matrixFloats = new Float32Array(matrixWords.buffer);
+    matrixWords.set(matrixOffsets, 0);
+    const incidentCursor = rowOffsets.slice(0, dofCount), matrixCursor = matrixOffsets.slice(0, dofCount);
+    for (let face = 0; face < faceCount; face += 1) {
+      const offset = face * faceStride, nodeCount = (faceU32[offset + 12] >> 18) & 7;
+      for (let a = 0; a < nodeCount; a += 1) {
+        const row = faceU32[offset + a]; if (row === INVALID) continue;
+        const incident = incidentCursor[row]++; rowEntryU32[2 * incident] = face; rowEntryF32[2 * incident + 1] = faceF32[offset + 4 + a];
+        for (let b = 0; b < nodeCount; b += 1) {
+          const column = faceU32[offset + b]; if (column === INVALID) continue;
+          const entry = matrixCursor[row]++, base = dofCount + 1 + 4 * entry;
+          matrixWords[base] = column; matrixWords[base + 1] = face | (b << 30);
+          matrixFloats[base + 2] = 0; matrixFloats[base + 3] = faceF32[offset + 4 + a] * faceF32[offset + 4 + b];
+        }
+      }
+    }
+
+    let tallSegmentCount = 0;
+    for (const segment of grid.segments) {
+      const leaf = quadtree.leaves[segment.leaf], bottom = dofBySample[segment.bottomSample], top = dofBySample[segment.topSample];
+      const packedY = segment.firstY | (segment.lastY << 10), packedLeaf = leaf.x | (leaf.z << 10) | (leaf.size << 20);
+      if (segment.tall) tallSegmentCount += 1;
+      for (let z = leaf.z; z < leaf.z + leaf.size && z < nz; z += 1) for (let y = segment.firstY; y <= segment.lastY; y += 1) for (let x = leaf.x; x < leaf.x + leaf.size && x < nx; x += 1) {
+        const offset = 4 * (x + nx * (y + ny * z));
+        cellPressureSamples[offset] = bottom < 0 ? INVALID : bottom; cellPressureSamples[offset + 1] = top < 0 ? INVALID : top;
+        cellPressureSamples[offset + 2] = packedY; cellPressureSamples[offset + 3] = packedLeaf;
+      }
+    }
+    for (const leaf of quadtree.leaves) {
+      const column = grid.samplesByLeaf[leaf.id];
+      for (let y = 0; y < ny; y += 1) {
+        const [a, b, wa, wb] = interpolation(column, y), representedPhi = wa * grid.samples[a].phi + wb * grid.samples[b].phi;
+        for (let z = leaf.z; z < leaf.z + leaf.size && z < nz; z += 1) for (let x = leaf.x; x < leaf.x + leaf.size && x < nx; x += 1) cellProjection[4 * (x + nx * (y + ny * z)) + 3] = representedPhi < 0 ? leaf.size : -leaf.size;
+      }
+    }
+
+    const lineCounts = new Uint32Array(leafCount); let lineCount = 0;
+    for (const leaf of quadtree.leaves) { for (const sample of grid.samplesByLeaf[leaf.id]) if (dofBySample[sample.id] >= 0) lineCounts[leaf.id] += 1; if (lineCounts[leaf.id] > 0) lineCount += 1; }
+    const levelsOffset = 0, rowOffsetsOffset = 0, rowEntriesOffset = dofCount + 1, blockTableOffset = rowEntriesOffset;
+    // Keep the empty by-body and by-DOF CSR sentinels so offsets are byte-for-
+    // byte identical to packSystem's zero-coupling layout.
+    const couplingByBodyOffset = blockTableOffset, couplingByDofOffset = couplingByBodyOffset + 1, couplingTableOffset = couplingByDofOffset + 1;
+    const dofSamplesBase = couplingTableOffset, lineOffsetsBase = dofSamplesBase + 4 * dofCount, lineDofsBase = lineOffsetsBase + lineCount + 1;
+    const factorAuxWords = new Uint32Array(Math.max(4, lineDofsBase + dofCount));
+    for (const sample of grid.samples) {
+      const dof = dofBySample[sample.id]; if (dof < 0) continue;
+      const leaf = quadtree.leaves[sample.leaf], segment = grid.segments[sample.segment], base = dofSamplesBase + 4 * dof;
+      factorAuxWords[base] = leaf.x | (leaf.z << 10) | (sample.y << 20); factorAuxWords[base + 1] = leaf.size; factorAuxWords[base + 2] = segment.lastY - segment.firstY + 1;
+    }
+    let line = 0, lineDof = 0;
+    for (const leaf of quadtree.leaves) {
+      if (lineCounts[leaf.id] === 0) continue;
+      factorAuxWords[lineOffsetsBase + line] = lineDof;
+      for (const sample of grid.samplesByLeaf[leaf.id]) { const dof = dofBySample[sample.id]; if (dof >= 0) factorAuxWords[lineDofsBase + lineDof++] = dof; }
+      line += 1;
+    }
+    factorAuxWords[lineOffsetsBase + lineCount] = lineDof;
+    const factorColumns = new Uint8Array(Math.max(1, dofCount + 1) * 8);
+    const packed = {
+      faces: new Uint8Array(faceBuffer, 0, faceCount * faceStride * 4), rowOffsets, rowEntries: new Uint8Array(rowEntriesBuffer, 0, entryCount * 8), matrixWords,
+      cellProjection, cellTopology, factorColumns, factorEntries: new Uint8Array(0), factorAuxWords,
+      factorLevelCount: 1, levelsOffset, rowOffsetsOffset, rowEntriesOffset,
+      couplingByBodyOffset, couplingByDofOffset, couplingTableOffset, couplingBodyCount: 0, couplingDistinctDofs: 0, couplingBodyIndices: [] as number[],
+      dofSamplesBase, mlsRowCount: 0, cellPressureSamples, icFactorization_ms: 0,
+      lineOffsetsBase, lineDofsBase, lineCount, blockTableOffset, blockCount: 0
+    };
+    return { packed, dofCount, faceCount, ghostFaceCount, maximumFluidScale: maximumSystemFluidScale, tallSegmentCount };
   }
 
   static packSystem(system: VariationalSystem, nx: number, ny: number, nz: number, dynamicBodies: VariationalBody[], preconditioner: QuadtreeTallCellProjectionOptions["preconditioner"] = "ic0") {
@@ -1029,12 +1586,32 @@ export class WebGPUQuadtreeTallCellProjection {
     const faceStride = 28, faces = new ArrayBuffer(system.faces.length * faceStride * 4), faceU32 = new Uint32Array(faces), faceF32 = new Float32Array(faces);
     const incident: Array<Array<{ face: number; coefficient: number }>> = Array.from({ length: system.liquidSampleIds.length }, () => []);
     const cellProjection = new Float32Array(nx * ny * nz * 4), cellTopology = adaptivePressureCellTopology(system.grid);
+    // Per-cubic-cell adaptive pressure endpoints. The GPU uses this compact
+    // topology to perform Narita Algorithm 1 line 10 on demand after CG,
+    // avoiding materialized CPU MLS rows (paper Sec. 6's virtual split).
+    const cellPressureSamples = new Uint32Array(nx * ny * nz * 4);
+    cellPressureSamples.fill(INVALID);
+    for (const segment of system.grid.segments) {
+      const leaf = system.grid.quadtree.leaves[segment.leaf];
+      const bottom = system.dofBySample[segment.bottomSample], top = system.dofBySample[segment.topSample];
+      const packedY = segment.firstY | (segment.lastY << 10);
+      const packedLeaf = leaf.x | (leaf.z << 10) | (leaf.size << 20);
+      for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let y = segment.firstY; y <= segment.lastY; y += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) {
+        const offset = 4 * (x + nx * (y + ny * z));
+        cellPressureSamples[offset] = bottom < 0 ? INVALID : bottom;
+        cellPressureSamples[offset + 1] = top < 0 ? INVALID : top;
+        cellPressureSamples[offset + 2] = packedY;
+        cellPressureSamples[offset + 3] = packedLeaf;
+      }
+    }
     const preconditionerChoice = preconditioner ?? "ic0", useBlockIC = preconditionerChoice === "blockic";
     // jacobi/line/poly read only the refreshed CSR diagonal, so both the
     // symbolic assembly below and the numeric factorization are skipped on
     // every topology rebuild when no incomplete-Cholesky factor is consumed.
     const buildIncompleteCholesky = preconditionerChoice === "ic0" || useBlockIC;
-    const matrixRows: Array<Map<number, number>> = Array.from({ length: system.liquidSampleIds.length }, () => new Map<number, number>());
+    const matrixRows: Array<Map<number, number>> = buildIncompleteCholesky
+      ? Array.from({ length: system.liquidSampleIds.length }, () => new Map<number, number>())
+      : [];
     system.faces.forEach((face, faceIndex) => {
       const offset = faceIndex * faceStride, nodeCount = face.nodes.length;
       for (let slot = 0; slot < 4; slot += 1) {
@@ -1053,6 +1630,7 @@ export class WebGPUQuadtreeTallCellProjection {
       const va = face.volume * face.openFraction;
       faceF32[offset + 13] = face.volume * face.solidFlux;
       faceF32.set([va, va * face.fluidScale], offset + 14);
+      faceF32[offset + 26] = face.volume;
       if (buildIncompleteCholesky) {
         const matrixWeight = va * face.fluidScale;
         const liquidTerms: Array<{ dof: number; coefficient: number }> = [];
@@ -1078,25 +1656,23 @@ export class WebGPUQuadtreeTallCellProjection {
     // Per-step refresh turns these frozen face contributions into a flat CSR
     // matrix. Each row then performs dense f32/u32 streams with no face-graph
     // gather or four-slot walk inside the CG loop.
-    const matrixTerms = incident.map((row) => row.flatMap((item) => {
-      const face = system.faces[item.face];
-      return face.nodes.flatMap((sample, slot) => {
-        const node = system.dofBySample[sample];
-        return node < 0 ? [] : [{ node, faceSlot: item.face | (slot << 30), base: item.coefficient * face.coefficients[slot] }];
-      });
-    }));
-    const matrixEntryCount = matrixTerms.reduce((sum, row) => sum + row.length, 0);
-    const matrixWords = new Uint32Array(matrixTerms.length + 1 + 4 * matrixEntryCount), matrixFloats = new Float32Array(matrixWords.buffer);
+    let matrixEntryCount = 0;
+    for (const row of incident) for (const item of row) for (const sample of system.faces[item.face].nodes) if (system.dofBySample[sample] >= 0) matrixEntryCount += 1;
+    const matrixWords = new Uint32Array(incident.length + 1 + 4 * matrixEntryCount), matrixFloats = new Float32Array(matrixWords.buffer);
     let matrixEntry = 0;
-    matrixTerms.forEach((row, rowIndex) => {
+    incident.forEach((row, rowIndex) => {
       matrixWords[rowIndex] = matrixEntry;
       for (const item of row) {
-        const base = matrixTerms.length + 1 + 4 * matrixEntry;
-        matrixWords[base] = item.node; matrixWords[base + 1] = item.faceSlot;
-        matrixFloats[base + 2] = 0; matrixFloats[base + 3] = item.base; matrixEntry += 1;
+        const face = system.faces[item.face];
+        for (let slot = 0; slot < face.nodes.length; slot += 1) {
+          const node = system.dofBySample[face.nodes[slot]]; if (node < 0) continue;
+          const base = incident.length + 1 + 4 * matrixEntry;
+          matrixWords[base] = node; matrixWords[base + 1] = item.face | (slot << 30);
+          matrixFloats[base + 2] = 0; matrixFloats[base + 3] = item.coefficient * face.coefficients[slot]; matrixEntry += 1;
+        }
       }
     });
-    matrixWords[matrixTerms.length] = matrixEntry;
+    matrixWords[incident.length] = matrixEntry;
     for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
       const leafId = system.grid.quadtree.leafAt[x + nx * z], leaf = system.grid.quadtree.leaves[leafId];
       for (let y = 0; y < ny; y += 1) {
@@ -1110,9 +1686,9 @@ export class WebGPUQuadtreeTallCellProjection {
     // Bridson's public-domain modified incomplete Cholesky level-zero
     // factorization (omega=0.97, minimum pivot ratio=0.25), generalized from
     // the regular seven-point stencil to this sparse variational matrix.
-    const n = matrixRows.length, factorStarts = new Uint32Array(n + 1), factorRows: number[] = [], factorValues: number[] = [];
-    const factorPositions: Array<Map<number, number>> = Array.from({ length: n }, () => new Map<number, number>());
-    const originalDiagonal = new Float64Array(n), workDiagonal = new Float64Array(n), inverseDiagonal = new Float64Array(n);
+    const n = system.liquidSampleIds.length, factorStarts = new Uint32Array(n + 1), factorRows: number[] = [], factorValues: number[] = [];
+    const factorPositions: Array<Map<number, number>> = buildIncompleteCholesky ? Array.from({ length: n }, () => new Map<number, number>()) : [];
+    const originalDiagonal = new Float64Array(buildIncompleteCholesky ? n : 0), workDiagonal = new Float64Array(buildIncompleteCholesky ? n : 0), inverseDiagonal = new Float64Array(buildIncompleteCholesky ? n : 0);
     // blockic partitions the DOFs into blocks of whole leaf columns (up to
     // ~64 rows each; a deeper single column still forms one block). DOF ids
     // follow sample ids, which populateTallPressureGrid assigns leaf by leaf
@@ -1172,21 +1748,21 @@ export class WebGPUQuadtreeTallCellProjection {
     } else factorStarts[n] = 0;
     const factorColumnsBuffer = new ArrayBuffer(Math.max(1, n + 1) * 8), factorColumnsU32 = new Uint32Array(factorColumnsBuffer), factorColumnsF32 = new Float32Array(factorColumnsBuffer);
     for (let column = 0; column <= n; column += 1) factorColumnsU32[2 * column] = factorStarts[column];
-    for (let column = 0; column < n; column += 1) factorColumnsF32[2 * column + 1] = inverseDiagonal[column];
+    for (let column = 0; column < n; column += 1) factorColumnsF32[2 * column + 1] = inverseDiagonal[column] ?? 0;
     const factorEntriesBuffer = new ArrayBuffer(Math.max(1, factorRows.length) * 8), factorEntriesU32 = new Uint32Array(factorEntriesBuffer), factorEntriesF32 = new Float32Array(factorEntriesBuffer);
     factorRows.forEach((row, index) => { factorEntriesU32[2 * index] = row; factorEntriesF32[2 * index + 1] = factorValues[index]; });
-    const rowFactors: Array<Array<{ column: number; value: number }>> = Array.from({ length: n }, () => []);
-    for (let column = 0; column < n; column += 1) for (let entryIndex = factorStarts[column]; entryIndex < factorStarts[column + 1]; entryIndex += 1) rowFactors[factorRows[entryIndex]].push({ column, value: factorValues[entryIndex] });
-    const forwardLevel = new Uint32Array(n), backwardLevel = new Uint32Array(n);
-    for (let row = 0; row < n; row += 1) for (const factor of rowFactors[row]) forwardLevel[row] = Math.max(forwardLevel[row], forwardLevel[factor.column] + 1);
-    for (let column = n - 1; column >= 0; column -= 1) for (let entryIndex = factorStarts[column]; entryIndex < factorStarts[column + 1]; entryIndex += 1) backwardLevel[column] = Math.max(backwardLevel[column], backwardLevel[factorRows[entryIndex]] + 1);
+    const rowFactors: Array<Array<{ column: number; value: number }>> = buildIncompleteCholesky ? Array.from({ length: n }, () => []) : [];
+    if (buildIncompleteCholesky) for (let column = 0; column < n; column += 1) for (let entryIndex = factorStarts[column]; entryIndex < factorStarts[column + 1]; entryIndex += 1) rowFactors[factorRows[entryIndex]].push({ column, value: factorValues[entryIndex] });
+    const forwardLevel = new Uint32Array(buildIncompleteCholesky ? n : 0), backwardLevel = new Uint32Array(buildIncompleteCholesky ? n : 0);
+    if (buildIncompleteCholesky) for (let row = 0; row < n; row += 1) for (const factor of rowFactors[row]) forwardLevel[row] = Math.max(forwardLevel[row], forwardLevel[factor.column] + 1);
+    if (buildIncompleteCholesky) for (let column = n - 1; column >= 0; column -= 1) for (let entryIndex = factorStarts[column]; entryIndex < factorStarts[column + 1]; entryIndex += 1) backwardLevel[column] = Math.max(backwardLevel[column], backwardLevel[factorRows[entryIndex]] + 1);
     let deepestLevel = 0;
-    for (let row = 0; row < n; row += 1) deepestLevel = Math.max(deepestLevel, forwardLevel[row], backwardLevel[row]);
+    if (buildIncompleteCholesky) for (let row = 0; row < n; row += 1) deepestLevel = Math.max(deepestLevel, forwardLevel[row], backwardLevel[row]);
     // With cross-block factor edges dropped, the global forward/backward
     // levels are also each block's local levels; levelCount stays the reported
     // schedule depth for either preconditioner.
     const levelCount = Math.max(1, 1 + deepestLevel);
-    const schedule = new Uint32Array(Math.max(1, 2 * n)); let scheduleOffset = 0;
+    const schedule = new Uint32Array(Math.max(1, buildIncompleteCholesky ? 2 * n : 1)); let scheduleOffset = 0;
     let levels = new Uint32Array(0), blockTable = new Uint32Array(0);
     if (useBlockIC) {
       // One [rowStart, rowEnd) header per block; the GPU lane that owns the
@@ -1194,7 +1770,7 @@ export class WebGPUQuadtreeTallCellProjection {
       // the triangular dependencies without any level schedule.
       blockTable = new Uint32Array(2 * blockCount);
       for (let block = 0; block < blockCount; block += 1) blockTable.set([blockStarts[block], block + 1 < blockCount ? blockStarts[block + 1] : n], 2 * block);
-    } else {
+    } else if (buildIncompleteCholesky) {
       const forwardByLevel: number[][] = Array.from({ length: levelCount }, () => []), backwardByLevel: number[][] = Array.from({ length: levelCount }, () => []);
       for (let row = 0; row < n; row += 1) { forwardByLevel[forwardLevel[row]].push(row); backwardByLevel[backwardLevel[row]].push(row); }
       levels = new Uint32Array(levelCount * 4);
@@ -1207,7 +1783,7 @@ export class WebGPUQuadtreeTallCellProjection {
     }
     const factorRowOffsets = new Uint32Array(n + 1), factorRowEntriesBuffer = new ArrayBuffer(Math.max(1, factorRows.length) * 8), factorRowEntriesU32 = new Uint32Array(factorRowEntriesBuffer), factorRowEntriesF32 = new Float32Array(factorRowEntriesBuffer);
     let rowEntry = 0;
-    for (let row = 0; row < n; row += 1) {
+    if (buildIncompleteCholesky) for (let row = 0; row < n; row += 1) {
       factorRowOffsets[row] = rowEntry;
       for (const factor of rowFactors[row]) { factorRowEntriesU32[2 * rowEntry] = factor.column; factorRowEntriesF32[2 * rowEntry + 1] = factor.value; rowEntry += 1; }
     }
@@ -1236,13 +1812,12 @@ export class WebGPUQuadtreeTallCellProjection {
     const couplingByBodyOffset = blockTableOffset + blockTable.length;
     const couplingByDofOffset = couplingByBodyOffset + (couplingBodyCount + 1) + couplingRowCount * 8;
     const couplingTableOffset = couplingByDofOffset + couplingDistinctDofs + (couplingDistinctDofs + 1) + couplingRowCount * 8;
-    // MLS pressure-mapping rows (Narita Alg. 1 line 10 via Ando--Batty MLS)
-    // follow the couplings in the same aux texture.
-    const mlsRows = buildMlsProjectionRows(system);
-    const mlsEntryCount = mlsRows.reduce((sum, row) => sum + row.entries.length, 0);
-    const mlsOffsetsBase = couplingTableOffset + couplingBodyCount * 12;
+    // Pressure-sample geometry follows coupling data in the shared auxiliary
+    // texture. `mapPressure` gathers these records and evaluates the fixed
+    // 4x4 MLS system in registers, so no per-face/per-cell rows are packed.
+    const dofSamplesBase = couplingTableOffset + couplingBodyCount * 12;
     const lineRows = system.grid.samplesByLeaf.map((column) => column.map((sample) => system.dofBySample[sample.id]).filter((dof) => dof >= 0)).filter((row) => row.length > 0);
-    const lineOffsetsBase = mlsOffsetsBase + (mlsRows.length + 1) + mlsEntryCount * 2;
+    const lineOffsetsBase = dofSamplesBase + 4 * n;
     const lineDofsBase = lineOffsetsBase + lineRows.length + 1;
     const lineDofCount = lineRows.reduce((sum, row) => sum + row.length, 0);
     const totalWords = lineDofsBase + lineDofCount;
@@ -1284,20 +1859,14 @@ export class WebGPUQuadtreeTallCellProjection {
         for (let component = 0; component < 9; component += 1) factorAuxFloats[base + 1 + component] = body.inverseInertia[component];
       });
     }
-    const mlsIndex = new Uint32Array(nx * ny * nz * 4);
-    {
-      const entriesBase = mlsOffsetsBase + mlsRows.length + 1;
-      let cursor = 0;
-      mlsRows.forEach((row, index) => {
-        factorAuxWords[mlsOffsetsBase + index] = cursor;
-        for (const [dof, weight] of row.entries) {
-          factorAuxWords[entriesBase + 2 * cursor] = dof;
-          factorAuxFloats[entriesBase + 2 * cursor + 1] = weight;
-          cursor += 1;
-        }
-        mlsIndex[4 * row.cell + row.axis] = index + 1;
-      });
-      factorAuxWords[mlsOffsetsBase + mlsRows.length] = cursor;
+    for (const sampleId of system.liquidSampleIds) {
+      const dof = system.dofBySample[sampleId], sample = system.grid.samples[sampleId];
+      const leaf = system.grid.quadtree.leaves[sample.leaf], segment = system.grid.segments[sample.segment];
+      const base = dofSamplesBase + 4 * dof;
+      factorAuxWords[base] = leaf.x | (leaf.z << 10) | (sample.y << 20);
+      factorAuxWords[base + 1] = leaf.size;
+      factorAuxWords[base + 2] = segment.lastY - segment.firstY + 1;
+      factorAuxWords[base + 3] = 0;
     }
     {
       let cursor = 0;
@@ -1310,7 +1879,7 @@ export class WebGPUQuadtreeTallCellProjection {
       factorAuxWords, factorLevelCount: levelCount, levelsOffset, rowOffsetsOffset, rowEntriesOffset,
       couplingByBodyOffset, couplingByDofOffset, couplingTableOffset, couplingBodyCount, couplingDistinctDofs,
       couplingBodyIndices: couplings.map((coupling) => coupling.body),
-      mlsOffsetsBase, mlsRowCount: mlsRows.length, mlsIndex, icFactorization_ms,
+      dofSamplesBase, mlsRowCount: 0, cellPressureSamples, icFactorization_ms,
       lineOffsetsBase, lineDofsBase, lineCount: lineRows.length,
       blockTableOffset, blockCount
     };
@@ -1319,6 +1888,7 @@ export class WebGPUQuadtreeTallCellProjection {
   encode(encoder: GPUCommandEncoder, nx: number, ny: number, nz: number, timestampWrites?: GPUComputePassTimestampWrites) {
     this.solveSequence += 1;
     encoder.clearBuffer(this.scalarBuffer);
+    encoder.clearBuffer(this.velocityClampCounter);
     const coupled = this.couplingBodyCount > 0;
     const rowGroups = Math.ceil(this.dofCount / 128);
     const preconditioner = this.options.preconditioner ?? "ic0";
@@ -1345,7 +1915,7 @@ export class WebGPUQuadtreeTallCellProjection {
     };
     const withPass = (writes: GPUComputePassTimestampWrites | undefined, encode: (direct: (entry: string, workgroups: number, y?: number, z?: number) => void, indirect: (entry: string, offset: number) => void, pass: GPUComputePassEncoder) => void) => {
       const pass = encoder.beginComputePass(writes ? { timestampWrites: writes } : undefined);
-      const direct = (entry: string, workgroups: number, y = 1, z = 1) => { pass.setPipeline(this.pipelines[entry]); pass.setBindGroup(0, this.bindGroup); pass.dispatchWorkgroups(workgroups, y, z); };
+      const direct = (entry: string, workgroups: number, y = 1, z = 1) => { pass.setPipeline(this.pipelines[entry]); pass.setBindGroup(0, entry === "mapPressure" ? this.mapPressureBindGroup : this.bindGroup); pass.dispatchWorkgroups(workgroups, y, z); };
       const indirect = (entry: string, offset: number) => { pass.setPipeline(this.pipelines[entry]); pass.setBindGroup(0, this.bindGroup); pass.dispatchWorkgroupsIndirect(this.dispatchArgs, offset); };
       encode(direct, indirect, pass); pass.end();
     };
@@ -1367,8 +1937,14 @@ export class WebGPUQuadtreeTallCellProjection {
         else indirect("finishIteration", 12);
       }
     };
+    const mapPressure = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void) => {
+      direct("mapPressure", Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
+    };
     const project = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void) => {
       if (coupled) direct("coupleImpulse", 1);
+      // Paper Sec. 6: virtually split adaptive cells only for pressure
+      // interpolation, then discard the temporary cubical pressure field.
+      direct("refreshFaceMls", Math.ceil(this.info.faceCount / 128));
       direct("project", Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
     };
     if (this.phaseQuerySet && this.phaseQueryResolve) {
@@ -1378,26 +1954,63 @@ export class WebGPUQuadtreeTallCellProjection {
       withPass(writes(0, 1), (direct) => setup(direct));
       withPass(writes(2, 3), (direct, indirect, pass) => iterations(0, firstCount, direct, indirect, pass));
       withPass(writes(4, 5), (direct, indirect, pass) => iterations(firstCount, this.iterations, direct, indirect, pass));
-      withPass(writes(6, 7), (direct) => project(direct));
+      withPass({ querySet: this.phaseQuerySet, beginningOfPassWriteIndex: 6 }, (direct) => mapPressure(direct));
+      withPass({ querySet: this.phaseQuerySet, endOfPassWriteIndex: 7 }, (direct) => project(direct));
       encoder.resolveQuerySet(this.phaseQuerySet, 0, 8, this.phaseQueryResolve, 0);
       if (timestampWrites) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: timestampWrites.querySet, beginningOfPassWriteIndex: timestampWrites.endOfPassWriteIndex } }); marker.end(); }
     } else {
-      // Default path stays in one pass; the debug split is deliberately opt-in.
-      withPass(timestampWrites, (direct, indirect, pass) => { setup(direct); iterations(0, this.iterations, direct, indirect, pass); project(direct); });
+      // MLS materialization writes a transient texture, so WebGPU requires a
+      // pass boundary before the conservative projection samples it.
+      withPass(timestampWrites ? { querySet: timestampWrites.querySet, beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } : undefined,
+        (direct, indirect, pass) => { setup(direct); iterations(0, this.iterations, direct, indirect, pass); });
+      withPass(undefined, (direct) => mapPressure(direct));
+      withPass(timestampWrites ? { querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex } : undefined,
+        (direct) => project(direct));
     }
+    // A pressure kick can be created inside this solve, after the frame's
+    // proactive subdivision decision. Clamp only that last-resort overshoot
+    // to CFL 0.9 and count every touched component for the debug HUD.
+    {
+      const pass = encoder.beginComputePass({ label: "Quadtree current-step CFL safety clamp" });
+      pass.setPipeline(this.velocityClampPipeline); pass.setBindGroup(0, this.velocityClampBindGroup);
+      pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); pass.end();
+      encoder.copyTextureToTexture({ texture: this.resources.velocityScratch }, { texture: this.resources.velocityOut }, [nx, ny, nz]);
+    }
+    // Ando--Batty-style narrow-band extrapolation: each dispatch grows the
+    // set of known face velocities by one 6-neighbour ring. Three rings cover
+    // every level-set backtrace admitted by the 3h surface band.
+    for (let sweep = 0; sweep < 3; sweep += 1) {
+      const pass = encoder.beginComputePass({ label: `Quadtree velocity extrapolation ${sweep + 1}/3` });
+      pass.setPipeline(this.velocityExtrapolationPipeline);
+      pass.setBindGroup(0, sweep % 2 === 0 ? this.extrapolateOutToScratchGroup : this.extrapolateScratchToOutGroup);
+      pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
+      pass.end();
+    }
+    // Odd sweep count leaves the complete field in scratch. Copying it back
+    // keeps the projection's public velocity texture identity stable.
+    encoder.copyTextureToTexture({ texture: this.resources.velocityScratch }, { texture: this.resources.velocityOut }, [nx, ny, nz]);
+    const divergencePass = encoder.beginComputePass({ label: "Quadtree post-projection divergence diagnostic" });
+    divergencePass.setPipeline(this.divergencePipeline); divergencePass.setBindGroup(0, this.divergenceBindGroup);
+    divergencePass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); divergencePass.end();
   }
 
-  encodeSurface(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState) {
+  encodeSurface(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState, cflSafetyDt_s = dt_s) {
     // The projection's own inflowTiming.x gates applyInflowVelocity in project.
     this.device.queue.writeBuffer(this.params, 176, new Float32Array([inflow?.strength ?? 0, 0, 0, 0]));
+    // The safety limit uses the whole submitted frame interval so a spike
+    // created in the final substep cannot cross a cell before the next frame.
+    this.device.queue.writeBuffer(this.params, 28, new Float32Array([cflSafetyDt_s]));
     this.surfaceState.encode(encoder, dt_s, inflow);
   }
-  readSurfaceDiagnostics() { return this.surfaceState.readVolumeDiagnostics(); }
+  async readSurfaceDiagnostics() { const diagnostics = await this.surfaceState.readVolumeDiagnostics(); this.levelSetMismatchFraction = diagnostics.mismatchFraction; return diagnostics; }
   get surfaceDiagnostics() { return this.surfaceState.volumeDiagnostics; }
   addSurfaceReferenceVolumeCells(cells: number) { this.surfaceState.addReferenceVolumeCells(cells); }
 
   /** Resident signed-distance field; texture identity is stable across topology rebuilds. */
   get levelSetTexture() { return this.surfaceState.texture; }
+  get pressureTexture() { return this.mappedPressure; }
+  get pressureSamplesTexture() { return this.cellPressureSamples; }
+  get divergenceTexture() { return this.divergence; }
 
   encodeBodyImpulseReadback(encoder: GPUCommandEncoder) {
     if (!this.coupling?.dynamic || this.couplingBodyCount === 0) return undefined;
@@ -1431,9 +2044,10 @@ export class WebGPUQuadtreeTallCellProjection {
     // retain the diagnostics carried over by rebuildFromState until it encodes.
     if (this.solveSequence === 0) return;
     const phaseBytes = this.phaseQueryResolve ? 64 : 0;
-    const readback = this.device.createBuffer({ label: "Quadtree solve diagnostics", size: 48 + phaseBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const readback = this.device.createBuffer({ label: "Quadtree solve diagnostics", size: 56 + phaseBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder(); encoder.copyBufferToBuffer(this.scalarBuffer, 0, readback, 0, 48);
-    if (this.phaseQueryResolve) encoder.copyBufferToBuffer(this.phaseQueryResolve, 0, readback, 48, 64);
+    encoder.copyBufferToBuffer(this.velocityClampCounter, 0, readback, 48, 4);
+    if (this.phaseQueryResolve) encoder.copyBufferToBuffer(this.phaseQueryResolve, 0, readback, 56, 64);
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
@@ -1442,8 +2056,9 @@ export class WebGPUQuadtreeTallCellProjection {
       this.lastRelativeResidual = Math.sqrt(Math.max(0, solve[7]) / Math.max(1e-30, solve[3]));
       this.lastResidualRms = Math.sqrt(Math.max(0, solve[7]) / Math.max(1, this.dofCount));
       this.lastInitialResidualRms = Math.sqrt(Math.max(0, solve[3]) / Math.max(1, this.dofCount));
+      this.info.velocityClampCount = new Uint32Array(readback.getMappedRange(48, 4))[0];
       if (phaseBytes) {
-        const times = new BigUint64Array(readback.getMappedRange(48, 64));
+        const times = new BigUint64Array(readback.getMappedRange(56, 64));
         this.info.pressurePhaseTimings = {
           setup_ms: Number(times[1] - times[0]) / 1e6,
           firstIterations_ms: Number(times[3] - times[2]) / 1e6,
@@ -1480,21 +2095,50 @@ export class WebGPUQuadtreeTallCellProjection {
     const activeBodies = bodies ?? this.coupling?.bodies;
     const builder = new WebGPUQuadtreeBuilder(this.device, this.dims, h, this.options.maximumLeafSize, this.options.adaptivityStrength, 3, this.gpuCache.construction);
     this.gpuCache.construction = builder.cache;
-    const built = await builder.build({
+    const currentPreconditioner = this.options.preconditioner ?? "ic0";
+    const gpuSparseRequested = !this.coupling && (currentPreconditioner === "poly" || currentPreconditioner === "jacobi");
+    const builderInputs = {
       velocity: this.resources.velocityOut, volume: this.resources.volume, levelSet: this.surfaceState.texture,
       explicitSizing: initialSizing(this.scene, nx, nz, h, activeBodies), diagnosticBuffer: this.scalarBuffer, diagnosticBytes: scalarBytes
-    });
+    };
+    let built = await builder.build({ ...builderInputs, readLeafProfiles: !gpuSparseRequested });
     this.applySolveFeedback(built.diagnostics);
     const nextOptions = this.feedbackOptions();
     const nextCoupling = this.coupling ? { bodies: activeBodies ?? this.coupling.bodies, dynamic: this.coupling.dynamic } : undefined;
-    // Decode, tall-cell segmentation, variational assembly, IC factorization,
-    // level scheduling, and MLS packing are pure CPU work and run off-main-thread
-    // in browsers. Node/test environments use the identical direct fallback.
-    const prepared = await prepareQuadtreeProjectionInWorker(this.gpuCache, {
+    // Appendix A: uncoupled parallel-preconditioned solves keep segmentation,
+    // face enumeration, and CSR emission on the GPU. The worker remains the
+    // byte-layout oracle and handles rigid coupling / incomplete factors.
+    const preconditioner = nextOptions.preconditioner ?? "ic0";
+    let prepared: PreparedProjectionCPU | undefined;
+    if (!nextCoupling && (preconditioner === "poly" || preconditioner === "jacobi")) {
+      this.gpuCache.gpuPack ??= new WebGPUQuadtreePackBuilder(this.device, this.dims, h, nextOptions.opticalDepthFraction);
+      const gpuPacked = await this.gpuCache.gpuPack.build(built.packedCells, this.surfaceState.texture, {
+        dofCount: this.dofCount, faceCount: this.info.faceCount, pressureSampleCount: this.info.pressureSampleCount
+      }, true);
+      if (gpuPacked) prepared = {
+        leafCount: gpuPacked.leafCount, pressureSampleCount: gpuPacked.pressureSampleCount, maximumNeighborRatio: gpuPacked.maximumNeighborRatio,
+        topologyWords: built.packedCells.slice(), topologyIdentityComplete: false, packed: gpuPacked.packed, resident: gpuPacked.resident,
+        displacedVolumes: [], dofCount: gpuPacked.dofCount, faceCount: gpuPacked.faceCount, ghostFaceCount: gpuPacked.ghostFaceCount,
+        maximumFluidScale: gpuPacked.maximumFluidScale, tallSegmentCount: gpuPacked.tallSegmentCount,
+        quadtreeDecode_ms: 0, tallGrid_ms: 0, variationalAssembly_ms: 0, systemPack_ms: 0, icFactorization_ms: 0, gpuPack_ms: gpuPacked.gpuWall_ms
+      };
+    }
+    if (!prepared && built.columnProfiles.length === 0) {
+      // Capacity growth is retried inside the GPU packer. Reaching this branch
+      // therefore means validation/device corruption; recover through the
+      // reference worker after obtaining only the profiles it requires.
+      built = await builder.build({ ...builderInputs, readLeafProfiles: true });
+      this.applySolveFeedback(built.diagnostics);
+    }
+    prepared ??= await prepareQuadtreeProjectionInWorker(this.gpuCache, {
       scene: this.scene, dims: this.dims, options: nextOptions,
-      packedCells: built.packedCells, columnProfiles: built.columnProfiles, coupling: nextCoupling
+      packedCells: built.packedCells, columnProfiles: built.columnProfiles,
+      reuseTopologyWords: nextCoupling ? undefined : this.topologyWords,
+      coupling: nextCoupling
     });
-    const reuseTopology = !this.coupling && sameWords(this.topologyWords, prepared.topologyWords);
+    const topologyReadbackBytes = built.columnProfiles.byteLength + nx * nz * 4 + scalarBytes + 16;
+    const reuseTopology = !this.coupling && prepared.topologyIdentityComplete !== false
+      && (prepared.reusedTopology === true || sameWords(this.topologyWords, prepared.topologyWords));
     let next: WebGPUQuadtreeTallCellProjection;
     if (reuseTopology) {
       const uploadStartedAt = performance.now();
@@ -1510,7 +2154,8 @@ export class WebGPUQuadtreeTallCellProjection {
       // eslint-disable-next-line @typescript-eslint/no-this-alias
       next = this;
     } else {
-      const fields: ProjectionFields = { quadtree: prepared.quadtree, pressureGrid: prepared.pressureGrid, topologyWords: prepared.topologyWords, prepared };
+      if (!prepared.packed) throw new Error("Changed topology rebuild did not return a complete projection pack");
+      const fields: ProjectionFields = { topologyWords: prepared.topologyWords, prepared };
       next = this.gpuCache.pipelines
         ? new WebGPUQuadtreeTallCellProjection(this.device, this.scene, this.dims, this.resources, nextOptions, fields, nextCoupling, false, this.gpuCache)
         : await WebGPUQuadtreeTallCellProjection.createAsync(this.device, this.scene, this.dims, this.resources, nextOptions, fields, nextCoupling, undefined, this.gpuCache);
@@ -1521,13 +2166,14 @@ export class WebGPUQuadtreeTallCellProjection {
     next.levelSetMismatchFraction = 0;
     next.info.gpuConstruction_ms = built.gpuWall_ms;
     next.info.gpuConstructionKernel_ms = built.gpuKernel_ms;
+    next.info.gpuSparsePack_ms = prepared.gpuPack_ms;
     next.info.cpuRedistance_ms = 0;
     next.info.cpuQuadtreeDecode_ms = prepared.quadtreeDecode_ms;
     next.info.cpuVariationalAssembly_ms = reuseTopology ? 0 : prepared.variationalAssembly_ms;
     next.info.cpuSystemPack_ms = reuseTopology ? 0 : prepared.systemPack_ms;
     next.info.cpuICFactorization_ms = prepared.icFactorization_ms;
     next.info.cpuTopologyPack_ms = prepared.quadtreeDecode_ms + prepared.tallGrid_ms + prepared.variationalAssembly_ms + prepared.systemPack_ms;
-    next.info.topologyReadbackBytes = built.columnProfiles.byteLength + nx * nz * 4 + scalarBytes + 16;
+    next.info.topologyReadbackBytes = topologyReadbackBytes;
     const solve = built.diagnostics;
     next.info.pressureIterationsUsed = Math.round(solve[9] ?? 0);
     next.info.pressureConverged = solve[3] > 0 && solve[2] <= this.options.relativeTolerance ** 2 * solve[3];
@@ -1543,8 +2189,8 @@ export class WebGPUQuadtreeTallCellProjection {
   get topologyTexture() { return this.cellTopology; }
   get preconditioner() { const value = this.options.preconditioner; return value === "blockic" || value === "jacobi" || value === "line" || value === "poly" ? value : "ic0"; }
 
-  destroySharedSurface() { this.surfaceState.destroy(); WebGPUQuadtreeBuilder.destroyCache(this.gpuCache.construction); this.gpuCache.cpuWorker?.terminate(); this.gpuCache.cpuWorker = undefined; }
-  destroy() { for (const buffer of this.buffers) buffer.destroy(); this.params.destroy(); this.cellProjection.destroy(); this.cellTopology.destroy(); this.factorAux.destroy(); this.mlsRowIndex.destroy(); this.phaseQuerySet?.destroy(); this.phaseQueryResolve?.destroy(); }
+  destroySharedSurface() { this.surfaceState.destroy(); WebGPUQuadtreeBuilder.destroyCache(this.gpuCache.construction); this.gpuCache.gpuPack?.destroy(); this.gpuCache.gpuPack = undefined; this.gpuCache.cpuWorker?.terminate(); this.gpuCache.cpuWorker = undefined; }
+  destroy() { for (const buffer of this.buffers) buffer.destroy(); this.params.destroy(); this.cellProjection.destroy(); this.cellTopology.destroy(); this.factorAux.destroy(); this.cellPressureSamples.destroy(); this.mappedPressure.destroy(); this.mappedPressureStorageFallback.destroy(); this.mappedPressureSampledFallback.destroy(); this.divergence.destroy(); this.phaseQuerySet?.destroy(); this.phaseQueryResolve?.destroy(); }
 }
 
 export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput): PreparedProjectionCPU {
@@ -1557,6 +2203,33 @@ export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput)
   const pressureGrid = populateTallPressureGridFromLeafProfiles(quadtree, input.columnProfiles, ny, h, input.options.opticalDepthFraction);
   const topologyWords = pressureTopologyWords(pressureGrid);
   const tallGrid_ms = performance.now() - tallStartedAt;
+  if (input.reuseTopologyWords && sameWords(input.reuseTopologyWords, topologyWords)) {
+    return {
+      topologyWords, reusedTopology: true,
+      leafCount: quadtree.leaves.length,
+      pressureSampleCount: pressureGrid.samples.length,
+      maximumNeighborRatio: quadtree.maximumNeighborRatio,
+      displacedVolumes: [], dofCount: 0, faceCount: 0, ghostFaceCount: 0,
+      maximumFluidScale: 0, tallSegmentCount: pressureGrid.segments.filter((segment) => segment.tall).length,
+      quadtreeDecode_ms, tallGrid_ms, variationalAssembly_ms: 0, systemPack_ms: 0, icFactorization_ms: 0
+    };
+  }
+  const preconditioner = input.options.preconditioner ?? "ic0";
+  if (!input.coupling && preconditioner !== "ic0" && preconditioner !== "blockic") {
+    const packStartedAt = performance.now();
+    const direct = WebGPUQuadtreeTallCellProjection.packUncoupledGrid(pressureGrid, nx, ny, nz);
+    const systemPack_ms = performance.now() - packStartedAt;
+    return {
+      leafCount: quadtree.leaves.length,
+      pressureSampleCount: pressureGrid.samples.length,
+      maximumNeighborRatio: quadtree.maximumNeighborRatio,
+      topologyWords, packed: direct.packed,
+      displacedVolumes: [], dofCount: direct.dofCount, faceCount: direct.faceCount,
+      ghostFaceCount: direct.ghostFaceCount, maximumFluidScale: direct.maximumFluidScale,
+      tallSegmentCount: direct.tallSegmentCount,
+      quadtreeDecode_ms, tallGrid_ms, variationalAssembly_ms: 0, systemPack_ms, icFactorization_ms: 0
+    };
+  }
   const assemblyStartedAt = performance.now();
   const solidFields = input.coupling ? solidFieldsFromBodies(input.scene, input.coupling.bodies, nx, ny, nz, h) : undefined;
   const variationalBodies = input.coupling ? variationalBodiesFrom(input.scene, input.coupling) : [];
@@ -1568,7 +2241,10 @@ export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput)
   const packed = WebGPUQuadtreeTallCellProjection.packSystem(system, nx, ny, nz, input.coupling?.dynamic ? variationalBodies : [], input.options.preconditioner);
   const systemPack_ms = performance.now() - packStartedAt;
   return {
-    quadtree, pressureGrid, topologyWords, packed,
+    leafCount: quadtree.leaves.length,
+    pressureSampleCount: pressureGrid.samples.length,
+    maximumNeighborRatio: quadtree.maximumNeighborRatio,
+    topologyWords, packed,
     displacedVolumes: displacedVolumesForGrid(pressureGrid, undefined, solidFields, input.coupling?.bodies.length ?? 0, nx, ny, h),
     dofCount: system.liquidSampleIds.length,
     faceCount: system.faces.length,
@@ -1595,7 +2271,7 @@ async function prepareQuadtreeProjectionInWorker(cache: QuadtreeGPUCache, input:
       const worker = new Worker(new URL("./quadtree-topology-worker.ts", import.meta.url), { type: "module" });
       worker.onmessage = (event: MessageEvent<{ id: number; value?: PreparedProjectionCPU; error?: string }>) => receive(event.data);
       worker.onerror = (event) => fail(event.message);
-      cache.cpuWorker = worker;
+      cache.cpuWorker = { postMessage: (message, transfer) => worker.postMessage(message, transfer ?? []), terminate: () => worker.terminate() };
     } else if (typeof process !== "undefined" && process.versions?.node) {
       // Keep Node smoke timings honest: topology packing must not synchronously
       // stall the driver thread while GPU timings are being sampled.
@@ -1605,7 +2281,14 @@ async function prepareQuadtreeProjectionInWorker(cache: QuadtreeGPUCache, input:
       // imported application code. The tiny data-module entry uses tsx's
       // programmatic API, then loads the real worker with full TS transforms.
       const entryUrl = new URL("./quadtree-topology-worker-node.ts", import.meta.url).href;
-      const tsxApiUrl = import.meta.resolve("tsx/esm/api");
+      // Resolve through Node's require machinery so browser worker bundles do
+      // not have to preserve the Node-only `import.meta.resolve` extension.
+      const moduleSpecifier = "node:" + "module", urlSpecifier = "node:" + "url";
+      const [{ createRequire }, { pathToFileURL }] = await Promise.all([
+        import(/* @vite-ignore */ moduleSpecifier) as Promise<typeof import("node:module")>,
+        import(/* @vite-ignore */ urlSpecifier) as Promise<typeof import("node:url")>
+      ]);
+      const tsxApiUrl = pathToFileURL(createRequire(`${process.cwd()}/package.json`).resolve("tsx/esm/api")).href;
       const source = `const { tsImport } = await import(${JSON.stringify(tsxApiUrl)}); await tsImport(${JSON.stringify(entryUrl)}, import.meta.url);`;
       const entry = new URL(`data:text/javascript,${encodeURIComponent(source)}`);
       let worker: import("node:worker_threads").Worker;
@@ -1618,12 +2301,15 @@ async function prepareQuadtreeProjectionInWorker(cache: QuadtreeGPUCache, input:
         worker = new NodeWorker(entry);
       }
       worker.on("message", receive); worker.on("error", (error) => fail(error.message));
-      cache.cpuWorker = worker;
+      cache.cpuWorker = { postMessage: (message, transfer) => worker.postMessage(message, transfer ?? []), terminate: () => worker.terminate() };
     } else return prepareQuadtreeProjectionCPU(input);
   }
   const id = (cache.cpuWorkerSequence ?? 0) + 1; cache.cpuWorkerSequence = id;
   return new Promise<PreparedProjectionCPU>((resolve, reject) => {
     cache.cpuWorkerPending!.set(id, { resolve, reject });
-    cache.cpuWorker!.postMessage({ id, input });
+    const transfer: ArrayBuffer[] = [];
+    if (input.packedCells.buffer instanceof ArrayBuffer) transfer.push(input.packedCells.buffer);
+    if (input.columnProfiles.buffer instanceof ArrayBuffer) transfer.push(input.columnProfiles.buffer);
+    cache.cpuWorker!.postMessage({ id, input }, transfer);
   });
 }

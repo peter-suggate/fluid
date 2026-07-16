@@ -27,6 +27,14 @@ export interface QuadtreeSizingOptions {
   smoothingDilations?: number;
 }
 
+/** One source of truth for the CPU oracle and GPU construction shader. */
+export const quadtreeSizingWeights = Object.freeze({
+  curvature: 4,
+  strain: 3,
+  speedGradient: 3,
+  frontSpeed: 0.5
+});
+
 export interface TallPressureSample {
   id: number;
   leaf: number;
@@ -67,7 +75,7 @@ export function adaptivePressureCellIds(grid: TallPressureGrid) {
   const { quadtree, ny } = grid, ids = new Uint32Array(quadtree.nx * ny * quadtree.nz);
   for (const segment of grid.segments) {
     const leaf = quadtree.leaves[segment.leaf], id = segment.id + 1;
-    for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let y = segment.firstY; y <= segment.lastY; y += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) {
+    for (let z = leaf.z; z < leaf.z + leaf.size && z < quadtree.nz; z += 1) for (let y = segment.firstY; y <= segment.lastY; y += 1) for (let x = leaf.x; x < leaf.x + leaf.size && x < quadtree.nx; x += 1) {
       ids[x + quadtree.nx * (y + ny * z)] = id;
     }
   }
@@ -90,7 +98,7 @@ export function adaptivePressureCellTopology(grid: TallPressureGrid) {
     const leaf = quadtree.leaves[segment.leaf];
     const horizontal = leaf.x | (leaf.z << 10) | (leaf.size << 20);
     const vertical = segment.firstY | ((segment.lastY + 1) << 10);
-    for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let y = segment.firstY; y <= segment.lastY; y += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) {
+    for (let z = leaf.z; z < leaf.z + leaf.size && z < quadtree.nz; z += 1) for (let y = segment.firstY; y <= segment.lastY; y += 1) for (let x = leaf.x; x < leaf.x + leaf.size && x < quadtree.nx; x += 1) {
       const offset = 2 * (x + quadtree.nx * (y + ny * z));
       topology[offset] = horizontal;
       topology[offset + 1] = vertical;
@@ -364,17 +372,38 @@ export function populateTallPressureGrid(
   h: Vec3,
   opticalDepthCells: number,
   localDepthFraction?: number,
-  leafCenterProfiles?: ArrayLike<number>
+  leafProfiles?: ArrayLike<number>
 ): TallPressureGrid {
-  if (ny <= 0 || (leafCenterProfiles ? leafCenterProfiles.length !== quadtree.leaves.length * ny : phi.length !== quadtree.nx * ny * quadtree.nz)) throw new Error("Invalid tall-grid level set");
+  const profileStride = leafProfiles ? leafProfiles.length / Math.max(1, quadtree.leaves.length * ny) : 0;
+  if (ny <= 0 || (leafProfiles ? (profileStride !== 1 && profileStride !== 3) : phi.length !== quadtree.nx * ny * quadtree.nz)) throw new Error("Invalid tall-grid level set");
   const samples: TallPressureSample[] = [], segments: TallSegment[] = [];
   const samplesByLeaf: TallPressureSample[][] = quadtree.leaves.map(() => []);
   for (const leaf of quadtree.leaves) {
-    const columnPhi = Float64Array.from({ length: ny }, (_, y) => leafCenterProfiles ? leafCenterProfiles[leaf.id * ny + y] : sampleLeafCenterScalar(phi, leaf, y, quadtree.nx, ny));
-    const interfaceY: number[] = [];
+    const columnPhi = Float64Array.from({ length: ny }, (_, y) => leafProfiles ? leafProfiles[profileStride * (leaf.id * ny + y)] : sampleLeafCenterScalar(phi, leaf, y, quadtree.nx, ny));
+    const footprintMinimum = new Float64Array(ny), footprintMaximum = new Float64Array(ny);
     for (let y = 0; y < ny; y += 1) {
-      const liquid = columnPhi[y] < 0;
-      if ((y > 0 && (columnPhi[y - 1] < 0) !== liquid) || (y + 1 < ny && (columnPhi[y + 1] < 0) !== liquid) || Math.abs(columnPhi[y]) <= Math.min(h.x, h.y, h.z)) interfaceY.push(y);
+      if (leafProfiles && profileStride === 3) {
+        footprintMinimum[y] = leafProfiles[3 * (leaf.id * ny + y) + 1];
+        footprintMaximum[y] = leafProfiles[3 * (leaf.id * ny + y) + 2];
+      } else if (leafProfiles) {
+        footprintMinimum[y] = footprintMaximum[y] = columnPhi[y];
+      } else {
+        let minimum = Number.POSITIVE_INFINITY, maximum = Number.NEGATIVE_INFINITY;
+        for (let z = leaf.z; z < leaf.z + leaf.size; z += 1) for (let x = leaf.x; x < leaf.x + leaf.size; x += 1) {
+          const value = phi[index3(x, y, z, quadtree.nx, ny)];
+          minimum = Math.min(minimum, value); maximum = Math.max(maximum, value);
+        }
+        footprintMinimum[y] = minimum; footprintMaximum[y] = maximum;
+      }
+    }
+    const interfaceY: number[] = [];
+    const hMin = Math.min(h.x, h.y, h.z);
+    for (let y = 0; y < ny; y += 1) {
+      const rowContainsInterface = footprintMinimum[y] <= hMin && footprintMaximum[y] >= -hMin;
+      const crossesNeighbor = (other: number) => footprintMinimum[y] < 0 !== footprintMinimum[other] < 0
+        || (footprintMinimum[y] < 0 && footprintMaximum[other] >= 0)
+        || (footprintMinimum[other] < 0 && footprintMaximum[y] >= 0);
+      if (rowContainsInterface || (y > 0 && crossesNeighbor(y - 1)) || (y + 1 < ny && crossesNeighbor(y + 1))) interfaceY.push(y);
     }
     const cubic = new Uint8Array(ny);
     // Irving's optical thickness, retained by Narita et al., is the thin
@@ -423,7 +452,7 @@ export function populateTallPressureGrid(
   return { quadtree, ny, h, samples, segments, samplesByLeaf };
 }
 
-/** GPU-rebuild variant that consumes only one leaf-centre phi profile per leaf. */
+/** GPU-rebuild variant consuming [centre, footprint-minimum, footprint-maximum] profiles. */
 export function populateTallPressureGridFromLeafProfiles(
   quadtree: QuadtreeGrid,
   profiles: ArrayLike<number>,
@@ -454,6 +483,8 @@ function interpolationAt(samples: TallPressureSample[], worldY: number) {
  * theta >= 0.01); values above it carry no physical information.
  */
 export const maximumFluidScale = 100;
+/** Velocity kick floor theta >= 0.05; the variational matrix retains maximumFluidScale. */
+export const maximumVelocityUpdateFluidScale = 20;
 
 function spdFluidScale(nodes: Array<{ sample: TallPressureSample; coefficient: number }>) {
   const all = nodes.reduce((sum, node) => sum + node.coefficient * node.sample.phi, 0);
@@ -897,9 +928,6 @@ export interface MlsProjectionRow {
 }
 
 const MLS_EPSILON = 1e-2;
-const MLS_MAX_SUBFACES = 32;
-/** Global budget: deep cubic bands produce hundreds of thousands of eligible faces with no visible benefit. */
-const MLS_MAX_ROWS = 150_000;
 
 function mlsWeightsAt(
   query: Vec3,
@@ -960,15 +988,25 @@ function solve4x4(matrix: Float64Array, rhs: number[]) {
  * variational face representing more than one background sub-face, each
  * sub-face gets the MLS pressure gradient plus the additive shift that makes
  * the sub-face corrections average exactly to the solved variational face
- * value (Eq. (5)). Where the MLS reconstruction is flat this degenerates to
- * the constant prolongation; single-sub-face faces are untouched.
+ * value (Eq. (5)). Fine faces in the interior of a merged adaptive pressure
+ * cell get the direct difference of the two mapped cubical pressures. This
+ * closes the dense-grid velocity null space left by correcting only
+ * variational boundary faces (Narita Algorithm 1, line 10).
+ *
+ * There is deliberately no global row cap. The previous 150k cap silently
+ * left an order-dependent suffix of merged-region faces unprojected, which is
+ * precisely the failure this mapping is required to prevent.
  */
 export function buildMlsProjectionRows(system: VariationalSystem): MlsProjectionRow[] {
   const { grid } = system, { quadtree, ny, h } = grid;
   const rows: MlsProjectionRow[] = [];
+  const segmentByLeafY = new Int32Array(quadtree.leaves.length * ny).fill(-1);
+  for (const segment of grid.segments) for (let y = segment.firstY; y <= segment.lastY; y += 1) segmentByLeafY[segment.leaf * ny + y] = segment.id;
   const candidatesForCell = (cellX: number, cellY: number, cellZ: number) => {
     const leaves = new Set<number>();
     const own = quadtree.leaves[quadtree.leafAt[index2(cellX, cellZ, quadtree.nx)]];
+    const ownSegment = grid.segments[segmentByLeafY[own.id * ny + cellY]];
+    const queryLiquid = grid.samples[ownSegment.bottomSample].liquid;
     const reach = 2 * own.size;
     for (const dx of [-reach, 0, reach]) for (const dz of [-reach, 0, reach]) {
       const px = clamp(cellX + dx, 0, quadtree.nx - 1), pz = clamp(cellZ + dz, 0, quadtree.nz - 1);
@@ -978,27 +1016,34 @@ export function buildMlsProjectionRows(system: VariationalSystem): MlsProjection
     const candidates: Array<{ sample: TallPressureSample; size: Vec3 }> = [];
     for (const leafId of leaves) {
       const leaf = quadtree.leaves[leafId];
-      const size = { x: Math.max(1, leaf.size) * h.x, y: h.y, z: Math.max(1, leaf.size) * h.z };
       const column = grid.samplesByLeaf[leafId];
       // Nearest sample in y always participates (the paper's one-ring rule);
-      // others join when their kernel support reaches the query.
-      let nearest = column[0];
+      // others join when their represented-cell support reaches the query.
+      // Pressure is mapped phase-locally: distant Dirichlet-air endpoints of
+      // a tall column must not contaminate every deep-liquid query.
+      let nearest: { sample: TallPressureSample; size: Vec3 } | undefined;
       for (const sample of column) {
-        if (Math.abs(sample.position.y - query.y) < Math.abs(nearest.position.y - query.y)) nearest = sample;
-        if (Math.abs(sample.position.y - query.y) <= 2 * size.y || sample.kind !== "cubic") candidates.push({ sample, size });
+        if (sample.liquid !== queryLiquid) continue;
+        const segment = grid.segments[sample.segment];
+        const size = { x: Math.max(1, leaf.size) * h.x, y: Math.max(1, segment.lastY - segment.firstY + 1) * h.y, z: Math.max(1, leaf.size) * h.z };
+        const entry = { sample, size };
+        if (!nearest || Math.abs(sample.position.y - query.y) < Math.abs(nearest.sample.position.y - query.y)) nearest = entry;
+        if (Math.abs(sample.position.y - query.y) <= 2 * size.y) candidates.push(entry);
       }
-      if (!candidates.some((entry) => entry.sample.id === nearest.id)) candidates.push({ sample: nearest, size });
+      if (nearest && !candidates.some((entry) => entry.sample.id === nearest!.sample.id)) candidates.push(nearest);
     }
     return { query, candidates };
   };
-  const cellWeights = new Map<number, Array<{ sample: TallPressureSample; weight: number }>>();
+  // This cache is dense by construction once interior merged faces are
+  // mapped. An indexed array avoids Map hashing in the hottest rebuild stage.
+  const cellWeights: Array<Array<{ sample: TallPressureSample; weight: number }> | undefined> = new Array(quadtree.nx * ny * quadtree.nz);
   const weightsFor = (cellX: number, cellY: number, cellZ: number) => {
     const key = index3(cellX, cellY, cellZ, quadtree.nx, ny);
-    let cached = cellWeights.get(key);
+    let cached = cellWeights[key];
     if (!cached) {
       const { query, candidates } = candidatesForCell(cellX, cellY, cellZ);
       cached = mlsWeightsAt(query, candidates);
-      cellWeights.set(key, cached);
+      cellWeights[key] = cached;
     }
     return cached;
   };
@@ -1008,6 +1053,30 @@ export function buildMlsProjectionRows(system: VariationalSystem): MlsProjection
   // Such faces keep the constant prolongation.
   const surfaceContaminated = (weights: Array<{ sample: TallPressureSample; weight: number }>) =>
     weights.length === 0 || weights.some((entry) => !entry.sample.liquid && Math.abs(entry.weight) > 1e-9);
+  const gradientRow = (x: number, y: number, z: number, axis: 0 | 1 | 2) => {
+    const px = x + (axis === 0 ? 1 : 0), py = y + (axis === 1 ? 1 : 0), pz = z + (axis === 2 ? 1 : 0);
+    const plusWeights = weightsFor(clamp(px, 0, quadtree.nx - 1), clamp(py, 0, ny - 1), clamp(pz, 0, quadtree.nz - 1));
+    const minusWeights = weightsFor(clamp(x, 0, quadtree.nx - 1), clamp(y, 0, ny - 1), clamp(z, 0, quadtree.nz - 1));
+    if (surfaceContaminated(plusWeights) || surfaceContaminated(minusWeights)) return undefined;
+    const spacing = axis === 0 ? h.x : axis === 1 ? h.y : h.z;
+    const row = new Map<number, number>();
+    for (const { sample, weight } of plusWeights) {
+      const dof = system.dofBySample[sample.id]; if (dof < 0) continue;
+      row.set(dof, (row.get(dof) ?? 0) + weight / spacing);
+    }
+    for (const { sample, weight } of minusWeights) {
+      const dof = system.dofBySample[sample.id]; if (dof < 0) continue;
+      row.set(dof, (row.get(dof) ?? 0) - weight / spacing);
+    }
+    return row;
+  };
+  const covered = new Uint8Array(quadtree.nx * ny * quadtree.nz * 4);
+  const append = (cell: number, axis: 0 | 1 | 2, row: Map<number, number>) => {
+    const entries = [...row.entries()].filter(([, weight]) => Math.abs(weight) > 1e-14) as Array<[number, number]>;
+    if (entries.length === 0) return;
+    rows.push({ cell, axis, entries });
+    covered[4 * cell + axis] = 1;
+  };
   for (const face of system.faces) {
     const subFaces: Array<[number, number, number]> = [];
     if (face.axis === 1) {
@@ -1020,25 +1089,12 @@ export function buildMlsProjectionRows(system: VariationalSystem): MlsProjection
         if (x < quadtree.nx && z < quadtree.nz) subFaces.push([x, y, z]);
       }
     }
-    if (subFaces.length <= 1 || subFaces.length > MLS_MAX_SUBFACES) continue;
-    if (rows.length + subFaces.length > MLS_MAX_ROWS) break;
-    const spacing = face.axis === 0 ? h.x : face.axis === 1 ? h.y : h.z;
+    if (subFaces.length <= 1) continue;
     const subRows: Array<Map<number, number>> = [];
     let contaminated = false;
     for (const [x, y, z] of subFaces) {
-      const px = x + (face.axis === 0 ? 1 : 0), py = y + (face.axis === 1 ? 1 : 0), pz = z + (face.axis === 2 ? 1 : 0);
-      const plusWeights = weightsFor(clamp(px, 0, quadtree.nx - 1), clamp(py, 0, ny - 1), clamp(pz, 0, quadtree.nz - 1));
-      const minusWeights = weightsFor(x, y, z);
-      if (surfaceContaminated(plusWeights) || surfaceContaminated(minusWeights)) { contaminated = true; break; }
-      const row = new Map<number, number>();
-      for (const { sample, weight } of plusWeights) {
-        const dof = system.dofBySample[sample.id]; if (dof < 0) continue;
-        row.set(dof, (row.get(dof) ?? 0) + weight / spacing);
-      }
-      for (const { sample, weight } of minusWeights) {
-        const dof = system.dofBySample[sample.id]; if (dof < 0) continue;
-        row.set(dof, (row.get(dof) ?? 0) - weight / spacing);
-      }
+      const row = gradientRow(x, y, z, face.axis);
+      if (!row) { contaminated = true; break; }
       subRows.push(row);
     }
     if (contaminated) continue;
@@ -1055,9 +1111,29 @@ export function buildMlsProjectionRows(system: VariationalSystem): MlsProjection
       const combined = new Map(subRows[index]);
       for (const [dof, weight] of meanRow) combined.set(dof, (combined.get(dof) ?? 0) - weight);
       for (const [dof, weight] of faceRow) combined.set(dof, (combined.get(dof) ?? 0) + weight);
-      const entries = [...combined.entries()].filter(([, weight]) => Math.abs(weight) > 1e-14) as Array<[number, number]>;
-      rows.push({ cell: index3(x, y, z, quadtree.nx, ny), axis: face.axis, entries });
+      append(index3(x, y, z, quadtree.nx, ny), face.axis, combined);
     });
+  }
+  // Faces strictly inside one adaptive pressure cell belong to no
+  // variational face, so they have no conservative face-average constraint.
+  // Map pressure to their adjacent cubical cell centres and use that direct
+  // MLS gradient. `adaptivePressureCellIds` captures both horizontal coarse-
+  // leaf interiors and vertical tall-segment interiors.
+  const pressureCellIds = adaptivePressureCellIds(grid), nx = quadtree.nx, nz = quadtree.nz;
+  const liquidPressureCells = new Uint8Array(grid.segments.length + 1);
+  for (const segment of grid.segments) {
+    if (grid.samples[segment.bottomSample].liquid || grid.samples[segment.topSample].liquid) liquidPressureCells[segment.id + 1] = 1;
+  }
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    const cell = index3(x, y, z, nx, ny), own = pressureCellIds[cell];
+    if (own === 0 || liquidPressureCells[own] === 0) continue;
+    for (const axis of [0, 1, 2] as const) {
+      const px = x + (axis === 0 ? 1 : 0), py = y + (axis === 1 ? 1 : 0), pz = z + (axis === 2 ? 1 : 0);
+      if (px >= nx || py >= ny || pz >= nz) continue;
+      if (pressureCellIds[index3(px, py, pz, nx, ny)] !== own || covered[4 * cell + axis] !== 0) continue;
+      const row = gradientRow(x, y, z, axis);
+      if (row) append(cell, axis, row);
+    }
   }
   return rows;
 }
@@ -1072,7 +1148,10 @@ export function applyVariationalMatrix(system: VariationalSystem, values: ArrayL
 
 export function quadtreeSizingFromVelocityAndSurface(
   phi: ArrayLike<number>, velocity: ArrayLike<Vec3>, nx: number, ny: number, nz: number, h: Vec3,
-  curvatureWeight = 4, velocityWeight = 3
+  curvatureWeight = quadtreeSizingWeights.curvature,
+  velocityWeight = quadtreeSizingWeights.strain,
+  speedGradientWeight = quadtreeSizingWeights.speedGradient,
+  frontSpeedWeight = quadtreeSizingWeights.frontSpeed
 ) {
   if (phi.length !== nx * ny * nz || velocity.length !== phi.length) throw new Error("Invalid sizing inputs");
   const sizing = new Float32Array(nx * nz);
@@ -1088,7 +1167,17 @@ export function quadtreeSizingFromVelocityAndSurface(
       const vx = (sampleVelocity(x + 1, y, z).x - sampleVelocity(x - 1, y, z).x) / (2 * h.x);
       const vy = (sampleVelocity(x, y + 1, z).y - sampleVelocity(x, y - 1, z).y) / (2 * h.y);
       const vz = (sampleVelocity(x, y, z + 1).z - sampleVelocity(x, y, z - 1).z) / (2 * h.z);
-      maximum = Math.max(maximum, curvatureWeight * Math.abs(laplacian) + velocityWeight * Math.hypot(vx, vy, vz));
+      const speed = (qx: number, qy: number, qz: number) => {
+        const value = sampleVelocity(qx, qy, qz); return Math.hypot(value.x, value.y, value.z);
+      };
+      const speedGradient = Math.hypot(
+        (speed(x + 1, y, z) - speed(x - 1, y, z)) / (2 * h.x),
+        (speed(x, y + 1, z) - speed(x, y - 1, z)) / (2 * h.y),
+        (speed(x, y, z + 1) - speed(x, y, z - 1)) / (2 * h.z)
+      );
+      const local = sampleVelocity(x, y, z);
+      const frontSpeedDemand = frontSpeedWeight * Math.hypot(local.x, local.y, local.z) / Math.min(h.x, h.y, h.z);
+      maximum = Math.max(maximum, curvatureWeight * Math.abs(laplacian) + velocityWeight * Math.hypot(vx, vy, vz) + speedGradientWeight * speedGradient + frontSpeedDemand);
     }
     sizing[index2(x, z, nx)] = maximum;
   }

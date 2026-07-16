@@ -16,6 +16,10 @@ struct Uniforms {
   options: vec4f,
   gridInfo: vec4f,
   debug: vec4f,
+  // environment.x is the art-direction preset (read by the water shaders);
+  // .y carries the solver's last substep dt and .z its max liquid speed so
+  // the field modes can color CFL and normalized speed without any readback.
+  environment: vec4f,
 }
 struct BodyGPU {
   positionRadius: vec4f,
@@ -28,6 +32,10 @@ struct BodyGPU {
 @group(0) @binding(2) var fluidField: texture_3d<f32>;
 @group(0) @binding(3) var tallCellBases: texture_2d<f32>;
 @group(0) @binding(4) var adaptiveCells: texture_3d<u32>;
+@group(0) @binding(5) var velocityField: texture_3d<f32>;
+@group(0) @binding(6) var pressureSamples: texture_3d<u32>;
+@group(0) @binding(7) var divergenceField: texture_3d<f32>;
+@group(0) @binding(8) var mappedPressureField: texture_3d<f32>;
 
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
@@ -131,8 +139,49 @@ fn fluidSample(cell: vec3i) -> f32 {
   return clamp(0.5-textureLoad(fluidField, vec3i(q.x, packedY, q.z), 0).x/cellSizeY,0.0,1.0);
 }
 
+fn levelSetSample(cell: vec3i) -> f32 {
+  let dims = vec3i(u.gridInfo.xyz); let q = clamp(cell, vec3i(0), dims - vec3i(1));
+  let h = u.container.y / max(u.gridInfo.y, 1.0);
+  if (u.gridInfo.w > 2.5) { return textureLoad(fluidField, q, 0).x; }
+  return (0.5 - fluidSample(q)) * 4.0 * h;
+}
+
+fn hasLiquidPressureDof(cell: vec3i) -> bool {
+  let samples = textureLoad(pressureSamples, cell, 0);
+  return samples.x != 0xffffffffu || samples.y != 0xffffffffu;
+}
+
 fn adaptiveCellKey(cell: vec3i, dims: vec3i) -> vec2u {
   return textureLoad(adaptiveCells, clamp(cell, vec3i(0), dims - vec3i(1)), 0).xy;
+}
+
+// World-cell velocity through the same packed mapping as fluidSample. The
+// tall-cell interior uses the solver's piecewise reconstruction (top world
+// cell = top endpoint dof, the rest = bottom dof) so the displayed field is
+// the one the projection actually controls.
+fn velocitySample(cell: vec3i) -> vec3f {
+  let dims = vec3i(u.gridInfo.xyz);
+  let q = clamp(cell, vec3i(0), dims - vec3i(1));
+  if (u.gridInfo.w < 1.5 || u.gridInfo.w > 2.5) { return textureLoad(velocityField, q, 0).xyz; }
+  let base = i32(round(textureLoad(tallCellBases, q.xz, 0).x));
+  if (q.y < base && base > 0) {
+    let row = select(0, 1, q.y == base - 1);
+    return textureLoad(velocityField, vec3i(q.x, row, q.z), 0).xyz;
+  }
+  let packedY = 2 + q.y - base;
+  let stored = vec3i(textureDimensions(velocityField));
+  if (packedY < 2 || packedY >= stored.y) { return vec3f(0.0); }
+  return textureLoad(velocityField, vec3i(q.x, packedY, q.z), 0).xyz;
+}
+
+// Shared five-stop heat ramp for the field modes: deep blue through cyan,
+// green, and amber to red as t goes 0..1.
+fn heatColor(t: f32) -> vec3f {
+  let clamped = clamp(t, 0.0, 1.0);
+  if (clamped < 0.25) { return mix(vec3f(0.13, 0.22, 0.55), vec3f(0.06, 0.62, 0.80), clamped * 4.0); }
+  if (clamped < 0.5) { return mix(vec3f(0.06, 0.62, 0.80), vec3f(0.22, 0.75, 0.34), (clamped - 0.25) * 4.0); }
+  if (clamped < 0.75) { return mix(vec3f(0.22, 0.75, 0.34), vec3f(0.98, 0.82, 0.20), (clamped - 0.5) * 4.0); }
+  return mix(vec3f(0.98, 0.82, 0.20), vec3f(0.90, 0.22, 0.15), (clamped - 0.75) * 4.0);
 }
 
 struct RepresentedCell {
@@ -268,7 +317,9 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
     let isTall = !lowerVerticalEdge || !upperVerticalEdge;
     let wet = fluidSample(cell) > 0.5;
     fill = select(select(vec3f(0.85, 0.91, 0.89), vec3f(0.20, 0.50, 0.74), wet), select(vec3f(0.10, 0.23, 0.22), vec3f(0.03, 0.52, 0.47), wet), isTall);
-    alpha = select(select(0.18, 0.55, wet), select(0.40, 0.78, wet), isTall);
+    // Dry tall cells are expected coalesced air storage. Keep their boundary
+    // visible but remove the alarming solid fill used for liquid tall cells.
+    alpha = select(select(0.08, 0.55, wet), select(0.03, 0.78, wet), isTall);
   } else if (cell.y < i32(base)) {
     let wet = fluidSample(cell) > 0.5;
     fill = select(vec3f(0.10, 0.23, 0.22), vec3f(0.03, 0.52, 0.47), wet);
@@ -290,6 +341,44 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
     fill = vec3f(0.62, 0.24, 0.22);
     alpha = 0.08 + 0.10 * stripe;
     line = columnLine * 0.35;
+  }
+  // Field modes recolor represented cells from the live velocity texture;
+  // structural lines, sample dots, the above-band hatch, and rigid-body
+  // occupancy all stay so the heatmap keeps its spatial reference frame.
+  let fieldMode = i32(round(u.debug.w));
+  if (fieldMode > 0 && (adaptiveGrid || cell.y < bandTop)) {
+    let velocity = velocitySample(cell);
+    let wet = fluidSample(cell) > 0.5;
+    if (fieldMode == 1) {
+      // Per-cell component CFL at the solver's substep dt: the quantity whose
+      // global maximum picks the substep count (substeps = ceil(maxCfl / 2)).
+      let h = size / vec3f(dims);
+      let dt = max(u.environment.y, 1e-6);
+      let cfl = max(abs(velocity.x) * dt / h.x, max(abs(velocity.y) * dt / h.y, abs(velocity.z) * dt / h.z));
+      // log2 ramp: cfl 1 -> 0.32, 2 -> 0.5, 4 -> 0.73, 8+ -> 1.
+      fill = heatColor(log2(1.0 + cfl) / log2(9.0));
+      alpha = select(select(0.30, 0.72, wet), 0.92, cfl > 1.0);
+    } else if (fieldMode == 2) {
+      let speed = length(velocity);
+      fill = heatColor(speed / max(u.environment.z, 1e-4));
+      alpha = select(0.30, 0.85, wet);
+    } else if (fieldMode == 3) {
+      let phi = levelSetSample(cell); let h = min(size.x / f32(dims.x), min(size.y / f32(dims.y), size.z / f32(dims.z)));
+      let signed = clamp(phi / max(4.0 * h, 1e-6), -1.0, 1.0);
+      fill = select(mix(vec3f(0.96, 0.96, 0.90), vec3f(0.93, 0.47, 0.16), signed), mix(vec3f(0.96, 0.96, 0.90), vec3f(0.10, 0.45, 0.92), -signed), signed < 0.0);
+      alpha = 0.80; line = max(line, 1.0 - smoothstep(0.04 * h, 0.22 * h, abs(phi)));
+    } else if (fieldMode == 4) {
+      let divergence = textureLoad(divergenceField, cell, 0).x; let scaled = clamp(divergence * max(u.environment.y, 1e-6), -1.0, 1.0);
+      fill = select(mix(vec3f(0.96), vec3f(0.88, 0.10, 0.08), scaled), mix(vec3f(0.96), vec3f(0.08, 0.28, 0.88), -scaled), scaled < 0.0);
+      alpha = select(0.28, 0.92, wet || abs(scaled) > 0.05);
+    } else if (fieldMode == 5) {
+      let pressure = textureLoad(mappedPressureField, cell, 0).x; let scale = max(1.0, 10000.0 * u.container.y);
+      fill = heatColor(clamp(0.5 + 0.5 * pressure / scale, 0.0, 1.0)); alpha = select(0.22, 0.88, wet);
+    } else if (fieldMode == 6) {
+      let unrepresented = adaptiveGrid && wet && !hasLiquidPressureDof(cell);
+      fill = select(select(vec3f(0.12, 0.20, 0.22), vec3f(0.08, 0.62, 0.50), wet), vec3f(1.0, 0.02, 0.01), unrepresented);
+      alpha = select(select(0.10, 0.70, wet), 0.98, unrepresented);
+    }
   }
   line *= lineFade;
   let gridBody = gridBodySample(representedCell(cell, dims, boundsMin, size, adaptiveGrid, tallGrid));
@@ -355,6 +444,10 @@ export class GridOverlayPipeline {
   private volume?: GPUTexture;
   private columnBases?: GPUTexture;
   private adaptiveCells?: GPUTexture;
+  private velocity?: GPUTexture;
+  private pressureSamples?: GPUTexture;
+  private divergence?: GPUTexture;
+  private mappedPressure?: GPUTexture;
 
   constructor(
     private readonly device: GPUDevice,
@@ -388,16 +481,20 @@ export class GridOverlayPipeline {
     this.rebuildBindGroup();
   }
 
-  setVolume(volume: GPUTexture, columnBases: GPUTexture, adaptiveCells: GPUTexture) {
-    if (this.volume === volume && this.columnBases === columnBases && this.adaptiveCells === adaptiveCells) return;
+  setVolume(volume: GPUTexture, columnBases: GPUTexture, adaptiveCells: GPUTexture, velocity: GPUTexture, pressureSamples: GPUTexture, divergence: GPUTexture, mappedPressure: GPUTexture) {
+    if (this.volume === volume && this.columnBases === columnBases && this.adaptiveCells === adaptiveCells && this.velocity === velocity && this.pressureSamples === pressureSamples && this.divergence === divergence && this.mappedPressure === mappedPressure) return;
     this.volume = volume;
     this.columnBases = columnBases;
     this.adaptiveCells = adaptiveCells;
+    this.velocity = velocity;
+    this.pressureSamples = pressureSamples;
+    this.divergence = divergence;
+    this.mappedPressure = mappedPressure;
     this.rebuildBindGroup();
   }
 
   private rebuildBindGroup() {
-    if (!this.pipeline || !this.volume || !this.columnBases || !this.adaptiveCells) return;
+    if (!this.pipeline || !this.volume || !this.columnBases || !this.adaptiveCells || !this.velocity || !this.pressureSamples || !this.divergence || !this.mappedPressure) return;
     this.bindGroup = this.device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -405,7 +502,11 @@ export class GridOverlayPipeline {
         { binding: 1, resource: { buffer: this.bodyBuffer } },
         { binding: 2, resource: this.volume.createView({ dimension: "3d" }) },
         { binding: 3, resource: this.columnBases.createView() },
-        { binding: 4, resource: this.adaptiveCells.createView({ dimension: "3d" }) }
+        { binding: 4, resource: this.adaptiveCells.createView({ dimension: "3d" }) },
+        { binding: 5, resource: this.velocity.createView({ dimension: "3d" }) },
+        { binding: 6, resource: this.pressureSamples.createView({ dimension: "3d" }) },
+        { binding: 7, resource: this.divergence.createView({ dimension: "3d" }) },
+        { binding: 8, resource: this.mappedPressure.createView({ dimension: "3d" }) }
       ]
     });
   }

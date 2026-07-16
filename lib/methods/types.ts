@@ -57,6 +57,14 @@ export interface GPUSolverInstance {
   readonly columnBaseTexture: GPUTexture;
   /** Adaptive pressure-cell ownership for scientific grid slices. */
   readonly gridCellTexture?: GPUTexture;
+  /** Live velocity field for scientific slice modes (CFL/speed heatmaps). */
+  readonly velocityTexture?: GPUTexture;
+  /** Adaptive pressure-DOF ownership used by the representation alarm. */
+  readonly gridPressureSamplesTexture?: GPUTexture;
+  /** Fine MLS pressure materialized by the latest adaptive solve. */
+  readonly gridPressureTexture?: GPUTexture;
+  /** Post-projection fine-cell divergence diagnostic. */
+  readonly gridDivergenceTexture?: GPUTexture;
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean;
   readStats(): Promise<GPUEulerianInfo>;
   destroy(): void;

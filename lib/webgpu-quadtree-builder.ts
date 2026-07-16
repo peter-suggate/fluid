@@ -9,6 +9,7 @@
  */
 
 import { inflowBoundaryWGSL } from "./inflow-boundary";
+import { quadtreeSizingWeights } from "./quadtree-tall-cell-grid";
 
 /** Per-step nozzle state for sourcing fluid into the resident level set. */
 export interface SurfaceInflowState {
@@ -17,6 +18,17 @@ export interface SurfaceInflowState {
   velocity_m_s: { x: number; y: number; z: number };
   apertureScale: number;
   strength: number;
+}
+
+/** W0 loss-recovery circuit breaker with hysteresis. */
+export function nextQuadtreeVofReconciliationActive(active: boolean, representedVolumeDrift: number) {
+  if (!Number.isFinite(representedVolumeDrift)) return active;
+  return active ? representedVolumeDrift < -0.02 : representedVolumeDrift < -0.10;
+}
+
+export function quadtreeVofReconciliationFraction(missingVolumeCells: number, mismatchCells: number) {
+  if (!(missingVolumeCells > 0) || !(mismatchCells > 0)) return 0;
+  return Math.max(1 / 512, Math.min(1 / 32, missingVolumeCells / (8 * mismatchCells)));
 }
 
 export interface WebGPUQuadtreeSurfaceCache {
@@ -32,6 +44,7 @@ export interface WebGPUQuadtreeSurfaceCache {
     seedDistance: GPUComputePipeline;
     jumpFlood: GPUComputePipeline;
     finalizeDistance: GPUComputePipeline;
+    cullDebris: GPUComputePipeline;
   };
 }
 
@@ -57,6 +70,7 @@ struct PassParams { jump: u32, pad0: u32, pad1: u32, pad2: u32 }
 @group(0) @binding(7) var<storage, read_write> reductions: array<atomic<u32>>;
 @group(0) @binding(8) var predictedPhiIn: texture_3d<f32>;
 @group(0) @binding(9) var reversedPhiIn: texture_3d<f32>;
+@group(0) @binding(10) var reconcileVolumeIn: texture_3d<f32>;
 
 fn index3(q: vec3u) -> u32 { return q.x + params.dims.x * (q.y + params.dims.y * q.z); }
 fn clamp3(q: vec3i) -> vec3i { return clamp(q, vec3i(0), vec3i(params.dims.xyz) - vec3i(1)); }
@@ -176,20 +190,39 @@ fn packSeedPoint(p: vec3f) -> vec2u {
 fn unpackSeedPoint(word: vec2u) -> vec3f {
   return vec3f(f32(word.x & 0xffffu), f32(word.x >> 16u), f32(word.y & 0xffffu)) / 64.0;
 }
+fn loadReconcileAlpha(q: vec3i) -> f32 { return clamp(textureLoad(reconcileVolumeIn, clamp3(q), 0).x, 0.0, 1.0); }
+fn loadReconcileWet(q: vec3i) -> bool { return loadReconcileAlpha(q) >= 0.5; }
+fn reconciliationSelected(gid: vec3u) -> bool {
+  var hash = index3(gid) ^ (params.dims.w * 747796405u + 2891336453u);
+  hash = (hash ^ (hash >> 16u)) * 2246822519u; hash = (hash ^ (hash >> 13u)) * 3266489917u; hash ^= hash >> 16u;
+  return f32(hash & 0xffffu) < params.control.w * 65536.0;
+}
 @compute @workgroup_size(4, 4, 4)
 fn seedDistance(@builtin(global_invocation_id) gid: vec3u) {
   if (any(gid >= params.dims.xyz)) { return; }
   let p = vec3i(gid); let wet = loadPhi(p) < 0.0;
-  let crosses = (loadPhi(p + vec3i(1, 0, 0)) < 0.0) != wet || (loadPhi(p - vec3i(1, 0, 0)) < 0.0) != wet
+  var crosses = (loadPhi(p + vec3i(1, 0, 0)) < 0.0) != wet || (loadPhi(p - vec3i(1, 0, 0)) < 0.0) != wet
     || (loadPhi(p + vec3i(0, 1, 0)) < 0.0) != wet || (loadPhi(p - vec3i(0, 1, 0)) < 0.0) != wet
     || (loadPhi(p + vec3i(0, 0, 1)) < 0.0) != wet || (loadPhi(p - vec3i(0, 0, 1)) < 0.0) != wet;
+  // With VOF reconciliation active, a phi sign change deep inside a
+  // VOF-saturated region is a fossil artifact, not a surface: seeding it
+  // would anchor the narrow band around fake interfaces and shield the whole
+  // neighbourhood from far-field repair. Only phi crossings with a VOF
+  // wet/dry transition in the immediate neighbourhood are real interfaces.
+  if (crosses && params.control.y > 0.5) {
+    let wetVof = loadReconcileWet(p);
+    let vofTransition = loadReconcileWet(p + vec3i(1, 0, 0)) != wetVof || loadReconcileWet(p - vec3i(1, 0, 0)) != wetVof
+      || loadReconcileWet(p + vec3i(0, 1, 0)) != wetVof || loadReconcileWet(p - vec3i(0, 1, 0)) != wetVof
+      || loadReconcileWet(p + vec3i(0, 0, 1)) != wetVof || loadReconcileWet(p - vec3i(0, 0, 1)) != wetVof;
+    crosses = vofTransition;
+  }
   var word = vec2u(0xffffffffu, 0xffffffffu);
   if (crosses) {
     let h = params.cellAndDt.xyz;
     let gradient = vec3f(
-      (loadPhi(p + vec3i(1, 0, 0)) - loadPhi(p - vec3i(1, 0, 0))) / (2.0 * h.x),
-      (loadPhi(p + vec3i(0, 1, 0)) - loadPhi(p - vec3i(0, 1, 0))) / (2.0 * h.y),
-      (loadPhi(p + vec3i(0, 0, 1)) - loadPhi(p - vec3i(0, 0, 1))) / (2.0 * h.z));
+        (loadPhi(p + vec3i(1, 0, 0)) - loadPhi(p - vec3i(1, 0, 0))) / (2.0 * h.x),
+        (loadPhi(p + vec3i(0, 1, 0)) - loadPhi(p - vec3i(0, 1, 0))) / (2.0 * h.y),
+        (loadPhi(p + vec3i(0, 0, 1)) - loadPhi(p - vec3i(0, 0, 1))) / (2.0 * h.z));
     let magnitude = max(length(gradient), 1e-6);
     // Chopp-style sub-cell distance, clamped inside the cell so a degenerate
     // gradient cannot eject the interface point.
@@ -227,15 +260,67 @@ fn finalizeDistance(@builtin(global_invocation_id) gid: vec3u) {
   // 2.5h keeps every cell a CFL-bounded backtrace can sample from inside the
   // smoothly advected field; the jump-flood reconstruction (a point-cloud
   // distance with sub-cell tangential ripple) only ever feeds the far field.
-  if (abs(advected) >= 2.5 * h) {
-    let word = distanceSeedsIn[index3(gid)];
+  //
+  // Band membership follows the jump-flood distance to the CURRENT interface,
+  // not the advected magnitude. A cell swept by a moving interface keeps a
+  // fossil near-zero value even when it is now deep inside one phase; judged
+  // by |advected| alone it stays "narrow band" forever, its gradient decays
+  // to ~0 (the contour can no longer be transported at the flow speed), and
+  // the volume controller (|phi| < 1.5h) eventually walks its sign across
+  // zero, creating fake air pockets inside the liquid that drop pressure
+  // DOFs and zero velocities (the 2026-07 dam-break lateral freeze).
+  let word = distanceSeedsIn[index3(gid)];
+  let hasSeed = word.y <= 0xffffu;
+  let interfaceDistance = select(3.402823e38, sqrt(seedDistanceSquared(gid, word)), hasSeed);
+  if (abs(advected) >= 2.5 * h || interfaceDistance >= 2.5 * h) {
     var distance = 5.0 * h;
-    if (word.y <= 0xffffu) {
-      distance = min(5.0 * h, max(2.5 * h, sqrt(seedDistanceSquared(gid, word))));
+    if (hasSeed) {
+      distance = min(5.0 * h, max(2.5 * h, interfaceDistance));
     }
     result = select(distance, -distance, advected < 0.0);
   }
+  // GPU port of reconcileLevelSetWithVolume: the conservative VOF is the
+  // transported mass field, and decisive wet/dry disagreement — liquid the
+  // advected level set never saw, or dry regions it still thinks are wet by
+  // more than half a cell — is overruled toward the VOF. The half-cell
+  // reseed becomes a jump-flood seed on the next step, which rebuilds the
+  // surrounding distances. Without this the projection's phi-based air
+  // classification zeroes velocities inside VOF-wet water the level set
+  // lost, which locks the two surfaces apart permanently.
+  let alpha = loadReconcileAlpha(vec3i(gid));
+  let wet = alpha >= 0.5;
+  let signMismatch = (result < 0.0) != wet;
+  let decisiveMismatch = signMismatch && abs(result) > 0.5 * h;
+  if (decisiveMismatch) {
+    atomicAdd(&reductions[3], 1u);
+    // W0 protects against the diagnosed catastrophic path: conservative VOF
+    // still contains liquid but phi has opened an interior air pocket. Do not
+    // symmetrically erase phi-wet cells from the diffused VOF threshold; that
+    // turned a benign interface-representation mismatch into multi-percent
+    // surface-volume error. W7 still observes both directions above.
+    if (params.control.y > 0.5 && wet && reconciliationSelected(gid)) {
+      // Invert the same four-cell smooth Heaviside used by reduceVolume and
+      // the renderer. A fixed +/-0.5h reseed assigns every repaired dry cell
+      // 37.5% liquid (and every wet cell 62.5%), creating phantom represented
+      // volume even though conservative VOF mass is exact.
+      let volumePhi = (0.5 - alpha) * (4.0 * params.cellAndDt.y);
+      result = select(max(0.02 * h, volumePhi), min(-0.02 * h, volumePhi), wet);
+    }
+  }
   textureStore(phiOut, vec3i(gid), vec4f(result, 0.0, 0.0, 0.0));
+}
+@compute @workgroup_size(4, 4, 4)
+fn cullDebris(@builtin(global_invocation_id) gid: vec3u) {
+  if (any(gid >= params.dims.xyz)) { return; }
+  let q = vec3i(gid); let value = loadPhi(q); var result = value;
+  if (params.control.z > 0.5 && value < 0.0 && textureLoad(reconcileVolumeIn, q, 0).x < 0.5) {
+    let threshold = 0.25 * hMin();
+    let isolated = loadPhi(q + vec3i(1, 0, 0)) > threshold && loadPhi(q - vec3i(1, 0, 0)) > threshold
+      && loadPhi(q + vec3i(0, 1, 0)) > threshold && loadPhi(q - vec3i(0, 1, 0)) > threshold
+      && loadPhi(q + vec3i(0, 0, 1)) > threshold && loadPhi(q - vec3i(0, 0, 1)) > threshold;
+    if (isolated) { result = 0.5 * hMin(); atomicAdd(&reductions[2], 1u); }
+  }
+  textureStore(phiOut, q, vec4f(result, 0.0, 0.0, 0.0));
 }
 `;
 
@@ -258,7 +343,8 @@ function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCach
     { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", hasDynamicOffset: true } },
     { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 8, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-    { binding: 9, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
+    { binding: 9, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+    { binding: 10, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
   ] });
   const shaderModule = device.createShaderModule({ label: "Resident quadtree level set", code: quadtreeSurfaceShader });
   void shaderModule.getCompilationInfo().then((info) => {
@@ -270,7 +356,7 @@ function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCach
     advectLevelSet: pipeline("advectLevelSet"), advectPredict: pipeline("advectPredict"),
     advectReverse: pipeline("advectReverse"), advectCorrect: pipeline("advectCorrect"),
     reduceVolume: pipeline("reduceVolume"),
-    seedDistance: pipeline("seedDistance"), jumpFlood: pipeline("jumpFlood"), finalizeDistance: pipeline("finalizeDistance")
+    seedDistance: pipeline("seedDistance"), jumpFlood: pipeline("jumpFlood"), finalizeDistance: pipeline("finalizeDistance"), cullDebris: pipeline("cullDebris")
   } };
 }
 
@@ -287,15 +373,23 @@ export class WebGPUQuadtreeSurfaceState {
   private readonly reductions: GPUBuffer;
   private readonly passStride: number;
   private readonly jumps: number[];
-  private readonly groups: { advect: GPUBindGroup; predict: GPUBindGroup; reverse: GPUBindGroup; correct: GPUBindGroup; reduce: GPUBindGroup; seed: GPUBindGroup; jumpAB: GPUBindGroup; jumpBA: GPUBindGroup; finalizeA: GPUBindGroup; finalizeB: GPUBindGroup };
+  private readonly groups: { advect: GPUBindGroup; predict: GPUBindGroup; reverse: GPUBindGroup; correct: GPUBindGroup; reduce: GPUBindGroup; seed: GPUBindGroup; jumpAB: GPUBindGroup; jumpBA: GPUBindGroup; finalizeA: GPUBindGroup; finalizeB: GPUBindGroup; cull: GPUBindGroup };
   private readbackPending = false;
   private referenceVolumeCells: number;
   private volumeCells: number;
   private interfaceCells = 0;
+  private culledDebrisCells = 0;
+  private mismatchCells = 0;
   private correctionSpeed = 0;
+  private readonly reconcileEnabled: boolean;
+  private reconcileActive = false;
+  private reconcileFraction = 0;
+  private surfaceSequence = 0;
+  private readonly ownedReconcileFallback?: GPUTexture;
 
-  constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, velocity: GPUTexture, initialPhi: Float32Array, cache?: WebGPUQuadtreeSurfaceCache) {
+  constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, velocity: GPUTexture, initialPhi: Float32Array, cache?: WebGPUQuadtreeSurfaceCache, reconcileVolume?: GPUTexture, private readonly debrisCulling = false, reconcileEnabled = reconcileVolume !== undefined) {
     this.cache = ensureSurfaceCache(device, cache);
+    this.reconcileEnabled = reconcileEnabled && reconcileVolume !== undefined;
     const textureUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC;
     this.texture = device.createTexture({ label: "Resident quadtree level set", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
     this.scratch = device.createTexture({ label: "Resident quadtree level-set advection scratch", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
@@ -306,10 +400,12 @@ export class WebGPUQuadtreeSurfaceState {
     this.seedsA = device.createBuffer({ label: "Quadtree surface seeds A", size: bytes, usage: seedUsage });
     this.seedsB = device.createBuffer({ label: "Quadtree surface seeds B", size: bytes, usage: seedUsage });
     this.params = device.createBuffer({ label: "Quadtree surface parameters", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.reductions = device.createBuffer({ label: "Quadtree level-set volume diagnostics", size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.reductions = device.createBuffer({ label: "Quadtree level-set volume diagnostics", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const volumeBand = 4 * cell.y;
     this.referenceVolumeCells = initialPhi.reduce((sum, value) => sum + Math.max(0, Math.min(1, 0.5 - value / volumeBand)), 0);
     this.volumeCells = this.referenceVolumeCells;
+    this.interfaceCells = initialPhi.reduce((sum, value) => sum + (Math.abs(value) < 1.5 * Math.min(cell.x, cell.y, cell.z) ? 1 : 0), 0);
+    device.queue.writeBuffer(this.reductions, 0, new Uint32Array([Math.round(this.volumeCells * 256), Math.round(this.interfaceCells * 256), 0, 0]));
     this.jumps = [];
     for (let jump = largestPowerOfTwoAtMost(Math.max(dims.nx, dims.ny, dims.nz)); jump >= 1; jump /= 2) this.jumps.push(jump);
     const alignment = device.limits.minUniformBufferOffsetAlignment;
@@ -322,11 +418,16 @@ export class WebGPUQuadtreeSurfaceState {
     // group's storage output: WebGPU rejects sampled+writable usage of one
     // texture in the same dispatch scope. Only `correct` reads them for real;
     // every other group binds textures it does not write.
+    // The reconcile binding needs a texture even when reconciliation is off
+    // (pure level-set transport, as the redistance/transport tests exercise);
+    // a one-texel fallback keeps the layout uniform and control.y gates reads.
+    const reconcileTexture = reconcileVolume ?? (this.ownedReconcileFallback = device.createTexture({ label: "Quadtree surface reconcile fallback", size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING }));
     const group = (phiIn: GPUTexture, phiOut: GPUTexture, seedIn: GPUBuffer, seedOut: GPUBuffer, predicted: GPUTexture = this.predicted, reversed: GPUTexture = this.reversed) => device.createBindGroup({ layout: this.cache.layout, entries: [
       { binding: 0, resource: velocity.createView() }, { binding: 1, resource: phiIn.createView() }, { binding: 2, resource: phiOut.createView() },
       { binding: 3, resource: { buffer: seedIn } }, { binding: 4, resource: { buffer: seedOut } }, { binding: 5, resource: { buffer: this.params } },
       { binding: 6, resource: { buffer: this.passBuffer, size: 16 } }, { binding: 7, resource: { buffer: this.reductions } },
-      { binding: 8, resource: predicted.createView() }, { binding: 9, resource: reversed.createView() }
+      { binding: 8, resource: predicted.createView() }, { binding: 9, resource: reversed.createView() },
+      { binding: 10, resource: reconcileTexture.createView() }
     ] });
     this.groups = {
       advect: group(this.texture, this.scratch, this.seedsA, this.seedsB),
@@ -338,16 +439,17 @@ export class WebGPUQuadtreeSurfaceState {
       jumpAB: group(this.scratch, this.texture, this.seedsA, this.seedsB),
       jumpBA: group(this.scratch, this.texture, this.seedsB, this.seedsA),
       finalizeA: group(this.scratch, this.texture, this.seedsA, this.seedsB),
-      finalizeB: group(this.scratch, this.texture, this.seedsB, this.seedsA)
+      finalizeB: group(this.scratch, this.texture, this.seedsB, this.seedsA),
+      cull: group(this.texture, this.scratch, this.seedsA, this.seedsB)
     };
   }
 
   encode(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState) {
     const { nx, ny, nz } = this.dims;
     const parameterData = new ArrayBuffer(128);
-    new Uint32Array(parameterData, 0, 4).set([nx, ny, nz, 0]);
+    new Uint32Array(parameterData, 0, 4).set([nx, ny, nz, this.surfaceSequence++]);
     new Float32Array(parameterData, 16, 4).set([this.cell.x, this.cell.y, this.cell.z, dt_s]);
-    new Float32Array(parameterData, 32, 4).set([this.correctionSpeed, 0, 0, 0]);
+    new Float32Array(parameterData, 32, 4).set([this.correctionSpeed, this.reconcileActive ? 1 : 0, this.debrisCulling ? 1 : 0, this.reconcileFraction]);
     new Float32Array(parameterData, 48, 4).set([this.cell.x, this.cell.y, this.cell.z, 0]);
     new Float32Array(parameterData, 64, 4).set([this.cell.x * nx, this.cell.y * ny, this.cell.z * nz, 0]);
     if (inflow) {
@@ -364,6 +466,7 @@ export class WebGPUQuadtreeSurfaceState {
     // method's BFECC correction), then a full sub-cell-preserving jump-flood
     // redistance every step so downstream consumers (sizing, segmentation,
     // Eq. 25 free-surface scale) always see a true signed-distance field.
+    encoder.clearBuffer(this.reductions);
     dispatch(this.cache.pipelines.advectPredict, this.groups.predict);
     dispatch(this.cache.pipelines.advectReverse, this.groups.reverse);
     dispatch(this.cache.pipelines.advectCorrect, this.groups.correct);
@@ -372,35 +475,43 @@ export class WebGPUQuadtreeSurfaceState {
       dispatch(this.cache.pipelines.jumpFlood, index % 2 === 0 ? this.groups.jumpAB : this.groups.jumpBA, index * this.passStride);
     });
     dispatch(this.cache.pipelines.finalizeDistance, this.jumps.length % 2 === 0 ? this.groups.finalizeA : this.groups.finalizeB);
-    encoder.clearBuffer(this.reductions);
+    if (this.debrisCulling) {
+      dispatch(this.cache.pipelines.cullDebris, this.groups.cull);
+      encoder.copyTextureToTexture({ texture: this.scratch }, { texture: this.texture }, [nx, ny, nz]);
+    }
     dispatch(this.cache.pipelines.reduceVolume, this.groups.reduce);
   }
 
   async readVolumeDiagnostics() {
     if (this.readbackPending) return this.volumeDiagnostics;
     this.readbackPending = true;
-    const readback = this.device.createBuffer({ label: "Quadtree level-set volume readback", size: 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    const encoder = this.device.createCommandEncoder(); encoder.copyBufferToBuffer(this.reductions, 0, readback, 0, 8); this.device.queue.submit([encoder.finish()]);
+    const readback = this.device.createBuffer({ label: "Quadtree level-set volume readback", size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = this.device.createCommandEncoder(); encoder.copyBufferToBuffer(this.reductions, 0, readback, 0, 16); this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
-      const words = new Uint32Array(readback.getMappedRange()); this.volumeCells = words[0] / 256; this.interfaceCells = words[1] / 256;
+      const words = new Uint32Array(readback.getMappedRange()); this.volumeCells = words[0] / 256; this.interfaceCells = words[1] / 256; this.culledDebrisCells = words[2]; this.mismatchCells = words[3];
+      if (this.reconcileEnabled) {
+        this.reconcileActive = nextQuadtreeVofReconciliationActive(this.reconcileActive, (this.volumeCells - this.referenceVolumeCells) / Math.max(1, this.referenceVolumeCells));
+        this.reconcileFraction = this.reconcileActive ? quadtreeVofReconciliationFraction(this.referenceVolumeCells - this.volumeCells, this.mismatchCells) : 0;
+      }
       // The smooth Heaviside is four cells wide, so its derivative converts a
       // one-cell normal shift into roughly one quarter cell of measured
-      // volume. Correct one measured error over the renderer's 30 Hz
-      // diagnostic interval; the regular solver's half-error gain was too
-      // gentle for this four-cell band during the dam-break release.
-      this.correctionSpeed = Math.max(-30, Math.min(30, 4 * (this.referenceVolumeCells - this.volumeCells) / Math.max(this.interfaceCells, 1) / (1 / 30)));
+      // volume. The 30 Hz readback/control loop adds roughly one sample of
+      // delay, so a 1.5x lead factor prevents the dam-break transient from
+      // crossing the 2% envelope while the unchanged +/-30 cells/s clamp
+      // remains the hard safety bound.
+      this.correctionSpeed = Math.max(-30, Math.min(30, 6 * (this.referenceVolumeCells - this.volumeCells) / Math.max(this.interfaceCells, 1) / (1 / 30)));
     } finally {
       if (readback.mapState === "mapped") readback.unmap(); readback.destroy(); this.readbackPending = false;
     }
     return this.volumeDiagnostics;
   }
 
-  get volumeDiagnostics() { return { referenceVolumeCells: this.referenceVolumeCells, volumeCells: this.volumeCells, interfaceCells: this.interfaceCells, correctionSpeed: this.correctionSpeed }; }
+  get volumeDiagnostics() { return { referenceVolumeCells: this.referenceVolumeCells, volumeCells: this.volumeCells, interfaceCells: this.interfaceCells, correctionSpeed: this.correctionSpeed, culledDebrisCells: this.culledDebrisCells, mismatchFraction: this.mismatchCells / Math.max(1, this.dims.nx * this.dims.ny * this.dims.nz), reconciliationActive: this.reconcileActive }; }
   addReferenceVolumeCells(cells: number) { if (Number.isFinite(cells) && cells > 0) this.referenceVolumeCells += cells; }
 
   destroy() {
-    this.texture.destroy(); this.scratch.destroy(); this.predicted.destroy(); this.reversed.destroy(); this.seedsA.destroy(); this.seedsB.destroy(); this.params.destroy(); this.passBuffer.destroy(); this.reductions.destroy();
+    this.texture.destroy(); this.scratch.destroy(); this.predicted.destroy(); this.reversed.destroy(); this.seedsA.destroy(); this.seedsB.destroy(); this.params.destroy(); this.passBuffer.destroy(); this.reductions.destroy(); this.ownedReconcileFallback?.destroy();
   }
 }
 
@@ -429,7 +540,7 @@ export interface WebGPUQuadtreeConstructionCache {
 }
 
 export interface GPUQuadtreeBuildResult {
-  /** Phi sampled at each decoded leaf's horizontal centre, leaf-major. */
+  /** Leaf-major [centre, footprint min, footprint max] phi profiles; empty for the resident GPU sparse-pack path. */
   columnProfiles: Float32Array;
   packedCells: Uint32Array;
   diagnostics: Float32Array;
@@ -536,6 +647,14 @@ fn strainMagnitude(q: vec3i) -> f32 {
   return length(vec3f(vx, vy, vz));
 }
 
+fn speedGradientMagnitude(q: vec3i) -> f32 {
+  let h = params.cellAndDt.xyz;
+  let dx = (length(loadVelocity(q + vec3i(1, 0, 0))) - length(loadVelocity(q - vec3i(1, 0, 0)))) / (2.0 * h.x);
+  let dy = (length(loadVelocity(q + vec3i(0, 1, 0))) - length(loadVelocity(q - vec3i(0, 1, 0)))) / (2.0 * h.y);
+  let dz = (length(loadVelocity(q + vec3i(0, 0, 1))) - length(loadVelocity(q - vec3i(0, 0, 1)))) / (2.0 * h.z);
+  return length(vec3f(dx, dy, dz));
+}
+
 @compute @workgroup_size(8, 8)
 fn evaluateSizing(@builtin(global_invocation_id) gid: vec3u) {
   let q = gid.xy; if (any(q >= params.dims.xz)) { return; }
@@ -550,7 +669,8 @@ fn evaluateSizing(@builtin(global_invocation_id) gid: vec3u) {
     let laplacian = (loadAdvancedPhi(p + vec3i(1, 0, 0)) - 2.0 * phi + loadAdvancedPhi(p - vec3i(1, 0, 0))) / (hx * hx)
       + (loadAdvancedPhi(p + vec3i(0, 1, 0)) - 2.0 * phi + loadAdvancedPhi(p - vec3i(0, 1, 0))) / (hy * hy)
       + (loadAdvancedPhi(p + vec3i(0, 0, 1)) - 2.0 * phi + loadAdvancedPhi(p - vec3i(0, 0, 1))) / (hz * hz);
-    maximum = max(maximum, params.sizing.x * abs(laplacian) + params.sizing.y * strainMagnitude(p));
+    let frontSpeedDemand = ${quadtreeSizingWeights.frontSpeed.toFixed(1)} * length(loadVelocity(p)) / min(hx, min(hy, hz));
+    maximum = max(maximum, params.sizing.x * abs(laplacian) + params.sizing.y * strainMagnitude(p) + ${quadtreeSizingWeights.speedGradient.toFixed(1)} * speedGradientMagnitude(p) + frontSpeedDemand);
   }
   sizingField[index2(q)] = maximum;
 }
@@ -609,7 +729,14 @@ fn sampleLeafProfiles(@builtin(global_invocation_id) gid: vec3u) {
     let p10 = loadInputPhi(vec3i(i32(b.x), i32(y), i32(a.y)));
     let p01 = loadInputPhi(vec3i(i32(a.x), i32(y), i32(b.y)));
     let p11 = loadInputPhi(vec3i(i32(b.x), i32(y), i32(b.y)));
-    columnProfiles[leaf * params.dims.y + y] = mix(mix(p00, p10, t.x), mix(p01, p11, t.x), t.y);
+    let profile = 3u * (leaf * params.dims.y + y);
+    columnProfiles[profile] = mix(mix(p00, p10, t.x), mix(p01, p11, t.x), t.y);
+    var minimum = 3.402823e38; var maximum = -3.402823e38;
+    for (var z = origin.y; z < origin.y + size; z += 1u) { for (var x = origin.x; x < origin.x + size; x += 1u) {
+      let value = loadInputPhi(vec3i(i32(x), i32(y), i32(z)));
+      minimum = min(minimum, value); maximum = max(maximum, value);
+    } }
+    columnProfiles[profile + 1u] = minimum; columnProfiles[profile + 2u] = maximum;
   }
 }
 `;
@@ -687,6 +814,8 @@ export class WebGPUQuadtreeBuilder {
     explicitSizing: Float32Array;
     diagnosticBuffer: GPUBuffer;
     diagnosticBytes: number;
+    /** Skip the CPU-reference leaf profiles when the GPU sparse pack consumes the owner map directly. */
+    readLeafProfiles?: boolean;
   }): Promise<GPUQuadtreeBuildResult> {
     const { nx, ny, nz } = this.dims, cellCount2 = nx * nz;
     if (inputs.explicitSizing.length !== cellCount2) throw new Error("Invalid explicit GPU sizing field");
@@ -708,7 +837,7 @@ export class WebGPUQuadtreeBuilder {
     operations.forEach((operation, index) => new Uint32Array(passData.buffer, index * passStride, 4).set([operation.size, maxRoot, operation.mode, 0]));
     jumps.forEach((jump, index) => new Uint32Array(passData.buffer, (operations.length + index) * passStride, 4).set([0, 0, 0, jump]));
     const align = (value: number, alignment: number) => Math.ceil(value / alignment) * alignment;
-    const phiBytes = nx * ny * nz * 4, topologyBytes = cellCount2 * 4;
+    const phiBytes = nx * ny * nz * 4, profileCapacityBytes = 3 * phiBytes, topologyBytes = cellCount2 * 4;
     const topologyOffset = 0;
     const diagnosticOffset = align(topologyOffset + topologyBytes, 8);
     const queryOffset = align(diagnosticOffset + inputs.diagnosticBytes, 8);
@@ -729,8 +858,8 @@ export class WebGPUQuadtreeBuilder {
         distanceSeedB: this.device.createBuffer({ label: "GPU quadtree binding scratch B", size: 4, usage }),
         passBuffer: this.device.createBuffer({ label: "GPU quadtree pass parameters", size: passData.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
         readback: this.device.createBuffer({ label: "GPU quadtree compact readback", size: Math.max(8, readbackBytes), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
-        columnProfiles: this.device.createBuffer({ label: "GPU quadtree leaf-centre phi profiles", size: Math.max(4, phiBytes), usage }),
-        profileReadback: this.device.createBuffer({ label: "GPU quadtree phi-profile readback", size: Math.max(4, phiBytes), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
+        columnProfiles: this.device.createBuffer({ label: "GPU quadtree conservative phi profiles", size: Math.max(4, profileCapacityBytes), usage }),
+        profileReadback: this.device.createBuffer({ label: "GPU quadtree phi-profile readback", size: Math.max(4, profileCapacityBytes), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
         querySet: hasTimestamps ? this.device.createQuerySet({ type: "timestamp", count: 2 }) : undefined,
         queryResolve: hasTimestamps ? this.device.createBuffer({ label: "GPU quadtree timestamp resolve", size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : undefined
       };
@@ -744,7 +873,7 @@ export class WebGPUQuadtreeBuilder {
     // trace only supplies the dense storage buffer used by sizing; no
     // accumulated-time advection occurs during rebuilds.
     new Float32Array(staticData, 16, 4).set([this.cell.x, this.cell.y, this.cell.z, 0]);
-    new Float32Array(staticData, 32, 4).set([4, 3, Math.min(this.cell.x, this.cell.z), Math.max(0, Math.min(1, this.adaptivityStrength))]);
+    new Float32Array(staticData, 32, 4).set([quadtreeSizingWeights.curvature, quadtreeSizingWeights.strain, Math.min(this.cell.x, this.cell.z), Math.max(0, Math.min(1, this.adaptivityStrength))]);
     this.device.queue.writeBuffer(staticParams, 0, staticData);
     this.device.queue.writeBuffer(passBuffer, 0, passData);
 
@@ -796,8 +925,9 @@ export class WebGPUQuadtreeBuilder {
     } finally {
       readback.unmap();
     }
+    if (inputs.readLeafProfiles === false) return { columnProfiles: new Float32Array(0), packedCells, diagnostics, mismatchFraction: 0, gpuKernel_ms, gpuWall_ms: performance.now() - submittedAt };
     const leafWords = Uint32Array.from(new Set(packedCells));
-    const profileBytes = leafWords.length * ny * 4;
+    const profileBytes = leafWords.length * ny * 3 * 4;
     this.device.queue.writeBuffer(explicit, 0, leafWords);
     this.device.queue.writeBuffer(passBuffer, 0, new Uint32Array([leafWords.length, 0, 0, 0]));
     const profileEncoder = this.device.createCommandEncoder({ label: "GPU quadtree leaf profiles" });

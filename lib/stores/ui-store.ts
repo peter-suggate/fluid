@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { defaultCamera, type CameraState, type ViewMode } from "../model";
-import type { GridOverlayConfig, WaterRenderMode } from "../webgpu-renderer";
+import type { GridOverlayConfig, GridOverlayMode, WaterRenderMode } from "../webgpu-renderer";
 import { defaultEnvironmentId, type EnvironmentId } from "../environments";
 
 export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | null;
@@ -17,6 +17,8 @@ interface UIStore {
   /** Fig. 2-style grid cross-section drawn on a slice plane in the scene. */
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
+  /** Field painted on the slice, including adaptive pressure diagnostics. */
+  gridOverlayMode: GridOverlayMode;
   /** Optical presentation pipeline. The legacy ray marcher stays available for A/B comparisons. */
   waterRenderMode: WaterRenderMode;
   /** Art-directed room, lighting, and foreground treatment surrounding the tank. */
@@ -30,6 +32,7 @@ interface UIStore {
   setRightPanel: (panel: RightPanel) => void;
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
   setGridOverlaySlice: (slice: number) => void;
+  setGridOverlayMode: (mode: GridOverlayMode) => void;
   setWaterRenderMode: (mode: WaterRenderMode) => void;
   setEnvironmentId: (environmentId: EnvironmentId) => void;
 }
@@ -44,6 +47,7 @@ export const useUIStore = create<UIStore>((set) => ({
   rightPanel: null,
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
+  gridOverlayMode: "structure",
   waterRenderMode: "rasterized",
   environmentId: defaultEnvironmentId,
   setView: (view) => set({ view }),
@@ -58,6 +62,7 @@ export const useUIStore = create<UIStore>((set) => ({
   setRightPanel: (rightPanel) => set({ rightPanel, diagnosticsOpen: rightPanel === "diagnostics" }),
   setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
+  setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
   setWaterRenderMode: (waterRenderMode) => set({ waterRenderMode }),
   setEnvironmentId: (environmentId) => set({ environmentId })
 }));
