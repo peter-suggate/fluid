@@ -117,17 +117,18 @@ fn fieldCell(cell: vec3i) -> f32 {
   if (any(cell < vec3i(0)) || any(cell >= dims)) { return 0.0; }
   if (u.gridInfo.w < 1.5) { return textureLoad(volume, cell, 0).x; }
   let base = i32(round(textureLoad(columnBases, cell.xz, 0).x));
+  let cellSizeY = u.container.y / max(u.gridInfo.y, 1.0);
+  var phi = 5.0 * cellSizeY;
   if (cell.y < base && base > 0) {
-    // The bottom texel is the tall-cell column-average VOF; every subcell
-    // shares that density, matching the solver's classification. Drawing a
-    // settled fill instead showed phantom air gaps the pressure solve never
-    // saw (2026-07-16 audit).
-    return clamp(textureLoad(volume, vec3i(cell.x, 0, cell.z), 0).x, 0.0, 1.0);
+    let t = clamp(f32(cell.y) / f32(max(base - 1, 1)), 0.0, 1.0);
+    phi = mix(textureLoad(volume, vec3i(cell.x, 0, cell.z), 0).x, textureLoad(volume, vec3i(cell.x, 1, cell.z), 0).x, t);
+    return clamp(0.5 - phi / cellSizeY, 0.0, 1.0);
   }
   let packedY = 2 + cell.y - base;
   let stored = vec3i(textureDimensions(volume));
   if (packedY < 2 || packedY >= stored.y) { return 0.0; }
-  return textureLoad(volume, vec3i(cell.x, packedY, cell.z), 0).x;
+  phi = textureLoad(volume, vec3i(cell.x, packedY, cell.z), 0).x;
+  return clamp(0.5 - phi / cellSizeY, 0.0, 1.0);
 }
 
 fn columnBaseAt(x: i32, z: i32) -> i32 {
@@ -380,13 +381,6 @@ fn extractTallSidesMain(@builtin(global_invocation_id) gid: vec3u) {
   let b11 = columnBaseAt(x, z);
   let minimumBase = min(min(b00, b10), min(b01, b11));
   if (minimumBase <= 0) { return; }
-  let v00 = textureLoad(volume, vec3i(x - 1, 0, z - 1), 0).x;
-  let v10 = textureLoad(volume, vec3i(x, 0, z - 1), 0).x;
-  let v01 = textureLoad(volume, vec3i(x - 1, 0, z), 0).x;
-  let v11 = textureLoad(volume, vec3i(x, 0, z), 0).x;
-  let minimum = min(min(v00, v10), min(v01, v11));
-  let maximum = max(max(v00, v10), max(v01, v11));
-  if (minimum >= 0.5 || maximum < 0.5) { return; }
   for (var y = 0; y < minimumBase; y += 1) { classifyCube(vec3i(x, y, z)); }
 }
 

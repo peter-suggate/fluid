@@ -23,7 +23,13 @@ export interface TallCellLayout {
   cellSize_m: { x: number; y: number; z: number };
   columnBases: Float32Array;
   initialVolume: Float32Array;
+  /** Signed-distance point samples at the paper's Eq. 4 locations. Negative
+   * values are liquid and the narrow band is clamped to five fine cells. */
+  initialPhi: Float32Array;
   initialVolumeCellSum: number;
+  /** Reference liquid volume in fine-cell units. Unlike initialVolume, this
+   * name survives the tall solver's level-set cutover. */
+  referenceLiquidVolume_cells: number;
   packedSampleCount: number;
   activeSampleCount: number;
   equivalentUniformCellCount: number;
@@ -128,6 +134,50 @@ function initialWet(scene: SceneDescription, x: number, y: number, z: number, nx
   if (scene.fluid.initialCondition === "tank-fill") return (y + 0.5) / fineNy <= scene.container.fillFraction;
   const dam = damBreakFractions(scene.container.fillFraction);
   return (x + 0.5) / nx <= dam.width && (y + 0.5) / fineNy <= dam.height && (z + 0.5) / nz <= dam.depth;
+}
+
+function boxSignedDistance(point: { x: number; y: number; z: number }, center: { x: number; y: number; z: number }, half: { x: number; y: number; z: number }) {
+  const qx = Math.abs(point.x - center.x) - half.x;
+  const qy = Math.abs(point.y - center.y) - half.y;
+  const qz = Math.abs(point.z - center.z) - half.z;
+  const outside = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0));
+  return outside + Math.min(Math.max(qx, qy, qz), 0);
+}
+
+/** Analytic initial liquid signed distance in metres. Container walls are
+ * solid contacts, not liquid-air interfaces, so a tank fill is the vertical
+ * free-surface plane while a dam break uses the finite liquid block. */
+export function initialLiquidPhi(scene: SceneDescription, point: { x: number; y: number; z: number }) {
+  const c = scene.container;
+  if (scene.fluid.initialCondition === "tank-fill") return point.y - c.height_m * c.fillFraction;
+  const dam = damBreakFractions(c.fillFraction);
+  const half = { x: 0.5 * dam.width * c.width_m, y: 0.5 * dam.height * c.height_m, z: 0.5 * dam.depth * c.depth_m };
+  return boxSignedDistance(point, {
+    x: -0.5 * c.width_m + half.x,
+    y: half.y,
+    z: -0.5 * c.depth_m + half.z
+  }, half);
+}
+
+function buildInitialPhi(scene: SceneDescription, nx: number, fineNy: number, nz: number, packedNy: number, columnBases: Float32Array) {
+  const c = scene.container;
+  const h = { x: c.width_m / nx, y: c.height_m / fineNy, z: c.depth_m / nz };
+  const limit = 5 * Math.min(h.x, h.y, h.z);
+  const phi = new Float32Array(nx * packedNy * nz);
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const base = columnBases[x + nx * z];
+    for (let packedY = 0; packedY < packedNy; packedY += 1) {
+      const sampleY = packedY === 0 ? 0.5 : packedY === 1 ? Math.max(0.5, base - 0.5) : base + packedY - 1.5;
+      const active = packedY < 2 ? base > 0 : base + packedY - 2 < fineNy;
+      const value = active ? initialLiquidPhi(scene, {
+        x: -0.5 * c.width_m + (x + 0.5) * h.x,
+        y: sampleY * h.y,
+        z: -0.5 * c.depth_m + (z + 0.5) * h.z
+      }) : limit;
+      phi[x + nx * (packedY + packedNy * z)] = Math.max(-limit, Math.min(limit, value));
+    }
+  }
+  return phi;
 }
 
 function isInitialSurfaceCell(scene: SceneDescription, x: number, y: number, z: number, nx: number, fineNy: number, nz: number) {
@@ -280,10 +330,12 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
 
   const packedSampleCount = nx * packedNy * nz;
   const equivalentUniformCellCount = nx * fineNy * nz;
+  const initialPhi = buildInitialPhi(scene, nx, fineNy, nz, packedNy, columnBases);
   return {
     nx, fineNy, nz, packedNy,
     cellSize_m: { x: c.width_m / nx, y: c.height_m / fineNy, z: c.depth_m / nz },
-    columnBases, initialVolume, initialVolumeCellSum,
+    columnBases, initialVolume, initialPhi, initialVolumeCellSum,
+    referenceLiquidVolume_cells: initialVolumeCellSum,
     packedSampleCount, activeSampleCount, equivalentUniformCellCount,
     compressionRatio: packedSampleCount / equivalentUniformCellCount,
     activeCompressionRatio: activeSampleCount / equivalentUniformCellCount,
@@ -370,11 +422,14 @@ export function createSingleTallCellProbeLayout(
     }
   }
   const equivalentUniformCellCount = nx * fineNy * nz;
+  const initialPhi = buildInitialPhi(scene, nx, fineNy, nz, packedNy, columnBases);
   return {
     ...layout,
     columnBases,
     initialVolume,
+    initialPhi,
     initialVolumeCellSum,
+    referenceLiquidVolume_cells: initialVolumeCellSum,
     activeSampleCount,
     activeCompressionRatio: activeSampleCount / equivalentUniformCellCount,
     settings: { ...layout.settings, maximumNeighborDelta, remeshInterval: Number.MAX_SAFE_INTEGER },
@@ -412,6 +467,7 @@ export function createSingleTallCellProbeControlLayout(
     ...candidate,
     columnBases,
     initialVolume,
+    initialPhi: buildInitialPhi(scene, candidate.nx, candidate.fineNy, candidate.nz, candidate.packedNy, columnBases),
     activeSampleCount: candidate.equivalentUniformCellCount,
     activeCompressionRatio: 1,
     singleTallCellProbe: undefined

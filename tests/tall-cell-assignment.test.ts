@@ -21,19 +21,23 @@ interface ColumnView {
   base: number;
   wet: boolean[];
   surfaceCells: number[];
-  tallFraction: number;
+  tallPhi: [number, number];
 }
 
 function columnView(layout: TallCellLayout, x: number, z: number): ColumnView {
-  const { nx, fineNy, packedNy, columnBases, initialVolume } = layout;
+  const { nx, fineNy, packedNy, columnBases, initialPhi } = layout;
   const base = Math.round(columnBases[x + nx * z]);
-  const tallFraction = initialVolume[x + nx * packedNy * z];
+  const bottom = initialPhi[x + nx * packedNy * z];
+  const top = initialPhi[x + nx * (1 + packedNy * z)];
   const wet: boolean[] = [];
   for (let y = 0; y < fineNy; y += 1) {
-    if (y < base && base > 0) wet.push(tallFraction >= 0.5);
+    if (y < base && base > 0) {
+      const t = y / Math.max(base - 1, 1);
+      wet.push(bottom + (top - bottom) * t <= 0);
+    }
     else {
       const packedY = 2 + y - base;
-      wet.push(packedY >= 2 && packedY < packedNy ? initialVolume[x + nx * (packedY + packedNy * z)] >= 0.5 : false);
+      wet.push(packedY >= 2 && packedY < packedNy ? initialPhi[x + nx * (packedY + packedNy * z)] <= 0 : false);
     }
   }
   const surfaceCells: number[] = [];
@@ -42,7 +46,7 @@ function columnView(layout: TallCellLayout, x: number, z: number): ColumnView {
     const above = y + 1 < fineNy ? wet[y + 1] : false;
     if (wet[y] !== below || wet[y] !== above) surfaceCells.push(y);
   }
-  return { base, wet, surfaceCells, tallFraction };
+  return { base, wet, surfaceCells, tallPhi: [bottom, top] };
 }
 
 function renderSlice(title: string, fineNy: number, nx: number, cellAt: (x: number, y: number) => string) {
@@ -75,9 +79,9 @@ for (const scenarioId of ["dam-break-ui", "settled-tank"] as const) {
       assert.ok(column.base >= Math.min(2, maxBase) && column.base <= maxBase, `${label} outside [2, ${maxBase}]`);
 
       // Section 3.6 constraint: the liquid interface never lies inside a
-      // tall cell. Initially that means the store is exactly full or exactly
-      // empty and no vertical crossing sits below the band.
-      assert.ok(column.tallFraction === 0 || column.tallFraction === 1, `${label} holds a fractional store ${column.tallFraction}`);
+      // tall cell. The Eq. 5 endpoint interpolation must therefore have no
+      // sign change below the regular band.
+      assert.equal(column.tallPhi[0] <= 0, column.tallPhi[1] <= 0, `${label} has an Eq. 5 zero crossing inside the tall cell`);
       for (const y of column.surfaceCells) {
         assert.ok(y >= column.base, `${label} has a surface cell at y=${y} inside the tall cell`);
         assert.ok(y < column.base + layers, `${label} has a surface cell at y=${y} above the band ceiling ${column.base + layers}`);
@@ -145,7 +149,7 @@ test("remeshed cell assignment after the dam-front transient still satisfies Sec
     assert.ok(adapter, "no WebGPU adapter");
     const device = await adapter.requestDevice({ requiredLimits: { maxTextureDimension3D: Math.min(2048, adapter.limits.maxTextureDimension3D) } });
     const values = Object.fromEntries(tallCellMethod.params.map((parameter) => [parameter.key, parameter.default])) as Record<string, string | number>;
-    const solver = tallCellMethod.createSolver(device, scenario.scene, "balanced", values, () => {}) as import("../lib/webgpu-eulerian").WebGPUEulerianSolver;
+    const solver = tallCellMethod.createSolver!(device, scenario.scene, "balanced", values, () => {}) as import("../lib/webgpu-eulerian").WebGPUEulerianSolver;
     const bodies = initializeRigidBodies(scenario.scene.rigidBodies);
     const dt = scenario.scene.numerics.maxDt_s;
     let t = 0;
@@ -171,79 +175,61 @@ test("remeshed cell assignment after the dam-front transient still satisfies Sec
     const bases = await readTexture(solver.columnBaseTexture, info.nx, info.nz, 1);
     const { nx, nz, ny: fineNy, storedNy, regularLayers: layers, maximumNeighborDelta: D } = info as unknown as { nx: number; nz: number; ny: number; storedNy: number; regularLayers: number; maximumNeighborDelta: number };
     const maxBase = Math.max(0, fineNy - layers);
-    const storeAt = (x: number, z: number) => Math.max(0, packed[x + nx * storedNy * z]);
+    const endpointAt = (x: number, z: number, endpoint: 0 | 1) => packed[x + nx * (endpoint + storedNy * z)];
     const bandAt = (x: number, z: number, packedY: number) => packed[x + nx * (packedY + storedNy * z)];
-    const columnWater = (x: number, z: number) => {
+    const phiAt = (x: number, y: number, z: number) => {
       const base = Math.round(bases[x + nx * z]);
-      let total = storeAt(x, z) * base;
-      for (let packedY = 2; packedY < storedNy; packedY += 1) if (base + packedY - 2 < fineNy) total += Math.max(0, bandAt(x, z, packedY));
-      return total;
-    };
-    // The two representability floors the remesh smoother applies after the
-    // Eq 10 min: the column's total water must fit under the band ceiling,
-    // and the highest wet cell must stay inside the band (a conservative VOF
-    // cannot delete above-band liquid the way the paper's level set can).
-    const representabilityFloor = (x: number, z: number) => {
-      const base = Math.round(bases[x + nx * z]);
-      let highestWet = base > 0 && storeAt(x, z) >= 0.5 ? base - 1 : -1;
-      for (let packedY = 2; packedY < storedNy; packedY += 1) {
-        const worldY = base + packedY - 2;
-        if (worldY < fineNy && bandAt(x, z, packedY) >= 0.5) highestWet = worldY;
+      if (y < base && base > 0) {
+        const t = y / Math.max(base - 1, 1);
+        const bottom = endpointAt(x, z, 0);
+        return bottom + (endpointAt(x, z, 1) - bottom) * t;
       }
-      const wetTopFloor = Math.min(Math.max(highestWet + 2 - layers, 0), maxBase);
-      return Math.max(2, Math.ceil(columnWater(x, z)) - layers, wetTopFloor);
+      const packedY = 2 + y - base;
+      return packedY >= 2 && packedY < storedNy ? bandAt(x, z, packedY) : Infinity;
     };
 
-    let dryUnderWet = 0, surfaceOutOfBand = 0, wetColumns = 0, unexcusedDelta = 0;
+    let dryUnderWet = 0, surfaceOutOfBand = 0, wetColumns = 0, deltaViolations = 0;
     for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
       const base = Math.round(bases[x + nx * z]);
       assert.ok(base >= 2 && base <= maxBase, `column (${x},${z}) base=${base} outside [2,${maxBase}] after remeshing`);
 
-      // Eq 10, with the representability excuse the solver documents: a
-      // column may exceed D only when lowering it would strand its own
-      // water above the band (conservative VOF cannot delete liquid the way
-      // the paper's level set can).
+      // Eq. 10 is strict for a level set: no VOF representability floor is
+      // needed or permitted.
       for (const [dx, dz] of [[1, 0], [0, 1]] as const) {
         const nxp = x + dx, nzp = z + dz;
         if (nxp >= nx || nzp >= nz) continue;
         const neighbor = Math.round(bases[nxp + nx * nzp]);
-        if (Math.abs(base - neighbor) <= D) continue;
-        const [highX, highZ, high] = base > neighbor ? [x, z, base] : [nxp, nzp, neighbor];
-        const floor = representabilityFloor(highX, highZ);
-        if (high > floor) { unexcusedDelta += 1; if (unexcusedDelta <= 6) console.log(`  delta violation: (${x},${z}) base=${base} vs (${nxp},${nzp}) base=${neighbor} floor(high)=${floor} water(high)=${columnWater(highX, highZ).toFixed(2)}`); }
+        if (Math.abs(base - neighbor) > D) deltaViolations += 1;
       }
 
       // Section 3.6: a wet band cannot rest on an air-classified store.
-      const storeWet = storeAt(x, z) >= 0.5;
-      const bandBottomWet = bandAt(x, z, 2) >= 0.5;
-      if (!storeWet && bandBottomWet) dryUnderWet += 1;
+      const tallTopWet = endpointAt(x, z, 1) <= 0;
+      const bandBottomWet = bandAt(x, z, 2) <= 0;
+      if (!tallTopWet && bandBottomWet) dryUnderWet += 1;
 
       // Section 8 coverage: the free surface of every wet column lies inside
       // its band (constraints 1 and 2 are what place it there).
-      let highestWet = storeWet ? base - 1 : -1;
-      for (let packedY = 2; packedY < storedNy; packedY += 1) {
-        const worldY = base + packedY - 2;
-        if (worldY < fineNy && bandAt(x, z, packedY) >= 0.5) highestWet = worldY;
-      }
+      let highestWet = -1;
+      for (let y = 0; y < fineNy; y += 1) if (phiAt(x, y, z) <= 0) highestWet = y;
       if (highestWet >= 0) {
         wetColumns += 1;
         const aboveCeiling = highestWet >= base + layers;
-        const deepPartialStore = highestWet < base && !bandBottomWet && storeAt(x, z) < 0.95 && base > 3;
-        if (aboveCeiling || deepPartialStore) { surfaceOutOfBand += 1; if (surfaceOutOfBand <= 6) console.log(`  surface out of band: (${x},${z}) base=${base} highestWet=${highestWet} store=${storeAt(x, z).toFixed(2)} ceiling=${aboveCeiling}`); }
+        const crossingInsideTall = (endpointAt(x, z, 0) <= 0) !== tallTopWet;
+        if (aboveCeiling || crossingInsideTall) { surfaceOutOfBand += 1; if (surfaceOutOfBand <= 6) console.log(`  surface out of band: (${x},${z}) base=${base} highestWet=${highestWet} crossingInsideTall=${crossingInsideTall} ceiling=${aboveCeiling}`); }
       }
     }
 
     const z = Math.floor(nz / 2);
     renderSlice(`remeshed assignment dam-break-ui t=${t.toFixed(3)}s z=${z}`, fineNy, nx, (x, y) => {
       const base = Math.round(bases[x + nx * z]);
-      if (y < base) return storeAt(x, z) >= 0.5 ? "T" : "t";
+      if (y < base) return phiAt(x, y, z) <= 0 ? "T" : "t";
       const packedY = 2 + y - base;
-      if (packedY >= 2 && packedY < storedNy && y < fineNy) return bandAt(x, z, packedY) >= 0.5 ? "#" : "-";
+      if (packedY >= 2 && packedY < storedNy && y < fineNy) return bandAt(x, z, packedY) <= 0 ? "#" : "-";
       return " ";
     });
-    console.log(`remeshed assignment: wetColumns=${wetColumns} dryUnderWetBand=${dryUnderWet} surfaceOutOfBand=${surfaceOutOfBand} unexcusedDelta=${unexcusedDelta}`);
+    console.log(`remeshed assignment: wetColumns=${wetColumns} dryUnderWetBand=${dryUnderWet} surfaceOutOfBand=${surfaceOutOfBand} deltaViolations=${deltaViolations}`);
 
-    assert.equal(unexcusedDelta, 0, "Eq 10 neighbor bound violated without a representability excuse");
+    assert.equal(deltaViolations, 0, "Eq. 10 neighbor bound violated");
     // Mid-collapse both counters are transiently nonzero on some GPUs; the
     // 2026-07-16 audits measured 0 and 0 here, so small bounds pin the
     // regression without flaking on scheduling nondeterminism.
