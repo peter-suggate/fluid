@@ -52,7 +52,6 @@ type UIQueryState = {
   view: ViewMode;
   camera: CameraState;
   sceneModalOpen: boolean;
-  performanceOpen: boolean;
   validationOpen: boolean;
   diagnosticsOpen: boolean;
   rightPanel: RightPanel;
@@ -164,8 +163,11 @@ export function parseQueryState(search: string): QueryState {
   const grid = query.get("grid");
   const render = query.get("render");
   const requestedPanel = query.get("panel");
-  const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "bodies" || requestedPanel === "diagnostics"
+  // One-way migration for shared pre-sidebar links. Serialization always emits
+  // the mutually exclusive panel state instead of restoring the old UI flag.
+  const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "bodies" || requestedPanel === "diagnostics" || requestedPanel === "performance"
     ? requestedPanel
+    : query.get("performance") === "1" ? "performance"
     : query.get("diagnostics") === "1" ? "diagnostics" : initialUI.rightPanel;
 
   return {
@@ -187,7 +189,6 @@ export function parseQueryState(search: string): QueryState {
         }
       },
       sceneModalOpen: query.get("sceneConfig") === "1",
-      performanceOpen: query.get("performance") === "1",
       validationOpen: query.get("validation") === "1",
       diagnosticsOpen: rightPanel === "diagnostics",
       rightPanel,
@@ -222,7 +223,6 @@ export function serializeQueryState(
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");
   else if (rightPanel) query.set("panel", rightPanel);
-  if (uiState.performanceOpen) query.set("performance", "1");
   if (uiState.validationOpen) query.set("validation", "1");
   if (uiState.sceneModalOpen) query.set("sceneConfig", "1");
   if (uiState.gridOverlayAxis !== "off") query.set("grid", uiState.gridOverlayAxis);

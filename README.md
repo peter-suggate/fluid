@@ -24,7 +24,7 @@ subcell Newton refinement with analytic trilinear normals, front/back thickness,
 Fresnel reflection, and Beer–Lambert absorption. It renders at native canvas
 resolution; traversal skipping and cached interface work keep the
 raymarch within its GPU budget without reducing surface fidelity.
-The live performance drawer separates hardware-timestamped GPU advection,
+The live performance sidebar separates hardware-timestamped GPU advection,
 pressure, projection, immersed-body coupling, reductions, queue/copy overhead,
 and raymarch rendering from wall-clock CPU simulation, upload, encoding, and
 orchestration costs, with a shared 60 Hz budget and recent-frame history.

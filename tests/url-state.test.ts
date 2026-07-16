@@ -21,9 +21,8 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   }, {
     ...initialUI,
     view: "presentation",
-    diagnosticsOpen: true,
-    rightPanel: "diagnostics",
-    performanceOpen: true,
+    diagnosticsOpen: false,
+    rightPanel: "performance",
     gridOverlayAxis: "z",
     gridOverlaySlice: 0.7,
     waterRenderMode: "ray-marched",
@@ -36,9 +35,8 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   assert.equal(parsed.presetId, "hose-tank");
   assert.equal(parsed.quality, "high");
   assert.equal(parsed.ui.view, "presentation");
-  assert.equal(parsed.ui.diagnosticsOpen, true);
-  assert.equal(parsed.ui.rightPanel, "diagnostics");
-  assert.equal(parsed.ui.performanceOpen, true);
+  assert.equal(parsed.ui.diagnosticsOpen, false);
+  assert.equal(parsed.ui.rightPanel, "performance");
   assert.equal(parsed.ui.gridOverlayAxis, "z");
   assert.equal(parsed.ui.gridOverlaySlice, 0.7);
   assert.equal(parsed.ui.waterRenderMode, "ray-marched");
@@ -98,4 +96,21 @@ test("viewport utility panels round-trip through one mutually exclusive query st
   assert.equal(params.get("panel"), "visual");
   assert.equal(params.has("diagnostics"), false);
   assert.equal(parseQueryState(query).ui.rightPanel, "visual");
+});
+
+test("legacy performance query links open the performance sidebar and canonicalize", () => {
+  const parsed = parseQueryState("?performance=1");
+  assert.equal(parsed.ui.rightPanel, "performance");
+
+  const query = serializeQueryState("?performance=1", {
+    presetId: parsed.presetId,
+    scene: parsed.scene
+  }, {
+    methodId: parsed.methodId,
+    quality: parsed.quality,
+    overrides: parsed.overrides
+  }, parsed.ui);
+  const params = new URLSearchParams(query);
+  assert.equal(params.get("panel"), "performance");
+  assert.equal(params.has("performance"), false);
 });

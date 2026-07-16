@@ -7,7 +7,6 @@ import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useRecordingStore } from "@/lib/stores/recording-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
-import { useUIStore } from "@/lib/stores/ui-store";
 
 export function TransportBar() {
   const runState = useRuntimeStore((state) => state.runState);
@@ -18,8 +17,6 @@ export function TransportBar() {
   const simRate = useRuntimeStore((state) => state.simRate);
   const maxDt = useSceneStore((state) => state.scene.numerics.maxDt_s);
   const gpuLag = useDiagnosticsStore((state) => state.gpuInfo?.simulationLag_s);
-  const performanceOpen = useUIStore((state) => state.performanceOpen);
-  const setPerformanceOpen = useUIStore((state) => state.setPerformanceOpen);
   const recordingStatus = useRecordingStore((state) => state.status);
   const recordingStart = useRecordingStore((state) => state.startedAtSimulation_s);
   const recording = useRecordingStore((state) => state.recording);
@@ -54,7 +51,6 @@ export function TransportBar() {
           aria-label={recordingStatus === "recording" ? "Stop simulation recording" : "Record simulation video"}
           data-testid="record-simulation"
         >{recordingStatus === "recording" ? "■ STOP" : recordingStatus === "processing" ? "WAIT" : "● REC"}</button>
-        <button className={performanceOpen ? "active" : ""} onClick={() => setPerformanceOpen(!performanceOpen)} aria-expanded={performanceOpen} aria-controls="performance-drawer">PERF</button>
       </div>
       <div className="time-readout">
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>

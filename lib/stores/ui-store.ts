@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { defaultCamera, type CameraState, type ViewMode } from "../model";
 import type { GridOverlayConfig, WaterRenderMode } from "../webgpu-renderer";
 
-export type RightPanel = "visual" | "bodies" | "diagnostics" | null;
+export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | null;
 
 /** Presentation-only state: camera, view mode, selection, open panels. */
 interface UIStore {
@@ -10,7 +10,6 @@ interface UIStore {
   camera: CameraState;
   selectedBodyId?: string;
   sceneModalOpen: boolean;
-  performanceOpen: boolean;
   validationOpen: boolean;
   diagnosticsOpen: boolean;
   rightPanel: RightPanel;
@@ -23,7 +22,6 @@ interface UIStore {
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   selectBody: (bodyId?: string) => void;
   setSceneModalOpen: (open: boolean) => void;
-  setPerformanceOpen: (open: boolean) => void;
   setValidationOpen: (open: boolean) => void;
   setDiagnosticsOpen: (open: boolean) => void;
   setRightPanel: (panel: RightPanel) => void;
@@ -37,7 +35,6 @@ export const useUIStore = create<UIStore>((set) => ({
   camera: defaultCamera,
   selectedBodyId: undefined,
   sceneModalOpen: false,
-  performanceOpen: false,
   validationOpen: false,
   diagnosticsOpen: false,
   rightPanel: null,
@@ -48,7 +45,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   selectBody: (selectedBodyId) => set({ selectedBodyId }),
   setSceneModalOpen: (sceneModalOpen) => set({ sceneModalOpen }),
-  setPerformanceOpen: (performanceOpen) => set({ performanceOpen }),
   setValidationOpen: (validationOpen) => set({ validationOpen }),
   setDiagnosticsOpen: (diagnosticsOpen) => set((state) => ({
     diagnosticsOpen,
