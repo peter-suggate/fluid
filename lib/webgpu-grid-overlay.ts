@@ -121,8 +121,9 @@ fn fluidSample(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz);
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
   if (u.gridInfo.w < 1.5) { return textureLoad(fluidField, q, 0).x; }
-  let base = i32(round(textureLoad(tallCellBases, q.xz, 0).x));
   let cellSizeY = u.container.y / max(u.gridInfo.y, 1.0);
+  if (u.gridInfo.w > 2.5) { return clamp(0.5 - textureLoad(fluidField, q, 0).x / cellSizeY, 0.0, 1.0); }
+  let base = i32(round(textureLoad(tallCellBases, q.xz, 0).x));
   if (q.y < base && base > 0) { let t=clamp(f32(q.y)/f32(max(base-1,1)),0.0,1.0);let phi=mix(textureLoad(fluidField,vec3i(q.x,0,q.z),0).x,textureLoad(fluidField,vec3i(q.x,1,q.z),0).x,t);return clamp(0.5-phi/cellSizeY,0.0,1.0); }
   let packedY = 2 + q.y - base;
   let stored = vec3i(textureDimensions(fluidField));
@@ -224,7 +225,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
   let lineFade = smoothstep(2.5, 6.0, pixelsPerCell);
   let dotFade = smoothstep(9.0, 18.0, pixelsPerCell);
   let adaptiveGrid = u.debug.z > 0.5;
-  let tallGrid = u.gridInfo.w > 1.5;
+  let tallGrid = u.gridInfo.w > 1.5 && u.gridInfo.w < 2.5;
   var base = 0.0;
   if (tallGrid) { base = round(textureLoad(tallCellBases, cell.xz, 0).x); }
   let stored = vec3i(textureDimensions(fluidField));

@@ -52,6 +52,8 @@ export type MethodParamSpec = NumberParamSpec | SelectParamSpec;
 export interface GPUSolverInstance {
   readonly info: GPUEulerianInfo;
   readonly volumeTexture: GPUTexture;
+  /** Field the renderer contours; a smooth level set when the solver keeps one separate from volumeTexture. */
+  readonly surfaceFieldTexture?: GPUTexture;
   readonly columnBaseTexture: GPUTexture;
   /** Adaptive pressure-cell ownership for scientific grid slices. */
   readonly gridCellTexture?: GPUTexture;

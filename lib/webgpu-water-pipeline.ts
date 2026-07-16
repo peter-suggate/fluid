@@ -112,23 +112,30 @@ struct ExtractionMeta { activeCubeCount: atomic<u32>, vertexAllocator: atomic<u3
 @group(0) @binding(6) var<storage, read_write> extractionMeta: ExtractionMeta;
 override countOnly = false;
 
+// Level-set fields become a smooth occupancy whose 0.5 contour is phi = 0.
+// The band spans four cells so no corner of a surface-crossing cube saturates
+// (the cube diagonal is under two cells); a saturated corner biases the linear
+// crossing estimate and extracts as cell-pitch lattice artifacts.
+fn occupancyFromPhi(phi: f32) -> f32 {
+  let band = 4.0 * u.container.y / max(u.gridInfo.y, 1.0);
+  return clamp(0.5 - phi / band, 0.0, 1.0);
+}
+
 fn fieldCell(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz);
   if (any(cell < vec3i(0)) || any(cell >= dims)) { return 0.0; }
-  if (u.gridInfo.w < 1.5) { return textureLoad(volume, cell, 0).x; }
+  let mode = u.gridInfo.w;
+  if (mode < 1.5) { return textureLoad(volume, cell, 0).x; }
+  if (mode > 2.5) { return occupancyFromPhi(textureLoad(volume, cell, 0).x); }
   let base = i32(round(textureLoad(columnBases, cell.xz, 0).x));
-  let cellSizeY = u.container.y / max(u.gridInfo.y, 1.0);
-  var phi = 5.0 * cellSizeY;
   if (cell.y < base && base > 0) {
     let t = clamp(f32(cell.y) / f32(max(base - 1, 1)), 0.0, 1.0);
-    phi = mix(textureLoad(volume, vec3i(cell.x, 0, cell.z), 0).x, textureLoad(volume, vec3i(cell.x, 1, cell.z), 0).x, t);
-    return clamp(0.5 - phi / cellSizeY, 0.0, 1.0);
+    return occupancyFromPhi(mix(textureLoad(volume, vec3i(cell.x, 0, cell.z), 0).x, textureLoad(volume, vec3i(cell.x, 1, cell.z), 0).x, t));
   }
   let packedY = 2 + cell.y - base;
   let stored = vec3i(textureDimensions(volume));
   if (packedY < 2 || packedY >= stored.y) { return 0.0; }
-  phi = textureLoad(volume, vec3i(cell.x, packedY, cell.z), 0).x;
-  return clamp(0.5 - phi / cellSizeY, 0.0, 1.0);
+  return occupancyFromPhi(textureLoad(volume, vec3i(cell.x, packedY, cell.z), 0).x);
 }
 
 fn columnBaseAt(x: i32, z: i32) -> i32 {
