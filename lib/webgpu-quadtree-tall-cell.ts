@@ -3,7 +3,8 @@ import { damBreakFractions } from "./initial-fluid";
 import { insidePrimitive } from "./fluid-rigid-coupling";
 import { boundingRadius, quaternionRotate, type RigidBodyState } from "./rigid-body";
 import type { SceneDescription, Vec3 } from "./model";
-import { WebGPUQuadtreeBuilder, WebGPUQuadtreeSurfaceState, type WebGPUQuadtreeConstructionCache, type WebGPUQuadtreeSurfaceCache } from "./webgpu-quadtree-builder";
+import { WebGPUQuadtreeBuilder, WebGPUQuadtreeSurfaceState, type SurfaceInflowState, type WebGPUQuadtreeConstructionCache, type WebGPUQuadtreeSurfaceCache } from "./webgpu-quadtree-builder";
+import { createInflowGridBoundary, inflowBoundaryWGSL, inflowOutletCenter } from "./inflow-boundary";
 
 export interface QuadtreeRigidCoupling {
   bodies: RigidBodyState[];
@@ -294,11 +295,18 @@ function initialSizing(scene: SceneDescription, nx: number, nz: number, h: Vec3,
   // evaluates its curvature/velocity demand over each candidate leaf's whole
   // footprint, so a flat surface genuinely coarsens (the paper's headline
   // deep-water case) while edges, blobs, and droplets always register.
+  const inflow = scene.fluid.inflow;
+  const outlet = inflow ? inflowOutletCenter(inflow) : undefined;
   for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
     const worldX = -scene.container.width_m / 2 + (x + 0.5) * h.x, worldZ = -scene.container.depth_m / 2 + (z + 0.5) * h.z;
     for (const body of sizingBodies) {
       const radius = Math.max(body.dimensions_m.x, body.dimensions_m.y, body.dimensions_m.z);
       if (Math.hypot(worldX - body.position_m.x, worldZ - body.position_m.z) <= radius + 2 * Math.max(h.x, h.z)) sizing[x + nx * z] = Math.max(sizing[x + nx * z], 2 / Math.min(h.x, h.z));
+    }
+    // The nozzle aperture must be resolved before any fluid exists there, or
+    // the surface-driven sizing never refines around the emerging jet.
+    if (inflow && outlet && Math.hypot(worldX - outlet.x, worldZ - outlet.z) <= inflow.radius_m + 2 * Math.max(h.x, h.z)) {
+      sizing[x + nx * z] = Math.max(sizing[x + nx * z], 2 / Math.min(h.x, h.z));
     }
   }
   return sizing;
@@ -323,7 +331,7 @@ function bufferWithData(device: GPUDevice, label: string, data: ArrayBufferView,
 }
 
 export const quadtreeTallCellProjectionShader = /* wgsl */ `
-struct Params { dims: vec4u, cell: vec4f, counts: vec4u, solve: vec4f, coupling: vec4u, couplingCounts: vec4u, precondition: vec4u }
+struct Params { dims: vec4u, cell: vec4f, counts: vec4u, solve: vec4f, coupling: vec4u, couplingCounts: vec4u, precondition: vec4u, cellGravity: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowVelocityLength: vec4f, inflowTiming: vec4f }
 struct Face { nodes: vec4u, coefficients: vec4f, bounds: vec4u, packed: u32, solidFlux: f32, weights: vec2f, sampleCells: vec4u, sampleSpans: vec4u, flux: f32 }
 struct Entry { face: u32, coefficient: f32 }
 alias SolverField = u32;
@@ -349,6 +357,8 @@ const DIAGONAL: SolverField = 6u; const ACTIVE_FLAG: SolverField = 7u;
 @group(0) @binding(15) var levelSetIn: texture_3d<f32>;
 var<workgroup> reductionA: array<f32, 256>;
 var<workgroup> reductionB: array<f32, 256>;
+fn inflowGridDims() -> vec3i { return vec3i(params.dims.xyz); }
+${inflowBoundaryWGSL}
 fn dofs() -> u32 { return params.counts.x; }
 fn stateIndex(row: u32, field: SolverField) -> u32 { return field * dofs() + row; }
 fn stateF(row: u32, field: SolverField) -> f32 { return bitcast<f32>(state[stateIndex(row, field)]); }
@@ -729,6 +739,10 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
       else { value[axis] -= fluidScale * solvedFaceGradient(face); }
     }
   }
+  // The nozzle is a prescribed boundary: re-impose its velocity after the
+  // pressure gradient (and after the air-air zeroing above), mirroring the
+  // restricted method's project kernel.
+  value = applyInflowVelocity(id, value);
   textureStore(velocityOut, id, vec4f(value, 0.0));
 }
 `;
@@ -872,7 +886,7 @@ export class WebGPUQuadtreeTallCellProjection {
     this.scalarBuffer = scalars;
     this.dispatchArgs = device.createBuffer({ label: "Quadtree tall-cell active dispatches", size: 76, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
     this.couplingBodyCount = packed.couplingBodyCount; this.couplingDistinctDofs = packed.couplingDistinctDofs; this.couplingBodyIndices = packed.couplingBodyIndices;
-    this.params = device.createBuffer({ label: "Quadtree tall-cell parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Quadtree tall-cell parameters", size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.params, 0, new Uint32Array([nx, ny, nz, factorAuxWidth, 0, 0, 0, 0]).buffer);
     device.queue.writeBuffer(this.params, 16, new Float32Array([h.x, h.y, h.z, 0]).buffer);
     device.queue.writeBuffer(this.params, 32, new Uint32Array([this.dofCount, faceCount, this.iterations, packed.factorLevelCount]).buffer);
@@ -881,6 +895,14 @@ export class WebGPUQuadtreeTallCellProjection {
     device.queue.writeBuffer(this.params, 64, new Uint32Array([packed.couplingByBodyOffset, packed.couplingByDofOffset, packed.couplingTableOffset, packed.couplingBodyCount]).buffer);
     device.queue.writeBuffer(this.params, 80, new Uint32Array([packed.couplingDistinctDofs, packed.mlsOffsetsBase, packed.mlsRowCount, rowGroups]).buffer);
     device.queue.writeBuffer(this.params, 96, new Uint32Array([packed.lineOffsetsBase, packed.lineDofsBase, packed.lineCount, Math.max(2, Math.min(4, Math.round(options.polynomialDegree ?? 2)))]).buffer);
+    const inflowBoundary = scene.fluid.inflow ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [nx, ny, nz]) : undefined;
+    device.queue.writeBuffer(this.params, 112, new Float32Array([
+      h.x, h.y, h.z, 0,
+      scene.container.width_m, scene.container.height_m, scene.container.depth_m, 0,
+      inflowBoundary?.outletCenter_m.x ?? 0, inflowBoundary?.outletCenter_m.y ?? 0, inflowBoundary?.outletCenter_m.z ?? 0, scene.fluid.inflow?.radius_m ?? 0,
+      scene.fluid.inflow?.velocity_m_s.x ?? 0, scene.fluid.inflow?.velocity_m_s.y ?? 0, scene.fluid.inflow?.velocity_m_s.z ?? 0, inflowBoundary?.apertureScale ?? 0,
+      0, 0, 0, 0
+    ]).buffer);
     const couplingGroups = Math.ceil(packed.couplingDistinctDofs / 128);
     const dispatchWords = new Uint32Array(19);
     dispatchWords.set([rowGroups, 1, 1, 1, 1, 1, couplingGroups, 1, 1, rowGroups, 1, 1, 1, 1, 1, couplingGroups, 1, 1]);
@@ -1277,7 +1299,11 @@ export class WebGPUQuadtreeTallCellProjection {
     }
   }
 
-  encodeSurface(encoder: GPUCommandEncoder, dt_s: number) { this.surfaceState.encode(encoder, dt_s); }
+  encodeSurface(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState) {
+    // The projection's own inflowTiming.x gates applyInflowVelocity in project.
+    this.device.queue.writeBuffer(this.params, 176, new Float32Array([inflow?.strength ?? 0, 0, 0, 0]));
+    this.surfaceState.encode(encoder, dt_s, inflow);
+  }
   readSurfaceDiagnostics() { return this.surfaceState.readVolumeDiagnostics(); }
   get surfaceDiagnostics() { return this.surfaceState.volumeDiagnostics; }
   addSurfaceReferenceVolumeCells(cells: number) { this.surfaceState.addReferenceVolumeCells(cells); }
@@ -1493,7 +1519,16 @@ async function prepareQuadtreeProjectionInWorker(cache: QuadtreeGPUCache, input:
       const entryUrl = new URL("./quadtree-topology-worker-node.ts", import.meta.url).href;
       const tsxApiUrl = import.meta.resolve("tsx/esm/api");
       const source = `const { tsImport } = await import(${JSON.stringify(tsxApiUrl)}); await tsImport(${JSON.stringify(entryUrl)}, import.meta.url);`;
-      const worker = new NodeWorker(new URL(`data:text/javascript,${encodeURIComponent(source)}`), { execArgv: ["--no-strip-types"] });
+      const entry = new URL(`data:text/javascript,${encodeURIComponent(source)}`);
+      let worker: import("node:worker_threads").Worker;
+      try {
+        worker = new NodeWorker(entry, { execArgv: ["--no-strip-types"] });
+      } catch {
+        // Node below 23.6 rejects --no-strip-types as a worker execArgv flag.
+        // The data-module entry is plain JavaScript and tsx transforms the
+        // real worker source, so no strip-types override is needed there.
+        worker = new NodeWorker(entry);
+      }
       worker.on("message", receive); worker.on("error", (error) => fail(error.message));
       cache.cpuWorker = worker;
     } else return prepareQuadtreeProjectionCPU(input);

@@ -424,7 +424,12 @@ export class WebGPUUniformEulerianSolver {
       if (this.quadtreeProjection) {
         const timing = this.timing("pressure_ms");
         encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
-        this.quadtreeProjection.encodeSurface(encoder, dt);
+        const surfaceInflow = inflow && this.inflowBoundary ? {
+          outletCenter_m: this.inflowBoundary.outletCenter_m, radius_m: inflow.radius_m,
+          velocity_m_s: inflow.velocity_m_s, apertureScale: this.inflowBoundary.apertureScale,
+          strength: inflowStepStrength
+        } : undefined;
+        this.quadtreeProjection.encodeSurface(encoder, dt, surfaceInflow);
         this.quadtreeProjection.encode(encoder, this.info.nx, this.info.ny, this.info.nz, timing && this.querySet ? {
           querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end
         } : undefined);
