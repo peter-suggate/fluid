@@ -14,7 +14,7 @@ import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundar
 import { WebGPUQuadtreeTallCellProjection, type QuadtreeTallCellProjectionOptions } from "./webgpu-quadtree-tall-cell";
 
 export type UniformVelocityTransport = GPUVelocityTransport;
-export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; deferPipelineCompilation?: boolean }
+export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; deferPipelineCompilation?: boolean }
 
 const quadtreePressureLabel = (projection: WebGPUQuadtreeTallCellProjection) => ({ ic0: "ICCG(0)", jacobi: "CG + diagonal Jacobi", line: "CG + vertical line Jacobi", poly: "CG + polynomial Jacobi" })[projection.preconditioner];
 
@@ -57,6 +57,7 @@ export class WebGPUUniformEulerianSolver {
   private quadtreeProjection?: WebGPUQuadtreeTallCellProjection;
   private readonly retiredQuadtreeProjections = new Set<WebGPUQuadtreeTallCellProjection>();
   private quadtreeRebuildPending = false;
+  private quadtreeReadyProjection?: WebGPUQuadtreeTallCellProjection;
   private quadtreeRebuildBlockedFrames = 0;
   private quadtreeRebuildCompletedCount = 0;
   private readonly rebuildQuadtreeEachStep: boolean;
@@ -64,6 +65,7 @@ export class WebGPUUniformEulerianSolver {
   private quadtreeStepsSinceKick = 0;
   private quadtreeLastBodies: RigidBodyState[] = [];
   private readonly quadtreeRebuildInterval: number;
+  private readonly quadtreeTopologyStaleLimit: number;
   private disposed = false;
   private baseAllocatedBytes = 0;
 
@@ -83,6 +85,7 @@ export class WebGPUUniformEulerianSolver {
     // Advance_Step. A caller may still request a slower experimental cadence,
     // but the paper-faithful default is one rebuild per simulation step.
     this.quadtreeRebuildInterval = Math.max(1, Math.round(options.quadtreeRebuildIntervalSteps ?? 1));
+    this.quadtreeTopologyStaleLimit = Math.max(1, Math.round(options.quadtreeTopologyStaleSteps ?? 2));
     this.inflowBoundary=scene.fluid.inflow?createInflowGridBoundary(scene.fluid.inflow,scene.container,[nx,ny,nz]):undefined;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     const texture = (format: GPUTextureFormat) => device.createTexture({ size: [nx, ny, nz], dimension: "3d", format, usage });
@@ -348,15 +351,10 @@ export class WebGPUUniformEulerianSolver {
       this.info.quadtreeRebuildWall_ms = performance.now() - rebuildStartedAt;
       this.info.quadtreeRebuildBlockedFrames = this.quadtreeRebuildBlockedFrames;
       if (this.disposed) { if (next !== previous) next.destroy(); return; }
-      this.quadtreeRebuildCompletedCount += 1;
-      this.quadtreeProjection = next; this.applyQuadtreeInfo(next);
-      // No step advances while this promise is pending, so the swapped
-      // topology corresponds exactly to the saved grid used by the next step.
-      this.quadtreeStepsSinceTopology = this.quadtreeStepsSinceKick;
-      // The replaced projection's buffers may still be referenced by queued
-      // steps; only release them once the queue drains.
-      if (next !== previous) this.retireQuadtreeProjection(previous);
-      if (this.shouldKickQuadtreeRebuild()) this.kickQuadtreeRebuild();
+      // Stage the finished projection; advanceTo applies it at the fixed
+      // step boundary so the swap schedule depends only on step counts,
+      // never on rebuild wall time (keeps stepping deterministic).
+      this.quadtreeReadyProjection = next;
     }).catch((error) => {
       this.quadtreeRebuildPending = false;
       this.info.quadtreeRebuildPending = false;
@@ -364,20 +362,45 @@ export class WebGPUUniformEulerianSolver {
     });
   }
 
+  private applyReadyQuadtreeProjection() {
+    const next = this.quadtreeReadyProjection, previous = this.quadtreeProjection;
+    if (!next || !previous) return;
+    this.quadtreeReadyProjection = undefined;
+    this.quadtreeRebuildCompletedCount += 1;
+    this.quadtreeProjection = next; this.applyQuadtreeInfo(next);
+    // Steps advanced on the previous topology while the rebuild was in
+    // flight; the swapped topology is stepsSinceKick steps behind the
+    // surface, which the swap boundary keeps bounded.
+    this.quadtreeStepsSinceTopology = this.quadtreeStepsSinceKick;
+    // The replaced projection's buffers may still be referenced by queued
+    // steps; only release them once the queue drains.
+    if (next !== previous) this.retireQuadtreeProjection(previous);
+  }
+
   advanceTo(time_s: number, bodies: RigidBodyState[] = []) {
     if (this.disposed) return false;
-    // Algorithm 1 constructs the new quadtree before advection and pressure.
-    // Do not advance on the previous topology while its replacement is being
-    // assembled across the GPU/CPU sparse-graph boundary.
-    if (this.quadtreeProjection && this.rebuildQuadtreeEachStep && this.quadtreeRebuildPending) {
-      this.quadtreeRebuildBlockedFrames += 1;
-      this.info.quadtreeRebuildBlockedFrames = this.quadtreeRebuildBlockedFrames;
-      return false;
+    // Deterministic bounded-staleness rebuild pipeline. Algorithm 1 wants the
+    // quadtree constructed before advection and pressure, but a synchronous
+    // handshake costs one full GPU-readback + worker-pack round trip per
+    // step. Instead, up to quadtreeTopologyStaleLimit steps run ahead on the
+    // previous topology while its replacement is assembled, and the finished
+    // projection is applied exactly at that step boundary — blocking there if
+    // the rebuild is still in flight — so the swap schedule depends only on
+    // step counts, never on rebuild wall time. refreshFaces re-derives the
+    // free-surface fractions from the live level set every solve, so only
+    // the DOF layout is stale in between.
+    if (this.quadtreeProjection && this.rebuildQuadtreeEachStep && (this.quadtreeRebuildPending || this.quadtreeReadyProjection) && this.quadtreeStepsSinceKick >= this.quadtreeTopologyStaleLimit) {
+      if (!this.quadtreeReadyProjection) {
+        this.quadtreeRebuildBlockedFrames += 1;
+        this.info.quadtreeRebuildBlockedFrames = this.quadtreeRebuildBlockedFrames;
+        return false;
+      }
+      this.applyReadyQuadtreeProjection();
     }
     const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s); if (!advance) return false;
     const delta = advance.dt_s; if (delta < 1e-6) { this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; return true; }
     this.lastTime = advance.nextTime_s; this.info.submittedTime_s = this.lastTime; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
-    const substeps = 1, dt = delta; this.info.lastDt_s = dt;
+    const substeps = 1, dt = delta; this.info.lastDt_s = dt; this.info.lastSubsteps = substeps;
     const activeBodies = bodies.slice(0, 12), bodyData = new Float32Array(12 * 20), shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
     activeBodies.forEach((body, index) => { const o = index * 20, d = body.description.dimensions_m, q = body.orientation; bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, shapeIndex[body.description.shape], d.x, d.y, d.z, 0, q.w, q.x, q.y, q.z, body.linearVelocity_m_s.x, body.linearVelocity_m_s.y, body.linearVelocity_m_s.z, 0, body.angularVelocity_rad_s.x, body.angularVelocity_rad_s.y, body.angularVelocity_rad_s.z, 0], o); });
     this.device.queue.writeBuffer(this.rigidBuffer, 0, bodyData); this.info.encodedSteps = (this.info.encodedSteps ?? 0) + substeps;
@@ -462,7 +485,7 @@ export class WebGPUUniformEulerianSolver {
     if (this.quadtreeProjection && this.rebuildQuadtreeEachStep) {
       this.quadtreeStepsSinceTopology += 1; this.quadtreeStepsSinceKick += 1;
       this.quadtreeLastBodies = activeBodies;
-      if (!this.quadtreeRebuildPending && this.shouldKickQuadtreeRebuild()) this.kickQuadtreeRebuild();
+      if (!this.quadtreeRebuildPending && !this.quadtreeReadyProjection && this.shouldKickQuadtreeRebuild()) this.kickQuadtreeRebuild();
     }
     if (!this.wallTimingPending) { this.wallTimingPending = true; void this.device.queue.onSubmittedWorkDone().then(() => { this.info.gpuQueueWall_ms = performance.now() - submittedAt; this.info.gpuQueueSimulation_s = delta; }).catch(() => { /* Device loss is handled by the renderer. */ }).finally(() => { this.wallTimingPending = false; }); }
     if (exchangeReadback) { const readback = exchangeReadback, elapsed = delta, cellVolume = c.width_m * c.height_m * c.depth_m / (this.info.nx * this.info.ny * this.info.nz); void readback.mapAsync(GPUMapMode.READ).then(() => { const words = new Int32Array(readback.getMappedRange()); const loads = activeBodies.map((body, index) => { const b = index * 8; return { bodyId: body.description.id, impulse_N_s: { x: words[b] / 1e6, y: words[b + 1] / 1e6, z: words[b + 2] / 1e6 }, angularImpulse_N_m_s: { x: words[b + 3] / 1e6, y: words[b + 4] / 1e6, z: words[b + 5] / 1e6 }, couplingInterval_s: elapsed, displacedVolume_m3: words[b + 6] / 65536 * cellVolume }; }); readback.unmap(); readback.destroy(); this.onRigidLoads?.(loads); }).catch(() => readback.destroy()).finally(() => { this.rigidReadbackPending = false; }); }
@@ -504,6 +527,8 @@ export class WebGPUUniformEulerianSolver {
 
   destroy() {
     this.disposed = true;
+    if (this.quadtreeReadyProjection && this.quadtreeReadyProjection !== this.quadtreeProjection) this.quadtreeReadyProjection.destroy();
+    this.quadtreeReadyProjection = undefined;
     this.quadtreeProjection?.destroySharedSurface();
     this.quadtreeProjection?.destroy();
     for (const projection of this.retiredQuadtreeProjections) projection.destroy();

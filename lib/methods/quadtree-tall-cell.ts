@@ -25,9 +25,12 @@ export const quadtreeTallCellMethod: SimulationMethod = {
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, {
     // Narita Sec. 4.5 advects the level set from the saved previous grid.
     // It is authoritative for adaptive pressure geometry, while the shared
-    // cubic backing transport runs without density sharpening.
+    // cubic backing transport runs without density sharpening. Velocity uses
+    // bounded MacCormack like the uniform and restricted references —
+    // first-order SL transport measurably damped the dam-break collapse
+    // (peak speed 4 vs 13 m/s against the restricted method).
     densitySharpening: false,
-    velocityTransport: "semi-lagrangian",
+    velocityTransport: "maccormack",
     pressureIterations: numberValue(values, params, "pressureIterations"),
     tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") },
     quadtreeRebuildTopology: values.rebuildTopology !== false,
@@ -47,7 +50,7 @@ export const quadtreeTallCellMethod: SimulationMethod = {
   }),
   createSolverAsync: (device, scene, quality, values, onRigidLoads, onProgress) => WebGPUUniformEulerianSolver.createAsync(device, scene, quality, onRigidLoads, {
     densitySharpening: false,
-    velocityTransport: "semi-lagrangian",
+    velocityTransport: "maccormack",
     pressureIterations: numberValue(values, params, "pressureIterations"),
     tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") },
     quadtreeRebuildTopology: values.rebuildTopology !== false,
