@@ -16,7 +16,7 @@ import { WebGPUQuadtreeTallCellProjection, type QuadtreeTallCellProjectionOption
 export type UniformVelocityTransport = GPUVelocityTransport;
 export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; deferPipelineCompilation?: boolean }
 
-const quadtreePressureLabel = (projection: WebGPUQuadtreeTallCellProjection) => ({ ic0: "ICCG(0)", jacobi: "CG + diagonal Jacobi", line: "CG + vertical line Jacobi", poly: "CG + polynomial Jacobi" })[projection.preconditioner];
+const quadtreePressureLabel = (projection: WebGPUQuadtreeTallCellProjection) => ({ ic0: "ICCG(0)", blockic: "CG + block ICCG(0)", jacobi: "CG + diagonal Jacobi", line: "CG + vertical line Jacobi", poly: "CG + polynomial Jacobi" })[projection.preconditioner];
 
 /** The main-branch cubic solver retained as an A/B reference backend. */
 export class WebGPUUniformEulerianSolver {

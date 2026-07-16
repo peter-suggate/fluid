@@ -3,8 +3,9 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { simulationMethods } from "../lib/methods";
 import { quadtreeTallCellMethod } from "../lib/methods/quadtree-tall-cell";
-import { nextQuadtreeIterationBudget, quadtreeDispatchShader, quadtreeIterationBudget, quadtreeTallCellProjectionShader } from "../lib/webgpu-quadtree-tall-cell";
+import { nextQuadtreeIterationBudget, quadtreeDispatchShader, quadtreeIterationBudget, quadtreeTallCellProjectionShader, WebGPUQuadtreeTallCellProjection } from "../lib/webgpu-quadtree-tall-cell";
 import { packedQuadtreeRootMap, quadtreeConstructionShader, quadtreeSurfaceShader } from "../lib/webgpu-quadtree-builder";
+import { buildQuadtree, buildVariationalSystem, populateTallPressureGrid } from "../lib/quadtree-tall-cell-grid";
 
 test("the old optical-layer method is replaced by quadtree tall cells", () => {
   assert.ok(simulationMethods.includes(quadtreeTallCellMethod));
@@ -68,11 +69,61 @@ test("WebGPU pressure path is variational PCG rather than Jacobi pressure smooth
   assert.match(quadtreeTallCellProjectionShader, /faceGradient/);
   assert.match(quadtreeTallCellProjectionShader, /matrixBaseCoefficient\(entry\) \* face\.weights\.y/);
   assert.match(quadtreeTallCellProjectionShader, /alias SolverField = u32/);
+  assert.match(quadtreeTallCellProjectionShader, /fn preconditionBlockIC/);
   assert.match(quadtreeTallCellProjectionShader, /fn preconditionJacobi/);
   assert.match(quadtreeTallCellProjectionShader, /fn preconditionLine/);
   assert.match(quadtreeTallCellProjectionShader, /fn preconditionPolynomialStart/);
   for (const entry of ["applyStepPartial", "applyStepFinalize", "applyStepUpdate", "finishIterationPartial", "finishIterationFinalize", "finishIterationUpdate"]) assert.match(quadtreeTallCellProjectionShader, new RegExp(`fn ${entry}\\b`));
   assert.doesNotMatch(quadtreeTallCellProjectionShader, /atomic(Add|Max|Min)/);
+});
+
+test("blockic packing partitions the DOFs and drops cross-block factor couplings", () => {
+  const nx = 16, ny = 12, nz = 16, h = { x: 0.5, y: 0.25, z: 0.5 };
+  const quadtree = buildQuadtree(new Float32Array(nx * nz), nx, nz, { h: h.x, maximumLeafSize: 1 });
+  const phi = new Float32Array(nx * ny * nz).fill(-1);
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) phi[x + nx * (ny - 1 + ny * z)] = 1;
+  const velocity = Array.from({ length: phi.length }, (_, index) => ({ x: 0.01 * index, y: 0.1 * Math.sin(index), z: 0 }));
+  const system = buildVariationalSystem(populateTallPressureGrid(quadtree, phi, ny, h, 1), { velocity }, { assembleDense: false });
+  const packed = WebGPUQuadtreeTallCellProjection.packSystem(system, nx, ny, nz, [], "blockic");
+  const n = system.liquidSampleIds.length;
+  assert.ok(n > 512, `fixture too small for multiple blocks (${n} DOFs)`);
+  assert.ok(packed.blockCount >= 2);
+  assert.ok(packed.factorLevelCount >= 1);
+  const aux = packed.factorAuxWords;
+  const blockOf = new Int32Array(n).fill(-1);
+  let previousEnd = 0;
+  for (let block = 0; block < packed.blockCount; block += 1) {
+    const header = packed.blockTableOffset + 2 * block;
+    const [start, end] = [aux[header], aux[header + 1]];
+    assert.equal(start, previousEnd, "blocks must be contiguous ascending row ranges");
+    assert.ok(end > start && end <= n);
+    previousEnd = end;
+    blockOf.fill(block, start, end);
+  }
+  assert.equal(previousEnd, n, "blocks must cover every DOF");
+  const factorColumns = new Uint32Array(packed.factorColumns.buffer, packed.factorColumns.byteOffset, packed.factorColumns.byteLength / 4);
+  const factorEntries = new Uint32Array(packed.factorEntries.buffer, packed.factorEntries.byteOffset, packed.factorEntries.byteLength / 4);
+  let entryCount = 0;
+  for (let column = 0; column < n; column += 1) {
+    for (let entry = factorColumns[2 * column]; entry < factorColumns[2 * (column + 1)]; entry += 1) {
+      assert.equal(blockOf[factorEntries[2 * entry]], blockOf[column], "factor couplings must not cross blocks");
+      entryCount += 1;
+    }
+  }
+  assert.ok(entryCount > 0, "the block factor must retain in-block couplings");
+});
+
+test("non-incomplete-Cholesky preconditioners skip the factorization during packing", () => {
+  const nx = 16, ny = 12, nz = 16, h = { x: 0.5, y: 0.25, z: 0.5 };
+  const quadtree = buildQuadtree(new Float32Array(nx * nz), nx, nz, { h: h.x, maximumLeafSize: 1 });
+  const phi = new Float32Array(nx * ny * nz).fill(-1);
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) phi[x + nx * (ny - 1 + ny * z)] = 1;
+  const velocity = Array.from({ length: phi.length }, () => ({ x: 0, y: 0, z: 0 }));
+  const system = buildVariationalSystem(populateTallPressureGrid(quadtree, phi, ny, h, 1), { velocity }, { assembleDense: false });
+  const packed = WebGPUQuadtreeTallCellProjection.packSystem(system, nx, ny, nz, [], "jacobi");
+  assert.equal(packed.factorEntries.byteLength, 0, "jacobi must not build an IC(0) factor");
+  assert.equal(packed.factorLevelCount, 1);
+  assert.equal(packed.blockCount, 0);
 });
 
 test("pressure command budgets follow convergence feedback without lowering the hard cap", () => {
