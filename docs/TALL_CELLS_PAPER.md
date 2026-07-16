@@ -959,3 +959,84 @@ thin below grid spacing.
     depth even when all height transitions are removed. Production currently
     caps `maximumTallHeight=3` as a paper-compatible parity boundary; lifting
     it is blocked on a coherent middle-face pressure representation.
+
+### Appendix C update — 2026-07-16 full-sweep audit (items 12–22)
+
+Status refresh of items 1–11: (1) RESOLVED as a recorded deviation, see item
+12. (2) root cause of the 07-15/16 instabilities; migration plan in
+`TALL_CELL_LEVELSET_MIGRATION.md`. (3) resolved: the repository uses the
+endpoint-exact convention (`t = y/(base-1)`) consistently in pressure/solid/φ
+reconstruction; velocity remains a separate departure (item 13). (5,7,8)
+implemented. (6) resolved 07-15 (full-column scan, no rate limit). (11)
+superseded: the parity cap was removed 07-16 after the constant-density and
+control-volume fixes; the flow gate now bounds the same error dynamically.
+
+New items found by sweeping Appendices A/B against the current tree:
+
+12. **Eq 10 smoothing operator (closes the A.5a "verify" flag).** The paper
+    lowers a column only when it exceeds its HIGHEST neighbor + D
+    (`min(y, max_neighbor + D)`); `smoothRemesh` and
+    `limitNeighboringTallCellBases` apply `min` against EVERY neighbor + D —
+    the strict pairwise form. Ours is STRONGER than the paper's operator and
+    exactly matches the paper's stated constraint (3); the paper's own Eq 10
+    does not actually guarantee pairwise ≤ D. Recorded as a deliberate
+    strengthening; cost is extra remesh churn on steep staircases.
+13. **Tall-interior velocity reconstruction is piecewise-constant, not Eq 5
+    linear** (top world cell = top dof, all others = bottom dof;
+    `validVelocityCell`). Chosen 07-15 to make the pressure stencil an exact
+    div∘grad pair; it is the deviation that made the VOF store mass leak
+    possible (see stability doc) and it biases advection traces inside deep
+    tall cells. Under the level-set migration it should be revisited against
+    Eq 5.
+14. **Narrow-band extrapolation method.** Paper: Jeong et al. PDE-form
+    directional extrapolation `du/dτ = -(∇φ/|∇φ|)·∇u` in a TWO-cell band,
+    then the hierarchy. Ours: isotropic valid-neighbor averaging run
+    `max(2, airHalo) = 8` passes, then the hierarchy. Direction-blind
+    averaging smears tangential liquid velocity into air along all axes and
+    over a 4× wider band; this is adjacent to the air-velocity igniter class
+    of failures and should be re-examined (a φ field makes the paper's form
+    implementable directly).
+15. **Ghost-fluid θ floor.** Eq 16's ghost coefficient is the raw φ ratio;
+    the repository floors the interface fraction at 0.05 in
+    `pressureTerm`/`interfaceFraction`/`ghostFraction` (up to 20× gradient
+    amplification bound). A stabilizer absent from the paper; flagged as a
+    suspect in the (since fixed) episodic blow-up. Keep, but recorded.
+16. **Multigrid restriction weighting.** Paper Sec 3.7.1: coarse RHS is
+    ordinarily an 8-to-1 average with least-squares fits for tall endpoints;
+    the repository trilinearly point-samples the Eq 19-masked residual at
+    the coarse sample position (`restrictResidual`). Same masking, different
+    quadrature. Also the smoother uses 0.8 under-relaxed RBGS (paper: plain
+    RBGS).
+17. **planRemesh split initialization.** Paper initializes `y_tmp` from the
+    AVERAGE of the two feasibility bounds; the repository clamps the OLD base
+    into the feasible interval (hysteresis). Deliberate (reduces base churn)
+    but unrecorded until now. The paper also re-clamps constraints (1)/(2)
+    during every smoothing pass; the repository re-applies only the
+    representability floors.
+18. **No separate high-resolution surface-tracking grid.** The paper carries
+    φ on a finer grid than the simulation grid (their reported results pair
+    e.g. 128³ simulation with higher surface grids); this repository tracks
+    the surface at simulation resolution. Feature gap with direct visual
+    impact; independent of the VOF/φ choice.
+19. **No terrain height `H`.** The packed layout hard-codes H = 0 (flat
+    floor). The paper's tall cells sit on per-column terrain. Feature gap.
+20. **Rigid-body trace repair missing (A.9).** The paper diffuses a separate
+    in-solid level set `φ^s` so semi-Lagrangian traces that land inside
+    bodies sample repaired values; the repository has no equivalent, so
+    traces through rigid bodies sample coupled-solid velocities directly.
+    Affects `dam-break-boxes`/`sphere-jet` class scenes only.
+21. **Mass-conserving paper solid handling absent (B.4/B.5).** Sharpening
+    ignores face non-solid fractions `V^f`; there is no `ρ > V_i` excess
+    scatter along the solid gradient (S = 1), and pressure classification
+    uses raw ρ rather than `ρ' = ρ/V_i` with extrapolation into fully solid
+    cells. Matters at walls and rigid bodies; moot after the level-set
+    migration retires ρ.
+22. **Correction-divergence units (B.5).** The paper adds
+    `min(λ(ρ'−1), η)/Δx` — with an explicit 1/Δx — to the divergence; the
+    repository expresses it as the rate `min(0.5·excess, 1)·30 /s` with no
+    1/Δx. At the current grid (h ≈ 0.067 m) the paper's literal reading is
+    ~15× stronger. The repository's rate form is deliberate (dt-independent)
+    but the magnitude discrepancy is unresolved; revisit when calibrating
+    the global volume control in the migration (its λ_v inherits this
+    question). Also unimplemented and optional: B.6 render-side density
+    post-processing (γ-blur thin-feature reveal).

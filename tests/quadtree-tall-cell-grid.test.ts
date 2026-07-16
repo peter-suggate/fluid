@@ -10,6 +10,7 @@ import {
   buildVariationalSystem,
   maximumFluidScale,
   populateTallPressureGrid,
+  populateTallPressureGridFromLeafProfiles,
   quadtreeFromPackedCells,
   quadtreeSizingFromVelocityAndSurface,
   reconcileLevelSetWithVolume,
@@ -188,6 +189,35 @@ test("every retained cube is its own single-cell cubic segment", () => {
     const ys = cubicSamples.map((sample) => sample.y);
     for (let index = 1; index < ys.length; index += 1) assert.equal(ys[index], ys[index - 1] + 1, "cubic band samples must sit on consecutive cells");
   }
+});
+
+test("optical layers use each connected column's local liquid depth", () => {
+  const nx = 2, ny = 12, nz = 1, h = { x: 1, y: 1, z: 1 };
+  const quadtree = buildQuadtree(new Float32Array(nx * nz).fill(1e6), nx, nz, { h: 1, maximumLeafSize: 1 });
+  const profiles = new Float32Array(quadtree.leaves.length * ny).fill(10);
+  for (const leaf of quadtree.leaves) {
+    const depth = leaf.x === 0 ? 4 : 8;
+    for (let y = 0; y < depth; y += 1) profiles[leaf.id * ny + y] = -10;
+  }
+  const grid = populateTallPressureGridFromLeafProfiles(quadtree, profiles, ny, h, 0.25);
+  const cubicCounts = grid.samplesByLeaf.map((samples) => samples.filter((sample) => sample.kind === "cubic").length);
+  assert.ok(cubicCounts[1] > cubicCounts[0], `deep local column should retain a thicker optical band (${cubicCounts})`);
+});
+
+test("leaf-centre profile rebuilds reproduce dense phi tall-cell segmentation", () => {
+  const nx = 4, ny = 9, nz = 4, h = { x: 1, y: 1, z: 1 };
+  const sizing = new Float32Array(nx * nz); sizing[3 + nx * 3] = 100;
+  const quadtree = buildQuadtree(sizing, nx, nz, { h: 1, maximumLeafSize: 4 });
+  const phi = Float32Array.from({ length: nx * ny * nz }, (_, index) => {
+    const x = index % nx, y = Math.floor(index / nx) % ny, z = Math.floor(index / (nx * ny));
+    return y - 4.25 + 0.1 * x - 0.05 * z;
+  });
+  const dense = populateTallPressureGrid(quadtree, phi, ny, h, 1, 0.25);
+  const profiles = new Float32Array(quadtree.leaves.length * ny);
+  for (const leaf of quadtree.leaves) for (let y = 0; y < ny; y += 1) profiles[leaf.id * ny + y] = y - 4.25 + 0.1 * (leaf.x + leaf.size / 2 - 0.5) - 0.05 * (leaf.z + leaf.size / 2 - 0.5);
+  const compact = populateTallPressureGridFromLeafProfiles(quadtree, profiles, ny, h, 0.25);
+  assert.deepEqual(compact.segments, dense.segments);
+  assert.deepEqual(compact.samples.map((sample) => ({ leaf: sample.leaf, y: sample.y, liquid: sample.liquid, kind: sample.kind })), dense.samples.map((sample) => ({ leaf: sample.leaf, y: sample.y, liquid: sample.liquid, kind: sample.kind })));
 });
 
 test("T-junction gradient uses vertically interpolated pressures and 1.5 dx", () => {

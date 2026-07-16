@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { defaultCamera, type CameraState, type ViewMode } from "../model";
 import type { GridOverlayConfig, WaterRenderMode } from "../webgpu-renderer";
+import { defaultEnvironmentId, type EnvironmentId } from "../environments";
 
 export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | null;
 
@@ -18,6 +19,8 @@ interface UIStore {
   gridOverlaySlice: number;
   /** Optical presentation pipeline. The legacy ray marcher stays available for A/B comparisons. */
   waterRenderMode: WaterRenderMode;
+  /** Art-directed room, lighting, and foreground treatment surrounding the tank. */
+  environmentId: EnvironmentId;
   setView: (view: ViewMode) => void;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   selectBody: (bodyId?: string) => void;
@@ -28,6 +31,7 @@ interface UIStore {
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
   setGridOverlaySlice: (slice: number) => void;
   setWaterRenderMode: (mode: WaterRenderMode) => void;
+  setEnvironmentId: (environmentId: EnvironmentId) => void;
 }
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -41,6 +45,7 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
   waterRenderMode: "rasterized",
+  environmentId: defaultEnvironmentId,
   setView: (view) => set({ view }),
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   selectBody: (selectedBodyId) => set({ selectedBodyId }),
@@ -53,5 +58,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setRightPanel: (rightPanel) => set({ rightPanel, diagnosticsOpen: rightPanel === "diagnostics" }),
   setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
-  setWaterRenderMode: (waterRenderMode) => set({ waterRenderMode })
+  setWaterRenderMode: (waterRenderMode) => set({ waterRenderMode }),
+  setEnvironmentId: (environmentId) => set({ environmentId })
 }));

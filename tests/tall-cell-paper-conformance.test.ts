@@ -30,6 +30,7 @@ test("level-set reinitialization keeps the paper safeguards", () => {
 });
 
 test("pressure and projection use phi ghost fractions and endpoint divergence", () => {
+  assert.match(tallCellComputeShader, /return 0\.5\*\(velocityCell\(q\)\[axis\]\+velocityCell\(neighbor\)\[axis\]\)/);
   assert.match(tallCellComputeShader, /fn interfaceFraction\(a:f32,b:f32\)->f32\{return clamp\(abs\(a\)\/max\(abs\(a\)\+abs\(b\)/);
   assert.match(tallCellComputeShader, /let wet=activeSample\(id\)&&pointSamplePhi\(id\)<=0\.0/);
   assert.match(tallCellComputeShader, /fn divergenceAt\(id:vec3i\)->f32\{\s*return pointDivergenceAt\(vec3i\(floor\(samplePoint\(id\)\)\)\);/);

@@ -351,22 +351,26 @@ function sampleLeafCenterScalar(field: ArrayLike<number>, leaf: QuadtreeLeaf, y:
 }
 
 /**
- * Paper Sec. 4.2. Cubes within `opticalDepthCells` of every interface are
+ * Paper Sec. 4.2. Cubes within the optical layer beneath every interface are
  * retained; every remaining connected vertical run is represented by a tall
  * cell with samples at the bottommost and topmost replaced cube centres.
+ * `localDepthFraction` implements Irving/Narita's quarter-of-local-depth rule;
+ * the fixed cell count remains available for reference fixtures.
  */
 export function populateTallPressureGrid(
   quadtree: QuadtreeGrid,
   phi: ArrayLike<number>,
   ny: number,
   h: Vec3,
-  opticalDepthCells: number
+  opticalDepthCells: number,
+  localDepthFraction?: number,
+  leafCenterProfiles?: ArrayLike<number>
 ): TallPressureGrid {
-  if (phi.length !== quadtree.nx * ny * quadtree.nz || ny <= 0) throw new Error("Invalid tall-grid level set");
+  if (ny <= 0 || (leafCenterProfiles ? leafCenterProfiles.length !== quadtree.leaves.length * ny : phi.length !== quadtree.nx * ny * quadtree.nz)) throw new Error("Invalid tall-grid level set");
   const samples: TallPressureSample[] = [], segments: TallSegment[] = [];
   const samplesByLeaf: TallPressureSample[][] = quadtree.leaves.map(() => []);
   for (const leaf of quadtree.leaves) {
-    const columnPhi = Float64Array.from({ length: ny }, (_, y) => sampleLeafCenterScalar(phi, leaf, y, quadtree.nx, ny));
+    const columnPhi = Float64Array.from({ length: ny }, (_, y) => leafCenterProfiles ? leafCenterProfiles[leaf.id * ny + y] : sampleLeafCenterScalar(phi, leaf, y, quadtree.nx, ny));
     const interfaceY: number[] = [];
     for (let y = 0; y < ny; y += 1) {
       const liquid = columnPhi[y] < 0;
@@ -378,7 +382,17 @@ export function populateTallPressureGrid(
     // cells on both sides of a sign change, so ending each band at surfaceY
     // also retains the immediately adjacent air cell without doubling the
     // requested quarter-depth layer into the air phase.
-    for (const surfaceY of interfaceY) for (let y = Math.max(0, surfaceY - opticalDepthCells + 1); y <= surfaceY; y += 1) cubic[y] = 1;
+    for (const surfaceY of interfaceY) {
+      let depthCells = opticalDepthCells;
+      if (localDepthFraction !== undefined) {
+        let liquidY = surfaceY;
+        if (columnPhi[liquidY] >= 0 && liquidY > 0 && columnPhi[liquidY - 1] < 0) liquidY -= 1;
+        let localDepth = 0;
+        while (liquidY >= 0 && columnPhi[liquidY] < 0) { localDepth += 1; liquidY -= 1; }
+        depthCells = Math.max(1, Math.ceil(localDepth * Math.max(0, localDepthFraction)));
+      }
+      for (let y = Math.max(0, surfaceY - depthCells + 1); y <= surfaceY; y += 1) cubic[y] = 1;
+    }
     let y = 0;
     while (y < ny) {
       const firstY = y, isCubic = cubic[y] === 1, sign = columnPhi[y] < 0;
@@ -401,6 +415,17 @@ export function populateTallPressureGrid(
     }
   }
   return { quadtree, ny, h, samples, segments, samplesByLeaf };
+}
+
+/** GPU-rebuild variant that consumes only one leaf-centre phi profile per leaf. */
+export function populateTallPressureGridFromLeafProfiles(
+  quadtree: QuadtreeGrid,
+  profiles: ArrayLike<number>,
+  ny: number,
+  h: Vec3,
+  localDepthFraction: number
+) {
+  return populateTallPressureGrid(quadtree, [], ny, h, 1, localDepthFraction, profiles);
 }
 
 function interpolationAt(samples: TallPressureSample[], worldY: number) {

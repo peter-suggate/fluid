@@ -6,6 +6,7 @@ import { useSceneStore } from "./stores/scene-store";
 import { useUIStore, type RightPanel } from "./stores/ui-store";
 import type { GPUQuality } from "./tall-cell-grid";
 import type { GridOverlayConfig, WaterRenderMode } from "./webgpu-renderer";
+import { isEnvironmentId, type EnvironmentId } from "./environments";
 
 const qualities: ReadonlyArray<GPUQuality> = ["balanced", "high", "ultra"];
 const deletedValue = "~delete";
@@ -58,6 +59,7 @@ type UIQueryState = {
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
   waterRenderMode: WaterRenderMode;
+  environmentId: EnvironmentId;
 };
 
 type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
@@ -162,6 +164,7 @@ export function parseQueryState(search: string): QueryState {
   const view = query.get("view");
   const grid = query.get("grid");
   const render = query.get("render");
+  const environment = query.get("environment");
   const requestedPanel = query.get("panel");
   // One-way migration for shared pre-sidebar links. Serialization always emits
   // the mutually exclusive panel state instead of restoring the old UI flag.
@@ -194,7 +197,8 @@ export function parseQueryState(search: string): QueryState {
       rightPanel,
       gridOverlayAxis: grid === "off" || grid === "x" || grid === "z" ? grid : initialUI.gridOverlayAxis,
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
-      waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode
+      waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode,
+      environmentId: isEnvironmentId(environment) ? environment : initialUI.environmentId
     }
   };
 }
@@ -202,7 +206,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "panel"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice"
-    || key === "render" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === "render" || key === "environment" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
@@ -220,6 +224,7 @@ export function serializeQueryState(
   query.set("quality", methodState.quality);
   query.set("view", uiState.view);
   query.set("render", uiState.waterRenderMode);
+  query.set("environment", uiState.environmentId);
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");
   else if (rightPanel) query.set("panel", rightPanel);

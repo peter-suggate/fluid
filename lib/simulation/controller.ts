@@ -133,7 +133,7 @@ class SimulationController {
     // substeps, so let the renderer consume a bounded queue batch. Rigid-body
     // scenes retain the strict one-step handshake because each body step needs
     // the preceding pressure impulse.
-    const gpuBatchDepth = backend === "webgpu" && methodId === "quadtree-tall-cell" && this.bodies.length === 0 ? 8 : 1;
+    const gpuBatchDepth = backend === "webgpu" && methodId === "quadtree-tall-cell" && this.bodies.length === 0 ? 2 : 1;
     const gpuCanQueue = () => backend !== "webgpu" || this.simulationTime < this.gpuCompletedTime + gpuBatchDepth * dt - 1e-9;
     let steps = 0;
     let diagnostics: RigidStepDiagnostics | undefined;
@@ -274,7 +274,6 @@ class SimulationController {
     this.bodies = [...this.bodies, initializeRigidBody(description)];
     this.publishBodies();
     useUIStore.getState().selectBody(description.id);
-    useRuntimeStore.getState().setRunState("paused");
     useRuntimeStore.getState().setNotice(`${description.name} added above the container`);
   }
 

@@ -22,5 +22,8 @@ test("viewport utility panels are mutually exclusive", () => {
   assert.equal(useUIStore.getState().rightPanel, "performance");
   assert.equal(useUIStore.getState().diagnosticsOpen, false);
 
+  useUIStore.getState().setEnvironmentId("bathhouse");
+  assert.equal(useUIStore.getState().environmentId, "bathhouse");
+
   useUIStore.setState(initial, true);
 });

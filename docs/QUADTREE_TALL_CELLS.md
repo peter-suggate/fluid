@@ -15,7 +15,7 @@ Irving et al. (2006) supplies the corrected inner tall-cell ghost face.
 | Sizing responds to surface curvature and non-translation velocity variation | `quadtreeSizingFromVelocityAndSurface`, with the vertical maximum flattened to x/z; rigid-body proximity (`initialSizing`) is the only persistent explicit source, so flat regions genuinely coarsen (the deep-water headline case) while curvature spikes always register through the footprint-maximum evaluation |
 | No adjacent diameter ratio above two | repeated 2:1 balancing/adaptivity smoothing |
 | Quadtree leaves extend from domain bottom to top | one vertical column per x/z leaf |
-| Cubes near every interface; tall cells above and below | `populateTallPressureGrid` |
+| Cubes near every interface; tall cells above and below | `populateTallPressureGrid`; the resolved band is computed independently from each connected liquid run's local depth |
 | Splashes/bubbles may create several tall cells in one column | connected runs are segmented independently |
 | Cubic pressure at cell centers | `TallPressureSample.kind === "cubic"`; every retained cube is a single-cell segment with its own sample, so cubic bands reduce to the ordinary per-cell stencil |
 | Tall pressure at bottommost/topmost replaced cube centers | `tall-bottom` and `tall-top` samples |
@@ -32,63 +32,68 @@ Irving et al. (2006) supplies the corrected inner tall-cell ghost face.
 | Pressure system is SPD and solved with CG | matrix-free CG on WebGPU with sparse uncompensated IC(0) and level-scheduled triangular solves; solution updates stop once the relative residual is reached. The iteration budget has an `O(sqrt(n))` floor: the deep-water column stack (~190k samples from the quarter-depth cubic band) converges superlinearly but only after ~500 iterations with 100x transient residual growth, and a budget it cannot converge within makes the best-iterate guard silently apply a zero correction (reported relative residual exactly 1, whole tank in free fall). MIC(0.97), plain Jacobi, per-column tridiagonal block-Jacobi, and cubic-first/tall-first elimination orderings were all measured worse than plain IC(0) on that system |
 | Relative stopping target | `max(scene tolerance, 1e-4)`, so this method follows the paper's `1e-4` target instead of inheriting the CPU-reference default `1e-8`; a dedicated convergence pass writes indirect arguments and suppresses remaining PCG work after convergence |
 | Pressure is mapped back before velocity update | sub-faces of multi-sub-face variational faces receive the Ando--Batty MLS pressure-gradient reconstruction (Eq. (33)-(35), epsilon 1e-2) plus the additive shift that makes each face's sub-face corrections average exactly to the solved variational value (Eq. (5)); single-sub-face faces and very large (deep tall) faces keep the constant conservative prolongation. The shift is what prevents the July failure mode from recurring: the mapping cannot invent net face flux |
-| Sec. 4.4 monolithic two-way rigid coupling | assembled as `G^T V A F G + K M^-1 K^T` with the rank-6 per-body coupling `K = G^T V (1-A) L` (`c V` is the face area, so `K^T p` is the wetted-surface pressure integral); body impulses are `-rho K^T p`, exposed through the standard rigid-load callback. Bodies without a load consumer stay kinematic (`M^-1 = 0`) |
-| Advection uses the saved previous grid/variables | shared semi-Lagrangian/MacCormack cubic field; quadtree is pressure-only as in Algorithm 1 |
-| Optical thickness | one quarter of liquid depth, following Irving et al. and Sec. 6 |
+| Sec. 4.4 monolithic two-way rigid coupling | assembled as `G^T V A F G + K M^-1 K^T` with the rank-6 per-body coupling `K = G^T V (1-A) L` (`c V` is the face area, so `K^T p` is the wetted-surface pressure integral); body impulses are `-rho K^T p`, read back asynchronously every step and exposed through the standard rigid-load callback. Bodies without a load consumer stay kinematic (`M^-1 = 0`) |
+| Advection uses the saved previous grid/variables | the pressure level set is semi-Lagrangian-advected every accepted step from a resident GPU texture using the centered value of adjacent MAC faces; narrow-band volume feedback prevents the resident level set from shrinking and collapsing; velocity/VOF remain on the dense finest-cubic backing field |
+| Optical thickness | one quarter of each connected liquid column's local depth, following Irving et al. and Sec. 6 |
 
-Topology rebuilds are pipelined and coalesced. The default cadence is
-displacement-driven: it may rebuild after eight accepted substeps once a
-speed-plus-gravity bound reaches half a finest cell, and always rebuilds by
-32 steps. An explicit `quadtreeRebuildIntervalSteps` still selects a fixed
-cadence for comparisons. At a rebuild,
-the GPU advects and reconciles the level set, redistances it with a 3D
-jump-flood pass, vertically reduces the sizing field, recursively subdivides
-the dyadic forest, enforces 2:1 balance, and applies the three smoothing
-dilations. One compact mapped staging buffer returns the level set, the
-one-word-per-column leaf map, pressure diagnostics, and timestamps. The VOF
-field remains GPU-resident and is not read back. The host still constructs the tall-cell face graph, sparse
-IC(0), level schedule, MLS rows, and upload images; that remaining symbolic
-sparse stage is shown separately in the live profiler and is not described as
-GPU work. Further steps may run on the current projection while a rebuild is
-in flight, bounded by `quadtreeTopologyLagSteps` (default 3). A completed
-rebuild is no longer followed immediately by a catch-up rebuild: accumulated
-state is coalesced until the next displacement/cadence boundary.
+The pressure level set advances before every pressure solve with the saved-grid
+semi-Lagrangian update specified in Section 4.5. A global normal-speed
+correction is applied only within 1.5 cells of the interface and is driven by
+volume measured from the resident level set itself using the renderer's
+four-cell smooth Heaviside. A direct port of the restricted solver's local
+two-pass reinitialization produced cadence-boundary volume jumps on this dense
+field, so it is not part of the adaptive path. The legacy jump-flood kernels
+remain available for explicit experiments but are disabled by default until
+their half-cell reset is replaced by a sub-cell-preserving variant.
+`refreshFaces` runs on every solve so the free-surface fractions use current phi.
+
+Algorithm 1 evaluates and subdivides the quadtree on every simulation step.
+The default cadence is therefore one rebuild per accepted step, and physics
+waits for that rebuild instead of advancing on a stale pressure graph. An
+explicit `quadtreeRebuildIntervalSteps` remains available only for controlled
+comparison runs. At a rebuild, the GPU consumes the resident
+level set, vertically reduces sizing, subdivides and smooths the dyadic forest,
+then returns the leaf-owner map and one vertical phi profile per unique leaf.
+The dense 3D phi and VOF fields remain GPU-resident. Quadtree decode, tall-cell
+segmentation, variational assembly, IC factorization and level scheduling, and
+MLS packing run in a persistent Web Worker (with the same direct fallback in
+non-browser tests). Builder scratch/readback buffers are cached across rebuilds.
+No further step runs on the current projection while this work is in flight.
 
 The pressure solve records all ICCG dispatches in one compute pass. A separate
 one-thread pipeline owns the indirect-argument buffer because WebGPU treats
 each dispatch as a usage scope and does not permit the same buffer to be both
 writable storage and indirect input for that dispatch. This removes thousands
 of pass begin/end transitions without weakening the relative-residual gate.
-The balanced preset caps at 96 iterations (the live dam-break converges in
-about 25); high/ultra retain 160/240, and the large-system `O(sqrt(n))` floor
-still overrides these caps where required. The profiler reports the actual
+The per-iteration denominator/solution work is fused into one ordered kernel,
+and residual reduction/best-iterate/direction work into another, reducing the
+ICCG command sequence from eight dispatches to five while the sparse matrix
+product remains fully parallel. Pressure timestamps are attached to this real
+compute pass; empty timestamp-marker passes are not used because Metal may
+collapse them and falsely report the solve below timer resolution.
+The balanced preset requests at least 96 iterations; high/ultra request
+160/240, and the large-system `O(sqrt(n))` cap overrides these minima where
+required. The profiler reports the actual
 iterations used, so empty indirect-command overhead is visible and tunable.
-Uncoupled adaptive scenes may queue up to eight fluid steps behind one renderer
-fence; rigid-coupled scenes retain the one-step CPU/GPU impulse handshake.
+The advanced preconditioner control exposes a fully parallel diagonal Jacobi
+comparison path; uncompensated IC(0) remains the paper-conformant default.
+Adaptive scenes retain a one-step CPU/GPU topology handshake so Algorithm 1's
+construction cannot be overtaken by another physics step.
 
 An exact sparse-topology cache keeps faces, CSR, IC factors, interpolation, and
-MLS rows resident when the full tall pressure graph is unchanged; only the
-level set and free-surface face weights refresh. Moving dam-break surfaces
+MLS rows resident when the full tall pressure graph is unchanged; the resident
+level set and free-surface face weights still refresh every step. Moving dam-break surfaces
 usually change the graph and correctly miss this cache. The live profiler
 reports reuse rather than presenting every in-flight rebuild as merely
 `running...`.
 
-The paper uses EXNBFLIP for additional splash detail, but calls it an
-independent enrichment rather than part of the quadtree tall-cell method. This
-application retains conservative VOF transport for mass and rendering, while
-the pressure geometry is an independently semi-Lagrangian-advected level set
-redistanced by a GPU jump-flood distance transform. Because only the
-VOF receives sources (inflow) and conservative transport, every rebuild
-reconciles the advected level set against it: cells whose wet/dry sign
-disagrees with VOF occupancy by more than half a finest cell are reseeded from
-the VOF sign, agreeing cells keep their advected sign, and the GPU distance
-transform restores a distance-like field. Sub-half-cell interface disagreement is left
-alone: stamping the VOF's quantized offsets into phi creates curvature noise
-that drives the sizing function to full refinement.
-Without this, injected liquid is projection-air and the projection freezes it;
-the pre-reconciliation sign-mismatch fraction is exported as a drift
-diagnostic and gated by the smoke matrix. No global volume correction is
-applied.
+The Results section states that the authors incorporated extended narrow-band
+FLIP (EXNBFLIP), and the Discussion says it falls back to traditional level-set
+methods on coarse grids. This paper does not give enough inline detail to
+reproduce that cited method, so this implementation does not claim EXNBFLIP.
+Pressure geometry, sizing, and projected liquid/air classification are
+level-set-authoritative; the dense VOF field never overrides phi. Volume
+feedback is measured and applied directly on that resident level set.
 
 ## July 2026 UI failure and first violated requirement
 
@@ -127,20 +132,25 @@ paper:
   (Measured on the deep-water system: MIC(0.97), Jacobi, per-column
   tridiagonal block-Jacobi, and elimination reorderings all converge worse
   than plain IC(0).)
+- Velocity and VOF advection still use dense finest-grid textures. The paper's
+  adaptive-grid advection and memory savings remain a strategic architecture
+  change rather than part of this pressure-path remediation.
+- EXNBFLIP enrichment and dual-contouring extraction remain deliberately
+  omitted presentation features.
 
 Known approximations inside the now-implemented features:
 
-- The parallel 3D jump-flood redistance is not the paper implementation's
-  exact fast-sweeping Eikonal solve. It removes the dominant serialized host
-  pass while preserving anisotropic physical distances and decisive VOF sign
-  reconciliation; nearest-seed Voronoi error remains a documented numerical
-  approximation.
+- The default path does not currently reinitialize the resident level set.
+  The tested local port and available jump-flood variant both need
+  sub-cell-preserving adaptive treatment before they can avoid
+  cadence-boundary volume jumps.
 - The GPU right-hand side evaluates the open-face fluid flux as
   `A x (average over all represented sub-faces)` of the staged velocity
   texture, whereas the CPU oracle open-weights each sub-face; velocities
   stored inside solids therefore contaminate boundary faces at second order.
-- The rank-6 body couplings and `[A]` fields are rebuilt from the previous
-  step's body states, the same one-step lag as the topology rebuild.
+- The rank-6 body couplings and `[A]` fields are held between topology rebuilds,
+  but displacement by half a finest cell forces a refresh; pressure impulses
+  themselves are delivered every accepted step.
 - The MLS pressure mapping applies to variational faces representing 2..32
   sub-faces (T-junction and small vertical faces); deeper tall faces keep the
   constant conservative prolongation.
@@ -167,11 +177,8 @@ component count and dominant-component fraction, and front progression. It
 also fails on device loss or any WebGPU validation error. The broader smoke
 matrix retains settled tank, dam break with boxes, hose inflow, sphere jet, and
 deep-water cases. Quadtree runs additionally gate the free-surface scale
-against its `maximumFluidScale` ceiling, the pre-reconciliation level-set/VOF
-sign-mismatch fraction against 2%, and inflow scenes against a minimum moving
-speed (a projection that treats injected liquid as air freezes the field at
-numerical zero while volume grows — the failure mode the reconciliation
-repairs).
+against its `maximumFluidScale` ceiling and inflow scenes against a minimum
+moving speed.
 
 The repaired balanced run reached `0.2 s` in 57 dynamic steps with peak speed
 `3.075 m/s`, peak CFL `0.629`, maximum projection energy ratio `1.008`, maximum
