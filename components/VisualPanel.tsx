@@ -4,6 +4,7 @@ import { getMethod } from "@/lib/methods";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore } from "@/lib/stores/method-store";
 import { useUIStore } from "@/lib/stores/ui-store";
+import { environmentPresets } from "@/lib/environments";
 
 export function VisualPanel() {
   const methodId = useMethodStore((state) => state.methodId);
@@ -12,6 +13,8 @@ export function VisualPanel() {
   const setView = useUIStore((state) => state.setView);
   const waterRenderMode = useUIStore((state) => state.waterRenderMode);
   const setWaterRenderMode = useUIStore((state) => state.setWaterRenderMode);
+  const environmentId = useUIStore((state) => state.environmentId);
+  const setEnvironmentId = useUIStore((state) => state.setEnvironmentId);
   const gridOverlayAxis = useUIStore((state) => state.gridOverlayAxis);
   const setGridOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
   const gridOverlaySlice = useUIStore((state) => state.gridOverlaySlice);
@@ -33,6 +36,27 @@ export function VisualPanel() {
         <button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button>
       </div>
       <small className="control-hint">Scientific mode exposes solver instrumentation; presentation mode keeps the clean rendered scene.</small>
+    </section>
+
+    <section className="panel-section utility-controls">
+      <div className="section-heading"><h2>Environment</h2><span>ART DIRECTION</span></div>
+      <div className="environment-grid" role="radiogroup" aria-label="Scene environment">
+        {environmentPresets.map((preset) => <button
+          key={preset.id}
+          type="button"
+          role="radio"
+          aria-checked={environmentId === preset.id}
+          className={environmentId === preset.id ? "active" : ""}
+          onClick={() => setEnvironmentId(preset.id)}
+          title={preset.description}
+        >
+          <span className="environment-swatch" aria-hidden="true">
+            {preset.swatch.map((color) => <i key={color} style={{ background: color }} />)}
+          </span>
+          <span><strong>{preset.shortName}</strong><small>{preset.description}</small></span>
+        </button>)}
+      </div>
+      <small className="control-hint">Architecture and foreground elements live in world space so the water bends them naturally as the camera moves.</small>
     </section>
 
     <section className="panel-section utility-controls">

@@ -26,6 +26,7 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
     gridOverlayAxis: "z",
     gridOverlaySlice: 0.7,
     waterRenderMode: "ray-marched",
+    environmentId: "night-lab",
     camera: { ...initialUI.camera, distance_m: 4.2 }
   });
   const parsed = parseQueryState(query);
@@ -40,6 +41,7 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   assert.equal(parsed.ui.gridOverlayAxis, "z");
   assert.equal(parsed.ui.gridOverlaySlice, 0.7);
   assert.equal(parsed.ui.waterRenderMode, "ray-marched");
+  assert.equal(parsed.ui.environmentId, "night-lab");
   assert.equal(parsed.ui.camera.distance_m, 4.2);
   assert.deepEqual(parsed.overrides, {
     "tall-cell": { pressureCycles: 5 },
@@ -67,7 +69,7 @@ test("query state persists an edited rigid-body roster atomically", () => {
 });
 
 test("invalid external query values fall back to validated defaults", () => {
-  const parsed = parseQueryState("?method=nope&scene=nope&quality=extreme&param.uniform.jacobiIterations=9999&scene.container.width_m=-4&scene.fluid.gravity_m_s2.y=null");
+  const parsed = parseQueryState("?method=nope&scene=nope&quality=extreme&environment=the-void&param.uniform.jacobiIterations=9999&scene.container.width_m=-4&scene.fluid.gravity_m_s2.y=null");
   const defaultScene = getScenePreset("water-box-dam-break").create();
 
   assert.equal(parsed.methodId, "tall-cell");
@@ -77,6 +79,7 @@ test("invalid external query values fall back to validated defaults", () => {
   assert.equal(parsed.scene.container.width_m, defaultScene.container.width_m);
   assert.equal(parsed.scene.fluid.gravity_m_s2.y, defaultScene.fluid.gravity_m_s2.y);
   assert.equal(parsed.ui.view, "scientific");
+  assert.equal(parsed.ui.environmentId, "default");
   assert.equal(parsed.ui.diagnosticsOpen, false);
   assert.equal(parsed.ui.rightPanel, null);
 });

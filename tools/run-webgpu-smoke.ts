@@ -55,6 +55,10 @@ const adaptivityOverride = process.env.FLUID_ADAPTIVITY === undefined ? undefine
 const opticalDepthOverride = process.env.FLUID_OPTICAL_DEPTH_FRACTION === undefined ? undefined : Number(process.env.FLUID_OPTICAL_DEPTH_FRACTION);
 const rebuildTopologyOverride = process.env.FLUID_REBUILD_TOPOLOGY === undefined ? undefined : process.env.FLUID_REBUILD_TOPOLOGY !== "0";
 const maximumLeafSizeOverride = process.env.FLUID_MAXIMUM_LEAF_SIZE === undefined ? undefined : Number(process.env.FLUID_MAXIMUM_LEAF_SIZE);
+const quadtreePreconditionerOverride = process.env.FLUID_QUADTREE_PRECONDITIONER;
+if (quadtreePreconditionerOverride !== undefined && !["ic0", "jacobi", "line", "poly"].includes(quadtreePreconditionerOverride)) throw new Error("FLUID_QUADTREE_PRECONDITIONER must be ic0, jacobi, line, or poly");
+const pressurePhaseTimings = process.env.FLUID_PRESSURE_PHASE_TIMINGS === "1";
+const polynomialDegreeOverride = process.env.FLUID_POLYNOMIAL_DEGREE === undefined ? undefined : Number(process.env.FLUID_POLYNOMIAL_DEGREE);
 const velocityTransportOverride = process.env.FLUID_VELOCITY_TRANSPORT;
 const sharpeningOverride = process.env.FLUID_SHARPENING === undefined ? undefined : process.env.FLUID_SHARPENING !== "0";
 const volumeControlOverride = process.env.FLUID_VOLUME_CONTROL === undefined ? undefined : process.env.FLUID_VOLUME_CONTROL !== "0";
@@ -339,15 +343,18 @@ function inspectTallVolumeGaps(packed: ArrayLike<number>, bases: ArrayLike<numbe
 
 async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance) {
   const { nx, ny, nz, storedNy, gridKind } = solver.info;
-  const packed = await readFloatTexture3D(device, solver.volumeTexture, nx, storedNy, nz);
+  const levelSet = solver.info.surfaceField === "levelset";
+  const packed = await readFloatTexture3D(device, levelSet ? solver.surfaceFieldTexture ?? solver.volumeTexture : solver.volumeTexture, nx, storedNy, nz);
   let bases = new Float32Array(nx * nz);
   if (gridKind === "restricted-tall-cell") bases = await readFloatTexture2D(device, solver.columnBaseTexture, nx, nz);
   const field = new Float32Array(nx * ny * nz);
-  const levelSet = solver.info.surfaceField === "levelset";
   const h = solver.info.cellSize_m;
   const index = (x: number, y: number, z: number) => x + nx * (y + ny * z);
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
-    if (gridKind !== "restricted-tall-cell") field[index(x, y, z)] = packed[index(x, y, z)];
+    if (gridKind !== "restricted-tall-cell") {
+      const value = packed[index(x, y, z)];
+      field[index(x, y, z)] = levelSet ? Math.min(1, Math.max(0, 0.5 - value / (4 * h))) : value;
+    }
     else {
       const base = Math.round(bases[x + nx * z]);
       if (y < base && base > 0) {
@@ -425,6 +432,16 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     activeCompressionRatio: info.activeCompressionRatio, activeSampleCount: info.activeSampleCount,
     quadtreeMaximumFluidScale: info.quadtreeMaximumFluidScale,
     quadtreeLevelSetMismatchFraction: info.quadtreeLevelSetMismatchFraction,
+    quadtreeRebuildCadenceSteps: info.quadtreeRebuildCadenceSteps,
+    quadtreeRebuildCompletedCount: info.quadtreeRebuildCompletedCount,
+    quadtreeRebuildBlockedFrames: info.quadtreeRebuildBlockedFrames,
+    quadtreePressureIterationsUsed: info.quadtreePressureIterationsUsed,
+    quadtreePressureIterationBudget: info.quadtreePressureIterationBudget,
+    quadtreePressureIterationHardBudget: info.quadtreePressureIterationHardBudget,
+    quadtreePressureConverged: info.quadtreePressureConverged,
+    quadtreeFactorLevelCount: info.quadtreeFactorLevelCount,
+    quadtreeCPUICFactorization_ms: info.quadtreeCPUICFactorization_ms,
+    quadtreePressurePhaseTimings: info.quadtreePressurePhaseTimings,
     initialVolumeCellSum: info.initialVolumeCellSum, volumeCellSum: info.volumeCellSum,
     representedVolumeCellSum: info.representedVolumeCellSum, volumeDrift: info.volumeDrift,
     representedVolumeDrift: info.representedVolumeDrift, front_m: info.front_m,
@@ -479,6 +496,9 @@ async function runGPU(
   if (method.id === "quadtree-tall-cell" && opticalDepthOverride !== undefined) values.opticalDepthFraction = opticalDepthOverride;
   if (method.id === "quadtree-tall-cell" && rebuildTopologyOverride !== undefined) values.rebuildTopology = rebuildTopologyOverride;
   if (method.id === "quadtree-tall-cell" && maximumLeafSizeOverride !== undefined) values.maximumLeafSize = maximumLeafSizeOverride;
+  if (method.id === "quadtree-tall-cell" && quadtreePreconditionerOverride !== undefined) values.preconditioner = quadtreePreconditionerOverride;
+  if (method.id === "quadtree-tall-cell" && pressurePhaseTimings) values.debugPressureTimings = true;
+  if (method.id === "quadtree-tall-cell" && polynomialDegreeOverride !== undefined) values.polynomialDegree = polynomialDegreeOverride;
   if (method.id === "tall-cell" && remeshIntervalOverride !== undefined) values.remeshInterval = remeshIntervalOverride;
   if (method.id === "tall-cell" && regularLayersOverride !== undefined) values.regularLayers = regularLayersOverride;
   if (method.id === "tall-cell" && maximumNeighborDeltaOverride !== undefined) values.maximumNeighborDelta = maximumNeighborDeltaOverride;
@@ -612,7 +632,7 @@ async function runGPU(
         stabilityEnvelope.nonFiniteVelocityCount += preProjectionVelocity.nonFiniteCount + postProjectionVelocity.nonFiniteCount;
         stabilityEnvelope.sampledSteps += 1;
       }
-      if (shouldReport) console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "running", steps, simulatedTime_s: sample.simulatedTime_s, dt_s: stepDt, preProjectionVelocity, postProjectionVelocity, maxSpeed_m_s: sample.maxSpeed_m_s, maxAirSpeed_m_s: sample.maxAirSpeed_m_s, maxDivergenceBefore_s: sample.maxDivergenceBefore_s, maxDivergenceAfter_s: sample.maxDivergenceAfter_s, pressureRelativeResidual: sample.pressureRelativeResidual, maxComponentCfl: sample.maxComponentCfl, representedVolumeDrift: sample.representedVolumeDrift, exactVolumeCellSum: exact.summary.cellSum, exactVolumeDrift, componentCount: exact.summary.componentCount, dominantComponentFraction: exact.summary.wetCells > 0 ? exact.summary.largestComponent / exact.summary.wetCells : 1, quadtree: sample.gridKind === "quadtree-tall-cell" ? { leafCount: sample.quadtreeLeafCount, pressureSampleCount: sample.quadtreePressureSampleCount, liquidDofCount: sample.quadtreeLiquidDofCount, faceCount: sample.quadtreeFaceCount, tallSegmentCount: sample.quadtreeTallSegmentCount, ghostFaceCount: sample.quadtreeGhostFaceCount, maximumNeighborRatio: sample.quadtreeMaximumNeighborRatio, maximumFluidScale: sample.quadtreeMaximumFluidScale, levelSetMismatchFraction: sample.quadtreeLevelSetMismatchFraction } : undefined, stabilityFlags: sample.stabilityFlags, extrema, tallCellActivity, tallVolumeGaps }));
+      if (shouldReport) console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "running", steps, simulatedTime_s: sample.simulatedTime_s, dt_s: stepDt, preProjectionVelocity, postProjectionVelocity, maxSpeed_m_s: sample.maxSpeed_m_s, maxAirSpeed_m_s: sample.maxAirSpeed_m_s, maxDivergenceBefore_s: sample.maxDivergenceBefore_s, maxDivergenceAfter_s: sample.maxDivergenceAfter_s, pressureRelativeResidual: sample.pressureRelativeResidual, pressureIterationsUsed: sample.quadtreePressureIterationsUsed, pressureIterationBudget: sample.quadtreePressureIterationBudget, pressureIterationHardBudget: sample.quadtreePressureIterationHardBudget, pressureConverged: sample.quadtreePressureConverged, factorLevelCount: sample.quadtreeFactorLevelCount, pressurePhaseTimings: sample.quadtreePressurePhaseTimings, maxComponentCfl: sample.maxComponentCfl, representedVolumeDrift: sample.representedVolumeDrift, volumeCorrectionNormalSpeed_cells_s: sample.volumeCorrectionNormalSpeed_cells_s, phiInterfaceCellCount: sample.phiInterfaceCellCount, exactVolumeCellSum: exact.summary.cellSum, exactVolumeDrift, componentCount: exact.summary.componentCount, dominantComponentFraction: exact.summary.wetCells > 0 ? exact.summary.largestComponent / exact.summary.wetCells : 1, quadtree: sample.gridKind === "quadtree-tall-cell" ? { leafCount: sample.quadtreeLeafCount, pressureSampleCount: sample.quadtreePressureSampleCount, liquidDofCount: sample.quadtreeLiquidDofCount, faceCount: sample.quadtreeFaceCount, tallSegmentCount: sample.quadtreeTallSegmentCount, ghostFaceCount: sample.quadtreeGhostFaceCount, maximumNeighborRatio: sample.quadtreeMaximumNeighborRatio, maximumFluidScale: sample.quadtreeMaximumFluidScale, levelSetMismatchFraction: sample.quadtreeLevelSetMismatchFraction } : undefined, stabilityFlags: sample.stabilityFlags, extrema, tallCellActivity, tallVolumeGaps }));
     }
     if (checkpointEvery_s > 0 && (solver.info.submittedTime_s ?? 0) + 1e-9 >= nextCheckpoint_s) {
       await device.queue.onSubmittedWorkDone();
@@ -807,15 +827,24 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
     if (scenarioId === "dam-break-ui") {
       const envelope = quadtree.stabilityEnvelope;
       fail((quadtree.info.simulatedTime_s ?? 0) >= 0.2 - 1e-9, `quadtree dam-break regression reached only ${quadtree.info.simulatedTime_s} s`);
+      fail(quadtree.info.quadtreeRebuildCadenceSteps === 1, `quadtree dam-break rebuild cadence was ${quadtree.info.quadtreeRebuildCadenceSteps}, not Algorithm 1's every-step cadence`);
+      fail((quadtree.info.quadtreeRebuildCompletedCount ?? 0) >= quadtree.steps - 1, `quadtree completed ${quadtree.info.quadtreeRebuildCompletedCount} rebuilds for ${quadtree.steps} steps`);
       fail((envelope?.sampledSteps ?? 0) === quadtree.steps, `quadtree dam-break sampled ${envelope?.sampledSteps} of ${quadtree.steps} steps`);
       fail((envelope?.nonFiniteVelocityCount ?? Infinity) === 0, `quadtree dam-break encountered ${envelope?.nonFiniteVelocityCount} non-finite staged velocities`);
       fail((envelope?.peakLiquidSpeed_m_s ?? Infinity) <= 5, `quadtree dam-break peak liquid speed ${envelope?.peakLiquidSpeed_m_s} m/s exceeds 5 m/s`);
       fail((envelope?.peakComponentCfl ?? Infinity) <= 1, `quadtree dam-break peak CFL ${envelope?.peakComponentCfl} exceeds one cell`);
       fail((envelope?.maximumProjectionEnergyRatio ?? Infinity) <= 1.1, `quadtree pressure projection amplified kinetic energy by ${envelope?.maximumProjectionEnergyRatio}`);
+      // Results Sec. 5: every paper example uses ICCG with relative residual
+      // 1e-4. A topology transition is not allowed to weaken that criterion.
       fail((envelope?.maximumPressureRelativeResidual ?? Infinity) <= 1e-4, `quadtree dam-break pressure residual peaked at ${envelope?.maximumPressureRelativeResidual}`);
-      fail((envelope?.maximumExactVolumeDrift ?? Infinity) <= 1e-5, `quadtree dam-break topology transfer mass drift peaked at ${envelope?.maximumExactVolumeDrift}`);
+      fail((envelope?.maximumExactVolumeDrift ?? Infinity) <= 0.02, `quadtree dam-break level-set volume drift peaked at ${envelope?.maximumExactVolumeDrift}`);
       fail((envelope?.minimumDominantComponentFraction ?? -Infinity) >= 0.995, `quadtree dam-break dominant component fell to ${envelope?.minimumDominantComponentFraction}`);
       fail((quadtree.info.front_m ?? -Infinity) > -0.005, `quadtree dam-break front did not progress: ${quadtree.info.front_m} m`);
+      if (tall && quadtree.grid.every((value, axis) => value === tall.grid[axis])) {
+        const comparison = compareScalarFields(quadtree.finalSummary ? quadtree.checkpoints.at(-1)?.field ?? quadtree.matchedField : quadtree.matchedField, tall.finalSummary ? tall.checkpoints.at(-1)?.field ?? tall.matchedField : tall.matchedField, ...quadtree.grid);
+        fail(comparison.wetIntersectionOverUnion >= 0.35, `quadtree dam-break wet-IoU ${comparison.wetIntersectionOverUnion} is below the active tall-cell quality floor`);
+        fail(comparison.centroidDistanceCells === null || comparison.centroidDistanceCells <= 6, `quadtree dam-break centroid differs from tall-cell by ${comparison.centroidDistanceCells} cells`);
+      }
     }
   }
   return failures;

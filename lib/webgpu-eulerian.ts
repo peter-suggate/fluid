@@ -102,10 +102,16 @@ export interface GPUEulerianInfo {
   quadtreeCPUTallGrid_ms?: number;
   quadtreeCPUVariationalAssembly_ms?: number;
   quadtreeCPUSystemPack_ms?: number;
+  quadtreeCPUICFactorization_ms?: number;
   quadtreeCPUResourceUpload_ms?: number;
   quadtreeTopologyReused?: boolean;
   quadtreeTopologyReuseCount?: number;
   quadtreePressureIterationsUsed?: number;
+  quadtreePressureIterationBudget?: number;
+  quadtreePressureIterationHardBudget?: number;
+  quadtreePressureConverged?: boolean;
+  quadtreeFactorLevelCount?: number;
+  quadtreePressurePhaseTimings?: { setup_ms: number; firstIterations_ms: number; remainingIterations_ms: number; project_ms: number };
   quadtreeRebuildCadenceSteps?: number;
   /** Bytes transferred from GPU for the latest adaptive topology update. */
   quadtreeTopologyReadbackBytes?: number;

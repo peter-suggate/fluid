@@ -6,6 +6,8 @@ import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-euleria
 import { getMethod, type GPUSolverInstance, type MethodParamValues } from "./methods";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { RasterWaterPipeline } from "./webgpu-water-pipeline";
+import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
+import { environmentShaderLibrary } from "./webgpu-environments";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 export type WaterRenderMode = "rasterized" | "ray-marched";
@@ -89,6 +91,7 @@ struct Uniforms {
   options: vec4f,
   gridInfo: vec4f,
   debug: vec4f,
+  environment: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -128,6 +131,8 @@ fn boxIntersection(ro: vec3f, rd: vec3f, boundsMin: vec3f, boundsMax: vec3f) -> 
   let far3 = max(t0, t1);
   return vec2f(max(max(near3.x, near3.y), near3.z), min(min(far3.x, far3.y), far3.z));
 }
+
+${environmentShaderLibrary}
 
 fn gridLine(value: vec2f, scale: f32) -> f32 {
   let g = abs(sin(value * 3.14159265 / max(scale, 0.0001)));
@@ -372,9 +377,8 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let up = normalize(cross(right, forward));
   let rd = normalize(forward + right * ndc.x * aspect * 0.72 + up * ndc.y * 0.72);
 
-  let skyT = clamp(input.uv.y, 0.0, 1.0);
-  var color = mix(vec3f(0.018, 0.042, 0.041), vec3f(0.055, 0.098, 0.092), skyT);
-  color += 0.025 * pow(max(dot(rd, normalize(vec3f(-0.4, 0.8, 0.3))), 0.0), 18.0);
+  let room = sampleEnvironment(ro, rd);
+  var color = room.color;
 
   let size = u.container.xyz;
   let center = vec3f(0.0, size.y * 0.5, 0.0);
@@ -384,14 +388,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let hit = boxIntersection(ro, rd, boundsMin, boundsMax);
   let rigidHit = nearestBody(ro, rd);
 
-  let floorT = (-0.025 - ro.y) / rd.y;
-  if (floorT > 0.0) {
-    let floorPoint = ro + rd * floorT;
-    let radial = length(floorPoint.xz);
-    let floorGrid = gridLine(floorPoint.xz, 0.1);
-    let floorFade = exp(-radial * 0.7);
-    color = mix(color, vec3f(0.045, 0.085, 0.079) + floorGrid * vec3f(0.05, 0.16, 0.135), 0.28 * floorFade);
-  }
+  let floorT = room.depth;
 
   if (hit.x <= hit.y && hit.y > 0.0) {
     let nearT = max(hit.x, 0.0);
@@ -426,10 +423,10 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
       let fresnel = 0.0204 + 0.9796 * pow(1.0 - max(dot(normal, -rd), 0.0), 5.0);
       let depth = clamp((hit.y - waterT) / max(size.y, 0.001), 0.0, 1.0);
       let thickness=max(0.0,solverHit.exit-solverHit.entry);let transmission=exp(-vec3f(0.95,0.28,0.16)*thickness);let scatter=vec3f(0.018,0.34,0.29)*(vec3f(1.0)-transmission);
-      let refracted=color*transmission+scatter;let reflected=mix(vec3f(0.025,0.07,0.07),vec3f(0.19,0.38,0.34),clamp(reflect(rd,normal).y*0.5+0.5,0.0,1.0));
+      let refracted=color*transmission+scatter;let reflected=environmentLight(reflect(rd,normal));
       var waterColor = mix(refracted,reflected,fresnel);
       waterColor+=vec3f(0.025,0.12,0.105)*(1.0-exp(-thickness*7.0));
-      waterColor += vec3f(0.16, 0.72, 0.64) * pow(max(dot(reflect(rd, normal), normalize(vec3f(-0.5, 0.8, 0.25))), 0.0), 64.0);
+      waterColor += environmentLightColor() * pow(max(dot(reflect(rd, normal), environmentLightDirection()), 0.0), 64.0);
 
       if (scientific) {
         let grid = gridLine(waterPoint.xz, max(u.options.y, 0.01));
@@ -448,7 +445,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
 
   if (rigidHit.t < 1e19 && (floorT <= 0.0 || rigidHit.t < floorT)) {
     let rigidPoint = ro + rd * rigidHit.t;
-    let light = normalize(vec3f(-0.45, 0.8, 0.3));
+    let light = environmentLightDirection();
     let diffuse = 0.22 + 0.78 * max(dot(rigidHit.normal, light), 0.0);
     let rim = pow(1.0 - max(dot(-rd, rigidHit.normal), 0.0), 3.0);
     var rigidColor = rigidHit.color * diffuse + vec3f(0.18, 0.42, 0.37) * rim;
@@ -460,6 +457,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
     color = rigidColor;
   }
 
+  color = environmentForeground(color, ndc);
   let vignette = 1.0 - 0.22 * dot(ndc * 0.58, ndc * 0.58);
   color *= vignette;
   color = color / (color + vec3f(1.0));
@@ -590,7 +588,7 @@ export class FluidLabRenderer {
     const upscaleModule=device.createShaderModule({label:"Presentation upscale shader",code:upscaleShader});
     this.upscalePipeline=await device.createRenderPipelineAsync({label:"Presentation upscale",layout:"auto",vertex:{module:upscaleModule,entryPoint:"vertexMain"},fragment:{module:upscaleModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
-    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.columnBaseTexture = device.createTexture({ label: "Uniform-grid tall-cell fallback", size: [1, 1], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
@@ -682,7 +680,10 @@ export class FluidLabRenderer {
       // Submit a small queue batch and fence it once. The solver's topology
       // lag guard can decline any later call, ending the batch while a rebuild
       // catches up.
-      const batchLimit = config.methodId === "quadtree-tall-cell" ? 8 : 1;
+      // Keep one extra adaptive step available to amortize frame/fence
+      // scheduling, but do not bury topology readbacks behind an eight-step
+      // pressure queue. Rebuild work is inserted after the triggering step.
+      const batchLimit = config.methodId === "quadtree-tall-cell" ? 2 : 1;
       let submittedTime = previousSubmittedTime;
       for (let batch = 0; batch < batchLimit && submittedTime + 1e-9 < time_s; batch += 1) {
         if (!this.gpuFluid.advanceTo(time_s, bodies)) break;
@@ -757,7 +758,7 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.activeRenderScale * 100)}%)`;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, view: ViewMode, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, waterRenderMode: WaterRenderMode = "rasterized"): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, view: ViewMode, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, waterRenderMode: WaterRenderMode = "rasterized", environmentId: EnvironmentId = defaultEnvironmentId): RendererFrameMetrics {
     if (!this.device || this.disposed || this.deviceLost || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     this.resize(waterRenderMode === "rasterized" ? this.rasterRenderScale : 1);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
@@ -779,7 +780,8 @@ export class FluidLabRenderer {
       // Field mode: 1 = raw occupancy, 2 = packed tall-cell level set,
       // 3 = uniform-layout level set (quadtree resident phi).
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "restricted-tall-cell" ? 2 : gpuInfo.gridKind === "quadtree-tall-cell" ? 3 : 1) : fluid ? 1 : 0,
-      gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "quadtree-tall-cell" ? 1 : 0, 0
+      gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "quadtree-tall-cell" ? 1 : 0, 0,
+      environmentIndex(environmentId), 0, 0, 0
     ]);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
     const bodyData = new Float32Array(12 * 16);

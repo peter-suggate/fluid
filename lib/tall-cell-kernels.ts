@@ -253,7 +253,9 @@ fn finishSemiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phi));textureStore(pressureOut,id,vec4f(0.0));
 }
 
-	fn positiveFaceVelocity(q:vec3i,axis:u32)->f32{let offset=axisOffset(axis);let neighbor=q+offset;if(!validWorld(q)||!validWorld(neighbor)){return 0.0;}if(solidFractionCell(neighbor)>0.9){return solidVelocityCell(neighbor)[axis];}if(solidFractionCell(q)>0.9){return solidVelocityCell(q)[axis];}return velocityCell(q)[axis];}
+	// Tall Cells Eq. 14: velocities are collocated at cell samples, so the
+	// velocity crossing a fluid-fluid face is the average of its two endpoints.
+	fn positiveFaceVelocity(q:vec3i,axis:u32)->f32{let offset=axisOffset(axis);let neighbor=q+offset;if(!validWorld(q)||!validWorld(neighbor)){return 0.0;}if(solidFractionCell(neighbor)>0.9){return solidVelocityCell(neighbor)[axis];}if(solidFractionCell(q)>0.9){return solidVelocityCell(q)[axis];}return 0.5*(velocityCell(q)[axis]+velocityCell(neighbor)[axis]);}
 	fn lateralDivergenceAt(q:vec3i)->f32{let h=params.cellGravity.xyz;return (positiveFaceVelocity(q,0u)-positiveFaceVelocity(q-vec3i(1,0,0),0u))/h.x+(positiveFaceVelocity(q,2u)-positiveFaceVelocity(q-vec3i(0,0,1),2u))/h.z;}
 	fn pointDivergenceAt(q:vec3i)->f32{let h=params.cellGravity.xyz;return lateralDivergenceAt(q)+(positiveFaceVelocity(q,1u)-positiveFaceVelocity(q-vec3i(0,1,0),1u))/h.y;}
 	// Paper Eq 13/19: divergence is measured as a POINT divergence at the top

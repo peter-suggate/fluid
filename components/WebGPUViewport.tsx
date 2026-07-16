@@ -54,7 +54,8 @@ export function WebGPUViewport() {
             state.fluidRenderState ?? undefined, simulation.backend,
             { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method) },
             { axis: ui.view === "scientific" ? ui.gridOverlayAxis : "off", position: ui.gridOverlaySlice },
-            ui.waterRenderMode
+            ui.waterRenderMode,
+            ui.environmentId
           );
         } catch (error: unknown) {
           running = false;

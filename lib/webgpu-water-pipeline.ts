@@ -1,3 +1,5 @@
+import { environmentShaderLibrary } from "./webgpu-environments";
+
 /**
  * Rasterized water presentation for the WebGPU renderer.
  *
@@ -482,7 +484,7 @@ struct Out { @builtin(position) clip:vec4f, @location(0) energy:f32 }
 
 export const sceneShader = /* wgsl */ `
 const ENABLE_CAUSTICS = false;
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f }
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(0) @binding(1) var<storage,read> bodies:array<BodyGPU,12>;
@@ -491,6 +493,7 @@ struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, c
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let n=min(a,b);let f=max(a,b);return vec2f(max(max(n.x,n.y),n.z),min(min(f.x,f.y),f.z));}
+${environmentShaderLibrary}
 fn qrot(q:vec4f,v:vec3f)->vec3f{let a=cross(q.yzw,v);return v+2.0*(q.x*a+cross(q.yzw,a));}
 fn qinv(q:vec4f,v:vec3f)->vec3f{return qrot(vec4f(q.x,-q.yzw),v);}
 struct Hit{t:f32,n:vec3f,color:vec3f,selected:f32}
@@ -502,11 +505,9 @@ fn bodyHit(ro:vec3f,rd:vec3f,b:BodyGPU)->Hit{
   return Hit(t,qrot(b.orientation,n),b.colorSelected.xyz,b.colorSelected.w);
 }
 fn nearestBody(ro:vec3f,rd:vec3f)->Hit{var best=Hit(1e20,vec3f(0,1,0),vec3f(.7),0);for(var i=0u;i<12u;i+=1u){if(i>=u32(round(u.options.z))){break;}let h=bodyHit(ro,rd,bodies[i]);if(h.t<best.t){best=h;}}return best;}
-fn sky(rd:vec3f)->vec3f{let t=clamp(rd.y*.5+.5,0.0,1.0);var c=mix(vec3f(.015,.027,.029),vec3f(.16,.23,.22),t);let sun=max(dot(rd,normalize(vec3f(-.45,.86,.28))),0.0);c+=vec3f(1.0,.86,.66)*pow(sun,320.0)*2.2+vec3f(.24,.31,.28)*pow(sun,12.0);return c;}
 @fragment fn fragmentMain(input:VOut)->@location(0) vec4f{
   let ndc=input.uv*2.0-1.0;let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*.72+up*ndc.y*.72);
-  var color=sky(rd);var nearest=1e20;let light=normalize(vec3f(-.45,.86,.28));
-  let floorT=(-.012-ro.y)/rd.y;if(floorT>0.0){let p=ro+rd*floorT;let radial=length(p.xz);let checker=.5+.5*cos(p.x*31.4)*cos(p.z*31.4);color=mix(color,vec3f(.055,.068,.064)+checker*vec3f(.018,.025,.022),.82*exp(-radial*.22));nearest=floorT;if(ENABLE_CAUSTICS){let uv=p.xz/u.container.xz+vec2f(.5);let insideCaustic=all(uv>=vec2f(0.0))&&all(uv<=vec2f(1.0));let texel=1.0/vec2f(textureDimensions(caustics));var c=textureSampleLevel(caustics,linearSampler,uv,0).rgb*.42;c+=textureSampleLevel(caustics,linearSampler,uv+vec2f(texel.x,0),0).rgb*.145;c+=textureSampleLevel(caustics,linearSampler,uv-vec2f(texel.x,0),0).rgb*.145;c+=textureSampleLevel(caustics,linearSampler,uv+vec2f(0,texel.y),0).rgb*.145;c+=textureSampleLevel(caustics,linearSampler,uv-vec2f(0,texel.y),0).rgb*.145;color+=c*3.6*select(0.0,1.0,insideCaustic);}}
+  let room=sampleEnvironment(ro,rd);var color=room.color;var nearest=room.depth;let light=environmentLightDirection();
   let rigid=nearestBody(ro,rd);if(rigid.t<nearest){let diffuse=.16+.84*max(dot(rigid.n,light),0.0);let rim=pow(1.0-max(dot(-rd,rigid.n),0.0),3.0);color=rigid.color*diffuse+vec3f(.18,.34,.31)*rim+rigid.selected*vec3f(.12,.42,.32);nearest=rigid.t;}
   // Rear seams belong in the dry scene so they are refracted by the water.
   // The near glass pane and its edges are composited after the water below.
@@ -516,7 +517,7 @@ fn sky(rd:vec3f)->vec3f{let t=clamp(rd.y*.5+.5,0.0,1.0);var c=mix(vec3f(.015,.02
 `;
 
 export const compositeShader = /* wgsl */ `
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f }
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(0) @binding(1) var sceneTexture:texture_2d<f32>;
 @group(0) @binding(2) var frontPosition:texture_2d<f32>;
@@ -526,10 +527,10 @@ struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, cont
 @group(0) @binding(6) var linearSampler:sampler;
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
-fn environment(rd:vec3f)->vec3f{let t=clamp(rd.y*.5+.5,0.0,1.0);var c=mix(vec3f(.012,.025,.028),vec3f(.19,.30,.29),t);let sun=max(dot(rd,normalize(vec3f(-.45,.86,.28))),0.0);return c+vec3f(1.0,.82,.58)*pow(sun,420.0)*3.0+vec3f(.25,.32,.29)*pow(sun,14.0);}
 fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let r=normalize(cross(f,vec3f(0,1,0)));let up=normalize(cross(r,f));let q=world-u.cameraPosition.xyz;let d=max(dot(q,f),1e-4);let ndc=vec2f(dot(q,r)/(d*u.viewport.x/max(u.viewport.y,1.0)*.72),dot(q,up)/(d*.72));return vec2f(ndc.x*.5+.5,.5-ndc.y*.5);}
 fn safeSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{return textureSampleLevel(texture,linearSampler,clamp(uv,vec2f(.001),vec2f(.999)),0);}
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let near3=min(a,b);let far3=max(a,b);return vec2f(max(max(near3.x,near3.y),near3.z),min(min(far3.x,far3.y),far3.z));}
+${environmentShaderLibrary}
 fn boxNormal(point:vec3f,center:vec3f,halfSize:vec3f)->vec3f{
   let q=abs((point-center)/max(halfSize,vec3f(1e-5)));
   if(q.x>=q.y&&q.x>=q.z){return vec3f(sign(point.x-center.x),0,0);}
@@ -549,11 +550,11 @@ fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
   let cosine=clamp(abs(dot(-rd,normal)),0.0,1.0);let fresnel=.04+.96*pow(1.0-cosine,5.0);
   let paneAlpha=.008+.065*fresnel;let edgeAlpha=.52*outerEdge+.10*innerEdge;
   let glassTint=vec3f(.30,.58,.54);var result=mix(color,color*vec3f(.985,1.0,.998)+glassTint*.035,paneAlpha+edgeAlpha);
-  let light=normalize(vec3f(-.45,.86,.28));let glint=pow(max(dot(reflect(rd,normal),light),0.0),240.0);
-  result+=vec3f(1.0,.96,.86)*(glint*(.18+.82*outerEdge)+fresnel*outerEdge*.16);
+  let light=environmentLightDirection();let glint=pow(max(dot(reflect(rd,normal),light),0.0),240.0);
+  result+=environmentLightColor()*(glint*(.18+.82*outerEdge)+fresnel*outerEdge*.16);
   return result;
 }
-fn finish(color:vec3f,ndc:vec2f)->vec4f{var c=color*(1.0-.08*dot(ndc*.55,ndc*.55));c=c/(c+vec3f(1.0));c=pow(max(c,vec3f(0.0)),vec3f(1.0/2.2));return vec4f(c,1);}
+fn finish(color:vec3f,ndc:vec2f)->vec4f{var c=environmentForeground(color,ndc)*(1.0-.08*dot(ndc*.55,ndc*.55));c=c/(c+vec3f(1.0));c=pow(max(c,vec3f(0.0)),vec3f(1.0/2.2));return vec4f(c,1);}
 @fragment fn fragmentMain(input:VOut)->@location(0) vec4f{
   // Full-screen interpolated UV has Y=1 at the top of the render target,
   // while sampled WebGPU textures have Y=0 there. The shared legacy upscaler
@@ -580,11 +581,11 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{var c=color*(1.0-.08*dot(ndc*.55,ndc*.55
   // Clean water: red is attenuated first.  A small in-scattering term keeps
   // thick regions luminous instead of turning into opaque ink.
   let absorption=vec3f(.45,.09,.06);let transmission=exp(-absorption*thickness);let scatter=vec3f(.012,.055,.049)*(vec3f(1.0)-transmission);
-  let refracted=transmittedScene*transmission+scatter;let reflectedDir=reflect(rd,n);var reflected=environment(reflectedDir);
+  let refracted=transmittedScene*transmission+scatter;let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);
   let ssrUV=project(front.xyz+reflectedDir*.8);let ssr=safeSample(sceneTexture,ssrUV);reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a<60000.0));
   let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=.02037+(1.0-.02037)*pow(1.0-cosine,5.0);var water=mix(refracted,reflected,fresnel);
-  if(tir){water=mix(water,environment(outgoing),.88);}
-  let light=normalize(vec3f(-.45,.86,.28));water+=vec3f(1.0,.91,.73)*pow(max(dot(reflect(rd,n),light),0.0),180.0)*1.4;
+  if(tir){water=mix(water,environmentLight(outgoing),.88);}
+  let light=environmentLightDirection();water+=environmentLightColor()*pow(max(dot(reflect(rd,n),light),0.0),180.0)*1.4;
   // Thin forward-scattering highlight at silhouettes, plus a restrained
   // turquoise body tint that grows only with actual optical thickness.
   water+=vec3f(.018,.10,.085)*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*pow(1.0-cosine,3.0)*.15;
