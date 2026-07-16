@@ -119,7 +119,7 @@ export interface QuadtreeTallCellProjectionOptions {
   maximumLeafSize: number;
   opticalDepthFraction: number;
   /** IC(0) is paper-conformant; the other choices preserve the operator and tolerance stop. */
-  preconditioner?: "ic0" | "jacobi" | "line" | "poly";
+  preconditioner?: "ic0" | "blockic" | "jacobi" | "line" | "poly";
   /** Degree of the damped-Jacobi Neumann polynomial (2--4). */
   polynomialDegree?: number;
   /** Internal feedback carried across topology rebuilds. */
@@ -516,6 +516,35 @@ fn applyPrecondition(lid: u32, solveActive: bool) {
 fn precondition(@builtin(local_invocation_id) lid: vec3u) {
   applyPrecondition(lid.x, !(scalars[3] > 0.0 && scalars[2] <= params.solve.x * scalars[3]));
 }
+// Block-restricted IC(0): the CPU factor drops couplings that cross the
+// column-aligned row blocks, so each block's triangular solves are
+// self-contained. A block's substitution is dominated by the near-serial
+// vertical chain of its columns (measured deep-water blocks are single
+// ~200-sample columns whose level schedule averages one row per level), so
+// one lane owns one whole block: its dependent loads replace the global
+// barrier round per level that made the single-workgroup sweep latency-bound,
+// and blocks solve in parallel across lanes.
+@compute @workgroup_size(64)
+fn preconditionBlockIC(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x >= params.precondition.y || (scalars[3] > 0.0 && scalars[2] <= params.solve.x * scalars[3])) { return; }
+  let header = params.precondition.x + 2u * gid.x;
+  let rowStart = auxWord(header); let rowEnd = auxWord(header + 1u);
+  let rowOffsetsOffset = bitcast<u32>(params.solve.z); let rowEntriesOffset = bitcast<u32>(params.solve.w);
+  for (var row = rowStart; row < rowEnd; row += 1u) {
+    var value = stateF(row, RESIDUAL);
+    for (var entry = auxWord(rowOffsetsOffset + row); entry < auxWord(rowOffsetsOffset + row + 1u); entry += 1u) {
+      let factor = auxEntry(rowEntriesOffset, entry); value -= factor.coefficient * stateF(factor.face, PRECONDITIONED);
+    }
+    setStateF(row, PRECONDITIONED, value * bitcast<f32>(factorColumns[row].y));
+  }
+  for (var slot = rowEnd; slot > rowStart; slot -= 1u) {
+    let column = slot - 1u; var value = stateF(column, PRECONDITIONED);
+    for (var entry = factorColumns[column].x; entry < factorColumns[column + 1u].x; entry += 1u) {
+      let factor = factorEntries[entry]; value -= factor.coefficient * stateF(factor.face, PRECONDITIONED);
+    }
+    setStateF(column, PRECONDITIONED, value * bitcast<f32>(factorColumns[column].y));
+  }
+}
 @compute @workgroup_size(128)
 fn preconditionJacobi(@builtin(global_invocation_id) gid: vec3u) {
   let row = gid.x;
@@ -757,9 +786,9 @@ export const quadtreeDispatchShader = /* wgsl */ `
 @group(0) @binding(1) var<storage, read_write> args: array<u32>;
 @compute @workgroup_size(1)
 fn updateDispatch() {
-  let keepSolving = !(scalars[3] > 0.0 && scalars[2] <= bitcast<f32>(args[18]) * scalars[3]);
+  let keepSolving = !(scalars[3] > 0.0 && scalars[2] <= bitcast<f32>(args[24]) * scalars[3]);
   if (keepSolving) { scalars[9] += 1.0; }
-  for (var word = 0u; word < 9u; word += 1u) { args[word] = select(0u, args[9u + word], keepSolving || word % 3u != 0u); }
+  for (var word = 0u; word < 12u; word += 1u) { args[word] = select(0u, args[12u + word], keepSolving || word % 3u != 0u); }
 }
 `;
 
@@ -781,6 +810,7 @@ export class WebGPUQuadtreeTallCellProjection {
   private readonly factorAux: GPUTexture;
   private readonly mlsRowIndex: GPUTexture;
   private readonly dofCount: number;
+  private readonly preconditionBlockGroups: number;
   private iterations: number;
   private iterationBudget: QuadtreeIterationBudget;
   private readonly parallelReductions: boolean;
@@ -884,7 +914,7 @@ export class WebGPUQuadtreeTallCellProjection {
     const rowGroups = Math.ceil(this.dofCount / 128), partialWords = 2 * rowGroups;
     const scalars = device.createBuffer({ label: "Quadtree tall-cell CG scalars and partial reductions", size: 4 * (108 + partialWords), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.scalarBuffer = scalars;
-    this.dispatchArgs = device.createBuffer({ label: "Quadtree tall-cell active dispatches", size: 76, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
+    this.dispatchArgs = device.createBuffer({ label: "Quadtree tall-cell active dispatches", size: 100, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
     this.couplingBodyCount = packed.couplingBodyCount; this.couplingDistinctDofs = packed.couplingDistinctDofs; this.couplingBodyIndices = packed.couplingBodyIndices;
     this.params = device.createBuffer({ label: "Quadtree tall-cell parameters", size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.params, 0, new Uint32Array([nx, ny, nz, factorAuxWidth, 0, 0, 0, 0]).buffer);
@@ -894,7 +924,15 @@ export class WebGPUQuadtreeTallCellProjection {
     new Uint32Array(solveParams).set([packed.levelsOffset, packed.rowOffsetsOffset, packed.rowEntriesOffset], 1); device.queue.writeBuffer(this.params, 48, solveParams);
     device.queue.writeBuffer(this.params, 64, new Uint32Array([packed.couplingByBodyOffset, packed.couplingByDofOffset, packed.couplingTableOffset, packed.couplingBodyCount]).buffer);
     device.queue.writeBuffer(this.params, 80, new Uint32Array([packed.couplingDistinctDofs, packed.mlsOffsetsBase, packed.mlsRowCount, rowGroups]).buffer);
-    device.queue.writeBuffer(this.params, 96, new Uint32Array([packed.lineOffsetsBase, packed.lineDofsBase, packed.lineCount, Math.max(2, Math.min(4, Math.round(options.polynomialDegree ?? 2)))]).buffer);
+    // precondition.xy carry the line tables or the blockic tables; only the
+    // active preconditioner's kernels are ever dispatched, so the overlay is
+    // unambiguous per projection.
+    this.preconditionBlockGroups = Math.ceil(packed.blockCount / 64);
+    device.queue.writeBuffer(this.params, 96, new Uint32Array([
+      (options.preconditioner ?? "ic0") === "blockic" ? packed.blockTableOffset : packed.lineOffsetsBase,
+      (options.preconditioner ?? "ic0") === "blockic" ? packed.blockCount : packed.lineDofsBase,
+      packed.lineCount, Math.max(2, Math.min(4, Math.round(options.polynomialDegree ?? 2)))
+    ]).buffer);
     const inflowBoundary = scene.fluid.inflow ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [nx, ny, nz]) : undefined;
     device.queue.writeBuffer(this.params, 112, new Float32Array([
       h.x, h.y, h.z, 0,
@@ -904,9 +942,13 @@ export class WebGPUQuadtreeTallCellProjection {
       0, 0, 0, 0
     ]).buffer);
     const couplingGroups = Math.ceil(packed.couplingDistinctDofs / 128);
-    const dispatchWords = new Uint32Array(19);
-    dispatchWords.set([rowGroups, 1, 1, 1, 1, 1, couplingGroups, 1, 1, rowGroups, 1, 1, 1, 1, 1, couplingGroups, 1, 1]);
-    dispatchWords[18] = new Uint32Array(new Float32Array([options.relativeTolerance ** 2]).buffer)[0];
+    // Four live dispatch triples (row groups, single workgroup, coupling
+    // groups, blockic blocks), the template copied by updateDispatch, then the
+    // squared tolerance.
+    const dispatchWords = new Uint32Array(25);
+    dispatchWords.set([rowGroups, 1, 1, 1, 1, 1, couplingGroups, 1, 1, Math.ceil(packed.blockCount / 64), 1, 1]);
+    dispatchWords.set(dispatchWords.subarray(0, 12), 12);
+    dispatchWords[24] = new Uint32Array(new Float32Array([options.relativeTolerance ** 2]).buffer)[0];
     device.queue.writeBuffer(this.dispatchArgs, 0, dispatchWords);
     let layout: GPUBindGroupLayout;
     if (cache) {
@@ -948,7 +990,7 @@ export class WebGPUQuadtreeTallCellProjection {
     this.dispatchBindGroup = device.createBindGroup({ layout: this.gpuCache.dispatchLayout, entries: [
       { binding: 0, resource: { buffer: scalars } }, { binding: 1, resource: { buffer: this.dispatchArgs } }
     ] });
-    const names = ["refreshFaces", "refreshRows", "initialize", "precondition", "preconditionJacobi", "preconditionLine", "preconditionPolynomialStart", "preconditionPolynomialMultiply", "preconditionPolynomialUpdate", "startDirection", "reduceInitial", "multiply", "applyStep", "applyStepPartial", "applyStepFinalize", "applyStepUpdate", "finishIteration", "finishIterationPartial", "finishIterationFinalize", "finishIterationUpdate", "project", "coupleReduce", "coupleApply", "coupleImpulse"];
+    const names = ["refreshFaces", "refreshRows", "initialize", "precondition", "preconditionBlockIC", "preconditionJacobi", "preconditionLine", "preconditionPolynomialStart", "preconditionPolynomialMultiply", "preconditionPolynomialUpdate", "startDirection", "reduceInitial", "multiply", "applyStep", "applyStepPartial", "applyStepFinalize", "applyStepUpdate", "finishIteration", "finishIterationPartial", "finishIterationFinalize", "finishIterationUpdate", "project", "coupleReduce", "coupleApply", "coupleImpulse"];
     this.pipelines = this.gpuCache.pipelines ?? (deferPipelineCompilation ? {} : Object.fromEntries(names.map((entryPoint) => [entryPoint, device.createComputePipeline(this.pipelineDescriptor(entryPoint))])));
     if (!this.gpuCache.pipelines && !deferPipelineCompilation) this.gpuCache.pipelines = this.pipelines;
     const all = [faces, rowOffsets, rowEntries, matrixBuffer, state, scalars, factorColumns, factorEntries];
@@ -975,7 +1017,7 @@ export class WebGPUQuadtreeTallCellProjection {
   static async createAsync(device:GPUDevice,scene:SceneDescription,dims:{nx:number;ny:number;nz:number},resources:ProjectionResources,options:QuadtreeTallCellProjectionOptions,fields?:ProjectionFields,coupling?:QuadtreeRigidCoupling,onProgress:(label:string,completed:number,total:number)=>void=()=>{},cache?:QuadtreeGPUCache){const projection=new WebGPUQuadtreeTallCellProjection(device,scene,dims,resources,options,fields,coupling,true,cache);await projection.initializePipelines(onProgress);return projection;}
   async initializePipelines(onProgress:(label:string,completed:number,total:number)=>void=()=>{}){
     if(this.gpuCache.pipelines){this.pipelines=this.gpuCache.pipelines;return;}
-    const names=["refreshFaces","refreshRows","initialize","precondition","preconditionJacobi","preconditionLine","preconditionPolynomialStart","preconditionPolynomialMultiply","preconditionPolynomialUpdate","startDirection","reduceInitial","multiply","applyStep","applyStepPartial","applyStepFinalize","applyStepUpdate","finishIteration","finishIterationPartial","finishIterationFinalize","finishIterationUpdate","project","coupleReduce","coupleApply","coupleImpulse"];const pipelines:Record<string,GPUComputePipeline>={};for(let index=0;index<names.length;index+=1){const entryPoint=names[index];onProgress(`Adaptive pressure · ${entryPoint}`,index,names.length);pipelines[entryPoint]=await this.device.createComputePipelineAsync(this.pipelineDescriptor(entryPoint));onProgress(`Adaptive pressure · ${entryPoint}`,index+1,names.length);}this.pipelines=pipelines;this.gpuCache.pipelines=pipelines;
+    const names=["refreshFaces","refreshRows","initialize","precondition","preconditionBlockIC","preconditionJacobi","preconditionLine","preconditionPolynomialStart","preconditionPolynomialMultiply","preconditionPolynomialUpdate","startDirection","reduceInitial","multiply","applyStep","applyStepPartial","applyStepFinalize","applyStepUpdate","finishIteration","finishIterationPartial","finishIterationFinalize","finishIterationUpdate","project","coupleReduce","coupleApply","coupleImpulse"];const pipelines:Record<string,GPUComputePipeline>={};for(let index=0;index<names.length;index+=1){const entryPoint=names[index];onProgress(`Adaptive pressure · ${entryPoint}`,index,names.length);pipelines[entryPoint]=await this.device.createComputePipelineAsync(this.pipelineDescriptor(entryPoint));onProgress(`Adaptive pressure · ${entryPoint}`,index+1,names.length);}this.pipelines=pipelines;this.gpuCache.pipelines=pipelines;
   }
 
   static packSystem(system: VariationalSystem, nx: number, ny: number, nz: number, dynamicBodies: VariationalBody[], preconditioner: QuadtreeTallCellProjectionOptions["preconditioner"] = "ic0") {
@@ -987,6 +1029,11 @@ export class WebGPUQuadtreeTallCellProjection {
     const faceStride = 28, faces = new ArrayBuffer(system.faces.length * faceStride * 4), faceU32 = new Uint32Array(faces), faceF32 = new Float32Array(faces);
     const incident: Array<Array<{ face: number; coefficient: number }>> = Array.from({ length: system.liquidSampleIds.length }, () => []);
     const cellProjection = new Float32Array(nx * ny * nz * 4), cellTopology = adaptivePressureCellTopology(system.grid);
+    const preconditionerChoice = preconditioner ?? "ic0", useBlockIC = preconditionerChoice === "blockic";
+    // jacobi/line/poly read only the refreshed CSR diagonal, so both the
+    // symbolic assembly below and the numeric factorization are skipped on
+    // every topology rebuild when no incomplete-Cholesky factor is consumed.
+    const buildIncompleteCholesky = preconditionerChoice === "ic0" || useBlockIC;
     const matrixRows: Array<Map<number, number>> = Array.from({ length: system.liquidSampleIds.length }, () => new Map<number, number>());
     system.faces.forEach((face, faceIndex) => {
       const offset = faceIndex * faceStride, nodeCount = face.nodes.length;
@@ -1006,13 +1053,15 @@ export class WebGPUQuadtreeTallCellProjection {
       const va = face.volume * face.openFraction;
       faceF32[offset + 13] = face.volume * face.solidFlux;
       faceF32.set([va, va * face.fluidScale], offset + 14);
-      const matrixWeight = va * face.fluidScale;
-      const liquidTerms: Array<{ dof: number; coefficient: number }> = [];
-      for (let slot = 0; slot < nodeCount; slot += 1) {
-        const dof = system.dofBySample[face.nodes[slot]];
-        if (dof >= 0) liquidTerms.push({ dof, coefficient: face.coefficients[slot] });
+      if (buildIncompleteCholesky) {
+        const matrixWeight = va * face.fluidScale;
+        const liquidTerms: Array<{ dof: number; coefficient: number }> = [];
+        for (let slot = 0; slot < nodeCount; slot += 1) {
+          const dof = system.dofBySample[face.nodes[slot]];
+          if (dof >= 0) liquidTerms.push({ dof, coefficient: face.coefficients[slot] });
+        }
+        for (const a of liquidTerms) for (const b of liquidTerms) matrixRows[a.dof].set(b.dof, (matrixRows[a.dof].get(b.dof) ?? 0) + a.coefficient * b.coefficient * matrixWeight);
       }
-      for (const a of liquidTerms) for (const b of liquidTerms) matrixRows[a.dof].set(b.dof, (matrixRows[a.dof].get(b.dof) ?? 0) + a.coefficient * b.coefficient * matrixWeight);
       if (face.axis === 0 || face.axis === 2) {
         for (let y = face.bounds.y0; y < face.bounds.y1 && y < ny; y += 1) for (let transverse = 0; transverse < face.bounds.span; transverse += 1) {
           const x = face.axis === 0 ? face.bounds.x : face.bounds.x + transverse;
@@ -1064,12 +1113,33 @@ export class WebGPUQuadtreeTallCellProjection {
     const n = matrixRows.length, factorStarts = new Uint32Array(n + 1), factorRows: number[] = [], factorValues: number[] = [];
     const factorPositions: Array<Map<number, number>> = Array.from({ length: n }, () => new Map<number, number>());
     const originalDiagonal = new Float64Array(n), workDiagonal = new Float64Array(n), inverseDiagonal = new Float64Array(n);
-    const buildIncompleteCholesky = (preconditioner ?? "ic0") === "ic0";
+    // blockic partitions the DOFs into blocks of whole leaf columns (up to
+    // ~64 rows each; a deeper single column still forms one block). DOF ids
+    // follow sample ids, which populateTallPressureGrid assigns leaf by leaf
+    // and bottom-to-top, so every column is a contiguous ascending DOF range
+    // and blocks of consecutive columns are contiguous row ranges. The factor
+    // drops couplings that cross a block boundary, making each block's
+    // triangular solves independent (one GPU lane per block).
+    const blockStarts: number[] = [];
+    if (useBlockIC) {
+      const targetBlockRows = 64;
+      let blockRows = 0;
+      for (const column of system.grid.samplesByLeaf) {
+        let first = -1, rows = 0;
+        for (const sample of column) { const dof = system.dofBySample[sample.id]; if (dof >= 0) { if (first < 0) first = dof; rows += 1; } }
+        if (rows === 0) continue;
+        if (blockRows === 0 || blockRows + rows > targetBlockRows) { blockStarts.push(first); blockRows = 0; }
+        blockRows += rows;
+      }
+    }
+    const blockCount = blockStarts.length;
+    const blockOf = new Int32Array(useBlockIC ? n : 0);
+    for (let block = 0; block < blockCount; block += 1) blockOf.fill(block, blockStarts[block], block + 1 < blockCount ? blockStarts[block + 1] : n);
     if (buildIncompleteCholesky) {
       for (let column = 0; column < n; column += 1) {
         factorStarts[column] = factorRows.length;
         const diagonal = matrixRows[column].get(column) ?? 0; originalDiagonal[column] = diagonal; workDiagonal[column] = diagonal;
-        for (const row of [...matrixRows[column].keys()].filter((row) => row > column).sort((a, b) => a - b)) {
+        for (const row of [...matrixRows[column].keys()].filter((row) => row > column && (!useBlockIC || blockOf[row] === blockOf[column])).sort((a, b) => a - b)) {
           factorPositions[column].set(row, factorRows.length); factorRows.push(row); factorValues.push(matrixRows[column].get(row) ?? 0);
         }
       }
@@ -1112,15 +1182,28 @@ export class WebGPUQuadtreeTallCellProjection {
     for (let column = n - 1; column >= 0; column -= 1) for (let entryIndex = factorStarts[column]; entryIndex < factorStarts[column + 1]; entryIndex += 1) backwardLevel[column] = Math.max(backwardLevel[column], backwardLevel[factorRows[entryIndex]] + 1);
     let deepestLevel = 0;
     for (let row = 0; row < n; row += 1) deepestLevel = Math.max(deepestLevel, forwardLevel[row], backwardLevel[row]);
+    // With cross-block factor edges dropped, the global forward/backward
+    // levels are also each block's local levels; levelCount stays the reported
+    // schedule depth for either preconditioner.
     const levelCount = Math.max(1, 1 + deepestLevel);
-    const forwardByLevel: number[][] = Array.from({ length: levelCount }, () => []), backwardByLevel: number[][] = Array.from({ length: levelCount }, () => []);
-    for (let row = 0; row < n; row += 1) { forwardByLevel[forwardLevel[row]].push(row); backwardByLevel[backwardLevel[row]].push(row); }
-    const schedule = new Uint32Array(Math.max(1, 2 * n)), levels = new Uint32Array(levelCount * 4); let scheduleOffset = 0;
-    for (let level = 0; level < levelCount; level += 1) {
-      levels[4 * level] = scheduleOffset; schedule.set(forwardByLevel[level], scheduleOffset); scheduleOffset += forwardByLevel[level].length; levels[4 * level + 1] = scheduleOffset;
-    }
-    for (let level = 0; level < levelCount; level += 1) {
-      levels[4 * level + 2] = scheduleOffset; schedule.set(backwardByLevel[level], scheduleOffset); scheduleOffset += backwardByLevel[level].length; levels[4 * level + 3] = scheduleOffset;
+    const schedule = new Uint32Array(Math.max(1, 2 * n)); let scheduleOffset = 0;
+    let levels = new Uint32Array(0), blockTable = new Uint32Array(0);
+    if (useBlockIC) {
+      // One [rowStart, rowEnd) header per block; the GPU lane that owns the
+      // block substitutes its rows serially in natural order, which respects
+      // the triangular dependencies without any level schedule.
+      blockTable = new Uint32Array(2 * blockCount);
+      for (let block = 0; block < blockCount; block += 1) blockTable.set([blockStarts[block], block + 1 < blockCount ? blockStarts[block + 1] : n], 2 * block);
+    } else {
+      const forwardByLevel: number[][] = Array.from({ length: levelCount }, () => []), backwardByLevel: number[][] = Array.from({ length: levelCount }, () => []);
+      for (let row = 0; row < n; row += 1) { forwardByLevel[forwardLevel[row]].push(row); backwardByLevel[backwardLevel[row]].push(row); }
+      levels = new Uint32Array(levelCount * 4);
+      for (let level = 0; level < levelCount; level += 1) {
+        levels[4 * level] = scheduleOffset; schedule.set(forwardByLevel[level], scheduleOffset); scheduleOffset += forwardByLevel[level].length; levels[4 * level + 1] = scheduleOffset;
+      }
+      for (let level = 0; level < levelCount; level += 1) {
+        levels[4 * level + 2] = scheduleOffset; schedule.set(backwardByLevel[level], scheduleOffset); scheduleOffset += backwardByLevel[level].length; levels[4 * level + 3] = scheduleOffset;
+      }
     }
     const factorRowOffsets = new Uint32Array(n + 1), factorRowEntriesBuffer = new ArrayBuffer(Math.max(1, factorRows.length) * 8), factorRowEntriesU32 = new Uint32Array(factorRowEntriesBuffer), factorRowEntriesF32 = new Float32Array(factorRowEntriesBuffer);
     let rowEntry = 0;
@@ -1131,6 +1214,7 @@ export class WebGPUQuadtreeTallCellProjection {
     factorRowOffsets[n] = rowEntry;
     const icFactorization_ms = performance.now() - icStartedAt;
     const levelsOffset = scheduleOffset, rowOffsetsOffset = levelsOffset + levels.length, rowEntriesOffset = rowOffsetsOffset + factorRowOffsets.length;
+    const blockTableOffset = rowEntriesOffset + 2 * rowEntry;
     // Rank-6 body couplings ride in the same aux-words texture (the storage
     // binding budget is exhausted): a by-body CSR for K^T reductions, a
     // by-DOF CSR for race-free K applications, and the per-body generalized
@@ -1149,7 +1233,7 @@ export class WebGPUQuadtreeTallCellProjection {
       }
     });
     const couplingDistinctDofs = byDof.size;
-    const couplingByBodyOffset = rowEntriesOffset + 2 * rowEntry;
+    const couplingByBodyOffset = blockTableOffset + blockTable.length;
     const couplingByDofOffset = couplingByBodyOffset + (couplingBodyCount + 1) + couplingRowCount * 8;
     const couplingTableOffset = couplingByDofOffset + couplingDistinctDofs + (couplingDistinctDofs + 1) + couplingRowCount * 8;
     // MLS pressure-mapping rows (Narita Alg. 1 line 10 via Ando--Batty MLS)
@@ -1166,6 +1250,7 @@ export class WebGPUQuadtreeTallCellProjection {
     const factorAuxFloats = new Float32Array(factorAuxWords.buffer);
     factorAuxWords.set(schedule.subarray(0, scheduleOffset), 0); factorAuxWords.set(levels, levelsOffset); factorAuxWords.set(factorRowOffsets, rowOffsetsOffset);
     factorAuxWords.set(new Uint32Array(factorRowEntriesBuffer, 0, 2 * rowEntry), rowEntriesOffset);
+    factorAuxWords.set(blockTable, blockTableOffset);
     if (couplingBodyCount > 0) {
       let entryCursor = 0;
       const entriesBase = couplingByBodyOffset + couplingBodyCount + 1;
@@ -1226,7 +1311,8 @@ export class WebGPUQuadtreeTallCellProjection {
       couplingByBodyOffset, couplingByDofOffset, couplingTableOffset, couplingBodyCount, couplingDistinctDofs,
       couplingBodyIndices: couplings.map((coupling) => coupling.body),
       mlsOffsetsBase, mlsRowCount: mlsRows.length, mlsIndex, icFactorization_ms,
-      lineOffsetsBase, lineDofsBase, lineCount: lineRows.length
+      lineOffsetsBase, lineDofsBase, lineCount: lineRows.length,
+      blockTableOffset, blockCount
     };
   }
 
@@ -1239,6 +1325,7 @@ export class WebGPUQuadtreeTallCellProjection {
     const polynomialDegree = Math.max(2, Math.min(4, Math.round(this.options.polynomialDegree ?? 2)));
     const directPrecondition = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void) => {
       if (preconditioner === "ic0") direct("precondition", 1);
+      else if (preconditioner === "blockic") direct("preconditionBlockIC", this.preconditionBlockGroups);
       else if (preconditioner === "jacobi") direct("preconditionJacobi", rowGroups);
       else if (preconditioner === "line") direct("preconditionLine", rowGroups);
       else {
@@ -1248,6 +1335,7 @@ export class WebGPUQuadtreeTallCellProjection {
     };
     const indirectPrecondition = (indirect: (entry: string, offset: number) => void) => {
       if (preconditioner === "ic0") indirect("precondition", 12);
+      else if (preconditioner === "blockic") indirect("preconditionBlockIC", 36);
       else if (preconditioner === "jacobi") indirect("preconditionJacobi", 0);
       else if (preconditioner === "line") indirect("preconditionLine", 0);
       else {
@@ -1453,7 +1541,7 @@ export class WebGPUQuadtreeTallCellProjection {
   get residualRms() { return this.lastResidualRms; }
   get initialResidualRms() { return this.lastInitialResidualRms; }
   get topologyTexture() { return this.cellTopology; }
-  get preconditioner() { const value = this.options.preconditioner; return value === "jacobi" || value === "line" || value === "poly" ? value : "ic0"; }
+  get preconditioner() { const value = this.options.preconditioner; return value === "blockic" || value === "jacobi" || value === "line" || value === "poly" ? value : "ic0"; }
 
   destroySharedSurface() { this.surfaceState.destroy(); WebGPUQuadtreeBuilder.destroyCache(this.gpuCache.construction); this.gpuCache.cpuWorker?.terminate(); this.gpuCache.cpuWorker = undefined; }
   destroy() { for (const buffer of this.buffers) buffer.destroy(); this.params.destroy(); this.cellProjection.destroy(); this.cellTopology.destroy(); this.factorAux.destroy(); this.mlsRowIndex.destroy(); this.phaseQuerySet?.destroy(); this.phaseQueryResolve?.destroy(); }
