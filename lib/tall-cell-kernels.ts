@@ -255,7 +255,7 @@ fn finishAdvection(@builtin(global_invocation_id) gid:vec3u){
   // uniform path). Gating on the own sample alone starved the face beneath
   // every droplet, which levitated small drops and left splash water welded
   // to the ceiling where the wall zeroes the only gravity-fed face.
-  if(phi<=0.0||phiCell(q+vec3i(0,1,0))<=0.0){v.y+=params.cellGravity.w*dt;}if(phi<=min(h.x,min(h.y,h.z))){let nu=params.physical.y/params.physical.x;v+=dt*nu*velocityLaplacian(q);if(abs(phi)<min(h.x,min(h.y,h.z))){v+=dt*params.boundary.x/params.physical.x*curvature(q)*volumeGradient(q);}}
+  let fluidOpen=1.0-clamp(solidFractionCell(q),0.0,1.0);if(phi<=0.0||phiCell(q+vec3i(0,1,0))<=0.0){v.y+=fluidOpen*params.cellGravity.w*dt;}if(phi<=min(h.x,min(h.y,h.z))){let nu=params.physical.y/params.physical.x;v+=fluidOpen*dt*nu*velocityLaplacian(q);if(abs(phi)<min(h.x,min(h.y,h.z))){v+=fluidOpen*dt*params.boundary.x/params.physical.x*curvature(q)*volumeGradient(q);}}
   // Safety rail against the flux-form transport's CFL limit (Appendix C
   // gap 9): physical speeds in these scenes stay below CFL ~1.5 per frame
   // step while a developing blow-up passes CFL 4 within a few steps, so an
@@ -283,7 +283,7 @@ fn finishSemiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   // uniform path). Gating on the own sample alone starved the face beneath
   // every droplet, which levitated small drops and left splash water welded
   // to the ceiling where the wall zeroes the only gravity-fed face.
-  if(phi<=0.0||phiCell(q+vec3i(0,1,0))<=0.0){v.y+=params.cellGravity.w*dt;}if(phi<=min(h.x,min(h.y,h.z))){let nu=params.physical.y/params.physical.x;v+=dt*nu*velocityLaplacian(q);if(abs(phi)<min(h.x,min(h.y,h.z))){v+=dt*params.boundary.x/params.physical.x*curvature(q)*volumeGradient(q);}}
+  let fluidOpen=1.0-clamp(solidFractionCell(q),0.0,1.0);if(phi<=0.0||phiCell(q+vec3i(0,1,0))<=0.0){v.y+=fluidOpen*params.cellGravity.w*dt;}if(phi<=min(h.x,min(h.y,h.z))){let nu=params.physical.y/params.physical.x;v+=fluidOpen*dt*nu*velocityLaplacian(q);if(abs(phi)<min(h.x,min(h.y,h.z))){v+=fluidOpen*dt*params.boundary.x/params.physical.x*curvature(q)*volumeGradient(q);}}
   // Same absolute speed rail as finishAdvection (see the comment there).
   let speedCap=vec3f(params.container.w);v=clamp(v,-speedCap,speedCap);
   v=applyInflowVelocity(q,v);let d=fineDims();if(q.x+1>=d.x){v.x=0.0;}if(q.y+1>=d.y||!representedWorld(q+vec3i(0,1,0))){v.y=0.0;}if(q.z+1>=d.z){v.z=0.0;}
@@ -363,7 +363,14 @@ fn project(@builtin(global_invocation_id) gid:vec3u){
 	    if(!validWorld(q+offsets[2])){v.z=0.0;}else{v.z-=scale*storeLateralGradient(id.x,id.z,vec2i(0,1),ownAlpha,ownPressure)/h.z;}
 	    if(!validWorld(q+offsets[1])||!representedWorld(q+offsets[1])){v.y=0.0;}else{v.y-=scale*pressureGradientAt(q,1u);}
 	  } else {
-	  for(var axis=0u;axis<3u;axis+=1u){let plus=q+offsets[axis];if(!validWorld(plus)){v[axis]=0.0;continue;}if(axis==1u&&!representedWorld(plus)){v[axis]=0.0;continue;}v[axis]-=scale*pressureGradientAt(q,axis);}
+	  for(var axis=0u;axis<3u;axis+=1u){let plus=q+offsets[axis];if(!validWorld(plus)){v[axis]=0.0;continue;}if(axis==1u&&!representedWorld(plus)){v[axis]=0.0;continue;}v[axis]-=scale*pressureGradientAt(q,axis);
+	    // divergenceAt substitutes the rigid velocity on every solid-covered
+	    // positive face. Apply the identical constraint after projection too.
+	    // Otherwise pressure writes an arbitrary velocity inside a stationary
+	    // body; coupleRigid reads it on the next frame as real fluid momentum,
+	    // producing a persistent bias toward the negative-X/negative-Z corner.
+	    if(solidFractionCell(plus)>0.9){v[axis]=solidVelocityCell(plus)[axis];}else if(solidFractionCell(q)>0.9){v[axis]=solidVelocityCell(q)[axis];}
+	  }
 	  }
 	  let speedCap=vec3f(params.container.w);v=clamp(v,-speedCap,speedCap);
 	  v=applyInflowVelocity(q,v);textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x));
@@ -385,7 +392,7 @@ fn project(@builtin(global_invocation_id) gid:vec3u){
 	      for(var corner:u32=0u;corner<8u;corner+=1u){let offset=vec3f(select(-0.4,0.4,(corner&1u)>0u),select(-0.4,0.4,(corner&2u)>0u),select(-0.4,0.4,(corner&4u)>0u))*h;let sample=world+offset;for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}if(insideRigid(rigidBodies[bodyIndex],sample)){virtualSolid+=0.125;owner=min(owner,bodyIndex);break;}}}
 	      var s=0.5;if(height>1){s=1.0-f32(y)/f32(height-1);}let endpointWeight=select(s,1.0-s,id.y==1);basisWeight+=endpointWeight;solidBasis+=endpointWeight*virtualSolid;
 	      if(owner<12u&&virtualSolid>0.0){let body=rigidBodies[owner];let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let virtualVelocity=velocityCell(q);let weight=endpointWeight*virtualSolid;weightedDelta+=weight*(solidVelocity-virtualVelocity);coupledWeight+=weight;
-	        if(id.y==0){let ambientVelocity=ambientFluidVelocity(body,q,virtualVelocity);let solidDensity=max(body.angularVelocity.w,1.0);let reducedDensity=params.physical.x*solidDensity/(params.physical.x+solidDensity);let fluidImpulse=reducedDensity*h.x*h.y*h.z*alpha*virtualSolid*(solidVelocity-virtualVelocity);let reaction=-fluidImpulse;let torque=cross(arm,reaction);let exchangeBase=owner*12u;atomicAdd(&rigidExchange[exchangeBase],i32(round(reaction.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+1u],i32(round(reaction.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+2u],i32(round(reaction.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+3u],i32(round(torque.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+4u],i32(round(torque.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+5u],i32(round(torque.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+6u],i32(round(alpha*virtualSolid*65536.0)));atomicAdd(&rigidExchange[exchangeBase+7u],i32(round(alpha*virtualSolid*ambientVelocity.x*1e4)));atomicAdd(&rigidExchange[exchangeBase+8u],i32(round(alpha*virtualSolid*ambientVelocity.y*1e4)));atomicAdd(&rigidExchange[exchangeBase+9u],i32(round(alpha*virtualSolid*ambientVelocity.z*1e4)));}
+	        if(id.y==0){let ambientVelocity=ambientFluidVelocity(body,q,virtualVelocity);let solidDensity=max(body.angularVelocity.w,1.0);let reducedDensity=params.physical.x*solidDensity/(params.physical.x+solidDensity);let fluidImpulse=reducedDensity*h.x*h.y*h.z*alpha*virtualSolid*(solidVelocity-virtualVelocity);let reaction=-fluidImpulse*select(0.0,1.0,virtualSolid>0.9);let torque=cross(arm,reaction);let exchangeBase=owner*12u;atomicAdd(&rigidExchange[exchangeBase],i32(round(reaction.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+1u],i32(round(reaction.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+2u],i32(round(reaction.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+3u],i32(round(torque.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+4u],i32(round(torque.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+5u],i32(round(torque.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+6u],i32(round(alpha*virtualSolid*65536.0)));atomicAdd(&rigidExchange[exchangeBase+7u],i32(round(alpha*virtualSolid*ambientVelocity.x*1e4)));atomicAdd(&rigidExchange[exchangeBase+8u],i32(round(alpha*virtualSolid*ambientVelocity.y*1e4)));atomicAdd(&rigidExchange[exchangeBase+9u],i32(round(alpha*virtualSolid*ambientVelocity.z*1e4)));}
 	      }
 	    }
 	    if(coupledWeight>0.0){v+=weightedDelta/coupledWeight;}solid=solidBasis/max(basisWeight,1e-6);
@@ -393,11 +400,11 @@ fn project(@builtin(global_invocation_id) gid:vec3u){
 	    let world=cellWorld;var owner=12u;
 	    for(var corner:u32=0u;corner<8u;corner+=1u){let offset=vec3f(select(-0.4,0.4,(corner&1u)>0u),select(-0.4,0.4,(corner&2u)>0u),select(-0.4,0.4,(corner&4u)>0u))*h;let sample=world+offset;for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}if(insideRigid(rigidBodies[bodyIndex],sample)){solid+=0.125;owner=min(owner,bodyIndex);break;}}}
 	    coupledBody=owner;
-	    // The full fluid velocity blend is intentionally paired with a reduced-
-	    // density reaction impulse as a stabilizer. Explicit CPU-side drag below
-	    // supplies the physical light-body resistance; strict closure is a
-	    // separate operator-splitting experiment.
-	    if(owner<12u&&solid>0.0){let body=rigidBodies[owner];let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let ambientVelocity=ambientFluidVelocity(body,q,oldV);v=mix(v,solidVelocity,solid);let solidDensity=max(body.angularVelocity.w,1.0);let reducedDensity=params.physical.x*solidDensity/(params.physical.x+solidDensity);let fluidImpulse=reducedDensity*h.x*h.y*h.z*alpha*solid*(solidVelocity-oldV);let reaction=-fluidImpulse;let torque=cross(arm,reaction);let exchangeBase=owner*12u;atomicAdd(&rigidExchange[exchangeBase],i32(round(reaction.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+1u],i32(round(reaction.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+2u],i32(round(reaction.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+3u],i32(round(torque.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+4u],i32(round(torque.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+5u],i32(round(torque.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+6u],i32(round(alpha*solid*65536.0)));atomicAdd(&rigidExchange[exchangeBase+7u],i32(round(alpha*solid*ambientVelocity.x*1e4)));atomicAdd(&rigidExchange[exchangeBase+8u],i32(round(alpha*solid*ambientVelocity.y*1e4)));atomicAdd(&rigidExchange[exchangeBase+9u],i32(round(alpha*solid*ambientVelocity.z*1e4)));}
+	    // The full fluid velocity blend is paired with a reduced-density reaction
+	    // only in body-interior cells. A cut cell's collocated velocity is not a
+	    // surface momentum sample and changes discontinuously with grid phase;
+	    // explicit CPU-side drag supplies the physical light-body resistance.
+	    if(owner<12u&&solid>0.0){let body=rigidBodies[owner];let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let ambientVelocity=ambientFluidVelocity(body,q,oldV);v=mix(v,solidVelocity,solid);let solidDensity=max(body.angularVelocity.w,1.0);let reducedDensity=params.physical.x*solidDensity/(params.physical.x+solidDensity);let fluidImpulse=reducedDensity*h.x*h.y*h.z*alpha*solid*(solidVelocity-oldV);let reaction=-fluidImpulse*select(0.0,1.0,solid>0.9);let torque=cross(arm,reaction);let exchangeBase=owner*12u;atomicAdd(&rigidExchange[exchangeBase],i32(round(reaction.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+1u],i32(round(reaction.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+2u],i32(round(reaction.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+3u],i32(round(torque.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+4u],i32(round(torque.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+5u],i32(round(torque.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+6u],i32(round(alpha*solid*65536.0)));atomicAdd(&rigidExchange[exchangeBase+7u],i32(round(alpha*solid*ambientVelocity.x*1e4)));atomicAdd(&rigidExchange[exchangeBase+8u],i32(round(alpha*solid*ambientVelocity.y*1e4)));atomicAdd(&rigidExchange[exchangeBase+9u],i32(round(alpha*solid*ambientVelocity.z*1e4)));}
 	  }
 	  // The prescribed reservoir occupies the nozzle's open channel. The
 	  // display cylinder is a filled rigid primitive, so carve its inlet cells
