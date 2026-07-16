@@ -146,14 +146,33 @@ fn samplePressure(p:vec3f)->f32{
 fn quaternionRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.0*(q.x*uv+uuv);}
 fn quaternionInverseRotate(q:vec4f,v:vec3f)->vec3f{return quaternionRotate(vec4f(q.x,-q.yzw),v);}
 	fn insideRigid(body:RigidBody,world:vec3f)->bool{
-  let p=quaternionInverseRotate(body.orientation,world-body.positionShape.xyz);let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
-  if(shape==0){return length(p)<=d.x;}if(shape==1){return all(abs(p)<=0.5*d);}if(shape==2){let cy=clamp(p.y,-0.5*d.y,0.5*d.y);return length(vec3f(p.x,p.y-cy,p.z))<=d.x;}return p.x*p.x+p.z*p.z<=d.x*d.x&&abs(p.y)<=0.5*d.y;
+	  let offset=world-body.positionShape.xyz;let radius=max(body.dimensions.w,0.0);let radiusSquared=radius*radius;let distanceSquared=dot(offset,offset);
+	  // Every uploaded primitive carries its exact orientation-independent
+	  // bounding radius in dimensions.w. Most grid samples are far from the
+	  // body, so reject them before quaternion rotation and shape evaluation.
+	  if(distanceSquared>radiusSquared){return false;}let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));if(shape==0){return distanceSquared<=d.x*d.x;}
+	  let p=quaternionInverseRotate(body.orientation,offset);if(shape==1){return all(abs(p)<=0.5*d);}if(shape==2){let cy=clamp(p.y,-0.5*d.y,0.5*d.y);return length(vec3f(p.x,p.y-cy,p.z))<=d.x;}return p.x*p.x+p.z*p.z<=d.x*d.x&&abs(p.y)<=0.5*d.y;
+	}
+	fn cellMayTouchRigid(world:vec3f,h:vec3f,bodyCount:u32)->bool{
+	  // All eight occupancy probes lie on a sphere of this radius around the
+	  // packed sample. If that sphere misses every primitive's bounding sphere,
+	  // every exact corner test below is guaranteed to be false.
+	  let probeRadius=0.4*length(h);for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}let body=rigidBodies[bodyIndex];let radius=max(body.dimensions.w,0.0)+probeRadius;let offset=world-body.positionShape.xyz;if(dot(offset,offset)<=radius*radius){return true;}}return false;
 	}
 	fn rigidVelocityAt(world:vec3f)->vec4f{
 	  let bodyCount=u32(round(params.boundary.z));for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}let body=rigidBodies[bodyIndex];if(insideRigid(body,world)){let arm=world-body.positionShape.xyz;return vec4f(body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm),f32(bodyIndex+1u));}}
 	  return vec4f(0.0);
 	}
 	fn solidVelocityCell(q:vec3i)->vec3f{return rigidVelocityAt(worldFromPoint(vec3f(vec3i(q))+vec3f(0.5))).xyz;}
+	// Interior projected samples already move with the body and therefore are
+	// not an undisturbed velocity for form drag. Sample wet, open points beyond
+	// the body's bounding sphere for the exchange snapshot.
+	fn ambientFluidVelocity(body:RigidBody,q:vec3i,fallback:vec3f)->vec3f{
+	  let h=params.cellGravity.xyz;let radius=max(body.dimensions.w,0.0);let reach=vec3i(ceil(vec3f(2.0*radius)/h))+vec3i(2);
+	  let offsets=array<vec3i,6>(vec3i(-reach.x,0,0),vec3i(reach.x,0,0),vec3i(0,-reach.y,0),vec3i(0,reach.y,0),vec3i(0,0,-reach.z),vec3i(0,0,reach.z));var total=vec3f(0.0);var weight=0.0;
+	  for(var n=0;n<6;n+=1){let nq=q+offsets[n];if(!validWorld(nq)){continue;}let sampleWorld=worldFromPoint(vec3f(nq)+vec3f(0.5));if(rigidVelocityAt(sampleWorld).w!=0.0){continue;}let wet=occupancyFromPhi(phiCell(nq));total+=wet*velocityCell(nq);weight+=wet;}
+	  return select(fallback,total/max(weight,1e-6),weight>0.0);
+	}
 
 fn axisOffset(axis:u32)->vec3i{return select(select(vec3i(0,0,1),vec3i(0,1,0),axis==1u),vec3i(1,0,0),axis==0u);}
 // Equation 18 pressure-gradient correction evaluated at a virtual cubic
@@ -354,7 +373,8 @@ fn project(@builtin(global_invocation_id) gid:vec3u){
 	@compute @workgroup_size(4,4,4)
 	fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
 	  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
-	  let q=vec3i(floor(samplePoint(id)));let phi=textureLoad(volumeIn,id,0).x;let alpha=occupancyFromPhi(phi);let oldV=textureLoad(velocityIn,id,0).xyz;var v=oldV;let h=params.cellGravity.xyz;let bodyCount=u32(round(params.boundary.z));var solid=0.0;
+	  let cellPoint=samplePoint(id);let q=vec3i(floor(cellPoint));let cellWorld=worldFromPoint(cellPoint);let phi=textureLoad(volumeIn,id,0).x;let alpha=occupancyFromPhi(phi);let oldV=textureLoad(velocityIn,id,0).xyz;var v=oldV;let h=params.cellGravity.xyz;let bodyCount=u32(round(params.boundary.z));var solid=0.0;var coupledBody=12u;
+	  if(bodyCount==0u||(params.physical.z<=0.5&&!cellMayTouchRigid(cellWorld,h,bodyCount))){textureStore(velocityOut,id,vec4f(oldV,0.0));textureStore(volumeOut,id,vec4f(phi));textureStore(pressureOut,id,vec4f(0.0));return;}
 	  // The legacy full-height diagnostic mode evaluates every virtual cubic cell inside a
 	  // tall cell. Its contribution is mapped to the two endpoint unknowns with
 	  // the paper's (1-s) / s weights; exchange is accumulated once by id.y=0.
@@ -365,20 +385,38 @@ fn project(@builtin(global_invocation_id) gid:vec3u){
 	      for(var corner:u32=0u;corner<8u;corner+=1u){let offset=vec3f(select(-0.4,0.4,(corner&1u)>0u),select(-0.4,0.4,(corner&2u)>0u),select(-0.4,0.4,(corner&4u)>0u))*h;let sample=world+offset;for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}if(insideRigid(rigidBodies[bodyIndex],sample)){virtualSolid+=0.125;owner=min(owner,bodyIndex);break;}}}
 	      var s=0.5;if(height>1){s=1.0-f32(y)/f32(height-1);}let endpointWeight=select(s,1.0-s,id.y==1);basisWeight+=endpointWeight;solidBasis+=endpointWeight*virtualSolid;
 	      if(owner<12u&&virtualSolid>0.0){let body=rigidBodies[owner];let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let virtualVelocity=velocityCell(q);let weight=endpointWeight*virtualSolid;weightedDelta+=weight*(solidVelocity-virtualVelocity);coupledWeight+=weight;
-	        if(id.y==0){let solidDensity=max(body.angularVelocity.w,1.0);let reducedDensity=params.physical.x*solidDensity/(params.physical.x+solidDensity);let fluidImpulse=reducedDensity*h.x*h.y*h.z*alpha*virtualSolid*(solidVelocity-virtualVelocity);let reaction=-fluidImpulse;let torque=cross(arm,reaction);let exchangeBase=owner*8u;atomicAdd(&rigidExchange[exchangeBase],i32(round(reaction.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+1u],i32(round(reaction.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+2u],i32(round(reaction.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+3u],i32(round(torque.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+4u],i32(round(torque.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+5u],i32(round(torque.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+6u],i32(round(alpha*virtualSolid*65536.0)));}
+	        if(id.y==0){let ambientVelocity=ambientFluidVelocity(body,q,virtualVelocity);let solidDensity=max(body.angularVelocity.w,1.0);let reducedDensity=params.physical.x*solidDensity/(params.physical.x+solidDensity);let fluidImpulse=reducedDensity*h.x*h.y*h.z*alpha*virtualSolid*(solidVelocity-virtualVelocity);let reaction=-fluidImpulse;let torque=cross(arm,reaction);let exchangeBase=owner*12u;atomicAdd(&rigidExchange[exchangeBase],i32(round(reaction.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+1u],i32(round(reaction.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+2u],i32(round(reaction.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+3u],i32(round(torque.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+4u],i32(round(torque.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+5u],i32(round(torque.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+6u],i32(round(alpha*virtualSolid*65536.0)));atomicAdd(&rigidExchange[exchangeBase+7u],i32(round(alpha*virtualSolid*ambientVelocity.x*1e4)));atomicAdd(&rigidExchange[exchangeBase+8u],i32(round(alpha*virtualSolid*ambientVelocity.y*1e4)));atomicAdd(&rigidExchange[exchangeBase+9u],i32(round(alpha*virtualSolid*ambientVelocity.z*1e4)));}
 	      }
 	    }
 	    if(coupledWeight>0.0){v+=weightedDelta/coupledWeight;}solid=solidBasis/max(basisWeight,1e-6);
 	  }else{
-	    let p=samplePoint(id);let world=worldFromPoint(p);var owner=12u;
+	    let world=cellWorld;var owner=12u;
 	    for(var corner:u32=0u;corner<8u;corner+=1u){let offset=vec3f(select(-0.4,0.4,(corner&1u)>0u),select(-0.4,0.4,(corner&2u)>0u),select(-0.4,0.4,(corner&4u)>0u))*h;let sample=world+offset;for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}if(insideRigid(rigidBodies[bodyIndex],sample)){solid+=0.125;owner=min(owner,bodyIndex);break;}}}
-	    if(owner<12u&&solid>0.0){let body=rigidBodies[owner];let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);v=mix(v,solidVelocity,solid);let solidDensity=max(body.angularVelocity.w,1.0);let reducedDensity=params.physical.x*solidDensity/(params.physical.x+solidDensity);let fluidImpulse=reducedDensity*h.x*h.y*h.z*alpha*solid*(solidVelocity-oldV);let reaction=-fluidImpulse;let torque=cross(arm,reaction);let exchangeBase=owner*8u;atomicAdd(&rigidExchange[exchangeBase],i32(round(reaction.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+1u],i32(round(reaction.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+2u],i32(round(reaction.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+3u],i32(round(torque.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+4u],i32(round(torque.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+5u],i32(round(torque.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+6u],i32(round(alpha*solid*65536.0)));}
+	    coupledBody=owner;
+	    // The full fluid velocity blend is intentionally paired with a reduced-
+	    // density reaction impulse as a stabilizer. Explicit CPU-side drag below
+	    // supplies the physical light-body resistance; strict closure is a
+	    // separate operator-splitting experiment.
+	    if(owner<12u&&solid>0.0){let body=rigidBodies[owner];let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let ambientVelocity=ambientFluidVelocity(body,q,oldV);v=mix(v,solidVelocity,solid);let solidDensity=max(body.angularVelocity.w,1.0);let reducedDensity=params.physical.x*solidDensity/(params.physical.x+solidDensity);let fluidImpulse=reducedDensity*h.x*h.y*h.z*alpha*solid*(solidVelocity-oldV);let reaction=-fluidImpulse;let torque=cross(arm,reaction);let exchangeBase=owner*12u;atomicAdd(&rigidExchange[exchangeBase],i32(round(reaction.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+1u],i32(round(reaction.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+2u],i32(round(reaction.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+3u],i32(round(torque.x*1e6)));atomicAdd(&rigidExchange[exchangeBase+4u],i32(round(torque.y*1e6)));atomicAdd(&rigidExchange[exchangeBase+5u],i32(round(torque.z*1e6)));atomicAdd(&rigidExchange[exchangeBase+6u],i32(round(alpha*solid*65536.0)));atomicAdd(&rigidExchange[exchangeBase+7u],i32(round(alpha*solid*ambientVelocity.x*1e4)));atomicAdd(&rigidExchange[exchangeBase+8u],i32(round(alpha*solid*ambientVelocity.y*1e4)));atomicAdd(&rigidExchange[exchangeBase+9u],i32(round(alpha*solid*ambientVelocity.z*1e4)));}
 	  }
 	  // The prescribed reservoir occupies the nozzle's open channel. The
 	  // display cylinder is a filled rigid primitive, so carve its inlet cells
 	  // back out of the pressure mask and let the boundary velocity win there.
 	  if(isInflowVelocityCell(q)){solid=0.0;v=applyInflowVelocity(q,v);}
-	  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phi));textureStore(pressureOut,id,vec4f(solid));
+	  // Paper Sec 3.9.1 phi-s: the advected level set is meaningless inside a
+	  // rigid body. Pull it toward open neighbours so a rising body displaces
+	  // its water column instead of carrying a phantom wet plug and buoyancy.
+	  var phiNext=phi;
+	  if(solid>0.0){
+	    let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var open=0.0;var openSum=0.0;var total=0.0;var count=0.0;
+	    let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+	    for(var n=0;n<6;n+=1){let nq=q+offsets[n];if(!validWorld(nq)){continue;}let neighborPhi=phiCell(nq);total+=neighborPhi;count+=1.0;let neighborWorld=worldFromPoint(vec3f(nq)+vec3f(0.5));if(rigidVelocityAt(neighborWorld).w==0.0){open+=1.0;openSum+=neighborPhi;}}
+	    // Preserve the neighbour target but converge interior body cells directly
+	    // from lateral open samples instead of diffusing over several radii.
+	    if(coupledBody<12u&&i32(round(rigidBodies[coupledBody].positionShape.w))==0&&length(rigidBodies[coupledBody].linearVelocity.xyz)>0.25){let radius=max(rigidBodies[coupledBody].dimensions.w,0.0);let reach=vec3i(ceil(vec3f(2.0*radius)/h))+vec3i(2);let far=array<vec3i,4>(vec3i(-reach.x,0,0),vec3i(reach.x,0,0),vec3i(0,0,-reach.z),vec3i(0,0,reach.z));for(var n=0;n<4;n+=1){let nq=q+far[n];if(!validWorld(nq)){continue;}let neighborWorld=worldFromPoint(vec3f(nq)+vec3f(0.5));if(rigidVelocityAt(neighborWorld).w==0.0){open+=1.0;openSum+=phiCell(nq);}}}
+	    let relaxTarget=select(total/max(count,1.0),openSum/max(open,1.0),open>0.0);phiNext=clamp(mix(phi,relaxTarget,solid),-limit,limit);
+	  }
+	  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phiNext));textureStore(pressureOut,id,vec4f(solid));
 	}
 
 @compute @workgroup_size(4,4,4)
