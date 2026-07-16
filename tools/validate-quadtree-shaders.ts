@@ -33,7 +33,7 @@ async function validate(label: string, code: string, entryPoints: string[]) {
 await validate("surface", quadtreeSurfaceShader, ["advectLevelSet", "seedDistance", "jumpFlood", "finalizeDistance"]);
 await validate("construction", quadtreeConstructionShader, ["advectLevelSet", "evaluateSizing", "refine", "smoothTopology", "sampleLeafProfiles"]);
 await validate("projection", quadtreeTallCellProjectionShader, [
-  "refreshFaces", "refreshRows", "initialize", "precondition", "preconditionJacobi", "preconditionLine",
+  "refreshFaces", "refreshRows", "initialize", "precondition", "preconditionBlockIC", "preconditionJacobi", "preconditionLine",
   "preconditionPolynomialStart", "preconditionPolynomialMultiply", "preconditionPolynomialUpdate",
   "startDirection", "reduceInitial", "multiply",
   "applyStep", "applyStepPartial", "applyStepFinalize", "applyStepUpdate",

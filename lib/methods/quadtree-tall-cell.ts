@@ -5,10 +5,10 @@ const params: MethodParamSpec[] = [
   { kind: "number", key: "pressureIterations", label: "Pressure iterations", unit: "iterations", min: 16, max: 1024, step: 16, digits: 0, default: 96, tier: "coarse", hint: "Hard CG safety budget; encoded work adapts to recent iterations-to-tolerance without changing the relative residual stop." },
   { kind: "number", key: "surfaceColumns", label: "Finest columns", unit: "columns", min: 1_000, max: 20_000, step: 500, digits: 0, default: 2_500, tier: "fine", hint: "Finest x/z lattice used by quadtree leaves and the cubic advection field." },
   { kind: "number", key: "adaptivityStrength", label: "Adaptivity", unit: "alpha", min: 0, max: 1, step: 0.05, digits: 2, default: 1, tier: "fine", hint: "Ando–Batty Eq. 38: 0 is the ordinary-grid limit; 1 permits full quadtree coarsening." },
-  { kind: "select", key: "preconditioner", label: "Preconditioner", default: "ic0", tier: "fine", options: [{ value: "ic0", label: "Paper IC(0)" }, { value: "line", label: "Vertical line" }, { value: "poly", label: "Polynomial" }, { value: "jacobi", label: "Parallel Jacobi" }], hint: "IC(0) is the paper reference; line and polynomial paths preserve the operator and tolerance while avoiding serial triangular levels." }
+  { kind: "select", key: "preconditioner", label: "Preconditioner", default: "ic0", tier: "fine", options: [{ value: "ic0", label: "Paper IC(0)" }, { value: "blockic", label: "Block IC(0)" }, { value: "line", label: "Vertical line" }, { value: "poly", label: "Polynomial" }, { value: "jacobi", label: "Parallel Jacobi" }], hint: "IC(0) is the paper reference; block IC(0) drops couplings across column-aligned row blocks so independent per-block substitutions replace the serial triangular levels; line and polynomial paths preserve the operator and tolerance." }
 ];
 
-const preconditionerValue = (value: unknown) => value === "line" || value === "poly" || value === "jacobi" ? value : "ic0";
+const preconditionerValue = (value: unknown) => value === "blockic" || value === "line" || value === "poly" || value === "jacobi" ? value : "ic0";
 
 export const quadtreeTallCellMethod: SimulationMethod = {
   id: "quadtree-tall-cell",
