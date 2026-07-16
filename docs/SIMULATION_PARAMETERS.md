@@ -63,7 +63,7 @@ the per-parameter override (sparse, per method, resettable to the preset).
 ### Tall-cell VOF (`tall-cell`)
 | Parameter | Tier | Meaning |
 | --- | --- | --- |
-| Pressure V-cycles | coarse | multigrid refinement cycles after the initial full cycle (default 2) |
+| Pressure V-cycles | coarse | multigrid refinement cycles after the initial full cycle (default 8; the remeshed dam-settling convergence floor) |
 | Surface columns | fine | target x/z column count (horizontal resolution) |
 | Surface band layers | fine | cubic cells kept around the free surface (auto-grows if the surface spans more) |
 | Neighbor base delta | fine | max tall-cell base step between adjacent columns |

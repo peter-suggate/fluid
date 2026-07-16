@@ -1,0 +1,687 @@
+Eurographics/ ACM SIGGRAPH Symposium on Computer Animation (2012)
+P. Kry and J. Lee (Editors)
+
+
+
+
+                     Mass-Conserving Eulerian Liquid Simulation
+
+                                            Nuttapong Chentanez1,2 and Matthias Müller1
+
+                                                            1 NVIDIA Research
+                                                        2 Chulalongkorn University
+
+
+
+
+        Abstract
+
+        We present a GPU friendly, Eulerian, free surface fluid simulation method that conserves mass locally and globally
+        without the use of Lagrangian components. Local mass conservation prevents small scale details of the free surface
+        from disappearing, a problem that plagues many previous approaches, while global mass conservation ensures
+        that the total volume of the liquid does not decrease over time. Our method handles moving solid boundaries as
+        well as cells that are partially filled with solids. Due to its stability, it allows the use of large time steps which makes
+        it suitable for both off-line and real-time applications. We achieve this by using density based surface tracking with
+        a novel, unconditionally stable, conservative advection scheme and a novel interface sharpening method. While
+        our approach conserves mass, volume loss is still possible but only temporarily. With constant mass, local volume
+        loss causes a local increase of the density used for surface tracking which we detect and correct over time. We also
+        propose a density post-processing method to reveal sub-grid details of the liquid surface. We show the effectiveness
+        of the proposed method in several practical examples all running either at interactive rates or in real-time.
+
+
+
+
+1. Introduction                                                          troduced the idea of using a density field as the scalar field
+                                                                         for surface tracking with the liquid surface being the 0.5 iso-
+Tracking the free surface of a liquid is an important and
+                                                                         surface. This density field is not to be mistaken for the den-
+challenging problem. For an overview of existing methods
+                                                                         sity field of the liquid. In incompressible fluid simulations,
+we recommend the class notes of Wojtan et al. [WMFB11].
+                                                                         the fluid-density is 1 everywhere and therefore not stored. So
+The most popular approach is to advect a scalar field with
+                                                                         in what follows, we use the symbol ρ for the surface density.
+the fluid and define the liquid surface to be one of the iso-
+surfaces. The main advantage of this class of methods is                 We chose to use surface density instead of the signed dis-
+that they handle topological changes implicitly in contrast              tance field because there are advection methods that strictly
+to mesh-based tracking methods. Until recently, the level                conserve quantities like density such as the one proposed
+set method was the method of choice in graphics. Here, the               by [LAF11]. Their advection method is unconditionally sta-
+signed distance field is used as the scalar field with the zero-         ble and fully conservative.
+iso-surface as the liquid surface.
+                                                                         With this approach, the overall mass defined by the surface
+A well known drawback of the level set method is that vol-               density is conserved. Since the surface density can devi-
+ume is lost both globally and locally. With global volume                ate from 1 temporarily, the overall volume may vary over
+loss the water level decreases over time while local volume              time though. However, in contrast to the level set method
+loss causes small detail such as thin sheets and droplets to             where such variations go unnoticed, volume deviations are
+disappear. A way to alleviate this problem is to introduce               reflected in the density field. In this paper we propose sev-
+Lagrangian components such as particles [FF01], [EMF02]                  eral methods to preserve volume both globally and locally
+or triangle meshes [BGOS05]. Even though these methods                   using the information stored in the density field.
+reduce volume loss, they cannot guarantee complete volume
+                                                                         Ideally, the surface density has the form of a step function
+conservation. Moreover, Lagrangian components add signif-
+                                                                         at the liquid-air interface. Over time, however, the initially
+icant run-time cost and complicate the implementation sig-
+                                                                         sharp boundary blurs out due to numerical diffusion. There-
+nificantly, especially for GPUs.
+                                                                         fore, [MMTD07] apply a sharpening filter at each time step
+As an alternative to the signed distance field, [MMTD07] in-             which conserves mass globally but not locally. We propose a
+
+c The Eurographics Association 2012.
+                        Nuttapong Chentanez & Matthias Müller / Mass-Conserving Eulerian Liquid Simulation
+
+
+
+
+Figure 1: A liquid jet with large flow rate inside a rectangular tank simulated at a resolution of 256x128x128 cells. The simula-
+tion time step is 1/30 seconds (CFL 25) which is much larger than what is typically used in other grid based liquid simulation
+approach. The liquid moves across many grid cells in a single time step, a situation our method handles without difficulty. Left)
+Surface rendering. Right) Volumetric rendering showing intricate detail of the density field.
+
+new sharpening method which conserves mass both locally             In this paper we focus on fluid mass and volume conserva-
+and globally.                                                       tion. A popular way to compensate volume gain or loss is
+                                                                    to modify the divergence of the velocity field as proposed
+Our main contributions are:
+                                                                    in [FOA03]. This technique was extended and used for con-
+• A GPU friendly, purely Eulerian liquid simulator that con-        serving volume of bubbles [KLL∗ 07], highly deformable ob-
+  serves mass locally and globally without any need for La-         jects [ISF07] and liquids [MMTD07].
+  grangian components.
+                                                                    The problem of loss of liquid mass and momentum has
+• A new GPU friendly sharpening method which conserves
+                                                                    also been addressed by proposing elaborate advection meth-
+  mass locally and globally.
+                                                                    ods such as BFECC [KLLR05], modified MacCormack
+• Modifications to reduce the computational cost of the con-        [SFK∗ 08], derivatives advection [KSK08] and conservative
+  servative advection method of [LAF11] and to make it              semi-Lagrangian advection [LGF11], [LAF11].
+  more GPU friendly.
+                                                                    As an alternative to level-set, the fluid domain can be tracked
+• Additional novel steps to handle non-axis aligned and             with a Volume-of-Fluid (VOF) approach [HN81] where
+  moving solid boundaries.                                          the volume fraction of fluid in each cell is evolved over
+• A density post processing technique to bring out sub-grid         time. With proper care, VOF can be made mass conserv-
+  detail.                                                           ing. However, despite several improvements in subsequent
+                                                                    works such [PP04], [AGDJ08], reconstructing surface nor-
+                                                                    mal and curvature from VOF is still difficult. Sussman and
+2. Related Work                                                     Puckett [SP00] proposes coupled Level Set and Volume-of-
+3D Eulerian liquid simulation was introduced to computer            Fluid (CLVOF) which track the fluid interface with both
+graphics by Foster and Metaxas [FM96] who used a finite             representations, where VOF is used for re-initializing the
+difference approach to solve the governing equations. Later         Level Set. The surface can then be extracted from the Level
+Foster and Fedkiw [FF01] employed the semi-Lagrangian               Set. CLVOF is extended to handle multiple interfaces in
+method introduced by Stam [Sta99] to solve the advection            [KPyNS10]. The downside of CLVOF is the need to use two
+term and the level set method and particles to track liquid         representations which can be quite computationally inten-
+surface. Enright et al. [EMF02] devised the Particle Level          sive. An alternative to VOF is to track a smeared-out sur-
+Set (PLS) method which uses particles on both sides of              face density and keep it relatively sharp with a sharpening
+liquid-air interface to reduce volume loss. Since then, many        operation. This method was introduced to computer graph-
+methods have been proposed to further improve the accuracy          ics by Mullen et al. [MMTD07]. Our fluid domain tracking
+of Eulerian surface tracking.                                       approach builds upon this work and make it conserve mass
+                                                                    both locally and globally.
+Various approaches have been proposed to track the liquid
+domain more faithfully. [BGOS05] used a triangle mesh rep-          Apart from the Eulerian formulation we use, there are many
+resentation in connection with a level set grid, [HK10] aug-        alternative models to simulate 3D liquids such as the Lattice-
+mented the level set grid with quadrature points. Grid-less         Boltzmann method [TR04] and [TR09], approaches based
+methods work with Lagrangian elements only such as parti-           on the discrete sin-cosine transform [LR09] or particle based
+cles [ZB05], [APKG07] or [YT10], triangles meshes [M0̈9],           methods such as [MCG03], [PTB∗ 03], [APKG07], [SP09],
+[BB09] and [WTGT10].                                                and [SG11].
+
+                                                                                                       c The Eurographics Association 2012.
+                               Nuttapong Chentanez & Matthias Müller / Mass-Conserving Eulerian Liquid Simulation
+
+3. Methods                                                                 3.3. Velocity Extrapolation
+We simulate the liquid by solving the inviscid Euler Equa-                 To extrapolate the velocities from inside the liquid into the
+tions,                                                                     surrounding air we use the scheme described in [CM11b],
+                                                                           i.e. we apply the method of [JRW07] to derive the velocities
+                   ∂u              f ∇p                                    a few grid cells away from the interface and then extrapolate
+                      = −(u · ∇)u + −   ,                        (1)
+                   ∂t              d  d                                    based on a hierarchy of grids to obtain velocities far away
+subject to the incompressibility constraint                                from the surface.
+
+                                ∇ · u = 0,                       (2)
+                                                                           3.4. Density Advection
+where u = [u, v, w]T is the fluid velocity field, p is the pres-           We advect ρ using our unconditionally stable conservative
+sure, t is time, d the fluid density and f is a field of external          advection method which we derived from the method pro-
+forces.                                                                    posed by Lentine et al. in [LGF11] and [LAF11] and im-
+The equations are solved in the domain specified by a sur-                 proved in terms of computational cost.
+face density field ρ [MMTD07], in the region where ρ > 0.5.                Lentine et al. [LGF11] modified the semi-Lagrangian advec-
+The surface density itself is advected with the fluid via                  tion scheme to conserve mass by ensuring that each cell dis-
+                                                                           tributes all its mass of the current time step among some
+                             ∂ρ
+                                = −u · ∇ρ                        (3)       cells at the next time step. Let A be the matrix of the dis-
+                             ∂t
+                                                                           cretized advection operator such that ρn+1 = Aρn , where ρn
+and periodically sharpened to prevent the 0.5 iso-contour                  and ρn+1 are the density in the current and the next time step
+from being blurred by numerical damping. The interaction                   respectively. Let w−          +
+                                                                                               i j (and wi j ) represent the fraction of value
+of the liquid with the environment is handled by considering               that cell i gives to cell j which is found by backward (and
+the appropriate Dirichlet and Neumann boundary conditions.                 forward) tracing and computing the tri-linear interpolation
+                                                                           weights. The entries of A in the standard semi-Lagrangian
+                                                                           advection is hence Ai j = w−  ji . Then, β j = ∑i Ai j is the frac-
+3.1. Discretization                                                        tion of mass from cell j that gets advected. To ensure that
+                                                                           mass is conserved, A needs to be modified such that all the
+We discretize the simulation domain using a regular stag-                  β j are 1.
+gered grid [HW65]. The x, y and z components of fluid ve-
+locity u = (u, v, w) are stored at the center of the faces per-            Lentine et al. [LGF11] achieve this by first iterating through
+pendicular to the x, y and z axis, respectively. The scalar                all cells j with β j > 1 and re-scaling all Ai j to Ai j /β j . In
+pressure p and the density ρ are stored at cell centers fol-               a second step they iterate through all cells j with β j < 1
+lowing [MMTD07].                                                           and forward trace the velocity field to adding the weights
+                                                                           (1 − β j ) by distributing them among the Ak j , where k are
+                                                                           the cells reached by forward tracing and tri-linear interpola-
+                                                                           tion. At this point, all the β j are 1, i.e. A is mass conserving.
+3.2. Time integration
+                                                                           This method works well for compressible flow on fine grids.
+Our time integration scheme is summarized in Algorithm                     However, as discussed in [LAF11], the scheme produces ar-
+1. The overall structure is the same as the one proposed                   tifacts when used for incompressible flow on coarser grids.
+in [MMTD07] with our novel modifications to the advec-                     The problem is due to the clamping of the β j by re-scaling
+tion, sharpening and pressure incompressibility enforcement                which limits the amount of density that reaches certain cells.
+steps.                                                                     An indicator of this amount are the γi = ∑ j Ai j . The tradi-
+                                                                           tional semi-Lagrangian method ensures that all the γi are 1
+Algorithm 1 Time step                                                      while the β j are arbitrary. In contrast, the scheme described
+ 1: Velocity extrapolation                                                 above ensures that all the β j are 1, while the γi are arbitrary.
+ 2: Density advection and density sharpening                               Lentine et al. [LAF11] propose a method to ensure the β j
+ 3: Velocity advection and external force addition                         are all 1 while the γi stay close to 1. To this end they keep
+ 4: Incompressibility enforcement                                          track of the cumulative γi over time as separate variables.
+                                                                           The matrix A is computed by performing multiple forward
+                                                                           and backward traces as follows:
+First, we extrapolate the velocity field into the air region.
+                                                                           1. Advect γi using the backward semi-Lagrangian method
+Then, we advect the surface density field and sharpen it. Af-
+                                                                              (set to 1 in the first time step).
+ter this we advect the velocity field and take external forces
+into account. Finally, we enforce incompressibility by mak-                2. Compute A by performing a backward tracing step as be-
+ing the velocity field divergence free.                                       fore, i.e. Ai j = w−
+                                                                                                 ji .
+
+c The Eurographics Association 2012.
+                             Nuttapong Chentanez & Matthias Müller / Mass-Conserving Eulerian Liquid Simulation
+
+ 3. Scale A by the γi , i.e. Ai j ← Ai j /γi .
+ 4. Compute the β j from A.
+ 5. Forward trace the velocity field to add the weights (1 −
+    β j ) to A for all cells j where β j < 1 by distributing them
+    among the Ak j , where k are the cells reached by forward
+    tracing and tri-linear interpolation as before, i.e. Ak j +=
+    (1 − β j )w+jk .
+ 6. Compute the new γi from the updated matrix A.
+ 7. Scale A by the γi , i.e. Ai j ← Ai j /γi .                           Figure 2: Snapshots from a simulation of a 2D ball of liq-
+ 8. Re-compute the β j from the updated matrix A.                        uid dropping into an empty box at a resolution of 1282 cells.
+                                                                         Top) Using conservative advection method of Lentine et al.
+ 9. Clamp the β j to 1 by re-scaling Ai j ← Ai j /β j .                  2011. Bottom) Using our conservative advection method.
+10. Re-compute the γi from the updated A.                                The result are of similar visual quality.
+11. Evaluate ρn+1 = Aρn .
+ At this point, all the β j are 1 but the γi might still deviate         4. Evaluate ρn+1 from ρn and γ0 from γ by backward tracing
+ from 1. To bring them even closer to 1 Lentine et al. apply                and tri-linear interpolation from cells l but this time scale
+ a diffusion step on ρn+1 and the γi . They iterate through all
+                                                                                                 γi
+                                                                            the weights by max(1,β   )
+                                                                                                       , i.e. ρn+1
+                                                                                                               i
+                                                                                                                            γi
+                                                                                                                   += ∑l max(1,β  w− ρn )
+                                                                                                                                 ) li l
+                                                                                                    l                               l
+
+ the cells dimension-by-dimension. If, for two neighboring                        0
+                                                                         5. γ ← γ . (This can be done in-place during the previous
+ cells i and j, γ j > γi , they move ρ j (γ j − γi )/2γ j from cell j       step).
+                                       γ +γ
+ to cell i and set both γ j and γi to j 2 i . If γ j < γi , the flow
+ happens in the opposite direction. This process is repeated 1           6. For each cell j whose β j < 1, add ρnj (1 − β j ) to ρn+1 by
+ to 7 times per time step. Note that these diffusion iterations             distributing the value among the ρn+1 k , where k are the
+ do not affect the β j , so they remain 1.                                  cells reached by the forward tracing and tri-linear inter-
+                                                                                                    n           +
+                                                                            polation, i.e. ρn+1
+                                                                                            k += ρ j (1 − β j )w jk .
+ Implementing the method described above on a GPU would
+ require 5 scatter passes per iteration in steps 4, 6, 8, 10, and        7. Similarly, for each cell j whose β j < 1, add (1 − β j ) to
+ 11. Scattering is expensive on GPU’s because it either re-                 γ by distributing the value among the γk , where k are the
+ quires atomic operations or a prefix-scan.                                 cells reached by the forward tracing and tri-linear inter-
+                                                                                                    n           +
+                                                                            polation, i.e. γn+1
+                                                                                            k += γ j (1 − β j )w jk . These two steps can
+ We propose a modification of this method. The basic idea
+                                                                            be done concurrently.
+ is to reorder the forward tracing and the re-scaling steps to
+ simplify the calculations. The resulting discrete conservative          8. Apply diffusion as in the original approach.
+ advection operator is not the same as the one computed with
+                                                                         This modified method only requires 3 scatter passes in the
+ the original scheme. However, both are just approximations
+                                                                         steps 3, 6, and 7. As demonstrated in Table 1, our method
+ to the doubly-stochastic matrix (all row- and column sums
+                                                                         keeps γ in a similar range to that of [LAF11], while [LGF11]
+ are one) closest to the original discrete advection operator.
+                                                                         has a much larger range, resulting in visible compressibility
+ While the visual results are of similar quality as shown in             artifacts.
+ Figure 2 and the accompanying video, our simplification re-
+ duces the number of scatter passes from 5 to 3. Another ad-              Method           Minimum γ       Maximum γ
+ vantage of our new scheme is that A does not need to be                  Our Method       0.627           2.403
+ stored explicitly because the order of the operations allow              [LAF11]          0.627           2.502
+ for updating ρn+1 , β and γ directly. Not storing A explic-              [LGF11]          0.271           9.793
+ itly is possible in the original scheme as well but it would
+                                                                         Table 1: Minimum and maximum γ of our method, LAF11
+ complicate the process considerably and would require even
+                                                                         and LGF11 for the situation of Figure 2. Our method and
+ more scatter operations.
+                                                                         LAF11 have similar range, while LGF11 has a much larger
+ Here is our modified scheme:                                            range which explains the incompressibility artifacts.
+ 1. Advect γi using the semi-Lagrangian method (set to 1 in
+    the first time step).                                                3.5. Density sharpening
+ 2. Initialize β ← 0.
+                                                                         The technique above guarantees that mass is conserved.
+ 3. Add the weights γi to β by distributing them among the               However, the density field smooths out over time blurring the
+    βl , where l are the cells reached by backward tracing and           0.5 iso-contour with the effect that we can no longer track
+    tri-linear interpolation, i.e. βl += w−
+                                          li γi .                        the movement of the liquid surface accurately. We solve this
+
+                                                                                                             c The Eurographics Association 2012.
+                                       Nuttapong Chentanez & Matthias Müller / Mass-Conserving Eulerian Liquid Simulation
+
+problem by manipulating ρ to sharpen the interface. Follow-
+ing [MMTD07], we first compute the mass change of each
+cell due to unit velocity along the x axis as
+                    +
+                                Z
+                δxi =                 (∇ · (ρ[1, 0, 0]T )∆T )dV,               (4)
+                                 Ci
+                −
+                            Z
+               δxi =                (∇ · (ρ[−1, 0, 0]T )∆T )dV,                (5)
+                            Ci
+where ∆T is the fictitious time step, which we set to 3 times
+that of the simulation time step in all of our examples. We
+              +       −
+discretize δxi and δxi using an upwind scheme to get
+                        +                                                            Figure 3: Top) The density sharpening method used by
+                  δix       ≈ −(ρi − ρi−(1,0,0) )∆x∆T,                         (6)   Mullen et al. [2007] conserves mass globally but not locally,
+                       −
+                 δxi        ≈ −(ρi+(1,0,0) − ρi )∆x∆T.                         (7)   causing the mass from a liquid ball (marked with the ar-
+                                                                                     row) to disappear in mid air. Bottom) Our density sharpening
+                                                                               y+    method conserves mass both globally and locally preserving
+The mass change due to unit velocity along y and z axes, δi ,
+ y   −     +            −                                                            the mass of the liquid ball.
+δi , δzi , and δzi are computed similarly.
+The maximum mass increase and mass decrease due to any                               re-distributing mass only within connected regions as pro-
+unit velocity in each cell is:                                                       posed by [KLL∗ 07]. However, even with this technique, lo-
+                                                   +             −
+         ∆T |∇ρ|+    1           x     2       x     2                               cal mass loss can still occur due to moving mass away from
+                i = ∆x2(max(max(δi , 0) , min(δi , 0) ) + (8)
+                                                                                     small features resulting in the disappearance of small surface
+                                               y+               y−
+                                max(max(δi , 0)2 , min(δi , 0)2 ) +            (9)   details. Figure 3 top shows a scene where liquid balls are
+                                           +               −         1               thrown into a pool of water. The mass conserving sharpen-
+                                max(max(δzi , 0)2 , min(δzi , 0)2 )) 2        (10)   ing method of [MMTD07] transfers the mass from the liquid
+and                                                                                  balls to the pool causing them to disappear mid-air. The left
+                                                +                −                   side of Figure 4 illustrates the situation in greater detail.
+         ∆T |∇ρ|−    1           x     2       x     2
+                i = ∆x2(max(min(δi , 0) , max(δi , 0) ) + (11)
+                                                                                     We propose a novel method to conserve mass during the
+                                              y+                y−
+                                max(min(δi , 0)2 , max(δi , 0)2 ) + (12)             sharpening phase that conserves mass both locally and glob-
+                                               +                −        1           ally. After evaluating ∆ρi using Equation 15, we modify it as
+                                max(min(δzi , 0)2 , max(δzi , 0)2 )) 2 . (13)
+                                                                                     follows:
+                                                                                                      
+We then compute                                                                                       −ρi if ρi + ∆ρi < 0 or ρi < ε
+                                                                                                      
+                                                max j∈ℵ(Ci ) (|ρi − ρ j |)                    ∆ρi ← 0         if ρi > 0.5                    (17)
+wi (ρ) = (ρi − 0.5)3 (1 − min(1,                                             )),
+                                                                              (14)                    
+                                                                                                      
+                                                                                                        ∆ρi otherwise,
+                                                            τ
+where ℵ(Ci ) is the set of cells adjacent to Ci . The parameter                      where we use ε = 10−5 in all examples. In the first line we
+τ controls the maximum difference in density between two                             make sure that ρ ≥ 0 at the next time step. We also clamp
+adjacent cells, which we set to 0.4 as in [MMTD07]. This                             small positive densities to zero so that we do not have to
+yields the following density correction:                                             apply the sharpening operator to this cell at the next time
+                      (
+                        ∆T |∇ρ|+      if wi (ρ) ≥ 0                                  step, thus reducing computation cost. In the second line we
+         ∆ρi = wi (ρ)             i                 .      (15)                      make sure that cells with ρ > 0.5 are not modified. This way
+                        ∆T |∇ρ|−  i   if wi (ρ) < 0
+                                                                                     mass only moves from the air side to the liquid side. Then
+ρ can then be sharpened by updating the density of each cell                         we update ρi using this modified ∆ρi in Equation 16.
+using                                                                                We then add back −∆ρi by using Algorithm 2.
+                                    ρi ← ρi + ∆ρi .                           (16)   TraceAlongField determines where to put the lost
+                                                                                     mass. It starts from the cell center and follows the gradient
+This update sharpens the interface. However, it does not con-                        field of the density ∇ρ until it reaches the 0.5 iso-contour.
+serve mass. Mullen et al. [MMTD07] modify it to conserve                             The tracing stops if a predefined distance D∆x is reached or
+mass by summing up the mass change due to this update                                if it crosses a solid boundary. This is done using multiple
+across all cells. Then they distribute a fraction of the total                       forward Euler sub-steps. ScatterValue deposits −∆ρi to
+mass change back to each cell based on a local area measure.                         nearby grid points using tri-linear weights. If a grid point
+This successfully conserves mass globally. One artifact of                           is in a solid we set the corresponding weight to zero and
+this approach is that mass moves far, potentially across the                         re-normalize the weights. We use values of D between 1.1
+entire simulation domain. This problem can be reduced by                             to 3.1 in all of our examples.
+
+c The Eurographics Association 2012.
+                                   Nuttapong Chentanez & Matthias Müller / Mass-Conserving Eulerian Liquid Simulation
+                                                Mullen et al. 2007                                                 Our method
+                         1.0                                                           1.0
+ Before sharpening       0.5                                                            0.5
+                         0.0                                                            0.0
+                         1.0                                                           1.0
+  After adding           0.5                                                            0.5
+                         0.0                                                            0.0
+
+                         1.0                                                           1.0
+ After mass correction   0.5                                                           0.5
+                         0.0                                                           0.0
+
+Figure 4: Comparison between the sharpening scheme of Mullen et al. 07 (Left) and ours (Right). The bigger hump has a
+large area with 0.5 < ρ < 1.0. In this particular case, − ∑i ∆ρi is negative in the scheme of Mullen et al. 2007. This negative
+mass is distributed to all the cells near interface, causing the smaller hump to become even smaller. Our method does not have
+this problem because −∆ρ > 0 is only added to the nearby cells around the 0.5 iso-contour. This prevents mass from being
+transported from one hump to another.
+
+                                                                               solid boundary and guarantees ρi = 0 inside the solid. We
+                                                                               use S = 1 in all of our examples. With this choice excess
+                                                                               density gets removed from solid quickly enough to not cause
+                                                                               visual artifacts. The case where Vi = 1 is handled in the in-
+                                                                               compressibility enforcement step described in the next sec-
+                                                                               tion.
+Figure 5: Left most) Initial condition of a ball dropping into
+a liquid pool. Others) Liquid surface at frame 40 of simula-
+tions with various values of parameter D.                                      3.7. Enforcing Incompressibility
+                                                                               To enforce incompressibility, we first compute the pressure
+Figure 5 shows the result of ball dropping into a pool us-
+                                                                               using a variational framework [BBB07] and then use the
+ing various values of D. Increasing D visually resembles the
+                                                                               pressure gradient to make velocity field divergence free. The
+effect of surface tension.
+                                                                               tricky part in our case is to determine the fraction of liquid
+Algorithm 2 Local mass conservation for sharpening                             in each cell. This fraction is used to decide whether a cell
+                                                                               is included in the linear pressure solve. It is also needed in
+ 1: for each cell i do
+                                                                               the ghost fluid method [ENGF03] to accurately handle the
+ 2:    p = TraceAlongField(Position(i), ρ, ∇ρ, D∆x)
+                                                                               liquid-air boundary. However, we cannot directly use ρ be-
+ 3:   ScatterValue(p, −∆ρi ).
+                                                                               cause a cell with V < 0.5 will likely have ρ < 0.5 causing
+ 4: end for
+                                                                               the solver to treat it erroneously as air. To fix this, we define
+                                                                               ρ0 as follows:
+                                                                                                        (
+3.6. Handling Solid Boundaries                                                                      0     0 if Vi = 0
+                                                                                                  ρi = ρi                 .                 (20)
+                                                                                                          Vi  otherwise
+So far, the method does not take solid fraction and solid ve-
+locity into account. We use us = (us , vs , ws ) for the solid ve-             Notice that cells that are completely solid (V = 0) have
+locity and Vi for the fraction of non-solid matter, i.e. fluid and             ρ0 = 0. We then extrapolate ρ0 from cells that have V > 0
+                             f              f                  f
+air in cell i. The scalars Vi+( 1 ,0,0) , Vi+(0, 1 ,0) , and Vi+(0,0, 1 )      to adjacent cells with V = 0 so they are included in the lin-
+                                           2           2              2
+represent the fraction of non-solid area of the positive x, y,                 ear system. For the ghost fluid method, we also need a signed
+and z faces respectively.                                                      distance function near the free surface. We approximate this
+          +
+                                                                               field by defining φi = −(ρ0i − 0.5)∆x and use the method
+                         f                         f
+       δxi ≈−(ρiVi+( 1 ,0,0) − ρi−(1,0,0)Vi−( 1 ,0,0) )∆x∆T, (18)              of [CM11a] to compute the coefficients of linear system for
+                               2                       2
+         −
+                                                                               pressure projection.
+                                   f              f
+       δxi ≈−(ρi+(1,0,0)Vi+( 1 ,0,0) − ρiVi−( 1 ,0,0) )∆x∆T. (19)
+                                       2               2                       To handle the cells with ρ0i > 1 (whether or not V = 1 or
+                                                                                                 min(λ(ρ0 −1),η)
+During the simulation, the value of ρi can become larger                       V < 1), we add          i
+                                                                                                      ∆x       to the divergence, where we
+than Vi in some cells which is a non-valid state. We han-                      use λ = 0.5 and η = 1 in all our examples. This artificial
+dle the situation differently depending on whether the cell is                 divergence pushes the excess density away from the cells
+partially solid (Vi < 1) or completely non-solid (Vi = 1). If                  whose ρ0 > 1. Mullen et al. [MMTD07] also added this term
+the cell is partially solid, we first compute the excess den-                  to the divergence but with λ = 1 and η = ∞ which can cause
+sity d = ρi − Vi . When then follow the gradient of the solid                  stability problems when ρ0 is much larger than 1. A scenario
+signed distance function away from the solid for a distance                    in which this happens is when liquid flows very fast towards
+of S∆x and scatter d to nearby grid points. After this we sub-                 a solid boundary and gets reflected due to our method for
+tract d from ρi . This method keeps ρi ≤ Vi in most cells near                 removing excess density from the solid.
+
+                                                                                                                      c The Eurographics Association 2012.
+                               Nuttapong Chentanez & Matthias Müller / Mass-Conserving Eulerian Liquid Simulation
+
+                                                                           improve the results further would be to apply thinning to the
+                                                                           parts of the surface that come from region with ρ < 0.5 in
+                                                                           order to compensate for the density up-scaling. This is part
+                                                                           of our future work.
+
+Figure 6: A crown splash simulated with our method at reso-
+lution of 1283 cells. The density field is post-processed with             4. Results
+the method proposed in this paper to enhance sub-grid de-                  We implemented our method using CUDA and ran the sim-
+tails.                                                                     ulations on an NVIDIA GTX 680. For all the examples we
+                                                                           used a time step size of 1/30s, ∆x = 0.05m, gravity 10m/s2
+Adding additional divergence is important because in our                   and D = 2.1. Density post-processing was turned off unless
+case, ρ0 > 1 results in visual volume loss. With the method                otherwise stated. Our code run at interactive rates in all ex-
+described above, this problem gets gradually corrected over                amples. The simulation times and CFL numbers are listed in
+time. We solve for the pressure p with the multigrid method                Table 2. Parameter tuning to get visually appealing results
+of [CM11a] which enforces separating solid boundary con-                   did not take much time.
+ditions. Finally, we use the pressure field to make the veloc-             We compared our method with the particle level set (PLS)
+ity field divergence free.                                                 approach [EMF02]. The results of this comparison are
+                                                                           shown in Figure 7 and in the accompanying video. Our
+3.8. Density Post Processing                                               method conserves the liquid’s mass as expected and prevents
+                                                                           the water level from decreasing. In contrast, with PLS, most
+For rendering, we extract the triangle mesh of the 0.5 iso-                of the liquid disappears in the course of the simulation due
+contour of ρ using the marching cubes method [LC87]. This                  to the large time step size used. We used the PLS implemen-
+approach is typically used in level-set based liquid simula-               tation of [MF] and set the number of particles per cell to 64.
+tions as well to extract the zero contour of the signed dis-
+tance field [EMF02].                                                       Figure 1 shows a simulation of a liquid jet in a rectangu-
+                                                                           lar tank. The jet has a very fast flow rate and generates
+The surface density ρ contains small scale details that are
+                                                                           fast moving liquid splashes and sheets. The accompanying
+not captured by the 0.5 iso-contour. This problem is clearly
+                                                                           video of this example also shows how we fill the tank from a
+visible on the right side of Figure 1 and in the bottom row
+                                                                           completely dry state by adding liquid balls. These are diffi-
+of Figure 12. Here, the regions where 0 < ρ < 0.5 represent
+                                                                           cult cases for level set approaches while our method handles
+features such as small splashes and thin sheets that are too
+                                                                           them without any problem.
+small to be captured with the grid resolution used. In the
+level-set approach, these features are destroyed by the re-                With our approach we were able to create, for the first time,
+distancing step.                                                           a 3d water demo that is both simulated and ray-traced in real
+                                                                           time. The scene starting with a dam break initial setup and
+To bring out these small scale details in surface rendering,
+                                                                           subsequent additions of water balls is shown in Figure 9. We
+we propose a post processing method. An important obser-
+                                                                           achieved a frame rate of over 30fps with two GPUs, one for
+vation is that regions in which 0 < ρ < 0.5 do not necessarily
+                                                                           simulation and one for ray-tracing.
+represent small scale features. They also exist on the air side
+of the surface of large liquid regions. In the latter case, we             Figures 8 and 12 show a dam break and dropping balls in
+want to leave ρ unchanged but in the former we want to scale               a spherical container. In the accompanying video we shake
+up ρ so that the features appear in the 0.5 iso-surface.                   the container. These examples demonstrate the ability of our
+To this end, we define an additional function γi =                         method to simulate liquid in a non-axis aligned moving con-
+2 min(ρi , 0.5) and define the regions in which ρ needs to be              tainer.
+scaled up as the regions where γ ≤ 0.5. So far, the two cases              One way coupling with fast moving solids is shown in Figure
+above are not distinguished. However, this can be achieved                 11 and the accompanying video. Several solid objects move
+by applying a Gaussian blur filter to γ. Now, since γ > 0.5                at high speed across the tank sloshing the liquid up to the air.
+inside liquid, those values spread across the interface and                Our method conserves mass and prevents volume loss in this
+cause γ to raise toward 1. In contrast, since γ < 0.5 every-               difficult case as well.
+where inside small scale features, blurring will still result in
+                                                                           We computed the mass and the volume enclosed by the 0.5
+γ being small. We then define ρ00              ρi
+                                   i = min(max(γi ,θ),1) and ex-
+                                                                           iso-contour of the liquid over time in various examples. The
+tract the liquid surface as the 0.5 iso-surface of this modified           corresponding plots are shown in Figure 10. The total mass
+density field.                                                             is computed by integrating ρ over the whole simulation grid.
+The effect of this post processing method is shown in Figure               To measure the volume we used marching cubes to extract
+6 and in the accompanying video. We used σ = 2∆x for the                   the 0.5 contour triangle mesh of ρ and determined the en-
+Gaussian blur filter and θ = 0.01 in this example. A way to                closed volume. Our method conserves mass in all examples
+
+c The Eurographics Association 2012.
+                        Nuttapong Chentanez & Matthias Müller / Mass-Conserving Eulerian Liquid Simulation
+
+
+
+
+Figure 7: Liquid ball dropped inside a box simulated on a
+1283 resolution grid. Left) Initial condition. Shape of the
+surface at frame 40 computed with our method (middle) and           Figure 12: Simulation of a liquid ball dropping inside a
+with PLS (right). PLS loses most of the mass due to the large       spherical container at a resolution of 1283 cells. Top) Sur-
+time step used.                                                     face rendering. Bottom) Volume rendering, showing many
+                                                                    sub-grid details not visible in the surface rendering.
+
+                                                                    does not happen in practice because the divergence free ve-
+                                                                    locity field prevents the liquid from expanding significantly.
+                                                                    An alternative to our sharpening method is to perform anti-
+Figure 8: Snapshots of a dam breaking scene in a spherical
+                                                                    diffusion step [SHA11], which is an interesting avenue for
+container simulated at a resolution of 1283 cells.
+                                                                    future work. Another limitation is the possibility of losing
+                                                                    local volume temporarily as discussed in the previous sec-
+and generally keeps the volume close to the true liquid vol-
+                                                                    tion. The density post processing method we proposed is
+ume. However, there are several situations where our method
+                                                                    an effective way to alleviate this effect. Even though our
+loses volume visually. One such case is when a liquid ball
+                                                                    method cannot guarantee complete volume conservation at
+hits the ground and spreads out until it becomes thinner than
+                                                                    all times, it reduces this problem significantly in comparison
+the grid spacing. Even though the density values are non-
+                                                                    to all the previous methods we have investigated.
+zero, marching cubes does not generate surface meshes in
+those regions. Another case is when the ratio of surface area
+to volume is large. In this case, there are large regions with      References
+ρ < 0.5 that do not contribute to the volume because the            [AGDJ08] A NDERSON J. C., G ARTH C., D UCHAINEAU M. A.,
+0.5 iso-contour is empty. However, in contrast to PLS, when           J OY K.: Discrete multi-material interface reconstruction for
+such features join the main body of water again, they cor-            volume fraction data. Computer Graphics Forum (Proc. of
+                                                                      Eurographics/IEEE-VGTC Symposium on Visualization 2008)
+rectly contribute to its volume so that the global level re-
+                                                                      27, 3 (2008). 2
+mains constant.
+                                                                    [APKG07] A DAMS B., PAULY M., K EISER R., G UIBAS L. J.:
+ Name          Grid             CFL     Time (ms)                     Adaptively sampled particle fluids. ACM Trans. Graph. 26 (July
+                                                                      2007). 2
+ Figure 1      256x128x128      25      113.2
+ Figure 5      128x128x128      8       54.2                        [BB09] B ROCHU T., B RIDSON R.: Robust topological operations
+                                                                      for dynamic explicit surfaces. SIAM Journal on Scientific Com-
+ Figure 9      128x128x64       24      26.7                          puting 31, 4 (2009), 2472–2493. 2
+ Figure 8      128x128x128      14      53.4
+                                                                    [BBB07] BATTY C., B ERTAILS F., B RIDSON R.: A fast varia-
+ Figure 11     256x128x128      32      118.6                         tional framework for accurate solid-fluid coupling. In Proc. SIG-
+ Figure 12     128x128x128      20      53.8                          GRAPH (2007), p. 100. 6
+Table 2: CFL Number and simulation time per frame for var-          [BGOS05] BARGTEIL A. W., G OKTEKIN T. G., O’B RIEN J. F.,
+ious examples. We use the time step of 1/30s in all examples.         S TRAIN J. A.: A semi-lagrangian contouring method for fluid
+                                                                      simulation. ACM Transactions on Graphics (2005). 1, 2
+All timing are done on GTX680.
+                                                                    [CM11a] C HENTANEZ N., M ÜLLER M.: A multigrid fluid pres-
+                                                                      sure solver handling separating solid boundary conditions. In
+5. Conclusion and Discussion                                          Proceedings of the 2011 ACM SIGGRAPH/Eurographics Sym-
+We proposed a method for simulating liquids that conserves            posium on Computer Animation (New York, NY, USA, 2011),
+                                                                      SCA ’11, ACM, pp. 83–90. 6, 7
+mass and is effective in keeping the volume defined by the
+0.5 iso-contour close to constant. We have demonstrated the         [CM11b] C HENTANEZ N., M ÜLLER M.: Real-time eulerian wa-
+                                                                      ter simulation using a restricted tall cell grid. In Proc. SIG-
+strength of our technique in various scenarios. The method            GRAPH (2011), p. 82. 3
+has its limitations as well. First, although our sharpening
+                                                                    [EMF02] E NRIGHT D., M ARSCHNER S., F EDKIW R.: Anima-
+scheme ensures that the ρ = 0.5 interface is sharp, it does           tion and rendering of complex water surfaces. In Proc. SIG-
+not modify regions where ρ > 0.5. It could theoretically be           GRAPH (2002), pp. 736–744. 1, 2, 7
+possible that the region with ρ slightly above 0.5 expands so       [ENGF03] E NRIGHT D., N GUYEN D., G IBOU F., F EDKIW R.:
+that the volume defined by the 0.5 iso-contour grows by a             Using the particle level set method and a second order accu-
+factor of two while keeping its original mass. This, however,         rate pressure boundary condition for free surface flows. In
+
+                                                                                                         c The Eurographics Association 2012.
+                               Nuttapong Chentanez & Matthias Müller / Mass-Conserving Eulerian Liquid Simulation
+
+
+
+
+Figure 9: Snapshots of a dam break and ball drop scene in a glass box at a resolution of 128x128x64 cells. The simulation and
+raytracing run in parallel on dual NVIDIA GTX680 GPUs in real-time at 30fps.
+
+
+
+
+Figure 10: Time evolution of mass and volume relative to the ground truth in various examples. In all examples, the time axis is
+re-scaled to start at 0 and end at 1. The volume of the liquid was measured by evaluating the volume enclosed by the marching
+cubes 0.5 iso-contour triangle mesh of ρ. Our method conserves mass up to an arithmetic error. The volume generally stays
+close to the true value, but can decrease significantly in some cases. For example, when the liquid ball spreads out on the floor
+and becomes thinner than the grid spacing or when the ratio of surface area to volume is large.
+
+  In Proc. 4th ASME-JSME Joint Fluids Eng. Conf., number                   [KLLR05] K IM B., L IU Y., L LAMAS I., ROSSIGNAC J.: Flow-
+  FEDSM2003Ű45144. ASME (2003), pp. 2003–45144. 6                           fixer: Using bfecc for fluid simulation. In NPH (2005), pp. 51–
+                                                                             56. 2
+[FF01] F OSTER N., F EDKIW R.: Practical animation of liquids.
+  In Proc. SIGGRAPH (Aug. 2001), pp. 23–30. 1, 2                           [KPyNS10] K ANG N., PARK J., YONG N OH J., S HIN S. Y.: A
+                                                                             hybrid approach to multiple fluid simulation using volume frac-
+[FM96] F OSTER N., M ETAXAS D.: Realistic animation of liq-                  tions. Comput. Graph. Forum 29, 2 (2010), 685–694. 2
+  uids. Graph. Models Image Process. 58, 5 (1996), 471–483. 2
+                                                                           [KSK08] K IM D., S ONG O.-Y., KO H.-S.: A semi-lagrangian
+[FOA03] F ELDMAN B. E., O’B RIEN J. F., A RIKAN O.: Animat-                  cip fluid solver without dimensional splitting. Computer Graph-
+  ing suspended particle explosions. In the Proceedings of ACM               ics Forum 27, 2 (April 2008), 467–475. 2
+  SIGGRAPH 2003 (July 2003), pp. 708–715. 2
+                                                                           [LAF11] L ENTINE M., A ANJANEYA M., F EDKIW R.: Mass and
+[HK10] H EO N., KO H.-S.: Detail-preserving fully-eulerian in-               momentum conservation for fluid simulation. In Proceedings of
+  terface tracking framework. ACM Trans. Graph. 29 (December                 the 2011 ACM SIGGRAPH/Eurographics Symposium on Com-
+  2010), 176:1–176:8. 2                                                      puter Animation (New York, NY, USA, August 2011), SCA ’11,
+[HN81] H IRT C. W., N ICHOLS B. D.: Volume of fluid (VOF)                    ACM, pp. 91–100. 1, 2, 3, 4
+  method for the dynamics of free boundaries. Journal of Compu-            [LC87] L ORENSEN W. E., C LINE H. E.: Marching cubes: A
+  tational Physics 39, 1 (Jan. 1981), 201–225. 2                             high resolution 3d surface construction algorithm. SIGGRAPH
+[HW65] H ARLOW F., W ELCH J.: Numerical calculation of time-                 Comput. Graph. 21 (August 1987), 163–169. 7
+  dependent viscous incompressible flow of fluid with a free sur-          [LGF11] L ENTINE M., G RÉTARSSON J. T., F EDKIW R.: An un-
+  face. The Physics of Fluids 8 (1965), 2182–2189. 3                         conditionally stable fully conservative semi-lagrangian method.
+[ISF07] I RVING G., S CHROEDER C., F EDKIW R.: Volume con-                   J. Comput. Phys. 230 (April 2011), 2857–2879. 2, 3, 4
+   serving finite element simulations of deformable models. In ACM         [LR09] L ONG B., R EINHARD E.: Real-time fluid simulation us-
+   SIGGRAPH 2007 papers (New York, NY, USA, 2007), SIG-                      ing discrete sine/cosine transforms. In Proc. ACM SIGGRAPH
+   GRAPH ’07, ACM. 2                                                         symposium on Interactive 3D Graphics and Games (2009),
+[JRW07] J EONG W.-K., ROSS , W HITAKER T.: A fast eikonal                    pp. 99–106. 2
+   equation solver for parallel systems. In SIAM conference on             [M0̈9] M ÜLLER M.: Fast and robust tracking of fluid surfaces. In
+   Computational Science and Engineering (2007). 3                           Proc. ACM SIGGRAPH/Eurographics Symposium on Computer
+                                                                             Animation (2009). 2
+[KLL∗ 07] K IM B., L IU Y., L LAMAS I., J IAO X., ROSSIGNAC
+  J.: Simulation of bubbles in foam with the volume control                [MCG03] M ÜLLER M., C HARYPAR D., G ROSS M.: Particle-
+  method. ACM Trans. Graph. 26 (July 2007). 2, 5                             based fluid simulation for interactive applications. In ACM
+
+c The Eurographics Association 2012.
+                          Nuttapong Chentanez & Matthias Müller / Mass-Conserving Eulerian Liquid Simulation
+
+
+
+
+Figure 11: Simulation of a solid duck moving across a liquid tank at high speed, sloshing the liquid up in the air on a grid of
+256x128x128 cells.
+
+  SIGGRAPH/Eurographics Symposium on Computer Animation
+  (2003), pp. 154–159. 2
+[MF]   M OKBERI E., FALOUTSOS P.: A particle level set library.
+  7
+[MMTD07] M ULLEN P., M C K ENZIE A., T ONG Y., D ESBRUN
+  M.: A variational approach to eulerian geometry processing.
+  In ACM SIGGRAPH 2007 papers (New York, NY, USA, 2007),
+  SIGGRAPH ’07, ACM. 1, 2, 3, 5, 6
+[PP04] P ILLIOD J R . J. E., P UCKETT E. G.: Second-order accu-
+  rate volume-of-fluid algorithms for tracking material interfaces.
+  J. Comput. Phys. 199, 2 (Sept. 2004), 465–502. 2
+[PTB∗ 03] P REMOZE S., TASDIZEN T., B IGLER J., L EFOHN
+  A. E., W HITAKER R. T.: Particle-based simulation of fluids.
+  Comput. Graph. Forum 22, 3 (2003), 401–410. 2
+[SFK∗ 08] S ELLE A., F EDKIW R., K IM B., L IU Y., ROSSIGNAC
+   J.: An unconditionally stable MacCormack method. J. Sci. Com-
+  put. 35, 2-3 (2008), 350–371. 2
+[SG11] S OLENTHALER B., G ROSS M.: Two-scale particle sim-
+  ulation. ACM Trans. Graph. 30 (Aug. 2011), 81:1–81:8. 2
+[SHA11] S O K. K., H U X. Y., A DAMS N. A.: Anti-diffusion
+  method for interface steepening in two-phase incompressible
+  flow. J. Comput. Phys. 230, 13 (June 2011), 5155–5177. 8
+[SP00] S USSMAN M., P UCKETT E. G.: A coupled level set and
+  volume-of-fluid method for computing 3d and axisymmetric in-
+  compressible two-phase flows. J. Comput. Phys. 162, 2 (Aug.
+  2000), 301–337. 2
+[SP09] S OLENTHALER B., PAJAROLA R.: Predictive-corrective
+  incompressible sph. In Proc. SIGGRAPH (2009), pp. 1–6. 2
+[Sta99] S TAM J.: Stable fluids. In Proc. SIGGRAPH (Aug. 1999),
+   pp. 121–128. 2
+[TR04] T HÜREY N., RÜDE U.: Free Surface Lattice-Boltzmann
+  fluid simulations with and without level sets. Proc. of Vision,
+  Modelling, and Visualization VMV (2004), 199–207. 2
+[TR09] T HÜREY N., RÜDE U.: Stable free surface flows with the
+  lattice Boltzmann method on adaptively coarsened grids. Com-
+  puting and Visualization in Science 12 (5) (2009). 2
+[WMFB11] W OJTAN C., M ÜLLER -F ISCHER M., B ROCHU T.:
+  Liquid simulation with mesh-based surface tracking. In ACM
+  SIGGRAPH 2011 Courses (New York, NY, USA, 2011), SIG-
+  GRAPH ’11, ACM, pp. 8:1–8:84. 1
+[WTGT10] W OJTAN C., T HÜREY N., G ROSS M., T URK G.:
+  Physics-inspired topology changes for thin fluid features. In
+  Proc. SIGGRAPH (2010), no. 4, pp. 1–8. 2
+[YT10] Y U J., T URK G.: Enhancing fluid animation with adap-
+  tive, controllable and intermittent turbulence. In Proc. ACM
+  SIGGRAPH/Eurographics Symposium on Computer Animation
+  (2010). 2
+[ZB05] Z HU Y., B RIDSON R.: Animating sand as a fluid. In Proc.
+  SIGGRAPH (2005), pp. 965–972. 2
+
+                                                                                                         c The Eurographics Association 2012.
+

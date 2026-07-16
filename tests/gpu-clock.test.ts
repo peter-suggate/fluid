@@ -2,15 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { commitGPUCompletion, gpuBatchDepth, gpuCanAcceptNextStep } from "../lib/simulation/gpu-clock";
 
-test("uncoupled tall-cell batches one presentation quantum without changing dt", () => {
+test("tall-cell batches one presentation quantum without changing dt", () => {
   assert.equal(gpuBatchDepth("tall-cell", 0.004, false), 5);
   assert.equal(gpuBatchDepth("tall-cell", 1 / 30, false), 1);
   assert.equal(gpuBatchDepth("tall-cell", 0.0005, false), 8, "batch latency remains bounded");
-  assert.equal(gpuBatchDepth("tall-cell", 0.004, true), 1, "rigid impulses require a per-step fence");
+  assert.equal(gpuBatchDepth("tall-cell", 0.004, true), 5, "partitioned rigid feedback retains presentation throughput");
 });
 
 test("other GPU methods preserve their existing submission depths", () => {
   assert.equal(gpuBatchDepth("quadtree-tall-cell", 0.004, false), 2);
+  assert.equal(gpuBatchDepth("quadtree-tall-cell", 0.004, true), 1);
   assert.equal(gpuBatchDepth("uniform-grid", 0.004, false), 1);
   assert.equal(gpuBatchDepth("tall-cell", Number.NaN, false), 1);
 });

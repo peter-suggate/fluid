@@ -211,7 +211,7 @@ export class TallCellMultigrid {
   private bindGroupCache=new Map<string,GPUBindGroup>();private resourceIds=new WeakMap<object,number>();private nextResourceId=1;
   private activePass?:GPUComputePassEncoder;
 
-  constructor(private device:GPUDevice,geometry:TallCellLayout,fine:TallCellMultigridFineResources,readonly refinementCycles=2,deferPipelineCompilation=false){
+  constructor(private device:GPUDevice,geometry:TallCellLayout,fine:TallCellMultigridFineResources,readonly refinementCycles=8,deferPipelineCompilation=false){
     if(!deferPipelineCompilation)device.pushErrorScope("validation");
     const usage=GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST;
     const texture3=(nx:number,ny:number,nz:number)=>device.createTexture({size:[nx,ny,nz],dimension:"3d",format:"r32float",usage});
@@ -307,9 +307,9 @@ export class TallCellMultigrid {
         state=this.cycle(encoder,index,state);
       }
     }
-    // Refinement depth is an explicit convergence control. The fixed method
-    // retains its historical two V-cycles; adaptive tall columns request more
-    // until a residual-controlled solve is available on the GPU.
+    // Refinement depth is an explicit convergence control. Eight cycles are
+    // the validated default for remeshed tall columns; the UI and smoke
+    // harness retain an override for convergence/performance probes.
     for(let cycle=0;cycle<this.refinementCycles;cycle+=1)state=this.cycle(encoder,0,state);
     this.activePass.end();this.activePass=undefined;
     if(state!==0)encoder.copyTextureToTexture({texture:fine.pressure[state]},{texture:fine.pressure[0]},[fine.nx,fine.packedNy,fine.nz]);

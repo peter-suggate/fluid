@@ -765,3 +765,177 @@ to read the raw conservative average through `transportVolumeCell`.
 - `test:webgpu:single-tall-cell-soak` passes (tall-vs-control RMS ~1e-4).
 - Settled tank fill 0.7 (dt 1/120): max speed 1.1 mm/s over 3 s.
 - Deep-water 20 m, 1 s: max speed 6 cm/s, relRes 0.076, no flags.
+
+## 2026-07-16 (dam-settling handoff): fixed two-cycle solve was below the remeshed convergence floor
+
+### Durable reproduction
+
+`npm run test:webgpu:dam-settling` now records CPU-side PE, pre/post-projection
+KE, projection energy delta, divergence, pressure residual, and exact reconstructed
+volume every 50 steps for the same 10 s `tall-cell,uniform` run. The settling
+gate rejects a normalized late mechanical-energy slope above `1e-3 /s` and a
+late/middle KE-envelope ratio above one. The slope allowance is six times the
+same-run uniform proxy floor observed during the reproduction (`1.61e-4 /s`),
+but almost nine times below the failing two-cycle tall result (`8.88e-3 /s`).
+The release transient's maximum signed-distance occupancy swing remains in the
+JSON summary, while the 1% settling-volume assertion uses the final sample;
+interface-area growth makes the transient occupancy proxy unsuitable as a
+settling assertion. The shorter active-dam regression uses a 2% final
+represented-volume limit and a separate 15% catastrophic transient-proxy
+backstop.
+
+Before the fix, the tall backend was confirmed active (61 x 46 x 41 cubic
+equivalent, 26 stored layers, all 2501 columns tall). Its 10 s trace had:
+
+- late mechanical-energy slope `+6.858e-3 /s` (`+8.884e-3` of initial energy/s),
+  versus uniform's `+1.227e-4 /s` proxy floor;
+- sampled net projection gain `+5.069e-3` (`+0.00657` of initial energy), while
+  uniform projection removed `8.706e-3`;
+- late/middle KE envelope ratio `0.578` (so the direct slope, not that secondary
+  envelope, is the reproducer).
+
+### Localization and root cause
+
+Stage attribution places the persistent bias in projection: the two-cycle run's
+sampled projection budget was positive, whereas uniform's was strictly negative.
+The decisive probe was pressure effort on the identical remeshing configuration:
+
+| Refinement V-cycles | final relative residual | sampled net projection delta | normalized late slope |
+| ---: | ---: | ---: | ---: |
+| 2 | `5.39e-3` | `+5.07e-3` | `+8.88e-3 /s` |
+| 4 | `1.77e-3` | `+7.46e-3` | `+4.68e-3 /s` |
+| 8 | `3.00e-5` | `+1.53e-3` | `+4.31e-4 /s` |
+
+The trajectory is chaotic enough that the intermediate budget is not monotone,
+but only eight cycles cross both the residual and settling-energy floor. In the
+late half specifically, eight cycles changed sampled net projection work from
+positive to negative (`-1.53e-3`) and mechanical energy from `+3.07e-3` growth
+at two cycles to `-1.04e-3` decay. The mechanism is therefore the historical
+fixed FMG + two-V-cycle schedule leaving a remesh-conditioned tall pressure
+system under-converged; its incomplete correction retains divergence and has a
+positive projection-work bias over repeated slosh cycles. This is H2, without
+the old pre-264429b signature of convergence toward an inconsistent operator.
+
+A geometry bisection supports the tall/remesh conditioning part of that result:
+forcing every tall cell to height two with the same two-cycle budget produced no
+positive projection samples, late slope `-4.02e-3 /s`, and late/middle KE ratio
+`0.0443`. Residual magnitude alone is not comparable across these geometries;
+the failure requires the variable-height remeshed system.
+
+### Fix and negative results
+
+The validated default is now eight refinement V-cycles in the method preset,
+direct solver fallback, and multigrid constructor. `FLUID_PRESSURE_CYCLES`
+remains available for diagnostic/performance probes. A residual-controlled GPU
+schedule would be a future optimization; the correctness default no longer
+ships below the measured convergence floor.
+
+Negative results retained from the localization:
+
+- Disabling global level-set volume control did not remove the underlying
+  conservation problem: the run gained 163% represented volume by 10 s. The
+  controller is necessary, not the late energy source.
+- Treating the stronger deep top row as a simple `(base-1)` row scaling and
+  scaling its fine RHS likewise was rejected and fully reverted: the 20 m
+  deep-water scene lost 92% volume and fragmented. Coarse transfer is not
+  invariant under that fine-row rescaling.
+- The UI dam's fine bases do not exceed its 24 regular layers, so that deep-row
+  branch cannot explain this particular reproduction; the handoff's H1 is not
+  the active fine-level mechanism here.
+
+Post-fix valid 10 s run (`tmp/tall-cell-audit/handoff-final-settling.jsonl`):
+tall relative residual `8.18e-5`, net projection delta `-1.15e-4`, normalized
+late slope `-1.21e-3 /s`, late/middle KE ratio `0.504`, and final sampled exact
+volume drift `0.651%`; uniform passed the same assertions. Subsequent 1 s
+equilibrium checks also passed (`settled-tank`: drift `0.124%`, speed
+`4.09e-4 m/s`; `deep-water`: drift `-0.026%`, speed `0.0134 m/s`, compression
+`0.0255`, no flags). Active-dam and long conservation/soak retries then hit an
+acknowledged device-state fault (including runs where both independent solvers'
+fields stayed at initialization and `encodedSteps` remained zero), so those
+runs are recorded but are not physics evidence.
+
+## 2026-07-17: MAC transport and GPU-resident CM12 volume control implemented; live acceptance blocked
+
+The mass-oscillation plan is implemented in the restricted `tall-cell` path:
+
+- Velocity reconstruction and advection now use a component-staggered sampler.
+  Every predictor/reverse trace starts at the component's positive MAC face,
+  trace velocities reconstruct all three components at their own faces, and
+  the MacCormack limiter uses the eight corners of that component's staggered
+  interpolation cell. The Eq. 5 endpoint reconstruction is unchanged.
+- The CPU/readback-driven normal-speed offset of phi is removed. The substep
+  planner captures the completed step's reconstructed volume and wet-interface
+  count before the reduction buffer is cleared. On the following step, pressure
+  subtracts a globally normalized divergence source with CM12 Sec. 3.7's
+  `lambda=0.5` and `eta=1` per-step clamp. A 0.1% deadband is the only
+  implementation tolerance. `FLUID_VOLUME_CONTROL=0` still disables the source.
+- The settling summary now median-smooths exact drift over the late half,
+  reports first-difference sign changes and peak-to-peak drift, and gates at
+  at most three changes and 0.5%. `FLUID_REFERENCE_VOLUME_SCALE=1.02` provides
+  the prescribed +2% step-response probe.
+- `advective-cfl` now means escalation: maximum component CFL above the CFL-4
+  speed rail, or at least 32 wet samples above one. CFL telemetry is unchanged.
+
+Archived pre-change traces validate that the new gate is a regression lock:
+`handoff-final-settling.jsonl` has 5 late sign changes and 4.645% peak-to-peak
+drift for restricted tall cells, versus 0 and 0.00216% for uniform. The
+uncontrolled archived run ends at +162.893% drift. Thus the gate fails the old
+tall behavior and passes its same-run uniform control.
+
+Static and compilation verification is green: 189 unit tests, standalone
+`tsc --noEmit`, targeted ESLint, `git diff --check`, and the production build
+pass, and Dawn accepts the current tall-cell pipeline set.
+
+No post-change physics numbers are claimed. The native Metal adapter silently
+no-ops even a one-workgroup shader (`probe-minimal.ts` returns sum zero), while
+OpenGL/Vulkan adapters are unavailable; the in-app browser independently fails
+WebGPU initialization with an invalid external Instance. Runs in that state
+leave both tall and uniform fields at initialization and are explicitly invalid.
+After the host GPU is recovered, rerun the complete matrix in the mass-
+oscillation plan, including the uncontrolled 10 s probe and:
+
+```sh
+FLUID_REFERENCE_VOLUME_SCALE=1.02 FLUID_SCENE=settled-tank \
+  FLUID_METHOD=tall-cell FLUID_TARGET_S=10 FLUID_ENERGY_EVERY_STEPS=25 \
+  FLUID_CPU_ORACLE=0 node --import tsx tools/run-webgpu-smoke.ts
+```
+
+Workstream 4 remains intentionally untouched until those live gates pass.
+
+## 2026-07-17 (later): first live run collapsed volume — divergence-control sign was inverted for a level set
+
+The first live run after the MAC-transport + CM12 volume-control migration
+collapsed the dam's volume within a fraction of a second. Code audit (no live
+GPU needed) localized three defects in the new `planSubsteps` /
+`volumeCorrectionDivergence` pair; the implementation matched the plan, and the
+first defect was the plan's own prescription.
+
+1. **Inverted feedback sign.** With `rhs = rho*(div - c)/dt` an exact solve
+   leaves `div_new = c`. CM12 Sec 3.7's convention (excess => `c > 0`) is
+   correct for a *density* field, where continuity dilutes an overfull cell
+   under positive divergence. A level set has no continuity coupling: the
+   interface rides the flow, so `div_new > 0` moves the 0-contour outward and
+   GROWS the enclosed volume. As implemented, both error directions were
+   positive feedback, compounding per step until the rate clamp; the release
+   transient's occupancy dip picked the collapse direction. The level-set sign
+   is `c ∝ (V_ref - V)` (deficit => expansion), matching the FOA03/KLL*07
+   interface volume-control family. Fixed in `planSubsteps`.
+2. **Eta clamped before a ~20x amplification.** The rate was clamped to
+   `±1/dt` globally and then multiplied per cell by
+   `reference/interfaceCells` (~20 on the UI dam), so a saturated controller
+   commanded ~2500/s of divergence per interface cell versus the uniform
+   kernel's 30/s per-cell cap. `governor[7]` now stores the eta-clamped
+   PER-CELL rate (`±30/s`) after distribution.
+3. **Lambda expressed per frame dt instead of per 1/30 s.** `0.5/0.008 s` is
+   ~4x stiffer than CM12's `lambda=0.5` per 1/30 s step (the uniform kernel's
+   `min(0.5*excess,1.0)*30.0`). The rate now uses the `*30.0` convention.
+
+With the per-cell 30/s cap, commanded post-projection divergence is at most
+`0.24*dt^-1*dt = 0.24` dimensionless — below the 0.5 stability-flag threshold,
+so the diagnostics gates need no special-casing. The plan's Sec 6.1 actuator
+prescription is rewritten with the sign derivation so it is not re-inherited.
+The step-response probe (`FLUID_REFERENCE_VOLUME_SCALE=1.02`, settled tank,
+volume must move TOWARD the biased reference) catches an inverted sign in
+seconds and must run before any soak. Live acceptance for the whole migration
+(uncontrolled 10 s probe, dam-settling matrix) remains outstanding from the
+previous entry.

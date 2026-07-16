@@ -42,10 +42,12 @@ scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 120;
 const waterHeight = scene.container.height_m * scene.container.fillFraction; // 0.54 m
 const radius = 0.08;
 const startY = 0.30; // fully submerged: top of sphere 0.16 m below the surface
+const startX = Number(process.env.PROBE_START_X ?? 0);
+const startZ = Number(process.env.PROBE_START_Z ?? 0);
 scene.rigidBodies = [{
   id: "buoyant-sphere", name: "Buoyant sphere", shape: "sphere",
   dimensions_m: { x: radius, y: radius, z: radius }, density_kg_m3: sphereDensity,
-  position_m: { x: 0, y: startY, z: 0 }, orientation: { w: 1, x: 0, y: 0, z: 0 },
+  position_m: { x: startX, y: startY, z: startZ }, orientation: { w: 1, x: 0, y: 0, z: 0 },
   linearVelocity_m_s: { x: 0, y: 0, z: 0 }, angularVelocity_rad_s: { x: 0, y: 0, z: 0 },
   restitution: 0.05, friction: 0.8, motion: "dynamic"
 }];
@@ -110,8 +112,22 @@ while (t < targetTime - 1e-9) {
   if (body.linearVelocity_m_s.y > peakVy) peakVy = body.linearVelocity_m_s.y;
   if (step % reportEvery === 0) {
     const analytic = analyticSubmergedVolume(body.position_m.y);
+    const pendingLoad = pending.find((load) => load.bodyId === body.description.id);
     console.log(JSON.stringify({
-      t: Number(t.toFixed(3)), y: Number(body.position_m.y.toFixed(4)), vy: Number(body.linearVelocity_m_s.y.toFixed(4)),
+      t: Number(t.toFixed(3)),
+      position: { x: Number(body.position_m.x.toFixed(5)), y: Number(body.position_m.y.toFixed(5)), z: Number(body.position_m.z.toFixed(5)) },
+      velocity: { x: Number(body.linearVelocity_m_s.x.toFixed(5)), y: Number(body.linearVelocity_m_s.y.toFixed(5)), z: Number(body.linearVelocity_m_s.z.toFixed(5)) },
+      hydroForce: { x: Number(body.hydrodynamicForce_N.x.toFixed(5)), y: Number(body.hydrodynamicForce_N.y.toFixed(5)), z: Number(body.hydrodynamicForce_N.z.toFixed(5)) },
+      meanFluidVelocity: {
+        x: Number((pendingLoad?.meanFluidVelocity_m_s.x ?? 0).toFixed(5)),
+        y: Number((pendingLoad?.meanFluidVelocity_m_s.y ?? 0).toFixed(5)),
+        z: Number((pendingLoad?.meanFluidVelocity_m_s.z ?? 0).toFixed(5))
+      },
+      pendingImpulse: {
+        x: Number((pendingLoad?.impulse_N_s.x ?? 0).toFixed(6)),
+        y: Number((pendingLoad?.impulse_N_s.y ?? 0).toFixed(6)),
+        z: Number((pendingLoad?.impulse_N_s.z ?? 0).toFixed(6))
+      },
       displacedV_m3: Number(displaced.toExponential(4)), analyticV_m3: Number(analytic.toExponential(4)),
       dispOverAnalytic: analytic > 1e-9 ? Number((displaced / analytic).toFixed(3)) : (displaced > 1e-9 ? Infinity : 1),
       dispOverSphere: Number((displaced / sphereVolume).toFixed(3)),

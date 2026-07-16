@@ -8,18 +8,22 @@ const MAX_TALL_CELL_BATCH_DEPTH = 8;
  * The restricted tall-cell solver is commonly configured with a 4 ms outer
  * step. Fencing every step then limits it to one 4 ms advance per display
  * refresh even when the GPU has enough headroom to calculate several steps.
- * An uncoupled solve has no intervening CPU state dependency, so batch enough
- * work to cover one 60 Hz presentation interval and fence the batch once.
+ * Batch enough restricted tall-cell work to cover one 60 Hz presentation
+ * interval and fence the batch once. Rigid feedback remains conservative: the
+ * solver captures every per-step impulse, the controller merges them over the
+ * frame-sized partitioned-coupling interval, then distributes that aggregate
+ * over the next fixed rigid substeps.
  *
- * Rigid-body scenes retain the one-step impulse handshake. The adaptive
- * quadtree method keeps its existing shallow batch because topology rebuilds
- * may deliberately stop a submission sequence.
+ * Other rigid-body methods retain the one-step handshake. The adaptive
+ * quadtree method keeps its existing shallow uncoupled batch because topology
+ * rebuilds may deliberately stop a submission sequence.
  */
 export function gpuBatchDepth(methodId: string, fixedDt_s: number, hasRigidBodies: boolean): number {
+  if (methodId === "tall-cell" && Number.isFinite(fixedDt_s) && fixedDt_s > 0) {
+    return Math.min(MAX_TALL_CELL_BATCH_DEPTH, Math.max(1, Math.ceil((PRESENTATION_QUANTUM_S - CLOCK_EPSILON_S) / fixedDt_s)));
+  }
   if (hasRigidBodies) return 1;
-  if (methodId === "quadtree-tall-cell") return 2;
-  if (methodId !== "tall-cell" || !Number.isFinite(fixedDt_s) || fixedDt_s <= 0) return 1;
-  return Math.min(MAX_TALL_CELL_BATCH_DEPTH, Math.max(1, Math.ceil((PRESENTATION_QUANTUM_S - CLOCK_EPSILON_S) / fixedDt_s)));
+  return methodId === "quadtree-tall-cell" ? 2 : 1;
 }
 
 /**
