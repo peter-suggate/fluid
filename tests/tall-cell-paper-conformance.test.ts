@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { tallCellComputeShader } from "../lib/tall-cell-kernels";
-import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
+import { legacyUniformComputeShader, WebGPUEulerianSolver } from "../lib/webgpu-eulerian";
 import { tallCellExtrapolationShader } from "../lib/tall-cell-extrapolation";
 import { tallCellMultigridShaderForTests } from "../lib/tall-cell-multigrid";
 
@@ -59,6 +59,13 @@ test("global volume correction offsets phi only in the interface band", () => {
   assert.match(tallCellComputeShader, /value-params\.physical\.w\*h\*dt/);
   assert.match(tallCellComputeShader, /abs\(value\)<1\.5\*h/);
   assert.doesNotMatch(tallCellComputeShader, /volumeCorrectionDivergence/);
+});
+
+test("tall volume-control uniform carries a bounded normal speed, not a volume", () => {
+  const solverSource = WebGPUEulerianSolver.toString();
+  assert.match(solverSource, /this\.volumeCorrectionNormalSpeed/);
+  assert.match(solverSource, /this\.info\.phiInterfaceCellCount/);
+  assert.doesNotMatch(solverSource, /this\.volumeControl\?this\.referenceLiquidVolumeCells:0/);
 });
 
 test("restricted level-set path has retired its VOF transport machinery", () => {

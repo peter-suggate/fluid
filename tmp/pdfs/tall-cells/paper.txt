@@ -1,0 +1,737 @@
+          Real-Time Eulerian Water Simulation Using a Restricted Tall Cell Grid
+                                     Nuttapong Chentanez                  Matthias Müller
+                                                    NVIDIA PhysX Research
+
+
+
+
+Figure 1: Simulation of a flood at 30 frames per second including physics and rendering. Water flows from the left into an uneven terrain.
+The tall cells (below the orange line) represent the major part of the water volume while the computation is focused to the surface area
+represented by cubic cells (above the orange line). Particles are used to add visual richness to the scene.
+
+
+Abstract                                                                1    Introduction
+                                                                        Fluid simulation has a long history in computer graphics and has
+We present a new Eulerian fluid simulation method, which allows         attracted hundreds of researchers in the past three decades. One
+real-time simulations of large scale three dimensional liquids. Such    of the main reasons for the fascination with fluids is the rich and
+scenarios have hitherto been restricted to the domain of off-line       complex behavior of liquids and gases. Due to the computational
+computation. To reduce computation time we use a hybrid grid            expense of capturing this complexity, fluid simulations are typically
+representation composed of regular cubic cells on top of a layer        executed off-line. The computational load has so far made it hard
+of tall cells. With this layout water above an arbitrary terrain can    to reproduce realistic scenarios in real time.
+be represented without consuming an excessive amount of mem-
+ory and compute power, while focusing effort on the area near the       There are two basic approaches to solving the fluid equations:
+surface where it most matters. Additionally, we optimized the grid      the grid-based (Eulerian) and the particle-based (Lagrangian) ap-
+representation for a GPU implementation of the fluid solver. To         proach. Both have been successfully used as off-line methods to
+further accelerate the simulation, we introduce a specialized multi-    create impressive effects in feature films and commercials. One
+grid algorithm for solving the Poisson equation and propose solver      way to make such methods fast enough for real-time applications,
+modifications to keep the simulation stable for large time steps. We    such as computer games, is to reduce the grid resolution or the num-
+demonstrate the efficiency of our approach in several real-world        ber of particles from the millions to the thousands. In the grid-
+scenarios, all running above 30 frames per second on a modern           based case, another way to accelerate the simulation is to reduce
+GPU. Some scenes include additional features such as two-way            the dimensionality of the problem, most often from a 3 dimensional
+rigid body coupling as well as particle representations of sub-grid     grid to a 2.5 dimensional height field representation. This reduction
+detail.                                                                 comes at a price: interesting features of a full 3D simulation such
+                                                                        as splashes and overturning waves get lost because the height field
+                                                                        representation cannot capture them.
+CR Categories: I.3.5 [Computer Graphics]: Computational Ge-
+ometry and Object Modeling—Physically Based Modeling; I.3.7             In this paper we propose a new grid-based method that is fast
+[Computer Graphics]: Three-Dimensional Graphics and Realism—            enough to simulate fully three dimensional large scale scenes in real
+Animation and Virtual Reality                                           time. The main idea is to combine a generalized height field rep-
+                                                                        resentation with a three dimensional grid on top of it. In contrast
+                                                                        to a traditional height field simulation, we simultaneously solve the
+Keywords: fluid simulation, multigrid, tall cell grid, real time        three dimensional Euler equations on both the height field columns
+                                                                        and the regular cubic grid cells.
+                                                                        Our method is an adaptation of the approach proposed by [Irving
+                                                                        et al. 2006]. In their paper, the authors discretize the fluid domain
+                                                                        using a generalized grid, which contains both regular cubic cells
+                                                                        and tall cells. The tall cells represent an arbitrary number of con-
+                                                                        secutive cubic cells in the up direction. With this generality the data
+                                                                        structures as well as the computations become quite complex. For
+                                                                        instance, there is a variable number of face velocities that need to
+                                                                        be stored per tall grid cell, depending on the heights of adjacent
+                                                                        tall cells. Our goal was to reduce the complexity of the general
+                                                                        approach, while retaining enough flexibility to capture the impor-
+                                                                        tant configurations of a three dimensional liquid. To this end, we
+                                                                        introduce three restrictions/modifications:
+    • Each water column contains exactly one tall cell                     [Lentine et al. 2010] modified the restriction and prolongation sten-
+                                                                           cils to only consider velocities on the faces of coarser cells.
+    • The tall cell is located at the bottom of the water column
+                                                                           The complex and interesting motion of a fluid is typically caused
+    • Velocities are stored at the cell center for regular cells and at    by its interaction with the solid environment. Therefore, handling
+      the top and bottom of tall cells                                     solid boundary conditions correctly has been a further active re-
+These modifications greatly simplify data structures and algorithms        search area. [Takahashi et al. 2002] proposed to use a volume of
+as well as making the method GPU friendly. In addition, due to the         fluid fraction method to handle two-way rigid body coupling ac-
+simplified layout, we were able to formulate and implement a fast,         curately. [Carlson et al. 2004] included fluid cells as well as cells
+parallel, multigrid Poisson solver for the tall cell grid. To accelerate   occupied by rigid bodies in one pressure solve. Similarly, [Klingner
+our method further, we modified the level set and velocity advection       et al. 2006] combined fluid motion and rigid body momentum into a
+schemes to ensure stability for the large time steps used in real time     single linear system and solved it simultaneously. Later, the method
+applications and to allow efficient implementation on GPUs.                was extended to include soft body-fluid coupling [Chentanez et al.
+                                                                           2006] and then re-formulated to conserve momentum yielding a
+To summarize, the main contributions of this work are:                     symmetric system matrix in [Robinson-Mosher et al. 2008]. Two-
+    1. A tall cell grid data structure that allows for efficient liquid    way coupling of fluids with cloth and thin shells was studied by
+       simulation within a wide variety of scenarios.                      [Guendelman et al. 2005]. Using a variational formulation [Batty
+                                                                           et al. 2007] were able to handle fluid-solid interactions with sub-
+    2. An efficient multigrid Poisson solver for the tall cell grid. Our   grid accuracy.
+       solver can also be used to accelerate fluid simulations on the
+       commonly employed staggered regular grid.                           Other approaches to simulate liquids include particles-based meth-
+                                                                           ods such as [Müller et al. 2003], [Premoze et al. 2003], [Adams
+    3. Several modifications in the level set and velocity advection       et al. 2007], [Solenthaler and Pajarola 2009] and lattice-Boltzmann
+       schemes that allow both larger time steps to be used and an         models [Thürey and Rüde 2004], [Thürey and Rüde 2009]. Real-
+       efficient GPU implementation.                                       time performance has been achieved by using the pipe model [Št́ava
+                                                                           et al. 2008], the 2D wave equation [Holmberg and Wünsche 2004]
+2     Related Work                                                         and the shallow water equations [Thurey et al. 2007], [Chentanez
+                                                                           and Müller-Fischer 2010] to name a few. Height field methods can-
+Early work in the field of Eulerian fluid simulation in computer           not capture the 3D phenomena faithfully though. So far, only a
+graphics include [Foster and Metaxas 1996] who used finite differ-         few researchers have shown 3D Eulerian liquid simulation at inter-
+ences to solve the Navier-Stokes equations, [Stam 1999] who intro-         active rates. To achieve real-time performance [Crane et al. 2007]
+duced the semi-Lagrangian method for advection and [Foster and             confined the liquid to a relatively small rectangular domain with-
+Fedkiw 2001] who combined Lagrangian particles with the level set          out general fluid-solid interaction, while [Long and Reinhard 2009]
+method to track the free surface of liquids. Since then, a wide vari-      leveraged the discrete cosine transform to speed up their simulation.
+ety of methods have been proposed to accelerate fluid simulations
+in order to cope with large scenes. One solution is to use adaptive        3     Methods
+grids in order to focus the computational effort to important regions
+such octrees [Losasso et al. 2004], tetrahedral grids [Feldman et al.      We simulate liquids by solving the inviscid Euler Equations,
+2005], [Klingner et al. 2006], [Chentanez et al. 2007], [Batty et al.
+2010], Voronoi cells grids [Sin et al. 2009], [Brochu et al. 2010]                          ∂u                            f   ∇p
+                                                                                                  =     −(u · ∇)u +         −    ,             (1)
+or tall cell grids [Irving et al. 2006]. Using an adaptive grid is one                      ∂t                            ρ   ρ
+of the main components of our method to reach real-time perfor-
+mance.                                                                     subject to the incompressibility constraint
+The simulation of a fluid can be split into three main steps: ad-                                     ∇·u      =     0,                        (2)
+vection, surface tracking and pressure projection. Each of these
+steps has been the focus of many research papers. For instance,            where u = [u, v, w]T is the fluid velocity field, p is the pressure, t
+[Kim et al. 2008] proposed to advect derivatives along with phys-          is time, ρ the fluid density and f is a field of external forces. The
+ical quantities to improve the quality of the simulation. [Selle           equations are solved in the domain specified by a scalar level-set
+et al. 2008] used a modified MacCormack scheme to lift the semi-           field φ in the region where φ < 0. φ itself is evolved by
+Lagrangian step to second order accuracy. To reduce volume-loss,
+[Enright et al. 2002] added particles on both sides of the liquid sur-                             ∂φ
+face to correct the level set. Apart from level sets, other representa-                                   =    −u · ∇φ.                        (3)
+                                                                                                   ∂t
+tions of the liquid surface have been proposed such as particles only
+[Zhu and Bridson 2005], [Adams et al. 2007], [Yu and Turk 2010]            [Foster and Fedkiw 2001]. Dirichlet and Neumann boundary con-
+or explicit triangle meshes [Bargteil et al. 2005], [Müller 2009],        ditions must be taken into account as well when solving these equa-
+[Brochu and Bridson 2009], [Wojtan et al. 2010] requiring various          tions.
+topological fixes. [Enright et al. 2003] used the ghost fluid method
+to improve the accuracy of pressure projection near the free sur-          3.1   Discretization
+face. In many cases, the pressure projection step is the slowest
+part in liquid simulations because it involves solving a large linear      As a discretization of the simulation domain we use the special-
+system at each time step. The preconditioned conjugate gradients           ized tall cell grid discussed in Section 1. The diagram on the left
+(PCG) method is commonly used [Foster and Fedkiw 2001], [Brid-             of Figure 2 shows the tall cell grid in 2D. From bottom to top,
+son 2008] for solving this system efficiently. The regularity of Eu-       each column consists of terrain, one tall cell and a fixed number
+lerian grids makes the multigrid approach an effective alternative to      of regular cells. The terrain height and the height of the tall cell are
+PCG [Molemaker et al. 2008]. [McAdams et al. 2010] combined                discretized to be a multiple of the grid spacing ∆x. These height
+both approaches and used one multigrid V-Cycle as a conjugate              values are stored in two arrays. For regular cells, all the physical
+gradients’s pre-conditioner. To accelerate the multigrid approach          quantities like velocity, level set value and pressure are stored at the
+Figure 2: Left: 2D cross section of the tall cell grid. Each column stores the terrain height, one tall cell and a constant number of regular
+cubic cells. Physical quantities are stored at the center of regular cells and at the top and the bottom of tall cells. Middle and Right: The next
+two coarser levels in the hierarchy of grids used for velocity extrapolation and the multigrid solver.
+
+cell center. For tall cells, these quantities are stored at the center of         component per touching tall cell neighbor. The fact that the
+the topmost and the bottommost subcells. In terms of implementa-                  number of tall cells and the number of touching neighbors
+tion, a quantity q is stored in a compressed 3D array, qi,j,k , of size           vary during the simulation complicates the data storage and
+(Bx , By + 2, Bz ) where Bx and Bz are the number of cells along                  implementation of [Irving et al. 2006].
+the x and z axis respectively, By is the constant number of regular
+cells along the y-axis per column and the +2 comes from the top               2. We use a collocated grid, which reduces the number of rays
+and the bottom values stored in per tall cell. In addition, we store             that need to be traced in the semi-lagrangian step. This part
+the terrain height Hi,k and the tall cell height hi,k in two 2D arrays           of the computation is significant, especially if the resolution
+of size (Bx , Bz ). The y-coordinate of the uncompressed position                used for surface tracking is higher than the one for simulation.
+of an array element qi,j,k is given by                                        3. In contrast to the general case, the stencil of the discrere
+                                                                                Laplacian operator on our simplified tall cell grid only in-
+          Hi,k + 1
+                                     if j = 1 (tall cell bottom)                cludes a constant number of neighbors (see Section 3.7).
+yi,j,k = Hi,k + hi,k                  if j = 2 (tall cell top)        (4)
+          H + h + j − 2 if j ≥ 3 (regular cell).
+          
+               i,j     i,k
+                                                                            3.2   Time integration
+
+We denote a quantity stored in the compressed array at position             Our time integration scheme is summarized in Algorithm 1. With
+i, j, k with qi,j,k without parentheses, and a quantity at the uncom-       the exception of the remeshing step, it follows standard Eulerian
+pressed world location (x∆x, y∆x, z∆x) as q(x,y,z) with paren-              liquid simulation [Enright et al. 2002]. First, we extrapolate the
+theses. Depending on the y-coordinate, there are four cases for
+evaluating q(x,y,z) based on the values stored in the compressed            Algorithm 1 Time step
+array.                                                                       1: Velocity extrapolation
+   • If y ≤ Hx,z the value of q(x,y,z) is the value below the terrain.       2: Level set reinitialization
+                                                                             3: Advection and external force integration
+   • If Hx,z < y ≤ Hx,z + hx,z the requested quantity lies within
+                                                                             4: Remeshing
+     the tall cell. In this case, we linearly interpolate from the top
+                                                                             5: Incompressibility enforcement
+     and the bottom sub-cells of the tall cell:
+                      y − Hx,z               y − Hx,z
+         q(x,y,z) =            qx,2,z + (1 −          )qx,1,z        (5)    velocity field into the air region. Then, after reinitializing the signed
+                        hx,z                   hx,z                         distance field, we advect the level set and the velocity field and
+                                                                            take external forces into account. The next step is to recompute the
+   • If Hx,z + hx,z < y < Hx,z + hx,z + By we have to look up               height of the tall cells and transfer the physical quantities to the new
+     the quantity from the regular cells in the compressed array as         grid. Finally, we enforce incompressibility by making the velocity
+                                                                            field divergence free.
+                      q(x,y,z) = qx,(y−Hx,z −hx,z −2),z              (6)
+                                                                            3.3   Velocity Extrapolation
+   • Otherwise q(x,y,z) gets the value above air.
+                                                                            The x-component of the velocity field u can be extrapolated into
+This definition of q(x,y,z) hides the tall cell structure of the grid.      the air region, where φ > 0, by solving the equation
+Once implemented, the grid can be accesses as if it was a regular
+grid composed of cubical cells only, which simplifies what follows                                ∂u     ∇φ
+significantly. A quantity at an arbitrary point in space can be com-                                 =−      · ∇u,                               (7)
+                                                                                                  ∂τ    |∇φ|
+puted using tri-linear interpolation of the nearest q(x,y,z) ’s.
+There are a few properties that distinguish our tall cell formulation       where τ is fictitious time [Enright et al. 2002]. Similar equations
+from [Irving et al. 2006].                                                  are used for v and w. For a CPU implementation, an O(n log n)
+                                                                            algorithm exists for solving this equation efficiently [Adalsteins-
+  1. Our tall cell grid has a constant data size for all quantities         son and Sethian 1997]. To solve the equation efficiently on GPUs
+     p, u, φ. This allows for an efficient GPU implementation.              [Jeong et al. 2007] proposed to use a variation of an Eikonal solver.
+     In contrast, [Irving et al. 2006] store a variable number of
+     values of p and φ depend on the number of tall cells used per          If the time step is not too large, the velocity is only needed within a
+     water column. Moreover, each tall cell stores one velocity             narrow band of air cells near the liquid surface [Enright et al. 2002].
+In this case, the two algorithms mentioned above are efficient be-         3.5   Advection and external force integration
+cause they can be terminated early. However, in our examples, the
+                                                         1                 To advect u we use the modified MacCormack scheme proposed by
+velocity is relatively large and the time step we use ( 30 s) is much
+larger than is typically used in water simulations. Therefore, water       [Selle et al. 2008] and revert to simple Semi-Lagrangian advection
+can cross several grid cells in a single time step. To make this possi-    if the new velocity component lies outside the bound of the values
+ble, we need velocity information far away from the liquid surface.        used for interpolation. To update φ we use Semi-lagrangian advec-
+                                                                           tion because we found that MacCormack causes noisier surfaces
+We observed that we only need an accurate velocity field close to          even if care is taken near the interface. Due to the collocated grid
+the surface, while far away from the liquid a crude estimate is suf-       we only need to trace the Semi-Lagrangian ray once for all quanti-
+ficient. Therefore, we apply the algorithm proposed in [Jeong et al.       ties reusing the same interpolation weights. After that, we integrate
+2007] only in a narrow band of two cells. Outside this region we           external forces such as gravity using forward-Euler.
+use a hierarchical grid for extrapolating the velocity field. An ex-
+ample of a hierarchy of grids is shown in Figure 2. All velocity           3.6   Remeshing
+components can be extrapolated at the same time because we use a
+collocated grid.                                                           After advection, we identify liquid cells as those where φ ≤ 0.
+                                                                           At this point we need to define new values hi,k , i.e. decide how
+3.3.1    Hierarchical Grid for Velocity Extrapolation                      many cells above the terrain should be grouped into one tall cell for
+                                                                           each column (i, k). There are a few desirable constraints that may
+The number of levels of the hierarchical grid is determined by L =         conflict each other:
+log2 min(Bx , By , Bz ). The finest level of the grid corresponds to
+the simulation grid with ∆xL = ∆x, uL                        L
+                                          i,j,k = ui,j,k , Hi,k = Hi,k
+                                                                             1. There must be at least GL regular cells below the bottom most
+      L
+and hi,k = hi,k . On coarser levels l, L > l ≥ 1, the quantities                liquid surface to capture the 3D dynamics of the liquid.
+H l+1 and hl+1 are defined via down sampling as                              2. There must be at least GA regular cells above the top most
+                                                                                liquid surface, to allow water to slosh into the air in the next
+                    mini2i+1,2k+1       l+1                                     time steps.
+                  $                           %
+        l                0 =2i,k0 =2k Hi0 ,k0
+      Hi,k =                                    ,                   (8)      3. The heights of adjacent tall cells must not differ by more than
+                                2
+                                                                                D units to reduce the volume gain artifacts as will be dis-
+                    maxi2i+1,2k+1        l+1      l+1
+                  &                                      '
+        l                 0 =2i,k0 =2k Hi0 ,k0 + hi0 ,k0       l
+                                                                                cussed in Section 5.
+      hi,k =                                               − Hi,k , (9)
+                                     2                                     We first iterate through each pair (i, k) and compute the maximum
+                                                                           and minimum y-coordinate of the top of the tall cell that satisfy
+                               l+1
+                              Bx          B   l+1                  l+1
+                                                                  Bz       constraints (1) and (2), respectively. Next we initialize the tempo-
+and ∆xl = 2∆xl+1 , Bxl =       2
+                                   , Byl = y2       , and Bzl =    2
+                                                                       .                   tmp
+                                                                           rary variable yi,k  to be the average of the two extrema. To reduce
+With this definition, coarser grids are tall cell grids and are guaran-    the differences in height of adjacent tall cells we then run several
+                                                                                                    tmp                                    tmp
+teed to cover all cells in the finer grid, as the diagrams in the middle   smoothing passes on yi,k     . During the smoothing we clamp yi,k   so
+and on the right of Figure 2 show. The velocities in the hierarchy         that it always satisfies conditions (1) and (2), giving preference to
+of grids are evaluated by sweeping down then sweeping up the hi-           condition (2) by enforcing it after condition (1). Finally, we iter-
+erarchy. On the finest level L, we declare the velocity of a cell          ate through (i, k) again and enforce condition (3) in a Jacobi-type
+to be known if the cell is a liquid cell or if the velocity is already     fashion using
+extrapolated. We then go through the levels from finest to coars-                   tmp’        tmp
+est and obtain velocities by tri-linear interpolation of the velocities            yi,k  = min(yi,k ,          max          yitmp
+                                                                                                                               0 ,k0 + D)   (10)
+                                                                                                        |i0 −i|+|k0 −k|=1
+of the previous level using only known velocities and renormaliz-
+ing the interpolation weights accordingly. The velocity of a coarse        In our examples we used 8 ≤ GL ≤ 32, GA = 8, 3 ≤ D ≤ 6
+cell is declared to be known if at least one corresponding finer cell      and between one and two Jacobi iterations. Finally we set hnew   i,k =
+                                                                             tmp
+velocity is known. We then traverse the hierarchy in the reverse or-       yi,k  − Hi,k . The algorithm attempts to make compromise among
+der from coarsest to finest and evaluate velocities on finer levels by     the constraints but may not satisfy all of them. Once we know the
+tri-linearly interpolating values from coarser grids. After these two      new heights of the tall cells, we transfer all the physical quantities
+passes every cell of the finest grid has a known velocity.                 to the new grid. For regular cells, we simply copy the values at the
+                                                                           corresponding locations from the old grid or interpolate linearly if
+3.4     Level Set Reinitialization                                         the location was occupied by a tall cell in the previous time step.
+                                                                           For tall cells, we do a least square fit to obtain the values at the
+Advecting φ destroys its property of being a signed distance field.        bottom and the top of the cell, similar to [Irving et al. 2006].
+Therefore, φ needs to be reinitialized periodically to be accurate at
+least for two to three cells away from the liquid surface. We use the      3.7   Enforcing Incompressibility
+method of [Jeong et al. 2007] for this step. Since we use a higher
+resolution grid for surface tracking than for the simulation in most       Suppose the velocity field after the advection and the remeshing
+of our examples, this step can be quite costly. In practice, we found      step is u∗ . We want to find the pressure field p such that
+that we can simplify the process significantly, while still getting
+                                                                                                             ∆t
+satisfactory results. First, we run the reinitialization step only ev-                        ∇ · (u∗ −         ∇p)     =       0.          (11)
+ery ten frames. Second, during reinitialization, we do not modify                                            ρ
+φ values of grid points next to the surface in order to avoid mov-         Assuming a constant ρ, we have a Poisson equation
+ing it. Third, in every frame we clamp the value of φ next to the
+liquid surface to not exceed the grid spacing ∆x. Without clamp-                                                 ρ
+                                                                                                 ∇2 p      =        ∇ · u∗ .                (12)
+ing, incorrect values get advected near the surface and cause surface                                            ∆t
+bumpiness. To stabilize the process further we clamp all φ values
+to have magnitude less than 5∆x. We have not seen significant              To discretize this equation, we need to define the divergence, gradi-
+problems or artifacts due to these stabilizations.                         ent and Laplacian operators on our restricted tall cell grid. We use
+the following divergence operator                                                3.7.1   Multigrid Overview
+                                   ∂u           ∂v          ∂w                   Algorithm 2 summarizes our multigrid pressure solver.
+      (∇ · u)i,j,k    =        (      )i,j,k + ( )i,j,k + (    )i,j,k , (13)
+                                   ∂x           ∂y          ∂z
+                     u+        −u−                                               Algorithm 2 Multigrid
+where ( ∂u )
+        ∂x i,j,k
+                   = i,j,k∆x i,j,k and
+         (u                                                                        1: Compute matrix AL for level L
+             i,j,k +u(i+1,y,k)
+ +                   2
+                                 if the cell (i + 1, y, k) is not solid            2: for l = L − 1 down to 1 do
+ui,j,k =                                                                (14)       3:    Down sample φl+1 → φl and sl+1 → sl
+           usolid                otherwise.
+                                                                                   4:    Compute matrix Al for level l
+u−                                                  ∂v
+  i,j,k is defined similarly and so are the terms ( ∂y )i,j,k and
+                                                                                   5: end for
+  ∂w                                                                               6: bL = − ∆t  (∇ · u)
+( ∂z )i,j,k .                                                                                  ρ
+                                                                                  7: pL = 0
+For the Laplacian we use                                                          8: for i = 1 to num Full Cycles do
+                               ∂2p            ∂2p          ∂2p                    9:    Full Cycle()
+     (∇2 p)i,j,k     =     (      2
+                                    )i,j,k + ( 2 )i,j,k + ( 2 )i,j,k , (15)      10: end for
+                               ∂x             ∂y           ∂z
+                                                                                 11: for i = 1 to num V Cycles do
+          2
+         ∂ p             px+
+                         i,j,k     −2pi,j,k +px-
+                                           i,j,k                                 12:    V Cycle(L)
+where ( ∂x  2 )i,j,k =           ∆x2
+                                                 and
+                                                                                 13: end for
+                    φ(i+1,y,k)
+          
+          pi,j,k φi,j,k
+                                                if cell (i + 1, y, k) is air,
+  x+
+pi,j,k = s(i+1,y,k) pi,j,k +                                                   (16) The hierarchy of grids we use is the same as the one described in
+                                                                                    Section 3.3. On each level, a linear system of the form Al pl = bl
+          
+               (1 − s(i+1,y,k) )p(i+1,y,k) otherwise,
+          
+                                                                                    has   to be solved. To down sample sl+1 to sl , we do an 8-to-1
+where si,j,k is the fraction of solid in a cell. px-i,j,k is defined sim-           average for regular cells and a least square fit of the 8-to-1 averages
+                                 ∂2p                 ∂2p
+ilarly and so are the terms ( ∂y    2 )i,j,k and ( ∂z 2 )i,j,k . Equation 16        of the sub cells for the tall cells. For down sampling φl+1 to φl we
+incorporates two important methods. First, for air cells we use the                 distinguish the following two cases:
+ghost-fluid method [Enright and Fedkiw 2002] to get more accurate                      1. if the 8 φ-values all have the same sign or l < L − C we use
+free-surface boundary conditions by assigning negative pressures to                        the 8-to-1 average,
+air cells such that p = 0 exactly on the liquid surface, i.e. where
+φ = 0 and not at the center of the air cell. The second line of Equa-                  2. otherwise we use the average of the positive φ-values.
+tion 16 utilizes solid fraction [Batty et al. 2007]. It is not only valid           The key idea is to ensure that air bubbles persist in the C finest
+for s = 0 and s = 1 but for any value in between so cells that are                  levels. In those levels, bubbles have a significant influence on the
+only partially occupied by solids can be handled correctly. This is                 resulting pressure values. On the other hand, letting air bubbles
+an important feature in the case of a hierarchical grid where coarser               disappear in coarser levels is not problematic because only a general
+cells cover both, solid and fluid cells of finer levels.                            pressure profile is needed there in order to get accurate pressure
+Discretizing Equation 12 by applying the operators defined above                    values in the original grid. Tracking bubbles on coarser levels is not
+to all the regular cells and the bottom and the top of tall cells yields            only unnecessary but we found that keeping them yields incorrect
+a linear system for the unknown pressure field p. After solving for                 profiles because their influence gets exaggerated. We use C = 2 in
+p, we compute its gradient using                                                    all simulations.
+                         ∂p           ∂p            ∂p                              We then compute the coefficients of the Al for each level using
+        (∇p)i,j,k = [( )i,j,k , ( )i,j,k , ( )i,j,k ]T ,                  (17)      Equation 16. Unlike [McAdams et al. 2010], our solver handles
+                         ∂x           ∂y            ∂z
+                                                                                    sub-grid features correctly through the ghost fluid and solid frac-
+                        px+    −px-         ∂p                                      tion methods on all the levels of the hierarchy. So in contrast to
+where ( ∂x∂p
+             )i,j,k = i,j,k∆x i,j,k . ( ∂y     )i,j,k and ( ∂p  )
+                                                             ∂z i,j,k
+                                                                      are  de-
+                                                                                    [McAdams et al. 2010], our solver converges even in the presence
+fined similarly. The velocity can then be corrected using                           of irregular free-surface and solid boundaries. Handling sub-grid
+                                    ∆t                                              features correctly is crucial to obtain meaningful pressures fields
+                     ui,j,k − =        (∇p)i,j,k                          (18)      on coarse levels. For example, in the hydrostatic case we can en-
+                                    ρ
+                                                                                    force free surface boundary conditions at the correct location up
+Solving the linear system for p is usually the most time consum-                    to first order to get a correct linear pressure profile on all levels of
+ing step in fluid simulations. Without tall cells, the matrix of our                the hierarchy. Without using sub-grid resolution, slightly different
+system is identical to the one appearing in standard Eulerian regu-                 problems would be solved on the coarse grids.
+lar grid liquid simulation used by many authors [Foster and Fedkiw                  For smoothing, we use the Red-Black Gauss-Seidel(RBGS) method
+2001], [Enright et al. 2002], [Rasmussen et al. 2004], [Guendelman                  and solve the system in two parallel passes. The restriction operator
+et al. 2005], [Batty et al. 2007], [Kim et al. 2008] and can be solved              tri-linearly interpolates r, where r(x,y,z) is specially computed as
+efficiently using the incomplete Cholesky preconditioned Conju-
+gate Gradients method. In the presence of tall cells though, the
+                                                                                                  
+                                                                                                   rx,1,z                   if y = Hx,z + 1
+resulting linear system is non-symmetric and the Conjugate Gradi-                                 
+                                                                                                  
+                                                                                                  
+                                                                                                   rx,2,z                   if y = Hx,z + hx,z
+ents method cannot be used. On the other hand, even though non-                                   
+symmetric, the system is still much simpler than the one emerging                    r (x,y,z) =    r x,y−H x,z −h x,z −2,z  if Hx,z + hx,z ≤ y        (19)
+                                                                                                  
+from the general case of [Irving et al. 2006] because we have a con-                              
+                                                                                                  
+                                                                                                  
+                                                                                                                              <  H x,z + hx,z + By
+stant number of coefficients that need to be stored per cell. This                                
+                                                                                                    0                        otherwise.
+property makes the problem well suited for a data parallel archi-
+tecture such as a GPU and for a multigrid approach. We therefore                    Note that r(x,y,z) is zero everywhere inside a tall cell except at the
+decided to write a parallel multigrid solver using CUDA[Sanders                     top and bottom, because divergence is measured only at the top
+and Kandrot 2010].                                                                  and bottom sub-cells. Using a wider stencil for restriction as in
+[McAdams et al. 2010] is more expensive and does not yield a faster         • We clamp the grid hierarchy at the level that completely fits in
+convergence rate in our tests. For prolongation we also use tri-              the GPU’s shared memory. This top level can then be solved
+linear interpolation. On the boundary, if we find that a pressure             efficiently to high precision by executing multiple Gauss Sei-
+value outside the grid is needed for interpolation, then we simply            del iterations using a single kernel (see [Cohen et al. 2010]).
+ignore it and renormalize the interpolation weights. If all values are
+                                                                            • We only build the hierarchical grid once per simulation frame
+outside the grid the pressure is set to zero.
+                                                                              at the incompressibility solve step. The same hierarchy can be
+There are three critical steps to making our multigrid algorithm con-         re-used for velocity extrapolation in the next time step because
+verge:                                                                        remeshing happens after velocity extrapolation.
+  1. The use of full-cycles.
+                                                                         3.9     Extensions
+  2. Preserving air bubbles in the finest levels.
+  3. Using the ghost fluid and solid fraction methods.                   In this section we describe a few additional methods to complement
+                                                                         the core grid-based fluid solver.
+Not considering any one of these leads to either stagnation or even
+divergence of the solver as reported in [McAdams et al. 2010].           3.9.1   Rigid Body Coupling
+
+Algorithm 3 V Cycle(l)                                                   To handle rigid body coupling, we use a variation of the Volume
+                                                                         of Solid Method (VOS) [Takahashi et al. 2002] and alternately run
+ 1: if l == 1 then                                                       the water and the rigid body solver. Although more accurate tech-
+ 2:     Solve the linear system, A1 p1 = b1                              niques have been proposed for fluid-rigid body coupling [Carlson
+ 3: else                                                                 et al. 2004], [Chentanez et al. 2006], [Batty et al. 2007], [Robinson-
+ 4:     for i = 1 to num Pre Sweep do                                    Mosher et al. 2008], we use this simple method because it requires
+ 5:        Smooth(pl )                                                   only minimal changes of the water simulator that do not affect its
+ 6:     end for                                                          GPU optimized structure. For rigid to water coupling, we voxelize
+ 7:     rl = bl − Apl                                                    the rigid bodies into the water simulation grid by modifying the
+ 8:     bl−1 = Restrict(rl )                                             solid fraction s and blend the fluid and solid velocities based on this
+ 9:     pl−1 = 0                                                         fraction. The divergence calculation treats a cell as solid if s > 0.9.
+10:     V Cycle(l − 1)
+                                                                         Special care has to be taken regarding the level set function φ inside
+11:     pl = pl + Prolong(pl−1 )
+                                                                         rigid bodies because the φ resulting from the Semi-Lagrangian ad-
+12:     for i = 1 to num Post Sweep do
+                                                                         vection step is not correct there. We therefore define a second field
+13:        Smooth (pl )
+                                                                         φs defined inside rigid bodies only. Ideally, φs would be the extrap-
+14:     end for
+                                                                         olation of φ outside the body. A correct evaluation of this function
+15: end if
+                                                                         would, however, require a fast marching step. We use a simpler
+                                                                         approach which lets φ diffuse into the solid over several time steps
+                                                                         using
+Algorithm 4 Full Cycle()
+                                                                                             1              X
+ 1: ptmp = pL                                                                    φsi,j,k =                                    (1 − s(i0 ,y0 ,k0 ) )φ(i0 ,y0 ,k0 )
+ 2: r L = bL − ApL
+                                                                                             S
+                                                                                                 |i0 −i|+|y 0 −y|+|k0 −k|=1
+ 3: for l = L − 1 down to 1 do
+                                                                         if S > 0 and
+ 4:    rl = Restrict(rl+1 )
+ 5: end for                                                                                  1             X
+                                                                                 φsi,j,k =                                    φ(i0 ,y0 ,k0 )
+ 6: b1 = r 1                                                                                 6
+                                                                                                 |i0 −i|+|y 0 −y|+|k0 −k|=1
+ 7: Solve the linear system, A1 p1 = b1
+ 8: for l = 2 to L do
+                                                                                                  P
+                                                                         otherwise, where S =        |i0 −i|+|y 0 −y|+|k0 −k|=1 (1 − s(i ,y ,k ) ).
+                                                                                                                                        0 0 0
+ 9:    pl = Prolong(pl−1 )                                               For mixed cells, the two level set values are blended as sφs + (1 −
+10:    bl = r l                                                          s)φ. This estimation is not strictly correct, but it is sufficient in all
+11:    V Cycle(l)                                                        of our examples to generate plausible behavior.
+12: end for
+13: pL = ptmp + pL                                                       For water to rigid coupling, we visit all the voxels that contain both
+                                                                         rigid bodies and water and sum up the forces and torques resulting
+                                                                         from the interaction. We consider buoyancy and drag. The buoy-
+3.8   Optimizations                                                      ancy force is computed using s and the relative density of the solid
+                                                                         w.r.t. the liquid. We use a drag force proportional to s and the rel-
+We optimized our method in several ways to increase its perfor-          ative velocity between the fluid and the solid. Again, this force is
+mance.                                                                   only an approximation of the real drag force but it yields plausible
+                                                                         results in our examples.
+   • For all tri-linear interpolations, we first interpolate along the
+     y-axis. This step always requires exactly 2 consecutive grid        3.9.2   Particle-Based Thickening
+     point values independent of whether the entry is part of a tall
+     or a regular cell. In this way, only 8 memory access are nec-       To reduce volume loss due to the use of large time steps we apply a
+     essary instead of up to 16 when using Equation 5 naively.           variation of the particle thickening method presented in [Chentanez
+                                                                         et al. 2007]. The method identifies thin parts of the water domain
+   • In the Gauss Seidel step, to get the pressure below the top
+                                                                         and seed particles there. These particles are moved forward in time
+     pressure value of a tall cell, we access pi,j−1,k in the com-
+                                                                         and then the signed distance function of each particle is united with
+     pressed grid and do the interpolation implicitly via modifying
+                                                                         the advected φ. A grid location (x, y, z) is considered thin if
+     the Laplace stencil instead of querying p(i,y−1,k) through the
+     mapping function.                                                     1. φthin ≤ φ ≤ 0 and
+                                             ∇φ
+    2. φl = φ at (x, y, z)∆x + 2φthin |∇φ(x,y,z) | is positive and
+                                                  (x,y,z)
+
+        r                             thin    ∇φ(x,y,z)
+    3. φ = φ at (x, y, z)∆x − 2φ             |∇φ(x,y,z) |
+                                                          is positive.
+
+When a thin cell is identified, 16 particles are seeded
+                                            φ(x,y,z)
+on the disk of radius 21 ∆x centered at ( φl −φ      −
+                                                                   (x,y,z)
+  φ(x,y,z)               ∇φ                           ∇φ
+φr −φ(x,y,z)
+             )(−φthin ) |∇φ(x,y,z) | whose normal is |∇φ(x,y,z) | .
+                                                                  The
+                            (x,y,z)                      (x,y,z)
+center of the disk is an estimation of the mid-point between the two
+water surfaces above and below the thin region. The radius of a par-
+ticle is taken to be −φ at its location. Its velocity is computed via
+tri-linear interpolation of the velocity field. Particles whose radius
+is negative are ignored. In our examples we used φthin = −1.5∆x.
+
+3.9.3    Particles Generation
+
+For rendering purposes, we automatically generate particles that
+represent spray and small droplets. At each time step cells whose φ-
+value satisfies φgen ≤ φ ≤ 0 are sampled with trial particles. Again,
+the radius of a particle is taken to be −φ at its location and its ve-
+locity is computed via tri-linear interpolation of the velocity field.
+After being moved forward in time we check whether the particle
+arrived at a location where φ is greater than twice its radius. If so,
+we seed a number of escape particles there with the same velocity            Figure 3: Water flows from a magic inexhaustible bucket into a tank
+plus some additional noise. These particles are rendered as spray            filling it up to an arbitrary level without increasing computational
+in the flood and the lighthouse examples in Figures 1 and 5. In the          load.
+lighthouse example, a subset of the spray particles is converted into
+mist particles. In addition, whenever spray particles fall into the
+main body of water they are converted to foam particles with some
+probability. Spray and mist particles move ballistically, the latter
+experiencing more drag. Foam particles stay on the surface and are
+advected passively with the velocity of the water.
+
+ Case         Total    VE      LA            VA       RM      PP
+ Manip        29.06    1.30    2.35          0.57     0.56    8.56
+ Tank         27.29    1.10    3.26          0.67     0.56    8.44
+ Flood        32.33    2.35    0.59          1.14     0.85    13.49
+ LightH       33.09    2.05    0.61          0.67     0.95    9.77
+Table 1: Timing for the examples scenes in milliseconds. Total
+stands for the frame time including rendering, VE for velocity ex-
+trapolation, LA for level set advection, VA for velocity advection,
+RM for remeshing and PP for pressure projection.
+
+ Case         Sim                  Surf
+ Manip        64x(64+2)x64         128x(128+2)x128
+ Tank         64x(64+2)x64         128x(128+2)x128
+ Flood        64x(32+2)x256        64x(32+2)x256
+ LightH       128x(32+2)x128       128x(32+2)x128
+Table 2: Simulation and surface tracking grid sizes used in our              Figure 4: This dam breaking scene demonstrates two-way interac-
+examples.                                                                    tion of water with rigid bodies and user intervention.
+
+4     Results
+We demonstrate the features and performance of our simulation al-
+gorithm in several scenarios. The timing data for each example
+is listed in Table 1. All examples run in real time at more than 30
+frames per second on a single NVIDIA GTX480 graphics card. The
+                           1
+simulation time step is 30    second in all cases. We found that exe-
+cuting two V-cycles and one full multigrid in the pressure solver is
+sufficient to get visually pleasing results. The water level in our ex-
+amples does not decrease significantly over time because the multi-
+grid solver is able to reduce the low-frequency error quickly even
+                                                                             Figure 6: Water flows past a sphere into a tank. This scene was
+with only a few cycles. This is in contrast to a Jacobi type method
+                                                                             used for comparing IC(0) PCG with our multigrid solver.
+as used by [Crane et al. 2007] who reported water loss to be a sig-
+nificant problem.
+Figure 5: Our method allows real-time simulation of large scale scenarios. To increase realism we enriched the scene by adding various
+additional features. Spray, mist and foam effects are created with thousands of particles. We overlayed the beach with a simulated wet map
+and added an evolving foam map to the water surface. The high frequency waves are created by adding a wave texture and advecting it with
+the velocity field of the water. To demonstrate the interactivity of the scene, we let the user add water and interact with the rigid bodies during
+the simulation.
+
+                                                                                                           100
+Figure 1 shows a flooding scene. Water is injected on the left side
+with an increasing flow rate for 30 seconds after which the flow is                                         10
+abruptly stopped. This scene demonstrates the efficiency of using
+
+
+                                                                                L infinity of residual
+                                                                                                             1
+a tall call grid when simulating a scenario with large variations in                                              0   5   10   15               20   25   30   35   Left
+water depth. Notice also how water fills up the uneven terrain and                                          0.1
+                                                                                                                                                                    Mid
+settles down to a flat steady state. In the scene shown in Figure 3                                                                                                 Right
+                                                                                                           0.01
+a jet of water fills up a tank to an arbitrary level. Simulating this
+scenario using only regular cells would require increasing storage                                        0.001
+
+and computation time with rising water level. To demonstrate two-                                        0.0001
+way interaction of a liquid with rigid bodies we put a stack of boxes                                                               Iteration
+
+into a standard dam break scene as shown in Figure 4.
+                                                                              Figure 7: Convergence rates for the three frames shown in Figure
+Figure 5 shows a large scale simulation of waves crashing and                 1. The infinity norm of the residual is plotted on a logarithmic scale
+breaking over a beach. Here we used particles to add small scale              against the number of solver iterations. We use single precision
+detail such as spray and mist. The foam map on the water surface is           floating point numbers on the GPU which explains why the error
+advected by the water’s velocity field and seeded by spray particles          stops decreasing at some point.
+that fall into the main body of water. Additionally, we overlaid the
+sandy area with a wet map which dries out over time and gets ac-              multigrid solver outperforms PCG in all scenarios except the one
+tivated when the water level rises. To add more detail to the water           where the grid resolution and the water level are low, in which case
+surface, we superimposed it with a wave texture that is animated by           they perform equally well. With increasing grid size, the speedup
+an FFT-based simulation. Its coordinates are advected and blended             over PCG increases up to 14x at a resolution of 2563 cells. The
+using the algorithm presented in [Neyret 2003]. The entire scene              number of iterations required to reach a certain tolerance is almost
+is inspired by the results presented in [Losasso et al. 2008]. One            constant regardless of the grid resolution, which is expected from
+of the main goals of our project was to show that it is possible to           the multigrid algorithm that has linear time complexity.
+simulate such a complex scene in real time. Even though a direct
+comparison is not fair due to the fact that we used a coarser grid and        A fair comparison against [McAdams et al. 2010] is not feasible
+faster hardware it is still worth mentioning that our simulation runs         for practical cases because they do not handle the free liquid sur-
+three to four orders of magnitude faster than what was reported in            face with sub-grid precision as we do. In other words, the two
+[Losasso et al. 2008].                                                        methods do not solve the same problem. In addition, in contrast
+                                                                              to [McAdams et al. 2010], our solver runs stably on its own without
+To benchmark our solver we took the Incomplete Cholesky Precon-               an additional PCG loop. The latter requires global reduction with
+ditioned Conjugate Gradients method (IC(0) PCG) [Bridson 2008])               double precision floating point arithmetic [Bridson 2008], a step
+as a reference because it is the state of the art way to solve for            that would slow down a GPU implementation.
+incompressibility in fluid solvers. We ran our tests in double pre-           For a performance analysis of the general case with cubic and tall
+cision using a single CPU thread on an Intel Core i7 at 2.67 GHz              cells we used the three frames of the flood scene shown in Figure
+with 4 GB of RAM. Since PCG is not applicable to non-symmetric                1. Figure 7 shows the infinity norm of the residual on a logarithmic
+systems, we did the comparison using only cubic cells grid without            scale against the the number of multigrid iterations. The curves
+tall cells at three different resolutions, 643 , 1283 , and 2563 . Our test   show that our solver reduces the error exponentially even for the
+scenario shown in Figure 6 is composed of a stream of water flow-             asymmetric system derived from a tall cell grid. At some point, the
+ing past a solid sphere into a tank with three different water levels.        error cannot be reduced any further and the curves reach a plateau.
+We ran our tests with two different tolerances on the infinity norm           This is because we use single precision arithmetic with single pre-
+of the residual: 10−4 1s and 10−8 1s . The solver ran only full cycles        cision floating point numbers on the GPU.
+with num Pre Sweep = num Post Sweep = 2 (see Algorithm 3).
+The timings in seconds for various cases are shown in Table 3. Our            Using a co-located grid is one of the main reasons why our incom-
+pressibility solver is simple and fast enough for real-time applica-      References
+tions. However, since the divergence is only measured at the top
+and the bottom of tall cells, in the center, the solver is only aware     A DALSTEINSSON , D., AND S ETHIAN , J. A. 1997. The fast con-
+of water flow in adjacent cubic cells, not inside the tall cell, which       struction of extension velocities in level set methods. Journal of
+results in slight water gain over time. Even though this problem is          Computational Physics 148, 2–22.
+not present in the staggered formulation of [Irving et al. 2006], we      A DAMS , B., PAULY, M., K EISER , R., AND G UIBAS , L. J. 2007.
+chose speed over accuracy in this trade off. To mitigate the problem,        Adaptively sampled particle fluids. In Proc. SIGGRAPH, 48.
+we make sure that the heights of adjacent tall cells do not differ too
+much, using parameter D in the remeshing step described in Sec-           BARGTEIL , A. W., G OKTEKIN , T. G., O’B RIEN , J. F., AND
+tion 3.6. This step reduces the chance that water flows into tall cells     S TRAIN , J. A. 2005. A semi-lagrangian contouring method
+through their middle faces because they are not exposed to the reg-         for fluid simulation. ACM Transactions on Graphics.
+ular cells. Note that smoothing the interface between the tall and        BATTY, C., B ERTAILS , F., AND B RIDSON , R. 2007. A fast varia-
+the cubic cell regions does not smooth out the visual water surface.        tional framework for accurate solid-fluid coupling. In Proc. SIG-
+Note also that our pressure projection operator is not idempotent be-       GRAPH, 100.
+cause the Laplacian is not a composition of gradient and divergence
+and hence may not eliminate divergence completely. This is not a          BATTY, C., X ENOS , S., AND H OUSTON , B. 2010. Tetrahedral
+problem in our real-time application but it could be problematic if         embedded boundary methods for accurate and flexible adaptive
+very small divergence is required such as in off-line simulation.           fluids. In Proc. Eurographics.
+                                                                          B RIDSON , R. 2008. Fluid Simulation for Computer Graphics. A
+                                                                             K Peters.
+    Cases
+                                      Full‐cycle     Full‐cycle           B ROCHU , T., AND B RIDSON , R. 2009. Robust topological oper-
+                                                                             ations for dynamic explicit surfaces. SIAM Journal on Scientific
+                                                                             Computing 31, 4, 2472–2493.
+                                                                          B ROCHU , T., BATTY, C., AND B RIDSON , R. 2010. Matching fluid
+                                                                             simulation elements to surface geometry and topology. In Proc.
+    Case                                                                     SIGGRAPH, 1–9.
+                                      Full‐cycle     Full‐cycle
+                                                                          C ARLSON , M., M UCHA , P. J., AND T URK , G. 2004. Rigid fluid:
+                                                                             animating the interplay between rigid bodies and fluid. In Proc.
+                                                                             SIGGRAPH, 377–384.
+                                                                          C HENTANEZ , N., AND M ÜLLER -F ISCHER , M. 2010. Real-time
+    Case
+                                      Full‐cycle     Full‐cycle
+                                                                             simulation of large bodies of water with small scale details. In
+                                                                             Proc. ACM SIGGRAPH/Eurographics Symposium on Computer
+                                                                             Animation.
+Table 3: Performance comparison between IC(0) PCG and our                 C HENTANEZ , N., G OKTEKIN , T. G., F ELDMAN , B. E., AND
+multigrid solver based on the three frames shown in Figure 6. The            O’B RIEN , J. F. 2006. Simultaneous coupling of fluids and de-
+simulations were executed in a single CPU thread using double pre-           formable bodies. In Proc. ACM SIGGRAPH/Eurographics Sym-
+cision floating point numbers.                                               posium on Computer Animation, 83–89.
+                                                                          C HENTANEZ , N., F ELDMAN , B. E., L ABELLE , F., O’B RIEN ,
+5       Conclusion and Future Work                                           J. F., AND S HEWCHUK , J. R.        2007. Liquid simula-
+                                                                             tion on lattice-based tetrahedral meshes. In Proc. ACM
+We have presented a method that is capable of simulating complex             SIGGRAPH/Eurographics Symposium on Computer Animation,
+water scenes in real time. There are three main factors that speedup         219–228.
+the solver to reach real-time performance. First, we use a special-       C OHEN , J. M., TARIQ , S., AND G REEN , S. 2010. Interactive
+ized tall cell grid to focus computation time on areas near the sur-         fluid-particle simulation using translating eulerian grids. In Proc.
+face, where the motion of the liquid is most interesting. Second,            ACM SIGGRAPH symposium on Interactive 3D Graphics and
+we devised an efficient multigrid solver that can handle the asym-           Games, 15–22.
+metric systems resulting from such a hybrid grid. Third, we laid
+out the data structures and the algorithms to most efficiently use the    C RANE , K., L LAMAS , I., AND TARIQ , S. 2007. Real-time simu-
+compute power of modern GPUs.                                                lation and rendering of 3d fluids. In GPU Gems 3, H. Nguyen,
+                                                                             Ed. Addison Wesley Professional, August, ch. 30.
+In the future, we plan to investigate how to couple our 3D solver
+with a 2D height field solver in order to simulate even larger do-        E NRIGHT, D., AND F EDKIW, R. 2002. Robust treatment of in-
+mains in real time. So far we focused on real-time simulations only.         terfaces for fluid flows and computer graphics. In Computer
+A next step would be to drop the real-time constraint and substan-           Graphics, 9th Int. Conf. on Hyperbolic Problems Theory, Nu-
+tially increase the grid resolution. This will require a re-design of        merics, Applications.
+our data layout.                                                          E NRIGHT, D., M ARSCHNER , S., AND F EDKIW, R. 2002. Ani-
+                                                                             mation and rendering of complex water surfaces. In Proc. SIG-
+Acknowledgements                                                             GRAPH, 736–744.
+                                                                          E NRIGHT, D., N GUYEN , D., G IBOU , F., AND F EDKIW, R.
+We would like to thank the members of the NVIDIA PhysX and                   2003. Using the particle level set method and a second or-
+APEX teams for their support and helpful comments. We also thank             der accurate pressure boundary condition for free surface flows.
+Aleka McAdams and Joseph M. Teran for provinding us with the                 In In Proc. 4th ASME-JSME Joint Fluids Eng. Conf., number
+source code of [McAdams et al. 2010] through their website.                  FEDSM200345144. ASME, 2003–45144.
+F ELDMAN , B. E., O’B RIEN , J. F., AND K LINGNER , B. M. 2005.       P REMOZE , S., TASDIZEN , T., B IGLER , J., L EFOHN , A. E., AND
+   Animating gases with hybrid meshes. In Proc. SIGGRAPH, 904–           W HITAKER , R. T. 2003. Particle-based simulation of fluids.
+   909.                                                                  Comput. Graph. Forum 22, 3, 401–410.
+F OSTER , N., AND F EDKIW, R. 2001. Practical animation of liq-       R ASMUSSEN , N., E NRIGHT, D., N GUYEN , D., M ARINO , S.,
+   uids. In Proc. SIGGRAPH, 23–30.                                       S UMNER , N., G EIGER , W., H OON , S., AND F EDKIW, R.
+                                                                         2004.    Directable photorealistic liquids. In Proc. ACM
+F OSTER , N., AND M ETAXAS , D. 1996. Realistic animation of             SIGGRAPH/Eurographics Symposium on Computer Animation,
+   liquids. Graph. Models Image Process. 58, 5, 471–483.                 193–202.
+G UENDELMAN , E., S ELLE , A., L OSASSO , F., AND F EDKIW, R.         ROBINSON -M OSHER , A., S HINAR , T., G RETARSSON , J., S U , J.,
+   2005. Coupling water and smoke to thin deformable and rigid          AND F EDKIW, R. 2008. Two-way coupling of fluids to rigid and
+   shells. In Proc. SIGGRAPH, 973–981.                                  deformable solids and shells. ACM Trans. Graph. 27 (August),
+H OLMBERG , N., AND W ÜNSCHE , B. C. 2004. Efficient modeling          46:1–46:9.
+   and rendering of turbulent water over natural terrain. In Proc.    S ANDERS , J., AND K ANDROT, E. 2010. CUDA by Example: An
+   GRAPHITE, 15–22.                                                      Introduction to General-Purpose GPU Programming. Addison-
+                                                                         Wesley Professional.
+I RVING , G., G UENDELMAN , E., L OSASSO , F., AND F EDKIW, R.
+   2006. Efficient simulation of large bodies of water by coupling    S ELLE , A., F EDKIW, R., K IM , B., L IU , Y., AND ROSSIGNAC , J.
+   two- and three-dimensional techniques. In Proc. SIGGRAPH,             2008. An unconditionally stable MacCormack method. J. Sci.
+   805–811.                                                              Comput. 35, 2-3, 350–371.
+J EONG , W.-K., ROSS , AND W HITAKER , T. 2007. A fast eikonal        S IN , F., BARGTEIL , A. W., AND H ODGINS , J. K. 2009. A point-
+   equation solver for parallel systems. In SIAM conference on           based method for animating incompressible flow. In Proc. ACM
+   Computational Science and Engineering.                                SIGGRAPH/Eurographics Symposium on Computer Animation,
+                                                                         247–255.
+K IM , D., S ONG , O.-Y., AND KO , H.-S. 2008. A semi-lagrangian
+   cip fluid solver without dimensional splitting. Computer Graph-    S OLENTHALER , B., AND PAJAROLA , R. 2009. Predictive-
+   ics Forum 27, 2 (April), 467–475.                                     corrective incompressible sph. In Proc. SIGGRAPH, 1–6.
+
+K LINGNER , B. M., F ELDMAN , B. E., C HENTANEZ , N., AND             S TAM , J. 1999. Stable fluids. In Proc. SIGGRAPH, 121–128.
+   O’B RIEN , J. F. 2006. Fluid animation with dynamic meshes. In     TAKAHASHI , T., U EKI , H., K UNIMATSU , A., AND F UJII , H.
+   Proc. SIGGRAPH, 820–825.                                             2002. The simulation of fluid-rigid body interaction. In ACM
+                                                                        SIGGRAPH conference abstracts and applications, 266–266.
+L ENTINE , M., Z HENG , W., AND F EDKIW, R. 2010. A novel
+   algorithm for incompressible flow using only a coarse grid pro-    T H ÜREY, N., AND R ÜDE , U. 2004. Free Surface Lattice-
+   jection. In Proc. SIGGRAPH, 114:1–114:9.                              Boltzmann fluid simulations with and without level sets. Proc.
+                                                                         of Vision, Modelling, and Visualization VMV, 199–207.
+L ONG , B., AND R EINHARD , E. 2009. Real-time fluid simulation
+   using discrete sine/cosine transforms. In Proc. ACM SIGGRAPH       T H ÜREY, N., AND R ÜDE , U. 2009. Stable free surface flows with
+   symposium on Interactive 3D Graphics and Games, 99–106.               the lattice Boltzmann method on adaptively coarsened grids.
+                                                                         Computing and Visualization in Science 12 (5).
+L OSASSO , F., G IBOU , F., AND F EDKIW, R. 2004. Simulating
+   water and smoke with an octree data structure. In Proc. SIG-       T HUREY, N., M ULLER -F ISCHER , M., S CHIRM , S., AND G ROSS ,
+   GRAPH, 457–462.                                                       M. 2007. Real-time breakingwaves for shallow water simula-
+                                                                         tions. In Proc. Pacific Conf. on CG and App., 39–46.
+L OSASSO , F., TALTON , J., K WATRA , N., AND F EDKIW, R. 2008.
+   Two-way coupled sph and particle level set fluid simulation.       Š T́AVA , O., B ENE Š , B., B RISBIN , M., AND K ŘIV ÁNEK , J. 2008.
+   IEEE Transactions on Visualization and Computer Graphics 14,            Interactive terrain modeling using hydraulic erosion. In Proc.
+   4, 797–804.                                                             ACM SIGGRAPH/Eurographics Symposium on Computer Ani-
+                                                                           mation, 201–210.
+M C A DAMS , A., S IFAKIS , E., AND T ERAN , J. 2010. A parallel
+                                                                      W OJTAN , C., T H ÜREY, N., G ROSS , M., AND T URK , G. 2010.
+  multigrid poisson solver for fluids simulation on large grids. In
+                                                                        Physics-inspired topology changes for thin fluid features. In
+  Proc. ACM SIGGRAPH/Eurographics Symposium on Computer
+                                                                        Proc. SIGGRAPH, no. 4, 1–8.
+  Animation.
+                                                                      Y U , J., AND T URK , G. 2010. Enhancing fluid animation with
+M OLEMAKER , J., C OHEN , J. M., PATEL , S., AND N OH , J. 2008.         adaptive, controllable and intermittent turbulence. In Proc. ACM
+  Low viscosity flow simulations for animation. In ACM SIG-              SIGGRAPH/Eurographics Symposium on Computer Animation.
+  GRAPH/Eurographics Symposium on Computer Animation, 9–
+  18.                                                                 Z HU , Y., AND B RIDSON , R. 2005. Animating sand as a fluid. In
+                                                                         Proc. SIGGRAPH, 965–972.
+M ÜLLER , M., C HARYPAR , D., AND G ROSS , M. 2003. Particle-
+   based fluid simulation for interactive applications. In ACM
+   SIGGRAPH/Eurographics Symposium on Computer Animation,
+   154–159.
+M ÜLLER , M. 2009. Fast and robust tracking of fluid surfaces. In
+   Proc. ACM SIGGRAPH/Eurographics Symposium on Computer
+   Animation.
+N EYRET, F.  2003.    Advected textures.  In Proc. ACM
+   SIGGRAPH/Eurographics Symposium on Computer Animation,
+   147–153.
+

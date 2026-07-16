@@ -20,6 +20,18 @@ test("tall-cell semi-Lagrangian finish consumes the shared predictor", () => {
   assert.match(tallCellComputeShader, /var v=boundedMacCormack\(id,p\)/);
 });
 
+test("tall velocity transport follows each positive MAC face", () => {
+  assert.match(tallCellComputeShader, /fn sampleVelocityComponent\(p:vec3f,component:u32\)->f32/);
+  assert.match(tallCellComputeShader, /offset\[component\]=1\.0/);
+  assert.match(tallCellComputeShader, /lower\[component\]=-1\.0/);
+  assert.match(tallCellComputeShader, /fn faceSampledVelocity[\s\S]*sampleVelocityComponent\(p,2u\)/);
+  assert.match(tallCellComputeShader, /fn traceDeparture[\s\S]*faceSampledVelocity\(midpoint\)/);
+  assert.match(tallCellComputeShader, /fn faceAdvectedVelocity[\s\S]*faceP=center\+0\.5\*vec3f\(axisOffset\(component\)\)[\s\S]*sampleVelocityComponent\(traceDeparture\(faceP,signedDt\),component\)/);
+  assert.match(tallCellComputeShader, /fn predictVelocity[\s\S]*faceAdvectedVelocity\(id,params\.dimsDt\.w\)/);
+  assert.match(tallCellComputeShader, /fn reverseVelocity[\s\S]*faceAdvectedVelocity\(id,-params\.dimsDt\.w\)/);
+  assert.match(tallCellComputeShader, /fn boundedMacCormack[\s\S]*departure-faceOffset[\s\S]*velocityCell\(b\+offset\)\[component\]/);
+});
+
 test("tall phi transport is independent of the velocity transport selector", () => {
   assert.match(tallCellComputeShader, /fn transportPhi/);
   assert.match(tallCellComputeShader, /var phi=volumeCorrectedPhi\(samplePhi\(traceDeparture\(p,dt\)\),dt\)/);
@@ -37,9 +49,19 @@ test("phi subdivision is GPU-governed without multiplying pressure work", () => 
   assert.match(tallCellComputeShader, /atomicMax\(&governor\[0\],bitcast<u32>\(cfl\)\)/);
 });
 
+test("rigid coupling rejects distant cells before exact corner-shape tests", () => {
+  assert.match(tallCellComputeShader, /fn cellMayTouchRigid/);
+  assert.match(tallCellComputeShader, /if\(distanceSquared>radiusSquared\)\{return false;\}/);
+  assert.match(tallCellComputeShader, /!cellMayTouchRigid\(cellWorld,h,bodyCount\)/);
+});
+
 test("tall-cell pressure warm start remains explicitly switchable", () => {
   const warmStart = tallCellMethod.params.find((spec) => spec.key === "pressureWarmStart");
   assert.equal(warmStart?.kind, "select");
   assert.equal(resolveMethodValues(tallCellMethod, "balanced", {}).pressureWarmStart, "off");
   assert.equal(resolveMethodValues(tallCellMethod, "balanced", { pressureWarmStart: "on" }).pressureWarmStart, "on");
+});
+
+test("tall-cell pressure defaults to the settling-validated cycle budget", () => {
+  assert.equal(resolveMethodValues(tallCellMethod, "balanced", {}).pressureCycles, 8);
 });

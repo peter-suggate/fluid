@@ -14,6 +14,7 @@
     "test:webgpu": "FLUID_SCENE=${FLUID_SCENE:-all} node --import tsx tools/run-webgpu-smoke.ts",
     "test:webgpu:dam-break-regression": "FLUID_SCENE=dam-break-ui FLUID_METHOD=quadtree-tall-cell FLUID_TARGET_S=0.2 FLUID_CPU_ORACLE=0 FLUID_FIELD_STATS=1 node --import tsx tools/run-webgpu-smoke.ts",
     "test:webgpu:dam-quadtree-quality": "FLUID_SCENE=dam-break-ui FLUID_METHOD=quadtree-tall-cell FLUID_TARGET_S=0.2 FLUID_STABILITY_ENVELOPE=1 FLUID_CHECKPOINT_EVERY_S=0.05 FLUID_CPU_ORACLE=0 FLUID_FIELD_STATS=1 FLUID_DISABLE_TIMESTAMPS=1 node --import tsx tools/run-webgpu-smoke.ts",
+    "test:webgpu:dam-quadtree-phi-only-soak": "FLUID_SCENE=dam-break-ui FLUID_METHOD=quadtree-tall-cell FLUID_TARGET_S=10 FLUID_STABILITY_ENVELOPE=1 FLUID_QUADTREE_VOF_RECONCILIATION=0 FLUID_CPU_ORACLE=0 FLUID_FIELD_STATS=1 node --import tsx tools/run-webgpu-smoke.ts",
     "test:webgpu:quadtree-matrix": "FLUID_SCENE=all FLUID_METHOD=quadtree-tall-cell FLUID_TARGET_S=0.2 FLUID_CPU_ORACLE=0 node --import tsx tools/run-webgpu-smoke.ts",
     "test:webgpu:dam-conservation": "FLUID_SCENE=dam-break-boxes FLUID_METHOD=tall-cell FLUID_TARGET_S=5 FLUID_REGULAR_LAYERS=12 FLUID_CPU_ORACLE=0 FLUID_FIELD_STATS=1 node --import tsx tools/run-webgpu-smoke.ts",
     "test:water-shaders": "node --import tsx tools/validate-water-shaders.ts",
@@ -28,6 +29,7 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "test:webgpu:dam-tall-active": "FLUID_SCENE=dam-break-ui FLUID_METHOD=tall-cell,uniform FLUID_TARGET_S=2 FLUID_REGULAR_LAYERS=24 FLUID_STABILITY_ENVELOPE=1 FLUID_CHECKPOINT_EVERY_S=0.25 FLUID_CPU_ORACLE=0 FLUID_SURFACE_TENSION=0 FLUID_DISABLE_TIMESTAMPS=1 node --import tsx tools/run-webgpu-smoke.ts",
     "test:webgpu:dam-tall-soak": "FLUID_SCENE=dam-break-ui FLUID_METHOD=tall-cell FLUID_TARGET_S=5 FLUID_REGULAR_LAYERS=24 FLUID_STABILITY_ENVELOPE=1 FLUID_CPU_ORACLE=0 FLUID_SURFACE_TENSION=0 FLUID_DISABLE_TIMESTAMPS=1 node --import tsx tools/run-webgpu-smoke.ts",
+    "test:webgpu:dam-settling": "FLUID_SCENE=dam-break-ui FLUID_METHOD=tall-cell,uniform FLUID_TARGET_S=10 FLUID_REGULAR_LAYERS=24 FLUID_ENERGY_EVERY_STEPS=50 FLUID_SETTLING_GATE=1 FLUID_CPU_ORACLE=0 FLUID_SURFACE_TENSION=0 FLUID_DISABLE_TIMESTAMPS=1 node --import tsx tools/run-webgpu-smoke.ts",
     "test:webgpu:single-tall-cell": "FLUID_SCENE=dam-break-ui FLUID_METHOD=tall-cell,uniform FLUID_SINGLE_TALL_CELL=15,10,4 FLUID_TARGET_S=0.004 FLUID_ORACLE_STEPS=1 FLUID_CHECKPOINT_EVERY_S=0.004 FLUID_STABILITY_ENVELOPE=1 FLUID_CPU_ORACLE=0 FLUID_SURFACE_TENSION=0 FLUID_DISABLE_TIMESTAMPS=1 node --import tsx tools/run-webgpu-smoke.ts",
     "test:webgpu:single-tall-cell-soak": "FLUID_SCENE=dam-break-ui FLUID_METHOD=tall-cell,uniform FLUID_SINGLE_TALL_CELL=15,10,4 FLUID_TARGET_S=0.2 FLUID_ORACLE_STEPS=50 FLUID_CHECKPOINT_EVERY_S=0.02 FLUID_STABILITY_ENVELOPE=1 FLUID_CPU_ORACLE=0 FLUID_SURFACE_TENSION=0 FLUID_DISABLE_TIMESTAMPS=1 node --import tsx tools/run-webgpu-smoke.ts"
   },

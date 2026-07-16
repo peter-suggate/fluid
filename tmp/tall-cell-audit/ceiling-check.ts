@@ -16,7 +16,7 @@ const scenario = createSmokeScenario("dam-break-ui");
 const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
 const device = await adapter!.requestDevice({ requiredLimits: { maxTextureDimension3D: Math.min(2048, adapter!.limits.maxTextureDimension3D) } });
 const values = Object.fromEntries(tallCellMethod.params.map((p) => [p.key, p.default])) as Record<string, string | number>;
-const solver = tallCellMethod.createSolver(device, scenario.scene, "balanced", values, () => {}) as import("../../lib/webgpu-eulerian").WebGPUEulerianSolver;
+const solver = tallCellMethod.createSolver!(device, scenario.scene, "balanced", values, () => {}) as import("../../lib/webgpu-eulerian").WebGPUEulerianSolver;
 const bodies = initializeRigidBodies(scenario.scene.rigidBodies);
 const dt = scenario.scene.numerics.maxDt_s;
 let t = 0;
