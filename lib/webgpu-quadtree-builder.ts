@@ -8,12 +8,26 @@
  * step; construction only evaluates sizing and rebuilds the horizontal tree.
  */
 
+import { inflowBoundaryWGSL } from "./inflow-boundary";
+
+/** Per-step nozzle state for sourcing fluid into the resident level set. */
+export interface SurfaceInflowState {
+  outletCenter_m: { x: number; y: number; z: number };
+  radius_m: number;
+  velocity_m_s: { x: number; y: number; z: number };
+  apertureScale: number;
+  strength: number;
+}
+
 export interface WebGPUQuadtreeSurfaceCache {
   layout: GPUBindGroupLayout;
   pipelineLayout: GPUPipelineLayout;
   shaderModule: GPUShaderModule;
   pipelines: {
     advectLevelSet: GPUComputePipeline;
+    advectPredict: GPUComputePipeline;
+    advectReverse: GPUComputePipeline;
+    advectCorrect: GPUComputePipeline;
     reduceVolume: GPUComputePipeline;
     seedDistance: GPUComputePipeline;
     jumpFlood: GPUComputePipeline;
@@ -31,16 +45,18 @@ export interface WebGPUQuadtreeSurfaceCache {
  * surface without a CPU upload.
  */
 export const quadtreeSurfaceShader = /* wgsl */ `
-struct SurfaceParams { dims: vec4u, cellAndDt: vec4f, control: vec4f }
+struct SurfaceParams { dims: vec4u, cellAndDt: vec4f, control: vec4f, cellGravity: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowVelocityLength: vec4f, inflowTiming: vec4f }
 struct PassParams { jump: u32, pad0: u32, pad1: u32, pad2: u32 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var phiIn: texture_3d<f32>;
 @group(0) @binding(2) var phiOut: texture_storage_3d<r32float, write>;
-@group(0) @binding(3) var<storage, read> distanceSeedsIn: array<u32>;
-@group(0) @binding(4) var<storage, read_write> distanceSeedsOut: array<u32>;
+@group(0) @binding(3) var<storage, read> distanceSeedsIn: array<vec2u>;
+@group(0) @binding(4) var<storage, read_write> distanceSeedsOut: array<vec2u>;
 @group(0) @binding(5) var<uniform> params: SurfaceParams;
 @group(0) @binding(6) var<uniform> passParams: PassParams;
 @group(0) @binding(7) var<storage, read_write> reductions: array<atomic<u32>>;
+@group(0) @binding(8) var predictedPhiIn: texture_3d<f32>;
+@group(0) @binding(9) var reversedPhiIn: texture_3d<f32>;
 
 fn index3(q: vec3u) -> u32 { return q.x + params.dims.x * (q.y + params.dims.y * q.z); }
 fn clamp3(q: vec3i) -> vec3i { return clamp(q, vec3i(0), vec3i(params.dims.xyz) - vec3i(1)); }
@@ -71,13 +87,72 @@ fn volumeCorrectedPhi(value: f32) -> f32 {
   let h = hMin();
   return select(value, value - params.control.x * h * params.cellAndDt.w, abs(value) < 1.5 * h);
 }
+fn inflowGridDims() -> vec3i { return vec3i(params.dims.xyz); }
+${inflowBoundaryWGSL}
+fn centredMacVelocityAt(position: vec3f) -> vec3f {
+  let hi = vec3f(params.dims.xyz - vec3u(1));
+  let p = clamp(position, vec3f(0.0), hi);
+  let a = vec3i(floor(p)); let b = min(a + vec3i(1), vec3i(params.dims.xyz) - vec3i(1)); let t = fract(p);
+  let x00 = mix(centredMacVelocity(vec3i(a.x, a.y, a.z)), centredMacVelocity(vec3i(b.x, a.y, a.z)), t.x);
+  let x10 = mix(centredMacVelocity(vec3i(a.x, b.y, a.z)), centredMacVelocity(vec3i(b.x, b.y, a.z)), t.x);
+  let x01 = mix(centredMacVelocity(vec3i(a.x, a.y, b.z)), centredMacVelocity(vec3i(b.x, a.y, b.z)), t.x);
+  let x11 = mix(centredMacVelocity(vec3i(a.x, b.y, b.z)), centredMacVelocity(vec3i(b.x, b.y, b.z)), t.x);
+  return mix(mix(x00, x10, t.y), mix(x01, x11, t.y), t.z);
+}
+// RK2 midpoint backtrace, mirroring the restricted method's traceDeparture.
+fn departurePoint(p: vec3f, dt: f32) -> vec3f {
+  let cellsPerMetre = vec3f(1.0) / params.cellAndDt.xyz;
+  let first = centredMacVelocityAt(p);
+  let midpoint = p - 0.5 * first * dt * cellsPerMetre;
+  return p - centredMacVelocityAt(midpoint) * dt * cellsPerMetre;
+}
 @compute @workgroup_size(4, 4, 4)
 fn advectLevelSet(@builtin(global_invocation_id) gid: vec3u) {
   if (any(gid >= params.dims.xyz)) { return; }
   // Narita et al. Sec. 4.5: interpolate velocity from the saved previous
   // staggered grid, backtrace, then interpolate the previous level set.
   let departure = vec3f(gid) - centredMacVelocity(vec3i(gid)) * params.cellAndDt.w / params.cellAndDt.xyz;
-  textureStore(phiOut, vec3i(gid), vec4f(volumeCorrectedPhi(trilinearPhi(departure)), 0.0, 0.0, 0.0));
+  var phi = volumeCorrectedPhi(trilinearPhi(departure));
+  // The nozzle sources fluid directly into the resident surface, exactly as
+  // the restricted method's finishAdvection clamps phi at inflow cells.
+  let q = vec3i(gid);
+  if (isInflowVelocityCell(q)) { phi = min(phi, -0.5 * hMin() * inflowApertureFraction(q) * inflowStrength()); }
+  textureStore(phiOut, q, vec4f(phi, 0.0, 0.0, 0.0));
+}
+@compute @workgroup_size(4, 4, 4)
+fn advectPredict(@builtin(global_invocation_id) gid: vec3u) {
+  if (any(gid >= params.dims.xyz)) { return; }
+  textureStore(phiOut, vec3i(gid), vec4f(trilinearPhi(departurePoint(vec3f(gid), params.cellAndDt.w)), 0.0, 0.0, 0.0));
+}
+@compute @workgroup_size(4, 4, 4)
+fn advectReverse(@builtin(global_invocation_id) gid: vec3u) {
+  // phiIn is the predicted field; tracing it forward (negative dt backtrace)
+  // recovers the BFECC error estimate.
+  if (any(gid >= params.dims.xyz)) { return; }
+  textureStore(phiOut, vec3i(gid), vec4f(trilinearPhi(departurePoint(vec3f(gid), -params.cellAndDt.w)), 0.0, 0.0, 0.0));
+}
+@compute @workgroup_size(4, 4, 4)
+fn advectCorrect(@builtin(global_invocation_id) gid: vec3u) {
+  if (any(gid >= params.dims.xyz)) { return; }
+  let q = vec3i(gid);
+  let original = loadPhi(q);
+  let predicted = textureLoad(predictedPhiIn, q, 0).x;
+  let reversed = textureLoad(reversedPhiIn, q, 0).x;
+  var corrected = predicted + 0.5 * (original - reversed);
+  // Bounded MacCormack: clamp to the eight previous-phi corners around the
+  // forward departure point, falling back to the monotone prediction
+  // (mirrors the restricted method's boundedMacCormack).
+  let hi = vec3f(params.dims.xyz - vec3u(1));
+  let a = vec3i(floor(clamp(departurePoint(vec3f(gid), params.cellAndDt.w), vec3f(0.0), hi)));
+  var lower = loadPhi(a); var upper = lower;
+  for (var corner = 1u; corner < 8u; corner += 1u) {
+    let offset = vec3i(i32(corner & 1u), i32((corner >> 1u) & 1u), i32((corner >> 2u) & 1u));
+    let value = loadPhi(a + offset); lower = min(lower, value); upper = max(upper, value);
+  }
+  if (corrected < lower || corrected > upper) { corrected = predicted; }
+  var phi = volumeCorrectedPhi(corrected);
+  if (isInflowVelocityCell(q)) { phi = min(phi, -0.5 * hMin() * inflowApertureFraction(q) * inflowStrength()); }
+  textureStore(phiOut, q, vec4f(phi, 0.0, 0.0, 0.0));
 }
 @compute @workgroup_size(4, 4, 4)
 fn reduceVolume(@builtin(global_invocation_id) gid: vec3u) {
@@ -89,8 +164,18 @@ fn reduceVolume(@builtin(global_invocation_id) gid: vec3u) {
   atomicAdd(&reductions[0], u32(occupied * 256.0));
   if (abs(value) < 1.5 * cell) { atomicAdd(&reductions[1], 256u); }
 }
-fn packSeed(q: vec3u) -> u32 { return q.x | (q.y << 10u) | (q.z << 20u); }
-fn unpackSeed(word: u32) -> vec3u { return vec3u(word & 1023u, (word >> 10u) & 1023u, (word >> 20u) & 1023u); }
+// Seeds carry the interface point itself (the cell's phi projected along the
+// gradient) in 16.6 fixed point per axis, not the seed cell's coordinates.
+// Measuring the jump flood against projected points keeps the rebuilt far
+// field second-order: measuring against cell centres and adding the seed's
+// own offset at finalize overestimates by up to a cell for tangential seeds.
+fn packSeedPoint(p: vec3f) -> vec2u {
+  let q = vec3u(clamp(p * 64.0, vec3f(0.0), vec3f(65535.0)));
+  return vec2u(q.x | (q.y << 16u), q.z);
+}
+fn unpackSeedPoint(word: vec2u) -> vec3f {
+  return vec3f(f32(word.x & 0xffffu), f32(word.x >> 16u), f32(word.y & 0xffffu)) / 64.0;
+}
 @compute @workgroup_size(4, 4, 4)
 fn seedDistance(@builtin(global_invocation_id) gid: vec3u) {
   if (any(gid >= params.dims.xyz)) { return; }
@@ -98,11 +183,25 @@ fn seedDistance(@builtin(global_invocation_id) gid: vec3u) {
   let crosses = (loadPhi(p + vec3i(1, 0, 0)) < 0.0) != wet || (loadPhi(p - vec3i(1, 0, 0)) < 0.0) != wet
     || (loadPhi(p + vec3i(0, 1, 0)) < 0.0) != wet || (loadPhi(p - vec3i(0, 1, 0)) < 0.0) != wet
     || (loadPhi(p + vec3i(0, 0, 1)) < 0.0) != wet || (loadPhi(p - vec3i(0, 0, 1)) < 0.0) != wet;
-  distanceSeedsOut[index3(gid)] = select(0xffffffffu, packSeed(gid), crosses);
+  var word = vec2u(0xffffffffu, 0xffffffffu);
+  if (crosses) {
+    let h = params.cellAndDt.xyz;
+    let gradient = vec3f(
+      (loadPhi(p + vec3i(1, 0, 0)) - loadPhi(p - vec3i(1, 0, 0))) / (2.0 * h.x),
+      (loadPhi(p + vec3i(0, 1, 0)) - loadPhi(p - vec3i(0, 1, 0))) / (2.0 * h.y),
+      (loadPhi(p + vec3i(0, 0, 1)) - loadPhi(p - vec3i(0, 0, 1))) / (2.0 * h.z));
+    let magnitude = max(length(gradient), 1e-6);
+    // Chopp-style sub-cell distance, clamped inside the cell so a degenerate
+    // gradient cannot eject the interface point.
+    let distance = clamp(loadPhi(p) / magnitude, -0.87 * hMin(), 0.87 * hMin());
+    let point = vec3f(gid) - distance * (gradient / magnitude) / h;
+    word = packSeedPoint(clamp(point, vec3f(0.0), vec3f(params.dims.xyz - vec3u(1))));
+  }
+  distanceSeedsOut[index3(gid)] = word;
 }
-fn seedDistanceSquared(cell: vec3u, word: u32) -> f32 {
-  if (word == 0xffffffffu) { return 3.402823e38; }
-  let delta = (vec3f(cell) - vec3f(unpackSeed(word))) * params.cellAndDt.xyz;
+fn seedDistanceSquared(cell: vec3u, word: vec2u) -> f32 {
+  if (word.y > 0xffffu) { return 3.402823e38; }
+  let delta = (vec3f(cell) - unpackSeedPoint(word)) * params.cellAndDt.xyz;
   return dot(delta, delta);
 }
 @compute @workgroup_size(4, 4, 4)
@@ -119,12 +218,24 @@ fn jumpFlood(@builtin(global_invocation_id) gid: vec3u) {
 @compute @workgroup_size(4, 4, 4)
 fn finalizeDistance(@builtin(global_invocation_id) gid: vec3u) {
   if (any(gid >= params.dims.xyz)) { return; }
-  let word = distanceSeedsIn[index3(gid)];
-  let h = min(params.cellAndDt.x, min(params.cellAndDt.y, params.cellAndDt.z)); var distance = 5.0 * h;
-  if (word != 0xffffffffu) {
-    distance = min(5.0 * h, sqrt(seedDistanceSquared(gid, word)) + 0.5 * h);
+  let advected = loadPhi(vec3i(gid));
+  let h = hMin();
+  var result = advected;
+  // The narrow band keeps the advected phi verbatim, so redistancing never
+  // moves the interface (the old +0.5h floor snapped it to the cell
+  // lattice). Only the far field is rebuilt from the jump-flood distances.
+  // 2.5h keeps every cell a CFL-bounded backtrace can sample from inside the
+  // smoothly advected field; the jump-flood reconstruction (a point-cloud
+  // distance with sub-cell tangential ripple) only ever feeds the far field.
+  if (abs(advected) >= 2.5 * h) {
+    let word = distanceSeedsIn[index3(gid)];
+    var distance = 5.0 * h;
+    if (word.y <= 0xffffu) {
+      distance = min(5.0 * h, max(2.5 * h, sqrt(seedDistanceSquared(gid, word))));
+    }
+    result = select(distance, -distance, advected < 0.0);
   }
-  textureStore(phiOut, vec3i(gid), vec4f(select(distance, -distance, loadPhi(vec3i(gid)) < 0.0), 0.0, 0.0, 0.0));
+  textureStore(phiOut, vec3i(gid), vec4f(result, 0.0, 0.0, 0.0));
 }
 `;
 
@@ -145,7 +256,9 @@ function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCach
     { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
     { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform", hasDynamicOffset: true } },
-    { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
+    { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+    { binding: 8, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+    { binding: 9, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
   ] });
   const shaderModule = device.createShaderModule({ label: "Resident quadtree level set", code: quadtreeSurfaceShader });
   void shaderModule.getCompilationInfo().then((info) => {
@@ -154,7 +267,9 @@ function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCach
   const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
   const pipeline = (entryPoint: string) => device.createComputePipeline({ label: `Quadtree surface ${entryPoint}`, layout: pipelineLayout, compute: { module: shaderModule, entryPoint } });
   return { layout, pipelineLayout, shaderModule, pipelines: {
-    advectLevelSet: pipeline("advectLevelSet"), reduceVolume: pipeline("reduceVolume"),
+    advectLevelSet: pipeline("advectLevelSet"), advectPredict: pipeline("advectPredict"),
+    advectReverse: pipeline("advectReverse"), advectCorrect: pipeline("advectCorrect"),
+    reduceVolume: pipeline("reduceVolume"),
     seedDistance: pipeline("seedDistance"), jumpFlood: pipeline("jumpFlood"), finalizeDistance: pipeline("finalizeDistance")
   } };
 }
@@ -163,6 +278,8 @@ export class WebGPUQuadtreeSurfaceState {
   readonly cache: WebGPUQuadtreeSurfaceCache;
   readonly texture: GPUTexture;
   private readonly scratch: GPUTexture;
+  private readonly predicted: GPUTexture;
+  private readonly reversed: GPUTexture;
   private readonly seedsA: GPUBuffer;
   private readonly seedsB: GPUBuffer;
   private readonly params: GPUBuffer;
@@ -170,7 +287,7 @@ export class WebGPUQuadtreeSurfaceState {
   private readonly reductions: GPUBuffer;
   private readonly passStride: number;
   private readonly jumps: number[];
-  private readonly groups: { advect: GPUBindGroup; reduce: GPUBindGroup; seed: GPUBindGroup; jumpAB: GPUBindGroup; jumpBA: GPUBindGroup; finalizeA: GPUBindGroup; finalizeB: GPUBindGroup };
+  private readonly groups: { advect: GPUBindGroup; predict: GPUBindGroup; reverse: GPUBindGroup; correct: GPUBindGroup; reduce: GPUBindGroup; seed: GPUBindGroup; jumpAB: GPUBindGroup; jumpBA: GPUBindGroup; finalizeA: GPUBindGroup; finalizeB: GPUBindGroup };
   private readbackPending = false;
   private referenceVolumeCells: number;
   private volumeCells: number;
@@ -182,11 +299,13 @@ export class WebGPUQuadtreeSurfaceState {
     const textureUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC;
     this.texture = device.createTexture({ label: "Resident quadtree level set", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
     this.scratch = device.createTexture({ label: "Resident quadtree level-set advection scratch", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
+    this.predicted = device.createTexture({ label: "Resident quadtree level-set MacCormack prediction", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
+    this.reversed = device.createTexture({ label: "Resident quadtree level-set MacCormack reversal", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
     uploadLevelSetTexture(device, this.texture, initialPhi, dims.nx, dims.ny, dims.nz);
-    const bytes = Math.max(4, dims.nx * dims.ny * dims.nz * 4), seedUsage = GPUBufferUsage.STORAGE;
+    const bytes = Math.max(8, dims.nx * dims.ny * dims.nz * 8), seedUsage = GPUBufferUsage.STORAGE;
     this.seedsA = device.createBuffer({ label: "Quadtree surface seeds A", size: bytes, usage: seedUsage });
     this.seedsB = device.createBuffer({ label: "Quadtree surface seeds B", size: bytes, usage: seedUsage });
-    this.params = device.createBuffer({ label: "Quadtree surface parameters", size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Quadtree surface parameters", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.reductions = device.createBuffer({ label: "Quadtree level-set volume diagnostics", size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const volumeBand = 4 * cell.y;
     this.referenceVolumeCells = initialPhi.reduce((sum, value) => sum + Math.max(0, Math.min(1, 0.5 - value / volumeBand)), 0);
@@ -199,13 +318,21 @@ export class WebGPUQuadtreeSurfaceState {
     this.jumps.forEach((jump, index) => new Uint32Array(passData.buffer, index * this.passStride, 4).set([jump, 0, 0, 0]));
     this.passBuffer = device.createBuffer({ label: "Quadtree surface pass parameters", size: passData.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.passBuffer, 0, passData);
-    const group = (phiIn: GPUTexture, phiOut: GPUTexture, seedIn: GPUBuffer, seedOut: GPUBuffer) => device.createBindGroup({ layout: this.cache.layout, entries: [
+    // Bindings 8/9 (MacCormack predicted/reversed inputs) must never alias a
+    // group's storage output: WebGPU rejects sampled+writable usage of one
+    // texture in the same dispatch scope. Only `correct` reads them for real;
+    // every other group binds textures it does not write.
+    const group = (phiIn: GPUTexture, phiOut: GPUTexture, seedIn: GPUBuffer, seedOut: GPUBuffer, predicted: GPUTexture = this.predicted, reversed: GPUTexture = this.reversed) => device.createBindGroup({ layout: this.cache.layout, entries: [
       { binding: 0, resource: velocity.createView() }, { binding: 1, resource: phiIn.createView() }, { binding: 2, resource: phiOut.createView() },
       { binding: 3, resource: { buffer: seedIn } }, { binding: 4, resource: { buffer: seedOut } }, { binding: 5, resource: { buffer: this.params } },
-      { binding: 6, resource: { buffer: this.passBuffer, size: 16 } }, { binding: 7, resource: { buffer: this.reductions } }
+      { binding: 6, resource: { buffer: this.passBuffer, size: 16 } }, { binding: 7, resource: { buffer: this.reductions } },
+      { binding: 8, resource: predicted.createView() }, { binding: 9, resource: reversed.createView() }
     ] });
     this.groups = {
       advect: group(this.texture, this.scratch, this.seedsA, this.seedsB),
+      predict: group(this.texture, this.predicted, this.seedsA, this.seedsB, this.texture, this.texture),
+      reverse: group(this.predicted, this.reversed, this.seedsA, this.seedsB, this.predicted, this.predicted),
+      correct: group(this.texture, this.scratch, this.seedsA, this.seedsB),
       reduce: group(this.texture, this.scratch, this.seedsA, this.seedsB),
       seed: group(this.scratch, this.texture, this.seedsB, this.seedsA),
       jumpAB: group(this.scratch, this.texture, this.seedsA, this.seedsB),
@@ -215,19 +342,36 @@ export class WebGPUQuadtreeSurfaceState {
     };
   }
 
-  encode(encoder: GPUCommandEncoder, dt_s: number) {
+  encode(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState) {
     const { nx, ny, nz } = this.dims;
-    const parameterData = new ArrayBuffer(48);
+    const parameterData = new ArrayBuffer(128);
     new Uint32Array(parameterData, 0, 4).set([nx, ny, nz, 0]);
     new Float32Array(parameterData, 16, 4).set([this.cell.x, this.cell.y, this.cell.z, dt_s]);
     new Float32Array(parameterData, 32, 4).set([this.correctionSpeed, 0, 0, 0]);
+    new Float32Array(parameterData, 48, 4).set([this.cell.x, this.cell.y, this.cell.z, 0]);
+    new Float32Array(parameterData, 64, 4).set([this.cell.x * nx, this.cell.y * ny, this.cell.z * nz, 0]);
+    if (inflow) {
+      new Float32Array(parameterData, 80, 4).set([inflow.outletCenter_m.x, inflow.outletCenter_m.y, inflow.outletCenter_m.z, inflow.radius_m]);
+      new Float32Array(parameterData, 96, 4).set([inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z, inflow.apertureScale]);
+      new Float32Array(parameterData, 112, 4).set([inflow.strength, 0, 0, 0]);
+    }
     this.device.queue.writeBuffer(this.params, 0, parameterData);
     const dispatch = (pipeline: GPUComputePipeline, group: GPUBindGroup, offset = 0) => {
       const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, group, [offset]);
       pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); pass.end();
     };
-    dispatch(this.cache.pipelines.advectLevelSet, this.groups.advect);
-    encoder.copyTextureToTexture({ texture: this.scratch }, { texture: this.texture }, { width: nx, height: ny, depthOrArrayLayers: nz });
+    // Bounded-MacCormack transport (Narita Sec. 4.5 with the restricted
+    // method's BFECC correction), then a full sub-cell-preserving jump-flood
+    // redistance every step so downstream consumers (sizing, segmentation,
+    // Eq. 25 free-surface scale) always see a true signed-distance field.
+    dispatch(this.cache.pipelines.advectPredict, this.groups.predict);
+    dispatch(this.cache.pipelines.advectReverse, this.groups.reverse);
+    dispatch(this.cache.pipelines.advectCorrect, this.groups.correct);
+    dispatch(this.cache.pipelines.seedDistance, this.groups.seed);
+    this.jumps.forEach((_, index) => {
+      dispatch(this.cache.pipelines.jumpFlood, index % 2 === 0 ? this.groups.jumpAB : this.groups.jumpBA, index * this.passStride);
+    });
+    dispatch(this.cache.pipelines.finalizeDistance, this.jumps.length % 2 === 0 ? this.groups.finalizeA : this.groups.finalizeB);
     encoder.clearBuffer(this.reductions);
     dispatch(this.cache.pipelines.reduceVolume, this.groups.reduce);
   }
@@ -256,7 +400,7 @@ export class WebGPUQuadtreeSurfaceState {
   addReferenceVolumeCells(cells: number) { if (Number.isFinite(cells) && cells > 0) this.referenceVolumeCells += cells; }
 
   destroy() {
-    this.texture.destroy(); this.scratch.destroy(); this.seedsA.destroy(); this.seedsB.destroy(); this.params.destroy(); this.passBuffer.destroy(); this.reductions.destroy();
+    this.texture.destroy(); this.scratch.destroy(); this.predicted.destroy(); this.reversed.destroy(); this.seedsA.destroy(); this.seedsB.destroy(); this.params.destroy(); this.passBuffer.destroy(); this.reductions.destroy();
   }
 }
 
