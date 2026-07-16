@@ -140,10 +140,16 @@ paper:
 
 Known approximations inside the now-implemented features:
 
-- The default path does not currently reinitialize the resident level set.
-  The tested local port and available jump-flood variant both need
-  sub-cell-preserving adaptive treatment before they can avoid
-  cadence-boundary volume jumps.
+- The resident level set is transported with RK2 + bounded MacCormack and
+  redistanced every step by a jump flood measured against projected interface
+  points (16.6 fixed point per axis). The narrow band (|phi| < 2.5h) keeps
+  the advected phi verbatim, so redistancing never moves the interface; only
+  the far field is rebuilt, clamped at 5h. The point-cloud distance carries
+  sub-cell tangential ripple in the rebuilt far field.
+- Nozzle inflow feeds the resident level set directly (the restricted
+  method's phi clamp at inflow cells) and the projection re-imposes the
+  prescribed inflow velocity after the pressure gradient; the analytic
+  inflow volume still integrates into the volume-controller reference.
 - The GPU right-hand side evaluates the open-face fluid flux as
   `A x (average over all represented sub-faces)` of the staged velocity
   texture, whereas the CPU oracle open-weights each sub-face; velocities
