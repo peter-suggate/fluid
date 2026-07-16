@@ -101,11 +101,11 @@ alpha(phi) = clamp(0.5 - phi / h, 0, 1)
 When diagnostic readback completes, the next step uses
 
 ```text
-c = clamp(0.5 * (V_ref - V_phi) / (N_interface * (1/30 s)), -1/s, +1/s)
+c = clamp(0.5 * (V_ref - V_phi) / (N_interface * (1/30 s)), -30, +30) cells/s
 ```
 
-in cells with `|phi| < 1.5 h`; pressure RHS construction subtracts this
-correction from divergence. The method's `volumeControl` parameter and
+and applies `phi_next = phi_advected - c h dt` only where `|phi| < 1.5 h`.
+The method's `volumeControl` parameter and
 `FLUID_VOLUME_CONTROL=0|1` smoke override provide an A/B switch. This is a
 slow global controller, not exact conservative transport and not the local
 density correction from the mass-conserving paper.

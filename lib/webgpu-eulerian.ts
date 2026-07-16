@@ -77,9 +77,9 @@ export interface GPUEulerianInfo {
   rawVolumeDrift?:number;
   referenceLiquidVolume_cells?: number;
   phiInterfaceCellCount?: number;
-  volumeCorrectionDivergence_s?: number;
+  volumeCorrectionNormalSpeed_cells_s?: number;
   surfaceField?: "levelset";
-  /** Global interface-divergence volume controller. Defaults to enabled. */
+  /** Global normal level-set volume controller. Defaults to enabled. */
   volumeControl?: boolean;
   quadtreeLeafCount?: number;
   quadtreePressureSampleCount?: number;
@@ -137,7 +137,7 @@ export interface WebGPUEulerianSolverOptions {
   /** Restricted tall cells now use the paper's signed-distance surface.
    * Retained as an informational compatibility parameter. */
   surfaceField?: "levelset";
-  /** Apply the narrow-band global volume-error divergence controller on the
+  /** Apply the narrow-band global normal level-set volume controller on the
    * restricted tall-cell level set. Defaults to on. */
   volumeControl?: boolean;
   /** Tall-cell paper Sec 3.3.1 hierarchical velocity extrapolation beyond the
@@ -656,7 +656,7 @@ export class WebGPUEulerianSolver {
   private readonly hierarchicalExtrapolation: boolean;
   private readonly volumeControl: boolean;
   private referenceLiquidVolumeCells = 0;
-  private volumeCorrectionDivergence = 0;
+  private volumeCorrectionNormalSpeed = 0;
 
   constructor(private device: GPUDevice, readonly scene: SceneDescription, quality: GPUQuality, private onRigidLoads?: (loads: GPURigidLoad[]) => void, private readonly options:WebGPUEulerianSolverOptions={}) {
     this.layout=options.layoutOverride??createTallCellLayout(scene,quality,device.limits.maxTextureDimension3D,options.tallCellSettings);const {nx,packedNy,nz,fineNy}=this.layout;
@@ -754,7 +754,7 @@ export class WebGPUEulerianSolver {
   private initializeVolume(){
     const {nx,nz,packedNy,initialPhi,columnBases,initialVolumeCellSum,referenceLiquidVolume_cells}=this.layout,c=this.scene.container,dam=damBreakFractions(c.fillFraction);this.referenceLiquidVolumeCells=referenceLiquidVolume_cells;
     this.info.initialVolumeCellSum=initialVolumeCellSum;this.info.volumeCellSum=initialVolumeCellSum;this.info.representedVolumeCellSum=initialVolumeCellSum;this.info.representedVolumeDrift=0;this.info.volumeDrift=0;this.info.rawVolumeDrift=0;this.info.maxSpeed_m_s=0;this.info.maxDivergence_s=0;this.info.maxDivergenceBefore_s=0;this.info.maxDivergenceAfter_s=0;this.info.maxAirSpeed_m_s=0;this.info.maxPressure_Pa=0;this.info.pressureResidual=0;this.info.pressureRelativeResidual=0;this.info.maxComponentCfl=0;this.info.highCflCellCount=0;this.info.nonFiniteCount=0;this.info.stabilityFlags=[];this.info.front_m=this.scene.fluid.initialCondition==="dam-break"?-c.width_m/2+dam.width*c.width_m:c.width_m/2;
-    this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;this.info.volumeCorrectionDivergence_s=0;
+    this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;this.info.volumeCorrectionNormalSpeed_cells_s=0;
     const rowBytes=nx*4,padded=Math.ceil(rowBytes/256)*256,packed=new Uint8Array(padded*packedNy*nz),source=new Uint8Array(initialPhi.buffer,initialPhi.byteOffset,initialPhi.byteLength);
     for(let k=0;k<nz;k++)for(let j=0;j<packedNy;j++)packed.set(source.subarray(rowBytes*(j+packedNy*k),rowBytes*(j+packedNy*k+1)),padded*(j+packedNy*k));
     for(const texture of [this.volumeA,this.volumeB])this.device.queue.writeTexture({texture},packed,{bytesPerRow:padded,rowsPerImage:packedNy},{width:nx,height:packedNy,depthOrArrayLayers:nz});
@@ -778,7 +778,7 @@ export class WebGPUEulerianSolver {
     const substeps=Math.max(1,Math.min(8,Math.ceil(lastCfl/2)));
     const dt=delta/substeps;
     const activeBodies=bodies.slice(0,12),bodyData=new Float32Array(12*20),shapeIndex={sphere:0,box:1,capsule:2,cylinder:3} as const;activeBodies.forEach((body,index)=>{const o=index*20,d=body.description.dimensions_m,q=body.orientation;bodyData.set([body.position_m.x,body.position_m.y,body.position_m.z,shapeIndex[body.description.shape],d.x,d.y,d.z,boundingRadius(body),q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,0,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3],o);});this.device.queue.writeBuffer(this.rigidBuffer,0,bodyData);
-    const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;if(this.inflowBoundary){const cellVolume=h.x*h.y*h.z;this.referenceLiquidVolumeCells+=this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume;this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;}this.info.encodedSteps=(this.info.encodedSteps??0)+substeps;this.info.lastDt_s=dt;this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,dt,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,4*Math.min(h.x,h.y,h.z)/Math.max(this.scene.numerics.maxDt_s,1e-6),rho,this.scene.fluid.dynamicViscosity_Pa_s,0,this.volumeCorrectionDivergence,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,0,0,0]));
+    const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;if(this.inflowBoundary){const cellVolume=h.x*h.y*h.z;this.referenceLiquidVolumeCells+=this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume;this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;}this.info.encodedSteps=(this.info.encodedSteps??0)+substeps;this.info.lastDt_s=dt;this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,dt,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,4*Math.min(h.x,h.y,h.z)/Math.max(this.scene.numerics.maxDt_s,1e-6),rho,this.scene.fluid.dynamicViscosity_Pa_s,0,this.volumeCorrectionNormalSpeed,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,0,0,0]));
     this.querySegments=[];this.queryCount=0;if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"}),totalTiming=this.timing("total_ms");if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:totalTiming.start}});pass.end();}encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductionBuffer);
     for(let substep=0;substep<substeps;substep+=1){
       if(this.velocityHierarchy){
@@ -827,8 +827,8 @@ export class WebGPUEulerianSolver {
       this.info.representedVolumeCellSum=this.info.volumeCellSum;
       this.info.representedVolumeDrift=this.info.volumeDrift;
       this.info.phiInterfaceCellCount=words[7]/256;
-      this.volumeCorrectionDivergence=this.volumeControl?Math.max(-1,Math.min(1,0.5*(reference-this.info.volumeCellSum)/Math.max(this.info.phiInterfaceCellCount,1)/(1/30))):0;
-      this.info.volumeCorrectionDivergence_s=this.volumeCorrectionDivergence;
+      this.volumeCorrectionNormalSpeed=this.volumeControl?Math.max(-30,Math.min(30,0.5*(reference-this.info.volumeCellSum)/Math.max(this.info.phiInterfaceCellCount,1)/(1/30))):0;
+      this.info.volumeCorrectionNormalSpeed_cells_s=this.volumeCorrectionNormalSpeed;
       this.info.front_m=-this.scene.container.width_m/2+words[1]*this.scene.container.width_m/this.info.nx;
       this.info.maxSpeed_m_s=decodePositiveFloat(words[2]);
       this.info.maximumTallCellHeight=words[3];

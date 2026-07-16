@@ -11,7 +11,7 @@ const params: MethodParamSpec[] = [
   { kind: "number", key: "maximumNeighborDelta", label: "Neighbor base delta", unit: "cells", min: 2, max: 6, step: 1, digits: 0, default: 4, tier: "fine", hint: "Maximum tall-cell base step between adjacent columns." },
   { kind: "number", key: "maximumTallHeight", label: "Maximum tall height", unit: "cells", min: 3, max: 4096, step: 1, digits: 0, default: 4096, tier: "fine", hint: "Diagnostic ceiling on tall-cell height. Small values force near-cubic parity (Section 5 middle-face isolation); the default leaves remeshing free to claim the full depth below the surface band." },
   { kind: "number", key: "remeshInterval", label: "Remesh interval", unit: "steps", min: 1, max: 60, step: 1, digits: 0, default: 1, tier: "fine", hint: "Paper Algorithm 1 remeshes after advection on every step; larger values are diagnostic departures." },
-  { kind: "select", key: "volumeControl", label: "Volume control", default: "on", tier: "fine", options: [{ value: "on", label: "On" }, { value: "off", label: "Off (diagnostic)" }], hint: "Slow global interface-divergence correction for level-set volume drift; disable to measure free drift." }
+  { kind: "select", key: "volumeControl", label: "Volume control", default: "on", tier: "fine", options: [{ value: "on", label: "On" }, { value: "off", label: "Off (diagnostic)" }], hint: "Slow global normal level-set correction for the tall-cell paper's acknowledged water gain; disable to measure free drift." }
 ];
 
 export const tallCellMethod: SimulationMethod = {
