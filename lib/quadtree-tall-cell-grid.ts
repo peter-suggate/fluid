@@ -382,6 +382,11 @@ export function populateTallPressureGrid(
     // cells on both sides of a sign change, so ending each band at surfaceY
     // also retains the immediately adjacent air cell without doubling the
     // requested quarter-depth layer into the air phase.
+    // Narita Sec. 4.2 keeps cells cubic a few cells from the surface in BOTH
+    // directions; the upward air band also guarantees an advancing interface
+    // stays inside cubic cells while the pipelined topology is a couple of
+    // steps stale, instead of landing in a two-DOF tall air run.
+    const airBandCells = 2;
     for (const surfaceY of interfaceY) {
       let depthCells = opticalDepthCells;
       if (localDepthFraction !== undefined) {
@@ -392,6 +397,7 @@ export function populateTallPressureGrid(
         depthCells = Math.max(1, Math.ceil(localDepth * Math.max(0, localDepthFraction)));
       }
       for (let y = Math.max(0, surfaceY - depthCells + 1); y <= surfaceY; y += 1) cubic[y] = 1;
+      for (let y = surfaceY + 1; y <= Math.min(ny - 1, surfaceY + airBandCells); y += 1) if (columnPhi[y] >= 0) cubic[y] = 1;
     }
     let y = 0;
     while (y < ny) {
