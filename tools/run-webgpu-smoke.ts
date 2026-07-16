@@ -56,7 +56,7 @@ const opticalDepthOverride = process.env.FLUID_OPTICAL_DEPTH_FRACTION === undefi
 const rebuildTopologyOverride = process.env.FLUID_REBUILD_TOPOLOGY === undefined ? undefined : process.env.FLUID_REBUILD_TOPOLOGY !== "0";
 const maximumLeafSizeOverride = process.env.FLUID_MAXIMUM_LEAF_SIZE === undefined ? undefined : Number(process.env.FLUID_MAXIMUM_LEAF_SIZE);
 const quadtreePreconditionerOverride = process.env.FLUID_QUADTREE_PRECONDITIONER;
-if (quadtreePreconditionerOverride !== undefined && !["ic0", "jacobi", "line", "poly"].includes(quadtreePreconditionerOverride)) throw new Error("FLUID_QUADTREE_PRECONDITIONER must be ic0, jacobi, line, or poly");
+if (quadtreePreconditionerOverride !== undefined && !["ic0", "blockic", "jacobi", "line", "poly"].includes(quadtreePreconditionerOverride)) throw new Error("FLUID_QUADTREE_PRECONDITIONER must be ic0, blockic, jacobi, line, or poly");
 const pressurePhaseTimings = process.env.FLUID_PRESSURE_PHASE_TIMINGS === "1";
 const polynomialDegreeOverride = process.env.FLUID_POLYNOMIAL_DEGREE === undefined ? undefined : Number(process.env.FLUID_POLYNOMIAL_DEGREE);
 const velocityTransportOverride = process.env.FLUID_VELOCITY_TRANSPORT;
