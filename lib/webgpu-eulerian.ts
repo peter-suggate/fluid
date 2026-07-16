@@ -60,6 +60,8 @@ export interface GPUEulerianInfo {
   maxPressureLocation?: GPUFieldLocation;
   maxPressureResidualLocation?: GPUFieldLocation;
   lastDt_s?: number;
+  /** Level-set transport substeps encoded by the latest advance (1 when calm). */
+  lastSubsteps?: number;
   /** Latest GPU step submitted to the device queue. */
   submittedTime_s?: number;
   /** Latest GPU step encoded by the solver. */
@@ -138,6 +140,8 @@ export interface WebGPUEulerianSolverOptions {
   tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>;
   /** Multigrid refinement V-cycles after the initial full cycle. */
   pressureCycles?: number;
+  /** Reuse the previous frame's pressure as the fine-grid initial guess. */
+  pressureWarmStart?: boolean;
   /** Mass-Conserving Eulerian Liquid Simulation Sec 3.5 density sharpening
    * after conservative advection. Defaults to on. */
   densitySharpening?: boolean;
@@ -645,14 +649,16 @@ export class WebGPUEulerianSolver {
   private heightA: GPUTexture; private heightB: GPUTexture;
   private params: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
-  private extrapolatePipeline!:GPUComputePipeline;private predictPipeline!:GPUComputePipeline;private reversePipeline!:GPUComputePipeline;private clampPhiPipeline!:GPUComputePipeline;private reinitializePhiPipeline!:GPUComputePipeline;private advectPipeline!: GPUComputePipeline;private buildRhsPipeline!:GPUComputePipeline; private jacobiPipeline!: GPUComputePipeline; private projectPipeline!: GPUComputePipeline; private rigidPipeline!:GPUComputePipeline;private preReductionPipeline!:GPUComputePipeline;private reductionPipeline!:GPUComputePipeline;private planRemeshPipeline!:GPUComputePipeline;private smoothRemeshPipeline!:GPUComputePipeline;private remapPipeline!:GPUComputePipeline;
-  private shaderModule:GPUShaderModule;private pipelineLayout:GPUPipelineLayout;
-  private extrapolateFirstGroup:GPUBindGroup;private extrapolateSecondGroup:GPUBindGroup;private extrapolateBackGroup:GPUBindGroup;private phiABGroup:GPUBindGroup;private phiBAGroup:GPUBindGroup;private predictGroup:GPUBindGroup;private reverseGroup:GPUBindGroup;private advectGroup: GPUBindGroup;private pressureRhsGroup:GPUBindGroup; private jacobiABGroup: GPUBindGroup; private jacobiBAGroup: GPUBindGroup; private projectGroup: GPUBindGroup;private rigidGroup:GPUBindGroup; private reductionGroup:GPUBindGroup;private planRemeshGroup:GPUBindGroup;private smoothRemeshFirstGroup:GPUBindGroup;private smoothRemeshSecondGroup:GPUBindGroup;private remapGroup:GPUBindGroup;
+  private planBindGroupLayout:GPUBindGroupLayout;
+  private extrapolatePipeline!:GPUComputePipeline;private predictPipeline!:GPUComputePipeline;private reversePipeline!:GPUComputePipeline;private planSubstepsPipeline!:GPUComputePipeline;private transportPhiPipeline!:GPUComputePipeline;private clampPhiPipeline!:GPUComputePipeline;private reinitializePhiPipeline!:GPUComputePipeline;private advectPipeline!: GPUComputePipeline;private buildRhsPipeline!:GPUComputePipeline; private jacobiPipeline!: GPUComputePipeline; private projectPipeline!: GPUComputePipeline; private rigidPipeline!:GPUComputePipeline;private preReductionPipeline!:GPUComputePipeline;private reductionPipeline!:GPUComputePipeline;private planRemeshPipeline!:GPUComputePipeline;private smoothRemeshPipeline!:GPUComputePipeline;private remapPipeline!:GPUComputePipeline;
+  private shaderModule:GPUShaderModule;private pipelineLayout:GPUPipelineLayout;private planPipelineLayout:GPUPipelineLayout;
+  private planSubstepsGroup:GPUBindGroup;private extrapolateFirstGroup:GPUBindGroup;private extrapolateSecondGroup:GPUBindGroup;private extrapolateBackGroup:GPUBindGroup;private phiABGroup:GPUBindGroup;private phiBAGroup:GPUBindGroup;private predictGroup:GPUBindGroup;private reverseGroup:GPUBindGroup;private advectGroup: GPUBindGroup;private pressureRhsGroup:GPUBindGroup; private jacobiABGroup: GPUBindGroup; private jacobiBAGroup: GPUBindGroup; private projectGroup: GPUBindGroup;private rigidGroup:GPUBindGroup; private reductionGroup:GPUBindGroup;private planRemeshGroup:GPUBindGroup;private smoothRemeshFirstGroup:GPUBindGroup;private smoothRemeshSecondGroup:GPUBindGroup;private remapGroup:GPUBindGroup;
   private multigrid:TallCellMultigrid;
   private velocityHierarchy?:TallCellVelocityHierarchy;
-  private reductionBuffer:GPUBuffer;private rigidBuffer:GPUBuffer;private rigidExchangeBuffer:GPUBuffer;private nextColumnBases:GPUBuffer;private smoothedColumnBases:GPUBuffer;private querySet?:GPUQuerySet;private queryResolve?:GPUBuffer;
+  private reductionBuffer:GPUBuffer;private governorBuffer:GPUBuffer;private phiDispatchBuffer:GPUBuffer;private rigidBuffer:GPUBuffer;private rigidExchangeBuffer:GPUBuffer;private nextColumnBases:GPUBuffer;private smoothedColumnBases:GPUBuffer;private querySet?:GPUQuerySet;private queryResolve?:GPUBuffer;
   private querySegments: Array<{name:keyof NonNullable<GPUEulerianInfo["gpuTimings"]>;start:number;end:number}>=[];private queryCount=0;
   private lastTime = 0;
+  private lastFrameDt = 0;
   private readbackPending = false;
   private rigidReadbackPending = false;
   private wallTimingPending = false;
@@ -662,12 +668,13 @@ export class WebGPUEulerianSolver {
   private readonly velocityTransport: GPUVelocityTransport;
   private readonly hierarchicalExtrapolation: boolean;
   private readonly volumeControl: boolean;
+  private readonly pressureWarmStart:boolean;
   private referenceLiquidVolumeCells = 0;
   private volumeCorrectionNormalSpeed = 0;
 
   constructor(private device: GPUDevice, readonly scene: SceneDescription, quality: GPUQuality, private onRigidLoads?: (loads: GPURigidLoad[]) => void, private readonly options:WebGPUEulerianSolverOptions={}) {
     this.layout=options.layoutOverride??createTallCellLayout(scene,quality,device.limits.maxTextureDimension3D,options.tallCellSettings);const {nx,packedNy,nz,fineNy}=this.layout;
-    this.velocityTransport=options.velocityTransport??"maccormack";this.hierarchicalExtrapolation=options.hierarchicalExtrapolation??true;this.volumeControl=options.volumeControl??true;
+    this.velocityTransport=options.velocityTransport??"maccormack";this.hierarchicalExtrapolation=options.hierarchicalExtrapolation??true;this.volumeControl=options.volumeControl??true;this.pressureWarmStart=options.pressureWarmStart??false;
     this.inflowBoundary=scene.fluid.inflow?createInflowGridBoundary(scene.fluid.inflow,scene.container,[nx,fineNy,nz]):undefined;
     const usage=GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST;
     const texture=(format: GPUTextureFormat)=>device.createTexture({size:[nx,packedNy,nz],dimension:"3d",format,usage});
@@ -675,6 +682,9 @@ export class WebGPUEulerianSolver {
     this.heightA=device.createTexture({label:"Tall-cell column bases A",size:[nx,nz],format:"r32float",usage});this.heightB=device.createTexture({label:"Tall-cell column bases B",size:[nx,nz],format:"r32float",usage});
     this.params=device.createBuffer({size:144,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.reductionBuffer=device.createBuffer({size:128,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+    this.governorBuffer=device.createBuffer({label:"Tall-cell phi governor",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+    this.phiDispatchBuffer=device.createBuffer({label:"Tall-cell phi indirect dispatches",size:8*16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT});
+    device.queue.writeBuffer(this.governorBuffer,0,new Uint32Array(4));
     this.rigidBuffer=device.createBuffer({size:12*80,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     this.rigidExchangeBuffer=device.createBuffer({size:12*8*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     if(device.features.has("timestamp-query")){this.querySet=device.createQuerySet({type:"timestamp",count:160});this.queryResolve=device.createBuffer({size:160*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
@@ -703,13 +713,21 @@ export class WebGPUEulerianSolver {
       ,{binding:14,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}}
       ,{binding:15,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}}
       ,{binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}
+      ,{binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}
     ]});
     this.pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[this.bindGroupLayout]});
+    this.planBindGroupLayout=device.createBindGroupLayout({entries:[
+      {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+      {binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:18,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}
+    ]});
+    this.planPipelineLayout=device.createPipelineLayout({bindGroupLayouts:[this.planBindGroupLayout]});
+    this.planSubstepsGroup=device.createBindGroup({layout:this.planBindGroupLayout,entries:[{binding:6,resource:{buffer:this.params}},{binding:17,resource:{buffer:this.governorBuffer}},{binding:18,resource:{buffer:this.phiDispatchBuffer}}]});
     if(!options.deferPipelineCompilation){this.createPipelinesSync();void device.popErrorScope().then(error=>{if(error)console.error(`Tall-cell pipeline creation: ${error.message}`);}).catch(()=>{ /* Device loss is handled by the renderer. */ });}
     if(this.hierarchicalExtrapolation)this.velocityHierarchy=new TallCellVelocityHierarchy(device,this.layout,this.velocityC,this.velocityD,this.heightA);
     this.multigrid=new TallCellMultigrid(device,this.layout,{pressureA:this.pressureA,pressureB:this.pressureB,volume:this.volumeA,solid:this.solidA,base:this.heightA,diagnostics:this.reductionBuffer},options.pressureCycles??2,options.deferPipelineCompilation);
-    const pressureIterations=1,cellSize=this.layout.cellSize_m,columnCount=nx*nz,allocatedBytes=this.layout.packedSampleCount*76+columnCount*12+128+12*80+12*8*4+this.multigrid.allocatedBytes;
-    this.info={nx,ny:fineNy,nz,storedNy:packedNy,cellCount:this.layout.packedSampleCount,equivalentUniformCells:this.layout.equivalentUniformCellCount,compressionRatio:this.layout.compressionRatio,activeCompressionRatio:this.layout.activeCompressionRatio,activeSampleCount:this.layout.activeSampleCount,regularLayers:this.layout.settings.regularLayers,maximumNeighborDelta:this.layout.settings.maximumNeighborDelta,gridKind:"restricted-tall-cell",surfaceField:"levelset",cellSize_m:Math.min(cellSize.x,cellSize.y,cellSize.z),pressureIterations,pressureSolver:`1 full + ${this.multigrid.refinementCycles} V-cycles · ${this.multigrid.levelCount} levels · RBGS`,allocatedBytes,quality,encodedSteps:0,submittedTime_s:0,simulatedTime_s:0,completedTime_s:0,simulationLag_s:0};
+    const pressureIterations=1,cellSize=this.layout.cellSize_m,columnCount=nx*nz,allocatedBytes=this.layout.packedSampleCount*76+columnCount*12+128+16+8*16+12*80+12*8*4+this.multigrid.allocatedBytes;
+    this.info={nx,ny:fineNy,nz,storedNy:packedNy,cellCount:this.layout.packedSampleCount,equivalentUniformCells:this.layout.equivalentUniformCellCount,compressionRatio:this.layout.compressionRatio,activeCompressionRatio:this.layout.activeCompressionRatio,activeSampleCount:this.layout.activeSampleCount,regularLayers:this.layout.settings.regularLayers,maximumNeighborDelta:this.layout.settings.maximumNeighborDelta,gridKind:"restricted-tall-cell",surfaceField:"levelset",cellSize_m:Math.min(cellSize.x,cellSize.y,cellSize.z),pressureIterations,pressureSolver:this.pressureWarmStart?`warm ${this.multigrid.refinementCycles} V-cycles · ${this.multigrid.levelCount} levels · RBGS`:`1 full + ${this.multigrid.refinementCycles} V-cycles · ${this.multigrid.levelCount} levels · RBGS`,allocatedBytes,quality,encodedSteps:0,submittedTime_s:0,simulatedTime_s:0,completedTime_s:0,simulationLag_s:0};
     this.initializeVolume();
     this.extrapolateFirstGroup=this.group(this.velocityA,this.velocityD,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
     this.extrapolateSecondGroup=this.group(this.velocityD,this.velocityC,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
@@ -728,24 +746,25 @@ export class WebGPUEulerianSolver {
     this.planRemeshGroup=this.group(this.velocityB,this.velocityA,this.pressureA,this.pressureB,this.volumeB,this.volumeA,this.heightA,this.heightB);
     this.smoothRemeshFirstGroup=this.group(this.velocityB,this.velocityA,this.pressureA,this.pressureB,this.volumeB,this.volumeA,this.heightA,this.heightB,this.velocityB,this.velocityB,this.solidA,this.nextColumnBases,this.smoothedColumnBases);
     this.smoothRemeshSecondGroup=this.group(this.velocityB,this.velocityA,this.pressureA,this.pressureB,this.volumeB,this.volumeA,this.heightA,this.heightB,this.velocityB,this.velocityB,this.solidA,this.smoothedColumnBases,this.nextColumnBases);
-    this.remapGroup=this.group(this.velocityB,this.velocityA,this.pressureB,this.pressureA,this.volumeB,this.volumeA,this.heightA,this.heightB);
+    this.remapGroup=this.group(this.velocityB,this.velocityA,this.pressureA,this.pressureB,this.volumeB,this.volumeA,this.heightA,this.heightB);
   }
 
-  private pipelineDescriptor(entryPoint:string):GPUComputePipelineDescriptor{return{layout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};}
-  private createPipelinesSync(){const pipeline=(entryPoint:string)=>this.device.createComputePipeline(this.pipelineDescriptor(entryPoint));this.extrapolatePipeline=pipeline("extrapolateVelocity");this.predictPipeline=pipeline("predictVelocity");this.reversePipeline=pipeline("reverseVelocity");this.clampPhiPipeline=pipeline("clampPhi");this.reinitializePhiPipeline=pipeline("reinitializePhi");this.advectPipeline=pipeline(this.velocityTransport==="maccormack"?"finishAdvection":"finishSemiLagrangianAdvection");this.buildRhsPipeline=pipeline("buildPressureRhs");this.jacobiPipeline=pipeline("jacobi");this.projectPipeline=pipeline("project");this.rigidPipeline=pipeline("coupleRigid");this.preReductionPipeline=pipeline("reduceBeforeProjection");this.reductionPipeline=pipeline("reduceDiagnostics");this.planRemeshPipeline=pipeline("planRemesh");this.smoothRemeshPipeline=pipeline("smoothRemesh");this.remapPipeline=pipeline("remap");}
+  private pipelineDescriptor(entryPoint:string):GPUComputePipelineDescriptor{return{layout:entryPoint==="planSubsteps"?this.planPipelineLayout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};}
+  private createPipelinesSync(){const pipeline=(entryPoint:string)=>this.device.createComputePipeline(this.pipelineDescriptor(entryPoint));this.extrapolatePipeline=pipeline("extrapolateVelocity");this.predictPipeline=pipeline("predictVelocity");this.reversePipeline=pipeline("reverseVelocity");this.planSubstepsPipeline=pipeline("planSubsteps");this.transportPhiPipeline=pipeline("transportPhi");this.clampPhiPipeline=pipeline("clampPhi");this.reinitializePhiPipeline=pipeline("reinitializePhi");this.advectPipeline=pipeline(this.velocityTransport==="maccormack"?"finishAdvection":"finishSemiLagrangianAdvection");this.buildRhsPipeline=pipeline("buildPressureRhs");this.jacobiPipeline=pipeline("jacobi");this.projectPipeline=pipeline("project");this.rigidPipeline=pipeline("coupleRigid");this.preReductionPipeline=pipeline("reduceBeforeProjection");this.reductionPipeline=pipeline("reduceDiagnostics");this.planRemeshPipeline=pipeline("planRemesh");this.smoothRemeshPipeline=pipeline("smoothRemesh");this.remapPipeline=pipeline("remap");}
   static async createAsync(device:GPUDevice,scene:SceneDescription,quality:GPUQuality,onRigidLoads:((loads:GPURigidLoad[])=>void)|undefined,options:WebGPUEulerianSolverOptions,onProgress:(label:string,completed:number,total:number)=>void){const solver=new WebGPUEulerianSolver(device,scene,quality,onRigidLoads,{...options,deferPipelineCompilation:true});await solver.initializePipelines(onProgress);return solver;}
   private async initializePipelines(onProgress:(label:string,completed:number,total:number)=>void){
     const definitions=[
       ["Extrapolate velocity","extrapolateVelocity"],["Predict velocity","predictVelocity"],["Reverse velocity","reverseVelocity"],
-      ["Clamp level set","clampPhi"],["Reinitialize level set","reinitializePhi"],
-      ["Advect velocity and level set",this.velocityTransport==="maccormack"?"finishAdvection":"finishSemiLagrangianAdvection"],
+      ["Transport level set","transportPhi"],["Clamp level set","clampPhi"],["Reinitialize level set","reinitializePhi"],
+      ["Advect velocity",this.velocityTransport==="maccormack"?"finishAdvection":"finishSemiLagrangianAdvection"],
       ["Build pressure right-hand side","buildPressureRhs"],["Pressure relaxation","jacobi"],["Project velocity","project"],
       ["Couple rigid bodies","coupleRigid"],["Pre-projection diagnostics","reduceBeforeProjection"],["Fluid diagnostics","reduceDiagnostics"],
-      ["Plan tall-cell remesh","planRemesh"],["Smooth remesh plan","smoothRemesh"],["Remap tall cells","remap"]
+      ["Plan tall-cell remesh","planRemesh"],["Smooth remesh plan","smoothRemesh"],["Remap tall cells","remap"],
+      ["Plan phi substeps","planSubsteps"]
     ] as const;
     const total=definitions.length+11,compiled:GPUComputePipeline[]=[];
     for(let index=0;index<definitions.length;index+=1){const [label,entryPoint]=definitions[index];onProgress(label,index,total);compiled.push(await this.device.createComputePipelineAsync(this.pipelineDescriptor(entryPoint)));onProgress(label,index+1,total);}
-    this.extrapolatePipeline=compiled[0];this.predictPipeline=compiled[1];this.reversePipeline=compiled[2];this.clampPhiPipeline=compiled[3];this.reinitializePhiPipeline=compiled[4];this.advectPipeline=compiled[5];this.buildRhsPipeline=compiled[6];this.jacobiPipeline=compiled[7];this.projectPipeline=compiled[8];this.rigidPipeline=compiled[9];this.preReductionPipeline=compiled[10];this.reductionPipeline=compiled[11];this.planRemeshPipeline=compiled[12];this.smoothRemeshPipeline=compiled[13];this.remapPipeline=compiled[14];
+    this.extrapolatePipeline=compiled[0];this.predictPipeline=compiled[1];this.reversePipeline=compiled[2];this.transportPhiPipeline=compiled[3];this.clampPhiPipeline=compiled[4];this.reinitializePhiPipeline=compiled[5];this.advectPipeline=compiled[6];this.buildRhsPipeline=compiled[7];this.jacobiPipeline=compiled[8];this.projectPipeline=compiled[9];this.rigidPipeline=compiled[10];this.preReductionPipeline=compiled[11];this.reductionPipeline=compiled[12];this.planRemeshPipeline=compiled[13];this.smoothRemeshPipeline=compiled[14];this.remapPipeline=compiled[15];this.planSubstepsPipeline=compiled[16];
     await this.multigrid.initializePipelines(onProgress,definitions.length,total);
   }
 
@@ -770,42 +789,40 @@ export class WebGPUEulerianSolver {
     for(const texture of [this.heightA,this.heightB])this.device.queue.writeTexture({texture},basePacked,{bytesPerRow:padded,rowsPerImage:nz},{width:nx,height:nz});
   }
 
-  private group(velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture, pressureOut: GPUTexture, volumeIn: GPUTexture, volumeOut: GPUTexture,heightIn:GPUTexture,heightOut:GPUTexture,predictedVelocity:GPUTexture=velocityIn,reversedVelocity:GPUTexture=velocityIn,solidIn:GPUTexture=this.solidA,columnPlanIn:GPUBuffer=this.nextColumnBases,columnPlanOut:GPUBuffer=this.smoothedColumnBases){return this.device.createBindGroup({layout:this.bindGroupLayout,entries:[{binding:0,resource:velocityIn.createView()},{binding:1,resource:velocityOut.createView()},{binding:2,resource:pressureIn.createView()},{binding:3,resource:pressureOut.createView()},{binding:4,resource:volumeIn.createView()},{binding:5,resource:volumeOut.createView()},{binding:6,resource:{buffer:this.params}},{binding:7,resource:heightIn.createView()},{binding:8,resource:heightOut.createView()},{binding:9,resource:{buffer:this.reductionBuffer}},{binding:10,resource:{buffer:this.rigidBuffer}},{binding:11,resource:{buffer:this.rigidExchangeBuffer}},{binding:12,resource:{buffer:columnPlanIn}},{binding:13,resource:predictedVelocity.createView()},{binding:14,resource:reversedVelocity.createView()},{binding:15,resource:solidIn.createView()},{binding:16,resource:{buffer:columnPlanOut}}]});}
+  private group(velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture, pressureOut: GPUTexture, volumeIn: GPUTexture, volumeOut: GPUTexture,heightIn:GPUTexture,heightOut:GPUTexture,predictedVelocity:GPUTexture=velocityIn,reversedVelocity:GPUTexture=velocityIn,solidIn:GPUTexture=this.solidA,columnPlanIn:GPUBuffer=this.nextColumnBases,columnPlanOut:GPUBuffer=this.smoothedColumnBases){return this.device.createBindGroup({layout:this.bindGroupLayout,entries:[{binding:0,resource:velocityIn.createView()},{binding:1,resource:velocityOut.createView()},{binding:2,resource:pressureIn.createView()},{binding:3,resource:pressureOut.createView()},{binding:4,resource:volumeIn.createView()},{binding:5,resource:volumeOut.createView()},{binding:6,resource:{buffer:this.params}},{binding:7,resource:heightIn.createView()},{binding:8,resource:heightOut.createView()},{binding:9,resource:{buffer:this.reductionBuffer}},{binding:10,resource:{buffer:this.rigidBuffer}},{binding:11,resource:{buffer:this.rigidExchangeBuffer}},{binding:12,resource:{buffer:columnPlanIn}},{binding:13,resource:predictedVelocity.createView()},{binding:14,resource:reversedVelocity.createView()},{binding:15,resource:solidIn.createView()},{binding:16,resource:{buffer:columnPlanOut}},{binding:17,resource:{buffer:this.governorBuffer}}]});}
   private dispatch(pass: GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(this.info.nx/4),Math.ceil(this.info.storedNy/4),Math.ceil(this.info.nz/4));}
+  private dispatchPhiIndirect(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup,slot:number){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroupsIndirect(this.phiDispatchBuffer,slot*16);}
   private dispatchColumns(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(this.info.nx/8),Math.ceil(this.info.nz/8));}
   private timing(name:keyof NonNullable<GPUEulerianInfo["gpuTimings"]>){if(!this.querySet)return undefined;const segment={name,start:this.queryCount++,end:this.queryCount++};this.querySegments.push(segment);return segment;}
 
   advanceTo(time_s:number,bodies:RigidBodyState[]=[]){
     const advance=planGPUAdvance(time_s,this.lastTime,this.scene.numerics.maxDt_s);if(!advance)return false;const delta=advance.dt_s;if(delta<1e-6){this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;return true;}this.lastTime=advance.nextTime_s;this.info.submittedTime_s=this.lastTime;this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;const c=this.scene.container,rho=this.scene.fluid.density_kg_m3,sigma=0;
-    // Keep the established adaptive subdivision for violent velocity
-    // transients. Phi advection itself is unconditionally stable
-    // semi-Lagrangian, but projection and rigid coupling still benefit from
-    // a bounded component displacement.
-    const lastCfl=this.info.maxComponentCfl??0;
-    const substeps=Math.max(1,Math.min(8,Math.ceil(lastCfl/2)));
-    const dt=delta/substeps;
+    // The signed-distance interface retains adaptive transport subdivision,
+    // while the expensive momentum, coupling, and pressure stages run once
+    // for the CPU-planned frame delta. The absolute speed rail remains based
+    // on maxDt_s, so changing this subdivision cannot relax that guard.
+    this.lastFrameDt=delta;
     const activeBodies=bodies.slice(0,12),bodyData=new Float32Array(12*20),shapeIndex={sphere:0,box:1,capsule:2,cylinder:3} as const;activeBodies.forEach((body,index)=>{const o=index*20,d=body.description.dimensions_m,q=body.orientation;bodyData.set([body.position_m.x,body.position_m.y,body.position_m.z,shapeIndex[body.description.shape],d.x,d.y,d.z,boundingRadius(body),q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,0,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3],o);});this.device.queue.writeBuffer(this.rigidBuffer,0,bodyData);
-    const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;if(this.inflowBoundary){const cellVolume=h.x*h.y*h.z;this.referenceLiquidVolumeCells+=this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume;this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;}this.info.encodedSteps=(this.info.encodedSteps??0)+substeps;this.info.lastDt_s=dt;this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,dt,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,4*Math.min(h.x,h.y,h.z)/Math.max(this.scene.numerics.maxDt_s,1e-6),rho,this.scene.fluid.dynamicViscosity_Pa_s,0,this.volumeCorrectionNormalSpeed,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,0,0,0]));
-    this.querySegments=[];this.queryCount=0;if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"}),totalTiming=this.timing("total_ms");if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:totalTiming.start}});pass.end();}encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductionBuffer);
-    for(let substep=0;substep<substeps;substep+=1){
-      if(this.velocityHierarchy){
-        // Paper Sec 3.3: two fine narrow-band passes (standing in for the
-        // Jeong et al. Eikonal band), then the Eq 8/9 grid hierarchy fills
-        // every remaining sample. Seed ends in velocityC; the hierarchy's
-        // fully extrapolated field lands in velocityD.
-        {const pass=encoder.beginComputePass();this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);pass.end();}
-        {const pass=encoder.beginComputePass();this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);pass.end();}
-        this.velocityHierarchy.encode(encoder);
-        encoder.copyTextureToTexture({texture:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);
-      }else{const passes=Math.max(2,s.airHalo);for(let passIndex=0;passIndex<passes;passIndex+=1){const pass=encoder.beginComputePass();if(passIndex===0)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);else if(passIndex%2===1)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);else this.dispatch(pass,this.extrapolatePipeline,this.extrapolateBackGroup);pass.end();}encoder.copyTextureToTexture({texture:passes%2===0?this.velocityC:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
-      {const clamp=encoder.beginComputePass();this.dispatch(clamp,this.clampPhiPipeline,this.phiABGroup);clamp.end();if(substep===0&&this.stepIndex%10===0){const first=encoder.beginComputePass();this.dispatch(first,this.reinitializePhiPipeline,this.phiBAGroup);first.end();const second=encoder.beginComputePass();this.dispatch(second,this.reinitializePhiPipeline,this.phiABGroup);second.end();encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}else{encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}}
-      {const timing=this.timing("advection_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatch(pass,this.predictPipeline,this.predictGroup);pass.end();if(this.velocityTransport==="maccormack"){const reverse=encoder.beginComputePass();this.dispatch(reverse,this.reversePipeline,this.reverseGroup);reverse.end();}const finish=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(finish,this.advectPipeline,this.advectGroup);finish.end();encoder.copyTextureToTexture({texture:this.velocityD},{texture:this.velocityB},[this.info.nx,this.info.storedNy,this.info.nz]);}
-      if(substep===substeps-1&&this.stepIndex>0&&this.stepIndex%s.remeshInterval===0){const plan=encoder.beginComputePass();this.dispatchColumns(plan,this.planRemeshPipeline,this.planRemeshGroup);plan.end();for(let passIndex=0;passIndex<8;passIndex+=1){const smooth=encoder.beginComputePass();this.dispatchColumns(smooth,this.smoothRemeshPipeline,passIndex%2===0?this.smoothRemeshFirstGroup:this.smoothRemeshSecondGroup);smooth.end();}const remap=encoder.beginComputePass();this.dispatch(remap,this.remapPipeline,this.remapGroup);remap.end();encoder.copyTextureToTexture({texture:this.heightB},{texture:this.heightA},[this.info.nx,this.info.nz,1]);}else{const extent:[number,number,number]=[this.info.nx,this.info.storedNy,this.info.nz];encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},extent);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},extent);}
-      {const timing=this.timing("rigidCoupling_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.rigidPipeline,this.rigidGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
-      {const pass=encoder.beginComputePass();this.dispatch(pass,this.preReductionPipeline,this.reductionGroup);pass.end();}
-      {const timing=this.timing("pressure_ms");const rhs=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder);if(timing&&this.querySet){const end=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}});end.end();}}
-      {const timing=this.timing("projection_ms");encoder.copyTextureToTexture({texture:this.velocityA},{texture:this.velocityC},[this.info.nx,this.info.storedNy,this.info.nz]);const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}
-    }
+    const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;if(this.inflowBoundary){const cellVolume=h.x*h.y*h.z;this.referenceLiquidVolumeCells+=this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume;this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;}this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,delta,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,4*Math.min(h.x,h.y,h.z)/Math.max(this.scene.numerics.maxDt_s,1e-6),rho,this.scene.fluid.dynamicViscosity_Pa_s,0,this.volumeCorrectionNormalSpeed,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,0,0,0]));
+    this.querySegments=[];this.queryCount=0;if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"}),totalTiming=this.timing("total_ms");if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:totalTiming.start}});pass.end();}{const plan=encoder.beginComputePass({label:"Plan phi substeps"});plan.setPipeline(this.planSubstepsPipeline);plan.setBindGroup(0,this.planSubstepsGroup);plan.dispatchWorkgroups(1);plan.end();}encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductionBuffer);
+    if(this.velocityHierarchy){
+      // The hierarchy fills the whole packed field. The fallback's eight-cell
+      // halo also exceeds the four-cell full-frame speed rail.
+      {const pass=encoder.beginComputePass();this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);pass.end();}
+      {const pass=encoder.beginComputePass();this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);pass.end();}
+      this.velocityHierarchy.encode(encoder);
+      encoder.copyTextureToTexture({texture:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);
+    }else{const passes=Math.max(2,s.airHalo);for(let passIndex=0;passIndex<passes;passIndex+=1){const pass=encoder.beginComputePass();if(passIndex===0)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);else if(passIndex%2===1)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);else this.dispatch(pass,this.extrapolatePipeline,this.extrapolateBackGroup);pass.end();}encoder.copyTextureToTexture({texture:passes%2===0?this.velocityC:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    if(this.stepIndex%10===0){const first=encoder.beginComputePass();this.dispatch(first,this.reinitializePhiPipeline,this.phiABGroup);first.end();const second=encoder.beginComputePass();this.dispatch(second,this.reinitializePhiPipeline,this.phiBAGroup);second.end();}
+    const advectionTiming=this.timing("advection_ms");
+    for(let slot=0;slot<8;slot+=1){const transport=encoder.beginComputePass(slot===0&&advectionTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:advectionTiming.start}}:undefined);this.dispatchPhiIndirect(transport,this.transportPhiPipeline,this.phiABGroup,slot);transport.end();const clamp=encoder.beginComputePass();this.dispatchPhiIndirect(clamp,this.clampPhiPipeline,this.phiBAGroup,slot);clamp.end();}
+    {const pass=encoder.beginComputePass();this.dispatch(pass,this.predictPipeline,this.predictGroup);pass.end();if(this.velocityTransport==="maccormack"){const reverse=encoder.beginComputePass();this.dispatch(reverse,this.reversePipeline,this.reverseGroup);reverse.end();}const finish=encoder.beginComputePass(advectionTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:advectionTiming.end}}:undefined);this.dispatch(finish,this.advectPipeline,this.advectGroup);finish.end();encoder.copyTextureToTexture({texture:this.velocityD},{texture:this.velocityB},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    const remeshed=this.stepIndex>0&&this.stepIndex%s.remeshInterval===0;
+    if(remeshed){const extent:[number,number,number]=[this.info.nx,this.info.storedNy,this.info.nz];encoder.copyTextureToTexture({texture:this.volumeA},{texture:this.volumeB},extent);const plan=encoder.beginComputePass();this.dispatchColumns(plan,this.planRemeshPipeline,this.planRemeshGroup);plan.end();for(let passIndex=0;passIndex<8;passIndex+=1){const smooth=encoder.beginComputePass();this.dispatchColumns(smooth,this.smoothRemeshPipeline,passIndex%2===0?this.smoothRemeshFirstGroup:this.smoothRemeshSecondGroup);smooth.end();}const remap=encoder.beginComputePass();this.dispatch(remap,this.remapPipeline,this.remapGroup);remap.end();if(this.pressureWarmStart)encoder.copyTextureToTexture({texture:this.pressureB},{texture:this.pressureA},extent);encoder.copyTextureToTexture({texture:this.heightB},{texture:this.heightA},[this.info.nx,this.info.nz,1]);}else{encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    {const timing=this.timing("rigidCoupling_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.rigidPipeline,this.rigidGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    {const pass=encoder.beginComputePass();this.dispatch(pass,this.preReductionPipeline,this.reductionGroup);pass.end();}
+    {const timing=this.timing("pressure_ms");const rhs=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder,{warmStart:this.pressureWarmStart&&this.stepIndex>0,topologyChanged:this.stepIndex===0||remeshed});if(timing&&this.querySet){const end=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}});end.end();}}
+    {const timing=this.timing("projection_ms");encoder.copyTextureToTexture({texture:this.velocityA},{texture:this.velocityC},[this.info.nx,this.info.storedNy,this.info.nz]);const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}
     this.stepIndex+=1;
     {const timing=this.timing("diagnostics_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:totalTiming.end}});pass.end();}if(this.querySet&&this.queryResolve&&this.queryCount>0)encoder.resolveQuerySet(this.querySet,0,this.queryCount,this.queryResolve,0);
     let exchangeReadback:GPUBuffer|undefined;if(activeBodies.length>0&&this.onRigidLoads&&!this.rigidReadbackPending){this.rigidReadbackPending=true;exchangeReadback=this.device.createBuffer({size:12*8*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.rigidExchangeBuffer,0,exchangeReadback,0,12*8*4);}
@@ -814,18 +831,19 @@ export class WebGPUEulerianSolver {
   }
 
   async readStats(){
-    if((this.info.encodedSteps??0)===0)return this.info;
+    if(this.stepIndex===0)return this.info;
     if(this.readbackPending)return this.info;
     this.readbackPending=true;
-    const diagnosticBytes=128,querySegments=[...this.querySegments],queryBytes=this.queryResolve?this.queryCount*8:0;
-    const buffer=this.device.createBuffer({size:diagnosticBytes+queryBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    const diagnosticBytes=128,governorBytes=16,queryOffset=diagnosticBytes+governorBytes,querySegments=[...this.querySegments],queryBytes=this.queryResolve?this.queryCount*8:0;
+    const buffer=this.device.createBuffer({size:queryOffset+queryBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
     const encoder=this.device.createCommandEncoder();
     encoder.copyBufferToBuffer(this.reductionBuffer,0,buffer,0,diagnosticBytes);
-    if(this.queryResolve&&queryBytes>0)encoder.copyBufferToBuffer(this.queryResolve,0,buffer,diagnosticBytes,queryBytes);
+    encoder.copyBufferToBuffer(this.governorBuffer,0,buffer,diagnosticBytes,governorBytes);
+    if(this.queryResolve&&queryBytes>0)encoder.copyBufferToBuffer(this.queryResolve,0,buffer,queryOffset,queryBytes);
     this.device.queue.submit([encoder.finish()]);
     try{
       await buffer.mapAsync(GPUMapMode.READ);
-      const words=new Uint32Array(buffer.getMappedRange(0,diagnosticBytes)),reference=Math.max(1,this.referenceLiquidVolumeCells);
+      const words=new Uint32Array(buffer.getMappedRange(0,diagnosticBytes)),governorWords=new Uint32Array(buffer.getMappedRange(diagnosticBytes,governorBytes)),reference=Math.max(1,this.referenceLiquidVolumeCells);
       const decodePositiveFloat=(word:number)=>new Float32Array(new Uint32Array([word]).buffer)[0];
       const location=(slot:number):GPUFieldLocation=>({x:words[slot],y:words[slot+1],z:words[slot+2]});
       this.info.volumeCellSum=words[0]/256;
@@ -857,12 +875,13 @@ export class WebGPUEulerianSolver {
       this.info.maxPressureResidualLocation=location(27);
       this.info.maxComponentCfl=decodePositiveFloat(words[30]);
       this.info.highCflCellCount=words[31];
-      this.info.stabilityFlags=classifyTallCellStability({nonFiniteCount:this.info.nonFiniteCount,pressureRelativeResidual:this.info.pressureRelativeResidual,maxComponentCfl:this.info.maxComponentCfl,maxDivergenceBefore_s:this.info.maxDivergenceBefore_s,maxDivergenceAfter_s:this.info.maxDivergenceAfter_s,dt_s:this.info.lastDt_s??0});
-      if(queryBytes>0){const times=new BigUint64Array(buffer.getMappedRange(diagnosticBytes,queryBytes));const timings={layerConstruction_ms:0,advection_ms:0,pressure_ms:0,projection_ms:0,rigidCoupling_ms:0,diagnostics_ms:0,overhead_ms:0,total_ms:0};for(const segment of querySegments)timings[segment.name]+=Number(times[segment.end]-times[segment.start])/1e6;const categorized=timings.layerConstruction_ms+timings.advection_ms+timings.pressure_ms+timings.projection_ms+timings.rigidCoupling_ms+timings.diagnostics_ms;timings.overhead_ms=Math.max(0,timings.total_ms-categorized);this.info.gpuTimings=timings;this.info.gpuStep_ms=timings.total_ms;}
+      this.info.lastSubsteps=governorWords[1];this.info.lastDt_s=decodePositiveFloat(governorWords[2]);this.info.encodedSteps=governorWords[3];
+      const measuredFrameDt=(this.info.lastDt_s??0)*(this.info.lastSubsteps??1);this.info.stabilityFlags=classifyTallCellStability({nonFiniteCount:this.info.nonFiniteCount,pressureRelativeResidual:this.info.pressureRelativeResidual,maxComponentCfl:this.info.maxComponentCfl,maxDivergenceBefore_s:this.info.maxDivergenceBefore_s,maxDivergenceAfter_s:this.info.maxDivergenceAfter_s,dt_s:measuredFrameDt||this.lastFrameDt});
+      if(queryBytes>0){const times=new BigUint64Array(buffer.getMappedRange(queryOffset,queryBytes));const timings={layerConstruction_ms:0,advection_ms:0,pressure_ms:0,projection_ms:0,rigidCoupling_ms:0,diagnostics_ms:0,overhead_ms:0,total_ms:0};for(const segment of querySegments){const elapsed=Number(times[segment.end])-Number(times[segment.start]);timings[segment.name]+=Math.max(0,elapsed)/1e6;}const categorized=timings.layerConstruction_ms+timings.advection_ms+timings.pressure_ms+timings.projection_ms+timings.rigidCoupling_ms+timings.diagnostics_ms;timings.total_ms=Math.max(timings.total_ms,categorized);timings.overhead_ms=Math.max(0,timings.total_ms-categorized);this.info.gpuTimings=timings;this.info.gpuStep_ms=timings.total_ms;}
       buffer.unmap();
     }catch(error){console.error("Tall-cell diagnostics readback failed",error);}finally{buffer.destroy();this.readbackPending=false;}
     return this.info;
   }
 
-  destroy(){this.multigrid.destroy();this.velocityHierarchy?.destroy();for(const t of [this.velocityA,this.velocityB,this.velocityC,this.velocityD,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.solidA,this.solidB,this.heightA,this.heightB])t.destroy();this.params.destroy();this.reductionBuffer.destroy();this.rigidBuffer.destroy();this.rigidExchangeBuffer.destroy();this.nextColumnBases.destroy();this.smoothedColumnBases.destroy();this.querySet?.destroy();this.queryResolve?.destroy();}
+  destroy(){this.multigrid.destroy();this.velocityHierarchy?.destroy();for(const t of [this.velocityA,this.velocityB,this.velocityC,this.velocityD,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.solidA,this.solidB,this.heightA,this.heightB])t.destroy();this.params.destroy();this.reductionBuffer.destroy();this.governorBuffer.destroy();this.phiDispatchBuffer.destroy();this.rigidBuffer.destroy();this.rigidExchangeBuffer.destroy();this.nextColumnBases.destroy();this.smoothedColumnBases.destroy();this.querySet?.destroy();this.queryResolve?.destroy();}
 }

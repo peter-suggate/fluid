@@ -28,6 +28,10 @@ const { create, globals } = await import(pathToFileURL(modulePath).href) as {
   globals: Record<string, unknown>;
 };
 Object.assign(globalThis, globals);
+// Dawn exposes a Web Worker-compatible global in Node. The adaptive solver
+// must still select its worker_threads transport here: Dawn's worker wrapper
+// does not preserve typed-array inputs used by the topology packer.
+Reflect.deleteProperty(globalThis, "Worker");
 const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
 
@@ -47,6 +51,7 @@ const cpuMaximumCells = Number(process.env.FLUID_CPU_MAX_CELLS ?? 250_000);
 const cpuMarkerSamplesPerAxis = Number(process.env.FLUID_CPU_MARKERS_PER_AXIS ?? 1);
 const oracleStepsOverride = process.env.FLUID_ORACLE_STEPS === undefined ? undefined : Number(process.env.FLUID_ORACLE_STEPS);
 const pressureCyclesOverride = process.env.FLUID_PRESSURE_CYCLES === undefined ? undefined : Number(process.env.FLUID_PRESSURE_CYCLES);
+const pressureWarmStartOverride = process.env.FLUID_PRESSURE_WARM_START === undefined ? undefined : process.env.FLUID_PRESSURE_WARM_START !== "0";
 const remeshIntervalOverride = process.env.FLUID_REMESH_INTERVAL === undefined ? undefined : Number(process.env.FLUID_REMESH_INTERVAL);
 const regularLayersOverride = process.env.FLUID_REGULAR_LAYERS === undefined ? undefined : Number(process.env.FLUID_REGULAR_LAYERS);
 const maximumNeighborDeltaOverride = process.env.FLUID_MAX_NEIGHBOR_DELTA === undefined ? undefined : Number(process.env.FLUID_MAX_NEIGHBOR_DELTA);
@@ -491,6 +496,7 @@ async function runGPU(
   const constructionStarted = performance.now();
   const values = method.presetFor(quality);
   if (method.id === "tall-cell" && pressureCyclesOverride !== undefined) values.pressureCycles = pressureCyclesOverride;
+  if (method.id === "tall-cell" && pressureWarmStartOverride !== undefined) values.pressureWarmStart = pressureWarmStartOverride ? "on" : "off";
   if (method.id === "quadtree-tall-cell" && pressureCyclesOverride !== undefined) values.pressureIterations = pressureCyclesOverride;
   if (method.id === "quadtree-tall-cell" && adaptivityOverride !== undefined) values.adaptivityStrength = adaptivityOverride;
   if (method.id === "quadtree-tall-cell" && opticalDepthOverride !== undefined) values.opticalDepthFraction = opticalDepthOverride;
@@ -517,6 +523,7 @@ async function runGPU(
     ? new WebGPUEulerianSolver(instrumentedDevice, scene, quality, undefined, {
       layoutOverride: probeLayout,
       pressureCycles: typeof values.pressureCycles === "number" ? values.pressureCycles : 2,
+      pressureWarmStart: values.pressureWarmStart !== "off",
       velocityTransport: values.velocityTransport === "semi-lagrangian" ? "semi-lagrangian" : "maccormack",
       volumeControl: values.volumeControl !== "off",
       hierarchicalExtrapolation: values.hierarchicalExtrapolation !== "off"

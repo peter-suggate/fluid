@@ -8,6 +8,7 @@ import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { RasterWaterPipeline } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import { environmentShaderLibrary } from "./webgpu-environments";
+import { gpuBatchDepth } from "./simulation/gpu-clock";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 export type WaterRenderMode = "rasterized" | "ray-marched";
@@ -17,10 +18,19 @@ export type WaterRenderMode = "rasterized" | "ray-marched";
  * teal tall cells, outlined regular cells with centre sample dots, and the
  * tall cell's top/bottom subcell samples. Uniform grids render as an
  * all-regular band. `position` selects the slice layer as a 0..1 fraction.
+ *
+ * `mode` recolors represented cells from GPU-resident fields: "cfl" shows the
+ * per-cell component CFL at the solver's substep dt (the quantity whose
+ * maximum picks the adaptive substep count), "speed" the velocity magnitude
+ * normalized by the last reported liquid maximum. Both sample live solver
+ * textures in the overlay shader — no readback is involved.
  */
+export type GridOverlayMode = "structure" | "cfl" | "speed";
+
 export interface GridOverlayConfig {
   axis: "off" | "z" | "x";
   position: number;
+  mode?: GridOverlayMode;
 }
 
 /** Everything the renderer needs to know about the selected method. */
@@ -497,6 +507,7 @@ export class FluidLabRenderer {
   private fluidTexture?: GPUTexture;
   private columnBaseTexture?: GPUTexture;
   private gridCellTexture?: GPUTexture;
+  private velocityFallbackTexture?: GPUTexture;
   private fluidTextureKey = "";
   private fluidRevision = -1;
   private gpuFluid?: GPUSolverInstance;
@@ -593,6 +604,7 @@ export class FluidLabRenderer {
     this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.columnBaseTexture = device.createTexture({ label: "Uniform-grid tall-cell fallback", size: [1, 1], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.gridCellTexture = device.createTexture({ label: "Uniform-grid adaptive-cell fallback", size: [1, 1, 1], dimension: "3d", format: "rg32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.velocityFallbackTexture = device.createTexture({ label: "Overlay velocity fallback", size: [1, 1, 1], dimension: "3d", format: "rgba32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     const gridOverlayPipeline = new GridOverlayPipeline(device, this.format, this.uniformBuffer, this.bodyBuffer);
     try {
       progress("Compiling grid overlay",4);
@@ -622,8 +634,8 @@ export class FluidLabRenderer {
     this.onStatus({ state: "ready", label: "WebGPU renderer ready", adapter: this.adapterName });
   }
 
-  private rebuildBindGroup(texture = this.fluidTexture, columnBases = this.columnBaseTexture, gridCells = this.gridCellTexture) {
-    if (!this.device || this.disposed || this.deviceLost || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !texture || !columnBases || !gridCells) return;
+  private rebuildBindGroup(texture = this.fluidTexture, columnBases = this.columnBaseTexture, gridCells = this.gridCellTexture, velocity = this.velocityFallbackTexture) {
+    if (!this.device || this.disposed || this.deviceLost || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !texture || !columnBases || !gridCells || !velocity) return;
     this.bindGroup = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } },
       { binding: 1, resource: { buffer: this.bodyBuffer } },
@@ -631,7 +643,7 @@ export class FluidLabRenderer {
       { binding: 3, resource: columnBases.createView() }
     ] });
     this.waterPipeline?.setVolume(texture, columnBases);
-    this.gridOverlayPipeline?.setVolume(texture, columnBases, gridCells);
+    this.gridOverlayPipeline?.setVolume(texture, columnBases, gridCells, velocity);
   }
 
   private solverKey(scene:SceneDescription,config:SimulationRunConfig){return`${config.methodId}:${config.quality}:${JSON.stringify(config.values)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow??null)}`;}
@@ -675,15 +687,11 @@ export class FluidLabRenderer {
     if (time_s < (this.gpuFluid.info.submittedTime_s ?? 0)) {this.beginGPUFluidInitialization(scene,config,key);return undefined;}
     if (!this.gpuPhysicsPending) {
       const previousSubmittedTime = this.gpuFluid.info.submittedTime_s ?? 0;
-      // Adaptive pressure work is well below the frame budget, but a single
-      // CFL-sized step per display refresh hard-caps simulated throughput.
-      // Submit a small queue batch and fence it once. The solver's topology
-      // lag guard can decline any later call, ending the batch while a rebuild
-      // catches up.
-      // Keep one extra adaptive step available to amortize frame/fence
-      // scheduling, but do not bury topology readbacks behind an eight-step
-      // pressure queue. Rebuild work is inserted after the triggering step.
-      const batchLimit = config.methodId === "quadtree-tall-cell" ? 2 : 1;
+      // Amortize the render-frame and queue-fence latency across uncoupled
+      // solver steps. Restricted tall-cell batches span at most one 60 Hz
+      // presentation interval; adaptive quadtree remains shallow so a pending
+      // topology rebuild can stop the sequence promptly.
+      const batchLimit = gpuBatchDepth(config.methodId, scene.numerics.fixedDt_s, bodies.length > 0);
       let submittedTime = previousSubmittedTime;
       for (let batch = 0; batch < batchLimit && submittedTime + 1e-9 < time_s; batch += 1) {
         if (!this.gpuFluid.advanceTo(time_s, bodies)) break;
@@ -768,7 +776,7 @@ export class FluidLabRenderer {
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
     const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, config, time_s, bodies) : undefined;
-    if (gpuInfo && this.gpuFluid && this.gridCellTexture) this.gridOverlayPipeline?.setVolume(this.gpuFluid.surfaceFieldTexture ?? this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture);
+    if (gpuInfo && this.gpuFluid && this.gridCellTexture && this.velocityFallbackTexture) this.gridOverlayPipeline?.setVolume(this.gpuFluid.surfaceFieldTexture ?? this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture);
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const uniform = new Float32Array([
@@ -780,8 +788,8 @@ export class FluidLabRenderer {
       // Field mode: 1 = raw occupancy, 2 = packed tall-cell level set,
       // 3 = uniform-layout level set (quadtree resident phi).
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "restricted-tall-cell" ? 2 : gpuInfo.gridKind === "quadtree-tall-cell" ? 3 : 1) : fluid ? 1 : 0,
-      gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "quadtree-tall-cell" ? 1 : 0, 0,
-      environmentIndex(environmentId), 0, 0, 0
+      gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "quadtree-tall-cell" ? 1 : 0, gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : 0,
+      environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0, 0
     ]);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
     const bodyData = new Float32Array(12 * 16);
@@ -850,7 +858,7 @@ export class FluidLabRenderer {
     for (const retired of this.retiredGPUFluids) { try { retired.destroy(); } catch { /* Best-effort cleanup after device loss. */ } }
     this.retiredGPUFluids.clear();
     try { this.waterPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
-    for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.uniformBuffer, this.bodyBuffer, this.renderQuerySet, this.renderQueryResolve]) {
+    for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.uniformBuffer, this.bodyBuffer, this.renderQuerySet, this.renderQueryResolve]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }
     }
     try { this.device?.destroy(); } catch { /* The device may already be lost. */ }

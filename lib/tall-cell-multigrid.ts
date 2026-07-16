@@ -196,6 +196,10 @@ interface Level {
 }
 
 export interface TallCellMultigridFineResources { pressureA:GPUTexture;pressureB:GPUTexture;volume:GPUTexture;solid:GPUTexture;base:GPUTexture;diagnostics:GPUBuffer }
+export interface TallCellMultigridEncodeOptions {
+  warmStart?:boolean;
+  topologyChanged?:boolean;
+}
 
 export class TallCellMultigrid {
   readonly fineRhs:GPUTexture;readonly allocatedBytes:number;
@@ -281,26 +285,27 @@ export class TallCellMultigrid {
   private restrict(encoder:GPUCommandEncoder,child:Level,level:Level,residual:GPUTexture){this.dispatch(encoder,this.restrictPipeline,this.group(child,level,child.pressure[0],this.dummy3D[0],{currentRhs:this.dummy3D[3],sourcePressure:residual,rhsOut:child.rhs}),child);}
   private cycle(encoder:GPUCommandEncoder,index:number,state:number):number{const level=this.levels[index];if(index===this.levels.length-1)return this.solveTop(encoder,level,true);state=this.smooth(encoder,level,state,2);const child=this.levels[index+1];this.restrict(encoder,child,level,this.residual(encoder,level,state));this.clear(encoder,child,0);const childState=this.cycle(encoder,index+1,0);state=this.prolong(encoder,level,state,child,childState);return this.smooth(encoder,level,state,2);}
 
-  encode(encoder:GPUCommandEncoder){
-    this.activePass=encoder.beginComputePass({label:"Tall-cell full multigrid"});
+  encode(encoder:GPUCommandEncoder,options:TallCellMultigridEncodeOptions={}){
+    this.activePass=encoder.beginComputePass({label:options.warmStart?"Tall-cell warm multigrid":"Tall-cell cold FMG"});
     const fine=this.levels[0];
     for(let index=1;index<this.levels.length;index+=1){
       const source=this.levels[index-1],current=this.levels[index];
-      this.dispatch(encoder,this.basePipeline,this.group(current,source,current.pressure[0],this.dummy3D[0],{currentPhi:this.dummy3D[3],currentBase:this.dummy2D,baseOut:current.base}),current,true);
+      if(options.topologyChanged!==false)this.dispatch(encoder,this.basePipeline,this.group(current,source,current.pressure[0],this.dummy3D[0],{currentPhi:this.dummy3D[3],currentBase:this.dummy2D,baseOut:current.base}),current,true);
       this.dispatch(encoder,this.columnsPipeline,this.group(current,source,current.pressure[0],this.dummy3D[0],{currentPhi:this.dummy3D[3],currentSolid:this.dummy3D[3],phiOut:current.phi,rhsOut:current.solid}),current);
     }
     for(let index=0;index<this.levels.length;index+=1)this.dispatch(encoder,this.bakePipeline,this.bakeGroups[index],this.levels[index]);
-    // The second ping-pong texture never needs clearing: every consumer
-    // (smooth, prolongate, residual) fully overwrites its target first.
-    for(const level of this.levels)this.clear(encoder,level,0);
-    for(let index=1;index<this.levels.length;index+=1){
-      const source=this.levels[index-1],current=this.levels[index];
-      this.restrict(encoder,current,source,this.residual(encoder,source,0));
-    }
-    let state=this.solveTop(encoder,this.levels.at(-1)!);
-    for(let index=this.levels.length-2;index>=0;index-=1){
-      state=this.prolong(encoder,this.levels[index],0,this.levels[index+1],state);
-      state=this.cycle(encoder,index,state);
+    let state=0;
+    if(!options.warmStart){
+      for(const level of this.levels)this.clear(encoder,level,0);
+      for(let index=1;index<this.levels.length;index+=1){
+        const source=this.levels[index-1],current=this.levels[index];
+        this.restrict(encoder,current,source,this.residual(encoder,source,0));
+      }
+      state=this.solveTop(encoder,this.levels.at(-1)!);
+      for(let index=this.levels.length-2;index>=0;index-=1){
+        state=this.prolong(encoder,this.levels[index],0,this.levels[index+1],state);
+        state=this.cycle(encoder,index,state);
+      }
     }
     // Refinement depth is an explicit convergence control. The fixed method
     // retains its historical two V-cycles; adaptive tall columns request more
