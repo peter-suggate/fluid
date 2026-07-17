@@ -260,7 +260,7 @@ export class TallCellVelocityHierarchy {
   /** Encode the hierarchy sweeps. The finest seeded field must already be in
    * the constructor's fineVelocityIn texture; the fully extrapolated result
    * lands in fineVelocityOut (known samples pass through unchanged). */
-  encode(encoder: GPUCommandEncoder) {
+  encode(encoder: GPUCommandEncoder, finalTimestampWrites?: GPUComputePassTimestampWrites) {
     for (let index = 0; index < this.levels.length; index += 1) {
       const level = this.levels[index];
       const bases = encoder.beginComputePass();
@@ -278,7 +278,7 @@ export class TallCellVelocityHierarchy {
       pass.dispatchWorkgroups(Math.ceil(level.nx / 4), Math.ceil(level.packedNy / 4), Math.ceil(level.nz / 4));
       pass.end();
     }
-    const fine = encoder.beginComputePass();
+    const fine = encoder.beginComputePass(finalTimestampWrites ? { timestampWrites: finalTimestampWrites } : undefined);
     fine.setPipeline(this.fillPipeline); fine.setBindGroup(0, this.fineFillGroup);
     fine.dispatchWorkgroups(Math.ceil(this.fineLevelDims.nx / 4), Math.ceil(this.fineLevelDims.packedNy / 4), Math.ceil(this.fineLevelDims.nz / 4));
     fine.end();

@@ -13,6 +13,63 @@ export type { GPUQuality } from "./tall-cell-grid";
 export type GPUGridMethod = "tall-cell" | "quadtree-tall-cell" | "uniform";
 export type GPUVelocityTransport = "semi-lagrangian" | "maccormack";
 
+export type GPUPhysicsStageId =
+  | "preparation"
+  | "topology"
+  | "advection"
+  | "conditioning"
+  | "remeshing"
+  | "pressure"
+  | "projection"
+  | "surfaceUpdate"
+  | "rigidCoupling"
+  | "diagnostics";
+
+export interface GPUPhysicsTimings {
+  preparation_ms: number;
+  layerConstruction_ms: number;
+  advection_ms: number;
+  conditioning_ms: number;
+  remeshing_ms: number;
+  pressure_ms: number;
+  projection_ms: number;
+  surfaceUpdate_ms: number;
+  rigidCoupling_ms: number;
+  diagnostics_ms: number;
+  overhead_ms: number;
+  total_ms: number;
+  /** Stages actually encoded in the sampled advance; zero-duration entries can therefore be shown as idle. */
+  activeStages: GPUPhysicsStageId[];
+}
+
+export type GPUPhysicsTimingField = Exclude<keyof GPUPhysicsTimings, "activeStages">;
+export const GPU_PHYSICS_TIMESTAMP_CAPACITY = 768;
+
+export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): GPUPhysicsTimings {
+  return {
+    preparation_ms: 0,
+    layerConstruction_ms: 0,
+    advection_ms: 0,
+    conditioning_ms: 0,
+    remeshing_ms: 0,
+    pressure_ms: 0,
+    projection_ms: 0,
+    surfaceUpdate_ms: 0,
+    rigidCoupling_ms: 0,
+    diagnostics_ms: 0,
+    overhead_ms: 0,
+    total_ms: 0,
+    activeStages
+  };
+}
+
+export function categorizedGPUPhysicsTime_ms(timings: GPUPhysicsTimings) {
+  return timings.preparation_ms + timings.layerConstruction_ms + timings.advection_ms
+    + timings.conditioning_ms + timings.remeshing_ms + timings.pressure_ms
+    + timings.projection_ms + timings.surfaceUpdate_ms + timings.rigidCoupling_ms
+    + timings.diagnostics_ms;
+}
+
 export interface GPUFieldLocation {
   x: number;
   y: number;
@@ -143,19 +200,12 @@ export interface GPUEulerianInfo {
   quadtreeTopologyReadbackBytes?: number;
   /** Whether an adaptive topology readback/rebuild is currently in flight. */
   quadtreeRebuildPending?: boolean;
+  /** True when topology construction is encoded in each fluid advance rather than rebuilt by the asynchronous host path. */
+  quadtreeInlineRebuild?: boolean;
   /** Render frames whose physics advance was blocked by the latest rebuild. */
   quadtreeRebuildBlockedFrames?: number;
   quadtreeRebuildCompletedCount?: number;
-  gpuTimings?: {
-    layerConstruction_ms: number;
-    advection_ms: number;
-    pressure_ms: number;
-    projection_ms: number;
-    rigidCoupling_ms: number;
-    diagnostics_ms: number;
-    overhead_ms: number;
-    total_ms: number;
-  };
+  gpuTimings?: GPUPhysicsTimings;
 }
 
 export interface WebGPUEulerianSolverOptions {
@@ -906,7 +956,7 @@ export class WebGPUEulerianSolver {
   private multigrid:TallCellMultigrid;
   private velocityHierarchy?:TallCellVelocityHierarchy;
   private reductionBuffer:GPUBuffer;private governorBuffer:GPUBuffer;private phiDispatchBuffer:GPUBuffer;private rigidBuffer:GPUBuffer;private rigidExchangeBuffer:GPUBuffer;private nextColumnBases:GPUBuffer;private smoothedColumnBases:GPUBuffer;private querySet?:GPUQuerySet;private queryResolve?:GPUBuffer;
-  private querySegments: Array<{name:keyof NonNullable<GPUEulerianInfo["gpuTimings"]>;start:number;end:number}>=[];private queryCount=0;
+  private querySegments: Array<{name:GPUPhysicsTimingField;start:number;end:number}>=[];private queryCount=0;
   private lastTime = 0;
   private lastFrameDt = 0;
   private readbackPending = false;
@@ -943,7 +993,7 @@ export class WebGPUEulerianSolver {
     // the short interval where queue completion has fired but mapAsync has not
     // yet released the preceding readback.
     for(let index=0;index<2;index+=1)this.rigidReadbackPool.push({buffer:device.createBuffer({size:GPU_RIGID_EXCHANGE_BYTES,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}),busy:false});
-    if(device.features.has("timestamp-query")){this.querySet=device.createQuerySet({type:"timestamp",count:160});this.queryResolve=device.createBuffer({size:160*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
+    if(device.features.has("timestamp-query")){this.querySet=device.createQuerySet({type:"timestamp",count:GPU_PHYSICS_TIMESTAMP_CAPACITY});this.queryResolve=device.createBuffer({size:GPU_PHYSICS_TIMESTAMP_CAPACITY*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
     this.nextColumnBases=device.createBuffer({label:"Next tall-cell column bases",size:nx*nz*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     this.smoothedColumnBases=device.createBuffer({label:"Smoothed tall-cell column bases",size:nx*nz*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     // The restricted solve expands one pressure stage into many multigrid
@@ -1059,7 +1109,7 @@ export class WebGPUEulerianSolver {
   private dispatch(pass: GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(this.info.nx/4),Math.ceil(this.info.storedNy/4),Math.ceil(this.info.nz/4));}
   private dispatchPhiIndirect(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup,slot:number){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroupsIndirect(this.phiDispatchBuffer,slot*16);}
   private dispatchColumns(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(this.info.nx/8),Math.ceil(this.info.nz/8));}
-  private timing(name:keyof NonNullable<GPUEulerianInfo["gpuTimings"]>){if(!this.querySet)return undefined;const segment={name,start:this.queryCount++,end:this.queryCount++};this.querySegments.push(segment);return segment;}
+  private timing(name:GPUPhysicsTimingField){if(!this.querySet||this.queryCount+2>GPU_PHYSICS_TIMESTAMP_CAPACITY)return undefined;const segment={name,start:this.queryCount++,end:this.queryCount++};this.querySegments.push(segment);return segment;}
 
   advanceTo(time_s:number,bodies:RigidBodyState[]=[]){
     const advance=planGPUAdvance(time_s,this.lastTime,this.scene.numerics.maxDt_s);if(!advance)return false;const delta=advance.dt_s;if(delta<1e-6){this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;return true;}this.lastTime=advance.nextTime_s;this.info.submittedTime_s=this.lastTime;this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;const c=this.scene.container,rho=this.scene.fluid.density_kg_m3,sigma=0;
@@ -1071,20 +1121,21 @@ export class WebGPUEulerianSolver {
     const activeBodies=bodies.slice(0,12),bodyData=new Float32Array(12*20),shapeIndex={sphere:0,box:1,capsule:2,cylinder:3} as const;activeBodies.forEach((body,index)=>{const o=index*20,d=body.description.dimensions_m,q=body.orientation;bodyData.set([body.position_m.x,body.position_m.y,body.position_m.z,shapeIndex[body.description.shape],d.x,d.y,d.z,boundingRadius(body),q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,0,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3],o);});this.device.queue.writeBuffer(this.rigidBuffer,0,bodyData);
     const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;if(this.inflowBoundary){const cellVolume=h.x*h.y*h.z;this.referenceLiquidVolumeCells+=this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume;this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;}this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,delta,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,4*Math.min(h.x,h.y,h.z)/Math.max(this.scene.numerics.maxDt_s,1e-6),rho,this.scene.fluid.dynamicViscosity_Pa_s,0,this.volumeCorrectionNormalSpeed,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,sceneHasTerrain(this.scene)?1:0,0,0]));
     this.querySegments=[];this.queryCount=0;if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"}),totalTiming=this.timing("total_ms");if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:totalTiming.start}});pass.end();}{const plan=encoder.beginComputePass({label:"Plan phi substeps"});plan.setPipeline(this.planSubstepsPipeline);plan.setBindGroup(0,this.planSubstepsGroup);plan.dispatchWorkgroups(1);plan.end();}encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductionBuffer);
+    const preparationTiming=this.timing("preparation_ms"),reinitialize=this.stepIndex%10===0;
     if(this.velocityHierarchy){
       // The hierarchy fills the whole packed field. The fallback's eight-cell
       // halo also exceeds the four-cell full-frame speed rail.
-      {const pass=encoder.beginComputePass();this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);pass.end();}
+      {const pass=encoder.beginComputePass(preparationTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:preparationTiming.start}}:undefined);this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);pass.end();}
       {const pass=encoder.beginComputePass();this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);pass.end();}
-      this.velocityHierarchy.encode(encoder);
+      this.velocityHierarchy.encode(encoder,!reinitialize&&preparationTiming&&this.querySet?{querySet:this.querySet,endOfPassWriteIndex:preparationTiming.end}:undefined);
       encoder.copyTextureToTexture({texture:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);
-    }else{const passes=Math.max(2,s.airHalo);for(let passIndex=0;passIndex<passes;passIndex+=1){const pass=encoder.beginComputePass();if(passIndex===0)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);else if(passIndex%2===1)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);else this.dispatch(pass,this.extrapolatePipeline,this.extrapolateBackGroup);pass.end();}encoder.copyTextureToTexture({texture:passes%2===0?this.velocityC:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
-    if(this.stepIndex%10===0){const first=encoder.beginComputePass();this.dispatch(first,this.reinitializePhiPipeline,this.phiABGroup);first.end();const second=encoder.beginComputePass();this.dispatch(second,this.reinitializePhiPipeline,this.phiBAGroup);second.end();}
+    }else{const passes=Math.max(2,s.airHalo);for(let passIndex=0;passIndex<passes;passIndex+=1){const first=passIndex===0,last=passIndex===passes-1&&!reinitialize;const pass=encoder.beginComputePass(preparationTiming&&this.querySet&&(first||last)?{timestampWrites:{querySet:this.querySet,...(first?{beginningOfPassWriteIndex:preparationTiming.start}:{}),...(last?{endOfPassWriteIndex:preparationTiming.end}:{})}}:undefined);if(passIndex===0)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);else if(passIndex%2===1)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);else this.dispatch(pass,this.extrapolatePipeline,this.extrapolateBackGroup);pass.end();}encoder.copyTextureToTexture({texture:passes%2===0?this.velocityC:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    if(reinitialize){const first=encoder.beginComputePass();this.dispatch(first,this.reinitializePhiPipeline,this.phiABGroup);first.end();const second=encoder.beginComputePass(preparationTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:preparationTiming.end}}:undefined);this.dispatch(second,this.reinitializePhiPipeline,this.phiBAGroup);second.end();}
     const advectionTiming=this.timing("advection_ms");
     for(let slot=0;slot<8;slot+=1){const transport=encoder.beginComputePass(slot===0&&advectionTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:advectionTiming.start}}:undefined);this.dispatchPhiIndirect(transport,this.transportPhiPipeline,this.phiABGroup,slot);transport.end();const clamp=encoder.beginComputePass();this.dispatchPhiIndirect(clamp,this.clampPhiPipeline,this.phiBAGroup,slot);clamp.end();}
     {const pass=encoder.beginComputePass();this.dispatch(pass,this.predictPipeline,this.predictGroup);pass.end();if(this.velocityTransport==="maccormack"){const reverse=encoder.beginComputePass();this.dispatch(reverse,this.reversePipeline,this.reverseGroup);reverse.end();}const finish=encoder.beginComputePass(advectionTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:advectionTiming.end}}:undefined);this.dispatch(finish,this.advectPipeline,this.advectGroup);finish.end();encoder.copyTextureToTexture({texture:this.velocityD},{texture:this.velocityB},[this.info.nx,this.info.storedNy,this.info.nz]);}
     const remeshed=this.stepIndex>0&&this.stepIndex%s.remeshInterval===0;
-    if(remeshed){const extent:[number,number,number]=[this.info.nx,this.info.storedNy,this.info.nz];encoder.copyTextureToTexture({texture:this.volumeA},{texture:this.volumeB},extent);const plan=encoder.beginComputePass();this.dispatchColumns(plan,this.planRemeshPipeline,this.planRemeshGroup);plan.end();for(let passIndex=0;passIndex<8;passIndex+=1){const smooth=encoder.beginComputePass();this.dispatchColumns(smooth,this.smoothRemeshPipeline,passIndex%2===0?this.smoothRemeshFirstGroup:this.smoothRemeshSecondGroup);smooth.end();}const remap=encoder.beginComputePass();this.dispatch(remap,this.remapPipeline,this.remapGroup);remap.end();if(this.pressureWarmStart)encoder.copyTextureToTexture({texture:this.pressureB},{texture:this.pressureA},extent);encoder.copyTextureToTexture({texture:this.heightB},{texture:this.heightA},[this.info.nx,this.info.nz,1]);}else{encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    if(remeshed){const timing=this.timing("remeshing_ms"),extent:[number,number,number]=[this.info.nx,this.info.storedNy,this.info.nz];encoder.copyTextureToTexture({texture:this.volumeA},{texture:this.volumeB},extent);const plan=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatchColumns(plan,this.planRemeshPipeline,this.planRemeshGroup);plan.end();for(let passIndex=0;passIndex<8;passIndex+=1){const smooth=encoder.beginComputePass();this.dispatchColumns(smooth,this.smoothRemeshPipeline,passIndex%2===0?this.smoothRemeshFirstGroup:this.smoothRemeshSecondGroup);smooth.end();}const remap=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(remap,this.remapPipeline,this.remapGroup);remap.end();if(this.pressureWarmStart)encoder.copyTextureToTexture({texture:this.pressureB},{texture:this.pressureA},extent);encoder.copyTextureToTexture({texture:this.heightB},{texture:this.heightA},[this.info.nx,this.info.nz,1]);}else{encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
     {const timing=this.timing("rigidCoupling_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.rigidPipeline,this.rigidGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}
     {const pass=encoder.beginComputePass();this.dispatch(pass,this.preReductionPipeline,this.reductionGroup);pass.end();}
     {const timing=this.timing("pressure_ms");const rhs=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder,{warmStart:this.pressureWarmStart&&this.stepIndex>0,topologyChanged:this.stepIndex===0||remeshed});if(timing&&this.querySet){const end=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}});end.end();}}
@@ -1144,7 +1195,14 @@ export class WebGPUEulerianSolver {
       this.info.highCflCellCount=words[31];
       this.info.lastSubsteps=governorWords[1];this.info.lastDt_s=decodePositiveFloat(governorWords[2]);this.info.encodedSteps=governorWords[3];
       const measuredFrameDt=(this.info.lastDt_s??0)*(this.info.lastSubsteps??1);this.info.stabilityFlags=classifyTallCellStability({nonFiniteCount:this.info.nonFiniteCount,pressureRelativeResidual:this.info.pressureRelativeResidual,maxComponentCfl:this.info.maxComponentCfl,highCflCellCount:this.info.highCflCellCount,maxDivergenceBefore_s:this.info.maxDivergenceBefore_s,maxDivergenceAfter_s:this.info.maxDivergenceAfter_s,dt_s:measuredFrameDt||this.lastFrameDt});
-      if(queryBytes>0){const times=new BigUint64Array(buffer.getMappedRange(queryOffset,queryBytes));const timings={layerConstruction_ms:0,advection_ms:0,pressure_ms:0,projection_ms:0,rigidCoupling_ms:0,diagnostics_ms:0,overhead_ms:0,total_ms:0};for(const segment of querySegments){const elapsed=Number(times[segment.end])-Number(times[segment.start]);timings[segment.name]+=Math.max(0,elapsed)/1e6;}const categorized=timings.layerConstruction_ms+timings.advection_ms+timings.pressure_ms+timings.projection_ms+timings.rigidCoupling_ms+timings.diagnostics_ms;timings.total_ms=Math.max(timings.total_ms,categorized);timings.overhead_ms=Math.max(0,timings.total_ms-categorized);this.info.gpuTimings=timings;this.info.gpuStep_ms=timings.total_ms;}
+      if(queryBytes>0){
+        const times=new BigUint64Array(buffer.getMappedRange(queryOffset,queryBytes));
+        const stageByField:Partial<Record<GPUPhysicsTimingField,GPUPhysicsStageId>>={preparation_ms:"preparation",layerConstruction_ms:"topology",advection_ms:"advection",conditioning_ms:"conditioning",remeshing_ms:"remeshing",pressure_ms:"pressure",projection_ms:"projection",surfaceUpdate_ms:"surfaceUpdate",rigidCoupling_ms:"rigidCoupling",diagnostics_ms:"diagnostics"};
+        const activeStages=[...new Set(querySegments.map(segment=>stageByField[segment.name]).filter((stage):stage is GPUPhysicsStageId=>Boolean(stage)))];
+        const timings=emptyGPUPhysicsTimings(activeStages);
+        for(const segment of querySegments){const elapsed=Number(times[segment.end])-Number(times[segment.start]);timings[segment.name]+=Math.max(0,elapsed)/1e6;}
+        const categorized=categorizedGPUPhysicsTime_ms(timings);timings.total_ms=Math.max(timings.total_ms,categorized);timings.overhead_ms=Math.max(0,timings.total_ms-categorized);this.info.gpuTimings=timings;this.info.gpuStep_ms=timings.total_ms;
+      }
       buffer.unmap();
     }catch(error){console.error("Tall-cell diagnostics readback failed",error);}finally{buffer.destroy();this.readbackPending=false;}
     return this.info;
