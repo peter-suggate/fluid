@@ -10,13 +10,15 @@ const snapshot = (methodId: string, activeStages: GPUPhysicsStageId[]): Performa
   gpuPhysicsTimingAvailable: true,
   gpuActiveStages: activeStages,
   gpuPreparation_ms: methodId === "tall-cell" ? 1 : 0,
-  gpuLayerConstruction_ms: methodId === "quadtree-tall-cell" ? 2 : 0,
+  gpuLayerConstruction_ms: methodId === "quadtree-tall-cell" || methodId === "octree" ? 2 : 0,
   gpuAdvection_ms: 3,
   gpuConditioning_ms: methodId === "uniform" ? 4 : 0,
   gpuRemeshing_ms: methodId === "tall-cell" ? 5 : 0,
   gpuPressure_ms: 6,
   gpuProjection_ms: methodId === "quadtree-tall-cell" ? 0 : 7,
-  gpuSurfaceUpdate_ms: methodId === "quadtree-tall-cell" ? 8 : 0,
+  gpuExtrapolation_ms: methodId === "octree" ? 12 : 0,
+  gpuMaterialization_ms: methodId === "octree" ? 13 : 0,
+  gpuSurfaceUpdate_ms: methodId === "quadtree-tall-cell" || methodId === "octree" ? 8 : 0,
   gpuRigid_ms: 9,
   gpuDiagnostics_ms: 10,
   gpuOverhead_ms: 11
@@ -46,6 +48,13 @@ test("quadtree trace exposes inline topology and post-projection surface mainten
   assert.deepEqual(stages.map((stage) => stage.key), ["topology", "advection", "pressure", "surface-update", "rigid", "diagnostics", "overhead"]);
   assert.deepEqual(stages.find((stage) => stage.key === "advection")?.dependsOn, ["topology"]);
   assert.deepEqual(stages.find((stage) => stage.key === "surface-update")?.dependsOn, ["pressure"]);
+  assert.equal(stages.reduce((sum, stage) => sum + stage.value, 0), measuredGPUTime_ms(sample));
+});
+
+test("octree trace exposes its resident pipeline and immersed-body coupling", () => {
+  const { sample, stages } = stagesFor("octree", ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surfaceUpdate", "rigidCoupling", "diagnostics"]);
+  assert.deepEqual(stages.map((stage) => stage.key), ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "diagnostics", "overhead"]);
+  assert.deepEqual(stages.map((stage) => stage.dependsOn[0]), ["uploads", "topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "diagnostics"]);
   assert.equal(stages.reduce((sum, stage) => sum + stage.value, 0), measuredGPUTime_ms(sample));
 });
 
@@ -87,12 +96,12 @@ test("conditional method stages remain visible when idle", () => {
 
 test("expanded physics accounting includes every named category", () => {
   const timings = emptyGPUPhysicsTimings();
-  Object.assign(timings, { preparation_ms: 1, layerConstruction_ms: 2, advection_ms: 3, conditioning_ms: 4, remeshing_ms: 5, pressure_ms: 6, projection_ms: 7, surfaceUpdate_ms: 8, rigidCoupling_ms: 9, diagnostics_ms: 10 });
-  assert.equal(categorizedGPUPhysicsTime_ms(timings), 55);
+  Object.assign(timings, { preparation_ms: 1, layerConstruction_ms: 2, advection_ms: 3, conditioning_ms: 4, remeshing_ms: 5, pressure_ms: 6, projection_ms: 7, surfaceUpdate_ms: 8, rigidCoupling_ms: 9, diagnostics_ms: 10, extrapolation_ms: 11, materialization_ms: 12 });
+  assert.equal(categorizedGPUPhysicsTime_ms(timings), 78);
 });
 
 test("timestamp capacity covers the worst 64-substep wrapper trace", () => {
-  const worstCaseQueries = 2 * (1 + 64 * 5 + 1); // total + five possible timed categories/substep + diagnostics
+  const worstCaseQueries = 2 * (1 + 1 + 64 * 7 + 1); // total + topology + seven possible timed categories/substep + diagnostics
   assert.ok(GPU_PHYSICS_TIMESTAMP_CAPACITY >= worstCaseQueries);
-  assert.equal(GPU_PHYSICS_TIMESTAMP_CAPACITY * 8, 6144);
+  assert.equal(GPU_PHYSICS_TIMESTAMP_CAPACITY * 8, 8192);
 });

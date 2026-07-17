@@ -5,6 +5,8 @@ import {
   adaptivePressureCellTopology,
   advectAndRedistanceLevelSet,
   applyVariationalMatrix,
+  adaptiveOpticalLayerDefaults,
+  buildAdaptiveOpticalLayerField,
   buildMlsProjectionRows,
   buildQuadtree,
   buildVariationalSystem,
@@ -44,6 +46,27 @@ test("VOF reconstruction produces an anisotropic signed-distance field", () => {
   const volume = new Float32Array([1, 1, 0, 0]);
   const phi = signedDistanceFromVolume(volume, 1, 4, 1, { x: 2, y: 0.5, z: 3 });
   assert.deepEqual(Array.from(phi), [-0.75, -0.25, 0.25, 0.75]);
+});
+
+test("motion-adaptive optical layers thin calm columns and dilate around nonlinear flow", () => {
+  const nx = 5, ny = 64, nz = 1, h = { x: 1, y: 1, z: 1 }, phi = new Float32Array(nx * ny * nz), velocity = Array.from({ length: phi.length }, () => ({ x: 0, y: 0, z: 0 }));
+  for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    const index = index3(x, y, 0, nx, ny); phi[index] = y - 31.5;
+    if (x === 2 && y < 32) velocity[index].x = y % 2 === 0 ? 20 : -20;
+  }
+  const defaults = adaptiveOpticalLayerDefaults(ny);
+  assert.deepEqual({ minimum: defaults.minimumCells, maximum: defaults.maximumCells, airborne: defaults.airborneCells, offset: defaults.surfaceOffsetCells }, { minimum: 4, maximum: 8, airborne: 4, offset: 4 });
+  const adaptive = buildAdaptiveOpticalLayerField(phi, velocity, nx, ny, nz, h);
+  const boundaries = Array.from({ length: nx }, (_, x) => adaptive.columns[4 * x]);
+  assert.equal(boundaries[2], 24, "the nonlinear column reaches the paper's dmax=Ny/8");
+  assert.ok(boundaries[0] < 28 && boundaries[4] < 28, "Manhattan dilation and constrained smoothing add cells around the dynamic column");
+  assert.deepEqual(boundaries, boundaries.toReversed(), "the optical response remains spatially symmetric");
+
+  const quadtree = buildQuadtree(new Float32Array(nx * nz).fill(100), nx, nz, { h: 1, maximumLeafSize: 1, adaptivityStrength: 1 });
+  const fixed = populateTallPressureGrid(quadtree, phi, ny, h, 1, 0.25);
+  const calm = buildAdaptiveOpticalLayerField(phi, Array.from({ length: phi.length }, () => ({ x: 0, y: 0, z: 0 })), nx, ny, nz, h);
+  const motionAdaptive = populateTallPressureGrid(quadtree, phi, ny, h, 1, 0.25, undefined, calm);
+  assert.ok(motionAdaptive.samples.length < fixed.samples.length, `calm adaptive layer should retain fewer samples (${motionAdaptive.samples.length} vs ${fixed.samples.length})`);
 });
 
 test("the independently transported level set remains finite and translates a planar interface", () => {

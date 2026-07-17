@@ -75,8 +75,119 @@ The balanced preset requests at least 96 iterations; high/ultra request
 160/240, and the large-system `O(sqrt(n))` cap overrides these minima where
 required. The profiler reports the actual
 iterations used, so empty indirect-command overhead is visible and tunable.
-The advanced preconditioner control exposes a fully parallel diagonal Jacobi
-comparison path; uncompensated IC(0) remains the paper-conformant default.
+
+Measured on dam-break (16k DOF), each CG dispatch costs ~15-20 microseconds of
+fixed decode/transition overhead regardless of workload — converged no-op
+indirect dispatches are priced like live iterations, and the loop is
+dispatch-count-bound, not ALU-bound. Three mechanisms attack this:
+(1) the uncoupled parallel path runs a fused iteration (6 dispatches for
+poly-2 instead of 8): the `d.Ad` partial reduction rides inside the SpMV
+(`multiplyPartial`) and every update workgroup re-reduces the tiny partial
+list for alpha instead of waiting on a dedicated finalize dispatch. The
+coupled path keeps the separate partial because `coupleApply` modifies the
+matrix product between the SpMV and the dot product.
+(2) The encoded iteration budget follows an asymmetric EMA of
+iterations-to-tolerance (fast down, cautious up, immediate 2x recovery on a
+budget-exhausted solve) with a floor of 8, and a dedicated 48-byte
+pending-gated solve-feedback readback keeps that EMA fed every step even when
+no stats consumer polls, so settled scenes stop encoding dead iteration tails.
+(3) Solves warm-start from the previous step's mapped cubical pressure
+(poly/jacobi/geometric-MG paths; `FLUID_PRESSURE_WARM_START=0` disables): initialization
+gathers each sample's previous pressure through the aux dof-sample table,
+computes `r0 = b - A x0`, and a `reduceInitialNorm` dispatch captures `|b|^2`
+before the preconditioner setup recycles the staging slot, so the stop test
+stays relative to `|b|` exactly as the paper specifies. A settled tank drops
+from 84 iterations per solve to 1; a warm solve already at tolerance skips the
+CG loop entirely through the existing indirect-dispatch gate. The texture is
+zero on first build and after an async swap, degrading gracefully to the cold
+start.
+
+Supported uncoupled polynomial/Jacobi solves can replace that fused dispatch
+ladder with a persistent-CG megakernel (`solveMegakernel`). One 256-lane
+workgroup initializes the warm/cold iterate, captures `|b|^2`, applies the
+degree-1 Jacobi or degree-2--4 polynomial preconditioner, and runs the entire
+CG loop with workgroup-uniform convergence and storage/workgroup barriers.
+It preserves the ladder's final/minimum residual, iteration, alpha/beta, and
+best-iterate telemetry, while never reading its indirect-dispatch or control
+words. The uniform hard cap is packed above the warm-start bit and remains
+independent of the feedback-controlled encoded ladder budget.
+
+The feature is enabled by default but selected by a measured workload gate,
+not by DOF count alone. A new projection first runs the ladder. After a
+converged solve supplies an iteration count, the persistent path is selected
+only when there are at most 32,768 DOFs and
+`dofs * max(1, previousIterations) * max(1, polynomialDegree / 2) <= 30,000`.
+A non-converged solve clears the hint. This keeps calm warm-start solves on the
+one-dispatch path without serializing an iteration-heavy transient onto one GPU
+core. `FLUID_QUADTREE_MEGAKERNEL=0` (or `megakernelSolve: false`) remains the
+kill switch; coupled, IC(0), block-IC, and line solves always retain the
+ladder. With phase timings enabled, the complete persistent dispatch is
+reported as `firstIterations_ms` and `remainingIterations_ms` is empty.
+
+The method panel exposes the same policy under **Advanced → CG megakernel**.
+`Dynamic (recommended)` uses the measured selector above, `Forced on` runs the
+persistent path for every compatible uncoupled Polynomial/Jacobi solve, and
+`Off` keeps the ladder. Dynamic mode's DOF and effective row-iteration limits
+are separately editable; forced mode deliberately ignores both thresholds.
+
+Post-reboot Dawn/Metal measurements on 2026-07-17 established the crossover.
+At 13.8k DOFs and 41 iterations, the persistent loop took 68.94 ms versus
+6.03 ms for ladder iterations, so the original 32,768-only gate was rejected.
+At 2.94k DOFs and 14 iterations it was still slightly slower (5.31 vs
+4.59 ms); high-quality 8.94k--9.62k systems at 18--36 iterations likewise
+took 20.91--50.07 ms persistently versus 6.82--10.16 ms on the ladder. In
+contrast, warm low-work solves won: 5.13k DOFs x 1 iteration was 1.51 vs
+2.23 ms, and 9.17k x 3 was 3.93 vs 13.76 ms when the ladder still carried a
+large encoded tail. Those observations place the conservative gate at 30k
+effective row-iterations. Asynchronous or volatile feedback simply leaves the
+ladder selected, so an uncertain estimate cannot create a performance cliff.
+The 2x2 SPD GPU test runs both Jacobi and poly-2 and verifies the solution,
+residual, iteration, alpha/beta, and best-iterate telemetry on the executing
+adapter.
+
+The default throughput solver is now a fixed row-parallel Chebyshev
+semi-iteration over `D^-1 A`, using the same measured `[0.01, 2.2]` spectral
+interval as the octree pressure path. Balanced/high/ultra effort maps from
+96/160/240 equivalent sweeps to 24/40/60 polynomial passes. Each pass is one
+cached sparse row product and a local recurrence; it has no dot-product
+reduction, convergence readback, or single-workgroup owner. Pressure and best
+pressure are used as ping-pong vectors, while existing scratch fields retain
+the previous correction, recurrence scalar, and original RHS. A final
+row-parallel residual plus one reduction keeps quality telemetry honest
+without putting a scalar boundary back into the hot loop.
+
+For dynamic rigid bodies, this accelerated path uses a partitioned lagged
+split. The current body velocity remains in the solid-boundary RHS, the fluid
+operator omits `K M^-1 K^T`, and `K^T p` is evaluated once after the final
+polynomial pass for delivery to the next controller batch. Dense and
+variational reactions share one pooled asynchronous staging slot, so every
+submitted impulse snapshot remains independent without a per-step buffer
+allocation or queue fence. `pressureSolver=pcg` (or
+`FLUID_QUADTREE_PRESSURE_SOLVER=pcg` in the smoke harness) retains the exact
+same-step low-rank response and tolerance-driven PCG ladder for A/B checks.
+Coupled quadtree submission depth remains one until moving-body topology and
+rasterization no longer require the existing host-side rebuild path.
+
+The post-projection tier avoids two full-texture copies: the CFL clamp leaves
+the field in scratch and the five extrapolation sweeps run scratch-first, so
+the odd sweep count lands the final ring in the public velocity texture. The
+divergence diagnostic only feeds the debug grid overlay and refreshes every
+fourth solve. The rebuild re-seeds the coarse forest with a GPU-side copy from
+a once-uploaded root-map buffer, and the explicit sizing array re-uploads only
+when its identity changes.
+
+`deepSpeedGradientScale` (`FLUID_SIZING_DEEP_SPEED`, default 1 =
+paper-faithful) scales only the deep-interior speed-gradient sizing term; the
+near-surface band keeps the full curvature/strain/speed/front-speed formula.
+On dam-break this barely changes the DOF count (the near-surface terms
+dominate an active surface, which is why an energetic dam break legitimately
+looks near-uniform mid-collapse); it exists for scenes with fast but smooth
+bulk currents.
+The advanced preconditioner control exposes polynomial/Jacobi comparisons,
+the paper-reference IC(0), and an experimental geometric multigrid PCG path.
+Polynomial is the measured runtime default. The multigrid implementation,
+invariants, rejected variants, and current benchmark gap are documented in
+[QUADTREE_MULTIGRID.md](./QUADTREE_MULTIGRID.md).
 Adaptive scenes retain a one-step CPU/GPU topology handshake so Algorithm 1's
 construction cannot be overtaken by another physics step.
 

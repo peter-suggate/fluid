@@ -44,6 +44,43 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
     description: "Applies solid occupancy and exchanges impulses between the liquid and active rigid bodies.", reads: ["fluid state", "body transforms and velocities"], writes: ["fluid momentum", "body impulses"], dependsOn: [dependsOn]
   });
 
+  if (methodId === "octree") {
+    const pressureLabel = pressureSolver ? `Octree leaf pressure · ${pressureSolver}` : "Octree leaf pressure · Chebyshev-Jacobi";
+    return [
+      stage({
+        key: "topology", label: "Octree rebuild + 2:1 balance", shortLabel: "OCTREE", value: value(contextMatches, snapshot.gpuLayerConstruction_ms), className: "stage-topology", group: "compute", active: active(snapshot, "topology"),
+        description: "Resets the dense owner map, refines leaves from the resident signed-distance sizing field, and applies three 2:1 balancing rounds entirely on the GPU.", reads: ["signed distance φ", "maximum leaf size", "adaptivity"], writes: ["balanced octree owner map"], dependsOn: ["uploads"], sync: "Regenerated once at the start of every GPU advance with no topology readback."
+      }),
+      stage({
+        key: "advection", label: "Velocity transport preparation + advection", shortLabel: "ADVECT", value: value(contextMatches, snapshot.gpuAdvection_ms), className: "stage-advection", group: "compute", active: active(snapshot, "advection"),
+        description: "Builds signed-distance occupancy and an air-extended transport field, then advances the dense velocity predictor with bounded MacCormack transport.", reads: ["projected velocity", "signed distance φ"], writes: ["transport velocity", "predicted velocity"], dependsOn: ["topology"]
+      }),
+      stage({
+        key: "pressure", label: pressureLabel, shortLabel: "LEAF SOLVE", value: value(contextMatches, snapshot.gpuPressure_ms), className: "stage-pressure", group: "compute", active: active(snapshot, "pressure"),
+        description: "Compacts and assembles octree rows once, then applies a Chebyshev-accelerated polynomial with one row-parallel SpMV per pass. Rigid scenes keep the same path by exchanging pressure impulses at the next presentation boundary instead of reducing Kᵀp inside every iterate.", reads: ["octree row matrix", "predicted velocity", "signed distance φ", "lagged rigid velocity"], writes: ["octree leaf pressure p", "next-batch rigid impulse"], dependsOn: ["advection"]
+      }),
+      stage({
+        key: "projection", label: "Finite-volume octree projection", shortLabel: "PROJECT", value: value(contextMatches, snapshot.gpuProjection_ms), className: "stage-projection", group: "compute", active: active(snapshot, "projection"),
+        description: "Applies coarse/fine pressure fluxes to the dense face velocity field while preserving the finite-volume face-area weighting of the octree solve.", reads: ["leaf pressure p", "octree owner map", "predicted velocity"], writes: ["projected velocity"], dependsOn: ["pressure"]
+      }),
+      stage({
+        key: "extrapolation", label: "Narrow-band velocity extrapolation", shortLabel: "EXTEND", value: value(contextMatches, snapshot.gpuExtrapolation_ms), className: "stage-extrapolation", group: "compute", active: active(snapshot, "extrapolation"),
+        description: "Extends projected velocity through the air-side interface band so the following level-set transport can sample newly exposed cells.", reads: ["projected velocity", "signed distance φ"], writes: ["extrapolated velocity"], dependsOn: ["projection"]
+      }),
+      stage({
+        key: "materialization", label: "Adaptive overlay materialization", shortLabel: "MAP FIELDS", value: value(contextMatches, snapshot.gpuMaterialization_ms), className: "stage-materialization", group: "compute", active: active(snapshot, "materialization"),
+        description: "Materializes the resident owner map, pressure ownership, mapped pressure, and projected divergence into 3D textures for adaptive diagnostics and overlays.", reads: ["octree owners", "leaf pressure p", "projected velocity", "signed distance φ"], writes: ["topology overlay", "pressure overlay", "divergence overlay"], dependsOn: ["extrapolation"]
+      }),
+      stage({
+        key: "surface-update", label: "Level-set transport + volume control", shortLabel: "SURFACE φ", value: value(contextMatches, snapshot.gpuSurfaceUpdate_ms), className: "stage-surface-update", group: "compute", active: active(snapshot, "surfaceUpdate"),
+        description: "Advects the authoritative level set with the extrapolated velocity, restores signed distance, culls isolated debris, and applies GPU-only volume feedback.", reads: ["extrapolated velocity", "signed distance φ"], writes: ["advected signed distance φ", "surface reductions"], dependsOn: ["materialization"]
+      }),
+      rigid("surface-update"),
+      diagnostics("rigid"),
+      overhead("diagnostics")
+    ];
+  }
+
   if (methodId === "quadtree-tall-cell") {
     const pressureLabel = pressureSolver ? `Variational pressure + projection · ${pressureSolver}` : "Variational pressure + projection";
     const stages: PerformanceStage[] = [];
@@ -58,7 +95,7 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
       }),
       stage({
         key: "pressure", label: pressureLabel, shortLabel: "PRESSURE+PROJECT", value: value(contextMatches, snapshot.gpuPressure_ms), className: "stage-pressure", group: "compute", active: active(snapshot, "pressure"),
-        description: "Assembles and solves the adaptive tall-cell pressure system, projects face fluxes, maps velocity back to the cubic field, and evaluates post-projection divergence.", reads: ["adaptive DOFs and faces", "predicted velocity", "solid fractions"], writes: ["pressure p", "projected and extrapolated velocity"], dependsOn: ["advection"], sync: "Projection is fused into this measured stage by the quadtree solver."
+        description: "Refreshes adaptive coefficients once, applies the row-parallel Chebyshev pressure polynomial, projects face fluxes, maps velocity back to the cubic field, and evaluates post-projection divergence. The PCG reference remains selectable.", reads: ["adaptive DOFs and faces", "predicted velocity", "solid fractions", "lagged rigid velocity"], writes: ["pressure p", "projected and extrapolated velocity", "next-batch rigid impulse"], dependsOn: ["advection"], sync: "Chebyshev has no Krylov scalar reductions; rigid throughput mode publishes Kᵀp after the solve instead of applying K M⁻¹ Kᵀ in every pass."
       }),
       stage({
         key: "surface-update", label: "Surface transport + redistance", shortLabel: "SURFACE φ", value: value(contextMatches, snapshot.gpuSurfaceUpdate_ms), className: "stage-surface-update", group: "compute", active: active(snapshot, "surfaceUpdate"),

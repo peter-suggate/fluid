@@ -35,6 +35,143 @@ export const quadtreeSizingWeights = Object.freeze({
   frontSpeed: 0.5
 });
 
+/** Narita--Kanai 2026 adaptive optical-layer controls, expressed in cells. */
+export interface AdaptiveOpticalLayerOptions {
+  alpha?: number;
+  minimumCells?: number;
+  maximumCells?: number;
+  airborneCells?: number;
+  surfaceOffsetCells?: number;
+  smoothingRadius?: number;
+  smoothingIterations?: number;
+}
+
+/**
+ * Four uints per finest x/z column:
+ *   [smoothed lower optical boundary, main-surface y, pre-smoothed boundary, valid].
+ *
+ * The pre-smoothed boundary enforces Sec. 3.1.2's one-sided constraint: the
+ * filter may lower a tall-cell boundary (add optical cubes), but may never
+ * raise it and remove cubes selected by motion-sensitive dilation.
+ */
+export interface AdaptiveOpticalLayerField {
+  columns: ArrayLike<number>;
+  surfaceOffsetCells: number;
+  airborneCells: number;
+}
+
+export function adaptiveOpticalLayerDefaults(ny: number, options: AdaptiveOpticalLayerOptions = {}) {
+  const minimumCells = Math.max(1, Math.round(options.minimumCells ?? Math.max(4, ny / 64)));
+  const maximumCells = Math.max(minimumCells, Math.round(options.maximumCells ?? ny / 8));
+  return {
+    alpha: Math.max(0, options.alpha ?? 0.5),
+    minimumCells,
+    maximumCells,
+    airborneCells: Math.max(1, Math.round(options.airborneCells ?? ny / 16)),
+    surfaceOffsetCells: Math.max(1, Math.round(options.surfaceOffsetCells ?? Math.max(4, ny / 32))),
+    smoothingRadius: Math.max(0, Math.round(options.smoothingRadius ?? 4)),
+    smoothingIterations: Math.max(0, Math.round(options.smoothingIterations ?? 5))
+  };
+}
+
+/**
+ * CPU oracle for Narita--Kanai 2026 Sec. 3.1.
+ *
+ * Each ground-connected column is collapsed conceptually to one tall cell:
+ * horizontal velocity is least-squares linear in y and vertical velocity is
+ * its mean. The L1 reconstruction error controls a variable Manhattan
+ * dilation radius. Two separable min-plus transforms perform the horizontal
+ * part of that dilation, followed by the paper's constrained 9x9 / five-pass
+ * moving average. The GPU construction shader implements the same steps.
+ */
+export function buildAdaptiveOpticalLayerField(
+  phi: ArrayLike<number>,
+  velocity: ArrayLike<Vec3>,
+  nx: number,
+  ny: number,
+  nz: number,
+  h: Vec3,
+  options: AdaptiveOpticalLayerOptions = {}
+): AdaptiveOpticalLayerField {
+  const cellCount = nx * ny * nz;
+  if (phi.length !== cellCount || velocity.length !== cellCount) throw new Error("Invalid adaptive optical-layer fields");
+  const settings = adaptiveOpticalLayerDefaults(ny, options), columnCount = nx * nz, stride = 4;
+  const raw = new Uint32Array(columnCount * stride), passX = new Uint32Array(raw.length), dilated = new Uint32Array(raw.length);
+  const invalidBoundary = ny;
+
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const base = stride * index2(x, z, nx);
+    let groundY = 0;
+    while (groundY < ny && phi[index3(x, groundY, z, nx, ny)] >= 0) groundY += 1;
+    if (groundY >= ny) {
+      raw[base] = raw[base + 2] = invalidBoundary;
+      continue;
+    }
+    let surfaceY = groundY;
+    while (surfaceY + 1 < ny && phi[index3(x, surfaceY + 1, z, nx, ny)] < 0) surfaceY += 1;
+    const count = surfaceY - groundY + 1;
+    let sumT = 0, sumTT = 0, sumX = 0, sumY = 0, sumZ = 0, sumTX = 0, sumTZ = 0;
+    for (let y = groundY; y <= surfaceY; y += 1) {
+      const t = y - groundY, value = velocity[index3(x, y, z, nx, ny)];
+      sumT += t; sumTT += t * t; sumX += value.x; sumY += value.y; sumZ += value.z; sumTX += t * value.x; sumTZ += t * value.z;
+    }
+    const denominator = count * sumTT - sumT * sumT;
+    const slopeX = denominator > 1e-12 ? (count * sumTX - sumT * sumX) / denominator : 0;
+    const slopeZ = denominator > 1e-12 ? (count * sumTZ - sumT * sumZ) / denominator : 0;
+    const interceptX = (sumX - slopeX * sumT) / count, interceptZ = (sumZ - slopeZ * sumT) / count, meanY = sumY / count;
+    let error = 0;
+    for (let y = groundY; y <= surfaceY; y += 1) {
+      const t = y - groundY, value = velocity[index3(x, y, z, nx, ny)];
+      error += Math.abs(value.x - (interceptX + slopeX * t)) + Math.abs(value.y - meanY) + Math.abs(value.z - (interceptZ + slopeZ * t));
+    }
+    const distance = Math.ceil(clamp(settings.alpha * error * Math.min(h.x, h.y, h.z), settings.minimumCells, settings.maximumCells));
+    const boundary = Math.max(0, surfaceY + 1 - distance);
+    raw[base] = boundary; raw[base + 1] = surfaceY; raw[base + 2] = boundary; raw[base + 3] = 1;
+  }
+
+  // A surface seed with lower boundary b covers a column q down to
+  // b + ManhattanDistanceXZ(seed,q). This is an exact separable min-plus
+  // transform for the horizontal part of the paper's variable-radius dilation.
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const base = stride * index2(x, z, nx), ownValid = raw[base + 3];
+    let best = invalidBoundary;
+    for (let sourceX = 0; sourceX < nx; sourceX += 1) {
+      const source = stride * index2(sourceX, z, nx);
+      if (raw[source + 3] !== 0) best = Math.min(best, raw[source] + Math.abs(x - sourceX));
+    }
+    passX[base] = Math.min(invalidBoundary, best); passX[base + 1] = raw[base + 1]; passX[base + 2] = passX[base]; passX[base + 3] = ownValid;
+  }
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const base = stride * index2(x, z, nx), ownValid = raw[base + 3];
+    let best = invalidBoundary;
+    for (let sourceZ = 0; sourceZ < nz; sourceZ += 1) {
+      const source = stride * index2(x, sourceZ, nx);
+      best = Math.min(best, passX[source] + Math.abs(z - sourceZ));
+    }
+    dilated[base] = Math.min(invalidBoundary, best); dilated[base + 1] = raw[base + 1]; dilated[base + 2] = dilated[base]; dilated[base + 3] = ownValid;
+  }
+
+  let current = dilated;
+  for (let iteration = 0; iteration < settings.smoothingIterations; iteration += 1) {
+    const next = new Uint32Array(current.length);
+    for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+      const base = stride * index2(x, z, nx);
+      next[base + 1] = current[base + 1]; next[base + 2] = current[base + 2]; next[base + 3] = current[base + 3];
+      if (current[base + 3] === 0) { next[base] = invalidBoundary; continue; }
+      let sum = 0, samples = 0;
+      for (let dz = -settings.smoothingRadius; dz <= settings.smoothingRadius; dz += 1) for (let dx = -settings.smoothingRadius; dx <= settings.smoothingRadius; dx += 1) {
+        const qx = clamp(x + dx, 0, nx - 1), qz = clamp(z + dz, 0, nz - 1), neighbor = stride * index2(qx, qz, nx);
+        if (current[neighbor + 3] === 0) continue;
+        sum += current[neighbor]; samples += 1;
+      }
+      const average = samples > 0 ? Math.floor(sum / samples) : current[base];
+      next[base] = Math.min(current[base + 2], average);
+    }
+    current = next;
+  }
+  return { columns: current, surfaceOffsetCells: settings.surfaceOffsetCells, airborneCells: settings.airborneCells };
+}
+
 export interface TallPressureSample {
   id: number;
   leaf: number;
@@ -372,10 +509,12 @@ export function populateTallPressureGrid(
   h: Vec3,
   opticalDepthCells: number,
   localDepthFraction?: number,
-  leafProfiles?: ArrayLike<number>
+  leafProfiles?: ArrayLike<number>,
+  adaptiveOpticalLayer?: AdaptiveOpticalLayerField
 ): TallPressureGrid {
   const profileStride = leafProfiles ? leafProfiles.length / Math.max(1, quadtree.leaves.length * ny) : 0;
   if (ny <= 0 || (leafProfiles ? (profileStride !== 1 && profileStride !== 3) : phi.length !== quadtree.nx * ny * quadtree.nz)) throw new Error("Invalid tall-grid level set");
+  if (adaptiveOpticalLayer && adaptiveOpticalLayer.columns.length !== quadtree.nx * quadtree.nz * 4) throw new Error("Invalid adaptive optical-layer columns");
   const samples: TallPressureSample[] = [], segments: TallSegment[] = [];
   const samplesByLeaf: TallPressureSample[][] = quadtree.leaves.map(() => []);
   for (const leaf of quadtree.leaves) {
@@ -423,14 +562,25 @@ export function populateTallPressureGrid(
     const airBandCells = 2;
     for (const surfaceY of interfaceY) {
       let depthCells = opticalDepthCells;
-      if (localDepthFraction !== undefined) {
+      let adaptiveFirst = ny, adaptiveSurface = false;
+      if (adaptiveOpticalLayer) {
+        for (let z = leaf.z; z < leaf.z + leaf.size && z < quadtree.nz; z += 1) for (let x = leaf.x; x < leaf.x + leaf.size && x < quadtree.nx; x += 1) {
+          const base = 4 * index2(x, z, quadtree.nx), columns = adaptiveOpticalLayer.columns;
+          if (columns[base + 3] !== 0 && Math.abs(surfaceY - columns[base + 1]) <= adaptiveOpticalLayer.surfaceOffsetCells) {
+            adaptiveSurface = true;
+            adaptiveFirst = Math.min(adaptiveFirst, columns[base]);
+          }
+        }
+        if (!adaptiveSurface) depthCells = adaptiveOpticalLayer.airborneCells;
+      } else if (localDepthFraction !== undefined) {
         let liquidY = surfaceY;
         if (footprintWet[liquidY] === 0 && liquidY > 0 && footprintWet[liquidY - 1] !== 0) liquidY -= 1;
         let localDepth = 0;
         while (liquidY >= 0 && footprintWet[liquidY] !== 0) { localDepth += 1; liquidY -= 1; }
         depthCells = Math.max(1, Math.ceil(localDepth * Math.max(0, localDepthFraction)));
       }
-      for (let y = Math.max(0, surfaceY - depthCells + 1); y <= surfaceY; y += 1) cubic[y] = 1;
+      const first = adaptiveSurface ? Math.min(surfaceY, adaptiveFirst) : Math.max(0, surfaceY - depthCells + 1);
+      for (let y = first; y <= surfaceY; y += 1) cubic[y] = 1;
       for (let y = surfaceY + 1; y <= Math.min(ny - 1, surfaceY + airBandCells); y += 1) if (columnPhi[y] >= 0) cubic[y] = 1;
     }
     let y = 0;
@@ -464,9 +614,10 @@ export function populateTallPressureGridFromLeafProfiles(
   profiles: ArrayLike<number>,
   ny: number,
   h: Vec3,
-  localDepthFraction: number
+  localDepthFraction: number,
+  adaptiveOpticalLayer?: AdaptiveOpticalLayerField
 ) {
-  return populateTallPressureGrid(quadtree, [], ny, h, 1, localDepthFraction, profiles);
+  return populateTallPressureGrid(quadtree, [], ny, h, 1, localDepthFraction, profiles, adaptiveOpticalLayer);
 }
 
 function interpolationAt(samples: TallPressureSample[], worldY: number) {
@@ -1151,7 +1302,8 @@ export function quadtreeSizingFromVelocityAndSurface(
   curvatureWeight = quadtreeSizingWeights.curvature,
   velocityWeight = quadtreeSizingWeights.strain,
   speedGradientWeight = quadtreeSizingWeights.speedGradient,
-  frontSpeedWeight = quadtreeSizingWeights.frontSpeed
+  frontSpeedWeight = quadtreeSizingWeights.frontSpeed,
+  deepSpeedGradientScale = 1
 ) {
   if (phi.length !== nx * ny * nz || velocity.length !== phi.length) throw new Error("Invalid sizing inputs");
   const sizing = new Float32Array(nx * nz);
@@ -1174,7 +1326,10 @@ export function quadtreeSizingFromVelocityAndSurface(
         (speed(x, y + 1, z) - speed(x, y - 1, z)) / (2 * h.y),
         (speed(x, y, z + 1) - speed(x, y, z - 1)) / (2 * h.z)
       );
-      let demand = wet ? speedGradientWeight * speedGradient : 0;
+      // Away from the surface only the speed-gradient term registers; scaling
+      // it below 1 lets fast but smooth interior currents stay under coarse
+      // leaves while the near-surface band keeps the full paper formula.
+      let demand = wet ? deepSpeedGradientScale * speedGradientWeight * speedGradient : 0;
       if (nearSurface) {
         const laplacian = (samplePhi(x + 1, y, z) - 2 * localPhi + samplePhi(x - 1, y, z)) / (h.x * h.x)
           + (samplePhi(x, y + 1, z) - 2 * localPhi + samplePhi(x, y - 1, z)) / (h.y * h.y)

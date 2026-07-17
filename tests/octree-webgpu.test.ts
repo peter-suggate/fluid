@@ -1,0 +1,249 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { simulationMethods } from "../lib/methods";
+import { octreeMethod } from "../lib/methods/octree";
+import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
+import { octreeDiagnosticShader, octreePressureCouplingShader, octreeProjectionShader, WebGPUOctreeProjection } from "../lib/webgpu-octree";
+import { quadtreeSurfaceShader, WebGPUQuadtreeSurfaceState } from "../lib/webgpu-quadtree-builder";
+
+const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+const uniformSolverSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+
+test("octree is a registered GPU method with dam-break defaults", () => {
+  assert.ok(simulationMethods.includes(octreeMethod));
+  assert.equal(octreeMethod.id, "octree");
+  assert.equal(octreeMethod.backend, "webgpu");
+  assert.equal(octreeMethod.presetFor("balanced").pressureIterations, 128);
+  assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "4");
+  assert.equal(octreeMethod.presetFor("balanced").adaptivity, 1);
+  assert.match(octreeMethod.detail, /no topology readbacks/);
+  assert.match(octreeMethod.detail, /Chebyshev-Jacobi/);
+  assert.match(octreeMethod.detail, /rigid-body coupling/);
+  assert.match(octreeMethod.description, /signed-distance level set/);
+  const warmStart = octreeMethod.params.find((spec) => spec.key === "pressureWarmStart");
+  assert.ok(warmStart && warmStart.kind === "select" && warmStart.tier === "fine" && warmStart.default === "on");
+  // Options are copied field-by-field into the solver; a dropped key would
+  // silently revert the UI toggle to its default.
+  assert.match(octreeSource, /pressureWarmStart\?: boolean/);
+  assert.match(uniformSolverSource, /pressureWarmStart: options\.octree\.pressureWarmStart/);
+  const encode = WebGPUOctreeProjection.prototype.encode.toString();
+  assert.match(encode.replace(/\s+/g, ""), /if\(!this\.pressureWarmStart\)\{encoder\.clearBuffer\(this\.pressureA\);encoder\.clearBuffer\(this\.pressureB\);?\}/);
+});
+
+test("octree participates in the shared two-way immersed-body coupling path", () => {
+  const methodSource = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
+  assert.match(methodSource, /values, onRigidLoads\) => new WebGPUUniformEulerianSolver\(device, scene, quality, onRigidLoads/);
+  assert.match(methodSource, /values, onRigidLoads, onProgress\) => WebGPUUniformEulerianSolver\.createAsync/);
+  assert.match(uniformSolverSource, /const activeBodies = bodies\.slice\(0, 12\)/);
+  assert.doesNotMatch(uniformSolverSource, /this\.octreeProjection \? \[\] : bodies/);
+  assert.match(uniformSolverSource, /if \(this\.adaptiveProjection\) this\.solidPhiGroup/);
+  assert.match(uniformSolverSource, /texture: this\.adaptiveProjection\.levelSetTexture/);
+  assert.match(uniformSolverSource, /this\.dispatch\(pass, this\.rigidPipeline, this\.rigidGroup\)/);
+  assert.match(uniformSolverSource, /this\.onRigidLoads\?\.\(loads\.map/);
+});
+
+test("octree voxelizes partial solid volume and reports liquid-displaced volume", () => {
+  assert.match(octreeProjectionShader, /fn bodySolidFraction/);
+  assert.match(octreeProjectionShader, /for \(var corner = 0u; corner < 8u/);
+  assert.match(octreeProjectionShader, /return inside \/ 8\.0/);
+  assert.match(octreeProjectionShader, /fn rasterizeSolids/);
+  assert.match(octreeProjectionShader, /if \(candidate > fraction\) \{ fraction = candidate; owner = i32\(bodyIndex\); \}/,
+    "overlapping terrain/body samples must have one maximum-coverage owner");
+  assert.match(legacyUniformComputeShader, /let displacedWeight=wetFraction\*solidFraction/,
+    "buoyancy volume must integrate liquid occupancy times sub-cell solid volume");
+  assert.match(legacyUniformComputeShader, /if\(candidate>solidFraction\)\{solidFraction=candidate;coupledBody=bodyIndex;\}/,
+    "overlapping bodies must not double-count displaced volume");
+});
+
+test("octree pressure solve uses the variational solid face constraint", () => {
+  const assemble = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn assembleSystem"), octreeProjectionShader.indexOf("fn iterateLeaves"));
+  assert.match(assemble, /let open = 1\.0 - clamp\(solid\.fraction/);
+  assert.match(assemble, /let coefficient = open \* area \/ max\(distance/);
+  assert.match(assemble, /constrainedFaceVelocity\(faceCell, axis, solid\)/);
+  assert.match(octreeProjectionShader, /open \* component\(velocityAt\(faceCell\), axis\) \+ solid\.fraction \* component\(solidVelocity/);
+  assert.match(octreeProjectionShader, /crossesSolidBoundary \|\| closestSurface/,
+    "solid interfaces must force finest octree leaves");
+});
+
+test("octree retains exact rank-six coupling as an A/B path and defaults to lagged feedback", () => {
+  assert.match(octreeProjectionShader, /K M\^-1 K\^T/);
+  assert.match(octreeProjectionShader, /fn gatherBodyCoupling/);
+  assert.match(octreeProjectionShader, /faceArea\(axis\) \* solid\.fraction \* \(p1 - p0\)/);
+  assert.match(octreeProjectionShader, /let coupling = leafBodyCoupling/);
+  assert.match(octreeProjectionShader, /effectiveDiagonal = header\.diagonal \+ coupling\.y/);
+  assert.match(octreeProjectionShader, /fn applyBodyCoupling/);
+  assert.match(octreeProjectionShader, /body\.linearVelocity\.xyz - linear/);
+  assert.match(octreeProjectionShader, /body\.angularVelocity\.xyz - angular/,
+    "the exact compact ladder must retain its same-step pressure-updated body velocity");
+  assert.match(octreePressureCouplingShader, /params\.physical\.x \* faceArea\(axis\) \* solid\.fraction \* \(p0 - p1\)/);
+  assert.match(octreePressureCouplingShader, /0\.5 \* f32\(owner\.size - 1u\)/,
+    "pressure-to-body coupling must classify leaves at the same geometric centre as projection");
+  assert.match(octreePressureCouplingShader, /atomicAdd\(&rigidExchange\[base/);
+  const encode = WebGPUOctreeProjection.prototype.encode.toString().replace(/\s+/g, "");
+  assert.match(encode, /gatherBodyCoupling\(pressure,group\)/);
+  assert.match(encode, /constuseChebyshev=this\.leafSolver==="chebyshev"/);
+  assert.match(encode, /constuseLaggedRigidCoupling=useChebyshev&&this\.couplingHasDynamicBodies/);
+  assert.match(encode, /if\(!useLaggedRigidCoupling\)gatherBodyCoupling\(project,finalGroup\)/);
+  assert.match(encode, /this\.pressureImpulsePipeline/,
+    "lagged coupling must still publish the current pressure impulse for the next batch");
+});
+
+test("octree topology is genuinely three-dimensional and 2:1 balanced", () => {
+  assert.match(octreeProjectionShader, /packOrigin\(p: vec3u\)/);
+  assert.match(octreeProjectionShader, /p\.z << 20u/);
+  assert.match(octreeProjectionShader, /for \(var z = 0u; z < size/);
+  assert.match(octreeProjectionShader, /for \(var y = 0u; y < size/);
+  assert.match(octreeProjectionShader, /for \(var x = 0u; x < size/);
+  assert.match(octreeProjectionShader, /neighborTooFine/);
+  assert.match(octreeProjectionShader, /\.size \* 2u < size/);
+});
+
+test("octree refinement is graded by resident signed distance rather than bulk VOF occupancy", () => {
+  assert.match(octreeProjectionShader, /levelSetIn: texture_3d<f32>/);
+  assert.doesNotMatch(octreeProjectionShader, /volumeIn/, "the octree solve must not bind the diagnostic VOF field");
+  assert.match(octreeProjectionShader, /closestSurface = min\(closestSurface, abs\(phi/);
+  assert.match(octreeProjectionShader, /closestSurface \* adaptivity < f32\(size\) \* finestWidth/);
+  const refinement = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn leafNeedsRefinement"), octreeProjectionShader.indexOf("fn splitLeaf"));
+  assert.doesNotMatch(refinement, /wet != liquidCell|a > 0\.001/);
+  assert.match(octreeProjectionShader, /fn liquidCell\(p: vec3i\) -> bool \{ return valid\(p\) && phi\(p\) < 0\.0; \}/);
+});
+
+test("octree preserves advected level-set volume with GPU-only feedback", () => {
+  assert.match(quadtreeSurfaceShader, /fn correctLevelSetVolume/);
+  assert.match(quadtreeSurfaceShader, /let desiredVolume = params\.inflowTiming\.y/);
+  assert.match(quadtreeSurfaceShader, /atomicLoad\(&reductions\[0\]\)/);
+  assert.match(quadtreeSurfaceShader, /u32\(occupied \* open \* 256\.0 \+ 0\.5\)/, "mixed open-cell volume reduction must be unbiased");
+  assert.match(quadtreeSurfaceShader, /abs\(value\) < 2\.0 \* params\.cellAndDt\.y/, "controller derivative must use the Heaviside support");
+  assert.match(quadtreeSurfaceShader, /occupied \* open \* 256\.0/, "volume control must conserve liquid only in the open fraction of each cell");
+  assert.match(quadtreeSurfaceShader, /surfaceSolids\[index3\(gid\)\]\.fraction/, "the controller must consume the octree's current VOS field");
+  assert.match(octreeSource, /true, true, this\.solidCells/, "octree must bind its freshly rasterized solid fractions into surface-volume control");
+  assert.match(octreeSource, /readSurfaceDiagnostics\(\) \{ return this\.surfaceState\.readVolumeDiagnostics\(\); \}/,
+    "octree telemetry must report its authoritative level-set volume rather than the dormant VOF texture");
+  assert.match(legacyUniformComputeShader, /let represented=surfaceOccupancy\(id\)\*open/, "reported liquid volume must exclude the same displaced solid fraction");
+  assert.match(legacyUniformComputeShader, /for\(var step=1;step<=64;step\+=1\)/, "phi-s must reach open liquid across a newly submerged large solid in one pass");
+  assert.match(legacyUniformComputeShader, /exteriorSum\+=exteriorWeight\*textureLoad\(pressureIn,exterior,0\)\.x/, "solid-interior phase must be extended from exterior fluid samples");
+  assert.match(uniformSolverSource, /gridKind: "octree",[\s\S]*?volumeControl: true/, "octree diagnostics must report that GPU volume control is active");
+  assert.doesNotMatch(quadtreeSurfaceShader, /params\.control\.y > 1\.5/);
+  assert.match(octreeSource, /undefined, false, false, true, true/, "octree enables GPU phi-volume correction and topology-preserving transport");
+  const encode = WebGPUQuadtreeSurfaceState.prototype.encode.toString();
+  assert.match(encode, /monotoneLevelSetTransport[\s\S]*advectLevelSet[\s\S]*advectPredict/, "octree can select monotone phi transport without changing other surface users");
+});
+
+test("octree shared fine-grid dynamics use the resident level set as their sole liquid authority", () => {
+  const projectionConstruction = uniformSolverSource.indexOf("else if (options.octree)");
+  const authorityBinding = uniformSolverSource.indexOf("const surfaceAuthority = this.adaptiveProjection?.levelSetTexture ?? this.volumeA");
+  assert.ok(projectionConstruction >= 0 && authorityBinding > projectionConstruction, "surface bind groups must be created after the octree level set exists");
+  assert.match(uniformSolverSource, /surfaceIn: GPUTexture = this\.adaptiveProjection\?\.levelSetTexture \?\? volumeIn/);
+  assert.doesNotMatch(uniformSolverSource, /surfaceIn: GPUTexture = this\.quadtreeProjection\?\.levelSetTexture/);
+  assert.match(uniformSolverSource, /this\.transportConservativeVolume = !this\.octreeProjection/);
+  assert.match(uniformSolverSource, /if \(this\.transportConservativeVolume\) \{\s+prep\.setPipeline\(this\.buildFluxScalesPipeline\)/);
+  assert.match(uniformSolverSource, /this\.densitySharpening && this\.transportConservativeVolume/);
+  assert.match(uniformSolverSource, /this\.adaptiveProjection \? 1 : 0, sigma/, "octree must interpret the shared authority texture as signed distance");
+  assert.match(legacyUniformComputeShader, /fn transportConservativeVolume\(\) -> bool/);
+  assert.match(legacyUniformComputeShader, /if\(transportConservativeVolume\(\)\)\{advected=advectedVolume\(id,dt\);\}/);
+});
+
+test("octree rebuild and solve stay resident on the GPU", () => {
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
+  const solve = WebGPUOctreeProjection.prototype.encode.toString();
+  assert.match(rebuild, /beginComputePass/);
+  assert.match(solve, /clearBuffer/);
+  assert.doesNotMatch(`${rebuild}\n${solve}`, /mapAsync|getMappedRange/);
+  // The only buffer copy is the device-local 12-byte indirect-args hand-off;
+  // anything else would reintroduce a hidden readback or dense-field copy.
+  const copies = (solve.match(/copyBufferToBuffer\([^)]*\)/g) ?? []).map((copy) => copy.replace(/\s+/g, ""));
+  assert.deepEqual(copies, ["copyBufferToBuffer(this.compaction,8,this.solveDispatch,0,12)"]);
+  assert.match(octreeProjectionShader, /var<storage, read_write> owners/);
+  assert.match(octreeProjectionShader, /pressureIn: array<f32>/);
+  assert.match(uniformSolverSource, /if \(substep > 0 && this\.octreeProjection\) this\.octreeProjection\.encodeInlineRebuild\(encoder\)/,
+    "CFL subdivision must rebuild from the level set transported by the preceding substep");
+});
+
+test("octree compacted leaf solve scans, assembles once, and iterates over rows only", () => {
+  // Prefix-sum stream compaction: per-block reduce, one-workgroup exclusive
+  // block scan, then a rank-and-scatter emit — no atomics, deterministic order.
+  assert.match(octreeProjectionShader, /fn planLeaves/);
+  assert.match(octreeProjectionShader, /fn scanLeafBlocks/);
+  assert.match(octreeProjectionShader, /fn emitLeaves/);
+  assert.doesNotMatch(octreeProjectionShader, /atomicAdd/);
+  assert.match(octreeProjectionShader, /var running = scanPairs\[lid\] - sum;/);
+  // Assembly caches diagonal, RHS flux, and a merged neighbor table, so the
+  // per-iteration kernels never touch the velocity texture or owner map.
+  const assemble = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn assembleSystem"), octreeProjectionShader.indexOf("fn iterateLeaves"));
+  assert.match(assemble, /neighborCoefficients\[j\] \+= coefficient/);
+  assert.match(assemble, /flux \+= f32\(side\) \* area \* /);
+  const iterate = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn iterateLeaves"), octreeProjectionShader.indexOf("fn leafPressureLoad"));
+  assert.doesNotMatch(iterate, /velocityAt|ownerAt|textureLoad/);
+  assert.match(iterate, /entry\.coefficient \* pressureIn\[entry\.cell\]/);
+});
+
+test("octree Chebyshev solve removes three quarters of global iteration boundaries", () => {
+  const start = octreeProjectionShader.indexOf("fn iterateChebyshev");
+  const end = octreeProjectionShader.indexOf("fn leafPressureLoad", start);
+  const chebyshev = octreeProjectionShader.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(chebyshev, /params\.solve\.y/);
+  assert.match(chebyshev, /params\.solve\.z/);
+  assert.match(chebyshev, /header\.pad0 = bitcast<u32>\(search\)/);
+  assert.match(chebyshev, /header\.pad1 = bitcast<u32>\(rho\)/);
+  assert.doesNotMatch(chebyshev, /workgroupBarrier|storageBarrier|ownerAt|textureLoad/, "each pass stays row-parallel and reduction-free");
+  const encode = WebGPUOctreeProjection.prototype.encode.toString();
+  assert.match(encode, /Math\.ceil\(this\.iterations\s*\/\s*4\)/);
+  assert.match(encode, /this\.iterateChebyshevPipeline/);
+  assert.doesNotMatch(encode, /this\.leafSolver === "chebyshev" && !this\.couplingHasDynamicBodies/,
+    "dynamic bodies must not force the accelerated solve back onto the dispatch ladder");
+});
+
+test("octree megakernel keeps barriers in uniform control flow and folds parity back", () => {
+  const solve = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn solveLeaves"));
+  assert.match(solve, /workgroupUniformLoad\(&convergedShared\)/);
+  assert.match(solve, /workgroupUniformLoad\(&rowCountShared\)/);
+  assert.match(solve, /storageBarrier\(\)/);
+  assert.match(solve, /pressureIn\[cell\] = pressureOut\[cell\]/);
+  assert.match(solve, /tolerance2 \* normB/);
+});
+
+test("octree pressure traverses coarse-fine faces by finest subfaces", () => {
+  const face = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn accumulateFace"), octreeProjectionShader.indexOf("@compute @workgroup_size(4,4,4)\nfn jacobi"));
+  assert.match(face, /for \(var b = 0u; b < size/);
+  assert.match(face, /for \(var a = 0u; a < size/);
+  assert.match(face, /ownerAt\(outside\)/);
+  assert.match(face, /let distance = (?:pressureDistance\(ownerAt\(vec3i\(origin\)\), neighbor, axis\)|0\.5 \* f32\(size \+ neighbor\.size\) \* h)/);
+  if (octreeProjectionShader.includes("fn pressureDistance")) {
+    assert.match(octreeProjectionShader, /let full = 0\.5 \* f32\(a\.size \+ b\.size\) \* cellWidth\(axis\)/);
+  }
+  assert.match(face, /area \/ max\(distance/);
+});
+
+test("octree uses the level-set crossing and prolongates pressure inside coarse leaves", () => {
+  assert.match(octreeProjectionShader, /fn ownerPhi\(owner: Owner\)/);
+  assert.match(octreeProjectionShader, /0\.5 \* f32\(owner\.size - 1u\)/,
+    "even-sized leaf pressure samples must use the geometric centre rather than an upper fine cell");
+  assert.match(octreeProjectionShader, /fn pressureDistance\(a: Owner, b: Owner, axis: u32\)/);
+  assert.match(octreeProjectionShader, /abs\(liquidPhi\) \/ max\(abs\(liquidPhi\) \+ abs\(airPhi\)/,
+    "the free-surface pressure boundary must lie at phi=0");
+  assert.match(octreeProjectionShader, /fn reconstructGradients/);
+  assert.match(octreeProjectionShader, /pressureOut\[index\(gid \+ vec3u\(1u,0u,0u\)\)\] = reconstructedAxisGradient/);
+  const project = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn projectedComponent"), octreeProjectionShader.indexOf("fn extrapolate"));
+  assert.match(project, /left\.packedOrigin != right\.packedOrigin[\s\S]*pressureDistance\(left, right, axis\)/,
+    "leaf-boundary faces must retain the exact assembled variational gradient");
+  assert.match(project, /else if \(leftWet && rightWet\) \{\s+fluid -= reconstructedGradient\(left, axis\)/,
+    "dense faces inside a coarse leaf must no longer be invisible to pressure");
+  assert.match(octreeDiagnosticShader, /mappedPressure = pressure\[ownerIndex\] \+ dot\(leafGradient\(owner\), offset\)/,
+    "the pressure overlay must expose the same affine field used by projection");
+  assert.match(octreeDiagnosticShader, /bitcast<u32>\(pressureUpdate\)/,
+    "the pressure-ownership texture must expose the applied velocity update without a readback");
+});
+
+test("octree materializes adaptive overlay fields without a readback", () => {
+  assert.match(octreeDiagnosticShader, /texture_storage_3d<rg32uint, write>/);
+  assert.match(octreeDiagnosticShader, /origin\.x \| \(origin\.z << 10u\) \| \(owner\.size << 20u\)/);
+  assert.match(octreeDiagnosticShader, /origin\.y \| \(\(origin\.y \+ owner\.size\) << 10u\)/);
+  assert.match(octreeDiagnosticShader, /textureStore\(pressureSamplesOut/);
+  assert.match(octreeDiagnosticShader, /textureStore\(pressureOut/);
+  assert.match(octreeDiagnosticShader, /textureStore\(divergenceOut/);
+  assert.doesNotMatch(octreeDiagnosticShader, /mapAsync|getMappedRange/);
+  assert.match(rendererSource, /gridKind === "quadtree-tall-cell" \|\| gpuInfo\?\.gridKind === "octree" \? 1 : 0/);
+});

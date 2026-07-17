@@ -1,4 +1,4 @@
-import { adaptivePressureCellTopology, buildQuadtree, buildVariationalSystem, maximumVelocityUpdateFluidScale, populateTallPressureGrid, populateTallPressureGridFromLeafProfiles, quadtreeFromPackedCells, quadtreeSizingFromVelocityAndSurface, signedDistanceFromVolume, type QuadtreeGrid, type TallPressureGrid, type TallPressureSample, type VariationalBody, type VariationalSystem } from "./quadtree-tall-cell-grid";
+import { adaptiveOpticalLayerDefaults, adaptivePressureCellTopology, buildAdaptiveOpticalLayerField, buildQuadtree, buildVariationalSystem, maximumVelocityUpdateFluidScale, populateTallPressureGrid, populateTallPressureGridFromLeafProfiles, quadtreeFromPackedCells, quadtreeSizingFromVelocityAndSurface, signedDistanceFromVolume, type AdaptiveOpticalLayerField, type QuadtreeGrid, type TallPressureGrid, type TallPressureSample, type VariationalBody, type VariationalSystem } from "./quadtree-tall-cell-grid";
 import { damBreakFractions } from "./initial-fluid";
 import { insidePrimitive } from "./fluid-rigid-coupling";
 import { boundingRadius, quaternionRotate, type RigidBodyState } from "./rigid-body";
@@ -7,6 +7,7 @@ import { WebGPUQuadtreeBuilder, WebGPUQuadtreeSurfaceState, type SurfaceInflowSt
 import { createInflowGridBoundary, inflowBoundaryWGSL, inflowOutletCenter } from "./inflow-boundary";
 import { WebGPUQuadtreePackBuilder, type GPUQuadtreeResidentResources } from "./webgpu-quadtree-pack-builder";
 import { sceneHasTerrain, terrainCellSolidFraction, terrainColumnHeights } from "./terrain";
+import { buildQuadtreeMultigridHierarchy, type QuadtreeMultigridHierarchy } from "./quadtree-multigrid";
 
 export interface QuadtreeRigidCoupling {
   bodies: RigidBodyState[];
@@ -33,12 +34,18 @@ export interface QuadtreeGPUCache {
   divergencePipeline?: GPUComputePipeline;
   velocityClampLayout?: GPUBindGroupLayout;
   velocityClampPipeline?: GPUComputePipeline;
+  surfaceTransportLayout?: GPUBindGroupLayout;
+  surfaceTransportPipeline?: GPUComputePipeline;
   construction?: WebGPUQuadtreeConstructionCache;
   surface?: WebGPUQuadtreeSurfaceCache;
   cpuWorker?: { postMessage(message: unknown, transfer?: ArrayBuffer[]): void; terminate(): unknown };
   cpuWorkerSequence?: number;
   cpuWorkerPending?: Map<number, { resolve: (value: PreparedProjectionCPU) => void; reject: (reason: unknown) => void }>;
   gpuPack?: WebGPUQuadtreePackBuilder;
+  multigridLayout?: GPUBindGroupLayout;
+  multigridModule?: GPUShaderModule;
+  multigridPipelineLayout?: GPUPipelineLayout;
+  multigridPipelines?: Record<string, GPUComputePipeline>;
 }
 
 export interface QuadtreeBodyImpulse {
@@ -142,14 +149,32 @@ export interface QuadtreeTallCellProjectionOptions {
   adaptivityStrength: number;
   maximumLeafSize: number;
   opticalDepthFraction: number;
+  /** Fixed quarter-depth baseline or Narita--Kanai 2026 motion-adaptive layer. */
+  opticalLayerMode?: "fixed" | "adaptive-motion";
+  /** Eq. (1) motion-error scale; the paper uses 0.5. */
+  opticalAlpha?: number;
+  /**
+   * Scale on the deep-interior speed-gradient sizing term (1 = paper-faithful
+   * column reduction). Below 1, fast but smooth bulk flow stops forcing the
+   * finest leaves far from the surface; the near-surface band keeps the full
+   * curvature/strain/speed/front-speed formula.
+   */
+  deepSpeedGradientScale?: number;
   /** IC(0) is paper-conformant; the other choices preserve the operator and tolerance stop. */
-  preconditioner?: "ic0" | "blockic" | "jacobi" | "line" | "poly";
+  preconditioner?: "ic0" | "blockic" | "jacobi" | "line" | "poly" | "mg";
   /** Degree of the damped-Jacobi Neumann polynomial (2--4). */
   polynomialDegree?: number;
+  /**
+   * Row-parallel Chebyshev is the throughput path. PCG retains the exact
+   * tolerance-driven ladder and monolithic rigid response for A/B checks.
+   */
+  pressureSolver?: QuadtreePressureSolver;
   /** Internal feedback carried across topology rebuilds. */
   iterationBudgetHint?: number;
   /** Internal exponential moving average of iterations-to-tolerance. */
   iterationEmaHint?: number;
+  /** Internal condition-number guard for very tall cells created by thin optical layers. */
+  iterationConditioningScale?: number;
   /** Opt-in timestamp-query breakdown of setup / early iterations / remainder / projection. */
   debugPressureTimings?: boolean;
   debugPressureFirstIterations?: number;
@@ -157,6 +182,23 @@ export interface QuadtreeTallCellProjectionOptions {
   debrisCulling?: boolean;
   /** Catastrophic lost-liquid safety circuit; inactive during healthy phi transport. */
   vofReconciliation?: boolean;
+  /**
+   * Seed each solve from the previous step's mapped cubical pressure instead
+   * of zero (poly/jacobi/multigrid paths). The stop test stays relative to |b|, so a
+   * converged answer is identical to the cold start within tolerance; steps
+   * whose warm residual already meets tolerance skip the CG loop entirely.
+   */
+  pressureWarmStart?: boolean;
+  /** Legacy master switch; false always disables the persistent solver. */
+  megakernelSolve?: boolean;
+  /** Dynamic is measured/default, always forces supported solves, and off disables it. */
+  megakernelMode?: QuadtreeMegakernelMode;
+  /** Maximum DOFs considered by dynamic megakernel selection. */
+  megakernelDofLimit?: number;
+  /** Maximum effective row-iterations considered by dynamic selection. */
+  megakernelRowIterationLimit?: number;
+  /** Internal: iterations used by the last converged solve, carried across rebuilds. */
+  megakernelIterationHint?: number;
 }
 
 export interface QuadtreeIterationBudget {
@@ -166,24 +208,69 @@ export interface QuadtreeIterationBudget {
 }
 
 /** Pure helper kept separate from GPU state so budget feedback is unit-testable. */
-export function quadtreeIterationBudget(dofCount: number, options: Pick<QuadtreeTallCellProjectionOptions, "pressureIterations" | "iterationBudgetHint" | "iterationEmaHint">): QuadtreeIterationBudget {
-  const hardBudget = Math.max(options.pressureIterations, Math.min(2048, Math.ceil(4 * Math.sqrt(Math.max(1, dofCount)))));
+export function quadtreeIterationBudget(dofCount: number, options: Pick<QuadtreeTallCellProjectionOptions, "pressureIterations" | "iterationBudgetHint" | "iterationEmaHint" | "iterationConditioningScale">): QuadtreeIterationBudget {
+  const hardBudget = Math.max(options.pressureIterations, Math.min(2048, Math.ceil(4 * Math.sqrt(Math.max(1, dofCount) * Math.max(1, options.iterationConditioningScale ?? 1)))));
   const ema = Math.max(1, options.iterationEmaHint ?? options.iterationBudgetHint ?? hardBudget / 1.5);
   const hinted = options.iterationBudgetHint ?? Math.ceil(1.5 * ema);
-  return { hardBudget, encodedBudget: Math.max(Math.min(32, hardBudget), Math.min(hardBudget, Math.ceil(hinted))), ema };
+  return { hardBudget, encodedBudget: Math.max(Math.min(8, hardBudget), Math.min(hardBudget, Math.ceil(hinted))), ema };
 }
 
 export function nextQuadtreeIterationBudget(current: QuadtreeIterationBudget, used: number, converged: boolean): QuadtreeIterationBudget {
   const boundedUsed = Math.max(0, Math.min(current.hardBudget, Math.round(used)));
-  const ema = current.ema * 0.75 + boundedUsed * 0.25;
+  // Asymmetric tracking: follow drops quickly (warm-started calm scenes reach
+  // tolerance in a handful of iterations and every over-encoded iteration is
+  // paid as dispatch decode), climb cautiously and rely on the immediate 2x
+  // recovery below when a solve exhausts its budget.
+  const alpha = boundedUsed < current.ema ? 0.4 : 0.25;
+  const ema = current.ema * (1 - alpha) + boundedUsed * alpha;
   const target = !converged && boundedUsed >= current.encodedBudget
     ? Math.max(current.encodedBudget + 1, current.encodedBudget * 2)
-    : 1.5 * ema;
+    // Indirect work becomes zero after convergence, but WebGPU still decodes
+    // every pre-encoded dispatch at near-full per-dispatch cost, so the tail
+    // is priced like live iterations. Keep 20% variation headroom plus a
+    // small absolute margin and rely on the immediate 2x recovery when a
+    // solve reaches this budget. The low floor matters for settled scenes,
+    // where the solve converges in a handful of iterations and a large floor
+    // would encode a permanently dead tail.
+    : 1.2 * ema + 4;
   return {
     hardBudget: current.hardBudget,
-    encodedBudget: Math.max(Math.min(32, current.hardBudget), Math.min(current.hardBudget, Math.ceil(target))),
+    encodedBudget: Math.max(Math.min(8, current.hardBudget), Math.min(current.hardBudget, Math.ceil(target))),
     ema
   };
+}
+
+export const quadtreeMegakernelDofLimit = 32_768;
+export const quadtreeMegakernelRowIterationLimit = 30_000;
+export type QuadtreeMegakernelMode = "dynamic" | "always" | "off";
+export type QuadtreePressureSolver = "chebyshev" | "pcg";
+
+/** Match the octree's measured pressure-effort policy. */
+export function quadtreeChebyshevPasses(pressureIterations: number) {
+  return Math.max(1, Math.ceil(Math.max(1, pressureIterations) / 4));
+}
+
+/**
+ * The persistent kernel serializes the whole matrix onto one workgroup. It is
+ * profitable for already-calm warm solves, but parallel ladder dispatches win
+ * once row count times observed iterations grows. Require one converged
+ * ladder observation before opting in, and charge higher polynomial degrees
+ * for their extra matrix products.
+ */
+export function quadtreeMegakernelPreferred(
+  dofCount: number,
+  previousIterations: number | undefined,
+  polynomialDegree = 2,
+  dofLimit = quadtreeMegakernelDofLimit,
+  rowIterationLimit = quadtreeMegakernelRowIterationLimit
+) {
+  if (!Number.isFinite(dofCount) || dofCount < 0 || previousIterations === undefined
+    || !Number.isFinite(previousIterations) || previousIterations < 0
+    || !Number.isFinite(dofLimit) || dofLimit < 0
+    || !Number.isFinite(rowIterationLimit) || rowIterationLimit < 0) return false;
+  const degreeCost = Math.max(1, Math.max(1, polynomialDegree) / 2);
+  const effectiveRowIterations = dofCount * Math.max(1, Math.round(previousIterations)) * degreeCost;
+  return dofCount <= dofLimit && effectiveRowIterations <= rowIterationLimit;
 }
 
 export interface QuadtreeTallCellProjectionInfo {
@@ -197,6 +284,10 @@ export interface QuadtreeTallCellProjectionInfo {
   maximumNeighborRatio: number;
   compressionRatio: number;
   maximumFluidScale: number;
+  opticalLayerMode: "fixed" | "adaptive-motion";
+  opticalAlpha: number;
+  opticalMinimumCells: number;
+  opticalMaximumCells: number;
   allocatedBytes: number;
   /** GPU queue + compact readback time for Sec. 4.1 construction. */
   gpuConstruction_ms?: number;
@@ -220,6 +311,8 @@ export interface QuadtreeTallCellProjectionInfo {
   pressureIterationHardBudget?: number;
   pressureConverged?: boolean;
   factorLevelCount?: number;
+  multigridLevelCount?: number;
+  multigridCoarsestDofs?: number;
   velocityClampCount?: number;
   pressurePhaseTimings?: { setup_ms: number; firstIterations_ms: number; remainingIterations_ms: number; project_ms: number };
   /** Bytes read back for an update (leaf-centre phi profiles + compact 2D leaves + diagnostics). */
@@ -233,6 +326,8 @@ interface ProjectionResources {
   velocityScratch: GPUTexture;
   volume: GPUTexture;
   levelSet?: WebGPUQuadtreeSurfaceState;
+  /** Shared flux-consistent velocity view consumed only by the surface pipeline. */
+  surfaceTransport?: GPUTexture;
 }
 
 interface ProjectionFields {
@@ -250,6 +345,7 @@ export interface QuadtreeCPUPreparationInput {
   options: QuadtreeTallCellProjectionOptions;
   packedCells: Uint32Array;
   columnProfiles: Float32Array;
+  opticalColumns?: Uint32Array;
   /** Current resident topology; matching rebuilds skip sparse/MLS repacking. */
   reuseTopologyWords?: Uint32Array;
   coupling?: QuadtreeRigidCoupling;
@@ -293,6 +389,10 @@ export function preparedProjectionTransferables(value: PreparedProjectionCPU): A
     packed.faces, packed.rowOffsets, packed.rowEntries, packed.matrixWords, packed.cellProjection, packed.cellTopology,
     packed.factorColumns, packed.factorEntries, packed.factorAuxWords, packed.cellPressureSamples
   ]) add(view);
+  for (const level of packed?.multigrid?.levels ?? []) {
+    add(level.rowOffsets); add(level.columns); add(level.lineOffsets); add(level.lineNodes);
+    add(level.nodeToCoarse); add(level.entryToCoarse); add(level.coarseNodeOffsets); add(level.coarseNodes); add(level.matrixWords);
+  }
   return [...buffers];
 }
 
@@ -424,7 +524,7 @@ const DIAGONAL: SolverField = 6u; const ACTIVE_FLAG: SolverField = 7u;
 @group(0) @binding(7) var cellProjection: texture_3d<f32>;
 @group(0) @binding(8) var<storage, read_write> state: array<u32>;
 @group(0) @binding(9) var<storage, read_write> scalars: array<f32>;
-@group(0) @binding(10) var<storage, read> factorColumns: array<vec2u>;
+@group(0) @binding(10) var<storage, read_write> factorColumns: array<vec2u>;
 @group(0) @binding(11) var<storage, read> factorEntries: array<Entry>;
 @group(0) @binding(12) var<uniform> params: Params;
 @group(0) @binding(13) var factorAux: texture_2d<u32>;
@@ -558,6 +658,21 @@ fn rowProduct(row: u32) -> f32 {
   for (var entry = matrixStart(row); entry < matrixStart(row + 1u); entry += 1u) { sum += matrixCoefficient(entry) * stateF(matrixNode(entry), DIRECTION); }
   return sum;
 }
+// couplingCounts.z packs the warm-start flag in bit 0 and the persistent
+// megakernel's hard iteration cap above it. Seed the iterate from last solve's
+// mapped cubical pressure, read back at each sample's defining cell through
+// the aux dof-sample table. The texture is zero on the first solve and after
+// an async topology swap, which degrades gracefully to the cold start.
+fn warmStartActive() -> bool { return (params.couplingCounts.z & 1u) != 0u; }
+fn dofSampleCell(row: u32) -> vec3i {
+  let base = params.couplingCounts.y + 4u * row;
+  let word = auxWord(base); let size = max(1u, auxWord(base + 1u));
+  return vec3i(i32((word & 1023u) + size / 2u), i32(word >> 20u), i32(((word >> 10u) & 1023u) + size / 2u));
+}
+fn warmStartPressure(row: u32) -> f32 {
+  if (!dofActive(row)) { return 0.0; }
+  return textureLoad(mappedPressureIn, dofSampleCell(row), 0).x;
+}
 fn initializeRow(row: u32) {
   if (!dofActive(row)) {
     setStateF(row, PRESSURE, 0.0); setStateF(row, BEST_PRESSURE, 0.0); setStateF(row, RESIDUAL, 0.0); setStateF(row, DIAGONAL, 1.0);
@@ -570,12 +685,104 @@ fn initializeRow(row: u32) {
     // CPU-integrated (1-A) u_solid constraint flux of moving rigid bodies.
     rhs += item.coefficient * face.flux;
   }
+  var pressure0 = 0.0; var residual = rhs;
+  if (warmStartActive()) {
+    pressure0 = warmStartPressure(row);
+    for (var entry = matrixStart(row); entry < matrixStart(row + 1u); entry += 1u) { residual -= matrixCoefficient(entry) * warmStartPressure(matrixNode(entry)); }
+  }
   for (var entry = matrixStart(row); entry < matrixStart(row + 1u); entry += 1u) { if (matrixNode(entry) == row) { diag += matrixCoefficient(entry); } }
-  setStateF(row, PRESSURE, 0.0); setStateF(row, BEST_PRESSURE, 0.0); setStateF(row, RESIDUAL, rhs); setStateF(row, DIAGONAL, max(diag, 1e-12));
-  setStateF(row, PRECONDITIONED, 0.0); setStateF(row, DIRECTION, 0.0); setStateF(row, MATRIX_DIRECTION, 0.0);
+  setStateF(row, PRESSURE, pressure0); setStateF(row, BEST_PRESSURE, pressure0); setStateF(row, RESIDUAL, residual); setStateF(row, DIAGONAL, max(diag, 1e-12));
+  // MATRIX_DIRECTION carries b until the first SpMV so the stop test can stay
+  // relative to |b| rather than to the (already reduced) warm residual.
+  setStateF(row, PRECONDITIONED, 0.0); setStateF(row, DIRECTION, 0.0); setStateF(row, MATRIX_DIRECTION, rhs);
+}
+// Fixed-degree Chebyshev semi-iteration over D^-1 A. PRESSURE and
+// BEST_PRESSURE are the ping-pong vectors; PRECONDITIONED stores the previous
+// polynomial correction, MATRIX_DIRECTION stores rho, and DIRECTION retains
+// b for the final residual report. Geometry and coefficients were refreshed
+// once before this ladder.
+fn initializeChebyshevRow(row: u32) {
+  initializeRow(row);
+  setStateF(row, DIRECTION, stateF(row, MATRIX_DIRECTION));
+  setStateF(row, PRECONDITIONED, 0.0);
+  setStateF(row, MATRIX_DIRECTION, 0.0);
+}
+@compute @workgroup_size(128)
+fn initializeChebyshev(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x < dofs()) { initializeChebyshevRow(gid.x); }
+}
+fn pressureProduct(row: u32, source: SolverField) -> f32 {
+  if (!dofActive(row)) { return stateF(row, source); }
+  var sum = 0.0;
+  for (var entry = matrixStart(row); entry < matrixStart(row + 1u); entry += 1u) {
+    sum += matrixCoefficient(entry) * stateF(matrixNode(entry), source);
+  }
+  return sum;
+}
+fn chebyshevUpdate(row: u32, source: SolverField, destination: SolverField) {
+  if (!dofActive(row)) {
+    setStateF(row, destination, 0.0); setStateF(row, PRECONDITIONED, 0.0); setStateF(row, MATRIX_DIRECTION, 0.0); return;
+  }
+  let residual = (stateF(row, DIRECTION) - pressureProduct(row, source)) / stateF(row, DIAGONAL);
+  let lower = 0.01; let upper = 2.2;
+  let theta = 0.5 * (upper + lower); let delta = 0.5 * (upper - lower); let sigma = theta / delta;
+  let previousSearch = stateF(row, PRECONDITIONED); let previousRho = stateF(row, MATRIX_DIRECTION);
+  var rho = 1.0 / sigma;
+  var search = residual / theta;
+  if (previousRho > 0.0) {
+    rho = 1.0 / (2.0 * sigma - previousRho);
+    search = rho * previousRho * previousSearch + (2.0 * rho / delta) * residual;
+  }
+  setStateF(row, destination, stateF(row, source) + search);
+  setStateF(row, PRECONDITIONED, search); setStateF(row, MATRIX_DIRECTION, rho);
+}
+@compute @workgroup_size(128)
+fn iterateChebyshevAB(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x < dofs()) { chebyshevUpdate(gid.x, PRESSURE, BEST_PRESSURE); }
+}
+@compute @workgroup_size(128)
+fn iterateChebyshevBA(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x < dofs()) { chebyshevUpdate(gid.x, BEST_PRESSURE, PRESSURE); }
+}
+@compute @workgroup_size(128)
+fn finishChebyshevFromPressure(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= dofs()) { return; }
+  setStateF(row, BEST_PRESSURE, stateF(row, PRESSURE));
+  setStateF(row, RESIDUAL, stateF(row, DIRECTION) - pressureProduct(row, PRESSURE));
+}
+@compute @workgroup_size(128)
+fn finishChebyshevFromBest(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= dofs()) { return; }
+  setStateF(row, RESIDUAL, stateF(row, DIRECTION) - pressureProduct(row, BEST_PRESSURE));
+}
+@compute @workgroup_size(256)
+fn reduceChebyshevResidual(@builtin(local_invocation_id) lid: vec3u) {
+  var bb = 0.0; var rr = 0.0;
+  for (var row = lid.x; row < dofs(); row += 256u) {
+    bb += stateF(row, DIRECTION) * stateF(row, DIRECTION);
+    rr += stateF(row, RESIDUAL) * stateF(row, RESIDUAL);
+  }
+  reducePair(lid.x, bb, rr);
+  if (lid.x == 0u) {
+    scalars[2] = reductionB[0]; scalars[3] = max(reductionA[0], 1e-30); scalars[7] = reductionB[0];
+    scalars[9] = f32(params.counts.z);
+  }
 }
 @compute @workgroup_size(128)
 fn initialize(@builtin(global_invocation_id) gid: vec3u) { if (gid.x < dofs()) { initializeRow(gid.x); } }
+@compute @workgroup_size(128)
+fn initializeJacobiDirection(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= dofs()) { return; }
+  initializeRow(row);
+  setStateF(row, PRECONDITIONED, stateF(row, RESIDUAL) / stateF(row, DIAGONAL));
+  setStateF(row, DIRECTION, stateF(row, PRECONDITIONED));
+}
+@compute @workgroup_size(128)
+fn initializePolynomialStart(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= dofs()) { return; }
+  initializeRow(row);
+  setStateF(row, PRECONDITIONED, 0.5 * stateF(row, RESIDUAL) / stateF(row, DIAGONAL));
+}
 fn applyPrecondition(lid: u32, solveActive: bool) {
   if (solveActive) { for (var row = lid; row < dofs(); row += 256u) { setStateF(row, PRECONDITIONED, stateF(row, RESIDUAL)); } }
   storageBarrier(); workgroupBarrier();
@@ -690,6 +897,12 @@ fn preconditionPolynomialUpdate(@builtin(global_invocation_id) gid: vec3u) {
   let row = gid.x; if (row < dofs()) { addStateF(row, PRECONDITIONED, 0.5 * (stateF(row, RESIDUAL) - stateF(row, MATRIX_DIRECTION)) / stateF(row, DIAGONAL)); }
 }
 @compute @workgroup_size(128)
+fn preconditionPolynomialUpdateDirection(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= dofs()) { return; }
+  addStateF(row, PRECONDITIONED, 0.5 * (stateF(row, RESIDUAL) - stateF(row, MATRIX_DIRECTION)) / stateF(row, DIAGONAL));
+  setStateF(row, DIRECTION, stateF(row, PRECONDITIONED));
+}
+@compute @workgroup_size(128)
 fn startDirection(@builtin(global_invocation_id) gid: vec3u) {
   if (gid.x < dofs()) { setStateF(gid.x, DIRECTION, stateF(gid.x, PRECONDITIONED)); }
 }
@@ -698,11 +911,24 @@ fn reducePair(local: u32, a: f32, b: f32) {
   var stride = 128u;
   loop { if (local < stride) { reductionA[local] += reductionA[local + stride]; reductionB[local] += reductionB[local + stride]; } workgroupBarrier(); if (stride == 1u) { break; } stride /= 2u; }
 }
+// Warm-start companion for reduceInitial: captures |b|^2 from the staged
+// MATRIX_DIRECTION copy before the preconditioner setup overwrites it, so the
+// stop test stays relative to |b| exactly as in the cold start.
+@compute @workgroup_size(256)
+fn reduceInitialNorm(@builtin(local_invocation_id) lid: vec3u) {
+  var bb = 0.0;
+  for (var row = lid.x; row < dofs(); row += 256u) { let b = stateF(row, MATRIX_DIRECTION); bb += b * b; }
+  reducePair(lid.x, bb, 0.0); if (lid.x == 0u) { scalars[3] = max(reductionA[0], 1e-30); }
+}
 @compute @workgroup_size(256)
 fn reduceInitial(@builtin(local_invocation_id) lid: vec3u) {
-  var rz = 0.0; var bb = 0.0;
-  for (var row = lid.x; row < dofs(); row += 256u) { rz += stateF(row, RESIDUAL) * stateF(row, PRECONDITIONED); bb += stateF(row, RESIDUAL) * stateF(row, RESIDUAL); }
-  reducePair(lid.x, rz, bb); if (lid.x == 0u) { scalars[0] = reductionA[0]; scalars[2] = reductionB[0]; scalars[3] = max(reductionB[0], 1e-30); scalars[7] = reductionB[0]; }
+  var rz = 0.0; var rr = 0.0;
+  for (var row = lid.x; row < dofs(); row += 256u) { rz += stateF(row, RESIDUAL) * stateF(row, PRECONDITIONED); rr += stateF(row, RESIDUAL) * stateF(row, RESIDUAL); }
+  reducePair(lid.x, rz, rr);
+  if (lid.x == 0u) {
+    scalars[0] = reductionA[0]; scalars[2] = reductionB[0]; scalars[7] = reductionB[0];
+    if (!warmStartActive()) { scalars[3] = max(reductionB[0], 1e-30); }
+  }
 }
 @compute @workgroup_size(128)
 fn multiply(@builtin(global_invocation_id) gid: vec3u) { if (gid.x < dofs()) { setStateF(gid.x, MATRIX_DIRECTION, rowProduct(gid.x)); } }
@@ -748,22 +974,272 @@ fn applyStepFinalize(@builtin(local_invocation_id) lid: vec3u) {
 fn applyStepUpdate(@builtin(global_invocation_id) gid: vec3u) {
   let row = gid.x; if (row < dofs()) { let alpha = scalars[4]; addStateF(row, PRESSURE, alpha * stateF(row, DIRECTION)); addStateF(row, RESIDUAL, -alpha * stateF(row, MATRIX_DIRECTION)); }
 }
+fn applyStepUpdateRow(row: u32) {
+  let alpha = scalars[4]; addStateF(row, PRESSURE, alpha * stateF(row, DIRECTION)); addStateF(row, RESIDUAL, -alpha * stateF(row, MATRIX_DIRECTION));
+}
+@compute @workgroup_size(128)
+fn applyStepUpdateJacobi(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= dofs()) { return; }
+  applyStepUpdateRow(row);
+  setStateF(row, PRECONDITIONED, stateF(row, RESIDUAL) / stateF(row, DIAGONAL));
+}
+@compute @workgroup_size(128)
+fn applyStepUpdatePolynomialStart(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= dofs()) { return; }
+  applyStepUpdateRow(row);
+  setStateF(row, PRECONDITIONED, 0.5 * stateF(row, RESIDUAL) / stateF(row, DIAGONAL));
+}
 @compute @workgroup_size(128)
 fn finishIterationPartial(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u, @builtin(workgroup_id) wid: vec3u) {
   var rz = 0.0; var rr = 0.0;
   if (gid.x < dofs()) { rz = stateF(gid.x, RESIDUAL) * stateF(gid.x, PRECONDITIONED); rr = stateF(gid.x, RESIDUAL) * stateF(gid.x, RESIDUAL); }
   reducePartial(lid.x, rz, rr); if (lid.x == 0u) { scalars[partialBase() + wid.x] = reductionA[0]; scalars[partialBase() + params.couplingCounts.w + wid.x] = reductionB[0]; }
 }
+@compute @workgroup_size(128)
+fn preconditionPolynomialUpdateFinishPartial(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u, @builtin(workgroup_id) wid: vec3u) {
+  let row = gid.x; var rz = 0.0; var rr = 0.0;
+  if (row < dofs()) {
+    addStateF(row, PRECONDITIONED, 0.5 * (stateF(row, RESIDUAL) - stateF(row, MATRIX_DIRECTION)) / stateF(row, DIAGONAL));
+    rz = stateF(row, RESIDUAL) * stateF(row, PRECONDITIONED); rr = stateF(row, RESIDUAL) * stateF(row, RESIDUAL);
+  }
+  reducePartial(lid.x, rz, rr); if (lid.x == 0u) { scalars[partialBase() + wid.x] = reductionA[0]; scalars[partialBase() + params.couplingCounts.w + wid.x] = reductionB[0]; }
+}
+// The parallel finalizer's bind group aliases binding 10 to dispatchArgs.
+// Its direct one-workgroup dispatch can therefore publish next-iteration
+// work without aliasing that buffer as an indirect source in the same scope.
+fn controlWord(index: u32) -> u32 { return factorColumns[index / 2u][index % 2u]; }
+fn setControlWord(index: u32, value: u32) {
+  let pairIndex = index / 2u; var pair = factorColumns[pairIndex]; pair[index % 2u] = value; factorColumns[pairIndex] = pair;
+}
+fn publishNextDispatches(keepSolving: bool) {
+  for (var word = 0u; word < 12u; word += 1u) { setControlWord(word, select(0u, controlWord(12u + word), keepSolving || word % 3u != 0u)); }
+}
 @compute @workgroup_size(256)
 fn finishIterationFinalize(@builtin(local_invocation_id) lid: vec3u) {
+  let solveActive = scalars[10] != 0.0;
   var rz = 0.0; var rr = 0.0;
-  for (var part = lid.x; part < params.couplingCounts.w; part += 256u) { rz += scalars[partialBase() + part]; rr += scalars[partialBase() + params.couplingCounts.w + part]; }
+  if (solveActive) { for (var part = lid.x; part < params.couplingCounts.w; part += 256u) { rz += scalars[partialBase() + part]; rr += scalars[partialBase() + params.couplingCounts.w + part]; } }
   reducePair(lid.x, rz, rr);
-  if (lid.x == 0u) { scalars[5] = reductionA[0]; scalars[2] = reductionB[0]; scalars[7] = min(scalars[7], reductionB[0]); scalars[6] = reductionA[0] / max(abs(scalars[0]), 1e-30) * sign(scalars[0]); scalars[0] = reductionA[0]; }
+  if (lid.x == 0u) {
+    if (solveActive) {
+      scalars[5] = reductionA[0]; scalars[2] = reductionB[0]; scalars[7] = min(scalars[7], reductionB[0]);
+      scalars[6] = reductionA[0] / max(abs(scalars[0]), 1e-30) * sign(scalars[0]); scalars[0] = reductionA[0];
+      let keepSolving = !(scalars[3] > 0.0 && scalars[2] <= params.solve.x * scalars[3]);
+      if (keepSolving) { scalars[9] += 1.0; }
+      scalars[10] = select(0.0, 1.0, keepSolving); publishNextDispatches(keepSolving);
+      // This triple belongs to the iteration just finalized, so it remains
+      // active even when the next-iteration triples were switched off.
+      setControlWord(31u, controlWord(12u)); setControlWord(32u, 1u); setControlWord(33u, 1u);
+    } else {
+      setControlWord(31u, 0u); setControlWord(32u, 1u); setControlWord(33u, 1u);
+    }
+  }
 }
 @compute @workgroup_size(128)
 fn finishIterationUpdate(@builtin(global_invocation_id) gid: vec3u) {
   let row = gid.x; if (row < dofs()) { if (scalars[2] <= scalars[7]) { setStateF(row, BEST_PRESSURE, stateF(row, PRESSURE)); } setStateF(row, DIRECTION, stateF(row, PRECONDITIONED) + scalars[6] * stateF(row, DIRECTION)); }
+}
+// Fused SpMV + d.Ad partial for the uncoupled parallel path. The coupled path
+// keeps the separate applyStepPartial because coupleApply modifies
+// [MATRIX_DIRECTION] between the multiply and the dot product.
+@compute @workgroup_size(128)
+fn multiplyPartial(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u, @builtin(workgroup_id) wid: vec3u) {
+  var value = 0.0;
+  if (gid.x < dofs()) {
+    let product = rowProduct(gid.x);
+    setStateF(gid.x, MATRIX_DIRECTION, product);
+    value = stateF(gid.x, DIRECTION) * product;
+  }
+  reducePartial(lid.x, value, 0.0); if (lid.x == 0u) { scalars[partialBase() + wid.x] = reductionA[0]; }
+}
+// Every workgroup re-reduces the d.Ad partials instead of waiting on a
+// dedicated finalize dispatch: the partial list is tiny (one value per
+// 128 rows) and stays L2-resident, so the redundant sum is far cheaper than
+// another dispatch boundary.
+var<workgroup> alphaShared: f32;
+fn broadcastAlpha(lid: u32) -> f32 {
+  if (lid == 0u) {
+    var denominator = 0.0;
+    for (var part = 0u; part < params.couplingCounts.w; part += 1u) { denominator += scalars[partialBase() + part]; }
+    alphaShared = scalars[0] / max(denominator, 1e-30);
+  }
+  workgroupBarrier();
+  return alphaShared;
+}
+@compute @workgroup_size(128)
+fn applyStepAlphaUpdate(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+  let alpha = broadcastAlpha(lid.x);
+  let row = gid.x; if (row >= dofs()) { return; }
+  addStateF(row, PRESSURE, alpha * stateF(row, DIRECTION));
+  addStateF(row, RESIDUAL, -alpha * stateF(row, MATRIX_DIRECTION));
+  if (row == 0u) { scalars[4] = alpha; }
+}
+@compute @workgroup_size(128)
+fn applyStepAlphaUpdatePolynomialStart(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+  let alpha = broadcastAlpha(lid.x);
+  let row = gid.x; if (row >= dofs()) { return; }
+  addStateF(row, PRESSURE, alpha * stateF(row, DIRECTION));
+  addStateF(row, RESIDUAL, -alpha * stateF(row, MATRIX_DIRECTION));
+  setStateF(row, PRECONDITIONED, 0.5 * stateF(row, RESIDUAL) / stateF(row, DIAGONAL));
+  if (row == 0u) { scalars[4] = alpha; }
+}
+@compute @workgroup_size(128)
+fn applyStepAlphaUpdateJacobiFinishPartial(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u, @builtin(workgroup_id) wid: vec3u) {
+  let alpha = broadcastAlpha(lid.x);
+  let row = gid.x; var rz = 0.0; var rr = 0.0;
+  if (row < dofs()) {
+    addStateF(row, PRESSURE, alpha * stateF(row, DIRECTION));
+    addStateF(row, RESIDUAL, -alpha * stateF(row, MATRIX_DIRECTION));
+    let preconditioned = stateF(row, RESIDUAL) / stateF(row, DIAGONAL);
+    setStateF(row, PRECONDITIONED, preconditioned);
+    rz = stateF(row, RESIDUAL) * preconditioned; rr = stateF(row, RESIDUAL) * stateF(row, RESIDUAL);
+    if (row == 0u) { scalars[4] = alpha; }
+  }
+  reducePartial(lid.x, rz, rr); if (lid.x == 0u) { scalars[partialBase() + wid.x] = reductionA[0]; scalars[partialBase() + params.couplingCounts.w + wid.x] = reductionB[0]; }
+}
+// Persistent-CG path for uncoupled polynomial/Jacobi solves. One workgroup
+// owns every phase, so storage barriers provide global ordering without a
+// dispatch boundary. params.precondition.w is 1 for Jacobi and 2--4 for the
+// damped-Jacobi polynomial degree.
+fn megakernelPreconditionedProduct(row: u32) -> f32 {
+  if (!dofActive(row)) { return stateF(row, PRECONDITIONED); }
+  var sum = 0.0;
+  for (var entry = matrixStart(row); entry < matrixStart(row + 1u); entry += 1u) {
+    sum += matrixCoefficient(entry) * stateF(matrixNode(entry), PRECONDITIONED);
+  }
+  return sum;
+}
+var<workgroup> megakernelBb: f32;
+var<workgroup> megakernelRz: f32;
+var<workgroup> megakernelRr: f32;
+var<workgroup> megakernelMinimumRr: f32;
+var<workgroup> megakernelAlpha: f32;
+var<workgroup> megakernelBeta: f32;
+var<workgroup> megakernelConverged: u32;
+var<workgroup> megakernelSnapshotBest: u32;
+@compute @workgroup_size(256)
+fn solveMegakernel(@builtin(local_invocation_id) lid: vec3u) {
+  let local = lid.x;
+  let degree = params.precondition.w;
+  let hardBudget = params.couplingCounts.z >> 1u;
+
+  // Initialize the warm/cold iterate and preserve b in MATRIX_DIRECTION.
+  for (var row = local; row < dofs(); row += 256u) { initializeRow(row); }
+  storageBarrier(); workgroupBarrier();
+
+  // Capture |b|^2 before polynomial scratch reuses MATRIX_DIRECTION, and
+  // capture the initial residual independently for the best-iterate guard.
+  var bb = 0.0; var rr0 = 0.0;
+  for (var row = local; row < dofs(); row += 256u) {
+    let b = stateF(row, MATRIX_DIRECTION); let r = stateF(row, RESIDUAL);
+    bb += b * b; rr0 += r * r;
+  }
+  reducePair(local, bb, rr0);
+  if (local == 0u) {
+    megakernelBb = max(reductionA[0], 1e-30);
+    megakernelRr = reductionB[0]; megakernelMinimumRr = reductionB[0];
+    scalars[2] = reductionB[0]; scalars[3] = megakernelBb; scalars[7] = reductionB[0];
+    scalars[4] = 0.0; scalars[6] = 0.0; scalars[9] = 0.0;
+  }
+  storageBarrier(); workgroupBarrier();
+
+  // z0 = M^-1 r0. Degree one is Jacobi; higher degrees evaluate the same
+  // damped Neumann polynomial as the dispatch ladder.
+  for (var row = local; row < dofs(); row += 256u) {
+    let scaled = stateF(row, RESIDUAL) / stateF(row, DIAGONAL);
+    setStateF(row, PRECONDITIONED, select(0.5 * scaled, scaled, degree == 1u));
+  }
+  storageBarrier(); workgroupBarrier();
+  for (var polynomialPass = 1u; polynomialPass < degree; polynomialPass += 1u) {
+    for (var row = local; row < dofs(); row += 256u) {
+      setStateF(row, MATRIX_DIRECTION, megakernelPreconditionedProduct(row));
+    }
+    storageBarrier(); workgroupBarrier();
+    for (var row = local; row < dofs(); row += 256u) {
+      addStateF(row, PRECONDITIONED, 0.5 * (stateF(row, RESIDUAL) - stateF(row, MATRIX_DIRECTION)) / stateF(row, DIAGONAL));
+    }
+    storageBarrier(); workgroupBarrier();
+  }
+
+  var rz0 = 0.0;
+  for (var row = local; row < dofs(); row += 256u) {
+    let z = stateF(row, PRECONDITIONED);
+    setStateF(row, DIRECTION, z); rz0 += stateF(row, RESIDUAL) * z;
+  }
+  reducePair(local, rz0, 0.0);
+  if (local == 0u) {
+    megakernelRz = reductionA[0]; scalars[0] = reductionA[0];
+    megakernelConverged = select(0u, 1u, megakernelRr <= params.solve.x * megakernelBb);
+  }
+  storageBarrier(); workgroupBarrier();
+
+  for (var iteration = 0u; iteration < hardBudget; iteration += 1u) {
+    // The collective load makes the break condition uniform for every
+    // invocation, which is mandatory because all later phases contain
+    // workgroup and storage barriers.
+    if (workgroupUniformLoad(&megakernelConverged) != 0u) { break; }
+
+    // q = A d and d.q in one strided pass.
+    var pAp = 0.0;
+    for (var row = local; row < dofs(); row += 256u) {
+      let product = rowProduct(row); setStateF(row, MATRIX_DIRECTION, product);
+      pAp += stateF(row, DIRECTION) * product;
+    }
+    reducePair(local, pAp, 0.0);
+    if (local == 0u) {
+      megakernelAlpha = megakernelRz / max(reductionA[0], 1e-30);
+      scalars[1] = reductionA[0]; scalars[4] = megakernelAlpha;
+    }
+    storageBarrier(); workgroupBarrier();
+
+    for (var row = local; row < dofs(); row += 256u) {
+      addStateF(row, PRESSURE, megakernelAlpha * stateF(row, DIRECTION));
+      addStateF(row, RESIDUAL, -megakernelAlpha * stateF(row, MATRIX_DIRECTION));
+    }
+    if (local == 0u) { scalars[9] = f32(iteration + 1u); }
+    storageBarrier(); workgroupBarrier();
+
+    // z = M^-1 r, reusing MATRIX_DIRECTION as polynomial scratch now that q
+    // has already been consumed by the pressure/residual update.
+    for (var row = local; row < dofs(); row += 256u) {
+      let scaled = stateF(row, RESIDUAL) / stateF(row, DIAGONAL);
+      setStateF(row, PRECONDITIONED, select(0.5 * scaled, scaled, degree == 1u));
+    }
+    storageBarrier(); workgroupBarrier();
+    for (var polynomialPass = 1u; polynomialPass < degree; polynomialPass += 1u) {
+      for (var row = local; row < dofs(); row += 256u) {
+        setStateF(row, MATRIX_DIRECTION, megakernelPreconditionedProduct(row));
+      }
+      storageBarrier(); workgroupBarrier();
+      for (var row = local; row < dofs(); row += 256u) {
+        addStateF(row, PRECONDITIONED, 0.5 * (stateF(row, RESIDUAL) - stateF(row, MATRIX_DIRECTION)) / stateF(row, DIAGONAL));
+      }
+      storageBarrier(); workgroupBarrier();
+    }
+
+    var rz = 0.0; var rr = 0.0;
+    for (var row = local; row < dofs(); row += 256u) {
+      let r = stateF(row, RESIDUAL);
+      rz += r * stateF(row, PRECONDITIONED); rr += r * r;
+    }
+    reducePair(local, rz, rr);
+    if (local == 0u) {
+      let nextRz = reductionA[0]; let nextRr = reductionB[0];
+      megakernelBeta = nextRz / max(abs(megakernelRz), 1e-30) * sign(megakernelRz);
+      megakernelSnapshotBest = select(0u, 1u, nextRr <= megakernelMinimumRr);
+      megakernelRz = nextRz; megakernelRr = nextRr; megakernelMinimumRr = min(megakernelMinimumRr, nextRr);
+      scalars[0] = nextRz; scalars[2] = nextRr; scalars[5] = nextRz;
+      scalars[6] = megakernelBeta; scalars[7] = megakernelMinimumRr;
+      megakernelConverged = select(0u, 1u, nextRr <= params.solve.x * megakernelBb);
+    }
+    storageBarrier(); workgroupBarrier();
+
+    for (var row = local; row < dofs(); row += 256u) {
+      if (megakernelSnapshotBest != 0u) { setStateF(row, BEST_PRESSURE, stateF(row, PRESSURE)); }
+      setStateF(row, DIRECTION, stateF(row, PRECONDITIONED) + megakernelBeta * stateF(row, DIRECTION));
+    }
+    storageBarrier(); workgroupBarrier();
+  }
 }
 fn cellIndex(q: vec3u) -> u32 { return q.x + params.dims.x * (q.y + params.dims.y * q.z); }
 // Narita Sec. 4.4: the monolithic body coupling K = [grad]^T [V] (1-[A]) [L] is
@@ -1000,6 +1476,215 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
 // one usage scope, so the same buffer cannot be a writable storage binding and
 // the indirect argument source of that dispatch. A tiny preceding dispatch
 // writes the arguments; all pressure kernels can then remain in one pass.
+/**
+ * Geometric multigrid is a separate module so the already-full projection
+ * layout does not acquire more storage bindings. Coarse matrices are numeric
+ * Galerkin products of the refreshed fine operator; the symbolic entry map is
+ * rebuilt only when quadtree topology changes.
+ */
+export const quadtreeMultigridShader = /* wgsl */ `
+struct MGParams {
+  source: vec4u,
+  coarse: vec4u,
+  topologyOffsets: vec4u,
+  counts: vec4u,
+  transferOffsets: vec4u,
+  solve: vec4f,
+}
+@group(0) @binding(0) var<storage, read_write> sourceMatrix: array<atomic<u32>>;
+@group(0) @binding(1) var<storage, read_write> targetMatrix: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> sourceVectors: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> targetVectors: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read> topology: array<u32>;
+@group(0) @binding(5) var<storage, read> scalars: array<f32>;
+@group(0) @binding(7) var<storage, read_write> fineState: array<u32>;
+@group(0) @binding(8) var<uniform> params: MGParams;
+const RHS = 0u; const CORRECTION = 1u; const DEFECT = 2u;
+const CPRIME = 3u; const DPRIME = 4u;
+fn sourceCount() -> u32 { return params.source.x; }
+fn targetCount() -> u32 { return params.coarse.x; }
+fn sourceEntryBase(entry: u32) -> u32 { return sourceCount() + 1u + params.source.z * entry; }
+fn targetEntryBase(entry: u32) -> u32 { return targetCount() + 1u + params.coarse.z * entry; }
+fn sourceRowStart(row: u32) -> u32 { return atomicLoad(&sourceMatrix[row]); }
+fn targetRowStart(row: u32) -> u32 { return atomicLoad(&targetMatrix[row]); }
+fn sourceColumn(entry: u32) -> u32 { return atomicLoad(&sourceMatrix[sourceEntryBase(entry)]); }
+fn sourceCoefficient(entry: u32) -> f32 { return bitcast<f32>(atomicLoad(&sourceMatrix[sourceEntryBase(entry) + params.source.w])); }
+fn targetCoefficient(entry: u32) -> f32 { return bitcast<f32>(atomicLoad(&targetMatrix[targetEntryBase(entry) + params.coarse.w])); }
+fn sourceVectorIndex(field: u32, row: u32) -> u32 { return field * sourceCount() + row; }
+fn targetVectorIndex(field: u32, row: u32) -> u32 { return field * targetCount() + row; }
+fn sourceF(field: u32, row: u32) -> f32 { return bitcast<f32>(atomicLoad(&sourceVectors[sourceVectorIndex(field, row)])); }
+fn targetF(field: u32, row: u32) -> f32 { return bitcast<f32>(atomicLoad(&targetVectors[targetVectorIndex(field, row)])); }
+fn setSourceF(field: u32, row: u32, value: f32) { atomicStore(&sourceVectors[sourceVectorIndex(field, row)], bitcast<u32>(value)); }
+fn setTargetF(field: u32, row: u32, value: f32) { atomicStore(&targetVectors[targetVectorIndex(field, row)], bitcast<u32>(value)); }
+fn fineActive(row: u32) -> bool { return params.counts.y == 0u || fineState[7u * sourceCount() + row] != 0u; }
+fn solveActive() -> bool { return !(scalars[3] > 0.0 && scalars[2] <= params.solve.x * scalars[3]); }
+fn nodeParent(row: u32) -> u32 { return topology[params.topologyOffsets.x + row]; }
+fn entryParent(entry: u32) -> u32 { return topology[params.topologyOffsets.y + entry]; }
+fn atomicAddFloat(destination: ptr<storage, atomic<u32>, read_write>, value: f32) {
+  if (value == 0.0) { return; }
+  var old = atomicLoad(destination);
+  loop {
+    let next = bitcast<u32>(bitcast<f32>(old) + value);
+    let result = atomicCompareExchangeWeak(destination, old, next);
+    if (result.exchanged) { break; }
+    old = result.old_value;
+  }
+}
+fn sourceMatrixValue(row: u32, column: u32) -> f32 {
+  if (!fineActive(row)) { return select(0.0, 1.0, row == column); }
+  var value = 0.0;
+  for (var entry = sourceRowStart(row); entry < sourceRowStart(row + 1u); entry += 1u) {
+    if (sourceColumn(entry) == column) { value += sourceCoefficient(entry); }
+  }
+  return value;
+}
+fn sourceLineValues(row: u32, previous: u32, next: u32) -> vec3f {
+  if (!fineActive(row)) { return vec3f(0.0, 1.0, 0.0); }
+  var result = vec3f(0.0);
+  for (var entry = sourceRowStart(row); entry < sourceRowStart(row + 1u); entry += 1u) {
+    let column = sourceColumn(entry); let coefficient = sourceCoefficient(entry);
+    if (column == previous) { result.x += coefficient; }
+    if (column == row) { result.y += coefficient; }
+    if (column == next) { result.z += coefficient; }
+  }
+  return result;
+}
+fn sourceProduct(row: u32) -> f32 {
+  if (!fineActive(row)) { return sourceF(CORRECTION, row); }
+  var value = 0.0;
+  for (var entry = sourceRowStart(row); entry < sourceRowStart(row + 1u); entry += 1u) {
+    value += sourceCoefficient(entry) * sourceF(CORRECTION, sourceColumn(entry));
+  }
+  return value;
+}
+
+@compute @workgroup_size(128)
+fn clearCoarseMatrix(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= targetCount()) { return; }
+  for (var entry = targetRowStart(row); entry < targetRowStart(row + 1u); entry += 1u) {
+    atomicStore(&targetMatrix[targetEntryBase(entry) + params.coarse.w], 0u);
+  }
+}
+
+@compute @workgroup_size(128)
+fn assembleGalerkin(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= sourceCount()) { return; }
+  if (!fineActive(row)) {
+    for (var entry = sourceRowStart(row); entry < sourceRowStart(row + 1u); entry += 1u) {
+      if (sourceColumn(entry) == row) {
+        let targetEntry = entryParent(entry);
+        atomicAddFloat(&targetMatrix[targetEntryBase(targetEntry) + params.coarse.w], 1.0);
+        break;
+      }
+    }
+    return;
+  }
+  for (var entry = sourceRowStart(row); entry < sourceRowStart(row + 1u); entry += 1u) {
+    let targetEntry = entryParent(entry);
+    atomicAddFloat(&targetMatrix[targetEntryBase(targetEntry) + params.coarse.w], sourceCoefficient(entry));
+  }
+}
+
+@compute @workgroup_size(128)
+fn copyFineResidual(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= sourceCount() || !solveActive()) { return; }
+  setSourceF(RHS, row, bitcast<f32>(fineState[2u * sourceCount() + row]));
+  setSourceF(CORRECTION, row, 0.0);
+}
+
+fn smoothLine(line: u32, add: bool) {
+  let first = topology[params.topologyOffsets.z + line];
+  let end = topology[params.topologyOffsets.z + line + 1u];
+  var previous = 0xffffffffu; var previousC = 0.0; var previousD = 0.0;
+  for (var slot = first; slot < end; slot += 1u) {
+    let row = topology[params.topologyOffsets.w + slot];
+    var next = 0xffffffffu; if (slot + 1u < end) { next = topology[params.topologyOffsets.w + slot + 1u]; }
+    let coefficients = sourceLineValues(row, previous, next);
+    let denominator = max(params.solve.w, coefficients.y - coefficients.x * previousC);
+    let cPrime = coefficients.z / denominator;
+    var rightHandSide = select(sourceF(RHS, row), sourceF(DEFECT, row), add);
+    if (!add && params.counts.y != 0u) {
+      rightHandSide = bitcast<f32>(fineState[2u * sourceCount() + row]);
+      setSourceF(RHS, row, rightHandSide);
+    }
+    let dPrime = (rightHandSide - coefficients.x * previousD) / denominator;
+    setSourceF(CPRIME, row, cPrime); setSourceF(DPRIME, row, dPrime);
+    previous = row; previousC = cPrime; previousD = dPrime;
+  }
+  var nextValue = 0.0;
+  for (var reverse = end; reverse > first; reverse -= 1u) {
+    let row = topology[params.topologyOffsets.w + reverse - 1u];
+    let value = sourceF(DPRIME, row) - sourceF(CPRIME, row) * nextValue;
+    let weighted = params.solve.y * value;
+    setSourceF(CORRECTION, row, select(weighted, sourceF(CORRECTION, row) + weighted, add));
+    nextValue = value;
+  }
+}
+
+@compute @workgroup_size(128)
+fn lineSmoothInitial(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x < params.counts.x && solveActive()) { smoothLine(gid.x, false); }
+}
+
+@compute @workgroup_size(128)
+fn computeDefect(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row < sourceCount() && solveActive()) { setSourceF(DEFECT, row, sourceF(RHS, row) - sourceProduct(row)); }
+}
+
+@compute @workgroup_size(128)
+fn restrictDefectGather(@builtin(global_invocation_id) gid: vec3u) {
+  let coarseRow = gid.x; if (coarseRow >= targetCount() || !solveActive()) { return; }
+  let first = topology[params.transferOffsets.x + coarseRow];
+  let end = topology[params.transferOffsets.x + coarseRow + 1u];
+  var value = 0.0;
+  for (var slot = first; slot < end; slot += 1u) {
+    let row = topology[params.transferOffsets.y + slot];
+    value += sourceF(RHS, row) - sourceProduct(row);
+  }
+  setTargetF(RHS, coarseRow, value);
+}
+
+@compute @workgroup_size(128)
+fn prolongateCorrection(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row >= sourceCount() || !solveActive()) { return; }
+  setSourceF(CORRECTION, row, sourceF(CORRECTION, row) + targetF(CORRECTION, nodeParent(row)));
+}
+
+@compute @workgroup_size(128)
+fn lineSmoothFinal(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x < params.counts.x && solveActive()) { smoothLine(gid.x, true); }
+}
+
+@compute @workgroup_size(128)
+fn solveCoarsest(@builtin(local_invocation_id) lid: vec3u) {
+  if (!solveActive()) { return; }
+  let row = lid.x; let count = sourceCount();
+  if (row < count) { setSourceF(CORRECTION, row, 0.0); }
+  storageBarrier(); workgroupBarrier();
+  // A fixed zero-start Richardson/Jacobi polynomial is a linear symmetric
+  // operator: every term has the form D^-1 A ... A D^-1. Keeping the entire
+  // <=96-row coarse level in one workgroup supplies the global ordering that
+  // ordinary multi-dispatch Jacobi would require without serial Cholesky.
+  for (var iteration = 0u; iteration < 8u; iteration += 1u) {
+    if (row < count) {
+      let defect = sourceF(RHS, row) - sourceProduct(row);
+      setSourceF(DEFECT, row, defect);
+    }
+    storageBarrier(); workgroupBarrier();
+    if (row < count) {
+      let diagonal = max(params.solve.w, sourceMatrixValue(row, row));
+      setSourceF(CORRECTION, row, sourceF(CORRECTION, row) + params.solve.y * sourceF(DEFECT, row) / diagonal);
+    }
+    storageBarrier(); workgroupBarrier();
+  }
+}
+
+@compute @workgroup_size(128)
+fn copyFineCorrection(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x; if (row < sourceCount() && solveActive()) { fineState[4u * sourceCount() + row] = bitcast<u32>(sourceF(CORRECTION, row)); }
+}
+`;
+
 export const quadtreeDispatchShader = /* wgsl */ `
 @group(0) @binding(0) var<storage, read_write> scalars: array<f32>;
 @group(0) @binding(1) var<storage, read_write> args: array<u32>;
@@ -1007,6 +1692,7 @@ export const quadtreeDispatchShader = /* wgsl */ `
 fn updateDispatch() {
   let keepSolving = !(scalars[3] > 0.0 && scalars[2] <= bitcast<f32>(args[24]) * scalars[3]);
   if (keepSolving) { scalars[9] += 1.0; }
+  scalars[10] = select(0.0, 1.0, keepSolving);
   for (var word = 0u; word < 12u; word += 1u) { args[word] = select(0u, args[12u + word], keepSolving || word % 3u != 0u); }
 }
 `;
@@ -1094,11 +1780,90 @@ fn clampVelocity(@builtin(global_invocation_id) gid: vec3u) {
 }
 `;
 
+/**
+ * Flux-consistent transport-velocity view for the resident level set.
+ *
+ * The momentum write-back deliberately keeps fine sub-face deviations on
+ * multi-subface variational faces (they carry real shear; box-filtering them
+ * away costs a large KE deficit). Those deviations, however, are only
+ * divergence-free at coarse granularity: advecting phi through them locally
+ * compresses/expands the interface and steadily inflates its volume. This
+ * pass rebuilds, for exactly those sub-faces, the face-mean sample the
+ * variational solve actually constrained — the same quantity the momentum
+ * write-back used before the shear-preserving change — into a separate
+ * texture consumed only by the surface pipeline, never by momentum.
+ */
+export const quadtreeSurfaceTransportShader = /* wgsl */ `
+struct Params { dims: vec4u, cell: vec4f }
+struct Face { nodes: vec4u, coefficients: vec4f, bounds: vec4u, packed: u32, solidFlux: f32, weights: vec2f, sampleCells: vec4u, sampleSpans: vec4u, flux: f32, mlsMean: f32, volume: f32 }
+@group(0) @binding(0) var velocityFinal: texture_3d<f32>;
+@group(0) @binding(1) var transportOut: texture_storage_3d<rgba32float, write>;
+@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var velocityPre: texture_3d<f32>;
+@group(0) @binding(4) var cellProjection: texture_3d<f32>;
+@group(0) @binding(5) var<storage, read> faces: array<Face>;
+@group(0) @binding(6) var levelSetIn: texture_3d<f32>;
+fn faceSpan(face: Face) -> u32 { return face.packed & 0xffffu; }
+fn faceAxis(face: Face) -> u32 { return (face.packed >> 16u) & 0x3u; }
+fn faceSubfaceCount(face: Face) -> u32 {
+  let ySpan = face.bounds.w - face.bounds.z;
+  return select(faceSpan(face) * ySpan, faceSpan(face) * faceSpan(face) * ySpan, faceAxis(face) == 1u);
+}
+@compute @workgroup_size(4, 4, 4)
+fn buildSurfaceTransport(@builtin(global_invocation_id) gid: vec3u) {
+  if (any(gid >= params.dims.xyz)) { return; }
+  let id = vec3i(gid);
+  var value = textureLoad(velocityFinal, id, 0);
+  let projection = textureLoad(cellProjection, id, 0);
+  let pre = textureLoad(velocityPre, id, 0).xyz;
+  let ownPhi = textureLoad(levelSetIn, id, 0).x;
+  for (var axis = 0u; axis < 3u; axis += 1u) {
+    var plus = gid; plus[axis] += 1u;
+    if (plus[axis] >= params.dims[axis]) { continue; }
+    // Faces with both sides in air keep the narrow-band extrapolated value;
+    // their pre-projection integrals never constrained anything.
+    if (min(ownPhi, textureLoad(levelSetIn, vec3i(plus), 0).x) >= 0.0) { continue; }
+    let packedFace = u32(round(projection[axis]));
+    if (packedFace == 0u) { continue; }
+    let face = faces[packedFace - 1u];
+    if (faceSubfaceCount(face) > 1u && face.weights.x > 0.0) {
+      // The projected momentum sample is (face mean + deviation); refreshFaces
+      // integrated face.flux from the same pre-projection field, so removing
+      // the pre-projection deviation leaves the flux-consistent face mean for
+      // the level-set backtrace while momentum keeps its shear.
+      value[axis] += (face.flux - face.solidFlux) / face.weights.x - pre[axis];
+    }
+  }
+  textureStore(transportOut, id, value);
+}
+`;
+
+interface GPUQuadtreeMultigridLevel {
+  bindGroup: GPUBindGroup;
+  rowGroups: number;
+}
+
+interface GPUQuadtreeMultigrid {
+  hierarchy: QuadtreeMultigridHierarchy;
+  levels: GPUQuadtreeMultigridLevel[];
+  buffers: GPUBuffer[];
+}
+
+const quadtreeMultigridPipelineNames = [
+  "clearCoarseMatrix", "assembleGalerkin", "copyFineResidual",
+  "lineSmoothInitial", "computeDefect", "restrictDefectGather",
+  "solveCoarsest", "prolongateCorrection", "lineSmoothFinal", "copyFineCorrection",
+] as const;
+
 export class WebGPUQuadtreeTallCellProjection {
   readonly info: QuadtreeTallCellProjectionInfo;
   private readonly buffers: GPUBuffer[];
   private readonly bindGroup: GPUBindGroup;
   private readonly mapPressureBindGroup: GPUBindGroup;
+  private warmStartEnabled = false;
+  private solveFeedbackReadback?: GPUBuffer;
+  private solveFeedbackPending = false;
+  private readonly solverFinalizeBindGroup: GPUBindGroup;
   private pipelines: Record<string, GPUComputePipeline>;
   private readonly shaderModule:GPUShaderModule;
   private readonly pipelineLayout:GPUPipelineLayout;
@@ -1124,6 +1889,8 @@ export class WebGPUQuadtreeTallCellProjection {
   private readonly velocityClampCounter: GPUBuffer;
   private readonly velocityClampPipeline: GPUComputePipeline;
   private readonly velocityClampBindGroup: GPUBindGroup;
+  private readonly surfaceTransportPipeline: GPUComputePipeline;
+  private readonly surfaceTransportBindGroup: GPUBindGroup;
   /** Mutable: the non-blocking inline-rebuild monitor refreshes it from packControl. */
   private dofCount: number;
   private readonly preconditionBlockGroups: number;
@@ -1147,6 +1914,13 @@ export class WebGPUQuadtreeTallCellProjection {
   /** Capacity-sized GPU pack targets bound by this projection; enables Algorithm-1 in-place rebuilds. */
   private readonly residentResources?: GPUQuadtreeResidentResources;
   private readonly inlineSupported: boolean;
+  /** Last converged iteration count; absent until the ladder supplies a safe cost sample. */
+  private megakernelIterationHint?: number;
+  private readonly megakernelMode: QuadtreeMegakernelMode;
+  private readonly megakernelEligible: boolean;
+  private readonly pressureSolver: QuadtreePressureSolver;
+  private multigrid?: GPUQuadtreeMultigrid;
+  private multigridPipelines: Record<string, GPUComputePipeline> = {};
   /** Set by the monitor when a pack overflowed capacity; one async rebuild regrows and swaps. */
   inlineNeedsAsyncRebuild = false;
   private inlineMonitorBuffer?: GPUBuffer;
@@ -1161,10 +1935,12 @@ export class WebGPUQuadtreeTallCellProjection {
     const initial: ProjectionFields = fields ?? initialFields(scene, nx, ny, nz);
     if (!fields) initial.phi = signedDistanceFromVolume(Float32Array.from(initial.phi!, (value) => value < 0 ? 1 : 0), nx, ny, nz, h);
     if (!resources.levelSet && !initial.phi) throw new Error("Initial quadtree projection needs a level set");
-    // At this point velocityOut still contains the previous step's projected,
-    // divergence-free field. velocityIn is the newly advected/gravity-forced
-    // predictor and must not transport the resident interface.
-    this.surfaceState = resources.levelSet ?? (resources.levelSet = new WebGPUQuadtreeSurfaceState(device, dims, h, resources.velocityOut, initial.phi!, cache?.surface, resources.volume, options.debrisCulling === true, options.vofReconciliation === true));
+    // The surface pipeline backtraces phi through a dedicated flux-consistent
+    // transport view: the projected field with multi-subface deviations
+    // replaced by their constrained face means (see
+    // quadtreeSurfaceTransportShader). Momentum never reads this texture.
+    const surfaceTransport = resources.surfaceTransport ?? (resources.surfaceTransport = device.createTexture({ label: "Quadtree surface transport velocity", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "rgba32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING }));
+    this.surfaceState = resources.levelSet ?? (resources.levelSet = new WebGPUQuadtreeSurfaceState(device, dims, h, surfaceTransport, initial.phi!, cache?.surface, resources.volume, options.debrisCulling === true, options.vofReconciliation === true));
     const tallGridStartedAt = performance.now();
     let pressureGrid: TallPressureGrid | undefined;
     let leafCount: number, pressureSampleCount: number, maximumNeighborRatio: number;
@@ -1177,12 +1953,15 @@ export class WebGPUQuadtreeTallCellProjection {
       if (!quadtree) {
         if (!initial.velocity) throw new Error("Initial quadtree construction needs a velocity field");
         if (!initial.phi) throw new Error("Initial quadtree sizing needs a level set");
-        const sizing = quadtreeSizingFromVelocityAndSurface(initial.phi, initial.velocity, nx, ny, nz, h);
+        const sizing = quadtreeSizingFromVelocityAndSurface(initial.phi, initial.velocity, nx, ny, nz, h, undefined, undefined, undefined, undefined, options.deepSpeedGradientScale ?? 1);
         for (let index = 0; index < sizing.length; index += 1) sizing[index] = Math.max(sizing[index], explicitSizing[index]);
         quadtree = buildQuadtree(sizing, nx, nz, { h: Math.min(h.x, h.z), maximumLeafSize: options.maximumLeafSize, adaptivityStrength: options.adaptivityStrength, smoothingDilations: 3 });
       }
       if (!initial.pressureGrid && !initial.phi) throw new Error("Initial tall-grid population needs a level set");
-      pressureGrid = initial.pressureGrid ?? populateTallPressureGrid(quadtree, initial.phi!, ny, h, 1, options.opticalDepthFraction);
+      const adaptiveOpticalLayer = options.opticalLayerMode === "adaptive-motion" && initial.velocity
+        ? buildAdaptiveOpticalLayerField(initial.phi!, initial.velocity, nx, ny, nz, h, { alpha: options.opticalAlpha })
+        : undefined;
+      pressureGrid = initial.pressureGrid ?? populateTallPressureGrid(quadtree, initial.phi!, ny, h, 1, options.opticalDepthFraction, undefined, adaptiveOpticalLayer);
       this.topologyWords = initial.topologyWords ?? pressureTopologyWords(pressureGrid);
       leafCount = quadtree.leaves.length;
       pressureSampleCount = pressureGrid.samples.length;
@@ -1217,9 +1996,31 @@ export class WebGPUQuadtreeTallCellProjection {
     }
     // The hard cap remains the paper-faithful worst case. Only the amount of
     // command stream encoded ahead of the tolerance stop follows recent solves.
-    this.iterationBudget = quadtreeIterationBudget(this.dofCount, options);
+    // A cold polynomial solve historically needs 55--75 iterations, while
+    // the geometric hierarchy reaches the same tolerance in roughly a dozen.
+    // Starting MG from the generic hard-budget-derived hint would encode
+    // hundreds of dead V-cycles on its first frames—the exact dispatch tail
+    // this preconditioner is meant to remove. Feedback still grows the budget
+    // immediately if a difficult solve exhausts this conservative seed.
+    const opticalConditioning = adaptiveOpticalLayerDefaults(ny, { alpha: options.opticalAlpha });
+    // Removing optical cubes does not remove the long vertical pressure mode:
+    // the resulting taller cells can retain the condition number of the fixed
+    // grid even while DOF count drops by an order of magnitude. Scale only the
+    // safety cap by dmax/dmin; convergence feedback still controls encoded work.
+    const conditionedOptions = options.opticalLayerMode === "adaptive-motion"
+      ? { ...options, iterationConditioningScale: Math.max(options.iterationConditioningScale ?? 1, opticalConditioning.maximumCells / opticalConditioning.minimumCells) }
+      : options;
+    const budgetOptions = (options.preconditioner ?? "ic0") === "mg"
+      && options.iterationBudgetHint === undefined && options.iterationEmaHint === undefined
+      ? { ...conditionedOptions, iterationBudgetHint: 24, iterationEmaHint: 16 }
+      : conditionedOptions;
+    this.iterationBudget = quadtreeIterationBudget(this.dofCount, budgetOptions);
     this.iterations = this.iterationBudget.encodedBudget;
+    this.megakernelIterationHint = options.megakernelIterationHint;
     this.parallelReductions = this.dofCount >= 4096;
+    // The product method passes Chebyshev explicitly. Keep direct low-level
+    // construction source-compatible with the former exact PCG behavior.
+    this.pressureSolver = options.pressureSolver ?? "pcg";
     const uploadStartedAt = performance.now();
     const resident = initial.prepared?.resident;
     const faces = resident?.faces ?? bufferWithData(device, "Quadtree tall-cell variational faces", packed.faces, GPUBufferUsage.STORAGE, 112);
@@ -1270,16 +2071,21 @@ export class WebGPUQuadtreeTallCellProjection {
     const rowGroups = Math.ceil(this.dofCount / 128), partialWords = 2 * Math.ceil(dofCapacity / 128);
     const scalars = device.createBuffer({ label: "Quadtree tall-cell CG scalars and partial reductions", size: 4 * (108 + partialWords), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.scalarBuffer = scalars;
-    this.dispatchArgs = device.createBuffer({ label: "Quadtree tall-cell active dispatches", size: 124, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
+    this.dispatchArgs = device.createBuffer({ label: "Quadtree tall-cell active dispatches", size: 136, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
     this.couplingBodyCount = packed.couplingBodyCount; this.couplingDistinctDofs = packed.couplingDistinctDofs; this.couplingBodyIndices = packed.couplingBodyIndices;
     this.params = device.createBuffer({ label: "Quadtree tall-cell parameters", size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.params, 0, new Uint32Array([nx, ny, nz, factorAuxWidth, 0, 0, 0, 0]).buffer);
     device.queue.writeBuffer(this.params, 16, new Float32Array([h.x, h.y, h.z, 0]).buffer);
-    device.queue.writeBuffer(this.params, 32, new Uint32Array([this.dofCount, faceCount, this.iterations, packed.factorLevelCount]).buffer);
+    const encodedPressureIterations = this.pressureSolver === "chebyshev" ? quadtreeChebyshevPasses(options.pressureIterations) : this.iterations;
+    device.queue.writeBuffer(this.params, 32, new Uint32Array([this.dofCount, faceCount, encodedPressureIterations, packed.factorLevelCount]).buffer);
     const solveParams = new ArrayBuffer(16); new Float32Array(solveParams)[0] = options.relativeTolerance ** 2;
     new Uint32Array(solveParams).set([packed.levelsOffset, packed.rowOffsetsOffset, packed.rowEntriesOffset], 1); device.queue.writeBuffer(this.params, 48, solveParams);
     device.queue.writeBuffer(this.params, 64, new Uint32Array([packed.couplingByBodyOffset, packed.couplingByDofOffset, packed.couplingTableOffset, packed.couplingBodyCount]).buffer);
-    device.queue.writeBuffer(this.params, 80, new Uint32Array([packed.couplingDistinctDofs, packed.dofSamplesBase, 0, rowGroups]).buffer);
+    // couplingCounts.z packs the warm-start flag in bit 0 and the persistent
+    // solver's uniform hard cap in bits 1..12. The ladder never reads the cap.
+    this.warmStartEnabled = (options.pressureWarmStart ?? true) && (this.pressureSolver === "chebyshev" || (options.preconditioner ?? "ic0") === "poly" || (options.preconditioner ?? "ic0") === "jacobi" || (options.preconditioner ?? "ic0") === "mg");
+    const megakernelControl = (Math.min(2048, this.iterationBudget.hardBudget) << 1) | (this.warmStartEnabled ? 1 : 0);
+    device.queue.writeBuffer(this.params, 80, new Uint32Array([packed.couplingDistinctDofs, packed.dofSamplesBase, megakernelControl, rowGroups]).buffer);
     // precondition.xy carry the line tables or the blockic tables; only the
     // active preconditioner's kernels are ever dispatched, so the overlay is
     // unambiguous per projection.
@@ -1287,7 +2093,7 @@ export class WebGPUQuadtreeTallCellProjection {
     device.queue.writeBuffer(this.params, 96, new Uint32Array([
       (options.preconditioner ?? "ic0") === "blockic" ? packed.blockTableOffset : packed.lineOffsetsBase,
       (options.preconditioner ?? "ic0") === "blockic" ? packed.blockCount : packed.lineDofsBase,
-      packed.lineCount, Math.max(2, Math.min(4, Math.round(options.polynomialDegree ?? 2)))
+      packed.lineCount, (options.preconditioner ?? "ic0") === "jacobi" ? 1 : Math.max(2, Math.min(4, Math.round(options.polynomialDegree ?? 2)))
     ]).buffer);
     const inflowBoundary = scene.fluid.inflow ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [nx, ny, nz]) : undefined;
     device.queue.writeBuffer(this.params, 112, new Float32Array([
@@ -1298,15 +2104,17 @@ export class WebGPUQuadtreeTallCellProjection {
       0, 0, 0, 0
     ]).buffer);
     const couplingGroups = Math.ceil(packed.couplingDistinctDofs / 128);
-    // Four live dispatch triples (row groups, single workgroup, coupling
-    // groups, blockic blocks), the template copied by updateDispatch, the
-    // squared tolerance, then two never-zeroed setup triples (words 25-27 row
-    // groups, 28-30 face groups) that in-place GPU rebuilds patch directly.
-    const dispatchWords = new Uint32Array(31);
+    // Four next-iteration triples (row groups, single workgroup, coupling
+    // groups, blockic blocks), their template, the squared tolerance, two
+    // never-zeroed setup triples (words 25-30), and an independent current-
+    // iteration row triple (31-33). The residual finalizer can switch off the
+    // next iteration without suppressing the direction update it just earned.
+    const dispatchWords = new Uint32Array(34);
     dispatchWords.set([rowGroups, 1, 1, 1, 1, 1, couplingGroups, 1, 1, Math.ceil(packed.blockCount / 64), 1, 1]);
     dispatchWords.set(dispatchWords.subarray(0, 12), 12);
     dispatchWords[24] = new Uint32Array(new Float32Array([options.relativeTolerance ** 2]).buffer)[0];
     dispatchWords.set([rowGroups, 1, 1, Math.ceil(faceCount / 128), 1, 1], 25);
+    dispatchWords.set([rowGroups, 1, 1], 31);
     device.queue.writeBuffer(this.dispatchArgs, 0, dispatchWords);
     let layout: GPUBindGroupLayout;
     if (cache) {
@@ -1321,7 +2129,7 @@ export class WebGPUQuadtreeTallCellProjection {
         { binding: 7, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
         { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
         { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
         { binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "2d" } },
@@ -1386,6 +2194,30 @@ export class WebGPUQuadtreeTallCellProjection {
       { binding: 0, resource: resources.velocityOut.createView() }, { binding: 1, resource: resources.velocityScratch.createView() },
       { binding: 2, resource: { buffer: this.params } }, { binding: 3, resource: { buffer: this.velocityClampCounter } }
     ] });
+    if (!this.gpuCache.surfaceTransportLayout || !this.gpuCache.surfaceTransportPipeline) {
+      this.gpuCache.surfaceTransportLayout = device.createBindGroupLayout({ entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
+      ] });
+      const module = device.createShaderModule({ label: "Quadtree surface transport velocity", code: quadtreeSurfaceTransportShader });
+      void module.getCompilationInfo().then((result) => { for (const message of result.messages) if (message.type === "error") console.error(`Quadtree surface transport WGSL ${message.lineNum}:${message.linePos} ${message.message}`); }).catch(() => { /* Device loss is reported by the renderer. */ });
+      this.gpuCache.surfaceTransportPipeline = device.createComputePipeline({ label: "Quadtree surface transport velocity", layout: device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.surfaceTransportLayout] }), compute: { module, entryPoint: "buildSurfaceTransport" } });
+    }
+    this.surfaceTransportPipeline = this.gpuCache.surfaceTransportPipeline;
+    this.surfaceTransportBindGroup = device.createBindGroup({ layout: this.gpuCache.surfaceTransportLayout, entries: [
+      { binding: 0, resource: resources.velocityOut.createView() },
+      { binding: 1, resource: surfaceTransport.createView() },
+      { binding: 2, resource: { buffer: this.params } },
+      { binding: 3, resource: resources.velocityIn.createView() },
+      { binding: 4, resource: this.cellProjection.createView() },
+      { binding: 5, resource: { buffer: faces } },
+      { binding: 6, resource: this.surfaceState.texture.createView() }
+    ] });
     if (!this.gpuCache.divergenceLayout || !this.gpuCache.divergencePipeline) {
       this.gpuCache.divergenceLayout = device.createBindGroupLayout({ entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
@@ -1399,15 +2231,15 @@ export class WebGPUQuadtreeTallCellProjection {
     this.divergenceBindGroup = device.createBindGroup({ layout: this.gpuCache.divergenceLayout, entries: [
       { binding: 0, resource: resources.velocityOut.createView() }, { binding: 1, resource: this.divergence.createView() }, { binding: 2, resource: { buffer: this.params } }
     ] });
-    const names = ["refreshFaces", "refreshRows", "initialize", "precondition", "preconditionBlockIC", "preconditionJacobi", "preconditionLine", "preconditionPolynomialStart", "preconditionPolynomialMultiply", "preconditionPolynomialUpdate", "startDirection", "reduceInitial", "multiply", "applyStep", "applyStepPartial", "applyStepFinalize", "applyStepUpdate", "finishIteration", "finishIterationPartial", "finishIterationFinalize", "finishIterationUpdate", "mapPressure", "refreshFaceMls", "project", "coupleReduce", "coupleApply", "coupleImpulse"];
+    const names = ["refreshFaces", "refreshRows", "initializeChebyshev", "iterateChebyshevAB", "iterateChebyshevBA", "finishChebyshevFromPressure", "finishChebyshevFromBest", "reduceChebyshevResidual", "initialize", "initializeJacobiDirection", "initializePolynomialStart", "precondition", "preconditionBlockIC", "preconditionJacobi", "preconditionLine", "preconditionPolynomialStart", "preconditionPolynomialMultiply", "preconditionPolynomialUpdate", "preconditionPolynomialUpdateDirection", "startDirection", "reduceInitial", "reduceInitialNorm", "solveMegakernel", "multiply", "multiplyPartial", "applyStep", "applyStepPartial", "applyStepFinalize", "applyStepUpdate", "applyStepUpdateJacobi", "applyStepUpdatePolynomialStart", "applyStepAlphaUpdate", "applyStepAlphaUpdatePolynomialStart", "applyStepAlphaUpdateJacobiFinishPartial", "finishIteration", "finishIterationPartial", "preconditionPolynomialUpdateFinishPartial", "finishIterationFinalize", "finishIterationUpdate", "mapPressure", "refreshFaceMls", "project", "coupleReduce", "coupleApply", "coupleImpulse"];
     this.pipelines = this.gpuCache.pipelines ?? (deferPipelineCompilation ? {} : Object.fromEntries(names.map((entryPoint) => [entryPoint, device.createComputePipeline(this.pipelineDescriptor(entryPoint))])));
     if (!this.gpuCache.pipelines && !deferPipelineCompilation) this.gpuCache.pipelines = this.pipelines;
     const all = [faces, rowOffsets, rowEntries, matrixBuffer, state, scalars, factorColumns, factorEntries];
-    const projectionEntries = (storagePressure: GPUTexture, sampledPressure: GPUTexture): GPUBindGroupEntry[] => [
+    const projectionEntries = (storagePressure: GPUTexture, sampledPressure: GPUTexture, factorColumnsOverride = factorColumns): GPUBindGroupEntry[] => [
       { binding: 0, resource: resources.velocityIn.createView() }, { binding: 1, resource: resources.velocityOut.createView() },
       ...all.slice(0, 4).map((buffer, index) => ({ binding: index + 3, resource: { buffer } })),
       { binding: 7, resource: this.cellProjection.createView() },
-      ...all.slice(4, 8).map((buffer, index) => ({ binding: index + 8, resource: { buffer } })), { binding: 12, resource: { buffer: this.params } },
+      ...[state, scalars, factorColumnsOverride, factorEntries].map((buffer, index) => ({ binding: index + 8, resource: { buffer } })), { binding: 12, resource: { buffer: this.params } },
       { binding: 13, resource: this.factorAux.createView() },
       { binding: 14, resource: this.cellPressureSamples.createView() },
       { binding: 15, resource: this.surfaceState.texture.createView() },
@@ -1416,27 +2248,118 @@ export class WebGPUQuadtreeTallCellProjection {
     ];
     this.bindGroup = device.createBindGroup({ layout, entries: projectionEntries(this.mappedPressureStorageFallback, this.mappedPressure) });
     this.mapPressureBindGroup = device.createBindGroup({ layout, entries: projectionEntries(this.mappedPressure, this.mappedPressureSampledFallback) });
-    this.buffers = [...all, this.dispatchArgs, this.velocityClampCounter];
+    this.solverFinalizeBindGroup = device.createBindGroup({ layout, entries: projectionEntries(this.mappedPressureStorageFallback, this.mappedPressure, this.dispatchArgs) });
+    const multigridBuffers: GPUBuffer[] = [];
+    if (packed.multigrid) {
+      if (!this.gpuCache.multigridLayout || !this.gpuCache.multigridModule || !this.gpuCache.multigridPipelineLayout) {
+        this.gpuCache.multigridLayout = device.createBindGroupLayout({ entries: [
+          { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+          { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+          { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+          { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+          { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+          { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+          { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+          { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        ] });
+        this.gpuCache.multigridModule = device.createShaderModule({ label: "Quadtree geometric multigrid", code: quadtreeMultigridShader });
+        void this.gpuCache.multigridModule.getCompilationInfo().then((result) => { for (const message of result.messages) if (message.type === "error") console.error(`Quadtree multigrid WGSL ${message.lineNum}:${message.linePos} ${message.message}`); }).catch(() => { /* Device loss is reported by the renderer. */ });
+        this.gpuCache.multigridPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.multigridLayout] });
+      }
+      this.multigridPipelines = this.gpuCache.multigridPipelines ?? (deferPipelineCompilation ? {} : Object.fromEntries(quadtreeMultigridPipelineNames.map((entryPoint) => [entryPoint, device.createComputePipeline({ label: `Quadtree multigrid ${entryPoint}`, layout: this.gpuCache.multigridPipelineLayout!, compute: { module: this.gpuCache.multigridModule!, entryPoint } })])));
+      if (!this.gpuCache.multigridPipelines && !deferPipelineCompilation) this.gpuCache.multigridPipelines = this.multigridPipelines;
+
+      const hierarchy = packed.multigrid;
+      const matrixBuffers = hierarchy.levels.map((level, levelIndex) => {
+        if (levelIndex === 0) return matrixBuffer;
+        const buffer = bufferWithData(device, `Quadtree multigrid L${levelIndex} Galerkin matrix`, level.matrixWords!, GPUBufferUsage.STORAGE, 4);
+        multigridBuffers.push(buffer); return buffer;
+      });
+      const vectorBuffers = hierarchy.levels.map((level, levelIndex) => {
+        const buffer = device.createBuffer({ label: `Quadtree multigrid L${levelIndex} vectors`, size: Math.max(20, 5 * level.nodeCount * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        multigridBuffers.push(buffer); return buffer;
+      });
+      // WebGPU forbids overlapping writable bindings even when an entry point
+      // never touches the second binding. The coarsest solve has no next
+      // level, so bind distinct one-word sentinels instead of aliasing itself.
+      const terminalMatrix = device.createBuffer({ label: "Quadtree multigrid terminal matrix sentinel", size: 4, usage: GPUBufferUsage.STORAGE });
+      const terminalVectors = device.createBuffer({ label: "Quadtree multigrid terminal vector sentinel", size: 4, usage: GPUBufferUsage.STORAGE });
+      multigridBuffers.push(terminalMatrix, terminalVectors);
+      const levels = hierarchy.levels.map((level, levelIndex): GPUQuadtreeMultigridLevel => {
+        const next = hierarchy.levels[levelIndex + 1] ?? level;
+        const nodeMap = level.nodeToCoarse ?? new Uint32Array(0);
+        const entryMap = level.entryToCoarse ?? new Uint32Array(0);
+        const coarseNodeOffsets = level.coarseNodeOffsets ?? new Uint32Array(0);
+        const coarseNodes = level.coarseNodes ?? new Uint32Array(0);
+        const nodeMapOffset = 0;
+        const entryMapOffset = nodeMap.length;
+        const coarseNodeOffsetsOffset = entryMapOffset + entryMap.length;
+        const coarseNodesOffset = coarseNodeOffsetsOffset + coarseNodeOffsets.length;
+        const lineOffsetsOffset = coarseNodesOffset + coarseNodes.length;
+        const lineNodesOffset = lineOffsetsOffset + level.lineOffsets.length;
+        const topologyWords = new Uint32Array(lineNodesOffset + level.lineNodes.length);
+        topologyWords.set(nodeMap, nodeMapOffset); topologyWords.set(entryMap, entryMapOffset);
+        topologyWords.set(coarseNodeOffsets, coarseNodeOffsetsOffset); topologyWords.set(coarseNodes, coarseNodesOffset);
+        topologyWords.set(level.lineOffsets, lineOffsetsOffset); topologyWords.set(level.lineNodes, lineNodesOffset);
+        const topologyBuffer = bufferWithData(device, `Quadtree multigrid L${levelIndex} transfers`, topologyWords, GPUBufferUsage.STORAGE, 4);
+        const uniformWords = new Uint32Array(24);
+        uniformWords.set([level.nodeCount, level.columns.length, levelIndex === 0 ? 4 : 2, levelIndex === 0 ? 2 : 1], 0);
+        uniformWords.set([next.nodeCount, next.columns.length, levelIndex + 1 < hierarchy.levels.length ? 2 : (levelIndex === 0 ? 4 : 2), levelIndex + 1 < hierarchy.levels.length ? 1 : (levelIndex === 0 ? 2 : 1)], 4);
+        uniformWords.set([nodeMapOffset, entryMapOffset, lineOffsetsOffset, lineNodesOffset], 8);
+        uniformWords.set([level.lineOffsets.length - 1, levelIndex === 0 ? 1 : 0, levelIndex, hierarchy.levels.length], 12);
+        uniformWords.set([coarseNodeOffsetsOffset, coarseNodesOffset, 0, 0], 16);
+        const uniformFloats = new Float32Array(uniformWords.buffer);
+        uniformFloats.set([options.relativeTolerance ** 2, 0.7, 1e-6, 1e-12], 20);
+        const uniform = bufferWithData(device, `Quadtree multigrid L${levelIndex} parameters`, uniformWords, GPUBufferUsage.UNIFORM, 96);
+        multigridBuffers.push(topologyBuffer, uniform);
+        const hasTarget = levelIndex + 1 < hierarchy.levels.length;
+        const targetIndex = Math.min(levelIndex + 1, hierarchy.levels.length - 1);
+        return {
+          rowGroups: Math.ceil(level.nodeCount / 128),
+          bindGroup: device.createBindGroup({ layout: this.gpuCache.multigridLayout!, entries: [
+            { binding: 0, resource: { buffer: matrixBuffers[levelIndex] } },
+            { binding: 1, resource: { buffer: hasTarget ? matrixBuffers[targetIndex] : terminalMatrix } },
+            { binding: 2, resource: { buffer: vectorBuffers[levelIndex] } },
+            { binding: 3, resource: { buffer: hasTarget ? vectorBuffers[targetIndex] : terminalVectors } },
+            { binding: 4, resource: { buffer: topologyBuffer } },
+            { binding: 5, resource: { buffer: scalars } },
+            { binding: 7, resource: { buffer: state } },
+            { binding: 8, resource: { buffer: uniform } },
+          ] }),
+        };
+      });
+      this.multigrid = { hierarchy, levels, buffers: multigridBuffers };
+    }
+    this.buffers = [...all, this.dispatchArgs, this.velocityClampCounter, ...multigridBuffers];
     // Algorithm-1 in-place rebuilds: available once the sparse pack lives in
     // capacity-sized GPU resources this projection owns. Rigid coupling and
     // incomplete-factor preconditioners stay on the asynchronous CPU path.
     const preconditionerChoice = options.preconditioner ?? "ic0";
     this.residentResources = resident;
     this.inlineSupported = !!resident?.packControl && !coupling && (preconditionerChoice === "poly" || preconditionerChoice === "jacobi");
+    this.megakernelMode = options.megakernelSolve === false ? "off" : options.megakernelMode ?? "dynamic";
+    this.megakernelEligible = this.pressureSolver === "pcg" && this.megakernelMode !== "off"
+      && this.couplingBodyCount === 0
+      && (preconditionerChoice === "poly" || preconditionerChoice === "jacobi");
     if (options.debugPressureTimings && device.features.has("timestamp-query")) {
       this.phaseQuerySet = device.createQuerySet({ label: "Quadtree pressure phase timings", type: "timestamp", count: 8 });
       this.phaseQueryResolve = device.createBuffer({ label: "Quadtree pressure phase timing resolve", size: 64, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
     }
     const allocatedBytes = this.buffers.reduce((sum, buffer) => sum + buffer.size, this.params.size + nx * ny * nz * 28);
     const resourceUpload_ms = performance.now() - uploadStartedAt;
-    this.info = { leafCount, pressureSampleCount, liquidDofCount: this.dofCount, faceCount, mlsProjectionRowCount: packed.mlsRowCount, tallSegmentCount, ghostFaceCount, maximumNeighborRatio, compressionRatio: this.dofCount / Math.max(1, nx * ny * nz), maximumFluidScale: maximumSystemFluidScale, allocatedBytes, cpuTallGrid_ms: tallGrid_ms, cpuVariationalAssembly_ms: variationalAssembly_ms, cpuSystemPack_ms: systemPack_ms, cpuICFactorization_ms: packed.icFactorization_ms, cpuResourceUpload_ms: resourceUpload_ms, cpuTopologyPack_ms: performance.now() - constructorStartedAt, topologyReused: false, topologyReuseCount: 0, pressureIterationBudget: this.iterations, pressureIterationHardBudget: this.iterationBudget.hardBudget, factorLevelCount: packed.factorLevelCount };
+    const opticalSettings = adaptiveOpticalLayerDefaults(ny, { alpha: options.opticalAlpha });
+    this.info = { leafCount, pressureSampleCount, liquidDofCount: this.dofCount, faceCount, mlsProjectionRowCount: packed.mlsRowCount, tallSegmentCount, ghostFaceCount, maximumNeighborRatio, compressionRatio: this.dofCount / Math.max(1, nx * ny * nz), maximumFluidScale: maximumSystemFluidScale, opticalLayerMode: options.opticalLayerMode ?? "fixed", opticalAlpha: opticalSettings.alpha, opticalMinimumCells: opticalSettings.minimumCells, opticalMaximumCells: opticalSettings.maximumCells, allocatedBytes, cpuTallGrid_ms: tallGrid_ms, cpuVariationalAssembly_ms: variationalAssembly_ms, cpuSystemPack_ms: systemPack_ms, cpuICFactorization_ms: packed.icFactorization_ms, cpuResourceUpload_ms: resourceUpload_ms, cpuTopologyPack_ms: performance.now() - constructorStartedAt, topologyReused: false, topologyReuseCount: 0, pressureIterationBudget: encodedPressureIterations, pressureIterationHardBudget: this.pressureSolver === "chebyshev" ? encodedPressureIterations : this.iterationBudget.hardBudget, factorLevelCount: packed.factorLevelCount, multigridLevelCount: packed.multigrid?.levels.length, multigridCoarsestDofs: packed.multigrid?.coarsestNodeCount };
   }
 
   private pipelineDescriptor(entryPoint:string):GPUComputePipelineDescriptor{return{label:`Quadtree tall-cell ${entryPoint}`,layout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};}
   static async createAsync(device:GPUDevice,scene:SceneDescription,dims:{nx:number;ny:number;nz:number},resources:ProjectionResources,options:QuadtreeTallCellProjectionOptions,fields?:ProjectionFields,coupling?:QuadtreeRigidCoupling,onProgress:(label:string,completed:number,total:number)=>void=()=>{},cache?:QuadtreeGPUCache){const projection=new WebGPUQuadtreeTallCellProjection(device,scene,dims,resources,options,fields,coupling,true,cache);await projection.initializePipelines(onProgress);return projection;}
   async initializePipelines(onProgress:(label:string,completed:number,total:number)=>void=()=>{}){
-    if(this.gpuCache.pipelines){this.pipelines=this.gpuCache.pipelines;return;}
-    const names=["refreshFaces","refreshRows","initialize","precondition","preconditionBlockIC","preconditionJacobi","preconditionLine","preconditionPolynomialStart","preconditionPolynomialMultiply","preconditionPolynomialUpdate","startDirection","reduceInitial","multiply","applyStep","applyStepPartial","applyStepFinalize","applyStepUpdate","finishIteration","finishIterationPartial","finishIterationFinalize","finishIterationUpdate","mapPressure","refreshFaceMls","project","coupleReduce","coupleApply","coupleImpulse"];const pipelines:Record<string,GPUComputePipeline>={};for(let index=0;index<names.length;index+=1){const entryPoint=names[index];onProgress(`Adaptive pressure · ${entryPoint}`,index,names.length);pipelines[entryPoint]=await this.device.createComputePipelineAsync(this.pipelineDescriptor(entryPoint));onProgress(`Adaptive pressure · ${entryPoint}`,index+1,names.length);}this.pipelines=pipelines;this.gpuCache.pipelines=pipelines;
+    if(this.gpuCache.pipelines)this.pipelines=this.gpuCache.pipelines;
+    else {const names=["refreshFaces","refreshRows","initializeChebyshev","iterateChebyshevAB","iterateChebyshevBA","finishChebyshevFromPressure","finishChebyshevFromBest","reduceChebyshevResidual","initialize","initializeJacobiDirection","initializePolynomialStart","precondition","preconditionBlockIC","preconditionJacobi","preconditionLine","preconditionPolynomialStart","preconditionPolynomialMultiply","preconditionPolynomialUpdate","preconditionPolynomialUpdateDirection","startDirection","reduceInitial","reduceInitialNorm","solveMegakernel","multiply","multiplyPartial","applyStep","applyStepPartial","applyStepFinalize","applyStepUpdate","applyStepUpdateJacobi","applyStepUpdatePolynomialStart","applyStepAlphaUpdate","applyStepAlphaUpdatePolynomialStart","applyStepAlphaUpdateJacobiFinishPartial","finishIteration","finishIterationPartial","preconditionPolynomialUpdateFinishPartial","finishIterationFinalize","finishIterationUpdate","mapPressure","refreshFaceMls","project","coupleReduce","coupleApply","coupleImpulse"];const pipelines:Record<string,GPUComputePipeline>={};for(let index=0;index<names.length;index+=1){const entryPoint=names[index];onProgress(`Adaptive pressure · ${entryPoint}`,index,names.length);pipelines[entryPoint]=await this.device.createComputePipelineAsync(this.pipelineDescriptor(entryPoint));onProgress(`Adaptive pressure · ${entryPoint}`,index+1,names.length);}this.pipelines=pipelines;this.gpuCache.pipelines=pipelines;}
+    if(this.multigrid){
+      if(this.gpuCache.multigridPipelines)this.multigridPipelines=this.gpuCache.multigridPipelines;
+      else {const pipelines:Record<string,GPUComputePipeline>={};for(let index=0;index<quadtreeMultigridPipelineNames.length;index+=1){const entryPoint=quadtreeMultigridPipelineNames[index];onProgress(`Adaptive pressure multigrid · ${entryPoint}`,index,quadtreeMultigridPipelineNames.length);pipelines[entryPoint]=await this.device.createComputePipelineAsync({label:`Quadtree multigrid ${entryPoint}`,layout:this.gpuCache.multigridPipelineLayout!,compute:{module:this.gpuCache.multigridModule!,entryPoint}});onProgress(`Adaptive pressure multigrid · ${entryPoint}`,index+1,quadtreeMultigridPipelineNames.length);}this.multigridPipelines=pipelines;this.gpuCache.multigridPipelines=pipelines;}
+    }
   }
 
   /**
@@ -1450,7 +2373,7 @@ export class WebGPUQuadtreeTallCellProjection {
    * kernels; retaining this CPU implementation gives those kernels a compact
    * byte-exact oracle.
    */
-  static packUncoupledGrid(grid: TallPressureGrid, nx: number, ny: number, nz: number) {
+  static packUncoupledGrid(grid: TallPressureGrid, nx: number, ny: number, nz: number, preconditioner: QuadtreeTallCellProjectionOptions["preconditioner"] = "poly") {
     const faceStride = 28, { quadtree, h } = grid, leafCount = quadtree.leaves.length;
     const dofBySample = new Int32Array(grid.samples.length); dofBySample.fill(-1);
     let dofCount = 0;
@@ -1629,13 +2552,17 @@ export class WebGPUQuadtreeTallCellProjection {
     }
     factorAuxWords[lineOffsetsBase + lineCount] = lineDof;
     const factorColumns = new Uint8Array(Math.max(1, dofCount + 1) * 8);
+    const multigrid = preconditioner === "mg"
+      ? buildQuadtreeMultigridHierarchy(matrixWords, dofCount, factorAuxWords, dofSamplesBase, nx, ny, nz)
+      : undefined;
     const packed = {
       faces: new Uint8Array(faceBuffer, 0, faceCount * faceStride * 4), rowOffsets, rowEntries: new Uint8Array(rowEntriesBuffer, 0, entryCount * 8), matrixWords,
       cellProjection, cellTopology, factorColumns, factorEntries: new Uint8Array(0), factorAuxWords,
       factorLevelCount: 1, levelsOffset, rowOffsetsOffset, rowEntriesOffset,
       couplingByBodyOffset, couplingByDofOffset, couplingTableOffset, couplingBodyCount: 0, couplingDistinctDofs: 0, couplingBodyIndices: [] as number[],
       dofSamplesBase, mlsRowCount: 0, cellPressureSamples, icFactorization_ms: 0,
-      lineOffsetsBase, lineDofsBase, lineCount, blockTableOffset, blockCount: 0
+      lineOffsetsBase, lineDofsBase, lineCount, blockTableOffset, blockCount: 0,
+      ...(multigrid ? { multigrid } : {})
     };
     return { packed, dofCount, faceCount, ghostFaceCount, maximumFluidScale: maximumSystemFluidScale, tallSegmentCount };
   }
@@ -1936,6 +2863,9 @@ export class WebGPUQuadtreeTallCellProjection {
       lineRows.forEach((row, index) => { factorAuxWords[lineOffsetsBase + index] = cursor; factorAuxWords.set(row, lineDofsBase + cursor); cursor += row.length; });
       factorAuxWords[lineOffsetsBase + lineRows.length] = cursor;
     }
+    const multigrid = preconditioner === "mg"
+      ? buildQuadtreeMultigridHierarchy(matrixWords, n, factorAuxWords, dofSamplesBase, nx, ny, nz)
+      : undefined;
     return {
       faces: new Uint8Array(faces), rowOffsets, rowEntries: new Uint8Array(rowEntries, 0, entryCount * 8), matrixWords, cellProjection, cellTopology,
       factorColumns: new Uint8Array(factorColumnsBuffer), factorEntries: new Uint8Array(factorEntriesBuffer, 0, factorRows.length * 8),
@@ -1944,7 +2874,8 @@ export class WebGPUQuadtreeTallCellProjection {
       couplingBodyIndices: couplings.map((coupling) => coupling.body),
       dofSamplesBase, mlsRowCount: 0, cellPressureSamples, icFactorization_ms,
       lineOffsetsBase, lineDofsBase, lineCount: lineRows.length,
-      blockTableOffset, blockCount
+      blockTableOffset, blockCount,
+      ...(multigrid ? { multigrid } : {})
     };
   }
 
@@ -1953,24 +2884,76 @@ export class WebGPUQuadtreeTallCellProjection {
     encoder.clearBuffer(this.scalarBuffer);
     encoder.clearBuffer(this.velocityClampCounter);
     const coupled = this.couplingBodyCount > 0;
+    const chebyshev = this.pressureSolver === "chebyshev";
+    // Throughput mode keeps K only for the post-solve impulse publication.
+    // The uploaded solid velocity remains in b, but K M^-1 K^T does not
+    // re-enter every polynomial pass.
+    const exactCoupled = coupled && !chebyshev;
+    const chebyshevPasses = quadtreeChebyshevPasses(this.options.pressureIterations);
+    const megakernelDegree = (this.options.preconditioner ?? "ic0") === "jacobi"
+      ? 1
+      : Math.max(2, Math.min(4, Math.round(this.options.polynomialDegree ?? 2)));
+    const megakernel = this.megakernelEligible && (this.megakernelMode === "always"
+      || (this.megakernelMode === "dynamic" && quadtreeMegakernelPreferred(
+        this.dofCount,
+        this.megakernelIterationHint,
+        megakernelDegree,
+        this.options.megakernelDofLimit,
+        this.options.megakernelRowIterationLimit
+      )));
     const rowGroups = Math.ceil(this.dofCount / 128);
     const preconditioner = this.options.preconditioner ?? "ic0";
     const polynomialDegree = Math.max(2, Math.min(4, Math.round(this.options.polynomialDegree ?? 2)));
-    const directPrecondition = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void) => {
+    const multigridDispatch = (pass: GPUComputePassEncoder, entry: string, levelIndex: number, indirect: boolean, workgroups: number, single = false) => {
+      const multigrid = this.multigrid;
+      if (!multigrid) throw new Error("Geometric multigrid hierarchy was not packed");
+      pass.setPipeline(this.multigridPipelines[entry]); pass.setBindGroup(0, multigrid.levels[levelIndex].bindGroup);
+      if (indirect) pass.dispatchWorkgroupsIndirect(this.dispatchArgs, single ? 12 : 0);
+      else pass.dispatchWorkgroups(workgroups);
+    };
+    const assembleMultigrid = (pass: GPUComputePassEncoder) => {
+      const multigrid = this.multigrid; if (!multigrid) return;
+      for (let level = 0; level + 1 < multigrid.levels.length; level += 1) {
+        multigridDispatch(pass, "clearCoarseMatrix", level, false, multigrid.levels[level + 1].rowGroups);
+        multigridDispatch(pass, "assembleGalerkin", level, false, multigrid.levels[level].rowGroups);
+      }
+    };
+    const applyMultigrid = (pass: GPUComputePassEncoder, indirect: boolean) => {
+      const multigrid = this.multigrid;
+      if (!multigrid) throw new Error("Geometric multigrid hierarchy was not packed");
+      const last = multigrid.levels.length - 1;
+      if (last === 0) multigridDispatch(pass, "copyFineResidual", 0, indirect, multigrid.levels[0].rowGroups);
+      for (let level = 0; level < last; level += 1) {
+        const groups = multigrid.levels[level].rowGroups;
+        multigridDispatch(pass, "lineSmoothInitial", level, indirect, groups);
+        multigridDispatch(pass, "restrictDefectGather", level, indirect, multigrid.levels[level + 1].rowGroups);
+      }
+      multigridDispatch(pass, "solveCoarsest", last, indirect, 1, true);
+      for (let level = last - 1; level >= 0; level -= 1) {
+        const groups = multigrid.levels[level].rowGroups;
+        multigridDispatch(pass, "prolongateCorrection", level, indirect, groups);
+        multigridDispatch(pass, "computeDefect", level, indirect, groups);
+        multigridDispatch(pass, "lineSmoothFinal", level, indirect, groups);
+      }
+      multigridDispatch(pass, "copyFineCorrection", 0, indirect, multigrid.levels[0].rowGroups);
+    };
+    const directPrecondition = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void, pass: GPUComputePassEncoder) => {
       if (preconditioner === "ic0") direct("precondition", 1);
       else if (preconditioner === "blockic") direct("preconditionBlockIC", this.preconditionBlockGroups);
       else if (preconditioner === "jacobi") direct("preconditionJacobi", rowGroups);
       else if (preconditioner === "line") direct("preconditionLine", rowGroups);
+      else if (preconditioner === "mg") applyMultigrid(pass, false);
       else {
         direct("preconditionPolynomialStart", rowGroups);
         for (let degree = 1; degree < polynomialDegree; degree += 1) { direct("preconditionPolynomialMultiply", rowGroups); direct("preconditionPolynomialUpdate", rowGroups); }
       }
     };
-    const indirectPrecondition = (indirect: (entry: string, offset: number) => void) => {
+    const indirectPrecondition = (indirect: (entry: string, offset: number) => void, pass: GPUComputePassEncoder) => {
       if (preconditioner === "ic0") indirect("precondition", 12);
       else if (preconditioner === "blockic") indirect("preconditionBlockIC", 36);
       else if (preconditioner === "jacobi") indirect("preconditionJacobi", 0);
       else if (preconditioner === "line") indirect("preconditionLine", 0);
+      else if (preconditioner === "mg") applyMultigrid(pass, true);
       else {
         indirect("preconditionPolynomialStart", 0);
         for (let degree = 1; degree < polynomialDegree; degree += 1) { indirect("preconditionPolynomialMultiply", 0); indirect("preconditionPolynomialUpdate", 0); }
@@ -1978,7 +2961,11 @@ export class WebGPUQuadtreeTallCellProjection {
     };
     const withPass = (writes: GPUComputePassTimestampWrites | undefined, encode: (direct: (entry: string, workgroups: number, y?: number, z?: number) => void, indirect: (entry: string, offset: number) => void, pass: GPUComputePassEncoder) => void) => {
       const pass = encoder.beginComputePass(writes ? { timestampWrites: writes } : undefined);
-      const direct = (entry: string, workgroups: number, y = 1, z = 1) => { pass.setPipeline(this.pipelines[entry]); pass.setBindGroup(0, entry === "mapPressure" ? this.mapPressureBindGroup : this.bindGroup); pass.dispatchWorkgroups(workgroups, y, z); };
+      const direct = (entry: string, workgroups: number, y = 1, z = 1) => {
+        pass.setPipeline(this.pipelines[entry]);
+        pass.setBindGroup(0, entry === "mapPressure" ? this.mapPressureBindGroup : entry === "finishIterationFinalize" ? this.solverFinalizeBindGroup : this.bindGroup);
+        pass.dispatchWorkgroups(workgroups, y, z);
+      };
       const indirect = (entry: string, offset: number) => { pass.setPipeline(this.pipelines[entry]); pass.setBindGroup(0, this.bindGroup); pass.dispatchWorkgroupsIndirect(this.dispatchArgs, offset); };
       encode(direct, indirect, pass); pass.end();
     };
@@ -1986,34 +2973,88 @@ export class WebGPUQuadtreeTallCellProjection {
     // count-shaped setup dispatch reads the never-zeroed indirect triples
     // (word 25 row groups, word 28 face groups) patched from packControl.
     const gpuCounts = this.inlineSupported;
-    const indirectPreconditionSetup = (indirect: (entry: string, offset: number) => void) => {
-      if (preconditioner === "jacobi") indirect("preconditionJacobi", 100);
-      else {
-        indirect("preconditionPolynomialStart", 100);
-        for (let degree = 1; degree < polynomialDegree; degree += 1) { indirect("preconditionPolynomialMultiply", 100); indirect("preconditionPolynomialUpdate", 100); }
+    const indirectParallelSetup = (indirect: (entry: string, offset: number) => void, afterInit?: () => void) => {
+      if (preconditioner === "jacobi") { indirect("initializeJacobiDirection", 100); afterInit?.(); return; }
+      indirect("initializePolynomialStart", 100);
+      afterInit?.();
+      for (let degree = 1; degree < polynomialDegree; degree += 1) {
+        indirect("preconditionPolynomialMultiply", 100);
+        indirect(degree + 1 === polynomialDegree ? "preconditionPolynomialUpdateDirection" : "preconditionPolynomialUpdate", 100);
       }
     };
-    const setup = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void, indirect: (entry: string, offset: number) => void) => {
+    const directParallelSetup = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void, afterInit?: () => void) => {
+      if (preconditioner === "jacobi") { direct("initializeJacobiDirection", rowGroups); afterInit?.(); return; }
+      direct("initializePolynomialStart", rowGroups);
+      afterInit?.();
+      for (let degree = 1; degree < polynomialDegree; degree += 1) {
+        direct("preconditionPolynomialMultiply", rowGroups);
+        direct(degree + 1 === polynomialDegree ? "preconditionPolynomialUpdateDirection" : "preconditionPolynomialUpdate", rowGroups);
+      }
+    };
+    const warmStart = this.warmStartEnabled;
+    const refreshSystem = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void, indirect: (entry: string, offset: number) => void) => {
+      if (gpuCounts) { indirect("refreshFaces", 112); indirect("refreshRows", 100); }
+      else { direct("refreshFaces", Math.ceil(this.info.faceCount / 128)); direct("refreshRows", rowGroups); }
+    };
+    const setup = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void, indirect: (entry: string, offset: number) => void, pass: GPUComputePassEncoder) => {
       // Geometry-dependent values are refreshed once, outside the CG loop.
+      // With warm start, |b|^2 is reduced right after initialization, before
+      // the preconditioner setup recycles the staging slot.
+      const captureNorm = warmStart ? () => direct("reduceInitialNorm", 1) : undefined;
+      refreshSystem(direct, indirect);
+      if (preconditioner === "mg") assembleMultigrid(pass);
       if (gpuCounts) {
-        indirect("refreshFaces", 112); indirect("refreshRows", 100);
-        indirect("initialize", 100); indirectPreconditionSetup(indirect); indirect("startDirection", 100); direct("reduceInitial", 1);
+        indirectParallelSetup(indirect, captureNorm); direct("reduceInitial", 1);
         return;
       }
-      direct("refreshFaces", Math.ceil(this.info.faceCount / 128)); direct("refreshRows", rowGroups);
-      direct("initialize", rowGroups); directPrecondition(direct); direct("startDirection", rowGroups); direct("reduceInitial", 1);
+      if (preconditioner === "poly" || preconditioner === "jacobi") directParallelSetup(direct, captureNorm);
+      else { direct("initialize", rowGroups); captureNorm?.(); directPrecondition(direct, pass); direct("startDirection", rowGroups); }
+      direct("reduceInitial", 1);
     };
     const iterations = (first: number, end: number, direct: (entry: string, workgroups: number, y?: number, z?: number) => void, indirect: (entry: string, offset: number) => void, pass: GPUComputePassEncoder) => {
       void direct;
+      if (this.parallelReductions && first === 0) { pass.setPipeline(this.dispatchPipeline); pass.setBindGroup(0, this.dispatchBindGroup); pass.dispatchWorkgroups(1); }
       for (let iteration = first; iteration < end; iteration += 1) {
-        pass.setPipeline(this.dispatchPipeline); pass.setBindGroup(0, this.dispatchBindGroup); pass.dispatchWorkgroups(1);
+        if (!this.parallelReductions) { pass.setPipeline(this.dispatchPipeline); pass.setBindGroup(0, this.dispatchBindGroup); pass.dispatchWorkgroups(1); }
+        if (this.parallelReductions && !exactCoupled) {
+          // Uncoupled fused path: the d.Ad partial rides inside the SpMV and
+          // every update workgroup re-reduces the partials for alpha, so an
+          // iteration needs no dedicated dot-product finalize dispatches.
+          indirect("multiplyPartial", 0);
+          if (preconditioner === "jacobi") {
+            indirect("applyStepAlphaUpdateJacobiFinishPartial", 0);
+          } else if (preconditioner === "poly") {
+            indirect("applyStepAlphaUpdatePolynomialStart", 0);
+            for (let degree = 1; degree < polynomialDegree; degree += 1) {
+              indirect("preconditionPolynomialMultiply", 0);
+              indirect(degree + 1 === polynomialDegree ? "preconditionPolynomialUpdateFinishPartial" : "preconditionPolynomialUpdate", 0);
+            }
+          } else {
+            indirect("applyStepAlphaUpdate", 0); indirectPrecondition(indirect, pass); indirect("finishIterationPartial", 0);
+          }
+          direct("finishIterationFinalize", 1); indirect("finishIterationUpdate", 124);
+          continue;
+        }
         indirect("multiply", 0);
-        if (coupled) { indirect("coupleReduce", 12); indirect("coupleApply", 24); }
-        if (this.parallelReductions) { indirect("applyStepPartial", 0); indirect("applyStepFinalize", 12); indirect("applyStepUpdate", 0); }
-        else indirect("applyStep", 12);
-        indirectPrecondition(indirect);
-        if (this.parallelReductions) { indirect("finishIterationPartial", 0); indirect("finishIterationFinalize", 12); indirect("finishIterationUpdate", 0); }
-        else indirect("finishIteration", 12);
+        if (exactCoupled) { indirect("coupleReduce", 12); indirect("coupleApply", 24); }
+        if (this.parallelReductions) {
+          indirect("applyStepPartial", 0); indirect("applyStepFinalize", 12);
+          if (preconditioner === "jacobi") {
+            indirect("applyStepUpdateJacobi", 0);
+            indirect("finishIterationPartial", 0);
+          } else if (preconditioner === "poly") {
+            indirect("applyStepUpdatePolynomialStart", 0);
+            for (let degree = 1; degree < polynomialDegree; degree += 1) {
+              indirect("preconditionPolynomialMultiply", 0);
+              indirect(degree + 1 === polynomialDegree ? "preconditionPolynomialUpdateFinishPartial" : "preconditionPolynomialUpdate", 0);
+            }
+          } else {
+            indirect("applyStepUpdate", 0); indirectPrecondition(indirect, pass); indirect("finishIterationPartial", 0);
+          }
+          direct("finishIterationFinalize", 1); indirect("finishIterationUpdate", 124);
+        } else {
+          indirect("applyStep", 12); indirectPrecondition(indirect, pass); indirect("finishIteration", 12);
+        }
       }
     };
     const mapPressure = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void) => {
@@ -2027,13 +3068,36 @@ export class WebGPUQuadtreeTallCellProjection {
       else direct("refreshFaceMls", Math.ceil(this.info.faceCount / 128));
       direct("project", Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
     };
+    const chebyshevSolve = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void, indirect: (entry: string, offset: number) => void, includeRefresh: boolean) => {
+      if (includeRefresh) refreshSystem(direct, indirect);
+      const rows = (entry: string) => gpuCounts ? indirect(entry, 100) : direct(entry, rowGroups);
+      rows("initializeChebyshev");
+      for (let pass = 0; pass < chebyshevPasses; pass += 1) rows(pass % 2 === 0 ? "iterateChebyshevAB" : "iterateChebyshevBA");
+      rows(chebyshevPasses % 2 === 0 ? "finishChebyshevFromPressure" : "finishChebyshevFromBest");
+      direct("reduceChebyshevResidual", 1);
+    };
     if (this.phaseQuerySet && this.phaseQueryResolve) {
       if (timestampWrites) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } }); marker.end(); }
       const writes = (beginningOfPassWriteIndex: number, endOfPassWriteIndex: number): GPUComputePassTimestampWrites => ({ querySet: this.phaseQuerySet!, beginningOfPassWriteIndex, endOfPassWriteIndex });
       const firstCount = Math.min(this.iterations, Math.max(1, Math.round(this.options.debugPressureFirstIterations ?? 8)));
-      withPass(writes(0, 1), (direct, indirect) => setup(direct, indirect));
-      withPass(writes(2, 3), (direct, indirect, pass) => iterations(0, firstCount, direct, indirect, pass));
-      withPass(writes(4, 5), (direct, indirect, pass) => iterations(firstCount, this.iterations, direct, indirect, pass));
+      if (chebyshev) {
+        withPass(writes(0, 1), (direct, indirect) => refreshSystem(direct, indirect));
+        // The fixed polynomial has no convergence-dependent boundary. Keep
+        // its complete row-parallel ladder in one timing window.
+        withPass(writes(2, 3), (direct, indirect) => chebyshevSolve(direct, indirect, false));
+        withPass(writes(4, 5), () => {});
+      } else if (megakernel) {
+        withPass(writes(0, 1), (direct, indirect) => refreshSystem(direct, indirect));
+        // The persistent dispatch includes initialization and every CG
+        // iteration, so it occupies the first-iterations timing window; the
+        // remaining-iterations window intentionally stays empty.
+        withPass(writes(2, 3), (direct) => direct("solveMegakernel", 1));
+        withPass(writes(4, 5), () => {});
+      } else {
+        withPass(writes(0, 1), (direct, indirect, pass) => setup(direct, indirect, pass));
+        withPass(writes(2, 3), (direct, indirect, pass) => iterations(0, firstCount, direct, indirect, pass));
+        withPass(writes(4, 5), (direct, indirect, pass) => iterations(firstCount, this.iterations, direct, indirect, pass));
+      }
       withPass({ querySet: this.phaseQuerySet, beginningOfPassWriteIndex: 6 }, (direct) => mapPressure(direct));
       withPass({ querySet: this.phaseQuerySet, endOfPassWriteIndex: 7 }, (direct, indirect) => project(direct, indirect));
       encoder.resolveQuerySet(this.phaseQuerySet, 0, 8, this.phaseQueryResolve, 0);
@@ -2042,7 +3106,11 @@ export class WebGPUQuadtreeTallCellProjection {
       // MLS materialization writes a transient texture, so WebGPU requires a
       // pass boundary before the conservative projection samples it.
       withPass(timestampWrites ? { querySet: timestampWrites.querySet, beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } : undefined,
-        (direct, indirect, pass) => { setup(direct, indirect); iterations(0, this.iterations, direct, indirect, pass); });
+        (direct, indirect, pass) => {
+          if (chebyshev) chebyshevSolve(direct, indirect, true);
+          else if (megakernel) { refreshSystem(direct, indirect); direct("solveMegakernel", 1); }
+          else { setup(direct, indirect, pass); iterations(0, this.iterations, direct, indirect, pass); }
+        });
       withPass(undefined, (direct) => mapPressure(direct));
       withPass(timestampWrites ? { querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex } : undefined,
         (direct, indirect) => project(direct, indirect));
@@ -2054,33 +3122,45 @@ export class WebGPUQuadtreeTallCellProjection {
       const pass = encoder.beginComputePass({ label: "Quadtree current-step CFL safety clamp" });
       pass.setPipeline(this.velocityClampPipeline); pass.setBindGroup(0, this.velocityClampBindGroup);
       pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); pass.end();
-      encoder.copyTextureToTexture({ texture: this.resources.velocityScratch }, { texture: this.resources.velocityOut }, [nx, ny, nz]);
     }
     // Ando--Batty-style narrow-band extrapolation: each dispatch grows the
     // set of known face velocities by one 6-neighbour ring. Five rings cover
     // the aligned 5h keep-alive band, including fast thin floor sheets.
+    // The clamp left the field in scratch, so the odd sweep count starts
+    // scratch->out and finishes in the public velocity texture with no
+    // full-texture copies on either side.
     for (let sweep = 0; sweep < 5; sweep += 1) {
       const pass = encoder.beginComputePass({ label: `Quadtree velocity extrapolation ${sweep + 1}/5` });
       pass.setPipeline(this.velocityExtrapolationPipeline);
-      pass.setBindGroup(0, sweep % 2 === 0 ? this.extrapolateOutToScratchGroup : this.extrapolateScratchToOutGroup);
+      pass.setBindGroup(0, sweep % 2 === 0 ? this.extrapolateScratchToOutGroup : this.extrapolateOutToScratchGroup);
       pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
       pass.end();
     }
-    // Odd sweep count leaves the complete field in scratch. Copying it back
-    // keeps the projection's public velocity texture identity stable.
-    encoder.copyTextureToTexture({ texture: this.resources.velocityScratch }, { texture: this.resources.velocityOut }, [nx, ny, nz]);
-    const divergencePass = encoder.beginComputePass({ label: "Quadtree post-projection divergence diagnostic" });
-    divergencePass.setPipeline(this.divergencePipeline); divergencePass.setBindGroup(0, this.divergenceBindGroup);
-    divergencePass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); divergencePass.end();
+    // The divergence texture only feeds the debug grid overlay; refreshing it
+    // on a short cadence keeps the overlay honest without spending a dense
+    // dispatch on every solve.
+    if (this.solveSequence % 4 === 1) {
+      const divergencePass = encoder.beginComputePass({ label: "Quadtree post-projection divergence diagnostic" });
+      divergencePass.setPipeline(this.divergencePipeline); divergencePass.setBindGroup(0, this.divergenceBindGroup);
+      divergencePass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); divergencePass.end();
+    }
   }
 
-  encodeSurface(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState, cflSafetyDt_s = dt_s) {
+  encodeSurface(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState, cflSafetyDt_s = dt_s, timestampWrites?: GPUComputePassTimestampWrites) {
     // The projection's own inflowTiming.x gates applyInflowVelocity in project.
     this.device.queue.writeBuffer(this.params, 176, new Float32Array([inflow?.strength ?? 0, 0, 0, 0]));
     // The safety limit uses the whole submitted frame interval so a spike
     // created in the final substep cannot cross a cell before the next frame.
     this.device.queue.writeBuffer(this.params, 28, new Float32Array([cflSafetyDt_s]));
-    this.surfaceState.encode(encoder, dt_s, inflow);
+    // Materialize the flux-consistent transport view from this solve's faces
+    // before phi transport; the momentum field itself is left untouched.
+    {
+      const { nx, ny, nz } = this.dims;
+      const pass = encoder.beginComputePass({ label: "Quadtree surface transport velocity", ...(timestampWrites ? { timestampWrites: { querySet: timestampWrites.querySet, beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } } : {}) });
+      pass.setPipeline(this.surfaceTransportPipeline); pass.setBindGroup(0, this.surfaceTransportBindGroup);
+      pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); pass.end();
+    }
+    this.surfaceState.encode(encoder, dt_s, inflow, timestampWrites ? { querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex } : undefined);
   }
   async readSurfaceDiagnostics() { const diagnostics = await this.surfaceState.readVolumeDiagnostics(); this.levelSetMismatchFraction = diagnostics.mismatchFraction; return diagnostics; }
   get surfaceDiagnostics() { return this.surfaceState.volumeDiagnostics; }
@@ -2092,39 +3172,43 @@ export class WebGPUQuadtreeTallCellProjection {
   get pressureSamplesTexture() { return this.cellPressureSamples; }
   get divergenceTexture() { return this.divergence; }
 
-  encodeBodyImpulseReadback(encoder: GPUCommandEncoder) {
+  get bodyImpulseReadbackBytes() { return this.couplingBodyCount * 8 * 4; }
+
+  encodeBodyImpulseReadback(encoder: GPUCommandEncoder, pooledReadback?: GPUBuffer, destinationOffset = 0) {
     if (!this.coupling?.dynamic || this.couplingBodyCount === 0) return undefined;
-    const bytes = this.couplingBodyCount * 8 * 4;
-    const readback = this.device.createBuffer({ label: "Quadtree per-step rigid impulse readback", size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    encoder.copyBufferToBuffer(this.scalarBuffer, 12 * 4, readback, 0, bytes);
+    const bytes = this.bodyImpulseReadbackBytes;
+    const readback = pooledReadback ?? this.device.createBuffer({ label: "Quadtree per-step rigid impulse readback", size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    encoder.copyBufferToBuffer(this.scalarBuffer, 12 * 4, readback, destinationOffset, bytes);
     return readback;
+  }
+
+  decodeMappedBodyImpulseReadback(readback: GPUBuffer, sourceOffset = 0): QuadtreeBodyImpulse[] {
+    const solve = new Float32Array(readback.getMappedRange(sourceOffset, this.bodyImpulseReadbackBytes)), rho = this.scene.fluid.density_kg_m3;
+    return this.couplingBodyIndices.map((bodyIndex, slot) => {
+      const base = slot * 8, body = this.coupling!.bodies[bodyIndex];
+      return {
+        bodyId: body?.description.id ?? `body-${bodyIndex}`,
+        impulse_N_s: { x: -rho * solve[base], y: -rho * solve[base + 1], z: -rho * solve[base + 2] },
+        angularImpulse_N_m_s: { x: -rho * solve[base + 3], y: -rho * solve[base + 4], z: -rho * solve[base + 5] },
+        displacedVolume_m3: this.displacedVolumes[bodyIndex] ?? 0
+      };
+    });
   }
 
   async readBodyImpulseReadback(readback: GPUBuffer): Promise<QuadtreeBodyImpulse[]> {
     await readback.mapAsync(GPUMapMode.READ);
-    try {
-      const solve = new Float32Array(readback.getMappedRange()), rho = this.scene.fluid.density_kg_m3;
-      return this.couplingBodyIndices.map((bodyIndex, slot) => {
-        const base = slot * 8, body = this.coupling!.bodies[bodyIndex];
-        return {
-          bodyId: body?.description.id ?? `body-${bodyIndex}`,
-          impulse_N_s: { x: -rho * solve[base], y: -rho * solve[base + 1], z: -rho * solve[base + 2] },
-          angularImpulse_N_m_s: { x: -rho * solve[base + 3], y: -rho * solve[base + 4], z: -rho * solve[base + 5] },
-          displacedVolume_m3: this.displacedVolumes[bodyIndex] ?? 0
-        };
-      });
-    } finally {
-      readback.unmap(); readback.destroy();
-    }
+    try { return this.decodeMappedBodyImpulseReadback(readback); }
+    finally { readback.unmap(); readback.destroy(); }
   }
 
   async readSolveDiagnostics() {
     // A freshly rebuilt projection may be swapped in after the preceding solve
     // but before stats are sampled. Its scalar buffer is intentionally blank;
     // retain the diagnostics carried over by rebuildFromState until it encodes.
-    if (this.solveSequence === 0) return;
+    if (this.solveSequence === 0 || this.solveFeedbackPending) return;
+    this.solveFeedbackPending = true;
     const phaseBytes = this.phaseQueryResolve ? 64 : 0;
-    const readback = this.device.createBuffer({ label: "Quadtree solve diagnostics", size: 56 + phaseBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const readback = this.solveFeedbackReadback ??= this.device.createBuffer({ label: "Quadtree solve diagnostics", size: 56 + phaseBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder(); encoder.copyBufferToBuffer(this.scalarBuffer, 0, readback, 0, 48);
     encoder.copyBufferToBuffer(this.velocityClampCounter, 0, readback, 48, 4);
     if (this.phaseQueryResolve) encoder.copyBufferToBuffer(this.phaseQueryResolve, 0, readback, 56, 64);
@@ -2147,7 +3231,8 @@ export class WebGPUQuadtreeTallCellProjection {
         };
       }
     } finally {
-      if (readback.mapState === "mapped") readback.unmap(); readback.destroy();
+      if (readback.mapState === "mapped") readback.unmap();
+      this.solveFeedbackPending = false;
     }
   }
 
@@ -2155,9 +3240,21 @@ export class WebGPUQuadtreeTallCellProjection {
     const used = Math.round(solve[9] ?? 0);
     const converged = solve[3] > 0 && solve[2] <= this.options.relativeTolerance ** 2 * solve[3];
     this.info.pressureIterationsUsed = used; this.info.pressureConverged = converged;
+    if (this.pressureSolver === "chebyshev") return;
+    // Only a converged solve is a safe workload predictor. An exhausted
+    // ladder budget may understate the work the hard-capped megakernel would
+    // need, so clear the hint until convergence is observed again.
+    this.megakernelIterationHint = converged ? used : undefined;
     if (this.feedbackSequence === this.solveSequence) return;
     this.feedbackSequence = this.solveSequence;
-    this.iterationBudget = nextQuadtreeIterationBudget(this.iterationBudget, used, converged);
+    const nextBudget = nextQuadtreeIterationBudget(this.iterationBudget, used, converged);
+    // A V-cycle has many more dispatches than the polynomial preconditioner,
+    // so its dead tail needs tighter headroom. Two iterations plus a 10%
+    // EMA margin proved sufficient across the dam-break transition; an
+    // exhausted budget still takes the generic immediate 2x recovery path.
+    this.iterationBudget = (this.options.preconditioner ?? "ic0") === "mg" && converged
+      ? { ...nextBudget, encodedBudget: Math.max(Math.min(8, nextBudget.hardBudget), Math.min(nextBudget.hardBudget, Math.ceil(Math.max(used + 2, 1.1 * nextBudget.ema + 2)))) }
+      : nextBudget;
     this.iterations = this.iterationBudget.encodedBudget;
     this.info.pressureIterationBudget = this.iterations;
     this.info.pressureIterationHardBudget = this.iterationBudget.hardBudget;
@@ -2165,7 +3262,12 @@ export class WebGPUQuadtreeTallCellProjection {
   }
 
   private feedbackOptions(): QuadtreeTallCellProjectionOptions {
-    return { ...this.options, iterationBudgetHint: this.iterations, iterationEmaHint: this.iterationBudget.ema };
+    return {
+      ...this.options,
+      iterationBudgetHint: this.iterations,
+      iterationEmaHint: this.iterationBudget.ema,
+      megakernelIterationHint: this.megakernelIterationHint
+    };
   }
 
   /** True when Algorithm-1's every-step topology regeneration can run fully on the GPU. */
@@ -2187,7 +3289,7 @@ export class WebGPUQuadtreeTallCellProjection {
     if (!resident || !gpuPack || !this.canEncodeInlineRebuild) return false;
     const { nx, ny, nz } = this.dims;
     const h = { x: this.scene.container.width_m / nx, y: this.scene.container.height_m / ny, z: this.scene.container.depth_m / nz };
-    this.inlineBuilder ??= new WebGPUQuadtreeBuilder(this.device, this.dims, h, this.options.maximumLeafSize, this.options.adaptivityStrength, 3, this.gpuCache.construction);
+    this.inlineBuilder ??= new WebGPUQuadtreeBuilder(this.device, this.dims, h, this.options.maximumLeafSize, this.options.adaptivityStrength, 3, this.gpuCache.construction, this.options.deepSpeedGradientScale ?? 1, this.options.opticalLayerMode ?? "fixed", this.options.opticalAlpha ?? 0.5);
     this.gpuCache.construction = this.inlineBuilder.cache;
     // Uncoupled scenes have static explicit sizing (rigid-coupled rebuilds
     // stay on the asynchronous path), so the CPU field is computed once.
@@ -2196,7 +3298,7 @@ export class WebGPUQuadtreeTallCellProjection {
       velocity: this.resources.velocityOut, levelSet: this.surfaceState.texture,
       explicitSizing: this.inlineExplicitSizing, diagnosticBytes: 48 + 12 * 8 * 4
     });
-    if (!gpuPack.encodeResidentPack(encoder, finalTopology, this.surfaceState.texture, resident)) return false;
+    if (!gpuPack.encodeResidentPack(encoder, finalTopology, this.surfaceState.texture, resident, this.inlineBuilder.opticalLayerBuffer)) return false;
     // Publish the (fresh or retained) counts into the uniform parameters and
     // the never-zeroed indirect setup triples. finalizeControl only advances
     // words 0-4 on a valid pack, so these copies are always consistent.
@@ -2207,6 +3309,7 @@ export class WebGPUQuadtreeTallCellProjection {
     encoder.copyBufferToBuffer(control, 12, this.dispatchArgs, 48, 4);   // CG template row groups
     encoder.copyBufferToBuffer(control, 12, this.dispatchArgs, 100, 4);  // setup row groups
     encoder.copyBufferToBuffer(control, 16, this.dispatchArgs, 112, 4);  // setup face groups
+    encoder.copyBufferToBuffer(control, 12, this.dispatchArgs, 124, 4);  // current-iteration finish groups
     if (!this.inlineMonitorPending) {
       this.inlineMonitorBuffer ??= this.device.createBuffer({ label: "Quadtree inline rebuild monitor", size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       encoder.copyBufferToBuffer(control, 0, this.inlineMonitorBuffer, 0, 64);
@@ -2249,10 +3352,10 @@ export class WebGPUQuadtreeTallCellProjection {
     const scalarBytes = 48 + 12 * 8 * 4;
     const h = { x: this.scene.container.width_m / nx, y: this.scene.container.height_m / ny, z: this.scene.container.depth_m / nz };
     const activeBodies = bodies ?? this.coupling?.bodies;
-    const builder = new WebGPUQuadtreeBuilder(this.device, this.dims, h, this.options.maximumLeafSize, this.options.adaptivityStrength, 3, this.gpuCache.construction);
+    const builder = new WebGPUQuadtreeBuilder(this.device, this.dims, h, this.options.maximumLeafSize, this.options.adaptivityStrength, 3, this.gpuCache.construction, this.options.deepSpeedGradientScale ?? 1, this.options.opticalLayerMode ?? "fixed", this.options.opticalAlpha ?? 0.5);
     this.gpuCache.construction = builder.cache;
     const currentPreconditioner = this.options.preconditioner ?? "ic0";
-    const gpuSparseRequested = !this.coupling && (currentPreconditioner === "poly" || currentPreconditioner === "jacobi");
+    const gpuSparseRequested = !this.coupling && (currentPreconditioner === "poly" || currentPreconditioner === "jacobi" || currentPreconditioner === "mg");
     const builderInputs = {
       velocity: this.resources.velocityOut, levelSet: this.surfaceState.texture,
       explicitSizing: initialSizing(this.scene, nx, nz, h, activeBodies), diagnosticBuffer: this.scalarBuffer, diagnosticBytes: scalarBytes
@@ -2266,11 +3369,19 @@ export class WebGPUQuadtreeTallCellProjection {
     // byte-layout oracle and handles rigid coupling / incomplete factors.
     const preconditioner = nextOptions.preconditioner ?? "ic0";
     let prepared: PreparedProjectionCPU | undefined;
-    if (!nextCoupling && (preconditioner === "poly" || preconditioner === "jacobi")) {
-      this.gpuCache.gpuPack ??= new WebGPUQuadtreePackBuilder(this.device, this.dims, h, nextOptions.opticalDepthFraction);
+    if (!nextCoupling && (preconditioner === "poly" || preconditioner === "jacobi" || preconditioner === "mg")) {
+      this.gpuCache.gpuPack ??= new WebGPUQuadtreePackBuilder(this.device, this.dims, h, nextOptions.opticalDepthFraction, nextOptions.opticalLayerMode ?? "fixed");
       const gpuPacked = await this.gpuCache.gpuPack.build(built.packedCells, this.surfaceState.texture, {
         dofCount: this.dofCount, faceCount: this.info.faceCount, pressureSampleCount: this.info.pressureSampleCount
-      }, true);
+      }, preconditioner !== "mg", builder.opticalLayerBuffer);
+      if (gpuPacked && preconditioner === "mg") {
+        // MG cannot publish a changed hierarchy in place yet, but it can
+        // reuse the GPU's segmentation/face/CSR pack. Read back that compact
+        // pack and build only dyadic transfers/symbolic coarse CSR on the CPU;
+        // this removes the expensive worker face-graph construction.
+        const packed = gpuPacked.packed as typeof gpuPacked.packed & { multigrid?: QuadtreeMultigridHierarchy };
+        packed.multigrid = buildQuadtreeMultigridHierarchy(packed.matrixWords, gpuPacked.dofCount, packed.factorAuxWords, packed.dofSamplesBase, nx, ny, nz);
+      }
       if (gpuPacked) prepared = {
         leafCount: gpuPacked.leafCount, pressureSampleCount: gpuPacked.pressureSampleCount, maximumNeighborRatio: gpuPacked.maximumNeighborRatio,
         topologyWords: built.packedCells.slice(), topologyIdentityComplete: false, packed: gpuPacked.packed, resident: gpuPacked.resident,
@@ -2288,11 +3399,11 @@ export class WebGPUQuadtreeTallCellProjection {
     }
     prepared ??= await prepareQuadtreeProjectionInWorker(this.gpuCache, {
       scene: this.scene, dims: this.dims, options: nextOptions,
-      packedCells: built.packedCells, columnProfiles: built.columnProfiles,
+      packedCells: built.packedCells, columnProfiles: built.columnProfiles, opticalColumns: built.opticalColumns,
       reuseTopologyWords: nextCoupling ? undefined : this.topologyWords,
       coupling: nextCoupling
     });
-    const topologyReadbackBytes = built.columnProfiles.byteLength + nx * nz * 4 + scalarBytes + 16;
+    const topologyReadbackBytes = built.columnProfiles.byteLength + built.opticalColumns.byteLength + nx * nz * 4 + scalarBytes + 16;
     const reuseTopology = !this.coupling && prepared.topologyIdentityComplete !== false
       && (prepared.reusedTopology === true || sameWords(this.topologyWords, prepared.topologyWords));
     let next: WebGPUQuadtreeTallCellProjection;
@@ -2343,10 +3454,11 @@ export class WebGPUQuadtreeTallCellProjection {
   get residualRms() { return this.lastResidualRms; }
   get initialResidualRms() { return this.lastInitialResidualRms; }
   get topologyTexture() { return this.cellTopology; }
-  get preconditioner() { const value = this.options.preconditioner; return value === "blockic" || value === "jacobi" || value === "line" || value === "poly" ? value : "ic0"; }
+  get preconditioner() { const value = this.options.preconditioner; return value === "blockic" || value === "jacobi" || value === "line" || value === "poly" || value === "mg" ? value : "ic0"; }
+  get solver() { return this.pressureSolver; }
 
-  destroySharedSurface() { this.surfaceState.destroy(); WebGPUQuadtreeBuilder.destroyCache(this.gpuCache.construction); this.gpuCache.gpuPack?.destroy(); this.gpuCache.gpuPack = undefined; this.gpuCache.cpuWorker?.terminate(); this.gpuCache.cpuWorker = undefined; }
-  destroy() { for (const buffer of this.buffers) buffer.destroy(); this.params.destroy(); this.cellProjection.destroy(); this.cellTopology.destroy(); this.factorAux.destroy(); this.cellPressureSamples.destroy(); this.mappedPressure.destroy(); this.mappedPressureStorageFallback.destroy(); this.mappedPressureSampledFallback.destroy(); this.divergence.destroy(); this.phaseQuerySet?.destroy(); this.phaseQueryResolve?.destroy(); this.inlineMonitorBuffer?.destroy(); }
+  destroySharedSurface() { this.surfaceState.destroy(); this.resources.surfaceTransport?.destroy(); this.resources.surfaceTransport = undefined; WebGPUQuadtreeBuilder.destroyCache(this.gpuCache.construction); this.gpuCache.gpuPack?.destroy(); this.gpuCache.gpuPack = undefined; this.gpuCache.cpuWorker?.terminate(); this.gpuCache.cpuWorker = undefined; }
+  destroy() { for (const buffer of this.buffers) buffer.destroy(); this.params.destroy(); this.cellProjection.destroy(); this.cellTopology.destroy(); this.factorAux.destroy(); this.cellPressureSamples.destroy(); this.mappedPressure.destroy(); this.mappedPressureStorageFallback.destroy(); this.mappedPressureSampledFallback.destroy(); this.divergence.destroy(); this.phaseQuerySet?.destroy(); this.phaseQueryResolve?.destroy(); this.inlineMonitorBuffer?.destroy(); this.solveFeedbackReadback?.destroy(); }
 }
 
 export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput): PreparedProjectionCPU {
@@ -2356,7 +3468,11 @@ export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput)
   const quadtree = quadtreeFromPackedCells(input.packedCells, nx, nz);
   const quadtreeDecode_ms = performance.now() - decodeStartedAt;
   const tallStartedAt = performance.now();
-  const pressureGrid = populateTallPressureGridFromLeafProfiles(quadtree, input.columnProfiles, ny, h, input.options.opticalDepthFraction);
+  const opticalDefaults = adaptiveOpticalLayerDefaults(ny, { alpha: input.options.opticalAlpha });
+  const adaptiveOpticalLayer: AdaptiveOpticalLayerField | undefined = input.options.opticalLayerMode === "adaptive-motion" && input.opticalColumns?.length === nx * nz * 4
+    ? { columns: input.opticalColumns, surfaceOffsetCells: opticalDefaults.surfaceOffsetCells, airborneCells: opticalDefaults.airborneCells }
+    : undefined;
+  const pressureGrid = populateTallPressureGridFromLeafProfiles(quadtree, input.columnProfiles, ny, h, input.options.opticalDepthFraction, adaptiveOpticalLayer);
   const topologyWords = pressureTopologyWords(pressureGrid);
   const tallGrid_ms = performance.now() - tallStartedAt;
   if (input.reuseTopologyWords && sameWords(input.reuseTopologyWords, topologyWords)) {
@@ -2373,7 +3489,7 @@ export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput)
   const preconditioner = input.options.preconditioner ?? "ic0";
   if (!input.coupling && preconditioner !== "ic0" && preconditioner !== "blockic") {
     const packStartedAt = performance.now();
-    const direct = WebGPUQuadtreeTallCellProjection.packUncoupledGrid(pressureGrid, nx, ny, nz);
+    const direct = WebGPUQuadtreeTallCellProjection.packUncoupledGrid(pressureGrid, nx, ny, nz, preconditioner);
     const systemPack_ms = performance.now() - packStartedAt;
     return {
       leafCount: quadtree.leaves.length,
@@ -2466,6 +3582,7 @@ async function prepareQuadtreeProjectionInWorker(cache: QuadtreeGPUCache, input:
     const transfer: ArrayBuffer[] = [];
     if (input.packedCells.buffer instanceof ArrayBuffer) transfer.push(input.packedCells.buffer);
     if (input.columnProfiles.buffer instanceof ArrayBuffer) transfer.push(input.columnProfiles.buffer);
+    if (input.opticalColumns?.buffer instanceof ArrayBuffer) transfer.push(input.opticalColumns.buffer);
     cache.cpuWorker!.postMessage({ id, input }, transfer);
   });
 }

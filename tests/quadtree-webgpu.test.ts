@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { simulationMethods } from "../lib/methods";
+import { resolveMethodValues, simulationMethods } from "../lib/methods";
 import { quadtreeTallCellMethod } from "../lib/methods/quadtree-tall-cell";
-import { nextQuadtreeIterationBudget, quadtreeDispatchShader, quadtreeDivergenceShader, quadtreeIterationBudget, quadtreeTallCellProjectionShader, quadtreeVelocityClampShader, quadtreeVelocityExtrapolationShader, WebGPUQuadtreeTallCellProjection } from "../lib/webgpu-quadtree-tall-cell";
-import { nextQuadtreeVofReconciliationActive, packedQuadtreeRootMap, quadtreeConstructionShader, quadtreeSurfaceShader, quadtreeVofReconciliationFraction } from "../lib/webgpu-quadtree-builder";
+import { nextQuadtreeIterationBudget, quadtreeChebyshevPasses, quadtreeDispatchShader, quadtreeDivergenceShader, quadtreeIterationBudget, quadtreeMegakernelDofLimit, quadtreeMegakernelPreferred, quadtreeMegakernelRowIterationLimit, quadtreeMultigridShader, quadtreeTallCellProjectionShader, quadtreeVelocityClampShader, quadtreeVelocityExtrapolationShader, WebGPUQuadtreeTallCellProjection } from "../lib/webgpu-quadtree-tall-cell";
+import { nextQuadtreeVofReconciliationActive, packedQuadtreeRootMap, quadtreeConstructionShader, quadtreeSurfaceJumpSequence, quadtreeSurfaceShader, quadtreeVofReconciliationFraction, WebGPUQuadtreeBuilder, WebGPUQuadtreeSurfaceState } from "../lib/webgpu-quadtree-builder";
 import { quadtreeSegmentationPackShader, WebGPUQuadtreePackBuilder } from "../lib/webgpu-quadtree-pack-builder";
-import { buildQuadtree, buildVariationalSystem, populateTallPressureGrid } from "../lib/quadtree-tall-cell-grid";
+import { buildAdaptiveOpticalLayerField, buildQuadtree, buildVariationalSystem, populateTallPressureGrid } from "../lib/quadtree-tall-cell-grid";
 import { proactiveQuadtreeSubsteps, quadtreeMissedFrames, quadtreeRebuildRetryDelay } from "../lib/webgpu-uniform-eulerian";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 
@@ -16,8 +16,38 @@ test("the old optical-layer method is replaced by quadtree tall cells", () => {
   assert.equal(quadtreeTallCellMethod.shortLabel, "Adaptive");
   assert.match(quadtreeTallCellMethod.detail, /T-junction/);
   assert.equal(quadtreeTallCellMethod.presetFor("balanced").preconditioner, "poly", "the parallel polynomial preconditioner is the runtime default");
+  assert.equal(quadtreeTallCellMethod.presetFor("balanced").pressureSolver, "chebyshev", "the reduction-free row-parallel solve is the runtime default");
+  assert.equal(quadtreeTallCellMethod.presetFor("balanced").opticalLayerMode, "adaptive-motion", "the product preset exercises the 2026 adaptive layer while the fixed path remains selectable");
+  assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "opticalLayerMode" && param.default === "adaptive-motion"));
+  assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "opticalAlpha" && param.default === 0.5));
   assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "preconditioner" && param.default === "poly"));
+  assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "preconditioner" && param.kind === "select" && param.options.some((option) => option.value === "mg")), "geometric MG is selectable without replacing the measured default");
   assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "vofReconciliation" && param.default === "on"), "catastrophic-loss recovery is armed by default but inactive during healthy phi transport");
+});
+
+test("quadtree Chebyshev pressure keeps rows parallel and exact PCG selectable", () => {
+  assert.equal(quadtreeChebyshevPasses(96), 24);
+  assert.equal(quadtreeChebyshevPasses(160), 40);
+  assert.equal(quadtreeChebyshevPasses(240), 60);
+  for (const entry of ["initializeChebyshev", "iterateChebyshevAB", "iterateChebyshevBA", "finishChebyshevFromPressure", "finishChebyshevFromBest", "reduceChebyshevResidual"]) {
+    assert.match(quadtreeTallCellProjectionShader, new RegExp(`fn ${entry}\\b`));
+  }
+  const polynomial = quadtreeTallCellProjectionShader.slice(
+    quadtreeTallCellProjectionShader.indexOf("fn initializeChebyshevRow"),
+    quadtreeTallCellProjectionShader.indexOf("fn initialize(")
+  );
+  assert.match(polynomial, /pressureProduct\(row, source\)/, "each pass is a cached sparse row product");
+  assert.match(polynomial, /let lower = 0\.01; let upper = 2\.2/);
+  assert.doesNotMatch(polynomial, /workgroupBarrier|atomic|coupleReduce|coupleApply/, "the hot polynomial pass has no global scalar dependency");
+
+  const encode = WebGPUQuadtreeTallCellProjection.prototype.encode.toString();
+  assert.match(encode, /exactCoupled=coupled&&!chebyshev/, "accelerated rigid solves omit the exact low-rank response");
+  assert.match(encode, /if\(exactCoupled\)\{indirect\("coupleReduce",12\);indirect\("coupleApply",24\)\}/, "PCG retains exact same-step coupling as the reference");
+  assert.match(encode, /if\(coupled\)direct\("coupleImpulse",1\)/, "both paths publish the current pressure impulse");
+
+  const defaults = resolveMethodValues(quadtreeTallCellMethod, "balanced", {});
+  assert.equal(defaults.pressureSolver, "chebyshev");
+  assert.equal(resolveMethodValues(quadtreeTallCellMethod, "balanced", { pressureSolver: "pcg" }).pressureSolver, "pcg");
 });
 
 test("quadtree projection preserves and extrapolates near-surface air velocity", () => {
@@ -73,8 +103,8 @@ test("VOF reconciliation is an armed catastrophic-loss circuit breaker", () => {
   assert.equal(quadtreeVofReconciliationFraction(1000, 100), 1 / 32);
 });
 
-test("quadtree updates evaluate sizing, subdivide, and smooth on WebGPU", () => {
-  for (const entry of ["evaluateSizing", "refine", "smoothTopology", "sampleLeafProfiles"]) assert.match(quadtreeConstructionShader, new RegExp(`fn ${entry}\\b`));
+test("quadtree updates evaluate sizing, adaptive optical depth, subdivide, and smooth on WebGPU", () => {
+  for (const entry of ["evaluateSizing", "evaluateOpticalLayer", "dilateOpticalLayerX", "dilateOpticalLayerZ", "smoothOpticalLayer", "refine", "smoothTopology", "sampleLeafProfiles"]) assert.match(quadtreeConstructionShader, new RegExp(`fn ${entry}\\b`));
   assert.match(quadtreeConstructionShader, /for \(var y = 0u; y < params\.dims\.y; y \+= 1u\)/, "sizing must vertically reduce each column on the GPU");
   assert.match(quadtreeConstructionShader, /sizingField\[index2\(q\)\] = maximum/);
   assert.match(quadtreeConstructionShader, /neighborTooFine/);
@@ -86,7 +116,26 @@ test("quadtree updates evaluate sizing, subdivide, and smooth on WebGPU", () => 
   assert.match(quadtreeConstructionShader, /if \(!nearSurface && !wet\) \{ continue; \}/, "deep liquid remains eligible for velocity-variation sizing");
   assert.doesNotMatch(quadtreeConstructionShader, /volumeIn|loadVolume/, "adaptive topology must not read VOF");
   assert.match(quadtreeSegmentationPackShader, /fn footprintWet/);
+  assert.match(quadtreeSegmentationPackShader, /fn adaptiveOpticalFirst/);
+  assert.match(quadtreeSegmentationPackShader, /params\.optical\.x != 0u/, "the same resident pack supports fixed and motion-adaptive A\/B modes");
   assert.match(quadtreeSegmentationPackShader, /let liquid = footprintWet\(word, y\)/, "GPU sparse packing must use footprint wetness for coarse DOFs");
+});
+
+test("quadtree topology kernels elect one invocation per leaf", () => {
+  const splitWriter = quadtreeConstructionShader.slice(quadtreeConstructionShader.indexOf("fn writeSplitLeaf"), quadtreeConstructionShader.indexOf("fn refine"));
+  assert.match(splitWriter, /topologyOut\[index2\(q\)\] = childForCell\(origin, size, q\)/, "a split must still materialize every fine-cell owner");
+
+  const refine = quadtreeConstructionShader.slice(quadtreeConstructionShader.indexOf("fn refine"), quadtreeConstructionShader.indexOf("fn neighborTooFine"));
+  assert.match(refine, /if \(any\(q != origin\)\) \{ return; \}[\s\S]*var demand = 0\.0/, "only the leaf origin may reduce its sizing footprint");
+  assert.match(refine, /if \(demand > 1\.0 \/ testedWidth\) \{ writeSplitLeaf\(origin, size\); \}/);
+  assert.doesNotMatch(refine, /topologyOut\[index\]/, "unchanged cells come from the bulk owner-map copy");
+
+  const smooth = quadtreeConstructionShader.slice(quadtreeConstructionShader.indexOf("fn smoothTopology"), quadtreeConstructionShader.indexOf("fn sampleLeafProfiles"));
+  assert.match(smooth, /if \(any\(q != origin\)\) \{ return; \}[\s\S]*neighborTooFine/, "only the leaf origin may scan its boundary");
+  assert.match(smooth, /writeSplitLeaf\(origin, size\)/);
+  assert.doesNotMatch(smooth, /topologyOut\[index\]/);
+
+  assert.match(WebGPUQuadtreeBuilder.prototype.encodeConstruction.toString(), /copyBufferToBuffer/, "each sparse topology kernel must start from a complete copied owner map");
 });
 
 test("resident phi uses bounded-MacCormack transport with per-step sub-cell redistance", () => {
@@ -131,6 +180,21 @@ test("resident phi uses bounded-MacCormack transport with per-step sub-cell redi
   assert.match(quadtreeConstructionShader, /columnProfiles\[profile \+ 2u\] = maximum/);
 });
 
+test("resident phi redistance is bounded to the consumed five-cell band", () => {
+  assert.deepEqual(quadtreeSurfaceJumpSequence(64, 32, 48), [4, 2, 1, 1], "large domains use capped JFA+1 instead of domain-scale jumps");
+  assert.deepEqual(quadtreeSurfaceJumpSequence(4, 3, 2), [4, 2, 1], "tiny domains retain the full schedule");
+  assert.ok(4 + 2 + 1 >= Math.ceil(5 + 0.87), "the capped schedule reaches every projected seed that can affect the 5h band");
+
+  const finalize = quadtreeSurfaceShader.slice(quadtreeSurfaceShader.indexOf("fn finalizeDistance"), quadtreeSurfaceShader.indexOf("fn cullDebris"));
+  assert.match(finalize, /distance = min\(5\.0 \* h, max\(2\.5 \* h, interfaceDistance\)\)/, "far-field magnitudes remain capped at 5h");
+  assert.match(finalize, /result = select\(distance, -distance, advected < 0\.0\)/, "far-field signs do not depend on a global seed");
+  assert.match(finalize, /if \(params\.control\.z <= 0\.5\) \{ accumulateVolume\(result, gid\); \}/, "default diagnostics are fused into finalization");
+
+  const encode = WebGPUQuadtreeSurfaceState.prototype.encode.toString();
+  assert.match(encode, /surfacePass[\s\S]*advectPredict[\s\S]*jumpFlood[\s\S]*finalizeDistance[\s\S]*surfacePass\.end/, "dependent surface stages share one ordered compute pass");
+  assert.match(encode, /if\s*\(this\.debrisCulling\)[\s\S]*reduceVolume/, "the post-cull path retains an exact reduction");
+});
+
 test("pressure iterations consume precomputed face masks, fluxes, and row activity", () => {
   assert.match(quadtreeTallCellProjectionShader, /fn refreshRows/);
   assert.match(quadtreeTallCellProjectionShader, /liquidMask \|= 1u << slot/);
@@ -164,6 +228,95 @@ test("WebGPU pressure path is variational PCG rather than Jacobi pressure smooth
   assert.match(quadtreeTallCellProjectionShader, /fn preconditionPolynomialStart/);
   for (const entry of ["applyStepPartial", "applyStepFinalize", "applyStepUpdate", "finishIterationPartial", "finishIterationFinalize", "finishIterationUpdate"]) assert.match(quadtreeTallCellProjectionShader, new RegExp(`fn ${entry}\\b`));
   assert.doesNotMatch(quadtreeTallCellProjectionShader, /atomic(Add|Max|Min)/);
+});
+
+test("geometric MG assembles Galerkin levels and applies a symmetric V-cycle", () => {
+  for (const entry of ["clearCoarseMatrix", "assembleGalerkin", "lineSmoothInitial", "restrictDefectGather", "solveCoarsest", "prolongateCorrection", "lineSmoothFinal"]) {
+    assert.match(quadtreeMultigridShader, new RegExp(`fn ${entry}\\b`));
+  }
+  assert.match(quadtreeMultigridShader, /entryParent\(entry\)/, "symbolic fine entries map directly into Galerkin coarse CSR");
+  assert.match(quadtreeMultigridShader, /sourceF\(RHS, row\) - sourceProduct\(row\)/, "restriction consumes the post-smoothing defect");
+  assert.match(quadtreeMultigridShader, /for \(var iteration = 0u; iteration < 8u/, "the coarse polynomial is fixed and therefore linear inside PCG");
+});
+
+test("parallel PCG fuses row-local setup and polynomial iteration stages", () => {
+  for (const entry of [
+    "initializeJacobiDirection",
+    "initializePolynomialStart",
+    "preconditionPolynomialUpdateDirection",
+    "applyStepUpdateJacobi",
+    "applyStepUpdatePolynomialStart",
+    "preconditionPolynomialUpdateFinishPartial",
+  ]) assert.match(quadtreeTallCellProjectionShader, new RegExp(`fn ${entry}\\b`));
+
+  const encode = WebGPUQuadtreeTallCellProjection.prototype.encode.toString();
+  assert.match(encode, /initializeJacobiDirection/);
+  assert.match(encode, /initializePolynomialStart/);
+  assert.match(encode, /applyStepUpdatePolynomialStart/);
+  assert.match(encode, /preconditionPolynomialUpdateFinishPartial/);
+
+  const fusedFinish = quadtreeTallCellProjectionShader.slice(
+    quadtreeTallCellProjectionShader.indexOf("fn preconditionPolynomialUpdateFinishPartial"),
+    quadtreeTallCellProjectionShader.indexOf("fn finishIterationFinalize"),
+  );
+  assert.match(fusedFinish, /addStateF\(row, PRECONDITIONED/);
+  assert.match(fusedFinish, /reducePartial\(lid\.x, rz, rr\)/, "the final polynomial update must feed the PCG reduction in the same dispatch");
+
+  assert.match(quadtreeTallCellProjectionShader, /fn finishIterationFinalize\b/);
+  assert.match(quadtreeTallCellProjectionShader, /publishNextDispatches\(keepSolving\)/, "the residual finalizer must publish the next iteration without another control dispatch");
+  assert.match(quadtreeDispatchShader, /scalars\[10\] = select\(0\.0, 1\.0, keepSolving\)/, "the initial control dispatch must seed the fused finalizer's active flag");
+  assert.match(encode, /first===0/);
+  assert.match(encode, /finishIterationFinalize/);
+  assert.match(encode, /finishIterationUpdate",124/, "the current iteration's direction update needs its independent indirect triple");
+});
+
+test("persistent PCG megakernel is barrier-uniform and isolated from ladder control state", () => {
+  const start = quadtreeTallCellProjectionShader.indexOf("fn megakernelPreconditionedProduct");
+  const end = quadtreeTallCellProjectionShader.indexOf("fn cellIndex", start);
+  assert.ok(start >= 0 && end > start, "the megakernel source region must be present");
+  const megakernel = quadtreeTallCellProjectionShader.slice(start, end);
+  assert.match(megakernel, /fn solveMegakernel\b/);
+  assert.match(megakernel, /@compute @workgroup_size\(256\)/);
+  assert.match(megakernel, /workgroupUniformLoad\(&megakernelConverged\)/, "barrier-containing loop exits must be workgroup-uniform");
+  assert.match(megakernel, /params\.couplingCounts\.z >> 1u/, "the hard iteration cap is uniform and independent of ladder feedback");
+  assert.doesNotMatch(megakernel, /dispatchArgs|controlWord|setControlWord|publishNextDispatches|factorColumns/, "the megakernel must not read or mutate ladder dispatch controls");
+  assert.match(quadtreeTallCellProjectionShader, /fn warmStartActive\(\) -> bool \{ return \(params\.couplingCounts\.z & 1u\) != 0u; \}/, "the packed hard cap must not accidentally enable warm start");
+
+  const encode = WebGPUQuadtreeTallCellProjection.prototype.encode.toString();
+  assert.match(encode, /megakernel=this\.megakernelEligible/);
+  assert.match(encode, /quadtreeMegakernelPreferred/, "runtime selection must include the measured workload gate");
+  assert.match(encode, /direct\("solveMegakernel",1\)/);
+});
+
+test("persistent PCG megakernel selection requires a converged low-work observation", () => {
+  assert.equal(quadtreeMegakernelPreferred(5_000, undefined), false, "the first solve establishes a ladder baseline");
+  assert.equal(quadtreeMegakernelPreferred(5_000, Number.NaN), false);
+  assert.equal(quadtreeMegakernelPreferred(5_000, -1), false);
+  assert.equal(quadtreeMegakernelPreferred(9_000, 3), true, "measured calm-scene work stays below the crossover");
+  assert.equal(quadtreeMegakernelPreferred(3_000, 14), false, "iteration-heavy small systems retain the parallel ladder");
+  assert.equal(quadtreeMegakernelPreferred(quadtreeMegakernelDofLimit + 1, 0), false);
+  assert.equal(quadtreeMegakernelPreferred(quadtreeMegakernelRowIterationLimit, 1), true);
+  assert.equal(quadtreeMegakernelPreferred(quadtreeMegakernelRowIterationLimit + 1, 1), false);
+  assert.equal(quadtreeMegakernelPreferred(10_000, 2, 4), false, "higher-degree polynomial work is charged proportionally");
+  assert.equal(quadtreeMegakernelPreferred(5_000, 1, 2, 4_096, 30_000), false, "the user DOF limit is honored");
+  assert.equal(quadtreeMegakernelPreferred(5_000, 2, 2, 32_768, 9_000), false, "the user work limit is honored");
+  assert.equal(quadtreeMegakernelPreferred(5_000, 2, 2, 32_768, 10_000), true);
+});
+
+test("quadtree advanced settings expose dynamic, forced, and disabled megakernel modes", () => {
+  const mode = quadtreeTallCellMethod.params.find((spec) => spec.key === "megakernelMode");
+  const dofLimit = quadtreeTallCellMethod.params.find((spec) => spec.key === "megakernelDofLimit");
+  const workLimit = quadtreeTallCellMethod.params.find((spec) => spec.key === "megakernelRowIterationLimit");
+  assert.equal(mode?.kind, "select");
+  assert.equal(mode?.tier, "fine");
+  if (mode?.kind === "select") assert.deepEqual(mode.options.map((option) => option.value), ["dynamic", "always", "off"]);
+  assert.equal(dofLimit?.kind, "number");
+  assert.equal(workLimit?.kind, "number");
+  const defaults = resolveMethodValues(quadtreeTallCellMethod, "balanced", {});
+  assert.equal(defaults.megakernelMode, "dynamic");
+  assert.equal(defaults.megakernelDofLimit, quadtreeMegakernelDofLimit);
+  assert.equal(defaults.megakernelRowIterationLimit, quadtreeMegakernelRowIterationLimit);
+  assert.equal(resolveMethodValues(quadtreeTallCellMethod, "balanced", { megakernelMode: "always", megakernelDofLimit: 8_192 }).megakernelMode, "always");
 });
 
 test("blockic packing partitions the DOFs and drops cross-block factor couplings", () => {
@@ -240,9 +393,11 @@ test("pressure command budgets follow convergence feedback without lowering the 
   assert.equal(initial.encodedBudget, 445);
   const converged = nextQuadtreeIterationBudget(initial, 200, true);
   assert.equal(converged.hardBudget, 445);
-  assert.ok(converged.encodedBudget < initial.encodedBudget);
+  assert.equal(converged.encodedBudget, 314, "converged solves retain 20% EMA headroom plus a small margin without encoding the old 50% tail");
   const capped = nextQuadtreeIterationBudget({ ...converged, encodedBudget: 128 }, 128, false);
   assert.equal(capped.encodedBudget, 256);
+  const thinLayer = quadtreeIterationBudget(12_322, { pressureIterations: 96, iterationConditioningScale: 8 });
+  assert.ok(thinLayer.hardBudget > initial.hardBudget, "a dmax/dmin=8 adaptive layer retains headroom for long vertical pressure modes despite its smaller DOF count");
 });
 
 test("cubic pressure projection conservatively prolongs the solved variational face correction", () => {
@@ -315,6 +470,86 @@ function writeScalarTexture(device: GPUDevice, values: Float32Array, nx: number,
   return texture;
 }
 
+function writeStorageBuffer(device: GPUDevice, data: ArrayBufferView, extraUsage = 0) {
+  const buffer = device.createBuffer({ size: Math.max(4, data.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | extraUsage });
+  device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+  return buffer;
+}
+
+async function gpuComputeExecutes(device: GPUDevice) {
+  const storage = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const readback = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const shaderModule = device.createShaderModule({ code: "@group(0) @binding(0) var<storage, read_write> value: array<u32>; @compute @workgroup_size(1) fn probe() { value[0] = 0x5a17u; }" });
+  const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint: "probe" } });
+  const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: storage } }] });
+  const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(1); pass.end();
+  encoder.copyBufferToBuffer(storage, 0, readback, 0, 4); device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ); const result = new Uint32Array(readback.getMappedRange())[0]; readback.unmap();
+  storage.destroy(); readback.destroy(); return result === 0x5a17;
+}
+
+test("persistent PCG megakernel solves a known SPD system and publishes diagnostics", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU solve checks" }, async (t) => {
+  await withSurfaceDevice(async (device) => {
+    if (!await gpuComputeExecutes(device)) { t.skip("Dawn adapter accepted pipelines but did not execute a trivial compute dispatch"); return; }
+    const shaderModule = device.createShaderModule({ label: "megakernel numerical contract", code: quadtreeTallCellProjectionShader });
+    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint: "solveMegakernel" } });
+    for (const degree of [1, 2]) {
+      device.pushErrorScope("validation");
+      const faces = new Uint32Array(28), faceFloats = new Float32Array(faces.buffer); faceFloats[24] = 1;
+      const rowOffsets = new Uint32Array([0, 1, 1]);
+      const rowEntries = new Uint32Array([0, new Uint32Array(new Float32Array([1]).buffer)[0]]);
+      const matrix = new Uint32Array(3 + 4 * 4); matrix.set([0, 2, 4]);
+      const coefficients = [2, -1, -1, 2], nodes = [0, 1, 0, 1];
+      for (let entry = 0; entry < 4; entry += 1) {
+        const base = 3 + 4 * entry; matrix[base] = nodes[entry];
+        matrix[base + 2] = new Uint32Array(new Float32Array([coefficients[entry]]).buffer)[0];
+      }
+      const stateWords = new Uint32Array(16); stateWords[14] = 1; stateWords[15] = 1;
+      const scalarWords = new Float32Array(32);
+      const params = new Uint32Array(48), paramsF = new Float32Array(params.buffer);
+      params[3] = 1; params.set([2, 1, 0, 0], 8); paramsF[12] = 1e-8;
+      params.set([0, 0, 8 << 1, 1], 20); params[27] = degree;
+
+      const faceBuffer = writeStorageBuffer(device, faces);
+      const rowOffsetBuffer = writeStorageBuffer(device, rowOffsets);
+      const rowEntryBuffer = writeStorageBuffer(device, rowEntries);
+      const matrixBuffer = writeStorageBuffer(device, matrix);
+      const stateBuffer = writeStorageBuffer(device, stateWords, GPUBufferUsage.COPY_SRC);
+      const scalarBuffer = writeStorageBuffer(device, scalarWords, GPUBufferUsage.COPY_SRC);
+      const paramsBuffer = device.createBuffer({ size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      device.queue.writeBuffer(paramsBuffer, 0, params);
+      const factorAux = device.createTexture({ size: [1, 1], format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING });
+      const mappedPressure = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING });
+      const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+        { binding: 3, resource: { buffer: faceBuffer } }, { binding: 4, resource: { buffer: rowOffsetBuffer } },
+        { binding: 5, resource: { buffer: rowEntryBuffer } }, { binding: 6, resource: { buffer: matrixBuffer } },
+        { binding: 8, resource: { buffer: stateBuffer } }, { binding: 9, resource: { buffer: scalarBuffer } },
+        { binding: 12, resource: { buffer: paramsBuffer } }, { binding: 13, resource: factorAux.createView() },
+        { binding: 17, resource: mappedPressure.createView() }
+      ] });
+      const readback = device.createBuffer({ size: 16 * 4 + 12 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(1); pass.end();
+      encoder.copyBufferToBuffer(stateBuffer, 0, readback, 0, 16 * 4);
+      encoder.copyBufferToBuffer(scalarBuffer, 0, readback, 16 * 4, 12 * 4);
+      device.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ);
+      const state = new Float32Array(readback.getMappedRange(0, 16 * 4));
+      const scalars = new Float32Array(readback.getMappedRange(16 * 4, 12 * 4));
+      const validation = await device.popErrorScope();
+      assert.equal(validation, null, `degree-${degree} dispatch validation error: ${validation?.message}`);
+      assert.ok(Math.abs(state[2] - 2 / 3) < 2e-5 && Math.abs(state[3] - 1 / 3) < 2e-5, `degree-${degree} best iterate was [${state[2]}, ${state[3]}], pressure [${state[0]}, ${state[1]}], scalars ${Array.from(scalars).join(",")}`);
+      assert.equal(scalars[3], 1, "|b|^2 telemetry remains relative to the original RHS");
+      assert.ok(Math.sqrt(scalars[7] / scalars[3]) <= 1e-4, `degree-${degree} relative residual ${Math.sqrt(scalars[7] / scalars[3])}`);
+      assert.ok(scalars[9] >= 1 && scalars[9] <= 2, `degree-${degree} iteration count ${scalars[9]}`);
+      assert.ok(Number.isFinite(scalars[4]) && Number.isFinite(scalars[6]), "alpha/beta telemetry is finite");
+      readback.unmap();
+      for (const resource of [faceBuffer, rowOffsetBuffer, rowEntryBuffer, matrixBuffer, stateBuffer, scalarBuffer, paramsBuffer, readback]) resource.destroy();
+      factorAux.destroy(); mappedPressure.destroy();
+    }
+  });
+});
+
 test("GPU count-scan-emit rebuild reproduces the CPU topology and face graph", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU pack checks" }, async () => {
   await withSurfaceDevice(async (device) => {
     const nx = 12, ny = 9, nz = 10, h = { x: 0.25, y: 0.2, z: 0.25 };
@@ -382,6 +617,51 @@ test("GPU count-scan-emit rebuild reproduces the CPU topology and face graph", {
     for (const buffer of [resident.resident.faces, resident.resident.rowOffsets, resident.resident.rowEntries, resident.resident.matrixBuffer, resident.resident.factorColumns, resident.resident.factorEntries]) buffer.destroy();
     for (const resource of [resident.resident.factorAux, resident.resident.cellProjection, resident.resident.cellTopology, resident.resident.cellPressureSamples]) resource.destroy();
     builder.destroy(); texture.destroy();
+  });
+});
+
+test("GPU sparse packing consumes the same adaptive optical columns as the CPU oracle", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU pack checks" }, async () => {
+  await withSurfaceDevice(async (device) => {
+    const nx = 8, ny = 32, nz = 6, h = { x: 0.25, y: 0.25, z: 0.25 };
+    const phi = Float32Array.from({ length: nx * ny * nz }, (_, index) => (Math.floor(index / nx) % ny - 15.5) * h.y);
+    const velocity = Array.from({ length: phi.length }, (_, index) => {
+      const y = Math.floor(index / nx) % ny, x = index % nx;
+      return { x: x === 3 ? (y % 2 === 0 ? 8 : -8) : 0, y: 0, z: 0 };
+    });
+    const sizing = new Float32Array(nx * nz).fill(100), quadtree = buildQuadtree(sizing, nx, nz, { h: h.x, maximumLeafSize: 2, adaptivityStrength: 1 });
+    const packedCells = new Uint32Array(nx * nz);
+    for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) { const leaf = quadtree.leaves[quadtree.leafAt[x + nx * z]]; packedCells[x + nx * z] = leaf.x | (leaf.z << 10) | (leaf.size << 20); }
+    const optical = buildAdaptiveOpticalLayerField(phi, velocity, nx, ny, nz, h), grid = populateTallPressureGrid(quadtree, phi, ny, h, 1, 0.25, undefined, optical);
+    const reference = WebGPUQuadtreeTallCellProjection.packUncoupledGrid(grid, nx, ny, nz);
+    const opticalData = new Uint32Array(optical.columns.length);
+    opticalData.set(optical.columns);
+    const opticalBuffer = device.createBuffer({ label: "adaptive optical test columns", size: opticalData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(opticalBuffer, 0, opticalData);
+    const texture = writeScalarTexture(device, phi, nx, ny, nz), builder = new WebGPUQuadtreePackBuilder(device, { nx, ny, nz }, h, 0.25, "adaptive-motion");
+    const gpu = await builder.build(packedCells, texture, { dofCount: reference.dofCount, faceCount: reference.faceCount, pressureSampleCount: grid.samples.length }, false, opticalBuffer);
+    assert.ok(gpu);
+    assert.deepEqual({ samples: gpu.pressureSampleCount, dofs: gpu.dofCount, faces: gpu.faceCount, tall: gpu.tallSegmentCount }, { samples: grid.samples.length, dofs: reference.dofCount, faces: reference.faceCount, tall: reference.tallSegmentCount });
+    assert.deepEqual(Array.from(gpu.packed.cellTopology), Array.from(reference.packed.cellTopology), "adaptive CPU/GPU segmentation bounds must match exactly");
+    builder.destroy(); texture.destroy(); opticalBuffer.destroy();
+  });
+});
+
+test("GPU motion-error construction matches the adaptive optical CPU oracle", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU optical-layer checks" }, async () => {
+  await withSurfaceDevice(async (device) => {
+    const nx = 8, ny = 32, nz = 6, h = { x: 0.25, y: 0.25, z: 0.25 };
+    const phi = Float32Array.from({ length: nx * ny * nz }, (_, index) => (Math.floor(index / nx) % ny - 15.5) * h.y);
+    const velocityValues = Array.from({ length: phi.length }, (_, index) => {
+      const y = Math.floor(index / nx) % ny, x = index % nx;
+      return { x: x === 3 ? (y % 2 === 0 ? 8 : -8) : 0, y: 0, z: 0 };
+    });
+    const expected = buildAdaptiveOpticalLayerField(phi, velocityValues, nx, ny, nz, h).columns;
+    const levelSet = writeScalarTexture(device, phi, nx, ny, nz);
+    const velocity = writeVelocityTexture(device, nx, ny, nz, (x, y, z) => { const value = velocityValues[x + nx * (y + ny * z)]; return [value.x, value.y, value.z]; });
+    const diagnostics = device.createBuffer({ size: 48, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const builder = new WebGPUQuadtreeBuilder(device, { nx, ny, nz }, h, 2, 1, 1, undefined, 1, "adaptive-motion", 0.5);
+    const built = await builder.build({ velocity, levelSet, explicitSizing: new Float32Array(nx * nz).fill(100), diagnosticBuffer: diagnostics, diagnosticBytes: 48, readLeafProfiles: false });
+    assert.deepEqual(Array.from(built.opticalColumns), Array.from(expected));
+    WebGPUQuadtreeBuilder.destroyCache(builder.cache); diagnostics.destroy(); velocity.destroy(); levelSet.destroy();
   });
 });
 

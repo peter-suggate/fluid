@@ -28,7 +28,11 @@ export function VisualPanel() {
   const setGridOverlayMode = useUIStore((state) => state.setGridOverlayMode);
   const setRightPanel = useUIStore((state) => state.setRightPanel);
   const gridKind = getMethod(methodId).backend === "cpu" ? "uniform" : gpuInfo?.gridKind ?? "uniform";
-  const tall = gridKind !== "uniform";
+  const tall = gridKind === "restricted-tall-cell";
+  const adaptive = gridKind === "quadtree-tall-cell" || gridKind === "octree";
+  const quadtreeTall = gridKind === "quadtree-tall-cell";
+  const octree = gridKind === "octree";
+  const motionAdaptiveOptical = gpuInfo?.quadtreeOpticalLayerMode === "adaptive-motion";
   // Environments are art direction, but some carry a matching physical scene:
   // picking the garden brings its terrain pond along unless the current
   // preset already belongs to that world.
@@ -106,6 +110,7 @@ export function VisualPanel() {
           <button className={gridOverlayAxis === "off" ? "active" : ""} onClick={() => setGridOverlayAxis("off")}>Off</button>
           <button className={gridOverlayAxis === "z" ? "active" : ""} onClick={() => setGridOverlayAxis("z")}>Z slice</button>
           <button className={gridOverlayAxis === "x" ? "active" : ""} onClick={() => setGridOverlayAxis("x")}>X slice</button>
+          <button className={gridOverlayAxis === "y" ? "active" : ""} onClick={() => setGridOverlayAxis("y")}>Y slice</button>
         </div>
         {gridOverlayAxis !== "off" && <label className="slice-control">
           <span><span>Slice position</span><output>{Math.round(gridOverlaySlice * 100)}%</output></span>
@@ -113,19 +118,21 @@ export function VisualPanel() {
         </label>}
         {gridOverlayAxis !== "off" && <div className="segmented compact" role="group" aria-label="Slice field">
           <button className={gridOverlayMode === "structure" ? "active" : ""} onClick={() => setGridOverlayMode("structure")}>Structure</button>
+          {quadtreeTall && <button className={gridOverlayMode === "optical" ? "active" : ""} onClick={() => setGridOverlayMode("optical")}>Optical layer</button>}
           <button className={gridOverlayMode === "cfl" ? "active" : ""} onClick={() => setGridOverlayMode("cfl")}>CFL load</button>
           <button className={gridOverlayMode === "speed" ? "active" : ""} onClick={() => setGridOverlayMode("speed")}>Speed</button>
           <button className={gridOverlayMode === "representation" ? "active" : ""} onClick={() => setGridOverlayMode("representation")}>Coverage</button>
           <button className={gridOverlayMode === "phi" ? "active" : ""} onClick={() => setGridOverlayMode("phi")}>φ</button>
           <button className={gridOverlayMode === "divergence" ? "active" : ""} onClick={() => setGridOverlayMode("divergence")}>Divergence</button>
           <button className={gridOverlayMode === "pressure" ? "active" : ""} onClick={() => setGridOverlayMode("pressure")}>Pressure</button>
+          {octree && <button className={gridOverlayMode === "projection" ? "active" : ""} onClick={() => setGridOverlayMode("projection")}>Projection Δu</button>}
         </div>}
         <small className="control-hint">The slice remains an independent layer, so it can be combined with either optical renderer.</small>
       </> : <p className="panel-note">Switch to Scientific view to configure debug layers.</p>}
     </section>
 
     {view === "scientific" && gridOverlayAxis !== "off" && <section className="panel-section grid-key" data-testid="grid-legend">
-      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : "UNIFORM GRID"} · {gridOverlayAxis.toUpperCase()} SLICE{gridOverlayMode !== "structure" ? ` · ${{ cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: "MAPPED PRESSURE" }[gridOverlayMode]}` : ""}</strong>
+      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {gridOverlayAxis.toUpperCase()} SLICE{gridOverlayMode !== "structure" ? ` · ${{ optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU" }[gridOverlayMode]}` : ""}</strong>
       {gridOverlayMode === "structure" && <>
         {tall && <span><i className="sw sw-tall" />tall cell · liquid</span>}
         {tall && <span><i className="sw sw-tall-dry" />tall cell · air</span>}
@@ -133,8 +140,16 @@ export function VisualPanel() {
         <span><i className="sw sw-wet" />{tall ? "regular cell · liquid" : "cell · liquid"}</span>
         <span><i className="sw sw-air" />{tall ? "regular cell · air" : "cell · air"}</span>
         {gridKind === "restricted-tall-cell" && <span><i className="sw sw-outside" />above band · not stored</span>}
-        {gridKind !== "quadtree-tall-cell" && <span><i className="sw sw-dot" />stored samples (zoom in)</span>}
-        {gridKind === "quadtree-tall-cell" && <span>edges follow live adaptive pressure cells</span>}
+        {!adaptive && <span><i className="sw sw-dot" />stored samples (zoom in)</span>}
+        {adaptive && <span>edges follow live adaptive pressure cells</span>}
+      </>}
+      {gridOverlayMode === "optical" && <>
+        <span><i className="sw" style={{ background: "#f4c33a" }} />retained cubic optical cells · liquid</span>
+        <span><i className="sw" style={{ background: "#66cdda" }} />retained cubic optical cells · air</span>
+        <span><i className="sw" style={{ background: "#263b58" }} />merged tall-cell interior</span>
+        <span><i className="sw" style={{ background: motionAdaptiveOptical ? "#ff3ca6" : "#ededfa" }} />{motionAdaptiveOptical ? "motion-adaptive" : "fixed"} lower boundary</span>
+        <span>showing the post-quadtree layer consumed by the pressure solver · {motionAdaptiveOptical ? "motion-adaptive" : "fixed quarter-depth"}</span>
+        {motionAdaptiveOptical && <span>α {(gpuInfo?.quadtreeOpticalAlpha ?? 0.5).toFixed(2)} · requested depth {gpuInfo?.quadtreeOpticalMinimumCells ?? "–"}–{gpuInfo?.quadtreeOpticalMaximumCells ?? "–"} cells</span>}
       </>}
       {gridOverlayMode === "cfl" && <>
         <span><i className="sw" style={{ background: "#213a8c" }} />CFL ≈ 0 · idle</span>
@@ -160,14 +175,18 @@ export function VisualPanel() {
         <span>color saturates at |∇·u| Δt = 1</span>
       </>}
       {gridOverlayMode === "pressure" && <>
-        <span><i className="sw" style={{ background: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)" }} />latest fine MLS pressure</span>
+        <span><i className="sw" style={{ background: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)" }} />{octree ? "affine pressure reconstructed from leaf DOFs" : "latest fine MLS pressure"}</span>
+      </>}
+      {gridOverlayMode === "projection" && <>
+        <span><i className="sw" style={{ background: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)" }} />|u after − u before| · normalized by live max speed</span>
+        <span>dark coarse-leaf interiors reveal pressure modes that do not reach the dense transport field</span>
       </>}
       {gridKind === "quadtree-tall-cell" && <>
         <span>culled debris {gpuInfo?.quadtreeCulledDebrisCells ?? 0} · CFL clamps {gpuInfo?.quadtreeVelocityClampCount ?? 0} · pressure iterations {gpuInfo?.quadtreePressureIterationsUsed ?? 0}</span>
         <span>topology stale {gpuInfo?.quadtreeTopologyStaleSteps ?? 0}/{gpuInfo?.quadtreeTopologyStaleLimit ?? 0} steps · blocked frames {gpuInfo?.quadtreeRebuildBlockedFrames ?? 0}</span>
         <span>VOF recovery {gpuInfo?.quadtreeVofReconciliationActive ? "ARMED" : "idle"}</span>
       </>}
-      <small>Drag the bright top edge in the viewport to sweep the slice.{gridOverlayMode !== "structure" ? " Field modes sample live GPU textures — no readback." : ""}</small>
+      <small>Drag the highlighted slice edge in the viewport to sweep the plane.{gridOverlayMode !== "structure" ? " Field modes sample live GPU textures — no readback." : ""}</small>
     </section>}
   </aside>;
 }

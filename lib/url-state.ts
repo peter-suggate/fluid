@@ -196,9 +196,9 @@ export function parseQueryState(search: string): QueryState {
       sceneModalOpen: query.get("sceneConfig") === "1",
       diagnosticsOpen: rightPanel === "diagnostics",
       rightPanel,
-      gridOverlayAxis: grid === "off" || grid === "x" || grid === "z" ? grid : initialUI.gridOverlayAxis,
+      gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" ? grid : initialUI.gridOverlayAxis,
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
-      gridOverlayMode: gridMode === "structure" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
+      gridOverlayMode: gridMode === "structure" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
       waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode,
       // The scene preset carries its own art direction (a garden pond loads
       // the garden); an explicit environment parameter still wins.

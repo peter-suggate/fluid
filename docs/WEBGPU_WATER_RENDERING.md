@@ -46,6 +46,15 @@ and as the automatic fallback if an adapter cannot create the raster pipeline.
    is composited last with its own Fresnel and edge highlights so it correctly
    remains in front of water and submerged objects.
 
+   Rigid-body contacts use a hybrid resolver. The raster interfaces remain the
+   fast global representation, but pixels whose analytic rigid depth is within
+   1.5 finest cells of the raster front re-intersect the resident trilinear
+   liquid field with four bounded Newton updates. Exact primitive depth then
+   decides whether water or solid owns the pixel. After refraction, an analytic
+   rigid hit that precedes the back interface terminates the water thickness as
+   an opaque solid contact; it is not treated as a water-air exit. Pixels away
+   from bodies perform no volume samples beyond the ordinary raster composite.
+
 Fullscreen shader UVs have Y=1 at the top of a render target, while texture
 sampling uses Y=0 there. The composite converts that coordinate for every
 intermediate read and world-space projection. The shared final upscaler retains

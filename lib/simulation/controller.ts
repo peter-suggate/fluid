@@ -100,9 +100,10 @@ class SimulationController {
     const methodId = useMethodStore.getState().methodId;
     this.accumulator += elapsed;
     const dt = scene.numerics.fixedDt_s;
-    // Restricted tall cells use a frame-sized partitioned-coupling batch: all
-    // GPU impulses are accumulated over the batch and consumed over the next
-    // fixed rigid substeps. Other coupled methods retain a one-step handshake.
+    // Tall-cell and octree methods use a frame-sized partitioned-coupling
+    // batch: GPU impulses are accumulated over the batch and consumed over the
+    // next fixed rigid substeps. This trades one frame of coupling coherence
+    // for enough independent GPU work to avoid a per-step CPU/GPU handshake.
     const targetFps = useUIStore.getState().targetFps;
     const batchDepth = backend === "webgpu" ? gpuBatchDepth(methodId, dt, this.bodies.length > 0, targetFps) : 1;
     const inFlightStepLimit = backend === "webgpu" ? gpuInFlightStepLimit(methodId, dt, this.bodies.length > 0, targetFps) : 1;
@@ -395,6 +396,8 @@ class SimulationController {
       gpuRemeshing_ms: sane(gpu?.remeshing_ms, physicsFallback.gpuRemeshing_ms),
       gpuPressure_ms: sane(gpu?.pressure_ms, physicsFallback.gpuPressure_ms),
       gpuProjection_ms: sane(gpu?.projection_ms, physicsFallback.gpuProjection_ms),
+      gpuExtrapolation_ms: sane(gpu?.extrapolation_ms, physicsFallback.gpuExtrapolation_ms),
+      gpuMaterialization_ms: sane(gpu?.materialization_ms, physicsFallback.gpuMaterialization_ms),
       gpuSurfaceUpdate_ms: sane(gpu?.surfaceUpdate_ms, physicsFallback.gpuSurfaceUpdate_ms),
       gpuRigid_ms: sane(gpu?.rigidCoupling_ms, physicsFallback.gpuRigid_ms),
       gpuDiagnostics_ms: sane(gpu?.diagnostics_ms, physicsFallback.gpuDiagnostics_ms),

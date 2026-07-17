@@ -16,6 +16,18 @@ export function shouldUpdateWaterSurface(extractedRevision: number, latestRevisi
     || (latestRevision !== extractedRevision && now_ms - lastExtractionAt_ms + 0.5 >= frameInterval_ms(targetFps));
 }
 
+/** Raster/body depth separation that activates the local implicit resolver. */
+export const CONTACT_RESOLVE_BAND_CELLS = 1.5;
+
+/** CPU mirror of the shader gate, kept explicit for regression tests. */
+export function shouldResolveRigidContact(frontDepth: number, rigidDepth: number, cellSize: number, bodyCount: number) {
+  return bodyCount > 0
+    && Number.isFinite(frontDepth)
+    && Number.isFinite(rigidDepth)
+    && rigidDepth < 1e19
+    && Math.abs(rigidDepth - frontDepth) <= CONTACT_RESOLVE_BAND_CELLS * Math.max(cellSize, 0);
+}
+
 export interface SurfaceExtractionDispatchPlan {
   mode: "full-volume" | "restricted-band";
   full?: [number, number, number];
@@ -518,6 +530,7 @@ fn nearestBody(ro:vec3f,rd:vec3f)->Hit{var best=Hit(1e20,vec3f(0,1,0),vec3f(.7),
 
 export const compositeShader = /* wgsl */ `
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
+struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(0) @binding(1) var sceneTexture:texture_2d<f32>;
 @group(0) @binding(2) var frontPosition:texture_2d<f32>;
@@ -525,12 +538,71 @@ struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, cont
 @group(0) @binding(4) var backPosition:texture_2d<f32>;
 @group(0) @binding(5) var backNormal:texture_2d<f32>;
 @group(0) @binding(6) var linearSampler:sampler;
+@group(0) @binding(7) var<storage,read> bodies:array<BodyGPU,12>;
+@group(0) @binding(8) var liquidField:texture_3d<f32>;
+@group(0) @binding(9) var tallCellBases:texture_2d<f32>;
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
 fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let r=normalize(cross(f,vec3f(0,1,0)));let up=normalize(cross(r,f));let q=world-u.cameraPosition.xyz;let d=max(dot(q,f),1e-4);let ndc=vec2f(dot(q,r)/(d*u.viewport.x/max(u.viewport.y,1.0)*.72),dot(q,up)/(d*.72));return vec2f(ndc.x*.5+.5,.5-ndc.y*.5);}
 fn safeSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{return textureSampleLevel(texture,linearSampler,clamp(uv,vec2f(.001),vec2f(.999)),0);}
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let near3=min(a,b);let far3=max(a,b);return vec2f(max(max(near3.x,near3.y),near3.z),min(min(far3.x,far3.y),far3.z));}
 ${environmentShaderLibrary}
+fn qrot(q:vec4f,v:vec3f)->vec3f{let a=cross(q.yzw,v);return v+2.0*(q.x*a+cross(q.yzw,a));}
+fn qinv(q:vec4f,v:vec3f)->vec3f{return qrot(vec4f(q.x,-q.yzw),v);}
+struct RigidHit { t:f32, n:vec3f }
+fn sphereRigidHit(ro:vec3f,rd:vec3f,center:vec3f,radius:f32)->RigidHit{
+  let oc=ro-center;let b=dot(oc,rd);let discriminant=b*b-dot(oc,oc)+radius*radius;
+  if(discriminant<0.0){return RigidHit(1e20,vec3f(0,1,0));}
+  let root=sqrt(discriminant);var t=-b-root;if(t<=1e-4){t=-b+root;}
+  if(t<=1e-4){return RigidHit(1e20,vec3f(0,1,0));}
+  return RigidHit(t,normalize(ro+rd*t-center));
+}
+fn cylinderRigidHit(ro:vec3f,rd:vec3f,radius:f32,halfHeight:f32,capped:bool)->RigidHit{
+  var best=RigidHit(1e20,vec3f(0,1,0));let a=dot(rd.xz,rd.xz);
+  if(a>1e-8){let b=dot(ro.xz,rd.xz);let c=dot(ro.xz,ro.xz)-radius*radius;let discriminant=b*b-a*c;
+    if(discriminant>=0.0){let root=sqrt(discriminant);var t=(-b-root)/a;if(t<=1e-4){t=(-b+root)/a;}let y=ro.y+rd.y*t;
+      if(t>1e-4&&abs(y)<=halfHeight){let p=ro+rd*t;best=RigidHit(t,normalize(vec3f(p.x,0,p.z)));}}}
+  if(capped&&abs(rd.y)>1e-8){for(var side=-1.0;side<=1.0;side+=2.0){let t=(side*halfHeight-ro.y)/rd.y;let p=ro+rd*t;
+    if(t>1e-4&&t<best.t&&dot(p.xz,p.xz)<=radius*radius){best=RigidHit(t,vec3f(0,side,0));}}}
+  return best;
+}
+fn bodyRigidHit(ro:vec3f,rd:vec3f,body:BodyGPU)->RigidHit{
+  let o=qinv(body.orientation,ro-body.positionRadius.xyz);let d=qinv(body.orientation,rd);let shape=i32(round(body.halfSizeShape.w));var hit=RigidHit(1e20,vec3f(0,1,0));
+  if(shape==0){hit=sphereRigidHit(o,d,vec3f(0),body.halfSizeShape.x);}
+  else if(shape==1){let interval=boxHit(o,d,-body.halfSizeShape.xyz,body.halfSizeShape.xyz);var t=interval.x;if(t<=1e-4){t=interval.y;}
+    if(t>1e-4&&interval.x<=interval.y){let p=o+d*t;let q=abs(p/max(body.halfSizeShape.xyz,vec3f(1e-5)));var n=vec3f(0,0,sign(p.z));
+      if(q.x>=q.y&&q.x>=q.z){n=vec3f(sign(p.x),0,0);}else if(q.y>=q.z){n=vec3f(0,sign(p.y),0);}hit=RigidHit(t,n);}}
+  else if(shape==2){hit=cylinderRigidHit(o,d,body.halfSizeShape.x,body.halfSizeShape.y,false);let upper=sphereRigidHit(o,d,vec3f(0,body.halfSizeShape.y,0),body.halfSizeShape.x);let lower=sphereRigidHit(o,d,vec3f(0,-body.halfSizeShape.y,0),body.halfSizeShape.x);if(upper.t<hit.t){hit=upper;}if(lower.t<hit.t){hit=lower;}}
+  else{hit=cylinderRigidHit(o,d,body.halfSizeShape.x,body.halfSizeShape.y,true);}
+  return RigidHit(hit.t,normalize(qrot(body.orientation,hit.n)));
+}
+fn nearestRigid(ro:vec3f,rd:vec3f)->RigidHit{var best=RigidHit(1e20,vec3f(0,1,0));for(var i=0u;i<12u;i+=1u){if(i>=u32(round(u.options.z))){break;}let hit=bodyRigidHit(ro,rd,bodies[i]);if(hit.t<best.t){best=hit;}}return best;}
+
+// The raster mesh is the fast global solution. Only pixels whose analytic
+// rigid depth lies in this narrow band evaluate the resident implicit field.
+fn contactOccupancyFromPhi(phi:f32)->f32{let band=4.0*u.container.y/max(u.gridInfo.y,1.0);return clamp(0.5-phi/band,0.0,1.0);}
+fn contactFieldCell(cell:vec3i)->f32{
+  let dims=vec3i(u.gridInfo.xyz);if(any(cell<vec3i(0))||any(cell>=dims)){return 0.0;}let mode=u.gridInfo.w;
+  if(mode<1.5){return textureLoad(liquidField,cell,0).x;}if(mode>2.5){return contactOccupancyFromPhi(textureLoad(liquidField,cell,0).x);}
+  let base=i32(round(textureLoad(tallCellBases,cell.xz,0).x));
+  if(cell.y<base&&base>0){let t=clamp(f32(cell.y)/f32(max(base-1,1)),0.0,1.0);return contactOccupancyFromPhi(mix(textureLoad(liquidField,vec3i(cell.x,0,cell.z),0).x,textureLoad(liquidField,vec3i(cell.x,1,cell.z),0).x,t));}
+  let packedY=2+cell.y-base;let stored=vec3i(textureDimensions(liquidField));if(packedY<2||packedY>=stored.y){return 0.0;}return contactOccupancyFromPhi(textureLoad(liquidField,vec3i(cell.x,packedY,cell.z),0).x);
+}
+fn contactFluidValue(world:vec3f)->f32{
+  let dims=vec3i(u.gridInfo.xyz);let boundsMin=vec3f(-0.5*u.container.x,0,-0.5*u.container.z);let uvw=clamp((world-boundsMin)/u.container.xyz,vec3f(0),vec3f(1));
+  let q=clamp(uvw*vec3f(dims)-vec3f(0.5),vec3f(0),vec3f(dims-vec3i(1)));let base=vec3i(floor(q));let f=fract(q);
+  let c000=contactFieldCell(base);let c100=contactFieldCell(base+vec3i(1,0,0));let c010=contactFieldCell(base+vec3i(0,1,0));let c110=contactFieldCell(base+vec3i(1,1,0));
+  let c001=contactFieldCell(base+vec3i(0,0,1));let c101=contactFieldCell(base+vec3i(1,0,1));let c011=contactFieldCell(base+vec3i(0,1,1));let c111=contactFieldCell(base+vec3i(1,1,1));
+  return mix(mix(mix(c000,c100,f.x),mix(c010,c110,f.x),f.y),mix(mix(c001,c101,f.x),mix(c011,c111,f.x),f.y),f.z);
+}
+struct ContactSurface { point:vec3f, normal:vec3f, valid:bool }
+fn refineContactSurface(ro:vec3f,rd:vec3f,rasterT:f32,cellSize:f32)->ContactSurface{
+  let radius=1.35*cellSize;let lo=max(1e-4,rasterT-radius);let hi=rasterT+radius;var t=rasterT;let initialError=abs(contactFluidValue(ro+rd*t)-0.5);
+  let epsilon=max(2e-4,0.18*cellSize);
+  for(var iteration=0;iteration<4;iteration+=1){let point=ro+rd*t;let value=contactFluidValue(point)-0.5;let derivative=(contactFluidValue(point+rd*epsilon)-contactFluidValue(point-rd*epsilon))/(2.0*epsilon);if(abs(derivative)<1e-5){break;}t=clamp(t-value/derivative,lo,hi);}
+  let point=ro+rd*t;let e=max(3e-4,0.3*cellSize);let gradient=vec3f(contactFluidValue(point+vec3f(e,0,0))-contactFluidValue(point-vec3f(e,0,0)),contactFluidValue(point+vec3f(0,e,0))-contactFluidValue(point-vec3f(0,e,0)),contactFluidValue(point+vec3f(0,0,e))-contactFluidValue(point-vec3f(0,0,e)))/(2.0*e);
+  let normal=select(-rd,-normalize(gradient),length(gradient)>1e-5);return ContactSurface(point,normal,initialError<0.42&&abs(contactFluidValue(point)-0.5)<0.12);
+}
 fn boxNormal(point:vec3f,center:vec3f,halfSize:vec3f)->vec3f{
   let q=abs((point-center)/max(halfSize,vec3f(1e-5)));
   if(q.x>=q.y&&q.x>=q.z){return vec3f(sign(point.x-center.x),0,0);}
@@ -563,23 +635,27 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{var c=environmentForeground(color,ndc)*(
   // performs the same conversion for the final target; all raster-path
   // intermediate reads and world projections must do it here as well.
   let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*.72+up*ndc.y*.72);
-  let scene=safeSample(sceneTexture,textureUV);let front=safeSample(frontPosition,textureUV);if(front.a<.5){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}let frontDepth=dot(front.xyz-ro,rd);
+  let scene=safeSample(sceneTexture,textureUV);var front=safeSample(frontPosition,textureUV);if(front.a<.5){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}var frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
+  var n=normalize(safeSample(frontNormal,textureUV).xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
+  if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}}
   if(scene.a+depthEpsilon<frontDepth){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}
-  var n=normalize(safeSample(frontNormal,textureUV).xyz);if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/1.333;var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
+  if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/1.333;var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
   var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
   for(var iteration=0;iteration<3;iteration+=1){back=safeSample(backPosition,exitUV);if(back.a<.5){break;}let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(safeSample(backNormal,exitUV).xyz);}
   let refinedBack=safeSample(backPosition,exitUV);if(refinedBack.a>.5){back=refinedBack;exitN=normalize(safeSample(backNormal,exitUV).xyz);}
-  var exitPoint=back.xyz;var thickness=length(exitPoint-front.xyz);if(back.a<.5||thickness<1e-4){
+  var exitPoint=back.xyz;var thickness=length(exitPoint-front.xyz);let meshExitValid=back.a>=.5&&thickness>=1e-4;let innerStep=max(.0005,cellSize*.08);let innerOrigin=front.xyz+inside*innerStep;let rigidExit=nearestRigid(innerOrigin,inside);var opaqueSolidExit=false;
+  if(rigidExit.t<1e19&&(!meshExitValid||rigidExit.t+innerStep<thickness)){opaqueSolidExit=true;exitPoint=innerOrigin+inside*rigidExit.t;thickness=length(exitPoint-front.xyz);}
+  else if(!meshExitValid){
     // Solid contacts are not extracted as fake water-air sheets. When the
     // refracted ray reaches the floor (or a mesh exit is temporarily missing),
     // terminate it analytically at the tank boundary instead.
-    let boundsMin=vec3f(-u.container.x*.5,0,-u.container.z*.5);let boundsMax=vec3f(u.container.x*.5,u.container.y,u.container.z*.5);
-    let innerOrigin=front.xyz+inside*max(.0005,cellSize*.08);let tankExit=boxHit(innerOrigin,inside,boundsMin,boundsMax);let travel=max(.002,tankExit.y);
+    let boundsMin=vec3f(-u.container.x*.5,0,-u.container.z*.5);let boundsMax=vec3f(u.container.x*.5,u.container.y,u.container.z*.5);let tankExit=boxHit(innerOrigin,inside,boundsMin,boundsMax);let travel=max(.002,tankExit.y);
     thickness=length(innerOrigin-front.xyz)+travel;exitPoint=innerOrigin+inside*travel;exitN=boxNormal(exitPoint,(boundsMin+boundsMax)*.5,u.container.xyz*.5);
   }
-  if(dot(exitN,inside)<0.0){exitN=-exitN;}var outgoing=refract(inside,-exitN,1.333);let tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}
-  let backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));let transmittedScene=safeSample(sceneTexture,backgroundUV).rgb;
+  var outgoing=inside;var tir=false;var backgroundUV=project(exitPoint);
+  if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,1.333);tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
+  let transmittedScene=safeSample(sceneTexture,backgroundUV).rgb;
   // Clean water: red is attenuated first.  A small in-scattering term keeps
   // thick regions luminous instead of turning into opaque ink.
   let absorption=vec3f(.45,.09,.06);let transmission=exp(-absorption*thickness);let scatter=vec3f(.012,.055,.049)*(vec3f(1.0)-transmission);
@@ -692,7 +768,10 @@ export class RasterWaterPipeline {
     this.compositeLayout = this.device.createBindGroupLayout({ label: "Water composite bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       ...[1,2,3,4,5].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" as const } })),
-      { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } }
+      { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
+      { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
+      { binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+      { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
     ] });
     const extractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.extractLayout] });
     const total=11;let completed=0;
@@ -766,8 +845,8 @@ export class RasterWaterPipeline {
     ] });
     if (this.surfaceLayout && this.vertexBuffer) this.surfaceBindGroup = this.device.createBindGroup({ layout: this.surfaceLayout, entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.vertexBuffer } }] });
     if (this.sceneLayout && this.causticTexture && this.sampler) this.sceneBindGroup = this.device.createBindGroup({ layout: this.sceneLayout, entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.bodyBuffer } }, { binding: 2, resource: this.causticTexture.createView() }, { binding: 3, resource: this.sampler }] });
-    if (this.compositeLayout && this.sceneTexture && this.frontPosition && this.frontNormal && this.backPosition && this.backNormal && this.sampler) this.compositeBindGroup = this.device.createBindGroup({ layout: this.compositeLayout, entries: [
-      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: this.sceneTexture.createView() }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }
+    if (this.compositeLayout && this.sceneTexture && this.frontPosition && this.frontNormal && this.backPosition && this.backNormal && this.sampler && this.volume && this.columnBases) this.compositeBindGroup = this.device.createBindGroup({ layout: this.compositeLayout, entries: [
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: this.sceneTexture.createView() }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }
     ] });
   }
 
