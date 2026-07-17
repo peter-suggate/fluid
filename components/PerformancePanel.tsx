@@ -8,6 +8,7 @@ import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { gpuBatchDepth, gpuInFlightStepLimit } from "@/lib/simulation/gpu-clock";
+import { performanceSchedule } from "@/lib/performance-scheduling";
 
 type GPUStage = {
   key: string;
@@ -125,7 +126,6 @@ export function PerformancePanel() {
   const gpuStages = [...physicsStages, ...renderStages];
   const stageTimed = (stage: GPUStage) => stage.timer === "physics" ? physicsTimed : renderTimed;
   const measuredStages = gpuStages.filter(stageTimed);
-  const gpuTotal = measuredStages.reduce((sum, stage) => sum + stage.value, 0);
   const cpuOther = Math.max(0, snapshot.cpuFrame_ms - snapshot.cpuPhysicsSubmit_ms - snapshot.cpuDataUpload_ms - snapshot.cpuRenderEncode_ms);
   const cpuStages = [
     { key: "simulation", label: method.backend === "cpu" ? "Fluid + rigid solve" : "Rigid bodies + CPU oracle", shortLabel: "SIM", value: snapshot.cpuSimulation_ms, note: method.backend === "cpu" ? "CPU solver" : "Includes the coarse validation solve" },
@@ -140,25 +140,30 @@ export function PerformancePanel() {
   const measuredGPUAdvance_s = gpuInfo?.gpuQueueSimulation_s && gpuInfo.gpuQueueSimulation_s > 0 ? Math.min(maxDt_s, gpuInfo.gpuQueueSimulation_s) : maxDt_s;
   const submissionBatchDepth = method.backend === "webgpu" ? gpuBatchDepth(activeMethodId, fixedDt_s, hasRigidBodies, targetFps) : 1;
   const preparedStepLimit = method.backend === "webgpu" ? gpuInFlightStepLimit(activeMethodId, fixedDt_s, hasRigidBodies, targetFps) : 1;
-  const batchSimulation_ms = submissionBatchDepth * measuredGPUAdvance_s * 1000;
-  const batchGPU_ms = submissionBatchDepth * physicsPerStep_ms;
+  const pressureSolvesPerAdvance = activeMethodId === "tall-cell" && gpuInfo?.pressureSolver?.includes("defect correction") ? 2 : 1;
+  const schedule = performanceSchedule({
+    targetFps,
+    gpuAdvance_s: measuredGPUAdvance_s,
+    submissionBatchDepth,
+    physicsPerAdvance_ms: physicsPerStep_ms,
+    renderPerFrame_ms,
+    pressureSolvesPerAdvance
+  });
+  const batchSimulation_ms = schedule.batchSimulation_ms;
+  const batchGPU_ms = schedule.batchGPU_ms;
   const submissionEnvelope_ms = batchGPU_ms + renderPerFrame_ms;
   const completionRate = gpuInfo?.gpuCompletionWall_ms && gpuInfo.gpuCompletionSimulation_s
     ? gpuInfo.gpuCompletionSimulation_s * 1000 / gpuInfo.gpuCompletionWall_ms
     : null;
-  const requiredStepsPerFrame = measuredGPUAdvance_s > 0 ? 1 / (targetFps * measuredGPUAdvance_s) : 0;
-  const realtimeDemand_ms = physicsPerStep_ms * requiredStepsPerFrame + renderPerFrame_ms;
-  const demandPercent = realtimeDemand_ms / budget * 100;
-  const estimatedSimRate = physicsPerStep_ms > 0 ? Math.max(0, (1000 - renderPerFrame_ms * targetFps) * measuredGPUAdvance_s / physicsPerStep_ms) : 0;
+  const realtimeDemand_ms = schedule.gpuDemandPerFrame_ms;
+  const demandPercent = schedule.demandPercent;
   const cpuWindow = windowSamples.map((sample) => sample.cpuSimulation_ms + sample.cpuFrame_ms).sort((a, b) => a - b);
   const cpuP95_ms = cpuWindow.length ? cpuWindow[Math.min(cpuWindow.length - 1, Math.floor(cpuWindow.length * .95))] : cpuTotal;
   const gpuConstrained = demandPercent > 100;
   const cpuSpikeConstrained = cpuP95_ms > budget;
   const unexplainedSlowdown = !gpuConstrained && !cpuSpikeConstrained && observedSimRate !== null && observedSimRate < .95;
   const timelineScale = Math.max(budget, submissionEnvelope_ms, cpuTotal, 0.01);
-  const utilization = Math.min(demandPercent, 100);
-  const headroom = budget - realtimeDemand_ms;
-  const bottleneck = [...measuredStages].sort((a, b) => b.value - a.value)[0];
+  const headroom = schedule.headroom_ms;
   const selectedStage = gpuStages.find((stage) => stage.key === selectedStageKey) ?? gpuStages[0];
   const frameOffset = safeIndex === null ? 0 : Math.max(0, matchingHistory.length - 1 - safeIndex);
   const frameLabel = safeIndex === null ? "LIVE" : frameOffset === 0 ? "LATEST" : `F−${frameOffset}`;
@@ -168,6 +173,10 @@ export function PerformancePanel() {
   const historyValues = matchingHistory.map((sample) => ({ gpu: measuredGPUTime_ms(sample), cpu: sample.cpuSimulation_ms + sample.cpuFrame_ms }));
   const historyMax = Math.max(budget, ...historyValues.flatMap((sample) => [sample.gpu, sample.cpu]), 0.01);
   const points = (key: "gpu" | "cpu") => historyValues.map((sample, index) => `${historyValues.length < 2 ? 0 : index / (historyValues.length - 1) * 100},${48 - Math.min(sample[key] / historyMax, 1) * 44}`).join(" ");
+  const physicsDemandPercent = Math.min(100, schedule.physicsPerFrame_ms / budget * 100);
+  const renderDemandPercent = Math.min(100 - physicsDemandPercent, schedule.renderPerFrame_ms / budget * 100);
+  const observedPressureSolvesPerFrame = observedSimRate === null ? null : schedule.pressureSolvesPerFrame * observedSimRate;
+  const advanceDisplay_ms = physicsPerStep_ms > 0 ? physicsPerStep_ms : timelineScale / submissionBatchDepth;
   let gpuCursor = 0;
   let cpuCursor = 0;
 
@@ -187,33 +196,42 @@ export function PerformancePanel() {
       <button className="panel-close" onClick={() => setRightPanel(null)} aria-label="Close performance profiler">×</button>
     </header>
 
-    <section className={`performance-overview${gpuConstrained ? " over-budget" : ""}`} aria-label="Frame performance summary">
-      <div className="budget-gauge" style={{ "--utilization": `${utilization}%` } as React.CSSProperties}>
-        <div><strong>{measuredStages.length ? `${demandPercent.toFixed(0)}%` : "—"}</strong><small>RT demand</small></div>
+    <section className={`performance-overview schedule-overview${gpuConstrained ? " over-budget" : ""}`} aria-label="Frame performance summary">
+      <div className="realtime-budget-summary">
+        <div className="realtime-budget-title"><span><small>REALTIME GPU LOAD</small><strong>{measuredStages.length ? `${demandPercent.toFixed(0)}%` : "—"}</strong></span><b>{measuredStages.length ? `${realtimeDemand_ms.toFixed(2)} / ${budget.toFixed(2)} ms` : "sampling…"}</b></div>
+        <div className="frame-budget-track" aria-label={`${schedule.physicsPerFrame_ms.toFixed(2)} milliseconds physics, ${schedule.renderPerFrame_ms.toFixed(2)} milliseconds presentation, ${Math.max(0, headroom).toFixed(2)} milliseconds headroom`}>
+          <span className="budget-physics" style={{ width: `${physicsDemandPercent}%` }} />
+          <span className="budget-render" style={{ width: `${renderDemandPercent}%` }} />
+          <i />
+        </div>
+        <div className="frame-budget-labels"><span>0</span><span><b />physics {schedule.physicsPerFrame_ms.toFixed(2)}</span><span><b />render {schedule.renderPerFrame_ms.toFixed(2)}</span><strong>{budget.toFixed(2)} ms deadline</strong></div>
       </div>
-      <div className="overview-stat"><small>TIMESTAMPED GPU DEMAND</small><strong>{measuredStages.length ? `${realtimeDemand_ms.toFixed(2)} ms / frame` : "sampling…"}</strong><span>continuous estimate · {requiredStepsPerFrame.toFixed(2)} advances × {physicsPerStep_ms.toFixed(2)} ms + render</span></div>
-      <div className="overview-stat"><small>CPU WORK</small><strong>{cpuTotal.toFixed(2)} ms avg · {cpuP95_ms.toFixed(2)} p95</strong><span>SIM includes rigid bodies + CPU validation oracle</span></div>
-      <div className="overview-stat"><small>CRITICAL STAGE</small><strong>{bottleneck?.label ?? "Awaiting sample"}</strong><span>{bottleneck ? `${(bottleneck.value / Math.max(gpuTotal, .001) * 100).toFixed(0)}% of GPU work` : "No timestamp data"}</span></div>
-      <div className="overview-stat"><small>SIMULATION THROUGHPUT</small><strong>{observedSimRate === null ? "measuring…" : `×${observedSimRate.toFixed(2)} observed`}</strong><span>{completionRate === null ? "completion cadence sampling" : `queue completions ×${completionRate.toFixed(2)}`} · continuous ceiling ×{estimatedSimRate.toFixed(2)}</span></div>
+      <div className="overview-stat pressure-cadence"><small>PRESSURE CADENCE</small><strong>{schedule.pressureSolvesPerFrame.toFixed(2)} solves / frame</strong><span>{schedule.pressureSolvesPerSecond.toFixed(1)} / s · {schedule.pressureSolvesPerAdvance} per GPU advance</span></div>
+      <div className="overview-stat"><small>SUBMISSION PAYLOAD</small><strong>{schedule.pressureSolvesPerBatch} solves / batch</strong><span>{batchSimulation_ms.toFixed(0)} ms simulation · {schedule.realtimeFramesPerBatch.toFixed(2)} RT frames</span></div>
+      <div className="overview-stat"><small>OBSERVED COMPLETION</small><strong>{observedPressureSolvesPerFrame === null ? "measuring…" : `${observedPressureSolvesPerFrame.toFixed(2)} solves / frame`}</strong><span>{observedSimRate === null ? "simulation rate sampling" : `×${observedSimRate.toFixed(2)} realtime`} · {completionRate === null ? "queue sampling" : `queue ×${completionRate.toFixed(2)}`}</span></div>
     </section>
 
-    <section className={`throughput-explainer${gpuConstrained || cpuSpikeConstrained || unexplainedSlowdown ? " constrained" : ""}`}>
-      <div className="throughput-verdict"><small>WHY NOT ×1?</small><strong>{gpuConstrained ? "GPU advance throughput exceeds the frame budget" : cpuSpikeConstrained ? "CPU SIM spikes exceed the frame deadline" : unexplainedSlowdown ? "Visible pass timings do not yet explain the slowdown" : "Measured CPU and GPU work fit the realtime budget"}</strong><span>{gpuConstrained ? `${Math.abs(headroom).toFixed(2)} ms more GPU time is required per presentation frame` : cpuSpikeConstrained ? `CPU p95 is ${cpuP95_ms.toFixed(2)} ms against a ${budget.toFixed(2)} ms deadline` : unexplainedSlowdown ? "The missing time is likely between timestamp regions: queue fences, completion latency, or scheduler gaps" : `${headroom.toFixed(2)} ms estimated GPU headroom`}</span></div>
-      <div className="throughput-equation"><span><small>CONTROLLER CLOCK</small><strong>Δt {(fixedDt_s * 1000).toFixed(2)} ms</strong><b>{(1 / Math.max(fixedDt_s, 1e-9)).toFixed(0)} rigid/oracle ticks per s</b></span><i>→</i><span><small>SUBMISSION BATCH</small><strong>{submissionBatchDepth} advances · {batchSimulation_ms.toFixed(2)} ms sim</strong><b>up to {preparedStepLimit} prepared steps</b></span><i>→</i><span><small>TIMESTAMP WORK</small><strong>{batchGPU_ms.toFixed(2)} ms / batch</strong><b>{submissionEnvelope_ms.toFixed(2)} ms with presentation</b></span><i>→</i><span><small>QUEUE COMPLETION</small><strong>{completionRate === null ? "sampling…" : `×${completionRate.toFixed(2)} cadence`}</strong><b>{gpuInfo?.gpuPendingBatches ?? 0} batches pending · {(gpuInfo?.gpuQueueStarved_ms ?? 0).toFixed(2)} ms last host gap</b></span></div>
-      <p><strong>Queue model:</strong> timestamped demand assumes continuous packing. The bounded two-batch tall-cell window keeps work available across completion and presentation boundaries; completion cadence includes the host and scheduler gaps that pass timestamps cannot see.</p>
+    <section className={`schedule-translation${gpuConstrained || cpuSpikeConstrained || unexplainedSlowdown ? " constrained" : ""}`} aria-label="Scheduling model">
+      <div className="schedule-verdict"><small>CAPACITY VERDICT</small><strong>{gpuConstrained ? "GPU demand exceeds the presentation budget" : cpuSpikeConstrained ? "CPU p95 exceeds the presentation deadline" : unexplainedSlowdown ? "Timestamped work does not explain the observed slowdown" : `${headroom.toFixed(2)} ms GPU headroom per presentation frame`}</strong><span>{gpuConstrained ? `${Math.abs(headroom).toFixed(2)} ms over budget` : `CPU ${cpuTotal.toFixed(2)} ms avg · ${cpuP95_ms.toFixed(2)} p95`}</span></div>
+      <div className="schedule-node"><small>PRESENTATION FRAME</small><strong>{budget.toFixed(2)} ms wall time</strong><span>needs {schedule.advancesPerFrame.toFixed(2)} GPU advances</span><b>{schedule.pressureSolvesPerFrame.toFixed(2)} pressure solves</b></div>
+      <i className="schedule-arrow">→</i>
+      <div className="schedule-node active"><small>ONE GPU ADVANCE</small><strong>{schedule.gpuAdvance_ms.toFixed(2)} ms simulation</strong><span>costs {physicsPerStep_ms.toFixed(2)} ms on GPU</span><b>{schedule.pressureSolvesPerAdvance} pressure {schedule.pressureSolvesPerAdvance === 1 ? "solve" : "solves"}</b></div>
+      <i className="schedule-arrow">×{submissionBatchDepth}</i>
+      <div className="schedule-node"><small>ONE SUBMISSION BATCH</small><strong>{batchSimulation_ms.toFixed(2)} ms simulation</strong><span>costs {batchGPU_ms.toFixed(2)} ms on GPU</span><b>{schedule.pressureSolvesPerBatch} solves · spans {schedule.realtimeFramesPerBatch.toFixed(2)} RT frames</b></div>
     </section>
 
     <div className="performance-workspace">
       <section className="trace-card timeline-card">
-        <header className="trace-card-header"><div><p className="eyebrow">ONE {submissionBatchDepth}-STEP SUBMISSION BATCH + ONE PRESENTATION</p><h2>CPU submission → queued GPU execution → present</h2></div><div className="timeline-legend"><span><i className="legend-compute" />Compute</span><span><i className="legend-graphics" />Graphics</span><span><i className="legend-transfer" />Transfer / gap</span><span><i className="legend-idle" />Available</span></div></header>
+        <header className="trace-card-header"><div><p className="eyebrow">GPU ELAPSED TIME · ONE SUBMISSION BURST</p><h2>{submissionBatchDepth} advances are one batch—not one frame</h2></div><div className="timeline-legend"><span><i className="legend-compute" />Compute</span><span><i className="legend-graphics" />Presentation</span><span><i className="legend-transfer" />Transfer / gap</span></div></header>
         <div className="timeline-ruler"><span>0</span>{gridTicks.slice(1).map((tick) => <span key={tick}>{tick.toFixed(1)} ms</span>)}</div>
         <div className="timeline-lanes">
           <div className="timeline-lane"><div className="lane-label"><strong>CPU</strong><small>Main thread</small></div><div className="lane-track cpu-track">{cpuStages.map((stage) => { const left = cpuCursor / timelineScale * 100; cpuCursor += stage.value; return <button key={stage.key} className="cpu-block" style={{ left: `${left}%`, width: `${Math.max(.7, stage.value / timelineScale * 100)}%` }} title={`${stage.label} · ${formatMs(stage.value)}`}><span>{stage.shortLabel}</span></button>; })}</div><output>{cpuTotal.toFixed(2)} ms</output></div>
           <div className="timeline-connector"><span>queue.submit</span><i /></div>
-          <div className="timeline-lane gpu-lane"><div className="lane-label"><strong>GPU</strong><small>{submissionBatchDepth} queued physics solves</small></div><div className="lane-track gpu-track">{Array.from({ length: submissionBatchDepth }, (_, step) => physicsStages.map((stage) => { const left = gpuCursor / timelineScale * 100; const width = stageTimed(stage) ? stage.value / timelineScale * 100 : 0; gpuCursor += stageTimed(stage) ? stage.value : 0; return <button key={`${step}:${stage.key}`} className={`gpu-block ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} style={{ left: `${left}%`, width: `${Math.max(.7, width)}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`Step ${step + 1} · ${stage.label} · ${formatMs(stage.value, stageTimed(stage))}`}><span>{stage.shortLabel}</span><b>{formatMs(stage.value, stageTimed(stage))}</b></button>; }))}{renderStages.map((stage) => { const left = gpuCursor / timelineScale * 100; const width = stageTimed(stage) ? stage.value / timelineScale * 100 : 0; gpuCursor += stageTimed(stage) ? stage.value : 0; return <button key={`render:${stage.key}`} className={`gpu-block ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} style={{ left: `${left}%`, width: `${Math.max(.7, width)}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value, stageTimed(stage))}`}><span>{stage.shortLabel}</span><b>{formatMs(stage.value, stageTimed(stage))}</b></button>; })}<span className="budget-marker" style={{ left: `${Math.min(100, budget / timelineScale * 100)}%` }} /></div><output>{batchGPU_ms.toFixed(2)} ms / batch</output></div>
+          <div className="timeline-lane advance-lane"><div className="lane-label"><strong>ADVANCES</strong><small>{schedule.pressureSolvesPerAdvance} pressure / advance</small></div><div className="lane-track advance-track">{Array.from({ length: submissionBatchDepth }, (_, step) => <span key={step} style={{ left: `${step * advanceDisplay_ms / timelineScale * 100}%`, width: `${advanceDisplay_ms / timelineScale * 100}%` }}><b>#{step + 1}</b><small>{schedule.gpuAdvance_ms.toFixed(0)} ms sim</small></span>)}{renderPerFrame_ms > 0 && <span className="presentation-window" style={{ left: `${batchGPU_ms / timelineScale * 100}%`, width: `${renderPerFrame_ms / timelineScale * 100}%` }}><b>PRESENT</b></span>}</div><output>{schedule.pressureSolvesPerBatch} solves</output></div>
+          <div className="timeline-lane gpu-lane"><div className="lane-label"><strong>GPU PASSES</strong><small>elapsed execution</small></div><div className="lane-track gpu-track">{Array.from({ length: submissionBatchDepth }, (_, step) => physicsStages.map((stage) => { const left = gpuCursor / timelineScale * 100; const width = stageTimed(stage) ? stage.value / timelineScale * 100 : 0; gpuCursor += stageTimed(stage) ? stage.value : 0; return <button key={`${step}:${stage.key}`} className={`gpu-block ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} style={{ left: `${left}%`, width: `${Math.max(.7, width)}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`Advance ${step + 1} · ${stage.label} · ${formatMs(stage.value, stageTimed(stage))}`}><span>{stage.shortLabel}</span><b>{formatMs(stage.value, stageTimed(stage))}</b></button>; }))}{renderStages.map((stage) => { const left = gpuCursor / timelineScale * 100; const width = stageTimed(stage) ? stage.value / timelineScale * 100 : 0; gpuCursor += stageTimed(stage) ? stage.value : 0; return <button key={`render:${stage.key}`} className={`gpu-block ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} style={{ left: `${left}%`, width: `${Math.max(.7, width)}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value, stageTimed(stage))}`}><span>{stage.shortLabel}</span><b>{formatMs(stage.value, stageTimed(stage))}</b></button>; })}</div><output>{submissionEnvelope_ms.toFixed(2)} ms</output></div>
           <div className="timeline-lane async-lane"><div className="lane-label"><strong>ASYNC</strong><small>{adaptive ? "Topology worker" : "Browser + readback"}</small></div><div className="lane-track">{adaptive ? <span className={`async-block${snapshot.adaptiveRebuildPending ? " active" : ""}`} style={{ width: `${Math.min(100, Math.max(3, snapshot.adaptiveRebuildWall_ms / timelineScale * 100))}%` }}><i />{snapshot.adaptiveRebuildPending ? "REBUILD IN FLIGHT" : "LAST ADAPTIVE REBUILD"}</span> : <span className="async-note"><i />Readbacks resolve without blocking the queue unless consumed by the CPU</span>}</div><output>{adaptive && snapshot.adaptiveRebuildWall_ms ? `${snapshot.adaptiveRebuildWall_ms.toFixed(1)} ms` : "non-blocking"}</output></div>
         </div>
-        <footer className="timeline-footnote"><span><i className="sync-mark" />Queue completion is observed asynchronously; it no longer gates the next prepared tall-cell batch</span><span>{batchSimulation_ms.toFixed(2)} ms simulation queued per batch · {preparedStepLimit} steps maximum in flight</span></footer>
+        <footer className="timeline-footnote"><span><i className="sync-mark" />This {submissionEnvelope_ms.toFixed(2)} ms trace carries {schedule.realtimeFramesPerBatch.toFixed(2)} realtime frames of simulation; it does not have to fit inside one frame deadline.</span><span>{preparedStepLimit} advances max in flight · {gpuInfo?.gpuPendingBatches ?? 0} batches pending · {(gpuInfo?.gpuQueueStarved_ms ?? 0).toFixed(2)} ms last host gap</span></footer>
       </section>
 
       <section className="trace-card frame-graph-card">
