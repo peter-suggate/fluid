@@ -60,7 +60,7 @@ test("the independently transported level set remains finite and translates a pl
   assert.ok(Math.abs(Math.abs(transported[index3(5, 1, 1, nx, ny)] - transported[index3(4, 1, 1, nx, ny)]) - 1) < 1e-6, "redistancing must restore a unit gradient");
 });
 
-test("VOF reconciliation reseeds liquid the advected level set never saw", () => {
+test("emergency VOF recovery reseeds liquid the advected level set never saw", () => {
   const nx = 9, ny = 5, nz = 5, h = { x: 1, y: 1, z: 1 };
   const phi = new Float32Array(nx * ny * nz), volume = new Float32Array(nx * ny * nz);
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
@@ -80,7 +80,7 @@ test("VOF reconciliation reseeds liquid the advected level set never saw", () =>
   assert.ok(Math.abs(gradient - 1) < 0.35, `redistancing must restore a near-unit gradient, got ${gradient}`);
 });
 
-test("VOF reconciliation preserves agreeing sub-cell distances", () => {
+test("emergency VOF recovery preserves agreeing sub-cell distances", () => {
   const nx = 5, ny = 6, nz = 5, h = { x: 1, y: 1, z: 1 };
   const phi = new Float32Array(nx * ny * nz), volume = new Float32Array(nx * ny * nz);
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
@@ -91,6 +91,18 @@ test("VOF reconciliation preserves agreeing sub-cell distances", () => {
   const { phi: reconciled, mismatchFraction } = reconcileLevelSetWithVolume(phi, volume, nx, ny, nz, h);
   assert.equal(mismatchFraction, 0, "matching wet/dry signs must not count as drift");
   assert.ok(Math.abs(reconciled[index3(2, 2, 2, nx, ny)] + 0.25) < 1e-6, "the advected sub-cell offset must survive reconciliation");
+});
+
+test("emergency VOF recovery never deletes level-set liquid", () => {
+  const nx = 7, ny = 5, nz = 5, h = { x: 1, y: 1, z: 1 };
+  const phi = new Float32Array(nx * ny * nz).fill(2), volume = new Float32Array(nx * ny * nz);
+  for (let z = 1; z <= 3; z += 1) for (let y = 1; y <= 3; y += 1) for (let x = 1; x <= 5; x += 1) {
+    phi[index3(x, y, z, nx, ny)] = -2;
+  }
+  const centre = index3(3, 2, 2, nx, ny);
+  const { phi: recovered, mismatchFraction } = reconcileLevelSetWithVolume(phi, volume, nx, ny, nz, h);
+  assert.ok(mismatchFraction > 0, "VOF-dry/phi-wet disagreement remains visible in diagnostics");
+  assert.ok(recovered[centre] < 0, "VOF must not erase an established phi-wet component");
 });
 
 test("quadtree subdivision evaluates cell centres coarse-to-fine and remains 2:1", () => {
@@ -235,6 +247,9 @@ test("footprint-conservative profiles retain a cubic band around off-centre liqu
   const grid = populateTallPressureGrid(quadtree, phi, ny, h, 1, 0.25);
   const splash = grid.segments.find((segment) => segment.firstY === 5);
   assert.ok(splash && !splash.tall, "off-centre liquid must force the represented row cubic even when the leaf-centre sample is air");
+  const sample = grid.samples.find((candidate) => candidate.y === 5);
+  assert.ok(sample?.liquid, "the off-centre tongue must activate a liquid pressure DOF before reaching the leaf centre");
+  assert.ok((sample?.phi ?? 1) < 0, "the activated sample must carry footprint-conservative liquid phi");
 });
 
 test("T-junction gradient uses vertically interpolated pressures and 1.5 dx", () => {
@@ -566,4 +581,16 @@ test("moving flat fronts receive a Froude-like finest-grid sizing demand", () =>
   const stationarySizing = quadtreeSizingFromVelocityAndSurface(phi, still, nx, ny, nz, h);
   const movingSizing = quadtreeSizingFromVelocityAndSurface(phi, moving, nx, ny, nz, h);
   assert.ok(movingSizing.every((value, index) => value > stationarySizing[index]), "uniform surge speed must refine even when curvature and speed gradient vanish");
+});
+
+test("submerged floor-current velocity variation refines outside the surface band", () => {
+  const nx = 9, ny = 8, nz = 3, h = { x: 1, y: 1, z: 1 }, count = nx * ny * nz;
+  // A fully liquid column has no narrow-band/interface samples, so only the
+  // all-liquid speed-gradient term can request refinement.
+  const phi = new Float32Array(count).fill(-10);
+  const velocity = Array.from({ length: count }, () => ({ x: 0, y: 0, z: 0 }));
+  for (let z = 0; z < nz; z += 1) velocity[index3(4, 0, z, nx, ny)] = { x: 4, y: 0, z: 0 };
+  const sizing = quadtreeSizingFromVelocityAndSurface(phi, velocity, nx, ny, nz, h);
+  assert.ok(sizing[3 + nx] >= 1, `floor-current neighbour demand ${sizing[3 + nx]} should force a leaf of width <= 4`);
+  assert.equal(sizing[0], 0, "quiescent far-field columns should remain coarse");
 });

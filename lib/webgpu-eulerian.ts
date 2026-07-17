@@ -7,6 +7,7 @@ import { TallCellMultigrid } from "./tall-cell-multigrid";
 import { TallCellVelocityHierarchy } from "./tall-cell-extrapolation";
 import { classifyTallCellStability, planGPUAdvance } from "./tall-cell-diagnostics";
 import { averageInflowStrength, createInflowGridBoundary, inflowBoundaryWGSL, type InflowGridBoundary } from "./inflow-boundary";
+import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 
 export type { GPUQuality } from "./tall-cell-grid";
 export type GPUGridMethod = "tall-cell" | "quadtree-tall-cell" | "uniform";
@@ -165,6 +166,8 @@ export interface WebGPUEulerianSolverOptions {
   pressureCycles?: number;
   /** Reuse the previous frame's pressure as the fine-grid initial guess. */
   pressureWarmStart?: boolean;
+  /** Rebuild divergence after projection and apply a second pressure solve. */
+  pressureDefectCorrection?: boolean;
   /** Mass-Conserving Eulerian Liquid Simulation Sec 3.5 density sharpening
    * after conservative advection. Defaults to on. */
   densitySharpening?: boolean;
@@ -294,6 +297,9 @@ struct RigidBody {
 @group(0) @binding(17) var fluxScalesIn: texture_3d<f32>;
 @group(0) @binding(18) var fluxScalesOut: texture_storage_3d<rg32float, write>;
 @group(0) @binding(19) var<storage,read_write> sharpenDeposits:array<atomic<i32>>;
+// The adaptive method binds its resident signed-distance field here. Uniform
+// reference solvers bind volumeIn instead, preserving their VOF formulation.
+@group(0) @binding(20) var surfaceIn: texture_3d<f32>;
 
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn inflowGridDims()->vec3i{return dims();}
@@ -302,13 +308,24 @@ fn clampCell(p: vec3i) -> vec3i { return clamp(p, vec3i(0), dims()-vec3i(1)); }
 fn worldCell(id:vec3i)->vec3f{let h=params.cellGravity.xyz;return vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);}
 ${inflowBoundaryWGSL}
 fn volume(p: vec3i) -> f32 { if (!valid(p)) { return 0.0; } return textureLoad(volumeIn,p,0).x; }
+fn levelSetAuthority() -> bool { return params.physical.w > 0.5; }
+fn surfaceValue(p: vec3i) -> f32 {
+  if (!valid(p)) { return select(0.0, 5.0 * min(params.cellGravity.x, min(params.cellGravity.y, params.cellGravity.z)), levelSetAuthority()); }
+  return textureLoad(surfaceIn, p, 0).x;
+}
+fn surfaceOccupancy(p: vec3i) -> f32 {
+  if (!valid(p)) { return 0.0; }
+  let value = surfaceValue(p);
+  return select(clamp(value, 0.0, 1.0), clamp(0.5 - value / (4.0 * params.cellGravity.y), 0.0, 1.0), levelSetAuthority());
+}
+fn surfaceLiquid(p: vec3i) -> bool { return valid(p) && select(surfaceValue(p) >= 0.5, surfaceValue(p) < 0.0, levelSetAuthority()); }
 fn velocity(p: vec3i) -> vec3f { return textureLoad(velocityIn,clampCell(p),0).xyz; }
 fn faceVelocity(p:vec3i)->vec3f{if(!valid(p)){return vec3f(0.0);}return textureLoad(velocityIn,p,0).xyz;}
-fn liquid(p:vec3i)->bool{return valid(p)&&volume(p)>=0.5;}
+fn liquid(p:vec3i)->bool{return surfaceLiquid(p);}
 fn pressureValue(p:vec3i)->f32{return textureLoad(pressureIn,clampCell(p),0).x;}
 fn transportVelocity(id:vec3i)->vec3f{
-  var v=velocity(id);if(volume(id)>=0.01){return v;}var sum=vec3f(0.0);var weight=0.0;
-  let px=volume(id+vec3i(1,0,0));let nx=volume(id-vec3i(1,0,0));let py=volume(id+vec3i(0,1,0));let ny=volume(id-vec3i(0,1,0));let pz=volume(id+vec3i(0,0,1));let nz=volume(id-vec3i(0,0,1));
+  var v=velocity(id);if(surfaceOccupancy(id)>=0.01){return v;}var sum=vec3f(0.0);var weight=0.0;
+  let px=surfaceOccupancy(id+vec3i(1,0,0));let nx=surfaceOccupancy(id-vec3i(1,0,0));let py=surfaceOccupancy(id+vec3i(0,1,0));let ny=surfaceOccupancy(id-vec3i(0,1,0));let pz=surfaceOccupancy(id+vec3i(0,0,1));let nz=surfaceOccupancy(id-vec3i(0,0,1));
   sum+=velocity(id+vec3i(1,0,0))*px+velocity(id-vec3i(1,0,0))*nx+velocity(id+vec3i(0,1,0))*py+velocity(id-vec3i(0,1,0))*ny+velocity(id+vec3i(0,0,1))*pz+velocity(id-vec3i(0,0,1))*nz;weight=px+nx+py+ny+pz+nz;if(weight>0.001){v=sum/weight;}return v;
 }
 fn sampledFaceVelocity(p:vec3i,component:u32)->f32{
@@ -396,28 +413,39 @@ fn ambientFluidVelocity(body:RigidBody,p:vec3i,fallback:vec3f)->vec3f{
   let h=params.cellGravity.xyz;let radius=max(body.dimensions.w,0.0);let reach=vec3i(ceil(vec3f(2.0*radius)/h))+vec3i(2);
   let offsets=array<vec3i,6>(vec3i(-reach.x,0,0),vec3i(reach.x,0,0),vec3i(0,-reach.y,0),vec3i(0,reach.y,0),vec3i(0,0,-reach.z),vec3i(0,0,reach.z));
   var total=vec3f(0.0);var weight=0.0;
-  for(var n=0;n<6;n+=1){let q=p+offsets[n];if(!valid(q)||cellRigidBody(q)>=0){continue;}let wet=clamp(volume(q),0.0,1.0);total+=wet*velocity(q);weight+=wet;}
+  for(var n=0;n<6;n+=1){let q=p+offsets[n];if(!valid(q)||cellRigidBody(q)>=0){continue;}let wet=surfaceOccupancy(q);total+=wet*velocity(q);weight+=wet;}
   return select(fallback,total/max(weight,1e-6),weight>0.0);
 }
 fn columnHeight(x:i32,z:i32)->f32{
   let d=dims();if(x<0||x>=d.x||z<0||z>=d.z){return 0.0;}return textureLoad(heightIn,vec2i(x,z),0).x;
 }
 fn upwind(face:f32,negative:f32,positive:f32)->f32{return face*select(positive,negative,face>=0.0);}
-fn normalVolume(id:vec3i)->f32{
-  if(valid(id)){return volume(id);}
+fn normalSurfaceOccupancy(id:vec3i)->f32{
+  if(valid(id)){return surfaceOccupancy(id);}
   // Side walls and the floor are solids, so extend alpha with a zero-normal
   // gradient instead of inventing an air interface at the wall. Only an open
   // top (boundary.w) is allowed to expose liquid to exterior air.
+  if(id.y>=dims().y&&params.boundary.w>0.5){return 0.0;}
+  return surfaceOccupancy(clampCell(id));
+}
+fn surfaceGradient(id:vec3i)->vec3f{
+  let h=params.cellGravity.xyz;
+  return vec3f(normalSurfaceOccupancy(id+vec3i(1,0,0))-normalSurfaceOccupancy(id-vec3i(1,0,0)),normalSurfaceOccupancy(id+vec3i(0,1,0))-normalSurfaceOccupancy(id-vec3i(0,1,0)),normalSurfaceOccupancy(id+vec3i(0,0,1))-normalSurfaceOccupancy(id-vec3i(0,0,1)))/(2.0*h);
+}
+fn interfaceNormal(id:vec3i)->vec3f{
+  let gradient=surfaceGradient(id);
+  return gradient/max(length(gradient),1e-6);
+}
+// The diagnostic/emergency VOF still sharpens along its own density gradient;
+// this field does not classify the adaptive pressure or velocity solve.
+fn normalVolume(id:vec3i)->f32{
+  if(valid(id)){return volume(id);}
   if(id.y>=dims().y&&params.boundary.w>0.5){return 0.0;}
   return textureLoad(volumeIn,clampCell(id),0).x;
 }
 fn volumeGradient(id:vec3i)->vec3f{
   let h=params.cellGravity.xyz;
   return vec3f(normalVolume(id+vec3i(1,0,0))-normalVolume(id-vec3i(1,0,0)),normalVolume(id+vec3i(0,1,0))-normalVolume(id-vec3i(0,1,0)),normalVolume(id+vec3i(0,0,1))-normalVolume(id-vec3i(0,0,1)))/(2.0*h);
-}
-fn interfaceNormal(id:vec3i)->vec3f{
-  let gradient=volumeGradient(id);
-  return gradient/max(length(gradient),1e-6);
 }
 fn rawVolumeFlux(id:vec3i,axis:u32,dt:f32)->f32{
   if(!valid(id)){return 0.0;}
@@ -476,16 +504,16 @@ fn velocityLaplacian(id:vec3i)->vec3f{
 }
 
 fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
-  var v=inputVelocity;let phi=volume(id);if(phi>0.0){let molecular=params.physical.y/params.physical.x;v+=dt*molecular*velocityLaplacian(id);}
+  var v=inputVelocity;let occupancy=surfaceOccupancy(id);if(occupancy>0.0){let molecular=params.physical.y/params.physical.x;v+=dt*molecular*velocityLaplacian(id);}
   // Body force lives on faces. A face participates whenever liquid exists on
   // either side; this is the same rule during impact and at equilibrium.
   if(liquid(id)||liquid(id+vec3i(0,1,0))){v.y+=params.cellGravity.w*dt;}
   // Balanced-force CSF: pressure and capillary acceleration use the same
   // positive-face locations and alpha differences.
   let sigmaOverRho=params.boundary.x/params.physical.x;
-  if(valid(id+vec3i(1,0,0))){v.x+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(1,0,0)))*(volume(id+vec3i(1,0,0))-phi)/h.x;}
-  if(valid(id+vec3i(0,1,0))){v.y+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(0,1,0)))*(volume(id+vec3i(0,1,0))-phi)/h.y;}
-  if(valid(id+vec3i(0,0,1))){v.z+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(0,0,1)))*(volume(id+vec3i(0,0,1))-phi)/h.z;}
+  if(valid(id+vec3i(1,0,0))){v.x+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(1,0,0)))*(surfaceOccupancy(id+vec3i(1,0,0))-occupancy)/h.x;}
+  if(valid(id+vec3i(0,1,0))){v.y+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(0,1,0)))*(surfaceOccupancy(id+vec3i(0,1,0))-occupancy)/h.y;}
+  if(valid(id+vec3i(0,0,1))){v.z+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(0,0,1)))*(surfaceOccupancy(id+vec3i(0,0,1))-occupancy)/h.z;}
   v=applyInflowVelocity(id,v);let d=dims();if(id.x==d.x-1){v.x=0.0;}if(id.y==d.y-1){v.y=0.0;}if(id.z==d.z-1){v.z=0.0;}return v;
 }
 
@@ -501,13 +529,13 @@ fn buildFluxScales(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;
   textureStore(fluxScalesOut,id,vec4f(donorScale(id,dt),receiverScale(id,dt),0.0,0.0));
 }
-// Highest cell holding any volume in each column; advection skips cells well
-// above every nearby column because projection already zeroed their faces.
+// Highest cell supported by the authoritative surface in each column;
+// advection skips cells well above it after projection zeroes their faces.
 @compute @workgroup_size(8,8,1)
 fn buildOccupancy(@builtin(global_invocation_id) gid:vec3u){
   let d=dims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}
   var highest=-1.0;
-  for(var y:i32=d.y-1;y>=0;y-=1){if(volume(vec3i(i32(gid.x),y,i32(gid.y)))>0.0001){highest=f32(y);break;}}
+  for(var y:i32=d.y-1;y>=0;y-=1){if(surfaceOccupancy(vec3i(i32(gid.x),y,i32(gid.y)))>0.0001){highest=f32(y);break;}}
   textureStore(heightOut,vec2i(gid.xy),vec4f(highest));
 }
 fn nearInflow(id:vec3i)->bool{
@@ -674,17 +702,17 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
 // toward the local solid velocity and accumulate the exact opposite impulse.
 @compute @workgroup_size(4,4,4)
 fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}let phi=volume(id);var v=velocity(id);let h=params.cellGravity.xyz;
+  let id=vec3i(gid);if(!valid(id)){return;}let phi=volume(id);let wetFraction=surfaceOccupancy(id);var v=velocity(id);let h=params.cellGravity.xyz;
   let world=vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);
-  let bodyCount=u32(round(params.boundary.z));let cellMass=params.physical.x*h.x*h.y*h.z*phi;let blend=clamp(45.0*params.dimsDt.w,0.0,1.0);var coupledBody=12u;
+  let bodyCount=u32(round(params.boundary.z));let cellMass=params.physical.x*h.x*h.y*h.z*wetFraction;let blend=clamp(45.0*params.dimsDt.w,0.0,1.0);var coupledBody=12u;
   for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}let body=rigidBodies[bodyIndex];if(!insideRigid(body,world)){continue;}
     coupledBody=bodyIndex;
     let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let fluidVelocity=v;let ambientVelocity=ambientFluidVelocity(body,id,fluidVelocity);let fluidImpulse=cellMass*(solidVelocity-fluidVelocity)*blend;v+=fluidImpulse/max(cellMass,1e-9);
     let reaction=-fluidImpulse;let torque=cross(arm,reaction);let base=bodyIndex*12u;
     atomicAdd(&rigidExchange[base],i32(round(reaction.x*1000000.0)));atomicAdd(&rigidExchange[base+1u],i32(round(reaction.y*1000000.0)));atomicAdd(&rigidExchange[base+2u],i32(round(reaction.z*1000000.0)));
     atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*1000000.0)));atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*1000000.0)));atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*1000000.0)));
-    atomicAdd(&rigidExchange[base+6u],i32(round(phi*65536.0)));
-    atomicAdd(&rigidExchange[base+7u],i32(round(phi*ambientVelocity.x*10000.0)));atomicAdd(&rigidExchange[base+8u],i32(round(phi*ambientVelocity.y*10000.0)));atomicAdd(&rigidExchange[base+9u],i32(round(phi*ambientVelocity.z*10000.0)));break;
+    atomicAdd(&rigidExchange[base+6u],i32(round(wetFraction*65536.0)));
+    atomicAdd(&rigidExchange[base+7u],i32(round(wetFraction*ambientVelocity.x*10000.0)));atomicAdd(&rigidExchange[base+8u],i32(round(wetFraction*ambientVelocity.y*10000.0)));atomicAdd(&rigidExchange[base+9u],i32(round(wetFraction*ambientVelocity.z*10000.0)));break;
   }
   // Paper Sec 3.9.1 phi-s: inside a body the advected field is meaningless, so
   // blend it toward the (1-s)-weighted neighbor average. This is what lets the
@@ -836,7 +864,7 @@ fn sharpenResolve(@builtin(global_invocation_id) gid:vec3u){
   textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x+deposit));
 }
 @compute @workgroup_size(4,4,4)
-fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let phi=volume(id);atomicAdd(&reductions[0],u32(clamp(phi,0.0,1.0)*2048.0+0.5));if(phi>0.5){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(phi,0.0,8.0)*2048.0+0.5));}
+fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}
 `;
 
 export class WebGPUEulerianSolver {
@@ -846,6 +874,7 @@ export class WebGPUEulerianSolver {
   private pressureA: GPUTexture; private pressureB: GPUTexture;
   private volumeA: GPUTexture; private volumeB: GPUTexture;private solidA:GPUTexture;private solidB:GPUTexture;
   private heightA: GPUTexture; private heightB: GPUTexture;
+  private terrainTexture: GPUTexture;
   private params: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
   private planBindGroupLayout:GPUBindGroupLayout;
@@ -868,17 +897,19 @@ export class WebGPUEulerianSolver {
   private readonly hierarchicalExtrapolation: boolean;
   private readonly volumeControl: boolean;
   private readonly pressureWarmStart:boolean;
+  private readonly pressureDefectCorrection:boolean;
   private referenceLiquidVolumeCells = 0;
   private volumeCorrectionNormalSpeed = 0;
 
   constructor(private device: GPUDevice, readonly scene: SceneDescription, quality: GPUQuality, private onRigidLoads?: (loads: GPURigidLoad[]) => void, private readonly options:WebGPUEulerianSolverOptions={}) {
     this.layout=options.layoutOverride??createTallCellLayout(scene,quality,device.limits.maxTextureDimension3D,options.tallCellSettings);const {nx,packedNy,nz,fineNy}=this.layout;
-    this.velocityTransport=options.velocityTransport??"maccormack";this.hierarchicalExtrapolation=options.hierarchicalExtrapolation??true;this.volumeControl=options.volumeControl??true;this.pressureWarmStart=options.pressureWarmStart??false;
+    this.velocityTransport=options.velocityTransport??"maccormack";this.hierarchicalExtrapolation=options.hierarchicalExtrapolation??true;this.volumeControl=options.volumeControl??true;this.pressureWarmStart=options.pressureWarmStart??true;this.pressureDefectCorrection=options.pressureDefectCorrection??false;
     this.inflowBoundary=scene.fluid.inflow?createInflowGridBoundary(scene.fluid.inflow,scene.container,[nx,fineNy,nz]):undefined;
     const usage=GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST;
     const texture=(format: GPUTextureFormat)=>device.createTexture({size:[nx,packedNy,nz],dimension:"3d",format,usage});
     this.velocityA=texture("rgba32float"); this.velocityB=texture("rgba32float");this.velocityC=texture("rgba32float");this.velocityD=texture("rgba32float"); this.pressureA=texture("r32float"); this.pressureB=texture("r32float"); this.volumeA=texture("r32float"); this.volumeB=texture("r32float");this.solidA=texture("r32float");this.solidB=texture("r32float");
     this.heightA=device.createTexture({label:"Tall-cell column bases A",size:[nx,nz],format:"r32float",usage});this.heightB=device.createTexture({label:"Tall-cell column bases B",size:[nx,nz],format:"r32float",usage});
+    this.terrainTexture=device.createTexture({label:"Tall-cell terrain heights",size:[nx,nz],format:"r32float",usage});
     this.params=device.createBuffer({size:144,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.reductionBuffer=device.createBuffer({size:128,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.governorBuffer=device.createBuffer({label:"Tall-cell phi governor",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
@@ -917,6 +948,7 @@ export class WebGPUEulerianSolver {
       ,{binding:15,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}}
       ,{binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}
       ,{binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}
+      ,{binding:19,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"2d"}}
     ]});
     this.pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[this.bindGroupLayout]});
     this.planBindGroupLayout=device.createBindGroupLayout({entries:[
@@ -929,8 +961,9 @@ export class WebGPUEulerianSolver {
     if(!options.deferPipelineCompilation){this.createPipelinesSync();void device.popErrorScope().then(error=>{if(error)console.error(`Tall-cell pipeline creation: ${error.message}`);}).catch(()=>{ /* Device loss is handled by the renderer. */ });}
     if(this.hierarchicalExtrapolation)this.velocityHierarchy=new TallCellVelocityHierarchy(device,this.layout,this.velocityC,this.velocityD,this.heightA);
     this.multigrid=new TallCellMultigrid(device,this.layout,{pressureA:this.pressureA,pressureB:this.pressureB,volume:this.volumeA,solid:this.solidA,base:this.heightA,diagnostics:this.reductionBuffer},options.pressureCycles??8,options.deferPipelineCompilation);
-    const pressureIterations=1,cellSize=this.layout.cellSize_m,columnCount=nx*nz,allocatedBytes=this.layout.packedSampleCount*76+columnCount*12+128+16+8*16+12*80+GPU_RIGID_EXCHANGE_BYTES+this.multigrid.allocatedBytes;
-    this.info={nx,ny:fineNy,nz,storedNy:packedNy,cellCount:this.layout.packedSampleCount,equivalentUniformCells:this.layout.equivalentUniformCellCount,compressionRatio:this.layout.compressionRatio,activeCompressionRatio:this.layout.activeCompressionRatio,activeSampleCount:this.layout.activeSampleCount,regularLayers:this.layout.settings.regularLayers,maximumNeighborDelta:this.layout.settings.maximumNeighborDelta,gridKind:"restricted-tall-cell",surfaceField:"levelset",cellSize_m:Math.min(cellSize.x,cellSize.y,cellSize.z),pressureIterations,pressureSolver:this.pressureWarmStart?`warm ${this.multigrid.refinementCycles} V-cycles · ${this.multigrid.levelCount} levels · RBGS`:`1 full + ${this.multigrid.refinementCycles} V-cycles · ${this.multigrid.levelCount} levels · RBGS`,allocatedBytes,quality,encodedSteps:0,submittedTime_s:0,simulatedTime_s:0,completedTime_s:0,simulationLag_s:0};
+    const pressureIterations=this.pressureDefectCorrection?2:1,cellSize=this.layout.cellSize_m,columnCount=nx*nz,allocatedBytes=this.layout.packedSampleCount*76+columnCount*12+128+16+8*16+12*80+GPU_RIGID_EXCHANGE_BYTES+this.multigrid.allocatedBytes;
+    const primaryPressureSolver=this.pressureWarmStart?`warm ${this.multigrid.refinementCycles} V-cycles · ${this.multigrid.levelCount} levels · RBGS`:`1 full + ${this.multigrid.refinementCycles} V-cycles · ${this.multigrid.levelCount} levels · RBGS`;
+    this.info={nx,ny:fineNy,nz,storedNy:packedNy,cellCount:this.layout.packedSampleCount,equivalentUniformCells:this.layout.equivalentUniformCellCount,compressionRatio:this.layout.compressionRatio,activeCompressionRatio:this.layout.activeCompressionRatio,activeSampleCount:this.layout.activeSampleCount,regularLayers:this.layout.settings.regularLayers,maximumNeighborDelta:this.layout.settings.maximumNeighborDelta,gridKind:"restricted-tall-cell",surfaceField:"levelset",cellSize_m:Math.min(cellSize.x,cellSize.y,cellSize.z),pressureIterations,pressureSolver:this.pressureDefectCorrection?`${primaryPressureSolver} + cold defect correction`:primaryPressureSolver,allocatedBytes,quality,encodedSteps:0,submittedTime_s:0,simulatedTime_s:0,completedTime_s:0,simulationLag_s:0};
     this.initializeVolume();
     this.extrapolateFirstGroup=this.group(this.velocityA,this.velocityD,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
     this.extrapolateSecondGroup=this.group(this.velocityD,this.velocityC,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.heightA,this.heightB);
@@ -990,9 +1023,17 @@ export class WebGPUEulerianSolver {
     const basePacked=new Uint8Array(padded*nz),baseSource=new Uint8Array(columnBases.buffer,columnBases.byteOffset,columnBases.byteLength);
     for(let z=0;z<nz;z++)basePacked.set(baseSource.subarray(rowBytes*z,rowBytes*(z+1)),padded*z);
     for(const texture of [this.heightA,this.heightB])this.device.queue.writeTexture({texture},basePacked,{bytesPerRow:padded,rowsPerImage:nz},{width:nx,height:nz});
+    // Static per-column terrain heights H_{i,k} in fine-cell units (paper
+    // Fig. 2), consumed analytically by every kernel and re-stamped into the
+    // packed solid texture each step by coupleRigid for the multigrid.
+    const terrainHeights=terrainColumnHeights(this.scene,nx,nz),cellHeight=this.layout.cellSize_m.y;
+    const terrainCells=new Float32Array(nx*nz);for(let index=0;index<terrainCells.length;index++)terrainCells[index]=terrainHeights[index]/cellHeight;
+    const terrainPacked=new Uint8Array(padded*nz),terrainSource=new Uint8Array(terrainCells.buffer);
+    for(let z=0;z<nz;z++)terrainPacked.set(terrainSource.subarray(rowBytes*z,rowBytes*(z+1)),padded*z);
+    this.device.queue.writeTexture({texture:this.terrainTexture},terrainPacked,{bytesPerRow:padded,rowsPerImage:nz},{width:nx,height:nz});
   }
 
-  private group(velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture, pressureOut: GPUTexture, volumeIn: GPUTexture, volumeOut: GPUTexture,heightIn:GPUTexture,heightOut:GPUTexture,predictedVelocity:GPUTexture=velocityIn,reversedVelocity:GPUTexture=velocityIn,solidIn:GPUTexture=this.solidA,columnPlanIn:GPUBuffer=this.nextColumnBases,columnPlanOut:GPUBuffer=this.smoothedColumnBases){return this.device.createBindGroup({layout:this.bindGroupLayout,entries:[{binding:0,resource:velocityIn.createView()},{binding:1,resource:velocityOut.createView()},{binding:2,resource:pressureIn.createView()},{binding:3,resource:pressureOut.createView()},{binding:4,resource:volumeIn.createView()},{binding:5,resource:volumeOut.createView()},{binding:6,resource:{buffer:this.params}},{binding:7,resource:heightIn.createView()},{binding:8,resource:heightOut.createView()},{binding:9,resource:{buffer:this.reductionBuffer}},{binding:10,resource:{buffer:this.rigidBuffer}},{binding:11,resource:{buffer:this.rigidExchangeBuffer}},{binding:12,resource:{buffer:columnPlanIn}},{binding:13,resource:predictedVelocity.createView()},{binding:14,resource:reversedVelocity.createView()},{binding:15,resource:solidIn.createView()},{binding:16,resource:{buffer:columnPlanOut}},{binding:17,resource:{buffer:this.governorBuffer}}]});}
+  private group(velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture, pressureOut: GPUTexture, volumeIn: GPUTexture, volumeOut: GPUTexture,heightIn:GPUTexture,heightOut:GPUTexture,predictedVelocity:GPUTexture=velocityIn,reversedVelocity:GPUTexture=velocityIn,solidIn:GPUTexture=this.solidA,columnPlanIn:GPUBuffer=this.nextColumnBases,columnPlanOut:GPUBuffer=this.smoothedColumnBases){return this.device.createBindGroup({layout:this.bindGroupLayout,entries:[{binding:0,resource:velocityIn.createView()},{binding:1,resource:velocityOut.createView()},{binding:2,resource:pressureIn.createView()},{binding:3,resource:pressureOut.createView()},{binding:4,resource:volumeIn.createView()},{binding:5,resource:volumeOut.createView()},{binding:6,resource:{buffer:this.params}},{binding:7,resource:heightIn.createView()},{binding:8,resource:heightOut.createView()},{binding:9,resource:{buffer:this.reductionBuffer}},{binding:10,resource:{buffer:this.rigidBuffer}},{binding:11,resource:{buffer:this.rigidExchangeBuffer}},{binding:12,resource:{buffer:columnPlanIn}},{binding:13,resource:predictedVelocity.createView()},{binding:14,resource:reversedVelocity.createView()},{binding:15,resource:solidIn.createView()},{binding:16,resource:{buffer:columnPlanOut}},{binding:17,resource:{buffer:this.governorBuffer}},{binding:19,resource:this.terrainTexture.createView()}]});}
   private dispatch(pass: GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(this.info.nx/4),Math.ceil(this.info.storedNy/4),Math.ceil(this.info.nz/4));}
   private dispatchPhiIndirect(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup,slot:number){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroupsIndirect(this.phiDispatchBuffer,slot*16);}
   private dispatchColumns(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(this.info.nx/8),Math.ceil(this.info.nz/8));}
@@ -1006,7 +1047,7 @@ export class WebGPUEulerianSolver {
     // on maxDt_s, so changing this subdivision cannot relax that guard.
     this.lastFrameDt=delta;
     const activeBodies=bodies.slice(0,12),bodyData=new Float32Array(12*20),shapeIndex={sphere:0,box:1,capsule:2,cylinder:3} as const;activeBodies.forEach((body,index)=>{const o=index*20,d=body.description.dimensions_m,q=body.orientation;bodyData.set([body.position_m.x,body.position_m.y,body.position_m.z,shapeIndex[body.description.shape],d.x,d.y,d.z,boundingRadius(body),q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,0,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3],o);});this.device.queue.writeBuffer(this.rigidBuffer,0,bodyData);
-    const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;if(this.inflowBoundary){const cellVolume=h.x*h.y*h.z;this.referenceLiquidVolumeCells+=this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume;this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;}this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,delta,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,4*Math.min(h.x,h.y,h.z)/Math.max(this.scene.numerics.maxDt_s,1e-6),rho,this.scene.fluid.dynamicViscosity_Pa_s,0,this.volumeCorrectionNormalSpeed,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,0,0,0]));
+    const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;if(this.inflowBoundary){const cellVolume=h.x*h.y*h.z;this.referenceLiquidVolumeCells+=this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume;this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;}this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,delta,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,4*Math.min(h.x,h.y,h.z)/Math.max(this.scene.numerics.maxDt_s,1e-6),rho,this.scene.fluid.dynamicViscosity_Pa_s,0,this.volumeCorrectionNormalSpeed,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,sceneHasTerrain(this.scene)?1:0,0,0]));
     this.querySegments=[];this.queryCount=0;if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"}),totalTiming=this.timing("total_ms");if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:totalTiming.start}});pass.end();}{const plan=encoder.beginComputePass({label:"Plan phi substeps"});plan.setPipeline(this.planSubstepsPipeline);plan.setBindGroup(0,this.planSubstepsGroup);plan.dispatchWorkgroups(1);plan.end();}encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductionBuffer);
     if(this.velocityHierarchy){
       // The hierarchy fills the whole packed field. The fallback's eight-cell
@@ -1026,6 +1067,7 @@ export class WebGPUEulerianSolver {
     {const pass=encoder.beginComputePass();this.dispatch(pass,this.preReductionPipeline,this.reductionGroup);pass.end();}
     {const timing=this.timing("pressure_ms");const rhs=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder,{warmStart:this.pressureWarmStart&&this.stepIndex>0,topologyChanged:this.stepIndex===0||remeshed});if(timing&&this.querySet){const end=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}});end.end();}}
     {const timing=this.timing("projection_ms");encoder.copyTextureToTexture({texture:this.velocityA},{texture:this.velocityC},[this.info.nx,this.info.storedNy,this.info.nz]);const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    if(this.pressureDefectCorrection){const pressureTiming=this.timing("pressure_ms");const rhs=encoder.beginComputePass(pressureTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:pressureTiming.start}}:undefined);this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder,{warmStart:false,topologyChanged:false});if(pressureTiming&&this.querySet){const end=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:pressureTiming.end}});end.end();}const projectionTiming=this.timing("projection_ms");const pass=encoder.beginComputePass(projectionTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:projectionTiming.start,endOfPassWriteIndex:projectionTiming.end}}:undefined);this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}
     this.stepIndex+=1;
     {const timing=this.timing("diagnostics_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:totalTiming.end}});pass.end();}if(this.querySet&&this.queryResolve&&this.queryCount>0)encoder.resolveQuerySet(this.querySet,0,this.queryCount,this.queryResolve,0);
     let exchangeReadback:typeof this.rigidReadbackPool[number]|undefined;if(activeBodies.length>0&&this.onRigidLoads){exchangeReadback=this.rigidReadbackPool.find(slot=>!slot.busy);if(!exchangeReadback){exchangeReadback={buffer:this.device.createBuffer({size:GPU_RIGID_EXCHANGE_BYTES,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}),busy:false};this.rigidReadbackPool.push(exchangeReadback);}exchangeReadback.busy=true;encoder.copyBufferToBuffer(this.rigidExchangeBuffer,0,exchangeReadback.buffer,0,GPU_RIGID_EXCHANGE_BYTES);}

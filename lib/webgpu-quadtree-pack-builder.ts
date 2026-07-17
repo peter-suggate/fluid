@@ -91,6 +91,7 @@ fn phiRangeAt(word: u32, y: u32) -> vec2f {
   } }
   return result;
 }
+fn footprintWet(word: u32, y: u32) -> bool { return phiRangeAt(word, y).x < 0.0; }
 fn footprintCrossesInterface(word: u32, y: u32, h: f32) -> bool {
   let own = phiRangeAt(word, y);
   if (own.x <= h && own.y >= -h) { return true; }
@@ -107,12 +108,12 @@ fn classifySegments(@builtin(global_invocation_id) gid: vec3u) {
   if (any(leafOrigin(word) != q)) { leafMeta[slot] = LeafMeta(vec4u(0), vec4u(0)); return; }
   let h = min(params.cell.x, min(params.cell.y, params.cell.z));
   for (var surfaceY = 0u; surfaceY < params.dims.y; surfaceY += 1u) {
-    let phi = phiAt(word, surfaceY); let liquid = phi < 0.0; let isInterface = footprintCrossesInterface(word, surfaceY, h);
+    let liquid = footprintWet(word, surfaceY); let isInterface = footprintCrossesInterface(word, surfaceY, h);
     if (!isInterface) { continue; }
     var liquidY = surfaceY;
-    if (!liquid && liquidY > 0u && phiAt(word, liquidY - 1u) < 0.0) { liquidY -= 1u; }
+    if (!liquid && liquidY > 0u && footprintWet(word, liquidY - 1u)) { liquidY -= 1u; }
     var depth = 0u; var probe = i32(liquidY);
-    loop { if (probe < 0 || phiAt(word, u32(probe)) >= 0.0) { break; } depth += 1u; probe -= 1; }
+    loop { if (probe < 0 || !footprintWet(word, u32(probe))) { break; } depth += 1u; probe -= 1; }
     let depthCells = max(1u, u32(ceil(f32(depth) * params.cell.w)));
     let first = select(0u, surfaceY - depthCells + 1u, surfaceY + 1u >= depthCells);
     for (var y = first; y <= surfaceY; y += 1u) { cubicFlags[flagIndex(slot, y)] = 1u; }
@@ -122,8 +123,8 @@ fn classifySegments(@builtin(global_invocation_id) gid: vec3u) {
   var segmentCount = 0u; var sampleCount = 0u; var dofCount = 0u; var tallCount = 0u; var y = 0u;
   loop {
     if (y >= params.dims.y) { break; }
-    let first = y; let cubic = cubicFlags[flagIndex(slot, y)] != 0u; let liquid = phiAt(word, y) < 0.0;
-    if (!cubic) { loop { if (y + 1u >= params.dims.y || cubicFlags[flagIndex(slot, y + 1u)] != 0u || (phiAt(word, y + 1u) < 0.0) != liquid) { break; } y += 1u; } }
+    let first = y; let cubic = cubicFlags[flagIndex(slot, y)] != 0u; let liquid = footprintWet(word, y);
+    if (!cubic) { loop { if (y + 1u >= params.dims.y || cubicFlags[flagIndex(slot, y + 1u)] != 0u || footprintWet(word, y + 1u) != liquid) { break; } y += 1u; } }
     let tall = !cubic && y > first; let count = select(1u, 2u, y > first);
     segmentCount += 1u; sampleCount += count; if (liquid) { dofCount += count; } if (tall) { tallCount += 1u; } y += 1u;
   }
@@ -160,8 +161,8 @@ fn emitSegments(@builtin(global_invocation_id) gid: vec3u) {
   let offsets = leafMeta[slot].offsets; var segmentCursor = offsets.x; var sampleCursor = offsets.y; var dofCursor = offsets.z; var y = 0u;
   loop {
     if (y >= params.dims.y) { break; }
-    let first = y; let cubic = cubicFlags[flagIndex(slot, y)] != 0u; let liquid = phiAt(word, y) < 0.0;
-    if (!cubic) { loop { if (y + 1u >= params.dims.y || cubicFlags[flagIndex(slot, y + 1u)] != 0u || (phiAt(word, y + 1u) < 0.0) != liquid) { break; } y += 1u; } }
+    let first = y; let cubic = cubicFlags[flagIndex(slot, y)] != 0u; let liquid = footprintWet(word, y);
+    if (!cubic) { loop { if (y + 1u >= params.dims.y || cubicFlags[flagIndex(slot, y + 1u)] != 0u || footprintWet(word, y + 1u) != liquid) { break; } y += 1u; } }
     let last = y; let span = last - first + 1u; let bottomSample = sampleCursor; let bottomDof = select(${INVALID}u, dofCursor, liquid);
     emitSample(word, first, span, sampleCursor, bottomDof); sampleCursor += 1u; if (liquid) { dofCursor += 1u; }
     var topSample = bottomSample; var topDof = bottomDof;

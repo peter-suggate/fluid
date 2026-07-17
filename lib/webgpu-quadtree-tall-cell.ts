@@ -6,6 +6,7 @@ import type { SceneDescription, Vec3 } from "./model";
 import { WebGPUQuadtreeBuilder, WebGPUQuadtreeSurfaceState, type SurfaceInflowState, type WebGPUQuadtreeConstructionCache, type WebGPUQuadtreeSurfaceCache } from "./webgpu-quadtree-builder";
 import { createInflowGridBoundary, inflowBoundaryWGSL, inflowOutletCenter } from "./inflow-boundary";
 import { WebGPUQuadtreePackBuilder, type GPUQuadtreeResidentResources } from "./webgpu-quadtree-pack-builder";
+import { sceneHasTerrain, terrainCellSolidFraction, terrainColumnHeights } from "./terrain";
 
 export interface QuadtreeRigidCoupling {
   bodies: RigidBodyState[];
@@ -48,10 +49,25 @@ export interface QuadtreeBodyImpulse {
 }
 
 function solidFieldsFromBodies(scene: SceneDescription, bodies: RigidBodyState[], nx: number, ny: number, nz: number, h: Vec3) {
-  if (bodies.length === 0) return undefined;
+  const hasTerrain = sceneHasTerrain(scene);
+  if (bodies.length === 0 && !hasTerrain) return undefined;
   const solidFraction = new Float32Array(nx * ny * nz);
   const solidOwner = new Int32Array(nx * ny * nz).fill(-1);
   const halfWidth = scene.container.width_m / 2, halfDepth = scene.container.depth_m / 2;
+  // Terrain is a static solid with zero velocity: owner stays -1, so the
+  // variational A u_fluid + (1-A) u_solid face flux gets u_solid = 0 and no
+  // rigid-coupling row, exactly a no-slip ground at the column height.
+  if (hasTerrain) {
+    const heights = terrainColumnHeights(scene, nx, nz);
+    for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+      const height = heights[x + nx * z];
+      for (let y = 0; y < ny; y += 1) {
+        const fraction = terrainCellSolidFraction(height, y * h.y, h.y);
+        if (fraction <= 0) break;
+        solidFraction[x + nx * (y + ny * z)] = fraction;
+      }
+    }
+  }
   // A display nozzle is a filled rigid primitive; its open channel is the
   // prescribed inflow cylinder, which must stay carved out of [A] exactly as
   // the legacy coupling kernel carved its inflow velocity cells.
@@ -139,7 +155,7 @@ export interface QuadtreeTallCellProjectionOptions {
   debugPressureFirstIterations?: number;
   /** Non-paper isolated-voxel hygiene; opt-in only. */
   debrisCulling?: boolean;
-  /** W0 VOF sign-reconciliation safety net; retire only after the W7 ten-second φ-only gate. */
+  /** Catastrophic lost-liquid safety circuit; inactive during healthy phi transport. */
   vofReconciliation?: boolean;
 }
 
@@ -321,10 +337,13 @@ function displacedVolumesForGrid(grid: TallPressureGrid, phi: Float32Array | und
 function initialFields(scene: SceneDescription, nx: number, ny: number, nz: number) {
   const count = nx * ny * nz, phi = new Float32Array(count), velocity = Array.from({ length: count }, () => ({ x: 0, y: 0, z: 0 }));
   const dam = damBreakFractions(scene.container.fillFraction);
+  const heights = sceneHasTerrain(scene) ? terrainColumnHeights(scene, nx, nz) : undefined;
+  const cellHeight = scene.container.height_m / ny;
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
-    const wet = scene.fluid.initialCondition === "tank-fill"
+    const aboveGround = !heights || (y + 0.5) * cellHeight > heights[x + nx * z];
+    const wet = aboveGround && (scene.fluid.initialCondition === "tank-fill"
       ? (y + 0.5) / ny <= scene.container.fillFraction
-      : (x + 0.5) / nx <= dam.width && (y + 0.5) / ny <= dam.height && (z + 0.5) / nz <= dam.depth;
+      : (x + 0.5) / nx <= dam.width && (y + 0.5) / ny <= dam.height && (z + 0.5) / nz <= dam.depth);
     phi[x + nx * (y + ny * z)] = wet ? -1 : 1;
   }
   return { phi, velocity };
@@ -340,6 +359,7 @@ function initialSizing(scene: SceneDescription, nx: number, nz: number, h: Vec3,
   // deep-water case) while edges, blobs, and droplets always register.
   const inflow = scene.fluid.inflow;
   const outlet = inflow ? inflowOutletCenter(inflow) : undefined;
+  const terrainHeights = sceneHasTerrain(scene) ? terrainColumnHeights(scene, nx, nz) : undefined;
   for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
     const worldX = -scene.container.width_m / 2 + (x + 0.5) * h.x, worldZ = -scene.container.depth_m / 2 + (z + 0.5) * h.z;
     for (const body of sizingBodies) {
@@ -350,6 +370,19 @@ function initialSizing(scene: SceneDescription, nx: number, nz: number, h: Vec3,
     // the surface-driven sizing never refines around the emerging jet.
     if (inflow && outlet && Math.hypot(worldX - outlet.x, worldZ - outlet.z) <= inflow.radius_m + 2 * Math.max(h.x, h.z)) {
       sizing[x + nx * z] = Math.max(sizing[x + nx * z], 2 / Math.min(h.x, h.z));
+    }
+    // Sloping ground (a pool rim, a bank) is a persistent geometric feature
+    // like a rigid body: keep the columns crossing it at the finest size so a
+    // coarse leaf never straddles a step in the terrain floor.
+    if (terrainHeights) {
+      const height = terrainHeights[x + nx * z];
+      const step = Math.max(
+        Math.abs(height - terrainHeights[Math.max(0, x - 1) + nx * z]),
+        Math.abs(height - terrainHeights[Math.min(nx - 1, x + 1) + nx * z]),
+        Math.abs(height - terrainHeights[x + nx * Math.max(0, z - 1)]),
+        Math.abs(height - terrainHeights[x + nx * Math.min(nz - 1, z + 1)])
+      );
+      if (step > h.y) sizing[x + nx * z] = Math.max(sizing[x + nx * z], 2 / Math.min(h.x, h.z));
     }
   }
   return sizing;
@@ -384,7 +417,6 @@ const PRECONDITIONED: SolverField = 4u; const MATRIX_DIRECTION: SolverField = 5u
 const DIAGONAL: SolverField = 6u; const ACTIVE_FLAG: SolverField = 7u;
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
-@group(0) @binding(2) var volumeIn: texture_3d<f32>;
 @group(0) @binding(3) var<storage, read_write> faces: array<Face>;
 @group(0) @binding(4) var<storage, read> rowOffsets: array<u32>;
 @group(0) @binding(5) var<storage, read> rowEntries: array<Entry>;
@@ -434,7 +466,15 @@ fn packedSamplePhi(packed: u32, span: u32) -> f32 {
   let p10 = textureLoad(levelSetIn, vec3i(i32(b.x), i32(y), i32(a.y)), 0).x;
   let p01 = textureLoad(levelSetIn, vec3i(i32(a.x), i32(y), i32(b.y)), 0).x;
   let p11 = textureLoad(levelSetIn, vec3i(i32(b.x), i32(y), i32(b.y)), 0).x;
-  return mix(mix(p00, p10, t.x), mix(p01, p11, t.x), t.y);
+  let centre = mix(mix(p00, p10, t.x), mix(p01, p11, t.x), t.y);
+  var footprintMinimum = centre;
+  for (var z = origin.y; z < min(origin.y + span, params.dims.z); z += 1u) {
+    for (var x = origin.x; x < min(origin.x + span, params.dims.x); x += 1u) {
+      let value = textureLoad(levelSetIn, vec3i(i32(x), i32(y), i32(z)), 0).x;
+      footprintMinimum = min(footprintMinimum, value);
+    }
+  }
+  return footprintMinimum;
 }
 fn faceSamplePhi(face: Face, slot: u32) -> f32 {
   return packedSamplePhi(face.sampleCells[slot], face.sampleSpans[slot]);
@@ -925,18 +965,19 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
     let otherPhi = textureLoad(levelSetIn, vec3i(plus), 0).x; let otherLiquid = otherPhi < 0.0;
     // Air immediately outside the interface is the transport field used by
     // the level-set backtrace. Only true far-field air is zeroed here; the
-    // three-ring pass following projection fills this narrow band from
+    // five-ring pass following projection fills this narrow band from
     // liquid-touching faces.
-    if (!ownLiquid && !otherLiquid && ownPhi > 2.0 * h && otherPhi > 2.0 * h) { value[axis] = 0.0; continue; }
+    if (!ownLiquid && !otherLiquid && ownPhi > 5.0 * h && otherPhi > 5.0 * h) { value[axis] = 0.0; continue; }
     let packedFace = u32(round(projection[axis])); var gradient = mappedGradient(gid, axis);
     if (packedFace > 0u) {
       let face = faces[packedFace - 1u];
       let fluidScale = min(${maximumVelocityUpdateFluidScale.toFixed(1)}, select(0.0, face.weights.y / face.weights.x, face.weights.x > 0.0));
       let solved = solvedFaceGradient(face);
       if (faceSubfaceCount(face) > 1u) {
-        // Eq. (5): preserve the adaptive area average while retaining the
-        // local Ando--Batty MLS variation across temporary cubical faces.
-        if (face.weights.x > 0.0) { value[axis] = (face.flux - face.solidFlux) / face.weights.x; }
+        // refreshFaces integrated this same fine velocity field, so its
+        // sub-face deviations from the mean sum to zero. Applying only the
+        // MLS-varying solved gradient preserves the coarse constrained flux
+        // exactly without box-filtering away vertical/horizontal shear.
         gradient = gradient - face.mlsMean + solved;
       } else { gradient = solved; }
       value[axis] -= fluidScale * gradient;
@@ -970,7 +1011,7 @@ fn updateDispatch() {
 }
 `;
 
-/** Three-sweep narrow-band air-velocity extrapolation used after projection. */
+/** Five-sweep narrow-band air-velocity extrapolation used after projection. */
 export const quadtreeVelocityExtrapolationShader = /* wgsl */ `
 struct Params { dims: vec4u, cell: vec4f }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
@@ -998,7 +1039,7 @@ fn extrapolateVelocity(@builtin(global_invocation_id) gid: vec3u) {
     if (!valid(plus)) { value[axis] = 0.0; continue; }
     if (faceKnown(q, axis)) { knownMask |= 1u << axis; continue; }
     let ownPhi = phi(q); let otherPhi = phi(plus);
-    if (!(ownPhi > 0.0 && otherPhi > 0.0 && min(ownPhi, otherPhi) < 3.0 * h)) { continue; }
+    if (!(ownPhi > 0.0 && otherPhi > 0.0 && min(ownPhi, otherPhi) < 5.0 * h)) { continue; }
     var sum = 0.0; var count = 0.0;
     for (var neighbour = 0u; neighbour < 6u; neighbour += 1u) {
       let n = q + offsets[neighbour];
@@ -1146,7 +1187,7 @@ export class WebGPUQuadtreeTallCellProjection {
       ({ displacedVolumes: this.displacedVolumes, dofCount: this.dofCount, faceCount, ghostFaceCount, maximumFluidScale: maximumSystemFluidScale, tallSegmentCount, variationalAssembly_ms, systemPack_ms } = initial.prepared);
     } else {
       const variationalStartedAt = performance.now();
-      const solidFields = coupling ? solidFieldsFromBodies(scene, coupling.bodies, nx, ny, nz, h) : undefined;
+      const solidFields = solidFieldsFromBodies(scene, coupling?.bodies ?? [], nx, ny, nz, h);
       const variationalBodies = coupling ? variationalBodiesFrom(scene, coupling) : [];
       const system = buildVariationalSystem(pressureGrid!, {
         velocity: initial.velocity,
@@ -1257,7 +1298,6 @@ export class WebGPUQuadtreeTallCellProjection {
       layout = device.createBindGroupLayout({ entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
         { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
-        { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
         { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         ...Array.from({ length: 2 }, (_, index) => ({ binding: index + 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } })),
         { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
@@ -1347,7 +1387,7 @@ export class WebGPUQuadtreeTallCellProjection {
     if (!this.gpuCache.pipelines && !deferPipelineCompilation) this.gpuCache.pipelines = this.pipelines;
     const all = [faces, rowOffsets, rowEntries, matrixBuffer, state, scalars, factorColumns, factorEntries];
     const projectionEntries = (storagePressure: GPUTexture, sampledPressure: GPUTexture): GPUBindGroupEntry[] => [
-      { binding: 0, resource: resources.velocityIn.createView() }, { binding: 1, resource: resources.velocityOut.createView() }, { binding: 2, resource: resources.volume.createView() },
+      { binding: 0, resource: resources.velocityIn.createView() }, { binding: 1, resource: resources.velocityOut.createView() },
       ...all.slice(0, 4).map((buffer, index) => ({ binding: index + 3, resource: { buffer } })),
       { binding: 7, resource: this.cellProjection.createView() },
       ...all.slice(4, 8).map((buffer, index) => ({ binding: index + 8, resource: { buffer } })), { binding: 12, resource: { buffer: this.params } },
@@ -1977,10 +2017,10 @@ export class WebGPUQuadtreeTallCellProjection {
       encoder.copyTextureToTexture({ texture: this.resources.velocityScratch }, { texture: this.resources.velocityOut }, [nx, ny, nz]);
     }
     // Ando--Batty-style narrow-band extrapolation: each dispatch grows the
-    // set of known face velocities by one 6-neighbour ring. Three rings cover
-    // every level-set backtrace admitted by the 3h surface band.
-    for (let sweep = 0; sweep < 3; sweep += 1) {
-      const pass = encoder.beginComputePass({ label: `Quadtree velocity extrapolation ${sweep + 1}/3` });
+    // set of known face velocities by one 6-neighbour ring. Five rings cover
+    // the aligned 5h keep-alive band, including fast thin floor sheets.
+    for (let sweep = 0; sweep < 5; sweep += 1) {
+      const pass = encoder.beginComputePass({ label: `Quadtree velocity extrapolation ${sweep + 1}/5` });
       pass.setPipeline(this.velocityExtrapolationPipeline);
       pass.setBindGroup(0, sweep % 2 === 0 ? this.extrapolateOutToScratchGroup : this.extrapolateScratchToOutGroup);
       pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
@@ -2098,7 +2138,7 @@ export class WebGPUQuadtreeTallCellProjection {
     const currentPreconditioner = this.options.preconditioner ?? "ic0";
     const gpuSparseRequested = !this.coupling && (currentPreconditioner === "poly" || currentPreconditioner === "jacobi");
     const builderInputs = {
-      velocity: this.resources.velocityOut, volume: this.resources.volume, levelSet: this.surfaceState.texture,
+      velocity: this.resources.velocityOut, levelSet: this.surfaceState.texture,
       explicitSizing: initialSizing(this.scene, nx, nz, h, activeBodies), diagnosticBuffer: this.scalarBuffer, diagnosticBytes: scalarBytes
     };
     let built = await builder.build({ ...builderInputs, readLeafProfiles: !gpuSparseRequested });
@@ -2231,7 +2271,7 @@ export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput)
     };
   }
   const assemblyStartedAt = performance.now();
-  const solidFields = input.coupling ? solidFieldsFromBodies(input.scene, input.coupling.bodies, nx, ny, nz, h) : undefined;
+  const solidFields = solidFieldsFromBodies(input.scene, input.coupling?.bodies ?? [], nx, ny, nz, h);
   const variationalBodies = input.coupling ? variationalBodiesFrom(input.scene, input.coupling) : [];
   const system = buildVariationalSystem(pressureGrid, {
     solidFraction: solidFields?.solidFraction, solidOwner: solidFields?.solidOwner, bodies: variationalBodies
