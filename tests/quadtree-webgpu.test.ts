@@ -3,7 +3,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { resolveMethodValues, simulationMethods } from "../lib/methods";
 import { quadtreeTallCellMethod } from "../lib/methods/quadtree-tall-cell";
-import { nextQuadtreeIterationBudget, quadtreeChebyshevPasses, quadtreeDispatchShader, quadtreeDivergenceShader, quadtreeIterationBudget, quadtreeMegakernelDofLimit, quadtreeMegakernelPreferred, quadtreeMegakernelRowIterationLimit, quadtreeMultigridShader, quadtreeTallCellProjectionShader, quadtreeVelocityClampShader, quadtreeVelocityExtrapolationShader, WebGPUQuadtreeTallCellProjection } from "../lib/webgpu-quadtree-tall-cell";
+import { nextQuadtreeIterationBudget, quadtreeChebyshevPasses, quadtreeChebyshevSpectrum, quadtreeDispatchShader, quadtreeDivergenceShader, quadtreeIterationBudget, quadtreeMegakernelDofLimit, quadtreeMegakernelPreferred, quadtreeMegakernelRowIterationLimit, quadtreeMultigridShader, quadtreeTallCellProjectionShader, quadtreeVelocityClampShader, quadtreeVelocityExtrapolationShader, WebGPUQuadtreeTallCellProjection } from "../lib/webgpu-quadtree-tall-cell";
 import { nextQuadtreeVofReconciliationActive, packedQuadtreeRootMap, quadtreeConstructionShader, quadtreeSurfaceJumpSequence, quadtreeSurfaceShader, quadtreeVofReconciliationFraction, WebGPUQuadtreeBuilder, WebGPUQuadtreeSurfaceState } from "../lib/webgpu-quadtree-builder";
 import { quadtreeSegmentationPackShader, WebGPUQuadtreePackBuilder } from "../lib/webgpu-quadtree-pack-builder";
 import { buildAdaptiveOpticalLayerField, buildQuadtree, buildVariationalSystem, populateTallPressureGrid } from "../lib/quadtree-tall-cell-grid";
@@ -16,7 +16,7 @@ test("the old optical-layer method is replaced by quadtree tall cells", () => {
   assert.equal(quadtreeTallCellMethod.shortLabel, "Adaptive");
   assert.match(quadtreeTallCellMethod.detail, /T-junction/);
   assert.equal(quadtreeTallCellMethod.presetFor("balanced").preconditioner, "poly", "the parallel polynomial preconditioner is the runtime default");
-  assert.equal(quadtreeTallCellMethod.presetFor("balanced").pressureSolver, "chebyshev", "the reduction-free row-parallel solve is the runtime default");
+  assert.equal(quadtreeTallCellMethod.presetFor("balanced").pressureSolver, "pcg", "the tolerance-driven solve is the runtime default");
   assert.equal(quadtreeTallCellMethod.presetFor("balanced").opticalLayerMode, "adaptive-motion", "the product preset exercises the 2026 adaptive layer while the fixed path remains selectable");
   assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "opticalLayerMode" && param.default === "adaptive-motion"));
   assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "opticalAlpha" && param.default === 0.5));
@@ -25,10 +25,10 @@ test("the old optical-layer method is replaced by quadtree tall cells", () => {
   assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "vofReconciliation" && param.default === "on"), "catastrophic-loss recovery is armed by default but inactive during healthy phi transport");
 });
 
-test("quadtree Chebyshev pressure keeps rows parallel and exact PCG selectable", () => {
-  assert.equal(quadtreeChebyshevPasses(96), 24);
-  assert.equal(quadtreeChebyshevPasses(160), 40);
-  assert.equal(quadtreeChebyshevPasses(240), 60);
+test("quadtree Chebyshev pressure is bounded, row parallel, and opt-in", () => {
+  assert.equal(quadtreeChebyshevPasses(96), 96);
+  assert.equal(quadtreeChebyshevPasses(160), 160);
+  assert.equal(quadtreeChebyshevPasses(240), 240);
   for (const entry of ["initializeChebyshev", "iterateChebyshevAB", "iterateChebyshevBA", "finishChebyshevFromPressure", "finishChebyshevFromBest", "reduceChebyshevResidual"]) {
     assert.match(quadtreeTallCellProjectionShader, new RegExp(`fn ${entry}\\b`));
   }
@@ -37,8 +37,27 @@ test("quadtree Chebyshev pressure keeps rows parallel and exact PCG selectable",
     quadtreeTallCellProjectionShader.indexOf("fn initialize(")
   );
   assert.match(polynomial, /pressureProduct\(row, source\)/, "each pass is a cached sparse row product");
-  assert.match(polynomial, /let lower = 0\.01; let upper = 2\.2/);
+  assert.match(polynomial, /let lower = 0\.005; let upper = 4\.2/);
   assert.doesNotMatch(polynomial, /workgroupBarrier|atomic|coupleReduce|coupleApply/, "the hot polynomial pass has no global scalar dependency");
+
+  // The live dam-break matrix reaches lambda_max ~= 3.88 after diagonal
+  // scaling. Exercise that edge directly so an octree-sized upper bound can
+  // never be copied back into this solver unnoticed.
+  const eigenvalue = 3.88;
+  const { lower, upper } = quadtreeChebyshevSpectrum;
+  const theta = 0.5 * (upper + lower), delta = 0.5 * (upper - lower), sigma = theta / delta;
+  let pressure = 0, previousSearch = 0, previousRho = 0;
+  for (let pass = 0; pass < quadtreeChebyshevPasses(96); pass += 1) {
+    const residual = 1 - eigenvalue * pressure;
+    const rho = previousRho > 0 ? 1 / (2 * sigma - previousRho) : 1 / sigma;
+    const search = previousRho > 0
+      ? rho * previousRho * previousSearch + (2 * rho / delta) * residual
+      : residual / theta;
+    pressure += search;
+    previousSearch = search;
+    previousRho = rho;
+  }
+  assert.ok(Math.abs(1 - eigenvalue * pressure) < 1e-2, "the corrected polynomial damps the measured high-frequency mode by at least two orders of magnitude");
 
   const encode = WebGPUQuadtreeTallCellProjection.prototype.encode.toString();
   assert.match(encode, /exactCoupled=coupled&&!chebyshev/, "accelerated rigid solves omit the exact low-rank response");
@@ -46,8 +65,8 @@ test("quadtree Chebyshev pressure keeps rows parallel and exact PCG selectable",
   assert.match(encode, /if\(coupled\)direct\("coupleImpulse",1\)/, "both paths publish the current pressure impulse");
 
   const defaults = resolveMethodValues(quadtreeTallCellMethod, "balanced", {});
-  assert.equal(defaults.pressureSolver, "chebyshev");
-  assert.equal(resolveMethodValues(quadtreeTallCellMethod, "balanced", { pressureSolver: "pcg" }).pressureSolver, "pcg");
+  assert.equal(defaults.pressureSolver, "pcg");
+  assert.equal(resolveMethodValues(quadtreeTallCellMethod, "balanced", { pressureSolver: "chebyshev" }).pressureSolver, "chebyshev");
 });
 
 test("quadtree projection preserves and extrapolates near-surface air velocity", () => {

@@ -145,16 +145,19 @@ The 2x2 SPD GPU test runs both Jacobi and poly-2 and verifies the solution,
 residual, iteration, alpha/beta, and best-iterate telemetry on the executing
 adapter.
 
-The default throughput solver is now a fixed row-parallel Chebyshev
-semi-iteration over `D^-1 A`, using the same measured `[0.01, 2.2]` spectral
-interval as the octree pressure path. Balanced/high/ultra effort maps from
-96/160/240 equivalent sweeps to 24/40/60 polynomial passes. Each pass is one
-cached sparse row product and a local recurrence; it has no dot-product
-reduction, convergence readback, or single-workgroup owner. Pressure and best
-pressure are used as ping-pong vectors, while existing scratch fields retain
-the previous correction, recurrence scalar, and original RHS. A final
-row-parallel residual plus one reduction keeps quality telemetry honest
-without putting a scalar boundary back into the hot loop.
+The product default is the tolerance-driven PCG ladder. A fixed row-parallel
+Chebyshev semi-iteration over `D^-1 A` remains available as an experimental
+throughput option. The octree interval was not transferable: the 8,413-DOF
+dam-break quadtree matrix has a measured largest diagonally-scaled eigenvalue
+of about 3.88, so the former upper bound of 2.2 made the polynomial diverge.
+The corrected conservative interval is `[0.005, 4.2]`, and balanced/high/ultra
+now execute 96/160/240 passes instead of the unsupported four-to-one mapping.
+Each pass is one cached sparse row product and a local recurrence; it has no
+dot-product reduction, convergence readback, or single-workgroup owner.
+Pressure and best pressure are ping-pong vectors, while existing scratch
+fields retain the previous correction, recurrence scalar, and original RHS.
+A final row-parallel residual plus one reduction keeps quality telemetry
+honest without putting a scalar boundary back into the hot loop.
 
 For dynamic rigid bodies, this accelerated path uses a partitioned lagged
 split. The current body velocity remains in the solid-boundary RHS, the fluid
@@ -162,9 +165,9 @@ operator omits `K M^-1 K^T`, and `K^T p` is evaluated once after the final
 polynomial pass for delivery to the next controller batch. Dense and
 variational reactions share one pooled asynchronous staging slot, so every
 submitted impulse snapshot remains independent without a per-step buffer
-allocation or queue fence. `pressureSolver=pcg` (or
-`FLUID_QUADTREE_PRESSURE_SOLVER=pcg` in the smoke harness) retains the exact
-same-step low-rank response and tolerance-driven PCG ladder for A/B checks.
+allocation or queue fence. `pressureSolver=chebyshev` (or
+`FLUID_QUADTREE_PRESSURE_SOLVER=chebyshev` in the smoke harness) opts into
+this split; the default PCG path retains the exact same-step low-rank response.
 Coupled quadtree submission depth remains one until moving-body topology and
 rasterization no longer require the existing host-side rebuild path.
 
