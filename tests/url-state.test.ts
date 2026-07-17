@@ -26,7 +26,6 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
     gridOverlayAxis: "z",
     gridOverlaySlice: 0.7,
     waterRenderMode: "ray-marched",
-    environmentId: "night-lab",
     targetFps: 90,
     camera: { ...initialUI.camera, distance_m: 4.2 }
   });
@@ -42,7 +41,6 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   assert.equal(parsed.ui.gridOverlayAxis, "z");
   assert.equal(parsed.ui.gridOverlaySlice, 0.7);
   assert.equal(parsed.ui.waterRenderMode, "ray-marched");
-  assert.equal(parsed.ui.environmentId, "night-lab");
   assert.equal(parsed.ui.targetFps, 90);
   assert.equal(parsed.ui.camera.distance_m, 4.2);
   assert.deepEqual(parsed.overrides, {
@@ -109,9 +107,23 @@ test("invalid external query values fall back to validated defaults", () => {
   assert.equal(parsed.scene.container.width_m, defaultScene.container.width_m);
   assert.equal(parsed.scene.fluid.gravity_m_s2.y, defaultScene.fluid.gravity_m_s2.y);
   assert.equal(parsed.ui.view, "scientific");
-  assert.equal(parsed.ui.environmentId, "default");
   assert.equal(parsed.ui.diagnosticsOpen, false);
   assert.equal(parsed.ui.rightPanel, null);
+});
+
+test("background is fixed by the scene and legacy environment overrides are removed", () => {
+  const parsed = parseQueryState("?scene=sphere-jet&environment=garden");
+  assert.equal(getScenePreset(parsed.presetId).background, "night-lab");
+
+  const query = serializeQueryState("?scene=sphere-jet&environment=garden", {
+    presetId: parsed.presetId,
+    scene: parsed.scene
+  }, {
+    methodId: parsed.methodId,
+    quality: parsed.quality,
+    overrides: parsed.overrides
+  }, parsed.ui);
+  assert.equal(new URLSearchParams(query).has("environment"), false);
 });
 
 test("viewport utility panels round-trip through one mutually exclusive query state", () => {

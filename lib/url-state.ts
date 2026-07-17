@@ -6,7 +6,6 @@ import { useSceneStore } from "./stores/scene-store";
 import { useUIStore, type RightPanel } from "./stores/ui-store";
 import type { GPUQuality } from "./tall-cell-grid";
 import type { GridOverlayConfig, GridOverlayMode, WaterRenderMode } from "./webgpu-renderer";
-import { isEnvironmentId, type EnvironmentId } from "./environments";
 import { clampTargetFps, MAX_TARGET_FPS, MIN_TARGET_FPS } from "./frame-pacing";
 
 const qualities: ReadonlyArray<GPUQuality> = ["balanced", "high", "ultra"];
@@ -60,7 +59,6 @@ type UIQueryState = {
   gridOverlaySlice: number;
   gridOverlayMode: GridOverlayMode;
   waterRenderMode: WaterRenderMode;
-  environmentId: EnvironmentId;
   targetFps: number;
 };
 
@@ -166,7 +164,6 @@ export function parseQueryState(search: string): QueryState {
   const grid = query.get("grid");
   const gridMode = query.get("gridMode");
   const render = query.get("render");
-  const environment = query.get("environment");
   const requestedPanel = query.get("panel");
   // One-way migration for shared pre-sidebar links. Serialization always emits
   // the mutually exclusive panel state instead of restoring the old UI flag.
@@ -200,9 +197,6 @@ export function parseQueryState(search: string): QueryState {
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: gridMode === "structure" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
       waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode,
-      // The scene preset carries its own art direction (a garden pond loads
-      // the garden); an explicit environment parameter still wins.
-      environmentId: isEnvironmentId(environment) ? environment : preset.environment ?? initialUI.environmentId,
       targetFps: clampTargetFps(numberParam(query, "fps", initialUI.targetFps, MIN_TARGET_FPS, MAX_TARGET_FPS))
     }
   };
@@ -229,7 +223,6 @@ export function serializeQueryState(
   query.set("quality", methodState.quality);
   query.set("view", uiState.view);
   query.set("render", uiState.waterRenderMode);
-  query.set("environment", uiState.environmentId);
   if (uiState.targetFps !== useUIStore.getInitialState().targetFps) query.set("fps", String(uiState.targetFps));
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");

@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { defaultCamera, type CameraState, type ViewMode } from "../model";
 import type { GridOverlayConfig, GridOverlayMode, WaterRenderMode } from "../webgpu-renderer";
-import { defaultEnvironmentId, type EnvironmentId } from "../environments";
 import { clampTargetFps, DEFAULT_TARGET_FPS } from "../frame-pacing";
 
 export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | null;
@@ -21,8 +20,6 @@ interface UIStore {
   gridOverlayMode: GridOverlayMode;
   /** Optical presentation pipeline. The legacy ray marcher stays available for A/B comparisons. */
   waterRenderMode: WaterRenderMode;
-  /** Art-directed room, lighting, and foreground treatment surrounding the tank. */
-  environmentId: EnvironmentId;
   /** Requested presentation and raster-surface refresh rate. */
   targetFps: number;
   setView: (view: ViewMode) => void;
@@ -35,7 +32,6 @@ interface UIStore {
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setWaterRenderMode: (mode: WaterRenderMode) => void;
-  setEnvironmentId: (environmentId: EnvironmentId) => void;
   setTargetFps: (targetFps: number) => void;
 }
 
@@ -50,7 +46,6 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
   waterRenderMode: "rasterized",
-  environmentId: defaultEnvironmentId,
   targetFps: DEFAULT_TARGET_FPS,
   setView: (view) => set({ view }),
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
@@ -65,6 +60,5 @@ export const useUIStore = create<UIStore>((set) => ({
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
   setWaterRenderMode: (waterRenderMode) => set({ waterRenderMode }),
-  setEnvironmentId: (environmentId) => set({ environmentId }),
   setTargetFps: (targetFps) => set({ targetFps: clampTargetFps(targetFps) })
 }));

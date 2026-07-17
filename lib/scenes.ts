@@ -11,8 +11,8 @@ export interface ScenePreset {
   description: string;
   create(): SceneDescription;
   camera?: Partial<CameraState>;
-  /** Environment to switch to when the preset loads (UI-only presentation). */
-  environment?: EnvironmentId;
+  /** Art-directed background that is part of this preset's presentation. */
+  background: EnvironmentId;
 }
 
 const paperCamera: Partial<CameraState> = { distance_m: 2.45, target_m: { x: 0, y: 0.42, z: 0 } };
@@ -26,6 +26,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
     name: "Water box · dam break",
     group: "Interactive",
     description: "A collapsing water column. Drag bodies in from the viewport tray.",
+    background: "default",
     create: () => {
       const scene = cloneScene(defaultScene);
       scene.rigidBodies = [];
@@ -37,6 +38,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
     name: "Water box · settled tank",
     group: "Interactive",
     description: "The same container starting from a settled fill; drop bodies into calm water.",
+    background: "bathhouse",
     create: () => {
       const scene = cloneScene(defaultScene);
       scene.sceneId = "interactive-water-box-settled";
@@ -77,7 +79,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
       return scene;
     },
     camera: gardenCamera,
-    environment: "garden"
+    background: "garden"
   },
   {
     id: "garden-dam-break",
@@ -90,7 +92,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
       return scene;
     },
     camera: gardenCamera,
-    environment: "garden"
+    background: "garden"
   },
   {
     id: "garden-hose",
@@ -104,13 +106,14 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
       return scene;
     },
     camera: gardenCamera,
-    environment: "garden"
+    background: "garden"
   },
   {
     id: "hose-tank",
     name: "Hose-filled tank",
     group: "Paper figures",
     description: "Figure 3 · a continuous jet fills a shallow tank.",
+    background: "conservatory",
     create: () => createPaperScenario("hose-tank"),
     camera: paperCamera
   },
@@ -119,6 +122,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
     name: "Dam break + box stack",
     group: "Paper figures",
     description: "Figure 4 · a dam break strikes a stack of rigid boxes.",
+    background: "concrete-gallery",
     create: () => createPaperScenario("dam-break-boxes"),
     camera: paperCamera
   },
@@ -127,6 +131,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
     name: "Jet past sphere",
     group: "Paper figures",
     description: "Figure 6 · an inlet jet flows past a static sphere.",
+    background: "night-lab",
     create: () => createPaperScenario("sphere-jet"),
     camera: paperCamera
   },
@@ -135,6 +140,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
     name: "Deep-water A/B",
     group: "Comparisons",
     description: "20 m tank at 80% fill, 1/30 s paper step, σ = 0 · isolates the grid method.",
+    background: "research-station",
     create: () => {
       const scene = cloneScene(defaultScene);
       scene.sceneId = "deep-water-grid-comparison";
