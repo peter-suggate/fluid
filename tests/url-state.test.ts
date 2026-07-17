@@ -68,6 +68,25 @@ test("query state persists an edited rigid-body roster atomically", () => {
   assert.equal(parsed.scene.rigidBodies[0].density_kg_m3, 640);
 });
 
+test("query state round-trips the coupled CPU and GPU timestep", () => {
+  const scene = getScenePreset("water-box-dam-break").create();
+  scene.numerics.fixedDt_s = 0.006;
+  scene.numerics.maxDt_s = 0.012;
+
+  const query = serializeQueryState("", { presetId: "water-box-dam-break", scene }, {
+    methodId: "tall-cell",
+    quality: "balanced",
+    overrides: {}
+  });
+  const params = new URLSearchParams(query);
+  const parsed = parseQueryState(query);
+
+  assert.equal(params.get("scene.numerics.fixedDt_s"), "0.006");
+  assert.equal(params.get("scene.numerics.maxDt_s"), "0.012");
+  assert.equal(parsed.scene.numerics.fixedDt_s, 0.006);
+  assert.equal(parsed.scene.numerics.maxDt_s, 0.012);
+});
+
 test("invalid external query values fall back to validated defaults", () => {
   const parsed = parseQueryState("?method=nope&scene=nope&quality=extreme&environment=the-void&param.uniform.jacobiIterations=9999&scene.container.width_m=-4&scene.fluid.gravity_m_s2.y=null");
   const defaultScene = getScenePreset("water-box-dam-break").create();

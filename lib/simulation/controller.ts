@@ -354,11 +354,8 @@ class SimulationController {
   recordFrame(metrics: RendererFrameMetrics, resolution: string) {
     const diagnostics = useDiagnosticsStore.getState();
     const now = performance.now();
-    if (now - this.sampleClock <= 250) {
-      if (metrics.cpuFrame_ms !== diagnostics.frameMs || resolution !== diagnostics.resolution) diagnostics.set({ frameMs: metrics.cpuFrame_ms, resolution });
-      return;
-    }
-    this.sampleClock = now;
+    const metricSampleDue = now - this.sampleClock > 250;
+    if (metricSampleDue) this.sampleClock = now;
     const gpu = diagnostics.gpuInfo?.gpuTimings, previous = this.performance;
     // Timestamp-query wraparound can produce wildly negative or multi-hour
     // stage times; keep the previous sample rather than displaying garbage.
@@ -400,7 +397,7 @@ class SimulationController {
     };
     this.performance = snapshot;
     diagnostics.set({ frameMs: metrics.cpuFrame_ms, resolution });
-    diagnostics.pushPerformance(snapshot, { t: now / 1000, frame_ms: metrics.cpuFrame_ms, volume_drift_pct: this.fluidSolver.diagnostics.markerVolumeDrift * 100, constraint_error: this.fluidSolver.diagnostics.divergenceAfter_s, kinetic_energy_J: this.fluidSolver.diagnostics.kineticEnergy_J });
+    diagnostics.pushPerformance(snapshot, metricSampleDue ? { t: now / 1000, frame_ms: metrics.cpuFrame_ms, volume_drift_pct: this.fluidSolver.diagnostics.markerVolumeDrift * 100, constraint_error: this.fluidSolver.diagnostics.divergenceAfter_s, kinetic_energy_J: this.fluidSolver.diagnostics.kineticEnergy_J } : undefined);
   }
 
   // ---- persistence -------------------------------------------------------

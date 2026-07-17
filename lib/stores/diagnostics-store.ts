@@ -66,7 +66,7 @@ interface DiagnosticsStore {
   performanceSnapshot: PerformanceSnapshot;
   performanceHistory: PerformanceSnapshot[];
   set: (patch: Partial<DiagnosticsStore>) => void;
-  pushPerformance: (snapshot: PerformanceSnapshot, sample: MetricSample) => void;
+  pushPerformance: (snapshot: PerformanceSnapshot, sample?: MetricSample) => void;
 }
 
 export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
@@ -86,6 +86,6 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   pushPerformance: (snapshot, sample) => set((state) => ({
     performanceSnapshot: snapshot,
     performanceHistory: [...state.performanceHistory.slice(-119), snapshot],
-    samples: [...state.samples.slice(-79), sample]
+    samples: sample ? [...state.samples.slice(-79), sample] : state.samples
   }))
 }));
