@@ -11,6 +11,7 @@ import {
   surfaceRasterShader
 } from "../lib/webgpu-water-pipeline";
 import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
+import { secondaryParticleComputeShader, secondaryParticleOpticalShader, secondaryParticleRenderShader } from "../lib/webgpu-secondary-particles";
 
 const naga = process.env.NAGA ?? "naga";
 const shaders = {
@@ -20,7 +21,10 @@ const shaders = {
   caustics: causticShader,
   scene: sceneShader,
   composite: compositeShader,
-  "grid-overlay": gridOverlayShader
+  "grid-overlay": gridOverlayShader,
+  "secondary-liquid-particles": secondaryParticleRenderShader,
+  "secondary-liquid-particle-optics": secondaryParticleOpticalShader,
+  "secondary-liquid-particle-compute": secondaryParticleComputeShader
 };
 const directory = mkdtempSync(join(tmpdir(), "fluid-water-wgsl-"));
 try {

@@ -6,6 +6,8 @@ const params: MethodParamSpec[] = [
   { kind: "number", key: "pressureIterations", label: "Pressure effort", unit: "equiv. sweeps", min: 16, max: 400, step: 8, digits: 0, default: 128, tier: "coarse", hint: "Jacobi-equivalent pressure effort. The parallel Chebyshev solver maps four equivalent sweeps to one polynomial pass; rigid pressure impulses use a frame-lagged partitioned exchange so the accelerated path stays active." },
   { kind: "number", key: "surfaceColumns", label: "Finest columns", unit: "columns", min: 1_000, max: 20_000, step: 500, digits: 0, default: 2_500, tier: "fine", hint: "Finest x/z lattice shared by the authoritative level set and octree owner map." },
   { kind: "number", key: "adaptivity", label: "Octree adaptivity", unit: "", min: 0, max: 1, step: 0.1, digits: 1, default: 1, tier: "coarse", hint: "Debug quality/performance sweep: 0 forces finest pressure cells everywhere; 1 enables full signed-distance-graded coarsening." },
+  { kind: "select", key: "secondaryParticles", label: "Secondary liquid", default: "on", tier: "coarse", options: [{ value: "on", label: "Spray · mist · foam" }, { value: "off", label: "Off" }], hint: "One-way GPU particles enrich escaped droplets and surface foam without changing liquid mass or pressure." },
+  { kind: "number", key: "secondaryParticleCapacity", label: "Particle budget", unit: "particles", min: 4_096, max: 65_536, step: 1_024, digits: 0, default: 16_384, tier: "fine", hint: "Fixed GPU ring capacity. Full rings overwrite the oldest slots without allocating or reading back." },
   { kind: "select", key: "maximumLeafSize", label: "Maximum leaf", default: "4", tier: "fine", options: [{ value: "2", label: "2³ cells" }, { value: "4", label: "4³ cells" }, { value: "8", label: "8³ cells" }], hint: "Largest dyadic pressure cell. Signed distance grades the grid from a finest interface band to coarse deep liquid, then enforces 2:1 balance." },
   { kind: "select", key: "pressureWarmStart", label: "Pressure warm start", default: "on", tier: "fine", options: [{ value: "on", label: "On (previous field)" }, { value: "off", label: "Off (cold start)" }], hint: "Seed each compacted leaf solve with the previous step's pressure instead of clearing to zero, so the polynomial refines an already-good field. The legacy dense ladder always cold-starts." }
 ];
@@ -19,6 +21,8 @@ const options = (quality: GPUQuality, values: MethodParamValues) => ({
   densitySharpening: false,
   velocityTransport: "maccormack" as const,
   pressureIterations: numberValue(values, params, "pressureIterations"),
+  secondaryParticles: values.secondaryParticles !== "off" && values.secondaryParticles !== false,
+  secondaryParticleCapacity: numberValue(values, params, "secondaryParticleCapacity"),
   tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") },
   octree: {
     pressureIterations: numberValue(values, params, "pressureIterations"),
@@ -46,6 +50,8 @@ export const octreeMethod: SimulationMethod = {
     pressureIterations: quality === "balanced" ? 128 : quality === "high" ? 320 : 400,
     surfaceColumns: quality === "balanced" ? 2_500 : quality === "high" ? 7_000 : 12_500,
     adaptivity: 1,
+    secondaryParticles: "on",
+    secondaryParticleCapacity: 16_384,
     maximumLeafSize: quality === "balanced" ? "4" : "8"
   }),
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, options(quality, values)),

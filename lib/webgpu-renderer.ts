@@ -10,6 +10,7 @@ import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./en
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "./terrain";
 import { gpuBatchDepth } from "./simulation/gpu-clock";
+import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 export type WaterRenderMode = "rasterized" | "ray-marched";
@@ -503,6 +504,7 @@ export class FluidLabRenderer {
   private upscaleSampler?: GPUSampler;
   private upscaleBindGroup?: GPUBindGroup;
   private waterPipeline?: RasterWaterPipeline;
+  private secondaryParticlePipeline?: SecondaryParticleRenderPipeline;
   private gridOverlayPipeline?: GridOverlayPipeline;
   private presentationTexture?: GPUTexture;
   private presentationTextureKey = "";
@@ -551,7 +553,7 @@ export class FluidLabRenderer {
 
   async initialize(): Promise<void> {
     const startedAt_ms=performance.now();
-    const progress=(label:string,completed:number,total=6,phase="renderer")=>this.onStatus({state:"initializing",label,phase,completed,total,startedAt_ms});
+    const progress=(label:string,completed:number,total=7,phase="renderer")=>this.onStatus({state:"initializing",label,phase,completed,total,startedAt_ms});
     progress("Requesting WebGPU adapter",0);
     if (!("gpu" in navigator)) {
       this.onStatus({ state: "unavailable", label: "WebGPU is not available in this browser" });
@@ -637,12 +639,21 @@ export class FluidLabRenderer {
       waterPipeline.destroy();
       console.warn("Raster water pipeline unavailable; using the intact ray marcher", error);
     }
+    const secondaryParticlePipeline = new SecondaryParticleRenderPipeline(device, this.format, this.uniformBuffer);
+    try {
+      progress("Compiling secondary liquid particles",6);
+      await secondaryParticlePipeline.initialize();
+      this.secondaryParticlePipeline = secondaryParticlePipeline;
+      this.waterPipeline?.setSecondaryParticles(secondaryParticlePipeline);
+    } catch (error) {
+      console.warn("Secondary liquid particle renderer unavailable", error);
+    }
     if (this.disposed || this.deviceLost) return;
     this.rebuildBindGroup();
 
     const info = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     this.adapterName = info ? [info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter" : "WebGPU adapter";
-    progress("Renderer ready; preparing solver",6);
+    progress("Renderer ready; preparing solver",7);
     this.onStatus({ state: "ready", label: "WebGPU renderer ready", adapter: this.adapterName });
   }
 
@@ -691,6 +702,7 @@ export class FluidLabRenderer {
       // this fallback rebind, the grid overlay can keep submitting the old
       // topology texture after its queue fence has completed and destroyed it.
       this.rebuildBindGroup();
+      this.secondaryParticlePipeline?.setSource(undefined);
       this.retireGPUFluid(previous);
     }
     this.gpuFluid=undefined;this.gpuFluidKey="";this.gpuFluidPendingKey=key;this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackSecond=-1;
@@ -701,7 +713,7 @@ export class FluidLabRenderer {
       : new Promise<GPUSolverInstance>((resolve,reject)=>setTimeout(()=>{try{resolve(method.createSolver!(device,scene,config.quality,config.values,this.gpuRigidLoadCallback));}catch(error){reject(error);}},0));
     this.gpuFluidPending=create.then((solver)=>{
       if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration){solver.destroy();return;}
-      this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.rebuildBindGroup(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.gpuInfoCallback?.(solver.info);this.onStatus({state:"ready",label:"WebGPU solver ready",adapter:this.adapterName});
+      this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.rebuildBindGroup(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.gpuInfoCallback?.(solver.info);this.onStatus({state:"ready",label:"WebGPU solver ready",adapter:this.adapterName});
     }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed"});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration)this.gpuFluidPending=undefined;});
   }
 
@@ -893,6 +905,8 @@ export class FluidLabRenderer {
       pass.draw(3);
       pass.end();
     }
+    this.secondaryParticlePipeline?.setSource(backend === "webgpu" ? this.gpuFluid?.secondaryParticles : undefined);
+    this.secondaryParticlePipeline?.encode(encoder, this.presentationTexture.createView(), !rasterized);
     if (gridOverlay?.axis !== "off") this.gridOverlayPipeline?.encode(encoder, this.presentationTexture.createView());
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}],...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:10,endOfPassWriteIndex:11}}:{})});
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();

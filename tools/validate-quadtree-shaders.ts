@@ -3,6 +3,7 @@ import { quadtreeConstructionShader, quadtreeSurfaceShader } from "../lib/webgpu
 import { quadtreeDispatchShader, quadtreeDivergenceShader, quadtreeMultigridShader, quadtreeSurfaceTransportShader, quadtreeTallCellProjectionShader, quadtreeVelocityClampShader, quadtreeVelocityExtrapolationShader } from "../lib/webgpu-quadtree-tall-cell";
 import { quadtreeCsrPackShader, quadtreeFacePackShader, quadtreePackAuxShader, quadtreePackCopyShader, quadtreePackFinalizeShader, quadtreePackScanIOShader, quadtreePackScanShader, quadtreePackTextureShader, quadtreeSegmentationPackShader } from "../lib/webgpu-quadtree-pack-builder";
 import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
+import { secondaryParticleComputeShader } from "../lib/webgpu-secondary-particles";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
@@ -60,6 +61,7 @@ await validate("velocity-extrapolation", quadtreeVelocityExtrapolationShader, ["
 await validate("divergence-diagnostic", quadtreeDivergenceShader, ["computeDivergence"]);
 await validate("velocity-clamp", quadtreeVelocityClampShader, ["clampVelocity"]);
 await validate("surface-transport", quadtreeSurfaceTransportShader, ["buildSurfaceTransport"]);
+await validate("secondary-liquid-particles", secondaryParticleComputeShader, ["updateParticles", "spawnParticles"]);
 await validate("resident-segmentation-pack", quadtreeSegmentationPackShader, ["classifySegments", "emitSegments"]);
 await validateOverlay();
 await validate("resident-face-pack", quadtreeFacePackShader, ["countFaces", "emitFaces"]);
