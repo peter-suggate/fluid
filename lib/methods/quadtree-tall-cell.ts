@@ -35,6 +35,8 @@ export const quadtreeTallCellMethod: SimulationMethod = {
     pressureIterations: numberValue(values, params, "pressureIterations"),
     tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") },
     quadtreeRebuildTopology: values.rebuildTopology !== false,
+    ...(typeof values.topologyStaleSteps === "number" ? { quadtreeTopologyStaleSteps: values.topologyStaleSteps } : {}),
+    ...(typeof values.inlineRebuild === "boolean" ? { quadtreeInlineRebuild: values.inlineRebuild } : {}),
     quadtreeTallCells: {
       pressureIterations: numberValue(values, params, "pressureIterations"),
       // Narita et al. stop ICCG at a 1e-4 relative residual. The shared scene
@@ -57,6 +59,8 @@ export const quadtreeTallCellMethod: SimulationMethod = {
     pressureIterations: numberValue(values, params, "pressureIterations"),
     tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") },
     quadtreeRebuildTopology: values.rebuildTopology !== false,
+    ...(typeof values.topologyStaleSteps === "number" ? { quadtreeTopologyStaleSteps: values.topologyStaleSteps } : {}),
+    ...(typeof values.inlineRebuild === "boolean" ? { quadtreeInlineRebuild: values.inlineRebuild } : {}),
     quadtreeTallCells: {
       pressureIterations: numberValue(values, params, "pressureIterations"), relativeTolerance: Math.max(scene.numerics.pressureRelativeTolerance, 1e-4),
       adaptivityStrength: numberValue(values, params, "adaptivityStrength"),

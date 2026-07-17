@@ -1124,7 +1124,8 @@ export class WebGPUQuadtreeTallCellProjection {
   private readonly velocityClampCounter: GPUBuffer;
   private readonly velocityClampPipeline: GPUComputePipeline;
   private readonly velocityClampBindGroup: GPUBindGroup;
-  private readonly dofCount: number;
+  /** Mutable: the non-blocking inline-rebuild monitor refreshes it from packControl. */
+  private dofCount: number;
   private readonly preconditionBlockGroups: number;
   private iterations: number;
   private iterationBudget: QuadtreeIterationBudget;
@@ -1143,6 +1144,16 @@ export class WebGPUQuadtreeTallCellProjection {
   private lastInitialResidualRms?: number;
   private solveSequence = 0;
   private feedbackSequence = -1;
+  /** Capacity-sized GPU pack targets bound by this projection; enables Algorithm-1 in-place rebuilds. */
+  private readonly residentResources?: GPUQuadtreeResidentResources;
+  private readonly inlineSupported: boolean;
+  /** Set by the monitor when a pack overflowed capacity; one async rebuild regrows and swaps. */
+  inlineNeedsAsyncRebuild = false;
+  private inlineMonitorBuffer?: GPUBuffer;
+  private inlineMonitorPending = false;
+  private inlineMonitorEncoded = false;
+  private inlineExplicitSizing?: Float32Array;
+  private inlineBuilder?: WebGPUQuadtreeBuilder;
 
   constructor(private readonly device: GPUDevice, private readonly scene: SceneDescription, private readonly dims: { nx: number; ny: number; nz: number }, private readonly resources: ProjectionResources, private readonly options: QuadtreeTallCellProjectionOptions, fields?: ProjectionFields, private readonly coupling?: QuadtreeRigidCoupling,deferPipelineCompilation=false,cache?:QuadtreeGPUCache) {
     const constructorStartedAt = performance.now();
@@ -1249,13 +1260,17 @@ export class WebGPUQuadtreeTallCellProjection {
     this.mappedPressureSampledFallback = device.createTexture({ label: "Quadtree MLS sampled fallback", size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING });
     this.divergence = device.createTexture({ label: "Quadtree post-projection divergence", size: [nx, ny, nz], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
     this.velocityClampCounter = device.createBuffer({ label: "Quadtree CFL safety telemetry", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    const state = device.createBuffer({ label: "Quadtree tall-cell PCG SoA state", size: Math.max(32, this.dofCount * 32), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    // Count-dependent solver state is sized by the pack capacity when the
+    // projection owns resident GPU pack targets, so in-place topology rebuilds
+    // can grow the DOF count without any reallocation or bind-group churn.
+    const dofCapacity = resident?.capacities ? Math.max(this.dofCount, resident.capacities.dofCapacity) : this.dofCount;
+    const state = device.createBuffer({ label: "Quadtree tall-cell PCG SoA state", size: Math.max(32, dofCapacity * 32), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     // Words 0..11 are the CG scalars; words 12+ hold the per-body coupling
     // six-vectors (stride 8, up to 12 bodies).
-    const rowGroups = Math.ceil(this.dofCount / 128), partialWords = 2 * rowGroups;
+    const rowGroups = Math.ceil(this.dofCount / 128), partialWords = 2 * Math.ceil(dofCapacity / 128);
     const scalars = device.createBuffer({ label: "Quadtree tall-cell CG scalars and partial reductions", size: 4 * (108 + partialWords), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.scalarBuffer = scalars;
-    this.dispatchArgs = device.createBuffer({ label: "Quadtree tall-cell active dispatches", size: 100, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
+    this.dispatchArgs = device.createBuffer({ label: "Quadtree tall-cell active dispatches", size: 124, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
     this.couplingBodyCount = packed.couplingBodyCount; this.couplingDistinctDofs = packed.couplingDistinctDofs; this.couplingBodyIndices = packed.couplingBodyIndices;
     this.params = device.createBuffer({ label: "Quadtree tall-cell parameters", size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.params, 0, new Uint32Array([nx, ny, nz, factorAuxWidth, 0, 0, 0, 0]).buffer);
@@ -1284,12 +1299,14 @@ export class WebGPUQuadtreeTallCellProjection {
     ]).buffer);
     const couplingGroups = Math.ceil(packed.couplingDistinctDofs / 128);
     // Four live dispatch triples (row groups, single workgroup, coupling
-    // groups, blockic blocks), the template copied by updateDispatch, then the
-    // squared tolerance.
-    const dispatchWords = new Uint32Array(25);
+    // groups, blockic blocks), the template copied by updateDispatch, the
+    // squared tolerance, then two never-zeroed setup triples (words 25-27 row
+    // groups, 28-30 face groups) that in-place GPU rebuilds patch directly.
+    const dispatchWords = new Uint32Array(31);
     dispatchWords.set([rowGroups, 1, 1, 1, 1, 1, couplingGroups, 1, 1, Math.ceil(packed.blockCount / 64), 1, 1]);
     dispatchWords.set(dispatchWords.subarray(0, 12), 12);
     dispatchWords[24] = new Uint32Array(new Float32Array([options.relativeTolerance ** 2]).buffer)[0];
+    dispatchWords.set([rowGroups, 1, 1, Math.ceil(faceCount / 128), 1, 1], 25);
     device.queue.writeBuffer(this.dispatchArgs, 0, dispatchWords);
     let layout: GPUBindGroupLayout;
     if (cache) {
@@ -1400,6 +1417,12 @@ export class WebGPUQuadtreeTallCellProjection {
     this.bindGroup = device.createBindGroup({ layout, entries: projectionEntries(this.mappedPressureStorageFallback, this.mappedPressure) });
     this.mapPressureBindGroup = device.createBindGroup({ layout, entries: projectionEntries(this.mappedPressure, this.mappedPressureSampledFallback) });
     this.buffers = [...all, this.dispatchArgs, this.velocityClampCounter];
+    // Algorithm-1 in-place rebuilds: available once the sparse pack lives in
+    // capacity-sized GPU resources this projection owns. Rigid coupling and
+    // incomplete-factor preconditioners stay on the asynchronous CPU path.
+    const preconditionerChoice = options.preconditioner ?? "ic0";
+    this.residentResources = resident;
+    this.inlineSupported = !!resident?.packControl && !coupling && (preconditionerChoice === "poly" || preconditionerChoice === "jacobi");
     if (options.debugPressureTimings && device.features.has("timestamp-query")) {
       this.phaseQuerySet = device.createQuerySet({ label: "Quadtree pressure phase timings", type: "timestamp", count: 8 });
       this.phaseQueryResolve = device.createBuffer({ label: "Quadtree pressure phase timing resolve", size: 64, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
@@ -1959,8 +1982,24 @@ export class WebGPUQuadtreeTallCellProjection {
       const indirect = (entry: string, offset: number) => { pass.setPipeline(this.pipelines[entry]); pass.setBindGroup(0, this.bindGroup); pass.dispatchWorkgroupsIndirect(this.dispatchArgs, offset); };
       encode(direct, indirect, pass); pass.end();
     };
-    const setup = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void) => {
+    // In-place GPU rebuilds make the counts GPU-authoritative: every
+    // count-shaped setup dispatch reads the never-zeroed indirect triples
+    // (word 25 row groups, word 28 face groups) patched from packControl.
+    const gpuCounts = this.inlineSupported;
+    const indirectPreconditionSetup = (indirect: (entry: string, offset: number) => void) => {
+      if (preconditioner === "jacobi") indirect("preconditionJacobi", 100);
+      else {
+        indirect("preconditionPolynomialStart", 100);
+        for (let degree = 1; degree < polynomialDegree; degree += 1) { indirect("preconditionPolynomialMultiply", 100); indirect("preconditionPolynomialUpdate", 100); }
+      }
+    };
+    const setup = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void, indirect: (entry: string, offset: number) => void) => {
       // Geometry-dependent values are refreshed once, outside the CG loop.
+      if (gpuCounts) {
+        indirect("refreshFaces", 112); indirect("refreshRows", 100);
+        indirect("initialize", 100); indirectPreconditionSetup(indirect); indirect("startDirection", 100); direct("reduceInitial", 1);
+        return;
+      }
       direct("refreshFaces", Math.ceil(this.info.faceCount / 128)); direct("refreshRows", rowGroups);
       direct("initialize", rowGroups); directPrecondition(direct); direct("startDirection", rowGroups); direct("reduceInitial", 1);
     };
@@ -1980,32 +2019,33 @@ export class WebGPUQuadtreeTallCellProjection {
     const mapPressure = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void) => {
       direct("mapPressure", Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
     };
-    const project = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void) => {
+    const project = (direct: (entry: string, workgroups: number, y?: number, z?: number) => void, indirect: (entry: string, offset: number) => void) => {
       if (coupled) direct("coupleImpulse", 1);
       // Paper Sec. 6: virtually split adaptive cells only for pressure
       // interpolation, then discard the temporary cubical pressure field.
-      direct("refreshFaceMls", Math.ceil(this.info.faceCount / 128));
+      if (gpuCounts) indirect("refreshFaceMls", 112);
+      else direct("refreshFaceMls", Math.ceil(this.info.faceCount / 128));
       direct("project", Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
     };
     if (this.phaseQuerySet && this.phaseQueryResolve) {
       if (timestampWrites) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } }); marker.end(); }
       const writes = (beginningOfPassWriteIndex: number, endOfPassWriteIndex: number): GPUComputePassTimestampWrites => ({ querySet: this.phaseQuerySet!, beginningOfPassWriteIndex, endOfPassWriteIndex });
       const firstCount = Math.min(this.iterations, Math.max(1, Math.round(this.options.debugPressureFirstIterations ?? 8)));
-      withPass(writes(0, 1), (direct) => setup(direct));
+      withPass(writes(0, 1), (direct, indirect) => setup(direct, indirect));
       withPass(writes(2, 3), (direct, indirect, pass) => iterations(0, firstCount, direct, indirect, pass));
       withPass(writes(4, 5), (direct, indirect, pass) => iterations(firstCount, this.iterations, direct, indirect, pass));
       withPass({ querySet: this.phaseQuerySet, beginningOfPassWriteIndex: 6 }, (direct) => mapPressure(direct));
-      withPass({ querySet: this.phaseQuerySet, endOfPassWriteIndex: 7 }, (direct) => project(direct));
+      withPass({ querySet: this.phaseQuerySet, endOfPassWriteIndex: 7 }, (direct, indirect) => project(direct, indirect));
       encoder.resolveQuerySet(this.phaseQuerySet, 0, 8, this.phaseQueryResolve, 0);
       if (timestampWrites) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: timestampWrites.querySet, beginningOfPassWriteIndex: timestampWrites.endOfPassWriteIndex } }); marker.end(); }
     } else {
       // MLS materialization writes a transient texture, so WebGPU requires a
       // pass boundary before the conservative projection samples it.
       withPass(timestampWrites ? { querySet: timestampWrites.querySet, beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } : undefined,
-        (direct, indirect, pass) => { setup(direct); iterations(0, this.iterations, direct, indirect, pass); });
+        (direct, indirect, pass) => { setup(direct, indirect); iterations(0, this.iterations, direct, indirect, pass); });
       withPass(undefined, (direct) => mapPressure(direct));
       withPass(timestampWrites ? { querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex } : undefined,
-        (direct) => project(direct));
+        (direct, indirect) => project(direct, indirect));
     }
     // A pressure kick can be created inside this solve, after the frame's
     // proactive subdivision decision. Clamp only that last-resort overshoot
@@ -2128,6 +2168,82 @@ export class WebGPUQuadtreeTallCellProjection {
     return { ...this.options, iterationBudgetHint: this.iterations, iterationEmaHint: this.iterationBudget.ema };
   }
 
+  /** True when Algorithm-1's every-step topology regeneration can run fully on the GPU. */
+  get canEncodeInlineRebuild() {
+    return this.inlineSupported && !this.inlineNeedsAsyncRebuild
+      && !!this.residentResources && !!this.gpuCache.gpuPack?.canEncodeResident(this.residentResources);
+  }
+
+  /**
+   * Narita Algorithm 1, fully GPU-resident: encode sizing/subdivision, the
+   * sparse pack, and the in-place publish into this projection's live
+   * resources ahead of the step's own kernels. No readback sits between the
+   * rebuild and the solve, so a fresh topology lands every simulation step;
+   * a small non-blocking packControl monitor keeps telemetry current and
+   * requests one asynchronous rebuild when capacities overflow.
+   */
+  encodeInlineRebuild(encoder: GPUCommandEncoder): boolean {
+    const resident = this.residentResources, gpuPack = this.gpuCache.gpuPack;
+    if (!resident || !gpuPack || !this.canEncodeInlineRebuild) return false;
+    const { nx, ny, nz } = this.dims;
+    const h = { x: this.scene.container.width_m / nx, y: this.scene.container.height_m / ny, z: this.scene.container.depth_m / nz };
+    this.inlineBuilder ??= new WebGPUQuadtreeBuilder(this.device, this.dims, h, this.options.maximumLeafSize, this.options.adaptivityStrength, 3, this.gpuCache.construction);
+    this.gpuCache.construction = this.inlineBuilder.cache;
+    // Uncoupled scenes have static explicit sizing (rigid-coupled rebuilds
+    // stay on the asynchronous path), so the CPU field is computed once.
+    this.inlineExplicitSizing ??= initialSizing(this.scene, nx, nz, h);
+    const finalTopology = this.inlineBuilder.encodeConstruction(encoder, {
+      velocity: this.resources.velocityOut, levelSet: this.surfaceState.texture,
+      explicitSizing: this.inlineExplicitSizing, diagnosticBytes: 48 + 12 * 8 * 4
+    });
+    if (!gpuPack.encodeResidentPack(encoder, finalTopology, this.surfaceState.texture, resident)) return false;
+    // Publish the (fresh or retained) counts into the uniform parameters and
+    // the never-zeroed indirect setup triples. finalizeControl only advances
+    // words 0-4 on a valid pack, so these copies are always consistent.
+    const control = resident.packControl;
+    encoder.copyBufferToBuffer(control, 0, this.params, 32, 8);   // dofCount, faceCount
+    encoder.copyBufferToBuffer(control, 8, this.params, 84, 4);   // dofSamplesBase
+    encoder.copyBufferToBuffer(control, 12, this.params, 92, 4);  // rowGroups (partial reductions)
+    encoder.copyBufferToBuffer(control, 12, this.dispatchArgs, 48, 4);   // CG template row groups
+    encoder.copyBufferToBuffer(control, 12, this.dispatchArgs, 100, 4);  // setup row groups
+    encoder.copyBufferToBuffer(control, 16, this.dispatchArgs, 112, 4);  // setup face groups
+    if (!this.inlineMonitorPending) {
+      this.inlineMonitorBuffer ??= this.device.createBuffer({ label: "Quadtree inline rebuild monitor", size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      encoder.copyBufferToBuffer(control, 0, this.inlineMonitorBuffer, 0, 64);
+      this.inlineMonitorEncoded = true;
+    }
+    return true;
+  }
+
+  /** Kick the non-blocking monitor readback after the step's queue submission. */
+  finishInlineRebuild() {
+    if (!this.inlineMonitorEncoded || !this.inlineMonitorBuffer) return;
+    const buffer = this.inlineMonitorBuffer;
+    this.inlineMonitorEncoded = false; this.inlineMonitorPending = true;
+    void buffer.mapAsync(GPUMapMode.READ).then(() => {
+      const words = new Uint32Array(buffer.getMappedRange()).slice(); buffer.unmap();
+      this.applyInlineControl(words);
+    }).catch(() => { /* Device loss is reported by the renderer. */ }).finally(() => { this.inlineMonitorPending = false; });
+  }
+
+  private applyInlineControl(words: Uint32Array) {
+    if (words[5] !== 1) {
+      // Overflowed pack: the previous consistent topology stayed live; grow
+      // capacities through one asynchronous rebuild (the retrying path).
+      this.inlineNeedsAsyncRebuild = true;
+      return;
+    }
+    const { nx, ny, nz } = this.dims;
+    this.dofCount = words[0];
+    this.info.liquidDofCount = words[0];
+    this.info.faceCount = words[1];
+    this.info.pressureSampleCount = words[6];
+    this.info.leafCount = words[7];
+    this.info.tallSegmentCount = words[8];
+    this.info.ghostFaceCount = words[9];
+    this.info.compressionRatio = words[0] / Math.max(1, nx * ny * nz);
+  }
+
   async rebuildFromState(bodies?: RigidBodyState[]) {
     const { nx, ny, nz } = this.dims;
     const scalarBytes = 48 + 12 * 8 * 4;
@@ -2230,7 +2346,7 @@ export class WebGPUQuadtreeTallCellProjection {
   get preconditioner() { const value = this.options.preconditioner; return value === "blockic" || value === "jacobi" || value === "line" || value === "poly" ? value : "ic0"; }
 
   destroySharedSurface() { this.surfaceState.destroy(); WebGPUQuadtreeBuilder.destroyCache(this.gpuCache.construction); this.gpuCache.gpuPack?.destroy(); this.gpuCache.gpuPack = undefined; this.gpuCache.cpuWorker?.terminate(); this.gpuCache.cpuWorker = undefined; }
-  destroy() { for (const buffer of this.buffers) buffer.destroy(); this.params.destroy(); this.cellProjection.destroy(); this.cellTopology.destroy(); this.factorAux.destroy(); this.cellPressureSamples.destroy(); this.mappedPressure.destroy(); this.mappedPressureStorageFallback.destroy(); this.mappedPressureSampledFallback.destroy(); this.divergence.destroy(); this.phaseQuerySet?.destroy(); this.phaseQueryResolve?.destroy(); }
+  destroy() { for (const buffer of this.buffers) buffer.destroy(); this.params.destroy(); this.cellProjection.destroy(); this.cellTopology.destroy(); this.factorAux.destroy(); this.cellPressureSamples.destroy(); this.mappedPressure.destroy(); this.mappedPressureStorageFallback.destroy(); this.mappedPressureSampledFallback.destroy(); this.divergence.destroy(); this.phaseQuerySet?.destroy(); this.phaseQueryResolve?.destroy(); this.inlineMonitorBuffer?.destroy(); }
 }
 
 export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput): PreparedProjectionCPU {

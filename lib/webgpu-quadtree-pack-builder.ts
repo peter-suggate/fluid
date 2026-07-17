@@ -38,6 +38,17 @@ export interface GPUQuadtreePackedResult {
   resident?: GPUQuadtreeResidentResources;
 }
 
+/** Scratch capacities behind one resident pack; the inline path is valid only while these match the live scratch. */
+export interface GPUQuadtreeResidentCapacities {
+  dofCapacity: number;
+  faceCapacity: number;
+  entryCapacity: number;
+  matrixCapacity: number;
+  auxWidth: number;
+  auxHeight: number;
+  key: string;
+}
+
 export interface GPUQuadtreeResidentResources {
   faces: GPUBuffer;
   rowOffsets: GPUBuffer;
@@ -50,6 +61,14 @@ export interface GPUQuadtreeResidentResources {
   cellProjection: GPUTexture;
   cellTopology: GPUTexture;
   cellPressureSamples: GPUTexture;
+  /**
+   * GPU-authoritative topology counts (Appendix A / Algorithm 1 in-place
+   * rebuild). Written by finalizeControl; count words 0-4 retain the last
+   * valid topology whenever a pack overflows, so unconditional uniform
+   * patches never publish a half-built layout.
+   */
+  packControl: GPUBuffer;
+  capacities: GPUQuadtreeResidentCapacities;
 }
 
 const common = /* wgsl */ `
@@ -339,15 +358,115 @@ struct Params { dims: vec4u, cell: vec4f, capacities: vec4u }
 @group(0) @binding(2) var pressureSamplesOut: texture_storage_3d<rgba32uint, write>;
 @group(0) @binding(3) var topologyOut: texture_storage_3d<rg32uint, write>;
 @group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(5) var<storage, read> control: array<u32>;
 fn index3(q: vec3u) -> u32 { return q.x + params.dims.x * (q.y + params.dims.y * q.z); }
 @compute @workgroup_size(4, 4, 4)
 fn unpackCellFields(@builtin(global_invocation_id) gid: vec3u) {
+  // A pack that overflowed its capacities never publishes: the previous
+  // consistent topology stays resident (control word 5 is the valid flag).
+  if (control[5] == 0u) { return; }
   if (any(gid >= params.dims.xyz)) { return; }
   let cell = index3(gid); let cells = params.dims.x * params.dims.y * params.dims.z;
   let projectionBase = 4u * cell; let pressureBase = 4u * cells + 4u * cell; let topologyBase = 8u * cells + 2u * cell;
   textureStore(projectionOut, vec3i(gid), bitcast<vec4f>(vec4u(cellWords[projectionBase], cellWords[projectionBase + 1u], cellWords[projectionBase + 2u], cellWords[projectionBase + 3u])));
   textureStore(pressureSamplesOut, vec3i(gid), vec4u(cellWords[pressureBase], cellWords[pressureBase + 1u], cellWords[pressureBase + 2u], cellWords[pressureBase + 3u]));
   textureStore(topologyOut, vec3i(gid), vec4u(cellWords[topologyBase], cellWords[topologyBase + 1u], 0u, 0u));
+}
+`;
+
+/**
+ * Consolidates the pack's leaf/face control rows into the persistent
+ * packControl buffer. Count words 0-4 are only overwritten by a VALID pack,
+ * so the projection's unconditional uniform patches always read a complete
+ * topology (fresh or last-good). Words 5+ always reflect the current attempt
+ * for the non-blocking CPU monitor.
+ *
+ * packControl layout (u32 words):
+ *  0 dofCount   1 faceCount   2 dofSamplesBase(=dof+3)   3 rowGroups   4 faceGroups
+ *  5 valid      6 pressureSampleCount   7 leafCount   8 tallSegmentCount
+ *  9 ghostFaceCount   10 entryCount   11 matrixEntryCount   12 generation   13 overflow flags
+ */
+export const quadtreePackFinalizeShader = /* wgsl */ `
+${common}
+struct FaceMeta { counts: vec4u, offsets: vec4u }
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> leafMeta: array<LeafMeta>;
+@group(0) @binding(2) var<storage, read> faceMeta: array<FaceMeta>;
+@group(0) @binding(3) var<storage, read_write> control: array<u32>;
+@compute @workgroup_size(1)
+fn finalizeControl() {
+  let cells = params.dims.x * params.dims.z;
+  let totals = leafMeta[cells].counts;    // segments, samples, dofs, tallSegments
+  let leafInfo = leafMeta[cells].offsets; // leaves, overflow
+  let faceTotals = faceMeta[cells].counts;  // faces, ghostFaces
+  let faceInfo = faceMeta[cells].offsets;   // overflow, entries, matrixEntries
+  let entryCapacity = 4u * params.capacities.w;
+  let matrixCapacity = 16u * params.capacities.w;
+  let valid = leafInfo.x > 0u && totals.y > 0u && leafInfo.y == 0u && faceInfo.x == 0u
+    && faceInfo.y <= entryCapacity && faceInfo.z <= matrixCapacity;
+  if (valid) {
+    control[0] = totals.z;
+    control[1] = faceTotals.x;
+    control[2] = totals.z + 3u;
+    control[3] = (totals.z + 127u) / 128u;
+    control[4] = (faceTotals.x + 127u) / 128u;
+    control[6] = totals.y;
+    control[7] = leafInfo.x;
+    control[8] = totals.w;
+    control[9] = faceTotals.y;
+    control[10] = faceInfo.y;
+    control[11] = faceInfo.z;
+    control[12] = control[12] + 1u;
+  }
+  control[5] = select(0u, 1u, valid);
+  control[13] = leafInfo.y | (faceInfo.x << 1u);
+}
+`;
+
+/**
+ * Valid-gated word copies from pack scratch into the projection's persistent
+ * capacity-sized resources. Grid-stride loops keep dispatch sizes bounded for
+ * any capacity, and every entry point derives its live word count from
+ * packControl so only the used prefix moves.
+ */
+export const quadtreePackCopyShader = /* wgsl */ `
+@group(0) @binding(0) var<storage, read> control: array<u32>;
+@group(0) @binding(1) var<storage, read> source: array<u32>;
+@group(0) @binding(2) var<storage, read_write> destination: array<u32>;
+fn copyLimit(words: u32) -> u32 {
+  if (control[5] == 0u) { return 0u; }
+  return min(words, min(arrayLength(&source), arrayLength(&destination)));
+}
+fn copySpan(first: u32, stride: u32, limit: u32) {
+  for (var index = first; index < limit; index += stride) { destination[index] = source[index]; }
+}
+@compute @workgroup_size(256)
+fn copyFaces(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) wg: vec3u) { copySpan(gid.x, 256u * wg.x, copyLimit(28u * control[1])); }
+@compute @workgroup_size(256)
+fn copyRowOffsets(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) wg: vec3u) { copySpan(gid.x, 256u * wg.x, copyLimit(control[0] + 1u)); }
+@compute @workgroup_size(256)
+fn copyRowEntries(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) wg: vec3u) { copySpan(gid.x, 256u * wg.x, copyLimit(2u * control[10])); }
+@compute @workgroup_size(256)
+fn copyMatrix(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) wg: vec3u) { copySpan(gid.x, 256u * wg.x, copyLimit(control[0] + 1u + 4u * control[11])); }
+`;
+
+/** Valid-gated auxiliary-word upload into the projection's sampled 2D texture. */
+export const quadtreePackAuxShader = /* wgsl */ `
+@group(0) @binding(0) var<storage, read> control: array<u32>;
+@group(0) @binding(1) var<storage, read> source: array<u32>;
+@group(0) @binding(2) var auxOut: texture_storage_2d<rgba32uint, write>;
+@compute @workgroup_size(16, 16)
+fn writeAux(@builtin(global_invocation_id) gid: vec3u) {
+  if (control[5] == 0u) { return; }
+  let size = textureDimensions(auxOut);
+  if (any(gid.xy >= size)) { return; }
+  let base = 4u * (gid.y * size.x + gid.x);
+  let count = arrayLength(&source);
+  var value = vec4u(0u);
+  for (var component = 0u; component < 4u; component += 1u) {
+    if (base + component < count) { value[component] = source[base + component]; }
+  }
+  textureStore(auxOut, vec2i(gid.xy), value);
 }
 `;
 
@@ -364,7 +483,21 @@ export class WebGPUQuadtreePackBuilder {
   private readonly countFacesPipeline: GPUComputePipeline; private readonly scanFacesPipeline: GPUComputePipeline; private readonly emitFacesPipeline: GPUComputePipeline;
   private readonly scanRowsPipeline: GPUComputePipeline; private readonly emitCsrPipeline: GPUComputePipeline;
   private readonly textureLayout: GPUBindGroupLayout; private readonly unpackCellFieldsPipeline: GPUComputePipeline;
+  private readonly finalizeLayout: GPUBindGroupLayout; private readonly finalizeControlPipeline: GPUComputePipeline;
+  private readonly copyLayout: GPUBindGroupLayout;
+  private readonly copyFacesPipeline: GPUComputePipeline; private readonly copyRowOffsetsPipeline: GPUComputePipeline;
+  private readonly copyRowEntriesPipeline: GPUComputePipeline; private readonly copyMatrixPipeline: GPUComputePipeline;
+  private readonly auxLayout: GPUBindGroupLayout; private readonly writeAuxPipeline: GPUComputePipeline;
+  /** Persists across scratch reallocations so a failed pack retains last-good counts. */
+  private readonly packControl: GPUBuffer;
   private buffers?: BufferSet; private key = "";
+  private capacities?: GPUQuadtreeResidentCapacities & { sampleCapacity: number; segmentCapacity: number };
+  private inlineGroups?: {
+    resident: GPUQuadtreeResidentResources;
+    segmentation: GPUBindGroup; face: GPUBindGroup; csr: GPUBindGroup; finalize: GPUBindGroup;
+    copyFaces: GPUBindGroup; copyRowOffsets: GPUBindGroup; copyRowEntries: GPUBindGroup; copyMatrix: GPUBindGroup;
+    aux: GPUBindGroup; texture: GPUBindGroup;
+  };
 
   constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, private readonly opticalDepthFraction: number) {
     this.params = device.createBuffer({ label: "GPU quadtree pack parameters", size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -397,10 +530,36 @@ export class WebGPUQuadtreePackBuilder {
       { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32uint", viewDimension: "3d" } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rg32uint", viewDimension: "3d" } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) }
     ] });
     const textureModule = device.createShaderModule({ code: quadtreePackTextureShader });
     this.unpackCellFieldsPipeline = device.createComputePipeline({ label: "GPU quadtree pack unpack cell fields", layout: device.createPipelineLayout({ bindGroupLayouts: [this.textureLayout] }), compute: { module: textureModule, entryPoint: "unpackCellFields" } });
+    this.finalizeLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: storage() }
+    ] });
+    const finalizeModule = device.createShaderModule({ code: quadtreePackFinalizeShader });
+    this.finalizeControlPipeline = device.createComputePipeline({ label: "GPU quadtree pack finalize control", layout: device.createPipelineLayout({ bindGroupLayouts: [this.finalizeLayout] }), compute: { module: finalizeModule, entryPoint: "finalizeControl" } });
+    this.copyLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: storage() }
+    ] });
+    const copyModule = device.createShaderModule({ code: quadtreePackCopyShader });
+    const copyPipeline = (entryPoint: string) => device.createComputePipeline({ label: `GPU quadtree pack ${entryPoint}`, layout: device.createPipelineLayout({ bindGroupLayouts: [this.copyLayout] }), compute: { module: copyModule, entryPoint } });
+    this.copyFacesPipeline = copyPipeline("copyFaces"); this.copyRowOffsetsPipeline = copyPipeline("copyRowOffsets");
+    this.copyRowEntriesPipeline = copyPipeline("copyRowEntries"); this.copyMatrixPipeline = copyPipeline("copyMatrix");
+    this.auxLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32uint", viewDimension: "2d" } }
+    ] });
+    const auxModule = device.createShaderModule({ code: quadtreePackAuxShader });
+    this.writeAuxPipeline = device.createComputePipeline({ label: "GPU quadtree pack write aux", layout: device.createPipelineLayout({ bindGroupLayouts: [this.auxLayout] }), compute: { module: auxModule, entryPoint: "writeAux" } });
+    this.packControl = device.createBuffer({ label: "GPU quadtree pack control", size: 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
   }
 
   private ensure(hints: GPUQuadtreePackHints) {
@@ -410,7 +569,13 @@ export class WebGPUQuadtreePackBuilder {
     const segmentCapacity = Math.max(cells2, Math.min(cells3, sampleCapacity));
     const faceCapacity = Math.max(128, Math.min(4 * cells3, Math.ceil(hints.faceCount * 1.75)));
     const entryCapacity = 4 * faceCapacity, matrixCapacity = 16 * faceCapacity;
-    const key = [dofCapacity, sampleCapacity, segmentCapacity, faceCapacity].join(":"); if (this.buffers && this.key === key) return { dofCapacity, sampleCapacity, segmentCapacity, faceCapacity, entryCapacity, matrixCapacity };
+    // Aux words are stored in a rgba32uint texture; sizing the scratch buffer
+    // to exact texel rows keeps full-extent buffer<->texture transfers valid.
+    const auxCapacityTexels = Math.ceil((5 * dofCapacity + 4) / 4);
+    const auxWidth = Math.min(2048, Math.max(1, auxCapacityTexels));
+    const auxHeight = Math.ceil(auxCapacityTexels / auxWidth);
+    const key = [dofCapacity, sampleCapacity, segmentCapacity, faceCapacity].join(":");
+    if (this.buffers && this.key === key) return this.capacities!;
     this.destroyBuffers(); this.key = key; const rw = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     const make = (label: string, size: number, usage = rw) => this.device.createBuffer({ label, size: Math.max(4, Math.ceil(size / 4) * 4), usage });
     this.buffers = {
@@ -418,10 +583,11 @@ export class WebGPUQuadtreePackBuilder {
       segments: make("GPU pack segments", segmentCapacity * 16), samples: make("GPU pack samples", sampleCapacity * 16), faceMeta: make("GPU pack face metadata", (cells2 + 1) * 32),
       faces: make("GPU pack faces", faceCapacity * 112), rowCounts: make("GPU pack row counts", dofCapacity * 8), rowCursors: make("GPU pack row cursors", dofCapacity * 8),
       rowOffsets: make("GPU pack row offsets", (dofCapacity + 1) * 4), rowEntries: make("GPU pack row entries", entryCapacity * 8), matrix: make("GPU pack matrix", (dofCapacity + 1 + 4 * matrixCapacity) * 4),
-      cellWords: make("GPU pack cell fields", cells3 * 10 * 4), aux: make("GPU pack auxiliary words", (5 * dofCapacity + 4) * 4),
+      cellWords: make("GPU pack cell fields", cells3 * 10 * 4), aux: make("GPU pack auxiliary words", auxWidth * auxHeight * 16),
       controlReadback: make("GPU pack control readback", 64, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ)
     };
-    return { dofCapacity, sampleCapacity, segmentCapacity, faceCapacity, entryCapacity, matrixCapacity };
+    this.capacities = { dofCapacity, faceCapacity, entryCapacity, matrixCapacity, auxWidth, auxHeight, key, sampleCapacity, segmentCapacity };
+    return this.capacities;
   }
 
   async build(packedCells: Uint32Array, levelSet: GPUTexture, hints: GPUQuadtreePackHints, resident = false, retriesRemaining = 2): Promise<GPUQuadtreePackedResult | undefined> {
@@ -439,6 +605,8 @@ export class WebGPUQuadtreePackBuilder {
     dispatch(this.classifyPipeline, segmentationGroup, Math.ceil(nx / 8), Math.ceil(nz / 8)); dispatch(this.scanSegmentsPipeline, segmentationGroup, 1); dispatch(this.emitSegmentsPipeline, segmentationGroup, Math.ceil(nx / 8), Math.ceil(nz / 8));
     dispatch(this.countFacesPipeline, faceGroup, Math.ceil(nx / 8), Math.ceil(nz / 8)); dispatch(this.scanFacesPipeline, faceGroup, 1); dispatch(this.emitFacesPipeline, faceGroup, Math.ceil(nx / 8), Math.ceil(nz / 8));
     dispatch(this.scanRowsPipeline, csrGroup, 1); dispatch(this.emitCsrPipeline, csrGroup, Math.ceil(capacities.faceCapacity / 128));
+    const finalizeGroup = group(this.finalizeLayout, [this.params, b.leafMeta, b.faceMeta, this.packControl]);
+    dispatch(this.finalizeControlPipeline, finalizeGroup, 1);
     encoder.copyBufferToBuffer(b.leafMeta, cells2 * 32, b.controlReadback, 0, 32); encoder.copyBufferToBuffer(b.faceMeta, cells2 * 32, b.controlReadback, 32, 32);
     this.device.queue.submit([encoder.finish()]); await b.controlReadback.mapAsync(GPUMapMode.READ);
     let leafControl: Uint32Array, faceControl: Uint32Array;
@@ -476,16 +644,23 @@ export class WebGPUQuadtreePackBuilder {
     if (resident) {
       const rw = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
       const make = (label: string, size: number) => this.device.createBuffer({ label, size: Math.max(4, Math.ceil(size / 4) * 4), usage: rw });
-      const resources: GPUQuadtreeResidentResources = {
-        faces: make("Resident quadtree faces", faceBytes), rowOffsets: make("Resident quadtree row offsets", rowOffsetBytes),
-        rowEntries: make("Resident quadtree row entries", rowEntryBytes), matrixBuffer: make("Resident quadtree matrix", matrixBytes),
-        factorColumns: make("Resident quadtree empty factor columns", Math.max(1, dofCount + 1) * 8), factorEntries: make("Resident quadtree empty factor entries", 8),
-        factorAuxWidth: Math.min(2048, Math.max(1, Math.ceil(auxWords / 4))),
-        factorAux: undefined as unknown as GPUTexture, cellProjection: undefined as unknown as GPUTexture,
-        cellTopology: undefined as unknown as GPUTexture, cellPressureSamples: undefined as unknown as GPUTexture
+      // Capacity-sized targets: subsequent Algorithm-1 in-place rebuilds copy
+      // fresh packs into these same buffers/textures without any CPU sizing
+      // handshake, so bind-group identity survives every topology change.
+      const residentCapacities: GPUQuadtreeResidentCapacities = {
+        dofCapacity: capacities.dofCapacity, faceCapacity: capacities.faceCapacity, entryCapacity: capacities.entryCapacity,
+        matrixCapacity: capacities.matrixCapacity, auxWidth: capacities.auxWidth, auxHeight: capacities.auxHeight, key: this.key
       };
-      const factorAuxHeight = Math.ceil(Math.max(1, Math.ceil(auxWords / 4)) / resources.factorAuxWidth);
-      resources.factorAux = this.device.createTexture({ label: "Resident quadtree auxiliary data", size: [resources.factorAuxWidth, factorAuxHeight], format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      const resources: GPUQuadtreeResidentResources = {
+        faces: make("Resident quadtree faces", capacities.faceCapacity * 112), rowOffsets: make("Resident quadtree row offsets", (capacities.dofCapacity + 1) * 4),
+        rowEntries: make("Resident quadtree row entries", capacities.entryCapacity * 8), matrixBuffer: make("Resident quadtree matrix", (capacities.dofCapacity + 1 + 4 * capacities.matrixCapacity) * 4),
+        factorColumns: make("Resident quadtree empty factor columns", (capacities.dofCapacity + 1) * 8), factorEntries: make("Resident quadtree empty factor entries", 8),
+        factorAuxWidth: capacities.auxWidth,
+        factorAux: undefined as unknown as GPUTexture, cellProjection: undefined as unknown as GPUTexture,
+        cellTopology: undefined as unknown as GPUTexture, cellPressureSamples: undefined as unknown as GPUTexture,
+        packControl: this.packControl, capacities: residentCapacities
+      };
+      resources.factorAux = this.device.createTexture({ label: "Resident quadtree auxiliary data", size: [capacities.auxWidth, capacities.auxHeight], format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING });
       resources.cellProjection = this.device.createTexture({ label: "Resident quadtree projection field", size: [nx, ny, nz], dimension: "3d", format: "rgba32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
       resources.cellTopology = this.device.createTexture({ label: "Resident quadtree cell topology", size: [nx, ny, nz], dimension: "3d", format: "rg32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
       resources.cellPressureSamples = this.device.createTexture({ label: "Resident quadtree pressure samples", size: [nx, ny, nz], dimension: "3d", format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
@@ -493,12 +668,12 @@ export class WebGPUQuadtreePackBuilder {
       const copyIfPresent = (source: GPUBuffer, target: GPUBuffer, bytes: number) => { if (bytes > 0) copy.copyBufferToBuffer(source, 0, target, 0, bytes); };
       copyIfPresent(b.faces, resources.faces, faceBytes); copyIfPresent(b.rowOffsets, resources.rowOffsets, rowOffsetBytes);
       copyIfPresent(b.rowEntries, resources.rowEntries, rowEntryBytes); copyIfPresent(b.matrix, resources.matrixBuffer, matrixBytes);
-      const auxLayout: GPUImageDataLayout = factorAuxHeight > 1 ? { offset: 0, bytesPerRow: resources.factorAuxWidth * 16, rowsPerImage: factorAuxHeight } : { offset: 0 };
-      copy.copyBufferToTexture({ buffer: b.aux, ...auxLayout }, { texture: resources.factorAux }, { width: resources.factorAuxWidth, height: factorAuxHeight });
+      const auxLayout: GPUImageDataLayout = capacities.auxHeight > 1 ? { offset: 0, bytesPerRow: capacities.auxWidth * 16, rowsPerImage: capacities.auxHeight } : { offset: 0 };
+      copy.copyBufferToTexture({ buffer: b.aux, ...auxLayout }, { texture: resources.factorAux }, { width: capacities.auxWidth, height: capacities.auxHeight });
       const textureGroup = this.device.createBindGroup({ layout: this.textureLayout, entries: [
         { binding: 0, resource: { buffer: b.cellWords } }, { binding: 1, resource: resources.cellProjection.createView() },
         { binding: 2, resource: resources.cellPressureSamples.createView() }, { binding: 3, resource: resources.cellTopology.createView() },
-        { binding: 4, resource: { buffer: this.params } }
+        { binding: 4, resource: { buffer: this.params } }, { binding: 5, resource: { buffer: this.packControl } }
       ] });
       const pass = copy.beginComputePass(); pass.setPipeline(this.unpackCellFieldsPipeline); pass.setBindGroup(0, textureGroup);
       pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); pass.end();
@@ -526,6 +701,55 @@ export class WebGPUQuadtreePackBuilder {
     } };
   }
 
-  private destroyBuffers() { if (!this.buffers) return; for (const buffer of Object.values(this.buffers)) buffer.destroy(); this.buffers = undefined; }
-  destroy() { this.destroyBuffers(); this.params.destroy(); }
+  /** True when the scratch capacities behind `resident` are still live, so an in-place pack can be encoded. */
+  canEncodeResident(resident: GPUQuadtreeResidentResources) {
+    return !!this.buffers && resident.packControl === this.packControl && resident.capacities.key === this.key;
+  }
+
+  /**
+   * Fully GPU-resident Algorithm-1 rebuild: repack the supplied owner map and
+   * publish it into the projection's persistent resources within one command
+   * stream. No readbacks; an overflowing pack publishes nothing (the previous
+   * consistent topology stays live) and the caller's non-blocking monitor of
+   * packControl triggers one asynchronous capacity-growth rebuild.
+   */
+  encodeResidentPack(encoder: GPUCommandEncoder, topologySource: GPUBuffer, levelSet: GPUTexture, resident: GPUQuadtreeResidentResources): boolean {
+    if (!this.canEncodeResident(resident)) return false;
+    const b = this.buffers!, capacities = this.capacities!, { nx, ny, nz } = this.dims, cells2 = nx * nz;
+    if (this.inlineGroups?.resident !== resident) {
+      const group = (layout: GPUBindGroupLayout, entries: Array<GPUBuffer | GPUTexture>) => this.device.createBindGroup({ layout, entries: entries.map((resource, binding) => ({ binding, resource: "createView" in resource ? resource.createView() : { buffer: resource } })) });
+      this.inlineGroups = {
+        resident,
+        segmentation: group(this.segmentationLayout, [b.topology, levelSet, this.params, b.flags, b.leafMeta, b.segments, b.samples, b.cellWords, b.aux]),
+        face: group(this.faceLayout, [b.topology, this.params, b.leafMeta, b.segments, b.samples, b.faceMeta, b.faces, b.rowCounts, b.cellWords]),
+        csr: group(this.csrLayout, [this.params, b.leafMeta, b.faceMeta, b.faces, b.rowCounts, b.rowCursors, b.rowOffsets, b.rowEntries, b.matrix]),
+        finalize: group(this.finalizeLayout, [this.params, b.leafMeta, b.faceMeta, this.packControl]),
+        copyFaces: group(this.copyLayout, [this.packControl, b.faces, resident.faces]),
+        copyRowOffsets: group(this.copyLayout, [this.packControl, b.rowOffsets, resident.rowOffsets]),
+        copyRowEntries: group(this.copyLayout, [this.packControl, b.rowEntries, resident.rowEntries]),
+        copyMatrix: group(this.copyLayout, [this.packControl, b.matrix, resident.matrixBuffer]),
+        aux: group(this.auxLayout, [this.packControl, b.aux, resident.factorAux]),
+        texture: group(this.textureLayout, [b.cellWords, resident.cellProjection, resident.cellPressureSamples, resident.cellTopology, this.params, this.packControl])
+      };
+    }
+    const groups = this.inlineGroups;
+    encoder.copyBufferToBuffer(topologySource, 0, b.topology, 0, cells2 * 4);
+    for (const buffer of [b.flags, b.leafMeta, b.faceMeta, b.rowCounts, b.rowCursors, b.cellWords, b.aux]) encoder.clearBuffer(buffer);
+    const dispatch = (pipeline: GPUComputePipeline, bindGroup: GPUBindGroup, x: number, y = 1, z = 1) => { const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(x, y, z); pass.end(); };
+    dispatch(this.classifyPipeline, groups.segmentation, Math.ceil(nx / 8), Math.ceil(nz / 8)); dispatch(this.scanSegmentsPipeline, groups.segmentation, 1); dispatch(this.emitSegmentsPipeline, groups.segmentation, Math.ceil(nx / 8), Math.ceil(nz / 8));
+    dispatch(this.countFacesPipeline, groups.face, Math.ceil(nx / 8), Math.ceil(nz / 8)); dispatch(this.scanFacesPipeline, groups.face, 1); dispatch(this.emitFacesPipeline, groups.face, Math.ceil(nx / 8), Math.ceil(nz / 8));
+    dispatch(this.scanRowsPipeline, groups.csr, 1); dispatch(this.emitCsrPipeline, groups.csr, Math.ceil(capacities.faceCapacity / 128));
+    dispatch(this.finalizeControlPipeline, groups.finalize, 1);
+    const copyWorkgroups = (words: number) => Math.max(1, Math.min(4096, Math.ceil(words / 256)));
+    dispatch(this.copyFacesPipeline, groups.copyFaces, copyWorkgroups(capacities.faceCapacity * 28));
+    dispatch(this.copyRowOffsetsPipeline, groups.copyRowOffsets, copyWorkgroups(capacities.dofCapacity + 1));
+    dispatch(this.copyRowEntriesPipeline, groups.copyRowEntries, copyWorkgroups(capacities.entryCapacity * 2));
+    dispatch(this.copyMatrixPipeline, groups.copyMatrix, copyWorkgroups(capacities.dofCapacity + 1 + 4 * capacities.matrixCapacity));
+    dispatch(this.writeAuxPipeline, groups.aux, Math.ceil(capacities.auxWidth / 16), Math.ceil(capacities.auxHeight / 16));
+    dispatch(this.unpackCellFieldsPipeline, groups.texture, Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
+    return true;
+  }
+
+  private destroyBuffers() { if (!this.buffers) return; for (const buffer of Object.values(this.buffers)) buffer.destroy(); this.buffers = undefined; this.inlineGroups = undefined; }
+  destroy() { this.destroyBuffers(); this.params.destroy(); this.packControl.destroy(); }
 }
