@@ -10,6 +10,7 @@ import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store"
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { advancePresentationClock, presentationFrameDue } from "@/lib/frame-pacing";
+import { getScenePreset } from "@/lib/scenes";
 
 type Vec3 = RigidBodyState["position_m"];
 
@@ -49,7 +50,8 @@ export function WebGPUViewport() {
         const targetFps = useUIStore.getState().targetFps;
         if (!presentationFrameDue(lastFrameAt_ms, now_ms, targetFps)) return;
         lastFrameAt_ms = advancePresentationClock(lastFrameAt_ms, now_ms, targetFps);
-        const scene = useSceneStore.getState().scene;
+        const sceneState = useSceneStore.getState();
+        const scene = sceneState.scene;
         const ui = useUIStore.getState();
         const method = useMethodStore.getState();
         const state = useDiagnosticsStore.getState();
@@ -61,7 +63,7 @@ export function WebGPUViewport() {
             { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method) },
             { axis: ui.view === "scientific" ? ui.gridOverlayAxis : "off", position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
             ui.waterRenderMode,
-            ui.environmentId,
+            getScenePreset(sceneState.presetId).background,
             targetFps
           );
         } catch (error: unknown) {

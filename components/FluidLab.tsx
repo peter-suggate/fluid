@@ -21,6 +21,8 @@ import { TransportBar } from "./TransportBar";
 import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
 import type { GPUStatus } from "@/lib/webgpu-renderer";
 import { getEnvironmentPreset } from "@/lib/environments";
+import { getScenePreset } from "@/lib/scenes";
+import { useSceneStore } from "@/lib/stores/scene-store";
 
 function GPUInitializationPanel({ status }: { status: Extract<GPUStatus, { state: "initializing" }> }) {
   const [now, setNow] = useState(() => performance.now());
@@ -53,12 +55,12 @@ export function FluidLab() {
   const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
   const rightPanel = useUIStore((state) => state.rightPanel);
   const setRightPanel = useUIStore((state) => state.setRightPanel);
-  const environmentId = useUIStore((state) => state.environmentId);
+  const presetId = useSceneStore((state) => state.presetId);
   const fluidState = useDiagnosticsStore((state) => state.fluidState);
   const method = getMethod(methodId);
   const backend = method.backend === "cpu" ? "cpu-reference" : "webgpu";
   const scientific = view === "scientific";
-  const environment = getEnvironmentPreset(environmentId);
+  const environment = getEnvironmentPreset(getScenePreset(presetId).background);
   const visibleRightPanel = (rightPanel === "visual" || rightPanel === "performance" || scientific) ? rightPanel : null;
   const healthFlags = backend === "webgpu"
     ? [...(gpuInfo?.stabilityFlags ?? []), ...(gpuInfo?.nonFiniteCount ? ["non-finite-values"] : [])]
@@ -106,10 +108,10 @@ export function FluidLab() {
               </button>
             )}
           </div>
-          <button className="environment-chip" onClick={() => setRightPanel("visual")} title="Choose scene environment">
+          <div className="environment-chip" title={`${environment.name} · fixed by the selected scene`}>
             <span aria-hidden="true">{environment.swatch.map((color) => <i key={color} style={{ background: color }} />)}</span>
-            <small>ENVIRONMENT</small><strong>{environment.shortName}</strong>
-          </button>
+            <small>BACKGROUND</small><strong>{environment.shortName}</strong>
+          </div>
         </div>
         {scientific && <div className="physics-stage-badge"><strong>{method.badge}</strong><span>{backend === "webgpu" ? `${method.description}` : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} allocated · ${gpuInfo?.activeSampleCount?.toLocaleString() ?? "…"} ${gpuInfo?.gridKind === "octree" ? "estimated leaves" : "active samples"} · f32 · ${gpuInfo?.pressureSolver ?? `${gpuInfo?.pressureIterations ?? "…"} Jacobi`}` : "MAC · binary64 · PCG"}</small></div>}
         {scientific && <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>}

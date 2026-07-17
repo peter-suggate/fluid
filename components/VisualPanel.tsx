@@ -5,9 +5,8 @@ import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore } from "@/lib/stores/method-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
-import { environmentPresets, type EnvironmentId } from "@/lib/environments";
+import { getEnvironmentPreset } from "@/lib/environments";
 import { getScenePreset } from "@/lib/scenes";
-import { simulation } from "@/lib/simulation/controller";
 
 export function VisualPanel() {
   const methodId = useMethodStore((state) => state.methodId);
@@ -16,8 +15,7 @@ export function VisualPanel() {
   const setView = useUIStore((state) => state.setView);
   const waterRenderMode = useUIStore((state) => state.waterRenderMode);
   const setWaterRenderMode = useUIStore((state) => state.setWaterRenderMode);
-  const environmentId = useUIStore((state) => state.environmentId);
-  const setEnvironmentId = useUIStore((state) => state.setEnvironmentId);
+  const presetId = useSceneStore((state) => state.presetId);
   const targetFps = useUIStore((state) => state.targetFps);
   const setTargetFps = useUIStore((state) => state.setTargetFps);
   const gridOverlayAxis = useUIStore((state) => state.gridOverlayAxis);
@@ -33,15 +31,7 @@ export function VisualPanel() {
   const quadtreeTall = gridKind === "quadtree-tall-cell";
   const octree = gridKind === "octree";
   const motionAdaptiveOptical = gpuInfo?.quadtreeOpticalLayerMode === "adaptive-motion";
-  // Environments are art direction, but some carry a matching physical scene:
-  // picking the garden brings its terrain pond along unless the current
-  // preset already belongs to that world.
-  const selectEnvironment = (id: EnvironmentId) => {
-    setEnvironmentId(id);
-    if (id === "garden" && getScenePreset(useSceneStore.getState().presetId ?? "").environment !== "garden") {
-      simulation.loadPreset("garden-pond");
-    }
-  };
+  const background = getEnvironmentPreset(getScenePreset(presetId).background);
 
   return <aside className="right-panel panel-scroll visual-panel" data-testid="visual-panel">
     <section className="panel-section utility-panel-head">
@@ -74,24 +64,14 @@ export function VisualPanel() {
     </section>
 
     <section className="panel-section utility-controls">
-      <div className="section-heading"><h2>Environment</h2><span>ART DIRECTION</span></div>
-      <div className="environment-grid" role="radiogroup" aria-label="Scene environment">
-        {environmentPresets.map((preset) => <button
-          key={preset.id}
-          type="button"
-          role="radio"
-          aria-checked={environmentId === preset.id}
-          className={environmentId === preset.id ? "active" : ""}
-          onClick={() => selectEnvironment(preset.id)}
-          title={preset.description}
-        >
-          <span className="environment-swatch" aria-hidden="true">
-            {preset.swatch.map((color) => <i key={color} style={{ background: color }} />)}
-          </span>
-          <span><strong>{preset.shortName}</strong><small>{preset.description}</small></span>
-        </button>)}
+      <div className="section-heading"><h2>Background</h2><span>SCENE ART DIRECTION</span></div>
+      <div className="scene-background-card" aria-label={`Scene background: ${background.name}`}>
+        <span className="environment-swatch" aria-hidden="true">
+          {background.swatch.map((color) => <i key={color} style={{ background: color }} />)}
+        </span>
+        <span><strong>{background.shortName}</strong><small>{background.description}</small></span>
       </div>
-      <small className="control-hint">Architecture and foreground elements live in world space so the water bends them naturally as the camera moves.</small>
+      <small className="control-hint">The selected scene sets its background. Choose another scene to change both together.</small>
     </section>
 
     <section className="panel-section utility-controls">
