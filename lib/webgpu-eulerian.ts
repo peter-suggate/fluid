@@ -10,7 +10,7 @@ import { averageInflowStrength, createInflowGridBoundary, inflowBoundaryWGSL, ty
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 
 export type { GPUQuality } from "./tall-cell-grid";
-export type GPUGridMethod = "tall-cell" | "quadtree-tall-cell" | "uniform";
+export type GPUGridMethod = "tall-cell" | "quadtree-tall-cell" | "octree" | "uniform";
 export type GPUVelocityTransport = "semi-lagrangian" | "maccormack";
 
 export type GPUPhysicsStageId =
@@ -21,6 +21,8 @@ export type GPUPhysicsStageId =
   | "remeshing"
   | "pressure"
   | "projection"
+  | "extrapolation"
+  | "materialization"
   | "surfaceUpdate"
   | "rigidCoupling"
   | "diagnostics";
@@ -33,6 +35,8 @@ export interface GPUPhysicsTimings {
   remeshing_ms: number;
   pressure_ms: number;
   projection_ms: number;
+  extrapolation_ms: number;
+  materialization_ms: number;
   surfaceUpdate_ms: number;
   rigidCoupling_ms: number;
   diagnostics_ms: number;
@@ -43,7 +47,7 @@ export interface GPUPhysicsTimings {
 }
 
 export type GPUPhysicsTimingField = Exclude<keyof GPUPhysicsTimings, "activeStages">;
-export const GPU_PHYSICS_TIMESTAMP_CAPACITY = 768;
+export const GPU_PHYSICS_TIMESTAMP_CAPACITY = 1024;
 
 export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): GPUPhysicsTimings {
   return {
@@ -54,6 +58,8 @@ export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): 
     remeshing_ms: 0,
     pressure_ms: 0,
     projection_ms: 0,
+    extrapolation_ms: 0,
+    materialization_ms: 0,
     surfaceUpdate_ms: 0,
     rigidCoupling_ms: 0,
     diagnostics_ms: 0,
@@ -66,7 +72,8 @@ export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): 
 export function categorizedGPUPhysicsTime_ms(timings: GPUPhysicsTimings) {
   return timings.preparation_ms + timings.layerConstruction_ms + timings.advection_ms
     + timings.conditioning_ms + timings.remeshing_ms + timings.pressure_ms
-    + timings.projection_ms + timings.surfaceUpdate_ms + timings.rigidCoupling_ms
+    + timings.projection_ms + timings.extrapolation_ms + timings.materialization_ms
+    + timings.surfaceUpdate_ms + timings.rigidCoupling_ms
     + timings.diagnostics_ms;
 }
 
@@ -88,7 +95,7 @@ export interface GPUEulerianInfo {
   activeSampleCount?: number;
   regularLayers: number;
   maximumNeighborDelta: number;
-  gridKind: "restricted-tall-cell" | "quadtree-tall-cell" | "uniform";
+  gridKind: "restricted-tall-cell" | "quadtree-tall-cell" | "octree" | "uniform";
   cellSize_m: number;
   pressureIterations: number;
   pressureSolver?: string;
@@ -152,6 +159,10 @@ export interface GPUEulerianInfo {
   referenceLiquidVolume_cells?: number;
   phiInterfaceCellCount?: number;
   volumeCorrectionNormalSpeed_cells_s?: number;
+  /** Diagnostic divergence-rate equivalent of the normal volume correction. */
+  volumeCorrectionDivergenceRate_s?: number;
+  /** 1 = global controller; <1 concentrates the push on phi/VOF disagreement. */
+  volumeControlAgreeWeight?: number;
   surfaceField?: "levelset";
   /** Global normal level-set volume controller. Defaults to enabled. */
   volumeControl?: boolean;
@@ -160,6 +171,10 @@ export interface GPUEulerianInfo {
   quadtreeLeafCount?: number;
   quadtreePressureSampleCount?: number;
   quadtreeLiquidDofCount?: number;
+  quadtreeOpticalLayerMode?: "fixed" | "adaptive-motion";
+  quadtreeOpticalAlpha?: number;
+  quadtreeOpticalMinimumCells?: number;
+  quadtreeOpticalMaximumCells?: number;
   quadtreeFaceCount?: number;
   quadtreeMLSProjectionRowCount?: number;
   quadtreeTallSegmentCount?: number;
@@ -192,6 +207,8 @@ export interface GPUEulerianInfo {
   quadtreePressureIterationHardBudget?: number;
   quadtreePressureConverged?: boolean;
   quadtreeFactorLevelCount?: number;
+  quadtreeMultigridLevelCount?: number;
+  quadtreeMultigridCoarsestDofs?: number;
   quadtreePressurePhaseTimings?: { setup_ms: number; firstIterations_ms: number; remainingIterations_ms: number; project_ms: number };
   quadtreeRebuildCadenceSteps?: number;
   quadtreeTopologyStaleLimit?: number;
@@ -334,6 +351,7 @@ struct RigidBody {
   orientation: vec4f,
   linearVelocity: vec4f,
   angularVelocity: vec4f,
+  inverseMassInertia: vec4f,
 }
 @group(0) @binding(10) var<storage,read> rigidBodies:array<RigidBody,12>;
 @group(0) @binding(11) var<storage,read_write> rigidExchange:array<atomic<i32>>;
@@ -367,6 +385,7 @@ fn cellInsideTerrain(p:vec3i)->bool{if(!hasTerrain()){return false;}return f32(p
 fn cellTerrainFraction(p:vec3i)->f32{if(!hasTerrain()){return 0.0;}return clamp(terrainHeightCells(p.x,p.z)-f32(p.y),0.0,1.0);}
 ${inflowBoundaryWGSL}
 fn volume(p: vec3i) -> f32 { if (!valid(p)) { return 0.0; } return textureLoad(volumeIn,p,0).x; }
+fn transportConservativeVolume() -> bool { return params.physical.z > 0.5; }
 fn levelSetAuthority() -> bool { return params.physical.w > 0.5; }
 fn surfaceValue(p: vec3i) -> f32 {
   if (!valid(p)) { return select(0.0, 5.0 * min(params.cellGravity.x, min(params.cellGravity.y, params.cellGravity.z)), levelSetAuthority()); }
@@ -457,13 +476,18 @@ fn cellRigidBody(p:vec3i)->i32{
 }
 // Sub-cell solid fraction with the CPU voxelizer's 8-corner sampling
 // (solidFieldsFromBodies), so mixed cells blend rather than snap.
-fn cellSolidFraction(p:vec3i)->f32{
+fn bodySolidFraction(body:RigidBody,p:vec3i)->f32{
   var inside=0.0;
   for(var corner=0u;corner<8u;corner+=1u){
     let offset=vec3f(select(-0.4,0.4,(corner&1u)!=0u),select(-0.4,0.4,(corner&2u)!=0u),select(-0.4,0.4,(corner&4u)!=0u));
-    if(rigidBodyIndexAt(worldCell(p)+offset*params.cellGravity.xyz)>=0){inside+=1.0;}
+    if(insideRigid(body,worldCell(p)+offset*params.cellGravity.xyz)){inside+=1.0;}
   }
   return inside/8.0;
+}
+fn cellSolidFraction(p:vec3i)->f32{
+  let bodyCount=u32(round(params.boundary.z));var fraction=0.0;
+  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}fraction=max(fraction,bodySolidFraction(rigidBodies[bodyIndex],p));}
+  return fraction;
 }
 // Projection enforces body velocity on interior faces, so that value cannot be
 // used as the undisturbed fluid velocity for form drag. Sample six wet, open
@@ -614,7 +638,7 @@ fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));v=applyVelocityForces(id,v,dt,h);
-  let advected=advectedVolume(id,dt);textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(advected,0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));
+  var advected=volume(id);if(transportConservativeVolume()){advected=advectedVolume(id,dt);}textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(advected,0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));
 }
 
 @compute @workgroup_size(4,4,4)
@@ -623,7 +647,7 @@ fn advect(@builtin(global_invocation_id) gid: vec3u) {
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
   let dt=params.dimsDt.w; let h=params.cellGravity.xyz;
   let cell=vec3f(id);var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
-  let advected=advectedVolume(id,dt);let d=dims();
+  var advected=volume(id);if(transportConservativeVolume()){advected=advectedVolume(id,dt);}let d=dims();
   if (id.x==d.x-1) { v.x=0.0; }
   if (id.y==d.y-1) { v.y=0.0; }
   if (id.z==d.z-1) { v.z=0.0; }
@@ -775,15 +799,20 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
 fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}let phi=volume(id);let wetFraction=surfaceOccupancy(id);var v=velocity(id);let h=params.cellGravity.xyz;
   let world=vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);
-  let bodyCount=u32(round(params.boundary.z));let cellMass=params.physical.x*h.x*h.y*h.z*wetFraction;let blend=clamp(45.0*params.dimsDt.w,0.0,1.0);var coupledBody=12u;
-  for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}let body=rigidBodies[bodyIndex];if(!insideRigid(body,world)){continue;}
-    coupledBody=bodyIndex;
-    let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let fluidVelocity=v;let ambientVelocity=ambientFluidVelocity(body,id,fluidVelocity);let fluidImpulse=cellMass*(solidVelocity-fluidVelocity)*blend;v+=fluidImpulse/max(cellMass,1e-9);
+  let bodyCount=u32(round(params.boundary.z));let cellMass=params.physical.x*h.x*h.y*h.z*wetFraction;let blend=clamp(45.0*params.dimsDt.w,0.0,1.0);var coupledBody=12u;var solidFraction=0.0;
+  // Match the adaptive voxelizer's overlap rule: the body with the greatest
+  // sub-cell coverage owns this cell, so displaced volume is never counted
+  // twice and does not depend on body-array order.
+  for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}let candidate=bodySolidFraction(rigidBodies[bodyIndex],id);if(candidate>solidFraction){solidFraction=candidate;coupledBody=bodyIndex;}}
+  if(coupledBody<12u){
+    let bodyIndex=coupledBody;let body=rigidBodies[bodyIndex];
+    let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let fluidVelocity=v;let ambientVelocity=ambientFluidVelocity(body,id,fluidVelocity);let fluidImpulse=cellMass*solidFraction*(solidVelocity-fluidVelocity)*blend;v+=fluidImpulse/max(cellMass,1e-9);
     let reaction=-fluidImpulse;let torque=cross(arm,reaction);let base=bodyIndex*12u;
     atomicAdd(&rigidExchange[base],i32(round(reaction.x*1000000.0)));atomicAdd(&rigidExchange[base+1u],i32(round(reaction.y*1000000.0)));atomicAdd(&rigidExchange[base+2u],i32(round(reaction.z*1000000.0)));
     atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*1000000.0)));atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*1000000.0)));atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*1000000.0)));
-    atomicAdd(&rigidExchange[base+6u],i32(round(wetFraction*65536.0)));
-    atomicAdd(&rigidExchange[base+7u],i32(round(wetFraction*ambientVelocity.x*10000.0)));atomicAdd(&rigidExchange[base+8u],i32(round(wetFraction*ambientVelocity.y*10000.0)));atomicAdd(&rigidExchange[base+9u],i32(round(wetFraction*ambientVelocity.z*10000.0)));break;
+    let displacedWeight=wetFraction*solidFraction;
+    atomicAdd(&rigidExchange[base+6u],i32(round(displacedWeight*65536.0)));
+    atomicAdd(&rigidExchange[base+7u],i32(round(displacedWeight*ambientVelocity.x*10000.0)));atomicAdd(&rigidExchange[base+8u],i32(round(displacedWeight*ambientVelocity.y*10000.0)));atomicAdd(&rigidExchange[base+9u],i32(round(displacedWeight*ambientVelocity.z*10000.0)));
   }
   // Paper Sec 3.9.1 phi-s: inside a body the advected field is meaningless, so
   // blend it toward the (1-s)-weighted neighbor average. This is what lets the
@@ -797,8 +826,8 @@ fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
       let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
       for(var index=0;index<6;index+=1){
         let np=clampCell(id+offsets[index]);
-        let neighborVolume=volume(np);total+=neighborVolume;
-        if(cellRigidBody(np)<0&&!cellInsideTerrain(np)){open+=1.0;openSum+=neighborVolume;}
+        let neighborVolume=volume(np);let neighborOpen=(1.0-cellSolidFraction(np))*(1.0-cellTerrainFraction(np));total+=neighborVolume;
+        open+=neighborOpen;openSum+=neighborOpen*neighborVolume;
       }
       // A one-cell stencil diffuses a carried interior plug over several body
       // radii. Direct lateral open samples preserve the same local phi-s target
@@ -806,7 +835,7 @@ fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
       if(coupledBody<12u&&i32(round(rigidBodies[coupledBody].positionShape.w))==0&&length(rigidBodies[coupledBody].linearVelocity.xyz)>0.25){
         let radius=max(rigidBodies[coupledBody].dimensions.w,0.0);let reach=vec3i(ceil(vec3f(2.0*radius)/h))+vec3i(2);
         let far=array<vec3i,4>(vec3i(-reach.x,0,0),vec3i(reach.x,0,0),vec3i(0,0,-reach.z),vec3i(0,0,reach.z));
-        for(var index=0;index<4;index+=1){let np=id+far[index];if(valid(np)&&cellRigidBody(np)<0){open+=1.0;openSum+=volume(np);}}
+        for(var index=0;index<4;index+=1){let np=id+far[index];if(valid(np)){let neighborOpen=(1.0-cellSolidFraction(np))*(1.0-cellTerrainFraction(np));open+=neighborOpen;openSum+=neighborOpen*volume(np);}}
       }
       let relaxTarget=select(total/6.0,openSum/max(open,1.0),open>0.0);
       phiNext=mix(phi,relaxTarget,s);
@@ -818,10 +847,10 @@ fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
   textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phiNext));
 }
 
-// Paper Sec 3.9.1 phi-s for the resident quadtree level set. While the
-// quadtree projection owns the pressure solve the uniform pressure textures
-// are idle, so this pass aliases them: pressureIn is a copy of the signed
-// distance field and pressureOut is the resident level-set texture itself.
+// Paper Sec 3.9.1 phi-s for the resident adaptive level set. While an adaptive
+// projection owns the pressure solve the uniform pressure textures are idle,
+// so this pass aliases them: pressureIn is a copy of the signed-distance field
+// and pressureOut is the resident level-set texture itself.
 @compute @workgroup_size(4,4,4)
 fn relaxSolidPhi(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
@@ -830,14 +859,26 @@ fn relaxSolidPhi(@builtin(global_invocation_id) gid:vec3u){
   if(nearAnyBody(worldCell(id))){
     let s=cellSolidFraction(id);
     if(s>0.0){
-      var open=0.0;var openSum=0.0;var total=0.0;
+      var open=0.0;var openSum=0.0;var total=0.0;var exteriorOpen=0.0;var exteriorSum=0.0;
       let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
       for(var index=0;index<6;index+=1){
         let np=clampCell(id+offsets[index]);
-        let neighborPhi=textureLoad(pressureIn,np,0).x;total+=neighborPhi;
-        if(cellRigidBody(np)<0&&!cellInsideTerrain(np)){open+=1.0;openSum+=neighborPhi;}
+        let neighborPhi=textureLoad(pressureIn,np,0).x;let neighborOpen=(1.0-cellSolidFraction(np))*(1.0-cellTerrainFraction(np));total+=neighborPhi;
+        open+=neighborOpen;openSum+=neighborOpen*neighborPhi;
+        // Extend phi from the first genuinely open sample on each coordinate
+        // ray. A one-cell relaxation takes many frames to cross a large solid
+        // and leaves a newly submerged body falsely dry, under-reporting its
+        // displaced volume. Six exterior samples establish the correct phase
+        // throughout the solid in this pass while retaining a local fallback
+        // for bodies wider than the bounded search.
+        for(var step=1;step<=64;step+=1){
+          let exterior=id+step*offsets[index];if(!valid(exterior)){break;}
+          let exteriorWeight=(1.0-cellSolidFraction(exterior))*(1.0-cellTerrainFraction(exterior));
+          if(exteriorWeight>0.5){exteriorOpen+=exteriorWeight;exteriorSum+=exteriorWeight*textureLoad(pressureIn,exterior,0).x;break;}
+        }
       }
-      let relaxTarget=select(total/6.0,openSum/max(open,1.0),open>0.0);
+      let localTarget=select(total/6.0,openSum/max(open,1.0),open>0.0);
+      let relaxTarget=select(localTarget,exteriorSum/max(exteriorOpen,1.0),exteriorOpen>0.0);
       result=mix(phi,relaxTarget,s);
     }
   }
@@ -936,7 +977,7 @@ fn sharpenResolve(@builtin(global_invocation_id) gid:vec3u){
   textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x+deposit));
 }
 @compute @workgroup_size(4,4,4)
-fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}
+fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let open=(1.0-cellSolidFraction(id))*(1.0-cellTerrainFraction(id));let represented=surfaceOccupancy(id)*open;let conservative=volume(id)*open;atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}
 `;
 
 export class WebGPUEulerianSolver {
@@ -1197,7 +1238,7 @@ export class WebGPUEulerianSolver {
       const measuredFrameDt=(this.info.lastDt_s??0)*(this.info.lastSubsteps??1);this.info.stabilityFlags=classifyTallCellStability({nonFiniteCount:this.info.nonFiniteCount,pressureRelativeResidual:this.info.pressureRelativeResidual,maxComponentCfl:this.info.maxComponentCfl,highCflCellCount:this.info.highCflCellCount,maxDivergenceBefore_s:this.info.maxDivergenceBefore_s,maxDivergenceAfter_s:this.info.maxDivergenceAfter_s,dt_s:measuredFrameDt||this.lastFrameDt});
       if(queryBytes>0){
         const times=new BigUint64Array(buffer.getMappedRange(queryOffset,queryBytes));
-        const stageByField:Partial<Record<GPUPhysicsTimingField,GPUPhysicsStageId>>={preparation_ms:"preparation",layerConstruction_ms:"topology",advection_ms:"advection",conditioning_ms:"conditioning",remeshing_ms:"remeshing",pressure_ms:"pressure",projection_ms:"projection",surfaceUpdate_ms:"surfaceUpdate",rigidCoupling_ms:"rigidCoupling",diagnostics_ms:"diagnostics"};
+        const stageByField:Partial<Record<GPUPhysicsTimingField,GPUPhysicsStageId>>={preparation_ms:"preparation",layerConstruction_ms:"topology",advection_ms:"advection",conditioning_ms:"conditioning",remeshing_ms:"remeshing",pressure_ms:"pressure",projection_ms:"projection",extrapolation_ms:"extrapolation",materialization_ms:"materialization",surfaceUpdate_ms:"surfaceUpdate",rigidCoupling_ms:"rigidCoupling",diagnostics_ms:"diagnostics"};
         const activeStages=[...new Set(querySegments.map(segment=>stageByField[segment.name]).filter((stage):stage is GPUPhysicsStageId=>Boolean(stage)))];
         const timings=emptyGPUPhysicsTimings(activeStages);
         for(const segment of querySegments){const elapsed=Number(times[segment.end])-Number(times[segment.start]);timings[segment.name]+=Math.max(0,elapsed)/1e6;}

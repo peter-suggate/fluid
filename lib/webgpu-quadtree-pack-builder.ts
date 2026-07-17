@@ -7,6 +7,8 @@
  * numerical kernels are shared and only topology construction moves devices.
  */
 
+import { adaptiveOpticalLayerDefaults } from "./quadtree-tall-cell-grid";
+
 const INVALID = 0xffffffff;
 
 export interface GPUQuadtreePackHints {
@@ -72,7 +74,7 @@ export interface GPUQuadtreeResidentResources {
 }
 
 const common = /* wgsl */ `
-struct Params { dims: vec4u, cell: vec4f, capacities: vec4u }
+struct Params { dims: vec4u, cell: vec4f, capacities: vec4u, optical: vec4u }
 struct LeafMeta { counts: vec4u, offsets: vec4u }
 fn index2(q: vec2u) -> u32 { return q.x + params.dims.x * q.y; }
 fn index3(q: vec3u) -> u32 { return q.x + params.dims.x * (q.y + params.dims.y * q.z); }
@@ -91,6 +93,7 @@ ${common}
 @group(0) @binding(6) var<storage, read_write> samples: array<vec4u>;
 @group(0) @binding(7) var<storage, read_write> cellWords: array<atomic<u32>>;
 @group(0) @binding(8) var<storage, read_write> auxWords: array<u32>;
+@group(0) @binding(9) var<storage, read> opticalColumns: array<vec4u>;
 
 fn phiAt(word: u32, y: u32) -> f32 {
   let origin = leafOrigin(word); let size = leafSize(word);
@@ -120,6 +123,17 @@ fn footprintCrossesInterface(word: u32, y: u32, h: f32) -> bool {
 }
 fn flagIndex(slot: u32, y: u32) -> u32 { return slot * params.dims.y + y; }
 
+fn adaptiveOpticalFirst(word: u32, surfaceY: u32) -> u32 {
+  let origin = leafOrigin(word); let size = leafSize(word); var first = params.dims.y; var nearMainSurface = false;
+  for (var z = origin.y; z < origin.y + size && z < params.dims.z; z += 1u) { for (var x = origin.x; x < origin.x + size && x < params.dims.x; x += 1u) {
+    let column = opticalColumns[index2(vec2u(x, z))];
+    if (column.w != 0u && u32(abs(i32(surfaceY) - i32(column.y))) <= params.optical.z) { nearMainSurface = true; first = min(first, column.x); }
+  } }
+  if (nearMainSurface) { return min(surfaceY, first); }
+  let depth = max(1u, params.optical.y);
+  return select(0u, surfaceY - depth + 1u, surfaceY + 1u >= depth);
+}
+
 @compute @workgroup_size(8, 8)
 fn classifySegments(@builtin(global_invocation_id) gid: vec3u) {
   let q = gid.xy; if (any(q >= params.dims.xz)) { return; }
@@ -129,12 +143,16 @@ fn classifySegments(@builtin(global_invocation_id) gid: vec3u) {
   for (var surfaceY = 0u; surfaceY < params.dims.y; surfaceY += 1u) {
     let liquid = footprintWet(word, surfaceY); let isInterface = footprintCrossesInterface(word, surfaceY, h);
     if (!isInterface) { continue; }
-    var liquidY = surfaceY;
-    if (!liquid && liquidY > 0u && footprintWet(word, liquidY - 1u)) { liquidY -= 1u; }
-    var depth = 0u; var probe = i32(liquidY);
-    loop { if (probe < 0 || !footprintWet(word, u32(probe))) { break; } depth += 1u; probe -= 1; }
-    let depthCells = max(1u, u32(ceil(f32(depth) * params.cell.w)));
-    let first = select(0u, surfaceY - depthCells + 1u, surfaceY + 1u >= depthCells);
+    var first = 0u;
+    if (params.optical.x != 0u) { first = adaptiveOpticalFirst(word, surfaceY); }
+    else {
+      var liquidY = surfaceY;
+      if (!liquid && liquidY > 0u && footprintWet(word, liquidY - 1u)) { liquidY -= 1u; }
+      var depth = 0u; var probe = i32(liquidY);
+      loop { if (probe < 0 || !footprintWet(word, u32(probe))) { break; } depth += 1u; probe -= 1; }
+      let depthCells = max(1u, u32(ceil(f32(depth) * params.cell.w)));
+      first = select(0u, surfaceY - depthCells + 1u, surfaceY + 1u >= depthCells);
+    }
     for (var y = first; y <= surfaceY; y += 1u) { cubicFlags[flagIndex(slot, y)] = 1u; }
     let airEnd = min(params.dims.y - 1u, surfaceY + 2u);
     for (var y = surfaceY + 1u; y <= airEnd && y < params.dims.y; y += 1u) { if (phiAt(word, y) >= 0.0) { cubicFlags[flagIndex(slot, y)] = 1u; } }
@@ -148,19 +166,6 @@ fn classifySegments(@builtin(global_invocation_id) gid: vec3u) {
     segmentCount += 1u; sampleCount += count; if (liquid) { dofCount += count; } if (tall) { tallCount += 1u; } y += 1u;
   }
   leafMeta[slot].counts = vec4u(segmentCount, sampleCount, dofCount, tallCount);
-}
-
-@compute @workgroup_size(1)
-fn scanSegments(@builtin(global_invocation_id) gid: vec3u) {
-  if (gid.x != 0u) { return; }
-  let cells = params.dims.x * params.dims.z; var totals = vec4u(0); var leaves = 0u;
-  for (var slot = 0u; slot < cells; slot += 1u) {
-    let counts = leafMeta[slot].counts; leafMeta[slot].offsets = totals; totals += counts;
-    if (counts.x > 0u) { leaves += 1u; }
-  }
-  var overflow = 0u;
-  if (totals.x > params.capacities.x || totals.y > params.capacities.y || totals.z > params.capacities.z) { overflow = 1u; }
-  leafMeta[cells] = LeafMeta(totals, vec4u(leaves, overflow, 0u, 0u));
 }
 
 fn emitSample(word: u32, y: u32, span: u32, sampleIndex: u32, dof: u32) {
@@ -254,15 +259,6 @@ fn countFaces(@builtin(global_invocation_id) gid: vec3u) {
   faceMeta[slot].counts = counts;
 }
 
-@compute @workgroup_size(1)
-fn scanFaces(@builtin(global_invocation_id) gid: vec3u) {
-  if (gid.x != 0u) { return; } let cells = params.dims.x * params.dims.z; var cursor = 0u; var ghosts = 0u;
-  for (var slot = 0u; slot < cells; slot += 1u) { faceMeta[slot].offsets.x = cursor; cursor += faceMeta[slot].counts.x; ghosts += faceMeta[slot].counts.w; }
-  for (var slot = 0u; slot < cells; slot += 1u) { faceMeta[slot].offsets.y = cursor; cursor += faceMeta[slot].counts.y; }
-  for (var slot = 0u; slot < cells; slot += 1u) { faceMeta[slot].offsets.z = cursor; cursor += faceMeta[slot].counts.z; }
-  faceMeta[cells] = FaceMeta(vec4u(cursor, ghosts, 0u, 0u), vec4u(select(0u, 1u, cursor > params.capacities.w), 0u, 0u, 0u));
-}
-
 fn interpolate(slot: u32, queryY: f32) -> Interp {
   let columnMeta = leafMeta[slot]; var lower = columnMeta.offsets.y; var upper = lower + columnMeta.counts.y - 1u;
   for (var i = 0u; i < columnMeta.counts.y; i += 1u) { let sample = columnMeta.offsets.y + i; let y = (samples[sample].x >> 20u) & 1023u; if (f32(y) <= queryY) { lower = sample; } if (f32(y) >= queryY) { upper = sample; break; } }
@@ -331,22 +327,156 @@ struct Entry { face: u32, coefficient: f32 }
 @group(0) @binding(6) var<storage, read_write> rowOffsets: array<u32>;
 @group(0) @binding(7) var<storage, read_write> rowEntries: array<Entry>;
 @group(0) @binding(8) var<storage, read_write> matrixWords: array<u32>;
-
-@compute @workgroup_size(1)
-fn scanRows(@builtin(global_invocation_id) gid: vec3u) {
-  if (gid.x != 0u) { return; } let cells = params.dims.x * params.dims.z; let dofs = leafMeta[cells].counts.z; var incidents = 0u; var matrices = 0u;
-  for (var row = 0u; row < dofs; row += 1u) { rowOffsets[row] = incidents; matrixWords[row] = matrices; incidents += atomicLoad(&rowCounts[row].x); matrices += atomicLoad(&rowCounts[row].y); }
-  rowOffsets[dofs] = incidents; matrixWords[dofs] = matrices; faceMeta[cells].offsets.y = incidents; faceMeta[cells].offsets.z = matrices;
-}
-
 @compute @workgroup_size(128)
 fn emitCsr(@builtin(global_invocation_id) gid: vec3u) {
-  let cells = params.dims.x * params.dims.z; let faceId = gid.x; if (faceId >= faceMeta[cells].counts.x) { return; } let dofs = leafMeta[cells].counts.z; let face = faces[faceId]; let count = (face.packed >> 18u) & 7u;
+  let cells = params.dims.x * params.dims.z;
+  if (leafMeta[cells].offsets.y != 0u || faceMeta[cells].offsets.x != 0u) { return; }
+  let faceId = gid.x; if (faceId >= faceMeta[cells].counts.x) { return; } let dofs = leafMeta[cells].counts.z; let face = faces[faceId]; let count = (face.packed >> 18u) & 7u;
   for (var a = 0u; a < count; a += 1u) {
     let row = face.nodes[a]; if (row == ${INVALID}u) { continue; }
     let incident = atomicAdd(&rowCursors[row].x, 1u); rowEntries[rowOffsets[row] + incident] = Entry(faceId, face.coefficients[a]);
     for (var b = 0u; b < count; b += 1u) { let column = face.nodes[b]; if (column == ${INVALID}u) { continue; } let entry = atomicAdd(&rowCursors[row].y, 1u); let base = dofs + 1u + 4u * (matrixWords[row] + entry); matrixWords[base] = column; matrixWords[base + 1u] = faceId | (b << 30u); matrixWords[base + 2u] = 0u; matrixWords[base + 3u] = bitcast<u32>(face.coefficients[a] * face.coefficients[b]); }
   }
+}
+`;
+
+/** Layout adapters around the shared scan, kept separate from the already
+ * storage-binding-heavy emit shaders so the pack remains within WebGPU's
+ * portable eight-storage-buffer-per-stage limit. */
+export const quadtreePackScanIOShader = /* wgsl */ `
+${common}
+struct FaceMeta { counts: vec4u, offsets: vec4u }
+struct AtomicPair { x: atomic<u32>, y: atomic<u32> }
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> leafMeta: array<LeafMeta>;
+@group(0) @binding(2) var<storage, read_write> faceMeta: array<FaceMeta>;
+@group(0) @binding(3) var<storage, read_write> rowCounts: array<AtomicPair>;
+@group(0) @binding(4) var<storage, read_write> rowOffsets: array<u32>;
+@group(0) @binding(5) var<storage, read_write> matrixWords: array<u32>;
+@group(0) @binding(6) var<storage, read_write> scanValues: array<vec4u>;
+@group(0) @binding(7) var<storage, read_write> scanBlockOffsets: array<vec4u>;
+@group(0) @binding(8) var<storage, read_write> scanControl: array<atomic<u32>>;
+
+@compute @workgroup_size(256)
+fn prepareSegmentScan(@builtin(global_invocation_id) gid: vec3u) {
+  let cells = params.dims.x * params.dims.z;
+  if (gid.x == 0u) { atomicStore(&scanControl[0], cells); }
+  if (gid.x >= cells) { return; }
+  let counts = leafMeta[gid.x].counts; scanValues[gid.x] = counts;
+  if (counts.x > 0u) { atomicAdd(&scanControl[1], 1u); }
+}
+@compute @workgroup_size(256)
+fn finishSegmentScan(@builtin(global_invocation_id) gid: vec3u) {
+  let cells = params.dims.x * params.dims.z;
+  if (gid.x < cells) { leafMeta[gid.x].offsets = scanValues[gid.x] + scanBlockOffsets[gid.x / 256u]; }
+  if (gid.x != 0u) { return; }
+  let last = cells - 1u; let totals = scanValues[last] + scanBlockOffsets[last / 256u] + leafMeta[last].counts;
+  let overflow = totals.x > params.capacities.x || totals.y > params.capacities.y || totals.z > params.capacities.z;
+  let leaves = atomicLoad(&scanControl[1]); atomicStore(&scanControl[1], 0u);
+  leafMeta[cells] = LeafMeta(totals, vec4u(leaves, select(0u, 1u, overflow), 0u, 0u));
+}
+
+@compute @workgroup_size(256)
+fn prepareFaceScan(@builtin(global_invocation_id) gid: vec3u) {
+  let cells = params.dims.x * params.dims.z;
+  if (gid.x == 0u) { atomicStore(&scanControl[0], 3u * cells); }
+  if (gid.x >= cells) { return; }
+  let counts = faceMeta[gid.x].counts;
+  scanValues[gid.x] = vec4u(counts.x, 0u, 0u, 0u); scanValues[cells + gid.x] = vec4u(counts.y, 0u, 0u, 0u); scanValues[2u * cells + gid.x] = vec4u(counts.z, 0u, 0u, 0u);
+  if (counts.w > 0u) { atomicAdd(&scanControl[1], counts.w); }
+}
+fn scannedFaceOffset(index: u32) -> u32 { return (scanValues[index] + scanBlockOffsets[index / 256u]).x; }
+@compute @workgroup_size(256)
+fn finishFaceScan(@builtin(global_invocation_id) gid: vec3u) {
+  let cells = params.dims.x * params.dims.z;
+  if (gid.x < cells) { faceMeta[gid.x].offsets = vec4u(scannedFaceOffset(gid.x), scannedFaceOffset(cells + gid.x), scannedFaceOffset(2u * cells + gid.x), 0u); }
+  if (gid.x != 0u) { return; }
+  let last = 3u * cells - 1u; let total = scannedFaceOffset(last) + faceMeta[cells - 1u].counts.z;
+  let ghosts = atomicLoad(&scanControl[1]); atomicStore(&scanControl[1], 0u);
+  faceMeta[cells] = FaceMeta(vec4u(total, ghosts, 0u, 0u), vec4u(select(0u, 1u, total > params.capacities.w), 0u, 0u, 0u));
+}
+
+@compute @workgroup_size(256)
+fn prepareRowScan(@builtin(global_invocation_id) gid: vec3u) {
+  let cells = params.dims.x * params.dims.z; let dofs = leafMeta[cells].counts.z;
+  // An overflowing segment pack is invalidated later, but every intervening
+  // dispatch must still remain inside its scratch capacity.
+  let scanDofs = min(dofs, params.capacities.z);
+  if (gid.x == 0u) { atomicStore(&scanControl[0], scanDofs); }
+  if (gid.x >= scanDofs) { return; }
+  scanValues[gid.x] = vec4u(atomicLoad(&rowCounts[gid.x].x), atomicLoad(&rowCounts[gid.x].y), 0u, 0u);
+}
+@compute @workgroup_size(256)
+fn finishRowScan(@builtin(global_invocation_id) gid: vec3u) {
+  let cells = params.dims.x * params.dims.z; let dofs = leafMeta[cells].counts.z;
+  let scanDofs = min(dofs, params.capacities.z);
+  if (gid.x < scanDofs) { let prefix = scanValues[gid.x] + scanBlockOffsets[gid.x / 256u]; rowOffsets[gid.x] = prefix.x; matrixWords[gid.x] = prefix.y; }
+  if (gid.x != 0u) { return; }
+  var totals = vec4u(0u);
+  if (scanDofs > 0u) { let last = scanDofs - 1u; totals = scanValues[last] + scanBlockOffsets[last / 256u] + vec4u(atomicLoad(&rowCounts[last].x), atomicLoad(&rowCounts[last].y), 0u, 0u); }
+  rowOffsets[scanDofs] = totals.x; matrixWords[scanDofs] = totals.y; faceMeta[cells].offsets.y = totals.x; faceMeta[cells].offsets.z = totals.y;
+}
+`;
+
+/**
+ * Exclusive vec4<u32> scan shared by segment, face-axis, and CSR packing.
+ * The first pass scans 256-element tiles. The second scans those much smaller
+ * tile totals with 256 parallel contiguous chunks, avoiding a recursive
+ * dispatch tree while keeping the serial work per lane bounded by
+ * ceil(tileCount / 256).
+ */
+export const quadtreePackScanShader = /* wgsl */ `
+@group(0) @binding(0) var<storage, read_write> values: array<vec4u>;
+@group(0) @binding(1) var<storage, read_write> blockOffsets: array<vec4u>;
+@group(0) @binding(2) var<storage, read_write> control: array<atomic<u32>>;
+var<workgroup> partials: array<vec4u, 256>;
+
+@compute @workgroup_size(256)
+fn scanValueBlocks(@builtin(local_invocation_id) lid: vec3u, @builtin(workgroup_id) wid: vec3u) {
+  let length = atomicLoad(&control[0]); let base = 256u * wid.x; let index = base + lid.x;
+  var input = vec4u(0u); if (index < length) { input = values[index]; }
+  partials[lid.x] = input; workgroupBarrier();
+  // Work-efficient Blelloch up-sweep/down-sweep. Padded zero lanes make the
+  // final workgroup follow exactly the same path as a full tile.
+  for (var stride = 1u; stride < 256u; stride <<= 1u) {
+    let node = (lid.x + 1u) * 2u * stride - 1u;
+    if (node < 256u) { partials[node] += partials[node - stride]; }
+    workgroupBarrier();
+  }
+  if (lid.x == 0u) { blockOffsets[wid.x] = partials[255u]; partials[255u] = vec4u(0u); }
+  workgroupBarrier();
+  var stride = 128u;
+  loop {
+    let node = (lid.x + 1u) * 2u * stride - 1u;
+    if (node < 256u) { let lower = partials[node - stride]; partials[node - stride] = partials[node]; partials[node] += lower; }
+    workgroupBarrier();
+    if (stride == 1u) { break; } stride >>= 1u;
+  }
+  if (index < length) { values[index] = partials[lid.x]; }
+}
+
+@compute @workgroup_size(256)
+fn scanBlockTotals(@builtin(local_invocation_id) lid: vec3u) {
+  let length = atomicLoad(&control[0]); let blockCount = (length + 255u) / 256u;
+  let chunk = (blockCount + 255u) / 256u; let first = lid.x * chunk; let last = min(first + chunk, blockCount);
+  var chunkTotal = vec4u(0u);
+  for (var block = first; block < last; block += 1u) { chunkTotal += blockOffsets[block]; }
+  partials[lid.x] = chunkTotal; workgroupBarrier();
+  for (var stride = 1u; stride < 256u; stride <<= 1u) {
+    let node = (lid.x + 1u) * 2u * stride - 1u;
+    if (node < 256u) { partials[node] += partials[node - stride]; }
+    workgroupBarrier();
+  }
+  if (lid.x == 0u) { partials[255u] = vec4u(0u); } workgroupBarrier();
+  var stride = 128u;
+  loop {
+    let node = (lid.x + 1u) * 2u * stride - 1u;
+    if (node < 256u) { let lower = partials[node - stride]; partials[node - stride] = partials[node]; partials[node] += lower; }
+    workgroupBarrier();
+    if (stride == 1u) { break; } stride >>= 1u;
+  }
+  var cursor = partials[lid.x];
+  for (var block = first; block < last; block += 1u) { let count = blockOffsets[block]; blockOffsets[block] = cursor; cursor += count; }
 }
 `;
 
@@ -474,14 +604,17 @@ type BufferSet = {
   topology: GPUBuffer; flags: GPUBuffer; leafMeta: GPUBuffer; segments: GPUBuffer; samples: GPUBuffer; faceMeta: GPUBuffer;
   faces: GPUBuffer; rowCounts: GPUBuffer; rowCursors: GPUBuffer; rowOffsets: GPUBuffer; rowEntries: GPUBuffer;
   matrix: GPUBuffer; cellWords: GPUBuffer; aux: GPUBuffer; controlReadback: GPUBuffer;
+  scanValues: GPUBuffer; scanBlockOffsets: GPUBuffer; scanControl: GPUBuffer;
 };
 
 export class WebGPUQuadtreePackBuilder {
   private readonly params: GPUBuffer;
   private readonly segmentationLayout: GPUBindGroupLayout; private readonly faceLayout: GPUBindGroupLayout; private readonly csrLayout: GPUBindGroupLayout;
-  private readonly classifyPipeline: GPUComputePipeline; private readonly scanSegmentsPipeline: GPUComputePipeline; private readonly emitSegmentsPipeline: GPUComputePipeline;
-  private readonly countFacesPipeline: GPUComputePipeline; private readonly scanFacesPipeline: GPUComputePipeline; private readonly emitFacesPipeline: GPUComputePipeline;
-  private readonly scanRowsPipeline: GPUComputePipeline; private readonly emitCsrPipeline: GPUComputePipeline;
+  private readonly classifyPipeline: GPUComputePipeline; private readonly prepareSegmentScanPipeline: GPUComputePipeline; private readonly finishSegmentScanPipeline: GPUComputePipeline; private readonly emitSegmentsPipeline: GPUComputePipeline;
+  private readonly countFacesPipeline: GPUComputePipeline; private readonly prepareFaceScanPipeline: GPUComputePipeline; private readonly finishFaceScanPipeline: GPUComputePipeline; private readonly emitFacesPipeline: GPUComputePipeline;
+  private readonly prepareRowScanPipeline: GPUComputePipeline; private readonly finishRowScanPipeline: GPUComputePipeline; private readonly emitCsrPipeline: GPUComputePipeline;
+  private readonly scanIOLayout: GPUBindGroupLayout; private readonly scanLayout: GPUBindGroupLayout;
+  private readonly scanValueBlocksPipeline: GPUComputePipeline; private readonly scanBlockTotalsPipeline: GPUComputePipeline;
   private readonly textureLayout: GPUBindGroupLayout; private readonly unpackCellFieldsPipeline: GPUComputePipeline;
   private readonly finalizeLayout: GPUBindGroupLayout; private readonly finalizeControlPipeline: GPUComputePipeline;
   private readonly copyLayout: GPUBindGroupLayout;
@@ -494,17 +627,21 @@ export class WebGPUQuadtreePackBuilder {
   private capacities?: GPUQuadtreeResidentCapacities & { sampleCapacity: number; segmentCapacity: number };
   private inlineGroups?: {
     resident: GPUQuadtreeResidentResources;
-    segmentation: GPUBindGroup; face: GPUBindGroup; csr: GPUBindGroup; finalize: GPUBindGroup;
+    opticalLayer?: GPUBuffer;
+    segmentation: GPUBindGroup; face: GPUBindGroup; csr: GPUBindGroup; scanIO: GPUBindGroup; scan: GPUBindGroup; finalize: GPUBindGroup;
     copyFaces: GPUBindGroup; copyRowOffsets: GPUBindGroup; copyRowEntries: GPUBindGroup; copyMatrix: GPUBindGroup;
     aux: GPUBindGroup; texture: GPUBindGroup;
   };
+  private readonly emptyOpticalLayer: GPUBuffer;
 
-  constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, private readonly opticalDepthFraction: number) {
-    this.params = device.createBuffer({ label: "GPU quadtree pack parameters", size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, private readonly opticalDepthFraction: number, private readonly opticalLayerMode: "fixed" | "adaptive-motion" = "fixed") {
+    this.params = device.createBuffer({ label: "GPU quadtree pack parameters", size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.emptyOpticalLayer = device.createBuffer({ label: "GPU empty adaptive optical layer", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     const storage = (readOnly = false): GPUBindGroupLayoutEntry["buffer"] => ({ type: readOnly ? "read-only-storage" : "storage" });
     this.segmentationLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) }, { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }, ...[3, 4, 5, 6, 7, 8].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: storage() }))
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }, ...[3, 4, 5, 6, 7, 8].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: storage() })),
+      { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) }
     ] });
     this.faceLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) }, { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
@@ -519,12 +656,22 @@ export class WebGPUQuadtreePackBuilder {
       const shaderModule = device.createShaderModule({ code }); const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
       return Object.fromEntries(entries.map((entryPoint) => [entryPoint, device.createComputePipeline({ label: `GPU quadtree pack ${entryPoint}`, layout: pipelineLayout, compute: { module: shaderModule, entryPoint } })]));
     };
-    const segmentation = pipelines(quadtreeSegmentationPackShader, this.segmentationLayout, ["classifySegments", "scanSegments", "emitSegments"]);
-    this.classifyPipeline = segmentation.classifySegments; this.scanSegmentsPipeline = segmentation.scanSegments; this.emitSegmentsPipeline = segmentation.emitSegments;
-    const faces = pipelines(quadtreeFacePackShader, this.faceLayout, ["countFaces", "scanFaces", "emitFaces"]);
-    this.countFacesPipeline = faces.countFaces; this.scanFacesPipeline = faces.scanFaces; this.emitFacesPipeline = faces.emitFaces;
-    const csr = pipelines(quadtreeCsrPackShader, this.csrLayout, ["scanRows", "emitCsr"]);
-    this.scanRowsPipeline = csr.scanRows; this.emitCsrPipeline = csr.emitCsr;
+    const segmentation = pipelines(quadtreeSegmentationPackShader, this.segmentationLayout, ["classifySegments", "emitSegments"]);
+    this.classifyPipeline = segmentation.classifySegments; this.emitSegmentsPipeline = segmentation.emitSegments;
+    const faces = pipelines(quadtreeFacePackShader, this.faceLayout, ["countFaces", "emitFaces"]);
+    this.countFacesPipeline = faces.countFaces; this.emitFacesPipeline = faces.emitFaces;
+    const csr = pipelines(quadtreeCsrPackShader, this.csrLayout, ["emitCsr"]); this.emitCsrPipeline = csr.emitCsr;
+    this.scanIOLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      ...[1, 2, 3, 4, 5, 6, 7, 8].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: storage() }))
+    ] });
+    const scanIO = pipelines(quadtreePackScanIOShader, this.scanIOLayout, ["prepareSegmentScan", "finishSegmentScan", "prepareFaceScan", "finishFaceScan", "prepareRowScan", "finishRowScan"]);
+    this.prepareSegmentScanPipeline = scanIO.prepareSegmentScan; this.finishSegmentScanPipeline = scanIO.finishSegmentScan;
+    this.prepareFaceScanPipeline = scanIO.prepareFaceScan; this.finishFaceScanPipeline = scanIO.finishFaceScan;
+    this.prepareRowScanPipeline = scanIO.prepareRowScan; this.finishRowScanPipeline = scanIO.finishRowScan;
+    this.scanLayout = device.createBindGroupLayout({ entries: [0, 1, 2].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: storage() })) });
+    const scan = pipelines(quadtreePackScanShader, this.scanLayout, ["scanValueBlocks", "scanBlockTotals"]);
+    this.scanValueBlocksPipeline = scan.scanValueBlocks; this.scanBlockTotalsPipeline = scan.scanBlockTotals;
     this.textureLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: storage(true) },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
@@ -569,6 +716,7 @@ export class WebGPUQuadtreePackBuilder {
     const segmentCapacity = Math.max(cells2, Math.min(cells3, sampleCapacity));
     const faceCapacity = Math.max(128, Math.min(4 * cells3, Math.ceil(hints.faceCount * 1.75)));
     const entryCapacity = 4 * faceCapacity, matrixCapacity = 16 * faceCapacity;
+    const scanCapacity = Math.max(3 * cells2, dofCapacity), scanBlockCapacity = Math.ceil(scanCapacity / 256);
     // Aux words are stored in a rgba32uint texture; sizing the scratch buffer
     // to exact texel rows keeps full-extent buffer<->texture transfers valid.
     const auxCapacityTexels = Math.ceil((5 * dofCapacity + 4) / 4);
@@ -584,27 +732,39 @@ export class WebGPUQuadtreePackBuilder {
       faces: make("GPU pack faces", faceCapacity * 112), rowCounts: make("GPU pack row counts", dofCapacity * 8), rowCursors: make("GPU pack row cursors", dofCapacity * 8),
       rowOffsets: make("GPU pack row offsets", (dofCapacity + 1) * 4), rowEntries: make("GPU pack row entries", entryCapacity * 8), matrix: make("GPU pack matrix", (dofCapacity + 1 + 4 * matrixCapacity) * 4),
       cellWords: make("GPU pack cell fields", cells3 * 10 * 4), aux: make("GPU pack auxiliary words", auxWidth * auxHeight * 16),
-      controlReadback: make("GPU pack control readback", 64, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ)
+      controlReadback: make("GPU pack control readback", 64, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ),
+      scanValues: make("GPU pack scan values", scanCapacity * 16), scanBlockOffsets: make("GPU pack scan block offsets", scanBlockCapacity * 16), scanControl: make("GPU pack scan control", 16)
     };
     this.capacities = { dofCapacity, faceCapacity, entryCapacity, matrixCapacity, auxWidth, auxHeight, key, sampleCapacity, segmentCapacity };
     return this.capacities;
   }
 
-  async build(packedCells: Uint32Array, levelSet: GPUTexture, hints: GPUQuadtreePackHints, resident = false, retriesRemaining = 2): Promise<GPUQuadtreePackedResult | undefined> {
+  async build(packedCells: Uint32Array, levelSet: GPUTexture, hints: GPUQuadtreePackHints, resident = false, opticalLayer?: GPUBuffer, retriesRemaining = 2): Promise<GPUQuadtreePackedResult | undefined> {
     const startedAt = performance.now(), capacities = this.ensure(hints), b = this.buffers!, { nx, ny, nz } = this.dims, cells2 = nx * nz, cells3 = cells2 * ny;
-    this.device.queue.writeBuffer(b.topology, 0, packedCells.buffer as ArrayBuffer, packedCells.byteOffset, packedCells.byteLength); const paramData = new ArrayBuffer(48);
+    this.device.queue.writeBuffer(b.topology, 0, packedCells.buffer as ArrayBuffer, packedCells.byteOffset, packedCells.byteLength); const paramData = new ArrayBuffer(64);
     new Uint32Array(paramData, 0, 4).set([nx, ny, nz, 0]); new Float32Array(paramData, 16, 4).set([this.cell.x, this.cell.y, this.cell.z, Math.max(0, this.opticalDepthFraction)]);
-    new Uint32Array(paramData, 32, 4).set([capacities.segmentCapacity, capacities.sampleCapacity, capacities.dofCapacity, capacities.faceCapacity]); this.device.queue.writeBuffer(this.params, 0, paramData);
+    new Uint32Array(paramData, 32, 4).set([capacities.segmentCapacity, capacities.sampleCapacity, capacities.dofCapacity, capacities.faceCapacity]);
+    const optical = adaptiveOpticalLayerDefaults(ny);
+    new Uint32Array(paramData, 48, 4).set([this.opticalLayerMode === "adaptive-motion" ? 1 : 0, optical.airborneCells, optical.surfaceOffsetCells, 0]); this.device.queue.writeBuffer(this.params, 0, paramData);
     const group = (layout: GPUBindGroupLayout, entries: Array<GPUBuffer | GPUTexture>) => this.device.createBindGroup({ layout, entries: entries.map((resource, binding) => ({ binding, resource: "createView" in resource ? resource.createView() : { buffer: resource } })) });
-    const segmentationGroup = group(this.segmentationLayout, [b.topology, levelSet, this.params, b.flags, b.leafMeta, b.segments, b.samples, b.cellWords, b.aux]);
+    const segmentationGroup = group(this.segmentationLayout, [b.topology, levelSet, this.params, b.flags, b.leafMeta, b.segments, b.samples, b.cellWords, b.aux, opticalLayer ?? this.emptyOpticalLayer]);
     const faceGroup = group(this.faceLayout, [b.topology, this.params, b.leafMeta, b.segments, b.samples, b.faceMeta, b.faces, b.rowCounts, b.cellWords]);
     const csrGroup = group(this.csrLayout, [this.params, b.leafMeta, b.faceMeta, b.faces, b.rowCounts, b.rowCursors, b.rowOffsets, b.rowEntries, b.matrix]);
+    const scanIOGroup = group(this.scanIOLayout, [this.params, b.leafMeta, b.faceMeta, b.rowCounts, b.rowOffsets, b.matrix, b.scanValues, b.scanBlockOffsets, b.scanControl]);
+    const scanGroup = group(this.scanLayout, [b.scanValues, b.scanBlockOffsets, b.scanControl]);
     const encoder = this.device.createCommandEncoder({ label: "GPU quadtree segmentation/face/CSR pack" });
-    for (const buffer of [b.flags, b.leafMeta, b.faceMeta, b.rowCounts, b.rowCursors, b.cellWords, b.aux]) encoder.clearBuffer(buffer);
+    for (const buffer of [b.flags, b.leafMeta, b.faceMeta, b.rowCounts, b.rowCursors, b.cellWords, b.aux, b.scanControl]) encoder.clearBuffer(buffer);
     const dispatch = (pipeline: GPUComputePipeline, bindGroup: GPUBindGroup, x: number, y = 1) => { const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(x, y); pass.end(); };
-    dispatch(this.classifyPipeline, segmentationGroup, Math.ceil(nx / 8), Math.ceil(nz / 8)); dispatch(this.scanSegmentsPipeline, segmentationGroup, 1); dispatch(this.emitSegmentsPipeline, segmentationGroup, Math.ceil(nx / 8), Math.ceil(nz / 8));
-    dispatch(this.countFacesPipeline, faceGroup, Math.ceil(nx / 8), Math.ceil(nz / 8)); dispatch(this.scanFacesPipeline, faceGroup, 1); dispatch(this.emitFacesPipeline, faceGroup, Math.ceil(nx / 8), Math.ceil(nz / 8));
-    dispatch(this.scanRowsPipeline, csrGroup, 1); dispatch(this.emitCsrPipeline, csrGroup, Math.ceil(capacities.faceCapacity / 128));
+    const scan = (prepare: GPUComputePipeline, finish: GPUComputePipeline, workgroups: number, scanWorkgroups: number) => {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(prepare); pass.setBindGroup(0, scanIOGroup); pass.dispatchWorkgroups(workgroups);
+      pass.setPipeline(this.scanValueBlocksPipeline); pass.setBindGroup(0, scanGroup); pass.dispatchWorkgroups(scanWorkgroups);
+      pass.setPipeline(this.scanBlockTotalsPipeline); pass.dispatchWorkgroups(1);
+      pass.setPipeline(finish); pass.setBindGroup(0, scanIOGroup); pass.dispatchWorkgroups(workgroups); pass.end();
+    };
+    dispatch(this.classifyPipeline, segmentationGroup, Math.ceil(nx / 8), Math.ceil(nz / 8)); scan(this.prepareSegmentScanPipeline, this.finishSegmentScanPipeline, Math.ceil(cells2 / 256), Math.ceil(cells2 / 256)); dispatch(this.emitSegmentsPipeline, segmentationGroup, Math.ceil(nx / 8), Math.ceil(nz / 8));
+    dispatch(this.countFacesPipeline, faceGroup, Math.ceil(nx / 8), Math.ceil(nz / 8)); scan(this.prepareFaceScanPipeline, this.finishFaceScanPipeline, Math.ceil(cells2 / 256), Math.ceil(3 * cells2 / 256)); dispatch(this.emitFacesPipeline, faceGroup, Math.ceil(nx / 8), Math.ceil(nz / 8));
+    scan(this.prepareRowScanPipeline, this.finishRowScanPipeline, Math.ceil(capacities.dofCapacity / 256), Math.ceil(capacities.dofCapacity / 256)); dispatch(this.emitCsrPipeline, csrGroup, Math.ceil(capacities.faceCapacity / 128));
     const finalizeGroup = group(this.finalizeLayout, [this.params, b.leafMeta, b.faceMeta, this.packControl]);
     dispatch(this.finalizeControlPipeline, finalizeGroup, 1);
     encoder.copyBufferToBuffer(b.leafMeta, cells2 * 32, b.controlReadback, 0, 32); encoder.copyBufferToBuffer(b.faceMeta, cells2 * 32, b.controlReadback, 32, 32);
@@ -629,7 +789,7 @@ export class WebGPUQuadtreePackBuilder {
         dofCount: Math.max(hints.dofCount * 2, dofCount),
         faceCount: Math.max(hints.faceCount * 2, faceCount, faceHintFromEntries, faceHintFromMatrix),
         pressureSampleCount: Math.max(hints.pressureSampleCount * 2, pressureSampleCount)
-      }, resident, retriesRemaining - 1) : undefined;
+      }, resident, opticalLayer, retriesRemaining - 1) : undefined;
     }
     const faceBytes = faceCount * 112, rowOffsetBytes = (dofCount + 1) * 4, rowEntryBytes = entryCount * 8, matrixBytes = (dofCount + 1 + 4 * matrixEntryCount) * 4;
     const cellProjectionBytes = cells3 * 16, cellPressureBytes = cells3 * 16, cellTopologyBytes = cells3 * 8, auxWords = dofCount + 3 + 4 * dofCount, auxBytes = auxWords * 4;
@@ -713,16 +873,18 @@ export class WebGPUQuadtreePackBuilder {
    * consistent topology stays live) and the caller's non-blocking monitor of
    * packControl triggers one asynchronous capacity-growth rebuild.
    */
-  encodeResidentPack(encoder: GPUCommandEncoder, topologySource: GPUBuffer, levelSet: GPUTexture, resident: GPUQuadtreeResidentResources): boolean {
+  encodeResidentPack(encoder: GPUCommandEncoder, topologySource: GPUBuffer, levelSet: GPUTexture, resident: GPUQuadtreeResidentResources, opticalLayer?: GPUBuffer): boolean {
     if (!this.canEncodeResident(resident)) return false;
     const b = this.buffers!, capacities = this.capacities!, { nx, ny, nz } = this.dims, cells2 = nx * nz;
-    if (this.inlineGroups?.resident !== resident) {
+    if (this.inlineGroups?.resident !== resident || this.inlineGroups.opticalLayer !== opticalLayer) {
       const group = (layout: GPUBindGroupLayout, entries: Array<GPUBuffer | GPUTexture>) => this.device.createBindGroup({ layout, entries: entries.map((resource, binding) => ({ binding, resource: "createView" in resource ? resource.createView() : { buffer: resource } })) });
       this.inlineGroups = {
-        resident,
-        segmentation: group(this.segmentationLayout, [b.topology, levelSet, this.params, b.flags, b.leafMeta, b.segments, b.samples, b.cellWords, b.aux]),
+        resident, opticalLayer,
+        segmentation: group(this.segmentationLayout, [b.topology, levelSet, this.params, b.flags, b.leafMeta, b.segments, b.samples, b.cellWords, b.aux, opticalLayer ?? this.emptyOpticalLayer]),
         face: group(this.faceLayout, [b.topology, this.params, b.leafMeta, b.segments, b.samples, b.faceMeta, b.faces, b.rowCounts, b.cellWords]),
         csr: group(this.csrLayout, [this.params, b.leafMeta, b.faceMeta, b.faces, b.rowCounts, b.rowCursors, b.rowOffsets, b.rowEntries, b.matrix]),
+        scanIO: group(this.scanIOLayout, [this.params, b.leafMeta, b.faceMeta, b.rowCounts, b.rowOffsets, b.matrix, b.scanValues, b.scanBlockOffsets, b.scanControl]),
+        scan: group(this.scanLayout, [b.scanValues, b.scanBlockOffsets, b.scanControl]),
         finalize: group(this.finalizeLayout, [this.params, b.leafMeta, b.faceMeta, this.packControl]),
         copyFaces: group(this.copyLayout, [this.packControl, b.faces, resident.faces]),
         copyRowOffsets: group(this.copyLayout, [this.packControl, b.rowOffsets, resident.rowOffsets]),
@@ -734,11 +896,18 @@ export class WebGPUQuadtreePackBuilder {
     }
     const groups = this.inlineGroups;
     encoder.copyBufferToBuffer(topologySource, 0, b.topology, 0, cells2 * 4);
-    for (const buffer of [b.flags, b.leafMeta, b.faceMeta, b.rowCounts, b.rowCursors, b.cellWords, b.aux]) encoder.clearBuffer(buffer);
+    for (const buffer of [b.flags, b.leafMeta, b.faceMeta, b.rowCounts, b.rowCursors, b.cellWords, b.aux, b.scanControl]) encoder.clearBuffer(buffer);
     const dispatch = (pipeline: GPUComputePipeline, bindGroup: GPUBindGroup, x: number, y = 1, z = 1) => { const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(x, y, z); pass.end(); };
-    dispatch(this.classifyPipeline, groups.segmentation, Math.ceil(nx / 8), Math.ceil(nz / 8)); dispatch(this.scanSegmentsPipeline, groups.segmentation, 1); dispatch(this.emitSegmentsPipeline, groups.segmentation, Math.ceil(nx / 8), Math.ceil(nz / 8));
-    dispatch(this.countFacesPipeline, groups.face, Math.ceil(nx / 8), Math.ceil(nz / 8)); dispatch(this.scanFacesPipeline, groups.face, 1); dispatch(this.emitFacesPipeline, groups.face, Math.ceil(nx / 8), Math.ceil(nz / 8));
-    dispatch(this.scanRowsPipeline, groups.csr, 1); dispatch(this.emitCsrPipeline, groups.csr, Math.ceil(capacities.faceCapacity / 128));
+    const scan = (prepare: GPUComputePipeline, finish: GPUComputePipeline, workgroups: number, scanWorkgroups: number) => {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(prepare); pass.setBindGroup(0, groups.scanIO); pass.dispatchWorkgroups(workgroups);
+      pass.setPipeline(this.scanValueBlocksPipeline); pass.setBindGroup(0, groups.scan); pass.dispatchWorkgroups(scanWorkgroups);
+      pass.setPipeline(this.scanBlockTotalsPipeline); pass.dispatchWorkgroups(1);
+      pass.setPipeline(finish); pass.setBindGroup(0, groups.scanIO); pass.dispatchWorkgroups(workgroups); pass.end();
+    };
+    dispatch(this.classifyPipeline, groups.segmentation, Math.ceil(nx / 8), Math.ceil(nz / 8)); scan(this.prepareSegmentScanPipeline, this.finishSegmentScanPipeline, Math.ceil(cells2 / 256), Math.ceil(cells2 / 256)); dispatch(this.emitSegmentsPipeline, groups.segmentation, Math.ceil(nx / 8), Math.ceil(nz / 8));
+    dispatch(this.countFacesPipeline, groups.face, Math.ceil(nx / 8), Math.ceil(nz / 8)); scan(this.prepareFaceScanPipeline, this.finishFaceScanPipeline, Math.ceil(cells2 / 256), Math.ceil(3 * cells2 / 256)); dispatch(this.emitFacesPipeline, groups.face, Math.ceil(nx / 8), Math.ceil(nz / 8));
+    scan(this.prepareRowScanPipeline, this.finishRowScanPipeline, Math.ceil(capacities.dofCapacity / 256), Math.ceil(capacities.dofCapacity / 256)); dispatch(this.emitCsrPipeline, groups.csr, Math.ceil(capacities.faceCapacity / 128));
     dispatch(this.finalizeControlPipeline, groups.finalize, 1);
     const copyWorkgroups = (words: number) => Math.max(1, Math.min(4096, Math.ceil(words / 256)));
     dispatch(this.copyFacesPipeline, groups.copyFaces, copyWorkgroups(capacities.faceCapacity * 28));
@@ -751,5 +920,5 @@ export class WebGPUQuadtreePackBuilder {
   }
 
   private destroyBuffers() { if (!this.buffers) return; for (const buffer of Object.values(this.buffers)) buffer.destroy(); this.buffers = undefined; this.inlineGroups = undefined; }
-  destroy() { this.destroyBuffers(); this.params.destroy(); this.packControl.destroy(); }
+  destroy() { this.destroyBuffers(); this.params.destroy(); this.packControl.destroy(); this.emptyOpticalLayer.destroy(); }
 }

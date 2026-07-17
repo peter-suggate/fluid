@@ -20,7 +20,7 @@ export function WebGPUViewport() {
   const pointerRef = useRef<
     | { id: number; x: number; y: number; action: "orbit" | "pan" }
     | { id: number; action: "body"; bodyId: string; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
-    | { id: number; action: "slice"; axis: "x" | "z"; grabY: number }
+    | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
   >(null);
 
@@ -90,22 +90,26 @@ export function WebGPUViewport() {
     return add(origin, scale(direction, dot(sub(point, origin), normal) / denominator));
   };
 
-  // Hit test for the slice gripper: the accent bar along the top edge of the
-  // grid-overlay plane. Grabbing it sweeps the slice through the volume.
+  // Hit test for the slice gripper: vertical planes use their top edge, while
+  // the horizontal Y plane uses its perimeter. Grabbing either sweeps the
+  // slice through the volume.
   const sliceGrabHit = (origin: Vec3, direction: Vec3) => {
     const ui = useUIStore.getState();
     if (ui.view !== "scientific" || ui.gridOverlayAxis === "off") return undefined;
     const axis = ui.gridOverlayAxis;
     const c = useSceneStore.getState().scene.container;
-    const planeCoordinate = (axis === "z" ? -c.depth_m / 2 + ui.gridOverlaySlice * c.depth_m : -c.width_m / 2 + ui.gridOverlaySlice * c.width_m);
-    const denominator = axis === "z" ? direction.z : direction.x;
+    const planeCoordinate = axis === "z" ? -c.depth_m / 2 + ui.gridOverlaySlice * c.depth_m : axis === "x" ? -c.width_m / 2 + ui.gridOverlaySlice * c.width_m : ui.gridOverlaySlice * c.height_m;
+    const denominator = axis === "z" ? direction.z : axis === "x" ? direction.x : direction.y;
     if (Math.abs(denominator) < 1e-5) return undefined;
-    const t = (planeCoordinate - (axis === "z" ? origin.z : origin.x)) / denominator;
+    const rayOrigin = axis === "z" ? origin.z : axis === "x" ? origin.x : origin.y;
+    const t = (planeCoordinate - rayOrigin) / denominator;
     if (t <= 0) return undefined;
     const point = add(origin, scale(direction, t));
     const inFootprint = Math.abs(point.x) <= c.width_m / 2 && Math.abs(point.z) <= c.depth_m / 2;
     const nearTop = point.y >= c.height_m * 0.94 && point.y <= c.height_m * 1.02;
-    return inFootprint && nearTop ? { axis, grabY: Math.min(point.y, c.height_m) } : undefined;
+    const horizontalEdgeDistance = Math.min(point.x + c.width_m / 2, c.width_m / 2 - point.x, point.z + c.depth_m / 2, c.depth_m / 2 - point.z);
+    const nearHorizontalEdge = horizontalEdgeDistance >= 0 && horizontalEdgeDistance <= 0.035 * Math.min(c.width_m, c.depth_m);
+    return inFootprint && (axis === "y" ? nearHorizontalEdge : nearTop) ? { axis, grabY: Math.min(point.y, c.height_m) } : undefined;
   };
 
   const pointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -113,7 +117,7 @@ export function WebGPUViewport() {
     if (event.button === 0 && !event.shiftKey) {
       const ray = pointerRay(event);
       const grab = sliceGrabHit(ray.origin, ray.direction);
-      if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab }; return; }
+      if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
       let nearest: { body: RigidBodyState; t: number } | undefined;
       for (const body of useDiagnosticsStore.getState().bodies) {
         const oc = sub(ray.origin, body.position_m), radius = boundingRadius(body), b = dot(oc, ray.direction), c = dot(oc, oc) - radius * radius, discriminant = b * b - c;
@@ -135,6 +139,11 @@ export function WebGPUViewport() {
     const active = pointerRef.current;
     if (!active || active.id !== event.pointerId) return;
     if (active.action === "slice") {
+      if (active.axis === "y") {
+        const rect = event.currentTarget.getBoundingClientRect();
+        useUIStore.getState().setGridOverlaySlice(active.startSlice + (active.startClientY - event.clientY) / Math.max(rect.height, 1));
+        return;
+      }
       // Keep the grab height fixed and slide the plane along its normal.
       const ray = pointerRay(event);
       if (Math.abs(ray.direction.y) < 1e-4) return;

@@ -1,5 +1,6 @@
 import { tallCellMethod } from "./tall-cell";
 import { quadtreeTallCellMethod } from "./quadtree-tall-cell";
+import { octreeMethod } from "./octree";
 import { uniformMethod } from "./uniform";
 import { cpuReferenceMethod } from "./cpu-reference";
 import type { SimulationMethod } from "./types";
@@ -10,6 +11,7 @@ export * from "./types";
 export const simulationMethods: ReadonlyArray<SimulationMethod> = [
   tallCellMethod,
   quadtreeTallCellMethod,
+  octreeMethod,
   uniformMethod,
   cpuReferenceMethod
 ];

@@ -18,18 +18,22 @@ test("every selectable frame rate can advance the default tall-cell step in real
   }
 });
 
-test("other GPU methods preserve their existing submission depths", () => {
+test("adaptive methods use bounded batching when their coupling policy permits it", () => {
   assert.equal(gpuBatchDepth("quadtree-tall-cell", 0.004, false), 2);
   assert.equal(gpuBatchDepth("quadtree-tall-cell", 0.004, true), 1);
+  assert.equal(gpuBatchDepth("octree", 0.004, false), 5, "uncoupled octree work fills one presentation quantum");
+  assert.equal(gpuBatchDepth("octree", 0.004, true), 5, "lagged octree feedback keeps presentation throughput");
   assert.equal(gpuBatchDepth("uniform-grid", 0.004, false), 1);
   assert.equal(gpuBatchDepth("tall-cell", Number.NaN, false), 1);
 });
 
-test("tall-cell prepares a second bounded batch to prevent queue starvation", () => {
+test("eligible GPU methods prepare a second bounded batch to prevent queue starvation", () => {
   assert.equal(gpuInFlightStepLimit("tall-cell", 0.0065, true, 60), 6);
   assert.equal(gpuInFlightStepLimit("tall-cell", 0.004, false, 30), 18);
   assert.equal(gpuInFlightStepLimit("quadtree-tall-cell", 0.004, true, 60), 1, "adaptive rigid coupling remains single-step");
   assert.equal(gpuInFlightStepLimit("quadtree-tall-cell", 0.004, false, 60), 2, "adaptive topology retains its shallow window");
+  assert.equal(gpuInFlightStepLimit("octree", 0.004, false, 60), 10, "uncoupled octree keeps a second presentation batch queued");
+  assert.equal(gpuInFlightStepLimit("octree", 0.004, true, 60), 10, "lagged octree coupling stays bounded to two batches");
 });
 
 test("GPU transport grants only one submitted step at a time", () => {

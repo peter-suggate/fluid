@@ -42,12 +42,19 @@ test("pressure and projection use one coherent positive-face operator", () => {
   assert.match(tallCellMultigridShaderForTests, /1\.0\/\(distance\*h\.y\)/);
 });
 
+test("pressure defect correction rebuilds projected divergence behind a UI switch", () => {
+  const solverSource = WebGPUEulerianSolver.toString();
+  assert.match(solverSource, /if\(this\.pressureDefectCorrection\)/);
+  assert.match(solverSource, /multigrid\.encode\(encoder,\{warmStart:false,topologyChanged:false\}\)/);
+  assert.match(solverSource, /cold defect correction/);
+});
+
 test("level-set remesh follows zero crossings and uses least-squares endpoint transfer", () => {
   assert.match(tallCellComputeShader, /if\(\(previous<=0\.0\)!=\(current<=0\.0\)\)/);
   assert.match(tallCellComputeShader, /fn leastSquaresPhi/);
   assert.match(tallCellComputeShader, /fn leastSquaresVelocity/);
-  assert.match(tallCellComputeShader, /phi=select\(select\(fit\.x,fit\.y,id\.y==1\),fit\.y,crossing\)/);
-  assert.match(tallCellComputeShader, /let crossing=\(fit\.x<=0\.0\)!=\(fit\.y<=0\.0\)/);
+  assert.match(tallCellComputeShader, /phi=select\(fit\.x,fit\.y,id\.y==1\)/);
+  assert.doesNotMatch(tallCellComputeShader, /let crossing=\(fit\.x<=0\.0\)!=\(fit\.y<=0\.0\)/);
   assert.doesNotMatch(tallCellComputeShader, /desired=max\(desired,i32\(ceil\(columnWaterCells/);
   assert.doesNotMatch(tallCellComputeShader, /wetTopFloor/);
   assert.match(tallCellComputeShader, /base=min\(base,nextColumnBases\[u32\(q\.x\+d\.x\*q\.y\)\]\+delta\)/);

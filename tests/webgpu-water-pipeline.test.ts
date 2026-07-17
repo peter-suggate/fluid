@@ -2,13 +2,33 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   activeCubeCapacity,
+  compositeShader,
+  CONTACT_RESOLVE_BAND_CELLS,
   EXTRACTION_POLYGONISE_WORKGROUP,
   extractionPrepareShader,
+  shouldResolveRigidContact,
   shouldUpdateWaterSurface,
   surfaceExtractionDispatchPlan,
   surfaceExtractionShader,
   surfaceVertexCapacity
 } from "../lib/webgpu-water-pipeline";
+
+test("rigid contact resolution is confined to a narrow body/surface band", () => {
+  assert.equal(CONTACT_RESOLVE_BAND_CELLS, 1.5);
+  assert.equal(shouldResolveRigidContact(4, 4.149, 0.1, 1), true);
+  assert.equal(shouldResolveRigidContact(4, 4.151, 0.1, 1), false);
+  assert.equal(shouldResolveRigidContact(4, 4, 0.1, 0), false, "empty scenes must not pay for contact refinement");
+  assert.equal(shouldResolveRigidContact(4, Number.POSITIVE_INFINITY, 0.1, 1), false);
+});
+
+test("the optical composite locally refines rigid contacts and terminates water at opaque bodies", () => {
+  assert.match(compositeShader, /fn refineContactSurface/);
+  assert.match(compositeShader, /abs\(rigidFront\.t-frontDepth\)<=contactBand/, "implicit sampling stays behind the analytic contact gate");
+  assert.match(compositeShader, /rigidFront\.t<=frontDepth/, "exact rigid depth owns pixels in front of the refined liquid surface");
+  assert.match(compositeShader, /opaqueSolidExit=true/, "refracted water rays terminate on submerged rigid bodies");
+  assert.match(compositeShader, /var liquidField:texture_3d<f32>/);
+  assert.match(compositeShader, /var<storage,read> bodies:array<BodyGPU,12>/);
+});
 
 test("surface extraction follows the selected presentation cadence", () => {
   assert.equal(shouldUpdateWaterSurface(-1, 0, -Infinity, 0), true, "the first mesh is immediate");

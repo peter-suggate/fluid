@@ -70,6 +70,15 @@ test("query state persists an edited rigid-body roster atomically", () => {
   assert.equal(parsed.scene.rigidBodies[0].density_kg_m3, 640);
 });
 
+test("query state accepts and preserves a Y solver-grid slice", () => {
+  const parsed = parseQueryState("?grid=y&gridSlice=0.35");
+  assert.equal(parsed.ui.gridOverlayAxis, "y");
+  assert.equal(parsed.ui.gridOverlaySlice, 0.35);
+  const scene = getScenePreset("water-box-dam-break").create();
+  const serialized = serializeQueryState("", { presetId: "water-box-dam-break", scene }, { methodId: "uniform", quality: "balanced", overrides: {} }, parsed.ui);
+  assert.equal(new URLSearchParams(serialized).get("grid"), "y");
+});
+
 test("query state round-trips independently configured CPU and GPU timesteps", () => {
   const scene = getScenePreset("water-box-dam-break").create();
   scene.numerics.fixedDt_s = 0.006;

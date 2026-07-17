@@ -7,6 +7,7 @@ const params: MethodParamSpec[] = [
   { kind: "select", key: "velocityTransport", label: "Velocity transport", default: "maccormack", tier: "coarse", options: [{ value: "maccormack", label: "Bounded MacCormack" }, { value: "semi-lagrangian", label: "Semi-Lagrangian" }], hint: "Velocity may use bounded MacCormack; the level set always follows the paper's semi-Lagrangian transport." },
   { kind: "number", key: "pressureCycles", label: "Pressure V-cycles", unit: "cycles", min: 1, max: 12, step: 1, digits: 0, default: 8, tier: "coarse", hint: "Multigrid refinement cycles after the initial full cycle. Eight cycles keep remeshed dam-break pressure residuals below the settling-energy threshold; lower values are diagnostic/performance tradeoffs." },
   { kind: "select", key: "pressureWarmStart", label: "Pressure warm start", default: "off", tier: "coarse", options: [{ value: "off", label: "Off (cold FMG)" }, { value: "on", label: "On (experimental)" }], hint: "Reuse and remap the previous pressure field, then solve with V-cycles. The cold default retains tighter impact convergence." },
+  { kind: "select", key: "pressureDefectCorrection", label: "Pressure defect correction", default: "off", tier: "coarse", options: [{ value: "off", label: "Off (default)" }, { value: "on", label: "On (second projection)" }], hint: "Rebuild divergence after projection and run a second pressure correction. This targets the projected residual at the cost of a second pressure solve." },
   { kind: "number", key: "surfaceColumns", label: "Surface columns", unit: "columns", min: 1_000, max: 20_000, step: 500, digits: 0, default: 2_500, tier: "fine", hint: "Target x/z column count; sets horizontal resolution." },
   { kind: "number", key: "regularLayers", label: "Surface band layers", unit: "cells", min: 12, max: 64, step: 4, digits: 0, default: 24, tier: "fine", hint: "Cubic cells kept around the free surface. The band grows automatically if the surface spans more." },
   { kind: "number", key: "maximumNeighborDelta", label: "Neighbor base delta", unit: "cells", min: 2, max: 6, step: 1, digits: 0, default: 4, tier: "fine", hint: "Maximum tall-cell base step between adjacent columns." },
@@ -28,7 +29,7 @@ export const tallCellMethod: SimulationMethod = {
   pressureMapping: "Pressure accuracy scales the multigrid V-cycle count; experimental warm start is available for comparison.",
   presetFor: (quality) => {
     const preset = tallCellSettings[quality];
-    return { pressureCycles: 8, pressureWarmStart: "off", surfaceColumns: preset.surfaceColumns, regularLayers: preset.regularLayers, maximumNeighborDelta: preset.maximumNeighborDelta, maximumTallHeight: preset.maximumTallHeight, remeshInterval: preset.remeshInterval };
+    return { pressureCycles: 8, pressureWarmStart: "off", pressureDefectCorrection: "off", surfaceColumns: preset.surfaceColumns, regularLayers: preset.regularLayers, maximumNeighborDelta: preset.maximumNeighborDelta, maximumTallHeight: preset.maximumTallHeight, remeshInterval: preset.remeshInterval };
   },
   createSolver: (device, scene, quality, values, onRigidLoads) => {
     const velocityTransport = values.velocityTransport === "semi-lagrangian" ? "semi-lagrangian" : "maccormack";
@@ -47,6 +48,7 @@ export const tallCellMethod: SimulationMethod = {
     return new WebGPUEulerianSolver(device, scene, quality, onRigidLoads, {
       pressureCycles: numberValue(values, params, "pressureCycles"),
       pressureWarmStart: values.pressureWarmStart !== "off",
+      pressureDefectCorrection: values.pressureDefectCorrection !== "off",
       velocityTransport,
       volumeControl: values.volumeControl !== "off",
       referenceVolumeScale: typeof values.referenceVolumeScale === "number" ? values.referenceVolumeScale : undefined,
@@ -69,7 +71,7 @@ export const tallCellMethod: SimulationMethod = {
         (label, completed, total) => onProgress({ phase: "solver-pipelines", label: `Uniform fallback · ${label}`, completed, total }));
     }
     return WebGPUEulerianSolver.createAsync(device, scene, quality, onRigidLoads, {
-      pressureCycles: numberValue(values, params, "pressureCycles"), pressureWarmStart: values.pressureWarmStart !== "off", velocityTransport,
+      pressureCycles: numberValue(values, params, "pressureCycles"), pressureWarmStart: values.pressureWarmStart !== "off", pressureDefectCorrection: values.pressureDefectCorrection !== "off", velocityTransport,
       volumeControl: values.volumeControl !== "off",
       referenceVolumeScale: typeof values.referenceVolumeScale === "number" ? values.referenceVolumeScale : undefined,
       hierarchicalExtrapolation: values.hierarchicalExtrapolation !== "off",

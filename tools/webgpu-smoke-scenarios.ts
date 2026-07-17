@@ -107,6 +107,9 @@ export interface ScalarFieldSummary {
   columnAmountStdDev: number;
   componentCount: number;
   largestComponent: number;
+  interfaceFaceCount: number;
+  enclosedAirComponentCount: number;
+  enclosedAirCells: number;
   centroidCells: { x: number; y: number; z: number } | null;
 }
 
@@ -128,6 +131,13 @@ export function summarizeScalarField(field: ArrayLike<number>, nx: number, ny: n
   const meanColumnAmount = columnAmounts.reduce((sum, value) => sum + value, 0) / columnAmounts.length;
   const columnAmountStdDev = Math.sqrt(columnAmounts.reduce((sum, value) => sum + (value - meanColumnAmount) ** 2, 0) / columnAmounts.length);
   const visited = new Uint8Array(field.length), stack = new Int32Array(field.length);
+  let interfaceFaceCount = 0;
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    const wet = field[index(x, y, z)] >= 0.5;
+    if (x + 1 < nx && (field[index(x + 1, y, z)] >= 0.5) !== wet) interfaceFaceCount += 1;
+    if (y + 1 < ny && (field[index(x, y + 1, z)] >= 0.5) !== wet) interfaceFaceCount += 1;
+    if (z + 1 < nz && (field[index(x, y, z + 1)] >= 0.5) !== wet) interfaceFaceCount += 1;
+  }
   let componentCount = 0, largestComponent = 0;
   for (let start = 0; start < field.length; start += 1) {
     if (visited[start] || field[start] < 0.5) continue;
@@ -144,9 +154,44 @@ export function summarizeScalarField(field: ArrayLike<number>, nx: number, ny: n
     }
     largestComponent = Math.max(largestComponent, size);
   }
+  // Flood exterior air from the domain boundary. Any remaining dry cells are
+  // enclosed phi cavities: they add rendered zero-crossings without reducing
+  // the connectivity of the surrounding liquid, which makes them invisible
+  // to the ordinary dominant-liquid-component metric.
+  const exteriorAir = new Uint8Array(field.length);
+  let top = 0;
+  const seedExterior = (x: number, y: number, z: number) => {
+    const cell = index(x, y, z);
+    if (!exteriorAir[cell] && field[cell] < 0.5) { exteriorAir[cell] = 1; stack[top++] = cell; }
+  };
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) { seedExterior(0, y, z); seedExterior(nx - 1, y, z); }
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) { seedExterior(x, 0, z); seedExterior(x, ny - 1, z); }
+  for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) { seedExterior(x, y, 0); seedExterior(x, y, nz - 1); }
+  while (top > 0) {
+    const current = stack[--top], x = current % nx, yz = Math.floor(current / nx), y = yz % ny, z = Math.floor(yz / ny);
+    for (const [xx, yy, zz] of [[x - 1, y, z], [x + 1, y, z], [x, y - 1, z], [x, y + 1, z], [x, y, z - 1], [x, y, z + 1]]) {
+      if (xx < 0 || xx >= nx || yy < 0 || yy >= ny || zz < 0 || zz >= nz) continue;
+      const next = index(xx, yy, zz);
+      if (!exteriorAir[next] && field[next] < 0.5) { exteriorAir[next] = 1; stack[top++] = next; }
+    }
+  }
+  let enclosedAirComponentCount = 0, enclosedAirCells = 0;
+  for (let start = 0; start < field.length; start += 1) {
+    if (exteriorAir[start] || field[start] >= 0.5) continue;
+    enclosedAirComponentCount += 1; top = 0; stack[top++] = start; exteriorAir[start] = 1;
+    while (top > 0) {
+      const current = stack[--top]; enclosedAirCells += 1;
+      const x = current % nx, yz = Math.floor(current / nx), y = yz % ny, z = Math.floor(yz / ny);
+      for (const [xx, yy, zz] of [[x - 1, y, z], [x + 1, y, z], [x, y - 1, z], [x, y + 1, z], [x, y, z - 1], [x, y, z + 1]]) {
+        if (xx < 0 || xx >= nx || yy < 0 || yy >= ny || zz < 0 || zz >= nz) continue;
+        const next = index(xx, yy, zz);
+        if (!exteriorAir[next] && field[next] < 0.5) { exteriorAir[next] = 1; stack[top++] = next; }
+      }
+    }
+  }
   return {
     minimum, maximum, cellSum, wetCells, mixedCells, excessCells, meanColumnAmount, columnAmountStdDev,
-    componentCount, largestComponent,
+    componentCount, largestComponent, interfaceFaceCount, enclosedAirComponentCount, enclosedAirCells,
     centroidCells: cellSum > 0 ? { x: weightedX / cellSum, y: weightedY / cellSum, z: weightedZ / cellSum } : null
   };
 }

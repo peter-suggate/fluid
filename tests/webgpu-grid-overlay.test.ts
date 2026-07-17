@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
+
+const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 
 test("grid overlay is an independent alpha-composited presentation layer", () => {
   assert.match(gridOverlayShader, /@group\(0\) @binding\(2\) var fluidField: texture_3d<f32>/);
@@ -14,6 +17,14 @@ test("grid overlay is an independent alpha-composited presentation layer", () =>
   assert.match(gridOverlayShader, /return vec4f\(displayColor\(overlay\.color\), overlay\.alpha\)/);
 });
 
+test("grid overlay supports a horizontal Y slice with X-Z adaptive boundaries", () => {
+  assert.match(gridOverlayShader, /else if \(axis == 3\) \{\n    samplePosition = local3\.xz/);
+  assert.match(gridOverlayShader, /secondPlaneAxis = 2/);
+  assert.match(gridOverlayShader, /planeCoordinate = boundsMin\.y \+ \(layer \+ 0\.5\) \* size\.y \/ dims\.y/);
+  assert.match(gridOverlayShader, /denominator = direction\.y/);
+  assert.match(gridOverlayShader, /axis == 3\) \* 0\.8/);
+});
+
 test("adaptive diagnostic modes expose coverage, level set, divergence, and pressure", () => {
   assert.match(gridOverlayShader, /fieldMode == 3/);
   assert.match(gridOverlayShader, /fieldMode == 4/);
@@ -22,11 +33,32 @@ test("adaptive diagnostic modes expose coverage, level set, divergence, and pres
   assert.match(gridOverlayShader, /let unrepresented = adaptiveGrid && wet && !hasLiquidPressureDof\(cell\)/);
   assert.match(gridOverlayShader, /divergence \* max\(u\.environment\.y, 1e-6\)/);
   assert.match(gridOverlayShader, /textureLoad\(mappedPressureField, cell, 0\)\.x/);
+  assert.match(gridOverlayShader, /fieldMode == 8/);
+  assert.match(gridOverlayShader, /bitcast<f32>\(textureLoad\(pressureSamples, cell, 0\)\.y\)/,
+    "the octree projection-update alarm must consume the resident packed diagnostic");
+  assert.match(rendererSource, /gridOverlay\?\.mode === "projection" && gpuInfo\?\.gridKind === "octree" \? 8 : 0/);
+});
+
+test("optical-layer mode distinguishes retained cubes from the merged tall interior", () => {
+  assert.match(gridOverlayShader, /fn adaptiveCellVerticalShape/);
+  assert.match(gridOverlayShader, /fn isOpticalCube/);
+  assert.match(gridOverlayShader, /shape\.y - shape\.x == 1/);
+  assert.match(gridOverlayShader, /fieldMode == 7 && u\.environment\.w > 0\.5/);
+  assert.match(gridOverlayShader, /belowIsTall = !isOpticalCube/);
+  assert.match(gridOverlayShader, /color = mix\(color, opticalBoundaryColor, opticalBoundary\)/);
+  assert.match(gridOverlayShader, /u\.environment\.w > 1\.5/, "adaptive and fixed boundaries remain visually distinguishable");
+  assert.match(rendererSource, /gridOverlay\?\.mode === "optical" \? 7 : gridOverlay\?\.mode === "projection" && gpuInfo\?\.gridKind === "octree" \? 8 : 0/);
+  assert.match(rendererSource, /quadtreeOpticalLayerMode === "adaptive-motion" \? 2 : 1/);
+});
+
+test("solver option switches detach the overlay before retiring GPU textures", () => {
+  assert.match(rendererSource, /this\.rebuildBindGroup\(\);\s+this\.retireGPUFluid\(previous\);/);
 });
 
 test("grid overlay suppresses dense backing-grid lines inside adaptive cells", () => {
   assert.match(gridOverlayShader, /let adaptiveGrid = u\.debug\.z > 0\.5/);
-  assert.match(gridOverlayShader, /any\(adaptiveCellKey\(lowerHorizontal, dims\) != own\)/);
+  assert.match(gridOverlayShader, /any\(adaptiveCellKey\(lowerFirst, dims\) != own\)/);
+  assert.match(gridOverlayShader, /any\(adaptiveCellKey\(lowerSecond, dims\) != own\)/);
   assert.match(gridOverlayShader, /any\(adaptiveCellKey\(below, dims\) != own\)/);
   assert.match(gridOverlayShader, /let leafSize = i32\(\(key\.x >> 20u\) & 1023u\)/);
 });

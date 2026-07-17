@@ -21,6 +21,8 @@ test("empty performance identifies the renderer without claiming a sample", () =
   assert.equal(emptyPerformance.gpuRenderTimingAvailable, false);
   assert.equal(emptyPerformance.gpuSurfaceExtraction_ms, 0);
   assert.equal(emptyPerformance.gpuUpscale_ms, 0);
+  assert.equal(emptyPerformance.gpuExtrapolation_ms, 0);
+  assert.equal(emptyPerformance.gpuMaterialization_ms, 0);
   assert.equal(emptyPerformance.adaptiveRebuildWall_ms, 0);
   assert.equal(emptyPerformance.adaptiveRebuildPending, false);
   assert.equal(emptyPerformance.adaptiveRebuildBlockedFrames, 0);

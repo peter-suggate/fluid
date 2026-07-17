@@ -66,6 +66,8 @@ test("scalar discrepancy metrics are symmetric and distinguish shape from volume
   const leftSummary = summarizeScalarField(left, 2, 2, 2);
   assert.equal(leftSummary.cellSum, 2);
   assert.equal(leftSummary.componentCount, 1);
+  assert.equal(leftSummary.interfaceFaceCount, 4);
+  assert.equal(leftSummary.enclosedAirComponentCount, 0);
   const difference = compareScalarFields(left, right, 2, 2, 2);
   const reverse = compareScalarFields(right, left, 2, 2, 2);
   assert.equal(difference.volumeRelativeDifference, 0);
@@ -79,4 +81,15 @@ test("scalar discrepancy metrics are symmetric and distinguish shape from volume
     wetIntersectionOverUnion: 1,
     centroidDistanceCells: 0
   });
+});
+
+test("scalar topology metrics expose enclosed air that volume and liquid connectivity miss", () => {
+  const field = new Float32Array(27).fill(1);
+  field[1 + 3 * (1 + 3)] = 0;
+  const summary = summarizeScalarField(field, 3, 3, 3);
+  assert.equal(summary.componentCount, 1);
+  assert.equal(summary.largestComponent, 26);
+  assert.equal(summary.interfaceFaceCount, 6);
+  assert.equal(summary.enclosedAirComponentCount, 1);
+  assert.equal(summary.enclosedAirCells, 1);
 });

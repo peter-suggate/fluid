@@ -26,10 +26,10 @@ export type WaterRenderMode = "rasterized" | "ray-marched";
  * normalized by the last reported liquid maximum. Both sample live solver
  * textures in the overlay shader — no readback is involved.
  */
-export type GridOverlayMode = "structure" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "representation";
+export type GridOverlayMode = "structure" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation";
 
 export interface GridOverlayConfig {
-  axis: "off" | "z" | "x";
+  axis: "off" | "z" | "x" | "y";
   position: number;
   mode?: GridOverlayMode;
 }
@@ -684,7 +684,16 @@ export class FluidLabRenderer {
     if(!this.device||this.disposed||this.deviceLost)return;
     const method=getMethod(config.methodId);if(!method.createSolver)return;
     const device=this.device,generation=++this.gpuFluidRequestGeneration,startedAt_ms=performance.now();
-    const previous=this.gpuFluid;if(previous)this.retireGPUFluid(previous);this.gpuFluid=undefined;this.gpuFluidKey="";this.gpuFluidPendingKey=key;this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackSecond=-1;
+    const previous=this.gpuFluid;
+    if(previous){
+      // Detach presentation bind groups from the live solver textures before
+      // retiring them. Option A/B switches rebuild asynchronously; without
+      // this fallback rebind, the grid overlay can keep submitting the old
+      // topology texture after its queue fence has completed and destroyed it.
+      this.rebuildBindGroup();
+      this.retireGPUFluid(previous);
+    }
+    this.gpuFluid=undefined;this.gpuFluidKey="";this.gpuFluidPendingKey=key;this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackSecond=-1;
     const report=(progress:{phase:string;label:string;completed:number;total:number})=>{if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;this.onStatus({state:"initializing",...progress,startedAt_ms});};
     report({phase:"solver",label:`Preparing ${method.shortLabel} solver`,completed:0,total:1});
     const create=method.createSolverAsync
@@ -706,8 +715,8 @@ export class FluidLabRenderer {
     const previousSubmittedTime = this.gpuFluid.info.submittedTime_s ?? 0;
     // Submit one presentation-sized batch whenever prepared transport exists,
     // even when an earlier batch fence is unresolved. The controller bounds
-    // tall-cell preparation to two batches, keeping the queue fed without
-    // allowing rigid-feedback latency to grow without limit.
+    // tall-cell and octree preparation to two batches, keeping the queue fed
+    // while bounding partitioned rigid-feedback latency.
     const batchLimit = gpuBatchDepth(config.methodId, scene.numerics.fixedDt_s, bodies.length > 0, targetFps);
     let submittedTime = previousSubmittedTime;
     for (let batch = 0; batch < batchLimit && submittedTime + 1e-9 < time_s; batch += 1) {
@@ -819,10 +828,11 @@ export class FluidLabRenderer {
       view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), 0,
       // Field mode: 1 = raw occupancy, 2 = packed tall-cell level set,
       // 3 = uniform-layout level set (quadtree resident phi).
-      gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "restricted-tall-cell" ? 2 : gpuInfo.gridKind === "quadtree-tall-cell" ? 3 : 1) : fluid ? 1 : 0,
-      gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "quadtree-tall-cell" ? 1 : 0,
-      gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : 0,
-      environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0, 0
+      gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "restricted-tall-cell" ? 2 : gpuInfo.gridKind === "quadtree-tall-cell" || gpuInfo.gridKind === "octree" ? 3 : 1) : fluid ? 1 : 0,
+      gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : gridOverlay?.axis === "y" ? 3 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "quadtree-tall-cell" || gpuInfo?.gridKind === "octree" ? 1 : 0,
+      gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : 0,
+      environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0,
+      gpuInfo?.gridKind === "quadtree-tall-cell" ? (gpuInfo.quadtreeOpticalLayerMode === "adaptive-motion" ? 2 : 1) : 0
     ]);
     // Terrain heightfield mirror for the environment shaders: meta lane plus
     // two vec4 lanes per feature, matching lib/terrain.ts semantics exactly.

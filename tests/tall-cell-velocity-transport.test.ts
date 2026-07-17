@@ -64,6 +64,13 @@ test("tall-cell pressure warm start remains explicitly switchable", () => {
   assert.equal(resolveMethodValues(tallCellMethod, "balanced", { pressureWarmStart: "on" }).pressureWarmStart, "on");
 });
 
+test("tall-cell pressure defect correction is disabled by default and remains switchable", () => {
+  const correction = tallCellMethod.params.find((spec) => spec.key === "pressureDefectCorrection");
+  assert.equal(correction?.kind, "select");
+  assert.equal(resolveMethodValues(tallCellMethod, "balanced", {}).pressureDefectCorrection, "off");
+  assert.equal(resolveMethodValues(tallCellMethod, "balanced", { pressureDefectCorrection: "on" }).pressureDefectCorrection, "on");
+});
+
 test("tall-cell pressure defaults to the settling-validated cycle budget", () => {
   assert.equal(resolveMethodValues(tallCellMethod, "balanced", {}).pressureCycles, 8);
 });

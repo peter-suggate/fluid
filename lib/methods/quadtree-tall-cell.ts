@@ -1,28 +1,41 @@
 import { WebGPUUniformEulerianSolver } from "../webgpu-uniform-eulerian";
+import { quadtreeMegakernelDofLimit, quadtreeMegakernelRowIterationLimit, type QuadtreeMegakernelMode, type QuadtreePressureSolver } from "../webgpu-quadtree-tall-cell";
 import { numberValue, type MethodParamSpec, type SimulationMethod } from "./types";
 
 const params: MethodParamSpec[] = [
-  { kind: "number", key: "pressureIterations", label: "Pressure iterations", unit: "iterations", min: 16, max: 1024, step: 16, digits: 0, default: 96, tier: "coarse", hint: "Hard CG safety budget; encoded work adapts to recent iterations-to-tolerance without changing the relative residual stop." },
+  { kind: "number", key: "pressureIterations", label: "Pressure effort", unit: "equiv. sweeps", min: 16, max: 1024, step: 16, digits: 0, default: 96, tier: "coarse", hint: "Chebyshev maps four equivalent sweeps to one row-parallel polynomial pass. The PCG reference treats this as its minimum hard safety budget." },
   { kind: "number", key: "surfaceColumns", label: "Finest columns", unit: "columns", min: 1_000, max: 20_000, step: 500, digits: 0, default: 2_500, tier: "fine", hint: "Finest x/z lattice used by quadtree leaves and the cubic advection field." },
   { kind: "number", key: "adaptivityStrength", label: "Adaptivity", unit: "alpha", min: 0, max: 1, step: 0.05, digits: 2, default: 1, tier: "fine", hint: "Ando–Batty Eq. 38: 0 is the ordinary-grid limit; 1 permits full quadtree coarsening." },
-  { kind: "select", key: "preconditioner", label: "Preconditioner", default: "poly", tier: "fine", options: [{ value: "poly", label: "Polynomial" }, { value: "ic0", label: "Paper IC(0)" }, { value: "blockic", label: "Block IC(0)" }, { value: "line", label: "Vertical line" }, { value: "jacobi", label: "Parallel Jacobi" }], hint: "Polynomial is the parallel default; IC(0) remains the paper-reference path. All choices preserve the variational operator and relative-residual stop." },
+  { kind: "select", key: "opticalLayerMode", label: "Optical layer", default: "adaptive-motion", tier: "coarse", options: [{ value: "adaptive-motion", label: "Motion-adaptive (2026)" }, { value: "fixed", label: "Fixed quarter-depth" }], hint: "Narita–Kanai 2026 derives a smooth per-column layer thickness from tall-cell velocity reconstruction error. Fixed retains the previous baseline for A/B measurements." },
+  { kind: "number", key: "opticalAlpha", label: "Optical motion response", unit: "alpha", min: 0, max: 2, step: 0.05, digits: 2, default: 0.5, tier: "fine", hint: "Paper Eq. (1) scale for motion-sensitive dilation. Larger values retain more cubic pressure cells around dynamic flow." },
+  { kind: "select", key: "pressureSolver", label: "Pressure solver", default: "chebyshev", tier: "fine", options: [{ value: "chebyshev", label: "Parallel Chebyshev" }, { value: "pcg", label: "Exact PCG reference" }], hint: "Chebyshev removes Krylov reductions and uses frame-lagged rigid exchange. PCG retains tolerance convergence and the exact same-step low-rank rigid response for A/B validation." },
+  { kind: "select", key: "preconditioner", label: "Preconditioner", default: "poly", tier: "fine", options: [{ value: "mg", label: "Geometric multigrid" }, { value: "poly", label: "Polynomial" }, { value: "ic0", label: "Paper IC(0)" }, { value: "blockic", label: "Block IC(0)" }, { value: "line", label: "Vertical line" }, { value: "jacobi", label: "Parallel Jacobi" }], hint: "Geometric multigrid uses dyadic quadtree aggregation, Galerkin coarse operators, and vertical block smoothing. Polynomial remains the measured default until the multigrid benchmark gate passes." },
+  { kind: "select", key: "megakernelMode", label: "CG megakernel", default: "dynamic", tier: "fine", options: [{ value: "dynamic", label: "Dynamic (recommended)" }, { value: "always", label: "Forced on" }, { value: "off", label: "Off" }], hint: "Dynamic uses the previous converged solve to choose between one persistent workgroup and the parallel dispatch ladder. Forced on applies only to supported uncoupled Polynomial/Jacobi solves." },
+  { kind: "number", key: "megakernelDofLimit", label: "Megakernel DOF limit", unit: "DOFs", min: 256, max: 131_072, step: 256, digits: 0, default: quadtreeMegakernelDofLimit, tier: "fine", hint: "Dynamic mode uses the dispatch ladder above this pressure-system size. Forced on ignores this limit." },
+  { kind: "number", key: "megakernelRowIterationLimit", label: "Megakernel work limit", unit: "row-iterations", min: 1_000, max: 500_000, step: 1_000, digits: 0, default: quadtreeMegakernelRowIterationLimit, tier: "fine", hint: "Dynamic mode requires DOFs × previous iterations × polynomial cost at or below this value. Forced on ignores this limit." },
   { kind: "select", key: "vofReconciliation", label: "Emergency VOF recovery", default: "on", tier: "fine", options: [{ value: "on", label: "Armed" }, { value: "off", label: "Strict φ-only" }], hint: "Leaves healthy level-set transport untouched. If represented liquid falls below -10%, conservative VOF may restore lost liquid until recovery reaches -2%." }
 ];
 
-const preconditionerValue = (value: unknown) => value === "ic0" || value === "blockic" || value === "line" || value === "jacobi" ? value : "poly";
+const preconditionerValue = (value: unknown) => value === "ic0" || value === "blockic" || value === "line" || value === "jacobi" || value === "mg" ? value : "poly";
+const opticalLayerModeValue = (value: unknown) => value === "fixed" ? "fixed" as const : "adaptive-motion" as const;
+const megakernelModeValue = (values: Record<string, unknown>): QuadtreeMegakernelMode => {
+  if (values.megakernelSolve === false || values.megakernelSolve === "off") return "off";
+  return values.megakernelMode === "always" || values.megakernelMode === "off" ? values.megakernelMode : "dynamic";
+};
+const pressureSolverValue = (value: unknown): QuadtreePressureSolver => value === "pcg" ? "pcg" : "chebyshev";
 
 export const quadtreeTallCellMethod: SimulationMethod = {
   id: "quadtree-tall-cell",
   label: "Quadtree tall cells",
   shortLabel: "Adaptive",
   badge: "QUADTREE TALL CELLS",
-  description: "Narita et al. 2025: horizontally adaptive quadtree leaves with variational tall-cell pressure projection.",
-  detail: "coarse-to-fine quadtree sizing from surface curvature and velocity variation, strict 2:1 adaptivity smoothing, multiple vertical tall runs, horizontally centered pressure samples, T-junction face-overlap gradients, corrected inner ghost volumes, SPD free-surface scaling, and modified ICCG(0)",
+  description: "Narita et al. 2025 quadtree tall cells with Narita–Kanai 2026 motion-adaptive optical layers.",
+  detail: "motion-error optical thickness with constrained smoothing, coarse-to-fine quadtree sizing, strict 2:1 adaptivity, multiple vertical tall runs, horizontally centered pressure samples, T-junction face-overlap gradients, corrected inner ghost volumes, SPD free-surface scaling, and a row-parallel Chebyshev pressure solve",
   backend: "webgpu",
   qualityLabels: { balanced: "2.5k finest columns", high: "7k finest columns", ultra: "12.5k finest columns" },
   params,
-  pressureMapping: "The iteration budget is the PCG maximum; convergence is measured against the scene's relative pressure tolerance (the paper uses 1e-4).",
-  presetFor: (quality) => ({ pressureIterations: quality === "balanced" ? 96 : quality === "high" ? 160 : 240, surfaceColumns: quality === "balanced" ? 2_500 : quality === "high" ? 7_000 : 12_500, adaptivityStrength: 1, preconditioner: "poly" }),
+  pressureMapping: "Balanced pressure effort maps to 24 row-parallel Chebyshev passes. The exact PCG reference remains selectable for residual and coupling A/B checks.",
+  presetFor: (quality) => ({ pressureIterations: quality === "balanced" ? 96 : quality === "high" ? 160 : 240, surfaceColumns: quality === "balanced" ? 2_500 : quality === "high" ? 7_000 : 12_500, adaptivityStrength: 1, opticalLayerMode: "adaptive-motion", opticalAlpha: 0.5, pressureSolver: "chebyshev", preconditioner: "poly" }),
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, {
     // Narita Sec. 4.5 advects the level set from the saved previous grid.
     // It is authoritative for adaptive pressure geometry, while the shared
@@ -39,6 +52,7 @@ export const quadtreeTallCellMethod: SimulationMethod = {
     ...(typeof values.inlineRebuild === "boolean" ? { quadtreeInlineRebuild: values.inlineRebuild } : {}),
     quadtreeTallCells: {
       pressureIterations: numberValue(values, params, "pressureIterations"),
+      pressureSolver: pressureSolverValue(values.pressureSolver),
       // Narita et al. stop ICCG at a 1e-4 relative residual. The shared scene
       // default is 1e-8 for the small CPU reference and made the GPU path run
       // its entire maximum iteration budget on every step.
@@ -46,6 +60,13 @@ export const quadtreeTallCellMethod: SimulationMethod = {
       adaptivityStrength: numberValue(values, params, "adaptivityStrength"),
       maximumLeafSize: typeof values.maximumLeafSize === "number" ? values.maximumLeafSize : quality === "balanced" ? 8 : 16,
       opticalDepthFraction: typeof values.opticalDepthFraction === "number" ? values.opticalDepthFraction : 0.25,
+      opticalLayerMode: opticalLayerModeValue(values.opticalLayerMode),
+      opticalAlpha: numberValue(values, params, "opticalAlpha"),
+      deepSpeedGradientScale: typeof values.deepSpeedGradientScale === "number" ? values.deepSpeedGradientScale : 1,
+      pressureWarmStart: values.pressureWarmStart !== "off" && values.pressureWarmStart !== false,
+      megakernelMode: megakernelModeValue(values),
+      megakernelDofLimit: numberValue(values, params, "megakernelDofLimit"),
+      megakernelRowIterationLimit: numberValue(values, params, "megakernelRowIterationLimit"),
       preconditioner: preconditionerValue(values.preconditioner),
       polynomialDegree: typeof values.polynomialDegree === "number" ? values.polynomialDegree : 2,
       vofReconciliation: values.vofReconciliation !== "off" && values.vofReconciliation !== false,
@@ -63,9 +84,17 @@ export const quadtreeTallCellMethod: SimulationMethod = {
     ...(typeof values.inlineRebuild === "boolean" ? { quadtreeInlineRebuild: values.inlineRebuild } : {}),
     quadtreeTallCells: {
       pressureIterations: numberValue(values, params, "pressureIterations"), relativeTolerance: Math.max(scene.numerics.pressureRelativeTolerance, 1e-4),
+      pressureSolver: pressureSolverValue(values.pressureSolver),
       adaptivityStrength: numberValue(values, params, "adaptivityStrength"),
       maximumLeafSize: typeof values.maximumLeafSize === "number" ? values.maximumLeafSize : quality === "balanced" ? 8 : 16,
       opticalDepthFraction: typeof values.opticalDepthFraction === "number" ? values.opticalDepthFraction : 0.25,
+      opticalLayerMode: opticalLayerModeValue(values.opticalLayerMode),
+      opticalAlpha: numberValue(values, params, "opticalAlpha"),
+      deepSpeedGradientScale: typeof values.deepSpeedGradientScale === "number" ? values.deepSpeedGradientScale : 1,
+      pressureWarmStart: values.pressureWarmStart !== "off" && values.pressureWarmStart !== false,
+      megakernelMode: megakernelModeValue(values),
+      megakernelDofLimit: numberValue(values, params, "megakernelDofLimit"),
+      megakernelRowIterationLimit: numberValue(values, params, "megakernelRowIterationLimit"),
       preconditioner: preconditionerValue(values.preconditioner),
       polynomialDegree: typeof values.polynomialDegree === "number" ? values.polynomialDegree : 2,
       vofReconciliation: values.vofReconciliation !== "off" && values.vofReconciliation !== false,

@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { quadtreeConstructionShader, quadtreeSurfaceShader } from "../lib/webgpu-quadtree-builder";
-import { quadtreeDispatchShader, quadtreeDivergenceShader, quadtreeTallCellProjectionShader, quadtreeVelocityClampShader, quadtreeVelocityExtrapolationShader } from "../lib/webgpu-quadtree-tall-cell";
-import { quadtreeCsrPackShader, quadtreeFacePackShader, quadtreePackAuxShader, quadtreePackCopyShader, quadtreePackFinalizeShader, quadtreePackTextureShader, quadtreeSegmentationPackShader } from "../lib/webgpu-quadtree-pack-builder";
+import { quadtreeDispatchShader, quadtreeDivergenceShader, quadtreeMultigridShader, quadtreeSurfaceTransportShader, quadtreeTallCellProjectionShader, quadtreeVelocityClampShader, quadtreeVelocityExtrapolationShader } from "../lib/webgpu-quadtree-tall-cell";
+import { quadtreeCsrPackShader, quadtreeFacePackShader, quadtreePackAuxShader, quadtreePackCopyShader, quadtreePackFinalizeShader, quadtreePackScanIOShader, quadtreePackScanShader, quadtreePackTextureShader, quadtreeSegmentationPackShader } from "../lib/webgpu-quadtree-pack-builder";
 import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
@@ -42,23 +42,30 @@ async function validateOverlay() {
 }
 
 await validate("surface", quadtreeSurfaceShader, ["advectLevelSet", "seedDistance", "jumpFlood", "finalizeDistance", "cullDebris"]);
-await validate("construction", quadtreeConstructionShader, ["advectLevelSet", "evaluateSizing", "refine", "smoothTopology", "sampleLeafProfiles"]);
+await validate("construction", quadtreeConstructionShader, ["advectLevelSet", "evaluateSizing", "evaluateOpticalLayer", "dilateOpticalLayerX", "dilateOpticalLayerZ", "smoothOpticalLayer", "refine", "smoothTopology", "sampleLeafProfiles"]);
 await validate("projection", quadtreeTallCellProjectionShader, [
-  "refreshFaces", "refreshRows", "initialize", "precondition", "preconditionBlockIC", "preconditionJacobi", "preconditionLine",
-  "preconditionPolynomialStart", "preconditionPolynomialMultiply", "preconditionPolynomialUpdate",
-  "startDirection", "reduceInitial", "multiply",
-  "applyStep", "applyStepPartial", "applyStepFinalize", "applyStepUpdate",
-  "finishIteration", "finishIterationPartial", "finishIterationFinalize", "finishIterationUpdate",
+  "refreshFaces", "refreshRows", "initialize", "initializeJacobiDirection", "initializePolynomialStart", "precondition", "preconditionBlockIC", "preconditionJacobi", "preconditionLine",
+  "preconditionPolynomialStart", "preconditionPolynomialMultiply", "preconditionPolynomialUpdate", "preconditionPolynomialUpdateDirection",
+  "startDirection", "reduceInitial", "solveMegakernel", "multiply",
+  "applyStep", "applyStepPartial", "applyStepFinalize", "applyStepUpdate", "applyStepUpdateJacobi", "applyStepUpdatePolynomialStart",
+  "finishIteration", "finishIterationPartial", "preconditionPolynomialUpdateFinishPartial", "finishIterationFinalize", "finishIterationUpdate",
   "mapPressure", "refreshFaceMls", "project", "coupleReduce", "coupleApply", "coupleImpulse"
 ]);
 await validate("dispatch", quadtreeDispatchShader, ["updateDispatch"]);
+await validate("geometric-multigrid", quadtreeMultigridShader, [
+  "clearCoarseMatrix", "assembleGalerkin", "copyFineResidual", "lineSmoothInitial", "computeDefect",
+  "restrictDefectGather", "solveCoarsest", "prolongateCorrection", "lineSmoothFinal", "copyFineCorrection",
+]);
 await validate("velocity-extrapolation", quadtreeVelocityExtrapolationShader, ["extrapolateVelocity"]);
 await validate("divergence-diagnostic", quadtreeDivergenceShader, ["computeDivergence"]);
 await validate("velocity-clamp", quadtreeVelocityClampShader, ["clampVelocity"]);
-await validate("resident-segmentation-pack", quadtreeSegmentationPackShader, ["classifySegments", "scanSegments", "emitSegments"]);
+await validate("surface-transport", quadtreeSurfaceTransportShader, ["buildSurfaceTransport"]);
+await validate("resident-segmentation-pack", quadtreeSegmentationPackShader, ["classifySegments", "emitSegments"]);
 await validateOverlay();
-await validate("resident-face-pack", quadtreeFacePackShader, ["countFaces", "scanFaces", "emitFaces"]);
-await validate("resident-csr-pack", quadtreeCsrPackShader, ["scanRows", "emitCsr"]);
+await validate("resident-face-pack", quadtreeFacePackShader, ["countFaces", "emitFaces"]);
+await validate("resident-csr-pack", quadtreeCsrPackShader, ["emitCsr"]);
+await validate("resident-pack-scan-io", quadtreePackScanIOShader, ["prepareSegmentScan", "finishSegmentScan", "prepareFaceScan", "finishFaceScan", "prepareRowScan", "finishRowScan"]);
+await validate("resident-pack-scan", quadtreePackScanShader, ["scanValueBlocks", "scanBlockTotals"]);
 await validate("resident-texture-pack", quadtreePackTextureShader, ["unpackCellFields"]);
 await validate("resident-finalize-control", quadtreePackFinalizeShader, ["finalizeControl"]);
 await validate("resident-pack-copies", quadtreePackCopyShader, ["copyFaces", "copyRowOffsets", "copyRowEntries", "copyMatrix"]);

@@ -95,7 +95,7 @@ export function TransportBar() {
       <div className="time-readout">
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
         {simRate !== null && <small className="sim-rate" title="Simulated seconds per wall-clock second">×{simRate.toFixed(2)}</small>}
-        {lagged && <small className="lag-chip" title="The GPU solve is behind the transport clock. Uncoupled tall-cell scenes batch up to one display interval; coupled scenes retain one-step impulse ordering. RESET to resynchronize.">GPU −{gpuLag.toFixed(1)} s</small>}
+        {lagged && <small className="lag-chip" title="The GPU solve is behind the transport clock. Tall-cell and octree scenes batch up to one display interval; octree rigid impulses are applied through a bounded frame-lagged exchange. RESET to resynchronize.">GPU −{gpuLag.toFixed(1)} s</small>}
         {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
         <div className="transport-timing" aria-label="Simulation timestep controls">
           <TimingSlider key={`base-${fixedDt}`} label="BASE RATE" unit="Hz" value={baseRate_hz} min={Math.min(30, baseRate_hz)} max={Math.max(2000, baseRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms`} onCommit={commitBaseRate} />
