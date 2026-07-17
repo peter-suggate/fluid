@@ -2,9 +2,14 @@ import { damBreakFractions } from "./initial-fluid";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "./rigid-body";
 import {
   decodeGPURigidLoad,
+  categorizedGPUPhysicsTime_ms,
+  emptyGPUPhysicsTimings,
+  GPU_PHYSICS_TIMESTAMP_CAPACITY,
   GPU_RIGID_EXCHANGE_BYTES,
   legacyUniformComputeShader,
   type GPUEulerianInfo,
+  type GPUPhysicsStageId,
+  type GPUPhysicsTimingField,
   type GPURigidLoad,
   type GPUVelocityTransport,
   type GPUQuality
@@ -62,6 +67,7 @@ export class WebGPUUniformEulerianSolver {
   private transportSampler: GPUSampler;
   private params: GPUBuffer; private reductionBuffer: GPUBuffer; private sharpenBuffer: GPUBuffer;
   private rigidBuffer: GPUBuffer; private rigidExchangeBuffer: GPUBuffer;
+  private statsReadbackBuffer?: GPUBuffer; private rigidReadbackBuffer?: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
   private advectPipeline!: GPUComputePipeline; private reversePipeline!: GPUComputePipeline;
   private correctPipeline!: GPUComputePipeline; private jacobiPipeline!: GPUComputePipeline;
@@ -79,7 +85,7 @@ export class WebGPUUniformEulerianSolver {
   private sharpenComputeGroup: GPUBindGroup; private sharpenScatterGroup: GPUBindGroup; private sharpenResolveGroup: GPUBindGroup;
   private transportFromPredictedGroup?: GPUBindGroup;
   private querySet?: GPUQuerySet; private queryResolve?: GPUBuffer;
-  private querySegments: Array<{ name: keyof NonNullable<GPUEulerianInfo["gpuTimings"]>; start: number; end: number }> = [];
+  private querySegments: Array<{ name: GPUPhysicsTimingField; start: number; end: number }> = [];
   private queryCount = 0; private lastTime = 0; private readbackPending = false;
   private rigidReadbackPending = false; private wallTimingPending = false;
   private validationChecked = false;
@@ -151,8 +157,8 @@ export class WebGPUUniformEulerianSolver {
     this.sharpenBuffer = device.createBuffer({ label: "Uniform sharpening deposits", size: nx * ny * nz * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.rigidExchangeBuffer = device.createBuffer({ size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     if (device.features.has("timestamp-query")) {
-      this.querySet = device.createQuerySet({ type: "timestamp", count: 160 });
-      this.queryResolve = device.createBuffer({ size: 160 * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+      this.querySet = device.createQuerySet({ type: "timestamp", count: GPU_PHYSICS_TIMESTAMP_CAPACITY });
+      this.queryResolve = device.createBuffer({ size: GPU_PHYSICS_TIMESTAMP_CAPACITY * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
     }
     this.shaderModule = device.createShaderModule({ label: "Fluid Lab uniform reference kernels", code: legacyUniformComputeShader });
     void this.shaderModule.getCompilationInfo().then((info) => {
@@ -368,15 +374,38 @@ export class WebGPUUniformEulerianSolver {
       quadtreeFactorLevelCount: quadtree.factorLevelCount,
       quadtreePressurePhaseTimings: quadtree.pressurePhaseTimings,
       quadtreeRebuildCadenceSteps: this.quadtreeRebuildInterval,
+      // Report the effective path, not merely the preference: coupled and
+      // host-factorized pressure variants cannot consume the resident pack.
+      quadtreeInlineRebuild: this.quadtreeInlineRebuild && projection.canEncodeInlineRebuild,
       quadtreeTopologyStaleLimit: this.quadtreeTopologyStaleLimit,
       quadtreeTopologyStaleSteps: this.quadtreeStepsSinceTopology,
       quadtreeRebuildCompletedCount: this.quadtreeRebuildCompletedCount,
       quadtreeTopologyReadbackBytes: quadtree.topologyReadbackBytes
     });
   }
-  private timing(name: keyof NonNullable<GPUEulerianInfo["gpuTimings"]>) {
-    if (!this.querySet) return undefined;
+  private timing(name: GPUPhysicsTimingField) {
+    if (!this.querySet || this.queryCount + 2 > GPU_PHYSICS_TIMESTAMP_CAPACITY) return undefined;
     const segment = { name, start: this.queryCount++, end: this.queryCount++ }; this.querySegments.push(segment); return segment;
+  }
+
+  private statsReadback() {
+    // readbackPending guarantees that this buffer is never copied while it is
+    // mapped. Keep enough room for the fixed query resolve allocation so
+    // regular telemetry does not create/destroy a MAP_READ resource at 30 Hz.
+    return this.statsReadbackBuffer ??= this.device.createBuffer({
+      label: "Uniform pooled statistics readback",
+      size: 16 + GPU_PHYSICS_TIMESTAMP_CAPACITY * 8,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+  }
+
+  private rigidReadback() {
+    // rigidReadbackPending provides the same single-owner guarantee here.
+    return this.rigidReadbackBuffer ??= this.device.createBuffer({
+      label: "Uniform pooled rigid exchange readback",
+      size: GPU_RIGID_EXCHANGE_BYTES,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
   }
 
   /**
@@ -557,10 +586,11 @@ export class WebGPUUniformEulerianSolver {
         // Mass-Conserving Eulerian Liquid Simulation Sec 3.5: sharpen the
         // advected density before the pressure solve. volumeB -> volumeA
         // (sharpened, deltas in pressureB) -> volumeB (resolved deposits).
+        const timing = this.timing("conditioning_ms");
         encoder.clearBuffer(this.sharpenBuffer);
-        const computePass = encoder.beginComputePass(); this.dispatch(computePass, this.sharpenComputePipeline, this.sharpenComputeGroup); computePass.end();
+        const computePass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start } } : undefined); this.dispatch(computePass, this.sharpenComputePipeline, this.sharpenComputeGroup); computePass.end();
         const scatterPass = encoder.beginComputePass(); this.dispatch(scatterPass, this.sharpenScatterPipeline, this.sharpenScatterGroup); scatterPass.end();
-        const resolvePass = encoder.beginComputePass(); this.dispatch(resolvePass, this.sharpenResolvePipeline, this.sharpenResolveGroup); resolvePass.end();
+        const resolvePass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(resolvePass, this.sharpenResolvePipeline, this.sharpenResolveGroup); resolvePass.end();
       }
       if (this.quadtreeProjection) {
         const timing = this.timing("pressure_ms");
@@ -576,7 +606,10 @@ export class WebGPUUniformEulerianSolver {
         // Transport phi from the freshly projected, narrow-band-extrapolated
         // velocity. Sampling the previous frame here was the one-frame lag
         // that froze crests and newly exposed interface cells.
+        const surfaceTiming = this.timing("surfaceUpdate_ms");
+        if (surfaceTiming && this.querySet) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: surfaceTiming.start } }); marker.end(); }
         this.quadtreeProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s);
+        if (surfaceTiming && this.querySet) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: surfaceTiming.end } }); marker.end(); }
       } else {
         { const timing = this.timing("pressure_ms"); for (let iteration = 0; iteration < this.info.pressureIterations; iteration += 1) { const first = iteration === 0, last = iteration === this.info.pressureIterations - 1; const pass = encoder.beginComputePass(timing && this.querySet && (first || last) ? { timestampWrites: { querySet: this.querySet, ...(first ? { beginningOfPassWriteIndex: timing.start } : {}), ...(last ? { endOfPassWriteIndex: timing.end } : {}) } } : undefined); this.dispatch(pass, this.jacobiPipeline, iteration % 2 === 0 ? this.jacobiABGroup : this.jacobiBAGroup); pass.end(); } }
         { const timing = this.timing("projection_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(pass, this.projectPipeline, this.projectGroup); pass.end(); }
@@ -607,7 +640,7 @@ export class WebGPUUniformEulerianSolver {
     let quadtreeImpulseReadback: GPUBuffer | undefined;
     if (activeBodies.length > 0 && this.onRigidLoads && !this.rigidReadbackPending) {
       this.rigidReadbackPending = true;
-      exchangeReadback = this.device.createBuffer({ size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      exchangeReadback = this.rigidReadback();
       encoder.copyBufferToBuffer(this.rigidExchangeBuffer, 0, exchangeReadback, 0, GPU_RIGID_EXCHANGE_BYTES);
       // The blend reaction and the variational constraint impulse are
       // sequential operator splits over the same interval; both channels are
@@ -640,10 +673,11 @@ export class WebGPUUniformEulerianSolver {
       const impulsePromise = quadtreeImpulseReadback && quadtreeImpulseProjection
         ? quadtreeImpulseProjection.readBodyImpulseReadback(quadtreeImpulseReadback)
         : Promise.resolve([]);
-      void Promise.all([readback.mapAsync(GPUMapMode.READ), impulsePromise]).then(([, impulses]) => {
+      const mapPromise = readback.mapAsync(GPUMapMode.READ);
+      void Promise.all([mapPromise, impulsePromise]).then(([, impulses]) => {
         const words = new Int32Array(readback.getMappedRange());
         const loads = activeBodies.map((body, index) => decodeGPURigidLoad(body.description.id, words, index, elapsed, cellVolume, substeps));
-        readback.unmap(); readback.destroy();
+        readback.unmap();
         // Both channels cover the same interval, so impulses add per body and
         // the interval stays `delta`; the variational displaced volume (from
         // the voxelized [A] field) is the better of the two estimates.
@@ -658,7 +692,13 @@ export class WebGPUUniformEulerianSolver {
             displacedVolume_m3: extra.displacedVolume_m3 > 0 ? extra.displacedVolume_m3 : load.displacedVolume_m3
           };
         }));
-      }).catch(() => readback.destroy()).finally(() => { this.rigidReadbackPending = false; });
+      }).catch(async () => {
+        // Promise.all may reject on the impulse channel while mapping is still
+        // pending. Do not publish this pooled buffer for reuse until mapping
+        // has also settled.
+        await mapPromise.catch(() => { /* Device loss is handled by the renderer. */ });
+        if (readback.mapState === "mapped") readback.unmap();
+      }).finally(() => { this.rigidReadbackPending = false; });
     }
     if (!this.validationChecked) { this.validationChecked = true; void this.device.popErrorScope().then((error) => { if (error) console.error(`Uniform GPU validation: ${error.message}`); }).catch(() => { /* Device loss is handled by the renderer. */ }); }
     return true;
@@ -666,10 +706,13 @@ export class WebGPUUniformEulerianSolver {
 
   async readStats() {
     if ((this.info.encodedSteps ?? 0) === 0 || this.readbackPending) return this.info;
-    this.readbackPending = true; const quadtreeDiagnostics = this.quadtreeProjection?.readSolveDiagnostics(); const surfaceDiagnosticsPromise = this.quadtreeProjection?.readSurfaceDiagnostics(); const querySegments = [...this.querySegments], queryBytes = this.queryResolve ? this.queryCount * 8 : 0;
-    const buffer = this.device.createBuffer({ size: Math.max(16, 16 + queryBytes), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }), encoder = this.device.createCommandEncoder();
+    this.readbackPending = true; const quadtreeDiagnostics = this.quadtreeProjection?.readSolveDiagnostics(); const surfaceDiagnosticsPromise = this.quadtreeProjection?.readSurfaceDiagnostics(); const querySegments = this.querySegments, queryBytes = this.queryResolve ? this.queryCount * 8 : 0;
+    const buffer = this.statsReadback(), encoder = this.device.createCommandEncoder();
     encoder.copyBufferToBuffer(this.reductionBuffer, 0, buffer, 0, 16); if (this.queryResolve && queryBytes > 0) encoder.copyBufferToBuffer(this.queryResolve, 0, buffer, 16, queryBytes);
-    this.device.queue.submit([encoder.finish()]); const [, , surfaceDiagnostics] = await Promise.all([buffer.mapAsync(GPUMapMode.READ), quadtreeDiagnostics, surfaceDiagnosticsPromise]);
+    this.device.queue.submit([encoder.finish()]);
+    const mapPromise = buffer.mapAsync(GPUMapMode.READ);
+    try {
+      const [, , surfaceDiagnostics] = await Promise.all([mapPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise]);
     if (this.quadtreeProjection) this.info.quadtreeVelocityClampCount = this.quadtreeProjection.info.velocityClampCount ?? 0;
     const words = new Uint32Array(buffer.getMappedRange(0, 16)), initial = Math.max(1, this.info.initialVolumeCellSum ?? 1);
     const conservativeVolumeCells=words[3]/2048;this.info.rawVolumeDrift=(conservativeVolumeCells-initial)/initial;
@@ -688,8 +731,24 @@ export class WebGPUUniformEulerianSolver {
       this.info.quadtreePressurePhaseTimings = this.quadtreeProjection.info.pressurePhaseTimings;
       this.info.pressureSolver = `${quadtreePressureLabel(this.quadtreeProjection)} · ${this.quadtreeProjection.info.pressureIterationBudget ?? this.info.pressureIterations} encoded / ${this.quadtreeProjection.info.pressureIterationHardBudget ?? this.info.pressureIterations} hard · relative ${Math.max(this.scene.numerics.pressureRelativeTolerance, 1e-4)}`;
     }
-    if (queryBytes > 0) { const times = new BigUint64Array(buffer.getMappedRange(16, queryBytes)); const timings = { layerConstruction_ms: 0, advection_ms: 0, pressure_ms: 0, projection_ms: 0, rigidCoupling_ms: 0, diagnostics_ms: 0, overhead_ms: 0, total_ms: 0 }; for (const segment of querySegments) timings[segment.name] += Number(times[segment.end] - times[segment.start]) / 1e6; const categorized = timings.layerConstruction_ms + timings.advection_ms + timings.pressure_ms + timings.projection_ms + timings.rigidCoupling_ms + timings.diagnostics_ms; /* Empty marker passes may collapse to one timestamp on Metal. Never publish a total smaller than its directly timed real passes. */ timings.total_ms = Math.max(timings.total_ms, categorized); timings.overhead_ms = Math.max(0, timings.total_ms - categorized); this.info.gpuTimings = timings; this.info.gpuStep_ms = timings.total_ms; }
-    buffer.unmap(); buffer.destroy(); this.readbackPending = false; return this.info;
+    if (queryBytes > 0) {
+      const times = new BigUint64Array(buffer.getMappedRange(16, queryBytes));
+      const stageByField: Partial<Record<GPUPhysicsTimingField, GPUPhysicsStageId>> = { preparation_ms: "preparation", layerConstruction_ms: "topology", advection_ms: "advection", conditioning_ms: "conditioning", remeshing_ms: "remeshing", pressure_ms: "pressure", projection_ms: "projection", surfaceUpdate_ms: "surfaceUpdate", rigidCoupling_ms: "rigidCoupling", diagnostics_ms: "diagnostics" };
+      const activeStages = [...new Set(querySegments.map((segment) => stageByField[segment.name]).filter((stage): stage is GPUPhysicsStageId => Boolean(stage)))];
+      const timings = emptyGPUPhysicsTimings(activeStages);
+      for (const segment of querySegments) timings[segment.name] += Math.max(0, Number(times[segment.end] - times[segment.start])) / 1e6;
+      const categorized = categorizedGPUPhysicsTime_ms(timings);
+      /* Empty marker passes may collapse to one timestamp on Metal. Never publish a total smaller than its directly timed real passes. */
+      timings.total_ms = Math.max(timings.total_ms, categorized); timings.overhead_ms = Math.max(0, timings.total_ms - categorized); this.info.gpuTimings = timings; this.info.gpuStep_ms = timings.total_ms;
+    }
+      return this.info;
+    } finally {
+      // A diagnostic promise can reject before mapAsync settles. The pooled
+      // staging buffer cannot be copied again while it is pending or mapped.
+      await mapPromise.catch(() => { /* Device loss is handled by the renderer. */ });
+      if (buffer.mapState === "mapped") buffer.unmap();
+      this.readbackPending = false;
+    }
   }
 
   destroy() {
@@ -701,6 +760,6 @@ export class WebGPUUniformEulerianSolver {
     for (const projection of this.retiredQuadtreeProjections) projection.destroy();
     this.retiredQuadtreeProjections.clear();
     for (const texture of new Set([this.velocityA, this.velocityB, this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB, this.transportA, this.transportB, this.fluxScales])) texture.destroy();
-    this.params.destroy(); this.reductionBuffer.destroy(); this.sharpenBuffer.destroy(); this.rigidBuffer.destroy(); this.rigidExchangeBuffer.destroy(); this.querySet?.destroy(); this.queryResolve?.destroy();
+    this.params.destroy(); this.reductionBuffer.destroy(); this.sharpenBuffer.destroy(); this.rigidBuffer.destroy(); this.rigidExchangeBuffer.destroy(); this.statsReadbackBuffer?.destroy(); this.rigidReadbackBuffer?.destroy(); this.querySet?.destroy(); this.queryResolve?.destroy();
   }
 }
