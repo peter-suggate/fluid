@@ -74,6 +74,20 @@ export interface GPUEulerianInfo {
   gpuStep_ms?: number;
   gpuQueueWall_ms?: number;
   gpuQueueSimulation_s?: number;
+  /** Presentation-sized physics batches submitted but not yet queue-confirmed. */
+  gpuPendingBatches?: number;
+  /** Simulation time represented by submitted, unconfirmed GPU work. */
+  gpuInFlightSimulation_s?: number;
+  /** Wall latency from submission to completion of the latest confirmed batch. */
+  gpuBatchWall_ms?: number;
+  /** Simulation time advanced by the latest confirmed batch. */
+  gpuBatchSimulation_s?: number;
+  /** Wall interval between the two latest ordered batch completions. */
+  gpuCompletionWall_ms?: number;
+  /** Simulation time confirmed during gpuCompletionWall_ms. */
+  gpuCompletionSimulation_s?: number;
+  /** Host-side gap between an empty queue completing and its next physics submission. */
+  gpuQueueStarved_ms?: number;
   initialVolumeCellSum?:number;
   volumeDrift?:number;
   rawVolumeDrift?:number;

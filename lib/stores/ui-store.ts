@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { defaultCamera, type CameraState, type ViewMode } from "../model";
 import type { GridOverlayConfig, GridOverlayMode, WaterRenderMode } from "../webgpu-renderer";
 import { defaultEnvironmentId, type EnvironmentId } from "../environments";
+import { clampTargetFps, DEFAULT_TARGET_FPS } from "../frame-pacing";
 
 export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | null;
 
@@ -22,6 +23,8 @@ interface UIStore {
   waterRenderMode: WaterRenderMode;
   /** Art-directed room, lighting, and foreground treatment surrounding the tank. */
   environmentId: EnvironmentId;
+  /** Requested presentation and raster-surface refresh rate. */
+  targetFps: number;
   setView: (view: ViewMode) => void;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   selectBody: (bodyId?: string) => void;
@@ -33,6 +36,7 @@ interface UIStore {
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setWaterRenderMode: (mode: WaterRenderMode) => void;
   setEnvironmentId: (environmentId: EnvironmentId) => void;
+  setTargetFps: (targetFps: number) => void;
 }
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -47,6 +51,7 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlayMode: "structure",
   waterRenderMode: "rasterized",
   environmentId: defaultEnvironmentId,
+  targetFps: DEFAULT_TARGET_FPS,
   setView: (view) => set({ view }),
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   selectBody: (selectedBodyId) => set({ selectedBodyId }),
@@ -60,5 +65,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
   setWaterRenderMode: (waterRenderMode) => set({ waterRenderMode }),
-  setEnvironmentId: (environmentId) => set({ environmentId })
+  setEnvironmentId: (environmentId) => set({ environmentId }),
+  setTargetFps: (targetFps) => set({ targetFps: clampTargetFps(targetFps) })
 }));

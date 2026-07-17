@@ -14,7 +14,7 @@ import type { MethodParamValue } from "../methods";
 import { useRuntimeStore } from "../stores/runtime-store";
 import { useDiagnosticsStore, emptyPerformance, type PerformanceSnapshot } from "../stores/diagnostics-store";
 import { useUIStore } from "../stores/ui-store";
-import { commitGPUCompletion, gpuBatchDepth, gpuCanAcceptNextStep } from "./gpu-clock";
+import { commitGPUCompletion, gpuBatchDepth, gpuCanAcceptNextStep, gpuInFlightStepLimit } from "./gpu-clock";
 import { externalLoadsFromGPU } from "./gpu-loads";
 
 export type BodyDragPhase = "start" | "move" | "end";
@@ -103,8 +103,10 @@ class SimulationController {
     // Restricted tall cells use a frame-sized partitioned-coupling batch: all
     // GPU impulses are accumulated over the batch and consumed over the next
     // fixed rigid substeps. Other coupled methods retain a one-step handshake.
-    const batchDepth = backend === "webgpu" ? gpuBatchDepth(methodId, dt, this.bodies.length > 0) : 1;
-    const gpuCanQueue = () => backend !== "webgpu" || this.simulationTime < this.gpuCompletedTime + batchDepth * dt - 1e-9;
+    const targetFps = useUIStore.getState().targetFps;
+    const batchDepth = backend === "webgpu" ? gpuBatchDepth(methodId, dt, this.bodies.length > 0, targetFps) : 1;
+    const inFlightStepLimit = backend === "webgpu" ? gpuInFlightStepLimit(methodId, dt, this.bodies.length > 0, targetFps) : 1;
+    const gpuCanQueue = () => backend !== "webgpu" || this.simulationTime < this.gpuCompletedTime + inFlightStepLimit * dt - 1e-9;
     let steps = 0;
     let diagnostics: RigidStepDiagnostics | undefined;
     let fluidDiagnostics: ReturnType<EulerianFluidSolver["step"]> | undefined;

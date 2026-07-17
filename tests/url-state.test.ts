@@ -27,6 +27,7 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
     gridOverlaySlice: 0.7,
     waterRenderMode: "ray-marched",
     environmentId: "night-lab",
+    targetFps: 90,
     camera: { ...initialUI.camera, distance_m: 4.2 }
   });
   const parsed = parseQueryState(query);
@@ -42,6 +43,7 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   assert.equal(parsed.ui.gridOverlaySlice, 0.7);
   assert.equal(parsed.ui.waterRenderMode, "ray-marched");
   assert.equal(parsed.ui.environmentId, "night-lab");
+  assert.equal(parsed.ui.targetFps, 90);
   assert.equal(parsed.ui.camera.distance_m, 4.2);
   assert.deepEqual(parsed.overrides, {
     "tall-cell": { pressureCycles: 5 },
@@ -68,10 +70,10 @@ test("query state persists an edited rigid-body roster atomically", () => {
   assert.equal(parsed.scene.rigidBodies[0].density_kg_m3, 640);
 });
 
-test("query state round-trips the coupled CPU and GPU timestep", () => {
+test("query state round-trips independently configured CPU and GPU timesteps", () => {
   const scene = getScenePreset("water-box-dam-break").create();
   scene.numerics.fixedDt_s = 0.006;
-  scene.numerics.maxDt_s = 0.012;
+  scene.numerics.maxDt_s = 0.018;
 
   const query = serializeQueryState("", { presetId: "water-box-dam-break", scene }, {
     methodId: "tall-cell",
@@ -82,9 +84,9 @@ test("query state round-trips the coupled CPU and GPU timestep", () => {
   const parsed = parseQueryState(query);
 
   assert.equal(params.get("scene.numerics.fixedDt_s"), "0.006");
-  assert.equal(params.get("scene.numerics.maxDt_s"), "0.012");
+  assert.equal(params.get("scene.numerics.maxDt_s"), "0.018");
   assert.equal(parsed.scene.numerics.fixedDt_s, 0.006);
-  assert.equal(parsed.scene.numerics.maxDt_s, 0.012);
+  assert.equal(parsed.scene.numerics.maxDt_s, 0.018);
 });
 
 test("invalid external query values fall back to validated defaults", () => {

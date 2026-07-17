@@ -1,4 +1,5 @@
 import { environmentShaderLibrary } from "./webgpu-environments";
+import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 
 /**
  * Rasterized water presentation for the WebGPU renderer.
@@ -10,11 +11,9 @@ import { environmentShaderLibrary } from "./webgpu-environments";
  * the volume once per screen pixel.
  */
 
-export const WATER_SURFACE_UPDATE_INTERVAL_MS = 1000 / 30;
-
-export function shouldUpdateWaterSurface(extractedRevision: number, latestRevision: number, lastExtractionAt_ms: number, now_ms: number) {
+export function shouldUpdateWaterSurface(extractedRevision: number, latestRevision: number, lastExtractionAt_ms: number, now_ms: number, targetFps = 60) {
   return extractedRevision < 0
-    || (latestRevision !== extractedRevision && now_ms - lastExtractionAt_ms >= WATER_SURFACE_UPDATE_INTERVAL_MS);
+    || (latestRevision !== extractedRevision && now_ms - lastExtractionAt_ms + 0.5 >= frameInterval_ms(targetFps));
 }
 
 export interface SurfaceExtractionDispatchPlan {
@@ -769,14 +768,14 @@ export class RasterWaterPipeline {
     ] });
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, timestamps?: RasterWaterTimestampRanges): RasterWaterEncodeResult | false {
+  encode(encoder: GPUCommandEncoder, output: GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, targetFps = 60, timestamps?: RasterWaterTimestampRanges): RasterWaterEncodeResult | false {
     this.ensureGeometry(nx,ny,nz);
     if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.preparePipeline||!this.polygonisePipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.causticPipeline||!this.scenePipeline||!this.compositePipeline||!this.extractBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.sceneBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.extractionMetaBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.causticTexture) return false;
     const now_ms = performance.now();
     // Rendering follows the newest available solver revision, but extraction
-    // is intentionally decoupled from display refresh. Camera/optics stay at
-    // full frame rate while geometry updates at no more than 30 Hz.
-    const updateSurface = shouldUpdateWaterSurface(this.extractedRevision, revision, this.lastExtractionAt_ms, now_ms);
+    // follows the selected presentation cadence. Unchanged solver revisions
+    // retain the existing mesh, so pausing does not create redundant work.
+    const updateSurface = shouldUpdateWaterSurface(this.extractedRevision, revision, this.lastExtractionAt_ms, now_ms, targetFps);
     const updateCaustics = this.causticsEnabled && (updateSurface || !this.causticsValid);
     if (updateSurface) {
       this.device.queue.writeBuffer(this.indirectBuffer,0,new Uint32Array([0,1,0,0]));
@@ -796,7 +795,7 @@ export class RasterWaterPipeline {
       compute.setPipeline(this.preparePipeline); compute.setBindGroup(0, this.prepareBindGroup); compute.dispatchWorkgroups(1);
       compute.setPipeline(this.polygonisePipeline); compute.setBindGroup(0, this.extractBindGroup); compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
       compute.end();
-      this.extractedRevision = revision; this.lastExtractionAt_ms = now_ms;
+      this.extractedRevision = revision; this.lastExtractionAt_ms = advancePresentationClock(this.lastExtractionAt_ms, now_ms, targetFps);
     }
     if (updateCaustics) {
       const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}]});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.surfaceBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();

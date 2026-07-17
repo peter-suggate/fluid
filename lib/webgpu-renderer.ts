@@ -522,7 +522,9 @@ export class FluidLabRenderer {
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
   private gpuRigidLoadCallback?: (loads: GPURigidLoad[]) => void;
   private gpuAdvanceCompletedCallback?: (time_s: number) => void;
-  private gpuPhysicsPending = false;
+  private gpuPendingBatches = 0;
+  private lastGPUCompletionAt_ms = -Infinity;
+  private lastGPUCompletedTime_s = 0;
   private gpuFluidGeneration = 0;
   private lastGPUReadbackSecond = -1;
   private bindGroup?: GPUBindGroup;
@@ -573,7 +575,7 @@ export class FluidLabRenderer {
       const fluid = this.gpuFluid;
       this.gpuFluid = undefined;
       this.gpuFluidKey = "";
-      this.gpuPhysicsPending = false;
+      this.resetGPUQueueTracking();
       this.gpuFluidGeneration += 1;
       try { fluid?.destroy(); } catch { /* Resources may already be invalid after device loss. */ }
       this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` });
@@ -652,6 +654,12 @@ export class FluidLabRenderer {
 
   private solverKey(scene:SceneDescription,config:SimulationRunConfig){return`${config.methodId}:${config.quality}:${JSON.stringify(config.values)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow??null)}`;}
 
+  private resetGPUQueueTracking() {
+    this.gpuPendingBatches = 0;
+    this.lastGPUCompletionAt_ms = -Infinity;
+    this.lastGPUCompletedTime_s = 0;
+  }
+
   private retireGPUFluid(fluid: GPUSolverInstance) {
     const device = this.device;
     if (!device || this.deviceLost) { fluid.destroy(); return; }
@@ -670,7 +678,7 @@ export class FluidLabRenderer {
     if(!this.device||this.disposed||this.deviceLost)return;
     const method=getMethod(config.methodId);if(!method.createSolver)return;
     const device=this.device,generation=++this.gpuFluidRequestGeneration,startedAt_ms=performance.now();
-    const previous=this.gpuFluid;if(previous)this.retireGPUFluid(previous);this.gpuFluid=undefined;this.gpuFluidKey="";this.gpuFluidPendingKey=key;this.gpuPhysicsPending=false;this.gpuFluidGeneration+=1;this.lastGPUReadbackSecond=-1;
+    const previous=this.gpuFluid;if(previous)this.retireGPUFluid(previous);this.gpuFluid=undefined;this.gpuFluidKey="";this.gpuFluidPendingKey=key;this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackSecond=-1;
     const report=(progress:{phase:string;label:string;completed:number;total:number})=>{if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;this.onStatus({state:"initializing",...progress,startedAt_ms});};
     report({phase:"solver",label:`Preparing ${method.shortLabel} solver`,completed:0,total:1});
     const create=method.createSolverAsync
@@ -682,40 +690,54 @@ export class FluidLabRenderer {
     }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed"});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration)this.gpuFluidPending=undefined;});
   }
 
-  private ensureGPUFluid(scene: SceneDescription, config: SimulationRunConfig, time_s: number, bodies: RigidBodyState[]) {
+  private ensureGPUFluid(scene: SceneDescription, config: SimulationRunConfig, time_s: number, bodies: RigidBodyState[], targetFps: number) {
     if (!this.device || this.disposed || this.deviceLost) return undefined;
     const method = getMethod(config.methodId);
     if (!method.createSolver) return undefined;
     const key=this.solverKey(scene,config);
     if(!this.gpuFluid||key!==this.gpuFluidKey){if(this.gpuFluidPendingKey!==key)this.beginGPUFluidInitialization(scene,config,key);return undefined;}
     if (time_s < (this.gpuFluid.info.submittedTime_s ?? 0)) {this.beginGPUFluidInitialization(scene,config,key);return undefined;}
-    if (!this.gpuPhysicsPending) {
-      const previousSubmittedTime = this.gpuFluid.info.submittedTime_s ?? 0;
-      // Amortize render-frame and queue-fence latency across solver steps.
-      // Restricted tall-cell batches—including partitioned rigid coupling—span
-      // at most one 60 Hz presentation interval. Adaptive quadtree remains
-      // shallow so a pending topology rebuild can stop the sequence promptly.
-      const batchLimit = gpuBatchDepth(config.methodId, scene.numerics.fixedDt_s, bodies.length > 0);
-      let submittedTime = previousSubmittedTime;
-      for (let batch = 0; batch < batchLimit && submittedTime + 1e-9 < time_s; batch += 1) {
-        if (!this.gpuFluid.advanceTo(time_s, bodies)) break;
-        const nextSubmittedTime = this.gpuFluid.info.submittedTime_s ?? submittedTime;
-        if (nextSubmittedTime <= submittedTime) break;
-        submittedTime = nextSubmittedTime;
+    const previousSubmittedTime = this.gpuFluid.info.submittedTime_s ?? 0;
+    // Submit one presentation-sized batch whenever prepared transport exists,
+    // even when an earlier batch fence is unresolved. The controller bounds
+    // tall-cell preparation to two batches, keeping the queue fed without
+    // allowing rigid-feedback latency to grow without limit.
+    const batchLimit = gpuBatchDepth(config.methodId, scene.numerics.fixedDt_s, bodies.length > 0, targetFps);
+    let submittedTime = previousSubmittedTime;
+    for (let batch = 0; batch < batchLimit && submittedTime + 1e-9 < time_s; batch += 1) {
+      if (!this.gpuFluid.advanceTo(time_s, bodies)) break;
+      const nextSubmittedTime = this.gpuFluid.info.submittedTime_s ?? submittedTime;
+      if (nextSubmittedTime <= submittedTime) break;
+      submittedTime = nextSubmittedTime;
+    }
+    if (submittedTime > previousSubmittedTime) {
+      const fluid = this.gpuFluid, generation = this.gpuFluidGeneration;
+      const submittedAt_ms = performance.now();
+      const batchSimulation_s = submittedTime - previousSubmittedTime;
+      if (this.gpuPendingBatches === 0 && Number.isFinite(this.lastGPUCompletionAt_ms)) {
+        fluid.info.gpuQueueStarved_ms = Math.max(0, submittedAt_ms - this.lastGPUCompletionAt_ms);
       }
-      if (submittedTime > previousSubmittedTime) {
-        const fluid = this.gpuFluid, generation = this.gpuFluidGeneration;
-        this.gpuPhysicsPending = true;
-        void this.device.queue.onSubmittedWorkDone().then(() => {
-          if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
-          fluid.info.completedTime_s = submittedTime;
-          fluid.info.simulatedTime_s = submittedTime;
-          fluid.info.simulationLag_s = Math.max(0, time_s - submittedTime);
-          this.gpuPhysicsPending = false;
-          this.gpuInfoCallback?.({ ...fluid.info });
-          this.gpuAdvanceCompletedCallback?.(submittedTime);
-        }).catch(() => { /* Device loss is reported by device.lost. */ });
-      }
+      this.gpuPendingBatches += 1;
+      fluid.info.gpuPendingBatches = this.gpuPendingBatches;
+      fluid.info.gpuInFlightSimulation_s = Math.max(0, submittedTime - (fluid.info.completedTime_s ?? 0));
+      void this.device.queue.onSubmittedWorkDone().then(() => {
+        if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
+        const completedAt_ms = performance.now();
+        this.gpuPendingBatches = Math.max(0, this.gpuPendingBatches - 1);
+        fluid.info.completedTime_s = Math.max(fluid.info.completedTime_s ?? 0, submittedTime);
+        fluid.info.gpuPendingBatches = this.gpuPendingBatches;
+        fluid.info.gpuInFlightSimulation_s = Math.max(0, (fluid.info.submittedTime_s ?? submittedTime) - fluid.info.completedTime_s);
+        fluid.info.gpuBatchWall_ms = completedAt_ms - submittedAt_ms;
+        fluid.info.gpuBatchSimulation_s = batchSimulation_s;
+        if (Number.isFinite(this.lastGPUCompletionAt_ms) && submittedTime > this.lastGPUCompletedTime_s) {
+          fluid.info.gpuCompletionWall_ms = completedAt_ms - this.lastGPUCompletionAt_ms;
+          fluid.info.gpuCompletionSimulation_s = submittedTime - this.lastGPUCompletedTime_s;
+        }
+        this.lastGPUCompletionAt_ms = completedAt_ms;
+        this.lastGPUCompletedTime_s = submittedTime;
+        this.gpuInfoCallback?.({ ...fluid.info });
+        this.gpuAdvanceCompletedCallback?.(submittedTime);
+      }).catch(() => { /* Device loss is reported by device.lost. */ });
     }
     // Sample at 30 Hz of simulation time so a paper-sized 1/30 s step cannot
     // cross an instability threshold between diagnostic readbacks. The solver
@@ -770,7 +792,7 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.activeRenderScale * 100)}%)`;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, view: ViewMode, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, waterRenderMode: WaterRenderMode = "rasterized", environmentId: EnvironmentId = defaultEnvironmentId): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, view: ViewMode, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, waterRenderMode: WaterRenderMode = "rasterized", environmentId: EnvironmentId = defaultEnvironmentId, targetFps = 60): RendererFrameMetrics {
     if (!this.device || this.disposed || this.deviceLost || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     this.resize(waterRenderMode === "rasterized" ? this.rasterRenderScale : 1);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
@@ -779,7 +801,7 @@ export class FluidLabRenderer {
     if (timingContext !== this.renderTimingContext) { this.renderTimingContext = timingContext; this.gpuRender_ms = undefined; this.gpuSurfaceExtraction_ms=undefined;this.gpuDryScene_ms=undefined;this.gpuInterfaces_ms=undefined;this.gpuOpticalComposite_ms=undefined;this.gpuUpscale_ms=undefined; }
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
-    const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, config, time_s, bodies) : undefined;
+    const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, config, time_s, bodies, targetFps) : undefined;
     if (gpuInfo && this.gpuFluid && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) this.gridOverlayPipeline?.setVolume(this.gpuFluid.surfaceFieldTexture ?? this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture);
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
     if (backend === "cpu-reference") this.uploadFluid(fluid);
@@ -822,6 +844,7 @@ export class FluidLabRenderer {
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1,
       gpuInfo?.gridKind === "restricted-tall-cell", gpuInfo?.maximumNeighborDelta ?? 0,
       gpuInfo?.encodedSteps ?? fluid?.revision ?? 0,
+      targetFps,
       sampleRenderGPU&&this.renderQuerySet?{
         extraction:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1},
         scene:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:2,endOfPassWriteIndex:3},
@@ -857,7 +880,7 @@ export class FluidLabRenderer {
     this.gpuFluid = undefined;
     this.gpuFluidRequestGeneration += 1;
     this.gpuFluidPendingKey = "";
-    this.gpuPhysicsPending = false;
+    this.resetGPUQueueTracking();
     this.gpuFluidGeneration += 1;
     try { fluid?.destroy(); } catch { /* Device loss can invalidate solver resources first. */ }
     for (const retired of this.retiredGPUFluids) { try { retired.destroy(); } catch { /* Best-effort cleanup after device loss. */ } }

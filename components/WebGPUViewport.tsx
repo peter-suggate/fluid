@@ -9,6 +9,7 @@ import { useSceneStore } from "@/lib/stores/scene-store";
 import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useUIStore } from "@/lib/stores/ui-store";
+import { advancePresentationClock, presentationFrameDue } from "@/lib/frame-pacing";
 
 type Vec3 = RigidBodyState["position_m"];
 
@@ -40,9 +41,14 @@ export function WebGPUViewport() {
     );
     let frame = 0;
     let alive = true;
+    let lastFrameAt_ms = -Infinity;
     renderer.initialize().then(() => {
-      const render = () => {
+      const render = (now_ms: number) => {
         if (!alive || !running) return;
+        frame = requestAnimationFrame(render);
+        const targetFps = useUIStore.getState().targetFps;
+        if (!presentationFrameDue(lastFrameAt_ms, now_ms, targetFps)) return;
+        lastFrameAt_ms = advancePresentationClock(lastFrameAt_ms, now_ms, targetFps);
         const scene = useSceneStore.getState().scene;
         const ui = useUIStore.getState();
         const method = useMethodStore.getState();
@@ -55,7 +61,8 @@ export function WebGPUViewport() {
             { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method) },
             { axis: ui.view === "scientific" ? ui.gridOverlayAxis : "off", position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
             ui.waterRenderMode,
-            ui.environmentId
+            ui.environmentId,
+            targetFps
           );
         } catch (error: unknown) {
           running = false;
@@ -63,9 +70,8 @@ export function WebGPUViewport() {
           return;
         }
         simulation.recordFrame(metrics, renderer.presentationResolution);
-        frame = requestAnimationFrame(render);
       };
-      render();
+      frame = requestAnimationFrame(render);
     }).catch((error: unknown) => {
       running = false;
       if (useDiagnosticsStore.getState().gpuStatus.state !== "lost") diagnostics.set({ gpuStatus: { state: "unavailable", label: error instanceof Error ? error.message : "WebGPU initialization failed" } });
