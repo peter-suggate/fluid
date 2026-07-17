@@ -6,7 +6,7 @@ const params: MethodParamSpec[] = [
   { kind: "number", key: "surfaceColumns", label: "Finest columns", unit: "columns", min: 1_000, max: 20_000, step: 500, digits: 0, default: 2_500, tier: "fine", hint: "Finest x/z lattice used by quadtree leaves and the cubic advection field." },
   { kind: "number", key: "adaptivityStrength", label: "Adaptivity", unit: "alpha", min: 0, max: 1, step: 0.05, digits: 2, default: 1, tier: "fine", hint: "Ando–Batty Eq. 38: 0 is the ordinary-grid limit; 1 permits full quadtree coarsening." },
   { kind: "select", key: "preconditioner", label: "Preconditioner", default: "poly", tier: "fine", options: [{ value: "poly", label: "Polynomial" }, { value: "ic0", label: "Paper IC(0)" }, { value: "blockic", label: "Block IC(0)" }, { value: "line", label: "Vertical line" }, { value: "jacobi", label: "Parallel Jacobi" }], hint: "Polynomial is the parallel default; IC(0) remains the paper-reference path. All choices preserve the variational operator and relative-residual stop." },
-  { kind: "select", key: "vofReconciliation", label: "VOF safety net", default: "on", tier: "fine", options: [{ value: "on", label: "Armed" }, { value: "off", label: "Off (φ-only diagnostic)" }], hint: "W0 emergency fallback for catastrophic level-set loss. Healthy φ transport is untouched; proportional recovery activates below -10% represented volume and releases above -2%." }
+  { kind: "select", key: "vofReconciliation", label: "Emergency VOF recovery", default: "on", tier: "fine", options: [{ value: "on", label: "Armed" }, { value: "off", label: "Strict φ-only" }], hint: "Leaves healthy level-set transport untouched. If represented liquid falls below -10%, conservative VOF may restore lost liquid until recovery reaches -2%." }
 ];
 
 const preconditionerValue = (value: unknown) => value === "ic0" || value === "blockic" || value === "line" || value === "jacobi" ? value : "poly";
@@ -47,7 +47,7 @@ export const quadtreeTallCellMethod: SimulationMethod = {
       preconditioner: preconditionerValue(values.preconditioner),
       polynomialDegree: typeof values.polynomialDegree === "number" ? values.polynomialDegree : 2,
       vofReconciliation: values.vofReconciliation !== "off" && values.vofReconciliation !== false,
-      debrisCulling: values.debrisCulling !== false,
+      debrisCulling: values.debrisCulling === true,
       debugPressureTimings: values.debugPressureTimings === true
     }
   }),
@@ -65,7 +65,7 @@ export const quadtreeTallCellMethod: SimulationMethod = {
       preconditioner: preconditionerValue(values.preconditioner),
       polynomialDegree: typeof values.polynomialDegree === "number" ? values.polynomialDegree : 2,
       vofReconciliation: values.vofReconciliation !== "off" && values.vofReconciliation !== false,
-      debrisCulling: values.debrisCulling !== false,
+      debrisCulling: values.debrisCulling === true,
       debugPressureTimings: values.debugPressureTimings === true
     }
   }, (label, completed, total) => onProgress({ phase: label.startsWith("Building adaptive") ? "adaptive-topology" : "solver-pipelines", label, completed, total }))

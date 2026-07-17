@@ -5,9 +5,10 @@ import { simulationMethods } from "../lib/methods";
 import { quadtreeTallCellMethod } from "../lib/methods/quadtree-tall-cell";
 import { nextQuadtreeIterationBudget, quadtreeDispatchShader, quadtreeDivergenceShader, quadtreeIterationBudget, quadtreeTallCellProjectionShader, quadtreeVelocityClampShader, quadtreeVelocityExtrapolationShader, WebGPUQuadtreeTallCellProjection } from "../lib/webgpu-quadtree-tall-cell";
 import { nextQuadtreeVofReconciliationActive, packedQuadtreeRootMap, quadtreeConstructionShader, quadtreeSurfaceShader, quadtreeVofReconciliationFraction } from "../lib/webgpu-quadtree-builder";
-import { WebGPUQuadtreePackBuilder } from "../lib/webgpu-quadtree-pack-builder";
+import { quadtreeSegmentationPackShader, WebGPUQuadtreePackBuilder } from "../lib/webgpu-quadtree-pack-builder";
 import { buildQuadtree, buildVariationalSystem, populateTallPressureGrid } from "../lib/quadtree-tall-cell-grid";
-import { proactiveQuadtreeSubsteps, quadtreeMissedFrames } from "../lib/webgpu-uniform-eulerian";
+import { proactiveQuadtreeSubsteps, quadtreeMissedFrames, quadtreeRebuildRetryDelay } from "../lib/webgpu-uniform-eulerian";
+import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 
 test("the old optical-layer method is replaced by quadtree tall cells", () => {
   assert.ok(simulationMethods.includes(quadtreeTallCellMethod));
@@ -16,14 +17,27 @@ test("the old optical-layer method is replaced by quadtree tall cells", () => {
   assert.match(quadtreeTallCellMethod.detail, /T-junction/);
   assert.equal(quadtreeTallCellMethod.presetFor("balanced").preconditioner, "poly", "the parallel polynomial preconditioner is the runtime default");
   assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "preconditioner" && param.default === "poly"));
-  assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "vofReconciliation" && param.default === "on"), "W0 reconciliation stays enabled until the W7 soak gate passes");
+  assert.ok(quadtreeTallCellMethod.params.find((param) => param.key === "vofReconciliation" && param.default === "on"), "catastrophic-loss recovery is armed by default but inactive during healthy phi transport");
 });
 
 test("quadtree projection preserves and extrapolates near-surface air velocity", () => {
-  assert.match(quadtreeTallCellProjectionShader, /ownPhi > 2\.0 \* h && otherPhi > 2\.0 \* h/, "only far-field air faces are zeroed");
+  assert.match(quadtreeTallCellProjectionShader, /ownPhi > 5\.0 \* h && otherPhi > 5\.0 \* h/, "only air beyond the aligned five-cell band is zeroed");
+  assert.doesNotMatch(quadtreeTallCellProjectionShader, /volumeIn|loadVolume/, "the adaptive pressure projection must have no VOF binding");
+  const project = quadtreeTallCellProjectionShader.slice(quadtreeTallCellProjectionShader.indexOf("fn project"));
+  assert.doesNotMatch(project, /volumeIn|Alpha|alpha/, "projection classification must remain level-set authoritative");
   assert.match(quadtreeVelocityExtrapolationShader, /fn extrapolateVelocity/);
   assert.match(quadtreeVelocityExtrapolationShader, /phi\(q\) < 0\.0 \|\| phi\(plus\) < 0\.0/, "known faces touch phi-negative liquid");
-  assert.match(quadtreeVelocityExtrapolationShader, /min\(ownPhi, otherPhi\) < 3\.0 \* h/, "extrapolation is restricted to the three-cell surface band");
+  assert.match(quadtreeVelocityExtrapolationShader, /min\(ownPhi, otherPhi\) < 5\.0 \* h/, "extrapolation reaches the aligned five-cell surface band");
+});
+
+test("quadtree fine-grid dynamics use the resident level set as fluid support", () => {
+  assert.match(legacyUniformComputeShader, /@group\(0\) @binding\(20\) var surfaceIn/);
+  assert.match(legacyUniformComputeShader, /fn levelSetAuthority\(\) -> bool/);
+  assert.match(legacyUniformComputeShader, /fn liquid\(p:vec3i\)->bool\{return surfaceLiquid\(p\);\}/, "gravity and velocity-force wetness use the authoritative surface");
+  assert.match(legacyUniformComputeShader, /fn transportVelocity[\s\S]*surfaceOccupancy\(id\)/, "velocity extension uses phi support");
+  assert.match(legacyUniformComputeShader, /fn buildOccupancy[\s\S]*surfaceOccupancy/, "air-work culling uses phi support");
+  assert.match(legacyUniformComputeShader, /let cellMass=params\.physical\.x\*h\.x\*h\.y\*h\.z\*wetFraction/, "rigid coupling uses phi-represented liquid mass");
+  assert.match(legacyUniformComputeShader, /if\(surfaceLiquid\(id\)\)\{atomicMax\(&reductions\[1\]/, "front diagnostics follow the rendered level set");
 });
 
 test("quadtree publishes a post-projection divergence diagnostic field", () => {
@@ -45,6 +59,7 @@ test("quadtree blocked-frame telemetry counts missed presentation budgets, not r
   assert.equal(quadtreeMissedFrames(16), 0);
   assert.equal(quadtreeMissedFrames(17), 1);
   assert.equal(quadtreeMissedFrames(34), 2);
+  assert.deepEqual([0, 1, 2, 3, 6, 20].map(quadtreeRebuildRetryDelay), [0, 2, 4, 8, 60, 60], "failed rebuilds back off while the previous topology remains usable");
 });
 
 test("VOF reconciliation is an armed catastrophic-loss circuit breaker", () => {
@@ -52,6 +67,7 @@ test("VOF reconciliation is an armed catastrophic-loss circuit breaker", () => {
   assert.equal(nextQuadtreeVofReconciliationActive(false, -0.101), true);
   assert.equal(nextQuadtreeVofReconciliationActive(true, -0.021), true);
   assert.equal(nextQuadtreeVofReconciliationActive(true, -0.019), false);
+  assert.equal(nextQuadtreeVofReconciliationActive(false, Number.NaN), false);
   assert.equal(quadtreeVofReconciliationFraction(0, 100), 0);
   assert.equal(quadtreeVofReconciliationFraction(100, 800), 1 / 64);
   assert.equal(quadtreeVofReconciliationFraction(1000, 100), 1 / 32);
@@ -67,6 +83,10 @@ test("quadtree updates evaluate sizing, subdivide, and smooth on WebGPU", () => 
   assert.equal(roots.length, 128);
   assert.equal((roots[0] >>> 20) & 1023, 8);
   assert.equal((roots[15] >>> 20) & 1023, 8);
+  assert.match(quadtreeConstructionShader, /if \(!nearSurface && !wet\) \{ continue; \}/, "deep liquid remains eligible for velocity-variation sizing");
+  assert.doesNotMatch(quadtreeConstructionShader, /volumeIn|loadVolume/, "adaptive topology must not read VOF");
+  assert.match(quadtreeSegmentationPackShader, /fn footprintWet/);
+  assert.match(quadtreeSegmentationPackShader, /let liquid = footprintWet\(word, y\)/, "GPU sparse packing must use footprint wetness for coarse DOFs");
 });
 
 test("resident phi uses bounded-MacCormack transport with per-step sub-cell redistance", () => {
@@ -82,26 +102,29 @@ test("resident phi uses bounded-MacCormack transport with per-step sub-cell redi
   assert.match(quadtreeSurfaceShader, /if \(abs\(advected\) >= 2\.5 \* h \|\| interfaceDistance >= 2\.5 \* h\)/, "the narrow band is bounded by the true interface distance, not the advected magnitude, so swept fossils are repaired");
   assert.doesNotMatch(quadtreeSurfaceShader, /sqrt\(seedDistanceSquared\(gid, word\)\) \+ 0\.5 \* h\b/, "the half-cell redistance floor must be gone");
   assert.match(quadtreeSurfaceShader, /fn volumeCorrectedPhi/);
-  assert.match(quadtreeSurfaceShader, /value - params\.control\.x \* h \* params\.cellAndDt\.w/);
+  assert.match(quadtreeSurfaceShader, /value - params\.control\.x \* h \* params\.cellAndDt\.w/, "volume correction is a normal displacement of phi's interface");
   assert.match(quadtreeSurfaceShader, /abs\(value\) < 1\.5 \* h/);
   assert.match(quadtreeSurfaceShader, /value \/ \(4\.0 \* params\.cellAndDt\.y\)/);
   assert.match(quadtreeSurfaceShader, /atomicAdd\(&reductions\[0\]/);
   assert.match(quadtreeSurfaceShader, /isInflowVelocityCell/, "the nozzle must source fluid into the resident level set");
-  // The GPU port of reconcileLevelSetWithVolume: decisive wet/dry
-  // disagreement with the conservative VOF is overruled toward the VOF, and
-  // JFA seeding ignores phi sign changes with no VOF interface nearby. Both
-  // are gated on control.y so pure-transport users see no behavior change.
+  // Conservative VOF is isolated behind the catastrophic-loss control. It
+  // may restore missing liquid, but cannot delete phi topology or filter the
+  // phi-derived redistance seeds during ordinary transport.
   assert.match(quadtreeSurfaceShader, /reconcileVolumeIn/);
-  assert.match(quadtreeSurfaceShader, /params\.control\.y > 0\.5/);
+  assert.match(quadtreeSurfaceShader, /params\.control\.y > 0\.5 && wet/);
   assert.match(quadtreeSurfaceShader, /let signMismatch = \(result < 0\.0\) != wet/);
   assert.match(quadtreeSurfaceShader, /let decisiveMismatch = signMismatch && abs\(result\) > 0\.5 \* h/);
   assert.match(quadtreeSurfaceShader, /\(0\.5 - alpha\) \* \(4\.0 \* params\.cellAndDt\.y\)/, "VOF repairs preserve the conservative sub-cell amount instead of stamping half-cell signs");
-  assert.match(quadtreeSurfaceShader, /params\.control\.y > 0\.5 && wet/, "the W0 safety net restores lost liquid without deleting phi-wet surface cells at a diffused VOF threshold");
-  assert.match(quadtreeSurfaceShader, /atomicAdd\(&reductions\[3\], 1u\)/, "the W7 retirement gate needs a real pre-reconciliation mismatch count");
+  assert.match(quadtreeSurfaceShader, /let wet = alpha >= 0\.5/, "emergency restoration requires majority VOF occupancy");
+  const emergencyRepair = quadtreeSurfaceShader.slice(quadtreeSurfaceShader.indexOf("// VOF is not part"), quadtreeSurfaceShader.indexOf("fn cullDebris"));
+  assert.doesNotMatch(emergencyRepair, /confidentlyDry|params\.control\.y > 0\.5 && !wet/, "VOF must never erase phi-wet topology");
+  assert.match(quadtreeSurfaceShader, /atomicAdd\(&reductions\[3\], 1u\)/, "VOF disagreement remains diagnostic outside emergency recovery");
   assert.doesNotMatch(quadtreeSurfaceShader, /\bvolumeIn\b|\bloadVolume\b/);
   assert.match(quadtreeSurfaceShader, /fn cullDebris/);
   assert.match(quadtreeSurfaceShader, /params\.control\.z > 0\.5/, "debris hygiene stays explicitly gated");
   assert.match(quadtreeSurfaceShader, /textureLoad\(reconcileVolumeIn, q, 0\)\.x < 0\.5/);
+  const seeds = quadtreeSurfaceShader.slice(quadtreeSurfaceShader.indexOf("fn seedDistance"), quadtreeSurfaceShader.indexOf("fn seedDistanceSquared"));
+  assert.doesNotMatch(seeds, /reconcileVolumeIn|Alpha|alpha/, "redistance seeds must be derived only from phi sign crossings");
   assert.match(quadtreeConstructionShader, /fn effectiveWet[\s\S]*return loadAdvancedPhi\(clamp3\(q\)\) < 0\.0/);
   assert.match(quadtreeConstructionShader, /let profile = 3u \* \(leaf \* params\.dims\.y \+ y\)/);
   assert.match(quadtreeConstructionShader, /columnProfiles\[profile \+ 1u\] = minimum/);
@@ -117,6 +140,13 @@ test("pressure iterations consume precomputed face masks, fluxes, and row activi
   const iterationPath = quadtreeTallCellProjectionShader.slice(quadtreeTallCellProjectionShader.indexOf("fn rowProduct"), quadtreeTallCellProjectionShader.indexOf("fn cellIndex"));
   assert.doesNotMatch(iterationPath, /faceSamplePhi|faceVelocity/);
   assert.match(iterationPath, /matrixCoefficient\(entry\) \* stateF\(matrixNode\(entry\), DIRECTION\)/);
+});
+
+test("projection write-back retains fine sub-face shear while preserving coarse flux", () => {
+  const project = quadtreeTallCellProjectionShader.slice(quadtreeTallCellProjectionShader.indexOf("fn project"));
+  assert.match(project, /gradient = gradient - face\.mlsMean \+ solved/);
+  assert.doesNotMatch(project, /value\[axis\] = \(face\.flux - face\.solidFlux\) \/ face\.weights\.x/, "projection must not box-filter each fine sample to the adaptive face mean");
+  assert.match(quadtreeTallCellProjectionShader, /face\.flux = face\.weights\.x \* faceVelocity\(face\) \+ face\.solidFlux/, "the coarse constraint is integrated from the same fine samples");
 });
 
 test("WebGPU pressure path is variational PCG rather than Jacobi pressure smoothing", () => {

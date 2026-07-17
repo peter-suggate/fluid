@@ -406,6 +406,11 @@ export function populateTallPressureGrid(
       if (rowContainsInterface || (y > 0 && crossesNeighbor(y - 1)) || (y + 1 < ny && crossesNeighbor(y + 1))) interfaceY.push(y);
     }
     const cubic = new Uint8Array(ny);
+    // Footprint-conservative wetness activates a coarse pressure row as soon
+    // as an off-centre tongue enters the leaf. Face fractions still measure
+    // the partial aperture, so this creates a DOF without pretending the
+    // whole footprint is full.
+    const footprintWet = Uint8Array.from(footprintMinimum, (value) => value < 0 ? 1 : 0);
     // Irving's optical thickness, retained by Narita et al., is the thin
     // resolved layer *beneath* the liquid surface. `interfaceY` contains the
     // cells on both sides of a sign change, so ending each band at surfaceY
@@ -420,9 +425,9 @@ export function populateTallPressureGrid(
       let depthCells = opticalDepthCells;
       if (localDepthFraction !== undefined) {
         let liquidY = surfaceY;
-        if (columnPhi[liquidY] >= 0 && liquidY > 0 && columnPhi[liquidY - 1] < 0) liquidY -= 1;
+        if (footprintWet[liquidY] === 0 && liquidY > 0 && footprintWet[liquidY - 1] !== 0) liquidY -= 1;
         let localDepth = 0;
-        while (liquidY >= 0 && columnPhi[liquidY] < 0) { localDepth += 1; liquidY -= 1; }
+        while (liquidY >= 0 && footprintWet[liquidY] !== 0) { localDepth += 1; liquidY -= 1; }
         depthCells = Math.max(1, Math.ceil(localDepth * Math.max(0, localDepthFraction)));
       }
       for (let y = Math.max(0, surfaceY - depthCells + 1); y <= surfaceY; y += 1) cubic[y] = 1;
@@ -430,15 +435,16 @@ export function populateTallPressureGrid(
     }
     let y = 0;
     while (y < ny) {
-      const firstY = y, isCubic = cubic[y] === 1, sign = columnPhi[y] < 0;
+      const firstY = y, isCubic = cubic[y] === 1, sign = footprintWet[y] !== 0;
       // A cubic segment is exactly one retained cube; only uncut runs coalesce.
-      if (!isCubic) while (y + 1 < ny && cubic[y + 1] === 0 && (columnPhi[y + 1] < 0) === sign) y += 1;
+      if (!isCubic) while (y + 1 < ny && cubic[y + 1] === 0 && (footprintWet[y + 1] !== 0) === sign) y += 1;
       const lastY = y, segmentId = segments.length;
       const add = (sampleY: number, kind: TallPressureSample["kind"]) => {
+        const liquid = footprintWet[sampleY] !== 0;
         const sample: TallPressureSample = {
           id: samples.length, leaf: leaf.id, y: sampleY,
           position: { x: (leaf.x + leaf.size / 2) * h.x, y: (sampleY + 0.5) * h.y, z: (leaf.z + leaf.size / 2) * h.z },
-          phi: columnPhi[sampleY], liquid: columnPhi[sampleY] < 0, kind, segment: segmentId
+          phi: liquid ? Math.min(columnPhi[sampleY], footprintMinimum[sampleY]) : columnPhi[sampleY], liquid, kind, segment: segmentId
         };
         samples.push(sample); samplesByLeaf[leaf.id].push(sample); return sample.id;
       };
@@ -625,9 +631,10 @@ export function signedDistanceFromVolume(volume: ArrayLike<number>, nx: number, 
  * Ando--Batty use trilinear interpolation on ordinary cells and MLS only where
  * an adaptive shape function overlaps the query.  This implementation keeps a
  * finest-cubic backing field, so the trace is exactly the ordinary-cell branch
- * of their interpolation rule.  It deliberately does not reconstruct phi from
- * VOF: VOF remains the conservative mass/rendering field, while phi is the
- * independently transported geometry used by the pressure discretization.
+ * of their interpolation rule. It deliberately does not reconstruct phi from
+ * VOF: phi is the independently transported geometry used by pressure,
+ * topology, extrapolation, and rendering. VOF is retained for diagnostics and
+ * catastrophic-loss recovery only.
  */
 export function advectAndRedistanceLevelSet(
   phi: ArrayLike<number>, velocity: ArrayLike<Vec3>, nx: number, ny: number, nz: number, h: Vec3, dt_s: number
@@ -668,25 +675,18 @@ function advectLevelSetSamples(
 }
 
 /**
- * Conservative VOF is the transported mass field; the level set is only the
- * pressure geometry. Wherever the two disagree about wet/dry — inflow sources,
- * splash merges, accumulated advection drift — the VOF is authoritative:
- * conflicting cells are reseeded from its reconstructed signed distance while
- * agreeing cells keep the advected sub-cell distances, and one redistancing
- * restores |grad phi| = 1. The returned mismatch fraction is the drift
- * diagnostic before reconciliation.
+ * Emergency mirror of the GPU's catastrophic-loss recovery. It measures all
+ * decisive VOF/phi disagreement for diagnostics, but only restores liquid that
+ * phi lost; VOF is never allowed to delete phi-wet topology. Ordinary
+ * paper-aligned transport should call `advectAndRedistanceLevelSet` instead.
  */
 export function reconcileLevelSetWithVolume(
   phi: ArrayLike<number>, volume: ArrayLike<number>, nx: number, ny: number, nz: number, h: Vec3
 ): { phi: Float32Array; mismatchFraction: number } {
   const count = nx * ny * nz;
   if (phi.length !== count || volume.length !== count) throw new Error("Invalid level-set reconciliation inputs");
-  // Sub-half-cell disagreement along the interface is legitimate ambiguity
-  // between the two surface representations; reseeding it would stamp the
-  // VOF's quantized offsets into phi and the resulting curvature noise drives
-  // the sizing to full refinement. Only decisive disagreement -- liquid the
-  // advected field never saw, or dry regions it still thinks are wet by more
-  // than half a cell -- is overruled.
+  // Sub-half-cell disagreement along the interface is legitimate ambiguity.
+  // Only decisive missing-liquid cells are eligible for emergency restoration.
   const band = 0.5 * Math.min(h.x, h.y, h.z);
   let mismatches = 0;
   for (let index = 0; index < count; index += 1) {
@@ -696,13 +696,13 @@ export function reconcileLevelSetWithVolume(
   const volumePhi = signedDistanceFromVolume(volume, nx, ny, nz, h);
   const merged = new Float64Array(count);
   for (let index = 0; index < count; index += 1) {
-    const disagree = (phi[index] < 0) !== (volume[index] >= 0.5) && Math.abs(phi[index]) > band;
-    merged[index] = disagree ? volumePhi[index] : phi[index];
+    const missingLiquid = phi[index] >= 0 && volume[index] >= 0.5 && Math.abs(phi[index]) > band;
+    merged[index] = missingLiquid ? volumePhi[index] : phi[index];
   }
   return { phi: redistanceSignedSamples(merged, nx, ny, nz, h), mismatchFraction: mismatches / count };
 }
 
-/** Advect the pressure level set and reconcile it against the conservative VOF in one redistancing pass. */
+/** Legacy convenience for an explicitly requested emergency-recovery step. */
 export function advectAndReconcileLevelSet(
   phi: ArrayLike<number>, velocity: ArrayLike<Vec3>, volume: ArrayLike<number>,
   nx: number, ny: number, nz: number, h: Vec3, dt_s: number
@@ -1160,13 +1160,12 @@ export function quadtreeSizingFromVelocityAndSurface(
   for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
     let maximum = 0;
     for (let y = 0; y < ny; y += 1) {
-      if (Math.abs(samplePhi(x, y, z)) > 2 * Math.max(h.x, h.y, h.z)) continue;
-      const laplacian = (samplePhi(x + 1, y, z) - 2 * samplePhi(x, y, z) + samplePhi(x - 1, y, z)) / (h.x * h.x)
-        + (samplePhi(x, y + 1, z) - 2 * samplePhi(x, y, z) + samplePhi(x, y - 1, z)) / (h.y * h.y)
-        + (samplePhi(x, y, z + 1) - 2 * samplePhi(x, y, z) + samplePhi(x, y, z - 1)) / (h.z * h.z);
-      const vx = (sampleVelocity(x + 1, y, z).x - sampleVelocity(x - 1, y, z).x) / (2 * h.x);
-      const vy = (sampleVelocity(x, y + 1, z).y - sampleVelocity(x, y - 1, z).y) / (2 * h.y);
-      const vz = (sampleVelocity(x, y, z + 1).z - sampleVelocity(x, y, z - 1).z) / (2 * h.z);
+      const localPhi = samplePhi(x, y, z), wet = localPhi < 0;
+      const crosses = (samplePhi(x + 1, y, z) < 0) !== wet || (samplePhi(x - 1, y, z) < 0) !== wet
+        || (samplePhi(x, y + 1, z) < 0) !== wet || (samplePhi(x, y - 1, z) < 0) !== wet
+        || (samplePhi(x, y, z + 1) < 0) !== wet || (samplePhi(x, y, z - 1) < 0) !== wet;
+      const nearSurface = Math.abs(localPhi) <= 2 * Math.max(h.x, h.y, h.z) || crosses;
+      if (!nearSurface && localPhi >= 0) continue;
       const speed = (qx: number, qy: number, qz: number) => {
         const value = sampleVelocity(qx, qy, qz); return Math.hypot(value.x, value.y, value.z);
       };
@@ -1175,9 +1174,19 @@ export function quadtreeSizingFromVelocityAndSurface(
         (speed(x, y + 1, z) - speed(x, y - 1, z)) / (2 * h.y),
         (speed(x, y, z + 1) - speed(x, y, z - 1)) / (2 * h.z)
       );
-      const local = sampleVelocity(x, y, z);
-      const frontSpeedDemand = frontSpeedWeight * Math.hypot(local.x, local.y, local.z) / Math.min(h.x, h.y, h.z);
-      maximum = Math.max(maximum, curvatureWeight * Math.abs(laplacian) + velocityWeight * Math.hypot(vx, vy, vz) + speedGradientWeight * speedGradient + frontSpeedDemand);
+      let demand = wet ? speedGradientWeight * speedGradient : 0;
+      if (nearSurface) {
+        const laplacian = (samplePhi(x + 1, y, z) - 2 * localPhi + samplePhi(x - 1, y, z)) / (h.x * h.x)
+          + (samplePhi(x, y + 1, z) - 2 * localPhi + samplePhi(x, y - 1, z)) / (h.y * h.y)
+          + (samplePhi(x, y, z + 1) - 2 * localPhi + samplePhi(x, y, z - 1)) / (h.z * h.z);
+        const vx = (sampleVelocity(x + 1, y, z).x - sampleVelocity(x - 1, y, z).x) / (2 * h.x);
+        const vy = (sampleVelocity(x, y + 1, z).y - sampleVelocity(x, y - 1, z).y) / (2 * h.y);
+        const vz = (sampleVelocity(x, y, z + 1).z - sampleVelocity(x, y, z - 1).z) / (2 * h.z);
+        const local = sampleVelocity(x, y, z);
+        const frontSpeedDemand = frontSpeedWeight * Math.hypot(local.x, local.y, local.z) / Math.min(h.x, h.y, h.z);
+        demand = curvatureWeight * Math.abs(laplacian) + velocityWeight * Math.hypot(vx, vy, vz) + speedGradientWeight * speedGradient + frontSpeedDemand;
+      }
+      maximum = Math.max(maximum, demand);
     }
     sizing[index2(x, z, nx)] = maximum;
   }

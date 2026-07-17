@@ -45,7 +45,7 @@ test("rigid exchange decoding averages snapshots without dividing impulses", () 
 
 test("GPU coupling shaders publish twelve-word wet-velocity snapshots", () => {
   assert.match(legacyUniformComputeShader, /base=bodyIndex\*12u/);
-  assert.match(legacyUniformComputeShader, /phi\*ambientVelocity\.x\*10000\.0/);
+  assert.match(legacyUniformComputeShader, /wetFraction\*ambientVelocity\.x\*10000\.0/);
   assert.match(tallCellComputeShader, /exchangeBase=owner\*12u/);
   assert.match(tallCellComputeShader, /alpha\*solid\*ambientVelocity\.x\*1e4/);
   assert.match(tallCellComputeShader, /var phiNext=phi/);

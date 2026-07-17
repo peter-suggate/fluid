@@ -55,8 +55,8 @@ test("uniform advection skips air far above every nearby occupied column", () =>
 });
 
 test("uniform capillary normals do not classify solid walls as air", () => {
-  assert.match(legacyUniformComputeShader, /fn normalVolume/);
+  assert.match(legacyUniformComputeShader, /fn normalSurfaceOccupancy/);
   assert.match(legacyUniformComputeShader, /id\.y>=dims\(\)\.y&&params\.boundary\.w>0\.5/);
-  assert.match(legacyUniformComputeShader, /return textureLoad\(volumeIn,clampCell\(id\),0\)\.x/);
-  assert.match(legacyUniformComputeShader, /normalVolume\(id\+vec3i\(1,0,0\)\)-normalVolume\(id-vec3i\(1,0,0\)\)/);
+  assert.match(legacyUniformComputeShader, /return surfaceOccupancy\(clampCell\(id\)\)/);
+  assert.match(legacyUniformComputeShader, /normalSurfaceOccupancy\(id\+vec3i\(1,0,0\)\)-normalSurfaceOccupancy\(id-vec3i\(1,0,0\)\)/);
 });

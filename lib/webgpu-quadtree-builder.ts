@@ -20,7 +20,7 @@ export interface SurfaceInflowState {
   strength: number;
 }
 
-/** W0 loss-recovery circuit breaker with hysteresis. */
+/** Catastrophic level-set loss circuit breaker with wide hysteresis. */
 export function nextQuadtreeVofReconciliationActive(active: boolean, representedVolumeDrift: number) {
   if (!Number.isFinite(representedVolumeDrift)) return active;
   return active ? representedVolumeDrift < -0.02 : representedVolumeDrift < -0.10;
@@ -99,6 +99,8 @@ fn trilinearPhi(position: vec3f) -> f32 {
 fn hMin() -> f32 { return min(params.cellAndDt.x, min(params.cellAndDt.y, params.cellAndDt.z)); }
 fn volumeCorrectedPhi(value: f32) -> f32 {
   let h = hMin();
+  // Paper-aligned normal displacement: phi's own represented-volume error
+  // supplies the speed and only the signed-distance interface band moves.
   return select(value, value - params.control.x * h * params.cellAndDt.w, abs(value) < 1.5 * h);
 }
 fn inflowGridDims() -> vec3i { return vec3i(params.dims.xyz); }
@@ -125,11 +127,11 @@ fn advectLevelSet(@builtin(global_invocation_id) gid: vec3u) {
   if (any(gid >= params.dims.xyz)) { return; }
   // Narita et al. Sec. 4.5: interpolate velocity from the saved previous
   // staggered grid, backtrace, then interpolate the previous level set.
-  let departure = vec3f(gid) - centredMacVelocity(vec3i(gid)) * params.cellAndDt.w / params.cellAndDt.xyz;
+  let q = vec3i(gid);
+  let departure = vec3f(gid) - centredMacVelocity(q) * params.cellAndDt.w / params.cellAndDt.xyz;
   var phi = volumeCorrectedPhi(trilinearPhi(departure));
   // The nozzle sources fluid directly into the resident surface, exactly as
   // the restricted method's finishAdvection clamps phi at inflow cells.
-  let q = vec3i(gid);
   if (isInflowVelocityCell(q)) { phi = min(phi, -0.5 * hMin() * inflowApertureFraction(q) * inflowStrength()); }
   textureStore(phiOut, q, vec4f(phi, 0.0, 0.0, 0.0));
 }
@@ -191,7 +193,6 @@ fn unpackSeedPoint(word: vec2u) -> vec3f {
   return vec3f(f32(word.x & 0xffffu), f32(word.x >> 16u), f32(word.y & 0xffffu)) / 64.0;
 }
 fn loadReconcileAlpha(q: vec3i) -> f32 { return clamp(textureLoad(reconcileVolumeIn, clamp3(q), 0).x, 0.0, 1.0); }
-fn loadReconcileWet(q: vec3i) -> bool { return loadReconcileAlpha(q) >= 0.5; }
 fn reconciliationSelected(gid: vec3u) -> bool {
   var hash = index3(gid) ^ (params.dims.w * 747796405u + 2891336453u);
   hash = (hash ^ (hash >> 16u)) * 2246822519u; hash = (hash ^ (hash >> 13u)) * 3266489917u; hash ^= hash >> 16u;
@@ -204,18 +205,6 @@ fn seedDistance(@builtin(global_invocation_id) gid: vec3u) {
   var crosses = (loadPhi(p + vec3i(1, 0, 0)) < 0.0) != wet || (loadPhi(p - vec3i(1, 0, 0)) < 0.0) != wet
     || (loadPhi(p + vec3i(0, 1, 0)) < 0.0) != wet || (loadPhi(p - vec3i(0, 1, 0)) < 0.0) != wet
     || (loadPhi(p + vec3i(0, 0, 1)) < 0.0) != wet || (loadPhi(p - vec3i(0, 0, 1)) < 0.0) != wet;
-  // With VOF reconciliation active, a phi sign change deep inside a
-  // VOF-saturated region is a fossil artifact, not a surface: seeding it
-  // would anchor the narrow band around fake interfaces and shield the whole
-  // neighbourhood from far-field repair. Only phi crossings with a VOF
-  // wet/dry transition in the immediate neighbourhood are real interfaces.
-  if (crosses && params.control.y > 0.5) {
-    let wetVof = loadReconcileWet(p);
-    let vofTransition = loadReconcileWet(p + vec3i(1, 0, 0)) != wetVof || loadReconcileWet(p - vec3i(1, 0, 0)) != wetVof
-      || loadReconcileWet(p + vec3i(0, 1, 0)) != wetVof || loadReconcileWet(p - vec3i(0, 1, 0)) != wetVof
-      || loadReconcileWet(p + vec3i(0, 0, 1)) != wetVof || loadReconcileWet(p - vec3i(0, 0, 1)) != wetVof;
-    crosses = vofTransition;
-  }
   var word = vec2u(0xffffffffu, 0xffffffffu);
   if (crosses) {
     let h = params.cellAndDt.xyz;
@@ -279,25 +268,15 @@ fn finalizeDistance(@builtin(global_invocation_id) gid: vec3u) {
     }
     result = select(distance, -distance, advected < 0.0);
   }
-  // GPU port of reconcileLevelSetWithVolume: the conservative VOF is the
-  // transported mass field, and decisive wet/dry disagreement — liquid the
-  // advected level set never saw, or dry regions it still thinks are wet by
-  // more than half a cell — is overruled toward the VOF. The half-cell
-  // reseed becomes a jump-flood seed on the next step, which rebuilds the
-  // surrounding distances. Without this the projection's phi-based air
-  // classification zeroes velocities inside VOF-wet water the level set
-  // lost, which locks the two surfaces apart permanently.
+  // VOF is not part of ordinary surface evolution. It is consulted only when
+  // the wide-hysteresis circuit breaker has detected catastrophic represented
+  // liquid loss, and then only to restore liquid phi failed to carry.
   let alpha = loadReconcileAlpha(vec3i(gid));
   let wet = alpha >= 0.5;
   let signMismatch = (result < 0.0) != wet;
   let decisiveMismatch = signMismatch && abs(result) > 0.5 * h;
   if (decisiveMismatch) {
     atomicAdd(&reductions[3], 1u);
-    // W0 protects against the diagnosed catastrophic path: conservative VOF
-    // still contains liquid but phi has opened an interior air pocket. Do not
-    // symmetrically erase phi-wet cells from the diffused VOF threshold; that
-    // turned a benign interface-representation mismatch into multi-percent
-    // surface-volume error. W7 still observes both directions above.
     if (params.control.y > 0.5 && wet && reconciliationSelected(gid)) {
       // Invert the same four-cell smooth Heaviside used by reduceVolume and
       // the renderer. A fixed +/-0.5h reseed assigns every repaired dry cell
@@ -555,7 +534,6 @@ export const quadtreeConstructionShader = /* wgsl */ `
 struct StaticParams { dims: vec4u, cellAndDt: vec4f, sizing: vec4f }
 struct PassParams { values: vec4u }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
-@group(0) @binding(1) var volumeIn: texture_3d<f32>;
 @group(0) @binding(2) var phiIn: texture_3d<f32>;
 @group(0) @binding(3) var<storage, read_write> phiAdvanced: array<f32>;
 @group(0) @binding(4) var<storage, read> distanceSeedsIn: array<u32>;
@@ -574,7 +552,6 @@ fn clamp3(q: vec3i) -> vec3i { return clamp(q, vec3i(0), vec3i(params.dims.xyz) 
 fn loadInputPhi(q: vec3i) -> f32 { return textureLoad(phiIn, clamp3(q), 0).x; }
 fn loadAdvancedPhi(q: vec3i) -> f32 { return phiAdvanced[index3(vec3u(clamp3(q)))]; }
 fn loadVelocity(q: vec3i) -> vec3f { return textureLoad(velocityIn, clamp3(q), 0).xyz; }
-fn loadVolume(q: vec3i) -> f32 { return textureLoad(volumeIn, clamp3(q), 0).x; }
 fn effectiveWet(q: vec3i) -> bool {
   return loadAdvancedPhi(clamp3(q)) < 0.0;
 }
@@ -665,12 +642,21 @@ fn evaluateSizing(@builtin(global_invocation_id) gid: vec3u) {
     let crosses = effectiveWet(p + vec3i(1, 0, 0)) != wet || effectiveWet(p - vec3i(1, 0, 0)) != wet
       || effectiveWet(p + vec3i(0, 1, 0)) != wet || effectiveWet(p - vec3i(0, 1, 0)) != wet
       || effectiveWet(p + vec3i(0, 0, 1)) != wet || effectiveWet(p - vec3i(0, 0, 1)) != wet;
-    if (abs(phi) > band && !crosses) { continue; }
-    let laplacian = (loadAdvancedPhi(p + vec3i(1, 0, 0)) - 2.0 * phi + loadAdvancedPhi(p - vec3i(1, 0, 0))) / (hx * hx)
-      + (loadAdvancedPhi(p + vec3i(0, 1, 0)) - 2.0 * phi + loadAdvancedPhi(p - vec3i(0, 1, 0))) / (hy * hy)
-      + (loadAdvancedPhi(p + vec3i(0, 0, 1)) - 2.0 * phi + loadAdvancedPhi(p - vec3i(0, 0, 1))) / (hz * hz);
-    let frontSpeedDemand = ${quadtreeSizingWeights.frontSpeed.toFixed(1)} * length(loadVelocity(p)) / min(hx, min(hy, hz));
-    maximum = max(maximum, params.sizing.x * abs(laplacian) + params.sizing.y * strainMagnitude(p) + ${quadtreeSizingWeights.speedGradient.toFixed(1)} * speedGradientMagnitude(p) + frontSpeedDemand);
+    let nearSurface = abs(phi) <= band || crosses;
+    if (!nearSurface && !wet) { continue; }
+    // Narita Sec. 4.1 vertically reduces velocity variation over the entire
+    // liquid column. Keeping only curvature/strain/front-speed in the narrow
+    // surface band lets a fast floor current remain under a coarsest leaf.
+    let speedVariation = ${quadtreeSizingWeights.speedGradient.toFixed(1)} * speedGradientMagnitude(p);
+    var demand = select(0.0, speedVariation, wet);
+    if (nearSurface) {
+      let laplacian = (loadAdvancedPhi(p + vec3i(1, 0, 0)) - 2.0 * phi + loadAdvancedPhi(p - vec3i(1, 0, 0))) / (hx * hx)
+        + (loadAdvancedPhi(p + vec3i(0, 1, 0)) - 2.0 * phi + loadAdvancedPhi(p - vec3i(0, 1, 0))) / (hy * hy)
+        + (loadAdvancedPhi(p + vec3i(0, 0, 1)) - 2.0 * phi + loadAdvancedPhi(p - vec3i(0, 0, 1))) / (hz * hz);
+      let frontSpeedDemand = ${quadtreeSizingWeights.frontSpeed.toFixed(1)} * length(loadVelocity(p)) / min(hx, min(hy, hz));
+      demand = params.sizing.x * abs(laplacian) + params.sizing.y * strainMagnitude(p) + speedVariation + frontSpeedDemand;
+    }
+    maximum = max(maximum, demand);
   }
   sizingField[index2(q)] = maximum;
 }
@@ -768,7 +754,6 @@ function ensureCache(device: GPUDevice, cache?: WebGPUQuadtreeConstructionCache)
   if (cache) return cache;
   const layout = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-    { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
     { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
     { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -809,7 +794,6 @@ export class WebGPUQuadtreeBuilder {
 
   async build(inputs: {
     velocity: GPUTexture;
-    volume: GPUTexture;
     levelSet: GPUTexture;
     explicitSizing: Float32Array;
     diagnosticBuffer: GPUBuffer;
@@ -878,8 +862,8 @@ export class WebGPUQuadtreeBuilder {
     this.device.queue.writeBuffer(passBuffer, 0, passData);
 
     const group = (input: GPUBuffer, output: GPUBuffer, seedInput: GPUBuffer, seedOutput: GPUBuffer) => this.device.createBindGroup({ layout: this.cache.layout, entries: [
-      { binding: 0, resource: inputs.velocity.createView() }, { binding: 1, resource: inputs.volume.createView() },
-      { binding: 2, resource: inputs.levelSet.createView() }, { binding: 3, resource: { buffer: levelSetOut } },
+      { binding: 0, resource: inputs.velocity.createView() }, { binding: 2, resource: inputs.levelSet.createView() },
+      { binding: 3, resource: { buffer: levelSetOut } },
       { binding: 4, resource: { buffer: seedInput } },
       { binding: 5, resource: { buffer: input } }, { binding: 6, resource: { buffer: output } },
       { binding: 7, resource: { buffer: staticParams } }, { binding: 8, resource: { buffer: explicit } },
