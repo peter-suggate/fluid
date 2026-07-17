@@ -11,7 +11,6 @@ interface UIStore {
   camera: CameraState;
   selectedBodyId?: string;
   sceneModalOpen: boolean;
-  validationOpen: boolean;
   diagnosticsOpen: boolean;
   rightPanel: RightPanel;
   /** Fig. 2-style grid cross-section drawn on a slice plane in the scene. */
@@ -27,7 +26,6 @@ interface UIStore {
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   selectBody: (bodyId?: string) => void;
   setSceneModalOpen: (open: boolean) => void;
-  setValidationOpen: (open: boolean) => void;
   setDiagnosticsOpen: (open: boolean) => void;
   setRightPanel: (panel: RightPanel) => void;
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
@@ -42,7 +40,6 @@ export const useUIStore = create<UIStore>((set) => ({
   camera: defaultCamera,
   selectedBodyId: undefined,
   sceneModalOpen: false,
-  validationOpen: false,
   diagnosticsOpen: false,
   rightPanel: null,
   gridOverlayAxis: "off",
@@ -54,7 +51,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   selectBody: (selectedBodyId) => set({ selectedBodyId }),
   setSceneModalOpen: (sceneModalOpen) => set({ sceneModalOpen }),
-  setValidationOpen: (validationOpen) => set({ validationOpen }),
   setDiagnosticsOpen: (diagnosticsOpen) => set((state) => ({
     diagnosticsOpen,
     rightPanel: diagnosticsOpen ? "diagnostics" : state.rightPanel === "diagnostics" ? null : state.rightPanel

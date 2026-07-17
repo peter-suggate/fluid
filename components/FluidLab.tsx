@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
-import { runShellValidation } from "@/lib/validation";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { getMethod } from "@/lib/methods";
 import { defaultCamera } from "@/lib/model";
 import { simulation } from "@/lib/simulation/controller";
@@ -18,7 +17,6 @@ import { RigidBodyPanel } from "./RigidBodyTray";
 import { VisualPanel } from "./VisualPanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PerformancePanel } from "./PerformancePanel";
-import { ValidationPanel } from "./ValidationPanel";
 import { TransportBar } from "./TransportBar";
 import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
 import type { GPUStatus } from "@/lib/webgpu-renderer";
@@ -51,15 +49,12 @@ export function FluidLab() {
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const view = useUIStore((state) => state.view);
   const setCamera = useUIStore((state) => state.setCamera);
-  const validationOpen = useUIStore((state) => state.validationOpen);
-  const setValidationOpen = useUIStore((state) => state.setValidationOpen);
   const diagnosticsOpen = useUIStore((state) => state.diagnosticsOpen);
   const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
   const rightPanel = useUIStore((state) => state.rightPanel);
   const setRightPanel = useUIStore((state) => state.setRightPanel);
   const environmentId = useUIStore((state) => state.environmentId);
   const fluidState = useDiagnosticsStore((state) => state.fluidState);
-  const validationResults = useMemo(() => runShellValidation(), []);
   const method = getMethod(methodId);
   const backend = method.backend === "cpu" ? "cpu-reference" : "webgpu";
   const scientific = view === "scientific";
@@ -87,17 +82,8 @@ export function FluidLab() {
 
   return (
     <main className="lab-shell" data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(visibleRightPanel)} data-right-panel={visibleRightPanel ?? "closed"}>
-      <header className="topbar">
-        <div className="brand"><span className="brand-mark">FL</span><div><strong>Fluid Lab</strong><small>WEBGPU CFD WORKBENCH</small></div></div>
-        <div className="solver-identity">{method.label}</div>
-        <div className="top-actions">
-          <button className="quiet-button" onClick={() => setValidationOpen(true)}><span className={`status-dot ${validationResults.every((result) => result.passed) ? "online" : "warning"}`} />Validation</button>
-          <button className="quiet-button" title="Download the scene description — configuration only, reloadable via Import" onClick={() => simulation.saveScene()}>Save scene</button>
-          <button className="primary-button" title="Download the run manifest — metrics, diagnostics, and performance history for this run" onClick={() => simulation.exportMetrics()}>Export run</button>
-        </div>
-      </header>
-
       <aside className="left-panel panel-scroll">
+        <div className="brand"><span className="brand-mark">FL</span><div><strong>Fluid Lab</strong><small>WEBGPU CFD WORKBENCH</small></div></div>
         <ScenePanel />
         <MethodPanel />
       </aside>
@@ -147,7 +133,6 @@ export function FluidLab() {
       {rightPanel === "performance" && <PerformancePanel />}
       <TransportBar />
 
-      {validationOpen && <ValidationPanel results={validationResults} />}
       <RecordingPlaybackModal />
       <SceneConfigPopover />
     </main>
