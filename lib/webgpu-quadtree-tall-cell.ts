@@ -165,8 +165,9 @@ export interface QuadtreeTallCellProjectionOptions {
   /** Degree of the damped-Jacobi Neumann polynomial (2--4). */
   polynomialDegree?: number;
   /**
-   * Row-parallel Chebyshev is the throughput path. PCG retains the exact
-   * tolerance-driven ladder and monolithic rigid response for A/B checks.
+   * PCG is the stable tolerance-driven default and retains the exact
+   * monolithic rigid response. Chebyshev is an experimental reduction-free
+   * path with frame-lagged rigid exchange.
    */
   pressureSolver?: QuadtreePressureSolver;
   /** Internal feedback carried across topology rebuilds. */
@@ -244,10 +245,11 @@ export const quadtreeMegakernelDofLimit = 32_768;
 export const quadtreeMegakernelRowIterationLimit = 30_000;
 export type QuadtreeMegakernelMode = "dynamic" | "always" | "off";
 export type QuadtreePressureSolver = "chebyshev" | "pcg";
+export const quadtreeChebyshevSpectrum = Object.freeze({ lower: 0.005, upper: 4.2 });
 
-/** Match the octree's measured pressure-effort policy. */
+/** One configured pressure iteration is one experimental polynomial pass. */
 export function quadtreeChebyshevPasses(pressureIterations: number) {
-  return Math.max(1, Math.ceil(Math.max(1, pressureIterations) / 4));
+  return Math.max(1, Math.ceil(Math.max(1, pressureIterations)));
 }
 
 /**
@@ -724,7 +726,7 @@ fn chebyshevUpdate(row: u32, source: SolverField, destination: SolverField) {
     setStateF(row, destination, 0.0); setStateF(row, PRECONDITIONED, 0.0); setStateF(row, MATRIX_DIRECTION, 0.0); return;
   }
   let residual = (stateF(row, DIRECTION) - pressureProduct(row, source)) / stateF(row, DIAGONAL);
-  let lower = 0.01; let upper = 2.2;
+  let lower = ${quadtreeChebyshevSpectrum.lower}; let upper = ${quadtreeChebyshevSpectrum.upper};
   let theta = 0.5 * (upper + lower); let delta = 0.5 * (upper - lower); let sigma = theta / delta;
   let previousSearch = stateF(row, PRECONDITIONED); let previousRho = stateF(row, MATRIX_DIRECTION);
   var rho = 1.0 / sigma;
@@ -2018,8 +2020,8 @@ export class WebGPUQuadtreeTallCellProjection {
     this.iterations = this.iterationBudget.encodedBudget;
     this.megakernelIterationHint = options.megakernelIterationHint;
     this.parallelReductions = this.dofCount >= 4096;
-    // The product method passes Chebyshev explicitly. Keep direct low-level
-    // construction source-compatible with the former exact PCG behavior.
+    // PCG is the product and low-level default. Chebyshev remains available
+    // as an explicit experimental throughput path.
     this.pressureSolver = options.pressureSolver ?? "pcg";
     const uploadStartedAt = performance.now();
     const resident = initial.prepared?.resident;
