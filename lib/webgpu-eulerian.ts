@@ -100,6 +100,8 @@ export interface GPUEulerianInfo {
   pressureIterations: number;
   pressureSolver?: string;
   allocatedBytes: number;
+  /** Fixed GPU ring capacity for one-way spray, mist, and foam particles. */
+  secondaryParticleCapacity?: number;
   quality: GPUQuality;
   volumeCellSum?: number;
   representedVolumeCellSum?: number;

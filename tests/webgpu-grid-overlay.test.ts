@@ -52,7 +52,7 @@ test("optical-layer mode distinguishes retained cubes from the merged tall inter
 });
 
 test("solver option switches detach the overlay before retiring GPU textures", () => {
-  assert.match(rendererSource, /this\.rebuildBindGroup\(\);\s+this\.retireGPUFluid\(previous\);/);
+  assert.match(rendererSource, /this\.rebuildBindGroup\(\);[\s\S]{0,180}this\.retireGPUFluid\(previous\);/);
 });
 
 test("grid overlay suppresses dense backing-grid lines inside adaptive cells", () => {

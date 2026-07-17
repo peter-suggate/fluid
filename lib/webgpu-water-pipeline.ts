@@ -1,5 +1,6 @@
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
+import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 
 /**
  * Rasterized water presentation for the WebGPU renderer.
@@ -724,6 +725,7 @@ export class RasterWaterPipeline {
   private extractedRevision = -1;
   private lastExtractionAt_ms = -Infinity;
   private causticsValid = false;
+  private secondaryParticles?: SecondaryParticleRenderPipeline;
 
   constructor(
     private readonly device: GPUDevice,
@@ -809,6 +811,10 @@ export class RasterWaterPipeline {
     this.volume = texture; this.columnBases = columnBases; this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
   }
 
+  setSecondaryParticles(pipeline: SecondaryParticleRenderPipeline | undefined) {
+    this.secondaryParticles = pipeline;
+  }
+
   private ensureGeometry(nx: number, ny: number, nz: number) {
     const key = `${nx}x${ny}x${nz}`;
     if (key === this.geometryKey) return;
@@ -884,8 +890,8 @@ export class RasterWaterPipeline {
       this.causticsValid = true;
     }
     const scene=encoder.beginRenderPass({label:"Dry scene",colorAttachments:[{view:this.sceneTexture.createView(),clearValue:{r:0,g:0,b:0,a:65504},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.scene}:{})});scene.setPipeline(this.scenePipeline);scene.setBindGroup(0,this.sceneBindGroup);scene.draw(3);scene.end();
-    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,timestampWrites?:TimestampRange)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);pass.end();};
-    interfacePass("Water front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,timestamps?.frontInterfaces);interfacePass("Water back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,timestamps?.backInterfaces);
+    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",timestampWrites?:TimestampRange)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.secondaryParticles?.encodeOpticalInterface(pass,side);pass.end();};
+    interfacePass("Water front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.frontInterfaces);interfacePass("Water back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.backInterfaces);
     const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:output,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,this.compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface };
   }
 

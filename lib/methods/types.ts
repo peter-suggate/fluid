@@ -2,6 +2,7 @@ import type { SceneDescription } from "../model";
 import type { GPUQuality } from "../tall-cell-grid";
 import type { GPUEulerianInfo, GPURigidLoad } from "../webgpu-eulerian";
 import type { RigidBodyState } from "../rigid-body";
+import type { GPUSecondaryParticleSource } from "../webgpu-secondary-particles";
 
 /**
  * Method plugin contract.
@@ -59,6 +60,8 @@ export interface GPUSolverInstance {
   readonly gridCellTexture?: GPUTexture;
   /** Live velocity field for scientific slice modes (CFL/speed heatmaps). */
   readonly velocityTexture?: GPUTexture;
+  /** Optional one-way spray, mist, and foam stream rendered above the liquid surface. */
+  readonly secondaryParticles?: GPUSecondaryParticleSource;
   /** Adaptive pressure-DOF ownership used by the representation alarm. */
   readonly gridPressureSamplesTexture?: GPUTexture;
   /** Fine MLS pressure materialized by the latest adaptive solve. */
