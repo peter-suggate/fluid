@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { quadtreeConstructionShader, quadtreeSurfaceShader } from "../lib/webgpu-quadtree-builder";
 import { quadtreeDispatchShader, quadtreeDivergenceShader, quadtreeTallCellProjectionShader, quadtreeVelocityClampShader, quadtreeVelocityExtrapolationShader } from "../lib/webgpu-quadtree-tall-cell";
-import { quadtreeCsrPackShader, quadtreeFacePackShader, quadtreePackTextureShader, quadtreeSegmentationPackShader } from "../lib/webgpu-quadtree-pack-builder";
+import { quadtreeCsrPackShader, quadtreeFacePackShader, quadtreePackAuxShader, quadtreePackCopyShader, quadtreePackFinalizeShader, quadtreePackTextureShader, quadtreeSegmentationPackShader } from "../lib/webgpu-quadtree-pack-builder";
 import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
@@ -60,6 +60,9 @@ await validateOverlay();
 await validate("resident-face-pack", quadtreeFacePackShader, ["countFaces", "scanFaces", "emitFaces"]);
 await validate("resident-csr-pack", quadtreeCsrPackShader, ["scanRows", "emitCsr"]);
 await validate("resident-texture-pack", quadtreePackTextureShader, ["unpackCellFields"]);
+await validate("resident-finalize-control", quadtreePackFinalizeShader, ["finalizeControl"]);
+await validate("resident-pack-copies", quadtreePackCopyShader, ["copyFaces", "copyRowOffsets", "copyRowEntries", "copyMatrix"]);
+await validate("resident-pack-aux", quadtreePackAuxShader, ["writeAux"]);
 device.destroy();
 if (failures > 0) throw new Error(`${failures} quadtree shader validation failure(s)`);
 console.log("All quadtree shader pipelines are valid");

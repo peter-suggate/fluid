@@ -778,6 +778,8 @@ function ensureCache(device: GPUDevice, cache?: WebGPUQuadtreeConstructionCache)
 export class WebGPUQuadtreeBuilder {
   readonly cache: WebGPUQuadtreeConstructionCache;
   private readonly rootMap: Uint32Array;
+  /** Bind group from the most recent encodeConstruction; build() reuses it for the leaf-profile pass. */
+  private lastProfileGroup?: GPUBindGroup;
 
   constructor(
     private readonly device: GPUDevice,
@@ -792,15 +794,18 @@ export class WebGPUQuadtreeBuilder {
     this.rootMap = packedQuadtreeRootMap(dims.nx, dims.nz, maximumLeafSize);
   }
 
-  async build(inputs: {
+  /**
+   * Encode the Sec. 4.1 sizing/subdivision kernels into an existing command
+   * stream and return the buffer holding the final leaf-owner map. This is
+   * the readback-free half of build(); the resident Algorithm-1 rebuild feeds
+   * the returned buffer straight into the GPU sparse pack.
+   */
+  encodeConstruction(encoder: GPUCommandEncoder, inputs: {
     velocity: GPUTexture;
     levelSet: GPUTexture;
     explicitSizing: Float32Array;
-    diagnosticBuffer: GPUBuffer;
     diagnosticBytes: number;
-    /** Skip the CPU-reference leaf profiles when the GPU sparse pack consumes the owner map directly. */
-    readLeafProfiles?: boolean;
-  }): Promise<GPUQuadtreeBuildResult> {
+  }): GPUBuffer {
     const { nx, ny, nz } = this.dims, cellCount2 = nx * nz;
     if (inputs.explicitSizing.length !== cellCount2) throw new Error("Invalid explicit GPU sizing field");
     const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
@@ -848,7 +853,7 @@ export class WebGPUQuadtreeBuilder {
         queryResolve: hasTimestamps ? this.device.createBuffer({ label: "GPU quadtree timestamp resolve", size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : undefined
       };
     }
-    const { topologyA, topologyB, sizing, explicit, staticParams, levelSetOut, distanceSeedA, distanceSeedB, passBuffer, readback, columnProfiles, profileReadback, querySet, queryResolve } = this.cache.workspace!;
+    const { topologyA, topologyB, sizing, explicit, staticParams, levelSetOut, distanceSeedA, distanceSeedB, passBuffer, columnProfiles, querySet } = this.cache.workspace!;
     this.device.queue.writeBuffer(topologyA, 0, this.rootMap.buffer as ArrayBuffer, this.rootMap.byteOffset, this.rootMap.byteLength);
     this.device.queue.writeBuffer(explicit, 0, inputs.explicitSizing.buffer as ArrayBuffer, inputs.explicitSizing.byteOffset, inputs.explicitSizing.byteLength);
     const staticData = new ArrayBuffer(48);
@@ -872,10 +877,6 @@ export class WebGPUQuadtreeBuilder {
       { binding: 13, resource: { buffer: columnProfiles } }
     ] });
     const groupAB = group(topologyA, topologyB, distanceSeedA, distanceSeedB), groupBA = group(topologyB, topologyA, distanceSeedA, distanceSeedB);
-    // First read back the compact leaf-owner map. Once decoded, a second tiny
-    // GPU pass samples only one vertical phi profile per unique leaf instead
-    // of transferring the complete dense 3D level set.
-    const encoder = this.device.createCommandEncoder({ label: "GPU quadtree construction" });
     {
       const pass = encoder.beginComputePass(querySet ? { timestampWrites: { querySet, beginningOfPassWriteIndex: 0 } } : undefined); pass.setPipeline(this.cache.pipelines.advectLevelSet); pass.setBindGroup(0, groupAB, [0]);
       pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); pass.end();
@@ -890,7 +891,32 @@ export class WebGPUQuadtreeBuilder {
       const pass = encoder.beginComputePass(last && querySet ? { timestampWrites: { querySet, endOfPassWriteIndex: 1 } } : undefined); pass.setPipeline(this.cache.pipelines[operation.entry]); pass.setBindGroup(0, currentIsA ? groupAB : groupBA, [index * passStride]);
       pass.dispatchWorkgroups(Math.ceil(nx / 8), Math.ceil(nz / 8)); pass.end(); currentIsA = !currentIsA;
     });
-    const finalTopology = currentIsA ? topologyA : topologyB;
+    this.lastProfileGroup = groupAB;
+    return currentIsA ? topologyA : topologyB;
+  }
+
+  async build(inputs: {
+    velocity: GPUTexture;
+    levelSet: GPUTexture;
+    explicitSizing: Float32Array;
+    diagnosticBuffer: GPUBuffer;
+    diagnosticBytes: number;
+    /** Skip the CPU-reference leaf profiles when the GPU sparse pack consumes the owner map directly. */
+    readLeafProfiles?: boolean;
+  }): Promise<GPUQuadtreeBuildResult> {
+    const { nx, ny, nz } = this.dims, cellCount2 = nx * nz;
+    // First read back the compact leaf-owner map. Once decoded, a second tiny
+    // GPU pass samples only one vertical phi profile per unique leaf instead
+    // of transferring the complete dense 3D level set.
+    const encoder = this.device.createCommandEncoder({ label: "GPU quadtree construction" });
+    const finalTopology = this.encodeConstruction(encoder, inputs);
+    const groupAB = this.lastProfileGroup!;
+    const workspace = this.cache.workspace!;
+    const { readback, columnProfiles, profileReadback, querySet, queryResolve, passBuffer, explicit } = workspace;
+    const align = (value: number, alignment: number) => Math.ceil(value / alignment) * alignment;
+    const topologyBytes = cellCount2 * 4, topologyOffset = 0;
+    const diagnosticOffset = align(topologyOffset + topologyBytes, 8);
+    const queryOffset = align(diagnosticOffset + inputs.diagnosticBytes, 8);
     encoder.copyBufferToBuffer(finalTopology, 0, readback, topologyOffset, topologyBytes);
     encoder.copyBufferToBuffer(inputs.diagnosticBuffer, 0, readback, diagnosticOffset, inputs.diagnosticBytes);
     if (querySet && queryResolve) {

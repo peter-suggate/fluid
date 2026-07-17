@@ -61,6 +61,8 @@ const adaptivityOverride = process.env.FLUID_ADAPTIVITY === undefined ? undefine
 const opticalDepthOverride = process.env.FLUID_OPTICAL_DEPTH_FRACTION === undefined ? undefined : Number(process.env.FLUID_OPTICAL_DEPTH_FRACTION);
 const rebuildTopologyOverride = process.env.FLUID_REBUILD_TOPOLOGY === undefined ? undefined : process.env.FLUID_REBUILD_TOPOLOGY !== "0";
 const maximumLeafSizeOverride = process.env.FLUID_MAXIMUM_LEAF_SIZE === undefined ? undefined : Number(process.env.FLUID_MAXIMUM_LEAF_SIZE);
+const quadtreeStaleStepsOverride = process.env.FLUID_QUADTREE_STALE_STEPS === undefined ? undefined : Number(process.env.FLUID_QUADTREE_STALE_STEPS);
+const quadtreeInlineRebuildOverride = process.env.FLUID_QUADTREE_INLINE === undefined ? undefined : process.env.FLUID_QUADTREE_INLINE !== "0";
 const quadtreePreconditionerOverride = process.env.FLUID_QUADTREE_PRECONDITIONER;
 if (quadtreePreconditionerOverride !== undefined && !["ic0", "blockic", "jacobi", "line", "poly"].includes(quadtreePreconditionerOverride)) throw new Error("FLUID_QUADTREE_PRECONDITIONER must be ic0, blockic, jacobi, line, or poly");
 const quadtreeDebrisCullingOverride = process.env.FLUID_QUADTREE_DEBRIS_CULLING === undefined ? undefined : process.env.FLUID_QUADTREE_DEBRIS_CULLING !== "0";
@@ -618,6 +620,8 @@ async function runGPU(
   if (method.id === "quadtree-tall-cell" && rebuildTopologyOverride !== undefined) values.rebuildTopology = rebuildTopologyOverride;
   if (method.id === "quadtree-tall-cell" && maximumLeafSizeOverride !== undefined) values.maximumLeafSize = maximumLeafSizeOverride;
   if (method.id === "quadtree-tall-cell" && quadtreePreconditionerOverride !== undefined) values.preconditioner = quadtreePreconditionerOverride;
+  if (method.id === "quadtree-tall-cell" && quadtreeStaleStepsOverride !== undefined) values.topologyStaleSteps = quadtreeStaleStepsOverride;
+  if (method.id === "quadtree-tall-cell" && quadtreeInlineRebuildOverride !== undefined) values.inlineRebuild = quadtreeInlineRebuildOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeDebrisCullingOverride !== undefined) values.debrisCulling = quadtreeDebrisCullingOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeVofReconciliationOverride !== undefined) values.vofReconciliation = quadtreeVofReconciliationOverride ? "on" : "off";
   if (method.id === "quadtree-tall-cell" && pressurePhaseTimings) values.debugPressureTimings = true;
@@ -1057,7 +1061,10 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       fail((quadtree.info.simulatedTime_s ?? 0) >= 0.2 - 1e-9, `quadtree dam-break regression reached only ${quadtree.info.simulatedTime_s} s`);
       fail(quadtree.info.quadtreeRebuildCadenceSteps === 1, `quadtree dam-break rebuild cadence was ${quadtree.info.quadtreeRebuildCadenceSteps}, not Algorithm 1's every-step cadence`);
       const staleWindow = quadtree.info.quadtreeTopologyStaleLimit ?? 2;
-      const expectedRebuilds = Math.floor((quadtree.steps - 1) / Math.max(1, staleWindow + 1));
+      // Stale window 0 is the fully GPU-resident inline path: every step
+      // regenerates the topology (Algorithm 1), minus a short asynchronous
+      // warmup before the first resident pack exists.
+      const expectedRebuilds = staleWindow === 0 ? Math.ceil(0.9 * quadtree.steps) : Math.floor((quadtree.steps - 1) / Math.max(1, staleWindow + 1));
       fail((quadtree.info.quadtreeRebuildCompletedCount ?? 0) >= expectedRebuilds, `quadtree completed ${quadtree.info.quadtreeRebuildCompletedCount} rebuilds; stale-limit ${staleWindow} requires at least ${expectedRebuilds}`);
       fail((quadtree.info.quadtreeRebuildBlockedFrames ?? Infinity) === 0, `quadtree rebuild blocked ${(quadtree.info.quadtreeRebuildBlockedFrames ?? Infinity)} frame attempts`);
       const wallPerStep_ms = quadtree.simulationWall_ms / Math.max(1, quadtree.steps), gpuPerStep_ms = quadtree.info.gpuTimings?.total_ms ?? 0;
@@ -1076,6 +1083,13 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       fail((quadtree.finalSummary?.componentCount ?? Infinity) <= 10, `quadtree dam-break ended with ${quadtree.finalSummary?.componentCount} disconnected level-set components`);
       fail((quadtree.info.front_m ?? -Infinity) > -0.005, `quadtree dam-break front did not progress: ${quadtree.info.front_m} m`);
       const uniform = results.find((result) => result.method === "uniform"), uniformPeak = uniform?.stabilityEnvelope?.peakKineticEnergyProxy ?? 0;
+      if (uniform && uniform.checkpoints.length > 0 && quadtree.checkpoints.length > 0) {
+        const pairCount = Math.min(quadtree.checkpoints.length, uniform.checkpoints.length);
+        for (let index = 0; index < pairCount; index += 1) {
+          const iou = compareScalarFields(quadtree.checkpoints[index].field, uniform.checkpoints[index].field, ...quadtree.grid).wetIntersectionOverUnion;
+          console.log(JSON.stringify({ scenario: scenarioId, method: "quadtree-tall-cell", phase: "iou-vs-uniform", time_s: quadtree.checkpoints[index].time_s, wetIntersectionOverUnion: iou }));
+        }
+      }
       if ((quadtree.info.simulatedTime_s ?? 0) >= 0.5) fail((envelope?.peakKineticEnergyProxy ?? 0) >= 0.40, `quadtree peak kinetic-energy proxy ${envelope?.peakKineticEnergyProxy} is below 0.40`);
       if (uniformPeak > 1e-9) fail((envelope?.peakKineticEnergyProxy ?? 0) / uniformPeak >= 0.8, `quadtree/uniform peak kinetic-energy ratio ${(envelope?.peakKineticEnergyProxy ?? 0) / uniformPeak} is below 0.8`);
       if (tall && quadtree.grid.every((value, axis) => value === tall.grid[axis])) {
