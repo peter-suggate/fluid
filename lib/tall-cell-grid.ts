@@ -1,5 +1,6 @@
 import { damBreakFractions } from "./initial-fluid";
 import type { SceneDescription } from "./model";
+import { sceneHasTerrain, terrainHeightAt } from "./terrain";
 
 export type GPUQuality = "balanced" | "high" | "ultra";
 
@@ -131,6 +132,12 @@ export function limitNeighboringTallCellBases(
 }
 
 function initialWet(scene: SceneDescription, x: number, y: number, z: number, nx: number, fineNy: number, nz: number) {
+  if (sceneHasTerrain(scene)) {
+    const c = scene.container;
+    const worldX = -0.5 * c.width_m + (x + 0.5) * c.width_m / nx;
+    const worldZ = -0.5 * c.depth_m + (z + 0.5) * c.depth_m / nz;
+    if ((y + 0.5) * c.height_m / fineNy <= terrainHeightAt(scene.terrain, worldX, worldZ)) return false;
+  }
   if (scene.fluid.initialCondition === "tank-fill") return (y + 0.5) / fineNy <= scene.container.fillFraction;
   const dam = damBreakFractions(scene.container.fillFraction);
   return (x + 0.5) / nx <= dam.width && (y + 0.5) / fineNy <= dam.height && (z + 0.5) / nz <= dam.depth;
@@ -180,12 +187,26 @@ function buildInitialPhi(scene: SceneDescription, nx: number, fineNy: number, nz
   return phi;
 }
 
+function insideTerrainCell(scene: SceneDescription, x: number, y: number, z: number, nx: number, fineNy: number, nz: number) {
+  if (!sceneHasTerrain(scene)) return false;
+  const c = scene.container;
+  const worldX = -0.5 * c.width_m + (x + 0.5) * c.width_m / nx;
+  const worldZ = -0.5 * c.depth_m + (z + 0.5) * c.depth_m / nz;
+  return (y + 0.5) * c.height_m / fineNy <= terrainHeightAt(scene.terrain, worldX, worldZ);
+}
+
 function isInitialSurfaceCell(scene: SceneDescription, x: number, y: number, z: number, nx: number, fineNy: number, nz: number) {
   const wet = initialWet(scene, x, y, z, nx, fineNy, nz);
   // The moving cubic band follows vertical crossings within a column. A
   // vertical liquid face is represented by horizontal interpolation between
   // neighbouring tall endpoint values and does not force B_y to the floor.
-  const belowWet = y === 0 ? wet : initialWet(scene, x, y - 1, z, nx, fineNy, nz);
+  // A wet/dry transition against the terrain heightfield is a solid contact
+  // like the flat floor — never a liquid-air surface — so it must not drag
+  // the band down to the pool bed (the paper's H excludes the ground from
+  // the water column entirely).
+  const belowWet = y === 0 || insideTerrainCell(scene, x, y - 1, z, nx, fineNy, nz)
+    ? wet
+    : initialWet(scene, x, y - 1, z, nx, fineNy, nz);
   const aboveWet = y + 1 < fineNy && initialWet(scene, x, y + 1, z, nx, fineNy, nz);
   return wet !== belowWet || wet !== aboveWet;
 }

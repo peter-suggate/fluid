@@ -206,6 +206,7 @@ class SimulationController {
     useSceneStore.getState().setScene(scene, preset.id);
     this.reset(scene);
     useUIStore.getState().setCamera(cameraForPreset(preset));
+    if (preset.environment) useUIStore.getState().setEnvironmentId(preset.environment);
     useRuntimeStore.getState().setNotice(`${preset.name} loaded · dt ${scene.numerics.fixedDt_s.toFixed(4)} s`);
     useRuntimeStore.getState().setRunState("running");
   }

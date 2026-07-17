@@ -483,7 +483,7 @@ struct Out { @builtin(position) clip:vec4f, @location(0) energy:f32 }
 
 export const sceneShader = /* wgsl */ `
 const ENABLE_CAUSTICS = false;
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f }
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(0) @binding(1) var<storage,read> bodies:array<BodyGPU,12>;
@@ -510,13 +510,14 @@ fn nearestBody(ro:vec3f,rd:vec3f)->Hit{var best=Hit(1e20,vec3f(0,1,0),vec3f(.7),
   let rigid=nearestBody(ro,rd);if(rigid.t<nearest){let diffuse=.16+.84*max(dot(rigid.n,light),0.0);let rim=pow(1.0-max(dot(-rd,rigid.n),0.0),3.0);color=rigid.color*diffuse+vec3f(.18,.34,.31)*rim+rigid.selected*vec3f(.12,.42,.32);nearest=rigid.t;}
   // Rear seams belong in the dry scene so they are refracted by the water.
   // The near glass pane and its edges are composited after the water below.
-  let size=u.container.xyz;let mn=vec3f(-size.x*.5,0,-size.z*.5);let mx=vec3f(size.x*.5,size.y,size.z*.5);let tank=boxHit(ro,rd,mn,mx);if(tank.x<=tank.y&&tank.y>0.0){let p=ro+rd*tank.y;let local=abs((p-(mn+mx)*.5)/(size*.5));let edge=max(max(min(local.x,local.y),min(local.x,local.z)),min(local.y,local.z));let edgeGlow=smoothstep(.955,.998,edge);color+=vec3f(.11,.25,.23)*edgeGlow*.42;}
+  // The garden pond sits in open ground: there is no glass tank to glow.
+  if(environmentIndex()!=7){let size=u.container.xyz;let mn=vec3f(-size.x*.5,0,-size.z*.5);let mx=vec3f(size.x*.5,size.y,size.z*.5);let tank=boxHit(ro,rd,mn,mx);if(tank.x<=tank.y&&tank.y>0.0){let p=ro+rd*tank.y;let local=abs((p-(mn+mx)*.5)/(size*.5));let edge=max(max(min(local.x,local.y),min(local.x,local.z)),min(local.y,local.z));let edgeGlow=smoothstep(.955,.998,edge);color+=vec3f(.11,.25,.23)*edgeGlow*.42;}}
   let vignette=1.0-.16*dot(ndc*.58,ndc*.58);return vec4f(color*vignette,nearest);
 }
 `;
 
 export const compositeShader = /* wgsl */ `
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f }
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(0) @binding(1) var sceneTexture:texture_2d<f32>;
 @group(0) @binding(2) var frontPosition:texture_2d<f32>;
@@ -537,6 +538,8 @@ fn boxNormal(point:vec3f,center:vec3f,halfSize:vec3f)->vec3f{
   return vec3f(0,0,sign(point.z-center.z));
 }
 fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
+  // The garden pond has no vessel: nothing to composite in front of the water.
+  if(environmentIndex()==7){return color;}
   let size=u.container.xyz;let mn=vec3f(-size.x*.5,0,-size.z*.5);let mx=vec3f(size.x*.5,size.y,size.z*.5);let hit=boxHit(ro,rd,mn,mx);
   if(hit.x>hit.y||hit.y<=0.0){return color;}
   let glassT=select(hit.x,hit.y,hit.x<=1e-4);

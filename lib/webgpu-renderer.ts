@@ -8,6 +8,7 @@ import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { RasterWaterPipeline } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import { environmentShaderLibrary } from "./webgpu-environments";
+import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "./terrain";
 import { gpuBatchDepth } from "./simulation/gpu-clock";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
@@ -102,6 +103,8 @@ struct Uniforms {
   gridInfo: vec4f,
   debug: vec4f,
   environment: vec4f,
+  terrainMeta: vec4f,
+  terrainFeatures: array<vec4f, 16>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -445,12 +448,15 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
       color = mix(color, waterColor, 0.82 + depth * 0.1);
     }
 
-    let q = abs((entry - center) / max(halfSize, vec3f(0.001)));
-    let edge = max(max(min(q.x, q.y), min(q.x, q.z)), min(q.y, q.z));
-    let edgeAlpha = smoothstep(0.91, 0.995, edge);
-    let glassFresnel = pow(1.0 - abs(dot(rd, normalize(entry - center))), 3.0);
-    let glass = vec3f(0.42, 0.78, 0.72);
-    color = mix(color, glass, 0.035 + glassFresnel * 0.035 + edgeAlpha * 0.54);
+    // The garden pond is set into the ground — no glass vessel to tint.
+    if (environmentIndex() != 7) {
+      let q = abs((entry - center) / max(halfSize, vec3f(0.001)));
+      let edge = max(max(min(q.x, q.y), min(q.x, q.z)), min(q.y, q.z));
+      let edgeAlpha = smoothstep(0.91, 0.995, edge);
+      let glassFresnel = pow(1.0 - abs(dot(rd, normalize(entry - center))), 3.0);
+      let glass = vec3f(0.42, 0.78, 0.72);
+      color = mix(color, glass, 0.035 + glassFresnel * 0.035 + edgeAlpha * 0.54);
+    }
   }
 
   if (rigidHit.t < 1e19 && (floorT <= 0.0 || rigidHit.t < floorT)) {
@@ -603,7 +609,7 @@ export class FluidLabRenderer {
     const upscaleModule=device.createShaderModule({label:"Presentation upscale shader",code:upscaleShader});
     this.upscalePipeline=await device.createRenderPipelineAsync({label:"Presentation upscale",layout:"auto",vertex:{module:upscaleModule,entryPoint:"vertexMain"},fragment:{module:upscaleModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
-    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 400, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.columnBaseTexture = device.createTexture({ label: "Uniform-grid tall-cell fallback", size: [1, 1], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
@@ -818,7 +824,20 @@ export class FluidLabRenderer {
       gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : 0,
       environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0, 0
     ]);
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
+    // Terrain heightfield mirror for the environment shaders: meta lane plus
+    // two vec4 lanes per feature, matching lib/terrain.ts semantics exactly.
+    const packed = new Float32Array(100);
+    packed.set(uniform, 0);
+    if (sceneHasTerrain(scene) && scene.terrain) {
+      const terrain = scene.terrain;
+      const features = terrain.features.slice(0, MAX_TERRAIN_FEATURES);
+      packed.set([1, terrain.baseHeight_m, features.length, TERRAIN_UNION_EXPONENT], 32);
+      features.forEach((feature, index) => {
+        packed.set([feature.center_m.x, feature.center_m.z, feature.radius_m.x, feature.radius_m.z], 36 + index * 8);
+        packed.set([(feature.kind === "mound" ? 1 : -1) * feature.amount_m, feature.rotation_rad ?? 0, feature.flat ?? TERRAIN_DEFAULT_FLAT, 0], 40 + index * 8);
+      });
+    }
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, packed);
     const bodyData = new Float32Array(12 * 16);
     const shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
     const palette = [[0.95, 0.63, 0.29], [0.48, 0.66, 0.96], [0.84, 0.42, 0.48], [0.66, 0.52, 0.92]];

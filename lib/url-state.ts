@@ -200,7 +200,9 @@ export function parseQueryState(search: string): QueryState {
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: gridMode === "structure" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
       waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode,
-      environmentId: isEnvironmentId(environment) ? environment : initialUI.environmentId,
+      // The scene preset carries its own art direction (a garden pond loads
+      // the garden); an explicit environment parameter still wins.
+      environmentId: isEnvironmentId(environment) ? environment : preset.environment ?? initialUI.environmentId,
       targetFps: clampTargetFps(numberParam(query, "fps", initialUI.targetFps, MIN_TARGET_FPS, MAX_TARGET_FPS))
     }
   };

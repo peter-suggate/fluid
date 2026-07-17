@@ -11,7 +11,7 @@ import {
 } from "../tools/webgpu-smoke-scenarios";
 
 test("native WebGPU matrix covers the UI dam break, equilibrium, moving boundaries, rigid geometry, and deep compression", () => {
-  assert.deepEqual(smokeScenarioIds, ["dam-break-ui", "settled-tank", "dam-break-boxes", "hose-tank", "sphere-jet", "deep-water"]);
+  assert.deepEqual(smokeScenarioIds, ["dam-break-ui", "settled-tank", "dam-break-boxes", "hose-tank", "sphere-jet", "deep-water", "garden-pond", "garden-dam-break"]);
   for (const id of smokeScenarioIds) {
     const scenario = createSmokeScenario(id);
     assert.deepEqual(validateScene(scenario.scene), []);

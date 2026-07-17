@@ -42,12 +42,28 @@ struct RigidBody {
 @group(0) @binding(17) var<storage,read_write> governor:array<atomic<u32>,4>;
 // Eight 16-byte indirect slots. The fourth word pads each slot for inspection.
 @group(0) @binding(18) var<storage,read_write> phiDispatchArgs:array<atomic<u32>,32>;
+// Per-column terrain height H_{i,k} in fine-cell units (paper Fig. 2). Static
+// for the run; enabled by inflowTiming.y so terrain-free scenes skip the load.
+@group(0) @binding(19) var terrainIn: texture_2d<f32>;
 
 fn packedDims()->vec3i{return vec3i(textureDimensions(volumeIn));}
 fn fineDims()->vec3i{let d=packedDims();return vec3i(d.x,i32(round(params.boundary.w)),d.z);}
 fn inflowGridDims()->vec3i{return fineDims();}
 fn regularLayers()->i32{return i32(round(params.tall.x));}
 fn baseAt(x:i32,z:i32)->i32{let d=packedDims();if(x<0||x>=d.x||z<0||z>=d.z){return 0;}return i32(round(textureLoad(columnBaseIn,vec2i(x,z),0).x));}
+fn hasTerrain()->bool{return params.inflowTiming.y>0.5;}
+fn terrainHeightCells(x:i32,z:i32)->f32{let d=packedDims();return textureLoad(terrainIn,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.z-1)),0).x;}
+// Solid fraction contributed by the ground heightfield to the WORLD cell q:
+// the vertical cut of the column height through the unit cell.
+fn terrainFractionWorld(q:vec3i)->f32{if(!hasTerrain()){return 0.0;}return clamp(terrainHeightCells(q.x,q.z)-f32(q.y),0.0,1.0);}
+// Terrain fraction at a PACKED sample: endpoint rows live at world y = 0 and
+// y = base-1; regular rows at base + packedY - 2 (Eq 4 with H folded in).
+fn terrainFractionPacked(id:vec3i)->f32{
+  if(!hasTerrain()){return 0.0;}let base=baseAt(id.x,id.z);
+  var worldY=0;if(id.y==1){worldY=max(0,base-1);}else if(id.y>=2){worldY=base+id.y-2;}
+  return clamp(terrainHeightCells(id.x,id.z)-f32(worldY),0.0,1.0);
+}
+fn packedSolidFraction(id:vec3i)->f32{return max(textureLoad(solidFractionIn,id,0).x,terrainFractionPacked(id));}
 fn validPacked(q:vec3i)->bool{let d=packedDims();return all(q>=vec3i(0))&&all(q<d);}
 fn validWorld(q:vec3i)->bool{let d=fineDims();return all(q>=vec3i(0))&&all(q<d);}
 fn activeSample(id:vec3i)->bool{
@@ -128,9 +144,13 @@ fn diffusionVelocity(q:vec3i)->vec3f{
   let packedY=2+q.y-base;if(packedY<2||packedY>=packedDims().y){return 0.0;}return textureLoad(pressureIn,vec3i(q.x,packedY,q.z),0).x;
 	}
 	fn solidFractionCell(q:vec3i)->f32{
-	  if(!validWorld(q)){return 1.0;}let base=baseAt(q.x,q.z);
-	  if(q.y<base&&base>0){let t=clamp(f32(q.y)/f32(max(base-1,1)),0.0,1.0);return mix(textureLoad(solidFractionIn,vec3i(q.x,0,q.z),0).x,textureLoad(solidFractionIn,vec3i(q.x,1,q.z),0).x,t);}
-	  let packedY=2+q.y-base;if(packedY<2||packedY>=packedDims().y){return 1.0;}return textureLoad(solidFractionIn,vec3i(q.x,packedY,q.z),0).x;
+	  if(!validWorld(q)){return 1.0;}let base=baseAt(q.x,q.z);var stored=1.0;
+	  if(q.y<base&&base>0){let t=clamp(f32(q.y)/f32(max(base-1,1)),0.0,1.0);stored=mix(textureLoad(solidFractionIn,vec3i(q.x,0,q.z),0).x,textureLoad(solidFractionIn,vec3i(q.x,1,q.z),0).x,t);}
+	  else{let packedY=2+q.y-base;if(packedY<2||packedY>=packedDims().y){return 1.0;}stored=textureLoad(solidFractionIn,vec3i(q.x,packedY,q.z),0).x;}
+	  // The ground heightfield is evaluated at the world cell, not through the
+	  // Eq 5 endpoint blend: a tall store straddling the terrain surface must
+	  // read fully solid below it and open above it.
+	  return max(stored,terrainFractionWorld(q));
 	}
 fn sampleVelocity(p:vec3f)->vec3f{
   let q=clamp(p-vec3f(0.5),vec3f(0.0),vec3f(fineDims()-vec3i(1)));let b=vec3i(floor(q));let f=fract(q);
@@ -200,7 +220,7 @@ fn storeLateralGradient(x:i32,z:i32,offset:vec2i,ownPhi:f32,ownPressureIn:f32)->
   let plusPhi=textureLoad(volumeIn,vec3i(nx,0,nz),0).x;let ownLiquid=ownPhi<=0.0;let plusLiquid=plusPhi<=0.0;if(!ownLiquid&&!plusLiquid){return 0.0;}
   var ownPressure=select(0.0,ownPressureIn,ownLiquid);var plusPressure=select(0.0,textureLoad(pressureIn,vec3i(nx,0,nz),0).x,plusLiquid);
   var theta=1.0;if(ownLiquid!=plusLiquid){let liquidPhi=select(plusPhi,ownPhi,ownLiquid);let airPhi=select(ownPhi,plusPhi,ownLiquid);theta=clamp(abs(liquidPhi)/max(abs(liquidPhi)+abs(airPhi),1e-6),0.05,1.0);}
-  if(textureLoad(solidFractionIn,vec3i(nx,0,nz),0).x>0.9){plusPressure=ownPressure;}
+  if(packedSolidFraction(vec3i(nx,0,nz))>0.9){plusPressure=ownPressure;}
   return (plusPressure-ownPressure)/theta;
 }
 fn phiGradient(q:vec3i)->vec3f{let h=params.cellGravity.xyz;return vec3f(phiCell(q+vec3i(1,0,0))-phiCell(q-vec3i(1,0,0)),phiCell(q+vec3i(0,1,0))-phiCell(q-vec3i(0,1,0)),phiCell(q+vec3i(0,0,1))-phiCell(q-vec3i(0,0,1)))/(2.0*h);}
@@ -352,12 +372,12 @@ fn jacobi(@builtin(global_invocation_id) gid:vec3u){
 	    // s = 1/(base-1), so the top endpoint couples at s/h^2 = 1/(distance*h)
 	    // and the (1-s) share folds into the diagonal — identical to the
 	    // staggered adjoint of the endpoint point divergence.
-	    if(id.x>0){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x-1,0,id.z),0).x,textureLoad(pressureIn,vec3i(id.x-1,0,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x-1,0,id.z),0).x,1.0/(h.x*h.x));}
-	    if(id.x+1<d.x){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x+1,0,id.z),0).x,textureLoad(pressureIn,vec3i(id.x+1,0,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x+1,0,id.z),0).x,1.0/(h.x*h.x));}
-	    if(id.z>0){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,0,id.z-1),0).x,textureLoad(pressureIn,vec3i(id.x,0,id.z-1),0).x,textureLoad(solidFractionIn,vec3i(id.x,0,id.z-1),0).x,1.0/(h.z*h.z));}
-	    if(id.z+1<d.z){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,0,id.z+1),0).x,textureLoad(pressureIn,vec3i(id.x,0,id.z+1),0).x,textureLoad(solidFractionIn,vec3i(id.x,0,id.z+1),0).x,1.0/(h.z*h.z));}
+	    if(id.x>0){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x-1,0,id.z),0).x,textureLoad(pressureIn,vec3i(id.x-1,0,id.z),0).x,packedSolidFraction(vec3i(id.x-1,0,id.z)),1.0/(h.x*h.x));}
+	    if(id.x+1<d.x){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x+1,0,id.z),0).x,textureLoad(pressureIn,vec3i(id.x+1,0,id.z),0).x,packedSolidFraction(vec3i(id.x+1,0,id.z)),1.0/(h.x*h.x));}
+	    if(id.z>0){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,0,id.z-1),0).x,textureLoad(pressureIn,vec3i(id.x,0,id.z-1),0).x,packedSolidFraction(vec3i(id.x,0,id.z-1)),1.0/(h.z*h.z));}
+	    if(id.z+1<d.z){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,0,id.z+1),0).x,textureLoad(pressureIn,vec3i(id.x,0,id.z+1),0).x,packedSolidFraction(vec3i(id.x,0,id.z+1)),1.0/(h.z*h.z));}
 	    let distance=max(h.y,f32(base-1)*h.y);
-	    stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,1,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,1,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x,1,id.z),0).x,1.0/(distance*h.y));
+	    stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,1,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,1,id.z),0).x,packedSolidFraction(vec3i(id.x,1,id.z)),1.0/(distance*h.y));
 	  } else {
 	  if(q.x>0){let n=q-vec3i(1,0,0);stencil+=pressureTerm(ownAlpha,phiCell(n),pressureCell(n),solidFractionCell(n),1.0/(h.x*h.x));}if(q.x+1<d.x){let n=q+vec3i(1,0,0);stencil+=pressureTerm(ownAlpha,phiCell(n),pressureCell(n),solidFractionCell(n),1.0/(h.x*h.x));}if(q.z>0){let n=q-vec3i(0,0,1);stencil+=pressureTerm(ownAlpha,phiCell(n),pressureCell(n),solidFractionCell(n),1.0/(h.z*h.z));}if(q.z+1<d.z){let n=q+vec3i(0,0,1);stencil+=pressureTerm(ownAlpha,phiCell(n),pressureCell(n),solidFractionCell(n),1.0/(h.z*h.z));}
 	  }
@@ -367,8 +387,8 @@ fn jacobi(@builtin(global_invocation_id) gid:vec3u){
 		  // the reconstructed downward face carries another factor s: bottom is
 		  // s^2/h^2 and the first band sample is s/h^2. Using the paper's stronger
 		  // 1/(distance*h), 1/h^2 row solves a different operator and pumps energy.
-		  else if(id.y==1){let distance=max(h.y,f32(base-1)*h.y);let composed=base<=regularLayers();let bottomCoefficient=select(1.0/(distance*h.y),1.0/(distance*distance),composed);let bandCoefficient=select(1.0/(h.y*h.y),1.0/(distance*h.y),composed);stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,0,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,0,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x,0,id.z),0).x,bottomCoefficient);if(activeSample(vec3i(id.x,2,id.z))){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,2,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,2,id.z),0).x,textureLoad(solidFractionIn,vec3i(id.x,2,id.z),0).x,bandCoefficient);}}
-	  else {if(id.y>2||base>=2){let below=id-vec3i(0,1,0);let belowPhi=select(textureLoad(volumeIn,below,0).x,textureLoad(volumeIn,vec3i(id.x,1,id.z),0).x,id.y==2&&base>0);stencil+=pressureTerm(ownAlpha,belowPhi,textureLoad(pressureIn,below,0).x,textureLoad(solidFractionIn,below,0).x,1.0/(h.y*h.y));}if(activeSample(id+vec3i(0,1,0))){let above=id+vec3i(0,1,0);stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,above,0).x,textureLoad(pressureIn,above,0).x,textureLoad(solidFractionIn,above,0).x,1.0/(h.y*h.y));}else if(q.y+1>=d.y){stencil+=pressureTerm(ownAlpha,h.y,0.0,1.0,1.0/(h.y*h.y));}}
+		  else if(id.y==1){let distance=max(h.y,f32(base-1)*h.y);let composed=base<=regularLayers();let bottomCoefficient=select(1.0/(distance*h.y),1.0/(distance*distance),composed);let bandCoefficient=select(1.0/(h.y*h.y),1.0/(distance*h.y),composed);stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,0,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,0,id.z),0).x,packedSolidFraction(vec3i(id.x,0,id.z)),bottomCoefficient);if(activeSample(vec3i(id.x,2,id.z))){stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,vec3i(id.x,2,id.z),0).x,textureLoad(pressureIn,vec3i(id.x,2,id.z),0).x,packedSolidFraction(vec3i(id.x,2,id.z)),bandCoefficient);}}
+	  else {if(id.y>2||base>=2){let below=id-vec3i(0,1,0);let belowPhi=select(textureLoad(volumeIn,below,0).x,textureLoad(volumeIn,vec3i(id.x,1,id.z),0).x,id.y==2&&base>0);stencil+=pressureTerm(ownAlpha,belowPhi,textureLoad(pressureIn,below,0).x,packedSolidFraction(below),1.0/(h.y*h.y));}if(activeSample(id+vec3i(0,1,0))){let above=id+vec3i(0,1,0);stencil+=pressureTerm(ownAlpha,textureLoad(volumeIn,above,0).x,textureLoad(pressureIn,above,0).x,packedSolidFraction(above),1.0/(h.y*h.y));}else if(q.y+1>=d.y){stencil+=pressureTerm(ownAlpha,h.y,0.0,1.0,1.0/(h.y*h.y));}}
   let rhs=params.physical.x*divergenceAt(id)/params.dimsDt.w;let old=textureLoad(pressureIn,id,0).x;let next=(stencil.y-rhs)/max(stencil.x,1e-9);textureStore(pressureOut,id,vec4f(mix(old,next,0.8),0.0,0.0,0.0));
 }
 
@@ -385,6 +405,10 @@ fn project(@builtin(global_invocation_id) gid:vec3u){
 	    if(!validWorld(q+offsets[0])){v.x=0.0;}else{v.x-=scale*storeLateralGradient(id.x,id.z,vec2i(1,0),ownAlpha,ownPressure)/h.x;}
 	    if(!validWorld(q+offsets[2])){v.z=0.0;}else{v.z-=scale*storeLateralGradient(id.x,id.z,vec2i(0,1),ownAlpha,ownPressure)/h.z;}
 	    if(!validWorld(q+offsets[1])||!representedWorld(q+offsets[1])){v.y=0.0;}else{v.y-=scale*pressureGradientAt(q,1u);}
+	    // A bottom endpoint buried inside the terrain heightfield is a solid
+	    // sample: pin it to the (zero) solid velocity exactly like the regular
+	    // rows below, so Eq 5 interpolation never blends stale momentum upward.
+	    if(solidFractionCell(q)>0.9){v=solidVelocityCell(q);}
 	  } else {
 	  for(var axis=0u;axis<3u;axis+=1u){let plus=q+offsets[axis];if(!validWorld(plus)){v[axis]=0.0;continue;}if(axis==1u&&!representedWorld(plus)){v[axis]=0.0;continue;}v[axis]-=scale*pressureGradientAt(q,axis);
 	    // divergenceAt substitutes the rigid velocity on every solid-covered
@@ -404,7 +428,11 @@ fn project(@builtin(global_invocation_id) gid:vec3u){
 	fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
 	  let id=vec3i(gid);if(!validPacked(id)){return;}if(!activeSample(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
 	  let cellPoint=samplePoint(id);let q=vec3i(floor(cellPoint));let cellWorld=worldFromPoint(cellPoint);let phi=textureLoad(volumeIn,id,0).x;let alpha=occupancyFromPhi(phi);let oldV=textureLoad(velocityIn,id,0).xyz;var v=oldV;let h=params.cellGravity.xyz;let bodyCount=u32(round(params.boundary.z));var solid=0.0;var coupledBody=12u;
-	  if(bodyCount==0u||(params.physical.z<=0.5&&!cellMayTouchRigid(cellWorld,h,bodyCount))){textureStore(velocityOut,id,vec4f(oldV,0.0));textureStore(volumeOut,id,vec4f(phi));textureStore(pressureOut,id,vec4f(0.0));return;}
+	  // coupleRigid owns the packed solid-fraction texture consumed by the
+	  // multigrid solve; the static terrain fraction must survive every rewrite
+	  // so the coarse levels see the ground exactly like the fine stencils.
+	  let terrainSolid=terrainFractionPacked(id);
+	  if(bodyCount==0u||(params.physical.z<=0.5&&!cellMayTouchRigid(cellWorld,h,bodyCount))){textureStore(velocityOut,id,vec4f(oldV,0.0));textureStore(volumeOut,id,vec4f(phi));textureStore(pressureOut,id,vec4f(terrainSolid));return;}
 	  // The legacy full-height diagnostic mode evaluates every virtual cubic cell inside a
 	  // tall cell. Its contribution is mapped to the two endpoint unknowns with
 	  // the paper's (1-s) / s weights; exchange is accumulated once by id.y=0.
@@ -446,7 +474,7 @@ fn project(@builtin(global_invocation_id) gid:vec3u){
 	    if(coupledBody<12u&&i32(round(rigidBodies[coupledBody].positionShape.w))==0&&length(rigidBodies[coupledBody].linearVelocity.xyz)>0.25){let radius=max(rigidBodies[coupledBody].dimensions.w,0.0);let reach=vec3i(ceil(vec3f(2.0*radius)/h))+vec3i(2);let far=array<vec3i,4>(vec3i(-reach.x,0,0),vec3i(reach.x,0,0),vec3i(0,0,-reach.z),vec3i(0,0,reach.z));for(var n=0;n<4;n+=1){let nq=q+far[n];if(!validWorld(nq)){continue;}let neighborWorld=worldFromPoint(vec3f(nq)+vec3f(0.5));if(rigidVelocityAt(neighborWorld).w==0.0){open+=1.0;openSum+=phiCell(nq);}}}
 	    let relaxTarget=select(total/max(count,1.0),openSum/max(open,1.0),open>0.0);phiNext=clamp(mix(phi,relaxTarget,solid),-limit,limit);
 	  }
-	  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phiNext));textureStore(pressureOut,id,vec4f(solid));
+	  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phiNext));textureStore(pressureOut,id,vec4f(max(solid,terrainSolid)));
 	}
 
 @compute @workgroup_size(4,4,4)
@@ -478,7 +506,7 @@ fn leastSquaresPhi(x:i32,z:i32,newBase:i32)->vec2f{if(newBase<=1){let value=phiC
 fn leastSquaresVelocity(x:i32,z:i32,newBase:i32,top:bool)->vec3f{if(newBase<=1){return velocityCell(vec3i(x,0,z));}var st=0.0;var stt=0.0;var sv=vec3f(0.0);var stv=vec3f(0.0);for(var y=0;y<newBase;y+=1){let t=f32(y)/f32(newBase-1);let value=velocityCell(vec3i(x,y,z));st+=t;stt+=t*t;sv+=value;stv+=t*value;}let n=f32(newBase);let slope=(n*stv-st*sv)/max(n*stt-st*st,1e-6);let intercept=(sv-slope*st)/n;return select(intercept,intercept+slope,top);}
 @compute @workgroup_size(4,4,4)
 fn remap(@builtin(global_invocation_id) gid:vec3u){
-	  let id=vec3i(gid);if(!validPacked(id)){return;}let d=packedDims();let newBase=i32(nextColumnBases[u32(id.x+d.x*id.z)]);var p=vec3f(f32(id.x)+0.5,0.5,f32(id.z)+0.5);if(id.y==1){p.y=max(0.5,f32(newBase)-0.5);}else if(id.y>=2){p.y=f32(newBase+id.y-2)+0.5;}let isActive=select(newBase>0,newBase+id.y-2<fineDims().y,id.y>=2);let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var phi=limit;var velocity=vec3f(0.0);var pressure=0.0;if(isActive){pressure=samplePressure(p);if(id.y<2){let fit=leastSquaresPhi(id.x,id.z,newBase);let crossing=(fit.x<=0.0)!=(fit.y<=0.0);phi=select(select(fit.x,fit.y,id.y==1),fit.y,crossing);velocity=leastSquaresVelocity(id.x,id.z,newBase,id.y==1);}else{phi=samplePhi(p);for(var component=0u;component<3u;component+=1u){let faceP=p+0.5*vec3f(axisOffset(component));velocity[component]=sampleVelocityComponent(faceP,component);}}}
+	  let id=vec3i(gid);if(!validPacked(id)){return;}let d=packedDims();let newBase=i32(nextColumnBases[u32(id.x+d.x*id.z)]);var p=vec3f(f32(id.x)+0.5,0.5,f32(id.z)+0.5);if(id.y==1){p.y=max(0.5,f32(newBase)-0.5);}else if(id.y>=2){p.y=f32(newBase+id.y-2)+0.5;}let isActive=select(newBase>0,newBase+id.y-2<fineDims().y,id.y>=2);let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var phi=limit;var velocity=vec3f(0.0);var pressure=0.0;if(isActive){pressure=samplePressure(p);if(id.y<2){let fit=leastSquaresPhi(id.x,id.z,newBase);phi=select(fit.x,fit.y,id.y==1);velocity=leastSquaresVelocity(id.x,id.z,newBase,id.y==1);}else{phi=samplePhi(p);for(var component=0u;component<3u;component+=1u){let faceP=p+0.5*vec3f(axisOffset(component));velocity[component]=sampleVelocityComponent(faceP,component);}}}
   textureStore(velocityOut,id,vec4f(velocity,0.0));textureStore(volumeOut,id,vec4f(clamp(phi,-limit,limit)));textureStore(pressureOut,id,vec4f(pressure));if(id.y==0){textureStore(columnBaseOut,vec2i(id.x,id.z),vec4f(f32(newBase)));}
 }
 
@@ -486,7 +514,11 @@ fn remap(@builtin(global_invocation_id) gid:vec3u){
 fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){
 	  let id=vec3i(gid);if(!validPacked(id)||!activeSample(id)){return;}let phi=textureLoad(volumeIn,id,0).x;let velocityValue=textureLoad(velocityIn,id,0).xyz;
   if(!finiteScalar(phi)||!all(velocityValue==velocityValue)||any(abs(velocityValue)>vec3f(3.402823e38))){atomicAdd(&reductions[20],1u);return;}
-	  let band=1.5*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var occupied=0.0;var interfaceCells=0.0;if(id.y==0){for(var y=0;y<baseAt(id.x,id.z);y+=1){let value=phiCell(vec3i(id.x,y,id.z));occupied+=occupancyFromPhi(value);if(abs(value)<band){interfaceCells+=1.0;}}}else if(id.y>=2){occupied=occupancyFromPhi(phi);interfaceCells=select(0.0,1.0,abs(phi)<band);}atomicAdd(&reductions[0],u32(clamp(occupied*256.0,0.0,4294967295.0)));atomicAdd(&reductions[7],u32(interfaceCells*256.0));atomicMax(&reductions[3],u32(baseAt(id.x,id.z)));
+	  let band=1.5*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var occupied=0.0;var interfaceCells=0.0;if(id.y==0){for(var y=0;y<baseAt(id.x,id.z);y+=1){
+	    // phi continues into the ground as a solid contact (never an interface),
+	    // so cells the terrain heightfield covers hold no countable water.
+	    let open=1.0-terrainFractionWorld(vec3i(id.x,y,id.z));if(open<=0.0){continue;}
+	    let value=phiCell(vec3i(id.x,y,id.z));occupied+=open*occupancyFromPhi(value);if(abs(value)<band){interfaceCells+=open;}}}else if(id.y>=2){let open=1.0-terrainFractionWorld(vec3i(floor(samplePoint(id))));occupied=open*occupancyFromPhi(phi);interfaceCells=select(0.0,open,abs(phi)<band);}atomicAdd(&reductions[0],u32(clamp(occupied*256.0,0.0,4294967295.0)));atomicAdd(&reductions[7],u32(interfaceCells*256.0));atomicMax(&reductions[3],u32(baseAt(id.x,id.z)));
   if(pointSamplePhi(id)<=0.0){
     atomicMax(&reductions[1],u32(id.x+1));updatePositiveMaximum(length(velocityValue),2u,8u,id);
 	    if(solidFractionCell(vec3i(floor(samplePoint(id))))<=0.9){updatePositiveMaximum(abs(divergenceAt(id)),5u,14u,id);let h=params.cellGravity.xyz;let cfl=max(abs(velocityValue.x)*params.dimsDt.w/h.x,max(abs(velocityValue.y)*params.dimsDt.w/h.y,abs(velocityValue.z)*params.dimsDt.w/h.z));updatePositiveMaximumOnly(cfl,30u);atomicMax(&governor[0],bitcast<u32>(cfl));if(cfl>1.0){atomicAdd(&reductions[31],1u);}}

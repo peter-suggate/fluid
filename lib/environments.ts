@@ -5,7 +5,8 @@ export const environmentIds = [
   "concrete-gallery",
   "bathhouse",
   "research-station",
-  "default"
+  "default",
+  "garden"
 ] as const;
 
 export type EnvironmentId = typeof environmentIds[number];
@@ -68,6 +69,13 @@ export const environmentPresets: ReadonlyArray<EnvironmentPreset> = [
     shortName: "Research station",
     description: "Pressure ribs, portholes, instrument light and drifting particles.",
     swatch: ["#061724", "#2b6f7b", "#d2a55f"]
+  },
+  {
+    id: "garden",
+    name: "Summer garden",
+    shortName: "Garden",
+    description: "An open lawn under warm afternoon sun — the water sits in the ground itself, hedges and sky beyond.",
+    swatch: ["#2e5d2a", "#8fae4f", "#bcd9ec"]
   }
 ];
 

@@ -1,5 +1,6 @@
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { createPaperScenario } from "../lib/paper-scenarios";
+import { applyGardenPool } from "../lib/garden-scene";
 
 export const smokeScenarioIds = [
   "dam-break-ui",
@@ -7,7 +8,9 @@ export const smokeScenarioIds = [
   "dam-break-boxes",
   "hose-tank",
   "sphere-jet",
-  "deep-water"
+  "deep-water",
+  "garden-pond",
+  "garden-dam-break"
 ] as const;
 
 export type SmokeScenarioId = typeof smokeScenarioIds[number];
@@ -42,6 +45,26 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
       // meaningful: at 0.05 s the stream is still entirely sub-threshold and
       // the gate measured ambient equilibrium noise instead.
       target_s: id === "dam-break-boxes" ? Math.max(scene.numerics.maxDt_s * 8, 0.05) : 0.5
+    };
+  }
+
+  if (id === "garden-pond" || id === "garden-dam-break") {
+    // Terrain heightfield scenes. The CPU reference has no static-solid
+    // support, so oracle differentials are informative only; the per-method
+    // invariant gates (volume, stability) remain authoritative.
+    const scene = applyGardenPool(cloneScene(defaultScene), id === "garden-dam-break" ? { fillFraction: 0.16 } : {});
+    scene.sceneId = `smoke-${id}`;
+    scene.rigidBodies = [];
+    scene.fluid.surfaceTension_N_m = 0;
+    delete scene.fluid.inflow;
+    scene.fluid.initialCondition = id === "garden-pond" ? "tank-fill" : "dam-break";
+    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = id === "garden-pond" ? 1 / 120 : 0.004;
+    return {
+      id,
+      description: id === "garden-pond"
+        ? "hydrostatic rest in an organic pool carved from a terrain heightfield"
+        : "dam break released onto a lawn heightfield draining into the pool",
+      scene, oracleSteps: 2, target_s: id === "garden-pond" ? 0.1 : 0.2
     };
   }
 

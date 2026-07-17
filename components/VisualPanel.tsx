@@ -3,8 +3,11 @@
 import { getMethod } from "@/lib/methods";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore } from "@/lib/stores/method-store";
+import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
-import { environmentPresets } from "@/lib/environments";
+import { environmentPresets, type EnvironmentId } from "@/lib/environments";
+import { getScenePreset } from "@/lib/scenes";
+import { simulation } from "@/lib/simulation/controller";
 
 export function VisualPanel() {
   const methodId = useMethodStore((state) => state.methodId);
@@ -26,6 +29,15 @@ export function VisualPanel() {
   const setRightPanel = useUIStore((state) => state.setRightPanel);
   const gridKind = getMethod(methodId).backend === "cpu" ? "uniform" : gpuInfo?.gridKind ?? "uniform";
   const tall = gridKind !== "uniform";
+  // Environments are art direction, but some carry a matching physical scene:
+  // picking the garden brings its terrain pond along unless the current
+  // preset already belongs to that world.
+  const selectEnvironment = (id: EnvironmentId) => {
+    setEnvironmentId(id);
+    if (id === "garden" && getScenePreset(useSceneStore.getState().presetId ?? "").environment !== "garden") {
+      simulation.loadPreset("garden-pond");
+    }
+  };
 
   return <aside className="right-panel panel-scroll visual-panel" data-testid="visual-panel">
     <section className="panel-section utility-panel-head">
@@ -66,7 +78,7 @@ export function VisualPanel() {
           role="radio"
           aria-checked={environmentId === preset.id}
           className={environmentId === preset.id ? "active" : ""}
-          onClick={() => setEnvironmentId(preset.id)}
+          onClick={() => selectEnvironment(preset.id)}
           title={preset.description}
         >
           <span className="environment-swatch" aria-hidden="true">
