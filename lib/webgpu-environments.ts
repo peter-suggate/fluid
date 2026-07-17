@@ -12,6 +12,85 @@ struct EnvironmentSample { color:vec3f, depth:f32 }
 struct EnvironmentPropHit { t:f32, normal:vec3f, color:vec3f, emission:f32 }
 
 fn environmentIndex()->i32{return i32(round(u.environment.x));}
+
+// --- Scene terrain heightfield -------------------------------------------
+// Mirrors lib/terrain.ts exactly (same falloff and p-norm basin union) so the
+// rendered ground is the surface the solver's solid fractions were baked
+// from. terrainMeta = (enabled, baseHeight_m, featureCount, unionExponent);
+// each feature is two vec4s: (cx, cz, rx, rz) and (signedAmount, rotation,
+// flat, 0) with mounds positive and basins negative.
+fn envTerrainEnabled()->bool{return u.terrainMeta.x>0.5;}
+fn envTerrainHeightAt(x:f32,z:f32)->f32{
+  if(!envTerrainEnabled()){return 0.0;}
+  var mounds=0.0;var carvePower=0.0;let exponent=max(u.terrainMeta.w,1.0);
+  let count=i32(round(u.terrainMeta.z));
+  for(var i=0;i<count;i+=1){
+    let a=u.terrainFeatures[2*i];let b=u.terrainFeatures[2*i+1];
+    let cs=cos(b.y);let sn=sin(b.y);
+    let dx=x-a.x;let dz=z-a.y;
+    let localX=(cs*dx+sn*dz)/a.z;let localZ=(-sn*dx+cs*dz)/a.w;
+    let d=length(vec2f(localX,localZ));
+    var w=0.0;
+    if(d<=b.z){w=1.0;}
+    else if(d<1.0){let ss=1.0-(d-b.z)/(1.0-b.z);w=ss*ss*(3.0-2.0*ss);}
+    if(b.x>=0.0){mounds+=b.x*w;}
+    else{carvePower+=pow(-b.x*w,exponent);}
+  }
+  var carve=0.0;
+  if(carvePower>0.0){carve=pow(carvePower,1.0/exponent);}
+  return max(0.0,u.terrainMeta.y+mounds-carve);
+}
+// The garden lawn continues past the simulated footprint: outside the
+// container the analytic features have decayed to the base level, and a soft
+// meadow swell (zero at the boundary) keeps the horizon from reading flat.
+fn envGardenGroundY(p:vec2f)->f32{
+  var h=envTerrainHeightAt(p.x,p.y);
+  let outside=max(max(abs(p.x)-.5*u.container.x,abs(p.y)-.5*u.container.z),0.0);
+  let swell=smoothstep(0.0,1.2,outside);
+  h+=.10*u.terrainMeta.y*swell*sin(p.x*1.15+2.1)*sin(p.y*1.45+0.7);
+  return h;
+}
+fn envTerrainCeiling()->f32{
+  var top=u.terrainMeta.y*1.15+.05;
+  let count=i32(round(u.terrainMeta.z));
+  for(var i=0;i<count;i+=1){let amount=u.terrainFeatures[2*i+1].x;if(amount>0.0){top+=amount;}}
+  return top;
+}
+fn envTerrainNormal(p:vec2f)->vec3f{
+  let e=.02;
+  let gx=(envGardenGroundY(p+vec2f(e,0))-envGardenGroundY(p-vec2f(e,0)))/(2.0*e);
+  let gz=(envGardenGroundY(p+vec2f(0,e))-envGardenGroundY(p-vec2f(0,e)))/(2.0*e);
+  return normalize(vec3f(-gx,1.0,-gz));
+}
+// Sphere-trace substitute for a heightfield: graded fixed march (denser near
+// the camera) plus a short bisection refine on the crossing interval.
+fn envTerrainTrace(ro:vec3f,rd:vec3f)->f32{
+  let s=max(max(u.container.x,u.container.y),u.container.z);
+  let ceiling=envTerrainCeiling();
+  var t0=.005;
+  if(ro.y>ceiling){
+    if(rd.y>=-.0005){return -1.0;}
+    t0=(ceiling-ro.y)/rd.y;
+  }
+  var t1=t0+10.0*s;
+  if(rd.y<-.0005){t1=min(t1,(-.02-ro.y)/rd.y);}
+  else if(rd.y>.0005){t1=min(t1,max(t0,(ceiling-ro.y)/rd.y));}
+  if(t1<=t0){return -1.0;}
+  var previousT=t0;
+  let startP=ro+rd*t0;
+  if(startP.y-envGardenGroundY(startP.xz)<=0.0){return t0;}
+  for(var i=1;i<=56;i+=1){
+    let t=t0+(t1-t0)*pow(f32(i)/56.0,1.4);
+    let p=ro+rd*t;
+    if(p.y-envGardenGroundY(p.xz)<=0.0){
+      var a=previousT;var b=t;
+      for(var j=0;j<6;j+=1){let m=.5*(a+b);let pm=ro+rd*m;if(pm.y-envGardenGroundY(pm.xz)>0.0){a=m;}else{b=m;}}
+      return .5*(a+b);
+    }
+    previousT=t;
+  }
+  return -1.0;
+}
 fn envHash21(p:vec2f)->f32{return fract(sin(dot(p,vec2f(127.1,311.7)))*43758.5453);}
 fn envHash31(p:vec3f)->f32{return fract(sin(dot(p,vec3f(127.1,311.7,74.7)))*43758.5453);}
 // Width is expressed as the retained cell interior (0.46 is a 0.04-wide
@@ -125,8 +204,57 @@ fn sampleEnvironmentProps(ro:vec3f,rd:vec3f)->EnvironmentPropHit{
     for(var i=-1;i<=1;i+=2){let x=f32(i)*1.16*s;h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(x,.37*s,-.72*s),vec3f(.34*s,.37*s,.30*s),metal*.72,0));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(x,.63*s,-.40*s),vec3f(.25*s,.13*s,.018*s),vec3f(.06,.48,.58),.30));h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(x+.25*s,.88*s,-1.06*s),.055*s,.72*s,vec3f(.12,.25,.27),0));}
     h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-.76*s,.23*s,-1.04*s),vec3f(.30*s,.23*s,.24*s),vec3f(.12,.15,.15),0));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-.76*s,.47*s,-1.04*s),vec3f(.25*s,.018*s,.19*s),vec3f(.74,.48,.16),.12));
     for(var i=-1;i<=1;i+=1){h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(f32(i)*.52*s,1.36*s,-1.12*s),vec3f(.055*s),vec3f(.10,.65,.72),.36));}
+  }else if(e==7){
+    // Garden: clipped hedges frame the lawn, an apple tree leans over the
+    // knoll, terracotta pots and a watering can sit by the beach. Heights are
+    // anchored to the lawn level so props stand on the grass, not in it.
+    let g=u.terrainMeta.y;
+    let hedge=vec3f(.045,.145,.045);
+    h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(.4*s,g+.36*s,-1.55*s),vec3f(1.9*s,.36*s,.16*s),hedge,0));
+    h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-1.65*s,g+.42*s,-.35*s),vec3f(.15*s,.42*s,1.25*s),hedge*.88,0));
+    h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(1.72*s,g+.30*s,.45*s),vec3f(.14*s,.30*s,1.0*s),hedge*1.06,0));
+    // Apple tree behind the knoll.
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-1.15*s,g+.34*s,1.05*s),.045*s,.34*s,vec3f(.24,.155,.09),0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-1.15*s,g+.88*s,1.05*s),vec3f(.46*s,.36*s,.44*s),vec3f(.085,.27,.075),0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.88*s,g+.72*s,1.2*s),vec3f(.24*s,.20*s,.22*s),vec3f(.115,.32,.095),0));
+    for(var i=0;i<3;i+=1){let ax=(-1.32+.17*f32(i))*s;h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(ax,g+(.66+.14*f32(i))*s,(1.22-.09*f32(i))*s),vec3f(.022*s),vec3f(.78,.16,.10),.08));}
+    // Terracotta pots with blooms sheltering by the berm.
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(1.28*s,g+.085*s,-1.02*s),.10*s,.085*s,vec3f(.56,.28,.16),0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(1.28*s,g+.23*s,-1.02*s),vec3f(.125*s,.09*s,.125*s),vec3f(.76,.30,.42),.10));
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(1.45*s,g+.065*s,-.78*s),.075*s,.065*s,vec3f(.50,.25,.14),0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(1.45*s,g+.17*s,-.78*s),vec3f(.09*s,.07*s,.09*s),vec3f(.93,.79,.28),.10));
+    // Watering can waiting on the lawn near the beach.
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(.78*s,g+.075*s,-1.18*s),.065*s,.075*s,vec3f(.16,.34,.36),0));
+    h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(.86*s,g+.10*s,-1.18*s),vec3f(.055*s,.012*s,.012*s),vec3f(.14,.30,.32),0));
   }
   return h;
+}
+
+// Ground shading for the garden: pebble pool liner below the waterline, a
+// damp sand collar, then the lawn — mow stripes, blade-scale tone noise,
+// clover patches and scattered daisies. The hollow self-occludes with depth.
+fn gardenGroundMaterial(p:vec3f)->vec3f{
+  let base=u.terrainMeta.y;
+  let waterline=u.container.w;
+  let cell=floor(p.xz*26.0);
+  let jitter=vec2f(envHash21(cell),envHash21(cell+19.7))-.5;
+  let pebbleDistance=length(fract(p.xz*26.0)-.5-jitter*.55);
+  let pebbleTone=.55+.45*envHash21(cell+7.3);
+  let liner=mix(vec3f(.14,.115,.09),vec3f(.42,.36,.28)*pebbleTone,smoothstep(.44,.18,pebbleDistance));
+  let sand=vec3f(.50,.42,.29)*(.9+.2*envHash21(floor(p.xz*40.0)));
+  let stripe=.5+.5*sin((p.x*.9+p.z*.35)*4.4);
+  var lawn=mix(vec3f(.085,.26,.075),vec3f(.145,.375,.115),.5*stripe+.5*envHash21(floor(p.xz*90.0)));
+  let clover=step(.962,envHash21(floor(p.xz*14.0)));
+  lawn=mix(lawn,vec3f(.185,.41,.15),clover*.55);
+  let daisy=step(.986,envHash21(floor(p.xz*24.0)+3.1));
+  lawn=mix(lawn,vec3f(.87,.84,.68),daisy*.85);
+  let sandBand=smoothstep(waterline-.02,waterline+.04,p.y);
+  var c=mix(liner,sand,sandBand);
+  c=mix(c,lawn,smoothstep(base-.05,base-.008,p.y));
+  // Hollow self-occlusion: strongest at the pool bed, easing out through the
+  // banks so the carve reads even from a high camera.
+  let hollow=smoothstep(0.0,max(base,1e-3),p.y);
+  return c*(.38+.62*hollow*hollow);
 }
 
 fn envRoomHalf()->vec3f{
@@ -259,6 +387,7 @@ fn environmentLightDirection()->vec3f{
   if(e==3){return normalize(vec3f(.32,.82,.34));}
   if(e==4){return normalize(vec3f(-.55,.75,-.12));}
   if(e==5){return normalize(vec3f(.15,.42,.90));}
+  if(e==7){return normalize(vec3f(-.42,.72,.38));}
   return normalize(vec3f(-.45,.86,.28));
 }
 fn environmentLightColor()->vec3f{
@@ -269,6 +398,7 @@ fn environmentLightColor()->vec3f{
   if(e==3){return vec3f(1.0,.67,.40);}
   if(e==4){return vec3f(1.0,.83,.57);}
   if(e==5){return vec3f(.42,.83,1.0);}
+  if(e==7){return vec3f(1.0,.94,.76);}
   return vec3f(1.0,.86,.62);
 }
 fn environmentAccent()->vec3f{
@@ -279,6 +409,7 @@ fn environmentAccent()->vec3f{
   if(e==3){return vec3f(.72,.42,.22);}
   if(e==4){return vec3f(.54,.39,.25);}
   if(e==5){return vec3f(.14,.56,.68);}
+  if(e==7){return vec3f(.32,.50,.22);}
   return vec3f(.24,.55,.39);
 }
 
@@ -306,6 +437,16 @@ fn environmentLight(rd:vec3f)->vec3f{
   else if(e==2){c=mix(vec3f(.016,.017,.020),vec3f(.065,.068,.078),t);c+=vec3f(.30,.30,.27)*pow(max(rd.y,0.0),6.0)+vec3f(.05,.09,.16)*pow(max(-rd.z,0.0),4.0)*.6;}
   else if(e==3){c=mix(vec3f(.045,.050,.048),vec3f(.30,.32,.30),t);}
   else if(e==4){c=mix(vec3f(.045,.038,.032),vec3f(.34,.31,.25),t);}
+  else if(e==7){
+    // Summer afternoon: warm hazy horizon into blue zenith, drifting cumulus
+    // and a dark hedge line where the lawn meets the sky.
+    c=mix(vec3f(.58,.66,.70),vec3f(.24,.44,.74),pow(t,1.35));
+    let q=rd.xz/max(rd.y+.16,.09);
+    let cloudField=.5+.5*sin(q.x*1.25+sin(q.y*1.85))+.32*sin(q.y*3.6+q.x*2.15);
+    let cloud=smoothstep(.86,1.32,cloudField)*smoothstep(.015,.22,rd.y);
+    c=mix(c,vec3f(.97,.97,.99),cloud*.85);
+    c=mix(vec3f(.055,.13,.05),c,smoothstep(-.03,.05,rd.y));
+  }
   else {c=mix(vec3f(.002,.012,.022),vec3f(.028,.12,.17),t);}
   let sun=max(dot(rd,environmentLightDirection()),0.0);
   c+=environmentLightColor()*(pow(sun,360.0)*2.5+pow(sun,15.0)*.22);
@@ -398,6 +539,30 @@ fn stationMaterial(p:vec3f,n:vec3f)->vec3f{
 
 fn sampleEnvironment(ro:vec3f,rd:vec3f)->EnvironmentSample{
   let e=environmentIndex();
+  if(e==7){
+    // Open-air garden: no room box. The terrain heightfield IS the ground —
+    // the pool cavity, banks and lawn are the same surface the solver solids
+    // were baked from — with hedges, tree and pots as depth-tested props.
+    let terrainT=envTerrainTrace(ro,rd);
+    let prop=sampleEnvironmentProps(ro,rd);
+    if(prop.t<1e19&&(terrainT<0.0||prop.t<terrainT)){return EnvironmentSample(shadeEnvironmentProp(prop,ro,rd),prop.t);}
+    if(terrainT>0.0){
+      let p=ro+rd*terrainT;
+      let n=envTerrainNormal(p.xz);
+      let l=environmentLightDirection();
+      let daylight=.34+.72*max(dot(n,l),0.0);
+      // Soft canopy shadow under the apple tree.
+      let s=max(max(u.container.x,u.container.y),u.container.z);
+      let treeShadow=1.0-.38*envFootprintShadow(p,vec2f(-1.15,1.05)*s,vec2f(.5,.48)*s);
+      var c=gardenGroundMaterial(p)*environmentLightColor()*daylight*treeShadow;
+      let fresnel=pow(1.0-max(dot(-rd,n),0.0),4.0);
+      c+=vec3f(.22,.33,.44)*fresnel*.12;
+      let haze=1.0-exp(-terrainT*.05);
+      c=mix(c,vec3f(.60,.68,.72),haze*.65);
+      return EnvironmentSample(c,terrainT);
+    }
+    return EnvironmentSample(environmentLight(rd),65504.0);
+  }
   if(e==6){
     let t=clamp(rd.y*.5+.5,0.0,1.0);var color=mix(vec3f(.015,.027,.029),vec3f(.16,.23,.22),t);let sun=max(dot(rd,normalize(vec3f(-.45,.86,.28))),0.0);color+=vec3f(1.0,.86,.66)*pow(sun,320.0)*2.2+vec3f(.24,.31,.28)*pow(sun,12.0);
     let floorT=(-.012-ro.y)/rd.y;if(floorT>0.0){let p=ro+rd*floorT;let radial=length(p.xz);let checker=.5+.5*cos(p.x*31.4)*cos(p.z*31.4);color=mix(color,vec3f(.055,.068,.064)+checker*vec3f(.018,.025,.022),.82*exp(-radial*.22));return EnvironmentSample(color,floorT);}
@@ -433,6 +598,17 @@ fn environmentForeground(color:vec3f,ndc:vec2f)->vec3f{
     let post=smoothstep(.92,.88,abs(ndc.x));let cloth=smoothstep(.68,.74,ndc.x)*smoothstep(.38,.46,ndc.y);let hem=envStroke(ndc.y-.38-.018*sin(ndc.x*14.0),.010)*smoothstep(.68,.75,ndc.x);c=mix(c,vec3f(.055,.035,.022),post*.44);c=mix(c,vec3f(.30,.20,.12),cloth*.42);c+=hem*vec3f(.22,.15,.08);
   }else if(e==5){
     let radius=length(ndc*vec2f(1.0,u.viewport.y/max(u.viewport.x,1.0)));let frame=smoothstep(.83,.91,radius);let rib=max(envStroke(abs(ndc.x)-.93,.025),envStroke(abs(ndc.y)-.91,.025));c=mix(c,vec3f(.003,.014,.024),max(frame*.58,rib*.48));let drift=envHash21(floor((ndc+vec2f(u.viewport.z*.006,-u.viewport.z*.003))*vec2f(330,210)));c+=vec3f(.20,.62,.72)*select(0.0,.20,drift>.996);
+  }else if(e==7){
+    // Out-of-focus grass blades along the bottom edge, swaying gently, and a
+    // soft warm bloom from the top-left sun.
+    let sway=.014*sin(u.viewport.z*1.7+ndc.x*9.0);
+    let lane=floor((ndc.x+sway)*70.0);
+    let bladeHeight=.05+.15*envHash21(vec2f(lane,5.0));
+    let across=fract((ndc.x+sway)*70.0)-.5;
+    let taper=1.0-clamp((ndc.y+1.0)/max(bladeHeight,1e-4),0.0,1.0);
+    let blade=step(abs(across),.42*taper)*step(ndc.y,-1.0+bladeHeight);
+    c=mix(c,vec3f(.014,.07,.02),blade*.85);
+    c+=vec3f(.14,.12,.07)*pow(max(0.0,1.0-length(ndc-vec2f(-.88,.86))),3.0);
   }
   return c;
 }

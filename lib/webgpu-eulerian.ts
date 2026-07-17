@@ -300,12 +300,21 @@ struct RigidBody {
 // The adaptive method binds its resident signed-distance field here. Uniform
 // reference solvers bind volumeIn instead, preserving their VOF formulation.
 @group(0) @binding(20) var surfaceIn: texture_3d<f32>;
+// Per-column terrain heights in cell units; params.container.w enables it so
+// terrain-free scenes never pay the extra load. Static for the whole run.
+@group(0) @binding(21) var terrainIn: texture_2d<f32>;
 
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn inflowGridDims()->vec3i{return dims();}
 fn valid(p: vec3i) -> bool { let d=dims(); return all(p >= vec3i(0)) && all(p < d); }
 fn clampCell(p: vec3i) -> vec3i { return clamp(p, vec3i(0), dims()-vec3i(1)); }
 fn worldCell(id:vec3i)->vec3f{let h=params.cellGravity.xyz;return vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);}
+fn hasTerrain()->bool{return params.container.w>0.5;}
+fn terrainHeightCells(x:i32,z:i32)->f32{let d=dims();return textureLoad(terrainIn,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.z-1)),0).x;}
+// Ground handling mirrors the rigid-body solid treatment with zero velocity:
+// the heightfield closes faces, drops pressure unknowns, and blocks deposits.
+fn cellInsideTerrain(p:vec3i)->bool{if(!hasTerrain()){return false;}return f32(p.y)+0.5<terrainHeightCells(p.x,p.z);}
+fn cellTerrainFraction(p:vec3i)->f32{if(!hasTerrain()){return 0.0;}return clamp(terrainHeightCells(p.x,p.z)-f32(p.y),0.0,1.0);}
 ${inflowBoundaryWGSL}
 fn volume(p: vec3i) -> f32 { if (!valid(p)) { return 0.0; } return textureLoad(volumeIn,p,0).x; }
 fn levelSetAuthority() -> bool { return params.physical.w > 0.5; }
@@ -413,7 +422,7 @@ fn ambientFluidVelocity(body:RigidBody,p:vec3i,fallback:vec3f)->vec3f{
   let h=params.cellGravity.xyz;let radius=max(body.dimensions.w,0.0);let reach=vec3i(ceil(vec3f(2.0*radius)/h))+vec3i(2);
   let offsets=array<vec3i,6>(vec3i(-reach.x,0,0),vec3i(reach.x,0,0),vec3i(0,-reach.y,0),vec3i(0,reach.y,0),vec3i(0,0,-reach.z),vec3i(0,0,reach.z));
   var total=vec3f(0.0);var weight=0.0;
-  for(var n=0;n<6;n+=1){let q=p+offsets[n];if(!valid(q)||cellRigidBody(q)>=0){continue;}let wet=surfaceOccupancy(q);total+=wet*velocity(q);weight+=wet;}
+  for(var n=0;n<6;n+=1){let q=p+offsets[n];if(!valid(q)||cellRigidBody(q)>=0||cellInsideTerrain(q)){continue;}let wet=surfaceOccupancy(q);total+=wet*velocity(q);weight+=wet;}
   return select(fallback,total/max(weight,1e-6),weight>0.0);
 }
 fn columnHeight(x:i32,z:i32)->f32{
@@ -610,8 +619,11 @@ fn faceWorld(id:vec3i,axis:u32)->vec3f{
 // face touching a rigid-solid cell carries the solid velocity, which is what
 // makes a moving body sweep water out of its path instead of ignoring it.
 fn constrainedFaceVelocity(id:vec3i,axis:u32,checkSolid:bool)->f32{
+  var neighbor=id;neighbor[axis]+=1;
+  // The terrain heightfield is a static solid: a face touching it carries the
+  // ground's zero velocity in the divergence, exactly like a wall.
+  if(cellInsideTerrain(id)||cellInsideTerrain(neighbor)){return 0.0;}
   if(checkSolid){
-    var neighbor=id;neighbor[axis]+=1;
     let body=max(cellRigidBody(id),cellRigidBody(neighbor));
     if(body>=0){return rigidVelocityAt(body,faceWorld(id,axis))[axis];}
   }
@@ -640,8 +652,9 @@ fn curvatureAt(id:vec3i)->f32{
 
 fn stencilCoefficient(id:vec3i,neighbor:vec3i,axis:u32,checkSolid:bool)->f32{
   if(!valid(neighbor)){return 0.0;}
-  // A rigid-solid neighbor is a Neumann boundary exactly like a wall; its
-  // motion enters through the divergence, not the stencil.
+  // A rigid-solid or terrain neighbor is a Neumann boundary exactly like a
+  // wall; its motion enters through the divergence, not the stencil.
+  if(cellInsideTerrain(neighbor)){return 0.0;}
   if(checkSolid&&cellRigidBody(neighbor)>=0){return 0.0;}
   let h=params.cellGravity.xyz[axis];
   if(liquid(neighbor)){return 1.0/(h*h);}
@@ -657,6 +670,8 @@ fn stencilPressure(id:vec3i,neighbor:vec3i,axis:u32,checkSolid:bool)->f32{
 fn jacobi(@builtin(global_invocation_id) gid: vec3u) {
   let id=vec3i(gid); if (!valid(id)) { return; }
   if (!liquid(id)) { textureStore(pressureOut,id,vec4f(0.0)); return; }
+  // Ground cells are solid, not pressure unknowns, like body interiors below.
+  if(cellInsideTerrain(id)){textureStore(pressureOut,id,vec4f(0.0));return;}
   let checkSolid=nearAnyBody(worldCell(id));
   // Paper Sec 3.9.1: cells occupied by a rigid body are solid, not pressure
   // unknowns. Without this the sphere interior stays "water" and the solve
@@ -684,6 +699,12 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
   if(id.x==d.x-1){v.x=0.0;}else if(liquid(id)||liquid(ex)){let p1=select(0.0,pressureValue(ex),liquid(ex));let theta=select(interfaceFraction(volume(ex),volume(id)),interfaceFraction(volume(id),volume(ex)),liquid(id));v.x-=scale*(p1-p0)/(h.x*select(theta,1.0,liquid(id)&&liquid(ex)));}else{v.x=0.0;}
   if(id.y==d.y-1){v.y=0.0;}else if(liquid(id)||liquid(ey)){let p1=select(0.0,pressureValue(ey),liquid(ey));let theta=select(interfaceFraction(volume(ey),volume(id)),interfaceFraction(volume(id),volume(ey)),liquid(id));v.y-=scale*(p1-p0)/(h.y*select(theta,1.0,liquid(id)&&liquid(ey)));}else{v.y=0.0;}
   if(id.z==d.z-1){v.z=0.0;}else if(liquid(id)||liquid(ez)){let p1=select(0.0,pressureValue(ez),liquid(ez));let theta=select(interfaceFraction(volume(ez),volume(id)),interfaceFraction(volume(id),volume(ez)),liquid(id));v.z-=scale*(p1-p0)/(h.z*select(theta,1.0,liquid(id)&&liquid(ez)));}else{v.z=0.0;}
+  // Faces the terrain heightfield covers are no-flux ground, like the floor.
+  if(hasTerrain()){
+    if(cellInsideTerrain(id)||cellInsideTerrain(ex)){v.x=0.0;}
+    if(cellInsideTerrain(id)||cellInsideTerrain(ey)){v.y=0.0;}
+    if(cellInsideTerrain(id)||cellInsideTerrain(ez)){v.z=0.0;}
+  }
   // Faces covered by a rigid body move with the body (paper Sec 3.9.1); the
   // VOF fluxes then transport volume out of the body's path. Domain-edge
   // faces stay walls.
@@ -727,7 +748,7 @@ fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
       for(var index=0;index<6;index+=1){
         let np=clampCell(id+offsets[index]);
         let neighborVolume=volume(np);total+=neighborVolume;
-        if(cellRigidBody(np)<0){open+=1.0;openSum+=neighborVolume;}
+        if(cellRigidBody(np)<0&&!cellInsideTerrain(np)){open+=1.0;openSum+=neighborVolume;}
       }
       // A one-cell stencil diffuses a carried interior plug over several body
       // radii. Direct lateral open samples preserve the same local phi-s target
@@ -764,7 +785,7 @@ fn relaxSolidPhi(@builtin(global_invocation_id) gid:vec3u){
       for(var index=0;index<6;index+=1){
         let np=clampCell(id+offsets[index]);
         let neighborPhi=textureLoad(pressureIn,np,0).x;total+=neighborPhi;
-        if(cellRigidBody(np)<0){open+=1.0;openSum+=neighborPhi;}
+        if(cellRigidBody(np)<0&&!cellInsideTerrain(np)){open+=1.0;openSum+=neighborPhi;}
       }
       let relaxTarget=select(total/6.0,openSum/max(open,1.0),open>0.0);
       result=mix(phi,relaxTarget,s);
@@ -780,6 +801,7 @@ fn relaxSolidPhi(@builtin(global_invocation_id) gid:vec3u){
 // tracing along the density gradient to the 0.5 iso-contour and depositing
 // fixed-point trilinear weights; pass 3 folds the deposits back in.
 fn cellInsideSolid(p:vec3i)->bool{
+  if(cellInsideTerrain(p)){return true;}
   let bodyCount=u32(round(params.boundary.z));if(bodyCount==0u){return false;}
   let world=worldCell(p);
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}if(insideRigid(rigidBodies[bodyIndex],world)){return true;}}

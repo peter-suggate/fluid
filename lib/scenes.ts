@@ -1,16 +1,24 @@
-import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
+import { cloneScene, defaultCamera, defaultScene, DEFAULT_GPU_CPU_TIMESTEP_RATIO, type CameraState, type SceneDescription } from "./model";
 import { createPaperScenario } from "./paper-scenarios";
+import { applyGardenPool, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
+import { terrainHeightAt } from "./terrain";
+import type { EnvironmentId } from "./environments";
 
 export interface ScenePreset {
   id: string;
   name: string;
-  group: "Interactive" | "Paper figures" | "Comparisons";
+  group: "Interactive" | "Garden" | "Paper figures" | "Comparisons";
   description: string;
   create(): SceneDescription;
   camera?: Partial<CameraState>;
+  /** Environment to switch to when the preset loads (UI-only presentation). */
+  environment?: EnvironmentId;
 }
 
 const paperCamera: Partial<CameraState> = { distance_m: 2.45, target_m: { x: 0, y: 0.42, z: 0 } };
+// Low enough that the pond reads as inset into the lawn (banks occlude the
+// far waterline) while the whole garden still fits the frame.
+const gardenCamera: Partial<CameraState> = { azimuth_rad: 0.58, elevation_rad: 0.3, distance_m: 3.7, target_m: { x: 0, y: 0.3, z: 0 } };
 
 export const scenePresets: ReadonlyArray<ScenePreset> = [
   {
@@ -35,6 +43,68 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
       scene.fluid.initialCondition = "tank-fill";
       return scene;
     }
+  },
+  {
+    id: "garden-pond",
+    name: "Garden pond · still water",
+    group: "Garden",
+    description: "An organic pool inset into the lawn, settled to its waterline. A cork ball bobs over the deep end; stepping stones cross the beach shelf.",
+    create: () => {
+      const scene = applyGardenPool(cloneScene(defaultScene));
+      scene.sceneId = "garden-pond-still";
+      scene.fluid.initialCondition = "tank-fill";
+      const terrain = gardenPoolTerrain();
+      const beach = { x: 0.25, z: -0.55 };
+      const stone = (index: number, x: number, z: number) => ({
+        id: `garden-stone-${index}`, name: `Stepping stone ${index}`, shape: "cylinder" as const,
+        dimensions_m: { x: 0.13, y: 0.06, z: 0.13 }, density_kg_m3: 2600,
+        position_m: { x, y: terrainHeightAt(terrain, x, z) + 0.03, z },
+        orientation: { w: 1, x: 0, y: 0, z: 0 },
+        linearVelocity_m_s: { x: 0, y: 0, z: 0 }, angularVelocity_rad_s: { x: 0, y: 0, z: 0 },
+        restitution: 0.05, friction: 0.9, motion: "static" as const
+      });
+      scene.rigidBodies = [
+        {
+          id: "garden-cork-ball", name: "Cork ball", shape: "sphere",
+          dimensions_m: { x: 0.09, y: 0.09, z: 0.09 }, density_kg_m3: 240,
+          position_m: { x: -0.35, y: GARDEN_WATERLINE_M + 0.25, z: -0.12 },
+          orientation: { w: 1, x: 0, y: 0, z: 0 },
+          linearVelocity_m_s: { x: 0.1, y: 0, z: 0.05 }, angularVelocity_rad_s: { x: 0, y: 1.2, z: 0 },
+          restitution: 0.4, friction: 0.35
+        },
+        stone(1, beach.x - 0.18, beach.z - 0.1), stone(2, beach.x + 0.08, beach.z + 0.04), stone(3, beach.x + 0.34, beach.z + 0.16)
+      ];
+      return scene;
+    },
+    camera: gardenCamera,
+    environment: "garden"
+  },
+  {
+    id: "garden-dam-break",
+    name: "Garden pond · dam break",
+    group: "Garden",
+    description: "A water column released on the lawn corner races over the grass, scatters the crate stack and washes into the pond.",
+    create: () => {
+      const scene = applyGardenPool(createPaperScenario("dam-break-boxes"), { fillFraction: 0.16 });
+      scene.sceneId = "garden-pond-dam-break";
+      return scene;
+    },
+    camera: gardenCamera,
+    environment: "garden"
+  },
+  {
+    id: "garden-hose",
+    name: "Garden pond · hose fill",
+    group: "Garden",
+    description: "The pond starts as a puddle in the deep end and a hose arcs water in until the banks fill to the waterline.",
+    create: () => {
+      const scene = applyGardenPool(createPaperScenario("hose-tank"), { fillFraction: 0.08 });
+      scene.sceneId = "garden-pond-hose-fill";
+      if (scene.fluid.inflow) scene.fluid.inflow.end_s = 30;
+      return scene;
+    },
+    camera: gardenCamera,
+    environment: "garden"
   },
   {
     id: "hose-tank",
@@ -76,7 +146,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
       // pressure methods are the only variables in the comparison.
       scene.fluid.surfaceTension_N_m = 0;
       scene.numerics.fixedDt_s = 1 / 30;
-      scene.numerics.maxDt_s = 1 / 30;
+      scene.numerics.maxDt_s = scene.numerics.fixedDt_s * DEFAULT_GPU_CPU_TIMESTEP_RATIO;
       scene.rigidBodies = [];
       return scene;
     }

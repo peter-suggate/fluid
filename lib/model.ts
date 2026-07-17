@@ -1,4 +1,5 @@
 import sharedDefaultScene from "../native/Sources/FluidMetal/Resources/default-scene.json";
+import { validateTerrain, type TerrainDescription } from "./terrain";
 
 export type ViewMode = "scientific" | "presentation";
 export type RunState = "paused" | "running";
@@ -46,6 +47,8 @@ export interface SceneDescription {
     top: "open" | "closed";
     fluidWallMode: "free-slip" | "no-slip";
   };
+  /** Optional ground heightfield inside the container; absent means a flat floor at y = 0. */
+  terrain?: TerrainDescription;
   fluid: {
     density_kg_m3: number;
     dynamicViscosity_Pa_s: number;
@@ -92,6 +95,7 @@ export interface MetricSample {
 }
 
 export const BUILD_ID = "web-tall-cell-ab-1.3.0";
+export const DEFAULT_GPU_CPU_TIMESTEP_RATIO = 4;
 
 export const defaultScene: SceneDescription = sharedDefaultScene as SceneDescription;
 
@@ -156,6 +160,7 @@ export function validateScene(scene: SceneDescription): string[] {
       || inflow.center_m.y < 0 || inflow.center_m.y > c.height_m
       || inflow.center_m.z < -c.depth_m / 2 || inflow.center_m.z > c.depth_m / 2) errors.push("Inflow center must be inside the container");
   }
+  if (scene.terrain && c) errors.push(...validateTerrain(scene.terrain, c));
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");
   if (!scene.numerics || !(scene.numerics.fixedDt_s > 0) || !(scene.numerics.maxDt_s > 0)) errors.push("Time steps must be positive");
   if (scene.numerics && scene.numerics.fixedDt_s > scene.numerics.maxDt_s) errors.push("Fixed time step exceeds maximum time step");

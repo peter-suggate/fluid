@@ -43,13 +43,14 @@ Edited in the **scene configuration modal**; part of `SceneDescription`
 | Legacy run horizon | `duration_s` | retained for scene compatibility and fixed-duration benchmark metadata; it does not stop the interactive simulation |
 | Random seed | `randomSeed` | reproducibility manifest |
 | Rigid bodies | `rigidBodies[]` | rigid solver + coupling |
+| Terrain heightfield | `terrain` (base level + basin/mound features) | GPU solvers (static solid columns), initial fluid state, rigid ground contact, renderer (garden environment); the CPU reference ignores it |
 
 ## Common numerics (serialized, consumed by every method)
 
 | Parameter | Field | Meaning |
 | --- | --- | --- |
-| Fixed dt | `numerics.fixedDt_s` | rigid-body/validation clock step; CPU oracle step |
-| Max dt | `numerics.maxDt_s` | cap on each GPU advance (`planGPUAdvance`) |
+| CPU step | `numerics.fixedDt_s` | rigid-body and CPU-oracle clock step |
+| GPU advance cap | `numerics.maxDt_s` | independently configurable; defaults to four times the CPU step |
 | Nominal cell | `nominalResolution.length_m` | CPU oracle MAC grid resolution |
 | PCG budget | `numerics.pressureMaxIterations` | CPU reference PCG iteration cap (8–1000) |
 | PCG tolerance | `numerics.pressureRelativeTolerance` | CPU reference PCG relative residual target |

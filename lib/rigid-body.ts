@@ -1,5 +1,6 @@
 import { add, cross, dot, length, normalize, scale, sub } from "./math";
 import type { Quaternion, RigidBodyDescription, RigidShape, SceneDescription, Vec3 } from "./model";
+import { sceneHasTerrain, terrainHeightAt, terrainNormalAt } from "./terrain";
 
 export interface MassProperties {
   volume_m3: number;
@@ -323,7 +324,7 @@ export function rigidDiagnostics(bodies: RigidBodyState[], gravity: Vec3): Rigid
   return { contactCount: contacts, maxPenetration_m: penetration, kineticEnergy_J: kinetic, potentialEnergy_J: potential, linearMomentum_kg_m_s: linearMomentum, angularMomentum_kg_m2_s: angularMomentum, nanCount, quaternionMaxNormError: quaternionError };
 }
 
-export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDescription, "container" | "fluid">, dt: number, collisionIterations = 6, externalLoads?: ReadonlyMap<string, RigidExternalLoad>): RigidStepDiagnostics {
+export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDescription, "container" | "fluid" | "terrain">, dt: number, collisionIterations = 6, externalLoads?: ReadonlyMap<string, RigidExternalLoad>): RigidStepDiagnostics {
   if (!(dt > 0) || !Number.isFinite(dt)) throw new Error("Rigid-body time step must be finite and positive");
   for (const body of bodies) {
     body.contactCount = 0; body.maxPenetration_m = 0; body.quaternionNormError = 0;
@@ -363,9 +364,19 @@ export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDe
     [{ x: 0, y: 1, z: 0 }, 0]
   ];
   if (c.top === "closed") planes.push([{ x: 0, y: -1, z: 0 }, -c.height_m]);
+  const terrain = sceneHasTerrain(scene) ? scene.terrain : undefined;
 
   for (let iteration = 0; iteration < collisionIterations; iteration += 1) {
-    for (const body of bodies) for (const [normal, offset] of planes) solvePlaneContact(body, normal, offset);
+    for (const body of bodies) {
+      for (const [normal, offset] of planes) solvePlaneContact(body, normal, offset);
+      if (terrain) {
+        // Local tangent-plane contact against the ground heightfield, sampled
+        // under the body each iteration so it tracks the slope as it moves.
+        const normal = terrainNormalAt(terrain, body.position_m.x, body.position_m.z);
+        const surfaceY = terrainHeightAt(terrain, body.position_m.x, body.position_m.z);
+        solvePlaneContact(body, normal, normal.x * body.position_m.x + normal.y * surfaceY + normal.z * body.position_m.z);
+      }
+    }
     for (let i = 0; i < bodies.length; i += 1) for (let j = i + 1; j < bodies.length; j += 1) solveBodyContact(bodies[i], bodies[j]);
   }
   for (const body of bodies) {
