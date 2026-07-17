@@ -7,6 +7,7 @@ import { useUIStore, type RightPanel } from "./stores/ui-store";
 import type { GPUQuality } from "./tall-cell-grid";
 import type { GridOverlayConfig, GridOverlayMode, WaterRenderMode } from "./webgpu-renderer";
 import { isEnvironmentId, type EnvironmentId } from "./environments";
+import { clampTargetFps, MAX_TARGET_FPS, MIN_TARGET_FPS } from "./frame-pacing";
 
 const qualities: ReadonlyArray<GPUQuality> = ["balanced", "high", "ultra"];
 const deletedValue = "~delete";
@@ -60,6 +61,7 @@ type UIQueryState = {
   gridOverlayMode: GridOverlayMode;
   waterRenderMode: WaterRenderMode;
   environmentId: EnvironmentId;
+  targetFps: number;
 };
 
 type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
@@ -158,7 +160,6 @@ export function parseQueryState(search: string): QueryState {
     }
     catch { /* Malformed external values are ignored and canonicalized away. */ }
   }
-
   const initialUI = useUIStore.getInitialState();
   const presetCamera = cameraForPreset(preset);
   const view = query.get("view");
@@ -199,7 +200,8 @@ export function parseQueryState(search: string): QueryState {
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: gridMode === "structure" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
       waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode,
-      environmentId: isEnvironmentId(environment) ? environment : initialUI.environmentId
+      environmentId: isEnvironmentId(environment) ? environment : initialUI.environmentId,
+      targetFps: clampTargetFps(numberParam(query, "fps", initialUI.targetFps, MIN_TARGET_FPS, MAX_TARGET_FPS))
     }
   };
 }
@@ -207,7 +209,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "panel"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === "render" || key === "environment" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === "render" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
@@ -226,6 +228,7 @@ export function serializeQueryState(
   query.set("view", uiState.view);
   query.set("render", uiState.waterRenderMode);
   query.set("environment", uiState.environmentId);
+  if (uiState.targetFps !== useUIStore.getInitialState().targetFps) query.set("fps", String(uiState.targetFps));
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");
   else if (rightPanel) query.set("panel", rightPanel);

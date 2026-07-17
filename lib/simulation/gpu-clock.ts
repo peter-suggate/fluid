@@ -1,6 +1,6 @@
 const CLOCK_EPSILON_S = 1e-9;
-const PRESENTATION_QUANTUM_S = 1 / 60;
-const MAX_TALL_CELL_BATCH_DEPTH = 8;
+const MAX_TALL_CELL_BATCH_DEPTH = 32;
+const TALL_CELL_IN_FLIGHT_BATCHES = 2;
 
 /**
  * Number of CPU clock ticks that may be prepared before a GPU queue fence.
@@ -8,7 +8,7 @@ const MAX_TALL_CELL_BATCH_DEPTH = 8;
  * The restricted tall-cell solver is commonly configured with a 4 ms outer
  * step. Fencing every step then limits it to one 4 ms advance per display
  * refresh even when the GPU has enough headroom to calculate several steps.
- * Batch enough restricted tall-cell work to cover one 60 Hz presentation
+ * Batch enough restricted tall-cell work to cover one presentation
  * interval and fence the batch once. Rigid feedback remains conservative: the
  * solver captures every per-step impulse, the controller merges them over the
  * frame-sized partitioned-coupling interval, then distributes that aggregate
@@ -18,12 +18,26 @@ const MAX_TALL_CELL_BATCH_DEPTH = 8;
  * quadtree method keeps its existing shallow uncoupled batch because topology
  * rebuilds may deliberately stop a submission sequence.
  */
-export function gpuBatchDepth(methodId: string, fixedDt_s: number, hasRigidBodies: boolean): number {
+export function gpuBatchDepth(methodId: string, fixedDt_s: number, hasRigidBodies: boolean, targetFps = 60): number {
   if (methodId === "tall-cell" && Number.isFinite(fixedDt_s) && fixedDt_s > 0) {
-    return Math.min(MAX_TALL_CELL_BATCH_DEPTH, Math.max(1, Math.ceil((PRESENTATION_QUANTUM_S - CLOCK_EPSILON_S) / fixedDt_s)));
+    const presentationQuantum_s = 1 / Math.min(120, Math.max(24, Number.isFinite(targetFps) ? targetFps : 60));
+    return Math.min(MAX_TALL_CELL_BATCH_DEPTH, Math.max(1, Math.ceil((presentationQuantum_s - CLOCK_EPSILON_S) / fixedDt_s)));
   }
   if (hasRigidBodies) return 1;
   return methodId === "quadtree-tall-cell" ? 2 : 1;
+}
+
+/**
+ * Maximum CPU-prepared transport window ahead of queue-confirmed GPU state.
+ *
+ * Tall-cell coupling already partitions rigid feedback over a presentation-
+ * sized batch. Keep the following batch prepared as well so requestAnimationFrame
+ * jitter cannot starve the GPU at a completion boundary. Other methods retain
+ * their stricter topology/readback handshakes.
+ */
+export function gpuInFlightStepLimit(methodId: string, fixedDt_s: number, hasRigidBodies: boolean, targetFps = 60): number {
+  const batchDepth = gpuBatchDepth(methodId, fixedDt_s, hasRigidBodies, targetFps);
+  return methodId === "tall-cell" ? batchDepth * TALL_CELL_IN_FLIGHT_BATCHES : batchDepth;
 }
 
 /**

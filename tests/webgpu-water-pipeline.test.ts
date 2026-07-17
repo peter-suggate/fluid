@@ -7,14 +7,15 @@ import {
   shouldUpdateWaterSurface,
   surfaceExtractionDispatchPlan,
   surfaceExtractionShader,
-  surfaceVertexCapacity,
-  WATER_SURFACE_UPDATE_INTERVAL_MS
+  surfaceVertexCapacity
 } from "../lib/webgpu-water-pipeline";
 
-test("surface extraction coalesces solver revisions at 30 Hz", () => {
+test("surface extraction follows the selected presentation cadence", () => {
   assert.equal(shouldUpdateWaterSurface(-1, 0, -Infinity, 0), true, "the first mesh is immediate");
-  assert.equal(shouldUpdateWaterSurface(4, 5, 100, 100 + WATER_SURFACE_UPDATE_INTERVAL_MS - 0.01), false);
-  assert.equal(shouldUpdateWaterSurface(4, 9, 100, 100 + WATER_SURFACE_UPDATE_INTERVAL_MS), true, "the newest revision is eligible after one interval");
+  assert.equal(shouldUpdateWaterSurface(4, 5, 100, 115, 60), false);
+  assert.equal(shouldUpdateWaterSurface(4, 9, 100, 116.2, 60), true, "60 Hz is the default smooth raster cadence");
+  assert.equal(shouldUpdateWaterSurface(4, 9, 100, 125, 30), false);
+  assert.equal(shouldUpdateWaterSurface(4, 9, 100, 133, 30), true, "lower targets coalesce more revisions");
   assert.equal(shouldUpdateWaterSurface(9, 9, 100, 1000), false, "an unchanged solver field is never rebuilt");
 });
 

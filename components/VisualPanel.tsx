@@ -15,6 +15,8 @@ export function VisualPanel() {
   const setWaterRenderMode = useUIStore((state) => state.setWaterRenderMode);
   const environmentId = useUIStore((state) => state.environmentId);
   const setEnvironmentId = useUIStore((state) => state.setEnvironmentId);
+  const targetFps = useUIStore((state) => state.targetFps);
+  const setTargetFps = useUIStore((state) => state.setTargetFps);
   const gridOverlayAxis = useUIStore((state) => state.gridOverlayAxis);
   const setGridOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
   const gridOverlaySlice = useUIStore((state) => state.gridOverlaySlice);
@@ -38,6 +40,21 @@ export function VisualPanel() {
         <button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button>
       </div>
       <small className="control-hint">Scientific mode exposes solver instrumentation; presentation mode keeps the clean rendered scene.</small>
+    </section>
+
+    <section className="panel-section utility-controls">
+      <div className="section-heading"><h2>Frame pacing</h2><span>REALTIME</span></div>
+      <label className="select-control">
+        <span>Target presentation rate</span>
+        <select aria-label="Target frames per second" value={targetFps} onChange={(event) => setTargetFps(Number(event.target.value))}>
+          <option value={24}>24 fps</option>
+          <option value={30}>30 fps</option>
+          <option value={60}>60 fps</option>
+          <option value={90}>90 fps</option>
+          <option value={120}>120 fps</option>
+        </select>
+      </label>
+      <small className="control-hint">Raster surface extraction and presentation target {targetFps} Hz ({(1000 / targetFps).toFixed(2)} ms). Physics stays at real-time ×1 using the stable scene substep.</small>
     </section>
 
     <section className="panel-section utility-controls">
