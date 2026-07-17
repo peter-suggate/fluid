@@ -53,7 +53,6 @@ type UIQueryState = {
   view: ViewMode;
   camera: CameraState;
   sceneModalOpen: boolean;
-  validationOpen: boolean;
   diagnosticsOpen: boolean;
   rightPanel: RightPanel;
   gridOverlayAxis: GridOverlayConfig["axis"];
@@ -194,7 +193,6 @@ export function parseQueryState(search: string): QueryState {
         }
       },
       sceneModalOpen: query.get("sceneConfig") === "1",
-      validationOpen: query.get("validation") === "1",
       diagnosticsOpen: rightPanel === "diagnostics",
       rightPanel,
       gridOverlayAxis: grid === "off" || grid === "x" || grid === "z" ? grid : initialUI.gridOverlayAxis,
@@ -231,7 +229,6 @@ export function serializeQueryState(
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");
   else if (rightPanel) query.set("panel", rightPanel);
-  if (uiState.validationOpen) query.set("validation", "1");
   if (uiState.sceneModalOpen) query.set("sceneConfig", "1");
   if (uiState.gridOverlayAxis !== "off") query.set("grid", uiState.gridOverlayAxis);
   if (uiState.gridOverlaySlice !== 0.5) query.set("gridSlice", String(uiState.gridOverlaySlice));

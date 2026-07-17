@@ -1,4 +1,4 @@
-import { BUILD_ID, cloneScene, createRunManifest, parseScene, serializeScene, type SceneDescription } from "../model";
+import { BUILD_ID, cloneScene, parseScene, type SceneDescription } from "../model";
 import { EulerianFluidSolver } from "../eulerian-solver";
 import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidExternalLoad, type RigidStepDiagnostics } from "../rigid-body";
 import type { RigidBodyDescription } from "../model";
@@ -20,15 +20,6 @@ import { externalLoadsFromGPU } from "./gpu-loads";
 export type BodyDragPhase = "start" | "move" | "end";
 
 const MAX_BODIES = 12;
-
-function downloadText(name: string, text: string, mime = "application/json") {
-  const url = URL.createObjectURL(new Blob([text], { type: mime }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = name;
-  link.click();
-  URL.revokeObjectURL(url);
-}
 
 /**
  * Owns the mutable runtime the render loop needs at 60 Hz — rigid-body
@@ -402,13 +393,6 @@ class SimulationController {
 
   // ---- persistence -------------------------------------------------------
 
-  saveScene() {
-    const scene = useSceneStore.getState().scene;
-    localStorage.setItem("fluid-lab.scene.v1", serializeScene(scene));
-    downloadText(`${scene.sceneId}.fluid.json`, serializeScene(scene));
-    useRuntimeStore.getState().setNotice("Scene saved locally and exported");
-  }
-
   loadLocalScene(): boolean {
     const stored = localStorage.getItem("fluid-lab.scene.v1");
     if (!stored) return false;
@@ -420,28 +404,6 @@ class SimulationController {
   importScene(name: string, contents: string) {
     try { const loaded = parseScene(contents); this.reset(loaded); useRuntimeStore.getState().setNotice(`Loaded ${name}`); }
     catch (error) { useRuntimeStore.getState().setNotice(error instanceof Error ? error.message : "Scene import failed", "warn"); }
-  }
-
-  exportMetrics() {
-    const scene = useSceneStore.getState().scene;
-    const method = useMethodStore.getState();
-    const diagnostics = useDiagnosticsStore.getState();
-    const adapter = diagnostics.gpuStatus.state === "ready" ? diagnostics.gpuStatus.adapter : diagnostics.gpuStatus.label;
-    const payload = {
-      manifest: createRunManifest(scene, adapter),
-      backend: this.backend,
-      method: method.methodId,
-      gpuQuality: method.quality,
-      methodOverrides: method.overrides[method.methodId] ?? {},
-      gpuInfo: diagnostics.gpuInfo,
-      shellMetrics: { presentationFrame_ms: diagnostics.frameMs, canvasResolution: diagnostics.resolution, samples: diagnostics.samples, performance: diagnostics.performanceSnapshot, performanceHistory: diagnostics.performanceHistory },
-      rigidBodyState: diagnostics.bodies,
-      rigidBodyDiagnostics: diagnostics.rigidState,
-      eulerianMetrics: diagnostics.fluidState,
-      couplingMetrics: diagnostics.couplingState
-    };
-    downloadText(`fluid-lab-run-${Date.now()}.json`, JSON.stringify(payload, null, 2) + "\n");
-    useRuntimeStore.getState().setNotice("Run manifest and shell metrics exported");
   }
 
   applyAndResetFluid() {
