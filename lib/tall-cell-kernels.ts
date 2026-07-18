@@ -29,6 +29,9 @@ struct RigidBody {
   orientation: vec4f,
   linearVelocity: vec4f,
   angularVelocity: vec4f,
+  inverseMassInertia: vec4f,
+  angularMomentumRestitution: vec4f,
+  material: vec4f,
 }
 @group(0) @binding(10) var<storage,read> rigidBodies:array<RigidBody,12>;
 @group(0) @binding(11) var<storage,read_write> rigidExchange:array<atomic<i32>>;

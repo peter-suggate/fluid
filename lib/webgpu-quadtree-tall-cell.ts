@@ -1910,6 +1910,9 @@ export class WebGPUQuadtreeTallCellProjection {
   private readonly couplingDistinctDofs: number;
   private readonly couplingBodyIndices: number[];
   private readonly displacedVolumes: number[];
+  private bodyExchangePipeline?: GPUComputePipeline;
+  private bodyExchangeIndices?: GPUBuffer;
+  private bodyExchangeBindGroup?: GPUBindGroup;
   private lastResidualRms?: number;
   private lastInitialResidualRms?: number;
   private solveSequence = 0;
@@ -1929,6 +1932,7 @@ export class WebGPUQuadtreeTallCellProjection {
   private inlineMonitorBuffer?: GPUBuffer;
   private inlineMonitorPending = false;
   private inlineMonitorEncoded = false;
+  private inlineMonitorAvailable = false;
   private inlineExplicitSizing?: Float32Array;
   private inlineBuilder?: WebGPUQuadtreeBuilder;
 
@@ -3185,6 +3189,37 @@ export class WebGPUQuadtreeTallCellProjection {
     return readback;
   }
 
+  /** Fold variational K^T p impulses into the resident fixed-point exchange.
+   * This replaces the former per-step MAP_READ handoff to the CPU integrator. */
+  encodeBodyImpulseExchange(encoder: GPUCommandEncoder, exchange: GPUBuffer) {
+    if (!this.coupling?.dynamic || this.couplingBodyCount === 0) return false;
+    if (!this.bodyExchangePipeline || !this.bodyExchangeIndices) {
+      const indices = new Uint32Array(16); indices[0] = this.couplingBodyCount;
+      indices.set(this.couplingBodyIndices.slice(0, 12), 1);
+      this.bodyExchangeIndices = bufferWithData(this.device, "Quadtree resident rigid impulse indices", indices);
+      const exchangeShaderModule = this.device.createShaderModule({ label: "Quadtree resident rigid impulse exchange", code: `
+        @group(0) @binding(0) var<storage,read> scalars:array<f32>;
+        @group(0) @binding(1) var<storage,read_write> exchange:array<atomic<i32>>;
+        @group(0) @binding(2) var<storage,read> indices:array<u32>;
+        @compute @workgroup_size(12) fn main(@builtin(global_invocation_id) id:vec3u){
+          let slot=id.x;if(slot>=indices[0]){return;}let source=12u+slot*8u;let destination=indices[slot+1u]*12u;
+          atomicAdd(&exchange[destination],i32(round(-${this.scene.fluid.density_kg_m3}*scalars[source]*1e6)));
+          atomicAdd(&exchange[destination+1u],i32(round(-${this.scene.fluid.density_kg_m3}*scalars[source+1u]*1e6)));
+          atomicAdd(&exchange[destination+2u],i32(round(-${this.scene.fluid.density_kg_m3}*scalars[source+2u]*1e6)));
+          atomicAdd(&exchange[destination+3u],i32(round(-${this.scene.fluid.density_kg_m3}*scalars[source+3u]*1e6)));
+          atomicAdd(&exchange[destination+4u],i32(round(-${this.scene.fluid.density_kg_m3}*scalars[source+4u]*1e6)));
+          atomicAdd(&exchange[destination+5u],i32(round(-${this.scene.fluid.density_kg_m3}*scalars[source+5u]*1e6)));
+        }` });
+      this.bodyExchangePipeline = this.device.createComputePipeline({ label: "Quadtree resident rigid impulse exchange", layout: "auto", compute: { module: exchangeShaderModule, entryPoint: "main" } });
+      this.bodyExchangeBindGroup = this.device.createBindGroup({ layout: this.bodyExchangePipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: this.scalarBuffer } }, { binding: 1, resource: { buffer: exchange } }, { binding: 2, resource: { buffer: this.bodyExchangeIndices } }
+      ] });
+    }
+    const pass = encoder.beginComputePass({ label: "Quadtree variational impulse to resident rigid state" });
+    pass.setPipeline(this.bodyExchangePipeline); pass.setBindGroup(0, this.bodyExchangeBindGroup!); pass.dispatchWorkgroups(1); pass.end();
+    return true;
+  }
+
   decodeMappedBodyImpulseReadback(readback: GPUBuffer, sourceOffset = 0): QuadtreeBodyImpulse[] {
     const solve = new Float32Array(readback.getMappedRange(sourceOffset, this.bodyImpulseReadbackBytes)), rho = this.scene.fluid.density_kg_m3;
     return this.couplingBodyIndices.map((bodyIndex, slot) => {
@@ -3205,6 +3240,7 @@ export class WebGPUQuadtreeTallCellProjection {
   }
 
   async readSolveDiagnostics() {
+    await this.readInlineMonitorDiagnostics();
     // A freshly rebuilt projection may be swapped in after the preceding solve
     // but before stats are sampled. Its scalar buffer is intentionally blank;
     // retain the diagnostics carried over by rebuildFromState until it encodes.
@@ -3321,15 +3357,23 @@ export class WebGPUQuadtreeTallCellProjection {
     return true;
   }
 
-  /** Kick the non-blocking monitor readback after the step's queue submission. */
+  /** Mark the GPU-authored monitor available. Telemetry decides when to map it. */
   finishInlineRebuild() {
-    if (!this.inlineMonitorEncoded || !this.inlineMonitorBuffer) return;
+    if (!this.inlineMonitorEncoded) return;
+    this.inlineMonitorEncoded = false;
+    this.inlineMonitorAvailable = true;
+  }
+
+  private async readInlineMonitorDiagnostics() {
+    if (!this.inlineMonitorAvailable || !this.inlineMonitorBuffer || this.inlineMonitorPending) return;
     const buffer = this.inlineMonitorBuffer;
-    this.inlineMonitorEncoded = false; this.inlineMonitorPending = true;
-    void buffer.mapAsync(GPUMapMode.READ).then(() => {
+    this.inlineMonitorAvailable = false; this.inlineMonitorPending = true;
+    try {
+      await buffer.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(buffer.getMappedRange()).slice(); buffer.unmap();
       this.applyInlineControl(words);
-    }).catch(() => { /* Device loss is reported by the renderer. */ }).finally(() => { this.inlineMonitorPending = false; });
+    } catch { /* Device loss is reported by the renderer. */ }
+    finally { this.inlineMonitorPending = false; }
   }
 
   private applyInlineControl(words: Uint32Array) {
@@ -3461,7 +3505,7 @@ export class WebGPUQuadtreeTallCellProjection {
   get solver() { return this.pressureSolver; }
 
   destroySharedSurface() { this.surfaceState.destroy(); this.resources.surfaceTransport?.destroy(); this.resources.surfaceTransport = undefined; WebGPUQuadtreeBuilder.destroyCache(this.gpuCache.construction); this.gpuCache.gpuPack?.destroy(); this.gpuCache.gpuPack = undefined; this.gpuCache.cpuWorker?.terminate(); this.gpuCache.cpuWorker = undefined; }
-  destroy() { for (const buffer of this.buffers) buffer.destroy(); this.params.destroy(); this.cellProjection.destroy(); this.cellTopology.destroy(); this.factorAux.destroy(); this.cellPressureSamples.destroy(); this.mappedPressure.destroy(); this.mappedPressureStorageFallback.destroy(); this.mappedPressureSampledFallback.destroy(); this.divergence.destroy(); this.phaseQuerySet?.destroy(); this.phaseQueryResolve?.destroy(); this.inlineMonitorBuffer?.destroy(); this.solveFeedbackReadback?.destroy(); }
+  destroy() { for (const buffer of this.buffers) buffer.destroy(); this.params.destroy(); this.bodyExchangeIndices?.destroy(); this.cellProjection.destroy(); this.cellTopology.destroy(); this.factorAux.destroy(); this.cellPressureSamples.destroy(); this.mappedPressure.destroy(); this.mappedPressureStorageFallback.destroy(); this.mappedPressureSampledFallback.destroy(); this.divergence.destroy(); this.phaseQuerySet?.destroy(); this.phaseQueryResolve?.destroy(); this.inlineMonitorBuffer?.destroy(); this.solveFeedbackReadback?.destroy(); }
 }
 
 export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput): PreparedProjectionCPU {

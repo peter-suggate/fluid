@@ -599,6 +599,14 @@ export class FluidLabRenderer {
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; }
 
+  /** Resolve a click against live GPU poses without restoring a CPU pose mirror. */
+  async pickRigidBody(origin: RigidBodyState["position_m"], direction: RigidBodyState["position_m"]) {
+    const fluid=this.gpuFluid,generation=this.gpuFluidGeneration;
+    if(!fluid?.pickRigidBody||this.disposed||this.deviceLost)return undefined;
+    const picked=await fluid.pickRigidBody(origin,direction);
+    return this.gpuFluid===fluid&&this.gpuFluidGeneration===generation?picked:undefined;
+  }
+
   async initialize(): Promise<void> {
     const startedAt_ms=performance.now();
     const progress=(label:string,completed:number,total=7,phase="renderer")=>this.onStatus({state:"initializing",label,phase,completed,total,startedAt_ms});
@@ -983,22 +991,28 @@ export class FluidLabRenderer {
       });
     }
     this.device.queue.writeBuffer(this.uniformBuffer, 0, packed);
-    const bodyData = new Float32Array(12 * 16);
-    const shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
-    const palette = [[0.95, 0.63, 0.29], [0.48, 0.66, 0.96], [0.84, 0.42, 0.48], [0.66, 0.52, 0.92]];
-    bodies.slice(0, 12).forEach((body, index) => {
-      const offset = index * 16;
-      const d = body.description.dimensions_m;
-      const half = body.description.shape === "box" ? [d.x / 2, d.y / 2, d.z / 2] : body.description.shape === "sphere" ? [d.x, d.x, d.x] : [d.x, d.y / 2, d.x];
-      const color = palette[shapeIndex[body.description.shape]];
-      bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, boundingRadius(body)], offset);
-      bodyData.set([half[0], half[1], half[2], shapeIndex[body.description.shape]], offset + 4);
-      bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
-      bodyData.set([color[0], color[1], color[2], body.description.id === selectedBodyId ? 1 : 0], offset + 12);
-    });
-    this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
+    const residentRigidBuffer = backend === "webgpu" ? this.gpuFluid?.rigidRenderBuffer : undefined;
+    if (residentRigidBuffer) {
+      this.gpuFluid?.setSelectedRigidBody?.(bodies.findIndex((body) => body.description.id === selectedBodyId));
+    } else {
+      const bodyData = new Float32Array(12 * 16);
+      const shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
+      const palette = [[0.95, 0.63, 0.29], [0.48, 0.66, 0.96], [0.84, 0.42, 0.48], [0.66, 0.52, 0.92]];
+      bodies.slice(0, 12).forEach((body, index) => {
+        const offset = index * 16;
+        const d = body.description.dimensions_m;
+        const half = body.description.shape === "box" ? [d.x / 2, d.y / 2, d.z / 2] : body.description.shape === "sphere" ? [d.x, d.x, d.x] : [d.x, d.y / 2, d.x];
+        const color = palette[shapeIndex[body.description.shape]];
+        bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, boundingRadius(body)], offset);
+        bodyData.set([half[0], half[1], half[2], shapeIndex[body.description.shape]], offset + 4);
+        bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
+        bodyData.set([color[0], color[1], color[2], body.description.id === selectedBodyId ? 1 : 0], offset + 12);
+      });
+      this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
+    }
     const cpuDataUpload_ms=performance.now()-uploadStart,renderStart=performance.now();
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
+    if (residentRigidBuffer) encoder.copyBufferToBuffer(residentRigidBuffer, 0, this.bodyBuffer, 0, 12 * 16 * 4);
     this.secondaryParticlePipeline?.setSource(backend === "webgpu" ? this.gpuFluid?.secondaryParticles : undefined);
     // One interval surrounds the complete active presentation path. For raster
     // optics it starts at isosurface extraction and ends after final upscale;

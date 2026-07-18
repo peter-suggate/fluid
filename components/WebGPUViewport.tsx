@@ -16,10 +16,12 @@ type Vec3 = RigidBodyState["position_m"];
 
 export function WebGPUViewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rendererRef = useRef<FluidLabRenderer | null>(null);
   const camera = useUIStore((state) => state.camera);
   const setCamera = useUIStore((state) => state.setCamera);
   const pointerRef = useRef<
     | { id: number; x: number; y: number; action: "orbit" | "pan" }
+    | { id: number; x: number; y: number; action: "pick" }
     | { id: number; action: "body"; bodyId: string; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
@@ -37,9 +39,10 @@ export function WebGPUViewport() {
         useDiagnosticsStore.getState().set({ gpuStatus: status });
       },
       (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
-      (loads) => simulation.mergeGPULoads(loads),
+      undefined,
       (time_s) => simulation.gpuAdvanceCompleted(time_s)
     );
+    rendererRef.current = renderer;
     let frame = 0;
     let alive = true;
     let lastFrameAt_ms = -Infinity;
@@ -79,7 +82,7 @@ export function WebGPUViewport() {
       running = false;
       if (useDiagnosticsStore.getState().gpuStatus.state !== "lost") diagnostics.set({ gpuStatus: { state: "unavailable", label: error instanceof Error ? error.message : "WebGPU initialization failed" } });
     });
-    return () => { alive = false; running = false; cancelAnimationFrame(frame); renderer.destroy(); };
+    return () => { alive = false; running = false; cancelAnimationFrame(frame); if(rendererRef.current===renderer)rendererRef.current=null; renderer.destroy(); };
   }, []);
 
   const pointerRay = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -115,12 +118,31 @@ export function WebGPUViewport() {
     return inFootprint && (axis === "y" ? nearHorizontalEdge : nearTop) ? { axis, grabY: Math.min(point.y, c.height_m) } : undefined;
   };
 
-  const pointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+  const beginBodyDrag = (pointerId: number, timeStamp: number, ray: { origin: Vec3; direction: Vec3 }, body: RigidBodyState, position: Vec3, orientation?: RigidBodyState["orientation"]) => {
+    const basis = cameraBasis(useUIStore.getState().camera);
+    const dragPoint = planeHit(ray.origin, ray.direction, position, basis.forward), grabOffset = sub(position, dragPoint);
+    pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, planePoint: position, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };
+    useUIStore.getState().selectBody(body.description.id);
+    simulation.dragBody(body.description.id, position, { x: 0, y: 0, z: 0 }, "start", orientation);
+  };
+
+  const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     if (event.button === 0 && !event.shiftKey) {
       const ray = pointerRay(event);
       const grab = sliceGrabHit(ray.origin, ray.direction);
       if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
+      if (simulation.backend === "webgpu" && rendererRef.current) {
+        const pointerId=event.pointerId,timeStamp=event.timeStamp,x=event.clientX,y=event.clientY;
+        pointerRef.current={id:pointerId,x,y,action:"pick"};
+        const picked=await rendererRef.current.pickRigidBody(ray.origin,ray.direction);
+        const active=pointerRef.current;
+        if(!active||active.id!==pointerId||active.action!=="pick")return;
+        const body=picked?useDiagnosticsStore.getState().bodies[picked.bodyIndex]:undefined;
+        if(body&&picked){beginBodyDrag(pointerId,timeStamp,ray,body,picked.position_m,picked.orientation);return;}
+        pointerRef.current={id:pointerId,x,y,action:"orbit"};
+        return;
+      }
       let nearest: { body: RigidBodyState; t: number } | undefined;
       for (const body of useDiagnosticsStore.getState().bodies) {
         const oc = sub(ray.origin, body.position_m), radius = boundingRadius(body), b = dot(oc, ray.direction), c = dot(oc, oc) - radius * radius, discriminant = b * b - c;
@@ -128,11 +150,7 @@ export function WebGPUViewport() {
         if (t > 0 && (!nearest || t < nearest.t)) nearest = { body, t };
       }
       if (nearest) {
-        const basis = cameraBasis(useUIStore.getState().camera);
-        const dragPoint = planeHit(ray.origin, ray.direction, nearest.body.position_m, basis.forward), grabOffset = sub(nearest.body.position_m, dragPoint);
-        pointerRef.current = { id: event.pointerId, action: "body", bodyId: nearest.body.description.id, planePoint: nearest.body.position_m, planeNormal: basis.forward, grabOffset, lastPosition: nearest.body.position_m, lastTime: event.timeStamp };
-        useUIStore.getState().selectBody(nearest.body.description.id);
-        simulation.dragBody(nearest.body.description.id, nearest.body.position_m, { x: 0, y: 0, z: 0 }, "start");
+        beginBodyDrag(event.pointerId,event.timeStamp,ray,nearest.body,nearest.body.position_m,nearest.body.orientation);
         return;
       }
     }
@@ -141,6 +159,7 @@ export function WebGPUViewport() {
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const active = pointerRef.current;
     if (!active || active.id !== event.pointerId) return;
+    if (active.action === "pick") return;
     if (active.action === "slice") {
       if (active.axis === "y") {
         const rect = event.currentTarget.getBoundingClientRect();

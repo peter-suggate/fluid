@@ -1,6 +1,6 @@
 import type { SceneDescription } from "./model";
 import { damBreakFractions } from "./initial-fluid";
-import { boundingRadius, type RigidBodyState } from "./rigid-body";
+import { initializeRigidBodies, type RigidBodyState } from "./rigid-body";
 import { tallCellComputeShader } from "./tall-cell-kernels";
 import { createTallCellLayout, type GPUQuality, type TallCellLayout } from "./tall-cell-grid";
 import { TallCellMultigrid } from "./tall-cell-multigrid";
@@ -8,6 +8,7 @@ import { TallCellVelocityHierarchy } from "./tall-cell-extrapolation";
 import { classifyTallCellStability, planGPUAdvance } from "./tall-cell-diagnostics";
 import { averageInflowStrength, createInflowGridBoundary, inflowBoundaryWGSL, type InflowGridBoundary } from "./inflow-boundary";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
+import { WebGPURigidBodySystem } from "./webgpu-rigid-body";
 
 export type { GPUQuality } from "./tall-cell-grid";
 export type GPUGridMethod = "tall-cell" | "quadtree-tall-cell" | "octree" | "uniform";
@@ -380,6 +381,8 @@ struct RigidBody {
   linearVelocity: vec4f,
   angularVelocity: vec4f,
   inverseMassInertia: vec4f,
+  angularMomentumRestitution: vec4f,
+  material: vec4f,
 }
 @group(0) @binding(10) var<storage,read> rigidBodies:array<RigidBody,12>;
 @group(0) @binding(11) var<storage,read_write> rigidExchange:array<atomic<i32>>;
@@ -1024,12 +1027,11 @@ export class WebGPUEulerianSolver {
   private planSubstepsGroup:GPUBindGroup;private extrapolateFirstGroup:GPUBindGroup;private extrapolateSecondGroup:GPUBindGroup;private extrapolateBackGroup:GPUBindGroup;private phiABGroup:GPUBindGroup;private phiBAGroup:GPUBindGroup;private predictGroup:GPUBindGroup;private reverseGroup:GPUBindGroup;private advectGroup: GPUBindGroup;private pressureRhsGroup:GPUBindGroup; private jacobiABGroup: GPUBindGroup; private jacobiBAGroup: GPUBindGroup; private projectGroup: GPUBindGroup;private rigidGroup:GPUBindGroup; private reductionGroup:GPUBindGroup;private planRemeshGroup:GPUBindGroup;private smoothRemeshFirstGroup:GPUBindGroup;private smoothRemeshSecondGroup:GPUBindGroup;private remapGroup:GPUBindGroup;
   private multigrid:TallCellMultigrid;
   private velocityHierarchy?:TallCellVelocityHierarchy;
-  private reductionBuffer:GPUBuffer;private governorBuffer:GPUBuffer;private phiDispatchBuffer:GPUBuffer;private rigidBuffer:GPUBuffer;private rigidExchangeBuffer:GPUBuffer;private nextColumnBases:GPUBuffer;private smoothedColumnBases:GPUBuffer;private querySet?:GPUQuerySet;private queryResolve?:GPUBuffer;
+  private reductionBuffer:GPUBuffer;private governorBuffer:GPUBuffer;private phiDispatchBuffer:GPUBuffer;private rigidBuffer:GPUBuffer;private rigidExchangeBuffer:GPUBuffer;private rigidSystem:WebGPURigidBodySystem;private nextColumnBases:GPUBuffer;private smoothedColumnBases:GPUBuffer;private querySet?:GPUQuerySet;private queryResolve?:GPUBuffer;
   private querySegments: Array<{name:GPUPhysicsTimingField;start:number;end:number}>=[];private queryCount=0;
   private lastTime = 0;
   private lastFrameDt = 0;
   private readbackPending = false;
-  private rigidReadbackPool:Array<{buffer:GPUBuffer;busy:boolean}>=[];
   private wallTimingPending = false;
   private validationChecked = false;
   private stepIndex = 0;
@@ -1056,12 +1058,8 @@ export class WebGPUEulerianSolver {
     this.governorBuffer=device.createBuffer({label:"Tall-cell phi governor",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.phiDispatchBuffer=device.createBuffer({label:"Tall-cell phi indirect dispatches",size:8*16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT});
     device.queue.writeBuffer(this.governorBuffer,0,new Uint32Array(4));
-    this.rigidBuffer=device.createBuffer({size:12*80,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     this.rigidExchangeBuffer=device.createBuffer({size:GPU_RIGID_EXCHANGE_BYTES,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-    // Keep the usual one-step handoff allocation-free. A second slot covers
-    // the short interval where queue completion has fired but mapAsync has not
-    // yet released the preceding readback.
-    for(let index=0;index<2;index+=1)this.rigidReadbackPool.push({buffer:device.createBuffer({size:GPU_RIGID_EXCHANGE_BYTES,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}),busy:false});
+    this.rigidSystem=new WebGPURigidBodySystem(device,scene,this.rigidExchangeBuffer,this.terrainTexture);this.rigidBuffer=this.rigidSystem.stateBuffer;this.rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
     if(device.features.has("timestamp-query")){this.querySet=device.createQuerySet({type:"timestamp",count:GPU_PHYSICS_TIMESTAMP_CAPACITY});this.queryResolve=device.createBuffer({size:GPU_PHYSICS_TIMESTAMP_CAPACITY*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
     this.nextColumnBases=device.createBuffer({label:"Next tall-cell column bases",size:nx*nz*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     this.smoothedColumnBases=device.createBuffer({label:"Smoothed tall-cell column bases",size:nx*nz*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
@@ -1146,6 +1144,9 @@ export class WebGPUEulerianSolver {
   }
 
   get volumeTexture(){return this.volumeA;}
+  get rigidRenderBuffer(){return this.rigidSystem.renderBuffer;}
+  setSelectedRigidBody(index:number){this.rigidSystem.setSelectedIndex(index);}
+  pickRigidBody(origin:RigidBodyState["position_m"],direction:RigidBodyState["position_m"]){return this.rigidSystem.pick(origin,direction);}
   get columnBaseTexture(){return this.heightA;}
   get velocityTexture(){return this.velocityA;}
   // velocityC is dead between finishAdvection's reverse-trace read and the
@@ -1187,7 +1188,7 @@ export class WebGPUEulerianSolver {
     // for the CPU-planned frame delta. The absolute speed rail remains based
     // on maxDt_s, so changing this subdivision cannot relax that guard.
     this.lastFrameDt=delta;
-    const activeBodies=bodies.slice(0,12),bodyData=new Float32Array(12*20),shapeIndex={sphere:0,box:1,capsule:2,cylinder:3} as const;activeBodies.forEach((body,index)=>{const o=index*20,d=body.description.dimensions_m,q=body.orientation;bodyData.set([body.position_m.x,body.position_m.y,body.position_m.z,shapeIndex[body.description.shape],d.x,d.y,d.z,boundingRadius(body),q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,0,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3],o);});this.device.queue.writeBuffer(this.rigidBuffer,0,bodyData);
+    const activeBodies=bodies.slice(0,12);this.rigidSystem.syncBodies(activeBodies);
     const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;if(this.inflowBoundary){const cellVolume=h.x*h.y*h.z;this.referenceLiquidVolumeCells+=this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume;this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;}this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,delta,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,4*Math.min(h.x,h.y,h.z)/Math.max(this.scene.numerics.maxDt_s,1e-6),rho,this.scene.fluid.dynamicViscosity_Pa_s,0,this.volumeCorrectionNormalSpeed,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,sceneHasTerrain(this.scene)?1:0,0,0]));
     this.querySegments=[];this.queryCount=0;if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"}),totalTiming=this.timing("total_ms");if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:totalTiming.start}});pass.end();}{const plan=encoder.beginComputePass({label:"Plan phi substeps"});plan.setPipeline(this.planSubstepsPipeline);plan.setBindGroup(0,this.planSubstepsGroup);plan.dispatchWorkgroups(1);plan.end();}encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductionBuffer);
     const preparationTiming=this.timing("preparation_ms"),reinitialize=this.stepIndex%10===0;
@@ -1210,10 +1211,10 @@ export class WebGPUEulerianSolver {
     {const timing=this.timing("pressure_ms");const rhs=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder,{warmStart:this.pressureWarmStart&&this.stepIndex>0,topologyChanged:this.stepIndex===0||remeshed});if(timing&&this.querySet){const end=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}});end.end();}}
     {const timing=this.timing("projection_ms");encoder.copyTextureToTexture({texture:this.velocityA},{texture:this.velocityC},[this.info.nx,this.info.storedNy,this.info.nz]);const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}
     if(this.pressureDefectCorrection){const pressureTiming=this.timing("pressure_ms");const rhs=encoder.beginComputePass(pressureTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:pressureTiming.start}}:undefined);this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder,{warmStart:false,topologyChanged:false});if(pressureTiming&&this.querySet){const end=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:pressureTiming.end}});end.end();}const projectionTiming=this.timing("projection_ms");const pass=encoder.beginComputePass(projectionTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:projectionTiming.start,endOfPassWriteIndex:projectionTiming.end}}:undefined);this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    if(activeBodies.length>0){const cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);this.rigidSystem.encode(encoder,delta,cellVolume,1,h.y);}
     this.stepIndex+=1;
     {const timing=this.timing("diagnostics_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:totalTiming.end}});pass.end();}if(this.querySet&&this.queryResolve&&this.queryCount>0)encoder.resolveQuerySet(this.querySet,0,this.queryCount,this.queryResolve,0);
-    let exchangeReadback:typeof this.rigidReadbackPool[number]|undefined;if(activeBodies.length>0&&this.onRigidLoads){exchangeReadback=this.rigidReadbackPool.find(slot=>!slot.busy);if(!exchangeReadback){exchangeReadback={buffer:this.device.createBuffer({size:GPU_RIGID_EXCHANGE_BYTES,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}),busy:false};this.rigidReadbackPool.push(exchangeReadback);}exchangeReadback.busy=true;encoder.copyBufferToBuffer(this.rigidExchangeBuffer,0,exchangeReadback.buffer,0,GPU_RIGID_EXCHANGE_BYTES);}
-    const submittedAt=performance.now();this.device.queue.submit([encoder.finish()]);if(!this.wallTimingPending){this.wallTimingPending=true;void this.device.queue.onSubmittedWorkDone().then(()=>{this.info.gpuQueueWall_ms=performance.now()-submittedAt;this.info.gpuQueueSimulation_s=delta;}).catch(()=>{ /* Device loss is handled by the renderer. */ }).finally(()=>{this.wallTimingPending=false;});}if(exchangeReadback){const slot=exchangeReadback,readback=slot.buffer,elapsed=delta,cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);void readback.mapAsync(GPUMapMode.READ).then(()=>{const words=new Int32Array(readback.getMappedRange());const loads=activeBodies.map((body,index)=>decodeGPURigidLoad(body.description.id,words,index,elapsed,cellVolume));readback.unmap();this.onRigidLoads?.(loads);}).catch(()=>{ /* Device loss rejects pending maps. */ }).finally(()=>{slot.busy=false;});}
+    const submittedAt=performance.now();this.device.queue.submit([encoder.finish()]);if(!this.wallTimingPending){this.wallTimingPending=true;void this.device.queue.onSubmittedWorkDone().then(()=>{this.info.gpuQueueWall_ms=performance.now()-submittedAt;this.info.gpuQueueSimulation_s=delta;}).catch(()=>{ /* Device loss is handled by the renderer. */ }).finally(()=>{this.wallTimingPending=false;});}
     if(!this.validationChecked){this.validationChecked=true;void this.device.popErrorScope().then(error=>{if(error)console.error(`GPU fluid validation: ${error.message}`);}).catch(()=>{ /* Device loss is handled by the renderer. */ });}return true;
   }
 
@@ -1277,5 +1278,5 @@ export class WebGPUEulerianSolver {
     return this.info;
   }
 
-  destroy(){this.multigrid.destroy();this.velocityHierarchy?.destroy();for(const t of [this.velocityA,this.velocityB,this.velocityC,this.velocityD,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.solidA,this.solidB,this.heightA,this.heightB])t.destroy();this.params.destroy();this.reductionBuffer.destroy();this.governorBuffer.destroy();this.phiDispatchBuffer.destroy();this.rigidBuffer.destroy();this.rigidExchangeBuffer.destroy();for(const slot of this.rigidReadbackPool)slot.buffer.destroy();this.nextColumnBases.destroy();this.smoothedColumnBases.destroy();this.querySet?.destroy();this.queryResolve?.destroy();}
+  destroy(){this.multigrid.destroy();this.velocityHierarchy?.destroy();for(const t of [this.velocityA,this.velocityB,this.velocityC,this.velocityD,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.solidA,this.solidB,this.heightA,this.heightB,this.terrainTexture])t.destroy();this.params.destroy();this.reductionBuffer.destroy();this.governorBuffer.destroy();this.phiDispatchBuffer.destroy();this.rigidSystem.destroy();this.rigidExchangeBuffer.destroy();this.nextColumnBases.destroy();this.smoothedColumnBases.destroy();this.querySet?.destroy();this.queryResolve?.destroy();}
 }

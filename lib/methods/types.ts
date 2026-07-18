@@ -2,6 +2,8 @@ import type { SceneDescription } from "../model";
 import type { GPUQuality } from "../tall-cell-grid";
 import type { GPUEulerianInfo, GPURigidLoad } from "../webgpu-eulerian";
 import type { RigidBodyState } from "../rigid-body";
+import type { GPURigidBodyPick } from "../webgpu-rigid-body";
+import type { Vec3 } from "../model";
 import type { GPUSecondaryParticleSource } from "../webgpu-secondary-particles";
 import type { SparseVoxelRenderSource } from "../webgpu-voxel-debug";
 import type { SparseSurfaceBandGPUSource } from "../webgpu-sparse-surface-band";
@@ -68,6 +70,12 @@ export interface GPUSolverInstance {
   readonly sparseVoxelRenderSource?: SparseVoxelRenderSource;
   /** Dynamically paged fine phi/velocity band for sparse extraction and inspection. */
   readonly sparseSurfaceBand?: SparseSurfaceBandGPUSource;
+  /** GPU-authored rigid records matching the renderer's four-vec4 body ABI. */
+  readonly rigidRenderBuffer?: GPUBuffer;
+  /** Updates selection metadata without mirroring dynamic poses through CPU memory. */
+  setSelectedRigidBody?(index: number): void;
+  /** User-triggered ray query against authoritative GPU rigid poses. */
+  pickRigidBody?(origin: Vec3, direction: Vec3): Promise<GPURigidBodyPick | undefined>;
   /** Adaptive pressure-DOF ownership used by the representation alarm. */
   readonly gridPressureSamplesTexture?: GPUTexture;
   /** Fine MLS pressure materialized by the latest adaptive solve. */
