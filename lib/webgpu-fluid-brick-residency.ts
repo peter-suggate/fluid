@@ -106,6 +106,13 @@ fn brickCoordinate(index: u32) -> vec3u {
   return vec3u(index % bx, (index / bx) % by, index / (bx * by));
 }
 
+fn tiledDispatch(blocks: u32) -> vec2u {
+  let x = min(blocks, 65535u);
+  var y = 1u;
+  if (x > 0u) { y = (blocks + x - 1u) / x; }
+  return vec2u(x, y);
+}
+
 @compute @workgroup_size(64)
 fn classify(@builtin(global_invocation_id) gid: vec3u) {
   let brickIndex = gid.x;
@@ -172,19 +179,19 @@ fn finalize() {
   let resident = min(atomicLoad(&worklist[0]), capacity);
   let retired = min(atomicLoad(&worklist[4]), capacity);
   let voxelsPerBrick = params.dimsBrick.w * params.dimsBrick.w * params.dimsBrick.w;
-  // Indirect args past maxComputeWorkgroupsPerDimension turn the whole
-  // dispatch into a silent no-op. Clamped partial coverage beats losing every
-  // resident brick at once; domains needing more must move to 2D dispatch.
-  atomicStore(&worklist[1], min((resident * voxelsPerBrick + 255u) / 256u, 65535u));
-  atomicStore(&worklist[2], 1u);
+  let activeDispatch = tiledDispatch((resident * voxelsPerBrick + 255u) / 256u);
+  atomicStore(&worklist[1], activeDispatch.x);
+  atomicStore(&worklist[2], activeDispatch.y);
   atomicStore(&worklist[3], 1u);
-  atomicStore(&worklist[5], min((retired * voxelsPerBrick + 255u) / 256u, 65535u));
-  atomicStore(&worklist[6], 1u);
+  let retiredDispatch = tiledDispatch((retired * voxelsPerBrick + 255u) / 256u);
+  atomicStore(&worklist[5], retiredDispatch.x);
+  atomicStore(&worklist[6], retiredDispatch.y);
   atomicStore(&worklist[7], 1u);
   // Eight 4x4x4 workgroups cover one 8^3 brick. Four-cell bricks use one.
   let topologyGroups = select(1u, 8u, params.dimsBrick.w == 8u);
-  atomicStore(&worklist[12], min(resident * topologyGroups, 65535u));
-  atomicStore(&worklist[13], 1u);
+  let topologyDispatch = tiledDispatch(resident * topologyGroups);
+  atomicStore(&worklist[12], topologyDispatch.x);
+  atomicStore(&worklist[13], topologyDispatch.y);
   atomicStore(&worklist[14], 1u);
   atomicAdd(&worklist[15], 1u);
 }

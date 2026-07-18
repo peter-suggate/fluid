@@ -79,10 +79,6 @@ export class WebGPUOctreeProjection {
   readonly preconditioner = "jacobi" as const;
   readonly canEncodeInlineRebuild = true;
   readonly levelSetTexture: GPUTexture;
-  readonly topologyTexture: GPUTexture;
-  readonly pressureSamplesTexture: GPUTexture;
-  readonly pressureTexture: GPUTexture;
-  readonly divergenceTexture: GPUTexture;
   readonly info: {
     leafCount: number;
     pressureSampleCount: number;
@@ -146,7 +142,11 @@ export class WebGPUOctreeProjection {
   private readonly sparseSurfaceBand?: WebGPUSparseSurfaceBand;
   private readonly sparseBrickWorld: OctreeSparseBrickWorld;
   private readonly groups: { ab: GPUBindGroup; ba: GPUBindGroup; extrapolateOut: GPUBindGroup; extrapolateScratch: GPUBindGroup };
-  private readonly diagnosticGroups: { pressureA: GPUBindGroup; pressureB: GPUBindGroup };
+  private topologyDiagnosticTexture?: GPUTexture;
+  private pressureSamplesDiagnosticTexture?: GPUTexture;
+  private pressureDiagnosticTexture?: GPUTexture;
+  private divergenceDiagnosticTexture?: GPUTexture;
+  private diagnosticGroups?: { pressureA: GPUBindGroup; pressureB: GPUBindGroup };
   private readonly couplingGroups: { pressureA: GPUBindGroup; pressureB: GPUBindGroup };
   private rasterizeSolidsPipeline!: GPUComputePipeline;
   private resetPipeline!: GPUComputePipeline;
@@ -187,6 +187,7 @@ export class WebGPUOctreeProjection {
   private readonly linearBlocks: number;
   private couplingHasDynamicBodies = false;
   private topologyWorklistReady = false;
+  private latestPressureInA = true;
 
   constructor(
     private readonly device: GPUDevice,
@@ -270,11 +271,6 @@ export class WebGPUOctreeProjection {
     this.leafEntries = device.createBuffer({ label: "Octree leaf matrix entries", size: compactBuffers ? Math.max(8, count * 48) : 8, usage: GPUBufferUsage.STORAGE });
     this.solveDispatch = device.createBuffer({ label: "Octree leaf solve and retired-topology dispatch", size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
     this.params = device.createBuffer({ label: "Octree projection parameters", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const diagnosticUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING;
-    this.topologyTexture = device.createTexture({ label: "Octree overlay topology", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "rg32uint", usage: diagnosticUsage });
-    this.pressureSamplesTexture = device.createTexture({ label: "Octree overlay pressure ownership", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "rgba32uint", usage: diagnosticUsage });
-    this.pressureTexture = device.createTexture({ label: "Octree mapped leaf pressure", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: diagnosticUsage });
-    this.divergenceTexture = device.createTexture({ label: "Octree projected divergence", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: diagnosticUsage });
     this.layout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
@@ -333,23 +329,6 @@ export class WebGPUOctreeProjection {
     ] });
     this.diagnosticPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.diagnosticLayout] });
     this.diagnosticShader = device.createShaderModule({ label: "GPU octree overlay materialization", code: octreeDiagnosticShader });
-    const diagnosticGroup = (pressure: GPUBuffer, gradients: GPUBuffer) => device.createBindGroup({ layout: this.diagnosticLayout, entries: [
-      { binding: 0, resource: { buffer: this.topology } },
-      { binding: 1, resource: { buffer: pressure } },
-      { binding: 2, resource: resources.velocityOut.createView() },
-      { binding: 3, resource: this.levelSetTexture.createView() },
-      { binding: 4, resource: this.topologyTexture.createView() },
-      { binding: 5, resource: this.pressureSamplesTexture.createView() },
-      { binding: 6, resource: this.pressureTexture.createView() },
-      { binding: 7, resource: this.divergenceTexture.createView() },
-      { binding: 8, resource: { buffer: this.params } },
-      { binding: 9, resource: { buffer: gradients } },
-      { binding: 10, resource: resources.velocityIn.createView() }
-    ] });
-    this.diagnosticGroups = {
-      pressureA: diagnosticGroup(this.pressureA, this.pressureB),
-      pressureB: diagnosticGroup(this.pressureB, this.pressureA)
-    };
     this.couplingLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -428,6 +407,42 @@ export class WebGPUOctreeProjection {
     this.assignPipelines(WebGPUOctreeProjection.pipelineEntryPoints.map((entryPoint) => this.device.createComputePipeline(this.descriptor(entryPoint))));
     this.materializePipeline = this.device.createComputePipeline(this.diagnosticDescriptor());
     this.pressureImpulsePipeline = this.device.createComputePipeline(this.couplingDescriptor());
+  }
+
+  get topologyTexture() { return this.topologyDiagnosticTexture; }
+  get pressureSamplesTexture() { return this.pressureSamplesDiagnosticTexture; }
+  get pressureTexture() { return this.pressureDiagnosticTexture; }
+  get divergenceTexture() { return this.divergenceDiagnosticTexture; }
+  get hasDiagnosticTextures() { return this.diagnosticGroups !== undefined; }
+
+  /** Allocate the dense scientific-overlay fields only after inspection asks for them. */
+  ensureDiagnosticTextures(): boolean {
+    if (this.diagnosticGroups) return false;
+    const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING;
+    const size: GPUExtent3D = [this.dims.nx, this.dims.ny, this.dims.nz];
+    this.topologyDiagnosticTexture = this.device.createTexture({ label: "Octree overlay topology", size, dimension: "3d", format: "rg32uint", usage });
+    this.pressureSamplesDiagnosticTexture = this.device.createTexture({ label: "Octree overlay pressure ownership", size, dimension: "3d", format: "rgba32uint", usage });
+    this.pressureDiagnosticTexture = this.device.createTexture({ label: "Octree mapped leaf pressure", size, dimension: "3d", format: "r32float", usage });
+    this.divergenceDiagnosticTexture = this.device.createTexture({ label: "Octree projected divergence", size, dimension: "3d", format: "r32float", usage });
+    const diagnosticGroup = (pressure: GPUBuffer, gradients: GPUBuffer) => this.device.createBindGroup({ layout: this.diagnosticLayout, entries: [
+      { binding: 0, resource: { buffer: this.topology } },
+      { binding: 1, resource: { buffer: pressure } },
+      { binding: 2, resource: this.resources.velocityOut.createView() },
+      { binding: 3, resource: this.levelSetTexture.createView() },
+      { binding: 4, resource: this.topologyDiagnosticTexture!.createView() },
+      { binding: 5, resource: this.pressureSamplesDiagnosticTexture!.createView() },
+      { binding: 6, resource: this.pressureDiagnosticTexture!.createView() },
+      { binding: 7, resource: this.divergenceDiagnosticTexture!.createView() },
+      { binding: 8, resource: { buffer: this.params } },
+      { binding: 9, resource: { buffer: gradients } },
+      { binding: 10, resource: this.resources.velocityIn.createView() }
+    ] });
+    this.diagnosticGroups = {
+      pressureA: diagnosticGroup(this.pressureA, this.pressureB),
+      pressureB: diagnosticGroup(this.pressureB, this.pressureA)
+    };
+    this.info.allocatedBytes += this.dims.nx * this.dims.ny * this.dims.nz * 40;
+    return true;
   }
 
   async initializePipelines(onProgress: (label: string, completed: number) => void) {
@@ -634,6 +649,7 @@ export class WebGPUOctreeProjection {
     // The megakernel folds its final iterate back into pressure A; the fixed-
     // count ladders land in A exactly when the sweep count is even.
     const finalInA = pressureBufferSwaps % 2 === 0;
+    this.latestPressureInA = finalInA;
     const finalGroup = finalInA ? this.groups.ab : this.groups.ba;
     const project = encoder.beginComputePass({ label: "Octree finite-volume velocity projection", ...(detailedTimestampWrites?.projection ? { timestampWrites: detailedTimestampWrites.projection } : {}) });
     // The exact ladder refreshes M^-1 K^T p from the converged pressure so
@@ -672,15 +688,17 @@ export class WebGPUOctreeProjection {
     this.encodeOverlayMaterialization(encoder, finalInA, detailedTimestampWrites?.materialization);
   }
 
-  /** Publish the dense diagnostic textures from the current live owner map.
-   * This is also called at t=0, before any pressure solve, so reset-time grid
+  /** Publish lazily allocated diagnostic textures from the live owner map.
+   * The first overlay request materializes immediately, so reset-time grid
    * inspection never decodes zero-initialized topology storage as finest 1^3. */
-  encodeOverlayMaterialization(encoder: GPUCommandEncoder, pressureInA = true, timestampWrites?: GPUComputePassTimestampWrites) {
+  encodeOverlayMaterialization(encoder: GPUCommandEncoder, pressureInA = this.latestPressureInA, timestampWrites?: GPUComputePassTimestampWrites) {
+    if (!this.diagnosticGroups) return false;
     const materialize = encoder.beginComputePass({ label: "Materialize octree overlay fields", ...(timestampWrites ? { timestampWrites } : {}) });
     materialize.setPipeline(this.materializePipeline);
     materialize.setBindGroup(0, pressureInA ? this.diagnosticGroups.pressureA : this.diagnosticGroups.pressureB);
     materialize.dispatchWorkgroups(...this.workgroups);
     materialize.end();
+    return true;
   }
 
   encodeSurface(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState, _maximumDt_s?: number, timestampWrites?: GPUComputePassTimestampWrites) {
@@ -719,7 +737,7 @@ export class WebGPUOctreeProjection {
   destroy() {
     this.topology.destroy(); this.pressureA.destroy(); this.pressureB.destroy(); this.params.destroy();
     this.compaction.destroy(); this.leafHeaders.destroy(); this.leafEntries.destroy(); this.solveDispatch.destroy(); this.solidCells.destroy();
-    this.topologyTexture.destroy(); this.pressureSamplesTexture.destroy(); this.pressureTexture.destroy(); this.divergenceTexture.destroy();
+    this.topologyDiagnosticTexture?.destroy(); this.pressureSamplesDiagnosticTexture?.destroy(); this.pressureDiagnosticTexture?.destroy(); this.divergenceDiagnosticTexture?.destroy();
     this.surfaceState.destroy();
     this.sparseSurfaceBand?.destroy();
     this.sparseBrickWorld.destroy();
@@ -863,8 +881,9 @@ fn constrainedFaceVelocity(faceCell: vec3i, axis: u32, solid: SolidCell) -> f32 
 // (solver brick index, sparse scene leaf index). One 8^3 brick maps to eight
 // 4^3 topology workgroups, preserving the existing cell-local kernels.
 fn residentTopologyCell(workgroup: vec3u, local: vec3u) -> vec3u {
-  let streamIndex = workgroup.x / 8u;
-  let octant = workgroup.x % 8u;
+  let linearWorkgroup = workgroup.x + workgroup.y * compaction[12];
+  let streamIndex = linearWorkgroup / 8u;
+  let octant = linearWorkgroup % 8u;
   let brickIndex = compaction[16u + streamIndex * 2u];
   let bx = (dims().x + 7u) / 8u;
   let by = (dims().y + 7u) / 8u;
@@ -878,8 +897,9 @@ fn residentTopologyCell(workgroup: vec3u, local: vec3u) -> vec3u {
 // visits four octants serially. Resetting and rebuilding these just-retired
 // bricks prevents old interface leaves from fossilizing outside residency.
 fn retiredTopologyCell(workgroup: vec3u, local: vec3u, quarter: u32) -> vec3u {
-  let retiredSlot = workgroup.x / 2u;
-  let half = workgroup.x % 2u;
+  let linearWorkgroup = workgroup.x + workgroup.y * compaction[5];
+  let retiredSlot = linearWorkgroup / 2u;
+  let half = linearWorkgroup % 2u;
   let bx = (dims().x + 7u) / 8u;
   let by = (dims().y + 7u) / 8u;
   let bz = (dims().z + 7u) / 8u;
@@ -1252,10 +1272,11 @@ fn scanLeafBlocks(@builtin(local_invocation_id) lid3: vec3u) {
   if (lid == 255u) {
     let total = scanPairs[255];
     compaction[0] = total.x; compaction[1] = total.y;
-    // Beyond maxComputeWorkgroupsPerDimension the indirect solve dispatch
-    // no-ops entirely; clamp so oversized domains degrade instead of skipping
-    // the pressure solve outright.
-    compaction[2] = min((total.x + 255u) / 256u, 65535u); compaction[3] = 1u; compaction[4] = 1u;
+    let blocks = (total.x + 255u) / 256u;
+    let x = min(blocks, 65535u);
+    var y = 1u;
+    if (x > 0u) { y = (blocks + x - 1u) / x; }
+    compaction[2] = x; compaction[3] = y; compaction[4] = 1u;
   }
 }
 
@@ -1281,10 +1302,13 @@ fn emitLeaves(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocati
   }
 }
 
+fn compactRowIndex(gid: vec3u) -> u32 { return gid.x + gid.y * compaction[2] * 256u; }
+
 @compute @workgroup_size(256)
 fn assembleSystem(@builtin(global_invocation_id) gid: vec3u) {
-  if (gid.x >= compaction[0]) { return; }
-  var header = leafHeaders[gid.x];
+  let row = compactRowIndex(gid);
+  if (row >= compaction[0]) { return; }
+  var header = leafHeaders[row];
   let origin = cellCoord(header.cell);
   let size = header.size;
   var neighborCells: array<u32, 24>;
@@ -1323,14 +1347,15 @@ fn assembleSystem(@builtin(global_invocation_id) gid: vec3u) {
     } }
   }
   header.entryCount = neighborCount; header.diagonal = diagonal; header.rhs = flux;
-  leafHeaders[gid.x] = header;
+  leafHeaders[row] = header;
   for (var j = 0u; j < neighborCount; j += 1u) { leafEntries[header.entryStart + j] = LeafEntry(neighborCells[j], neighborCoefficients[j]); }
 }
 
 @compute @workgroup_size(256)
 fn iterateLeaves(@builtin(global_invocation_id) gid: vec3u) {
-  if (gid.x >= compaction[0]) { return; }
-  let header = leafHeaders[gid.x];
+  let row = compactRowIndex(gid);
+  if (row >= compaction[0]) { return; }
+  let header = leafHeaders[row];
   var sum = 0.0;
   for (var j = 0u; j < header.entryCount; j += 1u) {
     let entry = leafEntries[header.entryStart + j];
@@ -1346,8 +1371,9 @@ fn iterateLeaves(@builtin(global_invocation_id) gid: vec3u) {
 // unused header padding, so every iteration remains one row-parallel SpMV.
 @compute @workgroup_size(256)
 fn iterateChebyshev(@builtin(global_invocation_id) gid: vec3u) {
-  if (gid.x >= compaction[0]) { return; }
-  var header = leafHeaders[gid.x];
+  let row = compactRowIndex(gid);
+  if (row >= compaction[0]) { return; }
+  var header = leafHeaders[row];
   var sum = 0.0;
   for (var j = 0u; j < header.entryCount; j += 1u) {
     let entry = leafEntries[header.entryStart + j];
@@ -1366,7 +1392,7 @@ fn iterateChebyshev(@builtin(global_invocation_id) gid: vec3u) {
   }
   pressureOut[header.cell] = old + search;
   header.pad0 = bitcast<u32>(search); header.pad1 = bitcast<u32>(rho);
-  leafHeaders[gid.x] = header;
+  leafHeaders[row] = header;
 }
 
 fn leafPressureLoad(parity: u32, cell: u32) -> f32 {

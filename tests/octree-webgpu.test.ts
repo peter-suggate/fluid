@@ -278,6 +278,21 @@ test("octree materializes adaptive overlay fields without a readback", () => {
   assert.match(rendererSource, /gridKind === "quadtree-tall-cell" \|\| gpuInfo\?\.gridKind === "octree" \? 1 : 0/);
 });
 
+test("octree dense diagnostic textures are allocated only on overlay demand", () => {
+  const constructor = octreeSource.slice(octreeSource.indexOf("constructor("), octreeSource.indexOf("private descriptor("));
+  assert.doesNotMatch(constructor, /createTexture\(\{ label: "Octree overlay/);
+  assert.match(octreeSource, /ensureDiagnosticTextures\(\): boolean/);
+  assert.match(uniformSolverSource, /ensureGridDiagnosticTextures\(\)/);
+  assert.match(rendererSource, /gridOverlay\?\.axis !== "off"[\s\S]{0,100}ensureGridDiagnosticTextures/);
+});
+
+test("octree compact solve dispatches cover rows with two-dimensional tiles", () => {
+  assert.match(octreeProjectionShader, /compaction\[2\] = x; compaction\[3\] = y/);
+  assert.match(octreeProjectionShader, /fn compactRowIndex\(gid: vec3u\)/);
+  assert.match(octreeProjectionShader, /gid\.x \+ gid\.y \* compaction\[2\] \* 256u/);
+  assert.doesNotMatch(octreeProjectionShader, /compaction\[2\] = min\(/);
+});
+
 test("octree materializes its live owner map on the reset frame", () => {
   assert.match(uniformSolverSource, /encodeInlineRebuild\(initialSparseScene\);\s*this\.octreeProjection\.encodeOverlayMaterialization\(initialSparseScene\);\s*this\.octreeProjection\.encodeSparseBrickWorld/);
   assert.match(octreeSource, /reset-time grid[\s\S]{0,120}zero-initialized topology storage as finest 1\^3/);

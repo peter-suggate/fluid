@@ -388,6 +388,13 @@ export class WebGPUUniformEulerianSolver {
   get gridPressureSamplesTexture() { return this.adaptiveProjection?.pressureSamplesTexture; }
   get gridPressureTexture() { return this.adaptiveProjection?.pressureTexture; }
   get gridDivergenceTexture() { return this.adaptiveProjection?.divergenceTexture; }
+  ensureGridDiagnosticTextures() {
+    if (!this.octreeProjection?.ensureDiagnosticTextures()) return;
+    const encoder = this.device.createCommandEncoder({ label: "Initialize lazy octree diagnostic fields" });
+    this.octreeProjection.encodeOverlayMaterialization(encoder);
+    this.device.queue.submit([encoder.finish()]);
+    this.applyOctreeInfo(this.octreeProjection);
+  }
   /** Instrumentation view: velocity after advection/forces and before quadtree projection. */
   get preProjectionVelocityTexture() { return this.velocityB; }
 
@@ -783,7 +790,7 @@ export class WebGPUUniformEulerianSolver {
             {
               projection: timestampWrites(this.timing("projection_ms")),
               extrapolation: this.octreeProjection.extrapolationSweepCount > 0 ? timestampWrites(this.timing("extrapolation_ms")) : undefined,
-              materialization: timestampWrites(this.timing("materialization_ms"))
+              materialization: this.octreeProjection.hasDiagnosticTextures ? timestampWrites(this.timing("materialization_ms")) : undefined
             }
           );
         } else if (this.quadtreeProjection) {
