@@ -8,7 +8,7 @@
  * readback-free.
  */
 
-export const SECONDARY_PARTICLE_STRIDE_BYTES = 48;
+export const SECONDARY_PARTICLE_STRIDE_BYTES = 64;
 export const DEFAULT_SECONDARY_PARTICLE_CAPACITY = 16_384;
 
 export type SecondaryParticleFieldLayout = "uniform" | "restricted-tall-cell";
@@ -40,6 +40,8 @@ export interface SecondaryParticleDomain {
   depth_m: number;
   topOpen: boolean;
   gravity_m_s2: { x: number; y: number; z: number };
+  density_kg_m3: number;
+  surfaceTension_N_m: number;
   randomSeed: number;
 }
 
@@ -52,7 +54,8 @@ export const secondaryParticleComputeShader = /* wgsl */ `
 struct Particle {
   positionRadius: vec4f,
   velocityAge: vec4f,
-  attributes: vec4f,
+  birthNormalLifetime: vec4f,
+  shape: vec4f,
 }
 
 struct ParticleState {
@@ -69,6 +72,7 @@ struct Params {
   gravityAndSeed: vec4f,
   controls: vec4f,
   fieldModes: vec4f,
+  material: vec4f,
 }
 
 @group(0) @binding(0) var surfaceField: texture_3d<f32>;
@@ -201,8 +205,18 @@ fn surfaceNormal(world: vec3f) -> vec3f {
 fn deactivate(index: u32, particle: Particle) {
   var dead = particle;
   dead.positionRadius.w = 0.0;
-  dead.attributes.z = 0.0;
+  dead.shape.z = 0.0;
   particles[index] = dead;
+}
+
+fn capillaryTime(radius: f32) -> f32 {
+  let density = max(params.material.x, 1.0);
+  let sigma = params.material.y;
+  // Paper-comparison scenes intentionally disable capillarity in the grid
+  // solver. Keep their detached fragments stretched for longer rather than
+  // inventing a hidden surface-tension coefficient or dividing by zero.
+  if (sigma <= 1e-6) { return 0.32; }
+  return clamp(sqrt(density * radius * radius * radius / sigma), 0.035, 0.45);
 }
 
 @compute @workgroup_size(64)
@@ -210,12 +224,12 @@ fn updateParticles(@builtin(global_invocation_id) gid: vec3u) {
   let index = gid.x;
   if (index >= capacity()) { return; }
   var particle = particles[index];
-  if (particle.attributes.z < 0.5 || particle.positionRadius.w <= 0.0) { return; }
+  if (particle.shape.z < 0.5 || particle.positionRadius.w <= 0.0) { return; }
 
   var position = particle.positionRadius.xyz;
   var velocity = particle.velocityAge.xyz;
   var age = particle.velocityAge.w + dt();
-  let lifetime = particle.attributes.y;
+  let lifetime = particle.birthNormalLifetime.w;
   if (age >= lifetime) { deactivate(index, particle); return; }
 
   velocity = (velocity + params.gravityAndSeed.xyz * dt()) * exp(-0.18 * dt());
@@ -243,7 +257,12 @@ fn spawnParticles(@builtin(global_invocation_id) gid: vec3u) {
   let cellCenter = vec3f(-0.5 * params.containerAndTop.x, 0.0, -0.5 * params.containerAndTop.z)
     + (vec3f(cell) + vec3f(0.5)) * cellSize();
   let linear = u32(cell.x) + u32(dims().x) * (u32(cell.y) + u32(dims().y) * u32(cell.z));
-  let seed = linear ^ u32(params.gravityAndSeed.w) ^ u32(params.fieldModes.w);
+  let step = u32(params.fieldModes.w);
+  let macroCell = cell / vec3i(3);
+  let macroDims = (dims() + vec3i(2)) / vec3i(3);
+  let macroLinear = u32(macroCell.x) + u32(macroDims.x) * (u32(macroCell.y) + u32(macroDims.y) * u32(macroCell.z));
+  let eventSeed = macroLinear ^ u32(params.gravityAndSeed.w) ^ hash(step / 8u + 0x68bc21ebu);
+  let seed = linear ^ u32(params.gravityAndSeed.w) ^ hash(step);
   let jitter = vec3f(
     random01(seed ^ 0x68bc21ebu) - 0.5,
     random01(seed ^ 0x02e5be93u) - 0.5,
@@ -270,8 +289,19 @@ fn spawnParticles(@builtin(global_invocation_id) gid: vec3u) {
   let generationDt = max(dt(), 1.0 / 30.0);
   let escaped = trial + velocity * generationDt;
   if (!insideDomain(escaped) || samplePhi(escaped) <= 2.0 * radius) { return; }
-  let probability = clamp(dt() * params.fieldModes.z * (0.5 + outwardSpeed), 0.0, 0.72);
+  // A coarse, slowly-changing event gain makes neighboring cells break up in
+  // coherent bursts while the fine-cell hash retains irregular boundaries.
+  // This avoids a neighbor grid and does not synchronize whole macrocells.
+  let eventNoise = random01(eventSeed);
+  let eventGain = 0.18 + 1.72 * smoothstep(0.18, 0.92, eventNoise);
+  let probability = clamp(dt() * params.fieldModes.z * (0.5 + outwardSpeed) * eventGain, 0.0, 0.72);
   if (random01(seed) > probability) { return; }
+
+  // Chentanez-Mueller Sec. 3.9.2 identifies thin regions by finding air on
+  // both sides of the interface normal. We retain that information only as a
+  // render shape: the one-way particles still never modify phi or pressure.
+  let sheetProbe = 2.0 * h;
+  let thinSheet = samplePhi(trial + normal * sheetProbe) > 0.0 && samplePhi(trial - normal * sheetProbe) > 0.0;
 
   // The paper emits a number of escape particles at the successful trial,
   // rather than one probabilistic marker. Small coherent clusters preserve
@@ -301,12 +331,22 @@ fn spawnParticles(@builtin(global_invocation_id) gid: vec3u) {
     let particlePosition = escaped + (scatter - normal * min(dot(scatter, normal), 0.0)) * radius * 0.7;
     let particleVelocity = velocity + scatter * (0.12 * length(velocity) + 0.08);
     let lifetime = 1.1 + 1.2 * random01(particleSeed ^ 0x3c6ef372u);
+    let tangentialSpeed = length(velocity - normal * outwardSpeed);
+    let ligament = !thinSheet && (speedRatio > 1.15 || tangentialSpeed > params.controls.y);
+    let shapeKind = select(select(0.0, 1.0, ligament), 2.0, thinSheet);
+    var initialAspect = 1.0;
+    if (shapeKind > 1.5) {
+      initialAspect = clamp(1.55 + 0.55 * speedRatio + 0.35 * random01(particleSeed ^ 0xa24baed5u), 1.55, 3.2);
+    } else if (shapeKind > 0.5) {
+      initialAspect = clamp(1.35 + 0.7 * speedRatio + 0.45 * random01(particleSeed ^ 0x9fb21c65u), 1.35, 3.8);
+    }
     let slot = atomicAdd(&particleState.cursor, 1u) % capacity();
     atomicAdd(&particleState.spawned, 1u);
     particles[slot] = Particle(
       vec4f(particlePosition, particleRadius),
       vec4f(particleVelocity, 0.0),
-      vec4f(0.0, lifetime, 1.0, random01(particleSeed ^ 0x1b873593u))
+      vec4f(normal, lifetime),
+      vec4f(initialAspect, shapeKind, 1.0, capillaryTime(particleRadius))
     );
   }
 }
@@ -323,7 +363,8 @@ struct ViewUniforms {
 struct Particle {
   positionRadius: vec4f,
   velocityAge: vec4f,
-  attributes: vec4f,
+  birthNormalLifetime: vec4f,
+  shape: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> view: ViewUniforms;
@@ -354,8 +395,8 @@ fn particleVertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) i
   let particle = particles[instance];
   var output: ParticleVertex;
   output.local = corners[vertex];
-  output.opacity = particle.attributes.z;
-  if (particle.attributes.z < 0.5 || particle.positionRadius.w <= 0.0) {
+  output.opacity = particle.shape.z;
+  if (particle.shape.z < 0.5 || particle.positionRadius.w <= 0.0) {
     output.clip = vec4f(2.0, 2.0, 2.0, 1.0);
     output.opacity = 0.0;
     return output;
@@ -382,10 +423,11 @@ fn particleFragment(input: ParticleVertex) -> @location(0) vec4f {
 `;
 
 /**
- * Spray-only sphere impostors for the raster water interface buffers. The
- * optical composite cannot distinguish these interfaces from the extracted
- * Eulerian surface, so droplets inherit the same refraction, absorption,
- * environment reflection, Fresnel response, and rigid/glass occlusion.
+ * Exact ellipsoid interfaces for the raster water buffers. New sheet and
+ * ligament fragments retain their birth deformation, then relax toward a
+ * sphere on their capillary time scale. The optical composite cannot
+ * distinguish these interfaces from the Eulerian surface, so they inherit
+ * the resolved water's refraction, absorption, reflection, and occlusion.
  */
 export const secondaryParticleOpticalShader = /* wgsl */ `
 struct ViewUniforms {
@@ -398,18 +440,21 @@ struct ViewUniforms {
 struct Particle {
   positionRadius: vec4f,
   velocityAge: vec4f,
-  attributes: vec4f,
+  birthNormalLifetime: vec4f,
+  shape: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> view: ViewUniforms;
 @group(0) @binding(1) var<storage, read> particles: array<Particle>;
 
-struct SphereVertex {
+struct EllipsoidVertex {
   @builtin(position) clip: vec4f,
-  @location(0) local: vec2f,
+  @location(0) rayPoint: vec3f,
   @location(1) @interpolate(flat) center: vec3f,
-  @location(2) @interpolate(flat) radius: f32,
-  @location(3) @interpolate(flat) enabled: f32,
+  @location(2) @interpolate(flat) inverseAxis0: vec3f,
+  @location(3) @interpolate(flat) inverseAxis1: vec3f,
+  @location(4) @interpolate(flat) inverseAxis2: vec3f,
+  @location(5) @interpolate(flat) enabled: f32,
 }
 
 struct InterfaceFragment {
@@ -422,6 +467,16 @@ fn cameraForward() -> vec3f { return normalize(view.cameraTarget.xyz - view.came
 fn cameraRight() -> vec3f { return normalize(cross(cameraForward(), vec3f(0.0, 1.0, 0.0))); }
 fn cameraUp() -> vec3f { return normalize(cross(cameraRight(), cameraForward())); }
 
+fn safeNormalize(value: vec3f, fallback: vec3f) -> vec3f {
+  let magnitude2 = dot(value, value);
+  return select(fallback, value * inverseSqrt(magnitude2), magnitude2 > 1e-10);
+}
+
+fn perpendicular(axis: vec3f) -> vec3f {
+  let reference = select(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), abs(axis.y) < 0.82);
+  return safeNormalize(cross(axis, reference), vec3f(0.0, 0.0, 1.0));
+}
+
 fn project(world: vec3f) -> vec4f {
   let forward = cameraForward();
   let relative = world - view.cameraPosition.xyz;
@@ -432,42 +487,98 @@ fn project(world: vec3f) -> vec4f {
 }
 
 @vertex
-fn sphereVertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> SphereVertex {
+fn ellipsoidVertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> EllipsoidVertex {
   var corners = array<vec2f, 6>(
-    vec2f(-1.05, -1.05), vec2f(1.05, -1.05), vec2f(-1.05, 1.05),
-    vec2f(-1.05, 1.05), vec2f(1.05, -1.05), vec2f(1.05, 1.05)
+    vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
+    vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
   );
   let particle = particles[instance];
-  var output: SphereVertex;
-  output.local = corners[vertex];
+  var output: EllipsoidVertex;
   output.center = particle.positionRadius.xyz;
-  output.radius = particle.positionRadius.w;
-  output.enabled = particle.attributes.z;
-  if (output.enabled < 0.5 || output.radius <= 0.0) {
+  output.inverseAxis0 = vec3f(0.0);
+  output.inverseAxis1 = vec3f(0.0);
+  output.inverseAxis2 = vec3f(0.0);
+  output.rayPoint = output.center;
+  output.enabled = particle.shape.z;
+  let radius = particle.positionRadius.w;
+  if (output.enabled < 0.5 || radius <= 0.0) {
     output.clip = vec4f(2.0, 2.0, 2.0, 1.0);
     output.enabled = 0.0;
     return output;
   }
-  let world = output.center + (cameraRight() * output.local.x + cameraUp() * output.local.y) * output.radius;
-  output.clip = project(world);
+
+  let normal = safeNormalize(particle.birthNormalLifetime.xyz, vec3f(0.0, 1.0, 0.0));
+  let velocity = particle.velocityAge.xyz;
+  let flowAxis = safeNormalize(velocity, perpendicular(normal));
+  let tangent = safeNormalize(velocity - normal * dot(velocity, normal), perpendicular(normal));
+  let sheetSide = safeNormalize(cross(normal, tangent), perpendicular(normal));
+  let ligamentSide = perpendicular(flowAxis);
+  let ligamentOther = safeNormalize(cross(flowAxis, ligamentSide), normal);
+  let capillaryTime = max(particle.shape.w, 0.02);
+  let aspect = 1.0 + (max(particle.shape.x, 1.0) - 1.0) * exp(-particle.velocityAge.w / capillaryTime);
+  let shapeKind = particle.shape.y;
+  var axis0: vec3f;
+  var axis1: vec3f;
+  var axis2: vec3f;
+  if (shapeKind > 1.5) {
+    // Sheet particles are oblate: two expanded in-plane axes and a thin
+    // normal axis. sqrt(s) * sqrt(s) / s preserves the source volume.
+    let inPlane = sqrt(aspect);
+    axis0 = tangent * radius * inPlane;
+    axis1 = sheetSide * radius * inPlane;
+    axis2 = normal * radius / aspect;
+  } else {
+    // Ligaments are prolate along their motion. Drop-class particles have an
+    // aspect of one and therefore use the same exact path as a sphere.
+    let transverse = inverseSqrt(aspect);
+    axis0 = flowAxis * radius * aspect;
+    axis1 = ligamentSide * radius * transverse;
+    axis2 = ligamentOther * radius * transverse;
+  }
+  output.inverseAxis0 = axis0 / dot(axis0, axis0);
+  output.inverseAxis1 = axis1 / dot(axis1, axis1);
+  output.inverseAxis2 = axis2 / dot(axis2, axis2);
+
+  let right = cameraRight();
+  let up = cameraUp();
+  let forward = cameraForward();
+  let extentRight = sqrt(dot(axis0, right) * dot(axis0, right) + dot(axis1, right) * dot(axis1, right) + dot(axis2, right) * dot(axis2, right));
+  let extentUp = sqrt(dot(axis0, up) * dot(axis0, up) + dot(axis1, up) * dot(axis1, up) + dot(axis2, up) * dot(axis2, up));
+  let extentDepth = sqrt(dot(axis0, forward) * dot(axis0, forward) + dot(axis1, forward) * dot(axis1, forward) + dot(axis2, forward) * dot(axis2, forward));
+  let centerDepth = dot(output.center - view.cameraPosition.xyz, forward);
+  let perspectivePad = 1.035 + extentDepth / max(centerDepth, 0.02);
+  output.rayPoint = output.center + right * corners[vertex].x * extentRight * perspectivePad + up * corners[vertex].y * extentUp * perspectivePad;
+  output.clip = project(output.rayPoint);
   if (output.clip.w <= 0.001) { output.clip = vec4f(2.0, 2.0, 2.0, 1.0); output.enabled = 0.0; }
   return output;
 }
 
-fn sphereInterface(input: SphereVertex, back: bool) -> InterfaceFragment {
-  let radius2 = dot(input.local, input.local);
-  if (input.enabled < 0.5 || radius2 > 1.0) { discard; }
-  let z = sqrt(max(0.0, 1.0 - radius2));
-  let facing = select(-1.0, 1.0, back);
-  let localNormal = cameraRight() * input.local.x + cameraUp() * input.local.y + cameraForward() * (facing * z);
-  let normal = normalize(localNormal);
-  let world = input.center + normal * input.radius;
+fn ellipsoidInterface(input: EllipsoidVertex, back: bool) -> InterfaceFragment {
+  if (input.enabled < 0.5) { discard; }
+  let rayOrigin = view.cameraPosition.xyz;
+  let rayDirection = safeNormalize(input.rayPoint - rayOrigin, cameraForward());
+  let offset = rayOrigin - input.center;
+  let qOrigin = vec3f(dot(offset, input.inverseAxis0), dot(offset, input.inverseAxis1), dot(offset, input.inverseAxis2));
+  let qDirection = vec3f(dot(rayDirection, input.inverseAxis0), dot(rayDirection, input.inverseAxis1), dot(rayDirection, input.inverseAxis2));
+  let a = dot(qDirection, qDirection);
+  let b = dot(qOrigin, qDirection);
+  let discriminant = b * b - a * (dot(qOrigin, qOrigin) - 1.0);
+  if (discriminant < 0.0 || a <= 1e-12) { discard; }
+  let root = sqrt(max(discriminant, 0.0));
+  let nearDistance = (-b - root) / a;
+  let farDistance = (-b + root) / a;
+  let distance = select(nearDistance, farDistance, back);
+  if (distance <= 1e-4) { discard; }
+  let world = rayOrigin + rayDirection * distance;
+  let relative = world - input.center;
+  let q = vec3f(dot(relative, input.inverseAxis0), dot(relative, input.inverseAxis1), dot(relative, input.inverseAxis2));
+  let normal = safeNormalize(input.inverseAxis0 * q.x + input.inverseAxis1 * q.y + input.inverseAxis2 * q.z, -rayDirection);
   let clip = project(world);
   return InterfaceFragment(vec4f(world, 1.0), vec4f(normal, 1.0), clamp(clip.z / max(clip.w, 0.001), 0.0, 1.0));
 }
 
-@fragment fn sphereFront(input: SphereVertex) -> InterfaceFragment { return sphereInterface(input, false); }
-@fragment fn sphereBack(input: SphereVertex) -> InterfaceFragment { return sphereInterface(input, true); }
+@fragment fn ellipsoidFront(input: EllipsoidVertex) -> InterfaceFragment { return ellipsoidInterface(input, false); }
+@fragment fn ellipsoidBack(input: EllipsoidVertex) -> InterfaceFragment { return ellipsoidInterface(input, true); }
 `;
 
 export class WebGPUSecondaryParticleSystem {
@@ -498,10 +609,10 @@ export class WebGPUSecondaryParticleSystem {
       usage: GPUBufferUsage.STORAGE
     });
     this.state = device.createBuffer({ label: "Secondary particle ring state", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.params = device.createBuffer({ label: "Secondary particle parameters", size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Secondary particle parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.state, 0, new Uint32Array(4));
     this.renderSource = { buffer: this.particles, capacity, strideBytes: SECONDARY_PARTICLE_STRIDE_BYTES };
-    this.allocatedBytes = capacity * SECONDARY_PARTICLE_STRIDE_BYTES + 112;
+    this.allocatedBytes = capacity * SECONDARY_PARTICLE_STRIDE_BYTES + 128;
 
     this.shaderModule = device.createShaderModule({ label: "Secondary liquid particle kernels", code: secondaryParticleComputeShader });
     const layout = device.createBindGroupLayout({ label: "Secondary particle simulation bindings", entries: [
@@ -558,7 +669,8 @@ export class WebGPUSecondaryParticleSystem {
       this.domain.width_m, this.domain.height_m, this.domain.depth_m, this.domain.topOpen ? 1 : 0,
       this.domain.gravity_m_s2.x, this.domain.gravity_m_s2.y, this.domain.gravity_m_s2.z, this.domain.randomSeed,
       this.renderSource.capacity, outwardThreshold, 0.22, 0,
-      source.fieldLayout === "restricted-tall-cell" ? 1 : 0, source.surfaceEncoding === "occupancy" ? 1 : 0, 7, this.step
+      source.fieldLayout === "restricted-tall-cell" ? 1 : 0, source.surfaceEncoding === "occupancy" ? 1 : 0, 7, this.step,
+      this.domain.density_kg_m3, this.domain.surfaceTension_N_m, 0, 0
     ]));
   }
 
@@ -625,17 +737,17 @@ export class SecondaryParticleRenderPipeline {
       }] },
       primitive: { topology: "triangle-list", cullMode: "none" }
     });
-    const opticalDescriptor = (label: string, entryPoint: "sphereFront" | "sphereBack"): GPURenderPipelineDescriptor => ({
+    const opticalDescriptor = (label: string, entryPoint: "ellipsoidFront" | "ellipsoidBack"): GPURenderPipelineDescriptor => ({
       label, layout: pipelineLayout,
-      vertex: { module: opticalModule, entryPoint: "sphereVertex" },
+      vertex: { module: opticalModule, entryPoint: "ellipsoidVertex" },
       fragment: { module: opticalModule, entryPoint, targets: [{ format: "rgba16float" }, { format: "rgba16float" }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
     });
     [this.fallbackPipeline, this.opticalFrontPipeline, this.opticalBackPipeline] = await Promise.all([
       this.device.createRenderPipelineAsync(fallbackDescriptor("Spray droplet fallback overlay")),
-      this.device.createRenderPipelineAsync(opticalDescriptor("Secondary spray front interfaces", "sphereFront")),
-      this.device.createRenderPipelineAsync(opticalDescriptor("Secondary spray back interfaces", "sphereBack"))
+      this.device.createRenderPipelineAsync(opticalDescriptor("Secondary spray front interfaces", "ellipsoidFront")),
+      this.device.createRenderPipelineAsync(opticalDescriptor("Secondary spray back interfaces", "ellipsoidBack"))
     ]);
   }
 

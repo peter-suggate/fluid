@@ -44,8 +44,8 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
     description: "Applies solid occupancy and exchanges impulses between the liquid and active rigid bodies.", reads: ["fluid state", "body transforms and velocities"], writes: ["fluid momentum", "body impulses"], dependsOn: [dependsOn]
   });
   const spray = (dependsOn: string) => stage({
-    key: "spray-sim", label: "Spray droplet update + emission", shortLabel: "SPRAY SIM", value: value(contextMatches, snapshot.gpuSpraySimulation_ms), className: "stage-surface-update", group: "compute", active: active(snapshot, "spray"),
-    description: "Advects the bounded escaped-droplet ring and emits new droplets from level-set samples that move beyond the resolved interface.", reads: ["signed distance φ", "projected velocity", "spray particle ring"], writes: ["spray particle ring"], dependsOn: [dependsOn]
+    key: "spray-sim", label: "Spray breakup + transport", shortLabel: "SPRAY SIM", value: value(contextMatches, snapshot.gpuSpraySimulation_ms), className: "stage-surface-update", group: "compute", active: active(snapshot, "spray"),
+    description: "Advects the bounded secondary-liquid ring, emits spatially coherent breakup events, and classifies drops, ligaments, and thin sheets for optical rendering.", reads: ["signed distance φ", "projected velocity", "spray particle ring"], writes: ["spray particle ring", "breakup shape metadata"], dependsOn: [dependsOn]
   });
 
   if (methodId === "octree") {

@@ -28,6 +28,7 @@
     "test:water-shaders": "node --import tsx tools/validate-water-shaders.ts",
     "test:quadtree-shaders": "node --import tsx tools/validate-quadtree-shaders.ts",
     "benchmark:water": "node --import tsx tools/benchmark-water-extraction.ts",
+    "benchmark:spray": "node --import tsx tools/benchmark-secondary-particles.ts",
     "benchmark:rigid": "node --import tsx tools/run-rigid-benchmarks.ts",
     "native:run": "cd native && swift run -c release FluidMetal",
     "native:build": "cd native && swift build -c release",

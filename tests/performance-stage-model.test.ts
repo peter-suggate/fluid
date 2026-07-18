@@ -56,6 +56,7 @@ test("octree trace exposes its resident pipeline and immersed-body coupling", ()
   const { sample, stages } = stagesFor("octree", ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surfaceUpdate", "rigidCoupling", "spray", "diagnostics"]);
   assert.deepEqual(stages.map((stage) => stage.key), ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "spray-sim", "diagnostics", "overhead"]);
   assert.deepEqual(stages.map((stage) => stage.dependsOn[0]), ["uploads", "topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "spray-sim", "diagnostics"]);
+  assert.equal(stages.find((stage) => stage.key === "spray-sim")?.label, "Spray breakup + transport");
   assert.equal(stages.reduce((sum, stage) => sum + stage.value, 0), measuredGPUTime_ms(sample));
 });
 
