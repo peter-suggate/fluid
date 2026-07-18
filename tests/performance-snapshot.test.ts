@@ -16,7 +16,6 @@ test("GPU performance totals exclude unavailable or stale timer values", () => {
 });
 
 test("empty performance identifies the renderer without claiming a sample", () => {
-  assert.equal(emptyPerformance.waterRenderMode, "rasterized");
   assert.equal(emptyPerformance.gpuRenderTimestampSupported, false);
   assert.equal(emptyPerformance.gpuRenderTimingAvailable, false);
   assert.equal(emptyPerformance.gpuSurfaceExtraction_ms, 0);

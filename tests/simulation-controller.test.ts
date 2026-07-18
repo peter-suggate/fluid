@@ -48,7 +48,7 @@ test("editing rigid-body properties preserves its current position", () => {
   }
 });
 
-test("the running clock prepares all elapsed fixed steps without frame caps", () => {
+test("pause discards unsubmitted GPU debt but retains admitted work", () => {
   const originalScene = cloneScene(useSceneStore.getState().scene);
   const originalRunState = useRuntimeStore.getState().runState;
 
@@ -62,7 +62,9 @@ test("the running clock prepares all elapsed fixed steps without frame caps", ()
     simulation.tick(1_000);
     simulation.tick(1_100);
 
-    assert.ok(Math.abs(simulation.time() - 0.1) < 1e-9, "100 ms of wall time should prepare 25 fixed steps");
+    assert.ok(Math.abs(simulation.time() - 0.1) < 1e-9, "the renderer should receive enough prepared work to fill each frame budget");
+    simulation.gpuSchedulingPaused(0.012);
+    assert.ok(Math.abs(simulation.time() - 0.012) < 1e-9, "only already-submitted GPU work should survive pause");
   } finally {
     simulation.reset(originalScene);
     useRuntimeStore.getState().setRunState(originalRunState);

@@ -7,7 +7,7 @@ import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useRecordingStore } from "@/lib/stores/recording-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
-import { useUIStore } from "@/lib/stores/ui-store";
+import { PRESENTATION_FPS, frameInterval_ms } from "@/lib/frame-pacing";
 
 function TimingSlider({ label, unit, value, min, max, step, integer = false, detail, onCommit }: { label: string; unit: string; value: number; min: number; max: number; step: number; integer?: boolean; detail: (value: number) => string; onCommit: (value: number) => void }) {
   const [draft, setDraft] = useState(value);
@@ -34,13 +34,13 @@ export function TransportBar() {
   const maxDt = useSceneStore((state) => state.scene.numerics.maxDt_s);
   const fixedDt = useSceneStore((state) => state.scene.numerics.fixedDt_s);
   const patchNumerics = useSceneStore((state) => state.patchNumerics);
-  const targetFps = useUIStore((state) => state.targetFps);
   const gpuLag = useDiagnosticsStore((state) => state.gpuInfo?.simulationLag_s);
   const recordingStatus = useRecordingStore((state) => state.status);
   const recordingStart = useRecordingStore((state) => state.startedAtSimulation_s);
   const recording = useRecordingStore((state) => state.recording);
   const fileRef = useRef<HTMLInputElement>(null);
-  const lagged = simulation.backend === "webgpu" && gpuLag !== undefined && gpuLag > 2 * maxDt;
+  const webgpu = simulation.backend === "webgpu";
+  const lagged = webgpu && gpuLag !== undefined && gpuLag > 2 * maxDt;
   const fixedRate_hz = 1 / fixedDt;
   const gpuStepRate_hz = 1 / maxDt;
   const commitNumerics = (patch: Parameters<typeof patchNumerics>[0]) => {
@@ -94,14 +94,16 @@ export function TransportBar() {
       </div>
       <div className="time-readout">
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
-        {simRate !== null && <small className="sim-rate" title="Simulated seconds per wall-clock second">×{simRate.toFixed(2)}</small>}
-        {lagged && <small className="lag-chip" title="The GPU solve is behind the desired simulation clock. Prepared advances are queued continuously; RESET to resynchronize.">GPU −{gpuLag.toFixed(1)} s</small>}
+        {simRate !== null && <small className="sim-rate" title={webgpu ? "Queue-confirmed simulated seconds completed per wall-clock second" : "Simulated seconds completed per wall-clock second"}>ACTUAL ×{simRate.toFixed(2)}</small>}
+        {lagged && <small className="lag-chip" title="Simulation time currently admitted to the bounded GPU feed window.">GPU −{gpuLag.toFixed(1)} s</small>}
         {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
         <div className="transport-timing" aria-label="Simulation timestep controls">
           <TimingSlider key={`fixed-${fixedDt}`} label="FIXED STEP" unit="Hz" value={fixedRate_hz} min={Math.min(30, fixedRate_hz)} max={Math.max(2000, fixedRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms rigid`} onCommit={commitFixedRate} />
           <TimingSlider key={`gpu-${fixedDt}-${maxDt}`} label="GPU STEP" unit="Hz" value={gpuStepRate_hz} min={1} max={fixedRate_hz} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms max`} onCommit={commitGpuStepRate} />
         </div>
-        <span className="continuous-run" title={`Desired simulation rate ×1 · present every ${(1000 / targetFps).toFixed(2)} ms · rigid/oracle step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>SIM ×1 · PRESENT {targetFps} FPS</span>
+        {webgpu
+          ? <span className="continuous-run" title={`Physics fills measured GPU slack between presentations · present every ${frameInterval_ms().toFixed(2)} ms · rigid step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>MAX SIM THROUGHPUT · PRESENT {PRESENTATION_FPS} FPS</span>
+          : <span className="continuous-run" title={`CPU reference simulation · present every ${frameInterval_ms().toFixed(2)} ms · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT {PRESENTATION_FPS} FPS</span>}
       </div>
       <div className="file-actions">
         <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{notice}</span>

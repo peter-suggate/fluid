@@ -20,14 +20,11 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
     }
   }, {
     ...initialUI,
-    view: "presentation",
     diagnosticsOpen: false,
     rightPanel: "performance",
     gridOverlayAxis: "z",
     gridOverlaySlice: 0.7,
-    waterRenderMode: "ray-marched",
     voxelRenderMode: "brick-grid",
-    targetFps: 90,
     camera: { ...initialUI.camera, distance_m: 4.2 }
   });
   const parsed = parseQueryState(query);
@@ -36,14 +33,11 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   assert.equal(parsed.methodId, "uniform");
   assert.equal(parsed.presetId, "hose-tank");
   assert.equal(parsed.quality, "high");
-  assert.equal(parsed.ui.view, "presentation");
   assert.equal(parsed.ui.diagnosticsOpen, false);
   assert.equal(parsed.ui.rightPanel, "performance");
   assert.equal(parsed.ui.gridOverlayAxis, "z");
   assert.equal(parsed.ui.gridOverlaySlice, 0.7);
-  assert.equal(parsed.ui.waterRenderMode, "ray-marched");
   assert.equal(parsed.ui.voxelRenderMode, "brick-grid");
-  assert.equal(parsed.ui.targetFps, 90);
   assert.equal(parsed.ui.camera.distance_m, 4.2);
   assert.deepEqual(parsed.overrides, {
     "tall-cell": { pressureCycles: 5 },
@@ -108,7 +102,6 @@ test("invalid external query values fall back to validated defaults", () => {
   assert.deepEqual(parsed.overrides, {});
   assert.equal(parsed.scene.container.width_m, defaultScene.container.width_m);
   assert.equal(parsed.scene.fluid.gravity_m_s2.y, defaultScene.fluid.gravity_m_s2.y);
-  assert.equal(parsed.ui.view, "scientific");
   assert.equal(parsed.ui.diagnosticsOpen, false);
   assert.equal(parsed.ui.rightPanel, null);
 });
@@ -126,6 +119,22 @@ test("background is fixed by the scene and legacy environment overrides are remo
     overrides: parsed.overrides
   }, parsed.ui);
   assert.equal(new URLSearchParams(query).has("environment"), false);
+});
+
+test("legacy presentation choices are removed from canonical links", () => {
+  const parsed = parseQueryState("?view=presentation&render=ray-marched&fps=90");
+  const query = serializeQueryState("?view=presentation&render=ray-marched&fps=90", {
+    presetId: parsed.presetId,
+    scene: parsed.scene
+  }, {
+    methodId: parsed.methodId,
+    quality: parsed.quality,
+    overrides: parsed.overrides
+  }, parsed.ui);
+  const params = new URLSearchParams(query);
+  assert.equal(params.has("view"), false);
+  assert.equal(params.has("render"), false);
+  assert.equal(params.has("fps"), false);
 });
 
 test("viewport utility panels round-trip through one mutually exclusive query state", () => {

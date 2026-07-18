@@ -14,7 +14,7 @@ const timestamps = [
 ];
 
 test("raster timestamps retain each presentation stage", () => {
-  assert.deepEqual(decodeRenderStageTimestamps(timestamps, true, true), {
+  assert.deepEqual(decodeRenderStageTimestamps(timestamps, true), {
     total_ms: 32,
     surfaceExtraction_ms: 2,
     dryScene_ms: 3,
@@ -28,26 +28,15 @@ test("raster timestamps retain each presentation stage", () => {
 });
 
 test("unchanged surfaces contribute no stale extraction time", () => {
-  const result = decodeRenderStageTimestamps(timestamps, true, false);
+  const result = decodeRenderStageTimestamps(timestamps, false);
   assert.equal(result.surfaceExtraction_ms, undefined);
   assert.equal(result.total_ms, 30);
 });
 
 test("disabled spray contributes no stale render time", () => {
-  const result = decodeRenderStageTimestamps(timestamps, true, true, false);
+  const result = decodeRenderStageTimestamps(timestamps, true, false);
   assert.equal(result.sprayFront_ms, 0);
   assert.equal(result.sprayBack_ms, 0);
   assert.equal(result.sprayRender_ms, 0);
   assert.equal(result.total_ms, 27);
-});
-
-test("ray-march timestamps use the ray pass and shared upscale only", () => {
-  assert.deepEqual(decodeRenderStageTimestamps(timestamps, false, false), {
-    total_ms: 11,
-    sprayFront_ms: 2,
-    sprayBack_ms: 0,
-    sprayRender_ms: 2,
-    opticalComposite_ms: 2,
-    upscale_ms: 7
-  });
 });

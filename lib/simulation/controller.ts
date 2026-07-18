@@ -80,7 +80,7 @@ class SimulationController {
     useDiagnosticsStore.getState().set({ bodies: cloneRigidBodies(this.bodies), rigidState: diagnostics ?? rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2) });
   }
 
-  /** Prepare every fixed step owed by the wall clock. GPU submission is asynchronous. */
+  /** Prepare every fixed step owed by the wall clock. GPU admission is renderer-budgeted. */
   tick(now: number) {
     const tickStart = performance.now();
     if (this.lastClock === null) this.lastClock = now;
@@ -175,6 +175,7 @@ class SimulationController {
     this.bodies = initializeRigidBodies(scene.rigidBodies);
     this.fluidSolver = this.buildFluidSolver(scene);
     this.simulationTime = 0; this.gpuCompletedTime = 0; this.accumulator = 0; this.lastClock = null;
+    this.rateWallClock = 0; this.rateSimTime = 0;
     this.cpuOracleStep = 0; this.cpuSimulationMs = 0;
     this.kinematicDrag = null;
     this.performance = emptyPerformance;
@@ -182,6 +183,7 @@ class SimulationController {
     useDiagnosticsStore.getState().set({ fluidState: this.fluidSolver.diagnostics, fluidRenderState: this.fluidSolver.getRenderState(), gpuInfo: null, couplingState: { displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 }, samples: [], performanceSnapshot: emptyPerformance, performanceHistory: [] });
     const runtime = useRuntimeStore.getState();
     runtime.setSimulationTime(0);
+    runtime.setSimRate(null);
     runtime.setRunState("paused");
     useUIStore.getState().selectBody(scene.rigidBodies[0]?.id);
     runtime.setNotice(`${scene.fluid.inflow ? "Inflow scene" : scene.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
@@ -328,6 +330,18 @@ class SimulationController {
     useRuntimeStore.getState().setSimulationTime(completed);
   }
 
+  /** Drop host-side debt when paused, retaining only work already admitted to the GPU queue. */
+  gpuSchedulingPaused(submittedTime_s?: number) {
+    if (this.backend !== "webgpu") return;
+    const submitted = submittedTime_s !== undefined && Number.isFinite(submittedTime_s)
+      ? Math.max(this.gpuCompletedTime, submittedTime_s)
+      : this.gpuCompletedTime;
+    // A reset can pause while the renderer still owns the previous solver.
+    if (submitted > this.simulationTime + 1e-9) return;
+    this.simulationTime = submitted;
+    this.accumulator = 0;
+  }
+
   recordFrame(metrics: RendererFrameMetrics, resolution: string) {
     const diagnostics = useDiagnosticsStore.getState();
     const now = performance.now();
@@ -339,14 +353,11 @@ class SimulationController {
     const sane = (value: number | undefined, fallback: number) =>
       value !== undefined && Number.isFinite(value) && value >= 0 && value < 10_000 ? value : fallback;
     const methodId = metrics.methodId ?? useMethodStore.getState().methodId;
-    const waterRenderMode = metrics.waterRenderMode ?? useUIStore.getState().waterRenderMode;
     const samePhysicsMethod = previous.methodId === methodId;
-    const sameRenderMethod = samePhysicsMethod && previous.waterRenderMode === waterRenderMode;
     const physicsFallback = samePhysicsMethod ? previous : emptyPerformance;
-    const renderFallback = sameRenderMethod ? previous : emptyPerformance;
+    const renderFallback = samePhysicsMethod ? previous : emptyPerformance;
     const snapshot: PerformanceSnapshot = {
       methodId,
-      waterRenderMode,
       gpuPhysicsTimingAvailable: Boolean(gpu),
       gpuRenderTimestampSupported: Boolean(metrics.gpuRenderTimestampAvailable),
       gpuRenderTimingAvailable: Boolean(metrics.gpuRenderTimestampAvailable && metrics.gpuRender_ms !== undefined),

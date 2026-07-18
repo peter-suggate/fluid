@@ -37,7 +37,6 @@ test("CPU optical mirrors retain physical endpoint and attenuation invariants", 
 
 test("raster bodies and optical water/glass consume the canonical closure", () => {
   assert.match(sceneShader, /shadeUnifiedSurface\(material,lighting\)/);
-  assert.match(rendererSource, /shadeUnifiedSurface\(material, lighting\)/, "the ray-marched comparison path must use the same closure");
   assert.match(voxelDebugRenderShader, /shadeUnifiedSurface\(closure, lighting\)/, "raw voxel materials must use the same closure");
   assert.match(compositeShader, /unifiedDielectricFresnel\(cosine,0\.04\)/);
   assert.match(compositeShader, /unifiedDielectricFresnel\(cosine,0\.02037\)/);

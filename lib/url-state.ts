@@ -1,13 +1,12 @@
 import { defaultMethodId, simulationMethods, type MethodParamValue, type MethodParamValues } from "./methods";
-import { cloneScene, validateScene, type CameraState, type SceneDescription, type ViewMode } from "./model";
+import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets } from "./scenes";
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
 import { useUIStore, type RightPanel } from "./stores/ui-store";
 import type { GPUQuality } from "./tall-cell-grid";
-import type { GridOverlayConfig, GridOverlayMode, WaterRenderMode } from "./webgpu-renderer";
+import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
 import type { VoxelRenderMode } from "./webgpu-voxel-debug";
-import { clampTargetFps, MAX_TARGET_FPS, MIN_TARGET_FPS } from "./frame-pacing";
 
 const qualities: ReadonlyArray<GPUQuality> = ["balanced", "high", "ultra"];
 const deletedValue = "~delete";
@@ -51,7 +50,6 @@ type QueryState = {
 };
 
 type UIQueryState = {
-  view: ViewMode;
   camera: CameraState;
   sceneModalOpen: boolean;
   diagnosticsOpen: boolean;
@@ -59,9 +57,7 @@ type UIQueryState = {
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
   gridOverlayMode: GridOverlayMode;
-  waterRenderMode: WaterRenderMode;
   voxelRenderMode: VoxelRenderMode;
-  targetFps: number;
 };
 
 type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
@@ -162,10 +158,8 @@ export function parseQueryState(search: string): QueryState {
   }
   const initialUI = useUIStore.getInitialState();
   const presetCamera = cameraForPreset(preset);
-  const view = query.get("view");
   const grid = query.get("grid");
   const gridMode = query.get("gridMode");
-  const render = query.get("render");
   const voxels = query.get("voxels");
   const requestedPanel = query.get("panel");
   // One-way migration for shared pre-sidebar links. Serialization always emits
@@ -182,7 +176,6 @@ export function parseQueryState(search: string): QueryState {
     presetId: preset.id,
     scene: validateScene(scene).length === 0 ? scene : baseScene,
     ui: {
-      view: view === "scientific" || view === "presentation" ? view : initialUI.view,
       camera: {
         azimuth_rad: numberParam(query, "camera.azimuth", presetCamera.azimuth_rad),
         elevation_rad: numberParam(query, "camera.elevation", presetCamera.elevation_rad, -1.45, 1.45),
@@ -199,9 +192,7 @@ export function parseQueryState(search: string): QueryState {
       gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" ? grid : initialUI.gridOverlayAxis,
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
-      waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode,
-      voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode,
-      targetFps: clampTargetFps(numberParam(query, "fps", initialUI.targetFps, MIN_TARGET_FPS, MAX_TARGET_FPS))
+      voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode
     }
   };
 }
@@ -225,10 +216,7 @@ export function serializeQueryState(
   query.set("method", methodState.methodId);
   query.set("scene", sceneState.presetId);
   query.set("quality", methodState.quality);
-  query.set("view", uiState.view);
-  query.set("render", uiState.waterRenderMode);
   if (uiState.voxelRenderMode !== "smooth") query.set("voxels", uiState.voxelRenderMode);
-  if (uiState.targetFps !== useUIStore.getInitialState().targetFps) query.set("fps", String(uiState.targetFps));
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");
   else if (rightPanel) query.set("panel", rightPanel);

@@ -6,8 +6,7 @@ import {
   secondaryParticleCapacity,
   secondaryParticleComputeShader,
   secondaryParticleCorrectionShader,
-  secondaryParticleOpticalShader,
-  secondaryParticleRenderShader
+  secondaryParticleOpticalShader
 } from "../lib/webgpu-secondary-particles";
 
 test("secondary particle budgets are bounded and allocation-aligned", () => {
@@ -37,6 +36,7 @@ test("secondary particles retain render-only breakup metadata", () => {
   assert.match(secondaryParticleComputeShader, /capillaryTime\(particleRadius\)/);
   assert.match(secondaryParticleComputeShader, /eventGain = 0\.18 \+ 1\.72 \* smoothstep/);
   assert.doesNotMatch(secondaryParticleComputeShader, /texture_storage_3d/);
+  assert.match(secondaryParticleComputeShader, /atomicMax\(&particleState\.drawInstanceCount, min\(absoluteSlot \+ 1u, capacity\(\)\)\)/);
 });
 
 test("secondary particle sampling abstracts dense and restricted fields", () => {
@@ -52,13 +52,6 @@ test("optional particle feedback is narrow, bounded, and excludes detached spray
   assert.match(secondaryParticleCorrectionShader, /max\(-0\.5 \* hMin\(\)/);
   assert.match(secondaryParticleCorrectionShader, /atomicMin\(&nearestParticlePhi/);
   assert.doesNotMatch(secondaryParticleCorrectionShader, /velocityAge\.xyz\s*[+\-*\/]?=/, "surface correction must not invent particle-to-grid momentum transfer");
-});
-
-test("fallback spray renderer draws soft liquid-colored billboards", () => {
-  assert.match(secondaryParticleRenderShader, /@builtin\(instance_index\)/);
-  assert.match(secondaryParticleRenderShader, /smoothstep\(0\.34, 1\.0, radius2\)/);
-  assert.match(secondaryParticleRenderShader, /let alpha = 0\.46 \* edge/);
-  assert.match(secondaryParticleRenderShader, /particle\.shape\.z/);
 });
 
 test("energetic splashes bias toward smaller mixed-size droplets", () => {

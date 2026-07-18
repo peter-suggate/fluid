@@ -1,14 +1,12 @@
 import { create } from "zustand";
-import { defaultCamera, type CameraState, type ViewMode } from "../model";
-import type { GridOverlayConfig, GridOverlayMode, WaterRenderMode } from "../webgpu-renderer";
+import { defaultCamera, type CameraState } from "../model";
+import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 import type { VoxelRenderMode } from "../webgpu-voxel-debug";
-import { clampTargetFps, DEFAULT_TARGET_FPS } from "../frame-pacing";
 
 export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | null;
 
-/** Presentation-only state: camera, view mode, selection, open panels. */
+/** Viewport state: camera, selection, open panels, and debug controls. */
 interface UIStore {
-  view: ViewMode;
   camera: CameraState;
   selectedBodyId?: string;
   sceneModalOpen: boolean;
@@ -19,13 +17,8 @@ interface UIStore {
   gridOverlaySlice: number;
   /** Field painted on the slice, including adaptive pressure diagnostics. */
   gridOverlayMode: GridOverlayMode;
-  /** Optical presentation pipeline. The legacy ray marcher stays available for A/B comparisons. */
-  waterRenderMode: WaterRenderMode;
   /** Unified sparse-brick representation: smooth surface, raw voxels, or brick bounds. */
   voxelRenderMode: VoxelRenderMode;
-  /** Requested presentation and raster-surface refresh rate. */
-  targetFps: number;
-  setView: (view: ViewMode) => void;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   selectBody: (bodyId?: string) => void;
   setSceneModalOpen: (open: boolean) => void;
@@ -34,13 +27,10 @@ interface UIStore {
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
-  setWaterRenderMode: (mode: WaterRenderMode) => void;
   setVoxelRenderMode: (mode: VoxelRenderMode) => void;
-  setTargetFps: (targetFps: number) => void;
 }
 
 export const useUIStore = create<UIStore>((set) => ({
-  view: "scientific",
   camera: defaultCamera,
   selectedBodyId: undefined,
   sceneModalOpen: false,
@@ -49,10 +39,7 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
-  waterRenderMode: "rasterized",
   voxelRenderMode: "smooth",
-  targetFps: DEFAULT_TARGET_FPS,
-  setView: (view) => set({ view }),
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   selectBody: (selectedBodyId) => set({ selectedBodyId }),
   setSceneModalOpen: (sceneModalOpen) => set({ sceneModalOpen }),
@@ -64,7 +51,5 @@ export const useUIStore = create<UIStore>((set) => ({
   setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
-  setWaterRenderMode: (waterRenderMode) => set({ waterRenderMode }),
-  setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode }),
-  setTargetFps: (targetFps) => set({ targetFps: clampTargetFps(targetFps) })
+  setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode })
 }));

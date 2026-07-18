@@ -1,5 +1,5 @@
 import { cameraBasis, cameraPosition, dot } from "./math";
-import type { CameraState, SceneDescription, ViewMode } from "./model";
+import type { CameraState, SceneDescription } from "./model";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
 import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
@@ -8,19 +8,23 @@ import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "./webgpu-device-limits";
 import { RasterWaterPipeline } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
-import { environmentShaderLibrary } from "./webgpu-environments";
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "./terrain";
 import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import { SparseVoxelDebugRenderer, type VoxelRenderMode } from "./webgpu-voxel-debug";
-import { unifiedLightingShaderLibrary } from "./webgpu-lighting";
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
-export type WaterRenderMode = "rasterized" | "ray-marched";
 export const MAX_PRESENTATION_GAP_MS = 1000 / 60;
 
 export function presentationPriorityDue(lastFrameAt_ms: number, now_ms: number) {
   return !Number.isFinite(lastFrameAt_ms) || now_ms - lastFrameAt_ms + 0.5 >= MAX_PRESENTATION_GAP_MS;
+}
+
+/** Only start physics when its measured cost still fits before the next presentation. */
+export function presentationHasPhysicsSlack(lastFrameAt_ms: number, now_ms: number, gpuStep_ms: number | undefined, gpuRender_ms = 0) {
+  if (!Number.isFinite(lastFrameAt_ms) || !gpuStep_ms || !Number.isFinite(gpuStep_ms) || gpuStep_ms <= 0) return false;
+  const elapsed_ms = Math.max(0, now_ms - lastFrameAt_ms);
+  return elapsed_ms + gpuStep_ms + Math.max(0, gpuRender_ms) + 0.5 < MAX_PRESENTATION_GAP_MS;
 }
 
 /** Submit one solver advance toward the prepared simulation clock. */
@@ -81,7 +85,7 @@ export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, n
  * normalized by the last reported liquid maximum. Both sample live solver
  * textures in the overlay shader — no readback is involved.
  */
-export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation";
+export type GridOverlayMode = "structure" | "resolution" | "surface" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation";
 
 export interface GridOverlayConfig {
   axis: "off" | "z" | "x" | "y";
@@ -117,7 +121,6 @@ export interface RendererFrameMetrics {
   gpuOpticalComposite_ms?: number;
   gpuUpscale_ms?: number;
   methodId?: string;
-  waterRenderMode?: WaterRenderMode;
   gpuRenderTimestampAvailable?: boolean;
 }
 
@@ -133,7 +136,7 @@ export interface RenderStageTimings {
   upscale_ms: number;
 }
 
-export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, rasterized: boolean, surfaceUpdated: boolean, sprayRendered = true): RenderStageTimings {
+export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, surfaceUpdated: boolean, sprayRendered = true): RenderStageTimings {
   if (times.length < 16) throw new Error("Render timestamp sample must contain 16 query values");
   const duration = (start: number, end: number) => {
     const milliseconds = Number(times[end] - times[start]) / 1e6;
@@ -141,12 +144,8 @@ export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, rasterized
   };
   const upscale_ms = duration(10, 11);
   const sprayFront_ms = sprayRendered ? duration(12, 13) : 0;
-  const sprayBack_ms = sprayRendered && rasterized ? duration(14, 15) : 0;
+  const sprayBack_ms = sprayRendered ? duration(14, 15) : 0;
   const sprayRender_ms = sprayFront_ms + sprayBack_ms;
-  if (!rasterized) {
-    const opticalComposite_ms = duration(0, 1);
-    return { total_ms: opticalComposite_ms + sprayRender_ms + upscale_ms, sprayFront_ms, sprayBack_ms, sprayRender_ms, opticalComposite_ms, upscale_ms };
-  }
   const surfaceExtraction_ms = surfaceUpdated ? duration(0, 1) : undefined;
   const dryScene_ms = duration(2, 3);
   const interfaces_ms = duration(4, 5) + duration(6, 7);
@@ -156,397 +155,6 @@ export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, rasterized
     surfaceExtraction_ms, dryScene_ms, interfaces_ms, sprayFront_ms, sprayBack_ms, sprayRender_ms, opticalComposite_ms, upscale_ms
   };
 }
-
-const shader = /* wgsl */ `
-struct Uniforms {
-  viewport: vec4f,
-  cameraPosition: vec4f,
-  cameraTarget: vec4f,
-  container: vec4f,
-  options: vec4f,
-  gridInfo: vec4f,
-  debug: vec4f,
-  environment: vec4f,
-  terrainMeta: vec4f,
-  terrainFeatures: array<vec4f, 16>,
-}
-
-@group(0) @binding(0) var<uniform> u: Uniforms;
-
-struct BodyGPU {
-  positionRadius: vec4f,
-  halfSizeShape: vec4f,
-  orientation: vec4f,
-  colorSelected: vec4f,
-}
-
-@group(0) @binding(1) var<storage, read> bodies: array<BodyGPU, 12>;
-@group(0) @binding(2) var fluidField: texture_3d<f32>;
-@group(0) @binding(3) var tallCellBases: texture_2d<f32>;
-
-struct VertexOutput {
-  @builtin(position) position: vec4f,
-  @location(0) uv: vec2f,
-}
-
-@vertex
-fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
-  var positions = array<vec2f, 3>(
-    vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0)
-  );
-  var result: VertexOutput;
-  result.position = vec4f(positions[index], 0.0, 1.0);
-  result.uv = positions[index] * 0.5 + 0.5;
-  return result;
-}
-
-fn boxIntersection(ro: vec3f, rd: vec3f, boundsMin: vec3f, boundsMax: vec3f) -> vec2f {
-  let inverse = 1.0 / rd;
-  let t0 = (boundsMin - ro) * inverse;
-  let t1 = (boundsMax - ro) * inverse;
-  let near3 = min(t0, t1);
-  let far3 = max(t0, t1);
-  return vec2f(max(max(near3.x, near3.y), near3.z), min(min(far3.x, far3.y), far3.z));
-}
-
-${environmentShaderLibrary}
-${unifiedLightingShaderLibrary}
-
-fn gridLine(value: vec2f, scale: f32) -> f32 {
-  let g = abs(sin(value * 3.14159265 / max(scale, 0.0001)));
-  return 1.0 - smoothstep(0.0, 0.085, min(g.x, g.y));
-}
-
-struct BodyHit {
-  t: f32,
-  normal: vec3f,
-  color: vec3f,
-  selected: f32,
-}
-
-fn quatRotate(q: vec4f, v: vec3f) -> vec3f {
-  let uv = cross(q.yzw, v);
-  let uuv = cross(q.yzw, uv);
-  return v + 2.0 * (q.x * uv + uuv);
-}
-
-fn quatInverseRotate(q: vec4f, v: vec3f) -> vec3f {
-  return quatRotate(vec4f(q.x, -q.yzw), v);
-}
-
-fn sphereLocalHit(ro: vec3f, rd: vec3f, center: vec3f, radius: f32) -> vec4f {
-  let oc = ro - center;
-  let b = dot(oc, rd);
-  let discriminant = b * b - dot(oc, oc) + radius * radius;
-  if (discriminant < 0.0) { return vec4f(1e20, 0.0, 1.0, 0.0); }
-  let root = sqrt(discriminant);
-  var t = -b - root;
-  if (t <= 0.0001) { t = -b + root; }
-  if (t <= 0.0001) { return vec4f(1e20, 0.0, 1.0, 0.0); }
-  return vec4f(t, normalize(ro + rd * t - center));
-}
-
-fn cylinderLocalHit(ro: vec3f, rd: vec3f, radius: f32, halfHeight: f32, capped: bool) -> vec4f {
-  var best = vec4f(1e20, 0.0, 1.0, 0.0);
-  let a = rd.x * rd.x + rd.z * rd.z;
-  if (a > 1e-8) {
-    let b = ro.x * rd.x + ro.z * rd.z;
-    let c = ro.x * ro.x + ro.z * ro.z - radius * radius;
-    let discriminant = b * b - a * c;
-    if (discriminant >= 0.0) {
-      var t = (-b - sqrt(discriminant)) / a;
-      if (t <= 0.0001) { t = (-b + sqrt(discriminant)) / a; }
-      let y = ro.y + rd.y * t;
-      if (t > 0.0001 && abs(y) <= halfHeight) {
-        let p = ro + rd * t;
-        best = vec4f(t, normalize(vec3f(p.x, 0.0, p.z)));
-      }
-    }
-  }
-  if (capped && abs(rd.y) > 1e-8) {
-    let tTop = (halfHeight - ro.y) / rd.y;
-    let pTop = ro + rd * tTop;
-    if (tTop > 0.0001 && tTop < best.x && dot(pTop.xz, pTop.xz) <= radius * radius) { best = vec4f(tTop, 0.0, 1.0, 0.0); }
-    let tBottom = (-halfHeight - ro.y) / rd.y;
-    let pBottom = ro + rd * tBottom;
-    if (tBottom > 0.0001 && tBottom < best.x && dot(pBottom.xz, pBottom.xz) <= radius * radius) { best = vec4f(tBottom, 0.0, -1.0, 0.0); }
-  }
-  return best;
-}
-
-fn intersectBody(ro: vec3f, rd: vec3f, body: BodyGPU) -> vec4f {
-  let localOrigin = quatInverseRotate(body.orientation, ro - body.positionRadius.xyz);
-  let localDirection = quatInverseRotate(body.orientation, rd);
-  let shape = i32(round(body.halfSizeShape.w));
-  var localHit = vec4f(1e20, 0.0, 1.0, 0.0);
-  if (shape == 0) {
-    localHit = sphereLocalHit(localOrigin, localDirection, vec3f(0.0), body.halfSizeShape.x);
-  } else if (shape == 1) {
-    let boxHit = boxIntersection(localOrigin, localDirection, -body.halfSizeShape.xyz, body.halfSizeShape.xyz);
-    var t = boxHit.x;
-    if (t <= 0.0001) { t = boxHit.y; }
-    if (t > 0.0001 && boxHit.x <= boxHit.y) {
-      let p = localOrigin + localDirection * t;
-      let q = abs(p / max(body.halfSizeShape.xyz, vec3f(1e-6)));
-      var n = vec3f(0.0, 0.0, sign(p.z));
-      if (q.x >= q.y && q.x >= q.z) { n = vec3f(sign(p.x), 0.0, 0.0); }
-      else if (q.y >= q.z) { n = vec3f(0.0, sign(p.y), 0.0); }
-      localHit = vec4f(t, n);
-    }
-  } else if (shape == 2) {
-    let side = cylinderLocalHit(localOrigin, localDirection, body.halfSizeShape.x, body.halfSizeShape.y, false);
-    let upper = sphereLocalHit(localOrigin, localDirection, vec3f(0.0, body.halfSizeShape.y, 0.0), body.halfSizeShape.x);
-    let lower = sphereLocalHit(localOrigin, localDirection, vec3f(0.0, -body.halfSizeShape.y, 0.0), body.halfSizeShape.x);
-    localHit = side;
-    if (upper.x < localHit.x) { localHit = upper; }
-    if (lower.x < localHit.x) { localHit = lower; }
-  } else {
-    localHit = cylinderLocalHit(localOrigin, localDirection, body.halfSizeShape.x, body.halfSizeShape.y, true);
-  }
-  return vec4f(localHit.x, quatRotate(body.orientation, localHit.yzw));
-}
-
-fn nearestBody(ro: vec3f, rd: vec3f) -> BodyHit {
-  var result = BodyHit(1e20, vec3f(0.0, 1.0, 0.0), vec3f(0.7), 0.0);
-  let bodyCount = u32(round(u.options.z));
-  for (var index: u32 = 0u; index < 12u; index += 1u) {
-    if (index >= bodyCount) { break; }
-    let hit = intersectBody(ro, rd, bodies[index]);
-    if (hit.x < result.t) {
-      result = BodyHit(hit.x, normalize(hit.yzw), bodies[index].colorSelected.xyz, bodies[index].colorSelected.w);
-    }
-  }
-  return result;
-}
-
-// Level-set fields become a smooth occupancy whose 0.5 contour is phi = 0.
-// The band spans four cells so no corner of a surface-crossing cube saturates
-// (the cube diagonal is under two cells); a saturated corner biases the linear
-// crossing estimate and renders as cell-pitch lattice artifacts.
-fn occupancyFromPhi(phi: f32) -> f32 {
-  let band = 4.0 * u.container.y / max(u.gridInfo.y, 1.0);
-  return clamp(0.5 - phi / band, 0.0, 1.0);
-}
-
-fn fluidSample(cell: vec3i) -> f32 {
-  let dims = vec3i(u.gridInfo.xyz);
-  let q = clamp(cell, vec3i(0), dims - vec3i(1));
-  let mode = u.gridInfo.w;
-  if (mode < 1.5) { return textureLoad(fluidField, q, 0).x; }
-  if (mode > 2.5) { return occupancyFromPhi(textureLoad(fluidField, q, 0).x); }
-  let base = i32(round(textureLoad(tallCellBases, q.xz, 0).x));
-  if (q.y < base && base > 0) {
-    let t = clamp(f32(q.y) / f32(max(base - 1, 1)), 0.0, 1.0);
-    return occupancyFromPhi(mix(textureLoad(fluidField, vec3i(q.x, 0, q.z), 0).x, textureLoad(fluidField, vec3i(q.x, 1, q.z), 0).x, t));
-  }
-  let packedY = 2 + q.y - base;
-  let stored = vec3i(textureDimensions(fluidField));
-  if (packedY < 2 || packedY >= stored.y) { return 0.0; }
-  return occupancyFromPhi(textureLoad(fluidField, vec3i(q.x, packedY, q.z), 0).x);
-}
-
-fn fluidValue(uvw: vec3f) -> f32 {
-  let dims = vec3i(u.gridInfo.xyz);
-  let q = clamp(uvw * vec3f(dims) - vec3f(0.5), vec3f(0.0), vec3f(dims - vec3i(1)));
-  let base = vec3i(floor(q));
-  let f = fract(q);
-  let lower = vec4f(fluidSample(base), fluidSample(base + vec3i(1, 0, 0)), fluidSample(base + vec3i(0, 1, 0)), fluidSample(base + vec3i(1, 1, 0)));
-  let upper = vec4f(fluidSample(base + vec3i(0, 0, 1)), fluidSample(base + vec3i(1, 0, 1)), fluidSample(base + vec3i(0, 1, 1)), fluidSample(base + vec3i(1, 1, 1)));
-  let z0 = mix(mix(lower.x, lower.y, f.x), mix(lower.z, lower.w, f.x), f.y);
-  let z1 = mix(mix(upper.x, upper.y, f.x), mix(upper.z, upper.w, f.x), f.y);
-  return mix(z0, z1, f.z);
-}
-
-struct InterfaceCell {
-  base: vec3f,
-  lower: vec4f,
-  upper: vec4f,
-}
-
-fn loadInterfaceCell(uvw: vec3f) -> InterfaceCell {
-  let dims = vec3i(u.gridInfo.xyz);
-  let q = clamp(uvw * vec3f(dims) - vec3f(0.5), vec3f(0.0), vec3f(dims - vec3i(1)));
-  let base = clamp(vec3i(floor(q)), vec3i(0), dims - vec3i(2));
-  return InterfaceCell(
-    vec3f(base),
-    vec4f(fluidSample(base), fluidSample(base + vec3i(1, 0, 0)), fluidSample(base + vec3i(0, 1, 0)), fluidSample(base + vec3i(1, 1, 0))),
-    vec4f(fluidSample(base + vec3i(0, 0, 1)), fluidSample(base + vec3i(1, 0, 1)), fluidSample(base + vec3i(0, 1, 1)), fluidSample(base + vec3i(1, 1, 1)))
-  );
-}
-
-fn interfaceValue(cell: InterfaceCell, q: vec3f) -> f32 {
-  let f = clamp(q - cell.base, vec3f(0.0), vec3f(1.0));
-  let z0 = mix(mix(cell.lower.x, cell.lower.y, f.x), mix(cell.lower.z, cell.lower.w, f.x), f.y);
-  let z1 = mix(mix(cell.upper.x, cell.upper.y, f.x), mix(cell.upper.z, cell.upper.w, f.x), f.y);
-  return mix(z0, z1, f.z);
-}
-
-fn interfaceGradient(cell: InterfaceCell, q: vec3f, size: vec3f) -> vec3f {
-  let dims = vec3f(u.gridInfo.xyz);
-  let f = clamp(q - cell.base, vec3f(0.0), vec3f(1.0));
-  let dx0 = mix(cell.lower.y - cell.lower.x, cell.lower.w - cell.lower.z, f.y);
-  let dx1 = mix(cell.upper.y - cell.upper.x, cell.upper.w - cell.upper.z, f.y);
-  let dy0 = mix(cell.lower.z - cell.lower.x, cell.lower.w - cell.lower.y, f.x);
-  let dy1 = mix(cell.upper.z - cell.upper.x, cell.upper.w - cell.upper.y, f.x);
-  let z0 = mix(mix(cell.lower.x, cell.lower.y, f.x), mix(cell.lower.z, cell.lower.w, f.x), f.y);
-  let z1 = mix(mix(cell.upper.x, cell.upper.y, f.x), mix(cell.upper.z, cell.upper.w, f.x), f.y);
-  return vec3f(mix(dx0, dx1, f.z), mix(dy0, dy1, f.z), z1 - z0) * dims / size;
-}
-
-fn refineFluidHit(ro: vec3f, rd: vec3f, a: f32, b: f32, valueA: f32, valueB: f32, boundsMin: vec3f, size: vec3f) -> vec4f {
-  let dims = vec3f(u.gridInfo.xyz);
-  let denominator = valueB - valueA;
-  let fraction = select(0.5, clamp((0.5 - valueA) / denominator, 0.05, 0.95), abs(denominator) > 1e-6);
-  var t = mix(a, b, fraction);
-  let cell = loadInterfaceCell((ro + rd * t - boundsMin) / size);
-  for (var iteration = 0u; iteration < 4u; iteration += 1u) {
-    let q = (ro + rd * t - boundsMin) * dims / size - vec3f(0.5);
-    let gradient = interfaceGradient(cell, q, size);
-    let derivative = dot(gradient, rd);
-    if (abs(derivative) < 1e-6) { break; }
-    t = clamp(t - (interfaceValue(cell, q) - 0.5) / derivative, a, b);
-  }
-  let hitQ = (ro + rd * t - boundsMin) * dims / size - vec3f(0.5);
-  let gradient = interfaceGradient(cell, hitQ, size);
-  let normal = select(-rd, -normalize(gradient), length(gradient) > 1e-5);
-  return vec4f(t, normal);
-}
-
-struct FluidHit{entry:f32,exit:f32,normal:vec3f}
-fn fluidRayHit(ro: vec3f, rd: vec3f, nearT: f32, farT: f32, boundsMin: vec3f, size: vec3f) -> FluidHit {
-  let dims = vec3i(u.gridInfo.xyz);
-  let span = max(farT - nearT, 0.0);
-  let cellSize = min(min(size.x / f32(dims.x), size.y / f32(dims.y)), size.z / f32(dims.z));
-  let stepSize = max(span / 144.0, cellSize * 0.65);
-  var previousT = nearT;
-  var previous = fluidValue((ro + rd * previousT - boundsMin) / size);
-  var entry = select(1e20, nearT, previous > 0.5);
-  var surfaceNormal = -rd;
-  var t = min(nearT + stepSize, farT);
-  for (var sampleIndex = 0u; sampleIndex < 176u; sampleIndex += 1u) {
-    let occupied = fluidValue((ro + rd * t - boundsMin) / size);
-    if (entry > 1e19 && occupied > 0.5 && previous <= 0.5) {
-      let refined = refineFluidHit(ro, rd, previousT, t, previous, occupied, boundsMin, size);
-      entry = refined.x;
-      surfaceNormal = refined.yzw;
-    } else if (entry < 1e19 && occupied <= 0.5 && previous > 0.5) {
-      let refined = refineFluidHit(ro, rd, previousT, t, previous, occupied, boundsMin, size);
-      return FluidHit(entry, refined.x, surfaceNormal);
-    }
-    previous = occupied;
-    previousT = t;
-    if (t >= farT) { break; }
-    t = min(t + stepSize, farT);
-  }
-  if(entry<1e19){return FluidHit(entry,farT,surfaceNormal);}return FluidHit(1e20,1e20,vec3f(0.0,1.0,0.0));
-}
-
-@fragment
-fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
-  let resolution = max(u.viewport.xy, vec2f(1.0));
-  let time = u.viewport.z;
-  let scientific = u.options.x > 0.5;
-  let ndc = input.uv * 2.0 - 1.0;
-  let aspect = resolution.x / resolution.y;
-
-  let ro = u.cameraPosition.xyz;
-  let forward = normalize(u.cameraTarget.xyz - ro);
-  let right = normalize(cross(forward, vec3f(0.0, 1.0, 0.0)));
-  let up = normalize(cross(right, forward));
-  let rd = normalize(forward + right * ndc.x * aspect * ${CAMERA_TAN_HALF_FOV} + up * ndc.y * ${CAMERA_TAN_HALF_FOV});
-
-  let room = sampleEnvironment(ro, rd);
-  var color = room.color;
-
-  let size = u.container.xyz;
-  let center = vec3f(0.0, size.y * 0.5, 0.0);
-  let halfSize = size * 0.5;
-  let boundsMin = center - halfSize;
-  let boundsMax = center + halfSize;
-  let hit = boxIntersection(ro, rd, boundsMin, boundsMax);
-  let rigidHit = nearestBody(ro, rd);
-
-  let floorT = room.depth;
-
-  if (hit.x <= hit.y && hit.y > 0.0) {
-    let nearT = max(hit.x, 0.0);
-    let entry = ro + rd * nearT;
-    let waterBase = u.container.w;
-    let wave = 0.011 * sin(entry.x * 8.0 + time * 0.72) * cos(entry.z * 7.0 - time * 0.47)
-             + 0.006 * sin(entry.x * 17.0 - entry.z * 11.0 + time * 0.31);
-    var waterT = (waterBase + wave - ro.y) / rd.y;
-    var waterPoint = ro + rd * waterT;
-    let secondWave = 0.011 * sin(waterPoint.x * 8.0 + time * 0.72) * cos(waterPoint.z * 7.0 - time * 0.47)
-                   + 0.006 * sin(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
-    waterT = (waterBase + secondWave - ro.y) / rd.y;
-    waterPoint = ro + rd * waterT;
-    var solverHit = FluidHit(waterT, hit.y, vec3f(0.0, 1.0, 0.0));
-    let shouldMarch = u.gridInfo.w > 0.5;
-    if (shouldMarch) {
-      solverHit = fluidRayHit(ro, rd, nearT, hit.y, boundsMin, size);
-      waterT = solverHit.entry;
-      waterPoint = ro + rd * waterT;
-    }
-
-    var insideWater = waterT >= nearT && waterT <= hit.y
-      && abs(waterPoint.x) <= halfSize.x && abs(waterPoint.z) <= halfSize.z;
-    if (shouldMarch) { insideWater = solverHit.entry < 1e19; }
-    if (insideWater) {
-      let dx = 0.088 * cos(waterPoint.x * 8.0 + time * 0.72) * cos(waterPoint.z * 7.0 - time * 0.47)
-             + 0.102 * cos(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
-      let dz = -0.077 * sin(waterPoint.x * 8.0 + time * 0.72) * sin(waterPoint.z * 7.0 - time * 0.47)
-             - 0.066 * cos(waterPoint.x * 17.0 - waterPoint.z * 11.0 + time * 0.31);
-      var normal = normalize(vec3f(-dx, 1.0, -dz));
-      if (shouldMarch) { normal = normalize(solverHit.normal); }
-      let fresnel = 0.0204 + 0.9796 * pow(1.0 - max(dot(normal, -rd), 0.0), 5.0);
-      let depth = clamp((hit.y - waterT) / max(size.y, 0.001), 0.0, 1.0);
-      let thickness=max(0.0,solverHit.exit-solverHit.entry);let transmission=exp(-vec3f(0.95,0.28,0.16)*thickness);let scatter=vec3f(0.018,0.34,0.29)*(vec3f(1.0)-transmission);
-      let refracted=color*transmission+scatter;let reflected=environmentLight(reflect(rd,normal));
-      var waterColor = mix(refracted,reflected,fresnel);
-      waterColor+=vec3f(0.025,0.12,0.105)*(1.0-exp(-thickness*7.0));
-      waterColor += environmentLightColor() * pow(max(dot(reflect(rd, normal), environmentLightDirection()), 0.0), 64.0);
-
-      if (scientific) {
-        let grid = gridLine(waterPoint.xz, max(u.options.y, 0.01));
-        waterColor = mix(waterColor, vec3f(0.42, 0.96, 0.82), grid * 0.58);
-      }
-      color = mix(color, waterColor, 0.82 + depth * 0.1);
-    }
-
-    // The garden pond is set into the ground — no glass vessel to tint.
-    if (environmentIndex() != 7) {
-      let q = abs((entry - center) / max(halfSize, vec3f(0.001)));
-      let edge = max(max(min(q.x, q.y), min(q.x, q.z)), min(q.y, q.z));
-      let edgeAlpha = smoothstep(0.91, 0.995, edge);
-      let glassFresnel = pow(1.0 - abs(dot(rd, normalize(entry - center))), 3.0);
-      let glass = vec3f(0.42, 0.78, 0.72);
-      color = mix(color, glass, 0.035 + glassFresnel * 0.035 + edgeAlpha * 0.54);
-    }
-  }
-
-  if (rigidHit.t < 1e19 && (floorT <= 0.0 || rigidHit.t < floorT)) {
-    let rigidPoint = ro + rd * rigidHit.t;
-    let light = environmentLightDirection();
-    let material = unifiedMaterial(rigidHit.color, 1.0, vec3f(0.0), 0.22, vec3f(0.04), 0.0, vec3f(0.18, 0.42, 0.37), 1.0);
-    let lighting = unifiedLightingInput(rigidHit.normal, -rd, light, environmentLightColor());
-    var rigidColor = shadeUnifiedSurface(material, lighting);
-    let rim = pow(1.0 - max(dot(-rd, rigidHit.normal), 0.0), 3.0);
-    if (rigidPoint.y < u.container.w) {
-      let submergence = clamp((u.container.w - rigidPoint.y) / max(size.y, 0.001), 0.0, 1.0);
-      rigidColor = mix(rigidColor, rigidColor * vec3f(0.35, 0.72, 0.7) + vec3f(0.01, 0.11, 0.1), 0.4 + submergence * 0.32);
-    }
-    rigidColor += rigidHit.selected * vec3f(0.18, 0.55, 0.43) * (0.28 + rim);
-    color = rigidColor;
-  }
-
-  color = environmentForeground(color, ndc);
-  let vignette = 1.0 - 0.22 * dot(ndc * 0.58, ndc * 0.58);
-  color *= vignette;
-  color = color / (color + vec3f(1.0));
-  color = pow(color, vec3f(1.0 / 2.2));
-  return vec4f(color, 1.0);
-}
-`;
 
 const upscaleShader = /* wgsl */ `
 @group(0) @binding(0) var source: texture_2d<f32>;
@@ -564,7 +172,6 @@ export class FluidLabRenderer {
   private disposed = false;
   private deviceLost = false;
   private context?: GPUCanvasContext;
-  private pipeline?: GPURenderPipeline;
   private upscalePipeline?: GPURenderPipeline;
   private upscaleSampler?: GPUSampler;
   private upscaleBindGroup?: GPUBindGroup;
@@ -602,11 +209,11 @@ export class FluidLabRenderer {
   private lastGPUCompletedTime_s = 0;
   private lastPresentationCompletedAt_ms = -Infinity;
   private presentationPending = false;
+  private simulationRunning = true;
   private preparedGPUTime_s = 0;
   private preparedGPUBodies: RigidBodyState[] = [];
   private gpuFluidGeneration = 0;
   private lastGPUReadbackAt_ms = -Infinity;
-  private bindGroup?: GPUBindGroup;
   private format?: GPUTextureFormat;
   private renderQuerySet?: GPUQuerySet;
   private renderQueryResolve?: GPUBuffer;
@@ -691,21 +298,7 @@ export class FluidLabRenderer {
     if(device.features.has("timestamp-query")){this.renderQuerySet=device.createQuerySet({type:"timestamp",count:16});this.renderQueryResolve=device.createBuffer({size:16*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
     context.configure({ device, format: this.format, alphaMode: "opaque" });
 
-    progress("Checking presentation shader",2);
-    const shaderModule = device.createShaderModule({ label: "Fluid Lab presentation shader", code: shader });
-    const compilation = await shaderModule.getCompilationInfo();
-    if (this.disposed || this.deviceLost) return;
-    const errors = compilation.messages.filter((message) => message.type === "error");
-    if (errors.length > 0) throw new Error(errors.map((error) => `${error.lineNum}:${error.linePos} ${error.message}`).join("\n"));
-
-    progress("Compiling presentation pipeline",3);
-    this.pipeline = await device.createRenderPipelineAsync({
-      label: "Fluid Lab ray presentation",
-      layout: "auto",
-      vertex: { module: shaderModule, entryPoint: "vertexMain" },
-      fragment: { module: shaderModule, entryPoint: "fragmentMain", targets: [{ format: this.format }] },
-      primitive: { topology: "triangle-list" }
-    });
+    progress("Compiling presentation upscale",2);
     const upscaleModule=device.createShaderModule({label:"Presentation upscale shader",code:upscaleShader});
     this.upscalePipeline=await device.createRenderPipelineAsync({label:"Presentation upscale",layout:"auto",vertex:{module:upscaleModule,entryPoint:"vertexMain"},fragment:{module:upscaleModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
@@ -740,13 +333,10 @@ export class FluidLabRenderer {
       await waterPipeline.initialize((label,completed,total)=>progress(label,completed,total,"water-renderer"));
       this.waterPipeline = waterPipeline;
     } catch (error) {
-      // The legacy path has deliberately independent shaders/resources.  An
-      // adapter-specific failure in the optional optical pipeline must not make
-      // the viewport unusable or compromise the requested comparison mode.
       waterPipeline.destroy();
-      console.warn("Raster water pipeline unavailable; using the intact ray marcher", error);
+      throw error;
     }
-    const secondaryParticlePipeline = new SecondaryParticleRenderPipeline(device, this.format, this.uniformBuffer);
+    const secondaryParticlePipeline = new SecondaryParticleRenderPipeline(device, this.uniformBuffer);
     try {
       progress("Compiling secondary liquid particles",6);
       await secondaryParticlePipeline.initialize();
@@ -756,7 +346,7 @@ export class FluidLabRenderer {
       console.warn("Secondary liquid particle renderer unavailable", error);
     }
     if (this.disposed || this.deviceLost) return;
-    this.rebuildBindGroup();
+    this.updateRenderSources();
 
     const info = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     this.adapterName = info ? [info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter" : "WebGPU adapter";
@@ -788,9 +378,9 @@ export class FluidLabRenderer {
     // drop every device-scoped reference so the frame loop's !this.device
     // guards hold until initialize() completes on the replacement device.
     this.device = undefined; this.context = undefined;
-    this.pipeline = undefined; this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
+    this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
     this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.voxelDebugPipeline = undefined; this.secondaryParticlePipeline = undefined;
-    this.bindGroup = undefined; this.uniformBuffer = undefined; this.bodyBuffer = undefined;
+    this.uniformBuffer = undefined; this.bodyBuffer = undefined;
     this.presentationTexture = undefined; this.voxelDebugDepth = undefined; this.presentationTextureKey = "";
     this.fluidTexture = undefined; this.columnBaseTexture = undefined; this.gridCellTexture = undefined;
     this.velocityFallbackTexture = undefined; this.pressureSamplesFallbackTexture = undefined; this.scalarFallbackTexture = undefined;
@@ -805,14 +395,8 @@ export class FluidLabRenderer {
     }
   }
 
-  private rebuildBindGroup(texture = this.fluidTexture, columnBases = this.columnBaseTexture, gridCells = this.gridCellTexture, velocity = this.velocityFallbackTexture, pressureSamples = this.pressureSamplesFallbackTexture, divergence = this.scalarFallbackTexture, pressure = this.scalarFallbackTexture) {
-    if (!this.device || this.disposed || this.deviceLost || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !texture || !columnBases || !gridCells || !velocity || !pressureSamples || !divergence || !pressure) return;
-    this.bindGroup = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: this.uniformBuffer } },
-      { binding: 1, resource: { buffer: this.bodyBuffer } },
-      { binding: 2, resource: texture.createView({ dimension: "3d" }) },
-      { binding: 3, resource: columnBases.createView() }
-    ] });
+  private updateRenderSources(texture = this.fluidTexture, columnBases = this.columnBaseTexture, gridCells = this.gridCellTexture, velocity = this.velocityFallbackTexture, pressureSamples = this.pressureSamplesFallbackTexture, divergence = this.scalarFallbackTexture, pressure = this.scalarFallbackTexture) {
+    if (!this.device || this.disposed || this.deviceLost || !texture || !columnBases || !gridCells || !velocity || !pressureSamples || !divergence || !pressure) return;
     this.waterPipeline?.setVolume(texture, columnBases);
     this.waterPipeline?.setSparseSurface(this.gpuFluid?.sparseSurfaceBand);
     this.gridOverlayPipeline?.setSparseSurface(this.gpuFluid?.sparseSurfaceBand);
@@ -827,6 +411,17 @@ export class FluidLabRenderer {
     this.lastGPUCompletedTime_s = 0;
     this.preparedGPUTime_s = 0;
     this.preparedGPUBodies = [];
+  }
+
+  /** Stop refilling physics immediately while preserving already-submitted queue work. */
+  setSimulationRunning(running: boolean): number | undefined {
+    this.simulationRunning = running;
+    const submittedTime_s = this.gpuFluid?.info.submittedTime_s;
+    if (!running) {
+      this.preparedGPUTime_s = submittedTime_s ?? this.gpuFluid?.info.completedTime_s ?? 0;
+      this.preparedGPUBodies = [];
+    }
+    return submittedTime_s;
   }
 
   private retireGPUFluid(fluid: GPUSolverInstance) {
@@ -849,7 +444,7 @@ export class FluidLabRenderer {
     const device=this.device,generation=++this.gpuFluidRequestGeneration,startedAt_ms=performance.now();
     const previous=this.gpuFluid;
     // Clear the live-solver reference before the detach rebind below:
-    // rebuildBindGroup re-attaches this.gpuFluid's sparse surface band to the
+    // updateRenderSources re-attaches this.gpuFluid's sparse surface band to the
     // water and grid-overlay pipelines, so an old reference here would rebind
     // the very buffers the retirement fence is about to destroy.
     this.gpuFluid=undefined;
@@ -858,7 +453,7 @@ export class FluidLabRenderer {
       // retiring them. Option A/B switches rebuild asynchronously; without
       // this fallback rebind, the grid overlay can keep submitting the old
       // topology texture after its queue fence has completed and destroyed it.
-      this.rebuildBindGroup();
+      this.updateRenderSources();
       this.secondaryParticlePipeline?.setSource(undefined);
       this.voxelDebugPipeline?.setSource(undefined);
       this.retireGPUFluid(previous);
@@ -871,7 +466,7 @@ export class FluidLabRenderer {
       : new Promise<GPUSolverInstance>((resolve,reject)=>setTimeout(()=>{try{resolve(method.createSolver!(device,scene,config.quality,config.values,this.gpuRigidLoadCallback));}catch(error){reject(error);}},0));
     this.gpuFluidPending=create.then((solver)=>{
       if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration){solver.destroy();return;}
-      this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.rebuildBindGroup(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.voxelDebugPipeline?.setSource(solver.sparseVoxelRenderSource);this.gpuInfoCallback?.(solver.info);this.onStatus({state:"ready",label:"WebGPU solver ready",adapter:this.adapterName});
+      this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.updateRenderSources(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.voxelDebugPipeline?.setSource(solver.sparseVoxelRenderSource);this.gpuInfoCallback?.(solver.info);this.onStatus({state:"ready",label:"WebGPU solver ready",adapter:this.adapterName});
     }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed"});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration)this.gpuFluidPending=undefined;});
   }
 
@@ -933,8 +528,8 @@ export class FluidLabRenderer {
   /** Keep the GPU occupied with a rolling advance, but yield at the 60 Hz presentation boundary. */
   private continuePreparedGPUWork(fluid: GPUSolverInstance, generation: number) {
     if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
-    if (this.gpuPendingBatches > 0 || this.presentationPending) return;
-    if (presentationPriorityDue(this.lastPresentationCompletedAt_ms, performance.now())) return;
+    if (!this.simulationRunning || this.gpuPendingBatches > 0 || this.presentationPending) return;
+    if (!presentationHasPhysicsSlack(this.lastPresentationCompletedAt_ms, performance.now(), fluid.info.gpuStep_ms, this.gpuRender_ms ?? 0)) return;
     this.submitPreparedGPUFluid(fluid, this.preparedGPUTime_s, this.preparedGPUBodies);
   }
 
@@ -944,7 +539,7 @@ export class FluidLabRenderer {
     if (key !== this.fluidTextureKey) {
       this.fluidTexture?.destroy();
       this.fluidTexture = this.device.createTexture({ label: "Eulerian occupied cells", size: [fluid.nx, fluid.ny, fluid.nz], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-      this.fluidTextureKey = key; this.fluidRevision = -1; this.rebuildBindGroup();
+      this.fluidTextureKey = key; this.fluidRevision = -1; this.updateRenderSources();
     }
     if (fluid.revision === this.fluidRevision || !this.fluidTexture) return;
     const bytesPerRow = Math.ceil(fluid.nx / 256) * 256;
@@ -986,12 +581,12 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.activeRenderScale * 100)}%)`;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, view: ViewMode, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, waterRenderMode: WaterRenderMode = "rasterized", environmentId: EnvironmentId = defaultEnvironmentId, targetFps = 60, voxelRenderMode: VoxelRenderMode = "smooth"): RendererFrameMetrics {
-    if (!this.device || this.disposed || this.deviceLost || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
-    this.resize(waterRenderMode === "rasterized" ? this.rasterRenderScale : 1);
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth"): RendererFrameMetrics {
+    if (!this.device || this.disposed || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
+    this.resize(this.rasterRenderScale);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     const start = performance.now();
-    const timingContext = `${config.methodId}:${config.quality}:${waterRenderMode}:${voxelRenderMode}`;
+    const timingContext = `${config.methodId}:${config.quality}:${voxelRenderMode}`;
     if (timingContext !== this.renderTimingContext) { this.renderTimingContext = timingContext; this.gpuRender_ms = undefined; this.gpuSurfaceExtraction_ms=undefined;this.gpuDryScene_ms=undefined;this.gpuInterfaces_ms=undefined;this.gpuSprayFront_ms=undefined;this.gpuSprayBack_ms=undefined;this.gpuSprayRender_ms=undefined;this.gpuOpticalComposite_ms=undefined;this.gpuUpscale_ms=undefined; }
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
@@ -999,7 +594,7 @@ export class FluidLabRenderer {
     const readyGPUFluid = backend === "webgpu" ? this.currentGPUFluid(scene, config, time_s) : undefined;
     if (readyGPUFluid) { this.preparedGPUTime_s = Math.max(this.preparedGPUTime_s, time_s); this.preparedGPUBodies = bodies; }
     if (this.presentationPending) return {cpuFrame_ms:performance.now()-start,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
-    const renderBeforePhysics = backend === "webgpu" && presentationPriorityDue(this.lastPresentationCompletedAt_ms, start);
+    const renderBeforePhysics = backend === "webgpu" && !presentationHasPhysicsSlack(this.lastPresentationCompletedAt_ms, start, readyGPUFluid?.info.gpuStep_ms, this.gpuRender_ms ?? 0);
     let gpuInfo = readyGPUFluid?.info;
     if (readyGPUFluid && !renderBeforePhysics) gpuInfo = this.submitPreparedGPUFluid(readyGPUFluid, time_s, bodies);
     if (gpuInfo && this.gpuFluid && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) this.gridOverlayPipeline?.setVolume(this.gpuFluid.surfaceFieldTexture ?? this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture);
@@ -1013,12 +608,12 @@ export class FluidLabRenderer {
       // options.w carries the largest represented adaptive pressure-cell
       // width. The grid overlay uses it to normalize its categorical scale
       // palette to the hierarchy that can actually exist in this solver.
-      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), gpuInfo?.quadtreeMaximumFluidScale ?? 1,
+      1, scene.nominalResolution.length_m, Math.min(bodies.length, 12), gpuInfo?.quadtreeMaximumFluidScale ?? 1,
       // Field mode: 1 = raw occupancy, 2 = packed tall-cell level set,
       // 3 = uniform-layout level set (quadtree resident phi).
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "restricted-tall-cell" ? 2 : gpuInfo.gridKind === "quadtree-tall-cell" || gpuInfo.gridKind === "octree" ? 3 : 1) : fluid ? 1 : 0,
       gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : gridOverlay?.axis === "y" ? 3 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "quadtree-tall-cell" || gpuInfo?.gridKind === "octree" ? 1 : 0,
-      gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && (gpuInfo?.gridKind === "quadtree-tall-cell" || gpuInfo?.gridKind === "octree") ? 9 : 0,
+      gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && (gpuInfo?.gridKind === "quadtree-tall-cell" || gpuInfo?.gridKind === "octree") ? 9 : gridOverlay?.mode === "surface" && gpuInfo?.gridKind === "octree" ? 10 : 0,
       environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0,
       gpuInfo?.gridKind === "quadtree-tall-cell" ? (gpuInfo.quadtreeOpticalLayerMode === "adaptive-motion" ? 2 : 1) : 0
     ]);
@@ -1059,16 +654,13 @@ export class FluidLabRenderer {
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     if (residentRigidBuffer) encoder.copyBufferToBuffer(residentRigidBuffer, 0, this.bodyBuffer, 0, 12 * 16 * 4);
     this.secondaryParticlePipeline?.setSource(backend === "webgpu" ? this.gpuFluid?.secondaryParticles : undefined);
-    // One interval surrounds the complete active presentation path. For raster
-    // optics it starts at isosurface extraction and ends after final upscale;
-    // for the legacy path it starts at its full-screen pass and ends likewise.
+    // One interval surrounds raster surface extraction through final upscale.
     const sampleRenderGPU=Boolean(this.renderQuerySet&&this.renderQueryResolve&&!this.renderReadbackPending&&renderStart-this.lastRenderQueryAt>=250);
-    const rasterResult = waterRenderMode === "rasterized" && this.waterPipeline?.encode(
+    const rasterResult = this.waterPipeline.encode(
       encoder, this.presentationTexture.createView(),
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1,
       gpuInfo?.gridKind === "restricted-tall-cell", gpuInfo?.maximumNeighborDelta ?? 0,
       gpuInfo?.encodedSteps ?? fluid?.revision ?? 0,
-      targetFps,
       sampleRenderGPU&&this.renderQuerySet?{
         extraction:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1},
         scene:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:2,endOfPassWriteIndex:3},
@@ -1079,17 +671,7 @@ export class FluidLabRenderer {
         composite:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:8,endOfPassWriteIndex:9}
       }:undefined
     );
-    const rasterized = Boolean(rasterResult);
-    if (!rasterized) {
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [{ view: this.presentationTexture.createView(), clearValue: { r: 0.01, g: 0.025, b: 0.024, a: 1 }, loadOp: "clear", storeOp: "store" }],
-        ...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1}}:{})
-      });
-      pass.setPipeline(this.pipeline);
-      pass.setBindGroup(0, this.bindGroup);
-      pass.draw(3);
-      pass.end();
-    }
+    if (!rasterResult) throw new Error("Raster optics pipeline is not ready");
     if (voxelRenderMode !== "smooth" && this.voxelDebugDepth) {
       const sceneExtent = Math.hypot(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
       this.voxelDebugPipeline?.encode(encoder, {
@@ -1112,7 +694,6 @@ export class FluidLabRenderer {
         gridOpacity: 0.88
       });
     }
-    const fallbackSprayRendered = !rasterized && Boolean(this.secondaryParticlePipeline?.encode(encoder, this.presentationTexture.createView(), sampleRenderGPU&&this.renderQuerySet?{querySet:this.renderQuerySet,beginningOfPassWriteIndex:12,endOfPassWriteIndex:13}:undefined));
     if (gridOverlay?.axis !== "off") this.gridOverlayPipeline?.encode(encoder, this.presentationTexture.createView());
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}],...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:10,endOfPassWriteIndex:11}}:{})});
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();
@@ -1127,7 +708,7 @@ export class FluidLabRenderer {
     }).catch(()=>{this.presentationPending=false;});
     const presentationSubmittedAt_ms=performance.now();
     const cpuRenderEncode_ms=presentationSubmittedAt_ms-renderStart;
-    if(readyGPUFluid){
+    if(readyGPUFluid&&this.simulationRunning){
       const deferredPhysicsStart=performance.now();
       const postPresentationDepth=presentationPhysicsQueueDepth(readyGPUFluid.info.gpuStep_ms,this.gpuRender_ms??0);
       const maximumPendingAdvances=this.gpuPendingBatches+postPresentationDepth;
@@ -1138,8 +719,8 @@ export class FluidLabRenderer {
       }
       cpuPhysicsSubmit_ms+=performance.now()-deferredPhysicsStart;
     }
-    if(renderReadback){const readback=renderReadback,sampledContext=timingContext,sampledRasterized=rasterized,surfaceUpdated=Boolean(rasterResult&&rasterResult.surfaceUpdated),sampledSprayRendered=rasterized?Boolean(rasterResult&&rasterResult.sprayRendered):fallbackSprayRendered;void readback.mapAsync(GPUMapMode.READ).then(()=>{const stage=decodeRenderStageTimestamps(new BigUint64Array(readback.getMappedRange()),sampledRasterized,surfaceUpdated,sampledSprayRendered);if(this.renderTimingContext===sampledContext){this.gpuSurfaceExtraction_ms=stage.surfaceExtraction_ms;this.gpuDryScene_ms=stage.dryScene_ms;this.gpuInterfaces_ms=stage.interfaces_ms;this.gpuSprayFront_ms=stage.sprayFront_ms;this.gpuSprayBack_ms=stage.sprayBack_ms;this.gpuSprayRender_ms=stage.sprayRender_ms;this.gpuOpticalComposite_ms=stage.opticalComposite_ms;this.gpuUpscale_ms=stage.upscale_ms;this.gpuRender_ms=stage.total_ms;}readback.unmap();readback.destroy();}).catch(()=>readback.destroy()).finally(()=>{this.renderReadbackPending=false;});}
-    return {cpuFrame_ms:performance.now()-start,cpuPhysicsSubmit_ms,cpuDataUpload_ms,cpuRenderEncode_ms,gpuRender_ms:this.gpuRender_ms,gpuSurfaceExtraction_ms:this.gpuSurfaceExtraction_ms,gpuDryScene_ms:this.gpuDryScene_ms,gpuInterfaces_ms:this.gpuInterfaces_ms,gpuSprayFront_ms:this.gpuSprayFront_ms,gpuSprayBack_ms:this.gpuSprayBack_ms,gpuSprayRender_ms:this.gpuSprayRender_ms,gpuOpticalComposite_ms:this.gpuOpticalComposite_ms,gpuUpscale_ms:this.gpuUpscale_ms,methodId:config.methodId,waterRenderMode,gpuRenderTimestampAvailable:Boolean(this.renderQuerySet)};
+    if(renderReadback){const readback=renderReadback,sampledContext=timingContext,surfaceUpdated=rasterResult.surfaceUpdated,sampledSprayRendered=rasterResult.sprayRendered;void readback.mapAsync(GPUMapMode.READ).then(()=>{const stage=decodeRenderStageTimestamps(new BigUint64Array(readback.getMappedRange()),surfaceUpdated,sampledSprayRendered);if(this.renderTimingContext===sampledContext){this.gpuSurfaceExtraction_ms=stage.surfaceExtraction_ms;this.gpuDryScene_ms=stage.dryScene_ms;this.gpuInterfaces_ms=stage.interfaces_ms;this.gpuSprayFront_ms=stage.sprayFront_ms;this.gpuSprayBack_ms=stage.sprayBack_ms;this.gpuSprayRender_ms=stage.sprayRender_ms;this.gpuOpticalComposite_ms=stage.opticalComposite_ms;this.gpuUpscale_ms=stage.upscale_ms;this.gpuRender_ms=stage.total_ms;}readback.unmap();readback.destroy();}).catch(()=>readback.destroy()).finally(()=>{this.renderReadbackPending=false;});}
+    return {cpuFrame_ms:performance.now()-start,cpuPhysicsSubmit_ms,cpuDataUpload_ms,cpuRenderEncode_ms,gpuRender_ms:this.gpuRender_ms,gpuSurfaceExtraction_ms:this.gpuSurfaceExtraction_ms,gpuDryScene_ms:this.gpuDryScene_ms,gpuInterfaces_ms:this.gpuInterfaces_ms,gpuSprayFront_ms:this.gpuSprayFront_ms,gpuSprayBack_ms:this.gpuSprayBack_ms,gpuSprayRender_ms:this.gpuSprayRender_ms,gpuOpticalComposite_ms:this.gpuOpticalComposite_ms,gpuUpscale_ms:this.gpuUpscale_ms,methodId:config.methodId,gpuRenderTimestampAvailable:Boolean(this.renderQuerySet)};
   }
 
   destroy(): void {

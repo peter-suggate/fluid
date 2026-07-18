@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canQueuePreparedGPUAdvance, FluidLabRenderer, presentationPhysicsQueueDepth, presentationPriorityDue, submitNextPreparedGPUAdvance, type GPUStatus } from "../lib/webgpu-renderer";
+import { canQueuePreparedGPUAdvance, FluidLabRenderer, presentationHasPhysicsSlack, presentationPhysicsQueueDepth, presentationPriorityDue, submitNextPreparedGPUAdvance, type GPUStatus } from "../lib/webgpu-renderer";
 
 test("presentation takes queue priority once a 60 Hz deadline has elapsed", () => {
   assert.equal(presentationPriorityDue(-Infinity, 0), true);
   assert.equal(presentationPriorityDue(100, 108), false);
   assert.equal(presentationPriorityDue(100, 116.2), true);
+});
+
+test("physics admission preserves the measured presentation deadline", () => {
+  assert.equal(presentationHasPhysicsSlack(-Infinity, 0, 2, 1), false);
+  assert.equal(presentationHasPhysicsSlack(100, 105, 4, 2), true);
+  assert.equal(presentationHasPhysicsSlack(100, 112, 4, 2), false);
+  assert.equal(presentationHasPhysicsSlack(100, 105, 20, 2), false);
 });
 
 test("GPU submission advances only once toward prepared simulation debt", () => {
@@ -107,7 +114,7 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
   await Promise.resolve();
   assert.deepEqual(statuses.at(-1), { state: "lost", label: "GPU device lost: test device loss" });
 
-  const metrics = renderer.draw(0, {} as never, {} as never, "scientific", [], undefined, undefined, "webgpu", { methodId: "tall-cell", quality: "balanced", values: {} });
+  const metrics = renderer.draw(0, {} as never, {} as never, [], undefined, undefined, "webgpu", { methodId: "tall-cell", quality: "balanced", values: {} });
   assert.deepEqual(metrics, { cpuFrame_ms: 0, cpuPhysicsSubmit_ms: 0, cpuDataUpload_ms: 0, cpuRenderEncode_ms: 0 });
   assert.equal(submitCount, 0, "a lost device must never receive another queue submission");
 

@@ -10,6 +10,7 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import { performanceSchedule } from "@/lib/performance-scheduling";
 import { averagePerformanceSnapshots, rollingPerformanceSnapshots } from "@/lib/performance-averaging";
 import { adaptiveTopologyPerformanceStages, physicsPerformanceStages, type PerformanceStage } from "@/lib/performance-stage-model";
+import { PRESENTATION_FPS } from "@/lib/frame-pacing";
 
 const formatMs = (value: number, available = true, active = true) => !available ? "—" : !active ? "idle" : value > 0 ? `${value.toFixed(value < 1 ? 3 : 2)} ms` : "< timer resolution";
 
@@ -21,9 +22,8 @@ export function PerformancePanel() {
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const activeMethodId = useMethodStore((state) => state.methodId);
   const sprayEnabled = useMethodStore((state) => state.methodId === "octree" && state.overrides.octree?.secondaryParticles !== "off" && state.overrides.octree?.secondaryParticles !== false);
-  const activeWaterMode = useUIStore((state) => state.waterRenderMode);
-  const targetFps = useUIStore((state) => state.targetFps);
   const maxDt_s = useSceneStore((state) => state.scene.numerics.maxDt_s);
+  const runState = useRuntimeStore((state) => state.runState);
   const observedSimRate = useRuntimeStore((state) => state.simRate);
   const setRightPanel = useUIStore((state) => state.setRightPanel);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
@@ -32,37 +32,30 @@ export function PerformancePanel() {
 
   const method = getMethod(activeMethodId);
   const matchingHistory = useMemo(
-    () => history.filter((sample) => sample.methodId === activeMethodId && sample.waterRenderMode === activeWaterMode),
-    [history, activeMethodId, activeWaterMode]
+    () => history.filter((sample) => sample.methodId === activeMethodId),
+    [history, activeMethodId]
   );
   const safeIndex = historyIndex === null ? null : Math.min(historyIndex, Math.max(0, matchingHistory.length - 1));
   const windowEnd = safeIndex ?? matchingHistory.length - 1;
   const windowSamples = matchingHistory.slice(Math.max(0, windowEnd - averageWindow + 1), windowEnd + 1);
   const snapshot = averagePerformanceSnapshots(windowSamples, liveSnapshot);
   const averagedFrameCount = windowSamples.length;
-  const contextMatches = snapshot.methodId === activeMethodId && snapshot.waterRenderMode === activeWaterMode;
+  const contextMatches = snapshot.methodId === activeMethodId;
   const physicsTimed = contextMatches && snapshot.gpuPhysicsTimingAvailable;
   const renderTimed = contextMatches && snapshot.gpuRenderTimingAvailable;
-  const rasterized = activeWaterMode === "rasterized";
   const adaptive = activeMethodId === "quadtree-tall-cell";
-  const budget = 1000 / targetFps;
+  const budget = 1000 / PRESENTATION_FPS;
   const topologyPath = snapshot.adaptiveInlineTopology ? "inline" : "async";
   const physicsStages = method.backend === "webgpu" ? physicsPerformanceStages({ methodId: activeMethodId, snapshot, contextMatches, pressureSolver: gpuInfo?.pressureSolver, topologyPath }) : [];
   const adaptiveTopologyStages = adaptive && topologyPath === "async" ? adaptiveTopologyPerformanceStages({ snapshot, contextMatches }) : [];
   const physicsOutputStage = activeMethodId === "octree" ? "sparse-publication" : activeMethodId === "quadtree-tall-cell" ? "surface-update" : activeMethodId === "tall-cell" || activeMethodId === "uniform" ? "projection" : "uploads";
 
-  const renderStages: PerformanceStage[] = rasterized ? [
+  const renderStages: PerformanceStage[] = [
     { key: "extract", label: "Surface extraction", shortLabel: "SURFACE", value: contextMatches ? snapshot.gpuSurfaceExtraction_ms : 0, className: "stage-extract", timer: "render", group: "compute", active: true, description: "Extracts visible liquid surface geometry from the signed-distance field.", reads: ["signed distance φ", "active cells"], writes: ["surface vertices", "indirect draw args"], dependsOn: [physicsOutputStage] },
     { key: "dry-scene", label: "Dry scene", shortLabel: "SCENE", value: contextMatches ? snapshot.gpuDryScene_ms : 0, className: "stage-scene", timer: "render", group: "graphics", active: true, description: "Rasterizes the environment and rigid bodies behind the liquid.", reads: ["body transforms", "environment"], writes: ["scene color", "scene depth"], dependsOn: ["uploads"] },
-    { key: "interfaces", label: "Front + back interfaces", shortLabel: "INTERFACE", value: contextMatches ? snapshot.gpuInterfaces_ms : 0, className: "stage-interface", timer: "render", group: "graphics", active: true, description: "Captures front and back liquid interfaces for thickness and refraction.", reads: ["surface vertices", "camera"], writes: ["front depth", "back depth", "normals"], dependsOn: ["extract"] },
-    { key: "spray-front", label: "Spray front interfaces", shortLabel: "SPRAY FRONT", value: contextMatches ? snapshot.gpuSprayFront_ms : 0, className: "stage-interface", timer: "render", group: "graphics", active: sprayEnabled, description: "Intersects the camera ray with each relaxing drop, ligament, or sheet ellipsoid and writes its nearest optical interface.", reads: ["spray particle ring", "camera"], writes: ["front depth", "front normals"], dependsOn: ["interfaces"] },
-    { key: "spray-back", label: "Spray back interfaces", shortLabel: "SPRAY BACK", value: contextMatches ? snapshot.gpuSprayBack_ms : 0, className: "stage-interface", timer: "render", group: "graphics", active: sprayEnabled, description: "Writes the far ellipsoid intersections used to recover spray thickness for absorption and refraction.", reads: ["spray particle ring", "camera"], writes: ["back depth", "back normals"], dependsOn: ["spray-front"] },
-    { key: "composite", label: "Optical composite", shortLabel: "COMPOSITE", value: contextMatches ? snapshot.gpuOpticalComposite_ms : 0, className: "stage-composite", timer: "render", group: "graphics", active: true, description: "Combines refraction, absorption, reflection, and the dry scene.", reads: ["scene color", "front/back depth", "normals"], writes: ["water color"], dependsOn: ["dry-scene", "spray-back"] },
+    { key: "interfaces", label: sprayEnabled ? "Water + spray interfaces" : "Front + back interfaces", shortLabel: "INTERFACES", value: contextMatches ? snapshot.gpuInterfaces_ms : 0, className: "stage-interface", timer: "render", group: "graphics", active: true, description: sprayEnabled ? "Captures the resolved surface and active spray ellipsoids together in one front pass and one back pass." : "Captures front and back liquid interfaces for thickness and refraction.", reads: sprayEnabled ? ["surface vertices", "spray particle ring", "camera"] : ["surface vertices", "camera"], writes: ["front depth", "back depth", "normals"], dependsOn: ["extract"] },
+    { key: "composite", label: "Optical composite", shortLabel: "COMPOSITE", value: contextMatches ? snapshot.gpuOpticalComposite_ms : 0, className: "stage-composite", timer: "render", group: "graphics", active: true, description: "Combines refraction, absorption, reflection, and the dry scene.", reads: ["scene color", "front/back depth", "normals"], writes: ["water color"], dependsOn: ["dry-scene", "interfaces"] },
     { key: "upscale", label: "Final upscale", shortLabel: "UPSCALE", value: contextMatches ? snapshot.gpuUpscale_ms : 0, className: "stage-upscale", timer: "render", group: "graphics", active: true, description: "Resolves the internal render target into the presentation surface.", reads: ["water color"], writes: ["swapchain"], dependsOn: ["composite"], sync: "Presentation boundary" }
-  ] : [
-    { key: "ray", label: "Ray march", shortLabel: "RAY MARCH", value: contextMatches ? snapshot.gpuOpticalComposite_ms : 0, className: "stage-composite", timer: "render", group: "graphics", active: true, description: "Ray-marches the signed-distance field and shades the liquid in one presentation pass.", reads: ["signed distance φ", "scene", "camera"], writes: ["water color"], dependsOn: [physicsOutputStage] },
-    { key: "spray-render", label: "Spray fallback draw", shortLabel: "SPRAY DRAW", value: contextMatches ? snapshot.gpuSprayRender_ms : 0, className: "stage-interface", timer: "render", group: "graphics", active: sprayEnabled, description: "Draws escaped droplets above the ray-marched water fallback.", reads: ["spray particle ring", "camera"], writes: ["water color"], dependsOn: ["ray"] },
-    { key: "upscale", label: "Final upscale", shortLabel: "UPSCALE", value: contextMatches ? snapshot.gpuUpscale_ms : 0, className: "stage-upscale", timer: "render", group: "graphics", active: true, description: "Resolves the internal render target into the presentation surface.", reads: ["water color"], writes: ["swapchain"], dependsOn: ["spray-render"], sync: "Presentation boundary" }
   ];
   const gpuStages = [...physicsStages, ...adaptiveTopologyStages, ...renderStages];
   const stageTimed = (stage: PerformanceStage) => stage.timer === "physics" ? physicsTimed : stage.timer === "render" ? renderTimed : contextMatches && snapshot.adaptiveRebuildCompletedCount > 0;
@@ -72,7 +65,7 @@ export function PerformancePanel() {
     { key: "simulation", label: method.backend === "cpu" ? "Fluid + rigid solve" : "Rigid bodies + CPU oracle", shortLabel: "SIM", value: snapshot.cpuSimulation_ms, note: method.backend === "cpu" ? "CPU solver" : "Includes the coarse validation solve" },
     { key: "encode", label: "Physics encode", shortLabel: "ENCODE", value: snapshot.cpuPhysicsSubmit_ms, note: "Submit GPU work" },
     { key: "upload", label: "Buffer uploads", shortLabel: "UPLOAD", value: snapshot.cpuDataUpload_ms, note: "CPU → GPU" },
-    { key: "render", label: rasterized ? "Render passes encode" : "Ray pass encode", shortLabel: "RENDER", value: snapshot.cpuRenderEncode_ms, note: "Submit presentation" },
+    { key: "render", label: "Render passes encode", shortLabel: "RENDER", value: snapshot.cpuRenderEncode_ms, note: "Submit presentation" },
     { key: "frame", label: "Frame orchestration", shortLabel: "FRAME", value: cpuOther, note: "Input + scheduling" }
   ];
   const cpuTotal = cpuStages.reduce((sum, stage) => sum + stage.value, 0);
@@ -83,7 +76,7 @@ export function PerformancePanel() {
   const submissionBatchDepth = method.backend === "webgpu" ? Math.min(64, Math.max(1, Math.round(measuredBatchSimulation_s / Math.max(measuredGPUAdvance_s, 1e-9)))) : 1;
   const pressureSolvesPerAdvance = activeMethodId === "tall-cell" && gpuInfo?.pressureSolver?.includes("defect correction") ? 2 : 1;
   const schedule = performanceSchedule({
-    targetFps,
+    targetFps: PRESENTATION_FPS,
     gpuAdvance_s: measuredGPUAdvance_s,
     submissionBatchDepth,
     physicsPerAdvance_ms: physicsPerStep_ms,
@@ -96,35 +89,36 @@ export function PerformancePanel() {
   const completionRate = gpuInfo?.gpuCompletionWall_ms && gpuInfo.gpuCompletionSimulation_s
     ? gpuInfo.gpuCompletionSimulation_s * 1000 / gpuInfo.gpuCompletionWall_ms
     : null;
-  const realtimeDemand_ms = schedule.gpuDemandPerFrame_ms;
-  const demandPercent = schedule.demandPercent;
+  const paused = runState === "paused";
+  const realtimeDemand_ms = paused ? 0 : schedule.gpuDemandPerFrame_ms;
+  const demandPercent = paused ? 0 : schedule.demandPercent;
   const cpuWindow = windowSamples.map((sample) => sample.cpuSimulation_ms + sample.cpuFrame_ms).sort((a, b) => a - b);
   const cpuP95_ms = cpuWindow.length ? cpuWindow[Math.min(cpuWindow.length - 1, Math.floor(cpuWindow.length * .95))] : cpuTotal;
   const gpuConstrained = demandPercent > 100;
-  const cpuSpikeConstrained = cpuP95_ms > budget;
-  const unexplainedSlowdown = !gpuConstrained && !cpuSpikeConstrained && observedSimRate !== null && observedSimRate < .95;
+  const cpuSpikeConstrained = !paused && cpuP95_ms > budget;
+  const unexplainedSlowdown = !paused && !gpuConstrained && !cpuSpikeConstrained && observedSimRate !== null && observedSimRate < .95;
   const timelineScale = Math.max(budget, submissionEnvelope_ms, cpuTotal, 0.01);
-  const headroom = schedule.headroom_ms;
+  const headroom = paused ? budget : schedule.headroom_ms;
   const selectedStage = gpuStages.find((stage) => stage.key === selectedStageKey) ?? gpuStages[0];
   const frameOffset = safeIndex === null ? 0 : Math.max(0, matchingHistory.length - 1 - safeIndex);
   const frameLabel = safeIndex === null ? "LIVE" : frameOffset === 0 ? "LATEST" : `F−${frameOffset}`;
   const sampleLabel = averageWindow === 1 ? "single frame" : `${averagedFrameCount}-frame rolling average`;
-  const timerDescription = gpuStatus.state !== "ready" ? "GPU unavailable" : physicsTimed && renderTimed ? "Hardware timestamps · physics + presentation" : renderTimed ? "Presentation timestamps · physics pending" : physicsTimed ? "Physics timestamps · presentation pending" : "Awaiting timestamp sample";
+  const timerDescription = gpuStatus.state !== "ready" ? "GPU unavailable" : paused && renderTimed ? "Paused · last on-change presentation" : physicsTimed && renderTimed ? "Hardware timestamps · physics + presentation" : renderTimed ? "Presentation timestamps · physics pending" : physicsTimed ? "Physics timestamps · presentation pending" : "Awaiting timestamp sample";
   const gridTicks = Array.from({ length: 5 }, (_, index) => index * timelineScale / 4);
   const averagedHistory = rollingPerformanceSnapshots(matchingHistory, averageWindow);
   const historyValues = averagedHistory.map((sample) => ({ gpu: measuredGPUTime_ms(sample), cpu: sample.cpuSimulation_ms + sample.cpuFrame_ms }));
   const historyMax = Math.max(budget, ...historyValues.flatMap((sample) => [sample.gpu, sample.cpu]), 0.01);
   const points = (key: "gpu" | "cpu") => historyValues.map((sample, index) => `${historyValues.length < 2 ? 0 : index / (historyValues.length - 1) * 100},${48 - Math.min(sample[key] / historyMax, 1) * 44}`).join(" ");
-  const physicsDemandPercent = Math.min(100, schedule.physicsPerFrame_ms / budget * 100);
-  const renderDemandPercent = Math.min(100 - physicsDemandPercent, schedule.renderPerFrame_ms / budget * 100);
-  const observedPressureSolvesPerFrame = observedSimRate === null ? null : schedule.pressureSolvesPerFrame * observedSimRate;
+  const physicsDemandPercent = paused ? 0 : Math.min(100, schedule.physicsPerFrame_ms / budget * 100);
+  const renderDemandPercent = paused ? 0 : Math.min(100 - physicsDemandPercent, schedule.renderPerFrame_ms / budget * 100);
+  const observedPressureSolvesPerFrame = paused ? 0 : observedSimRate === null ? null : schedule.pressureSolvesPerFrame * observedSimRate;
   const advanceDisplay_ms = physicsPerStep_ms > 0 ? physicsPerStep_ms : timelineScale / submissionBatchDepth;
   const cpuTimeline = cpuStages.map((stage, index) => ({ stage, left: cpuStages.slice(0, index).reduce((sum, previous) => sum + previous.value, 0) / timelineScale * 100 }));
   const physicsOffsets = physicsStages.map((_, index) => physicsStages.slice(0, index).reduce((sum, previous) => sum + (stageTimed(previous) ? previous.value : 0), 0));
   const physicsTimeline = Array.from({ length: submissionBatchDepth }, (_, step) => physicsStages.map((stage, index) => ({ stage, step, left: (step * physicsPerStep_ms + physicsOffsets[index]) / timelineScale * 100, width: stageTimed(stage) ? stage.value / timelineScale * 100 : 0 }))).flat();
   const renderTimeline = renderStages.map((stage, index) => ({ stage, left: (batchGPU_ms + renderStages.slice(0, index).reduce((sum, previous) => sum + (stageTimed(previous) ? previous.value : 0), 0)) / timelineScale * 100, width: stageTimed(stage) ? stage.value / timelineScale * 100 : 0 }));
 
-  return <aside id="performance-panel" className="right-panel panel-scroll performance-panel" aria-label="Performance profiler" data-testid="performance-panel" data-method={activeMethodId} data-water-renderer={activeWaterMode}>
+  return <aside id="performance-panel" className="right-panel panel-scroll performance-panel" aria-label="Performance profiler" data-testid="performance-panel" data-method={activeMethodId}>
     <header className="performance-header">
       <div className="performance-title">
         <div><p className="eyebrow">FRAME GRAPH · {frameLabel} · {sampleLabel}</p><h1>Performance trace</h1></div>
@@ -142,22 +136,22 @@ export function PerformancePanel() {
 
     <section className={`performance-overview schedule-overview${gpuConstrained ? " over-budget" : ""}`} aria-label="Frame performance summary">
       <div className="realtime-budget-summary">
-        <div className="realtime-budget-title"><span><small>REALTIME GPU LOAD</small><strong>{measuredStages.length ? `${demandPercent.toFixed(0)}%` : "—"}</strong></span><b>{measuredStages.length ? `${realtimeDemand_ms.toFixed(2)} / ${budget.toFixed(2)} ms` : "sampling…"}</b></div>
+        <div className="realtime-budget-title"><span><small>{paused ? "IDLE GPU LOAD" : "REALTIME GPU LOAD"}</small><strong>{measuredStages.length || paused ? `${demandPercent.toFixed(0)}%` : "—"}</strong></span><b>{paused ? `${renderPerFrame_ms.toFixed(2)} ms on last change` : measuredStages.length ? `${realtimeDemand_ms.toFixed(2)} / ${budget.toFixed(2)} ms` : "sampling…"}</b></div>
         <div className="frame-budget-track" aria-label={`${schedule.physicsPerFrame_ms.toFixed(2)} milliseconds physics, ${schedule.renderPerFrame_ms.toFixed(2)} milliseconds presentation, ${Math.max(0, headroom).toFixed(2)} milliseconds headroom`}>
           <span className="budget-physics" style={{ width: `${physicsDemandPercent}%` }} />
           <span className="budget-render" style={{ width: `${renderDemandPercent}%` }} />
           <i />
         </div>
-        <div className="frame-budget-labels"><span>0</span><span><b />physics {schedule.physicsPerFrame_ms.toFixed(2)}</span><span><b />render {schedule.renderPerFrame_ms.toFixed(2)}</span><strong>{budget.toFixed(2)} ms deadline</strong></div>
+        <div className="frame-budget-labels"><span>0</span><span><b />physics {paused ? "0.00" : schedule.physicsPerFrame_ms.toFixed(2)}</span><span><b />render {paused ? "on change" : schedule.renderPerFrame_ms.toFixed(2)}</span><strong>{budget.toFixed(2)} ms deadline</strong></div>
       </div>
-      <div className="overview-stat pressure-cadence"><small>PRESSURE CADENCE</small><strong>{schedule.pressureSolvesPerFrame.toFixed(2)} solves / frame</strong><span>{schedule.pressureSolvesPerSecond.toFixed(1)} / s · {schedule.pressureSolvesPerAdvance} per GPU advance</span></div>
-      <div className="overview-stat"><small>ADVANCE PAYLOAD</small><strong>{schedule.pressureSolvesPerBatch} solves / slot</strong><span>{batchSimulation_ms.toFixed(0)} ms simulation · completion-gated</span></div>
-      <div className="overview-stat"><small>OBSERVED COMPLETION</small><strong>{observedPressureSolvesPerFrame === null ? "measuring…" : `${observedPressureSolvesPerFrame.toFixed(2)} solves / frame`}</strong><span>{observedSimRate === null ? "simulation rate sampling" : `×${observedSimRate.toFixed(2)} realtime`} · {completionRate === null ? "queue sampling" : `queue ×${completionRate.toFixed(2)}`}</span></div>
+      <div className="overview-stat pressure-cadence"><small>PRESSURE CADENCE</small><strong>{paused ? "0.00" : schedule.pressureSolvesPerFrame.toFixed(2)} solves / frame</strong><span>{paused ? "simulation paused" : `${schedule.pressureSolvesPerSecond.toFixed(1)} / s · ${schedule.pressureSolvesPerAdvance} per GPU advance`}</span></div>
+      <div className="overview-stat"><small>ADVANCE PAYLOAD</small><strong>{paused ? 0 : schedule.pressureSolvesPerBatch} solves / slot</strong><span>{paused ? "no GPU advances requested" : `${batchSimulation_ms.toFixed(0)} ms simulation · completion-gated`}</span></div>
+      <div className="overview-stat"><small>OBSERVED COMPLETION</small><strong>{observedPressureSolvesPerFrame === null ? "measuring…" : `${observedPressureSolvesPerFrame.toFixed(2)} solves / frame`}</strong><span>{paused ? "idle · presentation redraws on change" : `${observedSimRate === null ? "simulation rate sampling" : `×${observedSimRate.toFixed(2)} realtime`} · ${completionRate === null ? "queue sampling" : `queue ×${completionRate.toFixed(2)}`}`}</span></div>
     </section>
 
     <section className={`schedule-translation${gpuConstrained || cpuSpikeConstrained || unexplainedSlowdown ? " constrained" : ""}`} aria-label="Scheduling model">
-      <div className="schedule-verdict"><small>CAPACITY VERDICT</small><strong>{gpuConstrained ? "GPU demand exceeds the presentation budget" : cpuSpikeConstrained ? "CPU p95 exceeds the presentation deadline" : unexplainedSlowdown ? "Timestamped work does not explain the observed slowdown" : `${headroom.toFixed(2)} ms GPU headroom per presentation frame`}</strong><span>{gpuConstrained ? `${Math.abs(headroom).toFixed(2)} ms over budget` : `CPU ${cpuTotal.toFixed(2)} ms avg · ${cpuP95_ms.toFixed(2)} p95`}</span></div>
-      <div className="schedule-node"><small>PRESENTATION FRAME</small><strong>{budget.toFixed(2)} ms wall time</strong><span>needs {schedule.advancesPerFrame.toFixed(2)} GPU advances</span><b>{schedule.pressureSolvesPerFrame.toFixed(2)} pressure solves</b></div>
+      <div className="schedule-verdict"><small>CAPACITY VERDICT</small><strong>{paused ? "Paused · viewport renders only when its inputs change" : gpuConstrained ? "GPU demand exceeds the presentation budget" : cpuSpikeConstrained ? "CPU p95 exceeds the presentation deadline" : unexplainedSlowdown ? "Timestamped work does not explain the observed slowdown" : `${headroom.toFixed(2)} ms GPU headroom per presentation frame`}</strong><span>{paused ? `Last presentation ${renderPerFrame_ms.toFixed(2)} ms on GPU` : gpuConstrained ? `${Math.abs(headroom).toFixed(2)} ms over budget` : `CPU ${cpuTotal.toFixed(2)} ms avg · ${cpuP95_ms.toFixed(2)} p95`}</span></div>
+      <div className="schedule-node"><small>PRESENTATION FRAME</small><strong>{budget.toFixed(2)} ms wall time</strong><span>needs {paused ? "0.00" : schedule.advancesPerFrame.toFixed(2)} GPU advances</span><b>{paused ? "0.00" : schedule.pressureSolvesPerFrame.toFixed(2)} pressure solves</b></div>
       <i className="schedule-arrow">→</i>
       <div className="schedule-node active"><small>ONE GPU ADVANCE</small><strong>{schedule.gpuAdvance_ms.toFixed(2)} ms simulation</strong><span>costs {physicsPerStep_ms.toFixed(2)} ms on GPU</span><b>{schedule.pressureSolvesPerAdvance} pressure {schedule.pressureSolvesPerAdvance === 1 ? "solve" : "solves"}</b></div>
       <i className="schedule-arrow">×{submissionBatchDepth}</i>

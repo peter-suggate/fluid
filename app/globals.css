@@ -476,12 +476,6 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .panel-close:hover { border-color: var(--line-strong); color: var(--accent); }
 .utility-controls .section-heading { margin-bottom: 12px; }
 .utility-controls .control-hint { margin: 10px 0 0; }
-.environment-swatch { width: 48px; height: 34px; display: flex; overflow: hidden; border: 1px solid rgba(255,255,255,.12); }
-.environment-swatch i { flex: 1; height: 100%; }
-.scene-background-card { min-height: 52px; padding: 7px; display: grid; grid-template-columns: 48px minmax(0, 1fr); align-items: center; gap: 9px; border: 1px solid rgba(131,241,209,.28); background: rgba(131,241,209,.045); color: var(--accent-strong); box-shadow: inset 2px 0 0 rgba(131,241,209,.65); }
-.scene-background-card > span:last-child { min-width: 0; display: grid; gap: 4px; }
-.scene-background-card strong { font-size: 10px; font-weight: 650; }
-.scene-background-card small { overflow: hidden; color: var(--dim); font-size: 8px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .panel-note { margin: 0; color: var(--dim); font-size: 9px; line-height: 1.55; }
 .slice-control { display: grid; gap: 10px; margin-top: 16px; }
 .slice-control > span { display: flex; align-items: baseline; justify-content: space-between; color: #a9bfba; font-size: 10px; }

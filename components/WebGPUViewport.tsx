@@ -9,7 +9,8 @@ import { useSceneStore } from "@/lib/stores/scene-store";
 import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useUIStore } from "@/lib/stores/ui-store";
-import { advancePresentationClock, presentationFrameDue } from "@/lib/frame-pacing";
+import { useRuntimeStore } from "@/lib/stores/runtime-store";
+import { advancePresentationClock, presentationFrameDue, presentationStateChanged } from "@/lib/frame-pacing";
 import { getScenePreset } from "@/lib/scenes";
 
 type Vec3 = RigidBodyState["position_m"];
@@ -42,32 +43,45 @@ export function WebGPUViewport() {
       undefined,
       (time_s) => simulation.gpuAdvanceCompleted(time_s)
     );
+    const syncRunState = (runState: ReturnType<typeof useRuntimeStore.getState>["runState"]) => {
+      const submittedTime_s = renderer.setSimulationRunning(runState === "running");
+      if (runState === "paused") simulation.gpuSchedulingPaused(submittedTime_s);
+    };
+    syncRunState(useRuntimeStore.getState().runState);
+    const unsubscribeRunState = useRuntimeStore.subscribe((state, previous) => {
+      if (state.runState !== previous.runState) syncRunState(state.runState);
+    });
     rendererRef.current = renderer;
     let frame = 0;
     let alive = true;
     let lastFrameAt_ms = -Infinity;
+    let lastPausedPresentation: readonly unknown[] | undefined;
     renderer.initialize().then(() => {
       const render = (now_ms: number) => {
         if (!alive || !running) return;
         frame = requestAnimationFrame(render);
-        const targetFps = useUIStore.getState().targetFps;
-        if (!presentationFrameDue(lastFrameAt_ms, now_ms, targetFps)) return;
-        lastFrameAt_ms = advancePresentationClock(lastFrameAt_ms, now_ms, targetFps);
+        if (!presentationFrameDue(lastFrameAt_ms, now_ms)) return;
+        lastFrameAt_ms = advancePresentationClock(lastFrameAt_ms, now_ms);
         const sceneState = useSceneStore.getState();
         const scene = sceneState.scene;
         const ui = useUIStore.getState();
         const method = useMethodStore.getState();
         const state = useDiagnosticsStore.getState();
+        const runtime = useRuntimeStore.getState();
+        const pausedPresentation = runtime.runState === "paused" ? [
+          sceneState, ui, method, state.bodies, state.fluidRenderState, state.gpuInfo,
+          simulation.time(), canvas.clientWidth, canvas.clientHeight, window.devicePixelRatio
+        ] : undefined;
+        if (pausedPresentation && !presentationStateChanged(lastPausedPresentation, pausedPresentation)) return;
+        if (!pausedPresentation) lastPausedPresentation = undefined;
         let metrics;
         try {
           metrics = renderer.draw(
-            simulation.time(), scene, ui.camera, ui.view, state.bodies, ui.selectedBodyId,
+            simulation.time(), scene, ui.camera, state.bodies, ui.selectedBodyId,
             state.fluidRenderState ?? undefined, simulation.backend,
             { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method) },
-            { axis: ui.view === "scientific" ? ui.gridOverlayAxis : "off", position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
-            ui.waterRenderMode,
+            { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
             getScenePreset(sceneState.presetId).background,
-            targetFps,
             ui.voxelRenderMode
           );
         } catch (error: unknown) {
@@ -76,13 +90,17 @@ export function WebGPUViewport() {
           return;
         }
         simulation.recordFrame(metrics, renderer.presentationResolution);
+        // A pending presentation returns zero encode time. Retry that same
+        // paused state on the next paced callback instead of considering it
+        // painted before any command buffer was submitted.
+        if (pausedPresentation && metrics.cpuRenderEncode_ms > 0) lastPausedPresentation = pausedPresentation;
       };
       frame = requestAnimationFrame(render);
     }).catch((error: unknown) => {
       running = false;
       if (useDiagnosticsStore.getState().gpuStatus.state !== "lost") diagnostics.set({ gpuStatus: { state: "unavailable", label: error instanceof Error ? error.message : "WebGPU initialization failed" } });
     });
-    return () => { alive = false; running = false; cancelAnimationFrame(frame); if(rendererRef.current===renderer)rendererRef.current=null; renderer.destroy(); };
+    return () => { alive = false; running = false; unsubscribeRunState(); cancelAnimationFrame(frame); if(rendererRef.current===renderer)rendererRef.current=null; renderer.destroy(); };
   }, []);
 
   const pointerRay = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -101,7 +119,7 @@ export function WebGPUViewport() {
   // slice through the volume.
   const sliceGrabHit = (origin: Vec3, direction: Vec3) => {
     const ui = useUIStore.getState();
-    if (ui.view !== "scientific" || ui.gridOverlayAxis === "off") return undefined;
+    if (ui.gridOverlayAxis === "off") return undefined;
     const axis = ui.gridOverlayAxis;
     const c = useSceneStore.getState().scene.container;
     const planeCoordinate = axis === "z" ? -c.depth_m / 2 + ui.gridOverlaySlice * c.depth_m : axis === "x" ? -c.width_m / 2 + ui.gridOverlaySlice * c.width_m : ui.gridOverlaySlice * c.height_m;

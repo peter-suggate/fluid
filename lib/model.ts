@@ -2,7 +2,6 @@ import sharedDefaultScene from "../native/Sources/FluidMetal/Resources/default-s
 import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { EnvironmentId } from "./environments";
 
-export type ViewMode = "scientific" | "presentation";
 export type RunState = "paused" | "running";
 
 export interface Vec3 {

@@ -2,7 +2,7 @@
  * Solver-grid cross-section rendered as an independent presentation layer.
  *
  * Keeping this out of both water renderers lets the same scientific overlay
- * compose over raster optics and the legacy ray marcher. The shared view
+ * compose over raster optics. The shared view
  * uniform supplies the slice axis/position through `debug.xy`; this pipeline
  * only owns the grid-specific sampling and alpha blend.
  */
@@ -78,11 +78,15 @@ fn sparseSurfacePayload(fineCell: vec3i) -> u32 {
   let payload=slot*brickSize*brickSize*brickSize+localIndex;
   return select(SPARSE_SURFACE_INVALID,payload,payload<arrayLength(&sparseSurfacePhi));
 }
+fn sparseSurfacePageState(fineCell: vec3i) -> u32 {
+  if (!sparseSurfaceAvailable() || any(fineCell < vec3i(0)) || any(fineCell >= vec3i(sparseSurfaceParams.fineDims.xyz))) { return 0u; }
+  let q = vec3u(fineCell); let page = q / sparseSurfaceParams.fineDims.w;
+  let pageIndex = page.x + sparseSurfaceParams.brickDims.x * (page.y + sparseSurfaceParams.brickDims.y * page.z);
+  if (pageIndex >= arrayLength(&sparseSurfaceStates)) { return 0u; }
+  return sparseSurfaceStates[pageIndex];
+}
 fn sparseSurfaceCoreSample(fineCell: vec3i) -> bool {
-  if(any(fineCell<vec3i(0))||any(fineCell>=vec3i(sparseSurfaceParams.fineDims.xyz))){return false;}
-  let q=vec3u(fineCell);let page=q/sparseSurfaceParams.fineDims.w;
-  let pageIndex=page.x+sparseSurfaceParams.brickDims.x*(page.y+sparseSurfaceParams.brickDims.y*page.z);
-  if(pageIndex>=arrayLength(&sparseSurfaceStates)||(sparseSurfaceStates[pageIndex]&2u)==0u){return false;}
+  if ((sparseSurfacePageState(fineCell) & 2u) == 0u) { return false; }
   let payload=sparseSurfacePayload(fineCell);
   if (payload == SPARSE_SURFACE_INVALID) { return false; }
   let factor=f32(sparseSurfaceParams.coarseDims.w);
@@ -533,6 +537,35 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
       let coarseColor = vec3f(0.08, 0.18, 0.48);
       fill = select(mix(middleColor, coarseColor, (level - 0.5) * 2.0), mix(fineColor, middleColor, level * 2.0), level < 0.5);
       alpha = 0.88;
+    } else if (fieldMode == 10 && adaptiveGrid) {
+      // Dedicated sparse-surface audit. Unlike the normal structure and cell
+      // scale views, this deliberately exposes whole allocated pages so the
+      // true interface shell, its core-page support, the transport halo, and
+      // coarse fallback can be distinguished at a glance.
+      fill = vec3f(0.05, 0.12, 0.35);
+      alpha = 0.78;
+      if (sparseSurfaceAvailable()) {
+        let factor = f32(sparseSurfaceParams.coarseDims.w);
+        let fine3 = local3 * factor;
+        let fineCell = vec3i(floor(fine3));
+        let state = sparseSurfacePageState(fineCell);
+        let resident = (state & 1u) != 0u;
+        let core = (state & 2u) != 0u;
+        let halo = (state & 4u) != 0u;
+        fill = select(fill, vec3f(0.12, 0.72, 0.82), resident && halo);
+        fill = select(fill, vec3f(0.42, 0.19, 0.62), resident && core);
+        fill = select(fill, vec3f(1.0, 0.03, 0.52), sparseSurfaceCoreSample(fineCell));
+        alpha = select(alpha, 0.94, resident);
+        if (resident) {
+          var finePosition = fine3.xy;
+          var fineDerivative = derivative * factor;
+          if (axis == 2) { finePosition.x = fine3.z; }
+          else if (axis == 3) { finePosition = fine3.xz; }
+          let firstFineLine = 1.0 - smoothstep(0.35, 1.15, (0.5 - abs(fract(finePosition.x) - 0.5)) / max(fineDerivative.x, 1e-5));
+          let secondFineLine = 1.0 - smoothstep(0.35, 1.15, (0.5 - abs(fract(finePosition.y) - 0.5)) / max(fineDerivative.y, 1e-5));
+          line = max(line, max(firstFineLine, secondFineLine));
+        }
+      }
     }
   }
   line *= lineFade;
