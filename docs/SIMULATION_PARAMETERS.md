@@ -49,8 +49,8 @@ Edited in the **scene configuration modal**; part of `SceneDescription`
 
 | Parameter | Field | Meaning |
 | --- | --- | --- |
-| CPU step | `numerics.fixedDt_s` | rigid-body and CPU-oracle clock step |
-| GPU advance cap | `numerics.maxDt_s` | independently configurable; defaults to four times the CPU step |
+| Rigid/oracle step | `numerics.fixedDt_s` | fixed rigid-body and CPU-oracle step, exposed directly as Hz |
+| GPU advance cap | `numerics.maxDt_s` | independent outer-step ceiling, exposed directly as Hz rather than a CPU multiplier |
 | Nominal cell | `nominalResolution.length_m` | CPU oracle MAC grid resolution |
 | PCG budget | `numerics.pressureMaxIterations` | CPU reference PCG iteration cap (8–1000) |
 | PCG tolerance | `numerics.pressureRelativeTolerance` | CPU reference PCG relative residual target |

@@ -64,6 +64,12 @@ export interface SceneDescription {
      * bodies without allocating the space between them.
      */
     initialBrickSeeds_m?: Vec3[];
+    /**
+     * When true, seeded bricks are added on top of the ordinary initial
+     * condition (tank fill or dam break) instead of replacing it. The ocean
+     * scene uses this to raise a slab of water above a settled pool.
+     */
+    initialBrickSeedsAdditive?: boolean;
     inflow?: FluidInflow;
   };
   nominalResolution: {
@@ -74,6 +80,13 @@ export interface SceneDescription {
     maxDt_s: number;
     pressureRelativeTolerance: number;
     pressureMaxIterations: number;
+    /**
+     * Optional per-scene override of the quality preset's target x/z surface
+     * column count used by GPU grid sizing. Validation scenes (for example the
+     * four-brick cross-transport tank) use it to pin an exact finest grid that
+     * the quality presets could never reach through container shape alone.
+     */
+    surfaceColumnsOverride?: number;
   };
   rigidBodies: RigidBodyDescription[];
 }
@@ -181,6 +194,7 @@ export function validateScene(scene: SceneDescription): string[] {
   if (scene.terrain && c) errors.push(...validateTerrain(scene.terrain, c));
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");
   if (!scene.numerics || !(scene.numerics.fixedDt_s > 0) || !(scene.numerics.maxDt_s > 0)) errors.push("Time steps must be positive");
+  if (scene.numerics?.surfaceColumnsOverride !== undefined && !(scene.numerics.surfaceColumnsOverride > 0)) errors.push("Surface column override must be positive");
   if (scene.numerics && scene.numerics.fixedDt_s > scene.numerics.maxDt_s) errors.push("Fixed time step exceeds maximum time step");
   if (!Array.isArray(scene.rigidBodies)) errors.push("Rigid bodies must be an array");
   else {

@@ -67,7 +67,7 @@ test("extraction is split into a lean classify sweep and a compacted polygonise 
   assert.match(surfaceExtractionShader, /fn classifyCube/, "sweep kernels classify and append to the worklist");
   assert.match(surfaceExtractionShader, /fn polygoniseMain/, "triangle emission runs over compacted surface cubes only");
   assert.doesNotMatch(surfaceExtractionShader, /atomicCompareExchangeWeak/, "the per-triangle global compare-exchange loop must not return");
-  assert.match(surfaceExtractionShader, /atomicAdd\(&extractionMeta\.activeCubeCount, 1u\)/, "classification appends with a single atomic per surface cube");
+  assert.match(surfaceExtractionShader, /atomicAdd\(&drawArgs\.activeCubeCount, 1u\)/, "classification appends with a single atomic per surface cube");
   assert.match(surfaceExtractionShader, /var<workgroup> workgroupVertexTotal/, "vertex blocks are reserved per workgroup, not per triangle");
   assert.match(surfaceExtractionShader, new RegExp(`@compute @workgroup_size\\(${EXTRACTION_POLYGONISE_WORKGROUP}\\)\\s*\\nfn polygoniseMain`));
 });
@@ -76,7 +76,7 @@ test("the prepare kernel sizes the indirect polygonise dispatch from the worklis
   assert.match(extractionPrepareShader, /fn prepareMain/);
   assert.match(extractionPrepareShader, /@workgroup_size\(1\)/);
   assert.match(extractionPrepareShader, new RegExp(`\\+ ${EXTRACTION_POLYGONISE_WORKGROUP - 1}u\\) / ${EXTRACTION_POLYGONISE_WORKGROUP}u`), "ceiling division must match the polygonise workgroup size");
-  assert.match(extractionPrepareShader, /min\(extractionMeta\.activeCubeCount, arrayLength\(&activeCubes\)\)/, "an overflowing worklist must clamp instead of dispatching past the buffer");
+  assert.match(extractionPrepareShader, /min\(drawArgs\.activeCubeCount, arrayLength\(&activeCubes\)\)/, "an overflowing worklist must clamp instead of dispatching past the buffer");
 });
 
 test("buffer capacities keep the worklist aligned with the vertex allocation", () => {

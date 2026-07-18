@@ -161,9 +161,8 @@ try {
 
     const maximumVertices = surfaceVertexCapacity(nx, ny, nz);
     const vertices = device.createBuffer({ size: maximumVertices * 32, usage: GPUBufferUsage.STORAGE });
-    const indirect = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const indirect = device.createBuffer({ size: 24, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const activeCubes = device.createBuffer({ size: activeCubeCapacity(maximumVertices) * 8, usage: GPUBufferUsage.STORAGE });
-    const meta = device.createBuffer({ size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     const dispatchArgs = device.createBuffer({ size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const extractionModule = device.createShaderModule({ label: "Water extraction benchmark", code: surfaceExtractionShader });
     const prepareModule = device.createShaderModule({ label: "Water extraction prepare benchmark", code: extractionPrepareShader });
@@ -178,8 +177,7 @@ try {
       { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float" } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
     ] });
     const prepareLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -205,13 +203,12 @@ try {
       { binding: 2, resource: bases.createView() },
       { binding: 3, resource: { buffer: vertices } },
       { binding: 4, resource: { buffer: indirect } },
-      { binding: 5, resource: { buffer: activeCubes } },
-      { binding: 6, resource: { buffer: meta } }
+      { binding: 5, resource: { buffer: activeCubes } }
     ] });
     const production: ProductionStages = {
       prepare: device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [prepareLayout] }), compute: { module: prepareModule, entryPoint: "prepareMain" } }),
       prepareBindGroup: device.createBindGroup({ layout: prepareLayout, entries: [
-        { binding: 0, resource: { buffer: meta } },
+        { binding: 0, resource: { buffer: indirect } },
         { binding: 1, resource: { buffer: activeCubes } },
         { binding: 2, resource: { buffer: dispatchArgs } }
       ] }),
@@ -222,7 +219,6 @@ try {
     const warmupEncoder = device.createCommandEncoder({ label: `${sceneId} extraction warm-up` });
     for (let index = 0; index < warmups; index += 1) for (const variant of (index % 2 === 0 ? ["full-volume", "restricted-band"] : ["restricted-band", "full-volume"]) as Variant[]) {
       warmupEncoder.clearBuffer(indirect);
-      warmupEncoder.clearBuffer(meta);
       const pass = warmupEncoder.beginComputePass();
       encodeVariant(pass, variant, variant === "full-volume" ? fullPlan : restrictedPlan, pipelines, bindGroup, production);
       pass.end();
@@ -242,7 +238,6 @@ try {
       for (let order = 0; order < variants.length; order += 1) {
         const variant = variants[order], start = query++, end = query++;
         timedEncoder.clearBuffer(indirect);
-        timedEncoder.clearBuffer(meta);
         const pass = timedEncoder.beginComputePass({ timestampWrites: { querySet, beginningOfPassWriteIndex: start, endOfPassWriteIndex: end } });
         encodeVariant(pass, variant, variant === "full-volume" ? fullPlan : restrictedPlan, pipelines, bindGroup, production);
         pass.end();
@@ -317,7 +312,7 @@ try {
     if (fullVertexCount !== restrictedVertexCount) throw new Error(`${sceneId}: restricted extraction emitted ${restrictedVertexCount} vertices; full extraction emitted ${fullVertexCount}`);
     if (validationErrors.length) throw new Error(`${sceneId}: WebGPU validation errors: ${validationErrors.join("; ")}`);
 
-    for (const resource of [fullCountReadback, restrictedCountReadback, queryReadback, queryResolve, querySet, indirect, vertices, activeCubes, meta, dispatchArgs, bases, volume, uniformBuffer]) resource.destroy();
+    for (const resource of [fullCountReadback, restrictedCountReadback, queryReadback, queryResolve, querySet, indirect, vertices, activeCubes, dispatchArgs, bases, volume, uniformBuffer]) resource.destroy();
   }
 } finally {
   device.destroy();

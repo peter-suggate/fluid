@@ -1,4 +1,4 @@
-import { damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
+import { combineInitialBrickWet, damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
 import { initializeRigidBodies, type RigidBodyState } from "./rigid-body";
 import {
   categorizedGPUPhysicsTime_ms,
@@ -268,7 +268,7 @@ export class WebGPUUniformEulerianSolver {
         rigidBodies: this.rigidBuffer, rigidExchange: this.rigidExchangeBuffer, terrain: this.terrainTexture
       }, {
         pressureIterations,
-        maximumLeafSize: options.octree.maximumLeafSize ?? 8,
+        maximumLeafSize: options.octree.maximumLeafSize ?? 16,
         adaptivity: options.octree.adaptivity ?? 1,
         interfaceRefinementBandCells: options.octree.interfaceRefinementBandCells ?? 4,
         surfaceDetailStrength: options.octree.surfaceDetailStrength ?? 0,
@@ -276,6 +276,8 @@ export class WebGPUUniformEulerianSolver {
         surfaceRefinementFactor: options.octree.surfaceRefinementFactor ?? 2,
         sparseSurfaceBandCells: options.octree.sparseSurfaceBandCells ?? 4,
         sparseSurfacePageFraction: options.octree.sparseSurfacePageFraction ?? 0.75,
+        brickAtlas: options.octree.brickAtlas ?? true,
+        brickPreActivation: options.octree.brickPreActivation ?? true,
         jacobiRelaxation: options.octree.jacobiRelaxation ?? 0.8,
         extrapolationSweeps: options.octree.extrapolationSweeps ?? 4,
         leafSolver: options.octree.leafSolver,
@@ -415,9 +417,9 @@ export class WebGPUUniformEulerianSolver {
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const aboveGround = (j + 0.5) * cellHeight > terrainHeights[i + nx * k];
       const brickWet = initialFluidBrickContainsCell(this.scene, i, j, k, [nx, ny, nz]);
-      const fill = aboveGround && (brickWet ?? (this.scene.fluid.initialCondition === "dam-break"
+      const fill = aboveGround && combineInitialBrickWet(this.scene, brickWet, this.scene.fluid.initialCondition === "dam-break"
         ? (i + .5) / nx <= dam.width && (j + .5) / ny <= dam.height && (k + .5) / nz <= dam.depth
-        : (j + .5) / ny <= c.fillFraction));
+        : (j + .5) / ny <= c.fillFraction);
       data[i + nx * (j + ny * k)] = fill ? 1 : 0; if (fill) initialSum += 1;
     }
     const terrainCells = new Float32Array(nx * nz);
@@ -837,7 +839,7 @@ export class WebGPUUniformEulerianSolver {
       this.octreeProjection.encodeSparseBrickWorld(encoder, {
         residency: timestampWrites(this.timing("fluidResidency_ms")),
         publication: timestampWrites(this.timing("sparsePublication_ms"))
-      });
+      }, dt);
     }
     encoder.clearBuffer(this.reductionBuffer); { const timing = this.timing("diagnostics_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(pass, this.reductionPipeline, this.reductionGroup); pass.end(); }
     if (totalTiming && this.querySet) { const pass = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: totalTiming.end } }); pass.end(); }
@@ -882,10 +884,11 @@ export class WebGPUUniformEulerianSolver {
     this.device.queue.submit([encoder.finish()]);
     const mapPromise = buffer.mapAsync(GPUMapMode.READ);
     try {
-      const [, , surfaceDiagnostics, fluidBrickStats, sparseSurfaceStats] = await Promise.all([
-        mapPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise, this.octreeProjection?.readFluidBrickResidencyStats(), this.octreeProjection?.readSparseSurfaceBandStats(),
+      const [, , surfaceDiagnostics, fluidBrickStats, sparseSurfaceStats, fluidBrickAtlasStats] = await Promise.all([
+        mapPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise, this.octreeProjection?.readFluidBrickResidencyStats(), this.octreeProjection?.readSparseSurfaceBandStats(), this.octreeProjection?.readFluidBrickAtlasStats(),
       ]);
     if(fluidBrickStats){this.info.fluidBrickCapacity=fluidBrickStats.capacity;this.info.fluidBrickResidentCount=fluidBrickStats.resident;this.info.fluidBrickCoreCount=fluidBrickStats.core;this.info.fluidBrickHaloCount=fluidBrickStats.halo;this.info.fluidBrickActivatedCount=fluidBrickStats.activated;this.info.fluidBrickRetiredCount=fluidBrickStats.retired;this.info.fluidBrickGeneration=fluidBrickStats.generation;}
+    if(fluidBrickAtlasStats){this.info.fluidBrickAtlasCapacity=fluidBrickAtlasStats.capacity;this.info.fluidBrickAtlasResidentTiles=fluidBrickAtlasStats.residentTiles;this.info.fluidBrickAtlasOverflow=fluidBrickAtlasStats.overflow;this.info.fluidBrickAtlasMaxPhiError=fluidBrickAtlasStats.maxAbsPhiError;this.info.fluidBrickAtlasMaxVelocityError=fluidBrickAtlasStats.maxAbsVelocityError;this.info.fluidBrickAtlasMaxPhiErrorManual=fluidBrickAtlasStats.maxAbsPhiErrorManual;this.info.fluidBrickAtlasMaxVelocityErrorManual=fluidBrickAtlasStats.maxAbsVelocityErrorManual;}
     if(sparseSurfaceStats){this.info.sparseSurfaceLogicalPages=sparseSurfaceStats.logicalPageCount;this.info.sparseSurfacePageCapacity=sparseSurfaceStats.physicalPageCapacity;this.info.sparseSurfaceResidentPages=sparseSurfaceStats.resident;this.info.sparseSurfaceCorePages=sparseSurfaceStats.core;this.info.sparseSurfaceHaloPages=sparseSurfaceStats.halo;this.info.sparseSurfaceActivatedPages=sparseSurfaceStats.activated;this.info.sparseSurfaceRetiredPages=sparseSurfaceStats.retired;this.info.sparseSurfaceOverflow=sparseSurfaceStats.overflow;this.info.sparseSurfacePeakPages=sparseSurfaceStats.peakResident;}
     if (this.quadtreeProjection) this.info.quadtreeVelocityClampCount = this.quadtreeProjection.info.velocityClampCount ?? 0;
     const words = new Uint32Array(buffer.getMappedRange(0, 16)), initial = Math.max(1, this.info.initialVolumeCellSum ?? 1);

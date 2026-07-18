@@ -1,6 +1,7 @@
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { createPaperScenario } from "../lib/paper-scenarios";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M } from "../lib/garden-scene";
+import { createBrickQuadDamBreakScene, createOceanSeicheScene } from "../lib/scenes";
 
 export const smokeScenarioIds = [
   "dam-break-ui",
@@ -10,7 +11,9 @@ export const smokeScenarioIds = [
   "sphere-jet",
   "deep-water",
   "garden-pond",
-  "garden-dam-break"
+  "garden-dam-break",
+  "brick-quad-dam-break",
+  "ocean-seiche"
 ] as const;
 
 export type SmokeScenarioId = typeof smokeScenarioIds[number];
@@ -68,6 +71,36 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
         ? "hydrostatic rest in an organic pool carved from a terrain heightfield"
         : "dam break released onto a lawn heightfield draining into the pool",
       scene, oracleSteps: 2, target_s: id === "garden-pond" ? 0.1 : 0.2
+    };
+  }
+
+  if (id === "brick-quad-dam-break") {
+    // Exactly four 8-cubed fluid bricks (16x8x16 finest cells, 2x2 in x/z at
+    // one brick of height); the water starts confined to one brick quadrant.
+    const scene = createBrickQuadDamBreakScene();
+    scene.environment = "default";
+    scene.sceneId = "smoke-brick-quad-dam-break";
+    scene.fluid.surfaceTension_N_m = 0;
+    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+    return {
+      id,
+      description: "four-brick tank whose dam break carries water across every fluid brick boundary",
+      scene, oracleSteps: 2, target_s: 1.5
+    };
+  }
+
+  if (id === "ocean-seiche") {
+    // A wide deep tank whose calm interior coarsens into 16/32-cubed octree
+    // leaves; a raised 2x1x8-brick slab along the -x wall collapses into a
+    // long gravity wave (~4.2 m/s) that crosses the 4.8 m tank in ~1.1 s.
+    const scene = createOceanSeicheScene();
+    scene.environment = "research-station";
+    scene.sceneId = "smoke-ocean-seiche";
+    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.005;
+    return {
+      id,
+      description: "wide deep ocean tank releasing a wall-hugging surface slab into a traversing gravity wave",
+      scene, oracleSteps: 1, target_s: 6
     };
   }
 

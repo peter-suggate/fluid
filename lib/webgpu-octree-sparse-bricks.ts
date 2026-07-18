@@ -13,11 +13,23 @@ import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "./voxe
 import { SparseSceneProxyVoxelizer, type SparseScenePrimitive } from "./webgpu-sparse-scene-proxies";
 import { SPARSE_VOXEL_DEBUG_RECORD_STRIDE, type SparseVoxelRenderSource } from "./webgpu-voxel-debug";
 import { GPUFluidBrickResidency, type FluidBrickResidencyStats } from "./webgpu-fluid-brick-residency";
+import { WebGPUFluidBrickAtlas, type FluidBrickAtlasStats } from "./webgpu-brick-atlas";
 
 export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
   /** Air-side support retained for pressure-topology rebuilds. */
   haloCells?: number;
+  /** Brick-pooled phi/velocity atlas mirrored from the dense fields. */
+  brickAtlas?: boolean;
+  /** Velocity-swept residency support plus downstream neighbor activation. */
+  brickPreActivation?: boolean;
+  /**
+   * Power-of-two bricks per topology-tile axis. Topology rebuilds operate on
+   * tiles of max(brickSize, maximumLeafSize) cells so a pressure leaf can
+   * never straddle a partial-rebuild boundary; payload residency, the atlas
+   * and dense-field clears remain brick-granular.
+   */
+  topologyTileBricks?: number;
 }
 
 export interface OctreeSparseBrickDenseFields {
@@ -147,8 +159,10 @@ fn materializeBricks(@builtin(global_invocation_id) gid: vec3u) {
 export class OctreeSparseBrickWorld {
   readonly tree: SparseBrickOctreeGPU;
   readonly residency: GPUFluidBrickResidency;
+  readonly atlas?: WebGPUFluidBrickAtlas;
   readonly renderSource: SparseVoxelRenderSource;
   readonly allocatedBytes: number;
+  private readonly preActivation: boolean;
 
   private readonly device: GPUDevice;
   private readonly dimensions: readonly [number, number, number];
@@ -215,7 +229,10 @@ export class OctreeSparseBrickWorld {
     }
     this.residency = new GPUFluidBrickResidency(device, dimensions, sceneDomain.cellSize_m, {
       brickSize, haloCells: options.haloCells ?? 2, retireAfterFrames: 3, leafIndices, leafCapacity: this.tree.leafCapacity,
+      topologyTileBricks: options.topologyTileBricks ?? 1,
     });
+    this.preActivation = options.brickPreActivation ?? true;
+    if (options.brickAtlas ?? true) this.atlas = new WebGPUFluidBrickAtlas(device, dimensions, this.residency, { brickSize });
 
     const counts = storageBuffer(device, "Sparse brick source counts", packed.counts.byteLength, packed.counts);
     const topology = storageBuffer(device, "Sparse brick source topology", packed.topology.byteLength, packed.topology);
@@ -310,13 +327,13 @@ export class OctreeSparseBrickWorld {
       fluidBrickStats: { buffer: this.residency.worklist }, fluidBrickCapacity: this.residency.capacity,
       revision: 1
     };
-    this.allocatedBytes = this.tree.allocatedBytes + this.residency.allocatedBytes
+    this.allocatedBytes = this.tree.allocatedBytes + this.residency.allocatedBytes + (this.atlas?.allocatedBytes ?? 0)
       + this.tree.voxelCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE + this.tree.leafCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE
       + this.sourceBuffers.reduce((sum, buffer) => sum + buffer.size, 0) + this.voxelCount.size + this.brickCount.size
       + this.materialBuffer.size + this.bodyMaterialBuffer.size + this.params.size + this.proxyVoxelizer.allocatedBytes;
   }
 
-  encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, timings: OctreeSparseBrickTimestampWrites = {}): void {
+  encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, timings: OctreeSparseBrickTimestampWrites = {}, dt_s = 0): void {
     if (this.destroyed) return;
     const beginRange = (label: string, writes?: GPUComputePassTimestampWrites) => {
       if (writes?.beginningOfPassWriteIndex === undefined) return;
@@ -333,7 +350,7 @@ export class OctreeSparseBrickWorld {
       marker.end();
     };
     beginRange("Fluid brick residency", timings.residency);
-    this.residency.encode(encoder, fields.levelSet);
+    this.residency.encode(encoder, fields.levelSet, fields.velocity, { dt_s, preActivation: this.preActivation });
     endRange("Fluid brick residency", timings.residency);
     beginRange("Sparse brick publication", timings.publication);
     if (!this.published) {
@@ -365,16 +382,23 @@ export class OctreeSparseBrickWorld {
     const brickPass = encoder.beginComputePass({ label: "Publish octree sparse brick records" });
     brickPass.setPipeline(this.brickPipeline); brickPass.setBindGroup(0, this.debugBindGroup);
     brickPass.dispatchWorkgroups(Math.ceil(this.tree.leafCapacity / 64)); brickPass.end();
+    // Atlas tiles follow the freshly classified residency states within the
+    // same publication window: retire freed slots, allocate newly resident
+    // ones, then mirror the dense fields (apron included) and validate.
+    this.atlas?.encode(encoder, fields.levelSet, fields.velocity);
     endRange("Sparse brick publication", timings.publication);
   }
 
   readResidencyStats(): Promise<FluidBrickResidencyStats> { return this.residency.readStats(); }
+
+  readAtlasStats(): Promise<FluidBrickAtlasStats> | undefined { return this.atlas?.readStats(); }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     this.tree.destroy();
     this.residency.destroy();
+    this.atlas?.destroy();
     this.proxyVoxelizer.destroy();
     for (const buffer of [...this.sourceBuffers, this.voxelRecords, this.brickRecords, this.voxelCount, this.brickCount, this.materialBuffer, this.bodyMaterialBuffer, this.params]) buffer.destroy();
   }

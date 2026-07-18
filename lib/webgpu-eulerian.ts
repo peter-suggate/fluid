@@ -120,6 +120,14 @@ export interface GPUEulerianInfo {
   fluidBrickActivatedCount?: number;
   fluidBrickRetiredCount?: number;
   fluidBrickGeneration?: number;
+  /** Brick-pooled atlas tiles mirrored from the dense fields plus their validation error. */
+  fluidBrickAtlasCapacity?: number;
+  fluidBrickAtlasResidentTiles?: number;
+  fluidBrickAtlasOverflow?: number;
+  fluidBrickAtlasMaxPhiError?: number;
+  fluidBrickAtlasMaxVelocityError?: number;
+  fluidBrickAtlasMaxPhiErrorManual?: number;
+  fluidBrickAtlasMaxVelocityErrorManual?: number;
   sparseSurfaceLogicalPages?: number;
   sparseSurfacePageCapacity?: number;
   sparseSurfaceResidentPages?: number;

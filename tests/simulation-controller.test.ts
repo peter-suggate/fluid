@@ -47,3 +47,24 @@ test("editing rigid-body properties preserves its current position", () => {
     useRuntimeStore.getState().setRunState(originalRunState);
   }
 });
+
+test("the running clock prepares all elapsed fixed steps without frame caps", () => {
+  const originalScene = cloneScene(useSceneStore.getState().scene);
+  const originalRunState = useRuntimeStore.getState().runState;
+
+  try {
+    const scene = cloneScene(originalScene);
+    scene.rigidBodies = [];
+    scene.numerics.fixedDt_s = 0.004;
+    simulation.reset(scene);
+    useRuntimeStore.getState().setRunState("running");
+
+    simulation.tick(1_000);
+    simulation.tick(1_100);
+
+    assert.ok(Math.abs(simulation.time() - 0.1) < 1e-9, "100 ms of wall time should prepare 25 fixed steps");
+  } finally {
+    simulation.reset(originalScene);
+    useRuntimeStore.getState().setRunState(originalRunState);
+  }
+});

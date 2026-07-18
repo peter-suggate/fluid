@@ -15,6 +15,69 @@ export interface ScenePreset {
   background: EnvironmentId;
 }
 
+/** World-space centre of the single seeded 8-cubed fluid brick (the -x/-z quadrant). */
+export const BRICK_QUAD_DAM_SEED_M = { x: -0.2, y: 0.2, z: -0.2 };
+
+/**
+ * A tank sized so the finest solver grid is exactly 16x8x16 cells: a 2x2 x/z
+ * arrangement of 8-cubed fluid bricks at one brick of height. Water starts as
+ * a full-height column filling exactly one brick quadrant and dam-breaks
+ * across the brick boundaries into the other three, which makes it the
+ * minimal watchable scenario for brick residency activation, the sparse brick
+ * atlas, and seam quality.
+ */
+export function createBrickQuadDamBreakScene(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = "brick-quad-dam-break";
+  scene.rigidBodies = [];
+  scene.container = { ...scene.container, width_m: 0.8, height_m: 0.4, depth_m: 0.8, fillFraction: 0.25, top: "open", fluidWallMode: "no-slip" };
+  scene.fluid.initialCondition = "dam-break";
+  scene.fluid.initialBrickSeeds_m = [{ ...BRICK_QUAD_DAM_SEED_M }];
+  delete scene.fluid.inflow;
+  // 256 columns over the 0.8 m square footprint give 16x16 columns of 0.05 m
+  // cells; the 0.4 m height then yields exactly 8 fine layers (one brick).
+  scene.numerics.surfaceColumnsOverride = 256;
+  return scene;
+}
+
+/**
+ * A wide ocean tank sized so the finest solver grid is exactly 192x96x64
+ * cells of 0.025 m (24x12x8 fluid bricks). The pool fills to 72 cells
+ * (1.8 m); a 2x1x8-brick slab of extra water (0.4 m wide, 0.2 m tall, full
+ * depth extent) rests on the surface along the -x wall. Releasing it launches
+ * a long gravity wave (~sqrt(gH) = 4.2 m/s) that crosses the tank in ~1.1 s
+ * and reflects. The calm deep interior is exactly what large octree leaves
+ * coarsen best: below the graded surface band the water collapses into
+ * 16-cubed and 32-cubed pressure cells when the octree method's maximum leaf
+ * is raised to 32.
+ */
+export function createOceanSeicheScene(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = "ocean-seiche";
+  scene.rigidBodies = [];
+  scene.container = { ...scene.container, width_m: 4.8, height_m: 2.4, depth_m: 1.6, fillFraction: 0.75, top: "open", fluidWallMode: "no-slip" };
+  scene.fluid.initialCondition = "tank-fill";
+  // A long gravity wave has no meaningful capillary scale; keep the scene in
+  // the same physical scope as the deep-water A/B preset.
+  scene.fluid.surfaceTension_N_m = 0;
+  delete scene.fluid.inflow;
+  // 12288 columns over the 4.8 x 1.6 m footprint give 192x64 columns of
+  // 0.025 m cells; the 2.4 m height then yields exactly 96 fine layers.
+  scene.numerics.surfaceColumnsOverride = 12288;
+  // The raised slab: brick tiers x {0,1}, y tier 9 (cells 72..79 — directly
+  // on the 72-cell pool surface), and every z tier. Seeds are the world-space
+  // centres of those 8-cubed bricks at the exact grid above.
+  const h = 0.025, brick = 8 * h;
+  const seeds: { x: number; y: number; z: number }[] = [];
+  for (let zTier = 0; zTier < 8; zTier += 1) {
+    const z = -0.8 + (zTier + 0.5) * brick;
+    seeds.push({ x: -2.4 + 0.5 * brick, y: 9.5 * brick, z }, { x: -2.4 + 1.5 * brick, y: 9.5 * brick, z });
+  }
+  scene.fluid.initialBrickSeeds_m = seeds;
+  scene.fluid.initialBrickSeedsAdditive = true;
+  return scene;
+}
+
 const paperCamera: Partial<CameraState> = { distance_m: 2.45, target_m: { x: 0, y: 0.42, z: 0 } };
 // Low enough that the pond reads as inset into the lawn (banks occlude the
 // far waterline) while the whole garden still fits the frame.
@@ -135,6 +198,24 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     background: "night-lab",
     create: () => createPaperScenario("sphere-jet"),
     camera: paperCamera
+  },
+  {
+    id: "brick-quad-dam-break",
+    name: "Brick quad · dam break",
+    group: "Comparisons",
+    description: "A 2x2 four-brick tank: one brick quadrant of water releases and crosses every brick boundary, exercising cross-brick transport, residency activation, and seam quality.",
+    background: "default",
+    create: createBrickQuadDamBreakScene,
+    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.2, z: 0 } }
+  },
+  {
+    id: "ocean-seiche",
+    name: "Ocean · rolling wave",
+    group: "Comparisons",
+    description: "A wide 4.8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. With the octree method, set Maximum leaf to 32³ to watch the deep interior coarsen into 16³/32³ pressure cells.",
+    background: "research-station",
+    create: createOceanSeicheScene,
+    camera: { azimuth_rad: 0.35, elevation_rad: 0.32, distance_m: 7.0, target_m: { x: 0, y: 1.1, z: 0 } }
   },
   {
     id: "deep-water-ab",

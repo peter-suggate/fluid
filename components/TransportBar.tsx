@@ -41,26 +41,26 @@ export function TransportBar() {
   const recording = useRecordingStore((state) => state.recording);
   const fileRef = useRef<HTMLInputElement>(null);
   const lagged = simulation.backend === "webgpu" && gpuLag !== undefined && gpuLag > 2 * maxDt;
-  const baseRate_hz = 1 / fixedDt;
-  const gpuCpuMultiplier = Math.max(1, Math.round(maxDt / fixedDt));
+  const fixedRate_hz = 1 / fixedDt;
+  const gpuStepRate_hz = 1 / maxDt;
   const commitNumerics = (patch: Parameters<typeof patchNumerics>[0]) => {
     const wasRunning = useRuntimeStore.getState().runState === "running";
     patchNumerics(patch);
     simulation.applyAndResetFluid();
     if (wasRunning) useRuntimeStore.getState().setRunState("running");
   };
-  const commitBaseRate = (raw_hz: number) => {
+  const commitFixedRate = (raw_hz: number) => {
     const rate_hz = Math.max(1, raw_hz);
     const seconds = 1 / rate_hz;
     if (!Number.isFinite(seconds)) return;
     if (Math.abs(seconds - fixedDt) < 1e-9) return;
-    commitNumerics({ fixedDt_s: seconds, maxDt_s: seconds * gpuCpuMultiplier });
+    commitNumerics({ fixedDt_s: seconds, maxDt_s: Math.max(maxDt, seconds) });
   };
-  const commitMultiplier = (rawMultiplier: number) => {
-    const multiplier = Math.max(1, Math.round(rawMultiplier));
-    if (!Number.isFinite(multiplier)) return;
-    if (Math.abs(multiplier - gpuCpuMultiplier) < 1e-9) return;
-    commitNumerics({ maxDt_s: fixedDt * multiplier });
+  const commitGpuStepRate = (raw_hz: number) => {
+    const rate_hz = Math.max(1, raw_hz);
+    const seconds = Math.max(fixedDt, 1 / rate_hz);
+    if (!Number.isFinite(seconds) || Math.abs(seconds - maxDt) < 1e-9) return;
+    commitNumerics({ maxDt_s: seconds });
   };
   const importScene = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -95,13 +95,13 @@ export function TransportBar() {
       <div className="time-readout">
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
         {simRate !== null && <small className="sim-rate" title="Simulated seconds per wall-clock second">×{simRate.toFixed(2)}</small>}
-        {lagged && <small className="lag-chip" title="The GPU solve is behind the transport clock. Tall-cell and octree scenes batch up to one display interval; octree rigid impulses are applied through a bounded frame-lagged exchange. RESET to resynchronize.">GPU −{gpuLag.toFixed(1)} s</small>}
+        {lagged && <small className="lag-chip" title="The GPU solve is behind the desired simulation clock. Prepared advances are queued continuously; RESET to resynchronize.">GPU −{gpuLag.toFixed(1)} s</small>}
         {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
         <div className="transport-timing" aria-label="Simulation timestep controls">
-          <TimingSlider key={`base-${fixedDt}`} label="BASE RATE" unit="Hz" value={baseRate_hz} min={Math.min(30, baseRate_hz)} max={Math.max(2000, baseRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms`} onCommit={commitBaseRate} />
-          <TimingSlider key={`ratio-${fixedDt}-${maxDt}`} label="GPU / CPU" unit="×" value={gpuCpuMultiplier} min={1} max={Math.max(32, gpuCpuMultiplier)} step={1} integer detail={(value) => `GPU ${(fixedDt * value * 1000).toFixed(1)} ms`} onCommit={commitMultiplier} />
+          <TimingSlider key={`fixed-${fixedDt}`} label="FIXED STEP" unit="Hz" value={fixedRate_hz} min={Math.min(30, fixedRate_hz)} max={Math.max(2000, fixedRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms rigid`} onCommit={commitFixedRate} />
+          <TimingSlider key={`gpu-${fixedDt}-${maxDt}`} label="GPU STEP" unit="Hz" value={gpuStepRate_hz} min={1} max={fixedRate_hz} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms max`} onCommit={commitGpuStepRate} />
         </div>
-        <span className="continuous-run" title={`${(1000 / targetFps).toFixed(2)} ms presentation interval · ${(fixedDt * 1000).toFixed(2)} ms numerical substep`}>REALTIME ×1 · {targetFps} FPS</span>
+        <span className="continuous-run" title={`Desired simulation rate ×1 · present every ${(1000 / targetFps).toFixed(2)} ms · rigid/oracle step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>SIM ×1 · PRESENT {targetFps} FPS</span>
       </div>
       <div className="file-actions">
         <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{notice}</span>
