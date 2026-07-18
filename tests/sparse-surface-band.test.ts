@@ -137,6 +137,11 @@ test("raster extraction and solver-grid inspection consume the same live sparse 
   assert.match(water, /fn extractSparseMain/);
   assert.match(water, /dispatchWorkgroupsIndirect\(this\.sparseSurface\.activePages\.buffer/);
   assert.match(water, /sparsePayloadIndex/);
+  assert.match(water, /let xBases = array<i32, 2>\(i32\(q\.x \+ 1u\), 0\)/);
+  assert.match(water, /let yBases = array<i32, 2>\(i32\(q\.y \+ 1u\), 0\)/);
+  assert.match(water, /let zBases = array<i32, 2>\(i32\(q\.z \+ 1u\), 0\)/);
+  assert.match(water, /classifyCube\(vec3i\(xBases\[xIndex\], yBases\[yIndex\], zBases\[zIndex\]\)\)/,
+    "sparse extraction must include face, edge, floor-strip, and triple-corner cubes without duplicates");
   assert.match(grid, /fn sparseSurfaceCoreSample/);
   assert.match(grid, /abs\(sparseSurfacePhi\[payload\]\) <= 1\.5\*fineH/,
     "pink must be confined to the phi=0 shell rather than filling support pages");
@@ -146,8 +151,11 @@ test("raster extraction and solver-grid inspection consume the same live sparse 
     "a partial fine hierarchy must not be presented after allocator overflow");
   assert.match(grid, /fineColor=vec3f\(1\.0,0\.08,0\.55\)/);
   assert.match(water, /fn extractHybridCoarseMain/);
-  assert.match(water, /if \(sparsePayloadIndex\(fineCenter\) != SPARSE_INVALID\) \{ return; \}/,
-    "coarse cubes are replaced only inside resident detail support");
+  assert.match(water, /fn sparseCorePageAt/);
+  assert.match(water, /sparseStates\[pageIndex\] & SPARSE_CORE/,
+    "hybrid ownership must distinguish detail cores from their transition halos");
+  assert.match(water, /if \(sparseCorePageAt\(fineCenter\)\) \{ return; \}/,
+    "coarse cubes are replaced only inside detail cores, leaving a watertight overlap through support halos");
   assert.match(water, /this\.resetSurfaceWorklistPipeline/);
   assert.ok(water.indexOf("compute.setPipeline(this.polygonisePipeline)") < water.indexOf("compute.setPipeline(this.polygoniseSparsePipeline)"),
     "hybrid extraction emits the complete coarse level before fine patches");

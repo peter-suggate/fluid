@@ -1,10 +1,10 @@
 import type { SceneDescription } from "./model";
-import { damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
+import { combineInitialBrickWet, damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
 import { signedDistanceFromVolume } from "./quadtree-tall-cell-grid";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 import { WebGPUQuadtreeSurfaceState, type SurfaceInflowState } from "./webgpu-quadtree-builder";
 import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
-import { FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES, FLUID_BRICK_TOPOLOGY_DISPATCH_OFFSET_BYTES } from "./webgpu-fluid-brick-residency";
+import { FLUID_TILE_ACTIVE_DISPATCH_OFFSET_BYTES, FLUID_TILE_RETIRED_DISPATCH_OFFSET_BYTES } from "./webgpu-fluid-brick-residency";
 import {
   WebGPUSparseSurfaceBand,
   type SparseSurfaceBandGPUSource,
@@ -28,6 +28,10 @@ export interface OctreeProjectionOptions {
   sparseSurfaceBandCells?: number;
   /** Fraction of the logical fine-page lattice backed by physical slots. */
   sparseSurfacePageFraction?: number;
+  /** Brick-pooled phi/velocity atlas mirrored from the dense fields. */
+  brickAtlas?: boolean;
+  /** Velocity-swept brick residency support plus downstream activation. */
+  brickPreActivation?: boolean;
   jacobiRelaxation?: number;
   extrapolationSweeps?: number;
   /**
@@ -176,6 +180,7 @@ export class WebGPUOctreeProjection {
   private extrapolatePipeline!: GPUComputePipeline;
   private materializePipeline!: GPUComputePipeline;
   private readonly maxLeafSize: number;
+  private readonly topologyTileSize: number;
   private readonly adaptivity: number;
   private readonly interfaceRefinementBandCells: number;
   private readonly surfaceDetailStrength: number;
@@ -198,7 +203,7 @@ export class WebGPUOctreeProjection {
     deferPipelineCompilation = false
   ) {
     const count = dims.nx * dims.ny * dims.nz;
-    this.maxLeafSize = octreeLeafSize(options.maximumLeafSize ?? 8);
+    this.maxLeafSize = octreeLeafSize(options.maximumLeafSize ?? 16);
     this.adaptivity = Math.max(0, Math.min(1, options.adaptivity ?? 1));
     this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
     this.surfaceDetailStrength = Math.max(0, Math.min(1, options.surfaceDetailStrength ?? 0));
@@ -247,24 +252,40 @@ export class WebGPUOctreeProjection {
     // The rebuild worklist must cover every leaf that refinement or subsequent
     // 2:1 grading can touch. A narrower residency halo leaves initially fine
     // air bricks permanently outside both the active and retired streams.
+    // Expressed in topology tiles: a leaf lies inside exactly one tile, and a
+    // tile activates when ANY child brick is resident, so it suffices that
+    // some cell of every refinement- or grading-reachable leaf sits inside a
+    // resident brick. The grading chain from the interface sums the smaller
+    // leaf sizes (2+4+...+maxLeaf/2 < maxLeaf), so band + (maxLeaf-1) covers
+    // the nearest cell of the farthest leaf the 2:1 cascade can split.
     const topologyHaloCells = this.interfaceRefinementBandCells
       + 8 * this.surfaceDetailStrength
       + (this.maxLeafSize - 1);
+    // Topology work is tile-atomic: max(brick, maximumLeaf) cells per axis,
+    // so leaf-in-tile holds by construction for every legal size pair and the
+    // rebuild never needs a full-domain fallback after initialization.
+    this.topologyTileSize = Math.max(8, this.maxLeafSize);
     this.sparseBrickWorld = new OctreeSparseBrickWorld(device, scene, [dims.nx, dims.ny, dims.nz], {
       brickSize: 8,
-      haloCells: topologyHaloCells
+      haloCells: topologyHaloCells,
+      brickAtlas: options.brickAtlas ?? true,
+      brickPreActivation: options.brickPreActivation ?? true,
+      topologyTileBricks: this.topologyTileSize / 8
     });
     this.levelSetTexture = this.surfaceState.texture;
-    this.topology = device.createBuffer({ label: "Octree dense owner map", size: Math.max(8, count * 8), usage: GPUBufferUsage.STORAGE });
-    this.pressureA = device.createBuffer({ label: "Octree leaf pressure A", size: Math.max(4, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.pressureB = device.createBuffer({ label: "Octree leaf pressure B", size: Math.max(4, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    // COPY_SRC on the owner map and pressure iterates exists solely for test
+    // readbacks (leaf-size census, 2:1 balance, and finiteness audits); the
+    // simulation itself never copies them out.
+    this.topology = device.createBuffer({ label: "Octree dense owner map", size: Math.max(8, count * 8), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    this.pressureA = device.createBuffer({ label: "Octree leaf pressure A", size: Math.max(4, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.pressureB = device.createBuffer({ label: "Octree leaf pressure B", size: Math.max(4, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     const compactBuffers = this.leafSolver !== "dense";
     // The scan totals are dead after leaf emission. The tail then doubles as
     // twelve resident rank-six generalized body-response vectors, avoiding a
     // ninth storage binding on minimum-limit WebGPU devices.
     this.compaction = device.createBuffer({
       label: "Octree leaf compaction, body coupling, and resident topology worklist",
-      size: Math.max(32, 4 * (8 + 2 * this.linearBlocks + 12 * 8), this.sparseBrickWorld.residency.worklistByteLength),
+      size: Math.max(32, 4 * (8 + 2 * this.linearBlocks + 12 * 8), this.sparseBrickWorld.residency.tileWorklistByteLength),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
     });
     this.leafHeaders = device.createBuffer({ label: "Octree leaf row headers", size: compactBuffers ? Math.max(32, count * 32) : 32, usage: GPUBufferUsage.STORAGE });
@@ -510,22 +531,24 @@ export class WebGPUOctreeProjection {
 
   encodeInlineRebuild(encoder: GPUCommandEncoder) {
     // The first rebuild initializes every owner and solid cell. Thereafter the
-    // previous publication's GPU-owned core/halo list is the rebuild domain.
-    // Leaves larger than one residency brick retain the full-domain path: a
-    // partial reset could otherwise omit the true origin of a cross-brick leaf.
-    const active = this.topologyWorklistReady && this.maxLeafSize <= this.sparseBrickWorld.residency.brickSize;
+    // previous publication's GPU-owned topology-tile list is the rebuild
+    // domain: tiles span max(brick, maximumLeaf) cells, so every leaf lies
+    // inside exactly one tile and partial rebuilds can never split a leaf.
+    const active = this.topologyWorklistReady;
     if (active) {
       encoder.copyBufferToBuffer(
-        this.sparseBrickWorld.residency.worklist, 0,
+        this.sparseBrickWorld.residency.tileWorklist, 0,
         this.compaction, 0,
-        this.sparseBrickWorld.residency.worklistByteLength
+        this.sparseBrickWorld.residency.tileWorklistByteLength
       );
+      // Dawn forbids one buffer being both writable storage and INDIRECT in a
+      // pass; the dispatch args are staged into the dedicated indirect buffer.
       encoder.copyBufferToBuffer(
-        this.sparseBrickWorld.residency.worklist, FLUID_BRICK_TOPOLOGY_DISPATCH_OFFSET_BYTES,
+        this.sparseBrickWorld.residency.tileWorklist, FLUID_TILE_ACTIVE_DISPATCH_OFFSET_BYTES,
         this.solveDispatch, 0, 12
       );
       encoder.copyBufferToBuffer(
-        this.sparseBrickWorld.residency.worklist, FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES,
+        this.sparseBrickWorld.residency.tileWorklist, FLUID_TILE_RETIRED_DISPATCH_OFFSET_BYTES,
         this.solveDispatch, 16, 12
       );
     }
@@ -721,16 +744,17 @@ export class WebGPUOctreeProjection {
   get requiresFineSurfaceTimestep() { return this.sparseSurfaceBand?.requiresFineTimestep ?? false; }
   get fluidBrickCapacity() { return this.sparseBrickWorld.residency.capacity; }
   readFluidBrickResidencyStats() { return this.sparseBrickWorld.readResidencyStats(); }
+  readFluidBrickAtlasStats() { return this.sparseBrickWorld.readAtlasStats(); }
   readSparseSurfaceBandStats() { return this.sparseSurfaceBand?.readStats(); }
   encodeSparseBrickWorld(encoder: GPUCommandEncoder, timings: {
     residency?: GPUComputePassTimestampWrites;
     publication?: GPUComputePassTimestampWrites;
-  } = {}) {
+  } = {}, dt_s = 0) {
     this.sparseBrickWorld.encode(encoder, {
       levelSet: this.levelSetTexture,
       velocity: this.resources.velocityOut,
       solidCells: this.solidCells
-    }, timings);
+    }, timings, dt_s);
     this.topologyWorklistReady = true;
   }
 
@@ -756,9 +780,9 @@ function initialOctreeLevelSet(
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
     const aboveGround = (y + 0.5) * cell.y > terrainHeights[x + nx * z];
     const brickWet = initialFluidBrickContainsCell(scene, x, y, z, [nx, ny, nz]);
-    const wet = aboveGround && (brickWet ?? (scene.fluid.initialCondition === "dam-break"
+    const wet = aboveGround && combineInitialBrickWet(scene, brickWet, scene.fluid.initialCondition === "dam-break"
       ? (x + 0.5) / nx <= dam.width && (y + 0.5) / ny <= dam.height && (z + 0.5) / nz <= dam.depth
-      : (y + 0.5) / ny <= scene.container.fillFraction));
+      : (y + 0.5) / ny <= scene.container.fillFraction);
     alpha[x + nx * (y + ny * z)] = wet ? 1 : 0;
   }
   return signedDistanceFromVolume(alpha, nx, ny, nz, cell);
@@ -877,39 +901,43 @@ fn constrainedFaceVelocity(faceCell: vec3i, axis: u32, solid: SolidCell) -> f32 
   return open * component(velocityAt(faceCell), axis) + solid.fraction * component(solidVelocity(solid, faceWorld(faceCell, axis)), axis);
 }
 
-// Fluid residency worklist header occupies words 0..15. Each active pair is
-// (solver brick index, sparse scene leaf index). One 8^3 brick maps to eight
-// 4^3 topology workgroups, preserving the existing cell-local kernels.
-fn residentTopologyCell(workgroup: vec3u, local: vec3u) -> vec3u {
-  let linearWorkgroup = workgroup.x + workgroup.y * compaction[12];
-  let streamIndex = linearWorkgroup / 8u;
-  let octant = linearWorkgroup % 8u;
-  let brickIndex = compaction[16u + streamIndex * 2u];
-  let bx = (dims().x + 7u) / 8u;
-  let by = (dims().y + 7u) / 8u;
-  let brick = vec3u(brickIndex % bx, (brickIndex / bx) % by, brickIndex / (bx * by));
-  let sub = vec3u(octant & 1u, (octant >> 1u) & 1u, (octant >> 2u) & 1u);
-  return brick * 8u + sub * 4u + local;
+// Topology-tile worklist header occupies words 0..15 of the copied buffer:
+// word 0 the active tile count, word 1 the active dispatch x width, word 4
+// and word 5 the retired equivalents. A tile spans max(8, maximumLeaf) cells
+// per axis so every dyadic pressure leaf lies inside exactly one tile; each
+// tile decomposes into (tileSize/4)^3 of the existing 4^3 cell workgroups.
+fn topologyTileSize() -> u32 { return max(8u, params.dimsMax.w); }
+fn topologyTileCell(workgroup: vec3u, local: vec3u, countWord: u32, widthWord: u32, indexBase: u32) -> vec3u {
+  let tileSize = topologyTileSize();
+  let blocks = tileSize / 4u;
+  let groupsPerTile = blocks * blocks * blocks;
+  let linearWorkgroup = workgroup.x + workgroup.y * compaction[widthWord];
+  let streamIndex = linearWorkgroup / groupsPerTile;
+  // The 2D-tiled indirect dispatch may round up; out-of-list workgroups map
+  // to an out-of-domain cell that every kernel's bounds guard rejects.
+  if (streamIndex >= compaction[countWord]) { return vec3u(0xffffffffu); }
+  let sub = linearWorkgroup % groupsPerTile;
+  let tx = (dims().x + tileSize - 1u) / tileSize;
+  let ty = (dims().y + tileSize - 1u) / tileSize;
+  let tileIndex = compaction[indexBase + streamIndex];
+  let tile = vec3u(tileIndex % tx, (tileIndex / tx) % ty, tileIndex / (tx * ty));
+  let subCoord = vec3u(sub % blocks, (sub / blocks) % blocks, sub / (blocks * blocks));
+  return tile * tileSize + subCoord * 4u + local;
 }
 
-// Retired work uses the existing 256-thread sparse-payload dispatch: an 8^3
-// brick contributes two workgroups. Each 4^3 topology workgroup therefore
-// visits four octants serially. Resetting and rebuilding these just-retired
-// bricks prevents old interface leaves from fossilizing outside residency.
-fn retiredTopologyCell(workgroup: vec3u, local: vec3u, quarter: u32) -> vec3u {
-  let linearWorkgroup = workgroup.x + workgroup.y * compaction[5];
-  let retiredSlot = linearWorkgroup / 2u;
-  let half = linearWorkgroup % 2u;
-  let bx = (dims().x + 7u) / 8u;
-  let by = (dims().y + 7u) / 8u;
-  let bz = (dims().z + 7u) / 8u;
-  let capacity = bx * by * bz;
-  let retiredBase = 16u + capacity * 2u;
-  let brickIndex = compaction[retiredBase + retiredSlot * 2u];
-  let brick = vec3u(brickIndex % bx, (brickIndex / bx) % by, brickIndex / (bx * by));
-  let octant = half * 4u + quarter;
-  let sub = vec3u(octant & 1u, (octant >> 1u) & 1u, (octant >> 2u) & 1u);
-  return brick * 8u + sub * 4u + local;
+fn residentTopologyCell(workgroup: vec3u, local: vec3u) -> vec3u {
+  return topologyTileCell(workgroup, local, 0u, 1u, 16u);
+}
+
+// Retired tiles hold just-retired bricks with no resident sibling. Resetting
+// and rebuilding them prevents old interface leaves from fossilizing outside
+// residency; their indices follow the active capacity in the copied list.
+fn retiredTopologyCell(workgroup: vec3u, local: vec3u) -> vec3u {
+  let tileSize = topologyTileSize();
+  let tx = (dims().x + tileSize - 1u) / tileSize;
+  let ty = (dims().y + tileSize - 1u) / tileSize;
+  let tz = (dims().z + tileSize - 1u) / tileSize;
+  return topologyTileCell(workgroup, local, 4u, 5u, 16u + tx * ty * tz);
 }
 
 fn rasterizeSolidsAt(gid: vec3u) {
@@ -936,7 +964,7 @@ fn rasterizeSolidsActive(@builtin(workgroup_id) wid: vec3u, @builtin(local_invoc
 
 @compute @workgroup_size(4,4,4)
 fn rasterizeSolidsRetired(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
-  for (var quarter = 0u; quarter < 4u; quarter += 1u) { rasterizeSolidsAt(retiredTopologyCell(wid, lid, quarter)); }
+  rasterizeSolidsAt(retiredTopologyCell(wid, lid));
 }
 
 fn resetTopologyAt(gid: vec3u) {
@@ -960,7 +988,7 @@ fn resetTopologyActive(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocat
 
 @compute @workgroup_size(4,4,4)
 fn resetTopologyRetired(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
-  for (var quarter = 0u; quarter < 4u; quarter += 1u) { resetTopologyAt(retiredTopologyCell(wid, lid, quarter)); }
+  resetTopologyAt(retiredTopologyCell(wid, lid));
 }
 
 fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
@@ -1028,7 +1056,7 @@ fn refineTopologyActive(@builtin(workgroup_id) wid: vec3u, @builtin(local_invoca
 
 @compute @workgroup_size(4,4,4)
 fn refineTopologyRetired(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
-  for (var quarter = 0u; quarter < 4u; quarter += 1u) { refineTopologyAt(retiredTopologyCell(wid, lid, quarter)); }
+  refineTopologyAt(retiredTopologyCell(wid, lid));
 }
 
 fn neighborTooFine(origin: vec3u, size: u32) -> bool {
@@ -1064,7 +1092,7 @@ fn balanceTopologyActive(@builtin(workgroup_id) wid: vec3u, @builtin(local_invoc
 
 @compute @workgroup_size(4,4,4)
 fn balanceTopologyRetired(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
-  for (var quarter = 0u; quarter < 4u; quarter += 1u) { balanceTopologyAt(retiredTopologyCell(wid, lid, quarter)); }
+  balanceTopologyAt(retiredTopologyCell(wid, lid));
 }
 
 fn pressureOf(owner: Owner) -> f32 { return pressureIn[index(unpackOrigin(owner.packedOrigin))]; }

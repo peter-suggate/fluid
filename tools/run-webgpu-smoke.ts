@@ -14,7 +14,7 @@ import { summarizeDriftOscillation } from "../lib/tall-cell-diagnostics";
 import { VOXEL_MATERIAL_IDS, voxelMaterial } from "../lib/voxel-scene";
 import { SPARSE_VOXEL_DEBUG_RECORD_STRIDE, SparseVoxelDebugRenderer, type SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
 import { RasterWaterPipeline } from "../lib/webgpu-water-pipeline";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "../lib/webgpu-octree-sparse-bricks";
 import { environmentIndex } from "../lib/environments";
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "../lib/terrain";
@@ -81,6 +81,8 @@ const octreeAdaptivityOverride = process.env.FLUID_OCTREE_ADAPTIVITY === undefin
 const octreeLeafSolverOverride = process.env.FLUID_OCTREE_LEAF_SOLVER;
 if (octreeLeafSolverOverride !== undefined && !["auto", "dense", "compact", "chebyshev", "megakernel"].includes(octreeLeafSolverOverride)) throw new Error("FLUID_OCTREE_LEAF_SOLVER must be auto, dense, compact, chebyshev, or megakernel");
 const octreeWarmStartOverride = process.env.FLUID_OCTREE_WARM_START === undefined ? undefined : process.env.FLUID_OCTREE_WARM_START !== "0";
+const brickAtlasOverride = process.env.FLUID_BRICK_ATLAS === undefined ? undefined : process.env.FLUID_BRICK_ATLAS !== "0";
+const brickPreActivationOverride = process.env.FLUID_BRICK_PRE_ACTIVATION === undefined ? undefined : process.env.FLUID_BRICK_PRE_ACTIVATION !== "0";
 const quadtreeStaleStepsOverride = process.env.FLUID_QUADTREE_STALE_STEPS === undefined ? undefined : Number(process.env.FLUID_QUADTREE_STALE_STEPS);
 const quadtreeInlineRebuildOverride = process.env.FLUID_QUADTREE_INLINE === undefined ? undefined : process.env.FLUID_QUADTREE_INLINE !== "0";
 const quadtreePreconditionerOverride = process.env.FLUID_QUADTREE_PRECONDITIONER;
@@ -857,7 +859,10 @@ async function runGPU(
   // node the tall-cell solver's first-step projection pass does not execute
   // when timestamp writes are attached (see docs/TALL_CELL_STABILITY.md), so
   // correctness audits run without GPU stage timings.
-  const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") && process.env.FLUID_DISABLE_TIMESTAMPS !== "1" ? ["timestamp-query"] : [];
+  const requiredFeatures: GPUFeatureName[] = [
+    ...(adapter.features.has("timestamp-query") && process.env.FLUID_DISABLE_TIMESTAMPS !== "1" ? ["timestamp-query" as GPUFeatureName] : []),
+    ...optionalFluidDeviceFeatures(adapter.features),
+  ];
   const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
   const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
   let lost: GPUDeviceLostInfo | undefined;
@@ -891,10 +896,16 @@ async function runGPU(
   if (method.id === "quadtree-tall-cell" && deepSpeedGradientOverride !== undefined) values.deepSpeedGradientScale = deepSpeedGradientOverride;
   if (method.id === "quadtree-tall-cell" && rebuildTopologyOverride !== undefined) values.rebuildTopology = rebuildTopologyOverride;
   if (method.id === "quadtree-tall-cell" && maximumLeafSizeOverride !== undefined) values.maximumLeafSize = maximumLeafSizeOverride;
+  // The ocean scene exists to demonstrate 32-cubed coarse leaves in deep calm
+  // water; scenes cannot carry method parameters, so the harness requests the
+  // raised cap here. FLUID_MAXIMUM_LEAF_SIZE still wins below for A/B runs.
+  if (method.id === "octree" && scenarioId === "ocean-seiche") values.maximumLeafSize = 32;
   if (method.id === "octree" && maximumLeafSizeOverride !== undefined) values.maximumLeafSize = maximumLeafSizeOverride;
   if (method.id === "octree" && octreeAdaptivityOverride !== undefined) values.adaptivity = octreeAdaptivityOverride;
   if (method.id === "octree" && octreeLeafSolverOverride !== undefined) values.leafSolver = octreeLeafSolverOverride;
   if (method.id === "octree" && octreeWarmStartOverride !== undefined) values.pressureWarmStart = octreeWarmStartOverride ? "on" : "off";
+  if (method.id === "octree" && brickAtlasOverride !== undefined) values.brickAtlas = brickAtlasOverride ? "on" : "off";
+  if (method.id === "octree" && brickPreActivationOverride !== undefined) values.brickPreActivation = brickPreActivationOverride ? "on" : "off";
   if (method.id === "quadtree-tall-cell" && quadtreePreconditionerOverride !== undefined) values.preconditioner = quadtreePreconditionerOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeStaleStepsOverride !== undefined) values.topologyStaleSteps = quadtreeStaleStepsOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeInlineRebuildOverride !== undefined) values.inlineRebuild = quadtreeInlineRebuildOverride;
@@ -1471,6 +1482,97 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
           fail(comparison.wetIntersectionOverUnion >= 0.60, `octree dam-break wet-IoU ${comparison.wetIntersectionOverUnion} at t=${checkpoint.time_s.toFixed(2)} s is below 0.60`);
           fail(comparison.centroidDistanceCells === null || comparison.centroidDistanceCells <= 6, `octree dam-break centroid differs from tall-cell by ${comparison.centroidDistanceCells} cells at t=${checkpoint.time_s.toFixed(2)} s`);
         }
+      }
+    }
+  }
+  if (scenarioId === "brick-quad-dam-break") {
+    // The scene's whole point is cross-brick transport: the domain must be
+    // exactly four 8-cubed fluid bricks (2x2 in x/z at one brick of height),
+    // and the single seeded quadrant must wet all four brick columns.
+    for (const result of results) {
+      fail(result.grid[0] === 16 && result.grid[1] === 8 && result.grid[2] === 16,
+        `${result.method} grid ${result.grid.join("x")} is not the intended 16x8x16 four-brick domain`);
+      const [nx, ny, nz] = result.grid;
+      const wetBrickColumns = (field: Float32Array) => {
+        const wet = new Set<string>();
+        for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+          if (field[x + nx * (y + ny * z)] >= 0.5) wet.add(`${Math.floor(x / 8)},${Math.floor(z / 8)}`);
+        }
+        return wet;
+      };
+      if (result.checkpoints.length > 0) {
+        const first = result.checkpoints[0];
+        fail(wetBrickColumns(first.field).size >= 2,
+          `${result.method} water had not crossed a brick boundary by t=${first.time_s.toFixed(2)} s`);
+        const everWet = new Set<string>();
+        for (const checkpoint of result.checkpoints) for (const key of wetBrickColumns(checkpoint.field)) everWet.add(key);
+        fail(everWet.size === 4, `${result.method} wet only ${everWet.size} of 4 brick columns (${[...everWet].sort().join(" | ")})`);
+        fail(result.checkpoints.some((checkpoint) => wetBrickColumns(checkpoint.field).has("1,1")),
+          `${result.method} water never reached the far (+x/+z) brick quadrant opposite the seed`);
+      }
+      console.log(JSON.stringify({
+        scenario: scenarioId, method: result.method, phase: "brick-quad-coverage", front_m: result.info.front_m,
+        checkpoints: result.checkpoints.map((checkpoint) => ({ time_s: checkpoint.time_s, wetBrickColumns: [...wetBrickColumns(checkpoint.field)].sort() }))
+      }));
+    }
+    if (octree && sparseStatsRequested) {
+      // The full-height column places the initial phi zero crossing on the
+      // brick faces, so the seeded brick starts as a surface-band (halo)
+      // residency rather than a core one; what matters is that the band is
+      // resident from the start and that by the end the spread interface is a
+      // core crossing in more than one brick.
+      fail((octree.initialFluidBrickStats?.resident ?? 0) >= 1,
+        `brick-quad dam break started with ${octree.initialFluidBrickStats?.resident ?? "unknown"} resident fluid bricks`);
+      fail((octree.sparseVoxelStats?.fluidBrickResidentCount ?? 0) > 1,
+        `brick-quad dam break ended with ${octree.sparseVoxelStats?.fluidBrickResidentCount ?? "unknown"} resident fluid bricks; cross-brick flow must keep more than one resident`);
+      fail((octree.sparseVoxelStats?.fluidBrickCoreCount ?? 0) >= 2,
+        `brick-quad dam break ended with ${octree.sparseVoxelStats?.fluidBrickCoreCount ?? "unknown"} core fluid bricks; the spread interface must cross more than one brick`);
+    }
+  }
+  if (scenarioId === "ocean-seiche") {
+    // The scene's whole point is a long gravity wave traversing a wide calm
+    // tank: verify the exact intended grid and that the surface disturbance
+    // released at the -x wall visibly crosses into the far half of the tank,
+    // and log the surface-height profile time series as propagation evidence.
+    const scene = createSmokeScenario(scenarioId).scene;
+    const cellHeight_m = scene.container.height_m;
+    for (const result of results) {
+      fail(result.grid[0] === 192 && result.grid[1] === 96 && result.grid[2] === 64,
+        `${result.method} grid ${result.grid.join("x")} is not the intended 192x96x64 ocean domain`);
+      const [nx, ny, nz] = result.grid;
+      const columnHeights = (field: Float32Array) => {
+        const heights = new Float64Array(nx);
+        for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+          heights[x] += field[x + nx * (y + ny * z)];
+        }
+        for (let x = 0; x < nx; x += 1) heights[x] /= nz;
+        return heights;
+      };
+      const xWorld = (x: number) => -0.5 * scene.container.width_m + (x + 0.5) * scene.container.width_m / nx;
+      const stationCount = 12;
+      const stations = Array.from({ length: stationCount }, (_, i) => Math.min(nx - 1, Math.round((i + 0.5) * nx / stationCount)));
+      const baselineHeight_cells = scene.container.fillFraction * ny;
+      let crestReach_m = -Infinity;
+      const series = result.checkpoints.map((checkpoint) => {
+        const heights = columnHeights(checkpoint.field);
+        let crestX = 0;
+        for (let x = 1; x < nx; x += 1) if (heights[x] > heights[crestX]) crestX = x;
+        crestReach_m = Math.max(crestReach_m, xWorld(crestX));
+        return {
+          time_s: checkpoint.time_s,
+          crestX_m: Number(xWorld(crestX).toFixed(3)),
+          crestHeight_cells: Number(heights[crestX].toFixed(2)),
+          stationHeights_cells: stations.map((x) => Number(heights[x].toFixed(2)))
+        };
+      });
+      console.log(JSON.stringify({
+        scenario: scenarioId, method: result.method, phase: "ocean-wave-profile",
+        baselineHeight_cells, cellHeight_m: cellHeight_m / ny,
+        stationX_m: stations.map((x) => Number(xWorld(x).toFixed(3))), checkpoints: series
+      }));
+      if (result.checkpoints.length >= 3) {
+        fail(crestReach_m > 0.25 * scene.container.width_m / 2,
+          `${result.method} surface crest never crossed into the far half of the tank (max crest x ${crestReach_m.toFixed(3)} m)`);
       }
     }
   }

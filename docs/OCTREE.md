@@ -10,7 +10,9 @@ The adaptive part is the pressure topology and projection.
 Each finest-grid voxel stores an eight-byte owner record:
 
 - the packed `(x, y, z)` origin of its pressure leaf;
-- the dyadic leaf size (`1`, `2`, `4`, or `8`).
+- the dyadic leaf size (`1` up to the configured maximum of `2`-`32`; the
+  method default is `16`, and deep calm scenes such as the ocean tank opt into
+  `32`).
 
 Only the owner-origin entry carries a pressure value. The dense owner map makes
 neighbor lookup constant-time and avoids sparse topology allocation and
@@ -229,10 +231,10 @@ The implementation is therefore a working GPU-first baseline, not yet a claim
 of cell-for-cell parity with the quadtree tall-cell solver. The former compacted
 Jacobi ladder was dispatch-overhead-bound (~17 us per indirect sweep); the
 Chebyshev path removes three quarters of those synchronization points without
-collapsing work onto one GPU core. Runtime scheduling queues one presentation
-quantum at a time with a second bounded batch allowed in flight, including
-frame-lagged rigid scenes (five solves per batch and ten advances maximum at
-the default 4 ms clock).
+collapsing work onto one GPU core. Runtime scheduling retains every advance owed
+by the simulation clock, but feeds it through a dense completion-gated queue
+instead of placing the entire debt ahead of presentation. Frame-lagged rigid
+scenes use the same continuously queued path.
 Queue-completion promises, timestamp/statistics maps, and optional diagnostics
 readbacks are asynchronous and are never consumed by the step encoder. Rigid
 exchange uses reusable staging slots so overlapping maps preserve every

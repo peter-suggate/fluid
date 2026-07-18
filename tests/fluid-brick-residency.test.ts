@@ -82,7 +82,6 @@ test("GPU residency builds active and retired indirect worklists without readbac
   assert.match(fluidBrickResidencyShader, /resident \* voxelsPerBrick/);
   assert.match(fluidBrickResidencyShader, /let activeDispatch = tiledDispatch/);
   assert.match(fluidBrickResidencyShader, /atomicStore\(&worklist\[2\], activeDispatch\.y\)/);
-  assert.match(fluidBrickResidencyShader, /let topologyDispatch = tiledDispatch/);
   assert.doesNotMatch(fluidBrickResidencyShader, /resident \* topologyGroups, 65535u/);
   assert.doesNotMatch(fluidBrickResidencyShader, /mapAsync|getMappedRange/);
   assert.match(sparseBrickDenseFieldShader, /usesActiveWorklist\(\)/);
@@ -90,12 +89,26 @@ test("GPU residency builds active and retired indirect worklists without readbac
   assert.match(sparseBrickDenseFieldShader, /clearRetiredDenseFields/);
 });
 
-test("pressure topology rebuild consumes the shared resident-brick worklist indirectly", () => {
+test("GPU residency derives a topology-tile worklist so leaves never straddle a rebuild boundary", () => {
+  assert.match(fluidBrickResidencyShader, /fn emitTopologyTiles/);
+  assert.match(fluidBrickResidencyShader, /atomicAdd\(&tileWorklist\[0\], 1u\)/);
+  assert.match(fluidBrickResidencyShader, /atomicAdd\(&tileWorklist\[4\], 1u\)/);
+  assert.match(fluidBrickResidencyShader, /let tileDispatch = tiledDispatch\(activeTiles \* groupsPerTile\)/);
+  assert.match(fluidBrickResidencyShader, /let retiredTileDispatch = tiledDispatch\(retiredTiles \* groupsPerTile\)/);
+  // A retired brick with a resident sibling rides the active tile rebuild.
+  assert.match(fluidBrickResidencyShader, /WAS_RESIDENT\) != 0u && \(state & RESIDENT\) == 0u/);
+});
+
+test("pressure topology rebuild consumes the shared topology-tile worklist indirectly", () => {
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
-  assert.match(rebuild, /residency\.worklist/);
+  assert.match(rebuild, /residency\.tileWorklist/);
   assert.match(rebuild, /dispatchWorkgroupsIndirect/);
+  // The former leaf-size gate is gone: after initialization the tile path is
+  // the only rebuild domain at every legal (brickSize, maximumLeafSize) pair.
+  assert.doesNotMatch(rebuild, /maxLeafSize <= /);
+  assert.match(octreeProjectionShader, /fn topologyTileSize\(\) -> u32 \{ return max\(8u, params\.dimsMax\.w\); \}/);
   assert.match(octreeProjectionShader, /fn residentTopologyCell/);
-  assert.match(octreeProjectionShader, /workgroup\.x \+ workgroup\.y \* compaction\[12\]/);
+  assert.match(octreeProjectionShader, /workgroup\.x \+ workgroup\.y \* compaction\[widthWord\]/);
   assert.match(octreeProjectionShader, /fn rasterizeSolidsActive/);
   assert.match(octreeProjectionShader, /fn resetTopologyActive/);
   assert.match(octreeProjectionShader, /fn refineTopologyActive/);
@@ -110,15 +123,15 @@ test("pressure topology residency covers refinement and 2:1 grading support", ()
   assert.match(source, /haloCells: topologyHaloCells/);
 });
 
-test("retired fluid bricks rebuild their topology before leaving the active domain", () => {
+test("retired topology tiles rebuild before leaving the active domain", () => {
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
-  assert.match(rebuild, /FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES/);
+  assert.match(rebuild, /FLUID_TILE_RETIRED_DISPATCH_OFFSET_BYTES/);
   assert.match(rebuild, /dispatchRetired\(this\.resetRetiredPipeline\)/);
   assert.match(rebuild, /dispatchRetired\(this\.refineRetiredPipeline\)/);
   assert.match(rebuild, /dispatchRetired\(this\.balanceRetiredPipeline\)/);
   assert.match(octreeProjectionShader, /fn retiredTopologyCell/);
-  assert.match(octreeProjectionShader, /workgroup\.x \+ workgroup\.y \* compaction\[5\]/);
-  assert.match(octreeProjectionShader, /let retiredBase = 16u \+ capacity \* 2u/);
+  // Retired tile indices follow the active tile capacity in the copied list.
+  assert.match(octreeProjectionShader, /topologyTileCell\(workgroup, local, 4u, 5u, 16u \+ tx \* ty \* tz\)/);
   assert.match(octreeProjectionShader, /fn resetTopologyRetired/);
   assert.match(octreeProjectionShader, /fn refineTopologyRetired/);
   assert.match(octreeProjectionShader, /fn balanceTopologyRetired/);

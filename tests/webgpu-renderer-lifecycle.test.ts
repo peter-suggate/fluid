@@ -1,6 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FluidLabRenderer, type GPUStatus } from "../lib/webgpu-renderer";
+import { canQueuePreparedGPUAdvance, FluidLabRenderer, presentationPhysicsQueueDepth, presentationPriorityDue, submitNextPreparedGPUAdvance, type GPUStatus } from "../lib/webgpu-renderer";
+
+test("presentation takes queue priority once a 60 Hz deadline has elapsed", () => {
+  assert.equal(presentationPriorityDue(-Infinity, 0), true);
+  assert.equal(presentationPriorityDue(100, 108), false);
+  assert.equal(presentationPriorityDue(100, 116.2), true);
+});
+
+test("GPU submission advances only once toward prepared simulation debt", () => {
+  let submittedTime_s = 0;
+  let advances = 0;
+  const fluid = {
+    info: { submittedTime_s },
+    advanceTo(this: { info: { submittedTime_s: number } }, time_s: number) {
+      advances += 1;
+      submittedTime_s = Math.min(time_s, submittedTime_s + 0.008);
+      this.info.submittedTime_s = submittedTime_s;
+      return true;
+    }
+  } as unknown as Parameters<typeof submitNextPreparedGPUAdvance>[0];
+
+  const result = submitNextPreparedGPUAdvance(fluid, 0.1, []);
+  assert.equal(result.previousSubmittedTime, 0);
+  assert.equal(result.submittedTime, 0.008);
+  assert.equal(advances, 1);
+});
+
+test("GPU queue stays dense around presentation without admitting a physics burst", () => {
+  assert.equal(presentationPhysicsQueueDepth(undefined, 1), 1);
+  assert.equal(presentationPhysicsQueueDepth(35, 1), 1);
+  assert.equal(presentationPhysicsQueueDepth(3.4, 1), 4);
+  assert.equal(canQueuePreparedGPUAdvance(0, 4), true);
+  assert.equal(canQueuePreparedGPUAdvance(3, 4), true);
+  assert.equal(canQueuePreparedGPUAdvance(4, 4), false);
+});
 
 test("renderer stops submitting frames and disposes its device after WebGPU loss", async (t) => {
   let resolveDeviceLost!: (info: GPUDeviceLostInfo) => void;

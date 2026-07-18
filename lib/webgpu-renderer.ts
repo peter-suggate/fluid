@@ -5,12 +5,11 @@ import type { EulerianRenderState } from "./eulerian-solver";
 import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
 import { getMethod, type GPUSolverInstance, type MethodParamValues } from "./methods";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
-import { requiredFluidDeviceLimits } from "./webgpu-device-limits";
+import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "./webgpu-device-limits";
 import { RasterWaterPipeline } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "./terrain";
-import { gpuBatchDepth } from "./simulation/gpu-clock";
 import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import { SparseVoxelDebugRenderer, type VoxelRenderMode } from "./webgpu-voxel-debug";
 import { unifiedLightingShaderLibrary } from "./webgpu-lighting";
@@ -18,6 +17,31 @@ import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 export type WaterRenderMode = "rasterized" | "ray-marched";
+export const MAX_PRESENTATION_GAP_MS = 1000 / 60;
+
+export function presentationPriorityDue(lastFrameAt_ms: number, now_ms: number) {
+  return !Number.isFinite(lastFrameAt_ms) || now_ms - lastFrameAt_ms + 0.5 >= MAX_PRESENTATION_GAP_MS;
+}
+
+/** Submit one solver advance toward the prepared simulation clock. */
+export function submitNextPreparedGPUAdvance(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[]) {
+  const previousSubmittedTime = fluid.info.submittedTime_s ?? 0;
+  if (previousSubmittedTime + 1e-9 < time_s) fluid.advanceTo(time_s, bodies);
+  const submittedTime = fluid.info.submittedTime_s ?? previousSubmittedTime;
+  return { previousSubmittedTime, submittedTime };
+}
+
+/** Estimate a dense post-presentation queue that fits inside one 60 Hz interval. */
+export function presentationPhysicsQueueDepth(gpuStep_ms: number | undefined, gpuRender_ms = 0) {
+  if (!gpuStep_ms || !Number.isFinite(gpuStep_ms) || gpuStep_ms <= 0) return 1;
+  const physicsBudget_ms = Math.max(gpuStep_ms, MAX_PRESENTATION_GAP_MS - Math.max(0, gpuRender_ms));
+  return Math.max(1, Math.min(8, Math.floor(physicsBudget_ms / gpuStep_ms)));
+}
+
+/** Bound physics queue depth to the explicitly calculated rolling window. */
+export function canQueuePreparedGPUAdvance(pendingAdvances: number, maximumPendingAdvances: number) {
+  return pendingAdvances < Math.max(1, maximumPendingAdvances);
+}
 
 /** Column-major right-handed world-to-WebGPU-clip transform for voxel raster passes. */
 export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, near = 0.01, far = 100): Float32Array {
@@ -576,8 +600,12 @@ export class FluidLabRenderer {
   private gpuPendingBatches = 0;
   private lastGPUCompletionAt_ms = -Infinity;
   private lastGPUCompletedTime_s = 0;
+  private lastPresentationCompletedAt_ms = -Infinity;
+  private presentationPending = false;
+  private preparedGPUTime_s = 0;
+  private preparedGPUBodies: RigidBodyState[] = [];
   private gpuFluidGeneration = 0;
-  private lastGPUReadbackSecond = -1;
+  private lastGPUReadbackAt_ms = -Infinity;
   private bindGroup?: GPUBindGroup;
   private format?: GPUTextureFormat;
   private renderQuerySet?: GPUQuerySet;
@@ -621,7 +649,10 @@ export class FluidLabRenderer {
       return;
     }
     progress("Requesting GPU device",1);
-    const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
+    const requiredFeatures: GPUFeatureName[] = [
+      ...(adapter.features.has("timestamp-query") ? ["timestamp-query" as GPUFeatureName] : []),
+      ...optionalFluidDeviceFeatures(adapter.features),
+    ];
     const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
     const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
     if (this.disposed) { device.destroy(); return; }
@@ -794,6 +825,8 @@ export class FluidLabRenderer {
     this.gpuPendingBatches = 0;
     this.lastGPUCompletionAt_ms = -Infinity;
     this.lastGPUCompletedTime_s = 0;
+    this.preparedGPUTime_s = 0;
+    this.preparedGPUBodies = [];
   }
 
   private retireGPUFluid(fluid: GPUSolverInstance) {
@@ -830,7 +863,7 @@ export class FluidLabRenderer {
       this.voxelDebugPipeline?.setSource(undefined);
       this.retireGPUFluid(previous);
     }
-    this.gpuFluidKey="";this.gpuFluidPendingKey=key;this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackSecond=-1;
+    this.gpuFluidKey="";this.gpuFluidPendingKey=key;this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackAt_ms=-Infinity;
     const report=(progress:{phase:string;label:string;completed:number;total:number})=>{if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;this.onStatus({state:"initializing",...progress,startedAt_ms});};
     report({phase:"solver",label:`Preparing ${method.shortLabel} solver`,completed:0,total:1});
     const create=method.createSolverAsync
@@ -842,28 +875,27 @@ export class FluidLabRenderer {
     }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed"});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration)this.gpuFluidPending=undefined;});
   }
 
-  private ensureGPUFluid(scene: SceneDescription, config: SimulationRunConfig, time_s: number, bodies: RigidBodyState[], targetFps: number) {
+  private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig, time_s: number) {
     if (!this.device || this.disposed || this.deviceLost) return undefined;
     const method = getMethod(config.methodId);
     if (!method.createSolver) return undefined;
     const key=this.solverKey(scene,config);
     if(!this.gpuFluid||key!==this.gpuFluidKey){if(this.gpuFluidPendingKey!==key)this.beginGPUFluidInitialization(scene,config,key);return undefined;}
     if (time_s < (this.gpuFluid.info.submittedTime_s ?? 0)) {this.beginGPUFluidInitialization(scene,config,key);return undefined;}
-    const previousSubmittedTime = this.gpuFluid.info.submittedTime_s ?? 0;
-    // Submit one presentation-sized batch whenever prepared transport exists,
-    // even when an earlier batch fence is unresolved. The controller bounds
-    // tall-cell and octree preparation to two batches, keeping the queue fed
-    // while bounding partitioned rigid-feedback latency.
-    const batchLimit = gpuBatchDepth(config.methodId, scene.numerics.fixedDt_s, bodies.length > 0, targetFps);
-    let submittedTime = previousSubmittedTime;
-    for (let batch = 0; batch < batchLimit && submittedTime + 1e-9 < time_s; batch += 1) {
-      if (!this.gpuFluid.advanceTo(time_s, bodies)) break;
-      const nextSubmittedTime = this.gpuFluid.info.submittedTime_s ?? submittedTime;
-      if (nextSubmittedTime <= submittedTime) break;
-      submittedTime = nextSubmittedTime;
-    }
+    return this.gpuFluid;
+  }
+
+  private submitPreparedGPUFluid(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[], maximumPendingAdvances = 1) {
+    const device = this.device;
+    if (!device) return fluid.info;
+    this.preparedGPUTime_s = Math.max(this.preparedGPUTime_s, time_s);
+    this.preparedGPUBodies = bodies;
+    // A completion fence is the scheduling boundary. Encoding the entire debt
+    // here can put hundreds of milliseconds of GPU work between presentations.
+    if (!canQueuePreparedGPUAdvance(this.gpuPendingBatches, maximumPendingAdvances)) return fluid.info;
+    const { previousSubmittedTime, submittedTime } = submitNextPreparedGPUAdvance(fluid, this.preparedGPUTime_s, this.preparedGPUBodies);
     if (submittedTime > previousSubmittedTime) {
-      const fluid = this.gpuFluid, generation = this.gpuFluidGeneration;
+      const generation = this.gpuFluidGeneration;
       const submittedAt_ms = performance.now();
       const batchSimulation_s = submittedTime - previousSubmittedTime;
       if (this.gpuPendingBatches === 0 && Number.isFinite(this.lastGPUCompletionAt_ms)) {
@@ -872,7 +904,7 @@ export class FluidLabRenderer {
       this.gpuPendingBatches += 1;
       fluid.info.gpuPendingBatches = this.gpuPendingBatches;
       fluid.info.gpuInFlightSimulation_s = Math.max(0, submittedTime - (fluid.info.completedTime_s ?? 0));
-      void this.device.queue.onSubmittedWorkDone().then(() => {
+      void device.queue.onSubmittedWorkDone().then(() => {
         if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
         const completedAt_ms = performance.now();
         this.gpuPendingBatches = Math.max(0, this.gpuPendingBatches - 1);
@@ -889,13 +921,21 @@ export class FluidLabRenderer {
         this.lastGPUCompletedTime_s = submittedTime;
         this.gpuInfoCallback?.({ ...fluid.info });
         this.gpuAdvanceCompletedCallback?.(submittedTime);
+        this.continuePreparedGPUWork(fluid, generation);
       }).catch(() => { /* Device loss is reported by device.lost. */ });
     }
-    // Sample at 30 Hz of simulation time so a paper-sized 1/30 s step cannot
-    // cross an instability threshold between diagnostic readbacks. The solver
-    // coalesces reads while a previous map is pending.
-    const diagnosticTick=Math.round(time_s*30);if(diagnosticTick!==this.lastGPUReadbackSecond){this.lastGPUReadbackSecond=diagnosticTick;void this.gpuFluid.readStats().then(info=>this.gpuInfoCallback?.({...info})).catch(()=>{ /* Device loss is reported by device.lost. */ });}
-    return this.gpuFluid.info;
+    // Telemetry must not set solver cadence. A low wall-clock sampling rate is
+    // enough for the UI, and each solver coalesces a still-pending readback.
+    const now_ms=performance.now();if(now_ms-this.lastGPUReadbackAt_ms>=250){this.lastGPUReadbackAt_ms=now_ms;void fluid.readStats().then(info=>this.gpuInfoCallback?.({...info})).catch(()=>{ /* Device loss is reported by device.lost. */ });}
+    return fluid.info;
+  }
+
+  /** Keep the GPU occupied with a rolling advance, but yield at the 60 Hz presentation boundary. */
+  private continuePreparedGPUWork(fluid: GPUSolverInstance, generation: number) {
+    if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
+    if (this.gpuPendingBatches > 0 || this.presentationPending) return;
+    if (presentationPriorityDue(this.lastPresentationCompletedAt_ms, performance.now())) return;
+    this.submitPreparedGPUFluid(fluid, this.preparedGPUTime_s, this.preparedGPUBodies);
   }
 
   private uploadFluid(fluid?: EulerianRenderState) {
@@ -956,9 +996,14 @@ export class FluidLabRenderer {
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
     if (backend === "webgpu" && gridOverlay?.axis !== "off") this.gpuFluid?.ensureGridDiagnosticTextures?.();
-    const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, config, time_s, bodies, targetFps) : undefined;
+    const readyGPUFluid = backend === "webgpu" ? this.currentGPUFluid(scene, config, time_s) : undefined;
+    if (readyGPUFluid) { this.preparedGPUTime_s = Math.max(this.preparedGPUTime_s, time_s); this.preparedGPUBodies = bodies; }
+    if (this.presentationPending) return {cpuFrame_ms:performance.now()-start,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
+    const renderBeforePhysics = backend === "webgpu" && presentationPriorityDue(this.lastPresentationCompletedAt_ms, start);
+    let gpuInfo = readyGPUFluid?.info;
+    if (readyGPUFluid && !renderBeforePhysics) gpuInfo = this.submitPreparedGPUFluid(readyGPUFluid, time_s, bodies);
     if (gpuInfo && this.gpuFluid && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) this.gridOverlayPipeline?.setVolume(this.gpuFluid.surfaceFieldTexture ?? this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture);
-    const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();
+    let cpuPhysicsSubmit_ms=performance.now()-physicsStart;const uploadStart=performance.now();
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, 0,
@@ -1073,8 +1118,28 @@ export class FluidLabRenderer {
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();
     let renderReadback:GPUBuffer|undefined;if(sampleRenderGPU&&this.renderQuerySet&&this.renderQueryResolve){this.lastRenderQueryAt=renderStart;this.renderReadbackPending=true;encoder.resolveQuerySet(this.renderQuerySet,0,16,this.renderQueryResolve,0);renderReadback=this.device.createBuffer({size:16*8,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.renderQueryResolve,0,renderReadback,0,16*8);}
     this.device.queue.submit([encoder.finish()]);
+    this.presentationPending=true;
+    const presentationDevice=this.device;
+    void this.device.queue.onSubmittedWorkDone().then(()=>{
+      if(this.disposed||this.deviceLost||this.device!==presentationDevice)return;
+      this.presentationPending=false;this.lastPresentationCompletedAt_ms=performance.now();
+      if(this.gpuFluid)this.continuePreparedGPUWork(this.gpuFluid,this.gpuFluidGeneration);
+    }).catch(()=>{this.presentationPending=false;});
+    const presentationSubmittedAt_ms=performance.now();
+    const cpuRenderEncode_ms=presentationSubmittedAt_ms-renderStart;
+    if(readyGPUFluid){
+      const deferredPhysicsStart=performance.now();
+      const postPresentationDepth=presentationPhysicsQueueDepth(readyGPUFluid.info.gpuStep_ms,this.gpuRender_ms??0);
+      const maximumPendingAdvances=this.gpuPendingBatches+postPresentationDepth;
+      for(let queued=0;queued<postPresentationDepth;queued+=1){
+        const before=readyGPUFluid.info.submittedTime_s??0;
+        this.submitPreparedGPUFluid(readyGPUFluid,time_s,bodies,maximumPendingAdvances);
+        if((readyGPUFluid.info.submittedTime_s??0)<=before)break;
+      }
+      cpuPhysicsSubmit_ms+=performance.now()-deferredPhysicsStart;
+    }
     if(renderReadback){const readback=renderReadback,sampledContext=timingContext,sampledRasterized=rasterized,surfaceUpdated=Boolean(rasterResult&&rasterResult.surfaceUpdated),sampledSprayRendered=rasterized?Boolean(rasterResult&&rasterResult.sprayRendered):fallbackSprayRendered;void readback.mapAsync(GPUMapMode.READ).then(()=>{const stage=decodeRenderStageTimestamps(new BigUint64Array(readback.getMappedRange()),sampledRasterized,surfaceUpdated,sampledSprayRendered);if(this.renderTimingContext===sampledContext){this.gpuSurfaceExtraction_ms=stage.surfaceExtraction_ms;this.gpuDryScene_ms=stage.dryScene_ms;this.gpuInterfaces_ms=stage.interfaces_ms;this.gpuSprayFront_ms=stage.sprayFront_ms;this.gpuSprayBack_ms=stage.sprayBack_ms;this.gpuSprayRender_ms=stage.sprayRender_ms;this.gpuOpticalComposite_ms=stage.opticalComposite_ms;this.gpuUpscale_ms=stage.upscale_ms;this.gpuRender_ms=stage.total_ms;}readback.unmap();readback.destroy();}).catch(()=>readback.destroy()).finally(()=>{this.renderReadbackPending=false;});}
-    return {cpuFrame_ms:performance.now()-start,cpuPhysicsSubmit_ms,cpuDataUpload_ms,cpuRenderEncode_ms:performance.now()-renderStart,gpuRender_ms:this.gpuRender_ms,gpuSurfaceExtraction_ms:this.gpuSurfaceExtraction_ms,gpuDryScene_ms:this.gpuDryScene_ms,gpuInterfaces_ms:this.gpuInterfaces_ms,gpuSprayFront_ms:this.gpuSprayFront_ms,gpuSprayBack_ms:this.gpuSprayBack_ms,gpuSprayRender_ms:this.gpuSprayRender_ms,gpuOpticalComposite_ms:this.gpuOpticalComposite_ms,gpuUpscale_ms:this.gpuUpscale_ms,methodId:config.methodId,waterRenderMode,gpuRenderTimestampAvailable:Boolean(this.renderQuerySet)};
+    return {cpuFrame_ms:performance.now()-start,cpuPhysicsSubmit_ms,cpuDataUpload_ms,cpuRenderEncode_ms,gpuRender_ms:this.gpuRender_ms,gpuSurfaceExtraction_ms:this.gpuSurfaceExtraction_ms,gpuDryScene_ms:this.gpuDryScene_ms,gpuInterfaces_ms:this.gpuInterfaces_ms,gpuSprayFront_ms:this.gpuSprayFront_ms,gpuSprayBack_ms:this.gpuSprayBack_ms,gpuSprayRender_ms:this.gpuSprayRender_ms,gpuOpticalComposite_ms:this.gpuOpticalComposite_ms,gpuUpscale_ms:this.gpuUpscale_ms,methodId:config.methodId,waterRenderMode,gpuRenderTimestampAvailable:Boolean(this.renderQuerySet)};
   }
 
   destroy(): void {

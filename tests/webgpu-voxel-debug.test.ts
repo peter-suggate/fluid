@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import {
   SPARSE_VOXEL_DEBUG_MATERIAL_STRIDE,
   SPARSE_VOXEL_DEBUG_RECORD_STRIDE,
@@ -9,6 +10,9 @@ import {
   voxelDebugRenderShader
 } from "../lib/webgpu-voxel-debug";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+
+const modulePath = process.env.WEBGPU_NODE_MODULE;
 
 test("public sparse voxel render source is structural and exposes only inspection modes", () => {
   const external = {} as GPUBuffer;
@@ -24,12 +28,37 @@ test("public sparse voxel render source is structural and exposes only inspectio
 test("voxel inspection plans raw voxels and brick grids from one source", () => {
   const source = { voxelCapacity: 129, brickCapacity: 65 };
   assert.deepEqual(voxelDebugPlan("raw-voxels", source), {
-    enabled: true, recordKind: "voxels", capacity: 129, computeWorkgroups: 3, verticesPerInstance: 36, topology: "triangle-list"
+    enabled: true, recordKind: "voxels", capacity: 129, computeWorkgroups: 3, verticesPerInstance: 36, topology: "triangle-list",
+    overlayCapacity: 65, overlayWorkgroups: 2
   });
   assert.deepEqual(voxelDebugPlan("brick-grid", source), {
-    enabled: true, recordKind: "bricks", capacity: 65, computeWorkgroups: 2, verticesPerInstance: 24, topology: "line-list"
+    enabled: true, recordKind: "bricks", capacity: 65, computeWorkgroups: 2, verticesPerInstance: 24, topology: "line-list",
+    overlayCapacity: 65, overlayWorkgroups: 2
   });
   assert.equal(voxelDebugPlan("brick-grid", { voxelCapacity: 1, brickCapacity: 0 }).enabled, false);
+  assert.equal(voxelDebugPlan("raw-voxels", { voxelCapacity: 1, brickCapacity: 0 }).overlayWorkgroups, 0,
+    "sources without brick records draw no residency outlines");
+});
+
+test("fluid brick residency outlines compact separately and color by state", () => {
+  // Residency bits (CORE 2 | HALO 4 | ACTIVATED 8) only ever accompany fluid
+  // solver leaves, so the overlay filter excludes environment records.
+  assert.match(voxelDebugComputeShader, /const FLUID_RESIDENCY: u32 = 14u;/);
+  assert.match(voxelDebugComputeShader, /fn compactFluidBricks/);
+  assert.match(voxelDebugComputeShader, /materialAndFlags\.y & FLUID_RESIDENCY\) == 0u/);
+  assert.match(voxelDebugComputeShader, /atomicAdd\(&overlayDrawArguments\.instanceCount, 1u\)/);
+  assert.match(voxelDebugComputeShader, /compactSettings\.overlayCapacity/);
+  // Both prepare entry points reset the overlay's 24-vertex line draw.
+  assert.equal(voxelDebugComputeShader.split("overlayDrawArguments.vertexCount = 24u").length, 3);
+  assert.match(voxelDebugRenderShader, /fn fluidResidencyColor/);
+  assert.match(voxelDebugRenderShader, /fn overlayVertex/);
+  assert.match(voxelDebugRenderShader, /fn overlayFragment/);
+  // Outlines sit exactly on voxel faces; a camera-ward bias wins depth ties.
+  assert.match(voxelDebugRenderShader, /output\.position\.z -= 0\.0015 \* output\.position\.w;/);
+  // Grid mode routes resident fluid bricks through the shared palette while
+  // the environment lattice keeps its alternating level tint.
+  assert.match(voxelDebugRenderShader, /input\.flags & 14u/);
+  assert.match(voxelDebugRenderShader, /input\.level & 1u/);
 });
 
 test("voxel debug ABI and shaders retain GPU material color and indirect instance production", () => {
@@ -100,7 +129,7 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
   };
   assert.equal(renderer.encode(encoder, { ...common, mode: "raw-voxels", depthLoadOp: "clear", colorLoadOp: "clear" }), true);
   assert.equal(renderer.encode(encoder, { ...common, mode: "brick-grid" }), true);
-  assert.equal(indirectDraws, 2);
+  assert.equal(indirectDraws, 4, "each mode draws its primary records plus the fluid residency outline overlay");
   assert.deepEqual(paneDraws, [
     [6, 1, 0, 3], [6, 1, 0, 0], [6, 1, 0, 1], [6, 1, 0, 2], [6, 1, 0, 4]
   ], "open tank panes draw back-to-front after opaque voxels");
@@ -117,6 +146,111 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
     "Sparse voxel debug compaction settings",
     "Sparse voxel debug indirect draw",
     "Sparse voxel debug instances (80)",
+    "Sparse voxel debug overlay indirect draw",
+    "Sparse voxel debug overlay instances (20)",
     "Sparse voxel debug view"
   ]);
+});
+
+async function createDevice() {
+  const { create, globals } = await import(pathToFileURL(modulePath!).href) as { create(options: string[]): GPU; globals: Record<string, unknown> };
+  Object.assign(globalThis, globals);
+  const gpu = create(["backend=metal"]);
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
+  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+  assert.ok(adapter);
+  const device = await adapter.requestDevice({
+    requiredFeatures: optionalFluidDeviceFeatures(adapter.features),
+    requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+  });
+  const validationErrors: string[] = [];
+  device.addEventListener("uncapturederror", (event: unknown) => validationErrors.push((event as { error: { message: string } }).error.message));
+  return { device, validationErrors };
+}
+
+function packDebugRecord(origin: readonly number[], extent: readonly number[], material: number, flags: number, level: number) {
+  const record = new ArrayBuffer(SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
+  new Float32Array(record, 0, 8).set([...origin, 0, ...extent, 0]);
+  new Uint32Array(record, 32, 4).set([material, flags, level, 0xffff]);
+  return new Uint8Array(record);
+}
+
+test("resident fluid bricks render outlines while environment bricks stay outline-free in raw mode", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU render checks" }, async () => {
+  const { device, validationErrors } = await createDevice();
+  try {
+    const storage = (data: Uint8Array | Uint32Array) => {
+      const buffer = device.createBuffer({ size: Math.max(4, data.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      device.queue.writeBuffer(buffer, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
+      return buffer;
+    };
+    // Three same-scale brick records: a CORE fluid brick on the left, a
+    // freshly ACTIVATED halo brick on the right, and an environment brick
+    // above the pair that must not receive an outline.
+    const records = new Uint8Array(3 * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
+    records.set(packDebugRecord([-0.8, -0.25, 0], [0.5, 0.5, 0.5], 2, 1 | 2, 3), 0);
+    records.set(packDebugRecord([0.3, -0.25, 0], [0.5, 0.5, 0.5], 2, 1 | 4 | 8, 3), SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
+    records.set(packDebugRecord([-0.25, 0.35, 0], [0.5, 0.5, 0.5], 33, 1, 3), 2 * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
+    const brickRecords = storage(records);
+    const brickCount = storage(new Uint32Array([3]));
+    const voxelRecords = storage(new Uint8Array(SPARSE_VOXEL_DEBUG_RECORD_STRIDE));
+    const voxelCount = storage(new Uint32Array([0]));
+    // Zero-alpha materials keep raw cubes and glass panes invisible so the
+    // readback isolates the residency outline overlay.
+    const materials = storage(new Uint8Array(2 * SPARSE_VOXEL_DEBUG_MATERIAL_STRIDE));
+    const renderer = new SparseVoxelDebugRenderer(device, { colorFormat: "rgba8unorm" });
+    await renderer.initialize();
+    renderer.setSource({
+      voxelRecords: { buffer: voxelRecords }, voxelCount: { buffer: voxelCount },
+      brickRecords: { buffer: brickRecords }, brickCount: { buffer: brickCount },
+      materials: { buffer: materials }, voxelCapacity: 1, brickCapacity: 3, materialCount: 2, revision: 1
+    });
+    const size = 64;
+    const color = device.createTexture({ size: [size, size], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    const depth = device.createTexture({ size: [size, size], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    const readback = device.createBuffer({ size: 256 * size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const renderAndRead = async (mode: "raw-voxels" | "brick-grid") => {
+      const encoder = device.createCommandEncoder();
+      assert.equal(renderer.encode(encoder, {
+        mode, colorTarget: color.createView(), depthTarget: depth.createView(),
+        viewProjection: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.1, 0, 0, 0, 0.5, 1]),
+        cameraPosition: [0, 0, 4],
+        containerBounds: { min: [-30, -30, -30], max: [-29, -29, -29] }, containerClosedTop: false,
+        colorLoadOp: "clear", depthLoadOp: "clear"
+      }), true);
+      encoder.copyTextureToBuffer({ texture: color }, { buffer: readback, bytesPerRow: 256, rowsPerImage: size }, [size, size, 1]);
+      device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const pixels = new Uint8Array(readback.getMappedRange().slice(0));
+      readback.unmap();
+      return (region: { x0: number; x1: number; y0: number; y1: number }, classify: (r: number, g: number, b: number) => boolean) => {
+        let hits = 0;
+        for (let y = 0; y < size; y += 1) for (let x = 0; x < size; x += 1) {
+          const ndcX = (x + 0.5) / size * 2 - 1, ndcY = 1 - (y + 0.5) / size * 2;
+          if (ndcX < region.x0 || ndcX > region.x1 || ndcY < region.y0 || ndcY > region.y1) continue;
+          const base = y * 256 + x * 4;
+          if (classify(pixels[base], pixels[base + 1], pixels[base + 2])) hits += 1;
+        }
+        return hits;
+      };
+    };
+    const isCoreBlue = (r: number, g: number, b: number) => b > 180 && r < 80 && b > g;
+    const isActivatedGreen = (r: number, g: number, b: number) => g > 180 && g > b && g > r;
+    const isAnyLine = (r: number, g: number, b: number) => r > 60 || g > 60 || b > 60;
+    const raw = await renderAndRead("raw-voxels");
+    const coreRegion = { x0: -0.85, x1: -0.25, y0: -0.3, y1: 0.3 };
+    const activatedRegion = { x0: 0.25, x1: 0.85, y0: -0.3, y1: 0.3 };
+    const environmentRegion = { x0: -0.3, x1: 0.3, y0: 0.32, y1: 0.88 };
+    assert.ok(raw(coreRegion, isCoreBlue) > 8, "the CORE brick draws a bright blue outline in raw mode");
+    assert.ok(raw(activatedRegion, isActivatedGreen) > 8, "the freshly ACTIVATED brick flashes green in raw mode");
+    assert.equal(raw(environmentRegion, isAnyLine), 0, "environment bricks draw no raw-mode outline");
+    const grid = await renderAndRead("brick-grid");
+    assert.ok(grid(coreRegion, isCoreBlue) > 8, "grid mode keeps core-blue for CORE bricks");
+    assert.ok(grid(environmentRegion, isAnyLine) > 8, "grid mode still draws the environment lattice");
+    assert.deepEqual(validationErrors, []);
+    renderer.destroy();
+    for (const resource of [brickRecords, brickCount, voxelRecords, voxelCount, materials, readback]) resource.destroy();
+    color.destroy(); depth.destroy();
+  } finally {
+    device.destroy();
+  }
 });

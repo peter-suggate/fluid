@@ -16,8 +16,8 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.equal(octreeMethod.id, "octree");
   assert.equal(octreeMethod.backend, "webgpu");
   assert.equal(octreeMethod.presetFor("balanced").pressureIterations, 128);
-  assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "8");
-  assert.equal(octreeMethod.presetFor("high").maximumLeafSize, "8");
+  assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "16");
+  assert.equal(octreeMethod.presetFor("high").maximumLeafSize, "16");
   assert.equal(octreeMethod.presetFor("balanced").adaptivity, 1);
   assert.match(octreeMethod.detail, /no topology readbacks/);
   assert.match(octreeMethod.detail, /Chebyshev-Jacobi/);
@@ -25,7 +25,7 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(octreeMethod.description, /signed-distance level set/);
   const maximumLeaf = octreeMethod.params.find((spec) => spec.key === "maximumLeafSize");
   assert.ok(maximumLeaf && maximumLeaf.kind === "select");
-  assert.equal(maximumLeaf.default, "8");
+  assert.equal(maximumLeaf.default, "16");
   assert.deepEqual(maximumLeaf.options.map((option) => option.value), ["2", "4", "8", "16", "32"]);
   assert.match(octreeSource, /function octreeLeafSize\(value: number\): 2 \| 4 \| 8 \| 16 \| 32/);
   assert.match(octreeSource, /rounded >= 32/);

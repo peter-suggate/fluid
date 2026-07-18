@@ -51,7 +51,7 @@ export function VisualPanel() {
     </section>
 
     <section className="panel-section utility-controls">
-      <div className="section-heading"><h2>Frame pacing</h2><span>REALTIME</span></div>
+      <div className="section-heading"><h2>Presentation</h2><span>VISUAL ONLY</span></div>
       <label className="select-control">
         <span>Target presentation rate</span>
         <select aria-label="Target frames per second" value={targetFps} onChange={(event) => setTargetFps(Number(event.target.value))}>
@@ -62,7 +62,7 @@ export function VisualPanel() {
           <option value={120}>120 fps</option>
         </select>
       </label>
-      <small className="control-hint">Raster surface extraction and presentation target {targetFps} Hz ({(1000 / targetFps).toFixed(2)} ms). Physics stays at real-time ×1 using the stable scene substep.</small>
+      <small className="control-hint">Targets {targetFps} visual frames/s ({(1000 / targetFps).toFixed(2)} ms). Physics stays densely queued, but an overdue 60 Hz presentation is inserted before the next advance instead of sitting behind accumulated simulation debt.</small>
     </section>
 
     <section className="panel-section utility-controls">

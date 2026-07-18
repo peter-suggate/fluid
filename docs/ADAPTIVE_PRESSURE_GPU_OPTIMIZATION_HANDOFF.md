@@ -103,18 +103,18 @@ to manufacture occupancy by forcing a single persistent workgroup.
 
 ## Submission and readback restructuring
 
-The solver optimization exposed a second problem: a fast GPU step can still be
-starved by requestAnimationFrame and queue-fence cadence.
-
-At the default 4 ms simulation clock, octree execution now prepares five
-advances per 60 Hz presentation quantum and permits a second bounded batch in
-flight. This gives the queue up to ten ordered advances without letting CPU and
-GPU simulation time drift without limit.
+The solver optimization exposed a second problem: eagerly draining prepared
+steps can place hundreds of milliseconds of physics ahead of presentation.
+The runtime prepares every owed fixed step but submits completion-gated GPU
+advances through a dense rolling queue. Post-presentation depth is calculated
+from the latest measured advance and render costs to fill one 16.67 ms window,
+not from accumulated simulation debt. Once the last completed presentation is
+16.67 ms old, the next queue slot is presentation.
 
 Topology rebuild, compaction, pressure, projection, and surface transport stay
-in one ordered GPU command stream. Queue-completion promises update telemetry;
-they are not awaited by step encoding. Statistics readbacks are asynchronous
-and pending-gated.
+in one ordered GPU command stream. Completion promises immediately refill the
+next physics slot while the presentation deadline has not elapsed. Statistics
+readbacks remain asynchronous and pending-gated.
 
 Rigid impulse readback uses a reusable slot pool. Every encoded coupled step
 copies its small exchange record into its own idle staging slot. Overlapping
@@ -273,7 +273,7 @@ Required A/B gates:
 - prescribed large displacement;
 - freely moving heavy and light bodies;
 - contact/stack stability;
-- impulse and angular-impulse delivery count under two batches in flight;
+- impulse and angular-impulse delivery count under continuously queued advances;
 - long-horizon impact, rebound, and settling.
 
 Report both stage time and end-to-end wall time. A faster pressure solve that

@@ -50,6 +50,21 @@ export function initialFluidBrickContainsCell(
   });
 }
 
+/**
+ * Resolves the seeded-brick occupancy against the scene's base initial
+ * condition. Seeds ordinarily replace the base fill entirely (disconnected
+ * initial bodies); with `initialBrickSeedsAdditive` they union with it so a
+ * seeded slab can sit on top of a settled pool.
+ */
+export function combineInitialBrickWet(
+  scene: SceneDescription,
+  brickWet: boolean | undefined,
+  baseWet: boolean,
+): boolean {
+  if (brickWet === undefined) return baseWet;
+  return scene.fluid.initialBrickSeedsAdditive ? brickWet || baseWet : brickWet;
+}
+
 function boxSignedDistance(point: Vec3, minimum: Vec3, maximum: Vec3): number {
   const center = { x: 0.5 * (minimum.x + maximum.x), y: 0.5 * (minimum.y + maximum.y), z: 0.5 * (minimum.z + maximum.z) };
   const half = { x: 0.5 * (maximum.x - minimum.x), y: 0.5 * (maximum.y - minimum.y), z: 0.5 * (maximum.z - minimum.z) };

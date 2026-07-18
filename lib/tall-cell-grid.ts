@@ -1,4 +1,4 @@
-import { damBreakFractions, initialFluidBrickContainsCell, initialFluidBrickSignedDistance } from "./initial-fluid";
+import { combineInitialBrickWet, damBreakFractions, initialFluidBrickContainsCell, initialFluidBrickSignedDistance } from "./initial-fluid";
 import type { SceneDescription } from "./model";
 import { sceneHasTerrain, terrainHeightAt } from "./terrain";
 
@@ -139,10 +139,11 @@ function initialWet(scene: SceneDescription, x: number, y: number, z: number, nx
     if ((y + 0.5) * c.height_m / fineNy <= terrainHeightAt(scene.terrain, worldX, worldZ)) return false;
   }
   const brickWet = initialFluidBrickContainsCell(scene, x, y, z, [nx, fineNy, nz]);
-  if (brickWet !== undefined) return brickWet;
-  if (scene.fluid.initialCondition === "tank-fill") return (y + 0.5) / fineNy <= scene.container.fillFraction;
   const dam = damBreakFractions(scene.container.fillFraction);
-  return (x + 0.5) / nx <= dam.width && (y + 0.5) / fineNy <= dam.height && (z + 0.5) / nz <= dam.depth;
+  const baseWet = scene.fluid.initialCondition === "tank-fill"
+    ? (y + 0.5) / fineNy <= scene.container.fillFraction
+    : (x + 0.5) / nx <= dam.width && (y + 0.5) / fineNy <= dam.height && (z + 0.5) / nz <= dam.depth;
+  return combineInitialBrickWet(scene, brickWet, baseWet);
 }
 
 function boxSignedDistance(point: { x: number; y: number; z: number }, center: { x: number; y: number; z: number }, half: { x: number; y: number; z: number }) {
@@ -160,9 +161,22 @@ export function initialLiquidPhi(scene: SceneDescription, point: { x: number; y:
   const c = scene.container;
   if (dimensions) {
     const brickDistance = initialFluidBrickSignedDistance(scene, point, dimensions);
-    if (brickDistance !== undefined) return brickDistance;
+    if (brickDistance !== undefined) {
+      // Additive seeds union with the base liquid (signed-distance minimum);
+      // ordinary seeds replace it entirely.
+      if (!scene.fluid.initialBrickSeedsAdditive) return brickDistance;
+      const basePhi = scene.fluid.initialCondition === "tank-fill"
+        ? point.y - c.height_m * c.fillFraction
+        : baseDamBreakPhi(scene, point);
+      return Math.min(brickDistance, basePhi);
+    }
   }
   if (scene.fluid.initialCondition === "tank-fill") return point.y - c.height_m * c.fillFraction;
+  return baseDamBreakPhi(scene, point);
+}
+
+function baseDamBreakPhi(scene: SceneDescription, point: { x: number; y: number; z: number }) {
+  const c = scene.container;
   const dam = damBreakFractions(c.fillFraction);
   const half = { x: 0.5 * dam.width * c.width_m, y: 0.5 * dam.height * c.height_m, z: 0.5 * dam.depth * c.depth_m };
   return boxSignedDistance(point, {
@@ -253,6 +267,10 @@ function requiredInitialRegularLayers(
 
 export function createTallCellLayout(scene: SceneDescription, quality: GPUQuality, maximumTextureDimension = 2048, overrides?: Partial<TallCellSettings>): TallCellLayout {
   const c = scene.container, settings = { ...tallCellSettings[quality], ...overrides };
+  // A scene-authored column count wins over both the quality preset and the
+  // method's clamped UI parameter: exact-grid validation scenes (brick-quad
+  // cross-transport) depend on finest dimensions no preset can produce.
+  if ((scene.numerics.surfaceColumnsOverride ?? 0) > 0) settings.surfaceColumns = scene.numerics.surfaceColumnsOverride!;
   const targetH = Math.sqrt(c.width_m * c.depth_m / settings.surfaceColumns);
   const nx = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.width_m / targetH)));
   const nz = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.depth_m / targetH)));

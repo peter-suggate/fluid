@@ -29,8 +29,8 @@ export function SceneConfigPopover() {
   const patchContainer = useSceneStore((state) => state.patchContainer);
   const patchFluid = useSceneStore((state) => state.patchFluid);
   const patchNumerics = useSceneStore((state) => state.patchNumerics);
-  const baseRate_hz = 1 / scene.numerics.fixedDt_s;
-  const gpuCpuMultiplier = Math.max(1, Math.round(scene.numerics.maxDt_s / scene.numerics.fixedDt_s));
+  const fixedRate_hz = 1 / scene.numerics.fixedDt_s;
+  const gpuStepRate_hz = 1 / scene.numerics.maxDt_s;
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; baseX: number; baseY: number } | null>(null);
   if (!open) return null;
@@ -111,12 +111,12 @@ export function SceneConfigPopover() {
         <section>
           <h3>Timing &amp; numerics</h3>
           <div className="field-grid">
-            <NumberField label="Base rate" unit="Hz" value={baseRate_hz} step={0.01} min={1} onChange={(value) => { const dt = 1 / Math.max(1, value); patchNumerics({ fixedDt_s: dt, maxDt_s: dt * gpuCpuMultiplier }); }} />
-            <NumberField label="GPU / CPU" unit="×" value={Math.round(gpuCpuMultiplier)} step={1} min={1} onChange={(value) => patchNumerics({ maxDt_s: scene.numerics.fixedDt_s * Math.max(1, Math.round(value)) })} />
+            <NumberField label="Rigid / oracle rate" unit="Hz" value={fixedRate_hz} step={0.01} min={1} onChange={(value) => { const dt = 1 / Math.max(1, value); patchNumerics({ fixedDt_s: dt, maxDt_s: Math.max(scene.numerics.maxDt_s, dt) }); }} />
+            <NumberField label="GPU step cap" unit="Hz" value={gpuStepRate_hz} step={0.01} min={1} max={fixedRate_hz} onChange={(value) => patchNumerics({ maxDt_s: Math.max(scene.numerics.fixedDt_s, 1 / Math.max(1, value)) })} />
             <NumberField label="Oracle cell" unit="m" value={scene.nominalResolution.length_m} step={0.0025} min={0.0125} max={0.08} onChange={(value) => patchScene({ nominalResolution: { length_m: value } })} />
             <NumberField label="PCG budget" unit="iterations" value={scene.numerics.pressureMaxIterations} step={20} min={8} max={1000} onChange={(value) => patchNumerics({ pressureMaxIterations: Math.round(value) })} />
           </div>
-          <small className="control-hint">The base rate sets the CPU rigid/validation clock ({(scene.numerics.fixedDt_s * 1000).toFixed(2)} ms); GPU / CPU multiplies that interval to set each GPU advance cap ({(scene.numerics.maxDt_s * 1000).toFixed(2)} ms). The PCG budget and relative tolerance ({scene.numerics.pressureRelativeTolerance.toExponential(0)}) bound the CPU reference projection; GPU pressure effort is set per method.</small>
+          <small className="control-hint">The desired simulation clock stays at ×1. Rigid bodies and the CPU oracle step at {fixedRate_hz.toFixed(1)} Hz ({(scene.numerics.fixedDt_s * 1000).toFixed(2)} ms). GPU advances densely fill a measured 16.67 ms queue window, with an outer-step cap of {gpuStepRate_hz.toFixed(1)} Hz ({(scene.numerics.maxDt_s * 1000).toFixed(2)} ms).</small>
         </section>
       </div>
       <footer>
