@@ -264,6 +264,8 @@ export class WebGPUUniformEulerianSolver {
           depth_m: c.depth_m,
           topOpen: c.top === "open",
           gravity_m_s2: scene.fluid.gravity_m_s2,
+          density_kg_m3: scene.fluid.density_kg_m3,
+          surfaceTension_N_m: scene.fluid.surfaceTension_N_m,
           randomSeed: scene.randomSeed
         }, this.secondaryParticleSamplingSource, options.secondaryParticleCapacity, options.deferPipelineCompilation);
         this.info.secondaryParticleCapacity = this.secondaryParticleSystem.renderSource.capacity;

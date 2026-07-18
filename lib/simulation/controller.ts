@@ -406,6 +406,8 @@ class SimulationController {
       gpuSurfaceExtraction_ms: sane(metrics.gpuSurfaceExtraction_ms, 0),
       gpuDryScene_ms: sane(metrics.gpuDryScene_ms, renderFallback.gpuDryScene_ms),
       gpuInterfaces_ms: sane(metrics.gpuInterfaces_ms, renderFallback.gpuInterfaces_ms),
+      gpuSprayFront_ms: sane(metrics.gpuSprayFront_ms, renderFallback.gpuSprayFront_ms),
+      gpuSprayBack_ms: sane(metrics.gpuSprayBack_ms, renderFallback.gpuSprayBack_ms),
       gpuSprayRender_ms: sane(metrics.gpuSprayRender_ms, renderFallback.gpuSprayRender_ms),
       gpuOpticalComposite_ms: sane(metrics.gpuOpticalComposite_ms, renderFallback.gpuOpticalComposite_ms),
       gpuUpscale_ms: sane(metrics.gpuUpscale_ms, renderFallback.gpuUpscale_ms)

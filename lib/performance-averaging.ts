@@ -7,7 +7,7 @@ const physicsTimingFields = new Set<keyof PerformanceSnapshot>([
 ]);
 
 const renderTimingFields = new Set<keyof PerformanceSnapshot>([
-  "gpuRender_ms", "gpuSurfaceExtraction_ms", "gpuDryScene_ms", "gpuInterfaces_ms", "gpuSprayRender_ms",
+  "gpuRender_ms", "gpuSurfaceExtraction_ms", "gpuDryScene_ms", "gpuInterfaces_ms", "gpuSprayFront_ms", "gpuSprayBack_ms", "gpuSprayRender_ms",
   "gpuOpticalComposite_ms", "gpuUpscale_ms"
 ]);
 
