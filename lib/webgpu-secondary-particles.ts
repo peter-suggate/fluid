@@ -3,8 +3,9 @@
  *
  * The simulation intentionally remains one-way: particles sample the liquid
  * surface and projected velocity, but never enter the pressure solve. This is
- * the spray/mist/foam extension from Chentanez and Mueller, not particle-based
- * thickening. A fixed ring keeps the path allocation- and readback-free.
+ * the escaped-droplet part of the Chentanez and Mueller extension, not
+ * particle-based thickening. A fixed ring keeps the path allocation- and
+ * readback-free.
  */
 
 export const SECONDARY_PARTICLE_STRIDE_BYTES = 48;
@@ -214,47 +215,20 @@ fn updateParticles(@builtin(global_invocation_id) gid: vec3u) {
   var position = particle.positionRadius.xyz;
   var velocity = particle.velocityAge.xyz;
   var age = particle.velocityAge.w + dt();
-  var kind = particle.attributes.x;
   let lifetime = particle.attributes.y;
   if (age >= lifetime) { deactivate(index, particle); return; }
 
-  if (kind < 1.5) {
-    let drag = select(0.18, 2.8, kind > 0.5);
-    velocity = (velocity + params.gravityAndSeed.xyz * dt()) * exp(-drag * dt());
-    position += velocity * dt();
-    let half = 0.5 * params.containerAndTop.xz;
-    if (position.y < 0.0 || position.y > params.containerAndTop.y + 2.0 * minimumCell()) { deactivate(index, particle); return; }
-    if (abs(position.x) > half.x || abs(position.z) > half.y) { deactivate(index, particle); return; }
-
-    let phi = samplePhi(position);
-    if (age > 2.0 * dt() && phi < -0.2 * minimumCell()) {
-      let chance = random01(index ^ u32(age * 1000.0) ^ u32(params.gravityAndSeed.w));
-      if (kind < 0.5 && chance < 0.62 && abs(phi) < 2.5 * minimumCell()) {
-        // Spray re-entering the main body becomes passive surface foam.
-        kind = 2.0;
-        position -= clamp(phi, -minimumCell(), minimumCell()) * surfaceNormal(position);
-        velocity = sampleVelocity(position);
-        age = 0.0;
-        particle.attributes.y = 1.5 + 2.5 * random01(index ^ 0x9e3779b9u);
-      } else {
-        deactivate(index, particle);
-        return;
-      }
-    }
-  } else {
-    let phi = samplePhi(position);
-    if (abs(phi) > 3.0 * minimumCell()) { deactivate(index, particle); return; }
-    let normal = surfaceNormal(position);
-    let flow = sampleVelocity(position);
-    velocity = mix(velocity, flow - normal * dot(flow, normal) * 0.35, clamp(8.0 * dt(), 0.0, 1.0));
-    position += velocity * dt();
-    let correctedPhi = samplePhi(position);
-    position -= clamp(correctedPhi, -minimumCell(), minimumCell()) * surfaceNormal(position);
-  }
+  velocity = (velocity + params.gravityAndSeed.xyz * dt()) * exp(-0.18 * dt());
+  position += velocity * dt();
+  let half = 0.5 * params.containerAndTop.xz;
+  if (position.y < 0.0 || position.y > params.containerAndTop.y + 2.0 * minimumCell()) { deactivate(index, particle); return; }
+  if (abs(position.x) > half.x || abs(position.z) > half.y) { deactivate(index, particle); return; }
+  // Re-entered droplets belong to the resolved body again; no long-lived
+  // surface marker is retained.
+  if (age > 2.0 * dt() && samplePhi(position) < -0.2 * minimumCell()) { deactivate(index, particle); return; }
 
   particle.positionRadius = vec4f(position, particle.positionRadius.w);
   particle.velocityAge = vec4f(velocity, age);
-  particle.attributes.x = kind;
   particles[index] = particle;
 }
 
@@ -310,18 +284,29 @@ fn spawnParticles(@builtin(global_invocation_id) gid: vec3u) {
       random01(particleSeed ^ 0xc2b2ae35u) - 0.5,
       random01(particleSeed ^ 0x27d4eb2fu) - 0.5
     );
-    let mist = outwardSpeed > 2.4 && random01(particleSeed ^ 0xa511e9b3u) < 0.18;
-    let particleRadius = radius * (0.72 + 0.5 * random01(particleSeed ^ 0x165667b1u)) * select(1.0, 0.62, mist);
+    // Outward speed is our available proxy for breakup energy. Bias energetic
+    // events toward smaller fragments, as a high Weber number would, but keep
+    // a minority of coarse fragments so the result is not another uniform
+    // size class. The exponent and floor deliberately bound this heuristic
+    // until a sampled air-relative velocity is available.
+    let speedRatio = outwardSpeed / max(params.controls.y, 0.1);
+    let energyRatio = max(1.0, speedRatio * speedRatio);
+    let breakupScale = clamp(pow(energyRatio, -0.32), 0.38, 1.0);
+    let sizeBias = 0.55 + 0.4 * random01(particleSeed ^ 0xd3a2646cu);
+    var energyRadiusScale = mix(1.0, breakupScale, sizeBias);
+    if (random01(particleSeed ^ 0xfd7046c5u) < 0.16) {
+      energyRadiusScale = 0.88 + 0.24 * random01(particleSeed ^ 0xb55a4f09u);
+    }
+    let particleRadius = radius * (0.72 + 0.5 * random01(particleSeed ^ 0x165667b1u)) * energyRadiusScale;
     let particlePosition = escaped + (scatter - normal * min(dot(scatter, normal), 0.0)) * radius * 0.7;
     let particleVelocity = velocity + scatter * (0.12 * length(velocity) + 0.08);
-    let kind = select(0.0, 1.0, mist);
-    let lifetime = select(1.1 + 1.2 * random01(particleSeed ^ 0x3c6ef372u), 0.7 + 1.0 * random01(particleSeed ^ 0xbb67ae85u), mist);
+    let lifetime = 1.1 + 1.2 * random01(particleSeed ^ 0x3c6ef372u);
     let slot = atomicAdd(&particleState.cursor, 1u) % capacity();
     atomicAdd(&particleState.spawned, 1u);
     particles[slot] = Particle(
       vec4f(particlePosition, particleRadius),
       vec4f(particleVelocity, 0.0),
-      vec4f(kind, lifetime, 1.0, random01(particleSeed ^ 0x1b873593u))
+      vec4f(0.0, lifetime, 1.0, random01(particleSeed ^ 0x1b873593u))
     );
   }
 }
@@ -343,13 +328,10 @@ struct Particle {
 
 @group(0) @binding(0) var<uniform> view: ViewUniforms;
 @group(0) @binding(1) var<storage, read> particles: array<Particle>;
-override renderSpray = true;
-
 struct ParticleVertex {
   @builtin(position) clip: vec4f,
   @location(0) local: vec2f,
-  @location(1) @interpolate(flat) kind: f32,
-  @location(2) opacity: f32,
+  @location(1) opacity: f32,
 }
 
 fn project(world: vec3f) -> vec4f {
@@ -372,7 +354,6 @@ fn particleVertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) i
   let particle = particles[instance];
   var output: ParticleVertex;
   output.local = corners[vertex];
-  output.kind = particle.attributes.x;
   output.opacity = particle.attributes.z;
   if (particle.attributes.z < 0.5 || particle.positionRadius.w <= 0.0) {
     output.clip = vec4f(2.0, 2.0, 2.0, 1.0);
@@ -382,8 +363,7 @@ fn particleVertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) i
   let forward = normalize(view.cameraTarget.xyz - view.cameraPosition.xyz);
   let right = normalize(cross(forward, vec3f(0.0, 1.0, 0.0)));
   let up = normalize(cross(right, forward));
-  let sizeScale = select(select(1.35, 1.9, particle.attributes.x > 0.5), 1.1, particle.attributes.x > 1.5);
-  let world = particle.positionRadius.xyz + (right * output.local.x + up * output.local.y) * particle.positionRadius.w * sizeScale;
+  let world = particle.positionRadius.xyz + (right * output.local.x + up * output.local.y) * particle.positionRadius.w * 1.35;
   output.clip = project(world);
   if (output.clip.w <= 0.001) { output.clip = vec4f(2.0, 2.0, 2.0, 1.0); output.opacity = 0.0; }
   return output;
@@ -393,14 +373,11 @@ fn particleVertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) i
 fn particleFragment(input: ParticleVertex) -> @location(0) vec4f {
   let radius2 = dot(input.local, input.local);
   if (radius2 > 1.0 || input.opacity <= 0.0) { discard; }
-  if (!renderSpray && input.kind < 0.5) { discard; }
   let edge = 1.0 - smoothstep(0.34, 1.0, radius2);
-  var color = vec3f(0.72, 0.88, 0.98);
-  var alpha = 0.72 * edge;
-  if (input.kind > 1.5) { color = vec3f(0.92, 0.98, 0.96); alpha = 0.82 * edge; }
-  else if (input.kind > 0.5) { color = vec3f(0.88, 0.94, 0.98); alpha = 0.24 * edge; }
+  let color = vec3f(0.62, 0.80, 0.90);
+  let alpha = 0.46 * edge;
   let highlight = pow(max(0.0, 1.0 - radius2), 3.0);
-  return vec4f(color + vec3f(0.16) * highlight, alpha * input.opacity);
+  return vec4f(color + vec3f(0.08) * highlight, alpha * input.opacity);
 }
 `;
 
@@ -432,8 +409,7 @@ struct SphereVertex {
   @location(0) local: vec2f,
   @location(1) @interpolate(flat) center: vec3f,
   @location(2) @interpolate(flat) radius: f32,
-  @location(3) @interpolate(flat) kind: f32,
-  @location(4) @interpolate(flat) enabled: f32,
+  @location(3) @interpolate(flat) enabled: f32,
 }
 
 struct InterfaceFragment {
@@ -466,9 +442,8 @@ fn sphereVertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) ins
   output.local = corners[vertex];
   output.center = particle.positionRadius.xyz;
   output.radius = particle.positionRadius.w;
-  output.kind = particle.attributes.x;
   output.enabled = particle.attributes.z;
-  if (output.enabled < 0.5 || output.radius <= 0.0 || output.kind >= 0.5) {
+  if (output.enabled < 0.5 || output.radius <= 0.0) {
     output.clip = vec4f(2.0, 2.0, 2.0, 1.0);
     output.enabled = 0.0;
     return output;
@@ -481,7 +456,7 @@ fn sphereVertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) ins
 
 fn sphereInterface(input: SphereVertex, back: bool) -> InterfaceFragment {
   let radius2 = dot(input.local, input.local);
-  if (input.enabled < 0.5 || input.kind >= 0.5 || radius2 > 1.0) { discard; }
+  if (input.enabled < 0.5 || radius2 > 1.0) { discard; }
   let z = sqrt(max(0.0, 1.0 - radius2));
   let facing = select(-1.0, 1.0, back);
   let localNormal = cameraRight() * input.local.x + cameraUp() * input.local.y + cameraForward() * (facing * z);
@@ -592,14 +567,20 @@ export class WebGPUSecondaryParticleSystem {
     this.writeParameters(dt, source);
   }
 
-  encode(encoder: GPUCommandEncoder) {
+  encode(encoder: GPUCommandEncoder, timestampWrites?: GPUComputePassTimestampWrites) {
     if (!this.updatePipeline || !this.spawnPipeline) return;
-    const update = encoder.beginComputePass({ label: "Advect secondary liquid particles" });
+    const update = encoder.beginComputePass({
+      label: "Advect spray droplets",
+      ...(timestampWrites?.beginningOfPassWriteIndex !== undefined ? { timestampWrites: { querySet: timestampWrites.querySet, beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } } : {})
+    });
     update.setPipeline(this.updatePipeline);
     update.setBindGroup(0, this.bindGroup);
     update.dispatchWorkgroups(Math.ceil(this.renderSource.capacity / 64));
     update.end();
-    const spawn = encoder.beginComputePass({ label: "Seed escaped spray particles" });
+    const spawn = encoder.beginComputePass({
+      label: "Seed escaped spray droplets",
+      ...(timestampWrites?.endOfPassWriteIndex !== undefined ? { timestampWrites: { querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex } } : {})
+    });
     spawn.setPipeline(this.spawnPipeline);
     spawn.setBindGroup(0, this.bindGroup);
     spawn.dispatchWorkgroups(Math.ceil(this.grid.nx / 4), Math.ceil(this.grid.ny / 4), Math.ceil(this.grid.nz / 4));
@@ -614,7 +595,6 @@ export class WebGPUSecondaryParticleSystem {
 }
 
 export class SecondaryParticleRenderPipeline {
-  private overlayPipeline?: GPURenderPipeline;
   private fallbackPipeline?: GPURenderPipeline;
   private opticalFrontPipeline?: GPURenderPipeline;
   private opticalBackPipeline?: GPURenderPipeline;
@@ -633,10 +613,10 @@ export class SecondaryParticleRenderPipeline {
       { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } }
     ] });
     const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
-    const overlayDescriptor = (label: string, renderSpray: boolean): GPURenderPipelineDescriptor => ({
+    const fallbackDescriptor = (label: string): GPURenderPipelineDescriptor => ({
       label, layout: pipelineLayout,
       vertex: { module: overlayModule, entryPoint: "particleVertex" },
-      fragment: { module: overlayModule, entryPoint: "particleFragment", constants: { renderSpray: renderSpray ? 1 : 0 }, targets: [{
+      fragment: { module: overlayModule, entryPoint: "particleFragment", targets: [{
         format: this.format,
         blend: {
           color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
@@ -652,9 +632,8 @@ export class SecondaryParticleRenderPipeline {
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
     });
-    [this.overlayPipeline, this.fallbackPipeline, this.opticalFrontPipeline, this.opticalBackPipeline] = await Promise.all([
-      this.device.createRenderPipelineAsync(overlayDescriptor("Secondary mist and foam overlay", false)),
-      this.device.createRenderPipelineAsync(overlayDescriptor("Secondary liquid fallback overlay", true)),
+    [this.fallbackPipeline, this.opticalFrontPipeline, this.opticalBackPipeline] = await Promise.all([
+      this.device.createRenderPipelineAsync(fallbackDescriptor("Spray droplet fallback overlay")),
       this.device.createRenderPipelineAsync(opticalDescriptor("Secondary spray front interfaces", "sphereFront")),
       this.device.createRenderPipelineAsync(opticalDescriptor("Secondary spray back interfaces", "sphereBack"))
     ]);
@@ -671,6 +650,10 @@ export class SecondaryParticleRenderPipeline {
     this.opticalBindGroup = bindGroup;
   }
 
+  get active() {
+    return Boolean(this.source && this.opticalBindGroup);
+  }
+
   encodeOpticalInterface(pass: GPURenderPassEncoder, side: "front" | "back") {
     const pipeline = side === "front" ? this.opticalFrontPipeline : this.opticalBackPipeline;
     if (!pipeline || !this.opticalBindGroup || !this.source) return false;
@@ -680,11 +663,10 @@ export class SecondaryParticleRenderPipeline {
     return true;
   }
 
-  encode(encoder: GPUCommandEncoder, target: GPUTextureView, includeSpray = true) {
-    const pipeline = includeSpray ? this.fallbackPipeline : this.overlayPipeline;
-    if (!pipeline || !this.overlayBindGroup || !this.source) return false;
-    const pass = encoder.beginRenderPass({ label: "Render secondary liquid particles", colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }] });
-    pass.setPipeline(pipeline);
+  encode(encoder: GPUCommandEncoder, target: GPUTextureView, timestampWrites?: GPURenderPassTimestampWrites) {
+    if (!this.fallbackPipeline || !this.overlayBindGroup || !this.source) return false;
+    const pass = encoder.beginRenderPass({ label: "Render fallback spray droplets", colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }], ...(timestampWrites ? { timestampWrites } : {}) });
+    pass.setPipeline(this.fallbackPipeline);
     pass.setBindGroup(0, this.overlayBindGroup);
     pass.draw(6, this.source.capacity);
     pass.end();

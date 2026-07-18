@@ -399,12 +399,14 @@ class SimulationController {
       gpuMaterialization_ms: sane(gpu?.materialization_ms, physicsFallback.gpuMaterialization_ms),
       gpuSurfaceUpdate_ms: sane(gpu?.surfaceUpdate_ms, physicsFallback.gpuSurfaceUpdate_ms),
       gpuRigid_ms: sane(gpu?.rigidCoupling_ms, physicsFallback.gpuRigid_ms),
+      gpuSpraySimulation_ms: sane(gpu?.spray_ms, physicsFallback.gpuSpraySimulation_ms),
       gpuDiagnostics_ms: sane(gpu?.diagnostics_ms, physicsFallback.gpuDiagnostics_ms),
       gpuOverhead_ms: sane(gpu?.overhead_ms, physicsFallback.gpuOverhead_ms),
       gpuRender_ms: sane(metrics.gpuRender_ms, renderFallback.gpuRender_ms),
       gpuSurfaceExtraction_ms: sane(metrics.gpuSurfaceExtraction_ms, 0),
       gpuDryScene_ms: sane(metrics.gpuDryScene_ms, renderFallback.gpuDryScene_ms),
       gpuInterfaces_ms: sane(metrics.gpuInterfaces_ms, renderFallback.gpuInterfaces_ms),
+      gpuSprayRender_ms: sane(metrics.gpuSprayRender_ms, renderFallback.gpuSprayRender_ms),
       gpuOpticalComposite_ms: sane(metrics.gpuOpticalComposite_ms, renderFallback.gpuOpticalComposite_ms),
       gpuUpscale_ms: sane(metrics.gpuUpscale_ms, renderFallback.gpuUpscale_ms)
     };

@@ -44,11 +44,14 @@ export interface RasterWaterTimestampRanges {
   scene: TimestampRange;
   frontInterfaces: TimestampRange;
   backInterfaces: TimestampRange;
+  sprayFront: TimestampRange;
+  sprayBack: TimestampRange;
   composite: TimestampRange;
 }
 
 export interface RasterWaterEncodeResult {
   surfaceUpdated: boolean;
+  sprayRendered: boolean;
 }
 
 /**
@@ -890,9 +893,10 @@ export class RasterWaterPipeline {
       this.causticsValid = true;
     }
     const scene=encoder.beginRenderPass({label:"Dry scene",colorAttachments:[{view:this.sceneTexture.createView(),clearValue:{r:0,g:0,b:0,a:65504},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.scene}:{})});scene.setPipeline(this.scenePipeline);scene.setBindGroup(0,this.sceneBindGroup);scene.draw(3);scene.end();
-    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",timestampWrites?:TimestampRange)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.secondaryParticles?.encodeOpticalInterface(pass,side);pass.end();};
-    interfacePass("Water front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.frontInterfaces);interfacePass("Water back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.backInterfaces);
-    const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:output,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,this.compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface };
+    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,timestampWrites?:TimestampRange)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);pass.end();};
+    const sprayPass=(label:string,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",timestampWrites?:TimestampRange)=>{if(!this.secondaryParticles?.active)return false;const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),loadOp:"load",storeOp:"store"},{view:normal.createView(),loadOp:"load",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthLoadOp:"load",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});this.secondaryParticles.encodeOpticalInterface(pass,side);pass.end();return true;};
+    interfacePass("Water front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,timestamps?.frontInterfaces);const sprayRendered=sprayPass("Spray front interfaces",this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.sprayFront);interfacePass("Water back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,timestamps?.backInterfaces);sprayPass("Spray back interfaces",this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.sprayBack);
+    const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:output,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,this.compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface, sprayRendered };
   }
 
   destroy() {
