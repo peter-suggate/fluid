@@ -74,6 +74,8 @@ export interface GPUSolverInstance {
   readonly gridPressureTexture?: GPUTexture;
   /** Post-projection fine-cell divergence diagnostic. */
   readonly gridDivergenceTexture?: GPUTexture;
+  /** Lazily allocate dense adaptive fields when a scientific grid slice needs them. */
+  ensureGridDiagnosticTextures?(): void;
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean;
   readStats(): Promise<GPUEulerianInfo>;
   destroy(): void;

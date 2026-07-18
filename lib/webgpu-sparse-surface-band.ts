@@ -430,7 +430,12 @@ fn allocateHalo(@builtin(global_invocation_id) gid: vec3u){allocateAndListFor(gi
 fn finalizeDispatch() {
   let resident = min(atomicLoad(&activePages[0]), u32(params.sizing.w));
   let voxelsPerPage = params.fineDims.w * params.fineDims.w * params.fineDims.w;
-  atomicStore(&activePages[1], (resident * voxelsPerPage + 255u) / 256u);
+  let blocks = (resident * voxelsPerPage + 255u) / 256u;
+  let x = min(blocks, 65535u);
+  var y = 1u;
+  if (x > 0u) { y = (blocks + x - 1u) / x; }
+  atomicStore(&activePages[1], x);
+  atomicStore(&activePages[2], y);
 }
 `;
 
@@ -528,7 +533,7 @@ fn trilinearPhi(position: vec3f, useB: bool) -> f32 {
   return mix(mix(mix(p000,p100,t.x),mix(p010,p110,t.x),t.y), mix(mix(p001,p101,t.x),mix(p011,p111,t.x),t.y), t.z);
 }
 fn invocation(gid: vec3u) -> vec4u {
-  let stream = gid.x;
+  let stream = gid.x + gid.y * activePages[1] * 256u;
   let voxels = params.fineDims.w * params.fineDims.w * params.fineDims.w;
   let activeIndex = stream / voxels;
   if (activeIndex >= activePages[0] || 4u + activeIndex >= arrayLength(&activePages)) { return vec4u(INVALID); }
@@ -636,12 +641,13 @@ fn payloadIndex(q: vec3i) -> u32 {
   return slot * brickSize * brickSize * brickSize + local.x + brickSize * (local.y + brickSize * local.z);
 }
 fn invocation(gid: vec3u) -> vec4u {
+  let stream = gid.x + gid.y * activePages[1] * 256u;
   let voxels = params.fineDims.w * params.fineDims.w * params.fineDims.w;
-  let activeIndex = gid.x / voxels;
+  let activeIndex = stream / voxels;
   if (activeIndex >= activePages[0] || 4u + activeIndex >= arrayLength(&activePages)) { return vec4u(INVALID); }
   let pageIndex = activePages[4u + activeIndex];
   if (pageIndex >= params.brickDims.w) { return vec4u(INVALID); }
-  let localIndex = gid.x - activeIndex * voxels;
+  let localIndex = stream - activeIndex * voxels;
   let local = vec3u(localIndex % params.fineDims.w, (localIndex / params.fineDims.w) % params.fineDims.w,
     localIndex / (params.fineDims.w * params.fineDims.w));
   let q = pageCoordinate(pageIndex) * params.fineDims.w + local;

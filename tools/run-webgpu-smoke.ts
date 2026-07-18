@@ -14,6 +14,7 @@ import { summarizeDriftOscillation } from "../lib/tall-cell-diagnostics";
 import { VOXEL_MATERIAL_IDS, voxelMaterial } from "../lib/voxel-scene";
 import { SPARSE_VOXEL_DEBUG_RECORD_STRIDE, SparseVoxelDebugRenderer, type SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
 import { RasterWaterPipeline } from "../lib/webgpu-water-pipeline";
+import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "../lib/webgpu-octree-sparse-bricks";
 import { environmentIndex } from "../lib/environments";
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "../lib/terrain";
@@ -857,7 +858,8 @@ async function runGPU(
   // when timestamp writes are attached (see docs/TALL_CELL_STABILITY.md), so
   // correctness audits run without GPU stage timings.
   const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") && process.env.FLUID_DISABLE_TIMESTAMPS !== "1" ? ["timestamp-query"] : [];
-  const device = await adapter.requestDevice({ requiredFeatures });
+  const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
+  const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
   let lost: GPUDeviceLostInfo | undefined;
   void device.lost.then((info) => { lost = info; });
   const validationErrors: string[] = [];

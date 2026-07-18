@@ -468,14 +468,15 @@ fn extractSparseMain(@builtin(global_invocation_id) gid: vec3u) {
   if (sparseOverflow()) { return; }
   let brickSize = sparseParams.fineDims.w;
   let voxelsPerPage = brickSize * brickSize * brickSize;
-  let activeIndex = gid.x / voxelsPerPage;
+  let stream = gid.x + gid.y * sparseActivePages[1] * 256u;
+  let activeIndex = stream / voxelsPerPage;
   if (activeIndex >= sparseActivePages[0] || 4u + activeIndex >= arrayLength(&sparseActivePages)) { return; }
   let pageIndex = sparseActivePages[4u + activeIndex];
   if (pageIndex >= sparseParams.brickDims.w) { return; }
   let page = vec3u(pageIndex % sparseParams.brickDims.x,
     (pageIndex / sparseParams.brickDims.x) % sparseParams.brickDims.y,
     pageIndex / (sparseParams.brickDims.x * sparseParams.brickDims.y));
-  let localIndex = gid.x - activeIndex * voxelsPerPage;
+  let localIndex = stream - activeIndex * voxelsPerPage;
   let local = vec3u(localIndex % brickSize, (localIndex / brickSize) % brickSize, localIndex / (brickSize * brickSize));
   let q = page * brickSize + local;
   let dims = sparseParams.fineDims.xyz;

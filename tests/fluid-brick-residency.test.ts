@@ -80,6 +80,10 @@ test("GPU residency builds active and retired indirect worklists without readbac
   assert.match(fluidBrickResidencyShader, /minimumPhi <= 0\.0 && maximumPhi >= 0\.0/);
   assert.match(fluidBrickResidencyShader, /min\(abs\(minimumPhi\), abs\(maximumPhi\)\)/);
   assert.match(fluidBrickResidencyShader, /resident \* voxelsPerBrick/);
+  assert.match(fluidBrickResidencyShader, /let activeDispatch = tiledDispatch/);
+  assert.match(fluidBrickResidencyShader, /atomicStore\(&worklist\[2\], activeDispatch\.y\)/);
+  assert.match(fluidBrickResidencyShader, /let topologyDispatch = tiledDispatch/);
+  assert.doesNotMatch(fluidBrickResidencyShader, /resident \* topologyGroups, 65535u/);
   assert.doesNotMatch(fluidBrickResidencyShader, /mapAsync|getMappedRange/);
   assert.match(sparseBrickDenseFieldShader, /usesActiveWorklist\(\)/);
   assert.match(sparseBrickDenseFieldShader, /localIndex = index - streamBrick \* voxelsPerBrick/);
@@ -91,6 +95,7 @@ test("pressure topology rebuild consumes the shared resident-brick worklist indi
   assert.match(rebuild, /residency\.worklist/);
   assert.match(rebuild, /dispatchWorkgroupsIndirect/);
   assert.match(octreeProjectionShader, /fn residentTopologyCell/);
+  assert.match(octreeProjectionShader, /workgroup\.x \+ workgroup\.y \* compaction\[12\]/);
   assert.match(octreeProjectionShader, /fn rasterizeSolidsActive/);
   assert.match(octreeProjectionShader, /fn resetTopologyActive/);
   assert.match(octreeProjectionShader, /fn refineTopologyActive/);
@@ -112,6 +117,7 @@ test("retired fluid bricks rebuild their topology before leaving the active doma
   assert.match(rebuild, /dispatchRetired\(this\.refineRetiredPipeline\)/);
   assert.match(rebuild, /dispatchRetired\(this\.balanceRetiredPipeline\)/);
   assert.match(octreeProjectionShader, /fn retiredTopologyCell/);
+  assert.match(octreeProjectionShader, /workgroup\.x \+ workgroup\.y \* compaction\[5\]/);
   assert.match(octreeProjectionShader, /let retiredBase = 16u \+ capacity \* 2u/);
   assert.match(octreeProjectionShader, /fn resetTopologyRetired/);
   assert.match(octreeProjectionShader, /fn refineTopologyRetired/);

@@ -12,6 +12,13 @@ import {
   sparseSurfaceResidencyShader,
 } from "../lib/webgpu-sparse-surface-band";
 
+test("sparse surface indirect work tiles into two dimensions", () => {
+  assert.match(sparseSurfaceResidencyShader, /let x = min\(blocks, 65535u\)/);
+  assert.match(sparseSurfaceResidencyShader, /atomicStore\(&activePages\[2\], y\)/);
+  assert.match(sparseSurfaceFieldShader, /gid\.x \+ gid\.y \* activePages\[1\] \* 256u/);
+  assert.match(sparseSurfaceDynamicsShader, /gid\.x \+ gid\.y \* activePages\[1\] \* 256u/);
+});
+
 test("surface-band planning refines virtual samples without allocating the full fine volume", () => {
   const plan = planSparseSurfaceBand([61, 46, 41], { refinementFactor: 2, brickSize: 8, maximumResidentFraction: 0.35 });
   assert.deepEqual(plan.fineDimensions, [122, 92, 82]);

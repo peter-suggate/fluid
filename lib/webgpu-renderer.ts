@@ -5,6 +5,7 @@ import type { EulerianRenderState } from "./eulerian-solver";
 import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
 import { getMethod, type GPUSolverInstance, type MethodParamValues } from "./methods";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
+import { requiredFluidDeviceLimits } from "./webgpu-device-limits";
 import { RasterWaterPipeline } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import { environmentShaderLibrary } from "./webgpu-environments";
@@ -613,7 +614,8 @@ export class FluidLabRenderer {
     }
     progress("Requesting GPU device",1);
     const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
-    const device = await adapter.requestDevice({ requiredFeatures });
+    const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
+    const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
     if (this.disposed) { device.destroy(); return; }
     const context = this.canvas.getContext("webgpu");
     if (!context) {
@@ -945,6 +947,7 @@ export class FluidLabRenderer {
     if (timingContext !== this.renderTimingContext) { this.renderTimingContext = timingContext; this.gpuRender_ms = undefined; this.gpuSurfaceExtraction_ms=undefined;this.gpuDryScene_ms=undefined;this.gpuInterfaces_ms=undefined;this.gpuSprayFront_ms=undefined;this.gpuSprayBack_ms=undefined;this.gpuSprayRender_ms=undefined;this.gpuOpticalComposite_ms=undefined;this.gpuUpscale_ms=undefined; }
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
+    if (backend === "webgpu" && gridOverlay?.axis !== "off") this.gpuFluid?.ensureGridDiagnosticTextures?.();
     const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, config, time_s, bodies, targetFps) : undefined;
     if (gpuInfo && this.gpuFluid && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) this.gridOverlayPipeline?.setVolume(this.gpuFluid.surfaceFieldTexture ?? this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture);
     const cpuPhysicsSubmit_ms=performance.now()-physicsStart,uploadStart=performance.now();

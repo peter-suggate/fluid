@@ -7,6 +7,7 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
   const lost = new Promise<GPUDeviceLostInfo>((resolve) => { resolveDeviceLost = resolve; });
   let deviceDestroyCount = 0;
   let submitCount = 0;
+  let requestedDescriptor: GPUDeviceDescriptor | undefined;
   const destroyable = () => ({ destroy() {} });
   const texture = () => ({ ...destroyable(), width: 1, height: 1, createView: () => ({}) });
   const pipeline = () => ({ getBindGroupLayout: () => ({}) });
@@ -30,7 +31,13 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
   } as unknown as GPUDevice;
   const adapter = {
     features: new Set<GPUFeatureName>(),
-    requestDevice: async () => device,
+    limits: {
+      maxStorageBuffersPerShaderStage: 10,
+      maxStorageBufferBindingSize: 512 * 1024 * 1024,
+      maxBufferSize: 1024 * 1024 * 1024,
+      maxTextureDimension3D: 2048,
+    },
+    requestDevice: async (descriptor: GPUDeviceDescriptor) => { requestedDescriptor = descriptor; return device; },
     info: { vendor: "test" }
   } as unknown as GPUAdapter;
   const context = { configure() {} } as unknown as GPUCanvasContext;
@@ -54,6 +61,12 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
   const renderer = new FluidLabRenderer(canvas, (status) => statuses.push(status));
   await renderer.initialize();
   assert.equal(statuses.at(-1)?.state, "ready");
+  assert.deepEqual(requestedDescriptor?.requiredLimits, {
+    maxStorageBuffersPerShaderStage: 10,
+    maxStorageBufferBindingSize: 512 * 1024 * 1024,
+    maxBufferSize: 1024 * 1024 * 1024,
+    maxTextureDimension3D: 2048,
+  });
 
   resolveDeviceLost({ reason: "unknown", message: "test device loss" } as GPUDeviceLostInfo);
   await lost;
