@@ -4,7 +4,7 @@ import { signedDistanceFromVolume } from "./quadtree-tall-cell-grid";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 import { WebGPUQuadtreeSurfaceState, type SurfaceInflowState } from "./webgpu-quadtree-builder";
 import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
-import { FLUID_BRICK_TOPOLOGY_DISPATCH_OFFSET_BYTES } from "./webgpu-fluid-brick-residency";
+import { FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES, FLUID_BRICK_TOPOLOGY_DISPATCH_OFFSET_BYTES } from "./webgpu-fluid-brick-residency";
 
 export interface OctreeProjectionOptions {
   pressureIterations: number;
@@ -13,6 +13,8 @@ export interface OctreeProjectionOptions {
   adaptivity?: number;
   /** Pure-phase cells farther from liquid/solid interfaces than this finest-cell band may remain coarse. */
   interfaceRefinementBandCells?: number;
+  /** Adds up to eight finest cells of refinement support around curved or strongly straining surface regions. */
+  surfaceDetailStrength?: number;
   jacobiRelaxation?: number;
   extrapolationSweeps?: number;
   /**
@@ -140,6 +142,10 @@ export class WebGPUOctreeProjection {
   private resetActivePipeline!: GPUComputePipeline;
   private refineActivePipeline!: GPUComputePipeline;
   private balanceActivePipeline!: GPUComputePipeline;
+  private rasterizeSolidsRetiredPipeline!: GPUComputePipeline;
+  private resetRetiredPipeline!: GPUComputePipeline;
+  private refineRetiredPipeline!: GPUComputePipeline;
+  private balanceRetiredPipeline!: GPUComputePipeline;
   private jacobiPipeline!: GPUComputePipeline;
   private planPipeline!: GPUComputePipeline;
   private scanPipeline!: GPUComputePipeline;
@@ -158,6 +164,7 @@ export class WebGPUOctreeProjection {
   private readonly maxLeafSize: number;
   private readonly adaptivity: number;
   private readonly interfaceRefinementBandCells: number;
+  private readonly surfaceDetailStrength: number;
   private readonly iterations: number;
   private readonly extrapolationSweeps: number;
   private readonly leafSolver: "dense" | "compact" | "chebyshev" | "megakernel";
@@ -179,6 +186,7 @@ export class WebGPUOctreeProjection {
     this.maxLeafSize = octreeLeafSize(options.maximumLeafSize ?? 8);
     this.adaptivity = Math.max(0, Math.min(1, options.adaptivity ?? 1));
     this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
+    this.surfaceDetailStrength = Math.max(0, Math.min(1, options.surfaceDetailStrength ?? 0));
     this.iterations = Math.max(8, Math.min(400, Math.round(options.pressureIterations)));
     this.extrapolationSweeps = Math.max(0, Math.min(8, Math.round(options.extrapolationSweeps ?? 4)));
     this.linearBlocks = Math.ceil(count / 256);
@@ -202,7 +210,16 @@ export class WebGPUOctreeProjection {
       device, dims, cell, resources.velocityOut, initialOctreeLevelSet(scene, dims, cell), undefined,
       undefined, false, false, true, true, this.solidCells
     );
-    this.sparseBrickWorld = new OctreeSparseBrickWorld(device, scene, [dims.nx, dims.ny, dims.nz], { brickSize: 8 });
+    // The rebuild worklist must cover every leaf that refinement or subsequent
+    // 2:1 grading can touch. A narrower residency halo leaves initially fine
+    // air bricks permanently outside both the active and retired streams.
+    const topologyHaloCells = this.interfaceRefinementBandCells
+      + 8 * this.surfaceDetailStrength
+      + (this.maxLeafSize - 1);
+    this.sparseBrickWorld = new OctreeSparseBrickWorld(device, scene, [dims.nx, dims.ny, dims.nz], {
+      brickSize: 8,
+      haloCells: topologyHaloCells
+    });
     this.levelSetTexture = this.surfaceState.texture;
     this.topology = device.createBuffer({ label: "Octree dense owner map", size: Math.max(8, count * 8), usage: GPUBufferUsage.STORAGE });
     this.pressureA = device.createBuffer({ label: "Octree leaf pressure A", size: Math.max(4, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -218,7 +235,7 @@ export class WebGPUOctreeProjection {
     });
     this.leafHeaders = device.createBuffer({ label: "Octree leaf row headers", size: compactBuffers ? Math.max(32, count * 32) : 32, usage: GPUBufferUsage.STORAGE });
     this.leafEntries = device.createBuffer({ label: "Octree leaf matrix entries", size: compactBuffers ? Math.max(8, count * 48) : 8, usage: GPUBufferUsage.STORAGE });
-    this.solveDispatch = device.createBuffer({ label: "Octree leaf solve dispatch", size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
+    this.solveDispatch = device.createBuffer({ label: "Octree leaf solve and retired-topology dispatch", size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
     this.params = device.createBuffer({ label: "Octree projection parameters", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const diagnosticUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING;
     this.topologyTexture = device.createTexture({ label: "Octree overlay topology", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "rg32uint", usage: diagnosticUsage });
@@ -358,6 +375,7 @@ export class WebGPUOctreeProjection {
   private static readonly pipelineEntryPoints = [
     "rasterizeSolids", "resetTopology", "refineTopology", "balanceTopology", "jacobi",
     "rasterizeSolidsActive", "resetTopologyActive", "refineTopologyActive", "balanceTopologyActive",
+    "rasterizeSolidsRetired", "resetTopologyRetired", "refineTopologyRetired", "balanceTopologyRetired",
     "planLeaves", "scanLeafBlocks", "emitLeaves", "assembleSystem", "gatherBodyCoupling", "applyBodyCoupling", "iterateLeaves", "iterateChebyshev", "solveLeaves",
     "reconstructGradients", "project", "extrapolate"
   ] as const;
@@ -366,6 +384,7 @@ export class WebGPUOctreeProjection {
     [
       this.rasterizeSolidsPipeline, this.resetPipeline, this.refinePipeline, this.balancePipeline, this.jacobiPipeline,
       this.rasterizeSolidsActivePipeline, this.resetActivePipeline, this.refineActivePipeline, this.balanceActivePipeline,
+      this.rasterizeSolidsRetiredPipeline, this.resetRetiredPipeline, this.refineRetiredPipeline, this.balanceRetiredPipeline,
       this.planPipeline, this.scanPipeline, this.emitPipeline, this.assemblePipeline, this.gatherBodyCouplingPipeline, this.applyBodyCouplingPipeline, this.iteratePipeline, this.iterateChebyshevPipeline, this.solvePipeline,
       this.reconstructGradientsPipeline, this.projectPipeline, this.extrapolatePipeline
     ] = compiled;
@@ -421,7 +440,12 @@ export class WebGPUOctreeProjection {
       speed > 0 ? inflow!.velocity_m_s.z / speed : 0,
       inflow?.length_m ?? 0
     ]);
-    new Float32Array(data, 112, 4).set([this.scene.fluid.density_kg_m3, 0, 0, 0]);
+    new Float32Array(data, 112, 4).set([
+      this.scene.fluid.density_kg_m3,
+      this.scene.fluid.surfaceTension_N_m,
+      this.scene.numerics.maxDt_s,
+      this.surfaceDetailStrength
+    ]);
     this.device.queue.writeBuffer(this.params, 0, data);
   }
 
@@ -451,6 +475,10 @@ export class WebGPUOctreeProjection {
         this.sparseBrickWorld.residency.worklist, FLUID_BRICK_TOPOLOGY_DISPATCH_OFFSET_BYTES,
         this.solveDispatch, 0, 12
       );
+      encoder.copyBufferToBuffer(
+        this.sparseBrickWorld.residency.worklist, FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES,
+        this.solveDispatch, 16, 12
+      );
     }
     const pass = encoder.beginComputePass({ label: "Octree reset and refinement" });
     const dispatch = (full: GPUComputePipeline, resident: GPUComputePipeline) => {
@@ -459,11 +487,25 @@ export class WebGPUOctreeProjection {
       if (active) pass.dispatchWorkgroupsIndirect(this.solveDispatch, 0);
       else pass.dispatchWorkgroups(...this.workgroups);
     };
+    const dispatchRetired = (pipeline: GPUComputePipeline) => {
+      if (!active) return;
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, this.groups.ab);
+      pass.dispatchWorkgroupsIndirect(this.solveDispatch, 16);
+    };
     dispatch(this.rasterizeSolidsPipeline, this.rasterizeSolidsActivePipeline);
+    dispatchRetired(this.rasterizeSolidsRetiredPipeline);
     dispatch(this.resetPipeline, this.resetActivePipeline);
-    for (let size = this.maxLeafSize; size >= 2; size >>= 1) dispatch(this.refinePipeline, this.refineActivePipeline);
+    dispatchRetired(this.resetRetiredPipeline);
+    for (let size = this.maxLeafSize; size >= 2; size >>= 1) {
+      dispatch(this.refinePipeline, this.refineActivePipeline);
+      dispatchRetired(this.refineRetiredPipeline);
+    }
     const balanceRounds = Math.max(1, Math.ceil(Math.log2(this.maxLeafSize)));
-    for (let round = 0; round < balanceRounds; round += 1) dispatch(this.balancePipeline, this.balanceActivePipeline);
+    for (let round = 0; round < balanceRounds; round += 1) {
+      dispatch(this.balancePipeline, this.balanceActivePipeline);
+      dispatchRetired(this.balanceRetiredPipeline);
+    }
     pass.end();
     return true;
   }
@@ -593,9 +635,16 @@ export class WebGPUOctreeProjection {
     }
     // An odd sweep ends in scratch; copy it back to the solver's authoritative velocity.
     if (this.extrapolationSweeps % 2 === 1) encoder.copyTextureToTexture({ texture: this.resources.velocityScratch }, { texture: this.resources.velocityOut }, [this.dims.nx, this.dims.ny, this.dims.nz]);
-    const materialize = encoder.beginComputePass({ label: "Materialize octree overlay fields", ...(detailedTimestampWrites?.materialization ? { timestampWrites: detailedTimestampWrites.materialization } : {}) });
+    this.encodeOverlayMaterialization(encoder, finalInA, detailedTimestampWrites?.materialization);
+  }
+
+  /** Publish the dense diagnostic textures from the current live owner map.
+   * This is also called at t=0, before any pressure solve, so reset-time grid
+   * inspection never decodes zero-initialized topology storage as finest 1^3. */
+  encodeOverlayMaterialization(encoder: GPUCommandEncoder, pressureInA = true, timestampWrites?: GPUComputePassTimestampWrites) {
+    const materialize = encoder.beginComputePass({ label: "Materialize octree overlay fields", ...(timestampWrites ? { timestampWrites } : {}) });
     materialize.setPipeline(this.materializePipeline);
-    materialize.setBindGroup(0, finalInA ? this.diagnosticGroups.pressureA : this.diagnosticGroups.pressureB);
+    materialize.setBindGroup(0, pressureInA ? this.diagnosticGroups.pressureA : this.diagnosticGroups.pressureB);
     materialize.dispatchWorkgroups(...this.workgroups);
     materialize.end();
   }
@@ -781,6 +830,25 @@ fn residentTopologyCell(workgroup: vec3u, local: vec3u) -> vec3u {
   return brick * 8u + sub * 4u + local;
 }
 
+// Retired work uses the existing 256-thread sparse-payload dispatch: an 8^3
+// brick contributes two workgroups. Each 4^3 topology workgroup therefore
+// visits four octants serially. Resetting and rebuilding these just-retired
+// bricks prevents old interface leaves from fossilizing outside residency.
+fn retiredTopologyCell(workgroup: vec3u, local: vec3u, quarter: u32) -> vec3u {
+  let retiredSlot = workgroup.x / 2u;
+  let half = workgroup.x % 2u;
+  let bx = (dims().x + 7u) / 8u;
+  let by = (dims().y + 7u) / 8u;
+  let bz = (dims().z + 7u) / 8u;
+  let capacity = bx * by * bz;
+  let retiredBase = 16u + capacity * 2u;
+  let brickIndex = compaction[retiredBase + retiredSlot * 2u];
+  let brick = vec3u(brickIndex % bx, (brickIndex / bx) % by, brickIndex / (bx * by));
+  let octant = half * 4u + quarter;
+  let sub = vec3u(octant & 1u, (octant >> 1u) & 1u, (octant >> 2u) & 1u);
+  return brick * 8u + sub * 4u + local;
+}
+
 fn rasterizeSolidsAt(gid: vec3u) {
   if (any(gid >= dims())) { return; }
   let p = vec3i(gid); var fraction = 0.0; var owner = -1;
@@ -803,6 +871,11 @@ fn rasterizeSolidsActive(@builtin(workgroup_id) wid: vec3u, @builtin(local_invoc
   rasterizeSolidsAt(residentTopologyCell(wid, lid));
 }
 
+@compute @workgroup_size(4,4,4)
+fn rasterizeSolidsRetired(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+  for (var quarter = 0u; quarter < 4u; quarter += 1u) { rasterizeSolidsAt(retiredTopologyCell(wid, lid, quarter)); }
+}
+
 fn resetTopologyAt(gid: vec3u) {
   if (any(gid >= dims())) { return; }
   var size = params.dimsMax.w;
@@ -822,24 +895,50 @@ fn resetTopologyActive(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocat
   resetTopologyAt(residentTopologyCell(wid, lid));
 }
 
+@compute @workgroup_size(4,4,4)
+fn resetTopologyRetired(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+  for (var quarter = 0u; quarter < 4u; quarter += 1u) { resetTopologyAt(retiredTopologyCell(wid, lid, quarter)); }
+}
+
 fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   var closestSurface = 3.402823e38; var minimumPhi = 3.402823e38; var maximumPhi = -3.402823e38; var minimumSolid = 1.0; var maximumSolid = 0.0;
+  var minimumSurfaceVelocity = vec3f(0.0); var maximumSurfaceVelocity = vec3f(0.0); var maximumCurvatureProxy = 0.0; var hasSurfaceSample = false;
+  let finestWidth = max(params.cellRelax.x, max(params.cellRelax.y, params.cellRelax.z));
+  let baseBand = max(0.0, params.solve.w);
   for (var z = 0u; z < size; z += 1u) { for (var y = 0u; y < size; y += 1u) { for (var x = 0u; x < size; x += 1u) {
     let q = origin + vec3u(x,y,z); let solid = solidCells[index(q)].fraction;
     let samplePhi = phi(vec3i(q));
     closestSurface = min(closestSurface, abs(samplePhi)); minimumPhi = min(minimumPhi, samplePhi); maximumPhi = max(maximumPhi, samplePhi); minimumSolid = min(minimumSolid, solid); maximumSolid = max(maximumSolid, solid);
+    if (params.physical.w > 0.0 && abs(samplePhi) < (baseBand + 2.0) * finestWidth) {
+      let velocity = textureLoad(velocityIn, vec3i(q), 0).xyz;
+      if (!hasSurfaceSample) { minimumSurfaceVelocity = velocity; maximumSurfaceVelocity = velocity; }
+      else { minimumSurfaceVelocity = min(minimumSurfaceVelocity, velocity); maximumSurfaceVelocity = max(maximumSurfaceVelocity, velocity); }
+      hasSurfaceSample = true;
+      let p = vec3i(q);
+      let laplacian = phi(p + vec3i(1,0,0)) + phi(p - vec3i(1,0,0))
+        + phi(p + vec3i(0,1,0)) + phi(p - vec3i(0,1,0))
+        + phi(p + vec3i(0,0,1)) + phi(p - vec3i(0,0,1)) - 6.0 * samplePhi;
+      maximumCurvatureProxy = max(maximumCurvatureProxy, abs(laplacian) / max(finestWidth, 1e-6));
+    }
   } } }
   // Interface-graded sizing: leaves that cross the liquid surface or a solid
   // boundary split, while uniform air, liquid, and solid bulk may stay coarse
   // once they are outside the explicit finest-cell interface band.
-  let finestWidth = max(params.cellRelax.x, max(params.cellRelax.y, params.cellRelax.z));
   let adaptivity = f32(params.control.x) / 1000.0;
   if (adaptivity <= 0.0) { return true; }
   let crossesSurface = minimumPhi < 0.0 && maximumPhi >= 0.0;
   let crossesSolidBoundary = maximumSolid - minimumSolid > 1e-5 || (maximumSolid > 1e-5 && maximumSolid < 1.0 - 1e-5);
   if (crossesSurface || crossesSolidBoundary) { return true; }
   if (minimumSolid >= 1.0 - 1e-5) { return false; }
-  return closestSurface < max(0.0, params.solve.w) * finestWidth;
+  // This only widens the fine support band; it cannot coarsen a leaf selected
+  // by the baseline signed-distance rule. Velocity span estimates deformation
+  // over one configured maximum step, while the phi Laplacian detects curved
+  // features. Keeping it inside the full-domain rebuild avoids stale brick
+  // lists and preserves the dense transport/pressure authority.
+  let strainActivity = select(0.0, length(maximumSurfaceVelocity - minimumSurfaceVelocity) * params.physical.z / max(finestWidth, 1e-6), hasSurfaceSample);
+  let detailActivity = params.physical.w * clamp(max(strainActivity, 2.0 * maximumCurvatureProxy), 0.0, 1.0);
+  let effectiveBand = baseBand + 8.0 * detailActivity;
+  return closestSurface < effectiveBand * finestWidth;
 }
 
 fn splitLeaf(origin: vec3u, size: u32) {
@@ -862,6 +961,11 @@ fn refineTopology(@builtin(global_invocation_id) gid: vec3u) { refineTopologyAt(
 @compute @workgroup_size(4,4,4)
 fn refineTopologyActive(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
   refineTopologyAt(residentTopologyCell(wid, lid));
+}
+
+@compute @workgroup_size(4,4,4)
+fn refineTopologyRetired(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+  for (var quarter = 0u; quarter < 4u; quarter += 1u) { refineTopologyAt(retiredTopologyCell(wid, lid, quarter)); }
 }
 
 fn neighborTooFine(origin: vec3u, size: u32) -> bool {
@@ -893,6 +997,11 @@ fn balanceTopology(@builtin(global_invocation_id) gid: vec3u) { balanceTopologyA
 @compute @workgroup_size(4,4,4)
 fn balanceTopologyActive(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
   balanceTopologyAt(residentTopologyCell(wid, lid));
+}
+
+@compute @workgroup_size(4,4,4)
+fn balanceTopologyRetired(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+  for (var quarter = 0u; quarter < 4u; quarter += 1u) { balanceTopologyAt(retiredTopologyCell(wid, lid, quarter)); }
 }
 
 fn pressureOf(owner: Owner) -> f32 { return pressureIn[index(unpackOrigin(owner.packedOrigin))]; }

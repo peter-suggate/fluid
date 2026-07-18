@@ -5,6 +5,7 @@ import {
   SECONDARY_PARTICLE_STRIDE_BYTES,
   secondaryParticleCapacity,
   secondaryParticleComputeShader,
+  secondaryParticleCorrectionShader,
   secondaryParticleOpticalShader,
   secondaryParticleRenderShader
 } from "../lib/webgpu-secondary-particles";
@@ -43,6 +44,14 @@ test("secondary particle sampling abstracts dense and restricted fields", () => 
   assert.match(secondaryParticleComputeShader, /fn packedY\(cell: vec3i\)/);
   assert.match(secondaryParticleComputeShader, /fn occupancySurface\(\) -> bool/);
   assert.match(secondaryParticleComputeShader, /here\.x \+ velocityRaw\(q - vec3i\(1, 0, 0\)\)\.x/);
+});
+
+test("optional particle feedback is narrow, bounded, and excludes detached spray", () => {
+  assert.match(secondaryParticleCorrectionShader, /if \(abs\(residentPhi\) > 2\.0 \* hMin\(\)\) \{ return; \}/);
+  assert.match(secondaryParticleCorrectionShader, /let maximumShift = 0\.2 \* hMin\(\) \* correctionStrength\(\)/);
+  assert.match(secondaryParticleCorrectionShader, /max\(-0\.5 \* hMin\(\)/);
+  assert.match(secondaryParticleCorrectionShader, /atomicMin\(&nearestParticlePhi/);
+  assert.doesNotMatch(secondaryParticleCorrectionShader, /velocityAge\.xyz\s*[+\-*\/]?=/, "surface correction must not invent particle-to-grid momentum transfer");
 });
 
 test("fallback spray renderer draws soft liquid-colored billboards", () => {

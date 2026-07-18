@@ -16,6 +16,8 @@ import { GPUFluidBrickResidency, type FluidBrickResidencyStats } from "./webgpu-
 
 export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
+  /** Air-side support retained for pressure-topology rebuilds. */
+  haloCells?: number;
 }
 
 export interface OctreeSparseBrickDenseFields {
@@ -212,7 +214,7 @@ export class OctreeSparseBrickWorld {
       leafIndices[mappedBrick++] = leafIndex;
     }
     this.residency = new GPUFluidBrickResidency(device, dimensions, sceneDomain.cellSize_m, {
-      brickSize, haloCells: 2, retireAfterFrames: 3, leafIndices, leafCapacity: this.tree.leafCapacity,
+      brickSize, haloCells: options.haloCells ?? 2, retireAfterFrames: 3, leafIndices, leafCapacity: this.tree.leafCapacity,
     });
 
     const counts = storageBuffer(device, "Sparse brick source counts", packed.counts.byteLength, packed.counts);

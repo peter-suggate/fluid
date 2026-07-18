@@ -11,9 +11,10 @@ import {
   surfaceRasterShader
 } from "../lib/webgpu-water-pipeline";
 import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
-import { secondaryParticleComputeShader, secondaryParticleOpticalShader, secondaryParticleRenderShader } from "../lib/webgpu-secondary-particles";
+import { secondaryParticleComputeShader, secondaryParticleCorrectionShader, secondaryParticleOpticalShader, secondaryParticleRenderShader } from "../lib/webgpu-secondary-particles";
 import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
 import { octreeSparseBrickDebugPublicationShader } from "../lib/webgpu-octree-sparse-bricks";
+import { octreeProjectionShader } from "../lib/webgpu-octree";
 import { sparseSceneProxyVoxelizationShader } from "../lib/webgpu-sparse-scene-proxies";
 
 const naga = process.env.NAGA ?? "naga";
@@ -28,8 +29,10 @@ const shaders = {
   "secondary-liquid-particles": secondaryParticleRenderShader,
   "secondary-liquid-particle-optics": secondaryParticleOpticalShader,
   "secondary-liquid-particle-compute": secondaryParticleComputeShader,
+  "secondary-liquid-particle-correction": secondaryParticleCorrectionShader,
   "sparse-brick-dense-field": sparseBrickDenseFieldShader,
   "sparse-brick-debug-publication": octreeSparseBrickDebugPublicationShader,
+  "octree-projection": octreeProjectionShader,
   "sparse-scene-proxy-voxelization": sparseSceneProxyVoxelizationShader
 };
 const directory = mkdtempSync(join(tmpdir(), "fluid-water-wgsl-"));

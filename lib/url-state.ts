@@ -198,7 +198,7 @@ export function parseQueryState(search: string): QueryState {
       rightPanel,
       gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" ? grid : initialUI.gridOverlayAxis,
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
-      gridOverlayMode: gridMode === "structure" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
+      gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
       waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode,
       voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode,
       targetFps: clampTargetFps(numberParam(query, "fps", initialUI.targetFps, MIN_TARGET_FPS, MAX_TARGET_FPS))

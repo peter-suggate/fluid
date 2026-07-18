@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { cloneScene } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
@@ -87,6 +88,27 @@ test("pressure topology rebuild consumes the shared resident-brick worklist indi
   assert.match(octreeProjectionShader, /fn resetTopologyActive/);
   assert.match(octreeProjectionShader, /fn refineTopologyActive/);
   assert.match(octreeProjectionShader, /fn balanceTopologyActive/);
+});
+
+test("pressure topology residency covers refinement and 2:1 grading support", () => {
+  const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  assert.match(source, /const topologyHaloCells = this\.interfaceRefinementBandCells/);
+  assert.match(source, /\+ 8 \* this\.surfaceDetailStrength/);
+  assert.match(source, /\+ \(this\.maxLeafSize - 1\)/);
+  assert.match(source, /haloCells: topologyHaloCells/);
+});
+
+test("retired fluid bricks rebuild their topology before leaving the active domain", () => {
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
+  assert.match(rebuild, /FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES/);
+  assert.match(rebuild, /dispatchRetired\(this\.resetRetiredPipeline\)/);
+  assert.match(rebuild, /dispatchRetired\(this\.refineRetiredPipeline\)/);
+  assert.match(rebuild, /dispatchRetired\(this\.balanceRetiredPipeline\)/);
+  assert.match(octreeProjectionShader, /fn retiredTopologyCell/);
+  assert.match(octreeProjectionShader, /let retiredBase = 16u \+ capacity \* 2u/);
+  assert.match(octreeProjectionShader, /fn resetTopologyRetired/);
+  assert.match(octreeProjectionShader, /fn refineTopologyRetired/);
+  assert.match(octreeProjectionShader, /fn balanceTopologyRetired/);
 });
 
 test("sparse fluid tail exposes separate residency and publication timestamp ranges", () => {

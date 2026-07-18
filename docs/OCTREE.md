@@ -43,6 +43,44 @@ in the advancement path. Rigid-load delivery and `readStats()` use asynchronous
 diagnostic/readback buffers after submission; neither controls the encoded
 fluid step.
 
+## Surface-detail controls
+
+The fixed `interfaceRefinementBandCells` remains the validated default. Two
+advanced controls are available for experiments at a higher finest-grid
+resolution, but both default to zero for every scene and quality preset so the
+established solver behavior is unchanged. Neither control contains a
+scenario-specific path:
+
+- `surfaceDetailStrength` widens the finest pressure support by up to eight
+  cells where the resident level set has high discrete curvature or the
+  projected velocity varies strongly across a leaf. It runs inside the normal
+  full-domain topology rebuild and can only refine more; it never uses the
+  previous frame's sparse-residency list to omit physics work.
+- `secondaryParticleSurfaceCorrection` optionally folds near-interface
+  secondary particles back into the level set. Detached spray stays render
+  only. The correction moves a sample by at most `0.2h` per substep, never
+  pushes it below `-0.5h`, and does not transfer particle momentum.
+
+Adaptive stepping also enforces the explicit capillary-wave bound
+`0.5 sqrt(rho h^3 / (pi sigma))` in addition to the existing velocity CFL
+bound. This becomes important as the finest cell width `h` is reduced.
+
+These controls improve pressure support and surface retention around energetic
+features, but they do not create resolution beyond the dense velocity/level-set
+lattice. Truly sub-lattice ripples still require a finer finest grid or a later
+sparse authoritative transport representation.
+
+To inspect the live band, open Scientific view and enable any solver-grid
+slice. The default **Structure** field gives finest `1³` pressure cells a
+translucent pink tint and pink boundaries, which remain visible when individual
+cells are sub-pixel at the overview camera. Select **Cell scale** for the full
+hierarchy: pink cells are finest `1³` cells, cyan cells are intermediate dyadic
+leaves, and blue cells are the coarsest level supported by the active solver
+(the default octree uses `8³`). The palette is normalized to that live maximum,
+not to an unavailable fixed tree depth. Both views read the GPU owner texture
+directly. Sweeping the X, Y, or Z slice shows the complete liquid- and air-side
+surface band for any scene.
+
 ## Current scope
 
 - Supported targets include moving free surfaces and immersed rigid bodies.
