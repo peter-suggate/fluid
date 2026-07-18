@@ -1,0 +1,53 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import {
+  beerLambert,
+  dielectricFresnel,
+  GLASS_OPTICS,
+  unifiedLightingShaderLibrary,
+  WATER_OPTICS
+} from "../lib/webgpu-lighting";
+import { compositeShader, sceneShader } from "../lib/webgpu-water-pipeline";
+import { voxelDebugRenderShader } from "../lib/webgpu-voxel-debug";
+
+const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+
+test("shared lighting contract is resource-layout independent and scene-linear", () => {
+  assert.match(unifiedLightingShaderLibrary, /struct UnifiedLightingMaterial/);
+  assert.match(unifiedLightingShaderLibrary, /struct UnifiedLightingInput/);
+  assert.match(unifiedLightingShaderLibrary, /fn shadeUnifiedSurface/);
+  assert.match(unifiedLightingShaderLibrary, /fn unifiedDielectricFresnel/);
+  assert.match(unifiedLightingShaderLibrary, /fn unifiedAbsorbingTransmission/);
+  assert.doesNotMatch(unifiedLightingShaderLibrary, /@group|@binding/, "the closure must compose with any renderer bind-group ABI");
+  assert.doesNotMatch(unifiedLightingShaderLibrary, /pow\([^\n]*1\.0\s*\/\s*2\.2/, "display transfer belongs only in the final output pass");
+});
+
+test("CPU optical mirrors retain physical endpoint and attenuation invariants", () => {
+  assert.equal(dielectricFresnel(1, WATER_OPTICS.fresnelF0), WATER_OPTICS.fresnelF0);
+  assert.equal(dielectricFresnel(0, WATER_OPTICS.fresnelF0), 1);
+  assert.equal(dielectricFresnel(2, GLASS_OPTICS.fresnelF0), GLASS_OPTICS.fresnelF0, "cosine is clamped");
+  assert.equal(dielectricFresnel(-1, GLASS_OPTICS.fresnelF0), 1, "negative cosine is clamped");
+
+  assert.deepEqual(beerLambert(WATER_OPTICS.absorption, 0), [1, 1, 1]);
+  const transmission = beerLambert(WATER_OPTICS.absorption, 2);
+  assert.ok(transmission[0] < transmission[1] && transmission[1] < transmission[2], "clean water attenuates red first");
+  assert.deepEqual(beerLambert(WATER_OPTICS.absorption, -2), [1, 1, 1], "negative optical distance cannot amplify light");
+});
+
+test("raster bodies and optical water/glass consume the canonical closure", () => {
+  assert.match(sceneShader, /shadeUnifiedSurface\(material,lighting\)/);
+  assert.match(rendererSource, /shadeUnifiedSurface\(material, lighting\)/, "the ray-marched comparison path must use the same closure");
+  assert.match(voxelDebugRenderShader, /shadeUnifiedSurface\(closure, lighting\)/, "raw voxel materials must use the same closure");
+  assert.match(compositeShader, /unifiedDielectricFresnel\(cosine,0\.04\)/);
+  assert.match(compositeShader, /unifiedDielectricFresnel\(cosine,0\.02037\)/);
+  assert.match(compositeShader, /unifiedAbsorbingTransmission/);
+  assert.match(compositeShader, /unifiedSpecularLobe\(n,-rd,light,180\.0\)/);
+});
+
+test("analytic tank glass remains enabled for the hybrid octree smooth scene", () => {
+  assert.doesNotMatch(sceneShader, /u\.options\.w<0\.5&&environmentIndex\(\)!=7/);
+  const glassFunction = compositeShader.slice(compositeShader.indexOf("fn compositeFrontGlass"), compositeShader.indexOf("fn finish"));
+  assert.doesNotMatch(glassFunction, /u\.options\.w/, "voxel scene selection must not suppress the raster glass presentation");
+  assert.match(glassFunction, /if\(environmentIndex\(\)==7\)\{return color;\}/, "the open garden remains vessel-free");
+});

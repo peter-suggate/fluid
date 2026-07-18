@@ -16,8 +16,8 @@ export const simulationMethods: ReadonlyArray<SimulationMethod> = [
   cpuReferenceMethod
 ];
 
-export const defaultMethodId = tallCellMethod.id;
+export const defaultMethodId = octreeMethod.id;
 
 export function getMethod(id: string): SimulationMethod {
-  return simulationMethods.find((method) => method.id === id) ?? tallCellMethod;
+  return simulationMethods.find((method) => method.id === id) ?? octreeMethod;
 }

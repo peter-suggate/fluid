@@ -64,7 +64,8 @@ export function WebGPUViewport() {
             { axis: ui.view === "scientific" ? ui.gridOverlayAxis : "off", position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
             ui.waterRenderMode,
             getScenePreset(sceneState.presetId).background,
-            targetFps
+            targetFps,
+            ui.voxelRenderMode
           );
         } catch (error: unknown) {
           running = false;

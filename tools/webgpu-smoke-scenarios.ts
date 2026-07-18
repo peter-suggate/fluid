@@ -32,6 +32,7 @@ export function isSmokeScenarioId(value: string): value is SmokeScenarioId {
 export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
   if (id === "hose-tank" || id === "dam-break-boxes" || id === "sphere-jet") {
     const scene = createPaperScenario(id);
+    scene.environment = id === "hose-tank" ? "conservatory" : id === "dam-break-boxes" ? "concrete-gallery" : "night-lab";
     return {
       id,
       description: id === "hose-tank"
@@ -53,6 +54,7 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
     // support, so oracle differentials are informative only; the per-method
     // invariant gates (volume, stability) remain authoritative.
     const scene = applyGardenPool(cloneScene(defaultScene), id === "garden-dam-break" ? { fillFraction: 0.16 } : {});
+    scene.environment = "garden";
     scene.sceneId = `smoke-${id}`;
     scene.rigidBodies = [];
     scene.fluid.surfaceTension_N_m = 0;
@@ -69,6 +71,7 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
   }
 
   const scene = cloneScene(defaultScene);
+  scene.environment = id === "deep-water" ? "research-station" : "default";
   scene.rigidBodies = [];
   if (id === "dam-break-ui") {
     scene.sceneId = "smoke-ui-dam-break";

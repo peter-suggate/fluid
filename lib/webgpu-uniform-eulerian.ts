@@ -242,8 +242,9 @@ export class WebGPUUniformEulerianSolver {
         rigidBodies: this.rigidBuffer, rigidExchange: this.rigidExchangeBuffer, terrain: this.terrainTexture
       }, {
         pressureIterations,
-        maximumLeafSize: options.octree.maximumLeafSize ?? (quality === "balanced" ? 4 : 8),
+        maximumLeafSize: options.octree.maximumLeafSize ?? 8,
         adaptivity: options.octree.adaptivity ?? 1,
+        interfaceRefinementBandCells: options.octree.interfaceRefinementBandCells ?? 4,
         jacobiRelaxation: options.octree.jacobiRelaxation ?? 0.8,
         extrapolationSweeps: options.octree.extrapolationSweeps ?? 4,
         leafSolver: options.octree.leafSolver,
@@ -310,6 +311,7 @@ export class WebGPUUniformEulerianSolver {
     // pressureA, pressureOut = the level-set texture itself). The velocity and
     // volume outputs are bound but never written by relaxSolidPhi.
     if (this.adaptiveProjection) this.solidPhiGroup = this.group(this.velocityA, this.velocityD, this.pressureA, this.adaptiveProjection.levelSetTexture, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA);
+    if (this.octreeProjection && !options.deferPipelineCompilation) this.publishInitialSparseScene();
   }
 
   private pipelineDescriptor(entryPoint:string,prep=false):GPUComputePipelineDescriptor{return{layout:prep?this.prepPipelineLayout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};}
@@ -330,6 +332,17 @@ export class WebGPUUniformEulerianSolver {
     if(this.quadtreeProjection)await this.quadtreeProjection.initializePipelines((label,completed)=>onProgress(label,definitions.length+completed,total));
     else if(this.octreeProjection)await this.octreeProjection.initializePipelines((label,completed)=>onProgress(label,definitions.length+completed,total));
     if(this.secondaryParticleSystem)await this.secondaryParticleSystem.initializePipelines((label,completed)=>onProgress(label,definitions.length+projectionPipelineCount+completed,total));
+    if (this.octreeProjection) this.publishInitialSparseScene();
+  }
+
+  /** Publish a complete t=0 scene after rigid-solid raster pipelines exist. */
+  private publishInitialSparseScene() {
+    if (!this.octreeProjection) return;
+    const initialSparseScene = this.device.createCommandEncoder({ label: "Publish initial sparse-brick scene" });
+    this.octreeProjection.encodeInlineRebuild(initialSparseScene);
+    this.octreeProjection.encodeSparseBrickWorld(initialSparseScene);
+    this.device.queue.submit([initialSparseScene.finish()]);
+    this.octreeProjection.finishInlineRebuild();
   }
 
   get volumeTexture() { return this.volumeA; }
@@ -339,6 +352,7 @@ export class WebGPUUniformEulerianSolver {
   // field through volumeTexture.
   private get adaptiveProjection() { return this.quadtreeProjection ?? this.octreeProjection; }
   get surfaceFieldTexture() { return this.adaptiveProjection?.levelSetTexture ?? this.volumeA; }
+  get sparseVoxelRenderSource() { return this.octreeProjection?.sparseVoxelRenderSource; }
   get columnBaseTexture() { return this.heightA; }
   get gridCellTexture() { return this.adaptiveProjection?.topologyTexture; }
   get velocityTexture() { return this.velocityA; }
@@ -775,6 +789,10 @@ export class WebGPUUniformEulerianSolver {
         } : undefined);
       }
     }
+    // Publish the final substep's resident fields into the shared sparse-brick
+    // world. The topology and payload stay GPU-resident; rendering consumes
+    // compact debug records and subsequent voxel kernels consume the same ABI.
+    this.octreeProjection?.encodeSparseBrickWorld(encoder);
     encoder.clearBuffer(this.reductionBuffer); { const timing = this.timing("diagnostics_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(pass, this.reductionPipeline, this.reductionGroup); pass.end(); }
     if (totalTiming && this.querySet) { const pass = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: totalTiming.end } }); pass.end(); }
     if (this.querySet && this.queryResolve && this.queryCount > 0) encoder.resolveQuerySet(this.querySet, 0, this.queryCount, this.queryResolve, 0);

@@ -15,6 +15,8 @@ export function VisualPanel() {
   const setView = useUIStore((state) => state.setView);
   const waterRenderMode = useUIStore((state) => state.waterRenderMode);
   const setWaterRenderMode = useUIStore((state) => state.setWaterRenderMode);
+  const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
+  const setVoxelRenderMode = useUIStore((state) => state.setVoxelRenderMode);
   const presetId = useSceneStore((state) => state.presetId);
   const targetFps = useUIStore((state) => state.targetFps);
   const setTargetFps = useUIStore((state) => state.setTargetFps);
@@ -81,6 +83,16 @@ export function VisualPanel() {
         <button className={waterRenderMode === "ray-marched" ? "active" : ""} onClick={() => setWaterRenderMode("ray-marched")}>Ray march</button>
       </div>
       <small className="control-hint">Raster optics uses the extracted liquid surface. Ray march samples the solver volume directly for comparison.</small>
+    </section>
+
+    <section className="panel-section utility-controls">
+      <div className="section-heading"><h2>Scene representation</h2><span>HYBRID OCTREE</span></div>
+      <div className="segmented compact">
+        <button className={voxelRenderMode === "smooth" ? "active" : ""} onClick={() => setVoxelRenderMode("smooth")}>Hybrid</button>
+        <button className={voxelRenderMode === "raw-voxels" ? "active" : ""} onClick={() => setVoxelRenderMode("raw-voxels")}>Raw voxels</button>
+        <button className={voxelRenderMode === "brick-grid" ? "active" : ""} onClick={() => setVoxelRenderMode("brick-grid")}>Brick grid</button>
+      </div>
+      <small className="control-hint">Hybrid view renders smooth water, glass, terrain, and rigid surfaces while the octree keeps their fluid/CSG proxies in GPU-resident sparse bricks. Raw and grid views inspect that same publication with indirect GPU draws and no topology readback.</small>
     </section>
 
     <section className="panel-section utility-controls">

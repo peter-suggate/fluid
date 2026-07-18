@@ -3,12 +3,15 @@ import { damBreakFractions } from "./initial-fluid";
 import { signedDistanceFromVolume } from "./quadtree-tall-cell-grid";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 import { WebGPUQuadtreeSurfaceState, type SurfaceInflowState } from "./webgpu-quadtree-builder";
+import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
 
 export interface OctreeProjectionOptions {
   pressureIterations: number;
-  maximumLeafSize?: 2 | 4 | 8;
+  maximumLeafSize?: 2 | 4 | 8 | 16 | 32;
   /** 0 = finest cells everywhere; 1 = full distance-graded coarsening. */
   adaptivity?: number;
+  /** Pure-phase cells farther from liquid/solid interfaces than this finest-cell band may remain coarse. */
+  interfaceRefinementBandCells?: number;
   jacobiRelaxation?: number;
   extrapolationSweeps?: number;
   /**
@@ -38,6 +41,14 @@ interface OctreeProjectionResources {
   rigidBodies: GPUBuffer;
   rigidExchange: GPUBuffer;
   terrain: GPUTexture;
+}
+
+function octreeLeafSize(value: number): 2 | 4 | 8 | 16 | 32 {
+  const rounded = Math.max(2, Math.round(value));
+  if (rounded >= 32) return 32;
+  if (rounded >= 16) return 16;
+  if (rounded >= 8) return 8;
+  return rounded <= 2 ? 2 : 4;
 }
 
 /**
@@ -116,6 +127,7 @@ export class WebGPUOctreeProjection {
   private readonly couplingPipelineLayout: GPUPipelineLayout;
   private readonly couplingShader: GPUShaderModule;
   private readonly surfaceState: WebGPUQuadtreeSurfaceState;
+  private readonly sparseBrickWorld: OctreeSparseBrickWorld;
   private readonly groups: { ab: GPUBindGroup; ba: GPUBindGroup; extrapolateOut: GPUBindGroup; extrapolateScratch: GPUBindGroup };
   private readonly diagnosticGroups: { pressureA: GPUBindGroup; pressureB: GPUBindGroup };
   private readonly couplingGroups: { pressureA: GPUBindGroup; pressureB: GPUBindGroup };
@@ -140,6 +152,7 @@ export class WebGPUOctreeProjection {
   private materializePipeline!: GPUComputePipeline;
   private readonly maxLeafSize: number;
   private readonly adaptivity: number;
+  private readonly interfaceRefinementBandCells: number;
   private readonly iterations: number;
   private readonly extrapolationSweeps: number;
   private readonly leafSolver: "dense" | "compact" | "chebyshev" | "megakernel";
@@ -157,8 +170,9 @@ export class WebGPUOctreeProjection {
     deferPipelineCompilation = false
   ) {
     const count = dims.nx * dims.ny * dims.nz;
-    this.maxLeafSize = Math.max(2, Math.min(8, options.maximumLeafSize ?? 8));
+    this.maxLeafSize = octreeLeafSize(options.maximumLeafSize ?? 8);
     this.adaptivity = Math.max(0, Math.min(1, options.adaptivity ?? 1));
+    this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
     this.iterations = Math.max(8, Math.min(400, Math.round(options.pressureIterations)));
     this.extrapolationSweeps = Math.max(0, Math.min(8, Math.round(options.extrapolationSweeps ?? 4)));
     this.linearBlocks = Math.ceil(count / 256);
@@ -182,6 +196,7 @@ export class WebGPUOctreeProjection {
       device, dims, cell, resources.velocityOut, initialOctreeLevelSet(scene, dims, cell), undefined,
       undefined, false, false, true, true, this.solidCells
     );
+    this.sparseBrickWorld = new OctreeSparseBrickWorld(device, scene, [dims.nx, dims.ny, dims.nz], { brickSize: 8 });
     this.levelSetTexture = this.surfaceState.texture;
     this.topology = device.createBuffer({ label: "Octree dense owner map", size: Math.max(8, count * 8), usage: GPUBufferUsage.STORAGE });
     this.pressureA = device.createBuffer({ label: "Octree leaf pressure A", size: Math.max(4, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -307,7 +322,7 @@ export class WebGPUOctreeProjection {
       leafCount: approximateLeaves, pressureSampleCount: approximateLeaves, liquidDofCount: approximateLeaves,
       faceCount: 0, mlsProjectionRowCount: 0, tallSegmentCount: 0, ghostFaceCount: 0,
       maximumNeighborRatio: 2, maximumFluidScale: this.maxLeafSize, compressionRatio: approximateLeaves / Math.max(1, count),
-      allocatedBytes: count * (this.leafSolver === "dense" ? 56 : 136) + 4 * (8 + 2 * this.linearBlocks + 12 * 8) + 144,
+      allocatedBytes: count * (this.leafSolver === "dense" ? 56 : 136) + 4 * (8 + 2 * this.linearBlocks + 12 * 8) + 144 + this.sparseBrickWorld.allocatedBytes,
       pressureIterationsUsed: initialSolvePasses, pressureIterationBudget: initialSolvePasses,
       pressureIterationHardBudget: initialSolvePasses, pressureConverged: undefined, velocityClampCount: 0,
       factorLevelCount: 0, multigridLevelCount: 0, multigridCoarsestDofs: 0, topologyReadbackBytes: 0,
@@ -378,7 +393,7 @@ export class WebGPUOctreeProjection {
     ]);
     new Uint32Array(data, 32, 4).set([Math.round(this.adaptivity * 1000), this.iterations, this.linearBlocks, 0]);
     // Megakernel residual tolerance, followed by the scaled Chebyshev spectrum.
-    new Float32Array(data, 48, 4).set([1e-8, 0.01, 2.2, 0]);
+    new Float32Array(data, 48, 4).set([1e-8, 0.01, 2.2, this.interfaceRefinementBandCells]);
     new Float32Array(data, 64, 4).set([
       this.scene.container.width_m,
       this.scene.container.height_m,
@@ -409,12 +424,12 @@ export class WebGPUOctreeProjection {
   }
 
   encodeInlineRebuild(encoder: GPUCommandEncoder) {
-    let pass = encoder.beginComputePass({ label: "Octree reset and refinement" });
+    const pass = encoder.beginComputePass({ label: "Octree reset and refinement" });
     this.dispatch(pass, this.rasterizeSolidsPipeline);
     this.dispatch(pass, this.resetPipeline);
     for (let size = this.maxLeafSize; size >= 2; size >>= 1) this.dispatch(pass, this.refinePipeline);
-    // Three in-place 2:1 smoothing rounds are sufficient for max leaf size 8.
-    for (let round = 0; round < 3; round += 1) this.dispatch(pass, this.balancePipeline);
+    const balanceRounds = Math.max(1, Math.ceil(Math.log2(this.maxLeafSize)));
+    for (let round = 0; round < balanceRounds; round += 1) this.dispatch(pass, this.balancePipeline);
     pass.end();
     return true;
   }
@@ -561,12 +576,21 @@ export class WebGPUOctreeProjection {
   encodeBodyImpulseReadback(_encoder: GPUCommandEncoder) { return undefined; }
   readBodyImpulseReadback(_buffer: GPUBuffer) { return Promise.resolve([]); }
   destroySharedSurface() { /* The octree owns its surface for its full lifetime. */ }
+  get sparseVoxelRenderSource() { return this.sparseBrickWorld.renderSource; }
+  encodeSparseBrickWorld(encoder: GPUCommandEncoder) {
+    this.sparseBrickWorld.encode(encoder, {
+      levelSet: this.levelSetTexture,
+      velocity: this.resources.velocityOut,
+      solidCells: this.solidCells
+    });
+  }
 
   destroy() {
     this.topology.destroy(); this.pressureA.destroy(); this.pressureB.destroy(); this.params.destroy();
     this.compaction.destroy(); this.leafHeaders.destroy(); this.leafEntries.destroy(); this.solveDispatch.destroy(); this.solidCells.destroy();
     this.topologyTexture.destroy(); this.pressureSamplesTexture.destroy(); this.pressureTexture.destroy(); this.divergenceTexture.destroy();
     this.surfaceState.destroy();
+    this.sparseBrickWorld.destroy();
   }
 }
 
@@ -730,18 +754,23 @@ fn resetTopology(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
-  var closestSurface = 3.402823e38; var minimumSolid = 1.0; var maximumSolid = 0.0;
+  var closestSurface = 3.402823e38; var minimumPhi = 3.402823e38; var maximumPhi = -3.402823e38; var minimumSolid = 1.0; var maximumSolid = 0.0;
   for (var z = 0u; z < size; z += 1u) { for (var y = 0u; y < size; y += 1u) { for (var x = 0u; x < size; x += 1u) {
     let q = origin + vec3u(x,y,z); let solid = solidCells[index(q)].fraction;
-    closestSurface = min(closestSurface, abs(phi(vec3i(q)))); minimumSolid = min(minimumSolid, solid); maximumSolid = max(maximumSolid, solid);
+    let samplePhi = phi(vec3i(q));
+    closestSurface = min(closestSurface, abs(samplePhi)); minimumPhi = min(minimumPhi, samplePhi); maximumPhi = max(maximumPhi, samplePhi); minimumSolid = min(minimumSolid, solid); maximumSolid = max(maximumSolid, solid);
   } } }
-  // Distance-graded sizing: a size-S leaf splits only when the surface is
-  // closer than S finest cells. The next level repeats the test, producing a
-  // finest band at the interface, size-2 shoulders, and a coarse deep bulk.
+  // Interface-graded sizing: leaves that cross the liquid surface or a solid
+  // boundary split, while uniform air, liquid, and solid bulk may stay coarse
+  // once they are outside the explicit finest-cell interface band.
   let finestWidth = max(params.cellRelax.x, max(params.cellRelax.y, params.cellRelax.z));
   let adaptivity = f32(params.control.x) / 1000.0;
+  if (adaptivity <= 0.0) { return true; }
+  let crossesSurface = minimumPhi < 0.0 && maximumPhi >= 0.0;
   let crossesSolidBoundary = maximumSolid - minimumSolid > 1e-5 || (maximumSolid > 1e-5 && maximumSolid < 1.0 - 1e-5);
-  return crossesSolidBoundary || closestSurface * adaptivity < f32(size) * finestWidth;
+  if (crossesSurface || crossesSolidBoundary) { return true; }
+  if (minimumSolid >= 1.0 - 1e-5) { return false; }
+  return closestSurface < max(0.0, params.solve.w) * finestWidth;
 }
 
 fn splitLeaf(origin: vec3u, size: u32) {

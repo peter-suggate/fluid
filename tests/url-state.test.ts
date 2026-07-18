@@ -26,6 +26,7 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
     gridOverlayAxis: "z",
     gridOverlaySlice: 0.7,
     waterRenderMode: "ray-marched",
+    voxelRenderMode: "brick-grid",
     targetFps: 90,
     camera: { ...initialUI.camera, distance_m: 4.2 }
   });
@@ -41,6 +42,7 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   assert.equal(parsed.ui.gridOverlayAxis, "z");
   assert.equal(parsed.ui.gridOverlaySlice, 0.7);
   assert.equal(parsed.ui.waterRenderMode, "ray-marched");
+  assert.equal(parsed.ui.voxelRenderMode, "brick-grid");
   assert.equal(parsed.ui.targetFps, 90);
   assert.equal(parsed.ui.camera.distance_m, 4.2);
   assert.deepEqual(parsed.overrides, {
@@ -100,7 +102,7 @@ test("invalid external query values fall back to validated defaults", () => {
   const parsed = parseQueryState("?method=nope&scene=nope&quality=extreme&environment=the-void&param.uniform.jacobiIterations=9999&scene.container.width_m=-4&scene.fluid.gravity_m_s2.y=null");
   const defaultScene = getScenePreset("water-box-dam-break").create();
 
-  assert.equal(parsed.methodId, "tall-cell");
+  assert.equal(parsed.methodId, "octree");
   assert.equal(parsed.presetId, "water-box-dam-break");
   assert.equal(parsed.quality, "balanced");
   assert.deepEqual(parsed.overrides, {});

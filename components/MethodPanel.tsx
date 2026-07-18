@@ -1,7 +1,7 @@
 "use client";
 
 import { RangeControl, Segmented } from "./controls";
-import { getMethod, simulationMethods, type MethodParamSpec } from "@/lib/methods";
+import { getMethod, type MethodParamSpec } from "@/lib/methods";
 import type { GPUQuality } from "@/lib/tall-cell-grid";
 import { simulation } from "@/lib/simulation/controller";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
@@ -50,7 +50,7 @@ export function MethodPanel() {
       <Segmented
         ariaLabel="Simulation method"
         value={methodId}
-        options={simulationMethods.map((candidate) => ({ value: candidate.id, label: candidate.shortLabel, title: candidate.description }))}
+        options={[{ value: "octree", label: "Voxel octree", title: "Unified sparse-brick voxel scene and fluid" }]}
         onChange={(value) => simulation.setMethod(value)}
       />
       <label className="select-control" title={method.pressureMapping}>

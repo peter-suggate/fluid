@@ -53,7 +53,7 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
     return [
       stage({
         key: "topology", label: "Octree rebuild + 2:1 balance", shortLabel: "OCTREE", value: value(contextMatches, snapshot.gpuLayerConstruction_ms), className: "stage-topology", group: "compute", active: active(snapshot, "topology"),
-        description: "Resets the dense owner map, refines leaves from the resident signed-distance sizing field, and applies three 2:1 balancing rounds entirely on the GPU.", reads: ["signed distance φ", "maximum leaf size", "adaptivity"], writes: ["balanced octree owner map"], dependsOn: ["uploads"], sync: "Regenerated once at the start of every GPU advance with no topology readback."
+        description: "Resets the dense owner map, refines leaves from the resident signed-distance sizing field, and applies enough 2:1 balancing rounds for the selected maximum leaf size entirely on the GPU.", reads: ["signed distance φ", "maximum leaf size", "adaptivity"], writes: ["balanced octree owner map"], dependsOn: ["uploads"], sync: "Regenerated once at the start of every GPU advance with no topology readback."
       }),
       stage({
         key: "advection", label: "Velocity transport preparation + advection", shortLabel: "ADVECT", value: value(contextMatches, snapshot.gpuAdvection_ms), className: "stage-advection", group: "compute", active: active(snapshot, "advection"),

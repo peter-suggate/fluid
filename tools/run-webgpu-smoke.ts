@@ -6,10 +6,17 @@ import { uniformMethod } from "../lib/methods/uniform";
 import { quadtreeTallCellMethod } from "../lib/methods/quadtree-tall-cell";
 import { octreeMethod } from "../lib/methods/octree";
 import { maximumFluidScale } from "../lib/quadtree-tall-cell-grid";
-import { initializeRigidBodies } from "../lib/rigid-body";
+import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../lib/rigid-body";
+import type { SceneDescription } from "../lib/model";
 import { createSingleTallCellProbeControlLayout, createSingleTallCellProbeLayout, createTallCellLayout, tallCellSettings, type SingleTallCellProbeOptions } from "../lib/tall-cell-grid";
 import { WebGPUEulerianSolver, type GPUEulerianInfo, type GPUQuality } from "../lib/webgpu-eulerian";
 import { summarizeDriftOscillation } from "../lib/tall-cell-diagnostics";
+import { VOXEL_MATERIAL_IDS, voxelMaterial } from "../lib/voxel-scene";
+import { SPARSE_VOXEL_DEBUG_RECORD_STRIDE, SparseVoxelDebugRenderer, type SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import { RasterWaterPipeline } from "../lib/webgpu-water-pipeline";
+import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "../lib/webgpu-octree-sparse-bricks";
+import { environmentIndex } from "../lib/environments";
+import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "../lib/terrain";
 import {
   compareScalarFields,
   compareSingleTallCellNeighborhood,
@@ -90,6 +97,7 @@ const checkpointEvery_s = Number(process.env.FLUID_CHECKPOINT_EVERY_S ?? 0);
 const stabilityEnvelopeRequested = process.env.FLUID_STABILITY_ENVELOPE === "1";
 const energyEverySteps = Number(process.env.FLUID_ENERGY_EVERY_STEPS ?? 0);
 const settlingGateRequested = process.env.FLUID_SETTLING_GATE === "1";
+const sparseStatsRequested = process.env.FLUID_SPARSE_STATS === "1";
 // The CPU-side level-set/velocity reconstruction has a small positive
 // equilibrium drift even for the uniform oracle.  The default is more than
 // six times the measured uniform 10 s noise floor (1.61e-4 /s on 2026-07-16)
@@ -139,6 +147,179 @@ async function readFloatTexture3D(device: GPUDevice, texture: GPUTexture, width:
   }
   buffer.unmap(); buffer.destroy();
   return output;
+}
+
+async function readBufferBinding(device: GPUDevice, binding: GPUBufferBinding, byteLength: number) {
+  const alignedLength = Math.max(4, Math.ceil(byteLength / 4) * 4);
+  const readback = device.createBuffer({ size: alignedLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder({ label: "Sparse voxel smoke readback" });
+  encoder.copyBufferToBuffer(binding.buffer, binding.offset ?? 0, readback, 0, alignedLength);
+  device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  const bytes = new Uint8Array(byteLength);
+  bytes.set(new Uint8Array(readback.getMappedRange(0, alignedLength)).subarray(0, byteLength));
+  readback.unmap(); readback.destroy();
+  return bytes;
+}
+
+interface SparseVoxelSmokeStats {
+  voxelCount: number;
+  brickCount: number;
+  activeVoxelCount: number;
+  activeBrickCount: number;
+  fluidVoxelCount: number;
+  environmentVoxelCount: number;
+  materialVoxelCounts: Record<string, number>;
+  nonFiniteRecordCount: number;
+  invalidMaterialCount: number;
+  fluidColorLinear: number[];
+  uiRawVoxelRenderWall_ms: number;
+  uiBrickGridRenderWall_ms: number;
+}
+
+async function smokeRenderSparseVoxelDebugModes(device: GPUDevice, source: SparseVoxelRenderSource) {
+  const main = new SparseVoxelDebugRenderer(device, { colorFormat: "rgba8unorm" });
+  await main.initialize();
+  main.setSource(source);
+  const color = device.createTexture({ size: [320, 180], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  const depth = device.createTexture({ size: [320, 180], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  const matrix = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  const renderMode = async (mode: "raw-voxels" | "brick-grid") => {
+    const started = performance.now();
+    const encoder = device.createCommandEncoder({ label: `Sparse voxel ${mode} WebGPU smoke` });
+    main.encode(encoder, {
+      mode,
+      colorTarget: color.createView(), depthTarget: depth.createView(),
+      colorLoadOp: "clear", depthLoadOp: "clear",
+      viewProjection: matrix, cameraPosition: [0, 0, 4]
+    });
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    return performance.now() - started;
+  };
+  const uiRawVoxelRenderWall_ms = await renderMode("raw-voxels");
+  const uiBrickGridRenderWall_ms = await renderMode("brick-grid");
+  main.destroy(); color.destroy(); depth.destroy();
+  return { uiRawVoxelRenderWall_ms, uiBrickGridRenderWall_ms };
+}
+
+async function readSparseVoxelStats(device: GPUDevice, source: SparseVoxelRenderSource): Promise<SparseVoxelSmokeStats> {
+  const voxelCount = Math.min(new Uint32Array((await readBufferBinding(device, source.voxelCount, 4)).buffer)[0], source.voxelCapacity);
+  const brickCount = Math.min(new Uint32Array((await readBufferBinding(device, source.brickCount, 4)).buffer)[0], source.brickCapacity);
+  const voxelBytes = await readBufferBinding(device, source.voxelRecords, voxelCount * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
+  const brickBytes = await readBufferBinding(device, source.brickRecords, brickCount * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
+  const materialBytes = await readBufferBinding(device, source.materials, source.materialCount * 32);
+  const voxelFloats = new Float32Array(voxelBytes.buffer), voxelWords = new Uint32Array(voxelBytes.buffer);
+  const brickWords = new Uint32Array(brickBytes.buffer), materialFloats = new Float32Array(materialBytes.buffer);
+  let activeVoxelCount = 0, activeBrickCount = 0, fluidVoxelCount = 0, environmentVoxelCount = 0, nonFiniteRecordCount = 0, invalidMaterialCount = 0;
+  const materialVoxelCounts: Record<string, number> = {};
+  for (let index = 0; index < voxelCount; index += 1) {
+    const word = index * 12, material = voxelWords[word + 8], flags = voxelWords[word + 9];
+    if ((flags & 1) === 0) continue;
+    activeVoxelCount += 1;
+    materialVoxelCounts[String(material)] = (materialVoxelCounts[String(material)] ?? 0) + 1;
+    if (material === VOXEL_MATERIAL_IDS.fluid) fluidVoxelCount += 1;
+    if (material >= ENVIRONMENT_VOXEL_MATERIAL_BASE) environmentVoxelCount += 1;
+    if (material >= source.materialCount) invalidMaterialCount += 1;
+    if (![...voxelFloats.slice(word, word + 3), ...voxelFloats.slice(word + 4, word + 7)].every(Number.isFinite)
+      || voxelFloats[word + 4] <= 0 || voxelFloats[word + 5] <= 0 || voxelFloats[word + 6] <= 0) nonFiniteRecordCount += 1;
+  }
+  for (let index = 0; index < brickCount; index += 1) if ((brickWords[index * 12 + 9] & 1) !== 0) activeBrickCount += 1;
+  const colorOffset = VOXEL_MATERIAL_IDS.fluid * 8;
+  const debugRenderTimings = await smokeRenderSparseVoxelDebugModes(device, source);
+  return {
+    voxelCount, brickCount, activeVoxelCount, activeBrickCount, fluidVoxelCount, environmentVoxelCount, materialVoxelCounts,
+    nonFiniteRecordCount, invalidMaterialCount,
+    fluidColorLinear: Array.from(materialFloats.slice(colorOffset, colorOffset + 3)),
+    ...debugRenderTimings
+  };
+}
+
+interface HybridPresentationSmokeStats {
+  initializeWall_ms: number;
+  frameWall_ms: number;
+  bodyCount: number;
+  width: number;
+  height: number;
+}
+
+function hybridPresentationBodies(scene: SceneDescription, bodies: RigidBodyState[]): RigidBodyState[] {
+  if (bodies.length > 0) return bodies;
+  const scale = Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
+  return initializeRigidBodies([{
+    id: "hybrid-render-smoke-body", name: "Hybrid render smoke body", shape: "box",
+    dimensions_m: { x: 0.18 * scale, y: 0.22 * scale, z: 0.16 * scale }, density_kg_m3: 700,
+    position_m: { x: 0.18 * scene.container.width_m, y: 0.36 * scene.container.height_m, z: 0 },
+    orientation: { w: 1, x: 0, y: 0, z: 0 },
+    linearVelocity_m_s: { x: 0, y: 0, z: 0 }, angularVelocity_rad_s: { x: 0, y: 0, z: 0 },
+    restitution: 0.2, friction: 0.5, motion: "static"
+  }]);
+}
+
+async function smokeRenderHybridPresentation(
+  device: GPUDevice,
+  solver: GPUSolverInstance,
+  scene: SceneDescription,
+  bodies: RigidBodyState[]
+): Promise<HybridPresentationSmokeStats> {
+  const width = 320, height = 180;
+  const uniformBuffer = device.createBuffer({ label: "Hybrid presentation smoke uniforms", size: 400, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const bodyBuffer = device.createBuffer({ label: "Hybrid presentation smoke bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const output = device.createTexture({ label: "Hybrid presentation smoke output", size: [width, height], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  const presentationBodies = hybridPresentationBodies(scene, bodies).slice(0, 12);
+  const span = Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
+  const packed = new Float32Array(100);
+  packed.set([width, height, solver.info.submittedTime_s ?? 0, 0], 0);
+  packed.set([1.55 * span, 1.12 * span, 1.72 * span, 0], 4);
+  packed.set([0, 0.38 * scene.container.height_m, 0, 0], 8);
+  packed.set([scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction], 12);
+  packed.set([0, scene.nominalResolution.length_m, presentationBodies.length, 0], 16);
+  packed.set([solver.info.nx, solver.info.ny, solver.info.nz, solver.info.gridKind === "restricted-tall-cell" ? 2 : solver.info.gridKind === "quadtree-tall-cell" || solver.info.gridKind === "octree" ? 3 : 1], 20);
+  packed.set([0, 0.5, 0, 0], 24);
+  packed.set([environmentIndex(scene.environment ?? "default"), solver.info.lastDt_s ?? 0, solver.info.maxSpeed_m_s ?? 0, 0], 28);
+  if (sceneHasTerrain(scene) && scene.terrain) {
+    const features = scene.terrain.features.slice(0, MAX_TERRAIN_FEATURES);
+    packed.set([1, scene.terrain.baseHeight_m, features.length, TERRAIN_UNION_EXPONENT], 32);
+    features.forEach((feature, index) => {
+      packed.set([feature.center_m.x, feature.center_m.z, feature.radius_m.x, feature.radius_m.z], 36 + index * 8);
+      packed.set([(feature.kind === "mound" ? 1 : -1) * feature.amount_m, feature.rotation_rad ?? 0, feature.flat ?? TERRAIN_DEFAULT_FLAT, 0], 40 + index * 8);
+    });
+  }
+  device.queue.writeBuffer(uniformBuffer, 0, packed);
+  const bodyData = new Float32Array(12 * 16);
+  const shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
+  const palette = [[0.95, 0.63, 0.29], [0.48, 0.66, 0.96], [0.84, 0.42, 0.48], [0.66, 0.52, 0.92]];
+  presentationBodies.forEach((body, index) => {
+    const offset = index * 16, d = body.description.dimensions_m;
+    const half = body.description.shape === "box" ? [d.x / 2, d.y / 2, d.z / 2] : body.description.shape === "sphere" ? [d.x, d.x, d.x] : [d.x, d.y / 2, d.x];
+    const color = palette[shapeIndex[body.description.shape]];
+    bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, boundingRadius(body)], offset);
+    bodyData.set([half[0], half[1], half[2], shapeIndex[body.description.shape]], offset + 4);
+    bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
+    bodyData.set([color[0], color[1], color[2], 0], offset + 12);
+  });
+  device.queue.writeBuffer(bodyBuffer, 0, bodyData);
+  const pipeline = new RasterWaterPipeline(device, "rgba8unorm", uniformBuffer, bodyBuffer);
+  try {
+    const initializeStarted = performance.now();
+    await pipeline.initialize();
+    const initializeWall_ms = performance.now() - initializeStarted;
+    pipeline.setVolume(solver.surfaceFieldTexture ?? solver.volumeTexture, solver.columnBaseTexture);
+    pipeline.ensureSize(width, height);
+    const frameStarted = performance.now();
+    const encoder = device.createCommandEncoder({ label: "Hybrid smooth WebGPU smoke" });
+    const encoded = pipeline.encode(
+      encoder, output.createView(), solver.info.nx, solver.info.ny, solver.info.nz,
+      solver.info.gridKind === "restricted-tall-cell", solver.info.maximumNeighborDelta ?? 0,
+      solver.info.encodedSteps ?? 0, 60
+    );
+    if (!encoded) throw new Error("Hybrid presentation pipeline did not encode a frame");
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    return { initializeWall_ms, frameWall_ms: performance.now() - frameStarted, bodyCount: presentationBodies.length, width, height };
+  } finally {
+    pipeline.destroy(); output.destroy(); uniformBuffer.destroy(); bodyBuffer.destroy();
+  }
 }
 
 interface VelocityStageSummary {
@@ -451,6 +632,8 @@ interface GPUSmokeResult {
   simulationWall_ms: number;
   steps: number;
   velocitySummary?: VelocityStageSummary;
+  sparseVoxelStats?: SparseVoxelSmokeStats;
+  hybridPresentationStats?: HybridPresentationSmokeStats;
   stabilityEnvelope?: StabilityEnvelope;
   energyTrace: MechanicalEnergySample[];
   checkpoints: Array<{
@@ -587,7 +770,7 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     matchedFieldStats: result.matchedSummary, volumeFieldStats: result.finalSummary,
     matchedTallCellActivity: result.matchedTallCellActivity, finalTallCellActivity: result.finalTallCellActivity,
     finalTallVolumeGaps: result.finalTallVolumeGaps,
-    velocitySummary: result.velocitySummary, stabilityEnvelope: result.stabilityEnvelope,
+    velocitySummary: result.velocitySummary, sparseVoxelStats: result.sparseVoxelStats, hybridPresentationStats: result.hybridPresentationStats, stabilityEnvelope: result.stabilityEnvelope,
     energyTraceSummary: energyTraceSummary(result.energyTrace),
     validationErrors: result.validationErrors
   }));
@@ -889,13 +1072,20 @@ async function runGPU(
       ? await readTallVelocityTexture3D(device, velocityTexture, info.nx, info.storedNy, info.nz, info.ny, await readFloatTexture2D(device, solver.columnBaseTexture, info.nx, info.nz), final.field, finalSpacing, scene.numerics.maxDt_s)
       : await readVelocityTexture3D(device, velocityTexture, info.nx, info.ny, info.nz, final.field, finalSpacing, scene.numerics.maxDt_s))
     : undefined;
+  const sparseSource = (solver as GPUSolverInstance).sparseVoxelRenderSource;
+  const hybridPresentationStats = sparseStatsRequested && method.id === "octree"
+    ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies)
+    : undefined;
+  const sparseVoxelStats = sparseStatsRequested && sparseSource
+    ? await readSparseVoxelStats(device, sparseSource)
+    : undefined;
   await device.queue.onSubmittedWorkDone();
   const result: GPUSmokeResult = {
     method: resultMethod, info, grid: [info.nx, info.ny, info.nz], matchedField: matched.field,
     matchedSummary: matched.summary, matchedTallCellActivity: matched.tallCellActivity,
     finalSummary: final?.summary, finalTallCellActivity: final?.tallCellActivity,
     finalTallVolumeGaps: final?.tallVolumeGaps, validationErrors,
-    construction_ms, runtime_ms: performance.now() - runStarted, simulationWall_ms, steps, velocitySummary, stabilityEnvelope, energyTrace, checkpoints
+    construction_ms, runtime_ms: performance.now() - runStarted, simulationWall_ms, steps, velocitySummary, sparseVoxelStats, hybridPresentationStats, stabilityEnvelope, energyTrace, checkpoints
   };
   reportResult(scenarioId, result);
   solver.destroy(); device.destroy();
@@ -1133,6 +1323,30 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
   if (octree) {
     fail(octree.info.gridKind === "octree", `octree method reported ${octree.info.gridKind}`);
     fail((octree.info.quadtreeMaximumNeighborRatio ?? Infinity) <= 2, `octree neighbor ratio ${octree.info.quadtreeMaximumNeighborRatio} exceeds 2:1`);
+    if (sparseStatsRequested) {
+      const sparse = octree.sparseVoxelStats;
+      const hybrid = octree.hybridPresentationStats;
+      const expectedFluidColor = voxelMaterial(VOXEL_MATERIAL_IDS.fluid).baseColorLinear;
+      fail(!!sparse, "octree did not expose its sparse voxel render publication");
+      fail((sparse?.voxelCount ?? 0) > 0 && (sparse?.brickCount ?? 0) > 0, `octree sparse publication has no records: ${JSON.stringify(sparse)}`);
+      fail((sparse?.activeVoxelCount ?? 0) > 0 && (sparse?.activeBrickCount ?? 0) > 0, `octree sparse publication has no active geometry: ${JSON.stringify(sparse)}`);
+      fail((sparse?.fluidVoxelCount ?? 0) > 0, "octree sparse publication contains no fluid material voxels");
+      fail((sparse?.environmentVoxelCount ?? 0) > 0, "octree sparse publication contains no environment geometry voxels");
+      if (scenarioId === "sphere-jet") {
+        const sphereVoxels = sparse?.materialVoxelCounts[String(VOXEL_MATERIAL_IDS.sphere)] ?? 0;
+        fail(sphereVoxels > 0 && sphereVoxels < 10_000,
+          `sphere proxy ownership leaked into empty sparse cells: ${sphereVoxels} sphere voxels`);
+      }
+      fail((sparse?.nonFiniteRecordCount ?? Infinity) === 0, `octree sparse publication contains ${sparse?.nonFiniteRecordCount} invalid spatial records`);
+      fail((sparse?.invalidMaterialCount ?? Infinity) === 0, `octree sparse publication contains ${sparse?.invalidMaterialCount} invalid material IDs`);
+      fail(Number.isFinite(sparse?.uiRawVoxelRenderWall_ms) && (sparse?.uiRawVoxelRenderWall_ms ?? 0) > 0,
+        `octree sparse raw-voxel WebGPU smoke did not complete: ${sparse?.uiRawVoxelRenderWall_ms}`);
+      fail(Number.isFinite(sparse?.uiBrickGridRenderWall_ms) && (sparse?.uiBrickGridRenderWall_ms ?? 0) > 0,
+        `octree sparse brick-grid WebGPU smoke did not complete: ${sparse?.uiBrickGridRenderWall_ms}`);
+      fail(!!hybrid && hybrid.bodyCount > 0 && Number.isFinite(hybrid.frameWall_ms) && hybrid.frameWall_ms > 0,
+        `octree hybrid smooth WebGPU smoke did not complete: ${JSON.stringify(hybrid)}`);
+      fail(expectedFluidColor.every((value, index) => Math.abs(value - (sparse?.fluidColorLinear[index] ?? Infinity)) <= 1e-6), `octree sparse fluid color ${sparse?.fluidColorLinear} differs from authored linear color ${expectedFluidColor}`);
+    }
     if (scenarioId === "dam-break-ui") {
       const envelope = octree.stabilityEnvelope;
       const reference = referenceVolumeCells(octree.info);

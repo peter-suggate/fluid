@@ -6,6 +6,7 @@ import { useSceneStore } from "./stores/scene-store";
 import { useUIStore, type RightPanel } from "./stores/ui-store";
 import type { GPUQuality } from "./tall-cell-grid";
 import type { GridOverlayConfig, GridOverlayMode, WaterRenderMode } from "./webgpu-renderer";
+import type { VoxelRenderMode } from "./webgpu-voxel-debug";
 import { clampTargetFps, MAX_TARGET_FPS, MIN_TARGET_FPS } from "./frame-pacing";
 
 const qualities: ReadonlyArray<GPUQuality> = ["balanced", "high", "ultra"];
@@ -59,6 +60,7 @@ type UIQueryState = {
   gridOverlaySlice: number;
   gridOverlayMode: GridOverlayMode;
   waterRenderMode: WaterRenderMode;
+  voxelRenderMode: VoxelRenderMode;
   targetFps: number;
 };
 
@@ -164,6 +166,7 @@ export function parseQueryState(search: string): QueryState {
   const grid = query.get("grid");
   const gridMode = query.get("gridMode");
   const render = query.get("render");
+  const voxels = query.get("voxels");
   const requestedPanel = query.get("panel");
   // One-way migration for shared pre-sidebar links. Serialization always emits
   // the mutually exclusive panel state instead of restoring the old UI flag.
@@ -197,6 +200,7 @@ export function parseQueryState(search: string): QueryState {
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: gridMode === "structure" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
       waterRenderMode: render === "rasterized" || render === "ray-marched" ? render : initialUI.waterRenderMode,
+      voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode,
       targetFps: clampTargetFps(numberParam(query, "fps", initialUI.targetFps, MIN_TARGET_FPS, MAX_TARGET_FPS))
     }
   };
@@ -205,7 +209,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "panel"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === "render" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === "render" || key === "voxels" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
@@ -223,6 +227,7 @@ export function serializeQueryState(
   query.set("quality", methodState.quality);
   query.set("view", uiState.view);
   query.set("render", uiState.waterRenderMode);
+  if (uiState.voxelRenderMode !== "smooth") query.set("voxels", uiState.voxelRenderMode);
   if (uiState.targetFps !== useUIStore.getInitialState().targetFps) query.set("fps", String(uiState.targetFps));
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");
@@ -288,7 +293,10 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void) {
   const hydrate = () => {
     applyingUrl = true;
     const state = parseQueryState(window.location.search);
-    useMethodStore.setState({ methodId: state.methodId, quality: state.quality, overrides: state.overrides });
+    // The interactive application has one scene authority. Legacy method IDs
+    // remain parseable for offline comparison tooling, but UI hydration always
+    // resolves to the unified sparse-brick octree.
+    useMethodStore.setState({ methodId: "octree", quality: state.quality, overrides: state.overrides });
     useSceneStore.getState().setScene(state.scene, state.presetId);
     useUIStore.setState(state.ui);
     applyingUrl = false;
