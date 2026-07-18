@@ -3,6 +3,7 @@ import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import { GLASS_OPTICS, unifiedLightingShaderLibrary, WATER_OPTICS } from "./webgpu-lighting";
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
+import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
 
 /**
  * Rasterized water presentation for the WebGPU renderer.
@@ -94,10 +95,16 @@ export function surfaceExtractionDispatchPlan(
  */
 export const EXTRACTION_POLYGONISE_WORKGROUP = 64;
 
-/** Vertex capacity from grid surface area (32 bytes per vertex, 64 MiB cap). */
+/** Vertex capacity from grid surface area (32 bytes per vertex, 64 MiB cap).
+ *
+ * Marching tetrahedra emits more vertices per crossing cube than marching
+ * cubes, and a ratio-two transported surface can retain transient sheets whose
+ * area is several times the tank footprint. 64 vertices per lattice-area unit
+ * covers that normal fine-band case while the byte ceiling remains absolute.
+ */
 export function surfaceVertexCapacity(nx: number, ny: number, nz: number) {
   const area = nx * ny + nx * nz + ny * nz;
-  return Math.max(262_144, Math.min(2_097_152, area * 32));
+  return Math.max(262_144, Math.min(2_097_152, area * 64));
 }
 
 /**
@@ -121,7 +128,10 @@ struct Uniforms {
 }
 struct SurfaceVertex { position: vec4f, normal: vec4f }
 struct IndirectArgs { vertexCount: atomic<u32>, instanceCount: u32, firstVertex: u32, firstInstance: u32 }
-struct ExtractionMeta { activeCubeCount: atomic<u32>, vertexAllocator: atomic<u32> }
+struct ExtractionMeta {
+  activeCubeCount: atomic<u32>,
+  vertexAllocator: atomic<u32>,
+}
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var volume: texture_3d<f32>;
 @group(0) @binding(2) var columnBases: texture_2d<f32>;
@@ -129,14 +139,66 @@ struct ExtractionMeta { activeCubeCount: atomic<u32>, vertexAllocator: atomic<u3
 @group(0) @binding(4) var<storage, read_write> drawArgs: IndirectArgs;
 @group(0) @binding(5) var<storage, read_write> activeCubes: array<vec2u>;
 @group(0) @binding(6) var<storage, read_write> extractionMeta: ExtractionMeta;
+struct SparseParams {
+  coarseDims: vec4u,
+  fineDims: vec4u,
+  brickDims: vec4u,
+  settings: vec4f,
+  cellAndDt: vec4f,
+  sizing: vec4f,
+  physical: vec4f,
+}
+@group(0) @binding(7) var<storage, read> sparsePageTable: array<u32>;
+@group(0) @binding(8) var<storage, read> sparseActivePages: array<u32>;
+@group(0) @binding(9) var<storage, read> sparsePhi: array<f32>;
+@group(0) @binding(10) var<uniform> sparseParams: SparseParams;
+@group(0) @binding(11) var<storage, read> sparseControl: array<u32>;
 override countOnly = false;
+override sparseField = false;
+
+const SPARSE_INVALID: u32 = 0xffffffffu;
+
+fn sparseOverflow() -> bool {
+  return arrayLength(&sparseControl) > 2u && sparseControl[2] != 0u;
+}
+
+fn sparseFineDimensions() -> vec3u { return sparseParams.fineDims.xyz; }
+fn sparsePayloadIndex(q: vec3u) -> u32 {
+  if (any(q >= sparseParams.fineDims.xyz)) { return SPARSE_INVALID; }
+  let brickSize = sparseParams.fineDims.w;
+  let page = q / brickSize;
+  let pageIndex = page.x + sparseParams.brickDims.x * (page.y + sparseParams.brickDims.y * page.z);
+  if (pageIndex >= arrayLength(&sparsePageTable)) { return SPARSE_INVALID; }
+  let slot = sparsePageTable[pageIndex];
+  if (slot == SPARSE_INVALID || slot >= u32(sparseParams.sizing.w)) { return SPARSE_INVALID; }
+  let local = q % brickSize;
+  let localIndex = local.x + brickSize * (local.y + brickSize * local.z);
+  return slot * brickSize * brickSize * brickSize + localIndex;
+}
+fn coarsePhiAtFine(position: vec3f) -> f32 {
+  let factor = f32(sparseParams.coarseDims.w);
+  let p = clamp((position + vec3f(0.5)) / factor - vec3f(0.5), vec3f(0.0), vec3f(sparseParams.coarseDims.xyz - vec3u(1)));
+  let a = vec3i(floor(p)); let b = min(a + vec3i(1), vec3i(sparseParams.coarseDims.xyz) - vec3i(1)); let t = fract(p);
+  let p000=textureLoad(volume,vec3i(a.x,a.y,a.z),0).x;let p100=textureLoad(volume,vec3i(b.x,a.y,a.z),0).x;
+  let p010=textureLoad(volume,vec3i(a.x,b.y,a.z),0).x;let p110=textureLoad(volume,vec3i(b.x,b.y,a.z),0).x;
+  let p001=textureLoad(volume,vec3i(a.x,a.y,b.z),0).x;let p101=textureLoad(volume,vec3i(b.x,a.y,b.z),0).x;
+  let p011=textureLoad(volume,vec3i(a.x,b.y,b.z),0).x;let p111=textureLoad(volume,vec3i(b.x,b.y,b.z),0).x;
+  return mix(mix(mix(p000,p100,t.x),mix(p010,p110,t.x),t.y),mix(mix(p001,p101,t.x),mix(p011,p111,t.x),t.y),t.z);
+}
+fn sparsePhiAt(cell: vec3i) -> f32 {
+  if (any(cell < vec3i(0)) || any(cell >= vec3i(sparseParams.fineDims.xyz))) { return coarsePhiAtFine(vec3f(cell)); }
+  let payload = sparsePayloadIndex(vec3u(cell));
+  if (payload == SPARSE_INVALID || payload >= arrayLength(&sparsePhi)) { return coarsePhiAtFine(vec3f(cell)); }
+  return sparsePhi[payload];
+}
 
 // Level-set fields become a smooth occupancy whose 0.5 contour is phi = 0.
 // The band spans four cells so no corner of a surface-crossing cube saturates
 // (the cube diagonal is under two cells); a saturated corner biases the linear
 // crossing estimate and extracts as cell-pitch lattice artifacts.
 fn occupancyFromPhi(phi: f32) -> f32 {
-  let band = 4.0 * u.container.y / max(u.gridInfo.y, 1.0);
+  let samplesY = select(u.gridInfo.y, f32(sparseParams.fineDims.y), sparseField);
+  let band = 4.0 * u.container.y / max(samplesY, 1.0);
   return clamp(0.5 - phi / band, 0.0, 1.0);
 }
 
@@ -165,16 +227,18 @@ fn columnBaseAt(x: i32, z: i32) -> i32 {
 // closes the liquid mesh at glass/floor contacts, so a camera ray always has a
 // usable exit interface as well as a free-surface entry interface.
 fn latticeValue(p: vec3i) -> f32 {
-  let dims = vec3i(u.gridInfo.xyz);
+  let dims = select(vec3i(u.gridInfo.xyz), vec3i(sparseParams.fineDims.xyz), sparseField);
   // Side/top boundaries are optical interfaces. The floor is a solid contact,
   // not a water-air surface: extend the bottom cell value to y=0 so extraction
   // cannot create a large horizontal sheet across the tank base.
   if (p.x <= 0 || p.z <= 0 || p.x >= dims.x + 1 || p.z >= dims.z + 1 || p.y >= dims.y + 1) { return 0.0; }
-  return fieldCell(vec3i(p.x - 1, max(p.y - 1, 0), p.z - 1));
+  let cell = vec3i(p.x - 1, max(p.y - 1, 0), p.z - 1);
+  if (sparseField) { return occupancyFromPhi(sparsePhiAt(cell)); }
+  return fieldCell(cell);
 }
 
 fn latticeWorld(p: vec3f) -> vec3f {
-  let dims = u.gridInfo.xyz;
+  let dims = select(u.gridInfo.xyz, vec3f(sparseParams.fineDims.xyz), sparseField);
   let local = clamp((p - vec3f(0.5)) / dims, vec3f(0.0), vec3f(1.0));
   return vec3f(-0.5 * u.container.x, 0.0, -0.5 * u.container.z) + local * u.container.xyz;
 }
@@ -193,7 +257,8 @@ fn surfaceNormal(lattice: vec3f, cubeBase: vec3f, value: ptr<function, array<f32
   let dx = mix(dx0, dx1, f.z);
   let dy = mix(dy0, dy1, f.z);
   let dz = upper - lower;
-  let scaled = vec3f(dx * u.gridInfo.x / u.container.x, dy * u.gridInfo.y / u.container.y, dz * u.gridInfo.z / u.container.z);
+  let dims = select(u.gridInfo.xyz, vec3f(sparseParams.fineDims.xyz), sparseField);
+  let scaled = vec3f(dx * dims.x / u.container.x, dy * dims.y / u.container.y, dz * dims.z / u.container.z);
   if (length(scaled) > 1e-5) { return -normalize(scaled); }
   return vec3f(0.0, 1.0, 0.0);
 }
@@ -294,7 +359,8 @@ fn cubeTriangleCount(value: ptr<function, array<f32, 8>>) -> u32 {
 // polygoniseMain so the register footprint of the full-lattice scan stays
 // small enough for the occupancy that hides the load latency.
 fn classifyCube(base: vec3i) {
-  let cubeDims = vec3u(u.gridInfo.xyz) + vec3u(1);
+  let fieldDims = select(vec3u(u.gridInfo.xyz), sparseParams.fineDims.xyz, sparseField);
+  let cubeDims = fieldDims + vec3u(1);
   if (any(base < vec3i(0)) || any(vec3u(base) >= cubeDims)) { return; }
   var value = loadCubeCorners(base);
   var minimum = 1.0; var maximum = 0.0;
@@ -323,6 +389,9 @@ var<workgroup> workgroupBaseSlot: u32;
 // draw count), and each thread then emits into its private slice.
 @compute @workgroup_size(${EXTRACTION_POLYGONISE_WORKGROUP})
 fn polygoniseMain(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  // Both polygonisers are dispatched for a sparse surface. Exactly one owns
+  // the shared worklist: fine pages normally, complete coarse extraction if
+  // the bounded allocator reported that any required page was unavailable.
   let activeTotal = min(atomicLoad(&extractionMeta.activeCubeCount), arrayLength(&activeCubes));
   var base = vec3i(0);
   var value = array<f32, 8>();
@@ -370,6 +439,57 @@ fn extractMain(@builtin(global_invocation_id) gid: vec3u) {
   classifyCube(vec3i(gid));
 }
 
+// Coarse extraction remains complete outside detail pages. A coarse cube
+// whose center maps into a resident fine support page is supplied by the fine
+// pass instead, so calm regions cost exactly the original coarse mesh and
+// active patches join it without drawing two coincident surfaces.
+@compute @workgroup_size(4, 4, 4)
+fn extractHybridCoarseMain(@builtin(global_invocation_id) gid: vec3u) {
+  let base=vec3i(gid);
+  if (!sparseOverflow()) {
+    let coarseCell=clamp(base-vec3i(1),vec3i(0),vec3i(u.gridInfo.xyz)-vec3i(1));
+    let factor=i32(sparseParams.coarseDims.w);
+    let fineCenter=vec3u(coarseCell*factor+vec3i(factor/2));
+    if (sparsePayloadIndex(fineCenter) != SPARSE_INVALID) { return; }
+  }
+  classifyCube(base);
+}
+
+@compute @workgroup_size(1)
+fn resetSurfaceWorklistMain() {
+  atomicStore(&extractionMeta.activeCubeCount,0u);
+}
+
+// One invocation per resident fine voxel. Interior cubes have a unique lower
+// cell. Boundary clauses add the virtual zero shell needed by two-interface
+// optics without scanning the globally fine lattice.
+@compute @workgroup_size(256)
+fn extractSparseMain(@builtin(global_invocation_id) gid: vec3u) {
+  if (sparseOverflow()) { return; }
+  let brickSize = sparseParams.fineDims.w;
+  let voxelsPerPage = brickSize * brickSize * brickSize;
+  let activeIndex = gid.x / voxelsPerPage;
+  if (activeIndex >= sparseActivePages[0] || 4u + activeIndex >= arrayLength(&sparseActivePages)) { return; }
+  let pageIndex = sparseActivePages[4u + activeIndex];
+  if (pageIndex >= sparseParams.brickDims.w) { return; }
+  let page = vec3u(pageIndex % sparseParams.brickDims.x,
+    (pageIndex / sparseParams.brickDims.x) % sparseParams.brickDims.y,
+    pageIndex / (sparseParams.brickDims.x * sparseParams.brickDims.y));
+  let localIndex = gid.x - activeIndex * voxelsPerPage;
+  let local = vec3u(localIndex % brickSize, (localIndex / brickSize) % brickSize, localIndex / (brickSize * brickSize));
+  let q = page * brickSize + local;
+  let dims = sparseParams.fineDims.xyz;
+  if (any(q >= dims)) { return; }
+  if (all(q + vec3u(1) < dims)) { classifyCube(vec3i(q + vec3u(1))); }
+  // Four tank sides and the top. The floor deliberately extends the lowest
+  // liquid samples instead of introducing a spurious water-air sheet.
+  if (q.x == 0u && q.y + 1u < dims.y && q.z + 1u < dims.z) { classifyCube(vec3i(0, i32(q.y + 1u), i32(q.z + 1u))); }
+  if (q.x + 1u == dims.x && q.y + 1u < dims.y && q.z + 1u < dims.z) { classifyCube(vec3i(i32(dims.x), i32(q.y + 1u), i32(q.z + 1u))); }
+  if (q.z == 0u && q.x + 1u < dims.x && q.y + 1u < dims.y) { classifyCube(vec3i(i32(q.x + 1u), i32(q.y + 1u), 0)); }
+  if (q.z + 1u == dims.z && q.x + 1u < dims.x && q.y + 1u < dims.y) { classifyCube(vec3i(i32(q.x + 1u), i32(q.y + 1u), i32(dims.z))); }
+  if (q.y + 1u == dims.y && q.x + 1u < dims.x && q.z + 1u < dims.z) { classifyCube(vec3i(i32(q.x + 1u), i32(dims.y), i32(q.z + 1u))); }
+}
+
 // Interior cubes follow the per-column cubic band instead of traversing the
 // full virtual height. The dispatch includes the configured diagonal base
 // delta; this local bound handles the exact four bases that touch each cube.
@@ -405,7 +525,9 @@ fn extractTallSidesMain(@builtin(global_invocation_id) gid: vec3u) {
   let b10 = columnBaseAt(x, z - 1);
   let b01 = columnBaseAt(x - 1, z);
   let b11 = columnBaseAt(x, z);
-  let minimumBase = min(min(b00, b10), min(b01, b11));
+  // Column bases come from GPU solver output; a corrupted value must not turn
+  // this per-thread loop into a watchdog-length stall.
+  let minimumBase = min(min(min(b00, b10), min(b01, b11)), dims.y);
   if (minimumBase <= 0) { return; }
   for (var y = 0; y < minimumBase; y += 1) { classifyCube(vec3i(x, y, z)); }
 }
@@ -693,8 +815,12 @@ export class RasterWaterPipeline {
   private extractBandPipeline?: GPUComputePipeline;
   private extractTallSidesPipeline?: GPUComputePipeline;
   private extractWallPipeline?: GPUComputePipeline;
+  private extractSparsePipeline?: GPUComputePipeline;
+  private extractHybridCoarsePipeline?: GPUComputePipeline;
+  private resetSurfaceWorklistPipeline?: GPUComputePipeline;
   private preparePipeline?: GPUComputePipeline;
   private polygonisePipeline?: GPUComputePipeline;
+  private polygoniseSparsePipeline?: GPUComputePipeline;
   private surfaceFrontPipeline?: GPURenderPipeline;
   private surfaceBackPipeline?: GPURenderPipeline;
   private causticPipeline?: GPURenderPipeline;
@@ -732,6 +858,12 @@ export class RasterWaterPipeline {
   private lastExtractionAt_ms = -Infinity;
   private causticsValid = false;
   private secondaryParticles?: SecondaryParticleRenderPipeline;
+  private sparseSurface?: SparseSurfaceBandGPUSource;
+  private fallbackSparsePageTable?: GPUBuffer;
+  private fallbackSparseActivePages?: GPUBuffer;
+  private fallbackSparsePhi?: GPUBuffer;
+  private fallbackSparseParams?: GPUBuffer;
+  private fallbackSparseControl?: GPUBuffer;
 
   constructor(
     private readonly device: GPUDevice,
@@ -757,6 +889,11 @@ export class RasterWaterPipeline {
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
+      ,{ binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+      ,{ binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+      ,{ binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+      ,{ binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
+      ,{ binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
     ] });
     this.prepareLayout = this.device.createBindGroupLayout({ label: "Water extraction prepare bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -782,14 +919,18 @@ export class RasterWaterPipeline {
       { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
     ] });
     const extractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.extractLayout] });
-    const total=11;let completed=0;
+    const total=15;let completed=0;
     const compute=async(label:string,descriptor:GPUComputePipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createComputePipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
     const render=async(label:string,descriptor:GPURenderPipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createRenderPipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
     this.extractPipeline = await compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractMain" } });
     this.extractBandPipeline = await compute("Classifying restricted water band",{ label: "Classify restricted water band", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractBandMain" } });
     this.extractTallSidesPipeline = await compute("Classifying tall-cell interfaces",{ label: "Classify tall-cell side interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractTallSidesMain" } });
     this.extractWallPipeline = await compute("Classifying water wall interfaces",{ label: "Classify water wall interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractWallMain" } });
+    this.extractSparsePipeline = await compute("Classifying sparse fine surface pages",{ label: "Classify sparse fine surface pages", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractSparseMain", constants: { sparseField: 1 } } });
+    this.extractHybridCoarsePipeline = await compute("Classifying coarse surface outside detail patches",{ label: "Classify hybrid coarse surface", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractHybridCoarseMain" } });
+    this.resetSurfaceWorklistPipeline = await compute("Preparing fine detail worklist",{ label: "Reset surface worklist between hierarchy levels", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "resetSurfaceWorklistMain" } });
     this.polygonisePipeline = await compute("Building water surface mesh",{ label: "Polygonise surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "polygoniseMain" } });
+    this.polygoniseSparsePipeline = await compute("Building sparse fine water mesh",{ label: "Polygonise sparse fine surface", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "polygoniseMain", constants: { sparseField: 1 } } });
     this.preparePipeline = await compute("Preparing surface dispatch",{ label: "Prepare polygonise dispatch", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.prepareLayout] }), compute: { module: prepare, entryPoint: "prepareMain" } });
     this.extractionMetaBuffer = this.device.createBuffer({ label: "Water extraction worklist counters", size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.polygoniseDispatchBuffer = this.device.createBuffer({ label: "Water polygonise dispatch arguments", size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
@@ -810,11 +951,27 @@ export class RasterWaterPipeline {
     this.scenePipeline = await render("Rendering the dry scene",{ label: "Render dry scene for water refraction", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.sceneLayout] }), vertex: { module: scene, entryPoint: "vertexMain" }, fragment: { module: scene, entryPoint: "fragmentMain", targets: [{ format: "rgba16float" }] }, primitive: { topology: "triangle-list" } });
     this.compositePipeline = await render("Compositing water optics",{ label: "Composite two-interface water optics", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeLayout] }), vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } });
     this.sampler = this.device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
+    this.fallbackSparsePageTable = this.device.createBuffer({ label: "Water sparse-page fallback", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.fallbackSparseActivePages = this.device.createBuffer({ label: "Water sparse-active fallback", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
+    this.fallbackSparsePhi = this.device.createBuffer({ label: "Water sparse-phi fallback", size: 4, usage: GPUBufferUsage.STORAGE });
+    this.fallbackSparseParams = this.device.createBuffer({ label: "Water sparse-params fallback", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.fallbackSparseControl = this.device.createBuffer({ label: "Water sparse-control fallback", size: 16, usage: GPUBufferUsage.STORAGE });
+    this.rebuildBindGroups();
   }
 
   setVolume(texture: GPUTexture, columnBases: GPUTexture) {
     if (this.volume === texture && this.columnBases === columnBases) return;
     this.volume = texture; this.columnBases = columnBases; this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
+  }
+
+  setSparseSurface(source: SparseSurfaceBandGPUSource | undefined) {
+    if (this.sparseSurface === source) return;
+    this.sparseSurface = source;
+    this.extractedRevision = -1;
+    this.lastExtractionAt_ms = -Infinity;
+    this.causticsValid = false;
+    this.geometryKey = "";
+    this.rebuildBindGroups();
   }
 
   setSecondaryParticles(pipeline: SecondaryParticleRenderPipeline | undefined) {
@@ -849,8 +1006,14 @@ export class RasterWaterPipeline {
   }
 
   private rebuildBindGroups() {
-    if (this.extractLayout && this.volume && this.columnBases && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.extractionMetaBuffer) this.extractBindGroup = this.device.createBindGroup({ layout: this.extractLayout, entries: [
-      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 2, resource: this.columnBases.createView() }, { binding: 3, resource: { buffer: this.vertexBuffer } }, { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } }, { binding: 6, resource: { buffer: this.extractionMetaBuffer } }
+    const sparse = this.sparseSurface;
+    if (this.extractLayout && this.volume && this.columnBases && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.extractionMetaBuffer && this.fallbackSparsePageTable && this.fallbackSparseActivePages && this.fallbackSparsePhi && this.fallbackSparseParams && this.fallbackSparseControl) this.extractBindGroup = this.device.createBindGroup({ layout: this.extractLayout, entries: [
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 2, resource: this.columnBases.createView() }, { binding: 3, resource: { buffer: this.vertexBuffer } }, { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } }, { binding: 6, resource: { buffer: this.extractionMetaBuffer } },
+      { binding: 7, resource: sparse?.pageTable ?? { buffer: this.fallbackSparsePageTable } },
+      { binding: 8, resource: sparse?.activePages ?? { buffer: this.fallbackSparseActivePages } },
+      { binding: 9, resource: sparse?.phi ?? { buffer: this.fallbackSparsePhi } },
+      { binding: 10, resource: sparse?.params ?? { buffer: this.fallbackSparseParams } },
+      { binding: 11, resource: sparse?.control ?? { buffer: this.fallbackSparseControl } }
     ] });
     if (this.prepareLayout && this.extractionMetaBuffer && this.activeCubeBuffer && this.polygoniseDispatchBuffer) this.prepareBindGroup = this.device.createBindGroup({ layout: this.prepareLayout, entries: [
       { binding: 0, resource: { buffer: this.extractionMetaBuffer } }, { binding: 1, resource: { buffer: this.activeCubeBuffer } }, { binding: 2, resource: { buffer: this.polygoniseDispatchBuffer } }
@@ -863,8 +1026,9 @@ export class RasterWaterPipeline {
   }
 
   encode(encoder: GPUCommandEncoder, output: GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, targetFps = 60, timestamps?: RasterWaterTimestampRanges, drySceneOverlay?: (encoder: GPUCommandEncoder, target: GPUTextureView) => void): RasterWaterEncodeResult | false {
-    this.ensureGeometry(nx,ny,nz);
-    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.preparePipeline||!this.polygonisePipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.causticPipeline||!this.scenePipeline||!this.compositePipeline||!this.extractBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.sceneBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.extractionMetaBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.causticTexture) return false;
+    const geometryDimensions = this.sparseSurface?.fineDimensions ?? [nx, ny, nz] as const;
+    this.ensureGeometry(geometryDimensions[0],geometryDimensions[1],geometryDimensions[2]);
+    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractSparsePipeline||!this.extractHybridCoarsePipeline||!this.resetSurfaceWorklistPipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseSparsePipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.causticPipeline||!this.scenePipeline||!this.compositePipeline||!this.extractBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.sceneBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.extractionMetaBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.causticTexture) return false;
     const now_ms = performance.now();
     // Rendering follows the newest available solver revision, but extraction
     // follows the selected presentation cadence. Unchanged solver revisions
@@ -879,15 +1043,31 @@ export class RasterWaterPipeline {
       // kernel sizes the indirect dispatch, and polygonise emits triangles for
       // just those cubes. Dispatches in one pass order their storage writes.
       const compute=encoder.beginComputePass({label:"Extract water isosurface",...(timestamps?{timestampWrites:timestamps.extraction}:{})});compute.setBindGroup(0,this.extractBindGroup);
-      if (plan.mode === "restricted-band") {
+      if (this.sparseSurface) {
+        // Level 0: retain the complete coarse surface except where a resident
+        // fine support page will replace it.
+        compute.setPipeline(this.extractHybridCoarsePipeline);
+        compute.dispatchWorkgroups(Math.ceil((nx + 1) / 4), Math.ceil((ny + 1) / 4), Math.ceil((nz + 1) / 4));
+        compute.setPipeline(this.preparePipeline); compute.setBindGroup(0, this.prepareBindGroup); compute.dispatchWorkgroups(1);
+        compute.setPipeline(this.polygonisePipeline); compute.setBindGroup(0, this.extractBindGroup); compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
+        // Level 1: reuse the compact worklist while retaining the shared vertex
+        // allocator and indirect draw count produced by the coarse pass.
+        compute.setPipeline(this.resetSurfaceWorklistPipeline); compute.dispatchWorkgroups(1);
+        compute.setPipeline(this.extractSparsePipeline);
+        compute.dispatchWorkgroupsIndirect(this.sparseSurface.activePages.buffer, (this.sparseSurface.activePages.offset ?? 0) + 4);
+        compute.setPipeline(this.preparePipeline); compute.setBindGroup(0, this.prepareBindGroup); compute.dispatchWorkgroups(1);
+        compute.setPipeline(this.polygoniseSparsePipeline); compute.setBindGroup(0, this.extractBindGroup); compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
+      } else if (plan.mode === "restricted-band") {
         compute.setPipeline(this.extractBandPipeline); compute.dispatchWorkgroups(...plan.band!);
         compute.setPipeline(this.extractTallSidesPipeline); compute.dispatchWorkgroups(...plan.tallSides!);
         compute.setPipeline(this.extractWallPipeline); compute.dispatchWorkgroups(...plan.walls!);
       } else {
         compute.setPipeline(this.extractPipeline); compute.dispatchWorkgroups(...plan.full!);
       }
-      compute.setPipeline(this.preparePipeline); compute.setBindGroup(0, this.prepareBindGroup); compute.dispatchWorkgroups(1);
-      compute.setPipeline(this.polygonisePipeline); compute.setBindGroup(0, this.extractBindGroup); compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
+      if (!this.sparseSurface) {
+        compute.setPipeline(this.preparePipeline); compute.setBindGroup(0, this.prepareBindGroup); compute.dispatchWorkgroups(1);
+        compute.setPipeline(this.polygonisePipeline); compute.setBindGroup(0, this.extractBindGroup); compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
+      }
       compute.end();
       this.extractedRevision = revision; this.lastExtractionAt_ms = advancePresentationClock(this.lastExtractionAt_ms, now_ms, targetFps);
     }
@@ -904,6 +1084,6 @@ export class RasterWaterPipeline {
   }
 
   destroy() {
-    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.extractionMetaBuffer,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.causticTexture]) { try { resource?.destroy(); } catch { /* device loss */ } }
+    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.extractionMetaBuffer,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.causticTexture,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.fallbackSparseControl]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

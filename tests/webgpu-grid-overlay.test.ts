@@ -44,19 +44,23 @@ test("adaptive cell-scale mode exposes the live finest surface band", () => {
   assert.match(gridOverlayShader, /let representedSize = max\(horizontalSize, verticalSize\)/);
   assert.match(gridOverlayShader, /let maximumRepresentedSize = max\(2\.0, u\.options\.w\)/);
   assert.match(gridOverlayShader, /log2\(f32\(representedSize\)\) \/ log2\(maximumRepresentedSize\)/);
-  assert.match(gridOverlayShader, /let fineColor = vec3f\(1\.0, 0\.16, 0\.58\)/);
+  assert.match(gridOverlayShader, /let fineColor = vec3f\(0\.22, 0\.68, 0\.74\)/,
+    "pressure leaves retain their own cyan-to-blue hierarchy");
+  assert.match(gridOverlayShader, /fn sparseSurfaceCoreSample/);
+  assert.match(gridOverlayShader, /abs\(sparseSurfacePhi\[payload\]\) <= 1\.5\*fineH/);
+  assert.match(gridOverlayShader, /let fineColor=vec3f\(1\.0,0\.08,0\.55\)/,
+    "pink is reserved for the fine phi=0 shell");
   assert.match(gridOverlayShader, /fill = select\(mix\(middleColor, coarseColor/);
   assert.match(rendererSource, /gridOverlay\?\.mode === "resolution" && \(gpuInfo\?\.gridKind === "quadtree-tall-cell" \|\| gpuInfo\?\.gridKind === "octree"\) \? 9 : 0/);
   assert.match(rendererSource, /gpuInfo\?\.quadtreeMaximumFluidScale \?\? 1/);
 });
 
-test("default adaptive structure mode marks live finest-cell boundaries pink", () => {
-  assert.match(gridOverlayShader, /fieldMode == 0 && adaptiveGrid/);
-  assert.match(gridOverlayShader, /representedSize == 1/);
-  assert.match(gridOverlayShader, /let finestColor = vec3f\(1\.0, 0\.08, 0\.55\)/);
-  assert.match(gridOverlayShader, /fill = mix\(fill, finestColor, 0\.72\)/);
-  assert.match(gridOverlayShader, /alpha = max\(alpha, 0\.44\)/);
-  assert.match(gridOverlayShader, /gridLineColor = finestColor/);
+test("default adaptive structure mode marks live sparse-surface cells pink", () => {
+  assert.match(gridOverlayShader, /fieldMode == 0 \|\| fieldMode == 9/);
+  assert.match(gridOverlayShader, /sparseSurfaceAvailable\(\)/);
+  assert.match(gridOverlayShader, /fine3=local3\*factor/);
+  assert.match(gridOverlayShader, /sparseSurfaceCoreSample\(fineCell\)/);
+  assert.match(gridOverlayShader, /gridLineColor=fineColor/);
 });
 
 test("optical-layer mode distinguishes retained cubes from the merged tall interior", () => {

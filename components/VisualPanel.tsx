@@ -135,8 +135,8 @@ export function VisualPanel() {
         {gridKind === "restricted-tall-cell" && <span><i className="sw sw-outside" />above band · not stored</span>}
         {!adaptive && <span><i className="sw sw-dot" />stored samples (zoom in)</span>}
         {adaptive && <span>edges follow live adaptive pressure cells</span>}
-        {adaptive && <span><i className="sw" style={{ background: "#ff148c" }} />pink cells and boundaries · finest represented pressure cell · 1³</span>}
-        {adaptive && <span>all other boundaries retain the structural grid color</span>}
+        {octree && <span><i className="sw" style={{ background: "#ff148c" }} />pink cells · active fine detail shell at |φ| ≤ 1.5h</span>}
+        {adaptive && <span>cyan-to-blue boundaries · adaptive pressure hierarchy</span>}
       </>}
       {gridOverlayMode === "resolution" && <>
         <span><i className="sw" style={{ background: "#ff2994" }} />finest represented pressure cell · 1³</span>

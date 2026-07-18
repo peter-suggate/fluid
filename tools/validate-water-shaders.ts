@@ -16,6 +16,7 @@ import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
 import { octreeSparseBrickDebugPublicationShader } from "../lib/webgpu-octree-sparse-bricks";
 import { octreeProjectionShader } from "../lib/webgpu-octree";
 import { sparseSceneProxyVoxelizationShader } from "../lib/webgpu-sparse-scene-proxies";
+import { sparseSurfaceDynamicsShader, sparseSurfaceFieldShader, sparseSurfaceResidencyShader } from "../lib/webgpu-sparse-surface-band";
 
 const naga = process.env.NAGA ?? "naga";
 const shaders = {
@@ -33,7 +34,10 @@ const shaders = {
   "sparse-brick-dense-field": sparseBrickDenseFieldShader,
   "sparse-brick-debug-publication": octreeSparseBrickDebugPublicationShader,
   "octree-projection": octreeProjectionShader,
-  "sparse-scene-proxy-voxelization": sparseSceneProxyVoxelizationShader
+  "sparse-scene-proxy-voxelization": sparseSceneProxyVoxelizationShader,
+  "sparse-surface-residency": sparseSurfaceResidencyShader,
+  "sparse-surface-field": sparseSurfaceFieldShader,
+  "sparse-surface-dynamics": sparseSurfaceDynamicsShader,
 };
 const directory = mkdtempSync(join(tmpdir(), "fluid-water-wgsl-"));
 try {

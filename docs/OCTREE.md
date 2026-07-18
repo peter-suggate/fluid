@@ -45,11 +45,66 @@ fluid step.
 
 ## Surface-detail controls
 
-The fixed `interfaceRefinementBandCells` remains the validated default. Two
-advanced controls are available for experiments at a higher finest-grid
-resolution, but both default to zero for every scene and quality preset so the
-established solver behavior is unchanged. Neither control contains a
-scenario-specific path:
+Pressure adaptivity and surface-detail adaptivity are separate hierarchies.
+The dense compatibility level set and dense transport velocity remain at the
+nominal grid resolution, while `sparseSurfaceBand` dynamically pages a second
+signed-distance field near `phi=0`. The default `authoritative` mode uses
+ratio-two fine samples for persistent geometric-detail transport and hybrid
+mesh extraction. It consumes velocity from the existing global octree
+projection; it does not add another pressure ladder.
+`mirror` retains the same allocation/extraction path but continually resamples
+the coarse field, and `off` is the dense baseline.
+
+The sparse hierarchy is general rather than scenario-specific and follows the
+surface-sizing construction in Ando--Batty 2020:
+
+- a logical page table covers the entire fine lattice, but physical `8^3`
+  pages come from a bounded free-list pool;
+- a scalar sizing field is evaluated only on cells adjacent to `phi=0`, using
+  the paper's curvature and non-translation velocity terms. Because volume
+  control perturbs the signed-distance profile, curvature is evaluated as
+  `div(normalize(grad(phi + phiSolid)))`; this equals the paper's Laplacian for
+  a signed-distance field but remains exactly zero for a monotone planar field;
+- the previous sizing field is semi-Lagrangian advected and decayed by
+  `0.9^(dt / 0.01 s)`, then max-combined with the new signal. Five bounded
+  face-neighbor propagation passes carry a moving detail request into its
+  immediate liquid/air support without scanning the finest virtual lattice;
+- a page becomes a detail core only when an interface-adjacent sample satisfies
+  the paper scale test `S h > 1`. Stencil halos are classified afterwards from
+  nearby detail cores, so unrelated bulk activity cannot activate a flat
+  surface. Calm and uniformly translating planar surfaces allocate zero pages;
+- core requests are bucketed by `S h` and allocated strongest-first; all cores
+  precede halo allocation under the fixed physical-page budget;
+- support width is the maximum of the requested band and stencil radii, plus
+  the velocity-swept departure distance and optional detail widening;
+- neighboring support pages and retirement hysteresis keep interpolation and
+  transport stencils valid while the surface moves;
+- every sparse lookup validates both logical and physical addresses and falls
+  back to trilinear coarse `phi` or coarse velocity at the edge of the band.
+
+`surfaceRefinementFactor` selects `1`, `2`, or `4`; `sparseSurfaceBandCells`
+sets the core support in fine cells; and `sparseSurfacePageFraction` bounds the
+physical pool. The pool is additionally clamped against the adapter's maximum
+storage-buffer binding size before allocation, preventing a factor-four
+request from causing device loss on lower-limit GPUs. If the pool ever cannot
+cover all desired pages, a GPU control flag suppresses partial fine extraction
+and retains the complete coarse surface in the same command stream. Raster
+extraction builds that coarse surface outside resident support, then appends
+fine patch geometry with the same bounded allocator. There is no CPU readback
+delay and no hole-producing partial mesh.
+
+The production path preserves the established pressure work: balanced quality
+still executes 32 row-parallel Chebyshev polynomial passes. Geometry-only fine
+phi transport is semi-Lagrangian and therefore does not reduce the global
+pressure timestep to the fine sample width. Fine pages add residency, phi
+transport, and presentation work proportional to detected detail, but no
+per-page Jacobi pressure loop. An experimental `fineDynamics`
+path retains a capillary-speed-limited local residual for research, but it is
+opt-in, has no preset/UI exposure, and its velocity/pressure payload is not
+allocated by default. The default payload is therefore 8 bytes per fine voxel
+(two phi buffers), not 48.
+
+Two related advanced controls remain available:
 
 - `surfaceDetailStrength` widens the finest pressure support by up to eight
   cells where the resident level set has high discrete curvature or the
@@ -63,23 +118,21 @@ scenario-specific path:
 
 Adaptive stepping also enforces the explicit capillary-wave bound
 `0.5 sqrt(rho h^3 / (pi sigma))` in addition to the existing velocity CFL
-bound. This becomes important as the finest cell width `h` is reduced.
-
-These controls improve pressure support and surface retention around energetic
-features, but they do not create resolution beyond the dense velocity/level-set
-lattice. Truly sub-lattice ripples still require a finer finest grid or a later
-sparse authoritative transport representation.
+bound. In authoritative mode `h` is the sparse fine-cell width, so ratio-two
+and ratio-four modes do not silently violate the capillary stability limit.
 
 To inspect the live band, open Scientific view and enable any solver-grid
-slice. The default **Structure** field gives finest `1³` pressure cells a
-translucent pink tint and pink boundaries, which remain visible when individual
-cells are sub-pixel at the overview camera. Select **Cell scale** for the full
-hierarchy: pink cells are finest `1³` cells, cyan cells are intermediate dyadic
-leaves, and blue cells are the coarsest level supported by the active solver
-(the default octree uses `8³`). The palette is normalized to that live maximum,
-not to an unavailable fixed tree depth. Both views read the GPU owner texture
-directly. Sweeping the X, Y, or Z slice shows the complete liquid- and air-side
-surface band for any scene.
+slice. Cyan-to-blue cells are the live pressure octree, normalized from its
+finest pressure leaves to the coarsest level supported by the active solver.
+Pink is reserved for sparse fine cells whose stored `abs(phi)` is at most 1.5
+fine-cell widths. It therefore forms a small shell on both sides of the actual
+free surface, rather than filling every allocated page or its stencil halo.
+The page table, fine `phi`, and overflow flag are read directly on the GPU.
+Sweeping X, Y, or Z shows the same surface hierarchy used by extraction; if an
+allocation overflows, pink is hidden because the renderer has uniformly fallen
+back to the complete coarse surface. A calm planar slice therefore shows only
+the cyan-to-blue pressure hierarchy; pink appears locally when curvature or
+velocity strain activates a detail patch.
 
 ## Current scope
 

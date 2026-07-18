@@ -593,6 +593,8 @@ export class FluidLabRenderer {
   private gpuOpticalComposite_ms?: number;
   private gpuUpscale_ms?: number;
   private renderTimingContext = "";
+  private deviceRecoveryAttempts = 0;
+  private lastDeviceRecoveryAt_ms = -Infinity;
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; }
 
@@ -628,10 +630,20 @@ export class FluidLabRenderer {
       const fluid = this.gpuFluid;
       this.gpuFluid = undefined;
       this.gpuFluidKey = "";
+      this.gpuFluidPendingKey = "";
+      this.gpuFluidPending = undefined;
       this.resetGPUQueueTracking();
       this.gpuFluidGeneration += 1;
+      // A solver initialization pending on the lost device must never attach
+      // after recovery: its resources belong to the dead device and any bind
+      // group mixing them with the replacement device fails validation.
+      this.gpuFluidRequestGeneration += 1;
       try { fluid?.destroy(); } catch { /* Resources may already be invalid after device loss. */ }
+      // Breadcrumbs for hang diagnosis: the last known solver state narrows a
+      // watchdog reset down to a stage without needing a reproduction.
+      if (fluid) console.error("GPU device lost mid-simulation", { reason: info.reason, message: info.message, submittedTime_s: fluid.info.submittedTime_s, completedTime_s: fluid.info.completedTime_s, pendingBatches: this.gpuPendingBatches, encodedSteps: fluid.info.encodedSteps, gpuTimings: fluid.info.gpuTimings });
       this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` });
+      this.scheduleDeviceRecovery(info.reason);
     }).catch((error: unknown) => {
       if (!this.disposed) console.error("Unable to observe WebGPU device loss", error);
     });
@@ -711,6 +723,47 @@ export class FluidLabRenderer {
     this.onStatus({ state: "ready", label: "WebGPU renderer ready", adapter: this.adapterName });
   }
 
+  /**
+   * A lost device leaves the app permanently dead without intervention: every
+   * frame-loop entry point guards on deviceLost, so a transient TDR would
+   * otherwise present as a hard crash until reload. Recover by re-running
+   * initialize() on a fresh device; the solver rebuilds automatically from the
+   * scene on the next frame (simulation state does not survive the loss).
+   * Attempts are bounded so a deterministic fault (a shader that kills the
+   * device on every submit) cannot loop device creation forever.
+   */
+  private scheduleDeviceRecovery(reason: string) {
+    if (this.disposed || reason === "destroyed") return;
+    if (performance.now() - this.lastDeviceRecoveryAt_ms > 60_000) this.deviceRecoveryAttempts = 0;
+    if (this.deviceRecoveryAttempts >= 3) return;
+    this.deviceRecoveryAttempts += 1;
+    this.lastDeviceRecoveryAt_ms = performance.now();
+    setTimeout(() => { void this.recoverDevice(); }, 500 * this.deviceRecoveryAttempts);
+  }
+
+  private async recoverDevice() {
+    if (this.disposed || !this.deviceLost) return;
+    // Resources on a lost device are already invalid and need no destroy;
+    // drop every device-scoped reference so the frame loop's !this.device
+    // guards hold until initialize() completes on the replacement device.
+    this.device = undefined; this.context = undefined;
+    this.pipeline = undefined; this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
+    this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.voxelDebugPipeline = undefined; this.secondaryParticlePipeline = undefined;
+    this.bindGroup = undefined; this.uniformBuffer = undefined; this.bodyBuffer = undefined;
+    this.presentationTexture = undefined; this.voxelDebugDepth = undefined; this.presentationTextureKey = "";
+    this.fluidTexture = undefined; this.columnBaseTexture = undefined; this.gridCellTexture = undefined;
+    this.velocityFallbackTexture = undefined; this.pressureSamplesFallbackTexture = undefined; this.scalarFallbackTexture = undefined;
+    this.fluidTextureKey = ""; this.fluidRevision = -1;
+    this.renderQuerySet = undefined; this.renderQueryResolve = undefined; this.renderReadbackPending = false;
+    this.retiredGPUFluids.clear();
+    this.deviceLost = false;
+    try {
+      await this.initialize();
+    } catch (error) {
+      this.onStatus({ state: "unavailable", label: error instanceof Error ? `GPU recovery failed: ${error.message}` : "GPU recovery failed" });
+    }
+  }
+
   private rebuildBindGroup(texture = this.fluidTexture, columnBases = this.columnBaseTexture, gridCells = this.gridCellTexture, velocity = this.velocityFallbackTexture, pressureSamples = this.pressureSamplesFallbackTexture, divergence = this.scalarFallbackTexture, pressure = this.scalarFallbackTexture) {
     if (!this.device || this.disposed || this.deviceLost || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !texture || !columnBases || !gridCells || !velocity || !pressureSamples || !divergence || !pressure) return;
     this.bindGroup = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
@@ -720,6 +773,8 @@ export class FluidLabRenderer {
       { binding: 3, resource: columnBases.createView() }
     ] });
     this.waterPipeline?.setVolume(texture, columnBases);
+    this.waterPipeline?.setSparseSurface(this.gpuFluid?.sparseSurfaceBand);
+    this.gridOverlayPipeline?.setSparseSurface(this.gpuFluid?.sparseSurfaceBand);
     this.gridOverlayPipeline?.setVolume(texture, columnBases, gridCells, velocity, pressureSamples, divergence, pressure);
   }
 
@@ -750,6 +805,11 @@ export class FluidLabRenderer {
     const method=getMethod(config.methodId);if(!method.createSolver)return;
     const device=this.device,generation=++this.gpuFluidRequestGeneration,startedAt_ms=performance.now();
     const previous=this.gpuFluid;
+    // Clear the live-solver reference before the detach rebind below:
+    // rebuildBindGroup re-attaches this.gpuFluid's sparse surface band to the
+    // water and grid-overlay pipelines, so an old reference here would rebind
+    // the very buffers the retirement fence is about to destroy.
+    this.gpuFluid=undefined;
     if(previous){
       // Detach presentation bind groups from the live solver textures before
       // retiring them. Option A/B switches rebuild asynchronously; without
@@ -760,7 +820,7 @@ export class FluidLabRenderer {
       this.voxelDebugPipeline?.setSource(undefined);
       this.retireGPUFluid(previous);
     }
-    this.gpuFluid=undefined;this.gpuFluidKey="";this.gpuFluidPendingKey=key;this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackSecond=-1;
+    this.gpuFluidKey="";this.gpuFluidPendingKey=key;this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackSecond=-1;
     const report=(progress:{phase:string;label:string;completed:number;total:number})=>{if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;this.onStatus({state:"initializing",...progress,startedAt_ms});};
     report({phase:"solver",label:`Preparing ${method.shortLabel} solver`,completed:0,total:1});
     const create=method.createSolverAsync
@@ -1013,6 +1073,7 @@ export class FluidLabRenderer {
     for (const retired of this.retiredGPUFluids) { try { retired.destroy(); } catch { /* Best-effort cleanup after device loss. */ } }
     this.retiredGPUFluids.clear();
     try { this.waterPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
+    try { this.gridOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.voxelDebugPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     for (const resource of [this.presentationTexture, this.voxelDebugDepth, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, this.renderQuerySet, this.renderQueryResolve]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }
