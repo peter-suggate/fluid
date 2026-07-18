@@ -43,6 +43,10 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
     key: "rigid", label: "Rigid-body coupling", shortLabel: "COUPLE", value: value(contextMatches, snapshot.gpuRigid_ms), className: "stage-rigid", group: "compute", active: active(snapshot, "rigidCoupling"),
     description: "Applies solid occupancy and exchanges impulses between the liquid and active rigid bodies.", reads: ["fluid state", "body transforms and velocities"], writes: ["fluid momentum", "body impulses"], dependsOn: [dependsOn]
   });
+  const spray = (dependsOn: string) => stage({
+    key: "spray-sim", label: "Spray droplet update + emission", shortLabel: "SPRAY SIM", value: value(contextMatches, snapshot.gpuSpraySimulation_ms), className: "stage-surface-update", group: "compute", active: active(snapshot, "spray"),
+    description: "Advects the bounded escaped-droplet ring and emits new droplets from level-set samples that move beyond the resolved interface.", reads: ["signed distance φ", "projected velocity", "spray particle ring"], writes: ["spray particle ring"], dependsOn: [dependsOn]
+  });
 
   if (methodId === "octree") {
     const pressureLabel = pressureSolver ? `Octree leaf pressure · ${pressureSolver}` : "Octree leaf pressure · Chebyshev-Jacobi";
@@ -76,7 +80,8 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
         description: "Advects the authoritative level set with the extrapolated velocity, restores signed distance, culls isolated debris, and applies GPU-only volume feedback.", reads: ["extrapolated velocity", "signed distance φ"], writes: ["advected signed distance φ", "surface reductions"], dependsOn: ["materialization"]
       }),
       rigid("surface-update"),
-      diagnostics("rigid"),
+      spray("rigid"),
+      diagnostics("spray-sim"),
       overhead("diagnostics")
     ];
   }

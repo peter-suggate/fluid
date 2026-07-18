@@ -57,6 +57,7 @@ export interface RendererFrameMetrics {
   gpuSurfaceExtraction_ms?: number;
   gpuDryScene_ms?: number;
   gpuInterfaces_ms?: number;
+  gpuSprayRender_ms?: number;
   gpuOpticalComposite_ms?: number;
   gpuUpscale_ms?: number;
   methodId?: string;
@@ -69,28 +70,30 @@ export interface RenderStageTimings {
   surfaceExtraction_ms?: number;
   dryScene_ms?: number;
   interfaces_ms?: number;
+  sprayRender_ms: number;
   opticalComposite_ms: number;
   upscale_ms: number;
 }
 
-export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, rasterized: boolean, surfaceUpdated: boolean): RenderStageTimings {
-  if (times.length < 12) throw new Error("Render timestamp sample must contain 12 query values");
+export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, rasterized: boolean, surfaceUpdated: boolean, sprayRendered = true): RenderStageTimings {
+  if (times.length < 16) throw new Error("Render timestamp sample must contain 16 query values");
   const duration = (start: number, end: number) => {
     const milliseconds = Number(times[end] - times[start]) / 1e6;
     return Number.isFinite(milliseconds) && milliseconds >= 0 && milliseconds < 10_000 ? milliseconds : 0;
   };
   const upscale_ms = duration(10, 11);
+  const sprayRender_ms = sprayRendered ? duration(12, 13) + (rasterized ? duration(14, 15) : 0) : 0;
   if (!rasterized) {
     const opticalComposite_ms = duration(0, 1);
-    return { total_ms: opticalComposite_ms + upscale_ms, opticalComposite_ms, upscale_ms };
+    return { total_ms: opticalComposite_ms + sprayRender_ms + upscale_ms, sprayRender_ms, opticalComposite_ms, upscale_ms };
   }
   const surfaceExtraction_ms = surfaceUpdated ? duration(0, 1) : undefined;
   const dryScene_ms = duration(2, 3);
   const interfaces_ms = duration(4, 5) + duration(6, 7);
   const opticalComposite_ms = duration(8, 9);
   return {
-    total_ms: (surfaceExtraction_ms ?? 0) + dryScene_ms + interfaces_ms + opticalComposite_ms + upscale_ms,
-    surfaceExtraction_ms, dryScene_ms, interfaces_ms, opticalComposite_ms, upscale_ms
+    total_ms: (surfaceExtraction_ms ?? 0) + dryScene_ms + interfaces_ms + sprayRender_ms + opticalComposite_ms + upscale_ms,
+    surfaceExtraction_ms, dryScene_ms, interfaces_ms, sprayRender_ms, opticalComposite_ms, upscale_ms
   };
 }
 
@@ -545,6 +548,7 @@ export class FluidLabRenderer {
   private gpuSurfaceExtraction_ms?: number;
   private gpuDryScene_ms?: number;
   private gpuInterfaces_ms?: number;
+  private gpuSprayRender_ms?: number;
   private gpuOpticalComposite_ms?: number;
   private gpuUpscale_ms?: number;
   private renderTimingContext = "";
@@ -590,7 +594,7 @@ export class FluidLabRenderer {
     }).catch((error: unknown) => {
       if (!this.disposed) console.error("Unable to observe WebGPU device loss", error);
     });
-    if(device.features.has("timestamp-query")){this.renderQuerySet=device.createQuerySet({type:"timestamp",count:12});this.renderQueryResolve=device.createBuffer({size:12*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
+    if(device.features.has("timestamp-query")){this.renderQuerySet=device.createQuerySet({type:"timestamp",count:16});this.renderQueryResolve=device.createBuffer({size:16*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
     context.configure({ device, format: this.format, alphaMode: "opaque" });
 
     progress("Checking presentation shader",2);
@@ -825,7 +829,7 @@ export class FluidLabRenderer {
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     const start = performance.now();
     const timingContext = `${config.methodId}:${config.quality}:${waterRenderMode}`;
-    if (timingContext !== this.renderTimingContext) { this.renderTimingContext = timingContext; this.gpuRender_ms = undefined; this.gpuSurfaceExtraction_ms=undefined;this.gpuDryScene_ms=undefined;this.gpuInterfaces_ms=undefined;this.gpuOpticalComposite_ms=undefined;this.gpuUpscale_ms=undefined; }
+    if (timingContext !== this.renderTimingContext) { this.renderTimingContext = timingContext; this.gpuRender_ms = undefined; this.gpuSurfaceExtraction_ms=undefined;this.gpuDryScene_ms=undefined;this.gpuInterfaces_ms=undefined;this.gpuSprayRender_ms=undefined;this.gpuOpticalComposite_ms=undefined;this.gpuUpscale_ms=undefined; }
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
     const gpuInfo = backend === "webgpu" ? this.ensureGPUFluid(scene, config, time_s, bodies, targetFps) : undefined;
@@ -876,6 +880,7 @@ export class FluidLabRenderer {
     this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     const cpuDataUpload_ms=performance.now()-uploadStart,renderStart=performance.now();
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
+    this.secondaryParticlePipeline?.setSource(backend === "webgpu" ? this.gpuFluid?.secondaryParticles : undefined);
     // One interval surrounds the complete active presentation path. For raster
     // optics it starts at isosurface extraction and ends after final upscale;
     // for the legacy path it starts at its full-screen pass and ends likewise.
@@ -891,6 +896,8 @@ export class FluidLabRenderer {
         scene:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:2,endOfPassWriteIndex:3},
         frontInterfaces:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:4,endOfPassWriteIndex:5},
         backInterfaces:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:6,endOfPassWriteIndex:7},
+        sprayFront:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:12,endOfPassWriteIndex:13},
+        sprayBack:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:14,endOfPassWriteIndex:15},
         composite:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:8,endOfPassWriteIndex:9}
       }:undefined
     );
@@ -905,15 +912,14 @@ export class FluidLabRenderer {
       pass.draw(3);
       pass.end();
     }
-    this.secondaryParticlePipeline?.setSource(backend === "webgpu" ? this.gpuFluid?.secondaryParticles : undefined);
-    this.secondaryParticlePipeline?.encode(encoder, this.presentationTexture.createView(), !rasterized);
+    const fallbackSprayRendered = !rasterized && Boolean(this.secondaryParticlePipeline?.encode(encoder, this.presentationTexture.createView(), sampleRenderGPU&&this.renderQuerySet?{querySet:this.renderQuerySet,beginningOfPassWriteIndex:12,endOfPassWriteIndex:13}:undefined));
     if (gridOverlay?.axis !== "off") this.gridOverlayPipeline?.encode(encoder, this.presentationTexture.createView());
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}],...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:10,endOfPassWriteIndex:11}}:{})});
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();
-    let renderReadback:GPUBuffer|undefined;if(sampleRenderGPU&&this.renderQuerySet&&this.renderQueryResolve){this.lastRenderQueryAt=renderStart;this.renderReadbackPending=true;encoder.resolveQuerySet(this.renderQuerySet,0,12,this.renderQueryResolve,0);renderReadback=this.device.createBuffer({size:12*8,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.renderQueryResolve,0,renderReadback,0,12*8);}
+    let renderReadback:GPUBuffer|undefined;if(sampleRenderGPU&&this.renderQuerySet&&this.renderQueryResolve){this.lastRenderQueryAt=renderStart;this.renderReadbackPending=true;encoder.resolveQuerySet(this.renderQuerySet,0,16,this.renderQueryResolve,0);renderReadback=this.device.createBuffer({size:16*8,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.renderQueryResolve,0,renderReadback,0,16*8);}
     this.device.queue.submit([encoder.finish()]);
-    if(renderReadback){const readback=renderReadback,sampledContext=timingContext,sampledRasterized=rasterized,surfaceUpdated=Boolean(rasterResult&&rasterResult.surfaceUpdated);void readback.mapAsync(GPUMapMode.READ).then(()=>{const stage=decodeRenderStageTimestamps(new BigUint64Array(readback.getMappedRange()),sampledRasterized,surfaceUpdated);if(this.renderTimingContext===sampledContext){this.gpuSurfaceExtraction_ms=stage.surfaceExtraction_ms;this.gpuDryScene_ms=stage.dryScene_ms;this.gpuInterfaces_ms=stage.interfaces_ms;this.gpuOpticalComposite_ms=stage.opticalComposite_ms;this.gpuUpscale_ms=stage.upscale_ms;this.gpuRender_ms=stage.total_ms;}readback.unmap();readback.destroy();}).catch(()=>readback.destroy()).finally(()=>{this.renderReadbackPending=false;});}
-    return {cpuFrame_ms:performance.now()-start,cpuPhysicsSubmit_ms,cpuDataUpload_ms,cpuRenderEncode_ms:performance.now()-renderStart,gpuRender_ms:this.gpuRender_ms,gpuSurfaceExtraction_ms:this.gpuSurfaceExtraction_ms,gpuDryScene_ms:this.gpuDryScene_ms,gpuInterfaces_ms:this.gpuInterfaces_ms,gpuOpticalComposite_ms:this.gpuOpticalComposite_ms,gpuUpscale_ms:this.gpuUpscale_ms,methodId:config.methodId,waterRenderMode,gpuRenderTimestampAvailable:Boolean(this.renderQuerySet)};
+    if(renderReadback){const readback=renderReadback,sampledContext=timingContext,sampledRasterized=rasterized,surfaceUpdated=Boolean(rasterResult&&rasterResult.surfaceUpdated),sampledSprayRendered=rasterized?Boolean(rasterResult&&rasterResult.sprayRendered):fallbackSprayRendered;void readback.mapAsync(GPUMapMode.READ).then(()=>{const stage=decodeRenderStageTimestamps(new BigUint64Array(readback.getMappedRange()),sampledRasterized,surfaceUpdated,sampledSprayRendered);if(this.renderTimingContext===sampledContext){this.gpuSurfaceExtraction_ms=stage.surfaceExtraction_ms;this.gpuDryScene_ms=stage.dryScene_ms;this.gpuInterfaces_ms=stage.interfaces_ms;this.gpuSprayRender_ms=stage.sprayRender_ms;this.gpuOpticalComposite_ms=stage.opticalComposite_ms;this.gpuUpscale_ms=stage.upscale_ms;this.gpuRender_ms=stage.total_ms;}readback.unmap();readback.destroy();}).catch(()=>readback.destroy()).finally(()=>{this.renderReadbackPending=false;});}
+    return {cpuFrame_ms:performance.now()-start,cpuPhysicsSubmit_ms,cpuDataUpload_ms,cpuRenderEncode_ms:performance.now()-renderStart,gpuRender_ms:this.gpuRender_ms,gpuSurfaceExtraction_ms:this.gpuSurfaceExtraction_ms,gpuDryScene_ms:this.gpuDryScene_ms,gpuInterfaces_ms:this.gpuInterfaces_ms,gpuSprayRender_ms:this.gpuSprayRender_ms,gpuOpticalComposite_ms:this.gpuOpticalComposite_ms,gpuUpscale_ms:this.gpuUpscale_ms,methodId:config.methodId,waterRenderMode,gpuRenderTimestampAvailable:Boolean(this.renderQuerySet)};
   }
 
   destroy(): void {

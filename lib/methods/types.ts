@@ -60,7 +60,7 @@ export interface GPUSolverInstance {
   readonly gridCellTexture?: GPUTexture;
   /** Live velocity field for scientific slice modes (CFL/speed heatmaps). */
   readonly velocityTexture?: GPUTexture;
-  /** Optional one-way spray, mist, and foam stream rendered above the liquid surface. */
+  /** Optional one-way escaped spray droplets rendered above the liquid surface. */
   readonly secondaryParticles?: GPUSecondaryParticleSource;
   /** Adaptive pressure-DOF ownership used by the representation alarm. */
   readonly gridPressureSamplesTexture?: GPUTexture;

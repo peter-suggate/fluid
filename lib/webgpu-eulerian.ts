@@ -25,6 +25,7 @@ export type GPUPhysicsStageId =
   | "materialization"
   | "surfaceUpdate"
   | "rigidCoupling"
+  | "spray"
   | "diagnostics";
 
 export interface GPUPhysicsTimings {
@@ -39,6 +40,7 @@ export interface GPUPhysicsTimings {
   materialization_ms: number;
   surfaceUpdate_ms: number;
   rigidCoupling_ms: number;
+  spray_ms: number;
   diagnostics_ms: number;
   overhead_ms: number;
   total_ms: number;
@@ -47,7 +49,7 @@ export interface GPUPhysicsTimings {
 }
 
 export type GPUPhysicsTimingField = Exclude<keyof GPUPhysicsTimings, "activeStages">;
-export const GPU_PHYSICS_TIMESTAMP_CAPACITY = 1024;
+export const GPU_PHYSICS_TIMESTAMP_CAPACITY = 2048;
 
 export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): GPUPhysicsTimings {
   return {
@@ -62,6 +64,7 @@ export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): 
     materialization_ms: 0,
     surfaceUpdate_ms: 0,
     rigidCoupling_ms: 0,
+    spray_ms: 0,
     diagnostics_ms: 0,
     overhead_ms: 0,
     total_ms: 0,
@@ -73,7 +76,7 @@ export function categorizedGPUPhysicsTime_ms(timings: GPUPhysicsTimings) {
   return timings.preparation_ms + timings.layerConstruction_ms + timings.advection_ms
     + timings.conditioning_ms + timings.remeshing_ms + timings.pressure_ms
     + timings.projection_ms + timings.extrapolation_ms + timings.materialization_ms
-    + timings.surfaceUpdate_ms + timings.rigidCoupling_ms
+    + timings.surfaceUpdate_ms + timings.rigidCoupling_ms + timings.spray_ms
     + timings.diagnostics_ms;
 }
 
@@ -100,7 +103,7 @@ export interface GPUEulerianInfo {
   pressureIterations: number;
   pressureSolver?: string;
   allocatedBytes: number;
-  /** Fixed GPU ring capacity for one-way spray, mist, and foam particles. */
+  /** Fixed GPU ring capacity for one-way escaped spray droplets. */
   secondaryParticleCapacity?: number;
   quality: GPUQuality;
   volumeCellSum?: number;

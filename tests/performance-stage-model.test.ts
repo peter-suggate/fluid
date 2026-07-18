@@ -20,6 +20,7 @@ const snapshot = (methodId: string, activeStages: GPUPhysicsStageId[]): Performa
   gpuMaterialization_ms: methodId === "octree" ? 13 : 0,
   gpuSurfaceUpdate_ms: methodId === "quadtree-tall-cell" || methodId === "octree" ? 8 : 0,
   gpuRigid_ms: 9,
+  gpuSpraySimulation_ms: methodId === "octree" ? 14 : 0,
   gpuDiagnostics_ms: 10,
   gpuOverhead_ms: 11
 });
@@ -52,9 +53,9 @@ test("quadtree trace exposes inline topology and post-projection surface mainten
 });
 
 test("octree trace exposes its resident pipeline and immersed-body coupling", () => {
-  const { sample, stages } = stagesFor("octree", ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surfaceUpdate", "rigidCoupling", "diagnostics"]);
-  assert.deepEqual(stages.map((stage) => stage.key), ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "diagnostics", "overhead"]);
-  assert.deepEqual(stages.map((stage) => stage.dependsOn[0]), ["uploads", "topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "diagnostics"]);
+  const { sample, stages } = stagesFor("octree", ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surfaceUpdate", "rigidCoupling", "spray", "diagnostics"]);
+  assert.deepEqual(stages.map((stage) => stage.key), ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "spray-sim", "diagnostics", "overhead"]);
+  assert.deepEqual(stages.map((stage) => stage.dependsOn[0]), ["uploads", "topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "spray-sim", "diagnostics"]);
   assert.equal(stages.reduce((sum, stage) => sum + stage.value, 0), measuredGPUTime_ms(sample));
 });
 
@@ -96,12 +97,12 @@ test("conditional method stages remain visible when idle", () => {
 
 test("expanded physics accounting includes every named category", () => {
   const timings = emptyGPUPhysicsTimings();
-  Object.assign(timings, { preparation_ms: 1, layerConstruction_ms: 2, advection_ms: 3, conditioning_ms: 4, remeshing_ms: 5, pressure_ms: 6, projection_ms: 7, surfaceUpdate_ms: 8, rigidCoupling_ms: 9, diagnostics_ms: 10, extrapolation_ms: 11, materialization_ms: 12 });
-  assert.equal(categorizedGPUPhysicsTime_ms(timings), 78);
+  Object.assign(timings, { preparation_ms: 1, layerConstruction_ms: 2, advection_ms: 3, conditioning_ms: 4, remeshing_ms: 5, pressure_ms: 6, projection_ms: 7, surfaceUpdate_ms: 8, rigidCoupling_ms: 9, diagnostics_ms: 10, extrapolation_ms: 11, materialization_ms: 12, spray_ms: 13 });
+  assert.equal(categorizedGPUPhysicsTime_ms(timings), 91);
 });
 
 test("timestamp capacity covers the worst 64-substep wrapper trace", () => {
-  const worstCaseQueries = 2 * (1 + 1 + 64 * 7 + 1); // total + topology + seven possible timed categories/substep + diagnostics
+  const worstCaseQueries = 2 * (1 + 1 + 64 * 8 + 1); // total + topology + eight possible timed categories/substep + diagnostics
   assert.ok(GPU_PHYSICS_TIMESTAMP_CAPACITY >= worstCaseQueries);
-  assert.equal(GPU_PHYSICS_TIMESTAMP_CAPACITY * 8, 8192);
+  assert.equal(GPU_PHYSICS_TIMESTAMP_CAPACITY * 8, 16384);
 });

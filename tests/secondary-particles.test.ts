@@ -17,15 +17,15 @@ test("secondary particle budgets are bounded and allocation-aligned", () => {
   assert.equal(SECONDARY_PARTICLE_STRIDE_BYTES, 48);
 });
 
-test("secondary liquid particles use the paper escape and phase rules", () => {
+test("secondary liquid particles use the paper escape rule", () => {
   assert.match(secondaryParticleComputeShader, /samplePhi\(escaped\) <= 2\.0 \* radius/);
   assert.match(secondaryParticleComputeShader, /let generationDt = max\(dt\(\), 1\.0 \/ 30\.0\)/);
   assert.match(secondaryParticleComputeShader, /let radius = clamp\(-trialPhi/);
   assert.match(secondaryParticleComputeShader, /let clusterCount = 1u \+ min\(3u/);
   assert.match(secondaryParticleComputeShader, /velocity \+ params\.gravityAndSeed\.xyz \* dt\(\)/);
-  assert.match(secondaryParticleComputeShader, /let drag = select\(0\.18, 2\.8/);
-  assert.match(secondaryParticleComputeShader, /kind = 2\.0/);
-  assert.match(secondaryParticleComputeShader, /velocity = sampleVelocity\(position\)/);
+  assert.match(secondaryParticleComputeShader, /exp\(-0\.18 \* dt\(\)\)/);
+  assert.match(secondaryParticleComputeShader, /samplePhi\(position\) < -0\.2 \* minimumCell\(\)/);
+  assert.doesNotMatch(secondaryParticleComputeShader, /kind = 2\.0|\bmist\b|\bfoam\b/i);
   assert.doesNotMatch(secondaryParticleComputeShader, /pressure/);
 });
 
@@ -36,11 +36,18 @@ test("secondary particle sampling abstracts dense and restricted fields", () => 
   assert.match(secondaryParticleComputeShader, /here\.x \+ velocityRaw\(q - vec3i\(1, 0, 0\)\)\.x/);
 });
 
-test("secondary particle renderer draws soft typed billboards", () => {
+test("fallback spray renderer draws soft liquid-colored billboards", () => {
   assert.match(secondaryParticleRenderShader, /@builtin\(instance_index\)/);
-  assert.match(secondaryParticleRenderShader, /input\.kind > 1\.5/);
-  assert.match(secondaryParticleRenderShader, /input\.kind > 0\.5/);
   assert.match(secondaryParticleRenderShader, /smoothstep\(0\.34, 1\.0, radius2\)/);
+  assert.match(secondaryParticleRenderShader, /let alpha = 0\.46 \* edge/);
+  assert.doesNotMatch(secondaryParticleRenderShader, /\bkind\b|\bmist\b|\bfoam\b/i);
+});
+
+test("energetic splashes bias toward smaller mixed-size droplets", () => {
+  assert.match(secondaryParticleComputeShader, /let energyRatio = max\(1\.0, speedRatio \* speedRatio\)/);
+  assert.match(secondaryParticleComputeShader, /pow\(energyRatio, -0\.32\)/);
+  assert.match(secondaryParticleComputeShader, /energyRadiusScale = mix\(1\.0, breakupScale, sizeBias\)/);
+  assert.match(secondaryParticleComputeShader, /< 0\.16/);
 });
 
 test("spray contributes sphere interfaces to the water optical composite", () => {
@@ -48,5 +55,5 @@ test("spray contributes sphere interfaces to the water optical composite", () =>
   assert.match(secondaryParticleOpticalShader, /@builtin\(frag_depth\)/);
   assert.match(secondaryParticleOpticalShader, /@fragment fn sphereFront/);
   assert.match(secondaryParticleOpticalShader, /@fragment fn sphereBack/);
-  assert.match(secondaryParticleOpticalShader, /input\.kind >= 0\.5/);
+  assert.doesNotMatch(secondaryParticleOpticalShader, /\bkind\b|\bmist\b|\bfoam\b/i);
 });
