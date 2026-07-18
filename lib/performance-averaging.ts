@@ -3,7 +3,8 @@ import type { PerformanceSnapshot } from "./stores/diagnostics-store";
 const physicsTimingFields = new Set<keyof PerformanceSnapshot>([
   "gpuPreparation_ms", "gpuLayerConstruction_ms", "gpuAdvection_ms", "gpuConditioning_ms",
   "gpuRemeshing_ms", "gpuPressure_ms", "gpuProjection_ms", "gpuSurfaceUpdate_ms",
-  "gpuExtrapolation_ms", "gpuMaterialization_ms", "gpuRigid_ms", "gpuSpraySimulation_ms", "gpuDiagnostics_ms", "gpuOverhead_ms"
+  "gpuExtrapolation_ms", "gpuMaterialization_ms", "gpuRigid_ms", "gpuSpraySimulation_ms",
+  "gpuFluidResidency_ms", "gpuSparsePublication_ms", "gpuDiagnostics_ms", "gpuOverhead_ms"
 ]);
 
 const renderTimingFields = new Set<keyof PerformanceSnapshot>([

@@ -1,6 +1,6 @@
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { createPaperScenario } from "../lib/paper-scenarios";
-import { applyGardenPool } from "../lib/garden-scene";
+import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M } from "../lib/garden-scene";
 
 export const smokeScenarioIds = [
   "dam-break-ui",
@@ -60,6 +60,7 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
     scene.fluid.surfaceTension_N_m = 0;
     delete scene.fluid.inflow;
     scene.fluid.initialCondition = id === "garden-pond" ? "tank-fill" : "dam-break";
+    if (id === "garden-dam-break") scene.fluid.initialBrickSeeds_m = [{ ...GARDEN_DAM_BRICK_SEED_M }];
     scene.numerics.fixedDt_s = scene.numerics.maxDt_s = id === "garden-pond" ? 1 / 120 : 0.004;
     return {
       id,

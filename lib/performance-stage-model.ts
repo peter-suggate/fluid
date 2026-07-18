@@ -81,7 +81,15 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
       }),
       rigid("surface-update"),
       spray("rigid"),
-      diagnostics("spray-sim"),
+      stage({
+        key: "fluid-residency", label: "Fluid brick residency", shortLabel: "RESIDENCY", value: value(contextMatches, snapshot.gpuFluidResidency_ms), className: "stage-residency", group: "compute", active: active(snapshot, "fluidResidency"),
+        description: "Classifies finest-level bricks as fluid core, stencil halo, newly activated, or retired and emits GPU-owned indirect worklists for the next adaptive rebuild.", reads: ["advected signed distance φ", "previous brick states"], writes: ["core / halo residency", "active and retired worklists"], dependsOn: ["spray-sim"]
+      }),
+      stage({
+        key: "sparse-publication", label: "Sparse scene fluid publication", shortLabel: "PUBLISH", value: value(contextMatches, snapshot.gpuSparsePublication_ms), className: "stage-publication", group: "compute", active: active(snapshot, "sparsePublication"),
+        description: "Materializes resident fluid payloads into the shared sparse-brick octree, clears retired payloads, and publishes compact voxel and brick records for scene consumers.", reads: ["active and retired worklists", "level set φ", "projected velocity", "solid occupancy"], writes: ["sparse brick payloads", "voxel and brick records"], dependsOn: ["fluid-residency"]
+      }),
+      diagnostics("sparse-publication"),
       overhead("diagnostics")
     ];
   }

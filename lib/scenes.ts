@@ -1,6 +1,6 @@
 import { cloneScene, defaultCamera, defaultScene, DEFAULT_GPU_CPU_TIMESTEP_RATIO, type CameraState, type SceneDescription } from "./model";
 import { createPaperScenario } from "./paper-scenarios";
-import { applyGardenPool, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
+import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import { terrainHeightAt } from "./terrain";
 import type { EnvironmentId } from "./environments";
 
@@ -85,10 +85,11 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     id: "garden-dam-break",
     name: "Garden pond · dam break",
     group: "Garden",
-    description: "A water column released on the lawn corner races over the grass, scatters the crate stack and washes into the pond.",
+    description: "One resident fluid brick releases on the upper lawn, vacates its source region, and activates neighbouring bricks as it washes into the pond.",
     create: () => {
       const scene = applyGardenPool(createPaperScenario("dam-break-boxes"), { fillFraction: 0.16 });
       scene.sceneId = "garden-pond-dam-break";
+      scene.fluid.initialBrickSeeds_m = [{ ...GARDEN_DAM_BRICK_SEED_M }];
       return scene;
     },
     camera: gardenCamera,

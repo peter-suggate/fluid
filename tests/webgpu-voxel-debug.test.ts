@@ -64,6 +64,7 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
   const writes: unknown[] = [];
   const renderDescriptors: GPURenderPassDescriptor[] = [];
   let indirectDraws = 0;
+  const paneDraws: unknown[][] = [];
   const pipeline = {} as GPUComputePipeline & GPURenderPipeline;
   const device = {
     createShaderModule: () => ({}),
@@ -76,7 +77,7 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
     queue: { writeBuffer: (...args: unknown[]) => writes.push(args) }
   } as unknown as GPUDevice;
   const computePass = { setBindGroup() {}, setPipeline() {}, dispatchWorkgroups() {}, end() {} };
-  const renderPass = { setBindGroup() {}, setPipeline() {}, drawIndirect: () => { indirectDraws += 1; }, end() {} };
+  const renderPass = { setBindGroup() {}, setPipeline() {}, draw: (...args: unknown[]) => { paneDraws.push(args); }, drawIndirect: () => { indirectDraws += 1; }, end() {} };
   const encoder = {
     beginComputePass: () => computePass,
     beginRenderPass: (descriptor: GPURenderPassDescriptor) => { renderDescriptors.push(descriptor); return renderPass; }
@@ -93,11 +94,16 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
   const common = {
     colorTarget: {} as GPUTextureView, depthTarget: {} as GPUTextureView,
     viewProjection: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
-    cameraPosition: [0, 0, 4] as const
+    cameraPosition: [0, 0, 4] as const,
+    containerBounds: { min: [-1, 0, -1] as const, max: [1, 2, 1] as const },
+    containerClosedTop: false
   };
   assert.equal(renderer.encode(encoder, { ...common, mode: "raw-voxels", depthLoadOp: "clear", colorLoadOp: "clear" }), true);
   assert.equal(renderer.encode(encoder, { ...common, mode: "brick-grid" }), true);
   assert.equal(indirectDraws, 2);
+  assert.deepEqual(paneDraws, [
+    [6, 1, 0, 3], [6, 1, 0, 0], [6, 1, 0, 1], [6, 1, 0, 2], [6, 1, 0, 4]
+  ], "open tank panes draw back-to-front after opaque voxels");
   assert.equal(renderDescriptors[0].depthStencilAttachment?.depthClearValue, 1);
   const firstColorAttachment = Array.from(renderDescriptors[0].colorAttachments)[0];
   assert.equal(firstColorAttachment?.loadOp, "clear");

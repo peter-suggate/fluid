@@ -21,6 +21,8 @@ const snapshot = (methodId: string, activeStages: GPUPhysicsStageId[]): Performa
   gpuSurfaceUpdate_ms: methodId === "quadtree-tall-cell" || methodId === "octree" ? 8 : 0,
   gpuRigid_ms: 9,
   gpuSpraySimulation_ms: methodId === "octree" ? 14 : 0,
+  gpuFluidResidency_ms: methodId === "octree" ? 15 : 0,
+  gpuSparsePublication_ms: methodId === "octree" ? 16 : 0,
   gpuDiagnostics_ms: 10,
   gpuOverhead_ms: 11
 });
@@ -53,10 +55,12 @@ test("quadtree trace exposes inline topology and post-projection surface mainten
 });
 
 test("octree trace exposes its resident pipeline and immersed-body coupling", () => {
-  const { sample, stages } = stagesFor("octree", ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surfaceUpdate", "rigidCoupling", "spray", "diagnostics"]);
-  assert.deepEqual(stages.map((stage) => stage.key), ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "spray-sim", "diagnostics", "overhead"]);
-  assert.deepEqual(stages.map((stage) => stage.dependsOn[0]), ["uploads", "topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "spray-sim", "diagnostics"]);
+  const { sample, stages } = stagesFor("octree", ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surfaceUpdate", "rigidCoupling", "spray", "fluidResidency", "sparsePublication", "diagnostics"]);
+  assert.deepEqual(stages.map((stage) => stage.key), ["topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "spray-sim", "fluid-residency", "sparse-publication", "diagnostics", "overhead"]);
+  assert.deepEqual(stages.map((stage) => stage.dependsOn[0]), ["uploads", "topology", "advection", "pressure", "projection", "extrapolation", "materialization", "surface-update", "rigid", "spray-sim", "fluid-residency", "sparse-publication", "diagnostics"]);
   assert.equal(stages.find((stage) => stage.key === "spray-sim")?.label, "Spray breakup + transport");
+  assert.equal(stages.find((stage) => stage.key === "fluid-residency")?.label, "Fluid brick residency");
+  assert.equal(stages.find((stage) => stage.key === "sparse-publication")?.label, "Sparse scene fluid publication");
   assert.equal(stages.reduce((sum, stage) => sum + stage.value, 0), measuredGPUTime_ms(sample));
 });
 
@@ -98,12 +102,12 @@ test("conditional method stages remain visible when idle", () => {
 
 test("expanded physics accounting includes every named category", () => {
   const timings = emptyGPUPhysicsTimings();
-  Object.assign(timings, { preparation_ms: 1, layerConstruction_ms: 2, advection_ms: 3, conditioning_ms: 4, remeshing_ms: 5, pressure_ms: 6, projection_ms: 7, surfaceUpdate_ms: 8, rigidCoupling_ms: 9, diagnostics_ms: 10, extrapolation_ms: 11, materialization_ms: 12, spray_ms: 13 });
-  assert.equal(categorizedGPUPhysicsTime_ms(timings), 91);
+  Object.assign(timings, { preparation_ms: 1, layerConstruction_ms: 2, advection_ms: 3, conditioning_ms: 4, remeshing_ms: 5, pressure_ms: 6, projection_ms: 7, surfaceUpdate_ms: 8, rigidCoupling_ms: 9, diagnostics_ms: 10, extrapolation_ms: 11, materialization_ms: 12, spray_ms: 13, fluidResidency_ms: 14, sparsePublication_ms: 15 });
+  assert.equal(categorizedGPUPhysicsTime_ms(timings), 120);
 });
 
 test("timestamp capacity covers the worst 64-substep wrapper trace", () => {
-  const worstCaseQueries = 2 * (1 + 1 + 64 * 8 + 1); // total + topology + eight possible timed categories/substep + diagnostics
+  const worstCaseQueries = 2 * (1 + 1 + 64 * 9 + 3); // total + topology + nine possible categories/substep + sparse tail + diagnostics
   assert.ok(GPU_PHYSICS_TIMESTAMP_CAPACITY >= worstCaseQueries);
   assert.equal(GPU_PHYSICS_TIMESTAMP_CAPACITY * 8, 16384);
 });

@@ -16,6 +16,12 @@ export const GARDEN_CONTAINER = { width_m: 3.0, height_m: 1.0, depth_m: 2.2 } as
 export const GARDEN_GRASS_M = 0.38;
 /** Still-water level of the filled pond: 3.5 cm of exposed bank. */
 export const GARDEN_WATERLINE_M = 0.345;
+/**
+ * Raised seed over the upstream lip of the deep basin. The solver fills
+ * exactly the one 8^3 brick containing this point; the released body drops
+ * through the basin mouth instead of sheeting around its left bank.
+ */
+export const GARDEN_DAM_BRICK_SEED_M = { x: -0.5, y: 0.61, z: -0.3 } as const;
 
 export function gardenPoolTerrain(): TerrainDescription {
   return {

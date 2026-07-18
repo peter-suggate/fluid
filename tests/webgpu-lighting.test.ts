@@ -51,3 +51,11 @@ test("analytic tank glass remains enabled for the hybrid octree smooth scene", (
   assert.doesNotMatch(glassFunction, /u\.options\.w/, "voxel scene selection must not suppress the raster glass presentation");
   assert.match(glassFunction, /if\(environmentIndex\(\)==7\)\{return color;\}/, "the open garden remains vessel-free");
 });
+
+test("raw voxel glass uses a separate stable pane pass", () => {
+  assert.match(voxelDebugRenderShader, /fn glassPaneVertex/);
+  assert.match(voxelDebugRenderShader, /fn glassPaneFragment/);
+  assert.match(voxelDebugRenderShader, /input\.materialId == 1u\) \{ discard/);
+  assert.match(rendererSource, /containerBounds: \{/);
+  assert.match(rendererSource, /containerClosedTop: scene\.container\.top === "closed"/);
+});

@@ -35,3 +35,11 @@ test("averaging preserves the union of conditional stages in the selected window
   const averaged = averagePerformanceSnapshots([first, second], emptyPerformance);
   assert.deepEqual(averaged.gpuActiveStages, ["preparation", "advection", "remeshing"]);
 });
+
+test("averaging carries sparse residency and publication timestamp stages", () => {
+  const first = { ...sample(3, 3), gpuFluidResidency_ms: 1, gpuSparsePublication_ms: 3 };
+  const second = { ...sample(6, 6), gpuFluidResidency_ms: 3, gpuSparsePublication_ms: 7 };
+  const averaged = averagePerformanceSnapshots([first, second], emptyPerformance);
+  assert.equal(averaged.gpuFluidResidency_ms, 2);
+  assert.equal(averaged.gpuSparsePublication_ms, 5);
+});

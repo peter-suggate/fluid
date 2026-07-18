@@ -12,6 +12,7 @@ import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTabl
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "./voxel-environments";
 import { SparseSceneProxyVoxelizer, type SparseScenePrimitive } from "./webgpu-sparse-scene-proxies";
 import { SPARSE_VOXEL_DEBUG_RECORD_STRIDE, type SparseVoxelRenderSource } from "./webgpu-voxel-debug";
+import { GPUFluidBrickResidency, type FluidBrickResidencyStats } from "./webgpu-fluid-brick-residency";
 
 export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
@@ -21,6 +22,11 @@ export interface OctreeSparseBrickDenseFields {
   levelSet: GPUTexture;
   velocity: GPUTexture;
   solidCells: GPUBuffer;
+}
+
+export interface OctreeSparseBrickTimestampWrites {
+  residency?: GPUComputePassTimestampWrites;
+  publication?: GPUComputePassTimestampWrites;
 }
 
 /** Environment terminal leaves are at most 2x the solver brick scale. */
@@ -56,6 +62,7 @@ struct Params { dims: vec4u, origin: vec4f, cell: vec4f, settings: vec4u }
 @group(0) @binding(5) var<uniform> params: Params;
 @group(0) @binding(6) var<storage, read_write> voxelRecords: array<DebugRecord>;
 @group(0) @binding(7) var<storage, read_write> brickRecords: array<DebugRecord>;
+@group(0) @binding(8) var<storage, read> fluidLeafStates: array<u32>;
 
 fn keyBit(low: u32, high: u32, bit: u32) -> u32 {
   if (bit < 32u) { return (low >> bit) & 1u; }
@@ -87,6 +94,9 @@ fn recordForVoxel(index: u32) -> DebugRecord {
   var material = packed & 0xffffu;
   let owner = packed >> 16u;
   if (material != 0u && owner != 0xffffu && owner < params.settings.y && owner < arrayLength(&bodyMaterials)) { material = bodyMaterials[owner]; }
+  // Residency makes a brick schedulable; it does not turn the halo's air
+  // voxels into liquid. Raw inspection therefore stays payload-exact while
+  // the brick-grid record below visualizes core and halo allocation.
   let isActive = inside && material != 0u;
   let world = params.origin.xyz + vec3f(cell) * params.cell.xyz;
   return DebugRecord(vec4f(world, 0.0), vec4f(f32(scale) * params.cell.xyz, 0.0), vec4u(material, select(0u, 1u, isActive), node.address.z, owner));
@@ -114,13 +124,16 @@ fn materializeBricks(@builtin(global_invocation_id) gid: vec3u) {
     if (candidate != 0u && candidateOwner != 0xffffu && candidateOwner < params.settings.y && candidateOwner < arrayLength(&bodyMaterials)) { candidate = bodyMaterials[candidateOwner]; }
     if (candidate != 0u) { isActive = true; material = candidate; owner = candidateOwner; }
   }
+  let residency = fluidLeafStates[leafIndex];
+  let fluidResident = (residency & 1u) != 0u;
+  if (fluidResident) { isActive = true; material = params.settings.w; owner = 0xffffu; }
   let leaf = leaves[leafIndex];
   let node = nodes[leaf.topology.x];
   let brick = decodeMorton(leaf.topology.z, leaf.topology.w, node.address.z);
   let scale = 1u << (params.settings.z - node.address.z);
   let world = params.origin.xyz + vec3f(brick * brickSize * scale) * params.cell.xyz;
   let extent = f32(brickSize * scale) * params.cell.xyz;
-  brickRecords[leafIndex] = DebugRecord(vec4f(world, 0.0), vec4f(extent, 0.0), vec4u(material, select(0u, 1u, isActive), node.address.z, owner));
+  brickRecords[leafIndex] = DebugRecord(vec4f(world, 0.0), vec4f(extent, 0.0), vec4u(material, select(0u, 1u, isActive) | residency, node.address.z, owner));
 }
 `;
 
@@ -131,6 +144,7 @@ fn materializeBricks(@builtin(global_invocation_id) gid: vec3u) {
  */
 export class OctreeSparseBrickWorld {
   readonly tree: SparseBrickOctreeGPU;
+  readonly residency: GPUFluidBrickResidency;
   readonly renderSource: SparseVoxelRenderSource;
   readonly allocatedBytes: number;
 
@@ -181,6 +195,25 @@ export class OctreeSparseBrickWorld {
     this.finestLevel = plan.maximumDepth;
     const packed = packSparseBrickPlan(plan, 1);
     this.tree = new SparseBrickOctreeGPU(device, { brickSize, nodeCapacity: Math.max(1, plan.nodes.length), leafCapacity: Math.max(1, plan.leaves.length), label: "Octree unified sparse-brick world" });
+    const solverOriginBricks = this.solverGridOriginCells.map((value) => value / brickSize);
+    if (solverOriginBricks.some((value) => !Number.isInteger(value))) throw new Error("Shared sparse scene origin must align to the fluid brick lattice");
+    const leafByCoordinate = new Map<string, number>();
+    for (const leaf of plan.leaves) {
+      const node = plan.nodes[leaf.nodeIndex];
+      if (node.level === plan.maximumDepth) leafByCoordinate.set(`${leaf.coordinate.x},${leaf.coordinate.y},${leaf.coordinate.z}`, leaf.index);
+    }
+    const localBrickDimensions = dimensions.map((value) => Math.ceil(value / brickSize)) as [number, number, number];
+    const leafIndices = new Uint32Array(localBrickDimensions[0] * localBrickDimensions[1] * localBrickDimensions[2]);
+    let mappedBrick = 0;
+    for (let z = 0; z < localBrickDimensions[2]; z += 1) for (let y = 0; y < localBrickDimensions[1]; y += 1) for (let x = 0; x < localBrickDimensions[0]; x += 1) {
+      const key = `${solverOriginBricks[0] + x},${solverOriginBricks[1] + y},${solverOriginBricks[2] + z}`;
+      const leafIndex = leafByCoordinate.get(key);
+      if (leafIndex === undefined) throw new Error(`Fluid brick ${key} has no finest scene leaf`);
+      leafIndices[mappedBrick++] = leafIndex;
+    }
+    this.residency = new GPUFluidBrickResidency(device, dimensions, sceneDomain.cellSize_m, {
+      brickSize, haloCells: 2, retireAfterFrames: 3, leafIndices, leafCapacity: this.tree.leafCapacity,
+    });
 
     const counts = storageBuffer(device, "Sparse brick source counts", packed.counts.byteLength, packed.counts);
     const topology = storageBuffer(device, "Sparse brick source topology", packed.topology.byteLength, packed.topology);
@@ -224,7 +257,7 @@ export class OctreeSparseBrickWorld {
     uints.set([sceneDomain.sceneDimensionsCells[0], sceneDomain.sceneDimensionsCells[1], sceneDomain.sceneDimensionsCells[2], 0], 0);
     floats.set([sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z, 0], 4);
     floats.set([...this.cellSize, 0], 8);
-    uints.set([brickSize, scene.rigidBodies.length, plan.maximumDepth, 0], 12);
+    uints.set([brickSize, scene.rigidBodies.length, plan.maximumDepth, VOXEL_MATERIAL_IDS.fluid], 12);
     device.queue.writeBuffer(this.params, 0, parameterData);
 
     const shaderModule = device.createShaderModule({ label: "Octree sparse-brick render publication", code: debugPublicationShader });
@@ -236,7 +269,8 @@ export class OctreeSparseBrickWorld {
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
+      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
     ] });
     const debugPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [debugLayout] });
     this.voxelPipeline = device.createComputePipeline({ label: "Materialize sparse voxel records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeVoxels" } });
@@ -247,7 +281,8 @@ export class OctreeSparseBrickWorld {
       { binding: 2, resource: { buffer: this.tree.leaves, offset: this.tree.leafOffsetBytes } },
       { binding: 3, resource: { buffer: this.tree.materialOwners, offset: this.tree.materialOwnerOffsetBytes } },
       { binding: 4, resource: { buffer: this.bodyMaterialBuffer } }, { binding: 5, resource: { buffer: this.params } },
-      { binding: 6, resource: { buffer: this.voxelRecords } }, { binding: 7, resource: { buffer: this.brickRecords } }
+      { binding: 6, resource: { buffer: this.voxelRecords } }, { binding: 7, resource: { buffer: this.brickRecords } },
+      { binding: 8, resource: { buffer: this.residency.leafStates } }
     ] });
     const proxyPrimitives: SparseScenePrimitive[] = environmentPrimitives.map((primitive) => {
       const identity = {
@@ -269,16 +304,36 @@ export class OctreeSparseBrickWorld {
       voxelRecords: { buffer: this.voxelRecords }, voxelCount: { buffer: this.voxelCount },
       brickRecords: { buffer: this.brickRecords }, brickCount: { buffer: this.brickCount },
       materials: { buffer: this.materialBuffer }, voxelCapacity: this.tree.voxelCapacity, brickCapacity: this.tree.leafCapacity,
-      materialCount: materialData.length / 8, revision: 1
+      materialCount: materialData.length / 8,
+      fluidBrickStats: { buffer: this.residency.worklist }, fluidBrickCapacity: this.residency.capacity,
+      revision: 1
     };
-    this.allocatedBytes = this.tree.allocatedBytes
+    this.allocatedBytes = this.tree.allocatedBytes + this.residency.allocatedBytes
       + this.tree.voxelCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE + this.tree.leafCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE
       + this.sourceBuffers.reduce((sum, buffer) => sum + buffer.size, 0) + this.voxelCount.size + this.brickCount.size
       + this.materialBuffer.size + this.bodyMaterialBuffer.size + this.params.size + this.proxyVoxelizer.allocatedBytes;
   }
 
-  encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields): void {
+  encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, timings: OctreeSparseBrickTimestampWrites = {}): void {
     if (this.destroyed) return;
+    const beginRange = (label: string, writes?: GPUComputePassTimestampWrites) => {
+      if (writes?.beginningOfPassWriteIndex === undefined) return;
+      const marker = encoder.beginComputePass({ label: `${label} start`, timestampWrites: {
+        querySet: writes.querySet, endOfPassWriteIndex: writes.beginningOfPassWriteIndex
+      } });
+      marker.end();
+    };
+    const endRange = (label: string, writes?: GPUComputePassTimestampWrites) => {
+      if (writes?.endOfPassWriteIndex === undefined) return;
+      const marker = encoder.beginComputePass({ label: `${label} end`, timestampWrites: {
+        querySet: writes.querySet, beginningOfPassWriteIndex: writes.endOfPassWriteIndex
+      } });
+      marker.end();
+    };
+    beginRange("Fluid brick residency", timings.residency);
+    this.residency.encode(encoder, fields.levelSet);
+    endRange("Fluid brick residency", timings.residency);
+    beginRange("Sparse brick publication", timings.publication);
     if (!this.published) {
       this.tree.encodePublish(encoder, this.source);
       this.published = true;
@@ -293,7 +348,8 @@ export class OctreeSparseBrickWorld {
       containerClosedTop: this.containerClosedTop,
       gridOriginCells: this.solverGridOriginCells,
       finestLevel: this.finestLevel,
-      preservedMaterialIdMinimum: ENVIRONMENT_VOXEL_MATERIAL_BASE
+      preservedMaterialIdMinimum: ENVIRONMENT_VOXEL_MATERIAL_BASE,
+      activeBrickWorklist: this.residency.worklist,
     });
     if (!this.proxiesPublished) {
       this.proxyVoxelizer.encode(encoder);
@@ -307,12 +363,16 @@ export class OctreeSparseBrickWorld {
     const brickPass = encoder.beginComputePass({ label: "Publish octree sparse brick records" });
     brickPass.setPipeline(this.brickPipeline); brickPass.setBindGroup(0, this.debugBindGroup);
     brickPass.dispatchWorkgroups(Math.ceil(this.tree.leafCapacity / 64)); brickPass.end();
+    endRange("Sparse brick publication", timings.publication);
   }
+
+  readResidencyStats(): Promise<FluidBrickResidencyStats> { return this.residency.readStats(); }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     this.tree.destroy();
+    this.residency.destroy();
     this.proxyVoxelizer.destroy();
     for (const buffer of [...this.sourceBuffers, this.voxelRecords, this.brickRecords, this.voxelCount, this.brickCount, this.materialBuffer, this.bodyMaterialBuffer, this.params]) buffer.destroy();
   }

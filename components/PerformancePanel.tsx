@@ -52,7 +52,7 @@ export function PerformancePanel() {
   const topologyPath = snapshot.adaptiveInlineTopology ? "inline" : "async";
   const physicsStages = method.backend === "webgpu" ? physicsPerformanceStages({ methodId: activeMethodId, snapshot, contextMatches, pressureSolver: gpuInfo?.pressureSolver, topologyPath }) : [];
   const adaptiveTopologyStages = adaptive && topologyPath === "async" ? adaptiveTopologyPerformanceStages({ snapshot, contextMatches }) : [];
-  const physicsOutputStage = activeMethodId === "quadtree-tall-cell" ? "surface-update" : activeMethodId === "tall-cell" || activeMethodId === "uniform" ? "projection" : "uploads";
+  const physicsOutputStage = activeMethodId === "octree" ? "sparse-publication" : activeMethodId === "quadtree-tall-cell" ? "surface-update" : activeMethodId === "tall-cell" || activeMethodId === "uniform" ? "projection" : "uploads";
 
   const renderStages: PerformanceStage[] = rasterized ? [
     { key: "extract", label: "Surface extraction", shortLabel: "SURFACE", value: contextMatches ? snapshot.gpuSurfaceExtraction_ms : 0, className: "stage-extract", timer: "render", group: "compute", active: true, description: "Extracts visible liquid surface geometry from the signed-distance field.", reads: ["signed distance φ", "active cells"], writes: ["surface vertices", "indirect draw args"], dependsOn: [physicsOutputStage] },

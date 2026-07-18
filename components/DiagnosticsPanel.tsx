@@ -41,6 +41,12 @@ export function DiagnosticsPanel() {
         {fluidState && <MetricCard label="Dam front" value={fluidState.damFront_m.toFixed(3)} unit="m" />}
         <MetricCard label={gpuInfo?.gridKind === "quadtree-tall-cell" ? "GPU quadtree tall cells" : gpuInfo?.gridKind === "octree" ? "GPU octree" : gpuInfo?.gridKind === "uniform" ? "GPU uniform grid" : "GPU tall grid"} value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.storedNy} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${gpuInfo.ny} cubic-equivalent Y · ${((gpuInfo.activeCompressionRatio ?? gpuInfo.compressionRatio) * 100).toFixed(0)}% active` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
         <MetricCard label={gpuInfo?.gridKind === "uniform" ? "Uniform allocation" : gpuInfo?.gridKind === "octree" ? "Octree leaf estimate" : "Tall-cell span"} value={gpuInfo?.gridKind === "uniform" ? gpuInfo.cellCount.toLocaleString() : gpuInfo?.gridKind === "octree" ? gpuInfo.activeSampleCount?.toLocaleString() ?? "—" : gpuInfo?.maximumTallCellHeight !== undefined ? String(gpuInfo.maximumTallCellHeight) : "—"} unit={gpuInfo ? `cells · ${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} />
+        {gpuInfo?.gridKind === "octree" && <MetricCard
+          label="Fluid brick residency"
+          value={gpuInfo.fluidBrickCoreCount !== undefined ? `${gpuInfo.fluidBrickCoreCount} core · ${gpuInfo.fluidBrickHaloCount ?? 0} halo` : "classifying"}
+          unit={`${gpuInfo.fluidBrickResidentCount ?? "—"} / ${gpuInfo.fluidBrickCapacity ?? "—"} resident · +${gpuInfo.fluidBrickActivatedCount ?? 0} −${gpuInfo.fluidBrickRetiredCount ?? 0} latest update`}
+          tone={gpuInfo.fluidBrickResidentCount !== undefined && gpuInfo.fluidBrickCapacity !== undefined && gpuInfo.fluidBrickResidentCount < gpuInfo.fluidBrickCapacity ? "good" : "warn"}
+        />}
         <MetricCard label="GPU dam front" value={gpuInfo?.front_m !== undefined ? gpuInfo.front_m.toFixed(3) : "—"} unit="m · volume-fraction threshold" />
         <MetricCard label="GPU stability" value={gpuInfo?.stabilityFlags ? (gpuInfo.stabilityFlags.length === 0 ? "CLEAR" : "ALERT") : "—"} unit={gpuInfo?.stabilityFlags?.join(" · ") || "all instrumented gates clear"} tone={gpuInfo?.stabilityFlags?.length ? "warn" : gpuInfo?.stabilityFlags ? "good" : "neutral"} />
         <MetricCard label="GPU liquid max speed" value={gpuInfo?.maxSpeed_m_s !== undefined ? gpuInfo.maxSpeed_m_s.toFixed(3) : "—"} unit={`m/s at ${formatGridLocation(gpuInfo?.maxSpeedLocation)} · ${gpuInfo?.encodedSteps ?? 0} steps`} />

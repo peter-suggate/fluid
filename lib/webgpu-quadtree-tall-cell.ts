@@ -1,5 +1,5 @@
 import { adaptiveOpticalLayerDefaults, adaptivePressureCellTopology, buildAdaptiveOpticalLayerField, buildQuadtree, buildVariationalSystem, maximumVelocityUpdateFluidScale, populateTallPressureGrid, populateTallPressureGridFromLeafProfiles, quadtreeFromPackedCells, quadtreeSizingFromVelocityAndSurface, signedDistanceFromVolume, type AdaptiveOpticalLayerField, type QuadtreeGrid, type TallPressureGrid, type TallPressureSample, type VariationalBody, type VariationalSystem } from "./quadtree-tall-cell-grid";
-import { damBreakFractions } from "./initial-fluid";
+import { damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
 import { insidePrimitive } from "./fluid-rigid-coupling";
 import { boundingRadius, quaternionRotate, type RigidBodyState } from "./rigid-body";
 import type { SceneDescription, Vec3 } from "./model";
@@ -443,9 +443,10 @@ function initialFields(scene: SceneDescription, nx: number, ny: number, nz: numb
   const cellHeight = scene.container.height_m / ny;
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
     const aboveGround = !heights || (y + 0.5) * cellHeight > heights[x + nx * z];
-    const wet = aboveGround && (scene.fluid.initialCondition === "tank-fill"
+    const brickWet = initialFluidBrickContainsCell(scene, x, y, z, [nx, ny, nz]);
+    const wet = aboveGround && (brickWet ?? (scene.fluid.initialCondition === "tank-fill"
       ? (y + 0.5) / ny <= scene.container.fillFraction
-      : (x + 0.5) / nx <= dam.width && (y + 0.5) / ny <= dam.height && (z + 0.5) / nz <= dam.depth);
+      : (x + 0.5) / nx <= dam.width && (y + 0.5) / ny <= dam.height && (z + 0.5) / nz <= dam.depth));
     phi[x + nx * (y + ny * z)] = wet ? -1 : 1;
   }
   return { phi, velocity };

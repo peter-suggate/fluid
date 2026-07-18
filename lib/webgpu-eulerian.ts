@@ -26,6 +26,8 @@ export type GPUPhysicsStageId =
   | "surfaceUpdate"
   | "rigidCoupling"
   | "spray"
+  | "fluidResidency"
+  | "sparsePublication"
   | "diagnostics";
 
 export interface GPUPhysicsTimings {
@@ -41,6 +43,8 @@ export interface GPUPhysicsTimings {
   surfaceUpdate_ms: number;
   rigidCoupling_ms: number;
   spray_ms: number;
+  fluidResidency_ms: number;
+  sparsePublication_ms: number;
   diagnostics_ms: number;
   overhead_ms: number;
   total_ms: number;
@@ -65,6 +69,8 @@ export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): 
     surfaceUpdate_ms: 0,
     rigidCoupling_ms: 0,
     spray_ms: 0,
+    fluidResidency_ms: 0,
+    sparsePublication_ms: 0,
     diagnostics_ms: 0,
     overhead_ms: 0,
     total_ms: 0,
@@ -77,7 +83,7 @@ export function categorizedGPUPhysicsTime_ms(timings: GPUPhysicsTimings) {
     + timings.conditioning_ms + timings.remeshing_ms + timings.pressure_ms
     + timings.projection_ms + timings.extrapolation_ms + timings.materialization_ms
     + timings.surfaceUpdate_ms + timings.rigidCoupling_ms + timings.spray_ms
-    + timings.diagnostics_ms;
+    + timings.fluidResidency_ms + timings.sparsePublication_ms + timings.diagnostics_ms;
 }
 
 export interface GPUFieldLocation {
@@ -105,6 +111,14 @@ export interface GPUEulerianInfo {
   allocatedBytes: number;
   /** Fixed GPU ring capacity for one-way escaped spray droplets. */
   secondaryParticleCapacity?: number;
+  /** Logical sparse-fluid page table capacity and latest GPU-owned lifecycle counts. */
+  fluidBrickCapacity?: number;
+  fluidBrickResidentCount?: number;
+  fluidBrickCoreCount?: number;
+  fluidBrickHaloCount?: number;
+  fluidBrickActivatedCount?: number;
+  fluidBrickRetiredCount?: number;
+  fluidBrickGeneration?: number;
   quality: GPUQuality;
   volumeCellSum?: number;
   representedVolumeCellSum?: number;
