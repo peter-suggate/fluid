@@ -145,7 +145,7 @@ test("raster extraction and solver-grid inspection consume the same live sparse 
   assert.match(grid, /fn sparseSurfaceCoreSample/);
   assert.match(grid, /abs\(sparseSurfacePhi\[payload\]\) <= 1\.5\*fineH/,
     "pink must be confined to the phi=0 shell rather than filling support pages");
-  assert.match(grid, /sparseSurfaceStates\[pageIndex\]&2u/,
+  assert.match(grid, /(?:sparseSurfaceStates\[pageIndex\]&2u|sparseSurfacePageState\(fineCell\) & 2u)/,
     "pink must identify a detail core rather than its allocation-only halo");
   assert.match(grid, /sparseSurfaceControl\[2\] == 0u/,
     "a partial fine hierarchy must not be presented after allocator overflow");

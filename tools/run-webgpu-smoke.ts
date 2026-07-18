@@ -379,7 +379,7 @@ async function smokeRenderHybridPresentation(
     const encoded = pipeline.encode(
       encoder, output.createView(), solver.info.nx, solver.info.ny, solver.info.nz,
       solver.info.gridKind === "restricted-tall-cell", solver.info.maximumNeighborDelta ?? 0,
-      solver.info.encodedSteps ?? 0, 60
+      solver.info.encodedSteps ?? 0
     );
     if (!encoded) throw new Error("Hybrid presentation pipeline did not encode a frame");
     device.queue.submit([encoder.finish()]);

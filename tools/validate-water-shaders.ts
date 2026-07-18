@@ -11,7 +11,7 @@ import {
   surfaceRasterShader
 } from "../lib/webgpu-water-pipeline";
 import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
-import { secondaryParticleComputeShader, secondaryParticleCorrectionShader, secondaryParticleOpticalShader, secondaryParticleRenderShader } from "../lib/webgpu-secondary-particles";
+import { secondaryParticleComputeShader, secondaryParticleCorrectionShader, secondaryParticleOpticalShader } from "../lib/webgpu-secondary-particles";
 import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
 import { octreeSparseBrickDebugPublicationShader } from "../lib/webgpu-octree-sparse-bricks";
 import { octreeProjectionShader } from "../lib/webgpu-octree";
@@ -27,7 +27,6 @@ const shaders = {
   scene: sceneShader,
   composite: compositeShader,
   "grid-overlay": gridOverlayShader,
-  "secondary-liquid-particles": secondaryParticleRenderShader,
   "secondary-liquid-particle-optics": secondaryParticleOpticalShader,
   "secondary-liquid-particle-compute": secondaryParticleComputeShader,
   "secondary-liquid-particle-correction": secondaryParticleCorrectionShader,

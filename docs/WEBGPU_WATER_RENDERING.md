@@ -1,8 +1,7 @@
 # WebGPU water rendering
 
-The default water presentation is a GPU-resident raster pipeline. The previous
-full-screen volume ray marcher is retained unchanged as the **Ray march** mode
-and as the automatic fallback if an adapter cannot create the raster pipeline.
+Water presentation uses one GPU-resident raster pipeline. Renderer
+initialization fails visibly if an adapter cannot create that required pipeline.
 
 ## Frame pipeline
 
@@ -58,7 +57,7 @@ and as the automatic fallback if an adapter cannot create the raster pipeline.
 Fullscreen shader UVs have Y=1 at the top of a render target, while texture
 sampling uses Y=0 there. The composite converts that coordinate for every
 intermediate read and world-space projection. The shared final upscaler retains
-its original conversion so the legacy ray marcher remains byte-for-byte intact.
+the same coordinate conversion.
 
 The virtual extraction lattice closes side and top contacts, but deliberately
 extends the lowest liquid sample through the floor. A solid floor is not a
@@ -69,8 +68,7 @@ the tank bounds in the composite shader.
 Surface extraction and the caustic map are cached by solver revision. Rapid
 solver revisions are coalesced so mesh extraction runs at no more than 30 Hz;
 camera and optical rendering remain at display rate. Raster optics renders at
-72% internal resolution before linear upscale; the legacy ray marcher remains
-at 100%.
+72% internal resolution before linear upscale.
 
 When timestamp queries are supported, the live profiler reports extraction,
 dry-scene rasterization, the two interface passes, optical compositing, and
@@ -101,10 +99,9 @@ where tone mapping and display gamma are applied once.
 
 ## Selection and validation
 
-Use **Raster optics** / **Ray march** in the viewport toolbar. Raster optics is
-the default. Both CPU-uploaded uniform fields and GPU solver textures use the
-same extraction path; restricted tall-cell fields are unpacked in the compute
-shader with the solver's column-base texture.
+Both CPU-uploaded uniform fields and GPU solver textures use the same raster
+extraction path; restricted tall-cell fields are unpacked in the compute shader
+with the solver's column-base texture.
 
 The shader-only validation command accepts a Naga executable:
 

@@ -30,12 +30,10 @@ test("the optical composite locally refines rigid contacts and terminates water 
   assert.match(compositeShader, /var<storage,read> bodies:array<BodyGPU,12>/);
 });
 
-test("surface extraction follows the selected presentation cadence", () => {
+test("surface extraction follows the fixed presentation cadence", () => {
   assert.equal(shouldUpdateWaterSurface(-1, 0, -Infinity, 0), true, "the first mesh is immediate");
-  assert.equal(shouldUpdateWaterSurface(4, 5, 100, 115, 60), false);
-  assert.equal(shouldUpdateWaterSurface(4, 9, 100, 116.2, 60), true, "60 Hz is the default smooth raster cadence");
-  assert.equal(shouldUpdateWaterSurface(4, 9, 100, 125, 30), false);
-  assert.equal(shouldUpdateWaterSurface(4, 9, 100, 133, 30), true, "lower targets coalesce more revisions");
+  assert.equal(shouldUpdateWaterSurface(4, 5, 100, 115), false);
+  assert.equal(shouldUpdateWaterSurface(4, 9, 100, 116.2), true, "60 Hz is the smooth raster cadence");
   assert.equal(shouldUpdateWaterSurface(9, 9, 100, 1000), false, "an unchanged solver field is never rebuilt");
 });
 

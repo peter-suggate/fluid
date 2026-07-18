@@ -3,23 +3,13 @@
 import { getMethod } from "@/lib/methods";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore } from "@/lib/stores/method-store";
-import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
-import { getEnvironmentPreset } from "@/lib/environments";
-import { getScenePreset } from "@/lib/scenes";
 
 export function VisualPanel() {
   const methodId = useMethodStore((state) => state.methodId);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
-  const view = useUIStore((state) => state.view);
-  const setView = useUIStore((state) => state.setView);
-  const waterRenderMode = useUIStore((state) => state.waterRenderMode);
-  const setWaterRenderMode = useUIStore((state) => state.setWaterRenderMode);
   const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
   const setVoxelRenderMode = useUIStore((state) => state.setVoxelRenderMode);
-  const presetId = useSceneStore((state) => state.presetId);
-  const targetFps = useUIStore((state) => state.targetFps);
-  const setTargetFps = useUIStore((state) => state.setTargetFps);
   const gridOverlayAxis = useUIStore((state) => state.gridOverlayAxis);
   const setGridOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
   const gridOverlaySlice = useUIStore((state) => state.gridOverlaySlice);
@@ -33,56 +23,11 @@ export function VisualPanel() {
   const quadtreeTall = gridKind === "quadtree-tall-cell";
   const octree = gridKind === "octree";
   const motionAdaptiveOptical = gpuInfo?.quadtreeOpticalLayerMode === "adaptive-motion";
-  const background = getEnvironmentPreset(getScenePreset(presetId).background);
 
   return <aside className="right-panel panel-scroll visual-panel" data-testid="visual-panel">
     <section className="panel-section utility-panel-head">
       <div><p className="eyebrow">VIEWPORT</p><strong>Render &amp; debug</strong></div>
       <button className="panel-close" onClick={() => setRightPanel(null)} aria-label="Close render panel">×</button>
-    </section>
-
-    <section className="panel-section utility-controls">
-      <div className="section-heading"><h2>View mode</h2><span>COMPOSITION</span></div>
-      <div className="segmented compact">
-        <button className={view === "scientific" ? "active" : ""} onClick={() => setView("scientific")}>Scientific</button>
-        <button className={view === "presentation" ? "active" : ""} onClick={() => setView("presentation")}>Presentation</button>
-      </div>
-      <small className="control-hint">Scientific mode exposes solver instrumentation; presentation mode keeps the clean rendered scene.</small>
-    </section>
-
-    <section className="panel-section utility-controls">
-      <div className="section-heading"><h2>Presentation</h2><span>VISUAL ONLY</span></div>
-      <label className="select-control">
-        <span>Target presentation rate</span>
-        <select aria-label="Target frames per second" value={targetFps} onChange={(event) => setTargetFps(Number(event.target.value))}>
-          <option value={24}>24 fps</option>
-          <option value={30}>30 fps</option>
-          <option value={60}>60 fps</option>
-          <option value={90}>90 fps</option>
-          <option value={120}>120 fps</option>
-        </select>
-      </label>
-      <small className="control-hint">Targets {targetFps} visual frames/s ({(1000 / targetFps).toFixed(2)} ms). Physics stays densely queued, but an overdue 60 Hz presentation is inserted before the next advance instead of sitting behind accumulated simulation debt.</small>
-    </section>
-
-    <section className="panel-section utility-controls">
-      <div className="section-heading"><h2>Background</h2><span>SCENE ART DIRECTION</span></div>
-      <div className="scene-background-card" aria-label={`Scene background: ${background.name}`}>
-        <span className="environment-swatch" aria-hidden="true">
-          {background.swatch.map((color) => <i key={color} style={{ background: color }} />)}
-        </span>
-        <span><strong>{background.shortName}</strong><small>{background.description}</small></span>
-      </div>
-      <small className="control-hint">The selected scene sets its background. Choose another scene to change both together.</small>
-    </section>
-
-    <section className="panel-section utility-controls">
-      <div className="section-heading"><h2>Water rendering</h2><span>OPTICS</span></div>
-      <div className="segmented compact">
-        <button className={waterRenderMode === "rasterized" ? "active" : ""} onClick={() => setWaterRenderMode("rasterized")}>Raster optics</button>
-        <button className={waterRenderMode === "ray-marched" ? "active" : ""} onClick={() => setWaterRenderMode("ray-marched")}>Ray march</button>
-      </div>
-      <small className="control-hint">Raster optics uses the extracted liquid surface. Ray march samples the solver volume directly for comparison.</small>
     </section>
 
     <section className="panel-section utility-controls">
@@ -97,7 +42,7 @@ export function VisualPanel() {
 
     <section className="panel-section utility-controls">
       <div className="section-heading"><h2>Solver grid</h2><span>DEBUG LAYER</span></div>
-      {view === "scientific" ? <>
+      <>
         <div className="segmented compact">
           <button className={gridOverlayAxis === "off" ? "active" : ""} onClick={() => setGridOverlayAxis("off")}>Off</button>
           <button className={gridOverlayAxis === "z" ? "active" : ""} onClick={() => setGridOverlayAxis("z")}>Z slice</button>
@@ -111,6 +56,7 @@ export function VisualPanel() {
         {gridOverlayAxis !== "off" && <div className="segmented compact" role="group" aria-label="Slice field">
           <button className={gridOverlayMode === "structure" ? "active" : ""} onClick={() => setGridOverlayMode("structure")}>Structure</button>
           {adaptive && <button className={gridOverlayMode === "resolution" ? "active" : ""} onClick={() => setGridOverlayMode("resolution")}>Cell scale</button>}
+          {octree && <button className={gridOverlayMode === "surface" ? "active" : ""} onClick={() => setGridOverlayMode("surface")}>Surface band</button>}
           {quadtreeTall && <button className={gridOverlayMode === "optical" ? "active" : ""} onClick={() => setGridOverlayMode("optical")}>Optical layer</button>}
           <button className={gridOverlayMode === "cfl" ? "active" : ""} onClick={() => setGridOverlayMode("cfl")}>CFL load</button>
           <button className={gridOverlayMode === "speed" ? "active" : ""} onClick={() => setGridOverlayMode("speed")}>Speed</button>
@@ -120,12 +66,12 @@ export function VisualPanel() {
           <button className={gridOverlayMode === "pressure" ? "active" : ""} onClick={() => setGridOverlayMode("pressure")}>Pressure</button>
           {octree && <button className={gridOverlayMode === "projection" ? "active" : ""} onClick={() => setGridOverlayMode("projection")}>Projection Δu</button>}
         </div>}
-        <small className="control-hint">The slice remains an independent layer, so it can be combined with either optical renderer.</small>
-      </> : <p className="panel-note">Switch to Scientific view to configure debug layers.</p>}
+        <small className="control-hint">The slice remains an independent layer over the raster scene.</small>
+      </>
     </section>
 
-    {view === "scientific" && gridOverlayAxis !== "off" && <section className="panel-section grid-key" data-testid="grid-legend">
-      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {gridOverlayAxis.toUpperCase()} SLICE{gridOverlayMode !== "structure" ? ` · ${{ resolution: "PRESSURE CELL SCALE", optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU" }[gridOverlayMode]}` : ""}</strong>
+    {gridOverlayAxis !== "off" && <section className="panel-section grid-key" data-testid="grid-legend">
+      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {gridOverlayAxis.toUpperCase()} SLICE{gridOverlayMode !== "structure" ? ` · ${{ resolution: "PRESSURE CELL SCALE", surface: "SPARSE SURFACE BAND", optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU" }[gridOverlayMode]}` : ""}</strong>
       {gridOverlayMode === "structure" && <>
         {tall && <span><i className="sw sw-tall" />tall cell · liquid</span>}
         {tall && <span><i className="sw sw-tall-dry" />tall cell · air</span>}
@@ -143,6 +89,13 @@ export function VisualPanel() {
         <span><i className="sw" style={{ background: "#55a8ba" }} />intermediate dyadic cell</span>
         <span><i className="sw" style={{ background: "#152e7a" }} />coarsest represented pressure cell · {(gpuInfo?.quadtreeMaximumFluidScale ?? "max")}³</span>
         <span>surface-band cells appear as the finest pink region</span>
+      </>}
+      {gridOverlayMode === "surface" && <>
+        <span><i className="sw" style={{ background: "#ff087f" }} />pink · detail-selected core at |φ| ≤ 1.5h</span>
+        <span><i className="sw" style={{ background: "#6b309e" }} />violet · allocated core-page support away from φ=0</span>
+        <span><i className="sw" style={{ background: "#1fb8d1" }} />cyan · interpolation and transport halo</span>
+        <span><i className="sw" style={{ background: "#0d1f59" }} />blue · coarse fallback, no fine page allocated</span>
+        <span>{gpuInfo?.sparseSurfaceCorePages ?? 0} core · {gpuInfo?.sparseSurfaceHaloPages ?? 0} halo · {gpuInfo?.sparseSurfaceResidentPages ?? 0}/{gpuInfo?.sparseSurfacePageCapacity ?? 0} resident · overflow {gpuInfo?.sparseSurfaceOverflow ?? 0}</span>
       </>}
       {gridOverlayMode === "optical" && <>
         <span><i className="sw" style={{ background: "#f4c33a" }} />retained cubic optical cells · liquid</span>

@@ -49,7 +49,6 @@ export function FluidLab() {
   const bodies = useDiagnosticsStore((state) => state.bodies);
   const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
-  const view = useUIStore((state) => state.view);
   const setCamera = useUIStore((state) => state.setCamera);
   const diagnosticsOpen = useUIStore((state) => state.diagnosticsOpen);
   const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
@@ -59,9 +58,7 @@ export function FluidLab() {
   const fluidState = useDiagnosticsStore((state) => state.fluidState);
   const method = getMethod(methodId);
   const backend = method.backend === "cpu" ? "cpu-reference" : "webgpu";
-  const scientific = view === "scientific";
   const environment = getEnvironmentPreset(getScenePreset(presetId).background);
-  const visibleRightPanel = (rightPanel === "visual" || rightPanel === "performance" || scientific) ? rightPanel : null;
   const healthFlags = backend === "webgpu"
     ? [...(gpuInfo?.stabilityFlags ?? []), ...(gpuInfo?.nonFiniteCount ? ["non-finite-values"] : [])]
     : [...(fluidState?.nanCount ? ["non-finite-values"] : []), ...(fluidState && !fluidState.pressureConverged ? ["pressure-not-converged"] : [])];
@@ -83,7 +80,7 @@ export function FluidLab() {
   };
 
   return (
-    <main className="lab-shell" data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(visibleRightPanel)} data-right-panel={visibleRightPanel ?? "closed"}>
+    <main className="lab-shell" data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(rightPanel)} data-right-panel={rightPanel ?? "closed"}>
       <aside className="left-panel panel-scroll">
         <div className="brand"><span className="brand-mark">FL</span><div><strong>Fluid Lab</strong><small>WEBGPU CFD WORKBENCH</small></div></div>
         <ScenePanel />
@@ -94,8 +91,8 @@ export function FluidLab() {
         <WebGPUViewport />
         <div className="viewport-topline">
           <div className="topline-left">
-            {scientific && <div className={`gpu-badge state-${gpuStatus.state}`}><span className={`status-dot ${gpuStatus.state === "ready" ? "online" : "warning"}`} /><strong>{gpuStatus.state === "ready" ? "WEBGPU" : gpuStatus.state.toUpperCase()}</strong><span>{gpuStatus.label}</span></div>}
-            {scientific && runState === "running" && gpuStatus.state === "ready" && (
+            <div className={`gpu-badge state-${gpuStatus.state}`}><span className={`status-dot ${gpuStatus.state === "ready" ? "online" : "warning"}`} /><strong>{gpuStatus.state === "ready" ? "WEBGPU" : gpuStatus.state.toUpperCase()}</strong><span>{gpuStatus.label}</span></div>
+            {runState === "running" && gpuStatus.state === "ready" && (
               <button
                 className={`health-chip${healthFlags.length ? " alert" : ""}`}
                 onClick={() => setDiagnosticsOpen(true)}
@@ -113,16 +110,16 @@ export function FluidLab() {
             <small>BACKGROUND</small><strong>{environment.shortName}</strong>
           </div>
         </div>
-        {scientific && <div className="physics-stage-badge"><strong>{method.badge}</strong><span>{backend === "webgpu" ? `${method.description}` : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} allocated · ${gpuInfo?.activeSampleCount?.toLocaleString() ?? "…"} ${gpuInfo?.gridKind === "octree" ? "estimated leaves" : "active samples"} · f32 · ${gpuInfo?.pressureSolver ?? `${gpuInfo?.pressureIterations ?? "…"} Jacobi`}` : "MAC · binary64 · PCG"}</small></div>}
-        {scientific && <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>}
+        <div className="physics-stage-badge"><strong>{method.badge}</strong><span>{backend === "webgpu" ? `${method.description}` : "CPU validation oracle active"}</span><small>{backend === "webgpu" ? `${gpuInfo?.cellCount.toLocaleString() ?? "…"} allocated · ${gpuInfo?.activeSampleCount?.toLocaleString() ?? "…"} ${gpuInfo?.gridKind === "octree" ? "live pressure rows" : "active samples"} · f32 · ${gpuInfo?.pressureSolver ?? `${gpuInfo?.pressureIterations ?? "…"} Jacobi`}` : "MAC · binary64 · PCG"}</small></div>
+        <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
         <div className="camera-toolbar" aria-label="Camera controls">
           <button onClick={() => setPresetCamera("reset")}>Reset</button><button onClick={() => setPresetCamera("front")}>Front</button><button onClick={() => setPresetCamera("side")}>Side</button><button onClick={() => setPresetCamera("top")}>Top</button>
-          {scientific && <span>drag body to move · drag to orbit · ⇧ drag pan · wheel zoom</span>}
+          <span>drag body to move · drag to orbit · ⇧ drag pan · wheel zoom</span>
         </div>
         <nav className="utility-panel-tabs" aria-label="Viewport panels">
           <button className={rightPanel === "visual" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visual" ? null : "visual")} aria-expanded={rightPanel === "visual"} title="Render and debug controls">RENDER</button>
-          {scientific && <button className={rightPanel === "bodies" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "bodies" ? null : "bodies")} aria-expanded={rightPanel === "bodies"} title="Rigid body controls">BODIES</button>}
-          {scientific && <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAG</button>}
+          <button className={rightPanel === "bodies" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "bodies" ? null : "bodies")} aria-expanded={rightPanel === "bodies"} title="Rigid body controls">BODIES</button>
+          <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAG</button>
           <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Live performance profiler">PERF</button>
         </nav>
         {gpuStatus.state === "initializing" && <GPUInitializationPanel status={gpuStatus} />}
@@ -130,8 +127,8 @@ export function FluidLab() {
       </section>
 
       {rightPanel === "visual" && <VisualPanel />}
-      {scientific && rightPanel === "bodies" && <RigidBodyPanel />}
-      {scientific && diagnosticsOpen && <DiagnosticsPanel />}
+      {rightPanel === "bodies" && <RigidBodyPanel />}
+      {diagnosticsOpen && <DiagnosticsPanel />}
       {rightPanel === "performance" && <PerformancePanel />}
       <TransportBar />
 

@@ -21,12 +21,11 @@ reduction. A one-click deep-water scene reproduces the depth-scaling benchmark.
 The presentation renderer samples the surface-density field trilinearly at a
 quality-aware stride, reconstructs an interface cell from eight cached samples, and uses
 subcell Newton refinement with analytic trilinear normals, front/back thickness,
-Fresnel reflection, and Beer–Lambert absorption. It renders at native canvas
-resolution; traversal skipping and cached interface work keep the
-raymarch within its GPU budget without reducing surface fidelity.
+Fresnel reflection, and Beer–Lambert absorption. Raster optics renders at a
+bounded internal resolution and upscales into the native canvas.
 The live performance sidebar separates hardware-timestamped GPU advection,
 pressure, projection, immersed-body coupling, sparse-fluid residency and scene
-publication, reductions, queue/copy overhead, and raymarch rendering from
+publication, reductions, queue/copy overhead, and raster rendering from
 wall-clock CPU simulation, upload, encoding, and orchestration costs, with a
 shared 60 Hz budget and recent-frame history.
 The tall-cell, adaptive, and uniform GPU paths use the same donor/receiver
@@ -70,6 +69,9 @@ with boxes (Figure 4), and jet-past-sphere benchmark (Figure 6).
   comparison against the retained uniform WebGPU solver.
 - [`docs/QUADTREE_TALL_CELLS.md`](docs/QUADTREE_TALL_CELLS.md) — paper-to-code
   specification, corrected discretization details, and verification contract.
+- [`docs/SPARSE_VOXEL_OCTREE_RENDERER_MIGRATION.md`](docs/SPARSE_VOXEL_OCTREE_RENDERER_MIGRATION.md)
+  — tracked milestones, acceptance gates, decisions, risks, and evidence for
+  the direct SVO renderer migration with retained raster compatibility.
 - [`docs/SCENE_FORMAT.md`](docs/SCENE_FORMAT.md) — canonical SI scene and run
   record format.
 - [`docs/COMPARABILITY.md`](docs/COMPARABILITY.md) — resolution, workload, and

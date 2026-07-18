@@ -58,7 +58,7 @@ const particleBuffer = device.createBuffer({
 });
 device.queue.writeBuffer(particleBuffer, 0, particleFloats);
 const source: GPUSecondaryParticleSource = { buffer: particleBuffer, capacity, strideBytes: SECONDARY_PARTICLE_STRIDE_BYTES };
-const pipeline = new SecondaryParticleRenderPipeline(device, "bgra8unorm", uniformBuffer);
+const pipeline = new SecondaryParticleRenderPipeline(device, uniformBuffer);
 await pipeline.initialize();
 pipeline.setSource(source);
 

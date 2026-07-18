@@ -27,6 +27,9 @@ export interface GPUSecondaryParticleSource {
   readonly buffer: GPUBuffer;
   readonly capacity: number;
   readonly strideBytes: typeof SECONDARY_PARTICLE_STRIDE_BYTES;
+  /** Draws only the ring prefix that has ever received a particle. */
+  readonly indirectBuffer?: GPUBuffer;
+  readonly indirectOffset?: number;
 }
 
 export interface SecondaryParticleGrid {
@@ -60,6 +63,10 @@ struct Particle {
 }
 
 struct ParticleState {
+  drawVertexCount: u32,
+  drawInstanceCount: atomic<u32>,
+  drawFirstVertex: u32,
+  drawFirstInstance: u32,
   cursor: atomic<u32>,
   spawned: atomic<u32>,
   reserved0: atomic<u32>,
@@ -341,8 +348,10 @@ fn spawnParticles(@builtin(global_invocation_id) gid: vec3u) {
     } else if (shapeKind > 0.5) {
       initialAspect = clamp(1.35 + 0.7 * speedRatio + 0.45 * random01(particleSeed ^ 0x9fb21c65u), 1.35, 3.8);
     }
-    let slot = atomicAdd(&particleState.cursor, 1u) % capacity();
+    let absoluteSlot = atomicAdd(&particleState.cursor, 1u);
+    let slot = absoluteSlot % capacity();
     atomicAdd(&particleState.spawned, 1u);
+    atomicMax(&particleState.drawInstanceCount, min(absoluteSlot + 1u, capacity()));
     particles[slot] = Particle(
       vec4f(particlePosition, particleRadius),
       vec4f(particleVelocity, 0.0),
@@ -431,76 +440,6 @@ fn applyParticleCorrection(@builtin(global_invocation_id) gid: vec3u) {
     result = max(-0.5 * hMin(), residentPhi - min(max(residentPhi - particlePhi, 0.0), maximumShift));
   }
   textureStore(correctedSurface, vec3i(gid), vec4f(result, 0.0, 0.0, 0.0));
-}
-`;
-
-export const secondaryParticleRenderShader = /* wgsl */ `
-struct ViewUniforms {
-  viewport: vec4f,
-  cameraPosition: vec4f,
-  cameraTarget: vec4f,
-  container: vec4f,
-}
-
-struct Particle {
-  positionRadius: vec4f,
-  velocityAge: vec4f,
-  birthNormalLifetime: vec4f,
-  shape: vec4f,
-}
-
-@group(0) @binding(0) var<uniform> view: ViewUniforms;
-@group(0) @binding(1) var<storage, read> particles: array<Particle>;
-struct ParticleVertex {
-  @builtin(position) clip: vec4f,
-  @location(0) local: vec2f,
-  @location(1) opacity: f32,
-}
-
-fn project(world: vec3f) -> vec4f {
-  let forward = normalize(view.cameraTarget.xyz - view.cameraPosition.xyz);
-  let right = normalize(cross(forward, vec3f(0.0, 1.0, 0.0)));
-  let up = normalize(cross(right, forward));
-  let relative = world - view.cameraPosition.xyz;
-  let depth = dot(relative, forward);
-  let aspect = view.viewport.x / max(view.viewport.y, 1.0);
-  let ndc = vec2f(dot(relative, right) / (max(depth, 0.001) * aspect * ${CAMERA_TAN_HALF_FOV}), dot(relative, up) / (max(depth, 0.001) * ${CAMERA_TAN_HALF_FOV}));
-  return vec4f(ndc * depth, clamp(depth / 50.0, 0.0, 1.0) * depth, depth);
-}
-
-@vertex
-fn particleVertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> ParticleVertex {
-  var corners = array<vec2f, 6>(
-    vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
-    vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
-  );
-  let particle = particles[instance];
-  var output: ParticleVertex;
-  output.local = corners[vertex];
-  output.opacity = particle.shape.z;
-  if (particle.shape.z < 0.5 || particle.positionRadius.w <= 0.0) {
-    output.clip = vec4f(2.0, 2.0, 2.0, 1.0);
-    output.opacity = 0.0;
-    return output;
-  }
-  let forward = normalize(view.cameraTarget.xyz - view.cameraPosition.xyz);
-  let right = normalize(cross(forward, vec3f(0.0, 1.0, 0.0)));
-  let up = normalize(cross(right, forward));
-  let world = particle.positionRadius.xyz + (right * output.local.x + up * output.local.y) * particle.positionRadius.w * 1.35;
-  output.clip = project(world);
-  if (output.clip.w <= 0.001) { output.clip = vec4f(2.0, 2.0, 2.0, 1.0); output.opacity = 0.0; }
-  return output;
-}
-
-@fragment
-fn particleFragment(input: ParticleVertex) -> @location(0) vec4f {
-  let radius2 = dot(input.local, input.local);
-  if (radius2 > 1.0 || input.opacity <= 0.0) { discard; }
-  let edge = 1.0 - smoothstep(0.34, 1.0, radius2);
-  let color = vec3f(0.62, 0.80, 0.90);
-  let alpha = 0.46 * edge;
-  let highlight = pow(max(0.0, 1.0 - radius2), 3.0);
-  return vec4f(color + vec3f(0.08) * highlight, alpha * input.opacity);
 }
 `;
 
@@ -702,13 +641,13 @@ export class WebGPUSecondaryParticleSystem {
       size: capacity * SECONDARY_PARTICLE_STRIDE_BYTES,
       usage: GPUBufferUsage.STORAGE
     });
-    this.state = device.createBuffer({ label: "Secondary particle ring state", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.state = device.createBuffer({ label: "Secondary particle ring state and draw arguments", size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
     this.params = device.createBuffer({ label: "Secondary particle parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(this.state, 0, new Uint32Array(4));
-    this.renderSource = { buffer: this.particles, capacity, strideBytes: SECONDARY_PARTICLE_STRIDE_BYTES };
+    device.queue.writeBuffer(this.state, 0, new Uint32Array([6, 0, 0, 0, 0, 0, 0, 0]));
+    this.renderSource = { buffer: this.particles, capacity, strideBytes: SECONDARY_PARTICLE_STRIDE_BYTES, indirectBuffer: this.state, indirectOffset: 0 };
     const correctionEnabled = source.surfaceEncoding === "level-set" && surfaceCorrectionStrength > 0;
     const correctionBytes = correctionEnabled ? grid.nx * grid.ny * grid.nz * 8 : 0;
-    this.allocatedBytes = capacity * SECONDARY_PARTICLE_STRIDE_BYTES + 128 + correctionBytes;
+    this.allocatedBytes = capacity * SECONDARY_PARTICLE_STRIDE_BYTES + 144 + correctionBytes;
 
     this.shaderModule = device.createShaderModule({ label: "Secondary liquid particle kernels", code: secondaryParticleComputeShader });
     const layout = device.createBindGroupLayout({ label: "Secondary particle simulation bindings", entries: [
@@ -882,36 +821,21 @@ export class WebGPUSecondaryParticleSystem {
 }
 
 export class SecondaryParticleRenderPipeline {
-  private fallbackPipeline?: GPURenderPipeline;
   private opticalFrontPipeline?: GPURenderPipeline;
   private opticalBackPipeline?: GPURenderPipeline;
-  private overlayBindGroup?: GPUBindGroup;
   private opticalBindGroup?: GPUBindGroup;
   private layout?: GPUBindGroupLayout;
   private source?: GPUSecondaryParticleSource;
 
-  constructor(private readonly device: GPUDevice, private readonly format: GPUTextureFormat, private readonly uniformBuffer: GPUBuffer) {}
+  constructor(private readonly device: GPUDevice, private readonly uniformBuffer: GPUBuffer) {}
 
   async initialize() {
-    const overlayModule = this.device.createShaderModule({ label: "Secondary liquid particle overlay", code: secondaryParticleRenderShader });
     const opticalModule = this.device.createShaderModule({ label: "Secondary liquid optical interfaces", code: secondaryParticleOpticalShader });
     this.layout = this.device.createBindGroupLayout({ label: "Secondary particle render bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } }
     ] });
     const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
-    const fallbackDescriptor = (label: string): GPURenderPipelineDescriptor => ({
-      label, layout: pipelineLayout,
-      vertex: { module: overlayModule, entryPoint: "particleVertex" },
-      fragment: { module: overlayModule, entryPoint: "particleFragment", targets: [{
-        format: this.format,
-        blend: {
-          color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
-          alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
-        }
-      }] },
-      primitive: { topology: "triangle-list", cullMode: "none" }
-    });
     const opticalDescriptor = (label: string, entryPoint: "ellipsoidFront" | "ellipsoidBack"): GPURenderPipelineDescriptor => ({
       label, layout: pipelineLayout,
       vertex: { module: opticalModule, entryPoint: "ellipsoidVertex" },
@@ -919,8 +843,7 @@ export class SecondaryParticleRenderPipeline {
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
     });
-    [this.fallbackPipeline, this.opticalFrontPipeline, this.opticalBackPipeline] = await Promise.all([
-      this.device.createRenderPipelineAsync(fallbackDescriptor("Spray droplet fallback overlay")),
+    [this.opticalFrontPipeline, this.opticalBackPipeline] = await Promise.all([
       this.device.createRenderPipelineAsync(opticalDescriptor("Secondary spray front interfaces", "ellipsoidFront")),
       this.device.createRenderPipelineAsync(opticalDescriptor("Secondary spray back interfaces", "ellipsoidBack"))
     ]);
@@ -933,7 +856,6 @@ export class SecondaryParticleRenderPipeline {
       { binding: 0, resource: { buffer: this.uniformBuffer } },
       { binding: 1, resource: { buffer: source.buffer } }
     ] }) : undefined;
-    this.overlayBindGroup = bindGroup;
     this.opticalBindGroup = bindGroup;
   }
 
@@ -946,17 +868,8 @@ export class SecondaryParticleRenderPipeline {
     if (!pipeline || !this.opticalBindGroup || !this.source) return false;
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.opticalBindGroup);
-    pass.draw(6, this.source.capacity);
-    return true;
-  }
-
-  encode(encoder: GPUCommandEncoder, target: GPUTextureView, timestampWrites?: GPURenderPassTimestampWrites) {
-    if (!this.fallbackPipeline || !this.overlayBindGroup || !this.source) return false;
-    const pass = encoder.beginRenderPass({ label: "Render fallback spray droplets", colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }], ...(timestampWrites ? { timestampWrites } : {}) });
-    pass.setPipeline(this.fallbackPipeline);
-    pass.setBindGroup(0, this.overlayBindGroup);
-    pass.draw(6, this.source.capacity);
-    pass.end();
+    if (this.source.indirectBuffer) pass.drawIndirect(this.source.indirectBuffer, this.source.indirectOffset ?? 0);
+    else pass.draw(6, this.source.capacity);
     return true;
   }
 }

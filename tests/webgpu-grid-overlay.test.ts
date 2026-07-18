@@ -51,7 +51,7 @@ test("adaptive cell-scale mode exposes the live finest surface band", () => {
   assert.match(gridOverlayShader, /let fineColor=vec3f\(1\.0,0\.08,0\.55\)/,
     "pink is reserved for the fine phi=0 shell");
   assert.match(gridOverlayShader, /fill = select\(mix\(middleColor, coarseColor/);
-  assert.match(rendererSource, /gridOverlay\?\.mode === "resolution" && \(gpuInfo\?\.gridKind === "quadtree-tall-cell" \|\| gpuInfo\?\.gridKind === "octree"\) \? 9 : 0/);
+  assert.match(rendererSource, /gridOverlay\?\.mode === "resolution" && \(gpuInfo\?\.gridKind === "quadtree-tall-cell" \|\| gpuInfo\?\.gridKind === "octree"\) \? 9 : gridOverlay\?\.mode === "surface"/);
   assert.match(rendererSource, /gpuInfo\?\.quadtreeMaximumFluidScale \?\? 1/);
 });
 
@@ -61,6 +61,19 @@ test("default adaptive structure mode marks live sparse-surface cells pink", () 
   assert.match(gridOverlayShader, /fine3=local3\*factor/);
   assert.match(gridOverlayShader, /sparseSurfaceCoreSample\(fineCell\)/);
   assert.match(gridOverlayShader, /gridLineColor=fineColor/);
+});
+
+test("surface-band audit mode separates interface core, page support, halo, and fallback", () => {
+  assert.match(gridOverlayShader, /fn sparseSurfacePageState/);
+  assert.match(gridOverlayShader, /fieldMode == 10 && adaptiveGrid/);
+  assert.match(gridOverlayShader, /resident && halo/);
+  assert.match(gridOverlayShader, /resident && core/);
+  assert.match(gridOverlayShader, /sparseSurfaceCoreSample\(fineCell\)/);
+  assert.match(gridOverlayShader, /fill = vec3f\(0\.05, 0\.12, 0\.35\)/, "blue is coarse fallback");
+  assert.match(gridOverlayShader, /vec3f\(0\.12, 0\.72, 0\.82\)/, "cyan is transport halo");
+  assert.match(gridOverlayShader, /vec3f\(0\.42, 0\.19, 0\.62\)/, "violet is core-page support");
+  assert.match(gridOverlayShader, /vec3f\(1\.0, 0\.03, 0\.52\)/, "pink is the core interface shell");
+  assert.match(rendererSource, /gridOverlay\?\.mode === "surface" && gpuInfo\?\.gridKind === "octree" \? 10 : 0/);
 });
 
 test("optical-layer mode distinguishes retained cubes from the merged tall interior", () => {

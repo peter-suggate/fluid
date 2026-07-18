@@ -15,9 +15,9 @@ import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
  * the volume once per screen pixel.
  */
 
-export function shouldUpdateWaterSurface(extractedRevision: number, latestRevision: number, lastExtractionAt_ms: number, now_ms: number, targetFps = 60) {
+export function shouldUpdateWaterSurface(extractedRevision: number, latestRevision: number, lastExtractionAt_ms: number, now_ms: number) {
   return extractedRevision < 0
-    || (latestRevision !== extractedRevision && now_ms - lastExtractionAt_ms + 0.5 >= frameInterval_ms(targetFps));
+    || (latestRevision !== extractedRevision && now_ms - lastExtractionAt_ms + 0.5 >= frameInterval_ms());
 }
 
 /** Raster/body depth separation that activates the local implicit resolver. */
@@ -1047,15 +1047,15 @@ export class RasterWaterPipeline {
     ] });
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, targetFps = 60, timestamps?: RasterWaterTimestampRanges, drySceneOverlay?: (encoder: GPUCommandEncoder, target: GPUTextureView) => void): RasterWaterEncodeResult | false {
+  encode(encoder: GPUCommandEncoder, output: GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, timestamps?: RasterWaterTimestampRanges, drySceneOverlay?: (encoder: GPUCommandEncoder, target: GPUTextureView) => void): RasterWaterEncodeResult | false {
     const geometryDimensions = this.sparseSurface?.fineDimensions ?? [nx, ny, nz] as const;
     this.ensureGeometry(geometryDimensions[0],geometryDimensions[1],geometryDimensions[2]);
     if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractSparsePipeline||!this.extractHybridCoarsePipeline||!this.resetSurfaceWorklistPipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseSparsePipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.causticPipeline||!this.scenePipeline||!this.compositePipeline||!this.extractBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.sceneBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.causticTexture) return false;
     const now_ms = performance.now();
     // Rendering follows the newest available solver revision, but extraction
-    // follows the selected presentation cadence. Unchanged solver revisions
+    // follows the fixed presentation cadence. Unchanged solver revisions
     // retain the existing mesh, so pausing does not create redundant work.
-    const updateSurface = shouldUpdateWaterSurface(this.extractedRevision, revision, this.lastExtractionAt_ms, now_ms, targetFps);
+    const updateSurface = shouldUpdateWaterSurface(this.extractedRevision, revision, this.lastExtractionAt_ms, now_ms);
     const updateCaustics = this.causticsEnabled && (updateSurface || !this.causticsValid);
     if (updateSurface) {
       this.device.queue.writeBuffer(this.indirectBuffer,0,new Uint32Array([0,1,0,0,0,0]));
@@ -1091,7 +1091,7 @@ export class RasterWaterPipeline {
         compute.setPipeline(this.polygonisePipeline); compute.setBindGroup(0, this.extractBindGroup); compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
       }
       compute.end();
-      this.extractedRevision = revision; this.lastExtractionAt_ms = advancePresentationClock(this.lastExtractionAt_ms, now_ms, targetFps);
+      this.extractedRevision = revision; this.lastExtractionAt_ms = advancePresentationClock(this.lastExtractionAt_ms, now_ms);
     }
     if (updateCaustics) {
       const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}]});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.surfaceBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();
@@ -1099,10 +1099,12 @@ export class RasterWaterPipeline {
     }
     const scene=encoder.beginRenderPass({label:"Dry scene",colorAttachments:[{view:this.sceneTexture.createView(),clearValue:{r:0,g:0,b:0,a:65504},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.scene}:{})});scene.setPipeline(this.scenePipeline);scene.setBindGroup(0,this.sceneBindGroup);scene.draw(3);scene.end();
     drySceneOverlay?.(encoder, this.sceneTexture.createView());
-    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,timestampWrites?:TimestampRange)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);pass.end();};
-    const sprayPass=(label:string,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",timestampWrites?:TimestampRange)=>{if(!this.secondaryParticles?.active)return false;const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),loadOp:"load",storeOp:"store"},{view:normal.createView(),loadOp:"load",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthLoadOp:"load",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});this.secondaryParticles.encodeOpticalInterface(pass,side);pass.end();return true;};
-    interfacePass("Water front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,timestamps?.frontInterfaces);const sprayRendered=sprayPass("Spray front interfaces",this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.sprayFront);interfacePass("Water back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,timestamps?.backInterfaces);sprayPass("Spray back interfaces",this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.sprayBack);
-    const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:output,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,this.compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface, sprayRendered };
+    // Water and spray target the same interface attachments and depth state.
+    // Encode both draws in one pass per side so spray does not force two extra
+    // full-resolution attachment load/store cycles.
+    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",timestampWrites?:TimestampRange)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.secondaryParticles?.encodeOpticalInterface(pass,side);pass.end();};
+    interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.frontInterfaces);interfacePass("Water + spray back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.backInterfaces);
+    const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:output,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,this.compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface, sprayRendered: false };
   }
 
   destroy() {
