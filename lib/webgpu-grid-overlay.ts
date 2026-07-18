@@ -7,6 +7,8 @@
  * only owns the grid-specific sampling and alpha blend.
  */
 
+import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
+
 export const gridOverlayShader = /* wgsl */ `
 struct Uniforms {
   viewport: vec4f,
@@ -482,7 +484,7 @@ fn displayColor(linear: vec3f) -> vec3f {
   let forward = normalize(u.cameraTarget.xyz - origin);
   let right = normalize(cross(forward, vec3f(0.0, 1.0, 0.0)));
   let up = normalize(cross(right, forward));
-  let direction = normalize(forward + right * ndc.x * u.viewport.x / max(u.viewport.y, 1.0) * 0.72 + up * ndc.y * 0.72);
+  let direction = normalize(forward + right * ndc.x * u.viewport.x / max(u.viewport.y, 1.0) * ${CAMERA_TAN_HALF_FOV} + up * ndc.y * ${CAMERA_TAN_HALF_FOV});
   let size = u.container.xyz;
   let boundsMin = vec3f(-0.5 * size.x, 0.0, -0.5 * size.z);
   let boundsMax = boundsMin + size;

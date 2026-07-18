@@ -1,6 +1,8 @@
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
+import { GLASS_OPTICS, unifiedLightingShaderLibrary, WATER_OPTICS } from "./webgpu-lighting";
+import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 
 /**
  * Rasterized water presentation for the WebGPU renderer.
@@ -465,7 +467,7 @@ fn project(world:vec3f)->vec4f {
   let right=normalize(cross(forward,vec3f(0.0,1.0,0.0))); let up=normalize(cross(right,forward));
   let relative=world-u.cameraPosition.xyz; let depth=max(dot(relative,forward),0.001);
   let aspect=u.viewport.x/max(u.viewport.y,1.0);
-  let ndc=vec2f(dot(relative,right)/(depth*aspect*0.72),dot(relative,up)/(depth*0.72));
+  let ndc=vec2f(dot(relative,right)/(depth*aspect*${CAMERA_TAN_HALF_FOV}),dot(relative,up)/(depth*${CAMERA_TAN_HALF_FOV}));
   return vec4f(ndc*depth,clamp(depth/50.0,0.0,1.0)*depth,depth);
 }
 @vertex fn surfaceVertex(@builtin(vertex_index) index:u32)->Out {
@@ -509,6 +511,7 @@ struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let n=min(a,b);let f=max(a,b);return vec2f(max(max(n.x,n.y),n.z),min(min(f.x,f.y),f.z));}
 ${environmentShaderLibrary}
+${unifiedLightingShaderLibrary}
 fn qrot(q:vec4f,v:vec3f)->vec3f{let a=cross(q.yzw,v);return v+2.0*(q.x*a+cross(q.yzw,a));}
 fn qinv(q:vec4f,v:vec3f)->vec3f{return qrot(vec4f(q.x,-q.yzw),v);}
 struct Hit{t:f32,n:vec3f,color:vec3f,selected:f32}
@@ -523,7 +526,7 @@ fn nearestBody(ro:vec3f,rd:vec3f)->Hit{var best=Hit(1e20,vec3f(0,1,0),vec3f(.7),
 @fragment fn fragmentMain(input:VOut)->@location(0) vec4f{
   let ndc=input.uv*2.0-1.0;let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*.72+up*ndc.y*.72);
   let room=sampleEnvironment(ro,rd);var color=room.color;var nearest=room.depth;let light=environmentLightDirection();
-  let rigid=nearestBody(ro,rd);if(rigid.t<nearest){let diffuse=.16+.84*max(dot(rigid.n,light),0.0);let rim=pow(1.0-max(dot(-rd,rigid.n),0.0),3.0);color=rigid.color*diffuse+vec3f(.18,.34,.31)*rim+rigid.selected*vec3f(.12,.42,.32);nearest=rigid.t;}
+  let rigid=nearestBody(ro,rd);if(rigid.t<nearest){let material=unifiedMaterial(rigid.color,1.0,rigid.selected*vec3f(.12,.42,.32),.16,vec3f(.04),0.0,vec3f(.18,.34,.31),1.0);let lighting=unifiedLightingInput(rigid.n,-rd,light,environmentLightColor());color=shadeUnifiedSurface(material,lighting);nearest=rigid.t;}
   // Rear seams belong in the dry scene so they are refracted by the water.
   // The near glass pane and its edges are composited after the water below.
   // The garden pond sits in open ground: there is no glass tank to glow.
@@ -551,6 +554,7 @@ fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPositi
 fn safeSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{return textureSampleLevel(texture,linearSampler,clamp(uv,vec2f(.001),vec2f(.999)),0);}
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let near3=min(a,b);let far3=max(a,b);return vec2f(max(max(near3.x,near3.y),near3.z),min(min(far3.x,far3.y),far3.z));}
 ${environmentShaderLibrary}
+${unifiedLightingShaderLibrary}
 fn qrot(q:vec4f,v:vec3f)->vec3f{let a=cross(q.yzw,v);return v+2.0*(q.x*a+cross(q.yzw,a));}
 fn qinv(q:vec4f,v:vec3f)->vec3f{return qrot(vec4f(q.x,-q.yzw),v);}
 struct RigidHit { t:f32, n:vec3f }
@@ -625,10 +629,10 @@ fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
   let edgeCoordinate=max(max(min(q.x,q.y),min(q.x,q.z)),min(q.y,q.z));
   let outerEdge=smoothstep(.955,.998,edgeCoordinate);
   let innerEdge=smoothstep(.91,.975,edgeCoordinate)*(1.0-outerEdge);
-  let cosine=clamp(abs(dot(-rd,normal)),0.0,1.0);let fresnel=.04+.96*pow(1.0-cosine,5.0);
+  let cosine=clamp(abs(dot(-rd,normal)),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,${GLASS_OPTICS.fresnelF0.toFixed(2)});
   let paneAlpha=.008+.065*fresnel;let edgeAlpha=.52*outerEdge+.10*innerEdge;
-  let glassTint=vec3f(.30,.58,.54);var result=mix(color,color*vec3f(.985,1.0,.998)+glassTint*.035,paneAlpha+edgeAlpha);
-  let light=environmentLightDirection();let glint=pow(max(dot(reflect(rd,normal),light),0.0),240.0);
+  let glassTint=vec3f(${GLASS_OPTICS.tint.join(",")});var result=mix(color,color*vec3f(.985,1.0,.998)+glassTint*.035,paneAlpha+edgeAlpha);
+  let light=environmentLightDirection();let glint=unifiedSpecularLobe(normal,-rd,light,240.0);
   result+=environmentLightColor()*(glint*(.18+.82*outerEdge)+fresnel*outerEdge*.16);
   return result;
 }
@@ -644,7 +648,7 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{var c=environmentForeground(color,ndc)*(
   var n=normalize(safeSample(frontNormal,textureUV).xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
   if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}}
   if(scene.a+depthEpsilon<frontDepth){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}
-  if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/1.333;var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
+  if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/${WATER_OPTICS.indexOfRefraction.toFixed(3)};var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
   var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
   for(var iteration=0;iteration<3;iteration+=1){back=safeSample(backPosition,exitUV);if(back.a<.5){break;}let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(safeSample(backNormal,exitUV).xyz);}
   let refinedBack=safeSample(backPosition,exitUV);if(refinedBack.a>.5){back=refinedBack;exitN=normalize(safeSample(backNormal,exitUV).xyz);}
@@ -658,16 +662,15 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{var c=environmentForeground(color,ndc)*(
     thickness=length(innerOrigin-front.xyz)+travel;exitPoint=innerOrigin+inside*travel;exitN=boxNormal(exitPoint,(boundsMin+boundsMax)*.5,u.container.xyz*.5);
   }
   var outgoing=inside;var tir=false;var backgroundUV=project(exitPoint);
-  if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,1.333);tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
+  if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,${WATER_OPTICS.indexOfRefraction.toFixed(3)});tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
   let transmittedScene=safeSample(sceneTexture,backgroundUV).rgb;
   // Clean water: red is attenuated first.  A small in-scattering term keeps
   // thick regions luminous instead of turning into opaque ink.
-  let absorption=vec3f(.45,.09,.06);let transmission=exp(-absorption*thickness);let scatter=vec3f(.012,.055,.049)*(vec3f(1.0)-transmission);
-  let refracted=transmittedScene*transmission+scatter;let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);
+  let refracted=unifiedAbsorbingTransmission(transmittedScene,vec3f(${WATER_OPTICS.absorption.join(",")}),vec3f(${WATER_OPTICS.scatter.join(",")}),thickness);let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);
   let ssrUV=project(front.xyz+reflectedDir*.8);let ssr=safeSample(sceneTexture,ssrUV);reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a<60000.0));
-  let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=.02037+(1.0-.02037)*pow(1.0-cosine,5.0);var water=mix(refracted,reflected,fresnel);
+  let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,${WATER_OPTICS.fresnelF0});var water=mix(refracted,reflected,fresnel);
   if(tir){water=mix(water,environmentLight(outgoing),.88);}
-  let light=environmentLightDirection();water+=environmentLightColor()*pow(max(dot(reflect(rd,n),light),0.0),180.0)*1.4;
+  let light=environmentLightDirection();water+=environmentLightColor()*unifiedSpecularLobe(n,-rd,light,180.0)*1.4;
   // Thin forward-scattering highlight at silhouettes, plus a restrained
   // turquoise body tint that grows only with actual optical thickness.
   water+=vec3f(.018,.10,.085)*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*pow(1.0-cosine,3.0)*.15;
@@ -859,7 +862,7 @@ export class RasterWaterPipeline {
     ] });
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, targetFps = 60, timestamps?: RasterWaterTimestampRanges): RasterWaterEncodeResult | false {
+  encode(encoder: GPUCommandEncoder, output: GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, targetFps = 60, timestamps?: RasterWaterTimestampRanges, drySceneOverlay?: (encoder: GPUCommandEncoder, target: GPUTextureView) => void): RasterWaterEncodeResult | false {
     this.ensureGeometry(nx,ny,nz);
     if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.preparePipeline||!this.polygonisePipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.causticPipeline||!this.scenePipeline||!this.compositePipeline||!this.extractBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.sceneBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.extractionMetaBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.causticTexture) return false;
     const now_ms = performance.now();
@@ -893,6 +896,7 @@ export class RasterWaterPipeline {
       this.causticsValid = true;
     }
     const scene=encoder.beginRenderPass({label:"Dry scene",colorAttachments:[{view:this.sceneTexture.createView(),clearValue:{r:0,g:0,b:0,a:65504},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.scene}:{})});scene.setPipeline(this.scenePipeline);scene.setBindGroup(0,this.sceneBindGroup);scene.draw(3);scene.end();
+    drySceneOverlay?.(encoder, this.sceneTexture.createView());
     const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,timestampWrites?:TimestampRange)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);pass.end();};
     const sprayPass=(label:string,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",timestampWrites?:TimestampRange)=>{if(!this.secondaryParticles?.active)return false;const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),loadOp:"load",storeOp:"store"},{view:normal.createView(),loadOp:"load",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthLoadOp:"load",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});this.secondaryParticles.encodeOpticalInterface(pass,side);pass.end();return true;};
     interfacePass("Water front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,timestamps?.frontInterfaces);const sprayRendered=sprayPass("Spray front interfaces",this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.sprayFront);interfacePass("Water back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,timestamps?.backInterfaces);sprayPass("Spray back interfaces",this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.sprayBack);

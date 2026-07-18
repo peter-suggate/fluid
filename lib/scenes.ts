@@ -20,7 +20,7 @@ const paperCamera: Partial<CameraState> = { distance_m: 2.45, target_m: { x: 0, 
 // far waterline) while the whole garden still fits the frame.
 const gardenCamera: Partial<CameraState> = { azimuth_rad: 0.58, elevation_rad: 0.3, distance_m: 3.7, target_m: { x: 0, y: 0.3, z: 0 } };
 
-export const scenePresets: ReadonlyArray<ScenePreset> = [
+const authoredScenePresets: ReadonlyArray<ScenePreset> = [
   {
     id: "water-box-dam-break",
     name: "Water box · dam break",
@@ -158,6 +158,16 @@ export const scenePresets: ReadonlyArray<ScenePreset> = [
     }
   }
 ];
+
+/** Attach the art-directed environment to the scene consumed by GPU solvers. */
+export const scenePresets: ReadonlyArray<ScenePreset> = authoredScenePresets.map((preset) => ({
+  ...preset,
+  create: () => {
+    const scene = preset.create();
+    scene.environment = preset.background;
+    return scene;
+  }
+}));
 
 export const defaultScenePresetId = scenePresets[0].id;
 

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { defaultCamera, type CameraState, type ViewMode } from "../model";
 import type { GridOverlayConfig, GridOverlayMode, WaterRenderMode } from "../webgpu-renderer";
+import type { VoxelRenderMode } from "../webgpu-voxel-debug";
 import { clampTargetFps, DEFAULT_TARGET_FPS } from "../frame-pacing";
 
 export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | null;
@@ -20,6 +21,8 @@ interface UIStore {
   gridOverlayMode: GridOverlayMode;
   /** Optical presentation pipeline. The legacy ray marcher stays available for A/B comparisons. */
   waterRenderMode: WaterRenderMode;
+  /** Unified sparse-brick representation: smooth surface, raw voxels, or brick bounds. */
+  voxelRenderMode: VoxelRenderMode;
   /** Requested presentation and raster-surface refresh rate. */
   targetFps: number;
   setView: (view: ViewMode) => void;
@@ -32,6 +35,7 @@ interface UIStore {
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setWaterRenderMode: (mode: WaterRenderMode) => void;
+  setVoxelRenderMode: (mode: VoxelRenderMode) => void;
   setTargetFps: (targetFps: number) => void;
 }
 
@@ -46,6 +50,7 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
   waterRenderMode: "rasterized",
+  voxelRenderMode: "smooth",
   targetFps: DEFAULT_TARGET_FPS,
   setView: (view) => set({ view }),
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
@@ -60,5 +65,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
   setWaterRenderMode: (waterRenderMode) => set({ waterRenderMode }),
+  setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode }),
   setTargetFps: (targetFps) => set({ targetFps: clampTargetFps(targetFps) })
 }));

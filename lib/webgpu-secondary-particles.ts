@@ -8,6 +8,8 @@
  * readback-free.
  */
 
+import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
+
 export const SECONDARY_PARTICLE_STRIDE_BYTES = 64;
 export const DEFAULT_SECONDARY_PARTICLE_CAPACITY = 16_384;
 
@@ -382,7 +384,7 @@ fn project(world: vec3f) -> vec4f {
   let relative = world - view.cameraPosition.xyz;
   let depth = dot(relative, forward);
   let aspect = view.viewport.x / max(view.viewport.y, 1.0);
-  let ndc = vec2f(dot(relative, right) / (max(depth, 0.001) * aspect * 0.72), dot(relative, up) / (max(depth, 0.001) * 0.72));
+  let ndc = vec2f(dot(relative, right) / (max(depth, 0.001) * aspect * ${CAMERA_TAN_HALF_FOV}), dot(relative, up) / (max(depth, 0.001) * ${CAMERA_TAN_HALF_FOV}));
   return vec4f(ndc * depth, clamp(depth / 50.0, 0.0, 1.0) * depth, depth);
 }
 
@@ -482,7 +484,7 @@ fn project(world: vec3f) -> vec4f {
   let relative = world - view.cameraPosition.xyz;
   let eyeDepth = dot(relative, forward);
   let aspect = view.viewport.x / max(view.viewport.y, 1.0);
-  let ndc = vec2f(dot(relative, cameraRight()) / (max(eyeDepth, 0.001) * aspect * 0.72), dot(relative, cameraUp()) / (max(eyeDepth, 0.001) * 0.72));
+  let ndc = vec2f(dot(relative, cameraRight()) / (max(eyeDepth, 0.001) * aspect * ${CAMERA_TAN_HALF_FOV}), dot(relative, cameraUp()) / (max(eyeDepth, 0.001) * ${CAMERA_TAN_HALF_FOV}));
   return vec4f(ndc * eyeDepth, clamp(eyeDepth / 50.0, 0.0, 1.0) * eyeDepth, eyeDepth);
 }
 

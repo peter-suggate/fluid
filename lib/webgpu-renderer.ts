@@ -1,4 +1,4 @@
-import { cameraPosition } from "./math";
+import { cameraBasis, cameraPosition, dot } from "./math";
 import type { CameraState, SceneDescription, ViewMode } from "./model";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
@@ -11,9 +11,38 @@ import { environmentShaderLibrary } from "./webgpu-environments";
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "./terrain";
 import { gpuBatchDepth } from "./simulation/gpu-clock";
 import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
+import { SparseVoxelDebugRenderer, type VoxelRenderMode } from "./webgpu-voxel-debug";
+import { unifiedLightingShaderLibrary } from "./webgpu-lighting";
+import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 export type WaterRenderMode = "rasterized" | "ray-marched";
+
+/** Column-major right-handed world-to-WebGPU-clip transform for voxel raster passes. */
+export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, near = 0.01, far = 100): Float32Array {
+  const basis = cameraBasis(camera), position = basis.position;
+  const view = new Float32Array([
+    basis.right.x, basis.up.x, -basis.forward.x, 0,
+    basis.right.y, basis.up.y, -basis.forward.y, 0,
+    basis.right.z, basis.up.z, -basis.forward.z, 0,
+    -dot(basis.right, position), -dot(basis.up, position), dot(basis.forward, position), 1
+  ]);
+  const safeNear = Math.max(1e-4, near), safeFar = Math.max(safeNear + 1, far);
+  const focal = 1 / CAMERA_TAN_HALF_FOV;
+  const projection = new Float32Array([
+    focal / Math.max(1e-4, aspect), 0, 0, 0,
+    0, focal, 0, 0,
+    0, 0, safeFar / (safeNear - safeFar), -1,
+    0, 0, safeNear * safeFar / (safeNear - safeFar), 0
+  ]);
+  const result = new Float32Array(16);
+  for (let column = 0; column < 4; column += 1) for (let row = 0; row < 4; row += 1) {
+    let value = 0;
+    for (let index = 0; index < 4; index += 1) value += projection[index * 4 + row] * view[column * 4 + index];
+    result[column * 4 + row] = value;
+  }
+  return result;
+}
 
 /**
  * Debug cross-section of the solver grid, after Chentanez & Mueller Fig. 2:
@@ -156,6 +185,7 @@ fn boxIntersection(ro: vec3f, rd: vec3f, boundsMin: vec3f, boundsMax: vec3f) -> 
 }
 
 ${environmentShaderLibrary}
+${unifiedLightingShaderLibrary}
 
 fn gridLine(value: vec2f, scale: f32) -> f32 {
   let g = abs(sin(value * 3.14159265 / max(scale, 0.0001)));
@@ -398,7 +428,7 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let forward = normalize(u.cameraTarget.xyz - ro);
   let right = normalize(cross(forward, vec3f(0.0, 1.0, 0.0)));
   let up = normalize(cross(right, forward));
-  let rd = normalize(forward + right * ndc.x * aspect * 0.72 + up * ndc.y * 0.72);
+  let rd = normalize(forward + right * ndc.x * aspect * ${CAMERA_TAN_HALF_FOV} + up * ndc.y * ${CAMERA_TAN_HALF_FOV});
 
   let room = sampleEnvironment(ro, rd);
   var color = room.color;
@@ -472,9 +502,10 @@ fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   if (rigidHit.t < 1e19 && (floorT <= 0.0 || rigidHit.t < floorT)) {
     let rigidPoint = ro + rd * rigidHit.t;
     let light = environmentLightDirection();
-    let diffuse = 0.22 + 0.78 * max(dot(rigidHit.normal, light), 0.0);
+    let material = unifiedMaterial(rigidHit.color, 1.0, vec3f(0.0), 0.22, vec3f(0.04), 0.0, vec3f(0.18, 0.42, 0.37), 1.0);
+    let lighting = unifiedLightingInput(rigidHit.normal, -rd, light, environmentLightColor());
+    var rigidColor = shadeUnifiedSurface(material, lighting);
     let rim = pow(1.0 - max(dot(-rd, rigidHit.normal), 0.0), 3.0);
-    var rigidColor = rigidHit.color * diffuse + vec3f(0.18, 0.42, 0.37) * rim;
     if (rigidPoint.y < u.container.w) {
       let submergence = clamp((u.container.w - rigidPoint.y) / max(size.y, 0.001), 0.0, 1.0);
       rigidColor = mix(rigidColor, rigidColor * vec3f(0.35, 0.72, 0.7) + vec3f(0.01, 0.11, 0.1), 0.4 + submergence * 0.32);
@@ -514,8 +545,10 @@ export class FluidLabRenderer {
   private upscaleBindGroup?: GPUBindGroup;
   private waterPipeline?: RasterWaterPipeline;
   private secondaryParticlePipeline?: SecondaryParticleRenderPipeline;
+  private voxelDebugPipeline?: SparseVoxelDebugRenderer;
   private gridOverlayPipeline?: GridOverlayPipeline;
   private presentationTexture?: GPUTexture;
+  private voxelDebugDepth?: GPUTexture;
   private presentationTextureKey = "";
   private activeRenderScale = 1;
   private readonly rasterRenderScale = 0.72;
@@ -639,6 +672,15 @@ export class FluidLabRenderer {
     } catch (error) {
       console.warn("Grid overlay pipeline unavailable", error);
     }
+    const voxelDebugPipeline = new SparseVoxelDebugRenderer(device, { colorFormat: this.format });
+    try {
+      progress("Compiling sparse voxel inspection",5);
+      await voxelDebugPipeline.initialize();
+      this.voxelDebugPipeline = voxelDebugPipeline;
+    } catch (error) {
+      voxelDebugPipeline.destroy();
+      console.warn("Sparse voxel inspection unavailable", error);
+    }
     const waterPipeline = new RasterWaterPipeline(device, this.format, this.uniformBuffer, this.bodyBuffer);
     try {
       progress("Compiling raster water pipelines",5);
@@ -681,7 +723,7 @@ export class FluidLabRenderer {
     this.gridOverlayPipeline?.setVolume(texture, columnBases, gridCells, velocity, pressureSamples, divergence, pressure);
   }
 
-  private solverKey(scene:SceneDescription,config:SimulationRunConfig){return`${config.methodId}:${config.quality}:${JSON.stringify(config.values)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow??null)}`;}
+  private solverKey(scene:SceneDescription,config:SimulationRunConfig){return`${config.methodId}:${config.quality}:${JSON.stringify(config.values)}:${scene.environment??"default"}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow??null)}`;}
 
   private resetGPUQueueTracking() {
     this.gpuPendingBatches = 0;
@@ -715,6 +757,7 @@ export class FluidLabRenderer {
       // topology texture after its queue fence has completed and destroyed it.
       this.rebuildBindGroup();
       this.secondaryParticlePipeline?.setSource(undefined);
+      this.voxelDebugPipeline?.setSource(undefined);
       this.retireGPUFluid(previous);
     }
     this.gpuFluid=undefined;this.gpuFluidKey="";this.gpuFluidPendingKey=key;this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackSecond=-1;
@@ -725,7 +768,7 @@ export class FluidLabRenderer {
       : new Promise<GPUSolverInstance>((resolve,reject)=>setTimeout(()=>{try{resolve(method.createSolver!(device,scene,config.quality,config.values,this.gpuRigidLoadCallback));}catch(error){reject(error);}},0));
     this.gpuFluidPending=create.then((solver)=>{
       if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration){solver.destroy();return;}
-      this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.rebuildBindGroup(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.gpuInfoCallback?.(solver.info);this.onStatus({state:"ready",label:"WebGPU solver ready",adapter:this.adapterName});
+      this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.rebuildBindGroup(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.voxelDebugPipeline?.setSource(solver.sparseVoxelRenderSource);this.gpuInfoCallback?.(solver.info);this.onStatus({state:"ready",label:"WebGPU solver ready",adapter:this.adapterName});
     }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed"});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration)this.gpuFluidPending=undefined;});
   }
 
@@ -820,7 +863,9 @@ export class FluidLabRenderer {
     const key = `${renderWidth}x${renderHeight}`;
     if (key === this.presentationTextureKey) return;
     this.presentationTexture?.destroy();
+    this.voxelDebugDepth?.destroy();
     this.presentationTexture = this.device.createTexture({label:"Water presentation target",size:[renderWidth,renderHeight],format:this.format,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+    this.voxelDebugDepth = this.device.createTexture({label:"Sparse voxel inspection depth",size:[renderWidth,renderHeight],format:"depth24plus",usage:GPUTextureUsage.RENDER_ATTACHMENT});
     this.upscaleBindGroup=this.device.createBindGroup({layout:this.upscalePipeline.getBindGroupLayout(0),entries:[{binding:0,resource:this.presentationTexture.createView()},{binding:1,resource:this.upscaleSampler}]});
     this.presentationTextureKey=key;
     this.waterPipeline?.ensureSize(renderWidth, renderHeight);
@@ -831,12 +876,12 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.activeRenderScale * 100)}%)`;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, view: ViewMode, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, waterRenderMode: WaterRenderMode = "rasterized", environmentId: EnvironmentId = defaultEnvironmentId, targetFps = 60): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, view: ViewMode, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, waterRenderMode: WaterRenderMode = "rasterized", environmentId: EnvironmentId = defaultEnvironmentId, targetFps = 60, voxelRenderMode: VoxelRenderMode = "smooth"): RendererFrameMetrics {
     if (!this.device || this.disposed || this.deviceLost || !this.context || !this.pipeline || !this.uniformBuffer || !this.bodyBuffer || !this.bindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     this.resize(waterRenderMode === "rasterized" ? this.rasterRenderScale : 1);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     const start = performance.now();
-    const timingContext = `${config.methodId}:${config.quality}:${waterRenderMode}`;
+    const timingContext = `${config.methodId}:${config.quality}:${waterRenderMode}:${voxelRenderMode}`;
     if (timingContext !== this.renderTimingContext) { this.renderTimingContext = timingContext; this.gpuRender_ms = undefined; this.gpuSurfaceExtraction_ms=undefined;this.gpuDryScene_ms=undefined;this.gpuInterfaces_ms=undefined;this.gpuSprayFront_ms=undefined;this.gpuSprayBack_ms=undefined;this.gpuSprayRender_ms=undefined;this.gpuOpticalComposite_ms=undefined;this.gpuUpscale_ms=undefined; }
     const position = cameraPosition(camera);
     const physicsStart=performance.now();
@@ -920,6 +965,23 @@ export class FluidLabRenderer {
       pass.draw(3);
       pass.end();
     }
+    if (voxelRenderMode !== "smooth" && this.voxelDebugDepth) {
+      const sceneExtent = Math.hypot(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
+      this.voxelDebugPipeline?.encode(encoder, {
+        mode: voxelRenderMode,
+        colorTarget: this.presentationTexture.createView(),
+        depthTarget: this.voxelDebugDepth.createView(),
+        depthLoadOp: "clear",
+        // Inspection is a representation switch, not a subtle overlay. Clear
+        // the smooth hybrid frame so contiguous voxels and brick bounds remain
+        // unmistakable even for a still, fully filled region.
+        colorLoadOp: "clear",
+        viewProjection: voxelViewProjectionMatrix(camera, this.presentationTexture.width / Math.max(1, this.presentationTexture.height), 0.01, camera.distance_m + sceneExtent * 3),
+        cameraPosition: [position.x, position.y, position.z],
+        exposure: 1,
+        gridOpacity: 0.88
+      });
+    }
     const fallbackSprayRendered = !rasterized && Boolean(this.secondaryParticlePipeline?.encode(encoder, this.presentationTexture.createView(), sampleRenderGPU&&this.renderQuerySet?{querySet:this.renderQuerySet,beginningOfPassWriteIndex:12,endOfPassWriteIndex:13}:undefined));
     if (gridOverlay?.axis !== "off") this.gridOverlayPipeline?.encode(encoder, this.presentationTexture.createView());
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}],...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:10,endOfPassWriteIndex:11}}:{})});
@@ -943,7 +1005,8 @@ export class FluidLabRenderer {
     for (const retired of this.retiredGPUFluids) { try { retired.destroy(); } catch { /* Best-effort cleanup after device loss. */ } }
     this.retiredGPUFluids.clear();
     try { this.waterPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
-    for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, this.renderQuerySet, this.renderQueryResolve]) {
+    try { this.voxelDebugPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
+    for (const resource of [this.presentationTexture, this.voxelDebugDepth, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, this.renderQuerySet, this.renderQueryResolve]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }
     }
     try { this.device?.destroy(); } catch { /* The device may already be lost. */ }

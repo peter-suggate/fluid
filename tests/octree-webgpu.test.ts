@@ -16,12 +16,23 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.equal(octreeMethod.id, "octree");
   assert.equal(octreeMethod.backend, "webgpu");
   assert.equal(octreeMethod.presetFor("balanced").pressureIterations, 128);
-  assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "4");
+  assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "8");
+  assert.equal(octreeMethod.presetFor("high").maximumLeafSize, "8");
   assert.equal(octreeMethod.presetFor("balanced").adaptivity, 1);
   assert.match(octreeMethod.detail, /no topology readbacks/);
   assert.match(octreeMethod.detail, /Chebyshev-Jacobi/);
   assert.match(octreeMethod.detail, /rigid-body coupling/);
   assert.match(octreeMethod.description, /signed-distance level set/);
+  const maximumLeaf = octreeMethod.params.find((spec) => spec.key === "maximumLeafSize");
+  assert.ok(maximumLeaf && maximumLeaf.kind === "select");
+  assert.equal(maximumLeaf.default, "8");
+  assert.deepEqual(maximumLeaf.options.map((option) => option.value), ["2", "4", "8", "16", "32"]);
+  assert.match(octreeSource, /function octreeLeafSize\(value: number\): 2 \| 4 \| 8 \| 16 \| 32/);
+  assert.match(octreeSource, /rounded >= 32/);
+  const interfaceBand = octreeMethod.params.find((spec) => spec.key === "interfaceRefinementBandCells");
+  assert.ok(interfaceBand && interfaceBand.kind === "number" && interfaceBand.tier === "fine" && interfaceBand.default === 4);
+  assert.doesNotMatch(`${octreeSource}\n${uniformSolverSource}`, /airRefinementBandCells/);
+  assert.match(uniformSolverSource, /interfaceRefinementBandCells: options\.octree\.interfaceRefinementBandCells \?\? 4/);
   const warmStart = octreeMethod.params.find((spec) => spec.key === "pressureWarmStart");
   assert.ok(warmStart && warmStart.kind === "select" && warmStart.tier === "fine" && warmStart.default === "on");
   // Options are copied field-by-field into the solver; a dropped key would
@@ -63,7 +74,7 @@ test("octree pressure solve uses the variational solid face constraint", () => {
   assert.match(assemble, /let coefficient = open \* area \/ max\(distance/);
   assert.match(assemble, /constrainedFaceVelocity\(faceCell, axis, solid\)/);
   assert.match(octreeProjectionShader, /open \* component\(velocityAt\(faceCell\), axis\) \+ solid\.fraction \* component\(solidVelocity/);
-  assert.match(octreeProjectionShader, /crossesSolidBoundary \|\| closestSurface/,
+  assert.match(octreeProjectionShader, /if \(crossesSurface \|\| crossesSolidBoundary\) \{ return true; \}/,
     "solid interfaces must force finest octree leaves");
 });
 
@@ -93,6 +104,7 @@ test("octree retains exact rank-six coupling as an A/B path and defaults to lagg
 test("octree topology is genuinely three-dimensional and 2:1 balanced", () => {
   assert.match(octreeProjectionShader, /packOrigin\(p: vec3u\)/);
   assert.match(octreeProjectionShader, /p\.z << 20u/);
+  assert.match(WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString(), /Math\.ceil\(Math\.log2\(this\.maxLeafSize\)\)/);
   assert.match(octreeProjectionShader, /for \(var z = 0u; z < size/);
   assert.match(octreeProjectionShader, /for \(var y = 0u; y < size/);
   assert.match(octreeProjectionShader, /for \(var x = 0u; x < size/);
@@ -103,8 +115,13 @@ test("octree topology is genuinely three-dimensional and 2:1 balanced", () => {
 test("octree refinement is graded by resident signed distance rather than bulk VOF occupancy", () => {
   assert.match(octreeProjectionShader, /levelSetIn: texture_3d<f32>/);
   assert.doesNotMatch(octreeProjectionShader, /volumeIn/, "the octree solve must not bind the diagnostic VOF field");
-  assert.match(octreeProjectionShader, /closestSurface = min\(closestSurface, abs\(phi/);
-  assert.match(octreeProjectionShader, /closestSurface \* adaptivity < f32\(size\) \* finestWidth/);
+  assert.match(octreeProjectionShader, /let samplePhi = phi\(vec3i\(q\)\)/);
+  assert.match(octreeProjectionShader, /closestSurface = min\(closestSurface, abs\(samplePhi\)\)/);
+  assert.match(octreeProjectionShader, /if \(minimumSolid >= 1\.0 - 1e-5\) \{ return false; \}/,
+    "fully solid bulk leaves should be allowed to stay coarse");
+  assert.match(octreeProjectionShader, /return closestSurface < max\(0\.0, params\.solve\.w\) \* finestWidth;/,
+    "pure air and liquid leaves should use the explicit interface-band knob instead of size-scaled refinement");
+  assert.doesNotMatch(octreeProjectionShader, /closestSurface \* adaptivity < f32\(size\) \* finestWidth/);
   const refinement = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn leafNeedsRefinement"), octreeProjectionShader.indexOf("fn splitLeaf"));
   assert.doesNotMatch(refinement, /wet != liquidCell|a > 0\.001/);
   assert.match(octreeProjectionShader, /fn liquidCell\(p: vec3i\) -> bool \{ return valid\(p\) && phi\(p\) < 0\.0; \}/);

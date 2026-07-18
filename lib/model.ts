@@ -1,5 +1,6 @@
 import sharedDefaultScene from "../native/Sources/FluidMetal/Resources/default-scene.json";
 import { validateTerrain, type TerrainDescription } from "./terrain";
+import type { EnvironmentId } from "./environments";
 
 export type ViewMode = "scientific" | "presentation";
 export type RunState = "paused" | "running";
@@ -37,6 +38,8 @@ export interface RigidBodyDescription {
 export interface SceneDescription {
   schemaVersion: "1.0.0";
   sceneId: string;
+  /** Visible environment is part of the unified scene representation, not merely a backdrop. */
+  environment?: EnvironmentId;
   randomSeed: number;
   duration_s: number;
   container: {

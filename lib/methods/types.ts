@@ -3,6 +3,7 @@ import type { GPUQuality } from "../tall-cell-grid";
 import type { GPUEulerianInfo, GPURigidLoad } from "../webgpu-eulerian";
 import type { RigidBodyState } from "../rigid-body";
 import type { GPUSecondaryParticleSource } from "../webgpu-secondary-particles";
+import type { SparseVoxelRenderSource } from "../webgpu-voxel-debug";
 
 /**
  * Method plugin contract.
@@ -62,6 +63,8 @@ export interface GPUSolverInstance {
   readonly velocityTexture?: GPUTexture;
   /** Optional one-way escaped spray droplets rendered above the liquid surface. */
   readonly secondaryParticles?: GPUSecondaryParticleSource;
+  /** GPU-resident sparse-brick publication for raw voxel and brick-grid rendering. */
+  readonly sparseVoxelRenderSource?: SparseVoxelRenderSource;
   /** Adaptive pressure-DOF ownership used by the representation alarm. */
   readonly gridPressureSamplesTexture?: GPUTexture;
   /** Fine MLS pressure materialized by the latest adaptive solve. */
