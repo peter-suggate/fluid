@@ -62,7 +62,8 @@ test("octree participates in the shared two-way immersed-body coupling path", ()
   assert.match(uniformSolverSource, /if \(this\.adaptiveProjection\) this\.solidPhiGroup/);
   assert.match(uniformSolverSource, /texture: this\.adaptiveProjection\.levelSetTexture/);
   assert.match(uniformSolverSource, /this\.dispatch\(pass, this\.rigidPipeline, this\.rigidGroup\)/);
-  assert.match(uniformSolverSource, /this\.onRigidLoads\?\.\(loads\.map/);
+  assert.match(uniformSolverSource, /this\.rigidSystem\.encode\(encoder, delta/);
+  assert.doesNotMatch(uniformSolverSource.slice(uniformSolverSource.indexOf("advanceTo(time_s"), uniformSolverSource.indexOf("async readStats()")), /mapAsync|encodeBodyImpulseReadback/);
 });
 
 test("octree voxelizes partial solid volume and reports liquid-displaced volume", () => {

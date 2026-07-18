@@ -1,9 +1,8 @@
 import { BUILD_ID, cloneScene, parseScene, type SceneDescription } from "../model";
 import { EulerianFluidSolver } from "../eulerian-solver";
-import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidExternalLoad, type RigidStepDiagnostics } from "../rigid-body";
+import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "../rigid-body";
 import type { RigidBodyDescription } from "../model";
 import { applyFluidReactions, computeFluidLoads, type CouplingDiagnostics } from "../fluid-rigid-coupling";
-import { mergeGPURigidLoads, type GPURigidLoad } from "../webgpu-eulerian";
 import type { RigidShape } from "../model";
 import type { RendererFrameMetrics, SimulationBackend } from "../webgpu-renderer";
 import { getMethod } from "../methods";
@@ -14,8 +13,7 @@ import type { MethodParamValue } from "../methods";
 import { useRuntimeStore } from "../stores/runtime-store";
 import { useDiagnosticsStore, emptyPerformance, type PerformanceSnapshot } from "../stores/diagnostics-store";
 import { useUIStore } from "../stores/ui-store";
-import { commitGPUCompletion, gpuBatchDepth, gpuCanAcceptNextStep, gpuInFlightStepLimit } from "./gpu-clock";
-import { externalLoadsFromGPU } from "./gpu-loads";
+import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
 
 export type BodyDragPhase = "start" | "move" | "end";
 
@@ -36,7 +34,6 @@ class SimulationController {
   private gpuCompletedTime = 0;
   private lastClock: number | null = null;
   private cpuOracleStep = 0;
-  private gpuRigidLoads: GPURigidLoad[] = [];
   private kinematicDrag: { bodyId: string; position: RigidBodyState["position_m"]; velocity: RigidBodyState["linearVelocity_m_s"] } | null = null;
   private sampleClock = 0;
   private cpuSimulationMs = 0;
@@ -83,11 +80,11 @@ class SimulationController {
     useDiagnosticsStore.getState().set({ bodies: cloneRigidBodies(this.bodies), rigidState: diagnostics ?? rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2) });
   }
 
-  /** Fixed-step advance driven by the shell's requestAnimationFrame. */
+  /** Prepare every fixed step owed by the wall clock. GPU submission is asynchronous. */
   tick(now: number) {
     const tickStart = performance.now();
     if (this.lastClock === null) this.lastClock = now;
-    const elapsed = Math.min((now - this.lastClock) / 1000, 0.05);
+    const elapsed = Math.max(0, (now - this.lastClock) / 1000);
     this.lastClock = now;
     const runtime = useRuntimeStore.getState();
     if (runtime.runState !== "running") {
@@ -97,48 +94,31 @@ class SimulationController {
     }
     const scene = useSceneStore.getState().scene;
     const backend = this.backend;
-    const methodId = useMethodStore.getState().methodId;
     this.accumulator += elapsed;
     const dt = scene.numerics.fixedDt_s;
-    // Tall-cell and octree methods use a frame-sized partitioned-coupling
-    // batch: GPU impulses are accumulated over the batch and consumed over the
-    // next fixed rigid substeps. This trades one frame of coupling coherence
-    // for enough independent GPU work to avoid a per-step CPU/GPU handshake.
-    const targetFps = useUIStore.getState().targetFps;
-    const batchDepth = backend === "webgpu" ? gpuBatchDepth(methodId, dt, this.bodies.length > 0, targetFps) : 1;
-    const inFlightStepLimit = backend === "webgpu" ? gpuInFlightStepLimit(methodId, dt, this.bodies.length > 0, targetFps) : 1;
-    const gpuCanQueue = () => backend !== "webgpu" || this.simulationTime < this.gpuCompletedTime + inFlightStepLimit * dt - 1e-9;
     let steps = 0;
     let diagnostics: RigidStepDiagnostics | undefined;
     let fluidDiagnostics: ReturnType<EulerianFluidSolver["step"]> | undefined;
     let latestCoupling: CouplingDiagnostics | undefined;
-    while (this.accumulator >= dt && steps < Math.max(2, batchDepth) && gpuCanQueue()) {
+    while (this.accumulator + 1e-12 >= dt) {
       this.applyDragConstraint();
-      let loads: ReadonlyMap<string, RigidExternalLoad>;
       if (backend === "webgpu") {
-        const gpuCoupling = externalLoadsFromGPU(scene, this.gpuRigidLoads, dt, this.bodies);
-        loads = gpuCoupling.loads; latestCoupling = gpuCoupling.diagnostics;
+        // WebGPU owns the canonical body state and advances coupling,
+        // integration, and contacts in the submitted command stream.
       } else {
         const coupling = computeFluidLoads(scene, this.fluidSolver, this.bodies);
-        latestCoupling = applyFluidReactions(this.fluidSolver, this.bodies, coupling.loads, dt); loads = coupling.loads;
+        latestCoupling = applyFluidReactions(this.fluidSolver, this.bodies, coupling.loads, dt);
+        diagnostics = advanceRigidBodies(this.bodies, scene, dt, 6, coupling.loads);
+        this.applyDragConstraint();
+        this.cpuOracleStep += 1;
+        fluidDiagnostics = this.fluidSolver.step(dt);
       }
-      diagnostics = advanceRigidBodies(this.bodies, scene, dt, 6, loads);
-      this.applyDragConstraint();
-      this.cpuOracleStep += 1;
-      // The adaptive GPU method can enqueue several independent fluid steps;
-      // running the coarse CPU oracle every four of those steps becomes the
-      // main-thread bottleneck. It remains a low-rate diagnostic here and the
-      // explicit Validation workflow still runs its dedicated comparisons.
-      const oracleStride = backend === "webgpu" ? (methodId === "quadtree-tall-cell" ? 32 : 4) : 1;
-      if (this.cpuOracleStep % oracleStride === 0) fluidDiagnostics = this.fluidSolver.step(dt * oracleStride);
       this.accumulator -= dt;
       this.simulationTime += dt;
       steps += 1;
     }
-    if (backend === "webgpu" && !gpuCanQueue()) this.accumulator = Math.min(this.accumulator, dt);
-    else if (steps === 2 && this.accumulator > dt * 2) this.accumulator = dt * 2;
     if (steps > 0) {
-      this.publishBodies(diagnostics);
+      if (backend === "cpu-reference") this.publishBodies(diagnostics);
       const patch: Parameters<ReturnType<typeof useDiagnosticsStore.getState>["set"]>[0] = {};
       if (fluidDiagnostics) {
         patch.fluidState = fluidDiagnostics;
@@ -171,15 +151,21 @@ class SimulationController {
     const dt = scene.numerics.fixedDt_s;
     const backend = this.backend;
     if (backend === "webgpu" && !gpuCanAcceptNextStep(this.simulationTime, this.gpuCompletedTime)) return;
-    const gpuCoupling = backend === "webgpu" ? externalLoadsFromGPU(scene, this.gpuRigidLoads, dt, this.bodies) : undefined;
-    const coupling = gpuCoupling ? undefined : computeFluidLoads(scene, this.fluidSolver, this.bodies);
-    const couplingDiagnostics = gpuCoupling?.diagnostics ?? applyFluidReactions(this.fluidSolver, this.bodies, coupling!.loads, dt);
-    const diagnostics = advanceRigidBodies(this.bodies, scene, dt, 6, gpuCoupling?.loads ?? coupling!.loads);
-    const fluidDiagnostics = this.fluidSolver.step(dt);
+    let couplingDiagnostics: CouplingDiagnostics | undefined;
+    let diagnostics: RigidStepDiagnostics | undefined;
+    let fluidDiagnostics: ReturnType<EulerianFluidSolver["step"]> | undefined;
+    if (backend === "cpu-reference") {
+      const coupling = computeFluidLoads(scene, this.fluidSolver, this.bodies);
+      couplingDiagnostics = applyFluidReactions(this.fluidSolver, this.bodies, coupling.loads, dt);
+      diagnostics = advanceRigidBodies(this.bodies, scene, dt, 6, coupling.loads);
+      fluidDiagnostics = this.fluidSolver.step(dt);
+    }
     this.simulationTime += dt;
     if (backend === "cpu-reference") runtime.setSimulationTime(this.simulationTime);
-    this.publishBodies(diagnostics);
-    useDiagnosticsStore.getState().set({ fluidState: fluidDiagnostics, fluidRenderState: this.fluidSolver.getRenderState(), couplingState: couplingDiagnostics });
+    if (backend === "cpu-reference") {
+      this.publishBodies(diagnostics);
+      useDiagnosticsStore.getState().set({ fluidState: fluidDiagnostics, fluidRenderState: this.fluidSolver.getRenderState(), couplingState: couplingDiagnostics });
+    }
   }
 
   reset(source?: SceneDescription) {
@@ -190,7 +176,7 @@ class SimulationController {
     this.fluidSolver = this.buildFluidSolver(scene);
     this.simulationTime = 0; this.gpuCompletedTime = 0; this.accumulator = 0; this.lastClock = null;
     this.cpuOracleStep = 0; this.cpuSimulationMs = 0;
-    this.gpuRigidLoads = []; this.kinematicDrag = null;
+    this.kinematicDrag = null;
     this.performance = emptyPerformance;
     this.publishBodies(rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2));
     useDiagnosticsStore.getState().set({ fluidState: this.fluidSolver.diagnostics, fluidRenderState: this.fluidSolver.getRenderState(), gpuInfo: null, couplingState: { displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 }, samples: [], performanceSnapshot: emptyPerformance, performanceHistory: [] });
@@ -315,12 +301,13 @@ class SimulationController {
     useRuntimeStore.getState().setNotice("Body released with buoyancy, drag, torque, and fluid reaction enabled");
   }
 
-  dragBody(bodyId: string, position: RigidBodyState["position_m"], velocity: RigidBodyState["linearVelocity_m_s"], phase: BodyDragPhase) {
+  dragBody(bodyId: string, position: RigidBodyState["position_m"], velocity: RigidBodyState["linearVelocity_m_s"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"]) {
     if (phase === "end") this.kinematicDrag = null;
     else this.kinematicDrag = { bodyId, position: { ...position }, velocity: { ...velocity } };
     const body = this.bodies.find((candidate) => candidate.description.id === bodyId);
     if (body) {
       body.position_m = { ...position };
+      if (orientation) body.orientation = { ...orientation };
       body.linearVelocity_m_s = phase === "end" ? { x: 0, y: 0, z: 0 } : { ...velocity };
       body.angularVelocity_rad_s = { x: 0, y: 0, z: 0 }; body.angularMomentum_kg_m2_s = { x: 0, y: 0, z: 0 };
       this.publishBodies();
@@ -331,10 +318,6 @@ class SimulationController {
   }
 
   // ---- renderer callbacks ------------------------------------------------
-
-  mergeGPULoads(loads: GPURigidLoad[]) {
-    this.gpuRigidLoads = mergeGPURigidLoads(this.gpuRigidLoads, loads);
-  }
 
   /** Publish transport time only after the corresponding GPU work completes. */
   gpuAdvanceCompleted(time_s: number) {

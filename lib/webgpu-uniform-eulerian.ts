@@ -1,7 +1,6 @@
 import { damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
-import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "./rigid-body";
+import { initializeRigidBodies, type RigidBodyState } from "./rigid-body";
 import {
-  decodeGPURigidLoad,
   categorizedGPUPhysicsTime_ms,
   emptyGPUPhysicsTimings,
   GPU_PHYSICS_TIMESTAMP_CAPACITY,
@@ -26,6 +25,7 @@ import {
   type SecondaryParticleSamplingSource
 } from "./webgpu-secondary-particles";
 import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
+import { WebGPURigidBodySystem } from "./webgpu-rigid-body";
 
 export type UniformVelocityTransport = GPUVelocityTransport;
 export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Escaped spray droplets. Initially enabled for octree. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; /** Bounded near-interface particle-to-level-set correction; zero keeps spray strictly one-way. */ secondaryParticleSurfaceCorrection?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
@@ -97,8 +97,8 @@ export class WebGPUUniformEulerianSolver {
   private transportSampler: GPUSampler;
   private params: GPUBuffer; private reductionBuffer: GPUBuffer; private sharpenBuffer: GPUBuffer;
   private rigidBuffer: GPUBuffer; private rigidExchangeBuffer: GPUBuffer;
+  private rigidSystem: WebGPURigidBodySystem;
   private statsReadbackBuffer?: GPUBuffer;
-  private rigidReadbackPool: Array<{ buffer: GPUBuffer; busy: boolean }> = [];
   private bindGroupLayout: GPUBindGroupLayout;
   private advectPipeline!: GPUComputePipeline; private reversePipeline!: GPUComputePipeline;
   private correctPipeline!: GPUComputePipeline; private jacobiPipeline!: GPUComputePipeline;
@@ -188,9 +188,11 @@ export class WebGPUUniformEulerianSolver {
     this.transportSampler = device.createSampler({ minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
     this.params = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.reductionBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.rigidBuffer = device.createBuffer({ size: 12 * 96, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.sharpenBuffer = device.createBuffer({ label: "Uniform sharpening deposits", size: nx * ny * nz * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.rigidExchangeBuffer = device.createBuffer({ size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchangeBuffer, this.terrainTexture);
+    this.rigidBuffer = this.rigidSystem.stateBuffer;
+    this.rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
     if (device.features.has("timestamp-query")) {
       this.querySet = device.createQuerySet({ type: "timestamp", count: GPU_PHYSICS_TIMESTAMP_CAPACITY });
       this.queryResolve = device.createBuffer({ size: GPU_PHYSICS_TIMESTAMP_CAPACITY * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
@@ -246,7 +248,11 @@ export class WebGPUUniformEulerianSolver {
     this.baseAllocatedBytes = this.info.allocatedBytes;
     this.initializeVolume();
     if (options.quadtreeTallCells) {
-      const initialCouplingBodies = scene.rigidBodies.length > 0 ? initializeRigidBodies(scene.rigidBodies) : [];
+      // Dynamic bodies are consumed from the resident storage buffer by the
+      // dense immersed-boundary pass. Only immutable bodies enter the CPU-built
+      // variational topology; otherwise a moving GPU body would leave behind a
+      // stale host-authored K matrix and force a pose readback to rebuild it.
+      const initialCouplingBodies = scene.rigidBodies.filter((body) => body.motion === "static").map((body) => initializeRigidBodies([body])[0]);
       this.quadtreeProjection = new WebGPUQuadtreeTallCellProjection(device, scene, { nx, ny, nz }, { velocityIn: this.velocityB, velocityOut: this.velocityA, velocityScratch: this.velocityD, volume: this.volumeA }, {
         pressureIterations,
         relativeTolerance: scene.numerics.pressureRelativeTolerance,
@@ -254,7 +260,7 @@ export class WebGPUUniformEulerianSolver {
         maximumLeafSize: options.quadtreeTallCells.maximumLeafSize ?? 16,
         opticalDepthFraction: options.quadtreeTallCells.opticalDepthFraction ?? 0.25,
         ...options.quadtreeTallCells
-      }, undefined, initialCouplingBodies.length > 0 ? { bodies: initialCouplingBodies, dynamic: !!onRigidLoads } : undefined,options.deferPipelineCompilation);
+      }, undefined, initialCouplingBodies.length > 0 ? { bodies: initialCouplingBodies, dynamic: false } : undefined,options.deferPipelineCompilation);
       this.applyQuadtreeInfo(this.quadtreeProjection, pressureIterations);
     } else if (options.octree) {
       this.octreeProjection = new WebGPUOctreeProjection(device, scene, { nx, ny, nz }, {
@@ -373,6 +379,9 @@ export class WebGPUUniformEulerianSolver {
   }
 
   get volumeTexture() { return this.volumeA; }
+  get rigidRenderBuffer() { return this.rigidSystem.renderBuffer; }
+  setSelectedRigidBody(index: number) { this.rigidSystem.setSelectedIndex(index); }
+  pickRigidBody(origin: RigidBodyState["position_m"], direction: RigidBodyState["position_m"]) { return this.rigidSystem.pick(origin,direction); }
   // Rendering contours the smooth resident level set when the quadtree
   // projection maintains one; the flux-form VOF field is near-binary and its
   // 0.5 contour is quantized to cell scale. Diagnostics keep reading the VOF
@@ -544,26 +553,6 @@ export class WebGPUUniformEulerianSolver {
     });
   }
 
-  private rigidReadback() {
-    let slot = this.rigidReadbackPool.find((candidate) => !candidate.busy);
-    if (!slot) {
-      slot = {
-        buffer: this.device.createBuffer({
-          label: "Uniform pooled rigid exchange readback",
-          // The upper half carries the quadtree variational K^T p record.
-          // Both channels then share one pooled map instead of allocating a
-          // second staging buffer for every adaptive step.
-          size: 2 * GPU_RIGID_EXCHANGE_BYTES,
-          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-        }),
-        busy: false
-      };
-      this.rigidReadbackPool.push(slot);
-    }
-    slot.busy = true;
-    return slot;
-  }
-
   /**
    * A rebuild may resolve between frame encoding and queue submission. Waiting
    * on the queue immediately is therefore insufficient: onSubmittedWorkDone
@@ -701,9 +690,8 @@ export class WebGPUUniformEulerianSolver {
       sigma
     ) : 1;
     const dt = delta / substeps; this.info.lastDt_s = dt; this.info.lastSubsteps = substeps;
-    const activeBodies = bodies.slice(0, 12), bodyData = new Float32Array(12 * 24), shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
-    activeBodies.forEach((body, index) => { const o = index * 24, d = body.description.dimensions_m, q = body.orientation; bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, shapeIndex[body.description.shape], d.x, d.y, d.z, boundingRadius(body), q.w, q.x, q.y, q.z, body.linearVelocity_m_s.x, body.linearVelocity_m_s.y, body.linearVelocity_m_s.z, 0, body.angularVelocity_rad_s.x, body.angularVelocity_rad_s.y, body.angularVelocity_rad_s.z, body.description.density_kg_m3, rho * body.inverseMass_kg, rho * body.inverseInertiaBody_kg_m2.x, rho * body.inverseInertiaBody_kg_m2.y, rho * body.inverseInertiaBody_kg_m2.z], o); });
-    this.device.queue.writeBuffer(this.rigidBuffer, 0, bodyData); this.info.encodedSteps = (this.info.encodedSteps ?? 0) + substeps;
+    const activeBodies = bodies.slice(0, 12);
+    this.rigidSystem.syncBodies(activeBodies); this.info.encodedSteps = (this.info.encodedSteps ?? 0) + substeps;
     this.octreeProjection?.setCouplingBodies(activeBodies.length, activeBodies.some((body) => body.inverseMass_kg > 0));
     const inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;
     if(this.adaptiveProjection&&this.inflowBoundary){const cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);this.adaptiveProjection.addSurfaceReferenceVolumeCells(this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume);}
@@ -834,6 +822,11 @@ export class WebGPUUniformEulerianSolver {
         } : undefined);
       }
     }
+    if (activeBodies.length > 0) {
+      this.quadtreeProjection?.encodeBodyImpulseExchange(encoder, this.rigidExchangeBuffer);
+      const cellVolume = c.width_m * c.height_m * c.depth_m / (this.info.nx * this.info.ny * this.info.nz);
+      this.rigidSystem.encode(encoder, delta, cellVolume, substeps, c.height_m / this.info.ny);
+    }
     // Publish the final substep's resident fields into the shared sparse-brick
     // world. The topology and payload stay GPU-resident; rendering consumes
     // compact debug records and subsequent voxel kernels consume the same ABI.
@@ -849,22 +842,9 @@ export class WebGPUUniformEulerianSolver {
     encoder.clearBuffer(this.reductionBuffer); { const timing = this.timing("diagnostics_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(pass, this.reductionPipeline, this.reductionGroup); pass.end(); }
     if (totalTiming && this.querySet) { const pass = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: totalTiming.end } }); pass.end(); }
     if (this.querySet && this.queryResolve && this.queryCount > 0) encoder.resolveQuerySet(this.querySet, 0, this.queryCount, this.queryResolve, 0);
-    let exchangeReadback: { buffer: GPUBuffer; busy: boolean } | undefined;
-    const quadtreeImpulseProjection = this.quadtreeProjection;
-    let hasQuadtreeImpulseReadback = false;
-    if (activeBodies.length > 0 && this.onRigidLoads) {
-      exchangeReadback = this.rigidReadback();
-      encoder.copyBufferToBuffer(this.rigidExchangeBuffer, 0, exchangeReadback.buffer, 0, GPU_RIGID_EXCHANGE_BYTES);
-      // The blend reaction and the variational constraint impulse are
-      // sequential operator splits over the same interval; both channels are
-      // read together and summed per body below.
-      hasQuadtreeImpulseReadback = !!quadtreeImpulseProjection?.encodeBodyImpulseReadback(encoder, exchangeReadback.buffer, GPU_RIGID_EXCHANGE_BYTES);
-    }
     const submittedAt = performance.now(); this.device.queue.submit([encoder.finish()]);
-    // Keep the iteration-budget EMA fed even when nobody polls stats: the
-    // solve feedback readback is 48 bytes, pending-gated, and non-blocking, so
-    // the encoded CG budget tracks iterations-to-tolerance at step rhythm.
-    void this.quadtreeProjection?.readSolveDiagnostics();
+    // Solver residuals are sampled only through the opt-in telemetry path.
+    // Physics submission itself must not initiate a GPU-to-CPU map.
     if (this.octreeProjection && inlineRebuildEncoded) {
       for (let rebuild = 0; rebuild < substeps; rebuild += 1) this.octreeProjection.finishInlineRebuild();
       this.applyOctreeInfo(this.octreeProjection);
@@ -885,42 +865,11 @@ export class WebGPUUniformEulerianSolver {
       }
       this.info.quadtreeTopologyStaleSteps = this.quadtreeStepsSinceTopology;
       this.info.quadtreeTopologyStaleLimit = inlineRebuildEncoded ? 0 : this.quadtreeTopologyStaleLimit;
-      this.quadtreeLastBodies = activeBodies;
+      this.quadtreeLastBodies = activeBodies.filter((body) => body.description.motion === "static");
       if (this.quadtreeRebuildRetrySteps > 0) this.quadtreeRebuildRetrySteps -= 1;
       if (!inlineRebuildEncoded && this.quadtreeRebuildRetrySteps === 0 && !this.quadtreeRebuildPending && !this.quadtreeReadyProjection && this.shouldKickQuadtreeRebuild()) this.kickQuadtreeRebuild();
     }
     if (!this.wallTimingPending) { this.wallTimingPending = true; void this.device.queue.onSubmittedWorkDone().then(() => { this.info.gpuQueueWall_ms = performance.now() - submittedAt; this.info.gpuQueueSimulation_s = delta; }).catch(() => { /* Device loss is handled by the renderer. */ }).finally(() => { this.wallTimingPending = false; }); }
-    if (exchangeReadback) {
-      const slot = exchangeReadback, readback = slot.buffer, elapsed = delta, cellVolume = c.width_m * c.height_m * c.depth_m / (this.info.nx * this.info.ny * this.info.nz);
-      const mapPromise = readback.mapAsync(GPUMapMode.READ);
-      void mapPromise.then(() => {
-        // WebGPU mapped ranges may not overlap. Decode the fixed dense record
-        // and the variational record from their disjoint halves.
-        const words = new Int32Array(readback.getMappedRange(0, GPU_RIGID_EXCHANGE_BYTES));
-        const impulses = hasQuadtreeImpulseReadback && quadtreeImpulseProjection
-          ? quadtreeImpulseProjection.decodeMappedBodyImpulseReadback(readback, GPU_RIGID_EXCHANGE_BYTES)
-          : [];
-        const loads = activeBodies.map((body, index) => decodeGPURigidLoad(body.description.id, words, index, elapsed, cellVolume, substeps));
-        readback.unmap();
-        // Both channels cover the same interval, so impulses add per body and
-        // the interval stays `delta`; the variational displaced volume (from
-        // the voxelized [A] field) is the better of the two estimates.
-        const impulseById = new Map(impulses.map((impulse) => [impulse.bodyId, impulse]));
-        this.onRigidLoads?.(loads.map((load) => {
-          const extra = impulseById.get(load.bodyId);
-          if (!extra) return load;
-          return {
-            ...load,
-            impulse_N_s: { x: load.impulse_N_s.x + extra.impulse_N_s.x, y: load.impulse_N_s.y + extra.impulse_N_s.y, z: load.impulse_N_s.z + extra.impulse_N_s.z },
-            angularImpulse_N_m_s: { x: load.angularImpulse_N_m_s.x + extra.angularImpulse_N_m_s.x, y: load.angularImpulse_N_m_s.y + extra.angularImpulse_N_m_s.y, z: load.angularImpulse_N_m_s.z + extra.angularImpulse_N_m_s.z },
-            displacedVolume_m3: extra.displacedVolume_m3 > 0 ? extra.displacedVolume_m3 : load.displacedVolume_m3
-          };
-        }));
-      }).catch(async () => {
-        await mapPromise.catch(() => { /* Device loss is handled by the renderer. */ });
-        if (readback.mapState === "mapped") readback.unmap();
-      }).finally(() => { slot.busy = false; });
-    }
     if (!this.validationChecked) { this.validationChecked = true; void this.device.popErrorScope().then((error) => { if (error) console.error(`Uniform GPU validation: ${error.message}`); }).catch(() => { /* Device loss is handled by the renderer. */ }); }
     return true;
   }
@@ -993,7 +942,7 @@ export class WebGPUUniformEulerianSolver {
     this.secondaryParticleSystem?.destroy();
     for (const projection of this.retiredQuadtreeProjections) projection.destroy();
     this.retiredQuadtreeProjections.clear();
-    for (const texture of new Set([this.velocityA, this.velocityB, this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB, this.transportA, this.transportB, this.fluxScales])) texture.destroy();
-    this.params.destroy(); this.reductionBuffer.destroy(); this.sharpenBuffer.destroy(); this.rigidBuffer.destroy(); this.rigidExchangeBuffer.destroy(); this.statsReadbackBuffer?.destroy(); for (const slot of this.rigidReadbackPool) slot.buffer.destroy(); this.querySet?.destroy(); this.queryResolve?.destroy();
+    for (const texture of new Set([this.velocityA, this.velocityB, this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB, this.terrainTexture, this.transportA, this.transportB, this.fluxScales])) texture.destroy();
+    this.params.destroy(); this.reductionBuffer.destroy(); this.sharpenBuffer.destroy(); this.rigidSystem.destroy(); this.rigidExchangeBuffer.destroy(); this.statsReadbackBuffer?.destroy(); this.querySet?.destroy(); this.queryResolve?.destroy();
   }
 }
