@@ -33,6 +33,7 @@
     "benchmark:water": "node --import tsx tools/benchmark-water-extraction.ts",
     "benchmark:spray": "node --import tsx tools/benchmark-secondary-particles.ts",
     "benchmark:rigid": "node --import tsx tools/run-rigid-benchmarks.ts",
+    "benchmark:octree-leaves": "node --import tsx tools/benchmark-octree-leaf-sizes.ts",
     "native:run": "cd native && swift run -c release FluidMetal",
     "native:build": "cd native && swift build -c release",
     "native:app": "native/build-app.sh",

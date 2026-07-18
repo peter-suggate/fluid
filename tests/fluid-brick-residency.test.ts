@@ -91,12 +91,14 @@ test("GPU residency builds active and retired indirect worklists without readbac
 
 test("GPU residency derives a topology-tile worklist so leaves never straddle a rebuild boundary", () => {
   assert.match(fluidBrickResidencyShader, /fn emitTopologyTiles/);
+  assert.match(fluidBrickResidencyShader, /fn tileHasResident/);
+  assert.match(fluidBrickResidencyShader, /vec3i\(tile\) \+ vec3i\(dx, dy, dz\)/, "grading support dilates by one maximum-leaf tile");
+  assert.match(fluidBrickResidencyShader, /atomicExchange\(&tileStates\[tileIndex\]/, "dilation-only tiles retain retirement state");
   assert.match(fluidBrickResidencyShader, /atomicAdd\(&tileWorklist\[0\], 1u\)/);
   assert.match(fluidBrickResidencyShader, /atomicAdd\(&tileWorklist\[4\], 1u\)/);
   assert.match(fluidBrickResidencyShader, /let tileDispatch = tiledDispatch\(activeTiles \* groupsPerTile\)/);
   assert.match(fluidBrickResidencyShader, /let retiredTileDispatch = tiledDispatch\(retiredTiles \* groupsPerTile\)/);
-  // A retired brick with a resident sibling rides the active tile rebuild.
-  assert.match(fluidBrickResidencyShader, /WAS_RESIDENT\) != 0u && \(state & RESIDENT\) == 0u/);
+  assert.match(fluidBrickResidencyShader, /candidateGroupsPerTile = max\(1u, groupsPerTile \/ 8u\)/);
 });
 
 test("pressure topology rebuild consumes the shared topology-tile worklist indirectly", () => {
@@ -108,6 +110,8 @@ test("pressure topology rebuild consumes the shared topology-tile worklist indir
   assert.doesNotMatch(rebuild, /maxLeafSize <= /);
   assert.match(octreeProjectionShader, /fn topologyTileSize\(\) -> u32 \{ return max\(8u, params\.dimsMax\.w\); \}/);
   assert.match(octreeProjectionShader, /fn residentTopologyCell/);
+  assert.match(octreeProjectionShader, /fn residentTopologyCandidate/);
+  assert.match(octreeProjectionShader, /subCoord \* 8u \+ local \* 2u/);
   assert.match(octreeProjectionShader, /workgroup\.x \+ workgroup\.y \* compaction\[widthWord\]/);
   assert.match(octreeProjectionShader, /fn rasterizeSolidsActive/);
   assert.match(octreeProjectionShader, /fn resetTopologyActive/);
@@ -119,7 +123,8 @@ test("pressure topology residency covers refinement and 2:1 grading support", ()
   const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   assert.match(source, /const topologyHaloCells = this\.interfaceRefinementBandCells/);
   assert.match(source, /\+ 8 \* this\.surfaceDetailStrength/);
-  assert.match(source, /\+ \(this\.maxLeafSize - 1\)/);
+  assert.doesNotMatch(source, /\+ \(this\.maxLeafSize - 1\)/, "grading support no longer inflates brick residency");
+  assert.match(fluidBrickResidencyShader, /2:1 grading chain travels less than one maximum-leaf tile/);
   assert.match(source, /haloCells: topologyHaloCells/);
 });
 
@@ -127,8 +132,10 @@ test("retired topology tiles rebuild before leaving the active domain", () => {
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
   assert.match(rebuild, /FLUID_TILE_RETIRED_DISPATCH_OFFSET_BYTES/);
   assert.match(rebuild, /dispatchRetired\(this\.resetRetiredPipeline\)/);
-  assert.match(rebuild, /dispatchRetired\(this\.refineRetiredPipeline\)/);
-  assert.match(rebuild, /dispatchRetired\(this\.balanceRetiredPipeline\)/);
+  assert.match(rebuild, /dispatchRetiredCandidates\(level\.retired\)/);
+  assert.match(rebuild, /this\.refineCoarsePipelines\.get\(size\)/,
+    "coarse cooperative refinement covers the full domain, including retired tiles");
+  assert.match(rebuild, /dispatchRetiredCandidates\(this\.balanceRetiredPipeline\)/);
   assert.match(octreeProjectionShader, /fn retiredTopologyCell/);
   // Retired tile indices follow the active tile capacity in the copied list.
   assert.match(octreeProjectionShader, /topologyTileCell\(workgroup, local, 4u, 5u, 16u \+ tx \* ty \* tz\)/);

@@ -60,7 +60,21 @@ interface OctreeInternals {
     pressureA: GPUBuffer;
     pressureB: GPUBuffer;
     compaction: GPUBuffer;
+    resources: { velocityOut: GPUTexture };
   };
+}
+
+async function readVelocityTexture(device: GPUDevice, texture: GPUTexture, dims: readonly [number, number, number]) {
+  const bytesPerRow = Math.ceil((dims[0] * 16) / 256) * 256;
+  const byteLength = bytesPerRow * dims[1] * dims[2];
+  const readback = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder();
+  encoder.copyTextureToBuffer({ texture }, { buffer: readback, bytesPerRow, rowsPerImage: dims[1] }, dims);
+  device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  const values = new Float32Array(readback.getMappedRange().slice(0));
+  readback.unmap(); readback.destroy();
+  return values;
 }
 
 async function runCalmDeepSolve(device: GPUDevice, maximumLeafSize: "8" | "32") {
@@ -86,8 +100,9 @@ async function runCalmDeepSolve(device: GPUDevice, maximumLeafSize: "8" | "32") 
   const owners = new Uint32Array(await readBufferBytes(device, internals.topology, count * 8));
   const pressureA = new Float32Array(await readBufferBytes(device, internals.pressureA, count * 4));
   const pressureB = new Float32Array(await readBufferBytes(device, internals.pressureB, count * 4));
+  const velocity = await readVelocityTexture(device, internals.resources.velocityOut, dims);
   const compaction = new Uint32Array(await readBufferBytes(device, internals.compaction, 8));
-  return { solver, dims, owners, pressureA, pressureB, liquidLeafRows: compaction[0], matrixEntries: compaction[1] };
+  return { solver, dims, owners, pressureA, pressureB, velocity, liquidLeafRows: compaction[0], matrixEntries: compaction[1] };
 }
 
 test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and finite pressure", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU octree checks" }, async () => {
@@ -148,6 +163,13 @@ test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and 
       assert.ok(Number.isFinite(value), "pressure must remain finite at maximum leaf 32");
       maximumMagnitude = Math.max(maximumMagnitude, Math.abs(value));
     }
+    let maximumVelocity = 0;
+    for (let cell = 0; cell < nx * ny * nz; cell += 1) for (let component = 0; component < 3; component += 1) {
+      const value = run32.velocity[cell * 4 + component];
+      assert.ok(Number.isFinite(value), "sparse frontier projection must publish finite dense-compatible velocity");
+      maximumVelocity = Math.max(maximumVelocity, Math.abs(value));
+    }
+    assert.ok(maximumVelocity > 0 && maximumVelocity <= 50.001, "projected velocity must be nonzero and respect the solver clamp");
     assert.ok(maximumMagnitude > 0, "the calm pool must carry a non-trivial (hydrostatic) pressure field");
     assert.ok(run32.liquidLeafRows > 0, "the compacted solve must emit liquid leaf rows");
     run32.solver.destroy();
