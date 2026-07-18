@@ -715,9 +715,11 @@ export class WebGPUUniformEulerianSolver {
       if (timing && this.querySet) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end(); }
     } else if (this.octreeProjection) {
       const timing = this.timing("layerConstruction_ms");
-      if (timing && this.querySet) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.start } }); marker.end(); }
-      inlineRebuildEncoded = this.octreeProjection.encodeInlineRebuild(encoder);
-      if (timing && this.querySet) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end(); }
+      inlineRebuildEncoded = this.octreeProjection.encodeInlineRebuild(encoder, timing && this.querySet ? {
+        querySet: this.querySet,
+        beginningOfPassWriteIndex: timing.start,
+        endOfPassWriteIndex: timing.end,
+      } : undefined);
     }
     for (let substep = 0; substep < substeps; substep += 1) {
       // The first rebuild was encoded above so topology is ready before any
@@ -910,6 +912,11 @@ export class WebGPUUniformEulerianSolver {
       this.info.quadtreePressurePhaseTimings = this.quadtreeProjection.info.pressurePhaseTimings;
       this.info.pressureSolver = quadtreePressureDescription(this.quadtreeProjection, this.info.pressureIterations, Math.max(this.scene.numerics.pressureRelativeTolerance, 1e-4));
     } else if (this.octreeProjection) {
+      this.info.activeSampleCount = this.octreeProjection.info.liquidDofCount;
+      this.info.activeCompressionRatio = this.octreeProjection.info.compressionRatio;
+      this.info.compressionRatio = this.octreeProjection.info.compressionRatio;
+      this.info.quadtreePressureSampleCount = this.octreeProjection.info.pressureSampleCount;
+      this.info.quadtreeLiquidDofCount = this.octreeProjection.info.liquidDofCount;
       this.info.quadtreePressureIterationsUsed = this.octreeProjection.info.pressureIterationsUsed;
       this.info.quadtreePressureIterationBudget = this.octreeProjection.info.pressureIterationBudget;
       this.info.quadtreePressureIterationHardBudget = this.octreeProjection.info.pressureIterationHardBudget;

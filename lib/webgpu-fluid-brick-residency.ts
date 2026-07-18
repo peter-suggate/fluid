@@ -27,6 +27,9 @@ export const FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES = 20;
 export const FLUID_TILE_WORKLIST_HEADER_WORDS = 16;
 export const FLUID_TILE_ACTIVE_DISPATCH_OFFSET_BYTES = 4;
 export const FLUID_TILE_RETIRED_DISPATCH_OFFSET_BYTES = 20;
+/** Candidate-origin dispatches used by refinement/balance (header words 8..14). */
+export const FLUID_TILE_ACTIVE_CANDIDATE_DISPATCH_OFFSET_BYTES = 32;
+export const FLUID_TILE_RETIRED_CANDIDATE_DISPATCH_OFFSET_BYTES = 48;
 
 export interface FluidBrickResidencyOptions {
   brickSize?: 4 | 8;
@@ -118,6 +121,10 @@ struct Params {
 // are max(brick, maximumLeaf)-sized brick groups; the octree topology rebuild
 // consumes this list so a partial rebuild can never split a pressure leaf.
 @group(0) @binding(7) var<storage, read_write> tileWorklist: array<atomic<u32>>;
+// Persistent topology-tile activity. A tile can be active solely because it
+// grades a neighboring surface tile, so brick WAS_RESIDENT bits cannot retire
+// it reliably after that neighbor moves away.
+@group(0) @binding(8) var<storage, read_write> tileStates: array<atomic<u32>>;
 
 const RESIDENT: u32 = 1u;
 const CORE: u32 = 2u;
@@ -307,10 +314,28 @@ fn emitWorklist(@builtin(global_invocation_id) gid: vec3u) {
   emitWorklistFor(brickIndex, state & 0xffu, (state & WAS_RESIDENT) != 0u);
 }
 
-// One thread per topology tile scans its child bricks: any resident child
-// makes the tile active (the whole tile rebuilds, covering retired siblings),
-// while a just-retired child with no resident sibling emits a retired tile so
-// stale interface leaves are re-coarsened before the tile leaves the domain.
+fn tileHasResident(tile: vec3i) -> bool {
+  let tileDims = vec3i(params.tiling.yzw);
+  if (any(tile < vec3i(0)) || any(tile >= tileDims)) { return false; }
+  let factor = params.tiling.x;
+  for (var z = 0u; z < factor; z += 1u) {
+    for (var y = 0u; y < factor; y += 1u) {
+      for (var x = 0u; x < factor; x += 1u) {
+        let brick = vec3u(tile) * factor + vec3u(x, y, z);
+        if (any(brick >= params.brickDimsCapacity.xyz)) { continue; }
+        let brickIndex = brick.x + params.brickDimsCapacity.x * (brick.y + params.brickDimsCapacity.y * brick.z);
+        if (brickIndex < arrayLength(&states) && (atomicLoad(&states[brickIndex]) & RESIDENT) != 0u) { return true; }
+      }
+    }
+  }
+  return false;
+}
+
+// One thread per topology tile scans the 3x3x3 tile neighborhood. The full
+// 2:1 grading chain travels less than one maximum-leaf tile, so this dilation
+// replaces a maxLeaf-1 phi-residency halo without making the atlas retain that
+// much dense air/liquid support. Persistent tile state emits a retired rebuild
+// even for tiles that were active only because of this grading dilation.
 @compute @workgroup_size(64)
 fn emitTopologyTiles(@builtin(global_invocation_id) gid: vec3u) {
   let tileCapacity = params.tiling.y * params.tiling.z * params.tiling.w;
@@ -323,24 +348,18 @@ fn emitTopologyTiles(@builtin(global_invocation_id) gid: vec3u) {
     tileIndex / (params.tiling.y * params.tiling.z)
   );
   var anyResident = false;
-  var anyRetired = false;
-  for (var z = 0u; z < factor; z += 1u) {
-    for (var y = 0u; y < factor; y += 1u) {
-      for (var x = 0u; x < factor; x += 1u) {
-        let brick = tile * factor + vec3u(x, y, z);
-        if (any(brick >= params.brickDimsCapacity.xyz)) { continue; }
-        let brickIndex = brick.x + params.brickDimsCapacity.x * (brick.y + params.brickDimsCapacity.y * brick.z);
-        if (brickIndex >= arrayLength(&states)) { continue; }
-        let state = atomicLoad(&states[brickIndex]);
-        anyResident = anyResident || (state & RESIDENT) != 0u;
-        anyRetired = anyRetired || ((state & WAS_RESIDENT) != 0u && (state & RESIDENT) == 0u);
+  for (var dz = -1; dz <= 1 && !anyResident; dz += 1) {
+    for (var dy = -1; dy <= 1 && !anyResident; dy += 1) {
+      for (var dx = -1; dx <= 1 && !anyResident; dx += 1) {
+        anyResident = tileHasResident(vec3i(tile) + vec3i(dx, dy, dz));
       }
     }
   }
+  let wasActive = atomicExchange(&tileStates[tileIndex], select(0u, 1u, anyResident)) != 0u;
   if (anyResident) {
     let slot = atomicAdd(&tileWorklist[0], 1u);
     if (slot < tileCapacity) { atomicStore(&tileWorklist[HEADER_WORDS + slot], tileIndex); }
-  } else if (anyRetired) {
+  } else if (wasActive) {
     let slot = atomicAdd(&tileWorklist[4], 1u);
     if (slot < tileCapacity) { atomicStore(&tileWorklist[HEADER_WORDS + tileCapacity + slot], tileIndex); }
   }
@@ -377,6 +396,18 @@ fn finalize() {
   atomicStore(&tileWorklist[5], retiredTileDispatch.x);
   atomicStore(&tileWorklist[6], retiredTileDispatch.y);
   atomicStore(&tileWorklist[7], 1u);
+  // Refinement and balancing only visit possible origins of splittable leaves.
+  // Every such dyadic origin is even-aligned, so one 4^3 workgroup spans an
+  // 8^3 cell region and needs one eighth as many invocations as cell passes.
+  let candidateGroupsPerTile = max(1u, groupsPerTile / 8u);
+  let activeCandidateDispatch = tiledDispatch(activeTiles * candidateGroupsPerTile);
+  atomicStore(&tileWorklist[8], activeCandidateDispatch.x);
+  atomicStore(&tileWorklist[9], activeCandidateDispatch.y);
+  atomicStore(&tileWorklist[10], 1u);
+  let retiredCandidateDispatch = tiledDispatch(retiredTiles * candidateGroupsPerTile);
+  atomicStore(&tileWorklist[12], retiredCandidateDispatch.x);
+  atomicStore(&tileWorklist[13], retiredCandidateDispatch.y);
+  atomicStore(&tileWorklist[14], 1u);
 }
 `;
 
@@ -398,6 +429,7 @@ export class GPUFluidBrickResidency {
 
   private readonly device: GPUDevice;
   private readonly states: GPUBuffer;
+  private readonly tileStates: GPUBuffer;
   private readonly leafIndices: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly layout: GPUBindGroupLayout;
@@ -445,6 +477,7 @@ export class GPUFluidBrickResidency {
     const tileWorklistWords = FLUID_TILE_WORKLIST_HEADER_WORDS + this.tileCapacity * 2;
     this.tileWorklistByteLength = tileWorklistWords * 4;
     this.tileWorklist = buffer("Topology tile active and retired worklists", tileWorklistWords * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
+    this.tileStates = buffer("Persistent topology tile activity", this.tileCapacity * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     this.leafIndices = buffer("Fluid brick to sparse leaf mapping", mapping.byteLength, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, mapping);
     this.leafStates = buffer("Sparse leaf fluid residency", leafCapacity * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
     this.params = buffer("Fluid brick residency parameters", 64, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
@@ -468,6 +501,7 @@ export class GPUFluidBrickResidency {
       { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
     this.classifyPipeline = device.createComputePipeline({ label: "Classify fluid brick residency", layout: pipelineLayout, compute: { module, entryPoint: "classify" } });
@@ -478,7 +512,7 @@ export class GPUFluidBrickResidency {
     this.finalizePipeline = device.createComputePipeline({ label: "Finalize fluid brick worklists", layout: pipelineLayout, compute: { module, entryPoint: "finalize" } });
     // The texture binding changes with the projection's ping-pong surface and
     // is therefore created in encode(). Keep the common resources resident.
-    this.allocatedBytes = this.capacity * 4 + worklistWords * 4 + tileWorklistWords * 4 + mapping.byteLength + leafCapacity * 4 + 64;
+    this.allocatedBytes = this.capacity * 4 + worklistWords * 4 + tileWorklistWords * 4 + this.tileCapacity * 4 + mapping.byteLength + leafCapacity * 4 + 64;
   }
 
   /** GPU-owned per-brick state words, consumable by sibling schedulers (atlas). */
@@ -507,6 +541,7 @@ export class GPUFluidBrickResidency {
       // the level set doubles as a typed placeholder when no velocity exists.
       { binding: 6, resource: (velocity ?? levelSet).createView() },
       { binding: 7, resource: { buffer: this.tileWorklist } },
+      { binding: 8, resource: { buffer: this.tileStates } },
     ] });
     const classify = encoder.beginComputePass({ label: "Classify evolving fluid bricks" });
     classify.setBindGroup(0, bindGroup);
@@ -552,6 +587,7 @@ export class GPUFluidBrickResidency {
     this.states.destroy();
     this.worklist.destroy();
     this.tileWorklist.destroy();
+    this.tileStates.destroy();
     this.leafIndices.destroy();
     this.leafStates.destroy();
     this.params.destroy();
