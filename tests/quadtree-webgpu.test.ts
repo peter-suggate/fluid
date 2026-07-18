@@ -7,7 +7,7 @@ import { nextQuadtreeIterationBudget, quadtreeChebyshevPasses, quadtreeChebyshev
 import { nextQuadtreeVofReconciliationActive, packedQuadtreeRootMap, quadtreeConstructionShader, quadtreeSurfaceJumpSequence, quadtreeSurfaceShader, quadtreeVofReconciliationFraction, WebGPUQuadtreeBuilder, WebGPUQuadtreeSurfaceState } from "../lib/webgpu-quadtree-builder";
 import { quadtreeSegmentationPackShader, WebGPUQuadtreePackBuilder } from "../lib/webgpu-quadtree-pack-builder";
 import { buildAdaptiveOpticalLayerField, buildQuadtree, buildVariationalSystem, populateTallPressureGrid } from "../lib/quadtree-tall-cell-grid";
-import { proactiveQuadtreeSubsteps, quadtreeMissedFrames, quadtreeRebuildRetryDelay } from "../lib/webgpu-uniform-eulerian";
+import { capillaryStableDt_s, proactiveQuadtreeSubsteps, quadtreeMissedFrames, quadtreeRebuildRetryDelay } from "../lib/webgpu-uniform-eulerian";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 
 test("the old optical-layer method is replaced by quadtree tall cells", () => {
@@ -101,6 +101,16 @@ test("quadtree CFL subdivisions use the current conservative velocity bound", ()
   assert.equal(proactiveQuadtreeSubsteps(0, 5, 0, 0.01, 0.02), 3, "a faster inflow participates before its first reduction");
   assert.equal(proactiveQuadtreeSubsteps(100, 0, 0, 0.01, 0.02), 50, "the safety ceiling rises past the old eight-step CFL limit");
   assert.equal(proactiveQuadtreeSubsteps(1, 0, 0, 0, 0), 1, "degenerate startup inputs remain safe");
+});
+
+test("adaptive substeps also enforce the finest-cell capillary-wave bound", () => {
+  assert.equal(capillaryStableDt_s(1_000, 0, 0.001), Number.POSITIVE_INFINITY, "zero surface tension has no capillary restriction");
+  const coarse = capillaryStableDt_s(1_000, 0.072, 0.004);
+  const fine = capillaryStableDt_s(1_000, 0.072, 0.001);
+  assert.ok(fine < coarse);
+  assert.ok(Math.abs(coarse / fine - 8) < 1e-10, "the bound scales with h^(3/2)");
+  assert.equal(proactiveQuadtreeSubsteps(0, 0, 0, 0.02, 0.001, 64, 1_000, 0.072), Math.ceil(0.02 / fine));
+  assert.equal(proactiveQuadtreeSubsteps(0, 0, 0, 0.02, 0.001, 64, 1_000, 0), 1, "sigma=0 preserves the previous CFL-only result");
 });
 
 test("quadtree blocked-frame telemetry counts missed presentation budgets, not retry polls", () => {

@@ -56,7 +56,7 @@ export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, n
  * normalized by the last reported liquid maximum. Both sample live solver
  * textures in the overlay shader — no readback is involved.
  */
-export type GridOverlayMode = "structure" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation";
+export type GridOverlayMode = "structure" | "resolution" | "optical" | "cfl" | "speed" | "phi" | "divergence" | "pressure" | "projection" | "representation";
 
 export interface GridOverlayConfig {
   axis: "off" | "z" | "x" | "y";
@@ -894,12 +894,15 @@ export class FluidLabRenderer {
       position.x, position.y, position.z, 0,
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
-      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), 0,
+      // options.w carries the largest represented adaptive pressure-cell
+      // width. The grid overlay uses it to normalize its categorical scale
+      // palette to the hierarchy that can actually exist in this solver.
+      view === "scientific" ? 1 : 0, scene.nominalResolution.length_m, Math.min(bodies.length, 12), gpuInfo?.quadtreeMaximumFluidScale ?? 1,
       // Field mode: 1 = raw occupancy, 2 = packed tall-cell level set,
       // 3 = uniform-layout level set (quadtree resident phi).
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "restricted-tall-cell" ? 2 : gpuInfo.gridKind === "quadtree-tall-cell" || gpuInfo.gridKind === "octree" ? 3 : 1) : fluid ? 1 : 0,
       gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : gridOverlay?.axis === "y" ? 3 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "quadtree-tall-cell" || gpuInfo?.gridKind === "octree" ? 1 : 0,
-      gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : 0,
+      gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && (gpuInfo?.gridKind === "quadtree-tall-cell" || gpuInfo?.gridKind === "octree") ? 9 : 0,
       environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0,
       gpuInfo?.gridKind === "quadtree-tall-cell" ? (gpuInfo.quadtreeOpticalLayerMode === "adaptive-motion" ? 2 : 1) : 0
     ]);

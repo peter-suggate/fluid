@@ -33,6 +33,16 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.ok(interfaceBand && interfaceBand.kind === "number" && interfaceBand.tier === "fine" && interfaceBand.default === 4);
   assert.doesNotMatch(`${octreeSource}\n${uniformSolverSource}`, /airRefinementBandCells/);
   assert.match(uniformSolverSource, /interfaceRefinementBandCells: options\.octree\.interfaceRefinementBandCells \?\? 4/);
+  const surfaceDetail = octreeMethod.params.find((spec) => spec.key === "surfaceDetailStrength");
+  assert.ok(surfaceDetail && surfaceDetail.kind === "number" && surfaceDetail.default === 0);
+  for (const quality of ["balanced", "high", "ultra"] as const) {
+    assert.equal(octreeMethod.presetFor(quality).surfaceDetailStrength, 0, "dynamic refinement must be uniformly opt-in across quality presets");
+  }
+  const particleCorrection = octreeMethod.params.find((spec) => spec.key === "secondaryParticleSurfaceCorrection");
+  assert.ok(particleCorrection && particleCorrection.kind === "number" && particleCorrection.default === 0);
+  for (const quality of ["balanced", "high", "ultra"] as const) {
+    assert.equal(octreeMethod.presetFor(quality).secondaryParticleSurfaceCorrection, 0, "particle feedback must be uniformly opt-in across quality presets");
+  }
   const warmStart = octreeMethod.params.find((spec) => spec.key === "pressureWarmStart");
   assert.ok(warmStart && warmStart.kind === "select" && warmStart.tier === "fine" && warmStart.default === "on");
   // Options are copied field-by-field into the solver; a dropped key would
@@ -119,8 +129,11 @@ test("octree refinement is graded by resident signed distance rather than bulk V
   assert.match(octreeProjectionShader, /closestSurface = min\(closestSurface, abs\(samplePhi\)\)/);
   assert.match(octreeProjectionShader, /if \(minimumSolid >= 1\.0 - 1e-5\) \{ return false; \}/,
     "fully solid bulk leaves should be allowed to stay coarse");
-  assert.match(octreeProjectionShader, /return closestSurface < max\(0\.0, params\.solve\.w\) \* finestWidth;/,
-    "pure air and liquid leaves should use the explicit interface-band knob instead of size-scaled refinement");
+  assert.match(octreeProjectionShader, /let effectiveBand = baseBand \+ 8\.0 \* detailActivity/);
+  assert.match(octreeProjectionShader, /return closestSurface < effectiveBand \* finestWidth;/,
+    "pure air and liquid leaves should use the explicit band plus bounded local detail support");
+  assert.match(octreeProjectionShader, /params\.physical\.w \* clamp\(max\(strainActivity, 2\.0 \* maximumCurvatureProxy\)/);
+  assert.match(octreeProjectionShader, /params\.physical\.w > 0\.0/, "zero detail strength must skip activity sampling and preserve the baseline sizing path");
   assert.doesNotMatch(octreeProjectionShader, /closestSurface \* adaptivity < f32\(size\) \* finestWidth/);
   const refinement = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn leafNeedsRefinement"), octreeProjectionShader.indexOf("fn splitLeaf"));
   assert.doesNotMatch(refinement, /wet != liquidCell|a > 0\.001/);
@@ -263,4 +276,9 @@ test("octree materializes adaptive overlay fields without a readback", () => {
   assert.match(octreeDiagnosticShader, /textureStore\(divergenceOut/);
   assert.doesNotMatch(octreeDiagnosticShader, /mapAsync|getMappedRange/);
   assert.match(rendererSource, /gridKind === "quadtree-tall-cell" \|\| gpuInfo\?\.gridKind === "octree" \? 1 : 0/);
+});
+
+test("octree materializes its live owner map on the reset frame", () => {
+  assert.match(uniformSolverSource, /encodeInlineRebuild\(initialSparseScene\);\s*this\.octreeProjection\.encodeOverlayMaterialization\(initialSparseScene\);\s*this\.octreeProjection\.encodeSparseBrickWorld/);
+  assert.match(octreeSource, /reset-time grid[\s\S]{0,120}zero-initialized topology storage as finest 1\^3/);
 });

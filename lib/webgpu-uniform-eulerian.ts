@@ -27,22 +27,41 @@ import {
 } from "./webgpu-secondary-particles";
 
 export type UniformVelocityTransport = GPUVelocityTransport;
-export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** One-way escaped spray droplets. Initially enabled for octree. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
+export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Escaped spray droplets. Initially enabled for octree. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; /** Bounded near-interface particle-to-level-set correction; zero keeps spray strictly one-way. */ secondaryParticleSurfaceCorrection?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
 
-/** Readback-free CFL subdivision for the next quadtree frame. */
+/** Explicit capillary-wave stability bound for a finest cell. */
+export function capillaryStableDt_s(
+  density_kg_m3: number,
+  surfaceTension_N_m: number,
+  minimumCellSize_m: number,
+  safety = 0.5
+) {
+  const density = Number.isFinite(density_kg_m3) ? Math.max(1e-9, density_kg_m3) : 1e-9;
+  const sigma = Number.isFinite(surfaceTension_N_m) ? Math.max(0, surfaceTension_N_m) : 0;
+  const h = Number.isFinite(minimumCellSize_m) ? Math.max(1e-9, minimumCellSize_m) : 1e-9;
+  const boundedSafety = Number.isFinite(safety) ? Math.max(0.05, Math.min(1, safety)) : 0.5;
+  return sigma > 0 ? boundedSafety * Math.sqrt(density * h * h * h / (Math.PI * sigma)) : Number.POSITIVE_INFINITY;
+}
+
+/** Readback-free CFL and capillary subdivision for the next adaptive frame. */
 export function proactiveQuadtreeSubsteps(
   previousMaxSpeed_m_s: number,
   inflowSpeed_m_s: number,
   gravityMagnitude_m_s2: number,
   frameDt_s: number,
   minimumCellSize_m: number,
-  maximumSubsteps = 64
+  maximumSubsteps = 64,
+  density_kg_m3 = 1_000,
+  surfaceTension_N_m = 0
 ) {
   const safeDt = Math.max(0, Number.isFinite(frameDt_s) ? frameDt_s : 0);
   const safeCell = Math.max(1e-9, Number.isFinite(minimumCellSize_m) ? minimumCellSize_m : 0);
   const residentBound = Math.max(0, previousMaxSpeed_m_s, inflowSpeed_m_s);
   const velocityBound = residentBound + Math.max(0, gravityMagnitude_m_s2) * safeDt;
-  const required = Math.ceil(velocityBound * safeDt / safeCell);
+  const cflRequired = Math.ceil(velocityBound * safeDt / safeCell);
+  const capillaryDt = capillaryStableDt_s(density_kg_m3, surfaceTension_N_m, safeCell);
+  const capillaryRequired = Number.isFinite(capillaryDt) && capillaryDt > 0 ? Math.ceil(safeDt / capillaryDt) : 1;
+  const required = Math.max(cflRequired, capillaryRequired);
   return Math.max(1, Math.min(Math.max(1, Math.floor(maximumSubsteps)), required));
 }
 
@@ -245,6 +264,7 @@ export class WebGPUUniformEulerianSolver {
         maximumLeafSize: options.octree.maximumLeafSize ?? 8,
         adaptivity: options.octree.adaptivity ?? 1,
         interfaceRefinementBandCells: options.octree.interfaceRefinementBandCells ?? 4,
+        surfaceDetailStrength: options.octree.surfaceDetailStrength ?? 0,
         jacobiRelaxation: options.octree.jacobiRelaxation ?? 0.8,
         extrapolationSweeps: options.octree.extrapolationSweeps ?? 4,
         leafSolver: options.octree.leafSolver,
@@ -268,7 +288,7 @@ export class WebGPUUniformEulerianSolver {
           density_kg_m3: scene.fluid.density_kg_m3,
           surfaceTension_N_m: scene.fluid.surfaceTension_N_m,
           randomSeed: scene.randomSeed
-        }, this.secondaryParticleSamplingSource, options.secondaryParticleCapacity, options.deferPipelineCompilation);
+        }, this.secondaryParticleSamplingSource, options.secondaryParticleCapacity, options.deferPipelineCompilation, options.secondaryParticleSurfaceCorrection ?? 0);
         this.info.secondaryParticleCapacity = this.secondaryParticleSystem.renderSource.capacity;
         this.info.allocatedBytes += this.secondaryParticleSystem.allocatedBytes;
       }
@@ -316,7 +336,7 @@ export class WebGPUUniformEulerianSolver {
 
   private pipelineDescriptor(entryPoint:string,prep=false):GPUComputePipelineDescriptor{return{layout:prep?this.prepPipelineLayout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};}
   private createPipelinesSync(){const pipeline=(entryPoint:string,prep=false)=>this.device.createComputePipeline(this.pipelineDescriptor(entryPoint,prep));this.advectPipeline=pipeline(this.velocityTransport==="maccormack"?"advect":"semiLagrangianAdvection");this.reversePipeline=pipeline("reverseAdvection");this.correctPipeline=pipeline("correctAdvection");this.jacobiPipeline=pipeline("jacobi");this.projectPipeline=pipeline("project");this.rigidPipeline=pipeline("coupleRigid");this.relaxSolidPhiPipeline=pipeline("relaxSolidPhi");this.reductionPipeline=pipeline("reduceDiagnostics");this.buildOccupancyPipeline=pipeline("buildOccupancy");this.buildTransportPipeline=pipeline("buildTransport",true);this.buildFluxScalesPipeline=pipeline("buildFluxScales",true);this.sharpenComputePipeline=pipeline("sharpenCompute");this.sharpenScatterPipeline=pipeline("sharpenScatter");this.sharpenResolvePipeline=pipeline("sharpenResolve");}
-  static async createAsync(device:GPUDevice,scene:SceneDescription,quality:GPUQuality,onRigidLoads:((loads:GPURigidLoad[])=>void)|undefined,options:WebGPUUniformEulerianOptions,onProgress:(label:string,completed:number,total:number)=>void){const adaptive=!!(options.quadtreeTallCells||options.octree),secondary=!!options.octree&&options.secondaryParticles!==false,total=(options.quadtreeTallCells?41:options.octree?33:14)+(secondary?2:0);onProgress(adaptive?"Building adaptive pressure topology":"Allocating uniform solver resources",0,total);await new Promise<void>(resolve=>setTimeout(resolve,0));const solver=new WebGPUUniformEulerianSolver(device,scene,quality,onRigidLoads,{...options,deferPipelineCompilation:true});await solver.initializePipelines(onProgress);return solver;}
+  static async createAsync(device:GPUDevice,scene:SceneDescription,quality:GPUQuality,onRigidLoads:((loads:GPURigidLoad[])=>void)|undefined,options:WebGPUUniformEulerianOptions,onProgress:(label:string,completed:number,total:number)=>void){const adaptive=!!(options.quadtreeTallCells||options.octree),secondary=!!options.octree&&options.secondaryParticles!==false,secondaryPipelines=secondary?2+((options.secondaryParticleSurfaceCorrection??0)>0?3:0):0,total=(options.quadtreeTallCells?41:options.octree?33:14)+secondaryPipelines;onProgress(adaptive?"Building adaptive pressure topology":"Allocating uniform solver resources",0,total);await new Promise<void>(resolve=>setTimeout(resolve,0));const solver=new WebGPUUniformEulerianSolver(device,scene,quality,onRigidLoads,{...options,deferPipelineCompilation:true});await solver.initializePipelines(onProgress);return solver;}
   private async initializePipelines(onProgress:(label:string,completed:number,total:number)=>void){
     const definitions=[
       ["Advect velocity",this.velocityTransport==="maccormack"?"advect":"semiLagrangianAdvection",false],["Reverse advection","reverseAdvection",false],
@@ -326,7 +346,7 @@ export class WebGPUUniformEulerianSolver {
       ["Sharpen density","sharpenCompute",false],["Scatter sharpened mass","sharpenScatter",false],["Resolve sharpened mass","sharpenResolve",false]
     ] as const,compiled:GPUComputePipeline[]=[];
     const projectionPipelineCount=this.quadtreeProjection?27:this.octreeProjection?19:0;
-    const total=definitions.length+projectionPipelineCount+(this.secondaryParticleSystem?2:0);
+    const total=definitions.length+projectionPipelineCount+(this.secondaryParticleSystem?.pipelineCount??0);
     for(let index=0;index<definitions.length;index+=1){const [label,entryPoint,prep]=definitions[index];onProgress(label,index,total);compiled.push(await this.device.createComputePipelineAsync(this.pipelineDescriptor(entryPoint,prep)));onProgress(label,index+1,total);}
     this.advectPipeline=compiled[0];this.reversePipeline=compiled[1];this.correctPipeline=compiled[2];this.jacobiPipeline=compiled[3];this.projectPipeline=compiled[4];this.rigidPipeline=compiled[5];this.relaxSolidPhiPipeline=compiled[6];this.reductionPipeline=compiled[7];this.buildOccupancyPipeline=compiled[8];this.buildTransportPipeline=compiled[9];this.buildFluxScalesPipeline=compiled[10];this.sharpenComputePipeline=compiled[11];this.sharpenScatterPipeline=compiled[12];this.sharpenResolvePipeline=compiled[13];
     if(this.quadtreeProjection)await this.quadtreeProjection.initializePipelines((label,completed)=>onProgress(label,definitions.length+completed,total));
@@ -340,6 +360,7 @@ export class WebGPUUniformEulerianSolver {
     if (!this.octreeProjection) return;
     const initialSparseScene = this.device.createCommandEncoder({ label: "Publish initial sparse-brick scene" });
     this.octreeProjection.encodeInlineRebuild(initialSparseScene);
+    this.octreeProjection.encodeOverlayMaterialization(initialSparseScene);
     this.octreeProjection.encodeSparseBrickWorld(initialSparseScene);
     this.device.queue.submit([initialSparseScene.finish()]);
     this.octreeProjection.finishInlineRebuild();
@@ -655,7 +676,10 @@ export class WebGPUUniformEulerianSolver {
       inflowSpeed,
       Math.hypot(this.scene.fluid.gravity_m_s2.x, this.scene.fluid.gravity_m_s2.y, this.scene.fluid.gravity_m_s2.z),
       delta,
-      hMin
+      hMin,
+      64,
+      rho,
+      sigma
     ) : 1;
     const dt = delta / substeps; this.info.lastDt_s = dt; this.info.lastSubsteps = substeps;
     const activeBodies = bodies.slice(0, 12), bodyData = new Float32Array(12 * 24), shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;

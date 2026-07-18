@@ -110,6 +110,7 @@ export function VisualPanel() {
         </label>}
         {gridOverlayAxis !== "off" && <div className="segmented compact" role="group" aria-label="Slice field">
           <button className={gridOverlayMode === "structure" ? "active" : ""} onClick={() => setGridOverlayMode("structure")}>Structure</button>
+          {adaptive && <button className={gridOverlayMode === "resolution" ? "active" : ""} onClick={() => setGridOverlayMode("resolution")}>Cell scale</button>}
           {quadtreeTall && <button className={gridOverlayMode === "optical" ? "active" : ""} onClick={() => setGridOverlayMode("optical")}>Optical layer</button>}
           <button className={gridOverlayMode === "cfl" ? "active" : ""} onClick={() => setGridOverlayMode("cfl")}>CFL load</button>
           <button className={gridOverlayMode === "speed" ? "active" : ""} onClick={() => setGridOverlayMode("speed")}>Speed</button>
@@ -124,16 +125,24 @@ export function VisualPanel() {
     </section>
 
     {view === "scientific" && gridOverlayAxis !== "off" && <section className="panel-section grid-key" data-testid="grid-legend">
-      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {gridOverlayAxis.toUpperCase()} SLICE{gridOverlayMode !== "structure" ? ` · ${{ optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU" }[gridOverlayMode]}` : ""}</strong>
+      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {gridOverlayAxis.toUpperCase()} SLICE{gridOverlayMode !== "structure" ? ` · ${{ resolution: "PRESSURE CELL SCALE", optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU" }[gridOverlayMode]}` : ""}</strong>
       {gridOverlayMode === "structure" && <>
         {tall && <span><i className="sw sw-tall" />tall cell · liquid</span>}
         {tall && <span><i className="sw sw-tall-dry" />tall cell · air</span>}
         <span><i className="sw sw-solid" />rigid body · represented cell</span>
         <span><i className="sw sw-wet" />{tall ? "regular cell · liquid" : "cell · liquid"}</span>
-        <span><i className="sw sw-air" />{tall ? "regular cell · air" : "cell · air"}</span>
+        <span><i className="sw sw-air" />{octree ? "air cells · outline only" : tall ? "regular cell · air" : "cell · air"}</span>
         {gridKind === "restricted-tall-cell" && <span><i className="sw sw-outside" />above band · not stored</span>}
         {!adaptive && <span><i className="sw sw-dot" />stored samples (zoom in)</span>}
         {adaptive && <span>edges follow live adaptive pressure cells</span>}
+        {adaptive && <span><i className="sw" style={{ background: "#ff148c" }} />pink cells and boundaries · finest represented pressure cell · 1³</span>}
+        {adaptive && <span>all other boundaries retain the structural grid color</span>}
+      </>}
+      {gridOverlayMode === "resolution" && <>
+        <span><i className="sw" style={{ background: "#ff2994" }} />finest represented pressure cell · 1³</span>
+        <span><i className="sw" style={{ background: "#55a8ba" }} />intermediate dyadic cell</span>
+        <span><i className="sw" style={{ background: "#152e7a" }} />coarsest represented pressure cell · {(gpuInfo?.quadtreeMaximumFluidScale ?? "max")}³</span>
+        <span>surface-band cells appear as the finest pink region</span>
       </>}
       {gridOverlayMode === "optical" && <>
         <span><i className="sw" style={{ background: "#f4c33a" }} />retained cubic optical cells · liquid</span>

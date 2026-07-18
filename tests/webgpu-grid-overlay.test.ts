@@ -36,7 +36,27 @@ test("adaptive diagnostic modes expose coverage, level set, divergence, and pres
   assert.match(gridOverlayShader, /fieldMode == 8/);
   assert.match(gridOverlayShader, /bitcast<f32>\(textureLoad\(pressureSamples, cell, 0\)\.y\)/,
     "the octree projection-update alarm must consume the resident packed diagnostic");
-  assert.match(rendererSource, /gridOverlay\?\.mode === "projection" && gpuInfo\?\.gridKind === "octree" \? 8 : 0/);
+  assert.match(rendererSource, /gridOverlay\?\.mode === "projection" && gpuInfo\?\.gridKind === "octree" \? 8 : gridOverlay\?\.mode === "resolution"/);
+});
+
+test("adaptive cell-scale mode exposes the live finest surface band", () => {
+  assert.match(gridOverlayShader, /fieldMode == 9 && adaptiveGrid/);
+  assert.match(gridOverlayShader, /let representedSize = max\(horizontalSize, verticalSize\)/);
+  assert.match(gridOverlayShader, /let maximumRepresentedSize = max\(2\.0, u\.options\.w\)/);
+  assert.match(gridOverlayShader, /log2\(f32\(representedSize\)\) \/ log2\(maximumRepresentedSize\)/);
+  assert.match(gridOverlayShader, /let fineColor = vec3f\(1\.0, 0\.16, 0\.58\)/);
+  assert.match(gridOverlayShader, /fill = select\(mix\(middleColor, coarseColor/);
+  assert.match(rendererSource, /gridOverlay\?\.mode === "resolution" && \(gpuInfo\?\.gridKind === "quadtree-tall-cell" \|\| gpuInfo\?\.gridKind === "octree"\) \? 9 : 0/);
+  assert.match(rendererSource, /gpuInfo\?\.quadtreeMaximumFluidScale \?\? 1/);
+});
+
+test("default adaptive structure mode marks live finest-cell boundaries pink", () => {
+  assert.match(gridOverlayShader, /fieldMode == 0 && adaptiveGrid/);
+  assert.match(gridOverlayShader, /representedSize == 1/);
+  assert.match(gridOverlayShader, /let finestColor = vec3f\(1\.0, 0\.08, 0\.55\)/);
+  assert.match(gridOverlayShader, /fill = mix\(fill, finestColor, 0\.72\)/);
+  assert.match(gridOverlayShader, /alpha = max\(alpha, 0\.44\)/);
+  assert.match(gridOverlayShader, /gridLineColor = finestColor/);
 });
 
 test("optical-layer mode distinguishes retained cubes from the merged tall interior", () => {
@@ -47,7 +67,7 @@ test("optical-layer mode distinguishes retained cubes from the merged tall inter
   assert.match(gridOverlayShader, /belowIsTall = !isOpticalCube/);
   assert.match(gridOverlayShader, /color = mix\(color, opticalBoundaryColor, opticalBoundary\)/);
   assert.match(gridOverlayShader, /u\.environment\.w > 1\.5/, "adaptive and fixed boundaries remain visually distinguishable");
-  assert.match(rendererSource, /gridOverlay\?\.mode === "optical" \? 7 : gridOverlay\?\.mode === "projection" && gpuInfo\?\.gridKind === "octree" \? 8 : 0/);
+  assert.match(rendererSource, /gridOverlay\?\.mode === "optical" \? 7 : gridOverlay\?\.mode === "projection" && gpuInfo\?\.gridKind === "octree" \? 8 : gridOverlay\?\.mode === "resolution"/);
   assert.match(rendererSource, /quadtreeOpticalLayerMode === "adaptive-motion" \? 2 : 1/);
 });
 
@@ -61,6 +81,12 @@ test("grid overlay suppresses dense backing-grid lines inside adaptive cells", (
   assert.match(gridOverlayShader, /any\(adaptiveCellKey\(lowerSecond, dims\) != own\)/);
   assert.match(gridOverlayShader, /any\(adaptiveCellKey\(below, dims\) != own\)/);
   assert.match(gridOverlayShader, /let leafSize = i32\(\(key\.x >> 20u\) & 1023u\)/);
+});
+
+test("octree structure view keeps the refined air band outline-only", () => {
+  assert.match(gridOverlayShader, /let octreeGrid = u\.gridInfo\.w > 2\.5/);
+  assert.match(gridOverlayShader, /let dryAlpha = select\(select\(0\.08, 0\.03, isTall\), 0\.0, octreeGrid\)/);
+  assert.match(gridOverlayShader, /alpha = select\(dryAlpha, wetAlpha, wet\)/);
 });
 
 test("grid overlay preserves rigid-body occlusion independently of the water renderer", () => {
