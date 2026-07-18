@@ -1,4 +1,4 @@
-import { damBreakFractions } from "./initial-fluid";
+import { damBreakFractions, initialFluidBrickContainsCell, initialFluidBrickSignedDistance } from "./initial-fluid";
 import type { SceneDescription } from "./model";
 import { sceneHasTerrain, terrainHeightAt } from "./terrain";
 
@@ -138,6 +138,8 @@ function initialWet(scene: SceneDescription, x: number, y: number, z: number, nx
     const worldZ = -0.5 * c.depth_m + (z + 0.5) * c.depth_m / nz;
     if ((y + 0.5) * c.height_m / fineNy <= terrainHeightAt(scene.terrain, worldX, worldZ)) return false;
   }
+  const brickWet = initialFluidBrickContainsCell(scene, x, y, z, [nx, fineNy, nz]);
+  if (brickWet !== undefined) return brickWet;
   if (scene.fluid.initialCondition === "tank-fill") return (y + 0.5) / fineNy <= scene.container.fillFraction;
   const dam = damBreakFractions(scene.container.fillFraction);
   return (x + 0.5) / nx <= dam.width && (y + 0.5) / fineNy <= dam.height && (z + 0.5) / nz <= dam.depth;
@@ -154,8 +156,12 @@ function boxSignedDistance(point: { x: number; y: number; z: number }, center: {
 /** Analytic initial liquid signed distance in metres. Container walls are
  * solid contacts, not liquid-air interfaces, so a tank fill is the vertical
  * free-surface plane while a dam break uses the finite liquid block. */
-export function initialLiquidPhi(scene: SceneDescription, point: { x: number; y: number; z: number }) {
+export function initialLiquidPhi(scene: SceneDescription, point: { x: number; y: number; z: number }, dimensions?: readonly [number, number, number]) {
   const c = scene.container;
+  if (dimensions) {
+    const brickDistance = initialFluidBrickSignedDistance(scene, point, dimensions);
+    if (brickDistance !== undefined) return brickDistance;
+  }
   if (scene.fluid.initialCondition === "tank-fill") return point.y - c.height_m * c.fillFraction;
   const dam = damBreakFractions(c.fillFraction);
   const half = { x: 0.5 * dam.width * c.width_m, y: 0.5 * dam.height * c.height_m, z: 0.5 * dam.depth * c.depth_m };
@@ -180,7 +186,7 @@ function buildInitialPhi(scene: SceneDescription, nx: number, fineNy: number, nz
         x: -0.5 * c.width_m + (x + 0.5) * h.x,
         y: sampleY * h.y,
         z: -0.5 * c.depth_m + (z + 0.5) * h.z
-      }) : limit;
+      }, [nx, fineNy, nz]) : limit;
       phi[x + nx * (packedY + packedNy * z)] = Math.max(-limit, Math.min(limit, value));
     }
   }

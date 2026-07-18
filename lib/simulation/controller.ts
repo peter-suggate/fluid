@@ -400,6 +400,8 @@ class SimulationController {
       gpuSurfaceUpdate_ms: sane(gpu?.surfaceUpdate_ms, physicsFallback.gpuSurfaceUpdate_ms),
       gpuRigid_ms: sane(gpu?.rigidCoupling_ms, physicsFallback.gpuRigid_ms),
       gpuSpraySimulation_ms: sane(gpu?.spray_ms, physicsFallback.gpuSpraySimulation_ms),
+      gpuFluidResidency_ms: sane(gpu?.fluidResidency_ms, physicsFallback.gpuFluidResidency_ms),
+      gpuSparsePublication_ms: sane(gpu?.sparsePublication_ms, physicsFallback.gpuSparsePublication_ms),
       gpuDiagnostics_ms: sane(gpu?.diagnostics_ms, physicsFallback.gpuDiagnostics_ms),
       gpuOverhead_ms: sane(gpu?.overhead_ms, physicsFallback.gpuOverhead_ms),
       gpuRender_ms: sane(metrics.gpuRender_ms, renderFallback.gpuRender_ms),

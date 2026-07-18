@@ -41,6 +41,9 @@ export interface SparseVoxelRenderSource {
   voxelCapacity: number;
   brickCapacity: number;
   materialCount: number;
+  /** Optional evolving-fluid residency header (16 u32 words). */
+  fluidBrickStats?: GPUBufferBinding;
+  fluidBrickCapacity?: number;
   /** Allows the caller to expose buffer replacement without implementation coupling. */
   revision: number;
 }
@@ -85,6 +88,12 @@ export interface SparseVoxelDebugEncodeOptions {
   /** Column-major world-to-clip matrix. */
   viewProjection: Float32Array | readonly number[];
   cameraPosition: readonly [number, number, number];
+  /** Interior tank bounds used to collapse glass boundary voxels into panes. */
+  containerBounds: {
+    min: readonly [number, number, number];
+    max: readonly [number, number, number];
+  };
+  containerClosedTop: boolean;
   /** World-space direction from the surface toward the key light. */
   lightDirection?: readonly [number, number, number];
   exposure?: number;
@@ -166,6 +175,8 @@ struct ViewUniforms {
   lightDirection: vec4f,
   // x: mode (1 raw, 2 grid), y: grid opacity, z: exposure, w: material count
   style: vec4f,
+  tankMin: vec4f,
+  tankMax: vec4f,
 }
 struct SpatialRecord {
   origin: vec4f,
@@ -182,6 +193,7 @@ struct VertexOutput {
   @location(1) worldNormal: vec3f,
   @location(2) @interpolate(flat) materialId: u32,
   @location(3) @interpolate(flat) level: u32,
+  @location(4) @interpolate(flat) flags: u32,
 }
 
 @group(0) @binding(0) var<uniform> view: ViewUniforms;
@@ -230,6 +242,7 @@ fn rawVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) i
   output.worldNormal = triangleNormal(vertexIndex);
   output.materialId = record.materialAndFlags.x;
   output.level = record.materialAndFlags.z;
+  output.flags = record.materialAndFlags.y;
   return output;
 }
 
@@ -243,7 +256,51 @@ fn gridVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) 
   output.worldNormal = vec3f(0.0, 1.0, 0.0);
   output.materialId = record.materialAndFlags.x;
   output.level = record.materialAndFlags.z;
+  output.flags = record.materialAndFlags.y;
   return output;
+}
+
+fn paneCorner(index: u32) -> vec2f {
+  let corners = array<vec2f, 6>(
+    vec2f(0,0), vec2f(1,0), vec2f(1,1),
+    vec2f(0,0), vec2f(1,1), vec2f(0,1)
+  );
+  return corners[index];
+}
+
+@vertex
+fn glassPaneVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) paneIndex: u32) -> VertexOutput {
+  let uv = paneCorner(vertexIndex);
+  let mn = view.tankMin.xyz;
+  let mx = view.tankMax.xyz;
+  var world = vec3f(0.0);
+  var normal = vec3f(0.0);
+  switch paneIndex {
+    case 0u: { world = vec3f(mn.x, mix(mn.y, mx.y, uv.y), mix(mn.z, mx.z, uv.x)); normal = vec3f(-1,0,0); }
+    case 1u: { world = vec3f(mx.x, mix(mn.y, mx.y, uv.y), mix(mn.z, mx.z, uv.x)); normal = vec3f(1,0,0); }
+    case 2u: { world = vec3f(mix(mn.x, mx.x, uv.x), mn.y, mix(mn.z, mx.z, uv.y)); normal = vec3f(0,-1,0); }
+    case 3u: { world = vec3f(mix(mn.x, mx.x, uv.x), mix(mn.y, mx.y, uv.y), mn.z); normal = vec3f(0,0,-1); }
+    case 4u: { world = vec3f(mix(mn.x, mx.x, uv.x), mix(mn.y, mx.y, uv.y), mx.z); normal = vec3f(0,0,1); }
+    default: { world = vec3f(mix(mn.x, mx.x, uv.x), mx.y, mix(mn.z, mx.z, uv.y)); normal = vec3f(0,1,0); }
+  }
+  var output: VertexOutput;
+  output.position = view.viewProjection * vec4f(world, 1.0);
+  output.worldPosition = world;
+  output.worldNormal = normal;
+  output.materialId = 1u;
+  output.level = 0u;
+  output.flags = 0u;
+  return output;
+}
+
+fn shadeMaterial(material: Material, normal: vec3f, worldPosition: vec3f) -> vec4f {
+  let l = normalize(view.lightDirection.xyz);
+  let v = normalize(view.cameraPosition.xyz - worldPosition);
+  let roughness = clamp(material.emissiveRoughness.w, 0.04, 1.0);
+  let closure = unifiedMaterial(material.baseColor.rgb, roughness, material.emissiveRoughness.rgb, 0.24, vec3f(0.04), (1.0 - roughness) * 0.22, vec3f(0.0), 0.0);
+  let lighting = unifiedLightingInput(normal, v, l, vec3f(1.0));
+  let linearColor = shadeUnifiedSurface(closure, lighting);
+  return vec4f(linearColor * view.style.z, material.baseColor.a);
 }
 
 @fragment
@@ -254,20 +311,26 @@ fn rawFragment(input: VertexOutput) -> @location(0) vec4f {
   // instead of merely returning alpha zero so their fragments do not write
   // depth and conceal desks, chairs, fixtures, or other interior props.
   if (material.baseColor.a <= 0.001) { discard; }
-  let n = normalize(input.worldNormal);
-  let l = normalize(view.lightDirection.xyz);
-  let v = normalize(view.cameraPosition.xyz - input.worldPosition);
-  let roughness = clamp(material.emissiveRoughness.w, 0.04, 1.0);
-  let closure = unifiedMaterial(material.baseColor.rgb, roughness, material.emissiveRoughness.rgb, 0.24, vec3f(0.04), (1.0 - roughness) * 0.22, vec3f(0.0), 0.0);
-  let lighting = unifiedLightingInput(n, v, l, vec3f(1.0));
-  // Material baseColor remains linear all the way to the render target. An
-  // sRGB target performs the sole display transfer; no shader gamma is added.
-  let linearColor = shadeUnifiedSurface(closure, lighting);
-  return vec4f(linearColor * view.style.z, material.baseColor.a);
+  // Tank glass is rendered in a separate, camera-sorted pass. Leaving it in
+  // the parallel compacted draw makes alpha/depth results depend on atomic
+  // instance order, which changes between frames and looks like z-fighting.
+  if (input.materialId == 1u) { discard; }
+  return shadeMaterial(material, normalize(input.worldNormal), input.worldPosition);
+}
+
+@fragment
+fn glassPaneFragment(input: VertexOutput) -> @location(0) vec4f {
+  let materialCount = max(1u, u32(view.style.w));
+  let material = materials[min(1u, materialCount - 1u)];
+  let towardCamera = normalize(view.cameraPosition.xyz - input.worldPosition);
+  let normal = select(-input.worldNormal, input.worldNormal, dot(input.worldNormal, towardCamera) >= 0.0);
+  return shadeMaterial(material, normal, input.worldPosition);
 }
 
 @fragment
 fn gridFragment(input: VertexOutput) -> @location(0) vec4f {
+  if ((input.flags & 2u) != 0u) { return vec4f(vec3f(0.08, 0.55, 1.0) * view.style.z, view.style.y); }
+  if ((input.flags & 4u) != 0u) { return vec4f(vec3f(0.58, 0.24, 0.95) * view.style.z, view.style.y * 0.72); }
   // Alternating level tint makes parent/child brick boundaries legible even
   // when many bounds project onto the same pixels.
   let even = (input.level & 1u) == 0u;
@@ -291,6 +354,7 @@ export class SparseVoxelDebugRenderer {
   private compactVoxelPipeline?: GPUComputePipeline;
   private compactBrickPipeline?: GPUComputePipeline;
   private rawPipeline?: GPURenderPipeline;
+  private glassPanePipeline?: GPURenderPipeline;
   private gridPipeline?: GPURenderPipeline;
   private uniformBuffer?: GPUBuffer;
   private compactSettingsBuffer?: GPUBuffer;
@@ -342,7 +406,7 @@ export class SparseVoxelDebugRenderer {
       compute("Compact visible sparse voxels", "compactVoxels"),
       compute("Compact visible sparse bricks", "compactBricks")
     ]);
-    [this.rawPipeline, this.gridPipeline] = await Promise.all([
+    [this.rawPipeline, this.glassPanePipeline, this.gridPipeline] = await Promise.all([
       this.device.createRenderPipelineAsync({
         label: "Raw sparse voxel cubes", layout: renderLayout,
         vertex: { module: renderModule, entryPoint: "rawVertex" },
@@ -351,6 +415,17 @@ export class SparseVoxelDebugRenderer {
           blend: { color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } }
         }] },
         primitive: { topology: "triangle-list", cullMode: "back" }, depthStencil,
+        multisample: { count: this.options.sampleCount }
+      }),
+      this.device.createRenderPipelineAsync({
+        label: "Camera-sorted tank glass panes", layout: renderLayout,
+        vertex: { module: renderModule, entryPoint: "glassPaneVertex" },
+        fragment: { module: renderModule, entryPoint: "glassPaneFragment", targets: [{
+          format: this.options.colorFormat,
+          blend: { color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } }
+        }] },
+        primitive: { topology: "triangle-list", cullMode: "none" },
+        depthStencil: { ...depthStencil, depthWriteEnabled: false },
         multisample: { count: this.options.sampleCount }
       }),
       this.device.createRenderPipelineAsync({
@@ -364,7 +439,7 @@ export class SparseVoxelDebugRenderer {
         multisample: { count: this.options.sampleCount }
       })
     ]);
-    this.uniformBuffer = this.device.createBuffer({ label: "Sparse voxel debug view", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.uniformBuffer = this.device.createBuffer({ label: "Sparse voxel debug view", size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.compactSettingsBuffer = this.device.createBuffer({ label: "Sparse voxel debug compaction settings", size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.indirectBuffer = this.device.createBuffer({ label: "Sparse voxel debug indirect draw", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     this.initialized = true;
@@ -421,11 +496,13 @@ export class SparseVoxelDebugRenderer {
     const plan = voxelDebugPlan(options.mode, this.source);
     if (!plan.enabled || !this.computeBindGroup || !this.renderBindGroup || !this.uniformBuffer || !this.indirectBuffer) return false;
     const light = normalizeDirection(options.lightDirection ?? [0.35, 0.84, 0.41]);
-    const uniforms = new Float32Array(28);
+    const uniforms = new Float32Array(36);
     uniforms.set(options.viewProjection, 0);
     uniforms.set([...options.cameraPosition, 1], 16);
     uniforms.set([...light, 0], 20);
     uniforms.set([options.mode === "raw-voxels" ? 1 : 2, options.gridOpacity ?? 0.82, options.exposure ?? 1, this.source.materialCount], 24);
+    uniforms.set([...options.containerBounds.min, 0], 28);
+    uniforms.set([...options.containerBounds.max, options.containerClosedTop ? 1 : 0], 32);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     this.device.queue.writeBuffer(this.compactSettingsBuffer!, 0, new Uint32Array([plan.capacity, 0, 0, 0]));
 
@@ -451,6 +528,26 @@ export class SparseVoxelDebugRenderer {
     pass.setPipeline(voxelMode ? this.rawPipeline! : this.gridPipeline!);
     pass.setBindGroup(0, this.renderBindGroup);
     pass.drawIndirect(this.indirectBuffer, 0);
+    if (voxelMode && this.glassPanePipeline) {
+      const [minX, minY, minZ] = options.containerBounds.min;
+      const [maxX, maxY, maxZ] = options.containerBounds.max;
+      const centers: Array<readonly [number, number, number, number]> = [
+        [minX, (minY + maxY) / 2, (minZ + maxZ) / 2, 0],
+        [maxX, (minY + maxY) / 2, (minZ + maxZ) / 2, 1],
+        [(minX + maxX) / 2, minY, (minZ + maxZ) / 2, 2],
+        [(minX + maxX) / 2, (minY + maxY) / 2, minZ, 3],
+        [(minX + maxX) / 2, (minY + maxY) / 2, maxZ, 4]
+      ];
+      if (options.containerClosedTop) centers.push([(minX + maxX) / 2, maxY, (minZ + maxZ) / 2, 5]);
+      const [cameraX, cameraY, cameraZ] = options.cameraPosition;
+      centers.sort((a, b) => {
+        const distanceSquared = (center: readonly [number, number, number, number]) =>
+          (center[0] - cameraX) ** 2 + (center[1] - cameraY) ** 2 + (center[2] - cameraZ) ** 2;
+        return distanceSquared(b) - distanceSquared(a);
+      });
+      pass.setPipeline(this.glassPanePipeline);
+      for (const center of centers) pass.draw(6, 1, 0, center[3]);
+    }
     pass.end();
     return true;
   }

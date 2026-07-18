@@ -20,9 +20,10 @@ test("negative world coordinates shift one unified lattice while keeping Morton 
   }]);
 
   assert.deepEqual(domain.cellSize_m, [1, 1, 1]);
-  assert.deepEqual(domain.worldOrigin_m, { x: -13, y: -3, z: -10 });
-  assert.deepEqual(domain.solverGridOriginCells, [9, 3, 6]);
-  assert.deepEqual(domain.sceneDimensionsCells, [17, 11, 14]);
+  assert.deepEqual(domain.worldOrigin_m, { x: -16, y: -4, z: -12 });
+  assert.deepEqual(domain.solverGridOriginCells, [12, 4, 8]);
+  assert.deepEqual(domain.sceneDimensionsCells, [20, 12, 16]);
+  assert.ok(domain.solverGridOriginCells.every((value) => value % 4 === 0), "shared scene and solver bricks must have one aligned origin");
   assert.ok(domain.coordinates.every(({ x, y, z }) => x >= 0 && y >= 0 && z >= 0));
   assert.doesNotThrow(() => domain.coordinates.map(({ x, y, z }) => mortonEncode3D(x, y, z)));
   assert.equal(planSparseBrickOctree(domain.coordinates, { brickSize: 4 }).leaves.length, domain.coordinates.length);
@@ -72,7 +73,8 @@ test("conservative padding expands proxy candidates on the solver lattice", () =
 
   assert.equal(exact.proxyBrickCoordinates[0].length, 1);
   assert.ok(padded.proxyBrickCoordinates[0].length > exact.proxyBrickCoordinates[0].length);
-  assert.ok(padded.worldBounds_m.max.x >= exact.worldBounds_m.max.x + 1);
+  assert.ok(padded.worldBounds_m.max.x >= exact.worldBounds_m.max.x,
+    "brick alignment may absorb the padding without growing the already-conservative world bound");
 });
 
 test("surface-shell coverage omits fully interior bricks but remains conservative at brick boundaries", () => {

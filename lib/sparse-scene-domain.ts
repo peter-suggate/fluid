@@ -187,6 +187,13 @@ export function planSparseSceneDomain(
       latticeMaximum[axis] = Math.max(latticeMaximum[axis], range.maxExclusive[axis]);
     }
   }
+  // A single brick address must mean the same cell extent to the scene and
+  // the fluid page table. Align the shared origin so solver-local 8^3 bricks
+  // never straddle two scene leaves when distant proxies extend the domain.
+  for (let axis = 0; axis < 3; axis += 1) {
+    latticeMinimum[axis] = Math.floor(latticeMinimum[axis] / brickSize) * brickSize;
+    latticeMaximum[axis] = Math.ceil(latticeMaximum[axis] / brickSize) * brickSize;
+  }
   const solverGridOriginCells = latticeMinimum.map((value) => -value) as MutableTriple;
   const sceneDimensionsCells = latticeMaximum.map((value, axis) => value - latticeMinimum[axis]) as MutableTriple;
   const brickDimensions = sceneDimensionsCells.map((value) => Math.ceil(value / brickSize)) as MutableTriple;

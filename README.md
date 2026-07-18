@@ -25,9 +25,10 @@ Fresnel reflection, and Beer–Lambert absorption. It renders at native canvas
 resolution; traversal skipping and cached interface work keep the
 raymarch within its GPU budget without reducing surface fidelity.
 The live performance sidebar separates hardware-timestamped GPU advection,
-pressure, projection, immersed-body coupling, reductions, queue/copy overhead,
-and raymarch rendering from wall-clock CPU simulation, upload, encoding, and
-orchestration costs, with a shared 60 Hz budget and recent-frame history.
+pressure, projection, immersed-body coupling, sparse-fluid residency and scene
+publication, reductions, queue/copy overhead, and raymarch rendering from
+wall-clock CPU simulation, upload, encoding, and orchestration costs, with a
+shared 60 Hz budget and recent-frame history.
 The tall-cell, adaptive, and uniform GPU paths use the same donor/receiver
 limited conservative VOF face flux. Tall columns integrate the shared deep
 face with bounded stratified quadrature and expand only the `D`-bounded

@@ -28,20 +28,35 @@ state; neither representation is reconstructed from the other after motion.
 
 ## Runtime path
 
-1. `WebGPUOctreeProjection` remains the fluid authority and rebuilds its
-   pressure octree on the GPU.
-2. `OctreeSparseBrickWorld` publishes the final substep into 8³ bricks. Its
+1. `WebGPUOctreeProjection` remains the fluid authority and cold-starts its
+   pressure octree over the complete domain on the GPU.
+2. `GPUFluidBrickResidency` classifies every 8³ solver brick from the resident
+   level set. Disconnected bodies produce independent core bricks; a signed-
+   distance halo keeps interpolation and pressure stencils valid. Activation,
+   hysteretic retirement, and indirect worklists remain GPU-owned.
+3. Subsequent pressure topology and solid rebuilds consume that same active
+   core/halo worklist. The scene page table maps every logical solver brick to
+   its finest sparse-tree leaf, so pressure scheduling and scene publication
+   share one evolving residency decision without a CPU readback.
+4. `OctreeSparseBrickWorld` publishes the final substep into 8³ bricks. Its
    topology, signed distances, solid fraction, velocity, liquid fraction,
-   material ID, and owner ID remain GPU-resident.
-3. The smooth viewport presents opaque rigid bodies and terrain in the dry
+   material ID, and owner ID remain GPU-resident. Only core/halo payloads are
+   refreshed; retired payloads are cleared while static environment material
+   is preserved.
+5. The smooth viewport presents opaque rigid bodies and terrain in the dry
    scene. Water and smooth glass contribute optical interfaces. A shared
    lighting/material contract shades opaque surfaces, and the optical composite
    resolves reflection, refraction, absorption, and interface ordering.
-4. Raw-voxel and brick-grid views compact the same sparse publication on the
+6. Raw-voxel and brick-grid views compact the same sparse publication on the
    GPU and issue indirect draws. Raw mode shows active payload cells in every
    terminal leaf; grid mode shows terminal leaf-brick bounds. Internal branch
    nodes are topology, not draw instances. Neither mode reads topology or
    counts back to the CPU.
+
+Raw-voxel inspection shows liquid payload, not allocation: empty halo cells are
+not painted as water. Brick-grid inspection exposes allocation state instead;
+core fluid bricks are blue and stencil-halo bricks are purple. A source brick
+therefore visibly changes from core to halo/vacant as its liquid migrates.
 
 Room-shell voxels remain modelled and contribute leaf topology, but raw mode
 discards their fragments so an enclosing front wall cannot conceal desks,
@@ -114,6 +129,10 @@ voxelized.
   fluid regression, reads back sparse records for QA, checks colors and finite
   bounds, and separately submits raw-voxel and brick-grid draws on the real
   adapter. Readback exists only in the smoke harness.
+- `WEBGPU_NODE_MODULE=... npm run test:webgpu:garden-brick-migration` starts the
+  garden dam break with exactly one core fluid brick, verifies that multiple
+  neighboring core bricks activate, and checks that the original brick has no
+  liquid payload after the release.
 - The production smooth smoke exercises the hybrid renderer: raster dry scene,
   octree-derived water, raster glass interfaces, and optical composition. It
   must not use voxel cubes as the smooth presentation for glass, rigid bodies,

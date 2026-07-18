@@ -723,7 +723,7 @@ export class FluidLabRenderer {
     this.gridOverlayPipeline?.setVolume(texture, columnBases, gridCells, velocity, pressureSamples, divergence, pressure);
   }
 
-  private solverKey(scene:SceneDescription,config:SimulationRunConfig){return`${config.methodId}:${config.quality}:${JSON.stringify(config.values)}:${scene.environment??"default"}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow??null)}`;}
+  private solverKey(scene:SceneDescription,config:SimulationRunConfig){return`${config.methodId}:${config.quality}:${JSON.stringify(config.values)}:${scene.environment??"default"}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialBrickSeeds_m??null)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow??null)}`;}
 
   private resetGPUQueueTracking() {
     this.gpuPendingBatches = 0;
@@ -978,6 +978,11 @@ export class FluidLabRenderer {
         colorLoadOp: "clear",
         viewProjection: voxelViewProjectionMatrix(camera, this.presentationTexture.width / Math.max(1, this.presentationTexture.height), 0.01, camera.distance_m + sceneExtent * 3),
         cameraPosition: [position.x, position.y, position.z],
+        containerBounds: {
+          min: [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2],
+          max: [scene.container.width_m / 2, scene.container.height_m, scene.container.depth_m / 2]
+        },
+        containerClosedTop: scene.container.top === "closed",
         exposure: 1,
         gridOpacity: 0.88
       });

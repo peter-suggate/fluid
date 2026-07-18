@@ -1,4 +1,4 @@
-import { damBreakFractions } from "./initial-fluid";
+import { damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "./rigid-body";
 import {
   decodeGPURigidLoad,
@@ -370,9 +370,10 @@ export class WebGPUUniformEulerianSolver {
     let initialSum = 0;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const aboveGround = (j + 0.5) * cellHeight > terrainHeights[i + nx * k];
-      const fill = aboveGround && (this.scene.fluid.initialCondition === "dam-break"
+      const brickWet = initialFluidBrickContainsCell(this.scene, i, j, k, [nx, ny, nz]);
+      const fill = aboveGround && (brickWet ?? (this.scene.fluid.initialCondition === "dam-break"
         ? (i + .5) / nx <= dam.width && (j + .5) / ny <= dam.height && (k + .5) / nz <= dam.depth
-        : (j + .5) / ny <= c.fillFraction);
+        : (j + .5) / ny <= c.fillFraction));
       data[i + nx * (j + ny * k)] = fill ? 1 : 0; if (fill) initialSum += 1;
     }
     const terrainCells = new Float32Array(nx * nz);
@@ -476,6 +477,7 @@ export class WebGPUUniformEulerianSolver {
       activeSampleCount: octree.liquidDofCount,
       allocatedBytes: this.baseAllocatedBytes + octree.allocatedBytes + (this.secondaryParticleSystem?.allocatedBytes ?? 0),
       secondaryParticleCapacity: this.secondaryParticleSystem?.renderSource.capacity,
+      fluidBrickCapacity: projection.fluidBrickCapacity,
       quadtreeLeafCount: octree.leafCount,
       quadtreePressureSampleCount: octree.pressureSampleCount,
       quadtreeLiquidDofCount: octree.liquidDofCount,
@@ -792,7 +794,15 @@ export class WebGPUUniformEulerianSolver {
     // Publish the final substep's resident fields into the shared sparse-brick
     // world. The topology and payload stay GPU-resident; rendering consumes
     // compact debug records and subsequent voxel kernels consume the same ABI.
-    this.octreeProjection?.encodeSparseBrickWorld(encoder);
+    if (this.octreeProjection) {
+      const timestampWrites = (timing: { start: number; end: number } | undefined) => timing && this.querySet ? {
+        querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end
+      } : undefined;
+      this.octreeProjection.encodeSparseBrickWorld(encoder, {
+        residency: timestampWrites(this.timing("fluidResidency_ms")),
+        publication: timestampWrites(this.timing("sparsePublication_ms"))
+      });
+    }
     encoder.clearBuffer(this.reductionBuffer); { const timing = this.timing("diagnostics_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(pass, this.reductionPipeline, this.reductionGroup); pass.end(); }
     if (totalTiming && this.querySet) { const pass = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: totalTiming.end } }); pass.end(); }
     if (this.querySet && this.queryResolve && this.queryCount > 0) encoder.resolveQuerySet(this.querySet, 0, this.queryCount, this.queryResolve, 0);
@@ -880,7 +890,10 @@ export class WebGPUUniformEulerianSolver {
     this.device.queue.submit([encoder.finish()]);
     const mapPromise = buffer.mapAsync(GPUMapMode.READ);
     try {
-      const [, , surfaceDiagnostics] = await Promise.all([mapPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise]);
+      const [, , surfaceDiagnostics, fluidBrickStats] = await Promise.all([
+        mapPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise, this.octreeProjection?.readFluidBrickResidencyStats(),
+      ]);
+    if(fluidBrickStats){this.info.fluidBrickCapacity=fluidBrickStats.capacity;this.info.fluidBrickResidentCount=fluidBrickStats.resident;this.info.fluidBrickCoreCount=fluidBrickStats.core;this.info.fluidBrickHaloCount=fluidBrickStats.halo;this.info.fluidBrickActivatedCount=fluidBrickStats.activated;this.info.fluidBrickRetiredCount=fluidBrickStats.retired;this.info.fluidBrickGeneration=fluidBrickStats.generation;}
     if (this.quadtreeProjection) this.info.quadtreeVelocityClampCount = this.quadtreeProjection.info.velocityClampCount ?? 0;
     const words = new Uint32Array(buffer.getMappedRange(0, 16)), initial = Math.max(1, this.info.initialVolumeCellSum ?? 1);
     const conservativeVolumeCells=words[3]/2048;this.info.rawVolumeDrift=this.transportConservativeVolume?(conservativeVolumeCells-initial)/initial:undefined;
@@ -908,7 +921,7 @@ export class WebGPUUniformEulerianSolver {
     }
     if (queryBytes > 0) {
       const times = new BigUint64Array(buffer.getMappedRange(16, queryBytes));
-      const stageByField: Partial<Record<GPUPhysicsTimingField, GPUPhysicsStageId>> = { preparation_ms: "preparation", layerConstruction_ms: "topology", advection_ms: "advection", conditioning_ms: "conditioning", remeshing_ms: "remeshing", pressure_ms: "pressure", projection_ms: "projection", extrapolation_ms: "extrapolation", materialization_ms: "materialization", surfaceUpdate_ms: "surfaceUpdate", rigidCoupling_ms: "rigidCoupling", spray_ms: "spray", diagnostics_ms: "diagnostics" };
+      const stageByField: Partial<Record<GPUPhysicsTimingField, GPUPhysicsStageId>> = { preparation_ms: "preparation", layerConstruction_ms: "topology", advection_ms: "advection", conditioning_ms: "conditioning", remeshing_ms: "remeshing", pressure_ms: "pressure", projection_ms: "projection", extrapolation_ms: "extrapolation", materialization_ms: "materialization", surfaceUpdate_ms: "surfaceUpdate", rigidCoupling_ms: "rigidCoupling", spray_ms: "spray", fluidResidency_ms: "fluidResidency", sparsePublication_ms: "sparsePublication", diagnostics_ms: "diagnostics" };
       const activeStages = [...new Set(querySegments.map((segment) => stageByField[segment.name]).filter((stage): stage is GPUPhysicsStageId => Boolean(stage)))];
       const timings = emptyGPUPhysicsTimings(activeStages);
       for (const segment of querySegments) timings[segment.name] += Math.max(0, Number(times[segment.end] - times[segment.start])) / 1e6;

@@ -58,6 +58,12 @@ export interface SceneDescription {
     surfaceTension_N_m: number;
     gravity_m_s2: Vec3;
     initialCondition: "dam-break" | "tank-fill";
+    /**
+     * Optional world-space seeds for exact solver bricks. Each seed fills the
+     * one brick containing it; multiple seeds create disconnected initial
+     * bodies without allocating the space between them.
+     */
+    initialBrickSeeds_m?: Vec3[];
     inflow?: FluidInflow;
   };
   nominalResolution: {
@@ -153,6 +159,15 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!scene.fluid || scene.fluid.dynamicViscosity_Pa_s < 0) errors.push("Dynamic viscosity cannot be negative");
   if (!scene.fluid || scene.fluid.surfaceTension_N_m < 0) errors.push("Surface tension cannot be negative");
   if (!scene.fluid || !["dam-break", "tank-fill"].includes(scene.fluid.initialCondition)) errors.push("Unsupported fluid initial condition");
+  if (scene.fluid?.initialBrickSeeds_m) {
+    if (!Array.isArray(scene.fluid.initialBrickSeeds_m) || scene.fluid.initialBrickSeeds_m.length === 0) errors.push("Initial fluid brick seeds must be a non-empty array");
+    else for (const [index, seed] of scene.fluid.initialBrickSeeds_m.entries()) {
+      if (![seed?.x, seed?.y, seed?.z].every(Number.isFinite)) errors.push(`Initial fluid brick seed ${index} must be finite`);
+      else if (seed.x < -c.width_m / 2 || seed.x >= c.width_m / 2 || seed.y < 0 || seed.y >= c.height_m || seed.z < -c.depth_m / 2 || seed.z >= c.depth_m / 2) {
+        errors.push(`Initial fluid brick seed ${index} must be inside the solver bounds`);
+      }
+    }
+  }
   const inflow = scene.fluid?.inflow;
   if (inflow) {
     const speed = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z);

@@ -312,6 +312,13 @@ export interface SparseBrickDenseFieldSource {
   solidMaterialId: number;
   containerMaterialId?: number;
   containerClosedTop?: boolean;
+  /**
+   * Optional GPU fluid-brick worklist. Header words 0..15 are followed by
+   * active `(solverBrick, leafIndex)` pairs and retired pairs. When present,
+   * dense publication dispatches only resident brick payloads and separately
+   * clears payloads for bricks that have just retired.
+   */
+  activeBrickWorklist?: GPUBuffer;
 }
 
 export interface SparseBrickOctreeGPUOptions {
@@ -400,6 +407,10 @@ struct Params { dims: vec4u, origin: vec4i, cell: vec4f, materials: vec4u }
 @group(0) @binding(4) var<storage, read> solidCells: array<SolidCell>;
 @group(0) @binding(5) var<uniform> params: Params;
 @group(0) @binding(6) var<storage, read_write> payload: array<u32>;
+@group(0) @binding(7) var<storage, read> brickWorklist: array<u32>;
+
+const ACTIVE_WORKLIST_BIT: u32 = 0x80000000u;
+const WORKLIST_HEADER_WORDS: u32 = 16u;
 
 fn keyBit(low: u32, high: u32, bit: u32) -> u32 {
   if (bit >= 32u) { return (high >> (bit - 32u)) & 1u; }
@@ -418,14 +429,26 @@ fn decodeMorton(low: u32, high: u32, level: u32) -> vec3u {
 fn linearIndex(gid: vec3u, groups: vec3u) -> u32 {
   return gid.x + gid.y * groups.x * 256u + gid.z * groups.x * groups.y * 256u;
 }
+fn usesActiveWorklist() -> bool { return (params.dims.w & ACTIVE_WORKLIST_BIT) != 0u; }
+fn finestLevel() -> u32 { return params.dims.w & ~ACTIVE_WORKLIST_BIT; }
+fn solverBrickCapacity(brickSize: u32) -> u32 {
+  let bricks = (params.dims.xyz + vec3u(brickSize - 1u)) / vec3u(brickSize);
+  return bricks.x * bricks.y * bricks.z;
+}
 @compute @workgroup_size(256)
 fn materializeDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u) {
   let index = linearIndex(gid, groups);
   let brickSize = control[11];
   let voxelsPerBrick = brickSize * brickSize * brickSize;
-  let leafIndex = index / voxelsPerBrick;
+  let streamBrick = index / voxelsPerBrick;
+  if (usesActiveWorklist() && streamBrick >= brickWorklist[0]) { return; }
+  var leafIndex = streamBrick;
+  if (usesActiveWorklist()) { leafIndex = brickWorklist[WORKLIST_HEADER_WORDS + streamBrick * 2u + 1u]; }
   if (leafIndex >= control[1]) { return; }
-  let localIndex = index - leafIndex * voxelsPerBrick;
+  // In active mode index addresses the compact work stream, not the sparse
+  // tree's leaf order. Keep voxel-local addressing tied to the stream slot;
+  // only payload lookup uses the mapped leaf index.
+  let localIndex = index - streamBrick * voxelsPerBrick;
   let local = vec3u(localIndex % brickSize, (localIndex / brickSize) % brickSize, localIndex / (brickSize * brickSize));
   let leafBase = control[16] + leafIndex * 4u;
   let nodeIndex = topology[leafBase];
@@ -433,7 +456,8 @@ fn materializeDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(nu
   let level = topology[nodeIndex * 8u + 2u];
   let brick = decodeMorton(topology[leafBase + 2u], topology[leafBase + 3u], level);
   var scale = 1u;
-  if (params.dims.w != 0xffffffffu && params.dims.w > level) { scale = 1u << (params.dims.w - level); }
+  let finest = finestLevel();
+  if (finest != 0x7fffffffu && finest > level) { scale = 1u << (finest - level); }
   let worldCell = vec3i((brick * brickSize + local) * scale);
   let q = worldCell - params.origin.xyz;
   let output = voxelOffset + localIndex;
@@ -474,6 +498,37 @@ fn materializeDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(nu
   // actually present.
   let owner = select(0xffffu, min(u32(max(solid.owner, 0)), 0xfffeu), solid.fraction > 0.0 && solid.owner >= 0);
   payload[materialOffset] = select((owner << 16u) | (material & 0xffffu), previousIdentity, preserveStatic && material == 0u);
+}
+
+@compute @workgroup_size(256)
+fn clearRetiredDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u) {
+  let index = linearIndex(gid, groups);
+  let brickSize = control[11];
+  let voxelsPerBrick = brickSize * brickSize * brickSize;
+  let retiredSlot = index / voxelsPerBrick;
+  if (retiredSlot >= brickWorklist[4]) { return; }
+  let capacity = solverBrickCapacity(brickSize);
+  let retiredBase = WORKLIST_HEADER_WORDS + capacity * 2u;
+  let leafIndex = brickWorklist[retiredBase + retiredSlot * 2u + 1u];
+  if (leafIndex >= control[1]) { return; }
+  let localIndex = index - retiredSlot * voxelsPerBrick;
+  let leafBase = control[16] + leafIndex * 4u;
+  let output = topology[leafBase + 1u] + localIndex;
+  let geometryBase = output * 4u;
+  let velocityBase = control[17] + output * 4u;
+  let materialOffset = control[18] + output;
+  let previousIdentity = payload[materialOffset];
+  let previousMaterial = previousIdentity & 0xffffu;
+  let preserveStatic = params.origin.w > 0 && previousMaterial >= u32(params.origin.w);
+  payload[geometryBase] = bitcast<u32>(3.402823e38);
+  payload[geometryBase + 3u] = 0u;
+  payload[velocityBase] = 0u; payload[velocityBase + 1u] = 0u;
+  payload[velocityBase + 2u] = 0u; payload[velocityBase + 3u] = 0u;
+  if (!preserveStatic) {
+    payload[geometryBase + 1u] = bitcast<u32>(3.402823e38);
+    payload[geometryBase + 2u] = 0u;
+    payload[materialOffset] = 0xffff0000u;
+  }
 }
 `;
 
@@ -535,6 +590,7 @@ export class SparseBrickOctreeGPU {
   private readonly device: GPUDevice;
   private readonly publicationPipeline: GPUComputePipeline;
   private readonly denseFieldPipeline: GPUComputePipeline;
+  private readonly denseFieldCleanupPipeline: GPUComputePipeline;
   private readonly denseFieldParams: GPUBuffer;
   private destroyed = false;
 
@@ -579,9 +635,14 @@ export class SparseBrickOctreeGPU {
       label: `${label} publication pipeline`, layout: "auto",
       compute: { module: device.createShaderModule({ label: `${label} publication shader`, code: publicationShader }), entryPoint: "publish" },
     });
+    const denseFieldModule = device.createShaderModule({ label: `${label} dense-field shader`, code: denseFieldShader });
     this.denseFieldPipeline = device.createComputePipeline({
       label: `${label} dense-field pipeline`, layout: "auto",
-      compute: { module: device.createShaderModule({ label: `${label} dense-field shader`, code: denseFieldShader }), entryPoint: "materializeDenseFields" },
+      compute: { module: denseFieldModule, entryPoint: "materializeDenseFields" },
+    });
+    this.denseFieldCleanupPipeline = device.createComputePipeline({
+      label: `${label} retired dense-field cleanup pipeline`, layout: "auto",
+      compute: { module: denseFieldModule, entryPoint: "clearRetiredDenseFields" },
     });
   }
 
@@ -635,7 +696,9 @@ export class SparseBrickOctreeGPU {
     const floats = new Float32Array(words);
     const finestLevel = source.finestLevel;
     if (finestLevel !== undefined && (!Number.isInteger(finestLevel) || finestLevel < 0 || finestLevel > SPARSE_BRICK_MAX_MORTON_BITS)) throw new RangeError("Finest topology level is invalid");
-    uints.set([nx, ny, nz, finestLevel ?? 0xffffffff], 0);
+    const activeWorklist = source.activeBrickWorklist;
+    const encodedFinestLevel = finestLevel ?? 0x7fffffff;
+    uints.set([nx, ny, nz, encodedFinestLevel | (activeWorklist ? 0x80000000 : 0)], 0);
     ints.set([origin[0], origin[1], origin[2], 0], 4);
     const preservedMaterialIdMinimum = source.preservedMaterialIdMinimum ?? 0;
     if (!Number.isInteger(preservedMaterialIdMinimum) || preservedMaterialIdMinimum < 0 || preservedMaterialIdMinimum > 0xffff) throw new RangeError("Preserved material minimum must fit uint16");
@@ -654,14 +717,33 @@ export class SparseBrickOctreeGPU {
         { binding: 4, resource: { buffer: source.solidCells } },
         { binding: 5, resource: { buffer: this.denseFieldParams } },
         { binding: 6, resource: { buffer: this.payload } },
+        { binding: 7, resource: { buffer: activeWorklist ?? this.control } },
       ],
     });
-    const dispatch = sparseBrickDispatchDimensions(this.voxelCapacity);
     const pass = encoder.beginComputePass({ label: "Materialize octree dense fields into sparse bricks" });
     pass.setPipeline(this.denseFieldPipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(...dispatch);
+    if (activeWorklist) pass.dispatchWorkgroupsIndirect(activeWorklist, 4);
+    else pass.dispatchWorkgroups(...sparseBrickDispatchDimensions(this.voxelCapacity));
     pass.end();
+    if (activeWorklist) {
+      const cleanupBindGroup = this.device.createBindGroup({
+        label: "Retired sparse brick cleanup bind group",
+        layout: this.denseFieldCleanupPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.control } },
+          { binding: 1, resource: { buffer: this.topology } },
+          { binding: 5, resource: { buffer: this.denseFieldParams } },
+          { binding: 6, resource: { buffer: this.payload } },
+          { binding: 7, resource: { buffer: activeWorklist } },
+        ],
+      });
+      const cleanup = encoder.beginComputePass({ label: "Clear retired sparse brick payloads" });
+      cleanup.setPipeline(this.denseFieldCleanupPipeline);
+      cleanup.setBindGroup(0, cleanupBindGroup);
+      cleanup.dispatchWorkgroupsIndirect(activeWorklist, 20);
+      cleanup.end();
+    }
   }
 
   destroy(): void {

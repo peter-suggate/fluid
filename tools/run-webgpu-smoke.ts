@@ -175,6 +175,42 @@ interface SparseVoxelSmokeStats {
   fluidColorLinear: number[];
   uiRawVoxelRenderWall_ms: number;
   uiBrickGridRenderWall_ms: number;
+  fluidBrickCapacity?: number;
+  fluidBrickResidentCount?: number;
+  fluidBrickCoreCount?: number;
+  fluidBrickHaloCount?: number;
+  fluidBrickActivatedCount?: number;
+  fluidBrickRetiredCount?: number;
+  fluidBrickGeneration?: number;
+  fluidBrickCoreOrigins_m?: number[][];
+  fluidBrickHaloOrigins_m?: number[][];
+  sourceBrickFluidVoxelCount?: number;
+  sourceBrickResidency?: "core" | "halo" | "vacant";
+}
+
+interface FluidBrickSnapshot { resident: number; core: number; halo: number; generation: number }
+interface WorldBounds { min: [number, number, number]; max: [number, number, number] }
+
+function initialSeedBrickBounds(scene: SceneDescription, dimensions: readonly [number, number, number], brickSize = 8): WorldBounds | undefined {
+  const seed = scene.fluid.initialBrickSeeds_m?.[0];
+  if (!seed) return undefined;
+  const minimum: [number, number, number] = [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
+  const extent: [number, number, number] = [scene.container.width_m, scene.container.height_m, scene.container.depth_m];
+  const point = [seed.x, seed.y, seed.z];
+  const start = point.map((value, axis) => {
+    const cell = Math.max(0, Math.min(dimensions[axis] - 1, Math.floor((value - minimum[axis]) * dimensions[axis] / extent[axis])));
+    return Math.floor(cell / brickSize) * brickSize;
+  });
+  return {
+    min: start.map((cell, axis) => minimum[axis] + cell * extent[axis] / dimensions[axis]) as [number, number, number],
+    max: start.map((cell, axis) => minimum[axis] + Math.min(dimensions[axis], cell + brickSize) * extent[axis] / dimensions[axis]) as [number, number, number]
+  };
+}
+
+async function readFluidBrickSnapshot(device: GPUDevice, source: SparseVoxelRenderSource): Promise<FluidBrickSnapshot | undefined> {
+  if (!source.fluidBrickStats) return undefined;
+  const words = new Uint32Array((await readBufferBinding(device, source.fluidBrickStats, 64)).buffer);
+  return { resident: words[0], core: words[8], halo: words[9], generation: words[15] };
 }
 
 async function smokeRenderSparseVoxelDebugModes(device: GPUDevice, source: SparseVoxelRenderSource) {
@@ -191,7 +227,9 @@ async function smokeRenderSparseVoxelDebugModes(device: GPUDevice, source: Spars
       mode,
       colorTarget: color.createView(), depthTarget: depth.createView(),
       colorLoadOp: "clear", depthLoadOp: "clear",
-      viewProjection: matrix, cameraPosition: [0, 0, 4]
+      viewProjection: matrix, cameraPosition: [0, 0, 4],
+      containerBounds: { min: [-1, 0, -1], max: [1, 2, 1] },
+      containerClosedTop: false
     });
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
@@ -203,35 +241,62 @@ async function smokeRenderSparseVoxelDebugModes(device: GPUDevice, source: Spars
   return { uiRawVoxelRenderWall_ms, uiBrickGridRenderWall_ms };
 }
 
-async function readSparseVoxelStats(device: GPUDevice, source: SparseVoxelRenderSource): Promise<SparseVoxelSmokeStats> {
+async function readSparseVoxelStats(device: GPUDevice, source: SparseVoxelRenderSource, sourceBrick?: WorldBounds): Promise<SparseVoxelSmokeStats> {
   const voxelCount = Math.min(new Uint32Array((await readBufferBinding(device, source.voxelCount, 4)).buffer)[0], source.voxelCapacity);
   const brickCount = Math.min(new Uint32Array((await readBufferBinding(device, source.brickCount, 4)).buffer)[0], source.brickCapacity);
   const voxelBytes = await readBufferBinding(device, source.voxelRecords, voxelCount * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
   const brickBytes = await readBufferBinding(device, source.brickRecords, brickCount * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
   const materialBytes = await readBufferBinding(device, source.materials, source.materialCount * 32);
   const voxelFloats = new Float32Array(voxelBytes.buffer), voxelWords = new Uint32Array(voxelBytes.buffer);
-  const brickWords = new Uint32Array(brickBytes.buffer), materialFloats = new Float32Array(materialBytes.buffer);
+  const brickWords = new Uint32Array(brickBytes.buffer), brickFloats = new Float32Array(brickBytes.buffer), materialFloats = new Float32Array(materialBytes.buffer);
   let activeVoxelCount = 0, activeBrickCount = 0, fluidVoxelCount = 0, environmentVoxelCount = 0, nonFiniteRecordCount = 0, invalidMaterialCount = 0;
+  let sourceBrickFluidVoxelCount = 0;
+  const fluidBrickCoreOrigins_m: number[][] = [], fluidBrickHaloOrigins_m: number[][] = [];
   const materialVoxelCounts: Record<string, number> = {};
   for (let index = 0; index < voxelCount; index += 1) {
     const word = index * 12, material = voxelWords[word + 8], flags = voxelWords[word + 9];
     if ((flags & 1) === 0) continue;
     activeVoxelCount += 1;
     materialVoxelCounts[String(material)] = (materialVoxelCounts[String(material)] ?? 0) + 1;
-    if (material === VOXEL_MATERIAL_IDS.fluid) fluidVoxelCount += 1;
+    if (material === VOXEL_MATERIAL_IDS.fluid) {
+      fluidVoxelCount += 1;
+      const centre = [voxelFloats[word] + 0.5 * voxelFloats[word + 4], voxelFloats[word + 1] + 0.5 * voxelFloats[word + 5], voxelFloats[word + 2] + 0.5 * voxelFloats[word + 6]];
+      if (sourceBrick && centre.every((value, axis) => value >= sourceBrick.min[axis] - 1e-6 && value < sourceBrick.max[axis] - 1e-6)) sourceBrickFluidVoxelCount += 1;
+    }
     if (material >= ENVIRONMENT_VOXEL_MATERIAL_BASE) environmentVoxelCount += 1;
     if (material >= source.materialCount) invalidMaterialCount += 1;
     if (![...voxelFloats.slice(word, word + 3), ...voxelFloats.slice(word + 4, word + 7)].every(Number.isFinite)
       || voxelFloats[word + 4] <= 0 || voxelFloats[word + 5] <= 0 || voxelFloats[word + 6] <= 0) nonFiniteRecordCount += 1;
   }
-  for (let index = 0; index < brickCount; index += 1) if ((brickWords[index * 12 + 9] & 1) !== 0) activeBrickCount += 1;
+  for (let index = 0; index < brickCount; index += 1) {
+    const word = index * 12, flags = brickWords[word + 9];
+    if ((flags & 1) !== 0) activeBrickCount += 1;
+    const origin = () => Array.from(brickFloats.slice(word, word + 3));
+    if ((flags & 2) !== 0) fluidBrickCoreOrigins_m.push(origin());
+    else if ((flags & 4) !== 0) fluidBrickHaloOrigins_m.push(origin());
+  }
   const colorOffset = VOXEL_MATERIAL_IDS.fluid * 8;
   const debugRenderTimings = await smokeRenderSparseVoxelDebugModes(device, source);
+  const fluidBrickWords = source.fluidBrickStats
+    ? new Uint32Array((await readBufferBinding(device, source.fluidBrickStats, 64)).buffer)
+    : undefined;
   return {
     voxelCount, brickCount, activeVoxelCount, activeBrickCount, fluidVoxelCount, environmentVoxelCount, materialVoxelCounts,
     nonFiniteRecordCount, invalidMaterialCount,
     fluidColorLinear: Array.from(materialFloats.slice(colorOffset, colorOffset + 3)),
-    ...debugRenderTimings
+    ...debugRenderTimings,
+    ...(fluidBrickWords ? {
+      fluidBrickCapacity: source.fluidBrickCapacity,
+      fluidBrickResidentCount: fluidBrickWords[0], fluidBrickCoreCount: fluidBrickWords[8], fluidBrickHaloCount: fluidBrickWords[9],
+      fluidBrickActivatedCount: fluidBrickWords[10], fluidBrickRetiredCount: fluidBrickWords[11], fluidBrickGeneration: fluidBrickWords[15],
+      fluidBrickCoreOrigins_m, fluidBrickHaloOrigins_m,
+      sourceBrickFluidVoxelCount,
+      sourceBrickResidency: fluidBrickCoreOrigins_m.some((origin) => origin.every((value, axis) => Math.abs(value - (sourceBrick?.min[axis] ?? Infinity)) <= 1e-5))
+        ? "core" as const
+        : fluidBrickHaloOrigins_m.some((origin) => origin.every((value, axis) => Math.abs(value - (sourceBrick?.min[axis] ?? Infinity)) <= 1e-5))
+          ? "halo" as const
+          : "vacant" as const,
+    } : {})
   };
 }
 
@@ -632,6 +697,7 @@ interface GPUSmokeResult {
   simulationWall_ms: number;
   steps: number;
   velocitySummary?: VelocityStageSummary;
+  initialFluidBrickStats?: FluidBrickSnapshot;
   sparseVoxelStats?: SparseVoxelSmokeStats;
   hybridPresentationStats?: HybridPresentationSmokeStats;
   stabilityEnvelope?: StabilityEnvelope;
@@ -770,7 +836,8 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     matchedFieldStats: result.matchedSummary, volumeFieldStats: result.finalSummary,
     matchedTallCellActivity: result.matchedTallCellActivity, finalTallCellActivity: result.finalTallCellActivity,
     finalTallVolumeGaps: result.finalTallVolumeGaps,
-    velocitySummary: result.velocitySummary, sparseVoxelStats: result.sparseVoxelStats, hybridPresentationStats: result.hybridPresentationStats, stabilityEnvelope: result.stabilityEnvelope,
+    velocitySummary: result.velocitySummary, initialFluidBrickStats: result.initialFluidBrickStats,
+    sparseVoxelStats: result.sparseVoxelStats, hybridPresentationStats: result.hybridPresentationStats, stabilityEnvelope: result.stabilityEnvelope,
     energyTraceSummary: energyTraceSummary(result.energyTrace),
     validationErrors: result.validationErrors
   }));
@@ -861,6 +928,11 @@ async function runGPU(
     : method.createSolver!(instrumentedDevice, scene, quality, values);
   const construction_ms = performance.now() - constructionStarted;
   console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod, phase: "constructed", construction_ms: Math.round(construction_ms), grid: [solver.info.nx, solver.info.storedNy, solver.info.nz], cubicGrid: [solver.info.nx, solver.info.ny, solver.info.nz] }));
+  const sparseSource = (solver as GPUSolverInstance).sparseVoxelRenderSource;
+  const seedBrickBounds = initialSeedBrickBounds(scene, [solver.info.nx, solver.info.ny, solver.info.nz]);
+  const initialFluidBrickStats = sparseStatsRequested && sparseSource
+    ? await readFluidBrickSnapshot(device, sparseSource)
+    : undefined;
   const runStarted = performance.now();
   let steps = 0, samplingWall_ms = 0, matched: Awaited<ReturnType<typeof readCubicVolumeField>> | undefined;
   // The perturbed cadence remains exclusive to the quadtree dam-break
@@ -1072,12 +1144,11 @@ async function runGPU(
       ? await readTallVelocityTexture3D(device, velocityTexture, info.nx, info.storedNy, info.nz, info.ny, await readFloatTexture2D(device, solver.columnBaseTexture, info.nx, info.nz), final.field, finalSpacing, scene.numerics.maxDt_s)
       : await readVelocityTexture3D(device, velocityTexture, info.nx, info.ny, info.nz, final.field, finalSpacing, scene.numerics.maxDt_s))
     : undefined;
-  const sparseSource = (solver as GPUSolverInstance).sparseVoxelRenderSource;
   const hybridPresentationStats = sparseStatsRequested && method.id === "octree"
     ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies)
     : undefined;
   const sparseVoxelStats = sparseStatsRequested && sparseSource
-    ? await readSparseVoxelStats(device, sparseSource)
+    ? await readSparseVoxelStats(device, sparseSource, seedBrickBounds)
     : undefined;
   await device.queue.onSubmittedWorkDone();
   const result: GPUSmokeResult = {
@@ -1085,7 +1156,8 @@ async function runGPU(
     matchedSummary: matched.summary, matchedTallCellActivity: matched.tallCellActivity,
     finalSummary: final?.summary, finalTallCellActivity: final?.tallCellActivity,
     finalTallVolumeGaps: final?.tallVolumeGaps, validationErrors,
-    construction_ms, runtime_ms: performance.now() - runStarted, simulationWall_ms, steps, velocitySummary, sparseVoxelStats, hybridPresentationStats, stabilityEnvelope, energyTrace, checkpoints
+    construction_ms, runtime_ms: performance.now() - runStarted, simulationWall_ms, steps, velocitySummary,
+    initialFluidBrickStats, sparseVoxelStats, hybridPresentationStats, stabilityEnvelope, energyTrace, checkpoints
   };
   reportResult(scenarioId, result);
   solver.destroy(); device.destroy();
@@ -1346,6 +1418,20 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       fail(!!hybrid && hybrid.bodyCount > 0 && Number.isFinite(hybrid.frameWall_ms) && hybrid.frameWall_ms > 0,
         `octree hybrid smooth WebGPU smoke did not complete: ${JSON.stringify(hybrid)}`);
       fail(expectedFluidColor.every((value, index) => Math.abs(value - (sparse?.fluidColorLinear[index] ?? Infinity)) <= 1e-6), `octree sparse fluid color ${sparse?.fluidColorLinear} differs from authored linear color ${expectedFluidColor}`);
+      if (scenarioId === "garden-dam-break") {
+        fail(octree.initialFluidBrickStats?.core === 1,
+          `garden dam break started with ${octree.initialFluidBrickStats?.core ?? "unknown"} core fluid bricks instead of one`);
+        fail((sparse?.fluidBrickResidentCount ?? Infinity) < (sparse?.fluidBrickCapacity ?? 0),
+          `garden dam break resident set filled its ${sparse?.fluidBrickCapacity ?? "unknown"}-brick capacity`);
+        if ((octree.info.simulatedTime_s ?? 0) >= 1 - 1e-9) {
+          fail((sparse?.fluidBrickCoreCount ?? 0) > 1,
+            `garden dam break did not migrate beyond its initial core brick: ${JSON.stringify(sparse?.fluidBrickCoreOrigins_m)}`);
+          fail(sparse?.sourceBrickFluidVoxelCount === 0,
+            `garden dam break left ${sparse?.sourceBrickFluidVoxelCount ?? "unknown"} liquid voxels in its original brick`);
+          fail(sparse?.sourceBrickResidency !== "core",
+            "garden dam break original brick remained a core fluid allocation");
+        }
+      }
     }
     if (scenarioId === "dam-break-ui") {
       const envelope = octree.stabilityEnvelope;
