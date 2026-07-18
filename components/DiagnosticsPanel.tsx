@@ -47,6 +47,12 @@ export function DiagnosticsPanel() {
           unit={`${gpuInfo.fluidBrickResidentCount ?? "—"} / ${gpuInfo.fluidBrickCapacity ?? "—"} resident · +${gpuInfo.fluidBrickActivatedCount ?? 0} −${gpuInfo.fluidBrickRetiredCount ?? 0} latest update`}
           tone={gpuInfo.fluidBrickResidentCount !== undefined && gpuInfo.fluidBrickCapacity !== undefined && gpuInfo.fluidBrickResidentCount < gpuInfo.fluidBrickCapacity ? "good" : "warn"}
         />}
+        {gpuInfo?.gridKind === "octree" && gpuInfo.sparseSurfacePageCapacity !== undefined && <MetricCard
+          label="Fine detail pages"
+          value={`${gpuInfo.sparseSurfaceCorePages ?? 0} core · ${gpuInfo.sparseSurfaceHaloPages ?? 0} halo`}
+          unit={`${gpuInfo.sparseSurfaceResidentPages ?? 0} / ${gpuInfo.sparseSurfacePageCapacity} resident · peak ${gpuInfo.sparseSurfacePeakPages ?? 0} · overflow ${gpuInfo.sparseSurfaceOverflow ?? 0}`}
+          tone={(gpuInfo.sparseSurfaceOverflow ?? 0) === 0 && (gpuInfo.sparseSurfaceResidentPages ?? 0) < gpuInfo.sparseSurfacePageCapacity ? "good" : "warn"}
+        />}
         <MetricCard label="GPU dam front" value={gpuInfo?.front_m !== undefined ? gpuInfo.front_m.toFixed(3) : "—"} unit="m · volume-fraction threshold" />
         <MetricCard label="GPU stability" value={gpuInfo?.stabilityFlags ? (gpuInfo.stabilityFlags.length === 0 ? "CLEAR" : "ALERT") : "—"} unit={gpuInfo?.stabilityFlags?.join(" · ") || "all instrumented gates clear"} tone={gpuInfo?.stabilityFlags?.length ? "warn" : gpuInfo?.stabilityFlags ? "good" : "neutral"} />
         <MetricCard label="GPU liquid max speed" value={gpuInfo?.maxSpeed_m_s !== undefined ? gpuInfo.maxSpeed_m_s.toFixed(3) : "—"} unit={`m/s at ${formatGridLocation(gpuInfo?.maxSpeedLocation)} · ${gpuInfo?.encodedSteps ?? 0} steps`} />

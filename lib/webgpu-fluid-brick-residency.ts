@@ -54,14 +54,21 @@ export function classifyCPUFluidBrick(
   minimumPhi: number,
   previous: CPUFluidBrickState = { flags: 0, dryFrames: 0 },
   options: CPUFluidBrickClassificationOptions,
+  maximumPhi = minimumPhi,
 ): CPUFluidBrickState {
-  if (!Number.isFinite(minimumPhi)) throw new RangeError("Brick signed distance must be finite");
+  if (!Number.isFinite(minimumPhi) || !Number.isFinite(maximumPhi) || maximumPhi < minimumPhi) {
+    throw new RangeError("Brick signed-distance range must be finite and ordered");
+  }
   if (!(options.haloPhi >= 0) || !Number.isFinite(options.haloPhi)) throw new RangeError("Brick halo must be finite and non-negative");
   if (!Number.isInteger(options.retireAfterFrames) || options.retireAfterFrames < 0 || options.retireAfterFrames > 0xffff) {
     throw new RangeError("Brick retirement window must be a uint16");
   }
-  const core = minimumPhi < 0;
-  const desired = minimumPhi < options.haloPhi;
+  // A sparse surface band must not retain every negative (deep-liquid)
+  // brick. Core pages actually straddle phi=0; halo pages have at least one
+  // sample within the requested absolute-distance support.
+  const core = minimumPhi <= 0 && maximumPhi >= 0;
+  const minimumAbsolutePhi = core ? 0 : Math.min(Math.abs(minimumPhi), Math.abs(maximumPhi));
+  const desired = minimumAbsolutePhi < options.haloPhi;
   const wasResident = (previous.flags & FLUID_BRICK_RESIDENT) !== 0;
   const dryFrames = desired ? 0 : Math.min(0xffff, previous.dryFrames + 1);
   const resident = desired || (wasResident && dryFrames <= options.retireAfterFrames);
@@ -108,19 +115,25 @@ fn classify(@builtin(global_invocation_id) gid: vec3u) {
   let brick = brickCoordinate(brickIndex);
   let origin = brick * brickSize;
   var minimumPhi = 3.402823e38;
+  var maximumPhi = -3.402823e38;
   for (var z = 0u; z < brickSize; z += 1u) {
     for (var y = 0u; y < brickSize; y += 1u) {
       for (var x = 0u; x < brickSize; x += 1u) {
         let cell = origin + vec3u(x, y, z);
-        if (all(cell < params.dimsBrick.xyz)) { minimumPhi = min(minimumPhi, textureLoad(levelSet, vec3i(cell), 0).x); }
+        if (all(cell < params.dimsBrick.xyz)) {
+          let samplePhi = textureLoad(levelSet, vec3i(cell), 0).x;
+          minimumPhi = min(minimumPhi, samplePhi);
+          maximumPhi = max(maximumPhi, samplePhi);
+        }
       }
     }
   }
   let previous = states[brickIndex];
   let previousFlags = previous & 0xffu;
   let wasResident = (previousFlags & RESIDENT) != 0u;
-  let core = minimumPhi < 0.0;
-  let desired = minimumPhi < params.settings.x;
+  let core = minimumPhi <= 0.0 && maximumPhi >= 0.0;
+  let minimumAbsolutePhi = select(min(abs(minimumPhi), abs(maximumPhi)), 0.0, core);
+  let desired = minimumAbsolutePhi < params.settings.x;
   var dryFrames = select(min(0xffffu, (previous >> 16u) + 1u), 0u, desired);
   let retireAfter = u32(params.settings.y);
   let resident = desired || (wasResident && dryFrames <= retireAfter);
@@ -159,15 +172,18 @@ fn finalize() {
   let resident = min(atomicLoad(&worklist[0]), capacity);
   let retired = min(atomicLoad(&worklist[4]), capacity);
   let voxelsPerBrick = params.dimsBrick.w * params.dimsBrick.w * params.dimsBrick.w;
-  atomicStore(&worklist[1], (resident * voxelsPerBrick + 255u) / 256u);
+  // Indirect args past maxComputeWorkgroupsPerDimension turn the whole
+  // dispatch into a silent no-op. Clamped partial coverage beats losing every
+  // resident brick at once; domains needing more must move to 2D dispatch.
+  atomicStore(&worklist[1], min((resident * voxelsPerBrick + 255u) / 256u, 65535u));
   atomicStore(&worklist[2], 1u);
   atomicStore(&worklist[3], 1u);
-  atomicStore(&worklist[5], (retired * voxelsPerBrick + 255u) / 256u);
+  atomicStore(&worklist[5], min((retired * voxelsPerBrick + 255u) / 256u, 65535u));
   atomicStore(&worklist[6], 1u);
   atomicStore(&worklist[7], 1u);
   // Eight 4x4x4 workgroups cover one 8^3 brick. Four-cell bricks use one.
   let topologyGroups = select(1u, 8u, params.dimsBrick.w == 8u);
-  atomicStore(&worklist[12], resident * topologyGroups);
+  atomicStore(&worklist[12], min(resident * topologyGroups, 65535u));
   atomicStore(&worklist[13], 1u);
   atomicStore(&worklist[14], 1u);
   atomicAdd(&worklist[15], 1u);

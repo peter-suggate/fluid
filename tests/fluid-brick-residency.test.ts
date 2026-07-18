@@ -16,25 +16,30 @@ import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
 import { WebGPUOctreeProjection, octreeProjectionShader } from "../lib/webgpu-octree";
 import { OctreeSparseBrickWorld } from "../lib/webgpu-octree-sparse-bricks";
 
-test("disconnected wet regions independently create multiple resident fluid bricks", () => {
+test("disconnected interface regions independently create multiple resident fluid bricks", () => {
   const options = { haloPhi: 0.2, retireAfterFrames: 2 };
-  const states = [-0.1, 1, -0.4].map((phi) => classifyCPUFluidBrick(phi, undefined, options));
+  const ranges = [[-0.1, 0.3], [0.4, 1], [-0.4, 0.1]] as const;
+  const states = ranges.map(([minimum, maximum]) => classifyCPUFluidBrick(minimum, undefined, options, maximum));
   assert.equal(states.filter((state) => (state.flags & FLUID_BRICK_CORE) !== 0).length, 2);
   assert.ok((states[0].flags & (FLUID_BRICK_RESIDENT | FLUID_BRICK_ACTIVATED)) !== 0);
   assert.equal(states[1].flags, 0);
   assert.ok((states[2].flags & FLUID_BRICK_CORE) !== 0);
 });
 
-test("air-band bricks form halos and dry source bricks retire with hysteresis", () => {
+test("two-sided surface-band bricks form halos and vacated bricks retire with hysteresis", () => {
   const options = { haloPhi: 0.2, retireAfterFrames: 2 };
-  const halo = classifyCPUFluidBrick(0.1, undefined, options);
+  const halo = classifyCPUFluidBrick(0.1, undefined, options, 0.5);
   assert.ok((halo.flags & FLUID_BRICK_HALO) !== 0);
-  let source = classifyCPUFluidBrick(-0.1, undefined, options);
-  source = classifyCPUFluidBrick(1, source, options);
+  const liquidHalo = classifyCPUFluidBrick(-0.5, undefined, options, -0.1);
+  assert.ok((liquidHalo.flags & FLUID_BRICK_HALO) !== 0, "the band must retain liquid-side stencil support");
+  const deepLiquid = classifyCPUFluidBrick(-2, undefined, options, -0.5);
+  assert.equal(deepLiquid.flags, 0, "deep liquid must not turn a surface band into a full liquid volume");
+  let source = classifyCPUFluidBrick(-0.1, undefined, options, 0.1);
+  source = classifyCPUFluidBrick(1, source, options, 2);
   assert.ok((source.flags & FLUID_BRICK_RESIDENT) !== 0);
-  source = classifyCPUFluidBrick(1, source, options);
+  source = classifyCPUFluidBrick(1, source, options, 2);
   assert.ok((source.flags & FLUID_BRICK_RESIDENT) !== 0);
-  source = classifyCPUFluidBrick(1, source, options);
+  source = classifyCPUFluidBrick(1, source, options, 2);
   assert.equal(source.flags & FLUID_BRICK_RESIDENT, 0, "the vacated source brick must return to the free pool");
 });
 
@@ -72,6 +77,8 @@ test("multiple seed points create independent initial fluid bricks", () => {
 test("GPU residency builds active and retired indirect worklists without readback", () => {
   assert.match(fluidBrickResidencyShader, /atomicAdd\(&worklist\[0\], 1u\)/);
   assert.match(fluidBrickResidencyShader, /atomicAdd\(&worklist\[4\], 1u\)/);
+  assert.match(fluidBrickResidencyShader, /minimumPhi <= 0\.0 && maximumPhi >= 0\.0/);
+  assert.match(fluidBrickResidencyShader, /min\(abs\(minimumPhi\), abs\(maximumPhi\)\)/);
   assert.match(fluidBrickResidencyShader, /resident \* voxelsPerBrick/);
   assert.doesNotMatch(fluidBrickResidencyShader, /mapAsync|getMappedRange/);
   assert.match(sparseBrickDenseFieldShader, /usesActiveWorklist\(\)/);

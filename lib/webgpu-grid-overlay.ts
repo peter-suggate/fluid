@@ -8,6 +8,7 @@
  */
 
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
+import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
 
 export const gridOverlayShader = /* wgsl */ `
 struct Uniforms {
@@ -40,6 +41,57 @@ struct BodyGPU {
 @group(0) @binding(6) var pressureSamples: texture_3d<u32>;
 @group(0) @binding(7) var divergenceField: texture_3d<f32>;
 @group(0) @binding(8) var mappedPressureField: texture_3d<f32>;
+struct SparseSurfaceParams {
+  coarseDims: vec4u,
+  fineDims: vec4u,
+  brickDims: vec4u,
+  settings: vec4f,
+  cellAndDt: vec4f,
+  sizing: vec4f,
+  physical: vec4f,
+}
+@group(0) @binding(9) var<storage, read> sparseSurfacePages: array<u32>;
+@group(0) @binding(10) var<uniform> sparseSurfaceParams: SparseSurfaceParams;
+@group(0) @binding(11) var<storage, read> sparseSurfacePhi: array<f32>;
+@group(0) @binding(12) var<storage, read> sparseSurfaceControl: array<u32>;
+@group(0) @binding(13) var<storage, read> sparseSurfaceStates: array<u32>;
+
+const SPARSE_SURFACE_INVALID: u32 = 0xffffffffu;
+
+// Overflow means the bounded fine pool could not cover the complete surface.
+// The renderer falls back to the complete coarse field in that case, and the
+// grid view follows the same rule instead of displaying a misleading partial
+// fine hierarchy.
+fn sparseSurfaceAvailable() -> bool {
+  return sparseSurfaceParams.coarseDims.w > 0u
+    && arrayLength(&sparseSurfaceControl) > 2u
+    && sparseSurfaceControl[2] == 0u;
+}
+fn sparseSurfacePayload(fineCell: vec3i) -> u32 {
+  if (!sparseSurfaceAvailable() || any(fineCell < vec3i(0)) || any(fineCell >= vec3i(sparseSurfaceParams.fineDims.xyz))) { return SPARSE_SURFACE_INVALID; }
+  let q=vec3u(fineCell);let brickSize=sparseSurfaceParams.fineDims.w;let page=q/brickSize;
+  let index=page.x+sparseSurfaceParams.brickDims.x*(page.y+sparseSurfaceParams.brickDims.y*page.z);
+  if (index >= arrayLength(&sparseSurfacePages)) { return SPARSE_SURFACE_INVALID; }
+  let slot = sparseSurfacePages[index];
+  if (slot == SPARSE_SURFACE_INVALID || slot >= u32(sparseSurfaceParams.sizing.w)) { return SPARSE_SURFACE_INVALID; }
+  let local=q%brickSize;let localIndex=local.x+brickSize*(local.y+brickSize*local.z);
+  let payload=slot*brickSize*brickSize*brickSize+localIndex;
+  return select(SPARSE_SURFACE_INVALID,payload,payload<arrayLength(&sparseSurfacePhi));
+}
+fn sparseSurfaceCoreSample(fineCell: vec3i) -> bool {
+  if(any(fineCell<vec3i(0))||any(fineCell>=vec3i(sparseSurfaceParams.fineDims.xyz))){return false;}
+  let q=vec3u(fineCell);let page=q/sparseSurfaceParams.fineDims.w;
+  let pageIndex=page.x+sparseSurfaceParams.brickDims.x*(page.y+sparseSurfaceParams.brickDims.y*page.z);
+  if(pageIndex>=arrayLength(&sparseSurfaceStates)||(sparseSurfaceStates[pageIndex]&2u)==0u){return false;}
+  let payload=sparseSurfacePayload(fineCell);
+  if (payload == SPARSE_SURFACE_INVALID) { return false; }
+  let factor=f32(sparseSurfaceParams.coarseDims.w);
+  let fineH=min(sparseSurfaceParams.cellAndDt.x,min(sparseSurfaceParams.cellAndDt.y,sparseSurfaceParams.cellAndDt.z))/factor;
+  // Residency includes whole 8^3 support bricks and a stencil halo.  Pink is
+  // intentionally the much smaller physical shell around phi=0, not every
+  // allocated support voxel.
+  return abs(sparseSurfacePhi[payload]) <= 1.5*fineH;
+}
 
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
@@ -473,7 +525,10 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
       // blue instead of remaining cyan simply because size 32 is unavailable.
       let maximumRepresentedSize = max(2.0, u.options.w);
       let level = clamp(log2(f32(representedSize)) / log2(maximumRepresentedSize), 0.0, 1.0);
-      let fineColor = vec3f(1.0, 0.16, 0.58);
+      // The pressure hierarchy is cyan-to-blue. Pink is reserved for the
+      // physically finer sparse surface field, avoiding the false impression
+      // that every finest pressure leaf is a separate surface resolution.
+      let fineColor = vec3f(0.22, 0.68, 0.74);
       let middleColor = vec3f(0.22, 0.68, 0.74);
       let coarseColor = vec3f(0.08, 0.18, 0.48);
       fill = select(mix(middleColor, coarseColor, (level - 0.5) * 2.0), mix(fineColor, middleColor, level * 2.0), level < 0.5);
@@ -487,23 +542,19 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
     alpha = 0.97;
     sampleDot = 0.0;
   }
-  // Structure is the default solver-grid mode, so expose the most important
-  // adaptive sizing fact there as well: boundaries of genuinely finest 1^3
-  // pressure cells are pink. This is derived solely from the live ownership
-  // texture for every adaptive method; the categorical Cell scale mode above
-  // remains available when the complete hierarchy needs to be inspected.
+  // Structure remains pressure-topology first. The independently allocated
+  // fine surface pages are layered over it below instead of recoloring every
+  // finest pressure leaf as though it were fine phi storage.
   var gridLineColor = vec3f(0.03, 0.08, 0.09);
-  if (fieldMode == 0 && adaptiveGrid) {
-    let shape = adaptiveCellVerticalShape(cell, dims);
-    let representedSize = max(max(1, shape.z), max(1, shape.y - shape.x));
-    if (representedSize == 1) {
-      let finestColor = vec3f(1.0, 0.08, 0.55);
-      // Finest boundaries become sub-pixel at the default overview camera.
-      // Retain a translucent categorical tint so the band remains visible
-      // without zooming while structural wet/dry shading still reads through.
-      fill = mix(fill, finestColor, 0.72);
-      alpha = max(alpha, 0.44);
-      gridLineColor = finestColor;
+  if ((fieldMode == 0 || fieldMode == 9) && sparseSurfaceAvailable()) {
+    let factor=f32(sparseSurfaceParams.coarseDims.w);let fine3=local3*factor;let fineCell=vec3i(floor(fine3));
+    if (sparseSurfaceCoreSample(fineCell)) {
+      var finePosition=fine3.xy;var fineDerivative=derivative*factor;
+      if(axis==2){finePosition.x=fine3.z;}else if(axis==3){finePosition=fine3.xz;}
+      let first=1.0-smoothstep(0.35,1.15,(0.5-abs(fract(finePosition.x)-0.5))/max(fineDerivative.x,1e-5));
+      let second=1.0-smoothstep(0.35,1.15,(0.5-abs(fract(finePosition.y)-0.5))/max(fineDerivative.y,1e-5));
+      let fineLine=max(first,second);let fineColor=vec3f(1.0,0.08,0.55);
+      fill=mix(fill,fineColor,0.34);alpha=max(alpha,0.46);line=max(line,fineLine);gridLineColor=fineColor;
     }
   }
   var color = mix(fill, gridLineColor, line);
@@ -575,13 +626,23 @@ export class GridOverlayPipeline {
   private pressureSamples?: GPUTexture;
   private divergence?: GPUTexture;
   private mappedPressure?: GPUTexture;
+  private sparseSurface?: SparseSurfaceBandGPUSource;
+  private fallbackSparsePages: GPUBuffer;
+  private fallbackSparseParams: GPUBuffer;
+  private fallbackSparsePhi: GPUBuffer;
+  private fallbackSparseControl: GPUBuffer;
 
   constructor(
     private readonly device: GPUDevice,
     private readonly targetFormat: GPUTextureFormat,
     private readonly uniformBuffer: GPUBuffer,
     private readonly bodyBuffer: GPUBuffer
-  ) {}
+  ) {
+    this.fallbackSparsePages = device.createBuffer({ label: "Grid sparse-surface page fallback", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.fallbackSparseParams = device.createBuffer({ label: "Grid sparse-surface parameter fallback", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.fallbackSparsePhi = device.createBuffer({ label: "Grid sparse-surface phi fallback", size: 4, usage: GPUBufferUsage.STORAGE });
+    this.fallbackSparseControl = device.createBuffer({ label: "Grid sparse-surface control fallback", size: 16, usage: GPUBufferUsage.STORAGE });
+  }
 
   async initialize() {
     const shaderModule = this.device.createShaderModule({ label: "Solver grid overlay", code: gridOverlayShader });
@@ -620,6 +681,12 @@ export class GridOverlayPipeline {
     this.rebuildBindGroup();
   }
 
+  setSparseSurface(source: SparseSurfaceBandGPUSource | undefined) {
+    if (this.sparseSurface === source) return;
+    this.sparseSurface = source;
+    this.rebuildBindGroup();
+  }
+
   private rebuildBindGroup() {
     if (!this.pipeline || !this.volume || !this.columnBases || !this.adaptiveCells || !this.velocity || !this.pressureSamples || !this.divergence || !this.mappedPressure) return;
     this.bindGroup = this.device.createBindGroup({
@@ -633,7 +700,12 @@ export class GridOverlayPipeline {
         { binding: 5, resource: this.velocity.createView({ dimension: "3d" }) },
         { binding: 6, resource: this.pressureSamples.createView({ dimension: "3d" }) },
         { binding: 7, resource: this.divergence.createView({ dimension: "3d" }) },
-        { binding: 8, resource: this.mappedPressure.createView({ dimension: "3d" }) }
+        { binding: 8, resource: this.mappedPressure.createView({ dimension: "3d" }) },
+        { binding: 9, resource: this.sparseSurface?.pageTable ?? { buffer: this.fallbackSparsePages } },
+        { binding: 10, resource: this.sparseSurface?.params ?? { buffer: this.fallbackSparseParams } },
+        { binding: 11, resource: this.sparseSurface?.phi ?? { buffer: this.fallbackSparsePhi } },
+        { binding: 12, resource: this.sparseSurface?.control ?? { buffer: this.fallbackSparseControl } },
+        { binding: 13, resource: this.sparseSurface?.states ?? { buffer: this.fallbackSparsePages } }
       ]
     });
   }
@@ -649,5 +721,12 @@ export class GridOverlayPipeline {
     pass.draw(3);
     pass.end();
     return true;
+  }
+
+  destroy() {
+    this.fallbackSparsePages.destroy();
+    this.fallbackSparseParams.destroy();
+    this.fallbackSparsePhi.destroy();
+    this.fallbackSparseControl.destroy();
   }
 }

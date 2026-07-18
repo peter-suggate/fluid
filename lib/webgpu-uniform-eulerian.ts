@@ -25,6 +25,7 @@ import {
   WebGPUSecondaryParticleSystem,
   type SecondaryParticleSamplingSource
 } from "./webgpu-secondary-particles";
+import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
 
 export type UniformVelocityTransport = GPUVelocityTransport;
 export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Escaped spray droplets. Initially enabled for octree. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; /** Bounded near-interface particle-to-level-set correction; zero keeps spray strictly one-way. */ secondaryParticleSurfaceCorrection?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
@@ -265,6 +266,10 @@ export class WebGPUUniformEulerianSolver {
         adaptivity: options.octree.adaptivity ?? 1,
         interfaceRefinementBandCells: options.octree.interfaceRefinementBandCells ?? 4,
         surfaceDetailStrength: options.octree.surfaceDetailStrength ?? 0,
+        sparseSurfaceBand: options.octree.sparseSurfaceBand ?? "off",
+        surfaceRefinementFactor: options.octree.surfaceRefinementFactor ?? 2,
+        sparseSurfaceBandCells: options.octree.sparseSurfaceBandCells ?? 4,
+        sparseSurfacePageFraction: options.octree.sparseSurfacePageFraction ?? 0.75,
         jacobiRelaxation: options.octree.jacobiRelaxation ?? 0.8,
         extrapolationSweeps: options.octree.extrapolationSweeps ?? 4,
         leafSolver: options.octree.leafSolver,
@@ -359,6 +364,7 @@ export class WebGPUUniformEulerianSolver {
   private publishInitialSparseScene() {
     if (!this.octreeProjection) return;
     const initialSparseScene = this.device.createCommandEncoder({ label: "Publish initial sparse-brick scene" });
+    this.octreeProjection.encodeSurfaceBand(initialSparseScene, 0);
     this.octreeProjection.encodeInlineRebuild(initialSparseScene);
     this.octreeProjection.encodeOverlayMaterialization(initialSparseScene);
     this.octreeProjection.encodeSparseBrickWorld(initialSparseScene);
@@ -374,6 +380,7 @@ export class WebGPUUniformEulerianSolver {
   private get adaptiveProjection() { return this.quadtreeProjection ?? this.octreeProjection; }
   get surfaceFieldTexture() { return this.adaptiveProjection?.levelSetTexture ?? this.volumeA; }
   get sparseVoxelRenderSource() { return this.octreeProjection?.sparseVoxelRenderSource; }
+  get sparseSurfaceBand(): SparseSurfaceBandGPUSource | undefined { return this.octreeProjection?.sparseSurfaceBandSource; }
   get columnBaseTexture() { return this.heightA; }
   get gridCellTexture() { return this.adaptiveProjection?.topologyTexture; }
   get velocityTexture() { return this.velocityA; }
@@ -669,7 +676,12 @@ export class WebGPUUniformEulerianSolver {
     // projected maximum; gravity is the only unbounded explicit acceleration
     // before the next solve, so prevMax + |g| dt is a conservative readback-
     // free bound for choosing this frame's subdivisions.
-    const hMin = Math.min(c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz);
+    const coarseHMin = Math.min(c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz);
+    // Sparse phi advection is semi-Lagrangian and does not force the global
+    // pressure solve onto the fine geometric timestep. Preserve the coarse
+    // Chebyshev cadence unless explicit fine dynamics is enabled.
+    const surfaceFactor = this.octreeProjection?.requiresFineSurfaceTimestep ? this.octreeProjection.sparseSurfaceRefinementFactor : 1;
+    const hMin = coarseHMin / surfaceFactor;
     const inflowSpeed = this.scene.fluid.inflow ? Math.hypot(this.scene.fluid.inflow.velocity_m_s.x, this.scene.fluid.inflow.velocity_m_s.y, this.scene.fluid.inflow.velocity_m_s.z) : 0;
     const substeps = this.adaptiveProjection ? proactiveQuadtreeSubsteps(
       this.info.maxSpeed_m_s ?? 0,
@@ -914,10 +926,11 @@ export class WebGPUUniformEulerianSolver {
     this.device.queue.submit([encoder.finish()]);
     const mapPromise = buffer.mapAsync(GPUMapMode.READ);
     try {
-      const [, , surfaceDiagnostics, fluidBrickStats] = await Promise.all([
-        mapPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise, this.octreeProjection?.readFluidBrickResidencyStats(),
+      const [, , surfaceDiagnostics, fluidBrickStats, sparseSurfaceStats] = await Promise.all([
+        mapPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise, this.octreeProjection?.readFluidBrickResidencyStats(), this.octreeProjection?.readSparseSurfaceBandStats(),
       ]);
     if(fluidBrickStats){this.info.fluidBrickCapacity=fluidBrickStats.capacity;this.info.fluidBrickResidentCount=fluidBrickStats.resident;this.info.fluidBrickCoreCount=fluidBrickStats.core;this.info.fluidBrickHaloCount=fluidBrickStats.halo;this.info.fluidBrickActivatedCount=fluidBrickStats.activated;this.info.fluidBrickRetiredCount=fluidBrickStats.retired;this.info.fluidBrickGeneration=fluidBrickStats.generation;}
+    if(sparseSurfaceStats){this.info.sparseSurfaceLogicalPages=sparseSurfaceStats.logicalPageCount;this.info.sparseSurfacePageCapacity=sparseSurfaceStats.physicalPageCapacity;this.info.sparseSurfaceResidentPages=sparseSurfaceStats.resident;this.info.sparseSurfaceCorePages=sparseSurfaceStats.core;this.info.sparseSurfaceHaloPages=sparseSurfaceStats.halo;this.info.sparseSurfaceActivatedPages=sparseSurfaceStats.activated;this.info.sparseSurfaceRetiredPages=sparseSurfaceStats.retired;this.info.sparseSurfaceOverflow=sparseSurfaceStats.overflow;this.info.sparseSurfacePeakPages=sparseSurfaceStats.peakResident;}
     if (this.quadtreeProjection) this.info.quadtreeVelocityClampCount = this.quadtreeProjection.info.velocityClampCount ?? 0;
     const words = new Uint32Array(buffer.getMappedRange(0, 16)), initial = Math.max(1, this.info.initialVolumeCellSum ?? 1);
     const conservativeVolumeCells=words[3]/2048;this.info.rawVolumeDrift=this.transportConservativeVolume?(conservativeVolumeCells-initial)/initial:undefined;

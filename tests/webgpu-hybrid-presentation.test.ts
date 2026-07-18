@@ -6,8 +6,8 @@ const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.
 const uniformEulerianSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
 
 test("octree smooth presentation keeps analytic solids and glass", () => {
-  assert.match(rendererSource, /scene\.nominalResolution\.length_m, Math\.min\(bodies\.length, 12\), 0,/,
-    "smooth presentation must publish rigid-body count and leave glass enabled");
+  assert.match(rendererSource, /scene\.nominalResolution\.length_m, Math\.min\(bodies\.length, 12\), gpuInfo\?\.quadtreeMaximumFluidScale \?\? 1,/,
+    "smooth presentation must publish rigid-body count while retaining the live hierarchy scale");
   assert.match(rendererSource, /if \(sceneHasTerrain\(scene\) && scene\.terrain\)/,
     "terrain must remain part of the analytic scene for octree simulations");
   assert.match(rendererSource, /bodies\.slice\(0, 12\)\.forEach/,

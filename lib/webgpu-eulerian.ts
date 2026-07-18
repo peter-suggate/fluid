@@ -119,6 +119,15 @@ export interface GPUEulerianInfo {
   fluidBrickActivatedCount?: number;
   fluidBrickRetiredCount?: number;
   fluidBrickGeneration?: number;
+  sparseSurfaceLogicalPages?: number;
+  sparseSurfacePageCapacity?: number;
+  sparseSurfaceResidentPages?: number;
+  sparseSurfaceCorePages?: number;
+  sparseSurfaceHaloPages?: number;
+  sparseSurfaceActivatedPages?: number;
+  sparseSurfaceRetiredPages?: number;
+  sparseSurfaceOverflow?: number;
+  sparseSurfacePeakPages?: number;
   quality: GPUQuality;
   volumeCellSum?: number;
   representedVolumeCellSum?: number;

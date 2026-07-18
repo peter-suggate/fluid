@@ -5,6 +5,11 @@ import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 import { WebGPUQuadtreeSurfaceState, type SurfaceInflowState } from "./webgpu-quadtree-builder";
 import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
 import { FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES, FLUID_BRICK_TOPOLOGY_DISPATCH_OFFSET_BYTES } from "./webgpu-fluid-brick-residency";
+import {
+  WebGPUSparseSurfaceBand,
+  type SparseSurfaceBandGPUSource,
+  type SparseSurfaceBandMode,
+} from "./webgpu-sparse-surface-band";
 
 export interface OctreeProjectionOptions {
   pressureIterations: number;
@@ -15,6 +20,14 @@ export interface OctreeProjectionOptions {
   interfaceRefinementBandCells?: number;
   /** Adds up to eight finest cells of refinement support around curved or strongly straining surface regions. */
   surfaceDetailStrength?: number;
+  /** Dynamic fine level-set pages around phi=0; off preserves the dense-only path. */
+  sparseSurfaceBand?: "off" | SparseSurfaceBandMode;
+  /** Fine level-set samples per coarse transport cell edge. */
+  surfaceRefinementFactor?: 1 | 2 | 4;
+  /** Two-sided sparse phi support measured in fine cells. */
+  sparseSurfaceBandCells?: number;
+  /** Fraction of the logical fine-page lattice backed by physical slots. */
+  sparseSurfacePageFraction?: number;
   jacobiRelaxation?: number;
   extrapolationSweeps?: number;
   /**
@@ -130,6 +143,7 @@ export class WebGPUOctreeProjection {
   private readonly couplingPipelineLayout: GPUPipelineLayout;
   private readonly couplingShader: GPUShaderModule;
   private readonly surfaceState: WebGPUQuadtreeSurfaceState;
+  private readonly sparseSurfaceBand?: WebGPUSparseSurfaceBand;
   private readonly sparseBrickWorld: OctreeSparseBrickWorld;
   private readonly groups: { ab: GPUBindGroup; ba: GPUBindGroup; extrapolateOut: GPUBindGroup; extrapolateScratch: GPUBindGroup };
   private readonly diagnosticGroups: { pressureA: GPUBindGroup; pressureB: GPUBindGroup };
@@ -210,6 +224,25 @@ export class WebGPUOctreeProjection {
       device, dims, cell, resources.velocityOut, initialOctreeLevelSet(scene, dims, cell), undefined,
       undefined, false, false, true, true, this.solidCells
     );
+    const sparseSurfaceMode = options.sparseSurfaceBand ?? "off";
+    if (sparseSurfaceMode !== "off") {
+      this.sparseSurfaceBand = new WebGPUSparseSurfaceBand(
+        device,
+        [dims.nx, dims.ny, dims.nz],
+        [cell.x, cell.y, cell.z],
+        this.surfaceState.texture,
+        resources.velocityOut,
+        this.solidCells,
+        {
+          mode: sparseSurfaceMode,
+          refinementFactor: options.surfaceRefinementFactor ?? 2,
+          bandCells: options.sparseSurfaceBandCells ?? 4,
+          stencilCells: 5,
+          retireAfterFrames: 3,
+          maximumResidentFraction: options.sparseSurfacePageFraction ?? 0.75,
+        },
+      );
+    }
     // The rebuild worklist must cover every leaf that refinement or subsequent
     // 2:1 grading can touch. A narrower residency halo leaves initially fine
     // air bricks permanently outside both the active and retired streams.
@@ -349,7 +382,8 @@ export class WebGPUOctreeProjection {
       leafCount: approximateLeaves, pressureSampleCount: approximateLeaves, liquidDofCount: approximateLeaves,
       faceCount: 0, mlsProjectionRowCount: 0, tallSegmentCount: 0, ghostFaceCount: 0,
       maximumNeighborRatio: 2, maximumFluidScale: this.maxLeafSize, compressionRatio: approximateLeaves / Math.max(1, count),
-      allocatedBytes: count * (this.leafSolver === "dense" ? 56 : 136) + this.compaction.size + 144 + this.sparseBrickWorld.allocatedBytes,
+      allocatedBytes: count * (this.leafSolver === "dense" ? 56 : 136) + this.compaction.size + 144
+        + this.sparseBrickWorld.allocatedBytes + (this.sparseSurfaceBand?.allocatedBytes ?? 0),
       pressureIterationsUsed: initialSolvePasses, pressureIterationBudget: initialSolvePasses,
       pressureIterationHardBudget: initialSolvePasses, pressureConverged: undefined, velocityClampCount: 0,
       factorLevelCount: 0, multigridLevelCount: 0, multigridCoarsestDofs: 0, topologyReadbackBytes: 0,
@@ -651,6 +685,10 @@ export class WebGPUOctreeProjection {
 
   encodeSurface(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState, _maximumDt_s?: number, timestampWrites?: GPUComputePassTimestampWrites) {
     this.surfaceState.encode(encoder, dt_s, inflow, timestampWrites);
+    this.encodeSurfaceBand(encoder, dt_s);
+  }
+  encodeSurfaceBand(encoder: GPUCommandEncoder, dt_s: number) {
+    this.sparseSurfaceBand?.encode(encoder, dt_s);
   }
   addSurfaceReferenceVolumeCells(cells: number) { this.surfaceState.addReferenceVolumeCells(cells); }
   readSolveDiagnostics() { return Promise.resolve(); }
@@ -660,8 +698,12 @@ export class WebGPUOctreeProjection {
   readBodyImpulseReadback(_buffer: GPUBuffer) { return Promise.resolve([]); }
   destroySharedSurface() { /* The octree owns its surface for its full lifetime. */ }
   get sparseVoxelRenderSource() { return this.sparseBrickWorld.renderSource; }
+  get sparseSurfaceBandSource(): SparseSurfaceBandGPUSource | undefined { return this.sparseSurfaceBand?.source; }
+  get sparseSurfaceRefinementFactor() { return this.sparseSurfaceBand?.plan.refinementFactor ?? 1; }
+  get requiresFineSurfaceTimestep() { return this.sparseSurfaceBand?.requiresFineTimestep ?? false; }
   get fluidBrickCapacity() { return this.sparseBrickWorld.residency.capacity; }
   readFluidBrickResidencyStats() { return this.sparseBrickWorld.readResidencyStats(); }
+  readSparseSurfaceBandStats() { return this.sparseSurfaceBand?.readStats(); }
   encodeSparseBrickWorld(encoder: GPUCommandEncoder, timings: {
     residency?: GPUComputePassTimestampWrites;
     publication?: GPUComputePassTimestampWrites;
@@ -679,6 +721,7 @@ export class WebGPUOctreeProjection {
     this.compaction.destroy(); this.leafHeaders.destroy(); this.leafEntries.destroy(); this.solveDispatch.destroy(); this.solidCells.destroy();
     this.topologyTexture.destroy(); this.pressureSamplesTexture.destroy(); this.pressureTexture.destroy(); this.divergenceTexture.destroy();
     this.surfaceState.destroy();
+    this.sparseSurfaceBand?.destroy();
     this.sparseBrickWorld.destroy();
   }
 }
@@ -1209,7 +1252,10 @@ fn scanLeafBlocks(@builtin(local_invocation_id) lid3: vec3u) {
   if (lid == 255u) {
     let total = scanPairs[255];
     compaction[0] = total.x; compaction[1] = total.y;
-    compaction[2] = (total.x + 255u) / 256u; compaction[3] = 1u; compaction[4] = 1u;
+    // Beyond maxComputeWorkgroupsPerDimension the indirect solve dispatch
+    // no-ops entirely; clamp so oversized domains degrade instead of skipping
+    // the pressure solve outright.
+    compaction[2] = min((total.x + 255u) / 256u, 65535u); compaction[3] = 1u; compaction[4] = 1u;
   }
 }
 

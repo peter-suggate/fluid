@@ -4,6 +4,7 @@ import type { GPUEulerianInfo, GPURigidLoad } from "../webgpu-eulerian";
 import type { RigidBodyState } from "../rigid-body";
 import type { GPUSecondaryParticleSource } from "../webgpu-secondary-particles";
 import type { SparseVoxelRenderSource } from "../webgpu-voxel-debug";
+import type { SparseSurfaceBandGPUSource } from "../webgpu-sparse-surface-band";
 
 /**
  * Method plugin contract.
@@ -65,6 +66,8 @@ export interface GPUSolverInstance {
   readonly secondaryParticles?: GPUSecondaryParticleSource;
   /** GPU-resident sparse-brick publication for raw voxel and brick-grid rendering. */
   readonly sparseVoxelRenderSource?: SparseVoxelRenderSource;
+  /** Dynamically paged fine phi/velocity band for sparse extraction and inspection. */
+  readonly sparseSurfaceBand?: SparseSurfaceBandGPUSource;
   /** Adaptive pressure-DOF ownership used by the representation alarm. */
   readonly gridPressureSamplesTexture?: GPUTexture;
   /** Fine MLS pressure materialized by the latest adaptive solve. */

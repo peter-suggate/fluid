@@ -82,7 +82,7 @@ test("the prepare kernel sizes the indirect polygonise dispatch from the worklis
 test("buffer capacities keep the worklist aligned with the vertex allocation", () => {
   assert.equal(surfaceVertexCapacity(16, 16, 16), 262_144, "small grids use the floor allocation");
   assert.equal(surfaceVertexCapacity(512, 512, 512), 2_097_152, "large grids hit the 64 MiB ceiling");
-  assert.equal(surfaceVertexCapacity(80, 160, 60), (80 * 160 + 80 * 60 + 160 * 60) * 32, "mid-size grids scale with surface area");
+  assert.equal(surfaceVertexCapacity(80, 160, 60), (80 * 160 + 80 * 60 + 160 * 60) * 64, "mid-size grids scale with transported surface area");
   assert.equal(activeCubeCapacity(262_144), 87_382, "every appended cube emits at least one triangle, so capacity/3 entries suffice");
   assert.equal(activeCubeCapacity(2_097_152), 699_051);
 });
