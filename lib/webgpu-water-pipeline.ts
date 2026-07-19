@@ -4,6 +4,7 @@ import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particl
 import { GLASS_OPTICS, unifiedLightingShaderLibrary, WATER_OPTICS } from "./webgpu-lighting";
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
+import type { SvoFluidRenderOwnership } from "./svo-fluid-media-path";
 
 /**
  * Rasterized water presentation for the WebGPU renderer.
@@ -41,7 +42,7 @@ export interface SurfaceExtractionDispatchPlan {
   bandCubeRows?: number;
 }
 
-type TimestampRange = { querySet: GPUQuerySet; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number };
+export type TimestampRange = { querySet: GPUQuerySet; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number };
 export interface RasterWaterTimestampRanges {
   extraction: TimestampRange;
   scene: TimestampRange;
@@ -56,6 +57,38 @@ export interface RasterWaterEncodeResult {
   surfaceUpdated: boolean;
   sprayRendered: boolean;
 }
+
+export interface RasterWaterStagePlan {
+  dryTarget: "internal-refraction" | "presentation-output";
+  extractSurface: boolean;
+  renderInterfaces: boolean;
+  compositeOptics: boolean;
+}
+
+/** CPU-visible mirror of the atomic presentation branch used by `encode`. */
+export function rasterWaterStagePlan(fluidOwnership?: SvoFluidRenderOwnership): RasterWaterStagePlan {
+  if (!fluidOwnership?.directStructuralMedia) {
+    return { dryTarget: "internal-refraction", extractSurface: true, renderInterfaces: true, compositeOptics: true };
+  }
+  if (fluidOwnership.legacyExtraction || fluidOwnership.legacyInterfaces || fluidOwnership.legacyComposite) {
+    throw new Error("Direct structural fluid media must atomically suppress every legacy water stage");
+  }
+  return { dryTarget: "presentation-output", extractSurface: false, renderInterfaces: false, compositeOptics: false };
+}
+
+/**
+ * Encodes a complete replacement for the analytic dry-scene pass.
+ *
+ * Returning true means the replacement wrote the target (including its clear)
+ * and the expensive raster/analytic pass must be skipped. Returning false
+ * preserves the production raster fallback without requiring the caller to
+ * know whether the sparse source is currently publishable.
+ */
+export type DrySceneReplacementEncoder = (
+  encoder: GPUCommandEncoder,
+  target: GPUTexture | GPUTextureView,
+  timestampWrites?: TimestampRange
+) => boolean;
 
 /**
  * Restricted tall cells cannot contain a free surface below their cubic band.
@@ -762,13 +795,16 @@ fn boxNormal(point:vec3f,center:vec3f,halfSize:vec3f)->vec3f{
   if(q.y>=q.z){return vec3f(0,sign(point.y-center.y),0);}
   return vec3f(0,0,sign(point.z-center.z));
 }
+// The compact SVO G-buffer uses zero linear depth on a miss, while the raster
+// compatibility pass retains its historical half-float maximum sentinel.
+fn resolvedDrySceneDepth(encodedDepth:f32)->f32{return select(65504.0,encodedDepth,encodedDepth>0.0);}
 fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
   // The garden pond has no vessel: nothing to composite in front of the water.
   if(environmentIndex()==7){return color;}
   let size=u.container.xyz;let mn=vec3f(-size.x*.5,0,-size.z*.5);let mx=vec3f(size.x*.5,size.y,size.z*.5);let hit=boxHit(ro,rd,mn,mx);
   if(hit.x>hit.y||hit.y<=0.0){return color;}
   let glassT=select(hit.x,hit.y,hit.x<=1e-4);
-  if(glassT<=1e-4||glassT>sceneDepth+.001){return color;}
+  if(glassT<=1e-4||glassT>resolvedDrySceneDepth(sceneDepth)+.001){return color;}
   let center=(mn+mx)*.5;let halfSize=size*.5;let point=ro+rd*glassT;let normal=boxNormal(point,center,halfSize);
   let q=abs((point-center)/max(halfSize,vec3f(1e-5)));
   let edgeCoordinate=max(max(min(q.x,q.y),min(q.x,q.z)),min(q.y,q.z));
@@ -792,7 +828,7 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{var c=environmentForeground(color,ndc)*(
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
   var n=normalize(safeSample(frontNormal,textureUV).xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
   if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}}
-  if(scene.a+depthEpsilon<frontDepth){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}
+  if(resolvedDrySceneDepth(scene.a)+depthEpsilon<frontDepth){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}
   if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/${WATER_OPTICS.indexOfRefraction.toFixed(3)};var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
   var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
   for(var iteration=0;iteration<3;iteration+=1){back=safeSample(backPosition,exitUV);if(back.a<.5){break;}let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(safeSample(backNormal,exitUV).xyz);}
@@ -812,7 +848,7 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{var c=environmentForeground(color,ndc)*(
   // Clean water: red is attenuated first.  A small in-scattering term keeps
   // thick regions luminous instead of turning into opaque ink.
   let refracted=unifiedAbsorbingTransmission(transmittedScene,vec3f(${WATER_OPTICS.absorption.join(",")}),vec3f(${WATER_OPTICS.scatter.join(",")}),thickness);let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);
-  let ssrUV=project(front.xyz+reflectedDir*.8);let ssr=safeSample(sceneTexture,ssrUV);reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a<60000.0));
+  let ssrUV=project(front.xyz+reflectedDir*.8);let ssr=safeSample(sceneTexture,ssrUV);reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a>0.0&&ssr.a<60000.0));
   let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,${WATER_OPTICS.fresnelF0});var water=mix(refracted,reflected,fresnel);
   if(tir){water=mix(water,environmentLight(outgoing),.88);}
   let light=environmentLightDirection();water+=environmentLightColor()*unifiedSpecularLobe(n,-rd,light,180.0)*1.4;
@@ -1018,7 +1054,7 @@ export class RasterWaterPipeline {
     if (key === this.targetKey) return;
     for (const texture of [this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth]) texture?.destroy();
     const sampledTarget = (label: string) => this.device.createTexture({ label, size: [width,height], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
-    this.sceneTexture = sampledTarget("Dry scene HDR"); this.frontPosition = sampledTarget("Water front positions"); this.frontNormal = sampledTarget("Water front normals"); this.backPosition = sampledTarget("Water back positions"); this.backNormal = sampledTarget("Water back normals");
+    this.sceneTexture = this.device.createTexture({ label: "Dry scene HDR", size: [width,height], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC }); this.frontPosition = sampledTarget("Water front positions"); this.frontNormal = sampledTarget("Water front normals"); this.backPosition = sampledTarget("Water back positions"); this.backNormal = sampledTarget("Water back normals");
     const depth = (label: string) => this.device.createTexture({ label, size: [width,height], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
     this.frontDepth = depth("Water front depth"); this.backDepth = depth("Water back depth");
     this.causticTexture?.destroy(); this.causticTexture = this.device.createTexture({ label: "Refracted floor caustics", size: [384,384], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
@@ -1047,7 +1083,12 @@ export class RasterWaterPipeline {
     ] });
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, timestamps?: RasterWaterTimestampRanges, drySceneOverlay?: (encoder: GPUCommandEncoder, target: GPUTextureView) => void): RasterWaterEncodeResult | false {
+  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, timestamps?: RasterWaterTimestampRanges, drySceneReplacement?: DrySceneReplacementEncoder, fluidOwnership?: SvoFluidRenderOwnership): RasterWaterEncodeResult | false {
+    const stagePlan = rasterWaterStagePlan(fluidOwnership);
+    if (stagePlan.dryTarget === "presentation-output") {
+      if (!("createView" in output) || !drySceneReplacement?.(encoder, output, timestamps?.scene)) return false;
+      return { surfaceUpdated: false, sprayRendered: false };
+    }
     const geometryDimensions = this.sparseSurface?.fineDimensions ?? [nx, ny, nz] as const;
     this.ensureGeometry(geometryDimensions[0],geometryDimensions[1],geometryDimensions[2]);
     if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractSparsePipeline||!this.extractHybridCoarsePipeline||!this.resetSurfaceWorklistPipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseSparsePipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.causticPipeline||!this.scenePipeline||!this.compositePipeline||!this.extractBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.sceneBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.causticTexture) return false;
@@ -1097,14 +1138,16 @@ export class RasterWaterPipeline {
       const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}]});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.surfaceBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();
       this.causticsValid = true;
     }
-    const scene=encoder.beginRenderPass({label:"Dry scene",colorAttachments:[{view:this.sceneTexture.createView(),clearValue:{r:0,g:0,b:0,a:65504},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.scene}:{})});scene.setPipeline(this.scenePipeline);scene.setBindGroup(0,this.sceneBindGroup);scene.draw(3);scene.end();
-    drySceneOverlay?.(encoder, this.sceneTexture.createView());
+    const sparseSceneEncoded = drySceneReplacement?.(encoder, this.sceneTexture, timestamps?.scene) ?? false;
+    if (!sparseSceneEncoded) {
+      const scene=encoder.beginRenderPass({label:"Dry scene",colorAttachments:[{view:this.sceneTexture.createView(),clearValue:{r:0,g:0,b:0,a:65504},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.scene}:{})});scene.setPipeline(this.scenePipeline);scene.setBindGroup(0,this.sceneBindGroup);scene.draw(3);scene.end();
+    }
     // Water and spray target the same interface attachments and depth state.
     // Encode both draws in one pass per side so spray does not force two extra
     // full-resolution attachment load/store cycles.
     const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",timestampWrites?:TimestampRange)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.secondaryParticles?.encodeOpticalInterface(pass,side);pass.end();};
     interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.frontInterfaces);interfacePass("Water + spray back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.backInterfaces);
-    const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:output,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,this.compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface, sprayRendered: false };
+    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,this.compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface, sprayRendered: false };
   }
 
   destroy() {

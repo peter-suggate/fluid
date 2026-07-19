@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { defaultCamera, type CameraState } from "../model";
+import { DEFAULT_SVO_RENDER_MODE, type SvoRenderMode } from "../svo-render-mode";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 import type { VoxelRenderMode } from "../webgpu-voxel-debug";
 
@@ -19,6 +20,8 @@ interface UIStore {
   gridOverlayMode: GridOverlayMode;
   /** Unified sparse-brick representation: smooth surface, raw voxels, or brick bounds. */
   voxelRenderMode: VoxelRenderMode;
+  /** Production scene presentation; independent of sparse inspection overlays. */
+  svoRenderMode: SvoRenderMode;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   selectBody: (bodyId?: string) => void;
   setSceneModalOpen: (open: boolean) => void;
@@ -28,6 +31,7 @@ interface UIStore {
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setVoxelRenderMode: (mode: VoxelRenderMode) => void;
+  setSvoRenderMode: (mode: SvoRenderMode) => void;
 }
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -40,6 +44,7 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
   voxelRenderMode: "smooth",
+  svoRenderMode: DEFAULT_SVO_RENDER_MODE,
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   selectBody: (selectedBodyId) => set({ selectedBodyId }),
   setSceneModalOpen: (sceneModalOpen) => set({ sceneModalOpen }),
@@ -51,5 +56,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
-  setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode })
+  setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode }),
+  setSvoRenderMode: (svoRenderMode) => set({ svoRenderMode })
 }));

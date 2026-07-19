@@ -10,6 +10,31 @@ export type PerformanceScheduleInput = {
 const positive = (value: number, fallback: number) => Number.isFinite(value) && value > 0 ? value : fallback;
 const nonNegative = (value: number) => Number.isFinite(value) && value > 0 ? value : 0;
 
+export type GPUUtilizationInput = {
+  physics_ms?: number;
+  physicsCompletionInterval_ms?: number;
+  presentation_ms?: number;
+  presentationInterval_ms?: number;
+};
+
+/** Estimate queue occupancy from timestamped work and queue-confirmed cadence. */
+export function measuredGPUUtilization(input: GPUUtilizationInput) {
+  const share = (busy_ms: number | undefined, interval_ms: number | undefined) =>
+    busy_ms !== undefined && interval_ms !== undefined
+      && Number.isFinite(busy_ms) && Number.isFinite(interval_ms)
+      && busy_ms >= 0 && interval_ms > 0
+      ? Math.min(1, Math.max(0, busy_ms / interval_ms))
+      : null;
+  const physics = share(input.physics_ms, input.physicsCompletionInterval_ms);
+  const presentation = share(input.presentation_ms, input.presentationInterval_ms);
+  if (physics === null && presentation === null) return null;
+  return {
+    physics: physics ?? 0,
+    presentation: presentation ?? 0,
+    total: Math.min(1, (physics ?? 0) + (presentation ?? 0))
+  };
+}
+
 /** Translate asynchronous GPU batching into presentation-frame-normalized rates. */
 export function performanceSchedule(input: PerformanceScheduleInput) {
   const targetFps = positive(input.targetFps, 60);

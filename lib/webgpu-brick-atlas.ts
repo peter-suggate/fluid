@@ -9,7 +9,10 @@
  * overflow flag, and an indirect active-tile worklist. In mirror mode the
  * dense textures stay authoritative; the atlas is populated from them each
  * frame and continuously validated against them, so later kernels can flip
- * to brick-resident sampling with a proven storage substrate.
+ * to brick-resident sampling with a proven storage substrate. Authoritative
+ * mode reverses that ownership: dense fields are only an import source for
+ * newly activated pages and an optional compatibility mirror for consumers
+ * that have not yet been ported.
  */
 
 import type { GPUFluidBrickResidency } from "./webgpu-fluid-brick-residency";
@@ -17,7 +20,10 @@ import type { GPUFluidBrickResidency } from "./webgpu-fluid-brick-residency";
 export const BRICK_ATLAS_INVALID_SLOT = 0xffff_ffff;
 export const BRICK_ATLAS_ACTIVE_DISPATCH_OFFSET_BYTES = 4;
 
-export type FluidBrickAtlasMode = "mirror";
+export type FluidBrickAtlasMode = "mirror" | "authoritative";
+
+/** Finite, unequivocally-air level set used for nonresident authoritative pages. */
+export const BRICK_ATLAS_AIR_PHI = 1_000_000;
 
 export interface FluidBrickAtlasOptions {
   brickSize?: 4 | 8;
@@ -28,6 +34,8 @@ export interface FluidBrickAtlasOptions {
   /** Compare atlas sampling against the dense fields every frame. */
   validate?: boolean;
   mode?: FluidBrickAtlasMode;
+  /** Velocity-swept residency is required before sparse solver dispatch. */
+  preActivation?: boolean;
 }
 
 export interface FluidBrickAtlasPlan {
@@ -114,6 +122,25 @@ export interface FluidBrickAtlasStats {
   comparedSamples: number;
 }
 
+/** Read-only resources needed by a compute pipeline that samples the atlas. */
+export interface FluidBrickAtlasSamplingSource {
+  mode: FluidBrickAtlasMode;
+  filterable: boolean;
+  pageTable: GPUBuffer;
+  params: GPUBuffer;
+  phi: GPUTextureView;
+  velocity: GPUTextureView;
+  sampler?: GPUSampler;
+  /** GPU-authored wet-domain cells scheduled for bulk solver kernels. */
+  bulkWorklist: GPUBuffer;
+  bulkWorklistByteLength: number;
+  brickSize: 4 | 8;
+  brickCapacity: number;
+  sparseDispatchSafe: boolean;
+  /** Refresh residency and mirror pages for the dt about to be advanced. */
+  encodeBulkRefresh: (encoder: GPUCommandEncoder, levelSet: GPUTexture, velocity: GPUTexture, dt_s: number) => void;
+}
+
 const atlasParamsWGSL = /* wgsl */ `
 struct AtlasParams {
   dims: vec4u,
@@ -133,16 +160,21 @@ struct AtlasParams {
  *   var<storage, read> brickAtlasPageTable: array<u32>
  *   var brickAtlasPhi: texture_3d<f32>
  *   var brickAtlasVelocity: texture_3d<f32>
- *   var denseLevelSet: texture_3d<f32>
- *   var denseVelocity: texture_3d<f32>
+ *   var denseLevelSet: texture_3d<f32>     (mirror mode only)
+ *   var denseVelocity: texture_3d<f32>     (mirror mode only)
  *   var brickAtlasSampler: sampler          (filterable variant only)
  *
  * Positions are dense cell-center coordinates (integer position = cell center),
  * matching the dense trilinear convention used throughout the solver. When the
- * containing brick has no atlas slot the helpers fall back to the dense
- * textures, so callers see a total function over the whole domain.
+ * containing brick has no atlas slot, mirror mode falls back to the dense
+ * textures. Authoritative mode deliberately has no dense dependency and
+ * returns air phi and zero velocity for missing pages.
  */
-export function fluidBrickAtlasSamplingWGSL(filterable: boolean): string {
+export function fluidBrickAtlasSamplingWGSL(
+  filterable: boolean,
+  mode: FluidBrickAtlasMode = "mirror",
+): string {
+  const authoritative = mode === "authoritative";
   const hardware = /* wgsl */ `
 fn brickAtlasSamplePhi(position: vec3f) -> f32 {
   let slotBrick = brickAtlasSlotFor(position);
@@ -157,12 +189,16 @@ fn brickAtlasSampleVelocity(position: vec3f) -> vec3f {
   return textureSampleLevel(brickAtlasVelocity, brickAtlasSampler, uvw, 0.0).xyz;
 }
 fn brickAtlasDensePhi(position: vec3f) -> f32 {
+  ${authoritative ? "return BRICK_ATLAS_AIR_PHI;" : /* wgsl */ `
   let p = brickAtlasClampPosition(position);
   return textureSampleLevel(denseLevelSet, brickAtlasSampler, (p + vec3f(0.5)) / vec3f(atlasParams.dims.xyz), 0.0).x;
+  `}
 }
 fn brickAtlasDenseVelocity(position: vec3f) -> vec3f {
+  ${authoritative ? "return vec3f(0.0);" : /* wgsl */ `
   let p = brickAtlasClampPosition(position);
   return textureSampleLevel(denseVelocity, brickAtlasSampler, (p + vec3f(0.5)) / vec3f(atlasParams.dims.xyz), 0.0).xyz;
+  `}
 }
 `;
   const manualAlias = /* wgsl */ `
@@ -173,6 +209,7 @@ fn brickAtlasDenseVelocity(position: vec3f) -> vec3f { return brickAtlasDenseVel
 `;
   return /* wgsl */ `
 const BRICK_ATLAS_INVALID: u32 = 0xffffffffu;
+const BRICK_ATLAS_AIR_PHI: f32 = ${BRICK_ATLAS_AIR_PHI}.0;
 
 fn brickAtlasClampPosition(position: vec3f) -> vec3f {
   return clamp(position, vec3f(0.0), vec3f(atlasParams.dims.xyz - vec3u(1u)));
@@ -205,6 +242,7 @@ fn brickAtlasTexelFor(slot: u32, brick: vec3u, cell: vec3i) -> vec3i {
   return vec3i(brickAtlasTileOrigin(slot)) + local;
 }
 fn brickAtlasDensePhiManual(position: vec3f) -> f32 {
+  ${authoritative ? "return BRICK_ATLAS_AIR_PHI;" : /* wgsl */ `
   let p = brickAtlasClampPosition(position);
   let a = vec3i(floor(p));
   let b = min(a + vec3i(1), vec3i(atlasParams.dims.xyz) - vec3i(1));
@@ -214,8 +252,10 @@ fn brickAtlasDensePhiManual(position: vec3f) -> f32 {
   let p001 = textureLoad(denseLevelSet, vec3i(a.x,a.y,b.z), 0).x; let p101 = textureLoad(denseLevelSet, vec3i(b.x,a.y,b.z), 0).x;
   let p011 = textureLoad(denseLevelSet, vec3i(a.x,b.y,b.z), 0).x; let p111 = textureLoad(denseLevelSet, vec3i(b.x,b.y,b.z), 0).x;
   return mix(mix(mix(p000,p100,t.x),mix(p010,p110,t.x),t.y), mix(mix(p001,p101,t.x),mix(p011,p111,t.x),t.y), t.z);
+  `}
 }
 fn brickAtlasDenseVelocityManual(position: vec3f) -> vec3f {
+  ${authoritative ? "return vec3f(0.0);" : /* wgsl */ `
   let p = brickAtlasClampPosition(position);
   let a = vec3i(floor(p));
   let b = min(a + vec3i(1), vec3i(atlasParams.dims.xyz) - vec3i(1));
@@ -225,6 +265,7 @@ fn brickAtlasDenseVelocityManual(position: vec3f) -> vec3f {
   let v001 = textureLoad(denseVelocity, vec3i(a.x,a.y,b.z), 0).xyz; let v101 = textureLoad(denseVelocity, vec3i(b.x,a.y,b.z), 0).xyz;
   let v011 = textureLoad(denseVelocity, vec3i(a.x,b.y,b.z), 0).xyz; let v111 = textureLoad(denseVelocity, vec3i(b.x,b.y,b.z), 0).xyz;
   return mix(mix(mix(v000,v100,t.x),mix(v010,v110,t.x),t.y), mix(mix(v001,v101,t.x),mix(v011,v111,t.x),t.y), t.z);
+  `}
 }
 fn brickAtlasSamplePhiManual(position: vec3f) -> f32 {
   let slotBrick = brickAtlasSlotFor(position);
@@ -310,8 +351,9 @@ fn activateAndList(@builtin(global_invocation_id) gid: vec3u) {
   if (slot == INVALID) {
     let oldFree = atomicSub(&control[0], 1u);
     if (oldFree == 0u) {
-      // Exhausted: residency stays authoritative and sampling falls back to
-      // the dense fields for this brick, so overflow degrades rather than fails.
+      // Exhausted: residency stays authoritative. Sampling supplies either
+      // the dense mirror fallback or deterministic air/zero in authoritative
+      // mode, so overflow degrades rather than exposing uninitialized memory.
       atomicAdd(&control[0], 1u);
       atomicStore(&control[2], 1u);
       return;
@@ -364,8 +406,10 @@ ${atlasParamsWGSL}
 @group(0) @binding(4) var phiAtlas: texture_storage_3d<r32float, write>;
 @group(0) @binding(5) var velocityAtlas: texture_storage_3d<rgba32float, write>;
 @group(0) @binding(6) var<uniform> atlasParams: AtlasParams;
+@group(0) @binding(7) var<storage, read> residencyStates: array<u32>;
 
 const INVALID: u32 = 0xffffffffu;
+const ACTIVATED: u32 = 8u;
 
 fn brickCoordinate(index: u32) -> vec3u {
   let b = atlasParams.brickDims;
@@ -379,8 +423,7 @@ fn tileOrigin(slot: u32) -> vec3u {
 // The apron reads dense neighbor cells directly with clamp-to-edge semantics,
 // matching the dense sampler exactly so mirror-mode parity holds through the
 // container walls without a dedicated boundary-condition pass.
-@compute @workgroup_size(256)
-fn mirrorResident(@builtin(global_invocation_id) gid: vec3u) {
+fn copyDenseVoxel(gid: vec3u, activatedOnly: bool) {
   let stream = gid.x + gid.y * activeTiles[1] * 256u;
   let tileSize = atlasParams.tileGrid.w;
   let tileVoxels = tileSize * tileSize * tileSize;
@@ -388,6 +431,7 @@ fn mirrorResident(@builtin(global_invocation_id) gid: vec3u) {
   if (activeIndex >= activeTiles[0] || 4u + activeIndex >= arrayLength(&activeTiles)) { return; }
   let brickIndex = activeTiles[4u + activeIndex];
   if (brickIndex >= atlasParams.brickDims.w || brickIndex >= arrayLength(&pageTable)) { return; }
+  if (activatedOnly && (brickIndex >= arrayLength(&residencyStates) || (residencyStates[brickIndex] & ACTIVATED) == 0u)) { return; }
   let slot = pageTable[brickIndex];
   if (slot == INVALID || slot >= atlasParams.capacitySeed.x) { return; }
   let localIndex = stream - activeIndex * tileVoxels;
@@ -397,6 +441,51 @@ fn mirrorResident(@builtin(global_invocation_id) gid: vec3u) {
   let texel = vec3i(tileOrigin(slot)) + vec3i(local);
   textureStore(phiAtlas, texel, vec4f(textureLoad(denseLevelSet, clamped, 0).x, 0.0, 0.0, 0.0));
   textureStore(velocityAtlas, texel, vec4f(textureLoad(denseVelocity, clamped, 0).xyz, 0.0));
+}
+
+@compute @workgroup_size(256)
+fn mirrorResident(@builtin(global_invocation_id) gid: vec3u) { copyDenseVoxel(gid, false); }
+
+// Authoritative mode imports only brand-new pages. Existing pages must never
+// be overwritten from the compatibility dense textures.
+@compute @workgroup_size(256)
+fn initializeActivated(@builtin(global_invocation_id) gid: vec3u) { copyDenseVoxel(gid, true); }
+`;
+
+/** Full-volume compatibility publication for dense-only downstream kernels. */
+export const brickAtlasToDenseShader = /* wgsl */ `
+${atlasParamsWGSL}
+@group(0) @binding(0) var phiAtlas: texture_3d<f32>;
+@group(0) @binding(1) var velocityAtlas: texture_3d<f32>;
+@group(0) @binding(2) var<storage, read> pageTable: array<u32>;
+@group(0) @binding(3) var denseLevelSet: texture_storage_3d<r32float, write>;
+@group(0) @binding(4) var denseVelocity: texture_storage_3d<rgba32float, write>;
+@group(0) @binding(5) var<uniform> atlasParams: AtlasParams;
+
+const INVALID: u32 = 0xffffffffu;
+const AIR_PHI: f32 = ${BRICK_ATLAS_AIR_PHI}.0;
+
+fn tileOrigin(slot: u32) -> vec3u {
+  let g = atlasParams.tileGrid;
+  return vec3u(slot % g.x, (slot / g.x) % g.y, slot / (g.x * g.y)) * g.w;
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn mirrorAtlasToDense(@builtin(global_invocation_id) cell: vec3u) {
+  if (any(cell >= atlasParams.dims.xyz)) { return; }
+  let brick = cell / atlasParams.dims.w;
+  let brickIndex = brick.x + atlasParams.brickDims.x * (brick.y + atlasParams.brickDims.y * brick.z);
+  var slot = INVALID;
+  if (brickIndex < arrayLength(&pageTable)) { slot = pageTable[brickIndex]; }
+  if (slot >= atlasParams.capacitySeed.x) {
+    textureStore(denseLevelSet, cell, vec4f(AIR_PHI, 0.0, 0.0, 0.0));
+    textureStore(denseVelocity, cell, vec4f(0.0));
+    return;
+  }
+  let local = cell - brick * atlasParams.dims.w;
+  let texel = tileOrigin(slot) + local + vec3u(1u);
+  textureStore(denseLevelSet, cell, vec4f(textureLoad(phiAtlas, texel, 0).x, 0.0, 0.0, 0.0));
+  textureStore(denseVelocity, cell, vec4f(textureLoad(velocityAtlas, texel, 0).xyz, 0.0));
 }
 `;
 
@@ -484,18 +573,25 @@ export class WebGPUFluidBrickAtlas {
   readonly pageTable: GPUBuffer;
   readonly activeTiles: GPUBuffer;
   readonly params: GPUBuffer;
+  readonly phiView: GPUTextureView;
+  readonly velocityView: GPUTextureView;
 
   private readonly freeList: GPUBuffer;
   private readonly control: GPUBuffer;
   private readonly stats: GPUBuffer;
+  private readonly residencyStates: GPUBuffer;
+  private readonly residency: GPUFluidBrickResidency;
   private readonly lifecycleGroup: GPUBindGroup;
   private readonly lifecyclePipelines: Record<"reset" | "retire" | "activate" | "finalize", GPUComputePipeline>;
   private readonly mirrorLayout: GPUBindGroupLayout;
-  private readonly mirrorPipeline: GPUComputePipeline;
+  private readonly mirrorPipelines: Record<"resident" | "activated", GPUComputePipeline>;
+  private readonly atlasToDenseLayout: GPUBindGroupLayout;
+  private readonly atlasToDensePipeline: GPUComputePipeline;
   private readonly validateLayout: GPUBindGroupLayout;
   private readonly validatePipeline: GPUComputePipeline;
   private readonly sampler?: GPUSampler;
   private readonly validate: boolean;
+  private readonly preActivation: boolean;
   private frame = 0;
   private destroyed = false;
   private statsReadback?: GPUBuffer;
@@ -507,17 +603,22 @@ export class WebGPUFluidBrickAtlas {
     residency: GPUFluidBrickResidency,
     options: FluidBrickAtlasOptions = {},
   ) {
+    this.residency = residency;
     this.plan = planFluidBrickAtlas(dimensions, {
       ...options,
       brickSize: options.brickSize ?? residency.brickSize,
       maxTextureDimension3D: Number(device.limits.maxTextureDimension3D),
     });
     this.mode = options.mode ?? "mirror";
-    this.validate = options.validate ?? true;
+    this.preActivation = options.preActivation ?? true;
+    this.residencyStates = residency.stateBuffer;
+    this.validate = options.validate ?? this.mode === "mirror";
     this.filterable = device.features.has("float32-filterable" as GPUFeatureName);
     const textureUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING;
     this.phiAtlas = device.createTexture({ label: "Fluid brick atlas phi", size: [...this.plan.atlasDimensions], dimension: "3d", format: "r32float", usage: textureUsage });
     this.velocityAtlas = device.createTexture({ label: "Fluid brick atlas velocity", size: [...this.plan.atlasDimensions], dimension: "3d", format: "rgba32float", usage: textureUsage });
+    this.phiView = this.phiAtlas.createView();
+    this.velocityView = this.velocityAtlas.createView();
     const pageTableData = new Uint32Array(this.plan.logicalBrickCount); pageTableData.fill(BRICK_ATLAS_INVALID_SLOT);
     const freeData = Uint32Array.from({ length: this.plan.capacity }, (_, index) => index);
     const controlData = new Uint32Array(16); controlData[0] = this.plan.capacity;
@@ -537,8 +638,9 @@ export class WebGPUFluidBrickAtlas {
     ] });
     const lifecycleModule = device.createShaderModule({ label: "Fluid brick atlas lifecycle", code: brickAtlasLifecycleShader });
     const mirrorModule = device.createShaderModule({ label: "Fluid brick atlas mirror", code: brickAtlasMirrorShader });
+    const atlasToDenseModule = device.createShaderModule({ label: "Fluid brick atlas compatibility mirror", code: brickAtlasToDenseShader });
     const validateModule = device.createShaderModule({ label: "Fluid brick atlas validation", code: brickAtlasValidateShader(this.filterable) });
-    void Promise.all([lifecycleModule.getCompilationInfo(), mirrorModule.getCompilationInfo(), validateModule.getCompilationInfo()]).then((reports) => {
+    void Promise.all([lifecycleModule.getCompilationInfo(), mirrorModule.getCompilationInfo(), atlasToDenseModule.getCompilationInfo(), validateModule.getCompilationInfo()]).then((reports) => {
       for (const report of reports) for (const message of report.messages) if (message.type === "error") {
         console.error(`Fluid brick atlas WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
       }
@@ -567,11 +669,33 @@ export class WebGPUFluidBrickAtlas {
       { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
       { binding: 5, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
-    this.mirrorPipeline = device.createComputePipeline({
-      label: "Mirror dense fields into fluid brick atlas",
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.mirrorLayout] }),
-      compute: { module: mirrorModule, entryPoint: "mirrorResident" },
+    const mirrorPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.mirrorLayout] });
+    this.mirrorPipelines = {
+      resident: device.createComputePipeline({
+        label: "Mirror dense fields into resident fluid brick atlas pages",
+        layout: mirrorPipelineLayout,
+        compute: { module: mirrorModule, entryPoint: "mirrorResident" },
+      }),
+      activated: device.createComputePipeline({
+        label: "Initialize activated authoritative fluid brick atlas pages",
+        layout: mirrorPipelineLayout,
+        compute: { module: mirrorModule, entryPoint: "initializeActivated" },
+      }),
+    };
+    this.atlasToDenseLayout = device.createBindGroupLayout({ label: "Fluid brick atlas compatibility mirror layout", entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+    ] });
+    this.atlasToDensePipeline = device.createComputePipeline({
+      label: "Mirror authoritative fluid brick atlas into dense compatibility fields",
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.atlasToDenseLayout] }),
+      compute: { module: atlasToDenseModule, entryPoint: "mirrorAtlasToDense" },
     });
     const sampleType = this.filterable ? "float" as const : "unfilterable-float" as const;
     this.validateLayout = device.createBindGroupLayout({ label: "Fluid brick atlas validation layout", entries: [
@@ -606,7 +730,99 @@ export class WebGPUFluidBrickAtlas {
     this.device.queue.writeBuffer(this.params, 0, data);
   }
 
-  /** Encode slot lifecycle + dense mirror (+ validation) after residency classification. */
+  /** Stable read-only bindings for atlas-aware downstream kernels. */
+  getSamplingSource(): FluidBrickAtlasSamplingSource {
+    return {
+      mode: this.mode,
+      filterable: this.filterable,
+      pageTable: this.pageTable,
+      params: this.params,
+      phi: this.phiView,
+      velocity: this.velocityView,
+      bulkWorklist: this.residency.worklist,
+      bulkWorklistByteLength: this.residency.worklistByteLength,
+      brickSize: this.residency.brickSize,
+      brickCapacity: this.residency.capacity,
+      sparseDispatchSafe: this.preActivation,
+      encodeBulkRefresh: (encoder, levelSet, velocity, dt_s) => this.encodeBulkRefresh(encoder, levelSet, velocity, dt_s),
+      ...(this.sampler ? { sampler: this.sampler } : {}),
+    };
+  }
+
+  /** Same-command refresh used immediately before each solver substep. */
+  encodeBulkRefresh(
+    encoder: GPUCommandEncoder,
+    levelSet: GPUTexture,
+    velocity: GPUTexture,
+    dt_s: number,
+  ): void {
+    if (this.destroyed) return;
+    this.residency.encode(encoder, levelSet, velocity, { dt_s, preActivation: this.preActivation });
+    this.encode(encoder, levelSet, velocity);
+  }
+
+  /**
+   * Import dense fields into atlas pages. In authoritative mode this defaults
+   * to newly activated pages only, preserving every existing authoritative
+   * page. Callers may explicitly request all residents for a one-time handoff.
+   */
+  encodeDenseToAtlas(
+    encoder: GPUCommandEncoder,
+    denseLevelSet: GPUTexture,
+    denseVelocity: GPUTexture,
+    activatedOnly = this.mode === "authoritative",
+  ): void {
+    if (this.destroyed) return;
+    const mirrorGroup = this.device.createBindGroup({ label: "Fluid brick atlas dense import bindings", layout: this.mirrorLayout, entries: [
+      { binding: 0, resource: denseLevelSet.createView() },
+      { binding: 1, resource: denseVelocity.createView() },
+      { binding: 2, resource: { buffer: this.pageTable } },
+      { binding: 3, resource: { buffer: this.activeTiles } },
+      { binding: 4, resource: this.phiView },
+      { binding: 5, resource: this.velocityView },
+      { binding: 6, resource: { buffer: this.params } },
+      { binding: 7, resource: { buffer: this.residencyStates } },
+    ] });
+    const mirror = encoder.beginComputePass({ label: activatedOnly
+      ? "Initialize activated authoritative fluid brick atlas pages"
+      : "Mirror dense fields into fluid brick atlas" });
+    mirror.setPipeline(activatedOnly ? this.mirrorPipelines.activated : this.mirrorPipelines.resident);
+    mirror.setBindGroup(0, mirrorGroup);
+    mirror.dispatchWorkgroupsIndirect(this.activeTiles, BRICK_ATLAS_ACTIVE_DISPATCH_OFFSET_BYTES);
+    mirror.end();
+  }
+
+  /**
+   * Publish authoritative atlas payloads to full dense compatibility fields.
+   * Missing pages are overwritten with air phi and zero velocity, never left
+   * stale. This intentionally remains O(volume) until the consumer is ported.
+   */
+  encodeAtlasToDense(
+    encoder: GPUCommandEncoder,
+    denseLevelSet: GPUTexture,
+    denseVelocity: GPUTexture,
+  ): void {
+    if (this.destroyed) return;
+    const group = this.device.createBindGroup({ label: "Fluid brick atlas compatibility mirror bindings", layout: this.atlasToDenseLayout, entries: [
+      { binding: 0, resource: this.phiView },
+      { binding: 1, resource: this.velocityView },
+      { binding: 2, resource: { buffer: this.pageTable } },
+      { binding: 3, resource: denseLevelSet.createView() },
+      { binding: 4, resource: denseVelocity.createView() },
+      { binding: 5, resource: { buffer: this.params } },
+    ] });
+    const pass = encoder.beginComputePass({ label: "Mirror fluid brick atlas into dense compatibility fields" });
+    pass.setPipeline(this.atlasToDensePipeline);
+    pass.setBindGroup(0, group);
+    pass.dispatchWorkgroups(
+      Math.ceil(this.plan.dimensions[0] / 4),
+      Math.ceil(this.plan.dimensions[1] / 4),
+      Math.ceil(this.plan.dimensions[2] / 4),
+    );
+    pass.end();
+  }
+
+  /** Encode slot lifecycle + mode-appropriate dense import (+ validation). */
   encode(encoder: GPUCommandEncoder, denseLevelSet: GPUTexture, denseVelocity: GPUTexture): void {
     if (this.destroyed) return;
     this.frame += 1;
@@ -620,20 +836,7 @@ export class WebGPUFluidBrickAtlas {
     lifecycle.setPipeline(this.lifecyclePipelines.activate); lifecycle.dispatchWorkgroups(bricks);
     lifecycle.setPipeline(this.lifecyclePipelines.finalize); lifecycle.dispatchWorkgroups(1);
     lifecycle.end();
-    const mirrorGroup = this.device.createBindGroup({ label: "Fluid brick atlas mirror bindings", layout: this.mirrorLayout, entries: [
-      { binding: 0, resource: denseLevelSet.createView() },
-      { binding: 1, resource: denseVelocity.createView() },
-      { binding: 2, resource: { buffer: this.pageTable } },
-      { binding: 3, resource: { buffer: this.activeTiles } },
-      { binding: 4, resource: this.phiAtlas.createView() },
-      { binding: 5, resource: this.velocityAtlas.createView() },
-      { binding: 6, resource: { buffer: this.params } },
-    ] });
-    const mirror = encoder.beginComputePass({ label: "Mirror dense fields into fluid brick atlas" });
-    mirror.setPipeline(this.mirrorPipeline);
-    mirror.setBindGroup(0, mirrorGroup);
-    mirror.dispatchWorkgroupsIndirect(this.activeTiles, BRICK_ATLAS_ACTIVE_DISPATCH_OFFSET_BYTES);
-    mirror.end();
+    this.encodeDenseToAtlas(encoder, denseLevelSet, denseVelocity);
     if (!this.validate) return;
     encoder.clearBuffer(this.stats);
     const validateGroup = this.device.createBindGroup({ label: "Fluid brick atlas validation bindings", layout: this.validateLayout, entries: [
@@ -641,8 +844,8 @@ export class WebGPUFluidBrickAtlas {
       { binding: 1, resource: denseVelocity.createView() },
       { binding: 2, resource: { buffer: this.pageTable } },
       { binding: 3, resource: { buffer: this.activeTiles } },
-      { binding: 4, resource: this.phiAtlas.createView() },
-      { binding: 5, resource: this.velocityAtlas.createView() },
+      { binding: 4, resource: this.phiView },
+      { binding: 5, resource: this.velocityView },
       ...(this.filterable && this.sampler ? [{ binding: 6, resource: this.sampler }] : []),
       { binding: 7, resource: { buffer: this.stats } },
       { binding: 8, resource: { buffer: this.params } },

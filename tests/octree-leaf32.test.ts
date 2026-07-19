@@ -98,8 +98,8 @@ async function runCalmDeepSolve(device: GPUDevice, maximumLeafSize: "8" | "32") 
   const internals = (solver as unknown as OctreeInternals).octreeProjection;
   const count = dims[0] * dims[1] * dims[2];
   const owners = new Uint32Array(await readBufferBytes(device, internals.topology, count * 8));
-  const pressureA = new Float32Array(await readBufferBytes(device, internals.pressureA, count * 4));
-  const pressureB = new Float32Array(await readBufferBytes(device, internals.pressureB, count * 4));
+  const pressureA = new Float32Array(await readBufferBytes(device, internals.pressureA, internals.pressureA.size));
+  const pressureB = new Float32Array(await readBufferBytes(device, internals.pressureB, internals.pressureB.size));
   const velocity = await readVelocityTexture(device, internals.resources.velocityOut, dims);
   const compaction = new Uint32Array(await readBufferBytes(device, internals.compaction, 8));
   return { solver, dims, owners, pressureA, pressureB, velocity, liquidLeafRows: compaction[0], matrixEntries: compaction[1] };

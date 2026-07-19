@@ -4,7 +4,7 @@ import test from "node:test";
 import { simulationMethods } from "../lib/methods";
 import { octreeMethod } from "../lib/methods/octree";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
-import { octreeDiagnosticShader, octreePressureCouplingShader, octreeProjectionShader, WebGPUOctreeProjection } from "../lib/webgpu-octree";
+import { octreeDiagnosticShader, octreePressureCouplingShader, octreeProjectionShader, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import { quadtreeSurfaceShader, WebGPUQuadtreeSurfaceState } from "../lib/webgpu-quadtree-builder";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
@@ -50,7 +50,35 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(octreeSource, /pressureWarmStart\?: boolean/);
   assert.match(uniformSolverSource, /pressureWarmStart: options\.octree\.pressureWarmStart/);
   const encode = WebGPUOctreeProjection.prototype.encode.toString();
-  assert.match(encode.replace(/\s+/g, ""), /if\(!this\.pressureWarmStart\)\{encoder\.clearBuffer\(this\.pressureA\);encoder\.clearBuffer\(this\.pressureB\);?\}/);
+  assert.match(encode.replace(/\s+/g, ""), /constremapGroup=this\.latestPressureInA\?this\.groups\.ab:this\.groups\.ba/);
+  assert.doesNotMatch(encode.slice(encode.indexOf("else")), /clearBuffer\(this\.pressure[AB]\)/,
+    "compact cold starts are initialized row-by-row during emission, not by clearing capacity-sized buffers");
+});
+
+test("compact octree pressure capacity scales with domain surface area", () => {
+  const dims = { nx: 288, ny: 96, nz: 64 };
+  const count = dims.nx * dims.ny * dims.nz;
+  const plan = planOctreePressureCapacity(dims, 16, 4);
+  assert.equal(plan.rowCapacity, 316_928);
+  assert.equal(plan.entryCapacity, plan.rowCapacity * 24);
+  assert.ok(plan.rowCapacity < count / 5, "the widened ocean must not reserve one pressure slot per finest cell");
+  const oldBytes = count * (2 * 4 + 32 + 48);
+  assert.ok(plan.pressureBytes + plan.headerBytes + plan.entryBytes < oldBytes * 0.55,
+    "compact pressure/header/entry arenas should remove at least 45% of the former dense-sized allocation");
+  assert.equal(planOctreePressureCapacity(dims, 16, 4, 1024).rowCapacity, 1024);
+});
+
+test("compact pressure rows publish origin ranks and fail closed on capacity overflow", () => {
+  assert.match(octreeProjectionShader, /override rowIndexedPressure: bool = true/);
+  assert.match(octreeProjectionShader, /return select\(0xffffffffu, word - 2u, word >= 2u\)/);
+  assert.match(octreeProjectionShader, /atomicStore\(&frontier\[frontierAliveBase\(\) \+ cell\], row \+ 2u\)/);
+  assert.match(octreeProjectionShader, /pressureOut\[row\] = select\(0\.0, warm/);
+  assert.match(octreeProjectionShader, /LeafEntry \{ row: u32, coefficient: f32 \}/);
+  assert.match(octreeProjectionShader, /total\.x > params\.pressureCapacity\.x \|\| total\.y > params\.pressureCapacity\.y/);
+  assert.match(octreeProjectionShader, /fn passThroughPressureOverflow/);
+  assert.match(WebGPUOctreeProjection.prototype.encode.toString(), /dispatchWorkgroupsIndirect\(this\.pressureOverflowDispatch,\s*0\)/);
+  assert.match(octreePressureCouplingShader, /rowIndexedPressure/);
+  assert.match(octreeDiagnosticShader, /fn pressureRow\(owner: Owner\)/);
 });
 
 test("octree participates in the shared two-way immersed-body coupling path", () => {
@@ -182,11 +210,14 @@ test("octree rebuild and solve stay resident on the GPU", () => {
   assert.match(rebuild, /beginComputePass/);
   assert.match(solve, /clearBuffer/);
   assert.doesNotMatch(`${rebuild}\n${solve}`, /mapAsync|getMappedRange/);
-  // Device-local copies publish row-parallel and one-workgroup-per-leaf
-  // indirect args; neither is a readback or dense-field copy.
+  // Device-local copies publish row-parallel indirect args and stage the
+  // residual/count telemetry before the next rebuild can reuse compaction;
+  // none of these copies is a CPU readback or dense-field transfer.
   const copies = (solve.match(/copyBufferToBuffer\([^)]*\)/g) ?? []).map((copy) => copy.replace(/\s+/g, ""));
   assert.deepEqual(copies, [
     "copyBufferToBuffer(this.compaction,8,this.solveDispatch,0,24)",
+    "copyBufferToBuffer(this.compaction,this.compactionByteLength-20,this.pressureOverflowDispatch,0,12)",
+    "copyBufferToBuffer(this.compaction,this.compactionByteLength-32,this.solveStats,0,32)",
   ]);
   assert.match(octreeProjectionShader, /var<storage, read_write> owners/);
   assert.match(octreeProjectionShader, /pressureIn: array<f32>/);
@@ -196,9 +227,13 @@ test("octree rebuild and solve stay resident on the GPU", () => {
 
 test("octree telemetry samples the live compacted pressure-row count", () => {
   const diagnostics = WebGPUOctreeProjection.prototype.readSolveDiagnostics.toString();
-  assert.match(diagnostics, /copyBufferToBuffer\(this\.compaction,\s*0,\s*readback,\s*0,\s*8\)/);
+  assert.match(diagnostics, /copyBufferToBuffer\(this\.solveStats,\s*0,\s*readback,\s*0,\s*32\)/,
+    "diagnostics must read the solve-ordered staging buffer instead of racing the reused compaction arena");
+  assert.match(diagnostics, /const liquidRows\s*=\s*words\[1\]/);
+  assert.match(diagnostics, /pressureCapacityOverflow\s*=\s*overflow/);
   assert.match(diagnostics, /this\.info\.liquidDofCount\s*=\s*liquidRows/);
   assert.match(diagnostics, /this\.info\.pressureSampleCount\s*=\s*liquidRows/);
+  assert.match(diagnostics, /this\.updateSolveBudget\(residuals\[0\],\s*residuals\[1\],\s*liquidRows\)/);
 });
 
 test("octree compacted leaf solve scans, assembles once, and iterates over rows only", () => {
@@ -224,7 +259,7 @@ test("octree compacted leaf solve scans, assembles once, and iterates over rows 
   assert.match(assemble, /flux \+= f32\(side\) \* area \* /);
   const iterate = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn iterateLeaves"), octreeProjectionShader.indexOf("fn leafPressureLoad"));
   assert.doesNotMatch(iterate, /velocityAt|ownerAt|textureLoad/);
-  assert.match(iterate, /entry\.coefficient \* pressureIn\[entry\.cell\]/);
+  assert.match(iterate, /entry\.coefficient \* pressureIn\[entry\.row\]/);
 });
 
 test("octree assembles coarse leaf faces cooperatively with deterministic quadrants", () => {
@@ -247,7 +282,7 @@ test("octree assembles coarse leaf faces cooperatively with deterministic quadra
 
 test("octree Chebyshev solve removes three quarters of global iteration boundaries", () => {
   const start = octreeProjectionShader.indexOf("fn iterateChebyshev");
-  const end = octreeProjectionShader.indexOf("fn leafPressureLoad", start);
+  const end = octreeProjectionShader.indexOf("// Relative-residual feedback", start);
   const chebyshev = octreeProjectionShader.slice(start, end);
   assert.ok(start >= 0 && end > start);
   assert.match(chebyshev, /params\.solve\.y/);
@@ -255,6 +290,9 @@ test("octree Chebyshev solve removes three quarters of global iteration boundari
   assert.match(chebyshev, /header\.pad0 = bitcast<u32>\(search\)/);
   assert.match(chebyshev, /header\.pad1 = bitcast<u32>\(rho\)/);
   assert.doesNotMatch(chebyshev, /workgroupBarrier|storageBarrier|ownerAt|textureLoad/, "each pass stays row-parallel and reduction-free");
+  const feedback = octreeProjectionShader.slice(end, octreeProjectionShader.indexOf("fn leafPressureLoad", end));
+  assert.match(feedback, /fn reduceResidualPartials/);
+  assert.match(feedback, /fn reduceResidualTotal/);
   const encode = WebGPUOctreeProjection.prototype.encode.toString();
   assert.match(encode, /Math\.ceil\(this\.iterations\s*\/\s*4\)/);
   assert.match(encode, /this\.iterateChebyshevPipeline/);
@@ -267,7 +305,7 @@ test("octree megakernel keeps barriers in uniform control flow and folds parity 
   assert.match(solve, /workgroupUniformLoad\(&convergedShared\)/);
   assert.match(solve, /workgroupUniformLoad\(&rowCountShared\)/);
   assert.match(solve, /storageBarrier\(\)/);
-  assert.match(solve, /pressureIn\[cell\] = pressureOut\[cell\]/);
+  assert.match(solve, /pressureIn\[pressureRow\] = pressureOut\[pressureRow\]/);
   assert.match(solve, /tolerance2 \* normB/);
 });
 
@@ -291,13 +329,14 @@ test("octree uses the level-set crossing and prolongates pressure inside coarse 
   assert.match(octreeProjectionShader, /abs\(liquidPhi\) \/ max\(abs\(liquidPhi\) \+ abs\(airPhi\)/,
     "the free-surface pressure boundary must lie at phi=0");
   assert.match(octreeProjectionShader, /fn reconstructGradients/);
-  assert.match(octreeProjectionShader, /pressureOut\[index\(workgroupOrigin \+ vec3u\(1u,0u,0u\)\)\] = reconstructedAxisGradient/);
+  assert.match(octreeProjectionShader, /fn storeReconstructedGradient/);
+  assert.match(octreeProjectionShader, /header\.gradient = vec4f\(gradient, 0\.0\)/);
   const project = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn projectedComponent"), octreeProjectionShader.indexOf("fn extrapolate"));
   assert.match(project, /left\.packedOrigin != right\.packedOrigin[\s\S]*pressureDistance\(left, right, axis\)/,
     "leaf-boundary faces must retain the exact assembled variational gradient");
   assert.match(project, /else if \(leftWet && rightWet\) \{\s+fluid -= reconstructedGradient\(left, axis\)/,
     "dense faces inside a coarse leaf must no longer be invisible to pressure");
-  assert.match(octreeDiagnosticShader, /mappedPressure = pressure\[ownerIndex\] \+ dot\(leafGradient\(owner\), offset\)/,
+  assert.match(octreeDiagnosticShader, /mappedPressure = centrePressure \+ dot\(leafGradient\(owner\), offset\)/,
     "the pressure overlay must expose the same affine field used by projection");
   assert.match(octreeDiagnosticShader, /bitcast<u32>\(pressureUpdate\)/,
     "the pressure-ownership texture must expose the applied velocity update without a readback");
@@ -344,6 +383,21 @@ test("octree projection is driven by the persistent leaf frontier", () => {
   assert.match(encode, /this\.projectLeavesPipeline\)[\s\S]*dispatchWorkgroupsIndirect\(this\.solveDispatch,\s*12\)/);
   assert.match(octreeProjectionShader, /fn extrapolateSeed/,
     "the first dense compatibility sweep must ignore stale air validity");
+});
+
+test("octree velocity extrapolation can consume the bulk resident cell64 stream", () => {
+  const encode = WebGPUOctreeProjection.prototype.encode.toString();
+  assert.match(octreeProjectionShader, /@group\(0\) @binding\(15\) var<storage, read> bulkWorklist/);
+  assert.match(octreeProjectionShader, /let stream = \(workgroup\.x \+ workgroup\.y \* dispatchWidth\) \* 64u \+ localIndex/,
+    "the sparse kernel must linearize the producer's tiled 2D dispatch");
+  assert.match(octreeProjectionShader, /let entry = 16u \+ 2u \* activeIndex/);
+  assert.match(octreeProjectionShader, /@compute @workgroup_size\(64\)\s+fn extrapolateSeedSparse/);
+  assert.match(octreeProjectionShader, /@compute @workgroup_size\(64\)\s+fn extrapolateSparse/);
+  assert.match(octreeProjectionShader, /fn extrapolateSeedSparse[\s\S]*extrapolateSeedAt\(bulkResidentCell\(wid, lid\)\)/);
+  assert.match(octreeProjectionShader, /fn extrapolateSparse[\s\S]*extrapolateAt\(bulkResidentCell\(wid, lid\)\)/);
+  assert.match(encode, /dispatchWorkgroupsIndirect\(bulkWorklist,\s*FLUID_BRICK_ACTIVE_CELL64_DISPATCH_OFFSET_BYTES\)/);
+  assert.match(encode, /copyExtrapolatedSparsePipeline[\s\S]*dispatchWorkgroupsIndirect/,
+    "an odd sweep count must not reintroduce a logical-volume texture copy");
 });
 
 test("octree materializes adaptive overlay fields without a readback", () => {

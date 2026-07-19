@@ -69,6 +69,8 @@ export interface SparseSurfaceBandStats {
 }
 
 export interface SparseSurfaceBandGPUSource {
+  /** Renderer staging accepts only the solver-authoritative fine field. */
+  mode: SparseSurfaceBandMode;
   pageTable: GPUBufferBinding;
   states: GPUBufferBinding;
   activePages: GPUBufferBinding;
@@ -1058,6 +1060,7 @@ export class WebGPUSparseSurfaceBand {
 
   get source(): SparseSurfaceBandGPUSource {
     return {
+      mode: this.mode,
       pageTable: { buffer: this.pageTable }, activePages: { buffer: this.activePages },
       states: { buffer: this.states },
       phi: { buffer: this.currentPhi === "a" ? this.phiA : this.phiB }, velocity: { buffer: this.velocity },

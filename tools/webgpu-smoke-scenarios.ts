@@ -18,6 +18,12 @@ export const smokeScenarioIds = [
 
 export type SmokeScenarioId = typeof smokeScenarioIds[number];
 
+/** Preserve the original 7.2 m gate's disturbance-volume bar for the same fixed slab in a wider tank. */
+export function minimumOceanFarHalfDisturbanceCells(width_m: number): number {
+  if (!(width_m > 0) || !Number.isFinite(width_m)) throw new RangeError("Ocean width must be positive and finite");
+  return 0.5 * 7.2 / width_m;
+}
+
 export interface SmokeScenario {
   id: SmokeScenarioId;
   description: string;
@@ -92,9 +98,12 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
   if (id === "ocean-seiche") {
     // A wide deep tank whose calm interior coarsens into 16/32-cubed octree
     // leaves; a raised 2x1x8-brick slab along the -x wall collapses into a
-    // long gravity wave (~4.2 m/s) that crosses the 4.8 m tank in ~1.1 s.
+    // long gravity wave (~4.2 m/s) that crosses the 9.6 m tank in ~2.3 s.
     const scene = createOceanSeicheScene();
-    scene.environment = "research-station";
+    // The benchmark isolates fluid scaling. Publishing the full research
+    // station's legacy inspection records adds hundreds of MB unrelated to
+    // the solver and can hide the sparse-field signal under debug memory.
+    scene.environment = "default";
     scene.sceneId = "smoke-ocean-seiche";
     scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.005;
     return {

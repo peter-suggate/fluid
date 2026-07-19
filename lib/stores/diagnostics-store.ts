@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { GPUStatus } from "../webgpu-renderer";
+import type { EffectiveRendererStatus, GPUStatus } from "../webgpu-renderer";
 import type { GPUEulerianInfo, GPUPhysicsStageId } from "../webgpu-eulerian";
 import type { EulerianDiagnostics, EulerianRenderState } from "../eulerian-solver";
 import type { RigidBodyState, RigidStepDiagnostics } from "../rigid-body";
@@ -89,6 +89,7 @@ interface DiagnosticsStore {
   couplingState: CouplingDiagnostics;
   gpuStatus: GPUStatus;
   gpuInfo: GPUEulerianInfo | null;
+  effectiveRendererStatus: EffectiveRendererStatus;
   frameMs: number;
   resolution: string;
   samples: MetricSample[];
@@ -106,6 +107,7 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   couplingState: emptyCoupling,
   gpuStatus: { state: "initializing", label: "Initializing WebGPU" },
   gpuInfo: null,
+  effectiveRendererStatus: { requestedMode: "raster", effectiveMode: "raster" },
   frameMs: 0,
   resolution: "—",
   samples: [],

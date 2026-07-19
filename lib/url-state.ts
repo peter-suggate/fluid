@@ -4,6 +4,7 @@ import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets } f
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
 import { useUIStore, type RightPanel } from "./stores/ui-store";
+import { DEFAULT_SVO_RENDER_MODE, isSvoRenderMode, type SvoRenderMode } from "./svo-render-mode";
 import type { GPUQuality } from "./tall-cell-grid";
 import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
 import type { VoxelRenderMode } from "./webgpu-voxel-debug";
@@ -58,6 +59,7 @@ type UIQueryState = {
   gridOverlaySlice: number;
   gridOverlayMode: GridOverlayMode;
   voxelRenderMode: VoxelRenderMode;
+  svoRenderMode: SvoRenderMode;
 };
 
 type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
@@ -161,6 +163,7 @@ export function parseQueryState(search: string): QueryState {
   const grid = query.get("grid");
   const gridMode = query.get("gridMode");
   const voxels = query.get("voxels");
+  const render = query.get("render");
   const requestedPanel = query.get("panel");
   // One-way migration for shared pre-sidebar links. Serialization always emits
   // the mutually exclusive panel state instead of restoring the old UI flag.
@@ -192,7 +195,8 @@ export function parseQueryState(search: string): QueryState {
       gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" ? grid : initialUI.gridOverlayAxis,
       gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
-      voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode
+      voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode,
+      svoRenderMode: isSvoRenderMode(render) ? render : DEFAULT_SVO_RENDER_MODE
     }
   };
 }
@@ -216,6 +220,7 @@ export function serializeQueryState(
   query.set("method", methodState.methodId);
   query.set("scene", sceneState.presetId);
   query.set("quality", methodState.quality);
+  if (uiState.svoRenderMode !== DEFAULT_SVO_RENDER_MODE) query.set("render", uiState.svoRenderMode);
   if (uiState.voxelRenderMode !== "smooth") query.set("voxels", uiState.voxelRenderMode);
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");

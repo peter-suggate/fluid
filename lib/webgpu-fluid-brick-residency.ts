@@ -16,8 +16,23 @@ export const FLUID_BRICK_ACTIVATED = 8;
 export const FLUID_BRICK_WAS_RESIDENT = 32;
 
 export const FLUID_BRICK_WORKLIST_HEADER_WORDS = 16;
+export const FLUID_BRICK_STATE_STRIDE_BYTES = 4;
+export const FLUID_BRICK_WORKLIST_ENTRY_STRIDE_BYTES = 8;
+export const FLUID_BRICK_WORKLIST_WORDS = Object.freeze({
+  activeCount: 0,
+  retiredCount: 4,
+  coreCount: 8,
+  haloCount: 9,
+  activatedCount: 10,
+  retiredStatsCount: 11,
+  generation: 15,
+} as const);
 export const FLUID_BRICK_ACTIVE_DISPATCH_OFFSET_BYTES = 4;
 export const FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES = 20;
+/** Generic 4x4x4 cell kernels consume 64 cells/workgroup. */
+export const FLUID_BRICK_ACTIVE_CELL64_DISPATCH_OFFSET_BYTES = 48;
+/** Backward-compatible surface scheduler name for the same generic stream. */
+export const FLUID_BRICK_ACTIVE_SURFACE_DISPATCH_OFFSET_BYTES = FLUID_BRICK_ACTIVE_CELL64_DISPATCH_OFFSET_BYTES;
 /**
  * Topology-tile worklist header layout (mirrors the brick worklist): word 0 is
  * the active tile count with its 4x4x4-workgroup indirect dispatch in words
@@ -37,6 +52,13 @@ export interface FluidBrickResidencyOptions {
   haloCells?: number;
   /** Consecutive dry publications before a formerly resident brick is freed. */
   retireAfterFrames?: number;
+  /**
+   * Retain every brick containing liquid, not only the two-sided interface
+   * band. Bulk-field atlases use this independent residency domain so deep
+   * velocity remains available without making surface-only kernels visit the
+   * whole wet volume.
+   */
+  includeLiquidInterior?: boolean;
   /** Tree leaf index for every x-major solver brick. */
   leafIndices?: Uint32Array<ArrayBuffer>;
   leafCapacity?: number;
@@ -67,6 +89,7 @@ export interface CPUFluidBrickState {
 export interface CPUFluidBrickClassificationOptions {
   haloPhi: number;
   retireAfterFrames: number;
+  includeLiquidInterior?: boolean;
 }
 
 /** Deterministic CPU mirror of the per-brick lifecycle used by unit tests. */
@@ -88,7 +111,8 @@ export function classifyCPUFluidBrick(
   // sample within the requested absolute-distance support.
   const core = minimumPhi <= 0 && maximumPhi >= 0;
   const minimumAbsolutePhi = core ? 0 : Math.min(Math.abs(minimumPhi), Math.abs(maximumPhi));
-  const desired = minimumAbsolutePhi < options.haloPhi;
+  const desired = minimumAbsolutePhi < options.haloPhi
+    || (options.includeLiquidInterior === true && minimumPhi < 0);
   const wasResident = (previous.flags & FLUID_BRICK_RESIDENT) !== 0;
   const dryFrames = desired ? 0 : Math.min(0xffff, previous.dryFrames + 1);
   const resident = desired || (wasResident && dryFrames <= options.retireAfterFrames);
@@ -221,7 +245,8 @@ fn classify(@builtin(global_invocation_id) gid: vec3u) {
   let wasResident = (previousFlags & RESIDENT) != 0u;
   let core = minimumPhi <= 0.0 && maximumPhi >= 0.0;
   let minimumAbsolutePhi = select(min(abs(minimumPhi), abs(maximumPhi)), 0.0, core);
-  let desired = minimumAbsolutePhi < params.settings.x;
+  let desired = minimumAbsolutePhi < params.settings.x
+    || (params.settings.w > 0.5 && minimumPhi < 0.0);
   var dryFrames = select(min(0xffffu, (previous >> 16u) + 1u), 0u, desired);
   let retireAfter = u32(params.settings.y);
   let resident = desired || (wasResident && dryFrames <= retireAfter);
@@ -250,7 +275,8 @@ fn classifySwept(@builtin(global_invocation_id) gid: vec3u) {
   // Support = max(phi halo band, |v| dt with a 1.5 safety factor) so a fast
   // front pre-activates the bricks it will sweep before phi arrives.
   let sweptSupport = brickMaximumSpeed(origin) * params.settings.z * 1.5;
-  let desired = minimumAbsolutePhi < max(params.settings.x, sweptSupport);
+  let desired = minimumAbsolutePhi < max(params.settings.x, sweptSupport)
+    || (params.settings.w > 0.5 && range.x < 0.0);
   let previous = atomicLoad(&states[brickIndex]);
   let wasResident = ((previous & 0xffu) & RESIDENT) != 0u;
   var dryFrames = select(min(0xffffu, (previous >> 16u) + 1u), 0u, desired);
@@ -287,15 +313,25 @@ fn expandDownstream(@builtin(global_invocation_id) gid: vec3u) {
       let neighborIndex = u32(neighbor.x) + params.brickDimsCapacity.x * (u32(neighbor.y) + params.brickDimsCapacity.y * u32(neighbor.z));
       if (neighborIndex >= arrayLength(&states)) { continue; }
       if ((atomicLoad(&states[neighborIndex]) & CORE) == 0u) { continue; }
-      // Sample the neighbor's face cell adjacent to this brick; flow toward
-      // this brick is a negative component along the direction axis.
+      // Scan the complete shared face. A single centre texel misses localized
+      // jets and would activate the downstream brick one substep too late once
+      // velocity output is dispatched only over resident bricks.
       var neighborBase = vec3u(neighbor) * brickSize;
-      var faceCell = neighborBase + vec3u(brickSize / 2u);
-      if (sign > 0) { faceCell[axis] = neighborBase[axis]; }
-      else { faceCell[axis] = neighborBase[axis] + brickSize - 1u; }
-      let clamped = clamp(vec3i(faceCell), vec3i(0), vec3i(params.dimsBrick.xyz) - vec3i(1));
-      var flow = textureLoad(velocity, clamped, 0).xyz;
-      forced = flow[axis] * f32(-sign) > 1e-4;
+      let tangentA = (axis + 1) % 3;
+      let tangentB = (axis + 2) % 3;
+      var maximumInwardSpeed = 0.0;
+      for (var a = 0u; a < brickSize; a += 1u) {
+        for (var b = 0u; b < brickSize; b += 1u) {
+          var faceCell = neighborBase;
+          faceCell[axis] = select(neighborBase[axis] + brickSize - 1u, neighborBase[axis], sign > 0);
+          faceCell[tangentA] = neighborBase[tangentA] + a;
+          faceCell[tangentB] = neighborBase[tangentB] + b;
+          if (any(faceCell >= params.dimsBrick.xyz)) { continue; }
+          let flow = textureLoad(velocity, vec3i(faceCell), 0).xyz;
+          maximumInwardSpeed = max(maximumInwardSpeed, flow[axis] * f32(-sign));
+        }
+      }
+      forced = maximumInwardSpeed > 1e-4;
     }
   }
   if (!forced) { return; }
@@ -375,6 +411,10 @@ fn finalize() {
   atomicStore(&worklist[1], activeDispatch.x);
   atomicStore(&worklist[2], activeDispatch.y);
   atomicStore(&worklist[3], 1u);
+  let surfaceDispatch = tiledDispatch((resident * voxelsPerBrick + 63u) / 64u);
+  atomicStore(&worklist[12], surfaceDispatch.x);
+  atomicStore(&worklist[13], surfaceDispatch.y);
+  atomicStore(&worklist[14], 1u);
   let retiredDispatch = tiledDispatch((retired * voxelsPerBrick + 255u) / 256u);
   atomicStore(&worklist[5], retiredDispatch.x);
   atomicStore(&worklist[6], retiredDispatch.y);
@@ -489,9 +529,9 @@ export class GPUFluidBrickResidency {
     const retireAfterFrames = options.retireAfterFrames ?? 3;
     if (!(haloCells >= 0) || !Number.isFinite(haloCells)) throw new RangeError("Fluid brick halo must be finite and non-negative");
     if (!Number.isInteger(retireAfterFrames) || retireAfterFrames < 0 || retireAfterFrames > 0xffff) throw new RangeError("Fluid brick retirement window must be a uint16");
-    floats.set([haloCells * Math.max(...cellSize), retireAfterFrames, 0, 0], 8);
+    floats.set([haloCells * Math.max(...cellSize), retireAfterFrames, 0, options.includeLiquidInterior ? 1 : 0], 8);
     device.queue.writeBuffer(this.params, 0, parameterData);
-    const module = device.createShaderModule({ label: "Fluid brick residency shader", code: fluidBrickResidencyShader });
+    const shaderModule = device.createShaderModule({ label: "Fluid brick residency shader", code: fluidBrickResidencyShader });
     this.layout = device.createBindGroupLayout({ label: "Fluid brick residency layout", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
@@ -504,12 +544,12 @@ export class GPUFluidBrickResidency {
       { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
-    this.classifyPipeline = device.createComputePipeline({ label: "Classify fluid brick residency", layout: pipelineLayout, compute: { module, entryPoint: "classify" } });
-    this.classifySweptPipeline = device.createComputePipeline({ label: "Classify fluid brick residency with swept support", layout: pipelineLayout, compute: { module, entryPoint: "classifySwept" } });
-    this.expandDownstreamPipeline = device.createComputePipeline({ label: "Expand fluid brick residency downstream", layout: pipelineLayout, compute: { module, entryPoint: "expandDownstream" } });
-    this.emitWorklistPipeline = device.createComputePipeline({ label: "Emit fluid brick worklists", layout: pipelineLayout, compute: { module, entryPoint: "emitWorklist" } });
-    this.emitTopologyTilesPipeline = device.createComputePipeline({ label: "Emit topology tile worklists", layout: pipelineLayout, compute: { module, entryPoint: "emitTopologyTiles" } });
-    this.finalizePipeline = device.createComputePipeline({ label: "Finalize fluid brick worklists", layout: pipelineLayout, compute: { module, entryPoint: "finalize" } });
+    this.classifyPipeline = device.createComputePipeline({ label: "Classify fluid brick residency", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "classify" } });
+    this.classifySweptPipeline = device.createComputePipeline({ label: "Classify fluid brick residency with swept support", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "classifySwept" } });
+    this.expandDownstreamPipeline = device.createComputePipeline({ label: "Expand fluid brick residency downstream", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "expandDownstream" } });
+    this.emitWorklistPipeline = device.createComputePipeline({ label: "Emit fluid brick worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "emitWorklist" } });
+    this.emitTopologyTilesPipeline = device.createComputePipeline({ label: "Emit topology tile worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "emitTopologyTiles" } });
+    this.finalizePipeline = device.createComputePipeline({ label: "Finalize fluid brick worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "finalize" } });
     // The texture binding changes with the projection's ping-pong surface and
     // is therefore created in encode(). Keep the common resources resident.
     this.allocatedBytes = this.capacity * 4 + worklistWords * 4 + tileWorklistWords * 4 + this.tileCapacity * 4 + mapping.byteLength + leafCapacity * 4 + 64;
@@ -526,7 +566,11 @@ export class GPUFluidBrickResidency {
   ): void {
     if (this.destroyed) return;
     const preActivation = (options.preActivation ?? false) && !!velocity;
-    this.device.queue.writeBuffer(this.params, 40, new Float32Array([Math.max(0, options.dt_s ?? 0), preActivation ? 1 : 0]));
+    // settings.z is the per-publication swept dt. settings.w is the immutable
+    // includeLiquidInterior bit written by the constructor; overwriting both
+    // words here made every pre-activated narrow surface scheduler retain the
+    // complete deep-liquid volume.
+    this.device.queue.writeBuffer(this.params, 40, new Float32Array([Math.max(0, options.dt_s ?? 0)]));
     // Preserve word 15 as a monotonically increasing GPU generation counter.
     encoder.clearBuffer(this.worklist, 0, (FLUID_BRICK_WORKLIST_HEADER_WORDS - 1) * 4);
     encoder.clearBuffer(this.tileWorklist, 0, FLUID_TILE_WORKLIST_HEADER_WORDS * 4);

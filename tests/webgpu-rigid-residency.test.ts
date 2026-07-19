@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { gpuRigidBodyShader, GPU_RIGID_RENDER_BYTES, GPU_RIGID_STATE_BYTES } from "../lib/webgpu-rigid-body";
+import { gpuRigidBodyShader, GPU_RIGID_MOTION_BYTES, GPU_RIGID_RENDER_BYTES, GPU_RIGID_STATE_BYTES } from "../lib/webgpu-rigid-body";
 
 const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
 const restricted = readFileSync(new URL("../lib/webgpu-eulerian.ts", import.meta.url), "utf8");
@@ -12,6 +12,7 @@ const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import
 test("rigid state and render records have stable storage ABIs", () => {
   assert.equal(GPU_RIGID_STATE_BYTES, 12 * 32 * 4);
   assert.equal(GPU_RIGID_RENDER_BYTES, 12 * 16 * 4);
+  assert.equal(GPU_RIGID_MOTION_BYTES, 12 * 128);
   assert.match(gpuRigidBodyShader, /array<RigidBody, 12>/);
   assert.match(gpuRigidBodyShader, /@compute @workgroup_size\(1\)/);
 });

@@ -24,3 +24,12 @@ test("viewport utility panels are mutually exclusive", () => {
 
   useUIStore.setState(initial, true);
 });
+
+test("production renderer mode defaults to SVO dry plus raster water and can select raster", () => {
+  const initial = useUIStore.getInitialState();
+  useUIStore.setState(initial, true);
+  assert.equal(useUIStore.getState().svoRenderMode, "svo");
+  useUIStore.getState().setSvoRenderMode("raster");
+  assert.equal(useUIStore.getState().svoRenderMode, "raster");
+  useUIStore.setState(initial, true);
+});

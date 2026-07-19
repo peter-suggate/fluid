@@ -144,7 +144,7 @@ const roomRepresentativeColors: Record<Exclude<EnvironmentId, "default" | "garde
   "research-station": { floor: C(.012, .045, .065), wall: C(.012, .045, .065), ceiling: C(.009, .032, .047) }
 };
 
-function addRoomShell(builder: ProxyBuilder, id: Exclude<EnvironmentId, "default" | "garden">, roomHalf: Vec3, floorY: number, thickness: number): EnvironmentProxyShell {
+function addRoomShell(builder: ProxyBuilder, id: Exclude<EnvironmentId, "default" | "garden">, roomHalf: Vec3, floorY: number, thickness: number, scale_m: number): EnvironmentProxyShell {
   const center = V(0, floorY + roomHalf.y, 0);
   const c = roomRepresentativeColors[id];
   const t = thickness * .5;
@@ -152,7 +152,27 @@ function addRoomShell(builder: ProxyBuilder, id: Exclude<EnvironmentId, "default
   builder.box("shell/ceiling", "shell-ceiling", V(0, floorY + 2 * roomHalf.y + t, 0), V(roomHalf.x, t, roomHalf.z), c.ceiling, 0, ["shell", "ceiling"], true);
   builder.box("shell/wall-left", "shell-wall", V(-roomHalf.x - t, center.y, 0), V(t, roomHalf.y, roomHalf.z), c.wall, 0, ["shell", "wall"], true);
   builder.box("shell/wall-right", "shell-wall", V(roomHalf.x + t, center.y, 0), V(t, roomHalf.y, roomHalf.z), c.wall, 0, ["shell", "wall"], true);
-  builder.box("shell/wall-back", "shell-wall", V(0, center.y, -roomHalf.z - t), V(roomHalf.x, roomHalf.y, t), c.wall, 0, ["shell", "wall"], true);
+  if (id === "night-lab") {
+    // The raster room shader has a city window in its back wall. A single
+    // union-only wall box concealed the authored thin-glass pane and forced
+    // the whole night-lab SVO path to raster. Four ordinary analytic boxes
+    // preserve the same wall while leaving an exact rectangular opening.
+    const openingHalfWidth = Math.min(1.62 * scale_m, roomHalf.x - thickness);
+    const openingHalfHeight = Math.min(.55 * scale_m, roomHalf.y - thickness);
+    const openingCenterY = floorY + 1.60 * scale_m;
+    const openingBottom = Math.max(floorY, openingCenterY - openingHalfHeight);
+    const openingTop = Math.min(floorY + 2 * roomHalf.y, openingCenterY + openingHalfHeight);
+    const sideHalfWidth = .5 * (roomHalf.x - openingHalfWidth);
+    const sideCenterX = openingHalfWidth + sideHalfWidth;
+    const bottomHalfHeight = .5 * (openingBottom - floorY);
+    const topHalfHeight = .5 * (floorY + 2 * roomHalf.y - openingTop);
+    builder.box("shell/wall-back-left", "shell-wall", V(-sideCenterX, center.y, -roomHalf.z - t), V(sideHalfWidth, roomHalf.y, t), c.wall, 0, ["shell", "wall", "window-cutout"], true);
+    builder.box("shell/wall-back-right", "shell-wall", V(sideCenterX, center.y, -roomHalf.z - t), V(sideHalfWidth, roomHalf.y, t), c.wall, 0, ["shell", "wall", "window-cutout"], true);
+    builder.box("shell/wall-back-bottom", "shell-wall", V(0, floorY + bottomHalfHeight, -roomHalf.z - t), V(openingHalfWidth, bottomHalfHeight, t), c.wall, 0, ["shell", "wall", "window-cutout"], true);
+    builder.box("shell/wall-back-top", "shell-wall", V(0, openingTop + topHalfHeight, -roomHalf.z - t), V(openingHalfWidth, topHalfHeight, t), c.wall, 0, ["shell", "wall", "window-cutout"], true);
+  } else {
+    builder.box("shell/wall-back", "shell-wall", V(0, center.y, -roomHalf.z - t), V(roomHalf.x, roomHalf.y, t), c.wall, 0, ["shell", "wall"], true);
+  }
   builder.box("shell/wall-front", "shell-wall", V(0, center.y, roomHalf.z + t), V(roomHalf.x, roomHalf.y, t), c.wall, 0, ["shell", "wall"], true);
   return { kind: "room", floorY_m: floorY, bounds_m: aabb(center, roomHalf), primitives: builder.shell, materialModel: roomMaterialModels[id] };
 }
@@ -278,20 +298,34 @@ function buildStation(b: ProxyBuilder, s: number): void {
 
 function buildGarden(b: ProxyBuilder, scene: SceneDescription, s: number): void {
   const g = scene.terrain?.baseHeight_m ?? 0;
-  const hedge = C(.045, .145, .045);
-  b.box("hedge/back", "hedge", V(.4 * s, g + .36 * s, -1.55 * s), V(1.9 * s, .36 * s, .16 * s), hedge, 0, ["hedge"]);
-  b.box("hedge/left", "hedge", V(-1.65 * s, g + .42 * s, -.35 * s), V(.15 * s, .42 * s, 1.25 * s), cmul(hedge, .88), 0, ["hedge"]);
-  b.box("hedge/right", "hedge", V(1.72 * s, g + .30 * s, .45 * s), V(.14 * s, .30 * s, 1 * s), cmul(hedge, 1.06), 0, ["hedge"]);
-  b.cylinder("apple-tree/trunk", "tree-trunk", V(-1.15 * s, g + .34 * s, 1.05 * s), .045 * s, .34 * s, C(.24, .155, .09), 0, ["tree"]);
-  b.ellipsoid("apple-tree/canopy-main", "leaf-foliage", V(-1.15 * s, g + .88 * s, 1.05 * s), V(.46 * s, .36 * s, .44 * s), C(.085, .27, .075), 0, ["tree"]);
-  b.ellipsoid("apple-tree/canopy-side", "leaf-foliage", V(-.88 * s, g + .72 * s, 1.2 * s), V(.24 * s, .20 * s, .22 * s), C(.115, .32, .095), 0, ["tree"]);
-  for (let i = 0; i < 3; i++) b.ellipsoid(`apple-tree/apple-${i + 1}`, "fruit", V((-1.32 + .17 * i) * s, g + (.66 + .14 * i) * s, (1.22 - .09 * i) * s), V(.022 * s, .022 * s, .022 * s), C(.78, .16, .10), .08, ["tree", "fruit"]);
-  b.cylinder("flower-pot-large/body", "terracotta-pot", V(1.28 * s, g + .085 * s, -1.02 * s), .10 * s, .085 * s, C(.56, .28, .16), 0, ["pot"]);
-  b.ellipsoid("flower-pot-large/bloom", "flower", V(1.28 * s, g + .23 * s, -1.02 * s), V(.125 * s, .09 * s, .125 * s), C(.76, .30, .42), .10, ["pot", "flower"]);
-  b.cylinder("flower-pot-small/body", "terracotta-pot", V(1.45 * s, g + .065 * s, -.78 * s), .075 * s, .065 * s, C(.50, .25, .14), 0, ["pot"]);
-  b.ellipsoid("flower-pot-small/bloom", "flower", V(1.45 * s, g + .17 * s, -.78 * s), V(.09 * s, .07 * s, .09 * s), C(.93, .79, .28), .10, ["pot", "flower"]);
-  b.cylinder("watering-can/body", "metal-watering-can", V(.78 * s, g + .075 * s, -1.18 * s), .065 * s, .075 * s, C(.16, .34, .36), 0, ["watering-can"]);
-  b.box("watering-can/spout", "metal-watering-can", V(.86 * s, g + .10 * s, -1.18 * s), V(.055 * s, .012 * s, .012 * s), C(.14, .30, .32), 0, ["watering-can"]);
+  const trunk = C(.52, .49, .45);
+  const canopy = C(.86, .85, .82);
+  const cap = C(.90, .88, .85);
+  const gill = C(.55, .52, .49);
+  const stem = C(.78, .75, .71);
+  const pebble = C(.68, .67, .64);
+  b.cylinder("tree-big/trunk", "tree-trunk", V(-.45 * s, g + .15 * s, -.117 * s), .055 * s, .15 * s, trunk, 0, ["tree"]);
+  b.ellipsoid("tree-big/canopy-main", "leaf-foliage", V(-.40 * s, g + .50 * s, -.08 * s), V(.30 * s, .24 * s, .28 * s), canopy, 0, ["tree"]);
+  b.ellipsoid("tree-big/canopy-side", "leaf-foliage", V(-.56 * s, g + .42 * s, -.20 * s), V(.17 * s, .14 * s, .16 * s), cmul(canopy, .92), 0, ["tree"]);
+  b.ellipsoid("tree-big/canopy-top", "leaf-foliage", V(-.33 * s, g + .66 * s, -.02 * s), V(.15 * s, .12 * s, .14 * s), cmul(canopy, 1.04), 0, ["tree"]);
+  b.cylinder("tree-round/trunk", "tree-trunk", V(.45 * s, g + .12 * s, -.25 * s), .045 * s, .12 * s, cmul(trunk, .95), 0, ["tree"]);
+  b.ellipsoid("tree-round/canopy-main", "leaf-foliage", V(.45 * s, g + .40 * s, -.25 * s), V(.22 * s, .18 * s, .21 * s), cmul(canopy, .96), 0, ["tree"]);
+  b.ellipsoid("tree-round/canopy-side", "leaf-foliage", V(.56 * s, g + .50 * s, -.19 * s), V(.12 * s, .10 * s, .11 * s), cmul(canopy, .88), 0, ["tree"]);
+  b.cylinder("mushroom-grand/stem", "mushroom-stem", V(-.20 * s, g + .10 * s, -.33 * s), .05 * s, .10 * s, stem, 0, ["mushroom"]);
+  b.cylinder("mushroom-grand/gill", "mushroom-gill", V(-.20 * s, g + .205 * s, -.33 * s), .115 * s, .012 * s, gill, 0, ["mushroom"]);
+  b.ellipsoid("mushroom-grand/cap", "mushroom-cap", V(-.20 * s, g + .25 * s, -.33 * s), V(.14 * s, .088 * s, .14 * s), cap, 0, ["mushroom"]);
+  b.cylinder("mushroom-sprout/stem", "mushroom-stem", V(-.13 * s, g + .055 * s, -.36 * s), .028 * s, .055 * s, cmul(stem, .9), 0, ["mushroom"]);
+  b.ellipsoid("mushroom-sprout/cap", "mushroom-cap", V(-.13 * s, g + .135 * s, -.36 * s), V(.072 * s, .046 * s, .072 * s), cmul(cap, .90), 0, ["mushroom"]);
+  b.cylinder("mushroom-tall/stem", "mushroom-stem", V(-.30 * s, g + .075 * s, .25 * s), .036 * s, .075 * s, cmul(stem, .96), 0, ["mushroom"]);
+  b.cylinder("mushroom-tall/gill", "mushroom-gill", V(-.30 * s, g + .16 * s, .25 * s), .085 * s, .010 * s, gill, 0, ["mushroom"]);
+  b.ellipsoid("mushroom-tall/cap", "mushroom-cap", V(-.30 * s, g + .20 * s, .25 * s), V(.105 * s, .066 * s, .105 * s), cmul(cap, .97), 0, ["mushroom"]);
+  b.cylinder("mushroom-button/stem", "mushroom-stem", V(.38 * s, g + .06 * s, .07 * s), .032 * s, .06 * s, cmul(stem, .92), 0, ["mushroom"]);
+  b.ellipsoid("mushroom-button/cap", "mushroom-cap", V(.38 * s, g + .15 * s, .07 * s), V(.085 * s, .054 * s, .085 * s), cmul(cap, .94), 0, ["mushroom"]);
+  b.cylinder("mushroom-pip/stem", "mushroom-stem", V(.24 * s, g + .045 * s, -.345 * s), .024 * s, .045 * s, cmul(stem, .88), 0, ["mushroom"]);
+  b.ellipsoid("mushroom-pip/cap", "mushroom-cap", V(.24 * s, g + .115 * s, -.345 * s), V(.06 * s, .04 * s, .06 * s), cmul(cap, .86), 0, ["mushroom"]);
+  b.ellipsoid("pebble-1/body", "stone-pebble", V(.21 * s, g + .02 * s, -.29 * s), V(.05 * s, .034 * s, .046 * s), pebble, 0, ["pebble"]);
+  b.ellipsoid("pebble-2/body", "stone-pebble", V(.26 * s, g + .015 * s, -.325 * s), V(.036 * s, .024 * s, .033 * s), cmul(pebble, .9), 0, ["pebble"]);
+  b.ellipsoid("pebble-3/body", "stone-pebble", V(-.05 * s, g + .02 * s, .31 * s), V(.045 * s, .03 * s, .042 * s), cmul(pebble, .95), 0, ["pebble"]);
 }
 
 /**
@@ -317,7 +351,7 @@ export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmen
       bounds_m: { min: V(-roomHalf.x, 0, -roomHalf.z), max: V(roomHalf.x, terrainTop, roomHalf.z) },
       primitives: b.shell, materialModel: "garden-terrain"
     };
-  } else shell = addRoomShell(b, environmentId, roomHalf, floorY, thickness);
+  } else shell = addRoomShell(b, environmentId, roomHalf, floorY, thickness, s);
 
   if (environmentId === "conservatory") buildConservatory(b, s);
   else if (environmentId === "courtyard") buildCourtyard(b, s);

@@ -72,10 +72,10 @@ export const environmentPresets: ReadonlyArray<EnvironmentPreset> = [
   },
   {
     id: "garden",
-    name: "Summer garden",
+    name: "Porcelain garden",
     shortName: "Garden",
-    description: "An open lawn under warm afternoon sun — the water sits in the ground itself, hedges and sky beyond.",
-    swatch: ["#2e5d2a", "#8fae4f", "#bcd9ec"]
+    description: "A miniature white-clay garden — cloud trees and oversized mushrooms crowd the pond, warm sun on porcelain.",
+    swatch: ["#ece9e2", "#b9b6ae", "#8fa0b4"]
   }
 ];
 

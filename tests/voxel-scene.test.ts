@@ -50,9 +50,9 @@ test("material IDs and legacy scene-linear colors are stable and unique", () => 
   assert.equal(new Set(VOXEL_MATERIALS.map((material) => material.id)).size, VOXEL_MATERIALS.length);
   assert.ok(VOXEL_MATERIALS.every((material) => material.id > 0), "material zero is reserved for empty space");
   assert.deepEqual(voxelMaterial(VOXEL_MATERIAL_IDS.containerGlass).baseColorLinear, [0.42, 0.78, 0.72]);
-  assert.deepEqual(voxelMaterial(VOXEL_MATERIAL_IDS.terrain).baseColorLinear, [0.115, 0.3175, 0.095]);
+  assert.deepEqual(voxelMaterial(VOXEL_MATERIAL_IDS.terrain).baseColorLinear, [0.56, 0.5525, 0.5275]);
   assert.deepEqual(voxelMaterial(VOXEL_MATERIAL_IDS.terrain).terrainPalette, {
-    lawnDarkLinear: [0.085, 0.26, 0.075], lawnLightLinear: [0.145, 0.375, 0.115], sandLinear: [0.5, 0.42, 0.29]
+    lawnDarkLinear: [0.46, 0.455, 0.435], lawnLightLinear: [0.66, 0.65, 0.62], sandLinear: [0.56, 0.55, 0.52]
   });
   assert.equal(VOXEL_MATERIAL_IDS.fluid, 3);
   assert.deepEqual(voxelMaterial(VOXEL_MATERIAL_IDS.fluid).baseColorLinear, [0.219, 0.65, 0.555]);

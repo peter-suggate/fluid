@@ -25,6 +25,7 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
     gridOverlayAxis: "z",
     gridOverlaySlice: 0.7,
     voxelRenderMode: "brick-grid",
+    svoRenderMode: "svo",
     camera: { ...initialUI.camera, distance_m: 4.2 }
   });
   const parsed = parseQueryState(query);
@@ -38,6 +39,7 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   assert.equal(parsed.ui.gridOverlayAxis, "z");
   assert.equal(parsed.ui.gridOverlaySlice, 0.7);
   assert.equal(parsed.ui.voxelRenderMode, "brick-grid");
+  assert.equal(parsed.ui.svoRenderMode, "svo");
   assert.equal(parsed.ui.camera.distance_m, 4.2);
   assert.deepEqual(parsed.overrides, {
     "tall-cell": { pressureCycles: 5 },
@@ -135,6 +137,27 @@ test("legacy presentation choices are removed from canonical links", () => {
   assert.equal(params.has("view"), false);
   assert.equal(params.has("render"), false);
   assert.equal(params.has("fps"), false);
+});
+
+test("production renderer mode omits the hybrid SVO default and serializes explicit raster", () => {
+  const parsed = parseQueryState("?render=svo");
+  assert.equal(parsed.ui.svoRenderMode, "svo");
+
+  const scene = getScenePreset(parsed.presetId).create();
+  const sparse = serializeQueryState("", { presetId: parsed.presetId, scene }, {
+    methodId: parsed.methodId,
+    quality: parsed.quality,
+    overrides: parsed.overrides
+  }, parsed.ui);
+  assert.equal(new URLSearchParams(sparse).has("render"), false);
+
+  const raster = serializeQueryState("?render=svo", { presetId: parsed.presetId, scene }, {
+    methodId: parsed.methodId,
+    quality: parsed.quality,
+    overrides: parsed.overrides
+  }, { ...parsed.ui, svoRenderMode: "raster" });
+  assert.equal(new URLSearchParams(raster).get("render"), "raster");
+  assert.equal(parseQueryState("?render=invalid").ui.svoRenderMode, "svo");
 });
 
 test("viewport utility panels round-trip through one mutually exclusive query state", () => {

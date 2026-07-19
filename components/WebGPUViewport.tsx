@@ -41,7 +41,8 @@ export function WebGPUViewport() {
       },
       (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
       undefined,
-      (time_s) => simulation.gpuAdvanceCompleted(time_s)
+      (time_s) => simulation.gpuAdvanceCompleted(time_s),
+      (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus })
     );
     const syncRunState = (runState: ReturnType<typeof useRuntimeStore.getState>["runState"]) => {
       const submittedTime_s = renderer.setSimulationRunning(runState === "running");
@@ -82,7 +83,8 @@ export function WebGPUViewport() {
             { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method) },
             { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
             getScenePreset(sceneState.presetId).background,
-            ui.voxelRenderMode
+            ui.voxelRenderMode,
+            ui.svoRenderMode
           );
         } catch (error: unknown) {
           running = false;
@@ -136,10 +138,10 @@ export function WebGPUViewport() {
     return inFootprint && (axis === "y" ? nearHorizontalEdge : nearTop) ? { axis, grabY: Math.min(point.y, c.height_m) } : undefined;
   };
 
-  const beginBodyDrag = (pointerId: number, timeStamp: number, ray: { origin: Vec3; direction: Vec3 }, body: RigidBodyState, position: Vec3, orientation?: RigidBodyState["orientation"]) => {
+  const beginBodyDrag = (pointerId: number, timeStamp: number, ray: { origin: Vec3; direction: Vec3 }, body: RigidBodyState, position: Vec3, orientation?: RigidBodyState["orientation"], surfacePosition = position) => {
     const basis = cameraBasis(useUIStore.getState().camera);
-    const dragPoint = planeHit(ray.origin, ray.direction, position, basis.forward), grabOffset = sub(position, dragPoint);
-    pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, planePoint: position, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };
+    const dragPoint = planeHit(ray.origin, ray.direction, surfacePosition, basis.forward), grabOffset = sub(position, dragPoint);
+    pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };
     useUIStore.getState().selectBody(body.description.id);
     simulation.dragBody(body.description.id, position, { x: 0, y: 0, z: 0 }, "start", orientation);
   };
@@ -153,11 +155,15 @@ export function WebGPUViewport() {
       if (simulation.backend === "webgpu" && rendererRef.current) {
         const pointerId=event.pointerId,timeStamp=event.timeStamp,x=event.clientX,y=event.clientY;
         pointerRef.current={id:pointerId,x,y,action:"pick"};
-        const picked=await rendererRef.current.pickRigidBody(ray.origin,ray.direction);
+        const rect=event.currentTarget.getBoundingClientRect();
+        const picked=await rendererRef.current.pickRigidBody(ray.origin,ray.direction,{
+          normalizedX:(event.clientX-rect.left)/Math.max(rect.width,1),
+          normalizedY:(event.clientY-rect.top)/Math.max(rect.height,1),
+        });
         const active=pointerRef.current;
         if(!active||active.id!==pointerId||active.action!=="pick")return;
         const body=picked?useDiagnosticsStore.getState().bodies[picked.bodyIndex]:undefined;
-        if(body&&picked){beginBodyDrag(pointerId,timeStamp,ray,body,picked.position_m,picked.orientation);return;}
+        if(body&&picked){beginBodyDrag(pointerId,timeStamp,ray,body,picked.position_m,picked.orientation,"surfacePosition_m" in picked?picked.surfacePosition_m:picked.position_m);return;}
         pointerRef.current={id:pointerId,x,y,action:"orbit"};
         return;
       }

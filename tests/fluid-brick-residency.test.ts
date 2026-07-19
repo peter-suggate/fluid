@@ -43,6 +43,23 @@ test("two-sided surface-band bricks form halos and vacated bricks retire with hy
   assert.equal(source.flags & FLUID_BRICK_RESIDENT, 0, "the vacated source brick must return to the free pool");
 });
 
+test("bulk residency retains deep liquid without widening surface-only residency", () => {
+  const deepLiquid = [-4, -2] as const;
+  const surface = classifyCPUFluidBrick(deepLiquid[0], undefined, { haloPhi: 1, retireAfterFrames: 0 }, deepLiquid[1]);
+  assert.equal(surface.flags & FLUID_BRICK_RESIDENT, 0, "surface scheduling excludes deep liquid");
+  const bulk = classifyCPUFluidBrick(
+    deepLiquid[0], undefined,
+    { haloPhi: 1, retireAfterFrames: 0, includeLiquidInterior: true },
+    deepLiquid[1],
+  );
+  assert.ok((bulk.flags & FLUID_BRICK_RESIDENT) !== 0, "bulk storage retains every wet brick");
+  assert.equal(bulk.flags & FLUID_BRICK_CORE, 0, "deep liquid is not mislabeled as an interface brick");
+  const source = readFileSync(new URL("../lib/webgpu-fluid-brick-residency.ts", import.meta.url), "utf8");
+  assert.match(source, /writeBuffer\(this\.params, 40, new Float32Array\(\[Math\.max\(0, options\.dt_s \?\? 0\)\]\)\)/,
+    "per-step swept dt updates must preserve the constructor-owned includeLiquidInterior word");
+  assert.doesNotMatch(source, /Math\.max\(0, options\.dt_s \?\? 0\), preActivation/);
+});
+
 test("garden dam-break seeds exactly one resolution-independent 8-cubed brick", () => {
   const scene = getScenePreset("garden-dam-break").create();
   assert.equal(scene.fluid.initialBrickSeeds_m?.length, 1);
@@ -82,6 +99,8 @@ test("GPU residency builds active and retired indirect worklists without readbac
   assert.match(fluidBrickResidencyShader, /resident \* voxelsPerBrick/);
   assert.match(fluidBrickResidencyShader, /let activeDispatch = tiledDispatch/);
   assert.match(fluidBrickResidencyShader, /atomicStore\(&worklist\[2\], activeDispatch\.y\)/);
+  assert.match(fluidBrickResidencyShader, /surfaceDispatch = tiledDispatch\(\(resident \* voxelsPerBrick \+ 63u\) \/ 64u\)/);
+  assert.match(fluidBrickResidencyShader, /atomicStore\(&worklist\[13\], surfaceDispatch\.y\)/);
   assert.doesNotMatch(fluidBrickResidencyShader, /resident \* topologyGroups, 65535u/);
   assert.doesNotMatch(fluidBrickResidencyShader, /mapAsync|getMappedRange/);
   assert.match(sparseBrickDenseFieldShader, /usesActiveWorklist\(\)/);

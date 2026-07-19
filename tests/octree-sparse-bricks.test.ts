@@ -19,7 +19,9 @@ test("octree sparse-brick render publication preserves owners, materials, and GP
   assert.match(octreeSparseBrickDebugPublicationShader, /bodyMaterials\[owner\]/);
   assert.match(octreeSparseBrickDebugPublicationShader, /material != 0u && owner != 0xffffu/);
   assert.match(octreeSparseBrickDebugPublicationShader, /candidate != 0u && candidateOwner != 0xffffu/);
-  assert.match(octreeSparseBrickDebugPublicationShader, /materialOwners\[index\]/);
+  assert.match(octreeSparseBrickDebugPublicationShader, /let payloadIndex = leaf\.topology\.y \+ localIndex;/);
+  assert.match(octreeSparseBrickDebugPublicationShader, /payloadIndex < arrayLength\(&materialOwners\)/);
+  assert.doesNotMatch(octreeSparseBrickDebugPublicationShader, /materialOwners\[index\]/);
   assert.match(octreeSparseBrickDebugPublicationShader, /control\[2\]/);
   assert.match(octreeSparseBrickDebugPublicationShader, /select\(0u, 1u, isActive\)/);
   assert.doesNotMatch(octreeSparseBrickDebugPublicationShader, /mapAsync|getMappedRange/);

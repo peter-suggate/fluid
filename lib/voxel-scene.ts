@@ -49,12 +49,12 @@ export const VOXEL_MATERIALS: ReadonlyArray<VoxelMaterial> = [
   },
   {
     id: VOXEL_MATERIAL_IDS.terrain, key: "terrain", name: "Terrain", closure: "opaque",
-    baseColorLinear: [0.115, 0.3175, 0.095], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.92, transmission: 0, ior: 1.45,
+    baseColorLinear: [0.56, 0.5525, 0.5275], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.92, transmission: 0, ior: 1.45,
     colorProvenance: "webgpu-environments garden lawn midpoint",
     terrainPalette: {
-      lawnDarkLinear: [0.085, 0.26, 0.075],
-      lawnLightLinear: [0.145, 0.375, 0.115],
-      sandLinear: [0.5, 0.42, 0.29]
+      lawnDarkLinear: [0.46, 0.455, 0.435],
+      lawnLightLinear: [0.66, 0.65, 0.62],
+      sandLinear: [0.56, 0.55, 0.52]
     }
   },
   {
