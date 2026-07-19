@@ -217,10 +217,17 @@ test("resident phi redistance is bounded to the consumed five-cell band", () => 
   const finalize = quadtreeSurfaceShader.slice(quadtreeSurfaceShader.indexOf("fn finalizeDistance"), quadtreeSurfaceShader.indexOf("fn cullDebris"));
   assert.match(finalize, /distance = min\(5\.0 \* h, max\(2\.5 \* h, interfaceDistance\)\)/, "far-field magnitudes remain capped at 5h");
   assert.match(finalize, /result = select\(distance, -distance, advected < 0\.0\)/, "far-field signs do not depend on a global seed");
-  assert.match(finalize, /if \(params\.control\.z <= 0\.5\) \{ accumulateVolume\(result, gid\); \}/, "default diagnostics are fused into finalization");
+  assert.match(finalize, /if \(sparseSurfaceEnabled\(\)\) \{ accumulateSparseInterface\(result, gid\); \}[\s\S]*else \{ accumulateVolume\(result, gid\); \}/,
+    "dense diagnostics stay fused while sparse execution updates its persistent total by cell deltas");
 
   const encode = WebGPUQuadtreeSurfaceState.prototype.encode.toString();
-  assert.match(encode, /surfacePass[\s\S]*advectPredict[\s\S]*jumpFlood[\s\S]*finalizeDistance[\s\S]*surfacePass\.end/, "dependent surface stages share one ordered compute pass");
+  assert.match(encode, /surfaceDispatch[\s\S]*advectPredict[\s\S]*jumpFlood[\s\S]*finalizeDistance/, "dependent surface stages preserve their command order");
+  assert.match(encode, /if\(this\.sparseExecution\)[\s\S]*stages\.forEach[\s\S]*encoder\.beginComputePass[\s\S]*dispatch\(pass,pipeline,group,offset\)/,
+    "sparse dependent texture stages receive separate WebGPU synchronization scopes");
+  assert.match(encode, /Quadtree dense surface transport and narrow-band redistance[\s\S]*for\(const\[,pipeline,group,offset\]of stages\)dispatch\(pass,pipeline,group,offset\)/,
+    "dense tall-cell transport retains its calibrated single-pass dispatch chain");
+  assert.match(encode, /dispatchWorkgroupsIndirect\(this\.sparseExecution\.worklist,\s*FLUID_BRICK_ACTIVE_SURFACE_DISPATCH_OFFSET_BYTES\)/,
+    "surface stages consume the resident-brick worklist without CPU counts");
   assert.match(encode, /if\s*\(this\.debrisCulling\)[\s\S]*reduceVolume/, "the post-cull path retains an exact reduction");
 });
 

@@ -18,6 +18,17 @@
  */
 
 import { unifiedLightingShaderLibrary } from "./webgpu-lighting";
+import {
+  FLUID_BRICK_ACTIVATED,
+  FLUID_BRICK_CORE,
+  FLUID_BRICK_HALO,
+  FLUID_BRICK_RESIDENT,
+  FLUID_BRICK_STATE_STRIDE_BYTES,
+  FLUID_BRICK_WAS_RESIDENT,
+  FLUID_BRICK_WORKLIST_ENTRY_STRIDE_BYTES,
+  FLUID_BRICK_WORKLIST_HEADER_WORDS,
+  FLUID_BRICK_WORKLIST_WORDS,
+} from "./webgpu-fluid-brick-residency";
 
 export type VoxelRenderMode = "smooth" | "raw-voxels" | "brick-grid";
 /** Sparse inspection is deliberately unavailable to the production hybrid mode. */
@@ -26,8 +37,248 @@ export type VoxelDebugMode = Exclude<VoxelRenderMode, "smooth">;
 export const SPARSE_VOXEL_DEBUG_RECORD_STRIDE = 48;
 export const SPARSE_VOXEL_DEBUG_MATERIAL_STRIDE = 32;
 export const SPARSE_VOXEL_DEBUG_ACTIVE = 1;
+export const SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS = Object.freeze({
+  resident: FLUID_BRICK_RESIDENT,
+  core: FLUID_BRICK_CORE,
+  halo: FLUID_BRICK_HALO,
+  activated: FLUID_BRICK_ACTIVATED,
+  wasResident: FLUID_BRICK_WAS_RESIDENT,
+} as const);
+export const SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS = FLUID_BRICK_WORKLIST_WORDS;
 
-export interface SparseVoxelRenderSource {
+/**
+ * GPU publication-state words. A producer writes `completeGeneration` only in
+ * a final pass after every buffer referenced by the structural source is ready.
+ * Consumers may cache that word and skip work when it has not changed.
+ */
+export const SPARSE_VOXEL_PUBLICATION_STATE = Object.freeze({
+  strideBytes: 32,
+  completeGeneration: 0,
+  validFields: 1,
+  topologyRevision: 2,
+  staticGeometryRevision: 3,
+  dynamicSolidRevision: 4,
+  coarseFluidRevision: 5,
+  fineFluidRevision: 6,
+} as const);
+
+/** Bit values stored in SPARSE_VOXEL_PUBLICATION_STATE.validFields. */
+export const SPARSE_VOXEL_VALID_FIELDS = Object.freeze({
+  topology: 1 << 0,
+  staticGeometry: 1 << 1,
+  dynamicSolid: 1 << 2,
+  coarseFluid: 1 << 3,
+  fineFluid: 1 << 4,
+  velocity: 1 << 5,
+  materialOwner: 1 << 6,
+} as const);
+
+export interface SparseVoxelStructuralFieldValidity {
+  /** Global availability bit tested against publication.validFields. */
+  bit: number;
+  /** Distance values are metres with negative values inside the material. */
+  signedDistance?: "negative-inside-metres";
+  /** Whether distance magnitude is currently a Euclidean metric distance. */
+  distanceQuality?: "metric" | "metric-near-interface" | "occupancy-estimate" | "mixed-exact-approximate";
+  /** Additional per-leaf condition required before reading this field. */
+  residency?: "all-published-leaves" | "fluid-resident-leaves" | "unavailable";
+}
+
+export interface SparseVoxelPublicationWord {
+  /** Bind the complete state block; `word` is the array<u32> index to read. */
+  binding: GPUBufferBinding;
+  word: number;
+}
+
+export interface SparseVoxelResidencyListView {
+  /** GPU count word; consumers clamp it to capacity before indexing. */
+  count: SparseVoxelPublicationWord;
+  entryOffsetBytes: number;
+  entryStrideBytes: number;
+  capacity: number;
+}
+
+export interface SparseVoxelFilteredResidencyListView extends SparseVoxelResidencyListView {
+  /** Candidate list is shared; select entries by this authoritative state bit. */
+  requiredStateBit: number;
+}
+
+export interface SparseVoxelFluidResidencySource {
+  /** One u32 per solver brick: low 8 flag bits, dry-frame count in bits 16..31. */
+  states: GPUBufferBinding;
+  /** Header, active `(brick, leaf)` pairs, then retired `(brick, leaf)` pairs. */
+  worklist: GPUBufferBinding;
+  /** Solver-brick lattice embedded in the structural render-brick domain. */
+  domain: Readonly<{
+    originBricks: readonly [number, number, number];
+    dimensionsBricks: readonly [number, number, number];
+  }>;
+  stateStrideBytes: number;
+  stateBits: Readonly<{
+    resident: number;
+    core: number;
+    halo: number;
+    activated: number;
+    wasResident: number;
+  }>;
+  active: SparseVoxelResidencyListView;
+  /** Core entries are a state-bit-filtered view of `active`. */
+  core: SparseVoxelFilteredResidencyListView;
+  /** Halo entries are a state-bit-filtered view of `active`. */
+  halo: SparseVoxelFilteredResidencyListView;
+  retired: SparseVoxelResidencyListView;
+  counters: Readonly<{ activated: SparseVoxelPublicationWord }>;
+  /** GPU worklist generation, incremented after list contents and dispatches. */
+  generation: SparseVoxelPublicationWord;
+  /** Structural coarse-fluid revision which owns the completed residency view. */
+  revision: SparseVoxelPublicationWord;
+  owner: "GPUFluidBrickResidency";
+}
+
+export interface SparseVoxelFluidResidencyLayout {
+  headerBytes: number;
+  activeEntryOffsetBytes: number;
+  retiredEntryOffsetBytes: number;
+  entryStrideBytes: number;
+  stateStrideBytes: number;
+  worklistByteLength: number;
+}
+
+/** Exact byte layout allocated by `GPUFluidBrickResidency`. */
+export function sparseVoxelFluidResidencyLayout(capacity: number): SparseVoxelFluidResidencyLayout {
+  if (!Number.isSafeInteger(capacity) || capacity < 1) throw new RangeError("Sparse voxel residency capacity must be a positive integer");
+  const headerBytes = FLUID_BRICK_WORKLIST_HEADER_WORDS * Uint32Array.BYTES_PER_ELEMENT;
+  const activeEntryOffsetBytes = headerBytes;
+  const retiredEntryOffsetBytes = activeEntryOffsetBytes + capacity * FLUID_BRICK_WORKLIST_ENTRY_STRIDE_BYTES;
+  return {
+    headerBytes,
+    activeEntryOffsetBytes,
+    retiredEntryOffsetBytes,
+    entryStrideBytes: FLUID_BRICK_WORKLIST_ENTRY_STRIDE_BYTES,
+    stateStrideBytes: FLUID_BRICK_STATE_STRIDE_BYTES,
+    worklistByteLength: headerBytes + capacity * FLUID_BRICK_WORKLIST_ENTRY_STRIDE_BYTES * 2,
+  };
+}
+
+export interface SparseVoxelFluidResidencyState {
+  flags: number;
+  dryFrames: number;
+  resident: boolean;
+  core: boolean;
+  halo: boolean;
+  activated: boolean;
+  wasResident: boolean;
+}
+
+export function decodeSparseVoxelFluidResidencyState(stateWord: number): SparseVoxelFluidResidencyState {
+  if (!Number.isSafeInteger(stateWord) || stateWord < 0 || stateWord > 0xffff_ffff) {
+    throw new RangeError("Sparse voxel residency state must be a uint32");
+  }
+  const flags = stateWord & 0xff;
+  const has = (bit: number) => (flags & bit) !== 0;
+  return {
+    flags,
+    dryFrames: stateWord >>> 16,
+    resident: has(SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS.resident),
+    core: has(SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS.core),
+    halo: has(SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS.halo),
+    activated: has(SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS.activated),
+    wasResident: has(SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS.wasResident),
+  };
+}
+
+/** Binding-free state/list address decode shared by renderer consumers. */
+export const sparseVoxelFluidResidencyWGSL = /* wgsl */ `
+const SVO_RESIDENCY_RESIDENT:u32=1u;const SVO_RESIDENCY_CORE:u32=2u;const SVO_RESIDENCY_HALO:u32=4u;const SVO_RESIDENCY_ACTIVATED:u32=8u;const SVO_RESIDENCY_WAS_RESIDENT:u32=32u;
+fn svoResidencyFlags(stateWord:u32)->u32{return stateWord&0xffu;}
+fn svoResidencyDryFrames(stateWord:u32)->u32{return stateWord>>16u;}
+fn svoResidencyHas(stateWord:u32,requiredBit:u32)->bool{return (svoResidencyFlags(stateWord)&requiredBit)!=0u;}
+fn svoResidencyEntryWord(entryOffsetBytes:u32,entryIndex:u32)->u32{return entryOffsetBytes/4u+entryIndex*2u;}
+`;
+
+export interface SparseVoxelStructuralRenderSource {
+  /** Counts, capacities, indirect arguments, and topology publication state. */
+  control: GPUBufferBinding;
+  /** Eight-u32 node records: Morton key, level, child links, leaf, flags. */
+  nodes: GPUBufferBinding;
+  /** Four-u32 leaf records: node, voxel offset, Morton key. */
+  leaves: GPUBufferBinding;
+  /** vec4f: fluid SDF, solid SDF, solid fraction, pressure. */
+  geometry: GPUBufferBinding;
+  /** vec4f: world velocity xyz and reconstructed liquid fraction. */
+  velocity: GPUBufferBinding;
+  /** u32 packed as owner:u16 | material:u16. */
+  materialOwners: GPUBufferBinding;
+  /** Per-leaf residency flags; required when reading evolving fluid payload. */
+  fluidLeafStates: GPUBufferBinding;
+  /** Authoritative producer-owned brick residency; never inferred from payload values. */
+  fluidResidency?: SparseVoxelFluidResidencySource;
+  capacities: Readonly<{ nodes: number; leaves: number; voxels: number }>;
+  strides: Readonly<{
+    control: number;
+    node: number;
+    leaf: number;
+    geometry: number;
+    velocity: number;
+    materialOwner: number;
+  }>;
+  domain: Readonly<{
+    worldOrigin_m: readonly [number, number, number];
+    cellSize_m: readonly [number, number, number];
+    dimensionsCells: readonly [number, number, number];
+    brickSize: 4 | 8;
+    maximumDepth: number;
+  }>;
+  publication: Readonly<{
+    /** Eight-u32 state block described by SPARSE_VOXEL_PUBLICATION_STATE. */
+    state: GPUBufferBinding;
+    /** State-block binding plus the u32 word containing the completion fence. */
+    completeGeneration: SparseVoxelPublicationWord;
+    validFields: SparseVoxelPublicationWord;
+    revisions: Readonly<{
+      topology: SparseVoxelPublicationWord;
+      staticGeometry: SparseVoxelPublicationWord;
+      dynamicSolid: SparseVoxelPublicationWord;
+      coarseFluid: SparseVoxelPublicationWord;
+      /** Zero until a fine sparse fluid field is attached to this ABI. */
+      fineFluid: SparseVoxelPublicationWord;
+    }>;
+  }>;
+  fields: Readonly<{
+    topology: SparseVoxelStructuralFieldValidity;
+    staticGeometry: SparseVoxelStructuralFieldValidity;
+    dynamicSolid: SparseVoxelStructuralFieldValidity;
+    coarseFluid: SparseVoxelStructuralFieldValidity;
+    fineFluid: SparseVoxelStructuralFieldValidity;
+    velocity: SparseVoxelStructuralFieldValidity;
+    materialOwner: SparseVoxelStructuralFieldValidity;
+  }>;
+}
+
+/** Production sparse-scene ABI. It deliberately excludes expanded inspection records. */
+export interface SparseVoxelSceneRenderSource {
+  /** Dense material-table slot count used by production and inspection shading. */
+  materialCount: number;
+  /**
+   * Optional production PBR table. Records are dense and direct-indexed by the
+   * stable sparse material ID; legacy inspection continues to use `materials`.
+   */
+  pbrMaterials?: SparseVoxelPbrMaterialSource;
+  /** Optional authored directional and finite-area light table for production shading. */
+  lights?: SparseVoxelLightSource;
+  /** Optional image-free diffuse/specular environment fallback for production shading. */
+  environmentLighting?: SparseVoxelEnvironmentLightingSource;
+  /** Optional evolving-fluid residency header (16 u32 words). */
+  fluidBrickStats?: GPUBufferBinding;
+  fluidBrickCapacity?: number;
+  /** Direct production source. Optional keeps non-structural producers valid. */
+  structural?: SparseVoxelStructuralRenderSource;
+  /** Allows the caller to expose buffer replacement without implementation coupling. */
+  revision: number;
+}
+
+/** Expanded records used only by raw-voxel and brick-grid inspection. */
+export interface SparseVoxelRenderSource extends SparseVoxelSceneRenderSource {
   /** Finest active/occupied voxel records. */
   voxelRecords: GPUBufferBinding;
   /** GPU-resident u32 count for voxelRecords. */
@@ -40,12 +291,91 @@ export interface SparseVoxelRenderSource {
   materials: GPUBufferBinding;
   voxelCapacity: number;
   brickCapacity: number;
-  materialCount: number;
-  /** Optional evolving-fluid residency header (16 u32 words). */
-  fluidBrickStats?: GPUBufferBinding;
-  fluidBrickCapacity?: number;
-  /** Allows the caller to expose buffer replacement without implementation coupling. */
+  /**
+   * Producer-owned switch for the expanded voxel/brick inspection records.
+   * Absence means a legacy producer whose inspection publication is always on.
+   * Structural publication is independent and must never be gated by this.
+   */
+  inspectionPublication?: SparseVoxelInspectionPublicationController;
+}
+
+export interface SparseVoxelInspectionPublicationController {
+  /** Whether the producer will materialize expanded voxel and brick records. */
+  readonly enabled: boolean;
+  /** Increments only when `enabled` changes. */
+  readonly revision: number;
+  /** Returns true when the requested state changed. */
+  setEnabled(enabled: boolean): boolean;
+  /**
+   * Materialize records requested by a disabled-to-enabled transition. This
+   * lets an inspection repaint publish current records without a simulation
+   * advance. Legacy callers may ignore it because producer encode stays on.
+   */
+  encodePending?(encoder: GPUCommandEncoder): boolean;
+}
+
+export interface SparseVoxelInspectionPublicationProducerController
+  extends SparseVoxelInspectionPublicationController {
+  encodePending(encoder: GPUCommandEncoder): boolean;
+  /** Called by the owning producer after its regular encode materializes records. */
+  markEncoded(): void;
+}
+
+/**
+ * Create the controller attached by sparse producers. Default-on preserves the
+ * publication behavior of callers that do not opt into production elision.
+ */
+export function createSparseVoxelInspectionPublicationController(
+  initiallyEnabled = true,
+  encode?: (encoder: GPUCommandEncoder) => void,
+): SparseVoxelInspectionPublicationProducerController {
+  let enabled = initiallyEnabled;
+  let revision = 1;
+  let pending = initiallyEnabled;
+  return {
+    get enabled() { return enabled; },
+    get revision() { return revision; },
+    setEnabled(nextEnabled: boolean) {
+      if (nextEnabled === enabled) return false;
+      enabled = nextEnabled;
+      if (enabled) pending = true;
+      revision += 1;
+      return true;
+    },
+    encodePending(encoder: GPUCommandEncoder) {
+      if (!enabled || !pending || !encode) return false;
+      encode(encoder);
+      pending = false;
+      return true;
+    },
+    markEncoded() { pending = false; },
+  };
+}
+
+export interface SparseVoxelPbrMaterialSource {
+  binding: GPUBufferBinding;
+  /** Dense slot count, including reserved and currently unassigned IDs. */
+  count: number;
+  strideBytes: number;
+  /** Content/schema revision shared by every record in this publication. */
   revision: number;
+}
+
+export interface SparseVoxelLightSource {
+  binding: GPUBufferBinding;
+  count: number;
+  strideBytes: number;
+  /** Content/schema revision shared by every published light record. */
+  revision: number;
+}
+
+export interface SparseVoxelEnvironmentLightingSource {
+  binding: GPUBufferBinding;
+  count: number;
+  strideBytes: number;
+  revision: number;
+  /** Versioned content identity for producer/consumer buffer reuse. */
+  cacheKey: string;
 }
 /** Compatibility alias; the source ABI is shared with the production voxel renderer. */
 export type SparseVoxelDebugSource = SparseVoxelRenderSource;
@@ -79,6 +409,11 @@ export function voxelDebugPlan(
     overlayCapacity,
     overlayWorkgroups: Math.ceil(overlayCapacity / 64)
   };
+}
+
+function voxelDebugDispatch(blocks: number): [number, number, number] {
+  const x = Math.min(65_535, Math.max(0, blocks));
+  return [x, x > 0 ? Math.ceil(blocks / x) : 1, 1];
 }
 
 export interface SparseVoxelDebugRendererOptions {
@@ -164,8 +499,10 @@ fn prepareGrid() {
 }
 
 @compute @workgroup_size(64)
-fn compactVoxels(@builtin(global_invocation_id) gid: vec3u) {
-  let index = gid.x;
+fn compactVoxels(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) lid: u32) {
+  let blocks = (compactSettings.capacity + 63u) / 64u;
+  let dispatchX = min(blocks, 65535u);
+  let index = (wid.x + wid.y * dispatchX) * 64u + lid;
   let count = min(min(voxelCount.value, arrayLength(&voxelRecords)), compactSettings.capacity);
   if (index >= count) { return; }
   let record = voxelRecords[index];
@@ -177,8 +514,10 @@ fn compactVoxels(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 @compute @workgroup_size(64)
-fn compactBricks(@builtin(global_invocation_id) gid: vec3u) {
-  let index = gid.x;
+fn compactBricks(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) lid: u32) {
+  let blocks = (compactSettings.capacity + 63u) / 64u;
+  let dispatchX = min(blocks, 65535u);
+  let index = (wid.x + wid.y * dispatchX) * 64u + lid;
   let count = min(min(brickCount.value, arrayLength(&brickRecords)), compactSettings.capacity);
   if (index >= count) { return; }
   let record = brickRecords[index];
@@ -188,8 +527,10 @@ fn compactBricks(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 @compute @workgroup_size(64)
-fn compactFluidBricks(@builtin(global_invocation_id) gid: vec3u) {
-  let index = gid.x;
+fn compactFluidBricks(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) lid: u32) {
+  let blocks = (compactSettings.overlayCapacity + 63u) / 64u;
+  let dispatchX = min(blocks, 65535u);
+  let index = (wid.x + wid.y * dispatchX) * 64u + lid;
   let count = min(min(brickCount.value, arrayLength(&brickRecords)), compactSettings.overlayCapacity);
   if (index >= count) { return; }
   let record = brickRecords[index];
@@ -366,7 +707,15 @@ fn rawFragment(input: VertexOutput) -> @location(0) vec4f {
   // the parallel compacted draw makes alpha/depth results depend on atomic
   // instance order, which changes between frames and looks like z-fighting.
   if (input.materialId == 1u) { discard; }
-  return shadeMaterial(material, normalize(input.worldNormal), input.worldPosition);
+  // Raw occupancy is a diagnostic representation, so use a finite bounded
+  // Lambert + ambient preview rather than allowing a malformed/degenerate PBR
+  // half-vector to turn thousands of valid occupied cubes into NaN/black.
+  // Production SVO shading and the sorted glass pass retain the shared PBR
+  // closure; this branch prioritizes stable material identity and silhouette.
+  let normal = normalize(input.worldNormal);
+  let lambert = 0.28 + 0.72 * max(dot(normal, normalize(view.lightDirection.xyz)), 0.0);
+  let linearColor = material.baseColor.rgb * lambert + material.emissiveRoughness.rgb;
+  return vec4f(max(linearColor, vec3f(0.035)) * view.style.z, material.baseColor.a);
 }
 
 @fragment
@@ -494,7 +843,11 @@ export class SparseVoxelDebugRenderer {
           format: this.options.colorFormat,
           blend: { color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } }
         }] },
-        primitive: { topology: "triangle-list", cullMode: "back" }, depthStencil,
+        // The standalone WebGPU clip transform reaches framebuffer-oriented
+        // front-face classification with the opposite winding on the affected
+        // backend. Inspection is opt-in and capacity-bounded, so render both
+        // sides rather than allowing every occupied cube face to be culled.
+        primitive: { topology: "triangle-list", cullMode: "none" }, depthStencil,
         multisample: { count: this.options.sampleCount }
       }),
       this.device.createRenderPipelineAsync({
@@ -545,6 +898,15 @@ export class SparseVoxelDebugRenderer {
       this.computeBindGroup = undefined;
       this.renderBindGroup = undefined;
       this.overlayRenderBindGroup = undefined;
+      // These arenas scale with published voxel capacity (hundreds of MB in
+      // wide scenes). Inspection is optional, so detaching must release them
+      // rather than merely dropping bind groups.
+      this.instanceBuffer?.destroy();
+      this.instanceBuffer = undefined;
+      this.instanceCapacity = 0;
+      this.overlayInstanceBuffer?.destroy();
+      this.overlayInstanceBuffer = undefined;
+      this.overlayInstanceCapacity = 0;
       return;
     }
     if (!Number.isInteger(source.voxelCapacity) || source.voxelCapacity < 0 || !Number.isInteger(source.brickCapacity) || source.brickCapacity < 0) {
@@ -619,10 +981,10 @@ export class SparseVoxelDebugRenderer {
     compute.setPipeline(voxelMode ? this.prepareRawPipeline! : this.prepareGridPipeline!);
     compute.dispatchWorkgroups(1);
     compute.setPipeline(voxelMode ? this.compactVoxelPipeline! : this.compactBrickPipeline!);
-    compute.dispatchWorkgroups(plan.computeWorkgroups);
+    compute.dispatchWorkgroups(...voxelDebugDispatch(plan.computeWorkgroups));
     if (plan.overlayWorkgroups > 0 && this.compactFluidBrickPipeline) {
       compute.setPipeline(this.compactFluidBrickPipeline);
-      compute.dispatchWorkgroups(plan.overlayWorkgroups);
+      compute.dispatchWorkgroups(...voxelDebugDispatch(plan.overlayWorkgroups));
     }
     compute.end();
 

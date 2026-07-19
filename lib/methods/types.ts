@@ -5,7 +5,7 @@ import type { RigidBodyState } from "../rigid-body";
 import type { GPURigidBodyPick } from "../webgpu-rigid-body";
 import type { Vec3 } from "../model";
 import type { GPUSecondaryParticleSource } from "../webgpu-secondary-particles";
-import type { SparseVoxelRenderSource } from "../webgpu-voxel-debug";
+import type { SparseVoxelRenderSource, SparseVoxelSceneRenderSource } from "../webgpu-voxel-debug";
 import type { SparseSurfaceBandGPUSource } from "../webgpu-sparse-surface-band";
 
 /**
@@ -66,12 +66,16 @@ export interface GPUSolverInstance {
   readonly velocityTexture?: GPUTexture;
   /** Optional one-way escaped spray droplets rendered above the liquid surface. */
   readonly secondaryParticles?: GPUSecondaryParticleSource;
-  /** GPU-resident sparse-brick publication for raw voxel and brick-grid rendering. */
+  /** Always-resident structural sparse scene used by production SVO rendering. */
+  readonly sparseVoxelSceneSource?: SparseVoxelSceneRenderSource;
+  /** Lazily allocated expanded records used by raw/grid inspection. */
   readonly sparseVoxelRenderSource?: SparseVoxelRenderSource;
   /** Dynamically paged fine phi/velocity band for sparse extraction and inspection. */
   readonly sparseSurfaceBand?: SparseSurfaceBandGPUSource;
   /** GPU-authored rigid records matching the renderer's four-vec4 body ABI. */
   readonly rigidRenderBuffer?: GPUBuffer;
+  /** GPU-authored 128-byte primitive-motion sidecars, including conservative swept bounds. */
+  readonly rigidMotionBuffer?: GPUBuffer;
   /** Updates selection metadata without mirroring dynamic poses through CPU memory. */
   setSelectedRigidBody?(index: number): void;
   /** User-triggered ray query against authoritative GPU rigid poses. */

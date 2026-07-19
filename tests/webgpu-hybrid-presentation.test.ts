@@ -4,6 +4,7 @@ import test from "node:test";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const uniformEulerianSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+const waterPipelineSource = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
 
 test("octree smooth presentation keeps analytic solids and glass", () => {
   assert.match(rendererSource, /scene\.nominalResolution\.length_m, Math\.min\(bodies\.length, 12\), gpuInfo\?\.quadtreeMaximumFluidScale \?\? 1,/,
@@ -12,14 +13,18 @@ test("octree smooth presentation keeps analytic solids and glass", () => {
     "terrain must remain part of the analytic scene for octree simulations");
   assert.match(rendererSource, /bodies\.slice\(0, 12\)\.forEach/,
     "rigid bodies must remain in the analytic scene for octree simulations");
-  assert.match(rendererSource, /if \(environmentIndex\(\) != 7\) \{/,
+  assert.match(waterPipelineSource, /if\s*\(\s*environmentIndex\(\)\s*!=\s*7\s*\)\s*\{/,
     "the tank glass path must be selected from scene semantics, not representation mode");
   assert.doesNotMatch(rendererSource, /voxelSceneActive|voxelScenePipeline|Compiling voxel scene materials/,
     "smooth presentation must not instantiate or encode sparse voxel cubes as production solids");
 });
 
 test("raw voxel and brick-grid inspection retain the GPU sparse source", () => {
-  assert.match(rendererSource, /this\.voxelDebugPipeline\?\.setSource\(solver\.sparseVoxelRenderSource\)/);
+  assert.match(rendererSource, /voxelRenderMode !== "smooth" && this\.gpuFluid/);
+  assert.match(rendererSource, /this\.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 \? this\.gpuFluid\?\.sparseVoxelRenderSource : undefined/,
+    "capacity-sized debug instance buffers attach only while inspection is visible");
+  assert.match(rendererSource, /const sparseSceneSource=solver\.sparseVoxelSceneSource/,
+    "smooth production SVO consumes the structural source without activating inspection records");
   assert.match(rendererSource, /if \(voxelRenderMode !== "smooth" && this\.voxelDebugDepth\)/);
   assert.match(rendererSource, /mode: voxelRenderMode/);
   assert.match(rendererSource, /colorLoadOp: "clear"/);

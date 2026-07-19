@@ -15,7 +15,7 @@ test("every authored environment gets a stable full-scene proxy catalog", () => 
   const scene = cloneScene(defaultScene);
   const authoredPropCounts = new Map([
     ["conservatory", 19], ["courtyard", 16], ["night-lab", 32], ["concrete-gallery", 9],
-    ["bathhouse", 16], ["research-station", 16], ["default", 0], ["garden", 15]
+    ["bathhouse", 16], ["research-station", 16], ["default", 0], ["garden", 22]
   ]);
   for (const id of environmentIds) {
     const first = buildEnvironmentProxyCatalog(scene, id);
@@ -68,7 +68,7 @@ test("world coordinates track scene dimensions and garden terrain base height", 
   assert.equal(garden.floorY_m, .17);
   assert.equal(garden.shell.kind, "terrain-heightfield");
   assert.equal(garden.shell.primitives.length, 0, "terrain stays an analytic heightfield instead of becoming a filled box");
-  assert.equal(garden.primitives.find((primitive) => primitive.key.endsWith("hedge/back"))?.center_m.y, .17 + .72);
+  assert.equal(garden.primitives.find((primitive) => primitive.key.endsWith("tree-big/trunk"))?.center_m.y, .17 + .30);
 });
 
 test("primitive colors and emission retain the exact shader constants", () => {

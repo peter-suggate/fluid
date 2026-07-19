@@ -8,8 +8,11 @@ import { useUIStore } from "@/lib/stores/ui-store";
 export function VisualPanel() {
   const methodId = useMethodStore((state) => state.methodId);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
+  const effectiveRendererStatus = useDiagnosticsStore((state) => state.effectiveRendererStatus);
   const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
   const setVoxelRenderMode = useUIStore((state) => state.setVoxelRenderMode);
+  const svoRenderMode = useUIStore((state) => state.svoRenderMode);
+  const setSvoRenderMode = useUIStore((state) => state.setSvoRenderMode);
   const gridOverlayAxis = useUIStore((state) => state.gridOverlayAxis);
   const setGridOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
   const gridOverlaySlice = useUIStore((state) => state.gridOverlaySlice);
@@ -23,11 +26,33 @@ export function VisualPanel() {
   const quadtreeTall = gridKind === "quadtree-tall-cell";
   const octree = gridKind === "octree";
   const motionAdaptiveOptical = gpuInfo?.quadtreeOpticalLayerMode === "adaptive-motion";
+  const rendererFallbackLabels = {
+    "missing-source": "waiting for structural SVO data",
+    "unsupported-terrain": "terrain source could not be represented",
+    "unsupported-glass-cutout": "authored glazing needs an opaque shell cutout",
+    "missing-pbr-materials": "production PBR material table is unavailable",
+    "missing-lighting-publications": "production light/environment publications are unavailable",
+    "pipeline-compile-failure": "SVO pipeline failed to compile",
+    "inspection-mode": "a sparse inspection view is active",
+  } as const;
 
   return <aside className="right-panel panel-scroll visual-panel" data-testid="visual-panel">
     <section className="panel-section utility-panel-head">
       <div><p className="eyebrow">VIEWPORT</p><strong>Render &amp; debug</strong></div>
       <button className="panel-close" onClick={() => setRightPanel(null)} aria-label="Close render panel">×</button>
+    </section>
+
+    <section className="panel-section utility-controls">
+      <div className="section-heading"><h2>Renderer</h2><span>SCENE GEOMETRY</span></div>
+      <div className="segmented compact" role="group" aria-label="Scene renderer">
+        <button className={svoRenderMode === "raster" ? "active" : ""} onClick={() => setSvoRenderMode("raster")}>Raster</button>
+        <button className={svoRenderMode === "svo" ? "active" : ""} onClick={() => setSvoRenderMode("svo")}>Sparse voxels</button>
+      </div>
+      <small className="control-hint" data-testid="effective-renderer-status">
+        Active: {effectiveRendererStatus.effectiveMode === "svo" ? "Sparse voxels" : "Raster"}
+        {effectiveRendererStatus.fallbackReason ? ` fallback · ${rendererFallbackLabels[effectiveRendererStatus.fallbackReason]}` : ""}
+      </small>
+      <small className="control-hint">Sparse voxels consumes the octree directly for scene geometry. Raster remains the compatibility and fallback renderer.</small>
     </section>
 
     <section className="panel-section utility-controls">

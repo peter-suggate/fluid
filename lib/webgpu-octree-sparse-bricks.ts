@@ -1,6 +1,24 @@
 import type { SceneDescription } from "./model";
 import {
+  buildSvoEnvironmentLighting,
+  SVO_ENVIRONMENT_LIGHTING_RECORD_STRIDE_BYTES,
+  type SvoEnvironmentLightingRecord,
+} from "./svo-environment-lighting";
+import {
+  buildSvoSceneLights,
+  SVO_LIGHT_MAXIMUM_RECORDS,
+  SVO_LIGHT_RECORD_STRIDE_BYTES,
+  type SvoLightRecord,
+} from "./svo-light-abi";
+import {
+  buildDefaultSvoMaterialRecords,
+  packSvoMaterialTable,
+  SVO_MATERIAL_RECORD_STRIDE_BYTES,
+  svoMaterialFromEnvironmentProxyMaterial,
+} from "./svo-material-abi";
+import {
   SparseBrickOctreeGPU,
+  SPARSE_BRICK_GPU_LAYOUT,
   packSparseBrickPlan,
   type SparseBrickCoordinate,
   type SparseBrickPublicationSource,
@@ -9,18 +27,35 @@ import {
 import { planAdaptiveSparseBrickOctree } from "./adaptive-sparse-brick-plan";
 import { planSparseSceneDomain } from "./sparse-scene-domain";
 import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTable } from "./voxel-scene";
-import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "./voxel-environments";
+import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "./voxel-environments";
 import { SparseSceneProxyVoxelizer, type SparseScenePrimitive } from "./webgpu-sparse-scene-proxies";
-import { SPARSE_VOXEL_DEBUG_RECORD_STRIDE, type SparseVoxelRenderSource } from "./webgpu-voxel-debug";
+import {
+  SPARSE_VOXEL_DEBUG_RECORD_STRIDE,
+  SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS,
+  SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS,
+  SPARSE_VOXEL_PUBLICATION_STATE,
+  SPARSE_VOXEL_VALID_FIELDS,
+  createSparseVoxelInspectionPublicationController,
+  sparseVoxelFluidResidencyLayout,
+  type SparseVoxelInspectionPublicationProducerController,
+  type SparseVoxelRenderSource,
+  type SparseVoxelSceneRenderSource,
+  type SparseVoxelStructuralRenderSource,
+} from "./webgpu-voxel-debug";
 import { GPUFluidBrickResidency, type FluidBrickResidencyStats } from "./webgpu-fluid-brick-residency";
-import { WebGPUFluidBrickAtlas, type FluidBrickAtlasStats } from "./webgpu-brick-atlas";
+import {
+  WebGPUFluidBrickAtlas,
+  type FluidBrickAtlasMode,
+  type FluidBrickAtlasSamplingSource,
+  type FluidBrickAtlasStats,
+} from "./webgpu-brick-atlas";
 
 export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
   /** Air-side support retained for pressure-topology rebuilds. */
   haloCells?: number;
-  /** Brick-pooled phi/velocity atlas mirrored from the dense fields. */
-  brickAtlas?: boolean;
+  /** Brick-pooled phi/velocity atlas ownership; off avoids atlas allocation. */
+  brickAtlas?: "off" | FluidBrickAtlasMode;
   /** Velocity-swept residency support plus downstream neighbor activation. */
   brickPreActivation?: boolean;
   /**
@@ -43,6 +78,28 @@ export interface OctreeSparseBrickTimestampWrites {
   publication?: GPUComputePassTimestampWrites;
 }
 
+export interface OctreeSparseBrickEncodePlan {
+  /** Structural topology/payload/publication always remains live. */
+  structuralPublication: true;
+  inspectionPublication: boolean;
+  inspectionCountCopies: 0 | 2;
+  inspectionComputePasses: 0 | 2;
+  inspectionDispatches: 0 | 2;
+}
+
+/** Deterministic work evidence for production and inspection publication. */
+export function planOctreeSparseBrickEncode(
+  inspectionPublication = true,
+): OctreeSparseBrickEncodePlan {
+  return {
+    structuralPublication: true,
+    inspectionPublication,
+    inspectionCountCopies: inspectionPublication ? 2 : 0,
+    inspectionComputePasses: inspectionPublication ? 2 : 0,
+    inspectionDispatches: inspectionPublication ? 2 : 0,
+  };
+}
+
 /** Environment terminal leaves are at most 2x the solver brick scale. */
 export const ENVIRONMENT_MAXIMUM_COARSENING_POWER = 1;
 
@@ -56,11 +113,110 @@ export function planOctreeBrickCoordinates(dimensions: readonly [number, number,
 }
 
 export const ENVIRONMENT_VOXEL_MATERIAL_BASE = 32;
+export const OCTREE_SVO_PBR_MATERIAL_REVISION = 1;
+export const OCTREE_SVO_LIGHT_REVISION = 1;
+export const OCTREE_SVO_ENVIRONMENT_LIGHTING_REVISION = 1;
+
+export interface OctreeSvoPbrMaterialPublicationData {
+  packedRecords: Uint32Array<ArrayBuffer>;
+  count: number;
+  strideBytes: number;
+  revision: number;
+}
+
+/** Dense default table used by the producer and CPU ABI/lifecycle tests. */
+export function buildOctreeSvoPbrMaterialPublication(
+  revision = OCTREE_SVO_PBR_MATERIAL_REVISION,
+  environmentPrimitives: readonly EnvironmentProxyPrimitive[] = [],
+): OctreeSvoPbrMaterialPublicationData {
+  if (!Number.isSafeInteger(revision) || revision < 1 || revision > 0xffff_ffff) {
+    throw new RangeError("SVO PBR material publication revision must be a positive uint32");
+  }
+  const records = [
+    ...buildDefaultSvoMaterialRecords(revision),
+    ...environmentPrimitives.map((primitive) => {
+      if (!Number.isSafeInteger(primitive.ownerIndex) || primitive.ownerIndex < 0) {
+        throw new RangeError(`Environment material owner index for ${primitive.key} must be a non-negative safe integer`);
+      }
+      const materialId = ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex;
+      if (materialId > 0xffff) throw new RangeError(`Environment material ID for ${primitive.key} does not fit uint16`);
+      return svoMaterialFromEnvironmentProxyMaterial(materialId, primitive.material, revision);
+    }),
+  ];
+  const packedRecords = packSvoMaterialTable(records);
+  return {
+    packedRecords,
+    count: packedRecords.byteLength / SVO_MATERIAL_RECORD_STRIDE_BYTES,
+    strideBytes: SVO_MATERIAL_RECORD_STRIDE_BYTES,
+    revision,
+  };
+}
+
+export interface OctreeSvoLightPublicationData {
+  records: readonly SvoLightRecord[];
+  packedRecords: Uint32Array<ArrayBuffer>;
+  count: number;
+  strideBytes: number;
+  revision: number;
+  omittedFixtureKeys: readonly string[];
+}
+
+/** Build the selected scene/environment's deterministic bounded light table. */
+export function buildOctreeSvoLightPublication(
+  scene: SceneDescription,
+  options: { revision?: number; maximumRecords?: number } = {},
+): OctreeSvoLightPublicationData {
+  const revision = options.revision ?? OCTREE_SVO_LIGHT_REVISION;
+  const lights = buildSvoSceneLights(scene, {
+    revision,
+    maximumRecords: options.maximumRecords ?? SVO_LIGHT_MAXIMUM_RECORDS,
+  });
+  return {
+    records: lights.records,
+    packedRecords: lights.packedRecords,
+    count: lights.records.length,
+    strideBytes: SVO_LIGHT_RECORD_STRIDE_BYTES,
+    revision: lights.revision,
+    omittedFixtureKeys: lights.omittedFixtureKeys,
+  };
+}
+
+export interface OctreeSvoEnvironmentLightingPublicationData {
+  record: SvoEnvironmentLightingRecord;
+  packedRecords: Uint32Array<ArrayBuffer>;
+  count: 1;
+  strideBytes: number;
+  revision: number;
+  cacheKey: string;
+}
+
+/** Build the selected environment's single image-free lighting record. */
+export function buildOctreeSvoEnvironmentLightingPublication(
+  scene: Pick<SceneDescription, "environment">,
+  revision = OCTREE_SVO_ENVIRONMENT_LIGHTING_REVISION,
+): OctreeSvoEnvironmentLightingPublicationData {
+  const lighting = buildSvoEnvironmentLighting(scene.environment ?? "default", revision);
+  return {
+    record: lighting.record,
+    packedRecords: lighting.packedRecord,
+    count: 1,
+    strideBytes: SVO_ENVIRONMENT_LIGHTING_RECORD_STRIDE_BYTES,
+    revision: lighting.record.revision,
+    cacheKey: lighting.cacheKey,
+  };
+}
 
 function storageBuffer(device: GPUDevice, label: string, size: number, data?: ArrayBufferView<ArrayBuffer>) {
   const buffer = device.createBuffer({ label, size: Math.max(4, size), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
   if (data && data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
   return buffer;
+}
+
+/** Cover arbitrarily large debug-publication arenas without exceeding WebGPU's per-axis limit. */
+export function tiledDebugDispatch(items: number, workgroupSize: number): [number, number, number] {
+  const blocks = Math.ceil(Math.max(0, items) / workgroupSize);
+  const x = Math.min(65_535, blocks);
+  return [x, x > 0 ? Math.ceil(blocks / x) : 1, 1];
 }
 
 const debugPublicationShader = /* wgsl */ `
@@ -104,7 +260,13 @@ fn recordForVoxel(index: u32) -> DebugRecord {
   let scale = 1u << (params.settings.z - node.address.z);
   let cell = (brick * brickSize + local) * scale;
   let inside = all(cell < params.dims.xyz);
-  let packed = materialOwners[index];
+  // Debug records are densely expanded in leaf order, but the authoritative
+  // field payload can live at a different arena offset for every leaf.
+  let payloadIndex = leaf.topology.y + localIndex;
+  var packed = 0u;
+  if (payloadIndex < arrayLength(&materialOwners)) {
+    packed = materialOwners[payloadIndex];
+  }
   var material = packed & 0xffffu;
   let owner = packed >> 16u;
   if (material != 0u && owner != 0xffffu && owner < params.settings.y && owner < arrayLength(&bodyMaterials)) { material = bodyMaterials[owner]; }
@@ -117,14 +279,19 @@ fn recordForVoxel(index: u32) -> DebugRecord {
 }
 
 @compute @workgroup_size(256)
-fn materializeVoxels(@builtin(global_invocation_id) gid: vec3u) {
-  if (gid.x >= control[2] || gid.x >= arrayLength(&voxelRecords)) { return; }
-  voxelRecords[gid.x] = recordForVoxel(gid.x);
+fn materializeVoxels(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) lid: u32) {
+  let blocks = (u32(arrayLength(&voxelRecords)) + 255u) / 256u;
+  let dispatchX = min(blocks, 65535u);
+  let index = (wid.x + wid.y * dispatchX) * 256u + lid;
+  if (index >= control[2] || index >= arrayLength(&voxelRecords)) { return; }
+  voxelRecords[index] = recordForVoxel(index);
 }
 
 @compute @workgroup_size(64)
-fn materializeBricks(@builtin(global_invocation_id) gid: vec3u) {
-  let leafIndex = gid.x;
+fn materializeBricks(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) lid: u32) {
+  let blocks = (u32(arrayLength(&brickRecords)) + 63u) / 64u;
+  let dispatchX = min(blocks, 65535u);
+  let leafIndex = (wid.x + wid.y * dispatchX) * 64u + lid;
   if (leafIndex >= control[1] || leafIndex >= arrayLength(&brickRecords)) { return; }
   let brickSize = params.settings.x;
   let voxelsPerBrick = brickSize * brickSize * brickSize;
@@ -132,7 +299,11 @@ fn materializeBricks(@builtin(global_invocation_id) gid: vec3u) {
   var material = 0u;
   var owner = 0xffffu;
   for (var local = 0u; local < voxelsPerBrick; local += 1u) {
-    let packed = materialOwners[leafIndex * voxelsPerBrick + local];
+    let payloadIndex = leaves[leafIndex].topology.y + local;
+    var packed = 0u;
+    if (payloadIndex < arrayLength(&materialOwners)) {
+      packed = materialOwners[payloadIndex];
+    }
     let candidateOwner = packed >> 16u;
     var candidate = packed & 0xffffu;
     if (candidate != 0u && candidateOwner != 0xffffu && candidateOwner < params.settings.y && candidateOwner < arrayLength(&bodyMaterials)) { candidate = bodyMaterials[candidateOwner]; }
@@ -151,6 +322,40 @@ fn materializeBricks(@builtin(global_invocation_id) gid: vec3u) {
 }
 `;
 
+const structuralPublicationFinalizeShader = /* wgsl */ `
+@group(0) @binding(0) var<storage, read_write> state: array<atomic<u32>>;
+
+const VALID_FIELDS: u32 = ${
+  SPARSE_VOXEL_VALID_FIELDS.topology |
+  SPARSE_VOXEL_VALID_FIELDS.staticGeometry |
+  SPARSE_VOXEL_VALID_FIELDS.dynamicSolid |
+  SPARSE_VOXEL_VALID_FIELDS.coarseFluid |
+  SPARSE_VOXEL_VALID_FIELDS.velocity |
+  SPARSE_VOXEL_VALID_FIELDS.materialOwner
+}u;
+
+fn finishFrame(first: bool) {
+  if (first) {
+    atomicStore(&state[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}], 1u);
+    atomicStore(&state[${SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision}], 1u);
+  }
+  atomicAdd(&state[${SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision}], 1u);
+  atomicAdd(&state[${SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision}], 1u);
+  // Fine fluid remains explicitly unavailable (validity bit and revision zero)
+  // until the sparse surface-band atlas is attached to this source.
+  atomicStore(&state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}], VALID_FIELDS);
+  // This is deliberately last: prior passes and the stores above define one
+  // complete structural snapshot for consumers later in the command stream.
+  atomicAdd(&state[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}], 1u);
+}
+
+@compute @workgroup_size(1)
+fn finalizeInitial() { finishFrame(true); }
+
+@compute @workgroup_size(1)
+fn finalizeFrame() { finishFrame(false); }
+`;
+
 /**
  * Transitional GPU bridge: the octree solver remains authoritative while its
  * resident level set, velocity and VOS solid field are published into one
@@ -158,10 +363,12 @@ fn materializeBricks(@builtin(global_invocation_id) gid: vec3u) {
  */
 export class OctreeSparseBrickWorld {
   readonly tree: SparseBrickOctreeGPU;
+  /** Narrow two-sided band used by surface and topology scheduling. */
   readonly residency: GPUFluidBrickResidency;
+  /** Full wet-domain residency used only by authoritative bulk field storage. */
+  readonly bulkResidency?: GPUFluidBrickResidency;
   readonly atlas?: WebGPUFluidBrickAtlas;
-  readonly renderSource: SparseVoxelRenderSource;
-  readonly allocatedBytes: number;
+  readonly sceneSource: SparseVoxelSceneRenderSource;
   private readonly preActivation: boolean;
 
   private readonly device: GPUDevice;
@@ -172,16 +379,30 @@ export class OctreeSparseBrickWorld {
   private readonly containerClosedTop: boolean;
   private readonly source: SparseBrickPublicationSource;
   private readonly sourceBuffers: GPUBuffer[];
-  private readonly voxelRecords: GPUBuffer;
-  private readonly brickRecords: GPUBuffer;
-  private readonly voxelCount: GPUBuffer;
-  private readonly brickCount: GPUBuffer;
-  private readonly materialBuffer: GPUBuffer;
-  private readonly bodyMaterialBuffer: GPUBuffer;
-  private readonly params: GPUBuffer;
-  private readonly voxelPipeline: GPUComputePipeline;
-  private readonly brickPipeline: GPUComputePipeline;
-  private readonly debugBindGroup: GPUBindGroup;
+  private readonly pbrMaterialBuffer: GPUBuffer;
+  private readonly lightBuffer: GPUBuffer;
+  private readonly environmentLightingBuffer: GPUBuffer;
+  private readonly inspectionMaterialData: Float32Array<ArrayBuffer>;
+  private readonly inspectionBodyMaterials: Uint32Array<ArrayBuffer>;
+  private readonly inspectionParameterData: ArrayBuffer;
+  private inspection?: {
+    source: SparseVoxelRenderSource;
+    publication: SparseVoxelInspectionPublicationProducerController;
+    buffers: GPUBuffer[];
+    voxelRecords: GPUBuffer;
+    brickRecords: GPUBuffer;
+    voxelCount: GPUBuffer;
+    brickCount: GPUBuffer;
+    voxelPipeline: GPUComputePipeline;
+    brickPipeline: GPUComputePipeline;
+    bindGroup: GPUBindGroup;
+    allocatedBytes: number;
+  };
+  private readonly baseAllocatedBytes: number;
+  private readonly structuralPublicationState: GPUBuffer;
+  private readonly structuralInitialPipeline: GPUComputePipeline;
+  private readonly structuralFramePipeline: GPUComputePipeline;
+  private readonly structuralFinalizeBindGroup: GPUBindGroup;
   private readonly proxyVoxelizer: SparseSceneProxyVoxelizer;
   private published = false;
   private proxiesPublished = false;
@@ -232,7 +453,27 @@ export class OctreeSparseBrickWorld {
       topologyTileBricks: options.topologyTileBricks ?? 1,
     });
     this.preActivation = options.brickPreActivation ?? true;
-    if (options.brickAtlas ?? true) this.atlas = new WebGPUFluidBrickAtlas(device, dimensions, this.residency, { brickSize });
+    const brickAtlasMode = options.brickAtlas ?? "mirror";
+    if (brickAtlasMode !== "off") {
+      // Bulk velocity must remain defined throughout deep liquid, while the
+      // surface path wins by visiting only a narrow two-sided band. Keep the
+      // two schedulers independent so atlas authority never widens surface
+      // redistance back to O(wet volume).
+      this.bulkResidency = new GPUFluidBrickResidency(device, dimensions, sceneDomain.cellSize_m, {
+        brickSize,
+        haloCells: options.haloCells ?? 2,
+        retireAfterFrames: 3,
+        includeLiquidInterior: true,
+        leafIndices,
+        leafCapacity: this.tree.leafCapacity,
+        topologyTileBricks: options.topologyTileBricks ?? 1,
+      });
+      this.atlas = new WebGPUFluidBrickAtlas(device, dimensions, this.bulkResidency, {
+        brickSize,
+        mode: brickAtlasMode,
+        preActivation: this.preActivation,
+      });
+    }
 
     const counts = storageBuffer(device, "Sparse brick source counts", packed.counts.byteLength, packed.counts);
     const topology = storageBuffer(device, "Sparse brick source topology", packed.topology.byteLength, packed.topology);
@@ -242,10 +483,6 @@ export class OctreeSparseBrickWorld {
     this.sourceBuffers = [counts, topology, geometry, velocity, materialOwners];
     this.source = { counts, topology, geometry, velocity, materialOwners, capacities: { nodes: plan.nodes.length, leaves: plan.leaves.length, voxels: this.tree.voxelCapacity } };
 
-    this.voxelRecords = storageBuffer(device, "Sparse voxel debug records", this.tree.voxelCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
-    this.brickRecords = storageBuffer(device, "Sparse brick debug records", this.tree.leafCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
-    this.voxelCount = storageBuffer(device, "Sparse voxel render count", 4);
-    this.brickCount = storageBuffer(device, "Sparse brick render count", 4);
     const baseMaterials = packVoxelDebugMaterialTable();
     const materialCount = ENVIRONMENT_VOXEL_MATERIAL_BASE + environmentPrimitives.length;
     const materialData = new Float32Array(Math.max(baseMaterials.length, materialCount * 8));
@@ -264,11 +501,34 @@ export class OctreeSparseBrickWorld {
         primitive.material.roughness
       ], offset);
     });
-    this.materialBuffer = storageBuffer(device, "Sparse voxel material table", materialData.byteLength, new Float32Array(materialData));
+    this.inspectionMaterialData = materialData;
+    const pbrMaterials = buildOctreeSvoPbrMaterialPublication(
+      OCTREE_SVO_PBR_MATERIAL_REVISION,
+      environmentPrimitives,
+    );
+    this.pbrMaterialBuffer = storageBuffer(
+      device,
+      "Sparse voxel PBR material table",
+      pbrMaterials.packedRecords.byteLength,
+      pbrMaterials.packedRecords,
+    );
+    const lights = buildOctreeSvoLightPublication(scene);
+    this.lightBuffer = storageBuffer(
+      device,
+      "Sparse voxel authored light table",
+      lights.packedRecords.byteLength,
+      lights.packedRecords,
+    );
+    const environmentLighting = buildOctreeSvoEnvironmentLightingPublication(scene);
+    this.environmentLightingBuffer = storageBuffer(
+      device,
+      "Sparse voxel environment lighting",
+      environmentLighting.packedRecords.byteLength,
+      environmentLighting.packedRecords,
+    );
     const bodyMaterials = new Uint32Array(Math.max(1, scene.rigidBodies.length));
     scene.rigidBodies.forEach((body, index) => { bodyMaterials[index] = materialIdForRigidShape(body.shape); });
-    this.bodyMaterialBuffer = storageBuffer(device, "Sparse voxel body material IDs", bodyMaterials.byteLength, bodyMaterials);
-    this.params = device.createBuffer({ label: "Sparse voxel debug publication parameters", size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.inspectionBodyMaterials = bodyMaterials;
     const c = scene.container;
     this.containerClosedTop = c.top === "closed";
     this.cellSize = sceneDomain.cellSize_m;
@@ -277,32 +537,36 @@ export class OctreeSparseBrickWorld {
     floats.set([sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z, 0], 4);
     floats.set([...this.cellSize, 0], 8);
     uints.set([brickSize, scene.rigidBodies.length, plan.maximumDepth, VOXEL_MATERIAL_IDS.fluid], 12);
-    device.queue.writeBuffer(this.params, 0, parameterData);
-
-    const shaderModule = device.createShaderModule({ label: "Octree sparse-brick render publication", code: debugPublicationShader });
-    const debugLayout = device.createBindGroupLayout({ label: "Octree sparse-brick render publication layout", entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
-    ] });
-    const debugPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [debugLayout] });
-    this.voxelPipeline = device.createComputePipeline({ label: "Materialize sparse voxel records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeVoxels" } });
-    this.brickPipeline = device.createComputePipeline({ label: "Materialize sparse brick records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeBricks" } });
-    this.debugBindGroup = device.createBindGroup({ layout: debugLayout, entries: [
-      { binding: 0, resource: { buffer: this.tree.control } },
-      { binding: 1, resource: { buffer: this.tree.nodes, offset: this.tree.nodeOffsetBytes } },
-      { binding: 2, resource: { buffer: this.tree.leaves, offset: this.tree.leafOffsetBytes } },
-      { binding: 3, resource: { buffer: this.tree.materialOwners, offset: this.tree.materialOwnerOffsetBytes } },
-      { binding: 4, resource: { buffer: this.bodyMaterialBuffer } }, { binding: 5, resource: { buffer: this.params } },
-      { binding: 6, resource: { buffer: this.voxelRecords } }, { binding: 7, resource: { buffer: this.brickRecords } },
-      { binding: 8, resource: { buffer: this.residency.leafStates } }
-    ] });
+    this.inspectionParameterData = parameterData;
+    this.structuralPublicationState = storageBuffer(
+      device,
+      "Sparse voxel structural publication state",
+      SPARSE_VOXEL_PUBLICATION_STATE.strideBytes,
+    );
+    const structuralModule = device.createShaderModule({
+      label: "Sparse voxel structural publication finalizer",
+      code: structuralPublicationFinalizeShader,
+    });
+    const structuralLayout = device.createBindGroupLayout({
+      label: "Sparse voxel structural publication finalizer layout",
+      entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }],
+    });
+    const structuralPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [structuralLayout] });
+    this.structuralInitialPipeline = device.createComputePipeline({
+      label: "Finalize initial sparse voxel structural publication",
+      layout: structuralPipelineLayout,
+      compute: { module: structuralModule, entryPoint: "finalizeInitial" },
+    });
+    this.structuralFramePipeline = device.createComputePipeline({
+      label: "Finalize sparse voxel structural frame",
+      layout: structuralPipelineLayout,
+      compute: { module: structuralModule, entryPoint: "finalizeFrame" },
+    });
+    this.structuralFinalizeBindGroup = device.createBindGroup({
+      label: "Sparse voxel structural publication finalizer bindings",
+      layout: structuralLayout,
+      entries: [{ binding: 0, resource: { buffer: this.structuralPublicationState } }],
+    });
     const proxyPrimitives: SparseScenePrimitive[] = environmentPrimitives.map((primitive) => {
       const identity = {
         center: [primitive.center_m.x, primitive.center_m.y, primitive.center_m.z] as const,
@@ -319,21 +583,188 @@ export class OctreeSparseBrickWorld {
       finestLevel: plan.maximumDepth,
       label: `${environmentCatalog.environmentId} environment proxies`
     });
-    this.renderSource = {
-      voxelRecords: { buffer: this.voxelRecords }, voxelCount: { buffer: this.voxelCount },
-      brickRecords: { buffer: this.brickRecords }, brickCount: { buffer: this.brickCount },
-      materials: { buffer: this.materialBuffer }, voxelCapacity: this.tree.voxelCapacity, brickCapacity: this.tree.leafCapacity,
+    const publicationBinding = { buffer: this.structuralPublicationState };
+    const publicationWord = (word: number) => ({ binding: publicationBinding, word });
+    const residencyLayout = sparseVoxelFluidResidencyLayout(this.residency.capacity);
+    if (residencyLayout.worklistByteLength !== this.residency.worklistByteLength) {
+      throw new Error("Sparse voxel residency ABI does not match the producer worklist allocation");
+    }
+    const residencyWorklistBinding = { buffer: this.residency.worklist, size: this.residency.worklistByteLength };
+    const residencyWord = (word: number) => ({ binding: residencyWorklistBinding, word });
+    const activeResidencyList = {
+      count: residencyWord(SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS.activeCount),
+      entryOffsetBytes: residencyLayout.activeEntryOffsetBytes,
+      entryStrideBytes: residencyLayout.entryStrideBytes,
+      capacity: this.residency.capacity,
+    };
+    const structural: SparseVoxelStructuralRenderSource = {
+      control: { buffer: this.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes },
+      nodes: { buffer: this.tree.nodes, offset: this.tree.nodeOffsetBytes, size: this.tree.nodeCapacity * SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes },
+      leaves: { buffer: this.tree.leaves, offset: this.tree.leafOffsetBytes, size: this.tree.leafCapacity * SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes },
+      geometry: { buffer: this.tree.geometry, offset: this.tree.geometryOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.geometryStrideBytes },
+      velocity: { buffer: this.tree.velocity, offset: this.tree.velocityOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.velocityStrideBytes },
+      materialOwners: { buffer: this.tree.materialOwners, offset: this.tree.materialOwnerOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes },
+      fluidLeafStates: { buffer: this.residency.leafStates, size: this.tree.leafCapacity * Uint32Array.BYTES_PER_ELEMENT },
+      fluidResidency: {
+        states: { buffer: this.residency.stateBuffer, size: this.residency.capacity * residencyLayout.stateStrideBytes },
+        worklist: residencyWorklistBinding,
+        domain: {
+          originBricks: solverOriginBricks as [number, number, number],
+          dimensionsBricks: localBrickDimensions,
+        },
+        stateStrideBytes: residencyLayout.stateStrideBytes,
+        stateBits: SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS,
+        active: activeResidencyList,
+        core: {
+          ...activeResidencyList,
+          count: residencyWord(SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS.coreCount),
+          requiredStateBit: SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS.core,
+        },
+        halo: {
+          ...activeResidencyList,
+          count: residencyWord(SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS.haloCount),
+          requiredStateBit: SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS.halo,
+        },
+        retired: {
+          count: residencyWord(SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS.retiredCount),
+          entryOffsetBytes: residencyLayout.retiredEntryOffsetBytes,
+          entryStrideBytes: residencyLayout.entryStrideBytes,
+          capacity: this.residency.capacity,
+        },
+        counters: {
+          activated: residencyWord(SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS.activatedCount),
+        },
+        generation: residencyWord(SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS.generation),
+        revision: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision),
+        owner: "GPUFluidBrickResidency",
+      },
+      capacities: { nodes: this.tree.nodeCapacity, leaves: this.tree.leafCapacity, voxels: this.tree.voxelCapacity },
+      strides: {
+        control: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes,
+        node: SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes,
+        leaf: SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes,
+        geometry: SPARSE_BRICK_GPU_LAYOUT.geometryStrideBytes,
+        velocity: SPARSE_BRICK_GPU_LAYOUT.velocityStrideBytes,
+        materialOwner: SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes,
+      },
+      domain: {
+        worldOrigin_m: [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z],
+        cellSize_m: this.cellSize,
+        dimensionsCells: sceneDomain.sceneDimensionsCells,
+        brickSize,
+        maximumDepth: plan.maximumDepth,
+      },
+      publication: {
+        state: publicationBinding,
+        completeGeneration: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration),
+        validFields: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.validFields),
+        revisions: {
+          topology: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision),
+          staticGeometry: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision),
+          dynamicSolid: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision),
+          coarseFluid: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision),
+          fineFluid: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.fineFluidRevision),
+        },
+      },
+      fields: {
+        topology: { bit: SPARSE_VOXEL_VALID_FIELDS.topology, residency: "all-published-leaves" },
+        staticGeometry: { bit: SPARSE_VOXEL_VALID_FIELDS.staticGeometry, signedDistance: "negative-inside-metres", distanceQuality: "mixed-exact-approximate", residency: "all-published-leaves" },
+        dynamicSolid: { bit: SPARSE_VOXEL_VALID_FIELDS.dynamicSolid, signedDistance: "negative-inside-metres", distanceQuality: "occupancy-estimate", residency: "fluid-resident-leaves" },
+        coarseFluid: { bit: SPARSE_VOXEL_VALID_FIELDS.coarseFluid, signedDistance: "negative-inside-metres", distanceQuality: "metric-near-interface", residency: "fluid-resident-leaves" },
+        fineFluid: { bit: SPARSE_VOXEL_VALID_FIELDS.fineFluid, signedDistance: "negative-inside-metres", distanceQuality: "metric", residency: "unavailable" },
+        velocity: { bit: SPARSE_VOXEL_VALID_FIELDS.velocity, residency: "fluid-resident-leaves" },
+        materialOwner: { bit: SPARSE_VOXEL_VALID_FIELDS.materialOwner, residency: "all-published-leaves" },
+      },
+    };
+    this.sceneSource = {
+      pbrMaterials: {
+        binding: { buffer: this.pbrMaterialBuffer, size: pbrMaterials.packedRecords.byteLength },
+        count: pbrMaterials.count,
+        strideBytes: pbrMaterials.strideBytes,
+        revision: pbrMaterials.revision,
+      },
+      lights: {
+        binding: { buffer: this.lightBuffer, size: lights.packedRecords.byteLength },
+        count: lights.count,
+        strideBytes: lights.strideBytes,
+        revision: lights.revision,
+      },
+      environmentLighting: {
+        binding: { buffer: this.environmentLightingBuffer, size: environmentLighting.packedRecords.byteLength },
+        count: environmentLighting.count,
+        strideBytes: environmentLighting.strideBytes,
+        revision: environmentLighting.revision,
+        cacheKey: environmentLighting.cacheKey,
+      },
       materialCount: materialData.length / 8,
       fluidBrickStats: { buffer: this.residency.worklist }, fluidBrickCapacity: this.residency.capacity,
+      structural,
       revision: 1
     };
-    this.allocatedBytes = this.tree.allocatedBytes + this.residency.allocatedBytes + (this.atlas?.allocatedBytes ?? 0)
-      + this.tree.voxelCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE + this.tree.leafCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE
-      + this.sourceBuffers.reduce((sum, buffer) => sum + buffer.size, 0) + this.voxelCount.size + this.brickCount.size
-      + this.materialBuffer.size + this.bodyMaterialBuffer.size + this.params.size + this.proxyVoxelizer.allocatedBytes;
+    this.baseAllocatedBytes = this.tree.allocatedBytes + this.residency.allocatedBytes
+      + (this.bulkResidency?.allocatedBytes ?? 0) + (this.atlas?.allocatedBytes ?? 0)
+      + this.sourceBuffers.reduce((sum, buffer) => sum + buffer.size, 0)
+      + this.pbrMaterialBuffer.size + this.lightBuffer.size + this.environmentLightingBuffer.size + this.structuralPublicationState.size
+      + this.proxyVoxelizer.allocatedBytes;
   }
 
-  encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, timings: OctreeSparseBrickTimestampWrites = {}, dt_s = 0): void {
+  get allocatedBytes(): number { return this.baseAllocatedBytes + (this.inspection?.allocatedBytes ?? 0); }
+
+  /** Allocate the expanded legacy records only when raw/grid inspection asks for them. */
+  ensureInspectionSource(): SparseVoxelRenderSource {
+    if (this.destroyed) throw new Error("Cannot inspect a destroyed sparse-brick world");
+    if (this.inspection) return this.inspection.source;
+    const voxelRecords = storageBuffer(this.device, "Sparse voxel debug records", this.tree.voxelCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
+    const brickRecords = storageBuffer(this.device, "Sparse brick debug records", this.tree.leafCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
+    const voxelCount = storageBuffer(this.device, "Sparse voxel render count", 4);
+    const brickCount = storageBuffer(this.device, "Sparse brick render count", 4);
+    const materialBuffer = storageBuffer(this.device, "Sparse voxel material table", this.inspectionMaterialData.byteLength, this.inspectionMaterialData);
+    const bodyMaterialBuffer = storageBuffer(this.device, "Sparse voxel body material IDs", this.inspectionBodyMaterials.byteLength, this.inspectionBodyMaterials);
+    const params = this.device.createBuffer({ label: "Sparse voxel debug publication parameters", size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(params, 0, this.inspectionParameterData);
+    const shaderModule = this.device.createShaderModule({ label: "Octree sparse-brick render publication", code: debugPublicationShader });
+    const debugLayout = this.device.createBindGroupLayout({ label: "Octree sparse-brick render publication layout", entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+    ] });
+    const debugPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [debugLayout] });
+    const voxelPipeline = this.device.createComputePipeline({ label: "Materialize sparse voxel records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeVoxels" } });
+    const brickPipeline = this.device.createComputePipeline({ label: "Materialize sparse brick records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeBricks" } });
+    const bindGroup = this.device.createBindGroup({ layout: debugLayout, entries: [
+      { binding: 0, resource: { buffer: this.tree.control } },
+      { binding: 1, resource: { buffer: this.tree.nodes, offset: this.tree.nodeOffsetBytes } },
+      { binding: 2, resource: { buffer: this.tree.leaves, offset: this.tree.leafOffsetBytes } },
+      { binding: 3, resource: { buffer: this.tree.materialOwners, offset: this.tree.materialOwnerOffsetBytes } },
+      { binding: 4, resource: { buffer: bodyMaterialBuffer } }, { binding: 5, resource: { buffer: params } },
+      { binding: 6, resource: { buffer: voxelRecords } }, { binding: 7, resource: { buffer: brickRecords } },
+      { binding: 8, resource: { buffer: this.residency.leafStates } }
+    ] });
+    const publication = createSparseVoxelInspectionPublicationController(true, (encoder) => this.encodeInspectionPublication(encoder));
+    const source: SparseVoxelRenderSource = {
+      ...this.sceneSource,
+      voxelRecords: { buffer: voxelRecords }, voxelCount: { buffer: voxelCount },
+      brickRecords: { buffer: brickRecords }, brickCount: { buffer: brickCount },
+      materials: { buffer: materialBuffer },
+      voxelCapacity: this.tree.voxelCapacity, brickCapacity: this.tree.leafCapacity,
+      inspectionPublication: publication,
+    };
+    const buffers = [voxelRecords, brickRecords, voxelCount, brickCount, materialBuffer, bodyMaterialBuffer, params];
+    this.inspection = {
+      source, publication, buffers, voxelRecords, brickRecords, voxelCount, brickCount,
+      voxelPipeline, brickPipeline, bindGroup,
+      allocatedBytes: buffers.reduce((sum, buffer) => sum + buffer.size, 0),
+    };
+    return source;
+  }
+
+  encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, timings: OctreeSparseBrickTimestampWrites = {}, dt_s = 0, bulkAlreadyRefreshed = false): void {
     if (this.destroyed) return;
     const beginRange = (label: string, writes?: GPUComputePassTimestampWrites) => {
       if (writes?.beginningOfPassWriteIndex === undefined) return;
@@ -351,9 +782,16 @@ export class OctreeSparseBrickWorld {
     };
     beginRange("Fluid brick residency", timings.residency);
     this.residency.encode(encoder, fields.levelSet, fields.velocity, { dt_s, preActivation: this.preActivation });
+    // Bulk residency normally refreshes at the head of every solver substep.
+    // Keep a tail refresh for t=0 publication and non-solver callers, while
+    // the solver explicitly suppresses the duplicate publication pass.
+    if (!bulkAlreadyRefreshed) this.atlas?.encodeBulkRefresh(encoder, fields.levelSet, fields.velocity, dt_s);
     endRange("Fluid brick residency", timings.residency);
     beginRange("Sparse brick publication", timings.publication);
-    if (!this.published) {
+    const inspection = this.inspection;
+    const encodePlan = planOctreeSparseBrickEncode(inspection?.publication.enabled ?? false);
+    const initialPublication = !this.published;
+    if (initialPublication) {
       this.tree.encodePublish(encoder, this.source);
       this.published = true;
     }
@@ -374,22 +812,38 @@ export class OctreeSparseBrickWorld {
       this.proxyVoxelizer.encode(encoder);
       this.proxiesPublished = true;
     }
-    encoder.copyBufferToBuffer(this.tree.control, 8, this.voxelCount, 0, 4);
-    encoder.copyBufferToBuffer(this.tree.control, 4, this.brickCount, 0, 4);
-    const voxelPass = encoder.beginComputePass({ label: "Publish octree raw voxel records" });
-    voxelPass.setPipeline(this.voxelPipeline); voxelPass.setBindGroup(0, this.debugBindGroup);
-    voxelPass.dispatchWorkgroups(Math.ceil(this.tree.voxelCapacity / 256)); voxelPass.end();
-    const brickPass = encoder.beginComputePass({ label: "Publish octree sparse brick records" });
-    brickPass.setPipeline(this.brickPipeline); brickPass.setBindGroup(0, this.debugBindGroup);
-    brickPass.dispatchWorkgroups(Math.ceil(this.tree.leafCapacity / 64)); brickPass.end();
-    // Atlas tiles follow the freshly classified residency states within the
-    // same publication window: retire freed slots, allocate newly resident
-    // ones, then mirror the dense fields (apron included) and validate.
-    this.atlas?.encode(encoder, fields.levelSet, fields.velocity);
+    if (encodePlan.inspectionPublication) {
+      this.encodeInspectionPublication(encoder);
+      inspection?.publication.markEncoded();
+    }
+    // Atlas pages were mirrored with the bulk-residency refresh above (or at
+    // the head of the final solver substep).
+    const finalizer = encoder.beginComputePass({ label: "Finalize sparse voxel structural publication" });
+    finalizer.setPipeline(initialPublication ? this.structuralInitialPipeline : this.structuralFramePipeline);
+    finalizer.setBindGroup(0, this.structuralFinalizeBindGroup);
+    finalizer.dispatchWorkgroups(1);
+    finalizer.end();
     endRange("Sparse brick publication", timings.publication);
   }
 
+  private encodeInspectionPublication(encoder: GPUCommandEncoder): void {
+    const inspection = this.inspection;
+    if (!inspection) return;
+    encoder.copyBufferToBuffer(this.tree.control, 8, inspection.voxelCount, 0, 4);
+    encoder.copyBufferToBuffer(this.tree.control, 4, inspection.brickCount, 0, 4);
+    const voxelPass = encoder.beginComputePass({ label: "Publish octree raw voxel records" });
+    voxelPass.setPipeline(inspection.voxelPipeline); voxelPass.setBindGroup(0, inspection.bindGroup);
+    voxelPass.dispatchWorkgroups(...tiledDebugDispatch(this.tree.voxelCapacity, 256)); voxelPass.end();
+    const brickPass = encoder.beginComputePass({ label: "Publish octree sparse brick records" });
+    brickPass.setPipeline(inspection.brickPipeline); brickPass.setBindGroup(0, inspection.bindGroup);
+    brickPass.dispatchWorkgroups(...tiledDebugDispatch(this.tree.leafCapacity, 64)); brickPass.end();
+  }
+
   readResidencyStats(): Promise<FluidBrickResidencyStats> { return this.residency.readStats(); }
+
+  readBulkResidencyStats(): Promise<FluidBrickResidencyStats> | undefined { return this.bulkResidency?.readStats(); }
+
+  get atlasSamplingSource(): FluidBrickAtlasSamplingSource | undefined { return this.atlas?.getSamplingSource(); }
 
   readAtlasStats(): Promise<FluidBrickAtlasStats> | undefined { return this.atlas?.readStats(); }
 
@@ -398,10 +852,12 @@ export class OctreeSparseBrickWorld {
     this.destroyed = true;
     this.tree.destroy();
     this.residency.destroy();
+    this.bulkResidency?.destroy();
     this.atlas?.destroy();
     this.proxyVoxelizer.destroy();
-    for (const buffer of [...this.sourceBuffers, this.voxelRecords, this.brickRecords, this.voxelCount, this.brickCount, this.materialBuffer, this.bodyMaterialBuffer, this.params]) buffer.destroy();
+    for (const buffer of [...this.sourceBuffers, this.pbrMaterialBuffer, this.lightBuffer, this.environmentLightingBuffer, this.structuralPublicationState, ...(this.inspection?.buffers ?? [])]) buffer.destroy();
   }
 }
 
 export const octreeSparseBrickDebugPublicationShader = debugPublicationShader;
+export const octreeSparseBrickStructuralFinalizeShader = structuralPublicationFinalizeShader;

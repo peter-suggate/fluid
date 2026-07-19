@@ -120,6 +120,11 @@ export interface GPUEulerianInfo {
   fluidBrickActivatedCount?: number;
   fluidBrickRetiredCount?: number;
   fluidBrickGeneration?: number;
+  /** Wet-domain storage residency, independent from the narrow surface band. */
+  fluidBulkBrickResidentCount?: number;
+  fluidBulkBrickHaloCount?: number;
+  fluidBulkBrickActivatedCount?: number;
+  fluidBulkBrickRetiredCount?: number;
   /** Brick-pooled atlas tiles mirrored from the dense fields plus their validation error. */
   fluidBrickAtlasCapacity?: number;
   fluidBrickAtlasResidentTiles?: number;
@@ -151,6 +156,11 @@ export interface GPUEulerianInfo {
   maxPressure_Pa?: number;
   pressureResidual?: number;
   pressureRelativeResidual?: number;
+  pressureRowCapacity?: number;
+  pressureEntryCapacity?: number;
+  pressureRequiredRows?: number;
+  pressureRequiredEntries?: number;
+  pressureCapacityOverflow?: boolean;
   maxComponentCfl?: number;
   highCflCellCount?: number;
   nonFiniteCount?: number;
@@ -188,6 +198,8 @@ export interface GPUEulerianInfo {
   gpuCompletionWall_ms?: number;
   /** Simulation time confirmed during gpuCompletionWall_ms. */
   gpuCompletionSimulation_s?: number;
+  /** Wall interval between queue-confirmed presentation completions. */
+  gpuPresentationWall_ms?: number;
   /** Host-side gap between an empty queue completing and its next physics submission. */
   gpuQueueStarved_ms?: number;
   initialVolumeCellSum?:number;
@@ -410,6 +422,29 @@ struct RigidBody {
 // Per-column terrain heights in cell units; params.container.w enables it so
 // terrain-free scenes never pay the extra load. Static for the whole run.
 @group(0) @binding(21) var terrainIn: texture_2d<f32>;
+// Optional bulk-field brick atlas. The page table is INVALID-only for uniform,
+// tall-cell, atlas-off, and authoritative-infrastructure-only paths, making the
+// helper fall back to the established dense transport texture.
+struct BulkAtlasParams {
+  dims: vec4u,
+  brickDims: vec4u,
+  tileGrid: vec4u,
+  capacitySeed: vec4u,
+  cell: vec4f,
+}
+@group(0) @binding(22) var<storage,read> bulkAtlasPageTable: array<u32>;
+@group(0) @binding(23) var bulkAtlasVelocity: texture_3d<f32>;
+@group(0) @binding(24) var<uniform> bulkAtlasParams: BulkAtlasParams;
+// x enables atlas reads; y independently enables GPU-authored sparse targets.
+@group(0) @binding(25) var<uniform> bulkAtlasControl: vec4u;
+// Residency ABI: words 0/count, 12..14/cell64 indirect dispatch, then active
+// (brick,leaf) pairs from word 16. The retired pair stream follows capacity.
+@group(0) @binding(26) var<storage,read> bulkWorklist: array<u32>;
+// Sparse occupancy reduces resident cells into one atomic maximum per x/z
+// column, then publishes the same dense r32float height texture consumed by
+// the unported advection kernels. A zero word represents the historical -1
+// (empty-column) sentinel; occupied y is stored as y+1.
+@group(0) @binding(27) var<storage,read_write> occupancyColumns: array<atomic<u32>>;
 
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn inflowGridDims()->vec3i{return dims();}
@@ -450,6 +485,58 @@ fn sampledFaceVelocity(p:vec3i,component:u32)->f32{
   return textureLoad(transportIn,clampCell(p)+vec3i(1),0)[component];
 }
 fn transportCoordinate(q:vec3f)->vec3f{return (q+vec3f(1.5))/vec3f(dims()+vec3i(2));}
+const BULK_ATLAS_INVALID:u32=0xffffffffu;
+fn bulkAtlasSlot(position:vec3f)->vec4u{
+  if(bulkAtlasControl.x==0u||bulkAtlasParams.capacitySeed.x==0u){return vec4u(BULK_ATLAS_INVALID);}
+  if(any(position<vec3f(0.0))||any(position>vec3f(bulkAtlasParams.dims.xyz-vec3u(1u)))){return vec4u(BULK_ATLAS_INVALID);}
+  let p=clamp(position,vec3f(0.0),vec3f(bulkAtlasParams.dims.xyz-vec3u(1u)));
+  let brick=min(vec3u(floor(p/f32(bulkAtlasParams.dims.w))),bulkAtlasParams.brickDims.xyz-vec3u(1u));
+  let brickIndex=brick.x+bulkAtlasParams.brickDims.x*(brick.y+bulkAtlasParams.brickDims.y*brick.z);
+  if(brickIndex>=arrayLength(&bulkAtlasPageTable)){return vec4u(BULK_ATLAS_INVALID,brick);}
+  let slot=bulkAtlasPageTable[brickIndex];
+  if(slot>=bulkAtlasParams.capacitySeed.x){return vec4u(BULK_ATLAS_INVALID,brick);}
+  return vec4u(slot,brick);
+}
+fn bulkAtlasTileOrigin(slot:u32)->vec3u{
+  let g=bulkAtlasParams.tileGrid;
+  return vec3u(slot%g.x,(slot/g.x)%g.y,slot/(g.x*g.y))*g.w;
+}
+fn bulkAtlasTexel(slot:u32,brick:vec3u,cell:vec3i)->vec3i{
+  return vec3i(bulkAtlasTileOrigin(slot))+cell-vec3i(brick*bulkAtlasParams.dims.w)+vec3i(1);
+}
+fn bulkAtlasSampleVelocity(position:vec3f,slotBrick:vec4u)->vec3f{
+  let p=clamp(position,vec3f(0.0),vec3f(bulkAtlasParams.dims.xyz-vec3u(1u)));
+  let a=vec3i(floor(p));let t=fract(p);let slot=slotBrick.x;let brick=slotBrick.yzw;
+  let v000=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a),0).xyz;
+  let v100=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(1,0,0)),0).xyz;
+  let v010=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(0,1,0)),0).xyz;
+  let v110=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(1,1,0)),0).xyz;
+  let v001=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(0,0,1)),0).xyz;
+  let v101=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(1,0,1)),0).xyz;
+  let v011=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(0,1,1)),0).xyz;
+  let v111=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(1,1,1)),0).xyz;
+  return mix(mix(mix(v000,v100,t.x),mix(v010,v110,t.x),t.y),mix(mix(v001,v101,t.x),mix(v011,v111,t.x),t.y),t.z);
+}
+struct ScheduledCell { id: vec3i, scheduled: u32 }
+fn sparseCell64Ready()->bool{return bulkWorklist[0]!=0u&&bulkWorklist[12]!=0u&&bulkWorklist[13]!=0u;}
+fn scheduledVelocityCell(wid:vec3u,localIndex:u32,denseGid:vec3u)->ScheduledCell{
+  if(bulkAtlasControl.y==0u){return ScheduledCell(vec3i(denseGid),1u);}
+  let workgroupLinear=wid.x+wid.y*bulkWorklist[12];
+  let stream=workgroupLinear*64u+localIndex;
+  let brickVoxels=bulkAtlasParams.dims.w*bulkAtlasParams.dims.w*bulkAtlasParams.dims.w;
+  let activeIndex=stream/brickVoxels;
+  if(activeIndex>=bulkWorklist[0]){return ScheduledCell(vec3i(0),0u);}
+  let entry=16u+activeIndex*2u;
+  if(entry>=arrayLength(&bulkWorklist)){return ScheduledCell(vec3i(0),0u);}
+  let brickIndex=bulkWorklist[entry];
+  if(brickIndex>=bulkAtlasParams.brickDims.w){return ScheduledCell(vec3i(0),0u);}
+  let b=bulkAtlasParams.brickDims;
+  let brick=vec3u(brickIndex%b.x,(brickIndex/b.x)%b.y,brickIndex/(b.x*b.y));
+  let localLinear=stream-activeIndex*brickVoxels;
+  let size=bulkAtlasParams.dims.w;
+  let local=vec3u(localLinear%size,(localLinear/size)%size,localLinear/(size*size));
+  return ScheduledCell(vec3i(brick*size+local),1u);
+}
 fn interfaceFraction(a:f32,b:f32)->f32{
   // Distance from the liquid cell centre to alpha=0.5 along a grid edge.
   return clamp((a-0.5)/max(abs(a-b),1e-6),0.05,1.0);
@@ -459,6 +546,7 @@ fn sampleVolume(p:vec3f)->f32{
 }
 fn sampleVelocityComponent(p:vec3f,component:u32)->f32{
   var offset=vec3f(0.5);offset[component]=1.0;var lower=vec3f(0.0);lower[component]=-1.0;let q=clamp(p-offset,lower,vec3f(dims()-vec3i(1)));
+  let slotBrick=bulkAtlasSlot(q);if(slotBrick.x!=BULK_ATLAS_INVALID){return bulkAtlasSampleVelocity(q,slotBrick)[component];}
   return textureSampleLevel(transportIn,transportSampler,transportCoordinate(q),0.0)[component];
 }
 fn sampleVelocity(p:vec3f)->vec3f{return vec3f(sampleVelocityComponent(p,0u),sampleVelocityComponent(p,1u),sampleVelocityComponent(p,2u));}
@@ -466,6 +554,7 @@ fn sampleVelocity(p:vec3f)->vec3f{return vec3f(sampleVelocityComponent(p,0u),sam
 // perturbs where the trace samples, not the sampled face values themselves.
 fn transportVectorEstimate(p:vec3f)->vec3f{
   let q=clamp(p-vec3f(0.75),vec3f(-1.0),vec3f(dims()-vec3i(1)));
+  let slotBrick=bulkAtlasSlot(q);if(slotBrick.x!=BULK_ATLAS_INVALID){return bulkAtlasSampleVelocity(q,slotBrick);}
   return textureSampleLevel(transportIn,transportSampler,transportCoordinate(q),0.0).xyz;
 }
 fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{let first=transportVectorEstimate(position);let midpoint=position-0.5*first*dt/h;return position-transportVectorEstimate(midpoint)*dt/h;}
@@ -640,15 +729,22 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
 }
 
 @compute @workgroup_size(4,4,4)
-fn buildTransport(@builtin(global_invocation_id) gid:vec3u){
-  let padded=vec3i(gid);let d=dims();if(any(padded>=d+vec3i(2))){return;}
-  let id=padded-vec3i(1);
-  if(!valid(id)){textureStore(transportOut,padded,vec4f(0.0));return;}
+fn buildTransport(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
+  var padded=vec3i(gid);let d=dims();var id=padded-vec3i(1);
+  if(bulkAtlasControl.y!=0u){
+    let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}
+    id=scheduled.id;if(!valid(id)){return;}padded=id+vec3i(1);
+  }else{
+    if(any(padded>=d+vec3i(2))){return;}
+    if(!valid(id)){textureStore(transportOut,padded,vec4f(0.0));return;}
+  }
   textureStore(transportOut,padded,vec4f(transportVelocity(id),0.0));
 }
 @compute @workgroup_size(4,4,4)
-fn buildFluxScales(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;
+fn buildFluxScales(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
+  var id=vec3i(gid);
+  if(bulkAtlasControl.y!=0u){let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}id=scheduled.id;}
+  if(!valid(id)){return;}let dt=params.dimsDt.w;
   textureStore(fluxScalesOut,id,vec4f(donorScale(id,dt),receiverScale(id,dt),0.0,0.0));
 }
 // Highest cell supported by the authoritative surface in each column;
@@ -656,9 +752,30 @@ fn buildFluxScales(@builtin(global_invocation_id) gid:vec3u){
 @compute @workgroup_size(8,8,1)
 fn buildOccupancy(@builtin(global_invocation_id) gid:vec3u){
   let d=dims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}
+  // The GPU-authored list is allowed to be empty during first-publication or
+  // overflow recovery. Sparse mode always launches this area-only sentinel;
+  // it becomes the historical dense y scan only when no indirect work exists.
+  if(bulkAtlasControl.y!=0u&&sparseCell64Ready()){return;}
   var highest=-1.0;
   for(var y:i32=d.y-1;y>=0;y-=1){if(surfaceOccupancy(vec3i(i32(gid.x),y,i32(gid.y)))>0.0001){highest=f32(y);break;}}
   textureStore(heightOut,vec2i(gid.xy),vec4f(highest));
+}
+// Cell64 deliberately visits every resident payload cell. Atomics collapse
+// all y bricks sharing a column without races, including floating/disconnected
+// liquid; the following area-only resolve preserves dense texture semantics.
+@compute @workgroup_size(4,4,4)
+fn buildSparseOccupancy(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
+  let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}
+  let id=scheduled.id;if(!valid(id)||surfaceOccupancy(id)<=0.0001){return;}
+  let d=dims();let column=u32(id.x+d.x*id.z);if(column>=arrayLength(&occupancyColumns)){return;}
+  atomicMax(&occupancyColumns[column],u32(id.y+1));
+}
+@compute @workgroup_size(8,8,1)
+fn resolveSparseOccupancy(@builtin(global_invocation_id) gid:vec3u){
+  let d=dims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}
+  if(!sparseCell64Ready()){return;}
+  let column=gid.x+u32(d.x)*gid.y;if(column>=arrayLength(&occupancyColumns)){return;}
+  textureStore(heightOut,vec2i(gid.xy),vec4f(f32(atomicLoad(&occupancyColumns[column]))-1.0));
 }
 fn nearInflow(id:vec3i)->bool{
   if(inflowStrength()<=0.0){return false;}
@@ -673,16 +790,16 @@ fn aboveOccupancy(id:vec3i)->bool{
   return f32(id.y)>occupancy+4.0&&!nearInflow(id);
 }
 @compute @workgroup_size(4,4,4)
-fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
+fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
+  let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}let id=scheduled.id;if(!valid(id)){return;}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));v=applyVelocityForces(id,v,dt,h);
   var advected=volume(id);if(transportConservativeVolume()){advected=advectedVolume(id,dt);}textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(advected,0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));
 }
 
 @compute @workgroup_size(4,4,4)
-fn advect(@builtin(global_invocation_id) gid: vec3u) {
-  let id=vec3i(gid); if (!valid(id)) { return; }
+fn advect(@builtin(global_invocation_id) gid: vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32) {
+  let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}let id=scheduled.id; if (!valid(id)) { return; }
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
   let dt=params.dimsDt.w; let h=params.cellGravity.xyz;
   let cell=vec3f(id);var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
@@ -696,8 +813,8 @@ fn advect(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 @compute @workgroup_size(4,4,4)
-fn reverseAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+fn reverseAdvection(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
+  let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}let id=scheduled.id;if(!valid(id)){return;}
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
   let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,-dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,-dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,-dt,h));let d=dims();
@@ -714,8 +831,8 @@ fn boundedMacCormack(id:vec3i,position:vec3f,component:u32,dt:f32,h:vec3f)->f32{
 }
 
 @compute @workgroup_size(4,4,4)
-fn correctAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+fn correctAdvection(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
+  let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}let id=scheduled.id;if(!valid(id)){return;}
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
   let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(boundedMacCormack(id,cell+vec3f(1.0,0.5,0.5),0u,dt,h),boundedMacCormack(id,cell+vec3f(0.5,1.0,0.5),1u,dt,h),boundedMacCormack(id,cell+vec3f(0.5,0.5,1.0),2u,dt,h));v=applyVelocityForces(id,v,dt,h);
@@ -1019,6 +1136,110 @@ fn sharpenResolve(@builtin(global_invocation_id) gid:vec3u){
 fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let open=(1.0-cellSolidFraction(id))*(1.0-cellTerrainFraction(id));let represented=surfaceOccupancy(id)*open;let conservative=volume(id)*open;atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}
 `;
 
+/** Clear every dense velocity scratch cell belonging to newly retired bricks. */
+export const retiredBulkVelocityClearShader = /* wgsl */ `
+struct BulkAtlasParams {
+  dims: vec4u,
+  brickDims: vec4u,
+  tileGrid: vec4u,
+  capacitySeed: vec4u,
+  cell: vec4f,
+}
+@group(0) @binding(0) var velocityOut: texture_storage_3d<rgba32float,write>;
+@group(0) @binding(1) var<storage,read> worklist: array<u32>;
+@group(0) @binding(2) var<uniform> atlasParams: BulkAtlasParams;
+@compute @workgroup_size(256)
+fn clearRetiredVelocity(@builtin(global_invocation_id) gid:vec3u){
+  let stream=gid.x+gid.y*worklist[5]*256u;
+  let brickSize=atlasParams.dims.w;
+  let brickVoxels=brickSize*brickSize*brickSize;
+  let retiredIndex=stream/brickVoxels;
+  if(retiredIndex>=worklist[4]){return;}
+  let entry=16u+atlasParams.brickDims.w*2u+retiredIndex*2u;
+  if(entry>=arrayLength(&worklist)){return;}
+  let brickIndex=worklist[entry];
+  if(brickIndex>=atlasParams.brickDims.w){return;}
+  let b=atlasParams.brickDims;
+  let brick=vec3u(brickIndex%b.x,(brickIndex/b.x)%b.y,brickIndex/(b.x*b.y));
+  let localLinear=stream-retiredIndex*brickVoxels;
+  let local=vec3u(localLinear%brickSize,(localLinear/brickSize)%brickSize,localLinear/(brickSize*brickSize));
+  let cell=brick*brickSize+local;
+  if(any(cell>=atlasParams.dims.xyz)){return;}
+  textureStore(velocityOut,cell,vec4f(0.0));
+}
+`;
+
+/**
+ * Clear retired dense transport payloads without touching the permanent
+ * one-texel zero shell. Sparse buildTransport writes only id+1, so the shell
+ * remains at WebGPU's zero-initialized resource value for the texture's life.
+ */
+export const retiredBulkTransportClearShader = /* wgsl */ `
+struct BulkAtlasParams {
+  dims: vec4u,
+  brickDims: vec4u,
+  tileGrid: vec4u,
+  capacitySeed: vec4u,
+  cell: vec4f,
+}
+@group(0) @binding(0) var transportOut: texture_storage_3d<rgba16float,write>;
+@group(0) @binding(1) var<storage,read> worklist: array<u32>;
+@group(0) @binding(2) var<uniform> atlasParams: BulkAtlasParams;
+@compute @workgroup_size(256)
+fn clearRetiredTransport(@builtin(global_invocation_id) gid:vec3u){
+  let stream=gid.x+gid.y*worklist[5]*256u;
+  let brickSize=atlasParams.dims.w;
+  let brickVoxels=brickSize*brickSize*brickSize;
+  let retiredIndex=stream/brickVoxels;
+  if(retiredIndex>=worklist[4]){return;}
+  let entry=16u+atlasParams.brickDims.w*2u+retiredIndex*2u;
+  if(entry>=arrayLength(&worklist)){return;}
+  let brickIndex=worklist[entry];
+  if(brickIndex>=atlasParams.brickDims.w){return;}
+  let b=atlasParams.brickDims;
+  let brick=vec3u(brickIndex%b.x,(brickIndex/b.x)%b.y,brickIndex/(b.x*b.y));
+  let localLinear=stream-retiredIndex*brickVoxels;
+  let local=vec3u(localLinear%brickSize,(localLinear/brickSize)%brickSize,localLinear/(brickSize*brickSize));
+  let cell=brick*brickSize+local;
+  if(any(cell>=atlasParams.dims.xyz)){return;}
+  textureStore(transportOut,vec3i(cell)+vec3i(1),vec4f(0.0));
+}
+`;
+
+/** Clear compatibility flux limits for cells in newly retired wet bricks. */
+export const retiredBulkFluxScaleClearShader = /* wgsl */ `
+struct BulkAtlasParams {
+  dims: vec4u,
+  brickDims: vec4u,
+  tileGrid: vec4u,
+  capacitySeed: vec4u,
+  cell: vec4f,
+}
+@group(0) @binding(0) var fluxScalesOut: texture_storage_3d<rg32float,write>;
+@group(0) @binding(1) var<storage,read> worklist: array<u32>;
+@group(0) @binding(2) var<uniform> atlasParams: BulkAtlasParams;
+@compute @workgroup_size(256)
+fn clearRetiredFluxScales(@builtin(global_invocation_id) gid:vec3u){
+  let stream=gid.x+gid.y*worklist[5]*256u;
+  let brickSize=atlasParams.dims.w;
+  let brickVoxels=brickSize*brickSize*brickSize;
+  let retiredIndex=stream/brickVoxels;
+  if(retiredIndex>=worklist[4]){return;}
+  let entry=16u+atlasParams.brickDims.w*2u+retiredIndex*2u;
+  if(entry>=arrayLength(&worklist)){return;}
+  let brickIndex=worklist[entry];
+  if(brickIndex>=atlasParams.brickDims.w){return;}
+  let b=atlasParams.brickDims;
+  let brick=vec3u(brickIndex%b.x,(brickIndex/b.x)%b.y,brickIndex/(b.x*b.y));
+  let localLinear=stream-retiredIndex*brickVoxels;
+  let local=vec3u(localLinear%brickSize,(localLinear/brickSize)%brickSize,localLinear/(brickSize*brickSize));
+  let cell=brick*brickSize+local;
+  if(any(cell>=atlasParams.dims.xyz)){return;}
+  // Invalid-neighbor semantics are donor=0, receiver=1.
+  textureStore(fluxScalesOut,cell,vec4f(0.0,1.0,0.0,0.0));
+}
+`;
+
 export class WebGPUEulerianSolver {
   readonly info: GPUEulerianInfo;
   private readonly layout: TallCellLayout;
@@ -1153,6 +1374,7 @@ export class WebGPUEulerianSolver {
 
   get volumeTexture(){return this.volumeA;}
   get rigidRenderBuffer(){return this.rigidSystem.renderBuffer;}
+  get rigidMotionBuffer(){return this.rigidSystem.motionBuffer;}
   setSelectedRigidBody(index:number){this.rigidSystem.setSelectedIndex(index);}
   pickRigidBody(origin:RigidBodyState["position_m"],direction:RigidBodyState["position_m"]){return this.rigidSystem.pick(origin,direction);}
   get columnBaseTexture(){return this.heightA;}

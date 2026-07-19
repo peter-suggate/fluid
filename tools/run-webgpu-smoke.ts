@@ -23,6 +23,7 @@ import {
   compareSingleTallCellNeighborhood,
   createSmokeScenario,
   isSmokeScenarioId,
+  minimumOceanFarHalfDisturbanceCells,
   smokeScenarioIds,
   summarizeScalarField,
   summarizeTallCellActivity,
@@ -82,7 +83,16 @@ const octreeLeafSolverOverride = process.env.FLUID_OCTREE_LEAF_SOLVER;
 if (octreeLeafSolverOverride !== undefined && !["auto", "dense", "compact", "chebyshev", "megakernel"].includes(octreeLeafSolverOverride)) throw new Error("FLUID_OCTREE_LEAF_SOLVER must be auto, dense, compact, chebyshev, or megakernel");
 const octreeWarmStartOverride = process.env.FLUID_OCTREE_WARM_START === undefined ? undefined : process.env.FLUID_OCTREE_WARM_START !== "0";
 const brickAtlasOverride = process.env.FLUID_BRICK_ATLAS === undefined ? undefined : process.env.FLUID_BRICK_ATLAS !== "0";
+const brickAtlasModeOverride = process.env.FLUID_BRICK_ATLAS_MODE;
+if (brickAtlasModeOverride !== undefined && !["off", "mirror", "authoritative"].includes(brickAtlasModeOverride)) {
+  throw new Error("FLUID_BRICK_ATLAS_MODE must be off, mirror, or authoritative");
+}
 const brickPreActivationOverride = process.env.FLUID_BRICK_PRE_ACTIVATION === undefined ? undefined : process.env.FLUID_BRICK_PRE_ACTIVATION !== "0";
+const brickSparseSurfaceOverride = process.env.FLUID_BRICK_SPARSE_SURFACE === undefined ? undefined : process.env.FLUID_BRICK_SPARSE_SURFACE !== "0";
+const brickSparseAdvectionOverride = process.env.FLUID_BRICK_SPARSE_ADVECTION === undefined ? undefined : process.env.FLUID_BRICK_SPARSE_ADVECTION !== "0";
+const brickSparseTransportOverride = process.env.FLUID_BRICK_SPARSE_TRANSPORT === undefined ? undefined : process.env.FLUID_BRICK_SPARSE_TRANSPORT !== "0";
+const brickSparseOccupancyFluxOverride = process.env.FLUID_BRICK_SPARSE_OCCUPANCY_FLUX === undefined ? undefined : process.env.FLUID_BRICK_SPARSE_OCCUPANCY_FLUX !== "0";
+const brickSparseExtrapolationOverride = process.env.FLUID_BRICK_SPARSE_EXTRAPOLATION === undefined ? undefined : process.env.FLUID_BRICK_SPARSE_EXTRAPOLATION !== "0";
 const quadtreeStaleStepsOverride = process.env.FLUID_QUADTREE_STALE_STEPS === undefined ? undefined : Number(process.env.FLUID_QUADTREE_STALE_STEPS);
 const quadtreeInlineRebuildOverride = process.env.FLUID_QUADTREE_INLINE === undefined ? undefined : process.env.FLUID_QUADTREE_INLINE !== "0";
 const quadtreePreconditionerOverride = process.env.FLUID_QUADTREE_PRECONDITIONER;
@@ -800,6 +810,7 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
   console.log(JSON.stringify({
     scenario, method: result.method, phase: "result", construction_ms: Math.round(result.construction_ms), runtime_ms: Math.round(result.runtime_ms), simulationWall_ms: Math.round(result.simulationWall_ms), steps: result.steps,
     simulatedTime_s: info.simulatedTime_s, grid: [info.nx, info.storedNy, info.nz], cubicGrid: result.grid,
+    allocatedBytes: info.allocatedBytes,
     encodedSteps: info.encodedSteps, gridKind: info.gridKind, compressionRatio: info.compressionRatio,
     activeCompressionRatio: info.activeCompressionRatio, activeSampleCount: info.activeSampleCount,
     quadtreeMaximumFluidScale: info.quadtreeMaximumFluidScale,
@@ -815,6 +826,11 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     quadtreeMLSProjectionRowCount: info.quadtreeMLSProjectionRowCount,
     quadtreePressureIterationBudget: info.quadtreePressureIterationBudget,
     quadtreePressureIterationHardBudget: info.quadtreePressureIterationHardBudget,
+    pressureRowCapacity: info.pressureRowCapacity,
+    pressureEntryCapacity: info.pressureEntryCapacity,
+    pressureRequiredRows: info.pressureRequiredRows,
+    pressureRequiredEntries: info.pressureRequiredEntries,
+    pressureCapacityOverflow: info.pressureCapacityOverflow,
     quadtreePressureConverged: info.quadtreePressureConverged,
     quadtreeFactorLevelCount: info.quadtreeFactorLevelCount,
     quadtreeMultigridLevelCount: info.quadtreeMultigridLevelCount,
@@ -904,8 +920,14 @@ async function runGPU(
   if (method.id === "octree" && octreeAdaptivityOverride !== undefined) values.adaptivity = octreeAdaptivityOverride;
   if (method.id === "octree" && octreeLeafSolverOverride !== undefined) values.leafSolver = octreeLeafSolverOverride;
   if (method.id === "octree" && octreeWarmStartOverride !== undefined) values.pressureWarmStart = octreeWarmStartOverride ? "on" : "off";
-  if (method.id === "octree" && brickAtlasOverride !== undefined) values.brickAtlas = brickAtlasOverride ? "on" : "off";
+  if (method.id === "octree" && brickAtlasOverride !== undefined) values.brickAtlas = brickAtlasOverride ? "mirror" : "off";
+  if (method.id === "octree" && brickAtlasModeOverride !== undefined) values.brickAtlas = brickAtlasModeOverride;
   if (method.id === "octree" && brickPreActivationOverride !== undefined) values.brickPreActivation = brickPreActivationOverride ? "on" : "off";
+  if (method.id === "octree" && brickSparseSurfaceOverride !== undefined) values.brickSparseSurface = brickSparseSurfaceOverride ? "on" : "off";
+  if (method.id === "octree" && brickSparseAdvectionOverride !== undefined) values.brickSparseAdvection = brickSparseAdvectionOverride ? "on" : "off";
+  if (method.id === "octree" && brickSparseTransportOverride !== undefined) values.brickSparseTransport = brickSparseTransportOverride ? "on" : "off";
+  if (method.id === "octree" && brickSparseOccupancyFluxOverride !== undefined) values.brickSparseOccupancyFlux = brickSparseOccupancyFluxOverride ? "on" : "off";
+  if (method.id === "octree" && brickSparseExtrapolationOverride !== undefined) values.brickSparseExtrapolation = brickSparseExtrapolationOverride ? "on" : "off";
   if (method.id === "quadtree-tall-cell" && quadtreePreconditionerOverride !== undefined) values.preconditioner = quadtreePreconditionerOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeStaleStepsOverride !== undefined) values.topologyStaleSteps = quadtreeStaleStepsOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeInlineRebuildOverride !== undefined) values.inlineRebuild = quadtreeInlineRebuildOverride;
@@ -941,7 +963,12 @@ async function runGPU(
     : method.createSolver!(instrumentedDevice, scene, quality, values);
   const construction_ms = performance.now() - constructionStarted;
   console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod, phase: "constructed", construction_ms: Math.round(construction_ms), grid: [solver.info.nx, solver.info.storedNy, solver.info.nz], cubicGrid: [solver.info.nx, solver.info.ny, solver.info.nz] }));
-  const sparseSource = (solver as GPUSolverInstance).sparseVoxelRenderSource;
+  // Raw voxel/brick records are a lazy inspection product. Merely reading the
+  // getter allocates their large publication arenas, so production timing and
+  // memory runs must not request them unless the explicit sparse audit is on.
+  const sparseSource = sparseStatsRequested
+    ? (solver as GPUSolverInstance).sparseVoxelRenderSource
+    : undefined;
   const seedBrickBounds = initialSeedBrickBounds(scene, [solver.info.nx, solver.info.ny, solver.info.nz]);
   const initialFluidBrickStats = sparseStatsRequested && sparseSource
     ? await readFluidBrickSnapshot(device, sparseSource)
@@ -1537,8 +1564,8 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
     const scene = createSmokeScenario(scenarioId).scene;
     const cellHeight_m = scene.container.height_m;
     for (const result of results) {
-      fail(result.grid[0] === 192 && result.grid[1] === 96 && result.grid[2] === 64,
-        `${result.method} grid ${result.grid.join("x")} is not the intended 192x96x64 ocean domain`);
+      fail(result.grid[0] === 384 && result.grid[1] === 96 && result.grid[2] === 64,
+        `${result.method} grid ${result.grid.join("x")} is not the intended 384x96x64 ocean domain`);
       const [nx, ny, nz] = result.grid;
       const columnHeights = (field: Float32Array) => {
         const heights = new Float64Array(nx);
@@ -1552,11 +1579,16 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       const stationCount = 12;
       const stations = Array.from({ length: stationCount }, (_, i) => Math.min(nx - 1, Math.round((i + 0.5) * nx / stationCount)));
       const baselineHeight_cells = scene.container.fillFraction * ny;
+      const minimumFarHalfDisturbance_cells = minimumOceanFarHalfDisturbanceCells(scene.container.width_m);
       let crestReach_m = -Infinity;
+      let farHalfDisturbance_cells = 0;
       const series = result.checkpoints.map((checkpoint) => {
         const heights = columnHeights(checkpoint.field);
         let crestX = 0;
-        for (let x = 1; x < nx; x += 1) if (heights[x] > heights[crestX]) crestX = x;
+        for (let x = 1; x < nx; x += 1) {
+          if (heights[x] > heights[crestX]) crestX = x;
+          if (xWorld(x) > 0) farHalfDisturbance_cells = Math.max(farHalfDisturbance_cells, Math.abs(heights[x] - baselineHeight_cells));
+        }
         crestReach_m = Math.max(crestReach_m, xWorld(crestX));
         return {
           time_s: checkpoint.time_s,
@@ -1568,11 +1600,16 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       console.log(JSON.stringify({
         scenario: scenarioId, method: result.method, phase: "ocean-wave-profile",
         baselineHeight_cells, cellHeight_m: cellHeight_m / ny,
+        minimumFarHalfDisturbance_cells: Number(minimumFarHalfDisturbance_cells.toFixed(3)),
+        farHalfDisturbance_cells: Number(farHalfDisturbance_cells.toFixed(3)),
         stationX_m: stations.map((x) => Number(xWorld(x).toFixed(3))), checkpoints: series
       }));
       if (result.checkpoints.length >= 3) {
-        fail(crestReach_m > 0.25 * scene.container.width_m / 2,
-          `${result.method} surface crest never crossed into the far half of the tank (max crest x ${crestReach_m.toFixed(3)} m)`);
+        // A dispersive/reflected wave can retain its global tallest crest near
+        // the release wall even after the leading disturbance has crossed the
+        // tank. Gate the actual far-half signal instead of the argmax crest.
+        fail(farHalfDisturbance_cells >= minimumFarHalfDisturbance_cells,
+          `${result.method} far-half surface disturbance reached only ${farHalfDisturbance_cells.toFixed(3)} cells (required ${minimumFarHalfDisturbance_cells.toFixed(3)}; global crest max x ${crestReach_m.toFixed(3)} m)`);
       }
     }
   }

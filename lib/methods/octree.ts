@@ -17,7 +17,12 @@ const params: MethodParamSpec[] = [
   { kind: "number", key: "sparseSurfaceBandCells", label: "Fine surface support", unit: "fine cells", min: 2, max: 16, step: 1, digits: 0, default: 4, tier: "fine", hint: "Minimum signed-distance support on both sides of phi=0. Velocity backtrace and stencil margins are added automatically." },
   { kind: "number", key: "sparseSurfacePageFraction", label: "Surface page budget", unit: "domain fraction", min: 0.1, max: 1, step: 0.05, digits: 2, default: 0.75, tier: "fine", hint: "Hard physical pool as a fraction of the virtual fine page lattice. Exhaustion is reported and atomically falls back to dense extraction; it never indexes beyond the pool." },
   { kind: "select", key: "pressureWarmStart", label: "Pressure warm start", default: "on", tier: "fine", options: [{ value: "on", label: "On (previous field)" }, { value: "off", label: "Off (cold start)" }], hint: "Seed each compacted leaf solve with the previous step's pressure instead of clearing to zero, so the polynomial refines an already-good field. The legacy dense ladder always cold-starts." },
-  { kind: "select", key: "brickAtlas", label: "Brick atlas mirror", default: "on", tier: "fine", options: [{ value: "on", label: "Mirror + validate" }, { value: "off", label: "Off" }], hint: "Pooled 3D atlas tiles (8³ payload + 1-voxel apron) for phi and velocity, mirrored from the dense fields each frame and continuously compared against them. Storage substrate for brick-resident kernels; the dense fields stay authoritative." },
+  { kind: "select", key: "brickAtlas", label: "Brick atlas ownership", default: "mirror", tier: "fine", options: [{ value: "mirror", label: "Mirror + validate" }, { value: "authoritative", label: "Authoritative A/B" }, { value: "off", label: "Off" }], hint: "Pooled 3D atlas tiles (8³ payload + 1-voxel apron) for phi and velocity. Mirror keeps dense fields authoritative and validates atlas sampling. Authoritative is an infrastructure A/B mode that preserves resident atlas pages, but bulk solver kernels do not write them yet." },
+  { kind: "select", key: "brickSparseSurface", label: "Brick-sparse surface", default: "on", tier: "fine", options: [{ value: "on", label: "Resident worklist" }, { value: "off", label: "Dense A/B" }], hint: "Runs coarse phi advection, redistancing, and volume correction only over velocity-swept resident bricks. The dense texture is retained as a compatibility mirror while remaining kernels migrate." },
+  { kind: "select", key: "brickSparseAdvection", label: "Brick-sparse velocity", default: "on", tier: "fine", options: [{ value: "on", label: "Resident worklist" }, { value: "off", label: "Dense A/B" }], hint: "Dispatches velocity predictor, reverse, and MacCormack correction over the GPU-authored wet-domain brick list; retired bricks are explicitly zeroed." },
+  { kind: "select", key: "brickSparseTransport", label: "Brick-sparse transport prep", default: "off", tier: "fine", options: [{ value: "off", label: "Dense (ocean default)" }, { value: "on", label: "Resident worklist A/B" }], hint: "Builds current and predicted padded transport fields only for wet-domain bricks. The widened full-footprint ocean retains most bricks, so this remains an opt-in A/B until a sparse-domain benchmark proves a win." },
+  { kind: "select", key: "brickSparseOccupancyFlux", label: "Brick-sparse occupancy/flux", default: "off", tier: "fine", options: [{ value: "off", label: "Dense (A/B baseline)" }, { value: "on", label: "Resident worklist A/B" }], hint: "Reduces column occupancy and conservative VOF flux limits over wet-domain bricks while retaining their dense compatibility textures. Column maxima use an area-only atomic resolve; retired flux cells restore invalid-neighbor limits." },
+  { kind: "select", key: "brickSparseExtrapolation", label: "Brick-sparse extrapolation", default: "off", tier: "fine", options: [{ value: "off", label: "Dense (A/B baseline)" }, { value: "on", label: "Resident worklist A/B" }], hint: "Runs the post-projection velocity extrapolation seed and narrow-band sweeps over the GPU-authored wet-domain brick list. Retired velocity bricks are explicitly zeroed; this remains opt-in until benchmarked." },
   { kind: "select", key: "brickPreActivation", label: "Brick pre-activation", default: "on", tier: "fine", options: [{ value: "on", label: "Velocity swept" }, { value: "off", label: "Phi band only" }], hint: "Widens brick residency support by the velocity swept per step and activates the downstream face-neighbor of interface bricks, so a moving front never advects into an unscheduled brick." }
 ];
 
@@ -31,10 +36,15 @@ const leafSolver = (value: unknown): "auto" | "dense" | "compact" | "chebyshev" 
 
 const surfaceRefinementFactor = (value: unknown): 1 | 2 | 4 => Number(value) >= 4 ? 4 : Number(value) <= 1 ? 1 : 2;
 const sparseSurfaceBand = (value: unknown): "off" | "mirror" | "authoritative" => value === "off" || value === "mirror" ? value : "authoritative";
+const brickAtlasMode = (value: unknown): "off" | "mirror" | "authoritative" =>
+  value === "off" || value === false ? "off" : value === "authoritative" ? "authoritative" : "mirror";
 
 const options = (quality: GPUQuality, values: MethodParamValues) => ({
   densitySharpening: false,
   velocityTransport: "maccormack" as const,
+  brickSparseVelocityAdvection: values.brickSparseAdvection !== "off" && values.brickSparseAdvection !== false,
+  brickSparseTransportPreparation: values.brickSparseTransport !== "off" && values.brickSparseTransport !== false,
+  brickSparseOccupancyFluxPreparation: values.brickSparseOccupancyFlux !== "off" && values.brickSparseOccupancyFlux !== false,
   pressureIterations: numberValue(values, params, "pressureIterations"),
   secondaryParticles: values.secondaryParticles !== "off" && values.secondaryParticles !== false,
   secondaryParticleCapacity: numberValue(values, params, "secondaryParticleCapacity"),
@@ -50,8 +60,10 @@ const options = (quality: GPUQuality, values: MethodParamValues) => ({
     surfaceRefinementFactor: surfaceRefinementFactor(values.surfaceRefinementFactor),
     sparseSurfaceBandCells: numberValue(values, params, "sparseSurfaceBandCells"),
     sparseSurfacePageFraction: numberValue(values, params, "sparseSurfacePageFraction"),
-    brickAtlas: values.brickAtlas !== "off" && values.brickAtlas !== false,
+    brickAtlas: brickAtlasMode(values.brickAtlas),
     brickPreActivation: values.brickPreActivation !== "off" && values.brickPreActivation !== false,
+    brickSparseSurface: values.brickSparseSurface !== "off" && values.brickSparseSurface !== false,
+    brickSparseExtrapolation: values.brickSparseExtrapolation !== "off" && values.brickSparseExtrapolation !== false,
     jacobiRelaxation: 0.8,
     extrapolationSweeps: 4,
     leafSolver: leafSolver(values.leafSolver),
@@ -84,7 +96,12 @@ export const octreeMethod: SimulationMethod = {
     surfaceRefinementFactor: "2",
     sparseSurfaceBandCells: 4,
     sparseSurfacePageFraction: 0.75,
-    brickAtlas: "on",
+    brickAtlas: "mirror",
+    brickSparseSurface: "on",
+    brickSparseAdvection: "on",
+    brickSparseTransport: "off",
+    brickSparseOccupancyFlux: "off",
+    brickSparseExtrapolation: "off",
     brickPreActivation: "on"
   }),
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, options(quality, values)),

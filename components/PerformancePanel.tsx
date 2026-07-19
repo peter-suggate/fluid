@@ -7,7 +7,8 @@ import { useMethodStore } from "@/lib/stores/method-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
-import { performanceSchedule } from "@/lib/performance-scheduling";
+import { measuredGPUUtilization, performanceSchedule } from "@/lib/performance-scheduling";
+import type { CSSProperties } from "react";
 import { averagePerformanceSnapshots, rollingPerformanceSnapshots } from "@/lib/performance-averaging";
 import { adaptiveTopologyPerformanceStages, physicsPerformanceStages, type PerformanceStage } from "@/lib/performance-stage-model";
 import { PRESENTATION_FPS } from "@/lib/frame-pacing";
@@ -90,6 +91,13 @@ export function PerformancePanel() {
     ? gpuInfo.gpuCompletionSimulation_s * 1000 / gpuInfo.gpuCompletionWall_ms
     : null;
   const paused = runState === "paused";
+  const measuredUtilization = paused ? { physics: 0, presentation: 0, total: 0 } : measuredGPUUtilization({
+    physics_ms: gpuInfo?.gpuStep_ms,
+    physicsCompletionInterval_ms: gpuInfo?.gpuCompletionWall_ms,
+    presentation_ms: liveSnapshot.gpuRenderTimingAvailable ? liveSnapshot.gpuRender_ms : undefined,
+    presentationInterval_ms: gpuInfo?.gpuPresentationWall_ms
+  });
+  const measuredUtilizationPercent = measuredUtilization ? measuredUtilization.total * 100 : null;
   const realtimeDemand_ms = paused ? 0 : schedule.gpuDemandPerFrame_ms;
   const demandPercent = paused ? 0 : schedule.demandPercent;
   const cpuWindow = windowSamples.map((sample) => sample.cpuSimulation_ms + sample.cpuFrame_ms).sort((a, b) => a - b);
@@ -135,6 +143,9 @@ export function PerformancePanel() {
     </header>
 
     <section className={`performance-overview schedule-overview${gpuConstrained ? " over-budget" : ""}`} aria-label="Frame performance summary">
+      <div className="budget-gauge" style={{ "--utilization": `${measuredUtilizationPercent ?? 0}%` } as CSSProperties} title="Timestamped GPU work divided by queue-confirmed wall intervals">
+        <div><strong>{measuredUtilizationPercent === null ? "—" : `${measuredUtilizationPercent.toFixed(0)}%`}</strong><small>GPU busy</small></div>
+      </div>
       <div className="realtime-budget-summary">
         <div className="realtime-budget-title"><span><small>{paused ? "IDLE GPU LOAD" : "REALTIME GPU LOAD"}</small><strong>{measuredStages.length || paused ? `${demandPercent.toFixed(0)}%` : "—"}</strong></span><b>{paused ? `${renderPerFrame_ms.toFixed(2)} ms on last change` : measuredStages.length ? `${realtimeDemand_ms.toFixed(2)} / ${budget.toFixed(2)} ms` : "sampling…"}</b></div>
         <div className="frame-budget-track" aria-label={`${schedule.physicsPerFrame_ms.toFixed(2)} milliseconds physics, ${schedule.renderPerFrame_ms.toFixed(2)} milliseconds presentation, ${Math.max(0, headroom).toFixed(2)} milliseconds headroom`}>
@@ -144,8 +155,8 @@ export function PerformancePanel() {
         </div>
         <div className="frame-budget-labels"><span>0</span><span><b />physics {paused ? "0.00" : schedule.physicsPerFrame_ms.toFixed(2)}</span><span><b />render {paused ? "on change" : schedule.renderPerFrame_ms.toFixed(2)}</span><strong>{budget.toFixed(2)} ms deadline</strong></div>
       </div>
+      <div className="overview-stat"><small>MEASURED UTILIZATION</small><strong>{measuredUtilizationPercent === null ? "sampling…" : `${measuredUtilizationPercent.toFixed(1)}% busy`}</strong><span>{measuredUtilization === null ? "awaiting completion cadence" : paused ? "simulation paused" : `${(measuredUtilization.physics * 100).toFixed(0)}% physics · ${(measuredUtilization.presentation * 100).toFixed(0)}% presentation`}</span></div>
       <div className="overview-stat pressure-cadence"><small>PRESSURE CADENCE</small><strong>{paused ? "0.00" : schedule.pressureSolvesPerFrame.toFixed(2)} solves / frame</strong><span>{paused ? "simulation paused" : `${schedule.pressureSolvesPerSecond.toFixed(1)} / s · ${schedule.pressureSolvesPerAdvance} per GPU advance`}</span></div>
-      <div className="overview-stat"><small>ADVANCE PAYLOAD</small><strong>{paused ? 0 : schedule.pressureSolvesPerBatch} solves / slot</strong><span>{paused ? "no GPU advances requested" : `${batchSimulation_ms.toFixed(0)} ms simulation · completion-gated`}</span></div>
       <div className="overview-stat"><small>OBSERVED COMPLETION</small><strong>{observedPressureSolvesPerFrame === null ? "measuring…" : `${observedPressureSolvesPerFrame.toFixed(2)} solves / frame`}</strong><span>{paused ? "idle · presentation redraws on change" : `${observedSimRate === null ? "simulation rate sampling" : `×${observedSimRate.toFixed(2)} realtime`} · ${completionRate === null ? "queue sampling" : `queue ×${completionRate.toFixed(2)}`}`}</span></div>
     </section>
 
@@ -169,7 +180,7 @@ export function PerformancePanel() {
           <div className="timeline-lane gpu-lane"><div className="lane-label"><strong>GPU PASSES</strong><small>elapsed execution</small></div><div className="lane-track gpu-track">{physicsTimeline.map(({ stage, step, left, width }) => <button key={`${step}:${stage.key}`} className={`gpu-block ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} style={{ left: `${left}%`, width: `${Math.max(.7, width)}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`Advance ${step + 1} · ${stage.label} · ${formatMs(stage.value, stageTimed(stage), stage.active)}`}><span>{stage.shortLabel}</span><b>{formatMs(stage.value, stageTimed(stage), stage.active)}</b></button>)}{renderTimeline.map(({ stage, left, width }) => <button key={`render:${stage.key}`} className={`gpu-block ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} style={{ left: `${left}%`, width: `${Math.max(.7, width)}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value, stageTimed(stage), stage.active)}`}><span>{stage.shortLabel}</span><b>{formatMs(stage.value, stageTimed(stage), stage.active)}</b></button>)}</div><output>{submissionEnvelope_ms.toFixed(2)} ms</output></div>
           <div className="timeline-lane async-lane"><div className="lane-label"><strong>ASYNC</strong><small>{adaptive ? "Topology worker" : "Browser + readback"}</small></div><div className="lane-track">{adaptive ? <span className={`async-block${snapshot.adaptiveRebuildPending ? " active" : ""}`} style={{ width: `${Math.min(100, Math.max(3, snapshot.adaptiveRebuildWall_ms / timelineScale * 100))}%` }}><i />{snapshot.adaptiveRebuildPending ? "REBUILD IN FLIGHT" : "LAST ADAPTIVE REBUILD"}</span> : <span className="async-note"><i />Readbacks resolve without blocking the queue unless consumed by the CPU</span>}</div><output>{adaptive && snapshot.adaptiveRebuildWall_ms ? `${snapshot.adaptiveRebuildWall_ms.toFixed(1)} ms` : "non-blocking"}</output></div>
         </div>
-        <footer className="timeline-footnote"><span><i className="sync-mark" />Post-presentation queue depth is sized from measured GPU cost to fill one 16.67 ms window, never the accumulated simulation debt.</span><span>{gpuInfo?.gpuPendingBatches ?? 0} advances pending · {(gpuInfo?.gpuQueueStarved_ms ?? 0).toFixed(2)} ms last host gap</span></footer>
+        <footer className="timeline-footnote"><span><i className="sync-mark" />Post-presentation depth rounds up to the next whole advance, preferring simulation throughput even when that step crosses the 16.67 ms target.</span><span>{gpuInfo?.gpuPendingBatches ?? 0} advances pending · {(gpuInfo?.gpuQueueStarved_ms ?? 0).toFixed(2)} ms last host gap</span></footer>
       </section>
 
       <section className="trace-card frame-graph-card">

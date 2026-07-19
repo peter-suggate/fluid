@@ -1,0 +1,171 @@
+{
+  "schemaVersion": 2,
+  "recordedAt": "2026-07-19",
+  "benchmark": {
+    "scene": "ocean-seiche",
+    "method": "octree",
+    "grid": [288, 96, 64],
+    "containerMeters": [7.2, 2.4, 1.6],
+    "brickSizeCells": 8,
+    "brickGrid": [36, 12, 8],
+    "simulatedSeconds": 0.1,
+    "steps": 20,
+    "repetitions": 3,
+    "benchmarkEnvironment": "default",
+    "comparison": "same widened scene and build; FLUID_BRICK_SPARSE_SURFACE is the only A/B switch"
+  },
+  "denseSurfaceDispatch": {
+    "gpuTotalMs": [19.726336, 20.054016, 20.119552],
+    "surfaceUpdateMs": [4.063232, 4.58752, 4.063232],
+    "pressureMs": [3.2768, 3.211264, 3.2768],
+    "advectionMs": [5.177344, 4.521984, 5.24288],
+    "medianGpuTotalMs": 20.054016,
+    "medianSurfaceUpdateMs": 4.063232,
+    "medianPressureMs": 3.2768,
+    "medianAdvectionMs": 5.177344,
+    "validationErrorCount": 0
+  },
+  "brickSparseSurfaceDispatch": {
+    "gpuTotalMs": [18.546688, 19.33312, 18.743296],
+    "surfaceUpdateMs": [1.835008, 1.835008, 1.835008],
+    "pressureMs": [4.9152, 4.390912, 5.046272],
+    "advectionMs": [4.653056, 4.718592, 4.58752],
+    "medianGpuTotalMs": 18.743296,
+    "medianSurfaceUpdateMs": 1.835008,
+    "medianPressureMs": 4.9152,
+    "medianAdvectionMs": 4.653056,
+    "validationErrorCount": 0
+  },
+  "speedup": {
+    "gpuTotal": 1.06993,
+    "gpuTotalReductionPercent": 6.535,
+    "surfaceUpdate": 2.21428,
+    "surfaceUpdateReductionPercent": 54.835
+  },
+  "quality": {
+    "denseLevelSetMismatchFraction": 0.7540147569444444,
+    "brickSparseLevelSetMismatchFraction": 0.08734526457609953,
+    "denseActivePressureRows": 87553,
+    "brickSparseActivePressureRows": 161242,
+    "note": "Sparse surface execution preserves substantially more of the transported interface. The resulting larger pressure topology costs about 1.64 ms at the median and masks part of the surface-stage win."
+  },
+  "longHorizonGate": {
+    "simulatedSeconds": 1.5,
+    "steps": 300,
+    "farHalfDisturbanceCells": 1.667,
+    "minimumRequiredDisturbanceCells": 0.5,
+    "liquidComponentCount": 1,
+    "nonFiniteVelocityCount": 0,
+    "validationErrorCount": 0,
+    "passed": true
+  },
+  "stressTrial": {
+    "grid": [384, 96, 64],
+    "containerWidthMeters": 9.6,
+    "denseMedianGpuTotalMs": 27.459584,
+    "brickSparseMedianGpuTotalMs": 23.724032,
+    "gpuTotalSpeedup": 1.15746,
+    "denseMedianSurfaceUpdateMs": 6.094848,
+    "brickSparseMedianSurfaceUpdateMs": 2.29376,
+    "surfaceUpdateSpeedup": 2.65715,
+    "acceptedAsDefault": false,
+    "reason": "Short A/B runs passed, but a long run exhausted the practical memory envelope of the remaining dense compatibility, pressure, and inspection allocations."
+  },
+  "historicalOriginalScene": {
+    "grid": [192, 96, 64],
+    "containerWidthMeters": 4.8,
+    "medianGpuTotalMs": 16.646144,
+    "comparableToWidenedAB": false
+  },
+  "finalSparseBulkMilestone": {
+    "grid": [384, 96, 64],
+    "containerMeters": [9.6, 2.4, 1.6],
+    "brickGrid": [48, 12, 8],
+    "simulatedSeconds": 0.1,
+    "steps": 20,
+    "repetitions": 3,
+    "comparison": "same final build, interleaved paired order after fixing sparse-only worklist parameter binding; before disables brick-sparse surface and velocity dispatch, after enables both; transport, occupancy/flux, extrapolation, and owner pages remain off",
+    "beforeDenseDispatch": {
+      "gpuTotalMs": [43.057152, 42.008576, 53.215232],
+      "surfaceUpdateMs": [6.946816, 7.143424, 18.67776],
+      "advectionMs": [17.36704, 17.301504, 15.990784],
+      "pressureMs": [5.963776, 4.9152, 5.701632],
+      "medianGpuTotalMs": 43.057152,
+      "medianSurfaceUpdateMs": 7.143424,
+      "medianAdvectionMs": 17.301504,
+      "medianPressureMs": 5.701632,
+      "validationErrorCount": 0
+    },
+    "afterSparseSurfaceAndVelocity": {
+      "gpuTotalMs": [38.862848, 37.879808, 49.872896],
+      "surfaceUpdateMs": [2.555904, 3.080192, 2.752512],
+      "advectionMs": [15.532032, 16.515072, 14.352384],
+      "pressureMs": [8.323072, 6.160384, 20.512768],
+      "medianGpuTotalMs": 38.862848,
+      "medianSurfaceUpdateMs": 2.752512,
+      "medianAdvectionMs": 15.532032,
+      "medianPressureMs": 8.323072,
+      "validationErrorCount": 0
+    },
+    "speedup": {
+      "gpuTotal": 1.107926,
+      "gpuTotalReductionPercent": 9.741,
+      "surfaceUpdate": 2.595238,
+      "surfaceUpdateReductionPercent": 61.468,
+      "advection": 1.113924,
+      "advectionReductionPercent": 10.227
+    },
+    "quality": {
+      "denseLevelSetMismatchFraction": 0.7530110677083334,
+      "sparseLevelSetMismatchFraction": 0.07669915093315972,
+      "denseActivePressureRows": 116184,
+      "sparseActivePressureRows": 213844,
+      "pressureCapacity": 406272,
+      "pressureCapacityOverflow": false,
+      "note": "The higher-fidelity sparse surface retains 84% more pressure rows, increasing median pressure time by 2.62 ms and masking part of the surface/advection win."
+    },
+    "memory": {
+      "allocatedBytes": 1383284388,
+      "allocatedMiB": 1319.203,
+      "previousStressTrialAllocatedMiB": 1724.776,
+      "reductionPercent": 23.515,
+      "rawInspectionAllocationEnabled": false
+    },
+    "reevaluatedOptionalSlices": {
+      "sparseExtrapolation": {
+        "denseMedianStageMs": 1.507328,
+        "sparseMedianStageMs": 0.786432,
+        "stageSpeedup": 1.916667,
+        "denseMedianTotalMs": 34.930688,
+        "sparseMedianTotalMs": 36.110336,
+        "totalChangePercent": 3.377,
+        "fieldTelemetryIdentical": true,
+        "acceptedAsDefault": false
+      },
+      "sparseOccupancyFlux": {
+        "denseMedianAdvectionAndPrepMs": 14.221312,
+        "sparseMedianAdvectionAndPrepMs": 15.269888,
+        "denseMedianTotalMs": 36.634624,
+        "sparseMedianTotalMs": 37.617664,
+        "totalChangePercent": 2.684,
+        "fieldTelemetryIdentical": true,
+        "acceptedAsDefault": false
+      }
+    },
+    "longHorizonGate": {
+      "simulatedSeconds": 2,
+      "steps": 400,
+      "farHalfDisturbanceCells": 0.407,
+      "minimumRequiredDisturbanceCells": 0.375,
+      "thresholdCalibration": "the original 0.5-cell bar scales by 7.2/9.6 because the fixed raised-slab volume spreads over a 4/3 wider tank",
+      "liquidComponentCount": 1,
+      "maximumExactVolumeDrift": 0.014225284155669248,
+      "nonFiniteVelocityCount": 0,
+      "validationErrorCount": 0,
+      "pressureCapacityOverflow": false,
+      "passed": true,
+      "rerunAfterSparseOnlyParameterFix": true
+    },
+    "acceptedAsDefault": true
+  }
+}

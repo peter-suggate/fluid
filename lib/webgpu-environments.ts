@@ -205,34 +205,50 @@ fn sampleEnvironmentProps(ro:vec3f,rd:vec3f)->EnvironmentPropHit{
     h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-.76*s,.23*s,-1.04*s),vec3f(.30*s,.23*s,.24*s),vec3f(.12,.15,.15),0));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-.76*s,.47*s,-1.04*s),vec3f(.25*s,.018*s,.19*s),vec3f(.74,.48,.16),.12));
     for(var i=-1;i<=1;i+=1){h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(f32(i)*.52*s,1.36*s,-1.12*s),vec3f(.055*s),vec3f(.10,.65,.72),.36));}
   }else if(e==7){
-    // Garden: clipped hedges frame the lawn, an apple tree leans over the
-    // knoll, terracotta pots and a watering can sit by the beach. Heights are
-    // anchored to the lawn level so props stand on the grass, not in it.
+    // Porcelain garden: a monochrome white-clay diorama packed tight around
+    // the pond. Two cloud-canopy trees lean over the banks, oversized
+    // mushrooms ring the water and pebbles mark the beach, so the pond is the
+    // only reflective, colorful thing in frame. Heights anchor to lawn level.
     let g=u.terrainMeta.y;
-    let hedge=vec3f(.045,.145,.045);
-    h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(.4*s,g+.36*s,-1.55*s),vec3f(1.9*s,.36*s,.16*s),hedge,0));
-    h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-1.65*s,g+.42*s,-.35*s),vec3f(.15*s,.42*s,1.25*s),hedge*.88,0));
-    h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(1.72*s,g+.30*s,.45*s),vec3f(.14*s,.30*s,1.0*s),hedge*1.06,0));
-    // Apple tree behind the knoll.
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-1.15*s,g+.34*s,1.05*s),.045*s,.34*s,vec3f(.24,.155,.09),0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-1.15*s,g+.88*s,1.05*s),vec3f(.46*s,.36*s,.44*s),vec3f(.085,.27,.075),0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.88*s,g+.72*s,1.2*s),vec3f(.24*s,.20*s,.22*s),vec3f(.115,.32,.095),0));
-    for(var i=0;i<3;i+=1){let ax=(-1.32+.17*f32(i))*s;h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(ax,g+(.66+.14*f32(i))*s,(1.22-.09*f32(i))*s),vec3f(.022*s),vec3f(.78,.16,.10),.08));}
-    // Terracotta pots with blooms sheltering by the berm.
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(1.28*s,g+.085*s,-1.02*s),.10*s,.085*s,vec3f(.56,.28,.16),0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(1.28*s,g+.23*s,-1.02*s),vec3f(.125*s,.09*s,.125*s),vec3f(.76,.30,.42),.10));
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(1.45*s,g+.065*s,-.78*s),.075*s,.065*s,vec3f(.50,.25,.14),0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(1.45*s,g+.17*s,-.78*s),vec3f(.09*s,.07*s,.09*s),vec3f(.93,.79,.28),.10));
-    // Watering can waiting on the lawn near the beach.
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(.78*s,g+.075*s,-1.18*s),.065*s,.075*s,vec3f(.16,.34,.36),0));
-    h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(.86*s,g+.10*s,-1.18*s),vec3f(.055*s,.012*s,.012*s),vec3f(.14,.30,.32),0));
+    let trunk=vec3f(.52,.49,.45);let canopy=vec3f(.86,.85,.82);
+    let cap=vec3f(.90,.88,.85);let gill=vec3f(.55,.52,.49);let stem=vec3f(.78,.75,.71);let pebble=vec3f(.68,.67,.64);
+    // Big cloud tree on the far-left bank, canopy leaning over the deep end.
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.45*s,g+.15*s,-.117*s),.055*s,.15*s,trunk,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.40*s,g+.50*s,-.08*s),vec3f(.30*s,.24*s,.28*s),canopy,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.56*s,g+.42*s,-.20*s),vec3f(.17*s,.14*s,.16*s),canopy*.92,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.33*s,g+.66*s,-.02*s),vec3f(.15*s,.12*s,.14*s),canopy*1.04,0));
+    // Round tree on the berm across the water.
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(.45*s,g+.12*s,-.25*s),.045*s,.12*s,trunk*.95,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.45*s,g+.40*s,-.25*s),vec3f(.22*s,.18*s,.21*s),canopy*.96,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.56*s,g+.50*s,-.19*s),vec3f(.12*s,.10*s,.11*s),canopy*.88,0));
+    // Grand mushroom on the far bank between beach and deep end, its sprout beside it.
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.20*s,g+.10*s,-.33*s),.05*s,.10*s,stem,0));
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.20*s,g+.205*s,-.33*s),.115*s,.012*s,gill,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.20*s,g+.25*s,-.33*s),vec3f(.14*s,.088*s,.14*s),cap,0));
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.13*s,g+.055*s,-.36*s),.028*s,.055*s,stem*.9,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.13*s,g+.135*s,-.36*s),vec3f(.072*s,.046*s,.072*s),cap*.90,0));
+    // Tall mushroom by the rockery on the near-left bank.
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.30*s,g+.075*s,.25*s),.036*s,.075*s,stem*.96,0));
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.30*s,g+.16*s,.25*s),.085*s,.010*s,gill,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.30*s,g+.20*s,.25*s),vec3f(.105*s,.066*s,.105*s),cap*.97,0));
+    // Button mushroom by the lobe edge and a pip by the beach shelf.
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(.38*s,g+.06*s,.07*s),.032*s,.06*s,stem*.92,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.38*s,g+.15*s,.07*s),vec3f(.085*s,.054*s,.085*s),cap*.94,0));
+    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(.24*s,g+.045*s,-.345*s),.024*s,.045*s,stem*.88,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.24*s,g+.115*s,-.345*s),vec3f(.06*s,.04*s,.06*s),cap*.86,0));
+    // White pebbles at the beach edge and by the near bank.
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.21*s,g+.02*s,-.29*s),vec3f(.05*s,.034*s,.046*s),pebble,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.26*s,g+.015*s,-.325*s),vec3f(.036*s,.024*s,.033*s),pebble*.9,0));
+    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.05*s,g+.02*s,.31*s),vec3f(.045*s,.03*s,.042*s),pebble*.95,0));
   }
   return h;
 }
 
-// Ground shading for the garden: pebble pool liner below the waterline, a
-// damp sand collar, then the lawn — mow stripes, blade-scale tone noise,
-// clover patches and scattered daisies. The hollow self-occludes with depth.
+// Ground shading for the porcelain garden: the same structure as before —
+// pebbled pool liner below the waterline, a pale collar, then the lawn with
+// mow stripes, tone noise, matte patches and bright white flecks — but in a
+// monochrome white-clay palette. The dark liner is what lets the water read
+// as deep. The hollow self-occludes with depth.
 fn gardenGroundMaterial(p:vec3f)->vec3f{
   let base=u.terrainMeta.y;
   let waterline=u.container.w;
@@ -240,14 +256,14 @@ fn gardenGroundMaterial(p:vec3f)->vec3f{
   let jitter=vec2f(envHash21(cell),envHash21(cell+19.7))-.5;
   let pebbleDistance=length(fract(p.xz*26.0)-.5-jitter*.55);
   let pebbleTone=.55+.45*envHash21(cell+7.3);
-  let liner=mix(vec3f(.14,.115,.09),vec3f(.42,.36,.28)*pebbleTone,smoothstep(.44,.18,pebbleDistance));
-  let sand=vec3f(.50,.42,.29)*(.9+.2*envHash21(floor(p.xz*40.0)));
+  let liner=mix(vec3f(.135,.13,.125),vec3f(.44,.435,.42)*pebbleTone,smoothstep(.44,.18,pebbleDistance));
+  let sand=vec3f(.56,.55,.52)*(.9+.2*envHash21(floor(p.xz*40.0)));
   let stripe=.5+.5*sin((p.x*.9+p.z*.35)*4.4);
-  var lawn=mix(vec3f(.085,.26,.075),vec3f(.145,.375,.115),.5*stripe+.5*envHash21(floor(p.xz*90.0)));
+  var lawn=mix(vec3f(.46,.455,.435),vec3f(.66,.65,.62),.5*stripe+.5*envHash21(floor(p.xz*90.0)));
   let clover=step(.962,envHash21(floor(p.xz*14.0)));
-  lawn=mix(lawn,vec3f(.185,.41,.15),clover*.55);
+  lawn=mix(lawn,vec3f(.58,.575,.55),clover*.55);
   let daisy=step(.986,envHash21(floor(p.xz*24.0)+3.1));
-  lawn=mix(lawn,vec3f(.87,.84,.68),daisy*.85);
+  lawn=mix(lawn,vec3f(.95,.94,.90),daisy*.85);
   let sandBand=smoothstep(waterline-.02,waterline+.04,p.y);
   var c=mix(liner,sand,sandBand);
   c=mix(c,lawn,smoothstep(base-.05,base-.008,p.y));
@@ -398,7 +414,7 @@ fn environmentLightColor()->vec3f{
   if(e==3){return vec3f(1.0,.67,.40);}
   if(e==4){return vec3f(1.0,.83,.57);}
   if(e==5){return vec3f(.42,.83,1.0);}
-  if(e==7){return vec3f(1.0,.94,.76);}
+  if(e==7){return vec3f(1.0,.97,.90);}
   return vec3f(1.0,.86,.62);
 }
 fn environmentAccent()->vec3f{
@@ -409,7 +425,7 @@ fn environmentAccent()->vec3f{
   if(e==3){return vec3f(.72,.42,.22);}
   if(e==4){return vec3f(.54,.39,.25);}
   if(e==5){return vec3f(.14,.56,.68);}
-  if(e==7){return vec3f(.32,.50,.22);}
+  if(e==7){return vec3f(.48,.50,.53);}
   return vec3f(.24,.55,.39);
 }
 
@@ -438,14 +454,15 @@ fn environmentLight(rd:vec3f)->vec3f{
   else if(e==3){c=mix(vec3f(.045,.050,.048),vec3f(.30,.32,.30),t);}
   else if(e==4){c=mix(vec3f(.045,.038,.032),vec3f(.34,.31,.25),t);}
   else if(e==7){
-    // Summer afternoon: warm hazy horizon into blue zenith, drifting cumulus
-    // and a dark hedge line where the lawn meets the sky.
-    c=mix(vec3f(.58,.66,.70),vec3f(.24,.44,.74),pow(t,1.35));
+    // Porcelain sky: a near-white horizon into a pale blue-grey zenith with
+    // soft drifting cumulus, easing into a misty pale ground line so the
+    // whole backdrop stays monochrome around the water.
+    c=mix(vec3f(.88,.88,.86),vec3f(.52,.60,.72),pow(t,1.35));
     let q=rd.xz/max(rd.y+.16,.09);
     let cloudField=.5+.5*sin(q.x*1.25+sin(q.y*1.85))+.32*sin(q.y*3.6+q.x*2.15);
     let cloud=smoothstep(.86,1.32,cloudField)*smoothstep(.015,.22,rd.y);
-    c=mix(c,vec3f(.97,.97,.99),cloud*.85);
-    c=mix(vec3f(.055,.13,.05),c,smoothstep(-.03,.05,rd.y));
+    c=mix(c,vec3f(1.0,.99,.98),cloud*.85);
+    c=mix(vec3f(.60,.61,.59),c,smoothstep(-.03,.05,rd.y));
   }
   else {c=mix(vec3f(.002,.012,.022),vec3f(.028,.12,.17),t);}
   let sun=max(dot(rd,environmentLightDirection()),0.0);
@@ -550,15 +567,15 @@ fn sampleEnvironment(ro:vec3f,rd:vec3f)->EnvironmentSample{
       let p=ro+rd*terrainT;
       let n=envTerrainNormal(p.xz);
       let l=environmentLightDirection();
-      let daylight=.34+.72*max(dot(n,l),0.0);
-      // Soft canopy shadow under the apple tree.
+      let daylight=.28+.82*max(dot(n,l),0.0);
+      // Soft canopy shadows under the two cloud trees and the grand mushroom.
       let s=max(max(u.container.x,u.container.y),u.container.z);
-      let treeShadow=1.0-.38*envFootprintShadow(p,vec2f(-1.15,1.05)*s,vec2f(.5,.48)*s);
+      let treeShadow=1.0-.38*max(envFootprintShadow(p,vec2f(-.40,-.08)*s,vec2f(.33,.31)*s),max(envFootprintShadow(p,vec2f(.45,-.25)*s,vec2f(.25,.24)*s),envFootprintShadow(p,vec2f(-.20,-.33)*s,vec2f(.17,.17)*s)));
       var c=gardenGroundMaterial(p)*environmentLightColor()*daylight*treeShadow;
       let fresnel=pow(1.0-max(dot(-rd,n),0.0),4.0);
-      c+=vec3f(.22,.33,.44)*fresnel*.12;
+      c+=vec3f(.35,.37,.40)*fresnel*.12;
       let haze=1.0-exp(-terrainT*.05);
-      c=mix(c,vec3f(.60,.68,.72),haze*.65);
+      c=mix(c,vec3f(.80,.81,.83),haze*.35);
       return EnvironmentSample(c,terrainT);
     }
     return EnvironmentSample(environmentLight(rd),65504.0);
@@ -599,16 +616,16 @@ fn environmentForeground(color:vec3f,ndc:vec2f)->vec3f{
   }else if(e==5){
     let radius=length(ndc*vec2f(1.0,u.viewport.y/max(u.viewport.x,1.0)));let frame=smoothstep(.83,.91,radius);let rib=max(envStroke(abs(ndc.x)-.93,.025),envStroke(abs(ndc.y)-.91,.025));c=mix(c,vec3f(.003,.014,.024),max(frame*.58,rib*.48));let drift=envHash21(floor((ndc+vec2f(u.viewport.z*.006,-u.viewport.z*.003))*vec2f(330,210)));c+=vec3f(.20,.62,.72)*select(0.0,.20,drift>.996);
   }else if(e==7){
-    // Out-of-focus grass blades along the bottom edge, swaying gently, and a
-    // soft warm bloom from the top-left sun.
+    // Out-of-focus pale grass blades along the bottom edge, swaying gently,
+    // and a soft warm-white bloom from the top-left sun.
     let sway=.014*sin(u.viewport.z*1.7+ndc.x*9.0);
     let lane=floor((ndc.x+sway)*70.0);
     let bladeHeight=.05+.15*envHash21(vec2f(lane,5.0));
     let across=fract((ndc.x+sway)*70.0)-.5;
     let taper=1.0-clamp((ndc.y+1.0)/max(bladeHeight,1e-4),0.0,1.0);
     let blade=step(abs(across),.42*taper)*step(ndc.y,-1.0+bladeHeight);
-    c=mix(c,vec3f(.014,.07,.02),blade*.85);
-    c+=vec3f(.14,.12,.07)*pow(max(0.0,1.0-length(ndc-vec2f(-.88,.86))),3.0);
+    c=mix(c,vec3f(.33,.34,.33),blade*.6);
+    c+=vec3f(.15,.14,.12)*pow(max(0.0,1.0-length(ndc-vec2f(-.88,.86))),3.0);
   }
   return c;
 }

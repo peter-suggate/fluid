@@ -10,6 +10,15 @@
 
 import { inflowBoundaryWGSL } from "./inflow-boundary";
 import { adaptiveOpticalLayerDefaults, quadtreeSizingWeights } from "./quadtree-tall-cell-grid";
+import { FLUID_BRICK_ACTIVE_SURFACE_DISPATCH_OFFSET_BYTES } from "./webgpu-fluid-brick-residency";
+
+export interface SparseSurfaceExecutionSource {
+  /** Header + active (brick, leaf) pairs emitted by GPU fluid residency. */
+  worklist: GPUBuffer;
+  /** Per-logical-brick resident flags used to reject stale jump-flood seeds. */
+  states: GPUBuffer;
+  brickSize: 4 | 8;
+}
 
 /** Per-step nozzle state for sourcing fluid into the resident level set. */
 export interface SurfaceInflowState {
@@ -45,6 +54,8 @@ export interface WebGPUQuadtreeSurfaceCache {
     jumpFlood: GPUComputePipeline;
     finalizeDistance: GPUComputePipeline;
     correctLevelSetVolume: GPUComputePipeline;
+    commitLevelSetVolumeCorrection: GPUComputePipeline;
+    copyLevelSet: GPUComputePipeline;
     cullDebris: GPUComputePipeline;
   };
 }
@@ -74,6 +85,45 @@ struct PassParams { jump: u32, pad0: u32, pad1: u32, pad2: u32 }
 @group(0) @binding(10) var reconcileVolumeIn: texture_3d<f32>;
 struct SurfaceSolidCell { fraction: f32, owner: i32 }
 @group(0) @binding(11) var<storage, read> surfaceSolids: array<SurfaceSolidCell>;
+// Optional sparse execution source. params.container.w is the brick size when
+// enabled and zero for the dense reference path.
+@group(0) @binding(12) var<storage, read> surfaceBrickWorklist: array<u32>;
+@group(0) @binding(13) var<storage, read> surfaceBrickStates: array<u32>;
+
+fn sparseSurfaceEnabled() -> bool { return params.container.w >= 4.0; }
+fn surfaceLocalCell(localIndex: u32, brickSize: u32) -> vec3u {
+  return vec3u(localIndex % brickSize, (localIndex / brickSize) % brickSize,
+    localIndex / (brickSize * brickSize));
+}
+fn surfaceBrickCoordinate(brickIndex: u32, brickSize: u32) -> vec3u {
+  let brickDims = (params.dims.xyz + vec3u(brickSize - 1u)) / brickSize;
+  return vec3u(brickIndex % brickDims.x, (brickIndex / brickDims.x) % brickDims.y,
+    brickIndex / (brickDims.x * brickDims.y));
+}
+// Dense launches use ordinary 4x4x4 workgroups. Sparse launches use the
+// residency worklist's 64-thread indirect stream (header words 12..14).
+fn surfaceDispatchCell(denseGid: vec3u, wid: vec3u, localIndex: u32) -> vec3u {
+  if (!sparseSurfaceEnabled()) {
+    return denseGid;
+  }
+  let stream = (wid.x + wid.y * surfaceBrickWorklist[12]) * 64u + localIndex;
+  let brickSize = u32(params.container.w);
+  let voxelsPerBrick = brickSize * brickSize * brickSize;
+  let brickSlot = stream / voxelsPerBrick;
+  if (brickSlot >= surfaceBrickWorklist[0]) { return params.dims.xyz; }
+  let brickIndex = surfaceBrickWorklist[16u + 2u * brickSlot];
+  return surfaceBrickCoordinate(brickIndex, brickSize) * brickSize
+    + surfaceLocalCell(stream % voxelsPerBrick, brickSize);
+}
+fn sparseSurfaceCellResident(q: vec3i) -> bool {
+  if (!sparseSurfaceEnabled()) { return true; }
+  if (any(q < vec3i(0)) || any(q >= vec3i(params.dims.xyz))) { return false; }
+  let brickSize = u32(params.container.w);
+  let brickDims = (params.dims.xyz + vec3u(brickSize - 1u)) / brickSize;
+  let brick = vec3u(q) / brickSize;
+  let brickIndex = brick.x + brickDims.x * (brick.y + brickDims.y * brick.z);
+  return brickIndex < arrayLength(&surfaceBrickStates) && (surfaceBrickStates[brickIndex] & 1u) != 0u;
+}
 
 fn index3(q: vec3u) -> u32 { return q.x + params.dims.x * (q.y + params.dims.y * q.z); }
 fn clamp3(q: vec3i) -> vec3i { return clamp(q, vec3i(0), vec3i(params.dims.xyz) - vec3i(1)); }
@@ -142,7 +192,8 @@ fn departurePoint(p: vec3f, dt: f32) -> vec3f {
   return p - centredMacVelocityAt(midpoint) * dt * cellsPerMetre;
 }
 @compute @workgroup_size(4, 4, 4)
-fn advectLevelSet(@builtin(global_invocation_id) gid: vec3u) {
+fn advectLevelSet(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   // Narita et al. Sec. 4.5: interpolate velocity from the saved previous
   // staggered grid, backtrace, then interpolate the previous level set.
@@ -152,22 +203,26 @@ fn advectLevelSet(@builtin(global_invocation_id) gid: vec3u) {
   // The nozzle sources fluid directly into the resident surface, exactly as
   // the restricted method's finishAdvection clamps phi at inflow cells.
   if (isInflowVelocityCell(q)) { phi = min(phi, -0.5 * hMin() * inflowApertureFraction(q) * inflowStrength()); }
+  if (sparseSurfaceEnabled()) { accumulateSparseVolumeDelta(loadPhi(q), phi, gid); }
   textureStore(phiOut, q, vec4f(phi, 0.0, 0.0, 0.0));
 }
 @compute @workgroup_size(4, 4, 4)
-fn advectPredict(@builtin(global_invocation_id) gid: vec3u) {
+fn advectPredict(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   textureStore(phiOut, vec3i(gid), vec4f(trilinearPhi(departurePoint(vec3f(gid), params.cellAndDt.w)), 0.0, 0.0, 0.0));
 }
 @compute @workgroup_size(4, 4, 4)
-fn advectReverse(@builtin(global_invocation_id) gid: vec3u) {
+fn advectReverse(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
   // phiIn is the predicted field; tracing it forward (negative dt backtrace)
   // recovers the BFECC error estimate.
   if (any(gid >= params.dims.xyz)) { return; }
   textureStore(phiOut, vec3i(gid), vec4f(trilinearPhi(departurePoint(vec3f(gid), -params.cellAndDt.w)), 0.0, 0.0, 0.0));
 }
 @compute @workgroup_size(4, 4, 4)
-fn advectCorrect(@builtin(global_invocation_id) gid: vec3u) {
+fn advectCorrect(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   let q = vec3i(gid);
   let original = loadPhi(q);
@@ -187,6 +242,7 @@ fn advectCorrect(@builtin(global_invocation_id) gid: vec3u) {
   if (corrected < lower || corrected > upper) { corrected = predicted; }
   var phi = volumeCorrectedPhi(corrected, q);
   if (isInflowVelocityCell(q)) { phi = min(phi, -0.5 * hMin() * inflowApertureFraction(q) * inflowStrength()); }
+  if (sparseSurfaceEnabled()) { accumulateSparseVolumeDelta(loadPhi(q), phi, gid); }
   textureStore(phiOut, q, vec4f(phi, 0.0, 0.0, 0.0));
 }
 fn surfaceOpenFraction(gid: vec3u) -> f32 {
@@ -213,8 +269,24 @@ fn accumulateVolume(value: f32, gid: vec3u) {
   // the represented-volume functional it is correcting.
   if (abs(value) < 2.0 * params.cellAndDt.y) { atomicAdd(&reductions[1], u32(open * 256.0 + 0.5)); }
 }
+fn representedOccupancy(value: f32, gid: vec3u) -> f32 {
+  return clamp(0.5 - value / (4.0 * params.cellAndDt.y), 0.0, 1.0) * surfaceOpenFraction(gid);
+}
+// Sparse execution keeps the global volume total persistent and applies only
+// each active cell's signed change. Two's-complement addition through u32
+// atomics is exact modulo 2^32 for the bounded per-step deltas here.
+fn accumulateSparseVolumeDelta(before: f32, after: f32, gid: vec3u) {
+  let delta = i32(round((representedOccupancy(after, gid) - representedOccupancy(before, gid)) * 256.0));
+  atomicAdd(&reductions[0], bitcast<u32>(delta));
+}
+fn accumulateSparseInterface(value: f32, gid: vec3u) {
+  if (abs(value) < 2.0 * params.cellAndDt.y) {
+    atomicAdd(&reductions[1], u32(surfaceOpenFraction(gid) * 256.0 + 0.5));
+  }
+}
 @compute @workgroup_size(4, 4, 4)
-fn reduceVolume(@builtin(global_invocation_id) gid: vec3u) {
+fn reduceVolume(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   accumulateVolume(loadPhi(vec3i(gid)), gid);
 }
@@ -236,7 +308,8 @@ fn reconciliationSelected(gid: vec3u) -> bool {
   return f32(hash & 0xffffu) < params.control.w * 65536.0;
 }
 @compute @workgroup_size(4, 4, 4)
-fn seedDistance(@builtin(global_invocation_id) gid: vec3u) {
+fn seedDistance(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   let p = vec3i(gid); let wet = loadPhi(p) < 0.0;
   var crosses = (loadPhi(p + vec3i(1, 0, 0)) < 0.0) != wet || (loadPhi(p - vec3i(1, 0, 0)) < 0.0) != wet
@@ -264,18 +337,21 @@ fn seedDistanceSquared(cell: vec3u, word: vec2u) -> f32 {
   return dot(delta, delta);
 }
 @compute @workgroup_size(4, 4, 4)
-fn jumpFlood(@builtin(global_invocation_id) gid: vec3u) {
+fn jumpFlood(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   var best = distanceSeedsIn[index3(gid)]; var bestDistance = seedDistanceSquared(gid, best); let jump = i32(passParams.jump);
   for (var dz = -1; dz <= 1; dz += 1) { for (var dy = -1; dy <= 1; dy += 1) { for (var dx = -1; dx <= 1; dx += 1) {
     let q = clamp(vec3i(gid) + vec3i(dx, dy, dz) * jump, vec3i(0), vec3i(params.dims.xyz) - vec3i(1));
+    if (!sparseSurfaceCellResident(q)) { continue; }
     let candidate = distanceSeedsIn[index3(vec3u(q))]; let candidateDistance = seedDistanceSquared(gid, candidate);
     if (candidateDistance < bestDistance) { best = candidate; bestDistance = candidateDistance; }
   } } }
   distanceSeedsOut[index3(gid)] = best;
 }
 @compute @workgroup_size(4, 4, 4)
-fn finalizeDistance(@builtin(global_invocation_id) gid: vec3u) {
+fn finalizeDistance(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   let advected = loadPhi(vec3i(gid));
   let h = hMin();
@@ -320,11 +396,15 @@ fn finalizeDistance(@builtin(global_invocation_id) gid: vec3u) {
   // In the normal path finalization already owns the exact value that the
   // following reduction used to reload from the texture. Debris culling can
   // still change that value, so its opt-in path reduces after the cull/copy.
-  if (params.control.z <= 0.5) { accumulateVolume(result, gid); }
+  if (params.control.z <= 0.5) {
+    if (sparseSurfaceEnabled()) { accumulateSparseInterface(result, gid); }
+    else { accumulateVolume(result, gid); }
+  }
   textureStore(phiOut, vec3i(gid), vec4f(result, 0.0, 0.0, 0.0));
 }
 @compute @workgroup_size(4, 4, 4)
-fn correctLevelSetVolume(@builtin(global_invocation_id) gid: vec3u) {
+fn correctLevelSetVolume(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   let represented = f32(atomicLoad(&reductions[0])) / 256.0;
   let desiredVolume = params.inflowTiming.y;
@@ -337,8 +417,24 @@ fn correctLevelSetVolume(@builtin(global_invocation_id) gid: vec3u) {
                     -1.5 * hMin(), 1.5 * hMin());
   textureStore(phiOut, vec3i(gid), vec4f(loadPhi(vec3i(gid)) + shift, 0.0, 0.0, 0.0));
 }
+@compute @workgroup_size(1)
+fn commitLevelSetVolumeCorrection() {
+  let represented = f32(atomicLoad(&reductions[0])) / 256.0;
+  let interfaceCells = max(1.0, f32(atomicLoad(&reductions[1])) / 256.0);
+  let shift = clamp((represented - params.inflowTiming.y) * (4.0 * params.cellAndDt.y) / interfaceCells,
+                    -1.5 * hMin(), 1.5 * hMin());
+  let corrected = max(0.0, represented - interfaceCells * shift / (4.0 * params.cellAndDt.y));
+  atomicStore(&reductions[0], u32(corrected * 256.0 + 0.5));
+}
 @compute @workgroup_size(4, 4, 4)
-fn cullDebris(@builtin(global_invocation_id) gid: vec3u) {
+fn copyLevelSet(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+  if (any(gid >= params.dims.xyz)) { return; }
+  textureStore(phiOut, vec3i(gid), vec4f(loadPhi(vec3i(gid)), 0.0, 0.0, 0.0));
+}
+@compute @workgroup_size(4, 4, 4)
+fn cullDebris(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   let q = vec3i(gid); let value = loadPhi(q); var result = value;
   if (params.control.z > 0.5 && value < 0.0 && textureLoad(reconcileVolumeIn, q, 0).x < 0.5) {
@@ -373,7 +469,9 @@ function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCach
     { binding: 8, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
     { binding: 9, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
     { binding: 10, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-    { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+    { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+    { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+    { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
   ] });
   const shaderModule = device.createShaderModule({ label: "Resident quadtree level set", code: quadtreeSurfaceShader });
   void shaderModule.getCompilationInfo().then((info) => {
@@ -386,7 +484,9 @@ function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCach
     advectReverse: pipeline("advectReverse"), advectCorrect: pipeline("advectCorrect"),
     reduceVolume: pipeline("reduceVolume"),
     seedDistance: pipeline("seedDistance"), jumpFlood: pipeline("jumpFlood"), finalizeDistance: pipeline("finalizeDistance"),
-    correctLevelSetVolume: pipeline("correctLevelSetVolume"), cullDebris: pipeline("cullDebris")
+    correctLevelSetVolume: pipeline("correctLevelSetVolume"),
+    commitLevelSetVolumeCorrection: pipeline("commitLevelSetVolumeCorrection"),
+    copyLevelSet: pipeline("copyLevelSet"), cullDebris: pipeline("cullDebris")
   } };
 }
 
@@ -420,8 +520,9 @@ export class WebGPUQuadtreeSurfaceState {
   private surfaceSequence = 0;
   private readonly ownedReconcileFallback?: GPUTexture;
   private readonly ownedSolidFallback?: GPUBuffer;
+  private readonly ownedSparseFallback?: GPUBuffer;
 
-  constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, velocity: GPUTexture, initialPhi: Float32Array, cache?: WebGPUQuadtreeSurfaceCache, reconcileVolume?: GPUTexture, private readonly debrisCulling = false, reconcileEnabled = reconcileVolume !== undefined, private readonly gpuVolumeCorrection = false, private readonly monotoneLevelSetTransport = false, private readonly solidFractions?: GPUBuffer) {
+  constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, velocity: GPUTexture, initialPhi: Float32Array, cache?: WebGPUQuadtreeSurfaceCache, reconcileVolume?: GPUTexture, private readonly debrisCulling = false, reconcileEnabled = reconcileVolume !== undefined, private readonly gpuVolumeCorrection = false, private readonly monotoneLevelSetTransport = false, private readonly solidFractions?: GPUBuffer, private readonly sparseExecution?: SparseSurfaceExecutionSource) {
     this.cache = ensureSurfaceCache(device, cache);
     this.hasReconcileVolume = reconcileVolume !== undefined;
     this.reconcileEnabled = reconcileEnabled && reconcileVolume !== undefined;
@@ -457,12 +558,16 @@ export class WebGPUQuadtreeSurfaceState {
     // a one-texel fallback keeps the layout uniform and control.y gates reads.
     const reconcileTexture = reconcileVolume ?? (this.ownedReconcileFallback = device.createTexture({ label: "Quadtree surface reconcile fallback", size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING }));
     const surfaceSolidBuffer = solidFractions ?? (this.ownedSolidFallback = device.createBuffer({ label: "Quadtree surface solid fallback", size: 8, usage: GPUBufferUsage.STORAGE }));
+    const sparseFallback = this.sparseExecution ? undefined : (this.ownedSparseFallback = device.createBuffer({ label: "Quadtree surface sparse fallback", size: 64, usage: GPUBufferUsage.STORAGE }));
+    const sparseWorklist = this.sparseExecution?.worklist ?? sparseFallback!;
+    const sparseStates = this.sparseExecution?.states ?? sparseFallback!;
     const group = (phiIn: GPUTexture, phiOut: GPUTexture, seedIn: GPUBuffer, seedOut: GPUBuffer, predicted: GPUTexture = this.predicted, reversed: GPUTexture = this.reversed) => device.createBindGroup({ layout: this.cache.layout, entries: [
       { binding: 0, resource: velocity.createView() }, { binding: 1, resource: phiIn.createView() }, { binding: 2, resource: phiOut.createView() },
       { binding: 3, resource: { buffer: seedIn } }, { binding: 4, resource: { buffer: seedOut } }, { binding: 5, resource: { buffer: this.params } },
       { binding: 6, resource: { buffer: this.passBuffer, size: 16 } }, { binding: 7, resource: { buffer: this.reductions } },
       { binding: 8, resource: predicted.createView() }, { binding: 9, resource: reversed.createView() },
-      { binding: 10, resource: reconcileTexture.createView() }, { binding: 11, resource: { buffer: surfaceSolidBuffer } }
+      { binding: 10, resource: reconcileTexture.createView() }, { binding: 11, resource: { buffer: surfaceSolidBuffer } },
+      { binding: 12, resource: { buffer: sparseWorklist } }, { binding: 13, resource: { buffer: sparseStates } }
     ] });
     this.groups = {
       advect: group(this.texture, this.scratch, this.seedsA, this.seedsB),
@@ -486,7 +591,7 @@ export class WebGPUQuadtreeSurfaceState {
     new Float32Array(parameterData, 16, 4).set([this.cell.x, this.cell.y, this.cell.z, dt_s]);
     new Float32Array(parameterData, 32, 4).set([this.correctionSpeed, this.reconcileActive ? 1 : 0, this.debrisCulling ? 1 : 0, this.reconcileFraction]);
     new Float32Array(parameterData, 48, 4).set([this.cell.x, this.cell.y, this.cell.z, this.volumeControlAgreeWeight]);
-    new Float32Array(parameterData, 64, 4).set([this.cell.x * nx, this.cell.y * ny, this.cell.z * nz, 0]);
+    new Float32Array(parameterData, 64, 4).set([this.cell.x * nx, this.cell.y * ny, this.cell.z * nz, this.sparseExecution?.brickSize ?? 0]);
     if (inflow) {
       new Float32Array(parameterData, 80, 4).set([inflow.outletCenter_m.x, inflow.outletCenter_m.y, inflow.outletCenter_m.z, inflow.radius_m]);
       new Float32Array(parameterData, 96, 4).set([inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z, inflow.apertureScale]);
@@ -495,27 +600,71 @@ export class WebGPUQuadtreeSurfaceState {
     this.device.queue.writeBuffer(this.params, 0, parameterData);
     const dispatch = (pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup, offset = 0) => {
       pass.setPipeline(pipeline); pass.setBindGroup(0, group, [offset]);
-      pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
+      if (this.sparseExecution) pass.dispatchWorkgroupsIndirect(this.sparseExecution.worklist, FLUID_BRICK_ACTIVE_SURFACE_DISPATCH_OFFSET_BYTES);
+      else pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
     };
     // Octree selects monotone RK2 semi-Lagrangian transport because applying a
     // BFECC correction directly to signed phi creates new zero crossings when
     // an impact folds a steep band. Other users retain bounded MacCormack for
     // smooth-shape accuracy. Both paths then rebuild the consumed far band.
-    encoder.clearBuffer(this.reductions);
-    const surfacePass = encoder.beginComputePass({ label: "Quadtree surface transport and narrow-band redistance", ...(!this.debrisCulling && finalTimestampWrites ? { timestampWrites: finalTimestampWrites } : {}) });
+    // Word 0 is a persistent global volume total in sparse mode. Active
+    // bricks contribute signed deltas; per-frame interface/mismatch counters
+    // are rebuilt from the resident band.
+    if (this.sparseExecution) encoder.clearBuffer(this.reductions, 4, 12);
+    else encoder.clearBuffer(this.reductions);
+    // Sparse execution crosses read/write ownership for only a subset of the
+    // texture, so dependent stages use separate passes and explicit command
+    // ordering. Keep the established dense tall-cell chain in one pass: its
+    // MacCormack/redistance numerics and Section-8 remeshing baseline were
+    // calibrated against dispatch-order visibility within that pass. Splitting
+    // the dense chain changed the dam-front zero set enough to outrun its band.
+    const timedSurface = !this.debrisCulling ? finalTimestampWrites : undefined;
+    const beginningTimestamp = timedSurface?.beginningOfPassWriteIndex === undefined ? undefined : {
+      querySet: timedSurface.querySet,
+      beginningOfPassWriteIndex: timedSurface.beginningOfPassWriteIndex,
+    };
+    const endingTimestamp = timedSurface?.endOfPassWriteIndex === undefined ? undefined : {
+      querySet: timedSurface.querySet,
+      endOfPassWriteIndex: timedSurface.endOfPassWriteIndex,
+    };
+    const stages: Array<readonly [label: string, pipeline: GPUComputePipeline, group: GPUBindGroup, offset: number]> = [];
+    const appendStage = (label: string, pipeline: GPUComputePipeline, group: GPUBindGroup, offset = 0) => stages.push([label, pipeline, group, offset]);
     if (this.monotoneLevelSetTransport) {
-      dispatch(surfacePass, this.cache.pipelines.advectLevelSet, this.groups.advect);
+      appendStage("Quadtree surface level-set advection", this.cache.pipelines.advectLevelSet, this.groups.advect);
     } else {
-      dispatch(surfacePass, this.cache.pipelines.advectPredict, this.groups.predict);
-      dispatch(surfacePass, this.cache.pipelines.advectReverse, this.groups.reverse);
-      dispatch(surfacePass, this.cache.pipelines.advectCorrect, this.groups.correct);
+      appendStage("Quadtree surface advection predictor", this.cache.pipelines.advectPredict, this.groups.predict);
+      appendStage("Quadtree surface advection reverse", this.cache.pipelines.advectReverse, this.groups.reverse);
+      appendStage("Quadtree surface advection correction", this.cache.pipelines.advectCorrect, this.groups.correct);
     }
-    dispatch(surfacePass, this.cache.pipelines.seedDistance, this.groups.seed);
+    appendStage("Quadtree surface distance seeds", this.cache.pipelines.seedDistance, this.groups.seed);
     this.jumps.forEach((_, index) => {
-      dispatch(surfacePass, this.cache.pipelines.jumpFlood, index % 2 === 0 ? this.groups.jumpAB : this.groups.jumpBA, index * this.passStride);
+      appendStage(
+        `Quadtree surface jump flood ${index}`,
+        this.cache.pipelines.jumpFlood,
+        index % 2 === 0 ? this.groups.jumpAB : this.groups.jumpBA,
+        index * this.passStride,
+      );
     });
-    dispatch(surfacePass, this.cache.pipelines.finalizeDistance, this.jumps.length % 2 === 0 ? this.groups.finalizeA : this.groups.finalizeB);
-    surfacePass.end();
+    appendStage(
+      "Quadtree surface finalize distance",
+      this.cache.pipelines.finalizeDistance,
+      this.jumps.length % 2 === 0 ? this.groups.finalizeA : this.groups.finalizeB,
+    );
+    if (this.sparseExecution) {
+      stages.forEach(([label, pipeline, group, offset], index) => {
+        const timestampWrites = index === 0 ? beginningTimestamp : index === stages.length - 1 ? endingTimestamp : undefined;
+        const pass = encoder.beginComputePass({ label, ...(timestampWrites ? { timestampWrites } : {}) });
+        dispatch(pass, pipeline, group, offset);
+        pass.end();
+      });
+    } else {
+      const pass = encoder.beginComputePass({
+        label: "Quadtree dense surface transport and narrow-band redistance",
+        ...(timedSurface ? { timestampWrites: timedSurface } : {}),
+      });
+      for (const [, pipeline, group, offset] of stages) dispatch(pass, pipeline, group, offset);
+      pass.end();
+    }
     if (this.debrisCulling) {
       const cullPass = encoder.beginComputePass({ label: "Quadtree surface debris cull" });
       dispatch(cullPass, this.cache.pipelines.cullDebris, this.groups.cull); cullPass.end();
@@ -529,8 +678,15 @@ export class WebGPUQuadtreeSurfaceState {
     if (this.gpuVolumeCorrection) {
       const correctionPass = encoder.beginComputePass({ label: "GPU level-set volume correction" });
       dispatch(correctionPass, this.cache.pipelines.correctLevelSetVolume, this.groups.advect);
+      correctionPass.setPipeline(this.cache.pipelines.commitLevelSetVolumeCorrection);
+      correctionPass.setBindGroup(0, this.groups.advect, [0]);
+      correctionPass.dispatchWorkgroups(1);
       correctionPass.end();
-      encoder.copyTextureToTexture({ texture: this.scratch }, { texture: this.texture }, [nx, ny, nz]);
+      if (this.sparseExecution) {
+        const copyPass = encoder.beginComputePass({ label: "Commit sparse level-set correction" });
+        dispatch(copyPass, this.cache.pipelines.copyLevelSet, this.groups.seed);
+        copyPass.end();
+      } else encoder.copyTextureToTexture({ texture: this.scratch }, { texture: this.texture }, [nx, ny, nz]);
     }
   }
 
@@ -571,7 +727,7 @@ export class WebGPUQuadtreeSurfaceState {
   addReferenceVolumeCells(cells: number) { if (Number.isFinite(cells) && cells > 0) this.referenceVolumeCells += cells; }
 
   destroy() {
-    this.texture.destroy(); this.scratch.destroy(); this.predicted.destroy(); this.reversed.destroy(); this.seedsA.destroy(); this.seedsB.destroy(); this.params.destroy(); this.passBuffer.destroy(); this.reductions.destroy(); this.ownedReconcileFallback?.destroy(); this.ownedSolidFallback?.destroy();
+    this.texture.destroy(); this.scratch.destroy(); this.predicted.destroy(); this.reversed.destroy(); this.seedsA.destroy(); this.seedsB.destroy(); this.params.destroy(); this.passBuffer.destroy(); this.reductions.destroy(); this.ownedReconcileFallback?.destroy(); this.ownedSolidFallback?.destroy(); this.ownedSparseFallback?.destroy();
   }
 }
 

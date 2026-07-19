@@ -72,6 +72,13 @@ test("voxel debug ABI and shaders retain GPU material color and indirect instanc
   assert.match(voxelDebugRenderShader, /let material = materials\[/);
   assert.match(voxelDebugRenderShader, /material\.baseColor\.a <= 0\.001\) \{ discard; \}/);
   assert.match(voxelDebugRenderShader, /shadeUnifiedSurface\(closure, lighting\)/);
+  const rawFragment = voxelDebugRenderShader.slice(
+    voxelDebugRenderShader.indexOf("fn rawFragment"),
+    voxelDebugRenderShader.indexOf("fn glassPaneFragment"),
+  );
+  assert.match(rawFragment, /let lambert = 0\.28 \+ 0\.72 \* max\(dot\(normal, normalize\(view\.lightDirection\.xyz\)\), 0\.0\);/,
+    "raw occupancy keeps a bounded material-colored visibility floor instead of collapsing to NaN/black");
+  assert.doesNotMatch(rawFragment, /shadeMaterial\(/, "raw occupancy never enters the degenerate PBR half-vector path");
   assert.match(voxelDebugRenderShader, /input\.level & 1u/);
   assert.match(voxelDebugRenderShader, /array<vec3f, 24>/);
   assert.doesNotMatch(voxelDebugComputeShader + voxelDebugRenderShader, /textureLoad|mapAsync|readBuffer/);
@@ -91,6 +98,7 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
 
   const destroyed: string[] = [];
   const writes: unknown[] = [];
+  const pipelineDescriptors: GPURenderPipelineDescriptor[] = [];
   const renderDescriptors: GPURenderPassDescriptor[] = [];
   let indirectDraws = 0;
   const paneDraws: unknown[][] = [];
@@ -100,7 +108,7 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
     createBindGroupLayout: () => ({}),
     createPipelineLayout: () => ({}),
     createComputePipelineAsync: async () => pipeline,
-    createRenderPipelineAsync: async () => pipeline,
+    createRenderPipelineAsync: async (descriptor: GPURenderPipelineDescriptor) => { pipelineDescriptors.push(descriptor); return pipeline; },
     createBuffer: ({ label }: GPUBufferDescriptor) => ({ destroy: () => destroyed.push(label ?? "unlabelled") }),
     createBindGroup: () => ({}),
     queue: { writeBuffer: (...args: unknown[]) => writes.push(args) }
@@ -116,6 +124,9 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
   const binding = { buffer: external };
   const renderer = new SparseVoxelDebugRenderer(device, { colorFormat: "rgba8unorm" });
   await renderer.initialize();
+  const rawPipeline = pipelineDescriptors.find(({ label }) => label === "Raw sparse voxel cubes");
+  assert.equal(rawPipeline?.primitive?.cullMode, "none",
+    "raw cubes remain two-sided because backend framebuffer orientation reverses their standalone clip-space winding");
   renderer.setSource({
     voxelRecords: binding, voxelCount: binding, brickRecords: binding, brickCount: binding, materials: binding,
     voxelCapacity: 80, brickCapacity: 20, materialCount: 2, revision: 1
@@ -139,6 +150,9 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
   assert.deepEqual(firstColorAttachment?.clearValue, { r: 0.008, g: 0.012, b: 0.018, a: 1 });
   assert.equal(writes.length, 4, "each voxel view uploads only view and declared capacity");
 
+  renderer.setSource(undefined);
+  assert.ok(destroyed.includes("Sparse voxel debug instances (80)"), "detaching inspection releases the capacity-sized voxel arena");
+  assert.ok(destroyed.includes("Sparse voxel debug overlay instances (20)"), "detaching inspection releases the overlay arena");
   renderer.destroy();
   renderer.destroy();
   assert.equal(externalDestroyCount, 0, "source buffers remain owned by the sparse representation");
@@ -174,6 +188,67 @@ function packDebugRecord(origin: readonly number[], extent: readonly number[], m
   new Uint32Array(record, 32, 4).set([material, flags, level, 0xffff]);
   return new Uint8Array(record);
 }
+
+test("a known active raw voxel produces a material-colored filled region", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU render checks" }, async () => {
+  const { device, validationErrors } = await createDevice();
+  try {
+    const storage = (data: Uint8Array | Uint32Array) => {
+      const buffer = device.createBuffer({ size: Math.max(4, data.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      device.queue.writeBuffer(buffer, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
+      return buffer;
+    };
+    const voxelRecords = storage(packDebugRecord([-0.45, -0.45, 0.1], [0.9, 0.9, 0.4], 2, 1, 0));
+    const voxelCount = storage(new Uint32Array([1]));
+    const brickRecords = storage(new Uint8Array(SPARSE_VOXEL_DEBUG_RECORD_STRIDE));
+    const brickCount = storage(new Uint32Array([0]));
+    const packedMaterials = new ArrayBuffer(3 * SPARSE_VOXEL_DEBUG_MATERIAL_STRIDE);
+    // Material 1 remains transparent so the deliberately off-screen tank
+    // cannot contribute pixels. Material 2 is the known occupied voxel.
+    new Float32Array(packedMaterials, 2 * SPARSE_VOXEL_DEBUG_MATERIAL_STRIDE, 8).set([
+      0.08, 0.82, 0.24, 1,
+      0.01, 0.08, 0.02, 0.5,
+    ]);
+    const materials = storage(new Uint8Array(packedMaterials));
+    const renderer = new SparseVoxelDebugRenderer(device, { colorFormat: "rgba8unorm" });
+    await renderer.initialize();
+    renderer.setSource({
+      voxelRecords: { buffer: voxelRecords }, voxelCount: { buffer: voxelCount },
+      brickRecords: { buffer: brickRecords }, brickCount: { buffer: brickCount },
+      materials: { buffer: materials }, voxelCapacity: 1, brickCapacity: 1, materialCount: 3, revision: 1
+    });
+    const size = 64;
+    const color = device.createTexture({ size: [size, size], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    const depth = device.createTexture({ size: [size, size], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    const readback = device.createBuffer({ size: 256 * size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = device.createCommandEncoder();
+    assert.equal(renderer.encode(encoder, {
+      mode: "raw-voxels", colorTarget: color.createView(), depthTarget: depth.createView(),
+      viewProjection: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
+      cameraPosition: [0, 0, 4],
+      containerBounds: { min: [10, 10, 10], max: [11, 11, 11] }, containerClosedTop: false,
+      colorLoadOp: "clear", depthLoadOp: "clear"
+    }), true);
+    encoder.copyTextureToBuffer({ texture: color }, { buffer: readback, bytesPerRow: 256, rowsPerImage: size }, [size, size, 1]);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const pixels = new Uint8Array(readback.getMappedRange());
+    let greenInteriorPixels = 0;
+    for (let y = 20; y < 44; y += 1) for (let x = 20; x < 44; x += 1) {
+      const base = y * 256 + x * 4;
+      const [r, g, b] = pixels.subarray(base, base + 3);
+      if (g > 35 && g > r * 2 && g > b * 2) greenInteriorPixels += 1;
+    }
+    assert.ok(greenInteriorPixels > 400,
+      `expected a filled material-colored cube interior, received ${greenInteriorPixels} green pixels`);
+    readback.unmap();
+    assert.deepEqual(validationErrors, []);
+    renderer.destroy();
+    for (const resource of [voxelRecords, voxelCount, brickRecords, brickCount, materials, readback]) resource.destroy();
+    color.destroy(); depth.destroy();
+  } finally {
+    device.destroy();
+  }
+});
 
 test("resident fluid bricks render outlines while environment bricks stay outline-free in raw mode", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU render checks" }, async () => {
   const { device, validationErrors } = await createDevice();

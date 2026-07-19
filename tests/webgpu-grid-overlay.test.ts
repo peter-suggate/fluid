@@ -89,7 +89,18 @@ test("optical-layer mode distinguishes retained cubes from the merged tall inter
 });
 
 test("solver option switches detach the overlay before retiring GPU textures", () => {
-  assert.match(rendererSource, /this\.rebuildBindGroup\(\);[\s\S]{0,180}this\.retireGPUFluid\(previous\);/);
+  const begin = rendererSource.indexOf("private beginGPUFluidInitialization");
+  const end = rendererSource.indexOf("private currentGPUFluid", begin);
+  const replacement = rendererSource.slice(begin, end);
+  const fallbackRebind = replacement.indexOf("this.updateRenderSources()");
+  const retire = replacement.indexOf("this.retireGPUFluid(previous)");
+  assert.ok(begin >= 0 && end > begin);
+  assert.ok(fallbackRebind >= 0 && retire > fallbackRebind,
+    "fallback presentation bind groups must be rebuilt before old solver textures retire");
+  const debugDetach = replacement.indexOf("this.voxelDebugPipeline?.setSource(undefined)");
+  const svoDetach = replacement.indexOf("this.svoDryScenePipeline?.setSource(undefined, undefined)");
+  assert.ok(debugDetach >= 0 && debugDetach < retire);
+  assert.ok(svoDetach >= 0 && svoDetach < retire);
 });
 
 test("grid overlay suppresses dense backing-grid lines inside adaptive cells", () => {

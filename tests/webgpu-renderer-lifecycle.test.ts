@@ -37,7 +37,7 @@ test("GPU submission advances only once toward prepared simulation debt", () => 
 test("GPU queue stays dense around presentation without admitting a physics burst", () => {
   assert.equal(presentationPhysicsQueueDepth(undefined, 1), 1);
   assert.equal(presentationPhysicsQueueDepth(35, 1), 1);
-  assert.equal(presentationPhysicsQueueDepth(3.4, 1), 4);
+  assert.equal(presentationPhysicsQueueDepth(3.4, 1), 5, "one whole advance may overshoot the remaining budget");
   assert.equal(canQueuePreparedGPUAdvance(0, 4), true);
   assert.equal(canQueuePreparedGPUAdvance(3, 4), true);
   assert.equal(canQueuePreparedGPUAdvance(4, 4), false);

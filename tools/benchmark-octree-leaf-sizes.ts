@@ -28,15 +28,20 @@ assert.ok(device.features.has("timestamp-query"), "leaf-size benchmark requires 
 const validationErrors: string[] = [];
 device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
 
+/** Widens the calm tank laterally (default 1) so the stable deep interior
+ * spans many topology tiles, the regime vast-ocean scaling cares about. */
+const tankScale = Number(process.env.FLUID_BENCH_TANK_SCALE ?? 1);
+assert.ok(Number.isInteger(tankScale) && tankScale >= 1 && tankScale <= 8);
+
 function calmDeepScene(): SceneDescription {
   const scene = cloneScene(defaultScene);
   scene.sceneId = "benchmark-octree-leaf-sizes";
   scene.rigidBodies = [];
   scene.container = {
     ...scene.container,
-    width_m: 1.6,
+    width_m: 1.6 * tankScale,
     height_m: 2.4,
-    depth_m: 1.6,
+    depth_m: 1.6 * tankScale,
     fillFraction: 0.75,
     top: "open",
     fluidWallMode: "no-slip",
@@ -44,7 +49,7 @@ function calmDeepScene(): SceneDescription {
   scene.fluid.initialCondition = "tank-fill";
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
-  scene.numerics.surfaceColumnsOverride = 4096;
+  scene.numerics.surfaceColumnsOverride = 4096 * tankScale * tankScale;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.005;
   return scene;
 }
@@ -78,8 +83,18 @@ const median = (values: number[]) => {
 };
 const rounded = (value: number) => Number(value.toFixed(3));
 
+// Optional in-process A/B: "|"-separated arms of ";"-separated KEY=VALUE env
+// assignments, applied round-robin ahead of each solver build. Interleaving
+// arms inside one process keeps GPU clock/thermal state comparable.
+const abArms = (process.env.FLUID_AB_ENV ?? "").split("|").filter(Boolean);
+
 const results: Array<Record<string, unknown>> = [];
-for (const maximumLeafSize of leafSizes) {
+for (const [configIndex, maximumLeafSize] of leafSizes.entries()) {
+  const arm = abArms.length > 0 ? abArms[configIndex % abArms.length] : undefined;
+  for (const assignment of arm?.split(";") ?? []) {
+    const [key, value] = assignment.split("=");
+    process.env[key] = value;
+  }
   const scene = calmDeepScene();
   const values = {
     ...octreeMethod.presetFor("balanced"),
@@ -87,9 +102,10 @@ for (const maximumLeafSize of leafSizes) {
     secondaryParticles: "off",
   };
   const solver = octreeMethod.createSolver!(device, scene, "balanced", values) as GPUSolverInstance;
-  assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], [64, 96, 64]);
+  assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], [64 * tankScale, 96, 64 * tankScale]);
   const samples = Object.fromEntries(timingFields.map((field) => [field, [] as number[]])) as Record<typeof timingFields[number], number[]>;
   const rowSamples: number[] = [];
+  const iterationSamples: number[] = [];
   const wallSamples: number[] = [];
   const totalSteps = warmupSteps + sampleSteps;
   for (let step = 1; step <= totalSteps; step += 1) {
@@ -102,13 +118,16 @@ for (const maximumLeafSize of leafSizes) {
     assert.ok(info.gpuTimings, "timestamp query results were not published");
     for (const field of timingFields) samples[field].push(info.gpuTimings[field]);
     rowSamples.push(info.quadtreeLiquidDofCount ?? info.activeSampleCount ?? 0);
+    iterationSamples.push(info.quadtreePressureIterationsUsed ?? 0);
     wallSamples.push(wall_ms);
   }
   const medians = Object.fromEntries(timingFields.map((field) => [field, rounded(median(samples[field]))]));
   results.push({
+    ...(arm !== undefined ? { arm } : {}),
     maximumLeafSize,
     grid: [solver.info.nx, solver.info.ny, solver.info.nz],
     liquidPressureRows: Math.round(median(rowSamples)),
+    solvePasses: Math.round(median(iterationSamples)),
     wall_ms: rounded(median(wallSamples)),
     ...medians,
   });
