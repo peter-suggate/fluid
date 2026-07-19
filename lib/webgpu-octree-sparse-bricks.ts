@@ -1,5 +1,10 @@
 import type { SceneDescription } from "./model";
 import {
+  cachedSvoStaticPublication,
+  hashSvoStaticPublication,
+  internSvoStaticPublication,
+} from "./svo-static-publication-cache";
+import {
   buildSvoEnvironmentLighting,
   SVO_ENVIRONMENT_LIGHTING_RECORD_STRIDE_BYTES,
   type SvoEnvironmentLightingRecord,
@@ -14,6 +19,7 @@ import {
   buildDefaultSvoMaterialRecords,
   packSvoMaterialTable,
   SVO_MATERIAL_RECORD_STRIDE_BYTES,
+  svoMaterialFunctionIdForEnvironmentProxy,
   svoMaterialFromEnvironmentProxyMaterial,
 } from "./svo-material-abi";
 import {
@@ -113,7 +119,7 @@ export function planOctreeBrickCoordinates(dimensions: readonly [number, number,
 }
 
 export const ENVIRONMENT_VOXEL_MATERIAL_BASE = 32;
-export const OCTREE_SVO_PBR_MATERIAL_REVISION = 1;
+export const OCTREE_SVO_PBR_MATERIAL_REVISION = 2;
 export const OCTREE_SVO_LIGHT_REVISION = 1;
 export const OCTREE_SVO_ENVIRONMENT_LIGHTING_REVISION = 1;
 
@@ -122,7 +128,11 @@ export interface OctreeSvoPbrMaterialPublicationData {
   count: number;
   strideBytes: number;
   revision: number;
+  staticRevision: string;
+  cacheKey: string;
 }
+
+const octreeSvoPbrMaterialCache = new Map<string, OctreeSvoPbrMaterialPublicationData>();
 
 /** Dense default table used by the producer and CPU ABI/lifecycle tests. */
 export function buildOctreeSvoPbrMaterialPublication(
@@ -132,6 +142,13 @@ export function buildOctreeSvoPbrMaterialPublication(
   if (!Number.isSafeInteger(revision) || revision < 1 || revision > 0xffff_ffff) {
     throw new RangeError("SVO PBR material publication revision must be a positive uint32");
   }
+  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+    revision,
+    environmentPrimitives: environmentPrimitives.map(({ key, ownerIndex, group, tags, material }) => ({ key, ownerIndex, group, tags, material })),
+  }));
+  const cacheKey = `octree-svo-pbr-material-v1:${staticRevision}`;
+  const cached = cachedSvoStaticPublication(octreeSvoPbrMaterialCache, cacheKey);
+  if (cached) return cached;
   const records = [
     ...buildDefaultSvoMaterialRecords(revision),
     ...environmentPrimitives.map((primitive) => {
@@ -140,16 +157,23 @@ export function buildOctreeSvoPbrMaterialPublication(
       }
       const materialId = ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex;
       if (materialId > 0xffff) throw new RangeError(`Environment material ID for ${primitive.key} does not fit uint16`);
-      return svoMaterialFromEnvironmentProxyMaterial(materialId, primitive.material, revision);
+      return svoMaterialFromEnvironmentProxyMaterial(
+        materialId,
+        primitive.material,
+        revision,
+        svoMaterialFunctionIdForEnvironmentProxy(primitive),
+      );
     }),
   ];
   const packedRecords = packSvoMaterialTable(records);
-  return {
+  return internSvoStaticPublication(octreeSvoPbrMaterialCache, cacheKey, {
     packedRecords,
     count: packedRecords.byteLength / SVO_MATERIAL_RECORD_STRIDE_BYTES,
     strideBytes: SVO_MATERIAL_RECORD_STRIDE_BYTES,
     revision,
-  };
+    staticRevision,
+    cacheKey,
+  });
 }
 
 export interface OctreeSvoLightPublicationData {
@@ -159,7 +183,11 @@ export interface OctreeSvoLightPublicationData {
   strideBytes: number;
   revision: number;
   omittedFixtureKeys: readonly string[];
+  staticRevision: string;
+  cacheKey: string;
 }
+
+const octreeSvoLightCache = new Map<string, OctreeSvoLightPublicationData>();
 
 /** Build the selected scene/environment's deterministic bounded light table. */
 export function buildOctreeSvoLightPublication(
@@ -171,14 +199,17 @@ export function buildOctreeSvoLightPublication(
     revision,
     maximumRecords: options.maximumRecords ?? SVO_LIGHT_MAXIMUM_RECORDS,
   });
-  return {
+  const cacheKey = `octree-${lights.cacheKey}`;
+  return internSvoStaticPublication(octreeSvoLightCache, cacheKey, {
     records: lights.records,
     packedRecords: lights.packedRecords,
     count: lights.records.length,
     strideBytes: SVO_LIGHT_RECORD_STRIDE_BYTES,
     revision: lights.revision,
     omittedFixtureKeys: lights.omittedFixtureKeys,
-  };
+    staticRevision: lights.staticRevision,
+    cacheKey,
+  });
 }
 
 export interface OctreeSvoEnvironmentLightingPublicationData {

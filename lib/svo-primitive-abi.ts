@@ -840,6 +840,10 @@ const SVO_FEATURE_CYLINDER_SIDE: u32 = 4u;
 const SVO_FEATURE_CYLINDER_CAP: u32 = 5u;
 const SVO_FEATURE_TERRAIN: u32 = 6u;
 const SVO_SAMPLE_NORMAL_VALID: u32 = 1u;
+const SVO_PRIMITIVE_RAY_MISS: u32 = 0u;
+const SVO_PRIMITIVE_RAY_HIT: u32 = 1u;
+const SVO_PRIMITIVE_RAY_INVALID: u32 = 2u;
+const SVO_PRIMITIVE_RAY_INFINITY: f32 = 3.402823e38;
 
 struct SvoPrimitiveRecord {
   centerKind: vec4u,
@@ -854,6 +858,20 @@ struct SvoPrimitiveSample {
   flags: u32,
   _padding: u32,
   normal: vec4f,
+}
+
+struct SvoPrimitiveRayResult {
+  t_m: f32,
+  featureId: u32,
+  status: u32,
+  _padding: u32,
+  normal: vec4f,
+}
+
+struct SvoPrimitiveQuadraticRoots {
+  values: vec2f,
+  count: u32,
+  _padding: u32,
 }
 
 fn svoPrimitiveCenter_m(record: SvoPrimitiveRecord) -> vec3f { return bitcast<vec3f>(record.centerKind.xyz); }
@@ -872,6 +890,180 @@ fn svoQuaternionRotate(q: vec4f, point: vec3f) -> vec3f {
 fn svoPrimitiveLocalPoint(record: SvoPrimitiveRecord, worldPoint_m: vec3f) -> vec3f {
   let q = record.orientation;
   return svoQuaternionRotate(vec4f(-q.xyz, q.w), worldPoint_m - svoPrimitiveCenter_m(record));
+}
+
+fn svoPrimitiveNoRayHit(status: u32) -> SvoPrimitiveRayResult {
+  return SvoPrimitiveRayResult(SVO_PRIMITIVE_RAY_INFINITY, SVO_FEATURE_SMOOTH, status, 0u, vec4f(0.0));
+}
+
+// Sorted roots of a*t^2 + 2*b*t + c. The stable q form retains near roots.
+fn svoPrimitiveQuadraticRoots(a: f32, b: f32, c: f32) -> SvoPrimitiveQuadraticRoots {
+  if (!(a > 1e-8)) { return SvoPrimitiveQuadraticRoots(vec2f(0.0), 0u, 0u); }
+  let discriminant = b * b - a * c;
+  let tolerance = 8e-6 * max(1.0, max(abs(b * b), abs(a * c)));
+  if (discriminant < -tolerance) { return SvoPrimitiveQuadraticRoots(vec2f(0.0), 0u, 0u); }
+  let root = sqrt(max(0.0, discriminant));
+  if (root == 0.0) { return SvoPrimitiveQuadraticRoots(vec2f(-b / a, 0.0), 1u, 0u); }
+  let q = -b - select(-root, root, b >= 0.0);
+  let first = q / a;
+  let second = c / q;
+  return SvoPrimitiveQuadraticRoots(vec2f(min(first, second), max(first, second)), 2u, 0u);
+}
+
+fn svoPrimitiveRayInRange(t_m: f32, tMin_m: f32, tMax_m: f32) -> bool {
+  let tolerance_m = 8e-6 * max(1.0, max(abs(t_m), max(abs(tMin_m), abs(tMax_m))));
+  return t_m >= tMin_m - tolerance_m && t_m <= tMax_m + tolerance_m;
+}
+
+/** Exact bounded analytic hit for every finite primitive kind in the shared ABI. */
+fn svoIntersectPrimitiveExact(
+  record: SvoPrimitiveRecord,
+  worldOrigin_m: vec3f,
+  worldDirectionIn: vec3f,
+  tMin_m: f32,
+  tMax_m: f32,
+) -> SvoPrimitiveRayResult {
+  let directionLength = length(worldDirectionIn);
+  let orientationLength = length(record.orientation);
+  if (!(directionLength > 1e-8) || !(orientationLength > 1e-8) || !(tMin_m >= 0.0) || !(tMax_m >= tMin_m)) {
+    return svoPrimitiveNoRayHit(SVO_PRIMITIVE_RAY_INVALID);
+  }
+  let worldDirection = worldDirectionIn / directionLength;
+  let q = record.orientation / orientationLength;
+  let inverse = vec4f(-q.xyz, q.w);
+  let localOrigin = svoQuaternionRotate(inverse, worldOrigin_m - svoPrimitiveCenter_m(record));
+  let localDirection = svoQuaternionRotate(inverse, worldDirection);
+  let dimensions_m = svoPrimitiveDimensions_m(record);
+  let kind = svoPrimitiveKind(record);
+  let finiteKind = kind >= SVO_KIND_SPHERE && kind <= SVO_KIND_ELLIPSOID;
+  let dimensionsValid = select(
+    dimensions_m.x > 0.0,
+    all(dimensions_m > vec3f(0.0)),
+    kind == SVO_KIND_BOX || kind == SVO_KIND_ELLIPSOID,
+  ) && select(true, dimensions_m.y >= 0.0, kind == SVO_KIND_CAPSULE)
+    && select(true, dimensions_m.y > 0.0, kind == SVO_KIND_CYLINDER);
+  if (!finiteKind || !dimensionsValid) { return svoPrimitiveNoRayHit(SVO_PRIMITIVE_RAY_INVALID); }
+
+  var bestT_m = SVO_PRIMITIVE_RAY_INFINITY;
+  var bestNormal = vec3f(0.0);
+  var bestFeature = SVO_FEATURE_SMOOTH;
+
+  if (kind == SVO_KIND_SPHERE) {
+    let roots = svoPrimitiveQuadraticRoots(
+      dot(localDirection, localDirection),
+      dot(localOrigin, localDirection),
+      dot(localOrigin, localOrigin) - dimensions_m.x * dimensions_m.x,
+    );
+    for (var rootIndex = 0u; rootIndex < 2u; rootIndex += 1u) {
+      if (rootIndex >= roots.count) { break; }
+      let candidate = roots.values[rootIndex];
+      if (svoPrimitiveRayInRange(candidate, tMin_m, tMax_m)) {
+        bestT_m = max(tMin_m, candidate);
+        bestNormal = normalize(localOrigin + localDirection * bestT_m);
+        break;
+      }
+    }
+  } else if (kind == SVO_KIND_ELLIPSOID) {
+    let scaledOrigin = localOrigin / dimensions_m;
+    let scaledDirection = localDirection / dimensions_m;
+    let roots = svoPrimitiveQuadraticRoots(
+      dot(scaledDirection, scaledDirection),
+      dot(scaledOrigin, scaledDirection),
+      dot(scaledOrigin, scaledOrigin) - 1.0,
+    );
+    for (var rootIndex = 0u; rootIndex < 2u; rootIndex += 1u) {
+      if (rootIndex >= roots.count) { break; }
+      let candidate = roots.values[rootIndex];
+      if (svoPrimitiveRayInRange(candidate, tMin_m, tMax_m)) {
+        bestT_m = max(tMin_m, candidate);
+        let point_m = localOrigin + localDirection * bestT_m;
+        bestNormal = normalize(point_m / (dimensions_m * dimensions_m));
+        break;
+      }
+    }
+  } else if (kind == SVO_KIND_BOX) {
+    var enter = -SVO_PRIMITIVE_RAY_INFINITY;
+    var exit = SVO_PRIMITIVE_RAY_INFINITY;
+    var enterAxis = 0u;
+    var exitAxis = 0u;
+    var valid = true;
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+      if (abs(localDirection[axis]) <= 1e-8) {
+        if (localOrigin[axis] < -dimensions_m[axis] || localOrigin[axis] > dimensions_m[axis]) { valid = false; }
+      } else {
+        let first = (-dimensions_m[axis] - localOrigin[axis]) / localDirection[axis];
+        let second = (dimensions_m[axis] - localOrigin[axis]) / localDirection[axis];
+        let nearT = min(first, second);
+        let farT = max(first, second);
+        if (nearT > enter) { enter = nearT; enterAxis = axis; }
+        if (farT < exit) { exit = farT; exitAxis = axis; }
+        if (exit < enter) { valid = false; }
+      }
+    }
+    let useEnter = svoPrimitiveRayInRange(enter, tMin_m, tMax_m);
+    let candidate = select(exit, enter, useEnter);
+    let featureAxis = select(exitAxis, enterAxis, useEnter);
+    if (valid && svoPrimitiveRayInRange(candidate, tMin_m, tMax_m)) {
+      bestT_m = max(tMin_m, candidate);
+      let point_m = localOrigin + localDirection * bestT_m;
+      bestNormal[featureAxis] = select(-1.0, 1.0, point_m[featureAxis] >= 0.0);
+      bestFeature = SVO_FEATURE_BOX_X + featureAxis;
+    }
+  } else {
+    let radialRoots = svoPrimitiveQuadraticRoots(
+      dot(localDirection.xz, localDirection.xz),
+      dot(localOrigin.xz, localDirection.xz),
+      dot(localOrigin.xz, localOrigin.xz) - dimensions_m.x * dimensions_m.x,
+    );
+    for (var rootIndex = 0u; rootIndex < 2u; rootIndex += 1u) {
+      if (rootIndex >= radialRoots.count) { break; }
+      let candidate = radialRoots.values[rootIndex];
+      let y_m = localOrigin.y + localDirection.y * candidate;
+      if (abs(y_m) <= dimensions_m.y && svoPrimitiveRayInRange(candidate, tMin_m, tMax_m) && candidate < bestT_m) {
+        bestT_m = max(tMin_m, candidate);
+        let point_m = localOrigin + localDirection * bestT_m;
+        bestNormal = normalize(vec3f(point_m.x, 0.0, point_m.z));
+        bestFeature = select(SVO_FEATURE_CYLINDER_SIDE, SVO_FEATURE_SMOOTH, kind == SVO_KIND_CAPSULE);
+      }
+    }
+    if (kind == SVO_KIND_CAPSULE) {
+      for (var capIndex = 0u; capIndex < 2u; capIndex += 1u) {
+        let capSign = select(-1.0, 1.0, capIndex != 0u);
+        let capCenter = vec3f(0.0, capSign * dimensions_m.y, 0.0);
+        let offset = localOrigin - capCenter;
+        let roots = svoPrimitiveQuadraticRoots(
+          dot(localDirection, localDirection), dot(offset, localDirection),
+          dot(offset, offset) - dimensions_m.x * dimensions_m.x,
+        );
+        for (var rootIndex = 0u; rootIndex < 2u; rootIndex += 1u) {
+          if (rootIndex >= roots.count) { break; }
+          let candidate = roots.values[rootIndex];
+          let normalPoint = offset + localDirection * candidate;
+          if (capSign * normalPoint.y >= 0.0 && svoPrimitiveRayInRange(candidate, tMin_m, tMax_m) && candidate < bestT_m) {
+            bestT_m = max(tMin_m, candidate);
+            bestNormal = normalize(offset + localDirection * bestT_m);
+          }
+        }
+      }
+    } else if (abs(localDirection.y) > 1e-8) {
+      for (var capIndex = 0u; capIndex < 2u; capIndex += 1u) {
+        let capSign = select(-1.0, 1.0, capIndex != 0u);
+        let candidate = (capSign * dimensions_m.y - localOrigin.y) / localDirection.y;
+        let point_m = localOrigin + localDirection * candidate;
+        let tieTolerance_m = 8e-6 * max(1.0, abs(candidate));
+        if (dot(point_m.xz, point_m.xz) <= dimensions_m.x * dimensions_m.x * 1.000008
+          && svoPrimitiveRayInRange(candidate, tMin_m, tMax_m) && candidate <= bestT_m + tieTolerance_m) {
+          bestT_m = max(tMin_m, candidate);
+          bestNormal = vec3f(0.0, capSign, 0.0);
+          bestFeature = SVO_FEATURE_CYLINDER_CAP;
+        }
+      }
+    }
+  }
+
+  if (!(bestT_m < SVO_PRIMITIVE_RAY_INFINITY)) { return svoPrimitiveNoRayHit(SVO_PRIMITIVE_RAY_MISS); }
+  let worldNormal = normalize(svoQuaternionRotate(q, bestNormal));
+  return SvoPrimitiveRayResult(bestT_m, bestFeature, SVO_PRIMITIVE_RAY_HIT, 0u, vec4f(worldNormal, 0.0));
 }
 
 fn svoBoxDistance_m(point: vec3f, halfExtents_m: vec3f) -> f32 {

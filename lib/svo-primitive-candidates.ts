@@ -204,6 +204,10 @@ function validateCandidatePublication(publication: SvoPrimitiveCandidatePublicat
     } else stack.push(node.leftOrPrimitiveIndex, node.rightChildIndex);
   }
   if (visited.size !== publication.nodes.length) throw new Error("SVO primitive candidate publication contains unreachable nodes");
+  const canonicalPackedRecords = packNodes(publication.nodes);
+  if (!canonicalPackedRecords.every((word, index) => word === publication.packedRecords[index])) {
+    throw new Error("SVO primitive candidate packed records do not match their validated nodes");
+  }
 }
 
 /** Append candidate records after primitives so no additional GPU binding is required. */

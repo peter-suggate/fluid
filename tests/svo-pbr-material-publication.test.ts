@@ -43,11 +43,16 @@ test("PBR publication is optional and leaves the legacy debug source ABI intact"
 
 test("producer table is a dense 96-byte direct-index publication with explicit revision", () => {
   const publication = buildOctreeSvoPbrMaterialPublication(17);
+  const repeated = buildOctreeSvoPbrMaterialPublication(17);
   const maximumId = Math.max(...VOXEL_MATERIALS.map(({ id }) => id));
   assert.equal(publication.strideBytes, SVO_MATERIAL_RECORD_STRIDE_BYTES);
   assert.equal(publication.count, maximumId + 1);
   assert.equal(publication.packedRecords.byteLength, publication.count * publication.strideBytes);
   assert.equal(publication.revision, 17);
+  assert.strictEqual(repeated, publication);
+  assert.strictEqual(repeated.packedRecords, publication.packedRecords);
+  assert.equal(repeated.cacheKey, publication.cacheKey);
+  assert.notEqual(buildOctreeSvoPbrMaterialPublication(18).cacheKey, publication.cacheKey);
   for (const material of VOXEL_MATERIALS) {
     const record = unpackSvoMaterialRecord(publication.packedRecords, material.id);
     assert.equal(record.materialId, material.id, `${material.key} remains its direct table index`);
@@ -96,7 +101,7 @@ test("every shipped environment primitive publishes a finite non-black opaque PB
 
 test("octree world owns, accounts, publishes, and destroys the PBR buffer once", () => {
   const source = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
-  assert.equal(OCTREE_SVO_PBR_MATERIAL_REVISION, 1);
+  assert.equal(OCTREE_SVO_PBR_MATERIAL_REVISION, 2);
   assert.match(source, /private readonly pbrMaterialBuffer: GPUBuffer/);
   assert.match(source, /this\.pbrMaterialBuffer = storageBuffer\(/);
   assert.match(source, /buildOctreeSvoPbrMaterialPublication\([\s\S]*environmentPrimitives/,

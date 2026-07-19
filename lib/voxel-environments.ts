@@ -214,7 +214,7 @@ function buildCourtyard(b: ProxyBuilder, s: number): void {
   b.ellipsoid("citrus/canopy-main", "leaf-foliage", V(1.12 * s, 1.12 * s, -.68 * s), V(.48 * s, .42 * s, .40 * s), citrus, 0, ["tree", "plant"]);
   b.ellipsoid("citrus/canopy-left", "leaf-foliage", V(.86 * s, 1.20 * s, -.70 * s), V(.27 * s, .27 * s, .27 * s), cmul(citrus, .82), 0, ["tree", "plant"]);
   b.ellipsoid("citrus/canopy-right", "leaf-foliage", V(1.35 * s, 1.26 * s, -.65 * s), V(.25 * s, .25 * s, .25 * s), cmul(citrus, .9), 0, ["tree", "plant"]);
-  for (const i of [-1, 1]) b.ellipsoid(`citrus/fruit-${i < 0 ? "left" : "right"}`, "fruit", V((1.12 + .16 * i) * s, 1.12 * s, -.42 * s), V(.045 * s, .045 * s, .045 * s), C(.92, .46, .06), .08, ["fruit", "plant"]);
+  for (const i of [-1, 1]) b.ellipsoid(`citrus/fruit-${i < 0 ? "left" : "right"}`, "fruit", V((1.12 + .16 * i) * s, 1.12 * s, -.42 * s), V(.045 * s, .045 * s, .045 * s), C(.92, .46, .06), .08, ["fruit", "plant", "emissive-surface-only"]);
 }
 
 function buildNightLab(b: ProxyBuilder, scene: SceneDescription, s: number, floorY: number, roomHalf: Vec3): void {
@@ -239,25 +239,25 @@ function buildNightLab(b: ProxyBuilder, scene: SceneDescription, s: number, floo
   b.box("counter/worktop", "lab-counter", V(0, floorY + .862 * s, zb), V(1.80 * s, .022 * s, .34 * s), C(.54, .54, .52), 0, ["counter"]);
   b.box("counter/monitor-stand", "metal-fixture", V(.95 * s, floorY + .93 * s, zb), V(.05 * s, .055 * s, .05 * s), C(.06, .065, .07), 0, ["counter", "instrument"]);
   b.box("counter/monitor", "monitor-frame", V(.95 * s, floorY + 1.17 * s, zb + .05 * s), V(.30 * s, .19 * s, .014 * s), C(.030, .034, .040), 0, ["counter", "instrument", "monitor"]);
-  b.box("counter/monitor-screen", "monitor-glass", V(.95 * s, floorY + 1.17 * s, zb + .068 * s), V(.265 * s, .155 * s, .004 * s), C(.25, .45, .58), 1, ["counter", "instrument", "monitor", "light"]);
+  b.box("counter/monitor-screen", "monitor-glass", V(.95 * s, floorY + 1.17 * s, zb + .068 * s), V(.265 * s, .155 * s, .004 * s), C(.25, .45, .58), 1, ["counter", "instrument", "monitor", "light", "emits-positive-z"]);
   b.box("counter/keyboard", "instrument", V(.95 * s, floorY + .892 * s, zb + .22 * s), V(.19 * s, .007 * s, .07 * s), C(.085, .09, .10), 0, ["counter", "instrument"]);
-  b.cylinder("counter/instrument-a", "instrument", V(-.58 * s, floorY + .966 * s, zb), .070 * s, .082 * s, C(.30, .36, .39), .02, ["counter", "instrument"]);
-  b.cylinder("counter/instrument-b", "instrument", V(-.86 * s, floorY + 1.014 * s, zb + .04 * s), .046 * s, .13 * s, C(.27, .33, .36), .02, ["counter", "instrument"]);
-  b.ellipsoid("counter/instrument-c", "instrument", V(-1.12 * s, floorY + .980 * s, zb - .02 * s), V(.088 * s, .096 * s, .088 * s), C(.28, .35, .34), .02, ["counter", "instrument"]);
+  b.cylinder("counter/instrument-a", "instrument", V(-.58 * s, floorY + .966 * s, zb), .070 * s, .082 * s, C(.30, .36, .39), .02, ["counter", "instrument", "emissive-surface-only"]);
+  b.cylinder("counter/instrument-b", "instrument", V(-.86 * s, floorY + 1.014 * s, zb + .04 * s), .046 * s, .13 * s, C(.27, .33, .36), .02, ["counter", "instrument", "emissive-surface-only"]);
+  b.ellipsoid("counter/instrument-c", "instrument", V(-1.12 * s, floorY + .980 * s, zb - .02 * s), V(.088 * s, .096 * s, .088 * s), C(.28, .35, .34), .02, ["counter", "instrument", "emissive-surface-only"]);
   b.box("counter/shelf", "metal-fixture", V(-.20 * s, floorY + 1.62 * s, zb - .05 * s), V(1.22 * s, .016 * s, .17 * s), C(.29, .30, .31), 0, ["counter", "shelf"]);
   const bottleColors = [C(.36, .14, .10), C(.10, .235, .255), C(.27, .27, .26)];
   for (let i = 0; i < 3; i++) b.box(`counter/shelf-bottle-${i + 1}`, "instrument", V((-.92 + .13 * i) * s, floorY + 1.751 * s, zb - .05 * s), V(.050 * s, .115 * s, .135 * s), bottleColors[i], 0, ["counter", "shelf", "instrument"]);
   for (const i of [-1, 1]) for (let j = 0; j < 2; j++) {
     const z = (j === 0 ? -.30 : .95) * s;
-    b.box(`fixtures/troffer-${i < 0 ? "left" : "right"}-${j + 1}`, "emissive-fixture", V(i * .95 * s, ceilY - .035 * s, z), V(.55 * s, .012 * s, .20 * s), C(.92, .93, .90), 2.3, ["fixture", "light"]);
+    b.box(`fixtures/troffer-${i < 0 ? "left" : "right"}-${j + 1}`, "emissive-fixture", V(i * .95 * s, ceilY - .035 * s, z), V(.55 * s, .012 * s, .20 * s), C(.92, .93, .90), 2.3, ["fixture", "light", "emits-negative-y"]);
   }
 }
 
 function buildGallery(b: ProxyBuilder, s: number): void {
   const portal = C(.82, .39, .17);
-  b.box("portal/left", "emissive-fixture", V(-.74 * s, .82 * s, -1.42 * s), V(.045 * s, .82 * s, .08 * s), portal, .12, ["portal", "fixture"]);
-  b.box("portal/right", "emissive-fixture", V(.74 * s, .82 * s, -1.42 * s), V(.045 * s, .82 * s, .08 * s), portal, .12, ["portal", "fixture"]);
-  b.box("portal/top", "emissive-fixture", V(0, 1.60 * s, -1.42 * s), V(.78 * s, .045 * s, .08 * s), portal, .12, ["portal", "fixture"]);
+  b.box("portal/left", "emissive-fixture", V(-.74 * s, .82 * s, -1.42 * s), V(.045 * s, .82 * s, .08 * s), portal, .12, ["portal", "fixture", "emissive-surface-only"]);
+  b.box("portal/right", "emissive-fixture", V(.74 * s, .82 * s, -1.42 * s), V(.045 * s, .82 * s, .08 * s), portal, .12, ["portal", "fixture", "emissive-surface-only"]);
+  b.box("portal/top", "emissive-fixture", V(0, 1.60 * s, -1.42 * s), V(.78 * s, .045 * s, .08 * s), portal, .12, ["portal", "fixture", "emissive-surface-only"]);
   const bench = C(.12, .14, .13);
   b.box("bench/seat", "gallery-bench", V(-1.08 * s, .27 * s, -.42 * s), V(.55 * s, .065 * s, .18 * s), bench, 0, ["bench"]);
   for (const i of [-1, 1]) b.box(`bench/leg-${i < 0 ? "left" : "right"}`, "gallery-bench", V((-1.08 + .40 * i) * s, .14 * s, -.42 * s), V(.04 * s, .14 * s, .13 * s), cmul(bench, .7), 0, ["bench"]);
@@ -282,18 +282,28 @@ function buildBathhouse(b: ProxyBuilder, s: number): void {
   }
 }
 
-function buildStation(b: ProxyBuilder, s: number): void {
+function buildStation(b: ProxyBuilder, s: number, floorY: number, roomHalf: Vec3): void {
   const metal = C(.025, .09, .115);
   for (let i = -2; i <= 2; i++) b.box(`pressure-rib-${i + 3}`, "metal-frame", V(i * .58 * s, 1.35 * s, -1.42 * s), V(.025 * s, 1.35 * s, .05 * s), metal, 0, ["rib", "fixture"]);
   for (const i of [-1, 1]) {
     const side = i < 0 ? "left" : "right", x = i * 1.16 * s;
     b.box(`console-${side}/cabinet`, "metal-console", V(x, .37 * s, -.72 * s), V(.34 * s, .37 * s, .30 * s), cmul(metal, .72), 0, ["console"]);
-    b.box(`console-${side}/monitor`, "monitor-glass", V(x, .63 * s, -.40 * s), V(.25 * s, .13 * s, .018 * s), C(.06, .48, .58), .30, ["console", "monitor", "light"]);
+    b.box(`console-${side}/monitor`, "monitor-glass", V(x, .63 * s, -.40 * s), V(.25 * s, .13 * s, .018 * s), C(.06, .48, .58), .30, ["console", "monitor", "light", "emits-positive-z"]);
     b.cylinder(`console-${side}/pipe`, "metal-pipe", V(x + .25 * s, .88 * s, -1.06 * s), .055 * s, .72 * s, C(.12, .25, .27), 0, ["console", "pipe"]);
   }
   b.box("equipment-case/body", "equipment-case", V(-.76 * s, .23 * s, -1.04 * s), V(.30 * s, .23 * s, .24 * s), C(.12, .15, .15), 0, ["equipment"]);
-  b.box("equipment-case/lid", "equipment-case", V(-.76 * s, .47 * s, -1.04 * s), V(.25 * s, .018 * s, .19 * s), C(.74, .48, .16), .12, ["equipment"]);
+  b.box("equipment-case/lid", "equipment-case", V(-.76 * s, .47 * s, -1.04 * s), V(.25 * s, .018 * s, .19 * s), C(.74, .48, .16), .12, ["equipment", "emissive-surface-only"]);
   for (let i = -1; i <= 1; i++) b.ellipsoid(`indicator-${i + 2}`, "emissive-fixture", V(i * .52 * s, 1.36 * s, -1.12 * s), V(.055 * s, .055 * s, .055 * s), C(.10, .65, .72), .36, ["fixture", "light"]);
+  // The raster station wall carries procedural circular portholes. The SVO
+  // catalog cannot express a subtractive annulus, but it can retain a stable
+  // finite observation-port frame and backing for the analytic thin pane.
+  const portY = floorY + 1.55 * s, portZ = -roomHalf.z + .018 * s;
+  const frame = C(.34, .27, .13), backing = C(.008, .035, .052);
+  b.box("observation-port/backing", "porthole-backing", V(0, portY, portZ - .006 * s), V(.66 * s, .39 * s, .003 * s), backing, 0, ["porthole", "frame"]);
+  b.box("observation-port/frame-left", "metal-frame", V(-.705 * s, portY, portZ), V(.045 * s, .435 * s, .018 * s), frame, 0, ["porthole", "frame", "fixture"]);
+  b.box("observation-port/frame-right", "metal-frame", V(.705 * s, portY, portZ), V(.045 * s, .435 * s, .018 * s), frame, 0, ["porthole", "frame", "fixture"]);
+  b.box("observation-port/frame-bottom", "metal-frame", V(0, portY - .435 * s, portZ), V(.75 * s, .045 * s, .018 * s), frame, 0, ["porthole", "frame", "fixture"]);
+  b.box("observation-port/frame-top", "metal-frame", V(0, portY + .435 * s, portZ), V(.75 * s, .045 * s, .018 * s), frame, 0, ["porthole", "frame", "fixture"]);
 }
 
 function buildGarden(b: ProxyBuilder, scene: SceneDescription, s: number): void {
@@ -358,7 +368,7 @@ export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmen
   else if (environmentId === "night-lab") buildNightLab(b, scene, s, floorY, roomHalf);
   else if (environmentId === "concrete-gallery") buildGallery(b, s);
   else if (environmentId === "bathhouse") buildBathhouse(b, s);
-  else if (environmentId === "research-station") buildStation(b, s);
+  else if (environmentId === "research-station") buildStation(b, s, floorY, roomHalf);
   else if (environmentId === "garden") buildGarden(b, scene, s);
 
   return { environmentId, environmentIndex: environmentIndex(environmentId), scale_m: s, floorY_m: floorY, shell, primitives: b.props };

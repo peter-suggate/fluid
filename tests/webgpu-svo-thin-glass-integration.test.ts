@@ -11,6 +11,7 @@ import {
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import { candidateBackedDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const panelSource = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
@@ -63,7 +64,7 @@ test("production scene construction uploads pane records and exposes an explicit
 
 test("pane ABI validation accepts empty gardens and rejects partial or over-capacity uploads", () => {
   const source = structuralSource();
-  const base: SparseVoxelDrySceneData = { primitiveRecords: new Uint32Array(16), ownerBase: 1 };
+  const base: SparseVoxelDrySceneData = { ...candidateBackedDrySceneFixture, ownerBase: 1 };
   assert.equal(canEncodeSparseVoxelDryScene(source, { ...base, glassRecords: new Uint32Array(0) }), true);
   assert.equal(canEncodeSparseVoxelDryScene(source, { ...base, glassRecords: new Uint32Array(SVO_THIN_GLASS_RECORD_WORDS - 1) }), false);
   assert.equal(canEncodeSparseVoxelDryScene(source, {
@@ -87,7 +88,7 @@ test("glass upload cache is reused by static revision and destroyed on detach", 
   try {
     const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer);
     const scene: SparseVoxelDrySceneData = {
-      primitiveRecords: new Uint32Array(16), ownerBase: 1,
+      ...candidateBackedDrySceneFixture, ownerBase: 1,
       glassRecords: new Uint32Array(SVO_THIN_GLASS_RECORD_WORDS), glassCacheKey: "glass:v1",
     };
     renderer.setSource(structuralSource(), scene);

@@ -138,3 +138,40 @@ test("scene convenience API follows the selected environment and enforces a hard
   );
   assert.throws(() => buildSvoScenePrimitives(scene, { maximumPrimitives: 0 }), /positive safe integer/);
 });
+
+test("static primitive publication reuses packed records and invalidates on authored geometry", () => {
+  const scene = cloneScene(defaultScene);
+  const first = buildSvoScenePrimitives(scene, { environmentId: "night-lab" });
+  const repeated = buildSvoScenePrimitives(cloneScene(scene), { environmentId: "night-lab" });
+  assert.strictEqual(repeated, first);
+  assert.strictEqual(repeated.packedRecords, first.packedRecords);
+  assert.equal(repeated.cacheKey, first.cacheKey);
+
+  scene.container.width_m += 0.1;
+  const resized = buildSvoScenePrimitives(scene, { environmentId: "night-lab" });
+  assert.notEqual(resized.cacheKey, first.cacheKey);
+  assert.notStrictEqual(resized.packedRecords, first.packedRecords);
+});
+
+test("subcell props retain exact analytic shapes plus conservative audit bounds", () => {
+  const scene = cloneScene(defaultScene);
+  for (const [environmentId, keys] of [
+    ["conservatory", ["conservatory/pendant-1/cord"]],
+    ["night-lab", ["night-lab/desk/lower-shelf", "night-lab/counter/keyboard"]],
+    ["bathhouse", ["bathhouse/lantern-left/cord", "bathhouse/lantern-right/cord"]],
+    ["research-station", ["research-station/observation-port/backing"]],
+  ] as const) {
+    const publication = buildSvoScenePrimitives(scene, { environmentId });
+    for (const key of keys) {
+      const metadata = publication.metadata.find((entry) => entry.key === key);
+      assert.ok(metadata, key);
+      assert.equal(metadata.coverageBounds.policy, "conservative-subcell", key);
+      assert.ok(metadata.coverageBounds.subcellAxes.length > 0, key);
+      for (const axis of metadata.coverageBounds.subcellAxes) {
+        const conservativeWidth = metadata.coverageBounds.conservative_m.max[axis]
+          - metadata.coverageBounds.conservative_m.min[axis];
+        assert.ok(conservativeWidth >= scene.nominalResolution.length_m, `${key}/${axis}`);
+      }
+    }
+  }
+});

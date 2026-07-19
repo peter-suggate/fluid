@@ -2,18 +2,28 @@ import { environmentIds, type EnvironmentId } from "./environments";
 import { cloneScene, defaultScene, type CameraState, type SceneDescription } from "./model";
 import { cameraForPreset, scenePresets } from "./scenes";
 import { buildSvoSceneGlass, type SvoSceneGlassUnsupportedEntry } from "./svo-scene-glass";
+import { buildSvoSceneThickGlass, type SvoSceneThickGlassMetadata } from "./svo-scene-thick-glass";
 import { buildSvoSceneLights } from "./svo-light-abi";
 import { buildSvoScenePrimitives } from "./svo-scene-primitives";
+import {
+  cachedSvoStaticPublication,
+  hashSvoStaticPublication,
+  internSvoStaticPublication,
+} from "./svo-static-publication-cache";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "./voxel-environments";
 import { materialIdForRigidShape } from "./voxel-scene";
 
-export const SVO_SCENE_COVERAGE_VERSION = 1;
+export const SVO_SCENE_COVERAGE_VERSION = 2;
+
+const environmentCoverageCache = new Map<string, SvoEnvironmentCoverageReport>();
+const shippedCoverageCache = new Map<string, SvoShippedSceneCoverageReport>();
 
 export type SvoSceneVisibleOwnership =
   | "analytic-primitive"
   | "analytic-rigid-body"
   | "analytic-terrain"
   | "thin-glass"
+  | "thick-glass"
   | "opaque-proxy-fallback"
   | "raster-only-procedural"
   | "not-visible";
@@ -48,6 +58,12 @@ export interface SvoSceneCoverageEntry {
   defaultCameraPriority: boolean;
   reason?: string;
   fallback?: string;
+  /** Conservative audit bounds for subcell analytic/collision proxy coverage. */
+  collisionProxyBounds_m?: EnvironmentProxyPrimitive["aabb_m"];
+  boundsPolicy?: "exact" | "conservative-subcell";
+  subcellAxes?: readonly ("x" | "y" | "z")[];
+  plannedThickGlassId?: number;
+  plannedThickGlassContract?: "analytic-thick-glass-bound";
 }
 
 export interface SvoEnvironmentCoverageReport {
@@ -60,9 +76,12 @@ export interface SvoEnvironmentCoverageReport {
     defaultCameraPriority: number;
     analyticPrimitives: number;
     thinGlassPanes: number;
+    thickGlassVolumes: number;
     lights: number;
   }>;
   unsupportedEntries: readonly SvoSceneCoverageEntry[];
+  staticRevision: string;
+  cacheKey: string;
 }
 
 export interface SvoPresetCoverageReport {
@@ -79,6 +98,8 @@ export interface SvoShippedSceneCoverageReport {
   version: typeof SVO_SCENE_COVERAGE_VERSION;
   environments: readonly SvoEnvironmentCoverageReport[];
   presets: readonly SvoPresetCoverageReport[];
+  staticRevision: string;
+  cacheKey: string;
 }
 
 interface ProceduralForegroundGap {
@@ -112,19 +133,26 @@ function priorityProxy(scene: SceneDescription, proxy: EnvironmentProxyPrimitive
     || proxy.tags.some((tag) => ["fixture", "monitor", "instrument", "fruit", "flower", "watering-can"].includes(tag));
 }
 
-function unsupportedGlassEntry(entry: SvoSceneGlassUnsupportedEntry): SvoSceneCoverageEntry {
+function unsupportedGlassEntry(
+  entry: SvoSceneGlassUnsupportedEntry,
+  thickGlass?: SvoSceneThickGlassMetadata,
+): SvoSceneCoverageEntry {
   const opaqueProxy = entry.fallback === "existing-opaque-primitive";
   return {
     key: entry.key,
     category: "environment-glazing",
-    status: opaqueProxy ? "degraded" : "unsupported",
-    visibleOwnership: opaqueProxy ? "opaque-proxy-fallback" : "raster-only-procedural",
+    status: thickGlass ? "complete" : opaqueProxy ? "degraded" : "unsupported",
+    visibleOwnership: thickGlass ? "thick-glass" : opaqueProxy ? "opaque-proxy-fallback" : "raster-only-procedural",
     collisionOwnership: "none-presentation-only",
     lightingOwnership: entry.reason === "curved-emissive-volume" || entry.reason === "emissive-display" ? "emissive-surface-only" : "none",
     sourceKind: entry.source,
     defaultCameraPriority: true,
     reason: entry.reason,
     fallback: entry.fallback,
+    ...(thickGlass ? {
+      plannedThickGlassId: thickGlass.glassId,
+      plannedThickGlassContract: "analytic-thick-glass-bound" as const,
+    } : {}),
   };
 }
 
@@ -132,29 +160,55 @@ export function buildSvoEnvironmentCoverage(scene: SceneDescription, environment
   const catalog = buildEnvironmentProxyCatalog(scene, environmentId);
   const primitiveBuild = buildSvoScenePrimitives(scene, { environmentId });
   const glass = buildSvoSceneGlass(scene, { environmentId });
+  const thickGlass = buildSvoSceneThickGlass(scene, { environmentId });
   const lights = buildSvoSceneLights(scene, { environmentId });
+  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+    environmentId,
+    primitiveRevision: primitiveBuild.staticRevision,
+    glassRevision: glass.staticRevision,
+    thickGlassRevision: thickGlass.staticRevision,
+    lightRevision: lights.staticRevision,
+    foreground: PROCEDURAL_FOREGROUND_GAPS[environmentId],
+  }));
+  const cacheKey = `svo-scene-coverage-v${SVO_SCENE_COVERAGE_VERSION}:${environmentId}:${staticRevision}`;
+  const cached = cachedSvoStaticPublication(environmentCoverageCache, cacheKey);
+  if (cached) return cached;
   const selectedLights = new Set(lights.records.map(({ sourceKey }) => sourceKey));
   const omittedLights = new Set(lights.omittedFixtureKeys);
   const proxies = new Map(environmentProxyPrimitives(catalog).map((proxy) => [proxy.key, proxy]));
   const unsupportedGlass = new Map(glass.unsupportedEntries.map((entry) => [entry.key, entry]));
+  const thickGlassBySource = new Map(thickGlass.metadata.map((entry) => [entry.sourceKey, entry]));
   const entries: SvoSceneCoverageEntry[] = primitiveBuild.metadata.map((metadata) => {
     const proxy = proxies.get(metadata.key)!;
     const opticalGap = unsupportedGlass.get(metadata.key);
+    const plannedThickGlass = thickGlassBySource.get(metadata.key);
     const lightingOwnership: SvoSceneLightingOwnership = selectedLights.has(metadata.key) ? "svo-area-light"
       : omittedLights.has(metadata.key) ? "omitted-light-capacity"
         : metadata.material.emission > 0 ? "emissive-surface-only" : "none";
-    const degradedReason = opticalGap?.reason ?? (lightingOwnership === "omitted-light-capacity" ? "light-record-capacity" : undefined);
+    const documentedSurfaceOnly = lightingOwnership === "emissive-surface-only" && proxy.tags.includes("emissive-surface-only");
+    const missingEmitterLight = lightingOwnership === "emissive-surface-only" && !documentedSurfaceOnly;
+    const degradedReason = (plannedThickGlass ? undefined : opticalGap?.reason)
+      ?? (lightingOwnership === "omitted-light-capacity" ? "light-record-capacity" : undefined)
+      ?? (missingEmitterLight ? "emissive-owner-missing-light" : undefined);
     return {
       key: metadata.key,
       category: metadata.shell ? "shell" : "prop",
       status: degradedReason ? "degraded" : "complete",
-      visibleOwnership: opticalGap ? "opaque-proxy-fallback" : "analytic-primitive",
+      visibleOwnership: plannedThickGlass ? "thick-glass" : opticalGap ? "opaque-proxy-fallback" : "analytic-primitive",
       collisionOwnership: "solver-environment-proxy",
       lightingOwnership,
       materialId: metadata.materialId,
       ownerId: metadata.ownerId,
       sourceKind: metadata.sourceKind,
       defaultCameraPriority: priorityProxy(scene, proxy),
+      collisionProxyBounds_m: metadata.coverageBounds.conservative_m,
+      boundsPolicy: metadata.coverageBounds.policy,
+      subcellAxes: metadata.coverageBounds.subcellAxes,
+      ...(plannedThickGlass ? {
+        plannedThickGlassId: plannedThickGlass.glassId,
+        plannedThickGlassContract: "analytic-thick-glass-bound" as const,
+      } : {}),
+      ...(documentedSurfaceOnly ? { reason: "documented-low-power-emissive-surface" } : {}),
       ...(degradedReason ? {
         reason: degradedReason,
         fallback: opticalGap?.fallback ?? "emissive-surface-only",
@@ -172,20 +226,22 @@ export function buildSvoEnvironmentCoverage(scene: SceneDescription, environment
     sourceKind: primitiveBuild.analyticTerrain.kind,
     defaultCameraPriority: true,
   });
-  for (const metadata of glass.metadata) entries.push({
+  for (const metadata of glass.metadata) { const replacingVolume = thickGlass.metadata.find(({ replacesThinPaneKey }) => replacesThinPaneKey === metadata.key); entries.push({
     key: metadata.key,
     category: metadata.role === "environment-glazing" ? "environment-glazing" : "container-glass",
-    status: metadata.opaqueCutoutKey ? "unsupported" : "complete",
-    visibleOwnership: "thin-glass",
+    status: metadata.opaqueCutoutKey && !replacingVolume ? "unsupported" : "complete",
+    visibleOwnership: replacingVolume ? "thick-glass" : "thin-glass",
     collisionOwnership: metadata.role === "environment-glazing" ? "none-presentation-only" : "solver-container-boundary",
     lightingOwnership: "none",
     materialId: metadata.materialId,
     ownerId: metadata.ownerId,
     sourceKind: metadata.role,
     defaultCameraPriority: true,
-    ...(metadata.opaqueCutoutKey ? { reason: "opaque-cutout-required", fallback: metadata.opaqueCutoutKey } : {}),
-  });
-  entries.push(...glass.unsupportedEntries.filter(({ key }) => !proxies.has(key)).map(unsupportedGlassEntry));
+    ...(replacingVolume ? { plannedThickGlassId: replacingVolume.glassId, plannedThickGlassContract: "analytic-thick-glass-bound" as const }
+      : metadata.opaqueCutoutKey ? { reason: "opaque-cutout-required", fallback: metadata.opaqueCutoutKey } : {}),
+  }); }
+  entries.push(...glass.unsupportedEntries.filter(({ key }) => !proxies.has(key)).map((entry) =>
+    unsupportedGlassEntry(entry, thickGlassBySource.get(entry.key))));
   entries.push({
     key: "authored/directional",
     category: "environment-light",
@@ -208,18 +264,22 @@ export function buildSvoEnvironmentCoverage(scene: SceneDescription, environment
   });
   const count = (status: SvoSceneCoverageStatus) => entries.filter((entry) => entry.status === status).length;
   const unsupportedEntries = entries.filter(({ status }) => status !== "complete");
-  return Object.freeze({
+  const summary = Object.freeze({
+    complete: count("complete"), degraded: count("degraded"), unsupported: count("unsupported"),
+    defaultCameraPriority: entries.filter(({ defaultCameraPriority }) => defaultCameraPriority).length,
+    analyticPrimitives: primitiveBuild.metadata.length,
+    thinGlassPanes: glass.metadata.length,
+    thickGlassVolumes: thickGlass.metadata.length,
+    lights: lights.records.length,
+  });
+  return internSvoStaticPublication(environmentCoverageCache, cacheKey, Object.freeze({
     environmentId,
     entries: Object.freeze(entries),
-    summary: Object.freeze({
-      complete: count("complete"), degraded: count("degraded"), unsupported: count("unsupported"),
-      defaultCameraPriority: entries.filter(({ defaultCameraPriority }) => defaultCameraPriority).length,
-      analyticPrimitives: primitiveBuild.metadata.length,
-      thinGlassPanes: glass.metadata.length,
-      lights: lights.records.length,
-    }),
+    summary,
     unsupportedEntries: Object.freeze(unsupportedEntries),
-  });
+    staticRevision,
+    cacheKey,
+  }));
 }
 
 export function buildSvoShippedSceneCoverage(): SvoShippedSceneCoverageReport {
@@ -254,7 +314,18 @@ export function buildSvoShippedSceneCoverage(): SvoShippedSceneCoverageReport {
       unsupportedEntries: Object.freeze(environment.unsupportedEntries),
     });
   });
-  return Object.freeze({ version: SVO_SCENE_COVERAGE_VERSION, environments: Object.freeze(environments), presets: Object.freeze(presets) });
+  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+    environments: environments.map(({ cacheKey }) => cacheKey),
+    presets,
+  }));
+  const cacheKey = `svo-shipped-scene-coverage-v${SVO_SCENE_COVERAGE_VERSION}:${staticRevision}`;
+  return internSvoStaticPublication(shippedCoverageCache, cacheKey, Object.freeze({
+    version: SVO_SCENE_COVERAGE_VERSION,
+    environments: Object.freeze(environments),
+    presets: Object.freeze(presets),
+    staticRevision,
+    cacheKey,
+  }));
 }
 
 /** Stable text suitable for checked-in reports and content hashing. */

@@ -112,3 +112,28 @@ test("default-camera audit prioritizes subcell and thin authored props", () => {
     assert.equal(bathhouse.entries.find((entry) => entry.key === key)?.defaultCameraPriority, true, key);
   }
 });
+
+test("coverage publications cache by content and expose subcell collision proxy ownership", () => {
+  const scene = cloneScene(defaultScene);
+  const first = buildSvoEnvironmentCoverage(scene, "night-lab");
+  const repeated = buildSvoEnvironmentCoverage(cloneScene(scene), "night-lab");
+  assert.strictEqual(repeated, first);
+  assert.equal(repeated.cacheKey, first.cacheKey);
+
+  const keyboard = first.entries.find(({ key }) => key === "night-lab/counter/keyboard");
+  assert.equal(keyboard?.visibleOwnership, "analytic-primitive");
+  assert.equal(keyboard?.collisionOwnership, "solver-environment-proxy");
+  assert.ok(keyboard?.materialId !== undefined && keyboard.ownerId !== undefined);
+  assert.equal(keyboard?.boundsPolicy, "conservative-subcell");
+  assert.ok(keyboard?.subcellAxes?.includes("y"));
+  assert.ok(keyboard?.collisionProxyBounds_m);
+
+  scene.container.width_m += 0.1;
+  const resized = buildSvoEnvironmentCoverage(scene, "night-lab");
+  assert.notEqual(resized.cacheKey, first.cacheKey);
+
+  const shippedFirst = buildSvoShippedSceneCoverage();
+  const shippedSecond = buildSvoShippedSceneCoverage();
+  assert.strictEqual(shippedSecond, shippedFirst);
+  assert.equal(shippedSecond.cacheKey, shippedFirst.cacheKey);
+});

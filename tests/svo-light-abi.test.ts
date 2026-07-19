@@ -33,6 +33,11 @@ test("emissive fixture tags become bounded area lights with stable owner identit
   const second = buildSvoSceneLights(scene, { revision: 3 });
   assert.deepEqual(first.records, second.records);
   assert.deepEqual(first.omittedFixtureKeys, second.omittedFixtureKeys);
+  assert.strictEqual(second, first);
+  assert.strictEqual(second.packedRecords, first.packedRecords);
+  const advanced = buildSvoSceneLights(scene, { revision: 4 });
+  assert.notEqual(advanced.cacheKey, first.cacheKey);
+  assert.notStrictEqual(advanced.packedRecords, first.packedRecords);
   const fixtures = first.records.slice(1);
   assert.ok(fixtures.length > 0);
   assert.ok(fixtures.every((light) => light.kind === "rectangleArea" || light.kind === "sphereArea"));

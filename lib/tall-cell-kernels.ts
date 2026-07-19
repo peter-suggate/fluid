@@ -505,11 +505,17 @@ fn smoothRemesh(@builtin(global_invocation_id) gid:vec3u){
   if(fineDims().y-regularLayers()>=2&&base<2u){base=2u;}smoothedColumnBases[index]=base;
 }
 
-fn leastSquaresPhi(x:i32,z:i32,newBase:i32)->vec2f{if(newBase<=1){let value=phiCell(vec3i(x,0,z));return vec2f(value);}var st=0.0;var stt=0.0;var sv=0.0;var stv=0.0;for(var y=0;y<newBase;y+=1){let t=f32(y)/f32(newBase-1);let value=phiCell(vec3i(x,y,z));st+=t;stt+=t*t;sv+=value;stv+=t*value;}let n=f32(newBase);let slope=(n*stv-st*sv)/max(n*stt-st*st,1e-6);let intercept=(sv-slope*st)/n;return vec2f(intercept,intercept+slope);}
+fn leastSquaresPhi(x:i32,z:i32,newBase:i32)->vec2f{if(newBase<=1){let value=phiCell(vec3i(x,0,z));return vec2f(value);}var st=0.0;var stt=0.0;var sv=0.0;var stv=0.0;for(var y=0;y<newBase;y+=1){let t=f32(y)/f32(newBase-1);let value=phiCell(vec3i(x,y,z));st+=t;stt+=t*t;sv+=value;stv+=t*value;}let n=f32(newBase);let slope=(n*stv-st*sv)/max(n*stt-st*st,1e-6);let intercept=(sv-slope*st)/n;let fit=vec2f(intercept,intercept+slope);
+  // Section 3.6 permits no liquid-air interface inside the single tall
+  // store. The mandatory two-cell floor store cannot move its cubic band
+  // below a y=0/1 crossing, so make both endpoints inherit the phase at the
+  // store's top (the phase adjacent to the band). This also removes a thin
+  // floor residue instead of turning it into an unrepresented interface.
+  return select(fit,vec2f(fit.y),(fit.x<=0.0)!=(fit.y<=0.0));}
 fn leastSquaresVelocity(x:i32,z:i32,newBase:i32,top:bool)->vec3f{if(newBase<=1){return velocityCell(vec3i(x,0,z));}var st=0.0;var stt=0.0;var sv=vec3f(0.0);var stv=vec3f(0.0);for(var y=0;y<newBase;y+=1){let t=f32(y)/f32(newBase-1);let value=velocityCell(vec3i(x,y,z));st+=t;stt+=t*t;sv+=value;stv+=t*value;}let n=f32(newBase);let slope=(n*stv-st*sv)/max(n*stt-st*st,1e-6);let intercept=(sv-slope*st)/n;return select(intercept,intercept+slope,top);}
 @compute @workgroup_size(4,4,4)
 fn remap(@builtin(global_invocation_id) gid:vec3u){
-	  let id=vec3i(gid);if(!validPacked(id)){return;}let d=packedDims();let newBase=i32(nextColumnBases[u32(id.x+d.x*id.z)]);var p=vec3f(f32(id.x)+0.5,0.5,f32(id.z)+0.5);if(id.y==1){p.y=max(0.5,f32(newBase)-0.5);}else if(id.y>=2){p.y=f32(newBase+id.y-2)+0.5;}let isActive=select(newBase>0,newBase+id.y-2<fineDims().y,id.y>=2);let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var phi=limit;var velocity=vec3f(0.0);var pressure=0.0;if(isActive){pressure=samplePressure(p);if(id.y<2){let fit=leastSquaresPhi(id.x,id.z,newBase);phi=select(fit.x,fit.y,id.y==1);velocity=leastSquaresVelocity(id.x,id.z,newBase,id.y==1);}else{phi=samplePhi(p);for(var component=0u;component<3u;component+=1u){let faceP=p+0.5*vec3f(axisOffset(component));velocity[component]=sampleVelocityComponent(faceP,component);}}}
+	  let id=vec3i(gid);if(!validPacked(id)){return;}let d=packedDims();let newBase=i32(nextColumnBases[u32(id.x+d.x*id.z)]);var p=vec3f(f32(id.x)+0.5,0.5,f32(id.z)+0.5);if(id.y==1){p.y=max(0.5,f32(newBase)-0.5);}else if(id.y>=2){p.y=f32(newBase+id.y-2)+0.5;}let isActive=select(newBase>0,newBase+id.y-2<fineDims().y,id.y>=2);let limit=5.0*min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));var phi=limit;var velocity=vec3f(0.0);var pressure=0.0;if(isActive){pressure=samplePressure(p);if(id.y<2){let fit=leastSquaresPhi(id.x,id.z,newBase);phi=fit[u32(id.y)];velocity=leastSquaresVelocity(id.x,id.z,newBase,id.y==1);}else{phi=samplePhi(p);for(var component=0u;component<3u;component+=1u){let faceP=p+0.5*vec3f(axisOffset(component));velocity[component]=sampleVelocityComponent(faceP,component);}}}
   textureStore(velocityOut,id,vec4f(velocity,0.0));textureStore(volumeOut,id,vec4f(clamp(phi,-limit,limit)));textureStore(pressureOut,id,vec4f(pressure));if(id.y==0){textureStore(columnBaseOut,vec2i(id.x,id.z),vec4f(f32(newBase)));}
 }
 

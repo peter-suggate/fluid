@@ -26,10 +26,17 @@ import {
 } from "./svo-light-abi";
 import type { SceneDescription } from "./model";
 import { svoMaterialWGSL, SVO_MATERIAL_RECORD_STRIDE_BYTES } from "./svo-material-abi";
+import { svoProceduralMaterialWGSL } from "./svo-procedural-material";
 import { SVO_SCENE_GLASS_MAXIMUM_PANES } from "./svo-scene-glass";
+import { SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES } from "./svo-scene-thick-glass";
 import { SVO_CONTACT_VISIBILITY_CONTRACT } from "./svo-contact-visibility";
 import { SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES, svoTerrainMaterialWGSL } from "./svo-terrain-material";
 import { svoThinGlassWGSL, SVO_THIN_GLASS_RECORD_STRIDE_BYTES } from "./svo-thin-glass";
+import {
+  SVO_THICK_GLASS_RECORD_STRIDE_BYTES,
+  svoThickGlassWGSL,
+  unpackSvoThickGlassVolumes,
+} from "./svo-thick-glass";
 import { SVO_VISIBILITY_LIMITS, svoVisibilityRaysWGSL } from "./svo-visibility-rays";
 import {
   resolveSvoFluidRenderOwnership,
@@ -46,6 +53,11 @@ import {
   svoFluidPrimaryModeWord,
   type SvoFluidPrimaryMode,
 } from "./webgpu-svo-fluid-primary";
+import {
+  svoFinePhiPackedSamplingWGSL,
+  svoFinePhiTypesWGSL,
+  type SvoFineFluidGpuCapability,
+} from "./webgpu-svo-fine-phi-stager";
 import { createWebgpuSvoTraversalWGSL } from "./webgpu-svo-traversal";
 import {
   SparseVoxelGBufferTargetArena,
@@ -81,6 +93,12 @@ export interface SparseVoxelDrySceneData {
   glassRecords?: Uint32Array<ArrayBuffer>;
   /** Versioned static content key used to avoid redundant pane uploads. */
   glassCacheKey?: string;
+  /** Packed analytic sphere/ellipsoid glass records mirrored into a renderer-owned uniform arena. */
+  thickGlassRecords?: Uint32Array<ArrayBuffer>;
+  thickGlassRevision?: number;
+  thickGlassCacheKey?: string;
+  /** Thin pane replaced by a curved volume only while the thick binder is valid. */
+  thickGlassReplacedThinPaneId?: number;
   /** First vessel-pane ID owned by the existing post-dry-scene glass compositor. */
   primaryCompositeOwnedGlassPaneIdBase?: number;
   /** Contiguous vessel-pane count beginning at `primaryCompositeOwnedGlassPaneIdBase`. */
@@ -103,21 +121,98 @@ export interface SparseVoxelDrySceneData {
   directFluidMediaEndToEndValidated?: boolean;
   /** Experimental bounded indirect-diffuse contact visibility; default is intentionally off pending timing acceptance. */
   contactVisibilityEnabled?: boolean;
+  /** Diagnostic primary/shadow split; omission keeps production hard visibility enabled. */
+  shadowVisibilityEnabled?: boolean;
   lightDirection?: readonly [number, number, number];
   lightColor?: readonly [number, number, number];
 }
 
 export const SVO_DRY_RIGID_MOTION_CAPACITY = 12;
 export const SVO_DRY_RIGID_MOTION_UNIFORM_BYTES = SVO_DRY_RIGID_MOTION_CAPACITY * SVO_PRIMITIVE_MOTION_STRIDE_BYTES;
+export const SVO_DRY_THICK_GLASS_BINDER_VERSION = 1;
+export const SVO_DRY_THICK_GLASS_ARENA_LAYOUT = Object.freeze({
+  metadataWordOffset: 0,
+  recordWordOffset: 4,
+  sizeBytes: 16 + SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES * SVO_THICK_GLASS_RECORD_STRIDE_BYTES,
+} as const);
 
-/** DryParams plus one 16-byte static-candidate publication lane. */
+/** Single source of truth for every group-0 declaration and production layout entry. */
+export const SVO_DRY_SCENE_BINDING_CONTRACT = Object.freeze([
+  ...[0, 1].map((binding) => ({ binding, type: "uniform" as const })),
+  ...[2, 3, 4, 5, 6, 7, 8].map((binding) => ({ binding, type: "read-only-storage" as const })),
+  { binding: 9, type: "uniform" as const },
+  ...[10, 11, 12].map((binding) => ({ binding, type: "read-only-storage" as const })),
+  ...[13, 14, 15].map((binding) => ({ binding, type: "uniform" as const })),
+] as const);
+
+export function sparseVoxelDrySceneBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
+  return SVO_DRY_SCENE_BINDING_CONTRACT.map(({ binding, type }) => ({
+    binding,
+    visibility: GPUShaderStage.FRAGMENT,
+    buffer: { type },
+  }));
+}
+
+export type SparseVoxelThickGlassBinderStatus =
+  | "disabled-empty"
+  | "bound"
+  | "fallback-malformed"
+  | "fallback-overflow"
+  | "fallback-stale";
+
+/** Typed optional-binder gate. Any failure retains the existing opaque/thin fallback path. */
+export function resolveSparseVoxelThickGlassBinderStatus(
+  scene: SparseVoxelDrySceneData | undefined,
+): SparseVoxelThickGlassBinderStatus {
+  const records = scene?.thickGlassRecords;
+  if (!records?.byteLength) return "disabled-empty";
+  if (records.byteLength % SVO_THICK_GLASS_RECORD_STRIDE_BYTES !== 0) return "fallback-malformed";
+  const count = records.byteLength / SVO_THICK_GLASS_RECORD_STRIDE_BYTES;
+  if (count > SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES) return "fallback-overflow";
+  const revision = scene?.thickGlassRevision;
+  if (!Number.isSafeInteger(revision) || revision! < 1 || revision! > 0xffff_ffff || !scene?.thickGlassCacheKey) {
+    return "fallback-malformed";
+  }
+  if (scene.thickGlassReplacedThinPaneId !== undefined
+    && (!Number.isSafeInteger(scene.thickGlassReplacedThinPaneId)
+      || scene.thickGlassReplacedThinPaneId < 1 || scene.thickGlassReplacedThinPaneId > 0xffff_ffff)) {
+    return "fallback-malformed";
+  }
+  try {
+    const volumes = unpackSvoThickGlassVolumes(records);
+    if (volumes.some((volume) => volume.revision !== revision)) return "fallback-stale";
+    if (new Set(volumes.map(({ glassId }) => glassId)).size !== volumes.length) return "fallback-malformed";
+  } catch {
+    return "fallback-malformed";
+  }
+  return "bound";
+}
+
+export function packSparseVoxelDrySceneThickGlassArena(
+  scene: SparseVoxelDrySceneData | undefined,
+): Uint32Array<ArrayBuffer> {
+  const arena = new Uint32Array(new ArrayBuffer(SVO_DRY_THICK_GLASS_ARENA_LAYOUT.sizeBytes));
+  if (resolveSparseVoxelThickGlassBinderStatus(scene) !== "bound") return arena;
+  const records = scene!.thickGlassRecords!;
+  arena.set([
+    records.byteLength / SVO_THICK_GLASS_RECORD_STRIDE_BYTES,
+    scene!.thickGlassRevision!,
+    scene!.thickGlassReplacedThinPaneId ?? 0xffff_ffff,
+    SVO_DRY_THICK_GLASS_BINDER_VERSION,
+  ], SVO_DRY_THICK_GLASS_ARENA_LAYOUT.metadataWordOffset);
+  arena.set(records, SVO_DRY_THICK_GLASS_ARENA_LAYOUT.recordWordOffset);
+  return arena;
+}
+
+/** DryParams plus static-candidate and renderer-owned fine-phi lanes. */
 export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
-  sizeBytes: 176,
+  sizeBytes: 336,
   terrainWordOffset: 24,
   terrainMaterialWordOffset: 28,
   materialPublicationWordOffset: 32,
   fluidDomainWordOffset: 36,
   primitiveCandidateWordOffset: 40,
+  finePhiWordOffset: 44,
 } as const);
 
 export const SVO_TERRAIN_FAST_MIN_VERTICAL = 0.35;
@@ -412,10 +507,8 @@ export function packSparseVoxelDrySceneLightingArena(
   return packed;
 }
 
-export function canEncodeSparseVoxelDryScene(
-  source: SparseVoxelSceneRenderSource | undefined,
-  scene: SparseVoxelDrySceneData | undefined
-): boolean {
+/** Validate the conservative static candidate publication independently for typed fallback reporting. */
+export function canConsumeSparseVoxelPrimitiveCandidates(scene: SparseVoxelDrySceneData | undefined): boolean {
   const primitiveCount = scene?.primitiveRecords.byteLength
     ? scene.primitiveRecords.byteLength / SVO_PRIMITIVE_RECORD_STRIDE_BYTES
     : 0;
@@ -428,6 +521,13 @@ export function canEncodeSparseVoxelDryScene(
       candidatesValid = false;
     }
   }
+  return candidatesValid;
+}
+
+export function canEncodeSparseVoxelDryScene(
+  source: SparseVoxelSceneRenderSource | undefined,
+  scene: SparseVoxelDrySceneData | undefined
+): boolean {
   return Boolean(
     source?.structural
     && scene
@@ -435,7 +535,7 @@ export function canEncodeSparseVoxelDryScene(
     && canConsumeSparseVoxelLighting(source, scene)
     && scene.primitiveRecords.byteLength >= SVO_PRIMITIVE_RECORD_STRIDE_BYTES
     && scene.primitiveRecords.byteLength % SVO_PRIMITIVE_RECORD_STRIDE_BYTES === 0
-    && candidatesValid
+    && canConsumeSparseVoxelPrimitiveCandidates(scene)
     && (scene.glassRecords?.byteLength ?? 0) % SVO_THIN_GLASS_RECORD_STRIDE_BYTES === 0
     && (scene.glassRecords?.byteLength ?? 0) / SVO_THIN_GLASS_RECORD_STRIDE_BYTES <= SVO_SCENE_GLASS_MAXIMUM_PANES
     && (scene.terrainMaterialMetadata === undefined || scene.terrainMaterialMetadata.byteLength === SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES)
@@ -447,13 +547,33 @@ export function canEncodeSparseVoxelDryScene(
   );
 }
 
+/** Validate the renderer-owned combined publication/fine arena before binding it. */
+export function canConsumeSvoFineFluidCapability(capability: SvoFineFluidGpuCapability | undefined): capability is SvoFineFluidGpuCapability {
+  const size = capability?.arena.size ?? capability?.arena.buffer?.size ?? 0;
+  return Boolean(capability
+    && capability.coarseFallbackRequired === true
+    && capability.directWaterOwnership === false
+    && capability.publicationMirrorWords === 8
+    && capability.statusWord === 16
+    && capability.acceptedStructuralGenerationWord === 19
+    && capability.acceptedFineGenerationWord === 20
+    && capability.paramsWords.length === 40
+    && capability.pageGenerationOffsetWords >= 64
+    && capability.ownerPageTableOffsetWords > capability.pageGenerationOffsetWords
+    && capability.payloadOffsetWords > capability.ownerPageTableOffsetWords
+    && size >= capability.payloadOffsetWords * 4);
+}
+
 const drySceneShader = /* wgsl */ `
 ${svoTerrainMaterialWGSL}
 ${svoMaterialWGSL}
+${svoProceduralMaterialWGSL}
+${svoThickGlassWGSL}
 ${svoGBufferWGSL}
 ${svoPrimitiveMotionWGSL}
 ${svoLightWGSL}
 ${svoEnvironmentLightingWGSL}
+${svoFinePhiTypesWGSL}
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 struct DryParams {
@@ -470,12 +590,18 @@ struct DryParams {
   fluidDomainMode:vec4u,
   // x: record offset after primitives; y: node count; z: root; w: candidate ABI version.
   candidatePublication:vec4u,
+  finePhi:SvoFinePhiParams,
 }
 struct DryLightingArena {
   // x: light count; y: light revision; z: environment revision; w: environment ABI version.
   metadata:vec4u,
   lights:array<SvoLightRecord,${SVO_LIGHT_MAXIMUM_RECORDS}>,
   environment:SvoEnvironmentLightingRecord,
+}
+struct DryThickGlassArena {
+  // x: count; y: revision; z: replaced thin-pane ID; w: binder ABI version.
+  metadata:vec4u,
+  records:array<SvoThickGlassRecord,${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}>,
 }
 struct DryHit {
   t:f32,
@@ -502,12 +628,17 @@ struct DryHit {
 @group(0) @binding(12) var<storage,read> svoStructuralLeafStates:array<u32>;
 @group(0) @binding(13) var<uniform> dryLighting:DryLightingArena;
 @group(0) @binding(14) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>;
+@group(0) @binding(15) var<uniform> thickGlass:DryThickGlassArena;
 
 ${createWebgpuSvoTraversalWGSL({ control: 2, nodes: 3, leaves: 4 })}
 fn dryStructuralNodeWordLength()->u32{return arrayLength(&svoNodes)*8u;}
 fn dryStructuralNodeWord(index:u32)->u32{let record=svoNodes[index/8u];let lane=index%8u;if(lane<4u){return record.address[lane];}return record.links[lane-4u];}
 fn dryStructuralLeafWordLength()->u32{return arrayLength(&svoLeaves)*4u;}
 fn dryStructuralLeafWord(index:u32)->u32{return svoLeaves[index/4u].topology[index%4u];}
+${svoFinePhiPackedSamplingWGSL("publicationState", "dry.finePhi")}
+fn dryFineFluidGridPosition(position_m:vec3f)->vec3f{return (position_m-dry.mapping.worldOrigin)/dry.finePhi.fineCell.xyz-vec3f(0.5);}
+fn dryFineFluidSample(position_m:vec3f,expectedStructural:u32)->SvoFinePhiSample{if(dry.finePhi.counts.x==0u){return SvoFinePhiSample(0.0,0u);}return svoFinePackedPhi(dryFineFluidGridPosition(position_m),expectedStructural);}
+fn dryFineFluidGradient(position_m:vec3f,expectedStructural:u32)->SvoFinePhiGradient{if(dry.finePhi.counts.x==0u){return SvoFinePhiGradient(vec3f(0.0),0u);}return svoFinePackedGradient(dryFineFluidGridPosition(position_m),expectedStructural);}
 ${createSvoStructuralFluidPrimaryWGSL({
   control: "svoControl",
   geometry: "svoStructuralGeometry",
@@ -519,6 +650,8 @@ ${createSvoStructuralFluidPrimaryWGSL({
   leafWordLengthFunction: "dryStructuralLeafWordLength",
   domainFunction: "dryStructuralFluidDomain",
   domainFunctionBody: "return SvoStructuralSamplingDomain(vec4f(dry.mapping.worldOrigin,0.0),vec4f(dry.mapping.cellSize,0.0),vec4u(dry.fluidDomainMode.xyz,dry.mapping.brickSize),vec4u(dry.mapping.maximumDepth,svoStructuralFluidPrimaryExpectedGeneration,0u,0u));",
+  fineSampleFunction: "dryFineFluidSample",
+  fineGradientFunction: "dryFineFluidGradient",
 })}
 ${svoPrimitiveWGSL}
 ${unifiedLightingShaderLibrary}
@@ -536,9 +669,17 @@ const DRY_GBUFFER_HARD_FEATURE:u32=256u;const DRY_GBUFFER_NO_INTERSECTION:u32=1u
 const DRY_GBUFFER_WORK_EXHAUSTED:u32=2u;const DRY_GBUFFER_INVALID_FIELD:u32=3u;
 const DRY_GBUFFER_FLUID_SURFACE:u32=128u;const DRY_GBUFFER_INSIDE_FLUID:u32=512u;
 const DRY_REVERSED_Z_NEAR_M:f32=0.01;
-var<private> dryFluidPrimaryFailure:u32;var<private> dryFluidInsideAtStart:u32;var<private> dryPrimitiveCandidateFailure:u32;
+var<private> dryFluidPrimaryFailure:u32;var<private> dryFluidInsideAtStart:u32;var<private> dryPrimitiveCandidateFailure:u32;var<private> dryVisibilityIgnoredOwner:u32;var<private> dryThickGlassEnabled:u32;var<private> dryThickGlassFailure:u32;
+fn dryBoundThickGlassOwner(owner:u32)->bool{
+  if(dryThickGlassEnabled==0u){return false;}let count=min(thickGlass.metadata.x,${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u);
+  for(var index=0u;index<${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u;index+=1u){if(index>=count){break;}if(svoThickGlassOwnerId(thickGlass.records[index])==owner){return true;}}
+  return false;
+}
+fn dryOpaqueOwnerSuppressed(owner:u32)->bool{return owner==dry.metadata.z||owner==dryVisibilityIgnoredOwner||dryBoundThickGlassOwner(owner);}
 
 fn missHit()->DryHit { return DryHit(DRY_MISS,vec3f(0.0,1.0,0.0),0u,DRY_OWNER_NONE,SVO_FEATURE_SMOOTH,0u,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u)); }
+fn dryFluidFieldSource(owner:u32)->u32{return select(SVO_GBUFFER_FIELD_FLUID_COARSE,SVO_GBUFFER_FIELD_FLUID_FINE,owner==SVO_FLUID_OWNER_FINE);}
+fn dryIsFluidFieldSource(source:u32)->bool{return source==SVO_GBUFFER_FIELD_FLUID_COARSE||source==SVO_GBUFFER_FIELD_FLUID_FINE;}
 fn qrotWxyz(q:vec4f,v:vec3f)->vec3f { let a=cross(q.yzw,v); return v+2.0*(q.x*a+cross(q.yzw,a)); }
 fn qinvWxyz(q:vec4f,v:vec3f)->vec3f { return qrotWxyz(vec4f(q.x,-q.yzw),v); }
 
@@ -559,7 +700,8 @@ fn dryBoundsInterval(minimum:vec3f,maximum:vec3f,ro:vec3f,rd:vec3f,tMin:f32,tMax
 }
 
 fn directionalLightSceneExitDistance(position:vec3f,directionToLightIn:vec3f)->f32 {
-  let directionToLight=normalize(directionToLightIn);
+  // dryLightSample returns a unit direction for every valid light sample.
+  let directionToLight=directionToLightIn;
   let minimum=vec3f(-0.5*uniforms.container.x,0.0,-0.5*uniforms.container.z);
   let maximum=vec3f(0.5*uniforms.container.x,uniforms.container.y,0.5*uniforms.container.z);
   var enter=0.0;var exit=DRY_MISS;
@@ -677,21 +819,22 @@ fn bodyCandidateVisible(ro:vec3f,rd:vec3f,body:BodyGPU,tMin:f32,tMax:f32)->bool{
   return dryBoundsInterval(-extent,extent,localOrigin,localDirection,tMin,tMax).valid!=0u;
 }
 
-fn nearestBody(ro:vec3f,rd:vec3f)->DryHit {
-  var best=missHit(); for(var index=0u;index<12u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(!bodyCandidateVisible(ro,rd,bodies[index],0.0,best.t)){continue;}let hit=bodyHit(ro,rd,bodies[index]);if(hit.t<best.t){best=hit;best.materialId=0x80000000u|index;best.ownerId=index;}} return best;
+fn bodyBoundingSphereVisible(ro:vec3f,rd:vec3f,body:BodyGPU,tMin:f32,tMax:f32)->bool{
+  let offset=body.positionRadius.xyz-ro;let projected=clamp(dot(offset,rd),tMin,tMax);let closest=ro+rd*projected;let radius=max(body.positionRadius.w,0.0)+1e-5;
+  return dot(closest-body.positionRadius.xyz,closest-body.positionRadius.xyz)<=radius*radius;
 }
 
-fn primitiveHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f)->DryHit {
-  let localOrigin=svoPrimitiveLocalPoint(record,ro); let inverse=vec4f(-record.orientation.xyz,record.orientation.w);
-  let localDirection=svoQuaternionRotate(inverse,rd); let dimensions=svoPrimitiveDimensions_m(record); let kind=svoPrimitiveKind(record);
-  var t=DRY_MISS;
-  if(kind==SVO_KIND_SPHERE){let b=dot(localOrigin,localDirection);let c=dot(localOrigin,localOrigin)-dimensions.x*dimensions.x;let disc=b*b-c;if(disc>=0.0){t=-b-sqrt(disc);if(t<=1e-4){t=-b+sqrt(disc);}}}
-  else if(kind==SVO_KIND_ELLIPSOID){let scaledOrigin=localOrigin/dimensions;let scaledDirection=localDirection/dimensions;let a=dot(scaledDirection,scaledDirection);let b=dot(scaledOrigin,scaledDirection);let c=dot(scaledOrigin,scaledOrigin)-1.0;let disc=b*b-a*c;if(a>1e-9&&disc>=0.0){t=(-b-sqrt(disc))/a;if(t<=1e-4){t=(-b+sqrt(disc))/a;}}}
-  else if(kind==SVO_KIND_BOX){let interval=slabHit(localOrigin,localDirection,dimensions);t=select(interval.x,interval.y,interval.x<=1e-4);if(interval.x>interval.y){t=DRY_MISS;}}
-  else if(kind==SVO_KIND_CYLINDER){let a=dot(localDirection.xz,localDirection.xz);let b=dot(localOrigin.xz,localDirection.xz);let c=dot(localOrigin.xz,localOrigin.xz)-dimensions.x*dimensions.x;if(a>1e-9&&b*b-a*c>=0.0){let candidate=(-b-sqrt(b*b-a*c))/a;let y=localOrigin.y+localDirection.y*candidate;if(candidate>1e-4&&abs(y)<=dimensions.y){t=candidate;}}if(abs(localDirection.y)>1e-7){for(var side=-1.0;side<=1.0;side+=2.0){let candidate=(side*dimensions.y-localOrigin.y)/localDirection.y;let p=localOrigin+localDirection*candidate;if(candidate>1e-4&&candidate<t&&dot(p.xz,p.xz)<=dimensions.x*dimensions.x){t=candidate;}}}}
-  if(!(t>1e-4)){return missHit();}
-  let sample=svoEvaluatePrimitive(record,ro+rd*t,0.0,vec3f(0.0,1.0,0.0));
-  return DryHit(t,sample.normal.xyz,svoPrimitiveMaterialId(record),svoPrimitiveOwnerId(record),sample.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+fn nearestBody(ro:vec3f,rd:vec3f)->DryHit {
+  var best=missHit(); for(var index=0u;index<12u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,best.t)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,best.t)){continue;}let hit=bodyHit(ro,rd,body);if(hit.t<best.t){best=hit;best.materialId=0x80000000u|index;best.ownerId=index;}} return best;
+}
+
+fn primitiveHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit {
+  // Use the shared analytic ray contract directly. In particular, do not call
+  // the bounded closest-point distance evaluator merely to recover an
+  // ellipsoid normal after the ray quadratic has already found the surface.
+  let exact=svoIntersectPrimitiveExact(record,ro,rd,max(tMin,1e-4),tMax);
+  if(exact.status!=SVO_PRIMITIVE_RAY_HIT){return missHit();}
+  return DryHit(exact.t_m,exact.normal.xyz,svoPrimitiveMaterialId(record),svoPrimitiveOwnerId(record),exact.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
 }
 
 const DRY_CANDIDATE_COMPLETE:u32=0u;const DRY_CANDIDATE_INVALID:u32=1u;const DRY_CANDIDATE_EXHAUSTED:u32=2u;
@@ -700,11 +843,17 @@ fn dryCandidateNode(nodeIndex:u32)->SvoPrimitiveRecord{return primitives[dry.can
 fn dryCandidateInterval(node:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryBoundsInterval{
   return dryBoundsInterval(bitcast<vec3f>(node.centerKind.xyz),bitcast<vec3f>(node.dimensionsIdentity.xyz),ro,rd,tMin,tMax);
 }
-fn tracePrimitiveCandidates(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,workLimit:u32)->DryCandidateTrace{
+fn tracePrimitiveCandidates(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,workLimit:u32,opaqueAnyHit:bool)->DryCandidateTrace{
   var best=missHit();best.t=tMax;var bestIndex=0xffffffffu;var workItems=0u;
   let recordOffset=dry.candidatePublication.x;let nodeCount=dry.candidatePublication.y;let root=dry.candidatePublication.z;
   if(dry.candidatePublication.w!=${SVO_PRIMITIVE_CANDIDATE_VERSION}u||recordOffset!=dry.metadata.x||nodeCount==0u||nodeCount>${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES}u||root>=nodeCount||recordOffset+nodeCount>arrayLength(&primitives)){
     return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_INVALID,workItems);
+  }
+  if(nodeCount==1u){
+    if(workLimit<2u){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_EXHAUSTED,workItems);}let node=dryCandidateNode(root);workItems+=1u;let primitiveIndex=node.centerKind.w;
+    if(node.dimensionsIdentity.w!=${SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL}u||primitiveIndex>=recordOffset){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_INVALID,workItems);}
+    if(dryCandidateInterval(node,ro,rd,tMin,tMax).valid==0u){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_COMPLETE,workItems);}workItems+=1u;let record=primitives[primitiveIndex];
+    let owner=svoPrimitiveOwnerId(record);if(dryOpaqueOwnerSuppressed(owner)){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_COMPLETE,workItems);}let hit=primitiveHit(record,ro,rd,tMin,tMax);return DryCandidateTrace(hit,select(0xffffffffu,primitiveIndex,hit.t<DRY_MISS),DRY_CANDIDATE_COMPLETE,workItems);
   }
   var stack:array<u32,${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK}>;var stackCount=1u;stack[0]=root;
   for(var visit=0u;visit<${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES}u;visit+=1u){
@@ -714,7 +863,7 @@ fn tracePrimitiveCandidates(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,workLimit:u32)->
     let leftOrPrimitive=node.centerKind.w;let rightChild=node.dimensionsIdentity.w;
     if(rightChild==${SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL}u){
       if(leftOrPrimitive>=dry.metadata.x||leftOrPrimitive>=recordOffset||workItems>=workLimit){return DryCandidateTrace(best,bestIndex,select(DRY_CANDIDATE_EXHAUSTED,DRY_CANDIDATE_INVALID,leftOrPrimitive>=dry.metadata.x||leftOrPrimitive>=recordOffset),workItems);}workItems+=1u;
-      let record=primitives[leftOrPrimitive];if(svoPrimitiveOwnerId(record)==dry.metadata.z){continue;}let candidate=primitiveHit(record,ro,rd);let tolerance=1e-6*max(1.0,max(candidate.t,best.t));
+      let record=primitives[leftOrPrimitive];let owner=svoPrimitiveOwnerId(record);if(dryOpaqueOwnerSuppressed(owner)){continue;}let candidate=primitiveHit(record,ro,rd,tMin,best.t);if(opaqueAnyHit&&candidate.t<DRY_MISS&&candidate.t>=tMin){return DryCandidateTrace(candidate,leftOrPrimitive,DRY_CANDIDATE_COMPLETE,workItems);}let tolerance=1e-6*max(1.0,max(candidate.t,best.t));
       if(candidate.t<DRY_MISS&&candidate.t>=tMin&&(bestIndex==0xffffffffu||candidate.t<best.t-tolerance||(abs(candidate.t-best.t)<=tolerance&&leftOrPrimitive<bestIndex))){best=candidate;bestIndex=leftOrPrimitive;}
       continue;
     }
@@ -738,7 +887,7 @@ fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex<arrayLength(&materialOwners)){
       let identity=materialOwners[payloadIndex];let owner=identity>>16u;
-      if(owner>=dry.metadata.y&&owner!=dry.metadata.z){let primitiveIndex=owner-dry.metadata.y;if(primitiveIndex<dry.metadata.x&&primitiveIndex<arrayLength(&primitives)){let candidate=primitiveHit(primitives[primitiveIndex],ro,rd);let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,hit.tExit));if(candidate.t>=entry-tolerance&&candidate.t<=cellExit+tolerance){return candidate;}}}
+      if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){let primitiveIndex=owner-dry.metadata.y;if(primitiveIndex<dry.metadata.x&&primitiveIndex<arrayLength(&primitives)){let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,hit.tExit));let candidate=primitiveHit(primitives[primitiveIndex],ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);if(candidate.t<DRY_MISS){return candidate;}}}
     }
     let advance=min(nextT.x,min(nextT.y,nextT.z)); if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
@@ -750,19 +899,37 @@ fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
   // Small authored catalogs use the producer-published conservative BVH in
   // the same binding. Exact intersections occur only at retained leaves.
   if(dry.metadata.x<=${SVO_DRY_SCENE_DIRECT_PRIMITIVE_LIMIT}u){
-    let candidate=tracePrimitiveCandidates(ro,rd,0.0,DRY_MISS,${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES * 2}u);if(candidate.status!=DRY_CANDIDATE_COMPLETE){dryPrimitiveCandidateFailure=select(DRY_GBUFFER_INVALID_FIELD,DRY_GBUFFER_WORK_EXHAUSTED,candidate.status==DRY_CANDIDATE_EXHAUSTED);}return candidate.hit;
+    let candidate=tracePrimitiveCandidates(ro,rd,0.0,DRY_MISS,${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES * 2}u,false);if(candidate.status!=DRY_CANDIDATE_COMPLETE){dryPrimitiveCandidateFailure=select(DRY_GBUFFER_INVALID_FIELD,DRY_GBUFFER_WORK_EXHAUSTED,candidate.status==DRY_CANDIDATE_EXHAUSTED);}return candidate.hit;
   }
   var minimum=0.0; for(var leafVisit=0u;leafVisit<48u;leafVisit+=1u){let ray=SvoRay(ro,minimum,rd,DRY_MISS);let leaf=svoTraverse(ray,dry.mapping);if(leaf.status!=SVO_STATUS_HIT){break;}let payloadHit=traceLeafPayload(ro,rd,leaf);if(payloadHit.t<DRY_MISS){return payloadHit;}minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);} return missHit();
 }
 
 struct DryGlassHit{hit:SvoThinGlassHit,recordIndex:u32}
 fn dryGlassMiss()->DryGlassHit{return DryGlassHit(svoThinGlassMiss(),0u);}
+fn dryGlassBoundingSphereVisible(record:SvoThinGlassRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->bool{
+  let offset=record.centerThickness.xyz-ro;let projected=clamp(dot(offset,rd),tMin,tMax);let closest=ro+rd*projected;let radius=length(vec3f(record.extentIorEpsilon.xy,.5*record.centerThickness.w))+record.extentIorEpsilon.w+1e-5;
+  return dot(closest-record.centerThickness.xyz,closest-record.centerThickness.xyz)<=radius*radius;
+}
 fn traceGlass(ro:vec3f,rd:vec3f,tMin_m:f32,tMax_m:f32,skipCompositeOwned:bool)->DryGlassHit {
   var best=dryGlassMiss();var bestT=tMax_m;
   let paneCount=min(dry.terrain.y,min(arrayLength(&glassPanes),${SVO_SCENE_GLASS_MAXIMUM_PANES}u));
   for(var paneIndex=0u;paneIndex<${SVO_SCENE_GLASS_MAXIMUM_PANES}u;paneIndex+=1u){
-    if(paneIndex>=paneCount){break;}let record=glassPanes[paneIndex];let paneId=svoThinGlassPaneId(record);let compositeOwned=skipCompositeOwned&&dry.terrain.w>0u&&paneId>=dry.terrain.z&&paneId-dry.terrain.z<dry.terrain.w;if(compositeOwned){continue;}let candidate=svoThinGlassIntersect(record,ro,rd,tMin_m,bestT,1e-6,record.extentIorEpsilon.w);
+    if(paneIndex>=paneCount){break;}let record=glassPanes[paneIndex];let paneId=svoThinGlassPaneId(record);let compositeOwned=skipCompositeOwned&&dry.terrain.w>0u&&paneId>=dry.terrain.z&&paneId-dry.terrain.z<dry.terrain.w;let thickReplaced=dryThickGlassEnabled!=0u&&paneId==thickGlass.metadata.z;if(compositeOwned||thickReplaced||!dryGlassBoundingSphereVisible(record,ro,rd,tMin_m,bestT)){continue;}let candidate=svoThinGlassIntersect(record,ro,rd,tMin_m,bestT,1e-6,record.extentIorEpsilon.w);
     if(candidate.valid!=0u&&candidate.t_m<bestT){best=DryGlassHit(candidate,paneIndex);bestT=candidate.t_m;}
+  }
+  return best;
+}
+
+struct DryThickGlassHit{interval:SvoThickGlassInterval,recordIndex:u32}
+fn dryThickGlassMiss()->DryThickGlassHit{return DryThickGlassHit(svoThickGlassEmpty(SVO_THICK_GLASS_MISS),0u);}
+fn dryThickGlassFirst(interval:SvoThickGlassInterval)->SvoThickGlassSurface{var first=interval.exit;if(interval.hasEntry!=0u){first=interval.entry;}return first;}
+fn traceThickGlass(ro:vec3f,rd:vec3f,tMin_m:f32,tMax_m:f32)->DryThickGlassHit{
+  var best=dryThickGlassMiss();var bestT=tMax_m;if(dryThickGlassEnabled==0u){return best;}
+  let count=min(thickGlass.metadata.x,${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u);
+  for(var recordIndex=0u;recordIndex<${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u;recordIndex+=1u){
+    if(recordIndex>=count){break;}let candidate=svoThickGlassIntersect(thickGlass.records[recordIndex],ro,rd,tMin_m,bestT,thickGlass.metadata.y);
+    if(candidate.status==SVO_THICK_GLASS_INVALID||candidate.status==SVO_THICK_GLASS_STALE){dryThickGlassFailure=candidate.status;return dryThickGlassMiss();}
+    if(candidate.status==SVO_THICK_GLASS_HIT){let first=dryThickGlassFirst(candidate);if(first.t_m<bestT){best=DryThickGlassHit(candidate,recordIndex);bestT=first.t_m;}}
   }
   return best;
 }
@@ -772,6 +939,15 @@ fn dryVisibilityStep(status:u32,nodeVisits:u32,leafVisits:u32,workItems:u32,t:f3
 }
 fn dryVisibilityTransmissionStep(nodeVisits:u32,leafVisits:u32,workItems:u32,t:f32,transmittance:vec3f)->SvoVisibilityStep {
   return SvoVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,t,0u,clamp(transmittance,vec3f(0.0),vec3f(1.0)),0u);
+}
+
+// Renderer-local unit-vector variant of the shared bias contract. Surface
+// normals and light/contact directions are normalized at their construction
+// sites, so repeating both inverse-square-roots per visibility ray is waste.
+fn dryBiasedVisibilityRayUnit(surfacePosition_m:vec3f,geometricNormal:vec3f,directionToLight:vec3f,maximumLightDistance_m:f32,cellSize_m:vec3f,biasCells:f32)->SvoVisibilityRay {
+  let projectedCellWidth=dot(abs(geometricNormal),cellSize_m);let originBias_m=max(biasCells,0.0)*projectedCellWidth;
+  let side=select(-1.0,1.0,dot(geometricNormal,directionToLight)>=0.0);let offset=side*geometricNormal*originBias_m;
+  return SvoVisibilityRay(surfacePosition_m+offset,max(0.0,maximumLightDistance_m-dot(offset,directionToLight)),directionToLight,originBias_m);
 }
 
 // Shadow payload lookup mirrors the production leaf DDA, but reports invalid
@@ -788,11 +964,11 @@ fn traceLeafPayloadVisibility(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHi
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex>=arrayLength(&materialOwners)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
     let identity=materialOwners[payloadIndex];let owner=identity>>16u;
-    if(owner>=dry.metadata.y&&owner!=dry.metadata.z){
+    if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){
       let primitiveIndex=owner-dry.metadata.y;
       if(primitiveIndex>=dry.metadata.x||primitiveIndex>=arrayLength(&primitives)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
-      let candidate=primitiveHit(primitives[primitiveIndex],ray.origin_m,ray.direction);let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,min(hit.tExit,ray.tMax_m)));
-      if(candidate.t>=max(entry-tolerance,tMin_m)&&candidate.t<=cellExit+tolerance){return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,candidate.t);}
+      let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,min(hit.tExit,ray.tMax_m)));let candidate=primitiveHit(primitives[primitiveIndex],ray.origin_m,ray.direction,max(entry-tolerance,tMin_m),cellExit+tolerance);
+      if(candidate.t<DRY_MISS){return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,candidate.t);}
     }
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
@@ -814,14 +990,15 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
 
   let bodyCount=min(u32(round(max(uniforms.options.z,0.0))),12u);
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
-    if(bodyIndex>=bodyCount){break;}if(workItems>=remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=1u;
-    if(!bodyCandidateVisible(ray.origin_m,ray.direction,bodies[bodyIndex],tMin_m,bestT)){continue;}let candidate=bodyHit(ray.origin_m,ray.direction,bodies[bodyIndex]);if(candidate.t>=tMin_m&&candidate.t<bestT){bestT=candidate.t;found=true;opaque=true;}
+    if(bodyIndex>=bodyCount){break;}if(bodyIndex==dryVisibilityIgnoredOwner){continue;}if(workItems>=remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=1u;
+    let body=bodies[bodyIndex];if(!bodyBoundingSphereVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let candidate=bodyHit(ray.origin_m,ray.direction,body);if(candidate.t>=tMin_m&&candidate.t<bestT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,candidate.t);}
   }
 
   if(dry.metadata.x<=${SVO_DRY_SCENE_DIRECT_PRIMITIVE_LIMIT}u){
-    let candidate=tracePrimitiveCandidates(ray.origin_m,ray.direction,tMin_m,bestT,remaining.workItems-workItems);workItems+=candidate.workItems;
-    if(candidate.status==DRY_CANDIDATE_INVALID){return dryVisibilityStep(SVO_VIS_STEP_INVALID,nodeVisits,leafVisits,workItems,DRY_MISS);}if(candidate.status==DRY_CANDIDATE_EXHAUSTED){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
-    if(candidate.hit.t<bestT){bestT=candidate.hit.t;found=true;opaque=true;}
+    let onlyIgnoredReceiver=dry.metadata.x==1u&&svoPrimitiveOwnerId(primitives[0])==dryVisibilityIgnoredOwner;
+    if(!onlyIgnoredReceiver){let candidate=tracePrimitiveCandidates(ray.origin_m,ray.direction,tMin_m,bestT,remaining.workItems-workItems,true);workItems+=candidate.workItems;
+      if(candidate.status==DRY_CANDIDATE_INVALID){return dryVisibilityStep(SVO_VIS_STEP_INVALID,nodeVisits,leafVisits,workItems,DRY_MISS);}if(candidate.status==DRY_CANDIDATE_EXHAUSTED){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
+      if(candidate.hit.t<bestT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,candidate.hit.t);}}
   }else{
     var cursor=max(tMin_m,0.0);
     for(var leafAttempt=0u;leafAttempt<${SVO_VISIBILITY_LIMITS.leafVisits}u;leafAttempt+=1u){
@@ -832,7 +1009,7 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
       if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
       if(leaf.status!=SVO_STATUS_HIT){return dryVisibilityStep(SVO_VIS_STEP_INVALID,nodeVisits,leafVisits,workItems,DRY_MISS);}leafVisits+=1u;
       let payloadRay=SvoVisibilityRay(ray.origin_m,bestT,ray.direction,ray.originBias_m);let payload=traceLeafPayloadVisibility(payloadRay,tMin_m,leaf,remaining.workItems-workItems);workItems+=payload.workItems;
-      if(payload.status==SVO_VIS_STEP_HIT){bestT=payload.t_m;found=true;opaque=true;break;}if(payload.status!=SVO_VIS_STEP_MISS){return dryVisibilityStep(payload.status,nodeVisits,leafVisits,workItems,payload.t_m);}
+      if(payload.status==SVO_VIS_STEP_HIT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,payload.t_m);}if(payload.status!=SVO_VIS_STEP_MISS){return dryVisibilityStep(payload.status,nodeVisits,leafVisits,workItems,payload.t_m);}
       cursor=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);
     }
     if(cursor<bestT&&leafVisits>=remaining.leafVisits){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
@@ -841,7 +1018,7 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
   if(terrainEnabled()){
     let terrainWork=${SVO_TERRAIN_FALLBACK_STEPS + SVO_TERRAIN_FALLBACK_REFINEMENTS + 6}u;
     if(workItems+terrainWork>remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=terrainWork;
-    let terrain=traceTerrain(ray.origin_m,ray.direction);if(terrain.t>=tMin_m&&terrain.t<bestT){bestT=terrain.t;found=true;opaque=true;}
+    let terrain=traceTerrain(ray.origin_m,ray.direction);if(terrain.t>=tMin_m&&terrain.t<bestT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,terrain.t);}
   }
   let paneCount=dry.terrain.y;if(workItems+paneCount>remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=paneCount;
   let glass=traceGlass(ray.origin_m,ray.direction,tMin_m,bestT,false);if(glass.hit.valid!=0u&&glass.hit.t_m<bestT){let optics=svoThinGlassOptics(glassPanes[glass.recordIndex],glass.hit,dryThinGlassIncidentIor(DRY_MEDIUM_AIR));bestT=glass.hit.t_m;found=true;opaque=false;glassTransmission=optics.netTransmittance;}
@@ -850,11 +1027,14 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
 
 ${svoVisibilityTraceWGSL}
 
-fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,towardLight:vec3f,finiteDistance_m:f32)->vec3f {
+fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32)->vec3f {
   if(dot(geometricNormal,towardLight)<=0.0){return vec3f(0.0);}
+  if((dry.materialPublication.w&2u)==0u){return vec3f(1.0);}
   let maximumDistance=select(directionalLightSceneExitDistance(position,towardLight),finiteDistance_m,finiteDistance_m>0.0);if(maximumDistance<=0.0){return vec3f(0.0);}
-  let ray=svoBiasedVisibilityRay(position,geometricNormal,towardLight,maximumDistance,dry.mapping.cellSize,${SVO_DRY_SCENE_SHADOW_BIAS_CELLS});
+  let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,towardLight,maximumDistance,dry.mapping.cellSize,${SVO_DRY_SCENE_SHADOW_BIAS_CELLS});
+  dryVisibilityIgnoredOwner=ownerId;
   let result=svoTraceVisibility(ray,SvoVisibilityBudget(${SVO_VISIBILITY_LIMITS.nodeVisits}u,${SVO_VISIBILITY_LIMITS.leafVisits}u,${SVO_VISIBILITY_LIMITS.workItems}u,4u),true,0.001,max(ray.originBias_m,1e-6));
+  dryVisibilityIgnoredOwner=DRY_OWNER_NONE;
   return result.transmittance;
 }
 
@@ -868,9 +1048,9 @@ fn dryContactVisibilityDirection(geometricNormalIn:vec3f,featureId:u32,sampleInd
   let signValue=select(1.0,-1.0,sampleIndex!=0u);return normalize(geometricNormal+signValue*(.55*tangent+.2*bitangent));
 }
 fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32)->vec3f {
-  if(dry.materialPublication.w==0u){return vec3f(1.0);}
+  if((dry.materialPublication.w&1u)==0u){return vec3f(1.0);}
   let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(0.0);}let biasCells=select(${SVO_CONTACT_VISIBILITY_CONTRACT.smoothBiasCells},${SVO_CONTACT_VISIBILITY_CONTRACT.hardFeatureBiasCells},featureId!=SVO_FEATURE_SMOOTH);var visibility=vec3f(0.0);
-  for(var sampleIndex=0u;sampleIndex<${SVO_CONTACT_VISIBILITY_CONTRACT.sampleCount}u;sampleIndex+=1u){let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex);let ray=svoBiasedVisibilityRay(position,geometricNormal,direction,radius,dry.mapping.cellSize,biasCells);let result=svoTraceVisibility(ray,SvoVisibilityBudget(${SVO_CONTACT_VISIBILITY_CONTRACT.maximumNodeVisitsPerSample}u,${SVO_CONTACT_VISIBILITY_CONTRACT.maximumLeafVisitsPerSample}u,${SVO_CONTACT_VISIBILITY_CONTRACT.maximumWorkItemsPerSample}u,${SVO_CONTACT_VISIBILITY_CONTRACT.maximumIntersectionsPerSample}u),true,0.001,max(ray.originBias_m,1e-6));if(result.status==SVO_VIS_STATUS_INVALID||result.status==SVO_VIS_STATUS_EXHAUSTED){return vec3f(0.0);}visibility+=result.transmittance;}
+  for(var sampleIndex=0u;sampleIndex<${SVO_CONTACT_VISIBILITY_CONTRACT.sampleCount}u;sampleIndex+=1u){let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex);let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,direction,radius,dry.mapping.cellSize,biasCells);let result=svoTraceVisibility(ray,SvoVisibilityBudget(${SVO_CONTACT_VISIBILITY_CONTRACT.maximumNodeVisitsPerSample}u,${SVO_CONTACT_VISIBILITY_CONTRACT.maximumLeafVisitsPerSample}u,${SVO_CONTACT_VISIBILITY_CONTRACT.maximumWorkItemsPerSample}u,${SVO_CONTACT_VISIBILITY_CONTRACT.maximumIntersectionsPerSample}u),true,0.001,max(ray.originBias_m,1e-6));if(result.status==SVO_VIS_STATUS_INVALID||result.status==SVO_VIS_STATUS_EXHAUSTED){return vec3f(0.0);}visibility+=result.transmittance;}
   return clamp(visibility/f32(${SVO_CONTACT_VISIBILITY_CONTRACT.sampleCount}),vec3f(0.0),vec3f(1.0));
 }
 
@@ -886,12 +1066,12 @@ fn dryLightSample(light:SvoLightRecord,sampleIndex:u32,position:vec3f)->DryLight
   }else if(light.identity.x==SVO_LIGHT_RECTANGLE_AREA){
     let signValue=select(-1.0,1.0,sampleIndex!=0u);samplePosition+=light.axisUWidth.xyz*(signValue*.45*light.axisUWidth.w)+light.axisVHeight.xyz*(signValue*.2*light.axisVHeight.w);
   }
-  let offset=samplePosition-position;let distanceSquared=dot(offset,offset);if(distanceSquared<=1e-10){return dryInvalidLightSample();}let distance=sqrt(distanceSquared);let towardLight=offset/distance;
+  let offset=samplePosition-position;let distanceSquared=dot(offset,offset);if(distanceSquared<=1e-10){return dryInvalidLightSample();}if(light.positionRange.w>0.0&&distanceSquared>=light.positionRange.w*light.positionRange.w){return dryInvalidLightSample();}let distance=sqrt(distanceSquared);let towardLight=offset/distance;
   let rangeFade=select(1.0,pow(clamp(1.0-distance/max(light.positionRange.w,1e-6),0.0,1.0),2.0),light.positionRange.w>0.0);
   var shapeScale=1.0/max(1.0,distanceSquared);
   if(light.identity.x==SVO_LIGHT_SPHERE_AREA){let area=4.0*UNIFIED_PI*light.shape.x*light.shape.x;shapeScale=area/max(area,distanceSquared);}
   if(light.identity.x==SVO_LIGHT_RECTANGLE_AREA){let area=4.0*light.axisUWidth.w*light.axisVHeight.w;let emitterFacing=max(dot(normalize(light.directionCone.xyz),-towardLight),0.0);shapeScale=emitterFacing*area/max(area,distanceSquared);}
-  return DryLightSample(towardLight,distance,baseRadiance*(rangeFade*shapeScale),1u);
+  let radiance=baseRadiance*(rangeFade*shapeScale);if(max(max(radiance.x,radiance.y),radiance.z)<=0.0){return dryInvalidLightSample();}return DryLightSample(towardLight,distance,radiance,1u);
 }
 fn traceDrySolidScene(ro:vec3f,rd:vec3f)->DryHit {
   var hit=traceStatic(ro,rd);let terrain=traceTerrain(ro,rd);if(terrain.t<hit.t){hit=terrain;}let rigid=nearestBody(ro,rd);if(rigid.t<hit.t){hit=rigid;}
@@ -902,7 +1082,7 @@ fn traceOpaqueScene(ro:vec3f,rd:vec3f)->DryHit {
   var hit=traceDrySolidScene(ro,rd);
   if(dry.fluidDomainMode.w==1u){
     let fluid=svoTraceStructuralFluidPrimary(ro,rd,hit.t,dry.mapping);
-    if(fluid.status==SVO_FLUID_PRIMARY_HIT){hit=DryHit(fluid.t_m,fluid.normal,${VOXEL_MATERIAL_IDS.fluid}u,DRY_OWNER_NONE,SVO_FEATURE_SMOOTH,SVO_GBUFFER_FIELD_FLUID_COARSE,DRY_GBUFFER_MOTION_FLUID,0u,0.0,vec3u(0u));dryFluidInsideAtStart=fluid.insideFluidAtStart;}
+    if(fluid.status==SVO_FLUID_PRIMARY_HIT){hit=DryHit(fluid.t_m,fluid.normal,${VOXEL_MATERIAL_IDS.fluid}u,DRY_OWNER_NONE,SVO_FEATURE_SMOOTH,dryFluidFieldSource(fluid.fieldOwner),DRY_GBUFFER_MOTION_FLUID,0u,0.0,vec3u(0u));dryFluidInsideAtStart=fluid.insideFluidAtStart;}
     else if(fluid.status==SVO_FLUID_PRIMARY_EXHAUSTED){dryFluidPrimaryFailure=DRY_GBUFFER_WORK_EXHAUSTED;}
     else if(fluid.status==SVO_FLUID_PRIMARY_INVALID){dryFluidPrimaryFailure=DRY_GBUFFER_INVALID_FIELD;}
   }
@@ -946,14 +1126,15 @@ fn dryPublishedMaterialValid(material:SvoMaterialRecord,index:u32)->bool{
 fn dryEvaluateSurfaceMaterial(hit:DryHit,position:vec3f)->DrySurfaceMaterial {
   // Temporary bounded primary-visibility material. It is deliberately opaque
   // until the shared media tracer replaces the legacy water compositor.
-  if(hit.fieldSource==SVO_GBUFFER_FIELD_FLUID_COARSE){return DrySurfaceMaterial(vec3f(.035,.22,.25),.12,vec3f(0.0),0.0,vec3f(.0204),1.0,DRY_SURFACE_REGION_NONE,0u,1u,0u);}
+  if(dryIsFluidFieldSource(hit.fieldSource)){return DrySurfaceMaterial(vec3f(.035,.22,.25),.12,vec3f(0.0),0.0,vec3f(.0204),1.0,DRY_SURFACE_REGION_NONE,0u,1u,0u);}
   var materialId=dryResolvedMaterialId(hit);var baseOverride=vec3f(0.0);var useBaseOverride=false;var selectedEmission=vec3f(0.0);
   if((hit.materialId&0x80000000u)!=0u){let body=bodies[hit.materialId&0x7fffffffu];baseOverride=body.colorSelected.xyz;useBaseOverride=true;selectedEmission=body.colorSelected.w*vec3f(.12,.42,.32);}
   if(materialId>=dry.materialPublication.x||materialId>=arrayLength(&materials)){return dryInvalidSurfaceMaterial();}let material=materials[materialId];if(!dryPublishedMaterialValid(material,materialId)){return dryInvalidSurfaceMaterial();}
-  var base=select(material.baseColorOpacity.xyz,baseOverride,useBaseOverride);var regionId=DRY_SURFACE_REGION_NONE;var variationFlags=0u;
+  var base=select(material.baseColorOpacity.xyz,baseOverride,useBaseOverride);var roughness=material.emissiveRoughness.w;var regionId=DRY_SURFACE_REGION_NONE;var variationFlags=0u;
   let terrainPolicyValid=material.identity.z==SVO_MATERIAL_FUNCTION_GARDEN_TERRAIN&&dry.terrainMaterial.policyVersion==1u&&dry.terrainMaterial.materialId==materialId&&materialId==dry.terrain.x;
   if(terrainPolicyValid){let terrainSample=svoTerrainMaterial(dry.terrainMaterial,position,hit.normal);base=terrainSample.colorLinear;regionId=terrainSample.regionId;variationFlags=terrainSample.variationFlags;}
-  return DrySurfaceMaterial(base,material.emissiveRoughness.w,material.emissiveRoughness.xyz+selectedEmission,material.surface.x,vec3f(svoMaterialDielectricF0(material)),material.surface.y,regionId,variationFlags,1u,0u);
+  else{let procedural=svoProceduralMaterial(material.identity.z,base,roughness,position);base=procedural.baseColorLinear;roughness=procedural.roughness;variationFlags=procedural.variationFlags;}
+  return DrySurfaceMaterial(base,roughness,material.emissiveRoughness.xyz+selectedEmission,material.surface.x,vec3f(svoMaterialDielectricF0(material)),material.surface.y,regionId,variationFlags,1u,0u);
 }
 fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   if(hit.t>=DRY_MISS){return dryEnvironment(rd,0.0);}let position=ro+rd*hit.t;let surface=dryEvaluateSurfaceMaterial(hit,position);
@@ -962,7 +1143,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   let lightCount=min(dryLighting.metadata.x,min(${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u,${SVO_LIGHT_MAXIMUM_RECORDS}u));
   for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
     if(lightIndex>=lightCount||sampleBudget>=${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(1u,${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u,area);
-    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u){continue;}let visibility=dryLightVisibility(position,hit.normal,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
+    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,hit.normal,hit.ownerId,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let fresnel=unifiedSchlick(max(dot(hit.normal,viewDirection),0.0),f0);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId);let diffuseEnvironment=diffuseColor*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*fresnel;
   return max(surface.emissive+diffuseEnvironment+specularEnvironment+direct,vec3f(0.0));
@@ -976,6 +1157,28 @@ fn shadeThinGlass(glass:DryGlassHit,opaque:DryHit,ro:vec3f,rd:vec3f)->DryGlassSu
   let reflected=dryEnvironment(reflect(rd,glass.hit.geometricNormal),.04);let transmitted=shadeDryOpaque(opaque,ro,rd);
   let color=reflected*optics.fresnel+transmitted*optics.netTransmittance;
   return DryGlassSurface(color,glass.hit.t_m,svoThinGlassMaterialId(record),svoThinGlassOwnerId(record),svoThinGlassPaneId(record),0u);
+}
+
+fn dryThickGlassEmission(materialId:u32)->vec3f{
+  if(materialId>=dry.materialPublication.x||materialId>=arrayLength(&materials)){return vec3f(0.0);}let material=materials[materialId];
+  if(!svoMaterialValid(material,materialId)||material.identity.y!=dry.materialPublication.y){return vec3f(0.0);}return material.emissiveRoughness.xyz;
+}
+fn shadeThickGlass(glass:DryThickGlassHit,ro:vec3f,rd:vec3f)->DryGlassSurface{
+  let record=thickGlass.records[glass.recordIndex];let first=dryThickGlassFirst(glass.interval);let ior=record.radiiYzIorEpsilon.z;
+  let fromIor=select(1.0,ior,glass.interval.insideAtStart!=0u);let toIor=select(ior,1.0,glass.interval.insideAtStart!=0u);
+  let firstOptics=svoThickGlassInterface(record,first,rd,fromIor,toIor,0.0);let reflected=dryEnvironment(firstOptics.reflectedDirection,.04);var transmitted=vec3f(0.0);var transmission=vec3f(0.0);
+  if(firstOptics.totalInternalReflection==0u){
+    if(glass.interval.insideAtStart!=0u){let origin=first.position_m+firstOptics.refractedDirection*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(origin,firstOptics.refractedDirection);transmitted=shadeDryOpaque(opaque,origin,firstOptics.refractedDirection);transmission=vec3f(1.0-firstOptics.fresnel);}
+    else if(glass.interval.tangent!=0u){let origin=first.position_m+rd*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(origin,rd);transmitted=shadeDryOpaque(opaque,origin,rd);transmission=vec3f(1.0-firstOptics.fresnel);}
+    else{
+      let insideOrigin=first.position_m+firstOptics.refractedDirection*record.radiiYzIorEpsilon.w;let inside=svoThickGlassIntersect(record,insideOrigin,firstOptics.refractedDirection,0.0,record.absorptionPath.w,thickGlass.metadata.y);
+      if(inside.status==SVO_THICK_GLASS_HIT){let exitSurface=inside.exit;let exitOptics=svoThickGlassInterface(record,exitSurface,firstOptics.refractedDirection,ior,1.0,inside.opticalPath_m);
+        if(exitOptics.totalInternalReflection==0u){let outsideOrigin=exitSurface.position_m+exitOptics.refractedDirection*record.radiiYzIorEpsilon.w;let opaque=traceOpaqueScene(outsideOrigin,exitOptics.refractedDirection);transmitted=shadeDryOpaque(opaque,outsideOrigin,exitOptics.refractedDirection);transmission=exitOptics.absorptionTint*(1.0-firstOptics.fresnel)*(1.0-exitOptics.fresnel);}
+      }
+    }
+  }
+  let materialId=svoThickGlassMaterialId(record);let color=reflected*firstOptics.fresnel+transmitted*transmission+dryThickGlassEmission(materialId);
+  return DryGlassSurface(max(color,vec3f(0.0)),first.t_m,materialId,svoThickGlassOwnerId(record),svoThickGlassId(record),0u);
 }
 
 struct VertexOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
@@ -1005,7 +1208,7 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
 }
 
 @fragment fn fragmentMain(input:VertexOut)->DryFragmentOut {
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryPrimitiveCandidateFailure=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryPrimitiveCandidateFailure=0u;dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;let thickBinderValid=thickGlass.metadata.x>0u&&thickGlass.metadata.x<=${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u&&thickGlass.metadata.y!=0u&&thickGlass.metadata.w==${SVO_DRY_THICK_GLASS_BINDER_VERSION}u;dryThickGlassEnabled=select(0u,1u,thickBinderValid&&dry.fluidDomainMode.w!=2u);
   if(dry.fluidDomainMode.w==2u){
     let solid=traceDrySolidScene(ro,rd);let sceneDistance=max(max(uniforms.container.x,uniforms.container.y),uniforms.container.z)*8.0;
     if(dryPrimitiveCandidateFailure!=0u){return dryFragmentOut(svoGBufferMiss(vec3f(.22,.005,.02),DRY_GBUFFER_FIELD_ANALYTIC,dryPublicationGeneration(),dryPrimitiveCandidateFailure,4096u),0.0);}
@@ -1015,12 +1218,14 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
       let initialMedium=select(DRY_MEDIUM_AIR,DRY_MEDIUM_WATER,first.insideFluidAtStart!=0u);let media=svoTraceStructuralFluidMedia(SvoFluidMediaRay(ro,sceneDistance,rd,0.0),initialMedium,publicationState[0],max(1e-5,min(dry.mapping.cellSize.x,min(dry.mapping.cellSize.y,dry.mapping.cellSize.z))*1e-3),max(1e-5,min(dry.mapping.cellSize.x,min(dry.mapping.cellSize.y,dry.mapping.cellSize.z))*1e-3),vec3f(.16,.32,.38));
       if(media.status==SVO_FLUID_MEDIA_RESULT_INVALID||media.status==SVO_FLUID_MEDIA_RESULT_EXHAUSTED){let failure=select(DRY_GBUFFER_INVALID_FIELD,DRY_GBUFFER_WORK_EXHAUSTED,media.status==SVO_FLUID_MEDIA_RESULT_EXHAUSTED);return dryFragmentOut(svoGBufferMiss(vec3f(.22,.005,.02),SVO_GBUFFER_FIELD_FLUID_COARSE,media.generation,failure,select(8192u,4096u,failure==DRY_GBUFFER_WORK_EXHAUSTED)),0.0);}
       let normal=first.normal;let cosine=clamp(abs(dot(rd,normal)),0.0,1.0);let fresnel=${WATER_OPTICS.fresnelF0}+(1.0-${WATER_OPTICS.fresnelF0})*pow(1.0-cosine,5.0);let reflected=dryEnvironment(reflect(rd,normal),.04);let transmitted=dryEnvironment(media.direction,.08);let radiance=max(media.inscatter+media.throughput*transmitted+reflected*fresnel,vec3f(0.0));let mediaBefore=select(DRY_MEDIUM_AIR,DRY_MEDIUM_WATER,first.insideFluidAtStart!=0u);let mediaAfter=select(DRY_MEDIUM_WATER,media.currentMedium,first.insideFluidAtStart!=0u);var flags=DRY_GBUFFER_FLUID_SURFACE;if(first.insideFluidAtStart!=0u){flags|=DRY_GBUFFER_INSIDE_FLUID;}
-      let targets=svoGBufferSurface(radiance,first.t_m,normal,normal,vec4u(${VOXEL_MATERIAL_IDS.fluid}u,DRY_OWNER_NONE,mediaBefore,mediaAfter),vec3f(0.0),DRY_GBUFFER_MOTION_FLUID,SVO_GBUFFER_FIELD_FLUID_COARSE,media.generation,flags,SVO_FEATURE_SMOOTH);return dryFragmentOut(targets,dryHardwareDepth(first.t_m,rd,forward));
+      let targets=svoGBufferSurface(radiance,first.t_m,normal,normal,vec4u(${VOXEL_MATERIAL_IDS.fluid}u,DRY_OWNER_NONE,mediaBefore,mediaAfter),vec3f(0.0),DRY_GBUFFER_MOTION_FLUID,dryFluidFieldSource(first.fieldOwner),media.generation,flags,SVO_FEATURE_SMOOTH);return dryFragmentOut(targets,dryHardwareDepth(first.t_m,rd,forward));
     }
   }
+  var thick=traceThickGlass(ro,rd,0.0,DRY_MISS);if(dryThickGlassFailure!=0u){dryThickGlassEnabled=0u;thick=dryThickGlassMiss();}
   let opaque=traceOpaqueScene(ro,rd);if(dryPrimitiveCandidateFailure!=0u){return dryFragmentOut(svoGBufferMiss(vec3f(.22,.005,.02),DRY_GBUFFER_FIELD_ANALYTIC,dryPublicationGeneration(),dryPrimitiveCandidateFailure,4096u),0.0);}let glass=traceGlass(ro,rd,0.0,opaque.t,true);var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;
-  let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;var glassSurface=DryGlassSurface(vec3f(0.0),DRY_MISS,0u,DRY_OWNER_NONE,0u,0u);
+  let thickFirst=dryThickGlassFirst(thick.interval);let thickVisible=thick.interval.status==SVO_THICK_GLASS_HIT&&thickFirst.t_m<opaque.t;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t&&(!thickVisible||glass.hit.t_m<thickFirst.t_m);var glassSurface=DryGlassSurface(vec3f(0.0),DRY_MISS,0u,DRY_OWNER_NONE,0u,0u);
   if(glassVisible){glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
+  else if(thickVisible){glassSurface=shadeThickGlass(thick,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);let radiance=max(color*vignette,vec3f(0.0));let generation=dryPublicationGeneration();
   if(dryFluidPrimaryFailure!=0u){let flags=select(8192u,4096u,dryFluidPrimaryFailure==DRY_GBUFFER_WORK_EXHAUSTED);return dryFragmentOut(svoGBufferMiss(vec3f(.22,.005,.02),SVO_GBUFFER_FIELD_FLUID_COARSE,generation,dryFluidPrimaryFailure,flags),0.0);}
   if(glassVisible){
@@ -1028,8 +1233,13 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
     let targets=svoGBufferSurface(radiance,depth,glass.hit.geometricNormal,glass.hit.geometricNormal,vec4u(glassSurface.materialId,glassSurface.ownerId,media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID,SVO_FEATURE_SMOOTH);
     return dryFragmentOut(targets,dryHardwareDepth(depth,rd,forward));
   }
+  if(thickVisible){
+    let media=dryMediumPair(rd,thickFirst.normal,DRY_MEDIUM_GLASS);
+    let targets=svoGBufferSurface(radiance,depth,thickFirst.normal,thickFirst.normal,vec4u(glassSurface.materialId,glassSurface.ownerId,media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID,SVO_FEATURE_SMOOTH);
+    return dryFragmentOut(targets,dryHardwareDepth(depth,rd,forward));
+  }
   if(opaque.t<DRY_MISS){
-    let surfaceMedium=select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_WATER,opaque.fieldSource==SVO_GBUFFER_FIELD_FLUID_COARSE);let media=dryMediumPair(rd,opaque.normal,surfaceMedium);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}if(opaque.fieldSource==SVO_GBUFFER_FIELD_FLUID_COARSE){flags|=DRY_GBUFFER_FLUID_SURFACE;if(dryFluidInsideAtStart!=0u){flags|=DRY_GBUFFER_INSIDE_FLUID;}}
+    let surfaceMedium=select(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_WATER,dryIsFluidFieldSource(opaque.fieldSource));let media=dryMediumPair(rd,opaque.normal,surfaceMedium);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}if(dryIsFluidFieldSource(opaque.fieldSource)){flags|=DRY_GBUFFER_FLUID_SURFACE;if(dryFluidInsideAtStart!=0u){flags|=DRY_GBUFFER_INSIDE_FLUID;}}
     let targets=svoGBufferSurface(radiance,opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
     return dryFragmentOut(targets,dryHardwareDepth(opaque.t,rd,forward));
   }
@@ -1056,6 +1266,7 @@ export class SparseVoxelDrySceneRenderer {
   private readonly paramsBuffer: GPUBuffer;
   private readonly lightingBuffer: GPUBuffer;
   private readonly rigidMotionUniformBuffer: GPUBuffer;
+  private readonly thickGlassUniformBuffer: GPUBuffer;
   private rigidMotionSource?: GPUBuffer;
   private readonly gBufferTargets: SparseVoxelGBufferTargetArena;
   private readonly pickingReadback: SparseVoxelGpuPickingReadbackRing;
@@ -1066,6 +1277,7 @@ export class SparseVoxelDrySceneRenderer {
   private paramsWords?: Uint32Array<ArrayBuffer>;
   private source?: SparseVoxelSceneRenderSource;
   private scene?: SparseVoxelDrySceneData;
+  private fineFluidCapability?: SvoFineFluidGpuCapability;
 
   constructor(
     private readonly device: GPUDevice,
@@ -1079,6 +1291,7 @@ export class SparseVoxelDrySceneRenderer {
     this.paramsBuffer = device.createBuffer({ label: "Sparse voxel dry scene parameters", size: SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.lightingBuffer = device.createBuffer({ label: "Sparse voxel dry scene lighting arena", size: SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rigidMotionUniformBuffer = device.createBuffer({ label: "Sparse voxel rigid motion uniform mirror", size: SVO_DRY_RIGID_MOTION_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.thickGlassUniformBuffer = device.createBuffer({ label: "Sparse voxel thick-glass uniform binder", size: SVO_DRY_THICK_GLASS_ARENA_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.gBufferTargets = new SparseVoxelGBufferTargetArena(device);
     this.pickingReadback = new SparseVoxelGpuPickingReadbackRing(device);
     this.temporalAccumulator = new SparseVoxelTemporalAccumulator(device);
@@ -1090,17 +1303,7 @@ export class SparseVoxelDrySceneRenderer {
       throw new Error(`Sparse voxel dry scene requires ${SVO_STRUCTURAL_FLUID_PRIMARY_STORAGE_BINDINGS} fragment storage buffers; adapter exposes ${fragmentStorageLimit}`);
     }
     const shaderModule = await checkedModule(this.device, drySceneShader);
-    this.layout = this.device.createBindGroupLayout({ label: "Sparse voxel dry scene bindings", entries: [
-      { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-      { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-      ...[2,3,4,5,6,7,8].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" as const } })),
-      { binding: 9, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-      { binding: 10, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
-      { binding: 11, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
-      { binding: 12, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
-      { binding: 13, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-      { binding: 14, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-    ] });
+    this.layout = this.device.createBindGroupLayout({ label: "Sparse voxel dry scene bindings", entries: sparseVoxelDrySceneBindGroupLayoutEntries() });
     this.pipeline = await this.device.createRenderPipelineAsync({
       label: "Sparse voxel dry scene", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
       vertex: { module: shaderModule, entryPoint: "vertexMain" }, fragment: { module: shaderModule, entryPoint: "fragmentMain", targets: [
@@ -1154,7 +1357,17 @@ export class SparseVoxelDrySceneRenderer {
       this.writeParams(source!, scene!);
       const lightingArena = packSparseVoxelDrySceneLightingArena(source!, scene!);
       if (lightingArena) this.device.queue.writeBuffer(this.lightingBuffer, 0, lightingArena);
+      this.device.queue.writeBuffer(this.thickGlassUniformBuffer, 0, packSparseVoxelDrySceneThickGlassArena(scene));
     }
+    this.rebuild();
+  }
+
+  /** Bind renderer-owned fine visibility without changing water presentation ownership. */
+  setFineFluidCapability(capability?: SvoFineFluidGpuCapability): void {
+    const next = canConsumeSvoFineFluidCapability(capability) ? capability : undefined;
+    if (this.fineFluidCapability?.arena.buffer === next?.arena.buffer) return;
+    this.fineFluidCapability = next;
+    if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) this.writeParams(this.source, this.scene);
     this.rebuild();
   }
 
@@ -1170,7 +1383,8 @@ export class SparseVoxelDrySceneRenderer {
     floats.set(scene.lightColor ?? [1.04, 1.0, 0.91], 20);
     words.set([scene.terrainMaterialId ?? 0xffff_ffff, (scene.glassRecords?.byteLength ?? 0) / SVO_THIN_GLASS_RECORD_STRIDE_BYTES, scene.primaryCompositeOwnedGlassPaneIdBase ?? 0xffff_ffff, scene.primaryCompositeOwnedGlassPaneCount ?? 0], SVO_DRY_SCENE_PARAMS_LAYOUT.terrainWordOffset);
     if (scene.terrainMaterialMetadata) words.set(scene.terrainMaterialMetadata, SVO_DRY_SCENE_PARAMS_LAYOUT.terrainMaterialWordOffset);
-    words.set([pbrMaterials.count, pbrMaterials.revision, pbrMaterials.strideBytes, scene.contactVisibilityEnabled ? 1 : 0], SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset);
+    const visibilityFlags = (scene.contactVisibilityEnabled ? 1 : 0) | (scene.shadowVisibilityEnabled === false ? 0 : 2);
+    words.set([pbrMaterials.count, pbrMaterials.revision, pbrMaterials.strideBytes, visibilityFlags], SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset);
     const fluidDimensions = structural.domain.dimensionsCells ?? [0, 0, 0];
     words.set([...fluidDimensions, svoFluidPrimaryModeWord(scene.fluidPrimaryMode, scene.directFluidMediaEndToEndValidated)], SVO_DRY_SCENE_PARAMS_LAYOUT.fluidDomainWordOffset);
     const candidates = this.primitiveCandidateArena;
@@ -1180,6 +1394,7 @@ export class SparseVoxelDrySceneRenderer {
       candidates.candidateRootNodeIndex,
       candidates.candidateVersion,
     ] : [0, 0, 0, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.primitiveCandidateWordOffset);
+    if (this.fineFluidCapability) words.set(this.fineFluidCapability.paramsWords, SVO_DRY_SCENE_PARAMS_LAYOUT.finePhiWordOffset);
     if (this.paramsWords?.length === words.length && words.every((word, index) => word === this.paramsWords![index])) return;
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
     this.paramsWords = Uint32Array.from(words);
@@ -1192,11 +1407,12 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.bodyBuffer } },
       { binding: 2, resource: structural.control }, { binding: 3, resource: structural.nodes }, { binding: 4, resource: structural.leaves },
       { binding: 5, resource: structural.materialOwners }, { binding: 6, resource: source.pbrMaterials!.binding }, { binding: 7, resource: { buffer: this.primitiveBuffer } },
-      { binding: 8, resource: structural.publication.state }, { binding: 9, resource: { buffer: this.paramsBuffer } },
+      { binding: 8, resource: this.fineFluidCapability?.arena ?? structural.publication.state }, { binding: 9, resource: { buffer: this.paramsBuffer } },
       { binding: 10, resource: { buffer: this.glassBuffer } },
       { binding: 11, resource: structural.geometry }, { binding: 12, resource: structural.fluidLeafStates },
       { binding: 13, resource: { buffer: this.lightingBuffer } },
       { binding: 14, resource: { buffer: this.rigidMotionUniformBuffer } },
+      { binding: 15, resource: { buffer: this.thickGlassUniformBuffer } },
     ] });
   }
 
@@ -1231,6 +1447,9 @@ export class SparseVoxelDrySceneRenderer {
 
   invalidateTemporalHistory(): void { this.temporalAccumulator.invalidate(); }
 
+  private lastTemporalEncoded = false;
+  get temporalEncodedLastFrame(): boolean { return this.lastTemporalEncoded; }
+
   /** Auxiliary MRTs and reversed-Z depth for future temporal/picking consumers. */
   get gBufferTextures(): SparseVoxelGBufferTextures | undefined {
     return this.gBufferTargets.textures;
@@ -1254,7 +1473,8 @@ export class SparseVoxelDrySceneRenderer {
     }, () => this.pickingFrameToken === frameToken && this.lastPickingTarget === radianceDepth);
   }
 
-  encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, timestampWrites?: TimestampRange, temporalFrame?: SparseVoxelTemporalFrameState): boolean {
+  encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, timestampWrites?: TimestampRange, temporalFrame?: SparseVoxelTemporalFrameState, temporalTimestampWrites?: TimestampRange): boolean {
+    this.lastTemporalEncoded = false;
     if (!this.pipeline || !this.bindGroup) return false;
     const gBufferViews = this.gBufferTargets.views;
     if (!gBufferViews) return false;
@@ -1279,7 +1499,7 @@ export class SparseVoxelDrySceneRenderer {
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, this.bindGroup); pass.draw(3); pass.end();
     this.lastPickingTarget = targetTexture;
     const gBuffer = this.gBufferTargets.textures;
-    if (temporalFrame && targetTexture && gBuffer) this.temporalAccumulator.encode(encoder, targetTexture, gBuffer, temporalFrame);
+    if (temporalFrame && targetTexture && gBuffer) this.lastTemporalEncoded = this.temporalAccumulator.encode(encoder, targetTexture, gBuffer, temporalFrame, temporalTimestampWrites);
     return true;
   }
 
@@ -1289,6 +1509,7 @@ export class SparseVoxelDrySceneRenderer {
     this.paramsBuffer.destroy();
     this.lightingBuffer.destroy();
     this.rigidMotionUniformBuffer.destroy();
+    this.thickGlassUniformBuffer.destroy();
     this.gBufferTargets.destroy();
     this.temporalAccumulator.destroy();
     this.pickingReadback.destroy();

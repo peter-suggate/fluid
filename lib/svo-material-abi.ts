@@ -1,5 +1,5 @@
 import { GLASS_OPTICS, WATER_OPTICS, type LinearRgb } from "./webgpu-lighting";
-import type { EnvironmentProxyMaterial } from "./voxel-environments";
+import type { EnvironmentProxyMaterial, EnvironmentProxyPrimitive } from "./voxel-environments";
 import { VOXEL_MATERIAL_IDS, VOXEL_MATERIALS, type VoxelMaterial } from "./voxel-scene";
 
 /** Six host-shareable 16-byte lanes. Stable material IDs remain direct indices. */
@@ -15,7 +15,29 @@ export const SVO_MATERIAL_FLAGS = Object.freeze({
 export const SVO_MATERIAL_FUNCTION_IDS = Object.freeze({
   none: 0,
   gardenTerrain: 1,
+  architecturalSurface: 2,
+  wood: 3,
+  stone: 4,
+  foliage: 5,
+  ceramic: 6,
+  brushedMetal: 7,
+  organic: 8,
 } as const);
+
+/** Stable semantic selection; it depends only on authored group/tags, never publication order. */
+export function svoMaterialFunctionIdForEnvironmentProxy(
+  primitive: Pick<EnvironmentProxyPrimitive, "group" | "tags">,
+): number {
+  const semantic = `${primitive.group} ${primitive.tags.join(" ")}`;
+  if (primitive.tags.includes("shell")) return SVO_MATERIAL_FUNCTION_IDS.architecturalSurface;
+  if (/leaf|foliage|hedge|flower|fruit|canopy/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.foliage;
+  if (/wood|cedar|bench|stool|bucket|tree|trunk/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.wood;
+  if (/stone|column|plinth|pebble|limestone/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.stone;
+  if (/pot|planter|ceramic|clay|tile/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.ceramic;
+  if (/steel|metal|pipe|frame|fixture|instrument|console|monitor/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.brushedMetal;
+  if (/mushroom|organic/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.organic;
+  return SVO_MATERIAL_FUNCTION_IDS.none;
+}
 
 export interface SvoMaterialRecord {
   materialId: number;
@@ -129,11 +151,12 @@ export function svoMaterialFromEnvironmentProxyMaterial(
   materialId: number,
   material: EnvironmentProxyMaterial,
   revision = 1,
+  materialFunctionId: number = SVO_MATERIAL_FUNCTION_IDS.none,
 ): SvoMaterialRecord {
   return canonicalSvoMaterialRecord({
     materialId,
     revision,
-    materialFunctionId: SVO_MATERIAL_FUNCTION_IDS.none,
+    materialFunctionId,
     flags: SVO_MATERIAL_FLAGS.opaque,
     baseColorLinear: material.colorLinear,
     opacity: 1,
@@ -209,6 +232,13 @@ const SVO_MATERIAL_FLAG_DIELECTRIC:u32=2u;
 const SVO_MATERIAL_FLAG_THIN_WALL:u32=4u;
 const SVO_MATERIAL_FUNCTION_NONE:u32=0u;
 const SVO_MATERIAL_FUNCTION_GARDEN_TERRAIN:u32=1u;
+const SVO_MATERIAL_FUNCTION_ARCHITECTURAL_SURFACE:u32=2u;
+const SVO_MATERIAL_FUNCTION_WOOD:u32=3u;
+const SVO_MATERIAL_FUNCTION_STONE:u32=4u;
+const SVO_MATERIAL_FUNCTION_FOLIAGE:u32=5u;
+const SVO_MATERIAL_FUNCTION_CERAMIC:u32=6u;
+const SVO_MATERIAL_FUNCTION_BRUSHED_METAL:u32=7u;
+const SVO_MATERIAL_FUNCTION_ORGANIC:u32=8u;
 fn svoMaterialValid(material:SvoMaterialRecord,index:u32)->bool{
   return material.identity.x==index&&index!=0u&&material.identity.w!=0u;
 }

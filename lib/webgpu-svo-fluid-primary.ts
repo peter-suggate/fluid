@@ -92,6 +92,10 @@ export interface SvoStructuralFluidPrimaryWgslNames {
   domainFunction?: string;
   /** Optional trusted WGSL body; injected before shared helpers for Chrome's no-forward-call frontend. */
   domainFunctionBody?: string;
+  /** Optional renderer-owned fine sampler; invalid samples retain exact coarse ownership. */
+  fineSampleFunction?: string;
+  /** Optional matching fine gradient. It is accepted only for a fine-owned root. */
+  fineGradientFunction?: string;
 }
 
 function identifier(value: string | undefined, fallback: string): string {
@@ -122,7 +126,12 @@ export function createSvoStructuralFluidPrimaryWGSL(names: SvoStructuralFluidPri
     leafStates: identifier(names.leafStates, "svoStructuralLeafStates"),
     publication: identifier(names.publication, "svoStructuralPublication"),
     domainFunction: identifier(names.domainFunction, "svoStructuralFluidPrimaryDomain"),
+    fineSampleFunction: names.fineSampleFunction ? identifier(names.fineSampleFunction, "") : undefined,
+    fineGradientFunction: names.fineGradientFunction ? identifier(names.fineGradientFunction, "") : undefined,
   };
+  if (Boolean(resolved.fineSampleFunction) !== Boolean(resolved.fineGradientFunction)) {
+    throw new RangeError("Fine structural sampling requires both sample and gradient functions");
+  }
   let shared = svoStructuralFluidVisibilityWGSL;
   const usesTypedNodes = Boolean(resolved.nodeWordFunction && resolved.nodeWordLengthFunction);
   const usesTypedLeaves = Boolean(resolved.leafWordFunction && resolved.leafWordLengthFunction);
@@ -147,6 +156,15 @@ export function createSvoStructuralFluidPrimaryWGSL(names: SvoStructuralFluidPri
     ["svoStructuralPublication", resolved.publication],
   ] as const) shared = replaceIdentifier(shared, from, to);
   shared = replaceIdentifier(shared, "svoStructuralFluidDomain", `${resolved.domainFunction}()`);
+  if (resolved.fineSampleFunction) {
+    const coarseAdapter = /fn svoFluidSampleAt\(position_m:vec3f\)->SvoFluidOwnedSample\{[\s\S]*?\n\}/;
+    const fineAdapter = `fn svoFluidSampleAt(position_m:vec3f)->SvoFluidOwnedSample{
+  let coarse=svoStructuralCoarseFluidTrilinear(${resolved.domainFunction}(),position_m);let fine=${resolved.fineSampleFunction}(position_m,svoStructuralFluidPrimaryExpectedGeneration);
+  return svoResolveFluidPhi(SvoFluidFieldValue(coarse.phi_m,select(0u,1u,coarse.status==SVO_STRUCTURAL_SAMPLE_VALID)),SvoFluidFieldValue(fine.phi_m,fine.valid));
+}`;
+    if (!coarseAdapter.test(shared)) throw new Error("Structural fluid sample adapter marker is missing");
+    shared = shared.replace(coarseAdapter, fineAdapter);
+  }
   const firstHelper = shared.indexOf("fn svoStructuralInvalid(");
   if (firstHelper < 0) throw new Error("Structural fluid WGSL helper marker is missing");
   const domainDeclaration = `var<private> svoStructuralFluidPrimaryExpectedGeneration:u32;\n${names.domainFunctionBody === undefined ? "" : `fn ${resolved.domainFunction}()->SvoStructuralSamplingDomain{${names.domainFunctionBody}}\n`}`;
@@ -168,16 +186,29 @@ struct SvoStructuralFluidPrimaryHit {
   insideFluidAtStart:u32,
   fieldSteps:u32,
   nodeVisits:u32,
+  fieldOwner:u32,
 }
 
-fn svoStructuralFluidPrimaryResult(status:u32,t_m:f32,normal:vec3f,insideAtStart:u32,steps:u32,nodeVisits:u32)->SvoStructuralFluidPrimaryHit{
-  return SvoStructuralFluidPrimaryHit(status,t_m,normal,insideAtStart,steps,nodeVisits);
+fn svoStructuralFluidPrimaryResult(status:u32,t_m:f32,normal:vec3f,insideAtStart:u32,steps:u32,nodeVisits:u32,fieldOwner:u32)->SvoStructuralFluidPrimaryHit{
+  return SvoStructuralFluidPrimaryHit(status,t_m,normal,insideAtStart,steps,nodeVisits,fieldOwner);
+}
+
+struct SvoStructuralFluidOwnedTrilinear { phi_m:f32,status:u32,nodeVisits:u32,owner:u32 }
+fn svoStructuralFluidPrimarySample(domain:SvoStructuralSamplingDomain,position_m:vec3f)->SvoStructuralFluidOwnedTrilinear{
+  let coarse=svoStructuralCoarseFluidTrilinear(domain,position_m);
+  ${resolved.fineSampleFunction ? `let fine=${resolved.fineSampleFunction}(position_m,svoStructuralFluidPrimaryExpectedGeneration);let owned=svoResolveFluidPhi(SvoFluidFieldValue(coarse.phi_m,select(0u,1u,coarse.status==SVO_STRUCTURAL_SAMPLE_VALID)),SvoFluidFieldValue(fine.phi_m,fine.valid));return SvoStructuralFluidOwnedTrilinear(owned.phi_m,select(coarse.status,SVO_STRUCTURAL_SAMPLE_VALID,owned.valid!=0u),coarse.nodeVisits,owned.owner);` : `return SvoStructuralFluidOwnedTrilinear(coarse.phi_m,coarse.status,coarse.nodeVisits,select(SVO_FLUID_OWNER_NONE,SVO_FLUID_OWNER_COARSE,coarse.status==SVO_STRUCTURAL_SAMPLE_VALID));`}
+}
+fn svoStructuralFluidPrimaryNormal(position_m:vec3f,owner:u32,domain:SvoStructuralSamplingDomain,rayDirection:vec3f)->SvoFluidNormal{
+  ${resolved.fineGradientFunction ? `if(owner==SVO_FLUID_OWNER_FINE){let fine=${resolved.fineGradientFunction}(position_m,svoStructuralFluidPrimaryExpectedGeneration);let magnitude2=dot(fine.gradient,fine.gradient);if(fine.valid!=0u&&all(fine.gradient==fine.gradient)&&magnitude2>1e-16&&svoFluidFinite(magnitude2)){return SvoFluidNormal(fine.gradient*inverseSqrt(magnitude2),fine.gradient,1u);}}` : ""}
+  let h=domain.cellSize_m.xyz;let xm=svoStructuralCoarseFluidTrilinear(domain,position_m-vec3f(h.x,0.0,0.0));let xp=svoStructuralCoarseFluidTrilinear(domain,position_m+vec3f(h.x,0.0,0.0));let ym=svoStructuralCoarseFluidTrilinear(domain,position_m-vec3f(0.0,h.y,0.0));let yp=svoStructuralCoarseFluidTrilinear(domain,position_m+vec3f(0.0,h.y,0.0));let zm=svoStructuralCoarseFluidTrilinear(domain,position_m-vec3f(0.0,0.0,h.z));let zp=svoStructuralCoarseFluidTrilinear(domain,position_m+vec3f(0.0,0.0,h.z));
+  if(xm.status==SVO_STRUCTURAL_SAMPLE_VALID&&xp.status==SVO_STRUCTURAL_SAMPLE_VALID&&ym.status==SVO_STRUCTURAL_SAMPLE_VALID&&yp.status==SVO_STRUCTURAL_SAMPLE_VALID&&zm.status==SVO_STRUCTURAL_SAMPLE_VALID&&zp.status==SVO_STRUCTURAL_SAMPLE_VALID){let gradient=vec3f((xp.phi_m-xm.phi_m)/(2.0*h.x),(yp.phi_m-ym.phi_m)/(2.0*h.y),(zp.phi_m-zm.phi_m)/(2.0*h.z));let magnitude2=dot(gradient,gradient);if(all(gradient==gradient)&&magnitude2>1e-16&&svoFluidFinite(magnitude2)){return SvoFluidNormal(gradient*inverseSqrt(magnitude2),gradient,1u);}}
+  return SvoFluidNormal(-normalize(rayDirection),vec3f(0.0),0u);
 }
 
 fn svoTraceStructuralFluidPrimary(ro:vec3f,rdIn:vec3f,tMax_m:f32,mapping:SvoMapping)->SvoStructuralFluidPrimaryHit{
   if(arrayLength(&${resolved.publication})<=${SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision}u
     || arrayLength(&${resolved.control})<=${SPARSE_BRICK_GPU_LAYOUT.controlWords.overflowFlags}u){
-    return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,0.0,-normalize(rdIn),0u,0u,0u);
+    return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,0.0,-normalize(rdIn),0u,0u,0u,SVO_FLUID_OWNER_NONE);
   }
   let generation=${resolved.publication}[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}u];
   let validFields=${resolved.publication}[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}u];
@@ -185,18 +216,18 @@ fn svoTraceStructuralFluidPrimary(ro:vec3f,rdIn:vec3f,tMax_m:f32,mapping:SvoMapp
   if(generation==0u||coarseRevision==0u
     ||(validFields&${SPARSE_VOXEL_VALID_FIELDS.topology | SPARSE_VOXEL_VALID_FIELDS.coarseFluid}u)!=${SPARSE_VOXEL_VALID_FIELDS.topology | SPARSE_VOXEL_VALID_FIELDS.coarseFluid}u
     ||${resolved.control}[${SPARSE_BRICK_GPU_LAYOUT.controlWords.overflowFlags}u]!=0u){
-    return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,0.0,-normalize(rdIn),0u,0u,0u);
+    return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,0.0,-normalize(rdIn),0u,0u,0u,SVO_FLUID_OWNER_NONE);
   }
   let directionLength=length(rdIn);
   if(!(directionLength>1e-9)||!svoFluidFinite(tMax_m)||tMax_m<=0.0){
-    return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,0.0,vec3f(0.0,1.0,0.0),0u,0u,0u);
+    return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,0.0,vec3f(0.0,1.0,0.0),0u,0u,0u,SVO_FLUID_OWNER_NONE);
   }
   let rd=rdIn/directionLength;
   svoStructuralFluidPrimaryExpectedGeneration=generation;
   let domain=${resolved.domainFunction}();
   let minimumCell=min(domain.cellSize_m.x,min(domain.cellSize_m.y,domain.cellSize_m.z));
   if(!(minimumCell>0.0)){
-    return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,0.0,-rd,0u,0u,0u);
+    return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,0.0,-rd,0u,0u,0u,SVO_FLUID_OWNER_NONE);
   }
   let progress=max(1e-6,minimumCell*1e-3);
   let step_m=0.5*minimumCell;
@@ -205,18 +236,18 @@ fn svoTraceStructuralFluidPrimary(ro:vec3f,rdIn:vec3f,tMax_m:f32,mapping:SvoMapp
   var totalNodeVisits=0u;
   var insideAtStart=0u;
   for(var leafAttempt=0u;leafAttempt<SVO_FLUID_PRIMARY_LEAF_VISITS;leafAttempt+=1u){
-    if(cursor>=tMax_m){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_MISS,tMax_m,-rd,insideAtStart,totalSteps,totalNodeVisits);}
+    if(cursor>=tMax_m){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_MISS,tMax_m,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
     let leaf=svoTraverse(SvoRay(ro,cursor,rd,tMax_m),mapping);
     totalNodeVisits+=leaf.visits;
     if(leaf.status==SVO_STATUS_MISS){
-      if(${resolved.publication}[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}u]!=generation){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,cursor,-rd,insideAtStart,totalSteps,totalNodeVisits);}
-      return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_MISS,tMax_m,-rd,insideAtStart,totalSteps,totalNodeVisits);
+      if(${resolved.publication}[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}u]!=generation){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,cursor,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
+      return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_MISS,tMax_m,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);
     }
     if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){
-      return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_EXHAUSTED,cursor,-rd,insideAtStart,totalSteps,totalNodeVisits);
+      return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_EXHAUSTED,cursor,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);
     }
     if(leaf.status!=SVO_STATUS_HIT||leaf.leafIndex>=arrayLength(&${resolved.leafStates})){
-      return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,cursor,-rd,insideAtStart,totalSteps,totalNodeVisits);
+      return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,cursor,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);
     }
     let leafExit=min(leaf.tExit,tMax_m);
     if((${resolved.leafStates}[leaf.leafIndex]&SVO_STRUCTURAL_RESIDENT)==0u){
@@ -226,35 +257,35 @@ fn svoTraceStructuralFluidPrimary(ro:vec3f,rdIn:vec3f,tMax_m:f32,mapping:SvoMapp
       continue;
     }
     var previousT=min(leafExit,max(cursor,leaf.tEnter)+progress);
-    var previous=svoStructuralCoarseFluidTrilinear(domain,ro+rd*previousT);
+    var previous=svoStructuralFluidPrimarySample(domain,ro+rd*previousT);
     totalNodeVisits+=previous.nodeVisits;
-    if(previous.status==SVO_STRUCTURAL_SAMPLE_EXHAUSTED){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_EXHAUSTED,previousT,-rd,insideAtStart,totalSteps,totalNodeVisits);}
-    if(previous.status!=SVO_STRUCTURAL_SAMPLE_VALID){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,previousT,-rd,insideAtStart,totalSteps,totalNodeVisits);}
+    if(previous.status==SVO_STRUCTURAL_SAMPLE_EXHAUSTED){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_EXHAUSTED,previousT,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
+    if(previous.status!=SVO_STRUCTURAL_SAMPLE_VALID){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,previousT,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
     if(previousT<=progress*2.0&&previous.phi_m<0.0){insideAtStart=1u;}
-    if(previous.phi_m==0.0){let gradient=svoFluidGradientNormal(ro+rd*previousT,domain.cellSize_m.xyz,rd);return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_HIT,previousT,gradient.normal,insideAtStart,totalSteps,totalNodeVisits);}
+    if(previous.phi_m==0.0){let gradient=svoStructuralFluidPrimaryNormal(ro+rd*previousT,previous.owner,domain,rd);return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_HIT,previousT,gradient.normal,insideAtStart,totalSteps,totalNodeVisits,previous.owner);}
     let sampleEnd=max(previousT,leafExit-progress);
     loop{
       if(previousT>=sampleEnd){break;}
-      if(totalSteps>=SVO_FLUID_PRIMARY_FIELD_STEPS){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_EXHAUSTED,previousT,-rd,insideAtStart,totalSteps,totalNodeVisits);}
+      if(totalSteps>=SVO_FLUID_PRIMARY_FIELD_STEPS){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_EXHAUSTED,previousT,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
       let nextT=min(sampleEnd,previousT+step_m);
-      let next=svoStructuralCoarseFluidTrilinear(domain,ro+rd*nextT);
+      let next=svoStructuralFluidPrimarySample(domain,ro+rd*nextT);
       totalSteps+=1u;totalNodeVisits+=next.nodeVisits;
-      if(next.status==SVO_STRUCTURAL_SAMPLE_EXHAUSTED){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_EXHAUSTED,nextT,-rd,insideAtStart,totalSteps,totalNodeVisits);}
-      if(next.status!=SVO_STRUCTURAL_SAMPLE_VALID){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,nextT,-rd,insideAtStart,totalSteps,totalNodeVisits);}
-      let previousOwned=SvoFluidOwnedSample(previous.phi_m,SVO_FLUID_OWNER_COARSE,1u);
-      let nextOwned=SvoFluidOwnedSample(next.phi_m,SVO_FLUID_OWNER_COARSE,1u);
+      if(next.status==SVO_STRUCTURAL_SAMPLE_EXHAUSTED){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_EXHAUSTED,nextT,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
+      if(next.status!=SVO_STRUCTURAL_SAMPLE_VALID){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,nextT,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
+      let previousOwned=SvoFluidOwnedSample(previous.phi_m,previous.owner,1u);
+      let nextOwned=SvoFluidOwnedSample(next.phi_m,next.owner,1u);
       if(svoFluidCrossesZero(previousOwned,nextOwned)){
         let root=svoFluidRefineZero(ro,rd,previousT,nextT,previousOwned,nextOwned,max(1e-5,minimumCell*1e-3),max(1e-5,minimumCell*1e-3));
-        if(root.valid==0u){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,nextT,-rd,insideAtStart,totalSteps,totalNodeVisits);}
-        let gradient=svoFluidGradientNormal(ro+rd*root.t_m,domain.cellSize_m.xyz,rd);
-        if(${resolved.publication}[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}u]!=generation){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,root.t_m,-rd,insideAtStart,totalSteps,totalNodeVisits);}
-        return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_HIT,root.t_m,gradient.normal,insideAtStart,totalSteps,totalNodeVisits);
+        if(root.valid==0u){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,nextT,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
+        let gradient=svoStructuralFluidPrimaryNormal(ro+rd*root.t_m,root.owner,domain,rd);
+        if(${resolved.publication}[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}u]!=generation){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,root.t_m,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
+        return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_HIT,root.t_m,gradient.normal,insideAtStart,totalSteps,totalNodeVisits,root.owner);
       }
       previousT=nextT;previous=next;
     }
     cursor=leafExit+progress;
   }
-  return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_EXHAUSTED,cursor,-rd,insideAtStart,totalSteps,totalNodeVisits);
+  return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_EXHAUSTED,cursor,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);
 }
 `;
 }

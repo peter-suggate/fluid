@@ -2,7 +2,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-import type { SVOBaselineQuality } from "./svo-baseline-cases";
+import { SVO_BASELINE_CASES, type SVOBaselineQuality } from "./svo-baseline-cases";
 import {
   aggregateSVOBenchmarkObservations,
   buildSVOBenchmarkPlan,
@@ -37,6 +37,9 @@ function parseResolution(value: string, label: string): SVOBenchmarkResolution {
 
 const quality = (argument("--quality") ?? "balanced") as SVOBaselineQuality;
 if (!["balanced", "high", "ultra"].includes(quality)) throw new Error("--quality must be balanced, high, or ultra");
+const caseId = argument("--case");
+const cases = caseId === undefined ? SVO_BASELINE_CASES : SVO_BASELINE_CASES.filter(({ id }) => id === caseId);
+if (caseId !== undefined && cases.length === 0) throw new Error(`Unknown --case ${caseId}`);
 
 const plan = buildSVOBenchmarkPlan({
   revision: requiredArgument("--revision"),
@@ -44,6 +47,7 @@ const plan = buildSVOBenchmarkPlan({
   resetToken: requiredArgument("--reset-token"),
   captureNotBeforeUnixMs: integerArgument("--not-before-ms", 0),
   pairCount: argument("--pairs") === undefined ? 4 : integerArgument("--pairs", 1),
+  cases,
   quality,
   internalResolution: {
     raster: parseResolution(argument("--raster-resolution") ?? "1280x720", "Raster resolution"),

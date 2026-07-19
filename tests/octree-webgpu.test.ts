@@ -19,6 +19,8 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "16");
   assert.equal(octreeMethod.presetFor("high").maximumLeafSize, "16");
   assert.equal(octreeMethod.presetFor("balanced").adaptivity, 1);
+  assert.equal(octreeMethod.params.find((spec) => spec.key === "secondaryParticles")?.default, "off");
+  assert.equal(octreeMethod.presetFor("balanced").secondaryParticles, "off");
   assert.match(octreeMethod.detail, /no topology readbacks/);
   assert.match(octreeMethod.detail, /Chebyshev-Jacobi/);
   assert.match(octreeMethod.detail, /rigid-body coupling/);
@@ -84,7 +86,7 @@ test("compact pressure rows publish origin ranks and fail closed on capacity ove
 test("octree participates in the shared two-way immersed-body coupling path", () => {
   const methodSource = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
   assert.match(methodSource, /values, onRigidLoads\) => new WebGPUUniformEulerianSolver\(device, scene, quality, onRigidLoads/);
-  assert.match(methodSource, /values, onRigidLoads, onProgress\) => WebGPUUniformEulerianSolver\.createAsync/);
+  assert.match(methodSource, /values, onRigidLoads, onProgress, signal\) => WebGPUUniformEulerianSolver\.createAsync/);
   assert.match(uniformSolverSource, /const activeBodies = bodies\.slice\(0, 12\)/);
   assert.doesNotMatch(uniformSolverSource, /this\.octreeProjection \? \[\] : bodies/);
   assert.match(uniformSolverSource, /if \(this\.adaptiveProjection\) this\.solidPhiGroup/);

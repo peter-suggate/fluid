@@ -13,6 +13,7 @@ import {
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import { candidateBackedDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 
@@ -55,7 +56,8 @@ test("production garden metadata is packed into the existing dry uniform without
   assert.match(rendererSource, /terrainMaterialMetadata:terrainMaterial\?\.packedMetadata,terrainMaterialCacheKey:terrainMaterial\?\.cacheKey/);
   assert.equal(SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES, 16);
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 160, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32, fluidDomainWordOffset: 36,
+    sizeBytes: 336, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32, fluidDomainWordOffset: 36,
+    primitiveCandidateWordOffset: 40, finePhiWordOffset: 44,
   });
   assert.match(svoDrySceneShader, /terrainMaterial:SvoTerrainMaterialMetadata/);
   assert.match(svoDrySceneShader, /@binding\(11\) var<storage,read> svoStructuralGeometry/);
@@ -83,7 +85,7 @@ test("terrain metadata validation and dry-parameter uploads are exact and conten
   const source = structuralSource();
   const build = gardenMaterial();
   const base: SparseVoxelDrySceneData = {
-    primitiveRecords: new Uint32Array(16), ownerBase: 0, terrainMaterialId: build.metadata.materialId,
+    ...candidateBackedDrySceneFixture, terrainMaterialId: build.metadata.materialId,
     terrainMaterialMetadata: build.packedMetadata, terrainMaterialCacheKey: build.cacheKey,
   };
   assert.equal(canEncodeSparseVoxelDryScene(source, base), true);

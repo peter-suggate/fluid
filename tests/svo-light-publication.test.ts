@@ -53,10 +53,14 @@ test("scene light content and publication revisions remain deterministic and exp
   const second = buildOctreeSvoLightPublication(scene, { revision: 19 });
   assert.deepEqual(second.records, first.records);
   assert.deepEqual(second.packedRecords, first.packedRecords);
+  assert.strictEqual(second, first);
+  assert.strictEqual(second.packedRecords, first.packedRecords);
+  assert.equal(second.cacheKey, first.cacheKey);
   assert.equal(first.revision, 19);
   assert.ok(first.records.every(({ revision }) => revision === first.revision));
   const advanced = buildOctreeSvoLightPublication(scene, { revision: 20 });
   assert.notDeepEqual(advanced.packedRecords, first.packedRecords);
+  assert.notEqual(advanced.cacheKey, first.cacheKey);
   assert.equal(OCTREE_SVO_LIGHT_REVISION, 1);
 });
 

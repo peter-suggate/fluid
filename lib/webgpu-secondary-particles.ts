@@ -8,6 +8,9 @@
  */
 
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
+import type { GPUInitializationTask } from "./gpu-initialization";
+
+const secondaryParticlePipelineCache = new WeakMap<GPUDevice, Map<string, GPUComputePipeline[]>>();
 
 export const SECONDARY_PARTICLE_STRIDE_BYTES = 64;
 export const DEFAULT_SECONDARY_PARTICLE_CAPACITY = 16_384;
@@ -719,37 +722,65 @@ export class WebGPUSecondaryParticleSystem {
       this.splatCorrectionPipeline = this.device.createComputePipeline(this.correctionDescriptor("splatParticleCorrection"));
       this.applyCorrectionPipeline = this.device.createComputePipeline(this.correctionDescriptor("applyParticleCorrection"));
     }
+    let cache = secondaryParticlePipelineCache.get(this.device);
+    if (!cache) { cache = new Map(); secondaryParticlePipelineCache.set(this.device, cache); }
+    cache.set(this.correction ? "corrected" : "one-way", [this.updatePipeline, this.spawnPipeline, ...(this.correction ? [this.resetCorrectionPipeline!, this.splatCorrectionPipeline!, this.applyCorrectionPipeline!] : [])]);
   }
 
   get pipelineCount() { return this.correction ? 5 : 2; }
 
-  async initializePipelines(onProgress: (label: string, completed: number, total: number) => void) {
+  initializationTasks(): GPUInitializationTask[] {
+    const cacheKey = this.correction ? "corrected" : "one-way";
+    const cached = secondaryParticlePipelineCache.get(this.device)?.get(cacheKey);
+    if (cached) return [{
+      id: "secondary-particles.pipeline-cache", phase: "secondary-particles", label: "Reuse compiled secondary-liquid programs", run: () => {
+        this.updatePipeline = cached[0]; this.spawnPipeline = cached[1];
+        if (this.correction) { this.resetCorrectionPipeline = cached[2]; this.splatCorrectionPipeline = cached[3]; this.applyCorrectionPipeline = cached[4]; }
+      },
+    }];
     const definitions = [["Advecting secondary particles", "updateParticles"], ["Seeding escaped spray", "spawnParticles"]] as const;
-    const total = this.pipelineCount;
-    for (let index = 0; index < definitions.length; index += 1) {
-      const [label, entryPoint] = definitions[index];
-      onProgress(label, index, total);
-      const pipeline = await this.device.createComputePipelineAsync(this.descriptor(entryPoint));
-      if (entryPoint === "updateParticles") this.updatePipeline = pipeline;
-      else this.spawnPipeline = pipeline;
-      onProgress(label, index + 1, total);
-    }
+    const tasks: GPUInitializationTask[] = definitions.map(([label, entryPoint]) => ({
+      id: `secondary-particles.pipeline.${entryPoint}`,
+      phase: "secondary-particles",
+      label,
+      run: async () => {
+        const pipeline = await this.device.createComputePipelineAsync(this.descriptor(entryPoint));
+        if (entryPoint === "updateParticles") this.updatePipeline = pipeline;
+        else this.spawnPipeline = pipeline;
+      },
+    }));
     if (this.correction) {
       const correctionDefinitions = [
         ["Clearing particle surface correction", "resetParticleCorrection"],
         ["Splatting near-surface particles", "splatParticleCorrection"],
         ["Applying bounded particle surface correction", "applyParticleCorrection"]
       ] as const;
-      for (let index = 0; index < correctionDefinitions.length; index += 1) {
-        const [label, entryPoint] = correctionDefinitions[index];
-        const completed = definitions.length + index;
-        onProgress(label, completed, total);
-        const pipeline = await this.device.createComputePipelineAsync(this.correctionDescriptor(entryPoint));
-        if (entryPoint === "resetParticleCorrection") this.resetCorrectionPipeline = pipeline;
-        else if (entryPoint === "splatParticleCorrection") this.splatCorrectionPipeline = pipeline;
-        else this.applyCorrectionPipeline = pipeline;
-        onProgress(label, completed + 1, total);
-      }
+      tasks.push(...correctionDefinitions.map(([label, entryPoint]) => ({
+        id: `secondary-particles.pipeline.${entryPoint}`,
+        phase: "secondary-particles" as const,
+        label,
+        run: async () => {
+          const pipeline = await this.device.createComputePipelineAsync(this.correctionDescriptor(entryPoint));
+          if (entryPoint === "resetParticleCorrection") this.resetCorrectionPipeline = pipeline;
+          else if (entryPoint === "splatParticleCorrection") this.splatCorrectionPipeline = pipeline;
+          else { this.applyCorrectionPipeline = pipeline; let cache = secondaryParticlePipelineCache.get(this.device); if (!cache) { cache = new Map(); secondaryParticlePipelineCache.set(this.device, cache); } cache.set(cacheKey, [this.updatePipeline!, this.spawnPipeline!, this.resetCorrectionPipeline!, this.splatCorrectionPipeline!, this.applyCorrectionPipeline]); }
+        },
+      })));
+    } else {
+      const last = tasks[tasks.length - 1];
+      const run = last.run;
+      last.run = async (signal) => { await run(signal); let cache = secondaryParticlePipelineCache.get(this.device); if (!cache) { cache = new Map(); secondaryParticlePipelineCache.set(this.device, cache); } cache.set(cacheKey, [this.updatePipeline!, this.spawnPipeline!]); };
+    }
+    return tasks;
+  }
+
+  async initializePipelines(onProgress: (label: string, completed: number, total: number) => void) {
+    const tasks = this.initializationTasks();
+    const signal = new AbortController().signal;
+    for (let index = 0; index < tasks.length; index += 1) {
+      onProgress(tasks[index].label, index, tasks.length);
+      await tasks[index].run(signal);
+      onProgress(tasks[index].label, index + 1, tasks.length);
     }
   }
 

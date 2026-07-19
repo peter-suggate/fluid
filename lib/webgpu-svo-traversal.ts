@@ -417,7 +417,9 @@ fn svoTraverse(ray: SvoRay, mapping: SvoMapping) -> SvoTraversalHit {
   stack[0] = SvoStackEntry(0u, 0u, rootInterval.y, rootInterval.z);
   var visits = 0u;
   let visitLimit = min(max(mapping.maxVisits, 1u), SVO_MAX_VISITS);
-  loop {
+  var traversalGuard = 0u;
+  while (traversalGuard <= SVO_MAX_VISITS) {
+    traversalGuard += 1u;
     if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
     if (visits >= visitLimit) { return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits); }
     stackSize -= 1u;
@@ -473,7 +475,7 @@ fn svoTraverse(ray: SvoRay, mapping: SvoMapping) -> SvoTraversalHit {
       stackSize += 1u;
     }
   }
-  return svoMiss(SVO_STATUS_MISS, visits);
+  return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits);
 }
 `;
 

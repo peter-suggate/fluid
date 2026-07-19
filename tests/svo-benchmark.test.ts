@@ -63,10 +63,14 @@ function observationForPlan(plan: SVOBenchmarkPlan): SVOBenchmarkObservationBund
       requestedMode: run.requestedMode,
       effectiveMode: run.requestedMode,
       fallbackReason: null,
+      renderTimingContext: `octree:${run.quality}:smooth:${run.requestedMode}:epoch-${run.sequenceIndex + 1}`,
+      renderTimingEpoch: run.sequenceIndex + 1,
+      renderTimingSampleId: run.sequenceIndex * 1_000 + frameIndex + 1,
       gpuRenderTimingAvailable: true,
       cpuFrame_ms: frameIndex,
       gpuRender_ms: frameIndex / 10,
       gpuDryScene_ms: frameIndex / 20,
+      gpuSvoTemporal_ms: run.requestedMode === "svo" ? frameIndex / 40 : 0,
       rendererOwnedBytes: 1_000 + frameIndex,
     })),
   }));
@@ -100,6 +104,8 @@ test("aggregation excludes warmups and retains p50/p95/max plus every raw frame"
   assert.deepEqual(report.runs[0].cpuFrame_ms, { p50: 89.5, p95: 143.05, maximum: 149 });
   assert.ok(Math.abs(report.runs[0].gpuRender_ms!.p50 - 8.95) < 1e-12);
   assert.ok(Math.abs(report.runs[0].gpuDryScene_ms!.p95 - 7.1525) < 1e-12);
+  assert.equal(report.runs[0].gpuSvoTemporal_ms!.p95, 0);
+  assert.ok(report.runs[1].gpuSvoTemporal_ms!.p95 > 0);
   assert.deepEqual(report.runs[0].rendererOwnedBytes, { p50: 1089.5, p95: 1143.05, maximum: 1149 });
   assert.equal(report.runs[0].rawFrames.length, 150);
   assert.equal(report.runs[0].timestampQueriesAvailable, true);
@@ -111,6 +117,8 @@ test("aggregation excludes warmups and retains p50/p95/max plus every raw frame"
   assert.deepEqual(report.aggregates.map(({ renderer }) => renderer), ["raster", "svo"]);
   assert.equal(report.aggregates[0].runIds.length, 1);
   assert.deepEqual(report.aggregates[0].gpuRender_ms, report.runs[0].gpuRender_ms);
+  assert.equal(report.aggregates[0].adapterId, "apple-m3-max-metal");
+  assert.deepEqual(report.aggregates[0].adapter, adapter);
 });
 
 test("stale reset tokens, pre-reset frames, discontinuities, and missing samples fail clearly", () => {
@@ -155,8 +163,10 @@ test("timestamp unavailability is explicit, while mixed measured availability is
     frames: original.runs[0].frames.map((frame) => ({
       ...frame,
       gpuRenderTimingAvailable: false,
+      renderTimingSampleId: null,
       gpuRender_ms: null,
       gpuDryScene_ms: null,
+      gpuSvoTemporal_ms: null,
     })),
   };
   const report = aggregateSVOBenchmarkObservations(plan, replaceRun(original, 0, unavailable), [baseline]);
@@ -165,9 +175,27 @@ test("timestamp unavailability is explicit, while mixed measured availability is
   assert.equal(report.runs[0].gpuDryScene_ms, null);
 
   const mixedFrames = unavailable.frames.map((frame, index) => index === plan.runs[0].warmupFrames
-    ? { ...frame, gpuRenderTimingAvailable: true, gpuRender_ms: 1, gpuDryScene_ms: .5 }
+    ? { ...frame, gpuRenderTimingAvailable: true, renderTimingSampleId: 999_999, gpuRender_ms: 1, gpuDryScene_ms: .5, gpuSvoTemporal_ms: 0 }
     : frame);
   assert.throws(() => aggregateSVOBenchmarkObservations(plan, replaceRun(original, 0, {
     ...unavailable, frames: mixedFrames,
   }), [baseline]), /timestamp availability changed/);
+});
+
+test("cached timing samples and mode-epoch drift are rejected", () => {
+  const plan = benchmarkPlan(1);
+  const original = observationForPlan(plan);
+  const run = original.runs[0];
+  assert.throws(() => aggregateSVOBenchmarkObservations(plan, replaceRun(original, 0, {
+    ...run,
+    frames: run.frames.map((frame, index) => index === 40
+      ? { ...frame, renderTimingSampleId: run.frames[39].renderTimingSampleId }
+      : frame),
+  }), [baseline]), /repeats a cached timestamp sample/);
+  assert.throws(() => aggregateSVOBenchmarkObservations(plan, replaceRun(original, 0, {
+    ...run,
+    frames: run.frames.map((frame, index) => index === 40
+      ? { ...frame, renderTimingEpoch: frame.renderTimingEpoch + 1 }
+      : frame),
+  }), [baseline]), /timing mode\/epoch changed/);
 });

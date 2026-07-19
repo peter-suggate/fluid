@@ -29,6 +29,14 @@ test("rolling frame averages use a trailing window at every history point", () =
   assert.deepEqual(rolling.map((entry) => entry.gpuPressure_ms), [3, 4.5, 9]);
 });
 
+test("timing epoch and accepted-sample identities remain discrete metadata", () => {
+  const first = { ...sample(3, 3), renderTimingEpoch: 7, renderTimingSampleId: 40 };
+  const second = { ...sample(6, 6), renderTimingEpoch: 7, renderTimingSampleId: 44 };
+  const averaged = averagePerformanceSnapshots([first, second], emptyPerformance);
+  assert.equal(averaged.renderTimingEpoch, 7);
+  assert.equal(averaged.renderTimingSampleId, 44);
+});
+
 test("averaging preserves the union of conditional stages in the selected window", () => {
   const first = { ...sample(3, 3), gpuActiveStages: ["preparation", "advection", "remeshing"] as PerformanceSnapshot["gpuActiveStages"] };
   const second = { ...sample(6, 6), gpuActiveStages: ["preparation", "advection"] as PerformanceSnapshot["gpuActiveStages"] };

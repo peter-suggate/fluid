@@ -5,10 +5,13 @@ import {
   beerLambert,
   dielectricFresnel,
   GLASS_OPTICS,
+  sceneLinearToDisplay,
+  unifiedDisplayTransferShaderLibrary,
   unifiedLightingShaderLibrary,
   WATER_OPTICS
 } from "../lib/webgpu-lighting";
 import { compositeShader, sceneShader } from "../lib/webgpu-water-pipeline";
+import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
 import { voxelDebugRenderShader } from "../lib/webgpu-voxel-debug";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
@@ -35,8 +38,28 @@ test("CPU optical mirrors retain physical endpoint and attenuation invariants", 
   assert.deepEqual(beerLambert(WATER_OPTICS.absorption, -2), [1, 1, 1], "negative optical distance cannot amplify light");
 });
 
+test("scene-linear lighting reaches the presentation target through exactly one display transfer", () => {
+  assert.deepEqual(sceneLinearToDisplay([0, -1, Number.NaN]), [0, 0, 0]);
+  assert.deepEqual(sceneLinearToDisplay([1, 1, 1]), [
+    0.5 ** (1 / 2.2),
+    0.5 ** (1 / 2.2),
+    0.5 ** (1 / 2.2),
+  ]);
+  assert.match(unifiedDisplayTransferShaderLibrary, /nonNegative \/ \(nonNegative \+ vec3f\(1\.0\)\)/);
+  assert.equal((unifiedDisplayTransferShaderLibrary.match(/pow\(/g) ?? []).length, 1);
+  assert.doesNotMatch(sceneShader, /unifiedDisplayTransfer|1\.0\s*\/\s*2\.2/,
+    "raster dry lighting must remain scene-linear");
+  assert.doesNotMatch(svoDrySceneShader, /unifiedDisplayTransfer|1\.0\s*\/\s*2\.2/,
+    "SVO dry lighting must remain scene-linear");
+  assert.equal((compositeShader.match(/fn unifiedDisplayTransfer\(/g) ?? []).length, 1);
+  assert.equal((compositeShader.match(/unifiedDisplayTransfer\(c\)/g) ?? []).length, 1);
+  assert.match(compositeShader, /fn finish\([^}]+return vec4f\(unifiedDisplayTransfer\(c\),1\);\}/);
+});
+
 test("raster bodies and optical water/glass consume the canonical closure", () => {
   assert.match(sceneShader, /shadeUnifiedSurface\(material,lighting\)/);
+  assert.match(svoDrySceneShader, /shadeUnifiedSurface\(directClosure,lighting\)/,
+    "SVO dry materials must use the same resource-independent closure as raster bodies");
   assert.match(voxelDebugRenderShader, /shadeUnifiedSurface\(closure, lighting\)/, "raw voxel materials must use the same closure");
   assert.match(compositeShader, /unifiedDielectricFresnel\(cosine,0\.04\)/);
   assert.match(compositeShader, /unifiedDielectricFresnel\(cosine,0\.02037\)/);

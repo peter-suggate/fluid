@@ -57,6 +57,27 @@ export function beerLambert(absorption: LinearRgb, distance: number): [number, n
   return [Math.exp(-Math.max(0, absorption[0]) * d), Math.exp(-Math.max(0, absorption[1]) * d), Math.exp(-Math.max(0, absorption[2]) * d)];
 }
 
+/**
+ * The single final-output transform shared by raster and sparse-voxel frames.
+ * Lighting and media code must keep values scene-linear and call this only
+ * when writing the presentation target.
+ */
+export function sceneLinearToDisplay(sceneLinear: LinearRgb): [number, number, number] {
+  return sceneLinear.map((channel) => {
+    const nonNegative = Math.max(0, Number.isFinite(channel) ? channel : 0);
+    return (nonNegative / (nonNegative + 1)) ** (1 / 2.2);
+  }) as [number, number, number];
+}
+
+/** Binding-free WGSL mirror of `sceneLinearToDisplay`. */
+export const unifiedDisplayTransferShaderLibrary = /* wgsl */ `
+fn unifiedDisplayTransfer(sceneLinear: vec3f) -> vec3f {
+  let nonNegative = max(sceneLinear, vec3f(0.0));
+  let toneMapped = nonNegative / (nonNegative + vec3f(1.0));
+  return pow(toneMapped, vec3f(1.0 / 2.2));
+}
+`;
+
 const PBR_PI = Math.PI;
 const PBR_EPSILON = 1e-8;
 

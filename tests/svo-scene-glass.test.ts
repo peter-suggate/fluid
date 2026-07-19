@@ -13,7 +13,7 @@ test("every shipped environment has explicit container and authored glazing cove
   const scene = cloneScene(defaultScene);
   scene.container.top = "open";
   const expectedEnvironmentPanes = new Map([
-    ["conservatory", 6], ["night-lab", 1],
+    ["conservatory", 6], ["night-lab", 1], ["research-station", 1],
   ]);
   for (const environmentId of environmentIds) {
     const glass = buildSvoSceneGlass(scene, { environmentId });
@@ -106,10 +106,13 @@ test("static revision and upload cache key are deterministic and content-sensiti
   const second = buildSvoSceneGlass(cloneScene(scene), { environmentId: "conservatory", cellSize_m: [0.02, 0.02, 0.02] });
   assert.equal(first.staticRevision, second.staticRevision);
   assert.equal(first.cacheKey, second.cacheKey);
+  assert.strictEqual(second, first, "unchanged glass rebuild reuses the immutable publication");
+  assert.strictEqual(second.packedRecords, first.packedRecords);
   scene.container.width_m += 0.1;
   const resized = buildSvoSceneGlass(scene, { environmentId: "conservatory", cellSize_m: 0.02 });
   assert.notEqual(resized.staticRevision, first.staticRevision);
   assert.notEqual(resized.cacheKey, first.cacheKey);
+  assert.notStrictEqual(resized.packedRecords, first.packedRecords);
   const differentCell = buildSvoSceneGlass(scene, { environmentId: "conservatory", cellSize_m: 0.01 });
   assert.notEqual(differentCell.staticRevision, resized.staticRevision);
 });

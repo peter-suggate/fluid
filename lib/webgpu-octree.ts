@@ -17,6 +17,18 @@ import {
   type SparseSurfaceBandGPUSource,
   type SparseSurfaceBandMode,
 } from "./webgpu-sparse-surface-band";
+import type { GPUInitializationTask } from "./gpu-initialization";
+
+type OctreePipelineVariants = { full: GPUComputePipeline; active: GPUComputePipeline; retired: GPUComputePipeline };
+interface OctreePipelineCacheEntry {
+  base: GPUComputePipeline[];
+  refine: Map<number, OctreePipelineVariants>;
+  refineCoarse: Map<number, OctreePipelineVariants>;
+  balanceCoarse: Map<number, OctreePipelineVariants>;
+  materialize: GPUComputePipeline;
+  pressureImpulse: GPUComputePipeline;
+}
+const octreePipelineCache = new WeakMap<GPUDevice, Map<string, OctreePipelineCacheEntry>>();
 
 export interface OctreeProjectionOptions {
   pressureIterations: number;
@@ -588,14 +600,47 @@ export class WebGPUOctreeProjection {
     ] = compiled;
   }
 
+  private pipelineCacheKey() { return this.rowIndexedPressure ? "row-indexed" : "dense"; }
+
+  private applyPipelineCache(entry: OctreePipelineCacheEntry) {
+    this.assignPipelines(entry.base);
+    this.refineLevelPipelines.clear(); entry.refine.forEach((value, key) => this.refineLevelPipelines.set(key, value));
+    this.refineCoarsePipelines.clear(); entry.refineCoarse.forEach((value, key) => this.refineCoarsePipelines.set(key, value));
+    this.balanceCoarsePipelines.clear(); entry.balanceCoarse.forEach((value, key) => this.balanceCoarsePipelines.set(key, value));
+    this.materializePipeline = entry.materialize;
+    this.pressureImpulsePipeline = entry.pressureImpulse;
+  }
+
+  private publishPipelineCache() {
+    let cache = octreePipelineCache.get(this.device);
+    if (!cache) { cache = new Map(); octreePipelineCache.set(this.device, cache); }
+    cache.set(this.pipelineCacheKey(), {
+      base: WebGPUOctreeProjection.pipelineEntryPoints.map((_, index) => [
+        this.rasterizeSolidsPipeline, this.resetPipeline, this.refinePipeline, this.balancePipeline, this.jacobiPipeline,
+        this.rasterizeSolidsActivePipeline, this.resetActivePipeline, this.refineActivePipeline, this.balanceActivePipeline,
+        this.rasterizeSolidsRetiredPipeline, this.resetRetiredPipeline, this.refineRetiredPipeline, this.balanceRetiredPipeline,
+        this.beginFrontierPipeline, this.filterFrontierPipeline, this.appendFrontierPipeline, this.appendFrontierActivePipeline, this.appendFrontierRetiredPipeline, this.finalizeFrontierPipeline,
+        this.planPipeline, this.scanPipeline, this.emitPipeline, this.assemblePipeline, this.assembleCoarsePipeline, this.gatherBodyCouplingPipeline, this.applyBodyCouplingPipeline, this.iteratePipeline, this.iterateChebyshevPipeline, this.solvePipeline, this.reduceResidualPartialsPipeline, this.reduceResidualTotalPipeline,
+        this.reconstructSmallGradientsPipeline, this.reconstructGradientsPipeline, this.projectPipeline, this.projectSmallLeavesPipeline, this.projectLeavesPipeline, this.pressureOverflowPipeline, this.extrapolateSeedPipeline, this.extrapolatePipeline,
+        this.extrapolateSeedSparsePipeline, this.extrapolateSparsePipeline, this.copyExtrapolatedSparsePipeline,
+        this.markChangedTilesPipeline, this.buildDirtyWorklistPipeline, this.refreshSnapshotTilesPipeline, this.refreshSnapshotDensePipeline,
+      ][index]),
+      refine: new Map(this.refineLevelPipelines), refineCoarse: new Map(this.refineCoarsePipelines), balanceCoarse: new Map(this.balanceCoarsePipelines),
+      materialize: this.materializePipeline, pressureImpulse: this.pressureImpulsePipeline,
+    });
+  }
+
   private createPipelinesSync() {
     this.assignPipelines(WebGPUOctreeProjection.pipelineEntryPoints.map((entryPoint) => this.device.createComputePipeline(this.descriptor(entryPoint))));
-    for (let size = this.maxLeafSize; size >= 2; size >>= 1) this.refineLevelPipelines.set(size, {
+    // Warm every user-selectable leaf specialization once per device. A leaf
+    // size change should rebuild data, not stop the interface to compile a
+    // program variant the settings UI already advertised.
+    for (let size = 32; size >= 2; size >>= 1) this.refineLevelPipelines.set(size, {
       full: this.device.createComputePipeline(this.refinementDescriptor("refineTopology", size)),
       active: this.device.createComputePipeline(this.refinementDescriptor("refineTopologyActive", size)),
       retired: this.device.createComputePipeline(this.refinementDescriptor("refineTopologyRetired", size)),
     });
-    for (let size = this.maxLeafSize; size >= 16; size >>= 1) {
+    for (let size = 32; size >= 16; size >>= 1) {
       this.refineCoarsePipelines.set(size, {
         full: this.device.createComputePipeline(this.refinementDescriptor("refineTopologyCoarse", size)),
         active: this.device.createComputePipeline(this.refinementDescriptor("refineTopologyCoarseActive", size)),
@@ -609,6 +654,7 @@ export class WebGPUOctreeProjection {
     }
     this.materializePipeline = this.device.createComputePipeline(this.diagnosticDescriptor());
     this.pressureImpulsePipeline = this.device.createComputePipeline(this.couplingDescriptor());
+    this.publishPipelineCache();
   }
 
   get topologyTexture() { return this.topologyDiagnosticTexture; }
@@ -648,38 +694,78 @@ export class WebGPUOctreeProjection {
     return true;
   }
 
-  async initializePipelines(onProgress: (label: string, completed: number) => void) {
+  initializationTasks(): GPUInitializationTask[] {
+    const cached = octreePipelineCache.get(this.device)?.get(this.pipelineCacheKey());
     const entries = WebGPUOctreeProjection.pipelineEntryPoints;
-    const compiled: GPUComputePipeline[] = [];
-    for (let i = 0; i < entries.length; i += 1) {
-      onProgress(`Compile octree ${entries[i]}`, i);
-      compiled.push(await this.device.createComputePipelineAsync(this.descriptor(entries[i])));
-      onProgress(`Compile octree ${entries[i]}`, i + 1);
+    const tasks: GPUInitializationTask[] = cached
+      ? [{ id: "octree.pipeline-cache", phase: "adaptive-topology", label: "Reuse compiled adaptive programs", run: () => this.applyPipelineCache(cached) }]
+      : [];
+    const compiled = new Array<GPUComputePipeline>(entries.length);
+    if (!cached) entries.forEach((entryPoint, index) => tasks.push({
+      id: `octree.pipeline.${entryPoint}`,
+      phase: "adaptive-topology",
+      label: `Compile octree ${entryPoint}`,
+      run: async () => {
+        compiled[index] = await this.device.createComputePipelineAsync(this.descriptor(entryPoint));
+        if (index === entries.length - 1) this.assignPipelines(compiled);
+      },
+    }));
+    for (let size = 32; size >= 2; size >>= 1) {
+      if (cached?.refine.has(size)) continue;
+      const level: Partial<{ full: GPUComputePipeline; active: GPUComputePipeline; retired: GPUComputePipeline }> = {};
+      const definitions = [
+        ["full", "refineTopology"],
+        ["active", "refineTopologyActive"],
+        ["retired", "refineTopologyRetired"],
+      ] as const;
+      definitions.forEach(([variant, entryPoint], index) => tasks.push({
+        id: `octree.pipeline.refine.${size}.${variant}`,
+        phase: "adaptive-topology",
+        label: `Compile octree refinement ${size} · ${variant}`,
+        run: async () => {
+          level[variant] = await this.device.createComputePipelineAsync(this.refinementDescriptor(entryPoint, size));
+          if (index === definitions.length - 1) this.refineLevelPipelines.set(size, level as { full: GPUComputePipeline; active: GPUComputePipeline; retired: GPUComputePipeline });
+        },
+      }));
     }
-    this.assignPipelines(compiled);
-    for (let size = this.maxLeafSize; size >= 2; size >>= 1) this.refineLevelPipelines.set(size, {
-      full: await this.device.createComputePipelineAsync(this.refinementDescriptor("refineTopology", size)),
-      active: await this.device.createComputePipelineAsync(this.refinementDescriptor("refineTopologyActive", size)),
-      retired: await this.device.createComputePipelineAsync(this.refinementDescriptor("refineTopologyRetired", size)),
-    });
-    for (let size = this.maxLeafSize; size >= 16; size >>= 1) {
-      this.refineCoarsePipelines.set(size, {
-        full: await this.device.createComputePipelineAsync(this.refinementDescriptor("refineTopologyCoarse", size)),
-        active: await this.device.createComputePipelineAsync(this.refinementDescriptor("refineTopologyCoarseActive", size)),
-        retired: await this.device.createComputePipelineAsync(this.refinementDescriptor("refineTopologyCoarseRetired", size)),
-      });
-      this.balanceCoarsePipelines.set(size, {
-        full: await this.device.createComputePipelineAsync(this.refinementDescriptor("balanceTopologyCoarse", size)),
-        active: await this.device.createComputePipelineAsync(this.refinementDescriptor("balanceTopologyCoarseActive", size)),
-        retired: await this.device.createComputePipelineAsync(this.refinementDescriptor("balanceTopologyCoarseRetired", size)),
-      });
+    for (let size = 32; size >= 16; size >>= 1) {
+      for (const operation of ["refine", "balance"] as const) {
+        if ((operation === "refine" ? cached?.refineCoarse : cached?.balanceCoarse)?.has(size)) continue;
+        const pipelines: Partial<{ full: GPUComputePipeline; active: GPUComputePipeline; retired: GPUComputePipeline }> = {};
+        const prefix = operation === "refine" ? "refineTopologyCoarse" : "balanceTopologyCoarse";
+        const definitions = [["full", prefix], ["active", `${prefix}Active`], ["retired", `${prefix}Retired`]] as const;
+        definitions.forEach(([variant, entryPoint], index) => tasks.push({
+          id: `octree.pipeline.${operation}-coarse.${size}.${variant}`,
+          phase: "adaptive-topology",
+          label: `Compile octree coarse ${operation} ${size} · ${variant}`,
+          run: async () => {
+            pipelines[variant] = await this.device.createComputePipelineAsync(this.refinementDescriptor(entryPoint, size));
+            if (index === definitions.length - 1) {
+              const complete = pipelines as { full: GPUComputePipeline; active: GPUComputePipeline; retired: GPUComputePipeline };
+              if (operation === "refine") this.refineCoarsePipelines.set(size, complete);
+              else this.balanceCoarsePipelines.set(size, complete);
+            }
+          },
+        }));
+      }
     }
-    onProgress("Compile octree overlay materialization", entries.length);
-    this.materializePipeline = await this.device.createComputePipelineAsync(this.diagnosticDescriptor());
-    onProgress("Compile octree overlay materialization", entries.length + 1);
-    onProgress("Compile octree pressure-to-body coupling", entries.length + 1);
-    this.pressureImpulsePipeline = await this.device.createComputePipelineAsync(this.couplingDescriptor());
-    onProgress("Compile octree pressure-to-body coupling", entries.length + 2);
+    if (!cached) {
+      tasks.push({ id: "octree.pipeline.materialize", phase: "adaptive-topology", label: "Compile octree overlay materialization", run: async () => { this.materializePipeline = await this.device.createComputePipelineAsync(this.diagnosticDescriptor()); } });
+      tasks.push({ id: "octree.pipeline.pressure-impulse", phase: "adaptive-topology", label: "Compile octree pressure-to-body coupling", run: async () => { this.pressureImpulsePipeline = await this.device.createComputePipelineAsync(this.couplingDescriptor()); this.publishPipelineCache(); } });
+    } else if (tasks.length > 1) {
+      tasks.push({ id: "octree.pipeline-cache.publish", phase: "adaptive-topology", label: "Publish compiled adaptive variants", run: () => this.publishPipelineCache() });
+    }
+    return tasks;
+  }
+
+  async initializePipelines(onProgress: (label: string, completed: number, total?: number) => void) {
+    const tasks = this.initializationTasks();
+    const signal = new AbortController().signal;
+    for (let index = 0; index < tasks.length; index += 1) {
+      onProgress(tasks[index].label, index, tasks.length);
+      await tasks[index].run(signal);
+      onProgress(tasks[index].label, index + 1, tasks.length);
+    }
   }
 
   private writeParams(relaxation = 0.8) {

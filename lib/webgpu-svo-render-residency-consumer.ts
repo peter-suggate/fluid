@@ -114,6 +114,10 @@ export interface SvoRenderResidencyConsumerReferenceInput {
   rendererCapacity: number;
   leafCapacity: number;
   acceptedGeneration?: number;
+  /** Optional embedding of the solver-brick list in the structural scene. */
+  sourceOriginBricks?: readonly [number, number, number];
+  sourceDimensionsBricks?: readonly [number, number, number];
+  structuralDimensionsBricks?: readonly [number, number, number];
 }
 
 export interface SvoRenderResidencyConsumerReferenceResult {
@@ -142,6 +146,14 @@ export function referenceSvoRenderResidencyConsumption(
   const accepted = input.acceptedGeneration ?? 0;
   if (!Number.isInteger(accepted) || accepted < 0 || accepted > UINT32_MAX) throw new RangeError("Accepted generation must fit uint32");
   const sourceLayout = sparseVoxelFluidResidencyLayout(sourceCapacity);
+  const remapSourceBrick = (brick: number) => {
+    if (!input.sourceOriginBricks || !input.sourceDimensionsBricks || !input.structuralDimensionsBricks) return brick;
+    const source = input.sourceDimensionsBricks, structural = input.structuralDimensionsBricks, origin = input.sourceOriginBricks;
+    const x = brick % source[0], y = Math.floor(brick / source[0]) % source[1], z = Math.floor(brick / (source[0] * source[1]));
+    const scene = [x + origin[0], y + origin[1], z + origin[2]];
+    if (z >= source[2] || scene.some((value, axis) => value >= structural[axis])) return -1;
+    return scene[0] + structural[0] * (scene[1] + structural[1] * scene[2]);
+  };
   if (input.publicationWords.length < 8 || input.worklistWords.byteLength < sourceLayout.worklistByteLength || input.stateWords.length < sourceCapacity) {
     throw new RangeError("Residency consumer reference snapshot is undersized");
   }
@@ -192,7 +204,9 @@ export function referenceSvoRenderResidencyConsumption(
         continue;
       }
       seenBricks.add(brick); seenLeaves.add(leaf);
-      const entry: [number, number] = [brick, leaf];
+      const structuralBrick = remapSourceBrick(brick);
+      if (structuralBrick < 0) { invalidEntryCount += 1; continue; }
+      const entry: [number, number] = [structuralBrick, leaf];
       if (isRetired) retired.push(entry);
       else {
         active.push(entry);
@@ -226,7 +240,11 @@ export function referenceSvoRenderResidencyConsumption(
 }
 
 export const svoRenderResidencyConsumerShader = /* wgsl */ `
-struct Params { sourceCapacity:u32, rendererCapacity:u32, leafCapacity:u32, activeOffsetWords:u32, retiredOffsetWords:u32, requiredFields:u32, outputListStrideWords:u32, _pad0:u32 }
+struct Params {
+  sourceCapacity:u32, rendererCapacity:u32, leafCapacity:u32, activeOffsetWords:u32,
+  retiredOffsetWords:u32, requiredFields:u32, outputListStrideWords:u32, _pad0:u32,
+  sourceOriginBricks:vec4u, sourceDimensionsBricks:vec4u, structuralDimensionsBricks:vec4u,
+}
 @group(0) @binding(0) var<storage,read> publication:array<u32>;
 @group(0) @binding(1) var<storage,read> states:array<u32>;
 @group(0) @binding(2) var<storage,read> sourceWorklist:array<u32>;
@@ -286,7 +304,14 @@ fn writeEntry(list:u32,slot:u32,brick:u32,leaf:u32) {
   if(slot>=params.rendererCapacity) { return; }
   let base=list*params.outputListStrideWords+slot*2u; outputEntries[base]=brick; outputEntries[base+1u]=leaf;
 }
-
+fn structuralBrick(sourceBrick:u32)->u32 {
+  let sourceDims=params.sourceDimensionsBricks.xyz;
+  if(any(sourceDims==vec3u(0u))||sourceBrick>=sourceDims.x*sourceDims.y*sourceDims.z){return 0xffffffffu;}
+  let local=vec3u(sourceBrick%sourceDims.x,(sourceBrick/sourceDims.x)%sourceDims.y,sourceBrick/(sourceDims.x*sourceDims.y));
+  let scene=local+params.sourceOriginBricks.xyz;let structural=params.structuralDimensionsBricks.xyz;
+  if(any(scene>=structural)){return 0xffffffffu;}
+  return scene.x+structural.x*(scene.y+structural.y*scene.z);
+}
 @compute @workgroup_size(64)
 fn consumeActive(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32) {
   if((atomicLoad(&control[0])&READY)==0u) { return; }
@@ -296,9 +321,10 @@ fn consumeActive(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_inde
   let valid=(flags&RESIDENT)!=0u && (((flags&CORE)!=0u)!=((flags&HALO)!=0u));
   let attempt=atomicLoad(&control[ATTEMPT]);
   if(!valid || !claimEntry(brick,leaf,attempt)) { atomicAdd(&control[INVALID_COUNT],1u); atomicOr(&control[0],INVALID_ENTRY); return; }
-  let activeSlot=atomicAdd(&control[DIRTY_ACTIVE],1u); writeEntry(0u,activeSlot,brick,leaf);
-  if((flags&CORE)!=0u) { let slot=atomicAdd(&control[DIRTY_CORE],1u); writeEntry(1u,slot,brick,leaf); }
-  else { let slot=atomicAdd(&control[DIRTY_HALO],1u); writeEntry(2u,slot,brick,leaf); }
+  let mapped=structuralBrick(brick);if(mapped==0xffffffffu){atomicAdd(&control[INVALID_COUNT],1u);atomicOr(&control[0],INVALID_ENTRY);return;}
+  let activeSlot=atomicAdd(&control[DIRTY_ACTIVE],1u); writeEntry(0u,activeSlot,mapped,leaf);
+  if((flags&CORE)!=0u) { let slot=atomicAdd(&control[DIRTY_CORE],1u); writeEntry(1u,slot,mapped,leaf); }
+  else { let slot=atomicAdd(&control[DIRTY_HALO],1u); writeEntry(2u,slot,mapped,leaf); }
 }
 
 @compute @workgroup_size(64)
@@ -309,7 +335,8 @@ fn consumeRetired(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_ind
   var state=0u; if(brick<params.sourceCapacity) { state=states[brick]; } let flags=state&0xffu;
   let valid=(flags&RESIDENT)==0u && (flags&WAS_RESIDENT)!=0u; let attempt=atomicLoad(&control[ATTEMPT]);
   if(!valid || !claimEntry(brick,leaf,attempt)) { atomicAdd(&control[INVALID_COUNT],1u); atomicOr(&control[0],INVALID_ENTRY); return; }
-  let slot=atomicAdd(&control[DIRTY_RETIRED],1u); writeEntry(3u,slot,brick,leaf);
+  let mapped=structuralBrick(brick);if(mapped==0xffffffffu){atomicAdd(&control[INVALID_COUNT],1u);atomicOr(&control[0],INVALID_ENTRY);return;}
+  let slot=atomicAdd(&control[DIRTY_RETIRED],1u); writeEntry(3u,slot,mapped,leaf);
 }
 
 @compute @workgroup_size(1)
@@ -343,6 +370,7 @@ export class WebGPUSvoRenderResidencyConsumer {
   readonly allocatedBytes: number;
   private readonly params: GPUBuffer;
   private readonly seenAttempt: GPUBuffer;
+  private readonly dispatch: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
   private readonly pipelines: Readonly<Record<"prepare" | "consumeActive" | "consumeRetired" | "finalize", GPUComputePipeline>>;
   private destroyed = false;
@@ -358,11 +386,18 @@ export class WebGPUSvoRenderResidencyConsumer {
     this.control = make("SVO renderer residency counters and indirect dispatches", this.layout.controlByteLength, storage | GPUBufferUsage.INDIRECT);
     this.entries = make("SVO renderer residency compact requests and releases", this.layout.entryByteLength, storage);
     this.seenAttempt = make("SVO renderer residency duplicate stamps", (sourceCapacity + structural.capacities.leaves) * 4, storage);
-    this.params = make("SVO renderer residency consumer parameters", 32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    this.dispatch = make("SVO renderer residency input dispatch staging", 24, GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST);
+    this.params = make("SVO renderer residency consumer parameters", 80, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     const sourceLayout = sparseVoxelFluidResidencyLayout(sourceCapacity);
+    const structuralBrickDimensions = structural.domain.dimensionsCells.map((value) => Math.ceil(value / structural.domain.brickSize));
+    const sourceOrigin = residency.domain.originBricks, sourceDimensions = residency.domain.dimensionsBricks;
+    if (sourceOrigin.some((value, axis) => value + sourceDimensions[axis] > structuralBrickDimensions[axis])) {
+      throw new RangeError("Solver residency domain falls outside the structural SVO brick domain");
+    }
     device.queue.writeBuffer(this.params, 0, new Uint32Array([
       sourceCapacity, this.layout.capacity, structural.capacities.leaves, sourceLayout.activeEntryOffsetBytes / 4,
       sourceLayout.retiredEntryOffsetBytes / 4, SPARSE_VOXEL_VALID_FIELDS.topology | SPARSE_VOXEL_VALID_FIELDS.coarseFluid, this.layout.listStrideBytes / 4, 0,
+      ...sourceOrigin, 0, ...sourceDimensions, 0, ...structuralBrickDimensions, 0,
     ]));
     const shader = device.createShaderModule({ label: "SVO renderer residency consumer", code: svoRenderResidencyConsumerShader });
     const layout = device.createBindGroupLayout({ label: "SVO renderer residency consumer bindings", entries: [
@@ -391,7 +426,7 @@ export class WebGPUSvoRenderResidencyConsumer {
       { binding: 5, resource: { buffer: this.entries } },
       { binding: 6, resource: { buffer: this.seenAttempt } },
     ] });
-    this.allocatedBytes = this.layout.controlByteLength + this.layout.entryByteLength + (sourceCapacity + structural.capacities.leaves) * 4 + 32;
+    this.allocatedBytes = this.layout.controlByteLength + this.layout.entryByteLength + (sourceCapacity + structural.capacities.leaves) * 4 + 80 + 24;
   }
 
   /** Encode GPU fence validation, bounded compaction, and output dispatch preparation. */
@@ -403,10 +438,12 @@ export class WebGPUSvoRenderResidencyConsumer {
     run("SVO renderer residency prepare", (pass) => {
       pass.setPipeline(this.pipelines.prepare); pass.setBindGroup(0, this.bindGroup); pass.dispatchWorkgroups(1);
     });
+    encoder.copyBufferToBuffer(this.control, this.layout.indirectOffsetsBytes.activeInput, this.dispatch, 0, 12);
+    encoder.copyBufferToBuffer(this.control, this.layout.indirectOffsetsBytes.retiredInput, this.dispatch, 12, 12);
     run("SVO renderer residency compact", (pass) => {
       pass.setBindGroup(0, this.bindGroup);
-      pass.setPipeline(this.pipelines.consumeActive); pass.dispatchWorkgroupsIndirect(this.control, this.layout.indirectOffsetsBytes.activeInput);
-      pass.setPipeline(this.pipelines.consumeRetired); pass.dispatchWorkgroupsIndirect(this.control, this.layout.indirectOffsetsBytes.retiredInput);
+      pass.setPipeline(this.pipelines.consumeActive); pass.dispatchWorkgroupsIndirect(this.dispatch, 0);
+      pass.setPipeline(this.pipelines.consumeRetired); pass.dispatchWorkgroupsIndirect(this.dispatch, 12);
     });
     run("SVO renderer residency finalize", (pass) => {
       pass.setPipeline(this.pipelines.finalize); pass.setBindGroup(0, this.bindGroup); pass.dispatchWorkgroups(1);
@@ -424,6 +461,6 @@ export class WebGPUSvoRenderResidencyConsumer {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.params.destroy(); this.control.destroy(); this.entries.destroy(); this.seenAttempt.destroy();
+    this.params.destroy(); this.dispatch.destroy(); this.control.destroy(); this.entries.destroy(); this.seenAttempt.destroy();
   }
 }

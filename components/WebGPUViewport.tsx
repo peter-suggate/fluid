@@ -12,6 +12,7 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { advancePresentationClock, presentationFrameDue, presentationStateChanged } from "@/lib/frame-pacing";
 import { getScenePreset } from "@/lib/scenes";
+import { gpuStageCapture } from "@/lib/gpu-stage-capture";
 
 type Vec3 = RigidBodyState["position_m"];
 
@@ -37,7 +38,14 @@ export function WebGPUViewport() {
       canvas,
       (status) => {
         if (status.state === "lost" || status.state === "unavailable") running = false;
-        useDiagnosticsStore.getState().set({ gpuStatus: status });
+        const current = useDiagnosticsStore.getState().gpuStatus;
+        // The controller publishes the user's intent before the next render
+        // can start expensive work. Preserve that context as detailed task
+        // progress arrives from the renderer.
+        const gpuStatus = status.state === "initializing" && current.state === "initializing" && current.operation
+          ? { ...status, operation: current.operation, kind: status.kind ?? current.kind, retainingPrevious: status.retainingPrevious ?? current.retainingPrevious }
+          : status;
+        useDiagnosticsStore.getState().set({ gpuStatus });
       },
       (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
       undefined,
@@ -71,7 +79,9 @@ export function WebGPUViewport() {
         const runtime = useRuntimeStore.getState();
         const pausedPresentation = runtime.runState === "paused" ? [
           sceneState, ui, method, state.bodies, state.fluidRenderState, state.gpuInfo,
-          simulation.time(), canvas.clientWidth, canvas.clientHeight, window.devicePixelRatio
+          simulation.time(), renderer.presentationRevision,
+          gpuStageCapture.getSnapshot().revision,
+          canvas.clientWidth, canvas.clientHeight, window.devicePixelRatio
         ] : undefined;
         if (pausedPresentation && !presentationStateChanged(lastPausedPresentation, pausedPresentation)) return;
         if (!pausedPresentation) lastPausedPresentation = undefined;

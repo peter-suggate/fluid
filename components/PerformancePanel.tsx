@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { getMethod } from "@/lib/methods";
 import { measuredGPUTime_ms, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore } from "@/lib/stores/method-store";
@@ -12,8 +12,21 @@ import type { CSSProperties } from "react";
 import { averagePerformanceSnapshots, rollingPerformanceSnapshots } from "@/lib/performance-averaging";
 import { adaptiveTopologyPerformanceStages, physicsPerformanceStages, type PerformanceStage } from "@/lib/performance-stage-model";
 import { PRESENTATION_FPS } from "@/lib/frame-pacing";
+import { captureTargetForStage, gpuStageCapture, type GPUStageCaptureArtifact, type GPUStageCaptureLane } from "@/lib/gpu-stage-capture";
 
 const formatMs = (value: number, available = true, active = true) => !available ? "—" : !active ? "idle" : value > 0 ? `${value.toFixed(value < 1 ? 3 : 2)} ms` : "< timer resolution";
+
+function CapturePreview({ artifact }: { artifact: GPUStageCaptureArtifact }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const context = ref.current?.getContext("2d");
+    if (!context) return;
+    const image = context.createImageData(artifact.previewWidth, artifact.previewHeight);
+    image.data.set(artifact.previewRgba);
+    context.putImageData(image, 0, 0);
+  }, [artifact]);
+  return <canvas ref={ref} width={artifact.previewWidth} height={artifact.previewHeight} aria-label={`${artifact.label} ${artifact.selectorLabel} preview`} />;
+}
 
 /** A frame-oriented CPU/GPU trace assembled from the profiler's live timestamp samples. */
 export function PerformancePanel() {
@@ -30,18 +43,19 @@ export function PerformancePanel() {
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [selectedStageKey, setSelectedStageKey] = useState("pressure");
   const [averageWindow, setAverageWindow] = useState(30);
+  const captureState = useSyncExternalStore(gpuStageCapture.subscribe, gpuStageCapture.getSnapshot, gpuStageCapture.getServerSnapshot);
 
   const method = getMethod(activeMethodId);
   const matchingHistory = useMemo(
-    () => history.filter((sample) => sample.methodId === activeMethodId),
-    [history, activeMethodId]
+    () => history.filter((sample) => sample.methodId === activeMethodId && sample.renderTimingContext === liveSnapshot.renderTimingContext),
+    [history, activeMethodId, liveSnapshot.renderTimingContext]
   );
   const safeIndex = historyIndex === null ? null : Math.min(historyIndex, Math.max(0, matchingHistory.length - 1));
   const windowEnd = safeIndex ?? matchingHistory.length - 1;
   const windowSamples = matchingHistory.slice(Math.max(0, windowEnd - averageWindow + 1), windowEnd + 1);
   const snapshot = averagePerformanceSnapshots(windowSamples, liveSnapshot);
   const averagedFrameCount = windowSamples.length;
-  const contextMatches = snapshot.methodId === activeMethodId;
+  const contextMatches = snapshot.methodId === activeMethodId && snapshot.renderTimingContext === liveSnapshot.renderTimingContext;
   const physicsTimed = contextMatches && snapshot.gpuPhysicsTimingAvailable;
   const renderTimed = contextMatches && snapshot.gpuRenderTimingAvailable;
   const adaptive = activeMethodId === "quadtree-tall-cell";
@@ -54,8 +68,9 @@ export function PerformancePanel() {
   const renderStages: PerformanceStage[] = [
     { key: "extract", label: "Surface extraction", shortLabel: "SURFACE", value: contextMatches ? snapshot.gpuSurfaceExtraction_ms : 0, className: "stage-extract", timer: "render", group: "compute", active: true, description: "Extracts visible liquid surface geometry from the signed-distance field.", reads: ["signed distance φ", "active cells"], writes: ["surface vertices", "indirect draw args"], dependsOn: [physicsOutputStage] },
     { key: "dry-scene", label: "Dry scene", shortLabel: "SCENE", value: contextMatches ? snapshot.gpuDryScene_ms : 0, className: "stage-scene", timer: "render", group: "graphics", active: true, description: "Rasterizes the environment and rigid bodies behind the liquid.", reads: ["body transforms", "environment"], writes: ["scene color", "scene depth"], dependsOn: ["uploads"] },
+    { key: "svo-temporal", label: "SVO temporal resolve", shortLabel: "TEMPORAL", value: contextMatches ? snapshot.gpuSvoTemporal_ms : 0, className: "stage-scene", timer: "render", group: "graphics", active: snapshot.gpuSvoTemporal_ms > 0, description: "Reprojects and filters the SVO dry target before legacy raster water composition.", reads: ["dry G-buffer", "history"], writes: ["filtered dry color", "history"], dependsOn: ["dry-scene"] },
     { key: "interfaces", label: sprayEnabled ? "Water + spray interfaces" : "Front + back interfaces", shortLabel: "INTERFACES", value: contextMatches ? snapshot.gpuInterfaces_ms : 0, className: "stage-interface", timer: "render", group: "graphics", active: true, description: sprayEnabled ? "Captures the resolved surface and active spray ellipsoids together in one front pass and one back pass." : "Captures front and back liquid interfaces for thickness and refraction.", reads: sprayEnabled ? ["surface vertices", "spray particle ring", "camera"] : ["surface vertices", "camera"], writes: ["front depth", "back depth", "normals"], dependsOn: ["extract"] },
-    { key: "composite", label: "Optical composite", shortLabel: "COMPOSITE", value: contextMatches ? snapshot.gpuOpticalComposite_ms : 0, className: "stage-composite", timer: "render", group: "graphics", active: true, description: "Combines refraction, absorption, reflection, and the dry scene.", reads: ["scene color", "front/back depth", "normals"], writes: ["water color"], dependsOn: ["dry-scene", "interfaces"] },
+    { key: "composite", label: "Optical composite", shortLabel: "COMPOSITE", value: contextMatches ? snapshot.gpuOpticalComposite_ms : 0, className: "stage-composite", timer: "render", group: "graphics", active: true, description: "Combines refraction, absorption, reflection, and the dry scene.", reads: ["scene color", "front/back depth", "normals"], writes: ["water color"], dependsOn: [snapshot.gpuSvoTemporal_ms > 0 ? "svo-temporal" : "dry-scene", "interfaces"] },
     { key: "upscale", label: "Final upscale", shortLabel: "UPSCALE", value: contextMatches ? snapshot.gpuUpscale_ms : 0, className: "stage-upscale", timer: "render", group: "graphics", active: true, description: "Resolves the internal render target into the presentation surface.", reads: ["water color"], writes: ["swapchain"], dependsOn: ["composite"], sync: "Presentation boundary" }
   ];
   const gpuStages = [...physicsStages, ...adaptiveTopologyStages, ...renderStages];
@@ -108,6 +123,23 @@ export function PerformancePanel() {
   const timelineScale = Math.max(budget, submissionEnvelope_ms, cpuTotal, 0.01);
   const headroom = paused ? budget : schedule.headroom_ms;
   const selectedStage = gpuStages.find((stage) => stage.key === selectedStageKey) ?? gpuStages[0];
+  const selectedCaptureLane: GPUStageCaptureLane | undefined = selectedStage?.timer === "render" ? "presentation" : selectedStage?.timer === "physics" ? "physics" : undefined;
+  const selectedCaptureTarget = selectedStage && selectedCaptureLane ? captureTargetForStage(activeMethodId, selectedCaptureLane, selectedStage.key) : undefined;
+  const captureBusy = captureState.phase === "armed" || captureState.phase === "encoding" || captureState.phase === "submitted" || captureState.phase === "reading";
+  const captureDisabledReason = !selectedCaptureTarget ? "No typed visual resource is registered for this stage" : !selectedStage?.active ? "This stage is idle in the live pipeline" : selectedCaptureLane === "physics" && paused ? "Resume the simulation to capture a physics boundary" : gpuStatus.state !== "ready" ? "GPU is not ready" : undefined;
+  const armSelectedCapture = () => {
+    if (!selectedCaptureTarget || !selectedStage || captureDisabledReason) return;
+    gpuStageCapture.arm({
+      ...selectedCaptureTarget,
+      baseline: {
+        methodId: activeMethodId,
+        renderTimingContext: liveSnapshot.renderTimingContext,
+        stage_ms: selectedStage.value,
+        gpuTotal_ms: measuredGPUTime_ms(snapshot),
+        sampleCount: averagedFrameCount,
+      },
+    });
+  };
   const frameOffset = safeIndex === null ? 0 : Math.max(0, matchingHistory.length - 1 - safeIndex);
   const frameLabel = safeIndex === null ? "LIVE" : frameOffset === 0 ? "LATEST" : `F−${frameOffset}`;
   const sampleLabel = averageWindow === 1 ? "single frame" : `${averagedFrameCount}-frame rolling average`;
@@ -126,7 +158,13 @@ export function PerformancePanel() {
   const physicsTimeline = Array.from({ length: submissionBatchDepth }, (_, step) => physicsStages.map((stage, index) => ({ stage, step, left: (step * physicsPerStep_ms + physicsOffsets[index]) / timelineScale * 100, width: stageTimed(stage) ? stage.value / timelineScale * 100 : 0 }))).flat();
   const renderTimeline = renderStages.map((stage, index) => ({ stage, left: (batchGPU_ms + renderStages.slice(0, index).reduce((sum, previous) => sum + (stageTimed(previous) ? previous.value : 0), 0)) / timelineScale * 100, width: stageTimed(stage) ? stage.value / timelineScale * 100 : 0 }));
 
-  return <aside id="performance-panel" className="right-panel panel-scroll performance-panel" aria-label="Performance profiler" data-testid="performance-panel" data-method={activeMethodId}>
+  return <aside id="performance-panel" className="right-panel panel-scroll performance-panel" aria-label="Performance profiler" data-testid="performance-panel" data-method={activeMethodId}
+    data-render-timing-context={liveSnapshot.renderTimingContext}
+    data-render-timing-epoch={liveSnapshot.renderTimingEpoch}
+    data-render-timing-sample-id={liveSnapshot.renderTimingSampleId}
+    data-render-timestamp-supported={liveSnapshot.gpuRenderTimestampSupported}
+    data-render-timing-available={liveSnapshot.gpuRenderTimingAvailable}
+    data-render-timing-total-ms={liveSnapshot.gpuRenderTimingAvailable ? liveSnapshot.gpuRender_ms : undefined}>
     <header className="performance-header">
       <div className="performance-title">
         <div><p className="eyebrow">FRAME GRAPH · {frameLabel} · {sampleLabel}</p><h1>Performance trace</h1></div>
@@ -147,7 +185,7 @@ export function PerformancePanel() {
         <div><strong>{measuredUtilizationPercent === null ? "—" : `${measuredUtilizationPercent.toFixed(0)}%`}</strong><small>GPU busy</small></div>
       </div>
       <div className="realtime-budget-summary">
-        <div className="realtime-budget-title"><span><small>{paused ? "IDLE GPU LOAD" : "REALTIME GPU LOAD"}</small><strong>{measuredStages.length || paused ? `${demandPercent.toFixed(0)}%` : "—"}</strong></span><b>{paused ? `${renderPerFrame_ms.toFixed(2)} ms on last change` : measuredStages.length ? `${realtimeDemand_ms.toFixed(2)} / ${budget.toFixed(2)} ms` : "sampling…"}</b></div>
+        <div className="realtime-budget-title"><span><small>{paused ? "IDLE GPU LOAD" : "REALTIME GPU LOAD"}</small><strong>{measuredStages.length ? `${demandPercent.toFixed(0)}%` : "—"}</strong></span><b>{paused ? renderTimed ? `${renderPerFrame_ms.toFixed(2)} ms on last change` : "awaiting timestamp…" : measuredStages.length ? `${realtimeDemand_ms.toFixed(2)} / ${budget.toFixed(2)} ms` : "sampling…"}</b></div>
         <div className="frame-budget-track" aria-label={`${schedule.physicsPerFrame_ms.toFixed(2)} milliseconds physics, ${schedule.renderPerFrame_ms.toFixed(2)} milliseconds presentation, ${Math.max(0, headroom).toFixed(2)} milliseconds headroom`}>
           <span className="budget-physics" style={{ width: `${physicsDemandPercent}%` }} />
           <span className="budget-render" style={{ width: `${renderDemandPercent}%` }} />
@@ -161,7 +199,7 @@ export function PerformancePanel() {
     </section>
 
     <section className={`schedule-translation${gpuConstrained || cpuSpikeConstrained || unexplainedSlowdown ? " constrained" : ""}`} aria-label="Scheduling model">
-      <div className="schedule-verdict"><small>CAPACITY VERDICT</small><strong>{paused ? "Paused · viewport renders only when its inputs change" : gpuConstrained ? "GPU demand exceeds the presentation budget" : cpuSpikeConstrained ? "CPU p95 exceeds the presentation deadline" : unexplainedSlowdown ? "Timestamped work does not explain the observed slowdown" : `${headroom.toFixed(2)} ms GPU headroom per presentation frame`}</strong><span>{paused ? `Last presentation ${renderPerFrame_ms.toFixed(2)} ms on GPU` : gpuConstrained ? `${Math.abs(headroom).toFixed(2)} ms over budget` : `CPU ${cpuTotal.toFixed(2)} ms avg · ${cpuP95_ms.toFixed(2)} p95`}</span></div>
+      <div className="schedule-verdict"><small>CAPACITY VERDICT</small><strong>{paused ? "Paused · viewport renders only when its inputs change" : gpuConstrained ? "GPU demand exceeds the presentation budget" : cpuSpikeConstrained ? "CPU p95 exceeds the presentation deadline" : unexplainedSlowdown ? "Timestamped work does not explain the observed slowdown" : `${headroom.toFixed(2)} ms GPU headroom per presentation frame`}</strong><span>{paused ? renderTimed ? `Last presentation ${renderPerFrame_ms.toFixed(2)} ms on GPU` : "Awaiting presentation timestamp" : gpuConstrained ? `${Math.abs(headroom).toFixed(2)} ms over budget` : `CPU ${cpuTotal.toFixed(2)} ms avg · ${cpuP95_ms.toFixed(2)} p95`}</span></div>
       <div className="schedule-node"><small>PRESENTATION FRAME</small><strong>{budget.toFixed(2)} ms wall time</strong><span>needs {paused ? "0.00" : schedule.advancesPerFrame.toFixed(2)} GPU advances</span><b>{paused ? "0.00" : schedule.pressureSolvesPerFrame.toFixed(2)} pressure solves</b></div>
       <i className="schedule-arrow">→</i>
       <div className="schedule-node active"><small>ONE GPU ADVANCE</small><strong>{schedule.gpuAdvance_ms.toFixed(2)} ms simulation</strong><span>costs {physicsPerStep_ms.toFixed(2)} ms on GPU</span><b>{schedule.pressureSolvesPerAdvance} pressure {schedule.pressureSolvesPerAdvance === 1 ? "solve" : "solves"}</b></div>
@@ -195,6 +233,7 @@ export function PerformancePanel() {
           <div className="stage-inspector-title"><span className={selectedStage.className} /><div><small>{selectedStage.group.toUpperCase()} PASS</small><h3>{selectedStage.label}</h3></div><strong>{formatMs(selectedStage.value, stageTimed(selectedStage), selectedStage.active)}</strong></div>
           <p>{selectedStage.description}</p>
           <div className="resource-columns"><div><small>READS</small>{selectedStage.reads.map((item) => <span key={item}><i>R</i>{item}</span>)}</div><div><small>WRITES</small>{selectedStage.writes.map((item) => <span key={item}><i>W</i>{item}</span>)}</div><div><small>WAITS FOR</small>{selectedStage.dependsOn.map((item) => <span key={item}><i>↳</i>{gpuStages.find((stage) => stage.key === item)?.shortLabel ?? item.toUpperCase()}</span>)}{selectedStage.sync && <span className="sync-detail"><i>⇄</i>{selectedStage.sync}</span>}</div></div>
+          <div className="stage-capture-action"><div><small>DIAGNOSTIC RESOURCE</small><strong>{selectedCaptureTarget?.label ?? "Timing and counters only"}</strong><span>{selectedCaptureTarget ? `${selectedCaptureTarget.selectorLabel}${selectedCaptureTarget.units ? ` · ${selectedCaptureTarget.units}` : ""} · centre slice` : captureDisabledReason}</span></div><button onClick={captureBusy ? () => gpuStageCapture.cancel() : armSelectedCapture} disabled={!captureBusy && Boolean(captureDisabledReason)} title={captureDisabledReason}>{captureBusy ? "CANCEL CAPTURE" : "CAPTURE NEXT"}</button></div>
         </article>}
       </section>
 
@@ -205,11 +244,18 @@ export function PerformancePanel() {
       </section>
 
       <aside className="trace-card capture-card">
-        <div><p className="eyebrow">CAPTURE LAYER</p><h2>Timestamp trace</h2><span className="capture-status"><i />LIVE</span></div>
-        <div className="architecture-model" title="Assumed architecture context; timing values remain directly measured"><span><small>ARCH MODEL</small><strong>APPLE M1 MAX</strong></span><span><small>CPU</small><strong>10 cores</strong></span><span><small>GPU</small><strong>32 cores*</strong></span><span><small>MEMORY</small><strong>Unified</strong></span></div>
-        <p>This view is driven by WebGPU timestamp queries and CPU wall-clock regions. A direct browser GPU capture can plug into the same frame graph to add hardware occupancy, barriers, and command-level gaps.</p>
-        <dl><div><dt>GPU physics</dt><dd>{measuredStages.length ? `${physicsPerStep_ms.toFixed(2)} ms / solve` : "sampling"}</dd></div><div><dt>CPU sync waits</dt><dd>{adaptive ? `${snapshot.adaptiveRebuildBlockedFrames} blocked frames` : "none observed"}</dd></div><div><dt>Trace fidelity</dt><dd>{adaptive ? "Pass + rebuild phase" : "Pass level"}</dd></div></dl>
-        <small className="architecture-note">* Assumed full M1 Max GPU configuration; architecture context only, not a hardware-counter reading.</small>
+        <div><p className="eyebrow">DIAGNOSTIC CAPTURE · INSTRUMENTED</p><h2>{captureState.artifact?.label ?? selectedCaptureTarget?.label ?? "Stage resource capture"}</h2><span className={`capture-status phase-${captureState.phase}`}><i />{captureState.phase.toUpperCase()}</span></div>
+        {captureState.phase === "ready" && captureState.artifact ? <div className="capture-result">
+          <CapturePreview artifact={captureState.artifact} />
+          <div className="capture-interpretation"><strong>{captureState.artifact.selectorLabel.toUpperCase()} · {captureState.artifact.dimensions.join("×")}</strong><p>{captureState.artifact.interpretation}</p></div>
+          <dl><div><dt>Clean stage</dt><dd>{captureState.artifact.baseline.stage_ms === undefined ? "—" : `${captureState.artifact.baseline.stage_ms.toFixed(3)} ms`}</dd></div><div><dt>Range</dt><dd>{Number.isFinite(captureState.artifact.minimum) && Number.isFinite(captureState.artifact.maximum) ? `${captureState.artifact.minimum.toPrecision(3)} → ${captureState.artifact.maximum.toPrecision(3)}` : "Unavailable"}</dd></div><div><dt>Coverage</dt><dd>{captureState.artifact.totalValues.toLocaleString()} values{captureState.artifact.invalidValues > 0 ? ` · ${captureState.artifact.invalidValues.toLocaleString()} invalid` : ""}</dd></div><div><dt>Readback wall</dt><dd>{captureState.artifact.readbackWall_ms.toFixed(1)} ms*</dd></div></dl>
+          <small>* Instrumented completion latency, never used as production stage timing. {(captureState.artifact.stagingBytes / 1024).toFixed(0)} KiB staged asynchronously.</small>
+        </div> : <>
+          <div className="architecture-model"><span><small>SELECTED</small><strong>{selectedStage?.shortLabel ?? "NONE"}</strong></span><span><small>PRODUCT</small><strong>{selectedCaptureTarget ? "SUMMARY" : "UNAVAILABLE"}</strong></span><span><small>PREVIEW</small><strong>{selectedCaptureTarget ? "≤256²" : "—"}</strong></span><span><small>RAW 3D</small><strong>DISABLED</strong></span></div>
+          <p>{captureState.message ?? (selectedCaptureTarget ? "Capture the next matching stage boundary. A full-domain GPU summary and bounded centre-slice preview are read back asynchronously." : "Select a stage with a registered texture product. Timing-only stages remain visible in the frame graph.")}</p>
+          <dl><div><dt>GPU physics</dt><dd>{measuredStages.length ? `${physicsPerStep_ms.toFixed(2)} ms / solve` : "sampling"}</dd></div><div><dt>CPU sync waits</dt><dd>{adaptive ? `${snapshot.adaptiveRebuildBlockedFrames} blocked frames` : "none observed"}</dd></div><div><dt>Trace fidelity</dt><dd>{adaptive ? "Pass + resource" : "Pass + slice"}</dd></div></dl>
+          {captureState.phase === "failed" && <small className="capture-error">{captureState.message}</small>}
+        </>}
       </aside>
     </div>
   </aside>;

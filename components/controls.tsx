@@ -25,6 +25,7 @@ interface RangeControlProps {
 
 export function RangeControl({ label, unit, value, min, max, step, onChange, displayDigits = 3, hint, onReset, modified }: RangeControlProps) {
   const [draft, setDraft] = useState<string | null>(null);
+  const [rangeDraft, setRangeDraft] = useState<{ base: number; value: number } | null>(null);
   const commit = () => {
     if (draft !== null) {
       const next = Number(draft);
@@ -32,6 +33,12 @@ export function RangeControl({ label, unit, value, min, max, step, onChange, dis
     }
     setDraft(null);
   };
+  const commitRange = (next: number) => {
+    const normalized = Math.min(max, Math.max(min, next));
+    setRangeDraft(null);
+    if (normalized !== value) onChange(normalized);
+  };
+  const displayedValue = rangeDraft?.base === value ? rangeDraft.value : value;
   return (
     <label className="range-control" title={hint}>
       <span className="control-heading">
@@ -47,9 +54,16 @@ export function RangeControl({ label, unit, value, min, max, step, onChange, dis
               onBlur={commit}
               onKeyDown={(event) => { if (event.key === "Enter") commit(); else if (event.key === "Escape") setDraft(null); }}
             />
-          : <output title="Double-click to type a value" onDoubleClick={(event) => { event.preventDefault(); setDraft(String(value)); }}>{formatNumber(value, displayDigits)} <small>{unit}</small></output>}
+          : <output title="Double-click to type a value" onDoubleClick={(event) => { event.preventDefault(); setDraft(String(value)); }}>{formatNumber(displayedValue, displayDigits)} <small>{unit}</small></output>}
       </span>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
+      <input
+        type="range" min={min} max={max} step={step} value={displayedValue}
+        onChange={(event) => setRangeDraft({ base: value, value: Number(event.currentTarget.value) })}
+        onPointerUp={(event) => commitRange(Number(event.currentTarget.value))}
+        onPointerCancel={() => setRangeDraft(null)}
+        onBlur={(event) => { if (rangeDraft?.base === value) commitRange(Number(event.currentTarget.value)); }}
+        onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commitRange(Number(event.currentTarget.value)); }}
+      />
     </label>
   );
 }

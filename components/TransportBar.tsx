@@ -9,7 +9,7 @@ import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { PRESENTATION_FPS, frameInterval_ms } from "@/lib/frame-pacing";
 
-function TimingSlider({ label, unit, value, min, max, step, integer = false, detail, onCommit }: { label: string; unit: string; value: number; min: number; max: number; step: number; integer?: boolean; detail: (value: number) => string; onCommit: (value: number) => void }) {
+function TimingSlider({ label, unit, value, min, max, step, integer = false, detail, onCommit, disabled = false }: { label: string; unit: string; value: number; min: number; max: number; step: number; integer?: boolean; detail: (value: number) => string; onCommit: (value: number) => void; disabled?: boolean }) {
   const [draft, setDraft] = useState(value);
   const [entry, setEntry] = useState(String(value));
   const normalize = (raw: number) => Math.min(max, Math.max(min, integer ? Math.round(raw) : raw));
@@ -21,7 +21,7 @@ function TimingSlider({ label, unit, value, min, max, step, integer = false, det
     onCommit(next);
   };
   const updateFromRange = (raw: number) => { const next = normalize(raw); setDraft(next); setEntry(String(next)); };
-  return <label title={`Adjust ${label.toLowerCase()}`}><span>{label}</span><input type="range" min={min} max={max} step={step} value={draft} onChange={(event) => updateFromRange(Number(event.currentTarget.value))} onPointerUp={() => commit(draft)} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) commit(Number(event.currentTarget.value)); }} aria-label={`${label} slider`} /><span className="timing-entry"><input type="number" min={min} max={max} step={step} inputMode={integer ? "numeric" : "decimal"} value={entry} onChange={(event) => { const raw = event.currentTarget.value; setEntry(raw); const next = Number(raw); if (raw !== "" && Number.isFinite(next)) setDraft(normalize(next)); }} onBlur={() => commit(Number(entry))} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(Number(entry)); } else if (event.key === "Escape") { event.preventDefault(); setEntry(String(value)); setDraft(value); } }} aria-label={`${label} exact value`} /><b>{unit}</b></span><small>{detail(draft)}</small></label>;
+  return <label title={`Adjust ${label.toLowerCase()}`}><span>{label}</span><input disabled={disabled} type="range" min={min} max={max} step={step} value={draft} onChange={(event) => updateFromRange(Number(event.currentTarget.value))} onPointerUp={() => commit(draft)} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) commit(Number(event.currentTarget.value)); }} aria-label={`${label} slider`} /><span className="timing-entry"><input disabled={disabled} type="number" min={min} max={max} step={step} inputMode={integer ? "numeric" : "decimal"} value={entry} onChange={(event) => { const raw = event.currentTarget.value; setEntry(raw); const next = Number(raw); if (raw !== "" && Number.isFinite(next)) setDraft(normalize(next)); }} onBlur={() => commit(Number(entry))} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(Number(entry)); } else if (event.key === "Escape") { event.preventDefault(); setEntry(String(value)); setDraft(value); } }} aria-label={`${label} exact value`} /><b>{unit}</b></span><small>{detail(draft)}</small></label>;
 }
 
 export function TransportBar() {
@@ -35,12 +35,14 @@ export function TransportBar() {
   const fixedDt = useSceneStore((state) => state.scene.numerics.fixedDt_s);
   const patchNumerics = useSceneStore((state) => state.patchNumerics);
   const gpuLag = useDiagnosticsStore((state) => state.gpuInfo?.simulationLag_s);
+  const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
   const recordingStatus = useRecordingStore((state) => state.status);
   const recordingStart = useRecordingStore((state) => state.startedAtSimulation_s);
   const recording = useRecordingStore((state) => state.recording);
   const fileRef = useRef<HTMLInputElement>(null);
   const webgpu = simulation.backend === "webgpu";
   const lagged = webgpu && gpuLag !== undefined && gpuLag > 2 * maxDt;
+  const applyingGPUSettings = gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild";
   const fixedRate_hz = 1 / fixedDt;
   const gpuStepRate_hz = 1 / maxDt;
   const commitNumerics = (patch: Parameters<typeof patchNumerics>[0]) => {
@@ -78,8 +80,8 @@ export function TransportBar() {
   return (
     <footer className="transport-bar">
       <div className="transport-controls">
-        <button className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={runState === "running" ? "Pause simulation" : "Play simulation"}>{runState === "running" ? "Ⅱ" : "▶"}</button>
-        <button onClick={() => simulation.singleStep()} aria-label="Single fluid clock step">STEP</button>
+        <button disabled={applyingGPUSettings} className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={applyingGPUSettings ? "Simulation paused while GPU settings apply" : runState === "running" ? "Pause simulation" : "Play simulation"}>{applyingGPUSettings ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
+        <button disabled={applyingGPUSettings} onClick={() => simulation.singleStep()} aria-label="Single fluid clock step">STEP</button>
         <button onClick={() => {
           if (recordingStatus === "recording") simulationRecording.stop(simulation.time());
           simulation.reset();
@@ -87,7 +89,7 @@ export function TransportBar() {
         <button
           className={`record-button${recordingStatus === "recording" ? " active" : ""}`}
           onClick={toggleRecording}
-          disabled={recordingStatus === "processing"}
+          disabled={recordingStatus === "processing" || applyingGPUSettings}
           aria-label={recordingStatus === "recording" ? "Stop simulation recording" : "Record simulation video"}
           data-testid="record-simulation"
         >{recordingStatus === "recording" ? "■ STOP" : recordingStatus === "processing" ? "WAIT" : "● REC"}</button>
@@ -98,15 +100,15 @@ export function TransportBar() {
         {lagged && <small className="lag-chip" title="Simulation time currently admitted to the bounded GPU feed window.">GPU −{gpuLag.toFixed(1)} s</small>}
         {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
         <div className="transport-timing" aria-label="Simulation timestep controls">
-          <TimingSlider key={`fixed-${fixedDt}`} label="FIXED STEP" unit="Hz" value={fixedRate_hz} min={Math.min(30, fixedRate_hz)} max={Math.max(2000, fixedRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms rigid`} onCommit={commitFixedRate} />
-          <TimingSlider key={`gpu-${fixedDt}-${maxDt}`} label="GPU STEP" unit="Hz" value={gpuStepRate_hz} min={1} max={fixedRate_hz} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms max`} onCommit={commitGpuStepRate} />
+          <TimingSlider disabled={applyingGPUSettings} key={`fixed-${fixedDt}`} label="FIXED STEP" unit="Hz" value={fixedRate_hz} min={Math.min(30, fixedRate_hz)} max={Math.max(2000, fixedRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms rigid`} onCommit={commitFixedRate} />
+          <TimingSlider disabled={applyingGPUSettings} key={`gpu-${fixedDt}-${maxDt}`} label="GPU STEP" unit="Hz" value={gpuStepRate_hz} min={1} max={fixedRate_hz} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms max`} onCommit={commitGpuStepRate} />
         </div>
         {webgpu
           ? <span className="continuous-run" title={`Physics fills measured GPU slack between presentations · present every ${frameInterval_ms().toFixed(2)} ms · rigid step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>MAX SIM THROUGHPUT · PRESENT {PRESENTATION_FPS} FPS</span>
           : <span className="continuous-run" title={`CPU reference simulation · present every ${frameInterval_ms().toFixed(2)} ms · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT {PRESENTATION_FPS} FPS</span>}
       </div>
       <div className="file-actions">
-        <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{notice}</span>
+        <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{applyingGPUSettings ? `GPU SETTINGS · ${gpuStatus.operation ?? gpuStatus.label}` : notice}</span>
         {recording && recordingStatus !== "recording" && <button onClick={() => simulationRecording.open()}>Playback</button>}
         <button onClick={() => { if (!simulation.loadLocalScene()) fileRef.current?.click(); }}>Load</button>
         <button onClick={() => fileRef.current?.click()}>Import</button>

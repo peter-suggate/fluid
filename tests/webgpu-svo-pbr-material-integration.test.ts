@@ -12,6 +12,7 @@ import {
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import { candidateBackedDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const dryRendererSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
@@ -45,7 +46,7 @@ function structuralSource(
   } as unknown as SparseVoxelRenderSource;
 }
 
-const scene: SparseVoxelDrySceneData = { primitiveRecords: new Uint32Array(16), ownerBase: 0 };
+const scene: SparseVoxelDrySceneData = candidateBackedDrySceneFixture;
 
 test("production PBR publication validation is exact and malformed sources fail over before encoding", () => {
   const valid = structuralSource();
@@ -75,10 +76,12 @@ test("binding 6 consumes the 96-byte producer table while the legacy debug ABI r
 
 test("published count, revision, direct identity, flags, and material functions are enforced in WGSL", () => {
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 160, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32, fluidDomainWordOffset: 36,
+    sizeBytes: 336, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32, fluidDomainWordOffset: 36,
+    primitiveCandidateWordOffset: 40, finePhiWordOffset: 44,
   });
-  assert.match(dryRendererSource, /words\.set\(\[pbrMaterials\.count, pbrMaterials\.revision, pbrMaterials\.strideBytes, scene\.contactVisibilityEnabled \? 1 : 0\], SVO_DRY_SCENE_PARAMS_LAYOUT\.materialPublicationWordOffset\)/,
-    "the spare publication lane defaults to zero while carrying the explicit contact-visibility capability");
+  assert.match(dryRendererSource, /const visibilityFlags = \(scene\.contactVisibilityEnabled \? 1 : 0\) \| \(scene\.shadowVisibilityEnabled === false \? 0 : 2\)/,
+    "the visibility lane keeps contact default-off and production shadows default-on as independent bits");
+  assert.match(dryRendererSource, /words\.set\(\[pbrMaterials\.count, pbrMaterials\.revision, pbrMaterials\.strideBytes, visibilityFlags\], SVO_DRY_SCENE_PARAMS_LAYOUT\.materialPublicationWordOffset\)/);
   assert.match(svoDrySceneShader, /fn dryPublishedMaterialValid\(material:SvoMaterialRecord,index:u32\)->bool/);
   assert.match(svoDrySceneShader, /svoMaterialValid\(material,index\)&&material\.identity\.y==dry\.materialPublication\.y&&\(material\.identity\.w&SVO_MATERIAL_FLAG_OPAQUE\)!=0u/);
   assert.match(svoDrySceneShader, /material\.identity\.z==SVO_MATERIAL_FUNCTION_GARDEN_TERRAIN/);
