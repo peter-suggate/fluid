@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { canQueuePreparedGPUAdvance, FluidLabRenderer, presentationHasPhysicsSlack, presentationPhysicsQueueDepth, presentationPriorityDue, submitNextPreparedGPUAdvance, type GPUStatus } from "../lib/webgpu-renderer";
+import { presentationStateChanged } from "../lib/frame-pacing";
 
 test("presentation takes queue priority once a 60 Hz deadline has elapsed", () => {
   assert.equal(presentationPriorityDue(-Infinity, 0), true);
@@ -41,6 +43,33 @@ test("GPU queue stays dense around presentation without admitting a physics burs
   assert.equal(canQueuePreparedGPUAdvance(0, 4), true);
   assert.equal(canQueuePreparedGPUAdvance(3, 4), true);
   assert.equal(canQueuePreparedGPUAdvance(4, 4), false);
+});
+
+test("paused solver attachment and raw publication each request exactly one presentation", () => {
+  const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+  const viewportSource = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
+  const attachStart = rendererSource.indexOf("this.gpuFluidPending=create.then");
+  const attachEnd = rendererSource.indexOf("}).catch((error:unknown)", attachStart);
+  const attach = rendererSource.slice(attachStart, attachEnd);
+  const sourceAttach = attach.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData");
+  const repaint = attach.indexOf("this.pausedPresentationRevision+=1", sourceAttach);
+  assert.ok(sourceAttach >= 0 && repaint > sourceAttach,
+    "the repaint revision must publish only after the warmed SVO and temporal-ready renderer source attaches");
+  assert.equal((attach.match(/pausedPresentationRevision\+=1/g) ?? []).length, 1,
+    "one successful transactional attach requests one paused repaint");
+  assert.match(viewportSource, /simulation\.time\(\), renderer\.presentationRevision,/,
+    "the paused presentation key must poll the renderer-owned attach revision");
+
+  const stableState = {};
+  const attached = [stableState, 1] as const;
+  assert.equal(presentationStateChanged([stableState, 0], attached), true);
+  assert.equal(presentationStateChanged(attached, attached), false,
+    "the attached solver paints once and does not create a paused render loop");
+  const rawMode = {};
+  const raw = [rawMode, 1] as const;
+  assert.equal(presentationStateChanged(attached, raw), true);
+  assert.equal(presentationStateChanged(raw, raw), false,
+    "the raw-mode state change services its pending publication in exactly one presentation");
 });
 
 test("renderer stops submitting frames and disposes its device after WebGPU loss", async (t) => {

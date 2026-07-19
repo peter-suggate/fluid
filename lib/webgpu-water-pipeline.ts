@@ -1,7 +1,12 @@
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
-import { GLASS_OPTICS, unifiedLightingShaderLibrary, WATER_OPTICS } from "./webgpu-lighting";
+import {
+  GLASS_OPTICS,
+  unifiedDisplayTransferShaderLibrary,
+  unifiedLightingShaderLibrary,
+  WATER_OPTICS,
+} from "./webgpu-lighting";
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
 import type { SvoFluidRenderOwnership } from "./svo-fluid-media-path";
@@ -733,6 +738,7 @@ fn safeSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{return textureSampleLevel
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let near3=min(a,b);let far3=max(a,b);return vec2f(max(max(near3.x,near3.y),near3.z),min(min(far3.x,far3.y),far3.z));}
 ${environmentShaderLibrary}
 ${unifiedLightingShaderLibrary}
+${unifiedDisplayTransferShaderLibrary}
 fn qrot(q:vec4f,v:vec3f)->vec3f{let a=cross(q.yzw,v);return v+2.0*(q.x*a+cross(q.yzw,a));}
 fn qinv(q:vec4f,v:vec3f)->vec3f{return qrot(vec4f(q.x,-q.yzw),v);}
 struct RigidHit { t:f32, n:vec3f }
@@ -817,7 +823,7 @@ fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
   result+=environmentLightColor()*(glint*(.18+.82*outerEdge)+fresnel*outerEdge*.16);
   return result;
 }
-fn finish(color:vec3f,ndc:vec2f)->vec4f{var c=environmentForeground(color,ndc)*(1.0-.08*dot(ndc*.55,ndc*.55));c=c/(c+vec3f(1.0));c=pow(max(c,vec3f(0.0)),vec3f(1.0/2.2));return vec4f(c,1);}
+fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=environmentForeground(color,ndc)*(1.0-.08*dot(ndc*.55,ndc*.55));return vec4f(unifiedDisplayTransfer(c),1);}
 @fragment fn fragmentMain(input:VOut)->@location(0) vec4f{
   // Full-screen interpolated UV has Y=1 at the top of the render target,
   // while sampled WebGPU textures have Y=0 there. The shared legacy upscaler
@@ -1033,6 +1039,11 @@ export class RasterWaterPipeline {
 
   setSecondaryParticles(pipeline: SecondaryParticleRenderPipeline | undefined) {
     this.secondaryParticles = pipeline;
+  }
+
+  diagnosticCaptureTexture(stageKey: string) {
+    const texture = stageKey === "interfaces" ? this.frontNormal : this.sceneTexture;
+    return texture ? { texture, dimensions: [texture.width, texture.height, 1] as [number, number, number] } : undefined;
   }
 
   private ensureGeometry(nx: number, ny: number, nz: number) {

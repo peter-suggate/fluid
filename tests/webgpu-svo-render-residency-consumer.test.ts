@@ -14,6 +14,12 @@ import {
   sparseVoxelFluidResidencyLayout,
   type SparseVoxelStructuralRenderSource,
 } from "../lib/webgpu-voxel-debug";
+import {
+  OctreeOwnerPageLifecycleMirror,
+  lookupOctreeOwnerPage,
+  packOctreeOwnerPageWord,
+  planOctreeOwnerPages,
+} from "../lib/webgpu-octree-owner-pages";
 
 const fakeBuffer = (size: number, label = "source") => ({ size, label, destroy() {} } as unknown as GPUBuffer);
 
@@ -100,6 +106,37 @@ test("CPU oracle accepts exact fences, splits core/halo, and keeps coarse fallba
   });
 });
 
+test("nonzero solver origin remaps active and retired bricks into the structural owner page table", () => {
+  const data = fixture();
+  const mapping = {
+    sourceOriginBricks: [2, 1, 1] as const,
+    sourceDimensionsBricks: [3, 1, 1] as const,
+    structuralDimensionsBricks: [6, 4, 3] as const,
+  };
+  const result = referenceSvoRenderResidencyConsumption({
+    ...data, ...mapping, sourceCapacity: 3, rendererCapacity: 3, leafCapacity: 16,
+  });
+  assert.deepEqual(result.active, [[32, 4], [33, 5]]);
+  assert.deepEqual(result.core, [[32, 4]]);
+  assert.deepEqual(result.halo, [[33, 5]]);
+  assert.deepEqual(result.retired, [[34, 6]]);
+
+  const plan = planOctreeOwnerPages([48, 32, 24], { maximumPages: 3 });
+  const lifecycle = new OctreeOwnerPageLifecycleMirror(plan.logicalBrickCount, plan.capacity);
+  lifecycle.publish(1, [34], []);
+  const publication = lifecycle.publish(2, result.active.map(([logical]) => logical), result.retired.map(([logical]) => logical));
+  assert.equal(publication.stats.retired, 1);
+  assert.equal(lifecycle.slot(34), undefined);
+  const arena = new Uint32Array(plan.allocatedWords);
+  arena.set(lifecycle.pageTable, plan.pageTableOffsetWords);
+  const cell = [16, 8, 8] as const; // structural brick (2,1,1), logical 32
+  const slot = lifecycle.slot(32)!;
+  arena[plan.ownerPagesOffsetWords + slot * plan.pageVoxels] = packOctreeOwnerPageWord(cell, cell, 1);
+  assert.deepEqual(lookupOctreeOwnerPage(arena, plan, cell, 16), {
+    origin: [...cell], size: 1, missing: false, status: 0,
+  });
+});
+
 test("CPU oracle rejects stale, unchanged, mismatched, and malformed publications without exposing dirty work", () => {
   const stale = fixture();
   const staleResult = referenceSvoRenderResidencyConsumption({ ...stale, sourceCapacity: 3, rendererCapacity: 3, leafCapacity: 16, acceptedGeneration: 8 });
@@ -128,6 +165,9 @@ test("shader validates source fences on GPU, reads source arenas only, and autho
   assert.match(svoRenderResidencyConsumerShader, /storeDispatch\(ACTIVE_OUTPUT_DISPATCH,min\(activeWork,params\.rendererCapacity\)\)/);
   assert.match(svoRenderResidencyConsumerShader, /status\|=RENDERER_EXHAUSTED/);
   assert.match(svoRenderResidencyConsumerShader, /status\|=INVALID_ENTRY\|COARSE_FALLBACK/);
+  assert.match(svoRenderResidencyConsumerShader, /let scene=local\+params\.sourceOriginBricks\.xyz/);
+  assert.match(svoRenderResidencyConsumerShader, /writeEntry\(3u,slot,mapped,leaf\)/,
+    "retired source bricks must use the same structural remap as active bricks");
   assert.doesNotMatch(svoRenderResidencyConsumerShader, /var<storage,read_write> (publication|states|sourceWorklist)/);
   assert.doesNotMatch(svoRenderResidencyConsumerShader, /mapAsync|copyBufferToBuffer/);
 });
@@ -163,9 +203,10 @@ test("WebGPU consumer owns outputs, binds producer arenas read-only, and encodes
   assert.deepEqual(bindLayouts[0].slice(0, 3).map((entry) => entry.buffer?.type), ["read-only-storage", "read-only-storage", "read-only-storage"]);
   assert.equal(consumer.binding("halo").offset, 512);
   assert.equal(consumer.indirectOffset("retired"), 160);
-  assert.equal(consumer.allocatedBytes, 256 + 1024 + (3 + 16) * 4 + 32);
+  assert.equal(consumer.allocatedBytes, 256 + 1024 + (3 + 16) * 4 + 80 + 24);
   const calls: Array<readonly unknown[]> = [];
   const encoder = {
+    copyBufferToBuffer: (...args: unknown[]) => calls.push(["copy", ...args]),
     beginComputePass: ({ label }: GPUComputePassDescriptor) => ({
       setPipeline: (pipeline: unknown) => calls.push([label, "pipeline", pipeline]),
       setBindGroup: () => {},
@@ -176,10 +217,11 @@ test("WebGPU consumer owns outputs, binds producer arenas read-only, and encodes
   } as unknown as GPUCommandEncoder;
   consumer.encode(encoder);
   assert.deepEqual(calls.filter((call) => call[1] === "direct").map((call) => call[0]), ["SVO renderer residency prepare", "SVO renderer residency finalize"]);
-  assert.deepEqual(calls.filter((call) => call[1] === "indirect").map((call) => call[3]), [80, 96]);
+  assert.deepEqual(calls.filter((call) => call[0] === "copy").map((call) => [call[2], call[4], call[5]]), [[80, 0, 12], [96, 12, 12]]);
+  assert.deepEqual(calls.filter((call) => call[1] === "indirect").map((call) => call[3]), [0, 12]);
   assert.equal(calls.filter((call) => call[1] === "end").length, 3, "pass boundaries make storage-authored indirect metadata visible");
   consumer.destroy(); consumer.destroy();
-  assert.equal(created.filter((buffer) => buffer.destroyed).length, 4);
+  assert.equal(created.filter((buffer) => buffer.destroyed).length, 5);
   assert.equal((data.structural.publication.state.buffer as unknown as { destroyed?: boolean }).destroyed, undefined, "producer buffers remain externally owned");
   assert.throws(() => new WebGPUSvoRenderResidencyConsumer(device, data.structural, { capacity: 2, coarseCoverageComplete: false as true }), /coarse fallback/);
 });

@@ -11,6 +11,11 @@ import {
   type SvoPrimitiveCandidatePublication,
 } from "./svo-primitive-candidates";
 import {
+  cachedSvoStaticPublication,
+  hashSvoStaticPublication,
+  internSvoStaticPublication,
+} from "./svo-static-publication-cache";
+import {
   buildEnvironmentProxyCatalog,
   environmentProxyPrimitives,
   type EnvironmentProxyCatalog,
@@ -22,11 +27,23 @@ import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "./webgpu-octree-sparse-bricks";
 
 /** Defensive ceiling: current authored catalogs contain fewer than 64 entries. */
 export const SVO_SCENE_DEFAULT_MAXIMUM_PRIMITIVES = 4_096;
+export const SVO_SCENE_PRIMITIVE_VERSION = "1" as const;
+
+const scenePrimitiveCache = new Map<string, SvoScenePrimitiveBuild>();
 
 export interface SvoScenePrimitiveBuildOptions {
   environmentId?: EnvironmentId;
   includeShell?: boolean;
   maximumPrimitives?: number;
+  /** Nominal coverage width used only for conservative subcell audit bounds. */
+  coverageCellSize_m?: number;
+}
+
+export interface SvoPrimitiveCoverageBounds {
+  exact_m: EnvironmentProxyPrimitive["aabb_m"];
+  conservative_m: EnvironmentProxyPrimitive["aabb_m"];
+  subcellAxes: readonly ("x" | "y" | "z")[];
+  policy: "exact" | "conservative-subcell";
 }
 
 export interface SvoEnvironmentPrimitiveMetadata {
@@ -46,6 +63,8 @@ export interface SvoEnvironmentPrimitiveMetadata {
   shell: boolean;
   /** Front room shell is retained in the model but skipped for interior presentation. */
   openShell: boolean;
+  /** Audit-only bounds; they do not alter rigid-body or solver collision physics. */
+  coverageBounds: SvoPrimitiveCoverageBounds;
 }
 
 export interface SvoUnsupportedStaticSource {
@@ -78,6 +97,10 @@ export interface SvoScenePrimitiveBuild {
   requiresRasterTerrainFallback: boolean;
   /** Analytic heightfield consumed directly from the packed scene uniforms. */
   analyticTerrain?: SvoAnalyticTerrainSource;
+  /** Content hash over packed records, identities, bounds policy, and terrain. */
+  staticRevision: string;
+  /** Versioned identity used to reuse immutable packed publication records. */
+  cacheKey: string;
 }
 
 function positiveSafeInteger(value: number, label: string): number {
@@ -122,6 +145,31 @@ function frontOpenShell(primitive: EnvironmentProxyPrimitive): boolean {
     && primitive.key.endsWith("/shell/wall-front");
 }
 
+function coverageBounds(primitive: EnvironmentProxyPrimitive, minimumWidth_m: number): SvoPrimitiveCoverageBounds {
+  const axes = ["x", "y", "z"] as const;
+  const exact_m = {
+    min: { ...primitive.aabb_m.min },
+    max: { ...primitive.aabb_m.max },
+  };
+  if (!(minimumWidth_m > 0)) return { exact_m, conservative_m: exact_m, subcellAxes: [], policy: "exact" };
+  const center = primitive.center_m;
+  const halfMinimum = 0.5 * minimumWidth_m;
+  const subcellAxes = axes.filter((axis) => primitive.aabb_m.max[axis] - primitive.aabb_m.min[axis] < minimumWidth_m);
+  const conservative_m = {
+    min: {
+      x: Math.min(primitive.aabb_m.min.x, center.x - halfMinimum),
+      y: Math.min(primitive.aabb_m.min.y, center.y - halfMinimum),
+      z: Math.min(primitive.aabb_m.min.z, center.z - halfMinimum),
+    },
+    max: {
+      x: Math.max(primitive.aabb_m.max.x, center.x + halfMinimum),
+      y: Math.max(primitive.aabb_m.max.y, center.y + halfMinimum),
+      z: Math.max(primitive.aabb_m.max.z, center.z + halfMinimum),
+    },
+  };
+  return { exact_m, conservative_m, subcellAxes, policy: subcellAxes.length > 0 ? "conservative-subcell" : "exact" };
+}
+
 /**
  * Convert one existing deterministic environment catalog into bounded SVO
  * primitive records without changing sparse-voxel material or owner identity.
@@ -140,6 +188,25 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
   if (primitives.length > maximumPrimitives) {
     throw new RangeError(`Environment ${catalog.environmentId} needs ${primitives.length} SVO primitives, exceeding the ${maximumPrimitives} record limit`);
   }
+  const coverageCellSize_m = options.coverageCellSize_m ?? 0;
+  if (!Number.isFinite(coverageCellSize_m) || coverageCellSize_m < 0) {
+    throw new RangeError("SVO scene primitive coverage cell size must be finite and non-negative");
+  }
+  const analyticTerrain: SvoAnalyticTerrainSource | undefined = catalog.shell.kind === "terrain-heightfield" ? {
+    kind: "terrain-heightfield",
+    materialId: VOXEL_MATERIAL_IDS.terrain,
+    normalEpsilon_m: 0.02,
+  } : undefined;
+  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+    environmentId: catalog.environmentId,
+    rigidBodyCount: scene.rigidBodies.length,
+    coverageCellSize_m,
+    primitives,
+    analyticTerrain,
+  }));
+  const cacheKey = `svo-scene-primitives-v${SVO_SCENE_PRIMITIVE_VERSION}:${catalog.environmentId}:${staticRevision}`;
+  const cached = cachedSvoStaticPublication(scenePrimitiveCache, cacheKey);
+  if (cached) return cached;
 
   const descriptors: SvoPrimitiveDescriptor[] = [];
   const metadata: SvoEnvironmentPrimitiveMetadata[] = [];
@@ -173,26 +240,23 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
       },
       shell: primitive.tags.includes("shell"),
       openShell,
+      coverageBounds: coverageBounds(primitive, coverageCellSize_m),
     });
     primitiveIndexByOwnerId.set(ownerId, primitiveIndex);
     primitiveIndexByMaterialId.set(materialId, primitiveIndex);
   }
 
   const unsupportedSources: SvoUnsupportedStaticSource[] = [];
-  const analyticTerrain: SvoAnalyticTerrainSource | undefined = catalog.shell.kind === "terrain-heightfield" ? {
-    kind: "terrain-heightfield",
-    materialId: VOXEL_MATERIAL_IDS.terrain,
-    normalEpsilon_m: 0.02,
-  } : undefined;
   const primitiveCandidates = descriptors.length <= SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES
     && descriptors.every(({ kind }) => kind !== "terrain-heightfield")
     ? buildSvoPrimitiveCandidates(descriptors as SvoFinitePrimitiveDescriptor[], { skippedOwnerId: openShellOwnerId })
     : undefined;
 
-  return {
+  const packedRecords = packSvoPrimitiveRecords(descriptors);
+  return internSvoStaticPublication(scenePrimitiveCache, cacheKey, {
     environmentId: catalog.environmentId,
     descriptors,
-    packedRecords: packSvoPrimitiveRecords(descriptors),
+    packedRecords,
     primitiveCandidates,
     metadata,
     primitiveIndexByOwnerId,
@@ -202,7 +266,9 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     unsupportedSources,
     requiresRasterTerrainFallback: unsupportedSources.length > 0,
     analyticTerrain,
-  };
+    staticRevision,
+    cacheKey,
+  });
 }
 
 /** Build the selected scene environment catalog and convert it in one call. */
@@ -212,5 +278,10 @@ export function buildSvoScenePrimitives(
 ): SvoScenePrimitiveBuild {
   const environmentId = options.environmentId ?? scene.environment ?? "default";
   const catalog = buildEnvironmentProxyCatalog(scene, environmentId);
-  return svoScenePrimitivesFromEnvironmentCatalog(scene, catalog, options);
+  return svoScenePrimitivesFromEnvironmentCatalog(scene, catalog, {
+    ...options,
+    // Match the default-camera acceptance audit: features below 1.5 nominal
+    // cells retain conservative coverage even when cell-centre sampling moves.
+    coverageCellSize_m: options.coverageCellSize_m ?? 1.5 * scene.nominalResolution.length_m,
+  });
 }

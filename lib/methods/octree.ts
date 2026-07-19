@@ -6,7 +6,7 @@ const params: MethodParamSpec[] = [
   { kind: "number", key: "pressureIterations", label: "Pressure effort", unit: "equiv. sweeps", min: 16, max: 400, step: 8, digits: 0, default: 128, tier: "coarse", hint: "Jacobi-equivalent pressure effort. The parallel Chebyshev solver maps four equivalent sweeps to one polynomial pass; rigid pressure impulses use a frame-lagged partitioned exchange so the accelerated path stays active." },
   { kind: "number", key: "surfaceColumns", label: "Finest columns", unit: "columns", min: 1_000, max: 20_000, step: 500, digits: 0, default: 2_500, tier: "fine", hint: "Finest x/z lattice shared by the authoritative level set and octree owner map." },
   { kind: "number", key: "adaptivity", label: "Octree adaptivity", unit: "", min: 0, max: 1, step: 0.1, digits: 1, default: 1, tier: "coarse", hint: "Debug quality/performance sweep: 0 forces finest pressure cells everywhere; 1 enables full signed-distance-graded coarsening." },
-  { kind: "select", key: "secondaryParticles", label: "Secondary liquid", default: "on", tier: "coarse", options: [{ value: "on", label: "Spray droplets" }, { value: "off", label: "Off" }], hint: "One-way GPU droplets preserve escaped splash detail without changing liquid mass or pressure." },
+  { kind: "select", key: "secondaryParticles", label: "Secondary liquid", default: "off", tier: "coarse", update: "runtime", options: [{ value: "on", label: "Spray droplets" }, { value: "off", label: "Off" }], hint: "One-way GPU droplets preserve escaped splash detail without changing liquid mass or pressure." },
   { kind: "number", key: "secondaryParticleCapacity", label: "Particle budget", unit: "particles", min: 4_096, max: 65_536, step: 1_024, digits: 0, default: 16_384, tier: "fine", hint: "Fixed GPU ring capacity. Full rings overwrite the oldest slots without allocating or reading back." },
   { kind: "number", key: "secondaryParticleSurfaceCorrection", label: "Particle surface correction", unit: "", min: 0, max: 1, step: 0.1, digits: 1, default: 0, tier: "fine", hint: "Optionally folds only near-interface spray markers back into phi. Each substep is capped to 0.2 cell and detached droplets remain render-only; zero preserves the proven one-way path." },
   { kind: "select", key: "maximumLeafSize", label: "Maximum leaf", default: "16", tier: "fine", options: [{ value: "2", label: "2³ cells" }, { value: "4", label: "4³ cells" }, { value: "8", label: "8³ cells" }, { value: "16", label: "16³ cells" }, { value: "32", label: "32³ cells" }], hint: "Largest dyadic pressure cell. Interface bands stay fine while distant bulk air, water, and solid regions can collapse to much larger cells, then enforce 2:1 balance." },
@@ -46,7 +46,10 @@ const options = (quality: GPUQuality, values: MethodParamValues) => ({
   brickSparseTransportPreparation: values.brickSparseTransport !== "off" && values.brickSparseTransport !== false,
   brickSparseOccupancyFluxPreparation: values.brickSparseOccupancyFlux !== "off" && values.brickSparseOccupancyFlux !== false,
   pressureIterations: numberValue(values, params, "pressureIterations"),
-  secondaryParticles: values.secondaryParticles !== "off" && values.secondaryParticles !== false,
+  // The spray component is allocated once; visibility/simulation is a live
+  // runtime setting so toggling it never rebuilds the pressure solver.
+  secondaryParticles: true,
+  secondaryParticlesEnabled: values.secondaryParticles !== "off" && values.secondaryParticles !== false,
   secondaryParticleCapacity: numberValue(values, params, "secondaryParticleCapacity"),
   secondaryParticleSurfaceCorrection: numberValue(values, params, "secondaryParticleSurfaceCorrection"),
   tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") },
@@ -86,7 +89,7 @@ export const octreeMethod: SimulationMethod = {
     pressureIterations: quality === "balanced" ? 128 : quality === "high" ? 320 : 400,
     surfaceColumns: quality === "balanced" ? 2_500 : quality === "high" ? 7_000 : 12_500,
     adaptivity: 1,
-    secondaryParticles: "on",
+    secondaryParticles: "off",
     secondaryParticleCapacity: 16_384,
     secondaryParticleSurfaceCorrection: 0,
     maximumLeafSize: "16",
@@ -104,9 +107,11 @@ export const octreeMethod: SimulationMethod = {
     brickSparseExtrapolation: "off",
     brickPreActivation: "on"
   }),
+  runtimeParamKeys: ["secondaryParticles"],
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, options(quality, values)),
-  createSolverAsync: (device, scene, quality, values, onRigidLoads, onProgress) => WebGPUUniformEulerianSolver.createAsync(
+  createSolverAsync: (device, scene, quality, values, onRigidLoads, onProgress, signal) => WebGPUUniformEulerianSolver.createAsync(
     device, scene, quality, onRigidLoads, options(quality, values),
-    (label, completed, total) => onProgress({ phase: label.includes("octree") || label.includes("adaptive") ? "adaptive-topology" : "solver-pipelines", label, completed, total })
+    (label, completed, total, phase, taskId) => onProgress({ phase: phase === "adaptive-topology" || phase === "secondary-particles" || phase === "allocation" || phase === "warmup" ? phase : "solver-pipelines", taskId, label, completed, total }),
+    signal,
   )
 };

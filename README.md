@@ -72,6 +72,9 @@ with boxes (Figure 4), and jet-past-sphere benchmark (Figure 6).
 - [`docs/SPARSE_VOXEL_OCTREE_RENDERER_MIGRATION.md`](docs/SPARSE_VOXEL_OCTREE_RENDERER_MIGRATION.md)
   — tracked milestones, acceptance gates, decisions, risks, and evidence for
   the direct SVO renderer migration with retained raster compatibility.
+- [`docs/GPU_STAGE_DIAGNOSTICS_CAPTURE_PLAN.md`](docs/GPU_STAGE_DIAGNOSTICS_CAPTURE_PLAN.md)
+  — one-shot simulation/SVO stage capture, resource visualization, workload
+  interpretation, and capture-off performance validation contract.
 - [`docs/SCENE_FORMAT.md`](docs/SCENE_FORMAT.md) — canonical SI scene and run
   record format.
 - [`docs/COMPARABILITY.md`](docs/COMPARABILITY.md) — resolution, workload, and

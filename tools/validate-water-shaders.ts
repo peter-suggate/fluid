@@ -18,6 +18,7 @@ import { octreeProjectionShader } from "../lib/webgpu-octree";
 import { sparseSceneProxyVoxelizationShader } from "../lib/webgpu-sparse-scene-proxies";
 import { sparseSurfaceDynamicsShader, sparseSurfaceFieldShader, sparseSurfaceResidencyShader } from "../lib/webgpu-sparse-surface-band";
 import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
+import { svoThickGlassWGSL } from "../lib/svo-thick-glass";
 import { sparseVoxelTemporalAccumulatorShader } from "../lib/webgpu-svo-temporal-accumulator";
 
 const naga = process.env.NAGA ?? "naga";
@@ -40,6 +41,7 @@ const shaders = {
   "sparse-surface-field": sparseSurfaceFieldShader,
   "sparse-surface-dynamics": sparseSurfaceDynamicsShader,
   "sparse-voxel-dry-scene": svoDrySceneShader,
+  "sparse-voxel-thick-glass-library": svoThickGlassWGSL,
   "sparse-voxel-temporal-accumulation": sparseVoxelTemporalAccumulatorShader,
 };
 const directory = mkdtempSync(join(tmpdir(), "fluid-water-wgsl-"));

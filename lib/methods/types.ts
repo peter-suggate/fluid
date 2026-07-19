@@ -7,6 +7,7 @@ import type { Vec3 } from "../model";
 import type { GPUSecondaryParticleSource } from "../webgpu-secondary-particles";
 import type { SparseVoxelRenderSource, SparseVoxelSceneRenderSource } from "../webgpu-voxel-debug";
 import type { SparseSurfaceBandGPUSource } from "../webgpu-sparse-surface-band";
+import type { GPUInitializationPhase } from "../gpu-initialization";
 
 /**
  * Method plugin contract.
@@ -33,6 +34,9 @@ interface ParamBase {
   hint?: string;
   /** Coarse controls are always visible; fine controls sit behind "Advanced". */
   tier: "coarse" | "fine";
+  /** Runtime parameters can be applied to a live solver. All others are
+   * structural and start a transactional solver rebuild. */
+  update?: "runtime" | "solver";
 }
 
 export interface NumberParamSpec extends ParamBase {
@@ -88,6 +92,8 @@ export interface GPUSolverInstance {
   readonly gridDivergenceTexture?: GPUTexture;
   /** Lazily allocate dense adaptive fields when a scientific grid slice needs them. */
   ensureGridDiagnosticTextures?(): void;
+  /** Apply configuration explicitly classified as runtime-safe by the method. */
+  applyRuntimeValues?(values: MethodParamValues): void;
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean;
   readStats(): Promise<GPUEulerianInfo>;
   destroy(): void;
@@ -127,6 +133,9 @@ export interface SimulationMethod {
    * merged via resolveMethodValues before reaching createSolver.
    */
   presetFor(quality: GPUQuality): MethodParamValues;
+  /** Keys omitted from the structural solver fingerprint and applied directly
+   * to the active/candidate solver instead. */
+  runtimeParamKeys?: readonly string[];
   /** WebGPU methods create a solver; the CPU reference method does not. */
   createSolver?(
     device: GPUDevice,
@@ -143,12 +152,14 @@ export interface SimulationMethod {
     quality: GPUQuality,
     values: MethodParamValues,
     onRigidLoads: ((loads: GPURigidLoad[]) => void) | undefined,
-    onProgress: GPUInitializationReporter
+    onProgress: GPUInitializationReporter,
+    signal?: AbortSignal,
   ): Promise<GPUSolverInstance>;
 }
 
 export interface GPUInitializationProgress {
-  phase: string;
+  phase: GPUInitializationPhase;
+  taskId?: string;
   label: string;
   completed: number;
   total: number;

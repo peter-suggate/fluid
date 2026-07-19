@@ -42,7 +42,21 @@ test("fine-phi staging ABI allocates aligned apron tiles and degrades under a by
   assert.equal(bounded.capacity, 1);
   assert.equal(bounded.degraded, true);
   assert.throws(() => planSvoFinePhiStaging(owner, source, [0.2, 0.4, 0.6], { maximumArenaBytes: 128 }), /cannot hold one apron tile/);
-  assert.throws(() => planSvoFinePhiStaging(owner, fakeSource({ fineDimensions: [31, 16, 16] }), [0.2, 0.4, 0.6]), /do not match/);
+  assert.throws(() => planSvoFinePhiStaging(owner, fakeSource({ fineDimensions: [31, 16, 16] }), [0.2, 0.4, 0.6]), /not refinement-aligned/);
+});
+
+test("fine-phi staging embeds a solver-local source at a nonzero structural origin", () => {
+  const owner = planOctreeOwnerPages([48, 32, 24], { maximumPages: 3 });
+  const plan = planSvoFinePhiStaging(owner, fakeSource(), [0.2, 0.4, 0.6], {
+    sourceOriginBricks: [2, 1, 1],
+  });
+  assert.deepEqual(plan.ownerDimensions, [48, 32, 24]);
+  assert.deepEqual(plan.fineDimensions, [96, 64, 48]);
+  assert.deepEqual(plan.sourceFineDimensions, [32, 16, 16]);
+  assert.deepEqual(plan.sourceOriginFine, [32, 16, 16]);
+  assert.throws(() => planSvoFinePhiStaging(owner, fakeSource(), [0.2, 0.4, 0.6], {
+    sourceOriginBricks: [5, 1, 1],
+  }), /falls outside/);
 });
 
 test("fine-phi publication oracle rejects stale and mismatched generations before publishing capability", () => {
@@ -74,9 +88,9 @@ test("staging and sampling WGSL fence both generations, copy aprons, scrub retir
   assert.match(svoFinePhiStagingShader, /ownerGeneration!=structural/);
   assert.match(svoFinePhiStagingShader, /tileCoordinate\(local\)/);
   assert.match(svoFinePhiStagingShader, /bitcast<u32>\(AIR_PHI\)/);
-  assert.match(svoFinePhiStagingShader, /atomicStore\(&fineArena\[3\].*atomicStore\(&fineArena\[4\]/s);
+  assert.match(svoFinePhiStagingShader, /atomicStore\(&fineArena\[19\].*atomicStore\(&fineArena\[20\]/s);
   const sampling = svoFinePhiSamplingWGSL(0, 0, 1, 2);
-  assert.match(sampling, /acceptedStructuralGeneration|svoFineArena\[3u\]!=expectedStructural/);
+  assert.match(sampling, /acceptedStructuralGeneration|svoFineArena\[19u\]!=expectedStructural/);
   assert.match(sampling, /svoFineArena\[svoFineParams\.offsets\.y\+logical\]!=fineGeneration/);
   assert.match(sampling, /svoFinePhi\(position-vec3f\(1,0,0\)/);
   assert.doesNotMatch(svoFinePhiStagingShader + sampling, /mapAsync|directWater|textureStore/);
@@ -183,7 +197,8 @@ test("real GPU fine staging publishes seams, rejects stale source generations, a
   };
   try {
     let result = await submit(3);
-    assert.ok((result[0] & SVO_FINE_PHI_STATUS.ready) !== 0); assert.deepEqual([result[3], result[4]], [7, 3]);
+    assert.ok((result[SVO_FINE_PHI_CONTROL_WORDS.status] & SVO_FINE_PHI_STATUS.ready) !== 0);
+    assert.deepEqual([result[SVO_FINE_PHI_CONTROL_WORDS.acceptedStructuralGeneration], result[SVO_FINE_PHI_CONTROL_WORDS.acceptedFineGeneration]], [7, 3]);
     assert.deepEqual(Array.from(result.slice(stager.plan.pageGenerationOffsetWords, stager.plan.pageGenerationOffsetWords + 2)), [3, 3]);
     const stagedValue = (position: readonly [number, number, number]) => {
       const ownerBrick = Math.min(1, Math.floor(position[0] / 16)), local = [position[0] - ownerBrick * 16 + 1, position[1] + 1, position[2] + 1];
@@ -201,9 +216,10 @@ test("real GPU fine staging publishes seams, rejects stale source generations, a
     residencyWords[2] = 8; residencyWords[7] = 1; residencyWords[10] = 1; residencyWords[28] = 1; residencyWords[40] = 1; residencyWords[41] = 1; residencyWords[42] = 1; device.queue.writeBuffer(residencyControl, 0, residencyWords);
     entryWords[0] = 1; entryWords[residencyLayout.entryOffsetsBytes.retired / 4] = 0; device.queue.writeBuffer(residencyEntries, 0, entryWords); device.queue.writeBuffer(retiredSlots, 0, new Uint32Array([0]));
     result = await submit(4);
-    assert.equal(result[0], SVO_FINE_PHI_STATUS.sourceRejected); assert.deepEqual([result[3], result[4]], [7, 3], "stale source cannot advance capability");
+    assert.equal(result[SVO_FINE_PHI_CONTROL_WORDS.status], SVO_FINE_PHI_STATUS.sourceRejected);
+    assert.deepEqual([result[SVO_FINE_PHI_CONTROL_WORDS.acceptedStructuralGeneration], result[SVO_FINE_PHI_CONTROL_WORDS.acceptedFineGeneration]], [7, 3], "stale source cannot advance capability");
     surfaceControlWords[1] = 4; device.queue.writeBuffer(surfaceControl, 0, surfaceControlWords); result = await submit(4);
-    assert.equal(result[stager.plan.pageGenerationOffsetWords], 0); assert.equal(result[8], 1);
+    assert.equal(result[stager.plan.pageGenerationOffsetWords], 0); assert.equal(result[SVO_FINE_PHI_CONTROL_WORDS.retiredClearedPageCount], 1);
     const payload = new Float32Array(result.buffer, stager.plan.payloadOffsetWords * 4, stager.plan.tileVoxels);
     assert.equal(payload.every((value) => value === 1_000_000), true, "retired physical tile is deterministically scrubbed");
     await device.queue.onSubmittedWorkDone(); assert.deepEqual(validationErrors, []);

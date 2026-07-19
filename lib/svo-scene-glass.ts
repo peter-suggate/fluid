@@ -8,6 +8,11 @@ import {
   type SvoThinGlassPane,
 } from "./svo-thin-glass";
 import { SPARSE_BRICK_NO_OWNER } from "./sparse-brick-octree";
+import {
+  cachedSvoStaticPublication,
+  hashSvoStaticPublication,
+  internSvoStaticPublication,
+} from "./svo-static-publication-cache";
 import { GLASS_OPTICS } from "./webgpu-lighting";
 import {
   buildEnvironmentProxyCatalog,
@@ -19,6 +24,8 @@ import type { SvoVec3 } from "./webgpu-svo-traversal";
 
 export const SVO_SCENE_GLASS_VERSION = "1" as const;
 export const SVO_SCENE_GLASS_MAXIMUM_PANES = 256;
+
+const sceneGlassCache = new Map<string, SvoSceneGlassBuild>();
 
 export type SvoSceneGlassRole = "container-pane" | "container-top" | "environment-glazing";
 export type SvoSceneContainerGlassSide = "floor" | "left" | "right" | "front" | "back" | "ceiling";
@@ -175,6 +182,13 @@ function environmentPanes(catalog: EnvironmentProxyCatalog, thickness_m: number)
       role: "environment-glazing",
       descriptor: pane(environmentBase, [0, catalog.floorY_m + 1.60 * s, catalog.shell.bounds_m.min.z], [1.62 * s, 0.55 * s], thickness_m, Q_IDENTITY),
     });
+  } else if (catalog.environmentId === "research-station") {
+    const s = catalog.scale_m;
+    result.push({
+      key: "research-station/observation-port/glazing",
+      role: "environment-glazing",
+      descriptor: pane(environmentBase, [0, catalog.floorY_m + 1.55 * s, catalog.shell.bounds_m.min.z + .018 * s], [.66 * s, .39 * s], thickness_m, Q_IDENTITY),
+    });
   }
   return result;
 }
@@ -204,27 +218,6 @@ function unsupportedCatalogGlass(catalog: EnvironmentProxyCatalog): SvoSceneGlas
   return result;
 }
 
-function fnvStep(hash: number, value: number): number {
-  return Math.imul((hash ^ value) >>> 0, 0x01000193) >>> 0;
-}
-
-function hashBuild(words: Uint32Array, metadata: readonly SvoSceneGlassMetadata[], unsupported: readonly SvoSceneGlassUnsupportedEntry[], cell: SvoVec3): string {
-  let hash = 0x811c9dc5;
-  for (const word of words) {
-    hash = fnvStep(hash, word & 0xff);
-    hash = fnvStep(hash, (word >>> 8) & 0xff);
-    hash = fnvStep(hash, (word >>> 16) & 0xff);
-    hash = fnvStep(hash, word >>> 24);
-  }
-  const text = JSON.stringify({
-    keys: metadata.map(({ key, role, side, opaqueCutoutKey }) => ({ key, role, side, opaqueCutoutKey })),
-    unsupported,
-    cell,
-  });
-  for (let index = 0; index < text.length; index += 1) hash = fnvStep(hash, text.charCodeAt(index));
-  return hash.toString(16).padStart(8, "0");
-}
-
 /** Build pane records from an already-authored deterministic environment catalog. */
 export function svoSceneGlassFromEnvironmentCatalog(
   scene: SceneDescription,
@@ -241,6 +234,16 @@ export function svoSceneGlassFromEnvironmentCatalog(
   if (authored.length > maximumPanes) {
     throw new RangeError(`Environment ${catalog.environmentId} needs ${authored.length} glass panes, exceeding the ${maximumPanes} record limit`);
   }
+  const unsupportedEntries = unsupportedCatalogGlass(catalog);
+  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+    environmentId: catalog.environmentId,
+    authored,
+    unsupportedEntries,
+    cell,
+  }));
+  const cacheKey = `svo-scene-glass-v${SVO_SCENE_GLASS_VERSION}:${catalog.environmentId}:${staticRevision}`;
+  const cached = cachedSvoStaticPublication(sceneGlassCache, cacheKey);
+  if (cached) return cached;
   const descriptors = authored.map(({ descriptor }) => canonicalSvoThinGlassPane(descriptor));
   const packedRecords = packSvoThinGlassPanes(descriptors);
   const metadata: SvoSceneGlassMetadata[] = authored.map((entry, recordIndex) => ({
@@ -254,11 +257,9 @@ export function svoSceneGlassFromEnvironmentCatalog(
     bounds: svoThinGlassBounds(descriptors[recordIndex], cell),
     ...(entry.opaqueCutoutKey ? { opaqueCutoutKey: entry.opaqueCutoutKey } : {}),
   }));
-  const unsupportedEntries = unsupportedCatalogGlass(catalog);
-  const staticRevision = hashBuild(packedRecords, metadata, unsupportedEntries, cell);
   const containerPaneIndices = metadata.filter(({ role }) => role === "container-pane" || role === "container-top").map(({ recordIndex }) => recordIndex);
   const environmentPaneIndices = metadata.filter(({ role }) => role === "environment-glazing").map(({ recordIndex }) => recordIndex);
-  return {
+  return internSvoStaticPublication(sceneGlassCache, cacheKey, {
     environmentId: catalog.environmentId,
     descriptors,
     packedRecords,
@@ -269,8 +270,8 @@ export function svoSceneGlassFromEnvironmentCatalog(
     containerTopPaneIndex: metadata.find(({ role }) => role === "container-top")?.recordIndex,
     environmentPaneIndices,
     staticRevision,
-    cacheKey: `svo-scene-glass-v${SVO_SCENE_GLASS_VERSION}:${catalog.environmentId}:${staticRevision}`,
-  };
+    cacheKey,
+  });
 }
 
 /** Build the selected scene environment catalog and its glass records in one call. */

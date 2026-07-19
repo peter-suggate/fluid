@@ -1,6 +1,7 @@
 import { svoGBufferWGSL } from "./svo-gbuffer";
 import { svoTemporalHistoryWGSL } from "./svo-temporal-history";
 import type { SparseVoxelGBufferTextures } from "./webgpu-svo-gbuffer-targets";
+import type { TimestampRange } from "./webgpu-water-pipeline";
 
 export const SVO_TEMPORAL_ACCUMULATION_LAYOUT = Object.freeze({
   paramsBytes: 160,
@@ -8,9 +9,21 @@ export const SVO_TEMPORAL_ACCUMULATION_LAYOUT = Object.freeze({
   momentsFormat: "rgba16float" as GPUTextureFormat,
   keyFormat: "rgba16uint" as GPUTextureFormat,
   pingPongBytesPerPixel: 64,
+  previousNeighborhoodLoadsPerAcceptedPixel: 9,
+  neighborhoodLoadsPerAcceptedPixel: 8,
+  fullScreenResolvePassesPerFrame: 1,
+  aliasBreakingCopiesPerFrame: 1,
   maximumAccumulationSamples: 64,
   maximumStoredSamples: 255,
 } as const);
+
+/** Logical format bytes; driver-private row/tile alignment is not observable through WebGPU. */
+export function sparseVoxelTemporalAllocatedBytes(width: number, height: number): number {
+  if (!Number.isSafeInteger(width) || width < 1 || !Number.isSafeInteger(height) || height < 1) {
+    throw new RangeError("Sparse voxel temporal dimensions must be positive safe integers");
+  }
+  return SVO_TEMPORAL_ACCUMULATION_LAYOUT.paramsBytes + width * height * SVO_TEMPORAL_ACCUMULATION_LAYOUT.pingPongBytesPerPixel;
+}
 
 export interface SparseVoxelTemporalCameraState {
   position_m: readonly [number, number, number];
@@ -81,8 +94,8 @@ fn temporalPreviousKey(color:vec4f,keyA:vec4u,keyB:vec4u)->SvoTemporalHitKey{
 fn temporalCurrentRay(pixel:vec2f)->vec3f{
   let uv=pixel*temporal.viewport.zw;let ndc=uv*2.0-1.0;return normalize(temporal.currentForwardAspect.xyz+temporal.currentRightTanHalfFov.xyz*(ndc.x*temporal.currentForwardAspect.w*temporal.currentRightTanHalfFov.w)+temporal.currentUp.xyz*(ndc.y*temporal.currentRightTanHalfFov.w));
 }
-fn temporalNeighborhood(pixel:vec2i,dimensions:vec2i)->array<vec3f,2>{
-  var minimum=vec3f(65504.0);var maximum=vec3f(0.0);for(var y=-1;y<=1;y+=1){for(var x=-1;x<=1;x+=1){let coordinate=clamp(pixel+vec2i(x,y),vec2i(0),dimensions-vec2i(1));let sample=max(textureLoad(currentColor,coordinate,0).rgb,vec3f(0.0));minimum=min(minimum,sample);maximum=max(maximum,sample);}}return array<vec3f,2>(minimum,maximum);
+fn temporalNeighborhood(pixel:vec2i,dimensions:vec2i,currentRgb:vec3f)->array<vec3f,2>{
+  let center=max(currentRgb,vec3f(0.0));var minimum=center;var maximum=center;for(var y=-1;y<=1;y+=1){for(var x=-1;x<=1;x+=1){if(x==0&&y==0){continue;}let coordinate=clamp(pixel+vec2i(x,y),vec2i(0),dimensions-vec2i(1));let sample=max(textureLoad(currentColor,coordinate,0).rgb,vec3f(0.0));minimum=min(minimum,sample);maximum=max(maximum,sample);}}return array<vec3f,2>(minimum,maximum);
 }
 fn temporalLuminance(color:vec3f)->f32{return dot(color,vec3f(.2126,.7152,.0722));}
 fn temporalSignedVelocityLane(word:u32,shift:u32)->f32{let raw=i32((word>>shift)&0x3ffu);let signed=select(raw,raw-1024,raw>=512);return f32(signed)*(SVO_GBUFFER_MAX_VELOCITY_M_S/511.0);}
@@ -95,9 +108,9 @@ fn temporalVarianceClamp(colorIn:vec3f,moments:vec4f)->vec3f{
   var accepted=false;var previous=vec4f(0.0);var oldMoments=vec4f(0.0);var previousPixel=vec2i(0);var expectedPreviousDistance=0.0;
   if(temporal.control.z>.5&&currentUsable){
     let world=temporal.currentPosition.xyz+temporalCurrentRay(position.xy)*current.a;let previousWorld=world-velocity*temporal.control.y;let relative=previousWorld-temporal.previousPosition.xyz;let previousForwardDepth=dot(relative,temporal.previousForward.xyz);let previousNdc=vec2f(dot(relative,temporal.previousRight.xyz)/(max(previousForwardDepth,1e-6)*temporal.currentForwardAspect.w*TEMPORAL_TAN_HALF_FOV),dot(relative,temporal.previousUp.xyz)/(max(previousForwardDepth,1e-6)*TEMPORAL_TAN_HALF_FOV));let previousUv=previousNdc*.5+.5;let reprojectValid=previousForwardDepth>0.0&&all(previousUv>=vec2f(0.0))&&all(previousUv<vec2f(1.0));
-    if(reprojectValid){previousPixel=clamp(vec2i(floor(previousUv*temporal.viewport.xy)),vec2i(0),dimensions-vec2i(1));previous=textureLoad(previousColor,previousPixel,0);oldMoments=textureLoad(previousMoments,previousPixel,0);let keyA=textureLoad(previousKeyA,previousPixel,0);let keyB=textureLoad(previousKeyB,previousPixel,0);var currentKey=temporalKey(current,packed,identity);expectedPreviousDistance=length(relative);currentKey.depth_m=expectedPreviousDistance;let previousKey=temporalPreviousKey(previous,keyA,keyB);let error=abs(previous.a-expectedPreviousDistance);accepted=oldMoments.z>0.0&&svoTemporalHistoryReason(currentKey,previousKey,temporal.control.x,temporal.control.y,velocity,motionKind,true,true,error)==SVO_TEMPORAL_REASON_ACCEPTED;}
+    if(reprojectValid){previousPixel=clamp(vec2i(floor(previousUv*temporal.viewport.xy)),vec2i(0),dimensions-vec2i(1));oldMoments=textureLoad(previousMoments,previousPixel,0);if(oldMoments.z>0.0){let keyA=textureLoad(previousKeyA,previousPixel,0);let keyB=textureLoad(previousKeyB,previousPixel,0);let exactIdentity=all(keyA.zw==published[0].zw)&&all(keyB==published[1]);if(exactIdentity){previous=textureLoad(previousColor,previousPixel,0);var currentKey=temporalKey(current,packed,identity);expectedPreviousDistance=length(relative);currentKey.depth_m=expectedPreviousDistance;let previousKey=temporalPreviousKey(previous,keyA,keyB);let error=abs(previous.a-expectedPreviousDistance);accepted=svoTemporalHistoryReason(currentKey,previousKey,temporal.control.x,temporal.control.y,velocity,motionKind,true,true,error)==SVO_TEMPORAL_REASON_ACCEPTED;}}}
   }
-  var result=current.rgb;var sampleCount=select(-1.0,1.0,currentUsable);var pausedStable=select(0.0,1.0,temporal.control.w>.5&&currentUsable);if(accepted){let neighborhood=temporalNeighborhood(pixel,dimensions);var history=clamp(previous.rgb,neighborhood[0],neighborhood[1]);history=temporalVarianceClamp(history,oldMoments);sampleCount=min(oldMoments.z+1.0,255.0);pausedStable=select(0.0,min(oldMoments.w+1.0,255.0),temporal.control.w>.5);let accumulationCount=min(sampleCount,${SVO_TEMPORAL_ACCUMULATION_LAYOUT.maximumAccumulationSamples}.0);result=mix(current.rgb,history,(accumulationCount-1.0)/accumulationCount);}
+  var result=current.rgb;var sampleCount=select(-1.0,1.0,currentUsable);var pausedStable=select(0.0,1.0,temporal.control.w>.5&&currentUsable);if(accepted){let neighborhood=temporalNeighborhood(pixel,dimensions,current.rgb);var history=clamp(previous.rgb,neighborhood[0],neighborhood[1]);history=temporalVarianceClamp(history,oldMoments);sampleCount=min(oldMoments.z+1.0,255.0);pausedStable=select(0.0,min(oldMoments.w+1.0,255.0),temporal.control.w>.5);let accumulationCount=min(sampleCount,${SVO_TEMPORAL_ACCUMULATION_LAYOUT.maximumAccumulationSamples}.0);result=mix(current.rgb,history,(accumulationCount-1.0)/accumulationCount);}
   let luminance=min(temporalLuminance(current.rgb),255.0);let momentWeight=1.0/max(sampleCount,1.0);let mean=select(luminance,mix(oldMoments.x,luminance,momentWeight),accepted);let second=select(luminance*luminance,mix(oldMoments.y,luminance*luminance,momentWeight),accepted);return TemporalOut(vec4f(max(result,vec3f(0.0)),current.a),vec4f(mean,second,sampleCount,pausedStable),published[0],published[1]);
 }
 `;
@@ -156,9 +169,9 @@ export class SparseVoxelTemporalAccumulator {
     this.releaseHistory();
     const make = (index: number): TemporalHistorySet => ({
       color: this.device.createTexture({ label: `Sparse voxel temporal HDR ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.historyColorFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }),
-      moments: this.device.createTexture({ label: `Sparse voxel temporal moments ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.momentsFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }),
-      keyA: this.device.createTexture({ label: `Sparse voxel temporal key A ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.keyFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }),
-      keyB: this.device.createTexture({ label: `Sparse voxel temporal key B ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.keyFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }),
+      moments: this.device.createTexture({ label: `Sparse voxel temporal moments ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.momentsFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }),
+      keyA: this.device.createTexture({ label: `Sparse voxel temporal key A ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.keyFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }),
+      keyB: this.device.createTexture({ label: `Sparse voxel temporal key B ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.keyFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }),
     });
     this.history = [make(0), make(1)];
     this.width = width; this.height = height; this.invalidate();
@@ -170,11 +183,16 @@ export class SparseVoxelTemporalAccumulator {
     this.previousCamera = undefined;
   }
 
+  get allocatedBytes(): number {
+    return this.history ? sparseVoxelTemporalAllocatedBytes(this.width, this.height) : SVO_TEMPORAL_ACCUMULATION_LAYOUT.paramsBytes;
+  }
+
   encode(
     encoder: GPUCommandEncoder,
     currentTarget: GPUTexture,
     gBuffer: SparseVoxelGBufferTextures,
     frame: SparseVoxelTemporalFrameState,
+    timestampWrites?: TimestampRange,
   ): boolean {
     if (!this.pipeline || !this.layout || !this.history || currentTarget.width !== this.width || currentTarget.height !== this.height
       || gBuffer.width !== this.width || gBuffer.height !== this.height || frame.composition !== "dry-before-legacy-water"
@@ -209,7 +227,7 @@ export class SparseVoxelTemporalAccumulator {
       { view: next.moments.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
       { view: next.keyA.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
       { view: next.keyB.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
-    ] });
+    ], ...(timestampWrites ? { timestampWrites } : {}) });
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, bindGroup); pass.draw(3); pass.end();
     encoder.copyTextureToTexture({ texture: next.color }, { texture: currentTarget }, [this.width, this.height, 1]);
     this.previousIndex = nextIndex; this.previousCamera = frame.camera; this.historyValid = true;

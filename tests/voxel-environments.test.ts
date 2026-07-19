@@ -15,7 +15,7 @@ test("every authored environment gets a stable full-scene proxy catalog", () => 
   const scene = cloneScene(defaultScene);
   const authoredPropCounts = new Map([
     ["conservatory", 19], ["courtyard", 16], ["night-lab", 32], ["concrete-gallery", 9],
-    ["bathhouse", 16], ["research-station", 16], ["default", 0], ["garden", 22]
+    ["bathhouse", 16], ["research-station", 21], ["default", 0], ["garden", 22]
   ]);
   for (const id of environmentIds) {
     const first = buildEnvironmentProxyCatalog(scene, id);

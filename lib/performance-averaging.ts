@@ -8,7 +8,7 @@ const physicsTimingFields = new Set<keyof PerformanceSnapshot>([
 ]);
 
 const renderTimingFields = new Set<keyof PerformanceSnapshot>([
-  "gpuRender_ms", "gpuSurfaceExtraction_ms", "gpuDryScene_ms", "gpuInterfaces_ms", "gpuSprayFront_ms", "gpuSprayBack_ms", "gpuSprayRender_ms",
+  "gpuRender_ms", "gpuSurfaceExtraction_ms", "gpuDryScene_ms", "gpuSvoTemporal_ms", "gpuInterfaces_ms", "gpuSprayFront_ms", "gpuSprayBack_ms", "gpuSprayRender_ms",
   "gpuOpticalComposite_ms", "gpuUpscale_ms"
 ]);
 
@@ -39,6 +39,8 @@ export function averagePerformanceSnapshots(samples: PerformanceSnapshot[], fall
   averaged.adaptiveRebuildBlockedFrames = latest.adaptiveRebuildBlockedFrames;
   averaged.adaptiveRebuildCompletedCount = latest.adaptiveRebuildCompletedCount;
   averaged.adaptiveRebuildPending = latest.adaptiveRebuildPending;
+  averaged.renderTimingEpoch = latest.renderTimingEpoch;
+  averaged.renderTimingSampleId = latest.renderTimingSampleId;
   return averaged;
 }
 

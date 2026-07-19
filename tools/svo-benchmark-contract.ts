@@ -11,7 +11,7 @@ import {
   type SVOBaselineAdapterObservation,
 } from "./svo-baseline-contract";
 
-export const SVO_BENCHMARK_SCHEMA_VERSION = 1;
+export const SVO_BENCHMARK_SCHEMA_VERSION = 2;
 
 export interface SVOBenchmarkResolution {
   readonly width: number;
@@ -67,10 +67,15 @@ export interface SVOBenchmarkFrameObservation {
   readonly requestedMode: SVOBaselineRenderer;
   readonly effectiveMode: SVOBaselineRenderer;
   readonly fallbackReason: string | null;
+  readonly renderTimingContext: string;
+  readonly renderTimingEpoch: number;
+  /** Accepted timestamp-query identity; collectors must not duplicate cached values. */
+  readonly renderTimingSampleId: number | null;
   readonly gpuRenderTimingAvailable: boolean;
   readonly cpuFrame_ms: number;
   readonly gpuRender_ms: number | null;
   readonly gpuDryScene_ms: number | null;
+  readonly gpuSvoTemporal_ms: number | null;
   readonly rendererOwnedBytes: number;
 }
 
@@ -106,10 +111,13 @@ export interface SVOBenchmarkRunResult {
   readonly equivalence: SVOBenchmarkEquivalenceObservation;
   readonly effectiveMode: SVOBaselineRenderer;
   readonly fallbackReason: null;
+  readonly renderTimingContext: string;
+  readonly renderTimingEpoch: number;
   readonly timestampQueriesAvailable: boolean;
   readonly cpuFrame_ms: SVOBenchmarkDistribution;
   readonly gpuRender_ms: SVOBenchmarkDistribution | null;
   readonly gpuDryScene_ms: SVOBenchmarkDistribution | null;
+  readonly gpuSvoTemporal_ms: SVOBenchmarkDistribution | null;
   readonly rendererOwnedBytes: SVOBenchmarkDistribution;
   /** Warmup and measured observations are retained verbatim for re-analysis. */
   readonly rawFrames: readonly SVOBenchmarkFrameObservation[];
@@ -130,6 +138,8 @@ export interface SVOBenchmarkPairResult {
 export interface SVOBenchmarkAggregateResult {
   readonly baselineId: string;
   readonly renderer: SVOBaselineRenderer;
+  readonly adapterId: string;
+  readonly adapter: SVOBaselineAdapterObservation;
   readonly runIds: readonly string[];
   readonly quality: SVOBaselineQuality;
   readonly outputResolution: SVOBenchmarkResolution;
@@ -138,6 +148,7 @@ export interface SVOBenchmarkAggregateResult {
   readonly cpuFrame_ms: SVOBenchmarkDistribution;
   readonly gpuRender_ms: SVOBenchmarkDistribution | null;
   readonly gpuDryScene_ms: SVOBenchmarkDistribution | null;
+  readonly gpuSvoTemporal_ms: SVOBenchmarkDistribution | null;
   readonly rendererOwnedBytes: SVOBenchmarkDistribution;
 }
 
@@ -259,6 +270,9 @@ export function buildSVOBenchmarkPlan(options: {
       "Reset timing history before every run and publish the exact per-run resetToken.",
       "Retain every warmup and measured frame in sequence; do not pre-average samples.",
       "Record requested/effective renderer and fallback identity on every frame.",
+      "Append a timing frame only when renderTimingSampleId advances; cached 250 ms telemetry is not an independent sample.",
+      "Record scene, SVO-temporal (zero only when explicitly idle), total, mode context, epoch, adapter, and exact output/internal resolution.",
+      "Use the canonical checkpoint and camera identity unchanged for both members of each raster/SVO pair.",
     ]),
   });
 }
@@ -280,6 +294,12 @@ function validateRunObservation(plan: SVOBenchmarkRunPlan, observation: SVOBench
   const expectedFrames = plan.warmupFrames + plan.measuredFrames;
   if (observation.frames.length !== expectedFrames) throw new Error(`${plan.id} has ${observation.frames.length} frames; exactly ${expectedFrames} are required`);
   let previousTimestamp = plan.captureNotBeforeUnixMs;
+  let previousTimingSampleId = -1;
+  const renderTimingContext = nonEmpty(observation.frames[0]?.renderTimingContext ?? "", `${plan.id} render timing context`);
+  const renderTimingEpoch = integer(observation.frames[0]?.renderTimingEpoch ?? -1, 1, `${plan.id} render timing epoch`);
+  if (!renderTimingContext.endsWith(`:${plan.requestedMode}:epoch-${renderTimingEpoch}`)) {
+    throw new Error(`${plan.id} render timing context does not identify ${plan.requestedMode} epoch ${renderTimingEpoch}`);
+  }
   for (let index = 0; index < observation.frames.length; index += 1) {
     const frame = observation.frames[index];
     if (frame.frameIndex !== index) throw new Error(`${plan.id} frame sequence is stale or discontinuous at ${index}`);
@@ -292,12 +312,22 @@ function validateRunObservation(plan: SVOBenchmarkRunPlan, observation: SVOBench
     if (frame.effectiveMode !== plan.requestedMode || frame.fallbackReason !== null) {
       throw new Error(`${plan.id} frame ${index} effective renderer/fallback mismatch: ${frame.effectiveMode}/${frame.fallbackReason ?? "none"}`);
     }
+    if (frame.renderTimingContext !== renderTimingContext || frame.renderTimingEpoch !== renderTimingEpoch) {
+      throw new Error(`${plan.id} frame ${index} timing mode/epoch changed during the run`);
+    }
     finiteNonNegative(frame.cpuFrame_ms, `${plan.id} CPU frame`);
     finiteNonNegative(frame.rendererOwnedBytes, `${plan.id} renderer memory`);
     if (frame.gpuRenderTimingAvailable) {
+      const sampleId = integer(frame.renderTimingSampleId ?? -1, 1, `${plan.id} timestamp sample ID`);
+      if (sampleId <= previousTimingSampleId) throw new Error(`${plan.id} frame ${index} repeats a cached timestamp sample`);
+      previousTimingSampleId = sampleId;
       finiteNonNegative(frame.gpuRender_ms ?? Number.NaN, `${plan.id} GPU render`);
       finiteNonNegative(frame.gpuDryScene_ms ?? Number.NaN, `${plan.id} GPU dry scene`);
-    } else if (frame.gpuRender_ms !== null || frame.gpuDryScene_ms !== null) {
+      finiteNonNegative(frame.gpuSvoTemporal_ms ?? Number.NaN, `${plan.id} GPU SVO temporal`);
+      if (plan.requestedMode === "raster" && frame.gpuSvoTemporal_ms !== 0) {
+        throw new Error(`${plan.id} frame ${index} raster mode must report temporal as explicitly idle`);
+      }
+    } else if (frame.renderTimingSampleId !== null || frame.gpuRender_ms !== null || frame.gpuDryScene_ms !== null || frame.gpuSvoTemporal_ms !== null) {
       throw new Error(`${plan.id} frame ${index} reports unavailable timestamps with timing values`);
     }
   }
@@ -312,10 +342,13 @@ function validateRunObservation(plan: SVOBenchmarkRunPlan, observation: SVOBench
     equivalence: observation.equivalence,
     effectiveMode: plan.requestedMode,
     fallbackReason: null,
+    renderTimingContext,
+    renderTimingEpoch,
     timestampQueriesAvailable,
     cpuFrame_ms: distribution(measured.map(({ cpuFrame_ms }) => cpuFrame_ms), `${plan.id} CPU frame`),
     gpuRender_ms: timestampQueriesAvailable ? distribution(measured.map(({ gpuRender_ms }) => gpuRender_ms!), `${plan.id} GPU render`) : null,
     gpuDryScene_ms: timestampQueriesAvailable ? distribution(measured.map(({ gpuDryScene_ms }) => gpuDryScene_ms!), `${plan.id} GPU dry scene`) : null,
+    gpuSvoTemporal_ms: timestampQueriesAvailable ? distribution(measured.map(({ gpuSvoTemporal_ms }) => gpuSvoTemporal_ms!), `${plan.id} GPU SVO temporal`) : null,
     rendererOwnedBytes: distribution(measured.map(({ rendererOwnedBytes }) => rendererOwnedBytes), `${plan.id} renderer memory`),
     rawFrames: Object.freeze([...observation.frames]),
   });
@@ -368,6 +401,8 @@ function aggregateRuns(results: readonly SVOBenchmarkRunResult[]): readonly SVOB
     return Object.freeze({
       baselineId,
       renderer,
+      adapterId: first.plan.adapterId,
+      adapter: first.adapter,
       runIds: Object.freeze(grouped.map(({ plan }) => plan.id)),
       quality: first.plan.quality,
       outputResolution: first.plan.outputResolution,
@@ -379,6 +414,9 @@ function aggregateRuns(results: readonly SVOBenchmarkRunResult[]): readonly SVOB
         : null,
       gpuDryScene_ms: timestampQueriesAvailable
         ? distribution(measured.map(({ gpuDryScene_ms }) => gpuDryScene_ms!), `${baselineId} ${renderer} aggregate GPU dry scene`)
+        : null,
+      gpuSvoTemporal_ms: timestampQueriesAvailable
+        ? distribution(measured.map(({ gpuSvoTemporal_ms }) => gpuSvoTemporal_ms!), `${baselineId} ${renderer} aggregate GPU SVO temporal`)
         : null,
       rendererOwnedBytes: distribution(measured.map(({ rendererOwnedBytes }) => rendererOwnedBytes), `${baselineId} ${renderer} aggregate memory`),
     });

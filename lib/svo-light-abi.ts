@@ -1,6 +1,11 @@
 import type { EnvironmentId } from "./environments";
 import type { SceneDescription } from "./model";
 import {
+  cachedSvoStaticPublication,
+  hashSvoStaticPublication,
+  internSvoStaticPublication,
+} from "./svo-static-publication-cache";
+import {
   buildEnvironmentProxyCatalog,
   environmentProxyPrimitives,
   type EnvironmentProxyPrimitive,
@@ -9,6 +14,9 @@ import {
 export const SVO_LIGHT_RECORD_STRIDE_BYTES = 112;
 export const SVO_LIGHT_RECORD_WORDS = SVO_LIGHT_RECORD_STRIDE_BYTES / Uint32Array.BYTES_PER_ELEMENT;
 export const SVO_LIGHT_MAXIMUM_RECORDS = 32;
+export const SVO_SCENE_LIGHT_VERSION = "1" as const;
+
+const sceneLightCache = new Map<string, SvoSceneLights>();
 
 export const SVO_LIGHT_KINDS = Object.freeze({
   directional: 1,
@@ -111,11 +119,22 @@ function proxyAreaLight(proxy: EnvironmentProxyPrimitive, ownerBase: number, rev
   const dimensions = [proxy.halfSize_m.x, proxy.halfSize_m.y, proxy.halfSize_m.z] as const;
   const normalAxis = dimensions.indexOf(Math.min(...dimensions));
   const axes: Vec3Tuple[] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  const directionTags = [
+    ["emits-positive-x", 0, 1], ["emits-negative-x", 0, -1],
+    ["emits-positive-y", 1, 1], ["emits-negative-y", 1, -1],
+    ["emits-positive-z", 2, 1], ["emits-negative-z", 2, -1],
+  ] as const;
+  const authoredDirection = directionTags.filter(([tag]) => proxy.tags.includes(tag));
+  if (authoredDirection.length > 1) throw new Error(`Emissive proxy ${proxy.key} has conflicting emission directions`);
+  if (authoredDirection[0]?.[1] !== undefined && authoredDirection[0][1] !== normalAxis) {
+    throw new Error(`Emissive proxy ${proxy.key} direction is not normal to its thinnest surface`);
+  }
+  const directionSign = authoredDirection[0]?.[2] ?? -1;
   const surfaceAxes = [0, 1, 2].filter((axis) => axis !== normalAxis);
   return canonicalSvoLightRecord({
     ...common,
     kind: "rectangleArea",
-    direction: axes[normalAxis].map((value) => -value) as [number, number, number],
+    direction: axes[normalAxis].map((value) => value === 0 ? 0 : directionSign * value) as [number, number, number],
     axisU: axes[surfaceAxes[0]], halfWidth_m: dimensions[surfaceAxes[0]],
     axisV: axes[surfaceAxes[1]], halfHeight_m: dimensions[surfaceAxes[1]], radius_m: 0,
   });
@@ -135,6 +154,8 @@ export interface SvoSceneLights {
   packedRecords: Uint32Array<ArrayBuffer>;
   omittedFixtureKeys: readonly string[];
   revision: number;
+  staticRevision: string;
+  cacheKey: string;
 }
 
 function importance(light: SvoLightRecord): number {
@@ -166,7 +187,22 @@ export function buildSvoSceneLights(scene: SceneDescription, options: BuildSvoSc
   const selectedIds = new Set(selected.map((light) => light.lightId));
   const omittedFixtureKeys = fixtures.filter((light) => !selectedIds.has(light.lightId)).map((light) => light.sourceKey).sort();
   const records = [directional, ...selected.sort((a, b) => a.lightId - b.lightId)];
-  return { records, packedRecords: packSvoLightRecords(records), omittedFixtureKeys, revision };
+  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+    records,
+    omittedFixtureKeys,
+  }));
+  const cacheKey = `svo-scene-lights-v${SVO_SCENE_LIGHT_VERSION}:${catalog.environmentId}:${staticRevision}`;
+  const cached = cachedSvoStaticPublication(sceneLightCache, cacheKey);
+  if (cached) return cached;
+  const packedRecords = packSvoLightRecords(records);
+  return internSvoStaticPublication(sceneLightCache, cacheKey, {
+    records,
+    packedRecords,
+    omittedFixtureKeys,
+    revision,
+    staticRevision,
+    cacheKey,
+  });
 }
 
 export function packSvoLightRecords(records: readonly SvoLightRecord[]): Uint32Array<ArrayBuffer> {

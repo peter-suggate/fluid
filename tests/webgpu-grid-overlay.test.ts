@@ -88,19 +88,19 @@ test("optical-layer mode distinguishes retained cubes from the merged tall inter
   assert.match(rendererSource, /quadtreeOpticalLayerMode === "adaptive-motion" \? 2 : 1/);
 });
 
-test("solver option switches detach the overlay before retiring GPU textures", () => {
+test("solver option switches atomically rebind the overlay before retiring GPU textures", () => {
   const begin = rendererSource.indexOf("private beginGPUFluidInitialization");
   const end = rendererSource.indexOf("private currentGPUFluid", begin);
   const replacement = rendererSource.slice(begin, end);
-  const fallbackRebind = replacement.indexOf("this.updateRenderSources()");
+  const candidateRebind = replacement.indexOf("this.updateRenderSources(solver.surfaceFieldTexture??solver.volumeTexture");
   const retire = replacement.indexOf("this.retireGPUFluid(previous)");
   assert.ok(begin >= 0 && end > begin);
-  assert.ok(fallbackRebind >= 0 && retire > fallbackRebind,
-    "fallback presentation bind groups must be rebuilt before old solver textures retire");
+  assert.ok(candidateRebind >= 0 && retire > candidateRebind,
+    "candidate presentation bind groups must replace old solver textures before retirement");
   const debugDetach = replacement.indexOf("this.voxelDebugPipeline?.setSource(undefined)");
-  const svoDetach = replacement.indexOf("this.svoDryScenePipeline?.setSource(undefined, undefined)");
   assert.ok(debugDetach >= 0 && debugDetach < retire);
-  assert.ok(svoDetach >= 0 && svoDetach < retire);
+  const svoAttach = replacement.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData)");
+  assert.ok(svoAttach >= 0 && svoAttach < retire);
 });
 
 test("grid overlay suppresses dense backing-grid lines inside adaptive cells", () => {

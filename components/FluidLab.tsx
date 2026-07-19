@@ -27,18 +27,27 @@ import { useSceneStore } from "@/lib/stores/scene-store";
 function GPUInitializationPanel({ status }: { status: Extract<GPUStatus, { state: "initializing" }> }) {
   const [now, setNow] = useState(() => performance.now());
   useEffect(() => { const timer = window.setInterval(() => setNow(performance.now()), 100); return () => window.clearInterval(timer); }, []);
-  const completed = status.completed ?? 0, total = Math.max(1, status.total ?? 1);
+  const completed = status.completed ?? 0, total = status.total ?? 0;
   const elapsed_s = Math.max(0, now - (status.startedAt_ms ?? now)) / 1000;
-  return <div className="gpu-fallback gpu-initializing" role="status" aria-live="polite">
-    <strong>Initializing WebGPU…</strong>
+  const rebuilding = status.kind === "rebuild";
+  const phaseCopy: Record<string, string> = {
+    planning: "Determining which GPU resources and programs are invalidated.",
+    allocation: "Allocating replacement textures and buffers. This stage can briefly occupy the browser's GPU process.",
+    "solver-pipelines": "Compiling simulation programs. Input may be delayed while the graphics driver finishes an individual program.",
+    "adaptive-topology": "Compiling adaptive topology and pressure programs.",
+    "secondary-particles": "Preparing secondary-liquid programs.",
+    upload: "Uploading initial simulation fields.",
+    warmup: "Submitting the initial scene and waiting for GPU completion.",
+    attach: "Atomically attaching the warmed replacement.",
+  };
+  return <div className={`${rebuilding ? "gpu-build-card" : "gpu-fallback"} gpu-initializing`} role="status" aria-live="polite" aria-busy="true">
+    <div className="gpu-build-heading"><i aria-hidden="true" /><strong>{rebuilding ? "Applying simulation settings" : "Starting WebGPU"}</strong></div>
+    {status.operation && <p className="gpu-build-operation">{status.operation}</p>}
     <p>{status.label}</p>
-    <progress max={total} value={Math.min(completed, total)} aria-label="GPU initialization progress" />
-    <div className="gpu-progress-summary"><span>{completed} / {total} stages</span><span>{elapsed_s.toFixed(1)} s</span></div>
-    <details open>
-      <summary>Initialization details</summary>
-      <dl><div><dt>Phase</dt><dd>{status.phase ?? "renderer"}</dd></div><div><dt>Current stage</dt><dd>{status.label}</dd></div><div><dt>UI thread</dt><dd>Responsive · asynchronous compilation</dd></div></dl>
-    </details>
-    <small>You can continue using the controls while the GPU prepares this method.</small>
+    <progress max={Math.max(1, total)} {...(total > 0 ? { value: Math.min(completed, total) } : {})} aria-label="GPU initialization progress" />
+    <div className="gpu-progress-summary"><span>{total > 0 ? `${completed} / ${total} stages` : "Planning work…"}</span><span>{elapsed_s.toFixed(1)} s</span></div>
+    <p className="gpu-stage-explanation">{phaseCopy[status.phase ?? "planning"] ?? "Preparing the replacement GPU state."}</p>
+    {rebuilding && <small>{status.retainingPrevious ? "The previous GPU frame remains visible. " : "The viewport will resume when the replacement is ready. "}Simulation is paused at t = 0 until attachment; another structural change will supersede this build.</small>}
   </div>;
 }
 
@@ -87,7 +96,7 @@ export function FluidLab() {
         <MethodPanel />
       </aside>
 
-      <section className="viewport-shell">
+      <section className="viewport-shell" aria-busy={gpuStatus.state === "initializing"} data-gpu-transition={gpuStatus.state === "initializing" ? gpuStatus.kind ?? "startup" : "ready"}>
         <WebGPUViewport />
         <div className="viewport-topline">
           <div className="topline-left">

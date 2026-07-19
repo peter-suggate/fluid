@@ -3,9 +3,16 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import { DEFAULT_SVO_RENDER_MODE } from "../lib/svo-render-mode";
-import { canEncodeSparseVoxelDryScene, type SparseVoxelDrySceneData } from "../lib/webgpu-svo-dry-scene";
+import {
+  canConsumeSparseVoxelPrimitiveCandidates,
+  canEncodeSparseVoxelDryScene,
+  SVO_DRY_SCENE_BINDING_CONTRACT,
+  svoDrySceneShader,
+  type SparseVoxelDrySceneData,
+} from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
 import type { DrySceneReplacementEncoder } from "../lib/webgpu-water-pipeline";
+import { candidateBackedDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererUrl = new URL("../lib/webgpu-renderer.ts", import.meta.url);
 const waterUrl = new URL("../lib/webgpu-water-pipeline.ts", import.meta.url);
@@ -18,10 +25,10 @@ function expectSource(source: string, pattern: RegExp, message: string): void {
   assert.ok(pattern.test(source), message);
 }
 
-test("raster remains the default production dry-scene renderer", () => {
+test("SVO dry-scene replacement is the default while raster remains selectable", () => {
   assert.equal(DEFAULT_SVO_RENDER_MODE, "svo");
   expectSource(rendererSource, /svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE/,
-    "callers which do not opt in must retain the current raster presentation");
+    "callers which do not opt in must use the production SVO dry-scene presentation");
   expectSource(rendererSource, /import \{ DEFAULT_SVO_RENDER_MODE, type SvoRenderMode \} from "\.\/svo-render-mode"/,
     "renderer must consume the canonical SvoRenderMode toggle");
 });
@@ -54,9 +61,36 @@ test("the direct renderer exposes a boolean source-aware replacement contract", 
     "a successful replacement owns the complete dry-scene target");
   assert.doesNotMatch(drySceneSource, /SparseVoxelDebugRecord|voxelRecords|brickRecords/,
     "production traversal must not expand or consume debug cube records");
+  const primitiveHitStart = drySceneSource.indexOf("fn primitiveHit(");
+  const primitiveHitEnd = drySceneSource.indexOf("const DRY_CANDIDATE_COMPLETE", primitiveHitStart);
+  const primitiveHit = drySceneSource.slice(primitiveHitStart, primitiveHitEnd);
+  assert.match(primitiveHit, /svoIntersectPrimitiveExact\(record,ro,rd,max\(tMin,1e-4\),tMax\)/,
+    "candidate leaves must use the shared five-kind analytic ray contract");
+  assert.doesNotMatch(primitiveHit, /svoEvaluatePrimitive|svoPrimitiveDistance_m|svoEllipsoidClosestPoint_m/,
+    "ray hits must not run the bounded ellipsoid closest-point distance solve to recover a normal");
+  assert.match(drySceneSource, /fn nearestBody\([^]*bodyBoundingSphereVisible\(ro,rd,body,0\.0,best\.t\)/,
+    "primary rays must reject distant dynamic bodies in world space before exact local intersection");
   for (const binding of ["structural.control", "structural.nodes", "structural.leaves", "structural.materialOwners", "structural.publication.state", "source.pbrMaterials!.binding"]) {
     assert.ok(drySceneSource.includes(binding), `direct rendering must bind ${binding}`);
   }
+});
+
+test("every dry-shader group-zero declaration has one layout and bind-group entry", () => {
+  const declarations = [...svoDrySceneShader.matchAll(/@group\(0\)\s+@binding\((\d+)\)\s+var<(uniform|storage,\s*read)>/g)]
+    .map((match) => ({ binding: Number(match[1]), type: match[2] === "uniform" ? "uniform" : "read-only-storage" }))
+    .sort((a, b) => a.binding - b.binding);
+  assert.deepEqual(declarations, [...SVO_DRY_SCENE_BINDING_CONTRACT],
+    "the production layout contract must enumerate every shader declaration, including optional uniform binders");
+  assert.equal(new Set(declarations.map(({ binding }) => binding)).size, declarations.length, "shader bindings must be unique");
+
+  const rebuildStart = drySceneSource.indexOf("this.bindGroup = this.device.createBindGroup");
+  const rebuildEnd = drySceneSource.indexOf("]);", rebuildStart);
+  const resources = [...drySceneSource.slice(rebuildStart, rebuildEnd).matchAll(/\{ binding: (\d+), resource:/g)]
+    .map((match) => Number(match[1])).sort((a, b) => a - b);
+  assert.deepEqual(resources, SVO_DRY_SCENE_BINDING_CONTRACT.map(({ binding }) => binding),
+    "every declared/layout binding must have a resource in the sole production bind-group variant");
+  assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length, 10,
+    "optional uniform binders must not exceed the portable fragment storage limit");
 });
 
 test("unavailable structural fields fail over to raster before GPU encoding", () => {
@@ -71,11 +105,15 @@ test("unavailable structural fields fail over to raster before GPU encoding", ()
       },
     },
   } as unknown as SparseVoxelRenderSource;
-  const scene: SparseVoxelDrySceneData = { primitiveRecords: new Uint32Array(16), ownerBase: 32 };
+  const scene: SparseVoxelDrySceneData = { ...candidateBackedDrySceneFixture, ownerBase: 32 };
   assert.equal(canEncodeSparseVoxelDryScene(undefined, scene), false);
   assert.equal(canEncodeSparseVoxelDryScene(source, undefined), false);
   assert.equal(canEncodeSparseVoxelDryScene(source, { ...scene, primitiveRecords: new Uint32Array(0) }), false);
   assert.equal(canEncodeSparseVoxelDryScene(source, scene), true);
+  assert.equal(canConsumeSparseVoxelPrimitiveCandidates(scene), true);
+  assert.equal(canEncodeSparseVoxelDryScene(source, { ...scene, primitiveCandidates: undefined }), false,
+    "small analytic catalogs must fail over when their conservative candidate publication is unavailable");
+  assert.equal(canConsumeSparseVoxelPrimitiveCandidates({ ...scene, primitiveCandidates: undefined }), false);
   const unavailable = {
     ...source,
     structural: {
@@ -89,16 +127,16 @@ test("unavailable structural fields fail over to raster before GPU encoding", ()
   assert.equal(canEncodeSparseVoxelDryScene(unavailable, scene), false);
 });
 
-test("renderer attaches and detaches structural sources across solver replacement", () => {
+test("renderer atomically replaces structural sources before retiring the previous solver", () => {
   expectSource(rendererSource, /private svoDryScenePipeline\?: SparseVoxelDrySceneRenderer/,
     "FluidLabRenderer must own the direct renderer lifecycle");
   expectSource(rendererSource, /this\.svoDryScenePipeline\?\.setSource\(sparseSceneSource,drySceneData\)/,
     "solver attachment must pass the complete source and its analytic-owner data");
 
-  const detach = rendererSource.indexOf("this.svoDryScenePipeline?.setSource(undefined, undefined)");
-  const retire = rendererSource.indexOf("this.retireGPUFluid(previous)", detach);
-  assert.ok(detach >= 0, "the old structural source must be detached");
-  assert.ok(retire > detach, "detach must happen before the solver's GPU buffers are retired");
+  const attach = rendererSource.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData)");
+  const retire = rendererSource.indexOf("this.retireGPUFluid(previous)", attach);
+  assert.ok(attach >= 0, "the warmed structural source must replace the active binding");
+  assert.ok(retire > attach, "the new binding must be installed before the previous solver is retired");
   expectSource(rendererSource, /this\.svoDryScenePipeline\?\.destroy\(\)/,
     "renderer teardown must destroy direct-renderer-owned GPU resources");
 });

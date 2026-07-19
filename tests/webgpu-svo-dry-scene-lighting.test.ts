@@ -10,6 +10,7 @@ import {
 } from "../lib/webgpu-svo-dry-scene";
 
 const drySceneSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
+const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const waterSource = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
 
 test("directional visibility clips to the finite authored scene exit", () => {
@@ -43,13 +44,23 @@ test("dry-scene direct PBR is geometry-normal aware and hard visibility modulate
   assert.match(svoDrySceneShader, /unifiedPbrMaterial\(surface\.baseColor,surface\.metallic,surface\.roughness,vec3f\(0\.0\),0\.0/);
   assert.match(svoDrySceneShader, /unifiedLightingInputWithGeometry\(hit\.normal,hit\.normal,-rd,sample\.towardLight,sample\.radiance\*visibility\/f32\(sampleCount\)\)/);
   assert.match(svoDrySceneShader, /direct\+=shadeUnifiedSurface\(directClosure,lighting\)/);
-  assert.match(svoDrySceneShader, /let visibility=dryLightVisibility\(position,hit\.normal,sample\.towardLight,sample\.finiteDistance_m\)/);
+  assert.match(svoDrySceneShader, /let visibility=dryLightVisibility\(position,hit\.normal,hit\.ownerId,sample\.towardLight,sample\.finiteDistance_m\)/);
+  assert.match(svoDrySceneShader, /sample\.valid==0u\|\|dot\(hit\.normal,sample\.towardLight\)<=0\.0[^]*continue[^]*dryLightVisibility/,
+    "back-facing opaque samples must skip the full primary/shadow visibility traversal");
   assert.doesNotMatch(svoDrySceneShader, /unifiedPbrMaterial\([^)]*visibility/,
     "hard visibility belongs on incident direct radiance, not material or ambient/emissive state");
+  assert.match(svoDrySceneShader, /light\.positionRange\.w>0\.0&&distanceSquared>=light\.positionRange\.w\*light\.positionRange\.w[^]*return dryInvalidLightSample\(\)/,
+    "finite-range samples with exactly zero contribution must stop before square roots and shadow traversal");
+  assert.match(svoDrySceneShader, /let radiance=baseRadiance\*\(rangeFade\*shapeScale\);if\(max\(max\(radiance\.x,radiance\.y\),radiance\.z\)<=0\.0\)\{return dryInvalidLightSample\(\);\}/,
+    "zero-radiance area samples, including back-facing emitters, must never launch visibility rays");
 });
 
 test("bounded hard-shadow visibility covers opaque sources and transmissive panes", () => {
   assert.match(svoDrySceneShader, /fn svoBiasedVisibilityRay/);
+  assert.match(svoDrySceneShader, /fn dryBiasedVisibilityRayUnit\([^]*projectedCellWidth=dot\(abs\(geometricNormal\),cellSize_m\)[^]*maximumLightDistance_m-dot\(offset,directionToLight\)/,
+    "the renderer-local unit-vector path must preserve the shared projected-cell bias and original endpoint");
+  assert.match(svoDrySceneShader, /let ray=dryBiasedVisibilityRayUnit\(position,geometricNormal,towardLight,maximumDistance/,
+    "hard shadows must avoid renormalizing already-unit light directions and surface normals");
   assert.match(svoDrySceneShader, /fn directionalLightSceneExitDistance/);
   assert.match(svoDrySceneShader, new RegExp(
     `SvoVisibilityBudget\\(${SVO_VISIBILITY_LIMITS.nodeVisits}u,${SVO_VISIBILITY_LIMITS.leafVisits}u,${SVO_VISIBILITY_LIMITS.workItems}u,4u\\)`,
@@ -63,27 +74,55 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
   assert.ok(adapterStart < svoDrySceneShader.indexOf("fn svoTraceVisibility("),
     "Chrome requires the renderer adapter declaration before the shared trace body calls it");
   const adapter = svoDrySceneShader.slice(adapterStart, adapterEnd);
-  assert.match(adapter, /bodyHit\(ray\.origin_m,ray\.direction,bodies\[bodyIndex\]\)/,
+  assert.match(adapter, /let body=bodies\[bodyIndex\][^]*bodyHit\(ray\.origin_m,ray\.direction,body\)/,
     "dynamic rigid bodies must cast hard shadows");
-  assert.match(adapter, /primitiveHit\(record,ray\.origin_m,ray\.direction\)/,
-    "small authored primitive catalogs must cast hard shadows");
+  assert.match(adapter, /bodyIndex==dryVisibilityIgnoredOwner[^]*continue/,
+    "a convex dynamic receiver must not exact-test itself along its outward front-facing shadow ray");
+  assert.match(adapter, /!bodyBoundingSphereVisible\(ray\.origin_m,ray\.direction,body,tMin_m,bestT\)[^]*continue/,
+    "a conservative world-space sphere must reject distant bodies before quaternion transforms");
+  assert.match(adapter, /shape>=2&&!bodyCandidateVisible\(ray\.origin_m,ray\.direction,body,tMin_m,bestT\)/,
+    "capsules and cylinders must retain conservative rejection while box/sphere exact tests avoid a duplicate local transform");
+  assert.match(adapter, /tracePrimitiveCandidates\(ray\.origin_m,ray\.direction,tMin_m,bestT,[^,]+,true\)/,
+    "small authored catalogs must spatially reject candidates before exact shadow intersections");
+  const candidateTraversalStart = svoDrySceneShader.indexOf("fn tracePrimitiveCandidates(");
+  const candidateTraversalEnd = svoDrySceneShader.indexOf("fn traceLeafPayload(", candidateTraversalStart);
+  const candidateTraversal = svoDrySceneShader.slice(candidateTraversalStart, candidateTraversalEnd);
+  assert.match(candidateTraversal, /opaqueAnyHit&&candidate\.t<DRY_MISS[^]*return DryCandidateTrace\(candidate,leftOrPrimitive,DRY_CANDIDATE_COMPLETE,workItems\)/,
+    "opaque shadow candidate traversal must stop at its first exact blocker rather than resolve nearest identity");
+  assert.match(adapter, /candidate\.hit\.t<bestT\)\{return dryVisibilityStep\(SVO_VIS_STEP_HIT/,
+    "any opaque analytic blocker must terminate visibility without nearest-identity work");
+  assert.match(adapter, /onlyIgnoredReceiver=dry\.metadata\.x==1u&&svoPrimitiveOwnerId\(primitives\[0\]\)==dryVisibilityIgnoredOwner/,
+    "the common one-primitive convex receiver must bypass its entire static candidate query");
+  assert.match(svoDrySceneShader, /owner==dry\.metadata\.z\|\|owner==dryVisibilityIgnoredOwner/,
+    "multi-primitive candidate traversal must skip the exact convex receiver while retaining every other blocker");
+  assert.match(adapter, /payload\.status==SVO_VIS_STEP_HIT\)\{return dryVisibilityStep\(SVO_VIS_STEP_HIT/,
+    "any opaque SVO payload blocker must terminate before terrain and glass work");
+  assert.doesNotMatch(adapter, /for\(var primitiveIndex=0u;primitiveIndex<dry\.metadata\.x/,
+    "small authored catalogs must never return to a full exact-primitive shadow loop");
   assert.match(adapter, /traceLeafPayloadVisibility/,
     "large or generated catalogs must retain SVO payload shadow traversal");
   assert.match(adapter, /traceTerrain\(ray\.origin_m,ray\.direction\)/,
     "analytic terrain must cast hard shadows");
   assert.match(adapter, /traceGlass\(ray\.origin_m,ray\.direction,tMin_m,bestT,false\)/,
     "finite panes must attenuate rather than become opaque shadow blockers");
+  assert.match(svoDrySceneShader, /fn dryGlassBoundingSphereVisible\([^]*record\.extentIorEpsilon\.xy[^]*record\.centerThickness\.w[^]*radius\*radius/,
+    "pane tracing must conservatively reject distant finite sheets in world space before local transforms");
+  assert.match(svoDrySceneShader, /compositeOwned\|\|!dryGlassBoundingSphereVisible\(record,ro,rd,tMin_m,bestT\)[^]*continue[^]*svoThinGlassIntersect/,
+    "both primary and shadow pane queries must apply the conservative gate before exact intersection");
   assert.match(adapter, /optics\.netTransmittance[^]*dryVisibilityTransmissionStep/);
   assert.doesNotMatch(adapter, /shadeUnifiedSurface|dryHardVisibility/,
     "visibility intersection must never recurse into shading");
 });
 
 test("invalid or exhausted shadow work fails closed and raster/timing fallback remains intact", () => {
+  assert.match(svoDrySceneShader, /if\(\(dry\.materialPublication\.w&2u\)==0u\)\{return vec3f\(1\.0\);\}/,
+    "the internal shadow-disabled A/B must return before traversal while production defaults remain enabled");
+  assert.match(rendererSource, /svoShadowVisibility=0/);
   assert.match(svoDrySceneShader, /publicationState\[0\]==0u[^]*SVO_VIS_STEP_INVALID/);
   assert.match(svoDrySceneShader, /SVO_STATUS_WORK_EXHAUSTED\|\|leaf\.status==SVO_STATUS_STACK_OVERFLOW\|\|leaf\.status==SVO_STATUS_SOURCE_OVERFLOW[^]*SVO_VIS_STEP_EXHAUSTED/);
   assert.match(svoDrySceneShader, /fn svoVisibilityFail\([^]*vec3f\(0\.0\)/,
     "shared invalid/exhausted/occluded results must carry zero direct visibility");
-  assert.match(drySceneSource, /encode\(encoder: GPUCommandEncoder, target: GPUTexture \| GPUTextureView, timestampWrites\?: TimestampRange, temporalFrame\?: SparseVoxelTemporalFrameState\): boolean/);
+  assert.match(drySceneSource, /encode\(encoder: GPUCommandEncoder, target: GPUTexture \| GPUTextureView, timestampWrites\?: TimestampRange, temporalFrame\?: SparseVoxelTemporalFrameState, temporalTimestampWrites\?: TimestampRange\): boolean/);
   assert.match(drySceneSource, /timestampWrites \? \{ timestampWrites \} : \{\}/,
     "SVO scene timing must remain attached to the replacement pass");
   assert.match(waterSource, /if \(!sparseSceneEncoded\) \{[^]*label:"Dry scene"/,

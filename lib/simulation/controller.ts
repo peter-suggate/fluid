@@ -200,26 +200,51 @@ class SimulationController {
   }
 
   setQuality(quality: Parameters<ReturnType<typeof useMethodStore.getState>["setQuality"]>[0]) {
+    this.announceGPURebuild(`Apply ${quality} quality`);
     useMethodStore.getState().setQuality(quality);
     this.reset();
     useRuntimeStore.getState().setNotice(`Quality ${quality} · simulation reset`);
   }
 
   setMethod(methodId: string) {
+    this.announceGPURebuild(`Switch to ${getMethod(methodId).label}`);
     useMethodStore.getState().setMethodId(methodId);
     this.reset();
     useRuntimeStore.getState().setNotice(`${getMethod(methodId).label} selected`);
   }
 
-  /** GPU methods rebuild from the config key; the CPU solver needs an explicit reset. */
+  /** Structural settings start from a defined t=0 state. Runtime-safe settings
+   * are applied to the live GPU solver without changing the simulation clock. */
+  private announceGPURebuild(operation: string) {
+    if (this.backend !== "webgpu") return;
+    const current = useDiagnosticsStore.getState().gpuStatus;
+    useDiagnosticsStore.getState().set({ gpuStatus: {
+      state: "initializing",
+      label: "Preparing GPU work plan",
+      phase: "planning",
+      completed: 0,
+      total: 0,
+      startedAt_ms: performance.now(),
+      kind: "rebuild",
+      operation,
+      retainingPrevious: current.state === "ready" || (current.state === "initializing" && Boolean(current.retainingPrevious)),
+    } });
+  }
+
   setMethodParam(methodId: string, key: string, value: MethodParamValue) {
+    const method = getMethod(methodId), spec = method.params.find((candidate) => candidate.key === key);
+    const structural = methodId === useMethodStore.getState().methodId && (method.backend === "cpu" || spec?.update !== "runtime");
+    if (structural && method.backend === "webgpu") this.announceGPURebuild(`Apply ${spec?.label ?? key}: ${String(value)}`);
     useMethodStore.getState().setParam(methodId, key, value);
-    if (methodId === useMethodStore.getState().methodId && getMethod(methodId).backend === "cpu") this.reset();
+    if (structural) this.reset();
   }
 
   resetMethodParam(methodId: string, key: string) {
+    const method = getMethod(methodId), spec = method.params.find((candidate) => candidate.key === key);
+    const structural = methodId === useMethodStore.getState().methodId && (method.backend === "cpu" || spec?.update !== "runtime");
+    if (structural && method.backend === "webgpu") this.announceGPURebuild(`Restore ${spec?.label ?? key} default`);
     useMethodStore.getState().resetParam(methodId, key);
-    if (methodId === useMethodStore.getState().methodId && getMethod(methodId).backend === "cpu") this.reset();
+    if (structural) this.reset();
   }
 
   // ---- rigid-body roster ------------------------------------------------
@@ -353,11 +378,16 @@ class SimulationController {
     const sane = (value: number | undefined, fallback: number) =>
       value !== undefined && Number.isFinite(value) && value >= 0 && value < 10_000 ? value : fallback;
     const methodId = metrics.methodId ?? useMethodStore.getState().methodId;
+    const renderTimingContext = metrics.renderTimingContext ?? `${methodId}:legacy`;
     const samePhysicsMethod = previous.methodId === methodId;
+    const sameRenderContext = previous.renderTimingContext === renderTimingContext;
     const physicsFallback = samePhysicsMethod ? previous : emptyPerformance;
-    const renderFallback = samePhysicsMethod ? previous : emptyPerformance;
+    const renderFallback = sameRenderContext ? previous : emptyPerformance;
     const snapshot: PerformanceSnapshot = {
       methodId,
+      renderTimingContext,
+      renderTimingEpoch: metrics.renderTimingEpoch ?? renderFallback.renderTimingEpoch,
+      renderTimingSampleId: metrics.renderTimingSampleId ?? renderFallback.renderTimingSampleId,
       gpuPhysicsTimingAvailable: Boolean(gpu),
       gpuRenderTimestampSupported: Boolean(metrics.gpuRenderTimestampAvailable),
       gpuRenderTimingAvailable: Boolean(metrics.gpuRenderTimestampAvailable && metrics.gpuRender_ms !== undefined),
@@ -401,6 +431,7 @@ class SimulationController {
       gpuRender_ms: sane(metrics.gpuRender_ms, renderFallback.gpuRender_ms),
       gpuSurfaceExtraction_ms: sane(metrics.gpuSurfaceExtraction_ms, 0),
       gpuDryScene_ms: sane(metrics.gpuDryScene_ms, renderFallback.gpuDryScene_ms),
+      gpuSvoTemporal_ms: sane(metrics.gpuSvoTemporal_ms, renderFallback.gpuSvoTemporal_ms),
       gpuInterfaces_ms: sane(metrics.gpuInterfaces_ms, renderFallback.gpuInterfaces_ms),
       gpuSprayFront_ms: sane(metrics.gpuSprayFront_ms, renderFallback.gpuSprayFront_ms),
       gpuSprayBack_ms: sane(metrics.gpuSprayBack_ms, renderFallback.gpuSprayBack_ms),

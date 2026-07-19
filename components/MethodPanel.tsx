@@ -41,12 +41,14 @@ export function MethodPanel() {
   const quality = useMethodStore((state) => state.quality);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const fluidRenderState = useDiagnosticsStore((state) => state.fluidRenderState);
+  const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
   const method = getMethod(methodId);
   const coarse = method.params.filter((spec) => spec.tier === "coarse");
   const fine = method.params.filter((spec) => spec.tier === "fine");
   return (
-    <section className="panel-section" data-testid="method-panel">
+    <section className="panel-section" data-testid="method-panel" aria-busy={gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild"}>
       <div className="section-heading"><h2>Method</h2><span>{method.backend === "webgpu" ? "WebGPU f32" : "CPU binary64"}</span></div>
+      {gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild" && <div className="method-apply-state" role="status"><i aria-hidden="true" /><span><strong>APPLYING</strong>{gpuStatus.operation ?? gpuStatus.label}</span></div>}
       <Segmented
         ariaLabel="Simulation method"
         value={methodId}

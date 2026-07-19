@@ -17,11 +17,11 @@ function shaderFunction(name: string, nextName: string): string {
 test("contact visibility is production-compiled but default-off with a branch before secondary traversal", () => {
   assert.equal(SVO_CONTACT_VISIBILITY_CONTRACT.enabledByDefault, false);
   const contact = shaderFunction("dryContactVisibility", "dryEnvironment");
-  const gate = contact.indexOf("if(dry.materialPublication.w==0u){return vec3f(1.0);}");
+  const gate = contact.indexOf("if((dry.materialPublication.w&1u)==0u){return vec3f(1.0);}");
   const trace = contact.indexOf("svoTraceVisibility(");
   assert.ok(gate >= 0 && trace > gate, "the default gate must return before secondary SVO work");
   assert.match(drySceneSource, /scene\.contactVisibilityEnabled \? 1 : 0/,
-    "omitting the capability must publish a zero gate word");
+    "omitting the capability must leave the contact bit clear");
   assert.doesNotMatch(drySceneSource, /contactVisibilityEnabled\s*:\s*true/,
     "no shipped scene may silently opt into the unaccepted timing cost");
 });

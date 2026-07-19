@@ -138,6 +138,12 @@ test("packed candidate records preserve the shared stride and fail closed on des
   assert.equal(arena.candidateRecordOffset, 1);
   assert.equal(arena.candidateNodeCount, 1);
   assert.equal(arena.packedRecords.byteLength, 128);
+  const tamperedRecords = Uint32Array.from(publication.packedRecords);
+  tamperedRecords[0] ^= 1;
+  assert.throws(() => packSvoPrimitiveCandidateArena(packSvoPrimitiveRecords(descriptors), {
+    ...publication,
+    packedRecords: tamperedRecords,
+  }), /packed records do not match/);
   assert.throws(() => packSvoPrimitiveCandidateArena(new Uint32Array(0), publication), /does not match primitive records/);
   assert.throws(() => traceSvoPrimitiveCandidates(publication, [], {
     origin_m: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 },

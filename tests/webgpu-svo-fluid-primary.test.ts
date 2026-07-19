@@ -3,11 +3,13 @@ import test from "node:test";
 
 import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/sparse-brick-octree";
 import {
+  canConsumeSvoFineFluidCapability,
   canEncodeSparseVoxelDryScene,
   SVO_DRY_SCENE_PARAMS_LAYOUT,
   svoDrySceneShader,
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
+import { SVO_FINE_PHI_CONTROL_WORDS, type SvoFineFluidGpuCapability } from "../lib/webgpu-svo-fine-phi-stager";
 import {
   canConsumeSparseVoxelCoarseFluidPrimary,
   createSvoStructuralFluidPrimaryWGSL,
@@ -21,6 +23,7 @@ import {
   SPARSE_VOXEL_VALID_FIELDS,
   type SparseVoxelSceneRenderSource,
 } from "../lib/webgpu-voxel-debug";
+import { candidateBackedDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 function buffer(size: number): GPUBuffer {
   return { size } as GPUBuffer;
@@ -139,9 +142,49 @@ test("shared traversal and primary marcher compose without duplicate structural 
     "every nested point lookup must compare against the trace-captured generation");
 });
 
+test("validated fine phi exclusively refines primary samples and preserves the ten-storage adapter contract", () => {
+  const primary = createSvoStructuralFluidPrimaryWGSL({
+    fineSampleFunction: "rendererFineSample",
+    fineGradientFunction: "rendererFineGradient",
+  });
+  assert.match(primary, /svoResolveFluidPhi\(SvoFluidFieldValue\(coarse\.phi_m[^]*SvoFluidFieldValue\(fine\.phi_m,fine\.valid\)\)/,
+    "one resolver gives valid fine data exclusive ownership and exact coarse fallback");
+  assert.match(primary, /previous\.owner/);
+  assert.match(primary, /root\.owner/);
+  assert.match(primary, /owner==SVO_FLUID_OWNER_FINE[^]*rendererFineGradient/);
+  assert.match(svoDrySceneShader, /dryFluidFieldSource\(first\.fieldOwner\)/,
+    "the existing G-buffer metadata distinguishes coarse and fine roots without ABI growth");
+  assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length, SVO_STRUCTURAL_FLUID_PRIMARY_STORAGE_BINDINGS);
+
+  const paramsWords = new Uint32Array(40);
+  paramsWords.set([2, 1, 1, 8], 0);
+  paramsWords.set([4, 2, 2, 2], 4);
+  paramsWords.set([2, 1, 1, 2], 8);
+  paramsWords.set([4, 2, 2, 0], 12);
+  paramsWords.set([2, 2, 2, 16], 16);
+  paramsWords.set([64, 64, 66, 128], 20);
+  const capability = {
+    arena: { buffer: { size: 4096 } as GPUBuffer, size: 4096 },
+    params: { buffer: { size: 160 } as GPUBuffer },
+    statusWord: SVO_FINE_PHI_CONTROL_WORDS.status,
+    acceptedStructuralGenerationWord: SVO_FINE_PHI_CONTROL_WORDS.acceptedStructuralGeneration,
+    acceptedFineGenerationWord: SVO_FINE_PHI_CONTROL_WORDS.acceptedFineGeneration,
+    pageGenerationOffsetWords: 64,
+    ownerPageTableOffsetWords: 66,
+    payloadOffsetWords: 128,
+    paramsWords,
+    publicationMirrorWords: 8,
+    coarseFallbackRequired: true,
+    directWaterOwnership: false,
+  } satisfies SvoFineFluidGpuCapability;
+  assert.equal(canConsumeSvoFineFluidCapability(capability), true);
+  assert.equal(canConsumeSvoFineFluidCapability({ ...capability, directWaterOwnership: true } as unknown as SvoFineFluidGpuCapability), false);
+  assert.equal(canConsumeSvoFineFluidCapability({ ...capability, paramsWords: new Uint32Array(39) }), false);
+});
+
 test("production dry renderer binds fluid only through an explicit non-overlapping primary mode", () => {
   const valid = source();
-  const legacy: SparseVoxelDrySceneData = { primitiveRecords: new Uint32Array(16), ownerBase: 0 };
+  const legacy: SparseVoxelDrySceneData = candidateBackedDrySceneFixture;
   const diagnostic: SparseVoxelDrySceneData = { ...legacy, fluidPrimaryMode: "coarse-opaque-diagnostic" };
   assert.equal(canEncodeSparseVoxelDryScene(valid, legacy), true);
   assert.equal(canEncodeSparseVoxelDryScene(valid, diagnostic), true);
@@ -150,11 +193,13 @@ test("production dry renderer binds fluid only through an explicit non-overlappi
   assert.equal(canEncodeSparseVoxelDryScene({ ...valid, structural: { ...valid.structural!, fields: { ...valid.structural!.fields, coarseFluid: { ...valid.structural!.fields.coarseFluid, residency: "unavailable" } } } }, diagnostic), false,
     "an explicitly requested direct fluid path must fall back before encoding malformed residency");
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 160,
+    sizeBytes: 336,
     terrainWordOffset: 24,
     terrainMaterialWordOffset: 28,
     materialPublicationWordOffset: 32,
     fluidDomainWordOffset: 36,
+    primitiveCandidateWordOffset: 40,
+    finePhiWordOffset: 44,
   });
   assert.match(svoDrySceneShader, /@group\(0\) @binding\(11\) var<storage,read> svoStructuralGeometry/);
   assert.match(svoDrySceneShader, /@group\(0\) @binding\(12\) var<storage,read> svoStructuralLeafStates/);

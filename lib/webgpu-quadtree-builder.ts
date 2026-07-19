@@ -102,9 +102,9 @@ fn surfaceBrickCoordinate(brickIndex: u32, brickSize: u32) -> vec3u {
 }
 // Dense launches use ordinary 4x4x4 workgroups. Sparse launches use the
 // residency worklist's 64-thread indirect stream (header words 12..14).
-fn surfaceDispatchCell(denseGid: vec3u, wid: vec3u, localIndex: u32) -> vec3u {
+fn surfaceDispatchCell(wid: vec3u, localIndex: u32) -> vec3u {
   if (!sparseSurfaceEnabled()) {
-    return denseGid;
+    return wid * vec3u(4u) + surfaceLocalCell(localIndex, 4u);
   }
   let stream = (wid.x + wid.y * surfaceBrickWorklist[12]) * 64u + localIndex;
   let brickSize = u32(params.container.w);
@@ -192,8 +192,8 @@ fn departurePoint(p: vec3f, dt: f32) -> vec3f {
   return p - centredMacVelocityAt(midpoint) * dt * cellsPerMetre;
 }
 @compute @workgroup_size(4, 4, 4)
-fn advectLevelSet(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn advectLevelSet(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   // Narita et al. Sec. 4.5: interpolate velocity from the saved previous
   // staggered grid, backtrace, then interpolate the previous level set.
@@ -207,22 +207,22 @@ fn advectLevelSet(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workg
   textureStore(phiOut, q, vec4f(phi, 0.0, 0.0, 0.0));
 }
 @compute @workgroup_size(4, 4, 4)
-fn advectPredict(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn advectPredict(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   textureStore(phiOut, vec3i(gid), vec4f(trilinearPhi(departurePoint(vec3f(gid), params.cellAndDt.w)), 0.0, 0.0, 0.0));
 }
 @compute @workgroup_size(4, 4, 4)
-fn advectReverse(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn advectReverse(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   // phiIn is the predicted field; tracing it forward (negative dt backtrace)
   // recovers the BFECC error estimate.
   if (any(gid >= params.dims.xyz)) { return; }
   textureStore(phiOut, vec3i(gid), vec4f(trilinearPhi(departurePoint(vec3f(gid), -params.cellAndDt.w)), 0.0, 0.0, 0.0));
 }
 @compute @workgroup_size(4, 4, 4)
-fn advectCorrect(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn advectCorrect(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   let q = vec3i(gid);
   let original = loadPhi(q);
@@ -285,8 +285,8 @@ fn accumulateSparseInterface(value: f32, gid: vec3u) {
   }
 }
 @compute @workgroup_size(4, 4, 4)
-fn reduceVolume(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn reduceVolume(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   accumulateVolume(loadPhi(vec3i(gid)), gid);
 }
@@ -308,8 +308,8 @@ fn reconciliationSelected(gid: vec3u) -> bool {
   return f32(hash & 0xffffu) < params.control.w * 65536.0;
 }
 @compute @workgroup_size(4, 4, 4)
-fn seedDistance(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn seedDistance(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   let p = vec3i(gid); let wet = loadPhi(p) < 0.0;
   var crosses = (loadPhi(p + vec3i(1, 0, 0)) < 0.0) != wet || (loadPhi(p - vec3i(1, 0, 0)) < 0.0) != wet
@@ -337,8 +337,8 @@ fn seedDistanceSquared(cell: vec3u, word: vec2u) -> f32 {
   return dot(delta, delta);
 }
 @compute @workgroup_size(4, 4, 4)
-fn jumpFlood(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn jumpFlood(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   var best = distanceSeedsIn[index3(gid)]; var bestDistance = seedDistanceSquared(gid, best); let jump = i32(passParams.jump);
   for (var dz = -1; dz <= 1; dz += 1) { for (var dy = -1; dy <= 1; dy += 1) { for (var dx = -1; dx <= 1; dx += 1) {
@@ -350,8 +350,8 @@ fn jumpFlood(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_
   distanceSeedsOut[index3(gid)] = best;
 }
 @compute @workgroup_size(4, 4, 4)
-fn finalizeDistance(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn finalizeDistance(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   let advected = loadPhi(vec3i(gid));
   let h = hMin();
@@ -403,8 +403,8 @@ fn finalizeDistance(@builtin(global_invocation_id) denseGid: vec3u, @builtin(wor
   textureStore(phiOut, vec3i(gid), vec4f(result, 0.0, 0.0, 0.0));
 }
 @compute @workgroup_size(4, 4, 4)
-fn correctLevelSetVolume(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn correctLevelSetVolume(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   let represented = f32(atomicLoad(&reductions[0])) / 256.0;
   let desiredVolume = params.inflowTiming.y;
@@ -427,14 +427,14 @@ fn commitLevelSetVolumeCorrection() {
   atomicStore(&reductions[0], u32(corrected * 256.0 + 0.5));
 }
 @compute @workgroup_size(4, 4, 4)
-fn copyLevelSet(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn copyLevelSet(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   textureStore(phiOut, vec3i(gid), vec4f(loadPhi(vec3i(gid)), 0.0, 0.0, 0.0));
 }
 @compute @workgroup_size(4, 4, 4)
-fn cullDebris(@builtin(global_invocation_id) denseGid: vec3u, @builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  let gid = surfaceDispatchCell(denseGid, wid, localIndex);
+fn cullDebris(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
+  let gid = surfaceDispatchCell(wid, localIndex);
   if (any(gid >= params.dims.xyz)) { return; }
   let q = vec3i(gid); let value = loadPhi(q); var result = value;
   if (params.control.z > 0.5 && value < 0.0 && textureLoad(reconcileVolumeIn, q, 0).x < 0.5) {
@@ -612,12 +612,8 @@ export class WebGPUQuadtreeSurfaceState {
     // are rebuilt from the resident band.
     if (this.sparseExecution) encoder.clearBuffer(this.reductions, 4, 12);
     else encoder.clearBuffer(this.reductions);
-    // Sparse execution crosses read/write ownership for only a subset of the
-    // texture, so dependent stages use separate passes and explicit command
-    // ordering. Keep the established dense tall-cell chain in one pass: its
-    // MacCormack/redistance numerics and Section-8 remeshing baseline were
-    // calibrated against dispatch-order visibility within that pass. Splitting
-    // the dense chain changed the dam-front zero set enough to outrun its band.
+    // Dependent texture stages use separate passes and explicit command
+    // ordering for both dense and sparse execution.
     const timedSurface = !this.debrisCulling ? finalTimestampWrites : undefined;
     const beginningTimestamp = timedSurface?.beginningOfPassWriteIndex === undefined ? undefined : {
       querySet: timedSurface.querySet,
@@ -627,44 +623,34 @@ export class WebGPUQuadtreeSurfaceState {
       querySet: timedSurface.querySet,
       endOfPassWriteIndex: timedSurface.endOfPassWriteIndex,
     };
-    const stages: Array<readonly [label: string, pipeline: GPUComputePipeline, group: GPUBindGroup, offset: number]> = [];
-    const appendStage = (label: string, pipeline: GPUComputePipeline, group: GPUBindGroup, offset = 0) => stages.push([label, pipeline, group, offset]);
+    const surfaceDispatch = (label: string, pipeline: GPUComputePipeline, group: GPUBindGroup, offset = 0, timestampWrites?: GPUComputePassTimestampWrites) => {
+      const pass = encoder.beginComputePass({ label, ...(timestampWrites ? { timestampWrites } : {}) });
+      dispatch(pass, pipeline, group, offset);
+      pass.end();
+    };
     if (this.monotoneLevelSetTransport) {
-      appendStage("Quadtree surface level-set advection", this.cache.pipelines.advectLevelSet, this.groups.advect);
+      surfaceDispatch("Quadtree surface level-set advection", this.cache.pipelines.advectLevelSet, this.groups.advect, 0, beginningTimestamp);
     } else {
-      appendStage("Quadtree surface advection predictor", this.cache.pipelines.advectPredict, this.groups.predict);
-      appendStage("Quadtree surface advection reverse", this.cache.pipelines.advectReverse, this.groups.reverse);
-      appendStage("Quadtree surface advection correction", this.cache.pipelines.advectCorrect, this.groups.correct);
+      surfaceDispatch("Quadtree surface advection predictor", this.cache.pipelines.advectPredict, this.groups.predict, 0, beginningTimestamp);
+      surfaceDispatch("Quadtree surface advection reverse", this.cache.pipelines.advectReverse, this.groups.reverse);
+      surfaceDispatch("Quadtree surface advection correction", this.cache.pipelines.advectCorrect, this.groups.correct);
     }
-    appendStage("Quadtree surface distance seeds", this.cache.pipelines.seedDistance, this.groups.seed);
+    surfaceDispatch("Quadtree surface distance seeds", this.cache.pipelines.seedDistance, this.groups.seed);
     this.jumps.forEach((_, index) => {
-      appendStage(
+      surfaceDispatch(
         `Quadtree surface jump flood ${index}`,
         this.cache.pipelines.jumpFlood,
         index % 2 === 0 ? this.groups.jumpAB : this.groups.jumpBA,
         index * this.passStride,
       );
     });
-    appendStage(
+    surfaceDispatch(
       "Quadtree surface finalize distance",
       this.cache.pipelines.finalizeDistance,
       this.jumps.length % 2 === 0 ? this.groups.finalizeA : this.groups.finalizeB,
+      0,
+      endingTimestamp,
     );
-    if (this.sparseExecution) {
-      stages.forEach(([label, pipeline, group, offset], index) => {
-        const timestampWrites = index === 0 ? beginningTimestamp : index === stages.length - 1 ? endingTimestamp : undefined;
-        const pass = encoder.beginComputePass({ label, ...(timestampWrites ? { timestampWrites } : {}) });
-        dispatch(pass, pipeline, group, offset);
-        pass.end();
-      });
-    } else {
-      const pass = encoder.beginComputePass({
-        label: "Quadtree dense surface transport and narrow-band redistance",
-        ...(timedSurface ? { timestampWrites: timedSurface } : {}),
-      });
-      for (const [, pipeline, group, offset] of stages) dispatch(pass, pipeline, group, offset);
-      pass.end();
-    }
     if (this.debrisCulling) {
       const cullPass = encoder.beginComputePass({ label: "Quadtree surface debris cull" });
       dispatch(cullPass, this.cache.pipelines.cullDebris, this.groups.cull); cullPass.end();

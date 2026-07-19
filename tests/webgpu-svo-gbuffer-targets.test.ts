@@ -137,13 +137,14 @@ test("shader populates stable identity/media/generation and consumes exact rigid
   assert.match(svoDrySceneShader, /svoPrimitiveMotionVelocityAt\(record,worldSurfacePosition_m\)/);
   assert.match(svoDrySceneShader, /DRY_GBUFFER_MOTION_STATIC,1u,0\.0/,
     "authored static primitives publish known zero motion");
-  assert.match(svoDrySceneShader, /svoPrimitiveOwnerId\(record\),sample\.featureId,DRY_GBUFFER_FIELD_ANALYTIC/);
+  assert.match(svoDrySceneShader, /svoPrimitiveOwnerId\(record\),exact\.featureId,DRY_GBUFFER_FIELD_ANALYTIC/,
+    "static G-buffer feature identity must come from the shared exact ray hit without a second distance evaluation");
   assert.match(svoDrySceneShader, /dry\.terrain\.x,DRY_OWNER_NONE,SVO_FEATURE_TERRAIN,DRY_GBUFFER_FIELD_TERRAIN/);
   assert.match(svoDrySceneShader, /dryPublicationGeneration\(\)->u32[^]*publicationState\[0\]/);
   assert.match(svoDrySceneShader, /DRY_REVERSED_Z_NEAR_M\/viewDepth_m/);
   assert.match(svoDrySceneShader, /svoGBufferMiss\(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u\),0\.0/);
-  assert.match(svoDrySceneShader, /surfaceMedium=select\(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_WATER,opaque\.fieldSource==SVO_GBUFFER_FIELD_FLUID_COARSE\)/,
-    "coarse fluid hits publish air/water media rather than the temporary opaque shading policy");
+  assert.match(svoDrySceneShader, /surfaceMedium=select\(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_WATER,dryIsFluidFieldSource\(opaque\.fieldSource\)\)/,
+    "coarse and fine fluid hits publish air/water media rather than the temporary opaque shading policy");
 });
 
 test("resize and water composition retain the SVO MRT lifecycle and zero-depth miss semantics", () => {

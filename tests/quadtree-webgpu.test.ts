@@ -222,10 +222,8 @@ test("resident phi redistance is bounded to the consumed five-cell band", () => 
 
   const encode = WebGPUQuadtreeSurfaceState.prototype.encode.toString();
   assert.match(encode, /surfaceDispatch[\s\S]*advectPredict[\s\S]*jumpFlood[\s\S]*finalizeDistance/, "dependent surface stages preserve their command order");
-  assert.match(encode, /if\(this\.sparseExecution\)[\s\S]*stages\.forEach[\s\S]*encoder\.beginComputePass[\s\S]*dispatch\(pass,pipeline,group,offset\)/,
-    "sparse dependent texture stages receive separate WebGPU synchronization scopes");
-  assert.match(encode, /Quadtree dense surface transport and narrow-band redistance[\s\S]*for\(const\[,pipeline,group,offset\]of stages\)dispatch\(pass,pipeline,group,offset\)/,
-    "dense tall-cell transport retains its calibrated single-pass dispatch chain");
+  assert.match(encode, /surfaceDispatch[\s\S]*encoder\.beginComputePass[\s\S]*dispatch\(pass,pipeline,group,offset\)/,
+    "dependent texture stages receive separate WebGPU synchronization scopes");
   assert.match(encode, /dispatchWorkgroupsIndirect\(this\.sparseExecution\.worklist,\s*FLUID_BRICK_ACTIVE_SURFACE_DISPATCH_OFFSET_BYTES\)/,
     "surface stages consume the resident-brick worklist without CPU counts");
   assert.match(encode, /if\s*\(this\.debrisCulling\)[\s\S]*reduceVolume/, "the post-cull path retains an exact reduction");

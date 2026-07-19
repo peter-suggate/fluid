@@ -21,6 +21,7 @@ import {
   SPARSE_SURFACE_INVALID_PAGE,
   type SparseSurfaceBandGPUSource,
 } from "./webgpu-sparse-surface-band";
+import { SPARSE_VOXEL_PUBLICATION_STATE } from "./webgpu-voxel-debug";
 
 const UINT32_MAX = 0xffff_ffff;
 const FINE_ARENA_ALIGNMENT_WORDS = 64;
@@ -35,18 +36,18 @@ export const SVO_FINE_PHI_STATUS = Object.freeze({
 } as const);
 
 export const SVO_FINE_PHI_CONTROL_WORDS = Object.freeze({
-  status: 0,
-  observedStructuralGeneration: 1,
-  observedFineGeneration: 2,
-  acceptedStructuralGeneration: 3,
-  acceptedFineGeneration: 4,
-  stagedPageCount: 5,
-  fallbackPageCount: 6,
-  missingSourceSampleCount: 7,
-  retiredClearedPageCount: 8,
-  sourceRejectedCount: 9,
-  stalePublicationCount: 10,
-  unchangedPublicationCount: 11,
+  status: 16,
+  observedStructuralGeneration: 17,
+  observedFineGeneration: 18,
+  acceptedStructuralGeneration: 19,
+  acceptedFineGeneration: 20,
+  stagedPageCount: 21,
+  fallbackPageCount: 22,
+  missingSourceSampleCount: 23,
+  retiredClearedPageCount: 24,
+  sourceRejectedCount: 25,
+  stalePublicationCount: 26,
+  unchangedPublicationCount: 27,
   length: 16,
 } as const);
 
@@ -54,6 +55,8 @@ export interface SvoFinePhiStagingPlan {
   ownerDimensions: readonly [number, number, number];
   ownerBrickDimensions: readonly [number, number, number];
   fineDimensions: readonly [number, number, number];
+  sourceFineDimensions: readonly [number, number, number];
+  sourceOriginFine: readonly [number, number, number];
   fineCellSize_m: readonly [number, number, number];
   refinementFactor: 1 | 2 | 4;
   ownerBrickSize: 8;
@@ -63,8 +66,9 @@ export interface SvoFinePhiStagingPlan {
   requestedCapacity: number;
   capacity: number;
   degraded: boolean;
-  controlOffsetWords: 0;
+  controlOffsetWords: 16;
   pageGenerationOffsetWords: number;
+  ownerPageTableOffsetWords: number;
   payloadOffsetWords: number;
   allocatedWords: number;
   allocatedBytes: number;
@@ -72,6 +76,8 @@ export interface SvoFinePhiStagingPlan {
 
 export interface SvoFinePhiStagingPlanOptions {
   maximumArenaBytes?: number;
+  /** Solver-brick origin inside the larger structural SVO domain. */
+  sourceOriginBricks?: readonly [number, number, number];
 }
 
 function alignWords(words: number): number {
@@ -94,10 +100,20 @@ export function planSvoFinePhiStaging(
   coarseCellSize_m.forEach((value, axis) => positiveFinite(value, `Fine-phi coarse cell size axis ${axis}`));
   const factor = source.refinementFactor;
   if (factor !== 1 && factor !== 2 && factor !== 4) throw new RangeError("Fine-phi refinement must be 1, 2, or 4");
-  const expectedFine = owner.dimensions.map((value) => value * factor);
-  if (source.fineDimensions.some((value, axis) => value !== expectedFine[axis])) {
-    throw new RangeError("Sparse-surface fine dimensions do not match the renderer owner domain and refinement");
+  const fineDimensions = owner.dimensions.map((value) => value * factor) as [number, number, number];
+  const sourceOriginBricks = options.sourceOriginBricks ?? [0, 0, 0];
+  sourceOriginBricks.forEach((value, axis) => {
+    if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`Fine-phi source brick origin axis ${axis} must be a non-negative integer`);
+  });
+  const sourceCoarseDimensions = source.fineDimensions.map((value, axis) => {
+    if (!Number.isSafeInteger(value) || value < 1 || value % factor !== 0) throw new RangeError(`Sparse-surface fine dimension axis ${axis} is not refinement-aligned`);
+    return value / factor;
+  });
+  const sourceOriginCells = sourceOriginBricks.map((value) => value * owner.brickSize);
+  if (sourceCoarseDimensions.some((value, axis) => sourceOriginCells[axis] + value > owner.dimensions[axis])) {
+    throw new RangeError("Sparse-surface fine domain falls outside the renderer owner domain");
   }
+  const sourceOriginFine = sourceOriginCells.map((value) => value * factor) as [number, number, number];
   const expectedSourceBricks = source.fineDimensions.map((value) => Math.ceil(value / source.brickSize));
   if (source.brickDimensions.some((value, axis) => value !== expectedSourceBricks[axis])) {
     throw new RangeError("Sparse-surface brick dimensions are inconsistent with its fine domain");
@@ -105,7 +121,8 @@ export function planSvoFinePhiStaging(
   const tileEdge = owner.brickSize * factor + 2;
   const tileVoxels = tileEdge ** 3;
   const pageGenerationOffsetWords = FINE_ARENA_ALIGNMENT_WORDS;
-  const payloadOffsetWords = alignWords(pageGenerationOffsetWords + owner.logicalBrickCount);
+  const ownerPageTableOffsetWords = pageGenerationOffsetWords + owner.logicalBrickCount;
+  const payloadOffsetWords = alignWords(ownerPageTableOffsetWords + owner.logicalBrickCount);
   const maximumBytes = options.maximumArenaBytes ?? Number.MAX_SAFE_INTEGER;
   if (!Number.isFinite(maximumBytes) || maximumBytes < 0) throw new RangeError("Fine-phi arena byte ceiling must be finite and non-negative");
   const availablePayloadWords = Math.max(0, Math.floor(maximumBytes / 4) - payloadOffsetWords);
@@ -114,12 +131,12 @@ export function planSvoFinePhiStaging(
   const allocatedWords = payloadOffsetWords + capacity * tileVoxels;
   return {
     ownerDimensions: [...owner.dimensions], ownerBrickDimensions: [...owner.brickDimensions],
-    fineDimensions: [...source.fineDimensions],
+    fineDimensions, sourceFineDimensions: [...source.fineDimensions], sourceOriginFine,
     fineCellSize_m: coarseCellSize_m.map((value) => value / factor) as [number, number, number],
     refinementFactor: factor, ownerBrickSize: 8, sourceBrickSize: source.brickSize,
     tileEdge, tileVoxels, requestedCapacity: owner.capacity, capacity,
-    degraded: capacity < owner.capacity, controlOffsetWords: 0,
-    pageGenerationOffsetWords, payloadOffsetWords, allocatedWords, allocatedBytes: allocatedWords * 4,
+    degraded: capacity < owner.capacity, controlOffsetWords: 16,
+    pageGenerationOffsetWords, ownerPageTableOffsetWords, payloadOffsetWords, allocatedWords, allocatedBytes: allocatedWords * 4,
   };
 }
 
@@ -189,7 +206,7 @@ export const svoFinePhiStagingShader = /* wgsl */ `
 struct SurfaceParams { coarseDims:vec4u, fineDims:vec4u, brickDims:vec4u, settings:vec4f, cellAndDt:vec4f, sizing:vec4f, physical:vec4f }
 struct FineParams {
   ownerDims:vec4u, fineDims:vec4u, ownerBrickDims:vec4u, sourceBrickDims:vec4u,
-  counts:vec4u, offsets:vec4u, source:vec4u, fineCell:vec4f,
+  counts:vec4u, offsets:vec4u, source:vec4u, sourceFineDims:vec4u, sourceOriginFine:vec4u, fineCell:vec4f,
 }
 @group(0) @binding(0) var<storage,read> ownerArena:array<u32>;
 @group(0) @binding(1) var<storage,read> retiredSlots:array<u32>;
@@ -210,7 +227,7 @@ const AIR_PHI:f32=${FINE_AIR_PHI_M}.0;
 fn entry(listWords:u32,item:u32)->u32 { return residencyEntries[listWords+item*2u]; }
 fn ownerBrick(logical:u32)->vec3u { return vec3u(logical%params.ownerBrickDims.x,(logical/params.ownerBrickDims.x)%params.ownerBrickDims.y,logical/(params.ownerBrickDims.x*params.ownerBrickDims.y)); }
 fn sourceSlot(q:vec3i)->vec2u {
-  let clamped=vec3u(clamp(q,vec3i(0),vec3i(params.fineDims.xyz)-vec3i(1)));
+  let clamped=vec3u(clamp(q,vec3i(0),vec3i(params.sourceFineDims.xyz)-vec3i(1)));
   let brick=clamped/params.source.x; let logical=brick.x+params.sourceBrickDims.x*(brick.y+params.sourceBrickDims.y*brick.z);
   if(logical>=arrayLength(&surfacePageTable)){return vec2u(INVALID,0u);}
   let slot=surfacePageTable[logical]; if(slot>=params.counts.w){return vec2u(INVALID,0u);}
@@ -223,66 +240,66 @@ fn sourcePhiAt(q:vec3i)->vec2f {
   if(word>=arrayLength(&surfacePhi)){return vec2f(AIR_PHI,0.0);} let value=surfacePhi[word];
   return vec2f(value,select(0.0,1.0,value==value&&abs(value)<3.402823e38));
 }
-fn tileCoordinate(index:u32)->vec3u { return vec3u(index%params.offsets.w,(index/params.offsets.w)%params.offsets.w,index/(params.offsets.w*params.offsets.w)); }
+fn tileCoordinate(index:u32)->vec3u { return vec3u(index%params.source.w,(index/params.source.w)%params.source.w,index/(params.source.w*params.source.w)); }
 
 @compute @workgroup_size(1)
 fn prepare() {
-  for(var i=0u;i<12u;i+=1u){if(i!=3u&&i!=4u&&i!=9u&&i!=10u&&i!=11u){atomicStore(&fineArena[i],0u);}}
+  for(var i=${SVO_FINE_PHI_CONTROL_WORDS.status}u;i<${SVO_FINE_PHI_CONTROL_WORDS.status + 12}u;i+=1u){if(i!=${SVO_FINE_PHI_CONTROL_WORDS.acceptedStructuralGeneration}u&&i!=${SVO_FINE_PHI_CONTROL_WORDS.acceptedFineGeneration}u&&i!=${SVO_FINE_PHI_CONTROL_WORDS.sourceRejectedCount}u&&i!=${SVO_FINE_PHI_CONTROL_WORDS.stalePublicationCount}u&&i!=${SVO_FINE_PHI_CONTROL_WORDS.unchangedPublicationCount}u){atomicStore(&fineArena[i],0u);}}
   let structural=residencyControl[${SVO_RENDER_RESIDENCY_CONSUMER_CONTROL_WORDS.acceptedGeneration}u];
   let ownerGeneration=ownerArena[${SVO_OWNER_PAGE_CONTROL_WORDS.acceptedGeneration}u]; let fineGeneration=surfaceControl[1u];
-  atomicStore(&fineArena[1],structural); atomicStore(&fineArena[2],fineGeneration);
+  atomicStore(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.observedStructuralGeneration}],structural); atomicStore(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.observedFineGeneration}],fineGeneration);
   let ownerStatus=ownerArena[${SVO_OWNER_PAGE_CONTROL_WORDS.status}u];
-  let sourceShape=all(surfaceParams.fineDims.xyz==params.fineDims.xyz)&&all(surfaceParams.brickDims.xyz==params.sourceBrickDims.xyz)
+  let sourceShape=all(surfaceParams.fineDims.xyz==params.sourceFineDims.xyz)&&all(surfaceParams.brickDims.xyz==params.sourceBrickDims.xyz)
     &&surfaceParams.fineDims.w==params.source.x;
   if(structural==0u||ownerGeneration!=structural||(ownerStatus&${SVO_OWNER_PAGE_STATUS.ready | SVO_OWNER_PAGE_STATUS.unchanged}u)==0u
-    ||fineGeneration==0u||fineGeneration!=params.source.y||!sourceShape){atomicStore(&fineArena[0],SOURCE_REJECTED);atomicAdd(&fineArena[9],1u);return;}
-  let acceptedStructural=atomicLoad(&fineArena[3]);let acceptedFine=atomicLoad(&fineArena[4]);
-  if(structural<acceptedStructural||fineGeneration<acceptedFine){atomicStore(&fineArena[0],STALE);atomicAdd(&fineArena[10],1u);return;}
-  if(structural==acceptedStructural&&fineGeneration==acceptedFine){atomicStore(&fineArena[0],UNCHANGED);atomicAdd(&fineArena[11],1u);return;}
-  atomicStore(&fineArena[0],READY);
+    ||fineGeneration==0u||fineGeneration!=params.source.y||!sourceShape){atomicStore(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}],SOURCE_REJECTED);atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.sourceRejectedCount}],1u);return;}
+  let acceptedStructural=atomicLoad(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.acceptedStructuralGeneration}]);let acceptedFine=atomicLoad(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.acceptedFineGeneration}]);
+  if(structural<acceptedStructural||fineGeneration<acceptedFine){atomicStore(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}],STALE);atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.stalePublicationCount}],1u);return;}
+  if(structural==acceptedStructural&&fineGeneration==acceptedFine){atomicStore(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}],UNCHANGED);atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.unchangedPublicationCount}],1u);return;}
+  atomicStore(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}],READY);
 }
 
 fn dispatchedItem(wid:vec3u,lid:u32,dispatchWord:u32)->u32{return (wid.y*residencyControl[dispatchWord]+wid.x)*64u+lid;}
 @compute @workgroup_size(64)
 fn clearRetired(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32) {
   let item=dispatchedItem(wid,lid,${SVO_RENDER_RESIDENCY_CONSUMER_CONTROL_WORDS.retiredOutputDispatch}u);let count=min(residencyControl[${SVO_RENDER_RESIDENCY_CONSUMER_CONTROL_WORDS.dirtyRetiredCount}u],params.counts.x);
-  if(item>=count||item>=arrayLength(&retiredSlots)){return;} let logical=entry(params.source.w,item);
+  if(item>=count||item>=arrayLength(&retiredSlots)){return;} let logical=entry(params.sourceBrickDims.w,item);
   if(logical<params.counts.x){atomicStore(&fineArena[params.offsets.y+logical],0u);} let slot=retiredSlots[item];
-  if(slot>=params.counts.z){return;} let base=params.offsets.z+slot*params.offsets.w*params.offsets.w*params.offsets.w;
-  let voxels=params.offsets.w*params.offsets.w*params.offsets.w;for(var local=0u;local<voxels;local+=1u){atomicStore(&fineArena[base+local],bitcast<u32>(AIR_PHI));}
-  atomicAdd(&fineArena[8],1u);
+  if(slot>=params.counts.z){return;} let base=params.offsets.w+slot*params.source.w*params.source.w*params.source.w;
+  let voxels=params.source.w*params.source.w*params.source.w;for(var local=0u;local<voxels;local+=1u){atomicStore(&fineArena[base+local],bitcast<u32>(AIR_PHI));}
+  atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.retiredClearedPageCount}],1u);
 }
 
 @compute @workgroup_size(64)
 fn stageActive(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32) {
-  if((atomicLoad(&fineArena[0])&READY)==0u){return;} let item=dispatchedItem(wid,lid,${SVO_RENDER_RESIDENCY_CONSUMER_CONTROL_WORDS.activeOutputDispatch}u);
+  if((atomicLoad(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}])&READY)==0u){return;} let item=dispatchedItem(wid,lid,${SVO_RENDER_RESIDENCY_CONSUMER_CONTROL_WORDS.activeOutputDispatch}u);
   let count=min(residencyControl[${SVO_RENDER_RESIDENCY_CONSUMER_CONTROL_WORDS.dirtyActiveCount}u],params.counts.x);if(item>=count){return;}
-  let logical=entry(params.source.z,item);if(logical>=params.counts.x){atomicAdd(&fineArena[6],1u);atomicOr(&fineArena[0],PARTIAL);return;}
-  let encoded=ownerArena[params.offsets.x+logical];if(encoded==0u||encoded>params.counts.y||encoded-1u>=params.counts.z){atomicStore(&fineArena[params.offsets.y+logical],0u);atomicAdd(&fineArena[6],1u);atomicOr(&fineArena[0],PARTIAL);return;}
-  let slot=encoded-1u;let brick=ownerBrick(logical);let edge=params.offsets.w;let voxels=edge*edge*edge;let base=params.offsets.z+slot*voxels;var missing=0u;
-  for(var local=0u;local<voxels;local+=1u){let c=tileCoordinate(local);let global=vec3i(brick*params.ownerDims.w*params.fineDims.w+c)-vec3i(1);let sample=sourcePhiAt(global);atomicStore(&fineArena[base+local],bitcast<u32>(sample.x));if(sample.y==0.0){missing+=1u;}}
-  if(missing==0u){atomicStore(&fineArena[params.offsets.y+logical],params.source.y);atomicAdd(&fineArena[5],1u);}
-  else{atomicStore(&fineArena[params.offsets.y+logical],0u);atomicAdd(&fineArena[6],1u);atomicAdd(&fineArena[7],missing);atomicOr(&fineArena[0],PARTIAL);}
+  let logical=entry(params.source.z,item);if(logical>=params.counts.x){atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.fallbackPageCount}],1u);atomicOr(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}],PARTIAL);return;}
+  let encoded=ownerArena[params.offsets.x+logical];atomicStore(&fineArena[params.offsets.z+logical],encoded);if(encoded==0u||encoded>params.counts.y||encoded-1u>=params.counts.z){atomicStore(&fineArena[params.offsets.y+logical],0u);atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.fallbackPageCount}],1u);atomicOr(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}],PARTIAL);return;}
+  let slot=encoded-1u;let brick=ownerBrick(logical);let edge=params.source.w;let voxels=edge*edge*edge;let base=params.offsets.w+slot*voxels;var missing=0u;
+  for(var local=0u;local<voxels;local+=1u){let c=tileCoordinate(local);let global=vec3i(brick*params.ownerDims.w*params.fineDims.w+c)-vec3i(1)-vec3i(params.sourceOriginFine.xyz);let sample=sourcePhiAt(global);atomicStore(&fineArena[base+local],bitcast<u32>(sample.x));if(sample.y==0.0){missing+=1u;}}
+  if(missing==0u){atomicStore(&fineArena[params.offsets.y+logical],params.source.y);atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.stagedPageCount}],1u);}
+  else{atomicStore(&fineArena[params.offsets.y+logical],0u);atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.fallbackPageCount}],1u);atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.missingSourceSampleCount}],missing);atomicOr(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}],PARTIAL);}
 }
 
 @compute @workgroup_size(1)
 fn finalize() {
-  if((atomicLoad(&fineArena[0])&READY)==0u){return;}
-  atomicStore(&fineArena[3],atomicLoad(&fineArena[1]));atomicStore(&fineArena[4],atomicLoad(&fineArena[2]));
+  if((atomicLoad(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}])&READY)==0u){return;}
+  atomicStore(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.acceptedStructuralGeneration}],atomicLoad(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.observedStructuralGeneration}]));atomicStore(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.acceptedFineGeneration}],atomicLoad(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.observedFineGeneration}]));
 }
 `;
 
 /** Composable read-only sampler. Invalid samples deliberately require coarse fallback. */
 export function svoFinePhiSamplingWGSL(group: number, ownerBinding: number, fineBinding: number, paramsBinding: number): string {
   return /* wgsl */ `
-struct SvoFinePhiParams { ownerDims:vec4u, fineDims:vec4u, ownerBrickDims:vec4u, sourceBrickDims:vec4u, counts:vec4u, offsets:vec4u, source:vec4u, fineCell:vec4f }
+struct SvoFinePhiParams { ownerDims:vec4u, fineDims:vec4u, ownerBrickDims:vec4u, sourceBrickDims:vec4u, counts:vec4u, offsets:vec4u, source:vec4u, sourceFineDims:vec4u, sourceOriginFine:vec4u, fineCell:vec4f }
 struct SvoFinePhiSample { phi_m:f32, valid:u32 }
 struct SvoFinePhiGradient { gradient:vec3f, valid:u32 }
 @group(${group}) @binding(${ownerBinding}) var<storage,read> svoFineOwnerArena:array<u32>;
 @group(${group}) @binding(${fineBinding}) var<storage,read> svoFineArena:array<u32>;
 @group(${group}) @binding(${paramsBinding}) var<uniform> svoFineParams:SvoFinePhiParams;
 fn svoFineTileCoordinate(position:vec3f,brick:vec3u)->vec3f{return position-vec3f(brick*svoFineParams.ownerDims.w*svoFineParams.fineDims.w)+vec3f(1.0);}
-fn svoFineLoad(slot:u32,q:vec3u)->f32{let edge=svoFineParams.offsets.w;return bitcast<f32>(svoFineArena[svoFineParams.offsets.z+slot*edge*edge*edge+q.x+edge*(q.y+edge*q.z)]);}
+fn svoFineLoad(slot:u32,q:vec3u)->f32{let edge=svoFineParams.source.w;return bitcast<f32>(svoFineArena[svoFineParams.offsets.w+slot*edge*edge*edge+q.x+edge*(q.y+edge*q.z)]);}
 fn svoFinePhi(position:vec3f,expectedStructural:u32)->SvoFinePhiSample{
   let status=svoFineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}u];let fineGeneration=svoFineArena[${SVO_FINE_PHI_CONTROL_WORDS.acceptedFineGeneration}u];
   if((status&${SVO_FINE_PHI_STATUS.ready}u)==0u||expectedStructural==0u||svoFineArena[${SVO_FINE_PHI_CONTROL_WORDS.acceptedStructuralGeneration}u]!=expectedStructural){return SvoFinePhiSample(0.0,0u);}
@@ -304,6 +321,39 @@ fn svoFinePhiGradient(position:vec3f,expectedStructural:u32)->SvoFinePhiGradient
 `;
 }
 
+/** Types embedded in DryParams without adding a fragment-stage binding. */
+export const svoFinePhiTypesWGSL = /* wgsl */ `
+struct SvoFinePhiParams { ownerDims:vec4u, fineDims:vec4u, ownerBrickDims:vec4u, sourceBrickDims:vec4u, counts:vec4u, offsets:vec4u, source:vec4u, sourceFineDims:vec4u, sourceOriginFine:vec4u, fineCell:vec4f }
+struct SvoFinePhiSample { phi_m:f32, valid:u32 }
+struct SvoFinePhiGradient { gradient:vec3f, valid:u32 }
+`;
+
+/** Read fine phi from the combined publication/fine arena used by dry rendering. */
+export function svoFinePhiPackedSamplingWGSL(arena = "publicationState", params = "dry.finePhi"): string {
+  for (const value of [arena, ...params.split(".")]) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new RangeError(`Invalid fine-phi WGSL identifier: ${value}`);
+  }
+  return /* wgsl */ `
+fn svoFinePackedTileCoordinate(position:vec3f,brick:vec3u)->vec3f{return position-vec3f(brick*${params}.ownerDims.w*${params}.fineDims.w)+vec3f(1.0);}
+fn svoFinePackedLoad(slot:u32,q:vec3u)->f32{let edge=${params}.source.w;return bitcast<f32>(${arena}[${params}.offsets.w+slot*edge*edge*edge+q.x+edge*(q.y+edge*q.z)]);}
+fn svoFinePackedPhi(position:vec3f,expectedStructural:u32)->SvoFinePhiSample{
+  let status=${arena}[${SVO_FINE_PHI_CONTROL_WORDS.status}u];let fineGeneration=${arena}[${SVO_FINE_PHI_CONTROL_WORDS.acceptedFineGeneration}u];
+  if((status&${SVO_FINE_PHI_STATUS.ready}u)==0u||expectedStructural==0u||${arena}[${SVO_FINE_PHI_CONTROL_WORDS.acceptedStructuralGeneration}u]!=expectedStructural){return SvoFinePhiSample(0.0,0u);}
+  let p=clamp(position,vec3f(0.0),vec3f(${params}.fineDims.xyz-vec3u(1)));let brick=min(vec3u(floor(p/f32(${params}.ownerDims.w*${params}.fineDims.w))),${params}.ownerBrickDims.xyz-vec3u(1));
+  let logical=brick.x+${params}.ownerBrickDims.x*(brick.y+${params}.ownerBrickDims.y*brick.z);if(${arena}[${params}.offsets.y+logical]!=fineGeneration){return SvoFinePhiSample(0.0,0u);}
+  let encoded=${arena}[${params}.offsets.z+logical];if(encoded==0u||encoded>${params}.counts.z){return SvoFinePhiSample(0.0,0u);}let slot=encoded-1u;
+  let local=svoFinePackedTileCoordinate(p,brick);let a=vec3u(floor(local));let b=a+vec3u(1);let t=fract(local);
+  let z0=mix(mix(svoFinePackedLoad(slot,vec3u(a.x,a.y,a.z)),svoFinePackedLoad(slot,vec3u(b.x,a.y,a.z)),t.x),mix(svoFinePackedLoad(slot,vec3u(a.x,b.y,a.z)),svoFinePackedLoad(slot,vec3u(b.x,b.y,a.z)),t.x),t.y);
+  let z1=mix(mix(svoFinePackedLoad(slot,vec3u(a.x,a.y,b.z)),svoFinePackedLoad(slot,vec3u(b.x,a.y,b.z)),t.x),mix(svoFinePackedLoad(slot,vec3u(a.x,b.y,b.z)),svoFinePackedLoad(slot,vec3u(b.x,b.y,b.z)),t.x),t.y);let value=mix(z0,z1,t.z);
+  return SvoFinePhiSample(value,select(0u,1u,value==value&&abs(value)<3.402823e38));
+}
+fn svoFinePackedGradient(position:vec3f,expectedStructural:u32)->SvoFinePhiGradient{
+  let xm=svoFinePackedPhi(position-vec3f(1,0,0),expectedStructural);let xp=svoFinePackedPhi(position+vec3f(1,0,0),expectedStructural);let ym=svoFinePackedPhi(position-vec3f(0,1,0),expectedStructural);let yp=svoFinePackedPhi(position+vec3f(0,1,0),expectedStructural);let zm=svoFinePackedPhi(position-vec3f(0,0,1),expectedStructural);let zp=svoFinePackedPhi(position+vec3f(0,0,1),expectedStructural);
+  if((xm.valid&xp.valid&ym.valid&yp.valid&zm.valid&zp.valid)==0u){return SvoFinePhiGradient(vec3f(0.0),0u);}return SvoFinePhiGradient(vec3f((xp.phi_m-xm.phi_m)/(2.0*${params}.fineCell.x),(yp.phi_m-ym.phi_m)/(2.0*${params}.fineCell.y),(zp.phi_m-zm.phi_m)/(2.0*${params}.fineCell.z)),1u);
+}
+`;
+}
+
 export interface SvoFineFluidGpuCapability {
   readonly arena: GPUBufferBinding;
   readonly params: GPUBufferBinding;
@@ -311,7 +361,10 @@ export interface SvoFineFluidGpuCapability {
   readonly acceptedStructuralGenerationWord: typeof SVO_FINE_PHI_CONTROL_WORDS.acceptedStructuralGeneration;
   readonly acceptedFineGenerationWord: typeof SVO_FINE_PHI_CONTROL_WORDS.acceptedFineGeneration;
   readonly pageGenerationOffsetWords: number;
+  readonly ownerPageTableOffsetWords: number;
   readonly payloadOffsetWords: number;
+  readonly paramsWords: Uint32Array<ArrayBuffer>;
+  readonly publicationMirrorWords: 8;
   readonly coarseFallbackRequired: true;
   readonly directWaterOwnership: false;
 }
@@ -326,6 +379,7 @@ export class WebGPUSvoFinePhiStager {
   private readonly bindGroup: GPUBindGroup;
   private readonly pipelines: Readonly<Record<"prepare" | "clearRetired" | "stageActive" | "finalize", GPUComputePipeline>>;
   private readonly paramWords: Uint32Array<ArrayBuffer>;
+  private readonly structuralPublication?: GPUBufferBinding;
   private destroyed = false;
 
   constructor(
@@ -334,27 +388,32 @@ export class WebGPUSvoFinePhiStager {
     residency: WebGPUSvoRenderResidencyConsumer,
     source: SparseSurfaceBandGPUSource,
     coarseCellSize_m: readonly [number, number, number],
-    options: SvoFinePhiStagingPlanOptions = {},
+    options: SvoFinePhiStagingPlanOptions & { structuralPublication?: GPUBufferBinding } = {},
   ) {
     if (source.mode !== "authoritative") throw new RangeError("Renderer fine-phi staging requires an authoritative sparse-surface source");
     const maximumArenaBytes = Math.min(options.maximumArenaBytes ?? Number.MAX_SAFE_INTEGER,
       Number(device.limits.maxStorageBufferBindingSize), Number(device.limits.maxBufferSize));
-    this.plan = planSvoFinePhiStaging(owner.plan, source, coarseCellSize_m, { maximumArenaBytes });
+    this.plan = planSvoFinePhiStaging(owner.plan, source, coarseCellSize_m, {
+      maximumArenaBytes, sourceOriginBricks: options.sourceOriginBricks,
+    });
+    this.structuralPublication = options.structuralPublication;
     this.residencyControlBuffer = residency.control;
     const storageCopy = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.arena = device.createBuffer({ label: "SVO renderer fine-phi arena", size: this.plan.allocatedBytes, usage: storageCopy });
-    this.params = device.createBuffer({ label: "SVO renderer fine-phi parameters", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "SVO renderer fine-phi parameters", size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.dispatch = device.createBuffer({ label: "SVO renderer fine-phi dispatch staging", size: 24, usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
-    this.paramWords = new Uint32Array(new ArrayBuffer(128));
+    this.paramWords = new Uint32Array(new ArrayBuffer(160));
     const p = this.plan;
     this.paramWords.set([...p.ownerDimensions, p.ownerBrickSize], 0);
     this.paramWords.set([...p.fineDimensions, p.refinementFactor], 4);
     this.paramWords.set([...p.ownerBrickDimensions, owner.plan.logicalBrickCount], 8);
-    this.paramWords.set([...source.brickDimensions, source.brickDimensions[0] * source.brickDimensions[1] * source.brickDimensions[2]], 12);
+    this.paramWords.set([...source.brickDimensions, residency.layout.entryOffsetsBytes.retired / 4], 12);
     this.paramWords.set([owner.plan.logicalBrickCount, owner.plan.capacity, p.capacity, source.pageCapacity], 16);
-    this.paramWords.set([owner.plan.pageTableOffsetWords, p.pageGenerationOffsetWords, p.payloadOffsetWords, p.tileEdge], 20);
-    this.paramWords.set([source.brickSize, source.revision, residency.layout.entryOffsetsBytes.active / 4, residency.layout.entryOffsetsBytes.retired / 4], 24);
-    new Float32Array(this.paramWords.buffer).set([...p.fineCellSize_m, 0], 28);
+    this.paramWords.set([owner.plan.pageTableOffsetWords, p.pageGenerationOffsetWords, p.ownerPageTableOffsetWords, p.payloadOffsetWords], 20);
+    this.paramWords.set([source.brickSize, source.revision, residency.layout.entryOffsetsBytes.active / 4, p.tileEdge], 24);
+    this.paramWords.set([...p.sourceFineDimensions, 0], 28);
+    this.paramWords.set([...p.sourceOriginFine, 0], 32);
+    new Float32Array(this.paramWords.buffer).set([...p.fineCellSize_m, 0], 36);
     device.queue.writeBuffer(this.arena, 0, new Uint32Array(p.payloadOffsetWords));
     device.queue.writeBuffer(this.params, 0, this.paramWords);
     const layout = device.createBindGroupLayout({ label: "SVO renderer fine-phi staging layout", entries: [
@@ -401,13 +460,26 @@ export class WebGPUSvoFinePhiStager {
     direct("Publish SVO renderer fine-phi capability", this.pipelines.finalize);
   }
 
+  /** Mirror the producer publication into the first eight arena words every frame. */
+  mirrorPublication(encoder: GPUCommandEncoder): void {
+    if (this.destroyed || !this.structuralPublication) return;
+    encoder.copyBufferToBuffer(
+      this.structuralPublication.buffer,
+      this.structuralPublication.offset ?? 0,
+      this.arena,
+      0,
+      SPARSE_VOXEL_PUBLICATION_STATE.strideBytes,
+    );
+  }
+
   capability(): SvoFineFluidGpuCapability {
     return {
       arena: { buffer: this.arena, offset: 0, size: this.plan.allocatedBytes }, params: { buffer: this.params },
       statusWord: SVO_FINE_PHI_CONTROL_WORDS.status,
       acceptedStructuralGenerationWord: SVO_FINE_PHI_CONTROL_WORDS.acceptedStructuralGeneration,
       acceptedFineGenerationWord: SVO_FINE_PHI_CONTROL_WORDS.acceptedFineGeneration,
-      pageGenerationOffsetWords: this.plan.pageGenerationOffsetWords, payloadOffsetWords: this.plan.payloadOffsetWords,
+      pageGenerationOffsetWords: this.plan.pageGenerationOffsetWords, ownerPageTableOffsetWords: this.plan.ownerPageTableOffsetWords,
+      payloadOffsetWords: this.plan.payloadOffsetWords, paramsWords: Uint32Array.from(this.paramWords), publicationMirrorWords: 8,
       coarseFallbackRequired: true, directWaterOwnership: false,
     };
   }

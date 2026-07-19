@@ -49,12 +49,12 @@ test("pressure defect correction rebuilds projected divergence behind a UI switc
   assert.match(solverSource, /cold defect correction/);
 });
 
-test("level-set remesh follows zero crossings and uses least-squares endpoint transfer", () => {
+test("level-set remesh follows zero crossings and keeps the tall-store endpoint transfer single-phase", () => {
   assert.match(tallCellComputeShader, /if\(\(previous<=0\.0\)!=\(current<=0\.0\)\)/);
   assert.match(tallCellComputeShader, /fn leastSquaresPhi/);
   assert.match(tallCellComputeShader, /fn leastSquaresVelocity/);
-  assert.match(tallCellComputeShader, /phi=select\(fit\.x,fit\.y,id\.y==1\)/);
-  assert.doesNotMatch(tallCellComputeShader, /let crossing=\(fit\.x<=0\.0\)!=\(fit\.y<=0\.0\)/);
+  assert.match(tallCellComputeShader, /return select\(fit,vec2f\(fit\.y\),\(fit\.x<=0\.0\)!=\(fit\.y<=0\.0\)\)/);
+  assert.match(tallCellComputeShader, /phi=fit\[u32\(id\.y\)\]/);
   assert.doesNotMatch(tallCellComputeShader, /desired=max\(desired,i32\(ceil\(columnWaterCells/);
   assert.doesNotMatch(tallCellComputeShader, /wetTopFloor/);
   assert.match(tallCellComputeShader, /base=min\(base,nextColumnBases\[u32\(q\.x\+d\.x\*q\.y\)\]\+delta\)/);
