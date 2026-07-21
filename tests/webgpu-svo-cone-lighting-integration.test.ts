@@ -42,9 +42,9 @@ function source(): SparseVoxelRenderSource {
   } as unknown as SparseVoxelRenderSource;
 }
 
-test("direct and cone lighting write independent mode flags without changing exact-shadow policy", () => {
-  assert.deepEqual(SVO_DRY_VISIBILITY_FLAGS, { exactContact: 1, exactShadow: 2, coneLightingRequested: 4 });
-  assert.match(drySource, /this\.lightingMode === "cone" \? SVO_DRY_VISIBILITY_FLAGS\.coneLightingRequested : 0/);
+test("lighting quality, shadows, and ambient occlusion write independent visibility flags", () => {
+  assert.deepEqual(SVO_DRY_VISIBILITY_FLAGS, { exactContact: 1, exactShadow: 2, coneLightingRequested: 4, ambientOcclusion: 8 });
+  assert.match(drySource, /this\.lightingMode === "cone" && \(shadowsEnabled \|\| ambientOcclusionEnabled\) \? SVO_DRY_VISIBILITY_FLAGS\.coneLightingRequested : 0/);
   const previousBufferUsage = globalThis.GPUBufferUsage, previousTextureUsage = globalThis.GPUTextureUsage;
   Object.assign(globalThis, {
     GPUBufferUsage: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4, MAP_READ: 8 },
@@ -68,7 +68,14 @@ test("direct and cone lighting write independent mode flags without changing exa
     const params = () => writes.filter(({ label }) => label === "Sparse voxel dry scene parameters");
     const flagWord = (write: { words: Uint32Array }) => write.words[SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset + 3];
     assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.exactShadow, SVO_DRY_VISIBILITY_FLAGS.exactShadow);
+    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion, SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion);
     assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested);
+    renderer.setLightingOptions({ shadowsEnabled: false, ambientOcclusionEnabled: true });
+    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.exactShadow, 0);
+    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested);
+    renderer.setLightingOptions({ shadowsEnabled: false, ambientOcclusionEnabled: false });
+    assert.equal(flagWord(params().at(-1)!) & (SVO_DRY_VISIBILITY_FLAGS.exactContact | SVO_DRY_VISIBILITY_FLAGS.exactShadow | SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested | SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion), 0);
+    renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true });
     renderer.setLightingMode("direct");
     assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.exactShadow, SVO_DRY_VISIBILITY_FLAGS.exactShadow);
     assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, 0);

@@ -14,16 +14,16 @@ function shaderFunction(name: string, nextName: string): string {
   return svoDrySceneShader.slice(start, end);
 }
 
-test("contact visibility is production-compiled but default-off with a branch before secondary traversal", () => {
-  assert.equal(SVO_CONTACT_VISIBILITY_CONTRACT.enabledByDefault, false);
+test("contact visibility defaults on for beautiful presentation with a branch before secondary traversal", () => {
+  assert.equal(SVO_CONTACT_VISIBILITY_CONTRACT.enabledByDefault, true);
   const contact = shaderFunction("dryContactVisibility", "dryEnvironment");
+  const publicGate = contact.indexOf("if((dry.materialPublication.w&8u)==0u){return vec3f(1.0);}");
   const gate = contact.indexOf("if((dry.materialPublication.w&1u)==0u){return vec3f(1.0);}");
   const trace = contact.indexOf("svoTraceVisibility(");
-  assert.ok(gate >= 0 && trace > gate, "the default gate must return before secondary SVO work");
-  assert.match(drySceneSource, /scene\.contactVisibilityEnabled \? SVO_DRY_VISIBILITY_FLAGS\.exactContact : 0/,
-    "omitting the capability must leave the contact bit clear");
-  assert.doesNotMatch(drySceneSource, /contactVisibilityEnabled\s*:\s*true/,
-    "no shipped scene may silently opt into the unaccepted timing cost");
+  assert.ok(publicGate >= 0 && gate > publicGate && trace > gate,
+    "the public option and exact-fallback gates must return before secondary SVO work");
+  assert.match(drySceneSource, /this\.lightingOptions\.ambientOcclusionEnabled && scene\.contactVisibilityEnabled !== false/,
+    "the user option enables AO unless a scene explicitly lacks the capability");
 });
 
 test("contact traversal has a fixed low sample and per-sample work budget", () => {

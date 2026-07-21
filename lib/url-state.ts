@@ -7,6 +7,7 @@ import { useSceneStore } from "./stores/scene-store";
 import { useUIStore, type RightPanel } from "./stores/ui-store";
 import {
   DEFAULT_SVO_LIGHTING_MODE,
+  DEFAULT_SVO_LIGHTING_OPTIONS,
   DEFAULT_SVO_RENDER_MODE,
   isSvoLightingMode,
   isSvoRenderMode,
@@ -69,6 +70,8 @@ type UIQueryState = {
   voxelRenderMode: VoxelRenderMode;
   svoRenderMode: SvoRenderMode;
   svoLightingMode: SvoLightingMode;
+  svoShadowsEnabled: boolean;
+  svoAmbientOcclusionEnabled: boolean;
 };
 
 type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
@@ -210,6 +213,8 @@ export function parseQueryState(search: string): QueryState {
       voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode,
       svoRenderMode: isSvoRenderMode(render) ? render : DEFAULT_SVO_RENDER_MODE,
       svoLightingMode: isSvoLightingMode(svoLighting) ? svoLighting : DEFAULT_SVO_LIGHTING_MODE,
+      svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
+      svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
     }
   };
 }
@@ -217,7 +222,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "panel"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === "render" || key === "svoLighting" || key === "voxels" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "voxels" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
@@ -235,6 +240,8 @@ export function serializeQueryState(
   query.set("quality", methodState.quality);
   if (uiState.svoRenderMode !== DEFAULT_SVO_RENDER_MODE) query.set("render", uiState.svoRenderMode);
   if (uiState.svoLightingMode !== DEFAULT_SVO_LIGHTING_MODE) query.set("svoLighting", uiState.svoLightingMode);
+  if (uiState.svoShadowsEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled) query.set("svoShadows", uiState.svoShadowsEnabled ? "1" : "0");
+  if (uiState.svoAmbientOcclusionEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled) query.set("svoAO", uiState.svoAmbientOcclusionEnabled ? "1" : "0");
   if (uiState.voxelRenderMode !== "smooth") query.set("voxels", uiState.voxelRenderMode);
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");

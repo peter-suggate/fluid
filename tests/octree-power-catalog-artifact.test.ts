@@ -16,6 +16,15 @@ import { OCTREE_CUBE_TRANSFORMS, transformPowerVector } from "../lib/octree-powe
 
 const catalogUrl = new URL("../lib/generated/octree-power-catalog.bin", import.meta.url);
 
+test("normal development and validation consume the committed catalog", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  assert.equal(Object.keys(packageJson.scripts).some((name) => name.startsWith("pre")
+    && packageJson.scripts[name].includes("generate:octree-power-catalog")), false);
+  assert.equal(packageJson.scripts["verify:octree-power-catalog"].startsWith("npm run check:octree-power-catalog"), true);
+});
+
 test("generated power catalog carries a verified format version and content hash", () => {
   const bytes = readFileSync(catalogUrl);
   const hash = createHash("sha256").update(bytes).digest("hex");

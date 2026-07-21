@@ -145,6 +145,8 @@ test("cone visibility is generation-checked and falls back to exact SVO visibili
   const contactEnd = svoDrySceneShader.indexOf("fn dryEnvironment(", contactStart);
   assert.match(svoDrySceneShader.slice(contactStart, contactEnd), /dry\.materialPublication\.w&4u[^]*dryNodeMipReady\(\)[^]*for\(var sampleIndex=0u;sampleIndex<4u/,
     "cone AO uses four bounded hemisphere samples only when the cache is ready");
+  assert.match(svoDrySceneShader.slice(contactStart, contactEnd), /cone\.valid==0u\)\{coneValid=false;break;\}[^]*if\(coneValid\)\{return[^]*svoTraceVisibility/,
+    "an unavailable cone sample must fall through to exact bounded AO instead of leaking ambient light");
   assert.match(svoDrySceneShader, /diffuseEnvironment=[^;]*\*contactVisibility\/UNIFIED_PI[^]*specularEnvironment=dryEnvironment/,
     "AO must modulate diffuse environment only, leaving direct light, emission, and specular environment intact");
 });
@@ -152,8 +154,8 @@ test("cone visibility is generation-checked and falls back to exact SVO visibili
 test("invalid or exhausted shadow work fails closed and raster/timing fallback remains intact", () => {
   assert.match(svoDrySceneShader, /if\(\(dry\.materialPublication\.w&2u\)==0u\)\{return vec3f\(1\.0\);\}/,
     "the shadow-disabled production path must return before traversal");
-  assert.match(rendererSource, /get\("svoShadowVisibility"\) === "1"/,
-    "full-resolution hard visibility must remain explicitly opt-in until it meets the interactive frame budget");
+  assert.match(rendererSource, /checkerboardShadowsEligible = this\.svoTemporalAccumulationEnabled && svoLightingOptions\.shadowsEnabled/,
+    "the user-facing shadow option must drive the temporally reconstructed visibility path");
   assert.match(svoDrySceneShader, /publicationState\[0\]==0u[^]*SVO_VIS_STEP_INVALID/);
   assert.match(svoDrySceneShader, /SVO_STATUS_WORK_EXHAUSTED\|\|leaf\.status==SVO_STATUS_STACK_OVERFLOW\|\|leaf\.status==SVO_STATUS_SOURCE_OVERFLOW[^]*SVO_VIS_STEP_EXHAUSTED/);
   assert.match(svoDrySceneShader, /fn svoVisibilityFail\([^]*vec3f\(0\.0\)/,

@@ -222,6 +222,10 @@ export function WebGPUViewport() {
             ui.svoRenderMode,
             ui.svoLightingMode,
             {
+              shadowsEnabled: ui.svoShadowsEnabled,
+              ambientOcclusionEnabled: ui.svoAmbientOcclusionEnabled,
+            },
+            {
               overlay: ui.svoCostOverlay,
               maximumTraversalDepth: ui.svoMaximumTraversalDepth,
               maximumNodeVisits: ui.svoMaximumNodeVisits,

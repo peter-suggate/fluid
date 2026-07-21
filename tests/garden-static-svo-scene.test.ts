@@ -54,3 +54,19 @@ test("static SVO startup bypasses the simulation solver and t=0 raster gate", ()
   assert.match(staticSource, /new OctreeSparseBrickWorld/);
   assert.match(staticSource, /emptyPhi\.fill/);
 });
+
+test("static SVO scenes lazily expose raw-voxel inspection records", () => {
+  const staticSource = readFileSync(new URL("../lib/webgpu-static-svo-scene.ts", import.meta.url), "utf8");
+
+  assert.match(staticSource, /get sparseVoxelRenderSource\(\)/,
+    "the renderer's existing inspection attachment must work for fluid-free scenes");
+  assert.match(staticSource, /this\.world\.ensureInspectionSource\(\)/,
+    "raw records should be derived from the same authoritative static octree");
+  assert.match(staticSource, /worldBytes - this\.accountedWorldBytes/,
+    "lazy inspection allocation must be reflected in renderer telemetry");
+
+  const constructorStart = staticSource.indexOf("private constructor(");
+  const getterStart = staticSource.indexOf("get sparseVoxelRenderSource()", constructorStart);
+  assert.doesNotMatch(staticSource.slice(constructorStart, getterStart), /ensureInspectionSource\(\)/,
+    "normal smooth SVO startup must not allocate capacity-sized debug records");
+});

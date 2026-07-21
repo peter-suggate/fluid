@@ -79,8 +79,8 @@ test("published count, revision, direct identity, flags, and material functions 
     sizeBytes: 368, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32, fluidDomainWordOffset: 36,
     primitiveCandidateWordOffset: 40, finePhiWordOffset: 44, nodeMipWordOffset: 84, nodeMipAtlasWordOffset: 88,
   });
-  assert.match(dryRendererSource, /const visibilityFlags = \(scene\.contactVisibilityEnabled \? SVO_DRY_VISIBILITY_FLAGS\.exactContact : 0\)[^]*SVO_DRY_VISIBILITY_FLAGS\.exactShadow[^]*SVO_DRY_VISIBILITY_FLAGS\.coneLightingRequested/,
-    "the visibility lane keeps exact contact, exact shadows, and requested cone lighting as independent bits");
+  assert.match(dryRendererSource, /const visibilityFlags = \(ambientOcclusionEnabled \? SVO_DRY_VISIBILITY_FLAGS\.exactContact \| SVO_DRY_VISIBILITY_FLAGS\.ambientOcclusion : 0\)[^]*SVO_DRY_VISIBILITY_FLAGS\.exactShadow[^]*SVO_DRY_VISIBILITY_FLAGS\.coneLightingRequested/,
+    "the visibility lane keeps ambient occlusion, shadows, and requested cone lighting independently switchable");
   assert.match(dryRendererSource, /words\.set\(\[pbrMaterials\.count, pbrMaterials\.revision, pbrMaterials\.strideBytes, visibilityFlags\], SVO_DRY_SCENE_PARAMS_LAYOUT\.materialPublicationWordOffset\)/);
   assert.match(svoDrySceneShader, /fn dryPublishedMaterialValid\(material:SvoMaterialRecord,index:u32\)->bool/);
   assert.match(svoDrySceneShader, /svoMaterialValid\(material,index\)&&material\.identity\.y==dry\.materialPublication\.y&&\(material\.identity\.w&SVO_MATERIAL_FLAG_OPAQUE\)!=0u/);

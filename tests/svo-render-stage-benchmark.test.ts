@@ -17,9 +17,10 @@ test("render-stage plan rotates fixed-resolution shadow and temporal isolation v
   assert.ok(plan.runs.every(({ outputResolution, internalResolution }) => outputResolution.width === 1280
     && outputResolution.height === 720 && internalResolution.width === 1280 && internalResolution.height === 720));
   assert.match(plan.runs[0].url, /existing=1/);
-  assert.match(plan.runs[0].url, /svoShadowVisibility=1/);
+  assert.match(plan.runs[0].url, /svoShadows=1/);
+  assert.match(plan.runs[0].url, /svoAO=1/);
   assert.match(plan.runs[0].url, /svoTemporal=1/);
-  assert.equal(plan.runs[2].expectedTimingContextFragment, "shadow-off:temporal-off:smooth:svo");
+  assert.equal(plan.runs[2].expectedTimingContextFragment, "shadow-off:ao-off:temporal-off:lighting-cone:smooth:svo");
   assert.match(plan.captureInstructions[0], /1280x720/);
 });
 
@@ -27,4 +28,3 @@ test("render-stage plan rejects ambiguous dimensions and non-web targets", () =>
   assert.throws(() => buildSVORenderStageBenchmarkPlan({ revision: "x", baseUrl: "file:///tmp/app", resolution: { width: 1, height: 1 } }), /HTTP/);
   assert.throws(() => buildSVORenderStageBenchmarkPlan({ revision: "x", baseUrl: "http://localhost", resolution: { width: 0, height: 720 } }), /positive/);
 });
-
