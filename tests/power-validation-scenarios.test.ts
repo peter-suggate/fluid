@@ -79,8 +79,8 @@ test("both power-validation scenes are shared by presets and the smoke registry"
   assert.equal(hydro.oracleSteps, 1);
   assert.equal(hydro.target_s, 0.004);
   const dam = createSmokeScenario("minimal-power-dam-break");
-  assert.equal(dam.oracleSteps, 1);
-  assert.equal(dam.target_s, 0.004);
+  assert.equal(dam.oracleSteps, 50);
+  assert.equal(dam.target_s, 0.2);
 });
 
 test("power-validation UI presets carry the exact authoritative Dawn method profile", () => {
@@ -113,13 +113,14 @@ test("isolated Dawn commands pin the authored adaptive power configurations", ()
 
   const dam = packageJson.scripts["test:webgpu:minimal-power-dam-break"];
   assert.match(dam, /FLUID_SCENE=minimal-power-dam-break/);
-  assert.match(dam, /FLUID_TARGET_S=0\.004/);
-  assert.match(dam, /FLUID_ORACLE_STEPS=1/);
-  assert.match(dam, /FLUID_EXPECT_EXACT_STEPS=1/);
-  assert.match(dam, /FLUID_CHECKPOINT_EVERY_S=0\.004/);
+  assert.match(dam, /FLUID_TARGET_S=0\.2/);
+  assert.match(dam, /FLUID_ORACLE_STEPS=50/);
+  assert.match(dam, /FLUID_EXPECT_EXACT_STEPS=50/);
+  assert.match(dam, /FLUID_CHECKPOINT_EVERY_S=0\.2/);
   assert.match(dam, /FLUID_EXPECT_GRID=16,16,16/);
   assert.match(dam, /FLUID_MAXIMUM_LEAF_SIZE=2/);
   assert.match(dam, /FLUID_OCTREE_INTERFACE_BAND=3/);
+  assert.match(dam, /FLUID_POWER_AUDIT_EVERY_STEPS=1/);
 
   const motion = packageJson.scripts["test:webgpu:minimal-power-dam-break-motion"];
   assert.match(motion, /FLUID_TARGET_S=0\.4/);

@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import { WebGPUOctreePowerCoarseLevelSet } from "../lib/webgpu-octree-power-coarse-levelset";
-import { WebGPUUniformEulerianSolver } from "../lib/webgpu-uniform-eulerian";
+import {
+  applyGlobalFineTransportDiagnostics,
+  WebGPUUniformEulerianSolver,
+} from "../lib/webgpu-uniform-eulerian";
+import type { GPUEulerianInfo } from "../lib/webgpu-eulerian";
 
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 
@@ -117,7 +121,9 @@ test("global-fine QA diagnostics read the published GPU controls without steerin
   assert.match(diagnostics, /this\.fineToPowerCoarseLevelSet\.control,0,readback,160,32/,
     "generation diagnostics must expose rejection between fine publication and coarse correction");
   assert.match(diagnostics, /this\.lastGlobalFineTransport\.control,0,readback,192,32/,
-    "transport rejection telemetry must retain all eight control words");
+    "the ABI-stable transport prefix must remain at its established offset");
+  assert.match(diagnostics, /this\.lastGlobalFineTransport\.control,32,readback,864,32/,
+    "the exact invalid-velocity status and position suffix must be appended without moving existing controls");
   assert.match(diagnostics, /redistance\.control,0,readback,224,16/,
     "the stable redistance prefix remains available at its established packet offset");
   assert.match(diagnostics, /this\.globalFineVolumeA\.control,0,readback,240,64/,
@@ -126,8 +132,8 @@ test("global-fine QA diagnostics read the published GPU controls without steerin
     "face-band rejection telemetry must retain the catalog-Delaunay gate preceding face emission");
   assert.match(diagnostics, /redistance\.control,0,readback,720,48/,
     "redistance rejection telemetry must retain its complete twelve-word control");
-  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:864/,
-    "the compact evidence packet accounts for the final controls and bounded transition failure payload");
+  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:896/,
+    "the compact evidence packet accounts for the appended transport failure payload");
   assert.match(diagnostics, /this\.globalFineFaceFastMarch\.pointFieldControl,0,readback,560,32/,
     "final cell-centre LS failures must be attributable independently of graph construction");
   assert.match(diagnostics, /this\.globalFineFaceFastMarch\.transientPowerControl,0,readback,592,64/,
@@ -141,7 +147,7 @@ test("global-fine QA diagnostics read the published GPU controls without steerin
   assert.match(diagnostics,
     /fineRestrictionCount:words\[40\][\s\S]*fineRestrictionFlags:words\[42\][\s\S]*fineRestrictionValid:words\[45\]/);
   assert.match(diagnostics,
-    /transportControl:Array\.from\(words\.slice\(48,56\)\)[\s\S]*redistanceControl:Array\.from\(words\.slice\(56,60\)\)[\s\S]*redistanceControlDetailed:Array\.from\(words\.slice\(180,192\)\)[\s\S]*volumeControl:Array\.from\(words\.slice\(60,76\)\)[\s\S]*faceBandTransitionControl:Array\.from\(words\.slice\(124,140\)\)[\s\S]*faceBandTransitionOwnerFailure:Array\.from\(words\.slice\(164,180\)\)[\s\S]*faceBandPointFieldControl:Array\.from\(words\.slice\(140,148\)\)[\s\S]*faceBandTransientPowerControl:Array\.from\(words\.slice\(148,164\)\)/);
+    /transportControl:this\.lastGlobalFineTransport\?\[\.\.\.words\.slice\(48,56\),\.\.\.words\.slice\(216,224\)\]:Array\.from\(words\.slice\(48,56\)\)[\s\S]*redistanceControl:Array\.from\(words\.slice\(56,60\)\)[\s\S]*redistanceControlDetailed:Array\.from\(words\.slice\(180,192\)\)[\s\S]*volumeControl:Array\.from\(words\.slice\(60,76\)\)[\s\S]*faceBandTransitionControl:Array\.from\(words\.slice\(124,140\)\)[\s\S]*faceBandTransitionOwnerFailure:Array\.from\(words\.slice\(164,180\)\)[\s\S]*faceBandPointFieldControl:Array\.from\(words\.slice\(140,148\)\)[\s\S]*faceBandTransientPowerControl:Array\.from\(words\.slice\(148,164\)\)/);
   assert.match(diagnostics,
     /faceBandPointField:unpackOctreeFaceBandPointFieldControl\(words\.slice\(140,148\)\)[\s\S]*faceBandTransientPower:unpackOctreeFaceBandTransientPowerControl\(words\.slice\(148,164\)\)/,
     "raw evidence must also expose decoded stage attribution without granting CPU authority");
@@ -153,4 +159,34 @@ test("global-fine QA diagnostics read the published GPU controls without steerin
   ].map(compact).join("");
   assert.doesNotMatch(simulation, /readGlobalFineLevelSetDiagnostics/,
     "QA counters must never influence topology, publication, or scheduling decisions");
+});
+
+test("global-fine transport diagnostics expose exact invalid velocity evidence and suppress sentinels", () => {
+  const bytes = new ArrayBuffer(64);
+  const words = new Uint32Array(bytes);
+  const floats = new Float32Array(bytes);
+  words.set([1, 2, 31, 0, 9, 4, 5, 6, 7, 8, 0x1400_0008, 0x0800_0008, 12]);
+  floats.set([0.125, 0.25, 0.375], 13);
+  const info = {} as GPUEulerianInfo;
+
+  applyGlobalFineTransportDiagnostics(info, Array.from(words));
+  assert.equal(info.globalFineTransportDepartureOutsideBand, 1);
+  assert.equal(info.globalFineTransportNonfiniteVelocity, 2);
+  assert.equal(info.globalFineTransportCommitted, false);
+  assert.equal(info.globalFineTransportFaceBandUnavailable, 5);
+  assert.equal(info.globalFineTransportVelocityUnavailable, 6);
+  assert.equal(info.globalFineTransportInvalidVelocityStatus, 7);
+  assert.equal(info.globalFineTransportNonpositiveVelocityResult, 8);
+  assert.equal(info.globalFineTransportVelocityStatusReasonOr, 0x1400_0008);
+  assert.equal(info.globalFineTransportFirstInvalidVelocityStatus, 0x0800_0008);
+  assert.equal(info.globalFineTransportFirstInvalidVelocityLocalIndex, 12);
+  assert.deepEqual(info.globalFineTransportFirstInvalidVelocityPosition_m,
+    { x: 0.125, y: 0.25, z: 0.375 });
+
+  const clear = new Uint32Array(16);
+  clear[12] = 0xffff_ffff;
+  applyGlobalFineTransportDiagnostics(info, Array.from(clear));
+  assert.equal(info.globalFineTransportFirstInvalidVelocityStatus, undefined);
+  assert.equal(info.globalFineTransportFirstInvalidVelocityLocalIndex, undefined);
+  assert.equal(info.globalFineTransportFirstInvalidVelocityPosition_m, undefined);
 });

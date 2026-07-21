@@ -1128,11 +1128,14 @@ export class FluidLabRenderer {
     // A completion fence is the scheduling boundary. Encoding the entire debt
     // here can put hundreds of milliseconds of GPU work between presentations.
     if (!canQueuePreparedGPUAdvance(this.gpuPendingBatches, maximumPendingAdvances)) return fluid.info;
+    const encodeStartedAt_ms = performance.now();
     const { previousSubmittedTime, submittedTime } = submitNextPreparedGPUAdvance(fluid, this.preparedGPUTime_s, this.preparedGPUBodies);
+    const encodeCompletedAt_ms = performance.now();
     if (submittedTime > previousSubmittedTime) {
       const generation = this.gpuFluidGeneration;
-      const submittedAt_ms = performance.now();
+      const submittedAt_ms = encodeCompletedAt_ms;
       const batchSimulation_s = submittedTime - previousSubmittedTime;
+      fluid.info.cpuAdvanceEncode_ms = encodeCompletedAt_ms - encodeStartedAt_ms;
       if (this.gpuPendingBatches === 0 && Number.isFinite(this.lastGPUCompletionAt_ms)) {
         fluid.info.gpuQueueStarved_ms = Math.max(0, submittedAt_ms - this.lastGPUCompletionAt_ms);
       }
@@ -1147,6 +1150,7 @@ export class FluidLabRenderer {
         fluid.info.gpuPendingBatches = this.gpuPendingBatches;
         fluid.info.gpuInFlightSimulation_s = Math.max(0, (fluid.info.submittedTime_s ?? submittedTime) - fluid.info.completedTime_s);
         fluid.info.gpuBatchWall_ms = completedAt_ms - submittedAt_ms;
+        fluid.info.gpuAdvanceWall_ms = completedAt_ms - encodeStartedAt_ms;
         fluid.info.gpuBatchSimulation_s = batchSimulation_s;
         if (Number.isFinite(this.lastGPUCompletionAt_ms) && submittedTime > this.lastGPUCompletedTime_s) {
           fluid.info.gpuCompletionWall_ms = completedAt_ms - this.lastGPUCompletionAt_ms;

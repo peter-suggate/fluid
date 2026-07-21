@@ -99,7 +99,7 @@ test("Dawn seeds a non-axis power face from transferred compact face velocity", 
       incidenceBytes: 32, workspaceBytes: 32, boundaryQueryBytes: 128, hashCapacity: 2, hashBytes: 32, scanBlockCount: 1,
       scanBytes: 16, maximumHashProbes: 32, allocatedBytes: 0 },
     faces: powerFaces, faceNormals: normals, faceCentroids: placeholder, faceQuadrature: placeholder, incidenceRows: powerRows, incidenceOffsets: powerRows,
-    incidence: powerIncidence, control: powerControl, siteIndex: placeholder,
+    incidence: powerIncidence, control: powerControl, siteIndex: placeholder, boundaryPhiQueries: placeholder,
   };
   const seed = new WebGPUOctreePowerFaceSeed(device, axis, power);
   const readback = device.createBuffer({ size: 160, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });

@@ -106,6 +106,34 @@ test("GPU L1 path filters axis faces and exposes adjacent-level ghost transfers"
   assert.match(octreeFirstOrderVCycleShader, /atomicAddFloat\(at\(SOLUTION_A,l,child\)/);
 });
 
+test("repeated L1 V-cycles reuse per-level bind groups", () => {
+  Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8 } });
+  let bindGroups = 0, passes = 0;
+  const buffer = (size: number, usage = 7) => ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
+  const device = {
+    queue: { writeBuffer() {} },
+    createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
+    createShaderModule: () => ({}),
+    createComputePipeline: ({ label }: { label: string }) => ({ label, getBindGroupLayout: () => ({}) }),
+    createBindGroup: () => { bindGroups += 1; return {}; },
+  } as unknown as GPUDevice;
+  const cycle = new WebGPUOctreeFirstOrderVCycle(device, {
+    leafHeaders: buffer(48 * 128), leafEntries: buffer(8 * 512),
+  }, { dimensions: [16, 16, 16], rowCapacity: 128, maximumLevels: 5, finestCellWidth: 1 });
+  const encoder = {
+    clearBuffer() {}, copyBufferToBuffer() {},
+    beginComputePass: () => { passes += 1; return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; },
+  } as unknown as GPUCommandEncoder;
+  const rowCount = buffer(64), control = buffer(64), rhs = buffer(512), correction = buffer(512);
+  cycle.encodeSetup(encoder, { rowCount, solverControl: control });
+  cycle.encodeCorrection(encoder, { rowCount, solverControl: control, rhs, correction });
+  const firstGroups = bindGroups, firstPasses = passes;
+  cycle.encodeCorrection(encoder, { rowCount, solverControl: control, rhs, correction });
+  assert.ok(firstPasses > firstGroups, `${firstPasses} dispatch passes should share ${firstGroups} descriptors`);
+  assert.equal(bindGroups, firstGroups, "a repeated correction must allocate no bind groups");
+  cycle.destroy();
+});
+
 test("Dawn L1 V-cycle application has symmetric positive energy", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for GPU V-cycle checks",
 }, async () => {
@@ -144,7 +172,8 @@ test("Dawn L1 V-cycle application has symmetric positive energy", {
   cycle.encodeCorrection(encoder, { rhs: rhsY, correction: outY, solverControl: control, rowCount: counts });
   encoder.copyBufferToBuffer(control, 0, readback, 0, 64); encoder.copyBufferToBuffer(outX, 0, readback, 64, 8);
   encoder.copyBufferToBuffer(outY, 0, readback, 72, 8); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-  assert.equal(await device.popErrorScope(), null); await readback.mapAsync(GPUMapMode.READ);
+  const validationError = await device.popErrorScope();
+  assert.equal(validationError, null, validationError?.message); await readback.mapAsync(GPUMapMode.READ);
   const mapped = readback.getMappedRange(); assert.equal(new Uint32Array(mapped, 0, 1)[0], 0);
   const mx = Array.from(new Float32Array(mapped, 64, 2)), my = Array.from(new Float32Array(mapped, 72, 2));
   assert.ok(Math.abs(dot(x, my) - dot(y, mx)) < 1e-5); assert.ok(dot(x, mx) > 0); assert.ok(dot(y, my) > 0); readback.unmap();

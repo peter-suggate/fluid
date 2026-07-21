@@ -17,10 +17,12 @@ test("renderer presentation source reaches the diagnostics store and panel with 
     assert.match(renderer, new RegExp(field), `${field} must cross the renderer metrics boundary`);
   }
   assert.match(controller, /waterSurfacePresentation:\s*metrics\.waterSurfacePresentation\s*\?\?\s*null/);
-  assert.match(pipeline, /query\.get\("diagnostics"\) === "1"/,
-    "opening the canonical diagnostics panel must enable its presentation readback");
-  assert.match(pipeline, /query\.get\("panel"\) === "visual"/,
-    "the Render inspector must enable the bounded presentation proof it displays");
+  assert.match(pipeline, /get adaptiveDiagnosticsReadbackEnabled\(\) \{ return true; \}/,
+    "the ordinary UI must receive presentation failures without a diagnostics query flag");
+  assert.match(pipeline, /lastAdaptiveDiagnosticEncodeAt_ms < 250/,
+    "the ordinary presentation proof must use the same bounded cadence as solver telemetry");
+  assert.match(pipeline, /adaptiveDiagnosticsFullRateRequested/,
+    "explicit diagnostics and Dawn captures may request per-capture presentation evidence");
   assert.match(panel, /testId="water-surface-presentation-source"/);
   assert.match(panel, /GLOBAL FINE \/ COARSE/);
   assert.match(panel, /ADAPTIVE FALLBACK/);

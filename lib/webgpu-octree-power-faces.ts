@@ -7,6 +7,7 @@ import {
   type OctreePowerTopologySource,
 } from "./webgpu-octree-power-topology";
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
+import { makeOctreePowerCoarseLevelSetSampleWGSL } from "./webgpu-octree-power-coarse-levelset";
 
 export const OCTREE_POWER_FACE_INCIDENCE_BYTES = 8;
 export const OCTREE_POWER_FACE_CONTROL_BYTES = 64;
@@ -34,6 +35,13 @@ export const OCTREE_POWER_CLOSED_BOUNDARY_MASK_WITH_CLOSED_TOP = 63;
 export function octreePowerClosedBoundaryMask(closedTop: boolean): number {
   return OCTREE_POWER_CLOSED_BOUNDARY_MASK_WITH_OPEN_TOP | (closedTop ? 16 : 0);
 }
+
+/**
+ * Transient face-record mark: fine boundary sampling deferred this face to
+ * the coarse-octree resolve pass.  Set and cleared inside one face-build
+ * encoder; never present on a published face.
+ */
+export const OCTREE_POWER_FACE_COARSE_PENDING = 1 << 30;
 
 export const OCTREE_POWER_FACE_ERROR = Object.freeze({
   invalidMetric: 1 << 0,
@@ -83,6 +91,13 @@ export interface OctreePowerFaceEncodeOptions {
   readonly boundaryPhi?: {
     readonly mode: "analytic" | "fine";
     readonly fine: Pick<WebGPUFineLevelSetBrickSource, "params" | "hash" | "metadata" | "worklist" | "flags" | "phi">;
+    /**
+     * Published coarse-octree signed-distance directory (paper Section 5).
+     * Outside the resident fine band the coarse level set is the cell-centre
+     * authority, so fine mode falls back to it instead of failing the
+     * generation when a query centre has no fine sample.
+     */
+    readonly coarse?: { readonly directory: GPUBuffer };
     readonly container: readonly [number, number, number];
     readonly fillFraction: number;
     readonly initialCondition: "dam-break" | "tank-fill";
@@ -129,6 +144,14 @@ export interface OctreePowerFaceSource {
   readonly incidence: GPUBuffer;
   readonly control: GPUBuffer;
   readonly siteIndex: GPUBuffer;
+  /**
+   * Exact liquid/air cell-centre pairs for internal open power faces.  These
+   * drive an implementation support rule motivated by Section 5's wide-band
+   * requirement and Section 4.1's cell-centre phi consumers: the next fine
+   * generation keeps every trilinear contributor needed at both endpoints
+   * resident. The paper does not prescribe this exact seeding mechanism.
+   */
+  readonly boundaryPhiQueries: GPUBuffer;
 }
 
 function positiveInteger(value: number, label: string): number {
@@ -233,6 +256,7 @@ export class WebGPUOctreePowerFaces {
   private readonly quadraturePipeline: GPUComputePipeline;
   private readonly boundaryQueryPipeline: GPUComputePipeline;
   private readonly boundaryPhiPipeline: GPUComputePipeline;
+  private readonly boundaryCoarsePipeline: GPUComputePipeline;
   private readonly publishPipeline: GPUComputePipeline;
   private destroyed = false;
 
@@ -287,6 +311,14 @@ export class WebGPUOctreePowerFaces {
       label: "Sample octree power boundary phi", layout: "auto",
       compute: { module: boundaryPhiModule, entryPoint: "samplePowerBoundaryPhi" },
     });
+    const boundaryCoarseModule = device.createShaderModule({
+      label: "Octree power boundary coarse phi resolve",
+      code: octreePowerBoundaryCoarsePhiShader,
+    });
+    this.boundaryCoarsePipeline = device.createComputePipeline({
+      label: "Resolve octree power boundary phi from coarse octree", layout: "auto",
+      compute: { module: boundaryCoarseModule, entryPoint: "resolveCoarsePowerBoundaryPhi" },
+    });
     this.publishPipeline = pipeline("Publish octree power faces", "publishPowerFaces");
   }
 
@@ -328,7 +360,7 @@ export class WebGPUOctreePowerFaces {
     this.device.queue.writeBuffer(this.params, 80, new Uint32Array([
       boundaryPhi?.mode === "analytic" ? 1 : boundaryPhi?.mode === "fine" ? 2 : 0,
       boundaryPhi?.initialCondition === "dam-break" ? 2 : boundaryPhi ? 1 : 0,
-      0, 0,
+      boundaryPhi?.mode === "fine" && boundaryPhi.coarse ? 1 : 0, 0,
     ]));
     if (typeof options.rowCount !== "number") encoder.copyBufferToBuffer(options.rowCount, 0, this.params, 12, 4);
     return typeof options.rowCount === "number"
@@ -420,6 +452,15 @@ export class WebGPUOctreePowerFaces {
             { binding: 8, resource: resource(this.boundaryQueries) },
             { binding: 9, resource: resource(this.control) },
           ]);
+        if (boundaryPhi.mode === "fine" && boundaryPhi.coarse) {
+          run("Resolve power boundary phi from coarse octree", this.boundaryCoarsePipeline,
+            Math.ceil(this.plan.faceCapacity / 64), [
+              { binding: 0, resource: resource(this.faces) },
+              { binding: 1, resource: resource(this.boundaryQueries) },
+              { binding: 2, resource: resource(this.control) },
+              { binding: 3, resource: resource(boundaryPhi.coarse.directory) },
+            ]);
+        }
       }
     }
     run("Publish power face control", this.publishPipeline, 1, [rows, control]);
@@ -429,7 +470,8 @@ export class WebGPUOctreePowerFaces {
     return { plan: this.plan, faces: this.faces, faceNormals: this.faceNormals, faceCentroids: this.faceCentroids,
       faceQuadrature: this.faceQuadrature,
       incidenceRows: this.incidenceOffsets, incidenceOffsets: this.incidenceOffsets,
-      incidence: this.incidence, control: this.control, siteIndex: this.siteIndex };
+      incidence: this.incidence, control: this.control, siteIndex: this.siteIndex,
+      boundaryPhiQueries: this.boundaryQueries };
   }
 
   destroy(): void {
@@ -537,6 +579,7 @@ fn worldBoundaryBitFromNormal(normal:vec3f)->u32{if(normal.x< -0.9999){return 1u
 fn boundaryFlags(metric:PowerRowMetric,geometry:ReconstructedPowerFace)->u32{let world=select(worldBoundaryBit(geometry.neighborCenter),worldBoundaryBitFromNormal(geometry.normal),geometry.neighborSize==0.0);let declared=(metric.transformAndFlags>>8u)&63u;let geometricWorld=world&declared;if(geometricWorld!=0u){let open=select(OPEN_BOUNDARY,0u,(params.boundaryPolicy.x&geometricWorld)!=0u);return BOUNDARY|open|(geometricWorld<<WORLD_BOUNDARY_SHIFT);}return BOUNDARY|OPEN_BOUNDARY;}
 fn fail(row:u32,flag:u32){atomicOr(&control.flags,flag);atomicMin(&control.firstInvalid,row);atomicAdd(&control.invalidCount,1u);}
 fn failGeometry(row:u32,slot:u32,detail:u32){atomicOr(&control.flags,INVALID_GEOMETRY);let previous=atomicMin(&control.firstInvalid,row);if(row<previous){atomicStore(&control.pad0,slot);atomicStore(&control.pad1,INVALID);atomicStore(&control.pad2,detail);}atomicAdd(&control.invalidCount,1u);}
+fn failGeometryTopology(row:u32,slot:u32,detail:u32,topologyCode:u32,transformAndFlags:u32){atomicOr(&control.flags,INVALID_GEOMETRY);let previous=atomicMin(&control.firstInvalid,row);if(row<previous){atomicStore(&control.pad0,slot);atomicStore(&control.pad1,topologyCode);atomicStore(&control.pad2,detail);atomicStore(&control.pad3,transformAndFlags);}atomicAdd(&control.invalidCount,1u);}
 fn failSite(row:u32,slot:u32,neighbor:u32,detail:u32){atomicOr(&control.flags,SITE_INDEX);let previous=atomicMin(&control.firstInvalid,row);if(row<previous){atomicStore(&control.pad0,slot);atomicStore(&control.pad1,neighbor);atomicStore(&control.pad2,detail);atomicStore(&control.pad3,row);}atomicAdd(&control.invalidCount,1u);}
 fn failFace(row:u32,slot:u32,neighbor:u32,detail:u32){atomicOr(&control.flags,ASYMMETRIC_FACE);let previous=atomicMin(&control.firstInvalid,row);if(row<previous){atomicStore(&control.pad0,slot);atomicStore(&control.pad1,neighbor);atomicStore(&control.pad2,detail);atomicStore(&control.pad3,row);}atomicAdd(&control.invalidCount,1u);}
 @compute @workgroup_size(1) fn preparePowerFaces(){atomicStore(&control.rowCount,params.dimensionsRowCount.w);atomicStore(&control.faceCount,0u);atomicStore(&control.incidenceCount,0u);atomicStore(&control.flags,0u);atomicStore(&control.firstInvalid,INVALID);atomicStore(&control.invalidCount,0u);atomicStore(&control.boundaryCount,0u);atomicStore(&control.generation,params.capacitiesGeneration.w);atomicStore(&control.valid,0u);atomicStore(&control.lookupMissCount,0u);atomicStore(&control.maximumObservedProbe,0u);atomicStore(&control.worldBoundaryCount,0u);atomicStore(&control.pad0,INVALID);atomicStore(&control.pad1,INVALID);atomicStore(&control.pad2,0u);atomicStore(&control.pad3,INVALID);}
@@ -544,7 +587,7 @@ fn failFace(row:u32,slot:u32,neighbor:u32,detail:u32){atomicOr(&control.flags,AS
 @compute @workgroup_size(64) fn buildPowerSiteIndex(@builtin(global_invocation_id) gid:vec3u){
   let row=gid.x;if(row>=params.dimensionsRowCount.w||row>=params.capacitiesGeneration.x){return;}if(!rowHeaderValid(row)){fail(row,INVALID_HEADER);return;}let header=headers[row];let capacity=min(hashCapacity(),arrayLength(&siteIndex));if(capacity==0u||(capacity&(capacity-1u))!=0u){failSite(row,INVALID,INVALID,1u);return;}let base=hashSite(header.cell,header.size)&(capacity-1u);var probe=0u;var attempts=0u;
   loop{if(probe>=min(maximumHashProbes(),capacity)||attempts>=maximumHashProbes()*4u){failSite(row,(base+probe)&(capacity-1u),INVALID,2u);return;}let slot=(base+probe)&(capacity-1u);let result=atomicCompareExchangeWeak(&siteIndex[slot].cellPlusOne,0u,header.cell+1u);attempts+=1u;if(result.exchanged){siteIndex[slot].size=header.size;siteIndex[slot].row=row;atomicStore(&siteIndex[slot].published,1u);atomicMax(&control.maximumObservedProbe,probe+1u);return;}if(result.old_value==0u){continue;}if(result.old_value==header.cell+1u){if(atomicLoad(&siteIndex[slot].published)==0u){continue;}let otherSize=siteIndex[slot].size;let otherRow=siteIndex[slot].row;if(otherSize!=header.size||otherRow!=row){failSite(row,slot,otherRow,select(8u,4u,otherSize!=header.size));}return;}probe+=1u;}}
-@compute @workgroup_size(64) fn countPowerFaces(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;if(row>=params.dimensionsRowCount.w||row>=params.capacitiesGeneration.x||row>=arrayLength(&rows)){return;}rows[row]=RowWork(0u,0u,0u,0u);if(!rowHeaderValid(row)){fail(row,INVALID_HEADER);return;}if(row>=arrayLength(&metrics)){fail(row,INVALID_METRIC);return;}let metric=metrics[row];if((metric.transformAndFlags&TOPOLOGY_VALID)==0u||metric.topologyCode>=arrayLength(&entries)||!finite(metric.volume)||metric.volume<=0.0){fail(row,INVALID_METRIC);return;}let entry=entries[metric.topologyCode];if(entry.firstFace>arrayLength(&catalogFaces)||entry.faceCount>arrayLength(&catalogFaces)-entry.firstFace){fail(row,INVALID_CATALOG);return;}var owned=0u;for(var slot=0u;slot<entry.faceCount;slot+=1u){let face=reconstructSlot(row,slot);if(!validReconstruction(face)){fail(row,INVALID_GEOMETRY);return;}if(face.neighborSize==0.0){let world=worldBoundaryBitFromNormal(face.normal);if(world==0u||((((metric.transformAndFlags>>8u)&63u)&world)==0u)){fail(row,INVALID_GEOMETRY);return;}owned+=1u;atomicAdd(&control.boundaryCount,1u);atomicAdd(&control.worldBoundaryCount,1u);continue;}let found=findNeighbor(face.neighborCenter,face.neighborSize);atomicMax(&control.maximumObservedProbe,found.y);if(found.y>maximumHashProbes()){fail(row,LOOKUP_MISS);return;}let neighbor=found.x;if(neighbor==INVALID){owned+=1u;atomicAdd(&control.boundaryCount,1u);atomicAdd(&control.lookupMissCount,1u);let boundary=boundaryFlags(metric,face);if(((boundary>>WORLD_BOUNDARY_SHIFT)&63u)!=0u){atomicAdd(&control.worldBoundaryCount,1u);}}else{if(neighbor==row){fail(row,SITE_INDEX);return;}let reciprocal=reciprocalSlot(row,neighbor);if(reciprocal==INVALID){failFace(row,slot,neighbor,1u);return;}let reverse=reconstructSlot(neighbor,reciprocal);var detail=0u;if(abs(face.inverseDistance-reverse.inverseDistance)>max(1e-5,face.inverseDistance*2e-4)){detail|=4u;}if(dot(face.normal,reverse.normal)>-0.999){detail|=16u;}let intersectionGeometry=sharedGeometry(row,slot,neighbor,reciprocal);if(!finite(intersectionGeometry.area)||intersectionGeometry.area<=1e-10||!all(vec3<bool>(finite(intersectionGeometry.centroid.x),finite(intersectionGeometry.centroid.y),finite(intersectionGeometry.centroid.z)))){detail|=32u;}if(detail!=0u){failFace(row,slot,neighbor,detail);return;}if(row<neighbor){owned+=1u;}}}rows[row].faceCount=owned;rows[row].incidenceCount=entry.faceCount;}
+@compute @workgroup_size(64) fn countPowerFaces(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;if(row>=params.dimensionsRowCount.w||row>=params.capacitiesGeneration.x||row>=arrayLength(&rows)){return;}rows[row]=RowWork(0u,0u,0u,0u);if(!rowHeaderValid(row)){fail(row,INVALID_HEADER);return;}if(row>=arrayLength(&metrics)){fail(row,INVALID_METRIC);return;}let metric=metrics[row];if((metric.transformAndFlags&TOPOLOGY_VALID)==0u||metric.topologyCode>=arrayLength(&entries)||!finite(metric.volume)||metric.volume<=0.0){fail(row,INVALID_METRIC);return;}let entry=entries[metric.topologyCode];if(entry.firstFace>arrayLength(&catalogFaces)||entry.faceCount>arrayLength(&catalogFaces)-entry.firstFace){fail(row,INVALID_CATALOG);return;}var owned=0u;for(var slot=0u;slot<entry.faceCount;slot+=1u){let face=reconstructSlot(row,slot);if(!validReconstruction(face)){failGeometryTopology(row,slot,4096u,metric.topologyCode,metric.transformAndFlags);return;}if(face.neighborSize==0.0){let world=worldBoundaryBitFromNormal(face.normal);if(world==0u||((((metric.transformAndFlags>>8u)&63u)&world)==0u)){failGeometry(row,slot,8192u);return;}owned+=1u;atomicAdd(&control.boundaryCount,1u);atomicAdd(&control.worldBoundaryCount,1u);continue;}let found=findNeighbor(face.neighborCenter,face.neighborSize);atomicMax(&control.maximumObservedProbe,found.y);if(found.y>maximumHashProbes()){fail(row,LOOKUP_MISS);return;}let neighbor=found.x;if(neighbor==INVALID){owned+=1u;atomicAdd(&control.boundaryCount,1u);atomicAdd(&control.lookupMissCount,1u);let boundary=boundaryFlags(metric,face);if(((boundary>>WORLD_BOUNDARY_SHIFT)&63u)!=0u){atomicAdd(&control.worldBoundaryCount,1u);}}else{if(neighbor==row){failSite(row,slot,neighbor,16u);return;}let reciprocal=reciprocalSlot(row,neighbor);if(reciprocal==INVALID){failFace(row,slot,neighbor,1u);return;}let reverse=reconstructSlot(neighbor,reciprocal);var detail=0u;if(abs(face.inverseDistance-reverse.inverseDistance)>max(1e-5,face.inverseDistance*2e-4)){detail|=4u;}if(dot(face.normal,reverse.normal)>-0.999){detail|=16u;}let intersectionGeometry=sharedGeometry(row,slot,neighbor,reciprocal);if(!finite(intersectionGeometry.area)||intersectionGeometry.area<=1e-10||!all(vec3<bool>(finite(intersectionGeometry.centroid.x),finite(intersectionGeometry.centroid.y),finite(intersectionGeometry.centroid.z)))){detail|=32u;}if(detail!=0u){failFace(row,slot,neighbor,detail);return;}if(row<neighbor){owned+=1u;}}}rows[row].faceCount=owned;rows[row].incidenceCount=entry.faceCount;}
 var<workgroup> faceScan:array<u32,${OCTREE_POWER_FACE_SCAN_BLOCK_SIZE}>;
 var<workgroup> incidenceScan:array<u32,${OCTREE_POWER_FACE_SCAN_BLOCK_SIZE}>;
 @compute @workgroup_size(${OCTREE_POWER_FACE_SCAN_BLOCK_SIZE}) fn scanPowerFaceRows(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){let row=wid.x*SCAN_BLOCK_SIZE+lid;let available=min(params.dimensionsRowCount.w,min(params.capacitiesGeneration.x,arrayLength(&rows)-1u));var faceValue=0u;var incidenceValue=0u;if(row<available){faceValue=rows[row].faceCount;incidenceValue=rows[row].incidenceCount;}faceScan[lid]=faceValue;incidenceScan[lid]=incidenceValue;workgroupBarrier();for(var offset=1u;offset<SCAN_BLOCK_SIZE;offset<<=1u){var addFace=0u;var addIncidence=0u;if(lid>=offset){addFace=faceScan[lid-offset];addIncidence=incidenceScan[lid-offset];}workgroupBarrier();faceScan[lid]+=addFace;incidenceScan[lid]+=addIncidence;workgroupBarrier();}if(row<available){rows[row].faceOffset=faceScan[lid]-faceValue;rows[row].incidenceOffset=incidenceScan[lid]-incidenceValue;}if(lid==SCAN_BLOCK_SIZE-1u&&wid.x<arrayLength(&scanBlocks)){scanBlocks[wid.x]=RowWork(faceScan[lid],incidenceScan[lid],0u,0u);}}
@@ -628,6 +671,7 @@ struct Control { rowCount:atomic<u32>, faceCount:atomic<u32>, incidenceCount:ato
 @group(0) @binding(9) var<storage,read_write> control:Control;
 const INVALID:u32=0xffffffffu;
 const SAMPLE_VALID:u32=1u;
+const COARSE_PENDING:u32=${OCTREE_POWER_FACE_COARSE_PENDING}u;
 const INVALID_GEOMETRY:u32=${OCTREE_POWER_FACE_ERROR.invalidGeometry}u;
 fn finite(value:f32)->bool{return value==value&&abs(value)<=3.402823e38;}
 fn failBoundary(row:u32,slot:u32,detail:u32,liquid:f32,air:f32){
@@ -703,7 +747,14 @@ fn samplePowerBoundaryPhi(@builtin(global_invocation_id) gid:vec3u){
   let query=queries[faceIndex];if(query.liquidCenter.w==0.0){return;}
   var face=powerFaces[faceIndex];let slot=face.geometryCode&0xffffu;
   let liquid=sampleAuthority(query.liquidCenter.xyz);let air=sampleAuthority(query.airCenter.xyz);
-  if(liquid.y==0.0||air.y==0.0){failBoundary(face.negativeRow,slot,2048u,liquid.x,air.x);return;}
+  if(liquid.y==0.0||air.y==0.0){
+    // Paper Section 5: the fine band is undefined beyond a narrow band of the
+    // interface, and the coarse octree level set is the cell-centre authority
+    // there.  Defer this face to the coarse resolve pass when that authority
+    // is bound; only its absence is a publication error.
+    if(faceParams.phiPolicy.z==1u){powerFaces[faceIndex].flags=face.flags|COARSE_PENDING;return;}
+    failBoundary(face.negativeRow,slot,2048u,liquid.x,air.x);return;
+  }
   // Ghost Fluid Method interface fraction from the two signed cell-centre
   // samples required by paper Sections 4.1 and 5.  No abs repair or floor.
   if(!finite(liquid.x)||!finite(air.x)||!(liquid.x<0.0)||!(air.x>0.0)){
@@ -711,6 +762,56 @@ fn samplePowerBoundaryPhi(@builtin(global_invocation_id) gid:vec3u){
   }
   let theta=(-liquid.x)/(air.x-liquid.x);
   if(!finite(theta)||!(theta>0.0)||theta>1.0){failBoundary(face.negativeRow,slot,8192u,liquid.x,air.x);return;}
+  face.inverseDistance=face.inverseDistance/theta;powerFaces[faceIndex]=face;
+}
+`;
+
+/**
+ * Coarse-octree resolve pass for boundary faces the fine band could not
+ * sample (paper Section 5: "we also store and evolve a separate (coarse)
+ * level set on the octree because our fine representation does not carry
+ * inside/outside information beyond a narrow band of the free surface").
+ * Both dual-edge endpoints are re-sampled from the published coarse
+ * directory so one face never mixes fine and coarse authorities.
+ */
+export const octreePowerBoundaryCoarsePhiShader = /* wgsl */ `
+struct BoundaryPhiQuery { liquidCenter:vec4f, airCenter:vec4f }
+struct PowerFaceRecord { negativeRow:u32, positiveRow:u32, geometryCode:u32, flags:u32, normalVelocity:f32, area:f32, inverseDistance:f32, openFraction:f32 }
+struct Control { rowCount:atomic<u32>, faceCount:atomic<u32>, incidenceCount:atomic<u32>, flags:atomic<u32>, firstInvalid:atomic<u32>, invalidCount:atomic<u32>, boundaryCount:atomic<u32>, generation:atomic<u32>, valid:atomic<u32>, lookupMissCount:atomic<u32>, maximumObservedProbe:atomic<u32>, worldBoundaryCount:atomic<u32>, pad0:atomic<u32>, pad1:atomic<u32>, pad2:atomic<u32>, pad3:atomic<u32> }
+@group(0) @binding(0) var<storage,read_write> powerFaces:array<PowerFaceRecord>;
+@group(0) @binding(1) var<storage,read> queries:array<BoundaryPhiQuery>;
+@group(0) @binding(2) var<storage,read_write> control:Control;
+${makeOctreePowerCoarseLevelSetSampleWGSL(3)}
+const COARSE_PENDING:u32=${OCTREE_POWER_FACE_COARSE_PENDING}u;
+const INVALID_GEOMETRY:u32=${OCTREE_POWER_FACE_ERROR.invalidGeometry}u;
+fn finite(value:f32)->bool{return value==value&&abs(value)<=3.402823e38;}
+fn coarseAvailable(value:f32)->bool{return finite(value)&&abs(value)<1e30;}
+fn failBoundary(row:u32,slot:u32,detail:u32,liquid:f32,air:f32){
+  atomicOr(&control.flags,INVALID_GEOMETRY);let previous=atomicMin(&control.firstInvalid,row);
+  if(row<previous){atomicStore(&control.pad0,slot);atomicStore(&control.pad1,bitcast<u32>(liquid));atomicStore(&control.pad2,detail);atomicStore(&control.pad3,bitcast<u32>(air));}
+  atomicAdd(&control.invalidCount,1u);
+}
+@compute @workgroup_size(64)
+fn resolveCoarsePowerBoundaryPhi(@builtin(global_invocation_id) gid:vec3u){
+  let faceIndex=gid.x;if(faceIndex>=atomicLoad(&control.faceCount)||faceIndex>=arrayLength(&powerFaces)||faceIndex>=arrayLength(&queries)){return;}
+  var face=powerFaces[faceIndex];if((face.flags&COARSE_PENDING)==0u){return;}
+  face.flags&=~COARSE_PENDING;powerFaces[faceIndex].flags=face.flags;
+  let query=queries[faceIndex];let slot=face.geometryCode&0xffffu;
+  if(query.liquidCenter.w==0.0){return;}
+  let liquid=sampleCoarseOctreePhi(query.liquidCenter.xyz);
+  let air=sampleCoarseOctreePhi(query.airCenter.xyz);
+  if(!coarseAvailable(liquid)||!coarseAvailable(air)){failBoundary(face.negativeRow,slot,2050u,liquid,air);return;}
+  // Ghost Fluid Method fraction from the coarse cell-centre samples.  The
+  // coarse row classification is one publication behind this build, so a
+  // fast-moving interface can legitimately sweep past a liquid row centre
+  // before the row set re-grades.  The paper delegates that regime to the
+  // GFM literature; the standard Gibou et al. 2002 treatment is the theta
+  // floor below, never a rejected generation.
+  var theta=1.0;
+  if(liquid<0.0&&air>0.0){theta=(-liquid)/(air-liquid);}
+  else if(liquid>=0.0){theta=0.0;}
+  if(!finite(theta)){failBoundary(face.negativeRow,slot,8194u,liquid,air);return;}
+  theta=clamp(theta,0.01,1.0);
   face.inverseDistance=face.inverseDistance/theta;powerFaces[faceIndex]=face;
 }
 `;

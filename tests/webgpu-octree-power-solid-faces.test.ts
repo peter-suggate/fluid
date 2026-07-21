@@ -72,6 +72,7 @@ test("Dawn classifies oblique rigid and terrain apertures and publishes paired r
       maximumHashProbes: 32, scanBlockCount: 1, scanBytes: 16, allocatedBytes: 0 },
     faces, faceNormals: normals, faceCentroids: centroids, faceQuadrature: quadrature, incidenceRows: placeholder,
     incidenceOffsets: placeholder, incidence: placeholder, control: faceControl, siteIndex: placeholder,
+    boundaryPhiQueries: placeholder,
   };
   const bodyWords = new Uint32Array(12 * 32); const bodyFloats = new Float32Array(bodyWords.buffer);
   bodyFloats.set([0, 1, 0, 0], 0); // sphere centered at the physical face centroid after x/z recentering

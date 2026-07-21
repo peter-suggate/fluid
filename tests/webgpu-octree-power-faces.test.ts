@@ -16,6 +16,7 @@ import {
   OCTREE_POWER_FACE_WORLD_BOUNDARY_SHIFT,
   WebGPUOctreePowerFaces,
   octreePowerClosedBoundaryMask,
+  octreePowerBoundaryCoarsePhiShader,
   octreePowerBoundaryPhiShader,
   octreePowerFaceShader,
   planOctreePowerFaces,
@@ -84,16 +85,25 @@ test("power free-surface coefficients use actual signed cell-centre phi without 
     "the Ghost Fluid fraction must use the two signed cell-centre values");
   assert.doesNotMatch(sampler, /abs\(liquid\.x\)|abs\(air\.x\)|clamp\([^)]*theta|0\.05/,
     "authoritative power pressure must not repair signs or floor theta");
-  assert.match(sampler, /if\(liquid\.y==0\.0\|\|air\.y==0\.0\)\{failBoundary/,
-    "missing narrow-band support must reject publication rather than estimate phi");
+  assert.match(sampler,
+    /if\(faceParams\.phiPolicy\.z==1u\)\{powerFaces\[faceIndex\]\.flags=face\.flags\|COARSE_PENDING;return;\}\s*failBoundary/,
+    "missing narrow-band support defers to the published coarse octree authority (paper Section 5) and rejects only when that authority is unbound");
+  const coarseResolve = octreePowerBoundaryCoarsePhiShader.replace(/\s+/g, "");
+  assert.match(coarseResolve,
+    /letliquid=sampleCoarseOctreePhi\(query\.liquidCenter\.xyz\);\s*letair=sampleCoarseOctreePhi\(query\.airCenter\.xyz\)/,
+    "the coarse resolve pass samples both dual-edge centres from one authority so a face never mixes fine and coarse phi");
+  assert.match(coarseResolve, /theta=clamp\(theta,0\.01,1\.0\)/,
+    "coarse GFM uses the standard Gibou et al. 2002 theta floor because the lagged row classification can trail a fast interface");
+  assert.match(coarseResolve, /if\(!coarseAvailable\(liquid\)\|\|!coarseAvailable\(air\)\)\{failBoundary/,
+    "an unpublished coarse directory still rejects the generation instead of estimating phi");
   assert.match(sampler, /worklist\[1\]!=fineParams\.generation\|\|worklist\[3\]!=1u\|\|worklist\[4\]!=1u/,
     "fine pressure sampling must require the current all-or-nothing GPU publication header");
   assert.match(octreeProjectionSource,
-    /const boundaryFine = this\.globalFineBootstrapped\s*\? \(this\.globalFineCurrentIsA \? this\.globalFineSourceA : this\.globalFineSourceB\)\s*:\s*this\.globalFineSourceA/,
-    "pressure assembly must bind the current fine generation, with source A used only as the analytic bootstrap binding");
+    /const useCurrentFineBoundary = this\.globalFineBootstrapped && this\.powerAdvancingPressureSteps > 0;[\s\S]*const boundaryFine = useCurrentFineBoundary\s*\? \(this\.globalFineCurrentIsA \? this\.globalFineSourceA : this\.globalFineSourceB\)\s*:\s*this\.globalFineSourceA/,
+    "advancing pressure assembly must bind the current fine generation, with source A retained only for the authored t=0 solve");
   assert.match(octreeProjectionSource,
-    /mode: this\.globalFineBootstrapped \? "fine" as const : "analytic" as const/,
-    "only the cold operator may use the authored analytic signed distance");
+    /mode: useCurrentFineBoundary \? "fine" as const : "analytic" as const/,
+    "only the authored t=0 operator may use the analytic signed distance");
   const bindings = [...octreePowerBoundaryPhiShader.matchAll(/@binding\((\d+)\)/g)].map((match) => Number(match[1]));
   assert.equal(new Set(bindings).size, 10, "boundary sampling stays at the practical ten-binding ceiling");
 });
@@ -251,6 +261,9 @@ test("power-face WGSL uses count/scan/emit and no atomic public append", () => {
   assert.doesNotMatch(octreePowerFaceShader, /atomicAdd\(&control\.faceCount/);
   assert.match(octreePowerFaceShader, /PowerFaceRecord\(row,neighbor,geometryCode,flags,0\.0,geometry\.area,geometry\.inverseDistance,1\.0\)/);
   assert.match(octreePowerFaceShader, /fn buildPowerBoundaryPhiQueries/);
+  assert.match(octreePowerFaceShader,
+    /if\(!validReconstruction\(face\)\)\{failGeometryTopology\(row,slot,4096u,metric\.topologyCode,metric\.transformAndFlags\);return;\}/,
+    "an invalid catalog reconstruction must retain its row, slot, topology code, and transform for the viewport failure marker");
   assert.doesNotMatch(octreePowerFaceShader, /airPhi=abs|liquidPhi\+dot|0\.05/,
     "face geometry must not synthesize or floor a free-surface coefficient");
 });

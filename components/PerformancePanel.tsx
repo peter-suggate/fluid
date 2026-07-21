@@ -7,7 +7,7 @@ import { useMethodStore } from "@/lib/stores/method-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
-import { measuredGPUUtilization, performanceSchedule } from "@/lib/performance-scheduling";
+import { advanceWallBreakdown, measuredGPUUtilization, performanceSchedule } from "@/lib/performance-scheduling";
 import type { CSSProperties } from "react";
 import { averagePerformanceSnapshots, rollingPerformanceSnapshots } from "@/lib/performance-averaging";
 import { adaptiveTopologyPerformanceStages, physicsPerformanceStages, type PerformanceStage } from "@/lib/performance-stage-model";
@@ -128,6 +128,16 @@ export function PerformancePanel() {
   const gpuConstrained = demandPercent > 100;
   const cpuSpikeConstrained = !paused && cpuP95_ms > budget;
   const unexplainedSlowdown = !paused && !gpuConstrained && !cpuSpikeConstrained && observedSimRate !== null && observedSimRate < .95;
+  const lastAdvance = advanceWallBreakdown(gpuInfo);
+  const encodeBreakdown = gpuInfo?.cpuAdvanceEncodeBreakdown;
+  const encodeStages = encodeBreakdown ? [
+    { key: "setup", label: "SETUP + PARAMS", value: encodeBreakdown.setup_ms },
+    { key: "topology", label: "TOPOLOGY COMMANDS", value: encodeBreakdown.topology_ms },
+    { key: "pressure", label: "PRESSURE + PROJECT COMMANDS", value: encodeBreakdown.pressureProjection_ms },
+    { key: "surface", label: "SURFACE COMMANDS", value: encodeBreakdown.surface_ms },
+    { key: "publication", label: "PUBLICATION COMMANDS", value: encodeBreakdown.publication_ms },
+    { key: "finalize", label: "FINALIZE + SUBMIT", value: encodeBreakdown.finalize_ms },
+  ] : [];
   const headroom = budget - Math.max(realtimeDemand_ms, cpuTotal);
   const heroScale = Math.max(budget * 1.12, realtimeDemand_ms, cpuTotal, .01);
   const budgetTick = budget / heroScale * 100;
@@ -166,16 +176,20 @@ export function PerformancePanel() {
   const historyMax = Math.max(budget, ...historyValues.flatMap((sample) => [sample.gpu, sample.cpu]), 0.01);
   const points = (key: "gpu" | "cpu") => historyValues.map((sample, index) => `${historyValues.length < 2 ? 0 : index / (historyValues.length - 1) * 100},${48 - Math.min(sample[key] / historyMax, 1) * 44}`).join(" ");
 
-  const stageRows = (stages: PerformanceStage[]) => {
-    const scale = Math.max(...stages.map((stage) => stageTimed(stage) && stage.active ? stage.value : 0), .01);
-    return stages.map((stage) => <button key={stage.key} className={`perf-row${selectedStage?.key === stage.key ? " selected" : ""}`} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value, stageTimed(stage), stage.active)}`}>
-      <i className={stage.className} />
-      <span>{stage.shortLabel}</span>
-      <div className="perf-row-bar">{stageTimed(stage) && stage.active && stage.value > 0 && <b className={stage.className} style={{ width: `${Math.max(1, stage.value / scale * 100)}%` }} />}</div>
-      <output>{formatMs(stage.value, stageTimed(stage), stage.active)}</output>
-    </button>);
-  };
+  const stageScale = (stages: PerformanceStage[], floor_ms = 0) => Math.max(...stages.map((stage) => stageTimed(stage) && stage.active ? stage.value : 0), floor_ms, .01);
+  const stageRows = (stages: PerformanceStage[], scale = stageScale(stages)) => stages.map((stage) => <button key={stage.key} className={`perf-row${selectedStage?.key === stage.key ? " selected" : ""}`} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value, stageTimed(stage), stage.active)}`}>
+    <i className={stage.className} />
+    <span>{stage.shortLabel}</span>
+    <div className="perf-row-bar">{stageTimed(stage) && stage.active && stage.value > 0 && <b className={stage.className} style={{ width: `${Math.max(1, stage.value / scale * 100)}%` }} />}</div>
+    <output>{formatMs(stage.value, stageTimed(stage), stage.active)}</output>
+  </button>);
+  // A paused manual step often costs far more wall time than its timestamped
+  // shaders (driver scheduling, pipeline compilation, fence latency), so the
+  // physics list reconciles against the queue-fence wall explicitly.
+  const untimedAdvance_ms = paused && lastAdvance && lastAdvance.untimestampedQueue_ms > .05 ? lastAdvance.untimestampedQueue_ms : 0;
+  const physicsRowScale = stageScale(physicsStages, untimedAdvance_ms);
   const cpuScale = Math.max(...cpuStages.map((stage) => stage.value), .01);
+  const encodeScale = Math.max(...encodeStages.map((stage) => stage.value), .01);
 
   return <aside id="performance-panel" className="right-panel panel-scroll performance-panel" aria-label="Performance profiler" data-testid="performance-panel" data-method={activeMethodId}
     data-render-timing-context={liveSnapshot.renderTimingContext}
@@ -229,7 +243,7 @@ export function PerformancePanel() {
     <section className="perf-meta" aria-label="Measured scheduling summary">
       <div><small>GPU BUSY</small><strong>{measuredUtilizationPercent === null ? "—" : `${measuredUtilizationPercent.toFixed(0)}%`}</strong><span>{measuredUtilization === null ? "awaiting completion cadence" : paused ? pausedPresentationNote : `${(measuredUtilization.physics * 100).toFixed(0)}% physics · ${(measuredUtilization.presentation * 100).toFixed(0)}% present`}</span></div>
       <div className={gpuConstrained || cpuSpikeConstrained ? "constrained" : undefined}><small>HEADROOM</small><strong>{measuredStages.length ? `${headroom.toFixed(2)} ms` : "—"}</strong><span>{gpuConstrained ? `${Math.abs(headroom).toFixed(2)} ms over the deadline` : cpuSpikeConstrained ? `CPU p95 ${cpuP95_ms.toFixed(2)} ms` : `per frame at ${PRESENTATION_FPS} Hz`}</span></div>
-      <div><small>SIM CADENCE</small><strong>{paused ? "paused" : `${schedule.advancesPerFrame.toFixed(2)} adv / frame`}</strong><span>{paused ? "presentation redraws continuously" : `×${displayedBatchDepth} per submission · ${schedule.pressureSolvesPerFrame.toFixed(2)} pressure solves`}</span></div>
+      <div><small>{paused ? "LAST PHYSICS ADVANCE" : "SIM CADENCE"}</small><strong>{paused ? lastAdvance ? `${lastAdvance.wall_ms.toFixed(1)} ms wall` : "no advance sampled" : `${schedule.advancesPerFrame.toFixed(2)} adv / frame`}</strong><span>{paused ? lastAdvance ? `CPU encode ${lastAdvance.encode_ms.toFixed(1)} · queue fence ${lastAdvance.queueFence_ms.toFixed(1)} ms` : "presentation redraws continuously" : `×${displayedBatchDepth} per submission · ${schedule.pressureSolvesPerFrame.toFixed(2)} pressure solves`}</span></div>
       <div><small>OBSERVED RATE</small><strong>{paused ? "—" : observedSimRate === null ? "measuring…" : `×${observedSimRate.toFixed(2)} realtime`}</strong><span>{paused ? "simulation paused" : completionRate === null ? "queue sampling" : `queue completion ×${completionRate.toFixed(2)}`}</span></div>
     </section>
 
@@ -245,8 +259,16 @@ export function PerformancePanel() {
 
     <section className="perf-breakdown" aria-label="Per-stage breakdown">
       {physicsStages.length > 0 && <div className="perf-group">
-        <header><small>GPU PHYSICS · PER ADVANCE</small><output>{physicsTimed ? `${physicsPerStep_ms.toFixed(2)} ms / advance` : "awaiting timestamps"}</output></header>
-        <div className="perf-rows">{stageRows(physicsStages)}</div>
+        <header><small>GPU PHYSICS · PER ADVANCE</small><output>{!physicsTimed ? "awaiting timestamps" : untimedAdvance_ms > 0 ? `${physicsPerStep_ms.toFixed(2)} ms shaders · ${(lastAdvance?.queueFence_ms ?? 0).toFixed(1)} ms queue wall` : `${physicsPerStep_ms.toFixed(2)} ms / advance`}</output></header>
+        <div className="perf-rows">
+          {stageRows(physicsStages, physicsRowScale)}
+          {untimedAdvance_ms > 0 && <div className="perf-row perf-row-untimed" title="Queue-fence wall time no shader timestamp covers: driver scheduling, pipeline compilation, bind and barrier overhead, and fence latency. It dominates when each dispatch is smaller than the timer quantum.">
+            <i />
+            <span>QUEUE + DRIVER</span>
+            <div className="perf-row-bar"><b style={{ width: `${Math.max(1, untimedAdvance_ms / physicsRowScale * 100)}%` }} /></div>
+            <output>{untimedAdvance_ms.toFixed(1)} ms wall</output>
+          </div>}
+        </div>
       </div>}
       {adaptiveTopologyStages.length > 0 && <div className="perf-group">
         <header><small>ADAPTIVE TOPOLOGY · EVENT-DRIVEN, NOT PER ADVANCE</small><output>{snapshot.adaptiveRebuildWall_ms ? `${snapshot.adaptiveRebuildWall_ms.toFixed(1)} ms wall${snapshot.adaptiveRebuildPending ? " · in flight" : ""}` : "no rebuild sampled"}</output></header>
@@ -265,6 +287,16 @@ export function PerformancePanel() {
           <div className="perf-row-bar">{stage.value > 0 && <b className="seg-cpu" style={{ width: `${Math.max(1, stage.value / cpuScale * 100)}%` }} />}</div>
           <output>{formatMs(stage.value)}</output>
         </div>)}</div>
+        {lastAdvance && <div className="perf-submission"><span>LAST PHYSICS ADVANCE · CPU encode {lastAdvance.encode_ms.toFixed(1)} ms + queue fence {lastAdvance.queueFence_ms.toFixed(1)} ms · timestamped shaders {lastAdvance.timestampedGPU_ms.toFixed(3)} ms · untimestamped queue/driver {lastAdvance.untimestampedQueue_ms.toFixed(1)} ms</span><output>{lastAdvance.wall_ms.toFixed(1)} ms wall</output></div>}
+        {encodeStages.length > 0 && <>
+          <header><small>LAST PHYSICS ENCODE · SOLVER ATTRIBUTION</small><output>{encodeStages.reduce((sum, stage) => sum + stage.value, 0).toFixed(1)} ms</output></header>
+          <div className="perf-rows">{encodeStages.map((stage) => <div key={stage.key} className="perf-row" title={`${stage.label} · host command construction only`}>
+            <i className="seg-cpu" />
+            <span>{stage.label}</span>
+            <div className="perf-row-bar">{stage.value > 0 && <b className="seg-cpu" style={{ width: `${Math.max(1, stage.value / encodeScale * 100)}%` }} />}</div>
+            <output>{formatMs(stage.value)}</output>
+          </div>)}</div>
+        </>}
       </div>
     </section>
 

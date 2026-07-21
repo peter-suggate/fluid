@@ -154,6 +154,13 @@ export function planOctreeFirstOrderVCycle(options: Pick<OctreeFirstOrderVCycleO
 type PipelineName = "setupMaps" | "setupDiagonal" | "copyRhs" | "applyA" | "applyB"
   | "jacobiAtoB" | "jacobiBtoA" | "formResidual" | "ghostAccumulate"
   | "ghostPropagate" | "publish";
+type CachedBindGroup = {
+  readonly rowCount: GPUBuffer;
+  readonly solverControl: GPUBuffer;
+  readonly rhs?: GPUBuffer;
+  readonly correction?: GPUBuffer;
+  readonly group: GPUBindGroup;
+};
 const PIPELINE_BINDINGS: Readonly<Record<PipelineName, readonly number[]>> = Object.freeze({
   setupMaps: [0, 1, 3, 4, 5], setupDiagonal: [0, 1, 2, 3, 4, 5],
   copyRhs: [0, 3, 4, 5, 6], applyA: [0, 1, 2, 3, 4, 5], applyB: [0, 1, 2, 3, 4, 5],
@@ -179,6 +186,8 @@ export class WebGPUOctreeFirstOrderVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly firstOrderEntries: GPUBuffer;
   private readonly levelParams: readonly GPUBuffer[];
   private readonly pipelines: Readonly<Record<PipelineName, GPUComputePipeline>>;
+  /** Immutable descriptors shared by repeated V-cycle applications. */
+  private readonly bindGroups = new Map<string, CachedBindGroup>();
   private readonly preIterations: number;
   private readonly postIterations: number;
   private readonly coarsestIterations: number;
@@ -311,13 +320,20 @@ export class WebGPUOctreeFirstOrderVCycle implements OctreeFirstOrderSPDVCycle {
   private run(encoder: GPUCommandEncoder, name: PipelineName, level: number,
     dispatch: readonly [number, number, number], rowCount: GPUBuffer, solverControl: GPUBuffer,
     rhs?: GPUBuffer, correction?: GPUBuffer): void {
-    const pipeline = this.pipelines[name];
-    const candidates = [this.levelParams[level], this.firstOrderHeaders, this.firstOrderEntries,
-      rowCount, this.state, solverControl, rhs, correction];
-    const entries: GPUBindGroupEntry[] = PIPELINE_BINDINGS[name].map((binding) => ({
-      binding, resource: { buffer: candidates[binding]! },
-    }));
-    const group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+    const pipeline = this.pipelines[name], key = `${name}:${level}`;
+    const cached = this.bindGroups.get(key);
+    const unchanged = cached?.rowCount === rowCount && cached.solverControl === solverControl
+      && cached.rhs === rhs && cached.correction === correction;
+    let group = cached?.group;
+    if (!unchanged || !group) {
+      const candidates = [this.levelParams[level], this.firstOrderHeaders, this.firstOrderEntries,
+        rowCount, this.state, solverControl, rhs, correction];
+      const entries: GPUBindGroupEntry[] = PIPELINE_BINDINGS[name].map((binding) => ({
+        binding, resource: { buffer: candidates[binding]! },
+      }));
+      group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+      this.bindGroups.set(key, { rowCount, solverControl, rhs, correction, group });
+    }
     const pass = encoder.beginComputePass({ label: pipeline.label }); pass.setPipeline(pipeline);
     pass.setBindGroup(0, group); pass.dispatchWorkgroups(...dispatch); pass.end();
   }
@@ -329,7 +345,7 @@ export class WebGPUOctreeFirstOrderVCycle implements OctreeFirstOrderSPDVCycle {
     return this.channelOffset(channel) + level * this.plan.hierarchyStride * 4;
   }
   private assertLive(): void { if (this.destroyed) throw new Error("Octree L1 V-cycle is destroyed"); }
-  destroy(): void { if (this.destroyed) return; this.destroyed = true; this.state.destroy();
+  destroy(): void { if (this.destroyed) return; this.destroyed = true; this.bindGroups.clear(); this.state.destroy();
     this.firstOrderHeaders.destroy(); this.firstOrderEntries.destroy(); for (const buffer of this.levelParams) buffer.destroy(); }
 }
 

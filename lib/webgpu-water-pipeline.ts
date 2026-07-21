@@ -1246,6 +1246,7 @@ export class RasterWaterPipeline {
   private adaptiveDiagnosticPending = false;
   private adaptiveDiagnosticCompletion?: Promise<AdaptiveWaterRenderDiagnostics | undefined>;
   private lastAdaptiveDiagnostics?: AdaptiveWaterRenderDiagnostics;
+  private lastAdaptiveDiagnosticEncodeAt_ms = -Infinity;
   private pendingAdaptiveDiagnosticShape?: readonly [number, number, number, number];
   private pendingAdaptiveDiagnosticGlobalFine = false;
   private pendingAdaptiveDiagnosticGlobalFineGeneration?: number;
@@ -1467,10 +1468,10 @@ export class RasterWaterPipeline {
     return texture ? { texture, dimensions: [texture.width, texture.height, 1] as [number, number, number] } : undefined;
   }
 
-  /** Latest opt-in (`?waterdiag=1`) GPU readback for sparse presentation debugging. */
+  /** Latest bounded GPU readback proving what sparse surface is presented. */
   get adaptiveRenderDiagnostics() { return this.lastAdaptiveDiagnostics; }
 
-  private adaptiveDiagnosticsEnabled() {
+  private adaptiveDiagnosticsFullRateRequested() {
     if (typeof location !== "undefined") {
       const query = new URLSearchParams(location.search);
       if (query.get("waterdiag") === "1" || query.get("diagnostics") === "1" || query.get("panel") === "diagnostics" || query.get("panel") === "visual") return true;
@@ -1478,11 +1479,21 @@ export class RasterWaterPipeline {
     return typeof process !== "undefined" && process.env?.FLUID_WATER_DIAGNOSTICS === "1";
   }
 
-  /** Whether this session requested the bounded presentation readback. */
-  get adaptiveDiagnosticsReadbackEnabled() { return this.adaptiveDiagnosticsEnabled(); }
+  /** Presentation failure evidence is part of the normal UI contract.  The
+   * renderer uses this bit for the fenced t=0 readiness decision as well as
+   * the persistent viewport alert; it must therefore not depend on a query
+   * flag. */
+  get adaptiveDiagnosticsReadbackEnabled() { return true; }
 
   private encodeAdaptiveDiagnostics(encoder: GPUCommandEncoder, adaptive: UnifiedOctreeConsumerSource) {
-    if (!this.adaptiveDiagnosticsEnabled() || this.adaptiveDiagnosticPending || !this.indirectBuffer) return;
+    if (this.adaptiveDiagnosticPending || !this.indirectBuffer) return;
+    const now_ms = performance.now();
+    // The normal UI needs failure evidence, not a frame-rate-synchronous
+    // telemetry stream. Match the solver's bounded 250 ms readback cadence;
+    // explicit diagnostic/Dawn sessions retain per-capture evidence.
+    if (!this.adaptiveDiagnosticsFullRateRequested()
+      && now_ms - this.lastAdaptiveDiagnosticEncodeAt_ms < 250) return;
+    this.lastAdaptiveDiagnosticEncodeAt_ms = now_ms;
     this.adaptiveDiagnosticReadback?.destroy();
     this.adaptiveDiagnosticReadback = this.device.createBuffer({ label: "Adaptive water render diagnostics", size: 128, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const activeOffsetBytes = (16 + 2 * adaptive.leafCapacity + 2 * adaptive.pageCapacity) * 4;

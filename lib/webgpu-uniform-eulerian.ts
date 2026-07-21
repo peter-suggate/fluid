@@ -40,6 +40,7 @@ import {
   unpackFineLevelSetGPUTopologyControl,
 } from "./webgpu-octree-fine-levelset-topology";
 import { unpackFineLevelSetGPURedistanceControl } from "./webgpu-octree-fine-levelset-redistance";
+import { unpackFineLevelSetGPUTransportControl } from "./webgpu-octree-fine-levelset-transport";
 import { FINE_TO_COARSE_LEVELSET_ERROR, unpackFineToCoarseGPUControl } from "./webgpu-octree-fine-to-coarse-levelset";
 import { planOctreeHostAllocation, type OctreeHostAllocationPlan } from "./octree-host-allocation";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
@@ -158,6 +159,34 @@ export interface InitialGlobalFineAuthorityDiagnostics extends GlobalFineVolumeP
   readonly faceBandPointFieldControl: readonly number[];
   readonly faceBandTransientPowerControl: readonly number[];
   readonly faceBandPowerPublicationControl: readonly number[];
+}
+
+/** Publish the bounded fine-transport control into the shared UI snapshot.
+ * The diagnostic position is solver-local metres and is present only when
+ * the GPU captured a real invalid-status sample rather than the sentinel. */
+export function applyGlobalFineTransportDiagnostics(
+  info: GPUEulerianInfo,
+  words: readonly number[] | undefined,
+): void {
+  if (!words || words.length < 8) return;
+  const transport = unpackFineLevelSetGPUTransportControl(words);
+  info.globalFineTransportDepartureOutsideBand = transport.departureOutsideBand;
+  info.globalFineTransportNonfiniteVelocity = transport.nonfiniteVelocity;
+  info.globalFineTransportCommitted = transport.committed;
+  info.globalFineTransportFaceBandUnavailable = transport.faceBandUnavailable;
+  info.globalFineTransportVelocityUnavailable = transport.velocityUnavailable;
+  info.globalFineTransportInvalidVelocityStatus = transport.invalidVelocityStatus;
+  info.globalFineTransportNonpositiveVelocityResult = transport.nonpositiveVelocityResult;
+  info.globalFineTransportVelocityStatusReasonOr = transport.velocityStatusReasonOr;
+  const first = transport.firstInvalidVelocityLocalIndex;
+  const position = transport.firstInvalidVelocityPosition;
+  const captured = first !== undefined && first !== 0xffff_ffff && position !== undefined
+    && position.every(Number.isFinite);
+  info.globalFineTransportFirstInvalidVelocityStatus = captured
+    ? transport.firstInvalidVelocityStatus : undefined;
+  info.globalFineTransportFirstInvalidVelocityLocalIndex = captured ? first : undefined;
+  info.globalFineTransportFirstInvalidVelocityPosition_m = captured
+    ? { x: position[0], y: position[1], z: position[2] } : undefined;
 }
 
 export interface InitialSparseAuthorityReadiness {
@@ -881,8 +910,7 @@ export class WebGPUUniformEulerianSolver {
     this.info.globalFineRedistanceSeeds=value.redistanceControl[2];
     this.info.globalFineRedistanceCommitted=value.redistanceControl[3]!==0;
     this.info.globalFineVolumeFlags=value.volumeControl[0];
-    const transport=value.transportControl;
-    if(transport){this.info.globalFineTransportDepartureOutsideBand=transport[0];this.info.globalFineTransportNonfiniteVelocity=transport[1];this.info.globalFineTransportCommitted=transport[3]!==0;this.info.globalFineTransportFaceBandUnavailable=transport[6];this.info.globalFineTransportVelocityUnavailable=transport[7];}
+    applyGlobalFineTransportDiagnostics(this.info,value.transportControl);
     this.info.globalFineFaceBandFlags=value.faceBandControl[0];
     this.info.globalFineFaceBandTransitionFlags=value.faceBandTransitionControl[0];
     this.info.globalFineFaceBandPowerPublicationFlags=value.faceBandPowerPublicationControl[0];
@@ -1040,6 +1068,9 @@ export class WebGPUUniformEulerianSolver {
   /** QA-only passthrough for the authoritative Section 4.3 solver status. */
   get mgpcgControl() { return this.octreeProjection?.mgpcgControl; }
   get powerFaceControl() { return this.octreeProjection?.powerFaceControl; }
+  get powerBoundaryPhiQueries() { return this.octreeProjection?.powerBoundaryPhiQueries; }
+  get ownerLatticeDebug() { return this.octreeProjection?.ownerLatticeDebug; }
+  get powerBoundaryFineSource() { return this.octreeProjection?.powerBoundaryFineSource; }
   get powerFaceSiteIndex() { return this.octreeProjection?.powerFaceSiteIndex; }
   get powerDescriptorControl() { return this.octreeProjection?.powerDescriptorControl; }
   get powerTopologyControl() { return this.octreeProjection?.powerTopologyControl; }
@@ -1059,6 +1090,8 @@ export class WebGPUUniformEulerianSolver {
   get octreeTechniqueDebugSource() { return this.octreeProjection?.techniqueDebugSource; }
   get initialSparseAuthorityReady() { return !this.octreeProjection || this.initialSparseAuthorityPublished; }
   get globalFineLevelSetSource() { return this.octreeProjection?.globalFineLevelSetSource; }
+  /** QA-only passthrough for reproducing recurring frontier phase decisions. */
+  get globalFineSummaryDirectory() { return this.octreeProjection?.globalFineSummaryDirectory; }
   get globalFineTransportControl() { return this.octreeProjection?.globalFineTransportControl; }
   get globalFineRedistanceControl() { return this.octreeProjection?.globalFineRedistanceControl; }
   get globalFineVolumeControl() { return this.octreeProjection?.globalFineVolumeControl; }
@@ -1081,6 +1114,9 @@ export class WebGPUUniformEulerianSolver {
     return this.octreeProjection?.globalFineFaceBandPowerPublicationControl;
   }
   get globalFineFaceBandPlan() { return this.octreeProjection?.globalFineFaceBandPlan; }
+  readGlobalFineDisconnectedFaceFailure(index: number) {
+    return this.octreeProjection?.readGlobalFineDisconnectedFaceFailure(index);
+  }
   /** Exact host compatibility allocation delta; adaptive resources are owned/accounted by the octree projection. */
   get octreeHostAllocation() { return this.hostAllocation; }
   /** @deprecated Use octreeHostAllocation. */
@@ -1295,6 +1331,20 @@ export class WebGPUUniformEulerianSolver {
     const segment = { name, start: this.queryCount++, end: this.queryCount++ }; this.querySegments.push(segment); return segment;
   }
 
+  /** Partition one aggregate timestamp range at a shared boundary. This adds
+   * one query value, rather than two independent child ranges, and makes the
+   * child durations sum exactly to the existing aggregate. */
+  private splitTiming(totalName: GPUPhysicsTimingField, firstName: GPUPhysicsTimingField, secondName: GPUPhysicsTimingField) {
+    if (!this.querySet || this.queryCount + 3 > GPU_PHYSICS_TIMESTAMP_CAPACITY) return undefined;
+    const start = this.queryCount++, boundary = this.queryCount++, end = this.queryCount++;
+    this.querySegments.push(
+      { name: totalName, start, end },
+      { name: firstName, start, end: boundary },
+      { name: secondName, start: boundary, end },
+    );
+    return { total: { start, end }, boundary };
+  }
+
   private statsReadback() {
     // readbackPending guarantees that this buffer is never copied while it is
     // mapped. Keep enough room for the fixed query resolve allocation so
@@ -1420,6 +1470,9 @@ export class WebGPUUniformEulerianSolver {
     }
     const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s); if (!advance) return false;
     const delta = advance.dt_s; if (delta < 1e-6) { this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; return true; }
+    const cpuAdvanceStartedAt_ms = performance.now();
+    let cpuTopologyEncode_ms = 0, cpuPressureProjectionEncode_ms = 0;
+    let cpuSurfaceEncode_ms = 0, cpuPublicationEncode_ms = 0;
     this.lastTime = advance.nextTime_s; this.info.submittedTime_s = this.lastTime; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
     // Proactive CFL control. The latest completed reduction is the previous
     // projected maximum; gravity is the only unbounded explicit acceleration
@@ -1458,6 +1511,7 @@ export class WebGPUUniformEulerianSolver {
     if (gpuStageCapture.matches("physics", "pressure") || gpuStageCapture.matches("physics", "topology")) this.ensureGridDiagnosticTextures();
     this.querySegments = []; this.queryCount = 0; if (!this.validationChecked) this.device.pushErrorScope("validation");
     const encoder = this.device.createCommandEncoder({ label: "Uniform GPU fluid step" }), totalTiming = this.timing("total_ms");
+    const cpuSetupEncode_ms = performance.now() - cpuAdvanceStartedAt_ms;
     let stageCapture: PendingGPUStageCapture | undefined;
     const captureTexture = (stageKey: string, texture: GPUTexture | undefined, visualizationDimension: "2d" | "3d" = "3d", sampleType: "float" | "uint" = "float") => {
       if (!texture || stageCapture) return;
@@ -1479,14 +1533,18 @@ export class WebGPUUniformEulerianSolver {
     if (this.quadtreeProjection && this.rebuildQuadtreeEachStep && this.quadtreeInlineRebuild && !this.quadtreeRebuildPending && !this.quadtreeReadyProjection && this.quadtreeProjection.canEncodeInlineRebuild) {
       const timing = this.timing("layerConstruction_ms");
       if (timing && this.querySet) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.start } }); marker.end(); }
+      const cpuStageStartedAt_ms = performance.now();
       inlineRebuildEncoded = this.quadtreeProjection.encodeInlineRebuild(encoder);
+      cpuTopologyEncode_ms += performance.now() - cpuStageStartedAt_ms;
       if (timing && this.querySet) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end(); }
     } else if (this.octreeProjection) {
       const timing = this.timing("layerConstruction_ms");
       if (timing && this.querySet) {
         const marker = encoder.beginComputePass({ label: "Octree topology timing start", timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.start } }); marker.end();
       }
+      const cpuStageStartedAt_ms = performance.now();
       inlineRebuildEncoded = this.octreeProjection.encodeInlineRebuild(encoder);
+      cpuTopologyEncode_ms += performance.now() - cpuStageStartedAt_ms;
       if (timing && this.querySet) {
         const marker = encoder.beginComputePass({ label: "Octree topology timing end", timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end();
       }
@@ -1501,7 +1559,9 @@ export class WebGPUUniformEulerianSolver {
         if (timing && this.querySet) {
           const marker = encoder.beginComputePass({ label: "Octree substep topology timing start", timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.start } }); marker.end();
         }
+        const cpuStageStartedAt_ms = performance.now();
         this.octreeProjection.encodeInlineRebuild(encoder);
+        cpuTopologyEncode_ms += performance.now() - cpuStageStartedAt_ms;
         if (timing && this.querySet) {
           const marker = encoder.beginComputePass({ label: "Octree substep topology timing end", timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end();
         }
@@ -1614,20 +1674,34 @@ export class WebGPUUniformEulerianSolver {
           querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end
         } : undefined;
         if (this.octreeProjection) {
+          const powerTimings = this.octreeProjection.info.powerDiagramProjection === "off" ? undefined : {
+            pressure: this.splitTiming("pressure_ms", "powerAssembly_ms", "pressureSolve_ms"),
+            projection: this.splitTiming("projection_ms", "powerProjection_ms", "velocityProjection_ms"),
+          };
+          const cpuStageStartedAt_ms = performance.now();
           this.octreeProjection.encode(
             encoder,
             this.info.nx,
             this.info.ny,
             this.info.nz,
-            timestampWrites(this.timing("pressure_ms")),
+            timestampWrites(powerTimings?.pressure?.total ?? this.timing("pressure_ms")),
             {
-              projection: timestampWrites(this.timing("projection_ms")),
+              projection: timestampWrites(powerTimings?.projection?.total ?? this.timing("projection_ms")),
+              pressurePhaseBoundary: powerTimings?.pressure && this.querySet ? {
+                querySet: this.querySet, writeIndex: powerTimings.pressure.boundary,
+              } : undefined,
+              projectionPhaseBoundary: powerTimings?.projection && this.querySet ? {
+                querySet: this.querySet, writeIndex: powerTimings.projection.boundary,
+              } : undefined,
               extrapolation: this.octreeProjection.extrapolationSweepCount > 0 ? timestampWrites(this.timing("extrapolation_ms")) : undefined,
               materialization: this.octreeProjection.hasDiagnosticTextures ? timestampWrites(this.timing("materialization_ms")) : undefined
             }
           );
+          cpuPressureProjectionEncode_ms += performance.now() - cpuStageStartedAt_ms;
         } else if (this.quadtreeProjection) {
+          const cpuStageStartedAt_ms = performance.now();
           this.quadtreeProjection.encode(encoder, this.info.nx, this.info.ny, this.info.nz, timestampWrites(this.timing("pressure_ms")));
+          cpuPressureProjectionEncode_ms += performance.now() - cpuStageStartedAt_ms;
         }
         captureTexture("topology", this.gridCellTexture, "3d", "uint");
         captureTexture("pressure", this.gridPressureTexture);
@@ -1642,7 +1716,9 @@ export class WebGPUUniformEulerianSolver {
         if (surfaceTiming && this.querySet) {
           const marker = encoder.beginComputePass({ label: "Adaptive surface timing start", timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: surfaceTiming.start } }); marker.end();
         }
+        const cpuStageStartedAt_ms = performance.now();
         this.adaptiveProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s);
+        cpuSurfaceEncode_ms += performance.now() - cpuStageStartedAt_ms;
         if (surfaceTiming && this.querySet) {
           const marker = encoder.beginComputePass({ label: "Adaptive surface timing end", timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: surfaceTiming.end } }); marker.end();
         }
@@ -1693,10 +1769,12 @@ export class WebGPUUniformEulerianSolver {
       const timestampWrites = (timing: { start: number; end: number } | undefined) => timing && this.querySet ? {
         querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end
       } : undefined;
+          const cpuStageStartedAt_ms = performance.now();
           this.octreeProjection.encodeSparseBrickWorld(encoder, {
             residency: timestampWrites(this.timing("fluidResidency_ms")),
             publication: timestampWrites(this.timing("sparsePublication_ms"))
           }, dt, this.octreeProjection.fluidBrickAtlasSamplingSource?.mode === "mirror");
+          cpuPublicationEncode_ms += performance.now() - cpuStageStartedAt_ms;
     }
     encoder.clearBuffer(this.reductionBuffer);
     if (!this.adaptiveFaceVelocityCutover) {
@@ -1746,6 +1824,16 @@ export class WebGPUUniformEulerianSolver {
         console.error(`Uniform GPU validation: ${error.message}`);
       }).catch(() => { /* Device loss is handled by the renderer. */ });
     }
+    const cpuAttributed_ms = cpuSetupEncode_ms + cpuTopologyEncode_ms + cpuPressureProjectionEncode_ms
+      + cpuSurfaceEncode_ms + cpuPublicationEncode_ms;
+    this.info.cpuAdvanceEncodeBreakdown = {
+      setup_ms: cpuSetupEncode_ms,
+      topology_ms: cpuTopologyEncode_ms,
+      pressureProjection_ms: cpuPressureProjectionEncode_ms,
+      surface_ms: cpuSurfaceEncode_ms,
+      publication_ms: cpuPublicationEncode_ms,
+      finalize_ms: Math.max(0, performance.now() - cpuAdvanceStartedAt_ms - cpuAttributed_ms),
+    };
     return true;
   }
 
@@ -1832,7 +1920,7 @@ export class WebGPUUniformEulerianSolver {
     }
     if (queryBytes > 0) {
       const times = new BigUint64Array(buffer.getMappedRange(16, queryBytes));
-      const stageByField: Partial<Record<GPUPhysicsTimingField, GPUPhysicsStageId>> = { preparation_ms: "preparation", layerConstruction_ms: "topology", advection_ms: "advection", conditioning_ms: "conditioning", remeshing_ms: "remeshing", pressure_ms: "pressure", projection_ms: "projection", extrapolation_ms: "extrapolation", materialization_ms: "materialization", surfaceUpdate_ms: "surfaceUpdate", rigidCoupling_ms: "rigidCoupling", spray_ms: "spray", fluidResidency_ms: "fluidResidency", sparsePublication_ms: "sparsePublication", diagnostics_ms: "diagnostics" };
+      const stageByField: Partial<Record<GPUPhysicsTimingField, GPUPhysicsStageId>> = { preparation_ms: "preparation", layerConstruction_ms: "topology", advection_ms: "advection", conditioning_ms: "conditioning", remeshing_ms: "remeshing", pressure_ms: "pressure", powerAssembly_ms: "powerAssembly", pressureSolve_ms: "pressureSolve", projection_ms: "projection", powerProjection_ms: "powerProjection", velocityProjection_ms: "velocityProjection", extrapolation_ms: "extrapolation", materialization_ms: "materialization", surfaceUpdate_ms: "surfaceUpdate", rigidCoupling_ms: "rigidCoupling", spray_ms: "spray", fluidResidency_ms: "fluidResidency", sparsePublication_ms: "sparsePublication", diagnostics_ms: "diagnostics" };
       const activeStages = [...new Set(querySegments.map((segment) => stageByField[segment.name]).filter((stage): stage is GPUPhysicsStageId => Boolean(stage)))];
       const timings = emptyGPUPhysicsTimings(activeStages);
       for (const segment of querySegments) timings[segment.name] += Math.max(0, Number(times[segment.end] - times[segment.start])) / 1e6;

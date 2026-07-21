@@ -50,6 +50,34 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
 
   if (methodId === "octree") {
     const pressureLabel = pressureSolver ? `Octree leaf pressure · ${pressureSolver}` : "Octree leaf pressure · Chebyshev-Jacobi";
+    const splitPowerPressure = active(snapshot, "powerAssembly") && active(snapshot, "pressureSolve");
+    const splitPowerProjection = active(snapshot, "powerProjection") && active(snapshot, "velocityProjection");
+    const pressureStages = splitPowerPressure ? [
+      stage({
+        key: "power-assembly", label: "Power rows + operator assembly", shortLabel: "POWER BUILD", value: value(contextMatches, snapshot.gpuPowerAssembly_ms), className: "stage-pressure", group: "compute", active: true,
+        description: "Compacts the published liquid frontier, captures the Cartesian L1 preconditioner rows, transports and constrains generalized face velocities, generates power descriptors, and assembles the second-order L2 operator and right-hand side.", reads: ["balanced octree", "fine / coarse φ", "predicted face velocity", "solid apertures"], writes: ["compact pressure rows", "power descriptors and faces", "L1 / L2 operators"], dependsOn: ["advection"], sync: "One hardware timestamp boundary partitions the existing pressure interval; no extra readback is introduced."
+      }),
+      stage({
+        key: "pressure", label: pressureLabel, shortLabel: "PRESSURE", value: value(contextMatches, snapshot.gpuPressureSolve_ms), className: "stage-pressure", group: "compute", active: true,
+        description: "Runs the selected pressure iteration, megakernel, or Section 4.3 MGPCG/V-cycle path through its final iterate and residual reduction.", reads: ["assembled L1 / L2 operators", "pressure warm start", "rigid coupling state"], writes: ["octree pressure p", "solver residuals"], dependsOn: ["power-assembly"]
+      }),
+    ] : [stage({
+      key: "pressure", label: pressureLabel, shortLabel: "LEAF SOLVE", value: value(contextMatches, snapshot.gpuPressure_ms), className: "stage-pressure", group: "compute", active: active(snapshot, "pressure"),
+      description: "Compacts liquid rows, generates power descriptors and generalized faces, assembles the second-order power operator and Section 4.3 first-order preconditioner, then runs the selected pressure solve through its final iterate. This range includes the complete PCG/V-cycle work rather than stopping at assembly.", reads: ["balanced octree", "power-face velocity", "fine / coarse φ", "solid apertures"], writes: ["power-face operator", "octree pressure p", "solver residuals"], dependsOn: ["advection"]
+    })];
+    const projectionStages = splitPowerProjection ? [
+      stage({
+        key: "power-projection", label: "Generalized power-face projection", shortLabel: "POWER PROJECT", value: value(contextMatches, snapshot.gpuPowerProjection_ms), className: "stage-projection", group: "compute", active: true,
+        description: "Applies the solved pressure jump to generalized faces, publishes the canonical adaptive normal velocities, enforces power-face solid constraints, and reconstructs and fast-marches the regular fine-band velocities used by interface transport.", reads: ["power faces", "leaf pressure p", "solid constraints", "predicted face velocity"], writes: ["projected power faces", "canonical adaptive velocity", "fine-band velocity"], dependsOn: ["pressure"], sync: "Shares one timestamp boundary with compatibility projection; the two values exactly partition the existing projection interval."
+      }),
+      stage({
+        key: "projection", label: "Compatibility-field projection", shortLabel: "FIELD PROJECT", value: value(contextMatches, snapshot.gpuVelocityProjection_ms), className: "stage-projection", group: "compute", active: true,
+        description: "Reconstructs and projects the regular compatibility velocity field, applies body coupling and pressure impulses, and records projection parity diagnostics.", reads: ["leaf pressure p", "projected power faces", "rigid coupling state"], writes: ["regular velocity samples", "body pressure impulses", "projection parity"], dependsOn: ["power-projection"]
+      }),
+    ] : [stage({
+      key: "projection", label: "Finite-volume octree projection", shortLabel: "PROJECT", value: value(contextMatches, snapshot.gpuProjection_ms), className: "stage-projection", group: "compute", active: active(snapshot, "projection"),
+      description: "Applies the solved pressure jump to the same generalized power faces used by assembly, reconstructs canonical octree and regular-face velocities, enforces solid constraints, and publishes the projected field consumed by fine-interface transport.", reads: ["power faces", "leaf pressure p", "solid constraints", "predicted face velocity"], writes: ["projected power faces", "canonical face velocity", "regular velocity samples"], dependsOn: ["pressure"]
+    })];
     return [
       stage({
         key: "topology", label: "Owner residency + balanced octree", shortLabel: "OCTREE", value: value(contextMatches, snapshot.gpuLayerConstruction_ms), className: "stage-topology", group: "compute", active: active(snapshot, "topology"),
@@ -59,14 +87,8 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
         key: "advection", label: "Velocity transport preparation + advection", shortLabel: "ADVECT", value: value(contextMatches, snapshot.gpuAdvection_ms), className: "stage-advection", group: "compute", active: active(snapshot, "advection"),
         description: "Builds signed-distance occupancy and an air-extended transport field, then advances the dense velocity predictor with bounded MacCormack transport.", reads: ["projected velocity", "signed distance φ"], writes: ["transport velocity", "predicted velocity"], dependsOn: ["topology"]
       }),
-      stage({
-        key: "pressure", label: pressureLabel, shortLabel: "LEAF SOLVE", value: value(contextMatches, snapshot.gpuPressure_ms), className: "stage-pressure", group: "compute", active: active(snapshot, "pressure"),
-        description: "Compacts liquid rows, generates power descriptors and generalized faces, assembles the second-order power operator and Section 4.3 first-order preconditioner, then runs the selected pressure solve through its final iterate. This range includes the complete PCG/V-cycle work rather than stopping at assembly.", reads: ["balanced octree", "power-face velocity", "fine / coarse φ", "solid apertures"], writes: ["power-face operator", "octree pressure p", "solver residuals"], dependsOn: ["advection"]
-      }),
-      stage({
-        key: "projection", label: "Finite-volume octree projection", shortLabel: "PROJECT", value: value(contextMatches, snapshot.gpuProjection_ms), className: "stage-projection", group: "compute", active: active(snapshot, "projection"),
-        description: "Applies the solved pressure jump to the same generalized power faces used by assembly, reconstructs canonical octree and regular-face velocities, enforces solid constraints, and publishes the projected field consumed by fine-interface transport.", reads: ["power faces", "leaf pressure p", "solid constraints", "predicted face velocity"], writes: ["projected power faces", "canonical face velocity", "regular velocity samples"], dependsOn: ["pressure"]
-      }),
+      ...pressureStages,
+      ...projectionStages,
       stage({
         key: "extrapolation", label: "Narrow-band velocity extrapolation", shortLabel: "EXTEND", value: value(contextMatches, snapshot.gpuExtrapolation_ms), className: "stage-extrapolation", group: "compute", active: active(snapshot, "extrapolation"),
         description: "Extends projected velocity through the air-side interface band so the following level-set transport can sample newly exposed cells.", reads: ["projected velocity", "signed distance φ"], writes: ["extrapolated velocity"], dependsOn: ["projection"]

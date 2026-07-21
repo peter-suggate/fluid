@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { measuredGPUUtilization, performanceSchedule } from "../lib/performance-scheduling";
+import { advanceWallBreakdown, measuredGPUUtilization, performanceSchedule } from "../lib/performance-scheduling";
 
 test("performance scheduling separates a presentation frame from a submission batch", () => {
   const schedule = performanceSchedule({
@@ -37,4 +37,20 @@ test("measured utilization combines independently timestamped physics and presen
   assert.deepEqual(utilization, { physics: 0.5, presentation: 0.25, total: 0.75 });
   assert.equal(measuredGPUUtilization({}), null);
   assert.equal(measuredGPUUtilization({ physics_ms: 20, physicsCompletionInterval_ms: 10 })?.total, 1, "queued work is reported as saturated, never above 100%");
+});
+
+test("last advance wall time preserves CPU encode and untimestamped queue delay", () => {
+  assert.deepEqual(advanceWallBreakdown({
+    cpuAdvanceEncode_ms: 48,
+    gpuBatchWall_ms: 210,
+    gpuAdvanceWall_ms: 258,
+    gpuStep_ms: 0.08,
+  }), {
+    encode_ms: 48,
+    queueFence_ms: 210,
+    timestampedGPU_ms: 0.08,
+    untimestampedQueue_ms: 209.92,
+    wall_ms: 258,
+  });
+  assert.equal(advanceWallBreakdown({}), null);
 });

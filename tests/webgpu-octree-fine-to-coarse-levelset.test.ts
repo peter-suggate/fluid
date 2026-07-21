@@ -31,7 +31,22 @@ test("resident fine-band samples may lead the compact liquid-row set", () => {
     "a resident fine sample does not require a compact pressure-row fallback");
 });
 
-test("Dawn builds deterministic O(rows) factor-4/factor-8 aggregates and preserves zero crossings", {
+test("fine-to-coarse restriction evaluates phi at the octree cell center", () => {
+  const shader = fineToCoarseLevelSetWGSL.replace(/\s+/g, "");
+  const encode = WebGPUFineToCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
+  assert.match(shader, /centerDelta=abs\(abs\(d\)-vec3f\(\.5\*p\.fineWidth\)\)/,
+    "the eight samples surrounding the cell center define the correction");
+  assert.match(shader, /centerPhiBits\[corner\][\s\S]*centerMask,1u<<corner/,
+    "the eight center-corner samples must occupy deterministic slots");
+  assert.match(shader, /centerMask\)==255u[\s\S]*center\+=\.125\*bitcast<f32>/,
+    "cell-center phi must be a fixed-order trilinear average, not a nearest-sample tie break");
+  assert.match(shader, /centerMask\)==255u/,
+    "a partial fine stencil must not claim a valid exact cell-center correction");
+  assert.doesNotMatch(shader, /nearestDistance|nearestLogical|NearestPhi/);
+  assert.doesNotMatch(encode, /selectRestrictionLogicalId|emitRestrictionNearestPhi/);
+});
+
+test("Dawn builds deterministic factor-4/factor-8 cell-center aggregates with O(rows) storage", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE",
 }, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
@@ -71,8 +86,10 @@ test("Dawn builds deterministic O(rows) factor-4/factor-8 aggregates and preserv
     device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
     await readback.mapAsync(GPUMapMode.READ); const bytes = readback.getMappedRange().slice(0); readback.unmap();
     const words = new Uint32Array(bytes); assert.deepEqual([...words.slice(0, 4)], [1, 1, 0, 1]);
-    const values = new Float32Array(bytes, 16); const [nearest, minimum, maximum] = values;
-    assert.ok(Number.isFinite(nearest)); assert.equal(words[7], 1);
+    const values = new Float32Array(bytes, 16); const [center, minimum, maximum] = values;
+    assert.ok(Number.isFinite(center)); assert.ok(Math.abs(center) <= 1e-6,
+      `factor-${factor} restriction must evaluate the plane at cell center, got ${center}`);
+    assert.equal(words[7], 1);
     assert.ok(minimum < 0 && maximum > 0, "restriction interval must retain the plane zero crossing");
     readback.destroy(); topologyControl.destroy(); rowCount.destroy(); sites.destroy(); headers.destroy(); restriction.destroy(); owner.destroy();
   }

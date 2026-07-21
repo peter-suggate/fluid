@@ -97,3 +97,32 @@ test("power projection publication is gated by MGPCG success", () => {
   assert.match(octreePowerOperatorShader, /atomicLoad\(&solverControl\[1\]\)==0u/);
   assert.match(WebGPUOctreeProjection.prototype.encode.toString(), /this\.mgpcg.*encode/);
 });
+
+test("fixed PCG replay retains immutable bind groups instead of rebuilding descriptors per dispatch", () => {
+  Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8 } });
+  let bindGroups = 0, passes = 0;
+  const buffer = (size: number) => ({ size, usage: 7, destroy() {} }) as unknown as GPUBuffer;
+  const device = {
+    queue: { writeBuffer() {} },
+    createBuffer: ({ size }: { size: number }) => buffer(size),
+    createShaderModule: () => ({}),
+    createComputePipeline: ({ label, compute }: { label: string; compute: { entryPoint: string } }) => ({
+      label, entryPoint: compute.entryPoint, getBindGroupLayout: () => ({}),
+    }),
+    createBindGroup: () => { bindGroups += 1; return {}; },
+  } as unknown as GPUDevice;
+  const solver = new WebGPUOctreeMGPCG(device, {
+    leafHeaders: buffer(48 * 256), leafEntries: buffer(8 * 1024), rowCount: buffer(64),
+  }, { dimensions: [16, 16, 16], rowCapacity: 256, maximumLeafSize: 4, maximumIterations: 128 });
+  const encoder = {
+    clearBuffer() {},
+    beginComputePass: () => { passes += 1; return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; },
+  } as unknown as GPUCommandEncoder;
+  const pressureA = buffer(1024), pressureB = buffer(1024);
+  solver.encode(encoder, pressureA, pressureB);
+  const firstGroups = bindGroups, firstPasses = passes;
+  solver.encode(encoder, pressureA, pressureB);
+  assert.ok(firstPasses > firstGroups * 30, `${firstPasses} dispatch passes should share ${firstGroups} descriptors`);
+  assert.equal(bindGroups, firstGroups, "a second fixed replay must allocate no bind groups");
+  solver.destroy();
+});
