@@ -190,7 +190,7 @@ export function packSparseVoxelDrySceneThickGlassArena(
 
 /** Packed dry-scene parameters. */
 export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
-  sizeBytes: 208,
+  sizeBytes: 256,
   terrainWordOffset: 24,
   terrainMaterialWordOffset: 28,
   materialPublicationWordOffset: 32,
@@ -198,6 +198,7 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
   nodeMipWordOffset: 40,
   nodeMipAtlasWordOffset: 44,
   wideFanoutWordOffset: 48,
+  nodeMipLevelStartWordOffset: 52,
 } as const);
 
 /** materialPublication.w flags shared by the direct and derived-lighting paths. */
@@ -536,6 +537,150 @@ export function canEncodeSparseVoxelDryScene(
   );
 }
 
+/** Feature toggles for the cone-traced node-mip marcher. Production enables every optimization. */
+export interface SvoDryConeMarcherOptions {
+  /** Branchless Morton bit-spread encode instead of the 21-iteration reference loop. */
+  branchlessMorton?: boolean;
+  /** Restrict the directory binary search to the queried level's contiguous row range. */
+  rangedDirectorySearch?: boolean;
+  /** Substitute provably zero coverage without fetching when inside a certified empty region. */
+  emptySpaceElision?: boolean;
+}
+
+/**
+ * Morton/find/`dryNodeMipAt`/`dryConeVisibility` marcher block shared by the
+ * production dry shader and the A/B cone benchmark. Every variant is bit-exact:
+ * optimizations may only change how a value is computed, never the value.
+ * Requires bindings/declarations named `dry` (DryParams), `publicationState`,
+ * `nodeMipAtlas`, `nodeMipSampler`, `nodeMipDirectory`, the private counter
+ * `dryMipSteps`, and the `svoNodeMipSamplingWGSL` library.
+ */
+export function createSvoDryConeMarcherWGSL(options: SvoDryConeMarcherOptions = {}): string {
+  const morton = options.branchlessMorton
+    ? /* wgsl */ `fn dryNodeMipSpreadMortonBits(value:vec3u)->vec3u{
+  var spread=value;
+  spread=(spread|(spread<<vec3u(16u)))&vec3u(0xff0000ffu);
+  spread=(spread|(spread<<vec3u(8u)))&vec3u(0x0f00f00fu);
+  spread=(spread|(spread<<vec3u(4u)))&vec3u(0xc30c30c3u);
+  spread=(spread|(spread<<vec3u(2u)))&vec3u(0x49249249u);
+  return spread;
+}
+fn dryNodeMipMorton(coordinate:vec3u)->vec2u{
+  let masked=coordinate&vec3u(0x1fffffu);
+  let low=dryNodeMipSpreadMortonBits(vec3u(masked.x&0x7ffu,masked.y&0x7ffu,masked.z&0x3ffu));
+  let high=dryNodeMipSpreadMortonBits(vec3u(masked.x>>11u,masked.y>>11u,masked.z>>10u));
+  return vec2u(low.x|(low.y<<1u)|(low.z<<2u),(high.x<<1u)|(high.y<<2u)|high.z);
+}`
+    : /* wgsl */ `fn dryNodeMipMorton(coordinate:vec3u)->vec2u{
+  var result=vec2u(0u);for(var bit=0u;bit<21u;bit+=1u){for(var axis=0u;axis<3u;axis+=1u){let outputBit=bit*3u+axis;let value=(coordinate[axis]>>bit)&1u;if(outputBit<32u){result.x|=value<<outputBit;}else{result.y|=value<<(outputBit-32u);}}}return result;
+}`;
+  // Directory rows are sorted by (level, morton), so each level occupies one
+  // contiguous run; a lower_bound over that run equals the full-range result.
+  // Constant vector indexing only: a dynamically indexed uniform array trips a
+  // slow-path Tint/Metal transform that taxes the whole fragment shader.
+  const levelStart = options.rangedDirectorySearch
+    ? /* wgsl */ `fn dryNodeMipLevelStart(level:u32)->u32{
+  let clamped=min(level,11u);
+  let word=select(select(dry.nodeMipLevelStart[0],dry.nodeMipLevelStart[1],clamped>=4u),dry.nodeMipLevelStart[2],clamped>=8u);
+  let lane=clamped&3u;
+  return select(select(select(word.x,word.y,lane==1u),word.z,lane==2u),word.w,lane==3u);
+}
+`
+    : "";
+  const searchRange = options.rangedDirectorySearch
+    ? /* wgsl */ `var low=dryNodeMipLevelStart(level);var high=select(dry.nodeMip.y,dryNodeMipLevelStart(level+1u),level<11u);`
+    : /* wgsl */ `var low=0u;var high=dry.nodeMip.y;`;
+  const zeroRegion = options.emptySpaceElision
+    ? /* wgsl */ `struct DryConeZeroRegion{minimum:vec3f,maximum:vec3f,valid:u32}
+fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNodeMipPageCache>)->DryConeZeroRegion{
+  // A cached page key is only trustworthy once its coordinate is recomputed in
+  // range: the dryNodeMipAt out-of-range early return leaves the cache stale.
+  let levelWidth=dry.mapping.cellSize*exp2(f32(level));
+  let levelVoxel=(position_m-dry.mapping.worldOrigin)/levelWidth;
+  let levelPageFloor=floor(levelVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
+  if(any(levelPageFloor<vec3f(0.0))||any(levelPageFloor>=vec3f(2097152.0))
+    ||(*pageCache).generation!=dry.nodeMip.x||(*pageCache).level!=level||any((*pageCache).coordinate!=vec3u(levelPageFloor))||(*pageCache).resident!=0u){
+    return DryConeZeroRegion(vec3f(0.0),vec3f(0.0),0u);
+  }
+  // Non-resident page: no page means no atlas content, so every sample whose
+  // trilinear support sits inside this page extent is exactly zero.
+  var region=DryConeZeroRegion(
+    dry.mapping.worldOrigin+levelPageFloor*f32(SVO_NODE_MIP_INTERIOR_SIZE)*levelWidth,
+    dry.mapping.worldOrigin+(levelPageFloor+vec3f(1.0))*f32(SVO_NODE_MIP_INTERIOR_SIZE)*levelWidth,1u);
+  let coarseLevel=min(level+2u,dry.nodeMip.z-1u);
+  if(coarseLevel>level){
+    // Directory-only coarse upgrade (no texture fetch): a non-resident coarse
+    // page has no resident descendants via the ancestor-residency chain, so the
+    // whole coarse page extent is zero.
+    let coarseWidth=dry.mapping.cellSize*exp2(f32(coarseLevel));
+    let coarsePageFloor=floor((position_m-dry.mapping.worldOrigin)/(coarseWidth*f32(SVO_NODE_MIP_INTERIOR_SIZE)));
+    if(dryNodeMipFind(coarseLevel,vec3u(coarsePageFloor))==0xffffffffu){
+      region=DryConeZeroRegion(
+        dry.mapping.worldOrigin+coarsePageFloor*f32(SVO_NODE_MIP_INTERIOR_SIZE)*coarseWidth,
+        dry.mapping.worldOrigin+(coarsePageFloor+vec3f(1.0))*f32(SVO_NODE_MIP_INTERIOR_SIZE)*coarseWidth,1u);
+    }
+  }
+  return region;
+}
+`
+    : "";
+  // The elision variant keeps the identical 48-step march (step distances,
+  // stepIndex sequence, dryMipSteps accounting, termination) and only replaces
+  // a fetch whose trilinear support is provably inside a zero region with the
+  // arithmetically identical zero sample: max(0,0*.15)=0 leaves transmittance
+  // bit-exact because 1-pow(1,stepInVoxels)==0.
+  const visibility = options.emptySpaceElision
+    ? /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32)->DryConeVisibility{
+  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
+  var zeroRegion=DryConeZeroRegion(vec3f(0.0),vec3f(0.0),0u);
+  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let voxelWidth=minimumVoxel*exp2(floor(lod));let stepWidth=min(max(voxelWidth,diameter*.5),maximumDistance_m-distance);
+    let position=origin_m+direction*distance;let level=min(u32(max(floor(lod),0.0)),dry.nodeMip.z-1u);
+    // Tap texels lie within 1.5 level-voxels of the sample position, so the
+    // whole trilinear support footprint sits inside this conservative box.
+    let supportRadius=1.5*dry.mapping.cellSize*exp2(f32(level));
+    var lookup=DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);
+    if(zeroRegion.valid==0u||any(position-supportRadius<zeroRegion.minimum)||any(position+supportRadius>zeroRegion.maximum)){
+      lookup=dryNodeMipAt(position,lod,&pageCache);
+      // Establish (or replace) a region only from a non-resident page and only
+      // once the march has left the current region entirely: re-deriving the
+      // same box would repeat its directory probe for nothing.
+      if(pageCache.resident==0u&&(zeroRegion.valid==0u||any(position<zeroRegion.minimum)||any(position>zeroRegion.maximum))){
+        zeroRegion=dryConeZeroRegionAt(position,level,&pageCache);
+      }
+    }
+    if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}let conservativeCoverage=max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15);let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/voxelWidth);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
+  return DryConeVisibility(clamp(transmittance,0.0,1.0),1u);
+}`
+    : /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32)->DryConeVisibility{
+  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
+  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let voxelWidth=minimumVoxel*exp2(floor(lod));let stepWidth=min(max(voxelWidth,diameter*.5),maximumDistance_m-distance);let lookup=dryNodeMipAt(origin_m+direction*distance,lod,&pageCache);if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}let conservativeCoverage=max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15);let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/voxelWidth);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
+  return DryConeVisibility(clamp(transmittance,0.0,1.0),1u);
+}`;
+  return /* wgsl */ `struct DryNodeMipLookup{sample:SvoNodeMipSample,valid:u32}
+struct DryNodeMipPageCache{coordinate:vec3u,level:u32,pageOrigin:vec3u,generation:u32,resident:u32}
+${morton}
+fn dryNodeMipCompare(entry:SvoNodeMipDirectoryEntry,level:u32,morton:vec2u)->i32{
+  if(entry.level<level){return -1;}if(entry.level>level){return 1;}if(entry.mortonHigh<morton.y){return -1;}if(entry.mortonHigh>morton.y){return 1;}if(entry.mortonLow<morton.x){return -1;}if(entry.mortonLow>morton.x){return 1;}return 0;
+}
+${levelStart}fn dryNodeMipFind(level:u32,coordinate:vec3u)->u32{
+  if(level>=dry.nodeMip.z||dry.nodeMip.y==0u){return 0xffffffffu;}let morton=dryNodeMipMorton(coordinate);${searchRange}
+  for(var iteration=0u;iteration<24u&&low<high;iteration+=1u){let middle=low+(high-low)/2u;let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,middle);let comparison=dryNodeMipCompare(entry,level,morton);if(comparison<0){low=middle+1u;}else{high=middle;}}
+  if(low>=dry.nodeMip.y){return 0xffffffffu;}let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,low);if(entry.generation!=dry.nodeMip.x||dryNodeMipCompare(entry,level,morton)!=0){return 0xffffffffu;}return low;
+}
+fn dryNodeMipReady()->bool{return dry.nodeMip.w!=0u&&dry.nodeMip.x!=0u&&dry.nodeMip.x==publicationState[2]&&dry.nodeMip.y>0u&&dry.nodeMip.z>0u;}
+fn dryNodeMipAt(position_m:vec3f,lodIn:f32,pageCache:ptr<function,DryNodeMipPageCache>)->DryNodeMipLookup{
+  let level=min(u32(max(floor(lodIn),0.0)),dry.nodeMip.z-1u);let levelScale=exp2(f32(level));let virtualVoxel=(position_m-dry.mapping.worldOrigin)/(dry.mapping.cellSize*levelScale);let pageFloor=floor(virtualVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
+  if(any(pageFloor<vec3f(0.0))||any(pageFloor>=vec3f(2097152.0))){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}let pageCoordinate=vec3u(pageFloor);
+  if((*pageCache).generation!=dry.nodeMip.x||(*pageCache).level!=level||any((*pageCache).coordinate!=pageCoordinate)){
+    *pageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
+    if(pageIndex!=0xffffffffu){let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u);}
+  }
+  if((*pageCache).resident==0u){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}let local=virtualVoxel-vec3f(pageCoordinate)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);return DryNodeMipLookup(svoNodeMipSamplePage(nodeMipAtlas,nodeMipSampler,(*pageCache).pageOrigin,local),1u);
+}
+${zeroRegion}struct DryConeVisibility{transmittance:f32,valid:u32}
+${visibility}`;
+}
+
 const drySceneShader = /* wgsl */ `
 ${svoTerrainMaterialWGSL}
 ${svoMaterialWGSL}
@@ -565,6 +710,8 @@ struct DryParams {
   nodeMipAtlas:vec4u,
   // x: derived generation; y: canonical source generation; z: pages; w: descriptors.
   wideFanout:vec4u,
+  // Twelve per-level directory row starts (count of pages with level < i) as three vec4u.
+  nodeMipLevelStart:array<vec4u,3>,
 }
 struct DryLightingArena {
   // x: light count; y: light revision; z: environment revision; w: environment ABI version.
@@ -607,35 +754,7 @@ struct DryHit {
 
 ${createWebgpuSvoTraversalWGSL({ control: 2, nodes: 3, leaves: 4 })}
 ${createWebgpuSvoWideFanoutTraversalWGSL({ pages: 11, descriptors: 12 })}
-struct DryNodeMipLookup{sample:SvoNodeMipSample,valid:u32}
-struct DryNodeMipPageCache{coordinate:vec3u,level:u32,pageOrigin:vec3u,generation:u32,resident:u32}
-fn dryNodeMipMorton(coordinate:vec3u)->vec2u{
-  var result=vec2u(0u);for(var bit=0u;bit<21u;bit+=1u){for(var axis=0u;axis<3u;axis+=1u){let outputBit=bit*3u+axis;let value=(coordinate[axis]>>bit)&1u;if(outputBit<32u){result.x|=value<<outputBit;}else{result.y|=value<<(outputBit-32u);}}}return result;
-}
-fn dryNodeMipCompare(entry:SvoNodeMipDirectoryEntry,level:u32,morton:vec2u)->i32{
-  if(entry.level<level){return -1;}if(entry.level>level){return 1;}if(entry.mortonHigh<morton.y){return -1;}if(entry.mortonHigh>morton.y){return 1;}if(entry.mortonLow<morton.x){return -1;}if(entry.mortonLow>morton.x){return 1;}return 0;
-}
-fn dryNodeMipFind(level:u32,coordinate:vec3u)->u32{
-  if(level>=dry.nodeMip.z||dry.nodeMip.y==0u){return 0xffffffffu;}let morton=dryNodeMipMorton(coordinate);var low=0u;var high=dry.nodeMip.y;
-  for(var iteration=0u;iteration<24u&&low<high;iteration+=1u){let middle=low+(high-low)/2u;let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,middle);let comparison=dryNodeMipCompare(entry,level,morton);if(comparison<0){low=middle+1u;}else{high=middle;}}
-  if(low>=dry.nodeMip.y){return 0xffffffffu;}let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,low);if(entry.generation!=dry.nodeMip.x||dryNodeMipCompare(entry,level,morton)!=0){return 0xffffffffu;}return low;
-}
-fn dryNodeMipReady()->bool{return dry.nodeMip.w!=0u&&dry.nodeMip.x!=0u&&dry.nodeMip.x==publicationState[2]&&dry.nodeMip.y>0u&&dry.nodeMip.z>0u;}
-fn dryNodeMipAt(position_m:vec3f,lodIn:f32,pageCache:ptr<function,DryNodeMipPageCache>)->DryNodeMipLookup{
-  let level=min(u32(max(floor(lodIn),0.0)),dry.nodeMip.z-1u);let levelScale=exp2(f32(level));let virtualVoxel=(position_m-dry.mapping.worldOrigin)/(dry.mapping.cellSize*levelScale);let pageFloor=floor(virtualVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
-  if(any(pageFloor<vec3f(0.0))||any(pageFloor>=vec3f(2097152.0))){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}let pageCoordinate=vec3u(pageFloor);
-  if((*pageCache).generation!=dry.nodeMip.x||(*pageCache).level!=level||any((*pageCache).coordinate!=pageCoordinate)){
-    *pageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
-    if(pageIndex!=0xffffffffu){let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u);}
-  }
-  if((*pageCache).resident==0u){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}let local=virtualVoxel-vec3f(pageCoordinate)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);return DryNodeMipLookup(svoNodeMipSamplePage(nodeMipAtlas,nodeMipSampler,(*pageCache).pageOrigin,local),1u);
-}
-struct DryConeVisibility{transmittance:f32,valid:u32}
-fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32)->DryConeVisibility{
-  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
-  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let voxelWidth=minimumVoxel*exp2(floor(lod));let stepWidth=min(max(voxelWidth,diameter*.5),maximumDistance_m-distance);let lookup=dryNodeMipAt(origin_m+direction*distance,lod,&pageCache);if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}let conservativeCoverage=max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15);let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/voxelWidth);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
-  return DryConeVisibility(clamp(transmittance,0.0,1.0),1u);
-}
+${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true })}
 fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
 fn dryDiagnosticMaximumNodeVisits()->u32{return clamp(dryDiagnosticControl()&511u,1u,256u);}
 fn dryDiagnosticMaximumDepth()->u32{return clamp(dryDiagnosticControl()>>9u,1u,21u);}
@@ -1436,6 +1555,12 @@ export class SparseVoxelDrySceneRenderer {
     if (nodeMip && nodeMip.generation > 0 && nodeMip.plan.complete) {
       words.set([nodeMip.generation, nodeMip.plan.pages.length, Math.max(1, ...nodeMip.plan.pages.map((page) => page.key.level + 1)), 1], SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipWordOffset);
       words.set([...nodeMip.plan.atlas.texels, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipAtlasWordOffset);
+      // Directory rows are level-major; boundary i counts pages with level < i so
+      // the WGSL binary search can restrict itself to one level's contiguous run.
+      const levelStart = new Uint32Array(12);
+      for (const page of nodeMip.plan.pages) if (page.key.level < 11) levelStart[page.key.level + 1] += 1;
+      for (let boundary = 1; boundary < levelStart.length; boundary += 1) levelStart[boundary] += levelStart[boundary - 1];
+      words.set(levelStart, SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipLevelStartWordOffset);
     }
     const wide = resolveSvoWideTraversalCapability(source.wideFanout, source.revision, structural.domain.maximumDepth);
     if (wide.status === "ready") {

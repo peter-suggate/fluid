@@ -597,8 +597,17 @@ fn svoTraversalContinuationNext(
     }
     var parentBounds = (*continuation).currentBounds;
     if ((*continuation).currentBoundsValid == 0u) { parentBounds = svoNodeBounds(node, mapping); }
-    var candidates: array<SvoCandidate, 8>;
+    // Streaming expansion: the nearest candidate lives in registers while every
+    // deferred sibling is insertion-sorted directly into the traversal stack
+    // region [expansionBase, stackSize), kept farthest-at-bottom so pops stay
+    // nearest-first. This retires the eight-entry scratch array while keeping
+    // the exact (tEnter, tExit, octant) comparison sequence of the sorted-array
+    // expansion; sibling nodeIndex order equals octant order because children
+    // are firstChild + popcountBefore(mask, octant).
+    let expansionBase = (*continuation).stackSize;
+    var nearest = SvoCandidate(0u, 0u, 0.0, 0.0);
     var candidateCount = 0u;
+    var overflowPending = false;
     for (var octant = 0u; octant < 8u; octant += 1u) {
       if ((mask & (1u << octant)) == 0u) { continue; }
       let childIndex = node.links.x + svoPopcountBefore(mask, octant);
@@ -611,22 +620,40 @@ fn svoTraversalContinuationNext(
         (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
         return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
       }
+      if (overflowPending) { continue; }
       let childBounds = svoChildBounds(parentBounds, octant);
       let interval = svoRayAabbWithInverse(ray, (*continuation).inverseDirection, childBounds);
       if (interval.x == 0.0) { continue; }
-      var insertion = candidateCount;
+      candidateCount += 1u;
+      if (candidateCount == 1u) {
+        nearest = SvoCandidate(childIndex, octant, interval.y, interval.z);
+        continue;
+      }
+      var deferred = SvoStackEntry(childIndex, interval.y, interval.z);
+      let nearestOrdered = nearest.tEnter < interval.y
+        || (nearest.tEnter == interval.y && (nearest.tExit < interval.z
+        || (nearest.tExit == interval.z && nearest.nodeIndex <= childIndex)));
+      if (!nearestOrdered) {
+        deferred = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
+        nearest = SvoCandidate(childIndex, octant, interval.y, interval.z);
+      }
+      if ((*continuation).stackSize == SVO_STACK_CAPACITY) {
+        overflowPending = true;
+        continue;
+      }
+      var insertion = (*continuation).stackSize;
       loop {
-        if (insertion == 0u) { break; }
-        let previous = candidates[insertion - 1u];
-        let ordered = previous.tEnter < interval.y
-          || (previous.tEnter == interval.y && (previous.tExit < interval.z
-          || (previous.tExit == interval.z && previous.octant <= octant)));
+        if (insertion == expansionBase) { break; }
+        let settled = (*continuation).stack[insertion - 1u];
+        let ordered = deferred.tEnter < settled.tEnter
+          || (deferred.tEnter == settled.tEnter && (deferred.tExit < settled.tExit
+          || (deferred.tExit == settled.tExit && deferred.nodeIndex <= settled.nodeIndex)));
         if (ordered) { break; }
-        candidates[insertion] = previous;
+        (*continuation).stack[insertion] = settled;
         insertion -= 1u;
       }
-      candidates[insertion] = SvoCandidate(childIndex, octant, interval.y, interval.z);
-      candidateCount += 1u;
+      (*continuation).stack[insertion] = deferred;
+      (*continuation).stackSize += 1u;
     }
     if (candidateCount == 0u) {
       svoTraversalContinuationAdvance(continuation);
@@ -635,19 +662,10 @@ fn svoTraversalContinuationNext(
       }
       continue;
     }
-    if ((*continuation).stackSize + candidateCount - 1u > SVO_STACK_CAPACITY) {
+    if (overflowPending) {
       (*continuation).status = SVO_STATUS_STACK_OVERFLOW;
       return svoMiss(SVO_STATUS_STACK_OVERFLOW, visits);
     }
-    var remaining = candidateCount;
-    loop {
-      if (remaining <= 1u) { break; }
-      remaining -= 1u;
-      let deferred = candidates[remaining];
-      (*continuation).stack[(*continuation).stackSize] = SvoStackEntry(deferred.nodeIndex, deferred.tEnter, deferred.tExit);
-      (*continuation).stackSize += 1u;
-    }
-    let nearest = candidates[0];
     (*continuation).current = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
     (*continuation).currentBounds = svoChildBounds(parentBounds, nearest.octant);
     (*continuation).currentBoundsValid = 1u;
@@ -703,30 +721,53 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
     }
     var parentBounds = currentBounds;
     if (!currentBoundsValid) { parentBounds = svoNodeBounds(node, mapping); }
-    var candidates: array<SvoCandidate, 8>;
+    // Streaming expansion: identical ordering contract to the continuation
+    // variant above — nearest candidate in registers, deferred siblings
+    // insertion-sorted into the stack region [expansionBase, stackSize).
+    let expansionBase = stackSize;
+    var nearest = SvoCandidate(0u, 0u, 0.0, 0.0);
     var candidateCount = 0u;
+    var overflowPending = false;
     for (var octant = 0u; octant < 8u; octant += 1u) {
       if ((mask & (1u << octant)) == 0u) { continue; }
       let childIndex = node.links.x + svoPopcountBefore(mask, octant);
       if (childIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
       let child = svoNodes[childIndex];
       if (child.address.z != node.address.z + 1u) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
+      if (overflowPending) { continue; }
       let childBounds = svoChildBounds(parentBounds, octant);
       let interval = svoRayAabbWithInverse(ray, inverseDirection, childBounds);
       if (interval.x == 0.0) { continue; }
-      var insertion = candidateCount;
+      candidateCount += 1u;
+      if (candidateCount == 1u) {
+        nearest = SvoCandidate(childIndex, octant, interval.y, interval.z);
+        continue;
+      }
+      var deferred = SvoStackEntry(childIndex, interval.y, interval.z);
+      let nearestOrdered = nearest.tEnter < interval.y
+        || (nearest.tEnter == interval.y && (nearest.tExit < interval.z
+        || (nearest.tExit == interval.z && nearest.nodeIndex <= childIndex)));
+      if (!nearestOrdered) {
+        deferred = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
+        nearest = SvoCandidate(childIndex, octant, interval.y, interval.z);
+      }
+      if (stackSize == SVO_STACK_CAPACITY) {
+        overflowPending = true;
+        continue;
+      }
+      var insertion = stackSize;
       loop {
-        if (insertion == 0u) { break; }
-        let previous = candidates[insertion - 1u];
-        let ordered = previous.tEnter < interval.y
-          || (previous.tEnter == interval.y && (previous.tExit < interval.z
-          || (previous.tExit == interval.z && previous.octant <= octant)));
+        if (insertion == expansionBase) { break; }
+        let settled = stack[insertion - 1u];
+        let ordered = deferred.tEnter < settled.tEnter
+          || (deferred.tEnter == settled.tEnter && (deferred.tExit < settled.tExit
+          || (deferred.tExit == settled.tExit && deferred.nodeIndex <= settled.nodeIndex)));
         if (ordered) { break; }
-        candidates[insertion] = previous;
+        stack[insertion] = settled;
         insertion -= 1u;
       }
-      candidates[insertion] = SvoCandidate(childIndex, octant, interval.y, interval.z);
-      candidateCount += 1u;
+      stack[insertion] = deferred;
+      stackSize += 1u;
     }
     if (candidateCount == 0u) {
       if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
@@ -735,18 +776,9 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
       currentBoundsValid = false;
       continue;
     }
-    if (stackSize + candidateCount - 1u > SVO_STACK_CAPACITY) {
+    if (overflowPending) {
       return svoMiss(SVO_STATUS_STACK_OVERFLOW, visits);
     }
-    var remaining = candidateCount;
-    loop {
-      if (remaining <= 1u) { break; }
-      remaining -= 1u;
-      let deferred = candidates[remaining];
-      stack[stackSize] = SvoStackEntry(deferred.nodeIndex, deferred.tEnter, deferred.tExit);
-      stackSize += 1u;
-    }
-    let nearest = candidates[0];
     current = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
     currentBounds = svoChildBounds(parentBounds, nearest.octant);
     currentBoundsValid = true;
