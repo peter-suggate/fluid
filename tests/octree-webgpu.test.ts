@@ -48,6 +48,8 @@ test("row-indexed octree startup skips the unreachable dense Jacobi specializati
     "the explicit dense validation solver must retain its Jacobi pipeline");
   assert.equal(octreeProjectionPipelineRequired("assembleSystem", product), true);
   assert.match(octreeSource, /if \(!this\.basePipelineRequired\(entryPoint\)\) return/);
+  assert.match(octreeSource, /compiled\.find\(\(pipeline\) => pipeline !== undefined\)/,
+    "body-free fresh-device startup must fill unreachable slots from the first reachable pipeline, not slot zero");
   assert.match(octreeSource, /for \(let size = Math\.min\(8, this\.maxLeafSize\); size >= 2; size >>= 1\)/,
     "fine refinement startup must not compile coarse or unreachable leaf sizes");
   assert.match(octreeSource, /for \(let size = this\.maxLeafSize; size >= 16; size >>= 1\)/,
