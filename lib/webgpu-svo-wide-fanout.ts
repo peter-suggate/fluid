@@ -59,7 +59,19 @@ export interface WebGPUSvoWideFanoutSource {
   readonly sourceGeneration: number;
   readonly pageCount: number;
   readonly descriptorCount: number;
+  readonly maximumDepth: number;
 }
+
+export interface SvoWideTraversalPublication {
+  readonly generation: number;
+  readonly sourceGeneration: number;
+  readonly pageCount: number;
+  readonly descriptorCount: number;
+}
+
+export type SvoWideTraversalCapabilityResolution =
+  | { status: "ready"; publication: SvoWideTraversalPublication; source: WebGPUSvoWideFanoutSource }
+  | { status: "missing" | "source-stale" | "invalid"; reason: string };
 
 export interface WebGPUSvoWideFanoutAllocation extends WebGPUSvoWideFanoutCapacity {
   controlBytes: number;
@@ -193,7 +205,7 @@ export class WebGPUSvoWideFanout {
       descriptors: { buffer: this.descriptorBuffer, offset: 0, size: this.allocation.descriptorBytes },
       microMips: { buffer: this.microMipBuffer, offset: 0, size: this.allocation.microMipBytes },
       generation: plan.generation, sourceGeneration: plan.sourceGeneration,
-      pageCount: plan.pages.length, descriptorCount: plan.descriptorCount,
+      pageCount: plan.pages.length, descriptorCount: plan.descriptorCount, maximumDepth: plan.maximumDepth,
     };
     return "encoded";
   }
@@ -211,6 +223,61 @@ export class WebGPUSvoWideFanout {
     this.descriptorBuffer.destroy();
     this.microMipBuffer.destroy();
   }
+}
+
+function bindingByteLength(binding: GPUBufferBinding): number {
+  const offset = binding.offset ?? 0;
+  const size = binding.size ?? binding.buffer.size - offset;
+  if (!Number.isSafeInteger(offset) || offset < 0 || (offset & 3) !== 0
+      || !Number.isSafeInteger(size) || size < 0 || (size & 3) !== 0
+      || offset + size > binding.buffer.size) return -1;
+  return size;
+}
+
+/**
+ * Fail-closed renderer gate for the optional hierarchy. The canonical source
+ * remains authoritative; a missing, stale, or structurally impossible view is
+ * represented by no capability and must select canonical traversal.
+ */
+export function resolveSvoWideTraversalCapability(
+  source: WebGPUSvoWideFanoutSource | undefined,
+  expectedSourceGeneration: number,
+  expectedMaximumDepth: number,
+): SvoWideTraversalCapabilityResolution {
+  if (!source) return { status: "missing", reason: "Wide-fanout capability is absent" };
+  if (!Number.isInteger(expectedSourceGeneration) || expectedSourceGeneration < 1 || expectedSourceGeneration > 0xffff_ffff
+      || !Number.isInteger(expectedMaximumDepth) || expectedMaximumDepth < 0 || expectedMaximumDepth > 21) {
+    return { status: "invalid", reason: "Canonical wide-fanout expectations are invalid" };
+  }
+  if (source.sourceGeneration !== (expectedSourceGeneration >>> 0)) {
+    return { status: "source-stale", reason: "Wide-fanout source generation is stale" };
+  }
+  const uint32 = (value: number) => Number.isInteger(value) && value >= 0 && value <= 0xffff_ffff;
+  if (!uint32(source.generation) || source.generation === 0 || !uint32(source.sourceGeneration)
+      || !uint32(source.pageCount) || !uint32(source.descriptorCount)
+      || !Number.isInteger(source.maximumDepth) || source.maximumDepth !== expectedMaximumDepth) {
+    return { status: "invalid", reason: "Wide-fanout capability metadata is invalid" };
+  }
+  const pagesBytes = source.pageCount * SVO_WIDE_GPU_LAYOUT.pageStrideBytes;
+  const descriptorBytes = source.descriptorCount * SVO_WIDE_GPU_LAYOUT.descriptorStrideBytes;
+  const microMipBytes = source.pageCount * SVO_WIDE_GPU_LAYOUT.microMipStrideBytes;
+  if (source.pageCount === 0 && source.descriptorCount !== 0
+      || bindingByteLength(source.control) < SVO_WIDE_GPU_LAYOUT.controlStrideBytes
+      || bindingByteLength(source.pages) < pagesBytes
+      || bindingByteLength(source.descriptors) < descriptorBytes
+      || bindingByteLength(source.microMips) < microMipBytes) {
+    return { status: "invalid", reason: "Wide-fanout capability exceeds its published binding bounds" };
+  }
+  return {
+    status: "ready",
+    publication: {
+      generation: source.generation,
+      sourceGeneration: source.sourceGeneration,
+      pageCount: source.pageCount,
+      descriptorCount: source.descriptorCount,
+    },
+    source,
+  };
 }
 
 function popcount(value: number): number {
@@ -299,15 +366,15 @@ struct SvoWidePage {
 };
 
 struct SvoWideDescriptor {
-  meta: u32,
+  metadata: u32,
   reference: u32,
   sourceLeaf: u32,
   opacity: u32,
 };
 
-fn svoWideDescriptorKind(descriptor: SvoWideDescriptor) -> u32 { return descriptor.meta & 3u; }
-fn svoWideDescriptorSlot(descriptor: SvoWideDescriptor) -> u32 { return (descriptor.meta >> 2u) & 63u; }
-fn svoWideDescriptorSourceLevel(descriptor: SvoWideDescriptor) -> u32 { return (descriptor.meta >> 8u) & 255u; }
+fn svoWideDescriptorKind(descriptor: SvoWideDescriptor) -> u32 { return descriptor.metadata & 3u; }
+fn svoWideDescriptorSlot(descriptor: SvoWideDescriptor) -> u32 { return (descriptor.metadata >> 2u) & 63u; }
+fn svoWideDescriptorSourceLevel(descriptor: SvoWideDescriptor) -> u32 { return (descriptor.metadata >> 8u) & 255u; }
 
 fn svoWideSlotCoordinate(slot: u32) -> vec3u {
   return vec3u(slot & 3u, (slot >> 2u) & 3u, (slot >> 4u) & 3u);
@@ -337,3 +404,325 @@ fn svoWideMicroMipOffset(lod: u32) -> u32 {
   return select(select(0u, 64u, lod == 1u), 72u, lod >= 2u);
 }
 `;
+
+/**
+ * Resumable near-to-far traversal over the optional 4^3 hierarchy.
+ *
+ * This fragment deliberately depends on the canonical traversal library for
+ * SvoMapping, SvoRay, SvoTraversalHit, svoNodes/svoLeaves, status constants,
+ * Morton decode, and ray/AABB intersection. A page-local DDA visits at most ten
+ * cells for a non-degenerate ray; parent DDA frames survive both tail descent
+ * and returned terminal leaves. Only the two traversal payloads are bound.
+ */
+export const webgpuSvoWideFanoutTraversalWGSL = /* wgsl */`
+${webgpuSvoWideFanoutHelpersWGSL}
+@group(0) @binding(0) var<storage, read> svoWidePages: array<SvoWidePage>;
+@group(0) @binding(1) var<storage, read> svoWideDescriptors: array<SvoWideDescriptor>;
+
+struct SvoWidePublication {
+  generation: u32,
+  sourceGeneration: u32,
+  pageCount: u32,
+  descriptorCount: u32,
+};
+
+struct SvoWideCursorFrame {
+  pageIndex: u32,
+  nextT: f32,
+  exitT: f32,
+  entered: u32,
+  cellSteps: u32,
+};
+
+struct SvoWideTraversalCursor {
+  frames: array<SvoWideCursorFrame, 12>,
+  depth: u32,
+  state: u32,
+  pageVisits: u32,
+  _padding: u32,
+};
+
+const SVO_WIDE_CURSOR_UNAVAILABLE: u32 = 0u;
+const SVO_WIDE_CURSOR_ACTIVE: u32 = 1u;
+const SVO_WIDE_CURSOR_COMPLETE: u32 = 2u;
+const SVO_WIDE_CURSOR_INVALID: u32 = 3u;
+const SVO_WIDE_CURSOR_EXHAUSTED: u32 = 4u;
+const SVO_WIDE_CURSOR_STACK_CAPACITY: u32 = 12u;
+const SVO_WIDE_MAXIMUM_PAGE_VISITS: u32 = 128u;
+const SVO_WIDE_MAXIMUM_CELL_STEPS: u32 = 12u;
+
+fn svoWidePublicationReady(publication: SvoWidePublication, canonicalSourceGeneration: u32) -> bool {
+  return publication.generation != 0u
+    && publication.sourceGeneration != 0u
+    && publication.sourceGeneration == canonicalSourceGeneration
+    && publication.pageCount <= arrayLength(&svoWidePages)
+    && publication.descriptorCount <= arrayLength(&svoWideDescriptors)
+    && (publication.pageCount != 0u || publication.descriptorCount == 0u);
+}
+
+fn svoWideCanonicalBounds(level: u32, coordinate: vec3u, mapping: SvoMapping) -> mat2x3f {
+  let scale = f32((1u << (mapping.maximumDepth - level)) * mapping.brickSize);
+  let minimum = mapping.worldOrigin + vec3f(coordinate) * scale * mapping.cellSize;
+  return mat2x3f(minimum, minimum + scale * mapping.cellSize);
+}
+
+fn svoWidePageCoordinate(page: SvoWidePage) -> vec3u {
+  return svoDecodeMorton(page.mortonLow, page.mortonHigh, page.level);
+}
+
+fn svoWideDdaSlotCoordinate(localPoint: vec3f, direction: vec3f) -> vec3u {
+  let scaled = clamp(localPoint * 4.0, vec3f(0.0), vec3f(3.9999998));
+  var coordinate = vec3u(floor(scaled));
+  // A ray parallel to a shared face intersects both closed cells in the
+  // canonical traversal. Select the lower coordinate to preserve its stable
+  // ascending-octant tie break instead of depending on floating-point sign.
+  for (var axis = 0u; axis < 3u; axis += 1u) {
+    let boundary = round(scaled[axis]);
+    if (direction[axis] == 0.0 && boundary > 0.0
+        && abs(scaled[axis] - boundary) <= 1e-6) {
+      coordinate[axis] = u32(boundary) - 1u;
+    }
+  }
+  return min(coordinate, vec3u(3u));
+}
+
+fn svoWidePageHeaderValid(page: SvoWidePage, pageIndex: u32, publication: SvoWidePublication, mapping: SvoMapping) -> bool {
+  return pageIndex < publication.pageCount
+    && (page.level & 1u) == 0u
+    && page.level <= mapping.maximumDepth
+    && page.firstDescriptor <= publication.descriptorCount
+    && page.descriptorCount <= publication.descriptorCount - page.firstDescriptor
+    && page.descriptorCount == countOneBits(page.occupancyLow) + countOneBits(page.occupancyHigh);
+}
+
+fn svoWideCursorInitialize(
+  cursor: ptr<function, SvoWideTraversalCursor>,
+  ray: SvoRay,
+  mapping: SvoMapping,
+  publication: SvoWidePublication,
+  canonicalSourceGeneration: u32,
+) -> bool {
+  (*cursor).depth = 0u;
+  (*cursor).pageVisits = 0u;
+  (*cursor).state = SVO_WIDE_CURSOR_UNAVAILABLE;
+  if (!svoWidePublicationReady(publication, canonicalSourceGeneration)) { return false; }
+  if (svoControl[12] != 0u) { return false; }
+  // Closed-AABB canonical traversal can visit both sides of a shared face for
+  // an exactly parallel ray. Defer that rare tie case to the canonical cursor
+  // before yielding anything; ordinary camera/light rays remain accelerated.
+  if (any(ray.direction == vec3f(0.0))) { return false; }
+  if (mapping.nodeCount == 0u) {
+    (*cursor).state = SVO_WIDE_CURSOR_COMPLETE;
+    return true;
+  }
+  if (publication.pageCount == 0u) { return false; }
+  let root = svoWidePages[0];
+  if (!svoWidePageHeaderValid(root, 0u, publication, mapping)
+      || root.level != 0u || root.mortonLow != 0u || root.mortonHigh != 0u) {
+    (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+    return false;
+  }
+  let interval = svoRayAabbWithInverse(ray, 1.0 / ray.direction, svoRootBounds(mapping));
+  if (interval.x == 0.0) {
+    (*cursor).state = SVO_WIDE_CURSOR_COMPLETE;
+    return true;
+  }
+  (*cursor).frames[0] = SvoWideCursorFrame(0u, interval.y, interval.z, 0u, 0u);
+  (*cursor).depth = 1u;
+  (*cursor).state = SVO_WIDE_CURSOR_ACTIVE;
+  return true;
+}
+
+fn svoWideCursorMiss(status: u32, visits: u32) -> SvoTraversalHit {
+  return SvoTraversalHit(status, visits, 0xffffffffu, 0xffffffffu, 0u, 0u, 0.0, 0.0);
+}
+
+fn svoWideCursorNext(
+  cursor: ptr<function, SvoWideTraversalCursor>,
+  ray: SvoRay,
+  mapping: SvoMapping,
+  maximumTraversalDepth: u32,
+  publication: SvoWidePublication,
+  canonicalSourceGeneration: u32,
+) -> SvoTraversalHit {
+  var callVisits = 0u;
+  if ((*cursor).state == SVO_WIDE_CURSOR_COMPLETE) { return svoWideCursorMiss(SVO_STATUS_MISS, 0u); }
+  if ((*cursor).state != SVO_WIDE_CURSOR_ACTIVE
+      || !svoWidePublicationReady(publication, canonicalSourceGeneration)) {
+    (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+    return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, 0u);
+  }
+  let inverseDirection = 1.0 / ray.direction;
+  let visitLimit = min(max(mapping.maxVisits, 1u), SVO_WIDE_MAXIMUM_PAGE_VISITS);
+  for (var guard = 0u; guard < SVO_WIDE_MAXIMUM_PAGE_VISITS * SVO_WIDE_MAXIMUM_CELL_STEPS; guard += 1u) {
+    if ((*cursor).depth == 0u) {
+      (*cursor).state = SVO_WIDE_CURSOR_COMPLETE;
+      return svoWideCursorMiss(SVO_STATUS_MISS, callVisits);
+    }
+    let frameIndex = (*cursor).depth - 1u;
+    var frame = (*cursor).frames[frameIndex];
+    if (frame.pageIndex >= publication.pageCount) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    if (frame.entered == 0u) {
+      if (callVisits >= visitLimit) {
+        (*cursor).state = SVO_WIDE_CURSOR_EXHAUSTED;
+        return svoWideCursorMiss(SVO_STATUS_WORK_EXHAUSTED, callVisits);
+      }
+      frame.entered = 1u;
+      (*cursor).frames[frameIndex] = frame;
+      (*cursor).pageVisits += 1u;
+      callVisits += 1u;
+    }
+    let page = svoWidePages[frame.pageIndex];
+    if (!svoWidePageHeaderValid(page, frame.pageIndex, publication, mapping)) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    if (page.level > maximumTraversalDepth) {
+      (*cursor).state = SVO_WIDE_CURSOR_EXHAUSTED;
+      return svoWideCursorMiss(SVO_STATUS_WORK_EXHAUSTED, callVisits);
+    }
+    if (frame.nextT > frame.exitT || (frame.cellSteps != 0u && frame.nextT == frame.exitT)) {
+      (*cursor).depth -= 1u;
+      continue;
+    }
+    if (frame.cellSteps >= SVO_WIDE_MAXIMUM_CELL_STEPS) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    (*cursor).frames[frameIndex].cellSteps += 1u;
+    let pageCoordinate = svoWidePageCoordinate(page);
+    let pageBounds = svoWideCanonicalBounds(page.level, pageCoordinate, mapping);
+    let pageExtent = pageBounds[1] - pageBounds[0];
+    let probeT = frame.nextT;
+    let localPointRaw = (ray.origin + ray.direction * probeT - pageBounds[0]) / pageExtent;
+    let entryGrid = localPointRaw * 4.0;
+    var entryBoundaryAxes = 0u;
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+      let boundary = round(entryGrid[axis]);
+      if (boundary > 0.0 && boundary < 4.0 && abs(entryGrid[axis] - boundary) <= 1e-5) { entryBoundaryAxes += 1u; }
+    }
+    if ((frame.cellSteps == 0u && entryBoundaryAxes != 0u) || entryBoundaryAxes >= 2u) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    let localBias = sign(ray.direction) * 1e-6;
+    let localPoint = clamp(localPointRaw + localBias, vec3f(0.0), vec3f(0.99999994));
+    let slotCoordinate = svoWideDdaSlotCoordinate(localPoint, ray.direction);
+    let slot = slotCoordinate.x | (slotCoordinate.y << 2u) | (slotCoordinate.z << 4u);
+    let slotMinimum = pageBounds[0] + pageExtent * (vec3f(slotCoordinate) * 0.25);
+    let slotBounds = mat2x3f(slotMinimum, slotMinimum + pageExtent * 0.25);
+    let slotInterval = svoRayAabbWithInverse(ray, inverseDirection, slotBounds);
+    if (slotInterval.x == 0.0) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    let slotExit = min(frame.exitT, slotInterval.z);
+    let exitGrid = (ray.origin + ray.direction * slotExit - pageBounds[0]) / pageExtent * 4.0;
+    var internalBoundaryAxes = 0u;
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+      let boundary = round(exitGrid[axis]);
+      if (boundary > 0.0 && boundary < 4.0 && abs(exitGrid[axis] - boundary) <= 1e-5) {
+        internalBoundaryAxes += 1u;
+      }
+    }
+    if (internalBoundaryAxes >= 2u) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    (*cursor).frames[frameIndex].nextT = slotExit;
+    if (!svoWideOccupied(page, slot)) { continue; }
+    let rank = svoWideDescriptorRank(page, slot);
+    if (rank >= page.descriptorCount) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    let descriptorIndex = page.firstDescriptor + rank;
+    if (descriptorIndex >= publication.descriptorCount) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    let descriptor = svoWideDescriptors[descriptorIndex];
+    let kind = svoWideDescriptorKind(descriptor);
+    let sourceLevel = svoWideDescriptorSourceLevel(descriptor);
+    if (svoWideDescriptorSlot(descriptor) != slot) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    let slotGlobalCoordinate = pageCoordinate * 4u + slotCoordinate;
+    if (kind == SVO_WIDE_KIND_PAGE) {
+      if (sourceLevel != page.level + 2u || sourceLevel > mapping.maximumDepth
+          || descriptor.reference <= frame.pageIndex || descriptor.reference >= publication.pageCount
+          || (*cursor).depth >= SVO_WIDE_CURSOR_STACK_CAPACITY) {
+        (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+        return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+      }
+      let child = svoWidePages[descriptor.reference];
+      if (!svoWidePageHeaderValid(child, descriptor.reference, publication, mapping)
+          || child.level != sourceLevel
+          || any(svoWidePageCoordinate(child) != slotGlobalCoordinate)) {
+        (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+        return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+      }
+      (*cursor).frames[(*cursor).depth] = SvoWideCursorFrame(
+        descriptor.reference, max(frame.nextT, slotInterval.y), slotExit, 0u, 0u);
+      (*cursor).depth += 1u;
+      continue;
+    }
+    if (kind != SVO_WIDE_KIND_TERMINAL || sourceLevel < page.level
+        || sourceLevel > page.level + 2u || sourceLevel > mapping.maximumDepth
+        || descriptor.reference >= mapping.nodeCount
+        || descriptor.sourceLeaf >= mapping.leafCount) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    if (sourceLevel > maximumTraversalDepth) {
+      (*cursor).state = SVO_WIDE_CURSOR_EXHAUSTED;
+      return svoWideCursorMiss(SVO_STATUS_WORK_EXHAUSTED, callVisits);
+    }
+    let terminalDivisor = 1u << (page.level + 2u - sourceLevel);
+    let terminalCoordinate = slotGlobalCoordinate / terminalDivisor;
+    let node = svoNodes[descriptor.reference];
+    let leaf = svoLeaves[descriptor.sourceLeaf];
+    if (node.address.z != sourceLevel || node.links.z != descriptor.sourceLeaf
+        || leaf.topology.x != descriptor.reference
+        || any(svoDecodeMorton(node.address.x, node.address.y, node.address.z) != terminalCoordinate)) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    let terminalInterval = svoRayAabbWithInverse(ray, inverseDirection,
+      svoWideCanonicalBounds(sourceLevel, terminalCoordinate, mapping));
+    if (terminalInterval.x == 0.0) {
+      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+    }
+    (*cursor).frames[frameIndex].nextT = min(frame.exitT, terminalInterval.z);
+    return SvoTraversalHit(SVO_STATUS_HIT, callVisits, descriptor.reference, descriptor.sourceLeaf,
+      leaf.topology.y, sourceLevel, max(ray.tMin, terminalInterval.y), min(ray.tMax, terminalInterval.z));
+  }
+  (*cursor).state = SVO_WIDE_CURSOR_EXHAUSTED;
+  return svoWideCursorMiss(SVO_STATUS_WORK_EXHAUSTED, callVisits);
+}
+`;
+
+export interface WebgpuSvoWideFanoutTraversalBindings {
+  group?: number;
+  pages?: number;
+  descriptors?: number;
+}
+
+/** Bind the resumable wide traversal without consuming control or micro-mip slots. */
+export function createWebgpuSvoWideFanoutTraversalWGSL(bindings: WebgpuSvoWideFanoutTraversalBindings = {}): string {
+  const group = bindings.group ?? 0;
+  const pages = bindings.pages ?? 0;
+  const descriptors = bindings.descriptors ?? 1;
+  for (const [label, value] of Object.entries({ group, pages, descriptors })) {
+    if (!Number.isInteger(value) || value < 0) throw new RangeError(`Wide SVO WGSL ${label} must be a non-negative integer`);
+  }
+  if (pages === descriptors) throw new RangeError("Wide SVO WGSL bindings must be distinct");
+  return webgpuSvoWideFanoutTraversalWGSL
+    .replace("@group(0) @binding(0) var<storage, read> svoWidePages", `@group(${group}) @binding(${pages}) var<storage, read> svoWidePages`)
+    .replace("@group(0) @binding(1) var<storage, read> svoWideDescriptors", `@group(${group}) @binding(${descriptors}) var<storage, read> svoWideDescriptors`);
+}

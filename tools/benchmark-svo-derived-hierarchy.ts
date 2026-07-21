@@ -21,6 +21,7 @@ export interface SvoDerivedBenchmarkReport {
   rayCount: number;
   canonical: { nodeVisits: number; averageNodeVisits: number; hits: number; misses: number; failures: number };
   wide: { pageVisits: number; averagePageVisits: number; descriptorTests: number; hits: number; misses: number; failures: number };
+  outputParity: { mismatches: number; exactMatches: number };
   estimatedLookupReduction: number;
   estimatedLookupReductionPercent: number;
   gateThresholdPercent: number;
@@ -139,6 +140,7 @@ export function runSvoDerivedHierarchyBenchmark(options: Pick<SvoDerivedBenchmar
   const mapping: SvoWorldMapping = { origin: [0, 0, 0], cellSize: [1, 1, 1], brickSize, maximumDepth };
   let canonicalNodeVisits = 0, canonicalHits = 0, canonicalMisses = 0, canonicalFailures = 0;
   let widePageVisits = 0, wideDescriptorTests = 0, wideHits = 0, wideMisses = 0, wideFailures = 0;
+  let parityMismatches = 0;
   for (let sample = 0; sample < options.rays; sample += 1) {
     const leaf = canonicalPlan.leaves[sample % canonicalPlan.leaves.length];
     const node = canonicalPlan.nodes[leaf.nodeIndex];
@@ -155,6 +157,16 @@ export function runSvoDerivedHierarchyBenchmark(options: Pick<SvoDerivedBenchmar
     if (wide.status === "hit") wideHits += 1;
     else if (wide.status === "miss") wideMisses += 1;
     else wideFailures += 1;
+    const statusMatches = canonical.status === wide.status;
+    const hitMatches = canonical.status !== "hit" || wide.status !== "hit" || (
+      canonical.hit.nodeIndex === wide.sourceNodeIndex
+      && canonical.hit.leafIndex === wide.sourceLeafIndex
+      && canonical.hit.level === wide.sourceLevel
+      && canonical.hit.coordinate.every((value, axis) => value === wide.coordinate[axis])
+      && Math.abs(canonical.hit.tEnter - wide.tEnter) <= 1e-9
+      && Math.abs(canonical.hit.tExit - wide.tExit) <= 1e-9
+    );
+    if (!statusMatches || !hitMatches) parityMismatches += 1;
   }
   const reduction = canonicalNodeVisits > 0 ? 1 - widePageVisits / canonicalNodeVisits : 0;
   const finestPageCoordinates = new Map<string, readonly [number, number, number]>();
@@ -180,7 +192,9 @@ export function runSvoDerivedHierarchyBenchmark(options: Pick<SvoDerivedBenchmar
     estimatedLookupReduction: reduction,
     estimatedLookupReductionPercent: reduction * 100,
     gateThresholdPercent: SVO_DERIVED_LOOKUP_REDUCTION_GATE * 100,
-    gatePassed: canonicalFailures === 0 && wideFailures === 0 && reduction >= SVO_DERIVED_LOOKUP_REDUCTION_GATE,
+    gatePassed: canonicalFailures === 0 && wideFailures === 0 && parityMismatches === 0
+      && reduction >= SVO_DERIVED_LOOKUP_REDUCTION_GATE,
+    outputParity: { mismatches: parityMismatches, exactMatches: options.rays - parityMismatches },
     topology: { canonicalNodes: canonicalPlan.nodes.length, canonicalLeaves: canonicalPlan.leaves.length,
       widePages: widePlan.pages.length, wideDescriptors: widePlan.descriptorCount,
       mixedTerminalLevels: [...new Set(canonicalPlan.leaves.map((leaf) => canonicalPlan.nodes[leaf.nodeIndex].level))].sort((a, b) => a - b) },
@@ -196,6 +210,7 @@ export function formatSvoDerivedBenchmarkReport(report: SvoDerivedBenchmarkRepor
     `  rays/seed: ${report.rayCount} / ${report.seed}`,
     `  canonical: ${report.canonical.nodeVisits} node visits (${report.canonical.averageNodeVisits.toFixed(2)}/ray), hits=${report.canonical.hits}, misses=${report.canonical.misses}, failures=${report.canonical.failures}`,
     `  wide 4^3: ${report.wide.pageVisits} page visits (${report.wide.averagePageVisits.toFixed(2)}/ray), descriptor tests=${report.wide.descriptorTests}, hits=${report.wide.hits}, misses=${report.wide.misses}, failures=${report.wide.failures}`,
+    `  output parity: ${report.outputParity.exactMatches}/${report.rayCount} exact, mismatches=${report.outputParity.mismatches}`,
     `  estimated lookup reduction: ${report.estimatedLookupReductionPercent.toFixed(2)}% (gate >= ${report.gateThresholdPercent.toFixed(0)}%: ${report.gatePassed ? "PASS" : "MISS"})`,
     `  topology: canonical nodes=${report.topology.canonicalNodes}, leaves=${report.topology.canonicalLeaves}, wide pages=${report.topology.widePages}, descriptors=${report.topology.wideDescriptors}, terminal levels=${report.topology.mixedTerminalLevels.join(",")}`,
     `  memory: wide=${report.memory.wideBytes} B, mip pages=${report.memory.mipPages}, payload=${report.memory.mipPayloadBytes} B, atlas=${report.memory.mipAtlasBytes} B, directory=${report.memory.mipDirectoryBytes} B, total=${report.memory.mipAllocatedBytes} B`,

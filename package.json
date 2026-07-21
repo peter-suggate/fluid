@@ -50,6 +50,8 @@
     "benchmark:octree-leaves": "node --import tsx tools/benchmark-octree-leaf-sizes.ts",
     "benchmark:svo": "node --import tsx tools/benchmark-svo.ts",
     "benchmark:svo-derived": "node --import tsx tools/benchmark-svo-derived-hierarchy.ts",
+    "benchmark:svo-continuation-gpu": "node --import tsx tools/benchmark-svo-continuation-gpu.ts",
+    "benchmark:svo-wide-gpu": "node --import tsx tools/benchmark-svo-wide-fanout-gpu.ts",
     "benchmark:svo-traversal": "node --import tsx tools/benchmark-svo-traversal-gpu.ts",
     "benchmark:svo-render-stages": "node --import tsx tools/benchmark-svo-render-stages.ts",
     "baseline:svo": "node --import tsx tools/capture-svo-baselines.ts",

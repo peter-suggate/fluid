@@ -23,10 +23,12 @@ test("derived hierarchy benchmark reports repeatable visit and memory telemetry"
   assert.equal(first.rayCount, 48);
   assert.equal(first.canonical.failures, 0);
   assert.equal(first.wide.failures, 0);
+  assert.deepEqual(first.outputParity, { mismatches: 0, exactMatches: 48 });
   assert.ok(first.canonical.nodeVisits > first.wide.pageVisits);
   assert.ok(first.estimatedLookupReduction >= SVO_DERIVED_LOOKUP_REDUCTION_GATE);
   assert.equal(first.gatePassed, true);
   assert.ok(first.memory.wideBytes > 0 && first.memory.mipPages > 0 && first.memory.mipAllocatedBytes > 0);
   assert.match(formatSvoDerivedBenchmarkReport(first), /estimated lookup reduction: [\d.]+% \(gate >= 35%: PASS\)/);
+  assert.match(formatSvoDerivedBenchmarkReport(first), /output parity: 48\/48 exact, mismatches=0/);
   assert.match(formatSvoDerivedBenchmarkReport(first), /mip pages=\d+/);
 });

@@ -366,6 +366,7 @@ const SVO_STATUS_WORK_EXHAUSTED: u32 = 2u;
 const SVO_STATUS_STACK_OVERFLOW: u32 = 3u;
 const SVO_STATUS_SOURCE_OVERFLOW: u32 = 4u;
 const SVO_STATUS_INVALID_TOPOLOGY: u32 = 5u;
+const SVO_STATUS_CONTINUE: u32 = 6u;
 const SVO_STACK_CAPACITY: u32 = 32u;
 const SVO_MAX_VISITS: u32 = 256u;
 
@@ -382,7 +383,17 @@ struct SvoMapping {
   maxVisits: u32,
   _padding: u32,
 }
-struct SvoStackEntry { nodeIndex: u32, octant: u32, tEnter: f32, tExit: f32 }
+struct SvoStackEntry { nodeIndex: u32, tEnter: f32, tExit: f32 }
+struct SvoCandidate { nodeIndex: u32, octant: u32, tEnter: f32, tExit: f32 }
+struct SvoTraversalContinuation {
+  stack: array<SvoStackEntry, 32>,
+  current: SvoStackEntry,
+  currentBounds: mat2x3f,
+  inverseDirection: vec3f,
+  stackSize: u32,
+  currentBoundsValid: u32,
+  status: u32,
+}
 struct SvoTraversalHit {
   status: u32,
   visits: u32,
@@ -402,20 +413,19 @@ fn svoMiss(status: u32, visits: u32) -> SvoTraversalHit {
   return SvoTraversalHit(status, visits, SVO_INVALID, SVO_INVALID, 0u, 0u, 0.0, 0.0);
 }
 
-fn svoKeyBit(low: u32, high: u32, bit: u32) -> u32 {
-  if (bit < 32u) { return (low >> bit) & 1u; }
-  return (high >> (bit - 32u)) & 1u;
+fn svoCompactMortonBits(value: vec3u) -> vec3u {
+  var compact = value & vec3u(0x49249249u);
+  compact = (compact ^ (compact >> vec3u(2u))) & vec3u(0xc30c30c3u);
+  compact = (compact ^ (compact >> vec3u(4u))) & vec3u(0x0f00f00fu);
+  compact = (compact ^ (compact >> vec3u(8u))) & vec3u(0xff0000ffu);
+  return (compact ^ (compact >> vec3u(16u))) & vec3u(0x0000ffffu);
 }
 
 fn svoDecodeMorton(low: u32, high: u32, level: u32) -> vec3u {
-  var result = vec3u(0u);
-  for (var bit = 0u; bit < level; bit += 1u) {
-    let scale = 1u << bit;
-    result.x += svoKeyBit(low, high, 3u * bit) * scale;
-    result.y += svoKeyBit(low, high, 3u * bit + 1u) * scale;
-    result.z += svoKeyBit(low, high, 3u * bit + 2u) * scale;
-  }
-  return result;
+  let levelMask = (1u << level) - 1u;
+  let lowBits = svoCompactMortonBits(vec3u(low, low >> 1u, low >> 2u));
+  let highBits = svoCompactMortonBits(vec3u(high >> 1u, high >> 2u, high));
+  return (lowBits | (highBits << vec3u(11u, 11u, 10u))) & vec3u(levelMask);
 }
 
 fn svoNodeBounds(node: SvoNode, mapping: SvoMapping) -> mat2x3f {
@@ -423,6 +433,11 @@ fn svoNodeBounds(node: SvoNode, mapping: SvoMapping) -> mat2x3f {
   let scale = f32((1u << (mapping.maximumDepth - node.address.z)) * mapping.brickSize);
   let minimum = mapping.worldOrigin + coordinate * scale * mapping.cellSize;
   return mat2x3f(minimum, minimum + scale * mapping.cellSize);
+}
+
+fn svoRootBounds(mapping: SvoMapping) -> mat2x3f {
+  let scale = f32((1u << mapping.maximumDepth) * mapping.brickSize);
+  return mat2x3f(mapping.worldOrigin, mapping.worldOrigin + scale * mapping.cellSize);
 }
 
 fn svoRayAabb(ray: SvoRay, bounds: mat2x3f) -> vec3f {
@@ -465,24 +480,204 @@ fn svoBrickVoxelIndex(voxelOffset: u32, local: vec3u, brickSize: u32) -> u32 {
   return voxelOffset + local.x + local.y * brickSize + local.z * brickSize * brickSize;
 }
 
-fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalDepth: u32) -> SvoTraversalHit {
-  if (svoControl[12] != 0u) { return svoMiss(SVO_STATUS_SOURCE_OVERFLOW, 0u); }
-  if (mapping.nodeCount == 0u) { return svoMiss(SVO_STATUS_MISS, 0u); }
-  let inverseDirection = 1.0 / ray.direction;
-  let rootInterval = svoRayAabbWithInverse(ray, inverseDirection, svoNodeBounds(svoNodes[0], mapping));
-  if (rootInterval.x == 0.0) { return svoMiss(SVO_STATUS_MISS, 0u); }
-  var stack: array<SvoStackEntry, 32>;
-  var stackSize = 1u;
-  stack[0] = SvoStackEntry(0u, 0u, rootInterval.y, rootInterval.z);
+fn svoTraversalContinuationAdvance(continuation: ptr<function, SvoTraversalContinuation>) {
+  if ((*continuation).stackSize == 0u) {
+    (*continuation).status = SVO_STATUS_MISS;
+    return;
+  }
+  (*continuation).stackSize -= 1u;
+  (*continuation).current = (*continuation).stack[(*continuation).stackSize];
+  (*continuation).currentBoundsValid = 0u;
+}
+
+// Initialize a near-to-far traversal cursor once. svoTraversalContinuationNext
+// then yields successive leaves without re-reading the root and common ancestors.
+fn svoTraversalContinuationBegin(
+  ray: SvoRay,
+  mapping: SvoMapping,
+  continuation: ptr<function, SvoTraversalContinuation>,
+) {
+  (*continuation).stackSize = 0u;
+  (*continuation).currentBoundsValid = 0u;
+  (*continuation).status = SVO_STATUS_CONTINUE;
+  if (svoControl[12] != 0u) {
+    (*continuation).status = SVO_STATUS_SOURCE_OVERFLOW;
+    return;
+  }
+  if (mapping.nodeCount == 0u) {
+    (*continuation).status = SVO_STATUS_MISS;
+    return;
+  }
+  let root = svoNodes[0];
+  if (root.address.x != 0u || root.address.y != 0u || root.address.z != 0u) {
+    (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+    return;
+  }
+  (*continuation).inverseDirection = 1.0 / ray.direction;
+  let rootBounds = svoRootBounds(mapping);
+  let rootInterval = svoRayAabbWithInverse(ray, (*continuation).inverseDirection, rootBounds);
+  if (rootInterval.x == 0.0) {
+    (*continuation).status = SVO_STATUS_MISS;
+    return;
+  }
+  (*continuation).current = SvoStackEntry(0u, rootInterval.y, rootInterval.z);
+  (*continuation).currentBounds = rootBounds;
+  (*continuation).currentBoundsValid = 1u;
+}
+
+// Resume the cursor until the next terminal leaf or a terminal traversal status.
+// ray.tMin may advance between calls; deferred entries behind it are discarded,
+// matching a fresh traversal over the narrower interval without restarting at root.
+fn svoTraversalContinuationNext(
+  ray: SvoRay,
+  mapping: SvoMapping,
+  maximumTraversalDepth: u32,
+  continuation: ptr<function, SvoTraversalContinuation>,
+) -> SvoTraversalHit {
+  if ((*continuation).status != SVO_STATUS_CONTINUE) {
+    return svoMiss((*continuation).status, 0u);
+  }
   var visits = 0u;
   let visitLimit = min(max(mapping.maxVisits, 1u), SVO_MAX_VISITS);
   var traversalGuard = 0u;
   while (traversalGuard <= SVO_MAX_VISITS) {
     traversalGuard += 1u;
-    if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
+    let current = (*continuation).current;
+    if (current.tExit < ray.tMin || current.tEnter > ray.tMax) {
+      svoTraversalContinuationAdvance(continuation);
+      if ((*continuation).status != SVO_STATUS_CONTINUE) {
+        return svoMiss((*continuation).status, visits);
+      }
+      continue;
+    }
+    if (visits >= visitLimit) {
+      (*continuation).status = SVO_STATUS_WORK_EXHAUSTED;
+      return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits);
+    }
+    if (current.nodeIndex >= mapping.nodeCount) {
+      (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+      return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+    }
+    let node = svoNodes[current.nodeIndex];
+    visits += 1u;
+    if (node.address.z > mapping.maximumDepth) {
+      (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+      return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+    }
+    if (node.address.z > maximumTraversalDepth) {
+      (*continuation).status = SVO_STATUS_WORK_EXHAUSTED;
+      return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits);
+    }
+    if (node.links.z != SVO_INVALID) {
+      if (node.links.z >= mapping.leafCount) {
+        (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+        return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+      }
+      let leaf = svoLeaves[node.links.z];
+      if (leaf.topology.x != current.nodeIndex) {
+        (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+        return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+      }
+      let hit = SvoTraversalHit(SVO_STATUS_HIT, visits, current.nodeIndex, node.links.z,
+        leaf.topology.y, node.address.z, max(current.tEnter, ray.tMin), min(current.tExit, ray.tMax));
+      svoTraversalContinuationAdvance(continuation);
+      return hit;
+    }
+    let mask = node.address.w & 0xffu;
+    if (mask == 0u) {
+      svoTraversalContinuationAdvance(continuation);
+      if ((*continuation).status != SVO_STATUS_CONTINUE) {
+        return svoMiss((*continuation).status, visits);
+      }
+      continue;
+    }
+    if (node.links.x == SVO_INVALID || countOneBits(mask) != node.links.y) {
+      (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+      return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+    }
+    var parentBounds = (*continuation).currentBounds;
+    if ((*continuation).currentBoundsValid == 0u) { parentBounds = svoNodeBounds(node, mapping); }
+    var candidates: array<SvoCandidate, 8>;
+    var candidateCount = 0u;
+    for (var octant = 0u; octant < 8u; octant += 1u) {
+      if ((mask & (1u << octant)) == 0u) { continue; }
+      let childIndex = node.links.x + svoPopcountBefore(mask, octant);
+      if (childIndex >= mapping.nodeCount) {
+        (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+        return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+      }
+      let child = svoNodes[childIndex];
+      if (child.address.z != node.address.z + 1u) {
+        (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+        return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+      }
+      let childBounds = svoChildBounds(parentBounds, octant);
+      let interval = svoRayAabbWithInverse(ray, (*continuation).inverseDirection, childBounds);
+      if (interval.x == 0.0) { continue; }
+      var insertion = candidateCount;
+      loop {
+        if (insertion == 0u) { break; }
+        let previous = candidates[insertion - 1u];
+        let ordered = previous.tEnter < interval.y
+          || (previous.tEnter == interval.y && (previous.tExit < interval.z
+          || (previous.tExit == interval.z && previous.octant <= octant)));
+        if (ordered) { break; }
+        candidates[insertion] = previous;
+        insertion -= 1u;
+      }
+      candidates[insertion] = SvoCandidate(childIndex, octant, interval.y, interval.z);
+      candidateCount += 1u;
+    }
+    if (candidateCount == 0u) {
+      svoTraversalContinuationAdvance(continuation);
+      if ((*continuation).status != SVO_STATUS_CONTINUE) {
+        return svoMiss((*continuation).status, visits);
+      }
+      continue;
+    }
+    if ((*continuation).stackSize + candidateCount - 1u > SVO_STACK_CAPACITY) {
+      (*continuation).status = SVO_STATUS_STACK_OVERFLOW;
+      return svoMiss(SVO_STATUS_STACK_OVERFLOW, visits);
+    }
+    var remaining = candidateCount;
+    loop {
+      if (remaining <= 1u) { break; }
+      remaining -= 1u;
+      let deferred = candidates[remaining];
+      (*continuation).stack[(*continuation).stackSize] = SvoStackEntry(deferred.nodeIndex, deferred.tEnter, deferred.tExit);
+      (*continuation).stackSize += 1u;
+    }
+    let nearest = candidates[0];
+    (*continuation).current = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
+    (*continuation).currentBounds = svoChildBounds(parentBounds, nearest.octant);
+    (*continuation).currentBoundsValid = 1u;
+  }
+  (*continuation).status = SVO_STATUS_WORK_EXHAUSTED;
+  return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits);
+}
+
+fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalDepth: u32) -> SvoTraversalHit {
+  if (svoControl[12] != 0u) { return svoMiss(SVO_STATUS_SOURCE_OVERFLOW, 0u); }
+  if (mapping.nodeCount == 0u) { return svoMiss(SVO_STATUS_MISS, 0u); }
+  let root = svoNodes[0];
+  if (root.address.x != 0u || root.address.y != 0u || root.address.z != 0u) {
+    return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, 0u);
+  }
+  let inverseDirection = 1.0 / ray.direction;
+  let rootBounds = svoRootBounds(mapping);
+  let rootInterval = svoRayAabbWithInverse(ray, inverseDirection, rootBounds);
+  if (rootInterval.x == 0.0) { return svoMiss(SVO_STATUS_MISS, 0u); }
+  var stack: array<SvoStackEntry, 32>;
+  var stackSize = 0u;
+  var current = SvoStackEntry(0u, rootInterval.y, rootInterval.z);
+  var currentBounds = rootBounds;
+  var currentBoundsValid = true;
+  var visits = 0u;
+  let visitLimit = min(max(mapping.maxVisits, 1u), SVO_MAX_VISITS);
+  var traversalGuard = 0u;
+  while (traversalGuard <= SVO_MAX_VISITS) {
+    traversalGuard += 1u;
     if (visits >= visitLimit) { return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits); }
-    stackSize -= 1u;
-    let current = stack[stackSize];
     if (current.nodeIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
     let node = svoNodes[current.nodeIndex];
     visits += 1u;
@@ -496,12 +691,19 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
         leaf.topology.y, node.address.z, current.tEnter, current.tExit);
     }
     let mask = node.address.w & 0xffu;
-    if (mask == 0u) { continue; }
+    if (mask == 0u) {
+      if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
+      stackSize -= 1u;
+      current = stack[stackSize];
+      currentBoundsValid = false;
+      continue;
+    }
     if (node.links.x == SVO_INVALID || countOneBits(mask) != node.links.y) {
       return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
     }
-    let parentBounds = svoNodeBounds(node, mapping);
-    var candidates: array<SvoStackEntry, 8>;
+    var parentBounds = currentBounds;
+    if (!currentBoundsValid) { parentBounds = svoNodeBounds(node, mapping); }
+    var candidates: array<SvoCandidate, 8>;
     var candidateCount = 0u;
     for (var octant = 0u; octant < 8u; octant += 1u) {
       if ((mask & (1u << octant)) == 0u) { continue; }
@@ -509,7 +711,8 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
       if (childIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
       let child = svoNodes[childIndex];
       if (child.address.z != node.address.z + 1u) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
-      let interval = svoRayAabbWithInverse(ray, inverseDirection, svoChildBounds(parentBounds, octant));
+      let childBounds = svoChildBounds(parentBounds, octant);
+      let interval = svoRayAabbWithInverse(ray, inverseDirection, childBounds);
       if (interval.x == 0.0) { continue; }
       var insertion = candidateCount;
       loop {
@@ -522,19 +725,31 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
         candidates[insertion] = previous;
         insertion -= 1u;
       }
-      candidates[insertion] = SvoStackEntry(childIndex, octant, interval.y, interval.z);
+      candidates[insertion] = SvoCandidate(childIndex, octant, interval.y, interval.z);
       candidateCount += 1u;
     }
-    if (stackSize + candidateCount > SVO_STACK_CAPACITY) {
+    if (candidateCount == 0u) {
+      if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
+      stackSize -= 1u;
+      current = stack[stackSize];
+      currentBoundsValid = false;
+      continue;
+    }
+    if (stackSize + candidateCount - 1u > SVO_STACK_CAPACITY) {
       return svoMiss(SVO_STATUS_STACK_OVERFLOW, visits);
     }
     var remaining = candidateCount;
     loop {
-      if (remaining == 0u) { break; }
+      if (remaining <= 1u) { break; }
       remaining -= 1u;
-      stack[stackSize] = candidates[remaining];
+      let deferred = candidates[remaining];
+      stack[stackSize] = SvoStackEntry(deferred.nodeIndex, deferred.tEnter, deferred.tExit);
       stackSize += 1u;
     }
+    let nearest = candidates[0];
+    current = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
+    currentBounds = svoChildBounds(parentBounds, nearest.octant);
+    currentBoundsValid = true;
   }
   return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits);
 }

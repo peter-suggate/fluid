@@ -8,6 +8,7 @@ import {
   canEncodeSparseVoxelDryScene,
   SVO_DRY_SCENE_BINDING_CONTRACT,
   svoDrySceneShader,
+  svoDrySceneVertexShader,
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
@@ -82,6 +83,18 @@ test("the direct renderer exposes a source-aware replacement texture contract", 
   }
 });
 
+test("the fullscreen vertex stage compiles from a small module isolated from the dry fragment graph", () => {
+  assert.ok(svoDrySceneVertexShader.length < 1_024);
+  assert.match(svoDrySceneVertexShader, /@vertex fn vertexMain/);
+  assert.doesNotMatch(svoDrySceneVertexShader, /@fragment|var<storage|svoTraverse/);
+  assert.doesNotMatch(svoDrySceneShader, /@vertex fn vertexMain/);
+  assert.match(svoDrySceneShader, /@fragment fn fragmentMain/);
+  expectSource(drySceneSource, /const \[vertexModule, fragmentModule\] = await Promise\.all/,
+    "the Metal vertex compiler must not receive the monolithic dry fragment module");
+  expectSource(drySceneSource, /vertex: \{ module: vertexModule[^]*fragment: \{ module: fragmentModule/,
+    "the render pipeline must preserve distinct stage modules");
+});
+
 test("every dry-shader group-zero declaration has one layout and bind-group entry", () => {
   const declarations = [...svoDrySceneShader.matchAll(/@group\(0\)\s+@binding\((\d+)\)\s+var(?:(?:<(uniform|storage,\s*read)>)|\s+[^:]+:\s*(texture_3d<f32>|texture_2d<u32>|sampler))/g)]
     .map((match) => ({
@@ -102,10 +115,13 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
   assert.deepEqual(resources, SVO_DRY_SCENE_BINDING_CONTRACT.map(({ binding }) => binding),
     "every declared/layout binding must have a resource in the sole production bind-group variant");
   assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length, 10,
-    "optional uniform binders must not exceed the portable fragment storage limit");
+    "the dry pass includes the two optional wide-fanout traversal payloads");
+  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ binding }) => binding === 11 || binding === 12), [
+    { binding: 11, type: "read-only-storage" }, { binding: 12, type: "read-only-storage" },
+  ]);
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-3).map(({ binding, type }) => [binding, type]), [
     [16, "texture-3d-float"], [17, "filtering-sampler"], [18, "texture-2d-uint"],
-  ], "cone lighting must consume sampled resources rather than an eleventh fragment storage buffer");
+  ], "cone lighting must consume sampled resources rather than another fragment storage buffer");
   assert.match(drySceneSource, /nodeMip\?\.view \?\? this\.nodeMipFallbackAtlasView/);
   assert.match(drySceneSource, /nodeMip\?\.sampler \?\? this\.nodeMipFallbackSampler/);
   assert.match(drySceneSource, /nodeMip\?\.directoryView \?\? this\.nodeMipFallbackDirectoryView/);
