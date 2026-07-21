@@ -107,6 +107,13 @@ export interface GPUEulerianInfo {
   regularLayers: number;
   maximumNeighborDelta: number;
   gridKind: "restricted-tall-cell" | "quadtree-tall-cell" | "octree" | "uniform";
+  /** True only after the complete sparse t=0 authority passed its queue fence. */
+  initialSparseAuthorityReady?: boolean;
+  /** Renderer-owned gate: a warmed octree is not transport-ready until its first t=0 raster publication is fenced. */
+  initialRasterSurfaceReady?: boolean;
+  /** Honest distinction between GPU-only authority, a readback-confirmed crossing, and fail-closed startup. */
+  initialRasterSurfaceState?: "pending" | "gpu-authoritative" | "crossing-confirmed" | "failed-closed";
+  initialRasterSurfaceDiagnostic?: string;
   cellSize_m: number;
   pressureIterations: number;
   pressureSolver?: string;
@@ -136,6 +143,147 @@ export interface GPUEulerianInfo {
   fluidBrickAtlasMaxVelocityErrorManual?: number;
   sparseSurfaceLogicalPages?: number;
   sparseSurfacePageCapacity?: number;
+  adaptiveSurfacePageCapacity?: number;
+  adaptiveSurfaceActivePages?: number;
+  adaptiveSurfaceCandidatePages?: number;
+  adaptiveSurfaceAdapterCandidateRows?: number;
+  adaptiveSurfaceAdapterDispatchX?: number;
+  adaptiveSurfaceOverflow?: boolean;
+  adaptiveSurfaceOverflowCode?: number;
+  adaptiveSurfaceDepartureFallbacks?: number;
+  adaptiveSurfaceFinestResidentPages?: number;
+  adaptiveSurfaceCoarseResidentPages?: number;
+  adaptiveSurfaceMaximumResidentLeafSize?: number;
+  /** Requested and effective GPU power-diagram projection state. */
+  powerDiagramProjection?: "off" | "mirror" | "authoritative";
+  powerDiagramReady?: boolean;
+  powerDiagramAuthoritative?: boolean;
+  /** Host-known generation stamped into the live GPU power topology/face publication. */
+  powerDiagramGeneration?: number;
+  powerDiagramFallbackReason?: string;
+  powerDiagramAllocatedBytes?: number;
+  globalFineLevelSetAllocatedBytes?: number;
+  globalFineLevelSetResidentBrickCapacity?: number;
+  globalFineLevelSetLogicalBrickCount?: number;
+  /** Global, uniformly indexed sparse fine narrow-band level set. */
+  globalFineLevelSetEnabled?: boolean;
+  globalFineLevelSetFactor?: 4 | 8;
+  /** QA-only global-fine handoff/publication counters. */
+  globalFineSeedCount?: number;
+  globalFineSeedError?: number;
+  globalFineTopologyFlags?: number;
+  /** Bit mask: 1 topology, 2 redistance, 4 volume, 8 transport. */
+  globalFineDownstreamFinalizeReason?: number;
+  globalFineRedistanceUnresolvedCells?: number;
+  globalFineRedistanceSeeds?: number;
+  globalFineRedistanceCommitted?: boolean;
+  globalFineVolumeFlags?: number;
+  globalFineTransportDepartureOutsideBand?: number;
+  globalFineTransportNonfiniteVelocity?: number;
+  globalFineTransportCommitted?: boolean;
+  globalFineTransportFaceBandUnavailable?: number;
+  globalFineTransportVelocityUnavailable?: number;
+  globalFineFaceBandFlags?: number;
+  globalFineFaceBandTransitionFlags?: number;
+  globalFineFaceBandPowerPublicationFlags?: number;
+  globalFineFaceBandTransientPowerFlags?: number;
+  globalFineFaceBandPointFieldFlags?: number;
+  /** Bounded, observational Section 5 transaction details. These values come
+   * from the control headers already read for authority validation; exposing
+   * them does not add a simulation-sized readback. */
+  globalFineFaceBandFirstError?: number;
+  globalFineFaceBandRowCount?: number;
+  globalFineFaceBandFaceCount?: number;
+  globalFineFaceBandIncidenceCount?: number;
+  globalFineFaceBandSeedCount?: number;
+  globalFineFaceBandAcceptedCount?: number;
+  globalFineFaceBandUnresolvedCount?: number;
+  globalFineFaceBandSampleFailures?: number;
+  globalFineFaceBandCoarsePhiFallbacks?: number;
+  globalFineFaceBandCoarsePhiFailures?: number;
+  globalFineFaceBandPhiExtensions?: number;
+  globalFineFaceBandMarchHeapHighWater?: number;
+  globalFineFaceBandMarchPops?: number;
+  globalFineFaceBandMarchTrials?: number;
+  globalFineFaceBandMarchChunks?: number;
+  globalFineFaceBandMarchChunkBound?: number;
+  globalFineFaceBandMarchCapExhausted?: number;
+  globalFineFaceBandMarchUnresolvedWithPredecessor?: number;
+  globalFineFaceBandMarchDisconnected?: number;
+  globalFineFaceBandTransitionFirstError?: number;
+  globalFineFaceBandTransitionRowCount?: number;
+  globalFineFaceBandTransitionRows?: number;
+  globalFineFaceBandTransitionAdjacencyCount?: number;
+  globalFineFaceBandTransitionCoreRows?: number;
+  globalFineFaceBandTransitionSupport1Rows?: number;
+  globalFineFaceBandTransitionSupport2Rows?: number;
+  globalFineFaceBandTransitionSupport3Rows?: number;
+  globalFineFaceBandTransitionEndpointRows?: number;
+  globalFineFaceBandBoundaryGhostRequests?: number;
+  globalFineFaceBandPhiFailureCounts?: {
+    readonly missingRow: number;
+    readonly exactCoarseMiss: number;
+    readonly invalidMetric: number;
+    readonly invalidSelector: number;
+  };
+  globalFineFaceBandPhiFailure?: {
+    readonly cause: number;
+    readonly faceIndex: number;
+    readonly globalFace: number;
+    readonly negativeRow: number;
+    readonly positiveRow: number;
+    readonly anchorRow: number;
+    readonly centroid: readonly [number, number, number];
+    readonly interpolantPath: number;
+    readonly missingOrigin: readonly [number, number, number];
+    readonly missingSize: number;
+    readonly selectorOrCorner: number;
+    readonly detail: number;
+  };
+  globalFineFaceBandTransientPowerFirstError?: number;
+  globalFineFaceBandTransientPowerRows?: number;
+  globalFineFaceBandTransientPowerEmitted?: number;
+  globalFineFaceBandTransientPowerSampled?: number;
+  globalFineFaceBandTransientPowerValidated?: number;
+  globalFineFaceBandPointFieldFirstError?: number;
+  globalFineFaceBandPointFieldRows?: number;
+  globalFineFaceBandPointFieldSolved?: number;
+  globalFineFaceBandPointFieldWallContributions?: number;
+  globalFineFaceBandPowerPublicationFirstError?: number;
+  globalFineFaceBandPowerPublicationFaces?: number;
+  globalFineFaceBandPowerPublicationTargets?: number;
+  globalFineFaceBandPowerPublicationInterpolated?: number;
+  globalFineFaceBandPowerPublicationCommitted?: number;
+  /** Exact live Section 5 transaction identities and validity, decoded from
+   * the existing bounded diagnostics readback. These never steer authority. */
+  globalFineFaceBandGeneration?: number;
+  globalFineFaceBandValid?: boolean;
+  globalFineFaceBandTransitionValid?: boolean;
+  globalFineFaceBandPointFieldValid?: boolean;
+  globalFineFaceBandTransientPowerValid?: boolean;
+  globalFineFaceBandPowerPublicationValid?: boolean;
+  globalFineFaceBandPowerFineGeneration?: number;
+  globalFineFaceBandPowerGeneration?: number;
+  globalFineInterfaceBricks?: number;
+  globalFineDesiredBricks?: number;
+  globalFineActivatedBricks?: number;
+  globalFinePublished?: boolean;
+  globalFineRolledBack?: boolean;
+  globalFineActiveBricks?: number;
+  globalFineGeneration?: number;
+  /** First validation error captured by the solver's diagnostic error scope.
+   * Reporting is asynchronous and never feeds simulation state. */
+  gpuValidationError?: string;
+  pagedPhiDifferentialSamples?: number;
+  pagedPhiDifferentialComparedSamples?: number;
+  pagedPhiDifferentialMaxAbs?: number;
+  pagedPhiDifferentialMeanAbs?: number;
+  pagedPhiDifferentialSignMismatches?: number;
+  pagedPhiDifferentialHashMisses?: number;
+  pagedPhiDifferentialAffineFallbacks?: number;
+  pagedPhiDifferentialMaxCell?: readonly [number, number, number];
+  pagedPhiDifferentialMaxDensePhi?: number;
+  pagedPhiDifferentialMaxPagedPhi?: number;
   sparseSurfaceResidentPages?: number;
   sparseSurfaceCorePages?: number;
   sparseSurfaceHaloPages?: number;
@@ -147,7 +295,11 @@ export interface GPUEulerianInfo {
   volumeCellSum?: number;
   representedVolumeCellSum?: number;
   representedVolumeDrift?: number;
+  /** GPU field which supplied the displayed physical volume. */
+  volumeTelemetrySource?: "global-fine" | "adaptive-pages" | "dense-volume" | "initial-condition" | "unavailable";
   front_m?: number;
+  /** GPU field which supplied the displayed dam-front location. */
+  frontTelemetrySource?: "dense-volume" | "initial-condition" | "unavailable";
   maxSpeed_m_s?: number;
   maxDivergence_s?: number;
   maxDivergenceBefore_s?: number;
@@ -162,7 +314,12 @@ export interface GPUEulerianInfo {
   pressureRequiredRows?: number;
   pressureRequiredEntries?: number;
   pressureCapacityOverflow?: boolean;
+  frontierListCapacity?: number;
+  frontierRequiredLeaves?: number;
+  frontierCapacityOverflow?: boolean;
   maxComponentCfl?: number;
+  /** Faces processed by the latest compact octree velocity transport pass. */
+  adaptiveFaceTransportedCount?: number;
   highCflCellCount?: number;
   nonFiniteCount?: number;
   stabilityFlags?: string[];
@@ -273,6 +430,12 @@ export interface GPUEulerianInfo {
   quadtreeRebuildBlockedFrames?: number;
   quadtreeRebuildCompletedCount?: number;
   gpuTimings?: GPUPhysicsTimings;
+  /** Fluid authority remains in resident GPU resources between submissions. */
+  hostFluidAuthority?: "gpu-resident" | "cpu-reference";
+  /** Simulation-sized host work performed by one authoritative fluid frame. */
+  hostSimulationSizedWorkItems?: number;
+  /** Must remain false for authoritative octree scheduling. */
+  hostSchedulingUsesReadback?: boolean;
 }
 
 export interface WebGPUEulerianSolverOptions {
@@ -393,7 +556,7 @@ struct Params {
 @group(0) @binding(5) var volumeOut: texture_storage_3d<r32float, write>;
 @group(0) @binding(6) var<uniform> params: Params;
 @group(0) @binding(7) var heightIn: texture_2d<f32>;
-@group(0) @binding(8) var heightOut: texture_storage_2d<r32float, write>;
+@group(0) @binding(8) var heightOut: texture_storage_2d<rg32float, write>;
 @group(0) @binding(9) var<storage,read_write> reductions:array<atomic<u32>,4>;
 struct RigidBody {
   positionShape: vec4f,
@@ -462,6 +625,7 @@ ${inflowBoundaryWGSL}
 fn volume(p: vec3i) -> f32 { if (!valid(p)) { return 0.0; } return textureLoad(volumeIn,p,0).x; }
 fn transportConservativeVolume() -> bool { return params.physical.z > 0.5; }
 fn levelSetAuthority() -> bool { return params.physical.w > 0.5; }
+fn hydrostaticSplit() -> bool { return params.inflowTiming.y > 0.5; }
 fn surfaceValue(p: vec3i) -> f32 {
   if (!valid(p)) { return select(0.0, 5.0 * min(params.cellGravity.x, min(params.cellGravity.y, params.cellGravity.z)), levelSetAuthority()); }
   return textureLoad(surfaceIn, p, 0).x;
@@ -631,6 +795,29 @@ fn ambientFluidVelocity(body:RigidBody,p:vec3i,fallback:vec3f)->vec3f{
 fn columnHeight(x:i32,z:i32)->f32{
   let d=dims();if(x<0||x>=d.x||z<0||z>=d.z){return 0.0;}return textureLoad(heightIn,vec2i(x,z),0).x;
 }
+fn hydrostaticSurfaceCells(x:i32,z:i32)->f32{
+  let d=dims();if(x<0||x>=d.x||z<0||z>=d.z){return -1.0;}return textureLoad(heightIn,vec2i(x,z),0).y;
+}
+fn hydrostaticColumnContains(id:vec3i)->bool{
+  let eta=hydrostaticSurfaceCells(id.x,id.z);
+  return eta>=0.0&&f32(id.y)+0.5<eta;
+}
+fn fixedHydrostaticPotentialAtY(yCells:f32)->f32{
+  return -params.cellGravity.w*max((params.inflowTiming.z-yCells)*params.cellGravity.y,0.0);
+}
+fn fixedHydrostaticAcceleration(id:vec3i)->f32{
+  let neighbor=id+vec3i(0,1,0);
+  if(!hydrostaticColumnContains(id)&&!hydrostaticColumnContains(neighbor)){return params.cellGravity.w;}
+  let y0=f32(id.y)+0.5;var y1=f32(neighbor.y)+0.5;
+  let phi0=surfaceValue(id);let phi1=surfaceValue(neighbor);
+  var distance=params.cellGravity.y;
+  if((phi0<0.0)!=(phi1<0.0)){
+    let crossing=clamp(-phi0/(phi1-phi0),0.01,1.0);
+    y1=mix(y0,y1,crossing);distance*=crossing;
+  }
+  let gradient=(fixedHydrostaticPotentialAtY(y1)-fixedHydrostaticPotentialAtY(y0))/max(distance,1e-7);
+  return params.cellGravity.w-gradient;
+}
 fn upwind(face:f32,negative:f32,positive:f32)->f32{return face*select(positive,negative,face>=0.0);}
 fn normalSurfaceOccupancy(id:vec3i)->f32{
   if(valid(id)){return surfaceOccupancy(id);}
@@ -719,13 +906,33 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
   var v=inputVelocity;let occupancy=surfaceOccupancy(id);if(occupancy>0.0){let molecular=params.physical.y/params.physical.x;v+=dt*molecular*velocityLaplacian(id);}
   // Body force lives on faces. A face participates whenever liquid exists on
   // either side; this is the same rule during impact and at equilibrium.
-  if(liquid(id)||liquid(id+vec3i(0,1,0))){v.y+=params.cellGravity.w*dt;}
+  let qy=id+vec3i(0,1,0);let yOccupancy=surfaceOccupancy(qy);
+  let centerLiquid=select(occupancy>=0.5,occupancy>0.5,levelSetAuthority());
+  let yLiquid=select(yOccupancy>=0.5,yOccupancy>0.5,levelSetAuthority());
+  if(centerLiquid||yLiquid){
+    if(hydrostaticSplit()){v.y+=fixedHydrostaticAcceleration(id)*dt;}
+    else{v.y+=params.cellGravity.w*dt;}
+  }
+  let qx=id+vec3i(1,0,0);let qz=id+vec3i(0,0,1);
+  let xOccupancy=surfaceOccupancy(qx);let zOccupancy=surfaceOccupancy(qz);
   // Balanced-force CSF: pressure and capillary acceleration use the same
-  // positive-face locations and alpha differences.
+  // positive-face locations and alpha differences. Curvature is a deep
+  // stencil, so evaluate the centre once and only on faces whose occupancy
+  // difference can produce a non-zero force. The previous formulation
+  // evaluated centre curvature three times and paid six curvature stencils in
+  // every bulk cell even though the final multiplication was exactly zero.
   let sigmaOverRho=params.boundary.x/params.physical.x;
-  if(valid(id+vec3i(1,0,0))){v.x+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(1,0,0)))*(surfaceOccupancy(id+vec3i(1,0,0))-occupancy)/h.x;}
-  if(valid(id+vec3i(0,1,0))){v.y+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(0,1,0)))*(surfaceOccupancy(id+vec3i(0,1,0))-occupancy)/h.y;}
-  if(valid(id+vec3i(0,0,1))){v.z+=dt*sigmaOverRho*0.5*(curvatureAt(id)+curvatureAt(id+vec3i(0,0,1)))*(surfaceOccupancy(id+vec3i(0,0,1))-occupancy)/h.z;}
+  if(sigmaOverRho>0.0){
+    let dx=select(0.0,xOccupancy-occupancy,valid(qx));
+    let dy=select(0.0,yOccupancy-occupancy,valid(qy));
+    let dz=select(0.0,zOccupancy-occupancy,valid(qz));
+    if(dx!=0.0||dy!=0.0||dz!=0.0){
+      let centreCurvature=curvatureAt(id);
+      if(dx!=0.0){v.x+=dt*sigmaOverRho*0.5*(centreCurvature+curvatureAt(qx))*dx/h.x;}
+      if(dy!=0.0){v.y+=dt*sigmaOverRho*0.5*(centreCurvature+curvatureAt(qy))*dy/h.y;}
+      if(dz!=0.0){v.z+=dt*sigmaOverRho*0.5*(centreCurvature+curvatureAt(qz))*dz/h.z;}
+    }
+  }
   v=applyInflowVelocity(id,v);let d=dims();if(id.x==d.x-1){v.x=0.0;}if(id.y==d.y-1){v.y=0.0;}if(id.z==d.z-1){v.z=0.0;}return v;
 }
 
@@ -750,6 +957,8 @@ fn buildFluxScales(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_i
 }
 // Highest cell supported by the authoritative surface in each column;
 // advection skips cells well above it after projection zeroes their faces.
+// The second channel is a separate bottom/terrain-connected zero crossing for
+// the hydrostatic reference. Floating sheets and spray never enter that field.
 @compute @workgroup_size(8,8,1)
 fn buildOccupancy(@builtin(global_invocation_id) gid:vec3u){
   let d=dims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}
@@ -758,8 +967,27 @@ fn buildOccupancy(@builtin(global_invocation_id) gid:vec3u){
   // it becomes the historical dense y scan only when no indirect work exists.
   if(bulkAtlasControl.y!=0u&&sparseCell64Ready()){return;}
   var highest=-1.0;
-  for(var y:i32=d.y-1;y>=0;y-=1){if(surfaceOccupancy(vec3i(i32(gid.x),y,i32(gid.y)))>0.0001){highest=f32(y);break;}}
-  textureStore(heightOut,vec2i(gid.xy),vec4f(highest));
+  if(!hydrostaticSplit()){
+    for(var y:i32=d.y-1;y>=0;y-=1){if(surfaceOccupancy(vec3i(i32(gid.x),y,i32(gid.y)))>0.0001){highest=f32(y);break;}}
+    textureStore(heightOut,vec2i(gid.xy),vec4f(highest,-1.0,0.0,0.0));return;
+  }
+  var referenceTop=-1;var referenceStarted=false;var referenceEnded=false;
+  for(var y:i32=0;y<d.y;y+=1){
+    let p=vec3i(i32(gid.x),y,i32(gid.y));let occupied=surfaceOccupancy(p)>0.0001;
+    if(occupied){highest=f32(y);}
+    if(!referenceEnded&&!cellInsideTerrain(p)){
+      let wet=surfaceLiquid(p);
+      if(!referenceStarted){referenceStarted=wet;if(wet){referenceTop=y;}else{referenceEnded=true;}}
+      else if(wet){referenceTop=y;}else{referenceEnded=true;}
+    }
+  }
+  var eta=-1.0;
+  if(referenceTop>=0){
+    let p=vec3i(i32(gid.x),referenceTop,i32(gid.y));let phi0=surfaceValue(p);let phi1=surfaceValue(p+vec3i(0,1,0));let difference=phi1-phi0;
+    let crossing=select(1.0,clamp(-phi0/difference,0.0,1.0),difference>1e-7);
+    eta=f32(referenceTop)+0.5+crossing;
+  }
+  textureStore(heightOut,vec2i(gid.xy),vec4f(highest,eta,0.0,0.0));
 }
 // Cell64 deliberately visits every resident payload cell. Atomics collapse
 // all y bricks sharing a column without races, including floating/disconnected
@@ -776,7 +1004,7 @@ fn resolveSparseOccupancy(@builtin(global_invocation_id) gid:vec3u){
   let d=dims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}
   if(!sparseCell64Ready()){return;}
   let column=gid.x+u32(d.x)*gid.y;if(column>=arrayLength(&occupancyColumns)){return;}
-  textureStore(heightOut,vec2i(gid.xy),vec4f(f32(atomicLoad(&occupancyColumns[column]))-1.0));
+  textureStore(heightOut,vec2i(gid.xy),vec4f(f32(atomicLoad(&occupancyColumns[column]))-1.0,-1.0,0.0,0.0));
 }
 fn nearInflow(id:vec3i)->bool{
   if(inflowStrength()<=0.0){return false;}
@@ -822,12 +1050,12 @@ fn reverseAdvection(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_
   if(id.x==d.x-1){v.x=0.0;}if(id.y==d.y-1){v.y=0.0;}if(id.z==d.z-1){v.z=0.0;}textureStore(velocityOut,id,vec4f(v,0.0));
 }
 
-fn boundedMacCormack(id:vec3i,position:vec3f,component:u32,dt:f32,h:vec3f)->f32{
+fn boundedMacCormack(id:vec3i,position:vec3f,component:u32,dt:f32,h:vec3f,predicted:f32,original:f32,reversed:f32)->f32{
   var offset=vec3f(0.5);offset[component]=1.0;var lowerCoordinate=vec3f(0.0);lowerCoordinate[component]=-1.0;
   let q=clamp(departurePoint(position,dt,h)-offset,lowerCoordinate,vec3f(dims()-vec3i(1)));let b=vec3i(floor(q));
   var lower=sampledFaceVelocity(b,component);var upper=lower;
   for(var corner:u32=1u;corner<8u;corner+=1u){let cornerOffset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let value=sampledFaceVelocity(b+cornerOffset,component);lower=min(lower,value);upper=max(upper,value);}
-  let predicted=textureLoad(predictedVelocityIn,id,0)[component];let original=textureLoad(velocityIn,id,0)[component];let reversed=textureLoad(reversedVelocityIn,id,0)[component];let corrected=predicted+0.5*(original-reversed);
+  let corrected=predicted+0.5*(original-reversed);
   return select(corrected,predicted,corrected<lower||corrected>upper);
 }
 
@@ -836,7 +1064,8 @@ fn correctAdvection(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_
   let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}let id=scheduled.id;if(!valid(id)){return;}
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
   let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
-  var v=vec3f(boundedMacCormack(id,cell+vec3f(1.0,0.5,0.5),0u,dt,h),boundedMacCormack(id,cell+vec3f(0.5,1.0,0.5),1u,dt,h),boundedMacCormack(id,cell+vec3f(0.5,0.5,1.0),2u,dt,h));v=applyVelocityForces(id,v,dt,h);
+  let predicted=textureLoad(predictedVelocityIn,id,0).xyz;let original=textureLoad(velocityIn,id,0).xyz;let reversed=textureLoad(reversedVelocityIn,id,0).xyz;
+  var v=vec3f(boundedMacCormack(id,cell+vec3f(1.0,0.5,0.5),0u,dt,h,predicted.x,original.x,reversed.x),boundedMacCormack(id,cell+vec3f(0.5,1.0,0.5),1u,dt,h,predicted.y,original.y,reversed.y),boundedMacCormack(id,cell+vec3f(0.5,0.5,1.0),2u,dt,h,predicted.z,original.z,reversed.z));v=applyVelocityForces(id,v,dt,h);
   textureStore(velocityOut,id,vec4f(v,0.0));
 }
 
@@ -1297,7 +1526,6 @@ export class WebGPUEulerianSolver {
     // passes. Queue-completion timing remains reliable across browsers; the
     // timestamp ring is reserved for the single-pass uniform baseline.
     if(!options.deferPipelineCompilation)device.pushErrorScope("validation");this.shaderModule=device.createShaderModule({label:"Fluid Lab restricted tall-cell kernels",code:tallCellComputeShader});
-    void this.shaderModule.getCompilationInfo().then(info=>{for(const message of info.messages)if(message.type==="error")console.error(`GPU fluid WGSL ${message.lineNum}:${message.linePos} ${message.message}`);}).catch(()=>{/* Device loss is reported by the renderer. */});
     this.bindGroupLayout=device.createBindGroupLayout({entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
@@ -1387,8 +1615,13 @@ export class WebGPUEulerianSolver {
   // column bases.
   get preProjectionVelocityTexture(){return this.velocityC;}
   private initializeVolume(){
-    const {nx,nz,packedNy,initialPhi,columnBases,initialVolumeCellSum,referenceLiquidVolume_cells}=this.layout,c=this.scene.container,dam=damBreakFractions(c.fillFraction);this.referenceLiquidVolumeCells=referenceLiquidVolume_cells*(this.options.referenceVolumeScale??1);
-    this.info.initialVolumeCellSum=initialVolumeCellSum;this.info.volumeCellSum=initialVolumeCellSum;this.info.representedVolumeCellSum=initialVolumeCellSum;this.info.representedVolumeDrift=0;this.info.volumeDrift=0;this.info.rawVolumeDrift=0;this.info.maxSpeed_m_s=0;this.info.maxDivergence_s=0;this.info.maxDivergenceBefore_s=0;this.info.maxDivergenceAfter_s=0;this.info.maxAirSpeed_m_s=0;this.info.maxPressure_Pa=0;this.info.pressureResidual=0;this.info.pressureRelativeResidual=0;this.info.maxComponentCfl=0;this.info.highCflCellCount=0;this.info.nonFiniteCount=0;this.info.stabilityFlags=[];this.info.front_m=this.scene.fluid.initialCondition==="dam-break"?-c.width_m/2+dam.width*c.width_m:c.width_m/2;
+    const {nx,nz,packedNy,initialPhi,columnBases,initialVolumeCellSum,referenceLiquidVolume_cells}=this.layout,c=this.scene.container,dam=damBreakFractions(c.fillFraction);const initiallyRepresented=referenceLiquidVolume_cells;this.referenceLiquidVolumeCells=initiallyRepresented*(this.options.referenceVolumeScale??1);const initialDrift=(initiallyRepresented-this.referenceLiquidVolumeCells)/Math.max(1,this.referenceLiquidVolumeCells);
+    // This solver transports phi, so its represented-volume diagnostics and
+    // controller reference use the smooth-Heaviside/fixed-point functional
+    // from reduceDiagnostics. Keep initialVolumeCellSum as distinct binary
+    // seed metadata; using it as the controller reference fabricated a ~6.6%
+    // first-step loss on the 24x18x16 dam break before meaningful transport.
+    this.info.initialVolumeCellSum=initialVolumeCellSum;this.info.volumeCellSum=initiallyRepresented;this.info.representedVolumeCellSum=initiallyRepresented;this.info.representedVolumeDrift=initialDrift;this.info.volumeDrift=initialDrift;this.info.rawVolumeDrift=initialDrift;this.info.maxSpeed_m_s=0;this.info.maxDivergence_s=0;this.info.maxDivergenceBefore_s=0;this.info.maxDivergenceAfter_s=0;this.info.maxAirSpeed_m_s=0;this.info.maxPressure_Pa=0;this.info.pressureResidual=0;this.info.pressureRelativeResidual=0;this.info.maxComponentCfl=0;this.info.highCflCellCount=0;this.info.nonFiniteCount=0;this.info.stabilityFlags=[];this.info.front_m=this.scene.fluid.initialCondition==="dam-break"?-c.width_m/2+dam.width*c.width_m:c.width_m/2;
     this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;this.info.volumeCorrectionNormalSpeed_cells_s=0;
     const rowBytes=nx*4,padded=Math.ceil(rowBytes/256)*256,packed=new Uint8Array(padded*packedNy*nz),source=new Uint8Array(initialPhi.buffer,initialPhi.byteOffset,initialPhi.byteLength);
     for(let k=0;k<nz;k++)for(let j=0;j<packedNy;j++)packed.set(source.subarray(rowBytes*(j+packedNy*k),rowBytes*(j+packedNy*k+1)),padded*(j+packedNy*k));

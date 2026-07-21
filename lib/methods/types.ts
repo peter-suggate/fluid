@@ -7,7 +7,13 @@ import type { Vec3 } from "../model";
 import type { GPUSecondaryParticleSource } from "../webgpu-secondary-particles";
 import type { SparseVoxelRenderSource, SparseVoxelSceneRenderSource } from "../webgpu-voxel-debug";
 import type { SparseSurfaceBandGPUSource } from "../webgpu-sparse-surface-band";
+import type { OctreeFaceMirrorSource } from "../webgpu-octree-face-mirror";
+import type { OctreeFaceVelocitySource } from "../webgpu-octree-face-transport";
+import type { OctreeSurfacePageSource } from "../webgpu-octree-surface-pages";
+import type { WebGPUFineLevelSetBrickSource } from "../webgpu-octree-fine-levelset-bricks";
 import type { GPUInitializationPhase } from "../gpu-initialization";
+import type { OctreeFaceBandGPUPlan } from "../webgpu-octree-face-fast-march";
+import type { OctreeTechniqueDebugSource } from "../octree-technique-debug";
 
 /**
  * Method plugin contract.
@@ -76,6 +82,37 @@ export interface GPUSolverInstance {
   readonly sparseVoxelRenderSource?: SparseVoxelRenderSource;
   /** Dynamically paged fine phi/velocity band for sparse extraction and inspection. */
   readonly sparseSurfaceBand?: SparseSurfaceBandGPUSource;
+  /** Default-off adaptive MAC-face migration mirror and parity counters. */
+  readonly adaptiveFaceMirrorSource?: OctreeFaceMirrorSource;
+  /** Authoritative compact adaptive MAC velocity and its four-word reduction. */
+  readonly adaptiveFaceVelocitySource?: OctreeFaceVelocitySource;
+  /** Leaf-attached authoritative narrow-band phi pages for octree-native consumers. */
+  readonly adaptiveSurfacePageSource?: OctreeSurfacePageSource;
+  /** Exact compact topology/geometry buffers for paper-technique overlays. */
+  readonly octreeTechniqueDebugSource?: OctreeTechniqueDebugSource;
+  /** True only after the complete t=0 sparse authority has passed its queue fence. */
+  readonly initialSparseAuthorityReady?: boolean;
+  /** Row-independent, globally indexed sparse fine level-set bricks. */
+  readonly globalFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
+  /** Diagnostic-only; never participates in authority selection. */
+  readonly globalFineTransportControl?: GPUBuffer;
+  readonly globalFineRedistanceControl?: GPUBuffer;
+  readonly globalFineVolumeControl?: GPUBuffer;
+  readonly globalFinePowerVelocityControl?: GPUBuffer;
+  /** Diagnostic-only Stage-B point-sampler transaction used by fine transport. */
+  readonly globalFinePowerVelocitySampleControl?: GPUBuffer;
+  readonly globalFineCoarseLevelSetControl?: GPUBuffer;
+  /** Diagnostic-only Section 5 regular-face extrapolation header and exact capacity plan. */
+  readonly globalFineFaceBandControl?: GPUBuffer;
+  /** Diagnostic-only catalog-Delaunay transition gate preceding regular-face emission. */
+  readonly globalFineFaceBandTransitionControl?: GPUBuffer;
+  /** Diagnostic-only transactional cell-vector field reconstructed after the face march. */
+  readonly globalFineFaceBandPointFieldControl?: GPUBuffer;
+  /** Diagnostic-only all-band transient physical generalized-face graph transaction. */
+  readonly globalFineFaceBandTransientPowerControl?: GPUBuffer;
+  /** Diagnostic-only regular-face to power-face publication transaction. */
+  readonly globalFineFaceBandPowerPublicationControl?: GPUBuffer;
+  readonly globalFineFaceBandPlan?: OctreeFaceBandGPUPlan;
   /** GPU-authored rigid records matching the renderer's four-vec4 body ABI. */
   readonly rigidRenderBuffer?: GPUBuffer;
   /** GPU-authored 128-byte primitive-motion sidecars, including conservative swept bounds. */

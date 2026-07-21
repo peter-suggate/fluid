@@ -5,6 +5,7 @@ import type { EulerianDiagnostics, EulerianRenderState } from "../eulerian-solve
 import type { RigidBodyState, RigidStepDiagnostics } from "../rigid-body";
 import type { CouplingDiagnostics } from "../fluid-rigid-coupling";
 import type { MetricSample } from "../model";
+import type { WaterSurfacePresentationDiagnostics } from "../webgpu-water-pipeline";
 
 export interface PerformanceSnapshot {
   methodId: string;
@@ -94,6 +95,7 @@ interface DiagnosticsStore {
   gpuStatus: GPUStatus;
   gpuInfo: GPUEulerianInfo | null;
   effectiveRendererStatus: EffectiveRendererStatus;
+  waterSurfacePresentation: WaterSurfacePresentationDiagnostics | null;
   frameMs: number;
   resolution: string;
   samples: MetricSample[];
@@ -112,6 +114,7 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   gpuStatus: { state: "initializing", label: "Initializing WebGPU" },
   gpuInfo: null,
   effectiveRendererStatus: { requestedMode: "raster", effectiveMode: "raster" },
+  waterSurfacePresentation: null,
   frameMs: 0,
   resolution: "—",
   samples: [],

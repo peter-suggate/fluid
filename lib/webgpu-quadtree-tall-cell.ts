@@ -2146,7 +2146,6 @@ export class WebGPUQuadtreeTallCellProjection {
         { binding: 17, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
       ] });
       this.shaderModule = device.createShaderModule({ label: "Quadtree tall-cell variational PCG", code: quadtreeTallCellProjectionShader });
-      void this.shaderModule.getCompilationInfo().then((result) => { for (const message of result.messages) if (message.type === "error") console.error(`Quadtree tall-cell WGSL ${message.lineNum}:${message.linePos} ${message.message}`); }).catch(()=>{/* Device loss is reported by the renderer. */});
       this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
       this.gpuCache = { layout, module: this.shaderModule, pipelineLayout: this.pipelineLayout };
     }
@@ -2212,7 +2211,6 @@ export class WebGPUQuadtreeTallCellProjection {
         { binding: 6, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
       ] });
       const module = device.createShaderModule({ label: "Quadtree surface transport velocity", code: quadtreeSurfaceTransportShader });
-      void module.getCompilationInfo().then((result) => { for (const message of result.messages) if (message.type === "error") console.error(`Quadtree surface transport WGSL ${message.lineNum}:${message.linePos} ${message.message}`); }).catch(() => { /* Device loss is reported by the renderer. */ });
       this.gpuCache.surfaceTransportPipeline = device.createComputePipeline({ label: "Quadtree surface transport velocity", layout: device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.surfaceTransportLayout] }), compute: { module, entryPoint: "buildSurfaceTransport" } });
     }
     this.surfaceTransportPipeline = this.gpuCache.surfaceTransportPipeline;
@@ -2270,7 +2268,6 @@ export class WebGPUQuadtreeTallCellProjection {
           { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
         ] });
         this.gpuCache.multigridModule = device.createShaderModule({ label: "Quadtree geometric multigrid", code: quadtreeMultigridShader });
-        void this.gpuCache.multigridModule.getCompilationInfo().then((result) => { for (const message of result.messages) if (message.type === "error") console.error(`Quadtree multigrid WGSL ${message.lineNum}:${message.linePos} ${message.message}`); }).catch(() => { /* Device loss is reported by the renderer. */ });
         this.gpuCache.multigridPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.multigridLayout] });
       }
       this.multigridPipelines = this.gpuCache.multigridPipelines ?? (deferPipelineCompilation ? {} : Object.fromEntries(quadtreeMultigridPipelineNames.map((entryPoint) => [entryPoint, device.createComputePipeline({ label: `Quadtree multigrid ${entryPoint}`, layout: this.gpuCache.multigridPipelineLayout!, compute: { module: this.gpuCache.multigridModule!, entryPoint } })])));

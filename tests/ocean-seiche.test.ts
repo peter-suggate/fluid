@@ -7,14 +7,14 @@ import { createTallCellLayout, initialLiquidPhi, type GPUQuality } from "../lib/
 import { createSmokeScenario, isSmokeScenarioId, minimumOceanFarHalfDisturbanceCells } from "../tools/webgpu-smoke-scenarios";
 import { validateScene } from "../lib/model";
 
-const OCEAN_GRID = [384, 96, 64] as const;
+const OCEAN_GRID = [320, 96, 80] as const;
 
-test("ocean tank resolves to exactly 384x96x64 finest cells at every quality", () => {
+test("ocean tank resolves to exactly 320x96x80 finest cells at every quality", () => {
   const scene = createOceanSeicheScene();
   assert.deepEqual(validateScene(scene), []);
   for (const quality of ["balanced", "high", "ultra"] as GPUQuality[]) {
     const layout = createTallCellLayout(scene, quality);
-    assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [...OCEAN_GRID], `${quality} finest grid must be 48x12x8 bricks of 8-cubed cells`);
+    assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [...OCEAN_GRID], `${quality} finest grid must be 40x12x10 bricks of 8-cubed cells`);
   }
 });
 
@@ -22,7 +22,7 @@ test("ocean water is a settled pool plus one raised full-depth slab along the -x
   const scene = createOceanSeicheScene();
   assert.equal(scene.fluid.initialCondition, "tank-fill");
   assert.equal(scene.fluid.initialBrickSeedsAdditive, true);
-  assert.equal(scene.fluid.initialBrickSeeds_m?.length, 16, "the slab is 2x1x8 seeded bricks");
+  assert.equal(scene.fluid.initialBrickSeeds_m?.length, 20, "the slab is 2x1x10 seeded bricks");
   const [nx, ny, nz] = OCEAN_GRID;
   const poolLayers = Math.round(scene.container.fillFraction * ny);
   assert.equal(poolLayers, 72, "the pool surface must sit exactly on a brick boundary");
@@ -64,12 +64,12 @@ test("ocean scene is registered in the UI presets and the smoke harness with lea
   assert.match(preset.description, /32/);
   assert.ok(isSmokeScenarioId("ocean-seiche"));
   const scenario = createSmokeScenario("ocean-seiche");
-  assert.equal(scenario.scene.numerics.surfaceColumnsOverride, 24576);
+  assert.equal(scenario.scene.numerics.surfaceColumnsOverride, 25600);
   assert.equal(scenario.scene.fluid.surfaceTension_N_m, 0);
-  assert.equal(scenario.scene.container.width_m, 9.6);
+  assert.equal(scenario.scene.container.width_m, 8.0);
   assert.equal(scenario.scene.container.height_m, 2.4);
-  assert.equal(scenario.scene.container.depth_m, 1.6);
-  assert.equal(minimumOceanFarHalfDisturbanceCells(scenario.scene.container.width_m), 0.375,
+  assert.equal(scenario.scene.container.depth_m, 2.0);
+  assert.equal(minimumOceanFarHalfDisturbanceCells(scenario.scene.container.width_m), 0.45,
     "the fixed slab's far-half amplitude bar scales inversely with widened tank length");
   assert.ok(scenario.target_s >= 5, "the wave needs several crossings of observation time");
   // Scenes cannot carry method parameters; the harness must request the

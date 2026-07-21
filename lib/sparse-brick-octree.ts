@@ -470,7 +470,8 @@ fn materializeDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(nu
   }
   let dense = u32(q.x) + params.dims.x * (u32(q.y) + params.dims.y * u32(q.z));
   let phi = textureLoad(levelSet, q, 0).x;
-  let solid = solidCells[dense];
+  var solid = SolidCell(0.0, -1);
+  if (dense < arrayLength(&solidCells)) { solid = solidCells[dense]; }
   let h = min(params.cell.x, min(params.cell.y, params.cell.z));
   let solidPhi = (0.5 - clamp(solid.fraction, 0.0, 1.0)) * 2.0 * h;
   let materialOffset = control[18] + output;

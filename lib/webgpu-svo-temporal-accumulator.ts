@@ -12,7 +12,7 @@ export const SVO_TEMPORAL_ACCUMULATION_LAYOUT = Object.freeze({
   previousNeighborhoodLoadsPerAcceptedPixel: 9,
   neighborhoodLoadsPerAcceptedPixel: 8,
   fullScreenResolvePassesPerFrame: 1,
-  aliasBreakingCopiesPerFrame: 1,
+  aliasBreakingCopiesPerFrame: 0,
   maximumAccumulationSamples: 64,
   maximumStoredSamples: 255,
 } as const);
@@ -43,9 +43,18 @@ export interface SparseVoxelTemporalFrameState {
 
 interface TemporalHistorySet {
   color: GPUTexture;
+  colorView: GPUTextureView;
   moments: GPUTexture;
+  momentsView: GPUTextureView;
   keyA: GPUTexture;
+  keyAView: GPUTextureView;
   keyB: GPUTexture;
+  keyBView: GPUTextureView;
+}
+
+export interface SparseVoxelTemporalResolve {
+  readonly resolvedTexture: GPUTexture;
+  readonly resolvedView: GPUTextureView;
 }
 
 const shader = /* wgsl */ `
@@ -72,6 +81,7 @@ struct TemporalParams{
 @group(0) @binding(6) var previousKeyA:texture_2d<u32>;
 @group(0) @binding(7) var previousKeyB:texture_2d<u32>;
 const TEMPORAL_REQUIRED_FLAGS:u32=SVO_GBUFFER_VALID_SURFACE|SVO_GBUFFER_DEPTH_VALID|SVO_GBUFFER_GEOMETRIC_NORMAL_VALID|SVO_GBUFFER_SHADING_NORMAL_VALID|SVO_GBUFFER_MOTION_VALID|SVO_GBUFFER_MEDIA_VALID;
+const TEMPORAL_FAILURE_SHADOW_DEFERRED:u32=8u;
 const TEMPORAL_TAN_HALF_FOV:f32=.72;
 struct TemporalVertexOut{@builtin(position) position:vec4f}
 @vertex fn temporalVertex(@builtin(vertex_index) index:u32)->TemporalVertexOut{var points=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));return TemporalVertexOut(vec4f(points[index],0,1));}
@@ -104,14 +114,18 @@ fn temporalVarianceClamp(colorIn:vec3f,moments:vec4f)->vec3f{
   let luminance=temporalLuminance(colorIn);let variance=max(moments.y-moments.x*moments.x,0.0);let deviation=max(2.0*sqrt(variance),.01);let clipped=clamp(luminance,moments.x-deviation,moments.x+deviation);return colorIn*select(1.0,clipped/max(luminance,1e-6),luminance>1e-6);
 }
 @fragment fn temporalFragment(@builtin(position) position:vec4f)->TemporalOut{
-  let dimensions=vec2i(textureDimensions(currentColor));let pixel=clamp(vec2i(position.xy),vec2i(0),dimensions-vec2i(1));let current=textureLoad(currentColor,pixel,0);let packed=textureLoad(currentPackedSurface,pixel,0);let identity=textureLoad(currentIdentityMedia,pixel,0);let published=temporalPublishedKey(packed,identity);let metadataFlags=(packed.w>>4u)&0xffffu;let motionKind=packed.z>>30u;let velocity=temporalVelocity(packed.z);let supportedMotion=motionKind==SVO_TEMPORAL_MOTION_STATIC||motionKind==SVO_TEMPORAL_MOTION_RIGID;let currentUsable=(metadataFlags&TEMPORAL_REQUIRED_FLAGS)==TEMPORAL_REQUIRED_FLAGS&&supportedMotion&&current.a>0.0;
+  let dimensions=vec2i(textureDimensions(currentColor));let pixel=clamp(vec2i(position.xy),vec2i(0),dimensions-vec2i(1));let current=textureLoad(currentColor,pixel,0);let packed=textureLoad(currentPackedSurface,pixel,0);let identity=textureLoad(currentIdentityMedia,pixel,0);let published=temporalPublishedKey(packed,identity);let metadataFlags=(packed.w>>4u)&0xffffu;let failure=(packed.w>>20u)&0xffu;let shadowDeferred=failure==TEMPORAL_FAILURE_SHADOW_DEFERRED;let motionKind=packed.z>>30u;let velocity=temporalVelocity(packed.z);let supportedMotion=motionKind==SVO_TEMPORAL_MOTION_STATIC||motionKind==SVO_TEMPORAL_MOTION_RIGID;let currentUsable=(metadataFlags&TEMPORAL_REQUIRED_FLAGS)==TEMPORAL_REQUIRED_FLAGS&&supportedMotion&&current.a>0.0;
   var accepted=false;var previous=vec4f(0.0);var oldMoments=vec4f(0.0);var previousPixel=vec2i(0);var expectedPreviousDistance=0.0;
   if(temporal.control.z>.5&&currentUsable){
     let world=temporal.currentPosition.xyz+temporalCurrentRay(position.xy)*current.a;let previousWorld=world-velocity*temporal.control.y;let relative=previousWorld-temporal.previousPosition.xyz;let previousForwardDepth=dot(relative,temporal.previousForward.xyz);let previousNdc=vec2f(dot(relative,temporal.previousRight.xyz)/(max(previousForwardDepth,1e-6)*temporal.currentForwardAspect.w*TEMPORAL_TAN_HALF_FOV),dot(relative,temporal.previousUp.xyz)/(max(previousForwardDepth,1e-6)*TEMPORAL_TAN_HALF_FOV));let previousUv=previousNdc*.5+.5;let reprojectValid=previousForwardDepth>0.0&&all(previousUv>=vec2f(0.0))&&all(previousUv<vec2f(1.0));
     if(reprojectValid){previousPixel=clamp(vec2i(floor(previousUv*temporal.viewport.xy)),vec2i(0),dimensions-vec2i(1));oldMoments=textureLoad(previousMoments,previousPixel,0);if(oldMoments.z>0.0){let keyA=textureLoad(previousKeyA,previousPixel,0);let keyB=textureLoad(previousKeyB,previousPixel,0);let exactIdentity=all(keyA.zw==published[0].zw)&&all(keyB==published[1]);if(exactIdentity){previous=textureLoad(previousColor,previousPixel,0);var currentKey=temporalKey(current,packed,identity);expectedPreviousDistance=length(relative);currentKey.depth_m=expectedPreviousDistance;let previousKey=temporalPreviousKey(previous,keyA,keyB);let error=abs(previous.a-expectedPreviousDistance);accepted=svoTemporalHistoryReason(currentKey,previousKey,temporal.control.x,temporal.control.y,velocity,motionKind,true,true,error)==SVO_TEMPORAL_REASON_ACCEPTED;}}}
   }
-  var result=current.rgb;var sampleCount=select(-1.0,1.0,currentUsable);var pausedStable=select(0.0,1.0,temporal.control.w>.5&&currentUsable);if(accepted){let neighborhood=temporalNeighborhood(pixel,dimensions,current.rgb);var history=clamp(previous.rgb,neighborhood[0],neighborhood[1]);history=temporalVarianceClamp(history,oldMoments);sampleCount=min(oldMoments.z+1.0,255.0);pausedStable=select(0.0,min(oldMoments.w+1.0,255.0),temporal.control.w>.5);let accumulationCount=min(sampleCount,${SVO_TEMPORAL_ACCUMULATION_LAYOUT.maximumAccumulationSamples}.0);result=mix(current.rgb,history,(accumulationCount-1.0)/accumulationCount);}
-  let luminance=min(temporalLuminance(current.rgb),255.0);let momentWeight=1.0/max(sampleCount,1.0);let mean=select(luminance,mix(oldMoments.x,luminance,momentWeight),accepted);let second=select(luminance*luminance,mix(oldMoments.y,luminance*luminance,momentWeight),accepted);return TemporalOut(vec4f(max(result,vec3f(0.0)),current.a),vec4f(mean,second,sampleCount,pausedStable),published[0],published[1]);
+  var result=current.rgb;var sampleCount=select(-1.0,1.0,currentUsable&&!shadowDeferred);var pausedStable=select(0.0,1.0,temporal.control.w>.5&&currentUsable&&!shadowDeferred);
+  if(accepted){
+    if(shadowDeferred){result=previous.rgb;sampleCount=oldMoments.z;pausedStable=oldMoments.w;}
+    else{let neighborhood=temporalNeighborhood(pixel,dimensions,current.rgb);var history=clamp(previous.rgb,neighborhood[0],neighborhood[1]);history=temporalVarianceClamp(history,oldMoments);sampleCount=min(oldMoments.z+1.0,255.0);pausedStable=select(0.0,min(oldMoments.w+1.0,255.0),temporal.control.w>.5);let accumulationCount=min(sampleCount,${SVO_TEMPORAL_ACCUMULATION_LAYOUT.maximumAccumulationSamples}.0);result=mix(current.rgb,history,(accumulationCount-1.0)/accumulationCount);}
+  }
+  let luminance=min(temporalLuminance(current.rgb),255.0);let momentWeight=1.0/max(sampleCount,1.0);let mean=select(luminance,select(mix(oldMoments.x,luminance,momentWeight),oldMoments.x,shadowDeferred),accepted);let second=select(luminance*luminance,select(mix(oldMoments.y,luminance*luminance,momentWeight),oldMoments.y,shadowDeferred),accepted);return TemporalOut(vec4f(max(result,vec3f(0.0)),current.a),vec4f(mean,second,sampleCount,pausedStable),published[0],published[1]);
 }
 `;
 
@@ -137,6 +151,12 @@ export class SparseVoxelTemporalAccumulator {
   private previousIndex = 0;
   private historyValid = false;
   private previousCamera?: SparseVoxelTemporalCameraState;
+  private inputBindings?: {
+    readonly currentTarget: GPUTexture;
+    readonly packedSurface: GPUTexture;
+    readonly identityMedia: GPUTexture;
+    readonly bindGroups: readonly [GPUBindGroup, GPUBindGroup];
+  };
 
   constructor(private readonly device: GPUDevice) {
     this.paramsBuffer = device.createBuffer({ label: "Sparse voxel temporal parameters", size: SVO_TEMPORAL_ACCUMULATION_LAYOUT.paramsBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -167,12 +187,13 @@ export class SparseVoxelTemporalAccumulator {
     if (!Number.isSafeInteger(width) || width < 1 || !Number.isSafeInteger(height) || height < 1) throw new RangeError("Sparse voxel temporal dimensions must be positive safe integers");
     if (this.history && width === this.width && height === this.height) return false;
     this.releaseHistory();
-    const make = (index: number): TemporalHistorySet => ({
-      color: this.device.createTexture({ label: `Sparse voxel temporal HDR ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.historyColorFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }),
-      moments: this.device.createTexture({ label: `Sparse voxel temporal moments ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.momentsFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }),
-      keyA: this.device.createTexture({ label: `Sparse voxel temporal key A ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.keyFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }),
-      keyB: this.device.createTexture({ label: `Sparse voxel temporal key B ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.keyFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }),
-    });
+    const make = (index: number): TemporalHistorySet => {
+      const color = this.device.createTexture({ label: `Sparse voxel temporal HDR ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.historyColorFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+      const moments = this.device.createTexture({ label: `Sparse voxel temporal moments ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.momentsFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+      const keyA = this.device.createTexture({ label: `Sparse voxel temporal key A ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.keyFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+      const keyB = this.device.createTexture({ label: `Sparse voxel temporal key B ${index}`, size: [width, height], format: SVO_TEMPORAL_ACCUMULATION_LAYOUT.keyFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+      return { color, colorView: color.createView(), moments, momentsView: moments.createView(), keyA, keyAView: keyA.createView(), keyB, keyBView: keyB.createView() };
+    };
     this.history = [make(0), make(1)];
     this.width = width; this.height = height; this.invalidate();
     return true;
@@ -193,12 +214,12 @@ export class SparseVoxelTemporalAccumulator {
     gBuffer: SparseVoxelGBufferTextures,
     frame: SparseVoxelTemporalFrameState,
     timestampWrites?: TimestampRange,
-  ): boolean {
+  ): SparseVoxelTemporalResolve | false {
     if (!this.pipeline || !this.layout || !this.history || currentTarget.width !== this.width || currentTarget.height !== this.height
       || gBuffer.width !== this.width || gBuffer.height !== this.height || frame.composition !== "dry-before-legacy-water"
       || !finiteCamera(frame.camera) || !Number.isFinite(frame.cellSize_m) || !(frame.cellSize_m > 0)
       || !Number.isFinite(frame.deltaTime_s) || frame.deltaTime_s < 0) { this.invalidate(); return false; }
-    const previous = this.history[this.previousIndex], nextIndex = 1 - this.previousIndex, next = this.history[nextIndex];
+    const nextIndex = 1 - this.previousIndex, next = this.history[nextIndex];
     const previousCamera = this.previousCamera ?? frame.camera;
     const buffer = new Float32Array(SVO_TEMPORAL_ACCUMULATION_LAYOUT.paramsBytes / 4);
     buffer.set([this.width, this.height, 1 / this.width, 1 / this.height], 0);
@@ -212,26 +233,34 @@ export class SparseVoxelTemporalAccumulator {
     buffer.set([...previousCamera.up, 0], 32);
     buffer.set([frame.cellSize_m, frame.deltaTime_s, this.historyValid ? 1 : 0, frame.paused ? 1 : 0], 36);
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
-    const bindGroup = this.device.createBindGroup({ layout: this.layout, entries: [
-      { binding: 0, resource: { buffer: this.paramsBuffer } },
-      { binding: 1, resource: currentTarget.createView() },
-      { binding: 2, resource: gBuffer.packedSurface.createView() },
-      { binding: 3, resource: gBuffer.identityMedia.createView() },
-      { binding: 4, resource: previous.color.createView() },
-      { binding: 5, resource: previous.moments.createView() },
-      { binding: 6, resource: previous.keyA.createView() },
-      { binding: 7, resource: previous.keyB.createView() },
-    ] });
+    if (!this.inputBindings || this.inputBindings.currentTarget !== currentTarget
+      || this.inputBindings.packedSurface !== gBuffer.packedSurface
+      || this.inputBindings.identityMedia !== gBuffer.identityMedia) {
+      const currentColorView = currentTarget.createView();
+      const packedSurfaceView = gBuffer.packedSurface.createView();
+      const identityMediaView = gBuffer.identityMedia.createView();
+      const makeBindGroup = (history: TemporalHistorySet) => this.device.createBindGroup({ layout: this.layout!, entries: [
+        { binding: 0, resource: { buffer: this.paramsBuffer } },
+        { binding: 1, resource: currentColorView },
+        { binding: 2, resource: packedSurfaceView },
+        { binding: 3, resource: identityMediaView },
+        { binding: 4, resource: history.colorView },
+        { binding: 5, resource: history.momentsView },
+        { binding: 6, resource: history.keyAView },
+        { binding: 7, resource: history.keyBView },
+      ] });
+      this.inputBindings = { currentTarget, packedSurface: gBuffer.packedSurface, identityMedia: gBuffer.identityMedia, bindGroups: [makeBindGroup(this.history[0]), makeBindGroup(this.history[1])] };
+    }
+    const bindGroup = this.inputBindings.bindGroups[this.previousIndex];
     const pass = encoder.beginRenderPass({ label: "Sparse voxel temporal accumulation", colorAttachments: [
-      { view: next.color.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
-      { view: next.moments.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
-      { view: next.keyA.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
-      { view: next.keyB.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+      { view: next.colorView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+      { view: next.momentsView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+      { view: next.keyAView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+      { view: next.keyBView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
     ], ...(timestampWrites ? { timestampWrites } : {}) });
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, bindGroup); pass.draw(3); pass.end();
-    encoder.copyTextureToTexture({ texture: next.color }, { texture: currentTarget }, [this.width, this.height, 1]);
     this.previousIndex = nextIndex; this.previousCamera = frame.camera; this.historyValid = true;
-    return true;
+    return { resolvedTexture: next.color, resolvedView: next.colorView };
   }
 
   destroy(): void {
@@ -242,7 +271,7 @@ export class SparseVoxelTemporalAccumulator {
 
   private releaseHistory(): void {
     for (const set of this.history ?? []) for (const texture of [set.color, set.moments, set.keyA, set.keyB]) texture.destroy();
-    this.history = undefined; this.width = 0; this.height = 0; this.previousIndex = 0; this.invalidate();
+    this.history = undefined; this.inputBindings = undefined; this.width = 0; this.height = 0; this.previousIndex = 0; this.invalidate();
   }
 }
 

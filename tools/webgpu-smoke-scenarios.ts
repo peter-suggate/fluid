@@ -97,8 +97,8 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
 
   if (id === "ocean-seiche") {
     // A wide deep tank whose calm interior coarsens into 16/32-cubed octree
-    // leaves; a raised 2x1x8-brick slab along the -x wall collapses into a
-    // long gravity wave (~4.2 m/s) that crosses the 9.6 m tank in ~2.3 s.
+    // leaves; a raised 2x1x10-brick slab along the -x wall collapses into a
+    // long gravity wave (~4.2 m/s) that crosses the 8 m tank in ~1.9 s.
     const scene = createOceanSeicheScene();
     // The benchmark isolates fluid scaling. Publishing the full research
     // station's legacy inspection records adds hundreds of MB unrelated to

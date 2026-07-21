@@ -77,7 +77,8 @@ test("renderer publishes effective status through the viewport diagnostics bridg
   const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
   assert.match(renderer, /publishEffectiveRendererStatus\(resolveEffectiveRendererStatus\(svoRenderMode/);
-  assert.match(renderer, /svoEncoded = this\.svoDryScenePipeline\?\.encode/);
+  assert.match(renderer, /const replacementResult = this\.svoDryScenePipeline\?\.encode/);
+  assert.match(renderer, /svoEncoded = Boolean\(replacementResult\)/);
   assert.match(renderer, /canEncodeSparseVoxelDryScene\(sparseSceneSource,drySceneData\)/);
   assert.match(viewport, /effectiveRendererStatus\) => useDiagnosticsStore\.getState\(\)\.set\(\{ effectiveRendererStatus \}\)/);
   assert.match(panel, /data-testid="effective-renderer-status"/);

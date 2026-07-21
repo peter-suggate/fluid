@@ -14,10 +14,20 @@ import { useRuntimeStore } from "../stores/runtime-store";
 import { useDiagnosticsStore, emptyPerformance, type PerformanceSnapshot } from "../stores/diagnostics-store";
 import { useUIStore } from "../stores/ui-store";
 import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
+import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
 
 export type BodyDragPhase = "start" | "move" | "end";
 
 const MAX_BODIES = 12;
+
+/** O(1) host-clock collapse for GPU authority; no intermediate host state exists. */
+export function collapseGPUFixedSteps(accumulator_s: number, dt_s: number) {
+  if (!Number.isFinite(accumulator_s) || accumulator_s < 0 || !Number.isFinite(dt_s) || dt_s <= 0) {
+    return { steps: 0, remainder_s: Math.max(0, Number.isFinite(accumulator_s) ? accumulator_s : 0) };
+  }
+  const steps = Math.floor((accumulator_s + 1e-12) / dt_s);
+  return { steps, remainder_s: Math.max(0, accumulator_s - steps * dt_s) };
+}
 
 /**
  * Owns the mutable runtime the render loop needs at 60 Hz — rigid-body
@@ -27,7 +37,8 @@ const MAX_BODIES = 12;
  * methods here so stores stay pure data.
  */
 class SimulationController {
-  private fluidSolver: EulerianFluidSolver;
+  /** Allocated only for the CPU reference method; GPU methods own no host fluid field. */
+  private fluidSolver?: EulerianFluidSolver;
   private bodies: RigidBodyState[] = [];
   private accumulator = 0;
   private simulationTime = 0;
@@ -40,6 +51,19 @@ class SimulationController {
   private performance: PerformanceSnapshot = emptyPerformance;
   private rateWallClock = 0;
   private rateSimTime = 0;
+  private safeBrowserStepConsumed = false;
+
+  private safeBrowserBringup(): boolean {
+    return typeof location !== "undefined" && safeBrowserGPUBringupEnabled(location.search);
+  }
+
+  private webgpuTransportReady(): boolean {
+    const diagnostics = useDiagnosticsStore.getState();
+    if (diagnostics.gpuStatus.state !== "ready") return false;
+    return useMethodStore.getState().methodId !== "octree"
+      || (diagnostics.gpuInfo?.initialSparseAuthorityReady === true
+        && diagnostics.gpuInfo?.initialRasterSurfaceReady === true);
+  }
 
   /**
    * The CPU solver doubles as the reference method and the background
@@ -61,10 +85,13 @@ class SimulationController {
 
   constructor() {
     const scene = useSceneStore.getState().scene;
-    this.fluidSolver = this.buildFluidSolver(scene);
+    if (this.backend === "cpu-reference") this.fluidSolver = this.buildFluidSolver(scene);
     this.bodies = initializeRigidBodies(scene.rigidBodies);
     this.publishBodies(rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2));
-    useDiagnosticsStore.getState().set({ fluidState: this.fluidSolver.diagnostics, fluidRenderState: this.fluidSolver.getRenderState() });
+    useDiagnosticsStore.getState().set({
+      fluidState: this.fluidSolver?.diagnostics ?? null,
+      fluidRenderState: this.fluidSolver?.getRenderState() ?? null,
+    });
     useUIStore.getState().selectBody(scene.rigidBodies[0]?.id);
   }
 
@@ -74,6 +101,10 @@ class SimulationController {
 
   time(): number { return this.simulationTime; }
   currentBodies(): RigidBodyState[] { return this.bodies; }
+
+  private cpuFluid(scene: SceneDescription): EulerianFluidSolver {
+    return this.fluidSolver ??= this.buildFluidSolver(scene);
+  }
 
   private publishBodies(diagnostics?: RigidStepDiagnostics) {
     const scene = useSceneStore.getState().scene;
@@ -87,6 +118,13 @@ class SimulationController {
     const elapsed = Math.max(0, (now - this.lastClock) / 1000);
     this.lastClock = now;
     const runtime = useRuntimeStore.getState();
+    if (this.safeBrowserBringup() && runtime.runState === "running") {
+      runtime.setRunState("paused");
+      runtime.setSimRate(null);
+      this.accumulator = 0;
+      this.rateWallClock = 0;
+      return;
+    }
     if (runtime.runState !== "running") {
       if (runtime.simRate !== null) runtime.setSimRate(null);
       this.rateWallClock = 0;
@@ -94,35 +132,50 @@ class SimulationController {
     }
     const scene = useSceneStore.getState().scene;
     const backend = this.backend;
+    if (backend === "webgpu" && !this.webgpuTransportReady()) {
+      this.accumulator = 0;
+      if (runtime.simRate !== null) runtime.setSimRate(null);
+      this.rateWallClock = 0;
+      return;
+    }
     this.accumulator += elapsed;
     const dt = scene.numerics.fixedDt_s;
     let steps = 0;
     let diagnostics: RigidStepDiagnostics | undefined;
     let fluidDiagnostics: ReturnType<EulerianFluidSolver["step"]> | undefined;
     let latestCoupling: CouplingDiagnostics | undefined;
-    while (this.accumulator + 1e-12 >= dt) {
-      this.applyDragConstraint();
-      if (backend === "webgpu") {
-        // WebGPU owns the canonical body state and advances coupling,
-        // integration, and contacts in the submitted command stream.
-      } else {
-        const coupling = computeFluidLoads(scene, this.fluidSolver, this.bodies);
-        latestCoupling = applyFluidReactions(this.fluidSolver, this.bodies, coupling.loads, dt);
+    if (backend === "webgpu") {
+      // The renderer admits GPU work against this target clock. Collapsing
+      // accumulated fixed ticks is exact because no host fluid/body evolution
+      // occurs at the intermediate ticks; solver.advanceTo owns subdivision.
+      const collapsed = collapseGPUFixedSteps(this.accumulator, dt);
+      steps = collapsed.steps;
+      if (steps > 0) {
+        this.applyDragConstraint();
+        this.accumulator = collapsed.remainder_s;
+        this.simulationTime += steps * dt;
+      }
+    } else {
+      const fluid = this.cpuFluid(scene);
+      while (this.accumulator + 1e-12 >= dt) {
+        this.applyDragConstraint();
+        const coupling = computeFluidLoads(scene, fluid, this.bodies);
+        latestCoupling = applyFluidReactions(fluid, this.bodies, coupling.loads, dt);
         diagnostics = advanceRigidBodies(this.bodies, scene, dt, 6, coupling.loads);
         this.applyDragConstraint();
         this.cpuOracleStep += 1;
-        fluidDiagnostics = this.fluidSolver.step(dt);
+        fluidDiagnostics = fluid.step(dt);
+        this.accumulator -= dt;
+        this.simulationTime += dt;
+        steps += 1;
       }
-      this.accumulator -= dt;
-      this.simulationTime += dt;
-      steps += 1;
     }
     if (steps > 0) {
       if (backend === "cpu-reference") this.publishBodies(diagnostics);
       const patch: Parameters<ReturnType<typeof useDiagnosticsStore.getState>["set"]>[0] = {};
       if (fluidDiagnostics) {
         patch.fluidState = fluidDiagnostics;
-        if (backend === "cpu-reference") patch.fluidRenderState = this.fluidSolver.getRenderState();
+        if (backend === "cpu-reference") patch.fluidRenderState = this.cpuFluid(scene).getRenderState();
       }
       if (latestCoupling) patch.couplingState = latestCoupling;
       useDiagnosticsStore.getState().set(patch);
@@ -150,39 +203,46 @@ class SimulationController {
     const scene = useSceneStore.getState().scene;
     const dt = scene.numerics.fixedDt_s;
     const backend = this.backend;
+    if (backend === "webgpu" && !this.webgpuTransportReady()) return;
     if (backend === "webgpu" && !gpuCanAcceptNextStep(this.simulationTime, this.gpuCompletedTime)) return;
+    if (this.safeBrowserBringup() && this.safeBrowserStepConsumed) return;
+    if (this.safeBrowserBringup()) this.safeBrowserStepConsumed = true;
     let couplingDiagnostics: CouplingDiagnostics | undefined;
     let diagnostics: RigidStepDiagnostics | undefined;
     let fluidDiagnostics: ReturnType<EulerianFluidSolver["step"]> | undefined;
     if (backend === "cpu-reference") {
-      const coupling = computeFluidLoads(scene, this.fluidSolver, this.bodies);
-      couplingDiagnostics = applyFluidReactions(this.fluidSolver, this.bodies, coupling.loads, dt);
+      const fluid = this.cpuFluid(scene);
+      const coupling = computeFluidLoads(scene, fluid, this.bodies);
+      couplingDiagnostics = applyFluidReactions(fluid, this.bodies, coupling.loads, dt);
       diagnostics = advanceRigidBodies(this.bodies, scene, dt, 6, coupling.loads);
-      fluidDiagnostics = this.fluidSolver.step(dt);
+      fluidDiagnostics = fluid.step(dt);
     }
     this.simulationTime += dt;
     if (backend === "cpu-reference") runtime.setSimulationTime(this.simulationTime);
     if (backend === "cpu-reference") {
       this.publishBodies(diagnostics);
-      useDiagnosticsStore.getState().set({ fluidState: fluidDiagnostics, fluidRenderState: this.fluidSolver.getRenderState(), couplingState: couplingDiagnostics });
+      useDiagnosticsStore.getState().set({ fluidState: fluidDiagnostics, fluidRenderState: this.cpuFluid(scene).getRenderState(), couplingState: couplingDiagnostics });
     }
   }
 
-  reset(source?: SceneDescription) {
+  reset(source?: SceneDescription, presetId?: string) {
     const sceneStore = useSceneStore.getState();
     const scene = source ?? sceneStore.scene;
-    if (source) sceneStore.setScene(source);
+    if (source) sceneStore.setScene(source, presetId);
     this.bodies = initializeRigidBodies(scene.rigidBodies);
-    this.fluidSolver = this.buildFluidSolver(scene);
+    this.fluidSolver = this.backend === "cpu-reference" ? this.buildFluidSolver(scene) : undefined;
     this.simulationTime = 0; this.gpuCompletedTime = 0; this.accumulator = 0; this.lastClock = null;
     this.rateWallClock = 0; this.rateSimTime = 0;
     this.cpuOracleStep = 0; this.cpuSimulationMs = 0;
     this.kinematicDrag = null;
     this.performance = emptyPerformance;
+    if (!this.safeBrowserBringup()) this.safeBrowserStepConsumed = false;
     this.publishBodies(rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2));
-    useDiagnosticsStore.getState().set({ fluidState: this.fluidSolver.diagnostics, fluidRenderState: this.fluidSolver.getRenderState(), gpuInfo: null, couplingState: { displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 }, samples: [], performanceSnapshot: emptyPerformance, performanceHistory: [] });
+    useDiagnosticsStore.getState().set({ fluidState: this.fluidSolver?.diagnostics ?? null, fluidRenderState: this.fluidSolver?.getRenderState() ?? null, gpuInfo: null, waterSurfacePresentation: null, couplingState: { displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 }, samples: [], performanceSnapshot: emptyPerformance, performanceHistory: [] });
     const runtime = useRuntimeStore.getState();
-    runtime.setSimulationTime(0);
+    // Publish the new t=0 identity before pausing. Renderer subscribers use
+    // this synchronous epoch edge to reject completions from the old queue.
+    runtime.resetSimulationTime();
     runtime.setSimRate(null);
     runtime.setRunState("paused");
     useUIStore.getState().selectBody(scene.rigidBodies[0]?.id);
@@ -192,8 +252,7 @@ class SimulationController {
   loadPreset(presetId: string) {
     const preset = getScenePreset(presetId);
     const scene = preset.create();
-    useSceneStore.getState().setScene(scene, preset.id);
-    this.reset(scene);
+    this.reset(scene, preset.id);
     useUIStore.getState().setCamera(cameraForPreset(preset));
     useRuntimeStore.getState().setNotice(`${preset.name} loaded · dt ${scene.numerics.fixedDt_s.toFixed(4)} s`);
     useRuntimeStore.getState().setRunState("running");
@@ -440,8 +499,13 @@ class SimulationController {
       gpuUpscale_ms: sane(metrics.gpuUpscale_ms, renderFallback.gpuUpscale_ms)
     };
     this.performance = snapshot;
-    diagnostics.set({ frameMs: metrics.cpuFrame_ms, resolution });
-    diagnostics.pushPerformance(snapshot, metricSampleDue ? { t: now / 1000, frame_ms: metrics.cpuFrame_ms, volume_drift_pct: this.fluidSolver.diagnostics.markerVolumeDrift * 100, constraint_error: this.fluidSolver.diagnostics.divergenceAfter_s, kinetic_energy_J: this.fluidSolver.diagnostics.kineticEnergy_J } : undefined);
+    diagnostics.set({
+      frameMs: metrics.cpuFrame_ms,
+      resolution,
+      waterSurfacePresentation: metrics.waterSurfacePresentation ?? null,
+    });
+    const referenceDiagnostics = this.fluidSolver?.diagnostics;
+    diagnostics.pushPerformance(snapshot, metricSampleDue && referenceDiagnostics ? { t: now / 1000, frame_ms: metrics.cpuFrame_ms, volume_drift_pct: referenceDiagnostics.markerVolumeDrift * 100, constraint_error: referenceDiagnostics.divergenceAfter_s, kinetic_energy_J: referenceDiagnostics.kineticEnergy_J } : undefined);
   }
 
   // ---- persistence -------------------------------------------------------

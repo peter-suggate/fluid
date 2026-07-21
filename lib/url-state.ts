@@ -1,5 +1,6 @@
 import { defaultMethodId, simulationMethods, type MethodParamValue, type MethodParamValues } from "./methods";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
+import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets } from "./scenes";
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
@@ -192,9 +193,11 @@ export function parseQueryState(search: string): QueryState {
       sceneModalOpen: query.get("sceneConfig") === "1",
       diagnosticsOpen: rightPanel === "diagnostics",
       rightPanel,
-      gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" ? grid : initialUI.gridOverlayAxis,
-      gridOverlaySlice: numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
-      gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" ? gridMode : initialUI.gridOverlayMode,
+      gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" || grid === "volume" ? grid : initialUI.gridOverlayAxis,
+      gridOverlaySlice: grid === "volume"
+        ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
+        : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
+      gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "surface" || gridMode === "faces" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || (gridMode !== null && isOctreeTechniqueOverlayMode(gridMode)) ? gridMode : initialUI.gridOverlayMode,
       voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode,
       svoRenderMode: isSvoRenderMode(render) ? render : DEFAULT_SVO_RENDER_MODE
     }

@@ -41,11 +41,11 @@ export function createBrickQuadDamBreakScene(): SceneDescription {
 }
 
 /**
- * A wide ocean tank sized so the finest solver grid is exactly 384x96x64
- * cells of 0.025 m (48x12x8 fluid bricks). The pool fills to 72 cells
- * (1.8 m); a 2x1x8-brick slab of extra water (0.4 m wide, 0.2 m tall, full
+ * A wide ocean tank sized so the finest solver grid is exactly 320x96x80
+ * cells of 0.025 m (40x12x10 fluid bricks). The pool fills to 72 cells
+ * (1.8 m); a 2x1x10-brick slab of extra water (0.4 m wide, 0.2 m tall, full
  * depth extent) rests on the surface along the -x wall. Releasing it launches
- * a long gravity wave (~sqrt(gH) = 4.2 m/s) that crosses the tank in ~2.3 s
+ * a long gravity wave (~sqrt(gH) = 4.2 m/s) that crosses the tank in ~1.9 s
  * and reflects. The calm deep interior is exactly what large octree leaves
  * coarsen best: below the graded surface band the water collapses into
  * 16-cubed and 32-cubed pressure cells when the octree method's maximum leaf
@@ -55,23 +55,23 @@ export function createOceanSeicheScene(): SceneDescription {
   const scene = cloneScene(defaultScene);
   scene.sceneId = "ocean-seiche";
   scene.rigidBodies = [];
-  scene.container = { ...scene.container, width_m: 9.6, height_m: 2.4, depth_m: 1.6, fillFraction: 0.75, top: "open", fluidWallMode: "no-slip" };
+  scene.container = { ...scene.container, width_m: 8.0, height_m: 2.4, depth_m: 2.0, fillFraction: 0.75, top: "open", fluidWallMode: "no-slip" };
   scene.fluid.initialCondition = "tank-fill";
   // A long gravity wave has no meaningful capillary scale; keep the scene in
   // the same physical scope as the deep-water A/B preset.
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
-  // 24576 columns over the 9.6 x 1.6 m footprint give 384x64 columns of
+  // 25600 columns over the 8.0 x 2.0 m footprint give 320x80 columns of
   // 0.025 m cells; the 2.4 m height then yields exactly 96 fine layers.
-  scene.numerics.surfaceColumnsOverride = 24576;
+  scene.numerics.surfaceColumnsOverride = 25600;
   // The raised slab: brick tiers x {0,1}, y tier 9 (cells 72..79 — directly
   // on the 72-cell pool surface), and every z tier. Seeds are the world-space
   // centres of those 8-cubed bricks at the exact grid above.
   const h = 0.025, brick = 8 * h;
   const seeds: { x: number; y: number; z: number }[] = [];
-  for (let zTier = 0; zTier < 8; zTier += 1) {
-    const z = -0.8 + (zTier + 0.5) * brick;
-    seeds.push({ x: -4.8 + 0.5 * brick, y: 9.5 * brick, z }, { x: -4.8 + 1.5 * brick, y: 9.5 * brick, z });
+  for (let zTier = 0; zTier < 10; zTier += 1) {
+    const z = -1.0 + (zTier + 0.5) * brick;
+    seeds.push({ x: -4.0 + 0.5 * brick, y: 9.5 * brick, z }, { x: -4.0 + 1.5 * brick, y: 9.5 * brick, z });
   }
   scene.fluid.initialBrickSeeds_m = seeds;
   scene.fluid.initialBrickSeedsAdditive = true;
@@ -213,10 +213,10 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     id: "ocean-seiche",
     name: "Ocean · rolling wave",
     group: "Comparisons",
-    description: "A wide 9.6 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. With the octree method, set Maximum leaf to 32³ to watch the deep interior coarsen into 16³/32³ pressure cells.",
+    description: "A broad 8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. With the octree method, set Maximum leaf to 32³ to watch the deep interior coarsen into 16³/32³ pressure cells.",
     background: "research-station",
     create: createOceanSeicheScene,
-    camera: { azimuth_rad: 0.35, elevation_rad: 0.32, distance_m: 10.0, target_m: { x: 0, y: 1.1, z: 0 } }
+    camera: { azimuth_rad: 0.35, elevation_rad: 0.32, distance_m: 9.0, target_m: { x: 0, y: 1.1, z: 0 } }
   },
   {
     id: "deep-water-ab",

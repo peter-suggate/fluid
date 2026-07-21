@@ -3,26 +3,45 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { simulationMethods } from "../lib/methods";
 import { octreeMethod } from "../lib/methods/octree";
+import { OCTREE_FACE_FRAGMENT_MAX_FINE_NEIGHBORS } from "../lib/octree-face-fragments";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
-import { octreeDiagnosticShader, octreePressureCouplingShader, octreeProjectionShader, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
+import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "../lib/generated/octree-power-catalog";
+import { defaultScene } from "../lib/model";
+import { createTallCellLayout } from "../lib/tall-cell-grid";
+import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreePressureCouplingShader, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import { quadtreeSurfaceShader, WebGPUQuadtreeSurfaceState } from "../lib/webgpu-quadtree-builder";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 const uniformSolverSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+const smokeSource = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+const packageManifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+  scripts: Record<string, string>;
+};
 
 test("octree is a registered GPU method with dam-break defaults", () => {
   assert.ok(simulationMethods.includes(octreeMethod));
   assert.equal(octreeMethod.id, "octree");
   assert.equal(octreeMethod.backend, "webgpu");
   assert.equal(octreeMethod.presetFor("balanced").pressureIterations, 128);
+  assert.equal(octreeMethod.presetFor("balanced").surfaceColumns, 384,
+    "the safe default dam-break must retain a cubic power lattice");
+  const surfaceColumns = octreeMethod.params.find((spec) => spec.key === "surfaceColumns");
+  assert.ok(surfaceColumns && surfaceColumns.kind === "number" && surfaceColumns.default === 384);
+  const layout = createTallCellLayout(defaultScene, "balanced", 2_048, { surfaceColumns: 384 });
+  assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [24, 18, 16]);
+  assert.deepEqual([layout.nx * 4, layout.fineNy * 4, layout.nz * 4], [96, 72, 64],
+    "the factor-4 authoritative lattice must remain an integer cubic refinement");
+  assert.ok(Math.abs(defaultScene.container.width_m / layout.nx - defaultScene.container.height_m / layout.fineNy) < 1e-12);
+  assert.ok(Math.abs(defaultScene.container.width_m / layout.nx - defaultScene.container.depth_m / layout.nz) < 1e-12);
   assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "16");
   assert.equal(octreeMethod.presetFor("high").maximumLeafSize, "16");
   assert.equal(octreeMethod.presetFor("balanced").adaptivity, 1);
   assert.equal(octreeMethod.params.find((spec) => spec.key === "secondaryParticles")?.default, "off");
   assert.equal(octreeMethod.presetFor("balanced").secondaryParticles, "off");
   assert.match(octreeMethod.detail, /no topology readbacks/);
-  assert.match(octreeMethod.detail, /Chebyshev-Jacobi/);
+  assert.match(octreeMethod.detail, /Section 4\.3 hybrid PCG/);
+  assert.match(octreeMethod.detail, /Chebyshev rollback/);
   assert.match(octreeMethod.detail, /rigid-body coupling/);
   assert.match(octreeMethod.description, /signed-distance level set/);
   const maximumLeaf = octreeMethod.params.find((spec) => spec.key === "maximumLeafSize");
@@ -33,6 +52,32 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(octreeSource, /rounded >= 32/);
   const interfaceBand = octreeMethod.params.find((spec) => spec.key === "interfaceRefinementBandCells");
   assert.ok(interfaceBand && interfaceBand.kind === "number" && interfaceBand.tier === "fine" && interfaceBand.default === 4);
+  const surfaceRefinement = octreeMethod.params.find((spec) => spec.key === "surfaceRefinementFactor");
+  assert.ok(surfaceRefinement && surfaceRefinement.kind === "select" && surfaceRefinement.default === "2");
+  assert.deepEqual(surfaceRefinement.options.map((option) => option.value), ["1", "2", "4"]);
+  const globalFine = octreeMethod.params.find((spec) => spec.key === "globalFineLevelSetFactor");
+  assert.ok(globalFine && globalFine.kind === "select" && globalFine.default === "4");
+  assert.deepEqual(globalFine.options.map((option) => option.value), ["off", "4", "8"]);
+  const powerProjection = octreeMethod.params.find((spec) => spec.key === "powerDiagramProjection");
+  assert.ok(powerProjection && powerProjection.kind === "select" && powerProjection.default === "authoritative");
+  assert.deepEqual(powerProjection.options.map((option) => option.value), ["off", "mirror", "authoritative"]);
+  assert.equal(octreeMethod.presetFor("balanced").globalFineLevelSetFactor, "4",
+    "the balanced product path must request the factor-4 global fine lattice");
+  assert.equal(octreeMethod.presetFor("balanced").powerDiagramProjection, "authoritative",
+    "the balanced product path must request power authority");
+  assert.equal(octreeMethod.presetFor("balanced").leafSolver, "auto",
+    "auto admits Section 4.3 only after power authority passes its fail-closed policy");
+  for (const quality of ["high", "ultra"] as const) {
+    assert.equal(octreeMethod.presetFor(quality).globalFineLevelSetFactor, "off",
+      `${quality} must retain the bounded rollback until its memory/endurance gate passes`);
+    assert.equal(octreeMethod.presetFor(quality).powerDiagramProjection, "off");
+  }
+  assert.match(smokeSource, /FLUID_OCTREE_POWER_PROJECTION/);
+  assert.match(smokeSource, /FLUID_OCTREE_GLOBAL_FINE_FACTOR/);
+  assert.match(octreeSource, /pageResolution: options\.surfaceRefinementFactor === 4 \? 4 : 2/,
+    "surface consumers must default to the bandwidth-oriented 2-cubed page ABI");
+  assert.match(octreeSource, /surfacePageResolution: plan\?\.pageResolution \?\? 2/);
+  assert.match(octreeProjectionShader, /override surfacePageResolution: u32 = 2u/);
   assert.doesNotMatch(`${octreeSource}\n${uniformSolverSource}`, /airRefinementBandCells/);
   assert.match(uniformSolverSource, /interfaceRefinementBandCells: options\.octree\.interfaceRefinementBandCells \?\? 4/);
   const surfaceDetail = octreeMethod.params.find((spec) => spec.key === "surfaceDetailStrength");
@@ -45,6 +90,21 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   for (const quality of ["balanced", "high", "ultra"] as const) {
     assert.equal(octreeMethod.presetFor(quality).secondaryParticleSurfaceCorrection, 0, "particle feedback must be uniformly opt-in across quality presets");
   }
+  const adaptiveVelocity = octreeMethod.params.find((spec) => spec.key === "faceVelocityTransport");
+  assert.ok(adaptiveVelocity && adaptiveVelocity.kind === "select" && adaptiveVelocity.default === "on");
+  for (const quality of ["balanced", "high", "ultra"] as const) {
+    assert.equal(octreeMethod.presetFor(quality).faceVelocityTransport, "on",
+      "compact octree-face velocity must be enabled across production quality presets");
+  }
+  const methodSource = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
+  assert.match(methodSource, /faceVelocityTransport: values\.faceVelocityTransport !== false && values\.faceVelocityTransport !== "off"/,
+    "missing saved values must migrate to the compact default");
+  assert.match(methodSource, /requiresCompatibilityGeometry\(scene\)[\s\S]*\? undefined : globalFineLevelSetFactor/,
+    "terrain and imported\/seeded geometry must not inherit the balanced factor-4 allocation");
+  assert.match(uniformSolverSource, /adaptiveFaceRhsIsSupported\([\s\S]*sceneHasTerrain\(scene\)[\s\S]*scene\.rigidBodies\.length[\s\S]*this\.hydrostaticSplit/,
+    "the dense host allocation must remain fail-closed for unsupported scenes");
+  assert.match(octreeSource, /this\.extrapolationSweeps = faceTransportEnabled \? 0 : requestedExtrapolationSweeps/,
+    "compact face authority must not retain the full-domain texture extrapolation ladder");
   const warmStart = octreeMethod.params.find((spec) => spec.key === "pressureWarmStart");
   assert.ok(warmStart && warmStart.kind === "select" && warmStart.tier === "fine" && warmStart.default === "on");
   // Options are copied field-by-field into the solver; a dropped key would
@@ -57,12 +117,42 @@ test("octree is a registered GPU method with dam-break defaults", () => {
     "compact cold starts are initialized row-by-row during emission, not by clearing capacity-sized buffers");
 });
 
+test("bounded power-vs-tall Dawn comparison uses one exact active-tall grid", () => {
+  const command = packageManifest.scripts["test:webgpu:dam-power-fine-compare-one-step"];
+  assert.ok(command);
+  assert.match(command, /FLUID_METHOD=octree,tall-cell/);
+  assert.match(command, /FLUID_TARGET_S=0\.004/);
+  assert.match(command, /FLUID_ORACLE_STEPS=1/);
+  assert.match(command, /FLUID_SURFACE_COLUMNS=384/);
+  assert.match(command, /FLUID_EXPECT_GRID=24,18,16/);
+  assert.match(command, /FLUID_REGULAR_LAYERS=12/);
+  assert.match(command, /FLUID_OCTREE_POWER_PROJECTION=authoritative/);
+  assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
+  assert.doesNotMatch(packageManifest.scripts["test:webgpu:dam-power-fine-parity"], /FLUID_SURFACE_COLUMNS=2400/,
+    "the named comparison path must not retain the former 2400-column allocation");
+
+  const layout = createTallCellLayout(defaultScene, "balanced", 2_048, {
+    surfaceColumns: 384,
+    regularLayers: 12,
+  });
+  assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [24, 18, 16]);
+  assert.equal(layout.planning.ordinaryGridFallback, false);
+  assert.ok(layout.columnBases.some((base) => base >= 2),
+    "the comparison must exercise restricted tall cells, not the ordinary-grid fallback");
+  assert.match(smokeSource, /scene\.numerics\.surfaceColumnsOverride = surfaceColumnsOverride/,
+    "the smoke scene override must bypass method UI clamps for exact-grid comparisons");
+  assert.match(smokeSource, /refusing to step a mismatched comparison/);
+});
+
 test("compact octree pressure capacity scales with domain surface area", () => {
   const dims = { nx: 288, ny: 96, nz: 64 };
   const count = dims.nx * dims.ny * dims.nz;
   const plan = planOctreePressureCapacity(dims, 16, 4);
   assert.equal(plan.rowCapacity, 316_928);
-  assert.equal(plan.entryCapacity, plan.rowCapacity * 24);
+  assert.equal(plan.entryCapacity, plan.rowCapacity * 6 * OCTREE_FACE_FRAGMENT_MAX_FINE_NEIGHBORS);
+  const powerPlan = planOctreePressureCapacity(dims, 16, 4, undefined, true);
+  assert.equal(powerPlan.entryCapacity, powerPlan.rowCapacity * Math.max(
+    6 * OCTREE_FACE_FRAGMENT_MAX_FINE_NEIGHBORS, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumNeighborRows));
   assert.ok(plan.rowCapacity < count / 5, "the widened ocean must not reserve one pressure slot per finest cell");
   const oldBytes = count * (2 * 4 + 32 + 48);
   assert.ok(plan.pressureBytes + plan.headerBytes + plan.entryBytes < oldBytes * 0.55,
@@ -70,10 +160,137 @@ test("compact octree pressure capacity scales with domain surface area", () => {
   assert.equal(planOctreePressureCapacity(dims, 16, 4, 1024).rowCapacity, 1024);
 });
 
+test("compact authority replaces the dense frontier row map with an exact-key hash", () => {
+  const cellCount = 320 * 96 * 80;
+  const rowCapacity = planOctreePressureCapacity({ nx: 320, ny: 96, nz: 80 }, 16, 4).rowCapacity;
+  assert.equal(rowCapacity, 388_864);
+  const compact = planOctreeLeafFrontierAllocation(cellCount, rowCapacity, true);
+  assert.deepEqual(compact, {
+    cellCount: 2_457_600,
+    listCapacity: 388_864,
+    hashCapacity: 524_288,
+    denseOriginMapBytes: 9_830_400,
+    rowMapBytes: 4_194_304,
+    allocatedBytes: 7_305_232,
+    denseCompatibilityBytes: 29_491_216,
+    savedBytes: 22_185_984,
+  });
+  const compatibility = planOctreeLeafFrontierAllocation(cellCount, rowCapacity, false);
+  assert.equal(compatibility.listCapacity, cellCount);
+  assert.equal(compatibility.hashCapacity, 0);
+  assert.equal(compatibility.rowMapBytes, compatibility.denseOriginMapBytes);
+  assert.equal(compatibility.allocatedBytes, compatibility.denseCompatibilityBytes);
+  assert.equal(compatibility.savedBytes, 0);
+  assert.throws(() => planOctreeLeafFrontierAllocation(0, rowCapacity, true), /positive integer/);
+  assert.throws(() => planOctreeLeafFrontierAllocation(cellCount, 0, true), /positive integer/);
+});
+
+test("Dawn smoke never reads compact face authority as a dense velocity texture", () => {
+  assert.match(smokeSource, /const compactFaceVelocity = stagedSolver\.adaptiveFaceVelocitySource !== undefined/);
+  assert.match(smokeSource, /if \(!texture \|\| compactFaceVelocity\) return Promise\.resolve\(undefined\)/);
+  assert.match(smokeSource, /velocityTexture && final && !finalSolver\.adaptiveFaceVelocitySource/);
+  assert.match(smokeSource, /adaptiveFaceTransportedCount === faces\?\.faceCount/);
+  assert.match(smokeSource, /compact transport reported invalid or zero CFL/);
+});
+
+test("compact scan and coarse-task scratch follows pressure and active-tile bounds", () => {
+  const dims = { nx: 640, ny: 192, nz: 160 };
+  const pressure = planOctreePressureCapacity(dims, 16, 4);
+  const activeTileCapacity = 4_800;
+  const activeTileWorklistBytes = (16 + 2 * activeTileCapacity) * 4;
+  const compact = planOctreeCompactionAllocation(
+    dims, pressure.rowCapacity, activeTileWorklistBytes, activeTileCapacity, 16, true,
+  );
+  assert.deepEqual(compact, {
+    scanBlockCapacity: 6_150,
+    coarseTaskCapacity: 38_400,
+    scanAndTaskBytes: 381_444,
+    activeTileBytes: 57_632,
+    allocatedBytes: 439_076,
+  });
+  const compatibility = planOctreeCompactionAllocation(
+    dims, pressure.rowCapacity, activeTileWorklistBytes, activeTileCapacity, 16, false,
+  );
+  assert.deepEqual(compatibility, {
+    scanBlockCapacity: 76_800,
+    coarseTaskCapacity: 38_400,
+    scanAndTaskBytes: 1_229_244,
+    activeTileBytes: 57_632,
+    allocatedBytes: 1_286_876,
+  });
+  assert.ok(compact.allocatedBytes < compatibility.allocatedBytes * 0.35);
+  assert.throws(() => planOctreeCompactionAllocation(dims, 0, 0, 0, 16, true), /positive integer/);
+  assert.throws(() => planOctreeCompactionAllocation(dims, 1, -1, 0, 16, true), /active-tile bounds/);
+  assert.match(octreeProjectionShader, /return params\.pressureCapacity\.z/,
+    "the publication guard must consume the exact host-planned task capacity");
+  assert.match(octreeProjectionShader, /total\.z > coarseTaskCapacity\(\)/,
+    "a corrupted or oversized coarse task publication must fail closed before indirect dispatch");
+  assert.match(octreeProjectionShader, /coarseTasks = select\(tiles \* tiles \* tiles, 1u, rowIndexedPressure\)/,
+    "compact authority must publish one cooperative task per coarse pressure row");
+  assert.match(octreeProjectionShader, /coarseTaskIndex\(wid\)/,
+    "coarse indirect work must retain every row through a two-dimensional dispatch");
+});
+
+test("octree hydrostatic reference is a default-off fixed-rest-surface A/B", () => {
+  const control = octreeMethod.params.find((spec) => spec.key === "hydrostaticSplit");
+  assert.ok(control && control.kind === "select" && control.default === "off");
+  assert.equal(octreeMethod.presetFor("balanced").hydrostaticSplit, "off");
+  for (const method of simulationMethods.filter((candidate) => candidate.id !== "octree")) {
+    assert.equal(method.params.some((spec) => spec.key === "hydrostaticSplit"), false,
+      `${method.id} must not expose the octree hydrostatic experiment`);
+  }
+  const methodSource = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
+  assert.match(methodSource, /hydrostaticSplit: values\.hydrostaticSplit === "on"/);
+  assert.match(uniformSolverSource, /this\.hydrostaticSplit = options\.hydrostaticSplit === true[\s\S]*scene\.fluid\.initialCondition === "tank-fill"[\s\S]*scene\.fluid\.inflow === undefined[\s\S]*scene\.rigidBodies\.length === 0/);
+  assert.match(smokeSource, /FLUID_HYDROSTATIC_SPLIT/);
+  assert.match(smokeSource, /method\.id === "octree" && hydrostaticSplitOverride/);
+
+  assert.match(legacyUniformComputeShader, /texture_storage_2d<rg32float, write>/);
+  assert.match(legacyUniformComputeShader, /fn hydrostaticSplit\(\) -> bool/);
+  assert.match(legacyUniformComputeShader, /if\(!hydrostaticSplit\(\)\)[\s\S]*vec4f\(highest,-1\.0,0\.0,0\.0\)/,
+    "the disabled path must retain the historical top-down occupancy scan and publish no reference");
+  assert.match(legacyUniformComputeShader, /!referenceEnded&&!cellInsideTerrain\(p\)/);
+  assert.match(legacyUniformComputeShader, /let wet=surfaceLiquid\(p\)/);
+  assert.match(legacyUniformComputeShader, /eta=f32\(referenceTop\)\+0\.5\+crossing/,
+    "eta must use the signed-distance zero crossing rather than an integer cell top");
+  assert.match(uniformSolverSource, /hydrostaticSplit: this\.hydrostaticSplit/);
+  assert.match(uniformSolverSource, /setHydrostaticTimestep\(dt\)/);
+  assert.match(uniformSolverSource, /c\.fillFraction\*this\.info\.ny/);
+  assert.match(octreeSource, /scene\.fluid\.initialCondition === "tank-fill"/);
+  assert.match(octreeSource, /scene\.fluid\.inflow === undefined/);
+  assert.match(octreeSource, /scene\.rigidBodies\.length === 0/,
+    "the fixed datum must fail closed for dam breaks and pressure-coupled bodies");
+  assert.match(octreeProjectionShader, /fn fixedHydrostaticPotential\(y_m: f32\)/);
+  assert.match(octreeProjectionShader, /return -fixedHydrostaticPotential\(surfaceY\)/,
+    "the perturbation Dirichlet value must make total pressure zero at the actual surface");
+  assert.match(octreeProjectionShader, /header\.rhs = flux - boundarySum/,
+    "assembly must move the known perturbation boundary pressure to the RHS");
+  assert.match(octreeProjectionShader, /let airPressure = hydrostaticAirPressure\(left, right, leftPhi, rightPhi\)/,
+    "projection must restore the same nonzero perturbation boundary value");
+  assert.match(octreeProjectionShader, /pressureDistanceFromPhi\(left, right, axis, leftPhi, rightPhi\)/,
+    "the perturbation boundary must use the projection's ghost-fluid distance");
+  assert.match(uniformSolverSource, /!this\.hydrostaticSplit && this\.sparseOccupancyFluxPreparationRequested/,
+    "the maximum-only sparse occupancy path cannot author connected eta");
+});
+
 test("compact pressure rows publish origin ranks and fail closed on capacity overflow", () => {
   assert.match(octreeProjectionShader, /override rowIndexedPressure: bool = true/);
   assert.match(octreeProjectionShader, /return select\(0xffffffffu, word - 2u, word >= 2u\)/);
-  assert.match(octreeProjectionShader, /atomicStore\(&frontier\[frontierAliveBase\(\) \+ cell\], row \+ 2u\)/);
+  assert.match(octreeProjectionShader, /fn frontierSetRow\(cell:u32,word:u32\)/);
+  assert.match(octreeProjectionShader, /let key=cell\+1u/);
+  assert.match(octreeProjectionShader, /probe<32u/);
+  assert.match(octreeProjectionShader, /firstTombstone=0xffffffffu/,
+    "frontier insertion must remember, rather than immediately reuse, a tombstone");
+  assert.match(octreeProjectionShader, /if\(stored==key\)\{return frontierClaimValue\(at\);\}/,
+    "frontier insertion must find a same-key slot later in a tombstone-bearing probe cluster");
+  assert.match(octreeProjectionShader, /if\(stored==0u\)\{emptySlot=slot;break;\}/,
+    "only an actual empty slot may terminate the same-key search");
+  assert.match(octreeProjectionShader, /claim\.exchanged\|\|claim\.old_value==key\)\{return frontierClaimValue\(at\);\}/,
+    "the key winner and same-key contenders must share one value-word append arbitration");
+  assert.match(octreeProjectionShader, /fn frontierListCapacity\(\) -> u32/);
+  assert.match(octreeProjectionShader, /required > frontierListCapacity\(\)/);
+  assert.match(octreeProjectionShader, /compaction\[control\] = 2u/,
+    "frontier-list overflow must carry a distinct fail-closed diagnostic bit");
   assert.match(octreeProjectionShader, /pressureOut\[row\] = select\(0\.0, warm/);
   assert.match(octreeProjectionShader, /LeafEntry \{ row: u32, coefficient: f32 \}/);
   assert.match(octreeProjectionShader, /total\.x > params\.pressureCapacity\.x \|\| total\.y > params\.pressureCapacity\.y/);
@@ -153,22 +370,82 @@ test("octree topology is genuinely three-dimensional and 2:1 balanced", () => {
   assert.match(octreeProjectionShader, /\.size \* 2u < size/);
 });
 
+test("coarse topology loops remain runtime-bounded at maximum leaf 16 and 32", () => {
+  const refine = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn refineCoarseBlock"),
+    octreeProjectionShader.indexOf("fn neighborTooFine"),
+  );
+  const balance = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn balanceCoarseBlock"),
+    octreeProjectionShader.indexOf("fn hydrostaticSplit"),
+  );
+  assert.match(refine, /leafNeedsRefinement\(origin, owner\.size\)/,
+    "the cubic sizing scan must use the storage-loaded leaf size");
+  assert.match(refine, /let size = workgroupUniformLoad\(&refineRuntimeSize\)/);
+  assert.match(balance, /let size = workgroupUniformLoad\(&balanceRuntimeSize\)/);
+  assert.doesNotMatch(refine, /let size = targetRefinementSize/,
+    "pipeline specialization must not unroll the size-cubed scan at 16/32");
+  assert.doesNotMatch(balance, /let size = targetRefinementSize/,
+    "pipeline specialization must not unroll the coarse balance loops at 16/32");
+});
+
 test("octree refinement is graded by resident signed distance rather than bulk VOF occupancy", () => {
   assert.match(octreeProjectionShader, /levelSetIn: texture_3d<f32>/);
   assert.doesNotMatch(octreeProjectionShader, /volumeIn/, "the octree solve must not bind the diagnostic VOF field");
-  assert.match(octreeProjectionShader, /let samplePhi = phi\(vec3i\(q\)\)/);
-  assert.match(octreeProjectionShader, /closestSurface = min\(closestSurface, abs\(samplePhi\)\)/);
+  assert.match(octreeProjectionShader,
+    /if \(!fineSummary\.complete\) \{\s*samplePhi=legacyPhi\(vec3i\(q\)\);closestSurface=min\(closestSurface,abs\(samplePhi\)\)/,
+    "an incomplete indexed summary must scan the selected page/analytic rollback rather than infer a missing sparse sample");
   assert.match(octreeProjectionShader, /if \(minimumSolid >= 1\.0 - 1e-5\) \{ return false; \}/,
     "fully solid bulk leaves should be allowed to stay coarse");
   assert.match(octreeProjectionShader, /let effectiveBand = baseBand \+ 8\.0 \* detailActivity/);
   assert.match(octreeProjectionShader, /return closestSurface < effectiveBand \* finestWidth;/,
     "pure air and liquid leaves should use the explicit band plus bounded local detail support");
-  assert.match(octreeProjectionShader, /params\.physical\.w \* clamp\(max\(strainActivity, 2\.0 \* maximumCurvatureProxy\)/);
-  assert.match(octreeProjectionShader, /params\.physical\.w > 0\.0/, "zero detail strength must skip activity sampling and preserve the baseline sizing path");
+  assert.match(octreeProjectionShader, /surfaceDetailStrengthValue\(\) \* clamp\(max\(strainActivity, 2\.0 \* maximumCurvatureProxy\)/);
+  assert.match(octreeProjectionShader, /surfaceDetailStrengthValue\(\) > 0\.0/,
+    "zero decoded detail strength must skip activity sampling while analytic sparse sentinels retain baseline sizing");
   assert.doesNotMatch(octreeProjectionShader, /closestSurface \* adaptivity < f32\(size\) \* finestWidth/);
   const refinement = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn leafNeedsRefinement"), octreeProjectionShader.indexOf("fn splitLeaf"));
   assert.doesNotMatch(refinement, /wet != liquidCell|a > 0\.001/);
   assert.match(octreeProjectionShader, /fn liquidCell\(p: vec3i\) -> bool \{ return valid\(p\) && phi\(p\) < 0\.0; \}/);
+});
+
+test("post-bootstrap topology samples compact surface pages and affine leaf fallbacks directly", () => {
+  assert.match(octreeProjectionShader, /fn pagedSurfaceAuthority\(\)/);
+  assert.match(octreeProjectionShader, /fn findSurfaceLeaf\(p: vec3u\)/);
+  assert.match(octreeProjectionShader, /surfaceHashCoord\(p \/ size\)/);
+  assert.match(octreeProjectionShader, /fn surfacePagePhi\(row: u32, point: vec3f\)/);
+  assert.match(octreeProjectionShader, /return surfaceLeafFallback\(row, point\)/);
+  assert.match(octreeSource, /FLUID_OCTREE_DIRECT_PAGED_PHI !== "0"[\s\S]*if \(this\.directPagedTopology && !this\.surfacePagesBootstrapped && this\.pagedGroups\)[\s\S]*this\.groups = this\.pagedGroups/,
+    "the direct sampler is the default authority after the one-time bootstrap");
+  assert.match(octreeSource, /releaseDenseBootstrapPhi\(\)[\s\S]*this\.surfaceState\.releasePresentationTexture\(\)/,
+    "the box-sized bootstrap phi must be releasable after its submission");
+  assert.match(octreeSource, /this\.groups = this\.pagedGroups[\s\S]*faceMirror\?\.setSurfacePageSource\(this\.adaptiveSurfacePages\.source, this\.levelSetFallbackTexture!\)[\s\S]*adaptiveSurfaceAdapter\.setSurfacePageSource\(this\.adaptiveSurfacePages\.source, this\.levelSetFallbackTexture!\)/,
+    "projection, face, and surface-adapter groups must hand off before dense phi can be destroyed");
+  assert.match(uniformSolverSource, /this\.device\.queue\.submit\(\[encoder\.finish\(\)\]\);[\s\S]*releaseDenseBootstrapPhi\(\)/,
+    "release happens only after the bootstrap commands have been submitted");
+});
+
+test("dense phi lifetime gate requires every recurring compact consumer handoff", () => {
+  const ready = {
+    directPagedTopology: true,
+    surfacePagesBootstrapped: true,
+    pagedProjectionGroupsActive: true,
+    faceGroupsPageNative: true,
+    surfaceAdapterPageNative: true,
+    topologyUsesSurfaceCandidates: true,
+    compactRendererSourceReady: true,
+    incompatibleDenseConsumer: false,
+  };
+  assert.equal(octreeDensePhiReleaseReady(ready), true);
+  for (const key of [
+    "directPagedTopology", "surfacePagesBootstrapped", "pagedProjectionGroupsActive",
+    "faceGroupsPageNative", "surfaceAdapterPageNative", "topologyUsesSurfaceCandidates",
+    "compactRendererSourceReady",
+  ] as const) assert.equal(octreeDensePhiReleaseReady({ ...ready, [key]: false }), false, key);
+  assert.equal(octreeDensePhiReleaseReady({ ...ready, incompatibleDenseConsumer: true }), false);
+  assert.match(octreeSource, /faceGroupsPageNative: this\.faceMirror\?\.hasPageNativePhiBindings === true/);
+  assert.match(octreeSource, /surfaceAdapterPageNative: this\.adaptiveSurfaceAdapter\?\.hasPageNativePhiBindings === true/);
+  assert.match(octreeSource, /topologyUsesSurfaceCandidates: this\.topologyWorklistReady/);
 });
 
 test("octree preserves advected level-set volume with GPU-only feedback", () => {
@@ -179,9 +456,10 @@ test("octree preserves advected level-set volume with GPU-only feedback", () => 
   assert.match(quadtreeSurfaceShader, /abs\(value\) < 2\.0 \* params\.cellAndDt\.y/, "controller derivative must use the Heaviside support");
   assert.match(quadtreeSurfaceShader, /occupied \* open \* 256\.0/, "volume control must conserve liquid only in the open fraction of each cell");
   assert.match(quadtreeSurfaceShader, /surfaceSolids\[index3\(gid\)\]\.fraction/, "the controller must consume the octree's current VOS field");
-  assert.match(octreeSource, /true, true, this\.solidCells/, "octree must bind its freshly rasterized solid fractions into surface-volume control");
-  assert.match(octreeSource, /readSurfaceDiagnostics\(\) \{ return this\.surfaceState\.readVolumeDiagnostics\(\); \}/,
-    "octree telemetry must report its authoritative level-set volume rather than the dormant VOF texture");
+  assert.match(octreeSource, /true, true, this\.hasDenseSolidCells \? this\.solidCells : undefined/,
+    "octree must bind freshly rasterized solid fractions only when the dense solid field exists");
+  assert.match(octreeSource, /async readSurfaceDiagnostics\(\) \{[\s\S]*?if \(!this\.adaptiveSurfacePages\) return this\.surfaceState\.readVolumeDiagnostics\(\);[\s\S]*?await this\.adaptiveSurfacePages\.readDiagnostics\(\);[\s\S]*?return this\.surfaceDiagnostics;/,
+    "octree telemetry must report the adaptive surface authority, with dense level-set diagnostics only as its compatibility fallback");
   assert.match(legacyUniformComputeShader, /let represented=surfaceOccupancy\(id\)\*open/, "reported liquid volume must exclude the same displaced solid fraction");
   assert.match(legacyUniformComputeShader, /for\(var step=1;step<=64;step\+=1\)/, "phi-s must reach open liquid across a newly submerged large solid in one pass");
   assert.match(legacyUniformComputeShader, /exteriorSum\+=exteriorWeight\*textureLoad\(pressureIn,exterior,0\)\.x/, "solid-interior phase must be extended from exterior fluid samples");
@@ -209,13 +487,19 @@ test("octree shared fine-grid dynamics use the resident level set as their sole 
 test("octree rebuild and solve stay resident on the GPU", () => {
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
   const solve = WebGPUOctreeProjection.prototype.encode.toString();
+  const frontierRows = (WebGPUOctreeProjection.prototype as unknown as {
+    encodeFrontierRows: () => void;
+  }).encodeFrontierRows.toString();
   assert.match(rebuild, /beginComputePass/);
   assert.match(solve, /clearBuffer/);
   assert.doesNotMatch(`${rebuild}\n${solve}`, /mapAsync|getMappedRange/);
   // Device-local copies publish row-parallel indirect args and stage the
   // residual/count telemetry before the next rebuild can reuse compaction;
   // none of these copies is a CPU readback or dense-field transfer.
-  const copies = (solve.match(/copyBufferToBuffer\([^)]*\)/g) ?? []).map((copy) => copy.replace(/\s+/g, ""));
+  assert.match(solve, /this\.encodeFrontierRows\(/,
+    "the solve must refresh compact indirect dispatch arguments before assembly");
+  const copies = (`${frontierRows}\n${solve}`.match(/copyBufferToBuffer\([^)]*\)/g) ?? [])
+    .map((copy) => copy.replace(/\s+/g, ""));
   assert.deepEqual(copies, [
     "copyBufferToBuffer(this.compaction,8,this.solveDispatch,0,24)",
     "copyBufferToBuffer(this.compaction,this.compactionByteLength-20,this.pressureOverflowDispatch,0,12)",
@@ -235,7 +519,10 @@ test("octree telemetry samples the live compacted pressure-row count", () => {
   assert.match(diagnostics, /pressureCapacityOverflow\s*=\s*overflow/);
   assert.match(diagnostics, /this\.info\.liquidDofCount\s*=\s*liquidRows/);
   assert.match(diagnostics, /this\.info\.pressureSampleCount\s*=\s*liquidRows/);
-  assert.match(diagnostics, /this\.updateSolveBudget\(residuals\[0\],\s*residuals\[1\],\s*liquidRows\)/);
+  assert.match(diagnostics, /this\.residualRms\s*=\s*Math\.sqrt\(rr\s*\/\s*liquidRows\)/,
+    "octree diagnostics must publish the measured Chebyshev residual instead of retaining the solver-info zero default");
+  assert.match(diagnostics, /this\.relativeResidual\s*=\s*Math\.sqrt\(rr\s*\/\s*Math\.max\(bb,\s*1e-30\)\)/);
+  assert.match(diagnostics, /this\.updateSolveBudget\(rr,\s*bb,\s*liquidRows\)/);
 });
 
 test("octree compacted leaf solve scans, assembles once, and iterates over rows only", () => {
@@ -269,7 +556,7 @@ test("octree assembles coarse leaf faces cooperatively with deterministic quadra
   const end = octreeProjectionShader.indexOf("fn iterateLeaves", start);
   const coarse = octreeProjectionShader.slice(start, end);
   assert.ok(start >= 0 && end > start);
-  assert.match(octreeProjectionShader, /if \(owner\.size >= 8u\)[\s\S]*coarseTasks = tiles \* tiles \* tiles/);
+  assert.match(octreeProjectionShader, /if \(owner\.size >= 8u\)[\s\S]*coarseTasks = select\(tiles \* tiles \* tiles, 1u, rowIndexedPressure\)/);
   assert.match(coarse, /@builtin\(local_invocation_index\) lid/);
   assert.match(coarse, /workgroupUniformLoad\(&coarseTaskEligible\) == 0u/);
   assert.match(coarse, /sample = lid; sample < faceSamples; sample \+= 64u/);
@@ -289,8 +576,8 @@ test("octree Chebyshev solve removes three quarters of global iteration boundari
   assert.ok(start >= 0 && end > start);
   assert.match(chebyshev, /params\.solve\.y/);
   assert.match(chebyshev, /params\.solve\.z/);
-  assert.match(chebyshev, /header\.pad0 = bitcast<u32>\(search\)/);
-  assert.match(chebyshev, /header\.pad1 = bitcast<u32>\(rho\)/);
+  assert.match(chebyshev, /leafHeaders\[row\]\.pad0 = bitcast<u32>\(search\)/);
+  assert.match(chebyshev, /leafHeaders\[row\]\.pad1 = bitcast<u32>\(rho\)/);
   assert.doesNotMatch(chebyshev, /workgroupBarrier|storageBarrier|ownerAt|textureLoad/, "each pass stays row-parallel and reduction-free");
   const feedback = octreeProjectionShader.slice(end, octreeProjectionShader.indexOf("fn leafPressureLoad", end));
   assert.match(feedback, /fn reduceResidualPartials/);
@@ -300,6 +587,10 @@ test("octree Chebyshev solve removes three quarters of global iteration boundari
   assert.match(encode, /this\.iterateChebyshevPipeline/);
   assert.doesNotMatch(encode, /this\.leafSolver === "chebyshev" && !this\.couplingHasDynamicBodies/,
     "dynamic bodies must not force the accelerated solve back onto the dispatch ladder");
+});
+
+test("compact face authority keeps a deterministic full Chebyshev budget", () => {
+  assert.match(octreeSource, /if \(this\.faceTransport\) return;/);
 });
 
 test("octree megakernel keeps barriers in uniform control flow and folds parity back", () => {
@@ -332,9 +623,12 @@ test("octree uses the level-set crossing and prolongates pressure inside coarse 
     "the free-surface pressure boundary must lie at phi=0");
   assert.match(octreeProjectionShader, /fn reconstructGradients/);
   assert.match(octreeProjectionShader, /fn storeReconstructedGradient/);
-  assert.match(octreeProjectionShader, /header\.gradient = vec4f\(gradient, 0\.0\)/);
-  const project = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn projectedComponent"), octreeProjectionShader.indexOf("fn extrapolate"));
-  assert.match(project, /left\.packedOrigin != right\.packedOrigin[\s\S]*pressureDistance\(left, right, axis\)/,
+  assert.match(octreeProjectionShader, /header\.gradient = vec4f\(gradient, header\.gradient\.w\)/,
+    "gradient reconstruction must preserve the compact liquid-site phi used by power ghost faces");
+  assert.match(octreeProjectionShader, /header\.gradient = vec4f\(ownerPhiGradient\(owner\),ownerPhi\(owner\)\)/,
+    "axis pressure assembly must publish the compact affine phi field consumed by power ghost faces");
+  const project = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn projectedComponentCached"), octreeProjectionShader.indexOf("fn extrapolate"));
+  assert.match(project, /left\.packedOrigin != right\.packedOrigin[\s\S]*pressureDistanceFromPhi\(left, right, axis, leftPhi, rightPhi\)/,
     "leaf-boundary faces must retain the exact assembled variational gradient");
   assert.match(project, /else if \(leftWet && rightWet\) \{\s+fluid -= reconstructedGradient\(left, axis\)/,
     "dense faces inside a coarse leaf must no longer be invisible to pressure");
@@ -342,6 +636,18 @@ test("octree uses the level-set crossing and prolongates pressure inside coarse 
     "the pressure overlay must expose the same affine field used by projection");
   assert.match(octreeDiagnosticShader, /bitcast<u32>\(pressureUpdate\)/,
     "the pressure-ownership texture must expose the applied velocity update without a readback");
+});
+
+test("power descriptors bind the shared octree topology rather than the phase-row index", () => {
+  const assembly = octreeSource.slice(
+    octreeSource.indexOf("private encodePowerAssemblyMirror"),
+    octreeSource.indexOf("private encodePowerProjection"),
+  );
+  assert.match(assembly, /descriptor\.encode\(encoder, this\.leafHeaders, this\.topology,/,
+    "descriptor bits must describe the one shared balanced octree");
+  assert.match(assembly, /ownerMode: this\.ownerPages \? "paged" : "dense"/);
+  assert.doesNotMatch(assembly, /descriptor\.encode\([^;]*faces\.siteIndex/,
+    "the liquid-row index cannot author geometry for absent air leaves");
 });
 
 test("octree reconstructs coarse affine gradients with a cooperative face reduction", () => {
@@ -377,7 +683,9 @@ test("octree projection is driven by the persistent leaf frontier", () => {
   assert.match(project, /let tile = coarseTaskTile\(task\)/);
   assert.match(project, /tileCoord \* 8u/);
   assert.match(project, /sample = lid; sample < samples; sample \+= 256u/);
-  assert.match(octreeProjectionShader, /projectionController\(id\) != owner\.packedOrigin/);
+  assert.match(octreeProjectionShader, /projectionControllerCached\(id, loaded\) != owner\.packedOrigin/);
+  assert.match(octreeProjectionShader, /fn projectionNeighborhood[\s\S]*loaded\.live\.y != loaded\.live\.x[\s\S]*xPhi = ownerPhi\(x\)/,
+    "projection must reconstruct phi only at wet\/dry leaf boundaries instead of once per face use");
   const encode = WebGPUOctreeProjection.prototype.encode.toString();
   assert.match(encode, /this\.projectSmallLeavesPipeline/);
   assert.match(encode, /this\.projectLeavesPipeline/);
@@ -428,7 +736,42 @@ test("octree compact solve dispatches cover rows with two-dimensional tiles", ()
   assert.doesNotMatch(octreeProjectionShader, /compaction\[2\] = min\(/);
 });
 
-test("octree materializes its live owner map on the reset frame", () => {
-  assert.match(uniformSolverSource, /encodeInlineRebuild\(initialSparseScene\);\s*this\.octreeProjection\.encodeOverlayMaterialization\(initialSparseScene\);\s*this\.octreeProjection\.encodeSparseBrickWorld/);
+test("octree materializes its t=0 authority through internally fenced Section 5 submissions", () => {
+  assert.deepEqual(OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.map(({ id }) => id), [
+    "cold-topology", "power-operator-authority", "surface-global-fine",
+    "section5-face-band-topology", "section5-face-band-transitions",
+    "section5-face-band-fast-march", "section5-face-band-power-publication",
+    "sparse-render-world",
+  ]);
+  const phaseEncoder = WebGPUOctreeProjection.prototype.encodeInitialSparseAuthorityPhase.toString().replace(/\s+/g, "");
+  assert.match(phaseEncoder,
+    /case"cold-topology":this\.encodeColdBootstrapRebuild\(encoder\)[\s\S]*case"power-operator-authority":this\.encode\(encoder[\s\S]*case"surface-global-fine":this\.encodeSurface\(encoder,0\)[\s\S]*case"section5-face-band-topology":this\.encodeGlobalFineFaceBandPhase\(encoder,"topology-build"\)[\s\S]*case"section5-face-band-transitions":this\.encodeGlobalFineFaceBandPhase\(encoder,"transition-adjacency"\)[\s\S]*case"section5-face-band-fast-march":this\.encodeGlobalFineFaceBandPhase\(encoder,"fast-march"\)[\s\S]*case"section5-face-band-power-publication":this\.encodeGlobalFineFaceBandPhase\(encoder,"power-publication"\)[\s\S]*case"sparse-render-world":this\.encodeSparseBrickWorld\(encoder\)/,
+    "phase encoder must retain topology -> power/operator -> fine redistance -> Section 5 rows -> Delaunay adjacency -> face march -> power publication -> render-world order");
+  const combined = WebGPUOctreeProjection.prototype.encodeInitialSparseAuthority.toString().replace(/\s+/g, "");
+  assert.match(combined, /for\(constphaseofOCTREE_INITIAL_SPARSE_AUTHORITY_PHASES\)/,
+    "synchronous callers must retain a combined ordered encoder contract");
+  const warmupTasks = uniformSolverSource.slice(
+    uniformSolverSource.indexOf("private initializationTasks"),
+    uniformSolverSource.indexOf("private async publishInitialSparseScenePhase"),
+  );
+  assert.match(warmupTasks, /OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES\.forEach/);
+  assert.match(warmupTasks, /const id = index === 0 \? "solver\.warmup" : `solver\.warmup\.\$\{authorityPhase\.id\}`/,
+    "the first warmup task must remain the safe pre-submit resource boundary");
+  assert.match(warmupTasks, /dependencies: \[previousTaskId\]/,
+    "each later warmup phase must depend on its fenced predecessor");
+  const phaseWarmup = uniformSolverSource.slice(
+    uniformSolverSource.indexOf("private async publishInitialSparseScenePhase"),
+    uniformSolverSource.indexOf("/** Publish a complete t=0 scene"),
+  );
+  assert.match(phaseWarmup, /Initial sparse authority: \$\{descriptor\.label\}/,
+    "each bounded command buffer needs a log-friendly phase label");
+  const submit = phaseWarmup.indexOf("this.device.queue.submit([initialSparseScene.finish()])");
+  const fence = phaseWarmup.indexOf("await this.device.queue.onSubmittedWorkDone()", submit);
+  const ready = phaseWarmup.indexOf("this.initialSparseAuthorityPublished = true", fence);
+  assert.ok(submit >= 0 && fence > submit && ready > fence,
+    "each task must submit then fence, and readiness must follow the final task fence");
+  assert.match(phaseWarmup,
+    /if \(phase === "sparse-render-world"\) \{[\s\S]*this\.initialSparseAuthorityPublished = true/,
+    "only the sparse-render-world task may publish initial readiness");
   assert.match(octreeSource, /reset-time grid[\s\S]{0,120}zero-initialized topology storage as finest 1\^3/);
 });

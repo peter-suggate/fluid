@@ -1,0 +1,206 @@
+                                                    Power Diagrams and Sparse Paged Grids for High Resolution Adaptive Liquids                         • 140:5
+
+
+efficient storage of the discrete equations and unknowns in an adap-
+tive grid structure, and fast solution of the resulting system using
+a preconditioner for Conjugate Gradient adapted from a multigrid
+scheme. Section 5 presents our interface tracking approach that
+uses a highly resolved implicit geometry representation of the free
+surface, localized to a narrow band around the moving interface and
+stored in a sparse grid structure (SPGrid) [Liu et al. 2016; Setaluri
+et al. 2014]. The same section also discusses details on how this                            a                           b                            c
+representation is advected forward in time, interpolation of scalar
+and vector quantities, and enhancements to fast marching and
+velocity extrapolation that are mandated by our power diagram
+discretization. Important implementation details and optimizations
+in our formulation are reviewed in Section 6.
+
+4     PRESSURE PROJECTION ON MODIFIED OCTREES
+To achieve an accurate staggered finite volume discretization of
+the Poisson equation, the faces of the primal mesh which store
+velocity components should be orthogonal to the edges of the dual
+mesh, which correspond to pressure gradients [Batty et al. 2010;
+Perot and Subramanian 2007]. For sufficiently regular meshes this                                d                                             e
+gives second order accurate pressures. In this section, we describe
+our discretization for the Poisson equation that exploits both the          Fig. 4. (Top) A 2D cell bordering two T-junctions, along with its correspond-
+regularity of octrees for aggressive parallelization and the inherent       ing power diagram (middle), and the Voronoi diagram of the cell centers
+primal-dual orthogonality of power diagrams for accuracy. Our               (right). The cells of the power diagram have the same neighbor relationships
+objective is to solve the incompressible Euler equations                    as the original quadtree, but the dual edges are orthogonal to cell faces.
+                                                                            The Voronoi diagram of the same geometry creates new face connections
+                    ∂u              ∇p
+                       + (u · ∇)u +         =f                      (1)     between nearby cells at the same level. (Bottom) A 3D cell bordering three
+                    ∂t              ρ                                       T-junctions, along with its corresponding power cell. Note the new faces
+                                   ∇·u      =0                      (2)     that emerge between neighbors that previously only shared an edge. Colors
+                                                                            imply resolution and neighbor relationship to the central coarse cell.
+with a splitting scheme following Stam [1999]. Here, u = (u, v, w)
+is the vector velocity field, f encapsulates external forces, p is the
+scalar pressure field, t is time, and ρ is the liquid density.              power cells as
+                                                                                                                              
+                                                                                                          ∇p   Õ         ∇p
+4.1    Power diagram discretization                                                           Vcell ∇ ·      =   Aface      ·n                                (3)
+                                                                                                          ρ              ρ
+                                                                                                                faces
+Aurenhammer [1987] defines the power of a point x with respect to
+a sphere of radius r as d 2 − r 2 , where d is the distance of the point    where n is the unit normal vector pointing out of a face, Aface is the
+from the center of the sphere. Given a set of spheres, their power          face area, and Vcell is the volume. We similarly compute the discrete
+diagram is then a partition of space where each point is associated         divergence as
+to the sphere with minimum power. We construct an octree-based
+                                                                                                            Õ
+                                                                                             Vcell ∇ · u =      Aface (u · n).                  (4)
+power diagram by conceptually √placing a sphere   √      at each octree                                         faces
+cell center with a radius of ∆x/ 3 (or ∆x/ 2 in 2D), where ∆x
+                                                                            For treating boundary conditions, we adapt an earlier unstructured
+is the cell’s side length; this yields the circumsphere for each cell.
+                                                                            mesh embedded boundary approach [Batty et al. 2010; Brochu
+For uniform resolution regions of the tree, the resulting power di-
+                                                                            et al. 2010]. In our setting, this allows both the free surface and
+agram leaves the regular Cartesian grid pattern unchanged. More
+                                                                            solid boundaries to arbitrarily cut through the domain, even near
+remarkably, for T-junctions in two dimensional graded quadtrees,
+                                                                            T-junctions. It requires only liquid signed distance values at cell
+this choice gives a power diagram with exactly the same cell con-
+                                                                            centers and solid signed distance values at cell vertices. By contrast,
+nectivity as the original quadtree, but with the geometry adapted
+                                                                            previous methods [Losasso et al. 2006, 2004] required uniformly
+to recover primal-dual orthogonality (see Figure 4(a,b)). However,
+                                                                            refined cells near boundaries. Our resulting linear system remains
+in three dimensions a minor wrinkle arises: a given cell remains
+                                                                            sparse, symmetric and positive definite, and ensures second order
+face-connected to its original face neighbors, but may now also
+                                                                            accuracy of the computed pressure field.
+share new faces with its original edge neighbors (see Figure 4(d,e)).
+Nevertheless, as we describe below, this geometry is still amenable            Voronoi diagram octrees. Another option to recover orthogonal-
+to efficient computation of the Poisson equation.                           ity would be the Voronoi diagram of the octree cell centers. For
+   We store pressures p at octree cell centers and normal components        non-graded trees this can yield very general unstructured meshes
+of the velocity field u at power cell faces. For computing the pressure,    that discard the regularity benefits of the tree structure (see e.g.,
+we discretize the Poisson equation in finite volume fashion over the        [Guittet et al. 2015b]). While the variety of mesh configurations can
+
+                                                                           ACM Transactions on Graphics, Vol. 36, No. 4, Article 140. Publication date: July 2017.
+140:6    •    M. Aanjaneya et al.
+
+
+naturally be reduced by grading, the Voronoi topology still differs
+more strongly from the original tree than for the power diagram,
+even in the simpler 2D setting (see Figure 4(c)). We therefore prefer
+the power diagram as it provides the necessary orthogonality while
+better preserving the original octree structure.
+
+4.2     Pyramid of sparse uniform grids
+By default, a power diagram would require an explicit mesh for
+storing the topological connectivity. However, such a representation
+would necessitate expensive lookups near T-junctions. Since power
+diagrams preserve the original octree structure, with the caveat
+of introducing some additional faces between edge neighbors, we
+adopt an approach similar to Setaluri et al. [2014] of organizing
+computation on a pyramid of sparsely populated uniform grids that                         Fig. 5. Pyramid of sparse uniform grids. All active cell and face degrees of
+                                                                                          freedom are shown along with ghost cells (square outlines) at each level.
+make much better use of the available hardware memory bandwidth.
+We first briefly review this approach and subsequently highlight the
+necessary modifications required for power diagrams. To identify
+                                                                                             Enhancements for power diagrams. Since power diagrams may
+cells and faces that carry degrees of freedom, Setaluri et al. [2014]
+                                                                                          introduce new faces between cells that previously only shared an
+defined active cells and faces as follows:
+                                                                                          edge, the definition of ghost cells requires some modifications. In
+        • A cell at a given level of the pyramid is active if it is geo-                  the second of the three criteria we previously listed for identifying a
+          metrically present and undivided in the octree.                                 ghost cell, Setaluri et al. [2014] considered only face neighbors of C Il
+        • A face at a given level is active if that face is geometrically                 to check if any of them were active at level s ≤ l; we now examine all
+          present and undivided in the octree, implying that every                        octree cells that share an edge with C Il (in 3D), and treat those that
+          active face has at least one active cell neighbor at that level.
+                                                                                          share a face of the power diagram with C Il as additional neighbors
+For efficiently emulating the building blocks of adaptive fluid sim-                      in deciding whether a ghost cell should be spawned. Moreover, their
+ulation, they used two fundamental algorithmic kernels: stencil                           implementation of the discrete Poisson operator (which was based
+operations within a single level, and transfer operations between                         on the formulation of Losasso et al. [2004]) yielded stencils with
+adjacent levels in the pyramid. This additionally requires the con-                       closed-form coefficients even at level transitions. By contrast, our
+cept of ghost cells. Suppose we index each level with 1 ≤ l ≤ L                           stencil coefficients are determined by the geometry of the power
+where lower indices denote finer grids, and let C Il denote a cell that                   diagram. To efficiently retrieve these coefficients at run-time, we
+natively lives at level l with multi-dimensional index I . Then, a cell                   adopt certain restrictions on our grading scheme that make the
+C Il is ghost if all three of the following conditions are jointly met:                   power diagram geometry of a cell dependent only on its 1-ring
+                                                                                          neighborhood. This allows us to retrieve stencil coefficients via a
+      (1) C Il is not active at level l,
+                                                                                          look-up table, indexed by a compact descriptor of the local topology
+      (2) C Il neighbors a cell that is active at level s ≤ l, and                        as we propose in Section 6.
+      (3) An active, coarser parent of C Il exists at some level l ⋆ > l.                    As mentioned in Section 4.1, we store velocities at all power cell
+  Figure 5 shows the pyramid of sparse grids, along with all ghost                        faces. For faces that are exactly homologous to faces on the original
+cells and active cell/face degrees of freedom. To transfer data be-                       octree, similar to Setaluri et al. [2014], we dedicate 3 channels for
+tween adjacent levels of the pyramid, two more operators are used:                        storing the individual components of the velocity field (in the stan-
+                                                                                          dard octree, those would have been the u, v, w axis-components of
+      (1) GhostValuePropagate(): an upsampling routine in which                           the velocity field; in our case they are normal velocity components
+          data from level l is copied to fine ghost children at level l − 1,              relative to the respective power diagram faces). In our power dia-
+      (2) GhostValueAccumulate(): a downsampling routine in which                         gram, however, faces of the power diagram (and correspondingly
+          data in level l accumulates contributions from any fine ghost                   normal velocity variables that require storage) can exist in 3D be-
+          children at level l − 1.                                                        tween cells that were edge neighbors in the original octree. An edge
+Essentially, ghost cells provide a mechanism to combine informa-                          of the octree can have up to four cells incident to it; however only
+tion that is shared across different levels of resolution, while only                     two of those four cells can actually be connected in any given power
+focusing effort one level at a time, enabling optimizations native to                     diagram under our formulation. Specifically, it is possible for the
+uniform grids. A ghost cell can either be a source of a numerical                         pair of cells indexed Ci, j,k and Ci, j+1,k +1 (sharing an edge aligned
+value originating from a coarser level in the pyramid (by mirroring                       with the x-axis) to share a face of the power diagram. Likewise,
+the coarse value), or a placeholder for the partial result of an opera-                   cells Ci, j+1,k and Ci, j,k +1 (incident on the same edge, as far as the
+tion that would have otherwise required access to a coarser variable.                     octree is concerned) could instead share a face of the power dia-
+We refer the reader to the work of Setaluri et al. [2014] for details                     gram. However, at most one of the aforementioned pairs could have
+on how this representation can be used to efficiently compute the                         a power diagram face connecting them, in any given scenario. Thus,
+discrete gradient, divergence, and Laplace operators.                                     we can associate the normal velocity component associated with
+
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 140. Publication date: July 2017.
+                                                    Power Diagrams and Sparse Paged Grids for High Resolution Adaptive Liquids                         • 140:7
+
+
+either of these two cases with the same octree edge, with the under-             (1) Starting with a zero initial guess p0 = 0, execute k iterations
+standing that at most one of these two neighboring relations can                     of the damped Jacobi method on the equation L2 p = q
+be present at the same time; the determination of which of the two                   (input vector is used as right hand side). This is only applied
+cases (if any) we have can be made by examining the local octreee                    to a band (about 3 voxels wide) around the boundaries and
+topology. Hence, velocity components associated with such cases of                   level transitions. Let p1 be the iterate that results from this
+edge neighbors can be conceptually stored on 3 offset grids, each of                 operation, and r1 = q − L2 p1 the associated residual.
+them centered on the midpoint of edges aligned with the x, y, and z              (2) Compute a correction δ p = M1 r1 by applying the first order
+axes, respectively. We simply dedicate three additional channels in                  accurate preconditioner M1 from Setaluri et al. [2014] to
+SPGrid to store those special velocity components (we would have                     the residual r1 . Add the correction to p1 , to obtain a new
+called them edge-centered velocities if such a concept existed in the                approximation p2 = p1 + δ p.
+original octree). We do not explicitly store a description for the               (3) Repeat k additional iterations of the same Jacobi method
+direction of this edge-centered velocity component, as this will be                  on the equation L2 p = q, but this time use p2 as the initial
+automatically reflected in the stencils of those cells incident to it.               guess. Let w denote the result at the end of this iteration.
+                                                                            We can easily verify that vectors w and q are related by a linear
+4.3   Multigrid preconditioner                                              map w = Mq (there is nothing in steps 1-3 above that introduces
+Our power diagram discretization, paired with a topology encod-             any nonlinearity, and it is easy to verify that when q = 0 we would
+ing scheme (see section 6) will allow the Laplace operator to be            also have w = 0). In fact, a careful look at the matrix formula for
+applied implicitly without building its explicit matrix form. This          the Jacobi iteration reveals that the entire matrix M is symmet-
+gives the opportunity to use a matrix-free method such as Conju-            ric and positive definite, assuming that M1 is SPD as well. We use
+gate Gradient for solving the Poisson equation. Naturally, a good           the algorithm above to implicitly apply M as a preconditioner to
+preconditioner is essential; Setaluri et al. [2014] used a very effec-      Conjugate Gradient for the system L2 p = f. In our examples, this
+tive adaptive multigrid preconditioner. However, their approach             preconditioner achieved very similar convergence performance to
+was specifically tailored for the first order accurate discretization of    the straightforward alternative approach of using a second order
+Losasso et al. [2004]. Since both our power diagram discretization,         operator at the finest level of a V-cycle preconditioner, achieving
+as well as the first-order accurate approach [Losasso et al. 2004; Se-      satisfactory convergence within 6-10 iterations across all resolu-
+taluri et al. 2014] have exactly the same set of pressure variables, it     tions. It was necessary to perform an adequate number (k ≈ 8) of
+would be natural to start with the multigrid V-cycle preconditioner         boundary smoothing iterations in steps (1) and (3) of the aforemen-
+proposed by Setaluri et al. [2014] as a baseline, and attempt to adapt      tioned preconditioner application to achieve this good convergence
+it to the power diagram discretization. The most straightforward            behavior, but the ability to restrict this effort to just the boundary
+way to make such an adaptation would be to replace the discretiza-          region (while using an aggressively optimized first order V-cycle)
+tion at the finest level of the hierarchy with our newly proposed           made this a favorable trade-off at large resolutions.
+power diagram formulation, retaining the first-order accurate oper-
+ators at all coarser levels. This adaptation is quite effective; in our     5    INTERVENTIONS IN THE SIMULATION PIPELINE
+tests it consistently achieves preconditioning efficiency comparable        To track the dynamically evolving liquid surface, we designed a
+with what Setaluri et al. [2014] report for the first-order problem.        level set scheme similar in spirit to prior work [Bargteil et al. 2006;
+   Although this approach is effective, there is a modest penalty           Bojsen-Hansen and Wojtan 2013; Goldade et al. 2016; Kim et al.
+to be paid in terms of implementation efficiency. The single most           2009] in the sense that we use the SPGrid data structure to store an
+costly component of a multigrid V-cycle is the smoothing routine            Eulerian description of a narrow band around the free surface at
+at the finest resolution of the discretization hierarchy. This step is      a significantly higher resolution than the velocity data — typically
+now using our second order power diagram discretization which,              by a factor of 4 or 8 (see Figure 6). Thus, we use two separate
+although quite efficient, does not permit the full extent of aggres-        meshes, a background simulation mesh that is an octree, and an
+sive optimizations of the first order scheme [Setaluri et al. 2014],        interface tracking grid (or fine level set grid) that is a single SPGrid
+which does not require local topology queries to define its stencils.       (rather than a pyramid). Note that the velocities natively live only
+Thus, we have implemented a hybrid alternative: We first invoke             on the octree, and we also store and evolve a separate (coarse)
+the smoothing routine, using the second order power diagram dis-            level set on the octree because our fine representation does not
+cretization, but iterate it only near boundaries and level transitions.     carry inside/outside information beyond a narrow band of the free
+We subsequently update the residual, and use a first order accurate         surface. The fine level set representation only requires an SPGrid
+multigrid V-cycle to solve the error equation and generate a correc-        with 4 channels (1 channel for Boolean flags associated with domain
+tion across the entire domain. We follow up with a second sweep             geometry, 1 for the level set, and 2 more channels for fast marching).
+of smoothing the second order discretization (near boundaries and
+level transitions) to ensure symmetry of the preconditioner thus               Level set advection. The time step ∆t is determined by the finest
+crafted. Let us denote by L1 the first order Laplace operator from          effective resolution of the octree, since the velocities live natively
+Setaluri et al. [2014], and let M1 ≈ L−1 1 be the multigrid precondi-       on the octree. However, this time step will be overly dissipative
+tioner they defined in their work. Finally, let L2 be our second order      for advecting the fine level set forward in time using a standard
+Laplace discretization, using the power diagram. We define a new            semi-Lagrangian update, and may require more expensive schemes
+preconditioner M, whose action w = Mq is computed as follows:               for volume conservation [Lentine et al. 2012]. We follow a more
+
+                                                                           ACM Transactions on Graphics, Vol. 36, No. 4, Article 140. Publication date: July 2017.
+

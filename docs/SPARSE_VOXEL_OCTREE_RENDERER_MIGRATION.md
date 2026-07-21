@@ -1029,9 +1029,9 @@ Objective: expose the migration safely and make failure/performance attributable
   default; serialize only the explicit compatibility selection as
   `render=raster`.
 - [ ] Add development-only split/difference modes.
-- [x] Keep raster user-selectable and automatic as a typed fallback while the
-  default uses SVO only for the dry-scene replacement and retains current
-  raster water extraction/interfaces/optical composition.
+- [x] Keep raster as the interactive default and automatic typed fallback;
+  retain SVO dry-scene replacement as an explicit A/B selection while its
+  worst-case presentation cost can still monopolize the shared GPU queue.
 - [x] Fall back on pipeline compilation, missing/unpublished structural data,
   unsupported terrain, adapter-limit, allocation, or fatal initialization
   failure.
@@ -1041,8 +1041,9 @@ Objective: expose the migration safely and make failure/performance attributable
   media, indirect light, temporal resolve, and upscale.
 - [x] Split the production SVO dry visibility/shading pass from temporal
   resolve/copy timing, include temporal cost in total GPU render time only when
-  encoded, and expose a default-preserving `svoShadowVisibility=0` diagnostic
-  gate to isolate primary versus shadow cost without changing shipped output.
+  encoded, and expose an opt-in `svoShadowVisibility=1` diagnostic gate. The
+  bounded hard-shadow pass remains out of the interactive default until its
+  worst-case full-frame cost meets the presentation budget.
 - [x] Fence asynchronous render-timestamp readback by the complete renderer
   mode plus a monotonic context epoch, reset per-stage fallbacks on a mode
   change, and exclude older raster/SVO epochs from performance averaging.

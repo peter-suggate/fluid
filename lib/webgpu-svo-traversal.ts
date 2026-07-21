@@ -407,7 +407,7 @@ fn svoBrickVoxelIndex(voxelOffset: u32, local: vec3u, brickSize: u32) -> u32 {
   return voxelOffset + local.x + local.y * brickSize + local.z * brickSize * brickSize;
 }
 
-fn svoTraverse(ray: SvoRay, mapping: SvoMapping) -> SvoTraversalHit {
+fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalDepth: u32) -> SvoTraversalHit {
   if (svoControl[12] != 0u) { return svoMiss(SVO_STATUS_SOURCE_OVERFLOW, 0u); }
   if (mapping.nodeCount == 0u) { return svoMiss(SVO_STATUS_MISS, 0u); }
   let rootInterval = svoRayAabb(ray, svoNodeBounds(svoNodes[0], mapping));
@@ -428,6 +428,7 @@ fn svoTraverse(ray: SvoRay, mapping: SvoMapping) -> SvoTraversalHit {
     let node = svoNodes[current.nodeIndex];
     visits += 1u;
     if (node.address.z > mapping.maximumDepth) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
+    if (node.address.z > maximumTraversalDepth) { return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits); }
     if (node.links.z != SVO_INVALID) {
       if (node.links.z >= mapping.leafCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
       let leaf = svoLeaves[node.links.z];
@@ -476,6 +477,9 @@ fn svoTraverse(ray: SvoRay, mapping: SvoMapping) -> SvoTraversalHit {
     }
   }
   return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits);
+}
+fn svoTraverse(ray: SvoRay, mapping: SvoMapping) -> SvoTraversalHit {
+  return svoTraverseWithDepthLimit(ray,mapping,mapping.maximumDepth);
 }
 `;
 

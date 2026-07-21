@@ -4,6 +4,7 @@ import test from "node:test";
 import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 
 test("grid overlay is an independent alpha-composited presentation layer", () => {
   assert.match(gridOverlayShader, /@group\(0\) @binding\(2\) var fluidField: texture_3d<f32>/);
@@ -39,9 +40,11 @@ test("adaptive diagnostic modes expose coverage, level set, divergence, and pres
   assert.match(rendererSource, /gridOverlay\?\.mode === "projection" && gpuInfo\?\.gridKind === "octree" \? 8 : gridOverlay\?\.mode === "resolution"/);
 });
 
-test("adaptive cell-scale mode exposes the live finest surface band", () => {
+test("adaptive cell-scale mode audits the compact octree leaf level", () => {
   assert.match(gridOverlayShader, /fieldMode == 9 && adaptiveGrid/);
-  assert.match(gridOverlayShader, /let representedSize = max\(horizontalSize, verticalSize\)/);
+  assert.match(gridOverlayShader, /var representedSize = max\(horizontalSize, verticalSize\)/);
+  assert.match(gridOverlayShader, /representedSize=i32\(octreeSurfaceLeaves\[row\]\.size\)/);
+  assert.match(gridOverlayShader, /missingCompactOwner=row==SPARSE_SURFACE_INVALID/);
   assert.match(gridOverlayShader, /let maximumRepresentedSize = max\(2\.0, u\.options\.w\)/);
   assert.match(gridOverlayShader, /log2\(f32\(representedSize\)\) \/ log2\(maximumRepresentedSize\)/);
   assert.match(gridOverlayShader, /let fineColor = vec3f\(0\.22, 0\.68, 0\.74\)/,
@@ -73,7 +76,7 @@ test("surface-band audit mode separates interface core, page support, halo, and 
   assert.match(gridOverlayShader, /vec3f\(0\.12, 0\.72, 0\.82\)/, "cyan is transport halo");
   assert.match(gridOverlayShader, /vec3f\(0\.42, 0\.19, 0\.62\)/, "violet is core-page support");
   assert.match(gridOverlayShader, /vec3f\(1\.0, 0\.03, 0\.52\)/, "pink is the core interface shell");
-  assert.match(rendererSource, /gridOverlay\?\.mode === "surface" && gpuInfo\?\.gridKind === "octree" \? 10 : 0/);
+  assert.match(rendererSource, /gridOverlay\?\.mode === "surface" && gpuInfo\?\.gridKind === "octree" \? 10 : gridOverlay\?\.mode === "faces"/);
 });
 
 test("optical-layer mode distinguishes retained cubes from the merged tall interior", () => {
@@ -101,6 +104,31 @@ test("solver option switches atomically rebind the overlay before retiring GPU t
   assert.ok(debugDetach >= 0 && debugDetach < retire);
   const svoAttach = replacement.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData)");
   assert.ok(svoAttach >= 0 && svoAttach < retire);
+});
+
+test("compact octree overlay samples leaf pages and never requests dense phi", () => {
+  assert.match(gridOverlayShader, /fn octreeSurfaceRow/);
+  assert.match(gridOverlayShader, /fn octreeSurfacePhi/);
+  assert.match(gridOverlayShader, /r==2u\|\|r==4u/);
+  assert.match(gridOverlayShader, /fn octreeSurfaceLoad/);
+  assert.match(gridOverlayShader, /grid=clamp\(\(point-origin\)\/f32\(leaf\.size\)\*f32\(r\)/);
+  assert.match(gridOverlayShader, /octreeSurfaceLoad\(base,b\)/);
+  assert.match(gridOverlayShader, /fieldMode == 10[\s\S]*?octreeSurfaceBound\(\)/);
+  assert.match(rendererSource, /adaptiveWaterReady \? this\.scalarFallbackTexture : readyGPUFluid\.surfaceFieldTexture/);
+  assert.match(rendererSource, /compactSurface\?this\.scalarFallbackTexture:this\.gpuFluid\.surfaceFieldTexture\?\?this\.gpuFluid\.volumeTexture/);
+});
+
+test("compact velocity diagnostics reuse owner rows and bounded face incidence", () => {
+  assert.match(gridOverlayShader, /let hinted=textureLoad\(pressureSamples,cell,0\)\.x/);
+  assert.match(gridOverlayShader, /if\(octreeLeafContains\(hinted,point\)\)\{return hinted;\}/);
+  assert.match(gridOverlayShader, /struct OctreeFaceAudit/);
+  assert.match(gridOverlayShader, /let count=min\(publishedCount,OCTREE_FACE_INCIDENCE_PER_ROW\)/);
+  assert.match(gridOverlayShader, /weighted\[axis\]\+=weight\*face\.normalVelocity/);
+  assert.match(gridOverlayShader, /fieldMode == 11 && octreeGrid/);
+  assert.match(gridOverlayShader, /compactVelocityFault = row == SPARSE_SURFACE_INVALID \|\| audit\.fault != 0u \|\| audit\.axisMask != 7u/);
+  assert.match(rendererSource, /gridOverlay\?\.mode === "faces" && gpuInfo\?\.gridKind === "octree" \? 11 : 0/);
+  assert.match(octreeSource, /vec4u\(row, bitcast<u32>\(pressureUpdate\), vertical, horizontal\)/,
+    "the existing overlay materialization lane publishes the compact row without another pass");
 });
 
 test("grid overlay suppresses dense backing-grid lines inside adaptive cells", () => {

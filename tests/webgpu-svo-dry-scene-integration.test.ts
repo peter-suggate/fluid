@@ -25,36 +25,37 @@ function expectSource(source: string, pattern: RegExp, message: string): void {
   assert.ok(pattern.test(source), message);
 }
 
-test("SVO dry-scene replacement is the default while raster remains selectable", () => {
-  assert.equal(DEFAULT_SVO_RENDER_MODE, "svo");
+test("raster presentation is the default while SVO remains selectable", () => {
+  assert.equal(DEFAULT_SVO_RENDER_MODE, "raster");
   expectSource(rendererSource, /svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE/,
-    "callers which do not opt in must use the production SVO dry-scene presentation");
+    "callers which do not opt in must use the bounded raster presentation");
   expectSource(rendererSource, /import \{ DEFAULT_SVO_RENDER_MODE, type SvoRenderMode \} from "\.\/svo-render-mode"/,
     "renderer must consume the canonical SvoRenderMode toggle");
 });
 
 test("the water pipeline replacement callback is fail-safe and replaces rather than overlays raster", () => {
-  const replacement: DrySceneReplacementEncoder = () => true;
-  assert.equal(replacement({} as GPUCommandEncoder, {} as GPUTexture), true);
+  const sampledTargetView = {} as GPUTextureView;
+  const replacement: DrySceneReplacementEncoder = () => ({ encoded: true, sampledTargetView });
+  assert.deepEqual(replacement({} as GPUCommandEncoder, {} as GPUTexture), { encoded: true, sampledTargetView });
   expectSource(waterSource, /drySceneReplacement\?\.\(encoder, this\.sceneTexture, timestamps\?\.scene\) \?\? false/,
     "water pipeline must let the replacement explicitly accept or reject a frame");
-  expectSource(waterSource, /if \(!sparseSceneEncoded\) \{[^]*label:"Dry scene"/,
+  expectSource(waterSource, /if \(!sparseSceneResult\) \{[^]*label:"Dry scene"/,
     "the analytic pass is encoded only when no replacement accepted the frame");
   assert.doesNotMatch(waterSource, /drySceneOverlay/,
     "a sparse production scene must never be composed after the analytic pass");
-  const replacementCall = waterSource.indexOf("const sparseSceneEncoded = drySceneReplacement");
-  const rasterFallback = waterSource.indexOf("if (!sparseSceneEncoded)", replacementCall);
+  const replacementCall = waterSource.indexOf("const sparseSceneResult = drySceneReplacement");
+  const rasterFallback = waterSource.indexOf("if (!sparseSceneResult)", replacementCall);
   assert.ok(replacementCall >= 0 && rasterFallback > replacementCall);
 });
 
-test("the direct renderer exposes a boolean source-aware replacement contract", () => {
+test("the direct renderer exposes a source-aware replacement texture contract", () => {
   assert.ok(drySceneSource, "lib/webgpu-svo-dry-scene.ts must implement the production dry-scene renderer");
   expectSource(drySceneSource, /export class SparseVoxelDrySceneRenderer/,
     "direct renderer class must be public to the presentation owner");
   expectSource(drySceneSource, /setSource\(source: SparseVoxelSceneRenderSource \| undefined, scene: SparseVoxelDrySceneData \| undefined\)/,
     "the renderer accepts structural arenas, their parent material table, and analytic-owner data together");
-  expectSource(drySceneSource, /encode\([^)]*encoder: GPUCommandEncoder[^)]*target: GPUTexture \| GPUTextureView[^)]*timestampWrites\?: TimestampRange[^)]*\): boolean/,
-    "encode must match DrySceneReplacementEncoder and report whether it wrote the frame");
+  expectSource(drySceneSource, /encode\([^)]*encoder: GPUCommandEncoder[^)]*target: GPUTexture \| GPUTextureView[^)]*timestampWrites\?: TimestampRange[^)]*\): DrySceneReplacementResult \| false/,
+    "encode must report both successful ownership and the texture the next stage should sample");
   expectSource(drySceneSource, /if \(!this\.pipeline \|\| !this\.bindGroup\) return false/,
     "an absent or unpublished source must trigger the raster fallback");
   expectSource(drySceneSource, /loadOp:\s*"clear"/,

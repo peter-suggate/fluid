@@ -291,6 +291,8 @@ export interface SparseVoxelRenderSource extends SparseVoxelSceneRenderSource {
   materials: GPUBufferBinding;
   voxelCapacity: number;
   brickCapacity: number;
+  /** Filled tank panes may conceal page-native fluid cells in raw inspection. */
+  drawContainerGlass?: boolean;
   /**
    * Producer-owned switch for the expanded voxel/brick inspection records.
    * Absence means a legacy producer whose inspection publication is always on.
@@ -568,6 +570,10 @@ struct VertexOutput {
   @location(2) @interpolate(flat) materialId: u32,
   @location(3) @interpolate(flat) level: u32,
   @location(4) @interpolate(flat) flags: u32,
+  // Unit-cube coordinates make every occupied cell legible even when a
+  // contiguous region (notably the initial dam column) has a flat silhouette.
+  @location(5) localPosition: vec3f,
+  @location(6) @interpolate(flat) voxelSeed: u32,
 }
 
 @group(0) @binding(0) var<uniform> view: ViewUniforms;
@@ -609,7 +615,10 @@ fn lineCorner(index: u32) -> vec3f {
 fn rawVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
   let record = instances[instanceIndex];
   let corner = triangleCorner(vertexIndex);
-  let world = record.origin.xyz + corner * record.extent.xyz;
+  // Pull every cube slightly toward its centre. A solid dam can otherwise
+  // hide every internal cell behind one continuous exterior surface.
+  let separatedCorner = mix(vec3f(0.035), vec3f(0.965), corner);
+  let world = record.origin.xyz + separatedCorner * record.extent.xyz;
   var output: VertexOutput;
   output.position = view.viewProjection * vec4f(world, 1.0);
   output.worldPosition = world;
@@ -617,6 +626,8 @@ fn rawVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) i
   output.materialId = record.materialAndFlags.x;
   output.level = record.materialAndFlags.z;
   output.flags = record.materialAndFlags.y;
+  output.localPosition = corner;
+  output.voxelSeed = instanceIndex;
   return output;
 }
 
@@ -631,6 +642,8 @@ fn gridVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) 
   output.materialId = record.materialAndFlags.x;
   output.level = record.materialAndFlags.z;
   output.flags = record.materialAndFlags.y;
+  output.localPosition = vec3f(0.0);
+  output.voxelSeed = 0u;
   return output;
 }
 
@@ -649,6 +662,8 @@ fn overlayVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_inde
   output.materialId = record.materialAndFlags.x;
   output.level = record.materialAndFlags.z;
   output.flags = record.materialAndFlags.y;
+  output.localPosition = vec3f(0.0);
+  output.voxelSeed = 0u;
   return output;
 }
 
@@ -682,6 +697,8 @@ fn glassPaneVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_in
   output.materialId = 1u;
   output.level = 0u;
   output.flags = 0u;
+  output.localPosition = vec3f(uv, 0.0);
+  output.voxelSeed = paneIndex;
   return output;
 }
 
@@ -714,7 +731,29 @@ fn rawFragment(input: VertexOutput) -> @location(0) vec4f {
   // closure; this branch prioritizes stable material identity and silhouette.
   let normal = normalize(input.worldNormal);
   let lambert = 0.28 + 0.72 * max(dot(normal, normalize(view.lightDirection.xyz)), 0.0);
-  let linearColor = material.baseColor.rgb * lambert + material.emissiveRoughness.rgb;
+  var linearColor = material.baseColor.rgb * lambert + material.emissiveRoughness.rgb;
+  // Only the two coordinates lying in this cube face describe its boundary;
+  // the third coordinate is identically 0 or 1 and would mark the whole face
+  // as an edge. Normalize by screen-space derivatives to keep seams visible at
+  // a stable pixel width across the very different dam-break cell scales.
+  var facePosition = input.localPosition.xy;
+  if (abs(normal.x) > 0.5) { facePosition = input.localPosition.yz; }
+  else if (abs(normal.y) > 0.5) { facePosition = input.localPosition.xz; }
+  let pixelWidth = max(fwidth(facePosition), vec2f(1e-4));
+  let boundaryDistance = min(facePosition, vec2f(1.0) - facePosition) / pixelWidth;
+  let edge = 1.0 - smoothstep(0.65, 1.35, min(boundaryDistance.x, boundaryDistance.y));
+  // Page-native water commonly occupies a contiguous block. Screen-door its
+  // face interiors with a per-cell seed so discarded pixels can reveal deeper
+  // cells without requiring an impossible global alpha sort. Cell edges stay
+  // solid, making this an order-independent structural cutaway.
+  if (input.materialId == 3u && edge < 0.35) {
+    let pixel = vec2u(input.position.xy);
+    var hash = input.voxelSeed * 747796405u + pixel.x * 2891336453u + pixel.y * 277803737u;
+    hash = (hash ^ (hash >> 16u)) * 2246822519u;
+    if ((hash & 7u) >= 3u) { discard; }
+    linearColor *= 1.45;
+  }
+  linearColor *= mix(1.0, 0.24, edge);
   return vec4f(max(linearColor, vec3f(0.035)) * view.style.z, material.baseColor.a);
 }
 
@@ -1010,7 +1049,7 @@ export class SparseVoxelDebugRenderer {
       pass.drawIndirect(this.overlayIndirectBuffer, 0);
       pass.setBindGroup(0, this.renderBindGroup);
     }
-    if (voxelMode && this.glassPanePipeline) {
+    if (voxelMode && this.glassPanePipeline && this.source.drawContainerGlass !== false) {
       const [minX, minY, minZ] = options.containerBounds.min;
       const [maxX, maxY, maxZ] = options.containerBounds.max;
       const centers: Array<readonly [number, number, number, number]> = [

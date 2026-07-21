@@ -9,6 +9,7 @@
 
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
+import { OCTREE_CONSUMER_MAX_FACE_CANDIDATES, validateUnifiedOctreeConsumerSource, type UnifiedOctreeConsumerSource } from "./octree-consumer-sampling";
 
 export const gridOverlayShader = /* wgsl */ `
 struct Uniforms {
@@ -55,8 +56,47 @@ struct SparseSurfaceParams {
 @group(0) @binding(11) var<storage, read> sparseSurfacePhi: array<f32>;
 @group(0) @binding(12) var<storage, read> sparseSurfaceControl: array<u32>;
 @group(0) @binding(13) var<storage, read> sparseSurfaceStates: array<u32>;
+struct OctreeSurfaceLeaf { packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f }
+struct OctreeSurfaceParams { shape:vec4u, offsets0:vec4u, offsets1:vec4u, offsets2:vec4u, cellDt:vec4f, spare0:vec4u, spare1:vec4u, spare2:vec4u }
+struct OctreeFaceRecord { negativeRow:u32,positiveRow:u32,packedOrigin:u32,axisSpan:u32,normalVelocity:f32,area:f32 }
+@group(0) @binding(14) var<storage, read> octreeSurfaceLeaves:array<OctreeSurfaceLeaf>;
+@group(0) @binding(15) var<storage, read> octreeSurfaceArena:array<u32>;
+@group(0) @binding(16) var<uniform> octreeSurfaceParams:OctreeSurfaceParams;
+@group(0) @binding(17) var<storage, read> octreeFaces:array<OctreeFaceRecord>;
+@group(0) @binding(18) var<storage, read> octreeIncidence:array<u32>;
+@group(0) @binding(19) var<storage, read> octreeFaceControl:array<u32>;
 
 const SPARSE_SURFACE_INVALID: u32 = 0xffffffffu;
+const OCTREE_FACE_INCIDENCE_PER_ROW: u32 = ${OCTREE_CONSUMER_MAX_FACE_CANDIDATES}u;
+
+fn octreeSurfaceBound()->bool{let r=octreeSurfaceParams.shape.z;return (r==2u||r==4u)&&arrayLength(&octreeSurfaceArena)>6u&&octreeSurfaceParams.shape.x<=arrayLength(&octreeSurfaceLeaves);}
+fn octreeSurfaceAvailable()->bool{return octreeSurfaceBound()&&octreeSurfaceArena[3]==0u;}
+fn octreeOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
+fn octreeHash(q:vec3u)->u32{var h=(q.x*73856093u)^(q.y*19349663u)^(q.z*83492791u);h^=h>>16u;return h;}
+fn octreeLeafContains(row:u32,point:vec3f)->bool{if(row>=octreeSurfaceParams.shape.x){return false;}let leaf=octreeSurfaceLeaves[row];let origin=vec3f(octreeOrigin(leaf.packedOrigin));return leaf.size>0u&&all(point>=origin)&&all(point<origin+vec3f(f32(leaf.size)));}
+fn octreeSurfaceRow(cell:vec3i)->u32{
+  if(!octreeSurfaceBound()||any(cell<vec3i(0))){return SPARSE_SURFACE_INVALID;}
+  let point=vec3f(cell)+vec3f(0.5);let hinted=textureLoad(pressureSamples,cell,0).x;
+  // Reuse the owner row already produced by the overlay materialization pass.
+  // Only air-side halo cells pay for a bounded compact-hash lookup.
+  if(octreeLeafContains(hinted,point)){return hinted;}
+  let mask=octreeSurfaceParams.offsets2.y-1u;
+  for(var size=1u;size<=1024u;size<<=1u){let q=vec3u(floor(point/f32(size)));var slot=octreeHash(q)&mask;
+    for(var probe=0u;probe<32u;probe+=1u){let encoded=octreeSurfaceArena[octreeSurfaceParams.offsets1.y+slot];if(encoded==0u){break;}let row=encoded-1u;if(octreeLeafContains(row,point)){return row;}slot=(slot+1u)&mask;}
+  }
+  return SPARSE_SURFACE_INVALID;
+}
+fn octreeLeafFallback(row:u32,point:vec3f)->f32{let leaf=octreeSurfaceLeaves[row];let origin=vec3f(octreeOrigin(leaf.packedOrigin));let centre=origin+vec3f(0.5*f32(leaf.size));let physicalGradient=leaf.phiGradient.yzw/max(octreeSurfaceParams.cellDt.xyz,vec3f(1e-9));let boundedPhysical=physicalGradient/max(1.0,length(physicalGradient));return leaf.phiGradient.x+dot(boundedPhysical*octreeSurfaceParams.cellDt.xyz,point-centre);}
+fn octreeSurfaceLoad(base:u32,q:vec3u)->f32{let r=octreeSurfaceParams.shape.z;return bitcast<f32>(octreeSurfaceArena[base+q.x+r*(q.y+r*q.z)]);}
+fn octreeSurfacePhi(row:u32,point:vec3f)->f32{
+  if(row==SPARSE_SURFACE_INVALID||row>=octreeSurfaceParams.shape.x){return 1e20;}let slot=octreeSurfaceArena[octreeSurfaceParams.offsets0.x+row];if(slot==SPARSE_SURFACE_INVALID||slot>=octreeSurfaceParams.shape.y){return octreeLeafFallback(row,point);}
+  let leaf=octreeSurfaceLeaves[row];let r=octreeSurfaceParams.shape.z;let origin=vec3f(octreeOrigin(leaf.packedOrigin));let grid=clamp((point-origin)/f32(leaf.size)*f32(r)-vec3f(0.5),vec3f(0.0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1u),vec3u(r-1u));let t=fract(grid);let base=octreeSurfaceParams.offsets1.z+slot*octreeSurfaceParams.shape.w;
+  return mix(mix(mix(octreeSurfaceLoad(base,a),octreeSurfaceLoad(base,vec3u(b.x,a.y,a.z)),t.x),mix(octreeSurfaceLoad(base,vec3u(a.x,b.y,a.z)),octreeSurfaceLoad(base,vec3u(b.x,b.y,a.z)),t.x),t.y),mix(mix(octreeSurfaceLoad(base,vec3u(a.x,a.y,b.z)),octreeSurfaceLoad(base,vec3u(b.x,a.y,b.z)),t.x),mix(octreeSurfaceLoad(base,vec3u(a.x,b.y,b.z)),octreeSurfaceLoad(base,b),t.x),t.y),t.z);
+}
+fn octreeSurfaceCoreSample(cell:vec3i)->bool{
+  let row=octreeSurfaceRow(cell);if(row==SPARSE_SURFACE_INVALID){return false;}let state=octreeSurfaceArena[octreeSurfaceParams.offsets0.y+row];
+  return (state&2u)!=0u&&abs(octreeSurfacePhi(row,vec3f(cell)+vec3f(0.5)))<=1.5*min(octreeSurfaceParams.cellDt.x,min(octreeSurfaceParams.cellDt.y,octreeSurfaceParams.cellDt.z));
+}
 
 // Overflow means the bounded fine pool could not cover the complete surface.
 // The renderer falls back to the complete coarse field in that case, and the
@@ -188,6 +228,7 @@ fn nearestBodyDistance(ro: vec3f, rd: vec3f) -> f32 {
 fn fluidSample(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz);
   let q = clamp(cell, vec3i(0), dims - vec3i(1));
+  if(octreeSurfaceAvailable()){let phi=octreeSurfacePhi(octreeSurfaceRow(q),vec3f(q)+vec3f(0.5));if(phi>=1e19){return select(0.0,1.0,hasLiquidPressureDof(q));}let h=u.container.y/max(u.gridInfo.y,1.0);return clamp(0.5-phi/max(h,1e-9),0.0,1.0);}
   if (u.gridInfo.w < 1.5) { return textureLoad(fluidField, q, 0).x; }
   let cellSizeY = u.container.y / max(u.gridInfo.y, 1.0);
   if (u.gridInfo.w > 2.5) { return clamp(0.5 - textureLoad(fluidField, q, 0).x / cellSizeY, 0.0, 1.0); }
@@ -201,6 +242,7 @@ fn fluidSample(cell: vec3i) -> f32 {
 
 fn levelSetSample(cell: vec3i) -> f32 {
   let dims = vec3i(u.gridInfo.xyz); let q = clamp(cell, vec3i(0), dims - vec3i(1));
+  if(octreeSurfaceAvailable()){return octreeSurfacePhi(octreeSurfaceRow(q),vec3f(q)+vec3f(0.5));}
   let h = u.container.y / max(u.gridInfo.y, 1.0);
   if (u.gridInfo.w > 2.5) { return textureLoad(fluidField, q, 0).x; }
   return (0.5 - fluidSample(q)) * 4.0 * h;
@@ -247,6 +289,22 @@ fn velocitySample(cell: vec3i) -> vec3f {
   let stored = vec3i(textureDimensions(velocityField));
   if (packedY < 2 || packedY >= stored.y) { return vec3f(0.0); }
   return textureLoad(velocityField, vec3i(q.x, packedY, q.z), 0).xyz;
+}
+
+struct OctreeFaceAudit { velocity:vec3f, count:u32, axisMask:u32, fault:u32 }
+fn octreeFaceAudit(row:u32,point:vec3f)->OctreeFaceAudit{
+  var result=OctreeFaceAudit(vec3f(0.0),0u,0u,0u);
+  if(arrayLength(&octreeFaceControl)<6u||octreeFaceControl[1]!=0u||octreeFaceControl[0]>octreeFaceControl[2]){result.fault|=1u;return result;}
+  let rowCapacity=octreeFaceControl[3];if(row>=rowCapacity||row>=arrayLength(&octreeIncidence)){result.fault|=2u;return result;}
+  let publishedCount=octreeIncidence[row];let count=min(publishedCount,OCTREE_FACE_INCIDENCE_PER_ROW);if(publishedCount>OCTREE_FACE_INCIDENCE_PER_ROW){result.fault|=4u;}
+  var weighted=vec3f(0.0);var weights=vec3f(0.0);
+  for(var local=0u;local<count;local+=1u){let at=rowCapacity+row*OCTREE_FACE_INCIDENCE_PER_ROW+local;if(at>=arrayLength(&octreeIncidence)){result.fault|=8u;break;}let faceIndex=octreeIncidence[at];if(faceIndex>=octreeFaceControl[0]||faceIndex>=octreeFaceControl[2]||faceIndex>=arrayLength(&octreeFaces)){result.fault|=8u;continue;}
+    let face=octreeFaces[faceIndex];let axis=face.axisSpan&3u;let span=face.axisSpan>>2u;if(axis>2u||span==0u||abs(face.normalVelocity)>3.402823e38||!(face.negativeRow==row||face.positiveRow==row)){result.fault|=8u;continue;}
+    var centre=vec3f(octreeOrigin(face.packedOrigin));centre[(axis+1u)%3u]+=0.5*f32(span);centre[(axis+2u)%3u]+=0.5*f32(span);let delta=point-centre;let distanceSquared=dot(delta,delta);let support=f32(max(1u,span));let weight=1.0/max(0.0625*support*support,distanceSquared);
+    weighted[axis]+=weight*face.normalVelocity;weights[axis]+=weight;result.axisMask|=1u<<axis;result.count+=1u;
+  }
+  for(var axis=0u;axis<3u;axis+=1u){if(weights[axis]>0.0){result.velocity[axis]=weighted[axis]/weights[axis];}}
+  return result;
 }
 
 // Shared five-stop heat ramp for the field modes: deep blue through cyan,
@@ -459,7 +517,12 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
   // occupancy all stay so the heatmap keeps its spatial reference frame.
   let fieldMode = i32(round(u.debug.w));
   if (fieldMode > 0 && (adaptiveGrid || cell.y < bandTop)) {
-    let velocity = velocitySample(cell);
+    var velocity = velocitySample(cell);
+    var compactVelocityFault = false;
+    if (octreeGrid && (fieldMode == 1 || fieldMode == 2)) {
+      let row = octreeSurfaceRow(cell);let audit = octreeFaceAudit(row, vec3f(cell) + vec3f(0.5));
+      velocity = audit.velocity;compactVelocityFault = row == SPARSE_SURFACE_INVALID || audit.fault != 0u || audit.axisMask != 7u;
+    }
     let wet = fluidSample(cell) > 0.5;
     if (fieldMode == 1) {
       // Per-cell component CFL at the solver's substep dt: the quantity whose
@@ -470,15 +533,17 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
       // log2 ramp: cfl 1 -> 0.32, 2 -> 0.5, 4 -> 0.73, 8+ -> 1.
       fill = heatColor(log2(1.0 + cfl) / log2(9.0));
       alpha = select(select(0.30, 0.72, wet), 0.92, cfl > 1.0);
+      if (compactVelocityFault && wet) { fill=vec3f(1.0,0.01,0.01);alpha=0.98; }
     } else if (fieldMode == 2) {
       let speed = length(velocity);
       fill = heatColor(speed / max(u.environment.z, 1e-4));
       alpha = select(0.30, 0.85, wet);
+      if (compactVelocityFault && wet) { fill=vec3f(1.0,0.01,0.01);alpha=0.98; }
     } else if (fieldMode == 3) {
       let phi = levelSetSample(cell); let h = min(size.x / f32(dims.x), min(size.y / f32(dims.y), size.z / f32(dims.z)));
-      let signed = clamp(phi / max(4.0 * h, 1e-6), -1.0, 1.0);
+      let resident=phi<1e19;let signed=clamp(select(4.0*h,phi,resident)/max(4.0*h,1e-6),-1.0,1.0);
       fill = select(mix(vec3f(0.96, 0.96, 0.90), vec3f(0.93, 0.47, 0.16), signed), mix(vec3f(0.96, 0.96, 0.90), vec3f(0.10, 0.45, 0.92), -signed), signed < 0.0);
-      alpha = 0.80; line = max(line, 1.0 - smoothstep(0.04 * h, 0.22 * h, abs(phi)));
+      alpha = select(0.10,0.80,resident);line=max(line,select(0.0,1.0-smoothstep(0.04*h,0.22*h,abs(phi)),resident));
     } else if (fieldMode == 4) {
       let divergence = textureLoad(divergenceField, cell, 0).x; let scaled = clamp(divergence * max(u.environment.y, 1e-6), -1.0, 1.0);
       fill = select(mix(vec3f(0.96), vec3f(0.88, 0.10, 0.08), scaled), mix(vec3f(0.96), vec3f(0.08, 0.28, 0.88), -scaled), scaled < 0.0);
@@ -516,14 +581,15 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
       fill = heatColor(pressureUpdate / max(u.environment.z, 0.05));
       alpha = select(0.25, 0.92, wet || pressureUpdate > 1e-5);
     } else if (fieldMode == 9 && adaptiveGrid) {
-      // Live represented pressure-cell scale. Finest cells are bright pink;
-      // successively coarser dyadic leaves move through cyan to deep blue.
-      // This reads the same owner texture used for structural edges, so the
-      // displayed surface band is the topology actually consumed by pressure.
+      // Prefer the compact leaf record itself for the octree. This audits the
+      // source shared by sparse velocity and surface pages instead of trusting
+      // the derived owner texture that draws the structural lines.
       let shape = adaptiveCellVerticalShape(cell, dims);
       let horizontalSize = max(1, shape.z);
       let verticalSize = max(1, shape.y - shape.x);
-      let representedSize = max(horizontalSize, verticalSize);
+      var representedSize = max(horizontalSize, verticalSize);var missingCompactOwner=false;var compactArenaFault=false;
+      if(octreeGrid&&octreeSurfaceBound()){let row=octreeSurfaceRow(cell);missingCompactOwner=row==SPARSE_SURFACE_INVALID;if(!missingCompactOwner){representedSize=i32(octreeSurfaceLeaves[row].size);}}
+      if(octreeGrid&&octreeSurfaceBound()){compactArenaFault=octreeSurfaceArena[3]!=0u;}
       // Normalize to this solver's live hierarchy rather than a hard-coded
       // size-32 tree. For the default octree, size 8 is therefore genuinely
       // blue instead of remaining cyan simply because size 32 is unavailable.
@@ -536,7 +602,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
       let middleColor = vec3f(0.22, 0.68, 0.74);
       let coarseColor = vec3f(0.08, 0.18, 0.48);
       fill = select(mix(middleColor, coarseColor, (level - 0.5) * 2.0), mix(fineColor, middleColor, level * 2.0), level < 0.5);
-      alpha = 0.88;
+      alpha = 0.88;if(missingCompactOwner){let hinted=textureLoad(pressureSamples,cell,0).x;fill=select(vec3f(1.0,0.02,0.72),vec3f(0.98,0.64,0.08),hinted<octreeSurfaceParams.shape.x);alpha=0.98;}if(compactArenaFault){fill=vec3f(1.0,0.01,0.01);alpha=0.98;}
     } else if (fieldMode == 10 && adaptiveGrid) {
       // Dedicated sparse-surface audit. Unlike the normal structure and cell
       // scale views, this deliberately exposes whole allocated pages so the
@@ -544,7 +610,15 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
       // coarse fallback can be distinguished at a glance.
       fill = vec3f(0.05, 0.12, 0.35);
       alpha = 0.78;
-      if (sparseSurfaceAvailable()) {
+      if(octreeSurfaceBound()){
+        let row=octreeSurfaceRow(cell);
+        if(octreeSurfaceArena[3]!=0u){fill=vec3f(1.0,0.01,0.01);alpha=0.98;}
+        else if(row==SPARSE_SURFACE_INVALID){let hinted=textureLoad(pressureSamples,cell,0).x;fill=select(vec3f(1.0,0.02,0.72),vec3f(0.98,0.64,0.08),hinted<octreeSurfaceParams.shape.x);alpha=0.98;}
+        else {let state=octreeSurfaceArena[octreeSurfaceParams.offsets0.y+row];let slot=octreeSurfaceArena[octreeSurfaceParams.offsets0.x+row];let resident=(state&1u)!=0u;let core=(state&2u)!=0u;let halo=(state&4u)!=0u;let desired=(state&8u)!=0u;let activated=(state&16u)!=0u;let pageValid=slot<octreeSurfaceParams.shape.y;
+          fill=select(fill,vec3f(0.12,0.72,0.82),resident&&halo);fill=select(fill,vec3f(0.42,0.19,0.62),resident&&core);fill=select(fill,vec3f(0.96,0.58,0.08),desired&&!resident);fill=select(fill,vec3f(0.98,0.84,0.10),activated);fill=select(fill,vec3f(1.0,0.03,0.52),core&&abs(octreeSurfacePhi(row,vec3f(cell)+vec3f(0.5)))<=1.5*min(octreeSurfaceParams.cellDt.x,min(octreeSurfaceParams.cellDt.y,octreeSurfaceParams.cellDt.z)));alpha=select(alpha,0.94,resident||desired);
+          if(resident!=pageValid){fill=vec3f(1.0,0.01,0.01);alpha=0.98;}
+        }
+      }else if (sparseSurfaceAvailable()) {
         let factor = f32(sparseSurfaceParams.coarseDims.w);
         let fine3 = local3 * factor;
         let fineCell = vec3i(floor(fine3));
@@ -566,6 +640,12 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
           line = max(line, max(firstFineLine, secondFineLine));
         }
       }
+    } else if (fieldMode == 11 && octreeGrid) {
+      let row=octreeSurfaceRow(cell);let audit=octreeFaceAudit(row,vec3f(cell)+vec3f(0.5));
+      let load=clamp((f32(audit.count)-6.0)/18.0,0.0,1.0);fill=mix(vec3f(0.08,0.58,0.47),vec3f(0.55,0.22,0.78),load);alpha=0.90;
+      if(audit.axisMask!=7u){fill=vec3f(0.98,0.64,0.08);alpha=0.96;}
+      if(row==SPARSE_SURFACE_INVALID){let hinted=textureLoad(pressureSamples,cell,0).x;fill=select(vec3f(1.0,0.02,0.72),vec3f(0.98,0.64,0.08),hinted<octreeSurfaceParams.shape.x);alpha=0.98;}
+      else if(audit.fault!=0u){fill=vec3f(1.0,0.01,0.01);alpha=0.98;}
     }
   }
   line *= lineFade;
@@ -660,6 +740,7 @@ export class GridOverlayPipeline {
   private divergence?: GPUTexture;
   private mappedPressure?: GPUTexture;
   private sparseSurface?: SparseSurfaceBandGPUSource;
+  private adaptiveOctree?: UnifiedOctreeConsumerSource;
   private fallbackSparsePages: GPUBuffer;
   private fallbackSparseParams: GPUBuffer;
   private fallbackSparsePhi: GPUBuffer;
@@ -672,9 +753,13 @@ export class GridOverlayPipeline {
     private readonly bodyBuffer: GPUBuffer
   ) {
     this.fallbackSparsePages = device.createBuffer({ label: "Grid sparse-surface page fallback", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.fallbackSparseParams = device.createBuffer({ label: "Grid sparse-surface parameter fallback", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.fallbackSparseParams = device.createBuffer({ label: "Grid sparse-surface parameter fallback", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.fallbackSparsePhi = device.createBuffer({ label: "Grid sparse-surface phi fallback", size: 4, usage: GPUBufferUsage.STORAGE });
-    this.fallbackSparseControl = device.createBuffer({ label: "Grid sparse-surface control fallback", size: 16, usage: GPUBufferUsage.STORAGE });
+    // This buffer also stands in for one 48-byte OctreeSurfaceLeaf when the
+    // adaptive source is absent. Auto-layout validation applies the leaf
+    // struct's minimum binding size even though the disabled shader path does
+    // not read it.
+    this.fallbackSparseControl = device.createBuffer({ label: "Grid sparse-surface control fallback", size: 48, usage: GPUBufferUsage.STORAGE });
   }
 
   async initialize() {
@@ -720,6 +805,8 @@ export class GridOverlayPipeline {
     this.rebuildBindGroup();
   }
 
+  setAdaptiveOctree(source: UnifiedOctreeConsumerSource|undefined){if(source)validateUnifiedOctreeConsumerSource(source);if(this.adaptiveOctree===source)return;this.adaptiveOctree=source;this.rebuildBindGroup();}
+
   private rebuildBindGroup() {
     if (!this.pipeline || !this.volume || !this.columnBases || !this.adaptiveCells || !this.velocity || !this.pressureSamples || !this.divergence || !this.mappedPressure) return;
     this.bindGroup = this.device.createBindGroup({
@@ -739,6 +826,12 @@ export class GridOverlayPipeline {
         { binding: 11, resource: this.sparseSurface?.phi ?? { buffer: this.fallbackSparsePhi } },
         { binding: 12, resource: this.sparseSurface?.control ?? { buffer: this.fallbackSparseControl } },
         { binding: 13, resource: this.sparseSurface?.states ?? { buffer: this.fallbackSparsePages } }
+        ,{binding:14,resource:this.adaptiveOctree?.leaves??{buffer:this.fallbackSparseControl}}
+        ,{binding:15,resource:this.adaptiveOctree?.surfaceArena??{buffer:this.fallbackSparseControl}}
+        ,{binding:16,resource:this.adaptiveOctree?.surfaceParams??{buffer:this.fallbackSparseParams}}
+        ,{binding:17,resource:this.adaptiveOctree?.faces??{buffer:this.fallbackSparseControl}}
+        ,{binding:18,resource:this.adaptiveOctree?.incidence??{buffer:this.fallbackSparseControl}}
+        ,{binding:19,resource:this.adaptiveOctree?.faceControl??{buffer:this.fallbackSparseControl}}
       ]
     });
   }

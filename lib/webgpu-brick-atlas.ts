@@ -104,6 +104,12 @@ export function planFluidBrickAtlas(
   };
 }
 
+/** Exact persistent GPU bytes owned by an atlas, excluding shared residency. */
+export function fluidBrickAtlasAllocatedBytes(plan: FluidBrickAtlasPlan): number {
+  return plan.allocatedTextureBytes + plan.logicalBrickCount * 4 + plan.capacity * 4
+    + 64 + (4 + plan.capacity) * 4 + 32 + 80;
+}
+
 export interface FluidBrickAtlasStats {
   residentTiles: number;
   activated: number;
@@ -640,11 +646,6 @@ export class WebGPUFluidBrickAtlas {
     const mirrorModule = device.createShaderModule({ label: "Fluid brick atlas mirror", code: brickAtlasMirrorShader });
     const atlasToDenseModule = device.createShaderModule({ label: "Fluid brick atlas compatibility mirror", code: brickAtlasToDenseShader });
     const validateModule = device.createShaderModule({ label: "Fluid brick atlas validation", code: brickAtlasValidateShader(this.filterable) });
-    void Promise.all([lifecycleModule.getCompilationInfo(), mirrorModule.getCompilationInfo(), atlasToDenseModule.getCompilationInfo(), validateModule.getCompilationInfo()]).then((reports) => {
-      for (const report of reports) for (const message of report.messages) if (message.type === "error") {
-        console.error(`Fluid brick atlas WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-      }
-    }).catch(() => { /* device loss is handled by the owning renderer */ });
     const lifecyclePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [lifecycleLayout] });
     const lifecycle = (label: string, entryPoint: string) => device.createComputePipeline({ label, layout: lifecyclePipelineLayout, compute: { module: lifecycleModule, entryPoint } });
     this.lifecyclePipelines = {
@@ -715,8 +716,7 @@ export class WebGPUFluidBrickAtlas {
       compute: { module: validateModule, entryPoint: "compareAtlasToDense" },
     });
     if (this.filterable) this.sampler = device.createSampler({ label: "Fluid brick atlas trilinear sampler", magFilter: "linear", minFilter: "linear" });
-    this.allocatedBytes = this.plan.allocatedTextureBytes + pageTableData.byteLength + freeData.byteLength
-      + 64 + (4 + this.plan.capacity) * 4 + 32 + 80;
+    this.allocatedBytes = fluidBrickAtlasAllocatedBytes(this.plan);
   }
 
   private writeParams() {

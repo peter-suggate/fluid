@@ -279,9 +279,6 @@ function createPipelines(device: GPUDevice, dimension: CaptureDimension, sampleT
     ],
   });
   const shaderModule = device.createShaderModule({ label: `GPU stage capture ${dimension} ${sampleType} shader`, code: shaderFor(dimension, sampleType) });
-  void shaderModule.getCompilationInfo().then((info) => {
-    for (const message of info.messages) if (message.type === "error") console.error(`GPU stage capture WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-  }).catch(() => { /* Device loss is reported by the renderer. */ });
   const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
   return {
     layout,

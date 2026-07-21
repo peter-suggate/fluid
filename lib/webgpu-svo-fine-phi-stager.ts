@@ -226,6 +226,14 @@ const AIR_PHI:f32=${FINE_AIR_PHI_M}.0;
 
 fn entry(listWords:u32,item:u32)->u32 { return residencyEntries[listWords+item*2u]; }
 fn ownerBrick(logical:u32)->vec3u { return vec3u(logical%params.ownerBrickDims.x,(logical/params.ownerBrickDims.x)%params.ownerBrickDims.y,logical/(params.ownerBrickDims.x*params.ownerBrickDims.y)); }
+fn ownerPageEncoded(logical:u32)->u32 {
+  let hashCapacity=params.sourceFineDims.w;if(hashCapacity==0u){return 0u;}
+  let key=logical+1u;var slot=(logical*0x9e3779b1u)%hashCapacity;
+  for(var probe=0u;probe<hashCapacity;probe+=1u){let observed=ownerArena[params.offsets.x+slot];
+    if(observed==key){return ownerArena[params.offsets.x+hashCapacity+slot];}
+    if(observed==0u){break;}slot=select(slot+1u,0u,slot+1u==hashCapacity);}
+  return 0u;
+}
 fn sourceSlot(q:vec3i)->vec2u {
   let clamped=vec3u(clamp(q,vec3i(0),vec3i(params.sourceFineDims.xyz)-vec3i(1)));
   let brick=clamped/params.source.x; let logical=brick.x+params.sourceBrickDims.x*(brick.y+params.sourceBrickDims.y*brick.z);
@@ -275,7 +283,7 @@ fn stageActive(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index)
   if((atomicLoad(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}])&READY)==0u){return;} let item=dispatchedItem(wid,lid,${SVO_RENDER_RESIDENCY_CONSUMER_CONTROL_WORDS.activeOutputDispatch}u);
   let count=min(residencyControl[${SVO_RENDER_RESIDENCY_CONSUMER_CONTROL_WORDS.dirtyActiveCount}u],params.counts.x);if(item>=count){return;}
   let logical=entry(params.source.z,item);if(logical>=params.counts.x){atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.fallbackPageCount}],1u);atomicOr(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}],PARTIAL);return;}
-  let encoded=ownerArena[params.offsets.x+logical];atomicStore(&fineArena[params.offsets.z+logical],encoded);if(encoded==0u||encoded>params.counts.y||encoded-1u>=params.counts.z){atomicStore(&fineArena[params.offsets.y+logical],0u);atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.fallbackPageCount}],1u);atomicOr(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}],PARTIAL);return;}
+  let encoded=ownerPageEncoded(logical);atomicStore(&fineArena[params.offsets.z+logical],encoded);if(encoded==0u||encoded>params.counts.y||encoded-1u>=params.counts.z){atomicStore(&fineArena[params.offsets.y+logical],0u);atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.fallbackPageCount}],1u);atomicOr(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.status}],PARTIAL);return;}
   let slot=encoded-1u;let brick=ownerBrick(logical);let edge=params.source.w;let voxels=edge*edge*edge;let base=params.offsets.w+slot*voxels;var missing=0u;
   for(var local=0u;local<voxels;local+=1u){let c=tileCoordinate(local);let global=vec3i(brick*params.ownerDims.w*params.fineDims.w+c)-vec3i(1)-vec3i(params.sourceOriginFine.xyz);let sample=sourcePhiAt(global);atomicStore(&fineArena[base+local],bitcast<u32>(sample.x));if(sample.y==0.0){missing+=1u;}}
   if(missing==0u){atomicStore(&fineArena[params.offsets.y+logical],params.source.y);atomicAdd(&fineArena[${SVO_FINE_PHI_CONTROL_WORDS.stagedPageCount}],1u);}
@@ -411,7 +419,7 @@ export class WebGPUSvoFinePhiStager {
     this.paramWords.set([owner.plan.logicalBrickCount, owner.plan.capacity, p.capacity, source.pageCapacity], 16);
     this.paramWords.set([owner.plan.pageTableOffsetWords, p.pageGenerationOffsetWords, p.ownerPageTableOffsetWords, p.payloadOffsetWords], 20);
     this.paramWords.set([source.brickSize, source.revision, residency.layout.entryOffsetsBytes.active / 4, p.tileEdge], 24);
-    this.paramWords.set([...p.sourceFineDimensions, 0], 28);
+    this.paramWords.set([...p.sourceFineDimensions, owner.plan.pageHashCapacity], 28);
     this.paramWords.set([...p.sourceOriginFine, 0], 32);
     new Float32Array(this.paramWords.buffer).set([...p.fineCellSize_m, 0], 36);
     device.queue.writeBuffer(this.arena, 0, new Uint32Array(p.payloadOffsetWords));
@@ -423,9 +431,6 @@ export class WebGPUSvoFinePhiStager {
       { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
     ] });
     const shaderModule = device.createShaderModule({ label: "SVO renderer fine-phi staging", code: svoFinePhiStagingShader });
-    void shaderModule.getCompilationInfo().then((report) => {
-      for (const message of report.messages) if (message.type === "error") console.error(`SVO fine-phi WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-    }).catch(() => { /* Device loss belongs to the owning renderer. */ });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
     const pipeline = (entryPoint: keyof typeof this.pipelines) => device.createComputePipeline({
       label: `SVO renderer fine-phi ${entryPoint}`, layout: pipelineLayout, compute: { module: shaderModule, entryPoint },

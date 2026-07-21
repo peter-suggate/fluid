@@ -8,6 +8,7 @@ import {
   SVO_DRY_SCENE_SHADOW_BIAS_CELLS,
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
+import { SVO_SHADOW_HISTORY_WARMUP_FRAMES, svoShadowTemporalFrame } from "../lib/webgpu-renderer";
 
 const drySceneSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
@@ -53,6 +54,23 @@ test("dry-scene direct PBR is geometry-normal aware and hard visibility modulate
     "finite-range samples with exactly zero contribution must stop before square roots and shadow traversal");
   assert.match(svoDrySceneShader, /let radiance=baseRadiance\*\(rangeFade\*shapeScale\);if\(max\(max\(radiance\.x,radiance\.y\),radiance\.z\)<=0\.0\)\{return dryInvalidLightSample\(\);\}/,
     "zero-radiance area samples, including back-facing emitters, must never launch visibility rays");
+});
+
+test("checkerboard hard visibility is enabled only with temporal reconstruction", () => {
+  assert.match(rendererSource, /new URLSearchParams\(location\.search\)\.get\("svoTemporal"\) !== "0"/);
+  assert.equal(SVO_SHADOW_HISTORY_WARMUP_FRAMES, 2);
+  assert.equal(svoShadowTemporalFrame(true, 0, 12), -1);
+  assert.equal(svoShadowTemporalFrame(true, 1, 12), -1);
+  assert.equal(svoShadowTemporalFrame(true, 2, 12), 12);
+  assert.equal(svoShadowTemporalFrame(false, 20, 12), -1);
+  assert.match(rendererSource, /shadowStabilityKey !== this\.svoShadowStabilityKey[^]*this\.svoDryScenePipeline\?\.invalidateTemporalHistory\(\)/,
+    "camera, body, scene, or diagnostic changes must force a full-rate shadow frame and discard stale shadows");
+  assert.match(rendererSource, /shadowTemporalFrame = svoShadowTemporalFrame\(checkerboardShadowsEligible, this\.svoShadowStableFrames, this\.presentationFrameIndex\)/);
+  assert.match(svoDrySceneShader, /temporalShadowSampling=uniforms\.viewport\.w>=0\.0&&\(dry\.materialPublication\.w&2u\)!=0u/);
+  assert.match(svoDrySceneShader, /shadowParity==0u/);
+  assert.match(svoDrySceneShader, /dryShadowTracingEnabled==0u\)\{return vec3f\(1\.0\);\}/);
+  assert.match(svoDrySceneShader, /DRY_GBUFFER_SHADOW_DEFERRED<<20u/,
+    "deferred visibility must be explicit in the G-buffer rather than inferred from color");
 });
 
 test("bounded hard-shadow visibility covers opaque sources and transmissive panes", () => {
@@ -116,15 +134,16 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
 
 test("invalid or exhausted shadow work fails closed and raster/timing fallback remains intact", () => {
   assert.match(svoDrySceneShader, /if\(\(dry\.materialPublication\.w&2u\)==0u\)\{return vec3f\(1\.0\);\}/,
-    "the internal shadow-disabled A/B must return before traversal while production defaults remain enabled");
-  assert.match(rendererSource, /svoShadowVisibility=0/);
+    "the shadow-disabled production path must return before traversal");
+  assert.match(rendererSource, /get\("svoShadowVisibility"\) === "1"/,
+    "full-resolution hard visibility must remain explicitly opt-in until it meets the interactive frame budget");
   assert.match(svoDrySceneShader, /publicationState\[0\]==0u[^]*SVO_VIS_STEP_INVALID/);
   assert.match(svoDrySceneShader, /SVO_STATUS_WORK_EXHAUSTED\|\|leaf\.status==SVO_STATUS_STACK_OVERFLOW\|\|leaf\.status==SVO_STATUS_SOURCE_OVERFLOW[^]*SVO_VIS_STEP_EXHAUSTED/);
   assert.match(svoDrySceneShader, /fn svoVisibilityFail\([^]*vec3f\(0\.0\)/,
     "shared invalid/exhausted/occluded results must carry zero direct visibility");
-  assert.match(drySceneSource, /encode\(encoder: GPUCommandEncoder, target: GPUTexture \| GPUTextureView, timestampWrites\?: TimestampRange, temporalFrame\?: SparseVoxelTemporalFrameState, temporalTimestampWrites\?: TimestampRange\): boolean/);
+  assert.match(drySceneSource, /encode\(encoder: GPUCommandEncoder, target: GPUTexture \| GPUTextureView, timestampWrites\?: TimestampRange, temporalFrame\?: SparseVoxelTemporalFrameState, temporalTimestampWrites\?: TimestampRange, reuseKey\?: string\): DrySceneReplacementResult \| false/);
   assert.match(drySceneSource, /timestampWrites \? \{ timestampWrites \} : \{\}/,
     "SVO scene timing must remain attached to the replacement pass");
-  assert.match(waterSource, /if \(!sparseSceneEncoded\) \{[^]*label:"Dry scene"/,
+  assert.match(waterSource, /if \(!sparseSceneResult\) \{[^]*label:"Dry scene"/,
     "the unchanged raster pass remains the fallback when SVO declines a frame");
 });

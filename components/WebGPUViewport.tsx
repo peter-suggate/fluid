@@ -2,6 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import { FluidLabRenderer } from "@/lib/webgpu-renderer";
+import { getMethod } from "@/lib/methods";
+import { canonicalScene } from "@/lib/model";
 import { add, cameraBasis, dot, length, normalize, orbit, pan, scale, sub, zoom } from "@/lib/math";
 import { boundingRadius, type RigidBodyState } from "@/lib/rigid-body";
 import { simulation } from "@/lib/simulation/controller";
@@ -13,6 +15,17 @@ import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { advancePresentationClock, presentationFrameDue, presentationStateChanged } from "@/lib/frame-pacing";
 import { getScenePreset } from "@/lib/scenes";
 import { gpuStageCapture } from "@/lib/gpu-stage-capture";
+import { SVO_COST_OVERLAY_LABELS } from "@/lib/svo-render-diagnostics";
+import {
+  acquireBrowserGPULease,
+  GPU_MANUAL_START_EVENT,
+  GPU_MANUAL_STOP_EVENT,
+  resolveGPUStartupMode,
+  safeBrowserGPUBringupEnabled,
+  safeBrowserGPUBringupViolations,
+  safeBrowserSimulationEpochChanged,
+  shutdownBrowserGPUSession,
+} from "@/lib/gpu-startup";
 
 type Vec3 = RigidBodyState["position_m"];
 
@@ -21,6 +34,11 @@ export function WebGPUViewport() {
   const rendererRef = useRef<FluidLabRenderer | null>(null);
   const camera = useUIStore((state) => state.camera);
   const setCamera = useUIStore((state) => state.setCamera);
+  const svoCostOverlay = useUIStore((state) => state.svoCostOverlay);
+  const svoRenderMode = useUIStore((state) => state.svoRenderMode);
+  const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
+  const svoMaximumTraversalDepth = useUIStore((state) => state.svoMaximumTraversalDepth);
+  const svoMaximumNodeVisits = useUIStore((state) => state.svoMaximumNodeVisits);
   const pointerRef = useRef<
     | { id: number; x: number; y: number; action: "orbit" | "pan" }
     | { id: number; x: number; y: number; action: "pick" }
@@ -33,18 +51,38 @@ export function WebGPUViewport() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const diagnostics = useDiagnosticsStore.getState();
+    const safeBringup = safeBrowserGPUBringupEnabled(window.location.search);
+    const canonicalSafeMethodValues = resolvedMethodValues({ methodId: "octree", quality: "balanced", overrides: {} });
+    const startupMode = () => resolveGPUStartupMode(window.location.search, {
+      presetId: useSceneStore.getState().presetId,
+      methodId: useMethodStore.getState().methodId,
+    });
+    if (startupMode() === "off") {
+      diagnostics.set({ gpuStatus: { state: "unavailable", label: "WebGPU disabled by gpu=off (UI-only mode)" } });
+      return;
+    }
     let running = true;
+    let releaseGPULease: (() => void) | undefined;
     const renderer = new FluidLabRenderer(
       canvas,
       (status) => {
-        if (status.state === "lost" || status.state === "unavailable") running = false;
+        if (status.state === "lost" || status.state === "unavailable") {
+          running = false;
+          queueMicrotask(() => { if (initializationStarted && !stopping && !stopped) void stopGPU(status.label); });
+          return;
+        }
         const current = useDiagnosticsStore.getState().gpuStatus;
         // The controller publishes the user's intent before the next render
         // can start expensive work. Preserve that context as detailed task
         // progress arrives from the renderer.
-        const gpuStatus = status.state === "initializing" && current.state === "initializing" && current.operation
-          ? { ...status, operation: current.operation, kind: status.kind ?? current.kind, retainingPrevious: status.retainingPrevious ?? current.retainingPrevious }
+        const rendererOnlyReady = status.state === "ready" && status.label === "WebGPU renderer ready"
+          && getMethod(useMethodStore.getState().methodId).backend === "webgpu";
+        const reportedStatus = rendererOnlyReady
+          ? { state: "initializing" as const, label: "Renderer ready; preparing fenced t=0 solver authority", phase: "warmup", completed: 0, total: 1, startedAt_ms: performance.now(), kind: "startup" as const }
           : status;
+        const gpuStatus = reportedStatus.state === "initializing" && current.state === "initializing" && current.operation
+          ? { ...reportedStatus, operation: current.operation, kind: reportedStatus.kind ?? current.kind, retainingPrevious: reportedStatus.retainingPrevious ?? current.retainingPrevious }
+          : reportedStatus;
         useDiagnosticsStore.getState().set({ gpuStatus });
       },
       (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
@@ -52,12 +90,20 @@ export function WebGPUViewport() {
       (time_s) => simulation.gpuAdvanceCompleted(time_s),
       (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus })
     );
+    let safeSimulationEpoch: number | undefined;
     const syncRunState = (runState: ReturnType<typeof useRuntimeStore.getState>["runState"]) => {
       const submittedTime_s = renderer.setSimulationRunning(runState === "running");
       if (runState === "paused") simulation.gpuSchedulingPaused(submittedTime_s);
     };
     syncRunState(useRuntimeStore.getState().runState);
     const unsubscribeRunState = useRuntimeStore.subscribe((state, previous) => {
+      if (state.simulationEpoch !== previous.simulationEpoch) {
+        if (safeBrowserSimulationEpochChanged(safeBringup, initializationStarted, safeSimulationEpoch, state.simulationEpoch)) {
+          void stopGPU("Safe WebGPU session stopped after a reset/rebuild attempt");
+          return;
+        }
+        renderer.resetSimulationTimeline();
+      }
       if (state.runState !== previous.runState) syncRunState(state.runState);
     });
     rendererRef.current = renderer;
@@ -65,7 +111,86 @@ export function WebGPUViewport() {
     let alive = true;
     let lastFrameAt_ms = -Infinity;
     let lastPausedPresentation: readonly unknown[] | undefined;
-    renderer.initialize().then(() => {
+    let initializationStarted = false;
+    let stopping = false;
+    let stopped = false;
+    let leaseAcquisition: ReturnType<typeof acquireBrowserGPULease> | undefined;
+    let stopPromise: Promise<void> | undefined;
+    const safeViolations = () => {
+      const sceneState = useSceneStore.getState(), methodState = useMethodStore.getState(), ui = useUIStore.getState();
+      return safeBrowserGPUBringupViolations({
+        presetId: sceneState.presetId,
+        methodId: methodState.methodId,
+        quality: methodState.quality,
+        methodValues: resolvedMethodValues(methodState),
+        canonicalMethodValues: canonicalSafeMethodValues,
+        exactScene: canonicalScene(sceneState.scene) === canonicalScene(getScenePreset("water-box-dam-break").create()),
+        voxelRenderMode: ui.voxelRenderMode,
+        svoRenderMode: ui.svoRenderMode,
+        diagnosticsOpen: ui.diagnosticsOpen,
+        rightPanel: ui.rightPanel,
+        gridOverlayAxis: ui.gridOverlayAxis,
+        stageCapturePhase: gpuStageCapture.getSnapshot().phase,
+        search: window.location.search,
+      });
+    };
+    function stopGPU(label = "WebGPU stopped; device released — safe to close this tab", publishStatus = true): Promise<void> {
+      if (stopPromise) return stopPromise;
+      stopping = true;
+      running = false;
+      useRuntimeStore.getState().setRunState("paused");
+      cancelAnimationFrame(frame);
+      if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: "Stopping WebGPU; waiting for initialization and solver tasks to drain" } });
+      const pendingLease = leaseAcquisition;
+      const releasedLabel = label.includes("device released") ? label : `${label}; device released — safe to close this tab`;
+      stopPromise = (async () => {
+        await shutdownBrowserGPUSession(renderer, pendingLease, releaseGPULease);
+        releaseGPULease = undefined;
+        stopping = false;
+        stopped = true;
+        if (publishStatus) diagnostics.set({ gpuStatus: { state: "unavailable", label: releasedLabel } });
+      })();
+      return stopPromise;
+    }
+    const beginInitialization = async () => {
+      if (initializationStarted || !alive || stopping || stopped) return;
+      if (safeBringup) {
+        const violations = safeViolations();
+        if (violations.length > 0) {
+          diagnostics.set({ gpuStatus: { state: "manual", label: `Safe WebGPU start refused: ${violations.join("; ")}` } });
+          return;
+        }
+        useRuntimeStore.getState().setRunState("paused");
+        safeSimulationEpoch = useRuntimeStore.getState().simulationEpoch;
+      }
+      initializationStarted = true;
+      window.removeEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
+      unsubscribeAutomaticStart();
+      diagnostics.set({ gpuStatus: { state: "initializing", label: "Acquiring exclusive browser WebGPU lease", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup" } });
+      const lockManager = "locks" in navigator
+        ? navigator.locks as Parameters<typeof acquireBrowserGPULease>[0]
+        : undefined;
+      const acquisition = acquireBrowserGPULease(lockManager);
+      leaseAcquisition = acquisition;
+      const lease = await acquisition;
+      if (leaseAcquisition === acquisition) leaseAcquisition = undefined;
+      if (!alive || stopping || stopped) { if (lease.status === "acquired") lease.release(); return; }
+      if (lease.status !== "acquired") {
+        initializationStarted = false;
+        if (safeBringup || lease.status !== "unsupported") {
+          diagnostics.set({ gpuStatus: { state: "manual", label: `WebGPU start refused: ${lease.message}` } });
+          window.addEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
+          return;
+        }
+      } else releaseGPULease = lease.release;
+      diagnostics.set({ gpuStatus: { state: "initializing", label: "Initializing WebGPU", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup" } });
+      void renderer.initialize().then(async () => {
+      if (!alive || stopping || stopped) return;
+      const status = useDiagnosticsStore.getState().gpuStatus;
+      if (status.state === "lost" || status.state === "unavailable") {
+        await stopGPU(status.label);
+        return;
+      }
       const render = (now_ms: number) => {
         if (!alive || !running) return;
         frame = requestAnimationFrame(render);
@@ -90,15 +215,20 @@ export function WebGPUViewport() {
           metrics = renderer.draw(
             simulation.time(), scene, ui.camera, state.bodies, ui.selectedBodyId,
             state.fluidRenderState ?? undefined, simulation.backend,
-            { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method) },
+            { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method), simulationEpoch: runtime.simulationEpoch },
             { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
             getScenePreset(sceneState.presetId).background,
             ui.voxelRenderMode,
-            ui.svoRenderMode
+            ui.svoRenderMode,
+            {
+              overlay: ui.svoCostOverlay,
+              maximumTraversalDepth: ui.svoMaximumTraversalDepth,
+              maximumNodeVisits: ui.svoMaximumNodeVisits,
+              overlayOpacity: ui.svoOverlayOpacity,
+            }
           );
         } catch (error: unknown) {
-          running = false;
-          useDiagnosticsStore.getState().set({ gpuStatus: { state: "lost", label: error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped" } });
+          void stopGPU(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
           return;
         }
         simulation.recordFrame(metrics, renderer.presentationResolution);
@@ -108,11 +238,34 @@ export function WebGPUViewport() {
         if (pausedPresentation && metrics.cpuRenderEncode_ms > 0) lastPausedPresentation = pausedPresentation;
       };
       frame = requestAnimationFrame(render);
-    }).catch((error: unknown) => {
-      running = false;
-      if (useDiagnosticsStore.getState().gpuStatus.state !== "lost") diagnostics.set({ gpuStatus: { state: "unavailable", label: error instanceof Error ? error.message : "WebGPU initialization failed" } });
-    });
-    return () => { alive = false; running = false; unsubscribeRunState(); cancelAnimationFrame(frame); if(rendererRef.current===renderer)rendererRef.current=null; renderer.destroy(); };
+      }).catch((error: unknown) => {
+      if (!stopping && !stopped) void stopGPU(error instanceof Error ? error.message : "WebGPU initialization failed");
+      });
+    };
+    const maybeStartAutomatically = () => {
+      if (startupMode() === "automatic") beginInitialization();
+    };
+    const unsubscribeScene = useSceneStore.subscribe(maybeStartAutomatically);
+    const unsubscribeMethod = useMethodStore.subscribe(maybeStartAutomatically);
+    const unsubscribeAutomaticStart = () => { unsubscribeScene(); unsubscribeMethod(); };
+    const enforceSafeConfiguration = () => {
+      if (!safeBringup || !initializationStarted || stopped) return;
+      const violations = safeViolations();
+      if (violations.length > 0) stopGPU(`Safe WebGPU session stopped after configuration drift: ${violations.join("; ")}`);
+    };
+    const unsubscribeSafeScene = useSceneStore.subscribe(enforceSafeConfiguration);
+    const unsubscribeSafeMethod = useMethodStore.subscribe(enforceSafeConfiguration);
+    const unsubscribeSafeUI = useUIStore.subscribe(enforceSafeConfiguration);
+    const unsubscribeSafeCapture = gpuStageCapture.subscribe(enforceSafeConfiguration);
+    const manualStop = () => { void stopGPU(); };
+    window.addEventListener(GPU_MANUAL_STOP_EVENT, manualStop);
+    const pageHide = () => { void stopGPU("WebGPU stopped during page close", false); };
+    window.addEventListener("pagehide", pageHide, { once: true });
+    if (startupMode() === "manual" || startupMode() === "safe") {
+      diagnostics.set({ gpuStatus: { state: "manual", label: "WebGPU is waiting for explicit startup" } });
+      window.addEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
+    } else beginInitialization();
+    return () => { alive = false; running = false; window.removeEventListener(GPU_MANUAL_START_EVENT, beginInitialization); window.removeEventListener(GPU_MANUAL_STOP_EVENT, manualStop); window.removeEventListener("pagehide", pageHide); unsubscribeAutomaticStart(); unsubscribeSafeScene(); unsubscribeSafeMethod(); unsubscribeSafeUI(); unsubscribeSafeCapture(); unsubscribeRunState(); cancelAnimationFrame(frame); if(rendererRef.current===renderer)rendererRef.current=null; void stopGPU("WebGPU stopped during component cleanup", false); };
   }, []);
 
   const pointerRay = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -131,7 +284,7 @@ export function WebGPUViewport() {
   // slice through the volume.
   const sliceGrabHit = (origin: Vec3, direction: Vec3) => {
     const ui = useUIStore.getState();
-    if (ui.gridOverlayAxis === "off") return undefined;
+    if (ui.gridOverlayAxis === "off" || ui.gridOverlayAxis === "volume") return undefined;
     const axis = ui.gridOverlayAxis;
     const c = useSceneStore.getState().scene.container;
     const planeCoordinate = axis === "z" ? -c.depth_m / 2 + ui.gridOverlaySlice * c.depth_m : axis === "x" ? -c.width_m / 2 + ui.gridOverlaySlice * c.width_m : ui.gridOverlaySlice * c.height_m;
@@ -230,7 +383,7 @@ export function WebGPUViewport() {
     }
   };
 
-  return (
+  return <>
     <canvas
       ref={canvasRef}
       className="gpu-canvas"
@@ -245,5 +398,13 @@ export function WebGPUViewport() {
       onWheel={(event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); }}
       onContextMenu={(event) => event.preventDefault()}
     />
-  );
+    {svoCostOverlay !== "off" && svoRenderMode === "svo" && voxelRenderMode === "smooth" && <div className="svo-cost-legend" data-testid="svo-cost-legend">
+      <header><span>SVO · {SVO_COST_OVERLAY_LABELS[svoCostOverlay]}</span><span>depth ≤ {svoMaximumTraversalDepth} · visits ≤ {svoMaximumNodeVisits}</span></header>
+      {svoCostOverlay === "exhaustion"
+        ? <div className="svo-cost-ramp" style={{ background: "linear-gradient(90deg,#17372f 0 48%,#f5d442 48% 72%,#f04438 72%)" }} />
+        : <div className="svo-cost-ramp" />}
+      <footer><span>{svoCostOverlay === "exhaustion" ? "within budget" : "lower work"}</span><span>{svoCostOverlay === "exhaustion" ? "exhausted / invalid" : "higher work"}</span></footer>
+      <small>Heatmap is blended with the scene radiance; lower the limits in Render to expose expensive rays.</small>
+    </div>}
+  </>;
 }
