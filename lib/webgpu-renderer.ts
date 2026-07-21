@@ -346,6 +346,15 @@ interface PendingInitialRasterPresentation {
   submitted: boolean;
 }
 
+interface PendingStaticSvoPresentation {
+  readonly solver: GPUSolverInstance;
+  readonly solverGeneration: number;
+  readonly requestGeneration: number;
+  readonly startedAt_ms: number;
+  attached: boolean;
+  submitted: boolean;
+}
+
 const upscaleShader = /* wgsl */ `
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var sourceSampler: sampler;
@@ -437,6 +446,10 @@ export class FluidLabRenderer {
   /** True only while both compact t=0 raster sources are attached. */
   private adaptiveWaterAttached = false;
   private pendingInitialRasterPresentation?: PendingInitialRasterPresentation;
+  /** Static worlds become ready only after their first dry-SVO frame completes. */
+  private pendingStaticSvoPresentation?: PendingStaticSvoPresentation;
+  private svoPipelineProgress?: { label: string; completed: number };
+  private svoPipelineStartedAt_ms?: number;
   /** Debug compaction owns capacity-sized instance buffers only in inspection modes. */
   private voxelDebugSourceGeneration = -1;
   private voxelInspectionSource?: SparseVoxelRenderSource;
@@ -531,6 +544,7 @@ export class FluidLabRenderer {
     } catch (error) {
       this.failedOptionalPipelines.add(key);
       console.warn(`Optional ${key} pipeline unavailable`, error);
+      if (key === "svo-dry-scene") this.failPendingStaticSvoPresentation(error);
       return undefined;
     }
     const task = initialize(candidate).then(() => {
@@ -545,12 +559,41 @@ export class FluidLabRenderer {
       if (this.device === device && !this.disposed && !this.deviceLost) {
         this.failedOptionalPipelines.add(key);
         console.warn(`Optional ${key} pipeline unavailable`, error);
+        if (key === "svo-dry-scene") this.failPendingStaticSvoPresentation(error);
       }
     }).finally(() => {
       if (this.optionalPipelineTasks.get(key) === task) this.optionalPipelineTasks.delete(key);
     });
     this.optionalPipelineTasks.set(key, task);
     return undefined;
+  }
+
+  private reportSvoPipelineProgress(label: string, completed: number) {
+    this.svoPipelineStartedAt_ms ??= performance.now();
+    this.svoPipelineProgress = { label, completed };
+    const pending = this.pendingStaticSvoPresentation;
+    this.onStatus({
+      state: "initializing", label, phase: "presentation", completed, total: 4,
+      startedAt_ms: pending?.startedAt_ms ?? this.svoPipelineStartedAt_ms, kind: "startup", retainingPrevious: false,
+    });
+  }
+
+  private reportStaticSvoAttachment() {
+    const pending = this.pendingStaticSvoPresentation;
+    if (!pending || pending.attached || !this.svoDryScenePipeline || !this.svoSourceAvailable) return;
+    pending.attached = true;
+    this.onStatus({
+      state: "initializing", label: "Sparse garden renderer attached", phase: "presentation",
+      completed: 3, total: 4, startedAt_ms: pending.startedAt_ms, kind: "startup", retainingPrevious: false,
+    });
+  }
+
+  private failPendingStaticSvoPresentation(error?: unknown) {
+    const pending = this.pendingStaticSvoPresentation;
+    if (!pending) return;
+    this.pendingStaticSvoPresentation = undefined;
+    const detail = error instanceof Error && error.message ? `: ${error.message}` : "";
+    this.onStatus({ state: "blocked", label: `Sparse garden renderer unavailable${detail}` });
   }
 
   private ensureRequestedOptionalPipelines(requested: readonly OptionalRendererPipeline[]) {
@@ -592,13 +635,14 @@ export class FluidLabRenderer {
     if (wants.has("svo-dry-scene")) this.ensureOptionalPipeline(
       "svo-dry-scene", this.svoDryScenePipeline,
       (device) => new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!),
-      (pipeline) => pipeline.initialize(),
+      (pipeline) => pipeline.initialize((label, completed) => this.reportSvoPipelineProgress(label, completed)),
       (pipeline) => {
         this.svoDryScenePipeline = pipeline;
         this.svoPipelineAvailable = true;
         pipeline.setFineFluidCapability(this.svoFineFluidCapability);
         pipeline.setSource(this.svoDrySceneSource, this.svoDrySceneData);
         if (this.presentationTexture) pipeline.ensureSize(this.presentationTexture.width, this.presentationTexture.height);
+        this.reportStaticSvoAttachment();
       },
       (pipeline) => pipeline.destroy(),
     );
@@ -700,6 +744,7 @@ export class FluidLabRenderer {
       const fluid = this.gpuFluid;
       this.gpuFluid = undefined;
       this.pendingInitialRasterPresentation = undefined;
+      this.pendingStaticSvoPresentation = undefined;
       this.gpuFluidKey = "";
       this.gpuFluidPendingKey = "";
       this.gpuFluidInitializationAbort?.abort();
@@ -782,7 +827,7 @@ export class FluidLabRenderer {
     this.device = undefined; this.context = undefined;
     this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
     this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.voxelDebugPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined;
-    this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.svoDrySceneSource = undefined; this.svoDrySceneData = undefined;
+    this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.svoDrySceneSource = undefined; this.svoDrySceneData = undefined; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingStaticSvoPresentation = undefined;
     this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoPrimitiveCandidatesSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
     this.presentationTexture = undefined; this.voxelDebugDepth = undefined; this.presentationTextureKey = "";
@@ -927,6 +972,7 @@ export class FluidLabRenderer {
     const previous=this.gpuFluid;
     const drainPreviousForReset=this.timelineResetPending&&Boolean(previous);
     this.timelineResetPending=false;
+    this.pendingStaticSvoPresentation=undefined;
     // The active solver remains attached for presentation throughout the
     // transaction. Only the warmed candidate is allowed to replace it.
     this.gpuFluidPendingKey=key;
@@ -969,7 +1015,7 @@ export class FluidLabRenderer {
       solver.applyRuntimeValues?.(config.values);
       this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackAt_ms=-Infinity;this.adaptiveWaterAttached=false;
       const staticRenderScene=!planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver;
-      if(staticRenderScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Static SVO scene ready; fluid authority intentionally bypassed";this.pendingInitialRasterPresentation=undefined;}
+      if(staticRenderScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Static SVO scene ready; fluid authority intentionally bypassed";this.pendingInitialRasterPresentation=undefined;this.pendingStaticSvoPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,startedAt_ms,attached:false,submitted:false};}
       else{solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false};}
       this.updateRenderSources(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);this.voxelInspectionSource=undefined;this.voxelDebugPipeline?.setSource(undefined);this.voxelDebugSourceGeneration=-1;this.attachSvoFinePhiResources(solver);
       const sparseSceneSource=solver.sparseVoxelSceneSource;
@@ -1002,12 +1048,16 @@ export class FluidLabRenderer {
       this.svoDrySceneSource=sparseSceneSource;this.svoDrySceneData=drySceneData;
       this.svoDryScenePipeline?.setFineFluidCapability(this.svoFineFluidCapability);
       this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData);
+      if(staticRenderScene){
+        if(this.failedOptionalPipelines.has("svo-dry-scene"))this.failPendingStaticSvoPresentation();
+        else if(this.svoDryScenePipeline)this.reportStaticSvoAttachment();
+        else{const pipelineProgress=this.svoPipelineProgress??{label:"Compiling sparse dry-scene pipeline",completed:0};this.onStatus({state:"initializing",...pipelineProgress,phase:"presentation",total:4,startedAt_ms,kind:"startup",retainingPrevious:false});}
+      }
       this.pausedPresentationRevision+=1;
       if(previous&&previous!==solver&&!previousDestroyedForReset)this.retireGPUFluid(previous);
       this.gpuInfoCallback?.(solver.info);
-      if(staticRenderScene)this.onStatus({state:"ready",label:"Static SVO renderer ready",adapter:this.adapterName});
-      else this.onStatus({state:"initializing",label:"Warmed solver attached; publishing fenced t=0 raster surface",phase:"presentation",completed:reportedCompleted,total:reportedTotal+1,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false});
-    }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.pendingInitialRasterPresentation=undefined;if(isGPUInitializationAbort(error))return;if(previous)this.onStatus({state:"ready",label:error instanceof Error?`Solver rebuild failed; previous solver retained: ${error.message}`:"Solver rebuild failed; previous solver retained",adapter:this.adapterName});else this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed"});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration){this.gpuFluidPending=undefined;if(this.gpuFluidInitializationAbort===abort)this.gpuFluidInitializationAbort=undefined;}});
+      if(!staticRenderScene)this.onStatus({state:"initializing",label:"Warmed solver attached; publishing fenced t=0 raster surface",phase:"presentation",completed:reportedCompleted,total:reportedTotal+1,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false});
+    }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.pendingInitialRasterPresentation=undefined;this.pendingStaticSvoPresentation=undefined;if(isGPUInitializationAbort(error))return;if(previous)this.onStatus({state:"ready",label:error instanceof Error?`Solver rebuild failed; previous solver retained: ${error.message}`:"Solver rebuild failed; previous solver retained",adapter:this.adapterName});else this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed"});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration){this.gpuFluidPending=undefined;if(this.gpuFluidInitializationAbort===abort)this.gpuFluidInitializationAbort=undefined;}});
   }
 
   private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig, time_s: number) {
@@ -1053,6 +1103,15 @@ export class FluidLabRenderer {
     this.pausedPresentationRevision += 1;
     if (outcome.ready) this.onStatus({ state: "ready", label: outcome.label, adapter: this.adapterName });
     else this.onStatus({ state: "blocked", label: outcome.label });
+  }
+
+  private settleStaticSvoPresentation(pending: PendingStaticSvoPresentation) {
+    if (this.disposed || this.deviceLost || this.pendingStaticSvoPresentation !== pending
+      || this.gpuFluid !== pending.solver || this.gpuFluidGeneration !== pending.solverGeneration
+      || this.gpuFluidRequestGeneration !== pending.requestGeneration || !pending.attached || !pending.submitted) return;
+    this.pendingStaticSvoPresentation = undefined;
+    this.pausedPresentationRevision += 1;
+    this.onStatus({ state: "ready", label: "Static SVO renderer ready", adapter: this.adapterName });
   }
 
   private submitPreparedGPUFluid(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[], maximumPendingAdvances = 1) {
@@ -1398,6 +1457,21 @@ export class FluidLabRenderer {
       ? pendingInitialRaster
       : undefined;
     if (initialRasterSubmission) initialRasterSubmission.submitted = true;
+    const pendingStaticSvo = this.pendingStaticSvoPresentation;
+    const initialStaticSvoSubmission = pendingStaticSvo
+      && !pendingStaticSvo.submitted
+      && pendingStaticSvo.attached
+      && pendingStaticSvo.solver === readyGPUFluid
+      && svoEncoded
+      ? pendingStaticSvo
+      : undefined;
+    if (initialStaticSvoSubmission) {
+      initialStaticSvoSubmission.submitted = true;
+      this.onStatus({
+        state: "initializing", label: "Submitting first sparse garden frame", phase: "presentation",
+        completed: 3, total: 4, startedAt_ms: initialStaticSvoSubmission.startedAt_ms, kind: "startup", retainingPrevious: false,
+      });
+    }
     const captureRequest = gpuStageCapture.getSnapshot().phase === "armed" && gpuStageCapture.getSnapshot().request?.lane === "presentation"
       ? gpuStageCapture.getSnapshot().request
       : undefined;
@@ -1479,6 +1553,7 @@ export class FluidLabRenderer {
         this.gpuFluid.info.gpuPresentationWall_ms=Math.max(0,completedAt_ms-this.lastPresentationCompletedAt_ms);
       }
       this.presentationPending=false;this.lastPresentationCompletedAt_ms=completedAt_ms;
+      if(initialStaticSvoSubmission)this.settleStaticSvoPresentation(initialStaticSvoSubmission);
       if(initialRasterSubmission){
         const initialDiagnostics=await adaptiveDiagnosticsCompletion;
         this.settleInitialRasterPresentation(initialRasterSubmission,adaptiveDiagnosticsRequired,initialDiagnostics);
@@ -1529,6 +1604,7 @@ export class FluidLabRenderer {
     const fluid = this.gpuFluid;
     this.gpuFluid = undefined;
     this.pendingInitialRasterPresentation = undefined;
+    this.pendingStaticSvoPresentation = undefined;
     this.svoPickingAvailable = false;
     this.lastSvoPickingBodies = [];
     this.gpuFluidRequestGeneration += 1;

@@ -4,6 +4,7 @@ import test from "node:test";
 import { optionalRendererPipelineRequests } from "../lib/webgpu-renderer";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+const drySceneSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
 
 test("paused raster-water startup requests no optional renderer pipelines", () => {
   assert.deepEqual(optionalRendererPipelineRequests(
@@ -54,4 +55,14 @@ test("first-use compilation is single-flight and fails closed per device", () =>
     "superseded or failed candidates are cleaned up");
   assert.match(helper, /this\.pausedPresentationRevision \+= 1/,
     "completion asks a paused scene for exactly another presentation opportunity");
+});
+
+test("dry SVO startup reports both expensive pipeline compilations", () => {
+  assert.match(drySceneSource, /initialize\(progress\?: \(label: string, completed: number, total: number\) => void\)/);
+  assert.match(drySceneSource, /progress\?\.\("Compiling sparse dry-scene pipeline", 0, 2\)/);
+  assert.match(drySceneSource, /progress\?\.\("Compiling sparse temporal accumulation", 1, 2\)/);
+  assert.match(rendererSource, /pipeline\.initialize\(\(label, completed\) => this\.reportSvoPipelineProgress\(label, completed\)\)/,
+    "the lazy optional pipeline must forward compilation stages to the viewport status flow");
+  assert.match(rendererSource, /label: "Sparse garden renderer attached"[^]*completed: 3, total: 4/);
+  assert.match(rendererSource, /label: "Submitting first sparse garden frame"[^]*completed: 3, total: 4/);
 });

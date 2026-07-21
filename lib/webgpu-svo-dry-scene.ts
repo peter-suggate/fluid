@@ -1414,7 +1414,8 @@ export class SparseVoxelDrySceneRenderer {
     this.temporalAccumulator = new SparseVoxelTemporalAccumulator(device);
   }
 
-  async initialize(): Promise<void> {
+  async initialize(progress?: (label: string, completed: number, total: number) => void): Promise<void> {
+    progress?.("Compiling sparse dry-scene pipeline", 0, 2);
     const fragmentStorageLimit = Number(this.device.limits?.maxStorageBuffersPerShaderStage);
     if (Number.isFinite(fragmentStorageLimit) && fragmentStorageLimit < SVO_STRUCTURAL_FLUID_PRIMARY_STORAGE_BINDINGS) {
       throw new Error(`Sparse voxel dry scene requires ${SVO_STRUCTURAL_FLUID_PRIMARY_STORAGE_BINDINGS} fragment storage buffers; adapter exposes ${fragmentStorageLimit}`);
@@ -1435,7 +1436,9 @@ export class SparseVoxelDrySceneRenderer {
         depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
       },
     });
+    progress?.("Compiling sparse temporal accumulation", 1, 2);
     await this.temporalAccumulator.initialize();
+    progress?.("Sparse presentation pipelines compiled", 2, 2);
     this.rebuild();
   }
 
