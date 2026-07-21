@@ -349,6 +349,17 @@ const MAP:u32=0u;const KEYS:u32=1u;const COUNTS:u32=2u;const DIAGONAL:u32=3u;
 const RHS:u32=4u;const SOLUTION_A:u32=5u;const SOLUTION_B:u32=6u;const WORK:u32=7u;
 const INVALID:u32=0xffffffffu;const HIERARCHY_OVERFLOW:u32=2u;const NONFINITE:u32=4u;const NONPOSITIVE:u32=8u;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn report(flag:u32){atomicOr(&solverControl[0],flag);}
+// Share the MGPCG control buffer's observational first-failure words. These
+// diagnostics do not alter the fail-closed solver path; they only identify an
+// L1 V-cycle operation when it raises a flag before PCG can start.
+fn reportAt(flag:u32,stage:u32,row:u32,value:f32){
+  atomicOr(&solverControl[0],flag);
+  for(var retry=0u;retry<16u;retry+=1u){
+    let claim=atomicCompareExchangeWeak(&solverControl[10],0u,stage);
+    if(claim.exchanged){atomicStore(&solverControl[11],row);atomicStore(&solverControl[12],bitcast<u32>(value));return;}
+    if(claim.old_value!=0u){return;}
+  }
+}
 fn stopped()->bool{return atomicLoad(&solverControl[0])!=0u||atomicLoad(&solverControl[1])!=0u;}
 fn rows()->u32{return min(select(0u,rowCounts[0],arrayLength(&rowCounts)>0u),params.capacity.x);}
 fn stride()->u32{return params.capacity.y;}fn levels()->u32{return params.capacity.z;}fn level()->u32{return params.dimsLevel.w;}
@@ -357,16 +368,18 @@ fn at(channel:u32,l:u32,slot:u32)->u32{return (channel*levels()+l)*stride()+slot
 fn map(row:u32,l:u32)->u32{return atomicLoad(&state[at(MAP,l,row)]);}
 fn loadFloat(channel:u32,l:u32,slot:u32)->f32{return bitcast<f32>(atomicLoad(&state[at(channel,l,slot)]));}
 fn storeFloat(channel:u32,l:u32,slot:u32,value:f32){atomicStore(&state[at(channel,l,slot)],bitcast<u32>(value));}
-fn atomicAddFloat(index:u32,value:f32){if(!finite(value)){report(NONFINITE);return;}var old=atomicLoad(&state[index]);loop{
-  let current=bitcast<f32>(old);if(!finite(current)){report(NONFINITE);return;}let result=atomicCompareExchangeWeak(&state[index],old,bitcast<u32>(current+value));
+fn atomicAddFloat(index:u32,value:f32,stage:u32,row:u32){if(!finite(value)){reportAt(NONFINITE,stage,row,value);return;}var old=atomicLoad(&state[index]);loop{
+  let current=bitcast<f32>(old);if(!finite(current)){reportAt(NONFINITE,stage+32u,row,current);return;}let result=atomicCompareExchangeWeak(&state[index],old,bitcast<u32>(current+value));
   if(result.exchanged){return;}old=result.old_value;}}
 fn coord(cell:u32)->vec3u{let nx=params.dimsLevel.x;let ny=params.dimsLevel.y;return vec3u(cell%nx,(cell/nx)%ny,cell/(nx*ny));}
 fn aggregateKey(row:u32,l:u32)->u32{let block=1u<<l;let q=coord(headers[row].cell)/block;let d=(params.dimsLevel.xyz+vec3u(block-1u))/block;
   return q.x+d.x*(q.y+d.y*q.z);}
 fn hash(key:u32)->u32{var h=key*0x9e3779b1u;h=(h^(h>>16u))*0x7feb352du;return (h^(h>>15u))&(stride()-1u);}
 fn findAggregate(row:u32,l:u32)->u32{let key=aggregateKey(row,l)+1u;var slot=hash(key);for(var probe=0u;probe<128u;probe+=1u){
-  let index=at(KEYS,l,slot);let old=atomicLoad(&state[index]);if(old==key){return slot;}if(old==0u){let claim=atomicCompareExchangeWeak(&state[index],0u,key);
-    if(claim.exchanged||claim.old_value==key){return slot;}}slot=(slot+1u)&(stride()-1u);}report(HIERARCHY_OVERFLOW);return INVALID;}
+  let index=at(KEYS,l,slot);var observed=atomicLoad(&state[index]);for(var retry=0u;retry<16u;retry+=1u){if(observed==key){return slot;}if(observed!=0u){break;}
+    let claim=atomicCompareExchangeWeak(&state[index],0u,key);if(claim.exchanged){return slot;}observed=claim.old_value;
+    if(retry==15u&&observed==0u){report(HIERARCHY_OVERFLOW);return INVALID;}}
+  slot=(slot+1u)&(stride()-1u);}report(HIERARCHY_OVERFLOW);return INVALID;}
 fn overlap(a0:u32,a1:u32,b0:u32,b1:u32)->u32{let lo=max(a0,b0);let hi=min(a1,b1);return select(0u,hi-lo,hi>lo);}
 fn axisCoefficient(row:u32,other:u32)->f32{let a=coord(headers[row].cell);let b=coord(headers[other].cell);let sa=headers[row].size;let sb=headers[other].size;
   let ox=overlap(a.x,a.x+sa,b.x,b.x+sb);let oy=overlap(a.y,a.y+sa,b.y,b.y+sb);let oz=overlap(a.z,a.z+sa,b.z,b.z+sb);
@@ -374,14 +387,14 @@ fn axisCoefficient(row:u32,other:u32)->f32{let a=coord(headers[row].cell);let b=
   let tz=(a.z+sa==b.z||b.z+sb==a.z)&&ox>0u&&oy>0u;if(select(0u,1u,tx)+select(0u,1u,ty)+select(0u,1u,tz)!=1u){return 0.0;}
   var area=0u;if(tx){area=oy*oz;}else if(ty){area=ox*oz;}else{area=ox*oy;}
   return params.weights.z*f32(area)/(0.5*f32(sa+sb));}
-fn firstOrderCoefficient(row:u32,e:LeafEntry)->f32{if(e.row>=rows()||!finite(e.coefficient)||e.coefficient<0.0){report(NONFINITE);return 0.0;}
+fn firstOrderCoefficient(row:u32,e:LeafEntry)->f32{if(e.row>=rows()||!finite(e.coefficient)||e.coefficient<0.0){reportAt(NONFINITE,25u,row,e.coefficient);return 0.0;}
   let geometric=axisCoefficient(row,e.row);if(e.coefficient>0.0&&geometric<=0.0){report(NONPOSITIVE);return 0.0;}return e.coefficient;}
 // These are captured Cartesian rows, ordered before L2 power publication in
 // the same command encoder. Their unmatched diagonal is therefore the exact
 // Losasso/GFM L1 free-surface anchor, never an inherited power coefficient.
 fn firstOrderDiagonal(row:u32)->f32{let value=headers[row].diagonal;if(!finite(value)||value<=params.weights.y){report(NONPOSITIVE);return 0.0;}return value;}
 fn boundaryAnchor(row:u32)->f32{let h=headers[row];var coupled=0.0;for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];
-  if(e.row>=rows()||!finite(e.coefficient)||e.coefficient<0.0){report(NONFINITE);continue;}coupled+=e.coefficient;}
+  if(e.row>=rows()||!finite(e.coefficient)||e.coefficient<0.0){reportAt(NONFINITE,26u,row,e.coefficient);continue;}coupled+=e.coefficient;}
   let value=firstOrderDiagonal(row)-coupled;let scale=max(1.0,max(abs(firstOrderDiagonal(row)),abs(coupled)));
   if(!finite(value)||value < -2e-5*scale){report(NONPOSITIVE);return 0.0;}return max(0.0,value);}
 fn solution(channel:u32,l:u32,slot:u32)->f32{return loadFloat(channel,l,slot);}
@@ -392,23 +405,23 @@ fn activeSlot(slot:u32,l:u32)->bool{return slot<stride()&&atomicLoad(&state[at(C
     if(slot==INVALID){return;}atomicStore(&state[at(MAP,l,row)],slot);atomicAdd(&state[at(COUNTS,l,slot)],1u);}}
 @compute @workgroup_size(64) fn setupDiagonal(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=rows()||stopped()){return;}
   let h=headers[row];let anchor=boundaryAnchor(row);for(var l=0u;l<levels();l+=1u){let own=map(row,l);var contribution=anchor;
-    for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=rows()){report(NONFINITE);continue;}let coefficient=firstOrderCoefficient(row,e);
+    for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=rows()){reportAt(NONFINITE,27u,row,e.coefficient);continue;}let coefficient=firstOrderCoefficient(row,e);
       if(coefficient>0.0&&map(e.row,l)!=own){contribution+=coefficient;}}
     if(l==0u){let expected=firstOrderDiagonal(row);let scale=max(1.0,max(abs(expected),abs(contribution)));
       if(abs(expected-contribution)>2e-5*scale){report(NONPOSITIVE);return;}}
-    atomicAddFloat(at(DIAGONAL,l,own),contribution);}}
+    atomicAddFloat(at(DIAGONAL,l,own),contribution,21u,row);}}
 @compute @workgroup_size(64) fn copyRhs(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<rows()&&!stopped()){
-  let value=inputRhs[row];if(!finite(value)){report(NONFINITE);}else{storeFloat(RHS,0u,row,value);}}}
+  let value=inputRhs[row];if(!finite(value)){reportAt(NONFINITE,29u,row,value);}else{storeFloat(RHS,0u,row,value);}}}
 fn applyRow(row:u32,channel:u32){let l=level();let own=map(row,l);let x=solution(channel,l,own);var value=boundaryAnchor(row)*x;let h=headers[row];
-  for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=rows()){report(NONFINITE);continue;}let coefficient=firstOrderCoefficient(row,e);
+  for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=rows()){reportAt(NONFINITE,28u,row,e.coefficient);continue;}let coefficient=firstOrderCoefficient(row,e);
     let neighbor=map(e.row,l);if(coefficient>0.0&&neighbor!=own){value+=coefficient*(x-solution(channel,l,neighbor));}}
-  atomicAddFloat(at(WORK,l,own),value);}
+  atomicAddFloat(at(WORK,l,own),value,22u,row);}
 @compute @workgroup_size(64) fn applyA(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<rows()&&!stopped()){applyRow(row,SOLUTION_A);}}
 @compute @workgroup_size(64) fn applyB(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<rows()&&!stopped()){applyRow(row,SOLUTION_B);}}
 fn jacobi(slot:u32,source:u32,destination:u32){let l=level();if(!activeSlot(slot,l)||stopped()){return;}let diagonal=loadFloat(DIAGONAL,l,slot);
   if(!finite(diagonal)||diagonal<=params.weights.y){report(NONPOSITIVE);return;}let old=solution(source,l,slot);
   let next=old+params.weights.x*(loadFloat(RHS,l,slot)-loadFloat(WORK,l,slot))/diagonal;
-  if(!finite(next)){report(NONFINITE);}else{storeFloat(destination,l,slot,next);}}
+  if(!finite(next)){reportAt(NONFINITE,30u,slot,next);}else{storeFloat(destination,l,slot,next);}}
 @compute @workgroup_size(64) fn jacobiAtoB(@builtin(global_invocation_id) gid:vec3u){jacobi(slotIndex(gid),SOLUTION_A,SOLUTION_B);}
 @compute @workgroup_size(64) fn jacobiBtoA(@builtin(global_invocation_id) gid:vec3u){jacobi(slotIndex(gid),SOLUTION_B,SOLUTION_A);}
 @compute @workgroup_size(64) fn formResidual(@builtin(global_invocation_id) gid:vec3u){let slot=slotIndex(gid);let l=level();if(activeSlot(slot,l)&&!stopped()){
@@ -417,12 +430,12 @@ fn jacobi(slot:u32,source:u32,destination:u32){let l=level();if(!activeSlot(slot
 // each child residual contribute exactly once although this kernel visits rows.
 @compute @workgroup_size(64) fn ghostAccumulate(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);let l=level();if(row>=rows()||l+1u>=levels()||stopped()){return;}
   let child=map(row,l);let parent=map(row,l+1u);let members=atomicLoad(&state[at(COUNTS,l,child)]);
-  if(members==0u){report(NONPOSITIVE);return;}atomicAddFloat(at(RHS,l+1u,parent),loadFloat(WORK,l,child)/f32(members));}
+  if(members==0u){report(NONPOSITIVE);return;}atomicAddFloat(at(RHS,l+1u,parent),loadFloat(WORK,l,child)/f32(members),23u,row);}
 // GhostValuePropagate = P, implemented as an identical-value member average
 // so concurrent rows use defined atomic accumulation into each child slot.
 @compute @workgroup_size(64) fn ghostPropagate(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);let l=level();if(row>=rows()||l+1u>=levels()||stopped()){return;}
   let child=map(row,l);let parent=map(row,l+1u);let members=atomicLoad(&state[at(COUNTS,l,child)]);
-  if(members==0u){report(NONPOSITIVE);return;}atomicAddFloat(at(SOLUTION_A,l,child),loadFloat(SOLUTION_A,l+1u,parent)/f32(members));}
+  if(members==0u){report(NONPOSITIVE);return;}atomicAddFloat(at(SOLUTION_A,l,child),loadFloat(SOLUTION_A,l+1u,parent)/f32(members),24u,row);}
 @compute @workgroup_size(64) fn publish(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<rows()&&!stopped()){
-  let value=loadFloat(SOLUTION_A,0u,row);if(!finite(value)){report(NONFINITE);}else{outputCorrection[row]=value;}}}
+  let value=loadFloat(SOLUTION_A,0u,row);if(!finite(value)){reportAt(NONFINITE,31u,row,value);}else{outputCorrection[row]=value;}}}
 `;

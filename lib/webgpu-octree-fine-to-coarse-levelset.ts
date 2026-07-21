@@ -28,6 +28,7 @@ export interface FineToCoarseGPUResult {
 export interface FineToCoarseGPUControl {
   readonly contributionCount: number; readonly maximumContributionsPerRow: number;
   readonly flags: number; readonly unownedSamples: number; readonly rowCount: number; readonly valid: boolean;
+  readonly firstUnownedLiquidLogical?: number; readonly maximumUnownedLiquidMagnitude?: number;
 }
 
 export function planFineToCoarseLevelSet(rowCapacity: number, sampleCapacity: number): FineToCoarseGPUPlan {
@@ -42,9 +43,13 @@ export function planFineToCoarseLevelSet(rowCapacity: number, sampleCapacity: nu
 
 export function unpackFineToCoarseGPUControl(words: ArrayLike<number>): FineToCoarseGPUControl {
   if (words.length < 6) throw new RangeError("Fine-to-coarse control requires six words");
+  const phi = words.length >= 8
+    ? new Float32Array(new Uint32Array([Number(words[7]) >>> 0]).buffer)[0] : undefined;
   return { contributionCount: Number(words[0]) >>> 0, maximumContributionsPerRow: Number(words[1]) >>> 0,
     flags: Number(words[2]) >>> 0, unownedSamples: Number(words[3]) >>> 0,
-    rowCount: Number(words[4]) >>> 0, valid: Number(words[5]) !== 0 };
+    rowCount: Number(words[4]) >>> 0, valid: Number(words[5]) !== 0,
+    ...(words.length >= 8 ? { firstUnownedLiquidLogical: Number(words[6]) >>> 0,
+      maximumUnownedLiquidMagnitude: phi } : {}) };
 }
 
 export class WebGPUFineToCoarseLevelSet {
@@ -127,7 +132,7 @@ ${fineLevelSetLinearWorkgroupWGSL}
 struct P{brickDims:vec3u,brickResolution:u32,sampleDims:vec3u,samplesPerBrick:u32,origin:vec3f,fineWidth:f32,
  pageCapacity:u32,generation:u32,rowCapacity:u32,sampleCapacity:u32,siteCapacity:u32,maxProbes:u32,dimensions:vec3u,maxLeaf:u32,cellWidth:f32}
 struct H{cell:u32,a:u32,b:u32,size:u32,x:f32,y:f32,z:u32,w:u32,g:vec4f}struct SI{cellPlusOne:atomic<u32>,size:u32,row:u32,pad:u32}
-struct C{count:u32,maximumPerRow:u32,flags:atomic<u32>,unowned:atomic<u32>,rowCount:u32,valid:u32,p0:u32,p1:u32}
+struct C{count:u32,maximumPerRow:u32,flags:atomic<u32>,unowned:atomic<u32>,rowCount:u32,valid:u32,firstUnownedLiquid:atomic<u32>,maximumUnownedLiquidMagnitude:atomic<u32>}
 struct Aggregate{count:atomic<u32>,minimumOrdered:atomic<u32>,maximumOrdered:atomic<u32>,nearestDistance:atomic<u32>,nearestLogical:atomic<u32>,nearestPhiBits:atomic<u32>}
 struct Contribution{nearestPhi:f32,minimumPhi:f32,maximumPhi:f32,valid:u32}struct Sample{positionPhi:vec4f,logical:u32,valid:u32}
 @group(0)@binding(0)var<uniform>p:P;@group(0)@binding(1)var<storage,read>metadata:array<u32>;@group(0)@binding(2)var<storage,read>worklist:array<u32>;
@@ -145,8 +150,14 @@ fn owner(x:vec3f)->u32{let g=x/p.cellWidth;if(any(g<vec3f(0))||any(g>=vec3f(p.di
 fn sample(flat:u32)->Sample{let residentCount=min(worklist[0],p.pageCapacity);if(flat>=residentCount*p.samplesPerBrick){return Sample(vec4f(0),0u,0u);}let w=flat/p.samplesPerBrick;let local=flat-w*p.samplesPerBrick;let id=worklist[5u+w];if(id>=p.pageCapacity||metadata[id*10u+2u]!=p.generation){return Sample(vec4f(0),0u,0u);}let index=id*p.samplesPerBrick+local;if((flags[index]&VALID)==0u){return Sample(vec4f(0),0u,0u);}let key=metadata[id*10u+1u];let brick=unpackBrick(key);let q=brick*p.brickResolution+localCoord(local);if(any(q>=p.sampleDims)){return Sample(vec4f(0),0u,0u);}let x=p.origin+(vec3f(q)+.5)*p.fineWidth;return Sample(vec4f(x,phi[index]),key*p.samplesPerBrick+local,1u);}
 fn ordered(v:f32)->u32{let bits=bitcast<u32>(v);return select(bits^0x80000000u,~bits,(bits&0x80000000u)!=0u);}fn unordered(v:u32)->f32{return bitcast<f32>(select(~v,v^0x80000000u,(v&0x80000000u)!=0u));}
 fn flatIndex(w:vec3u,lid:u32,n:vec3u)->u32{return fineLinearWorkgroup(w,n)*64u+lid;}
-fn rowAndSample(s:Sample)->vec2u{if(s.valid==0u){return vec2u(INVALID);}if(!finite(s.positionPhi.w)){atomicOr(&control.flags,NONFINITE);return vec2u(INVALID);}let r=owner(s.positionPhi.xyz);if(r==INVALID||r>=control.rowCount){atomicAdd(&control.unowned,1u);if(s.positionPhi.w<=0.0){atomicOr(&control.flags,UNOWNED);}return vec2u(INVALID);}return vec2u(r,s.logical);}
-@compute @workgroup_size(64)fn prepareRestriction(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i<arrayLength(&aggregates)){atomicStore(&aggregates[i].count,0u);atomicStore(&aggregates[i].minimumOrdered,0xffffffffu);atomicStore(&aggregates[i].maximumOrdered,0u);atomicStore(&aggregates[i].nearestDistance,0x7f800000u);atomicStore(&aggregates[i].nearestLogical,INVALID);atomicStore(&aggregates[i].nearestPhiBits,0u);out[i]=Contribution(0.,0.,0.,0u);}if(i<arrayLength(&rowOffsets)){rowOffsets[i]=i;}if(i==0u){control.count=0u;control.maximumPerRow=1u;atomicStore(&control.flags,0u);atomicStore(&control.unowned,0u);control.rowCount=min(rowCountSource[0],p.rowCapacity);control.valid=0u;if(arrayLength(&worklist)<5u||arrayLength(&topologyControl)<8u){atomicOr(&control.flags,UNPUBLISHED_SOURCE);}else if(worklist[1]!=p.generation||worklist[3]!=1u||worklist[4]!=1u||topologyControl[0]!=0u||topologyControl[4]!=1u||topologyControl[5]!=0u||topologyControl[7]!=0u){atomicOr(&control.flags,UNPUBLISHED_SOURCE);}}}
+// The fine narrow band is authoritative wherever it is resident. Samples may
+// advance beyond the current liquid pressure-row set by less than one CFL
+// step; the CPU restriction oracles count and skip those samples as well.
+// They do not need a coarse fallback entry because consumers sample this
+// validated fine publication first. Keep non-positive misses observable, but
+// do not invalidate an otherwise complete fine/coarse transaction.
+fn rowAndSample(s:Sample)->vec2u{if(s.valid==0u){return vec2u(INVALID);}if(!finite(s.positionPhi.w)){atomicOr(&control.flags,NONFINITE);return vec2u(INVALID);}let r=owner(s.positionPhi.xyz);if(r==INVALID||r>=control.rowCount){atomicAdd(&control.unowned,1u);if(s.positionPhi.w<=0.0){atomicMin(&control.firstUnownedLiquid,s.logical);atomicMax(&control.maximumUnownedLiquidMagnitude,bitcast<u32>(abs(s.positionPhi.w)));}return vec2u(INVALID);}return vec2u(r,s.logical);}
+@compute @workgroup_size(64)fn prepareRestriction(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i<arrayLength(&aggregates)){atomicStore(&aggregates[i].count,0u);atomicStore(&aggregates[i].minimumOrdered,0xffffffffu);atomicStore(&aggregates[i].maximumOrdered,0u);atomicStore(&aggregates[i].nearestDistance,0x7f800000u);atomicStore(&aggregates[i].nearestLogical,INVALID);atomicStore(&aggregates[i].nearestPhiBits,0u);out[i]=Contribution(0.,0.,0.,0u);}if(i<arrayLength(&rowOffsets)){rowOffsets[i]=i;}if(i==0u){control.count=0u;control.maximumPerRow=1u;atomicStore(&control.flags,0u);atomicStore(&control.unowned,0u);control.rowCount=min(rowCountSource[0],p.rowCapacity);control.valid=0u;atomicStore(&control.firstUnownedLiquid,INVALID);atomicStore(&control.maximumUnownedLiquidMagnitude,0u);if(arrayLength(&worklist)<5u||arrayLength(&topologyControl)<8u){atomicOr(&control.flags,UNPUBLISHED_SOURCE);}else if(worklist[1]!=p.generation||worklist[3]!=1u||worklist[4]!=1u||topologyControl[0]!=0u||topologyControl[4]!=1u||topologyControl[5]!=0u||topologyControl[7]!=0u){atomicOr(&control.flags,UNPUBLISHED_SOURCE);}}}
 @compute @workgroup_size(64)fn aggregateRestriction(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let flat=flatIndex(w,lid,n);if(flat>=p.sampleCapacity){return;}let s=sample(flat);let q=rowAndSample(s);if(q.x==INVALID){return;}let h=headers[q.x];let o=vec3u(h.cell%p.dimensions.x,(h.cell/p.dimensions.x)%p.dimensions.y,h.cell/(p.dimensions.x*p.dimensions.y));let c=(vec3f(o)+.5*f32(h.size))*p.cellWidth;let d=s.positionPhi.xyz-c;atomicAdd(&aggregates[q.x].count,1u);atomicMin(&aggregates[q.x].minimumOrdered,ordered(s.positionPhi.w));atomicMax(&aggregates[q.x].maximumOrdered,ordered(s.positionPhi.w));atomicMin(&aggregates[q.x].nearestDistance,bitcast<u32>(dot(d,d)));}
 @compute @workgroup_size(64)fn selectRestrictionLogicalId(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let flat=flatIndex(w,lid,n);if(flat>=p.sampleCapacity){return;}let s=sample(flat);if(s.valid==0u||!finite(s.positionPhi.w)){return;}let r=owner(s.positionPhi.xyz);if(r==INVALID||r>=control.rowCount){return;}let h=headers[r];let o=vec3u(h.cell%p.dimensions.x,(h.cell/p.dimensions.x)%p.dimensions.y,h.cell/(p.dimensions.x*p.dimensions.y));let c=(vec3f(o)+.5*f32(h.size))*p.cellWidth;let d=s.positionPhi.xyz-c;if(bitcast<u32>(dot(d,d))==atomicLoad(&aggregates[r].nearestDistance)){atomicMin(&aggregates[r].nearestLogical,s.logical);}}
 @compute @workgroup_size(64)fn emitRestrictionNearestPhi(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let flat=flatIndex(w,lid,n);if(flat>=p.sampleCapacity){return;}let s=sample(flat);if(s.valid==0u||!finite(s.positionPhi.w)){return;}let r=owner(s.positionPhi.xyz);if(r!=INVALID&&r<control.rowCount&&s.logical==atomicLoad(&aggregates[r].nearestLogical)){atomicStore(&aggregates[r].nearestPhiBits,bitcast<u32>(s.positionPhi.w));}}

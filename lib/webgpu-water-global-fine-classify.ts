@@ -63,7 +63,7 @@ fn phi(qi:vec3i)->f32{
   return finePhi[index];
 }
 fn fineValid(q:vec3u)->bool{if(any(q>=params.sampleDimensions)){return false;}let r=max(1u,params.brickResolution);let brick=q/r;if(any(brick>=params.brickDimensions)){return false;}let local=q-brick*r;let key=brick.x+params.brickDimensions.x*(brick.y+params.brickDimensions.y*brick.z);let id=pageLookup(key);if(id==INVALID){return false;}let index=id*params.samplesPerBrick+local.x+r*(local.y+r*local.z);return index<arrayLength(&fineFlags)&&index<arrayLength(&finePhi)&&(fineFlags[index]&1u)!=0u&&finite(finePhi[index]);}
-fn fineCubeFullyValid(base:vec3i,scale:i32)->bool{let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));for(var i=0;i<8;i+=1){let q=base+o[i]*scale-vec3i(1);if(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions))||!fineValid(vec3u(q))){return false;}}return true;}
+fn fineOwnsCube(base:vec3i)->bool{let q=max(base-vec3i(1),vec3i(0));return all(q<vec3i(params.sampleDimensions))&&fineValid(vec3u(q));}
 fn occupancy(value:f32)->f32{let band=4.0*u.container.y/max(f32(params.sampleDimensions.y),1.0);return clamp(0.5-value/band,0.0,1.0);}
 fn lattice(p:vec3i)->f32{
   let dims=vec3i(params.sampleDimensions);
@@ -91,5 +91,24 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   for(var zi=0u;zi<zn;zi+=1u){for(var yi=0u;yi<yn;yi+=1u){for(var xi=0u;xi<xn;xi+=1u){classifyScaled(vec3i(xb[xi],yb[yi],zb[zi]),1);}}}
 }
 @compute @workgroup_size(256)
-fn extractGlobalCoarseMain(@builtin(global_invocation_id)gid:vec3u){let slot=gid.x;if(!validCurrentPublication()){return;}if(slot>=min(powerCoarseSamples.hashCapacity,arrayLength(&powerCoarseSamples.entries))){return;}let entry=powerCoarseSamples.entries[slot];if(entry.cellPlusOne==0u||(entry.flags&1u)==0u||entry.size==0u){return;}let d=powerCoarseSamples.dimensions;let cell=entry.cellPlusOne-1u;let origin=vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));let factor=max(1u,u32(round(params.cellAndDt.x)));let scale=entry.size*factor;let base=vec3i(origin*factor+vec3u(1u));if(fineCubeFullyValid(base,i32(scale))){return;}classifyScaled(base,i32(scale));}
+fn extractGlobalCoarseMain(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)local:u32){let slot=group.x+group.y*65535u;if(!validCurrentPublication()){return;}if(slot>=min(powerCoarseSamples.hashCapacity,arrayLength(&powerCoarseSamples.entries))){return;}let entry=powerCoarseSamples.entries[slot];if(entry.cellPlusOne==0u||(entry.flags&1u)==0u||entry.size==0u){return;}let d=powerCoarseSamples.dimensions;let cell=entry.cellPlusOne-1u;let origin=vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));let factor=max(1u,u32(round(params.cellAndDt.x)));let scale=entry.size*factor;let base=vec3i(origin*factor+vec3u(1u));
+  // Coarse fallback is sampled on the same unit fine lattice as the narrow
+  // band. Emitting one scaled tetrahedral cube beside unit fine cubes creates
+  // non-conforming diagonals and visible T-junction slits. Each coarse leaf
+  // instead owns the unit cube bases corresponding to its samples. A valid
+  // lower-anchor sample makes the fine pass the unique cube owner; its other
+  // corners may still use compact coarse phi through lattice().
+  //
+  // A leaf touching a low tank boundary additionally owns base zero on that
+  // axis. Taking the Cartesian product closes wall/floor edges and corners.
+  let lowX=select(0u,1u,origin.x==0u);let lowY=select(0u,1u,origin.y==0u);let lowZ=select(0u,1u,origin.z==0u);
+  let sx=scale+lowX;let sy=scale+lowY;let sz=scale+lowZ;let total=sx*sy*sz;
+  // A whole workgroup cooperates on one leaf. This keeps large production
+  // leaves bounded per invocation instead of putting scale^3 work on one
+  // shader lane (a browser watchdog risk at maximumLeafSize 16/32).
+  for(var index=local;index<total;index+=256u){let xi=index%sx;let yi=(index/sx)%sy;let zi=index/(sx*sy);
+    var bx=0;if(xi>=lowX){bx=base.x+i32(xi-lowX);}var by=0;if(yi>=lowY){by=base.y+i32(yi-lowY);}var bz=0;if(zi>=lowZ){bz=base.z+i32(zi-lowZ);}let candidate=vec3i(bx,by,bz);
+    if(!fineOwnsCube(candidate)){classifyScaled(candidate,1);}
+  }
+}
 `;

@@ -257,10 +257,11 @@ export function initialGlobalFineAuthorityReadiness(
     || (value.coarseControlGeneration & 0x3fff_ffff) !== generation) {
     return rejected("compact coarse level set is not paired with the fine generation");
   }
-  // Positive narrow-band air samples need not own a liquid pressure row; the
-  // restriction shader counts those observationally but only faults a missing
-  // non-positive sample. Therefore validity/flags, not the raw miss count,
-  // are the authority predicate.
+  // Fine-band samples need not own a liquid pressure row: after an advective
+  // step the authoritative fine interface can lead the row topology by a
+  // subcell distance. Restriction counts these misses observationally while
+  // consumers sample fine before coarse fallback. Therefore validity/flags,
+  // not the raw miss count, are the authority predicate.
   if (value.fineRestrictionFlags !== 0 || value.fineRestrictionRows === 0
     || value.fineRestrictionValid !== OCTREE_POWER_COARSE_LEVELSET_VALID) {
     return rejected("fine-to-coarse level-set restriction did not publish");
@@ -1065,6 +1066,7 @@ export class WebGPUUniformEulerianSolver {
   get globalFinePowerProjectionControl() { return this.octreeProjection?.globalFinePowerProjectionControl; }
   get globalFinePowerVelocitySampleControl() { return this.octreeProjection?.globalFinePowerVelocitySampleControl; }
   get globalFineCoarseLevelSetControl() { return this.octreeProjection?.globalFineCoarseLevelSetControl; }
+  get globalFineRestrictionControl() { return this.octreeProjection?.globalFineRestrictionControl; }
   get globalFineFaceBandControl() { return this.octreeProjection?.globalFineFaceBandControl; }
   get globalFineFaceBandTransitionControl() {
     return this.octreeProjection?.globalFineFaceBandTransitionControl;

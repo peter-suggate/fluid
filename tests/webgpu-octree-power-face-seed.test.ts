@@ -14,10 +14,19 @@ test("power-face seed planner is bounded by compact row and face capacities", ()
   assert.deepEqual(planOctreePowerFaceSeed(100, 800, 400), {
     rowCapacity: 100, faceCapacity: 800, axisFaceCapacity: 400,
     velocityBytes: 1_600, rowStatusBytes: 400, axisVelocityBytes: 1_600,
-    allocatedBytes: 1_600 + 400 + 1_600 + 64 + 16,
+    allocatedBytes: 1_600 + 400 + 1_600 + 64 + 32,
   });
   assert.match(octreePowerFaceSeedShader, /weighted\[axis\]\+=face\.area\*face\.normalVelocity/);
   assert.match(octreePowerFaceSeedShader, /powerFaces\[index\]\.normalVelocity=normalVelocity/);
+  assert.match(octreePowerFaceSeedShader,
+    /face\.positiveRow==INVALID&&\(face\.flags&BOUNDARY\)!=0u&&\(face\.flags&OPEN_BOUNDARY\)==0u\)\{normalVelocity=0\.0;/,
+    "closed container power faces must enforce no-through-flow without requiring terrain or rigid bodies");
+  assert.match(octreePowerFaceSeedShader,
+    /dot\(accelerationParams\.acceleration,n\)\*accelerationParams\.dt/,
+    "body force must be evaluated on the native power-face normal");
+  assert.match(octreePowerFaceSeedShader,
+    /if\(closed\)\{powerFaces\[index\]\.normalVelocity=0\.0;return;\}/,
+    "native body force must preserve closed-wall no-through-flow");
   assert.equal(OCTREE_GPU_FACE_INCIDENCE_PER_ROW, 48);
   assert.match(WebGPUOctreePowerFaceSeed.toString(), /OCTREE_GPU_FACE_INCIDENCE_PER_ROW/,
     "the power bridge must index the axis incidence slab with the mirror ABI stride");
@@ -71,6 +80,7 @@ test("Dawn seeds a non-axis power face from transferred compact face velocity", 
   for (let face = 0; face < 4; face += 1) {
     powerFaceWords[face * 8] = 0; powerFaceWords[face * 8 + 1] = 0xffff_ffff; powerFaceFloats[face * 8 + 5] = 1;
   }
+  powerFaceWords[1 * 8 + 3] = 1; // closed world boundary
   const powerFaces = upload(powerFaceWords); const inverseRootTwo = Math.SQRT1_2;
   const inverseRootThree = 1 / Math.sqrt(3);
   const normalValues = new Float32Array([
@@ -98,10 +108,11 @@ test("Dawn seeds a non-axis power face from transferred compact face velocity", 
   encoder.copyBufferToBuffer(powerFaces, 0, readback, 32, 128);
   device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); await readback.mapAsync(GPUMapMode.READ);
   const result = readback.getMappedRange().slice(0); readback.unmap();
-  const control = new Uint32Array(result, 0, 8); const face = new Float32Array(result, 32, 8);
+  const control = new Uint32Array(result, 0, 8); const face = new Float32Array(result, 32, 32);
   assert.equal(control[0], 0); assert.equal(control[2], 1); assert.equal(control[3], 4);
   assert.equal(control[4], 4); assert.equal(control[5], 9); assert.equal(control[6], OCTREE_POWER_FACE_SEED_VALID);
   assert.ok(Math.abs(face[4] - 6 * Math.SQRT1_2) < 2e-5);
+  assert.equal(face[1 * 8 + 4], 0, "closed world power faces must discard reconstructed wall-normal velocity");
   // Simulate a successfully projected power field for v=(3,5,7), then
   // conservatively republish its least-squares reconstruction to axis faces.
   const target: readonly [number, number, number] = [3, 5, 7];

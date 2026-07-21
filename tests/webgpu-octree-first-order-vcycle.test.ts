@@ -66,6 +66,14 @@ test("first-order free-surface anchor uses the ghost-fluid zero-crossing distanc
   assert.throws(() => firstOrderGhostFluidBoundaryCoefficient(1, 1, 1, -1), /invalid/);
 });
 
+test("first-order aggregate claims retry weak compare-exchange at the same slot", () => {
+  assert.match(octreeFirstOrderVCycleShader,
+    /var observed=atomicLoad\(&state\[index\]\);for\(var retry=0u;retry<16u;retry\+=1u\)\{if\(observed==key\)\{return slot;\}if\(observed!=0u\)\{break;\}[\s\S]*observed=claim\.old_value;/,
+    "a spurious weak-CAS failure must not split one aggregate key across multiple slots");
+  assert.match(octreeFirstOrderVCycleShader, /retry==15u&&observed==0u\)\{report\(HIERARCHY_OVERFLOW\);return INVALID;/,
+    "same-slot retries must remain bounded and fail closed instead of hanging the device");
+});
+
 test("paired-smoothing Galerkin V-cycle is symmetric and positive", () => {
   const operator = [
     [3, -1, 0, 0, 0, 0],

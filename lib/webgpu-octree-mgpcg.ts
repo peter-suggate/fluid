@@ -233,6 +233,7 @@ export class WebGPUOctreeMGPCG {
       multiplyDirection: pipeline("multiplyDirection", [0, 1, 2, 3, 7, 8, 11, 12]),
       directionReduction: pipeline("reduceDirectionProduct", [0, 3, 7, 8, 11]),
       update: pipeline("updatePressureResidual", [0, 3, 5, 7, 8, 11, 12]),
+      updatedResidualReduction: pipeline("reduceUpdatedResidual", [0, 3, 5, 11]),
       nextReduction: pipeline("reduceNextState", [0, 3, 5, 6, 11]),
       direction: pipeline("updateDirection", [0, 3, 6, 7, 11]),
       finalize: pipeline("finalizeMGPCG", [3, 11]),
@@ -273,6 +274,10 @@ export class WebGPUOctreeMGPCG {
       rows(this.stages.multiplyDirection);
       single(this.stages.directionReduction);
       rows(this.stages.update);
+      // Standard PCG tests the updated residual before applying M again.  In
+      // particular, do not let a numerically exhausted r enter the fixed SPD
+      // Section 4.3 V-cycle and turn an already-converged solve into failure.
+      single(this.stages.updatedResidualReduction);
       this.applyPreconditioner(encoder, buffers);
       single(this.stages.nextReduction);
       rows(this.stages.direction);
@@ -405,6 +410,18 @@ fn diagonalBase()->u32{return 2u*levels()*stride();}fn rhsBase()->u32{return 3u*
 fn solutionBase()->u32{return 4u*levels()*stride();}fn offset(base:u32,level:u32,slot:u32)->u32{return base+level*stride()+slot;}
 fn failed()->bool{return atomicLoad(&control[0])!=0u;}fn stopped()->bool{return failed()||atomicLoad(&control[1])!=0u;}
 fn report(flag:u32){atomicOr(&control[0],flag);}
+// Words 10-12 are observational diagnostics only: the first failing stage,
+// compact row (or INVALID_ROW for a global reduction), and one f32 payload.
+// Keeping this beside the existing fail-closed flag lets Dawn identify the
+// first bad arithmetic operation without changing solver control flow.
+fn reportAt(flag:u32,stage:u32,row:u32,value:f32){
+  atomicOr(&control[0],flag);
+  for(var retry=0u;retry<16u;retry+=1u){
+    let claim=atomicCompareExchangeWeak(&control[10],0u,stage);
+    if(claim.exchanged){atomicStore(&control[11],row);atomicStore(&control[12],bitcast<u32>(value));return;}
+    if(claim.old_value!=0u){return;}
+  }
+}
 fn atomicAddFloat(at:u32,value:f32){if(!finite(value)){report(NONFINITE);return;}var old=atomicLoad(&hierarchy[at]);
   loop{let current=bitcast<f32>(old);if(!finite(current)){report(NONFINITE);return;}
     let exchange=atomicCompareExchangeWeak(&hierarchy[at],old,bitcast<u32>(current+value));if(exchange.exchanged){return;}old=exchange.old_value;}}
@@ -417,21 +434,22 @@ fn applyHybridL2(row:u32,useB:bool)->f32{let h=headers[row];if(!finite(h.diagona
     if(e.row>=liveRows()||!finite(e.coefficient)){report(INVALID_ROW_ERROR);continue;}value-=e.coefficient*hybridValue(e.row,useB);}return value;}
 fn smoothHybridValue(row:u32,useB:bool)->f32{let current=hybridValue(row,useB);if(hybridBandB[row]==0u){return current;}
   let diagonal=headers[row].diagonal;let next=current+hybridOmega()*(residual[row]-applyHybridL2(row,useB))/diagonal;
-  if(!finite(next)){report(NONFINITE);return current;}return next;}
+  if(!finite(next)){reportAt(NONFINITE,3u,row,next);return current;}return next;}
 fn cellCoord(cell:u32)->vec3u{let nx=params.dimsCapacity.x;let ny=params.dimsCapacity.y;return vec3u(cell%nx,(cell/nx)%ny,cell/(nx*ny));}
 fn aggregateKey(row:u32,level:u32)->u32{let block=params.hierarchy.z<<level;let q=cellCoord(headers[row].cell)/block;
   let d=(params.dimsCapacity.xyz+vec3u(block-1u))/block;return q.x+d.x*(q.y+d.y*q.z);}
 fn hashKey(key:u32)->u32{var h=key*0x9e3779b1u;h=(h^(h>>16u))*0x7feb352du;return (h^(h>>15u))%stride();}
 fn findAggregate(row:u32,level:u32)->u32{let key=aggregateKey(row,level)+1u;var slot=hashKey(key);
-  for(var probe=0u;probe<64u;probe+=1u){let at=offset(keyBase(),level,slot);let old=atomicLoad(&hierarchy[at]);
-    if(old==key){return slot;}if(old==0u){let claim=atomicCompareExchangeWeak(&hierarchy[at],0u,key);if(claim.exchanged||claim.old_value==key){return slot;}}
+  for(var probe=0u;probe<64u;probe+=1u){let at=offset(keyBase(),level,slot);var observed=atomicLoad(&hierarchy[at]);
+    for(var retry=0u;retry<16u;retry+=1u){if(observed==key){return slot;}if(observed!=0u){break;}let claim=atomicCompareExchangeWeak(&hierarchy[at],0u,key);
+      if(claim.exchanged){return slot;}observed=claim.old_value;if(retry==15u&&observed==0u){report(HASH_OVERFLOW);return INVALID_ROW;}}
     slot=(slot+1u)%stride();}report(HASH_OVERFLOW);return INVALID_ROW;}
 
 @compute @workgroup_size(64) fn initializeMGPCG(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()){return;}
   let h=headers[row];if(h.entryStart+h.entryCount>arrayLength(&entries)||!finite(h.diagonal)||h.diagonal<=0.0||!finite(h.rhs)){report(INVALID_ROW_ERROR);return;}
-  var seed=pressureSeed[row];if(!finite(seed)){report(NONFINITE);seed=0.0;}pressure[row]=seed;residual[row]=0.0;preconditioned[row]=0.0;direction[row]=0.0;}
+  var seed=pressureSeed[row];if(!finite(seed)){reportAt(NONFINITE,1u,row,seed);seed=0.0;}pressure[row]=seed;residual[row]=0.0;preconditioned[row]=0.0;direction[row]=0.0;}
 @compute @workgroup_size(64) fn multiplyX(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!failed()){direction[row]=applyA(row,false);}}
-@compute @workgroup_size(64) fn formInitialResidual(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!failed()){let r=-headers[row].rhs-direction[row];if(!finite(r)){report(NONFINITE);}else{residual[row]=r;}}}
+@compute @workgroup_size(64) fn formInitialResidual(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!failed()){let r=-headers[row].rhs-direction[row];if(!finite(r)){reportAt(NONFINITE,2u,row,r);}else{residual[row]=r;}}}
 
 @compute @workgroup_size(64) fn buildHierarchyMap(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||failed()){return;}
   for(var level=0u;level<levels();level+=1u){let slot=findAggregate(row,level);atomicStore(&hierarchy[offset(mapBase(),level,row)],slot);}}
@@ -452,7 +470,7 @@ fn findAggregate(row:u32,level:u32)->u32{let key=aggregateKey(row,level)+1u;var 
 @compute @workgroup_size(64) fn prolongateCorrection(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}var value=preconditioned[row];
   let scale=1.0/f32(levels()+1u);value*=scale;for(var level=0u;level<levels();level+=1u){let slot=atomicLoad(&hierarchy[offset(mapBase(),level,row)]);
     if(slot!=INVALID_ROW){value+=scale*bitcast<f32>(atomicLoad(&hierarchy[offset(solutionBase(),level,slot)]));}}
-  if(!finite(value)){report(NONFINITE);}else{preconditioned[row]=value;}}
+  if(!finite(value)){reportAt(NONFINITE,12u,row,value);}else{preconditioned[row]=value;}}
 
 @compute @workgroup_size(64) fn classifyHybridBand(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||failed()){return;}
   let h=headers[row];var offDiagonalSum=0.0;var transition=false;
@@ -469,11 +487,11 @@ fn findAggregate(row:u32,level:u32)->u32{let key=aggregateKey(row,level)+1u;var 
 @compute @workgroup_size(64) fn smoothHybridAtoB(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!stopped()){hybridB[row]=smoothHybridValue(row,false);}}
 @compute @workgroup_size(64) fn smoothHybridBtoA(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!stopped()){hybridA[row]=smoothHybridValue(row,true);}}
 @compute @workgroup_size(64) fn formHybridL1Residual(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
-  let next=residual[row]-applyHybridL2(row,false);if(!finite(next)){report(NONFINITE);}else{hybridRhs[row]=next;}}
+  let next=residual[row]-applyHybridL2(row,false);if(!finite(next)){reportAt(NONFINITE,4u,row,next);}else{hybridRhs[row]=next;}}
 @compute @workgroup_size(64) fn addHybridL1Correction(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
-  let next=hybridA[row]+hybridCorrection[row];if(!finite(next)){report(NONFINITE);}else{hybridB[row]=next;}}
+  let next=hybridA[row]+hybridCorrection[row];if(!finite(next)){reportAt(NONFINITE,5u,row,next);}else{hybridB[row]=next;}}
 @compute @workgroup_size(64) fn publishHybridPreconditioner(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
-  let value=hybridB[row];if(!finite(value)){report(NONFINITE);}else{preconditioned[row]=value;}}
+  let value=hybridB[row];if(!finite(value)){reportAt(NONFINITE,6u,row,value);}else{preconditioned[row]=value;}}
 
 var<workgroup> sums:array<vec4f,256>;
 @compute @workgroup_size(256) fn reduceInitialState(@builtin(local_invocation_index) lid:u32){var sum=vec4f(0.0);let n=liveRows();
@@ -481,21 +499,25 @@ var<workgroup> sums:array<vec4f,256>;
   sums[lid]=sum;for(var width=128u;width>0u;width>>=1u){workgroupBarrier();if(lid<width){sums[lid]+=sums[lid+width];}}workgroupBarrier();
   if(lid==0u){let v=sums[0];atomicStore(&control[3],n);atomicStore(&control[4],bitcast<u32>(v.x));atomicStore(&control[5],bitcast<u32>(v.y));atomicStore(&control[6],bitcast<u32>(v.z));
     let countWords=arrayLength(&counts);if(countWords<8u||counts[countWords-8u]!=0u){report(INVALID_ROW_ERROR);}
-    else if(!finite(v.x)||!finite(v.y)||!finite(v.z)||v.z<0.0){report(NONFINITE);}else if(!failed()&&v.x<=tolerance()*tolerance()*max(v.y,epsilon())){atomicStore(&control[1],1u);}}}
+    else if(!finite(v.x)||!finite(v.y)||!finite(v.z)||v.z<0.0){reportAt(NONFINITE,7u,INVALID_ROW,v.z);}else if(!failed()&&v.x<=tolerance()*tolerance()*max(v.y,epsilon())){atomicStore(&control[1],1u);}}}
 
 @compute @workgroup_size(64) fn multiplyDirection(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!stopped()){product[row]=applyA(row,true);}}
 @compute @workgroup_size(256) fn reduceDirectionProduct(@builtin(local_invocation_index) lid:u32){let solving=!stopped();var sum=0.0;
   if(solving){for(var row=lid;row<liveRows();row+=256u){sum+=direction[row]*product[row];}}sums[lid]=vec4f(sum,0.0,0.0,0.0);
   for(var width=128u;width>0u;width>>=1u){workgroupBarrier();if(lid<width){sums[lid]+=sums[lid+width];}}workgroupBarrier();if(lid==0u){let dq=sums[0].x;let rz=bitcast<f32>(atomicLoad(&control[6]));
-    if(!solving){}else if(!finite(dq)||!finite(rz)){report(NONFINITE);}else if(dq<=epsilon()||rz<0.0){report(NONPOSITIVE);}else{atomicStore(&control[7],bitcast<u32>(rz/dq));atomicStore(&control[9],bitcast<u32>(dq));}}}
+    if(!solving){}else if(!finite(dq)||!finite(rz)){reportAt(NONFINITE,8u,INVALID_ROW,dq);}else if(dq<=epsilon()||rz<0.0){report(NONPOSITIVE);}else{atomicStore(&control[7],bitcast<u32>(rz/dq));atomicStore(&control[9],bitcast<u32>(dq));}}}
 @compute @workgroup_size(64) fn updatePressureResidual(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}let alpha=bitcast<f32>(atomicLoad(&control[7]));
-  let nextPressure=pressure[row]+alpha*direction[row];let nextResidual=residual[row]-alpha*product[row];if(!finite(nextPressure)||!finite(nextResidual)){report(NONFINITE);return;}pressure[row]=nextPressure;residual[row]=nextResidual;}
-@compute @workgroup_size(256) fn reduceNextState(@builtin(local_invocation_index) lid:u32){let solving=!stopped();var sum=vec2f(0.0);
-  if(solving){for(var row=lid;row<liveRows();row+=256u){let r=residual[row];sum+=vec2f(r*r,r*preconditioned[row]);}}sums[lid]=vec4f(sum,0.0,0.0);
-  for(var width=128u;width>0u;width>>=1u){workgroupBarrier();if(lid<width){sums[lid]+=sums[lid+width];}}workgroupBarrier();if(lid==0u){let rr=sums[0].x;let nextRz=sums[0].y;let previousRz=bitcast<f32>(atomicLoad(&control[6]));let bb=bitcast<f32>(atomicLoad(&control[5]));
-    if(!solving){return;}if(!finite(rr)||!finite(nextRz)||nextRz<0.0||previousRz<=epsilon()){report(NONFINITE);return;}atomicStore(&control[4],bitcast<u32>(rr));atomicStore(&control[8],bitcast<u32>(nextRz/previousRz));atomicStore(&control[6],bitcast<u32>(nextRz));atomicAdd(&control[2],1u);
+  let nextPressure=pressure[row]+alpha*direction[row];let nextResidual=residual[row]-alpha*product[row];if(!finite(nextPressure)||!finite(nextResidual)){reportAt(NONFINITE,9u,row,nextResidual);return;}pressure[row]=nextPressure;residual[row]=nextResidual;}
+@compute @workgroup_size(256) fn reduceUpdatedResidual(@builtin(local_invocation_index) lid:u32){let solving=!stopped();var sum=0.0;
+  if(solving){for(var row=lid;row<liveRows();row+=256u){let r=residual[row];sum+=r*r;}}sums[lid]=vec4f(sum,0.0,0.0,0.0);
+  for(var width=128u;width>0u;width>>=1u){workgroupBarrier();if(lid<width){sums[lid]+=sums[lid+width];}}workgroupBarrier();if(lid==0u){let rr=sums[0].x;let bb=bitcast<f32>(atomicLoad(&control[5]));
+    if(!solving){return;}if(!finite(rr)){reportAt(NONFINITE,10u,INVALID_ROW,rr);return;}atomicStore(&control[4],bitcast<u32>(rr));atomicAdd(&control[2],1u);
     if(rr<=tolerance()*tolerance()*max(bb,epsilon())){atomicStore(&control[1],1u);}}}
-@compute @workgroup_size(64) fn updateDirection(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}let beta=bitcast<f32>(atomicLoad(&control[8]));let next=preconditioned[row]+beta*direction[row];if(!finite(next)){report(NONFINITE);}else{direction[row]=next;}}
+@compute @workgroup_size(256) fn reduceNextState(@builtin(local_invocation_index) lid:u32){let solving=!stopped();var sum=0.0;
+  if(solving){for(var row=lid;row<liveRows();row+=256u){sum+=residual[row]*preconditioned[row];}}sums[lid]=vec4f(sum,0.0,0.0,0.0);
+  for(var width=128u;width>0u;width>>=1u){workgroupBarrier();if(lid<width){sums[lid]+=sums[lid+width];}}workgroupBarrier();if(lid==0u){let nextRz=sums[0].x;let previousRz=bitcast<f32>(atomicLoad(&control[6]));
+    if(!solving){return;}if(!finite(nextRz)||nextRz<0.0||previousRz<=epsilon()){reportAt(NONFINITE,13u,INVALID_ROW,nextRz);return;}atomicStore(&control[8],bitcast<u32>(nextRz/previousRz));atomicStore(&control[6],bitcast<u32>(nextRz));}}
+@compute @workgroup_size(64) fn updateDirection(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}let beta=bitcast<f32>(atomicLoad(&control[8]));let next=preconditioned[row]+beta*direction[row];if(!finite(next)){reportAt(NONFINITE,11u,row,next);}else{direction[row]=next;}}
 
 @compute @workgroup_size(1) fn finalizeMGPCG(){if(atomicLoad(&control[1])==0u&&atomicLoad(&control[0])==0u){report(NONCONVERGENCE);}
   if(arrayLength(&counts)>=2u){let tail=arrayLength(&counts);let success=atomicLoad(&control[0])==0u&&atomicLoad(&control[1])!=0u;

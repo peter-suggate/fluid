@@ -845,6 +845,7 @@ export class WebGPUOctreeProjection {
   private globalFineGeneration = 2;
   private readonly faceRhsAuthority: boolean;
   private faceTransportDt_s = 0;
+  private powerAdvancingPressureSteps = 0;
   private readonly solveDispatch: GPUBuffer;
   private readonly topologyCandidateDispatch: GPUBuffer;
   private readonly solidCells: GPUBuffer;
@@ -2637,7 +2638,12 @@ export class WebGPUOctreeProjection {
       this.scene.container.depth_m / this.dims.nz,
     ];
     this.powerGeneration = (this.powerGeneration + 1) >>> 0;
-    const boundaryFine = this.globalFineBootstrapped
+    // The first advancing pressure solve is still at the authored t=0
+    // interface. Warmup publishes the fine-band data structure, but that
+    // administrative publication is not an advection step and must not move
+    // the initial Dirichlet surface used by the analytic cold solve.
+    const useCurrentFineBoundary = this.globalFineBootstrapped && this.powerAdvancingPressureSteps > 0;
+    const boundaryFine = useCurrentFineBoundary
       ? (this.globalFineCurrentIsA ? this.globalFineSourceA : this.globalFineSourceB)
       : this.globalFineSourceA;
     // Paper Sections 4.1/5 require free-surface pressure to evaluate signed
@@ -2647,7 +2653,7 @@ export class WebGPUOctreeProjection {
     // If neither exists, internal boundary publication fails closed in the
     // face builder instead of synthesizing an affine air value.
     const boundaryPhi = boundaryFine ? {
-      mode: this.globalFineBootstrapped ? "fine" as const : "analytic" as const,
+      mode: useCurrentFineBoundary ? "fine" as const : "analytic" as const,
       fine: boundaryFine,
       container: [this.scene.container.width_m, this.scene.container.height_m,
         this.scene.container.depth_m] as const,
@@ -2673,15 +2679,25 @@ export class WebGPUOctreeProjection {
     });
     topology.encode(encoder, descriptor.descriptors, this.compaction, spacing);
     faces.encode(encoder, this.leafHeaders, faceOptions, true);
-    // The compact axis field has already been topology-transferred, advected,
-    // and incremented by this step's body force.  It is therefore the only
-    // current-time u* authority for pressure assembly.  A generalized-face
+    // The compact axis field has already been topology-transferred and
+    // advected. It is the current-time transport authority. A generalized-face
     // snapshot captured after the previous projection is stale here: applying
     // it over this seed would erase this step's transport/acceleration on
     // every stable face and give the Poisson solve a patchy RHS.  Keep exact
     // generalized capture for diagnostics/future upstream transfer work, but
     // do not overwrite the current predicted velocity after seeding.
     this.powerFaceSeed?.encode(encoder);
+    // Equation (1) splits external forces from advection, while Section 4.1
+    // stores the authoritative normal velocity at every power face. Apply
+    // gravity in that native basis so oblique transition faces receive g.n dt
+    // exactly and closed walls retain their prescribed no-through-flow value.
+    if (this.powerPolicy.authoritative) {
+      this.powerFaceSeed?.encodeAcceleration(encoder, [
+        this.scene.fluid.gravity_m_s2.x,
+        this.scene.fluid.gravity_m_s2.y,
+        this.scene.fluid.gravity_m_s2.z,
+      ], this.faceTransportDt_s);
+    }
     this.powerSolidVertices?.encode(encoder, {
       dimensions,
       physicalSpacing: spacing,
@@ -2824,7 +2840,7 @@ export class WebGPUOctreeProjection {
           this.faceMirror.encodeTopology(encoder, this.solveDispatch);
           this.faceTransport?.encode(encoder, {
             dt: this.faceTransportDt_s,
-            acceleration: [
+            acceleration: this.powerPolicy.authoritative ? [0, 0, 0] : [
               this.scene.fluid.gravity_m_s2.x,
               this.scene.fluid.gravity_m_s2.y,
               this.scene.fluid.gravity_m_s2.z,
@@ -2999,6 +3015,7 @@ export class WebGPUOctreeProjection {
       } else encoder.copyTextureToTexture({ texture: this.resources.velocityScratch }, { texture: this.resources.velocityOut }, [this.dims.nx, this.dims.ny, this.dims.nz]);
     }
     this.encodeOverlayMaterialization(encoder, finalInA, detailedTimestampWrites?.materialization);
+    if (this.powerPolicy.authoritative && this.faceTransportDt_s > 0) this.powerAdvancingPressureSteps += 1;
   }
 
   /** Publish lazily allocated diagnostic textures from the live owner map.
@@ -3513,6 +3530,9 @@ export class WebGPUOctreeProjection {
   }
   /** Diagnostic-only compact coarse-phi transaction control. */
   get globalFineCoarseLevelSetControl(): GPUBuffer | undefined { return this.powerCoarseLevelSetSchedule?.control; }
+  /** Diagnostic-only fine-to-coarse restriction transaction consumed by the
+   * compact coarse-phi publication gate. */
+  get globalFineRestrictionControl(): GPUBuffer | undefined { return this.fineToPowerCoarseLevelSet?.control; }
   /** QA-only bounded readback for the compact row that caused a fail-closed
    * coarse-phi transaction. This is used only while constructing a rejected
    * t=0 solver, so it cannot enter the recurring simulation schedule. */
@@ -3987,19 +4007,28 @@ fn ensureOwnerPageEncoded(logical: u32) -> u32 {
       return select(encoded, 0u, encoded == 0u || encoded == 0xffffffffu);
     }
     if (observed == 0u || observed == 0xffffffffu) {
-      let claim = atomicCompareExchangeWeak(&owners[keyWord], observed, key);
-      if (claim.exchanged) {
-        atomicStore(&owners[valueWord], 0xffffffffu);
-        let physical = popOwnerPage(); let capacity = atomicLoad(&owners[3]);
-        if (physical == 0xffffffffu || physical >= capacity) {
-          atomicStore(&owners[valueWord], 0u); atomicStore(&owners[keyWord], 0xffffffffu);
-          atomicStore(&owners[2], 1u); return 0u;
+      // A weak compare-exchange may fail spuriously. Keep retrying the same
+      // logical slot while it still contains the value we observed; probing
+      // onward here can publish the same owner-page key twice and make the
+      // next compact pressure topology depend on workgroup scheduling.
+      var expected = observed;
+      for (var retry = 0u; retry < 16u; retry += 1u) {
+        let claim = atomicCompareExchangeWeak(&owners[keyWord], expected, key);
+        if (claim.exchanged) {
+          atomicStore(&owners[valueWord], 0xffffffffu);
+          let physical = popOwnerPage(); let capacity = atomicLoad(&owners[3]);
+          if (physical == 0xffffffffu || physical >= capacity) {
+            atomicStore(&owners[valueWord], 0u); atomicStore(&owners[keyWord], 0xffffffffu);
+            atomicStore(&owners[2], 1u); return 0u;
+          }
+          let base = atomicLoad(&owners[6]) + physical * 512u;
+          for (var local = 0u; local < 512u; local += 1u) { atomicStore(&owners[base + local], 0u); }
+          atomicStore(&owners[valueWord], physical + 1u); atomicAdd(&owners[1], 1u); return physical + 1u;
         }
-        let base = atomicLoad(&owners[6]) + physical * 512u;
-        for (var local = 0u; local < 512u; local += 1u) { atomicStore(&owners[base + local], 0u); }
-        atomicStore(&owners[valueWord], physical + 1u); atomicAdd(&owners[1], 1u); return physical + 1u;
+        expected = claim.old_value;
+        if (expected == key) { return 0u; }
+        if (expected != observed) { break; }
       }
-      if (claim.old_value == key) { return 0u; }
     }
     slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
   }

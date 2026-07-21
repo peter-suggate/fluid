@@ -26,6 +26,10 @@ test("trajectory prepass is bounded GPU-only Stage-B work", () => {
   const productionBuilder = makePowerVelocityPrepassBuilderWGSL();
   assert.doesNotMatch(productionBuilder, /nearestOwner|nearestFallback|0x10000000u/,
     "missing containing owners must be resolved only by the Section 5 face-band publication");
+  assert.match(productionBuilder, /fn interpolationOwner\(x:vec3f\)->u32\{return owner\(x\);\}/,
+    "Stage B starts from the exact adaptive owner; Section 5 completes uncovered dual octants");
+  assert.match(productionBuilder, /let row=interpolationOwner\(x\.xyz\);if\(row==0xffffffffu\)/,
+    "liquid transition samples may relocate to a neighboring incident cube or tetrahedron");
   assert.deepEqual(planOctreePowerVelocityPrepass(4096, 256), {
     queryCapacity: 4096,
     queryBytes: 196_608,

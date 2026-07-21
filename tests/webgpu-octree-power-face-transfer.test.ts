@@ -43,6 +43,8 @@ test("pressure assembly keeps the current transported axis seed instead of stale
   const assembly = (WebGPUOctreeProjection.prototype as unknown as { encodePowerAssemblyMirror?: () => void })
     .encodePowerAssemblyMirror?.toString?.() ?? WebGPUOctreeProjection.toString();
   assert.match(assembly, /powerFaceSeed/);
+  assert.match(assembly, /powerFaceSeed\?\.encodeAcceleration/,
+    "authoritative body force must be applied directly on generalized faces");
   assert.doesNotMatch(assembly, /powerFaceTransfer\?\.encodeApply/,
     "previous-frame projected faces must not erase current transport or body forces before pressure assembly");
   assert.equal(typeof WebGPUOctreePowerFaceTransfer.prototype.encodeApply, "function");
@@ -56,4 +58,8 @@ test("pressure assembly keeps the current transported axis seed instead of stale
   assert.doesNotMatch(WebGPUOctreePowerFaceTransfer.prototype.encodeCapture.toString(),
     /dispatchWorkgroupsIndirect\(this\.control/,
     "a writable storage buffer cannot also be indirect in the same synchronization scope");
+  assert.match(WebGPUOctreeProjection.toString(), /this\.powerPolicy\.authoritative\?\[0,0,0\]:\[/,
+    "authoritative mode must not also apply body force on the compatibility axis field");
+  assert.match(WebGPUOctreeProjection.toString(), /globalFineBootstrapped&&this\.powerAdvancingPressureSteps>0/,
+    "warmup publication must not displace the authored free surface before the first advancing pressure solve");
 });

@@ -214,7 +214,10 @@ test("compact smoke reconstruction rejects a stale GPU fine worklist against mat
 });
 
 test("rejected publication evidence retains coarse failure and fine topology controls", () => {
-  const rejected = snapshot();
+  const rejected: CompactOctreeFieldSnapshot = {
+    ...snapshot(),
+    mgpcgControl: new Uint32Array([4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 21, 17, 0x7fc0_0000, 0, 0, 0]),
+  };
   rejected.coarseDirectory[0] = 0;
   rejected.coarseControl!.set([32, 17, 41, 40], 0);
   rejected.topologyControl!.set([16, 5, 12, 11, 0, 1, 7, 2], 0);
@@ -229,5 +232,6 @@ test("rejected publication evidence retains coarse failure and fine topology con
     topologyFlags: 16, topologyInterfaceBricks: 5, topologyDesiredBricks: 12,
     topologyActivatedBricks: 11, topologyPublished: 0, topologyRolledBack: 1,
     topologyCapacityOrDilation: 7, downstreamFinalizeReason: 2,
+    mgpcgControl: [4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 21, 17, 0x7fc0_0000, 0, 0, 0],
   });
 });

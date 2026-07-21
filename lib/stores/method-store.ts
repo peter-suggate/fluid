@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { GPUQuality } from "../tall-cell-grid";
-import { defaultMethodId, getMethod, resolveMethodValues, type MethodParamValue, type MethodParamValues } from "../methods";
+import { defaultMethodId, getMethod, resolveMethodValues, type MethodParamValue, type MethodParamValues, type MethodProfile } from "../methods";
 
 /**
  * Which simulation method runs, at what quality, and any sparse per-method
@@ -16,6 +16,7 @@ interface MethodStore {
   setParam: (methodId: string, key: string, value: MethodParamValue) => void;
   resetParam: (methodId: string, key: string) => void;
   resetParams: (methodId: string) => void;
+  applyProfile: (profile: MethodProfile) => void;
 }
 
 export const useMethodStore = create<MethodStore>((set) => ({
@@ -30,7 +31,12 @@ export const useMethodStore = create<MethodStore>((set) => ({
     delete rest[key];
     return { overrides: { ...state.overrides, [methodId]: rest } };
   }),
-  resetParams: (methodId) => set((state) => ({ overrides: { ...state.overrides, [methodId]: {} } }))
+  resetParams: (methodId) => set((state) => ({ overrides: { ...state.overrides, [methodId]: {} } })),
+  applyProfile: ({ methodId, quality, overrides }) => set((state) => ({
+    methodId,
+    quality,
+    overrides: { ...state.overrides, [methodId]: { ...overrides } },
+  })),
 }));
 
 /** Effective values for the active method: defaults ← quality preset ← user overrides. */

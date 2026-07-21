@@ -14,7 +14,8 @@ import { WebGPUEulerianSolver, type GPUEulerianInfo, type GPUQuality } from "../
 import { summarizeDriftOscillation } from "../lib/tall-cell-diagnostics";
 import { VOXEL_MATERIAL_IDS, voxelMaterial } from "../lib/voxel-scene";
 import { SPARSE_VOXEL_DEBUG_RECORD_STRIDE, SparseVoxelDebugRenderer, type SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
-import { RasterWaterPipeline, type WaterSurfaceGeometrySource } from "../lib/webgpu-water-pipeline";
+import { activeCubeCapacity, RasterWaterPipeline, surfaceVertexCapacity,
+  type WaterSurfaceGeometrySource } from "../lib/webgpu-water-pipeline";
 import { createGlobalFineLevelSetConsumerSource, createUnifiedOctreeConsumerSource } from "../lib/octree-consumer-sampling";
 import { unpackOctreeFaceBandControl } from "../lib/webgpu-octree-face-fast-march";
 import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
@@ -27,6 +28,7 @@ import { compactOctreeFieldEvidenceIsAcceptable, compactOctreePublicationHeaderE
   type CompactOctreeFieldEvidence } from "./webgpu-smoke-compact-field";
 import { decodeOctreeMGPCGDiagnostics, octreeMGPCGDiagnosticsAreAcceptable,
   type OctreeMGPCGDiagnostics } from "./webgpu-smoke-pressure";
+import { narrowVerticalSlitMetrics, type NarrowVerticalSlitMetrics } from "./raster-slit-metrics";
 import {
   compareScalarFields,
   compareSingleTallCellNeighborhood,
@@ -131,9 +133,11 @@ const targetOverride = process.env.FLUID_TARGET_S === undefined ? undefined : Nu
 const maxDtOverride = process.env.FLUID_MAX_DT === undefined ? undefined : Number(process.env.FLUID_MAX_DT);
 const exactStepCount = process.env.FLUID_EXPECT_EXACT_STEPS === undefined ? undefined : Number(process.env.FLUID_EXPECT_EXACT_STEPS);
 const minimumPeakSpeed_m_s = process.env.FLUID_MIN_PEAK_SPEED_M_S === undefined ? undefined : Number(process.env.FLUID_MIN_PEAK_SPEED_M_S);
+const minimumDamSpread_m = process.env.FLUID_MIN_DAM_SPREAD_M === undefined ? undefined : Number(process.env.FLUID_MIN_DAM_SPREAD_M);
 if (maxDtOverride !== undefined && (!Number.isFinite(maxDtOverride) || maxDtOverride <= 0)) throw new Error("FLUID_MAX_DT must be positive and finite");
 if (exactStepCount !== undefined && (!Number.isInteger(exactStepCount) || exactStepCount < 1)) throw new Error("FLUID_EXPECT_EXACT_STEPS must be a positive integer");
 if (minimumPeakSpeed_m_s !== undefined && (!Number.isFinite(minimumPeakSpeed_m_s) || minimumPeakSpeed_m_s <= 0)) throw new Error("FLUID_MIN_PEAK_SPEED_M_S must be positive and finite");
+if (minimumDamSpread_m !== undefined && (!Number.isFinite(minimumDamSpread_m) || minimumDamSpread_m <= 0)) throw new Error("FLUID_MIN_DAM_SPREAD_M must be positive and finite");
 if (exactStepCount !== undefined && maxDtOverride === undefined) throw new Error("FLUID_EXPECT_EXACT_STEPS requires FLUID_MAX_DT so submitted/completed time is unambiguous");
 const reportEvery = Number(process.env.FLUID_REPORT_EVERY ?? 0);
 const includeFinalFieldStats = process.env.FLUID_FIELD_STATS !== "0";
@@ -200,6 +204,10 @@ if (octreeGlobalFineFactorOverride !== undefined && !["off", "4", "8"].includes(
 const powerGenerationAuditRequested = process.env.FLUID_POWER_GENERATION_AUDIT === "1";
 const powerGenerationAuditLog = process.env.FLUID_POWER_GENERATION_AUDIT_LOG !== "0";
 const powerStageAuditLog = process.env.FLUID_POWER_STAGE_AUDIT === "1";
+const powerAuditEverySteps = Number(process.env.FLUID_POWER_AUDIT_EVERY_STEPS ?? 1);
+if (!Number.isSafeInteger(powerAuditEverySteps) || powerAuditEverySteps < 1) {
+  throw new Error("FLUID_POWER_AUDIT_EVERY_STEPS must be a positive integer");
+}
 const topologyTransitionAuditLog = process.env.FLUID_TOPOLOGY_TRANSITION_AUDIT === "1";
 const hydrostaticSplitOverride = process.env.FLUID_HYDROSTATIC_SPLIT === undefined ? undefined : process.env.FLUID_HYDROSTATIC_SPLIT !== "0";
 const brickAtlasOverride = process.env.FLUID_BRICK_ATLAS === undefined ? undefined : process.env.FLUID_BRICK_ATLAS !== "0";
@@ -556,6 +564,9 @@ interface HybridPresentationSmokeStats {
   height: number;
   frontInterfacePixels: number;
   backInterfacePixels: number;
+  pairedInterfacePixels: number;
+  frontOnlyInterfacePixels: number;
+  backOnlyInterfacePixels: number;
   frontInterfaceHash: number;
   backInterfaceHash: number;
   rendererValidationErrorCount: number;
@@ -567,7 +578,21 @@ interface HybridPresentationSmokeStats {
   vertexCount?: number;
   activeCubeCount?: number;
   vertexAllocator?: number;
+  vertexCapacity?: number;
+  activeCubeCapacity?: number;
+  narrowVerticalSlits: NarrowVerticalSlitMetrics;
   frontInterfaceBounds_m?: readonly [readonly [number, number, number], readonly [number, number, number]];
+  reverseView?: {
+    frontInterfacePixels: number;
+    backInterfacePixels: number;
+    pairedInterfacePixels: number;
+    frontOnlyInterfacePixels: number;
+    backOnlyInterfacePixels: number;
+    frontInterfaceHash: number;
+    backInterfaceHash: number;
+    narrowVerticalSlits: NarrowVerticalSlitMetrics;
+    frontInterfaceBounds_m?: readonly [readonly [number, number, number], readonly [number, number, number]];
+  };
   globalFineAuthorityTransition?: {
     validGeneration: number;
     unpublishedGeneration: number;
@@ -708,7 +733,7 @@ async function readGlobalFineGenerationDiagnostics(
     source.topologyControl
       ? readBufferBinding(device, { buffer: source.topologyControl }, 32)
       : Promise.resolve(undefined),
-    transportControl ? readBufferBinding(device, { buffer: transportControl }, 32) : Promise.resolve(undefined),
+    transportControl ? readBufferBinding(device, { buffer: transportControl }, 64) : Promise.resolve(undefined),
     redistanceControl ? readBufferBinding(device, { buffer: redistanceControl }, 16) : Promise.resolve(undefined),
     volumeControl ? readBufferBinding(device, { buffer: volumeControl }, 64) : Promise.resolve(undefined),
     powerVelocityControl ? readBufferBinding(device, { buffer: powerVelocityControl }, 32) : Promise.resolve(undefined),
@@ -878,7 +903,9 @@ async function smokeRenderHybridPresentation(
   bodies: RigidBodyState[],
   verifyGlobalFineAuthorityTransition = false,
 ): Promise<HybridPresentationSmokeStats> {
-  const width = 320, height = 180;
+  // Match the UI's practical pixel density closely enough that a one-pixel
+  // slit there cannot disappear through smoke-test undersampling.
+  const width = 640, height = 360;
   const uniformBuffer = device.createBuffer({ label: "Hybrid presentation smoke uniforms", size: 400, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const bodyBuffer = device.createBuffer({ label: "Hybrid presentation smoke bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const output = device.createTexture({ label: "Hybrid presentation smoke output", size: [width, height], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT });
@@ -966,11 +993,13 @@ async function smokeRenderHybridPresentation(
         await interfaceReadback.mapAsync(GPUMapMode.READ);
         const interfaceWords = new Uint16Array(interfaceReadback.getMappedRange());
         const interfaceRowWords = interfaceBytesPerRow / 2;
-        let frontInterfacePixels = 0, backInterfacePixels = 0;
+        let frontInterfacePixels = 0, backInterfacePixels = 0, pairedInterfacePixels = 0;
+        let frontOnlyInterfacePixels = 0, backOnlyInterfacePixels = 0;
         let frontInterfaceHash = 0x811c_9dc5, backInterfaceHash = 0x811c_9dc5;
         const fold = (hash: number, value: number) => Math.imul((hash ^ value) >>> 0, 0x0100_0193) >>> 0;
         const frontMinimum: [number, number, number] = [Infinity, Infinity, Infinity];
         const frontMaximum: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+        const frontMask = new Uint8Array(width * height);
         for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
           const at = y * interfaceRowWords + x * 4;
           const backAt = interfacePlaneBytes / 2 + at;
@@ -978,20 +1007,29 @@ async function smokeRenderHybridPresentation(
             frontInterfaceHash = fold(frontInterfaceHash, interfaceWords[at + channel]);
             backInterfaceHash = fold(backInterfaceHash, interfaceWords[backAt + channel]);
           }
-          if (interfaceWords[at + 3] !== 0) {
+          const frontPresent = interfaceWords[at + 3] !== 0;
+          const backPresent = interfaceWords[backAt + 3] !== 0;
+          if (frontPresent) {
             frontInterfacePixels += 1;
+            frontMask[x + y * width] = 1;
             for (let axis = 0; axis < 3; axis += 1) {
               const value = decodeFloat16(interfaceWords[at + axis]);
               frontMinimum[axis] = Math.min(frontMinimum[axis], value);
               frontMaximum[axis] = Math.max(frontMaximum[axis], value);
             }
           }
-          if (interfaceWords[backAt + 3] !== 0) backInterfacePixels += 1;
+          if (backPresent) backInterfacePixels += 1;
+          if (frontPresent && backPresent) pairedInterfacePixels += 1;
+          else if (frontPresent) frontOnlyInterfacePixels += 1;
+          else if (backPresent) backOnlyInterfacePixels += 1;
         }
+        const narrowVerticalSlits = narrowVerticalSlitMetrics(frontMask, width, height);
         interfaceReadback.unmap();
         return { initializeWall_ms, frameWall_ms: performance.now() - frameStarted,
           bodyCount: presentationBodies.length, width, height, frontInterfacePixels, backInterfacePixels,
+          pairedInterfacePixels, frontOnlyInterfacePixels, backOnlyInterfacePixels,
           frontInterfaceHash, backInterfaceHash,
+          narrowVerticalSlits,
           ...(presentationDiagnostics ? {
             surfaceGeometrySource: presentationDiagnostics.surfaceGeometrySource,
             globalFineAuthorityLatch: presentationDiagnostics.globalFineAuthorityLatch,
@@ -1000,6 +1038,10 @@ async function smokeRenderHybridPresentation(
             vertexCount: presentationDiagnostics.vertexCount,
             activeCubeCount: presentationDiagnostics.activeCubeCount,
             vertexAllocator: presentationDiagnostics.vertexAllocator,
+            vertexCapacity: surfaceVertexCapacity(...(globalFineLevelSet?.sampleDimensions
+              ?? [solver.info.nx, solver.info.ny, solver.info.nz])),
+            activeCubeCapacity: activeCubeCapacity(surfaceVertexCapacity(...(globalFineLevelSet?.sampleDimensions
+              ?? [solver.info.nx, solver.info.ny, solver.info.nz]))),
           } : {}),
           ...(frontInterfacePixels > 0 ? { frontInterfaceBounds_m: [frontMinimum, frontMaximum] as const } : {}) };
       } finally {
@@ -1022,7 +1064,14 @@ async function smokeRenderHybridPresentation(
         retainedBackInterfaceHash: invalidB.backInterfaceHash,
         ...(invalidB.frontInterfaceBounds_m ? { retainedFrontInterfaceBounds_m: invalidB.frontInterfaceBounds_m } : {}),
       };
+      pipeline.setGlobalFineLevelSet(globalFineLevelSet);
     }
+    // Exercise the opposite camera hemisphere as a distinct closure oracle.
+    // Missing rear sheets and one-sided winding can be invisible from the
+    // default camera even when the scalar and pressure publications are valid.
+    packed.set([-1.55 * span, 1.12 * span, -1.72 * span, 0], 4);
+    device.queue.writeBuffer(uniformBuffer, 0, packed);
+    const reverse = await capture("Hybrid reverse-view closure smoke", revision + 2);
     if (process.env.FLUID_WATER_DIAGNOSTICS === "1") {
       await new Promise((resolve) => setTimeout(resolve, 25));
       console.info(JSON.stringify({ phase: "hybrid-water-diagnostics", ...pipeline.adaptiveRenderDiagnostics }));
@@ -1038,7 +1087,17 @@ async function smokeRenderHybridPresentation(
     if (rendererErrors.length > 0) {
       throw new Error(`RasterWaterPipeline production validation failed:\n${rendererErrors.join("\n")}`);
     }
-    return { ...validA, rendererValidationErrorCount: 0, rendererUncapturedErrorCount: 0,
+    return { ...validA, reverseView: {
+      frontInterfacePixels: reverse.frontInterfacePixels,
+      backInterfacePixels: reverse.backInterfacePixels,
+      pairedInterfacePixels: reverse.pairedInterfacePixels,
+      frontOnlyInterfacePixels: reverse.frontOnlyInterfacePixels,
+      backOnlyInterfacePixels: reverse.backOnlyInterfacePixels,
+      frontInterfaceHash: reverse.frontInterfaceHash,
+      backInterfaceHash: reverse.backInterfaceHash,
+      narrowVerticalSlits: reverse.narrowVerticalSlits,
+      ...(reverse.frontInterfaceBounds_m ? { frontInterfaceBounds_m: reverse.frontInterfaceBounds_m } : {}),
+    }, rendererValidationErrorCount: 0, rendererUncapturedErrorCount: 0,
       ...(globalFineAuthorityTransition ? { globalFineAuthorityTransition } : {}) };
   } finally {
     if (rendererValidationScopeActive) await device.popErrorScope().catch(() => null);
@@ -1340,9 +1399,10 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
     }
     const sampleWords = source.plan.maximumResidentBricks * source.plan.samplesPerBrick;
     const [hashBytes, metadataBytes, flagBytes, phiBytes, worklistBytes, coarseBytes, coarseControlBytes,
+      fineRestrictionBytes,
       topologyBytes, transportBytes, redistanceBytes, volumeBytes, faceBandBytes,
       faceBandTransitionBytes, faceBandTransientPowerBytes, faceBandPointFieldBytes, faceBandPowerPublicationBytes,
-      powerVelocityBytes, powerProjectionBytes, powerVelocitySampleBytes] = await Promise.all([
+      powerVelocityBytes, powerProjectionBytes, powerVelocitySampleBytes, mgpcgBytes] = await Promise.all([
       readBufferBinding(device, { buffer: source.hash }, source.plan.hashCapacity * 8),
       readBufferBinding(device, { buffer: source.metadata }, source.plan.maximumResidentBricks * 40),
       readBufferBinding(device, { buffer: source.flags }, sampleWords * 4),
@@ -1352,11 +1412,14 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
       solver.globalFineCoarseLevelSetControl
         ? readBufferBinding(device, { buffer: solver.globalFineCoarseLevelSetControl }, 64)
         : Promise.resolve(undefined),
+      solver.globalFineRestrictionControl
+        ? readBufferBinding(device, { buffer: solver.globalFineRestrictionControl }, 32)
+        : Promise.resolve(undefined),
       source.topologyControl
         ? readBufferBinding(device, { buffer: source.topologyControl }, 32)
         : Promise.resolve(undefined),
       solver.globalFineTransportControl
-        ? readBufferBinding(device, { buffer: solver.globalFineTransportControl }, 32)
+        ? readBufferBinding(device, { buffer: solver.globalFineTransportControl }, 64)
         : Promise.resolve(undefined),
       solver.globalFineRedistanceControl
         ? readBufferBinding(device, { buffer: solver.globalFineRedistanceControl }, 16)
@@ -1388,6 +1451,9 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
       solver.globalFinePowerVelocitySampleControl
         ? readBufferBinding(device, { buffer: solver.globalFinePowerVelocitySampleControl }, 32)
         : Promise.resolve(undefined),
+      (solver as GPUSolverInstance & { mgpcgControl?: GPUBuffer }).mgpcgControl
+        ? readBufferBinding(device, { buffer: (solver as GPUSolverInstance & { mgpcgControl: GPUBuffer }).mgpcgControl }, 64)
+        : Promise.resolve(undefined),
     ]);
     const compactSnapshot = {
       plan: source.plan,
@@ -1400,6 +1466,8 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
       coarseDirectory: new Uint32Array(coarseBytes.buffer, coarseBytes.byteOffset, coarseBytes.byteLength / 4),
       ...(coarseControlBytes ? { coarseControl: new Uint32Array(coarseControlBytes.buffer,
         coarseControlBytes.byteOffset, coarseControlBytes.byteLength / 4) } : {}),
+      ...(fineRestrictionBytes ? { fineRestrictionControl: new Uint32Array(fineRestrictionBytes.buffer,
+        fineRestrictionBytes.byteOffset, fineRestrictionBytes.byteLength / 4) } : {}),
       ...(topologyBytes ? { topologyControl: new Uint32Array(topologyBytes.buffer, topologyBytes.byteOffset,
         topologyBytes.byteLength / 4) } : {}),
       ...(transportBytes ? { transportControl: new Uint32Array(transportBytes.buffer, transportBytes.byteOffset,
@@ -1429,6 +1497,8 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
       ...(powerVelocitySampleBytes ? { powerVelocitySampleControl: new Uint32Array(
         powerVelocitySampleBytes.buffer, powerVelocitySampleBytes.byteOffset,
         powerVelocitySampleBytes.byteLength / 4) } : {}),
+      ...(mgpcgBytes ? { mgpcgControl: new Uint32Array(mgpcgBytes.buffer,
+        mgpcgBytes.byteOffset, mgpcgBytes.byteLength / 4) } : {}),
     };
     let reconstructed: ReturnType<typeof reconstructCompactOctreeOccupancyField>;
     try {
@@ -1514,7 +1584,7 @@ interface GPUSmokeResult {
   octreePowerFaceDiagnostics?: OctreePowerFaceDiagnostics;
   octreePowerTopologyDiagnostics?: OctreePowerTopologyDiagnostics;
   octreeMGPCGDiagnostics?: OctreeMGPCGDiagnostics;
-  hydrostaticPowerDiagnostics?: HydrostaticPowerDiagnostics;
+  powerProjectionDiagnostics?: PowerProjectionDiagnostics;
   stabilityEnvelope?: StabilityEnvelope;
   energyTrace: MechanicalEnergySample[];
   checkpoints: Array<{
@@ -1538,10 +1608,12 @@ interface OctreePowerTopologyDiagnostics {
     ownerNeighborhood?: Array<{ direction: number; probe: [number, number, number]; origin: [number, number, number]; size: number; invalid: boolean }> };
 }
 
-interface HydrostaticPowerDiagnostics {
+interface PowerProjectionDiagnostics {
   rowCount: number;
   faceCount: number;
   leafSizeHistogram: Record<string, number>;
+  transitionSizePairHistogram: Record<string, number>;
+  maximumTransitionSizeRatio: number;
   transitionFaceCount: number;
   obliqueTransitionFaceCount: number;
   maximumTransitionNormalVelocity_m_s: number;
@@ -1563,6 +1635,18 @@ interface HydrostaticPowerDiagnostics {
     relativeResidual: number;
     /** Residual obtained by substituting q=dt*|g|*(H-y) into the published rows. */
     analyticRelativeResidual: number;
+    /** A*q_analytic plus an independently reconstructed dt*g.n face-flux RHS. */
+    analyticGravityRelativeResidual: number;
+    /** Difference between assembled RHS and independent dt*g.n face fluxes. */
+    gravityRhsRelativeError: number;
+    analyticInteriorRelativeResidual: number;
+    analyticOpenBoundaryRelativeResidual: number;
+    analyticProjectionMaximum_m_s: number;
+    worstAnalyticFace: { face: number; negative: number; positive: number; flags: number; area: number;
+      inverseDistance: number; openFraction: number; normal: [number, number, number]; predicted: number;
+      pressureGradient: number; remaining: number };
+    worstAnalyticRow: { row: number; cell: number; size: number; centerY: number; residual: number;
+      rhs: number; gravityRhs: number; analyticApplied: number; diagonal: number; openBoundary: boolean };
   };
   velocityReconstruction?: {
     flags: number;
@@ -1594,12 +1678,12 @@ interface HydrostaticPowerDiagnostics {
   volumeDrift: number;
 }
 
-async function readHydrostaticPowerDiagnostics(
+async function readPowerProjectionDiagnostics(
   device: GPUDevice,
   solver: GPUSolverInstance,
   scene: SceneDescription,
   faceDiagnostics: OctreePowerFaceDiagnostics | undefined,
-): Promise<HydrostaticPowerDiagnostics | undefined> {
+): Promise<PowerProjectionDiagnostics | undefined> {
   const rowCount = faceDiagnostics?.rowCount ?? 0;
   const faceCount = faceDiagnostics?.faceCount ?? 0;
   const headersBuffer = solver.powerLeafHeaders;
@@ -1708,7 +1792,42 @@ async function readHydrostaticPowerDiagnostics(
       pressureReciprocityFailures += 1;
     }
   }
-  let residualSquared = 0, analyticResidualSquared = 0, rhsSquared = 0;
+  const gravityRhs = new Float64Array(rowCount);
+  const hasOpenBoundary = new Uint8Array(rowCount);
+  let analyticProjectionMaximum = 0;
+  let worstAnalyticFace = { face: 0, negative: 0, positive: 0, flags: 0, area: 0,
+    inverseDistance: 0, openFraction: 0, normal: [0, 0, 0] as [number, number, number],
+    predicted: 0, pressureGradient: 0, remaining: 0 };
+  for (let face = 0; face < faceCount; face += 1) {
+    const negative = faces[face * 8], positive = faces[face * 8 + 1], flags = faces[face * 8 + 3];
+    const area = faceFloats[face * 8 + 5];
+    if (negative >= rowCount || !Number.isFinite(area)) continue;
+    const closed = positive === OCTREE_POWER_INVALID_ROW && (flags & 1) !== 0 && (flags & 2) === 0;
+    if (positive === OCTREE_POWER_INVALID_ROW && (flags & 2) !== 0) hasOpenBoundary[negative] = 1;
+    const velocity = closed ? 0 : dt_s * (
+      scene.fluid.gravity_m_s2.x * normals[face * 4]
+      + scene.fluid.gravity_m_s2.y * normals[face * 4 + 1]
+      + scene.fluid.gravity_m_s2.z * normals[face * 4 + 2]
+    );
+    const flux = area * velocity;
+    gravityRhs[negative] += flux;
+    if (positive !== OCTREE_POWER_INVALID_ROW && positive < rowCount) gravityRhs[positive] -= flux;
+    const inverseDistance = faceFloats[face * 8 + 6], openFraction = faceFloats[face * 8 + 7];
+    const pressureGradient = closed ? 0 : ((positive === OCTREE_POWER_INVALID_ROW ? 0 : expectedPressure[positive])
+      - expectedPressure[negative]) * inverseDistance * openFraction;
+    const remaining = velocity - pressureGradient;
+    if (Math.abs(remaining) > analyticProjectionMaximum) {
+      analyticProjectionMaximum = Math.abs(remaining);
+      worstAnalyticFace = { face, negative, positive, flags, area, inverseDistance, openFraction,
+        normal: [normals[face * 4], normals[face * 4 + 1], normals[face * 4 + 2]],
+        predicted: velocity, pressureGradient, remaining };
+    }
+  }
+  let residualSquared = 0, analyticResidualSquared = 0, analyticGravityResidualSquared = 0;
+  let gravityRhsErrorSquared = 0, rhsSquared = 0, gravityRhsSquared = 0;
+  let analyticInteriorResidualSquared = 0, analyticOpenBoundaryResidualSquared = 0;
+  let worstAnalyticRow = { row: 0, cell: 0, size: 0, centerY: 0, residual: 0,
+    rhs: 0, gravityRhs: 0, analyticApplied: 0, diagonal: 0, openBoundary: false };
   for (let row = 0; row < rowCount; row += 1) {
     let applied = headerFloats[row * 12 + 4] * pressure[row];
     let analyticApplied = headerFloats[row * 12 + 4] * expectedPressure[row];
@@ -1726,11 +1845,26 @@ async function readHydrostaticPowerDiagnostics(
     // A*q = -storedFluxRhs.
     const rhs = headerFloats[row * 12 + 5], residual = applied + rhs;
     const analyticResidual = analyticApplied + rhs;
+    const analyticGravityResidual = analyticApplied + gravityRhs[row];
     residualSquared += residual * residual;
     analyticResidualSquared += analyticResidual * analyticResidual;
+    analyticGravityResidualSquared += analyticGravityResidual * analyticGravityResidual;
+    if (hasOpenBoundary[row] !== 0) analyticOpenBoundaryResidualSquared += analyticGravityResidual ** 2;
+    else analyticInteriorResidualSquared += analyticGravityResidual ** 2;
+    if (Math.abs(analyticGravityResidual) > Math.abs(worstAnalyticRow.residual)) {
+      const cell = headers[row * 12], size = headers[row * 12 + 3];
+      const y = Math.floor(cell / solver.info.nx) % solver.info.ny;
+      worstAnalyticRow = { row, cell, size, centerY: (y + 0.5 * size) * h,
+        residual: analyticGravityResidual, rhs, gravityRhs: gravityRhs[row], analyticApplied,
+        diagonal: headerFloats[row * 12 + 4], openBoundary: hasOpenBoundary[row] !== 0 };
+    }
+    gravityRhsErrorSquared += (rhs - gravityRhs[row]) ** 2;
     rhsSquared += rhs * rhs;
+    gravityRhsSquared += gravityRhs[row] ** 2;
   }
   let transitionFaceCount = 0, obliqueTransitionFaceCount = 0, invalidFaceCount = 0;
+  const transitionSizePairHistogram: Record<string, number> = {};
+  let maximumTransitionSizeRatio = 1;
   let maximumNormalLengthError = 0, maximumTransitionNormalVelocity = 0, maximumFaceNormalVelocity = 0;
   const faceIncidenceCount = new Uint32Array(faceCount), faceIncidenceSignSum = new Int32Array(faceCount);
   const integratedFlux = new Float64Array(rowCount);
@@ -1760,6 +1894,11 @@ async function readHydrostaticPowerDiagnostics(
     if (negative >= rowCount || positive === OCTREE_POWER_INVALID_ROW || positive >= rowCount
       || sizes[negative] === sizes[positive]) continue;
     transitionFaceCount += 1;
+    const smaller = Math.min(sizes[negative], sizes[positive]);
+    const larger = Math.max(sizes[negative], sizes[positive]);
+    const pair = `${smaller}:${larger}`;
+    transitionSizePairHistogram[pair] = (transitionSizePairHistogram[pair] ?? 0) + 1;
+    maximumTransitionSizeRatio = Math.max(maximumTransitionSizeRatio, larger / Math.max(1, smaller));
     maximumTransitionNormalVelocity = Math.max(maximumTransitionNormalVelocity, Math.abs(normalVelocity));
     const dominant = Math.max(Math.abs(nx), Math.abs(ny), Math.abs(nz));
     if (dominant < 1 - 1e-5) obliqueTransitionFaceCount += 1;
@@ -1793,7 +1932,8 @@ async function readHydrostaticPowerDiagnostics(
   const operatorControl = operatorControlBytes
     ? new Uint32Array(operatorControlBytes.buffer, operatorControlBytes.byteOffset, 16) : undefined;
   return {
-    rowCount, faceCount, leafSizeHistogram: histogram, transitionFaceCount, obliqueTransitionFaceCount,
+    rowCount, faceCount, leafSizeHistogram: histogram, transitionSizePairHistogram,
+    maximumTransitionSizeRatio, transitionFaceCount, obliqueTransitionFaceCount,
     maximumTransitionNormalVelocity_m_s: maximumTransitionNormalVelocity,
     topology: { validRowCount: validTopologyRows, invalidRowCount: invalidTopologyRows,
       rowsWithTetrahedra, transitionRowCount, transitionTetrahedronCount },
@@ -1803,7 +1943,13 @@ async function readHydrostaticPowerDiagnostics(
     pressureRows: { finiteRowCount: finitePressureRows, invalidRowCount: invalidPressureRows,
       entryCount, reciprocityFailureCount: pressureReciprocityFailures,
       relativeResidual: Math.sqrt(residualSquared / Math.max(rhsSquared, 1e-30)),
-      analyticRelativeResidual: Math.sqrt(analyticResidualSquared / Math.max(rhsSquared, 1e-30)) },
+      analyticRelativeResidual: Math.sqrt(analyticResidualSquared / Math.max(rhsSquared, 1e-30)),
+      analyticGravityRelativeResidual: Math.sqrt(analyticGravityResidualSquared / Math.max(gravityRhsSquared, 1e-30)),
+      gravityRhsRelativeError: Math.sqrt(gravityRhsErrorSquared / Math.max(gravityRhsSquared, 1e-30)),
+      analyticInteriorRelativeResidual: Math.sqrt(analyticInteriorResidualSquared / Math.max(gravityRhsSquared, 1e-30)),
+      analyticOpenBoundaryRelativeResidual: Math.sqrt(analyticOpenBoundaryResidualSquared / Math.max(gravityRhsSquared, 1e-30)),
+      analyticProjectionMaximum_m_s: analyticProjectionMaximum, worstAnalyticFace,
+      worstAnalyticRow },
     velocityReconstruction: velocityControl ? { flags: velocityControl[0], rowCount: velocityControl[2],
       faceCount: velocityControl[3], incidenceCount: velocityControl[4], reconstructedCount: velocityControl[5],
       fallbackCount: velocityControl[6] } : undefined,
@@ -1997,14 +2143,20 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     globalFineGenerationCheckpoints: result.checkpoints.map(({ time_s, globalFineGeneration, raster }) => ({
       time_s, globalFineGeneration,
       raster: raster ? { frontInterfacePixels: raster.frontInterfacePixels, backInterfacePixels: raster.backInterfacePixels,
+        pairedInterfacePixels: raster.pairedInterfacePixels,
+        frontOnlyInterfacePixels: raster.frontOnlyInterfacePixels,
+        backOnlyInterfacePixels: raster.backOnlyInterfacePixels,
+        narrowVerticalSlits: raster.narrowVerticalSlits,
+        reverseView: raster.reverseView,
+        vertexCount: raster.vertexCount, vertexAllocator: raster.vertexAllocator,
+        vertexCapacity: raster.vertexCapacity, activeCubeCount: raster.activeCubeCount,
+        activeCubeCapacity: raster.activeCubeCapacity,
         frontInterfaceHash: raster.frontInterfaceHash, backInterfaceHash: raster.backInterfaceHash,
         frontInterfaceBounds_m: raster.frontInterfaceBounds_m,
         surfaceGeometrySource: raster.surfaceGeometrySource,
         globalFineAuthorityLatch: raster.globalFineAuthorityLatch,
         globalFineCrossingPublished: raster.globalFineCrossingPublished,
         presentationFallbackActive: raster.presentationFallbackActive,
-        vertexCount: raster.vertexCount, activeCubeCount: raster.activeCubeCount,
-        vertexAllocator: raster.vertexAllocator,
         globalFineAuthorityTransition: raster.globalFineAuthorityTransition } : undefined,
     })),
     octreeFaceMirrorDiagnostics: result.octreeFaceMirrorDiagnostics,
@@ -2012,7 +2164,7 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     octreePowerFaceDiagnostics: result.octreePowerFaceDiagnostics,
     octreePowerTopologyDiagnostics: result.octreePowerTopologyDiagnostics,
     octreeMGPCGDiagnostics: result.octreeMGPCGDiagnostics,
-    hydrostaticPowerDiagnostics: result.hydrostaticPowerDiagnostics,
+    powerProjectionDiagnostics: result.powerProjectionDiagnostics,
     stabilityEnvelope: result.stabilityEnvelope,
     energyTraceSummary: energyTraceSummary(result.energyTrace),
     validationErrors: result.validationErrors
@@ -2269,7 +2421,8 @@ async function runGPU(
       continue;
     }
     steps += 1;
-    if (powerGenerationAuditRequested && method.id === "octree"
+    const auditThisPowerStep = steps % powerAuditEverySteps === 0 || requestedTime + 1e-9 >= target_s;
+    if (powerGenerationAuditRequested && auditThisPowerStep && method.id === "octree"
       && octreePowerProjectionOverride === "authoritative") {
       await device.queue.onSubmittedWorkDone();
       const audited = solver as GPUSolverInstance & {
@@ -2336,6 +2489,8 @@ async function runGPU(
           mgpcgResidualSquared: mgpcgDiagnostics?.residualSquared,
           mgpcgRhsSquared: mgpcgDiagnostics?.rhsSquared,
           mgpcgRelativeResidualSquared: mgpcgDiagnostics?.relativeResidualSquared,
+          mgpcgFirstFailureStage: mgpcg?.[10], mgpcgFirstFailureRow: mgpcg?.[11],
+          mgpcgFirstFailureValue: mgpcg ? floatBits(mgpcg[12]) : undefined,
           operatorAssemblyFlags: operator[10], operatorAssemblyFirstError: operator[11], operatorEntryCount: operator[5],
           operatorRowCount: operator[2], operatorFaceCount: operator[3], operatorIncidenceCount: operator[4] },
         descriptor: { rowCount: descriptor[0], validCount: descriptor[1], errorCount: descriptor[2],
@@ -2896,9 +3051,30 @@ async function runGPU(
   const octreeMGPCGDiagnostics = mgpcgControlBytes
     ? decodeOctreeMGPCGDiagnostics(new Uint32Array(mgpcgControlBytes.buffer, mgpcgControlBytes.byteOffset, 16))
     : undefined;
-  const hydrostaticPowerDiagnostics = scenarioId === "hydrostatic-power-two-level" && method.id === "octree"
-    ? await readHydrostaticPowerDiagnostics(device, solver, scene, octreePowerFaceDiagnostics)
+  const powerValidationScenario = scenarioId === "hydrostatic-power-two-level"
+    || scenarioId === "hydrostatic-power-large-offset"
+    || scenarioId === "minimal-power-dam-break";
+  const powerProjectionDiagnostics = powerValidationScenario && method.id === "octree"
+    ? await readPowerProjectionDiagnostics(device, solver, scene, octreePowerFaceDiagnostics)
     : undefined;
+  // The compact face mirror predates the authoritative power projection and
+  // can legitimately contain the transferred pre-projection zero field on
+  // the first dam-break step.  For paper-path QA, publish motion telemetry
+  // from the generalized power faces that actually drive Section 5.
+  if (powerProjectionDiagnostics) {
+    const powerSpeed_m_s = powerProjectionDiagnostics.maximumSpeed_m_s;
+    const finestCellSize_m = scene.voxelDomain?.finestCellSize_m
+      ?? Math.min(scene.container.width_m / info.nx, scene.container.height_m / info.ny,
+        scene.container.depth_m / info.nz);
+    const powerCfl = powerSpeed_m_s * powerProjectionDiagnostics.pressurePotential.dt_s
+      / finestCellSize_m;
+    info.maxSpeed_m_s = powerSpeed_m_s;
+    info.maxComponentCfl = powerCfl;
+    if (stabilityEnvelope) {
+      stabilityEnvelope.peakLiquidSpeed_m_s = Math.max(stabilityEnvelope.peakLiquidSpeed_m_s, powerSpeed_m_s);
+      stabilityEnvelope.peakComponentCfl = Math.max(stabilityEnvelope.peakComponentCfl, powerCfl);
+    }
+  }
   await device.queue.onSubmittedWorkDone();
   const result: GPUSmokeResult = {
     method: resultMethod, info, grid: [info.nx, info.ny, info.nz], matchedField: matched.field,
@@ -2911,7 +3087,7 @@ async function runGPU(
     initialGlobalFineGeneration, initialGlobalFineRaster, finalGlobalFineGeneration, finalGlobalFineRaster,
     octreeFaceMirrorDiagnostics,
     octreePowerFaceTransferDiagnostics, octreePowerFaceDiagnostics, octreePowerTopologyDiagnostics,
-    octreeMGPCGDiagnostics, hydrostaticPowerDiagnostics,
+    octreeMGPCGDiagnostics, powerProjectionDiagnostics,
     stabilityEnvelope, energyTrace, checkpoints
   };
   reportResult(scenarioId, result);
@@ -2991,7 +3167,9 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       fail((result.info.adaptiveFaceTransportedCount ?? 0) > 0, "octree compact transport processed zero faces");
       fail(result.info.adaptiveFaceTransportedCount === faces?.faceCount,
         `octree compact transport processed ${result.info.adaptiveFaceTransportedCount} of ${faces?.faceCount} faces`);
-      fail(Number.isFinite(result.info.maxComponentCfl ?? NaN) && (result.info.maxComponentCfl ?? 0) > 0,
+      fail(Number.isFinite(result.info.maxComponentCfl ?? NaN)
+        && ((scenarioId === "hydrostatic-power-two-level" || scenarioId === "hydrostatic-power-large-offset")
+          || (result.info.maxComponentCfl ?? 0) > 0),
         `octree compact transport reported invalid or zero CFL ${result.info.maxComponentCfl}`);
       if (result.info.adaptiveSurfacePageCapacity !== undefined) {
         fail(result.info.adaptiveSurfaceOverflow === false,
@@ -3224,20 +3402,28 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       fail(octree.info.globalFineLevelSetFactor === expectedFactor,
         `octree global fine factor ${octree.info.globalFineLevelSetFactor ?? "unknown"} differs from requested ${expectedFactor}`);
     }
-    if (scenarioId === "hydrostatic-power-two-level") {
-      const hydrostatic = octree.hydrostaticPowerDiagnostics;
-      fail(octree.grid.every((value) => value === 16),
-        `hydrostatic power grid ${octree.grid.join("x")} is not the intended 16x16x16 domain`);
-      fail(!!hydrostatic, "hydrostatic power diagnostics were not published");
-      const sizes = hydrostatic?.leafSizeHistogram ?? {};
-      fail((sizes["1"] ?? 0) > 0 && (sizes["2"] ?? 0) > 0,
-        `hydrostatic power grid did not contain both size-1 and size-2 liquid leaves: ${JSON.stringify(sizes)}`);
-      fail(Object.keys(sizes).every((size) => size === "1" || size === "2"),
-        `hydrostatic power grid contained an unexpected leaf size: ${JSON.stringify(sizes)}`);
-      fail((hydrostatic?.transitionFaceCount ?? 0) > 0,
-        "hydrostatic power grid did not publish a cross-scale generalized face");
-      fail((hydrostatic?.obliqueTransitionFaceCount ?? 0) > 0,
-        "hydrostatic power grid did not publish an oblique cross-scale power face");
+    const powerValidationScenario = scenarioId === "hydrostatic-power-two-level"
+      || scenarioId === "hydrostatic-power-large-offset"
+      || scenarioId === "minimal-power-dam-break";
+    if (powerValidationScenario) {
+      const power = octree.powerProjectionDiagnostics;
+      const expectedGrid = scenarioId === "hydrostatic-power-large-offset"
+        ? [32, 24, 16] : [16, 16, 16];
+      fail(octree.grid.every((value, axis) => value === expectedGrid[axis]),
+        `power validation grid ${octree.grid.join("x")} is not the intended ${expectedGrid.join("x")} domain`);
+      fail(!!power, "power projection diagnostics were not published");
+      const sizes = power?.leafSizeHistogram ?? {};
+      const expectedLeafSizes = ["1", "2"];
+      fail(expectedLeafSizes.every((size) => (sizes[size] ?? 0) > 0),
+        `power grid did not contain every expected liquid leaf size ${expectedLeafSizes.join(",")}: ${JSON.stringify(sizes)}`);
+      fail(Object.keys(sizes).every((size) => expectedLeafSizes.includes(size)),
+        `power grid contained an unexpected leaf size: ${JSON.stringify(sizes)}`);
+      fail((power?.transitionFaceCount ?? 0) > 0,
+        "power grid did not publish a cross-scale generalized face");
+      fail((power?.obliqueTransitionFaceCount ?? 0) > 0,
+        "power grid did not publish an oblique cross-scale power face");
+      fail((power?.maximumTransitionSizeRatio ?? Infinity) <= 2,
+        `power grid transition size ratio ${power?.maximumTransitionSizeRatio} exceeds 2:1`);
       fail((octree.info.quadtreeMaximumNeighborRatio ?? Infinity) <= 2,
         `hydrostatic octree violated 2:1 balance: ${octree.info.quadtreeMaximumNeighborRatio}`);
       fail(octree.info.globalFineFaceBandTransitionValid === true
@@ -3291,7 +3477,7 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       })}`);
       fail(octree.info.globalFineFaceBandPowerPublicationValid === true
         && octree.info.globalFineFaceBandPowerPublicationFlags === 0
-        && octree.info.globalFineFaceBandPowerPublicationFaces === hydrostatic?.faceCount
+        && octree.info.globalFineFaceBandPowerPublicationFaces === power?.faceCount
         && (octree.info.globalFineFaceBandPowerPublicationTargets ?? 0) > 0
         && octree.info.globalFineFaceBandPowerPublicationInterpolated
           === octree.info.globalFineFaceBandPowerPublicationTargets
@@ -3307,54 +3493,103 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         committed: octree.info.globalFineFaceBandPowerPublicationCommitted,
         powerGeneration: octree.info.globalFineFaceBandPowerGeneration,
       })}`);
-      fail(hydrostatic?.topology.invalidRowCount === 0
-        && hydrostatic.topology.validRowCount === hydrostatic.rowCount
-        && hydrostatic.topology.rowsWithTetrahedra === hydrostatic.rowCount
-        && hydrostatic.topology.transitionRowCount > 0
-        && hydrostatic.topology.transitionTetrahedronCount > 0,
-      `hydrostatic live Delaunay topology is incomplete: ${JSON.stringify(hydrostatic?.topology)}`);
-      fail(hydrostatic?.geometry.invalidFaceCount === 0
-        && hydrostatic.geometry.maximumNormalLengthError <= 2e-4,
-      `hydrostatic power-face geometry is invalid: ${JSON.stringify(hydrostatic?.geometry)}`);
-      fail(hydrostatic?.incidence.invalidEntryCount === 0
-        && hydrostatic.incidence.reciprocityFailureCount === 0,
-      `hydrostatic signed face incidence is not reciprocal: ${JSON.stringify(hydrostatic?.incidence)}`);
-      fail(hydrostatic?.pressureRows.invalidRowCount === 0
-        && hydrostatic.pressureRows.finiteRowCount === hydrostatic.rowCount
-        && hydrostatic.pressureRows.entryCount > 0
-        && hydrostatic.pressureRows.reciprocityFailureCount === 0
-        && hydrostatic.pressureRows.relativeResidual <= 5e-3,
-      `hydrostatic pressure CSR is invalid or does not satisfy A*q=-storedFluxRhs: ${JSON.stringify(hydrostatic?.pressureRows)}`);
-      fail((hydrostatic?.pressureRows.analyticRelativeResidual ?? Infinity) <= 0.02,
-      `analytic hydrostatic q does not satisfy the assembled GPU rows: ${JSON.stringify(hydrostatic?.pressureRows)}`);
-      fail(hydrostatic?.velocityReconstruction?.flags === 0x8000_0000
-        && hydrostatic.velocityReconstruction.rowCount === hydrostatic.rowCount
-        && hydrostatic.velocityReconstruction.faceCount === hydrostatic.faceCount
-        && hydrostatic.velocityReconstruction.incidenceCount === hydrostatic.incidence.incidenceCount
-        && hydrostatic.velocityReconstruction.reconstructedCount === hydrostatic.rowCount
-        && hydrostatic.velocityReconstruction.fallbackCount === 0,
-      `hydrostatic power velocity reconstruction is invalid: ${JSON.stringify(hydrostatic?.velocityReconstruction)}`);
-      fail(hydrostatic?.operator?.flags === 0xc000_0000
-        && hydrostatic.operator.firstError === OCTREE_POWER_INVALID_ROW
-        && hydrostatic.operator.rowCount === hydrostatic.rowCount
-        && hydrostatic.operator.faceCount === hydrostatic.faceCount
-        && hydrostatic.operator.incidenceCount === hydrostatic.incidence.incidenceCount
-        && hydrostatic.operator.entryCount > 0
-        && hydrostatic.operator.projectedCount === hydrostatic.faceCount,
-      `hydrostatic generalized pressure operator is invalid: ${JSON.stringify(hydrostatic?.operator)}`);
-      fail((hydrostatic?.pressurePotential.relativeL2Error ?? Infinity) <= 0.02,
-        `hydrostatic pressure-potential relative L2 error ${hydrostatic?.pressurePotential.relativeL2Error} exceeds 2%`);
-      fail((hydrostatic?.pressurePotential.maximumAbsoluteError_m2_s ?? Infinity)
-        <= 0.02 * (hydrostatic?.pressurePotential.maximumExpected_m2_s ?? 0),
-      `hydrostatic pressure-potential L-infinity error ${hydrostatic?.pressurePotential.maximumAbsoluteError_m2_s} exceeds 2% of ${hydrostatic?.pressurePotential.maximumExpected_m2_s}`);
-      fail((hydrostatic?.maximumTransitionNormalVelocity_m_s ?? Infinity) <= 0.002,
-        `hydrostatic transition faces generated ${hydrostatic?.maximumTransitionNormalVelocity_m_s} m/s (limit 0.002)`);
-      fail((hydrostatic?.maximumSpeed_m_s ?? Infinity) <= 0.002,
-        `hydrostatic final power faces generated ${hydrostatic?.maximumSpeed_m_s} m/s (limit 0.002)`);
-      fail((hydrostatic?.maximumDivergence_s ?? Infinity) <= 0.02,
-        `hydrostatic final power-cell divergence ${hydrostatic?.maximumDivergence_s} 1/s exceeds 0.02`);
-      fail(Math.abs(hydrostatic?.volumeDrift ?? Infinity) <= 1e-4,
-        `hydrostatic rest volume drift ${hydrostatic?.volumeDrift} exceeds 1e-4`);
+      fail(power?.topology.invalidRowCount === 0
+        && power.topology.validRowCount === power.rowCount
+        && power.topology.rowsWithTetrahedra === power.rowCount
+        && power.topology.transitionRowCount > 0
+        && power.topology.transitionTetrahedronCount > 0,
+      `live Delaunay topology is incomplete: ${JSON.stringify(power?.topology)}`);
+      fail(power?.geometry.invalidFaceCount === 0
+        && power.geometry.maximumNormalLengthError <= 2e-4,
+      `power-face geometry is invalid: ${JSON.stringify(power?.geometry)}`);
+      fail(power?.incidence.invalidEntryCount === 0
+        && power.incidence.reciprocityFailureCount === 0,
+      `signed face incidence is not reciprocal: ${JSON.stringify(power?.incidence)}`);
+      fail(power?.pressureRows.invalidRowCount === 0
+        && power.pressureRows.finiteRowCount === power.rowCount
+        && power.pressureRows.entryCount > 0
+        && power.pressureRows.reciprocityFailureCount === 0
+        && power.pressureRows.relativeResidual <= 5e-3,
+      `pressure CSR is invalid or does not satisfy A*q=-storedFluxRhs: ${JSON.stringify(power?.pressureRows)}`);
+      fail(power?.velocityReconstruction?.flags === 0x8000_0000
+        && power.velocityReconstruction.rowCount === power.rowCount
+        && power.velocityReconstruction.faceCount === power.faceCount
+        && power.velocityReconstruction.incidenceCount === power.incidence.incidenceCount
+        && power.velocityReconstruction.reconstructedCount === power.rowCount
+        && power.velocityReconstruction.fallbackCount === 0,
+      `power velocity reconstruction is invalid: ${JSON.stringify(power?.velocityReconstruction)}`);
+      fail(power?.operator?.flags === 0xc000_0000
+        && power.operator.firstError === OCTREE_POWER_INVALID_ROW
+        && power.operator.rowCount === power.rowCount
+        && power.operator.faceCount === power.faceCount
+        && power.operator.incidenceCount === power.incidence.incidenceCount
+        && power.operator.entryCount > 0
+        && power.operator.projectedCount === power.faceCount,
+      `generalized pressure operator is invalid: ${JSON.stringify(power?.operator)}`);
+      const hydrostaticScenario = scenarioId === "hydrostatic-power-two-level"
+        || scenarioId === "hydrostatic-power-large-offset";
+      if (hydrostaticScenario) {
+        fail((power?.pressureRows.analyticGravityRelativeResidual ?? Infinity) <= 0.02,
+        `analytic hydrostatic q does not satisfy the power operator with an independent gravity RHS: ${JSON.stringify(power?.pressureRows)}`);
+        fail((power?.pressureRows.gravityRhsRelativeError ?? Infinity) <= 2e-4,
+        `assembled power RHS differs from independent dt*g.n face fluxes: ${JSON.stringify(power?.pressureRows)}`);
+        fail((power?.pressurePotential.relativeL2Error ?? Infinity) <= 0.02,
+          `hydrostatic pressure-potential relative L2 error ${power?.pressurePotential.relativeL2Error} exceeds 2%`);
+        fail((power?.pressurePotential.maximumAbsoluteError_m2_s ?? Infinity)
+          <= 0.02 * (power?.pressurePotential.maximumExpected_m2_s ?? 0),
+        `hydrostatic pressure-potential L-infinity error ${power?.pressurePotential.maximumAbsoluteError_m2_s} exceeds 2% of ${power?.pressurePotential.maximumExpected_m2_s}`);
+        fail((power?.maximumTransitionNormalVelocity_m_s ?? Infinity) <= 0.002,
+          `hydrostatic transition faces generated ${power?.maximumTransitionNormalVelocity_m_s} m/s (limit 0.002)`);
+        fail((power?.maximumSpeed_m_s ?? Infinity) <= 0.002,
+          `hydrostatic final power faces generated ${power?.maximumSpeed_m_s} m/s (limit 0.002)`);
+        fail((power?.maximumDivergence_s ?? Infinity) <= 0.02,
+          `hydrostatic final power-cell divergence ${power?.maximumDivergence_s} 1/s exceeds 0.02`);
+        fail(Math.abs(power?.volumeDrift ?? Infinity) <= 1e-4,
+          `hydrostatic rest volume drift ${power?.volumeDrift} exceeds 1e-4`);
+      } else if (scenarioId === "minimal-power-dam-break") {
+        const dt_s = power?.pressurePotential.dt_s ?? Infinity;
+        const finestCellSize_m = createSmokeScenario(scenarioId).scene.voxelDomain?.finestCellSize_m ?? 0;
+        const powerCfl = (power?.maximumSpeed_m_s ?? Infinity) * dt_s / finestCellSize_m;
+        fail(Number.isFinite(power?.maximumSpeed_m_s) && (power?.maximumSpeed_m_s ?? 0) > 1e-3,
+          `minimal dam release is frozen: authoritative power speed ${power?.maximumSpeed_m_s} m/s`);
+        fail(Number.isFinite(powerCfl) && powerCfl > 0 && powerCfl <= 1,
+          `minimal dam authoritative power CFL ${powerCfl} is outside (0, 1]`);
+        fail((power?.maximumDivergence_s ?? Infinity) * dt_s <= 0.01,
+          `minimal dam per-step power-cell divergence ${(power?.maximumDivergence_s ?? Infinity) * dt_s} exceeds 0.01`);
+        fail(Math.abs(power?.volumeDrift ?? Infinity) <= 0.01,
+          `minimal dam final compact volume drift ${power?.volumeDrift} exceeds 1%`);
+        const envelope = octree.stabilityEnvelope;
+        fail((envelope?.maximumExactVolumeDrift ?? Infinity) <= 0.01,
+          `minimal dam transient exact-volume drift ${envelope?.maximumExactVolumeDrift} exceeds 1%`);
+        fail((envelope?.maximumComponentCount ?? Infinity) === 1
+          && (envelope?.minimumDominantComponentFraction ?? -Infinity) >= 0.98,
+        `minimal dam liquid disconnected: ${JSON.stringify({
+          maximumComponentCount: envelope?.maximumComponentCount,
+          minimumDominantComponentFraction: envelope?.minimumDominantComponentFraction,
+        })}`);
+        const generation = octree.finalGlobalFineGeneration;
+        fail(generation?.transportCommitted === true
+          && (generation.transportProcessed ?? 0) > 0
+          && generation.transportDepartureOutsideBand === 0
+          && generation.transportNonfiniteVelocity === 0
+          && generation.transportFaceBandUnavailable === 0
+          && generation.transportVelocityUnavailable === 0
+          && (generation.transportMaximumDisplacementFineCells ?? Infinity) <= 1,
+        `minimal dam Section 5 transport is incomplete: ${JSON.stringify({
+          committed: generation?.transportCommitted,
+          processed: generation?.transportProcessed,
+          departureOutsideBand: generation?.transportDepartureOutsideBand,
+          nonfiniteVelocity: generation?.transportNonfiniteVelocity,
+          faceBandUnavailable: generation?.transportFaceBandUnavailable,
+          velocityUnavailable: generation?.transportVelocityUnavailable,
+          maximumDisplacementFineCells: generation?.transportMaximumDisplacementFineCells,
+        })}`);
+        fail(generation?.topologyRolledBack === false && generation?.topologyFinalizeReason === 0,
+          `minimal dam final topology publication rolled back: ${JSON.stringify({
+            rolledBack: generation?.topologyRolledBack,
+            finalizeReason: generation?.topologyFinalizeReason,
+          })}`);
+      }
     }
     if (globalFineGenerationTransitionRequested) {
       const container = createSmokeScenario(scenarioId).scene.container;
@@ -3368,14 +3603,34 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
           && bounds![0][1] >= -tolerance && bounds![1][1] <= container.height_m + tolerance
           && bounds![0][2] >= -0.5 * container.depth_m - tolerance
           && bounds![1][2] <= 0.5 * container.depth_m + tolerance;
+        const pairedFraction = (value: {
+          frontInterfacePixels: number; backInterfacePixels: number; pairedInterfacePixels: number;
+        } | undefined) => (value?.pairedInterfacePixels ?? 0)
+          / Math.max(1, (value?.frontInterfacePixels ?? 0) + (value?.backInterfacePixels ?? 0)
+            - (value?.pairedInterfacePixels ?? 0));
+        const reverse = observed?.reverseView;
         fail((observed?.frontInterfacePixels ?? 0) > 0 && (observed?.backInterfacePixels ?? 0) > 0,
           `${label} did not rasterize a closed front/back interface: ${JSON.stringify(observed)}`);
+        fail(pairedFraction(observed) >= 0.7,
+          `${label} front/back intersection Jaccard coverage is below 70%: ${JSON.stringify(observed)}`);
+        fail((reverse?.frontInterfacePixels ?? 0) > 0 && (reverse?.backInterfacePixels ?? 0) > 0
+          && pairedFraction(reverse) >= 0.7,
+        `${label} reverse view exposes missing or one-sided water faces: ${JSON.stringify(reverse)}`);
+        if (scenarioId === "minimal-power-dam-break") {
+          fail(observed?.narrowVerticalSlits.count === 0,
+            `${label} contains narrow vertical surface slits: ${JSON.stringify(observed?.narrowVerticalSlits)}`);
+          fail(reverse?.narrowVerticalSlits.count === 0,
+            `${label} reverse view contains narrow vertical surface slits: ${JSON.stringify(reverse?.narrowVerticalSlits)}`);
+        }
         fail(observed?.surfaceGeometrySource === "global-fine-coarse"
           && observed.globalFineCrossingPublished === true
           && observed.presentationFallbackActive === false
           && (observed.globalFineAuthorityLatch ?? 0) !== 0
           && (observed.vertexCount ?? 0) > 0
-          && (observed.activeCubeCount ?? 0) > 0,
+          && observed.vertexAllocator === observed.vertexCount
+          && (observed.activeCubeCount ?? 0) > 0
+          && (observed.vertexCount ?? Infinity) <= (observed.vertexCapacity ?? -Infinity)
+          && (observed.activeCubeCount ?? Infinity) <= (observed.activeCubeCapacity ?? -Infinity),
         `${label} was not extracted from the clean global fine/coarse publication: ${JSON.stringify(observed)}`);
         fail(boundsInsideTank, `${label} produced non-finite or out-of-tank interface bounds: ${JSON.stringify(bounds)}`);
         const transition = observed?.globalFineAuthorityTransition;
@@ -3403,6 +3658,15 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         && (generation?.positiveValidSamples ?? 0) > 0,
         `octree final global-fine generation does not contain a finite signed interface: ${JSON.stringify(generation)}`);
       assertAuthoritativeRaster("octree final raster", generation?.generation, raster);
+      if (scenarioId === "minimal-power-dam-break" && minimumDamSpread_m !== undefined) {
+        const initialBounds = octree.initialGlobalFineRaster?.frontInterfaceBounds_m;
+        const finalBounds = raster?.frontInterfaceBounds_m;
+        const lateralSpread_m = initialBounds && finalBounds
+          ? Math.max(finalBounds[1][0] - initialBounds[1][0], finalBounds[1][2] - initialBounds[1][2])
+          : -Infinity;
+        fail(lateralSpread_m >= minimumDamSpread_m,
+          `minimal dam interface spread ${lateralSpread_m} m is below ${minimumDamSpread_m} m: ${JSON.stringify({ initialBounds, finalBounds })}`);
+      }
       if (rasterCheckpointRequested) for (const checkpoint of octree.checkpoints) {
         const checkpointGeneration = checkpoint.globalFineGeneration;
         fail(checkpointGeneration?.publicationValid === true
