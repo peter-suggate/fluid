@@ -91,7 +91,14 @@ test("static SVO startup bypasses the simulation solver and t=0 raster gate", ()
     "fluid-disabled scenes must request their renderer-owned GPU source even under the CPU reference method");
   assert.match(renderer, /if\(!canInitializeGPUSceneSource\(scene,config\.methodId\)\)return/,
     "fluid-enabled scenes without a GPU solver factory must remain fail-closed");
-  assert.match(renderer, /if\(staticRenderScene\)this\.onStatus\(\{state:"ready",label:"Static SVO renderer ready"/);
+  assert.doesNotMatch(renderer, /if\(staticRenderScene\)this\.onStatus\(\{state:"ready",label:"Static SVO renderer ready"/,
+    "sparse-world attachment must not declare the garden visible before the dry renderer presents");
+  assert.match(renderer, /this\.pendingStaticSvoPresentation=\{solver,solverGeneration:this\.gpuFluidGeneration,requestGeneration:generation,startedAt_ms,attached:false,submitted:false\}/,
+    "static startup must open a separate presentation gate");
+  assert.match(renderer, /pendingStaticSvo\.attached[^]*pendingStaticSvo\.solver === readyGPUFluid[^]*svoEncoded/,
+    "the first static presentation must require an attached source and successful SVO encoding");
+  assert.match(renderer, /queue\.onSubmittedWorkDone\(\)\.then\([^]*settleStaticSvoPresentation\(initialStaticSvoSubmission\)/,
+    "ready must be published only after the first sparse garden frame completes");
   assert.doesNotMatch(staticSource, /WebGPUUniformEulerianSolver/);
   assert.match(staticSource, /fluid authority intentionally bypassed/);
   assert.match(staticSource, /new OctreeSparseBrickWorld/);
