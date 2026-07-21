@@ -89,6 +89,22 @@ test("near-to-far traversal oracle returns canonical terminal bounds from either
   }
 });
 
+test("shared-face rays retain canonical lower-slot tie breaking in both x directions", () => {
+  const plan = planSvoWideFanout({ sourceGeneration: 1, generation: 2, maximumDepth: 2, terminals: [
+    { sourceNodeIndex: 10, sourceLeafIndex: 10, level: 2, coordinate: [0, 0, 0] },
+    { sourceNodeIndex: 20, sourceLeafIndex: 20, level: 2, coordinate: [0, 1, 0] },
+  ] });
+  const mapping = { origin: [0, 0, 0] as const, cellSize: [1, 1, 1] as const, brickSize: 4 as const, maximumDepth: 2 };
+  for (const ray of [
+    { origin: [-1, 4, 2] as const, direction: [1, 0, 0] as const },
+    { origin: [17, 4, 2] as const, direction: [-1, 0, 0] as const },
+  ]) {
+    const result = traverseSvoWideFanout(ray, plan, mapping);
+    assert.equal(result.status, "hit");
+    if (result.status === "hit") assert.deepEqual(result.coordinate, [0, 0, 0]);
+  }
+});
+
 test("traversal reports miss and bounded-work failures distinctly", () => {
   const plan = planSvoWideFanout({ sourceGeneration: 1, generation: 2, maximumDepth: 4, terminals: [
     { sourceNodeIndex: 1, level: 4, coordinate: [0, 0, 0] },

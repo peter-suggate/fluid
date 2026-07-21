@@ -149,6 +149,13 @@ function slotIndex(x: number, y: number, z: number): number {
   return x + y * 4 + z * 16;
 }
 
+function canonicalSlotTieKey(slot: number): number {
+  const [x, y, z] = svoWideSlotCoordinate(slot);
+  const parentOctant = (x >>> 1) | ((y >>> 1) << 1) | ((z >>> 1) << 2);
+  const childOctant = (x & 1) | ((y & 1) << 1) | ((z & 1) << 2);
+  return parentOctant * 8 + childOctant;
+}
+
 export function svoWideSlotCoordinate(slot: number): SvoWideCoordinate {
   if (!Number.isInteger(slot) || slot < 0 || slot >= SVO_WIDE_FANOUT) throw new RangeError("Wide slot must be 0..63");
   return [slot & 3, (slot >> 2) & 3, (slot >> 4) & 3];
@@ -258,8 +265,6 @@ export function planSvoWideFanout(input: SvoWideFanoutPlanInput): SvoWideFanoutP
     }
   }
   const mutablePages = [...pageByKey.values()].sort((a, b) => a.level - b.level || (a.morton < b.morton ? -1 : a.morton > b.morton ? 1 : 0));
-  const pageIndex = new Map(mutablePages.map((page, index) => [pageKey(page.level, page.coordinate), index]));
-
   for (let index = 1; index < mutablePages.length; index += 1) {
     const child = mutablePages[index];
     const parentLevel = child.level - 2;
@@ -361,12 +366,12 @@ export function traverseSvoWideFanout(
   if (!Number.isInteger(maximumPageVisits) || maximumPageVisits < 1 || !Number.isInteger(stackCapacity) || stackCapacity < 1) {
     throw new RangeError("Wide traversal budgets must be positive integers");
   }
-  type Candidate = { kind: "page"; pageIndex: number; enter: number; exit: number }
-    | { kind: "terminal"; descriptor: SvoWideTerminalDescriptor; coordinate: SvoWideCoordinate; enter: number; exit: number };
+  type Candidate = { kind: "page"; pageIndex: number; slot: number; enter: number; exit: number }
+    | { kind: "terminal"; descriptor: SvoWideTerminalDescriptor; coordinate: SvoWideCoordinate; slot: number; enter: number; exit: number };
   const rootBounds = canonicalBounds(0, [0, 0, 0], mapping);
   const rootInterval = rayAabb(ray, rootBounds[0], rootBounds[1]);
   if (!rootInterval) return { status: "miss", pageVisits: 0, descriptorTests: 0 };
-  const stack: Candidate[] = [{ kind: "page", pageIndex: 0, enter: rootInterval[0], exit: rootInterval[1] }];
+  const stack: Candidate[] = [{ kind: "page", pageIndex: 0, slot: 0, enter: rootInterval[0], exit: rootInterval[1] }];
   let pageVisits = 0;
   let descriptorTests = 0;
   while (stack.length > 0) {
@@ -387,17 +392,18 @@ export function traverseSvoWideFanout(
       const slotBounds = canonicalBounds(page.level + 2, slotCoordinate, mapping);
       const interval = rayAabb(ray, slotBounds[0], slotBounds[1]);
       if (!interval) continue;
-      if (descriptor.kind === "page") next.push({ kind: "page", pageIndex: descriptor.pageIndex, enter: interval[0], exit: interval[1] });
+      if (descriptor.kind === "page") next.push({ kind: "page", pageIndex: descriptor.pageIndex, slot: descriptor.slot, enter: interval[0], exit: interval[1] });
       else {
         const divisor = 2 ** ((page.level + 2) - descriptor.sourceLevel);
         const terminalCoordinate = slotCoordinate.map((value) => Math.floor(value / divisor)) as unknown as SvoWideCoordinate;
         const terminalBounds = canonicalBounds(descriptor.sourceLevel, terminalCoordinate, mapping);
         const terminalInterval = rayAabb(ray, terminalBounds[0], terminalBounds[1]);
-        if (terminalInterval) next.push({ kind: "terminal", descriptor, coordinate: terminalCoordinate,
+        if (terminalInterval) next.push({ kind: "terminal", descriptor, coordinate: terminalCoordinate, slot: descriptor.slot,
           enter: terminalInterval[0], exit: terminalInterval[1] });
       }
     }
-    next.sort((a, b) => b.enter - a.enter || (a.kind === "terminal" ? 1 : 0) - (b.kind === "terminal" ? 1 : 0));
+    next.sort((a, b) => b.enter - a.enter || b.exit - a.exit
+      || canonicalSlotTieKey(b.slot) - canonicalSlotTieKey(a.slot));
     if (stack.length + next.length > stackCapacity) return { status: "stack-overflow", pageVisits, descriptorTests };
     stack.push(...next);
   }

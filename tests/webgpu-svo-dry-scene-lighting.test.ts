@@ -8,7 +8,12 @@ import {
   SVO_DRY_SCENE_SHADOW_BIAS_CELLS,
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
-import { SVO_SHADOW_HISTORY_WARMUP_FRAMES, svoShadowTemporalFrame } from "../lib/webgpu-renderer";
+import {
+  SVO_CAMERA_CHANGING_FRAME,
+  SVO_SHADOW_HISTORY_WARMUP_FRAMES,
+  svoDrySceneTemporalFrame,
+  svoShadowTemporalFrame,
+} from "../lib/webgpu-renderer";
 
 const drySceneSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
@@ -63,9 +68,15 @@ test("checkerboard hard visibility is enabled only with temporal reconstruction"
   assert.equal(svoShadowTemporalFrame(true, 1, 12), -1);
   assert.equal(svoShadowTemporalFrame(true, 2, 12), 12);
   assert.equal(svoShadowTemporalFrame(false, 20, 12), -1);
+  assert.equal(svoDrySceneTemporalFrame(12, 0), SVO_CAMERA_CHANGING_FRAME);
+  assert.equal(svoDrySceneTemporalFrame(-1, 2), -1,
+    "a settled camera remains distinguishable when checkerboard shadows are disabled");
+  assert.equal(svoDrySceneTemporalFrame(12, 2), 12);
   assert.match(rendererSource, /shadowStabilityKey !== this\.svoShadowStabilityKey[^]*this\.svoDryScenePipeline\?\.invalidateTemporalHistory\(\)/,
     "camera, body, scene, or diagnostic changes must force a full-rate shadow frame and discard stale shadows");
   assert.match(rendererSource, /shadowTemporalFrame = svoShadowTemporalFrame\(checkerboardShadowsEligible, this\.svoShadowStableFrames, this\.presentationFrameIndex\)/);
+  assert.match(rendererSource, /cameraStabilityKey !== this\.svoCameraStabilityKey[^]*this\.svoCameraStableFrames = 0[^]*drySceneTemporalFrame = svoDrySceneTemporalFrame\(shadowTemporalFrame, this\.svoCameraStableFrames\)/,
+    "camera movement must be detected from the view basis, independently of pointer state");
   assert.match(svoDrySceneShader, /temporalShadowSampling=uniforms\.viewport\.w>=0\.0&&\(dry\.materialPublication\.w&2u\)!=0u/);
   assert.match(svoDrySceneShader, /shadowParity==0u/);
   assert.match(svoDrySceneShader, /dryShadowTracingEnabled==0u\)\{return vec3f\(1\.0\);\}/);
@@ -79,6 +90,10 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
     "the renderer-local unit-vector path must preserve the shared projected-cell bias and original endpoint");
   assert.match(svoDrySceneShader, /let ray=dryBiasedVisibilityRayUnit\(position,geometricNormal,towardLight,maximumDistance/,
     "hard shadows must avoid renormalizing already-unit light directions and surface normals");
+  assert.match(svoDrySceneShader, /dryConeVisibility\(ray\.origin_m,towardLight,\.065,ray\.tMax_m\)[^]*rigidBlocker\.t<ray\.tMax_m/,
+    "cone and rigid visibility must stop at the same bias-adjusted emitter endpoint as exact traversal");
+  assert.match(svoDrySceneShader, /visibilityDistance=select\(distance,max\(0\.0,distance-light\.shape\.x\),light\.identity\.x==SVO_LIGHT_POINT\)/,
+    "point attenuation uses center distance while visibility stops at the conservative emitter surface");
   assert.match(svoDrySceneShader, /fn directionalLightSceneExitDistance/);
   assert.match(svoDrySceneShader, new RegExp(
     `SvoVisibilityBudget\\(${SVO_VISIBILITY_LIMITS.nodeVisits}u,${SVO_VISIBILITY_LIMITS.leafVisits}u,${SVO_VISIBILITY_LIMITS.workItems}u,4u\\)`,

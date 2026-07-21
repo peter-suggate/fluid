@@ -97,6 +97,47 @@ test("missing or stale node-mip samples enter exact bounded visibility rather th
     "cone use is fenced to the matching structural static-geometry revision");
 });
 
+test("cone steps reuse a matching mip page and search only on page, LOD, or generation changes", () => {
+  const lookupStart = svoDrySceneShader.indexOf("fn dryNodeMipAt(");
+  const lookupEnd = svoDrySceneShader.indexOf("struct DryConeVisibility", lookupStart);
+  const lookup = svoDrySceneShader.slice(lookupStart, lookupEnd);
+  assert.match(svoDrySceneShader, /struct DryNodeMipPageCache\{coordinate:vec3u,level:u32,pageOrigin:vec3u,generation:u32,resident:u32\}/);
+  assert.match(lookup, /pageCache:ptr<function,DryNodeMipPageCache>/);
+  assert.match(lookup, /generation!=dry\.nodeMip\.x\|\|\(\*pageCache\)\.level!=level\|\|any\(\(\*pageCache\)\.coordinate!=pageCoordinate\)/);
+  assert.match(lookup, /\*pageCache=DryNodeMipPageCache\(pageCoordinate,level,vec3u\(0u\),dry\.nodeMip\.x,0u\);let pageIndex=dryNodeMipFind\(level,pageCoordinate\)/,
+    "the queried key is cached as non-resident before searching so failed searches are reusable");
+  assert.match(lookup, /pageIndex!=0xffffffffu[^]*\*pageCache=DryNodeMipPageCache\(pageCoordinate,level,entry\.pageOrigin,entry\.generation,1u\)/);
+  assert.match(lookup, /if\(\(\*pageCache\)\.resident==0u\)\{return DryNodeMipLookup\(SvoNodeMipSample\(0\.0,0\.0,0\.0,0\.0\),1u\);\}/,
+    "cached sparse-directory misses sample as transparent without another search");
+  assert.match(svoDrySceneShader, /var pageCache=DryNodeMipPageCache\([^]*dryNodeMipAt\([^]*&pageCache\)/);
+
+  const coherentSteps = Array.from({ length: 48 }, (_, step) => ({
+    generation: 17,
+    level: 0,
+    coordinate: [Math.floor((0.75 + step) / 8), 0, 0] as const,
+  }));
+  let searches = 0;
+  let previous: (typeof coherentSteps)[number] | undefined;
+  for (const step of coherentSteps) {
+    if (!previous || previous.generation !== step.generation || previous.level !== step.level
+      || previous.coordinate.some((component, axis) => component !== step.coordinate[axis])) searches += 1;
+    previous = step;
+  }
+  assert.equal(searches, 6, "an axis-aligned 48-step path searches once per crossed 8-voxel page");
+  assert.equal(coherentSteps.length - searches, 42);
+  assert.equal(1 - searches / coherentSteps.length, 0.875, "the representative path eliminates 87.5% of directory searches");
+
+  const absentPageSteps = Array.from({ length: 12 }, () => ({ generation: 17, level: 0, coordinate: [9, 4, 2] as const }));
+  searches = 0;
+  let absentPrevious: (typeof absentPageSteps)[number] | undefined;
+  for (const step of absentPageSteps) {
+    if (!absentPrevious || absentPrevious.generation !== step.generation || absentPrevious.level !== step.level
+      || absentPrevious.coordinate.some((component, axis) => component !== step.coordinate[axis])) searches += 1;
+    absentPrevious = step;
+  }
+  assert.equal(searches, 1, "repeated samples in one non-resident sparse page reuse the negative lookup");
+});
+
 test("sparse-brick world exposes, accounts, and retires its optional node-mip capability", () => {
   assert.match(sourceAbi, /nodeMipPyramid\?: import\("\.\/webgpu-svo-node-mip-pyramid"\)\.WebGpuSvoNodeMipVisibleGeneration/);
   assert.match(worldSource, /nodeMipPyramid: this\.nodeMipPyramid\?\.visibleGeneration\(\)/);
