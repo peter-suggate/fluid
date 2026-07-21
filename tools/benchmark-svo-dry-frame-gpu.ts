@@ -62,8 +62,16 @@ const outPath = process.env.FLUID_SVO_DRY_FRAME_OUT ?? "/tmp/svo-bench/baseline.
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
-/** M1 Max 1280x720 scale-1 baseline; scale 1 must keep the WGSL byte-identical. */
-const REFERENCE_IMAGE_HASH = 0xa37d0cdd;
+/**
+ * M1 Max 1280x720 scale-1 baseline; scale 1 must keep the WGSL byte-identical.
+ * Re-baselined for the band-limited cone LOD blend
+ * (SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH): the marcher now blends the two
+ * bracketing mip levels only inside the trailing fract(lod) transition band
+ * (C0 at both band edges) instead of over the full fract range, which alters
+ * bits everywhere while keeping the cone-banding fix (no rings, no
+ * self-occlusion bands, no hard emitter disc).
+ */
+const REFERENCE_IMAGE_HASH = 0x211f5930;
 const modulePath = process.env.WEBGPU_NODE_MODULE
   ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
 assert.ok(Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0);

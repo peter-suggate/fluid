@@ -32,8 +32,9 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
     assert.match(reduced, /if\(weightSum<0\.05\)\{dryConeFallback=1u;return;\}/,
       "silhouette pixels below the guidance-weight threshold must fall back to exact inline cones");
     // Deliberate cone-banding fix: shadow-cone origins escape the receiver's
-    // trilinear support along the geometric normal before marching.
-    assert.match(reduced, /let cone=dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m,towardLight,\.065,max\(0\.0,ray\.tMax_m-coneEscape_m\*dot\(geometricNormal,towardLight\)\)\)/,
+    // trilinear support along the geometric normal, and finite emitters clear
+    // the march end by one cone-support width before marching.
+    assert.match(reduced, /let cone=dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m,towardLight,\.065,coneMax_m,geometricNormal,finiteDistance_m>0\.0\)/,
       "the inline shadow cone must remain the fallback for fallback-band pixels and lights past slot 2");
     assert.match(reduced, /dryCurrentLightSlot<3u/,
       "lights at slot 3 and above must keep inline full-resolution cones (documented cap)");

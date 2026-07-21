@@ -229,6 +229,31 @@ export const SVO_DRY_SCENE_SHADOW_BIAS_CELLS = 0.02;
  * 0.75 measurably lifted mushroom-stem contact shadows).
  */
 export const SVO_DRY_SCENE_CONE_SHADOW_NORMAL_ESCAPE_CELLS = 0.5;
+/**
+ * Fine cells cleared between a FINITE emitter's near surface and a shadow
+ * cone's march endpoint. The march used to end exactly at the emitter surface,
+ * so the last samples' trilinear/mip support read the emitter's own voxelized
+ * solid coverage, and the accumulated amount aliased with the receiver's
+ * distance modulo the step size (concentric rings around point lights, plus a
+ * hard-edged bright disc where the march was skipped entirely). The clearance
+ * is a FIXED cell count so the endpoint - and with it the light-anchored
+ * ladder the marcher walks over the far half of the cone - stays world-locked
+ * around the emitter for every receiver.
+ */
+export const SVO_DRY_SCENE_CONE_EMITTER_CLEARANCE_CELLS = 3;
+/**
+ * fract(lod) width of the transition band in which the cone marcher blends the
+ * two bracketing mip levels; below the band a single fine-level fetch suffices.
+ * The concentric-ring artifact came from C0 discontinuity at integer LOD
+ * switches, not from lack of full-range blending, so the band's blend weight
+ * ramps 0 at the band start to 1 at fract==1 (where it equals the next level's
+ * band-start value): coverage stays continuous at both band edges while ~70%
+ * of steps skip the second atlas fetch and its directory/page-cache work.
+ * Measured (M1 Max, garden 1280x720): full-range blending cost scale-1
+ * 40.6 ms / scale-0.5 16.0 ms; width 0.3 recovers most of the two-fetch
+ * regression with no visible banding (0.5 measured within noise of 0.3).
+ */
+export const SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH = 0.3;
 /** Bound direct-light work independently from the producer's 32-record capacity. */
 export const SVO_DRY_SCENE_MAX_SHADED_LIGHTS = 8;
 /** Two fixed shape samples are stable across frames and keep total visibility work bounded. */
@@ -635,21 +660,70 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
 }
 `
     : "";
-  // Both variants march the identical continuous-LOD cone: coverage is fetched
-  // from BOTH mip levels bracketing the fractional LOD and blended by
-  // fract(lod), and the step width follows the continuous cone diameter. A
-  // single floor(lod) fetch with a floored step width made accumulated opacity
-  // jump wherever floor(lod) incremented along the cone, which rendered as
-  // concentric isodistance rings around point lights. The elision variant keeps
-  // the identical march (step distances, stepIndex sequence, dryMipSteps
-  // accounting, termination) and only replaces the fine-level fetch whose
-  // trilinear support is provably inside a zero region with the arithmetically
-  // identical zero sample: max(0,0*.15)=0 contributes nothing to the blend.
+  // Both variants march the identical continuous-LOD cone: the step width
+  // follows the continuous cone diameter, and coverage is C0-continuous in
+  // lod. A single floor(lod) fetch with a floored step width made accumulated
+  // opacity jump wherever floor(lod) incremented along the cone, which
+  // rendered as concentric isodistance rings around point lights. Continuity
+  // is restored by blending the two bracketing mip levels — but only inside
+  // the trailing fract(lod) transition band (SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH
+  // wide): the blend weight ramps from 0 at the band start to 1 at
+  // fract(lod)==1, where the blended value equals the next level's band-start
+  // value, so coverage is continuous at both band edges. Below the band a
+  // single fine-level fetch suffices, which skips the second atlas fetch and
+  // its directory/page-cache work on most steps (full-range blending doubled
+  // per-step fetches everywhere and cost +35% frame time).
+  //
+  // surfaceNormal (zero to disable, as AO and the standalone benchmark do)
+  // marks the receiver's tangent plane at the march origin: coverage whose
+  // trilinear support still straddles that plane is the receiver's own
+  // voxelized surface, and accumulating it self-shadows in bands that track
+  // the sub-voxel phase of the analytic surface (terrain height isolines
+  // rendered as concentric rings, latitude bands on mushroom caps). Each
+  // sample's coverage is therefore scaled by its plane clearance over the
+  // sample's own support width, ramping back to full occlusion by 24 fine
+  // voxels of marched distance so genuine distant blockers keep their shadows.
+  // Shadow cones (surfaceNormal set) refine their step width geometrically as
+  // the march approaches its endpoint and fade the trailing 1.5 diameters:
+  // every cone toward a light converges on the same emitter neighbourhood, so
+  // with diameter-sized steps the number of samples landing inside geometry
+  // near the endpoint (the receiver's distance modulo the step size) is
+  // quantized, which rendered as concentric rings around point lights. Zeno
+  // steps shrink the per-sample opacity near the endpoint until the banding
+  // amplitude vanishes while the .25-voxel step floor bounds the extra work.
+  const stepWidthExpression = /* wgsl */ `let remaining=maximumDistance_m-distance;let stepWidth=min(diameter,remaining);`;
+  const selfCoverageWeight = /* wgsl */ `var selfWeight=1.0;if(shadowCone){selfWeight=max(clamp(dot(position-origin_m,surfaceNormal)/(1.5*diameter)-1.0,0.0,1.0),clamp((distance-12.0*minimumVoxel)/(12.0*minimumVoxel),0.0,1.0))*clamp(remaining/(1.5*diameter),0.0,1.0);}`;
+  const bandStart = 1 - SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH;
+  const blendWeightExpression = /* wgsl */ `let blendWeight=clamp((fract(lod)-${bandStart})*${(1 / SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH).toFixed(8)},0.0,1.0);`;
+  const coarseBlendedCoverage = /* wgsl */ `var coverage=max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15);if(blendWeight>0.0){let lookupCoarse=dryNodeMipAt(position,lod+1.0,&pageCacheCoarse);if(lookupCoarse.valid==0u){return DryConeVisibility(1.0,0u);}coverage=mix(coverage,max(lookupCoarse.sample.solidMean,lookupCoarse.sample.solidMaximum*.15),blendWeight);}`;
+  const blendedCoverage = /* wgsl */ `let conservativeCoverage=selfWeight*coverage;let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/diameter);transmittance*=1.0-alpha;`;
+  // Phase B: light-anchored geometric ladder over the far half of the march.
+  // Phase A's sample grid is anchored at the receiver, so how many samples
+  // land inside the mip-smeared coverage around the emitter (lamp globe, head,
+  // pole) aliases with the receiver's distance modulo the local step width,
+  // which rendered as concentric rings around point lights and latitude bands
+  // on nearby caps. The ladder offsets are measured FROM the march endpoint
+  // (a fixed clearance off the emitter surface), so its sample positions are
+  // world-locked around the light for every receiver: coverage near the light
+  // then varies only smoothly with direction and the rings vanish. Ordering is
+  // nearest-to-light first so a shared budget exhaustion drops mid-air rungs.
+  const emitterLadderWGSL = /* wgsl */ `
+  if(anchored){var emitterOffset=minimumVoxel*3.0;
+  for(var rung=0u;rung<48u&&budget>0u&&emitterOffset<maximumDistance_m-phaseSplit&&transmittance>.005;rung+=1u){budget-=1u;dryMipSteps+=1u;
+    let distance=maximumDistance_m-emitterOffset;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let remaining=emitterOffset;let stepWidth=emitterOffset*.5;let position=origin_m+direction*distance;
+    let lookup=dryNodeMipAt(position,lod,&pageCache);if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}
+    ${selfCoverageWeight}${blendWeightExpression}${coarseBlendedCoverage}${blendedCoverage}emitterOffset*=1.5;}}
+`;
+  // The elision variant keeps the identical march (step distances, stepIndex
+  // sequence, dryMipSteps accounting, termination) and only replaces the
+  // fine-level fetch whose trilinear support is provably inside a zero region
+  // with the arithmetically identical zero sample: max(0,0*.15)=0 contributes
+  // nothing to the blend.
   const visibility = options.emptySpaceElision
-    ? /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32)->DryConeVisibility{
-  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
+    ? /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32,surfaceNormal:vec3f,anchored:bool)->DryConeVisibility{
+  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=48u;let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
   var zeroRegion=DryConeZeroRegion(vec3f(0.0),vec3f(0.0),0u);
-  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let stepWidth=min(diameter,maximumDistance_m-distance);
+  for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit&&transmittance>.005;stepIndex+=1u){budget-=1u;dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}
     let position=origin_m+direction*distance;let level=min(u32(max(floor(lod),0.0)),dry.nodeMip.z-1u);
     // Tap texels lie within 1.5 level-voxels of the sample position, so the
     // whole trilinear support footprint sits inside this conservative box.
@@ -666,14 +740,14 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
     }
     if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}
     // The zero region certifies levels at or below its establishment level
-    // only, so the coarse bracketing fetch always goes to the cache.
-    let lookupCoarse=dryNodeMipAt(position,lod+1.0,&pageCacheCoarse);if(lookupCoarse.valid==0u){return DryConeVisibility(1.0,0u);}
-    let conservativeCoverage=mix(max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15),max(lookupCoarse.sample.solidMean,lookupCoarse.sample.solidMaximum*.15),fract(lod));let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/diameter);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
+    // only, so the in-band coarse bracketing fetch always misses the region
+    // and goes through the coarse page cache.
+    ${selfCoverageWeight}${blendWeightExpression}${coarseBlendedCoverage}${blendedCoverage}distance+=max(stepWidth,minimumVoxel*.25);}${emitterLadderWGSL}
   return DryConeVisibility(clamp(transmittance,0.0,1.0),1u);
 }`
-    : /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32)->DryConeVisibility{
-  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
-  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let stepWidth=min(diameter,maximumDistance_m-distance);let position=origin_m+direction*distance;let lookup=dryNodeMipAt(position,lod,&pageCache);if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}let lookupCoarse=dryNodeMipAt(position,lod+1.0,&pageCacheCoarse);if(lookupCoarse.valid==0u){return DryConeVisibility(1.0,0u);}let conservativeCoverage=mix(max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15),max(lookupCoarse.sample.solidMean,lookupCoarse.sample.solidMaximum*.15),fract(lod));let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/diameter);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
+    : /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32,surfaceNormal:vec3f,anchored:bool)->DryConeVisibility{
+  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=48u;let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
+  for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit&&transmittance>.005;stepIndex+=1u){budget-=1u;dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}let position=origin_m+direction*distance;let lookup=dryNodeMipAt(position,lod,&pageCache);if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}${selfCoverageWeight}${blendWeightExpression}${coarseBlendedCoverage}${blendedCoverage}distance+=max(stepWidth,minimumVoxel*.25);}${emitterLadderWGSL}
   return DryConeVisibility(clamp(transmittance,0.0,1.0),1u);
 }`;
   return /* wgsl */ `struct DryNodeMipLookup{sample:SvoNodeMipSample,valid:u32}
@@ -803,7 +877,9 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f){
         if(sampleIndex>=coneSampleCount){break;}
         let direction=dryContactVisibilityDirection(geometricNormal,opaque.featureId,sampleIndex&1u);
         let rotated=select(direction,normalize(direction+cross(geometricNormal,direction)*.7),sampleIndex>=2u);
-        let cone=dryConeVisibility(origin,rotated,.62,radius);
+        // AO keeps near-surface self-occlusion by design: zero normal disables
+        // the shadow cones' receiver-plane coverage suppression.
+        let cone=dryConeVisibility(origin,rotated,.62,radius,vec3f(0.0),false);
         visibility+=cone.transmittance;
       }
       output.visibility.x=clamp(visibility/f32(coneSampleCount),0.0,1.0);
@@ -826,10 +902,14 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f){
         let maximumDistance=select(directionalLightSceneExitDistance(position,sample.towardLight),sample.finiteDistance_m,sample.finiteDistance_m>0.0);
         if(maximumDistance<=0.0){continue;}
         let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,sample.towardLight,maximumDistance,dry.mapping.cellSize,${SVO_DRY_SCENE_SHADOW_BIAS_CELLS});
-        // Mirror of the inline path's normal escape: the reduced-rate texel
-        // must hold the same visibility the fallback band computes inline.
-        let coneEscape_m=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z))*${SVO_DRY_SCENE_CONE_SHADOW_NORMAL_ESCAPE_CELLS};
-        let cone=dryConeVisibility(ray.origin_m+geometricNormal*coneEscape_m,sample.towardLight,.065,max(0.0,ray.tMax_m-coneEscape_m*dot(geometricNormal,sample.towardLight)));
+        // Mirror of the inline path's normal escape and finite-emitter
+        // clearance: the reduced-rate texel must hold the same visibility the
+        // fallback band computes inline.
+        let coneCell_m=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
+        let coneEscape_m=coneCell_m*${SVO_DRY_SCENE_CONE_SHADOW_NORMAL_ESCAPE_CELLS};
+        let coneMaxRaw_m=max(0.0,ray.tMax_m-coneEscape_m*dot(geometricNormal,sample.towardLight));
+        let coneMax_m=coneMaxRaw_m-select(0.0,${SVO_DRY_SCENE_CONE_EMITTER_CLEARANCE_CELLS}*coneCell_m,sample.finiteDistance_m>0.0);
+        let cone=dryConeVisibility(ray.origin_m+geometricNormal*coneEscape_m,sample.towardLight,.065,coneMax_m,geometricNormal,sample.finiteDistance_m>0.0);
         visibility+=cone.transmittance;
       }
       output.visibility[1u+lightIndex]=clamp(visibility/f32(sampleCount),0.0,1.0);
@@ -1338,9 +1418,16 @@ fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLig
     // The cone origin escapes the receiver's own trilinear coverage support
     // along the geometric normal: the 0.02-cell hard-ray bias alone leaves the
     // first cone samples inside the surface, whose accumulated self-occlusion
-    // renders as banding. The march end stays at the emitter surface.
-    let coneEscape_m=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z))*${SVO_DRY_SCENE_CONE_SHADOW_NORMAL_ESCAPE_CELLS};
-    let cone=dryConeVisibility(ray.origin_m+geometricNormal*coneEscape_m,towardLight,.065,max(0.0,ray.tMax_m-coneEscape_m*dot(geometricNormal,towardLight)));
+    // renders as banding. Finite emitters additionally clear the march end by
+    // one cone-support width: a march ending exactly at the emitter surface
+    // reads the emitter's own voxelized coverage through the last samples'
+    // trilinear/mip support, and the amount aliases with the receiver's
+    // distance modulo the step size as concentric rings around the light.
+    let coneCell_m=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
+    let coneEscape_m=coneCell_m*${SVO_DRY_SCENE_CONE_SHADOW_NORMAL_ESCAPE_CELLS};
+    let coneMaxRaw_m=max(0.0,ray.tMax_m-coneEscape_m*dot(geometricNormal,towardLight));
+    let coneMax_m=coneMaxRaw_m-select(0.0,${SVO_DRY_SCENE_CONE_EMITTER_CLEARANCE_CELLS}*coneCell_m,finiteDistance_m>0.0);
+    let cone=dryConeVisibility(ray.origin_m+geometricNormal*coneEscape_m,towardLight,.065,coneMax_m,geometricNormal,finiteDistance_m>0.0);
     if(cone.valid!=0u){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);if(rigidBlocker.t<ray.tMax_m){return vec3f(0.0);}return vec3f(cone.transmittance);}}
   dryVisibilityIgnoredOwner=ownerId;
   let result=svoTraceVisibility(ray,SvoVisibilityBudget(${SVO_VISIBILITY_LIMITS.nodeVisits}u,${SVO_VISIBILITY_LIMITS.leafVisits}u,${SVO_VISIBILITY_LIMITS.workItems}u,4u),true,0.001,max(ray.originBias_m,1e-6));dryShadowNodeVisits+=result.nodeVisits;dryShadowLeafVisits+=result.leafVisits;dryShadowWorkItems+=result.workItems;if(result.status==SVO_VIS_STATUS_EXHAUSTED){dryTraversalFailure=max(dryTraversalFailure,1u);}else if(result.status==SVO_VIS_STATUS_INVALID){dryTraversalFailure=2u;}
@@ -1361,7 +1448,7 @@ fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32,owner
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion}u)==0u){return vec3f(1.0);}
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){${prepassContactShortcutWGSL}
     let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(1.0);}var visibility=0.0;var coneValid=true;let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let origin=position+normalize(geometricNormal)*cellScale*.2;let coneSampleCount=select(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,uniforms.viewport.w>=-1.0);
-    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=coneSampleCount){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let cone=dryConeVisibility(origin,rotated,.62,radius);if(cone.valid==0u){coneValid=false;break;}let rigidBlocker=nearestBodyIgnoring(origin,rotated,ownerId);visibility+=select(cone.transmittance,0.0,rigidBlocker.t<radius);}if(coneValid){return vec3f(clamp(visibility/f32(coneSampleCount),0.0,1.0));}
+    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=coneSampleCount){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let cone=dryConeVisibility(origin,rotated,.62,radius,vec3f(0.0),false);if(cone.valid==0u){coneValid=false;break;}let rigidBlocker=nearestBodyIgnoring(origin,rotated,ownerId);visibility+=select(cone.transmittance,0.0,rigidBlocker.t<radius);}if(coneValid){return vec3f(clamp(visibility/f32(coneSampleCount),0.0,1.0));}
   }
   if((dry.materialPublication.w&1u)==0u){return vec3f(1.0);}
   let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(0.0);}let biasCells=select(${SVO_CONTACT_VISIBILITY_CONTRACT.smoothBiasCells},${SVO_CONTACT_VISIBILITY_CONTRACT.hardFeatureBiasCells},featureId!=SVO_FEATURE_SMOOTH);var visibility=vec3f(0.0);

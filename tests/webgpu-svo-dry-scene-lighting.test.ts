@@ -91,11 +91,11 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
   assert.match(svoDrySceneShader, /let ray=dryBiasedVisibilityRayUnit\(position,geometricNormal,towardLight,maximumDistance/,
     "hard shadows must avoid renormalizing already-unit light directions and surface normals");
   // Deliberate cone-banding fix: the cone origin escapes the receiver surface
-  // along the geometric normal and its march end shortens by the escape's
-  // projection so it still stops at the emitter surface; the rigid blocker
-  // keeps the exact bias-adjusted ray.
-  assert.match(svoDrySceneShader, /dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m,towardLight,\.065,max\(0\.0,ray\.tMax_m-coneEscape_m\*dot\(geometricNormal,towardLight\)\)\)[^]*rigidBlocker\.t<ray\.tMax_m/,
-    "cone and rigid visibility must stop at the same bias-adjusted emitter endpoint as exact traversal");
+  // along the geometric normal, the march end shortens by the escape's
+  // projection plus a finite-emitter clearance of one cone-support width, and
+  // the rigid blocker keeps the exact bias-adjusted ray.
+  assert.match(svoDrySceneShader, /let coneMaxRaw_m=max\(0\.0,ray\.tMax_m-coneEscape_m\*dot\(geometricNormal,towardLight\)\);[^]*dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m,towardLight,\.065,coneMax_m,geometricNormal,finiteDistance_m>0\.0\)[^]*rigidBlocker\.t<ray\.tMax_m/,
+    "cone visibility derives from the bias-adjusted emitter endpoint and rigid visibility keeps the exact ray");
   assert.match(svoDrySceneShader, /visibilityDistance=select\(distance,max\(0\.0,distance-light\.shape\.x\),light\.identity\.x==SVO_LIGHT_POINT\)/,
     "point attenuation uses center distance while visibility stops at the conservative emitter surface");
   assert.match(svoDrySceneShader, /fn directionalLightSceneExitDistance/);

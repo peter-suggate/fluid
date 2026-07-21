@@ -172,7 +172,7 @@ fn benchmarkMain(@builtin(global_invocation_id) gid:vec3u){
   let aperture=select(select(select(.065,.15,gid.x%4u==1u),.35,gid.x%4u==2u),.6,gid.x%4u==3u);
   let maximumDistance=select(select(3.0,8.0,gid.x%3u==1u),22.0,gid.x%3u==2u);
   dryMipSteps=0u;benchFetches=0u;benchSearchIterations=0u;
-  let cone=dryConeVisibility(origin,direction,aperture,maximumDistance);
+  let cone=dryConeVisibility(origin,direction,aperture,maximumDistance,vec3f(0.0),false);
   rayResults[gid.x]=RayResult(bitcast<u32>(cone.transmittance),cone.valid,dryMipSteps,benchFetches,benchSearchIterations,0u,0u,0u);
 }
 @compute @workgroup_size(64)
