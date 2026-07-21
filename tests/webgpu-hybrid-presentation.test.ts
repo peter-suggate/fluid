@@ -9,7 +9,7 @@ const octreeProjectionSource = readFileSync(new URL("../lib/webgpu-octree.ts", i
 const waterPipelineSource = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
 
 test("octree smooth presentation keeps analytic solids and glass", () => {
-  assert.match(rendererSource, /scene\.nominalResolution\.length_m, Math\.min\(bodies\.length, 12\), gpuInfo\?\.quadtreeMaximumFluidScale \?\? 1,/,
+  assert.match(rendererSource, /scene\.voxelDomain\.finestCellSize_m, Math\.min\(bodies\.length, 12\), gpuInfo\?\.quadtreeMaximumFluidScale \?\? 1,/,
     "smooth presentation must publish rigid-body count while retaining the live hierarchy scale");
   assert.match(rendererSource, /if \(sceneHasTerrain\(scene\) && scene\.terrain\)/,
     "terrain must remain part of the analytic scene for octree simulations");

@@ -34,6 +34,7 @@ const sceneQueryPaths = [
   "container.fillFraction",
   "container.top",
   "container.fluidWallMode",
+  "voxelDomain",
   "fluid.density_kg_m3",
   "fluid.dynamicViscosity_Pa_s",
   "fluid.surfaceTension_N_m",
@@ -210,7 +211,7 @@ export function parseQueryState(search: string): QueryState {
         ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
         : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "surface" || gridMode === "faces" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || (gridMode !== null && isOctreeTechniqueOverlayMode(gridMode)) ? gridMode : initialUI.gridOverlayMode,
-      voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode,
+      voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "surface-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode,
       svoRenderMode: isSvoRenderMode(render) ? render : DEFAULT_SVO_RENDER_MODE,
       svoLightingMode: isSvoLightingMode(svoLighting) ? svoLighting : DEFAULT_SVO_LIGHTING_MODE,
       svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,

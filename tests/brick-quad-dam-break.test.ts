@@ -39,7 +39,8 @@ test("brick-quad scene is registered in the UI presets and the smoke harness", (
   assert.match(preset.description, /cross-brick/);
   assert.ok(isSmokeScenarioId("brick-quad-dam-break"));
   const scenario = createSmokeScenario("brick-quad-dam-break");
-  assert.equal(scenario.scene.numerics.surfaceColumnsOverride, 256);
+  assert.equal(scenario.scene.voxelDomain.finestCellSize_m, 0.05);
+  assert.equal(scenario.scene.voxelDomain.brickSize_cells, 8);
   assert.equal(scenario.scene.fluid.initialBrickSeeds_m?.length, 1);
   assert.equal(scenario.scene.container.width_m, 0.8);
   assert.equal(scenario.scene.container.height_m, 0.4);

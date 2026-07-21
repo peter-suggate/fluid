@@ -45,6 +45,15 @@ struct SceneDescription: Codable, Sendable {
         var gravity_m_s2: Vec3
         var initialCondition: String
     }
+    struct VoxelDomain: Codable, Sendable {
+        struct Bounds: Codable, Sendable {
+            var min: Vec3
+            var max: Vec3
+        }
+        var finestCellSize_m: Float
+        var brickSize_cells: Int
+        var bounds_m: Bounds?
+    }
     struct Resolution: Codable, Sendable { var length_m: Float }
     struct Numerics: Codable, Sendable {
         var fixedDt_s: Float
@@ -58,6 +67,7 @@ struct SceneDescription: Codable, Sendable {
     var randomSeed: Int
     var duration_s: Float
     var container: Container
+    var voxelDomain: VoxelDomain
     var fluid: Fluid
     var nominalResolution: Resolution
     var numerics: Numerics
@@ -67,8 +77,15 @@ struct SceneDescription: Codable, Sendable {
         let result = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
         guard result.schemaVersion == "1.0.0" else { throw SceneError.unsupportedSchema(result.schemaVersion) }
         guard result.container.width_m > 0, result.container.height_m > 0, result.container.depth_m > 0,
-              (0...1).contains(result.container.fillFraction), result.fluid.density_kg_m3 > 0 else {
+              (0...1).contains(result.container.fillFraction), result.fluid.density_kg_m3 > 0,
+              result.voxelDomain.finestCellSize_m > 0,
+              result.voxelDomain.brickSize_cells == 4 || result.voxelDomain.brickSize_cells == 8 else {
             throw SceneError.invalidValues
+        }
+        if let bounds = result.voxelDomain.bounds_m {
+            guard bounds.min.x < bounds.max.x, bounds.min.y < bounds.max.y, bounds.min.z < bounds.max.z else {
+                throw SceneError.invalidValues
+            }
         }
         return result
     }
@@ -91,9 +108,6 @@ enum SceneError: LocalizedError {
 
 enum Quality: String, CaseIterable {
     case balanced, high, ultra, m1Max
-    var targetCells: Int {
-        switch self { case .balanced: 110_000; case .high: 500_000; case .ultra: 1_200_000; case .m1Max: 2_000_000 }
-    }
     var pressureIterations: Int {
         switch self { case .balanced: 48; case .high: 64; case .ultra: 80; case .m1Max: 96 }
     }

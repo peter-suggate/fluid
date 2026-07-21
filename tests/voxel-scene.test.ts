@@ -90,7 +90,8 @@ test("debug material packing rejects invalid or duplicate stable IDs", () => {
 test("all primitive conventions receive conservative world and persistent local brick bounds", () => {
   const scene = cloneScene(defaultScene);
   scene.rigidBodies = (["sphere", "box", "capsule", "cylinder"] as const).map((shape) => body(shape));
-  const plan = planVoxelScene(scene, { voxelSize_m: 0.025, brickCells: 8 });
+  scene.voxelDomain = { finestCellSize_m: 0.025, brickSize_cells: 8 };
+  const plan = planVoxelScene(scene);
   assert.equal(plan.dynamicSources.length, 4);
   for (const source of plan.dynamicSources) {
     assert.ok(contains(source.candidate.conservative_m, source.candidate.exact_m), source.bodyId);
@@ -127,8 +128,22 @@ test("topology and transform revisions separate local rebuilds from body motion"
   scene.rigidBodies[0].dimensions_m.y += 0.05;
   const resized = planVoxelScene(scene);
   assert.notEqual(resized.revisions.dynamicTopologyHash, moved.revisions.dynamicTopologyHash);
-  const finer = planVoxelScene(scene, { voxelSize_m: scene.nominalResolution.length_m / 2 });
+  scene.voxelDomain = { ...scene.voxelDomain, finestCellSize_m: scene.voxelDomain.finestCellSize_m / 2 };
+  const finer = planVoxelScene(scene);
   assert.notEqual(finer.revisions.dynamicTopologyHash, resized.revisions.dynamicTopologyHash);
+});
+
+test("scene voxel domain is the only spatial authority for voxel planning", () => {
+  const scene = cloneScene(defaultScene);
+  const baseline = planVoxelScene(scene);
+  scene.nominalResolution.length_m *= 0.5;
+  const oracleOnly = planVoxelScene(scene);
+  assert.deepEqual(oracleOnly.layout, baseline.layout);
+  scene.voxelDomain = { finestCellSize_m: baseline.layout.voxelSize_m * 0.5, brickSize_cells: 4 };
+  const changed = planVoxelScene(scene);
+  assert.equal(changed.layout.voxelSize_m, baseline.layout.voxelSize_m * 0.5);
+  assert.equal(changed.layout.brickCells, 4);
+  assert.notDeepEqual(changed.layout, baseline.layout);
 });
 
 test("container shells preserve authored boundary planes and open/closed tops", () => {
@@ -153,5 +168,5 @@ test("scene plans are descriptors rather than dense voxel allocations", () => {
   };
   visit(plan);
   assert.deepEqual(arrays, []);
-  assert.equal(plan.layout.interiorVoxelRange.maxExclusive.y, 800);
+  assert.equal(plan.layout.interiorVoxelRange.maxExclusive.y, 400);
 });

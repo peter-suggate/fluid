@@ -11,6 +11,10 @@
     "top": "open",
     "fluidWallMode": "no-slip"
   },
+  "voxelDomain": {
+    "finestCellSize_m": 0.05,
+    "brickSize_cells": 8
+  },
   "fluid": {
     "density_kg_m3": 998.2,
     "dynamicViscosity_Pa_s": 0.001002,

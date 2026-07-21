@@ -5,11 +5,11 @@ interactive GPU path uses WebGPU `f32` storage textures and is not claimed to be
 bitwise identical to the staggered MAC discretization.
 
 Each x/z column stores one variable-height bottom cell, represented by bottom
-and top samples, plus a band of cubic cells around the free surface. Balanced,
-high, and ultra request approximately 2,500, 7,000, and 12,500 surface columns
-with minimum bands of 24, 32, and 40 layers. The band expands to the uniform
-limit when a vertical interface cannot fit; otherwise horizontal resolution is
-independent of full water depth.
+and top samples, plus a band of cubic cells around the free surface. All three
+axes come from the scene's required `voxelDomain.finestCellSize_m`; quality no
+longer changes spatial resolution. Balanced, high, and ultra retain minimum
+bands of 24, 32, and 40 layers and vary solver effort. The band expands to the
+uniform limit when a vertical interface cannot fit.
 
 One encoded step performs velocity extrapolation, bounded MacCormack velocity
 advection, conservative semi-Lagrangian surface-density transport, paired gamma

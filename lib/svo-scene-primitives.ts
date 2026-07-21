@@ -280,8 +280,8 @@ export function buildSvoScenePrimitives(
   const catalog = buildEnvironmentProxyCatalog(scene, environmentId);
   return svoScenePrimitivesFromEnvironmentCatalog(scene, catalog, {
     ...options,
-    // Match the default-camera acceptance audit: features below 1.5 nominal
+    // Match the default-camera acceptance audit: features below 1.5 finest
     // cells retain conservative coverage even when cell-centre sampling moves.
-    coverageCellSize_m: options.coverageCellSize_m ?? 1.5 * scene.nominalResolution.length_m,
+    coverageCellSize_m: options.coverageCellSize_m ?? 1.5 * scene.voxelDomain.finestCellSize_m,
   });
 }

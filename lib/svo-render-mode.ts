@@ -1,4 +1,4 @@
-/** Scene presentation modes; sparse voxels remain available for explicit A/B use. */
+/** Scene presentation modes; raster remains available for explicit A/B use. */
 export const SVO_RENDER_MODES = ["raster", "svo"] as const;
 
 export type SvoRenderMode = typeof SVO_RENDER_MODES[number];
@@ -23,12 +23,8 @@ export const DEFAULT_SVO_LIGHTING_OPTIONS: SvoLightingOptions = Object.freeze({
   ambientOcclusionEnabled: true,
 });
 
-/**
- * Default to the bounded raster presentation. The SVO dry-scene replacement
- * shares the physics queue and remains opt-in until its worst-case frame cost
- * cannot delay simulation completion or browser interaction.
- */
-export const DEFAULT_SVO_RENDER_MODE: SvoRenderMode = "raster";
+/** WebGPU presents the unified sparse scene by default; raster is an explicit fallback/A-B choice. */
+export const DEFAULT_SVO_RENDER_MODE: SvoRenderMode = "svo";
 
 export function isSvoRenderMode(value: unknown): value is SvoRenderMode {
   return typeof value === "string" && (SVO_RENDER_MODES as readonly string[]).includes(value);

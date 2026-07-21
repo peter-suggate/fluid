@@ -5,7 +5,6 @@ import { sceneHasTerrain, terrainColumnHeights, terrainHeightAt } from "./terrai
 export type GPUQuality = "balanced" | "high" | "ultra";
 
 export interface TallCellSettings {
-  surfaceColumns: number;
   regularLayers: number;
   liquidHalo: number;
   airHalo: number;
@@ -72,13 +71,12 @@ export interface SingleTallCellProbeOptions {
   supportRadius?: number;
 }
 
-// The presets retain approximately the x/z resolution of the former 110k,
-// 500k and 1.2m cubic grids for the default scene. Only the moving surface
-// band and two samples for each bottom tall cell are stored.
+// Quality controls storage/work around the scene-authored lattice. Spatial
+// resolution belongs exclusively to SceneDescription.voxelDomain.
 export const tallCellSettings: Record<GPUQuality, TallCellSettings> = {
-  balanced: { surfaceColumns: 2_500, regularLayers: 24, liquidHalo: 8, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
-  high: { surfaceColumns: 7_000, regularLayers: 32, liquidHalo: 16, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
-  ultra: { surfaceColumns: 12_500, regularLayers: 40, liquidHalo: 24, airHalo: 8, maximumNeighborDelta: 5, maximumTallHeight: 4096, remeshInterval: 1 }
+  balanced: { regularLayers: 24, liquidHalo: 8, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
+  high: { regularLayers: 32, liquidHalo: 16, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
+  ultra: { regularLayers: 40, liquidHalo: 24, airHalo: 8, maximumNeighborDelta: 5, maximumTallHeight: 4096, remeshInterval: 1 }
 };
 
 export function tallCellFluxSampleCount(height: number) {
@@ -328,15 +326,10 @@ function requiredInitialRegularLayers(
 
 export function createTallCellLayout(scene: SceneDescription, quality: GPUQuality, maximumTextureDimension = 2048, overrides?: Partial<TallCellSettings>): TallCellLayout {
   const c = scene.container, settings = { ...tallCellSettings[quality], ...overrides };
-  // A scene-authored column count wins over both the quality preset and the
-  // method's clamped UI parameter: exact-grid validation scenes (brick-quad
-  // cross-transport) depend on finest dimensions no preset can produce.
-  if ((scene.numerics.surfaceColumnsOverride ?? 0) > 0) settings.surfaceColumns = scene.numerics.surfaceColumnsOverride!;
-  const targetH = Math.sqrt(c.width_m * c.depth_m / settings.surfaceColumns);
-  const nx = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.width_m / targetH)));
-  const nz = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.depth_m / targetH)));
-  const horizontalH = Math.sqrt((c.width_m / nx) * (c.depth_m / nz));
-  const fineNy = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.height_m / horizontalH)));
+  const requestedCellSize = scene.voxelDomain.finestCellSize_m;
+  const nx = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.width_m / requestedCellSize)));
+  const nz = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.depth_m / requestedCellSize)));
+  const fineNy = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.height_m / requestedCellSize)));
   // Grow B_y only when the vertical crossings and their halos do not fit. A
   // vertical dam face is representable across neighbouring tall columns.
   const requiredLayers = requiredInitialRegularLayers(scene, nx, fineNy, nz, settings);

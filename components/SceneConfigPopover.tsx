@@ -36,6 +36,11 @@ export function SceneConfigPopover() {
   if (!open) return null;
 
   const inflow = scene.fluid.inflow;
+  const voxelDomain = scene.voxelDomain;
+  const fluidEnabled = scene.systems?.fluid !== false;
+  const voxelDimensions = [scene.container.width_m, scene.container.height_m, scene.container.depth_m]
+    .map((extent) => Math.max(8, Math.round(extent / voxelDomain.finestCellSize_m)));
+  const patchVoxelDomain = (patch: Partial<typeof voxelDomain>) => patchScene({ voxelDomain: { ...voxelDomain, ...patch } });
   const patchInflow = (patch: Partial<FluidInflow>) => patchFluid({ inflow: { ...(inflow ?? defaultInflow), ...patch } });
   // The jet's direction is carried by its velocity vector (the solvers orient
   // the injection cylinder along it), edited here as speed + pitch + yaw.
@@ -83,6 +88,14 @@ export function SceneConfigPopover() {
             <Segmented ariaLabel="Container top" value={scene.container.top} options={[{ value: "open", label: "Open top" }, { value: "closed", label: "Closed" }]} onChange={(value) => patchContainer({ top: value })} />
             <Segmented ariaLabel="Fluid wall condition" value={scene.container.fluidWallMode} options={[{ value: "no-slip", label: "No slip" }, { value: "free-slip", label: "Free slip" }]} onChange={(value) => patchContainer({ fluidWallMode: value })} />
           </div>
+        </section>
+        <section data-testid="voxel-domain-controls">
+          <h3>Unified voxel domain</h3>
+          <div className="field-grid">
+            <NumberField label="Finest cell" unit="m" value={voxelDomain.finestCellSize_m} step={0.005} min={0.01} max={0.25} onChange={(value) => patchVoxelDomain({ finestCellSize_m: Math.max(0.01, value) })} />
+          </div>
+          <Segmented ariaLabel="Sparse voxel brick size" value={String(voxelDomain.brickSize_cells)} options={[{ value: "4", label: "4³-cell leaves", disabled: fluidEnabled, title: fluidEnabled ? "4³ leaves require a renderer-only scene; fluid owner pages currently use 8³ bricks." : undefined }, { value: "8", label: "8³-cell leaves" }]} onChange={(value) => patchVoxelDomain({ brickSize_cells: value === "4" ? 4 : 8 })} />
+          <small className="control-hint">Container lattice: {voxelDimensions.join(" × ")} finest cells. The sparse world grows automatically to include authored environment objects and optional scene bounds.{fluidEnabled ? " Fluid scenes require 8³ leaves; 4³ is available for renderer-only scenes." : ""}</small>
         </section>
         <section>
           <h3>Fluid</h3>

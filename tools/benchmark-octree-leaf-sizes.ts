@@ -49,7 +49,7 @@ function calmDeepScene(): SceneDescription {
   scene.fluid.initialCondition = "tank-fill";
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
-  scene.numerics.surfaceColumnsOverride = 4096 * tankScale * tankScale;
+  scene.voxelDomain.finestCellSize_m = 0.025;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.005;
   return scene;
 }

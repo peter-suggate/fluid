@@ -5,6 +5,7 @@ import {
   ENVIRONMENT_MAXIMUM_COARSENING_POWER,
   octreeSparseBrickDebugPublicationShader,
   planOctreeBrickCoordinates,
+  sparseSceneOctreeMaximumDepth,
 } from "../lib/webgpu-octree-sparse-bricks";
 
 test("octree sparse-brick planning covers the real balanced dam-break lattice", () => {
@@ -34,6 +35,16 @@ test("raw inspection keeps room shells modelled without letting them hide interi
 
 test("scene environment terminal leaves are two levels deeper than the original coarse representation", () => {
   assert.equal(ENVIRONMENT_MAXIMUM_COARSENING_POWER, 1);
+});
+
+test("sparse scene root depth covers empty positive authored bounds", () => {
+  // Allocated solver terminals occupy bricks 0..1, while an authored positive
+  // bound extends the declared address space through brick 32.
+  const coordinates = planOctreeBrickCoordinates([8, 8, 8], 4).coordinates;
+  const maximumDepth = sparseSceneOctreeMaximumDepth([33, 2, 2], coordinates);
+  assert.equal(maximumDepth, 6);
+  assert.ok(2 ** maximumDepth >= 33,
+    "every in-domain cell bit must fit in the root instead of aliasing a low coordinate");
 });
 
 test("debug publication retains anisotropic XYZ extents for exact world bounds", () => {

@@ -34,6 +34,7 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
   scene.numerics.fixedDt_s = 1 / 180;
   scene.numerics.maxDt_s = 1 / 180;
   scene.nominalResolution.length_m = 0.025;
+  scene.voxelDomain.finestCellSize_m = 0.02;
 
   if (id === "hose-tank") {
     scene.sceneId = "paper-figure-3-hose-filled-tank";

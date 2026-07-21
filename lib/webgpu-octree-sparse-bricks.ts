@@ -143,6 +143,24 @@ export function planOctreeBrickCoordinates(dimensions: readonly [number, number,
   return { brickDimensions, coordinates };
 }
 
+/** Root depth must cover declared empty bounds as well as allocated terminals. */
+export function sparseSceneOctreeMaximumDepth(
+  brickDimensions: readonly [number, number, number],
+  coordinates: readonly SparseBrickCoordinate[],
+): number {
+  for (const [axis, value] of brickDimensions.entries()) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`Sparse scene brick dimension ${axis} must be positive`);
+  }
+  let maximumBrickCoordinate = Math.max(...brickDimensions.map((value) => value - 1));
+  for (const coordinate of coordinates) {
+    for (const [axis, value] of [coordinate.x, coordinate.y, coordinate.z].entries()) {
+      if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`Sparse scene brick coordinate ${axis} must be non-negative`);
+      maximumBrickCoordinate = Math.max(maximumBrickCoordinate, value);
+    }
+  }
+  return maximumBrickCoordinate === 0 ? 0 : Math.ceil(Math.log2(maximumBrickCoordinate + 1));
+}
+
 export const ENVIRONMENT_VOXEL_MATERIAL_BASE = 32;
 export const OCTREE_SVO_PBR_MATERIAL_REVISION = 2;
 export const OCTREE_SVO_LIGHT_REVISION = 1;
@@ -475,11 +493,10 @@ export class OctreeSparseBrickWorld {
     const sceneDomain = planSparseSceneDomain(
       scene, dimensions, brickSize,
       environmentPrimitives.map((primitive) => ({ min: primitive.aabb_m.min, max: primitive.aabb_m.max })),
-      { conservativePaddingCells: 1 }
+      { conservativePaddingCells: 1, worldBounds_m: scene.voxelDomain.bounds_m }
     );
     this.solverGridOriginCells = sceneDomain.solverGridOriginCells;
-    const maximumBrickCoordinate = sceneDomain.coordinates.reduce((maximum, coordinate) => Math.max(maximum, coordinate.x, coordinate.y, coordinate.z), 0);
-    const maximumDepth = maximumBrickCoordinate === 0 ? 0 : Math.ceil(Math.log2(maximumBrickCoordinate + 1));
+    const maximumDepth = sparseSceneOctreeMaximumDepth(sceneDomain.brickDimensions, sceneDomain.coordinates);
     const plan = planAdaptiveSparseBrickOctree({
       brickSize,
       solverBricks: sceneDomain.solverBrickCoordinates,

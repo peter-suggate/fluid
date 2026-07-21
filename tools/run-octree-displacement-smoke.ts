@@ -42,7 +42,8 @@ scene.rigidBodies = [{
 }];
 
 let latestLoad: GPURigidLoad | undefined;
-const values = { ...octreeMethod.presetFor("balanced"), pressureIterations: 64, surfaceColumns: 1600 };
+scene.voxelDomain.finestCellSize_m = Math.sqrt(scene.container.width_m * scene.container.depth_m / 1600);
+const values = { ...octreeMethod.presetFor("balanced"), pressureIterations: 64 };
 const solver = octreeMethod.createSolver!(device, scene, "balanced", values, (loads) => {
   latestLoad = loads.find((load) => load.bodyId === bodyId) ?? latestLoad;
 });

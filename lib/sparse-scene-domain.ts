@@ -21,6 +21,8 @@ export interface SparseSceneDomainOptions {
   proxyCoverage?: SparseSceneProxyCoverage;
   /** Thickness retained on each side of a surface-shell proxy. Defaults to one cell. */
   surfaceShellCells?: number;
+  /** Optional minimum world-space address bounds; sparse proxies may extend beyond them. */
+  worldBounds_m?: SparseSceneWorldBounds;
 }
 
 export interface SparseSceneCellRange {
@@ -181,7 +183,10 @@ export function planSparseSceneDomain(
   });
   const latticeMinimum: MutableTriple = [0, 0, 0];
   const latticeMaximum: MutableTriple = [...dimensions];
-  for (const range of proxyRanges) {
+  const explicitBoundsRange = options.worldBounds_m
+    ? worldRangeOnSolverLattice(options.worldBounds_m, solverOrigin, cellSize, 0)
+    : undefined;
+  for (const range of [...proxyRanges, ...(explicitBoundsRange ? [explicitBoundsRange] : [])]) {
     for (let axis = 0; axis < 3; axis += 1) {
       latticeMinimum[axis] = Math.min(latticeMinimum[axis], range.min[axis]);
       latticeMaximum[axis] = Math.max(latticeMaximum[axis], range.maxExclusive[axis]);

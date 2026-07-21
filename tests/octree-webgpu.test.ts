@@ -43,11 +43,9 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.equal(octreeMethod.id, "octree");
   assert.equal(octreeMethod.backend, "webgpu");
   assert.equal(octreeMethod.presetFor("balanced").pressureIterations, 128);
-  assert.equal(octreeMethod.presetFor("balanced").surfaceColumns, 384,
-    "the safe default dam-break must retain a cubic power lattice");
-  const surfaceColumns = octreeMethod.params.find((spec) => spec.key === "surfaceColumns");
-  assert.ok(surfaceColumns && surfaceColumns.kind === "number" && surfaceColumns.default === 384);
-  const layout = createTallCellLayout(defaultScene, "balanced", 2_048, { surfaceColumns: 384 });
+  assert.equal(octreeMethod.params.some((spec) => spec.key === "surfaceColumns"), false,
+    "scene voxelDomain is the sole spatial-resolution authority");
+  const layout = createTallCellLayout(defaultScene, "balanced", 2_048);
   assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [24, 18, 16]);
   assert.deepEqual([layout.nx * 4, layout.fineNy * 4, layout.nz * 4], [96, 72, 64],
     "the factor-4 authoritative lattice must remain an integer cubic refinement");
@@ -142,24 +140,23 @@ test("bounded power-vs-tall Dawn comparison uses one exact active-tall grid", ()
   assert.match(command, /FLUID_METHOD=octree,tall-cell/);
   assert.match(command, /FLUID_TARGET_S=0\.004/);
   assert.match(command, /FLUID_ORACLE_STEPS=1/);
-  assert.match(command, /FLUID_SURFACE_COLUMNS=384/);
+  assert.match(command, /FLUID_VOXEL_CELL_SIZE=0\.05/);
   assert.match(command, /FLUID_EXPECT_GRID=24,18,16/);
   assert.match(command, /FLUID_REGULAR_LAYERS=12/);
   assert.match(command, /FLUID_OCTREE_POWER_PROJECTION=authoritative/);
   assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
-  assert.doesNotMatch(packageManifest.scripts["test:webgpu:dam-power-fine-parity"], /FLUID_SURFACE_COLUMNS=2400/,
+  assert.doesNotMatch(packageManifest.scripts["test:webgpu:dam-power-fine-parity"], /FLUID_VOXEL_CELL_SIZE=0\.02/,
     "the named comparison path must not retain the former 2400-column allocation");
 
   const layout = createTallCellLayout(defaultScene, "balanced", 2_048, {
-    surfaceColumns: 384,
     regularLayers: 12,
   });
   assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [24, 18, 16]);
   assert.equal(layout.planning.ordinaryGridFallback, false);
   assert.ok(layout.columnBases.some((base) => base >= 2),
     "the comparison must exercise restricted tall cells, not the ordinary-grid fallback");
-  assert.match(smokeSource, /scene\.numerics\.surfaceColumnsOverride = surfaceColumnsOverride/,
-    "the smoke scene override must bypass method UI clamps for exact-grid comparisons");
+  assert.match(smokeSource, /scene\.voxelDomain\.finestCellSize_m = voxelCellSizeOverride/,
+    "the smoke comparison must change the shared scene lattice directly");
   assert.match(smokeSource, /refusing to step a mismatched comparison/);
 });
 

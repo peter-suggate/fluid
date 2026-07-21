@@ -58,6 +58,11 @@ test("S2-06 invalid physical fields are rejected without changing thresholds", (
   assert.ok(validateScene(scene).length >= 6);
 });
 
+test("scene parsing requires an explicit voxel domain without nominal-resolution fallback", () => {
+  const { voxelDomain: _voxelDomain, ...withoutVoxelDomain } = cloneScene(defaultScene);
+  assert.throws(() => parseScene(JSON.stringify(withoutVoxelDomain)), /Voxel finest cell size|Voxel brick size/);
+});
+
 test("S2-10 exported run manifest carries reproducibility identity", () => {
   const manifest = createRunManifest(defaultScene, "test-adapter");
   assert.equal(manifest.runSchemaVersion, "1.0.0");

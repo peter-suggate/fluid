@@ -75,7 +75,7 @@ final class MetalFluidSolver: @unchecked Sendable {
         self.queue = queue
 
         let c = scene.container
-        let h = pow(c.width_m * c.height_m * c.depth_m / Float(quality.targetCells), 1 / 3)
+        let h = scene.voxelDomain.finestCellSize_m
         let nx = max(8, Int((c.width_m / h).rounded()))
         let ny = max(8, Int((c.height_m / h).rounded()))
         let nz = max(8, Int((c.depth_m / h).rounded()))

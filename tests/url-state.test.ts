@@ -51,6 +51,20 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   assert.equal(parsed.scene.randomSeed, 91);
 });
 
+test("query state accepts the finest surface voxel inspection mode", () => {
+  const parsed = parseQueryState("?voxels=surface-voxels");
+  assert.equal(parsed.ui.voxelRenderMode, "surface-voxels");
+});
+
+test("query state round-trips the unified scene voxel domain atomically", () => {
+  const parsed = parseQueryState('?scene=garden-svo-lighting&scene.voxelDomain={"finestCellSize_m":0.04,"brickSize_cells":4}');
+  assert.deepEqual(parsed.scene.voxelDomain, { finestCellSize_m: 0.04, brickSize_cells: 4 });
+  const serialized = serializeQueryState("", { presetId: parsed.presetId, scene: parsed.scene }, {
+    methodId: parsed.methodId, quality: parsed.quality, overrides: parsed.overrides,
+  }, parsed.ui);
+  assert.deepEqual(JSON.parse(new URLSearchParams(serialized).get("scene.voxelDomain")!), parsed.scene.voxelDomain);
+});
+
 test("query state persists an edited rigid-body roster atomically", () => {
   const scene = getScenePreset("dam-break-boxes").create();
   scene.rigidBodies = scene.rigidBodies.slice(0, 1);
@@ -151,7 +165,7 @@ test("invalid external query values fall back to validated defaults", () => {
   assert.equal(parsed.ui.diagnosticsOpen, false);
   assert.equal(parsed.ui.rightPanel, null);
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality, parsed.overrides[parsed.methodId] ?? {});
-  assert.equal(values.surfaceColumns, 384);
+  assert.equal(parsed.scene.voxelDomain.finestCellSize_m, 0.05);
   assert.equal(values.faceVelocityTransport, "on");
   assert.equal(values.globalFineLevelSetFactor, "4");
   assert.equal(values.powerDiagramProjection, "authoritative");
@@ -189,7 +203,7 @@ test("legacy presentation choices are removed from canonical links", () => {
   assert.equal(params.has("fps"), false);
 });
 
-test("production renderer mode omits the raster default and serializes explicit SVO", () => {
+test("production renderer mode omits the SVO default and serializes explicit raster", () => {
   const parsed = parseQueryState("?render=svo");
   assert.equal(parsed.ui.svoRenderMode, "svo");
 
@@ -199,15 +213,15 @@ test("production renderer mode omits the raster default and serializes explicit 
     quality: parsed.quality,
     overrides: parsed.overrides
   }, parsed.ui);
-  assert.equal(new URLSearchParams(sparse).get("render"), "svo");
+  assert.equal(new URLSearchParams(sparse).has("render"), false);
 
   const raster = serializeQueryState("?render=svo", { presetId: parsed.presetId, scene }, {
     methodId: parsed.methodId,
     quality: parsed.quality,
     overrides: parsed.overrides
   }, { ...parsed.ui, svoRenderMode: "raster" });
-  assert.equal(new URLSearchParams(raster).has("render"), false);
-  assert.equal(parseQueryState("?render=invalid").ui.svoRenderMode, "raster");
+  assert.equal(new URLSearchParams(raster).get("render"), "raster");
+  assert.equal(parseQueryState("?render=invalid").ui.svoRenderMode, "svo");
 });
 
 test("SVO lighting round-trips exact direct while cone remains the canonical fail-soft default", () => {

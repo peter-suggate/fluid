@@ -170,7 +170,7 @@ test("subcell props retain exact analytic shapes plus conservative audit bounds"
       for (const axis of metadata.coverageBounds.subcellAxes) {
         const conservativeWidth = metadata.coverageBounds.conservative_m.max[axis]
           - metadata.coverageBounds.conservative_m.min[axis];
-        assert.ok(conservativeWidth >= scene.nominalResolution.length_m, `${key}/${axis}`);
+        assert.ok(conservativeWidth >= scene.voxelDomain.finestCellSize_m, `${key}/${axis}`);
       }
     }
   }

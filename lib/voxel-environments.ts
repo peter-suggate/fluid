@@ -346,7 +346,7 @@ export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmen
   const s = Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
   const roomHalf = V(Math.max(scene.container.width_m * 2.8, s * 2.25), Math.max(scene.container.height_m * 1.85, s * 1.8), Math.max(scene.container.depth_m * 2.8, s * 2.25));
   const floorY = environmentId === "night-lab" ? -.72 * s : environmentId === "garden" ? (scene.terrain?.baseHeight_m ?? 0) : -.025;
-  const thickness = options.shellThickness_m ?? scene.nominalResolution.length_m;
+  const thickness = options.shellThickness_m ?? scene.voxelDomain.finestCellSize_m;
   if (!(thickness > 0) || !Number.isFinite(thickness)) throw new Error("Environment shell thickness must be positive and finite");
   const b = new ProxyBuilder(environmentId);
   let shell: EnvironmentProxyShell;

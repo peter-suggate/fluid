@@ -101,7 +101,7 @@ test("timeline reset invalidates old completions and cannot trigger a timestamp 
   assert.match(reset, /this\.gpuFluidGeneration \+= 1/,
     "old queue completions must become stale synchronously at t=0");
   assert.match(reset, /this\.resetGPUQueueTracking\(\)/);
-  assert.match(renderer, /config\.simulationEpoch\?\?0/,
+  assert.match(renderer, /gpuSceneSolverKey\([^]*config\.simulationEpoch \?\? 0/,
     "each reset epoch must identify exactly one replacement solver");
   assert.doesNotMatch(renderer, /time_s < \(this\.gpuFluid\.info\.submittedTime_s \?\? 0\)\) \{this\.beginGPUFluidInitialization/,
     "timestamp rollback must never create an unexpected second build");

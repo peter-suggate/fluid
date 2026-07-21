@@ -4,7 +4,6 @@ import { numberValue, type MethodParamSpec, type SimulationMethod } from "./type
 
 const params: MethodParamSpec[] = [
   { kind: "number", key: "pressureIterations", label: "Pressure iterations", unit: "iterations", min: 16, max: 1024, step: 16, digits: 0, default: 96, tier: "coarse", hint: "Minimum PCG safety budget. The experimental Chebyshev solver uses the same number of fixed row-parallel passes." },
-  { kind: "number", key: "surfaceColumns", label: "Finest columns", unit: "columns", min: 1_000, max: 20_000, step: 500, digits: 0, default: 2_500, tier: "fine", hint: "Finest x/z lattice used by quadtree leaves and the cubic advection field." },
   { kind: "number", key: "adaptivityStrength", label: "Adaptivity", unit: "alpha", min: 0, max: 1, step: 0.05, digits: 2, default: 1, tier: "fine", hint: "Ando–Batty Eq. 38: 0 is the ordinary-grid limit; 1 permits full quadtree coarsening." },
   { kind: "select", key: "opticalLayerMode", label: "Optical layer", default: "adaptive-motion", tier: "coarse", options: [{ value: "adaptive-motion", label: "Motion-adaptive (2026)" }, { value: "fixed", label: "Fixed quarter-depth" }], hint: "Narita–Kanai 2026 derives a smooth per-column layer thickness from tall-cell velocity reconstruction error. Fixed retains the previous baseline for A/B measurements." },
   { kind: "number", key: "opticalAlpha", label: "Optical motion response", unit: "alpha", min: 0, max: 2, step: 0.05, digits: 2, default: 0.5, tier: "fine", hint: "Paper Eq. (1) scale for motion-sensitive dilation. Larger values retain more cubic pressure cells around dynamic flow." },
@@ -32,10 +31,10 @@ export const quadtreeTallCellMethod: SimulationMethod = {
   description: "Narita et al. 2025 quadtree tall cells with Narita–Kanai 2026 motion-adaptive optical layers.",
   detail: "motion-error optical thickness with constrained smoothing, coarse-to-fine quadtree sizing, strict 2:1 adaptivity, multiple vertical tall runs, horizontally centered pressure samples, T-junction face-overlap gradients, corrected inner ghost volumes, SPD free-surface scaling, and a tolerance-driven PCG pressure solve",
   backend: "webgpu",
-  qualityLabels: { balanced: "2.5k finest columns", high: "7k finest columns", ultra: "12.5k finest columns" },
+  qualityLabels: { balanced: "bounded pressure work", high: "higher pressure work", ultra: "maximum pressure work" },
   params,
   pressureMapping: "Balanced starts PCG with a 96-iteration safety budget and stops at the relative residual tolerance. Experimental Chebyshev uses 96 fixed passes.",
-  presetFor: (quality) => ({ pressureIterations: quality === "balanced" ? 96 : quality === "high" ? 160 : 240, surfaceColumns: quality === "balanced" ? 2_500 : quality === "high" ? 7_000 : 12_500, adaptivityStrength: 1, opticalLayerMode: "adaptive-motion", opticalAlpha: 0.5, pressureSolver: "pcg", preconditioner: "poly" }),
+  presetFor: (quality) => ({ pressureIterations: quality === "balanced" ? 96 : quality === "high" ? 160 : 240, adaptivityStrength: 1, opticalLayerMode: "adaptive-motion", opticalAlpha: 0.5, pressureSolver: "pcg", preconditioner: "poly" }),
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, {
     // Narita Sec. 4.5 advects the level set from the saved previous grid.
     // It is authoritative for adaptive pressure geometry, while the shared
@@ -46,7 +45,6 @@ export const quadtreeTallCellMethod: SimulationMethod = {
     densitySharpening: false,
     velocityTransport: "maccormack",
     pressureIterations: numberValue(values, params, "pressureIterations"),
-    tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") },
     quadtreeRebuildTopology: values.rebuildTopology !== false,
     ...(typeof values.topologyStaleSteps === "number" ? { quadtreeTopologyStaleSteps: values.topologyStaleSteps } : {}),
     ...(typeof values.inlineRebuild === "boolean" ? { quadtreeInlineRebuild: values.inlineRebuild } : {}),
@@ -78,7 +76,6 @@ export const quadtreeTallCellMethod: SimulationMethod = {
     densitySharpening: false,
     velocityTransport: "maccormack",
     pressureIterations: numberValue(values, params, "pressureIterations"),
-    tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") },
     quadtreeRebuildTopology: values.rebuildTopology !== false,
     ...(typeof values.topologyStaleSteps === "number" ? { quadtreeTopologyStaleSteps: values.topologyStaleSteps } : {}),
     ...(typeof values.inlineRebuild === "boolean" ? { quadtreeInlineRebuild: values.inlineRebuild } : {}),

@@ -7,7 +7,6 @@ import { sceneHasTerrain } from "../terrain";
 const params: MethodParamSpec[] = [
   { kind: "number", key: "pressureIterations", label: "Pressure effort", unit: "iterations", min: 16, max: 400, step: 8, digits: 0, default: 128, tier: "coarse", hint: "The paper-authoritative Section 4.3 solve is capped at 16 PCG iterations (reported convergence: 6–10); converged GPU iterations become no-ops. Explicit compatibility solvers use this larger iteration budget." },
   { kind: "select", key: "leafSolver", label: "Pressure solver", default: "auto", tier: "fine", options: [{ value: "auto", label: "Auto · Section 4.3 for power" }, { value: "mgpcg", label: "Section 4.3 hybrid" }, { value: "chebyshev", label: "Chebyshev compatibility" }], hint: "Auto selects the paper's Section 4.3 hybrid PCG preconditioner when power authority is admitted. Chebyshev is an explicit comparison mode, not a same-frame fallback for rejected paper authority." },
-  { kind: "number", key: "surfaceColumns", label: "Finest columns", unit: "columns", min: 384, max: 20_000, step: 24, digits: 0, default: 384, tier: "fine", hint: "Finest x/z lattice shared by the authoritative level set and octree owner map. The balanced 384-column dam-break bring-up grid is exactly cubic (24 x 18 x 16), as required by the power catalog and global fine lattice." },
   { kind: "number", key: "adaptivity", label: "Octree adaptivity", unit: "", min: 0, max: 1, step: 0.1, digits: 1, default: 1, tier: "coarse", hint: "Debug quality/performance sweep: 0 forces finest pressure cells everywhere; 1 enables full signed-distance-graded coarsening." },
   { kind: "select", key: "secondaryParticles", label: "Secondary liquid", default: "off", tier: "coarse", update: "runtime", options: [{ value: "on", label: "Spray droplets" }, { value: "off", label: "Off" }], hint: "One-way GPU droplets preserve escaped splash detail without changing liquid mass or pressure." },
   { kind: "number", key: "secondaryParticleCapacity", label: "Particle budget", unit: "particles", min: 4_096, max: 65_536, step: 1_024, digits: 0, default: 16_384, tier: "fine", hint: "Fixed GPU ring capacity. Full rings overwrite the oldest slots without allocating or reading back." },
@@ -67,7 +66,6 @@ const options = (scene: SceneDescription, quality: GPUQuality, values: MethodPar
   secondaryParticlesEnabled: values.secondaryParticles !== "off" && values.secondaryParticles !== false,
   secondaryParticleCapacity: numberValue(values, params, "secondaryParticleCapacity"),
   secondaryParticleSurfaceCorrection: numberValue(values, params, "secondaryParticleSurfaceCorrection"),
-  tallCellSettings: { surfaceColumns: numberValue(values, params, "surfaceColumns") },
   octree: {
     pressureIterations: numberValue(values, params, "pressureIterations"),
     faceVelocityMirror: values.faceVelocityMirror === true || values.faceVelocityMirror === "on",
@@ -106,16 +104,11 @@ export const octreeMethod: SimulationMethod = {
   description: "Fully GPU-resident 3D adaptive pressure cells driven by an independently transported signed-distance level set.",
   detail: "pressure-only dyadic octree, GPU-resident factor-4 signed-distance narrow band, compact face transport, catalog power cells, Section 4.3 hybrid PCG with fail-closed paper authority, strict 2:1 smoothing, frame-lagged variational rigid-body coupling, and no topology readbacks",
   backend: "webgpu",
-  qualityLabels: { balanced: "384-column cubic safety grid", high: "7k finest columns", ultra: "12.5k finest columns" },
+  qualityLabels: { balanced: "bounded workload", high: "higher solver effort", ultra: "maximum solver effort" },
   params,
   pressureMapping: "Admitted power authority uses the paper's Section 4.3 hybrid PCG with a 16-iteration hard cap and GPU convergence. Explicit compatibility modes use the larger pressure-effort budget; neither solve reads topology or row counts back.",
   presetFor: (quality) => ({
     pressureIterations: quality === "balanced" ? 128 : quality === "high" ? 320 : 400,
-    // The default 1.2 x 0.9 x 0.8 m dam-break box maps exactly to
-    // 24 x 18 x 16 cells at 384 x/z columns. This keeps the paper's cubic
-    // power/fine lattice invariant while bringing the first factor-4 run up
-    // with 15.6x fewer base cells than the 60 x 45 x 40 production grid.
-    surfaceColumns: quality === "balanced" ? 384 : quality === "high" ? 7_000 : 12_500,
     adaptivity: 1,
     secondaryParticles: "off",
     secondaryParticleCapacity: 16_384,

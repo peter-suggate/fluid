@@ -148,10 +148,10 @@ const quadtreePressureSolverOverride = process.env.FLUID_QUADTREE_PRESSURE_SOLVE
 if (quadtreePressureSolverOverride !== undefined && quadtreePressureSolverOverride !== "chebyshev" && quadtreePressureSolverOverride !== "pcg") throw new Error("FLUID_QUADTREE_PRESSURE_SOLVER must be chebyshev or pcg");
 const remeshIntervalOverride = process.env.FLUID_REMESH_INTERVAL === undefined ? undefined : Number(process.env.FLUID_REMESH_INTERVAL);
 const regularLayersOverride = process.env.FLUID_REGULAR_LAYERS === undefined ? undefined : Number(process.env.FLUID_REGULAR_LAYERS);
-const surfaceColumnsOverride = (() => {
-  if (process.env.FLUID_SURFACE_COLUMNS === undefined) return undefined;
-  const value = Number(process.env.FLUID_SURFACE_COLUMNS);
-  if (!Number.isInteger(value) || value <= 0) throw new Error("FLUID_SURFACE_COLUMNS must be a positive integer");
+const voxelCellSizeOverride = (() => {
+  if (process.env.FLUID_VOXEL_CELL_SIZE === undefined) return undefined;
+  const value = Number(process.env.FLUID_VOXEL_CELL_SIZE);
+  if (!Number.isFinite(value) || value <= 0) throw new Error("FLUID_VOXEL_CELL_SIZE must be positive and finite");
   return value;
 })();
 const expectedGridOverride = (() => {
@@ -873,7 +873,7 @@ async function smokeRenderHybridPresentation(
   packed.set([1.55 * span, 1.12 * span, 1.72 * span, 0], 4);
   packed.set([0, 0.38 * scene.container.height_m, 0, 0], 8);
   packed.set([scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction], 12);
-  packed.set([0, scene.nominalResolution.length_m, presentationBodies.length, 0], 16);
+  packed.set([0, scene.voxelDomain.finestCellSize_m, presentationBodies.length, 0], 16);
   packed.set([solver.info.nx, solver.info.ny, solver.info.nz, solver.info.gridKind === "restricted-tall-cell" ? 2 : solver.info.gridKind === "quadtree-tall-cell" || solver.info.gridKind === "octree" ? 3 : 1], 20);
   packed.set([0, 0.5, 0, 0], 24);
   packed.set([environmentIndex(scene.environment ?? "default"), solver.info.lastDt_s ?? 0, solver.info.maxSpeed_m_s ?? 0, 0], 28);
@@ -1717,10 +1717,8 @@ async function runGPU(
   oracleSteps: number
 ): Promise<GPUSmokeResult> {
   const scenario = createSmokeScenario(scenarioId), scene = applySceneOverrides(scenario.scene);
-  // Validation comparisons need the exact same cubic lattice on every
-  // backend. Method parameter schemas retain their product/UI minimums, while
-  // this scene-level validation override deliberately bypasses those clamps.
-  if (surfaceColumnsOverride !== undefined) scene.numerics.surfaceColumnsOverride = surfaceColumnsOverride;
+  // Validation comparisons author the exact same scene lattice on every backend.
+  if (voxelCellSizeOverride !== undefined) scene.voxelDomain.finestCellSize_m = voxelCellSizeOverride;
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("Dawn did not expose a WebGPU adapter");
   // FLUID_DISABLE_TIMESTAMPS=1 drops the timestamp-query feature: under Dawn
@@ -1752,7 +1750,6 @@ async function runGPU(
   const bodies = initializeRigidBodies(scene.rigidBodies);
   const constructionStarted = performance.now();
   const values = method.presetFor(quality);
-  if (surfaceColumnsOverride !== undefined) values.surfaceColumns = surfaceColumnsOverride;
   if (method.id === "tall-cell" && pressureCyclesOverride !== undefined) values.pressureCycles = pressureCyclesOverride;
   if (method.id === "tall-cell" && pressureWarmStartOverride !== undefined) values.pressureWarmStart = pressureWarmStartOverride ? "on" : "off";
   if ((method.id === "quadtree-tall-cell" || method.id === "octree") && pressureCyclesOverride !== undefined) values.pressureIterations = pressureCyclesOverride;
@@ -3138,8 +3135,7 @@ try {
       const layout = singleTallCellProbe
         ? createSingleTallCellProbeLayout(scenario.scene, quality, 2048, singleTallCellProbe)
         : createTallCellLayout(scenario.scene, quality, 2048,
-          surfaceColumnsOverride === undefined && regularLayersOverride === undefined && maximumNeighborDeltaOverride === undefined ? undefined : {
-          ...(surfaceColumnsOverride === undefined ? {} : { surfaceColumns: surfaceColumnsOverride }),
+          regularLayersOverride === undefined && maximumNeighborDeltaOverride === undefined ? undefined : {
           ...(regularLayersOverride === undefined ? {} : { regularLayers: regularLayersOverride }),
           ...(maximumNeighborDeltaOverride === undefined ? {} : { maximumNeighborDelta: maximumNeighborDeltaOverride })
         });

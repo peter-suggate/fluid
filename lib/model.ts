@@ -54,6 +54,18 @@ export interface SceneDescription {
     top: "open" | "closed";
     fluidWallMode: "free-slip" | "no-slip";
   };
+  /** Authoritative uniform lattice shared by scene geometry, SVO rendering, and fluid when enabled. */
+  voxelDomain: {
+    /** Requested finest physical spacing; integer container dimensions are rounded from this value. */
+    finestCellSize_m: number;
+    /** Payload edge length of each sparse octree terminal brick. */
+    brickSize_cells: 4 | 8;
+    /** Optional minimum address-space bounds. Authored proxies may extend the sparse domain beyond them. */
+    bounds_m?: {
+      min: Vec3;
+      max: Vec3;
+    };
+  };
   /** Optional ground heightfield inside the container; absent means a flat floor at y = 0. */
   terrain?: TerrainDescription;
   fluid: {
@@ -84,13 +96,6 @@ export interface SceneDescription {
     maxDt_s: number;
     pressureRelativeTolerance: number;
     pressureMaxIterations: number;
-    /**
-     * Optional per-scene override of the quality preset's target x/z surface
-     * column count used by GPU grid sizing. Validation scenes (for example the
-     * four-brick cross-transport tank) use it to pin an exact finest grid that
-     * the quality presets could never reach through container shape alone.
-     */
-    surfaceColumnsOverride?: number;
   };
   rigidBodies: RigidBodyDescription[];
 }
@@ -173,6 +178,15 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!c || !(c.width_m > 0) || !(c.height_m > 0) || !(c.depth_m > 0)) errors.push("Container dimensions must be positive");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
+  const voxelDomain = scene.voxelDomain;
+  if (!voxelDomain || !Number.isFinite(voxelDomain.finestCellSize_m) || !(voxelDomain.finestCellSize_m > 0)) errors.push("Voxel finest cell size must be positive and finite");
+  if (!voxelDomain || (voxelDomain.brickSize_cells !== 4 && voxelDomain.brickSize_cells !== 8)) errors.push("Voxel brick size must be 4 or 8 cells");
+  if (scene.systems?.fluid !== false && voxelDomain?.brickSize_cells === 4) errors.push("Fluid-enabled scenes require 8-cell voxel bricks");
+  if (voxelDomain?.bounds_m) {
+    const { min, max } = voxelDomain.bounds_m;
+    if (![min?.x, min?.y, min?.z, max?.x, max?.y, max?.z].every(Number.isFinite)) errors.push("Voxel domain bounds must be finite");
+    else if (!(min.x < max.x && min.y < max.y && min.z < max.z)) errors.push("Voxel domain bounds must have positive extent");
+  }
   if (!scene.fluid || !(scene.fluid.density_kg_m3 > 0)) errors.push("Fluid density must be positive");
   if (!scene.fluid || scene.fluid.dynamicViscosity_Pa_s < 0) errors.push("Dynamic viscosity cannot be negative");
   if (!scene.fluid || scene.fluid.surfaceTension_N_m < 0) errors.push("Surface tension cannot be negative");
@@ -199,7 +213,6 @@ export function validateScene(scene: SceneDescription): string[] {
   if (scene.terrain && c) errors.push(...validateTerrain(scene.terrain, c));
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");
   if (!scene.numerics || !(scene.numerics.fixedDt_s > 0) || !(scene.numerics.maxDt_s > 0)) errors.push("Time steps must be positive");
-  if (scene.numerics?.surfaceColumnsOverride !== undefined && !(scene.numerics.surfaceColumnsOverride > 0)) errors.push("Surface column override must be positive");
   if (scene.numerics && scene.numerics.fixedDt_s > scene.numerics.maxDt_s) errors.push("Fixed time step exceeds maximum time step");
   if (!Array.isArray(scene.rigidBodies)) errors.push("Rigid bodies must be an array");
   else {

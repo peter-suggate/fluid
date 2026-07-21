@@ -1,6 +1,6 @@
 import type { SceneDescription } from "./model";
 import type { GPUEulerianInfo } from "./webgpu-eulerian";
-import type { GPUSolverInstance, MethodParamValues } from "./methods/types";
+import type { GPUSolverInstance } from "./methods/types";
 import { createTallCellLayout, type GPUQuality } from "./tall-cell-grid";
 import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
 
@@ -35,11 +35,8 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     private readonly device: GPUDevice,
     scene: SceneDescription,
     quality: GPUQuality,
-    values: MethodParamValues,
   ) {
-    const requestedColumns = Number(values.surfaceColumns);
     const layout = createTallCellLayout(scene, quality, device.limits.maxTextureDimension3D, {
-      ...(Number.isFinite(requestedColumns) && requestedColumns > 0 ? { surfaceColumns: requestedColumns } : {}),
       // Static presentation needs a lattice, not a stored liquid band.
       regularLayers: 2,
       liquidHalo: 0,
@@ -87,7 +84,7 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     );
 
     this.world = new OctreeSparseBrickWorld(device, scene, dimensions, {
-      brickSize: 8,
+      brickSize: scene.voxelDomain.brickSize_cells,
       haloCells: 0,
       brickAtlas: "off",
       bulkResidencyOnly: false,
@@ -145,13 +142,12 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     device: GPUDevice,
     scene: SceneDescription,
     quality: GPUQuality,
-    values: MethodParamValues,
     progress: StaticSvoSceneProgress,
     signal?: AbortSignal,
   ): Promise<WebGPUStaticSvoScene> {
     progress({ phase: "allocation", taskId: "static-svo.allocate", label: "Allocate static sparse garden", completed: 0, total: 2 });
     if (signal?.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
-    const source = new WebGPUStaticSvoScene(device, scene, quality, values);
+    const source = new WebGPUStaticSvoScene(device, scene, quality);
     try {
       progress({ phase: "warmup", taskId: "static-svo.publish", label: "Publish static sparse garden", completed: 1, total: 2 });
       const encoder = device.createCommandEncoder({ label: "Publish renderer-only SVO scene" });
