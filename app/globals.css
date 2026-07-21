@@ -109,6 +109,9 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .viewport-topline > * { pointer-events: auto; }
 .frame-rate-counter { position: fixed; z-index: 40; top: 15px; right: 16px; min-width: 61px; height: 31px; padding: 0 9px; display: flex; align-items: baseline; justify-content: center; gap: 5px; border: 1px solid rgba(131,241,209,.26); background: rgba(5,18,16,.86); color: var(--accent-strong); font-family: var(--mono); font-variant-numeric: tabular-nums; backdrop-filter: blur(14px); pointer-events: none; }
 .frame-rate-counter strong { font-size: 12px; line-height: 1; }
+/* Keep the meter over the viewport's corner, clear of any open right panel. */
+.lab-shell[data-right-panel-open="true"] .frame-rate-counter { right: 316px; }
+.lab-shell[data-right-panel="performance"] .frame-rate-counter { right: 636px; }
 .frame-rate-counter span { color: var(--muted); font-size: 7px; font-weight: 650; letter-spacing: .1em; }
 .environment-chip { min-height: 31px; margin-right: 69px; padding: 4px 9px 4px 5px; display: grid; grid-template-columns: 35px auto; grid-template-rows: 10px 12px; column-gap: 8px; border: 1px solid var(--line); background: rgba(5,18,16,.73); color: var(--muted); text-align: left; backdrop-filter: blur(14px); }
 .environment-chip > span { grid-row: 1 / 3; width: 35px; display: flex; align-self: stretch; overflow: hidden; border: 1px solid rgba(255,255,255,.12); }
