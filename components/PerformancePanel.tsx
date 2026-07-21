@@ -28,7 +28,7 @@ function CapturePreview({ artifact }: { artifact: GPUStageCaptureArtifact }) {
   return <canvas ref={ref} width={artifact.previewWidth} height={artifact.previewHeight} aria-label={`${artifact.label} ${artifact.selectorLabel} preview`} />;
 }
 
-/** A frame-oriented CPU/GPU trace assembled from the profiler's live timestamp samples. */
+/** Averaged frame usage against the presentation target, with a per-stage drill-down. */
 export function PerformancePanel() {
   const liveSnapshot = useDiagnosticsStore((state) => state.performanceSnapshot);
   const history = useDiagnosticsStore((state) => state.performanceHistory);
@@ -40,7 +40,6 @@ export function PerformancePanel() {
   const runState = useRuntimeStore((state) => state.runState);
   const observedSimRate = useRuntimeStore((state) => state.simRate);
   const setRightPanel = useUIStore((state) => state.setRightPanel);
-  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [selectedStageKey, setSelectedStageKey] = useState("pressure");
   const [averageWindow, setAverageWindow] = useState(30);
   const captureState = useSyncExternalStore(gpuStageCapture.subscribe, gpuStageCapture.getSnapshot, gpuStageCapture.getServerSnapshot);
@@ -50,11 +49,9 @@ export function PerformancePanel() {
     () => history.filter((sample) => sample.methodId === activeMethodId && sample.renderTimingContext === liveSnapshot.renderTimingContext),
     [history, activeMethodId, liveSnapshot.renderTimingContext]
   );
-  const safeIndex = historyIndex === null ? null : Math.min(historyIndex, Math.max(0, matchingHistory.length - 1));
-  const windowEnd = safeIndex ?? matchingHistory.length - 1;
-  const windowSamples = matchingHistory.slice(Math.max(0, windowEnd - averageWindow + 1), windowEnd + 1);
+  const windowSamples = matchingHistory.slice(-averageWindow);
   const snapshot = averagePerformanceSnapshots(windowSamples, liveSnapshot);
-  const averagedFrameCount = windowSamples.length;
+  const averagedFrameCount = Math.max(1, windowSamples.length);
   const contextMatches = snapshot.methodId === activeMethodId && snapshot.renderTimingContext === liveSnapshot.renderTimingContext;
   const physicsTimed = contextMatches && snapshot.gpuPhysicsTimingAvailable;
   const renderTimed = contextMatches && snapshot.gpuRenderTimingAvailable;
@@ -108,7 +105,6 @@ export function PerformancePanel() {
     renderPerFrame_ms,
     pressureSolvesPerAdvance
   });
-  const batchSimulation_ms = schedule.batchSimulation_ms;
   const batchGPU_ms = paused ? 0 : schedule.batchGPU_ms;
   const displayedBatchDepth = paused ? 0 : submissionBatchDepth;
   const submissionEnvelope_ms = batchGPU_ms + renderPerFrame_ms;
@@ -124,13 +120,25 @@ export function PerformancePanel() {
   const measuredUtilizationPercent = measuredUtilization ? measuredUtilization.total * 100 : null;
   const realtimeDemand_ms = paused ? continuousPausedPresentation ? renderPerFrame_ms : 0 : schedule.gpuDemandPerFrame_ms;
   const demandPercent = realtimeDemand_ms / budget * 100;
+  const cpuPercent = cpuTotal / budget * 100;
+  const frameUsagePercent = Math.max(demandPercent, cpuPercent);
+  const overBudget = frameUsagePercent > 100;
   const cpuWindow = windowSamples.map((sample) => sample.cpuSimulation_ms + sample.cpuFrame_ms).sort((a, b) => a - b);
   const cpuP95_ms = cpuWindow.length ? cpuWindow[Math.min(cpuWindow.length - 1, Math.floor(cpuWindow.length * .95))] : cpuTotal;
   const gpuConstrained = demandPercent > 100;
   const cpuSpikeConstrained = !paused && cpuP95_ms > budget;
   const unexplainedSlowdown = !paused && !gpuConstrained && !cpuSpikeConstrained && observedSimRate !== null && observedSimRate < .95;
-  const timelineScale = Math.max(budget, submissionEnvelope_ms, cpuTotal, 0.01);
-  const headroom = paused ? budget - realtimeDemand_ms : schedule.headroom_ms;
+  const headroom = budget - Math.max(realtimeDemand_ms, cpuTotal);
+  const heroScale = Math.max(budget * 1.12, realtimeDemand_ms, cpuTotal, .01);
+  const budgetTick = budget / heroScale * 100;
+  const pausedPresentationNote = renderTimed ? `Last presentation ${renderPerFrame_ms.toFixed(2)} ms on GPU` : "Awaiting presentation timestamp";
+  const verdict = paused
+    ? gpuConstrained ? "Continuous presentation exceeds the frame target" : "Paused · continuous presentation only"
+    : gpuConstrained ? "GPU demand exceeds the frame target"
+      : cpuSpikeConstrained ? "CPU p95 exceeds the frame deadline"
+        : unexplainedSlowdown ? "Slowdown not explained by timestamped work"
+          : measuredStages.length ? `${headroom.toFixed(2)} ms headroom` : "sampling…";
+
   const selectedStage = gpuStages.find((stage) => stage.key === selectedStageKey) ?? gpuStages[0];
   const selectedCaptureLane: GPUStageCaptureLane | undefined = selectedStage?.timer === "render" ? "presentation" : selectedStage?.timer === "physics" ? "physics" : undefined;
   const selectedCaptureTarget = selectedStage && selectedCaptureLane ? captureTargetForStage(activeMethodId, selectedCaptureLane, selectedStage.key) : undefined;
@@ -149,24 +157,25 @@ export function PerformancePanel() {
       },
     });
   };
-  const frameOffset = safeIndex === null ? 0 : Math.max(0, matchingHistory.length - 1 - safeIndex);
-  const frameLabel = safeIndex === null ? "LIVE" : frameOffset === 0 ? "LATEST" : `F−${frameOffset}`;
-  const sampleLabel = averageWindow === 1 ? "single frame" : `${averagedFrameCount}-frame rolling average`;
+
+  const sampleLabel = averageWindow === 1 ? "SINGLE FRAME" : `${averagedFrameCount}-FRAME AVERAGE`;
   const timestampQueriesSupported = liveSnapshot.gpuRenderTimestampSupported;
-  const timerDescription = gpuStatus.state !== "ready" ? "GPU unavailable" : !timestampQueriesSupported ? "GPU timestamps unavailable · CPU + queue fences only" : continuousPausedPresentation && renderTimed ? "Paused simulation · continuous SVO presentation" : paused && renderTimed ? "Paused · last on-change presentation" : physicsTimed && renderTimed ? "Hardware timestamps · physics + presentation" : renderTimed ? "Presentation timestamps · physics pending" : physicsTimed ? "Physics timestamps · presentation pending" : "Awaiting timestamp sample";
-  const gridTicks = Array.from({ length: 5 }, (_, index) => index * timelineScale / 4);
+  const timerDescription = gpuStatus.state !== "ready" ? "GPU unavailable" : !timestampQueriesSupported ? "GPU timestamps unavailable · CPU + queue fences only" : continuousPausedPresentation && renderTimed ? "Paused simulation · continuous presentation timestamps" : physicsTimed && renderTimed ? "Hardware timestamps · physics + presentation" : renderTimed ? "Presentation timestamps · physics pending" : physicsTimed ? "Physics timestamps · presentation pending" : "Awaiting timestamp sample";
   const averagedHistory = rollingPerformanceSnapshots(matchingHistory, averageWindow);
   const historyValues = averagedHistory.map((sample) => ({ gpu: measuredGPUTime_ms(sample), cpu: sample.cpuSimulation_ms + sample.cpuFrame_ms }));
   const historyMax = Math.max(budget, ...historyValues.flatMap((sample) => [sample.gpu, sample.cpu]), 0.01);
   const points = (key: "gpu" | "cpu") => historyValues.map((sample, index) => `${historyValues.length < 2 ? 0 : index / (historyValues.length - 1) * 100},${48 - Math.min(sample[key] / historyMax, 1) * 44}`).join(" ");
-  const physicsDemandPercent = paused ? 0 : Math.min(100, schedule.physicsPerFrame_ms / budget * 100);
-  const renderDemandPercent = paused && !continuousPausedPresentation ? 0 : Math.min(100 - physicsDemandPercent, schedule.renderPerFrame_ms / budget * 100);
-  const observedPressureSolvesPerFrame = paused ? 0 : observedSimRate === null ? null : schedule.pressureSolvesPerFrame * observedSimRate;
-  const advanceDisplay_ms = physicsPerStep_ms > 0 ? physicsPerStep_ms : timelineScale / submissionBatchDepth;
-  const cpuTimeline = cpuStages.map((stage, index) => ({ stage, left: cpuStages.slice(0, index).reduce((sum, previous) => sum + previous.value, 0) / timelineScale * 100 }));
-  const physicsOffsets = physicsStages.map((_, index) => physicsStages.slice(0, index).reduce((sum, previous) => sum + (stageTimed(previous) ? previous.value : 0), 0));
-  const physicsTimeline = Array.from({ length: paused ? 0 : submissionBatchDepth }, (_, step) => physicsStages.map((stage, index) => ({ stage, step, left: (step * physicsPerStep_ms + physicsOffsets[index]) / timelineScale * 100, width: stageTimed(stage) ? stage.value / timelineScale * 100 : 0 }))).flat();
-  const renderTimeline = renderStages.map((stage, index) => ({ stage, left: (batchGPU_ms + renderStages.slice(0, index).reduce((sum, previous) => sum + (stageTimed(previous) ? previous.value : 0), 0)) / timelineScale * 100, width: stageTimed(stage) ? stage.value / timelineScale * 100 : 0 }));
+
+  const stageRows = (stages: PerformanceStage[]) => {
+    const scale = Math.max(...stages.map((stage) => stageTimed(stage) && stage.active ? stage.value : 0), .01);
+    return stages.map((stage) => <button key={stage.key} className={`perf-row${selectedStage?.key === stage.key ? " selected" : ""}`} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value, stageTimed(stage), stage.active)}`}>
+      <i className={stage.className} />
+      <span>{stage.shortLabel}</span>
+      <div className="perf-row-bar">{stageTimed(stage) && stage.active && stage.value > 0 && <b className={stage.className} style={{ width: `${Math.max(1, stage.value / scale * 100)}%` }} />}</div>
+      <output>{formatMs(stage.value, stageTimed(stage), stage.active)}</output>
+    </button>);
+  };
+  const cpuScale = Math.max(...cpuStages.map((stage) => stage.value), .01);
 
   return <aside id="performance-panel" className="right-panel panel-scroll performance-panel" aria-label="Performance profiler" data-testid="performance-panel" data-method={activeMethodId}
     data-render-timing-context={liveSnapshot.renderTimingContext}
@@ -175,98 +184,121 @@ export function PerformancePanel() {
     data-render-timestamp-supported={liveSnapshot.gpuRenderTimestampSupported}
     data-render-timing-available={liveSnapshot.gpuRenderTimingAvailable}
     data-render-timing-total-ms={liveSnapshot.gpuRenderTimingAvailable ? liveSnapshot.gpuRender_ms : undefined}>
-    <header className="performance-header">
-      <div className="performance-title">
-        <div><p className="eyebrow">FRAME GRAPH · {frameLabel} · {sampleLabel}</p><h1>Performance trace</h1></div>
-        <span className="trace-source"><i />{timerDescription}</span>
-      </div>
-      <div className="frame-browser" aria-label="Frame selection">
-        <button onClick={() => setHistoryIndex((current) => current === null ? Math.max(0, matchingHistory.length - 2) : Math.max(0, current - 1))} disabled={matchingHistory.length < 2 || safeIndex === 0} aria-label="Previous frame">‹</button>
-        <div><strong>{frameLabel}</strong><small>{safeIndex === null ? sampleLabel : `${sampleLabel} · ${frameOffset} behind`}</small></div>
-        <button onClick={() => setHistoryIndex((current) => current === null ? null : current >= matchingHistory.length - 2 ? null : current + 1)} disabled={safeIndex === null} aria-label="Next frame">›</button>
-        <button className={safeIndex === null ? "active" : ""} onClick={() => setHistoryIndex(null)}>LIVE</button>
+    <header className="perf-header">
+      <div>
+        <p className="eyebrow">LIVE PROFILE · {sampleLabel}</p>
+        <h1>Performance trace</h1>
+        <span className="perf-source"><i />{timerDescription}</span>
       </div>
       <label className="averaging-control"><small>AVERAGING</small><select value={averageWindow} onChange={(event) => setAverageWindow(Number(event.target.value))} aria-label="Timing averaging window"><option value="1">1 frame</option><option value="10">10 frames</option><option value="30">30 frames</option><option value="60">60 frames</option><option value="100">100 frames</option></select></label>
       <button className="panel-close" onClick={() => setRightPanel(null)} aria-label="Close performance profiler">×</button>
     </header>
 
-    <section className={`performance-overview schedule-overview${gpuConstrained ? " over-budget" : ""}`} aria-label="Frame performance summary">
-      <div className="budget-gauge" style={{ "--utilization": `${measuredUtilizationPercent ?? 0}%` } as CSSProperties} title="Timestamped GPU work divided by queue-confirmed wall intervals">
-        <div><strong>{measuredUtilizationPercent === null ? "—" : `${measuredUtilizationPercent.toFixed(0)}%`}</strong><small>GPU busy</small></div>
+    <section className={`perf-hero${overBudget ? " over-budget" : ""}`} aria-label="Averaged frame usage against the presentation target">
+      <div className="perf-gauge" style={{ "--usage": `${Math.min(100, Math.max(0, frameUsagePercent))}%` } as CSSProperties} title="Averaged frame demand divided by the presentation deadline">
+        <div><strong>{measuredStages.length ? `${frameUsagePercent.toFixed(0)}%` : "—"}</strong><small>OF {PRESENTATION_FPS} HZ FRAME</small></div>
       </div>
-      <div className="realtime-budget-summary">
-        <div className="realtime-budget-title"><span><small>{continuousPausedPresentation ? "CONTINUOUS SVO LOAD" : paused ? "IDLE GPU LOAD" : "REALTIME GPU LOAD"}</small><strong>{measuredStages.length ? `${demandPercent.toFixed(0)}%` : "—"}</strong></span><b>{paused && !continuousPausedPresentation ? renderTimed ? `${renderPerFrame_ms.toFixed(2)} ms on last change` : "awaiting timestamp…" : measuredStages.length ? `${realtimeDemand_ms.toFixed(2)} / ${budget.toFixed(2)} ms` : "sampling…"}</b></div>
-        <div className="frame-budget-track" aria-label={`${schedule.physicsPerFrame_ms.toFixed(2)} milliseconds physics, ${schedule.renderPerFrame_ms.toFixed(2)} milliseconds presentation, ${Math.max(0, headroom).toFixed(2)} milliseconds headroom`}>
-          <span className="budget-physics" style={{ width: `${physicsDemandPercent}%` }} />
-          <span className="budget-render" style={{ width: `${renderDemandPercent}%` }} />
-          <i />
+      <div className="perf-budget">
+        <div className="perf-budget-head"><small>FRAME USAGE VS {PRESENTATION_FPS} HZ TARGET</small><strong>{verdict}</strong></div>
+        <div className="perf-budget-row">
+          <span>GPU</span>
+          <div className="perf-track" aria-label={`${(paused ? 0 : schedule.physicsPerFrame_ms).toFixed(2)} milliseconds physics and ${renderPerFrame_ms.toFixed(2)} milliseconds presentation against a ${budget.toFixed(2)} millisecond deadline`}>
+            {!paused && physicsStages.map((stage) => stageTimed(stage) && stage.active && stage.value > 0 && <button key={stage.key} className={`perf-flame ${stage.className}${selectedStage?.key === stage.key ? " selected" : ""}`} style={{ width: `${stage.value * schedule.advancesPerFrame / heroScale * 100}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value)} × ${schedule.advancesPerFrame.toFixed(2)} advances / frame`}><span>{stage.shortLabel}</span></button>)}
+            {renderStages.map((stage) => stageTimed(stage) && stage.active && stage.value > 0 && <button key={stage.key} className={`perf-flame ${stage.className}${selectedStage?.key === stage.key ? " selected" : ""}`} style={{ width: `${stage.value / heroScale * 100}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value)}`}><span>{stage.shortLabel}</span></button>)}
+            <b className="perf-tick" style={{ left: `${budgetTick}%` }} />
+          </div>
+          <output>{measuredStages.length ? `${realtimeDemand_ms.toFixed(2)} ms` : "sampling…"}</output>
         </div>
-        <div className="frame-budget-labels"><span>0</span><span><b />physics {paused ? "0.00" : schedule.physicsPerFrame_ms.toFixed(2)}</span><span><b />render {paused && !continuousPausedPresentation ? "on change" : schedule.renderPerFrame_ms.toFixed(2)}</span><strong>{budget.toFixed(2)} ms deadline</strong></div>
+        <div className="perf-budget-row">
+          <span>CPU</span>
+          <div className="perf-track" aria-label={`${cpuTotal.toFixed(2)} milliseconds main-thread work against a ${budget.toFixed(2)} millisecond deadline`}>
+            {cpuStages.map((stage) => stage.value > 0 && <span key={stage.key} className="perf-flame seg-cpu" style={{ width: `${stage.value / heroScale * 100}%` }} title={`${stage.label} · ${formatMs(stage.value)} · ${stage.note}`}><span>{stage.shortLabel}</span></span>)}
+            <b className="perf-tick" style={{ left: `${budgetTick}%` }} />
+          </div>
+          <output>{cpuTotal.toFixed(2)} ms</output>
+        </div>
+        <div className="perf-budget-key">
+          <span><b className="seg-physics" />physics {paused ? "0.00" : schedule.physicsPerFrame_ms.toFixed(2)}</span>
+          <span><b className="seg-render" />render {renderPerFrame_ms.toFixed(2)}</span>
+          <span><b className="seg-cpu" />cpu {cpuTotal.toFixed(2)}</span>
+          <strong>{budget.toFixed(2)} ms deadline</strong>
+        </div>
       </div>
-      <div className="overview-stat"><small>MEASURED UTILIZATION</small><strong>{measuredUtilizationPercent === null ? "sampling…" : `${measuredUtilizationPercent.toFixed(1)}% busy`}</strong><span>{measuredUtilization === null ? "awaiting completion cadence" : paused && !continuousPausedPresentation ? "simulation paused" : `${(measuredUtilization.physics * 100).toFixed(0)}% physics · ${(measuredUtilization.presentation * 100).toFixed(0)}% presentation`}</span></div>
-      <div className="overview-stat pressure-cadence"><small>PRESSURE CADENCE</small><strong>{paused ? "0.00" : schedule.pressureSolvesPerFrame.toFixed(2)} solves / frame</strong><span>{paused ? "simulation paused" : `${schedule.pressureSolvesPerSecond.toFixed(1)} / s · ${schedule.pressureSolvesPerAdvance} per GPU advance`}</span></div>
-      <div className="overview-stat"><small>OBSERVED COMPLETION</small><strong>{observedPressureSolvesPerFrame === null ? "measuring…" : `${observedPressureSolvesPerFrame.toFixed(2)} solves / frame`}</strong><span>{paused ? continuousPausedPresentation ? "simulation paused · SVO presents at 60 Hz" : "idle · presentation redraws on change" : `${observedSimRate === null ? "simulation rate sampling" : `×${observedSimRate.toFixed(2)} realtime`} · ${completionRate === null ? "queue sampling" : `queue ×${completionRate.toFixed(2)}`}`}</span></div>
     </section>
 
-    <section className={`schedule-translation${gpuConstrained || cpuSpikeConstrained || unexplainedSlowdown ? " constrained" : ""}`} aria-label="Scheduling model">
-      <div className="schedule-verdict"><small>CAPACITY VERDICT</small><strong>{continuousPausedPresentation ? gpuConstrained ? "Continuous SVO exceeds the presentation budget" : `${headroom.toFixed(2)} ms SVO headroom per presentation frame` : paused ? "Paused · viewport renders only when its inputs change" : gpuConstrained ? "GPU demand exceeds the presentation budget" : cpuSpikeConstrained ? "CPU p95 exceeds the presentation deadline" : unexplainedSlowdown ? "Timestamped work does not explain the observed slowdown" : `${headroom.toFixed(2)} ms GPU headroom per presentation frame`}</strong><span>{continuousPausedPresentation ? renderTimed ? `Continuous presentation ${renderPerFrame_ms.toFixed(2)} ms on GPU` : "Awaiting presentation timestamp" : paused ? renderTimed ? `Last presentation ${renderPerFrame_ms.toFixed(2)} ms on GPU` : "Awaiting presentation timestamp" : gpuConstrained ? `${Math.abs(headroom).toFixed(2)} ms over budget` : `CPU ${cpuTotal.toFixed(2)} ms avg · ${cpuP95_ms.toFixed(2)} p95`}</span></div>
-      <div className="schedule-node"><small>PRESENTATION FRAME</small><strong>{budget.toFixed(2)} ms wall time</strong><span>needs {paused ? "0.00" : schedule.advancesPerFrame.toFixed(2)} GPU advances</span><b>{paused ? "0.00" : schedule.pressureSolvesPerFrame.toFixed(2)} pressure solves</b></div>
-      <i className="schedule-arrow">→</i>
-      <div className="schedule-node active"><small>ONE GPU ADVANCE</small><strong>{schedule.gpuAdvance_ms.toFixed(2)} ms simulation</strong><span>costs {physicsPerStep_ms.toFixed(2)} ms on GPU</span><b>{schedule.pressureSolvesPerAdvance} pressure {schedule.pressureSolvesPerAdvance === 1 ? "solve" : "solves"}</b></div>
-      <i className="schedule-arrow">×{displayedBatchDepth}</i>
-      <div className="schedule-node"><small>ONE QUEUE SLOT</small><strong>{paused ? "0.00" : batchSimulation_ms.toFixed(2)} ms simulation</strong><span>costs {batchGPU_ms.toFixed(2)} ms on GPU</span><b>next slot follows completion or presentation</b></div>
+    <section className="perf-meta" aria-label="Measured scheduling summary">
+      <div><small>GPU BUSY</small><strong>{measuredUtilizationPercent === null ? "—" : `${measuredUtilizationPercent.toFixed(0)}%`}</strong><span>{measuredUtilization === null ? "awaiting completion cadence" : paused ? pausedPresentationNote : `${(measuredUtilization.physics * 100).toFixed(0)}% physics · ${(measuredUtilization.presentation * 100).toFixed(0)}% present`}</span></div>
+      <div className={gpuConstrained || cpuSpikeConstrained ? "constrained" : undefined}><small>HEADROOM</small><strong>{measuredStages.length ? `${headroom.toFixed(2)} ms` : "—"}</strong><span>{gpuConstrained ? `${Math.abs(headroom).toFixed(2)} ms over the deadline` : cpuSpikeConstrained ? `CPU p95 ${cpuP95_ms.toFixed(2)} ms` : `per frame at ${PRESENTATION_FPS} Hz`}</span></div>
+      <div><small>SIM CADENCE</small><strong>{paused ? "paused" : `${schedule.advancesPerFrame.toFixed(2)} adv / frame`}</strong><span>{paused ? "presentation redraws continuously" : `×${displayedBatchDepth} per submission · ${schedule.pressureSolvesPerFrame.toFixed(2)} pressure solves`}</span></div>
+      <div><small>OBSERVED RATE</small><strong>{paused ? "—" : observedSimRate === null ? "measuring…" : `×${observedSimRate.toFixed(2)} realtime`}</strong><span>{paused ? "simulation paused" : completionRate === null ? "queue sampling" : `queue completion ×${completionRate.toFixed(2)}`}</span></div>
     </section>
 
-    <div className="performance-workspace">
-      <section className="trace-card timeline-card">
-        <header className="trace-card-header"><div><p className="eyebrow">GPU ELAPSED TIME · COMPLETION-GATED QUEUE</p><h2>Dense rolling advances with presentation boundaries</h2></div><div className="timeline-legend"><span><i className="legend-compute" />Compute</span><span><i className="legend-graphics" />Presentation</span><span><i className="legend-transfer" />Transfer / gap</span></div></header>
-        <div className="timeline-ruler"><span>0</span>{gridTicks.slice(1).map((tick) => <span key={tick}>{tick.toFixed(1)} ms</span>)}</div>
-        <div className="timeline-lanes">
-          <div className="timeline-lane"><div className="lane-label"><strong>CPU</strong><small>Main thread</small></div><div className="lane-track cpu-track">{cpuTimeline.map(({ stage, left }) => <button key={stage.key} className="cpu-block" style={{ left: `${left}%`, width: `${Math.max(.7, stage.value / timelineScale * 100)}%` }} title={`${stage.label} · ${formatMs(stage.value)}`}><span>{stage.shortLabel}</span></button>)}</div><output>{cpuTotal.toFixed(2)} ms</output></div>
-          <div className="timeline-connector"><span>queue.submit</span><i /></div>
-          <div className="timeline-lane advance-lane"><div className="lane-label"><strong>ADVANCES</strong><small>{schedule.pressureSolvesPerAdvance} pressure / advance</small></div><div className="lane-track advance-track">{Array.from({ length: displayedBatchDepth }, (_, step) => <span key={step} style={{ left: `${step * advanceDisplay_ms / timelineScale * 100}%`, width: `${advanceDisplay_ms / timelineScale * 100}%` }}><b>#{step + 1}</b><small>{schedule.gpuAdvance_ms.toFixed(0)} ms sim</small></span>)}{renderPerFrame_ms > 0 && <span className="presentation-window" style={{ left: `${batchGPU_ms / timelineScale * 100}%`, width: `${renderPerFrame_ms / timelineScale * 100}%` }}><b>PRESENT</b></span>}</div><output>{paused ? 0 : schedule.pressureSolvesPerBatch} solves</output></div>
-          <div className="timeline-lane gpu-lane"><div className="lane-label"><strong>GPU PASSES</strong><small>{timestampQueriesSupported ? "elapsed execution" : "timestamps unavailable"}</small></div><div className="lane-track gpu-track">{physicsTimeline.map(({ stage, step, left, width }) => <button key={`${step}:${stage.key}`} className={`gpu-block ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} style={{ left: `${left}%`, width: `${Math.max(.7, width)}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`Advance ${step + 1} · ${stage.label} · ${formatMs(stage.value, stageTimed(stage), stage.active)}`}><span>{stage.shortLabel}</span><b>{formatMs(stage.value, stageTimed(stage), stage.active)}</b></button>)}{renderTimeline.map(({ stage, left, width }) => <button key={`render:${stage.key}`} className={`gpu-block ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} style={{ left: `${left}%`, width: `${Math.max(.7, width)}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value, stageTimed(stage), stage.active)}`}><span>{stage.shortLabel}</span><b>{formatMs(stage.value, stageTimed(stage), stage.active)}</b></button>)}</div><output>{measuredStages.length ? `${submissionEnvelope_ms.toFixed(2)} ms` : "—"}</output></div>
-          <div className="timeline-lane async-lane"><div className="lane-label"><strong>ASYNC</strong><small>{adaptive ? "Topology worker" : "Browser + readback"}</small></div><div className="lane-track">{adaptive ? <span className={`async-block${snapshot.adaptiveRebuildPending ? " active" : ""}`} style={{ width: `${Math.min(100, Math.max(3, snapshot.adaptiveRebuildWall_ms / timelineScale * 100))}%` }}><i />{snapshot.adaptiveRebuildPending ? "REBUILD IN FLIGHT" : "LAST ADAPTIVE REBUILD"}</span> : <span className="async-note"><i />Readbacks resolve without blocking the queue unless consumed by the CPU</span>}</div><output>{adaptive && snapshot.adaptiveRebuildWall_ms ? `${snapshot.adaptiveRebuildWall_ms.toFixed(1)} ms` : "non-blocking"}</output></div>
+    <section className="perf-history" aria-label="Recent frame history">
+      <header><small>LAST {matchingHistory.length} FRAMES{averageWindow > 1 ? ` · ${averageWindow}-FRAME ROLLING AVERAGE` : " · RAW"}</small><div className="perf-legend"><span><i className="history-gpu" />GPU</span><span><i className="history-cpu" />CPU</span><span><i className="history-budget" />Target</span></div></header>
+      <svg viewBox="0 0 100 50" preserveAspectRatio="none" role="img" aria-label={`Recent timing history; vertical scale zero to ${historyMax.toFixed(1)} milliseconds`}>
+        <line x1="0" y1={48 - budget / historyMax * 44} x2="100" y2={48 - budget / historyMax * 44} />
+        <polyline className="history-gpu" points={points("gpu")} />
+        <polyline className="history-cpu" points={points("cpu")} />
+      </svg>
+      <footer><span>0 ms</span><span>{historyMax.toFixed(1)} ms</span></footer>
+    </section>
+
+    <section className="perf-breakdown" aria-label="Per-stage breakdown">
+      {physicsStages.length > 0 && <div className="perf-group">
+        <header><small>GPU PHYSICS · PER ADVANCE</small><output>{physicsTimed ? `${physicsPerStep_ms.toFixed(2)} ms / advance` : "awaiting timestamps"}</output></header>
+        <div className="perf-rows">{stageRows(physicsStages)}</div>
+      </div>}
+      {adaptiveTopologyStages.length > 0 && <div className="perf-group">
+        <header><small>ADAPTIVE TOPOLOGY · EVENT-DRIVEN, NOT PER ADVANCE</small><output>{snapshot.adaptiveRebuildWall_ms ? `${snapshot.adaptiveRebuildWall_ms.toFixed(1)} ms wall${snapshot.adaptiveRebuildPending ? " · in flight" : ""}` : "no rebuild sampled"}</output></header>
+        <div className="perf-rows">{stageRows(adaptiveTopologyStages)}</div>
+      </div>}
+      <div className="perf-group">
+        <header><small>GPU PRESENTATION · PER FRAME</small><output>{renderTimed ? `${renderPerFrame_ms.toFixed(2)} ms / frame` : "awaiting timestamps"}</output></header>
+        <div className="perf-rows">{stageRows(renderStages)}</div>
+        <div className="perf-submission"><span>ONE GPU SUBMISSION · ×{displayedBatchDepth} ADVANCES + PRESENT</span><output>{measuredStages.length ? `${submissionEnvelope_ms.toFixed(2)} ms` : "—"}</output></div>
+      </div>
+      <div className="perf-group">
+        <header><small>CPU · MAIN THREAD</small><output>{cpuTotal.toFixed(2)} ms / frame</output></header>
+        <div className="perf-rows">{cpuStages.map((stage) => <div key={stage.key} className="perf-row" title={`${stage.label} · ${stage.note}`}>
+          <i className="seg-cpu" />
+          <span>{stage.shortLabel}</span>
+          <div className="perf-row-bar">{stage.value > 0 && <b className="seg-cpu" style={{ width: `${Math.max(1, stage.value / cpuScale * 100)}%` }} />}</div>
+          <output>{formatMs(stage.value)}</output>
+        </div>)}</div>
+      </div>
+    </section>
+
+    {selectedStage && <section className="perf-inspector" aria-label="Stage inspector">
+      <header>
+        <span className={selectedStage.className} />
+        <div><small>{selectedStage.group.toUpperCase()} PASS · {selectedStage.timer === "physics" ? "PHYSICS QUEUE" : selectedStage.timer === "render" ? "PRESENTATION" : "ASYNC WORKER"}</small><h2>{selectedStage.label}</h2></div>
+        <strong>{formatMs(selectedStage.value, stageTimed(selectedStage), selectedStage.active)}</strong>
+      </header>
+      <p>{selectedStage.description}</p>
+      <div className="perf-io">
+        <div><small>READS</small>{selectedStage.reads.map((item) => <span key={item}><i>R</i>{item}</span>)}</div>
+        <div><small>WRITES</small>{selectedStage.writes.map((item) => <span key={item}><i>W</i>{item}</span>)}</div>
+        <div><small>WAITS FOR</small>{selectedStage.dependsOn.map((item) => <span key={item}><i>↳</i>{gpuStages.find((stage) => stage.key === item)?.shortLabel ?? item.toUpperCase()}</span>)}{selectedStage.sync && <span className="sync-detail"><i>⇄</i>{selectedStage.sync}</span>}</div>
+      </div>
+      <div className="perf-capture">
+        <div className="perf-capture-head">
+          <div><small>DIAGNOSTIC RESOURCE</small><strong>{selectedCaptureTarget?.label ?? "Timing and counters only"}</strong><span>{selectedCaptureTarget ? `${selectedCaptureTarget.selectorLabel}${selectedCaptureTarget.units ? ` · ${selectedCaptureTarget.units}` : ""} · centre slice` : captureDisabledReason}</span></div>
+          <span className={`perf-phase phase-${captureState.phase}`}><i />{captureState.phase.toUpperCase()}</span>
+          <button onClick={captureBusy ? () => gpuStageCapture.cancel() : armSelectedCapture} disabled={!captureBusy && Boolean(captureDisabledReason)} title={captureDisabledReason}>{captureBusy ? "CANCEL" : "CAPTURE NEXT"}</button>
         </div>
-        <footer className="timeline-footnote"><span><i className="sync-mark" />Post-presentation depth rounds up to the next whole advance, preferring simulation throughput even when that step crosses the 16.67 ms target.</span><span>{gpuInfo?.gpuPendingBatches ?? 0} advances pending · {(gpuInfo?.gpuQueueStarved_ms ?? 0).toFixed(2)} ms last host gap</span></footer>
-      </section>
-
-      <section className="trace-card frame-graph-card">
-        <header className="trace-card-header"><div><p className="eyebrow">FRAME GRAPH</p><h2>Pass dependencies & resource flow</h2></div><small>SELECT A PASS TO INSPECT</small></header>
-        <div className="frame-graph-flow">
-          <div className="graph-section"><span>PHYSICS</span><div>{physicsStages.map((stage, index) => <div className="graph-node-wrap" key={stage.key}><button className={`graph-node ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} onClick={() => setSelectedStageKey(stage.key)}><i /><strong>{stage.shortLabel}</strong><small>{formatMs(stage.value, stageTimed(stage), stage.active)}</small></button>{index < physicsStages.length - 1 && <b className="graph-arrow">→</b>}</div>)}</div></div>
-          {adaptiveTopologyStages.length > 0 && <><b className="graph-divider">EVENT-DRIVEN · NOT REPEATED PER ADVANCE</b><div className="graph-section async-graph-section"><span>ADAPTIVE TOPOLOGY</span><div>{adaptiveTopologyStages.map((stage, index) => <div className="graph-node-wrap" key={stage.key}><button className={`graph-node ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} onClick={() => setSelectedStageKey(stage.key)}><i /><strong>{stage.shortLabel}</strong><small>{formatMs(stage.value, stageTimed(stage), stage.active)}</small></button>{index < adaptiveTopologyStages.length - 1 && <b className="graph-arrow">→</b>}</div>)}</div></div></>}
-          <b className="graph-divider">QUEUE ORDER · OVERDUE 60 HZ PRESENTATION RUNS FIRST</b>
-          <div className="graph-section"><span>PRESENTATION</span><div>{renderStages.map((stage, index) => <div className="graph-node-wrap" key={stage.key}><button className={`graph-node ${stage.className} ${selectedStage?.key === stage.key ? "selected" : ""}`} onClick={() => setSelectedStageKey(stage.key)}><i /><strong>{stage.shortLabel}</strong><small>{formatMs(stage.value, stageTimed(stage), stage.active)}</small></button>{index < renderStages.length - 1 && <b className="graph-arrow">→</b>}</div>)}</div></div>
-        </div>
-        {selectedStage && <article className="stage-inspector">
-          <div className="stage-inspector-title"><span className={selectedStage.className} /><div><small>{selectedStage.group.toUpperCase()} PASS</small><h3>{selectedStage.label}</h3></div><strong>{formatMs(selectedStage.value, stageTimed(selectedStage), selectedStage.active)}</strong></div>
-          <p>{selectedStage.description}</p>
-          <div className="resource-columns"><div><small>READS</small>{selectedStage.reads.map((item) => <span key={item}><i>R</i>{item}</span>)}</div><div><small>WRITES</small>{selectedStage.writes.map((item) => <span key={item}><i>W</i>{item}</span>)}</div><div><small>WAITS FOR</small>{selectedStage.dependsOn.map((item) => <span key={item}><i>↳</i>{gpuStages.find((stage) => stage.key === item)?.shortLabel ?? item.toUpperCase()}</span>)}{selectedStage.sync && <span className="sync-detail"><i>⇄</i>{selectedStage.sync}</span>}</div></div>
-          <div className="stage-capture-action"><div><small>DIAGNOSTIC RESOURCE</small><strong>{selectedCaptureTarget?.label ?? "Timing and counters only"}</strong><span>{selectedCaptureTarget ? `${selectedCaptureTarget.selectorLabel}${selectedCaptureTarget.units ? ` · ${selectedCaptureTarget.units}` : ""} · centre slice` : captureDisabledReason}</span></div><button onClick={captureBusy ? () => gpuStageCapture.cancel() : armSelectedCapture} disabled={!captureBusy && Boolean(captureDisabledReason)} title={captureDisabledReason}>{captureBusy ? "CANCEL CAPTURE" : "CAPTURE NEXT"}</button></div>
-        </article>}
-      </section>
-
-      <section className="trace-card history-card">
-        <header className="trace-card-header"><div><p className="eyebrow">FRAME HISTORY · {averageWindow === 1 ? "RAW" : `${averageWindow}-FRAME ROLLING AVERAGE`}</p><h2>Last {matchingHistory.length} frames</h2></div><div className="timeline-legend"><span><i className="history-gpu" />GPU</span><span><i className="history-cpu" />CPU</span><span><i className="history-budget" />Budget</span></div></header>
-        <div className="history-chart"><svg viewBox="0 0 100 50" preserveAspectRatio="none" role="img" aria-label={`Recent timing history; vertical scale zero to ${historyMax.toFixed(1)} milliseconds`}><line x1="0" y1={48 - budget / historyMax * 44} x2="100" y2={48 - budget / historyMax * 44} /><polyline className="history-gpu" points={points("gpu")} /><polyline className="history-cpu" points={points("cpu")} />{safeIndex !== null && <line className="history-cursor" x1={matchingHistory.length < 2 ? 0 : safeIndex / (matchingHistory.length - 1) * 100} y1="2" x2={matchingHistory.length < 2 ? 0 : safeIndex / (matchingHistory.length - 1) * 100} y2="49" />}</svg><span>0</span><span>{historyMax.toFixed(1)} ms</span></div>
-        <input type="range" min="0" max={Math.max(0, matchingHistory.length - 1)} value={safeIndex ?? Math.max(0, matchingHistory.length - 1)} onChange={(event) => setHistoryIndex(Number(event.target.value))} disabled={!matchingHistory.length} aria-label="Inspect a frame from history" />
-      </section>
-
-      <aside className="trace-card capture-card">
-        <div><p className="eyebrow">DIAGNOSTIC CAPTURE · INSTRUMENTED</p><h2>{captureState.artifact?.label ?? selectedCaptureTarget?.label ?? "Stage resource capture"}</h2><span className={`capture-status phase-${captureState.phase}`}><i />{captureState.phase.toUpperCase()}</span></div>
-        {captureState.phase === "ready" && captureState.artifact ? <div className="capture-result">
+        {captureState.phase === "ready" && captureState.artifact ? <div className="perf-capture-result">
           <CapturePreview artifact={captureState.artifact} />
-          <div className="capture-interpretation"><strong>{captureState.artifact.selectorLabel.toUpperCase()} · {captureState.artifact.dimensions.join("×")}</strong><p>{captureState.artifact.interpretation}</p></div>
-          <dl><div><dt>Clean stage</dt><dd>{captureState.artifact.baseline.stage_ms === undefined ? "—" : `${captureState.artifact.baseline.stage_ms.toFixed(3)} ms`}</dd></div><div><dt>Range</dt><dd>{Number.isFinite(captureState.artifact.minimum) && Number.isFinite(captureState.artifact.maximum) ? `${captureState.artifact.minimum.toPrecision(3)} → ${captureState.artifact.maximum.toPrecision(3)}` : "Unavailable"}</dd></div><div><dt>Coverage</dt><dd>{captureState.artifact.totalValues.toLocaleString()} values{captureState.artifact.invalidValues > 0 ? ` · ${captureState.artifact.invalidValues.toLocaleString()} invalid` : ""}</dd></div><div><dt>Readback wall</dt><dd>{captureState.artifact.readbackWall_ms.toFixed(1)} ms*</dd></div></dl>
+          <div><strong>{captureState.artifact.label.toUpperCase()} · {captureState.artifact.selectorLabel.toUpperCase()} · {captureState.artifact.dimensions.join("×")}</strong><p>{captureState.artifact.interpretation}</p></div>
+          <dl>
+            <div><dt>Clean stage</dt><dd>{captureState.artifact.baseline.stage_ms === undefined ? "—" : `${captureState.artifact.baseline.stage_ms.toFixed(3)} ms`}</dd></div>
+            <div><dt>Range</dt><dd>{Number.isFinite(captureState.artifact.minimum) && Number.isFinite(captureState.artifact.maximum) ? `${captureState.artifact.minimum.toPrecision(3)} → ${captureState.artifact.maximum.toPrecision(3)}` : "Unavailable"}</dd></div>
+            <div><dt>Coverage</dt><dd>{captureState.artifact.totalValues.toLocaleString()} values{captureState.artifact.invalidValues > 0 ? ` · ${captureState.artifact.invalidValues.toLocaleString()} invalid` : ""}</dd></div>
+            <div><dt>Readback wall</dt><dd>{captureState.artifact.readbackWall_ms.toFixed(1)} ms*</dd></div>
+          </dl>
           <small>* Instrumented completion latency, never used as production stage timing. {(captureState.artifact.stagingBytes / 1024).toFixed(0)} KiB staged asynchronously.</small>
-        </div> : <>
-          <div className="architecture-model"><span><small>SELECTED</small><strong>{selectedStage?.shortLabel ?? "NONE"}</strong></span><span><small>PRODUCT</small><strong>{selectedCaptureTarget ? "SUMMARY" : "UNAVAILABLE"}</strong></span><span><small>PREVIEW</small><strong>{selectedCaptureTarget ? "≤256²" : "—"}</strong></span><span><small>RAW 3D</small><strong>DISABLED</strong></span></div>
-          <p>{captureState.message ?? (selectedCaptureTarget ? "Capture the next matching stage boundary. A full-domain GPU summary and bounded centre-slice preview are read back asynchronously." : "Select a stage with a registered texture product. Timing-only stages remain visible in the frame graph.")}</p>
-          <dl><div><dt>GPU physics</dt><dd>{measuredStages.length ? `${physicsPerStep_ms.toFixed(2)} ms / solve` : "sampling"}</dd></div><div><dt>CPU sync waits</dt><dd>{adaptive ? `${snapshot.adaptiveRebuildBlockedFrames} blocked frames` : "none observed"}</dd></div><div><dt>Trace fidelity</dt><dd>{adaptive ? "Pass + resource" : "Pass + slice"}</dd></div></dl>
-          {captureState.phase === "failed" && <small className="capture-error">{captureState.message}</small>}
-        </>}
-      </aside>
-    </div>
+        </div> : <p>{captureState.message ?? (selectedCaptureTarget ? "Capture the next matching stage boundary. A full-domain GPU summary and a bounded centre-slice preview are read back asynchronously without blocking the queue." : "This stage has no registered texture product; its timing stays visible in the breakdown above.")}</p>}
+        {captureState.phase === "failed" && <small className="perf-capture-error">{captureState.message}</small>}
+      </div>
+    </section>}
   </aside>;
 }
