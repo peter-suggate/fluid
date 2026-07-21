@@ -193,13 +193,15 @@ test("production dry renderer binds fluid only through an explicit non-overlappi
   assert.equal(canEncodeSparseVoxelDryScene({ ...valid, structural: { ...valid.structural!, fields: { ...valid.structural!.fields, coarseFluid: { ...valid.structural!.fields.coarseFluid, residency: "unavailable" } } } }, diagnostic), false,
     "an explicitly requested direct fluid path must fall back before encoding malformed residency");
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 336,
+    sizeBytes: 368,
     terrainWordOffset: 24,
     terrainMaterialWordOffset: 28,
     materialPublicationWordOffset: 32,
     fluidDomainWordOffset: 36,
     primitiveCandidateWordOffset: 40,
     finePhiWordOffset: 44,
+    nodeMipWordOffset: 84,
+    nodeMipAtlasWordOffset: 88,
   });
   assert.match(svoDrySceneShader, /@group\(0\) @binding\(11\) var<storage,read> svoStructuralGeometry/);
   assert.match(svoDrySceneShader, /@group\(0\) @binding\(12\) var<storage,read> svoStructuralLeafStates/);

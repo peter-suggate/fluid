@@ -10,7 +10,7 @@ struct Uniforms {
   viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f,
   options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f,
 }
-struct Leaf { packedOrigin:u32, size:u32, flags:u32, pad:u32, phiGradient:vec4f, motion:vec4f }
+struct Leaf { originX:u32, originY:u32, originZ:u32, size:u32, flags:u32, pad0:u32, pad1:u32, pad2:u32, phiGradient:vec4f, motion:vec4f }
 struct VertexOutput { @builtin(position) position:vec4f, @location(0) uv:vec2f }
 struct CameraRay { origin:vec3f, direction:vec3f }
 @vertex fn vertexMain(@builtin(vertex_index) index:u32)->VertexOutput {
@@ -67,7 +67,8 @@ fn fineToWorld(point:vec3f)->vec3f { let minimum=vec3f(-0.5*u.container.x,0.0,-0
 fn slice2(point:vec3f)->vec2f { let axis=i32(round(u.debug.x)); if(axis==1){return point.xy;}if(axis==2){return point.zy;}return point.xz; }
 fn segmentDistance(point:vec2f,a:vec2f,b:vec2f)->f32 { let edge=b-a;let t=clamp(dot(point-a,edge)/max(dot(edge,edge),1e-10),0.0,1.0);return length(point-(a+t*edge)); }
 fn segmentDistance3(point:vec3f,a:vec3f,b:vec3f)->f32 { let edge=b-a;let t=clamp(dot(point-a,edge)/max(dot(edge,edge),1e-10),0.0,1.0);return length(point-(a+t*edge)); }
-fn leafContains(leaf:Leaf,pointFine:vec3f)->bool { let origin=vec3f(unpackOrigin(leaf.packedOrigin)); return leaf.size>0u&&all(pointFine>=origin)&&all(pointFine<origin+vec3f(f32(leaf.size))); }
+fn leafOrigin(leaf:Leaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
+fn leafContains(leaf:Leaf,pointFine:vec3f)->bool { let origin=vec3f(leafOrigin(leaf)); return leaf.size>0u&&all(pointFine>=origin)&&all(pointFine<origin+vec3f(f32(leaf.size))); }
 fn displayColor(linear:vec3f)->vec3f { let mapped=linear/(linear+vec3f(1.0));return pow(max(mapped,vec3f(0.0)),vec3f(1.0/2.2)); }
 `;
 
@@ -101,7 +102,7 @@ fn volumeTopology(uv:vec2f,mode:i32)->vec4f {
     if(row==previous){continue;}previous=row;
     let fault=topologyFault(pointFine);if(fault.a>0.0){accum=composite(accum,fault.rgb,0.32*volumeOpacity());continue;}
     let leaf=leaves[row];let metric=metrics[row];let header=tetraHeaders[metric.topologyCode];let transition=(header.flags&1u)==0u;let boundary=((metric.transformAndFlags>>8u)&63u)!=0u;
-    let centerFine=vec3f(unpackOrigin(leaf.packedOrigin))+vec3f(0.5*f32(leaf.size));let centerWorld=fineToWorld(centerFine);let site=1.0-smoothstep(baseWidth,2.8*baseWidth,raySegmentDistance(ray,centerWorld,centerWorld+vec3f(0.0,1e-8,0.0)).x);
+    let centerFine=vec3f(leafOrigin(leaf))+vec3f(0.5*f32(leaf.size));let centerWorld=fineToWorld(centerFine);let site=1.0-smoothstep(baseWidth,2.8*baseWidth,raySegmentDistance(ray,centerWorld,centerWorld+vec3f(0.0,1e-8,0.0)).x);
     if(mode==12){let base=select(vec3f(0.08,0.52,0.42),vec3f(0.42,0.14,0.70),transition);accum=composite(accum,mix(base,vec3f(1.0,0.73,0.12),site),volumeOpacity()*(0.045+0.34*site));continue;}
     if(mode==15){if(transition||boundary){let color=select(vec3f(0.94,0.45,0.06),vec3f(0.96,0.08,0.40),boundary);accum=composite(accum,color,volumeOpacity()*0.42);}continue;}
     if(mode!=14||!transition||header.first>arrayLength(&tetrahedra)||header.count>arrayLength(&tetrahedra)-header.first){continue;}
@@ -120,7 +121,7 @@ fn volumeTopology(uv:vec2f,mode:i32)->vec4f {
   if(row==INVALID||row>=arrayLength(&leaves)||row>=arrayLength(&metrics)||!leafContains(leaves[row],pointFine)){return vec4f(displayColor(vec3f(1.0,0.01,0.18)),0.94);}
   let leaf=leaves[row];let metric=metrics[row];let valid=(metric.transformAndFlags&VALID)!=0u&&metric.topologyCode<arrayLength(&tetraHeaders);
   if(!valid){return vec4f(displayColor(vec3f(1.0,0.01,0.06)),0.96);}let header=tetraHeaders[metric.topologyCode];let transition=(header.flags&1u)==0u;
-  let boundary=((metric.transformAndFlags>>8u)&63u)!=0u;let centerFine=vec3f(unpackOrigin(leaf.packedOrigin))+vec3f(0.5*f32(leaf.size));let centerWorld=fineToWorld(centerFine);
+  let boundary=((metric.transformAndFlags>>8u)&63u)!=0u;let centerFine=vec3f(leafOrigin(leaf))+vec3f(0.5*f32(leaf.size));let centerWorld=fineToWorld(centerFine);
   let siteInk=1.0-smoothstep(1.6*footprint,3.2*footprint,length(slice2(hit.xyz)-slice2(centerWorld)));
   if(mode==12){let base=select(vec3f(0.08,0.52,0.42),vec3f(0.42,0.14,0.70),transition);let color=mix(base,vec3f(1.0,0.73,0.12),siteInk);return vec4f(displayColor(color),max(0.38,0.92*siteInk));}
   if(mode==15){let selected=transition||boundary;let color=select(vec3f(0.03,0.09,0.18),select(vec3f(0.94,0.45,0.06),vec3f(0.96,0.08,0.40),boundary),selected);return vec4f(displayColor(color),select(0.18,0.88,selected));}
@@ -156,9 +157,9 @@ fn volumeFaces(uv:vec2f,mode:i32)->vec4f {
     if(row==INVALID||row>=arrayLength(&leaves)||row>=arrayLength(&rows)||!leafContains(leaves[row],pointFine)){accum=composite(accum,vec3f(1.0,0.01,0.18),0.32*volumeOpacity());continue;}
     let work=rows[row];if(work.incidenceOffset>arrayLength(&incidences)||work.incidenceCount>arrayLength(&incidences)-work.incidenceOffset){accum=composite(accum,vec3f(1.0,0.01,0.06),0.44*volumeOpacity());continue;}
     var faceInk=0.0;var dualInk=0.0;var normalInk=0.0;var boundaryInk=0.0;var coefficient=0.0;let width=max(t*1.44/max(u.viewport.y,1.0),min(min(u.container.x/u.gridInfo.x,u.container.y/u.gridInfo.y),u.container.z/u.gridInfo.z)*0.08);
-    let centreA=fineToWorld(vec3f(unpackOrigin(leaves[row].packedOrigin))+vec3f(0.5*f32(leaves[row].size)));
+    let centreA=fineToWorld(vec3f(leafOrigin(leaves[row]))+vec3f(0.5*f32(leaves[row].size)));
     for(var local=0u;local<min(work.incidenceCount,48u);local+=1u){let incidence=incidences[work.incidenceOffset+local];if(incidence.face>=arrayLength(&faces)||incidence.face>=arrayLength(&normals)||incidence.face>=arrayLength(&centroids)){faceInk=1.0;boundaryInk=1.0;continue;}let face=faces[incidence.face];if((face.flags&FACE_VALID)==0u){continue;}let centroidFine=centroids[incidence.face].xyz;let centroidWorld=fineToWorld(centroidFine);let normal=normalize(normals[incidence.face].xyz);let denominator=dot(fineDirection,normal);if(abs(denominator)>1e-8){let faceT=dot(centroidFine-rayFineOrigin,normal)/denominator;if(faceT>=interval.x&&faceT<=interval.y){let at=rayFineOrigin+fineDirection*faceT;let delta=at-centroidFine;let radius=sqrt(max(face.area,1e-8)/3.14159265);let radial=length(delta-normal*dot(delta,normal));let fineWidth=width*max(u.gridInfo.x/u.container.x,1.0);faceInk=max(faceInk,1.0-smoothstep(radius,radius+2.0*fineWidth,radial));}}
-      if(face.positiveRow!=INVALID&&face.positiveRow<arrayLength(&leaves)){let other=select(face.negativeRow,face.positiveRow,face.negativeRow==row);if(other<arrayLength(&leaves)){let centreB=fineToWorld(vec3f(unpackOrigin(leaves[other].packedOrigin))+vec3f(0.5*f32(leaves[other].size)));dualInk=max(dualInk,1.0-smoothstep(width,2.2*width,raySegmentDistance(ray,centreA,centreB).x));}}
+      if(face.positiveRow!=INVALID&&face.positiveRow<arrayLength(&leaves)){let other=select(face.negativeRow,face.positiveRow,face.negativeRow==row);if(other<arrayLength(&leaves)){let centreB=fineToWorld(vec3f(leafOrigin(leaves[other]))+vec3f(0.5*f32(leaves[other].size)));dualInk=max(dualInk,1.0-smoothstep(width,2.2*width,raySegmentDistance(ray,centreA,centreB).x));}}
       let radius=sqrt(max(face.area,1e-8)/3.14159265);let normalEnd=fineToWorld(centroidFine+normal*max(0.35,radius*0.55));normalInk=max(normalInk,1.0-smoothstep(width,2.2*width,raySegmentDistance(ray,centroidWorld,normalEnd).x));coefficient=max(coefficient,face.area*face.inverseDistance*face.openFraction);if((face.flags&(BOUNDARY|OPEN_BOUNDARY))!=0u){boundaryInk=max(boundaryInk,faceInk);}}
     if(mode==16){let scaled=coefficient/max(f32(leaves[row].size),1.0);accum=composite(accum,heat(scaled),0.075*volumeOpacity());continue;}
     if(mode==13){let ink=max(faceInk,max(0.75*dualInk,normalInk));if(ink>0.01){var color=mix(vec3f(0.55,0.18,0.82),vec3f(0.08,0.82,0.92),faceInk);color=mix(color,vec3f(1.0,0.72,0.10),normalInk);color=mix(color,vec3f(1.0,0.10,0.18),boundaryInk);accum=composite(accum,color,0.94*ink*volumeOpacity());}}
@@ -173,7 +174,7 @@ fn volumeFaces(uv:vec2f,mode:i32)->vec4f {
   let work=rows[row];if(work.incidenceOffset>arrayLength(&incidences)||work.incidenceCount>arrayLength(&incidences)-work.incidenceOffset){return vec4f(displayColor(vec3f(1.0,0.01,0.06)),0.96);}
   var faceInk=0.0;var dualInk=0.0;var normalInk=0.0;var coefficient=0.0;var boundaryInk=0.0;let point2=slice2(hit.xyz);
   for(var local=0u;local<min(work.incidenceCount,48u);local+=1u){let incidence=incidences[work.incidenceOffset+local];if(incidence.face>=arrayLength(&faces)||incidence.face>=arrayLength(&normals)||incidence.face>=arrayLength(&centroids)){return vec4f(displayColor(vec3f(1.0,0.01,0.06)),0.96);}let face=faces[incidence.face];if((face.flags&FACE_VALID)==0u){continue;}let centroidFine=centroids[incidence.face].xyz;let centroidWorld=fineToWorld(centroidFine);let normal=normalize(normals[incidence.face].xyz);let planeDistance=abs(dot(pointFine-centroidFine,normal));let radius=sqrt(max(face.area,1e-8)/3.14159265);let radial=length((pointFine-centroidFine)-normal*dot(pointFine-centroidFine,normal));let line=(1.0-smoothstep(0.6,1.8,planeDistance/max(footprint*max(u.gridInfo.x/u.container.x,1.0),1e-4)))*(1.0-smoothstep(radius,1.25*radius,radial));faceInk=max(faceInk,line);
-    let centreA=fineToWorld(vec3f(unpackOrigin(leaves[row].packedOrigin))+vec3f(0.5*f32(leaves[row].size)));if(face.positiveRow!=INVALID&&face.positiveRow<arrayLength(&leaves)){let other=select(face.negativeRow,face.positiveRow,face.negativeRow==row);if(other<arrayLength(&leaves)){let centreB=fineToWorld(vec3f(unpackOrigin(leaves[other].packedOrigin))+vec3f(0.5*f32(leaves[other].size)));dualInk=max(dualInk,1.0-smoothstep(footprint,2.2*footprint,segmentDistance(point2,slice2(centreA),slice2(centreB))));}}
+    let centreA=fineToWorld(vec3f(leafOrigin(leaves[row]))+vec3f(0.5*f32(leaves[row].size)));if(face.positiveRow!=INVALID&&face.positiveRow<arrayLength(&leaves)){let other=select(face.negativeRow,face.positiveRow,face.negativeRow==row);if(other<arrayLength(&leaves)){let centreB=fineToWorld(vec3f(leafOrigin(leaves[other]))+vec3f(0.5*f32(leaves[other].size)));dualInk=max(dualInk,1.0-smoothstep(footprint,2.2*footprint,segmentDistance(point2,slice2(centreA),slice2(centreB))));}}
     let normalEnd=fineToWorld(centroidFine+normal*max(0.35,radius*0.55));normalInk=max(normalInk,1.0-smoothstep(footprint,2.2*footprint,segmentDistance(point2,slice2(centroidWorld),slice2(normalEnd))));coefficient=max(coefficient,face.area*face.inverseDistance*face.openFraction);if((face.flags&(BOUNDARY|OPEN_BOUNDARY))!=0u){boundaryInk=max(boundaryInk,line);}}
   if(mode==16){let scaled=coefficient/max(f32(leaves[row].size),1.0);return vec4f(displayColor(heat(scaled)),0.78);}
   if(mode!=13){discard;}let ink=max(faceInk,max(0.75*dualInk,normalInk));if(ink<0.02){discard;}var color=mix(vec3f(0.55,0.18,0.82),vec3f(0.08,0.82,0.92),faceInk);color=mix(color,vec3f(1.0,0.72,0.10),normalInk);color=mix(color,vec3f(1.0,0.10,0.18),boundaryInk);return vec4f(displayColor(color),0.94*ink);
@@ -284,9 +285,17 @@ struct FineState { color:vec3f,alpha:f32,address:u32 }
 @group(0) @binding(5) var<storage,read> sampleFlags:array<u32>;
 @group(0) @binding(6) var<storage,read> topologyControl:array<u32>;
 @group(0) @binding(7) var<storage,read> redistanceControl:array<u32>;
+@group(0) @binding(8) var<storage,read> finePhi:array<f32>;
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const INTERFACE:u32=2u;const KNOWN:u32=4u;const TRIAL:u32=8u;const FRONTIER:u32=32u;
 fn hashKey(key:u32)->u32{return ((key^(key>>16u))*0x9e3779b1u)&(fine.hashCapacity-1u);}
 fn pageOf(key:u32)->u32 {let start=hashKey(key);for(var probe=0u;probe<32u;probe+=1u){if(probe>=fine.maximumHashProbes){break;}let slot=(start+probe)&(fine.hashCapacity-1u);let stored=pageHash[slot*2u];if(stored==key){return pageHash[slot*2u+1u];}if(stored==INVALID){return INVALID;}}return INVALID;}
+fn fineAddress(q:vec3i)->u32 {
+  if(any(q<vec3i(0))||any(q>=vec3i(fine.sampleDimensions))){return INVALID;}
+  let uq=vec3u(q);let brick=uq/max(fine.brickResolution,1u);let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);let page=pageOf(key);
+  if(page==INVALID||page>=fine.pageCapacity||page*10u+3u>=arrayLength(&metadata)||metadata[page*10u+2u]!=fine.generation){return INVALID;}
+  let local=uq-brick*fine.brickResolution;let localIndex=local.x+fine.brickResolution*(local.y+fine.brickResolution*local.z);let address=page*fine.samplesPerBrick+localIndex;
+  return select(INVALID,address,address<arrayLength(&sampleFlags)&&address<arrayLength(&finePhi)&&(sampleFlags[address]&VALID)!=0u);
+}
 fn fineState(point:vec3f)->FineState {
   let relative=(point-fine.domainOrigin)/max(fine.fineCellWidth,1e-9);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return FineState(vec3f(0.0),0.0,INVALID);}let q=vec3u(floor(relative));let brick=q/max(fine.brickResolution,1u);let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);
   if(arrayLength(&topologyControl)>0u&&topologyControl[0]!=0u){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}if(arrayLength(&redistanceControl)>4u&&redistanceControl[4]!=0u){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}
@@ -296,13 +305,29 @@ fn fineState(point:vec3f)->FineState {
   if((flags&VALID)==0u){return FineState(vec3f(0.26,0.08,0.48),0.20,address);}if((flags&(FRONTIER|TRIAL))!=0u){return FineState(vec3f(1.0,0.84,0.04),0.88,address);}if((flags&INTERFACE)!=0u){return FineState(vec3f(1.0,0.02,0.44),0.90,address);}
   let activated=arrayLength(&redistanceControl)>6u&&redistanceControl[6]>0u&&(flags&KNOWN)==0u;if(activated){return FineState(vec3f(1.0,0.48,0.04),0.66,address);}if((flags&KNOWN)!=0u){return FineState(vec3f(0.04,0.72,0.82),0.34,address);}return FineState(vec3f(0.34,0.12,0.62),0.24,address);
 }
+fn globalFinePhi(point:vec3f)->vec4f {
+  if(arrayLength(&topologyControl)==0u||topologyControl[0]!=0u||arrayLength(&redistanceControl)<=4u||redistanceControl[3]==0u||redistanceControl[4]!=0u){return vec4f(1.0,0.01,0.06,0.96);}
+  let relative=(point-fine.domainOrigin)/max(fine.fineCellWidth,1e-9);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return vec4f(0.0);}
+  let q=vec3i(floor(relative));let centerAddress=fineAddress(q);if(centerAddress==INVALID){return vec4f(0.02,0.06,0.18,0.08);}
+  let center=finePhi[centerAddress];if(center!=center||abs(center)>=3.402823e38){return vec4f(1.0,0.01,0.06,0.96);}
+  var gradient=vec3f(0.0);var complete=true;let h=max(fine.fineCellWidth,1e-9);
+  for(var axis=0u;axis<3u;axis+=1u){var delta=vec3i(0);delta[axis]=1;let lo=fineAddress(q-delta);let hi=fineAddress(q+delta);var derivative=0.0;
+    if(lo!=INVALID&&hi!=INVALID){derivative=(finePhi[hi]-finePhi[lo])/(2.0*h);}else if(hi!=INVALID){derivative=(finePhi[hi]-center)/h;}else if(lo!=INVALID){derivative=(center-finePhi[lo])/h;}else{complete=false;}
+    if(derivative!=derivative||abs(derivative)>=3.402823e38){complete=false;}gradient[axis]=derivative;
+  }
+  if(!complete){return vec4f(1.0,0.01,0.06,0.96);}
+  let signed=clamp(center/(4.0*h),-1.0,1.0);let phiColor=select(mix(vec3f(0.96,0.96,0.90),vec3f(0.93,0.47,0.16),signed),mix(vec3f(0.96,0.96,0.90),vec3f(0.10,0.45,0.92),-signed),signed<0.0);
+  let residual=abs(length(gradient)-1.0);let residualInk=clamp(residual/0.25,0.0,1.0);let zeroInk=1.0-smoothstep(0.04*h,0.22*h,abs(center));
+  var color=mix(phiColor,vec3f(0.96,0.02,0.72),residualInk);color=mix(color,vec3f(1.0),zeroInk);
+  return vec4f(color,0.86);
+}
 fn fineVolume(uv:vec2f)->vec4f {
   let ray=cameraRay(uv);let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;let interval=boxInterval(ray,minimum,maximum);if(interval.y<=interval.x){discard;}let travel=abs(ray.direction*(interval.y-interval.x))/max(fine.fineCellWidth,1e-9);let steps=u32(clamp(ceil(travel.x+travel.y+travel.z+1.0),1.0,512.0));let dt=(interval.y-interval.x)/f32(steps);var accum=vec4f(0.0);var previous=INVALID;
   for(var i=0u;i<512u;i+=1u){if(i>=steps||accum.a>0.985){break;}let point=ray.origin+ray.direction*(interval.x+(f32(i)+0.5)*dt);let sample=fineState(point);if(sample.address==previous){continue;}previous=sample.address;let alpha=select(sample.alpha*0.20,sample.alpha,sample.alpha>0.30);accum=composite(accum,sample.color,alpha*volumeOpacity());}
   return finishVolume(accum);
 }
 @fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f {
-  if(i32(round(u.debug.x))==4){return fineVolume(input.uv);}let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;if(any(hit.xyz<minimum)||any(hit.xyz>maximum)){discard;}let sample=fineState(hit.xyz);if(sample.alpha<=0.001){discard;}return vec4f(displayColor(sample.color),sample.alpha);
+  let mode=i32(round(u.debug.w));if(i32(round(u.debug.x))==4){if(mode==25){discard;}return fineVolume(input.uv);}let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;if(any(hit.xyz<minimum)||any(hit.xyz>maximum)){discard;}if(mode==25){let sample=globalFinePhi(hit.xyz);if(sample.a<=0.001){discard;}return vec4f(displayColor(sample.rgb),sample.a);}let sample=fineState(hit.xyz);if(sample.alpha<=0.001){discard;}return vec4f(displayColor(sample.color),sample.alpha);
 }`;
 
 export class OctreeTechniqueOverlayPipeline {
@@ -397,7 +422,7 @@ export class OctreeTechniqueOverlayPipeline {
     if(fine&&this.fineLifecyclePipeline)this.fineLifecycleGroup=this.device.createBindGroup({layout:this.fineLifecyclePipeline.getBindGroupLayout(0),entries:[
       {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:fine.params},{binding:2,resource:fine.hash},
       {binding:3,resource:fine.metadata},{binding:4,resource:fine.worklist},{binding:5,resource:fine.sampleFlags},
-      {binding:6,resource:fine.topologyControl},{binding:7,resource:fine.redistanceControl},
+      {binding:6,resource:fine.topologyControl},{binding:7,resource:fine.redistanceControl},{binding:8,resource:fine.phi},
     ]});
     const section5=source.section5FaceBand;
     if(section5&&this.section5FaceBandPipeline)this.section5FaceBandGroup=this.device.createBindGroup({layout:this.section5FaceBandPipeline.getBindGroupLayout(0),entries:[
@@ -412,7 +437,7 @@ export class OctreeTechniqueOverlayPipeline {
     if(modeCode===12||modeCode===14||modeCode===15){pipeline=this.topologyPipeline;group=this.topologyGroup;}
     else if(modeCode===13||modeCode===16){pipeline=this.facePipeline;group=this.faceGroup;}
     else if(modeCode===17){pipeline=this.lifecyclePipeline;group=this.lifecycleGroup;if(this.lifecycleMembership&&this.lifecycleMembershipPipeline&&this.lifecycleMembershipGroup){encoder.clearBuffer(this.lifecycleMembership);const compute=encoder.beginComputePass({label:"Expand octree topology lifecycle membership"});compute.setPipeline(this.lifecycleMembershipPipeline);compute.setBindGroup(0,this.lifecycleMembershipGroup);compute.dispatchWorkgroups(Math.ceil(this.lifecycleCapacity/64));compute.end();}else{return false;}}
-    else if(modeCode===18){pipeline=this.fineLifecyclePipeline;group=this.fineLifecycleGroup;}
+    else if(modeCode===18||modeCode===25){pipeline=this.fineLifecyclePipeline;group=this.fineLifecycleGroup;}
     else if(modeCode===24){pipeline=this.section5FaceBandPipeline;group=this.section5FaceBandGroup;}
     else{return false;}
     if(!pipeline||!group)return false;

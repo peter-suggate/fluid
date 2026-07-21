@@ -88,7 +88,7 @@ test("required compact acceptance rejects a plausible coarse-only field", () => 
   assert.equal(compactOctreeFieldEvidenceIsAcceptable(result), false);
 });
 
-test("required compact acceptance exposes and rejects a downstream publication reason", () => {
+test("required compact validation rejects and exposes a downstream publication reason", () => {
   const volumeControl = new Uint32Array(16); volumeControl[0] = 2;
   const rejected: CompactOctreeFieldSnapshot = { ...snapshot(),
     transportControl: new Uint32Array([0, 0, 42, 0, 7, 4, 3, 3]),
@@ -114,9 +114,10 @@ test("required compact acceptance exposes and rejects a downstream publication r
   rejected.coarseDirectory[1] = generation - 1;
   rejected.coarseControl![11] = generation - 1;
   rejected.topologyControl!.set([16, 1, 1, 1, 1, 1, 1, 2]);
-  const result = reconstructCompactOctreeOccupancyField(rejected, [2, 1, 1]);
-  assert.equal(result.downstreamFinalizeReason, 2);
-  assert.equal(compactOctreeFieldEvidenceIsAcceptable(result), false);
+  assert.throws(() => reconstructCompactOctreeOccupancyField(rejected, [2, 1, 1]),
+    /coarse\/fine generation mismatch/,
+    "a rejected transaction must retain the prior mesh rather than reconstruct a new render publication");
+  assert.equal(compactOctreePublicationHeaderEvidence(rejected).downstreamFinalizeReason, 2);
   assert.deepEqual(compactOctreePublicationHeaderEvidence(rejected).transportControl,
     [0, 0, 42, 0, 7, 4, 3, 3]);
   assert.deepEqual(compactOctreePublicationHeaderEvidence(rejected).redistanceControl, [0, 1, 14, 1]);
@@ -150,7 +151,7 @@ test("compact smoke reconstruction rejects a stale coarse/fine generation pair",
   });
 });
 
-test("compact smoke reconstruction admits only a proven immediately-prior rollback epoch", () => {
+test("compact smoke reconstruction rejects every rollback epoch", () => {
   const rolledBack = snapshot();
   rolledBack.coarseDirectory[1] = generation - 1;
   rolledBack.coarseControl![11] = generation - 1;
@@ -163,12 +164,9 @@ test("compact smoke reconstruction admits only a proven immediately-prior rollba
   rolledBack.flags.fill(FINE_LEVELSET_SAMPLE_FLAGS.valid, 0, plan.samplesPerBrick);
   rolledBack.phi.fill(-0.5, 0, plan.samplesPerBrick / 2);
   rolledBack.phi.fill(0.5, plan.samplesPerBrick / 2, plan.samplesPerBrick);
-  const result = reconstructCompactOctreeOccupancyField(rolledBack, [2, 1, 1]);
-  assert.equal(result.publicationValid, true);
-  assert.equal(result.topologyRolledBack, true);
-  assert.equal(result.downstreamFinalizeReason, 2);
-  assert.equal(compactOctreeFieldEvidenceIsAcceptable(result), false,
-    "rollback can be reconstructed for diagnostics but cannot pass a successful-step gate");
+  assert.throws(() => reconstructCompactOctreeOccupancyField(rolledBack, [2, 1, 1]),
+    /coarse\/fine generation mismatch/,
+    "rollback evidence is diagnostic-only and cannot create a new render publication");
 
   for (const invalid of [
     { topology: new Uint32Array([16, 1, 1, 1, 1, 1, 1, 0]), coarse: generation - 1 },

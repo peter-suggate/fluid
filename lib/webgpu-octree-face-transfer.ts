@@ -5,10 +5,12 @@ import {
 
 export const OCTREE_FACE_TRANSFER_DIAGNOSTIC_BYTES = 32;
 const SORT_PARAMETER_STRIDE = 256;
-const PREVIOUS_FACE_RECORD_BYTES = 12;
+const PREVIOUS_FACE_RECORD_BYTES = 20;
 const RADIX_BITS = 4;
 const RADIX_BINS = 1 << RADIX_BITS;
-const RADIX_PASSES = (32 / RADIX_BITS) * 2;
+// Stable LSD order: axis/span, z, y, then x.  The resulting order is the
+// lexicographic full-width (x,y,z,axisSpan) canonical face key.
+const RADIX_PASSES = (32 / RADIX_BITS) * 4;
 const RADIX_BLOCK_SIZE = 256;
 
 export interface OctreeFaceTransferPlan {
@@ -66,7 +68,7 @@ export function planOctreeFaceTopologyTransfer(
  *
  * `encodeCapture` must be recorded before the octree/face rebuild and
  * `encodeTransfer` after it. Old face IDs are sorted by their canonical
- * `(packedOrigin, axisSpan)` descriptor. Each new face then performs bounded
+ * `(originX, originY, originZ, axisSpan)` descriptor. Each new face performs bounded
  * exact, one-parent, or four-child lookups. This is compact and deterministic;
  * it deliberately allocates no box-sized spatial hash.
  */
@@ -107,7 +109,7 @@ export class WebGPUOctreeFaceTopologyTransfer {
     });
     const words = new Uint32Array(this.plan.parameterBytes / 4);
     let passIndex = 0;
-    for (let field = 0; field < 2; field += 1) {
+    for (let field = 0; field < 4; field += 1) {
       for (let shift = 0; shift < 32; shift += RADIX_BITS) {
         const offset = (passIndex * SORT_PARAMETER_STRIDE) / 4;
         words.set([shift, field, this.plan.sortCapacity, Math.ceil(this.plan.sortCapacity / RADIX_BLOCK_SIZE)], offset);
@@ -210,8 +212,8 @@ export class WebGPUOctreeFaceTopologyTransfer {
 }
 
 export const octreeFaceTopologyTransferShader = /* wgsl */ `
-struct FaceRecord { negativeRow: u32, positiveRow: u32, packedOrigin: u32, axisSpan: u32, normalVelocity: f32, area: f32 }
-struct PreviousFace { packedOrigin: u32, axisSpan: u32, normalVelocity: f32 }
+struct FaceRecord { negativeRow: u32, positiveRow: u32, originX: u32, originY: u32, originZ: u32, axisSpan: u32, normalVelocity: f32, area: f32 }
+struct PreviousFace { originX: u32, originY: u32, originZ: u32, axisSpan: u32, normalVelocity: f32 }
 struct TransferRecord { newFace: u32, sourceCount: u32, old0: u32, old1: u32, old2: u32, old3: u32 }
 struct SortParams { shift: u32, field: u32, capacity: u32, blockCapacity: u32 }
 @group(0) @binding(0) var<storage, read> previousControl: array<u32>;
@@ -241,32 +243,37 @@ fn publishTransfer(record: TransferRecord) {
 fn keyLess(a: u32, b: u32) -> bool {
   if (a == INVALID) { return false; } if (b == INVALID) { return true; }
   let fa = previousFaces[a]; let fb = previousFaces[b];
-  return fa.packedOrigin < fb.packedOrigin || (fa.packedOrigin == fb.packedOrigin && fa.axisSpan < fb.axisSpan);
+  if (fa.originX != fb.originX) { return fa.originX < fb.originX; }
+  if (fa.originY != fb.originY) { return fa.originY < fb.originY; }
+  if (fa.originZ != fb.originZ) { return fa.originZ < fb.originZ; }
+  return fa.axisSpan < fb.axisSpan;
 }
-fn compareKey(face: PreviousFace, packedOrigin: u32, axisSpan: u32) -> i32 {
-  if (face.packedOrigin < packedOrigin || (face.packedOrigin == packedOrigin && face.axisSpan < axisSpan)) { return -1; }
-  if (face.packedOrigin == packedOrigin && face.axisSpan == axisSpan) { return 0; }
+fn compareKey(face: PreviousFace, origin: vec3u, axisSpan: u32) -> i32 {
+  if (face.originX < origin.x) { return -1; } if (face.originX > origin.x) { return 1; }
+  if (face.originY < origin.y) { return -1; } if (face.originY > origin.y) { return 1; }
+  if (face.originZ < origin.z) { return -1; } if (face.originZ > origin.z) { return 1; }
+  if (face.axisSpan < axisSpan) { return -1; }
+  if (face.axisSpan == axisSpan) { return 0; }
   return 1;
 }
-fn findFace(packedOrigin: u32, axisSpan: u32) -> u32 {
+fn findFace(origin: vec3u, axisSpan: u32) -> u32 {
   var low = 0u; var high = min(previousControl[0], previousControl[2]);
   while (low < high) { let middle = low + (high - low) / 2u; let index = sortedIndices[middle];
-    if (compareKey(previousFaces[index], packedOrigin, axisSpan) < 0) { low = middle + 1u; } else { high = middle; }
+    if (compareKey(previousFaces[index], origin, axisSpan) < 0) { low = middle + 1u; } else { high = middle; }
   }
   if (low < min(previousControl[0], previousControl[2])) { let index = sortedIndices[low];
-    if (compareKey(previousFaces[index], packedOrigin, axisSpan) == 0) { return index; }
+    if (compareKey(previousFaces[index], origin, axisSpan) == 0) { return index; }
   }
   return INVALID;
 }
-fn unpackOrigin(word: u32) -> vec3u { return vec3u(word & 1023u, (word >> 10u) & 1023u, (word >> 20u) & 1023u); }
-fn packOrigin(p: vec3u) -> u32 { return p.x | (p.y << 10u) | (p.z << 20u); }
+fn faceOrigin(face: FaceRecord) -> vec3u { return vec3u(face.originX, face.originY, face.originZ); }
 
 @compute @workgroup_size(256)
 fn captureFaces(@builtin(global_invocation_id) gid: vec3u) {
   let count = min(previousControl[0], previousControl[2]);
   if (gid.x >= count) { return; }
   let source = nextFaces[gid.x];
-  previousFaces[gid.x] = PreviousFace(source.packedOrigin, source.axisSpan, source.normalVelocity);
+  previousFaces[gid.x] = PreviousFace(source.originX, source.originY, source.originZ, source.axisSpan, source.normalVelocity);
 }
 
 @compute @workgroup_size(256)
@@ -281,7 +288,12 @@ fn prepareSort(@builtin(global_invocation_id) gid: vec3u) {
 fn radixKey(index: u32) -> u32 {
   if (index == INVALID) { return INVALID; }
   let face = previousFaces[index];
-  return select(face.axisSpan, face.packedOrigin, sortParams.field != 0u);
+  switch sortParams.field {
+    case 0u: { return face.axisSpan; }
+    case 1u: { return face.originZ; }
+    case 2u: { return face.originY; }
+    default: { return face.originX; }
+  }
 }
 fn radixBin(index: u32) -> u32 { return (radixKey(index) >> sortParams.shift) & RADIX_MASK; }
 
@@ -332,14 +344,14 @@ fn validateTopology(@builtin(global_invocation_id) gid: vec3u) {
   let previousCount=min(previousControl[0],previousControl[2]);
   if(gid.x<previousCount){let index=sortedIndices[gid.x];let old=previousFaces[index];
     if(!finite(old.normalVelocity)){atomicAdd(&diagnostics[2],1u);atomicStore(&diagnostics[3],1u);}
-    if(gid.x>0u){let prior=previousFaces[sortedIndices[gid.x-1u]];if(prior.packedOrigin==old.packedOrigin&&prior.axisSpan==old.axisSpan){atomicAdd(&diagnostics[2],1u);atomicStore(&diagnostics[3],1u);}}
+    if(gid.x>0u){let prior=previousFaces[sortedIndices[gid.x-1u]];if(prior.originX==old.originX&&prior.originY==old.originY&&prior.originZ==old.originZ&&prior.axisSpan==old.axisSpan){atomicAdd(&diagnostics[2],1u);atomicStore(&diagnostics[3],1u);}}
   }
   let nextCount = min(atomicLoad(&nextControl[0]), atomicLoad(&nextControl[2])); if (gid.x >= nextCount) { return; }
   let face = nextFaces[gid.x]; let axis = face.axisSpan & 3u; let span = face.axisSpan >> 2u;
   if (axis > 2u || span == 0u || (span & (span - 1u)) != 0u) { atomicAdd(&diagnostics[2], 1u); atomicStore(&diagnostics[3], 1u); }
 }
 
-fn publishHash(face:FaceRecord){atomicXor(&diagnostics[4],face.packedOrigin^(face.axisSpan*0x9e3779b9u));atomicXor(&diagnostics[5],bitcast<u32>(face.normalVelocity)*(face.packedOrigin|1u));atomicAdd(&diagnostics[6],1u);}
+fn publishHash(face:FaceRecord){let h=(face.originX*0x9e3779b9u)^(face.originY*0x85ebca6bu)^(face.originZ*0xc2b2ae35u)^face.axisSpan;atomicXor(&diagnostics[4],h);atomicXor(&diagnostics[5],bitcast<u32>(face.normalVelocity)*(h|1u));atomicAdd(&diagnostics[6],1u);}
 
 @compute @workgroup_size(256)
 fn transferFaces(@builtin(global_invocation_id) gid: vec3u) {
@@ -349,17 +361,17 @@ fn transferFaces(@builtin(global_invocation_id) gid: vec3u) {
     atomicStore(&diagnostics[3], 1u); return;
   }
   var next = nextFaces[gid.x]; let axis = next.axisSpan & 3u; let span = next.axisSpan >> 2u;
-  let exact = findFace(next.packedOrigin, next.axisSpan);
+  let origin = faceOrigin(next); let exact = findFace(origin, next.axisSpan);
   if (exact != INVALID) {
     next.normalVelocity = previousFaces[exact].normalVelocity; nextFaces[gid.x] = next;
     publishTransfer(TransferRecord(gid.x, 1u, exact, INVALID, INVALID, INVALID));publishHash(next); atomicAdd(&diagnostics[0], 1u); return;
   }
-  let origin = unpackOrigin(next.packedOrigin); let tangentA = (axis + 1u) % 3u; let tangentB = (axis + 2u) % 3u;
+  let tangentA = (axis + 1u) % 3u; let tangentB = (axis + 2u) % 3u;
   if (span > 1u) {
     let half = span / 2u; var children: array<u32, 4>; var childCount = 0u;
     for (var quadrant = 0u; quadrant < 4u; quadrant += 1u) { var childOrigin = origin;
       childOrigin[tangentA] += select(0u, half, (quadrant & 1u) != 0u); childOrigin[tangentB] += select(0u, half, (quadrant & 2u) != 0u);
-      let child = findFace(packOrigin(childOrigin), axis | (half << 2u)); children[quadrant] = child; childCount += select(0u, 1u, child != INVALID);
+      let child = findFace(childOrigin, axis | (half << 2u)); children[quadrant] = child; childCount += select(0u, 1u, child != INVALID);
     }
     if (childCount == 4u) { next.normalVelocity = 0.25 * (previousFaces[children[0]].normalVelocity + previousFaces[children[1]].normalVelocity + previousFaces[children[2]].normalVelocity + previousFaces[children[3]].normalVelocity);
       nextFaces[gid.x] = next; publishTransfer(TransferRecord(gid.x, 4u, children[0], children[1], children[2], children[3]));publishHash(next); atomicAdd(&diagnostics[0], 1u); return;
@@ -367,7 +379,7 @@ fn transferFaces(@builtin(global_invocation_id) gid: vec3u) {
   }
   let parentSpan = span * 2u; var parentOrigin = origin;
   parentOrigin[tangentA] = (parentOrigin[tangentA] / parentSpan) * parentSpan; parentOrigin[tangentB] = (parentOrigin[tangentB] / parentSpan) * parentSpan;
-  let parent = findFace(packOrigin(parentOrigin), axis | (parentSpan << 2u));
+  let parent = findFace(parentOrigin, axis | (parentSpan << 2u));
   if (parent != INVALID) { next.normalVelocity = previousFaces[parent].normalVelocity; nextFaces[gid.x] = next;
     publishTransfer(TransferRecord(gid.x, 1u, parent, INVALID, INVALID, INVALID));publishHash(next); atomicAdd(&diagnostics[0], 1u); return;
   }

@@ -10,7 +10,7 @@ test("paused raster-water startup requests no optional renderer pipelines", () =
     { axis: "off", position: 0.5 }, "smooth", "raster", false, true,
   ), []);
 
-  const initializeStart = rendererSource.indexOf("async initialize(): Promise<void>");
+  const initializeStart = rendererSource.indexOf("private async initializeInternal(): Promise<void>");
   const recoveryStart = rendererSource.indexOf("private scheduleDeviceRecovery", initializeStart);
   const initializeSource = rendererSource.slice(initializeStart, recoveryStart);
   assert.match(initializeSource, /new RasterWaterPipeline/,

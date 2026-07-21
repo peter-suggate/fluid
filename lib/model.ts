@@ -37,6 +37,11 @@ export interface RigidBodyDescription {
 export interface SceneDescription {
   schemaVersion: "1.0.0";
   sceneId: string;
+  /** Optional subsystem declarations. Omission preserves all legacy systems. */
+  systems?: {
+    /** False builds the authored render world without fluid transport/authority. */
+    fluid?: boolean;
+  };
   /** Visible environment is part of the unified scene representation, not merely a backdrop. */
   environment?: EnvironmentId;
   randomSeed: number;
@@ -161,6 +166,7 @@ export function validateScene(scene: SceneDescription): string[] {
   const errors: string[] = [];
   if (scene.schemaVersion !== "1.0.0") errors.push("Unsupported schema version");
   if (!scene.sceneId?.trim()) errors.push("Scene ID is required");
+  if (scene.systems?.fluid !== undefined && typeof scene.systems.fluid !== "boolean") errors.push("Scene fluid-system flag must be boolean");
   if (!Number.isInteger(scene.randomSeed) || scene.randomSeed < 0) errors.push("Random seed must be a non-negative integer");
   if (!(scene.duration_s > 0)) errors.push("Duration must be positive");
   const c = scene.container;

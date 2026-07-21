@@ -46,6 +46,15 @@ export function DiagnosticsPanel() {
   const publishedPowerSolver = gpuInfo?.pressureSolver?.includes("Section 4.3 hybrid")
     ? "POWER + SECTION 4.3"
     : gpuInfo?.pressureSolver?.includes("Chebyshev") ? "POWER + CHEBYSHEV" : "POWER PUBLISHED";
+  const octreePressurePotential = gpuInfo?.gridKind === "octree";
+  const globalFineVolumeEstimate = gpuInfo?.volumeTelemetrySource === "global-fine";
+  const representedVolumeAliasesPrimary = gpuInfo?.volumeDrift !== undefined
+    && gpuInfo?.representedVolumeDrift !== undefined
+    && gpuInfo.volumeDrift === gpuInfo.representedVolumeDrift;
+  const waterRasterGenerationCurrent = waterSurfacePresentation?.globalFineAttachedGeneration !== undefined
+    && waterSurfacePresentation.meshPublicationGeneration !== undefined
+    && waterSurfacePresentation.globalFineAttachedGeneration === gpuInfo?.globalFineGeneration
+    && waterSurfacePresentation.meshPublicationGeneration === gpuInfo?.globalFineGeneration;
   return (
     <aside className="right-panel panel-scroll diagnostics-panel">
       <section className="panel-section diagnostics-head">
@@ -97,7 +106,7 @@ export function DiagnosticsPanel() {
             : globalFineRequested ? `${requestedGlobalFineFactor}× PENDING` : "OFF"}
           unit={gpuInfo.globalFineLevelSetEnabled
             ? `${gpuInfo.globalFineSeedCount ?? 0} seeds / fault ${gpuInfo.globalFineSeedError ?? 0} · ${gpuInfo.globalFineInterfaceBricks ?? 0} interface → ${gpuInfo.globalFineDesiredBricks ?? 0} desired → ${gpuInfo.globalFineActiveBricks ?? 0} active · gen ${gpuInfo.globalFineGeneration ?? 0} ${gpuInfo.globalFinePublished ? (gpuInfo.globalFineRolledBack ? "ROLLBACK" : "PUBLISHED") : "PROVISIONAL"} · topology fault ${gpuInfo.globalFineTopologyFlags ?? 0} / downstream ${gpuInfo.globalFineDownstreamFinalizeReason ?? 0} · redistance ${gpuInfo.globalFineRedistanceCommitted ? "OK" : `REJECTED (${gpuInfo.globalFineRedistanceUnresolvedCells ?? 0} unresolved / ${gpuInfo.globalFineRedistanceSeeds ?? 0} seeds)`} · volume 0x${(gpuInfo.globalFineVolumeFlags ?? 0).toString(16)} · transport ${gpuInfo.globalFineTransportCommitted ? "OK" : `REJECTED (${gpuInfo.globalFineTransportDepartureOutsideBand ?? 0} outside / ${gpuInfo.globalFineTransportVelocityUnavailable ?? 0} unavailable / ${gpuInfo.globalFineTransportFaceBandUnavailable ?? 0} face-band)`} · Section 5 faults band/transition/power/transient/point ${gpuInfo.globalFineFaceBandFlags ?? 0}/${gpuInfo.globalFineFaceBandTransitionFlags ?? 0}/${gpuInfo.globalFineFaceBandPowerPublicationFlags ?? 0}/${gpuInfo.globalFineFaceBandTransientPowerFlags ?? 0}/${gpuInfo.globalFineFaceBandPointFieldFlags ?? 0} · ${gpuInfo.globalFineLevelSetResidentBrickCapacity?.toLocaleString() ?? "—"} capacity · ${((gpuInfo.globalFineLevelSetAllocatedBytes ?? 0) / 1048576).toFixed(1)} MiB`
-            : globalFineRequested ? "awaiting first valid sparse generation" : "leaf-page rollback"}
+            : globalFineRequested ? "awaiting first valid sparse generation" : "leaf-page compatibility"}
           tone={gpuInfo.globalFineLevelSetEnabled && ((gpuInfo.globalFineSeedError ?? 0) !== 0
             || (gpuInfo.globalFineTopologyFlags ?? 0) !== 0 || gpuInfo.globalFinePublished === false)
             ? "warn"
@@ -116,18 +125,19 @@ export function DiagnosticsPanel() {
         {gpuInfo?.gridKind === "octree" && waterSurfacePresentation && <MetricCard
             testId="water-surface-presentation-source"
             label="Rendered water geometry"
-            value={waterSurfacePresentation.surfaceGeometrySource === "global-fine-coarse" ? "GLOBAL FINE / COARSE"
+            value={waterSurfacePresentation.surfaceGeometrySource === "global-fine-coarse" ? `GLOBAL FINE / COARSE${waterRasterGenerationCurrent ? "" : " · STALE GEN"}`
               : waterSurfacePresentation.surfaceGeometrySource === "adaptive-fallback" ? "ADAPTIVE FALLBACK"
                 : waterSurfacePresentation.surfaceGeometrySource === "retained-previous" ? "RETAINED PREVIOUS MESH"
                   : waterSurfacePresentation.surfaceGeometrySource === "adaptive-octree" ? "ADAPTIVE OCTREE" : "EMPTY"}
             unit={waterSurfacePresentation.globalFineCrossingPublished
-              ? "current fine/coarse crossing · presentation source confirmed"
+              ? `${waterRasterGenerationCurrent ? "current" : "unproven/current mismatch"} fine/coarse crossing · attached gen ${waterSurfacePresentation.globalFineAttachedGeneration ?? "?"} · mesh gen ${waterSurfacePresentation.meshPublicationGeneration ?? "?"} · live gen ${gpuInfo?.globalFineGeneration ?? "?"}`
               : waterSurfacePresentation.presentationFallbackActive
                 ? "presentation fallback only · solver authority unchanged"
                 : waterSurfacePresentation.globalFineAttached
                   ? "no current crossing · no fallback geometry"
                   : "adaptive presentation source"}
-            tone={waterSurfacePresentation.presentationFallbackActive || waterSurfacePresentation.surfaceGeometrySource === "empty"
+            tone={(waterSurfacePresentation.surfaceGeometrySource === "global-fine-coarse" && !waterRasterGenerationCurrent)
+              || waterSurfacePresentation.presentationFallbackActive || waterSurfacePresentation.surfaceGeometrySource === "empty"
               ? "warn" : "good"}
           />}
         <MetricCard label="GPU dam front" value={gpuInfo?.front_m !== undefined ? gpuInfo.front_m.toFixed(3) : "—"} unit={`m · ${telemetrySourceLabel(gpuInfo?.frontTelemetrySource)}`} tone={gpuInfo?.frontTelemetrySource === "unavailable" ? "warn" : "neutral"} />
@@ -148,15 +158,15 @@ export function DiagnosticsPanel() {
             ? powerCSRPublished && !gpuInfo.pressureCapacityOverflow ? "good" : (gpuInfo.encodedSteps ?? 0) > 0 ? "warn" : "neutral"
             : "neutral"}
         />}
-        <MetricCard label="GPU pressure maximum" value={gpuInfo?.maxPressure_Pa !== undefined ? gpuInfo.maxPressure_Pa.toExponential(2) : "—"} unit={`Pa at ${formatGridLocation(gpuInfo?.maxPressureLocation)}`} />
+        <MetricCard label={octreePressurePotential ? "GPU pressure-potential maximum" : "GPU pressure maximum"} value={gpuInfo?.maxPressure_Pa !== undefined ? gpuInfo.maxPressure_Pa.toExponential(2) : "—"} unit={`${octreePressurePotential ? "m²/s · stored dt·p/ρ" : "Pa"} at ${formatGridLocation(gpuInfo?.maxPressureLocation)}`} />
         <MetricCard label="GPU component CFL" value={gpuInfo?.maxComponentCfl !== undefined ? gpuInfo.maxComponentCfl.toFixed(3) : "—"} unit={`${gpuInfo?.highCflCellCount ?? 0} wet samples above 1`} tone={gpuInfo?.maxComponentCfl !== undefined && gpuInfo.maxComponentCfl <= 4 && (gpuInfo.highCflCellCount ?? 0) < 32 ? "good" : "warn"} />
         <MetricCard label="Phi transport substeps" value={gpuInfo?.lastSubsteps !== undefined ? `${gpuInfo.lastSubsteps}×` : "—"} unit={gpuInfo?.lastDt_s !== undefined ? `${(gpuInfo.lastDt_s * 1000).toFixed(2)} ms interface dt · latest stats sample` : "GPU-governed · latest stats sample"} tone={gpuInfo?.lastSubsteps !== undefined && gpuInfo.lastSubsteps <= 1 ? "good" : "warn"} />
         <MetricCard label="GPU NaN / infinity" value={gpuInfo?.nonFiniteCount !== undefined ? String(gpuInfo.nonFiniteCount) : "—"} unit="across pre-pressure, pressure, and projected fields" tone={gpuInfo?.nonFiniteCount === 0 ? "good" : "warn"} />
         <MetricCard label="GPU step" value={gpuInfo?.gpuStep_ms !== undefined ? gpuInfo.gpuStep_ms.toFixed(2) : "—"} unit="ms · timestamp query" tone={gpuInfo?.gpuStep_ms !== undefined && gpuInfo.gpuStep_ms < 16.7 ? "good" : "neutral"} />
         <MetricCard label="GPU completion cadence" value={gpuInfo?.gpuCompletionWall_ms && gpuInfo.gpuCompletionSimulation_s ? (gpuInfo.gpuCompletionSimulation_s * 1000 / gpuInfo.gpuCompletionWall_ms).toFixed(2) : gpuInfo?.gpuQueueWall_ms && gpuInfo.gpuQueueSimulation_s ? (gpuInfo.gpuQueueSimulation_s * 1000 / gpuInfo.gpuQueueWall_ms).toFixed(2) : "—"} unit={gpuInfo?.gpuBatchWall_ms !== undefined ? `× realtime · ${gpuInfo.gpuPendingBatches ?? 0} batches pending · ${gpuInfo.gpuBatchWall_ms.toFixed(1)} ms batch wall` : "queue-confirmed completion"} tone={gpuInfo?.gpuCompletionWall_ms && gpuInfo.gpuCompletionSimulation_s && gpuInfo.gpuCompletionSimulation_s * 1000 >= gpuInfo.gpuCompletionWall_ms ? "good" : "neutral"} />
-        <MetricCard label={scene.fluid.inflow ? "GPU net mass change" : "GPU mass drift"} value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}`} tone={scene.fluid.inflow ? "neutral" : gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
-        <MetricCard label="GPU represented-volume drift" value={gpuInfo?.representedVolumeDrift !== undefined ? (gpuInfo.representedVolumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}`} tone={gpuInfo?.representedVolumeDrift !== undefined && Math.abs(gpuInfo.representedVolumeDrift) < 0.05 ? "good" : "warn"} />
-        <MetricCard label="Global correction" value={gpuInfo?.gridKind === "restricted-tall-cell" ? `${gpuInfo.volumeCorrectionDivergenceRate_s?.toFixed(3) ?? "0.000"}` : gpuInfo?.volumeControl ? `${gpuInfo.volumeCorrectionNormalSpeed_cells_s?.toFixed(2) ?? "0.00"}` : "None"} unit={gpuInfo?.gridKind === "restricted-tall-cell" ? `s⁻¹ CM12 divergence rate · ${gpuInfo.phiInterfaceCellCount?.toFixed(0) ?? "—"} wet interface cells` : gpuInfo?.volumeControl ? `cells/s normal speed · ${gpuInfo.phiInterfaceCellCount?.toFixed(0) ?? "—"} interface cells` : "pairwise conservative face flux"} tone={gpuInfo?.gridKind === "restricted-tall-cell" || gpuInfo?.volumeControl ? "neutral" : "good"} />
+        <MetricCard label={globalFineVolumeEstimate ? "GPU pre-correction occupancy drift" : scene.fluid.inflow ? "GPU net mass change" : "GPU mass drift"} value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}${globalFineVolumeEstimate ? " · smoothed occupancy estimate" : ""}`} tone={scene.fluid.inflow ? "neutral" : gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
+        {!representedVolumeAliasesPrimary && <MetricCard label="GPU represented-volume drift" value={gpuInfo?.representedVolumeDrift !== undefined ? (gpuInfo.representedVolumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}`} tone={gpuInfo?.representedVolumeDrift !== undefined && Math.abs(gpuInfo.representedVolumeDrift) < 0.05 ? "good" : "warn"} />}
+        <MetricCard label={octreePressurePotential && gpuInfo?.volumeControl ? "Global φ-shift supplement" : "Global correction"} value={gpuInfo?.gridKind === "restricted-tall-cell" ? `${gpuInfo.volumeCorrectionDivergenceRate_s?.toFixed(3) ?? "0.000"}` : gpuInfo?.volumeControl ? `${gpuInfo.volumeCorrectionNormalSpeed_cells_s?.toFixed(2) ?? "0.00"}` : "None"} unit={gpuInfo?.gridKind === "restricted-tall-cell" ? `s⁻¹ CM12 divergence rate · ${gpuInfo.phiInterfaceCellCount?.toFixed(0) ?? "—"} wet interface cells` : gpuInfo?.volumeControl ? `cells/s normal speed · ${gpuInfo.phiInterfaceCellCount?.toFixed(0) ?? "—"} interface cells${octreePressurePotential ? " · engineering supplement, not paper §5" : ""}` : "pairwise conservative face flux"} tone={gpuInfo?.gridKind === "restricted-tall-cell" || gpuInfo?.volumeControl ? "neutral" : "good"} />
         {gpuInfo?.gridKind === "quadtree-tall-cell" && <>
           <MetricCard label="Optical layer" value={gpuInfo.quadtreeOpticalLayerMode === "adaptive-motion" ? "Motion-adaptive" : "Fixed depth"} unit={gpuInfo.quadtreeOpticalLayerMode === "adaptive-motion" ? `α ${gpuInfo.quadtreeOpticalAlpha?.toFixed(2) ?? "—"} · ${gpuInfo.quadtreeOpticalMinimumCells ?? "—"}–${gpuInfo.quadtreeOpticalMaximumCells ?? "—"} cells` : "quarter of connected liquid depth"} tone={gpuInfo.quadtreeOpticalLayerMode === "adaptive-motion" ? "good" : "neutral"} />
           <MetricCard label="Quadtree leaves" value={gpuInfo.quadtreeLeafCount?.toLocaleString() ?? "—"} unit={`2:1 ratio ≤ ${gpuInfo.quadtreeMaximumNeighborRatio ?? "—"}`} />

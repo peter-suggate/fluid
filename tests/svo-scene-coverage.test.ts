@@ -60,7 +60,7 @@ test("finite panes and terrain are complete while unsupported optical/procedural
       const entry = entries.get(pane.key);
       assert.ok(entry, `${pane.key} is audited`);
       assert.equal(entry!.status, "complete");
-      assert.equal(entry!.visibleOwnership, "thin-glass");
+      assert.ok(entry!.visibleOwnership === "thin-glass" || entry!.visibleOwnership === "thick-glass");
     }
   }
 
@@ -72,8 +72,8 @@ test("finite panes and terrain are complete while unsupported optical/procedural
 
   const station = buildSvoEnvironmentCoverage(scene, "research-station");
   const portholes = station.entries.find(({ key }) => key.endsWith("procedural-portholes"));
-  assert.equal(portholes?.status, "unsupported");
-  assert.equal(portholes?.visibleOwnership, "raster-only-procedural");
+  assert.equal(portholes?.status, "complete");
+  assert.equal(portholes?.visibleOwnership, "thick-glass");
   assert.equal(portholes?.reason, "procedural-circular-glazing");
 
   const garden = buildSvoEnvironmentCoverage(scene, "garden");

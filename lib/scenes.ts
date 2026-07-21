@@ -84,6 +84,49 @@ const paperCamera: Partial<CameraState> = { distance_m: 2.45, target_m: { x: 0, 
 // water reads as inset into the ground.
 const gardenCamera: Partial<CameraState> = { azimuth_rad: 0.58, elevation_rad: 0.38, distance_m: 2.95, target_m: { x: 0, y: 0.26, z: 0 } };
 
+export function createGardenPondScene(): SceneDescription {
+  const scene = applyGardenPool(cloneScene(defaultScene));
+  scene.sceneId = "garden-pond-still";
+  scene.fluid.initialCondition = "tank-fill";
+  const terrain = gardenPoolTerrain();
+  const beach = { x: 0.25, z: -0.55 };
+  const stone = (index: number, x: number, z: number) => ({
+    id: `garden-stone-${index}`, name: `Stepping stone ${index}`, shape: "cylinder" as const,
+    dimensions_m: { x: 0.13, y: 0.06, z: 0.13 }, density_kg_m3: 2600,
+    position_m: { x, y: terrainHeightAt(terrain, x, z) + 0.03, z },
+    orientation: { w: 1, x: 0, y: 0, z: 0 },
+    linearVelocity_m_s: { x: 0, y: 0, z: 0 }, angularVelocity_rad_s: { x: 0, y: 0, z: 0 },
+    restitution: 0.05, friction: 0.9, motion: "static" as const
+  });
+  scene.rigidBodies = [
+    {
+      id: "garden-cork-ball", name: "Cork ball", shape: "sphere",
+      dimensions_m: { x: 0.09, y: 0.09, z: 0.09 }, density_kg_m3: 240,
+      position_m: { x: -0.35, y: GARDEN_WATERLINE_M + 0.25, z: -0.12 },
+      orientation: { w: 1, x: 0, y: 0, z: 0 },
+      linearVelocity_m_s: { x: 0.1, y: 0, z: 0.05 }, angularVelocity_rad_s: { x: 0, y: 1.2, z: 0 },
+      restitution: 0.4, friction: 0.35
+    },
+    stone(1, beach.x - 0.18, beach.z - 0.1), stone(2, beach.x + 0.08, beach.z + 0.04), stone(3, beach.x + 0.34, beach.z + 0.16)
+  ];
+  return scene;
+}
+
+/** Dry acceptance scene for the sparse renderer; no fluid solver is created. */
+export function createGardenSvoLightingScene(): SceneDescription {
+  const scene = createGardenPondScene();
+  scene.sceneId = "garden-svo-lighting-study";
+  scene.systems = { ...scene.systems, fluid: false };
+  scene.container.fillFraction = 0;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  // Remove the floating cork. Static stepping stones provide crisp contact
+  // and penumbra references without relying on rigid/fluid coupling.
+  scene.rigidBodies = scene.rigidBodies.filter(({ id }) => id !== "garden-cork-ball");
+  return scene;
+}
+
 const authoredScenePresets: ReadonlyArray<ScenePreset> = [
   {
     id: "water-box-dam-break",
@@ -115,33 +158,16 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     name: "Garden pond · still water",
     group: "Garden",
     description: "A white-clay pond settled to its waterline, ringed by cloud trees and oversized mushrooms. A cork ball bobs over the deep end; stepping stones cross the beach shelf.",
-    create: () => {
-      const scene = applyGardenPool(cloneScene(defaultScene));
-      scene.sceneId = "garden-pond-still";
-      scene.fluid.initialCondition = "tank-fill";
-      const terrain = gardenPoolTerrain();
-      const beach = { x: 0.25, z: -0.55 };
-      const stone = (index: number, x: number, z: number) => ({
-        id: `garden-stone-${index}`, name: `Stepping stone ${index}`, shape: "cylinder" as const,
-        dimensions_m: { x: 0.13, y: 0.06, z: 0.13 }, density_kg_m3: 2600,
-        position_m: { x, y: terrainHeightAt(terrain, x, z) + 0.03, z },
-        orientation: { w: 1, x: 0, y: 0, z: 0 },
-        linearVelocity_m_s: { x: 0, y: 0, z: 0 }, angularVelocity_rad_s: { x: 0, y: 0, z: 0 },
-        restitution: 0.05, friction: 0.9, motion: "static" as const
-      });
-      scene.rigidBodies = [
-        {
-          id: "garden-cork-ball", name: "Cork ball", shape: "sphere",
-          dimensions_m: { x: 0.09, y: 0.09, z: 0.09 }, density_kg_m3: 240,
-          position_m: { x: -0.35, y: GARDEN_WATERLINE_M + 0.25, z: -0.12 },
-          orientation: { w: 1, x: 0, y: 0, z: 0 },
-          linearVelocity_m_s: { x: 0.1, y: 0, z: 0.05 }, angularVelocity_rad_s: { x: 0, y: 1.2, z: 0 },
-          restitution: 0.4, friction: 0.35
-        },
-        stone(1, beach.x - 0.18, beach.z - 0.1), stone(2, beach.x + 0.08, beach.z + 0.04), stone(3, beach.x + 0.34, beach.z + 0.16)
-      ];
-      return scene;
-    },
+    create: createGardenPondScene,
+    camera: gardenCamera,
+    background: "garden"
+  },
+  {
+    id: "garden-svo-lighting",
+    name: "Garden · SVO lighting study",
+    group: "Garden",
+    description: "A fluid-free garden for validating SVO mip-cone lighting, soft shadows, and ambient occlusion without initializing simulation authority.",
+    create: createGardenSvoLightingScene,
     camera: gardenCamera,
     background: "garden"
   },

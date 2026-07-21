@@ -20,6 +20,8 @@ const request = (overrides: Partial<GPUStageCaptureRequest> = {}): GPUStageCaptu
 
 test("capture registry exposes typed resources only on supported stages and methods", () => {
   assert.equal(captureTargetForStage("uniform", "physics", "pressure")?.resourceId, "pressure");
+  assert.equal(captureTargetForStage("octree", "physics", "pressure")?.units, "m²/s");
+  assert.equal(captureTargetForStage("octree", "physics", "pressure")?.selectorLabel, "dt·p/ρ");
   assert.equal(captureTargetForStage("uniform", "physics", "topology"), undefined);
   assert.equal(captureTargetForStage("octree", "physics", "topology")?.visualization, "categorical");
   assert.equal(captureTargetForStage("octree", "presentation", "dry-scene")?.resourceId, "dry-scene-hdr");

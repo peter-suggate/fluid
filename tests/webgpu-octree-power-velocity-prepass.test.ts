@@ -23,6 +23,9 @@ import {
 test("trajectory prepass is bounded GPU-only Stage-B work", () => {
   assert.match(buildPowerTrajectoryQueriesWGSL, /buildPowerTrajectoryQueries/);
   assert.doesNotMatch(buildPowerTrajectoryQueriesWGSL, /texture|readback/i);
+  const productionBuilder = makePowerVelocityPrepassBuilderWGSL();
+  assert.doesNotMatch(productionBuilder, /nearestOwner|nearestFallback|0x10000000u/,
+    "missing containing owners must be resolved only by the Section 5 face-band publication");
   assert.deepEqual(planOctreePowerVelocityPrepass(4096, 256), {
     queryCapacity: 4096,
     queryBytes: 196_608,
@@ -169,7 +172,7 @@ for (const factor of [4, 8] as const) test(`Dawn resolves factor-${factor} segme
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE",
 }, () => runSegmentQueries(factor));
 
-test("Dawn extrapolates a positive-air query from the bounded nearest live power cell", {
+test("Dawn fails closed when a trajectory query has no containing power owner", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE",
 }, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
@@ -201,8 +204,8 @@ test("Dawn extrapolates a positive-air query from the bounded nearest live power
     size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   }); device.queue.writeBuffer(buffer, 0, data); return buffer; };
   const headerBuffer = upload(headers);
-  // Cell x=1 deliberately has no containing row; cell x=0 is the bounded
-  // nearest live power cell and supplies the extrapolated Stage-B query.
+  // Cell x=1 deliberately has no containing row. The paper's air-side value
+  // must come from the later Section 5 face-band publication, never cell x=0.
   const positions = upload(new Float32Array([1.5, 0.5, 0.5, 1]));
   const readback = device.createBuffer({ size: 20, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
@@ -213,9 +216,10 @@ test("Dawn extrapolates a positive-air query from the bounded nearest live power
   encoder.copyBufferToBuffer(prepass.source.statuses, 0, readback, 16, 4);
   device.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ);
   const bytes = readback.getMappedRange().slice(0); readback.unmap();
-  assert.deepEqual(Array.from(new Float32Array(bytes, 0, 4)), Array.from(values));
-  assert.notEqual(new Uint32Array(bytes, 16, 1)[0] & 0x1000_0000, 0,
-    "nearest-owner extrapolation must be marked in the existing status channel");
+  assert.deepEqual(Array.from(new Float32Array(bytes, 0, 4)), [0, 0, 0, 0]);
+  const status = new Uint32Array(bytes, 16, 1)[0];
+  assert.equal(status & 0x8000_0000, 0);
+  assert.equal(status & 0x1000_0000, 0);
   readback.destroy(); positions.destroy(); headerBuffer.destroy();
   prepass.destroy(); velocity.destroy(); faces.destroy(); topology.destroy(); device.destroy();
 });

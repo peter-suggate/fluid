@@ -27,10 +27,15 @@ import {
   SPARSE_BRICK_GPU_LAYOUT,
   packSparseBrickPlan,
   type SparseBrickCoordinate,
+  type SparseBrickPlan,
   type SparseBrickPublicationSource,
   type SparseBrickSize
 } from "./sparse-brick-octree";
 import { planAdaptiveSparseBrickOctree } from "./adaptive-sparse-brick-plan";
+import { planSvoWideFanout } from "./svo-wide-fanout";
+import { WebGPUSvoWideFanout } from "./webgpu-svo-wide-fanout";
+import { WebGpuSvoNodeMipPyramid } from "./webgpu-svo-node-mip-pyramid";
+import { buildSvoStaticNodeMipPublication } from "./svo-static-node-mips";
 import { planSparseSceneDomain } from "./sparse-scene-domain";
 import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTable } from "./voxel-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "./voxel-environments";
@@ -110,6 +115,24 @@ export function planOctreeSparseBrickEncode(
 
 /** Environment terminal leaves are at most 2x the solver brick scale. */
 export const ENVIRONMENT_MAXIMUM_COARSENING_POWER = 1;
+
+/** Derive the immutable renderer directory without taking structural authority. */
+export function planOctreeSvoWideFanout(plan: SparseBrickPlan) {
+  return planSvoWideFanout({
+    sourceGeneration: 1,
+    generation: 1,
+    maximumDepth: plan.maximumDepth,
+    terminals: plan.leaves.map((leaf) => {
+      const node = plan.nodes[leaf.nodeIndex];
+      return {
+        sourceNodeIndex: node.index,
+        sourceLeafIndex: leaf.index,
+        level: node.level,
+        coordinate: [node.coordinate.x, node.coordinate.y, node.coordinate.z] as const,
+      };
+    }),
+  });
+}
 
 export function planOctreeBrickCoordinates(dimensions: readonly [number, number, number], brickSize: SparseBrickSize) {
   if (brickSize !== 4 && brickSize !== 8) throw new RangeError("Octree brick size must be 4 or 8");
@@ -437,6 +460,8 @@ export class OctreeSparseBrickWorld {
   private readonly structuralFramePipeline: GPUComputePipeline;
   private readonly structuralFinalizeBindGroup: GPUBindGroup;
   private readonly proxyVoxelizer: SparseSceneProxyVoxelizer;
+  private readonly wideFanout?: WebGPUSvoWideFanout;
+  private readonly nodeMipPyramid?: WebGpuSvoNodeMipPyramid;
   private published = false;
   private proxiesPublished = false;
   private destroyed = false;
@@ -465,6 +490,49 @@ export class OctreeSparseBrickWorld {
     this.finestLevel = plan.maximumDepth;
     const packed = packSparseBrickPlan(plan, 1);
     this.tree = new SparseBrickOctreeGPU(device, { brickSize, nodeCapacity: Math.max(1, plan.nodes.length), leafCapacity: Math.max(1, plan.leaves.length), label: "Octree unified sparse-brick world" });
+    // Renderer acceleration is a derived immutable view of the exact same
+    // canonical terminal set. Failure leaves structural authority untouched
+    // and simply omits the optional capability.
+    let wideFanout: WebGPUSvoWideFanout | undefined;
+    try {
+      const widePlan = planOctreeSvoWideFanout(plan);
+      wideFanout = new WebGPUSvoWideFanout(device, {
+        maximumPages: Math.max(1, widePlan.pages.length),
+        maximumDescriptors: Math.max(1, widePlan.descriptorCount),
+      });
+      const encoder = device.createCommandEncoder({ label: "Publish immutable SVO wide-fanout hierarchy" });
+      if (wideFanout.encode(encoder, widePlan) !== "encoded" || !wideFanout.capability()) {
+        wideFanout.destroy();
+        wideFanout = undefined;
+      }
+    } catch {
+      wideFanout?.destroy();
+      wideFanout = undefined;
+    }
+    this.wideFanout = wideFanout;
+    // The opacity pyramid is a disposable static-lighting view over the same
+    // world lattice. It deliberately excludes fluid lanes: water transport
+    // and topology remain owned by the canonical simulation octree.
+    let nodeMipPyramid: WebGpuSvoNodeMipPyramid | undefined;
+    try {
+      const maximumDirectoryPages = Math.min(8_192, Number(device.limits?.maxTextureDimension2D) || 8_192);
+      const staticMips = buildSvoStaticNodeMipPublication(scene, sceneDomain, environmentPrimitives, {
+        generation: 1,
+        capacity: maximumDirectoryPages,
+        samplesPerAxis: 2,
+      });
+      nodeMipPyramid = new WebGpuSvoNodeMipPyramid(device);
+      nodeMipPyramid.beginGeneration(staticMips.plan);
+      for (const page of staticMips.interiors) nodeMipPyramid.uploadInteriorPage(page.key, page.interior);
+      if (!nodeMipPyramid.publish().published || !nodeMipPyramid.visibleGeneration()) {
+        nodeMipPyramid.destroy();
+        nodeMipPyramid = undefined;
+      }
+    } catch {
+      nodeMipPyramid?.destroy();
+      nodeMipPyramid = undefined;
+    }
+    this.nodeMipPyramid = nodeMipPyramid;
     const solverOriginBricks = this.solverGridOriginCells.map((value) => value / brickSize);
     if (solverOriginBricks.some((value) => !Number.isInteger(value))) throw new Error("Shared sparse scene origin must align to the fluid brick lattice");
     const leafByCoordinate = new Map<string, number>();
@@ -734,13 +802,20 @@ export class OctreeSparseBrickWorld {
       materialCount: materialData.length / 8,
       fluidBrickStats: { buffer: this.residency.worklist }, fluidBrickCapacity: this.residency.capacity,
       structural,
+      wideFanout: this.wideFanout?.capability(),
+      nodeMipPyramid: this.nodeMipPyramid?.visibleGeneration(),
+      derivedRenderAllocationBytes: {
+        wideFanout: this.wideFanout?.allocatedBytes ?? 0,
+        nodeMipPyramid: this.nodeMipPyramid?.telemetry().allocatedBytes ?? 0,
+      },
       revision: 1
     };
     this.baseAllocatedBytes = this.tree.allocatedBytes + this.residency.allocatedBytes
       + (this.bulkResidency?.allocatedBytes ?? 0) + (this.atlas?.allocatedBytes ?? 0)
       + this.sourceBuffers.reduce((sum, buffer) => sum + buffer.size, 0)
       + this.pbrMaterialBuffer.size + this.lightBuffer.size + this.environmentLightingBuffer.size + this.structuralPublicationState.size
-      + this.proxyVoxelizer.allocatedBytes;
+      + this.proxyVoxelizer.allocatedBytes + (this.wideFanout?.allocatedBytes ?? 0)
+      + (this.nodeMipPyramid?.telemetry().allocatedBytes ?? 0);
   }
 
   get allocatedBytes(): number { return this.baseAllocatedBytes + (this.inspection?.allocatedBytes ?? 0); }
@@ -899,6 +974,8 @@ export class OctreeSparseBrickWorld {
     this.bulkResidency?.destroy();
     this.atlas?.destroy();
     this.proxyVoxelizer.destroy();
+    this.wideFanout?.destroy();
+    this.nodeMipPyramid?.destroy();
     for (const buffer of [...this.sourceBuffers, this.pbrMaterialBuffer, this.lightBuffer, this.environmentLightingBuffer, this.structuralPublicationState, ...(this.inspection?.buffers ?? [])]) buffer.destroy();
   }
 }

@@ -7,7 +7,11 @@ import {
   type PowerBoundaryPlane,
   type PowerVec3,
 } from "./octree-power-geometry";
-import { OCTREE_CUBE_TRANSFORMS, transformPowerVector, type CubeTransform } from "./octree-power-topology";
+import {
+  OCTREE_CUBE_TRANSFORMS,
+  transformPowerVector,
+  type CubeTransform,
+} from "./octree-power-topology";
 
 export const OCTREE_POWER_CATALOG_VERSION = 4;
 /** Neighbor geometry, area/centroid, and normal/inverse-distance vec4s. */
@@ -121,6 +125,28 @@ function solidAngle(a: PowerVec3, b: PowerVec3, c: PowerVec3): number {
   return 2 * Math.atan2(Math.abs(dot(a, cross(b, c))), denominator);
 }
 
+function ordinaryDelaunayAtAnchor(a: PowerVec3, b: PowerVec3, c: PowerVec3,
+  sites: readonly PowerVec3[]): boolean {
+  const dot = (left: PowerVec3, right: PowerVec3) => left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
+  const cross = (left: PowerVec3, right: PowerVec3): PowerVec3 => [
+    left[1] * right[2] - left[2] * right[1], left[2] * right[0] - left[0] * right[2], left[0] * right[1] - left[1] * right[0],
+  ];
+  const determinant = dot(a, cross(b, c));
+  if (Math.abs(determinant) <= 1e-12) return false;
+  const rhs: PowerVec3 = [dot(a, a) / 2, dot(b, b) / 2, dot(c, c) / 2];
+  const center = [
+    (rhs[0] * cross(b, c)[0] + rhs[1] * cross(c, a)[0] + rhs[2] * cross(a, b)[0]) / determinant,
+    (rhs[0] * cross(b, c)[1] + rhs[1] * cross(c, a)[1] + rhs[2] * cross(a, b)[1]) / determinant,
+    (rhs[0] * cross(b, c)[2] + rhs[1] * cross(c, a)[2] + rhs[2] * cross(a, b)[2]) / determinant,
+  ] as PowerVec3;
+  const radius2 = dot(center, center);
+  const tolerance = Math.max(1, radius2) * 2e-9;
+  return sites.every((site) => {
+    const delta: PowerVec3 = [site[0] - center[0], site[1] - center[1], site[2] - center[2]];
+    return dot(delta, delta) >= radius2 - tolerance;
+  });
+}
+
 function localDelaunayTetrahedra(
   anchor: OctreePowerSite,
   sites: readonly OctreePowerSite[],
@@ -151,6 +177,8 @@ function localDelaunayTetrahedra(
     const site = ordinarySites.find((candidate) => candidate.key === key)!;
     positionBySelector.set(selector, site.center.map((value) => value / 4) as [number, number, number]);
   }
+  const ordinaryPositions = ordinarySites.filter((site) => site.key !== anchor.key)
+    .map((site): PowerVec3 => [site.center[0] / 4, site.center[1] / 4, site.center[2] / 4]);
   const vertexTolerance2 = (ordinaryAnchor.size * 4e-8) ** 2;
   const selectorsAtVertex = (vertex: PowerVec3) => cell.faces.flatMap((face) =>
     face.vertices.some((candidate) => distanceSquared(candidate, vertex) <= vertexTolerance2)
@@ -196,6 +224,16 @@ function localDelaunayTetrahedra(
       const positions = triple.map((selector) => positionBySelector.get(selector)!);
       const determinant = dot(positions[0], cross(positions[1], positions[2]));
       if (Math.abs(determinant) <= 1e-10) continue;
+      if (!ordinaryDelaunayAtAnchor(positions[0], positions[1], positions[2], ordinaryPositions)) {
+        throw new Error(`Local tetrahedron is not ordinary Delaunay at current cell ${anchor.key}`);
+      }
+      const angle = solidAngle(positions[0], positions[1], positions[2]);
+      // Equality is the Cartesian limiting case used by the regular Eikonal
+      // update. Strictly obtuse transition simplices must be removed by the
+      // topology grading rule before this configuration reaches the catalog.
+      if (angle > Math.PI / 2 + 1e-10) {
+        throw new Error(`Local Delaunay tetrahedron has obtuse current-cell solid angle ${angle} at ${anchor.key}`);
+      }
       const key = [...triple].sort((a, b) => a - b).join(",");
       if (!seen.has(key)) { seen.add(key); tetrahedra.push(triple); }
     }

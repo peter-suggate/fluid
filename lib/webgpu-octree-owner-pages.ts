@@ -965,9 +965,7 @@ fn activatePages(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) num
 
 fn analyticOwnerWord(origin: vec3u, size: u32) -> u32 {
   if (size == 1u) { return 0x80000000u; }
-  let exponent = u32(firstTrailingBit(size));
-  let aligned = origin >> vec3u(exponent);
-  return exponent | (aligned.x << 3u) | (aligned.y << 12u) | (aligned.z << 21u);
+  return u32(firstTrailingBit(size));
 }
 
 // One workgroup consumes one analytically published topology tile. Each lane

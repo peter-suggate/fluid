@@ -188,6 +188,10 @@ export interface GPUEulerianInfo {
   globalFineFaceBandPowerPublicationFlags?: number;
   globalFineFaceBandTransientPowerFlags?: number;
   globalFineFaceBandPointFieldFlags?: number;
+  /** Power-coarse φ authority failure bits and first compact row. Bit 512
+   * identifies a missing causal non-obtuse Delaunay simplex. */
+  globalFineCoarseLevelSetFlags?: number;
+  globalFineCoarseLevelSetFirstErrorRow?: number;
   /** Bounded, observational Section 5 transaction details. These values come
    * from the control headers already read for authority validation; exposing
    * them does not add a simulation-sized readback. */
@@ -220,6 +224,15 @@ export interface GPUEulerianInfo {
   globalFineFaceBandTransitionSupport3Rows?: number;
   globalFineFaceBandTransitionEndpointRows?: number;
   globalFineFaceBandBoundaryGhostRequests?: number;
+  /** Existing bounded transition-failure payload, decoded when an excluded
+   * same/coarser mask escapes acute-simplex grading into the dry band. */
+  globalFineFaceBandAcuteGradingFailure?: {
+    readonly band: number;
+    readonly rowCell: number;
+    readonly rowSize: number;
+    readonly descriptor: number;
+    readonly coarseMask: number;
+  };
   globalFineFaceBandPhiFailureCounts?: {
     readonly missingRow: number;
     readonly exactCoarseMiss: number;
@@ -306,6 +319,8 @@ export interface GPUEulerianInfo {
   maxDivergenceAfter_s?: number;
   projectionDivergenceRatio?: number;
   maxAirSpeed_m_s?: number;
+  /** Physical pressure in Pa for dense/tall-cell methods. The octree power
+   * projection stores dt·p/rho (m²/s); consumers must branch on gridKind. */
   maxPressure_Pa?: number;
   pressureResidual?: number;
   pressureRelativeResidual?: number;

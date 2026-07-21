@@ -46,7 +46,9 @@ test("eligible analytic scenes use the GPU-authored resident cold worklist", () 
     /if \(this\.analyticBootstrapWorklist\)[\s\S]*\.encode\(encoder\)[\s\S]*this\.topologyWorklistReady = true[\s\S]*this\.encodeInlineRebuild\(encoder\)/,
     "analytic bootstrap must enter the resident rebuild without a finest-domain cold dispatch");
   assert.match(projectionSource,
-    /if \(analyticSparseBootstrap\)[\s\S]*planOctreeAnalyticBootstrapBounds[\s\S]*new WebGPUOctreeAnalyticBootstrapWorklist/);
+    /const analyticBootstrapPlan = analyticSparseBootstrap \? planOctreeAnalyticBootstrapBounds/);
+  assert.match(projectionSource,
+    /if \(analyticBootstrapPlan\)[\s\S]*new WebGPUOctreeAnalyticBootstrapWorklist/);
   assert.match(projectionSource,
     /const topologyWorklistReady = this\.topologyWorklistReady[\s\S]*this\.topologyWorklistReady = false/,
     "non-analytic compatibility bootstrap must retain the existing full-domain fallback");

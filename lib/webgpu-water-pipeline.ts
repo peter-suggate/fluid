@@ -8,7 +8,15 @@ import {
   WATER_OPTICS,
 } from "./webgpu-lighting";
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
-import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
+import {
+  SPARSE_SURFACE_CONTROL_BYTES,
+  type SparseSurfaceBandGPUSource,
+} from "./webgpu-sparse-surface-band";
+import { OCTREE_SURFACE_LEAF_RECORD_BYTES } from "./webgpu-octree-surface-pages";
+import {
+  OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
+  OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES,
+} from "./webgpu-octree-power-coarse-levelset";
 import type { SvoFluidRenderOwnership } from "./svo-fluid-media-path";
 import {
   validateGlobalFineLevelSetConsumerSource,
@@ -36,6 +44,14 @@ export function shouldUpdateWaterSurface(extractedRevision: number, latestRevisi
 
 /** Raster/body depth separation that activates the local implicit resolver. */
 export const CONTACT_RESOLVE_BAND_CELLS = 1.5;
+
+/** Shared disabled storage must satisfy every struct it can stand in for. */
+export const WATER_SPARSE_FALLBACK_BYTES = Math.max(
+  SPARSE_SURFACE_CONTROL_BYTES,
+  OCTREE_SURFACE_LEAF_RECORD_BYTES,
+  OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES
+    + OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
+);
 
 /** CPU mirror of the shader gate, kept explicit for regression tests. */
 export function shouldResolveRigidContact(frontDepth: number, rigidDepth: number, cellSize: number, bodyCount: number) {
@@ -81,6 +97,10 @@ export interface WaterSurfacePresentationDiagnostics {
   /** Presentation geometry only; this does not confer simulation authority on a fallback field. */
   readonly surfaceGeometrySource: WaterSurfaceGeometrySource;
   readonly globalFineAttached: boolean;
+  /** Generation of the global-fine source captured with this queue-fenced diagnostic. */
+  readonly globalFineAttachedGeneration?: number;
+  /** Generation whose zero crossing produced the retained raster mesh, when that mesh is global-fine. */
+  readonly meshPublicationGeneration?: number;
   readonly globalFineCrossingPublished: boolean;
   readonly presentationFallbackActive: boolean;
 }
@@ -286,7 +306,7 @@ struct SparseParams {
 @group(0) @binding(10) var<uniform> sparseParams: SparseParams;
 @group(0) @binding(11) var<storage, read> sparseControl: array<u32>;
 @group(0) @binding(12) var<storage, read> sparseStates: array<u32>;
-struct AdaptiveLeaf { packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f }
+struct AdaptiveLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct AdaptiveParams { shape:vec4u, offsets0:vec4u, offsets1:vec4u, offsets2:vec4u, cellDt:vec4f, spare0:vec4u, spare1:vec4u, spare2:vec4u }
 @group(0) @binding(13) var<storage, read> adaptiveLeaves: array<AdaptiveLeaf>;
 @group(0) @binding(14) var<storage, read> adaptiveArena: array<u32>;
@@ -357,15 +377,16 @@ fn globalPhiAt(cell:vec3i)->f32{if(any(cell<vec3i(0))||any(cell>=vec3i(sparsePar
  if(index>=arrayLength(&sparsePhi)||(sparseControl[index]&1u)==0u){return globalCoarsePhi(cell);}return sparsePhi[index];}
 
 fn adaptiveOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
+fn adaptiveLeafOrigin(leaf:AdaptiveLeaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
 fn adaptiveFallback(leaf:AdaptiveLeaf,p:vec3f)->f32{
-  let c=vec3f(adaptiveOrigin(leaf.packedOrigin))+vec3f(0.5*f32(leaf.size));
+  let c=vec3f(adaptiveLeafOrigin(leaf))+vec3f(0.5*f32(leaf.size));
   let physicalGradient=leaf.phiGradient.yzw/max(adaptiveParams.cellDt.xyz,vec3f(1e-9));
   let boundedCellGradient=physicalGradient/max(1.0,length(physicalGradient))*adaptiveParams.cellDt.xyz;
   return leaf.phiGradient.x+dot(boundedCellGradient,p-c);
 }
 fn adaptivePageSlot(row:u32)->u32{return adaptiveArena[adaptiveParams.offsets0.x+row];}
 fn adaptiveHash(q:vec3u)->u32{var h=(q.x*73856093u)^(q.y*19349663u)^(q.z*83492791u);h^=h>>16u;return h;}
-fn adaptiveContains(leaf:AdaptiveLeaf,p:vec3f)->bool{let o=vec3f(adaptiveOrigin(leaf.packedOrigin));return all(p>=o)&&all(p<o+vec3f(f32(leaf.size)));}
+fn adaptiveContains(leaf:AdaptiveLeaf,p:vec3f)->bool{let o=vec3f(adaptiveLeafOrigin(leaf));return all(p>=o)&&all(p<o+vec3f(f32(leaf.size)));}
 fn adaptiveResidentRow(p:vec3f,fallbackRow:u32)->u32{
   let h=max(1u,adaptiveLeaves[fallbackRow].size);let q=vec3u(max(vec3f(0.0),floor(p/f32(h))));let mask=adaptiveParams.offsets2.y-1u;var slot=adaptiveHash(q)&mask;
   for(var probe=0u;probe<16u;probe+=1u){let encoded=adaptiveArena[adaptiveParams.offsets1.y+slot];if(encoded==0u){break;}let row=encoded-1u;if(row<adaptiveParams.shape.x&&adaptiveContains(adaptiveLeaves[row],p)){return row;}slot=(slot+1u)&mask;}
@@ -374,7 +395,7 @@ fn adaptiveResidentRow(p:vec3f,fallbackRow:u32)->u32{
 fn adaptiveLoad(slot:u32,resolution:u32,q:vec3u)->f32{return bitcast<f32>(adaptiveArena[adaptiveParams.offsets1.z+slot*adaptiveParams.shape.w+q.x+resolution*(q.y+resolution*q.z)]);}
 fn adaptivePagePhi(row:u32,p:vec3f)->f32{
   let leaf=adaptiveLeaves[row];let slot=adaptivePageSlot(row);if(slot==SPARSE_INVALID||slot>=adaptiveParams.shape.y||!adaptiveContains(leaf,p)){return adaptiveFallback(leaf,p);}
-  let resolution=adaptiveParams.shape.z;let origin=vec3f(adaptiveOrigin(leaf.packedOrigin));let grid=clamp((p-origin)/f32(leaf.size)*f32(resolution)-vec3f(0.5),vec3f(0.0),vec3f(f32(resolution-1u)));
+  let resolution=adaptiveParams.shape.z;let origin=vec3f(adaptiveLeafOrigin(leaf));let grid=clamp((p-origin)/f32(leaf.size)*f32(resolution)-vec3f(0.5),vec3f(0.0),vec3f(f32(resolution-1u)));
   let a=vec3u(floor(grid));let b=min(a+vec3u(1u),vec3u(resolution-1u));let t=fract(grid);
   let c000=adaptiveLoad(slot,resolution,a);let c100=adaptiveLoad(slot,resolution,vec3u(b.x,a.y,a.z));let c010=adaptiveLoad(slot,resolution,vec3u(a.x,b.y,a.z));let c110=adaptiveLoad(slot,resolution,vec3u(b.x,b.y,a.z));
   let c001=adaptiveLoad(slot,resolution,vec3u(a.x,a.y,b.z));let c101=adaptiveLoad(slot,resolution,vec3u(b.x,a.y,b.z));let c011=adaptiveLoad(slot,resolution,vec3u(a.x,b.y,b.z));let c111=adaptiveLoad(slot,resolution,b);
@@ -779,7 +800,7 @@ fn extractAdaptiveMain(@builtin(global_invocation_id) gid:vec3u) {
   if(item>=activeCount){return;}let row=adaptiveArena[adaptiveParams.offsets1.x+4u+item];if(row>=adaptiveParams.shape.x){return;}
   let leaf=adaptiveLeaves[row];if(leaf.size!=1u){return;}adaptiveOwnerRow=row;
   let localIndex=stream-item*samples;let resolution=adaptiveParams.shape.z;let local=vec3u(localIndex%resolution,(localIndex/resolution)%resolution,localIndex/(resolution*resolution));
-  let q=adaptiveOrigin(leaf.packedOrigin)*resolution+local;let xBases=array<i32,2>(i32(q.x+1u),0);let yBases=array<i32,2>(i32(q.y+1u),0);let zBases=array<i32,2>(i32(q.z+1u),0);
+  let q=adaptiveLeafOrigin(leaf)*resolution+local;let xBases=array<i32,2>(i32(q.x+1u),0);let yBases=array<i32,2>(i32(q.y+1u),0);let zBases=array<i32,2>(i32(q.z+1u),0);
   let xCount=select(1u,2u,q.x==0u);let yCount=select(1u,2u,q.y==0u);let zCount=select(1u,2u,q.z==0u);
   for(var zi=0u;zi<zCount;zi+=1u){for(var yi=0u;yi<yCount;yi+=1u){for(var xi=0u;xi<xCount;xi+=1u){classifyCube(vec3i(xBases[xi],yBases[yi],zBases[zi]));}}}
 }
@@ -809,7 +830,7 @@ fn extractAdaptiveLeafMain(@builtin(global_invocation_id) gid:vec3u) {
   let leaf=adaptiveLeaves[row];if(leaf.size==0u||(leaf.flags&32u)==0u){return;}
   let page=adaptivePageSlot(row);if(page!=SPARSE_INVALID&&page<adaptiveParams.shape.y){return;}
   adaptiveOwnerRow=row;let resolution=adaptiveParams.shape.z;
-  classifyCubeScaled(vec3i(adaptiveOrigin(leaf.packedOrigin)*resolution),max(1u,leaf.size*resolution));
+  classifyCubeScaled(vec3i(adaptiveLeafOrigin(leaf)*resolution),max(1u,leaf.size*resolution));
 }
 
 // Interior cubes follow the per-column cubic band instead of traversing the
@@ -1229,6 +1250,8 @@ export class RasterWaterPipeline {
   private lastAdaptiveDiagnostics?: AdaptiveWaterRenderDiagnostics;
   private pendingAdaptiveDiagnosticShape?: readonly [number, number, number, number];
   private pendingAdaptiveDiagnosticGlobalFine = false;
+  private pendingAdaptiveDiagnosticGlobalFineGeneration?: number;
+  private lastRasterMeshPublicationGeneration?: number;
 
   constructor(
     private readonly device: GPUDevice,
@@ -1369,9 +1392,9 @@ export class RasterWaterPipeline {
     this.fallbackSparsePhi = this.device.createBuffer({ label: "Water sparse-phi fallback", size: 4, usage: GPUBufferUsage.STORAGE });
     this.fallbackSparseParams = this.device.createBuffer({ label: "Water sparse-params fallback", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.globalFineRenderParams = this.device.createBuffer({ label: "Water global fine parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    // Also bound as the disabled adaptive leaf source. A leaf is 48 bytes, and
-    // WebGPU validates that minimum binding size before evaluating overrides.
-    this.fallbackSparseControl = this.device.createBuffer({ label: "Water sparse-control fallback", size: 48, usage: GPUBufferUsage.STORAGE });
+    // This disabled source also occupies the adaptive-leaf binding. WebGPU
+    // validates the complete 64-byte leaf/control minimum before overrides.
+    this.fallbackSparseControl = this.device.createBuffer({ label: "Water sparse-control fallback", size: WATER_SPARSE_FALLBACK_BYTES, usage: GPUBufferUsage.STORAGE });
     this.rebuildBindGroups();
   }
 
@@ -1452,7 +1475,7 @@ export class RasterWaterPipeline {
   private adaptiveDiagnosticsEnabled() {
     if (typeof location !== "undefined") {
       const query = new URLSearchParams(location.search);
-      if (query.get("waterdiag") === "1" || query.get("diagnostics") === "1" || query.get("panel") === "diagnostics") return true;
+      if (query.get("waterdiag") === "1" || query.get("diagnostics") === "1" || query.get("panel") === "diagnostics" || query.get("panel") === "visual") return true;
     }
     return typeof process !== "undefined" && process.env?.FLUID_WATER_DIAGNOSTICS === "1";
   }
@@ -1470,6 +1493,7 @@ export class RasterWaterPipeline {
     encoder.copyBufferToBuffer(this.indirectBuffer, 0, this.adaptiveDiagnosticReadback, 80, 28);
     this.pendingAdaptiveDiagnosticShape = [adaptive.leafCapacity, adaptive.pageCapacity, adaptive.pageResolution, adaptive.pageResolution ** 3];
     this.pendingAdaptiveDiagnosticGlobalFine = Boolean(this.globalFineLevelSet);
+    this.pendingAdaptiveDiagnosticGlobalFineGeneration = this.globalFineLevelSet?.generation;
     this.adaptiveDiagnosticPending = true;
   }
 
@@ -1484,7 +1508,13 @@ export class RasterWaterPipeline {
       const shape = this.pendingAdaptiveDiagnosticShape ?? [0, 0, 0, 0];
       const groups = Math.max(1, Math.ceil(words[16] * shape[3] / 256));
       const globalFineAttached = this.pendingAdaptiveDiagnosticGlobalFine;
+      const globalFineAttachedGeneration = this.pendingAdaptiveDiagnosticGlobalFineGeneration;
       const surfaceGeometrySource = waterSurfaceGeometrySource(globalFineAttached, words[20], words[26], words[25]);
+      if (surfaceGeometrySource === "global-fine-coarse") {
+        this.lastRasterMeshPublicationGeneration = globalFineAttachedGeneration;
+      } else if (surfaceGeometrySource !== "retained-previous") {
+        this.lastRasterMeshPublicationGeneration = undefined;
+      }
       this.lastAdaptiveDiagnostics = {
         leafCapacity: shape[0], pageCapacity: shape[1], pageResolution: shape[2], samplesPerPage: shape[3],
         surfaceFreePages: words[0], surfaceAllocatedPages: words[4], surfaceCandidatePages: words[12], surfaceActivePages: words[16], surfaceOverflow: words[3],
@@ -1494,6 +1524,8 @@ export class RasterWaterPipeline {
         globalFineAuthorityLatch: words[26],
         surfaceGeometrySource,
         globalFineAttached,
+        globalFineAttachedGeneration,
+        meshPublicationGeneration: this.lastRasterMeshPublicationGeneration,
         globalFineCrossingPublished: surfaceGeometrySource === "global-fine-coarse",
         presentationFallbackActive: surfaceGeometrySource === "adaptive-fallback" || surfaceGeometrySource === "retained-previous",
       };
@@ -1526,6 +1558,7 @@ export class RasterWaterPipeline {
     this.globalCubeValues = this.device.createBuffer({ label: "Global fine classified cube values", size: activeCubeCapacity(maxVertices) * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.globalCubeOffsets = this.device.createBuffer({ label: "Global fine tetrahedron offsets", size: activeCubeCapacity(maxVertices) * 6 * 4, usage: GPUBufferUsage.STORAGE });
     this.globalFineEmitWorkgroups=Math.ceil(activeCubeCapacity(maxVertices)/64);
+    this.lastRasterMeshPublicationGeneration = undefined;
     this.geometryKey = key; this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
   }
 

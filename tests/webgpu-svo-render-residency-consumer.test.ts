@@ -128,7 +128,14 @@ test("nonzero solver origin remaps active and retired bricks into the structural
   assert.equal(publication.stats.retired, 1);
   assert.equal(lifecycle.slot(34), undefined);
   const arena = new Uint32Array(plan.allocatedWords);
-  arena.set(lifecycle.pageTable, plan.pageTableOffsetWords);
+  for (let logical = 0; logical < lifecycle.pageTable.length; logical += 1) {
+    const encodedPage = lifecycle.pageTable[logical];
+    if (encodedPage === 0) continue;
+    let hashSlot = (Math.imul(logical, 0x9e37_79b1) >>> 0) % plan.pageHashCapacity;
+    while (arena[plan.pageTableOffsetWords + hashSlot] !== 0) hashSlot = (hashSlot + 1) % plan.pageHashCapacity;
+    arena[plan.pageTableOffsetWords + hashSlot] = logical + 1;
+    arena[plan.pageTableValueOffsetWords + hashSlot] = encodedPage;
+  }
   const cell = [16, 8, 8] as const; // structural brick (2,1,1), logical 32
   const slot = lifecycle.slot(32)!;
   arena[plan.ownerPagesOffsetWords + slot * plan.pageVoxels] = packOctreeOwnerPageWord(cell, cell, 1);

@@ -39,7 +39,9 @@ test("WebGPU rendering consumes GPU-authored body records", () => {
   assert.match(renderer, /residentRigidBuffer/);
   assert.match(renderer, /encoder\.copyBufferToBuffer\(residentRigidBuffer/);
   assert.match(renderer, /if \(residentRigidBuffer\)[\s\S]*else \{[\s\S]*queue\.writeBuffer\(this\.bodyBuffer/, "CPU body uploads remain only as the CPU-reference fallback");
-  assert.match(controller, /WebGPU owns the canonical body state/);
+  assert.match(controller,
+    /if \(backend === "cpu-reference"\) \{[\s\S]*advanceRigidBodies\(this\.bodies[\s\S]*if \(backend === "cpu-reference"\) \{[\s\S]*this\.publishBodies\(diagnostics\)/,
+    "the host controller must neither integrate nor publish a shadow rigid state for WebGPU");
 });
 
 test("mouse interaction picks live GPU poses with one bounded click readback", () => {

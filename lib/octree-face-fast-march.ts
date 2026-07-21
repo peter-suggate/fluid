@@ -99,8 +99,9 @@ export function planOctreeRegularFaceBand(
 
 /**
  * Oracle for Section 5's closest-face propagation rule on a supplied regular
- * face graph: process faces in increasing |phi| and copy the velocity of the
- * already-known incident face closest to the free surface. This does not model
+ * face graph: liquid seeds have arrival time zero, air faces are processed in
+ * increasing positive phi, and each copies the already-known incident face
+ * closest to the free surface. This does not model
  * the paper's Delaunay transition connectivity. Equal-distance ties use face
  * ID. The recorded graph distance is a data-derived dispatch bound for a
  * parallel one-ring GPU implementation.
@@ -139,8 +140,9 @@ export function fastMarchOctreeFaceVelocity(
       throw new RangeError(`Face-march row ${index} exceeds the proved incidence bound`);
     }
   });
+  const arrival = (phi: number) => Math.max(phi, 0);
   const order = faces.map((_, index) => index).filter((index) => inBand[index] !== 0)
-    .sort((a, b) => Math.abs(faces[a].phi) - Math.abs(faces[b].phi) || a - b);
+    .sort((a, b) => arrival(faces[a].phi) - arrival(faces[b].phi) || a - b);
   for (const faceIndex of order) {
     if (known[faceIndex] !== 0) continue;
     const face = faces[faceIndex];
@@ -152,7 +154,7 @@ export function fastMarchOctreeFaceVelocity(
     let source = OCTREE_FACE_MARCH_INVALID;
     for (const candidate of candidates) {
       if (known[candidate] === 0 || candidate === faceIndex) continue;
-      if (Math.abs(faces[candidate].phi) > Math.abs(face.phi) + tolerance) continue;
+      if (arrival(faces[candidate].phi) > arrival(face.phi) + tolerance) continue;
       if (source === OCTREE_FACE_MARCH_INVALID
         || Math.abs(faces[candidate].phi) < Math.abs(faces[source].phi)
         || (Math.abs(faces[candidate].phi) === Math.abs(faces[source].phi) && candidate < source)) source = candidate;

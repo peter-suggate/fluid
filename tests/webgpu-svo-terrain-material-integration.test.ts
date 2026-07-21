@@ -56,8 +56,8 @@ test("production garden metadata is packed into the existing dry uniform without
   assert.match(rendererSource, /terrainMaterialMetadata:terrainMaterial\?\.packedMetadata,terrainMaterialCacheKey:terrainMaterial\?\.cacheKey/);
   assert.equal(SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES, 16);
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 336, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32, fluidDomainWordOffset: 36,
-    primitiveCandidateWordOffset: 40, finePhiWordOffset: 44,
+    sizeBytes: 368, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32, fluidDomainWordOffset: 36,
+    primitiveCandidateWordOffset: 40, finePhiWordOffset: 44, nodeMipWordOffset: 84, nodeMipAtlasWordOffset: 88,
   });
   assert.match(svoDrySceneShader, /terrainMaterial:SvoTerrainMaterialMetadata/);
   assert.match(svoDrySceneShader, /@binding\(11\) var<storage,read> svoStructuralGeometry/);
@@ -94,12 +94,16 @@ test("terrain metadata validation and dry-parameter uploads are exact and conten
     "non-garden/default table shading remains encodable");
 
   const previousUsage = globalThis.GPUBufferUsage;
+  const previousTextureUsage = globalThis.GPUTextureUsage;
   Object.assign(globalThis, { GPUBufferUsage: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4 } });
+  Object.assign(globalThis, { GPUTextureUsage: { TEXTURE_BINDING: 1 } });
   const writes: Array<{ label?: string; words: Uint32Array }> = [];
   const device = {
     createBuffer(descriptor: { label?: string }) {
       return { label: descriptor.label, destroy() {} };
     },
+    createTexture() { return { createView() { return {}; }, destroy() {} }; },
+    createSampler() { return {}; },
     queue: {
       writeBuffer(target: { label?: string }, _offset: number, data: ArrayBuffer | ArrayBufferView) {
         const bytes = data instanceof ArrayBuffer
@@ -131,5 +135,6 @@ test("terrain metadata validation and dry-parameter uploads are exact and conten
     renderer.destroy();
   } finally {
     Object.assign(globalThis, { GPUBufferUsage: previousUsage });
+    Object.assign(globalThis, { GPUTextureUsage: previousTextureUsage });
   }
 });

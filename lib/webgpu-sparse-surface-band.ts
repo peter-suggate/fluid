@@ -16,6 +16,8 @@ export const SPARSE_SURFACE_HALO = 4;
 export const SPARSE_SURFACE_ACTIVATED = 8;
 export const SPARSE_SURFACE_DESIRED = 16;
 export const SPARSE_SURFACE_ACTIVE_DISPATCH_OFFSET_BYTES = 4;
+/** Sixteen-word allocator publication consumed by simulation and rendering. */
+export const SPARSE_SURFACE_CONTROL_BYTES = 64;
 
 export type SparseSurfaceBandMode = "mirror" | "authoritative";
 
@@ -834,12 +836,13 @@ export class WebGPUSparseSurfaceBand {
     coarseCellSize.forEach((value) => { if (!(value > 0) || !Number.isFinite(value)) throw new RangeError("Surface cell size must be positive and finite"); });
     const pageTableData = new Uint32Array(this.plan.logicalPageCount); pageTableData.fill(SPARSE_SURFACE_INVALID_PAGE);
     const freeData = Uint32Array.from({ length: this.plan.physicalPageCapacity }, (_, index) => index);
-    const controlData = new Uint32Array(16); controlData[0] = this.plan.physicalPageCapacity;
+    const controlData = new Uint32Array(SPARSE_SURFACE_CONTROL_BYTES / 4);
+    controlData[0] = this.plan.physicalPageCapacity;
     const storageCopy = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.pageTable = buffer(device, "Sparse surface logical page table", pageTableData.byteLength, storageCopy, pageTableData);
     this.states = buffer(device, "Sparse surface logical page states", this.plan.logicalPageCount * 4, storageCopy);
     this.freeList = buffer(device, "Sparse surface free page slots", freeData.byteLength, storageCopy, freeData);
-    this.control = buffer(device, "Sparse surface allocator control", 64, storageCopy, controlData);
+    this.control = buffer(device, "Sparse surface allocator control", SPARSE_SURFACE_CONTROL_BYTES, storageCopy, controlData);
     this.activePages = buffer(device, "Sparse surface active pages and dispatch", (4 + this.plan.physicalPageCapacity) * 4,
       storageCopy | GPUBufferUsage.INDIRECT);
     const scalarBytes = this.plan.physicalPageCapacity * this.plan.voxelsPerPage * 4;
@@ -1073,15 +1076,15 @@ export class WebGPUSparseSurfaceBand {
     // pending; overlapping callers fall back to a transient buffer.
     const pooled = !this.statsReadbackBusy;
     const readback = pooled
-      ? (this.statsReadback ??= this.device.createBuffer({ label: "Sparse surface stats readback", size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }))
-      : this.device.createBuffer({ label: "Sparse surface stats readback (transient)", size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      ? (this.statsReadback ??= this.device.createBuffer({ label: "Sparse surface stats readback", size: SPARSE_SURFACE_CONTROL_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }))
+      : this.device.createBuffer({ label: "Sparse surface stats readback (transient)", size: SPARSE_SURFACE_CONTROL_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     if (pooled) this.statsReadbackBusy = true;
     const encoder = this.device.createCommandEncoder({ label: "Read sparse surface stats" });
-    encoder.copyBufferToBuffer(this.control, 0, readback, 0, 64);
+    encoder.copyBufferToBuffer(this.control, 0, readback, 0, SPARSE_SURFACE_CONTROL_BYTES);
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
-      const words = new Uint32Array(readback.getMappedRange(0, 64));
+      const words = new Uint32Array(readback.getMappedRange(0, SPARSE_SURFACE_CONTROL_BYTES));
       return {
         free: words[0], generation: words[1], overflow: words[2], activated: words[3], retired: words[4],
         resident: words[5], core: words[6], halo: words[7], peakResident: words[8],

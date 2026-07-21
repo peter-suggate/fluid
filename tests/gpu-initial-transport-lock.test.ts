@@ -12,7 +12,7 @@ const safeModeHookSource = readFileSync(new URL("../lib/use-safe-browser-gpu-bri
 
 test("WebGPU transport stays locked until the fenced t=0 authority is ready", () => {
   assert.match(transportSource, /initialSceneReady = methodId !== "octree" \|\| \(gpuInfo\?\.initialSparseAuthorityReady === true[\s\S]*gpuInfo\?\.initialRasterSurfaceReady === true\)/);
-  assert.match(transportSource, /transportLocked = webgpu && \(gpuStatus\.state !== "ready" \|\| !initialSceneReady\)/);
+  assert.match(transportSource, /transportLocked = staticRenderScene \|\| \(webgpu && \(gpuStatus\.state !== "ready" \|\| !initialSceneReady\)\)/);
   assert.match(transportSource, /disabled=\{browserPolicyPending \|\| transportLocked \|\| safeStepLocked\}[^]*simulation\.singleStep\(\)/);
   assert.match(controllerSource, /gpuInfo\?\.initialSparseAuthorityReady === true[\s\S]*gpuInfo\?\.initialRasterSurfaceReady === true/);
   assert.match(controllerSource, /backend === "webgpu" && !this\.webgpuTransportReady\(\)/);

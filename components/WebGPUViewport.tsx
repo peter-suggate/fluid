@@ -220,6 +220,7 @@ export function WebGPUViewport() {
             getScenePreset(sceneState.presetId).background,
             ui.voxelRenderMode,
             ui.svoRenderMode,
+            ui.svoLightingMode,
             {
               overlay: ui.svoCostOverlay,
               maximumTraversalDepth: ui.svoMaximumTraversalDepth,

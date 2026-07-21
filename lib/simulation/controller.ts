@@ -15,6 +15,7 @@ import { useDiagnosticsStore, emptyPerformance, type PerformanceSnapshot } from 
 import { useUIStore } from "../stores/ui-store";
 import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
+import { planSceneRuntime } from "../scene-runtime";
 
 export type BodyDragPhase = "start" | "move" | "end";
 
@@ -73,6 +74,7 @@ class SimulationController {
    * resolution.
    */
   private buildFluidSolver(scene: SceneDescription): EulerianFluidSolver {
+    if (!planSceneRuntime(scene).fluidSolver) throw new Error("This scene does not enable a CPU fluid solver");
     const methodState = useMethodStore.getState();
     if (getMethod(methodState.methodId).backend !== "cpu") return new EulerianFluidSolver(scene);
     const cellSize = Number(resolvedMethodValues(methodState).cellSize_m);
@@ -118,6 +120,13 @@ class SimulationController {
     const elapsed = Math.max(0, (now - this.lastClock) / 1000);
     this.lastClock = now;
     const runtime = useRuntimeStore.getState();
+    if (!planSceneRuntime(useSceneStore.getState().scene).fluidSolver) {
+      if (runtime.runState !== "paused") runtime.setRunState("paused");
+      if (runtime.simRate !== null) runtime.setSimRate(null);
+      this.accumulator = 0;
+      this.rateWallClock = 0;
+      return;
+    }
     if (this.safeBrowserBringup() && runtime.runState === "running") {
       runtime.setRunState("paused");
       runtime.setSimRate(null);
@@ -201,6 +210,7 @@ class SimulationController {
     const runtime = useRuntimeStore.getState();
     runtime.setRunState("paused");
     const scene = useSceneStore.getState().scene;
+    if (!planSceneRuntime(scene).fluidSolver) return;
     const dt = scene.numerics.fixedDt_s;
     const backend = this.backend;
     if (backend === "webgpu" && !this.webgpuTransportReady()) return;
@@ -230,7 +240,8 @@ class SimulationController {
     const scene = source ?? sceneStore.scene;
     if (source) sceneStore.setScene(source, presetId);
     this.bodies = initializeRigidBodies(scene.rigidBodies);
-    this.fluidSolver = this.backend === "cpu-reference" ? this.buildFluidSolver(scene) : undefined;
+    const runtimePlan = planSceneRuntime(scene, { methodId: useMethodStore.getState().methodId });
+    this.fluidSolver = this.backend === "cpu-reference" && runtimePlan.fluidSolver ? this.buildFluidSolver(scene) : undefined;
     this.simulationTime = 0; this.gpuCompletedTime = 0; this.accumulator = 0; this.lastClock = null;
     this.rateWallClock = 0; this.rateSimTime = 0;
     this.cpuOracleStep = 0; this.cpuSimulationMs = 0;
@@ -246,7 +257,9 @@ class SimulationController {
     runtime.setSimRate(null);
     runtime.setRunState("paused");
     useUIStore.getState().selectBody(scene.rigidBodies[0]?.id);
-    runtime.setNotice(`${scene.fluid.inflow ? "Inflow scene" : scene.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
+    runtime.setNotice(!runtimePlan.fluidSolver
+      ? "Static renderer scene reset · fluid solver disabled"
+      : `${scene.fluid.inflow ? "Inflow scene" : scene.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
   }
 
   loadPreset(presetId: string) {
@@ -254,8 +267,11 @@ class SimulationController {
     const scene = preset.create();
     this.reset(scene, preset.id);
     useUIStore.getState().setCamera(cameraForPreset(preset));
-    useRuntimeStore.getState().setNotice(`${preset.name} loaded · dt ${scene.numerics.fixedDt_s.toFixed(4)} s`);
-    useRuntimeStore.getState().setRunState("running");
+    const runtimePlan = planSceneRuntime(scene, { methodId: useMethodStore.getState().methodId });
+    useRuntimeStore.getState().setNotice(!runtimePlan.fluidSolver
+      ? `${preset.name} loaded · fluid solver disabled`
+      : `${preset.name} loaded · dt ${scene.numerics.fixedDt_s.toFixed(4)} s`);
+    useRuntimeStore.getState().setRunState(runtimePlan.fluidSolver ? "running" : "paused");
   }
 
   setQuality(quality: Parameters<ReturnType<typeof useMethodStore.getState>["setQuality"]>[0]) {

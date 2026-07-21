@@ -9,6 +9,7 @@ import {
   gpuRigidBodyShader,
 } from "../lib/webgpu-rigid-body";
 import {
+  SVO_DRY_SCENE_BINDING_CONTRACT,
   SVO_DRY_RIGID_MOTION_CAPACITY,
   SVO_DRY_RIGID_MOTION_UNIFORM_BYTES,
   svoDrySceneShader,
@@ -51,7 +52,8 @@ test("production dry pass uses a renderer-owned uniform mirror without adding an
   assert.equal(SVO_DRY_RIGID_MOTION_UNIFORM_BYTES, 12 * 128);
   assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length, 10);
   assert.match(svoDrySceneShader, /@binding\(14\) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>/);
-  assert.match(drySource, /binding: 14, visibility: GPUShaderStage\.FRAGMENT, buffer: \{ type: "uniform" \}/);
+  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.find(({ binding }) => binding === 14), { binding: 14, type: "uniform" });
+  assert.match(drySource, /return \{ binding, visibility: GPUShaderStage\.FRAGMENT, buffer: \{ type \} \}/);
   assert.match(drySource, /copyBufferToBuffer\(this\.rigidMotionSource, 0, this\.rigidMotionUniformBuffer, 0, SVO_DRY_RIGID_MOTION_UNIFORM_BYTES\)/);
   assert.match(rendererSource, /setRigidMotionSource\(backend === "webgpu" \? this\.gpuFluid\?\.rigidMotionBuffer : undefined\)/);
   assert.match(methodsSource, /readonly rigidMotionBuffer\?: GPUBuffer/);
@@ -69,4 +71,3 @@ test("G-buffer identity gates exact surface velocity and moving-rigid temporal r
   assert.match(sparseVoxelTemporalAccumulatorShader, /previousWorld=world-velocity\*temporal\.control\.y/);
   assert.match(sparseVoxelTemporalAccumulatorShader, /supportedMotion=motionKind==SVO_TEMPORAL_MOTION_STATIC\|\|motionKind==SVO_TEMPORAL_MOTION_RIGID/);
 });
-

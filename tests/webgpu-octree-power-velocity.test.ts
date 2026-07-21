@@ -25,7 +25,6 @@ import {
   unpackOctreePowerVelocityControl,
   unpackOctreePowerVelocitySampleControl,
   OCTREE_POWER_SAMPLE_CONTROL_BYTES,
-  OCTREE_POWER_SAMPLE_VALID,
 } from "../lib/webgpu-octree-power-velocity";
 
 const INVALID_ROW = 0xffff_ffff;
@@ -47,17 +46,22 @@ test("power velocity shader contains area-weighted normal equations and guarded 
   assert.match(octreePowerVelocityShader, /conditionEstimate/);
   assert.match(octreePowerVelocityShader, /determinantFloor/);
   assert.match(octreePowerVelocityShader, /rowStatus\[row\]=FALLBACK/);
+  assert.match(octreePowerVelocityPublishShader,
+    /status==FALLBACK\)\{fallbackCount\+=1u;errors\|=ILL_CONDITIONED;firstError=min\(firstError,row\)/,
+    "an ill-conditioned Stage-A fit must reject the complete authority publication");
   assert.match(octreePowerVelocityPublishShader, /control\.flags=VALID/);
   assert.match(octreePowerVelocityPrepareFromFaceControlShader,
     /faceControl\[8\]!=FACE_VALID\|\|faceControl\[3\]!=0u[\s\S]*faceControl\[7\]!=params\.generation/,
     "GPU-derived Stage A must reject invalid or stale power-face generations");
-  assert.match(String((WebGPUOctreePowerVelocity.prototype as unknown as { encodePasses: Function }).encodePasses), /clearBuffer/,
+  assert.match(String((WebGPUOctreePowerVelocity.prototype as unknown as { encodePasses: (...args: never[]) => unknown }).encodePasses), /clearBuffer/,
     "Stage A clears vectors and row status before every publication attempt");
   assert.match(octreePowerVelocityShader, /velocityControl\[0\]!=0u\|\|row>=params\.rowCount/,
     "an invalid face-authority prepare prevents reconstruction from repopulating cleared vectors");
   assert.doesNotMatch(octreePowerVelocityShader, /faceAxis|axisSpan/);
   assert.match(octreePowerVelocitySampleShader, /tetraWeights/);
-  assert.match(octreePowerVelocitySampleShader, /atomicAdd\(&control\.nearest/);
+  assert.match(octreePowerVelocitySampleShader, /fail\(index,query\.output,NO_CONTAINING_SIMPLEX\)/);
+  assert.doesNotMatch(octreePowerVelocitySampleShader, /NEAREST|bestDistance/,
+    "Section 5 point interpolation must fail closed outside cube/tetrahedron coverage");
 });
 
 test("Stage-B CPU oracle is exact for structured and transition-linear fields", () => {
@@ -80,10 +84,14 @@ test("Stage-B CPU oracle is exact for structured and transition-linear fields", 
   const sampled = sampleOctreePowerCatalogVelocity(entry, catalog.tetrahedronVertexData, point, field([0, 0, 0]), positions.map(field));
   assert.equal(sampled.mode, "tetrahedron");
   sampled.velocity.forEach((value, axis) => close(value, field(point)[axis], 1e-10));
+  const incomplete: (readonly [number, number, number] | undefined)[] = positions.map(field);
+  incomplete[tetrahedron[0]] = undefined;
+  assert.throws(() => sampleOctreePowerCatalogVelocity(entry, catalog.tetrahedronVertexData,
+    point, field([0, 0, 0]), incomplete), /Containing local Delaunay tetrahedron 0 has an unavailable velocity vertex/);
   const boundary = sampleOctreePowerCatalogVelocity(entry, catalog.tetrahedronVertexData, [0, 0, 0], field([0, 0, 0]), positions.map(field));
   assert.equal(boundary.tetrahedron, 0, "catalog order is the deterministic shared-boundary tie-break");
-  const fallback = sampleOctreePowerCatalogVelocity(entry, catalog.tetrahedronVertexData, [100, 100, 100], field([0, 0, 0]), positions.map(field));
-  assert.equal(fallback.mode, "nearest");
+  assert.throws(() => sampleOctreePowerCatalogVelocity(entry, catalog.tetrahedronVertexData,
+    [100, 100, 100], field([0, 0, 0]), positions.map(field)), /No containing local Delaunay tetrahedron/);
 });
 
 test("transition barycentric interpolation is continuous across a shared local tetrahedron face", () => {
@@ -114,7 +122,7 @@ test("transition barycentric interpolation is continuous across a shared local t
   samples[0].velocity.forEach((value, axis) => assert.ok(Math.abs(value - samples[1].velocity[axis]) < 1e-4));
 });
 
-test("Dawn reconstructs uniform and general power velocities with deterministic guarded fallback", {
+test("Dawn reconstructs covered power velocities and rejects a query outside every catalog simplex", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for GPU power-velocity checks",
 }, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
@@ -193,8 +201,8 @@ test("Dawn reconstructs uniform and general power velocities with deterministic 
   const first = await run();
   const firstControl = unpackOctreePowerVelocityControl(new Uint32Array(first, 0, 8));
   assert.deepEqual(firstControl, {
-    flags: OCTREE_POWER_VELOCITY_VALID, firstError: INVALID_ROW, rowCount: 3, faceCount: 12,
-    incidenceCount: 12, reconstructedCount: 3, fallbackCount: 1, generation: 19,
+    flags: OCTREE_POWER_VELOCITY_ERROR.illConditioned, firstError: 2, rowCount: 3, faceCount: 12,
+    incidenceCount: 12, reconstructedCount: 0, fallbackCount: 1, generation: 19,
   });
   const values = new Float32Array(first, OCTREE_POWER_VELOCITY_CONTROL_BYTES, 12);
   // With outward-oriented negative-side values, this is exactly the ordinary
@@ -297,11 +305,12 @@ test("Dawn reconstructs uniform and general power velocities with deterministic 
   device.queue.submit([sampleEncoder.finish()]); await sampleReadback.mapAsync(GPUMapMode.READ);
   const sampledBytes = sampleReadback.getMappedRange().slice(0); sampleReadback.unmap();
   const sampleControl = unpackOctreePowerVelocitySampleControl(new Uint32Array(sampledBytes, 0, 8));
-  assert.deepEqual(sampleControl, { flags: OCTREE_POWER_SAMPLE_VALID, firstError: INVALID_ROW, queryCount: 3,
-    interpolatedCount: 3, uniformCount: 1, tetrahedronCount: 1, nearestFallbackCount: 1, generation: 23 });
+  assert.deepEqual(sampleControl, { flags: 8, firstError: 2, queryCount: 3,
+    interpolatedCount: 2, uniformCount: 1, tetrahedronCount: 1, noContainingSimplexCount: 1, generation: 23 });
   const sampledVelocities = new Float32Array(sampledBytes, OCTREE_POWER_SAMPLE_CONTROL_BYTES, 12);
   [0.25, 0.5, 0.75].forEach((expected, axis) => close(sampledVelocities[axis], expected));
   linear(transitionPoint).slice(0, 3).forEach((expected, axis) => close(sampledVelocities[4 + axis], expected));
+  assert.equal(sampledVelocities[11], 0, "rejected output must have w=0 and cannot be sampled as valid velocity");
   assert.deepEqual(validationErrors, []);
 
   sampleReadback.destroy(); queries.destroy(); sampleVertices.destroy(); sampler.destroy(); topology.destroy();

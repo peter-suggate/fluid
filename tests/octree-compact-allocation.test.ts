@@ -45,8 +45,8 @@ test("deep-domain compact allocation has an exact surface-to-volume crossover", 
     + dam.denseAtlasBytesRemoved);
   assert.equal(dam.surfacePageBytes, 3_425_360);
   // Includes the face mirror's projected-divergence tail and the full transfer diagnostics arena.
-  assert.equal(dam.compactAuxiliaryBytes, 72_386_280);
-  assert.equal(dam.netBytes, 48_775_976);
+  assert.equal(dam.compactAuxiliaryBytes, 90_494_696);
+  assert.equal(dam.netBytes, 66_884_392);
   assert.ok(dam.netBytes > 0, "the proved face bound truthfully exposes the small-scene radix-transfer overhead");
 
   const ocean = planOctreeCompactAllocation([320, 96, 80], 32, 4);
@@ -58,8 +58,8 @@ test("deep-domain compact allocation has an exact surface-to-volume crossover", 
   assert.equal(ocean.ownerPageBytes, 8_279_640);
   assert.equal(ocean.frontierHashBytes, 4_194_304);
   assert.equal(ocean.surfacePageBytes, 28_958_884);
-  assert.equal(ocean.compactAuxiliaryBytes, 703_133_876);
-  assert.equal(ocean.netBytes, 229_181_124);
+  assert.equal(ocean.compactAuxiliaryBytes, 863_201_460);
+  assert.equal(ocean.netBytes, 389_248_708);
   assert.ok(ocean.netBytes > 0, "the 320-wide target records the temporary capacity-sized radix-transfer amplification");
 
   const target = planOctreeCompactAllocation([640, 192, 160], 32, 4);
@@ -71,9 +71,9 @@ test("deep-domain compact allocation has an exact surface-to-volume crossover", 
   assert.equal(target.ownerPageBytes, 33_153_340);
   assert.equal(target.frontierHashBytes, 16_777_216);
   assert.equal(target.surfacePageBytes, 115_911_096);
-  assert.equal(target.compactAuxiliaryBytes, 2_815_069_356);
-  assert.equal(target.netBytes, -968_168_740);
-  assert.ok(target.netBytes < -900_000_000, "the large target still saves substantial memory with the proved face bound");
+  assert.equal(target.compactAuxiliaryBytes, 3_456_072_876);
+  assert.equal(target.netBytes, -327_165_220);
+  assert.ok(target.netBytes < -300_000_000, "the large target still saves substantial memory with full-width face and surface keys");
 });
 
 test("two-resolution level-set accounting scales with resident bricks and live rows", () => {

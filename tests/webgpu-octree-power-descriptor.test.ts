@@ -7,9 +7,12 @@ import {
 } from "../lib/generated/octree-power-catalog";
 import {
   OCTREE_POWER_SAME_OR_COARSER_FLAG,
+  enumerateCanonicalSameOrFinerPowerDescriptors,
+  encodeSameOrCoarserPowerDescriptor,
   sitesForSameOrCoarserPowerDescriptor,
   sitesForSameOrFinerPowerDescriptor,
 } from "../lib/octree-power-descriptor";
+import { octreePowerCoarseMaskNeedsAcuteRepair } from "../lib/octree-power-topology";
 import {
   OCTREE_POWER_DESCRIPTOR_ERROR,
   OCTREE_POWER_DESCRIPTOR_BOUNDARY_MASK,
@@ -50,11 +53,21 @@ test("power descriptor planner is compact-row proportional and exposes the exact
 });
 
 test("CPU descriptor generation reproduces every uniquely graded immutable catalog key", () => {
-  const lookup = catalogViews().lookup;
   const offset = [10, 10, 10] as const;
-  let redundantUniformCoarser = 0;
-  for (let index = 0; index < lookup.length; index += 3) {
-    const descriptor = lookup[index] >>> 0;
+  const descriptors = [
+    ...enumerateCanonicalSameOrFinerPowerDescriptors(),
+    ...Array.from({ length: 512 }, (_, low) => {
+      const mask = low >>> 3;
+      if (octreePowerCoarseMaskNeedsAcuteRepair(mask)) return undefined;
+      const coarseNeighbors = Array.from({ length: 6 }, (_, bit) => (mask & (1 << bit)) !== 0);
+      return encodeSameOrCoarserPowerDescriptor({
+        child: [low & 1, (low >> 1) & 1, (low >> 2) & 1] as [0 | 1, 0 | 1, 0 | 1],
+        coarseNeighbors: coarseNeighbors as [boolean, boolean, boolean, boolean, boolean, boolean],
+      });
+    }).filter((descriptor): descriptor is number => descriptor !== undefined),
+  ];
+  let redundantUniformCoarser = 0, checked = 0;
+  for (const descriptor of descriptors) {
     const coarser = (descriptor & OCTREE_POWER_SAME_OR_COARSER_FLAG) !== 0;
     // With no coarse-neighbor bits the physical neighborhood is uniform and
     // has eight parity-dependent 9-bit spellings plus one 18-bit spelling.
@@ -76,10 +89,12 @@ test("CPU descriptor generation reproduces every uniquely graded immutable catal
     };
     const origin = anchor.origin.map((value, axis) => value + offset[axis]) as [number, number, number];
     const result = describeOctreePowerRow({ cell: linear(origin), size: anchor.size }, dimensions, 32, ownerAt);
-    assert.equal(result.descriptor, descriptor, `catalog lookup ${index / 3}`);
-    assert.equal(result.flags, 0, `catalog lookup ${index / 3}`);
+    assert.equal(result.descriptor, descriptor, `runtime descriptor ${descriptor}`);
+    assert.equal(result.flags, 0, `runtime descriptor ${descriptor}`);
+    checked += 1;
   }
   assert.equal(redundantUniformCoarser, 8);
+  assert.ok(checked > 1_000, "the exhaustive symmetry quotient must remain substantial");
 });
 
 test("CPU oracle reports grading/owner errors and encodes domain boundaries as valid metadata", () => {
@@ -111,6 +126,50 @@ test("CPU oracle reports grading/owner errors and encodes domain boundaries as v
   assert.equal(boundary.flags, 0);
   assert.equal((boundary.descriptor & OCTREE_POWER_DESCRIPTOR_BOUNDARY_MASK) >>> OCTREE_POWER_DESCRIPTOR_BOUNDARY_SHIFT,
     (1 << 0) | (1 << 1) | (1 << 2));
+});
+
+test("CPU and GPU descriptor publication fail closed on every strictly-obtuse coarse mask", () => {
+  const offset = [10, 10, 10] as const;
+  const describe = (mask: number) => {
+    const descriptor = (OCTREE_POWER_SAME_OR_COARSER_FLAG | (mask << 3)) >>> 0;
+    const sites = sitesForSameOrCoarserPowerDescriptor(descriptor);
+    const anchor = sites.find((site) => site.key === "anchor")!;
+    const translated = sites.map((site) => ({
+      origin: site.origin.map((value, axis) => value + offset[axis]) as [number, number, number],
+      size: site.size,
+    }));
+    const ownerAt = (cell: readonly [number, number, number]): OctreePowerOwner => translated.find((candidate) =>
+      candidate.origin.every((origin, axis) => cell[axis] >= origin && cell[axis] < origin + candidate.size))
+      ?? { origin: [...cell] as [number, number, number], size: 1, invalid: true };
+    const origin = anchor.origin.map((value, axis) => value + offset[axis]) as [number, number, number];
+    return describeOctreePowerRow({ cell: linear(origin), size: anchor.size }, dimensions, 32, ownerAt);
+  };
+
+  for (const mask of [25, 42, 52, 57, 58, 60]) {
+    assert.deepEqual(describe(mask), {
+      descriptor: OCTREE_POWER_DESCRIPTOR_INVALID,
+      flags: OCTREE_POWER_DESCRIPTOR_ERROR.acuteGrading,
+      kind: "invalid",
+    }, `coarse mask ${mask}`);
+  }
+  assert.equal(describe(24).flags, 0, "splitting mask 25's unique coarse face must make the row publishable");
+  assert.equal(describe(56).flags, 0, "splitting masks 57/58/60's unique coarse face must make the row publishable");
+  const catalog = catalogViews();
+  for (const repairedMask of [24, 40, 48, 56]) {
+    const packed = catalog.sameOrCoarserDirect[repairedMask << 3];
+    const entry = packed & 0xffff;
+    assert.notEqual(packed, 0xffff_ffff, `repaired mask ${repairedMask} must be directly addressable`);
+    assert.equal(catalog.tetrahedronHeaders[entry * 3 + 1], 8,
+      `repaired mask ${repairedMask} must retain its eight right-angle transition simplices`);
+    assert.equal(catalog.tetrahedronHeaders[entry * 3 + 2] & 1, 0,
+      `repaired mask ${repairedMask} remains a transition entry; equality at pi/2 is the causal limiting case`);
+  }
+  assert.match(octreePowerDescriptorShader,
+    /coarseMask==25u\|\|coarseMask==42u\|\|coarseMask==52u\|\|coarseMask==57u\|\|coarseMask==58u\|\|coarseMask==60u/);
+  assert.match(octreePowerDescriptorShader, /failRow\(row,ACUTE_GRADING,coarseMask\);return/,
+    "an unrepaired live descriptor must suppress the all-or-nothing indirect publication");
+  assert.match(octreePowerDescriptorShader, /flags&127u\)\|\(detail<<7u\)/,
+    "the row-local failure payload must retain the acute-grading bit as well as its six-bit mask");
 });
 
 test("uniform descriptor constrains face and edge owners but not refined corner-only cells", () => {

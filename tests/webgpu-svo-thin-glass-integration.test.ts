@@ -57,7 +57,7 @@ test("production scene construction uploads pane records and exposes an explicit
   assert.match(waterSource, /fn compositeFrontGlass\(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32\)->vec3f/);
   assert.match(waterSource, /return finish\(compositeFrontGlass\(scene\.rgb,ro,rd,scene\.a\),ndc\)/,
     "the post-dry-scene compositor must still render vessel glass when no water interface is present");
-  assert.match(rendererSource, /svoGlassSupported=!sceneGlass\.metadata\.some\(\(\{opaqueCutoutKey\}\)=>Boolean\(opaqueCutoutKey\)\)/);
+  assert.match(rendererSource, /svoGlassSupported=!sceneGlass\.metadata\.some\(\(\{key,opaqueCutoutKey\}\)=>Boolean\(opaqueCutoutKey\)&&\(!thickGlassBound\|\|!thickReplacedPaneKeys\.has\(key\)\)\)/);
   assert.match(rendererSource, /fallbackReason: "unsupported-glass-cutout"/);
   assert.match(panelSource, /"unsupported-glass-cutout": "authored glazing needs an opaque shell cutout"/);
 });
@@ -75,7 +75,11 @@ test("pane ABI validation accepts empty gardens and rejects partial or over-capa
 
 test("glass upload cache is reused by static revision and destroyed on detach", () => {
   const previousUsage = globalThis.GPUBufferUsage;
-  Object.assign(globalThis, { GPUBufferUsage: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4 } });
+  const previousTextureUsage = globalThis.GPUTextureUsage;
+  Object.assign(globalThis, {
+    GPUBufferUsage: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4 },
+    GPUTextureUsage: { TEXTURE_BINDING: 1, RENDER_ATTACHMENT: 2 },
+  });
   const created: Array<{ label?: string; destroyed: boolean }> = [];
   const device = {
     createBuffer(descriptor: { label?: string }) {
@@ -83,6 +87,10 @@ test("glass upload cache is reused by static revision and destroyed on detach", 
       created.push(buffer);
       return buffer;
     },
+    createTexture() {
+      return { createView() { return {}; }, destroy() {} };
+    },
+    createSampler() { return {}; },
     queue: { writeBuffer() {} },
   } as unknown as GPUDevice;
   try {
@@ -102,7 +110,7 @@ test("glass upload cache is reused by static revision and destroyed on detach", 
     assert.equal(firstGlass.destroyed, true, "solver detach must retire the pane buffer before source buffers");
     renderer.destroy();
   } finally {
-    Object.assign(globalThis, { GPUBufferUsage: previousUsage });
+    Object.assign(globalThis, { GPUBufferUsage: previousUsage, GPUTextureUsage: previousTextureUsage });
   }
 });
 
@@ -116,7 +124,7 @@ test("primary pane optics are exact, two-sided, identity preserving, and one-que
     "the future fluid-boundary adapter must select water IOR only after coincident exits are resolved");
 
   const opticsStart = svoDrySceneShader.indexOf("fn shadeThinGlass(");
-  const opticsEnd = svoDrySceneShader.indexOf("struct VertexOut", opticsStart);
+  const opticsEnd = svoDrySceneShader.indexOf("fn dryThickGlassEmission", opticsStart);
   const optics = svoDrySceneShader.slice(opticsStart, opticsEnd);
   assert.ok((optics.match(/traceOpaqueScene\(/g) ?? []).length <= 1,
     "the first glass slice permits at most one transmitted scene query");

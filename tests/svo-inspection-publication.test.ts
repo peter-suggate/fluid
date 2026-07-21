@@ -85,16 +85,19 @@ test("inspection control is optional on legacy render sources", () => {
 
 test("producer gates only expanded records and always reaches atlas and structural finalization", () => {
   const source = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
-  const gateStart = source.indexOf("if (encodePlan.inspectionPublication)");
-  const atlasStart = source.indexOf("this.atlas?.encodeBulkRefresh");
-  const finalizerStart = source.indexOf("const finalizer = encoder.beginComputePass", gateStart);
+  const encodeStart = source.indexOf("  encode(encoder:");
+  const encodeEnd = source.indexOf("  private encodeInspectionPublication", encodeStart);
+  const encode = source.slice(encodeStart, encodeEnd);
+  const gateStart = encode.indexOf("if (encodePlan.inspectionPublication)");
+  const atlasStart = encode.indexOf("this.atlas.encodeBulkRefresh");
+  const finalizerStart = encode.indexOf("const finalizer = encoder.beginComputePass", gateStart);
   assert.ok(atlasStart >= 0 && gateStart > atlasStart && finalizerStart > gateStart,
     "atlas refresh, optional inspection, and structural finalization remain ordered but independently gated");
-  const gatedWork = source.slice(gateStart, finalizerStart);
+  const gatedWork = encode.slice(gateStart, finalizerStart);
   assert.match(gatedWork, /encodeInspectionPublication/);
   assert.doesNotMatch(gatedWork, /encodePublish|encodeFromDenseFields|proxyVoxelizer|atlas|structural publication/);
-  assert.match(source.slice(atlasStart, gateStart), /this\.atlas\?\.encodeBulkRefresh/);
-  assert.match(source.slice(finalizerStart), /finalizer\.dispatchWorkgroups\(1\)/);
+  assert.match(encode.slice(atlasStart, gateStart), /this\.atlas\.encodeBulkRefresh/);
+  assert.match(encode.slice(finalizerStart), /finalizer\.dispatchWorkgroups\(1\)/);
   const materializerStart = source.indexOf("private encodeInspectionPublication");
   const materializerEnd = source.indexOf("readResidencyStats", materializerStart);
   const materializer = source.slice(materializerStart, materializerEnd);

@@ -22,7 +22,12 @@ test("WP8 planner is compact-row bounded and exposes independent coarse/fine dia
   assert.ok(plan.allocatedBytes < 48_000);
   assert.match(octreePowerCoarseLevelSetShader, /redistancePowerCoarsePhi/);
   assert.match(octreePowerCoarseLevelSetShader, /validatePowerCoarseFineCorrection/);
-  assert.match(octreePowerCoarseLevelSetShader, /acuteAnchorSolidAngle|fn acute/);
+  assert.match(octreePowerCoarseLevelSetShader, /nonobtuseAnchorSolidAngle|fn nonobtuse/);
+  assert.match(octreePowerCoarseLevelSetShader, /NO_CAUSAL_SIMPLEX/);
+  assert.equal(OCTREE_POWER_COARSE_LEVELSET_ERROR.noCausalSimplex, 512,
+    "the WGSL no-causal-simplex failure must have a named host diagnostic bit");
+  assert.doesNotMatch(octreePowerCoarseLevelSetShader, /nearestFallback|bestKnown|nearestKnown/,
+    "Section 4.2 redistance must fail closed when no causal Delaunay simplex exists");
   assert.match(octreePowerCoarseLevelSetShader,
     /source\.flags&\(PHI_VALID\|PHI_FINITE\)\)\!=\(PHI_VALID\|PHI_FINITE\)[\s\S]*fail\(row,INVALID_SOURCE\)/);
   assert.match(octreePowerCoarseLevelSetShader,

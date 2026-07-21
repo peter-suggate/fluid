@@ -44,6 +44,7 @@ export const OCTREE_POWER_VELOCITY_ERROR = Object.freeze({
   nonfiniteSample: 1 << 5,
   nonfiniteSolution: 1 << 6,
   invalidSource: 1 << 7,
+  illConditioned: 1 << 8,
 } as const);
 
 export interface OctreePowerVelocityPlan {
@@ -416,6 +417,7 @@ const INVALID:u32=0xffffffffu;
 const VALID:u32=0x80000000u;
 const CAPACITY:u32=1u;
 const FALLBACK:u32=0x80000000u;
+const ILL_CONDITIONED:u32=256u;
 @compute @workgroup_size(1) fn publishPowerVelocity(){
   if(control.flags!=0u){control.reconstructedCount=0u;return;}
   if(params.rowCount>params.rowCapacity||params.rowCount>arrayLength(&rowStatus)
@@ -425,7 +427,8 @@ const FALLBACK:u32=0x80000000u;
   }
   var errors=0u;var firstError=INVALID;var fallbackCount=0u;
   for(var row=0u;row<params.rowCount;row+=1u){let status=rowStatus[row];
-    if(status==FALLBACK){fallbackCount+=1u;}else if(status!=0u){errors|=status;firstError=min(firstError,row);}
+    if(status==FALLBACK){fallbackCount+=1u;errors|=ILL_CONDITIONED;firstError=min(firstError,row);}
+    else if(status!=0u){errors|=status;firstError=min(firstError,row);}
   }
   control.fallbackCount=fallbackCount;control.firstError=firstError;
   if(errors==0u){control.flags=VALID;control.reconstructedCount=params.rowCount;}
@@ -440,7 +443,7 @@ export type PowerVelocityVector = readonly [number, number, number];
 
 export interface OctreePowerPointSample {
   readonly velocity: PowerVelocityVector;
-  readonly mode: "uniform" | "tetrahedron" | "nearest";
+  readonly mode: "uniform" | "tetrahedron";
   readonly tetrahedron: number;
 }
 
@@ -500,10 +503,12 @@ export function sampleOctreePowerCatalogVelocity(
   for (let tetrahedron = 0; tetrahedron < entry.tetrahedra.length; tetrahedron += 1) {
     const selectors = entry.tetrahedra[tetrahedron];
     const velocities = selectors.map((selector) => neighborVelocities[selector]);
-    if (velocities.some((value) => !finiteVelocity(value))) continue;
     const weights = tetrahedronCoordinates(point, ...selectors.map((selector) => [tetrahedronVertexData[selector * 4],
       tetrahedronVertexData[selector * 4 + 1], tetrahedronVertexData[selector * 4 + 2]] as PowerVec3) as [PowerVec3, PowerVec3, PowerVec3]);
     if (!weights || weights.some((weight) => weight < -containmentTolerance || weight > 1 + containmentTolerance)) continue;
+    if (velocities.some((value) => !finiteVelocity(value))) {
+      throw new RangeError(`Containing local Delaunay tetrahedron ${tetrahedron} has an unavailable velocity vertex`);
+    }
     const velocity = [0, 0, 0];
     const values = [anchorVelocity, ...velocities] as PowerVelocityVector[];
     for (let vertex = 0; vertex < 4; vertex += 1) for (let axis = 0; axis < 3; axis += 1) {
@@ -511,16 +516,7 @@ export function sampleOctreePowerCatalogVelocity(
     }
     return { velocity: velocity as [number, number, number], mode: "tetrahedron", tetrahedron };
   }
-  // The plan permits this only when the catalog has no containing tetrahedron.
-  // Distance then selector order (anchor first) defines a stable bounded tie.
-  let bestDistance = point.reduce((sum, value) => sum + value * value, 0);
-  let best = anchorVelocity;
-  for (let selector = 0; selector < selectorCount; selector += 1) {
-    const velocity = neighborVelocities[selector]; if (!finiteVelocity(velocity)) continue;
-    const distance = [0, 1, 2].reduce((sum, axis) => sum + (tetrahedronVertexData[selector * 4 + axis] - point[axis]) ** 2, 0);
-    if (distance < bestDistance) { bestDistance = distance; best = velocity; }
-  }
-  return { velocity: [...best], mode: "nearest", tetrahedron: 0xffff_ffff };
+  throw new RangeError("No containing local Delaunay tetrahedron for Section 5 velocity interpolation");
 }
 
 export const OCTREE_POWER_SAMPLE_QUERY_BYTES = 48;
@@ -528,7 +524,9 @@ export const OCTREE_POWER_SAMPLE_CONTROL_BYTES = 32;
 export const OCTREE_POWER_SAMPLE_VALID = 0x8000_0000;
 /** Query flags bits 8..13 carry the resolved world-to-catalog cube transform. */
 export const OCTREE_POWER_SAMPLE_TRANSFORM_SHIFT = 8;
-export const OCTREE_POWER_SAMPLE_ERROR = Object.freeze({ capacity: 1, invalidQuery: 2, nonfinite: 4 } as const);
+export const OCTREE_POWER_SAMPLE_ERROR = Object.freeze({
+  capacity: 1, invalidQuery: 2, nonfinite: 4, noContainingSimplex: 8,
+} as const);
 
 export interface OctreePowerVelocitySamplePlan {
   readonly queryCapacity: number;
@@ -551,7 +549,7 @@ export interface OctreePowerVelocitySampleControl {
   readonly interpolatedCount: number;
   readonly uniformCount: number;
   readonly tetrahedronCount: number;
-  readonly nearestFallbackCount: number;
+  readonly noContainingSimplexCount: number;
   readonly generation: number;
 }
 
@@ -559,7 +557,7 @@ export function unpackOctreePowerVelocitySampleControl(words: ArrayLike<number>)
   if (words.length < 8) throw new RangeError("Power velocity sample control needs eight words");
   return { flags: Number(words[0]) >>> 0, firstError: Number(words[1]) >>> 0, queryCount: Number(words[2]) >>> 0,
     interpolatedCount: Number(words[3]) >>> 0, uniformCount: Number(words[4]) >>> 0,
-    tetrahedronCount: Number(words[5]) >>> 0, nearestFallbackCount: Number(words[6]) >>> 0, generation: Number(words[7]) >>> 0 };
+    tetrahedronCount: Number(words[5]) >>> 0, noContainingSimplexCount: Number(words[6]) >>> 0, generation: Number(words[7]) >>> 0 };
 }
 
 /** Indexed Stage-B sampler; query vertex ranges are transient and may be built directly from CSR incidence. */
@@ -589,8 +587,7 @@ export class WebGPUOctreePowerVelocitySampler {
       .replace("let query=queries[index];",
         "let query=queries[index];if((query.flags&0x20000000u)!=0u){results[query.output]=vec4f(0.0,0.0,0.0,1.0);statuses[query.output]=VALID|0x20000000u;atomicAdd(&control.interpolated,1u);return;}")
       .replace("statuses[query.output]=VALID;", `statuses[query.output]=VALID|${marker};`)
-      .replace("statuses[query.output]=VALID|local;", `statuses[query.output]=VALID|local|${marker};`)
-      .replace("statuses[query.output]=VALID|NEAREST;", `statuses[query.output]=VALID|NEAREST|${marker};`) });
+      .replace("statuses[query.output]=VALID|local;", `statuses[query.output]=VALID|local|${marker};`) });
     this.pipeline = device.createComputePipeline({ label: "Sample octree power velocity", layout: "auto",
       compute: { module: shaderModule, entryPoint: "samplePowerVelocity" } });
     this.preparePipeline = device.createComputePipeline({ label: "Prepare octree power velocity samples", layout: "auto",
@@ -636,7 +633,7 @@ struct Params { queryCount:u32, queryCapacity:u32, generation:u32, pad:u32 }
 struct Query { firstFace:u32, faceCount:u32, firstTetrahedron:u32, tetrahedronCount:u32, flags:u32, vertexStart:u32, vertexCount:u32, output:u32, point:vec4f }
 struct TetraVertex { offsetSize:vec4f }
 struct TetraHeader { first:u32, count:u32, flags:u32 }
-struct Control { flags:atomic<u32>, firstError:atomic<u32>, queryCount:u32, interpolated:atomic<u32>, uniform:atomic<u32>, tetrahedron:atomic<u32>, nearest:atomic<u32>, generation:u32 }
+struct Control { flags:atomic<u32>, firstError:atomic<u32>, queryCount:u32, interpolated:atomic<u32>, uniform:atomic<u32>, tetrahedron:atomic<u32>, noContainingSimplex:atomic<u32>, generation:u32 }
 @group(0) @binding(0) var<uniform> params:Params;
 @group(0) @binding(1) var<storage,read> queries:array<Query>;
 @group(0) @binding(2) var<storage,read> vertexVelocities:array<vec4f>;
@@ -645,16 +642,15 @@ struct Control { flags:atomic<u32>, firstError:atomic<u32>, queryCount:u32, inte
 @group(0) @binding(5) var<storage,read_write> results:array<vec4f>;
 @group(0) @binding(6) var<storage,read_write> statuses:array<u32>;
 @group(0) @binding(7) var<storage,read_write> control:Control;
-const VALID:u32=0x80000000u;const CAPACITY:u32=1u;const INVALID_QUERY:u32=2u;const NONFINITE:u32=4u;
-const UNIFORM:u32=${OCTREE_POWER_CATALOG_ENTRY_UNIFORM}u;const NEAREST:u32=0x40000000u;
+const VALID:u32=0x80000000u;const CAPACITY:u32=1u;const INVALID_QUERY:u32=2u;const NONFINITE:u32=4u;const NO_CONTAINING_SIMPLEX:u32=8u;
+const UNIFORM:u32=${OCTREE_POWER_CATALOG_ENTRY_UNIFORM}u;
 fn finite(value:f32)->bool{return (bitcast<u32>(value)&0x7f800000u)!=0x7f800000u;}
-fn fail(query:u32,flag:u32){atomicOr(&control.flags,flag);atomicMin(&control.firstError,query);statuses[query]=flag;}
+fn fail(query:u32,output:u32,flag:u32){atomicOr(&control.flags,flag);atomicMin(&control.firstError,query);if(flag==NO_CONTAINING_SIMPLEX){atomicAdd(&control.noContainingSimplex,1u);}if(output<arrayLength(&results)){results[output]=vec4f(0.0);}if(output<arrayLength(&statuses)){statuses[output]=flag;}}
 fn velocityValid(value:vec4f)->bool{return value.w>0.0&&finite(value.x)&&finite(value.y)&&finite(value.z);}
 fn tetraWeights(point:vec3f,a:vec3f,b:vec3f,c:vec3f)->vec4f{let determinant=dot(a,cross(b,c));if(!finite(determinant)||abs(determinant)<=1e-10){return vec4f(-2.0);}let wa=dot(point,cross(b,c))/determinant;let wb=dot(a,cross(point,c))/determinant;let wc=dot(a,cross(b,point))/determinant;return vec4f(1.0-wa-wb-wc,wa,wb,wc);}
 fn contained(weights:vec4f)->bool{return all(weights>=vec4f(-2e-6))&&all(weights<=vec4f(1.000002));}
 fn powerTransform(value:vec3f,code:u32)->vec3f{let permutation=(code/8u)%6u;var result=value;if(permutation==1u){result=value.xzy;}else if(permutation==2u){result=value.yxz;}else if(permutation==3u){result=value.yzx;}else if(permutation==4u){result=value.zxy;}else if(permutation==5u){result=value.zyx;}let bits=code&7u;return result*vec3f(select(1.0,-1.0,(bits&1u)!=0u),select(1.0,-1.0,(bits&2u)!=0u),select(1.0,-1.0,(bits&4u)!=0u));}
-@compute @workgroup_size(1) fn preparePowerVelocitySamples(){atomicStore(&control.flags,0u);atomicStore(&control.firstError,0xffffffffu);control.queryCount=params.queryCount;atomicStore(&control.interpolated,0u);atomicStore(&control.uniform,0u);atomicStore(&control.tetrahedron,0u);atomicStore(&control.nearest,0u);control.generation=params.generation;}
-@compute @workgroup_size(64) fn samplePowerVelocity(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(index>=params.queryCount||index>=params.queryCapacity){return;}if(params.queryCount>params.queryCapacity||index>=arrayLength(&queries)||index>=arrayLength(&results)||index>=arrayLength(&statuses)){return;}let query=queries[index];if(query.output>=arrayLength(&results)||query.output>=arrayLength(&statuses)){fail(index,INVALID_QUERY);return;}if(query.firstFace>arrayLength(&vertices)||query.faceCount>arrayLength(&vertices)-query.firstFace||query.firstTetrahedron>arrayLength(&tetrahedra)||query.tetrahedronCount>arrayLength(&tetrahedra)-query.firstTetrahedron||query.vertexStart>arrayLength(&vertexVelocities)||query.vertexCount>arrayLength(&vertexVelocities)-query.vertexStart){fail(index,INVALID_QUERY);return;}if((query.flags&UNIFORM)!=0u){if(query.vertexCount<8u||any(query.point.xyz<vec3f(0.0))||any(query.point.xyz>vec3f(1.0))){fail(index,INVALID_QUERY);return;}var value=vec3f(0.0);for(var corner=0u;corner<8u;corner+=1u){let velocity=vertexVelocities[query.vertexStart+corner];if(!velocityValid(velocity)){fail(index,NONFINITE);return;}let weight=select(1.0-query.point.x,query.point.x,(corner&1u)!=0u)*select(1.0-query.point.y,query.point.y,(corner&2u)!=0u)*select(1.0-query.point.z,query.point.z,(corner&4u)!=0u);value+=weight*velocity.xyz;}results[query.output]=vec4f(value,1.0);statuses[query.output]=VALID;atomicAdd(&control.uniform,1u);atomicAdd(&control.interpolated,1u);return;}if(query.vertexCount<query.faceCount+1u){fail(index,INVALID_QUERY);return;}let point=powerTransform(query.point.xyz,(query.flags>>8u)&63u);let anchor=vertexVelocities[query.vertexStart];if(!velocityValid(anchor)){fail(index,NONFINITE);return;}for(var local=0u;local<query.tetrahedronCount;local+=1u){let packed=tetrahedra[query.firstTetrahedron+local];let selectors=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);if(any(selectors>=vec3u(query.faceCount))){fail(index,INVALID_QUERY);return;}let va=vertexVelocities[query.vertexStart+1u+selectors.x];let vb=vertexVelocities[query.vertexStart+1u+selectors.y];let vc=vertexVelocities[query.vertexStart+1u+selectors.z];if(!velocityValid(va)||!velocityValid(vb)||!velocityValid(vc)){continue;}let a=vertices[query.firstFace+selectors.x].offsetSize.xyz;let b=vertices[query.firstFace+selectors.y].offsetSize.xyz;let c=vertices[query.firstFace+selectors.z].offsetSize.xyz;let weights=tetraWeights(point,a,b,c);if(contained(weights)){results[query.output]=vec4f(weights.x*anchor.xyz+weights.y*va.xyz+weights.z*vb.xyz+weights.w*vc.xyz,1.0);statuses[query.output]=VALID|local;atomicAdd(&control.tetrahedron,1u);atomicAdd(&control.interpolated,1u);return;}}
-var best=anchor.xyz;var bestDistance=dot(point,point);for(var selector=0u;selector<query.faceCount;selector+=1u){let candidate=vertexVelocities[query.vertexStart+1u+selector];if(!velocityValid(candidate)){continue;}let delta=vertices[query.firstFace+selector].offsetSize.xyz-point;let distance=dot(delta,delta);if(distance<bestDistance){bestDistance=distance;best=candidate.xyz;}}results[query.output]=vec4f(best,1.0);statuses[query.output]=VALID|NEAREST;atomicAdd(&control.nearest,1u);atomicAdd(&control.interpolated,1u);}
+@compute @workgroup_size(1) fn preparePowerVelocitySamples(){atomicStore(&control.flags,0u);atomicStore(&control.firstError,0xffffffffu);control.queryCount=params.queryCount;atomicStore(&control.interpolated,0u);atomicStore(&control.uniform,0u);atomicStore(&control.tetrahedron,0u);atomicStore(&control.noContainingSimplex,0u);control.generation=params.generation;}
+@compute @workgroup_size(64) fn samplePowerVelocity(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(index>=params.queryCount||index>=params.queryCapacity){return;}if(params.queryCount>params.queryCapacity||index>=arrayLength(&queries)||index>=arrayLength(&results)||index>=arrayLength(&statuses)){return;}let query=queries[index];if(query.output>=arrayLength(&results)||query.output>=arrayLength(&statuses)){fail(index,query.output,INVALID_QUERY);return;}if(query.firstFace>arrayLength(&vertices)||query.faceCount>arrayLength(&vertices)-query.firstFace||query.firstTetrahedron>arrayLength(&tetrahedra)||query.tetrahedronCount>arrayLength(&tetrahedra)-query.firstTetrahedron||query.vertexStart>arrayLength(&vertexVelocities)||query.vertexCount>arrayLength(&vertexVelocities)-query.vertexStart){fail(index,query.output,INVALID_QUERY);return;}if((query.flags&UNIFORM)!=0u){if(query.vertexCount<8u||any(query.point.xyz<vec3f(0.0))||any(query.point.xyz>vec3f(1.0))){fail(index,query.output,INVALID_QUERY);return;}var value=vec3f(0.0);for(var corner=0u;corner<8u;corner+=1u){let velocity=vertexVelocities[query.vertexStart+corner];if(!velocityValid(velocity)){fail(index,query.output,NONFINITE);return;}let weight=select(1.0-query.point.x,query.point.x,(corner&1u)!=0u)*select(1.0-query.point.y,query.point.y,(corner&2u)!=0u)*select(1.0-query.point.z,query.point.z,(corner&4u)!=0u);value+=weight*velocity.xyz;}results[query.output]=vec4f(value,1.0);statuses[query.output]=VALID;atomicAdd(&control.uniform,1u);atomicAdd(&control.interpolated,1u);return;}if(query.vertexCount<query.faceCount+1u){fail(index,query.output,INVALID_QUERY);return;}let point=powerTransform(query.point.xyz,(query.flags>>8u)&63u);let anchor=vertexVelocities[query.vertexStart];if(!velocityValid(anchor)){fail(index,query.output,NONFINITE);return;}for(var local=0u;local<query.tetrahedronCount;local+=1u){let packed=tetrahedra[query.firstTetrahedron+local];let selectors=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);if(any(selectors>=vec3u(query.faceCount))){fail(index,query.output,INVALID_QUERY);return;}let a=vertices[query.firstFace+selectors.x].offsetSize.xyz;let b=vertices[query.firstFace+selectors.y].offsetSize.xyz;let c=vertices[query.firstFace+selectors.z].offsetSize.xyz;let weights=tetraWeights(point,a,b,c);if(!contained(weights)){continue;}let va=vertexVelocities[query.vertexStart+1u+selectors.x];let vb=vertexVelocities[query.vertexStart+1u+selectors.y];let vc=vertexVelocities[query.vertexStart+1u+selectors.z];if(!velocityValid(va)||!velocityValid(vb)||!velocityValid(vc)){fail(index,query.output,NONFINITE);return;}results[query.output]=vec4f(weights.x*anchor.xyz+weights.y*va.xyz+weights.z*vb.xyz+weights.w*vc.xyz,1.0);statuses[query.output]=VALID|local;atomicAdd(&control.tetrahedron,1u);atomicAdd(&control.interpolated,1u);return;}fail(index,query.output,NO_CONTAINING_SIMPLEX);}
 @compute @workgroup_size(1) fn publishPowerVelocitySamples(){if(params.queryCount>params.queryCapacity||params.queryCount>arrayLength(&queries)||params.queryCount>arrayLength(&results)||params.queryCount>arrayLength(&statuses)){atomicOr(&control.flags,CAPACITY);atomicMin(&control.firstError,min(params.queryCount,params.queryCapacity));return;}if(atomicLoad(&control.flags)==0u&&atomicLoad(&control.interpolated)==params.queryCount){atomicStore(&control.flags,VALID);}}
 `;

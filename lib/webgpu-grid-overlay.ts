@@ -10,6 +10,7 @@
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
 import { OCTREE_CONSUMER_MAX_FACE_CANDIDATES, validateUnifiedOctreeConsumerSource, type UnifiedOctreeConsumerSource } from "./octree-consumer-sampling";
+import { OCTREE_SURFACE_LEAF_RECORD_BYTES } from "./webgpu-octree-surface-pages";
 
 export const gridOverlayShader = /* wgsl */ `
 struct Uniforms {
@@ -56,9 +57,9 @@ struct SparseSurfaceParams {
 @group(0) @binding(11) var<storage, read> sparseSurfacePhi: array<f32>;
 @group(0) @binding(12) var<storage, read> sparseSurfaceControl: array<u32>;
 @group(0) @binding(13) var<storage, read> sparseSurfaceStates: array<u32>;
-struct OctreeSurfaceLeaf { packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f }
+struct OctreeSurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct OctreeSurfaceParams { shape:vec4u, offsets0:vec4u, offsets1:vec4u, offsets2:vec4u, cellDt:vec4f, spare0:vec4u, spare1:vec4u, spare2:vec4u }
-struct OctreeFaceRecord { negativeRow:u32,positiveRow:u32,packedOrigin:u32,axisSpan:u32,normalVelocity:f32,area:f32 }
+struct OctreeFaceRecord { negativeRow:u32,positiveRow:u32,originX:u32,originY:u32,originZ:u32,axisSpan:u32,normalVelocity:f32,area:f32 }
 @group(0) @binding(14) var<storage, read> octreeSurfaceLeaves:array<OctreeSurfaceLeaf>;
 @group(0) @binding(15) var<storage, read> octreeSurfaceArena:array<u32>;
 @group(0) @binding(16) var<uniform> octreeSurfaceParams:OctreeSurfaceParams;
@@ -72,8 +73,9 @@ const OCTREE_FACE_INCIDENCE_PER_ROW: u32 = ${OCTREE_CONSUMER_MAX_FACE_CANDIDATES
 fn octreeSurfaceBound()->bool{let r=octreeSurfaceParams.shape.z;return (r==2u||r==4u)&&arrayLength(&octreeSurfaceArena)>6u&&octreeSurfaceParams.shape.x<=arrayLength(&octreeSurfaceLeaves);}
 fn octreeSurfaceAvailable()->bool{return octreeSurfaceBound()&&octreeSurfaceArena[3]==0u;}
 fn octreeOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
+fn octreeLeafOrigin(leaf:OctreeSurfaceLeaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
 fn octreeHash(q:vec3u)->u32{var h=(q.x*73856093u)^(q.y*19349663u)^(q.z*83492791u);h^=h>>16u;return h;}
-fn octreeLeafContains(row:u32,point:vec3f)->bool{if(row>=octreeSurfaceParams.shape.x){return false;}let leaf=octreeSurfaceLeaves[row];let origin=vec3f(octreeOrigin(leaf.packedOrigin));return leaf.size>0u&&all(point>=origin)&&all(point<origin+vec3f(f32(leaf.size)));}
+fn octreeLeafContains(row:u32,point:vec3f)->bool{if(row>=octreeSurfaceParams.shape.x){return false;}let leaf=octreeSurfaceLeaves[row];let origin=vec3f(octreeLeafOrigin(leaf));return leaf.size>0u&&all(point>=origin)&&all(point<origin+vec3f(f32(leaf.size)));}
 fn octreeSurfaceRow(cell:vec3i)->u32{
   if(!octreeSurfaceBound()||any(cell<vec3i(0))){return SPARSE_SURFACE_INVALID;}
   let point=vec3f(cell)+vec3f(0.5);let hinted=textureLoad(pressureSamples,cell,0).x;
@@ -86,11 +88,11 @@ fn octreeSurfaceRow(cell:vec3i)->u32{
   }
   return SPARSE_SURFACE_INVALID;
 }
-fn octreeLeafFallback(row:u32,point:vec3f)->f32{let leaf=octreeSurfaceLeaves[row];let origin=vec3f(octreeOrigin(leaf.packedOrigin));let centre=origin+vec3f(0.5*f32(leaf.size));let physicalGradient=leaf.phiGradient.yzw/max(octreeSurfaceParams.cellDt.xyz,vec3f(1e-9));let boundedPhysical=physicalGradient/max(1.0,length(physicalGradient));return leaf.phiGradient.x+dot(boundedPhysical*octreeSurfaceParams.cellDt.xyz,point-centre);}
+fn octreeLeafFallback(row:u32,point:vec3f)->f32{let leaf=octreeSurfaceLeaves[row];let origin=vec3f(octreeLeafOrigin(leaf));let centre=origin+vec3f(0.5*f32(leaf.size));let physicalGradient=leaf.phiGradient.yzw/max(octreeSurfaceParams.cellDt.xyz,vec3f(1e-9));let boundedPhysical=physicalGradient/max(1.0,length(physicalGradient));return leaf.phiGradient.x+dot(boundedPhysical*octreeSurfaceParams.cellDt.xyz,point-centre);}
 fn octreeSurfaceLoad(base:u32,q:vec3u)->f32{let r=octreeSurfaceParams.shape.z;return bitcast<f32>(octreeSurfaceArena[base+q.x+r*(q.y+r*q.z)]);}
 fn octreeSurfacePhi(row:u32,point:vec3f)->f32{
   if(row==SPARSE_SURFACE_INVALID||row>=octreeSurfaceParams.shape.x){return 1e20;}let slot=octreeSurfaceArena[octreeSurfaceParams.offsets0.x+row];if(slot==SPARSE_SURFACE_INVALID||slot>=octreeSurfaceParams.shape.y){return octreeLeafFallback(row,point);}
-  let leaf=octreeSurfaceLeaves[row];let r=octreeSurfaceParams.shape.z;let origin=vec3f(octreeOrigin(leaf.packedOrigin));let grid=clamp((point-origin)/f32(leaf.size)*f32(r)-vec3f(0.5),vec3f(0.0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1u),vec3u(r-1u));let t=fract(grid);let base=octreeSurfaceParams.offsets1.z+slot*octreeSurfaceParams.shape.w;
+  let leaf=octreeSurfaceLeaves[row];let r=octreeSurfaceParams.shape.z;let origin=vec3f(octreeLeafOrigin(leaf));let grid=clamp((point-origin)/f32(leaf.size)*f32(r)-vec3f(0.5),vec3f(0.0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1u),vec3u(r-1u));let t=fract(grid);let base=octreeSurfaceParams.offsets1.z+slot*octreeSurfaceParams.shape.w;
   return mix(mix(mix(octreeSurfaceLoad(base,a),octreeSurfaceLoad(base,vec3u(b.x,a.y,a.z)),t.x),mix(octreeSurfaceLoad(base,vec3u(a.x,b.y,a.z)),octreeSurfaceLoad(base,vec3u(b.x,b.y,a.z)),t.x),t.y),mix(mix(octreeSurfaceLoad(base,vec3u(a.x,a.y,b.z)),octreeSurfaceLoad(base,vec3u(b.x,a.y,b.z)),t.x),mix(octreeSurfaceLoad(base,vec3u(a.x,b.y,b.z)),octreeSurfaceLoad(base,b),t.x),t.y),t.z);
 }
 fn octreeSurfaceCoreSample(cell:vec3i)->bool{
@@ -300,7 +302,7 @@ fn octreeFaceAudit(row:u32,point:vec3f)->OctreeFaceAudit{
   var weighted=vec3f(0.0);var weights=vec3f(0.0);
   for(var local=0u;local<count;local+=1u){let at=rowCapacity+row*OCTREE_FACE_INCIDENCE_PER_ROW+local;if(at>=arrayLength(&octreeIncidence)){result.fault|=8u;break;}let faceIndex=octreeIncidence[at];if(faceIndex>=octreeFaceControl[0]||faceIndex>=octreeFaceControl[2]||faceIndex>=arrayLength(&octreeFaces)){result.fault|=8u;continue;}
     let face=octreeFaces[faceIndex];let axis=face.axisSpan&3u;let span=face.axisSpan>>2u;if(axis>2u||span==0u||abs(face.normalVelocity)>3.402823e38||!(face.negativeRow==row||face.positiveRow==row)){result.fault|=8u;continue;}
-    var centre=vec3f(octreeOrigin(face.packedOrigin));centre[(axis+1u)%3u]+=0.5*f32(span);centre[(axis+2u)%3u]+=0.5*f32(span);let delta=point-centre;let distanceSquared=dot(delta,delta);let support=f32(max(1u,span));let weight=1.0/max(0.0625*support*support,distanceSquared);
+    var centre=vec3f(vec3u(face.originX,face.originY,face.originZ));centre[(axis+1u)%3u]+=0.5*f32(span);centre[(axis+2u)%3u]+=0.5*f32(span);let delta=point-centre;let distanceSquared=dot(delta,delta);let support=f32(max(1u,span));let weight=1.0/max(0.0625*support*support,distanceSquared);
     weighted[axis]+=weight*face.normalVelocity;weights[axis]+=weight;result.axisMask|=1u<<axis;result.count+=1u;
   }
   for(var axis=0u;axis<3u;axis+=1u){if(weights[axis]>0.0){result.velocity[axis]=weighted[axis]/weights[axis];}}
@@ -755,11 +757,12 @@ export class GridOverlayPipeline {
     this.fallbackSparsePages = device.createBuffer({ label: "Grid sparse-surface page fallback", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.fallbackSparseParams = device.createBuffer({ label: "Grid sparse-surface parameter fallback", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.fallbackSparsePhi = device.createBuffer({ label: "Grid sparse-surface phi fallback", size: 4, usage: GPUBufferUsage.STORAGE });
-    // This buffer also stands in for one 48-byte OctreeSurfaceLeaf when the
+    // This buffer also stands in for one 64-byte OctreeSurfaceLeaf when the
     // adaptive source is absent. Auto-layout validation applies the leaf
     // struct's minimum binding size even though the disabled shader path does
     // not read it.
-    this.fallbackSparseControl = device.createBuffer({ label: "Grid sparse-surface control fallback", size: 48, usage: GPUBufferUsage.STORAGE });
+    this.fallbackSparseControl = device.createBuffer({ label: "Grid sparse-surface control fallback",
+      size: OCTREE_SURFACE_LEAF_RECORD_BYTES, usage: GPUBufferUsage.STORAGE });
   }
 
   async initialize() {

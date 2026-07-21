@@ -210,6 +210,34 @@ test("production renderer mode omits the raster default and serializes explicit 
   assert.equal(parseQueryState("?render=invalid").ui.svoRenderMode, "raster");
 });
 
+test("SVO lighting round-trips exact direct while cone remains the canonical fail-soft default", () => {
+  const direct = parseQueryState("?render=svo&svoLighting=direct");
+  assert.equal(direct.ui.svoRenderMode, "svo");
+  assert.equal(direct.ui.svoLightingMode, "direct");
+  const directQuery = serializeQueryState("?svoLighting=stale", {
+    presetId: direct.presetId,
+    scene: direct.scene,
+  }, {
+    methodId: direct.methodId,
+    quality: direct.quality,
+    overrides: direct.overrides,
+  }, direct.ui);
+  assert.equal(new URLSearchParams(directQuery).get("svoLighting"), "direct");
+
+  const cone = parseQueryState("?svoLighting=cone");
+  assert.equal(cone.ui.svoLightingMode, "cone");
+  const coneQuery = serializeQueryState("?svoLighting=direct", {
+    presetId: cone.presetId,
+    scene: cone.scene,
+  }, {
+    methodId: cone.methodId,
+    quality: cone.quality,
+    overrides: cone.overrides,
+  }, cone.ui);
+  assert.equal(new URLSearchParams(coneQuery).has("svoLighting"), false);
+  assert.equal(parseQueryState("?svoLighting=invalid").ui.svoLightingMode, "cone");
+});
+
 test("viewport utility panels round-trip through one mutually exclusive query state", () => {
   const initialUI = useUIStore.getInitialState();
   const query = serializeQueryState("?diagnostics=1", {

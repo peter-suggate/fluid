@@ -6,9 +6,9 @@ Representation constraint: one unified sparse octree; no persistent dense simula
 Pressure-solver direction (revised 2026-07-20): the authoritative power path
 now uses the paper's Section 4.3 hybrid PCG preconditioner: an SPD first-order
 L1 V-cycle with adjoint transfers, bracketed by paired `k=8` second-order
-boundary/transition smoothing. Compact-row Chebyshev and compatibility
-projection remain explicit fail-closed rollback paths (see "Critique outcomes
-and direction changes").
+boundary/transition smoothing. Compact-row Chebyshev and axis projection remain
+explicit comparison modes; a rejected paper-authoritative generation stops
+publication and stepping instead of silently continuing on a comparison path.
 
 ## Implementation checkpoint and restart handoff (2026-07-20)
 
@@ -30,7 +30,8 @@ requests the 384-column (`24 x 18 x 16`) cubic safety grid, compact face
 transport, factor-4 global fine phi, authoritative power projection, and
 `leafSolver=auto`. Once power authority is admitted, `auto` selects the
 Section 4.3 hybrid PCG path; terrain, imported/seeded geometry, anisotropic
-spacing, or any failed power publication retains the axis/Chebyshev rollback.
+spacing selects an explicit compatibility configuration; a failed authoritative
+power publication stops before stepping.
 Browser WebGPU startup remains manual, so changing the product preset does not
 submit GPU work on page load. This cutover is configuration and CPU-test
 evidence only: the staged Dawn and one-step browser gates below are still
@@ -253,12 +254,13 @@ GPU-resident and observational.
    but allocation, generation validation, and publication use WebGPU buffers,
    hashes, free lists, and indirect worklists. There are no CPU page-table
    decisions or simulation readbacks.
-2. **Pressure migration is staged.** The power operator feeds both compact-row
-   Chebyshev and experimental matrix-free PCG. The PCG preconditioner currently
-   adds independent geometric-aggregate diagonal corrections to fine Jacobi;
-   it is not a first-order multigrid V-cycle and has no paired second-order
-   boundary/transition smoothing. Section 4.3 therefore remains outstanding,
-   and Chebyshev remains the explicit A/B rollback.
+2. **Section 4.3 authority is wired.** The power operator feeds the hybrid PCG,
+   which captures Cartesian/GFM L1 rows, applies paired `k=8` L2 boundary and
+   transition smoothing, invokes an SPD sparse first-order Galerkin V-cycle,
+   and repeats the matching post-smoothing. The three-ring compact-row band is
+   an engineering approximation of the paper's about-three-voxel physical
+   band. Aggregate PCG and Chebyshev remain explicitly selected comparison
+   modes and cannot authorize the paper path.
 3. **The fine grid stores phi only.** Velocity stays on octree power faces and
    is reconstructed/interpolated on demand, following Section 5. Pressure is
    never allocated on the fine grid.

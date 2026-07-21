@@ -219,10 +219,10 @@ test("Dawn executes the shared adaptive velocity and phi sampler", {
 fn octreeConsumerPageLoad(base:u32,index:u32)->f32{return page[base+index];}
 @compute @workgroup_size(1) fn main(){
   var candidates:array<OctreeConsumerFaceSample,48>;
-  candidates[0]=OctreeConsumerFaceSample(0u,4u,1.0,0u);
-  candidates[1]=OctreeConsumerFaceSample(0u,5u,2.0,0u);
-  candidates[2]=OctreeConsumerFaceSample(0u,6u,3.0,0u);
-  let leaf=OctreeConsumerSurfaceLeaf(0u,4u,0u,0u,vec4f(5.0,2.0,0.0,0.0));
+  candidates[0]=OctreeConsumerFaceSample(0u,0u,0u,4u,1.0,0u);
+  candidates[1]=OctreeConsumerFaceSample(0u,0u,0u,5u,2.0,0u);
+  candidates[2]=OctreeConsumerFaceSample(0u,0u,0u,6u,3.0,0u);
+  let leaf=OctreeConsumerSurfaceLeaf(0u,0u,0u,4u,vec4f(5.0,2.0,0.0,0.0));
   let velocity=octreeConsumerVelocity(vec3f(0.5),candidates,3u,vec3f(0.0));
   result[0]=vec4f(velocity,octreeConsumerPhi(vec3f(3.0,2.0,2.0),leaf,0u,2u,false));
   for(var z=0u;z<2u;z+=1u){for(var y=0u;y<2u;y+=1u){for(var x=0u;x<2u;x+=1u){page[x+2u*(y+2u*z)]=f32(2u*x+1u)+2.0*f32(2u*y+1u)-f32(2u*z+1u);}}}

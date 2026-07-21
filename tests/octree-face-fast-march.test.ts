@@ -62,3 +62,14 @@ test("face fast march reports a disconnected or non-monotone band instead of fab
   assert.deepEqual(Array.from(result.unresolvedFaces), [1, 2]);
   assert.equal(result.parents[1], OCTREE_FACE_MARCH_INVALID);
 });
+
+test("liquid boundary data has zero arrival time across a face-centroid sign crossing", () => {
+  const result = fastMarchOctreeFaceVelocity(3, [
+    { negativeRow: 0, positiveRow: 1, phi: -0.04, normalVelocity: 2 },
+    { negativeRow: 1, positiveRow: 2, phi: 0.006 },
+    { negativeRow: 2, positiveRow: OCTREE_FACE_MARCH_INVALID, phi: 0.03 },
+  ]);
+  assert.deepEqual(Array.from(result.velocities), [2, 2, 2]);
+  assert.deepEqual(Array.from(result.parents), [0, 0, 1]);
+  assert.deepEqual(Array.from(result.unresolvedFaces), []);
+});

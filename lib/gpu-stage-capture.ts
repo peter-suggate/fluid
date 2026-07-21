@@ -155,6 +155,7 @@ export interface GPUStageCaptureTarget {
 
 export const GPU_STAGE_CAPTURE_TARGETS: readonly GPUStageCaptureTarget[] = [
   { lane: "physics", stageKey: "advection", resourceId: "predicted-velocity", label: "Predicted velocity", selector: 4, selectorLabel: "speed", visualization: "magnitude", units: "m/s", nearZero: 1e-4 },
+  { lane: "physics", stageKey: "pressure", resourceId: "pressure", label: "Pressure potential", selector: 0, selectorLabel: "dt·p/ρ", visualization: "diverging", units: "m²/s", nearZero: 1e-5, methods: ["octree"] },
   { lane: "physics", stageKey: "pressure", resourceId: "pressure", label: "Pressure field", selector: 0, selectorLabel: "pressure", visualization: "diverging", units: "Pa", nearZero: 1e-5 },
   { lane: "physics", stageKey: "projection", resourceId: "projected-velocity", label: "Projected velocity", selector: 4, selectorLabel: "speed", visualization: "magnitude", units: "m/s", nearZero: 1e-4 },
   { lane: "physics", stageKey: "surface-update", resourceId: "surface-phi", label: "Updated signed distance", selector: 0, selectorLabel: "phi", visualization: "diverging", units: "m", nearZero: 1e-4, methods: ["octree", "quadtree-tall-cell"] },

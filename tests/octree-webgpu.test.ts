@@ -8,7 +8,7 @@ import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "../lib/generated/octree-power-catalog";
 import { defaultScene } from "../lib/model";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
-import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreePressureCouplingShader, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
+import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreePressureCouplingShader, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import { quadtreeSurfaceShader, WebGPUQuadtreeSurfaceState } from "../lib/webgpu-quadtree-builder";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
@@ -18,6 +18,25 @@ const smokeSource = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.
 const packageManifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   scripts: Record<string, string>;
 };
+
+test("row-indexed octree startup skips the unreachable dense Jacobi specialization", () => {
+  const product = {
+    leafSolver: "mgpcg",
+    segmentedProjection: true,
+    extrapolationSweeps: 0,
+    sparseExtrapolation: false,
+    hasDensePhiSnapshot: false,
+  } as const;
+  assert.equal(octreeProjectionPipelineRequired("jacobi", product), false);
+  assert.equal(octreeProjectionPipelineRequired("project", product), false);
+  assert.equal(octreeProjectionPipelineRequired("extrapolate", product), false);
+  assert.equal(octreeProjectionPipelineRequired("refreshSnapshotDense", product), false);
+  assert.equal(octreeProjectionPipelineRequired("projectLeaves", product), true);
+  assert.equal(octreeProjectionPipelineRequired("jacobi", { ...product, leafSolver: "dense" }), true,
+    "the explicit dense validation solver must retain its Jacobi pipeline");
+  assert.equal(octreeProjectionPipelineRequired("assembleSystem", product), true);
+  assert.match(octreeSource, /if \(!this\.basePipelineRequired\(entryPoint\)\) return/);
+});
 
 test("octree is a registered GPU method with dam-break defaults", () => {
   assert.ok(simulationMethods.includes(octreeMethod));
@@ -41,7 +60,7 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.equal(octreeMethod.presetFor("balanced").secondaryParticles, "off");
   assert.match(octreeMethod.detail, /no topology readbacks/);
   assert.match(octreeMethod.detail, /Section 4\.3 hybrid PCG/);
-  assert.match(octreeMethod.detail, /Chebyshev rollback/);
+  assert.match(octreeMethod.detail, /fail-closed paper authority/);
   assert.match(octreeMethod.detail, /rigid-body coupling/);
   assert.match(octreeMethod.description, /signed-distance level set/);
   const maximumLeaf = octreeMethod.params.find((spec) => spec.key === "maximumLeafSize");
@@ -69,7 +88,7 @@ test("octree is a registered GPU method with dam-break defaults", () => {
     "auto admits Section 4.3 only after power authority passes its fail-closed policy");
   for (const quality of ["high", "ultra"] as const) {
     assert.equal(octreeMethod.presetFor(quality).globalFineLevelSetFactor, "off",
-      `${quality} must retain the bounded rollback until its memory/endurance gate passes`);
+      `${quality} must remain an explicit compatibility preset until its memory/endurance gate passes`);
     assert.equal(octreeMethod.presetFor(quality).powerDiagramProjection, "off");
   }
   assert.match(smokeSource, /FLUID_OCTREE_POWER_PROJECTION/);
@@ -361,7 +380,10 @@ test("octree retains exact rank-six coupling as an A/B path and defaults to lagg
 
 test("octree topology is genuinely three-dimensional and 2:1 balanced", () => {
   assert.match(octreeProjectionShader, /packOrigin\(p: vec3u\)/);
-  assert.match(octreeProjectionShader, /p\.z << 20u/);
+  assert.match(octreeProjectionShader, /fn packOrigin\(p: vec3u\) -> u32 \{ return index\(p\); \}/,
+    "owner identity is the exact full-domain linear cell index");
+  assert.doesNotMatch(octreeProjectionShader, /p\.z << 20u/,
+    "owner identity must not retain the legacy 10:10:10 coordinate cap");
   assert.match(WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString(), /Math\.ceil\(Math\.log2\(this\.maxLeafSize\)\)/);
   assert.match(octreeProjectionShader, /for \(var z = 0u; z < size/);
   assert.match(octreeProjectionShader, /for \(var y = 0u; y < size/);
@@ -394,7 +416,7 @@ test("octree refinement is graded by resident signed distance rather than bulk V
   assert.doesNotMatch(octreeProjectionShader, /volumeIn/, "the octree solve must not bind the diagnostic VOF field");
   assert.match(octreeProjectionShader,
     /if \(!fineSummary\.complete\) \{\s*samplePhi=legacyPhi\(vec3i\(q\)\);closestSurface=min\(closestSurface,abs\(samplePhi\)\)/,
-    "an incomplete indexed summary must scan the selected page/analytic rollback rather than infer a missing sparse sample");
+    "an incomplete indexed summary must scan the selected page/analytic source rather than infer a missing sparse sample");
   assert.match(octreeProjectionShader, /if \(minimumSolid >= 1\.0 - 1e-5\) \{ return false; \}/,
     "fully solid bulk leaves should be allowed to stay coarse");
   assert.match(octreeProjectionShader, /let effectiveBand = baseBand \+ 8\.0 \* detailActivity/);

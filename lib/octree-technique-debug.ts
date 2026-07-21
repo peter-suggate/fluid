@@ -43,6 +43,8 @@ export interface OctreeTechniqueDebugSource {
     readonly metadata: GPUBufferBinding;
     readonly worklist: GPUBufferBinding;
     readonly sampleFlags: GPUBufferBinding;
+    /** Paper Section 5 signed-distance samples on the factor-m fine lattice. */
+    readonly phi: GPUBufferBinding;
     readonly topologyControl: GPUBufferBinding;
     readonly redistanceControl: GPUBufferBinding;
   };
@@ -75,6 +77,7 @@ export const OCTREE_TECHNIQUE_OVERLAY_MODES = [
   "operator-open-fraction",
   "tetra-validity",
   "section5-face-band",
+  "global-fine-phi",
 ] as const;
 
 export type OctreeTechniqueOverlayMode = typeof OCTREE_TECHNIQUE_OVERLAY_MODES[number];
@@ -97,4 +100,5 @@ export const OCTREE_TECHNIQUE_OVERLAY_CODES: Readonly<Record<OctreeTechniqueOver
   "operator-open-fraction": 22,
   "tetra-validity": 23,
   "section5-face-band": 24,
+  "global-fine-phi": 25,
 };

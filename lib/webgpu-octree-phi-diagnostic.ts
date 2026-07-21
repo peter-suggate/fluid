@@ -62,7 +62,7 @@ export class WebGPUOctreePhiDifferential {
 }
 
 export const pagedPhiDifferentialShader=/* wgsl */`
-struct Leaf{packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f}
+struct Leaf{originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f}
 struct Params{dimsTile:vec4u,surface0:vec4u,surface1:vec4u,spare:vec4u}
 struct Lookup{row:u32,probes:u32}
 @group(0) @binding(0) var densePhi:texture_3d<f32>;
@@ -72,13 +72,14 @@ struct Lookup{row:u32,probes:u32}
 @group(0) @binding(4) var<storage,read_write> stats:array<atomic<u32>>;
 @group(0) @binding(5) var<uniform> params:Params;
 const INVALID=0xffffffffu;
-fn unpack(w:u32)->vec3u{return vec3u(w&1023u,(w>>10u)&1023u,(w>>20u)&1023u);}
+fn leafOrigin(l:Leaf)->vec3u{return vec3u(l.originX,l.originY,l.originZ);}
 fn hash(q:vec3u)->u32{var h=(q.x*73856093u)^(q.y*19349663u)^(q.z*83492791u);h^=h>>16u;return h;}
-fn contains(row:u32,p:vec3u)->bool{let l=leaves[row];let o=unpack(l.packedOrigin);return l.size>0u&&all(p>=o)&&all(p<o+vec3u(l.size));}
+fn airCellKey(p:vec3u)->u32{return p.x+params.dimsTile.x*(p.y+params.dimsTile.y*p.z)+1u;}
+fn contains(row:u32,p:vec3u)->bool{let l=leaves[row];let o=leafOrigin(l);return l.size>0u&&all(p>=o)&&all(p<o+vec3u(l.size));}
 fn lookup(p:vec3u)->Lookup{let mask=params.surface0.y-1u;var probes=0u;for(var size=1u;size<=32u;size<<=1u){var slot=hash(p/size)&mask;for(var probe=0u;probe<32u;probe+=1u){probes+=1u;let encoded=arena[params.surface0.x+slot];if(encoded==0u){break;}let row=encoded-1u;if(row<params.surface1.y&&row<arrayLength(&leaves)&&leaves[row].size==size&&contains(row,p)){return Lookup(row,probes);}slot=(slot+1u)&mask;}}return Lookup(INVALID,probes);}
-fn lookupAirAlias(p:vec3u)->Lookup{let mask=params.surface1.w-1u;var slot=hash(p)&mask;let key=(p.x|(p.y<<10u)|(p.z<<20u))+1u;for(var probe=0u;probe<32u;probe+=1u){let at=params.surface1.z+2u*slot;let stored=arena[at];if(stored==0u){return Lookup(INVALID,probe+1u);}if(stored==key){let encoded=arena[at+1u];if(encoded!=0u){let row=0xffffffffu-encoded;if(row<params.surface1.y&&row<arrayLength(&leaves)){return Lookup(row,probe+1u);}}}slot=(slot+1u)&mask;}return Lookup(INVALID,32u);}
+fn lookupAirAlias(p:vec3u)->Lookup{let mask=params.surface1.w-1u;var slot=hash(p)&mask;let key=airCellKey(p);for(var probe=0u;probe<32u;probe+=1u){let at=params.surface1.z+2u*slot;let stored=arena[at];if(stored==0u){return Lookup(INVALID,probe+1u);}if(stored==key){let encoded=arena[at+1u];if(encoded!=0u){let row=0xffffffffu-encoded;if(row<params.surface1.y&&row<arrayLength(&leaves)){return Lookup(row,probe+1u);}}}slot=(slot+1u)&mask;}return Lookup(INVALID,32u);}
 fn load(base:u32,q:vec3u)->f32{let r=params.spare.x;return bitcast<f32>(arena[base+q.x+r*(q.y+r*q.z)]);}
-fn sample(row:u32,p:vec3f,countFallback:bool)->f32{let l=leaves[row];let page=arena[params.surface0.z+row];let o=vec3f(unpack(l.packedOrigin));if(page==INVALID||page>=params.surface1.x||any(p<o)||any(p>=o+vec3f(f32(l.size)))){if(countFallback){atomicAdd(&stats[2],1u);}let c=o+vec3f(0.5*f32(l.size));return l.phiGradient.x+dot(l.phiGradient.yzw,p-c);}let r=params.spare.x;let grid=clamp((p-o)/f32(l.size)*f32(r)-vec3f(0.5),vec3f(0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1),vec3u(r-1u));let t=fract(grid);let base=params.surface0.w+page*params.spare.y;return mix(mix(mix(load(base,a),load(base,vec3u(b.x,a.y,a.z)),t.x),mix(load(base,vec3u(a.x,b.y,a.z)),load(base,vec3u(b.x,b.y,a.z)),t.x),t.y),mix(mix(load(base,vec3u(a.x,a.y,b.z)),load(base,vec3u(b.x,a.y,b.z)),t.x),mix(load(base,vec3u(a.x,b.y,b.z)),load(base,b),t.x),t.y),t.z);}
+fn sample(row:u32,p:vec3f,countFallback:bool)->f32{let l=leaves[row];let page=arena[params.surface0.z+row];let o=vec3f(leafOrigin(l));if(page==INVALID||page>=params.surface1.x||any(p<o)||any(p>=o+vec3f(f32(l.size)))){if(countFallback){atomicAdd(&stats[2],1u);}let c=o+vec3f(0.5*f32(l.size));return l.phiGradient.x+dot(l.phiGradient.yzw,p-c);}let r=params.spare.x;let grid=clamp((p-o)/f32(l.size)*f32(r)-vec3f(0.5),vec3f(0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1),vec3u(r-1u));let t=fract(grid);let base=params.surface0.w+page*params.spare.y;return mix(mix(mix(load(base,a),load(base,vec3u(b.x,a.y,a.z)),t.x),mix(load(base,vec3u(a.x,b.y,a.z)),load(base,vec3u(b.x,b.y,a.z)),t.x),t.y),mix(mix(load(base,vec3u(a.x,a.y,b.z)),load(base,vec3u(b.x,a.y,b.z)),t.x),mix(load(base,vec3u(a.x,b.y,b.z)),load(base,b),t.x),t.y),t.z);}
 fn tileCell(wg:vec3u,local:vec3u,countWord:u32,widthWord:u32,indexBase:u32)->vec3u{let tile=params.dimsTile.w;let blocks=tile/4u;let groups=blocks*blocks*blocks;let linear=wg.x+wg.y*worklist[widthWord];let stream=linear/groups;if(stream>=worklist[countWord]){return vec3u(INVALID);}let sub=linear%groups;let tx=(params.dimsTile.x+tile-1u)/tile;let ty=(params.dimsTile.y+tile-1u)/tile;let index=worklist[indexBase+stream];let tc=vec3u(index%tx,(index/tx)%ty,index/(tx*ty));let sc=vec3u(sub%blocks,(sub/blocks)%blocks,sub/(blocks*blocks));return tc*tile+sc*4u+local;}
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn addFloat(word:u32,value:f32){var old=atomicLoad(&stats[word]);loop{let next=bitcast<u32>(bitcast<f32>(old)+value);let result=atomicCompareExchangeWeak(&stats[word],old,next);if(result.exchanged){return;}old=result.old_value;}}

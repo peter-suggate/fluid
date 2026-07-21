@@ -5,6 +5,7 @@ import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+const gridSource = readFileSync(new URL("../lib/webgpu-grid-overlay.ts", import.meta.url), "utf8");
 
 test("grid overlay is an independent alpha-composited presentation layer", () => {
   assert.match(gridOverlayShader, /@group\(0\) @binding\(2\) var fluidField: texture_3d<f32>/);
@@ -16,6 +17,14 @@ test("grid overlay is an independent alpha-composited presentation layer", () =>
   assert.match(gridOverlayShader, /let axis = i32\(round\(u\.debug\.x\)\)/);
   assert.match(gridOverlayShader, /@fragment fn fragmentMain/);
   assert.match(gridOverlayShader, /return vec4f\(displayColor\(overlay\.color\), overlay\.alpha\)/);
+});
+
+test("grid optional-source fallback satisfies the canonical 64-byte surface-leaf ABI", () => {
+  assert.match(gridOverlayShader,
+    /struct OctreeSurfaceLeaf \{ originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f \}/);
+  assert.match(gridSource,
+    /label: "Grid sparse-surface control fallback",\s*\n\s*size: OCTREE_SURFACE_LEAF_RECORD_BYTES/);
+  assert.doesNotMatch(gridSource, /Grid sparse-surface control fallback"[^\n]*size:\s*48/);
 });
 
 test("grid overlay supports a horizontal Y slice with X-Z adaptive boundaries", () => {

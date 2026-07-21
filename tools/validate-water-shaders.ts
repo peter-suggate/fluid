@@ -29,7 +29,7 @@ import { octreeFaceBandWGSL } from "../lib/webgpu-octree-face-fast-march";
 import { octreePowerVelocityPrepareFromFaceControlShader, octreePowerVelocityShader } from "../lib/webgpu-octree-power-velocity";
 import { octreePowerCoarseLevelSetShader } from "../lib/webgpu-octree-power-coarse-levelset";
 import { octreePowerFaceTransferShader } from "../lib/webgpu-octree-power-face-transfer";
-import { octreePowerFaceShader } from "../lib/webgpu-octree-power-faces";
+import { octreePowerBoundaryPhiShader, octreePowerFaceShader } from "../lib/webgpu-octree-power-faces";
 import { octreePowerSolidFaceShader, octreePowerSolidImpulseShader } from "../lib/webgpu-octree-power-solid-faces";
 import { octreeSolidVertexSdfShader } from "../lib/webgpu-octree-solid-vertex-sdf";
 import { octreeAnalyticBootstrapWorklistShader } from "../lib/webgpu-octree-analytic-bootstrap";
@@ -90,6 +90,7 @@ const shaders = {
   "octree-power-coarse-level-set": octreePowerCoarseLevelSetShader,
   "octree-power-face-transfer": octreePowerFaceTransferShader,
   "octree-power-faces": octreePowerFaceShader,
+  "octree-power-boundary-phi": octreePowerBoundaryPhiShader,
   "octree-power-solid-vertex-sdf": octreeSolidVertexSdfShader,
   "octree-power-solid-faces": octreePowerSolidFaceShader,
   "octree-power-solid-impulses": octreePowerSolidImpulseShader,
