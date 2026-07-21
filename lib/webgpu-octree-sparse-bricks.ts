@@ -62,6 +62,8 @@ export interface OctreeSparseBrickWorldOptions {
   haloCells?: number;
   /** Brick-pooled phi/velocity atlas ownership; off avoids atlas allocation. */
   brickAtlas?: "off" | FluidBrickAtlasMode;
+  /** Keep the deep-liquid worklist without allocating atlas field payloads. */
+  bulkResidencyOnly?: boolean;
   /** Velocity-swept residency support plus downstream neighbor activation. */
   brickPreActivation?: boolean;
   /**
@@ -485,7 +487,7 @@ export class OctreeSparseBrickWorld {
     });
     this.preActivation = options.brickPreActivation ?? true;
     const brickAtlasMode = options.brickAtlas ?? "mirror";
-    if (brickAtlasMode !== "off") {
+    if (brickAtlasMode !== "off" || options.bulkResidencyOnly) {
       // Bulk velocity must remain defined throughout deep liquid, while the
       // surface path wins by visiting only a narrow two-sided band. Keep the
       // two schedulers independent so atlas authority never widens surface
@@ -499,11 +501,13 @@ export class OctreeSparseBrickWorld {
         leafCapacity: this.tree.leafCapacity,
         topologyTileBricks: options.topologyTileBricks ?? 1,
       });
-      this.atlas = new WebGPUFluidBrickAtlas(device, dimensions, this.bulkResidency, {
-        brickSize,
-        mode: brickAtlasMode,
-        preActivation: this.preActivation,
-      });
+      if (brickAtlasMode !== "off") {
+        this.atlas = new WebGPUFluidBrickAtlas(device, dimensions, this.bulkResidency, {
+          brickSize,
+          mode: brickAtlasMode,
+          preActivation: this.preActivation,
+        });
+      }
     }
 
     const counts = storageBuffer(device, "Sparse brick source counts", packed.counts.byteLength, packed.counts);
@@ -816,7 +820,10 @@ export class OctreeSparseBrickWorld {
     // Bulk residency normally refreshes at the head of every solver substep.
     // Keep a tail refresh for t=0 publication and non-solver callers, while
     // the solver explicitly suppresses the duplicate publication pass.
-    if (!bulkAlreadyRefreshed) this.atlas?.encodeBulkRefresh(encoder, fields.levelSet, fields.velocity, dt_s);
+    if (!bulkAlreadyRefreshed) {
+      if (this.atlas) this.atlas.encodeBulkRefresh(encoder, fields.levelSet, fields.velocity, dt_s);
+      else this.bulkResidency?.encode(encoder, fields.levelSet, fields.velocity, { dt_s, preActivation: this.preActivation });
+    }
     endRange("Fluid brick residency", timings.residency);
     beginRange("Sparse brick publication", timings.publication);
     const inspection = this.inspection;
@@ -875,6 +882,12 @@ export class OctreeSparseBrickWorld {
   readBulkResidencyStats(): Promise<FluidBrickResidencyStats> | undefined { return this.bulkResidency?.readStats(); }
 
   get atlasSamplingSource(): FluidBrickAtlasSamplingSource | undefined { return this.atlas?.getSamplingSource(); }
+
+  /** Full wet-domain worklist, independent of optional atlas payload storage. */
+  get bulkResidencyWorklist(): GPUBuffer | undefined { return this.bulkResidency?.worklist; }
+
+  /** Persistent wet-domain topology scheduler on compact authority. */
+  get topologyResidency(): GPUFluidBrickResidency { return this.bulkResidency ?? this.residency; }
 
   readAtlasStats(): Promise<FluidBrickAtlasStats> | undefined { return this.atlas?.readStats(); }
 

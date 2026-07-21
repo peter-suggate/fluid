@@ -1,6 +1,6 @@
 import { combineInitialBrickWet, damBreakFractions, initialFluidBrickContainsCell, initialFluidBrickSignedDistance } from "./initial-fluid";
 import type { SceneDescription } from "./model";
-import { sceneHasTerrain, terrainHeightAt } from "./terrain";
+import { sceneHasTerrain, terrainColumnHeights, terrainHeightAt } from "./terrain";
 
 export type GPUQuality = "balanced" | "high" | "ultra";
 
@@ -28,8 +28,10 @@ export interface TallCellLayout {
    * values are liquid and the narrow band is clamped to five fine cells. */
   initialPhi: Float32Array;
   initialVolumeCellSum: number;
-  /** Reference liquid volume in fine-cell units. Unlike initialVolume, this
-   * name survives the tall solver's level-set cutover. */
+  /** Initial volume represented by the level-set Heaviside and its fixed-point
+   * GPU diagnostic, in fine-cell units. This is intentionally distinct from
+   * initialVolumeCellSum: the latter is the exact binary seed volume, whereas
+   * the level-set solver must measure drift against its own t=0 functional. */
   referenceLiquidVolume_cells: number;
   packedSampleCount: number;
   activeSampleCount: number;
@@ -207,6 +209,65 @@ function buildInitialPhi(scene: SceneDescription, nx: number, fineNy: number, nz
   return phi;
 }
 
+/**
+ * Evaluate the exact represented-volume functional used by
+ * tallCellComputeShader.reduceDiagnostics at t=0.
+ *
+ * The binary seed volume and a point-sampled signed-distance field are not
+ * interchangeable near box corners: smoothing phi over one cell can differ
+ * from the binary count by several percent without any transport having run.
+ * Using that binary count as the controller reference therefore reports a
+ * fictitious first-step loss and makes volume control expand an unchanged
+ * interface. Keep the packed-row 8-bit truncation here because the GPU atomic
+ * reduction has that same ABI: the bottom tall-cell endpoint reconstructs and
+ * sums every world row below the column base before one conversion to u32,
+ * while each regular row is converted independently.
+ */
+export function representedInitialPhiVolumeCells(
+  scene: SceneDescription,
+  nx: number,
+  fineNy: number,
+  nz: number,
+  packedNy: number,
+  columnBases: ArrayLike<number>,
+  initialPhi: ArrayLike<number>
+) {
+  const h = {
+    x: scene.container.width_m / nx,
+    y: scene.container.height_m / fineNy,
+    z: scene.container.depth_m / nz
+  };
+  const hMin = Math.min(h.x, h.y, h.z);
+  const terrainHeights = terrainColumnHeights(scene, nx, nz);
+  let fixedPointTotal = 0;
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const column = x + nx * z;
+    const base = Math.round(columnBases[column]);
+    const bottom = initialPhi[x + nx * packedNy * z];
+    const top = initialPhi[x + nx * (1 + packedNy * z)];
+    const terrainHeightCells = terrainHeights[column] / h.y;
+    let tallOccupied = 0;
+    for (let y = 0; y < fineNy; y += 1) {
+      let phi: number;
+      if (y < base && base > 0) {
+        const t = Math.min(1, Math.max(0, y / Math.max(base - 1, 1)));
+        phi = bottom + (top - bottom) * t;
+      } else {
+        const packedY = 2 + y - base;
+        phi = packedY >= 2 && packedY < packedNy
+          ? initialPhi[x + nx * (packedY + packedNy * z)]
+          : 5 * hMin;
+      }
+      const open = 1 - Math.min(1, Math.max(0, terrainHeightCells - y));
+      const occupied = open * Math.min(1, Math.max(0, 0.5 - phi / hMin));
+      if (y < base) tallOccupied += occupied;
+      else fixedPointTotal += Math.trunc(Math.min(0xffff_ffff, Math.max(0, occupied * 256)));
+    }
+    fixedPointTotal += Math.trunc(Math.min(0xffff_ffff, Math.max(0, tallOccupied * 256)));
+  }
+  return fixedPointTotal / 256;
+}
+
 function insideTerrainCell(scene: SceneDescription, x: number, y: number, z: number, nx: number, fineNy: number, nz: number) {
   if (!sceneHasTerrain(scene)) return false;
   const c = scene.container;
@@ -376,11 +437,14 @@ export function createTallCellLayout(scene: SceneDescription, quality: GPUQualit
   const packedSampleCount = nx * packedNy * nz;
   const equivalentUniformCellCount = nx * fineNy * nz;
   const initialPhi = buildInitialPhi(scene, nx, fineNy, nz, packedNy, columnBases);
+  const referenceLiquidVolume_cells = representedInitialPhiVolumeCells(
+    scene, nx, fineNy, nz, packedNy, columnBases, initialPhi
+  );
   return {
     nx, fineNy, nz, packedNy,
     cellSize_m: { x: c.width_m / nx, y: c.height_m / fineNy, z: c.depth_m / nz },
     columnBases, initialVolume, initialPhi, initialVolumeCellSum,
-    referenceLiquidVolume_cells: initialVolumeCellSum,
+    referenceLiquidVolume_cells,
     packedSampleCount, activeSampleCount, equivalentUniformCellCount,
     compressionRatio: packedSampleCount / equivalentUniformCellCount,
     activeCompressionRatio: activeSampleCount / equivalentUniformCellCount,
@@ -468,13 +532,16 @@ export function createSingleTallCellProbeLayout(
   }
   const equivalentUniformCellCount = nx * fineNy * nz;
   const initialPhi = buildInitialPhi(scene, nx, fineNy, nz, packedNy, columnBases);
+  const referenceLiquidVolume_cells = representedInitialPhiVolumeCells(
+    scene, nx, fineNy, nz, packedNy, columnBases, initialPhi
+  );
   return {
     ...layout,
     columnBases,
     initialVolume,
     initialPhi,
     initialVolumeCellSum,
-    referenceLiquidVolume_cells: initialVolumeCellSum,
+    referenceLiquidVolume_cells,
     activeSampleCount,
     activeCompressionRatio: activeSampleCount / equivalentUniformCellCount,
     settings: { ...layout.settings, maximumNeighborDelta, remeshInterval: Number.MAX_SAFE_INTEGER },
@@ -508,11 +575,18 @@ export function createSingleTallCellProbeControlLayout(
       initialVolume[xx + candidate.nx * (packedY + candidate.packedNy * zz)] = fraction;
     }
   }
+  const initialPhi = buildInitialPhi(
+    scene, candidate.nx, candidate.fineNy, candidate.nz, candidate.packedNy, columnBases
+  );
+  const referenceLiquidVolume_cells = representedInitialPhiVolumeCells(
+    scene, candidate.nx, candidate.fineNy, candidate.nz, candidate.packedNy, columnBases, initialPhi
+  );
   return {
     ...candidate,
     columnBases,
     initialVolume,
-    initialPhi: buildInitialPhi(scene, candidate.nx, candidate.fineNy, candidate.nz, candidate.packedNy, columnBases),
+    initialPhi,
+    referenceLiquidVolume_cells,
     activeSampleCount: candidate.equivalentUniformCellCount,
     activeCompressionRatio: 1,
     singleTallCellProbe: undefined

@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { DEFAULT_SVO_RENDER_MODE, isSvoRenderMode, SVO_RENDER_MODES } from "../lib/svo-render-mode";
 
-test("SVO production renderer modes have a stable raster fallback", () => {
-  assert.equal(DEFAULT_SVO_RENDER_MODE, "svo");
+test("renderer modes keep raster as the interactive default and SVO as an opt-in", () => {
+  assert.equal(DEFAULT_SVO_RENDER_MODE, "raster");
   assert.deepEqual(SVO_RENDER_MODES, ["raster", "svo"]);
   assert.equal(isSvoRenderMode("raster"), true);
   assert.equal(isSvoRenderMode("svo"), true);

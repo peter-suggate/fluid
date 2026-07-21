@@ -49,11 +49,13 @@ fluid step.
 
 Pressure adaptivity and surface-detail adaptivity are separate hierarchies.
 The dense compatibility level set and dense transport velocity remain at the
-nominal grid resolution, while `sparseSurfaceBand` dynamically pages a second
-signed-distance field near `phi=0`. The default `authoritative` mode uses
-ratio-two fine samples for persistent geometric-detail transport and hybrid
-mesh extraction. It consumes velocity from the existing global octree
-projection; it does not add another pressure ladder.
+nominal grid resolution. The default keeps `sparseSurfaceBand` off so the
+octree's nominal-resolution level set is authoritative. When explicitly
+enabled, `sparseSurfaceBand` dynamically pages a second signed-distance field
+near `phi=0`; `authoritative` mode uses ratio-two fine samples for persistent
+geometric-detail transport and hybrid mesh extraction. It consumes velocity
+from the existing global octree projection; it does not add another pressure
+ladder.
 `mirror` retains the same allocation/extraction path but continually resamples
 the coarse field, and `off` is the dense baseline.
 
@@ -155,9 +157,15 @@ velocity strain activates a detail patch.
   VOF: it skips the flux limiter, density sharpening, and per-step VOF copies.
   A dormant compatibility texture remains in the shared dense bind layout, but
   has no binding in the octree projection and cannot change a solve decision.
-- Pressure solver: row-parallel Chebyshev semi-iteration over the diagonally
-  scaled finite-volume operator. Balanced quality's 128-sweep effort maps to
-  32 polynomial SpMV passes; high and ultra retain their larger effort budgets.
+- Pressure solver: the normal cubic dam-break path uses matrix-free PCG with
+  the paper's Section 4.3 hybrid preconditioner: paired eight-sweep smoothing
+  of the second-order boundary/transition rows around a first-order Galerkin
+  octree V-cycle. The authority path is hard-capped at 16 PCG iterations (the
+  paper reports 6–10); convergence is decided on the GPU. Row-parallel
+  Chebyshev semi-iteration is
+  retained as the explicit fail-closed rollback.
+  In that rollback, balanced quality's 128-sweep effort maps to 32 polynomial
+  SpMV passes; high and ultra retain their larger effort budgets.
   The spectral interval `[0.01, 2.2]` covers the modes that the former fixed
   Jacobi budget could materially damp while leaving margin above the
   Gershgorin bound. Dynamic rigid scenes keep this accelerated path by treating
@@ -165,7 +173,10 @@ velocity strain activates a detail patch.
   applying the newly calculated pressure impulse to the next presentation
   batch. This frame-lagged partitioned split removes the per-iterate global
   `K^T p` dependency; `compact` and `dense` remain exact same-step A/B paths.
-- Leaf solve execution (`leafSolver`, default `auto` = `chebyshev`): each solve
+- Leaf solve execution (`leafSolver`, default `auto`): admitted power authority
+  selects the Section 4.3 hybrid PCG path. Terrain, imported/seeded geometry,
+  anisotropic finest cells, or a failed power publication retain Chebyshev.
+  Each solve
   first stream-compacts the wet leaf origins with a deterministic prefix-sum
   scan (per-block reduce, one-workgroup exclusive block scan, rank-and-scatter
   emit) and assembles each row's diagonal, velocity-flux RHS, and merged

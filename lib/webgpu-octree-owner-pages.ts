@@ -11,6 +11,10 @@ import {
   SVO_RENDER_RESIDENCY_CONSUMER_STATUS,
   type WebGPUSvoRenderResidencyConsumer,
 } from "./webgpu-svo-render-residency-consumer";
+import {
+  FLUID_BRICK_ACTIVE_DISPATCH_OFFSET_BYTES,
+  FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES,
+} from "./webgpu-fluid-brick-residency";
 
 export const OCTREE_OWNER_BRICK_SIZE = 8 as const;
 export const OCTREE_OWNER_PAGE_VOXELS = OCTREE_OWNER_BRICK_SIZE ** 3;
@@ -18,6 +22,8 @@ export const OCTREE_OWNER_ARENA_CONTROL_WORDS = 16;
 export const OCTREE_OWNER_PAGE_WORD_VALID = 0x8000_0000;
 export const OCTREE_OWNER_PAGE_TABLE_MISSING = 0;
 export const OCTREE_OWNER_PAGE_TABLE_RESERVED = 0xffff_ffff;
+export const OCTREE_OWNER_PAGE_HASH_EMPTY = 0;
+export const OCTREE_OWNER_PAGE_HASH_TOMBSTONE = 0xffff_ffff;
 
 /** Renderer-owned lifecycle status bits stored in arena control word 10. */
 export const SVO_OWNER_PAGE_STATUS = Object.freeze({
@@ -63,8 +69,23 @@ export interface OctreeOwnerPagePlanOptions {
   brickSize?: 8;
   maximumResidentFraction?: number;
   maximumPages?: number;
+  /** Correctness floor for a bounded bootstrap publication. */
+  minimumPages?: number;
   /** Optional device/allocation ceiling. Capacity degrades to fit this bound. */
   maximumArenaBytes?: number;
+  /**
+   * Compact-simulation capacity model. Pressure rows cover the volumetric
+   * topology while fine surface rows cover the two-dimensional refinement
+   * sheet. A 50% overlap/headroom allowance is applied before clamping to the
+   * logical brick lattice. This is a conservative operational bound, not a
+   * proof for an arbitrarily folded interface: an exact smaller bound requires
+   * the topology producer to publish its refined-brick count. Until then,
+   * overflow remains fail-closed to canonical owners and invalidates the solve.
+   */
+  adaptiveBounds?: {
+    pressureRowCapacity: number;
+    surfacePageCapacity: number;
+  };
 }
 
 export interface OctreeOwnerPagePlan {
@@ -73,12 +94,17 @@ export interface OctreeOwnerPagePlan {
   brickDimensions: readonly [number, number, number];
   logicalBrickCount: number;
   requestedCapacity: number;
+  minimumCapacity: number;
+  adaptiveCapacity?: number;
   capacity: number;
   degraded: boolean;
   pageVoxels: number;
   bytesPerPage: number;
   controlOffsetWords: number;
   pageTableOffsetWords: number;
+  /** Number of open-addressed key/value slots. Bounded by physical capacity, not box volume. */
+  pageHashCapacity: number;
+  pageTableValueOffsetWords: number;
   freeListOffsetWords: number;
   ownerPagesOffsetWords: number;
   allocatedWords: number;
@@ -122,20 +148,52 @@ export function planOctreeOwnerPages(
     ? logicalBrickCount
     : Math.max(1, Math.min(logicalBrickCount, Math.floor(options.maximumPages)));
   if (!Number.isFinite(hardCapacity)) throw new RangeError("Octree owner maximum pages must be finite");
-  const requestedCapacity = Math.min(fractionalCapacity, hardCapacity);
-  const fixedWords = OCTREE_OWNER_ARENA_CONTROL_WORDS + logicalBrickCount;
-  const wordsPerPhysicalPage = 1 + OCTREE_OWNER_PAGE_VOXELS;
-  let deviceCapacity = logicalBrickCount;
+  const minimumCapacity = options.minimumPages === undefined
+    ? 1
+    : Math.max(1, Math.min(logicalBrickCount, Math.floor(options.minimumPages)));
+  if (!Number.isFinite(minimumCapacity)) throw new RangeError("Octree owner minimum pages must be finite");
+  let adaptiveCapacity: number | undefined;
+  if (options.adaptiveBounds !== undefined) {
+    const { pressureRowCapacity, surfacePageCapacity } = options.adaptiveBounds;
+    positiveInteger(pressureRowCapacity, "Octree owner pressure-row capacity");
+    positiveInteger(surfacePageCapacity, "Octree owner surface-page capacity");
+    // Bulk rows amortize over an 8^3 owner page. Fine interface rows amortize
+    // only over its 8^2 cross-section. The 3/2 multiplier covers overlap,
+    // 2:1 grading, and one-frame residency hysteresis without returning to a
+    // fixed percentage of the entire bounding volume.
+    const pressurePages = Math.ceil(pressureRowCapacity / OCTREE_OWNER_PAGE_VOXELS);
+    const surfacePages = Math.ceil(surfacePageCapacity / (OCTREE_OWNER_BRICK_SIZE ** 2));
+    adaptiveCapacity = Math.min(logicalBrickCount, Math.max(1, Math.ceil((pressurePages + surfacePages) * 3 / 2)));
+  }
+  const requestedCapacity = Math.min(logicalBrickCount, Math.max(
+    minimumCapacity,
+    Math.min(fractionalCapacity, hardCapacity, adaptiveCapacity ?? logicalBrickCount),
+  ));
+  const hashSlotsFor = (residentCapacity: number) => Math.max(2, Math.ceil(residentCapacity * 4 / 3));
+  const wordsFor = (residentCapacity: number) =>
+    OCTREE_OWNER_ARENA_CONTROL_WORDS + hashSlotsFor(residentCapacity) * 2
+      + residentCapacity * (1 + OCTREE_OWNER_PAGE_VOXELS);
+  let deviceCapacity = requestedCapacity;
   if (options.maximumArenaBytes !== undefined) {
     if (!Number.isFinite(options.maximumArenaBytes) || options.maximumArenaBytes < 0) {
       throw new RangeError("Octree owner arena byte ceiling must be finite and non-negative");
     }
-    deviceCapacity = Math.floor((Math.floor(options.maximumArenaBytes / 4) - fixedWords) / wordsPerPhysicalPage);
+    const maximumWords = Math.floor(options.maximumArenaBytes / 4);
+    let low = 0;
+    let high = requestedCapacity;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (wordsFor(middle) <= maximumWords) low = middle;
+      else high = middle - 1;
+    }
+    deviceCapacity = low;
     if (deviceCapacity < 1) throw new RangeError("Octree owner arena byte ceiling cannot hold one physical page");
   }
   const capacity = Math.min(requestedCapacity, deviceCapacity);
+  const pageHashCapacity = hashSlotsFor(capacity);
   const pageTableOffsetWords = OCTREE_OWNER_ARENA_CONTROL_WORDS;
-  const freeListOffsetWords = pageTableOffsetWords + logicalBrickCount;
+  const pageTableValueOffsetWords = pageTableOffsetWords + pageHashCapacity;
+  const freeListOffsetWords = pageTableValueOffsetWords + pageHashCapacity;
   const ownerPagesOffsetWords = freeListOffsetWords + capacity;
   const allocatedWords = ownerPagesOffsetWords + capacity * OCTREE_OWNER_PAGE_VOXELS;
   return {
@@ -144,12 +202,16 @@ export function planOctreeOwnerPages(
     brickDimensions,
     logicalBrickCount,
     requestedCapacity,
+    minimumCapacity,
+    adaptiveCapacity,
     capacity,
     degraded: capacity < requestedCapacity,
     pageVoxels: OCTREE_OWNER_PAGE_VOXELS,
-    bytesPerPage: wordsPerPhysicalPage * 4,
+    bytesPerPage: (1 + OCTREE_OWNER_PAGE_VOXELS) * 4,
     controlOffsetWords: 0,
     pageTableOffsetWords,
+    pageHashCapacity,
+    pageTableValueOffsetWords,
     freeListOffsetWords,
     ownerPagesOffsetWords,
     allocatedWords,
@@ -240,6 +302,32 @@ export const OCTREE_OWNER_PAGE_LOOKUP_STATUS = Object.freeze({
   invalid: 1 << 1,
 } as const);
 
+function ownerPageHash(logical: number): number {
+  return Math.imul(logical >>> 0, 0x9e37_79b1) >>> 0;
+}
+
+/** Locate a logical brick in the sparse owner hash. Returns -1 when absent. */
+export function findOctreeOwnerPageHashSlot(
+  arena: ArrayLike<number>,
+  plan: Pick<OctreeOwnerPagePlan, "pageTableOffsetWords" | "pageHashCapacity">,
+  logical: number,
+): number {
+  if (!Number.isSafeInteger(logical) || logical < 0 || logical >= 0xffff_fffe) return -1;
+  const key = logical + 1;
+  const capacity = plan.pageHashCapacity;
+  if (capacity < 1) return -1;
+  let slot = ownerPageHash(logical) % capacity;
+  for (let probe = 0; probe < capacity; probe += 1) {
+    const word = plan.pageTableOffsetWords + slot;
+    if (word >= arena.length) return -1;
+    const observed = Number(arena[word]) >>> 0;
+    if (observed === key) return slot;
+    if (observed === OCTREE_OWNER_PAGE_HASH_EMPTY) return -1;
+    slot = slot + 1 === capacity ? 0 : slot + 1;
+  }
+  return -1;
+}
+
 export interface OctreeOwnerPageLookupResult extends OctreeOwnerRecord {
   /** Zero for a resident, valid owner; otherwise `OCTREE_OWNER_PAGE_LOOKUP_STATUS` bits. */
   status: number;
@@ -286,14 +374,17 @@ export function lookupOctreeOwnerPage(
   const logical = brick[0]
     + brick[1] * plan.brickDimensions[0]
     + brick[2] * plan.brickDimensions[0] * plan.brickDimensions[1];
-  const pageTableWord = plan.pageTableOffsetWords + logical;
-  if (logical < 0 || logical >= plan.logicalBrickCount || pageTableWord >= arena.length) {
+  if (logical < 0 || logical >= plan.logicalBrickCount) {
     return missingOwnerLookup(cellValue, plan.dimensions, maximumLeafSize, true);
   }
-  const encodedPage = Number(arena[pageTableWord]) >>> 0;
-  if (encodedPage === OCTREE_OWNER_PAGE_TABLE_MISSING) {
+  const hashSlot = findOctreeOwnerPageHashSlot(arena, plan, logical);
+  if (hashSlot < 0) {
     return missingOwnerLookup(cellValue, plan.dimensions, maximumLeafSize, false);
   }
+  const valueWord = plan.pageTableValueOffsetWords + hashSlot;
+  if (valueWord >= arena.length) return missingOwnerLookup(cellValue, plan.dimensions, maximumLeafSize, true);
+  const encodedPage = Number(arena[valueWord]) >>> 0;
+  if (encodedPage === OCTREE_OWNER_PAGE_TABLE_MISSING) return missingOwnerLookup(cellValue, plan.dimensions, maximumLeafSize, true);
   if (encodedPage === OCTREE_OWNER_PAGE_TABLE_RESERVED || encodedPage > plan.capacity) {
     return missingOwnerLookup(cellValue, plan.dimensions, maximumLeafSize, true);
   }
@@ -419,23 +510,39 @@ fn octreeOwnerPageLookup(cell: vec3i) -> OctreeOwnerPageLookupResult {
   let logical = yzOffset + brick.x;
   if (logical >= logicalCount) { return ownerPageInvalidAir(cell); }
   let arenaWords = arrayLength(&ownerPageArena);
-  if (pageTableOffset >= arenaWords || logical >= arenaWords - pageTableOffset) {
+  if (payloadOffset <= pageTableOffset + capacity || ((payloadOffset - pageTableOffset - capacity) & 1u) != 0u) {
     return ownerPageInvalidAir(cell);
   }
-  let encodedPage = ownerPageArena[pageTableOffset + logical];
-  if (encodedPage == 0u) {
-    return ownerPageCanonicalAir(cell, 0u);
+  let hashCapacity = (payloadOffset - pageTableOffset - capacity) / 2u;
+  if (hashCapacity == 0u || pageTableOffset >= arenaWords || hashCapacity > arenaWords - pageTableOffset) {
+    return ownerPageInvalidAir(cell);
   }
+  let key = logical + 1u;
+  var slot = (logical * 0x9e3779b1u) % hashCapacity;
+  var encodedPage = 0u;
+  var found = false;
+  for (var probe = 0u; probe < hashCapacity; probe += 1u) {
+    let observed = ownerPageArena[pageTableOffset + slot];
+    if (observed == key) {
+      if (pageTableOffset + hashCapacity + slot >= arenaWords) { return ownerPageInvalidAir(cell); }
+      encodedPage = ownerPageArena[pageTableOffset + hashCapacity + slot];
+      found = true;
+      break;
+    }
+    if (observed == 0u) { break; }
+    slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
+  }
+  if (!found) { return ownerPageCanonicalAir(cell, 0u); }
   if (encodedPage == OWNER_PAGE_TABLE_RESERVED || encodedPage > capacity) {
     return ownerPageInvalidAir(cell);
   }
-  let slot = encodedPage - 1u;
+  let physicalSlot = encodedPage - 1u;
   let local = unsignedCell % vec3u(OWNER_PAGE_BRICK_SIZE);
   let localIndex = local.x + local.y * 8u + local.z * 64u;
-  if (payloadOffset >= arenaWords || slot > (arenaWords - payloadOffset - 1u) / pageVoxels) {
+  if (payloadOffset >= arenaWords || physicalSlot > (arenaWords - payloadOffset - 1u) / pageVoxels) {
     return ownerPageInvalidAir(cell);
   }
-  let pageBase = payloadOffset + slot * pageVoxels;
+  let pageBase = payloadOffset + physicalSlot * pageVoxels;
   if (localIndex >= arenaWords - pageBase) { return ownerPageInvalidAir(cell); }
   let packed = ownerPageArena[pageBase + localIndex];
   if ((packed & OWNER_PAGE_WORD_VALID) == 0u) {
@@ -638,6 +745,31 @@ fn popFreeSlot() -> u32 {
     let claim = atomicCompareExchangeWeak(&arena[0], available, available - 1u);
     if (claim.exchanged) { return atomicLoad(&arena[params.offsets.y + available - 1u]); }
   }
+  return INVALID;
+}
+
+fn pageValueWord(logical: u32, insert: bool) -> u32 {
+  let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
+  let key = logical + 1u;
+  var slot = (logical * 0x9e3779b1u) % hashCapacity;
+  for (var probe = 0u; probe < hashCapacity; probe += 1u) {
+    let keyWord = params.offsets.x + slot;
+    let observed = atomicLoad(&arena[keyWord]);
+    if (observed == key) { return params.offsets.x + hashCapacity + slot; }
+    if (observed == 0u || observed == INVALID) {
+      if (!insert) { if (observed == 0u) { return INVALID; } }
+      else {
+        var expected = observed;
+        loop {
+          let claim = atomicCompareExchangeWeak(&arena[keyWord], expected, key);
+          if (claim.exchanged || claim.old_value == key) { return params.offsets.x + hashCapacity + slot; }
+          if (claim.old_value != expected) { break; }
+        }
+      }
+    }
+    slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
+  }
+  return INVALID;
 }
 
 @compute @workgroup_size(1)
@@ -663,7 +795,8 @@ fn activatePages(
   let logical = changes[item];
   if (logical >= params.counts.x) { return; }
   if (lid == 0u) {
-    let pageWord = params.offsets.x + logical;
+    let pageWord = pageValueWord(logical, true);
+    if (pageWord == INVALID) { atomicAdd(&arena[3], 1u); return; }
     loop {
       let current = atomicLoad(&arena[pageWord]);
       if (current != 0u) { break; }
@@ -673,6 +806,8 @@ fn activatePages(
       let slot = popFreeSlot();
       if (slot == INVALID || slot >= params.counts.y) {
         atomicStore(&arena[pageWord], 0u);
+        let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
+        atomicStore(&arena[params.offsets.x + (pageWord - params.offsets.x - hashCapacity)], INVALID);
         atomicAdd(&arena[3], 1u);
         break;
       }
@@ -702,8 +837,12 @@ fn retirePages(
   if (item >= params.counts.w || lid != 0u) { return; }
   let logical = changes[params.offsets.w + item];
   if (logical >= params.counts.x) { return; }
-  let encoded = atomicExchange(&arena[params.offsets.x + logical], 0u);
+  let pageWord = pageValueWord(logical, false);
+  if (pageWord == INVALID) { return; }
+  let encoded = atomicExchange(&arena[pageWord], 0u);
   if (encoded == 0u || encoded == INVALID || encoded > params.counts.y) { return; }
+  let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
+  atomicStore(&arena[params.offsets.x + (pageWord - params.offsets.x - hashCapacity)], INVALID);
   let freeIndex = atomicAdd(&arena[0], 1u);
   if (freeIndex >= params.counts.y) {
     atomicStore(&arena[0], params.counts.y);
@@ -722,6 +861,297 @@ function tiledWorkgroups(items: number): readonly [number, number, number] {
   const y = x > 0 ? Math.ceil(items / x) : 1;
   if (y > 65_535) throw new RangeError("Octree owner lifecycle exceeds the two-dimensional WebGPU dispatch range");
   return [x, y, 1];
+}
+
+export const octreeSimulationOwnerPageLifecycleShader = /* wgsl */ `
+struct Params {
+  counts: vec4u,  // logical bricks, capacity, cell dimensions xy
+  offsets: vec4u, // page table, free list, payload, cell dimension z
+}
+@group(0) @binding(0) var<storage, read_write> arena: array<atomic<u32>>;
+@group(0) @binding(1) var<storage, read> worklist: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+const INVALID: u32 = 0xffffffffu;
+const HEADER: u32 = 16u;
+const PAGE_VOXELS: u32 = 512u;
+
+fn popFree() -> u32 {
+  loop {
+    let count = atomicLoad(&arena[0]);
+    if (count == 0u) { return INVALID; }
+    let claim = atomicCompareExchangeWeak(&arena[0], count, count - 1u);
+    if (claim.exchanged) { return atomicLoad(&arena[params.offsets.y + count - 1u]); }
+  }
+}
+
+fn pageValueWord(logical: u32, insert: bool) -> u32 {
+  let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
+  let key = logical + 1u;
+  var slot = (logical * 0x9e3779b1u) % hashCapacity;
+  for (var probe = 0u; probe < hashCapacity; probe += 1u) {
+    let keyWord = params.offsets.x + slot;
+    let observed = atomicLoad(&arena[keyWord]);
+    if (observed == key) { return params.offsets.x + hashCapacity + slot; }
+    if (observed == 0u || observed == INVALID) {
+      if (!insert) { if (observed == 0u) { return INVALID; } }
+      else {
+        var expected = observed;
+        loop {
+          let claim = atomicCompareExchangeWeak(&arena[keyWord], expected, key);
+          if (claim.exchanged || claim.old_value == key) { return params.offsets.x + hashCapacity + slot; }
+          if (claim.old_value != expected) { break; }
+        }
+      }
+    }
+    slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
+  }
+  return INVALID;
+}
+
+@compute @workgroup_size(1)
+fn beginLifecycle() { atomicStore(&arena[2], 0u); atomicAdd(&arena[7], 1u); }
+
+@compute @workgroup_size(64)
+fn retirePages(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) numWorkgroups: vec3u, @builtin(local_invocation_index) lid: u32) {
+  let linearGroup = wid.x + numWorkgroups.x * wid.y;
+  if ((linearGroup & 1u) != 0u) { return; }
+  let item = linearGroup >> 1u;
+  let count = min(worklist[4], params.counts.x);
+  if (item >= count || lid != 0u) { return; }
+  let logical = worklist[HEADER + params.counts.x * 2u + item * 2u];
+  if (logical >= params.counts.x) { atomicStore(&arena[2], 2u); return; }
+  let pageWord = pageValueWord(logical, false);
+  if (pageWord == INVALID) { return; }
+  let encoded = atomicExchange(&arena[pageWord], 0u);
+  if (encoded == 0u || encoded == INVALID || encoded > params.counts.y) { return; }
+  let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
+  atomicStore(&arena[params.offsets.x + (pageWord - params.offsets.x - hashCapacity)], INVALID);
+  let free = atomicAdd(&arena[0], 1u);
+  if (free < params.counts.y) { atomicStore(&arena[params.offsets.y + free], encoded - 1u); atomicSub(&arena[1], 1u); }
+  else { atomicStore(&arena[0], params.counts.y); atomicStore(&arena[2], 2u); }
+}
+
+@compute @workgroup_size(1)
+fn activatePages(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) numWorkgroups: vec3u) {
+  let linearGroup = wid.x + numWorkgroups.x * wid.y;
+  if ((linearGroup & 1u) != 0u) { return; }
+  let item = linearGroup >> 1u;
+  let count = min(worklist[0], params.counts.x);
+  if (item >= count) { return; }
+  let logical = worklist[HEADER + item * 2u];
+  if (logical >= params.counts.x) { atomicStore(&arena[2], 2u); return; }
+  let table = pageValueWord(logical, true);
+  if (table == INVALID) { atomicStore(&arena[2], 1u); return; }
+  var reserved = false;
+  loop {
+    let reserve = atomicCompareExchangeWeak(&arena[table], 0u, INVALID);
+    if (reserve.exchanged) { reserved = true; break; }
+    if (reserve.old_value != 0u) { break; }
+  }
+  if (!reserved) { return; }
+  let slot = popFree();
+  if (slot == INVALID || slot >= params.counts.y) {
+    atomicStore(&arena[table], 0u);
+    let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
+    atomicStore(&arena[params.offsets.x + (table - params.offsets.x - hashCapacity)], INVALID);
+    atomicStore(&arena[2], 1u);
+    return;
+  }
+  atomicStore(&arena[table], slot + 1u);
+  atomicAdd(&arena[1], 1u);
+  let base = params.offsets.z + slot * PAGE_VOXELS;
+  for (var local = 0u; local < PAGE_VOXELS; local += 1u) { atomicStore(&arena[base + local], 0u); }
+}
+
+fn analyticOwnerWord(origin: vec3u, size: u32) -> u32 {
+  if (size == 1u) { return 0x80000000u; }
+  let exponent = u32(firstTrailingBit(size));
+  let aligned = origin >> vec3u(exponent);
+  return exponent | (aligned.x << 3u) | (aligned.y << 12u) | (aligned.z << 21u);
+}
+
+// One workgroup consumes one analytically published topology tile. Each lane
+// owns at most one 8^3 page (tileSize <= 32), allocates it from the bounded
+// arena, and seeds the exact coarse owner that resetTopology would publish.
+// This closes the cold-start gap where brick residency is still empty and a
+// missing page would otherwise cap lookup at the synthetic size-8 owner.
+@compute @workgroup_size(64)
+fn activateAnalyticTopologyPages(
+  @builtin(workgroup_id) wid: vec3u,
+  @builtin(num_workgroups) numWorkgroups: vec3u,
+  @builtin(local_invocation_index) lid: u32,
+) {
+  let tileSlot = wid.x + numWorkgroups.x * wid.y;
+  let dimensions = vec3u(params.counts.z, params.counts.w, params.offsets.w);
+  let tileSize = atomicLoad(&arena[14]);
+  let tileDimensions = (dimensions + vec3u(tileSize - 1u)) / tileSize;
+  let tileCapacity = tileDimensions.x * tileDimensions.y * tileDimensions.z;
+  let tileCount = min(worklist[0], tileCapacity);
+  if (tileSlot >= tileCount || tileSize < 8u || tileSize > 32u || (tileSize & (tileSize - 1u)) != 0u) { return; }
+  let tileIndex = worklist[HEADER + tileSlot];
+  if (tileIndex >= tileCapacity) { atomicStore(&arena[2], 2u); return; }
+  let tile = vec3u(tileIndex % tileDimensions.x,
+    (tileIndex / tileDimensions.x) % tileDimensions.y,
+    tileIndex / (tileDimensions.x * tileDimensions.y));
+  let pagesPerAxis = tileSize / 8u;
+  let pagesPerTile = pagesPerAxis * pagesPerAxis * pagesPerAxis;
+  if (lid >= pagesPerTile) { return; }
+  let localBrick = vec3u(lid % pagesPerAxis,
+    (lid / pagesPerAxis) % pagesPerAxis,
+    lid / (pagesPerAxis * pagesPerAxis));
+  let brick = tile * vec3u(pagesPerAxis) + localBrick;
+  let brickDimensions = (dimensions + vec3u(7u)) / 8u;
+  if (any(brick >= brickDimensions)) { return; }
+  let logical = brick.x + brick.y * brickDimensions.x + brick.z * brickDimensions.x * brickDimensions.y;
+  if (logical >= params.counts.x) { atomicStore(&arena[2], 2u); return; }
+  let table = pageValueWord(logical, true);
+  if (table == INVALID) { atomicStore(&arena[2], 1u); return; }
+  var reserved = false;
+  loop {
+    let reserve = atomicCompareExchangeWeak(&arena[table], 0u, INVALID);
+    if (reserve.exchanged) { reserved = true; break; }
+    if (reserve.old_value != 0u) { break; }
+  }
+  if (!reserved) { return; }
+  let slot = popFree();
+  if (slot == INVALID || slot >= params.counts.y) {
+    atomicStore(&arena[table], 0u);
+    let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
+    atomicStore(&arena[params.offsets.x + (table - params.offsets.x - hashCapacity)], INVALID);
+    atomicStore(&arena[2], 1u);
+    return;
+  }
+  let base = params.offsets.z + slot * PAGE_VOXELS;
+  let brickOrigin = brick * 8u;
+  for (var local = 0u; local < PAGE_VOXELS; local += 1u) {
+    let cell = brickOrigin + vec3u(local % 8u, (local / 8u) % 8u, local / 64u);
+    var word = 0u;
+    if (all(cell < dimensions)) {
+      var size = tileSize;
+      var origin = (cell / vec3u(size)) * vec3u(size);
+      loop {
+        if (all(origin + vec3u(size) <= dimensions) || size == 1u) { break; }
+        size >>= 1u;
+        origin = (cell / vec3u(size)) * vec3u(size);
+      }
+      word = analyticOwnerWord(origin, size);
+    }
+    atomicStore(&arena[base + local], word);
+  }
+  atomicStore(&arena[table], slot + 1u);
+  atomicAdd(&arena[1], 1u);
+}
+`;
+
+export interface OctreeAnalyticOwnerBootstrapSource {
+  readonly tileWorklist: GPUBuffer;
+  readonly tileSizeCells: number;
+  readonly activeTileLimits: readonly [number, number, number];
+  readonly activeTileCount: number;
+}
+
+export function octreeAnalyticOwnerBootstrapPageCount(
+  dimensions: OctreeOwnerCoordinate,
+  source: Pick<OctreeAnalyticOwnerBootstrapSource, "tileSizeCells" | "activeTileLimits">,
+): number {
+  if (!Number.isSafeInteger(source.tileSizeCells) || source.tileSizeCells < 8
+      || source.tileSizeCells > 32 || (source.tileSizeCells & (source.tileSizeCells - 1)) !== 0) {
+    throw new RangeError("Analytic owner bootstrap tile size must be 8, 16, or 32");
+  }
+  const coveredCells = source.activeTileLimits.map((limit, axis) => {
+    if (!Number.isSafeInteger(limit) || limit < 0) throw new RangeError("Analytic owner bootstrap limits must be non-negative integers");
+    return Math.min(dimensions[axis], limit * source.tileSizeCells);
+  });
+  return coveredCells.reduce((product, cells) => product * Math.ceil(cells / OCTREE_OWNER_BRICK_SIZE), 1);
+}
+
+/** GPU-only owner-page lifecycle driven directly by fluid brick residency. */
+export class WebGPUOctreeSimulationOwnerPages {
+  readonly plan: OctreeOwnerPagePlan;
+  readonly arena: GPUBuffer;
+  readonly allocatedBytes: number;
+  private readonly params: GPUBuffer;
+  private readonly group: GPUBindGroup;
+  private readonly begin: GPUComputePipeline;
+  private readonly retire: GPUComputePipeline;
+  private readonly activate: GPUComputePipeline;
+  private readonly worklist: GPUBuffer;
+  private readonly analyticBootstrap?: OctreeAnalyticOwnerBootstrapSource;
+  private readonly analyticGroup?: GPUBindGroup;
+  private readonly activateAnalytic?: GPUComputePipeline;
+
+  constructor(device: GPUDevice, dimensions: OctreeOwnerCoordinate, worklist: GPUBuffer,
+    options: OctreeOwnerPagePlanOptions = {}, analyticBootstrap?: OctreeAnalyticOwnerBootstrapSource) {
+    this.worklist = worklist;
+    this.analyticBootstrap = analyticBootstrap;
+    const analyticMinimumPages = analyticBootstrap
+      ? octreeAnalyticOwnerBootstrapPageCount(dimensions, analyticBootstrap)
+      : 1;
+    this.plan = planOctreeOwnerPages(dimensions, {
+      ...options,
+      minimumPages: Math.max(options.minimumPages ?? 1, analyticMinimumPages),
+    });
+    this.arena = device.createBuffer({ label: "Simulation octree owner pages", size: this.plan.allocatedBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Simulation octree owner-page parameters", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const initial = new Uint32Array(this.plan.allocatedWords);
+    initial[0] = this.plan.capacity; initial[3] = this.plan.capacity; initial[4] = this.plan.logicalBrickCount;
+    initial[5] = this.plan.freeListOffsetWords; initial[6] = this.plan.ownerPagesOffsetWords;
+    initial[14] = analyticBootstrap?.tileSizeCells ?? 0;
+    initial[15] = 0x4f57_4e52;
+    for (let index = 0; index < this.plan.capacity; index += 1) initial[this.plan.freeListOffsetWords + index] = this.plan.capacity - 1 - index;
+    device.queue.writeBuffer(this.arena, 0, initial);
+    device.queue.writeBuffer(this.params, 0, new Uint32Array([
+      this.plan.logicalBrickCount, this.plan.capacity, dimensions[0], dimensions[1],
+      this.plan.pageTableOffsetWords, this.plan.freeListOffsetWords, this.plan.ownerPagesOffsetWords, dimensions[2],
+    ]));
+    const layout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+    ] });
+    const module = device.createShaderModule({ label: "Simulation octree owner-page lifecycle", code: octreeSimulationOwnerPageLifecycleShader });
+    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+    this.begin = device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint: "beginLifecycle" } });
+    this.retire = device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint: "retirePages" } });
+    this.activate = device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint: "activatePages" } });
+    this.group = device.createBindGroup({ layout, entries: [
+      { binding: 0, resource: { buffer: this.arena } }, { binding: 1, resource: { buffer: worklist } }, { binding: 2, resource: { buffer: this.params } },
+    ] });
+    if (analyticBootstrap) {
+      this.activateAnalytic = device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint: "activateAnalyticTopologyPages" } });
+      this.analyticGroup = device.createBindGroup({ layout, entries: [
+        { binding: 0, resource: { buffer: this.arena } },
+        { binding: 1, resource: { buffer: analyticBootstrap.tileWorklist } },
+        { binding: 2, resource: { buffer: this.params } },
+      ] });
+    }
+    this.allocatedBytes = this.arena.size + this.params.size;
+  }
+
+  encode(encoder: GPUCommandEncoder): void {
+    const pass = encoder.beginComputePass({ label: "Evolve simulation octree owner pages" });
+    pass.setBindGroup(0, this.group); pass.setPipeline(this.begin); pass.dispatchWorkgroups(1);
+    pass.setPipeline(this.retire); pass.dispatchWorkgroupsIndirect(this.worklist, FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES);
+    pass.setPipeline(this.activate); pass.dispatchWorkgroupsIndirect(this.worklist, FLUID_BRICK_ACTIVE_DISPATCH_OFFSET_BYTES);
+    pass.end();
+  }
+
+  /** One-time, GPU-only coarse owner publication for the analytic cold tile set. */
+  encodeAnalyticBootstrap(encoder: GPUCommandEncoder): void {
+    if (!this.analyticBootstrap || !this.analyticGroup || !this.activateAnalytic) {
+      throw new Error("Analytic owner-page bootstrap was not configured");
+    }
+    const pass = encoder.beginComputePass({ label: "Seed analytic octree owner pages" });
+    pass.setBindGroup(0, this.analyticGroup);
+    pass.setPipeline(this.begin); pass.dispatchWorkgroups(1);
+    if (this.analyticBootstrap.activeTileCount > 0) {
+      pass.setPipeline(this.activateAnalytic);
+      pass.dispatchWorkgroups(...tiledWorkgroups(this.analyticBootstrap.activeTileCount));
+    }
+    pass.end();
+  }
+
+  destroy(): void { this.arena.destroy(); this.params.destroy(); }
 }
 
 /** Self-contained GPU allocation skeleton. It is not bound to projection yet. */
@@ -766,11 +1196,6 @@ export class GPUOctreeOwnerPageArena {
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
     ] });
     const lifecycleModule = device.createShaderModule({ label: "Octree owner page lifecycle", code: octreeOwnerPageLifecycleShader });
-    void lifecycleModule.getCompilationInfo().then((report) => {
-      for (const message of report.messages) if (message.type === "error") {
-        console.error(`Octree owner page WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-      }
-    }).catch(() => { /* Device loss belongs to the owning renderer. */ });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
     this.beginPipeline = device.createComputePipeline({ label: "Begin octree owner page lifecycle", layout: pipelineLayout, compute: { module: lifecycleModule, entryPoint: "beginLifecycle" } });
     this.activatePipeline = device.createComputePipeline({ label: "Activate octree owner pages", layout: pipelineLayout, compute: { module: lifecycleModule, entryPoint: "activatePages" } });
@@ -812,7 +1237,7 @@ export class GPUOctreeOwnerPageArena {
 
   async readState(): Promise<{ stats: OctreeOwnerPageLifecycleStats; pageTable: Uint32Array<ArrayBuffer> }> {
     if (this.destroyed) throw new Error("Octree owner page arena has been destroyed");
-    const words = OCTREE_OWNER_ARENA_CONTROL_WORDS + this.plan.logicalBrickCount;
+    const words = OCTREE_OWNER_ARENA_CONTROL_WORDS + this.plan.pageHashCapacity * 2;
     const readback = this.device.createBuffer({ label: "Octree owner page state readback", size: words * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read octree owner page state" });
     encoder.copyBufferToBuffer(this.arena, 0, readback, 0, words * 4);
@@ -820,13 +1245,20 @@ export class GPUOctreeOwnerPageArena {
     try {
       await readback.mapAsync(GPUMapMode.READ);
       const data = new Uint32Array(readback.getMappedRange().slice(0));
+      const pageTable = new Uint32Array(this.plan.logicalBrickCount);
+      for (let slot = 0; slot < this.plan.pageHashCapacity; slot += 1) {
+        const key = data[this.plan.pageTableOffsetWords + slot];
+        if (key !== OCTREE_OWNER_PAGE_HASH_EMPTY && key !== OCTREE_OWNER_PAGE_HASH_TOMBSTONE && key <= this.plan.logicalBrickCount) {
+          pageTable[key - 1] = data[this.plan.pageTableValueOffsetWords + slot];
+        }
+      }
       return {
         stats: {
           free: data[0], resident: data[1], peakResident: data[2], overflow: data[3],
           required: data[4], activated: data[5], retired: data[6], generation: data[7], capacity: this.plan.capacity,
           ownerMismatches: data[8], comparedOwners: data[9],
         },
-        pageTable: data.slice(this.plan.pageTableOffsetWords, this.plan.pageTableOffsetWords + this.plan.logicalBrickCount),
+        pageTable,
       };
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
@@ -917,16 +1349,43 @@ fn invalidateEntry() {
   atomicOr(&arena[10], INVALID_ENTRY);
 }
 
+fn pageValueWord(logical: u32, insert: bool) -> u32 {
+  let hashCapacity = (params.arenaOffsets.y - params.arenaOffsets.x) / 2u;
+  let key = logical + 1u;
+  var slot = (logical * 0x9e3779b1u) % hashCapacity;
+  var firstTombstone = 0xffffffffu;
+  for (var probe = 0u; probe < hashCapacity; probe += 1u) {
+    let observed = atomicLoad(&arena[params.arenaOffsets.x + slot]);
+    if (observed == key) { return params.arenaOffsets.x + hashCapacity + slot; }
+    if (observed == 0xffffffffu && firstTombstone == 0xffffffffu) { firstTombstone = slot; }
+    if (observed == 0u) {
+      if (!insert) { return 0xffffffffu; }
+      let targetSlot = select(firstTombstone, slot, firstTombstone == 0xffffffffu);
+      atomicStore(&arena[params.arenaOffsets.x + targetSlot], key);
+      return params.arenaOffsets.x + hashCapacity + targetSlot;
+    }
+    slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
+  }
+  if (insert && firstTombstone != 0xffffffffu) {
+    atomicStore(&arena[params.arenaOffsets.x + firstTombstone], key);
+    return params.arenaOffsets.x + hashCapacity + firstTombstone;
+  }
+  return 0xffffffffu;
+}
+
 // One invocation owns allocation order. The compact source preserves list
 // order, reverse-initialized free storage therefore yields slots 0, 1, ... and
 // retired slots are unavailable until all activations in this publication end.
 fn activate(logical: u32) {
   if (logical >= params.countsOffsets.x) { invalidateEntry(); return; }
-  let pageWord = params.arenaOffsets.x + logical;
+  let pageWord = pageValueWord(logical, true);
+  if (pageWord == 0xffffffffu) { atomicAdd(&arena[3], 1u); atomicOr(&arena[10], OVERFLOW); return; }
   if (atomicLoad(&arena[pageWord]) != 0u) { return; }
   atomicAdd(&arena[4], 1u);
   let available = atomicLoad(&arena[0]);
   if (available == 0u) {
+    let hashCapacity = (params.arenaOffsets.y - params.arenaOffsets.x) / 2u;
+    atomicStore(&arena[params.arenaOffsets.x + (pageWord - params.arenaOffsets.x - hashCapacity)], 0xffffffffu);
     atomicAdd(&arena[3], 1u);
     atomicOr(&arena[10], OVERFLOW);
     return;
@@ -934,6 +1393,8 @@ fn activate(logical: u32) {
   let freeWord = params.arenaOffsets.y + available - 1u;
   let slot = atomicLoad(&arena[freeWord]);
   if (slot >= params.countsOffsets.y) {
+    let hashCapacity = (params.arenaOffsets.y - params.arenaOffsets.x) / 2u;
+    atomicStore(&arena[params.arenaOffsets.x + (pageWord - params.arenaOffsets.x - hashCapacity)], 0xffffffffu);
     atomicAdd(&arena[3], 1u);
     atomicOr(&arena[10], OVERFLOW | INVALID_ENTRY);
     return;
@@ -952,13 +1413,16 @@ fn activate(logical: u32) {
 fn retire(logical: u32, item: u32) {
   if (item < arrayLength(&retiredSlots)) { retiredSlots[item] = 0xffffffffu; }
   if (logical >= params.countsOffsets.x) { invalidateEntry(); return; }
-  let pageWord = params.arenaOffsets.x + logical;
+  let pageWord = pageValueWord(logical, false);
+  if (pageWord == 0xffffffffu) { return; }
   let encoded = atomicLoad(&arena[pageWord]);
   if (encoded == 0u) { return; }
   if (encoded > params.countsOffsets.y) { invalidateEntry(); return; }
   let freeCount = atomicLoad(&arena[0]);
   if (freeCount >= params.countsOffsets.y) { invalidateEntry(); return; }
   atomicStore(&arena[pageWord], 0u);
+  let hashCapacity = (params.arenaOffsets.y - params.arenaOffsets.x) / 2u;
+  atomicStore(&arena[params.arenaOffsets.x + (pageWord - params.arenaOffsets.x - hashCapacity)], 0xffffffffu);
   if (item < arrayLength(&retiredSlots)) { retiredSlots[item] = encoded - 1u; }
   atomicStore(&arena[params.arenaOffsets.y + freeCount], encoded - 1u);
   atomicStore(&arena[0], freeCount + 1u);
@@ -1066,11 +1530,6 @@ export class WebGPUSvoOwnerPageAllocator {
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
     const shaderModule = device.createShaderModule({ label: "SVO renderer owner-page allocator", code: svoRendererOwnerPageAllocatorShader });
-    void shaderModule.getCompilationInfo().then((report) => {
-      for (const message of report.messages) if (message.type === "error") {
-        console.error(`SVO renderer owner-page WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-      }
-    }).catch(() => { /* Device loss belongs to the owning renderer. */ });
     this.pipeline = device.createComputePipeline({
       label: "Apply SVO renderer owner-page publication",
       layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),

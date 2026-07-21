@@ -23,6 +23,8 @@ import type { GPUStatus } from "@/lib/webgpu-renderer";
 import { getEnvironmentPreset } from "@/lib/environments";
 import { getScenePreset } from "@/lib/scenes";
 import { useSceneStore } from "@/lib/stores/scene-store";
+import { requestManualGPUStart } from "@/lib/gpu-startup";
+import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
 
 function GPUInitializationPanel({ status }: { status: Extract<GPUStatus, { state: "initializing" }> }) {
   const [now, setNow] = useState(() => performance.now());
@@ -52,6 +54,7 @@ function GPUInitializationPanel({ status }: { status: Extract<GPUStatus, { state
 }
 
 export function FluidLab() {
+  const safeBringup = useSafeBrowserGPUBringup() === true;
   const runState = useRuntimeStore((state) => state.runState);
   const simulationTime = useRuntimeStore((state) => state.simulationTime);
   const methodId = useMethodStore((state) => state.methodId);
@@ -96,7 +99,7 @@ export function FluidLab() {
         <MethodPanel />
       </aside>
 
-      <section className="viewport-shell" aria-busy={gpuStatus.state === "initializing"} data-gpu-transition={gpuStatus.state === "initializing" ? gpuStatus.kind ?? "startup" : "ready"}>
+      <section className="viewport-shell" aria-busy={gpuStatus.state === "initializing"} data-gpu-transition={gpuStatus.state === "initializing" ? gpuStatus.kind ?? "startup" : gpuStatus.state}>
         <WebGPUViewport />
         <div className="viewport-topline">
           <div className="topline-left">
@@ -132,6 +135,16 @@ export function FluidLab() {
           <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Live performance profiler">PERF</button>
         </nav>
         {gpuStatus.state === "initializing" && <GPUInitializationPanel status={gpuStatus} />}
+        {gpuStatus.state === "manual" && <div className="gpu-fallback gpu-manual-start" role="status">
+          <strong>WebGPU startup paused for safety</strong>
+          <p>{safeBringup
+            ? "Bounded bring-up permits the authored 384-column dam break, one STEP, then an explicit STOP GPU. Close every Dawn process first."
+            : "The dam-break GPU workload will not start until you explicitly allow it."}</p>
+          <button type="button" onClick={requestManualGPUStart}>START WEBGPU</button>
+          <small>{safeBringup
+            ? "This browser can exclude other Fluid Lab tabs, but cannot observe Dawn's local filesystem lease."
+            : <>Use <code>gpu=off</code> for UI-only inspection or <code>gpu=on</code> to restore automatic startup.</>}</small>
+        </div>}
         {gpuStatus.state === "unavailable" && <div className="gpu-fallback"><strong>3D renderer unavailable</strong><p>{gpuStatus.label}</p><small>The scene editor, serialization, and CPU validation remain available.</small></div>}
       </section>
 

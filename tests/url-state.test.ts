@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getMethod, resolveMethodValues } from "../lib/methods";
 import { getScenePreset } from "../lib/scenes";
 import { useUIStore } from "../lib/stores/ui-store";
 import { parseQueryState, serializeQueryState } from "../lib/url-state";
@@ -75,6 +76,49 @@ test("query state accepts and preserves a Y solver-grid slice", () => {
   assert.equal(new URLSearchParams(serialized).get("grid"), "y");
 });
 
+test("query state preserves a full-volume paper-technique diagnostic", () => {
+  const parsed = parseQueryState("?grid=volume&gridSlice=0.42&gridMode=delaunay-tetrahedra");
+  assert.equal(parsed.ui.gridOverlayAxis, "volume");
+  assert.equal(parsed.ui.gridOverlaySlice, 0.42);
+  assert.equal(parsed.ui.gridOverlayMode, "delaunay-tetrahedra");
+
+  const serialized = serializeQueryState("", {
+    presetId: parsed.presetId,
+    scene: parsed.scene,
+  }, {
+    methodId: parsed.methodId,
+    quality: parsed.quality,
+    overrides: parsed.overrides,
+  }, parsed.ui);
+  const query = new URLSearchParams(serialized);
+  assert.equal(query.get("grid"), "volume");
+  assert.equal(query.get("gridSlice"), "0.42");
+  assert.equal(query.get("gridMode"), "delaunay-tetrahedra");
+  assert.equal(parseQueryState("?grid=volume&gridSlice=0&gridMode=power-cells").ui.gridOverlaySlice, 0.05,
+    "full-volume links retain the shader's minimum visible opacity");
+});
+
+test("query state preserves compact hierarchy and paper-technique diagnostic modes", () => {
+  for (const mode of [
+    "resolution", "surface", "faces",
+    "power-cells", "power-faces", "delaunay-tetrahedra", "transition-band", "power-operator",
+    "octree-lifecycle", "fine-band-lifecycle", "operator-diagonal", "operator-rhs",
+    "operator-reciprocity", "operator-open-fraction", "tetra-validity",
+  ] as const) {
+    const parsed = parseQueryState(`?grid=z&gridMode=${mode}`);
+    assert.equal(parsed.ui.gridOverlayMode, mode);
+    const serialized = serializeQueryState("", {
+      presetId: parsed.presetId,
+      scene: parsed.scene,
+    }, {
+      methodId: parsed.methodId,
+      quality: parsed.quality,
+      overrides: parsed.overrides,
+    }, parsed.ui);
+    assert.equal(new URLSearchParams(serialized).get("gridMode"), mode);
+  }
+});
+
 test("query state round-trips independently configured CPU and GPU timesteps", () => {
   const scene = getScenePreset("water-box-dam-break").create();
   scene.numerics.fixedDt_s = 0.006;
@@ -106,6 +150,12 @@ test("invalid external query values fall back to validated defaults", () => {
   assert.equal(parsed.scene.fluid.gravity_m_s2.y, defaultScene.fluid.gravity_m_s2.y);
   assert.equal(parsed.ui.diagnosticsOpen, false);
   assert.equal(parsed.ui.rightPanel, null);
+  const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality, parsed.overrides[parsed.methodId] ?? {});
+  assert.equal(values.surfaceColumns, 384);
+  assert.equal(values.faceVelocityTransport, "on");
+  assert.equal(values.globalFineLevelSetFactor, "4");
+  assert.equal(values.powerDiagramProjection, "authoritative");
+  assert.equal(values.leafSolver, "auto");
 });
 
 test("background is fixed by the scene and legacy environment overrides are removed", () => {
@@ -139,7 +189,7 @@ test("legacy presentation choices are removed from canonical links", () => {
   assert.equal(params.has("fps"), false);
 });
 
-test("production renderer mode omits the hybrid SVO default and serializes explicit raster", () => {
+test("production renderer mode omits the raster default and serializes explicit SVO", () => {
   const parsed = parseQueryState("?render=svo");
   assert.equal(parsed.ui.svoRenderMode, "svo");
 
@@ -149,15 +199,15 @@ test("production renderer mode omits the hybrid SVO default and serializes expli
     quality: parsed.quality,
     overrides: parsed.overrides
   }, parsed.ui);
-  assert.equal(new URLSearchParams(sparse).has("render"), false);
+  assert.equal(new URLSearchParams(sparse).get("render"), "svo");
 
   const raster = serializeQueryState("?render=svo", { presetId: parsed.presetId, scene }, {
     methodId: parsed.methodId,
     quality: parsed.quality,
     overrides: parsed.overrides
   }, { ...parsed.ui, svoRenderMode: "raster" });
-  assert.equal(new URLSearchParams(raster).get("render"), "raster");
-  assert.equal(parseQueryState("?render=invalid").ui.svoRenderMode, "svo");
+  assert.equal(new URLSearchParams(raster).has("render"), false);
+  assert.equal(parseQueryState("?render=invalid").ui.svoRenderMode, "raster");
 });
 
 test("viewport utility panels round-trip through one mutually exclusive query state", () => {

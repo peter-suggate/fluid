@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { defaultCamera, type CameraState } from "../model";
 import { DEFAULT_SVO_RENDER_MODE, type SvoRenderMode } from "../svo-render-mode";
+import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoCostOverlayMode } from "../svo-render-diagnostics";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 import type { VoxelRenderMode } from "../webgpu-voxel-debug";
 
@@ -22,6 +23,10 @@ interface UIStore {
   voxelRenderMode: VoxelRenderMode;
   /** Production scene presentation; independent of sparse inspection overlays. */
   svoRenderMode: SvoRenderMode;
+  svoCostOverlay: SvoCostOverlayMode;
+  svoMaximumTraversalDepth: number;
+  svoMaximumNodeVisits: number;
+  svoOverlayOpacity: number;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   selectBody: (bodyId?: string) => void;
   setSceneModalOpen: (open: boolean) => void;
@@ -32,6 +37,10 @@ interface UIStore {
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setVoxelRenderMode: (mode: VoxelRenderMode) => void;
   setSvoRenderMode: (mode: SvoRenderMode) => void;
+  setSvoCostOverlay: (mode: SvoCostOverlayMode) => void;
+  setSvoMaximumTraversalDepth: (depth: number) => void;
+  setSvoMaximumNodeVisits: (visits: number) => void;
+  setSvoOverlayOpacity: (opacity: number) => void;
 }
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -45,6 +54,10 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlayMode: "structure",
   voxelRenderMode: "smooth",
   svoRenderMode: DEFAULT_SVO_RENDER_MODE,
+  svoCostOverlay: DEFAULT_SVO_RENDER_DIAGNOSTICS.overlay,
+  svoMaximumTraversalDepth: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumTraversalDepth,
+  svoMaximumNodeVisits: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumNodeVisits,
+  svoOverlayOpacity: DEFAULT_SVO_RENDER_DIAGNOSTICS.overlayOpacity,
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   selectBody: (selectedBodyId) => set({ selectedBodyId }),
   setSceneModalOpen: (sceneModalOpen) => set({ sceneModalOpen }),
@@ -57,5 +70,30 @@ export const useUIStore = create<UIStore>((set) => ({
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
   setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode }),
-  setSvoRenderMode: (svoRenderMode) => set({ svoRenderMode })
+  setSvoRenderMode: (svoRenderMode) => set({ svoRenderMode }),
+  setSvoCostOverlay: (svoCostOverlay) => set({ svoCostOverlay }),
+  setSvoMaximumTraversalDepth: (svoMaximumTraversalDepth) => set((state) => ({
+    svoMaximumTraversalDepth: normalizeSvoRenderDiagnostics({
+      overlay: state.svoCostOverlay,
+      maximumTraversalDepth: svoMaximumTraversalDepth,
+      maximumNodeVisits: state.svoMaximumNodeVisits,
+      overlayOpacity: state.svoOverlayOpacity,
+    }).maximumTraversalDepth,
+  })),
+  setSvoMaximumNodeVisits: (svoMaximumNodeVisits) => set((state) => ({
+    svoMaximumNodeVisits: normalizeSvoRenderDiagnostics({
+      overlay: state.svoCostOverlay,
+      maximumTraversalDepth: state.svoMaximumTraversalDepth,
+      maximumNodeVisits: svoMaximumNodeVisits,
+      overlayOpacity: state.svoOverlayOpacity,
+    }).maximumNodeVisits,
+  })),
+  setSvoOverlayOpacity: (svoOverlayOpacity) => set((state) => ({
+    svoOverlayOpacity: normalizeSvoRenderDiagnostics({
+      overlay: state.svoCostOverlay,
+      maximumTraversalDepth: state.svoMaximumTraversalDepth,
+      maximumNodeVisits: state.svoMaximumNodeVisits,
+      overlayOpacity: svoOverlayOpacity,
+    }).overlayOpacity,
+  })),
 }));

@@ -103,8 +103,8 @@ export function Segmented<T extends string>({ value, options, onChange, ariaLabe
   );
 }
 
-export function MetricCard({ label, value, unit, tone = "neutral" }: { label: string; value: string; unit?: string; tone?: "neutral" | "good" | "warn" }) {
-  return <div className={`metric-card tone-${tone}`}><span>{label}</span><strong>{value}</strong>{unit && <small>{unit}</small>}</div>;
+export function MetricCard({ label, value, unit, tone = "neutral", testId }: { label: string; value: string; unit?: string; tone?: "neutral" | "good" | "warn"; testId?: string }) {
+  return <div className={`metric-card tone-${tone}`} data-testid={testId}><span>{label}</span><strong>{value}</strong>{unit && <small>{unit}</small>}</div>;
 }
 
 export function Sparkline({ samples }: { samples: MetricSample[] }) {

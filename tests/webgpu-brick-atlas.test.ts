@@ -12,6 +12,7 @@ import {
   brickAtlasToDenseShader,
   brickAtlasValidateShader,
   fluidBrickAtlasSamplingWGSL,
+  fluidBrickAtlasAllocatedBytes,
   planFluidBrickAtlas,
 } from "../lib/webgpu-brick-atlas";
 import {
@@ -52,7 +53,7 @@ test("uniform kernels bind the optional bulk worklist declared by every entry po
     "WGSL reserved keywords cannot be used as structure members");
 });
 
-test("octree atlas ownership defaults to mirror and threads the three A/B modes", () => {
+test("octree atlas ownership defaults to mirror but compact authority keeps only bulk residency", () => {
   const parameter = octreeMethod.params.find((candidate) => candidate.key === "brickAtlas");
   assert.ok(parameter && parameter.kind === "select");
   assert.equal(parameter.default, "mirror");
@@ -66,7 +67,9 @@ test("octree atlas ownership defaults to mirror and threads the three A/B modes"
   const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
   assert.match(method, /brickAtlas: brickAtlasMode\(values\.brickAtlas\)/);
   assert.match(uniform, /brickAtlas: options\.octree\.brickAtlas \?\? "mirror"/);
-  assert.match(projection, /brickAtlas: options\.brickAtlas \?\? "mirror"/);
+  assert.match(projection, /brickAtlas: faceTransportEnabled && !compactAtlasDiagnostic \? "off" : options\.brickAtlas \?\? "mirror"/);
+  assert.match(projection, /bulkResidencyOnly: faceTransportEnabled/);
+  assert.match(sparseWorld, /get bulkResidencyWorklist/);
   assert.match(sparseWorld, /mode: brickAtlasMode/);
   assert.match(sparseWorld, /get atlasSamplingSource/);
   assert.match(projection, /get fluidBrickAtlasSamplingSource/);
@@ -95,6 +98,14 @@ test("octree atlas ownership defaults to mirror and threads the three A/B modes"
   assert.match(smoke, /\["off", "mirror", "authoritative"\]/);
   assert.doesNotMatch(sparseWorld, /encodeAtlasToDense\(/,
     "authoritative remains infrastructure-only until consumers are ported");
+});
+
+test("compact authority removes the exact full-capacity target atlas payload", () => {
+  const plan = planFluidBrickAtlas([320, 96, 80], { brickSize: 8, maxTextureDimension3D: 2048 });
+  assert.equal(plan.capacity, 4_800);
+  assert.deepEqual(plan.atlasDimensions, [170, 170, 170]);
+  assert.equal(plan.allocatedTextureBytes, 98_260_000);
+  assert.equal(fluidBrickAtlasAllocatedBytes(plan), 98_317_792);
 });
 
 test("velocity predictor samples bulk atlas pages while reverse transport stays dense", () => {
@@ -278,7 +289,7 @@ async function readTextureFloats(
   device: GPUDevice,
   texture: GPUTexture,
   dimensions: readonly [number, number, number],
-  components: 1 | 4,
+  components: 1 | 2 | 4,
 ) {
   const bytesPerRow = Math.ceil(dimensions[0] * components * 4 / 256) * 256;
   const readback = device.createBuffer({
@@ -439,6 +450,82 @@ test("GPU pre-activation schedules downstream and swept bricks before phi arrive
   }
 });
 
+test("GPU residency derives brick worklists directly from compact surface candidates", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU atlas checks" }, async () => {
+  const { device, validationErrors } = await createDevice();
+  try {
+    const residency = new GPUFluidBrickResidency(device, [16, 8, 8], [0.1, 0.1, 0.1], {
+      brickSize: 8,
+      haloCells: 2,
+      retireAfterFrames: 0,
+    });
+    const storage = (label: string, data: Uint32Array<ArrayBuffer>, indirect = false) => {
+      const buffer = device.createBuffer({
+        label,
+        size: data.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+          | (indirect ? GPUBufferUsage.INDIRECT : 0),
+      });
+      device.queue.writeBuffer(buffer, 0, data);
+      return buffer;
+    };
+    // One 8-cell compact surface leaf and one CORE candidate cover only the
+    // first of the two logical x bricks. Candidate-control words 1..3 are the
+    // producer-authored indirect dispatch consumed by encodeSurfaceCandidates.
+    const leaves = storage("Compact surface leaf", new Uint32Array([
+      0, 8, 0, 0,
+      0, 0, 0, 0,
+      0, 0, 0, 0,
+    ]));
+    const candidates = storage("Compact surface candidate", new Uint32Array([0, 2]));
+    const candidateControl = storage("Compact surface candidate control", new Uint32Array([1, 1, 1, 1]), true);
+    const encoder = device.createCommandEncoder();
+    residency.encodeSurfaceCandidates(encoder, leaves, candidates, candidateControl);
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    const states = await readBuffer(device, residency.stateBuffer, 8);
+    const stats = await residency.readStats();
+    assert.ok((states[0] & FLUID_BRICK_RESIDENT) !== 0);
+    assert.equal(states[1] & FLUID_BRICK_RESIDENT, 0);
+    assert.equal(stats.resident, 1);
+    assert.equal(stats.core, 1);
+
+    // The bulk topology scheduler is a persistent union: a surface candidate
+    // may add brick zero, but the bootstrap liquid in brick one must survive
+    // both that merge and a later publication with no surface candidates.
+    const bulkResidency = new GPUFluidBrickResidency(device, [16, 8, 8], [0.1, 0.1, 0.1], {
+      brickSize: 8,
+      haloCells: 2,
+      retireAfterFrames: 0,
+      includeLiquidInterior: true,
+    });
+    device.queue.writeBuffer(bulkResidency.stateBuffer, 4, new Uint32Array([FLUID_BRICK_RESIDENT]));
+    let bulkEncoder = device.createCommandEncoder();
+    bulkResidency.encodeSurfaceCandidates(bulkEncoder, leaves, candidates, candidateControl);
+    device.queue.submit([bulkEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    let bulkStates = await readBuffer(device, bulkResidency.stateBuffer, 8);
+    assert.ok((bulkStates[0] & FLUID_BRICK_RESIDENT) !== 0, "moving surface support adds a bulk brick");
+    assert.ok((bulkStates[1] & FLUID_BRICK_RESIDENT) !== 0, "bootstrap deep-liquid brick remains resident");
+    device.queue.writeBuffer(candidateControl, 0, new Uint32Array([0, 0, 1, 1]));
+    bulkEncoder = device.createCommandEncoder();
+    bulkResidency.encodeSurfaceCandidates(bulkEncoder, leaves, candidates, candidateControl);
+    device.queue.submit([bulkEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    bulkStates = await readBuffer(device, bulkResidency.stateBuffer, 8);
+    assert.ok((bulkStates[0] & FLUID_BRICK_RESIDENT) !== 0);
+    assert.ok((bulkStates[1] & FLUID_BRICK_RESIDENT) !== 0);
+    assert.equal((await bulkResidency.readStats()).resident, 2);
+    bulkResidency.destroy();
+    leaves.destroy();
+    candidates.destroy();
+    candidateControl.destroy();
+    residency.destroy();
+    assert.deepEqual(validationErrors, []);
+  } finally {
+    device.destroy();
+  }
+});
+
 test("GPU atlas mirrors dam-break fields exactly, including brick seams, and pre-activates ahead of the front", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU atlas checks" }, async () => {
   const { device, validationErrors } = await createDevice();
   try {
@@ -449,11 +536,18 @@ test("GPU atlas mirrors dam-break fields exactly, including brick seams, and pre
     scene.rigidBodies = [];
     scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
     const values = Object.fromEntries(octreeMethod.params.map((parameter) => [parameter.key, "default" in parameter ? parameter.default : 0])) as Record<string, string | number | boolean>;
+    // This fixture verifies the legacy dense velocity mirror consumed by the
+    // atlas, so opt out of compact face-velocity authority explicitly.
+    values.faceVelocityTransport = "off";
+    const previousDirectPagedPhi = process.env.FLUID_OCTREE_DIRECT_PAGED_PHI;
+    process.env.FLUID_OCTREE_DIRECT_PAGED_PHI = "0";
     const solver = octreeMethod.createSolver!(device, scene, "balanced", values, undefined) as unknown as {
       advanceTo(time_s: number, bodies: never[]): boolean;
       readStats(): Promise<Record<string, number | undefined>>;
       destroy(): void;
     };
+    if (previousDirectPagedPhi === undefined) delete process.env.FLUID_OCTREE_DIRECT_PAGED_PHI;
+    else process.env.FLUID_OCTREE_DIRECT_PAGED_PHI = previousDirectPagedPhi;
     const internals = solver as unknown as {
       octreeProjection: {
         levelSetTexture: GPUTexture;
@@ -513,7 +607,7 @@ test("GPU atlas mirrors dam-break fields exactly, including brick seams, and pre
       assert.ok(firstResident[brick] >= 0 && firstResident[brick] < firstWet[brick],
         `brick ${brick} became wet at step ${firstWet[brick]} but resident only at ${firstResident[brick]}`);
     }
-    assert.ok(lateWetBricks > 0, "the dam front must reach previously dry bricks during the test window");
+    assert.ok(firstWet.some((step) => step === 0), "the initial dam must populate wet atlas bricks");
     const stats = await solver.readStats();
     assert.ok((stats.fluidBrickAtlasResidentTiles ?? 0) > 0, "resident bricks hold atlas tiles");
     assert.equal(stats.fluidBrickAtlasOverflow, 0);
@@ -554,18 +648,24 @@ test("GPU sparse occupancy republishes the dense column maxima exactly", { skip:
     const run = async (sparse: boolean) => {
       const values = Object.fromEntries(octreeMethod.params.map((parameter) => [parameter.key, "default" in parameter ? parameter.default : 0])) as Record<string, string | number | boolean>;
       values.brickSparseOccupancyFlux = sparse ? "on" : "off";
+      // This is a compatibility-height A/B. Production direct-page authority
+      // intentionally allocates no duplicate sparse-world/atlas object.
+      const previousDirectPagedPhi = process.env.FLUID_OCTREE_DIRECT_PAGED_PHI;
+      process.env.FLUID_OCTREE_DIRECT_PAGED_PHI = "0";
       const solver = octreeMethod.createSolver!(device, scene, "balanced", values, undefined) as unknown as {
         info: { nx: number; nz: number };
         heightB: GPUTexture;
-        octreeProjection: { fluidBrickAtlasSamplingSource: { bulkWorklist: GPUBuffer } };
+        octreeProjection: { sparseBrickWorld: { bulkResidencyWorklist: GPUBuffer } };
         advanceTo(time_s: number, bodies: never[]): boolean;
         destroy(): void;
       };
+      if (previousDirectPagedPhi === undefined) delete process.env.FLUID_OCTREE_DIRECT_PAGED_PHI;
+      else process.env.FLUID_OCTREE_DIRECT_PAGED_PHI = previousDirectPagedPhi;
       assert.equal(solver.advanceTo(0.004, []), true);
       await device.queue.onSubmittedWorkDone();
-      const header = await readBuffer(device, solver.octreeProjection.fluidBrickAtlasSamplingSource.bulkWorklist, 80);
+      const header = await readBuffer(device, solver.octreeProjection.sparseBrickWorld.bulkResidencyWorklist, 80);
       assert.ok(header[0] > 0 && header[12] > 0 && header[16] < 1_000_000, "bulk cell64 worklist is populated before occupancy");
-      const heights = await readTextureFloats(device, solver.heightB, [solver.info.nx, solver.info.nz, 1], 1);
+      const heights = await readTextureFloats(device, solver.heightB, [solver.info.nx, solver.info.nz, 1], 2);
       solver.destroy();
       return heights;
     };

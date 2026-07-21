@@ -127,6 +127,39 @@ Effort: ~2–4 days including harness time. Watch items: wave-amplitude parity
 (the split changes the surface cell's force discretization at the η kink —
 this is where the ghost-fluid machinery already lives) and inflow columns.
 
+### A5. Implementation finding (2026-07-19)
+
+The default-off octree A/B is implemented, but Stage A has **not** cleared its
+gates. Three formulations were tested on Dawn/Metal:
+
+- A local connected-column `η(x,z)` force made a settled tank exactly still,
+  but the 2 s ocean far-half disturbance rose from the absolute-pressure
+  baseline's 0.408 cells to 1.457 cells.
+- Restoring analytic `p_h` through octree leaf pressure reduced neither issue:
+  vertically nonconforming coarse/fine neighbours have pressure centres at
+  different heights, so a leaf-constant hydrostatic field creates horizontal
+  gradients. Settled liquid speed remained about 1.13 m/s and ocean
+  disturbance was 1.381 cells.
+- The retained fixed-rest-surface variant keeps `p_h` out of the leaf basis.
+  It cancels only vertical rest gravity and supplies the perturbation Dirichlet
+  value `p'=-p_h` at the actual level-set crossing. After 100 settled-tank
+  steps it gives 0.00143 m/s maximum liquid speed, 0.00465 1/s RMS divergence,
+  zero volume drift, and no validation errors. The 2 s ocean remains stable
+  and connected, but its 1.345-cell far-half disturbance still fails the 5%
+  parity gate; the pressure budget also remains at 32 passes rather than its
+  floor.
+
+This falsifies A1's load-bearing claim for the current discrete octree: an
+arbitrary continuous reference is not merely a change of variables when its
+gradient is applied on fine faces but `p'` lives in the nonconforming
+leaf-constant/affine space. The flag therefore remains off by default and
+fails closed for dam-break initial conditions, inflows, and pressure-coupled
+bodies.
+Before Stage B, either enrich the octree pressure space with an explicit
+hydrostatic mode and demonstrate operator parity, or revise the seiche
+reference against an independent analytic/referee solution rather than the
+numerically damped absolute-pressure baseline.
+
 ---
 
 ## Part B — Two-tier velocity (leaf-face DOFs below the band)

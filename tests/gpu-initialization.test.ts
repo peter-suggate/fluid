@@ -62,7 +62,13 @@ test("octree initialization has no hand-maintained pipeline totals and fences wa
   assert.match(fluidLab, /Applying simulation settings/);
   assert.doesNotMatch(fluidLab, /continue using the controls/, "the UI must not promise responsiveness while the graphics driver owns the main process");
   const transaction = renderer.slice(renderer.indexOf("private beginGPUFluidInitialization"), renderer.indexOf("private currentGPUFluid"));
-  assert.doesNotMatch(transaction, /this\.gpuFluid=undefined/);
-  assert.match(transaction, /if\(previous&&previous!==solver\)this\.retireGPUFluid\(previous\)/);
+  assert.match(transaction, /const drainPreviousForReset=this\.timelineResetPending&&Boolean\(previous\)/,
+    "only an explicit timeline reset may detach the active solver before replacement");
+  assert.match(transaction, /if\(!drainPreviousForReset\|\|!previous\)return;[\s\S]*await device\.queue\.onSubmittedWorkDone\(\)/,
+    "reset replacement must fence previously submitted GPU work before detaching resources");
+  assert.match(transaction, /if\(this\.gpuFluid===previous\)\{[\s\S]*this\.gpuFluid=undefined;[\s\S]*previous\.destroy\(\);previousDestroyedForReset=true/,
+    "the reset-only path must detach presentation bindings and destroy the drained solver before allocating its replacement");
+  assert.match(transaction, /if\(previous&&previous!==solver&&!previousDestroyedForReset\)this\.retireGPUFluid\(previous\)/,
+    "ordinary warm replacement must retain and retire the previous solver transactionally");
   assert.match(transaction, /method\.createSolverAsync\([^\n]+abort\.signal\)/);
 });

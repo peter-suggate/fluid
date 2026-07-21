@@ -877,11 +877,6 @@ export class WebGPUSparseSurfaceBand {
     ] });
     const residencyModule = device.createShaderModule({ label: "Sparse surface residency", code: sparseSurfaceResidencyShader });
     const fieldModule = device.createShaderModule({ label: "Sparse surface field", code: sparseSurfaceFieldShader });
-    void Promise.all([residencyModule.getCompilationInfo(), fieldModule.getCompilationInfo()]).then((reports) => {
-      for (const report of reports) for (const message of report.messages) if (message.type === "error") {
-        console.error(`Sparse surface WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-      }
-    }).catch(() => { /* device loss is handled by the owning renderer */ });
     const residencyPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [residencyLayout] });
     const fieldPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [fieldLayout] });
     const residency = (label: string, entryPoint: string) => device.createComputePipeline({ label, layout: residencyPipelineLayout, compute: { module: residencyModule, entryPoint } });
@@ -936,11 +931,6 @@ export class WebGPUSparseSurfaceBand {
         { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ] });
       const dynamicsModule = device.createShaderModule({ label: "Sparse surface dynamics", code: sparseSurfaceDynamicsShader });
-      void dynamicsModule.getCompilationInfo().then((report) => {
-        for (const message of report.messages) if (message.type === "error") {
-          console.error(`Sparse surface dynamics WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-        }
-      }).catch(() => { /* device loss is handled by the owning renderer */ });
       const dynamicsPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [dynamicsLayout] });
       const dynamics = (label: string, entryPoint: string) => device.createComputePipeline({ label, layout: dynamicsPipelineLayout, compute: { module: dynamicsModule, entryPoint } });
       this.dynamicsPipelines = {

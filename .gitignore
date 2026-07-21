@@ -12,3 +12,8 @@ coverage/
 !.env.example
 .build/
 native/.build/
+
+# Deterministic power-topology build artifacts. Keep the generator and its
+# source inputs tracked; supported npm entry points regenerate these files.
+lib/generated/octree-power-catalog.bin
+lib/generated/octree-power-catalog.ts

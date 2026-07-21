@@ -198,9 +198,6 @@ export class TallCellVelocityHierarchy {
     ] });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] });
     const module = device.createShaderModule({ label: "Tall-cell extrapolation hierarchy", code: tallCellExtrapolationShader });
-    void module.getCompilationInfo().then((info) => {
-      for (const message of info.messages) if (message.type === "error") console.error(`Extrapolation WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-    }).catch(() => { /* Device loss is handled by the renderer. */ });
     const pipeline = (entryPoint: string) => device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint } });
     this.downsampleBasePipeline = pipeline("downsampleExtrapolationBase");
     this.downsamplePipeline = pipeline("downsampleVelocity");

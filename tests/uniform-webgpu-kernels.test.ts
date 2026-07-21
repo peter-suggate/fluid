@@ -24,6 +24,10 @@ test("uniform velocity transport uses bounded MacCormack correction", () => {
   assert.match(legacyUniformComputeShader, /fn correctAdvection/);
   assert.match(legacyUniformComputeShader, /predicted\+0\.5\*\(original-reversed\)/);
   assert.match(legacyUniformComputeShader, /return select\(corrected,predicted,corrected<lower\|\|corrected>upper\)/);
+  const correction = legacyUniformComputeShader.slice(legacyUniformComputeShader.indexOf("fn correctAdvection"), legacyUniformComputeShader.indexOf("@compute @workgroup_size(8,8,1)\nfn buildHeight"));
+  assert.match(correction, /let predicted=textureLoad\(predictedVelocityIn,id,0\)\.xyz/);
+  assert.equal(correction.match(/textureLoad\(predictedVelocityIn,id,0\)/g)?.length, 1,
+    "MacCormack correction should load each vector field once rather than once per component");
 });
 
 test("uniform traces extrapolate liquid velocity into air and preserve wall faces", () => {
@@ -59,4 +63,34 @@ test("uniform capillary normals do not classify solid walls as air", () => {
   assert.match(legacyUniformComputeShader, /id\.y>=dims\(\)\.y&&params\.boundary\.w>0\.5/);
   assert.match(legacyUniformComputeShader, /return surfaceOccupancy\(clampCell\(id\)\)/);
   assert.match(legacyUniformComputeShader, /normalSurfaceOccupancy\(id\+vec3i\(1,0,0\)\)-normalSurfaceOccupancy\(id-vec3i\(1,0,0\)\)/);
+});
+
+test("uniform capillary force skips zero-gradient bulk cells and reuses centre curvature", () => {
+  const forces = legacyUniformComputeShader.slice(legacyUniformComputeShader.indexOf("fn applyVelocityForces"), legacyUniformComputeShader.indexOf("@compute @workgroup_size(4,4,4)\nfn buildTransport"));
+  assert.match(forces, /if\(sigmaOverRho>0\.0\)/);
+  assert.match(forces, /if\(dx!=0\.0\|\|dy!=0\.0\|\|dz!=0\.0\)/);
+  assert.match(forces, /let centreCurvature=curvatureAt\(id\)/);
+  assert.equal(forces.match(/curvatureAt\(id\)/g)?.length, 1,
+    "the expensive centre curvature stencil should be shared by all three faces");
+});
+
+test("shared force kernel subtracts only a fixed vertical rest-surface reference", () => {
+  const occupancy = legacyUniformComputeShader.slice(
+    legacyUniformComputeShader.indexOf("fn buildOccupancy"),
+    legacyUniformComputeShader.indexOf("fn buildSparseOccupancy"),
+  );
+  assert.match(occupancy, /if\(!hydrostaticSplit\(\)\)/);
+  assert.match(occupancy, /for\(var y:i32=d\.y-1;y>=0;y-=1\)/,
+    "the ordinary path should retain its cheap top-down early exit");
+  const forces = legacyUniformComputeShader.slice(
+    legacyUniformComputeShader.indexOf("fn applyVelocityForces"),
+    legacyUniformComputeShader.indexOf("@compute @workgroup_size(4,4,4)\nfn buildTransport"),
+  );
+  assert.match(legacyUniformComputeShader, /fn fixedHydrostaticPotentialAtY\(yCells:f32\)/);
+  assert.match(legacyUniformComputeShader, /params\.inflowTiming\.z-yCells/);
+  assert.match(forces, /if\(hydrostaticSplit\(\)\)\{v\.y\+=fixedHydrostaticAcceleration\(id\)\*dt;\}/);
+  assert.match(forces, /else\{v\.y\+=params\.cellGravity\.w\*dt;\}/,
+    "the disabled path must not eagerly evaluate the connected-column reference");
+  assert.doesNotMatch(forces, /v\.[xz]\+=.*fixedHydrostatic/,
+    "the fixed datum must not inject a local free-surface-slope acceleration");
 });

@@ -71,6 +71,8 @@ test("voxel debug ABI and shaders retain GPU material color and indirect instanc
   assert.match(voxelDebugComputeShader, /compactSettings\.capacity/);
   assert.match(voxelDebugRenderShader, /let material = materials\[/);
   assert.match(voxelDebugRenderShader, /material\.baseColor\.a <= 0\.001\) \{ discard; \}/);
+  assert.match(voxelDebugRenderShader, /let separatedCorner = mix\(vec3f\(0\.035\), vec3f\(0\.965\), corner\);/,
+    "raw cubes leave a visible gap instead of hiding the internal grid behind a continuous exterior shell");
   assert.match(voxelDebugRenderShader, /shadeUnifiedSurface\(closure, lighting\)/);
   const rawFragment = voxelDebugRenderShader.slice(
     voxelDebugRenderShader.indexOf("fn rawFragment"),
@@ -78,6 +80,13 @@ test("voxel debug ABI and shaders retain GPU material color and indirect instanc
   );
   assert.match(rawFragment, /let lambert = 0\.28 \+ 0\.72 \* max\(dot\(normal, normalize\(view\.lightDirection\.xyz\)\), 0\.0\);/,
     "raw occupancy keeps a bounded material-colored visibility floor instead of collapsing to NaN/black");
+  assert.match(rawFragment, /let pixelWidth = max\(fwidth\(facePosition\), vec2f\(1e-4\)\);/,
+    "raw occupancy keeps individual cell seams visible across projected cell sizes");
+  assert.match(rawFragment, /linearColor \*= mix\(1\.0, 0\.24, edge\);/,
+    "contiguous occupied cells remain structurally legible instead of reading as one smooth slab");
+  assert.match(rawFragment, /input\.materialId == 3u && edge < 0\.35/);
+  assert.match(rawFragment, /input\.voxelSeed \* 747796405u/,
+    "fluid faces use a distinct per-cell screen-door pattern so deeper voxels remain visible without alpha sorting");
   assert.doesNotMatch(rawFragment, /shadeMaterial\(/, "raw occupancy never enters the degenerate PBR half-vector path");
   assert.match(voxelDebugRenderShader, /input\.level & 1u/);
   assert.match(voxelDebugRenderShader, /array<vec3f, 24>/);
@@ -164,6 +173,44 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
     "Sparse voxel debug overlay instances (20)",
     "Sparse voxel debug view"
   ]);
+});
+
+test("page-native raw inspection can omit filled tank panes", async (t) => {
+  const previousBufferUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
+  const previousShaderStage = Object.getOwnPropertyDescriptor(globalThis, "GPUShaderStage");
+  Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true, value: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4, INDIRECT: 8 } });
+  Object.defineProperty(globalThis, "GPUShaderStage", { configurable: true, value: { VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 } });
+  t.after(() => {
+    for (const [name, descriptor] of [["GPUBufferUsage", previousBufferUsage], ["GPUShaderStage", previousShaderStage]] as const) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else Reflect.deleteProperty(globalThis, name);
+    }
+  });
+  const pipeline = {} as GPUComputePipeline & GPURenderPipeline;
+  let directDraws = 0;
+  const device = {
+    createShaderModule: () => ({}), createBindGroupLayout: () => ({}), createPipelineLayout: () => ({}),
+    createComputePipelineAsync: async () => pipeline, createRenderPipelineAsync: async () => pipeline,
+    createBuffer: () => ({ destroy() {} }), createBindGroup: () => ({}), queue: { writeBuffer() {} },
+  } as unknown as GPUDevice;
+  const computePass = { setBindGroup() {}, setPipeline() {}, dispatchWorkgroups() {}, end() {} };
+  const renderPass = { setBindGroup() {}, setPipeline() {}, draw: () => { directDraws += 1; }, drawIndirect() {}, end() {} };
+  const encoder = { beginComputePass: () => computePass, beginRenderPass: () => renderPass } as unknown as GPUCommandEncoder;
+  const external = {} as GPUBuffer;
+  const binding = { buffer: external };
+  const renderer = new SparseVoxelDebugRenderer(device, { colorFormat: "rgba8unorm" });
+  await renderer.initialize();
+  renderer.setSource({
+    voxelRecords: binding, voxelCount: binding, brickRecords: binding, brickCount: binding, materials: binding,
+    voxelCapacity: 1, brickCapacity: 1, materialCount: 4, revision: 1, drawContainerGlass: false,
+  });
+  assert.equal(renderer.encode(encoder, {
+    mode: "raw-voxels", colorTarget: {} as GPUTextureView, depthTarget: {} as GPUTextureView,
+    viewProjection: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]), cameraPosition: [0, 0, 4],
+    containerBounds: { min: [-1, 0, -1], max: [1, 2, 1] }, containerClosedTop: false,
+  }), true);
+  assert.equal(directDraws, 0, "compact fluid inspection must not cover voxels with filled glass panes");
+  renderer.destroy();
 });
 
 async function createDevice() {

@@ -5,11 +5,13 @@ import { createBodyDescription } from "../lib/rigid-body";
 import { simulation } from "../lib/simulation/controller";
 import { useRuntimeStore } from "../lib/stores/runtime-store";
 import { useSceneStore } from "../lib/stores/scene-store";
+import { useDiagnosticsStore } from "../lib/stores/diagnostics-store";
+import type { GPUEulerianInfo } from "../lib/webgpu-eulerian";
+import { useMethodStore } from "../lib/stores/method-store";
 
 test("adding a rigid body does not pause a running simulation", () => {
   const originalScene = cloneScene(useSceneStore.getState().scene);
   const originalRunState = useRuntimeStore.getState().runState;
-
   try {
     useRuntimeStore.getState().setRunState("running");
     simulation.addBody("sphere");
@@ -51,12 +53,18 @@ test("editing rigid-body properties preserves its current position", () => {
 test("pause discards unsubmitted GPU debt but retains admitted work", () => {
   const originalScene = cloneScene(useSceneStore.getState().scene);
   const originalRunState = useRuntimeStore.getState().runState;
+  const originalGPUStatus = useDiagnosticsStore.getState().gpuStatus;
+  const originalGPUInfo = useDiagnosticsStore.getState().gpuInfo;
 
   try {
     const scene = cloneScene(originalScene);
     scene.rigidBodies = [];
     scene.numerics.fixedDt_s = 0.004;
     simulation.reset(scene);
+    useDiagnosticsStore.getState().set({
+      gpuStatus: { state: "ready", label: "test GPU ready", adapter: "test" },
+      gpuInfo: { initialSparseAuthorityReady: true, initialRasterSurfaceReady: true } as GPUEulerianInfo,
+    });
     useRuntimeStore.getState().setRunState("running");
 
     simulation.tick(1_000);
@@ -67,6 +75,81 @@ test("pause discards unsubmitted GPU debt but retains admitted work", () => {
     assert.ok(Math.abs(simulation.time() - 0.012) < 1e-9, "only already-submitted GPU work should survive pause");
   } finally {
     simulation.reset(originalScene);
+    useDiagnosticsStore.getState().set({ gpuStatus: originalGPUStatus, gpuInfo: originalGPUInfo });
     useRuntimeStore.getState().setRunState(originalRunState);
   }
+});
+
+test("startup cannot advance the WebGPU target clock before t=0 authority is ready", () => {
+  const originalScene = cloneScene(useSceneStore.getState().scene);
+  const originalRunState = useRuntimeStore.getState().runState;
+  const originalGPUStatus = useDiagnosticsStore.getState().gpuStatus;
+  try {
+    simulation.reset(cloneScene(originalScene));
+    useDiagnosticsStore.getState().set({ gpuStatus: { state: "initializing", label: "Warming t=0 authority", kind: "startup" } });
+    useRuntimeStore.getState().setRunState("running");
+    simulation.tick(1_000);
+    simulation.tick(1_100);
+    simulation.singleStep();
+    assert.equal(simulation.time(), 0);
+  } finally {
+    simulation.reset(originalScene);
+    useDiagnosticsStore.getState().set({ gpuStatus: originalGPUStatus });
+    useRuntimeStore.getState().setRunState(originalRunState);
+  }
+});
+
+test("reset publishes an atomic t=0 epoch before stale GPU completions can land", () => {
+  const originalScene = cloneScene(useSceneStore.getState().scene);
+  const originalRunState = useRuntimeStore.getState().runState;
+  const beforeEpoch = useRuntimeStore.getState().simulationEpoch;
+
+  try {
+    useRuntimeStore.getState().setSimulationTime(12.5);
+    simulation.reset(cloneScene(originalScene));
+    const runtime = useRuntimeStore.getState();
+    assert.equal(simulation.time(), 0);
+    assert.equal(runtime.simulationTime, 0);
+    assert.equal(runtime.simulationEpoch, beforeEpoch + 1);
+    assert.equal(runtime.runState, "paused");
+  } finally {
+    simulation.reset(originalScene);
+    useRuntimeStore.getState().setRunState(originalRunState);
+  }
+});
+
+test("safe browser bring-up admits one step and rejects continuous running", (t) => {
+  const originalScene = cloneScene(useSceneStore.getState().scene);
+  const originalRunState = useRuntimeStore.getState().runState;
+  const originalGPUStatus = useDiagnosticsStore.getState().gpuStatus;
+  const originalGPUInfo = useDiagnosticsStore.getState().gpuInfo;
+  const originalMethodId = useMethodStore.getState().methodId;
+  const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "location", { configurable: true, value: { search: "?gpu=safe" } });
+  t.after(() => {
+    if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
+    else Reflect.deleteProperty(globalThis, "location");
+    useMethodStore.getState().setMethodId(originalMethodId);
+    simulation.reset(originalScene);
+    useDiagnosticsStore.getState().set({ gpuStatus: originalGPUStatus, gpuInfo: originalGPUInfo });
+    useRuntimeStore.getState().setRunState(originalRunState);
+  });
+
+  useMethodStore.getState().setMethodId("octree");
+  simulation.reset(cloneScene(originalScene));
+  useDiagnosticsStore.getState().set({
+    gpuStatus: { state: "ready", label: "test GPU ready", adapter: "test" },
+    gpuInfo: { initialSparseAuthorityReady: true, initialRasterSurfaceReady: true } as GPUEulerianInfo,
+  });
+  simulation.singleStep();
+  assert.equal(simulation.time(), 0.004);
+  simulation.gpuAdvanceCompleted(0.004);
+  simulation.singleStep();
+  assert.equal(simulation.time(), 0.004, "a second explicit request must not advance the safe session");
+
+  useRuntimeStore.getState().setRunState("running");
+  simulation.tick(1_000);
+  simulation.tick(1_100);
+  assert.equal(useRuntimeStore.getState().runState, "paused");
+  assert.equal(simulation.time(), 0.004, "continuous scheduling must remain disabled in safe mode");
 });

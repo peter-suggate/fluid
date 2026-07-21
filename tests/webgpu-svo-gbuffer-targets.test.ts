@@ -13,6 +13,7 @@ import {
   SVO_GBUFFER_RENDER_TARGET_CONTRACT,
 } from "../lib/webgpu-svo-gbuffer-targets";
 import { SparseVoxelDrySceneRenderer, svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
+import type { SparseVoxelTemporalFrameState } from "../lib/webgpu-svo-temporal-accumulator";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const waterSource = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
@@ -52,6 +53,7 @@ function mockDevice(textures: MockTexture[], renderDescriptors: GPURenderPipelin
     },
     createBuffer() { return { destroy() {} }; },
     createShaderModule() { return { getCompilationInfo: async () => ({ messages: [] }) }; },
+    createBindGroup() { return {}; },
     createBindGroupLayout() { return {}; },
     createPipelineLayout() { return {}; },
     async createRenderPipelineAsync(descriptor: GPURenderPipelineDescriptor) { renderDescriptors.push(descriptor); return {}; },
@@ -106,15 +108,17 @@ test("production dry pass writes three MRTs plus reversed-Z without changing loc
   renderer.ensureSize(64, 48);
   const internals = renderer as unknown as { bindGroup: GPUBindGroup };
   internals.bindGroup = {} as GPUBindGroup;
-  let passDescriptor: GPURenderPassDescriptor | undefined;
+  let passDescriptor: GPURenderPassDescriptor | undefined, passCount = 0;
   const encoder = {
     beginRenderPass(descriptor: GPURenderPassDescriptor) {
-      passDescriptor = descriptor;
+      passDescriptor = descriptor; passCount += 1;
       return { setPipeline() {}, setBindGroup() {}, draw() {}, end() {} };
     },
   } as unknown as GPUCommandEncoder;
   const externalHdr = { label: "existing water compositor HDR view" } as GPUTextureView;
-  assert.equal(renderer.encode(encoder, externalHdr), true);
+  const result = renderer.encode(encoder, externalHdr);
+  assert.ok(result);
+  assert.equal(result.sampledTargetView, externalHdr);
   const colorAttachments = Array.from(passDescriptor?.colorAttachments ?? []);
   assert.equal(colorAttachments.length, 3);
   assert.equal(colorAttachments[0]?.view, externalHdr);
@@ -124,6 +128,29 @@ test("production dry pass writes three MRTs plus reversed-Z without changing loc
   assert.equal(passDescriptor?.depthStencilAttachment?.depthClearValue, 0);
   assert.equal(passDescriptor?.depthStencilAttachment?.depthLoadOp, "clear");
   assert.equal(passDescriptor?.depthStencilAttachment?.depthStoreOp, "store");
+  const reusableView = { label: "reusable dry HDR" } as GPUTextureView;
+  const reusableTexture = { width: 64, height: 48, createView: () => reusableView } as GPUTexture;
+  const passesBeforeReuse = passCount;
+  const firstReusable = renderer.encode(encoder, reusableTexture, undefined, undefined, undefined, "fixed-camera-and-bodies");
+  const secondReusable = renderer.encode(encoder, reusableTexture, undefined, undefined, undefined, "fixed-camera-and-bodies");
+  assert.ok(firstReusable && secondReusable);
+  assert.equal(passCount, passesBeforeReuse + 1, "an unchanged non-temporal dry frame is rendered once and then reused");
+  assert.equal(secondReusable.sampledTargetView, firstReusable.sampledTargetView);
+  const temporalFrame: SparseVoxelTemporalFrameState = {
+    camera: { position_m: [0, 0, 0], forward: [0, 0, -1], right: [1, 0, 0], up: [0, 1, 0] },
+    deltaTime_s: 0,
+    cellSize_m: 0.025,
+    paused: true,
+    composition: "dry-before-legacy-water",
+  };
+  const passesBeforeTemporalReuse = passCount;
+  const firstTemporal = renderer.encode(encoder, reusableTexture, undefined, temporalFrame, undefined, "fixed-temporal-frame");
+  const secondTemporal = renderer.encode(encoder, reusableTexture, undefined, temporalFrame, undefined, "fixed-temporal-frame");
+  const reusedTemporal = renderer.encode(encoder, reusableTexture, undefined, temporalFrame, undefined, "fixed-temporal-frame");
+  assert.ok(firstTemporal && secondTemporal && reusedTemporal);
+  assert.equal(passCount, passesBeforeTemporalReuse + 4,
+    "both checkerboard phases render and resolve before an unchanged temporal frame is reused");
+  assert.equal(reusedTemporal.sampledTargetView, secondTemporal.sampledTargetView);
   renderer.destroy();
   assert.throws(() => new SparseVoxelDrySceneRenderer(mockDevice([]), {} as GPUBuffer, {} as GPUBuffer, "bgra8unorm"), /location 0 must use rgba16float/);
 });
@@ -140,7 +167,8 @@ test("shader populates stable identity/media/generation and consumes exact rigid
   assert.match(svoDrySceneShader, /svoPrimitiveOwnerId\(record\),exact\.featureId,DRY_GBUFFER_FIELD_ANALYTIC/,
     "static G-buffer feature identity must come from the shared exact ray hit without a second distance evaluation");
   assert.match(svoDrySceneShader, /dry\.terrain\.x,DRY_OWNER_NONE,SVO_FEATURE_TERRAIN,DRY_GBUFFER_FIELD_TERRAIN/);
-  assert.match(svoDrySceneShader, /dryPublicationGeneration\(\)->u32[^]*publicationState\[0\]/);
+  assert.match(svoDrySceneShader, /dryPublicationGeneration\(\)->u32[^]*publicationState\[3\]/,
+    "static and analytic history must use the stable static-geometry revision");
   assert.match(svoDrySceneShader, /DRY_REVERSED_Z_NEAR_M\/viewDepth_m/);
   assert.match(svoDrySceneShader, /svoGBufferMiss\(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u\),0\.0/);
   assert.match(svoDrySceneShader, /surfaceMedium=select\(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_WATER,dryIsFluidFieldSource\(opaque\.fieldSource\)\)/,

@@ -7,7 +7,10 @@ import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useRecordingStore } from "@/lib/stores/recording-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
+import { useMethodStore } from "@/lib/stores/method-store";
 import { PRESENTATION_FPS, frameInterval_ms } from "@/lib/frame-pacing";
+import { requestManualGPUStop } from "@/lib/gpu-startup";
+import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
 
 function TimingSlider({ label, unit, value, min, max, step, integer = false, detail, onCommit, disabled = false }: { label: string; unit: string; value: number; min: number; max: number; step: number; integer?: boolean; detail: (value: number) => string; onCommit: (value: number) => void; disabled?: boolean }) {
   const [draft, setDraft] = useState(value);
@@ -36,13 +39,24 @@ export function TransportBar() {
   const patchNumerics = useSceneStore((state) => state.patchNumerics);
   const gpuLag = useDiagnosticsStore((state) => state.gpuInfo?.simulationLag_s);
   const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
+  const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
+  const methodId = useMethodStore((state) => state.methodId);
   const recordingStatus = useRecordingStore((state) => state.status);
   const recordingStart = useRecordingStore((state) => state.startedAtSimulation_s);
   const recording = useRecordingStore((state) => state.recording);
   const fileRef = useRef<HTMLInputElement>(null);
+  const safeBringupPolicy = useSafeBrowserGPUBringup();
+  const safeBringup = safeBringupPolicy === true;
+  const browserPolicyPending = safeBringupPolicy === null;
+  const browserSafetyLocked = safeBringupPolicy !== false;
+  const [safeStepRequested, setSafeStepRequested] = useState(false);
   const webgpu = simulation.backend === "webgpu";
   const lagged = webgpu && gpuLag !== undefined && gpuLag > 2 * maxDt;
   const applyingGPUSettings = gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild";
+  const initialSceneReady = methodId !== "octree" || (gpuInfo?.initialSparseAuthorityReady === true
+    && gpuInfo?.initialRasterSurfaceReady === true);
+  const transportLocked = webgpu && (gpuStatus.state !== "ready" || !initialSceneReady);
+  const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
   const fixedRate_hz = 1 / fixedDt;
   const gpuStepRate_hz = 1 / maxDt;
   const commitNumerics = (patch: Parameters<typeof patchNumerics>[0]) => {
@@ -80,19 +94,20 @@ export function TransportBar() {
   return (
     <footer className="transport-bar">
       <div className="transport-controls">
-        <button disabled={applyingGPUSettings} className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={applyingGPUSettings ? "Simulation paused while GPU settings apply" : runState === "running" ? "Pause simulation" : "Play simulation"}>{applyingGPUSettings ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
-        <button disabled={applyingGPUSettings} onClick={() => simulation.singleStep()} aria-label="Single fluid clock step">STEP</button>
-        <button onClick={() => {
+        <button disabled={transportLocked || browserSafetyLocked} className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : safeBringup ? "Continuous play is disabled during bounded GPU bring-up" : transportLocked ? "Simulation controls unlock after the initial GPU scene is ready" : runState === "running" ? "Pause simulation" : "Play simulation"}>{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
+        <button disabled={browserPolicyPending || transportLocked || safeStepLocked} onClick={() => { if (safeBringup) setSafeStepRequested(true); simulation.singleStep(); }} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : transportLocked ? "Single step unavailable until the initial GPU scene is ready" : safeStepLocked ? "The bounded browser GPU step has already been requested" : "Single fluid clock step"}>STEP</button>
+        <button disabled={browserSafetyLocked} onClick={() => {
           if (recordingStatus === "recording") simulationRecording.stop(simulation.time());
           simulation.reset();
         }}>RESET</button>
         <button
           className={`record-button${recordingStatus === "recording" ? " active" : ""}`}
           onClick={toggleRecording}
-          disabled={recordingStatus === "processing" || applyingGPUSettings}
+          disabled={recordingStatus === "processing" || transportLocked || browserSafetyLocked}
           aria-label={recordingStatus === "recording" ? "Stop simulation recording" : "Record simulation video"}
           data-testid="record-simulation"
         >{recordingStatus === "recording" ? "■ STOP" : recordingStatus === "processing" ? "WAIT" : "● REC"}</button>
+        {safeBringup && <button type="button" className="stop-gpu-button" onClick={requestManualGPUStop}>STOP GPU</button>}
       </div>
       <div className="time-readout">
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
@@ -100,8 +115,8 @@ export function TransportBar() {
         {lagged && <small className="lag-chip" title="Simulation time currently admitted to the bounded GPU feed window.">GPU −{gpuLag.toFixed(1)} s</small>}
         {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
         <div className="transport-timing" aria-label="Simulation timestep controls">
-          <TimingSlider disabled={applyingGPUSettings} key={`fixed-${fixedDt}`} label="FIXED STEP" unit="Hz" value={fixedRate_hz} min={Math.min(30, fixedRate_hz)} max={Math.max(2000, fixedRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms rigid`} onCommit={commitFixedRate} />
-          <TimingSlider disabled={applyingGPUSettings} key={`gpu-${fixedDt}-${maxDt}`} label="GPU STEP" unit="Hz" value={gpuStepRate_hz} min={1} max={fixedRate_hz} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms max`} onCommit={commitGpuStepRate} />
+          <TimingSlider disabled={transportLocked || browserSafetyLocked} key={`fixed-${fixedDt}`} label="FIXED STEP" unit="Hz" value={fixedRate_hz} min={Math.min(30, fixedRate_hz)} max={Math.max(2000, fixedRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms rigid`} onCommit={commitFixedRate} />
+          <TimingSlider disabled={transportLocked || browserSafetyLocked} key={`gpu-${fixedDt}-${maxDt}`} label="GPU STEP" unit="Hz" value={gpuStepRate_hz} min={1} max={fixedRate_hz} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms max`} onCommit={commitGpuStepRate} />
         </div>
         {webgpu
           ? <span className="continuous-run" title={`Physics fills measured GPU slack between presentations · present every ${frameInterval_ms().toFixed(2)} ms · rigid step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>MAX SIM THROUGHPUT · PRESENT {PRESENTATION_FPS} FPS</span>
@@ -110,8 +125,8 @@ export function TransportBar() {
       <div className="file-actions">
         <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{applyingGPUSettings ? `GPU SETTINGS · ${gpuStatus.operation ?? gpuStatus.label}` : notice}</span>
         {recording && recordingStatus !== "recording" && <button onClick={() => simulationRecording.open()}>Playback</button>}
-        <button onClick={() => { if (!simulation.loadLocalScene()) fileRef.current?.click(); }}>Load</button>
-        <button onClick={() => fileRef.current?.click()}>Import</button>
+        <button disabled={browserSafetyLocked} onClick={() => { if (!simulation.loadLocalScene()) fileRef.current?.click(); }}>Load</button>
+        <button disabled={browserSafetyLocked} onClick={() => fileRef.current?.click()}>Import</button>
         <input ref={fileRef} type="file" accept="application/json,.json" onChange={importScene} hidden />
       </div>
     </footer>

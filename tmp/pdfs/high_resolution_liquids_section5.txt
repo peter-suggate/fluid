@@ -1,0 +1,123 @@
+                                                    Power Diagrams and Sparse Paged Grids for High Resolution Adaptive Liquids                         • 140:7
+
+
+either of these two cases with the same octree edge, with the under-             (1) Starting with a zero initial guess p0 = 0, execute k iterations
+standing that at most one of these two neighboring relations can                     of the damped Jacobi method on the equation L2 p = q
+be present at the same time; the determination of which of the two                   (input vector is used as right hand side). This is only applied
+cases (if any) we have can be made by examining the local octreee                    to a band (about 3 voxels wide) around the boundaries and
+topology. Hence, velocity components associated with such cases of                   level transitions. Let p1 be the iterate that results from this
+edge neighbors can be conceptually stored on 3 offset grids, each of                 operation, and r1 = q − L2 p1 the associated residual.
+them centered on the midpoint of edges aligned with the x, y, and z              (2) Compute a correction δ p = M1 r1 by applying the first order
+axes, respectively. We simply dedicate three additional channels in                  accurate preconditioner M1 from Setaluri et al. [2014] to
+SPGrid to store those special velocity components (we would have                     the residual r1 . Add the correction to p1 , to obtain a new
+called them edge-centered velocities if such a concept existed in the                approximation p2 = p1 + δ p.
+original octree). We do not explicitly store a description for the               (3) Repeat k additional iterations of the same Jacobi method
+direction of this edge-centered velocity component, as this will be                  on the equation L2 p = q, but this time use p2 as the initial
+automatically reflected in the stencils of those cells incident to it.               guess. Let w denote the result at the end of this iteration.
+                                                                            We can easily verify that vectors w and q are related by a linear
+4.3   Multigrid preconditioner                                              map w = Mq (there is nothing in steps 1-3 above that introduces
+Our power diagram discretization, paired with a topology encod-             any nonlinearity, and it is easy to verify that when q = 0 we would
+ing scheme (see section 6) will allow the Laplace operator to be            also have w = 0). In fact, a careful look at the matrix formula for
+applied implicitly without building its explicit matrix form. This          the Jacobi iteration reveals that the entire matrix M is symmet-
+gives the opportunity to use a matrix-free method such as Conju-            ric and positive definite, assuming that M1 is SPD as well. We use
+gate Gradient for solving the Poisson equation. Naturally, a good           the algorithm above to implicitly apply M as a preconditioner to
+preconditioner is essential; Setaluri et al. [2014] used a very effec-      Conjugate Gradient for the system L2 p = f. In our examples, this
+tive adaptive multigrid preconditioner. However, their approach             preconditioner achieved very similar convergence performance to
+was specifically tailored for the first order accurate discretization of    the straightforward alternative approach of using a second order
+Losasso et al. [2004]. Since both our power diagram discretization,         operator at the finest level of a V-cycle preconditioner, achieving
+as well as the first-order accurate approach [Losasso et al. 2004; Se-      satisfactory convergence within 6-10 iterations across all resolu-
+taluri et al. 2014] have exactly the same set of pressure variables, it     tions. It was necessary to perform an adequate number (k ≈ 8) of
+would be natural to start with the multigrid V-cycle preconditioner         boundary smoothing iterations in steps (1) and (3) of the aforemen-
+proposed by Setaluri et al. [2014] as a baseline, and attempt to adapt      tioned preconditioner application to achieve this good convergence
+it to the power diagram discretization. The most straightforward            behavior, but the ability to restrict this effort to just the boundary
+way to make such an adaptation would be to replace the discretiza-          region (while using an aggressively optimized first order V-cycle)
+tion at the finest level of the hierarchy with our newly proposed           made this a favorable trade-off at large resolutions.
+power diagram formulation, retaining the first-order accurate oper-
+ators at all coarser levels. This adaptation is quite effective; in our     5    INTERVENTIONS IN THE SIMULATION PIPELINE
+tests it consistently achieves preconditioning efficiency comparable        To track the dynamically evolving liquid surface, we designed a
+with what Setaluri et al. [2014] report for the first-order problem.        level set scheme similar in spirit to prior work [Bargteil et al. 2006;
+   Although this approach is effective, there is a modest penalty           Bojsen-Hansen and Wojtan 2013; Goldade et al. 2016; Kim et al.
+to be paid in terms of implementation efficiency. The single most           2009] in the sense that we use the SPGrid data structure to store an
+costly component of a multigrid V-cycle is the smoothing routine            Eulerian description of a narrow band around the free surface at
+at the finest resolution of the discretization hierarchy. This step is      a significantly higher resolution than the velocity data — typically
+now using our second order power diagram discretization which,              by a factor of 4 or 8 (see Figure 6). Thus, we use two separate
+although quite efficient, does not permit the full extent of aggres-        meshes, a background simulation mesh that is an octree, and an
+sive optimizations of the first order scheme [Setaluri et al. 2014],        interface tracking grid (or fine level set grid) that is a single SPGrid
+which does not require local topology queries to define its stencils.       (rather than a pyramid). Note that the velocities natively live only
+Thus, we have implemented a hybrid alternative: We first invoke             on the octree, and we also store and evolve a separate (coarse)
+the smoothing routine, using the second order power diagram dis-            level set on the octree because our fine representation does not
+cretization, but iterate it only near boundaries and level transitions.     carry inside/outside information beyond a narrow band of the free
+We subsequently update the residual, and use a first order accurate         surface. The fine level set representation only requires an SPGrid
+multigrid V-cycle to solve the error equation and generate a correc-        with 4 channels (1 channel for Boolean flags associated with domain
+tion across the entire domain. We follow up with a second sweep             geometry, 1 for the level set, and 2 more channels for fast marching).
+of smoothing the second order discretization (near boundaries and
+level transitions) to ensure symmetry of the preconditioner thus               Level set advection. The time step ∆t is determined by the finest
+crafted. Let us denote by L1 the first order Laplace operator from          effective resolution of the octree, since the velocities live natively
+Setaluri et al. [2014], and let M1 ≈ L−1 1 be the multigrid precondi-       on the octree. However, this time step will be overly dissipative
+tioner they defined in their work. Finally, let L2 be our second order      for advecting the fine level set forward in time using a standard
+Laplace discretization, using the power diagram. We define a new            semi-Lagrangian update, and may require more expensive schemes
+preconditioner M, whose action w = Mq is computed as follows:               for volume conservation [Lentine et al. 2012]. We follow a more
+
+                                                                           ACM Transactions on Graphics, Vol. 36, No. 4, Article 140. Publication date: July 2017.
+140:8    •    M. Aanjaneya et al.
+
+
+                                                                                          full velocity vectors at the centroid of each face and advect them
+                                                                                          using a standard semi-Lagrangian update, subsequently projecting
+                                                                                          the velocity onto the face normal direction. Likewise, we use this
+                                                                                          interpolant as needed for advecting the fine resolution level set.
+                                                                                             Dynamic topology. After each advection step, the topology of the
+                                                                                          SPGrid storing the high resolution level set needs to be updated; new
+                                                                                          cells may emerge in the narrow band which require valid signed
+                                                                                          distance values, and old cells may fall outside the band and should
+                                                                                          be deleted. We do this by instantiating a new SPGrid and copying
+                                                                                          over level set values for all cells at the interface. Subsequently, we
+                                                                                          run fast marching on this SPGrid, activating new cells wherever
+Fig. 6. A time-evolving Eulerian description of a narrow band around the                  necessary. For efficiency, we first allocate all pages corresponding
+interface is stored at a significantly higher resolution (shown in green) in              to blocks that either contain the interface, or lie in the 1-ring of a
+our framework. This representation is used to correct the level set field on              block that contains the interface. After this step, cells that lie within
+the octree after every advection step.                                                    the narrow band can be safely marked in parallel without any data
+                                                                                          hazards. We note that Setaluri et al. [2014] speculated on the utility
+accurate approach where we divide this time step by m, where m                            of an enhancement to SPGrid, that could actually discard physical
+is the factor by which the fine level set resolution is higher than                       pages no longer in use (in Linux, this would be via a variant of
+the effective resolution of the octree. Next, we take m steps (of                         the madvise system call), to allow dynamic additions and removals
+forward Euler) backwards along the velocity field, where each step                        to the same SPGrid. We did not find such an optimization to be
+is performed with a time step size of ∆t/m.                                               worthwhile here, as evaluating refinement criteria at the same time
+   At each step, we reach a new point p                                                   while discarding prior data is an unnecessary complexity.
+where we compute a new interpolated ve-
+locity before taking the next step, tracing                                                  Fast marching and velocity extrapolation. We                 p3
+a piecewise linear curve in the process (see                                              store level set values ϕ on cell centers of the oc-     p1
+the figure inset). After the mt h step we inter-                                          tree, and solve for fast marching in uniform re-
+polate the level set, and assign its value back                                           gions similar to Foster and Fedkiw [2001]. Near         p2
+to the starting cell of the trajectory. Note that this approach still                     T-junctions we adopt the approach of Sethian                    p4
+allows for efficient parallelization without decreasing the time step                     and Vladimirsky [2000] and run fast marching
+size according to the fine level set resolution. Of course, we maintain                   on a tetrahedral mesh. Note that this approach mandates that the
+a wide enough band so that the free surface still falls inside this band                  solid angle of each tetrahedron incident at the center of the current
+after advection. Compared to simply upsampling the background                             cell should be less than π /2, and so we use the Delaunay tetrahedral-
+octree, tracing back a piecewise linear curve for semi-Lagrangian                         ization of the centers of the face/edge neighbors and the current cell.
+advection foregoes the numerical dissipation that would have been                         Note that ϕ-values were stored at grid nodes by Losasso et al. [2004],
+introduced by m individual advection and reinitialization steps, pro-                     and they simply ignored missing neighbors near T-junctions as
+ducing more accurate results (see Figure 7). For advecting forward                        their grading scheme specifically coarsened away from the interface.
+the coarse level set stored on the octree, we follow the approach                         However, our discretization for the pressure specifically requires
+of Setaluri et al. [2014]. Subsequently, we use the fine level set to                     ϕ-values at the cell centers to obtain second order accuracy near
+correct the coarse level set wherever we have valid ϕ-values.                             the free surface [Gibou et al. 2002], and we adapt the simulation
+                                                                                          grid topology even across the interface, thus our different approach.
+   Velocity interpolation and advection. The discretization of velocity                   A slight subtlety is that these tetrahedral meshes should be com-
+advection is more subtle as not all faces are axis-aligned, and so                        puted locally per cell. To understand this consider the 2D illustration
+velocities are not neatly segregated into orthogonal components.                          shown in the figure inset: ∆p1p2p4 and ∆p1p3p4 must be used at
+Fortunately, this problem has been studied in prior work on unstruc-                      the point p1 to ensure an acute angle, while ∆p2p1p3 and ∆p2p3p4
+tured mesh fluid simulation. To interpolate velocities at arbitrary                       should be used at the point p2 . To extrapolate velocities outside
+points, we first compute full velocity vectors at all cell centers. For                   the liquid region we first interpolate velocities from power faces to
+regular uniform cells, we average the axis-aligned face velocities;                       regular octree faces and use an approach similar to fast marching,
+for all power cells, we perform a least squares fit based on all the                      this time operating on faces instead of cells and copying over the
+face normal components [Feldman et al. 2005]. The dual mesh of                            velocity value from the face closest to the free surface. For regular
+our power diagram consists of cubes and tetrahedra, whose vertices                        uniform cells, identifying face neighbors is straightforward, while
+are the octree cell centers. Therefore, having constructed velocity                       near T-junctions we use the connectivity of the tetrahedral mesh
+vectors at the vertices of this mesh, we apply trilinear interpolation                    to identify all faces incident to cells that correspond to nodes in
+inside cubic cells and barycentric interpolation on tetrahedra. For                       the mesh. Subsequently, we interpolate back velocities from regular
+improved efficiency and accuracy in regular regions away from level                       octree faces to all power faces. Figure 7 shows a comparison of
+transitions, we revert to standard per-axis face-based velocity inter-                    the particle level set method [Enright et al. 2002] and our interface
+polation. With this interpolation procedure at hand, we compute                           tracking scheme for a sphere that undergoes a deformation in a
+
+ACM Transactions on Graphics, Vol. 36, No. 4, Article 140. Publication date: July 2017.
+

@@ -1,14 +1,14 @@
-/** Production scene presentation; raster remains the compatibility fallback. */
+/** Scene presentation modes; sparse voxels remain available for explicit A/B use. */
 export const SVO_RENDER_MODES = ["raster", "svo"] as const;
 
 export type SvoRenderMode = typeof SVO_RENDER_MODES[number];
 
 /**
- * Default hybrid presentation: direct SVO dry-scene replacement feeding the
- * existing raster water extraction/interface/optical compositor. `raster`
- * remains an explicit selection and the automatic compatibility fallback.
+ * Default to the bounded raster presentation. The SVO dry-scene replacement
+ * shares the physics queue and remains opt-in until its worst-case frame cost
+ * cannot delay simulation completion or browser interaction.
  */
-export const DEFAULT_SVO_RENDER_MODE: SvoRenderMode = "svo";
+export const DEFAULT_SVO_RENDER_MODE: SvoRenderMode = "raster";
 
 export function isSvoRenderMode(value: unknown): value is SvoRenderMode {
   return typeof value === "string" && (SVO_RENDER_MODES as readonly string[]).includes(value);

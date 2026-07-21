@@ -117,10 +117,10 @@ test("optional fine dynamics is bounded but does not replace the global pressure
   assert.match(sparseSurfaceDynamicsShader, /return vec3f\(0\.0\)/, "missing pages impose the coarse-velocity boundary condition");
 });
 
-test("octree defaults enable the guarded dynamic ratio-two band uniformly", () => {
+test("octree defaults leave fine surface refinement disabled while retaining its controls", () => {
   for (const quality of ["balanced", "high", "ultra"] as const) {
     const preset = octreeMethod.presetFor(quality);
-    assert.equal(preset.sparseSurfaceBand, "authoritative");
+    assert.equal(preset.sparseSurfaceBand, "off");
     assert.equal(preset.surfaceRefinementFactor, "2");
     assert.equal(preset.sparseSurfaceBandCells, 4);
     assert.equal(preset.sparseSurfacePageFraction, 0.75);

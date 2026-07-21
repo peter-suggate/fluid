@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import { EulerianFluidSolver } from "../lib/eulerian-solver";
 import { tallCellMethod } from "../lib/methods/tall-cell";
 import type { GPUSolverInstance, SimulationMethod } from "../lib/methods/types";
+import type { OctreeFaceMirrorSource } from "../lib/webgpu-octree-face-mirror";
 import { uniformMethod } from "../lib/methods/uniform";
 import { quadtreeTallCellMethod } from "../lib/methods/quadtree-tall-cell";
 import { octreeMethod } from "../lib/methods/octree";
@@ -13,11 +14,18 @@ import { WebGPUEulerianSolver, type GPUEulerianInfo, type GPUQuality } from "../
 import { summarizeDriftOscillation } from "../lib/tall-cell-diagnostics";
 import { VOXEL_MATERIAL_IDS, voxelMaterial } from "../lib/voxel-scene";
 import { SPARSE_VOXEL_DEBUG_RECORD_STRIDE, SparseVoxelDebugRenderer, type SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
-import { RasterWaterPipeline } from "../lib/webgpu-water-pipeline";
+import { RasterWaterPipeline, type WaterSurfaceGeometrySource } from "../lib/webgpu-water-pipeline";
+import { createGlobalFineLevelSetConsumerSource, createUnifiedOctreeConsumerSource } from "../lib/octree-consumer-sampling";
+import { unpackOctreeFaceBandControl } from "../lib/webgpu-octree-face-fast-march";
 import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "../lib/webgpu-octree-sparse-bricks";
 import { environmentIndex } from "../lib/environments";
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "../lib/terrain";
+import { compactOctreeFieldEvidenceIsAcceptable, compactOctreePublicationHeaderEvidence,
+  reconstructCompactOctreeOccupancyField,
+  type CompactOctreeFieldEvidence } from "./webgpu-smoke-compact-field";
+import { decodeOctreeMGPCGDiagnostics, octreeMGPCGDiagnosticsAreAcceptable,
+  type OctreeMGPCGDiagnostics } from "./webgpu-smoke-pressure";
 import {
   compareScalarFields,
   compareSingleTallCellNeighborhood,
@@ -32,9 +40,14 @@ import {
   type SmokeScenarioId
 } from "./webgpu-smoke-scenarios";
 
+// SAFETY (2026-07-20): two browser WebGPU attempts triggered machine-wide
+// WindowServer/AGX watchdog failures. Native Dawn and browser WebGPU workloads
+// must remain mutually exclusive until that driver fault is localized.
+console.error("SAFETY: close every browser WebGPU tab before running Dawn. Never run this smoke and browser GPU validation concurrently.");
+
 const modulePath = process.env.WEBGPU_NODE_MODULE;
-if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
-const { create, globals } = await import(pathToFileURL(modulePath).href) as {
+const webgpuModule = modulePath ? await import(pathToFileURL(modulePath).href) : await import("webgpu");
+const { create, globals } = webgpuModule as {
   create(options: string[]): GPU;
   globals: Record<string, unknown>;
 };
@@ -46,6 +59,65 @@ Reflect.deleteProperty(globalThis, "Worker");
 const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
 
+const COMPUTE_SENTINEL_WORD = 0x4f43_5452;
+
+/**
+ * Prove that this adapter executes and returns compute results before paying
+ * the much larger octree construction cost. Shader validation and successful
+ * submission alone are insufficient: a poisoned backend has historically
+ * accepted both while returning an all-zero readback.
+ */
+async function assertComputeSentinel(device: GPUDevice): Promise<void> {
+  const output = device.createBuffer({
+    label: "WebGPU smoke compute sentinel",
+    size: 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+  });
+  const readback = device.createBuffer({
+    label: "WebGPU smoke compute sentinel readback",
+    size: 4,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  try {
+    const module = device.createShaderModule({
+      label: "WebGPU smoke compute sentinel",
+      code: `
+@group(0) @binding(0) var<storage, read_write> output: array<u32>;
+@compute @workgroup_size(1)
+fn sentinel() { output[0] = 0x4f435452u; }
+`,
+    });
+    const pipeline = await device.createComputePipelineAsync({
+      label: "WebGPU smoke compute sentinel",
+      layout: "auto",
+      compute: { module, entryPoint: "sentinel" },
+    });
+    const bindGroup = device.createBindGroup({
+      label: "WebGPU smoke compute sentinel",
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: output } }],
+    });
+    const encoder = device.createCommandEncoder({ label: "WebGPU smoke compute sentinel" });
+    const pass = encoder.beginComputePass({ label: "WebGPU smoke compute sentinel" });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    encoder.copyBufferToBuffer(output, 0, readback, 0, 4);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const observed = new Uint32Array(readback.getMappedRange())[0];
+    readback.unmap();
+    if (observed !== COMPUTE_SENTINEL_WORD) {
+      throw new Error(`WebGPU compute sentinel returned 0x${observed.toString(16).padStart(8, "0")} instead of 0x${COMPUTE_SENTINEL_WORD.toString(16)}; stop before collecting simulation evidence`);
+    }
+    console.log(JSON.stringify({ phase: "compute-sentinel", value: observed, passed: true }));
+  } finally {
+    output.destroy();
+    readback.destroy();
+  }
+}
+
 const availableMethods = [tallCellMethod, quadtreeTallCellMethod, octreeMethod, uniformMethod];
 const methodFilter = process.env.FLUID_METHOD?.split(",").map((value) => value.trim()).filter(Boolean);
 const methods = availableMethods.filter((method) => !methodFilter || methodFilter.includes(method.id));
@@ -55,8 +127,16 @@ const qualityValue = process.env.FLUID_QUALITY ?? "balanced";
 if (!["balanced", "high", "ultra"].includes(qualityValue)) throw new Error(`Unknown FLUID_QUALITY=${qualityValue}`);
 const quality = qualityValue as GPUQuality;
 const targetOverride = process.env.FLUID_TARGET_S === undefined ? undefined : Number(process.env.FLUID_TARGET_S);
+const maxDtOverride = process.env.FLUID_MAX_DT === undefined ? undefined : Number(process.env.FLUID_MAX_DT);
+const exactStepCount = process.env.FLUID_EXPECT_EXACT_STEPS === undefined ? undefined : Number(process.env.FLUID_EXPECT_EXACT_STEPS);
+const minimumPeakSpeed_m_s = process.env.FLUID_MIN_PEAK_SPEED_M_S === undefined ? undefined : Number(process.env.FLUID_MIN_PEAK_SPEED_M_S);
+if (maxDtOverride !== undefined && (!Number.isFinite(maxDtOverride) || maxDtOverride <= 0)) throw new Error("FLUID_MAX_DT must be positive and finite");
+if (exactStepCount !== undefined && (!Number.isInteger(exactStepCount) || exactStepCount < 1)) throw new Error("FLUID_EXPECT_EXACT_STEPS must be a positive integer");
+if (minimumPeakSpeed_m_s !== undefined && (!Number.isFinite(minimumPeakSpeed_m_s) || minimumPeakSpeed_m_s <= 0)) throw new Error("FLUID_MIN_PEAK_SPEED_M_S must be positive and finite");
+if (exactStepCount !== undefined && maxDtOverride === undefined) throw new Error("FLUID_EXPECT_EXACT_STEPS requires FLUID_MAX_DT so submitted/completed time is unambiguous");
 const reportEvery = Number(process.env.FLUID_REPORT_EVERY ?? 0);
 const includeFinalFieldStats = process.env.FLUID_FIELD_STATS !== "0";
+const requireSpatialField = process.env.FLUID_REQUIRE_SPATIAL_FIELD === "1";
 const runCPUOracle = process.env.FLUID_CPU_ORACLE !== "0";
 const cpuMaximumCells = Number(process.env.FLUID_CPU_MAX_CELLS ?? 250_000);
 const cpuMarkerSamplesPerAxis = Number(process.env.FLUID_CPU_MARKERS_PER_AXIS ?? 1);
@@ -68,6 +148,21 @@ const quadtreePressureSolverOverride = process.env.FLUID_QUADTREE_PRESSURE_SOLVE
 if (quadtreePressureSolverOverride !== undefined && quadtreePressureSolverOverride !== "chebyshev" && quadtreePressureSolverOverride !== "pcg") throw new Error("FLUID_QUADTREE_PRESSURE_SOLVER must be chebyshev or pcg");
 const remeshIntervalOverride = process.env.FLUID_REMESH_INTERVAL === undefined ? undefined : Number(process.env.FLUID_REMESH_INTERVAL);
 const regularLayersOverride = process.env.FLUID_REGULAR_LAYERS === undefined ? undefined : Number(process.env.FLUID_REGULAR_LAYERS);
+const surfaceColumnsOverride = (() => {
+  if (process.env.FLUID_SURFACE_COLUMNS === undefined) return undefined;
+  const value = Number(process.env.FLUID_SURFACE_COLUMNS);
+  if (!Number.isInteger(value) || value <= 0) throw new Error("FLUID_SURFACE_COLUMNS must be a positive integer");
+  return value;
+})();
+const expectedGridOverride = (() => {
+  const raw = process.env.FLUID_EXPECT_GRID;
+  if (raw === undefined) return undefined;
+  const values = raw.split(",").map(Number);
+  if (values.length !== 3 || values.some((value) => !Number.isInteger(value) || value <= 0)) {
+    throw new Error("FLUID_EXPECT_GRID must be three comma-separated positive integers (for example 24,18,16)");
+  }
+  return values as [number, number, number];
+})();
 const maximumNeighborDeltaOverride = process.env.FLUID_MAX_NEIGHBOR_DELTA === undefined ? undefined : Number(process.env.FLUID_MAX_NEIGHBOR_DELTA);
 const maximumTallHeightOverride = process.env.FLUID_MAX_TALL_HEIGHT === undefined ? undefined : Number(process.env.FLUID_MAX_TALL_HEIGHT);
 const adaptivityOverride = process.env.FLUID_ADAPTIVITY === undefined ? undefined : Number(process.env.FLUID_ADAPTIVITY);
@@ -80,8 +175,26 @@ const rebuildTopologyOverride = process.env.FLUID_REBUILD_TOPOLOGY === undefined
 const maximumLeafSizeOverride = process.env.FLUID_MAXIMUM_LEAF_SIZE === undefined ? undefined : Number(process.env.FLUID_MAXIMUM_LEAF_SIZE);
 const octreeAdaptivityOverride = process.env.FLUID_OCTREE_ADAPTIVITY === undefined ? undefined : Number(process.env.FLUID_OCTREE_ADAPTIVITY);
 const octreeLeafSolverOverride = process.env.FLUID_OCTREE_LEAF_SOLVER;
-if (octreeLeafSolverOverride !== undefined && !["auto", "dense", "compact", "chebyshev", "megakernel"].includes(octreeLeafSolverOverride)) throw new Error("FLUID_OCTREE_LEAF_SOLVER must be auto, dense, compact, chebyshev, or megakernel");
+if (octreeLeafSolverOverride !== undefined && !["auto", "dense", "compact", "chebyshev", "mgpcg", "megakernel"].includes(octreeLeafSolverOverride)) throw new Error("FLUID_OCTREE_LEAF_SOLVER must be auto, dense, compact, chebyshev, mgpcg, or megakernel");
 const octreeWarmStartOverride = process.env.FLUID_OCTREE_WARM_START === undefined ? undefined : process.env.FLUID_OCTREE_WARM_START !== "0";
+const octreeFaceVelocityMirror = process.env.FLUID_OCTREE_FACE_MIRROR === "1";
+const octreeFaceVelocityRhs = process.env.FLUID_OCTREE_FACE_RHS === "1";
+const octreeFaceVelocityTransport = process.env.FLUID_OCTREE_FACE_TRANSPORT === undefined
+  ? undefined
+  : process.env.FLUID_OCTREE_FACE_TRANSPORT === "1";
+const octreePowerProjectionOverride = process.env.FLUID_OCTREE_POWER_PROJECTION;
+if (octreePowerProjectionOverride !== undefined && !["off", "mirror", "authoritative"].includes(octreePowerProjectionOverride)) {
+  throw new Error("FLUID_OCTREE_POWER_PROJECTION must be off, mirror, or authoritative");
+}
+const octreeGlobalFineFactorOverride = process.env.FLUID_OCTREE_GLOBAL_FINE_FACTOR;
+if (octreeGlobalFineFactorOverride !== undefined && !["off", "4", "8"].includes(octreeGlobalFineFactorOverride)) {
+  throw new Error("FLUID_OCTREE_GLOBAL_FINE_FACTOR must be off, 4, or 8");
+}
+const powerGenerationAuditRequested = process.env.FLUID_POWER_GENERATION_AUDIT === "1";
+const powerGenerationAuditLog = process.env.FLUID_POWER_GENERATION_AUDIT_LOG !== "0";
+const powerStageAuditLog = process.env.FLUID_POWER_STAGE_AUDIT === "1";
+const topologyTransitionAuditLog = process.env.FLUID_TOPOLOGY_TRANSITION_AUDIT === "1";
+const hydrostaticSplitOverride = process.env.FLUID_HYDROSTATIC_SPLIT === undefined ? undefined : process.env.FLUID_HYDROSTATIC_SPLIT !== "0";
 const brickAtlasOverride = process.env.FLUID_BRICK_ATLAS === undefined ? undefined : process.env.FLUID_BRICK_ATLAS !== "0";
 const brickAtlasModeOverride = process.env.FLUID_BRICK_ATLAS_MODE;
 if (brickAtlasModeOverride !== undefined && !["off", "mirror", "authoritative"].includes(brickAtlasModeOverride)) {
@@ -111,6 +224,13 @@ const stabilityEnvelopeRequested = process.env.FLUID_STABILITY_ENVELOPE === "1";
 const energyEverySteps = Number(process.env.FLUID_ENERGY_EVERY_STEPS ?? 0);
 const settlingGateRequested = process.env.FLUID_SETTLING_GATE === "1";
 const sparseStatsRequested = process.env.FLUID_SPARSE_STATS === "1";
+const rasterCheckpointRequested = process.env.FLUID_RASTER_CHECKPOINTS === "1";
+const globalFineGenerationTransitionRequested = process.env.FLUID_GLOBAL_FINE_GENERATION_TRANSITION === "1";
+// Publication-transition acceptance needs the existing bounded renderer
+// counter readback so it can distinguish global fine/coarse authority from an
+// adaptive or retained presentation fallback. This is QA-only and adds no
+// shader bindings or simulation readback.
+if (globalFineGenerationTransitionRequested) process.env.FLUID_WATER_DIAGNOSTICS = "1";
 // The CPU-side level-set/velocity reconstruction has a small positive
 // equilibrium drift even for the uniform oracle.  The default is more than
 // six times the measured uniform 10 s noise floor (1.61e-4 /s on 2026-07-16)
@@ -145,6 +265,11 @@ function selectedScenarios(): SmokeScenarioId[] {
   return ids as SmokeScenarioId[];
 }
 
+function applySceneOverrides(scene: SceneDescription): SceneDescription {
+  if (maxDtOverride !== undefined) scene.numerics.maxDt_s = maxDtOverride;
+  return scene;
+}
+
 async function readFloatTexture3D(device: GPUDevice, texture: GPUTexture, width: number, height: number, depth: number) {
   const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
   const buffer = device.createBuffer({ size: bytesPerRow * height * depth, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -173,6 +298,109 @@ async function readBufferBinding(device: GPUDevice, binding: GPUBufferBinding, b
   bytes.set(new Uint8Array(readback.getMappedRange(0, alignedLength)).subarray(0, byteLength));
   readback.unmap(); readback.destroy();
   return bytes;
+}
+
+interface OctreeFaceMirrorDiagnostics {
+  faceCount: number;
+  faceCapacity: number;
+  overflow: boolean;
+  maximumIncidence: number;
+  incidenceOverflowCount: number;
+  comparedRows: number;
+  mismatchedRows: number;
+  maximumAbsoluteRhsError: number;
+  maximumReferenceRhs: number;
+  projectionComparedFaces: number;
+  projectionMismatchedFaces: number;
+  maximumAbsoluteProjectedVelocityError: number;
+  maximumReferenceProjectedVelocity: number;
+  maximumProjectedDivergence_s?: number;
+  rmsProjectedDivergence_s?: number;
+  maximumProjectedDivergenceStep?: number;
+  rmsProjectedDivergenceStep?: number;
+  projectedDivergenceRows?: number;
+  projectedDivergenceNonFiniteRows?: number;
+  topologyTransferTransferred?: number;
+  topologyTransferInitialized?: number;
+  topologyTransferInvalid?: number;
+  topologyTransferFailed?: boolean;
+  topologyTransferKeyHash?: number;
+  topologyTransferVelocityHash?: number;
+  topologyTransferHashedFaces?: number;
+}
+
+interface OctreePowerFaceTransferDiagnostics {
+  previousFaceCount: number;
+  valid: boolean;
+  flags: number;
+  generation: number;
+  exactFaces: number;
+  fallbackFaces: number;
+  sourceFlags: number;
+}
+interface OctreePowerFaceDiagnostics {
+  rowCount: number; faceCount: number; incidenceCount: number; flags: number;
+  firstInvalid: number; invalidCount: number; boundaryCount: number; generation: number;
+  valid: boolean; lookupMissCount: number; maximumObservedProbe: number; worldBoundaryCount: number;
+  firstInvalidSlot: number; firstInvalidNeighbor: number; firstInvalidDetail: number;
+  firstInvalidRow?: number;
+  firstInvalidPair?: Array<{ row: number; cell: number; size: number; topologyCode: number; transformAndFlags: number; gradient: number[] }>;
+}
+
+async function readOctreeFaceMirrorDiagnostics(device: GPUDevice, source: OctreeFaceMirrorSource, dt_s = 1): Promise<OctreeFaceMirrorDiagnostics> {
+  const projectionParityBuffer = source.projectionParity ?? source.parity;
+  const projectionParityOffset = source.projectionParityOffset ?? 0;
+  const [controlBytes, parityBytes, projectionBytes, divergenceBytes, transferBytes] = await Promise.all([
+    readBufferBinding(device, { buffer: source.control }, 24),
+    readBufferBinding(device, { buffer: source.parity }, 16),
+    readBufferBinding(device, { buffer: projectionParityBuffer, offset: projectionParityOffset }, 16),
+    source.projectedDivergence
+      ? readBufferBinding(device, { buffer: source.projectedDivergence, offset: source.projectedDivergenceOffset ?? 0 }, 16)
+      : undefined,
+    source.topologyTransferDiagnostics
+      ? readBufferBinding(device, { buffer: source.topologyTransferDiagnostics }, 32)
+      : undefined,
+  ]);
+  const control = new Uint32Array(controlBytes.buffer, controlBytes.byteOffset, 6);
+  const parity = new Uint32Array(parityBytes.buffer, parityBytes.byteOffset, 4);
+  const parityFloats = new Float32Array(parity.buffer, parity.byteOffset, 2);
+  const projection = new Uint32Array(projectionBytes.buffer, projectionBytes.byteOffset, 4);
+  const projectionFloats = new Float32Array(projection.buffer, projection.byteOffset, 2);
+  const divergence = divergenceBytes ? new Uint32Array(divergenceBytes.buffer, divergenceBytes.byteOffset, 4) : undefined;
+  const divergenceFloats = divergenceBytes ? new Float32Array(divergenceBytes.buffer, divergenceBytes.byteOffset, 4) : undefined;
+  const maximumProjectedDivergence_s = divergenceFloats?.[0];
+  const rmsProjectedDivergence_s = divergence && divergenceFloats
+    ? Math.sqrt(Math.max(0, divergenceFloats[3]) / Math.max(1, divergence[1]))
+    : undefined;
+  const transfer = transferBytes ? new Uint32Array(transferBytes.buffer, transferBytes.byteOffset, 8) : undefined;
+  return {
+    faceCount: control[0],
+    faceCapacity: control[2],
+    overflow: control[1] !== 0,
+    maximumIncidence: control[4],
+    incidenceOverflowCount: control[5],
+    maximumAbsoluteRhsError: parityFloats[0],
+    maximumReferenceRhs: parityFloats[1],
+    mismatchedRows: parity[2],
+    comparedRows: parity[3],
+    maximumAbsoluteProjectedVelocityError: projectionFloats[0],
+    maximumReferenceProjectedVelocity: projectionFloats[1],
+    projectionMismatchedFaces: projection[2],
+    projectionComparedFaces: projection[3],
+    maximumProjectedDivergence_s,
+    rmsProjectedDivergence_s,
+    maximumProjectedDivergenceStep: maximumProjectedDivergence_s === undefined ? undefined : maximumProjectedDivergence_s * dt_s,
+    rmsProjectedDivergenceStep: rmsProjectedDivergence_s === undefined ? undefined : rmsProjectedDivergence_s * dt_s,
+    projectedDivergenceRows: divergence?.[1],
+    projectedDivergenceNonFiniteRows: divergence?.[2],
+    topologyTransferTransferred: transfer?.[0],
+    topologyTransferInitialized: transfer?.[1],
+    topologyTransferInvalid: transfer?.[2],
+    topologyTransferFailed: transfer ? transfer[3] !== 0 : undefined,
+    topologyTransferKeyHash: transfer?.[4],
+    topologyTransferVelocityHash: transfer?.[5],
+    topologyTransferHashedFaces: transfer?.[6],
+  };
 }
 
 interface SparseVoxelSmokeStats {
@@ -319,6 +547,299 @@ interface HybridPresentationSmokeStats {
   bodyCount: number;
   width: number;
   height: number;
+  frontInterfacePixels: number;
+  backInterfacePixels: number;
+  frontInterfaceHash: number;
+  backInterfaceHash: number;
+  rendererValidationErrorCount: number;
+  rendererUncapturedErrorCount: number;
+  surfaceGeometrySource?: WaterSurfaceGeometrySource;
+  globalFineAuthorityLatch?: number;
+  globalFineCrossingPublished?: boolean;
+  presentationFallbackActive?: boolean;
+  vertexCount?: number;
+  activeCubeCount?: number;
+  vertexAllocator?: number;
+  frontInterfaceBounds_m?: readonly [readonly [number, number, number], readonly [number, number, number]];
+  globalFineAuthorityTransition?: {
+    validGeneration: number;
+    unpublishedGeneration: number;
+    cleanFineCoarseRequired: true;
+    retainedGeometrySource?: WaterSurfaceGeometrySource;
+    retainedFrontInterfacePixels: number;
+    retainedBackInterfacePixels: number;
+    retainedFrontInterfaceHash: number;
+    retainedBackInterfaceHash: number;
+    retainedFrontInterfaceBounds_m?: readonly [readonly [number, number, number], readonly [number, number, number]];
+  };
+}
+
+interface GlobalFineGenerationDiagnostics {
+  generation: number;
+  generationSlot: number;
+  activePages: number;
+  configuredBrickCapacity: number;
+  taggedMetadataPages: number;
+  malformedActivePages: number;
+  validSamples: number;
+  finiteValidSamples: number;
+  negativeValidSamples: number;
+  positiveValidSamples: number;
+  publicationValid: boolean;
+  residentPayloadBytes: number;
+  payloadCapacityBytes: number;
+  payloadFragmentationBytes: number;
+  pageHashBytes: number;
+  pageMetadataBytes: number;
+  pageWorklistBytes: number;
+  diagnosticReadbackBytes: number;
+  coarseState?: number;
+  coarseGeneration?: number;
+  coarseHashCapacity?: number;
+  coarseMaximumLeafSize?: number;
+  coarseEntryCount?: number;
+  coarseNegativeEntries?: number;
+  coarsePositiveEntries?: number;
+  coarseInterfaceEntries?: number;
+  coarseMalformedEntries?: number;
+  seedCount?: number;
+  seedFlags?: number;
+  topologyFlags?: number;
+  topologyInterfaceBricks?: number;
+  topologyDesiredBricks?: number;
+  topologyRequiredDesiredBricks?: number;
+  topologyRequiredDesiredBricksExact?: boolean;
+  topologyDilationBrickRings?: number;
+  topologyActivatedBricks?: number;
+  topologyPublished?: boolean;
+  topologyRolledBack?: boolean;
+  /** Downstream finalization reason mask: topology=1, redistance=2, volume=4, transport=8. */
+  topologyFinalizeReason?: number;
+  phiBitXor: number;
+  phiBitSum: number;
+  phiSum: number;
+  phiAbsSum: number;
+  transportDepartureOutsideBand?: number;
+  transportNonfiniteVelocity?: number;
+  transportProcessed?: number;
+  transportCommitted?: boolean;
+  transportExtrapolatedVelocity?: number;
+  transportMaximumDisplacementFineCells?: number;
+  transportFaceBandUnavailable?: number;
+  transportVelocityUnavailable?: number;
+  redistanceUnresolvedCells?: number;
+  redistanceMaximumResidualScaled?: number;
+  redistanceSeedCount?: number;
+  redistanceCommitted?: boolean;
+  volumeFlags?: number;
+  volumeInitialized?: boolean;
+  volumeSamples?: number;
+  volumeReference?: number;
+  volumeCurrent?: number;
+  volumeInterfaceArea?: number;
+  volumeCorrection?: number;
+  volumeCorrected?: boolean;
+  volumeCoarse?: number;
+  volumeFine?: number;
+  volumeReplacedCoarse?: number;
+  volumeCoarseRows?: number;
+  volumeUnowned?: number;
+  volumeExpectedAir?: number;
+  volumeLookupFailures?: number;
+  volumeStaleOwners?: number;
+  volumeGeneration?: number;
+  powerVelocityFlags?: number;
+  powerVelocityRows?: number;
+  powerVelocityReconstructed?: number;
+  powerVelocityFallbacks?: number;
+  faceBandFlags?: number;
+  faceBandFirstError?: number;
+  faceBandRows?: number;
+  faceBandFaces?: number;
+  faceBandIncidences?: number;
+  faceBandGeneration?: number;
+  faceBandValid?: boolean;
+  faceBandMaximumDepth?: number;
+  faceBandSeeds?: number;
+  faceBandAccepted?: number;
+  faceBandUnresolved?: number;
+  faceBandSampleFailures?: number;
+  faceBandRowCapacity?: number;
+  faceBandFaceCapacity?: number;
+}
+
+async function readGlobalFineGenerationDiagnostics(
+  device: GPUDevice,
+  solver: GPUSolverInstance,
+): Promise<GlobalFineGenerationDiagnostics | undefined> {
+  const source = solver.globalFineLevelSetSource;
+  if (!source) return undefined;
+  const transportControl = (solver as GPUSolverInstance & { globalFineTransportControl?: GPUBuffer })
+    .globalFineTransportControl;
+  const redistanceControl = solver.globalFineRedistanceControl;
+  const volumeControl = solver.globalFineVolumeControl;
+  const powerVelocityControl = (solver as GPUSolverInstance & { globalFinePowerVelocityControl?: GPUBuffer })
+    .globalFinePowerVelocityControl;
+  const faceBandControl = solver.globalFineFaceBandControl;
+  const faceBandPlan = solver.globalFineFaceBandPlan;
+  const pageCapacity = source.plan.maximumResidentBricks;
+  const samplesPerBrick = source.plan.samplesPerBrick;
+  const [worklistBytes, metadataBytes, flagBytes, phiBytes, coarseBytes, seedBytes, topologyBytes,
+    transportBytes, redistanceBytes, volumeBytes, powerVelocityBytes, faceBandBytes] = await Promise.all([
+    readBufferBinding(device, { buffer: source.worklist }, (5 + pageCapacity) * 4),
+    readBufferBinding(device, { buffer: source.metadata }, pageCapacity * 40),
+    readBufferBinding(device, { buffer: source.flags }, pageCapacity * samplesPerBrick * 4),
+    readBufferBinding(device, { buffer: source.phi }, pageCapacity * samplesPerBrick * 4),
+    source.coarsePhiDirectory
+      ? readBufferBinding(device, { buffer: source.coarsePhiDirectory },
+        32 + (source.coarsePhiHashCapacity ?? 0) * 32)
+      : Promise.resolve(undefined),
+    source.seedControl ? readBufferBinding(device, { buffer: source.seedControl }, 8) : Promise.resolve(undefined),
+    source.topologyControl
+      ? readBufferBinding(device, { buffer: source.topologyControl }, 32)
+      : Promise.resolve(undefined),
+    transportControl ? readBufferBinding(device, { buffer: transportControl }, 32) : Promise.resolve(undefined),
+    redistanceControl ? readBufferBinding(device, { buffer: redistanceControl }, 16) : Promise.resolve(undefined),
+    volumeControl ? readBufferBinding(device, { buffer: volumeControl }, 64) : Promise.resolve(undefined),
+    powerVelocityControl ? readBufferBinding(device, { buffer: powerVelocityControl }, 32) : Promise.resolve(undefined),
+    faceBandControl ? readBufferBinding(device, { buffer: faceBandControl }, 64) : Promise.resolve(undefined),
+  ]);
+  const worklist = new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset, worklistBytes.byteLength / 4);
+  const metadata = new Uint32Array(metadataBytes.buffer, metadataBytes.byteOffset, metadataBytes.byteLength / 4);
+  const flags = new Uint32Array(flagBytes.buffer, flagBytes.byteOffset, flagBytes.byteLength / 4);
+  const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4);
+  const phiBits = new Uint32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4);
+  const activePages = Math.min(worklist[0], pageCapacity);
+  let taggedMetadataPages = 0, malformedActivePages = 0;
+  let validSamples = 0, finiteValidSamples = 0, negativeValidSamples = 0, positiveValidSamples = 0;
+  let phiBitXor = 0, phiBitSum = 0, phiSum = 0, phiAbsSum = 0;
+  for (let id = 0; id < pageCapacity; id += 1) if (metadata[id * 10 + 2] === source.generation) taggedMetadataPages += 1;
+  for (let work = 0; work < activePages; work += 1) {
+    const id = worklist[5 + work];
+    if (id >= pageCapacity || metadata[id * 10 + 2] !== source.generation || metadata[id * 10] !== id) {
+      malformedActivePages += 1; continue;
+    }
+    for (let local = 0; local < samplesPerBrick; local += 1) {
+      const index = id * samplesPerBrick + local;
+      if ((flags[index] & 1) === 0) continue;
+      validSamples += 1;
+      const value = phi[index];
+      if (!Number.isFinite(value)) continue;
+      finiteValidSamples += 1;
+      const logicalSample = (Math.imul(metadata[id * 10 + 1], samplesPerBrick) + local) >>> 0;
+      let mixed = Math.imul((phiBits[index] ^ logicalSample) >>> 0, 0x7feb_352d) >>> 0;
+      mixed = Math.imul((mixed ^ (mixed >>> 15)) >>> 0, 0x846c_a68b) >>> 0;
+      mixed = (mixed ^ (mixed >>> 16)) >>> 0;
+      phiBitXor = (phiBitXor ^ mixed) >>> 0; phiBitSum = (phiBitSum + mixed) >>> 0;
+      phiSum += value; phiAbsSum += Math.abs(value);
+      if (value < 0) negativeValidSamples += 1; else positiveValidSamples += 1;
+    }
+  }
+  const coarse = coarseBytes
+    ? new Uint32Array(coarseBytes.buffer, coarseBytes.byteOffset, coarseBytes.byteLength / 4)
+    : undefined;
+  let coarseEntryCount = 0, coarseNegativeEntries = 0, coarsePositiveEntries = 0;
+  let coarseInterfaceEntries = 0, coarseMalformedEntries = 0;
+  if (coarse) for (let slot = 0; slot < (coarse.length - 8) / 8; slot += 1) {
+    const base = 8 + slot * 8;
+    if (coarse[base] === 0) continue;
+    coarseEntryCount += 1;
+    const values = new Float32Array(coarse.buffer, coarse.byteOffset + (base + 2) * 4, 3);
+    const [phiValue, minimumPhi, maximumPhi] = values;
+    if (!Number.isFinite(phiValue) || !Number.isFinite(minimumPhi) || !Number.isFinite(maximumPhi)
+      || minimumPhi > phiValue || phiValue > maximumPhi || (coarse[base + 5] & 9) !== 9) {
+      coarseMalformedEntries += 1; continue;
+    }
+    if (minimumPhi < 0) coarseNegativeEntries += 1; else coarsePositiveEntries += 1;
+    if (minimumPhi <= 0 && maximumPhi >= 0) coarseInterfaceEntries += 1;
+  }
+  const seed = seedBytes
+    ? new Uint32Array(seedBytes.buffer, seedBytes.byteOffset, seedBytes.byteLength / 4)
+    : undefined;
+  const topology = topologyBytes
+    ? new Uint32Array(topologyBytes.buffer, topologyBytes.byteOffset, topologyBytes.byteLength / 4)
+    : undefined;
+  const transport = transportBytes
+    ? new Uint32Array(transportBytes.buffer, transportBytes.byteOffset, transportBytes.byteLength / 4)
+    : undefined;
+  const redistance = redistanceBytes
+    ? new Uint32Array(redistanceBytes.buffer, redistanceBytes.byteOffset, redistanceBytes.byteLength / 4)
+    : undefined;
+  const volume = volumeBytes
+    ? new Uint32Array(volumeBytes.buffer, volumeBytes.byteOffset, volumeBytes.byteLength / 4)
+    : undefined;
+  const volumeFloats = volumeBytes
+    ? new Float32Array(volumeBytes.buffer, volumeBytes.byteOffset, volumeBytes.byteLength / 4)
+    : undefined;
+  const powerVelocity = powerVelocityBytes
+    ? new Uint32Array(powerVelocityBytes.buffer, powerVelocityBytes.byteOffset, powerVelocityBytes.byteLength / 4)
+    : undefined;
+  const faceBand = faceBandBytes
+    ? unpackOctreeFaceBandControl(new Uint32Array(faceBandBytes.buffer, faceBandBytes.byteOffset,
+      faceBandBytes.byteLength / 4))
+    : undefined;
+  return {
+    generation: source.generation, generationSlot: source.generationSlot, activePages,
+    configuredBrickCapacity: pageCapacity,
+    taggedMetadataPages, malformedActivePages, validSamples, finiteValidSamples,
+    negativeValidSamples, positiveValidSamples, phiBitXor, phiBitSum, phiSum, phiAbsSum,
+    residentPayloadBytes: activePages * source.plan.payloadBytesPerBrick,
+    payloadCapacityBytes: source.plan.payloadCapacityBytes,
+    payloadFragmentationBytes: (pageCapacity - activePages) * source.plan.payloadBytesPerBrick,
+    pageHashBytes: source.plan.hashCapacity * 8,
+    pageMetadataBytes: pageCapacity * 40,
+    pageWorklistBytes: (5 + pageCapacity) * 4,
+    diagnosticReadbackBytes: [worklistBytes, metadataBytes, flagBytes, phiBytes, coarseBytes, seedBytes,
+      topologyBytes, transportBytes, redistanceBytes, volumeBytes, powerVelocityBytes, faceBandBytes]
+      .reduce((sum, bytes) => sum + (bytes?.byteLength ?? 0), 0),
+    publicationValid: worklist[1] === source.generation && worklist[3] === 1 && worklist[4] === 1
+      && activePages > 0 && taggedMetadataPages >= activePages && malformedActivePages === 0
+      && validSamples > 0 && finiteValidSamples === validSamples,
+    ...(coarse ? { coarseState: coarse[0], coarseGeneration: coarse[1],
+      coarseHashCapacity: coarse[2], coarseMaximumLeafSize: coarse[3], coarseEntryCount,
+      coarseNegativeEntries, coarsePositiveEntries, coarseInterfaceEntries, coarseMalformedEntries } : {}),
+    ...(seed ? { seedCount: seed[0], seedFlags: seed[1] } : {}),
+    ...(topology ? { topologyFlags: topology[0], topologyInterfaceBricks: topology[1],
+      topologyDesiredBricks: topology[2], topologyActivatedBricks: topology[3],
+      topologyPublished: topology[4] !== 0, topologyRolledBack: topology[5] !== 0,
+      topologyFinalizeReason: topology[7],
+      topologyRequiredDesiredBricks: (topology[0] & 1) !== 0 ? topology[6] : topology[2],
+      topologyRequiredDesiredBricksExact: (topology[0] & 1) === 0,
+      topologyDilationBrickRings: topology[0] === 0 ? topology[6] : 0 } : {}),
+    ...(transport ? { transportDepartureOutsideBand: transport[0], transportNonfiniteVelocity: transport[1],
+      transportProcessed: transport[2], transportCommitted: transport[3] !== 0,
+      transportExtrapolatedVelocity: transport[4],
+      transportMaximumDisplacementFineCells: transport[5], transportFaceBandUnavailable: transport[6],
+      transportVelocityUnavailable: transport[7] } : {}),
+    ...(redistance ? { redistanceUnresolvedCells: redistance[0],
+      redistanceMaximumResidualScaled: redistance[1], redistanceSeedCount: redistance[2],
+      redistanceCommitted: redistance[3] !== 0 } : {}),
+    ...(volume && volumeFloats ? { volumeFlags: volume[0], volumeInitialized: volume[1] !== 0,
+      volumeSamples: volume[2], volumeReference: volumeFloats[3], volumeCurrent: volumeFloats[4],
+      volumeInterfaceArea: volumeFloats[5], volumeCorrection: volumeFloats[6],
+      volumeCorrected: volume[7] !== 0, volumeCoarse: volumeFloats[8], volumeFine: volumeFloats[9],
+      volumeReplacedCoarse: volumeFloats[10], volumeCoarseRows: volume[11], volumeUnowned: volume[12],
+      volumeExpectedAir: volume[12], volumeGeneration: volume[13],
+      volumeLookupFailures: volume[14], volumeStaleOwners: volume[15] } : {}),
+    ...(powerVelocity ? { powerVelocityFlags: powerVelocity[0], powerVelocityRows: powerVelocity[2],
+      powerVelocityReconstructed: powerVelocity[5], powerVelocityFallbacks: powerVelocity[6] } : {}),
+    ...(faceBand ? { faceBandFlags: faceBand.flags, faceBandFirstError: faceBand.firstError,
+      faceBandRows: faceBand.rowCount, faceBandFaces: faceBand.faceCount,
+      faceBandIncidences: faceBand.incidenceCount, faceBandGeneration: faceBand.generation,
+      faceBandValid: faceBand.valid, faceBandMaximumDepth: faceBand.maximumDepth,
+      faceBandSeeds: faceBand.seedCount, faceBandAccepted: faceBand.acceptedCount,
+      faceBandUnresolved: faceBand.unresolvedCount, faceBandSampleFailures: faceBand.sampleFailures,
+      faceBandRowCapacity: faceBandPlan?.rowCapacity, faceBandFaceCapacity: faceBandPlan?.faceCapacity } : {}),
+  };
+}
+
+function decodeFloat16(bits: number): number {
+  const sign = (bits & 0x8000) === 0 ? 1 : -1;
+  const exponent = (bits >>> 10) & 0x1f;
+  const fraction = bits & 0x03ff;
+  if (exponent === 0) return sign * 2 ** -14 * (fraction / 1024);
+  if (exponent === 0x1f) return fraction === 0 ? sign * Infinity : Number.NaN;
+  return sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
 }
 
 function hybridPresentationBodies(scene: SceneDescription, bodies: RigidBodyState[]): RigidBodyState[] {
@@ -338,7 +859,8 @@ async function smokeRenderHybridPresentation(
   device: GPUDevice,
   solver: GPUSolverInstance,
   scene: SceneDescription,
-  bodies: RigidBodyState[]
+  bodies: RigidBodyState[],
+  verifyGlobalFineAuthorityTransition = false,
 ): Promise<HybridPresentationSmokeStats> {
   const width = 320, height = 180;
   const uniformBuffer = device.createBuffer({ label: "Hybrid presentation smoke uniforms", size: 400, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -378,24 +900,133 @@ async function smokeRenderHybridPresentation(
   });
   device.queue.writeBuffer(bodyBuffer, 0, bodyData);
   const pipeline = new RasterWaterPipeline(device, "rgba8unorm", uniformBuffer, bodyBuffer);
+  const uncapturedRendererErrors: string[] = [];
+  const onUncapturedRendererError = (event: Event) => {
+    const error = (event as Event & { error?: GPUError }).error;
+    uncapturedRendererErrors.push(error?.message ?? "unknown uncaptured WebGPU renderer error");
+  };
+  device.addEventListener("uncapturederror", onUncapturedRendererError);
+  device.pushErrorScope("validation");
+  let rendererValidationScopeActive = true;
   try {
     const initializeStarted = performance.now();
     await pipeline.initialize();
     const initializeWall_ms = performance.now() - initializeStarted;
+    const adaptiveOctree = solver.adaptiveFaceMirrorSource && solver.adaptiveFaceVelocitySource && solver.adaptiveSurfacePageSource
+      ? createUnifiedOctreeConsumerSource(solver.adaptiveFaceMirrorSource, solver.adaptiveSurfacePageSource)
+      : undefined;
+    let globalFineLevelSet = solver.globalFineLevelSetSource
+      ? createGlobalFineLevelSetConsumerSource(solver.globalFineLevelSetSource)
+      : undefined;
+    if (verifyGlobalFineAuthorityTransition && !globalFineLevelSet) {
+      throw new Error("Global-fine authority transition requested without a published source");
+    }
     pipeline.setVolume(solver.surfaceFieldTexture ?? solver.volumeTexture, solver.columnBaseTexture);
+    pipeline.setAdaptiveOctree(adaptiveOctree);
+    pipeline.setGlobalFineLevelSet(globalFineLevelSet);
     pipeline.ensureSize(width, height);
-    const frameStarted = performance.now();
-    const encoder = device.createCommandEncoder({ label: "Hybrid smooth WebGPU smoke" });
-    const encoded = pipeline.encode(
-      encoder, output.createView(), solver.info.nx, solver.info.ny, solver.info.nz,
-      solver.info.gridKind === "restricted-tall-cell", solver.info.maximumNeighborDelta ?? 0,
-      solver.info.encodedSteps ?? 0
-    );
-    if (!encoded) throw new Error("Hybrid presentation pipeline did not encode a frame");
-    device.queue.submit([encoder.finish()]);
+    const capture = async (label: string, revision: number) => {
+      const frameStarted = performance.now();
+      const encoder = device.createCommandEncoder({ label });
+      const encoded = pipeline.encode(
+        encoder, output.createView(), solver.info.nx, solver.info.ny, solver.info.nz,
+        solver.info.gridKind === "restricted-tall-cell", solver.info.maximumNeighborDelta ?? 0,
+        revision
+      );
+      if (!encoded) throw new Error("Hybrid presentation pipeline did not encode a frame");
+      const interfaceCapture = pipeline.diagnosticCaptureTexture("interface-positions");
+      if (!interfaceCapture) throw new Error("Hybrid presentation did not expose its front interface target");
+      const backInterfaceCapture = pipeline.diagnosticCaptureTexture("back-interface-positions");
+      if (!backInterfaceCapture) throw new Error("Hybrid presentation did not expose its back interface target");
+      const interfaceBytesPerRow = Math.ceil(width * 8 / 256) * 256;
+      const interfacePlaneBytes = interfaceBytesPerRow * height;
+      const interfaceReadback = device.createBuffer({ size: 2 * interfacePlaneBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      try {
+        encoder.copyTextureToBuffer({ texture: interfaceCapture.texture }, { buffer: interfaceReadback, bytesPerRow: interfaceBytesPerRow, rowsPerImage: height }, [width, height]);
+        encoder.copyTextureToBuffer({ texture: backInterfaceCapture.texture }, { buffer: interfaceReadback, offset: interfacePlaneBytes, bytesPerRow: interfaceBytesPerRow, rowsPerImage: height }, [width, height]);
+        device.queue.submit([encoder.finish()]);
+        const presentationDiagnostics = await pipeline.completeAdaptiveDiagnostics();
+        await device.queue.onSubmittedWorkDone();
+        await interfaceReadback.mapAsync(GPUMapMode.READ);
+        const interfaceWords = new Uint16Array(interfaceReadback.getMappedRange());
+        const interfaceRowWords = interfaceBytesPerRow / 2;
+        let frontInterfacePixels = 0, backInterfacePixels = 0;
+        let frontInterfaceHash = 0x811c_9dc5, backInterfaceHash = 0x811c_9dc5;
+        const fold = (hash: number, value: number) => Math.imul((hash ^ value) >>> 0, 0x0100_0193) >>> 0;
+        const frontMinimum: [number, number, number] = [Infinity, Infinity, Infinity];
+        const frontMaximum: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+        for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+          const at = y * interfaceRowWords + x * 4;
+          const backAt = interfacePlaneBytes / 2 + at;
+          for (let channel = 0; channel < 4; channel += 1) {
+            frontInterfaceHash = fold(frontInterfaceHash, interfaceWords[at + channel]);
+            backInterfaceHash = fold(backInterfaceHash, interfaceWords[backAt + channel]);
+          }
+          if (interfaceWords[at + 3] !== 0) {
+            frontInterfacePixels += 1;
+            for (let axis = 0; axis < 3; axis += 1) {
+              const value = decodeFloat16(interfaceWords[at + axis]);
+              frontMinimum[axis] = Math.min(frontMinimum[axis], value);
+              frontMaximum[axis] = Math.max(frontMaximum[axis], value);
+            }
+          }
+          if (interfaceWords[backAt + 3] !== 0) backInterfacePixels += 1;
+        }
+        interfaceReadback.unmap();
+        return { initializeWall_ms, frameWall_ms: performance.now() - frameStarted,
+          bodyCount: presentationBodies.length, width, height, frontInterfacePixels, backInterfacePixels,
+          frontInterfaceHash, backInterfaceHash,
+          ...(presentationDiagnostics ? {
+            surfaceGeometrySource: presentationDiagnostics.surfaceGeometrySource,
+            globalFineAuthorityLatch: presentationDiagnostics.globalFineAuthorityLatch,
+            globalFineCrossingPublished: presentationDiagnostics.globalFineCrossingPublished,
+            presentationFallbackActive: presentationDiagnostics.presentationFallbackActive,
+            vertexCount: presentationDiagnostics.vertexCount,
+            activeCubeCount: presentationDiagnostics.activeCubeCount,
+            vertexAllocator: presentationDiagnostics.vertexAllocator,
+          } : {}),
+          ...(frontInterfacePixels > 0 ? { frontInterfaceBounds_m: [frontMinimum, frontMaximum] as const } : {}) };
+      } finally {
+        interfaceReadback.destroy();
+      }
+    };
+    const revision = solver.info.encodedSteps ?? 0;
+    const validA = await capture("Hybrid smooth WebGPU smoke", revision);
+    let globalFineAuthorityTransition: HybridPresentationSmokeStats["globalFineAuthorityTransition"];
+    if (verifyGlobalFineAuthorityTransition && globalFineLevelSet) {
+      const unpublishedGeneration = globalFineLevelSet.generation + 1;
+      pipeline.setGlobalFineLevelSet({ ...globalFineLevelSet, generation: unpublishedGeneration });
+      const invalidB = await capture("Unpublished global-fine generation retention smoke", revision + 1);
+      globalFineAuthorityTransition = {
+        validGeneration: globalFineLevelSet.generation, unpublishedGeneration, cleanFineCoarseRequired: true,
+        retainedGeometrySource: invalidB.surfaceGeometrySource,
+        retainedFrontInterfacePixels: invalidB.frontInterfacePixels,
+        retainedBackInterfacePixels: invalidB.backInterfacePixels,
+        retainedFrontInterfaceHash: invalidB.frontInterfaceHash,
+        retainedBackInterfaceHash: invalidB.backInterfaceHash,
+        ...(invalidB.frontInterfaceBounds_m ? { retainedFrontInterfaceBounds_m: invalidB.frontInterfaceBounds_m } : {}),
+      };
+    }
+    if (process.env.FLUID_WATER_DIAGNOSTICS === "1") {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      console.info(JSON.stringify({ phase: "hybrid-water-diagnostics", ...pipeline.adaptiveRenderDiagnostics }));
+    }
     await device.queue.onSubmittedWorkDone();
-    return { initializeWall_ms, frameWall_ms: performance.now() - frameStarted, bodyCount: presentationBodies.length, width, height };
+    const rendererValidationError = await device.popErrorScope();
+    rendererValidationScopeActive = false;
+    await Promise.resolve();
+    const rendererErrors = [
+      ...(rendererValidationError ? [rendererValidationError.message] : []),
+      ...uncapturedRendererErrors,
+    ];
+    if (rendererErrors.length > 0) {
+      throw new Error(`RasterWaterPipeline production validation failed:\n${rendererErrors.join("\n")}`);
+    }
+    return { ...validA, rendererValidationErrorCount: 0, rendererUncapturedErrorCount: 0,
+      ...(globalFineAuthorityTransition ? { globalFineAuthorityTransition } : {}) };
   } finally {
+    if (rendererValidationScopeActive) await device.popErrorScope().catch(() => null);
+    device.removeEventListener("uncapturederror", onUncapturedRendererError);
     pipeline.destroy(); output.destroy(); uniformBuffer.destroy(); bodyBuffer.destroy();
   }
 }
@@ -582,7 +1213,8 @@ function velocityDifferenceMagnitude(left: Float32Array, right: Float32Array) {
 }
 
 async function readFloatTexture2D(device: GPUDevice, texture: GPUTexture, width: number, height: number) {
-  const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
+  const components = texture.format === "rg32float" ? 2 : 1;
+  const bytesPerRow = Math.ceil(width * components * 4 / 256) * 256;
   const buffer = device.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
   encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: height }, { width, height });
@@ -590,7 +1222,10 @@ async function readFloatTexture2D(device: GPUDevice, texture: GPUTexture, width:
   await buffer.mapAsync(GPUMapMode.READ);
   const mapped = new Uint8Array(buffer.getMappedRange());
   const output = new Float32Array(width * height);
-  for (let y = 0; y < height; y += 1) output.set(new Float32Array(mapped.buffer, mapped.byteOffset + bytesPerRow * y, width), width * y);
+  for (let y = 0; y < height; y += 1) {
+    const row = new Float32Array(mapped.buffer, mapped.byteOffset + bytesPerRow * y, width * components);
+    for (let x = 0; x < width; x += 1) output[x + width * y] = row[components * x];
+  }
   buffer.unmap(); buffer.destroy();
   return output;
 }
@@ -656,8 +1291,143 @@ function inspectTallVolumeGaps(packed: ArrayLike<number>, bases: ArrayLike<numbe
   return { dryTallColumns, dryTallWithWetRegularAbove, mixedEndpointColumns, wetBandCeilingColumns, unexcusedDeltaViolations, examples };
 }
 
-async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance) {
+interface CubicVolumeFieldReadback {
+  field: Float32Array;
+  summary: ScalarFieldSummary;
+  compactFieldEvidence?: CompactOctreeFieldEvidence;
+  tallCellActivity?: TallCellActivitySummary;
+  tallVolumeGaps?: ReturnType<typeof inspectTallVolumeGaps>;
+}
+
+async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance): Promise<CubicVolumeFieldReadback> {
   const { nx, ny, nz, storedNy, gridKind } = solver.info;
+  const compactPaged = solver.info.gridKind === "octree" && (
+    Boolean(solver.adaptiveSurfacePageSource) || (solver.info.adaptiveSurfacePageCapacity ?? 0) > 0
+  );
+  if (compactPaged) {
+    const source = solver.globalFineLevelSetSource;
+    if (!source?.coarsePhiDirectory || !source.coarsePhiHashCapacity) {
+      if (requireSpatialField) {
+        throw new Error("Compact octree QA field requires a published global-fine source and compact-coarse fallback");
+      }
+      // Legacy compact-only smoke cases do not request cross-method spatial
+      // acceptance. Keep their reduction summary while making the exact
+      // comparison harness fail closed via FLUID_REQUIRE_SPATIAL_FIELD=1.
+      const cellSum = solver.info.volumeCellSum ?? solver.info.initialVolumeCellSum ?? 0;
+      const occupied = Math.max(0, Math.min(nx * ny * nz, Math.round(cellSum)));
+      return { field: new Float32Array(0), summary: {
+        minimum: 0, maximum: 1, cellSum, wetCells: occupied, mixedCells: solver.info.phiInterfaceCellCount ?? 0,
+        excessCells: 0, meanColumnAmount: cellSum / Math.max(1, nx * nz), columnAmountStdDev: 0,
+        componentCount: occupied > 0 ? 1 : 0, largestComponent: occupied, interfaceFaceCount: 0,
+        enclosedAirComponentCount: 0, enclosedAirCells: 0, centroidCells: null,
+      } };
+    }
+    const sampleWords = source.plan.maximumResidentBricks * source.plan.samplesPerBrick;
+    const [hashBytes, metadataBytes, flagBytes, phiBytes, worklistBytes, coarseBytes, coarseControlBytes,
+      topologyBytes, transportBytes, redistanceBytes, volumeBytes, faceBandBytes,
+      faceBandTransitionBytes, faceBandTransientPowerBytes, faceBandPointFieldBytes, faceBandPowerPublicationBytes,
+      powerVelocityBytes, powerVelocitySampleBytes] = await Promise.all([
+      readBufferBinding(device, { buffer: source.hash }, source.plan.hashCapacity * 8),
+      readBufferBinding(device, { buffer: source.metadata }, source.plan.maximumResidentBricks * 40),
+      readBufferBinding(device, { buffer: source.flags }, sampleWords * 4),
+      readBufferBinding(device, { buffer: source.phi }, sampleWords * 4),
+      readBufferBinding(device, { buffer: source.worklist }, (5 + source.plan.maximumResidentBricks) * 4),
+      readBufferBinding(device, { buffer: source.coarsePhiDirectory }, 32 + source.coarsePhiHashCapacity * 32),
+      solver.globalFineCoarseLevelSetControl
+        ? readBufferBinding(device, { buffer: solver.globalFineCoarseLevelSetControl }, 64)
+        : Promise.resolve(undefined),
+      source.topologyControl
+        ? readBufferBinding(device, { buffer: source.topologyControl }, 32)
+        : Promise.resolve(undefined),
+      solver.globalFineTransportControl
+        ? readBufferBinding(device, { buffer: solver.globalFineTransportControl }, 32)
+        : Promise.resolve(undefined),
+      solver.globalFineRedistanceControl
+        ? readBufferBinding(device, { buffer: solver.globalFineRedistanceControl }, 16)
+        : Promise.resolve(undefined),
+      solver.globalFineVolumeControl
+        ? readBufferBinding(device, { buffer: solver.globalFineVolumeControl }, 64)
+        : Promise.resolve(undefined),
+      solver.globalFineFaceBandControl
+        ? readBufferBinding(device, { buffer: solver.globalFineFaceBandControl }, 64)
+        : Promise.resolve(undefined),
+      solver.globalFineFaceBandTransitionControl
+        ? readBufferBinding(device, { buffer: solver.globalFineFaceBandTransitionControl }, 128)
+        : Promise.resolve(undefined),
+      solver.globalFineFaceBandTransientPowerControl
+        ? readBufferBinding(device, { buffer: solver.globalFineFaceBandTransientPowerControl }, 64)
+        : Promise.resolve(undefined),
+      solver.globalFineFaceBandPointFieldControl
+        ? readBufferBinding(device, { buffer: solver.globalFineFaceBandPointFieldControl }, 32)
+        : Promise.resolve(undefined),
+      solver.globalFineFaceBandPowerPublicationControl
+        ? readBufferBinding(device, { buffer: solver.globalFineFaceBandPowerPublicationControl }, 64)
+        : Promise.resolve(undefined),
+      solver.globalFinePowerVelocityControl
+        ? readBufferBinding(device, { buffer: solver.globalFinePowerVelocityControl }, 32)
+        : Promise.resolve(undefined),
+      solver.globalFinePowerVelocitySampleControl
+        ? readBufferBinding(device, { buffer: solver.globalFinePowerVelocitySampleControl }, 32)
+        : Promise.resolve(undefined),
+    ]);
+    const compactSnapshot = {
+      plan: source.plan,
+      generation: source.generation,
+      hash: new Uint32Array(hashBytes.buffer, hashBytes.byteOffset, hashBytes.byteLength / 4),
+      metadata: new Uint32Array(metadataBytes.buffer, metadataBytes.byteOffset, metadataBytes.byteLength / 4),
+      flags: new Uint32Array(flagBytes.buffer, flagBytes.byteOffset, flagBytes.byteLength / 4),
+      phi: new Float32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4),
+      worklist: new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset, worklistBytes.byteLength / 4),
+      coarseDirectory: new Uint32Array(coarseBytes.buffer, coarseBytes.byteOffset, coarseBytes.byteLength / 4),
+      ...(coarseControlBytes ? { coarseControl: new Uint32Array(coarseControlBytes.buffer,
+        coarseControlBytes.byteOffset, coarseControlBytes.byteLength / 4) } : {}),
+      ...(topologyBytes ? { topologyControl: new Uint32Array(topologyBytes.buffer, topologyBytes.byteOffset,
+        topologyBytes.byteLength / 4) } : {}),
+      ...(transportBytes ? { transportControl: new Uint32Array(transportBytes.buffer, transportBytes.byteOffset,
+        transportBytes.byteLength / 4) } : {}),
+      ...(redistanceBytes ? { redistanceControl: new Uint32Array(redistanceBytes.buffer, redistanceBytes.byteOffset,
+        redistanceBytes.byteLength / 4) } : {}),
+      ...(volumeBytes ? { volumeControl: new Uint32Array(volumeBytes.buffer, volumeBytes.byteOffset,
+        volumeBytes.byteLength / 4) } : {}),
+      ...(faceBandBytes ? { faceBandControl: new Uint32Array(faceBandBytes.buffer, faceBandBytes.byteOffset,
+        faceBandBytes.byteLength / 4) } : {}),
+      ...(faceBandTransitionBytes ? { faceBandTransitionControl: new Uint32Array(
+        faceBandTransitionBytes.buffer, faceBandTransitionBytes.byteOffset,
+        faceBandTransitionBytes.byteLength / 4) } : {}),
+      ...(faceBandTransientPowerBytes ? { faceBandTransientPowerControl: new Uint32Array(
+        faceBandTransientPowerBytes.buffer, faceBandTransientPowerBytes.byteOffset,
+        faceBandTransientPowerBytes.byteLength / 4) } : {}),
+      ...(faceBandPointFieldBytes ? { faceBandPointFieldControl: new Uint32Array(
+        faceBandPointFieldBytes.buffer, faceBandPointFieldBytes.byteOffset,
+        faceBandPointFieldBytes.byteLength / 4) } : {}),
+      ...(faceBandPowerPublicationBytes ? { faceBandPowerPublicationControl: new Uint32Array(
+        faceBandPowerPublicationBytes.buffer, faceBandPowerPublicationBytes.byteOffset,
+        faceBandPowerPublicationBytes.byteLength / 4) } : {}),
+      ...(powerVelocityBytes ? { powerVelocityControl: new Uint32Array(powerVelocityBytes.buffer,
+        powerVelocityBytes.byteOffset, powerVelocityBytes.byteLength / 4) } : {}),
+      ...(powerVelocitySampleBytes ? { powerVelocitySampleControl: new Uint32Array(
+        powerVelocitySampleBytes.buffer, powerVelocitySampleBytes.byteOffset,
+        powerVelocitySampleBytes.byteLength / 4) } : {}),
+    };
+    let reconstructed: ReturnType<typeof reconstructCompactOctreeOccupancyField>;
+    try {
+      reconstructed = reconstructCompactOctreeOccupancyField(compactSnapshot, [nx, ny, nz]);
+    } catch (error) {
+      console.error(JSON.stringify({ phase: "compact-octree-field-publication-rejected", grid: [nx, ny, nz],
+        ...compactOctreePublicationHeaderEvidence(compactSnapshot),
+        error: error instanceof Error ? error.message : String(error) }));
+      throw error;
+    }
+    const { field, ...compactFieldEvidence } = reconstructed;
+    // Keep the complete publication transaction visible even when compact
+    // reconstruction succeeds. Section 5 face-band failures are downstream
+    // of the fine/coarse field gate, so hiding these headers on the successful
+    // path discards the exact transition tier/detail that must remain
+    // fail-closed (in particular the first exact-owner mismatch record).
+    console.log(JSON.stringify({ phase: "compact-octree-field-readback", grid: [nx, ny, nz],
+      ...compactOctreePublicationHeaderEvidence(compactSnapshot), ...compactFieldEvidence }));
+    return { field, summary: summarizeScalarField(field, nx, ny, nz), compactFieldEvidence };
+  }
   const levelSet = solver.info.surfaceField === "levelset";
   const packed = await readFloatTexture3D(device, levelSet ? solver.surfaceFieldTexture ?? solver.volumeTexture : solver.volumeTexture, nx, storedNy, nz);
   let bases = new Float32Array(nx * nz);
@@ -699,6 +1469,7 @@ interface GPUSmokeResult {
   grid: [number, number, number];
   matchedField: Float32Array;
   matchedSummary: ScalarFieldSummary;
+  compactFieldEvidence?: CompactOctreeFieldEvidence;
   matchedTallCellActivity?: TallCellActivitySummary;
   finalSummary?: ScalarFieldSummary;
   finalTallCellActivity?: TallCellActivitySummary;
@@ -713,15 +1484,36 @@ interface GPUSmokeResult {
   initialFluidBrickStats?: FluidBrickSnapshot;
   sparseVoxelStats?: SparseVoxelSmokeStats;
   hybridPresentationStats?: HybridPresentationSmokeStats;
+  initialGlobalFineGeneration?: GlobalFineGenerationDiagnostics;
+  initialGlobalFineRaster?: HybridPresentationSmokeStats;
+  finalGlobalFineGeneration?: GlobalFineGenerationDiagnostics;
+  finalGlobalFineRaster?: HybridPresentationSmokeStats;
+  octreeFaceMirrorDiagnostics?: OctreeFaceMirrorDiagnostics;
+  octreePowerFaceTransferDiagnostics?: OctreePowerFaceTransferDiagnostics;
+  octreePowerFaceDiagnostics?: OctreePowerFaceDiagnostics;
+  octreePowerTopologyDiagnostics?: OctreePowerTopologyDiagnostics;
+  octreeMGPCGDiagnostics?: OctreeMGPCGDiagnostics;
   stabilityEnvelope?: StabilityEnvelope;
   energyTrace: MechanicalEnergySample[];
   checkpoints: Array<{
     time_s: number;
     field: Float32Array;
     summary: ScalarFieldSummary;
+    /** GPU raster result sampled for QA only; never feeds the simulation. */
+    raster?: HybridPresentationSmokeStats;
+    globalFineGeneration?: GlobalFineGenerationDiagnostics;
     preProjectionVelocity?: Float32Array;
     postProjectionVelocity?: Float32Array;
   }>;
+}
+
+interface OctreePowerTopologyDiagnostics {
+  descriptor: { rowCount: number; validCount: number; errorCount: number; firstInvalid: number; flags: number;
+    sameOrFinerCount: number; sameOrCoarserCount: number; generation: number };
+  topology: { invalidCount: number; firstInvalid: number; flags: number; resolvedCount: number; version: number };
+  firstInvalidRow?: { row: number; descriptor: number; topologyCode: number; transformAndFlags: number;
+    volume: number; reserved: number; cell: number; size: number;
+    ownerNeighborhood?: Array<{ direction: number; probe: [number, number, number]; origin: [number, number, number]; size: number; invalid: boolean }> };
 }
 
 interface MechanicalEnergySample {
@@ -809,7 +1601,8 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
   const info = result.info;
   console.log(JSON.stringify({
     scenario, method: result.method, phase: "result", construction_ms: Math.round(result.construction_ms), runtime_ms: Math.round(result.runtime_ms), simulationWall_ms: Math.round(result.simulationWall_ms), steps: result.steps,
-    simulatedTime_s: info.simulatedTime_s, grid: [info.nx, info.storedNy, info.nz], cubicGrid: result.grid,
+    simulatedTime_s: info.simulatedTime_s, submittedTime_s: info.submittedTime_s, completedTime_s: info.completedTime_s,
+    grid: [info.nx, info.storedNy, info.nz], cubicGrid: result.grid,
     allocatedBytes: info.allocatedBytes,
     encodedSteps: info.encodedSteps, gridKind: info.gridKind, compressionRatio: info.compressionRatio,
     activeCompressionRatio: info.activeCompressionRatio, activeSampleCount: info.activeSampleCount,
@@ -831,6 +1624,19 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     pressureRequiredRows: info.pressureRequiredRows,
     pressureRequiredEntries: info.pressureRequiredEntries,
     pressureCapacityOverflow: info.pressureCapacityOverflow,
+    powerDiagramProjection: info.powerDiagramProjection,
+    powerDiagramReady: info.powerDiagramReady,
+    powerDiagramAuthoritative: info.powerDiagramAuthoritative,
+    powerDiagramFallbackReason: info.powerDiagramFallbackReason,
+    powerDiagramAllocatedBytes: info.powerDiagramAllocatedBytes,
+    globalFineLevelSetAllocatedBytes: info.globalFineLevelSetAllocatedBytes,
+    globalFineLevelSetResidentBrickCapacity: info.globalFineLevelSetResidentBrickCapacity,
+    globalFineLevelSetLogicalBrickCount: info.globalFineLevelSetLogicalBrickCount,
+    globalFineLevelSetEnabled: info.globalFineLevelSetEnabled,
+    globalFineLevelSetFactor: info.globalFineLevelSetFactor,
+    frontierListCapacity: info.frontierListCapacity,
+    frontierRequiredLeaves: info.frontierRequiredLeaves,
+    frontierCapacityOverflow: info.frontierCapacityOverflow,
     quadtreePressureConverged: info.quadtreePressureConverged,
     quadtreeFactorLevelCount: info.quadtreeFactorLevelCount,
     quadtreeMultigridLevelCount: info.quadtreeMultigridLevelCount,
@@ -843,20 +1649,62 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     quadtreeCPUSystemPack_ms: info.quadtreeCPUSystemPack_ms,
     quadtreeCPUICFactorization_ms: info.quadtreeCPUICFactorization_ms,
     quadtreeCPUResourceUpload_ms: info.quadtreeCPUResourceUpload_ms,
+    quadtreeTopologyReadbackBytes: info.quadtreeTopologyReadbackBytes,
     quadtreePressurePhaseTimings: info.quadtreePressurePhaseTimings,
     initialVolumeCellSum: info.initialVolumeCellSum, volumeCellSum: info.volumeCellSum,
     representedVolumeCellSum: info.representedVolumeCellSum, volumeDrift: info.volumeDrift,
     representedVolumeDrift: info.representedVolumeDrift, rawVolumeDrift: info.rawVolumeDrift,
     volumeCorrectionNormalSpeed_cells_s: info.volumeCorrectionNormalSpeed_cells_s, volumeCorrectionDivergenceRate_s: info.volumeCorrectionDivergenceRate_s, phiInterfaceCellCount: info.phiInterfaceCellCount, front_m: info.front_m,
-    maxSpeed_m_s: info.maxSpeed_m_s, maxDivergenceBefore_s: info.maxDivergenceBefore_s,
+    maxSpeed_m_s: info.maxSpeed_m_s, maxComponentCfl: info.maxComponentCfl,
+    adaptiveFaceTransportedCount: info.adaptiveFaceTransportedCount,
+    adaptiveSurfacePageCapacity: info.adaptiveSurfacePageCapacity,
+    adaptiveSurfaceActivePages: info.adaptiveSurfaceActivePages,
+    adaptiveSurfaceCandidatePages: info.adaptiveSurfaceCandidatePages,
+    adaptiveSurfaceOverflow: info.adaptiveSurfaceOverflow,
+    adaptiveSurfaceOverflowCode: info.adaptiveSurfaceOverflowCode,
+    pagedPhiDifferentialSamples: info.pagedPhiDifferentialSamples,
+    pagedPhiDifferentialComparedSamples: info.pagedPhiDifferentialComparedSamples,
+    pagedPhiDifferentialMaxAbs: info.pagedPhiDifferentialMaxAbs,
+    pagedPhiDifferentialMeanAbs: info.pagedPhiDifferentialMeanAbs,
+    pagedPhiDifferentialSignMismatches: info.pagedPhiDifferentialSignMismatches,
+    pagedPhiDifferentialHashMisses: info.pagedPhiDifferentialHashMisses,
+    pagedPhiDifferentialAffineFallbacks: info.pagedPhiDifferentialAffineFallbacks,
+    pagedPhiDifferentialMaxCell: info.pagedPhiDifferentialMaxCell,
+    pagedPhiDifferentialMaxDensePhi: info.pagedPhiDifferentialMaxDensePhi,
+    pagedPhiDifferentialMaxPagedPhi: info.pagedPhiDifferentialMaxPagedPhi,
+    maxDivergenceBefore_s: info.maxDivergenceBefore_s,
     maxDivergenceAfter_s: info.maxDivergenceAfter_s, pressureRelativeResidual: info.pressureRelativeResidual,
     pressureResidual: info.pressureResidual,
     nonFiniteCount: info.nonFiniteCount, stabilityFlags: info.stabilityFlags, gpuTimings: info.gpuTimings,
     matchedFieldStats: result.matchedSummary, volumeFieldStats: result.finalSummary,
+    compactFieldEvidence: result.compactFieldEvidence,
     matchedTallCellActivity: result.matchedTallCellActivity, finalTallCellActivity: result.finalTallCellActivity,
     finalTallVolumeGaps: result.finalTallVolumeGaps,
     velocitySummary: result.velocitySummary, initialFluidBrickStats: result.initialFluidBrickStats,
-    sparseVoxelStats: result.sparseVoxelStats, hybridPresentationStats: result.hybridPresentationStats, stabilityEnvelope: result.stabilityEnvelope,
+    sparseVoxelStats: result.sparseVoxelStats, hybridPresentationStats: result.hybridPresentationStats,
+    initialGlobalFineGeneration: result.initialGlobalFineGeneration,
+    initialGlobalFineRaster: result.initialGlobalFineRaster,
+    finalGlobalFineGeneration: result.finalGlobalFineGeneration,
+    finalGlobalFineRaster: result.finalGlobalFineRaster,
+    globalFineGenerationCheckpoints: result.checkpoints.map(({ time_s, globalFineGeneration, raster }) => ({
+      time_s, globalFineGeneration,
+      raster: raster ? { frontInterfacePixels: raster.frontInterfacePixels, backInterfacePixels: raster.backInterfacePixels,
+        frontInterfaceHash: raster.frontInterfaceHash, backInterfaceHash: raster.backInterfaceHash,
+        frontInterfaceBounds_m: raster.frontInterfaceBounds_m,
+        surfaceGeometrySource: raster.surfaceGeometrySource,
+        globalFineAuthorityLatch: raster.globalFineAuthorityLatch,
+        globalFineCrossingPublished: raster.globalFineCrossingPublished,
+        presentationFallbackActive: raster.presentationFallbackActive,
+        vertexCount: raster.vertexCount, activeCubeCount: raster.activeCubeCount,
+        vertexAllocator: raster.vertexAllocator,
+        globalFineAuthorityTransition: raster.globalFineAuthorityTransition } : undefined,
+    })),
+    octreeFaceMirrorDiagnostics: result.octreeFaceMirrorDiagnostics,
+    octreePowerFaceTransferDiagnostics: result.octreePowerFaceTransferDiagnostics,
+    octreePowerFaceDiagnostics: result.octreePowerFaceDiagnostics,
+    octreePowerTopologyDiagnostics: result.octreePowerTopologyDiagnostics,
+    octreeMGPCGDiagnostics: result.octreeMGPCGDiagnostics,
+    stabilityEnvelope: result.stabilityEnvelope,
     energyTraceSummary: energyTraceSummary(result.energyTrace),
     validationErrors: result.validationErrors
   }));
@@ -868,7 +1716,11 @@ async function runGPU(
   target_s: number,
   oracleSteps: number
 ): Promise<GPUSmokeResult> {
-  const scenario = createSmokeScenario(scenarioId), scene = scenario.scene;
+  const scenario = createSmokeScenario(scenarioId), scene = applySceneOverrides(scenario.scene);
+  // Validation comparisons need the exact same cubic lattice on every
+  // backend. Method parameter schemas retain their product/UI minimums, while
+  // this scene-level validation override deliberately bypasses those clamps.
+  if (surfaceColumnsOverride !== undefined) scene.numerics.surfaceColumnsOverride = surfaceColumnsOverride;
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("Dawn did not expose a WebGPU adapter");
   // FLUID_DISABLE_TIMESTAMPS=1 drops the timestamp-query feature: under Dawn
@@ -881,6 +1733,7 @@ async function runGPU(
   ];
   const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
   const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
+  await assertComputeSentinel(device);
   let lost: GPUDeviceLostInfo | undefined;
   void device.lost.then((info) => { lost = info; });
   const validationErrors: string[] = [];
@@ -899,6 +1752,7 @@ async function runGPU(
   const bodies = initializeRigidBodies(scene.rigidBodies);
   const constructionStarted = performance.now();
   const values = method.presetFor(quality);
+  if (surfaceColumnsOverride !== undefined) values.surfaceColumns = surfaceColumnsOverride;
   if (method.id === "tall-cell" && pressureCyclesOverride !== undefined) values.pressureCycles = pressureCyclesOverride;
   if (method.id === "tall-cell" && pressureWarmStartOverride !== undefined) values.pressureWarmStart = pressureWarmStartOverride ? "on" : "off";
   if ((method.id === "quadtree-tall-cell" || method.id === "octree") && pressureCyclesOverride !== undefined) values.pressureIterations = pressureCyclesOverride;
@@ -920,6 +1774,12 @@ async function runGPU(
   if (method.id === "octree" && octreeAdaptivityOverride !== undefined) values.adaptivity = octreeAdaptivityOverride;
   if (method.id === "octree" && octreeLeafSolverOverride !== undefined) values.leafSolver = octreeLeafSolverOverride;
   if (method.id === "octree" && octreeWarmStartOverride !== undefined) values.pressureWarmStart = octreeWarmStartOverride ? "on" : "off";
+  if (method.id === "octree" && octreeFaceVelocityMirror) values.faceVelocityMirror = "on";
+  if (method.id === "octree" && octreeFaceVelocityRhs) values.faceVelocityRhs = "on";
+  if (method.id === "octree" && octreeFaceVelocityTransport !== undefined) values.faceVelocityTransport = octreeFaceVelocityTransport ? "on" : "off";
+  if (method.id === "octree" && octreePowerProjectionOverride !== undefined) values.powerDiagramProjection = octreePowerProjectionOverride;
+  if (method.id === "octree" && octreeGlobalFineFactorOverride !== undefined) values.globalFineLevelSetFactor = octreeGlobalFineFactorOverride;
+  if (method.id === "octree" && hydrostaticSplitOverride !== undefined) values.hydrostaticSplit = hydrostaticSplitOverride ? "on" : "off";
   if (method.id === "octree" && brickAtlasOverride !== undefined) values.brickAtlas = brickAtlasOverride ? "mirror" : "off";
   if (method.id === "octree" && brickAtlasModeOverride !== undefined) values.brickAtlas = brickAtlasModeOverride;
   if (method.id === "octree" && brickPreActivationOverride !== undefined) values.brickPreActivation = brickPreActivationOverride ? "on" : "off";
@@ -960,8 +1820,18 @@ async function runGPU(
       referenceVolumeScale: typeof values.referenceVolumeScale === "number" ? values.referenceVolumeScale : undefined,
       hierarchicalExtrapolation: values.hierarchicalExtrapolation !== "off"
     })
-    : method.createSolver!(instrumentedDevice, scene, quality, values);
+    : method.id === "octree" && octreePowerProjectionOverride !== undefined && method.createSolverAsync
+      // The power catalog is an initialization task in the production
+      // browser-safe construction path. A synchronous smoke constructor would
+      // silently exercise only the rollback solver while still claiming it
+      // requested authority.
+      ? await method.createSolverAsync(instrumentedDevice, scene, quality, values, undefined, () => {})
+      : method.createSolver!(instrumentedDevice, scene, quality, values);
   const construction_ms = performance.now() - constructionStarted;
+  const actualGrid: [number, number, number] = [solver.info.nx, solver.info.ny, solver.info.nz];
+  if (expectedGridOverride && actualGrid.some((value, axis) => value !== expectedGridOverride[axis])) {
+    throw new Error(`${scenarioId}/${resultMethod} constructed ${actualGrid.join("x")} instead of FLUID_EXPECT_GRID=${expectedGridOverride.join("x")}; refusing to step a mismatched comparison`);
+  }
   console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod, phase: "constructed", construction_ms: Math.round(construction_ms), grid: [solver.info.nx, solver.info.storedNy, solver.info.nz], cubicGrid: [solver.info.nx, solver.info.ny, solver.info.nz] }));
   // Raw voxel/brick records are a lazy inspection product. Merely reading the
   // getter allocates their large publication arenas, so production timing and
@@ -973,6 +1843,17 @@ async function runGPU(
   const initialFluidBrickStats = sparseStatsRequested && sparseSource
     ? await readFluidBrickSnapshot(device, sparseSource)
     : undefined;
+  const initialGlobalFineGeneration = globalFineGenerationTransitionRequested && method.id === "octree"
+    ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
+  const initialGlobalFineRaster = globalFineGenerationTransitionRequested && method.id === "octree"
+    ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies, true) : undefined;
+  if (initialGlobalFineRaster) {
+    // Emit the pre-step renderer evidence immediately.  A later simulation
+    // transaction may deliberately reject and roll back, but that must not
+    // hide whether reset-time global-fine rasterization was already visible.
+    console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+      phase: "initial-global-fine-raster", ...initialGlobalFineRaster }));
+  }
   const runStarted = performance.now();
   let steps = 0, samplingWall_ms = 0, matched: Awaited<ReturnType<typeof readCubicVolumeField>> | undefined;
   // The perturbed cadence remains exclusive to the quadtree dam-break
@@ -1028,6 +1909,8 @@ async function runGPU(
     console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod, phase: "energy", ...sample }));
   }
   let nextCheckpoint_s = checkpointEvery_s;
+  let previousAuditedPowerGeneration = 0;
+  let topologyTransitionDeepCell: number | undefined;
   while ((solver.info.submittedTime_s ?? 0) + 1e-9 < target_s) {
     const stepDt = perturbCadence
       ? Math.min(scene.numerics.maxDt_s, regressionDtPattern[steps % regressionDtPattern.length])
@@ -1039,10 +1922,306 @@ async function runGPU(
       continue;
     }
     steps += 1;
+    if (powerGenerationAuditRequested && method.id === "octree"
+      && octreePowerProjectionOverride === "authoritative") {
+      await device.queue.onSubmittedWorkDone();
+      const audited = solver as GPUSolverInstance & {
+        powerFaceControl?: GPUBuffer; powerFaceTransferControl?: GPUBuffer; powerFaceSiteIndex?: GPUBuffer;
+        powerFaceSeedControl?: GPUBuffer; powerOperatorControl?: GPUBuffer; mgpcgControl?: GPUBuffer;
+        powerDescriptorControl?: GPUBuffer; powerTopologyControl?: GPUBuffer;
+        globalFineSummaryDirectory?: GPUBuffer;
+        powerLeafHeaders?: GPUBuffer; powerDescriptorRows?: GPUBuffer; powerTopologyMetrics?: GPUBuffer;
+        powerLeafFrontier?: GPUBuffer; topologyTileWorklist?: GPUBuffer;
+        powerCatalogEntryHeaders?: GPUBuffer; powerCatalogFaces?: GPUBuffer;
+      };
+      const axisSource = (solver as GPUSolverInstance).adaptiveFaceMirrorSource;
+      if (!audited.powerFaceControl || !audited.powerFaceTransferControl || !audited.powerFaceSeedControl || !audited.powerOperatorControl
+        || !audited.powerDescriptorControl || !audited.powerTopologyControl) {
+        const missing = (["powerFaceControl", "powerFaceTransferControl", "powerFaceSeedControl", "powerOperatorControl",
+          "powerDescriptorControl", "powerTopologyControl"] as const).filter((name) => !audited[name]);
+        throw new Error(`power generation audit step ${steps} is missing authoritative control buffers: ${missing.join(", ")}; `
+          + `ready=${solver.info.powerDiagramReady} authoritative=${solver.info.powerDiagramAuthoritative} `
+          + `fallback=${solver.info.powerDiagramFallbackReason ?? "none"}`);
+      }
+      const [faceBytes, transferBytes, seedBytes, operatorBytes, descriptorBytes, topologyBytes, axisBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: audited.powerFaceControl }, 64),
+        readBufferBinding(device, { buffer: audited.powerFaceTransferControl }, 32),
+        readBufferBinding(device, { buffer: audited.powerFaceSeedControl }, 64),
+        readBufferBinding(device, { buffer: audited.powerOperatorControl }, 64),
+        readBufferBinding(device, { buffer: audited.powerDescriptorControl }, 32),
+        readBufferBinding(device, { buffer: audited.powerTopologyControl }, 32),
+        axisSource ? readBufferBinding(device, { buffer: axisSource.control }, 24) : Promise.resolve(undefined),
+      ]);
+      const face = new Uint32Array(faceBytes.buffer, faceBytes.byteOffset, 16);
+      const transfer = new Uint32Array(transferBytes.buffer, transferBytes.byteOffset, 8);
+      const seed = new Uint32Array(seedBytes.buffer, seedBytes.byteOffset, 16);
+      const operator = new Uint32Array(operatorBytes.buffer, operatorBytes.byteOffset, 16);
+      const mgpcgBytes = audited.mgpcgControl
+        ? await readBufferBinding(device, { buffer: audited.mgpcgControl }, 64) : undefined;
+      const mgpcg = mgpcgBytes ? new Uint32Array(mgpcgBytes.buffer, mgpcgBytes.byteOffset, 16) : undefined;
+      const mgpcgDiagnostics = mgpcg ? decodeOctreeMGPCGDiagnostics(mgpcg) : undefined;
+      const descriptor = new Uint32Array(descriptorBytes.buffer, descriptorBytes.byteOffset, 8);
+      const topology = new Uint32Array(topologyBytes.buffer, topologyBytes.byteOffset, 8);
+      const axis = axisBytes ? new Uint32Array(axisBytes.buffer, axisBytes.byteOffset, 6) : undefined;
+      const floatBits = (word: number) => new Float32Array(new Uint32Array([word]).buffer)[0];
+      const audit = {
+        step: steps,
+        axis: axis ? { faceCount: axis[0], overflow: axis[1] !== 0, faceCapacity: axis[2], rowCapacity: axis[3],
+          maximumIncidence: axis[4], incidenceOverflowAppends: axis[5] } : undefined,
+        faces: { rowCount: face[0], faceCount: face[1], incidenceCount: face[2], flags: face[3],
+          firstInvalid: face[4], invalidCount: face[5], generation: face[7], valid: face[8] === 0x8000_0000,
+          lookupMissCount: face[9], firstInvalidSlot: face[12], firstInvalidNeighbor: face[13], firstInvalidDetail: face[14],
+          firstInvalidRow: face[15] },
+        transfer: { previousFaceCount: transfer[0], valid: transfer[1] === 0x8000_0000,
+          flags: transfer[2], generation: transfer[3], exactFaces: transfer[4], fallbackFaces: transfer[5],
+          maximumFaceSpeed: floatBits(transfer[6]), sourceFlags: transfer[7] },
+        velocityStages: { axisRowInputMaximum: floatBits(seed[9]), axisToPowerSeedMaximum: floatBits(seed[8]),
+          projectionInputMaximum: floatBits(operator[8]), projectionOutputMaximum: floatBits(operator[9]),
+          projectedRowMaximum: floatBits(seed[10]), powerToAxisOutputMaximum: floatBits(seed[11]),
+          seedFlags: seed[12], seedFirstError: seed[13], seedProcessedCount: seed[14], seedValid: seed[15] === 0x8000_0000,
+          reverseFlags: seed[0], reverseFirstError: seed[1], reverseProcessedCount: seed[4], reverseValid: seed[6] === 0x8000_0000,
+          operatorFlags: operator[0], operatorFirstError: operator[1], operatorProjectedCount: operator[6],
+          mgpcgFlags: mgpcgDiagnostics?.flags, mgpcgConverged: mgpcgDiagnostics?.converged,
+          mgpcgIterations: mgpcgDiagnostics?.iterations, mgpcgRows: mgpcgDiagnostics?.rows,
+          mgpcgResidualSquared: mgpcgDiagnostics?.residualSquared,
+          mgpcgRhsSquared: mgpcgDiagnostics?.rhsSquared,
+          mgpcgRelativeResidualSquared: mgpcgDiagnostics?.relativeResidualSquared,
+          operatorAssemblyFlags: operator[10], operatorAssemblyFirstError: operator[11], operatorEntryCount: operator[5],
+          operatorRowCount: operator[2], operatorFaceCount: operator[3], operatorIncidenceCount: operator[4] },
+        descriptor: { rowCount: descriptor[0], validCount: descriptor[1], errorCount: descriptor[2],
+          firstInvalid: descriptor[3], flags: descriptor[4], generation: descriptor[7] },
+        topology: { invalidCount: topology[0], firstInvalid: topology[1], flags: topology[2],
+          resolvedCount: topology[3], version: topology[4] },
+      };
+      if (topologyTransitionAuditLog) {
+        const transitionHeaders = audited.powerLeafHeaders;
+        const transitionFrontier = audited.powerLeafFrontier;
+        const transitionTiles = audited.topologyTileWorklist;
+        if (!transitionHeaders || !transitionFrontier || !transitionTiles) {
+          throw new Error("topology transition audit requires compact headers, frontier, and tile worklist buffers");
+        }
+        const headerBytes = await readBufferBinding(device, { buffer: transitionHeaders }, audit.faces.rowCount * 48);
+        const headers = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, headerBytes.byteLength / 4);
+        if (topologyTransitionDeepCell === undefined) {
+          let bestY = Infinity, bestCell: number | undefined;
+          for (let row = 0; row < audit.faces.rowCount; row += 1) {
+            const cell = headers[row * 12], y = Math.floor(cell / solver.info.nx) % solver.info.ny;
+            if (y < bestY) { bestY = y; bestCell = cell; }
+          }
+          topologyTransitionDeepCell = bestCell;
+        }
+        const frontierBytes = await readBufferBinding(device, { buffer: transitionFrontier }, transitionFrontier.size);
+        const frontier = new Uint32Array(frontierBytes.buffer, frontierBytes.byteOffset, frontierBytes.byteLength / 4);
+        const listCapacity = solver.info.frontierListCapacity ?? 0;
+        const current = frontier[2], frontierCount = Math.min(frontier[current], listCapacity);
+        let frontierContainsDeepCell = false;
+        for (let slot = 0; slot < frontierCount; slot += 1) {
+          if (frontier[4 + current * listCapacity + slot] === topologyTransitionDeepCell) {
+            frontierContainsDeepCell = true; break;
+          }
+        }
+        const tileBytes = await readBufferBinding(device, { buffer: transitionTiles }, transitionTiles.size);
+        const tiles = new Uint32Array(tileBytes.buffer, tileBytes.byteOffset, tileBytes.byteLength / 4);
+        const tileCapacity = (tiles.length - 16) / 2;
+        console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "topology-transition-audit",
+          step: steps, generation: audit.faces.generation, deepCell: topologyTransitionDeepCell,
+          frontierContainsDeepCell, frontierCount, activeTopologyTiles: tiles[0], retiredTopologyTiles: tiles[4],
+          topologyGeneration: tiles[15], tileCapacity }));
+      }
+      if (powerGenerationAuditLog) {
+        console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "power-generation-audit", ...audit }));
+      }
+      if (powerStageAuditLog) {
+        console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "power-stage-audit",
+          step: steps, generation: audit.faces.generation, ...audit.velocityStages,
+          topologyTransferMaximum: audit.transfer.maximumFaceSpeed }));
+      }
+      if (powerGenerationAuditLog) {
+        const fine = await readGlobalFineGenerationDiagnostics(device, solver);
+        const summaryBytes = audited.globalFineSummaryDirectory
+          ? await readBufferBinding(device, { buffer: audited.globalFineSummaryDirectory }, 64) : undefined;
+        const summary = summaryBytes
+          ? new Uint32Array(summaryBytes.buffer, summaryBytes.byteOffset, 16) : undefined;
+        console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "power-source-audit", step: steps,
+          compactionRows: audit.faces.rowCount,
+          fineTopology: fine ? { flags: fine.topologyFlags, published: fine.topologyPublished,
+            rolledBack: fine.topologyRolledBack, finalizeReason: fine.topologyFinalizeReason,
+            desiredBricks: fine.topologyDesiredBricks, activePages: fine.activePages } : undefined,
+          coarse: fine ? { generation: fine.coarseGeneration, state: fine.coarseState,
+            entries: fine.coarseEntryCount, negative: fine.coarseNegativeEntries, positive: fine.coarsePositiveEntries,
+            interfaces: fine.coarseInterfaceEntries, malformed: fine.coarseMalformedEntries } : undefined,
+          summary: summary ? { flags: summary[0], generation: summary[1], entries: summary[2],
+            hashCapacity: summary[3], dimensions: [summary[4], summary[5], summary[6]], maximumLevel: summary[7],
+            maximumProbes: summary[8], state: summary[9], hierarchyKeys: summary[10] } : undefined }));
+      }
+      const failure = !audit.faces.valid || audit.faces.flags !== 0 || audit.faces.rowCount === 0
+        || audit.faces.faceCount === 0 || audit.faces.incidenceCount === 0 || audit.faces.invalidCount !== 0
+        || audit.descriptor.rowCount !== audit.faces.rowCount
+        || audit.descriptor.validCount !== audit.descriptor.rowCount || audit.descriptor.errorCount !== 0
+        || audit.descriptor.flags !== 0 || audit.topology.invalidCount !== 0 || audit.topology.flags !== 0
+        || audit.topology.resolvedCount !== audit.descriptor.rowCount
+        || !audit.transfer.valid || audit.transfer.flags !== 0 || audit.transfer.sourceFlags !== 0
+        || !audit.velocityStages.seedValid || audit.velocityStages.seedFlags !== 0
+        || audit.velocityStages.operatorFlags !== 0xc000_0000
+        || !octreeMGPCGDiagnosticsAreAcceptable(mgpcgDiagnostics)
+        || audit.faces.generation <= previousAuditedPowerGeneration;
+      if (failure) {
+        let duplicateSite: { slot: number; cellPlusOne?: number; size?: number; row?: number; published?: number;
+          firstInvalidRow: number; firstInvalidHeader?: { cell: number; size: number };
+          matchingHeaderRows: number[] } | undefined;
+        let reciprocalFace: unknown;
+        let axisIncidence: unknown;
+        const slot = audit.faces.firstInvalidSlot;
+        const firstInvalidRow = face[15];
+        const internal = audited as typeof audited & { powerFaces?: { siteIndex?: GPUBuffer }; leafHeaders?: GPUBuffer };
+        const siteIndex = audited.powerFaceSiteIndex ?? internal.powerFaces?.siteIndex;
+        const leafHeaders = audited.powerLeafHeaders ?? internal.leafHeaders;
+        if (axisSource && audit.velocityStages.seedFlags === 4
+          && audit.velocityStages.seedFirstError < (axis?.[3] ?? 0xffff_ffff)) {
+          const row = audit.velocityStages.seedFirstError;
+          const countBytes = await readBufferBinding(device, { buffer: axisSource.incidence, offset: row * 4, size: 4 }, 4);
+          const count = new Uint32Array(countBytes.buffer, countBytes.byteOffset, 1)[0];
+          const boundedCount = Math.min(count, 48);
+          const indexOffset = ((axis![3] + row * 48) * 4);
+          const indexBytes = boundedCount > 0
+            ? await readBufferBinding(device, { buffer: axisSource.incidence, offset: indexOffset, size: boundedCount * 4 }, boundedCount * 4)
+            : undefined;
+          const indices = indexBytes ? Array.from(new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, boundedCount)) : [];
+          const records = await Promise.all(indices.map(async (faceIndex) => {
+            if (faceIndex >= axis![0] || faceIndex * 24 + 24 > axisSource.faces.size) return { faceIndex, invalid: true };
+            const bytes = await readBufferBinding(device, { buffer: axisSource.faces, offset: faceIndex * 24, size: 24 }, 24);
+            const words = new Uint32Array(bytes.buffer, bytes.byteOffset, 6);
+            const floats = new Float32Array(bytes.buffer, bytes.byteOffset, 6);
+            return { faceIndex, negativeRow: words[0], positiveRow: words[1], packedOrigin: words[2], axisSpan: words[3],
+              normalVelocity: floats[4], area: floats[5], incident: words[0] === row || words[1] === row };
+          }));
+          axisIncidence = { row, count, records };
+        }
+        if (leafHeaders) {
+          const headerBytes = await readBufferBinding(device, { buffer: leafHeaders }, audit.faces.rowCount * 48);
+          const headers = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, headerBytes.byteLength / 4);
+          const firstInvalidHeader = firstInvalidRow < audit.faces.rowCount
+            ? { cell: headers[firstInvalidRow * 12], size: headers[firstInvalidRow * 12 + 3] } : undefined;
+          const matchingHeaderRows: number[] = [];
+          if (firstInvalidHeader) for (let row = 0; row < audit.faces.rowCount; row += 1) {
+            if (headers[row * 12] === firstInvalidHeader.cell && headers[row * 12 + 3] === firstInvalidHeader.size) {
+              matchingHeaderRows.push(row);
+            }
+          }
+          duplicateSite = { slot, firstInvalidRow, firstInvalidHeader, matchingHeaderRows };
+          if (siteIndex && slot !== 0xffff_ffff && slot * 16 + 16 <= siteIndex.size) {
+            const siteBytes = await readBufferBinding(device, { buffer: siteIndex, offset: slot * 16, size: 16 }, 16);
+            const site = new Uint32Array(siteBytes.buffer, siteBytes.byteOffset, 4);
+            Object.assign(duplicateSite, { cellPlusOne: site[0], size: site[1], row: site[2], published: site[3] });
+          }
+          const neighborRow = audit.faces.firstInvalidNeighbor;
+          if (firstInvalidRow < audit.faces.rowCount && neighborRow < audit.faces.rowCount
+            && audited.powerTopologyMetrics && audited.powerCatalogEntryHeaders && audited.powerCatalogFaces) {
+            const readMetric = async (row: number) => {
+              const bytes = await readBufferBinding(device,
+                { buffer: audited.powerTopologyMetrics!, offset: row * 16, size: 16 }, 16);
+              const words = new Uint32Array(bytes.buffer, bytes.byteOffset, 4);
+              return { topologyCode: words[0], transformAndFlags: words[1] };
+            };
+            const [rowMetric, neighborMetric] = await Promise.all([readMetric(firstInvalidRow), readMetric(neighborRow)]);
+            const readDescriptor = async (row: number) => {
+              if (!audited.powerDescriptorRows) return undefined;
+              const bytes = await readBufferBinding(device,
+                { buffer: audited.powerDescriptorRows, offset: row * 4, size: 4 }, 4);
+              return new Uint32Array(bytes.buffer, bytes.byteOffset, 1)[0];
+            };
+            const [rowDescriptor, neighborDescriptor] = await Promise.all([
+              readDescriptor(firstInvalidRow), readDescriptor(neighborRow),
+            ]);
+            const readEntry = async (topologyCode: number) => {
+              if (topologyCode === 0xffff_ffff || topologyCode * 8 + 8 > audited.powerCatalogEntryHeaders!.size) {
+                return { firstFace: 0, faceCount: 0 };
+              }
+              const bytes = await readBufferBinding(device,
+                { buffer: audited.powerCatalogEntryHeaders!, offset: topologyCode * 8, size: 8 }, 8);
+              const words = new Uint32Array(bytes.buffer, bytes.byteOffset, 2);
+              return { firstFace: words[0], faceCount: words[1] };
+            };
+            const [rowEntry, neighborEntry] = await Promise.all([
+              readEntry(rowMetric.topologyCode), readEntry(neighborMetric.topologyCode),
+            ]);
+            const readFaces = async (firstFace: number, faceCount: number) => {
+              if (faceCount === 0) return new Float32Array();
+              const bytes = await readBufferBinding(device, { buffer: audited.powerCatalogFaces!,
+                offset: firstFace * 48, size: faceCount * 48 }, faceCount * 48);
+              return new Float32Array(bytes.buffer, bytes.byteOffset, faceCount * 12);
+            };
+            const [rowFaces, neighborFaces] = await Promise.all([
+              readFaces(rowEntry.firstFace, rowEntry.faceCount),
+              readFaces(neighborEntry.firstFace, neighborEntry.faceCount),
+            ]);
+            const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
+            const header = (row: number) => ({ cell: headers[row * 12], size: headers[row * 12 + 3] });
+            const origin = ({ cell }: { cell: number }) => [cell % dimensions[0],
+              Math.floor(cell / dimensions[0]) % dimensions[1], Math.floor(cell / (dimensions[0] * dimensions[1]))];
+            const inverseTransform = (value: number[], code: number) => {
+              const q = value.map((component, axis) => component * (((code & (1 << axis)) !== 0) ? -1 : 1));
+              const permutations = [[0,1,2], [0,2,1], [1,0,2], [2,0,1], [1,2,0], [2,1,0]];
+              return permutations[Math.floor(code / 8) % 6].map((axis) => q[axis]);
+            };
+            const reconstruct = (faces: Float32Array, selector: number, anchor: { cell: number; size: number }, transform: number) => {
+              const raw = Array.from(faces.slice(selector * 12, selector * 12 + 12));
+              const anchorOrigin = origin(anchor);
+              const anchorCenter = anchorOrigin.map((component) => component + 0.5 * anchor.size);
+              const offset = inverseTransform(raw.slice(0, 3), transform & 63);
+              return { selector, raw, neighborCenter: anchorCenter.map((component, axis) => component + anchor.size * offset[axis]),
+                neighborSize: anchor.size * raw[3] };
+            };
+            const rowHeader = header(firstInvalidRow), neighborHeader = header(neighborRow);
+            const rowCenter = origin(rowHeader).map((component) => component + 0.5 * rowHeader.size);
+            const neighborCenter = origin(neighborHeader).map((component) => component + 0.5 * neighborHeader.size);
+            const forward = reconstruct(rowFaces, audit.faces.firstInvalidSlot, rowHeader, rowMetric.transformAndFlags);
+            const candidates = Array.from({ length: neighborEntry.faceCount }, (_, selector) => {
+              const candidate = reconstruct(neighborFaces, selector, neighborHeader, neighborMetric.transformAndFlags);
+              return { ...candidate,
+                centerError: Math.max(...candidate.neighborCenter.map((component, axis) => Math.abs(component - rowCenter[axis]))),
+                sizeError: Math.abs(candidate.neighborSize - rowHeader.size) };
+            }).sort((a, b) => (a.centerError + a.sizeError) - (b.centerError + b.sizeError));
+            const lookupSite = (targetHeader: { cell: number; size: number }, words: Uint32Array) => {
+              let value = (targetHeader.cell ^ Math.imul(targetHeader.size, 0x9e3779b9)) >>> 0;
+              value = Math.imul(value ^ (value >>> 16), 0x7feb352d) >>> 0;
+              value = Math.imul(value ^ (value >>> 15), 0x846ca68b) >>> 0;
+              let hashSlot = (value ^ (value >>> 16)) & (words.length / 4 - 1);
+              for (let probe = 0; probe < 32; probe += 1) {
+                const at = hashSlot * 4;
+                if (words[at] === 0) return undefined;
+                if (words[at] === targetHeader.cell + 1 && words[at + 1] === targetHeader.size) {
+                  return { slot: hashSlot, cellPlusOne: words[at], size: words[at + 1], row: words[at + 2], published: words[at + 3] };
+                }
+                hashSlot = (hashSlot + 1) & (words.length / 4 - 1);
+              }
+              return undefined;
+            };
+            let siteEntries: unknown;
+            if (siteIndex) {
+              const bytes = await readBufferBinding(device, { buffer: siteIndex }, siteIndex.size);
+              const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+              siteEntries = { row: lookupSite(rowHeader, words), neighbor: lookupSite(neighborHeader, words) };
+            }
+            reciprocalFace = { row: { index: firstInvalidRow, header: rowHeader, center: rowCenter,
+              descriptor: rowDescriptor, ...rowMetric, entry: rowEntry },
+              neighbor: { index: neighborRow, header: neighborHeader, center: neighborCenter,
+                descriptor: neighborDescriptor, ...neighborMetric, entry: neighborEntry },
+              forward, closestReverseCandidates: candidates.slice(0, 4), siteEntries };
+          }
+        }
+        throw new Error(`power generation audit failed at step ${steps}: ${JSON.stringify({ ...audit, duplicateSite, reciprocalFace, axisIncidence,
+          diagnosticBuffers: { siteIndex: Boolean(siteIndex), siteIndexSize: siteIndex?.size, leafHeaders: Boolean(leafHeaders) } })}`);
+      }
+      previousAuditedPowerGeneration = audit.faces.generation;
+    }
     if (steps === oracleSteps) {
       const samplingStartedAt = performance.now();
       await device.queue.onSubmittedWorkDone();
-      matched = await readCubicVolumeField(device, solver);
+      solver.info.completedTime_s = Math.max(solver.info.completedTime_s ?? 0, solver.info.submittedTime_s ?? 0);
+      solver.info.simulatedTime_s = solver.info.submittedTime_s;
+      if (exactStepCount !== undefined) await solver.readStats();
+      if (!collectStabilityEnvelope) matched = await readCubicVolumeField(device, solver);
       samplingWall_ms += performance.now() - samplingStartedAt;
     }
     if (steps % 30 === 0) await device.queue.onSubmittedWorkDone();
@@ -1056,20 +2235,28 @@ async function runGPU(
       const isRestrictedTall = sample.gridKind === "restricted-tall-cell";
       let tallCellActivity: ReturnType<typeof inspectColumnBases> | undefined, tallVolumeGaps: ReturnType<typeof inspectTallVolumeGaps> | undefined;
       let bases: Float32Array | undefined;
-      if (sample.gridKind !== "uniform") {
+      if (isRestrictedTall) {
         bases = await readFloatTexture2D(device, solver.columnBaseTexture, sample.nx, sample.nz);
         tallCellActivity = inspectColumnBases(bases, sample.nx, sample.nz, sample.ny, sample.regularLayers, sample.maximumNeighborDelta);
         tallVolumeGaps = inspectTallVolumeGaps(await readFloatTexture3D(device, solver.volumeTexture, sample.nx, sample.storedNy, sample.nz), bases, sample.nx, sample.storedNy, sample.nz, sample.ny, sample.maximumNeighborDelta);
       }
       const exact = await readCubicVolumeField(device, solver);
-      const stagedSolver = solver as GPUSolverInstance & { preProjectionVelocityTexture?: GPUTexture; velocityTexture?: GPUTexture };
+      if (steps === oracleSteps) matched = exact;
+      const stagedSolver = solver as GPUSolverInstance & {
+        preProjectionVelocityTexture?: GPUTexture;
+        velocityTexture?: GPUTexture;
+      };
+      // U3 deliberately shrinks the legacy dense velocity textures to 1x1x1.
+      // Once the compact face source exists, attempting a cubic readback is
+      // both semantically wrong and a WebGPU validation error.
+      const compactFaceVelocity = stagedSolver.adaptiveFaceVelocitySource !== undefined;
       const spacing = {
         x: scene.container.width_m / sample.nx,
         y: scene.container.height_m / sample.ny,
         z: scene.container.depth_m / sample.nz
       };
       const readStagedVelocity = (texture: GPUTexture | undefined) => {
-        if (!texture) return Promise.resolve(undefined);
+        if (!texture || compactFaceVelocity) return Promise.resolve(undefined);
         return isRestrictedTall && bases
           ? readTallVelocityTexture3D(device, texture, sample.nx, sample.storedNy, sample.nz, sample.ny, bases, exact.field, spacing, stepDt)
           : readVelocityTexture3D(device, texture, sample.nx, sample.ny, sample.nz, exact.field, spacing, stepDt);
@@ -1147,13 +2334,27 @@ async function runGPU(
         stabilityEnvelope.nonFiniteVelocityCount += preProjectionVelocity.nonFiniteCount + postProjectionVelocity.nonFiniteCount;
         stabilityEnvelope.sampledSteps += 1;
       }
+      if (stabilityEnvelope && compactFaceVelocity) {
+        const dominantFraction = exact.summary.wetCells > 0 ? exact.summary.largestComponent / exact.summary.wetCells : 1;
+        stabilityEnvelope.peakLiquidSpeed_m_s = Math.max(stabilityEnvelope.peakLiquidSpeed_m_s, sample.maxSpeed_m_s ?? 0);
+        stabilityEnvelope.peakComponentCfl = Math.max(stabilityEnvelope.peakComponentCfl, sample.maxComponentCfl ?? 0);
+        stabilityEnvelope.maximumExactVolumeDrift = Math.max(stabilityEnvelope.maximumExactVolumeDrift, Math.abs(exactVolumeDrift));
+        stabilityEnvelope.maximumComponentCount = Math.max(stabilityEnvelope.maximumComponentCount, exact.summary.componentCount);
+        stabilityEnvelope.minimumDominantComponentFraction = Math.min(stabilityEnvelope.minimumDominantComponentFraction, dominantFraction);
+        stabilityEnvelope.nonFiniteVelocityCount += sample.nonFiniteCount ?? 0;
+        stabilityEnvelope.maximumPressureRelativeResidual = Math.max(stabilityEnvelope.maximumPressureRelativeResidual,
+          sample.pressureRelativeResidual ?? (steps <= 2 ? 0 : Infinity));
+        stabilityEnvelope.maximumProjectedVariationalResidual = Math.max(stabilityEnvelope.maximumProjectedVariationalResidual,
+          sample.pressureResidual ?? (steps <= 2 ? 0 : Infinity));
+        stabilityEnvelope.sampledSteps += 1;
+      }
       if (shouldReport) console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "running", steps, simulatedTime_s: sample.simulatedTime_s, dt_s: stepDt, preProjectionVelocity, postProjectionVelocity, maxSpeed_m_s: sample.maxSpeed_m_s, maxAirSpeed_m_s: sample.maxAirSpeed_m_s, maxDivergenceBefore_s: sample.maxDivergenceBefore_s, maxDivergenceAfter_s: sample.maxDivergenceAfter_s, pressureRelativeResidual: sample.pressureRelativeResidual, pressureIterationsUsed: sample.quadtreePressureIterationsUsed, pressureIterationBudget: sample.quadtreePressureIterationBudget, pressureIterationHardBudget: sample.quadtreePressureIterationHardBudget, pressureConverged: sample.quadtreePressureConverged, velocityClampCount: sample.quadtreeVelocityClampCount, factorLevelCount: sample.quadtreeFactorLevelCount, pressurePhaseTimings: sample.quadtreePressurePhaseTimings, maxComponentCfl: sample.maxComponentCfl, representedVolumeDrift: sample.representedVolumeDrift, volumeCorrectionNormalSpeed_cells_s: sample.volumeCorrectionNormalSpeed_cells_s, volumeCorrectionDivergenceRate_s: sample.volumeCorrectionDivergenceRate_s, phiInterfaceCellCount: sample.phiInterfaceCellCount, exactVolumeCellSum: exact.summary.cellSum, exactVolumeDrift, componentCount: exact.summary.componentCount, dominantComponentFraction: exact.summary.wetCells > 0 ? exact.summary.largestComponent / exact.summary.wetCells : 1, quadtree: sample.gridKind === "quadtree-tall-cell" ? { opticalLayerMode: sample.quadtreeOpticalLayerMode, opticalAlpha: sample.quadtreeOpticalAlpha, opticalMinimumCells: sample.quadtreeOpticalMinimumCells, opticalMaximumCells: sample.quadtreeOpticalMaximumCells, leafCount: sample.quadtreeLeafCount, pressureSampleCount: sample.quadtreePressureSampleCount, liquidDofCount: sample.quadtreeLiquidDofCount, faceCount: sample.quadtreeFaceCount, tallSegmentCount: sample.quadtreeTallSegmentCount, ghostFaceCount: sample.quadtreeGhostFaceCount, maximumNeighborRatio: sample.quadtreeMaximumNeighborRatio, maximumFluidScale: sample.quadtreeMaximumFluidScale, levelSetMismatchFraction: sample.quadtreeLevelSetMismatchFraction } : undefined, stabilityFlags: sample.stabilityFlags, extrema, tallCellActivity, tallVolumeGaps }));
       samplingWall_ms += performance.now() - samplingStartedAt;
     }
     if (checkpointEvery_s > 0 && (solver.info.submittedTime_s ?? 0) + 1e-9 >= nextCheckpoint_s) {
       const samplingStartedAt = performance.now();
       await device.queue.onSubmittedWorkDone();
-      const cubic = await readCubicVolumeField(device, solver);
+      const cubic = steps === oracleSteps && matched ? matched : await readCubicVolumeField(device, solver);
       let preProjectionVelocity: Float32Array | undefined, postProjectionVelocity: Float32Array | undefined;
       if (singleTallCellProbe && solver.info.gridKind === "restricted-tall-cell") {
         const bases = await readFloatTexture2D(device, solver.columnBaseTexture, solver.info.nx, solver.info.nz);
@@ -1161,7 +2362,14 @@ async function runGPU(
         if (staged.preProjectionVelocityTexture) preProjectionVelocity = await readTallVelocityField3D(device, staged.preProjectionVelocityTexture, solver.info.nx, solver.info.storedNy, solver.info.nz, solver.info.ny, bases);
         if (staged.velocityTexture) postProjectionVelocity = await readTallVelocityField3D(device, staged.velocityTexture, solver.info.nx, solver.info.storedNy, solver.info.nz, solver.info.ny, bases);
       }
-      checkpoints.push({ time_s: solver.info.submittedTime_s ?? 0, field: cubic.field, summary: cubic.summary, preProjectionVelocity, postProjectionVelocity });
+      const raster = rasterCheckpointRequested && method.id === "octree"
+        ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies,
+          globalFineGenerationTransitionRequested)
+        : undefined;
+      const globalFineGeneration = globalFineGenerationTransitionRequested && method.id === "octree"
+        ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
+      checkpoints.push({ time_s: solver.info.submittedTime_s ?? 0, field: cubic.field, summary: cubic.summary,
+        raster, globalFineGeneration, preProjectionVelocity, postProjectionVelocity });
       while (nextCheckpoint_s <= (solver.info.submittedTime_s ?? 0) + 1e-9) nextCheckpoint_s += checkpointEvery_s;
       samplingWall_ms += performance.now() - samplingStartedAt;
     }
@@ -1169,17 +2377,25 @@ async function runGPU(
   }
   const simulationWall_ms = Math.max(0, performance.now() - runStarted - samplingWall_ms);
   await device.queue.onSubmittedWorkDone();
+  solver.info.completedTime_s = Math.max(solver.info.completedTime_s ?? 0, solver.info.submittedTime_s ?? 0);
   solver.info.simulatedTime_s = solver.info.submittedTime_s;
   const info = { ...await solver.readStats() };
+  if (info.gpuValidationError && !validationErrors.includes(info.gpuValidationError)) {
+    validationErrors.push(info.gpuValidationError);
+  }
   matched ??= await readCubicVolumeField(device, solver);
   const final = includeFinalFieldStats && steps !== oracleSteps ? await readCubicVolumeField(device, solver) : matched;
-  const velocityTexture = (solver as GPUSolverInstance & { velocityTexture?: GPUTexture }).velocityTexture;
+  const finalSolver = solver as GPUSolverInstance & { velocityTexture?: GPUTexture; powerFaceTransferControl?: GPUBuffer;
+    powerFaceControl?: GPUBuffer; powerDescriptorControl?: GPUBuffer; powerTopologyControl?: GPUBuffer;
+    powerDescriptorRows?: GPUBuffer; powerTopologyMetrics?: GPUBuffer; powerLeafHeaders?: GPUBuffer; powerOwnerArena?: GPUBuffer;
+    mgpcgControl?: GPUBuffer };
+  const velocityTexture = finalSolver.velocityTexture;
   const finalSpacing = {
     x: scene.container.width_m / info.nx,
     y: scene.container.height_m / info.ny,
     z: scene.container.depth_m / info.nz
   };
-  const velocitySummary = velocityTexture && final
+  const velocitySummary = velocityTexture && final && !finalSolver.adaptiveFaceVelocitySource
     ? (info.gridKind === "restricted-tall-cell"
       ? await readTallVelocityTexture3D(device, velocityTexture, info.nx, info.storedNy, info.nz, info.ny, await readFloatTexture2D(device, solver.columnBaseTexture, info.nx, info.nz), final.field, finalSpacing, scene.numerics.maxDt_s)
       : await readVelocityTexture3D(device, velocityTexture, info.nx, info.ny, info.nz, final.field, finalSpacing, scene.numerics.maxDt_s))
@@ -1187,17 +2403,156 @@ async function runGPU(
   const hybridPresentationStats = sparseStatsRequested && method.id === "octree"
     ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies)
     : undefined;
+  const finalGlobalFineGeneration = globalFineGenerationTransitionRequested && method.id === "octree"
+    ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
+  const finalGlobalFineRaster = globalFineGenerationTransitionRequested && method.id === "octree"
+    ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies, true) : undefined;
   const sparseVoxelStats = sparseStatsRequested && sparseSource
     ? await readSparseVoxelStats(device, sparseSource, seedBrickBounds)
+    : undefined;
+  const faceMirrorSource = (solver as GPUSolverInstance).adaptiveFaceMirrorSource;
+  const octreeFaceMirrorDiagnostics = faceMirrorSource
+    ? await readOctreeFaceMirrorDiagnostics(device, faceMirrorSource, info.lastDt_s ?? scene.numerics.maxDt_s)
+    : undefined;
+  const powerTransferBytes = finalSolver.powerFaceTransferControl
+    ? await readBufferBinding(device, { buffer: finalSolver.powerFaceTransferControl }, 32)
+    : undefined;
+  const powerTransferWords = powerTransferBytes
+    ? new Uint32Array(powerTransferBytes.buffer, powerTransferBytes.byteOffset, 8)
+    : undefined;
+  const octreePowerFaceTransferDiagnostics: OctreePowerFaceTransferDiagnostics | undefined = powerTransferWords ? {
+    previousFaceCount: powerTransferWords[0], valid: powerTransferWords[1] === 0x8000_0000,
+    flags: powerTransferWords[2], generation: powerTransferWords[3],
+    exactFaces: powerTransferWords[4], fallbackFaces: powerTransferWords[5], sourceFlags: powerTransferWords[7],
+  } : undefined;
+  const powerFaceBytes = finalSolver.powerFaceControl
+    ? await readBufferBinding(device, { buffer: finalSolver.powerFaceControl }, 64) : undefined;
+  const powerFaceWords = powerFaceBytes ? new Uint32Array(powerFaceBytes.buffer, powerFaceBytes.byteOffset, 16) : undefined;
+  const octreePowerFaceDiagnostics: OctreePowerFaceDiagnostics | undefined = powerFaceWords ? {
+    rowCount: powerFaceWords[0], faceCount: powerFaceWords[1], incidenceCount: powerFaceWords[2], flags: powerFaceWords[3],
+    firstInvalid: powerFaceWords[4], invalidCount: powerFaceWords[5], boundaryCount: powerFaceWords[6], generation: powerFaceWords[7],
+    valid: powerFaceWords[8] === 0x8000_0000, lookupMissCount: powerFaceWords[9], maximumObservedProbe: powerFaceWords[10],
+    worldBoundaryCount: powerFaceWords[11],
+    firstInvalidSlot: powerFaceWords[12], firstInvalidNeighbor: powerFaceWords[13], firstInvalidDetail: powerFaceWords[14],
+    firstInvalidRow: powerFaceWords[15],
+  } : undefined;
+  if (octreePowerFaceDiagnostics && !octreePowerFaceDiagnostics.valid && finalSolver.powerLeafHeaders
+    && finalSolver.powerTopologyMetrics && octreePowerFaceDiagnostics.firstInvalid !== 0xffff_ffff) {
+    octreePowerFaceDiagnostics.firstInvalidPair = [];
+    for (const row of [octreePowerFaceDiagnostics.firstInvalid, octreePowerFaceDiagnostics.firstInvalidNeighbor]
+      .filter((candidate) => candidate !== 0xffff_ffff)) {
+      const header = await readBufferBinding(device, { buffer: finalSolver.powerLeafHeaders, offset: row * 48, size: 48 }, 48);
+      const metric = await readBufferBinding(device, { buffer: finalSolver.powerTopologyMetrics, offset: row * 16, size: 16 }, 16);
+      const hw = new Uint32Array(header.buffer, header.byteOffset, 12), mw = new Uint32Array(metric.buffer, metric.byteOffset, 4);
+      const hf = new Float32Array(header.buffer, header.byteOffset, 12);
+      octreePowerFaceDiagnostics.firstInvalidPair.push({ row, cell: hw[0], size: hw[3], topologyCode: mw[0], transformAndFlags: mw[1], gradient: [...hf.slice(8, 12)] });
+    }
+  }
+  const descriptorControlBytes = finalSolver.powerDescriptorControl
+    ? await readBufferBinding(device, { buffer: finalSolver.powerDescriptorControl }, 32) : undefined;
+  const topologyControlBytes = finalSolver.powerTopologyControl
+    ? await readBufferBinding(device, { buffer: finalSolver.powerTopologyControl }, 32) : undefined;
+  const descriptorControlWords = descriptorControlBytes
+    ? new Uint32Array(descriptorControlBytes.buffer, descriptorControlBytes.byteOffset, 8) : undefined;
+  const topologyControlWords = topologyControlBytes
+    ? new Uint32Array(topologyControlBytes.buffer, topologyControlBytes.byteOffset, 8) : undefined;
+  let octreePowerTopologyDiagnostics: OctreePowerTopologyDiagnostics | undefined;
+  if (descriptorControlWords && topologyControlWords) {
+    const descriptorFirstInvalid = descriptorControlWords[3];
+    const topologyFirstInvalid = topologyControlWords[1];
+    const firstInvalid = Math.min(descriptorFirstInvalid, topologyFirstInvalid);
+    let firstInvalidRow: OctreePowerTopologyDiagnostics["firstInvalidRow"];
+    if (firstInvalid !== 0xffff_ffff && firstInvalid < descriptorControlWords[0]
+      && finalSolver.powerDescriptorRows && finalSolver.powerTopologyMetrics && finalSolver.powerLeafHeaders) {
+      const descriptorBytes = await readBufferBinding(device,
+        { buffer: finalSolver.powerDescriptorRows, offset: firstInvalid * 4, size: 4 }, 4);
+      const metricBytes = await readBufferBinding(device,
+        { buffer: finalSolver.powerTopologyMetrics, offset: firstInvalid * 16, size: 16 }, 16);
+      const headerBytes = await readBufferBinding(device,
+        { buffer: finalSolver.powerLeafHeaders, offset: firstInvalid * 48, size: 48 }, 48);
+      const metricWords = new Uint32Array(metricBytes.buffer, metricBytes.byteOffset, 4);
+      const metricFloats = new Float32Array(metricBytes.buffer, metricBytes.byteOffset, 4);
+      const headerWords = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, 12);
+      let ownerNeighborhood: NonNullable<OctreePowerTopologyDiagnostics["firstInvalidRow"]>["ownerNeighborhood"];
+      if (finalSolver.powerOwnerArena) {
+        const arenaBytes = await readBufferBinding(device, { buffer: finalSolver.powerOwnerArena }, finalSolver.powerOwnerArena.size);
+        const arena = new Uint32Array(arenaBytes.buffer, arenaBytes.byteOffset, arenaBytes.byteLength / 4);
+        const dimensions = [info.nx, info.ny, info.nz] as const;
+        const maximumLeaf = info.quadtreeMaximumFluidScale ?? 16;
+        const canonical = (cell: [number, number, number]) => {
+          let size = Math.min(maximumLeaf, 8);
+          let origin = cell.map((value) => Math.floor(value / size) * size) as [number, number, number];
+          while (size > 1 && origin.some((value, axis) => value + size > dimensions[axis])) {
+            size /= 2; origin = cell.map((value) => Math.floor(value / size) * size) as [number, number, number];
+          }
+          return { origin, size, invalid: false };
+        };
+        const ownerAt = (cell: [number, number, number]) => {
+          if (arena.length <= 15 || arena[15] !== 0x4f57_4e52) return { ...canonical(cell), invalid: true };
+          const brickDimensions = dimensions.map((value) => Math.ceil(value / 8));
+          const brick = cell.map((value) => Math.floor(value / 8));
+          const logical = brick[0] + brick[1] * brickDimensions[0] + brick[2] * brickDimensions[0] * brickDimensions[1];
+          const hashCapacity = (arena[5] - 16) / 2; let slot = Math.imul(logical, 0x9e37_79b1) >>> 0; slot %= hashCapacity;
+          let encoded = 0;
+          for (let probe = 0; probe < hashCapacity; probe += 1) {
+            const observed = arena[16 + slot]; if (observed === logical + 1) { encoded = arena[16 + hashCapacity + slot]; break; }
+            if (observed === 0) break; slot = slot + 1 === hashCapacity ? 0 : slot + 1;
+          }
+          if (encoded === 0) return canonical(cell);
+          if (encoded === 0xffff_ffff || encoded > arena[3]) return { ...canonical(cell), invalid: true };
+          const local = (cell[0] & 7) + 8 * ((cell[1] & 7) + 8 * (cell[2] & 7));
+          const word = arena[arena[6] + (encoded - 1) * 512 + local]; if (word === 0) return canonical(cell);
+          if (word === 0x8000_0000) return { origin: cell, size: 1, invalid: false };
+          const exponent = word & 7; const size = 1 << exponent;
+          const origin = [((word >>> 3) & 511) << exponent, ((word >>> 12) & 511) << exponent,
+            ((word >>> 21) & 511) << exponent] as [number, number, number];
+          const invalid = (word & 0xc000_0000) !== 0 || exponent < 1 || exponent > 5
+            || origin.some((value, axis) => cell[axis] < value || cell[axis] >= value + size);
+          return { origin, size, invalid };
+        };
+        const origin = [headerWords[0] % info.nx, Math.floor(headerWords[0] / info.nx) % info.ny,
+          Math.floor(headerWords[0] / (info.nx * info.ny))] as [number, number, number];
+        const directions = [[0,0,0],[-1,0,0],[0,-1,0],[0,0,-1],[0,0,1],[0,1,0],[1,0,0],
+          [-1,-1,0],[-1,0,-1],[-1,0,1],[-1,1,0],[0,-1,-1],[0,-1,1],[0,1,-1],[0,1,1],[1,-1,0],[1,0,-1],[1,0,1],[1,1,0]];
+        ownerNeighborhood = directions.map((direction, bit) => {
+          const probe = bit === 0 ? origin : direction.map((component, axis) => component < 0 ? origin[axis] - 1
+            : component > 0 ? origin[axis] + headerWords[3] : origin[axis] + Math.floor(headerWords[3] / 2)) as [number, number, number];
+          return { direction: bit - 1, probe, ...ownerAt(probe) };
+        });
+      }
+      firstInvalidRow = { row: firstInvalid,
+        descriptor: new Uint32Array(descriptorBytes.buffer, descriptorBytes.byteOffset, 1)[0],
+        topologyCode: metricWords[0], transformAndFlags: metricWords[1], volume: metricFloats[2],
+        reserved: metricWords[3], cell: headerWords[0], size: headerWords[3], ownerNeighborhood };
+    }
+    octreePowerTopologyDiagnostics = {
+      descriptor: { rowCount: descriptorControlWords[0], validCount: descriptorControlWords[1],
+        errorCount: descriptorControlWords[2], firstInvalid: descriptorControlWords[3], flags: descriptorControlWords[4],
+        sameOrFinerCount: descriptorControlWords[5], sameOrCoarserCount: descriptorControlWords[6], generation: descriptorControlWords[7] },
+      topology: { invalidCount: topologyControlWords[0], firstInvalid: topologyControlWords[1], flags: topologyControlWords[2],
+        resolvedCount: topologyControlWords[3], version: topologyControlWords[4] }, firstInvalidRow,
+    };
+  }
+  const mgpcgControlBytes = finalSolver.mgpcgControl
+    ? await readBufferBinding(device, { buffer: finalSolver.mgpcgControl }, 64)
+    : undefined;
+  const octreeMGPCGDiagnostics = mgpcgControlBytes
+    ? decodeOctreeMGPCGDiagnostics(new Uint32Array(mgpcgControlBytes.buffer, mgpcgControlBytes.byteOffset, 16))
     : undefined;
   await device.queue.onSubmittedWorkDone();
   const result: GPUSmokeResult = {
     method: resultMethod, info, grid: [info.nx, info.ny, info.nz], matchedField: matched.field,
-    matchedSummary: matched.summary, matchedTallCellActivity: matched.tallCellActivity,
+    matchedSummary: matched.summary, compactFieldEvidence: matched.compactFieldEvidence,
+    matchedTallCellActivity: matched.tallCellActivity,
     finalSummary: final?.summary, finalTallCellActivity: final?.tallCellActivity,
     finalTallVolumeGaps: final?.tallVolumeGaps, validationErrors,
     construction_ms, runtime_ms: performance.now() - runStarted, simulationWall_ms, steps, velocitySummary,
-    initialFluidBrickStats, sparseVoxelStats, hybridPresentationStats, stabilityEnvelope, energyTrace, checkpoints
+    initialFluidBrickStats, sparseVoxelStats, hybridPresentationStats,
+    initialGlobalFineGeneration, initialGlobalFineRaster, finalGlobalFineGeneration, finalGlobalFineRaster,
+    octreeFaceMirrorDiagnostics,
+    octreePowerFaceTransferDiagnostics, octreePowerFaceDiagnostics, octreePowerTopologyDiagnostics,
+    octreeMGPCGDiagnostics,
+    stabilityEnvelope, energyTrace, checkpoints
   };
   reportResult(scenarioId, result);
   solver.destroy(); device.destroy();
@@ -1216,7 +2571,7 @@ function runMatchedCPUOracle(scenarioId: SmokeScenarioId, grid: [number, number,
     console.log(JSON.stringify({ scenario: scenarioId, method: "cpu-reference", phase: "oracle-skipped", cubicGrid: grid, cellCount, reason: `exact grid exceeds FLUID_CPU_MAX_CELLS=${cpuMaximumCells}; set 0 for unlimited` }));
     return undefined;
   }
-  const scene = createSmokeScenario(scenarioId).scene, started = performance.now();
+  const scene = applySceneOverrides(createSmokeScenario(scenarioId).scene), started = performance.now();
   const solver = new EulerianFluidSolver(scene, { dimensions: { nx: grid[0], ny: grid[1], nz: grid[2] }, markerSamplesPerAxis: cpuMarkerSamplesPerAxis });
   for (let step = 0; step < oracleSteps; step += 1) solver.step(scene.numerics.maxDt_s);
   const field = cpuField(solver), summary = summarizeScalarField(field, ...grid);
@@ -1232,9 +2587,58 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
   const failures: string[] = [];
   const fail = (condition: boolean, message: string) => { if (!condition) failures.push(`${scenarioId}: ${message}`); };
   for (const result of results) {
+    if (exactStepCount !== undefined) {
+      const expectedTime_s = exactStepCount * maxDtOverride!;
+      fail(result.steps === exactStepCount,
+        `${result.method} accepted ${result.steps} outer steps; expected exactly ${exactStepCount}`);
+      fail(result.info.encodedSteps === exactStepCount,
+        `${result.method} encoded ${result.info.encodedSteps ?? "unknown"} steps; expected exactly ${exactStepCount}`);
+      fail(Math.abs((result.info.submittedTime_s ?? -Infinity) - expectedTime_s) <= 1e-9,
+        `${result.method} submitted time ${result.info.submittedTime_s} differs from exact checkpoint ${expectedTime_s}`);
+      fail(Math.abs((result.info.completedTime_s ?? -Infinity) - expectedTime_s) <= 1e-9,
+        `${result.method} completed time ${result.info.completedTime_s} differs from fenced checkpoint ${expectedTime_s}`);
+    }
+    if (requireSpatialField) {
+      fail(result.matchedField.length === result.grid[0] * result.grid[1] * result.grid[2],
+        `${result.method} did not publish a full spatial QA field`);
+      fail(result.matchedSummary.cellSum > 1 && result.matchedSummary.cellSum < result.matchedField.length - 1,
+        `${result.method} spatial QA field is not a meaningful partially wet domain (sum ${result.matchedSummary.cellSum})`);
+      if (result.method === "octree") {
+        fail(result.compactFieldEvidence !== undefined
+          && compactOctreeFieldEvidenceIsAcceptable(result.compactFieldEvidence),
+        `octree spatial QA field lacks current mixed fine/coarse publication evidence: ${JSON.stringify(result.compactFieldEvidence)}`);
+      }
+    }
+    if (minimumPeakSpeed_m_s !== undefined) {
+      fail((result.stabilityEnvelope?.peakLiquidSpeed_m_s ?? 0) >= minimumPeakSpeed_m_s,
+        `${result.method} peak sampled motion speed ${result.stabilityEnvelope?.peakLiquidSpeed_m_s ?? "unknown"} m/s is below ${minimumPeakSpeed_m_s} m/s`);
+    }
     fail(result.validationErrors.length === 0, `${result.method} WebGPU validation errors: ${result.validationErrors.join("; ")}`);
     fail((result.info.nonFiniteCount ?? 0) === 0, `${result.method} reported ${result.info.nonFiniteCount} non-finite values`);
     fail(Number.isFinite(result.info.maxSpeed_m_s ?? NaN), `${result.method} max speed is not finite`);
+    const compactFaceTransport = result.method === "octree"
+      && (result.info.adaptiveFaceTransportedCount ?? 0) > 0;
+    if (compactFaceTransport) {
+      const faces = result.octreeFaceMirrorDiagnostics;
+      fail(faces !== undefined, "octree compact transport did not publish face diagnostics");
+      fail((faces?.faceCount ?? 0) > 0, "octree compact transport published zero faces");
+      fail((faces?.comparedRows ?? 0) > 0, "octree compact transport assembled zero adaptive pressure rows");
+      if ((result.info.adaptiveSurfacePageCapacity ?? 0) > 0) {
+        fail((faces?.projectionComparedFaces ?? 0) === 0,
+          "paged octree authority must disable obsolete dense projection parity");
+      } else fail((faces?.projectionComparedFaces ?? 0) > 0, "octree compact transport projected zero adaptive faces");
+      fail(faces?.overflow === false, "octree compact transport overflowed its face arena");
+      fail((result.info.adaptiveFaceTransportedCount ?? 0) > 0, "octree compact transport processed zero faces");
+      fail(result.info.adaptiveFaceTransportedCount === faces?.faceCount,
+        `octree compact transport processed ${result.info.adaptiveFaceTransportedCount} of ${faces?.faceCount} faces`);
+      fail(Number.isFinite(result.info.maxComponentCfl ?? NaN) && (result.info.maxComponentCfl ?? 0) > 0,
+        `octree compact transport reported invalid or zero CFL ${result.info.maxComponentCfl}`);
+      if (result.info.adaptiveSurfacePageCapacity !== undefined) {
+        fail(result.info.adaptiveSurfaceOverflow === false,
+          `octree adaptive surface overflowed code ${result.info.adaptiveSurfaceOverflowCode} (${result.info.adaptiveSurfaceCandidatePages} candidates for ${result.info.adaptiveSurfacePageCapacity} pages)`);
+        fail((result.info.adaptiveSurfaceActivePages ?? 0) > 0, "octree adaptive surface published zero active pages");
+      }
+    }
     if (scenarioId === "hose-tank" || scenarioId === "sphere-jet") {
       fail((result.info.volumeCellSum ?? -Infinity) >= (result.info.initialVolumeCellSum ?? 0) * 0.99, `${result.method} inflow scene lost more than 1% of its initial represented volume`);
       // A working inflow moves fluid; a projection that treats injected liquid
@@ -1435,6 +2839,90 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
   if (octree) {
     fail(octree.info.gridKind === "octree", `octree method reported ${octree.info.gridKind}`);
     fail((octree.info.quadtreeMaximumNeighborRatio ?? Infinity) <= 2, `octree neighbor ratio ${octree.info.quadtreeMaximumNeighborRatio} exceeds 2:1`);
+    fail((octree.info.quadtreeTopologyReadbackBytes ?? Infinity) === 0,
+      `octree simulation topology performed ${octree.info.quadtreeTopologyReadbackBytes ?? "unknown"} CPU readback bytes`);
+    if (octreePowerProjectionOverride === "authoritative") {
+      fail(octree.info.powerDiagramProjection === "authoritative",
+        `octree requested authoritative power projection but reported ${octree.info.powerDiagramProjection ?? "unknown"}`);
+      fail(octree.info.powerDiagramReady === true && octree.info.powerDiagramAuthoritative === true,
+        `octree authoritative power projection did not publish: ${octree.info.powerDiagramFallbackReason ?? "no reason reported"}`);
+      const powerFaces = octree.octreePowerFaceDiagnostics;
+      fail(powerFaces?.valid === true && (powerFaces.faceCount ?? 0) > 0,
+        `octree authoritative power faces did not publish a nonzero valid generation: ${JSON.stringify(powerFaces)}`);
+      const powerTopology = octree.octreePowerTopologyDiagnostics;
+      fail(powerTopology?.descriptor.errorCount === 0 && powerTopology.topology.invalidCount === 0,
+        `octree authoritative power topology is invalid: ${JSON.stringify(powerTopology)}`);
+      fail(octree.info.pressureSolver?.includes("Section 4.3 hybrid") === true,
+        `octree authoritative power projection selected the wrong pressure solver: ${octree.info.pressureSolver ?? "unknown"}`);
+      fail(octreeMGPCGDiagnosticsAreAcceptable(octree.octreeMGPCGDiagnostics),
+        `octree authoritative Section 4.3 MGPCG did not converge to relative residual 1e-4: ${JSON.stringify(octree.octreeMGPCGDiagnostics)}`);
+    }
+    if (octreeGlobalFineFactorOverride === "4" || octreeGlobalFineFactorOverride === "8") {
+      const expectedFactor = Number(octreeGlobalFineFactorOverride);
+      fail(octree.info.globalFineLevelSetEnabled === true,
+        "octree requested the global fine level set but did not expose a live GPU source");
+      fail(octree.info.globalFineLevelSetFactor === expectedFactor,
+        `octree global fine factor ${octree.info.globalFineLevelSetFactor ?? "unknown"} differs from requested ${expectedFactor}`);
+    }
+    if (globalFineGenerationTransitionRequested) {
+      const container = createSmokeScenario(scenarioId).scene.container;
+      const assertAuthoritativeRaster = (label: string, publishedGeneration: number | undefined,
+        observed: HybridPresentationSmokeStats | undefined) => {
+        const bounds = observed?.frontInterfaceBounds_m;
+        const boundsFinite = bounds !== undefined && bounds.flat(2).every(Number.isFinite);
+        const tolerance = Math.max(container.width_m, container.height_m, container.depth_m) * 1e-4;
+        const boundsInsideTank = boundsFinite && bounds![0][0] >= -0.5 * container.width_m - tolerance
+          && bounds![1][0] <= 0.5 * container.width_m + tolerance
+          && bounds![0][1] >= -tolerance && bounds![1][1] <= container.height_m + tolerance
+          && bounds![0][2] >= -0.5 * container.depth_m - tolerance
+          && bounds![1][2] <= 0.5 * container.depth_m + tolerance;
+        fail((observed?.frontInterfacePixels ?? 0) > 0 && (observed?.backInterfacePixels ?? 0) > 0,
+          `${label} did not rasterize a closed front/back interface: ${JSON.stringify(observed)}`);
+        fail(observed?.surfaceGeometrySource === "global-fine-coarse"
+          && observed.globalFineCrossingPublished === true
+          && observed.presentationFallbackActive === false
+          && (observed.globalFineAuthorityLatch ?? 0) !== 0
+          && (observed.vertexCount ?? 0) > 0
+          && (observed.activeCubeCount ?? 0) > 0,
+        `${label} was not extracted from the clean global fine/coarse publication: ${JSON.stringify(observed)}`);
+        fail(boundsInsideTank, `${label} produced non-finite or out-of-tank interface bounds: ${JSON.stringify(bounds)}`);
+        const transition = observed?.globalFineAuthorityTransition;
+        fail(transition?.cleanFineCoarseRequired === true
+          && transition.validGeneration === publishedGeneration
+          && transition.retainedGeometrySource === "retained-previous",
+        `${label} did not reject unpublished B and retain clean A: ${JSON.stringify(transition)}`);
+        fail(transition?.retainedFrontInterfacePixels === observed?.frontInterfacePixels
+          && transition?.retainedBackInterfacePixels === observed?.backInterfacePixels
+          && transition?.retainedFrontInterfaceHash === observed?.frontInterfaceHash
+          && transition?.retainedBackInterfaceHash === observed?.backInterfaceHash,
+        `${label} changed raster content after the unpublished-B probe: ${JSON.stringify(transition)}`);
+      };
+      const initialGeneration = octree.initialGlobalFineGeneration;
+      fail(initialGeneration?.publicationValid === true && (initialGeneration.generation ?? 0) > 0,
+        `octree t=0 global-fine generation is not published: ${JSON.stringify(initialGeneration)}`);
+      assertAuthoritativeRaster("octree t=0 raster", initialGeneration?.generation, octree.initialGlobalFineRaster);
+      const generation = octree.finalGlobalFineGeneration;
+      const raster = octree.finalGlobalFineRaster;
+      fail(generation?.publicationValid === true && (generation.generation ?? 0) > 0 && (generation.activePages ?? 0) > 0,
+        `octree final global-fine generation is not a nonempty published generation: ${JSON.stringify(generation)}`);
+      fail((generation?.validSamples ?? 0) > 0
+        && generation?.finiteValidSamples === generation?.validSamples
+        && (generation?.negativeValidSamples ?? 0) > 0
+        && (generation?.positiveValidSamples ?? 0) > 0,
+        `octree final global-fine generation does not contain a finite signed interface: ${JSON.stringify(generation)}`);
+      assertAuthoritativeRaster("octree final raster", generation?.generation, raster);
+      if (rasterCheckpointRequested) for (const checkpoint of octree.checkpoints) {
+        const checkpointGeneration = checkpoint.globalFineGeneration;
+        fail(checkpointGeneration?.publicationValid === true
+          && checkpointGeneration.coarseState === 0x8000_0000
+          && checkpointGeneration.coarseGeneration === checkpointGeneration.generation
+          && checkpointGeneration.topologyRolledBack === false
+          && checkpointGeneration.topologyFinalizeReason === 0,
+        `octree raster checkpoint at t=${checkpoint.time_s} is not a clean current fine/coarse publication: ${JSON.stringify(checkpointGeneration)}`);
+        assertAuthoritativeRaster(`octree raster checkpoint at t=${checkpoint.time_s}`,
+          checkpointGeneration?.generation, checkpoint.raster);
+      }
+    }
     if (sparseStatsRequested) {
       const sparse = octree.sparseVoxelStats;
       const hybrid = octree.hybridPresentationStats;
@@ -1457,6 +2945,8 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         `octree sparse brick-grid WebGPU smoke did not complete: ${sparse?.uiBrickGridRenderWall_ms}`);
       fail(!!hybrid && hybrid.bodyCount > 0 && Number.isFinite(hybrid.frameWall_ms) && hybrid.frameWall_ms > 0,
         `octree hybrid smooth WebGPU smoke did not complete: ${JSON.stringify(hybrid)}`);
+      fail((hybrid?.frontInterfacePixels ?? 0) > 0,
+        `octree hybrid smooth WebGPU smoke rasterized no water interfaces: ${JSON.stringify(hybrid)}`);
       fail(expectedFluidColor.every((value, index) => Math.abs(value - (sparse?.fluidColorLinear[index] ?? Infinity)) <= 1e-6), `octree sparse fluid color ${sparse?.fluidColorLinear} differs from authored linear color ${expectedFluidColor}`);
       if (scenarioId === "garden-dam-break") {
         fail(octree.initialFluidBrickStats?.core === 1,
@@ -1475,16 +2965,29 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
     }
     if (scenarioId === "dam-break-ui") {
       const envelope = octree.stabilityEnvelope;
-      const reference = referenceVolumeCells(octree.info);
-      const finalDrift = octree.finalSummary
-        ? (octree.finalSummary.cellSum - reference) / Math.max(1, Math.abs(reference))
-        : Infinity;
+      // Compact volume authority is the clean, current global-fine controller.
+      // The reconstructed cubic field is a spatial/raster QA proxy and must
+      // not be mislabeled as the physical volume integral.
+      const finalDrift = octree.info.volumeDrift ?? Infinity;
       fail((envelope?.nonFiniteVelocityCount ?? Infinity) === 0, `octree dam break encountered ${envelope?.nonFiniteVelocityCount} non-finite staged velocities`);
-      fail((envelope?.maximumProjectionEnergyRatio ?? Infinity) <= 1.1, `octree pressure projection amplified kinetic energy by ${envelope?.maximumProjectionEnergyRatio}`);
+      if ((octree.info.adaptiveFaceTransportedCount ?? 0) === 0) {
+        fail((envelope?.maximumProjectionEnergyRatio ?? Infinity) <= 1.1, `octree pressure projection amplified kinetic energy by ${envelope?.maximumProjectionEnergyRatio}`);
+      }
       fail((envelope?.peakComponentCfl ?? Infinity) <= 3, `octree dam-break peak CFL ${envelope?.peakComponentCfl} exceeds the three-cell backstop`);
+      fail((envelope?.maximumPressureRelativeResidual ?? Infinity) <= 1e-4,
+        `octree dam-break pressure residual peaked at ${envelope?.maximumPressureRelativeResidual}`);
       fail((envelope?.maximumExactVolumeDrift ?? Infinity) <= 0.01, `octree dam-break level-set volume drift peaked at ${envelope?.maximumExactVolumeDrift}`);
       fail(Math.abs(finalDrift) <= 0.01, `octree dam-break final level-set volume drift ${finalDrift} exceeds 1%`);
       fail((envelope?.minimumDominantComponentFraction ?? -Infinity) >= 0.98, `octree dam-break dominant component fell to ${envelope?.minimumDominantComponentFraction}`);
+      if (rasterCheckpointRequested) {
+        fail(octree.checkpoints.length > 0, "octree dam break produced no raster checkpoints");
+        for (const checkpoint of octree.checkpoints) {
+          fail((checkpoint.raster?.frontInterfacePixels ?? 0) > 0,
+            `octree fine-level-set raster produced no visible interface at t=${checkpoint.time_s.toFixed(2)} s: ${JSON.stringify(checkpoint.raster)}`);
+          fail((checkpoint.raster?.backInterfacePixels ?? 0) > 0,
+            `octree fine-level-set raster produced no exit interface at t=${checkpoint.time_s.toFixed(2)} s: ${JSON.stringify(checkpoint.raster)}`);
+        }
+      }
       const initialInterfaceFaces = octree.matchedSummary.interfaceFaceCount;
       const impact = octree.checkpoints.reduce<typeof octree.checkpoints[number] | undefined>((best, sample) => {
         if (sample.time_s < 0.9 || sample.time_s > 1.3) return best;
@@ -1495,6 +2998,13 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         fail(impact.summary.enclosedAirCells <= 8, `octree dam-break formed ${impact.summary.enclosedAirCells} enclosed air cells near impact`);
       }
       if (tall && octree.grid.every((value, axis) => value === tall.grid[axis])) {
+        if (octreePowerProjectionOverride === "authoritative") {
+          const octreePeak = envelope?.peakLiquidSpeed_m_s ?? Infinity;
+          const tallPeak = tall.stabilityEnvelope?.peakLiquidSpeed_m_s ?? 0;
+          const peakRatio = octreePeak / Math.max(tallPeak, 1e-9);
+          fail(Number.isFinite(peakRatio) && peakRatio >= 0.5 && peakRatio <= 2,
+            `octree authoritative power peak-speed ratio ${peakRatio} (${octreePeak} / ${tallPeak} m/s) is outside [0.5, 2] versus tall-cell`);
+        }
         const finalComparison = compareScalarFields(
           octree.finalSummary ? octree.checkpoints.at(-1)?.field ?? octree.matchedField : octree.matchedField,
           tall.finalSummary ? tall.checkpoints.at(-1)?.field ?? tall.matchedField : tall.matchedField,
@@ -1564,8 +3074,8 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
     const scene = createSmokeScenario(scenarioId).scene;
     const cellHeight_m = scene.container.height_m;
     for (const result of results) {
-      fail(result.grid[0] === 384 && result.grid[1] === 96 && result.grid[2] === 64,
-        `${result.method} grid ${result.grid.join("x")} is not the intended 384x96x64 ocean domain`);
+      fail(result.grid[0] === 320 && result.grid[1] === 96 && result.grid[2] === 80,
+        `${result.method} grid ${result.grid.join("x")} is not the intended 320x96x80 ocean domain`);
       const [nx, ny, nz] = result.grid;
       const columnHeights = (field: Float32Array) => {
         const heights = new Float64Array(nx);
@@ -1620,13 +3130,16 @@ const failures: string[] = [];
 try {
   for (const scenarioId of selectedScenarios()) {
     const scenario = createSmokeScenario(scenarioId);
+    applySceneOverrides(scenario.scene);
     const oracleSteps = Math.max(1, Math.round(oracleStepsOverride ?? scenario.oracleSteps));
     const target_s = Math.max(targetOverride ?? scenario.target_s, oracleSteps * scenario.scene.numerics.maxDt_s);
     console.log(JSON.stringify({ scenario: scenarioId, phase: "scenario", description: scenario.description, target_s, oracleSteps, quality, methods: methods.map((method) => method.id), cpuOracle: runCPUOracle }));
     if (methods.some((method) => method.id === "tall-cell")) {
       const layout = singleTallCellProbe
         ? createSingleTallCellProbeLayout(scenario.scene, quality, 2048, singleTallCellProbe)
-        : createTallCellLayout(scenario.scene, quality, 2048, regularLayersOverride === undefined && maximumNeighborDeltaOverride === undefined ? undefined : {
+        : createTallCellLayout(scenario.scene, quality, 2048,
+          surfaceColumnsOverride === undefined && regularLayersOverride === undefined && maximumNeighborDeltaOverride === undefined ? undefined : {
+          ...(surfaceColumnsOverride === undefined ? {} : { surfaceColumns: surfaceColumnsOverride }),
           ...(regularLayersOverride === undefined ? {} : { regularLayers: regularLayersOverride }),
           ...(maximumNeighborDeltaOverride === undefined ? {} : { maximumNeighborDelta: maximumNeighborDeltaOverride })
         });

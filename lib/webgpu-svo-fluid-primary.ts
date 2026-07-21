@@ -96,6 +96,8 @@ export interface SvoStructuralFluidPrimaryWgslNames {
   fineSampleFunction?: string;
   /** Optional matching fine gradient. It is accepted only for a fine-owned root. */
   fineGradientFunction?: string;
+  /** Optional consumer-specific traversal wrapper, for example a diagnostic depth limiter. */
+  traversalFunction?: string;
 }
 
 function identifier(value: string | undefined, fallback: string): string {
@@ -128,6 +130,7 @@ export function createSvoStructuralFluidPrimaryWGSL(names: SvoStructuralFluidPri
     domainFunction: identifier(names.domainFunction, "svoStructuralFluidPrimaryDomain"),
     fineSampleFunction: names.fineSampleFunction ? identifier(names.fineSampleFunction, "") : undefined,
     fineGradientFunction: names.fineGradientFunction ? identifier(names.fineGradientFunction, "") : undefined,
+    traversalFunction: identifier(names.traversalFunction, "svoTraverse"),
   };
   if (Boolean(resolved.fineSampleFunction) !== Boolean(resolved.fineGradientFunction)) {
     throw new RangeError("Fine structural sampling requires both sample and gradient functions");
@@ -205,7 +208,10 @@ fn svoStructuralFluidPrimaryNormal(position_m:vec3f,owner:u32,domain:SvoStructur
   return SvoFluidNormal(-normalize(rayDirection),vec3f(0.0),0u);
 }
 
+var<private> svoStructuralFluidPrimaryMaximumDepth:u32;
+fn svoStructuralFluidPrimaryTraversalDepth()->u32{return svoStructuralFluidPrimaryMaximumDepth;}
 fn svoTraceStructuralFluidPrimary(ro:vec3f,rdIn:vec3f,tMax_m:f32,mapping:SvoMapping)->SvoStructuralFluidPrimaryHit{
+  svoStructuralFluidPrimaryMaximumDepth=0u;
   if(arrayLength(&${resolved.publication})<=${SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision}u
     || arrayLength(&${resolved.control})<=${SPARSE_BRICK_GPU_LAYOUT.controlWords.overflowFlags}u){
     return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,0.0,-normalize(rdIn),0u,0u,0u,SVO_FLUID_OWNER_NONE);
@@ -237,7 +243,7 @@ fn svoTraceStructuralFluidPrimary(ro:vec3f,rdIn:vec3f,tMax_m:f32,mapping:SvoMapp
   var insideAtStart=0u;
   for(var leafAttempt=0u;leafAttempt<SVO_FLUID_PRIMARY_LEAF_VISITS;leafAttempt+=1u){
     if(cursor>=tMax_m){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_MISS,tMax_m,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
-    let leaf=svoTraverse(SvoRay(ro,cursor,rd,tMax_m),mapping);
+    let leaf=${resolved.traversalFunction}(SvoRay(ro,cursor,rd,tMax_m),mapping);
     totalNodeVisits+=leaf.visits;
     if(leaf.status==SVO_STATUS_MISS){
       if(${resolved.publication}[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}u]!=generation){return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,cursor,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);}
@@ -249,6 +255,7 @@ fn svoTraceStructuralFluidPrimary(ro:vec3f,rdIn:vec3f,tMax_m:f32,mapping:SvoMapp
     if(leaf.status!=SVO_STATUS_HIT||leaf.leafIndex>=arrayLength(&${resolved.leafStates})){
       return svoStructuralFluidPrimaryResult(SVO_FLUID_PRIMARY_INVALID,cursor,-rd,insideAtStart,totalSteps,totalNodeVisits,SVO_FLUID_OWNER_NONE);
     }
+    svoStructuralFluidPrimaryMaximumDepth=max(svoStructuralFluidPrimaryMaximumDepth,leaf.level);
     let leafExit=min(leaf.tExit,tMax_m);
     if((${resolved.leafStates}[leaf.leafIndex]&SVO_STRUCTURAL_RESIDENT)==0u){
       // Explicit non-residency means this leaf does not own a coarse field.

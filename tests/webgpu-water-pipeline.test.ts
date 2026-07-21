@@ -9,8 +9,10 @@ import {
   shouldResolveRigidContact,
   shouldUpdateWaterSurface,
   surfaceExtractionDispatchPlan,
+  surfaceExtractionRepresentation,
   surfaceExtractionShader,
-  surfaceVertexCapacity
+  surfaceVertexCapacity,
+  WATER_INTERFACE_CULL_MODES
 } from "../lib/webgpu-water-pipeline";
 
 test("rigid contact resolution is confined to a narrow body/surface band", () => {
@@ -28,6 +30,12 @@ test("the optical composite locally refines rigid contacts and terminates water 
   assert.match(compositeShader, /opaqueSolidExit=true/, "refracted water rays terminate on submerged rigid bodies");
   assert.match(compositeShader, /var liquidField:texture_3d<f32>/);
   assert.match(compositeShader, /var<storage,read> bodies:array<BodyGPU,12>/);
+  assert.match(compositeShader, /if\(!adaptiveSurface&&u\.gridInfo\.w>/,
+    "adaptive presentation must not read the dense contact field");
+});
+
+test("outward water triangles preserve camera-entry interfaces after framebuffer Y inversion", () => {
+  assert.deepEqual(WATER_INTERFACE_CULL_MODES, { front: "back", back: "front" });
 });
 
 test("surface extraction follows the fixed presentation cadence", () => {
@@ -64,10 +72,29 @@ test("restricted extraction has separate surface-band and tank-wall entry points
 test("extraction is split into a lean classify sweep and a compacted polygonise pass", () => {
   assert.match(surfaceExtractionShader, /fn classifyCube/, "sweep kernels classify and append to the worklist");
   assert.match(surfaceExtractionShader, /fn polygoniseMain/, "triangle emission runs over compacted surface cubes only");
-  assert.doesNotMatch(surfaceExtractionShader, /atomicCompareExchangeWeak/, "the per-triangle global compare-exchange loop must not return");
+  const polygonise = surfaceExtractionShader.match(/fn polygoniseMain[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.doesNotMatch(polygonise, /atomicCompareExchangeWeak/, "the per-triangle global compare-exchange loop must not return");
   assert.match(surfaceExtractionShader, /atomicAdd\(&drawArgs\.activeCubeCount, 1u\)/, "classification appends with a single atomic per surface cube");
   assert.match(surfaceExtractionShader, /var<workgroup> workgroupVertexTotal/, "vertex blocks are reserved per workgroup, not per triangle");
   assert.match(surfaceExtractionShader, new RegExp(`@compute @workgroup_size\\(${EXTRACTION_POLYGONISE_WORKGROUP}\\)\\s*\\nfn polygoniseMain`));
+});
+
+test("adaptive octree pages drive the production mesh without a dense publication sweep", () => {
+  assert.match(surfaceExtractionShader, /fn extractAdaptiveMain/);
+  assert.match(surfaceExtractionShader, /fn extractAdaptiveLeafMain/);
+  assert.match(surfaceExtractionShader, /adaptiveArena\[adaptiveParams\.offsets1\.x\+4u\+item\]/);
+  assert.match(surfaceExtractionShader, /adaptiveOrigin\(leaf\.packedOrigin\)\*resolution\+local/);
+  assert.match(surfaceExtractionShader, /classifyCubeScaled\(vec3i\(adaptiveOrigin\(leaf\.packedOrigin\)\*resolution\),max\(1u,leaf\.size\*resolution\)\)/);
+  const leafExtraction = surfaceExtractionShader.match(/fn extractAdaptiveLeafMain[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(leafExtraction, /\(leaf\.flags&32u\)==0u/,
+    "all live affine leaves are presentation-authoritative even without a CORE residency hint");
+  assert.doesNotMatch(leafExtraction, /leaf\.flags&2u/);
+  assert.equal(surfaceExtractionRepresentation(true, true), "adaptive-octree");
+  assert.equal(surfaceExtractionRepresentation(false, true), "sparse-band");
+  assert.equal(surfaceExtractionRepresentation(false, false), "dense-texture");
+  assert.doesNotMatch(surfaceExtractionShader.match(/fn extractAdaptiveMain[\s\S]*?\n\}/)?.[0] ?? "", /textureLoad\(volume/);
+  assert.match(surfaceExtractionShader, /activeCubes: array<vec2u>/, "adaptive owner propagation must retain the 8-byte worklist record");
+  assert.match(surfaceExtractionShader, /adaptiveOwnerRow = \(packedCube\.x >> 26u\)/, "polygonisation must restore the classifier's owner row from the existing record");
 });
 
 test("the prepare kernel sizes the indirect polygonise dispatch from the worklist", () => {

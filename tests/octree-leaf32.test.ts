@@ -4,6 +4,8 @@ import { pathToFileURL } from "node:url";
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { octreeMethod } from "../lib/methods/octree";
 import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { decodeOctreeOwnerWord, encodeOctreeOwnerWord, planOctreeLeafFrontierAllocation, planOctreeOwnerAllocation } from "../lib/webgpu-octree";
+import { WebGPUUniformEulerianSolver } from "../lib/webgpu-uniform-eulerian";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 
@@ -81,6 +83,9 @@ async function runCalmDeepSolve(device: GPUDevice, maximumLeafSize: "8" | "32") 
   const scene = calmDeepScene();
   const values = Object.fromEntries(octreeMethod.params.map((parameter) => [parameter.key, "default" in parameter ? parameter.default : 0])) as Record<string, string | number | boolean>;
   values.maximumLeafSize = maximumLeafSize;
+  // This test reads the legacy dense projection texture directly. Keep that
+  // compatibility representation authoritative rather than the compact faces.
+  values.faceVelocityTransport = "off";
   values.secondaryParticles = "off";
   const solver = octreeMethod.createSolver!(device, scene, "balanced", values, undefined) as unknown as {
     advanceTo(time_s: number, bodies: never[]): boolean;
@@ -97,7 +102,7 @@ async function runCalmDeepSolve(device: GPUDevice, maximumLeafSize: "8" | "32") 
   await device.queue.onSubmittedWorkDone();
   const internals = (solver as unknown as OctreeInternals).octreeProjection;
   const count = dims[0] * dims[1] * dims[2];
-  const owners = new Uint32Array(await readBufferBytes(device, internals.topology, count * 8));
+  const owners = new Uint32Array(await readBufferBytes(device, internals.topology, count * 4));
   const pressureA = new Float32Array(await readBufferBytes(device, internals.pressureA, internals.pressureA.size));
   const pressureB = new Float32Array(await readBufferBytes(device, internals.pressureB, internals.pressureB.size));
   const velocity = await readVelocityTexture(device, internals.resources.velocityOut, dims);
@@ -111,12 +116,11 @@ test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and 
     const run32 = await runCalmDeepSolve(device, "32");
     const [nx, ny, nz] = run32.dims;
     const index = (x: number, y: number, z: number) => x + nx * (y + ny * z);
-    const unpack = (word: number) => [word & 1023, (word >> 10) & 1023, (word >> 20) & 1023] as const;
+    const ownerAt = (x: number, y: number, z: number) => decodeOctreeOwnerWord(run32.owners[index(x, y, z)], [x, y, z]);
     const sizeCounts = new Map<number, number>();
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
       const cell = index(x, y, z);
-      const origin = unpack(run32.owners[cell * 2]);
-      const size = run32.owners[cell * 2 + 1];
+      const { origin, size } = decodeOctreeOwnerWord(run32.owners[cell], [x, y, z]);
       assert.ok([1, 2, 4, 8, 16, 32].includes(size), `cell ${x},${y},${z} has invalid leaf size ${size}`);
       assert.ok(origin[0] === Math.floor(x / size) * size && origin[1] === Math.floor(y / size) * size && origin[2] === Math.floor(z / size) * size,
         `cell ${x},${y},${z} owner origin ${origin} is not its aligned ${size}-block`);
@@ -124,9 +128,9 @@ test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and 
     }
     assert.ok((sizeCounts.get(32) ?? 0) > 0, "the deep calm interior must contain 32-cubed leaves");
     assert.ok((sizeCounts.get(16) ?? 0) > 0, "the graded ladder must contain 16-cubed leaves");
-    assert.equal(run32.owners[index(32, 8, 32) * 2 + 1], 32, "the bottom interior tier must coarsen fully to 32");
+    assert.equal(ownerAt(32, 8, 32).size, 32, "the bottom interior tier must coarsen fully to 32");
     // Strict 2:1 balance across every face-adjacent owner pair.
-    const sizeAt = (x: number, y: number, z: number) => run32.owners[index(x, y, z) * 2 + 1];
+    const sizeAt = (x: number, y: number, z: number) => ownerAt(x, y, z).size;
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
       const size = sizeAt(x, y, z);
       for (const [dx, dy, dz] of [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const) {
@@ -139,15 +143,17 @@ test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and 
     }
     // Distinct face-neighbor leaves per leaf must fit the fixed 24-entry row
     // budget (6 faces x at most 4 subfaces under 2:1) with no saturation.
-    const neighborCounts = new Map<number, Set<number>>();
+    const neighborCounts = new Map<string, Set<string>>();
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
       const cell = index(x, y, z);
       for (const [dx, dy, dz] of [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const) {
         const xx = x + dx, yy = y + dy, zz = z + dz;
         if (xx >= nx || yy >= ny || zz >= nz) continue;
         const other = index(xx, yy, zz);
-        if (run32.owners[cell * 2] === run32.owners[other * 2]) continue;
-        const left = run32.owners[cell * 2], right = run32.owners[other * 2];
+        const leftOwner = decodeOctreeOwnerWord(run32.owners[cell], [x, y, z]);
+        const rightOwner = decodeOctreeOwnerWord(run32.owners[other], [xx, yy, zz]);
+        const left = leftOwner.origin.join(","), right = rightOwner.origin.join(",");
+        if (left === right) continue;
         if (!neighborCounts.has(left)) neighborCounts.set(left, new Set());
         if (!neighborCounts.has(right)) neighborCounts.set(right, new Set());
         neighborCounts.get(left)!.add(right);
@@ -186,6 +192,64 @@ test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and 
       leafSizeCensus: Object.fromEntries([...sizeCounts.entries()].sort((a, b) => a[0] - b[0]).map(([size, cells]) => [size, cells / (size ** 3)]))
     }));
     run8.solver.destroy();
+    assert.deepEqual(validationErrors, []);
+  } finally {
+    device.destroy();
+  }
+});
+
+test("packed owner authority removes one persistent word per finest cell", () => {
+  const ocean = planOctreeOwnerAllocation(320 * 96 * 80);
+  assert.equal(ocean.allocatedBytes, 9_830_400);
+  assert.equal(ocean.legacyDenseBytes, 19_660_800);
+  assert.equal(ocean.savedBytes, 9_830_400);
+  for (const size of [1, 2, 4, 8, 16, 32]) {
+    const origin = [1024 - size, 512 - size, 256 - size] as const;
+    const cell = [origin[0] + size - 1, origin[1] + size - 1, origin[2] + size - 1] as const;
+    assert.deepEqual(decodeOctreeOwnerWord(encodeOctreeOwnerWord(origin, size), cell), { origin: [...origin], size });
+  }
+});
+
+test("compact frontier overflow fails closed with bounded lists and a dense origin map", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU octree checks" }, async () => {
+  const { device, validationErrors } = await createDevice();
+  try {
+    const scene = calmDeepScene();
+    const solver = new WebGPUUniformEulerianSolver(device, scene, "balanced", undefined, {
+      secondaryParticles: false,
+      octree: {
+        pressureIterations: 8,
+        faceVelocityTransport: true,
+        maximumLeafSize: 32,
+        adaptivity: 1,
+        interfaceRefinementBandCells: 4,
+        pressureRowCapacity: 1,
+      },
+    });
+    const projection = (solver as unknown as {
+      octreeProjection: {
+        leafFrontier: GPUBuffer;
+        info: {
+          pressureRowCapacity: number;
+          pressureCapacityOverflow?: boolean;
+          frontierListCapacity: number;
+          frontierRequiredLeaves?: number;
+          frontierCapacityOverflow?: boolean;
+        };
+        readSolveDiagnostics(): Promise<void>;
+      };
+    }).octreeProjection;
+    const count = solver.info.nx * solver.info.ny * solver.info.nz;
+    assert.equal(projection.info.pressureRowCapacity, 256, "the explicit row override remains scan-block aligned");
+    assert.equal(projection.leafFrontier.size, planOctreeLeafFrontierAllocation(count, 256, true).allocatedBytes);
+    const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+    while (!solver.advanceTo(2 * scene.numerics.fixedDt_s!, [])) await nextTurn();
+    await device.queue.onSubmittedWorkDone();
+    await projection.readSolveDiagnostics();
+    assert.equal(projection.info.frontierListCapacity, 256);
+    assert.equal(projection.info.frontierCapacityOverflow, true);
+    assert.equal(projection.info.pressureCapacityOverflow, true, "frontier overflow must suppress the pressure solve");
+    assert.ok((projection.info.frontierRequiredLeaves ?? 0) > projection.info.frontierListCapacity);
+    solver.destroy();
     assert.deepEqual(validationErrors, []);
   } finally {
     device.destroy();

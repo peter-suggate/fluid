@@ -56,7 +56,7 @@ test("ping-pong HDR, compact keys, and moments have exact bounded formats and li
   assert.deepEqual(SVO_TEMPORAL_ACCUMULATION_LAYOUT, {
     paramsBytes: 160, historyColorFormat: "rgba16float", momentsFormat: "rgba16float", keyFormat: "rgba16uint",
     pingPongBytesPerPixel: 64, previousNeighborhoodLoadsPerAcceptedPixel: 9, neighborhoodLoadsPerAcceptedPixel: 8,
-    fullScreenResolvePassesPerFrame: 1, aliasBreakingCopiesPerFrame: 1,
+    fullScreenResolvePassesPerFrame: 1, aliasBreakingCopiesPerFrame: 0,
     maximumAccumulationSamples: 64, maximumStoredSamples: 255,
   });
   assert.deepEqual(Array.from(pipelines[0].fragment!.targets).map((target) => target?.format), ["rgba16float", "rgba16float", "rgba16uint", "rgba16uint"]);
@@ -73,7 +73,7 @@ test("ping-pong HDR, compact keys, and moments have exact bounded formats and li
   assert.ok(textures.slice(8).every(({ destroyed }) => destroyed === 1));
 });
 
-test("one resolve pass writes four compact MRTs, performs one alias-breaking copy, and advances previous camera", async (t) => {
+test("one resolve pass exposes ping-pong HDR without an alias-breaking copy and advances previous camera", async (t) => {
   installGpuConstants(t);
   const textures: MockTexture[] = [], writes: ArrayBufferView[] = [];
   const device = mockDevice(textures, [], writes);
@@ -89,16 +89,19 @@ test("one resolve pass writes four compact MRTs, performs one alias-breaking cop
   } as unknown as GPUCommandEncoder;
   const gBuffer = { width: 64, height: 48, radianceDepthOwnership: "external-water-compositor-target", packedSurface: packed, identityMedia: identity, hardwareDepth: {} as GPUTexture } as const;
   const timestampWrites = { querySet: {} as GPUQuerySet, beginningOfPassWriteIndex: 16, endOfPassWriteIndex: 17 };
-  assert.equal(accumulator.encode(encoder, current, gBuffer, frame, timestampWrites), true);
+  const firstResolve = accumulator.encode(encoder, current, gBuffer, frame, timestampWrites);
+  assert.ok(firstResolve);
   assert.equal(passes[0].timestampWrites, timestampWrites);
   assert.equal(Array.from(passes[0].colorAttachments).length, 4);
-  assert.equal(copies.length, 1);
-  assert.equal(copies[0].destination.texture, current, "only resolved dry HDR is copied before legacy water composition");
+  assert.equal(copies.length, 0);
+  assert.equal(firstResolve.resolvedTexture, textures[4], "the first resolve exposes the next ping-pong HDR texture");
   assert.equal((writes[0] as Float32Array)[38], 0, "first frame must reject uninitialized history");
-  assert.equal(accumulator.encode(encoder, current, gBuffer, { ...frame, camera: { ...frame.camera, position_m: [0.1, 1, 3] } }), true);
+  const secondResolve = accumulator.encode(encoder, current, gBuffer, { ...frame, camera: { ...frame.camera, position_m: [0.1, 1, 3] } });
+  assert.ok(secondResolve);
+  assert.equal(secondResolve.resolvedTexture, textures[0], "the second resolve exposes the other ping-pong HDR texture");
   assert.equal((writes[1] as Float32Array)[38], 1, "second frame may use the stored previous camera/key");
   accumulator.invalidate();
-  assert.equal(accumulator.encode(encoder, current, gBuffer, frame), true);
+  assert.ok(accumulator.encode(encoder, current, gBuffer, frame));
   assert.equal((writes[2] as Float32Array)[38], 0);
   accumulator.destroy();
 });
@@ -116,6 +119,11 @@ test("shader accepts exact static or rigid-valid motion and uses velocity reproj
   assert.match(sparseVoxelTemporalAccumulatorShader, /history=temporalVarianceClamp\(history,oldMoments\)/);
   assert.match(sparseVoxelTemporalAccumulatorShader, /sampleCount=min\(oldMoments\.z\+1\.0,255\.0\)/);
   assert.match(sparseVoxelTemporalAccumulatorShader, /accumulationCount=min\(sampleCount,64\.0\)/);
+  assert.match(sparseVoxelTemporalAccumulatorShader, /shadowDeferred=failure==TEMPORAL_FAILURE_SHADOW_DEFERRED/);
+  assert.match(sparseVoxelTemporalAccumulatorShader, /if\(shadowDeferred\)\{result=previous\.rgb;sampleCount=oldMoments\.z;pausedStable=oldMoments\.w;\}/,
+    "a deferred shadow pixel reuses only accepted identity-validated history");
+  assert.match(sparseVoxelTemporalAccumulatorShader, /sampleCount=select\(-1\.0,1\.0,currentUsable&&!shadowDeferred\)/,
+    "first-frame deferred pixels must not become valid history");
   assert.match(sparseVoxelTemporalAccumulatorShader, /if\(oldMoments\.z>0\.0\)[^]*if\(exactIdentity\)[^]*accepted=svoTemporalHistoryReason/,
     "the signed stored count must reject history produced by a previous non-static or invalid surface");
 });
@@ -125,11 +133,14 @@ test("production integration invalidates history outside smooth SVO and resolves
   const water = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
   assert.match(renderer, /if \(!useSvoDryScene\) this\.svoDryScenePipeline\?\.invalidateTemporalHistory\(\)/);
   assert.match(renderer, /composition: "dry-before-legacy-water"/);
-  assert.match(renderer, /if \(!svoEncoded\) this\.svoDryScenePipeline\?\.invalidateTemporalHistory\(\)/);
+  assert.match(renderer, /if \(!replacementResult\) this\.svoDryScenePipeline\?\.invalidateTemporalHistory\(\)/);
   assert.match(renderer, /beginningOfPassWriteIndex: 16, endOfPassWriteIndex: 17/);
+  assert.match(readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8"), /dryPublicationGeneration\(\)->u32\{return select\(0u,publicationState\[3\]/,
+    "static history identity must not be invalidated by every completed fluid publication");
   assert.match(renderer, /gpuSvoTemporal_ms=stage\.svoTemporal_ms/);
   assert.match(water, /drySceneReplacement\?\.\(encoder, this\.sceneTexture, timestamps\?\.scene\)/);
-  assert.match(water, /Dry scene HDR[^]*GPUTextureUsage\.COPY_DST/);
+  assert.doesNotMatch(water, /Dry scene HDR[^\n]*GPUTextureUsage\.COPY_DST/);
+  assert.match(water, /compositeBindGroupFor\(sparseSceneResult\.sampledTargetView\)/);
   const replacement = water.indexOf("drySceneReplacement?.(encoder, this.sceneTexture");
   const interfaces = water.indexOf("interfacePass(\"Water + spray front interfaces\"", replacement);
   assert.ok(replacement >= 0 && interfaces > replacement, "dry temporal history resolves before legacy water and spray composition");
@@ -171,9 +182,10 @@ test("real GPU resolve preserves a seeded nonzero dry HDR target", {
     assert.equal(seedResult[0], seeded[0], "test seed reaches the current dry target");
     await accumulator.initialize(); accumulator.ensureSize(width, height);
     const encoder = device.createCommandEncoder();
-    assert.equal(accumulator.encode(encoder, current, { width, height, radianceDepthOwnership: "external-water-compositor-target", packedSurface: packed, identityMedia: identity, hardwareDepth: depth }, frame), true);
+    const firstResolve = accumulator.encode(encoder, current, { width, height, radianceDepthOwnership: "external-water-compositor-target", packedSurface: packed, identityMedia: identity, hardwareDepth: depth }, frame);
+    assert.ok(firstResolve);
     const readback = device.createBuffer({ size: 256 * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    encoder.copyTextureToBuffer({ texture: current }, { buffer: readback, bytesPerRow: 256, rowsPerImage: height }, [width, height]); device.queue.submit([encoder.finish()]);
+    encoder.copyTextureToBuffer({ texture: firstResolve.resolvedTexture }, { buffer: readback, bytesPerRow: 256, rowsPerImage: height }, [width, height]); device.queue.submit([encoder.finish()]);
     await readback.mapAsync(GPUMapMode.READ); const result = new Uint16Array(readback.getMappedRange().slice(0)); readback.unmap();
     await device.queue.onSubmittedWorkDone();
     assert.ok(decodeSvoGBufferFloat16(result[0]) > .7, `resolved red channel remains nonzero; validation=${validationErrors.join(" | ")}`);
@@ -181,10 +193,11 @@ test("real GPU resolve preserves a seeded nonzero dry HDR target", {
     assert.equal(result[3], seeded[3], "linear depth is preserved exactly on the first frame");
     device.queue.writeTexture({ texture: current }, paddedRows(seeded), { bytesPerRow: 256, rowsPerImage: height }, [width, height]);
     const secondEncoder = device.createCommandEncoder();
-    assert.equal(accumulator.encode(secondEncoder, current, { width, height, radianceDepthOwnership: "external-water-compositor-target", packedSurface: packed, identityMedia: identity, hardwareDepth: depth }, frame), true);
+    const secondResolve = accumulator.encode(secondEncoder, current, { width, height, radianceDepthOwnership: "external-water-compositor-target", packedSurface: packed, identityMedia: identity, hardwareDepth: depth }, frame);
+    assert.ok(secondResolve);
     const internal = accumulator as unknown as { previousIndex: number; history: readonly [{ moments: GPUTexture }, { moments: GPUTexture }] };
     const secondReadback = device.createBuffer({ size: 512 * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    secondEncoder.copyTextureToBuffer({ texture: current }, { buffer: secondReadback, bytesPerRow: 256, rowsPerImage: height }, [width, height]);
+    secondEncoder.copyTextureToBuffer({ texture: secondResolve.resolvedTexture }, { buffer: secondReadback, bytesPerRow: 256, rowsPerImage: height }, [width, height]);
     secondEncoder.copyTextureToBuffer({ texture: internal.history[internal.previousIndex].moments }, { buffer: secondReadback, offset: 256 * height, bytesPerRow: 256, rowsPerImage: height }, [width, height]);
     device.queue.submit([secondEncoder.finish()]); await secondReadback.mapAsync(GPUMapMode.READ); const second = new Uint16Array(secondReadback.getMappedRange().slice(0)); secondReadback.unmap();
     assert.deepEqual(Array.from(second.slice(0, 4)), Array.from(seeded), "stable accepted history preserves the seeded HDR bits");

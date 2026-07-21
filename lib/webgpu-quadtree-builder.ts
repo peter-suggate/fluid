@@ -474,9 +474,6 @@ function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCach
     { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
   ] });
   const shaderModule = device.createShaderModule({ label: "Resident quadtree level set", code: quadtreeSurfaceShader });
-  void shaderModule.getCompilationInfo().then((info) => {
-    for (const message of info.messages) if (message.type === "error") console.error(`Resident quadtree level-set WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-  }).catch(() => { /* Device loss is reported by the owning solver. */ });
   const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
   const pipeline = (entryPoint: string) => device.createComputePipeline({ label: `Quadtree surface ${entryPoint}`, layout: pipelineLayout, compute: { module: shaderModule, entryPoint } });
   return { layout, pipelineLayout, shaderModule, pipelines: {
@@ -491,19 +488,19 @@ function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCach
 }
 
 export class WebGPUQuadtreeSurfaceState {
-  readonly cache: WebGPUQuadtreeSurfaceCache;
+  readonly cache?: WebGPUQuadtreeSurfaceCache;
   readonly texture: GPUTexture;
-  private readonly scratch: GPUTexture;
-  private readonly predicted: GPUTexture;
-  private readonly reversed: GPUTexture;
-  private readonly seedsA: GPUBuffer;
-  private readonly seedsB: GPUBuffer;
-  private readonly params: GPUBuffer;
-  private readonly passBuffer: GPUBuffer;
-  private readonly reductions: GPUBuffer;
-  private readonly passStride: number;
-  private readonly jumps: number[];
-  private readonly groups: { advect: GPUBindGroup; predict: GPUBindGroup; reverse: GPUBindGroup; correct: GPUBindGroup; reduce: GPUBindGroup; seed: GPUBindGroup; jumpAB: GPUBindGroup; jumpBA: GPUBindGroup; finalizeA: GPUBindGroup; finalizeB: GPUBindGroup; cull: GPUBindGroup };
+  private readonly scratch?: GPUTexture;
+  private readonly predicted?: GPUTexture;
+  private readonly reversed?: GPUTexture;
+  private readonly seedsA?: GPUBuffer;
+  private readonly seedsB?: GPUBuffer;
+  private readonly params?: GPUBuffer;
+  private readonly passBuffer?: GPUBuffer;
+  private readonly reductions?: GPUBuffer;
+  private passStride = 0;
+  private jumps: number[] = [];
+  private readonly groups?: { advect: GPUBindGroup; predict: GPUBindGroup; reverse: GPUBindGroup; correct: GPUBindGroup; reduce: GPUBindGroup; seed: GPUBindGroup; jumpAB: GPUBindGroup; jumpBA: GPUBindGroup; finalizeA: GPUBindGroup; finalizeB: GPUBindGroup; cull: GPUBindGroup };
   private readbackPending = false;
   private referenceVolumeCells: number;
   private volumeCells: number;
@@ -521,26 +518,35 @@ export class WebGPUQuadtreeSurfaceState {
   private readonly ownedReconcileFallback?: GPUTexture;
   private readonly ownedSolidFallback?: GPUBuffer;
   private readonly ownedSparseFallback?: GPUBuffer;
+  private presentationTextureReleased = false;
 
-  constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, velocity: GPUTexture, initialPhi: Float32Array, cache?: WebGPUQuadtreeSurfaceCache, reconcileVolume?: GPUTexture, private readonly debrisCulling = false, reconcileEnabled = reconcileVolume !== undefined, private readonly gpuVolumeCorrection = false, private readonly monotoneLevelSetTransport = false, private readonly solidFractions?: GPUBuffer, private readonly sparseExecution?: SparseSurfaceExecutionSource) {
-    this.cache = ensureSurfaceCache(device, cache);
+  constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, velocity: GPUTexture, initialPhi: Float32Array, cache?: WebGPUQuadtreeSurfaceCache, reconcileVolume?: GPUTexture, private readonly debrisCulling = false, reconcileEnabled = reconcileVolume !== undefined, private readonly gpuVolumeCorrection = false, private readonly monotoneLevelSetTransport = false, private readonly solidFractions?: GPUBuffer, private readonly sparseExecution?: SparseSurfaceExecutionSource, private readonly presentationOnly = false, private readonly placeholderOnly = false) {
+    this.cache = presentationOnly ? cache : ensureSurfaceCache(device, cache);
     this.hasReconcileVolume = reconcileVolume !== undefined;
     this.reconcileEnabled = reconcileEnabled && reconcileVolume !== undefined;
     const textureUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC;
-    this.texture = device.createTexture({ label: "Resident quadtree level set", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
+    if (placeholderOnly && (!presentationOnly || initialPhi.length !== 1)) {
+      throw new RangeError("A placeholder surface publication requires presentation-only mode and one phi sample");
+    }
+    const textureDimensions = placeholderOnly ? { nx: 1, ny: 1, nz: 1 } : dims;
+    this.texture = device.createTexture({ label: placeholderOnly ? "Quadtree level-set format placeholder" : "Resident quadtree level set", size: [textureDimensions.nx, textureDimensions.ny, textureDimensions.nz], dimension: "3d", format: "r32float", usage: textureUsage });
+    uploadLevelSetTexture(device, this.texture, initialPhi, textureDimensions.nx, textureDimensions.ny, textureDimensions.nz);
+    const volumeBand = 4 * cell.y;
+    this.referenceVolumeCells = initialPhi.reduce((sum, value) => sum + Math.max(0, Math.min(1, 0.5 - value / volumeBand)), 0);
+    this.volumeCells = this.referenceVolumeCells;
+    this.interfaceCells = initialPhi.reduce((sum, value) => sum + (Math.abs(value) < 1.5 * Math.min(cell.x, cell.y, cell.z) ? 1 : 0), 0);
+    // Adaptive surface pages own transport, redistance, and volume control.
+    // Retain only the topology/render publication texture; in particular do
+    // not hide box-sized scratch allocations behind unused bind groups.
+    if (presentationOnly) return;
     this.scratch = device.createTexture({ label: "Resident quadtree level-set advection scratch", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
     this.predicted = device.createTexture({ label: "Resident quadtree level-set MacCormack prediction", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
     this.reversed = device.createTexture({ label: "Resident quadtree level-set MacCormack reversal", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
-    uploadLevelSetTexture(device, this.texture, initialPhi, dims.nx, dims.ny, dims.nz);
     const bytes = Math.max(8, dims.nx * dims.ny * dims.nz * 8), seedUsage = GPUBufferUsage.STORAGE;
     this.seedsA = device.createBuffer({ label: "Quadtree surface seeds A", size: bytes, usage: seedUsage });
     this.seedsB = device.createBuffer({ label: "Quadtree surface seeds B", size: bytes, usage: seedUsage });
     this.params = device.createBuffer({ label: "Quadtree surface parameters", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.reductions = device.createBuffer({ label: "Quadtree level-set volume diagnostics", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    const volumeBand = 4 * cell.y;
-    this.referenceVolumeCells = initialPhi.reduce((sum, value) => sum + Math.max(0, Math.min(1, 0.5 - value / volumeBand)), 0);
-    this.volumeCells = this.referenceVolumeCells;
-    this.interfaceCells = initialPhi.reduce((sum, value) => sum + (Math.abs(value) < 1.5 * Math.min(cell.x, cell.y, cell.z) ? 1 : 0), 0);
     device.queue.writeBuffer(this.reductions, 0, new Uint32Array([Math.round(this.volumeCells * 256), Math.round(this.interfaceCells * 256), 0, 0]));
     this.jumps = quadtreeSurfaceJumpSequence(dims.nx, dims.ny, dims.nz);
     const alignment = device.limits.minUniformBufferOffsetAlignment;
@@ -561,35 +567,49 @@ export class WebGPUQuadtreeSurfaceState {
     const sparseFallback = this.sparseExecution ? undefined : (this.ownedSparseFallback = device.createBuffer({ label: "Quadtree surface sparse fallback", size: 64, usage: GPUBufferUsage.STORAGE }));
     const sparseWorklist = this.sparseExecution?.worklist ?? sparseFallback!;
     const sparseStates = this.sparseExecution?.states ?? sparseFallback!;
-    const group = (phiIn: GPUTexture, phiOut: GPUTexture, seedIn: GPUBuffer, seedOut: GPUBuffer, predicted: GPUTexture = this.predicted, reversed: GPUTexture = this.reversed) => device.createBindGroup({ layout: this.cache.layout, entries: [
+    const scratch = this.scratch!, predictedTexture = this.predicted!, reversedTexture = this.reversed!;
+    const seedsA = this.seedsA!, seedsB = this.seedsB!, params = this.params!, passBuffer = this.passBuffer!, reductions = this.reductions!;
+    const surfaceCache = this.cache!;
+    const group = (phiIn: GPUTexture, phiOut: GPUTexture, seedIn: GPUBuffer, seedOut: GPUBuffer, predicted: GPUTexture = predictedTexture, reversed: GPUTexture = reversedTexture) => device.createBindGroup({ layout: surfaceCache.layout, entries: [
       { binding: 0, resource: velocity.createView() }, { binding: 1, resource: phiIn.createView() }, { binding: 2, resource: phiOut.createView() },
-      { binding: 3, resource: { buffer: seedIn } }, { binding: 4, resource: { buffer: seedOut } }, { binding: 5, resource: { buffer: this.params } },
-      { binding: 6, resource: { buffer: this.passBuffer, size: 16 } }, { binding: 7, resource: { buffer: this.reductions } },
+      { binding: 3, resource: { buffer: seedIn } }, { binding: 4, resource: { buffer: seedOut } }, { binding: 5, resource: { buffer: params } },
+      { binding: 6, resource: { buffer: passBuffer, size: 16 } }, { binding: 7, resource: { buffer: reductions } },
       { binding: 8, resource: predicted.createView() }, { binding: 9, resource: reversed.createView() },
       { binding: 10, resource: reconcileTexture.createView() }, { binding: 11, resource: { buffer: surfaceSolidBuffer } },
       { binding: 12, resource: { buffer: sparseWorklist } }, { binding: 13, resource: { buffer: sparseStates } }
     ] });
     this.groups = {
-      advect: group(this.texture, this.scratch, this.seedsA, this.seedsB),
-      predict: group(this.texture, this.predicted, this.seedsA, this.seedsB, this.texture, this.texture),
-      reverse: group(this.predicted, this.reversed, this.seedsA, this.seedsB, this.predicted, this.predicted),
-      correct: group(this.texture, this.scratch, this.seedsA, this.seedsB),
-      reduce: group(this.texture, this.scratch, this.seedsA, this.seedsB),
-      seed: group(this.scratch, this.texture, this.seedsB, this.seedsA),
-      jumpAB: group(this.scratch, this.texture, this.seedsA, this.seedsB),
-      jumpBA: group(this.scratch, this.texture, this.seedsB, this.seedsA),
-      finalizeA: group(this.scratch, this.texture, this.seedsA, this.seedsB),
-      finalizeB: group(this.scratch, this.texture, this.seedsB, this.seedsA),
-      cull: group(this.texture, this.scratch, this.seedsA, this.seedsB)
+      advect: group(this.texture, scratch, seedsA, seedsB),
+      predict: group(this.texture, predictedTexture, seedsA, seedsB, this.texture, this.texture),
+      reverse: group(predictedTexture, reversedTexture, seedsA, seedsB, predictedTexture, predictedTexture),
+      correct: group(this.texture, scratch, seedsA, seedsB),
+      reduce: group(this.texture, scratch, seedsA, seedsB),
+      seed: group(scratch, this.texture, seedsB, seedsA),
+      jumpAB: group(scratch, this.texture, seedsA, seedsB),
+      jumpBA: group(scratch, this.texture, seedsB, seedsA),
+      finalizeA: group(scratch, this.texture, seedsA, seedsB),
+      finalizeB: group(scratch, this.texture, seedsB, seedsA),
+      cull: group(this.texture, scratch, seedsA, seedsB)
     };
   }
 
   encode(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState, finalTimestampWrites?: GPUComputePassTimestampWrites) {
+    if (this.presentationOnly) return;
+    const cache = this.cache!, params = this.params!, groups = this.groups!, reductions = this.reductions!;
     const { nx, ny, nz } = this.dims;
     const parameterData = new ArrayBuffer(128);
     new Uint32Array(parameterData, 0, 4).set([nx, ny, nz, this.surfaceSequence++]);
     new Float32Array(parameterData, 16, 4).set([this.cell.x, this.cell.y, this.cell.z, dt_s]);
-    new Float32Array(parameterData, 32, 4).set([this.correctionSpeed, this.reconcileActive ? 1 : 0, this.debrisCulling ? 1 : 0, this.reconcileFraction]);
+    // GPU correction consumes the resident reduction and commits its own
+    // shift below. Never feed asynchronously mapped diagnostic state back
+    // into that authoritative path; host correction/reconciliation remains
+    // available to the CPU-packed quadtree reference variants.
+    new Float32Array(parameterData, 32, 4).set([
+      this.gpuVolumeCorrection ? 0 : this.correctionSpeed,
+      !this.gpuVolumeCorrection && this.reconcileActive ? 1 : 0,
+      this.debrisCulling ? 1 : 0,
+      this.gpuVolumeCorrection ? 0 : this.reconcileFraction,
+    ]);
     new Float32Array(parameterData, 48, 4).set([this.cell.x, this.cell.y, this.cell.z, this.volumeControlAgreeWeight]);
     new Float32Array(parameterData, 64, 4).set([this.cell.x * nx, this.cell.y * ny, this.cell.z * nz, this.sparseExecution?.brickSize ?? 0]);
     if (inflow) {
@@ -597,7 +617,7 @@ export class WebGPUQuadtreeSurfaceState {
       new Float32Array(parameterData, 96, 4).set([inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z, inflow.apertureScale]);
     }
     new Float32Array(parameterData, 112, 4).set([inflow?.strength ?? 0, this.referenceVolumeCells, this.solidFractions ? 1 : 0, 0]);
-    this.device.queue.writeBuffer(this.params, 0, parameterData);
+    this.device.queue.writeBuffer(params, 0, parameterData);
     const dispatch = (pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup, offset = 0) => {
       pass.setPipeline(pipeline); pass.setBindGroup(0, group, [offset]);
       if (this.sparseExecution) pass.dispatchWorkgroupsIndirect(this.sparseExecution.worklist, FLUID_BRICK_ACTIVE_SURFACE_DISPATCH_OFFSET_BYTES);
@@ -610,8 +630,8 @@ export class WebGPUQuadtreeSurfaceState {
     // Word 0 is a persistent global volume total in sparse mode. Active
     // bricks contribute signed deltas; per-frame interface/mismatch counters
     // are rebuilt from the resident band.
-    if (this.sparseExecution) encoder.clearBuffer(this.reductions, 4, 12);
-    else encoder.clearBuffer(this.reductions);
+    if (this.sparseExecution) encoder.clearBuffer(reductions, 4, 12);
+    else encoder.clearBuffer(reductions);
     // Dependent texture stages use separate passes and explicit command
     // ordering for both dense and sparse execution.
     const timedSurface = !this.debrisCulling ? finalTimestampWrites : undefined;
@@ -629,54 +649,55 @@ export class WebGPUQuadtreeSurfaceState {
       pass.end();
     };
     if (this.monotoneLevelSetTransport) {
-      surfaceDispatch("Quadtree surface level-set advection", this.cache.pipelines.advectLevelSet, this.groups.advect, 0, beginningTimestamp);
+      surfaceDispatch("Quadtree surface level-set advection", cache.pipelines.advectLevelSet, groups.advect, 0, beginningTimestamp);
     } else {
-      surfaceDispatch("Quadtree surface advection predictor", this.cache.pipelines.advectPredict, this.groups.predict, 0, beginningTimestamp);
-      surfaceDispatch("Quadtree surface advection reverse", this.cache.pipelines.advectReverse, this.groups.reverse);
-      surfaceDispatch("Quadtree surface advection correction", this.cache.pipelines.advectCorrect, this.groups.correct);
+      surfaceDispatch("Quadtree surface advection predictor", cache.pipelines.advectPredict, groups.predict, 0, beginningTimestamp);
+      surfaceDispatch("Quadtree surface advection reverse", cache.pipelines.advectReverse, groups.reverse);
+      surfaceDispatch("Quadtree surface advection correction", cache.pipelines.advectCorrect, groups.correct);
     }
-    surfaceDispatch("Quadtree surface distance seeds", this.cache.pipelines.seedDistance, this.groups.seed);
+    surfaceDispatch("Quadtree surface distance seeds", cache.pipelines.seedDistance, groups.seed);
     this.jumps.forEach((_, index) => {
       surfaceDispatch(
         `Quadtree surface jump flood ${index}`,
-        this.cache.pipelines.jumpFlood,
-        index % 2 === 0 ? this.groups.jumpAB : this.groups.jumpBA,
+        cache.pipelines.jumpFlood,
+        index % 2 === 0 ? groups.jumpAB : groups.jumpBA,
         index * this.passStride,
       );
     });
     surfaceDispatch(
       "Quadtree surface finalize distance",
-      this.cache.pipelines.finalizeDistance,
-      this.jumps.length % 2 === 0 ? this.groups.finalizeA : this.groups.finalizeB,
+      cache.pipelines.finalizeDistance,
+      this.jumps.length % 2 === 0 ? groups.finalizeA : groups.finalizeB,
       0,
       endingTimestamp,
     );
     if (this.debrisCulling) {
       const cullPass = encoder.beginComputePass({ label: "Quadtree surface debris cull" });
-      dispatch(cullPass, this.cache.pipelines.cullDebris, this.groups.cull); cullPass.end();
-      encoder.copyTextureToTexture({ texture: this.scratch }, { texture: this.texture }, [nx, ny, nz]);
+      dispatch(cullPass, cache.pipelines.cullDebris, groups.cull); cullPass.end();
+      encoder.copyTextureToTexture({ texture: this.scratch! }, { texture: this.texture }, [nx, ny, nz]);
       const reductionPass = encoder.beginComputePass({ label: "Quadtree surface post-cull reduction", ...(finalTimestampWrites ? { timestampWrites: finalTimestampWrites } : {}) });
-      dispatch(reductionPass, this.cache.pipelines.reduceVolume, this.groups.reduce); reductionPass.end();
+      dispatch(reductionPass, cache.pipelines.reduceVolume, groups.reduce); reductionPass.end();
     }
     // Consume the most recent phi-volume reduction entirely on the GPU. When
     // optional debris culling is enabled by another method this is its
     // post-cull volume; octree uses the ordinary redistanced phi reduction.
     if (this.gpuVolumeCorrection) {
       const correctionPass = encoder.beginComputePass({ label: "GPU level-set volume correction" });
-      dispatch(correctionPass, this.cache.pipelines.correctLevelSetVolume, this.groups.advect);
-      correctionPass.setPipeline(this.cache.pipelines.commitLevelSetVolumeCorrection);
-      correctionPass.setBindGroup(0, this.groups.advect, [0]);
+      dispatch(correctionPass, cache.pipelines.correctLevelSetVolume, groups.advect);
+      correctionPass.setPipeline(cache.pipelines.commitLevelSetVolumeCorrection);
+      correctionPass.setBindGroup(0, groups.advect, [0]);
       correctionPass.dispatchWorkgroups(1);
       correctionPass.end();
       if (this.sparseExecution) {
         const copyPass = encoder.beginComputePass({ label: "Commit sparse level-set correction" });
-        dispatch(copyPass, this.cache.pipelines.copyLevelSet, this.groups.seed);
+        dispatch(copyPass, cache.pipelines.copyLevelSet, groups.seed);
         copyPass.end();
-      } else encoder.copyTextureToTexture({ texture: this.scratch }, { texture: this.texture }, [nx, ny, nz]);
+      } else encoder.copyTextureToTexture({ texture: this.scratch! }, { texture: this.texture }, [nx, ny, nz]);
     }
   }
 
   async readVolumeDiagnostics() {
+    if (!this.reductions) return this.volumeDiagnostics;
     if (this.readbackPending) return this.volumeDiagnostics;
     this.readbackPending = true;
     const readback = this.device.createBuffer({ label: "Quadtree level-set volume readback", size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -684,7 +705,7 @@ export class WebGPUQuadtreeSurfaceState {
     try {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange()); this.volumeCells = words[0] / 256; this.interfaceCells = words[1] / 256; this.culledDebrisCells = words[2]; this.mismatchCells = words[3];
-      if (this.reconcileEnabled) {
+      if (this.reconcileEnabled && !this.gpuVolumeCorrection) {
         this.reconcileActive = nextQuadtreeVofReconciliationActive(this.reconcileActive, (this.volumeCells - this.referenceVolumeCells) / Math.max(1, this.referenceVolumeCells));
         this.reconcileFraction = this.reconcileActive ? quadtreeVofReconciliationFraction(this.referenceVolumeCells - this.volumeCells, this.mismatchCells) : 0;
       }
@@ -694,13 +715,14 @@ export class WebGPUQuadtreeSurfaceState {
       // delay, so a 1.5x lead factor prevents the dam-break transient from
       // crossing the 2% envelope while the unchanged +/-30 cells/s clamp
       // remains the hard safety bound.
-      this.correctionSpeed = Math.max(-30, Math.min(30, 6 * (this.referenceVolumeCells - this.volumeCells) / Math.max(this.interfaceCells, 1) / (1 / 30)));
+      if (!this.gpuVolumeCorrection) this.correctionSpeed = Math.max(-30, Math.min(30,
+        6 * (this.referenceVolumeCells - this.volumeCells) / Math.max(this.interfaceCells, 1) / (1 / 30)));
       // Volume-controller localization: once decisive phi/VOF disagreement is
       // a meaningful fraction of the interface band, agreeing cells stop
       // receiving the global normal push (weight -> 0) and the correction
       // targets the disagreement instead. Near-zero mismatch keeps weight 1,
       // i.e. exactly the legacy uniform controller.
-      this.volumeControlAgreeWeight = this.hasReconcileVolume
+      if (!this.gpuVolumeCorrection) this.volumeControlAgreeWeight = this.hasReconcileVolume
         ? Math.max(0, Math.min(1, 1 - 4 * this.mismatchCells / Math.max(1, this.interfaceCells)))
         : 1;
     } finally {
@@ -712,8 +734,31 @@ export class WebGPUQuadtreeSurfaceState {
   get volumeDiagnostics() { return { referenceVolumeCells: this.referenceVolumeCells, volumeCells: this.volumeCells, interfaceCells: this.interfaceCells, correctionSpeed: this.correctionSpeed, culledDebrisCells: this.culledDebrisCells, mismatchFraction: this.mismatchCells / Math.max(1, this.dims.nx * this.dims.ny * this.dims.nz), reconciliationActive: this.reconcileActive, volumeControlAgreeWeight: this.volumeControlAgreeWeight }; }
   addReferenceVolumeCells(cells: number) { if (Number.isFinite(cells) && cells > 0) this.referenceVolumeCells += cells; }
 
+  /**
+   * Compact surface pages only need the dense level set to seed their first
+   * command submission. WebGPU keeps resources alive for work that was
+   * already submitted, so the owner may release this compatibility texture
+   * immediately after that submission without a CPU/GPU fence.
+   */
+  releasePresentationTexture() {
+    if (!this.presentationOnly || this.presentationTextureReleased) return 0;
+    // The analytic sparse path owns only this format-compatible texel. It is
+    // intentionally the persistent sampled fallback for recurring bind
+    // groups, so releasing it would invalidate every later submission while
+    // saving no box-scaled storage.
+    if (this.placeholderOnly) return 0;
+    this.presentationTextureReleased = true;
+    // destroy() invalidates a resource even for already-submitted work in
+    // Dawn. Detach it from future submissions immediately, but defer actual
+    // destruction until the bootstrap command buffer has completed.
+    void this.device.queue.onSubmittedWorkDone().then(() => this.texture.destroy()).catch(() => {
+      // Device loss owns resource teardown.
+    });
+    return this.dims.nx * this.dims.ny * this.dims.nz * 4;
+  }
+
   destroy() {
-    this.texture.destroy(); this.scratch.destroy(); this.predicted.destroy(); this.reversed.destroy(); this.seedsA.destroy(); this.seedsB.destroy(); this.params.destroy(); this.passBuffer.destroy(); this.reductions.destroy(); this.ownedReconcileFallback?.destroy(); this.ownedSolidFallback?.destroy(); this.ownedSparseFallback?.destroy();
+    if (!this.presentationTextureReleased) this.texture.destroy(); this.scratch?.destroy(); this.predicted?.destroy(); this.reversed?.destroy(); this.seedsA?.destroy(); this.seedsB?.destroy(); this.params?.destroy(); this.passBuffer?.destroy(); this.reductions?.destroy(); this.ownedReconcileFallback?.destroy(); this.ownedSolidFallback?.destroy(); this.ownedSparseFallback?.destroy();
   }
 }
 
@@ -1118,9 +1163,6 @@ function ensureCache(device: GPUDevice, cache?: WebGPUQuadtreeConstructionCache)
     { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
   ] });
   const shaderModule = device.createShaderModule({ label: "GPU quadtree construction", code: quadtreeConstructionShader });
-  void shaderModule.getCompilationInfo().then((info) => {
-    for (const message of info.messages) if (message.type === "error") console.error(`GPU quadtree WGSL ${message.lineNum}:${message.linePos} ${message.message}`);
-  }).catch(() => { /* Device loss is reported by the owning solver. */ });
   const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
   const pipeline = (entryPoint: string) => device.createComputePipeline({ label: `GPU quadtree ${entryPoint}`, layout: pipelineLayout, compute: { module: shaderModule, entryPoint } });
   return { layout, shaderModule, pipelineLayout, pipelines: {

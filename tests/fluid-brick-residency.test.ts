@@ -122,7 +122,9 @@ test("GPU residency derives a topology-tile worklist so leaves never straddle a 
 
 test("pressure topology rebuild consumes the shared topology-tile worklist indirectly", () => {
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
-  assert.match(rebuild, /residency\.tileWorklist/);
+  assert.match(rebuild, /if\(active\|\|!this\.directPagedTopology\)this\.ownerPages\?\.encode\(encoder\)/,
+    "an unpublished direct-paged worklist must not retire the coarse owner map before full-domain rebuild");
+  assert.match(rebuild, /topologyResidency\.tileWorklist/);
   assert.match(rebuild, /dispatchWorkgroupsIndirect/);
   // The former leaf-size gate is gone: after initialization the tile path is
   // the only rebuild domain at every legal (brickSize, maximumLeafSize) pair.
@@ -151,7 +153,7 @@ test("retired topology tiles rebuild before leaving the active domain", () => {
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
   assert.match(rebuild, /FLUID_TILE_RETIRED_DISPATCH_OFFSET_BYTES/);
   assert.match(rebuild, /dispatchRetired\(this\.resetRetiredPipeline\)/);
-  assert.match(rebuild, /dispatchRetiredCandidates\(level\.retired\)/);
+  assert.match(rebuild, /dispatchRetiredCandidates\(level\.retired/);
   assert.match(rebuild, /this\.refineCoarsePipelines\.get\(size\)/,
     "coarse cooperative refinement covers the full domain, including retired tiles");
   assert.match(rebuild, /dispatchRetiredCandidates\(this\.balanceRetiredPipeline\)/);
@@ -169,4 +171,6 @@ test("sparse fluid tail exposes separate residency and publication timestamp ran
   assert.match(encode, /Sparse brick publication/);
   const publish = WebGPUOctreeProjection.prototype.encodeSparseBrickWorld.toString();
   assert.match(publish, /timings/);
+  assert.match(publish, /this\.topologyWorklistReady\s*=\s*true/,
+    "direct-paged analytic topology remains ready because rejected GPU generations retain its last-good worklist");
 });
