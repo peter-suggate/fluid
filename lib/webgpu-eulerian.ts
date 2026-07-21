@@ -22,7 +22,11 @@ export type GPUPhysicsStageId =
   | "conditioning"
   | "remeshing"
   | "pressure"
+  | "powerAssembly"
+  | "pressureSolve"
   | "projection"
+  | "powerProjection"
+  | "velocityProjection"
   | "extrapolation"
   | "materialization"
   | "surfaceUpdate"
@@ -39,7 +43,15 @@ export interface GPUPhysicsTimings {
   conditioning_ms: number;
   remeshing_ms: number;
   pressure_ms: number;
+  /** Diagnostic subdivision of pressure_ms for power-row construction and operator assembly. */
+  powerAssembly_ms: number;
+  /** Diagnostic subdivision of pressure_ms for the pressure iteration/V-cycle work. */
+  pressureSolve_ms: number;
   projection_ms: number;
+  /** Diagnostic subdivision of projection_ms for generalized-face projection and publication. */
+  powerProjection_ms: number;
+  /** Diagnostic subdivision of projection_ms for the regular finite-volume compatibility field. */
+  velocityProjection_ms: number;
   extrapolation_ms: number;
   materialization_ms: number;
   surfaceUpdate_ms: number;
@@ -65,7 +77,11 @@ export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): 
     conditioning_ms: 0,
     remeshing_ms: 0,
     pressure_ms: 0,
+    powerAssembly_ms: 0,
+    pressureSolve_ms: 0,
     projection_ms: 0,
+    powerProjection_ms: 0,
+    velocityProjection_ms: 0,
     extrapolation_ms: 0,
     materialization_ms: 0,
     surfaceUpdate_ms: 0,
@@ -183,6 +199,18 @@ export interface GPUEulerianInfo {
   globalFineTransportCommitted?: boolean;
   globalFineTransportFaceBandUnavailable?: number;
   globalFineTransportVelocityUnavailable?: number;
+  /** Invalid Stage-B velocity statuses observed while tracing the fine band. */
+  globalFineTransportInvalidVelocityStatus?: number;
+  /** Velocity samples that returned a non-positive validity weight. */
+  globalFineTransportNonpositiveVelocityResult?: number;
+  /** Bitwise union of invalid Stage-B velocity status reasons. */
+  globalFineTransportVelocityStatusReasonOr?: number;
+  /** Exact status and chunk-local sample index for the first invalid velocity. */
+  globalFineTransportFirstInvalidVelocityStatus?: number;
+  globalFineTransportFirstInvalidVelocityLocalIndex?: number;
+  /** Exact solver-local position in metres at which that status was observed.
+   * Solver-local x/z begin at the negative-world container walls. */
+  globalFineTransportFirstInvalidVelocityPosition_m?: GPUFieldLocation;
   globalFineFaceBandFlags?: number;
   globalFineFaceBandTransitionFlags?: number;
   globalFineFaceBandPowerPublicationFlags?: number;
@@ -365,6 +393,20 @@ export interface GPUEulerianInfo {
   gpuInFlightSimulation_s?: number;
   /** Wall latency from submission to completion of the latest confirmed batch. */
   gpuBatchWall_ms?: number;
+  /** Main-thread time spent encoding and submitting the latest GPU advance. */
+  cpuAdvanceEncode_ms?: number;
+  /** Solver-side attribution for the latest command encode. These regions are
+   * host timings only; shader execution remains covered by timestamp queries. */
+  cpuAdvanceEncodeBreakdown?: {
+    setup_ms: number;
+    topology_ms: number;
+    pressureProjection_ms: number;
+    surface_ms: number;
+    publication_ms: number;
+    finalize_ms: number;
+  };
+  /** End-to-end wall time from starting command encoding through queue completion. */
+  gpuAdvanceWall_ms?: number;
   /** Simulation time advanced by the latest confirmed batch. */
   gpuBatchSimulation_s?: number;
   /** Wall interval between the two latest ordered batch completions. */

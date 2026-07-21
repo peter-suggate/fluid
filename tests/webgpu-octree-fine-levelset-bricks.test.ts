@@ -29,6 +29,31 @@ import {
   unpackFineLevelSetGPUTopologyControl,
 } from "../lib/webgpu-octree-fine-levelset-topology";
 
+test("fine transport diagnostics decode the exact first invalid velocity position", () => {
+  const bytes = new ArrayBuffer(64);
+  const words = new Uint32Array(bytes);
+  const floats = new Float32Array(bytes);
+  words.set([3, 2, 41, 0, 17, 5, 7, 11, 13, 19, 0x0120_0004, 0x0800_0004, 23]);
+  floats.set([1.25, 2.5, 3.75], 13);
+
+  assert.deepEqual(unpackFineLevelSetGPUTransportControl(words), {
+    departureOutsideBand: 3,
+    nonfiniteVelocity: 2,
+    processed: 41,
+    committed: false,
+    extrapolatedVelocity: 17,
+    maximumDisplacementFineCells: 5,
+    faceBandUnavailable: 7,
+    velocityUnavailable: 11,
+    invalidVelocityStatus: 13,
+    nonpositiveVelocityResult: 19,
+    velocityStatusReasonOr: 0x0120_0004,
+    firstInvalidVelocityStatus: 0x0800_0004,
+    firstInvalidVelocityLocalIndex: 23,
+    firstInvalidVelocityPosition: [1.25, 2.5, 3.75],
+  });
+});
+
 test("fine topology dilation covers displacement, interpolation, redistance, and a safety brick", () => {
   assert.deepEqual(planFineLevelSetTopologyBand(4, {
     maximumBacktraceFineCells: 8,
@@ -139,13 +164,16 @@ test("fine topology rollback snapshot cannot alias Section 5 transport or fast-m
     "a rejected downstream generation must restore the protected signed snapshot");
 });
 
-test("fine topology keeps cold failure unpublished and uses affine seeds only for cold retry", () => {
+test("fine topology keeps cold failure unpublished and separates recurring support from affine cold seeds", () => {
   const shader = makeFineLevelSetTopologyWGSL(
     "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
   ).replace(/\s+/g, "");
   assert.match(shader,
-    /fninsertExternalSeeds[\s\S]*currentPublished=sourceB\[1\]==params\.currentGeneration&&sourceB\[3\]==1u&&sourceB\[4\]==1u;if\(currentPublished\)\{return;\}/,
-    "recurring topology must come from transported fine zero crossings, while an unpublished cold slot may retry affine bootstrap");
+    /fninsertExternalSeeds[\s\S]*if\(currentPublished&&\(tagged==INVALID\|\|\(tagged&RECURRING_SUPPORT\)==0u\)\)\{return;\}/,
+    "a published generation admits only explicitly tagged recurring support keys");
+  assert.match(shader,
+    /fnexternalSeedPhi[\s\S]*params\.affineSeeds==0u\|\|currentFinePublished\(\)[\s\S]*return3\.402823e38/,
+    "recurring pages initialize from coarse phi rather than a compact affine bootstrap plane");
   assert.match(shader,
     /fnrollbackFailedGeneration[\s\S]*if\(!currentPublished\)\{targetB\[0\]=0u;targetB\[1\]=params\.nextGeneration;targetB\[2\]=0u;targetB\[3\]=0u;targetB\[4\]=0u;atomicStore\(&control\[4\],0u\);atomicStore\(&control\[5\],1u\);return;\}/,
     "failure before a first valid fine generation must remain explicitly unpublished");

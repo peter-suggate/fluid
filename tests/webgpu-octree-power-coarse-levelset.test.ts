@@ -34,6 +34,9 @@ test("WP8 planner is compact-row bounded and exposes independent coarse/fine dia
   assert.match(octreePowerCoarseLevelSetShader, /causalEdgeCandidate/,
     "transition redistance must include lower-dimensional causal simplex updates");
   assert.match(octreePowerCoarseLevelSetShader,
+    /if\(any\(rows==vec3u\(INVALID\)\)\|\|any\(rows>=vec3u\(requested\(\)\)\)\)\{continue;\}[\s\S]*nonobtuse[\s\S]*causalTetraCandidate/,
+    "the Section 5 local Delaunay update must retain a complete acute tetrahedron");
+  assert.match(octreePowerCoarseLevelSetShader,
     /source\.flags&\(PHI_VALID\|PHI_FINITE\)\)\!=\(PHI_VALID\|PHI_FINITE\)[\s\S]*fail\(row,INVALID_SOURCE\)/);
   assert.match(octreePowerCoarseLevelSetShader,
     /if\(params\.physical\.y>0\.0&&\(!finite\(velocity\.x\)[\s\S]*velocity\.w<=0\.0\)\)\{fail\(row,INVALID_VELOCITY\)/,
@@ -49,6 +52,7 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
   assert.doesNotMatch(source, /guardRejectedFineCoarseEntryPoints|coarseFineTransactionEntryPoints|\.replace(?:All)?\(/,
     "transaction guards and scratch addressing must be authored directly in WGSL");
   const entryPoints = ["migratePowerCoarsePhiSource", "preparePowerCoarsePhi", "clearPowerCoarsePhiSamples", "advectPowerCoarsePhi",
+    "applyExactFineCorrection",
     "redistancePowerCoarsePhi", "validatePowerCoarseFineCorrection", "publishPowerCoarsePhi",
     "finalizePowerCoarsePhi"];
   assert.match(octreePowerCoarseLevelSetShader,
@@ -59,7 +63,7 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
       `${entryPoint} must exit before any control, record, scratch, or directory write`);
   }
   const encode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
-  for (const bindings of ["[0,1,8,14,15,16]", "[0,13,14,15,16]", "[0,15,16]", "[0,1,2,5,6,7,8,9,13,16]",
+  for (const bindings of ["[0,1,8,14,15,16]", "[0,13,14,15,16]", "[0,15,16]", "[0,1,2,5,6,7,8,9,13,16]", "[0,9,11,12,13,16]",
     "[0,1,2,3,4,5,6,9,13,16]", "[0,11,12,13,16]", "[0,1,2,9,11,12,8,13,15,16]",
     "[0,13,15,16]"]) assert.ok(encode.includes(bindings.replace(/\s+/g, "")));
   assert.match(octreePowerCoarseLevelSetShader,
@@ -68,6 +72,16 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
   assert.match(octreePowerCoarseLevelSetShader,
     /MIGRATED_AIR[\s\S]*output\.flags&\(~MIGRATED_AIR\)[\s\S]*output\.flags&MIGRATED_AIR[\s\S]*fail\(row,INVALID_SOURCE\)/,
     "a newly wet row missing old coarse support must receive a valid fine correction or fail closed");
+  assert.match(octreePowerCoarseLevelSetShader,
+    /applyExactFineCorrection[\s\S]*output\.flags=.*PHI_CORRECTED[\s\S]*redistancePowerCoarsePhi[\s\S]*source\.flags&PHI_CORRECTED[\s\S]*return;/,
+    "valid cell-center fine aggregates are fixed coarse seeds during the local Delaunay sweep");
+  assert.match(octreePowerCoarseLevelSetShader,
+    /let metric=metrics\[row\];if\(\(metric\.transformAndFlags&VALID\)==0u\)\{fail\(row,INVALID_ROW\);return;\}if\(\(source\.flags&PHI_CORRECTED\)!=0u\)/,
+    "a fine correction cannot bypass invalid topology validation");
+  const scheduleEncode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString();
+  assert.match(scheduleEncode,
+    /dispatch\("validateFine"[\s\S]*dispatch\("applyFine"[\s\S]*for\s*\(let iteration\s*=\s*0;/,
+    "fine correction validation and seeding must precede the Delaunay redistance sweep");
 });
 
 test("coarse publication snapshots physical power-cell volume with phi authority", () => {
@@ -141,7 +155,7 @@ test("every coarse schedule bind group equals transitive WGSL reachability", () 
   for (const entryPoint of entryPoints) assert.deepEqual(observed.get(entryPoint), reachable(entryPoint), entryPoint);
 });
 
-test("Dawn runs live-row advection, redistance, and O(rows) fine aggregate correction without readback dependencies", {
+test("Dawn runs live-row advection, redistance, and cell-center fine correction without readback dependencies", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for WP8 GPU checks",
 }, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as { create(options: string[]): GPU; globals: Record<string, unknown> };
@@ -197,11 +211,15 @@ test("Dawn runs live-row advection, redistance, and O(rows) fine aggregate corre
   encoder.copyBufferToBuffer(schedule.sampleDirectory, 0, readback, directoryOffset, schedule.plan.sampleDirectoryBytes);
   device.queue.submit([encoder.finish()]); schedule.retireSubmittedEncoder(encoder);
   await readback.mapAsync(GPUMapMode.READ); const result = readback.getMappedRange().slice(0); readback.unmap();
-  assert.deepEqual(unpackOctreePowerCoarseLevelSetControl(new Uint32Array(result, 0, 16)), {
-    flags: 0, firstErrorRow: 0xffff_ffff, rowCount, advectedRows: rowCount, uniformUpdates: rowCount * 2,
+  const decoded = unpackOctreePowerCoarseLevelSetControl(new Uint32Array(result, 0, 16));
+  assert.deepEqual(decoded, {
+    flags: 0, firstErrorRow: 0xffff_ffff, rowCount, advectedRows: rowCount, uniformUpdates: (rowCount - 1) * 2,
     transitionUpdates: 0, nearestFallbacks: 0, redistancePasses: 2, correctedRows: 1, interfaceRows: 1,
     contributionCount: rowCount, generation: 41, valid: OCTREE_POWER_COARSE_LEVELSET_VALID,
   });
+  assert.equal(decoded.uniformUpdates + decoded.transitionUpdates + decoded.correctedRows * decoded.redistancePasses,
+    rowCount * decoded.redistancePasses,
+    "every row in every pass must be either swept or retained as a fine cell-center seed");
   const output = new Float32Array(result, OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES, rowCount * 4);
   assert.ok(Math.abs(output[0] + 0.05) < 1e-6); assert.ok(Math.abs(output[1] + 0.05) < 1e-6);
   assert.ok(Math.abs(output[2] - 0.05) < 1e-6);

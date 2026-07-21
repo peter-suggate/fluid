@@ -111,8 +111,8 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
       id,
       description: "16-cubed settled tank with room for unit and two-cell power-diagram leaves",
       scene,
-      oracleSteps: 1,
-      target_s: scene.numerics.maxDt_s,
+      oracleSteps: 50,
+      target_s: 50 * scene.numerics.maxDt_s,
     };
   }
 
@@ -135,8 +135,8 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
       id,
       description: "minimal two-level analytic dam reservoir collapsing in a 16-cubed tank",
       scene,
-      oracleSteps: 1,
-      target_s: scene.numerics.maxDt_s,
+      oracleSteps: 50,
+      target_s: 50 * scene.numerics.maxDt_s,
     };
   }
 

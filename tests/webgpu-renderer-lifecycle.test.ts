@@ -62,6 +62,17 @@ test("completion wall time backs adapters without timestamp queries", () => {
   assert.equal(observedGPUAdvanceTime_ms(undefined, undefined), undefined);
 });
 
+test("renderer retains end-to-end advance wall time across paused redraws", () => {
+  const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+  const submit = renderer.slice(
+    renderer.indexOf("private submitPreparedGPUFluid"),
+    renderer.indexOf("/** Keep the GPU occupied", renderer.indexOf("private submitPreparedGPUFluid")),
+  );
+  assert.match(submit, /encodeStartedAt_ms = performance\.now\(\)[\s\S]*submitNextPreparedGPUAdvance/);
+  assert.match(submit, /cpuAdvanceEncode_ms = encodeCompletedAt_ms - encodeStartedAt_ms/);
+  assert.match(submit, /gpuAdvanceWall_ms = completedAt_ms - encodeStartedAt_ms/);
+});
+
 test("paused solver attachment and raw publication each request exactly one presentation", () => {
   const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const viewportSource = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");

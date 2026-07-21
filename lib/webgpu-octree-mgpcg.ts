@@ -128,6 +128,10 @@ export function planOctreeMGPCG(options: Pick<OctreeMGPCGOptions,
 }
 
 type Stage = { readonly pipeline: GPUComputePipeline; readonly bindings: readonly number[] };
+type CachedStageGroup = {
+  readonly resources: readonly (GPUBuffer | undefined)[];
+  readonly group: GPUBindGroup;
+};
 
 /**
  * Fixed-capacity GPU solver.  encode() performs a fixed host-authored maximum
@@ -151,6 +155,8 @@ export class WebGPUOctreeMGPCG {
   private readonly hybridBandA?: GPUBuffer;
   private readonly hybridBandB?: GPUBuffer;
   private readonly stages: Readonly<Record<string, Stage>>;
+  /** Immutable descriptors shared by every replay of a stage. */
+  private readonly stageGroups = new Map<Stage, CachedStageGroup>();
   private readonly maximumIterations: number;
   private readonly device: GPUDevice;
   private destroyed = false;
@@ -355,9 +361,17 @@ export class WebGPUOctreeMGPCG {
   }
 
   private run(encoder: GPUCommandEncoder, stage: Stage, dispatch: readonly [number, number, number], buffers: readonly (GPUBuffer | undefined)[]): void {
-    const group = this.device.createBindGroup({ layout: stage.pipeline.getBindGroupLayout(0), entries: stage.bindings.map((binding) => ({
-      binding, resource: { buffer: buffers[binding]! },
-    })) });
+    // A fixed PCG schedule replays these stages thousands of times. Rebuilding
+    // identical bind groups for every dispatch was pure main-thread/driver
+    // work; WebGPU bind groups are immutable and safe to retain.
+    const cached = this.stageGroups.get(stage);
+    const unchanged = cached !== undefined
+      && stage.bindings.every((binding) => cached.resources[binding] === buffers[binding]);
+    const group = unchanged ? cached.group : this.device.createBindGroup({
+      layout: stage.pipeline.getBindGroupLayout(0),
+      entries: stage.bindings.map((binding) => ({ binding, resource: { buffer: buffers[binding]! } })),
+    });
+    if (!unchanged) this.stageGroups.set(stage, { resources: [...buffers], group });
     const pass = encoder.beginComputePass({ label: stage.pipeline.label });
     pass.setPipeline(stage.pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(...dispatch); pass.end();
   }
@@ -366,6 +380,7 @@ export class WebGPUOctreeMGPCG {
   get iterationBudget(): number { return this.maximumIterations; }
   destroy(): void {
     if (this.destroyed) return; this.destroyed = true;
+    this.stageGroups.clear();
     this.x.destroy(); this.residual.destroy(); this.preconditioned.destroy(); this.direction.destroy();
     this.product.destroy(); this.hierarchy.destroy(); this.control.destroy(); this.params.destroy();
     this.hybridA?.destroy(); this.hybridB?.destroy(); this.hybridRhs?.destroy();

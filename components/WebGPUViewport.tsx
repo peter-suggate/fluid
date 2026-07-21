@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FluidLabRenderer } from "@/lib/webgpu-renderer";
 import { getMethod } from "@/lib/methods";
 import { canonicalScene } from "@/lib/model";
@@ -17,6 +17,7 @@ import { getScenePreset } from "@/lib/scenes";
 import { gpuStageCapture } from "@/lib/gpu-stage-capture";
 import { SVO_COST_OVERLAY_LABELS } from "@/lib/svo-render-diagnostics";
 import { recordPresentedFrame } from "@/lib/presentation-frame-rate";
+import { projectViewportFailure, viewportFailureIndicator } from "@/lib/viewport-failure-diagnostics";
 import {
   acquireBrowserGPULease,
   GPU_MANUAL_START_EVENT,
@@ -35,6 +36,11 @@ export function WebGPUViewport() {
   const rendererRef = useRef<FluidLabRenderer | null>(null);
   const camera = useUIStore((state) => state.camera);
   const setCamera = useUIStore((state) => state.setCamera);
+  const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
+  const scene = useSceneStore((state) => state.scene);
+  const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
+  const waterSurfacePresentation = useDiagnosticsStore((state) => state.waterSurfacePresentation);
+  const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const svoCostOverlay = useUIStore((state) => state.svoCostOverlay);
   const svoRenderMode = useUIStore((state) => state.svoRenderMode);
   const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
@@ -47,6 +53,24 @@ export function WebGPUViewport() {
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
   >(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const update = () => {
+      const bounds = canvas.getBoundingClientRect();
+      setViewportSize({ width: Math.max(1, bounds.width), height: Math.max(1, bounds.height) });
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  const failure = viewportFailureIndicator(gpuInfo, waterSurfacePresentation, scene);
+  const failureProjection = failure?.location_m
+    ? projectViewportFailure(failure.location_m, camera, viewportSize.width, viewportSize.height)
+    : undefined;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -411,6 +435,25 @@ export function WebGPUViewport() {
       onWheel={(event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); }}
       onContextMenu={(event) => event.preventDefault()}
     />
+    {failure && <div
+      className={`viewport-failure-alert tone-${failure.tone}`}
+      data-testid="viewport-failure-alert"
+      data-failure-id={failure.id}
+      role="alert"
+      aria-live="assertive"
+    >
+      <div><strong>{failure.title}</strong><span>{failure.stage}</span></div>
+      <p>{failure.detail}</p>
+      <button type="button" onClick={() => setDiagnosticsOpen(true)}>INSPECT DIAGNOSTICS</button>
+    </div>}
+    {failure && failureProjection?.visible && <div
+      className={`viewport-failure-marker tone-${failure.tone}`}
+      data-testid="viewport-failure-marker"
+      style={{ left: `${failureProjection.leftFraction * 100}%`, top: `${failureProjection.topFraction * 100}%` }}
+      aria-hidden="true"
+    >
+      <i /><span>{failure.locationLabel ?? "first recorded failure"}</span>
+    </div>}
     {svoCostOverlay !== "off" && svoRenderMode === "svo" && voxelRenderMode === "smooth" && <div className="svo-cost-legend" data-testid="svo-cost-legend">
       <header><span>SVO · {SVO_COST_OVERLAY_LABELS[svoCostOverlay]}</span><span>depth ≤ {svoMaximumTraversalDepth} · visits ≤ {svoMaximumNodeVisits}</span></header>
       {svoCostOverlay === "exhaustion"

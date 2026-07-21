@@ -41,8 +41,8 @@ test("tiny hydrostatic oracle is shared by the UI preset and smoke registry", ()
   assert.ok(isSmokeScenarioId("hydrostatic-power-two-level"));
   const smoke = createSmokeScenario("hydrostatic-power-two-level");
   assert.equal(smoke.scene.sceneId, "tiny-hydrostatic-two-level");
-  assert.equal(smoke.oracleSteps, 1);
-  assert.equal(smoke.target_s, 0.004);
+  assert.equal(smoke.oracleSteps, 50);
+  assert.equal(smoke.target_s, 0.2);
   assert.deepEqual(smoke.scene.container, preset.create().container);
   assert.deepEqual(smoke.scene.voxelDomain, preset.create().voxelDomain);
 });
@@ -54,11 +54,14 @@ test("tiny hydrostatic isolated Dawn command pins the two-level paper path", () 
   const command = packageJson.scripts["test:webgpu:hydrostatic-power-two-level"];
   assert.match(command, /FLUID_SCENE=hydrostatic-power-two-level/);
   assert.match(command, /FLUID_EXPECT_GRID=16,16,16/);
-  assert.match(command, /FLUID_EXPECT_EXACT_STEPS=1/);
+  assert.match(command, /FLUID_TARGET_S=0\.2/);
+  assert.match(command, /FLUID_ORACLE_STEPS=50/);
+  assert.match(command, /FLUID_EXPECT_EXACT_STEPS=50/);
   assert.match(command, /FLUID_MAXIMUM_LEAF_SIZE=2/);
   assert.match(command, /FLUID_OCTREE_INTERFACE_BAND=3/);
   assert.match(command, /FLUID_OCTREE_POWER_PROJECTION=authoritative/);
   assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
   assert.match(command, /FLUID_POWER_GENERATION_AUDIT=1/);
+  assert.match(command, /FLUID_POWER_AUDIT_EVERY_STEPS=1/);
   assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
 });

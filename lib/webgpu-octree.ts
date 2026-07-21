@@ -851,6 +851,7 @@ export class WebGPUOctreeProjection {
   private globalFineCurrentIsA = true;
   private globalFineBootstrapped = false;
   private globalFineGeneration = 2;
+  private lastPowerBoundaryFineSource?: { generation: number; generationSlot: 0 | 1 };
   private readonly faceRhsAuthority: boolean;
   private faceTransportDt_s = 0;
   private powerAdvancingPressureSteps = 0;
@@ -2111,11 +2112,13 @@ export class WebGPUOctreeProjection {
       );
       if (this.faceMirror) {
         // Factor-4 has one B4 page per finest octree cell; factor-8 has a
-        // deduplicated 2 x 2 x 2 page group per cell. The bounded graph depth
-        // spans both sides of the configured physical interface band plus
-        // topology-publication support; validation suppresses the generation
-        // if this conservative bound is ever insufficient.
-        const maximumBandPhiRounds = Math.max(1, 2 * this.interfaceRefinementBandCells + 4);
+        // deduplicated 2 x 2 x 2 page group per cell. The transition closure
+        // contains exact owners outside the physical fine band, so its graph
+        // diameter is bounded by the adaptive domain rather than by the fine
+        // interface width alone. Cover two face hops per cell across the
+        // longest axis; publication still fails closed if any row is missing.
+        const maximumBandPhiRounds = Math.max(1, 2 * this.interfaceRefinementBandCells + 4,
+          2 * Math.max(this.dims.nx, this.dims.ny, this.dims.nz));
         this.globalFineFaceFastMarch = new WebGPUOctreeFaceFastMarch(
           this.device, this.globalFineSourceA, rowCapacity, maximumBandPhiRounds, this.powerFaces.plan.faceCapacity,
         );
@@ -2587,10 +2590,9 @@ export class WebGPUOctreeProjection {
         },
       } : {}),
     });
-    evolve.setBindGroup(0, this.groups.ab);
+    evolve.setBindGroup(0, active ? this.fineSummarySizingGroup : this.groups.ab);
     if (active) {
       evolve.setPipeline(this.filterFrontierPipeline); evolve.dispatchWorkgroupsIndirect(this.topologyCandidateDispatch, 0);
-      evolve.setBindGroup(0, this.fineSummarySizingGroup);
       evolve.setPipeline(this.appendFrontierActivePipeline); evolve.dispatchWorkgroupsIndirect(this.solveDispatch, 0);
       evolve.setPipeline(this.appendFrontierRetiredPipeline); evolve.dispatchWorkgroupsIndirect(this.solveDispatch, 16);
     } else {
@@ -2661,15 +2663,25 @@ export class WebGPUOctreeProjection {
     const boundaryFine = useCurrentFineBoundary
       ? (this.globalFineCurrentIsA ? this.globalFineSourceA : this.globalFineSourceB)
       : this.globalFineSourceA;
+    this.lastPowerBoundaryFineSource = boundaryFine
+      ? { generation: boundaryFine.generation, generationSlot: boundaryFine.generationSlot }
+      : undefined;
     // Paper Sections 4.1/5 require free-surface pressure to evaluate signed
     // distance at both actual cell centres.  Before the first fine-band
     // publication the authored analytic field is that authority; recurring
     // generations consume the current two-sided sparse fine field directly.
     // If neither exists, internal boundary publication fails closed in the
     // face builder instead of synthesizing an affine air value.
+    // Paper Section 5: beyond the fine narrow band the coarse octree level
+    // set is the signed-distance authority at cell centres, so fine-mode
+    // boundary sampling resolves band-exterior query centres from the
+    // published coarse directory instead of rejecting the generation.
+    const boundaryCoarseDirectory = this.powerCoarseLevelSetSchedule?.sampleSource.directory;
     const boundaryPhi = boundaryFine ? {
       mode: useCurrentFineBoundary ? "fine" as const : "analytic" as const,
       fine: boundaryFine,
+      ...(useCurrentFineBoundary && boundaryCoarseDirectory
+        ? { coarse: { directory: boundaryCoarseDirectory } } : {}),
       container: [this.scene.container.width_m, this.scene.container.height_m,
         this.scene.container.depth_m] as const,
       fillFraction: this.scene.container.fillFraction,
@@ -2786,6 +2798,10 @@ export class WebGPUOctreeProjection {
     timestampWrites?: GPUComputePassTimestampWrites,
     detailedTimestampWrites?: {
       projection?: GPUComputePassTimestampWrites;
+      /** Shared timestamp separating power-row/operator assembly from the solve. */
+      pressurePhaseBoundary?: { querySet: GPUQuerySet; writeIndex: number };
+      /** Shared timestamp separating generalized-face work from compatibility projection. */
+      projectionPhaseBoundary?: { querySet: GPUQuerySet; writeIndex: number };
       extrapolation?: GPUComputePassTimestampWrites;
       materialization?: GPUComputePassTimestampWrites;
     }
@@ -2812,6 +2828,9 @@ export class WebGPUOctreeProjection {
     this.info.pressureIterationBudget = solvePasses;
     this.info.pressureIterationHardBudget = useChebyshev ? Math.ceil(this.iterations / 4) : solvePasses;
     let pressureBufferSwaps = this.iterations;
+    const phaseBoundaryTimestampWrites = (boundary: { querySet: GPUQuerySet; writeIndex: number } | undefined) => boundary ? {
+      querySet: boundary.querySet, beginningOfPassWriteIndex: boundary.writeIndex,
+    } : undefined;
     if (timestampWrites?.beginningOfPassWriteIndex !== undefined) {
       const marker = encoder.beginComputePass({ label: "Power pressure timing start", timestampWrites: {
         querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex,
@@ -2819,7 +2838,8 @@ export class WebGPUOctreeProjection {
     }
     if (this.leafSolver === "dense") {
       encoder.clearBuffer(this.pressureA); encoder.clearBuffer(this.pressureB);
-      const pressure = encoder.beginComputePass({ label: "Octree leaf Jacobi solve" });
+      const pressureBoundary = phaseBoundaryTimestampWrites(detailedTimestampWrites?.pressurePhaseBoundary);
+      const pressure = encoder.beginComputePass({ label: "Octree leaf Jacobi solve", ...(pressureBoundary ? { timestampWrites: pressureBoundary } : {}) });
       for (let iteration = 0; iteration < this.iterations; iteration += 1) {
         const group = iteration % 2 === 0 ? this.groups.ab : this.groups.ba;
         gatherBodyCoupling(pressure, group);
@@ -2866,7 +2886,8 @@ export class WebGPUOctreeProjection {
           this.faceMirror.encodeRhs(encoder, this.solveDispatch, this.faceRhsAuthority);
         }
         this.encodePowerAssemblyMirror(encoder);
-        pressure = encoder.beginComputePass({ label: "Octree leaf pressure solve" });
+        const pressureBoundary = phaseBoundaryTimestampWrites(detailedTimestampWrites?.pressurePhaseBoundary);
+        pressure = encoder.beginComputePass({ label: "Octree leaf pressure solve", ...(pressureBoundary ? { timestampWrites: pressureBoundary } : {}) });
       }
       if (useMGPCG) {
         // The row assembly pass must be closed before the standalone solver
@@ -2956,7 +2977,8 @@ export class WebGPUOctreeProjection {
     // for off/mirror, or the all-or-nothing power-to-axis reconstruction.
     this.faceMirror?.encodeProjectedDivergence(encoder);
     const finalGroup = finalInA ? this.groups.ab : this.groups.ba;
-    const project = encoder.beginComputePass({ label: "Octree finite-volume velocity projection" });
+    const projectionBoundary = phaseBoundaryTimestampWrites(detailedTimestampWrites?.projectionPhaseBoundary);
+    const project = encoder.beginComputePass({ label: "Octree finite-volume velocity projection", ...(projectionBoundary ? { timestampWrites: projectionBoundary } : {}) });
     // The exact ladder refreshes M^-1 K^T p from the converged pressure so
     // projection sees the same-step solid response. The accelerated coupled
     // path intentionally skips that dependency: projection uses the rigid
@@ -3079,6 +3101,10 @@ export class WebGPUOctreeProjection {
         // generation can therefore retry on the next encoded step.
         const seeds = this.globalFineSeeds.encodeFromAllInterfaceLeaves(
           encoder, { buffer: this.adaptiveSurfaceAdapter.leaves }, { buffer: this.compaction },
+          this.powerFaces ? {
+            queries: { buffer: this.powerFaces.source.boundaryPhiQueries },
+            control: { buffer: this.powerFaces.source.control },
+          } : undefined,
         );
         const compactCoarseEntry: GPUBindGroupEntry = { binding: 9,
           resource: { buffer: this.powerCoarseLevelSetSchedule!.sampleSource.directory } };
@@ -3430,6 +3456,10 @@ export class WebGPUOctreeProjection {
   /** QA-only MGPCG status; simulation authority consumes this buffer directly on GPU. */
   get mgpcgControl() { return this.mgpcg?.control; }
   get powerFaceControl() { return this.powerFaces?.control; }
+  /** QA-only exact liquid/air cell-centre queries authored before boundary-phi sampling. */
+  get powerBoundaryPhiQueries() { return this.powerFaces?.source.boundaryPhiQueries; }
+  /** QA-only identity of the sparse fine source sampled by the last face build. */
+  get powerBoundaryFineSource() { return this.lastPowerBoundaryFineSource; }
   get powerFaceSiteIndex() { return this.powerFaces?.source.siteIndex; }
   get powerDescriptorControl() { return this.powerDescriptor?.control; }
   get powerTopologyControl() { return this.powerTopology?.control; }
@@ -3505,6 +3535,16 @@ export class WebGPUOctreeProjection {
   /** QA-only buffers for the cold-to-recurring sparse-topology acceptance gate. */
   get powerLeafFrontier() { return this.leafFrontier; }
   get topologyTileWorklist() { return this.topologyResidency.tileWorklist; }
+  /** Debug-only QA readback of the packed owner lattice (dense or paged arena). */
+  get ownerLatticeDebug(): {
+    buffer: GPUBuffer;
+    paged: boolean;
+    maximumLeafSize: number;
+    dimensions: readonly [number, number, number];
+  } {
+    return { buffer: this.topology, paged: this.ownerPages !== undefined, maximumLeafSize: this.maxLeafSize,
+      dimensions: [this.dims.nx, this.dims.ny, this.dims.nz] };
+  }
   /** QA-only compact surface producer header feeding recurring topology residency. */
   get adaptiveSurfaceCandidateControl() { return this.adaptiveSurfaceAdapter?.source.candidateCount; }
   /** QA-only compact affine leaves classified by the recurring topology producer. */
@@ -3594,6 +3634,9 @@ export class WebGPUOctreeProjection {
     return this.globalFineFaceFastMarch?.powerPublicationControl;
   }
   get globalFineFaceBandPlan() { return this.globalFineFaceFastMarch?.plan; }
+  readGlobalFineDisconnectedFaceFailure(index: number) {
+    return this.globalFineFaceFastMarch?.readDisconnectedFaceFailure(index);
+  }
   readGlobalFinePowerPublicationFailure(index: number) {
     const march = this.globalFineFaceFastMarch, faces = this.powerFaces?.source;
     return march && faces ? march.readPowerPublicationFailure(index, faces) : undefined;
@@ -3614,9 +3657,10 @@ export class WebGPUOctreeProjection {
     // control [560, 592), transient physical graph control [592, 656),
     // transition first-owner-mismatch payload [656, 720), the complete
     // 48-byte redistance control [720, 768), then the face-march heap
-    // completion diagnostics [768, 800), then the power projection producer
-    // control [800, 864). Existing prefixes remain ABI-stable.
-    const readback = this.device.createBuffer({ label: "Global fine QA diagnostics", size: 864,
+    // completion diagnostics [768, 800), the power projection producer
+    // control [800, 864), then the appended transport detail suffix
+    // [864, 896). Existing prefixes remain ABI-stable.
+    const readback = this.device.createBuffer({ label: "Global fine QA diagnostics", size: 896,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read global fine QA diagnostics" });
     encoder.copyBufferToBuffer(this.globalFineSeeds.buffer, 0, readback, 0, 8);
@@ -3653,6 +3697,9 @@ export class WebGPUOctreeProjection {
     }
     if (redistance) encoder.copyBufferToBuffer(redistance.control, 0, readback, 720, 48);
     if (this.powerOperator) encoder.copyBufferToBuffer(this.powerOperator.control, 0, readback, 800, 64);
+    if (this.lastGlobalFineTransport) {
+      encoder.copyBufferToBuffer(this.lastGlobalFineTransport.control, 32, readback, 864, 32);
+    }
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
@@ -3675,7 +3722,9 @@ export class WebGPUOctreeProjection {
         fineRestrictionCount: words[40], fineRestrictionMaximumPerRow: words[41],
         fineRestrictionFlags: words[42], fineRestrictionUnowned: words[43],
         fineRestrictionRows: words[44], fineRestrictionValid: words[45],
-        transportControl: Array.from(words.slice(48, 56)),
+        transportControl: this.lastGlobalFineTransport
+          ? [...words.slice(48, 56), ...words.slice(216, 224)]
+          : Array.from(words.slice(48, 56)),
         transportDepartureOutsideBand: words[48], transportNonfiniteVelocity: words[49],
         transportProcessed: words[50], transportCommitted: words[51] !== 0,
         transportExtrapolatedVelocity: words[52], transportMaximumDisplacementFineCells: words[53],
@@ -4008,45 +4057,78 @@ fn popOwnerPage() -> u32 {
 // Refinement/grading may discover a required neighbor just outside the
 // residency publication. Allocate that 8^3 owner page on demand instead of
 // silently dropping the split and leaving an immutable synthetic coarse leaf.
+// A sibling lane mid-creation holds the placeholder only while it zero-fills
+// one 4KB page (a bounded 512-store loop), so a bounded wait resolves it.
+// Dropping the write instead published a page whose still-zero block-origin
+// word decoded as a canonical coarse owner overlapping its own written
+// size-one children, which the Section 5 face band correctly rejects.
+fn awaitOwnerPagePublication(valueWord: u32) -> u32 {
+  for (var wait = 0u; wait < 4096u; wait += 1u) {
+    let encoded = atomicLoad(&owners[valueWord]);
+    if (encoded != 0u && encoded != 0xffffffffu) { return encoded; }
+  }
+  atomicStore(&owners[2], 1u); return 0u;
+}
 fn ensureOwnerPageEncoded(logical: u32) -> u32 {
   let freeListOffset = atomicLoad(&owners[5]);
   if (freeListOffset <= 16u || ((freeListOffset - 16u) & 1u) != 0u) { return 0u; }
   let hashCapacity = (freeListOffset - 16u) / 2u; let key = logical + 1u;
-  var slot = (logical * 0x9e3779b1u) % hashCapacity;
-  for (var probe = 0u; probe < hashCapacity; probe += 1u) {
-    let keyWord = 16u + slot; let valueWord = 16u + hashCapacity + slot;
-    let observed = atomicLoad(&owners[keyWord]);
-    if (observed == key) {
-      // Never spin behind a sibling lane that is clearing the page. The fixed
-      // grading ladder retries this idempotent split in the next dispatch.
-      let encoded = atomicLoad(&owners[valueWord]);
-      return select(encoded, 0u, encoded == 0u || encoded == 0xffffffffu);
+  let start = (logical * 0x9e3779b1u) % hashCapacity;
+  // Retirement leaves 0xffffffff tombstones in the probe chain. Claiming the
+  // first tombstone without first scanning the rest of the chain for the key
+  // inserted the same key twice; the shadowed entry's physical page leaked
+  // until the pool starved and creation failures dropped owner writes. Scan
+  // the complete chain for the key first, then claim the earliest reusable
+  // slot, and re-scan whenever the claim races another lane.
+  for (var attempt = 0u; attempt < 16u; attempt += 1u) {
+    var reusable = 0xffffffffu;
+    var slot = start;
+    var outcome = 0xffffffffu; // chain slot to claim, or INVALID when full
+    for (var probe = 0u; probe < hashCapacity; probe += 1u) {
+      let observed = atomicLoad(&owners[16u + slot]);
+      if (observed == key) { return awaitOwnerPagePublication(16u + hashCapacity + slot); }
+      if (observed == 0xffffffffu) { if (reusable == 0xffffffffu) { reusable = slot; } }
+      else if (observed == 0u) { outcome = select(slot, reusable, reusable != 0xffffffffu); break; }
+      slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
     }
-    if (observed == 0u || observed == 0xffffffffu) {
-      // A weak compare-exchange may fail spuriously. Keep retrying the same
-      // logical slot while it still contains the value we observed; probing
-      // onward here can publish the same owner-page key twice and make the
-      // next compact pressure topology depend on workgroup scheduling.
-      var expected = observed;
-      for (var retry = 0u; retry < 16u; retry += 1u) {
-        let claim = atomicCompareExchangeWeak(&owners[keyWord], expected, key);
-        if (claim.exchanged) {
-          atomicStore(&owners[valueWord], 0xffffffffu);
-          let physical = popOwnerPage(); let capacity = atomicLoad(&owners[3]);
-          if (physical == 0xffffffffu || physical >= capacity) {
-            atomicStore(&owners[valueWord], 0u); atomicStore(&owners[keyWord], 0xffffffffu);
-            atomicStore(&owners[2], 1u); return 0u;
-          }
-          let base = atomicLoad(&owners[6]) + physical * 512u;
-          for (var local = 0u; local < 512u; local += 1u) { atomicStore(&owners[base + local], 0u); }
-          atomicStore(&owners[valueWord], physical + 1u); atomicAdd(&owners[1], 1u); return physical + 1u;
-        }
-        expected = claim.old_value;
-        if (expected == key) { return 0u; }
-        if (expected != observed) { break; }
+    if (outcome == 0xffffffffu) { outcome = reusable; }
+    if (outcome == 0xffffffffu) { break; }
+    let keyWord = 16u + outcome; let valueWord = 16u + hashCapacity + outcome;
+    let expected = atomicLoad(&owners[keyWord]);
+    if (expected != 0u && expected != 0xffffffffu) { continue; }
+    let claim = atomicCompareExchangeWeak(&owners[keyWord], expected, key);
+    if (!claim.exchanged) { continue; }
+    // A concurrent lane may have inserted the same key at another chain slot
+    // between our scan and claim. Keep whichever entry is earliest in probe
+    // order and roll the later claim back before it allocates, so duplicate
+    // keys can never orphan a physical page again.
+    var duplicate = 0xffffffffu;
+    var scan = start;
+    for (var probe = 0u; probe < hashCapacity; probe += 1u) {
+      if (scan != outcome) {
+        let observedScan = atomicLoad(&owners[16u + scan]);
+        if (observedScan == key) { duplicate = scan; break; }
+        if (observedScan == 0u) { break; }
       }
+      scan = select(scan + 1u, 0u, scan + 1u == hashCapacity);
     }
-    slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
+    if (duplicate != 0xffffffffu
+      && ((duplicate + hashCapacity - start) % hashCapacity) < ((outcome + hashCapacity - start) % hashCapacity)) {
+      atomicStore(&owners[keyWord], 0xffffffffu);
+      return awaitOwnerPagePublication(16u + hashCapacity + duplicate);
+    }
+    // Free-pool pages are already zeroed: WebGPU zero-initializes the arena
+    // and the retirement kernels scrub payloads before pushing a slot back.
+    // Publishing without an inline 512-word fill keeps the placeholder
+    // window to a few atomics so concurrent same-page writers never exhaust
+    // their bounded wait.
+    atomicStore(&owners[valueWord], 0xffffffffu);
+    let physical = popOwnerPage(); let capacity = atomicLoad(&owners[3]);
+    if (physical == 0xffffffffu || physical >= capacity) {
+      atomicStore(&owners[valueWord], 0u); atomicStore(&owners[keyWord], 0xffffffffu);
+      atomicStore(&owners[2], 1u); return 0u;
+    }
+    atomicStore(&owners[valueWord], physical + 1u); atomicAdd(&owners[1], 1u); return physical + 1u;
   }
   atomicStore(&owners[2], 1u); return 0u;
 }
@@ -4287,6 +4369,17 @@ fn pagedPhiMiss(p: vec3u) -> f32 {
 fn pressureIndex(owner: Owner) -> u32 {
   let cell = index(unpackOrigin(owner.packedOrigin));
   return select(cell, frontierRow(cell), rowIndexedPressure);
+}
+// Section 4.3 requires the L1 and L2 operators to use exactly the same set of
+// pressure variables. Recurring frontier publication may classify a leaf from
+// the newer complete fine-summary interval, while liquidOwner() deliberately
+// retains the older coarse/page fallbacks for topology construction. Once the
+// compact frontier is published, membership in that frontier is therefore the
+// pressure-variable authority; reclassifying an incident leaf here can create
+// an L1 entry for a row that does not exist in L2.
+fn pressureVariableExists(owner: Owner) -> bool {
+  if (!rowIndexedPressure) { return liquidOwner(owner); }
+  return pressureIndex(owner) < compaction[0];
 }
 fn frontierInvalidate(cell: u32) {
   if(!rowIndexedPressure){atomicStore(&frontier[frontierMapBase()+cell],0u);return;}
@@ -4745,6 +4838,8 @@ struct FineLeafSummary {
   found: bool,
   complete: bool,
   coarseAuthority: bool,
+  centerValid: bool,
+  centerPhi: f32,
   minimumPhi: f32,
   maximumPhi: f32,
   minimumAbsolutePhi: f32,
@@ -4764,7 +4859,8 @@ fn fineSummaryOrderedFloat(value: u32) -> f32 {
 fn fineSummaryLength() -> u32 { return arrayLength(&pressureIn); }
 fn fineSummaryWord(index: u32) -> u32 { return bitcast<u32>(pressureIn[index]); }
 fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
-  var result = FineLeafSummary(false, false, false, 3.402823e38, -3.402823e38, 3.402823e38);
+  var result = FineLeafSummary(false, false, false, false, 0.0,
+    3.402823e38, -3.402823e38, 3.402823e38);
   if (fineSummaryLength() < 16u || fineSummaryWord(0u) != 0u
       || fineSummaryWord(9u) != 0x80000000u) { return result; }
   let baseDims = vec3u(fineSummaryWord(4u), fineSummaryWord(5u), fineSummaryWord(6u));
@@ -4802,14 +4898,25 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
     let minimumPhi = fineSummaryOrderedFloat(fineSummaryWord(base + 1u));
     let maximumPhi = fineSummaryOrderedFloat(fineSummaryWord(base + 2u));
     let minimumAbsolutePhi = bitcast<f32>(fineSummaryWord(base + 3u));
-    if (fineSummaryWord(base + 6u) != 0u || !fineSummaryFinite(minimumPhi)
+    let entryFlags = fineSummaryWord(base + 6u);
+    if ((entryFlags & 0x7fffffffu) != 0u || !fineSummaryFinite(minimumPhi)
         || !fineSummaryFinite(maximumPhi) || !fineSummaryFinite(minimumAbsolutePhi)) { return result; }
     let expectedBricks = brickSide * brickSide * brickSide;
     result.found = true; result.minimumPhi = minimumPhi; result.maximumPhi = maximumPhi;
     result.minimumAbsolutePhi = minimumAbsolutePhi;
-    result.coarseAuthority = (fineSummaryWord(base + 7u) & 1u) != 0u;
-    result.complete = result.coarseAuthority || (fineSummaryWord(base + 5u) == expectedBricks
-      && fineSummaryWord(base + 4u) == expectedBricks * 64u);
+    result.coarseAuthority = (entryFlags & 0x80000000u) != 0u;
+    let samplesPerBrick = fineSummaryWord(11u);
+    let fineComplete = fineSummaryWord(base + 5u) == expectedBricks
+      && (samplesPerBrick == 64u || samplesPerBrick == 512u)
+      && fineSummaryWord(base + 4u) == expectedBricks * samplesPerBrick;
+    result.complete = result.coarseAuthority || fineComplete;
+    result.centerPhi = bitcast<f32>(fineSummaryWord(base + 7u));
+    // A corrected-coarse interval and complete fine samples intentionally
+    // coexist in the unified entry. Coarse authority must not hide the exact
+    // fine centre: pure-coarse entries have zero fine counts and therefore
+    // fail fineComplete without overloading centerPhi=0 as evidence.
+    result.centerValid = size == 1u && fineComplete
+      && fineSummaryFinite(result.centerPhi);
     return result;
   }
   return result;
@@ -5317,7 +5424,8 @@ fn filterFrontier(@builtin(global_invocation_id) gid: vec3u) {
   let slot = gid.x + gid.y * compaction[12] * 256u;
   if (slot >= frontierCount(current)) { return; }
   let cell = frontierCell(current, slot);
-  if (frontierAlive(cell) && isOrigin(cellCoord(cell), ownerAtIndex(cell))) {
+  let owner = ownerAtIndex(cell);
+  if (frontierAlive(cell) && isOrigin(cellCoord(cell), owner) && currentPressureOwnerWet(owner)) {
     let next = 1u - current;
     let output = atomicAdd(&frontier[next], 1u);
     if (output < frontierListCapacity()) {
@@ -5328,6 +5436,18 @@ fn filterFrontier(@builtin(global_invocation_id) gid: vec3u) {
   } else { frontierInvalidate(cell); }
 }
 
+fn currentPressureOwnerWet(owner: Owner) -> bool {
+  let origin=unpackOrigin(owner.packedOrigin);let fine=fineLeafSummary(origin,owner.size);
+  var wet=liquidOwner(owner);
+  if(fine.found&&fine.complete){
+    if(fine.maximumPhi<0.0){wet=true;}
+    else if(fine.minimumPhi>=0.0){wet=false;}
+    else if(owner.size==1u&&fine.centerValid){wet=fine.centerPhi<0.0;}
+    else{let centre=vec3f(origin)+vec3f(0.5*f32(owner.size-1u));wet=legacyOwnerPhiPoint(centre)<0.0;}
+  }
+  return wet;
+}
+
 fn appendFrontierAt(gid: vec3u) {
   if (any(gid >= dims())) { return; }
   let cell = index(gid);
@@ -5336,14 +5456,7 @@ fn appendFrontierAt(gid: vec3u) {
   // Recurring topology append binds the current global-fine summary directory
   // at pressureIn.  Its exact owner interval is newer than the advected coarse
   // directory and therefore owns phase selection wherever it is complete.
-  let origin=unpackOrigin(owner.packedOrigin);let fine=fineLeafSummary(origin,owner.size);
-  var wet=liquidOwner(owner);
-  if(fine.found&&fine.complete&&fine.coarseAuthority){
-    if(fine.maximumPhi<0.0){wet=true;}
-    else if(fine.minimumPhi>=0.0){wet=false;}
-    else{let centre=vec3f(origin)+vec3f(0.5*f32(owner.size-1u));wet=legacyOwnerPhiPoint(centre)<0.0;}
-  }
-  if(wet){frontierAppend(1u-frontierCurrent(),cell);}
+  if(currentPressureOwnerWet(owner)){frontierAppend(1u-frontierCurrent(),cell);}
 }
 
 @compute @workgroup_size(4,4,4)
@@ -5631,7 +5744,7 @@ fn assembleSystem(@builtin(global_invocation_id) gid: vec3u) {
       let solid = faceSolid(inside, outside); let open = 1.0 - clamp(solid.fraction, 0.0, 1.0);
       let coefficient = open * area / max(distance, 1e-7);
       diagonal += coefficient;
-      if (liquidOwner(neighbor)) {
+      if (pressureVariableExists(neighbor)) {
         let neighborCell = pressureIndex(neighbor);
         var found = false;
         for (var j = 0u; j < neighborCount; j += 1u) {
@@ -5711,7 +5824,7 @@ fn assembleCoarseSystem(
       let open = 1.0 - clamp(solid.fraction, 0.0, 1.0);
       let coefficient = open * area / max(pressureDistance(owner, neighbor, axis), 1e-7);
       laneDiagonal += coefficient;
-      if (liquidOwner(neighbor)) {
+      if (pressureVariableExists(neighbor)) {
         let quadrant = select(0u, 1u, a >= half) + select(0u, 2u, b >= half);
         laneCoefficients[quadrant] += coefficient;
       } else if (hydrostaticSplit()) {
@@ -5755,7 +5868,7 @@ fn assembleCoarseSystem(
         let coefficient = coarseCoefficientScratch[quadrant * 64u];
         if (coefficient > 0.0 && valid(outside)) {
           let neighbor = ownerAt(outside);
-          if (liquidOwner(neighbor)) { neighborCell = pressureIndex(neighbor); }
+          if (pressureVariableExists(neighbor)) { neighborCell = pressureIndex(neighbor); }
         }
         leafEntries[header.entryStart + face * 4u + quadrant] = LeafEntry(neighborCell, coefficient);
       }

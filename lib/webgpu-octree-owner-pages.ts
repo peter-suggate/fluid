@@ -751,23 +751,32 @@ fn popFreeSlot() -> u32 {
 fn pageValueWord(logical: u32, insert: bool) -> u32 {
   let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
   let key = logical + 1u;
-  var slot = (logical * 0x9e3779b1u) % hashCapacity;
-  for (var probe = 0u; probe < hashCapacity; probe += 1u) {
-    let keyWord = params.offsets.x + slot;
-    let observed = atomicLoad(&arena[keyWord]);
-    if (observed == key) { return params.offsets.x + hashCapacity + slot; }
-    if (observed == 0u || observed == INVALID) {
-      if (!insert) { if (observed == 0u) { return INVALID; } }
-      else {
-        var expected = observed;
-        loop {
-          let claim = atomicCompareExchangeWeak(&arena[keyWord], expected, key);
-          if (claim.exchanged || claim.old_value == key) { return params.offsets.x + hashCapacity + slot; }
-          if (claim.old_value != expected) { break; }
-        }
+  let start = (logical * 0x9e3779b1u) % hashCapacity;
+  // Retirement leaves INVALID tombstones. Insertion must scan the complete
+  // probe chain for the key before reusing one, or the same key is inserted
+  // twice and the shadowed entry's physical page leaks from the pool.
+  for (var attempt = 0u; attempt < 16u; attempt += 1u) {
+    var reusable = INVALID;
+    var slot = start;
+    var claimSlot = INVALID;
+    for (var probe = 0u; probe < hashCapacity; probe += 1u) {
+      let observed = atomicLoad(&arena[params.offsets.x + slot]);
+      if (observed == key) { return params.offsets.x + hashCapacity + slot; }
+      if (observed == INVALID) { if (reusable == INVALID) { reusable = slot; } }
+      else if (observed == 0u) {
+        if (!insert) { return INVALID; }
+        claimSlot = select(slot, reusable, reusable != INVALID); break;
       }
+      slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
     }
-    slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
+    if (!insert) { return INVALID; }
+    if (claimSlot == INVALID) { claimSlot = reusable; }
+    if (claimSlot == INVALID) { return INVALID; }
+    let keyWord = params.offsets.x + claimSlot;
+    let expected = atomicLoad(&arena[keyWord]);
+    if (expected != 0u && expected != INVALID) { continue; }
+    let claim = atomicCompareExchangeWeak(&arena[keyWord], expected, key);
+    if (claim.exchanged || claim.old_value == key) { return params.offsets.x + hashCapacity + claimSlot; }
   }
   return INVALID;
 }
@@ -828,21 +837,42 @@ fn activatePages(
   }
 }
 
+var<workgroup> retiredEncoded: u32;
 @compute @workgroup_size(64)
 fn retirePages(
   @builtin(workgroup_id) wid: vec3u,
   @builtin(local_invocation_index) lid: u32,
 ) {
   let item = retiredIndex(wid);
-  if (item >= params.counts.w || lid != 0u) { return; }
-  let logical = changes[params.offsets.w + item];
-  if (logical >= params.counts.x) { return; }
-  let pageWord = pageValueWord(logical, false);
-  if (pageWord == INVALID) { return; }
-  let encoded = atomicExchange(&arena[pageWord], 0u);
-  if (encoded == 0u || encoded == INVALID || encoded > params.counts.y) { return; }
-  let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
-  atomicStore(&arena[params.offsets.x + (pageWord - params.offsets.x - hashCapacity)], INVALID);
+  if (lid == 0u) {
+    retiredEncoded = 0u;
+    if (item < params.counts.w) {
+      let logical = changes[params.offsets.w + item];
+      if (logical < params.counts.x) {
+        let pageWord = pageValueWord(logical, false);
+        if (pageWord != INVALID) {
+          let encoded = atomicExchange(&arena[pageWord], 0u);
+          if (encoded != 0u && encoded != INVALID && encoded <= params.counts.y) {
+            let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
+            atomicStore(&arena[params.offsets.x + (pageWord - params.offsets.x - hashCapacity)], INVALID);
+            retiredEncoded = encoded;
+          }
+        }
+      }
+    }
+  }
+  workgroupBarrier();
+  let encoded = workgroupUniformLoad(&retiredEncoded);
+  if (encoded == 0u) { return; }
+  // Scrub the payload before the slot re-enters the free pool: on-demand
+  // page creation in the topology rebuild publishes immediately and relies
+  // on free pages already reading as all-zero canonical owners.
+  let base = params.offsets.z + (encoded - 1u) * PAGE_VOXELS;
+  for (var local = lid; local < PAGE_VOXELS; local += 64u) {
+    atomicStore(&arena[base + local], 0u);
+  }
+  workgroupBarrier();
+  if (lid != 0u) { return; }
   let freeIndex = atomicAdd(&arena[0], 1u);
   if (freeIndex >= params.counts.y) {
     atomicStore(&arena[0], params.counts.y);
@@ -887,23 +917,32 @@ fn popFree() -> u32 {
 fn pageValueWord(logical: u32, insert: bool) -> u32 {
   let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
   let key = logical + 1u;
-  var slot = (logical * 0x9e3779b1u) % hashCapacity;
-  for (var probe = 0u; probe < hashCapacity; probe += 1u) {
-    let keyWord = params.offsets.x + slot;
-    let observed = atomicLoad(&arena[keyWord]);
-    if (observed == key) { return params.offsets.x + hashCapacity + slot; }
-    if (observed == 0u || observed == INVALID) {
-      if (!insert) { if (observed == 0u) { return INVALID; } }
-      else {
-        var expected = observed;
-        loop {
-          let claim = atomicCompareExchangeWeak(&arena[keyWord], expected, key);
-          if (claim.exchanged || claim.old_value == key) { return params.offsets.x + hashCapacity + slot; }
-          if (claim.old_value != expected) { break; }
-        }
+  let start = (logical * 0x9e3779b1u) % hashCapacity;
+  // Retirement leaves INVALID tombstones. Insertion must scan the complete
+  // probe chain for the key before reusing one, or the same key is inserted
+  // twice and the shadowed entry's physical page leaks from the pool.
+  for (var attempt = 0u; attempt < 16u; attempt += 1u) {
+    var reusable = INVALID;
+    var slot = start;
+    var claimSlot = INVALID;
+    for (var probe = 0u; probe < hashCapacity; probe += 1u) {
+      let observed = atomicLoad(&arena[params.offsets.x + slot]);
+      if (observed == key) { return params.offsets.x + hashCapacity + slot; }
+      if (observed == INVALID) { if (reusable == INVALID) { reusable = slot; } }
+      else if (observed == 0u) {
+        if (!insert) { return INVALID; }
+        claimSlot = select(slot, reusable, reusable != INVALID); break;
       }
+      slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
     }
-    slot = select(slot + 1u, 0u, slot + 1u == hashCapacity);
+    if (!insert) { return INVALID; }
+    if (claimSlot == INVALID) { claimSlot = reusable; }
+    if (claimSlot == INVALID) { return INVALID; }
+    let keyWord = params.offsets.x + claimSlot;
+    let expected = atomicLoad(&arena[keyWord]);
+    if (expected != 0u && expected != INVALID) { continue; }
+    let claim = atomicCompareExchangeWeak(&arena[keyWord], expected, key);
+    if (claim.exchanged || claim.old_value == key) { return params.offsets.x + hashCapacity + claimSlot; }
   }
   return INVALID;
 }
@@ -911,21 +950,43 @@ fn pageValueWord(logical: u32, insert: bool) -> u32 {
 @compute @workgroup_size(1)
 fn beginLifecycle() { atomicStore(&arena[2], 0u); atomicAdd(&arena[7], 1u); }
 
+var<workgroup> lifecycleRetiredEncoded: u32;
 @compute @workgroup_size(64)
 fn retirePages(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) numWorkgroups: vec3u, @builtin(local_invocation_index) lid: u32) {
   let linearGroup = wid.x + numWorkgroups.x * wid.y;
   if ((linearGroup & 1u) != 0u) { return; }
   let item = linearGroup >> 1u;
   let count = min(worklist[4], params.counts.x);
-  if (item >= count || lid != 0u) { return; }
-  let logical = worklist[HEADER + params.counts.x * 2u + item * 2u];
-  if (logical >= params.counts.x) { atomicStore(&arena[2], 2u); return; }
-  let pageWord = pageValueWord(logical, false);
-  if (pageWord == INVALID) { return; }
-  let encoded = atomicExchange(&arena[pageWord], 0u);
-  if (encoded == 0u || encoded == INVALID || encoded > params.counts.y) { return; }
-  let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
-  atomicStore(&arena[params.offsets.x + (pageWord - params.offsets.x - hashCapacity)], INVALID);
+  if (lid == 0u) {
+    lifecycleRetiredEncoded = 0u;
+    if (item < count) {
+      let logical = worklist[HEADER + params.counts.x * 2u + item * 2u];
+      if (logical >= params.counts.x) { atomicStore(&arena[2], 2u); }
+      else {
+        let pageWord = pageValueWord(logical, false);
+        if (pageWord != INVALID) {
+          let encoded = atomicExchange(&arena[pageWord], 0u);
+          if (encoded != 0u && encoded != INVALID && encoded <= params.counts.y) {
+            let hashCapacity = (params.offsets.y - params.offsets.x) / 2u;
+            atomicStore(&arena[params.offsets.x + (pageWord - params.offsets.x - hashCapacity)], INVALID);
+            lifecycleRetiredEncoded = encoded;
+          }
+        }
+      }
+    }
+  }
+  workgroupBarrier();
+  let encoded = workgroupUniformLoad(&lifecycleRetiredEncoded);
+  if (encoded == 0u) { return; }
+  // Scrub before returning the slot to the pool: on-demand page creation in
+  // the topology rebuild publishes without an inline fill and requires free
+  // pages to already read as all-zero canonical owners.
+  let base = params.offsets.z + (encoded - 1u) * PAGE_VOXELS;
+  for (var local = lid; local < PAGE_VOXELS; local += 64u) {
+    atomicStore(&arena[base + local], 0u);
+  }
+  workgroupBarrier();
+  if (lid != 0u) { return; }
   let free = atomicAdd(&arena[0], 1u);
   if (free < params.counts.y) { atomicStore(&arena[params.offsets.y + free], encoded - 1u); atomicSub(&arena[1], 1u); }
   else { atomicStore(&arena[0], params.counts.y); atomicStore(&arena[2], 2u); }

@@ -51,3 +51,13 @@ test("averaging carries sparse residency and publication timestamp stages", () =
   assert.equal(averaged.gpuFluidResidency_ms, 2);
   assert.equal(averaged.gpuSparsePublication_ms, 5);
 });
+
+test("averaging carries the power-diagram timing subdivisions", () => {
+  const first = { ...sample(3, 5), gpuPowerAssembly_ms: 2, gpuPressureSolve_ms: 3, gpuPowerProjection_ms: 4, gpuVelocityProjection_ms: 1 };
+  const second = { ...sample(6, 9), gpuPowerAssembly_ms: 4, gpuPressureSolve_ms: 5, gpuPowerProjection_ms: 6, gpuVelocityProjection_ms: 3 };
+  const averaged = averagePerformanceSnapshots([first, second], emptyPerformance);
+  assert.deepEqual(
+    [averaged.gpuPowerAssembly_ms, averaged.gpuPressureSolve_ms, averaged.gpuPowerProjection_ms, averaged.gpuVelocityProjection_ms],
+    [3, 4, 5, 2],
+  );
+});

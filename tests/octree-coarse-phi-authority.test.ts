@@ -63,17 +63,20 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
     /Topology renewal runs while the persistent frontier hash is being[\s\S]*return max\(params\.cellRelax\.x/,
     "interface classification must not read the frontier hash while appendFrontier mutates it");
   assert.match(octreeProjectionShader,
-    /let fine=fineLeafSummary\(origin,owner\.size\);[\s\S]*if\(fine\.found&&fine\.complete&&fine\.coarseAuthority\)/,
-    "recurring frontier phase selection consumes the current exact global-fine summary");
+    /let fine=fineLeafSummary\(origin,owner\.size\);[\s\S]*if\(fine\.found&&fine\.complete\)/,
+    "recurring frontier phase selection consumes any complete current global-fine summary");
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
   assert.match(rebuild,
-    /filterFrontierPipeline[\s\S]*setBindGroup\(0,this\.fineSummarySizingGroup\)[\s\S]*appendFrontierActivePipeline/,
-    "frontier filtering uses the old row map, then append switches to current fine-summary authority");
+    /setBindGroup\(0,\s*active\s*\?\s*this\.fineSummarySizingGroup\s*:\s*this\.groups\.ab\)[\s\S]*filterFrontierPipeline[\s\S]*appendFrontierActivePipeline/,
+    "frontier filtering and insertion both consume current fine-summary authority");
   assert.match(fineLevelSetSummaryWGSL, /mergeCoarsePhiSummaries/);
   assert.match(fineLevelSetSummaryWGSL, /coarse\.state!=PUBLISHED[\s\S]*coarse\.generation&0x3fffffffu/);
-  assert.match(fineLevelSetSummaryWGSL, /atomicOr\(&directory\[base\+7u\],1u\)/,
+  assert.match(fineLevelSetSummaryWGSL, /atomicOr\(&directory\[base\+6u\],COARSE_AUTHORITY\)/,
     "an exact corrected-coarse leaf marks the unified summary authoritative");
-  assert.match(octreeProjectionShader, /result\.coarseAuthority = \(fineSummaryWord\(base \+ 7u\) & 1u\) != 0u/);
+  assert.match(octreeProjectionShader, /result\.coarseAuthority = \(entryFlags & 0x80000000u\) != 0u/);
+  assert.match(fineLevelSetSummaryWGSL,
+    /atomicAddFloat\(&directory\[base\+7u\],centerPhi\)/,
+    "the former authority word now accumulates exact fine cell-centre interpolation contributions");
   assert.match(octreeProjectionShader, /if \(!fineSummary\.complete\)[\s\S]*legacyPhi/,
     "a missing exact coarse/fine summary remains inconclusive and executes the rollback scan");
   assert.match(octreeProjectionShader, /if\(coarse\.authority\)\{return coarseClassificationPhi\(coarse\);\}[\s\S]*return legacyPhi\(p\);/);

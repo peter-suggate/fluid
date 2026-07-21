@@ -588,6 +588,12 @@ test("octree compacted leaf solve scans, assembles once, and iterates over rows 
   assert.match(octreeProjectionShader, /fn planLeaves/);
   assert.match(octreeProjectionShader, /fn scanLeafBlocks/);
   assert.match(octreeProjectionShader, /fn emitLeaves/);
+  const filter = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn filterFrontier"),
+    octreeProjectionShader.indexOf("fn appendFrontierAt"));
+  assert.match(filter, /currentPressureOwnerWet\(owner\)/,
+    "persistent pressure rows must retire when the current fine authority changes phase");
+  assert.match(filter, /fineLeafSummary\(origin,owner\.size\)[\s\S]*fine\.minimumPhi>=0\.0[\s\S]*fine\.centerPhi<0\.0[\s\S]*legacyOwnerPhiPoint/,
+    "frontier filtering and insertion must share the complete fine-summary classifier");
   assert.match(octreeProjectionShader, /var running = scanPairs\[lid\] - sum;/);
   const emit = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn emitLeaves"), octreeProjectionShader.indexOf("fn compactRowIndex"));
   assert.match(emit, /frontierCell\(current, slot\)/);
@@ -598,6 +604,12 @@ test("octree compacted leaf solve scans, assembles once, and iterates over rows 
   const assemble = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn assembleSystem"), octreeProjectionShader.indexOf("fn iterateLeaves"));
   assert.match(assemble, /neighborCoefficients\[j\] \+= coefficient/);
   assert.match(assemble, /flux \+= f32\(side\) \* area \* /);
+  assert.match(octreeProjectionShader, /fn pressureVariableExists\(owner: Owner\)[\s\S]*pressureIndex\(owner\) < compaction\[0\]/,
+    "the captured L1 operator must use the exact compact pressure-variable set shared with L2");
+  assert.doesNotMatch(assemble, /liquidOwner\(neighbor\)/,
+    "pressure assembly must not reclassify a neighbor after the compact frontier has been published");
+  assert.equal(assemble.match(/pressureVariableExists\(neighbor\)/g)?.length, 3,
+    "serial and cooperative L1 assembly must share the published pressure-variable authority");
   const iterate = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn iterateLeaves"), octreeProjectionShader.indexOf("fn leafPressureLoad"));
   assert.doesNotMatch(iterate, /velocityAt|ownerAt|textureLoad/);
   assert.match(iterate, /entry\.coefficient \* pressureIn\[entry\.row\]/);
@@ -617,6 +629,9 @@ test("octree assembles coarse leaf faces cooperatively with deterministic quadra
   assert.match(coarse, /header\.entryCount = 24u/);
   assert.doesNotMatch(coarse, /atomicAdd/,
     "coarse face coefficients must reduce deterministically rather than accumulate atomically");
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString().replace(/\s+/g, "");
+  assert.match(rebuild, /evolve\.setBindGroup\(0,active\?this\.fineSummarySizingGroup:this\.groups\.ab\)/,
+    "recurring frontier filtering must bind the current fine-summary directory");
   const encode = WebGPUOctreeProjection.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(encode, /this\.assemblePipeline[\s\S]*dispatchWorkgroupsIndirect\(this\.solveDispatch,0\)[\s\S]*this\.assembleCoarsePipeline[\s\S]*dispatchWorkgroupsIndirect\(this\.solveDispatch,12\)/);
 });

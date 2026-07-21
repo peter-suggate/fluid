@@ -1,4 +1,4 @@
-/** GPU-only deterministic O(rows) restriction from resident fine bricks to live octree rows. */
+/** GPU-only deterministic restriction with O(rows) storage over resident fine samples. */
 
 import { fineLevelSetLinearWorkgroupWGSL, planFineLevelSetDispatch2D } from "./webgpu-fine-levelset-dispatch";
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
@@ -18,7 +18,7 @@ export interface FineToCoarseGPUPlan {
 
 export interface FineToCoarseGPUResult {
   readonly rowOffsets: GPUBuffer;
-  /** One 16-byte `{nearestPhi,minimumPhi,maximumPhi,valid}` record per row. */
+  /** One 16-byte `{centerPhi,minimumPhi,maximumPhi,valid}` record per row. */
   readonly contributions: GPUBuffer;
   /** First two u32s are aggregateCount and maximumAggregatesPerRow. */
   readonly counts: GPUBuffer;
@@ -36,7 +36,7 @@ export function planFineToCoarseLevelSet(rowCapacity: number, sampleCapacity: nu
     || !Number.isSafeInteger(sampleCapacity) || sampleCapacity < 1) {
     throw new RangeError("Fine-to-coarse capacities must be positive integers");
   }
-  const blockCount = Math.ceil(rowCapacity / 256), aggregateScratchBytes = rowCapacity * 24;
+  const blockCount = Math.ceil(rowCapacity / 256), aggregateScratchBytes = rowCapacity * 48;
   return { rowCapacity, sampleCapacity, blockCount, aggregateScratchBytes,
     allocatedBytes: 112 + aggregateScratchBytes + (rowCapacity + 1) * 4 + rowCapacity * 16 + 32 };
 }
@@ -79,7 +79,6 @@ export class WebGPUFineToCoarseLevelSet {
     const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
       compute: { module: shaderModule, entryPoint } });
     this.pipelines = { prepare: pipeline("prepareRestriction"), aggregate: pipeline("aggregateRestriction"),
-      select: pipeline("selectRestrictionLogicalId"), emit: pipeline("emitRestrictionNearestPhi"),
       finalize: pipeline("finalizeRestrictionRows"), publish: pipeline("publishRestriction") };
   }
 
@@ -107,7 +106,6 @@ export class WebGPUFineToCoarseLevelSet {
       [14, input.topologyControl]]);
     const used: Record<string, number[]> = {
       prepare: [0, 2, 7, 8, 9, 12, 13, 14], aggregate: [0, 1, 2, 3, 4, 5, 6, 8, 13],
-      select: [0, 1, 2, 3, 4, 5, 6, 8, 13], emit: [0, 1, 2, 3, 4, 6, 8, 13],
       finalize: [8, 12, 13], publish: [13],
     };
     const run = (name: string, x: number, y = 1) => { const pipeline = this.pipelines[name];
@@ -117,7 +115,7 @@ export class WebGPUFineToCoarseLevelSet {
       pass.dispatchWorkgroups(x, y); pass.end(); };
     run("prepare", Math.ceil((this.plan.rowCapacity + 1) / 64));
     const tiled = planFineLevelSetDispatch2D(Math.ceil(sampleCount / 64), this.device.limits.maxComputeWorkgroupsPerDimension);
-    for (const name of ["aggregate", "select", "emit"] as const) if (tiled.workgroups > 0) run(name, tiled.x, tiled.y);
+    if (tiled.workgroups > 0) run("aggregate", tiled.x, tiled.y);
     run("finalize", Math.ceil(this.plan.rowCapacity / 64)); run("publish", 1);
     return this.result;
   }
@@ -133,8 +131,8 @@ struct P{brickDims:vec3u,brickResolution:u32,sampleDims:vec3u,samplesPerBrick:u3
  pageCapacity:u32,generation:u32,rowCapacity:u32,sampleCapacity:u32,siteCapacity:u32,maxProbes:u32,dimensions:vec3u,maxLeaf:u32,cellWidth:f32}
 struct H{cell:u32,a:u32,b:u32,size:u32,x:f32,y:f32,z:u32,w:u32,g:vec4f}struct SI{cellPlusOne:atomic<u32>,size:u32,row:u32,pad:u32}
 struct C{count:u32,maximumPerRow:u32,flags:atomic<u32>,unowned:atomic<u32>,rowCount:u32,valid:u32,firstUnownedLiquid:atomic<u32>,maximumUnownedLiquidMagnitude:atomic<u32>}
-struct Aggregate{count:atomic<u32>,minimumOrdered:atomic<u32>,maximumOrdered:atomic<u32>,nearestDistance:atomic<u32>,nearestLogical:atomic<u32>,nearestPhiBits:atomic<u32>}
-struct Contribution{nearestPhi:f32,minimumPhi:f32,maximumPhi:f32,valid:u32}struct Sample{positionPhi:vec4f,logical:u32,valid:u32}
+struct Aggregate{count:atomic<u32>,minimumOrdered:atomic<u32>,maximumOrdered:atomic<u32>,centerMask:atomic<u32>,centerPhiBits:array<atomic<u32>,8>}
+struct Contribution{centerPhi:f32,minimumPhi:f32,maximumPhi:f32,valid:u32}struct Sample{positionPhi:vec4f,logical:u32,valid:u32}
 @group(0)@binding(0)var<uniform>p:P;@group(0)@binding(1)var<storage,read>metadata:array<u32>;@group(0)@binding(2)var<storage,read>worklist:array<u32>;
 @group(0)@binding(3)var<storage,read>flags:array<u32>;@group(0)@binding(4)var<storage,read>phi:array<f32>;@group(0)@binding(5)var<storage,read>headers:array<H>;
 @group(0)@binding(6)var<storage,read_write>sites:array<SI>;@group(0)@binding(7)var<storage,read>rowCountSource:array<u32>;
@@ -157,10 +155,8 @@ fn flatIndex(w:vec3u,lid:u32,n:vec3u)->u32{return fineLinearWorkgroup(w,n)*64u+l
 // validated fine publication first. Keep non-positive misses observable, but
 // do not invalidate an otherwise complete fine/coarse transaction.
 fn rowAndSample(s:Sample)->vec2u{if(s.valid==0u){return vec2u(INVALID);}if(!finite(s.positionPhi.w)){atomicOr(&control.flags,NONFINITE);return vec2u(INVALID);}let r=owner(s.positionPhi.xyz);if(r==INVALID||r>=control.rowCount){atomicAdd(&control.unowned,1u);if(s.positionPhi.w<=0.0){atomicMin(&control.firstUnownedLiquid,s.logical);atomicMax(&control.maximumUnownedLiquidMagnitude,bitcast<u32>(abs(s.positionPhi.w)));}return vec2u(INVALID);}return vec2u(r,s.logical);}
-@compute @workgroup_size(64)fn prepareRestriction(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i<arrayLength(&aggregates)){atomicStore(&aggregates[i].count,0u);atomicStore(&aggregates[i].minimumOrdered,0xffffffffu);atomicStore(&aggregates[i].maximumOrdered,0u);atomicStore(&aggregates[i].nearestDistance,0x7f800000u);atomicStore(&aggregates[i].nearestLogical,INVALID);atomicStore(&aggregates[i].nearestPhiBits,0u);out[i]=Contribution(0.,0.,0.,0u);}if(i<arrayLength(&rowOffsets)){rowOffsets[i]=i;}if(i==0u){control.count=0u;control.maximumPerRow=1u;atomicStore(&control.flags,0u);atomicStore(&control.unowned,0u);control.rowCount=min(rowCountSource[0],p.rowCapacity);control.valid=0u;atomicStore(&control.firstUnownedLiquid,INVALID);atomicStore(&control.maximumUnownedLiquidMagnitude,0u);if(arrayLength(&worklist)<5u||arrayLength(&topologyControl)<8u){atomicOr(&control.flags,UNPUBLISHED_SOURCE);}else if(worklist[1]!=p.generation||worklist[3]!=1u||worklist[4]!=1u||topologyControl[0]!=0u||topologyControl[4]!=1u||topologyControl[5]!=0u||topologyControl[7]!=0u){atomicOr(&control.flags,UNPUBLISHED_SOURCE);}}}
-@compute @workgroup_size(64)fn aggregateRestriction(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let flat=flatIndex(w,lid,n);if(flat>=p.sampleCapacity){return;}let s=sample(flat);let q=rowAndSample(s);if(q.x==INVALID){return;}let h=headers[q.x];let o=vec3u(h.cell%p.dimensions.x,(h.cell/p.dimensions.x)%p.dimensions.y,h.cell/(p.dimensions.x*p.dimensions.y));let c=(vec3f(o)+.5*f32(h.size))*p.cellWidth;let d=s.positionPhi.xyz-c;atomicAdd(&aggregates[q.x].count,1u);atomicMin(&aggregates[q.x].minimumOrdered,ordered(s.positionPhi.w));atomicMax(&aggregates[q.x].maximumOrdered,ordered(s.positionPhi.w));atomicMin(&aggregates[q.x].nearestDistance,bitcast<u32>(dot(d,d)));}
-@compute @workgroup_size(64)fn selectRestrictionLogicalId(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let flat=flatIndex(w,lid,n);if(flat>=p.sampleCapacity){return;}let s=sample(flat);if(s.valid==0u||!finite(s.positionPhi.w)){return;}let r=owner(s.positionPhi.xyz);if(r==INVALID||r>=control.rowCount){return;}let h=headers[r];let o=vec3u(h.cell%p.dimensions.x,(h.cell/p.dimensions.x)%p.dimensions.y,h.cell/(p.dimensions.x*p.dimensions.y));let c=(vec3f(o)+.5*f32(h.size))*p.cellWidth;let d=s.positionPhi.xyz-c;if(bitcast<u32>(dot(d,d))==atomicLoad(&aggregates[r].nearestDistance)){atomicMin(&aggregates[r].nearestLogical,s.logical);}}
-@compute @workgroup_size(64)fn emitRestrictionNearestPhi(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let flat=flatIndex(w,lid,n);if(flat>=p.sampleCapacity){return;}let s=sample(flat);if(s.valid==0u||!finite(s.positionPhi.w)){return;}let r=owner(s.positionPhi.xyz);if(r!=INVALID&&r<control.rowCount&&s.logical==atomicLoad(&aggregates[r].nearestLogical)){atomicStore(&aggregates[r].nearestPhiBits,bitcast<u32>(s.positionPhi.w));}}
-@compute @workgroup_size(64)fn finalizeRestrictionRows(@builtin(global_invocation_id)g:vec3u){let r=g.x;if(r>=control.rowCount||r>=arrayLength(&aggregates)||r>=arrayLength(&out)){return;}if(atomicLoad(&aggregates[r].count)>0u){out[r]=Contribution(bitcast<f32>(atomicLoad(&aggregates[r].nearestPhiBits)),unordered(atomicLoad(&aggregates[r].minimumOrdered)),unordered(atomicLoad(&aggregates[r].maximumOrdered)),1u);}}
+@compute @workgroup_size(64)fn prepareRestriction(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i<arrayLength(&aggregates)){atomicStore(&aggregates[i].count,0u);atomicStore(&aggregates[i].minimumOrdered,0xffffffffu);atomicStore(&aggregates[i].maximumOrdered,0u);atomicStore(&aggregates[i].centerMask,0u);for(var corner=0u;corner<8u;corner+=1u){atomicStore(&aggregates[i].centerPhiBits[corner],0u);}out[i]=Contribution(0.,0.,0.,0u);}if(i<arrayLength(&rowOffsets)){rowOffsets[i]=i;}if(i==0u){control.count=0u;control.maximumPerRow=1u;atomicStore(&control.flags,0u);atomicStore(&control.unowned,0u);control.rowCount=min(rowCountSource[0],p.rowCapacity);control.valid=0u;atomicStore(&control.firstUnownedLiquid,INVALID);atomicStore(&control.maximumUnownedLiquidMagnitude,0u);if(arrayLength(&worklist)<5u||arrayLength(&topologyControl)<8u){atomicOr(&control.flags,UNPUBLISHED_SOURCE);}else if(worklist[1]!=p.generation||worklist[3]!=1u||worklist[4]!=1u||topologyControl[0]!=0u||topologyControl[4]!=1u||topologyControl[5]!=0u||topologyControl[7]!=0u){atomicOr(&control.flags,UNPUBLISHED_SOURCE);}}}
+@compute @workgroup_size(64)fn aggregateRestriction(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let flat=flatIndex(w,lid,n);if(flat>=p.sampleCapacity){return;}let s=sample(flat);let q=rowAndSample(s);if(q.x==INVALID){return;}let h=headers[q.x];let o=vec3u(h.cell%p.dimensions.x,(h.cell/p.dimensions.x)%p.dimensions.y,h.cell/(p.dimensions.x*p.dimensions.y));let c=(vec3f(o)+.5*f32(h.size))*p.cellWidth;let d=s.positionPhi.xyz-c;atomicAdd(&aggregates[q.x].count,1u);atomicMin(&aggregates[q.x].minimumOrdered,ordered(s.positionPhi.w));atomicMax(&aggregates[q.x].maximumOrdered,ordered(s.positionPhi.w));let centerDelta=abs(abs(d)-vec3f(.5*p.fineWidth));let tolerance=2e-5*max(p.cellWidth,p.fineWidth);if(all(centerDelta<=vec3f(tolerance))){let corner=select(0u,1u,d.x>0.)+select(0u,2u,d.y>0.)+select(0u,4u,d.z>0.);atomicStore(&aggregates[q.x].centerPhiBits[corner],bitcast<u32>(s.positionPhi.w));atomicOr(&aggregates[q.x].centerMask,1u<<corner);}}
+@compute @workgroup_size(64)fn finalizeRestrictionRows(@builtin(global_invocation_id)g:vec3u){let r=g.x;if(r>=control.rowCount||r>=arrayLength(&aggregates)||r>=arrayLength(&out)){return;}if(atomicLoad(&aggregates[r].centerMask)==255u){var center=0.;for(var corner=0u;corner<8u;corner+=1u){center+=.125*bitcast<f32>(atomicLoad(&aggregates[r].centerPhiBits[corner]));}out[r]=Contribution(center,unordered(atomicLoad(&aggregates[r].minimumOrdered)),unordered(atomicLoad(&aggregates[r].maximumOrdered)),1u);}}
 @compute @workgroup_size(1)fn publishRestriction(){if(atomicLoad(&control.flags)==0u){control.count=control.rowCount;control.maximumPerRow=1u;control.valid=0x80000000u;}else{control.count=0xffffffffu;control.maximumPerRow=1u;}}
 `;

@@ -17,6 +17,32 @@ export type GPUUtilizationInput = {
   presentationInterval_ms?: number;
 };
 
+export type AdvanceWallTimingInput = {
+  cpuAdvanceEncode_ms?: number;
+  gpuBatchWall_ms?: number;
+  gpuAdvanceWall_ms?: number;
+  gpuStep_ms?: number;
+};
+
+/** Last completed advance, kept separate from continuously sampled presentation
+ * frames so a paused manual-step hitch cannot be overwritten by idle redraws. */
+export function advanceWallBreakdown(input: AdvanceWallTimingInput | null | undefined) {
+  if (!input) return null;
+  const measured = (value: number | undefined) => value !== undefined && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const encode_ms = measured(input.cpuAdvanceEncode_ms);
+  const queueFence_ms = measured(input.gpuBatchWall_ms);
+  const timestampedGPU_ms = measured(input.gpuStep_ms);
+  const wall_ms = measured(input.gpuAdvanceWall_ms);
+  if (encode_ms === undefined && queueFence_ms === undefined && wall_ms === undefined) return null;
+  return {
+    encode_ms: encode_ms ?? 0,
+    queueFence_ms: queueFence_ms ?? 0,
+    timestampedGPU_ms: timestampedGPU_ms ?? 0,
+    untimestampedQueue_ms: Math.max(0, (queueFence_ms ?? 0) - (timestampedGPU_ms ?? 0)),
+    wall_ms: wall_ms ?? (encode_ms ?? 0) + (queueFence_ms ?? 0),
+  };
+}
+
 /** Estimate queue occupancy from timestamped work and queue-confirmed cadence. */
 export function measuredGPUUtilization(input: GPUUtilizationInput) {
   const share = (busy_ms: number | undefined, interval_ms: number | undefined) =>

@@ -4,8 +4,16 @@ import { pathToFileURL } from "node:url";
 import { FineLevelSetBrickOracle, packFineLevelSetBrickKey, planFineLevelSetBricks } from
   "../lib/octree-fine-levelset-bricks";
 import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
-import { FINE_LEVELSET_SUMMARY_VALID, WebGPUFineLevelSetSummaries } from
+import { FINE_LEVELSET_SUMMARY_VALID, planFineLevelSetSummaryLeafLookup, WebGPUFineLevelSetSummaries } from
   "../lib/webgpu-octree-fine-levelset-summary";
+
+function findSummaryEntry(words: Uint32Array, hashCapacity: number, key: number): number | undefined {
+  for (let slot = 0; slot < hashCapacity; slot += 1) {
+    const base = 16 + slot * 8;
+    if (words[base] === key) return base;
+  }
+  return undefined;
+}
 
 test("Dawn publishes factor-4/factor-8 sparse fine summaries across moving interface generations", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE",
@@ -41,6 +49,47 @@ test("Dawn publishes factor-4/factor-8 sparse fine summaries across moving inter
     const topKey = summaries.plan.levelOffsets[summaries.plan.maximumLevel]; let top: number | undefined;
     for (let slot = 0; slot < summaries.plan.hashCapacity; slot += 1) if (words[16 + slot * 8] === topKey) { top = 16 + slot * 8; break; }
     assert.notEqual(top, undefined); assert.ok(words[top! + 4] > 0); assert.ok(words[top! + 5] > 0);
+    summaries.destroy(); owner.destroy(); readback.destroy();
+  }
+  device.destroy();
+});
+
+test("Dawn publishes exact factor-4/factor-8 fine cell-centre phase in summary word 7", {
+  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE",
+}, async () => {
+  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
+    create(options: string[]): GPU; globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, dawn.globals);
+  const gpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
+  const adapter = await gpu.requestAdapter(); assert.ok(adapter); const device = await adapter.requestDevice();
+  for (const factor of [4, 8] as const) {
+    const residentBricks = factor === 4 ? 1 : 8;
+    const plan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0], finestCellDimensions: [1, 1, 1],
+      finestCellWidth: 1, fineFactor: factor, brickResolution: 4, maximumResidentBricks: residentBricks });
+    const owner = new WebGPUFineLevelSetBricks(device, plan);
+    const summaries = new WebGPUFineLevelSetSummaries(device, plan);
+    const oracle = new FineLevelSetBrickOracle(plan);
+    const keys = Array.from({ length: plan.logicalBrickCount }, (_, key) => key);
+    // The affine field's exact trilinear value at (0.5, 0.5, 0.5) is -0.25.
+    oracle.publishInterfaceAndRing(keys, ([x, y, z]) => x + 2 * y + 4 * z - 3.75);
+    const source = owner.uploadGeneration(oracle.exportGPUGeneration());
+    const encoder = device.createCommandEncoder(); summaries.encode(encoder, source); device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    const readback = device.createBuffer({ size: summaries.plan.directoryBytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const copy = device.createCommandEncoder(); copy.copyBufferToBuffer(summaries.directory, 0, readback, 0,
+      summaries.plan.directoryBytes); device.queue.submit([copy.finish()]); await device.queue.onSubmittedWorkDone();
+    await readback.mapAsync(GPUMapMode.READ); const bytes = readback.getMappedRange().slice(0); readback.unmap();
+    const words = new Uint32Array(bytes); const floats = new Float32Array(bytes);
+    const lookup = planFineLevelSetSummaryLeafLookup(plan.brickDimensions, plan.finestCellDimensions,
+      [0, 0, 0], 1, plan.samplesPerBrick);
+    const base = findSummaryEntry(words, summaries.plan.hashCapacity, lookup.key); assert.notEqual(base, undefined);
+    assert.equal(words[base! + 4], lookup.expectedSampleCount);
+    assert.equal(words[base! + 5], lookup.expectedBrickCount);
+    assert.equal(words[base! + 6], 0);
+    assert.ok(Math.abs(floats[base! + 7] - (-0.25)) < 1e-6,
+      `factor ${factor} centre phi ${floats[base! + 7]}`);
     summaries.destroy(); owner.destroy(); readback.destroy();
   }
   device.destroy();

@@ -15,7 +15,11 @@ const snapshot = (methodId: string, activeStages: GPUPhysicsStageId[]): Performa
   gpuConditioning_ms: methodId === "uniform" ? 4 : 0,
   gpuRemeshing_ms: methodId === "tall-cell" ? 5 : 0,
   gpuPressure_ms: 6,
+  gpuPowerAssembly_ms: methodId === "octree" ? 2 : 0,
+  gpuPressureSolve_ms: methodId === "octree" ? 4 : 0,
   gpuProjection_ms: methodId === "quadtree-tall-cell" ? 0 : 7,
+  gpuPowerProjection_ms: methodId === "octree" ? 3 : 0,
+  gpuVelocityProjection_ms: methodId === "octree" ? 4 : 0,
   gpuExtrapolation_ms: methodId === "octree" ? 12 : 0,
   gpuMaterialization_ms: methodId === "octree" ? 13 : 0,
   gpuSurfaceUpdate_ms: methodId === "quadtree-tall-cell" || methodId === "octree" ? 8 : 0,
@@ -64,6 +68,14 @@ test("octree trace exposes its resident pipeline and immersed-body coupling", ()
   assert.equal(stages.reduce((sum, stage) => sum + stage.value, 0), measuredGPUTime_ms(sample));
 });
 
+test("power-diagram timestamps split assembly, solve, and projection without double-counting", () => {
+  const { sample, stages } = stagesFor("octree", ["topology", "advection", "pressure", "powerAssembly", "pressureSolve", "projection", "powerProjection", "velocityProjection", "extrapolation", "materialization", "surfaceUpdate", "rigidCoupling", "spray", "fluidResidency", "sparsePublication", "diagnostics"]);
+  assert.deepEqual(stages.slice(2, 6).map((stage) => stage.key), ["power-assembly", "pressure", "power-projection", "projection"]);
+  assert.deepEqual(stages.slice(2, 6).map((stage) => stage.value), [2, 4, 3, 4]);
+  assert.deepEqual(stages.slice(2, 6).map((stage) => stage.dependsOn[0]), ["advection", "power-assembly", "pressure", "power-projection"]);
+  assert.equal(stages.reduce((sum, stage) => sum + stage.value, 0), measuredGPUTime_ms(sample));
+});
+
 test("asynchronous quadtree topology is not repeated in the per-advance physics total", () => {
   const sample = snapshot("quadtree-tall-cell", ["advection", "pressure", "surfaceUpdate", "diagnostics"]);
   const stages = physicsPerformanceStages({ methodId: "quadtree-tall-cell", snapshot: sample, contextMatches: true, topologyPath: "async" });
@@ -107,7 +119,9 @@ test("expanded physics accounting includes every named category", () => {
 });
 
 test("timestamp capacity covers the worst 64-substep wrapper trace", () => {
-  const worstCaseQueries = 2 * (1 + 1 + 64 * 9 + 3); // total + topology + nine possible categories/substep + sparse tail + diagnostics
+  // Power pressure/projection each use three query values for an aggregate and
+  // two exact child intervals, adding only two values per substep.
+  const worstCaseQueries = 2 + 2 + 64 * (9 * 2 + 2) + 3 * 2;
   assert.ok(GPU_PHYSICS_TIMESTAMP_CAPACITY >= worstCaseQueries);
   assert.equal(GPU_PHYSICS_TIMESTAMP_CAPACITY * 8, 16384);
 });

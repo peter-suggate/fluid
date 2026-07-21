@@ -113,6 +113,17 @@ export interface GPUSolverInstance {
   readonly globalFineVolumeControl?: GPUBuffer;
   readonly globalFinePowerVelocityControl?: GPUBuffer;
   readonly globalFinePowerProjectionControl?: GPUBuffer;
+  /** QA-only exact power-face endpoint queries; never affects publication. */
+  readonly powerBoundaryPhiQueries?: GPUBuffer;
+  /** QA-only packed owner lattice readback for topology forensics. */
+  readonly ownerLatticeDebug?: {
+    buffer: GPUBuffer;
+    paged: boolean;
+    maximumLeafSize: number;
+    dimensions: readonly [number, number, number];
+  };
+  /** QA-only generation/slot sampled by the last power boundary build. */
+  readonly powerBoundaryFineSource?: { generation: number; generationSlot: 0 | 1 };
   /** Diagnostic-only Stage-B point-sampler transaction used by fine transport. */
   readonly globalFinePowerVelocitySampleControl?: GPUBuffer;
   readonly globalFineCoarseLevelSetControl?: GPUBuffer;
@@ -128,6 +139,8 @@ export interface GPUSolverInstance {
   /** Diagnostic-only regular-face to power-face publication transaction. */
   readonly globalFineFaceBandPowerPublicationControl?: GPUBuffer;
   readonly globalFineFaceBandPlan?: OctreeFaceBandGPUPlan;
+  /** Failure-only bounded readback for a disconnected Section-5 face. */
+  readGlobalFineDisconnectedFaceFailure?(index: number): Promise<unknown> | undefined;
   /** GPU-authored rigid records matching the renderer's four-vec4 body ABI. */
   readonly rigidRenderBuffer?: GPUBuffer;
   /** GPU-authored 128-byte primitive-motion sidecars, including conservative swept bounds. */
