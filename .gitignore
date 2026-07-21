@@ -12,6 +12,7 @@ coverage/
 !.env.example
 .build/
 native/.build/
+tmp/
 
 # The deterministic power-topology catalog is committed. Regenerate it only
 # when its generator or topology inputs intentionally change.
