@@ -218,6 +218,17 @@ export const SVO_TERRAIN_FALLBACK_REFINEMENTS = 8;
 export const SVO_TERRAIN_FAST_MAX_HEIGHT_EVALUATIONS = 12;
 /** Normal-projected sparse-cell widths used to offset the hard shadow ray. */
 export const SVO_DRY_SCENE_SHADOW_BIAS_CELLS = 0.02;
+/**
+ * Sparse-cell widths a shadow cone's origin escapes along the geometric normal
+ * before marching. The node-mip march samples trilinear coverage, so a cone
+ * that starts on the receiving surface (the hard-ray 0.02-cell bias) reads the
+ * receiver's own solid coverage for its first steps; the accumulated
+ * self-occlusion changes in visible bands with grazing angle and light
+ * distance. Half a voxel clears the origin's own trilinear support without
+ * visibly detaching contact shadows (0.25 still banded on grazing terrain,
+ * 0.75 measurably lifted mushroom-stem contact shadows).
+ */
+export const SVO_DRY_SCENE_CONE_SHADOW_NORMAL_ESCAPE_CELLS = 0.5;
 /** Bound direct-light work independently from the producer's 32-record capacity. */
 export const SVO_DRY_SCENE_MAX_SHADED_LIGHTS = 8;
 /** Two fixed shape samples are stable across frames and keep total visibility work bounded. */
@@ -624,16 +635,21 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
 }
 `
     : "";
-  // The elision variant keeps the identical 48-step march (step distances,
-  // stepIndex sequence, dryMipSteps accounting, termination) and only replaces
-  // a fetch whose trilinear support is provably inside a zero region with the
-  // arithmetically identical zero sample: max(0,0*.15)=0 leaves transmittance
-  // bit-exact because 1-pow(1,stepInVoxels)==0.
+  // Both variants march the identical continuous-LOD cone: coverage is fetched
+  // from BOTH mip levels bracketing the fractional LOD and blended by
+  // fract(lod), and the step width follows the continuous cone diameter. A
+  // single floor(lod) fetch with a floored step width made accumulated opacity
+  // jump wherever floor(lod) incremented along the cone, which rendered as
+  // concentric isodistance rings around point lights. The elision variant keeps
+  // the identical march (step distances, stepIndex sequence, dryMipSteps
+  // accounting, termination) and only replaces the fine-level fetch whose
+  // trilinear support is provably inside a zero region with the arithmetically
+  // identical zero sample: max(0,0*.15)=0 contributes nothing to the blend.
   const visibility = options.emptySpaceElision
     ? /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32)->DryConeVisibility{
-  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
+  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
   var zeroRegion=DryConeZeroRegion(vec3f(0.0),vec3f(0.0),0u);
-  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let voxelWidth=minimumVoxel*exp2(floor(lod));let stepWidth=min(max(voxelWidth,diameter*.5),maximumDistance_m-distance);
+  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let stepWidth=min(diameter,maximumDistance_m-distance);
     let position=origin_m+direction*distance;let level=min(u32(max(floor(lod),0.0)),dry.nodeMip.z-1u);
     // Tap texels lie within 1.5 level-voxels of the sample position, so the
     // whole trilinear support footprint sits inside this conservative box.
@@ -648,12 +664,16 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
         zeroRegion=dryConeZeroRegionAt(position,level,&pageCache);
       }
     }
-    if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}let conservativeCoverage=max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15);let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/voxelWidth);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
+    if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}
+    // The zero region certifies levels at or below its establishment level
+    // only, so the coarse bracketing fetch always goes to the cache.
+    let lookupCoarse=dryNodeMipAt(position,lod+1.0,&pageCacheCoarse);if(lookupCoarse.valid==0u){return DryConeVisibility(1.0,0u);}
+    let conservativeCoverage=mix(max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15),max(lookupCoarse.sample.solidMean,lookupCoarse.sample.solidMaximum*.15),fract(lod));let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/diameter);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
   return DryConeVisibility(clamp(transmittance,0.0,1.0),1u);
 }`
     : /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32)->DryConeVisibility{
-  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
-  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let voxelWidth=minimumVoxel*exp2(floor(lod));let stepWidth=min(max(voxelWidth,diameter*.5),maximumDistance_m-distance);let lookup=dryNodeMipAt(origin_m+direction*distance,lod,&pageCache);if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}let conservativeCoverage=max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15);let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/voxelWidth);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
+  if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
+  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let stepWidth=min(diameter,maximumDistance_m-distance);let position=origin_m+direction*distance;let lookup=dryNodeMipAt(position,lod,&pageCache);if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}let lookupCoarse=dryNodeMipAt(position,lod+1.0,&pageCacheCoarse);if(lookupCoarse.valid==0u){return DryConeVisibility(1.0,0u);}let conservativeCoverage=mix(max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15),max(lookupCoarse.sample.solidMean,lookupCoarse.sample.solidMaximum*.15),fract(lod));let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/diameter);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
   return DryConeVisibility(clamp(transmittance,0.0,1.0),1u);
 }`;
   return /* wgsl */ `struct DryNodeMipLookup{sample:SvoNodeMipSample,valid:u32}
@@ -681,7 +701,144 @@ ${zeroRegion}struct DryConeVisibility{transmittance:f32,valid:u32}
 ${visibility}`;
 }
 
-const drySceneShader = /* wgsl */ `
+/** Per-axis resolution scale for the cone-lighting prepass; 1 keeps the inline path. */
+export type SvoConeLightingScale = 1 | 0.5 | 0.25;
+
+/** Reduced-rate cone-lighting prepass target contract. */
+export const SVO_DRY_CONE_PREPASS_CONTRACT = Object.freeze({
+  /** rgba8unorm packing [AO, light0, light1, light2] cone visibilities. */
+  visibilityFormat: "rgba8unorm" as GPUTextureFormat,
+  /** rgba16float packing [linear hit distance, geometric normal xyz]; x<=0 marks a miss. */
+  geometryFormat: "rgba16float" as GPUTextureFormat,
+  /** Lights in slots at or above this cap keep inline full-resolution cones. */
+  maximumPrepassLights: 3,
+  /** Guided-upsample weight below this threshold re-traces exact inline cones (silhouettes). */
+  fallbackWeightThreshold: 0.05,
+} as const);
+
+/** Prepass target dimensions derived from the presentation size, never below 1x1. */
+export function svoConePrepassSize(width: number, height: number, scale: SvoConeLightingScale): readonly [number, number] {
+  return [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))];
+}
+
+/** Optional reduced-rate cone lighting layered over the shared user-facing options. */
+export type SparseVoxelDrySceneLightingOptions = SvoLightingOptions & {
+  readonly coneLightingScale?: SvoConeLightingScale;
+};
+
+/**
+ * Composes the production dry fragment shader. Scale 1 must return the exact
+ * historical string byte-for-byte: the bit-exact frame fingerprint gates on it,
+ * and every insertion below is the empty string in that configuration.
+ * Reduced scales add a half/quarter-rate cone-lighting prepass entry point
+ * (`dryPrepassMain`) plus a depth/normal-guided upsample consumed by
+ * `dryLightVisibility` and `dryContactVisibility`; rigid-body blocker terms
+ * stay inline at full resolution so moving-body contact shadows remain exact.
+ */
+export function createSvoDrySceneFragmentWGSL(coneLightingScale: SvoConeLightingScale = 1): string {
+  const reduced = coneLightingScale !== 1;
+  const prepassDeclarationsWGSL = reduced ? /* wgsl */ `// Reduced-rate cone-lighting prepass consumption. visibility packs
+// [AO, light0, light1, light2] cone transmittances; geometry packs
+// [linear hit distance, geometric normal]. Lights at slot 3 and above
+// keep inline full-resolution cones.
+@group(1) @binding(0) var dryPrepassVisibilityTexture:texture_2d<f32>;
+@group(1) @binding(1) var dryPrepassGeometryTexture:texture_2d<f32>;
+var<private> dryPrepassData:vec4f;
+var<private> dryPrepassState:u32;
+var<private> dryConeFallback:u32;
+var<private> dryCurrentLightSlot:u32;
+fn dryPrepassChannel(index:u32)->f32{return dryPrepassData[min(index,3u)];}
+fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f){
+  let dims=textureDimensions(dryPrepassGeometryTexture);
+  let normal=normalize(normalIn);
+  let coordinate=pixel*(vec2f(dims)/max(uniforms.viewport.xy,vec2f(1.0)))-vec2f(.5);
+  let base=floor(coordinate);let fraction=coordinate-base;
+  var accumulated=vec4f(0.0);var weightSum=0.0;
+  for(var j=0u;j<2u;j+=1u){for(var i=0u;i<2u;i+=1u){
+    let texel=vec2i(clamp(base+vec2f(f32(i),f32(j)),vec2f(0.0),vec2f(dims)-vec2f(1.0)));
+    let geometry=textureLoad(dryPrepassGeometryTexture,texel,0);
+    if(geometry.x<=0.0){continue;}
+    let bilinear=select(1.0-fraction.x,fraction.x,i==1u)*select(1.0-fraction.y,fraction.y,j==1u);
+    let depthWeight=exp(-24.0*abs(geometry.x-depth)/max(depth,1e-3));
+    let normalWeight=pow(max(dot(normal,geometry.yzw),0.0),8.0);
+    let weight=bilinear*depthWeight*normalWeight;
+    if(weight<=1e-6){continue;}
+    accumulated+=textureLoad(dryPrepassVisibilityTexture,texel,0)*weight;weightSum+=weight;
+  }}
+  if(weightSum<${SVO_DRY_CONE_PREPASS_CONTRACT.fallbackWeightThreshold}){dryConeFallback=1u;return;}
+  dryPrepassData=accumulated/weightSum;dryPrepassState=1u;
+}
+` : "";
+  const prepassResolveCallWGSL = reduced
+    ? /* wgsl */ `dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal);}`
+    : "";
+  const prepassShadowShortcutWGSL = reduced
+    ? /* wgsl */ `if(dryPrepassState==1u&&dryCurrentLightSlot<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u){let prepassRigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);if(prepassRigidBlocker.t<ray.tMax_m){return vec3f(0.0);}return vec3f(dryPrepassChannel(1u+dryCurrentLightSlot));}`
+    : "";
+  const prepassContactShortcutWGSL = reduced
+    ? /* wgsl */ `if(dryPrepassState==1u){let prepassRadius=dryContactVisibilityRadius();if(prepassRadius<=0.0){return vec3f(1.0);}let prepassCell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let prepassOrigin=position+normalize(geometricNormal)*prepassCell*.2;let prepassSamples=select(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,uniforms.viewport.w>=-1.0);var prepassUnblocked=0.0;for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=prepassSamples){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let prepassRigidBlocker=nearestBodyIgnoring(prepassOrigin,rotated,ownerId);prepassUnblocked+=select(1.0,0.0,prepassRigidBlocker.t<prepassRadius);}return vec3f(clamp(dryPrepassData.x*(prepassUnblocked/f32(prepassSamples)),0.0,1.0));}`
+    : "";
+  const prepassLightSlotWGSL = reduced ? /* wgsl */ `dryCurrentLightSlot=lightIndex;` : "";
+  const prepassOverlayWGSL = reduced ? /* wgsl */ `if(mode==10u){overlayColor=select(vec3f(.05,.62,.2),vec3f(.95,.08,.05),dryConeFallback==1u);}
+  ` : "";
+  const prepassEntryWGSL = reduced ? /* wgsl */ `struct DryPrepassOut{@location(0) visibility:vec4f,@location(1) geometry:vec4f}
+@fragment fn dryPrepassMain(input:VertexOut)->DryPrepassOut{
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);
+  dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryShadowTracingEnabled=1u;dryPrimitiveCandidateFailure=0u;
+  var output=DryPrepassOut(vec4f(1.0),vec4f(0.0));
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)==0u||!dryNodeMipReady()){return output;}
+  let opaque=traceOpaqueScene(ro,rd);
+  if(!(opaque.t<DRY_MISS)){return output;}
+  let position=ro+rd*opaque.t;let geometricNormal=normalize(opaque.normal);
+  output.geometry=vec4f(opaque.t,geometricNormal);
+  // AO cones exclude rigid blockers; those stay exact at full resolution.
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion}u)!=0u){
+    let radius=dryContactVisibilityRadius();
+    if(radius>0.0){
+      let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
+      let origin=position+geometricNormal*cellScale*.2;
+      let coneSampleCount=select(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,uniforms.viewport.w>=-1.0);
+      var visibility=0.0;
+      for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){
+        if(sampleIndex>=coneSampleCount){break;}
+        let direction=dryContactVisibilityDirection(geometricNormal,opaque.featureId,sampleIndex&1u);
+        let rotated=select(direction,normalize(direction+cross(geometricNormal,direction)*.7),sampleIndex>=2u);
+        let cone=dryConeVisibility(origin,rotated,.62,radius);
+        visibility+=cone.transmittance;
+      }
+      output.visibility.x=clamp(visibility/f32(coneSampleCount),0.0,1.0);
+    }
+  }
+  // Per-light cone shadow terms for slots 0..2; area lights average two fixed samples.
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.exactShadow}u)!=0u){
+    let lightCount=min(dryLighting.metadata.x,min(${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u,${SVO_LIGHT_MAXIMUM_RECORDS}u));
+    for(var lightIndex=0u;lightIndex<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u;lightIndex+=1u){
+      if(lightIndex>=lightCount){break;}
+      let light=dryLighting.lights[lightIndex];
+      if(light.identity.w!=dryLighting.metadata.y){continue;}
+      let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;
+      let sampleCount=select(1u,${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u,area);
+      var visibility=0.0;
+      for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){
+        if(sampleIndex>=sampleCount){continue;}
+        let sample=dryLightSample(light,sampleIndex,position);
+        if(sample.valid==0u||dot(geometricNormal,sample.towardLight)<=0.0){continue;}
+        let maximumDistance=select(directionalLightSceneExitDistance(position,sample.towardLight),sample.finiteDistance_m,sample.finiteDistance_m>0.0);
+        if(maximumDistance<=0.0){continue;}
+        let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,sample.towardLight,maximumDistance,dry.mapping.cellSize,${SVO_DRY_SCENE_SHADOW_BIAS_CELLS});
+        // Mirror of the inline path's normal escape: the reduced-rate texel
+        // must hold the same visibility the fallback band computes inline.
+        let coneEscape_m=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z))*${SVO_DRY_SCENE_CONE_SHADOW_NORMAL_ESCAPE_CELLS};
+        let cone=dryConeVisibility(ray.origin_m+geometricNormal*coneEscape_m,sample.towardLight,.065,max(0.0,ray.tMax_m-coneEscape_m*dot(geometricNormal,sample.towardLight)));
+        visibility+=cone.transmittance;
+      }
+      output.visibility[1u+lightIndex]=clamp(visibility/f32(sampleCount),0.0,1.0);
+    }
+  }
+  return output;
+}
+` : "";
+  return /* wgsl */ `
 ${svoTerrainMaterialWGSL}
 ${svoMaterialWGSL}
 ${svoProceduralMaterialWGSL}
@@ -755,7 +912,7 @@ struct DryHit {
 ${createWebgpuSvoTraversalWGSL({ control: 2, nodes: 3, leaves: 4 })}
 ${createWebgpuSvoWideFanoutTraversalWGSL({ pages: 11, descriptors: 12 })}
 ${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true })}
-fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
+${prepassDeclarationsWGSL}fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
 fn dryDiagnosticMaximumNodeVisits()->u32{return clamp(dryDiagnosticControl()&511u,1u,256u);}
 fn dryDiagnosticMaximumDepth()->u32{return clamp(dryDiagnosticControl()>>9u,1u,21u);}
 fn dryTraverse(ray:SvoRay,mapping:SvoMapping)->SvoTraversalHit{return svoTraverseWithDepthLimit(ray,mapping,dryDiagnosticMaximumDepth());}
@@ -810,7 +967,7 @@ fn dryCostOverlay(radianceDepth:vec4f)->vec4f{
   let mipCost=f32(dryMipSteps)/192.0;
   var cost=depthCost;if(mode==2u){cost=nodeCost;}else if(mode==3u){cost=brickCost;}else if(mode==4u){cost=emptyBrickCost;}else if(mode==5u){cost=candidateCost;}else if(mode==6u){cost=shadowCost;}else if(mode==7u){cost=mipCost;}else if(mode==8u){cost=max(max(depthCost,nodeCost),max(max(brickCost,emptyBrickCost),max(candidateCost,max(shadowCost,mipCost))));}
   var overlayColor=dryCostRamp(cost);
-  if(mode==9u){
+  ${prepassOverlayWGSL}if(mode==9u){
     var failure=dryTraversalFailure;
     if(dryPrimitiveCandidateFailure==DRY_GBUFFER_WORK_EXHAUSTED){failure=max(failure,1u);}
     if(dryPrimitiveCandidateFailure==DRY_GBUFFER_INVALID_FIELD){failure=2u;}
@@ -1177,7 +1334,14 @@ fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLig
   if(dryShadowTracingEnabled==0u){return vec3f(1.0);}
   let maximumDistance=select(directionalLightSceneExitDistance(position,towardLight),finiteDistance_m,finiteDistance_m>0.0);if(maximumDistance<=0.0){return vec3f(0.0);}
   let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,towardLight,maximumDistance,dry.mapping.cellSize,${SVO_DRY_SCENE_SHADOW_BIAS_CELLS});
-  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){let cone=dryConeVisibility(ray.origin_m,towardLight,.065,ray.tMax_m);if(cone.valid!=0u){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);if(rigidBlocker.t<ray.tMax_m){return vec3f(0.0);}return vec3f(cone.transmittance);}}
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u){${prepassShadowShortcutWGSL}
+    // The cone origin escapes the receiver's own trilinear coverage support
+    // along the geometric normal: the 0.02-cell hard-ray bias alone leaves the
+    // first cone samples inside the surface, whose accumulated self-occlusion
+    // renders as banding. The march end stays at the emitter surface.
+    let coneEscape_m=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z))*${SVO_DRY_SCENE_CONE_SHADOW_NORMAL_ESCAPE_CELLS};
+    let cone=dryConeVisibility(ray.origin_m+geometricNormal*coneEscape_m,towardLight,.065,max(0.0,ray.tMax_m-coneEscape_m*dot(geometricNormal,towardLight)));
+    if(cone.valid!=0u){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);if(rigidBlocker.t<ray.tMax_m){return vec3f(0.0);}return vec3f(cone.transmittance);}}
   dryVisibilityIgnoredOwner=ownerId;
   let result=svoTraceVisibility(ray,SvoVisibilityBudget(${SVO_VISIBILITY_LIMITS.nodeVisits}u,${SVO_VISIBILITY_LIMITS.leafVisits}u,${SVO_VISIBILITY_LIMITS.workItems}u,4u),true,0.001,max(ray.originBias_m,1e-6));dryShadowNodeVisits+=result.nodeVisits;dryShadowLeafVisits+=result.leafVisits;dryShadowWorkItems+=result.workItems;if(result.status==SVO_VIS_STATUS_EXHAUSTED){dryTraversalFailure=max(dryTraversalFailure,1u);}else if(result.status==SVO_VIS_STATUS_INVALID){dryTraversalFailure=2u;}
   dryVisibilityIgnoredOwner=DRY_OWNER_NONE;
@@ -1195,7 +1359,7 @@ fn dryContactVisibilityDirection(geometricNormalIn:vec3f,featureId:u32,sampleInd
 }
 fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32,ownerId:u32)->vec3f {
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion}u)==0u){return vec3f(1.0);}
-  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){${prepassContactShortcutWGSL}
     let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(1.0);}var visibility=0.0;var coneValid=true;let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let origin=position+normalize(geometricNormal)*cellScale*.2;let coneSampleCount=select(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,uniforms.viewport.w>=-1.0);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=coneSampleCount){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let cone=dryConeVisibility(origin,rotated,.62,radius);if(cone.valid==0u){coneValid=false;break;}let rigidBlocker=nearestBodyIgnoring(origin,rotated,ownerId);visibility+=select(cone.transmittance,0.0,rigidBlocker.t<radius);}if(coneValid){return vec3f(clamp(visibility/f32(coneSampleCount),0.0,1.0));}
   }
@@ -1269,7 +1433,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   let directClosure=unifiedPbrMaterial(surface.baseColor,surface.metallic,surface.roughness,vec3f(0.0),0.0,surface.specularF0,surface.specularWeight,vec3f(0.0),0.0);var direct=vec3f(0.0);var sampleBudget=0u;
   let lightCount=min(dryLighting.metadata.x,min(${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u,${SVO_LIGHT_MAXIMUM_RECORDS}u));
   for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
-    if(lightIndex>=lightCount||sampleBudget>=${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(1u,${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u,area);
+    if(lightIndex>=lightCount||sampleBudget>=${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(1u,${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u,area);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,hit.normal,hit.ownerId,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let fresnel=unifiedSchlick(max(dot(hit.normal,viewDirection),0.0),f0);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let diffuseEnvironment=diffuseColor*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*fresnel;
@@ -1343,7 +1507,7 @@ fn dryFragmentOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut
   // Curved thick glass is compiled separately from this Metal-sensitive pass.
   // Its authored pane therefore remains visible through the exact thin fallback.
   dryThickGlassEnabled=0u;
-  let opaque=traceOpaqueScene(ro,rd);if(dryPrimitiveCandidateFailure!=0u){return dryFragmentOut(svoGBufferMiss(vec3f(.22,.005,.02),DRY_GBUFFER_FIELD_ANALYTIC,dryPublicationGeneration(),dryPrimitiveCandidateFailure,4096u),0.0);}let glass=traceGlass(ro,rd,0.0,opaque.t,true);var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;
+  let opaque=traceOpaqueScene(ro,rd);${prepassResolveCallWGSL}if(dryPrimitiveCandidateFailure!=0u){return dryFragmentOut(svoGBufferMiss(vec3f(.22,.005,.02),DRY_GBUFFER_FIELD_ANALYTIC,dryPublicationGeneration(),dryPrimitiveCandidateFailure,4096u),0.0);}let glass=traceGlass(ro,rd,0.0,opaque.t,true);var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;
   let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;var glassSurface=DryGlassSurface(vec3f(0.0),DRY_MISS,0u,DRY_OWNER_NONE,0u,0u);
   if(glassVisible){glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);let radiance=max(color*vignette,vec3f(0.0));let generation=dryPublicationGeneration();
@@ -1359,7 +1523,10 @@ fn dryFragmentOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut
   }
   return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u),0.0);
 }
-`;
+${prepassEntryWGSL}`;
+}
+
+const drySceneShader = createSvoDrySceneFragmentWGSL(1);
 
 const drySceneVertexShader = /* wgsl */ `
 struct VertexOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
@@ -1381,6 +1548,23 @@ export class SparseVoxelDrySceneRenderer {
   private pipeline?: GPURenderPipeline;
   private layout?: GPUBindGroupLayout;
   private bindGroup?: GPUBindGroup;
+  private vertexModule?: GPUShaderModule;
+  /** Reduced-rate cone-lighting prepass state; absent at scale 1. */
+  private coneScale: SvoConeLightingScale = 1;
+  private conePipelineScale?: SvoConeLightingScale;
+  private conePipelineCompile?: Promise<void>;
+  private conePrepassPipeline?: GPURenderPipeline;
+  private coneReducedPipeline?: GPURenderPipeline;
+  private conePrepassLayout?: GPUBindGroupLayout;
+  private conePrepassBindGroup?: GPUBindGroup;
+  private conePrepassVisibility?: GPUTexture;
+  private conePrepassVisibilityView?: GPUTextureView;
+  private conePrepassGeometry?: GPUTexture;
+  private conePrepassGeometryView?: GPUTextureView;
+  private conePrepassWidth = 0;
+  private conePrepassHeight = 0;
+  private targetWidth = 0;
+  private targetHeight = 0;
   private primitiveBuffer?: GPUBuffer;
   private primitiveCandidateArena?: SvoPrimitiveCandidateArena;
   private glassBuffer?: GPUBuffer;
@@ -1456,10 +1640,128 @@ export class SparseVoxelDrySceneRenderer {
         depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
       },
     });
+    this.vertexModule = vertexModule;
     progress?.("Compiling sparse temporal accumulation", 1, 2);
     await this.temporalAccumulator.initialize();
     progress?.("Sparse presentation pipelines compiled", 2, 2);
     this.rebuild();
+  }
+
+  /** Active per-axis cone-lighting rate; 1 keeps the historical inline path. */
+  get coneLightingScale(): SvoConeLightingScale {
+    return this.coneScale;
+  }
+
+  /**
+   * Compiles and caches the reduced-rate prepass and consuming pipelines for
+   * the current scale. Fail-soft: until this resolves, encode keeps the
+   * bit-exact inline path. No-op at scale 1 or before initialize().
+   */
+  async ensureConeLightingPrepass(): Promise<void> {
+    if (this.coneScale === 1 || !this.layout || !this.pipeline || !this.vertexModule) return;
+    const scale = this.coneScale;
+    if (this.conePipelineScale === scale && this.conePrepassPipeline && this.coneReducedPipeline) {
+      this.ensureConePrepassTargets();
+      return;
+    }
+    if (this.conePipelineCompile) await this.conePipelineCompile.catch(() => {});
+    if (this.conePipelineScale === scale && this.conePrepassPipeline && this.coneReducedPipeline) {
+      this.ensureConePrepassTargets();
+      return;
+    }
+    const compile = (async () => {
+      const module = await checkedModule(this.device, `Sparse voxel dry scene cone prepass (x${scale})`, createSvoDrySceneFragmentWGSL(scale));
+      this.conePrepassLayout ??= this.device.createBindGroupLayout({
+        label: "Sparse voxel cone-prepass outputs",
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+        ],
+      });
+      const [prepassPipeline, reducedPipeline] = await Promise.all([
+        this.device.createRenderPipelineAsync({
+          label: "Sparse voxel cone-lighting prepass",
+          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout!] }),
+          vertex: { module: this.vertexModule!, entryPoint: "vertexMain" },
+          fragment: { module, entryPoint: "dryPrepassMain", targets: [
+            { format: SVO_DRY_CONE_PREPASS_CONTRACT.visibilityFormat },
+            { format: SVO_DRY_CONE_PREPASS_CONTRACT.geometryFormat },
+          ] },
+          primitive: { topology: "triangle-list" },
+        }),
+        this.device.createRenderPipelineAsync({
+          label: `Sparse voxel dry scene (cone prepass x${scale})`,
+          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout!, this.conePrepassLayout] }),
+          vertex: { module: this.vertexModule!, entryPoint: "vertexMain" },
+          fragment: { module, entryPoint: "fragmentMain", targets: [
+            { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat },
+            { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.packedSurfaceFormat },
+            { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.identityMediaFormat },
+          ] },
+          primitive: { topology: "triangle-list" },
+          depthStencil: {
+            format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+            depthWriteEnabled: true,
+            depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+          },
+        }),
+      ]);
+      this.conePrepassPipeline = prepassPipeline;
+      this.coneReducedPipeline = reducedPipeline;
+      this.conePipelineScale = scale;
+      this.clearReusableFrame();
+      this.ensureConePrepassTargets();
+    })();
+    const wrapped: Promise<void> = compile.finally(() => {
+      if (this.conePipelineCompile === wrapped) this.conePipelineCompile = undefined;
+    });
+    this.conePipelineCompile = wrapped;
+    await wrapped;
+  }
+
+  private ensureConePrepassTargets(): void {
+    if (this.coneScale === 1 || !this.conePrepassLayout || !this.targetWidth || !this.targetHeight) return;
+    const [width, height] = svoConePrepassSize(this.targetWidth, this.targetHeight, this.coneScale);
+    if (this.conePrepassVisibility && this.conePrepassWidth === width && this.conePrepassHeight === height) return;
+    this.releaseConePrepassTargets();
+    const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
+    this.conePrepassVisibility = this.device.createTexture({
+      label: "Sparse voxel cone-prepass visibility",
+      size: [width, height],
+      format: SVO_DRY_CONE_PREPASS_CONTRACT.visibilityFormat,
+      usage,
+    });
+    this.conePrepassGeometry = this.device.createTexture({
+      label: "Sparse voxel cone-prepass geometry",
+      size: [width, height],
+      format: SVO_DRY_CONE_PREPASS_CONTRACT.geometryFormat,
+      usage,
+    });
+    this.conePrepassVisibilityView = this.conePrepassVisibility.createView();
+    this.conePrepassGeometryView = this.conePrepassGeometry.createView();
+    this.conePrepassBindGroup = this.device.createBindGroup({
+      label: "Sparse voxel cone-prepass consumption",
+      layout: this.conePrepassLayout,
+      entries: [
+        { binding: 0, resource: this.conePrepassVisibilityView },
+        { binding: 1, resource: this.conePrepassGeometryView },
+      ],
+    });
+    this.conePrepassWidth = width;
+    this.conePrepassHeight = height;
+    this.clearReusableFrame();
+  }
+
+  private releaseConePrepassTargets(): void {
+    this.conePrepassVisibility?.destroy();
+    this.conePrepassGeometry?.destroy();
+    this.conePrepassVisibility = undefined;
+    this.conePrepassGeometry = undefined;
+    this.conePrepassVisibilityView = undefined;
+    this.conePrepassGeometryView = undefined;
+    this.conePrepassBindGroup = undefined;
+    this.conePrepassWidth = 0;
+    this.conePrepassHeight = 0;
   }
 
   setSource(source: SparseVoxelSceneRenderSource | undefined, scene: SparseVoxelDrySceneData | undefined): void {
@@ -1515,15 +1817,20 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   /** Enable finished-image visibility effects without rebuilding scene-owned resources. */
-  setLightingOptions(options: SvoLightingOptions): void {
+  setLightingOptions(options: SparseVoxelDrySceneLightingOptions): void {
+    const coneLightingScale = options.coneLightingScale ?? 1;
     if (options.shadowsEnabled === this.lightingOptions.shadowsEnabled
-      && options.ambientOcclusionEnabled === this.lightingOptions.ambientOcclusionEnabled) return;
-    this.lightingOptions = { ...options };
+      && options.ambientOcclusionEnabled === this.lightingOptions.ambientOcclusionEnabled
+      && coneLightingScale === this.coneScale) return;
+    this.lightingOptions = { shadowsEnabled: options.shadowsEnabled, ambientOcclusionEnabled: options.ambientOcclusionEnabled };
+    this.coneScale = coneLightingScale;
     this.clearReusableFrame();
     this.temporalAccumulator.invalidate();
     if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) {
       this.writeParams(this.source, this.scene);
     }
+    // Fail-soft: frames stay on the inline path until the variant pipelines resolve.
+    if (coneLightingScale !== 1) void this.ensureConeLightingPrepass().catch(() => {});
   }
 
   private writeParams(source: SparseVoxelSceneRenderSource, scene: SparseVoxelDrySceneData): void {
@@ -1609,6 +1916,9 @@ export class SparseVoxelDrySceneRenderer {
   ensureSize(width: number, height: number): void {
     if (this.gBufferTargets.ensureSize(width, height)) { this.pickingFrameToken += 1; this.lastPickingTarget = undefined; this.clearReusableFrame(); }
     this.temporalAccumulator.ensureSize(width, height);
+    this.targetWidth = width;
+    this.targetHeight = height;
+    this.ensureConePrepassTargets();
   }
 
   invalidateTemporalHistory(): void { this.temporalAccumulator.invalidate(); }
@@ -1644,9 +1954,16 @@ export class SparseVoxelDrySceneRenderer {
     if (!this.pipeline || !this.bindGroup) return false;
     const gBufferViews = this.gBufferTargets.views;
     if (!gBufferViews) return false;
+    // Reduced-rate cone lighting activates only once its pipelines and targets
+    // are resolved; until then frames stay on the bit-exact inline path. The
+    // effective frame key carries the active scale so toggling invalidates reuse.
+    const usePrepass = this.coneScale !== 1 && this.conePipelineScale === this.coneScale
+      && Boolean(this.conePrepassPipeline && this.coneReducedPipeline && this.conePrepassBindGroup
+        && this.conePrepassVisibilityView && this.conePrepassGeometryView);
+    const frameKey = reuseKey === undefined ? undefined : `${reuseKey}|cone=${usePrepass ? this.coneScale : 1}`;
     const targetTexture = "width" in target ? target as GPUTexture : undefined;
     const requiredStableFrames = temporalFrame ? 2 : 1;
-    if (reuseKey && targetTexture && reuseKey === this.reusableKey && targetTexture === this.reusableTarget
+    if (frameKey && targetTexture && frameKey === this.reusableKey && targetTexture === this.reusableTarget
       && this.reusableStableFrames >= requiredStableFrames && this.reusableResult) {
       if (timestampWrites) { const pass = encoder.beginComputePass({ label: "Sparse voxel dry scene reuse timestamp", timestampWrites }); pass.end(); }
       if (temporalFrame && temporalTimestampWrites) { const pass = encoder.beginComputePass({ label: "Sparse voxel temporal reuse timestamp", timestampWrites: temporalTimestampWrites }); pass.end(); }
@@ -1659,6 +1976,25 @@ export class SparseVoxelDrySceneRenderer {
       this.targetViews.set(targetTexture, targetView);
     }
     if (this.rigidMotionSource) encoder.copyBufferToBuffer(this.rigidMotionSource, 0, this.rigidMotionUniformBuffer, 0, SVO_DRY_RIGID_MOTION_UNIFORM_BYTES);
+    if (usePrepass) {
+      // The measured span keeps the caller's begin/end indices: begin stamps the
+      // prepass, end stamps the main pass, so timing covers the whole replacement.
+      const prepass = encoder.beginRenderPass({
+        label: "Sparse voxel cone-lighting prepass",
+        colorAttachments: [
+          { view: this.conePrepassVisibilityView!, clearValue: { r: 1, g: 1, b: 1, a: 1 }, loadOp: "clear", storeOp: "store" },
+          { view: this.conePrepassGeometryView!, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+        ],
+        ...(timestampWrites ? { timestampWrites: { querySet: timestampWrites.querySet, beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } } : {}),
+      });
+      prepass.setPipeline(this.conePrepassPipeline!);
+      prepass.setBindGroup(0, this.bindGroup);
+      prepass.draw(3);
+      prepass.end();
+    }
+    const mainTimestampWrites: GPURenderPassTimestampWrites | undefined = usePrepass && timestampWrites
+      ? { querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex }
+      : undefined;
     const pass = encoder.beginRenderPass({
       label: "Sparse voxel dry scene",
       colorAttachments: [
@@ -1672,9 +2008,12 @@ export class SparseVoxelDrySceneRenderer {
         depthLoadOp: "clear",
         depthStoreOp: "store",
       },
-      ...(timestampWrites ? { timestampWrites } : {}),
+      ...(mainTimestampWrites ? { timestampWrites: mainTimestampWrites } : (timestampWrites ? { timestampWrites } : {})),
     });
-    pass.setPipeline(this.pipeline); pass.setBindGroup(0, this.bindGroup); pass.draw(3); pass.end();
+    pass.setPipeline(usePrepass ? this.coneReducedPipeline! : this.pipeline);
+    pass.setBindGroup(0, this.bindGroup);
+    if (usePrepass) pass.setBindGroup(1, this.conePrepassBindGroup!);
+    pass.draw(3); pass.end();
     this.lastPickingTarget = targetTexture;
     const gBuffer = this.gBufferTargets.textures;
     const temporalResolve = temporalFrame && targetTexture && gBuffer
@@ -1682,14 +2021,18 @@ export class SparseVoxelDrySceneRenderer {
       : false;
     this.lastTemporalEncoded = Boolean(temporalResolve);
     const result = { encoded: true, sampledTargetView: temporalResolve ? temporalResolve.resolvedView : targetView } as const;
-    if (reuseKey && targetTexture) {
-      this.reusableStableFrames = reuseKey === this.reusableKey && targetTexture === this.reusableTarget ? this.reusableStableFrames + 1 : 1;
-      this.reusableKey = reuseKey; this.reusableTarget = targetTexture; this.reusableResult = result;
+    if (frameKey && targetTexture) {
+      this.reusableStableFrames = frameKey === this.reusableKey && targetTexture === this.reusableTarget ? this.reusableStableFrames + 1 : 1;
+      this.reusableKey = frameKey; this.reusableTarget = targetTexture; this.reusableResult = result;
     } else this.clearReusableFrame();
     return result;
   }
 
   destroy(): void {
+    this.releaseConePrepassTargets();
+    this.conePrepassPipeline = undefined;
+    this.coneReducedPipeline = undefined;
+    this.conePipelineScale = undefined;
     this.primitiveBuffer?.destroy();
     this.glassBuffer?.destroy();
     this.paramsBuffer.destroy();

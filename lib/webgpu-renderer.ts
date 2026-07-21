@@ -1378,7 +1378,9 @@ export class FluidLabRenderer {
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }
     this.svoDryScenePipeline?.setLightingMode(svoLightingMode);
-    this.svoDryScenePipeline?.setLightingOptions(svoLightingOptions);
+    // Reduced-rate cone lighting is the production default: half-resolution
+    // prepass + guided upsample, measured within the visibility-error gates.
+    this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: 0.5 });
     const cpuDataUpload_ms=performance.now()-uploadStart,renderStart=performance.now();
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     let stageCapture: PendingGPUStageCapture | undefined;
