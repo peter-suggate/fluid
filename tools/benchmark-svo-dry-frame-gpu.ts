@@ -20,7 +20,9 @@
  * Env: FLUID_SVO_DRY_FRAME_WIDTH / _HEIGHT / _WARMUPS / _CYCLES /
  *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25, default 0.5),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
- *      FLUID_SVO_DRY_FRAME_OUT.
+ *      FLUID_SVO_DRY_FRAME_OUT, FLUID_SVO_DRY_FRAME_CAMERA_MOVING (1 publishes
+ *      the camera-changing sentinel, times the moving tier against the settled
+ *      tier, and reports settle-pop luminance stats plus moving/settled PNGs).
  */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -39,6 +41,7 @@ import { buildSvoSceneThickGlass } from "../lib/svo-scene-thick-glass";
 import { buildSvoTerrainMaterial } from "../lib/svo-terrain-material";
 import { MAX_TERRAIN_FEATURES, sceneHasTerrain, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT } from "../lib/terrain";
 import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
 import { WebGPUStaticSvoScene } from "../lib/webgpu-static-svo-scene";
 import {
   buildSparseVoxelDrySceneLightingMirrors,
@@ -63,15 +66,28 @@ const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
 /**
- * M1 Max 1280x720 scale-1 baseline; scale 1 must keep the WGSL byte-identical.
- * Re-baselined for the band-limited cone LOD blend
- * (SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH): the marcher now blends the two
- * bracketing mip levels only inside the trailing fract(lod) transition band
- * (C0 at both band edges) instead of over the full fract range, which alters
- * bits everywhere while keeping the cone-banding fix (no rings, no
- * self-occlusion bands, no hard emitter disc).
+ * Publish the camera-changing sentinel so the dry shader's moving-quality tier
+ * is exercised, and additionally report moving-vs-settled timings, the
+ * settle-pop luminance statistics, and a moving-tier PNG.
  */
-const REFERENCE_IMAGE_HASH = 0x211f5930;
+const cameraMoving = process.env.FLUID_SVO_DRY_FRAME_CAMERA_MOVING === "1";
+/**
+ * M1 Max 1280x720 scale-1 baseline; scale 1 must keep the WGSL byte-identical.
+ * Re-baselined for the tuned cone marcher, whose three deliberate pieces all
+ * alter the settled frame's bits while keeping the cone-banding fix (no rings,
+ * no self-occlusion bands, no hard emitter disc):
+ *   - band-limited two-level LOD blend (SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH):
+ *     the two bracketing mip levels blend only inside the trailing fract(lod)
+ *     transition band (C0 at both band edges) instead of over the full range;
+ *   - receiver self-coverage weighting, which suppresses the march origin's
+ *     own voxelized surface over its trilinear support;
+ *   - the light-anchored geometric ladder over the far half of the march,
+ *     whose sample positions are world-locked around the emitter so coverage
+ *     near the light no longer aliases with the receiver's distance.
+ * The moving-quality tier (SVO_DRY_SCENE_MOVING_* constants) is gated on the
+ * camera-changing sentinel and must never alter this settled-path hash.
+ */
+const REFERENCE_IMAGE_HASH = 0xedb9eb3a;
 const modulePath = process.env.WEBGPU_NODE_MODULE
   ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
 assert.ok(Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0);
@@ -167,13 +183,17 @@ function packViewUniforms(
   info: { nx: number; ny: number; nz: number },
   bodyCount: number,
   overlay?: { mode: number; opacity: number },
+  cameraMovingOverride?: boolean,
 ): Float32Array<ArrayBuffer> {
   const position = cameraPosition(camera);
   // options.x: DEFAULT_SVO_RENDER_DIAGNOSTICS maximumTraversalDepth(21)*512 + maximumNodeVisits(256).
   const diagnosticControl = 21 * 512 + 256;
   // viewport.w: svoDrySceneTemporalFrame with a stable camera and no temporal
-  // accumulation eligibility (shadowTemporalFrame = -1) -> -1.
-  const temporalFrame = -1;
+  // accumulation eligibility (shadowTemporalFrame = -1) -> -1. The moving tier
+  // is measured by publishing the same SVO_CAMERA_CHANGING_FRAME sentinel the
+  // renderer emits while the camera is in motion, which is the only input the
+  // dry shader's moving-quality switches read.
+  const temporalFrame = (cameraMovingOverride ?? cameraMoving) ? SVO_CAMERA_CHANGING_FRAME : -1;
   const uniform = new Float32Array([
     width, height, 0, temporalFrame,
     position.x, position.y, position.z, overlay?.mode ?? 0,
@@ -392,6 +412,29 @@ assert.equal(samples.length, cycles);
 assert.deepEqual(validationErrors, [], "GPU validation errors during timing");
 
 // ---------------------------------------------------------------------------
+// Moving-quality tier: the samples above already ran with the camera-changing
+// sentinel published, so only the settled tier needs a paired measurement.
+// Interleaved cycle-by-cycle so thermal drift cancels between the two tiers.
+// ---------------------------------------------------------------------------
+function writeViewUniforms(moving: boolean, overlay?: { mode: number; opacity: number }): void {
+  device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, camera, environmentId, solver.info, bodies.count, overlay, moving));
+}
+let movingTierTiming: { moving_ms: number[]; settled_ms: number[] } | undefined;
+if (cameraMoving) {
+  const moving_ms: number[] = [];
+  const settled_ms: number[] = [];
+  for (let cycle = 0; cycle < cycles; cycle += 1) {
+    writeViewUniforms(true);
+    moving_ms.push((await timeFrames(1, `Moving tier ${cycle}`))[0]);
+    writeViewUniforms(false);
+    settled_ms.push((await timeFrames(1, `Settled tier ${cycle}`))[0]);
+  }
+  writeViewUniforms(true);
+  movingTierTiming = { moving_ms, settled_ms };
+  assert.deepEqual(validationErrors, [], "GPU validation errors during moving-tier A/B");
+}
+
+// ---------------------------------------------------------------------------
 // Interleaved A/B (reference inline cones vs reduced-rate prepass) in one
 // process, alternating every cycle so thermal drift cancels.
 // ---------------------------------------------------------------------------
@@ -472,18 +515,37 @@ function relativeLuminance(pixels: Float32Array, pixelIndex: number): number {
 // All GPU captures run back-to-back before any heavy CPU work: dawn-node's
 // async event pump intermittently faults when long blocking JS sections
 // (decode/PNG encode) interleave with further GPU submissions in one process.
+// The fingerprint frame is always captured settled, so its hash contract keeps
+// meaning under FLUID_SVO_DRY_FRAME_CAMERA_MOVING and doubles as the proof
+// that the moving tier leaves the settled frame untouched.
+writeViewUniforms(false);
 applyLighting(1);
 const referenceRows = await captureFrame("Bench fingerprint frame");
 let reducedRows: Uint32Array | undefined;
 let overlayRows: Uint32Array | undefined;
+// Settle-pop capture: the same scale and lighting, differing only in the
+// camera-motion sentinel, so the delta isolates the moving tier.
+let settledTierRows: Uint32Array | undefined;
+let movingTierRows: Uint32Array | undefined;
+if (cameraMoving) {
+  applyLighting(coneScale);
+  log("Capturing settled-tier frame for settle-pop statistics");
+  settledTierRows = await captureFrame("Bench settled tier frame");
+  writeViewUniforms(true);
+  log("Capturing moving-tier frame for settle-pop statistics");
+  movingTierRows = await captureFrame("Bench moving tier frame");
+  writeViewUniforms(false);
+  await device.queue.onSubmittedWorkDone();
+  assert.deepEqual(validationErrors, [], "GPU validation errors during moving-tier capture");
+}
 if (coneScale !== 1) {
   applyLighting(coneScale);
   log("Capturing reduced frame for quality statistics");
   reducedRows = await captureFrame("Bench reduced frame");
   log("Capturing fallback-band diagnostic frame");
-  device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, camera, environmentId, solver.info, bodies.count, { mode: 10, opacity: 1 }));
+  writeViewUniforms(false, { mode: 10, opacity: 1 });
   overlayRows = await captureFrame("Bench fallback diagnostic frame");
-  device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, camera, environmentId, solver.info, bodies.count));
+  writeViewUniforms(false);
   await device.queue.onSubmittedWorkDone();
   assert.deepEqual(validationErrors, [], "GPU validation errors during quality capture");
 }
@@ -526,6 +588,24 @@ log(`Reference (scale 1) image hash 0x${imageHash.toString(16).padStart(8, "0")}
 // guided-upsample fallback-band percentage from the mode-10 diagnostic overlay.
 // ---------------------------------------------------------------------------
 interface ErrorStats { litPixels: number; mean: number; p95: number; max: number; denominatorFloor: number }
+/** Relative luminance error of `candidate` against `baseline` over baseline-lit pixels. */
+function luminanceErrorStats(baseline: Float32Array, candidate: Float32Array): ErrorStats {
+  const denominatorFloor = 0.01;
+  const errors: number[] = [];
+  for (let pixel = 0; pixel < width * height; pixel += 1) {
+    const baselineY = relativeLuminance(baseline, pixel);
+    if (!(baselineY > 1e-4)) continue;
+    errors.push(Math.abs(relativeLuminance(candidate, pixel) - baselineY) / Math.max(baselineY, denominatorFloor));
+  }
+  errors.sort((a, b) => a - b);
+  return {
+    litPixels: errors.length,
+    mean: errors.reduce((sum, value) => sum + value, 0) / Math.max(1, errors.length),
+    p95: errors[Math.min(errors.length - 1, Math.ceil(0.95 * errors.length) - 1)] ?? 0,
+    max: errors[errors.length - 1] ?? 0,
+    denominatorFloor,
+  };
+}
 let errorStats: ErrorStats | undefined;
 let fallback: { percentOfHitPixels: number; hitPixels: number; fallbackPixels: number } | undefined;
 let images: Record<string, string> | undefined;
@@ -590,6 +670,56 @@ if (coneScale !== 1 && reducedRows && overlayRows) {
 }
 
 // ---------------------------------------------------------------------------
+// Moving tier: settle-pop statistics (moving vs settled at the same scale) and
+// an inspectable moving-tier PNG beside an 8x-amplified difference.
+// ---------------------------------------------------------------------------
+let movingTier: {
+  movingMedian_ms: number; settledMedian_ms: number; movingP95_ms: number; settledP95_ms: number;
+  moving_ms: number[]; settled_ms: number[]; settlePop?: ErrorStats; images?: Record<string, string>;
+} | undefined;
+if (movingTierTiming) {
+  const outDirectory = path.dirname(outPath);
+  mkdirSync(outDirectory, { recursive: true });
+  movingTier = {
+    movingMedian_ms: median(movingTierTiming.moving_ms),
+    settledMedian_ms: median(movingTierTiming.settled_ms),
+    movingP95_ms: percentile95(movingTierTiming.moving_ms),
+    settledP95_ms: percentile95(movingTierTiming.settled_ms),
+    moving_ms: movingTierTiming.moving_ms,
+    settled_ms: movingTierTiming.settled_ms,
+  };
+  if (settledTierRows && movingTierRows) {
+    const settledPixels = decodePixels(settledTierRows);
+    const movingPixels = decodePixels(movingTierRows);
+    movingTier.settlePop = luminanceErrorStats(settledPixels, movingPixels);
+    const toRgbBytes = (pixels: Float32Array): Uint8Array => {
+      const rgb = new Uint8Array(width * height * 3);
+      for (let pixel = 0; pixel < width * height; pixel += 1) {
+        rgb[pixel * 3] = toneByte(pixels[pixel * 4]);
+        rgb[pixel * 3 + 1] = toneByte(pixels[pixel * 4 + 1]);
+        rgb[pixel * 3 + 2] = toneByte(pixels[pixel * 4 + 2]);
+      }
+      return rgb;
+    };
+    const popRgb = new Uint8Array(width * height * 3);
+    for (let pixel = 0; pixel < width * height; pixel += 1) {
+      const amplified = Math.max(0, Math.min(255, Math.round(255 * 8 * Math.abs(relativeLuminance(movingPixels, pixel) - relativeLuminance(settledPixels, pixel)))));
+      popRgb[pixel * 3] = amplified;
+      popRgb[pixel * 3 + 1] = amplified;
+      popRgb[pixel * 3 + 2] = amplified;
+    }
+    movingTier.images = {
+      moving: path.join(outDirectory, `moving-tier-x${coneScale}.png`),
+      settled: path.join(outDirectory, `settled-tier-x${coneScale}.png`),
+      settlePopDifference: path.join(outDirectory, `settle-pop-x8-${coneScale}.png`),
+    };
+    writeFileSync(movingTier.images.moving, encodePng(width, height, toRgbBytes(movingPixels)));
+    writeFileSync(movingTier.images.settled, encodePng(width, height, toRgbBytes(settledPixels)));
+    writeFileSync(movingTier.images.settlePopDifference, encodePng(width, height, popRgb));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Report.
 // ---------------------------------------------------------------------------
 const result = {
@@ -621,6 +751,7 @@ const result = {
     fallback,
     images,
   },
+  movingTier,
   scene: {
     presetId: "garden-svo-lighting",
     sceneId: scene.sceneId,

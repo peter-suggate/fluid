@@ -5,7 +5,12 @@ import test from "node:test";
 import { createBiasedSvoVisibilityRay, SVO_VISIBILITY_LIMITS } from "../lib/svo-visibility-rays";
 import {
   directionalLightSceneExitDistance,
+  SVO_DRY_SCENE_AREA_LIGHT_SAMPLES,
+  SVO_DRY_SCENE_CAMERA_SETTLED_WGSL,
+  SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES,
+  SVO_DRY_SCENE_MOVING_AREA_LIGHT_SAMPLES,
   SVO_DRY_SCENE_SHADOW_BIAS_CELLS,
+  SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES,
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
 import {
@@ -82,6 +87,39 @@ test("checkerboard hard visibility is enabled only with temporal reconstruction"
   assert.match(svoDrySceneShader, /dryShadowTracingEnabled==0u\)\{return vec3f\(1\.0\);\}/);
   assert.match(svoDrySceneShader, /DRY_GBUFFER_SHADOW_DEFERRED<<20u/,
     "deferred visibility must be explicit in the G-buffer rather than inferred from color");
+});
+
+test("the moving-quality tier reduces cone work on the camera-changing sentinel but keeps every term present", () => {
+  // The renderer publishes SVO_CAMERA_CHANGING_FRAME while the camera moves;
+  // every quality tier must switch on that one shared predicate so a settled
+  // frame can never take a reduced path (the frame fingerprint depends on it).
+  assert.equal(SVO_DRY_SCENE_CAMERA_SETTLED_WGSL, "uniforms.viewport.w>=-1.0");
+  assert.ok(SVO_CAMERA_CHANGING_FRAME < -1,
+    "the moving sentinel must fall outside the settled predicate's accepted range");
+  assert.equal(svoDrySceneTemporalFrame(-1, 0), SVO_CAMERA_CHANGING_FRAME);
+
+  // AO stays present while moving: one cone rather than none, so settling
+  // changes the estimate's noise, not whether the ambient term exists.
+  assert.equal(SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES, 1);
+  assert.equal(SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES, 4);
+  assert.ok(SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES >= 1,
+    "AO must never be switched off entirely while moving: restoring it at rest is a full ambient-term brightness step");
+  const aoTier = new RegExp(
+    `select\\(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`,
+  );
+  assert.match(svoDrySceneShader, aoTier, "AO cone counts must switch on the shared settled predicate");
+
+  // Shadows stay present at every tier; motion only collapses area-light shape
+  // samples to the centre sample.
+  assert.equal(SVO_DRY_SCENE_MOVING_AREA_LIGHT_SAMPLES, 1);
+  assert.equal(SVO_DRY_SCENE_AREA_LIGHT_SAMPLES, 2);
+  const areaTier = new RegExp(
+    `let sampleCount=select\\(1u,select\\(${SVO_DRY_SCENE_MOVING_AREA_LIGHT_SAMPLES}u,${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\),area\\)`,
+  );
+  assert.match(svoDrySceneShader, areaTier,
+    "area-light shape sample counts must switch on the shared settled predicate");
+  assert.doesNotMatch(svoDrySceneShader, /dryLightVisibility[^]{0,200}return vec3f\(1\.0\);\}[^]{0,40}uniforms\.viewport\.w<-1\.0/,
+    "shadow tracing must never be disabled outright by camera motion");
 });
 
 test("bounded hard-shadow visibility covers opaque sources and transmissive panes", () => {

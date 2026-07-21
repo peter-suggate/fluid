@@ -258,9 +258,48 @@ export const SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH = 0.3;
 export const SVO_DRY_SCENE_MAX_SHADED_LIGHTS = 8;
 /** Two fixed shape samples are stable across frames and keep total visibility work bounded. */
 export const SVO_DRY_SCENE_AREA_LIGHT_SAMPLES = 2;
-/** Keep both signed AO directions during camera motion; add rotated coverage once the view settles. */
-export const SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES = 2;
+/**
+ * Ambient-occlusion cones traced per receiver while the camera is moving
+ * (the SVO_CAMERA_CHANGING_FRAME sentinel in uniforms.viewport.w), against
+ * SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES once the view settles.
+ *
+ * One cone rather than zero: AO stays PRESENT while moving, so settling
+ * changes only the estimate's noise, not whether the ambient term exists at
+ * all. Measured on the garden scene (M1 Max, 1280x720, cone scale 0.5, via
+ * FLUID_SVO_DRY_FRAME_CAMERA_MOVING=1), as relative luminance of the moving
+ * frame against the settled frame:
+ *   - one cone:    mean 0.0015, p95 0.0072, 0.01% of lit pixels past 10%;
+ *   - AO disabled: mean 0.0095, p95 0.0645, 3.0%  of lit pixels past 10%.
+ * Disabling AO is ~1.1 ms cheaper again but its error is not diffuse noise: it
+ * lands in contiguous patches on cap undersides, stem/cap junctions, and
+ * object-to-ground contacts — exactly the shading that reads as objects
+ * resting on the terrain — so every settle would pop those regions darker.
+ * One cone keeps that error at the 0.01% level, which is invisible.
+ */
+export const SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES = 1;
 export const SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES = 4;
+/**
+ * Area-light shape samples while the camera is moving. Shadows stay present
+ * at every tier — losing them during motion is far more visible than a
+ * slightly harder penumbra — so motion only collapses the area light's two
+ * fixed shape samples to its centre sample, which softens the penumbra edge
+ * without moving the shadow body. Worth 0.26 ms of the moving tier's 1.44 ms
+ * saving on the garden scene at cone scale 0.5.
+ *
+ * Reducing the cone marchers' step budget was considered and rejected: an
+ * exhausted budget returns the partially accumulated transmittance, so long
+ * shadow cones would lighten mid-march and the shadow body itself would shift
+ * on every settle rather than only its penumbra.
+ */
+export const SVO_DRY_SCENE_MOVING_AREA_LIGHT_SAMPLES = 1;
+/**
+ * WGSL predicate for "the camera has settled": the renderer publishes
+ * SVO_CAMERA_CHANGING_FRAME (-2) into uniforms.viewport.w while the camera is
+ * moving, -1 when settled without temporal accumulation, and the frame index
+ * once temporal shadow history has warmed up. Kept as one shared expression so
+ * every quality tier switches on the identical test.
+ */
+export const SVO_DRY_SCENE_CAMERA_SETTLED_WGSL = "uniforms.viewport.w>=-1.0";
 export const SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT = Object.freeze({
   metadataWordOffset: 0,
   lightWordOffset: 4,
@@ -775,7 +814,21 @@ ${zeroRegion}struct DryConeVisibility{transmittance:f32,valid:u32}
 ${visibility}`;
 }
 
-/** Per-axis resolution scale for the cone-lighting prepass; 1 keeps the inline path. */
+/**
+ * Per-axis resolution scale for the cone-lighting prepass; 1 keeps the inline
+ * path.
+ *
+ * Deliberately NOT switched per camera-motion state. Dropping to 0.25 while
+ * moving measures well on paper (garden, M1 Max, 1280x720: 11.08 ms moving
+ * against 13.63 ms settled at 0.5, quality still inside the reduced-rate bar
+ * at mean 0.0047 / p95 0.0224), but ensureConeLightingPrepass caches exactly
+ * one scale's pipelines: changing scale discards them and recompiles a shader
+ * module plus two render pipelines, which would stall precisely at the moment
+ * the camera starts moving. Prewarming both scales' pipelines would make this
+ * the strongest moving-tier lever available; until then motion quality is
+ * traded inside the shader (SVO_DRY_SCENE_MOVING_* constants), which costs no
+ * pipeline state at all.
+ */
 export type SvoConeLightingScale = 1 | 0.5 | 0.25;
 
 /** Reduced-rate cone-lighting prepass target contract. */
@@ -850,7 +903,7 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f){
     ? /* wgsl */ `if(dryPrepassState==1u&&dryCurrentLightSlot<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u){let prepassRigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);if(prepassRigidBlocker.t<ray.tMax_m){return vec3f(0.0);}return vec3f(dryPrepassChannel(1u+dryCurrentLightSlot));}`
     : "";
   const prepassContactShortcutWGSL = reduced
-    ? /* wgsl */ `if(dryPrepassState==1u){let prepassRadius=dryContactVisibilityRadius();if(prepassRadius<=0.0){return vec3f(1.0);}let prepassCell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let prepassOrigin=position+normalize(geometricNormal)*prepassCell*.2;let prepassSamples=select(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,uniforms.viewport.w>=-1.0);var prepassUnblocked=0.0;for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=prepassSamples){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let prepassRigidBlocker=nearestBodyIgnoring(prepassOrigin,rotated,ownerId);prepassUnblocked+=select(1.0,0.0,prepassRigidBlocker.t<prepassRadius);}return vec3f(clamp(dryPrepassData.x*(prepassUnblocked/f32(prepassSamples)),0.0,1.0));}`
+    ? /* wgsl */ `if(dryPrepassState==1u){let prepassRadius=dryContactVisibilityRadius();if(prepassRadius<=0.0){return vec3f(1.0);}let prepassCell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let prepassOrigin=position+normalize(geometricNormal)*prepassCell*.2;let prepassSamples=select(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL});var prepassUnblocked=0.0;for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=prepassSamples){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let prepassRigidBlocker=nearestBodyIgnoring(prepassOrigin,rotated,ownerId);prepassUnblocked+=select(1.0,0.0,prepassRigidBlocker.t<prepassRadius);}return vec3f(clamp(dryPrepassData.x*(prepassUnblocked/f32(prepassSamples)),0.0,1.0));}`
     : "";
   const prepassLightSlotWGSL = reduced ? /* wgsl */ `dryCurrentLightSlot=lightIndex;` : "";
   const prepassOverlayWGSL = reduced ? /* wgsl */ `if(mode==10u){overlayColor=select(vec3f(.05,.62,.2),vec3f(.95,.08,.05),dryConeFallback==1u);}
@@ -871,7 +924,7 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f){
     if(radius>0.0){
       let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
       let origin=position+geometricNormal*cellScale*.2;
-      let coneSampleCount=select(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,uniforms.viewport.w>=-1.0);
+      let coneSampleCount=select(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL});
       var visibility=0.0;
       for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){
         if(sampleIndex>=coneSampleCount){break;}
@@ -893,7 +946,7 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f){
       let light=dryLighting.lights[lightIndex];
       if(light.identity.w!=dryLighting.metadata.y){continue;}
       let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;
-      let sampleCount=select(1u,${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u,area);
+      let sampleCount=select(1u,select(${SVO_DRY_SCENE_MOVING_AREA_LIGHT_SAMPLES}u,${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area);
       var visibility=0.0;
       for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){
         if(sampleIndex>=sampleCount){continue;}
@@ -1447,7 +1500,7 @@ fn dryContactVisibilityDirection(geometricNormalIn:vec3f,featureId:u32,sampleInd
 fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32,ownerId:u32)->vec3f {
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion}u)==0u){return vec3f(1.0);}
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){${prepassContactShortcutWGSL}
-    let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(1.0);}var visibility=0.0;var coneValid=true;let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let origin=position+normalize(geometricNormal)*cellScale*.2;let coneSampleCount=select(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,uniforms.viewport.w>=-1.0);
+    let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(1.0);}var visibility=0.0;var coneValid=true;let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let origin=position+normalize(geometricNormal)*cellScale*.2;let coneSampleCount=select(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL});
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=coneSampleCount){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let cone=dryConeVisibility(origin,rotated,.62,radius,vec3f(0.0),false);if(cone.valid==0u){coneValid=false;break;}let rigidBlocker=nearestBodyIgnoring(origin,rotated,ownerId);visibility+=select(cone.transmittance,0.0,rigidBlocker.t<radius);}if(coneValid){return vec3f(clamp(visibility/f32(coneSampleCount),0.0,1.0));}
   }
   if((dry.materialPublication.w&1u)==0u){return vec3f(1.0);}
@@ -1520,7 +1573,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   let directClosure=unifiedPbrMaterial(surface.baseColor,surface.metallic,surface.roughness,vec3f(0.0),0.0,surface.specularF0,surface.specularWeight,vec3f(0.0),0.0);var direct=vec3f(0.0);var sampleBudget=0u;
   let lightCount=min(dryLighting.metadata.x,min(${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u,${SVO_LIGHT_MAXIMUM_RECORDS}u));
   for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
-    if(lightIndex>=lightCount||sampleBudget>=${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(1u,${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u,area);
+    if(lightIndex>=lightCount||sampleBudget>=${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(1u,select(${SVO_DRY_SCENE_MOVING_AREA_LIGHT_SAMPLES}u,${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,hit.normal,hit.ownerId,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let fresnel=unifiedSchlick(max(dot(hit.normal,viewDirection),0.0),f0);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let diffuseEnvironment=diffuseColor*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*fresnel;
