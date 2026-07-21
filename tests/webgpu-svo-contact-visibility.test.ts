@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { SVO_CONTACT_VISIBILITY_CONTRACT } from "../lib/svo-contact-visibility";
-import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
+import {
+  SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES,
+  SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES,
+  svoDrySceneShader,
+} from "../lib/webgpu-svo-dry-scene";
 
 const drySceneSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
 
@@ -56,6 +60,23 @@ test("contact radius, bias, and directions are finite, edge-aware, and temporall
     "the two directions must not shimmer with frame-varying noise");
 });
 
+test("cone AO halves its samples while the camera is changing", () => {
+  const contact = shaderFunction("dryContactVisibility", "dryEnvironment");
+  assert.equal(SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES, 2);
+  assert.equal(SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES, 4);
+  assert.match(contact, new RegExp(
+    `coneSampleCount=select\\(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,`
+    + `${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,uniforms\\.viewport\\.w>=-1\\.0\\)`,
+  ));
+  assert.match(contact, new RegExp(
+    `sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u[^]*sampleIndex>=coneSampleCount`,
+  ));
+  assert.match(contact, /visibility\/f32\(coneSampleCount\)/,
+    "both quality levels must retain the same average visibility range");
+  assert.doesNotMatch(contact, /pointer|mouse|click/i,
+    "AO quality must follow camera stability rather than input-device state");
+});
+
 test("contact visibility attenuates indirect diffuse only and adds no storage binding", () => {
   const shade = shaderFunction("shadeDryOpaque", "shadeThinGlass");
   assert.match(shade, /let contactVisibility=dryContactVisibility\(position,hit\.normal,hit\.featureId,hit\.ownerId\)/);
@@ -66,6 +87,6 @@ test("contact visibility attenuates indirect diffuse only and adds no storage bi
 
   const storageBindings = [...svoDrySceneShader.matchAll(/@group\(0\) @binding\((\d+)\) var<storage/g)]
     .map((match) => Number(match[1]));
-  assert.equal(storageBindings.length, 10);
+  assert.equal(storageBindings.length, 8);
   assert.equal(new Set(storageBindings).size, storageBindings.length);
 });

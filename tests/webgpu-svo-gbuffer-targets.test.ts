@@ -142,7 +142,7 @@ test("production dry pass writes three MRTs plus reversed-Z without changing loc
     deltaTime_s: 0,
     cellSize_m: 0.025,
     paused: true,
-    composition: "dry-before-legacy-water",
+    composition: "dry-before-raster-water",
   };
   const passesBeforeTemporalReuse = passCount;
   const firstTemporal = renderer.encode(encoder, reusableTexture, undefined, temporalFrame, undefined, "fixed-temporal-frame");
@@ -172,8 +172,8 @@ test("shader populates stable identity/media/generation and consumes exact rigid
     "static and analytic history must use the stable static-geometry revision");
   assert.match(svoDrySceneShader, /DRY_REVERSED_Z_NEAR_M\/viewDepth_m/);
   assert.match(svoDrySceneShader, /svoGBufferMiss\(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u\),0\.0/);
-  assert.match(svoDrySceneShader, /surfaceMedium=select\(DRY_MEDIUM_OPAQUE,DRY_MEDIUM_WATER,dryIsFluidFieldSource\(opaque\.fieldSource\)\)/,
-    "coarse and fine fluid hits publish air/water media rather than the temporary opaque shading policy");
+  assert.match(svoDrySceneShader, /dryMediumPair\(rd,opaque\.normal,DRY_MEDIUM_OPAQUE\)/,
+    "the dry scene publishes only opaque media because raster water owns fluid interfaces");
 });
 
 test("resize and water composition retain the SVO MRT lifecycle and zero-depth miss semantics", () => {

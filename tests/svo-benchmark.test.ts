@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { SVO_BASELINE_CASES } from "../tools/svo-baseline-cases";
@@ -198,4 +199,24 @@ test("cached timing samples and mode-epoch drift are rejected", () => {
       ? { ...frame, renderTimingEpoch: frame.renderTimingEpoch + 1 }
       : frame),
   }), [baseline]), /timing mode\/epoch changed/);
+});
+
+test("GPU traversal benchmark retains an opt-in isolated Morton-decode comparison", () => {
+  const source = readFileSync(new URL("../tools/benchmark-svo-traversal-gpu.ts", import.meta.url), "utf8");
+  assert.match(source, /FLUID_SVO_TRAVERSAL_COMPARISON \?\? "parent-bounds"/,
+    "the historical parent-bounds comparison must remain the default");
+  assert.match(source, /comparison === "morton-decode"[\s\S]*mortonDecodeBaselineTraversalWGSL/,
+    "the opt-in baseline must replace only the production Morton decoder");
+  assert.match(source, /decodeSample < \$\{amplifiedMortonDecodesPerTraversal\}u[\s\S]*svoDecodeMorton\(keyLow, keyHigh, 21u\)/,
+    "the isolated mode must amplify deepest supported decodes");
+  assert.match(source, /nodeHash = \(\(nodeHash \* 16777619u\) \^ decoded\.x\)/,
+    "decoded coordinates must participate in the bit-equivalence result");
+  assert.match(source, /phase: "svo-traversal-gpu-benchmark",\s*comparison,/,
+    "machine-readable output must identify the selected comparison");
+  assert.match(source, /comparison === "carried-bounds"[\s\S]*carriedBoundsBaselineTraversalWGSL/,
+    "the traversal-heavy mode must compare the carried-bounds stack against identical decode-based traversal");
+  assert.match(source, /FLUID_SVO_TRAVERSAL_FIXTURE \?\? "dense"/,
+    "the historical dense fixture must remain the default while allowing a deep sparse chain");
+  assert.match(source, /baselineStackEntryBytes:[\s\S]*optimizedStackEntryBytes:/,
+    "the benchmark must report the local stack footprint tradeoff");
 });

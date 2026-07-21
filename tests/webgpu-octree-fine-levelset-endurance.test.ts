@@ -231,7 +231,7 @@ test("Dawn factor-4 transported phi survives 300 A/B topology, Stage-B transport
   }
   await device.queue.onSubmittedWorkDone();
 
-  const transportBytes = 32, redistanceBytes = 16;
+  const transportBytes = 160, redistanceBytes = 16;
   const readback = device.createBuffer({ size: transportBytes + redistanceBytes + plan.payloadCapacityBytes / 4,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();

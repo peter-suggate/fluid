@@ -47,10 +47,10 @@ test("continuity, teleport, and roster changes fail closed while revision and ge
     "roster compaction keeps each body's motion publication beside the same stable body ID");
 });
 
-test("production dry pass uses a renderer-owned uniform mirror without adding an eleventh fragment storage binding", () => {
+test("production dry pass uses a renderer-owned uniform mirror within the fragment storage baseline", () => {
   assert.equal(SVO_DRY_RIGID_MOTION_CAPACITY, 12);
   assert.equal(SVO_DRY_RIGID_MOTION_UNIFORM_BYTES, 12 * 128);
-  assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length, 10);
+  assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length, 8);
   assert.match(svoDrySceneShader, /@binding\(14\) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>/);
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.find(({ binding }) => binding === 14), { binding: 14, type: "uniform" });
   assert.match(drySource, /return \{ binding, visibility: GPUShaderStage\.FRAGMENT, buffer: \{ type \} \}/);

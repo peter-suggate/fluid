@@ -5,7 +5,7 @@ import type { SceneDescription } from "../model";
 import { sceneHasTerrain } from "../terrain";
 
 const params: MethodParamSpec[] = [
-  { kind: "number", key: "pressureIterations", label: "Pressure effort", unit: "iterations", min: 16, max: 400, step: 8, digits: 0, default: 128, tier: "coarse", hint: "The paper-authoritative Section 4.3 solve is capped at 16 PCG iterations (reported convergence: 6–10); converged GPU iterations become no-ops. Explicit compatibility solvers use this larger iteration budget." },
+  { kind: "number", key: "pressureIterations", label: "Pressure effort", unit: "iterations", min: 16, max: 400, step: 8, digits: 0, default: 128, tier: "coarse", hint: "The paper-authoritative Section 4.3 solve encodes up to 128 PCG iterations with GPU early-out; the paper reports 6–10 iterations with its production hierarchy. Explicit compatibility solvers use this adjustable effort budget." },
   { kind: "select", key: "leafSolver", label: "Pressure solver", default: "auto", tier: "fine", options: [{ value: "auto", label: "Auto · Section 4.3 for power" }, { value: "mgpcg", label: "Section 4.3 hybrid" }, { value: "chebyshev", label: "Chebyshev compatibility" }], hint: "Auto selects the paper's Section 4.3 hybrid PCG preconditioner when power authority is admitted. Chebyshev is an explicit comparison mode, not a same-frame fallback for rejected paper authority." },
   { kind: "number", key: "adaptivity", label: "Octree adaptivity", unit: "", min: 0, max: 1, step: 0.1, digits: 1, default: 1, tier: "coarse", hint: "Debug quality/performance sweep: 0 forces finest pressure cells everywhere; 1 enables full signed-distance-graded coarsening." },
   { kind: "select", key: "secondaryParticles", label: "Secondary liquid", default: "off", tier: "coarse", update: "runtime", options: [{ value: "on", label: "Spray droplets" }, { value: "off", label: "Off" }], hint: "One-way GPU droplets preserve escaped splash detail without changing liquid mass or pressure." },
@@ -106,7 +106,7 @@ export const octreeMethod: SimulationMethod = {
   backend: "webgpu",
   qualityLabels: { balanced: "bounded workload", high: "higher solver effort", ultra: "maximum solver effort" },
   params,
-  pressureMapping: "Admitted power authority uses the paper's Section 4.3 hybrid PCG with a 16-iteration hard cap and GPU convergence. Explicit compatibility modes use the larger pressure-effort budget; neither solve reads topology or row counts back.",
+  pressureMapping: "Admitted power authority uses the paper's Section 4.3 hybrid PCG with up to 128 encoded iterations and GPU early-out; the paper reports 6–10 iterations with its production hierarchy. Explicit compatibility modes use the adjustable pressure-effort budget; neither solve reads topology or row counts back.",
   presetFor: (quality) => ({
     pressureIterations: quality === "balanced" ? 128 : quality === "high" ? 320 : 400,
     adaptivity: 1,

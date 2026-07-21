@@ -385,9 +385,13 @@ const INVALID_SOURCE:u32=128u;
   control.flags=0u;control.firstError=INVALID;control.rowCount=params.rowCount;control.faceCount=params.faceCount;
   control.incidenceCount=params.incidenceCount;control.reconstructedCount=0u;control.fallbackCount=0u;control.generation=params.generation;
   if(params.rowCount>params.rowCapacity){control.flags=CAPACITY;control.firstError=0u;return;}
-  if(arrayLength(&faceControl)<9u||faceControl[8]!=FACE_VALID||faceControl[3]!=0u
-    ||faceControl[7]!=params.generation||arrayLength(&projectionControl)<7u
-    ||projectionControl[0]!=0xc0000000u||projectionControl[6]!=params.faceCount){control.flags=INVALID_SOURCE;control.firstError=0u;}
+  if(arrayLength(&faceControl)<9u){control.flags=INVALID_SOURCE;control.firstError=1u;return;}
+  if(faceControl[8]!=FACE_VALID){control.flags=INVALID_SOURCE;control.firstError=2u;return;}
+  if(faceControl[3]!=0u){control.flags=INVALID_SOURCE;control.firstError=3u;return;}
+  if(faceControl[7]!=params.generation){control.flags=INVALID_SOURCE;control.firstError=4u;return;}
+  if(arrayLength(&projectionControl)<7u){control.flags=INVALID_SOURCE;control.firstError=5u;return;}
+  if(projectionControl[0]!=0xc0000000u){control.flags=INVALID_SOURCE;control.firstError=6u;return;}
+  if(projectionControl[6]!=params.faceCount){control.flags=INVALID_SOURCE;control.firstError=7u;}
 }
 `;
 

@@ -20,8 +20,8 @@ test("SVO cost diagnostic controls are bounded and retain a production-off defau
   });
   assert.equal(svoCostOverlayCode("traversal-depth"), 1);
   assert.equal(svoCostOverlayCode("brick-tests"), 3);
-  assert.equal(svoCostOverlayCode("mip-steps"), 8);
-  assert.equal(svoCostOverlayCode("exhaustion"), 10);
+  assert.equal(svoCostOverlayCode("mip-steps"), 7);
+  assert.equal(svoCostOverlayCode("exhaustion"), 9);
   assert.deepEqual(normalizeSvoRenderDiagnostics({
     overlay: "total-cost", maximumTraversalDepth: 99, maximumNodeVisits: 0, overlayOpacity: 2,
   }), { overlay: "total-cost", maximumTraversalDepth: 21, maximumNodeVisits: 1, overlayOpacity: 1 });
@@ -50,14 +50,13 @@ test("render panel and viewport expose selectable scene heatmaps with an in-scen
   assert.match(viewportSource, /maximumTraversalDepth: ui\.svoMaximumTraversalDepth/);
 });
 
-test("dry shader measures topology, field, candidate, and shadow work before applying the heatmap", () => {
+test("dry shader measures topology, candidate, mip, and shadow work before applying the heatmap", () => {
   assert.match(svoDrySceneShader, /fn dryConfiguredMapping\(\)->SvoMapping/);
   assert.match(svoDrySceneShader, /mapping\.maxVisits=min\(mapping\.maxVisits,dryDiagnosticMaximumNodeVisits\(\)\)/);
   assert.match(svoDrySceneShader, /fn dryTraverse\([^]*svoTraverseWithDepthLimit/);
   assert.match(svoDrySceneShader, /dryPrimaryNodeVisits\+=leaf\.visits/);
   assert.match(svoDrySceneShader, /dryPrimaryLeafVisits\+=1u/);
   assert.match(svoDrySceneShader, /dryPrimaryEmptyBrickSkips\+=1u/);
-  assert.match(svoDrySceneShader, /dryPrimaryFieldSteps\+=fluid\.fieldSteps/);
   assert.match(svoDrySceneShader, /dryCandidateWorkItems\+=candidate\.workItems/);
   assert.match(svoDrySceneShader, /dryShadowNodeVisits\+=result\.nodeVisits/);
   assert.match(svoDrySceneShader, /dryMipSteps\+=1u/);

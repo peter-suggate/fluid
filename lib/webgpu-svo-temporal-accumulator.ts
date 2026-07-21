@@ -38,7 +38,7 @@ export interface SparseVoxelTemporalFrameState {
   cellSize_m: number;
   paused: boolean;
   /** History is dry-only and must resolve before the legacy raster-water compositor samples it. */
-  composition: "dry-before-legacy-water";
+  composition: "dry-before-raster-water";
 }
 
 interface TemporalHistorySet {
@@ -216,7 +216,7 @@ export class SparseVoxelTemporalAccumulator {
     timestampWrites?: TimestampRange,
   ): SparseVoxelTemporalResolve | false {
     if (!this.pipeline || !this.layout || !this.history || currentTarget.width !== this.width || currentTarget.height !== this.height
-      || gBuffer.width !== this.width || gBuffer.height !== this.height || frame.composition !== "dry-before-legacy-water"
+      || gBuffer.width !== this.width || gBuffer.height !== this.height || frame.composition !== "dry-before-raster-water"
       || !finiteCamera(frame.camera) || !Number.isFinite(frame.cellSize_m) || !(frame.cellSize_m > 0)
       || !Number.isFinite(frame.deltaTime_s) || frame.deltaTime_s < 0) { this.invalidate(); return false; }
     const nextIndex = 1 - this.previousIndex, next = this.history[nextIndex];

@@ -38,6 +38,19 @@ test("row-indexed octree startup skips the unreachable dense Jacobi specializati
   assert.match(octreeSource, /if \(!this\.basePipelineRequired\(entryPoint\)\) return/);
 });
 
+test("octree pipeline cache keys include stable constants and reachability", () => {
+  const cacheKey = octreeSource.slice(octreeSource.indexOf("private pipelineCacheKey()"),
+    octreeSource.indexOf("private applyPipelineCache"));
+  assert.match(cacheKey, /stableEntries\(this\.pipelineConstants\(\)\)/,
+    "specializations with different sparse-layout constants must not alias");
+  assert.match(cacheKey, /reachability: stableEntries\(reachability\)/,
+    "immutable solver reachability must participate in the cache identity");
+  assert.match(cacheKey, /requiredEntryPoints:[\s\S]*octreeProjectionPipelineRequired\(entryPoint, reachability\)/,
+    "the cache identity must retain the exact reachable base-program set");
+  assert.match(cacheKey, /\.sort\(\(\[left\], \[right\]\) => left < right \? -1 : left > right \? 1 : 0\)/,
+    "cache-key object entries must be serialized in a stable key order");
+});
+
 test("octree is a registered GPU method with dam-break defaults", () => {
   assert.ok(simulationMethods.includes(octreeMethod));
   assert.equal(octreeMethod.id, "octree");
@@ -526,8 +539,8 @@ test("octree rebuild and solve stay resident on the GPU", () => {
   ]);
   assert.match(octreeProjectionShader, /var<storage, read_write> owners/);
   assert.match(octreeProjectionShader, /pressureIn: array<f32>/);
-  assert.match(uniformSolverSource, /if \(substep > 0 && this\.octreeProjection\) this\.octreeProjection\.encodeInlineRebuild\(encoder\)/,
-    "CFL subdivision must rebuild from the level set transported by the preceding substep");
+  assert.match(uniformSolverSource, /if \(substep > 0 && this\.octreeProjection\) \{[\s\S]*Octree substep topology timing start[\s\S]*this\.octreeProjection\.encodeInlineRebuild\(encoder\)[\s\S]*Octree substep topology timing end[\s\S]*\}/,
+    "CFL subdivision must rebuild from the level set transported by the preceding substep and include that work in topology timing");
 });
 
 test("octree telemetry samples the live compacted pressure-row count", () => {
@@ -642,10 +655,16 @@ test("octree uses the level-set crossing and prolongates pressure inside coarse 
     "the free-surface pressure boundary must lie at phi=0");
   assert.match(octreeProjectionShader, /fn reconstructGradients/);
   assert.match(octreeProjectionShader, /fn storeReconstructedGradient/);
-  assert.match(octreeProjectionShader, /header\.gradient = vec4f\(gradient, header\.gradient\.w\)/,
-    "gradient reconstruction must preserve the compact liquid-site phi used by power ghost faces");
-  assert.match(octreeProjectionShader, /header\.gradient = vec4f\(ownerPhiGradient\(owner\),ownerPhi\(owner\)\)/,
-    "axis pressure assembly must publish the compact affine phi field consumed by power ghost faces");
+  assert.match(octreeProjectionShader, /header\.gradient = vec4f\(gradient, 0\.0\)/,
+    "post-solve gradient reconstruction must overwrite xyz while keeping the unused component inert");
+  assert.doesNotMatch(octreeProjectionShader, /gradient\.w/,
+    "the dead compact gradient padding component must not retain a hidden consumer");
+  const assembly = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn assembleSystem"),
+    octreeProjectionShader.indexOf("fn iterateLeaves"));
+  assert.equal(assembly.match(/header\.gradient = vec4f\(0\.0\)/g)?.length, 2,
+    "both serial and cooperative assembly must leave gradients for the post-solve reconstruction stage");
+  assert.doesNotMatch(assembly, /ownerPhiGradient\(owner\)/,
+    "assembly must not compile the expensive level-set gradient sampler into either entry point");
   const project = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn projectedComponentCached"), octreeProjectionShader.indexOf("fn extrapolate"));
   assert.match(project, /left\.packedOrigin != right\.packedOrigin[\s\S]*pressureDistanceFromPhi\(left, right, axis, leftPhi, rightPhi\)/,
     "leaf-boundary faces must retain the exact assembled variational gradient");

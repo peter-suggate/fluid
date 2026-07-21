@@ -8,8 +8,8 @@ const physicsTimingFields = new Set<keyof PerformanceSnapshot>([
 ]);
 
 const renderTimingFields = new Set<keyof PerformanceSnapshot>([
-  "gpuRender_ms", "gpuSurfaceExtraction_ms", "gpuDryScene_ms", "gpuSvoTemporal_ms", "gpuInterfaces_ms", "gpuSprayFront_ms", "gpuSprayBack_ms", "gpuSprayRender_ms",
-  "gpuOpticalComposite_ms", "gpuUpscale_ms"
+  "gpuRender_ms", "gpuSurfaceExtraction_ms", "gpuCaustics_ms", "gpuDryScene_ms", "gpuSvoTemporal_ms", "gpuInterfaceFront_ms", "gpuInterfaceBack_ms", "gpuInterfaces_ms", "gpuSprayFront_ms", "gpuSprayBack_ms", "gpuSprayRender_ms",
+  "gpuOpticalComposite_ms", "gpuOverlays_ms", "gpuUpscale_ms"
 ]);
 
 /** Average a frame window without treating missing GPU timestamps as zero-valued samples. */

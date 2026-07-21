@@ -266,10 +266,10 @@ export interface OctreeSvoEnvironmentLightingPublicationData {
 
 /** Build the selected environment's single image-free lighting record. */
 export function buildOctreeSvoEnvironmentLightingPublication(
-  scene: Pick<SceneDescription, "environment">,
+  scene: Pick<SceneDescription, "environment" | "lighting">,
   revision = OCTREE_SVO_ENVIRONMENT_LIGHTING_REVISION,
 ): OctreeSvoEnvironmentLightingPublicationData {
-  const lighting = buildSvoEnvironmentLighting(scene.environment ?? "default", revision);
+  const lighting = buildSvoEnvironmentLighting(scene.environment ?? "default", revision, scene.lighting?.environment);
   return {
     record: lighting.record,
     packedRecords: lighting.packedRecord,

@@ -1,7 +1,7 @@
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { createPaperScenario } from "../lib/paper-scenarios";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M } from "../lib/garden-scene";
-import { createBrickQuadDamBreakScene, createOceanSeicheScene } from "../lib/scenes";
+import { createBrickQuadDamBreakScene, createOceanSeicheScene, createTinyHydrostaticScene } from "../lib/scenes";
 
 export const smokeScenarioIds = [
   "dam-break-ui",
@@ -13,6 +13,7 @@ export const smokeScenarioIds = [
   "garden-pond",
   "garden-dam-break",
   "brick-quad-dam-break",
+  "hydrostatic-power-two-level",
   "ocean-seiche"
 ] as const;
 
@@ -92,6 +93,18 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
       id,
       description: "four-brick tank whose dam break carries water across every fluid brick boundary",
       scene, oracleSteps: 2, target_s: 1.5
+    };
+  }
+
+  if (id === "hydrostatic-power-two-level") {
+    const scene = createTinyHydrostaticScene();
+    scene.environment = "default";
+    return {
+      id,
+      description: "16-cubed settled tank with room for unit and two-cell power-diagram leaves",
+      scene,
+      oracleSteps: 1,
+      target_s: scene.numerics.maxDt_s,
     };
   }
 

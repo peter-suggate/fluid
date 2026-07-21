@@ -19,6 +19,35 @@ export interface ScenePreset {
 export const BRICK_QUAD_DAM_SEED_M = { x: -0.2, y: 0.2, z: -0.2 };
 
 /**
+ * Smallest authored hydrostatic oracle that still leaves room for adaptive
+ * pressure cells away from the closed walls and planar free surface. The
+ * 0.05 m lattice resolves the 0.8 m cube as exactly 16 cells per axis.
+ */
+export function createTinyHydrostaticScene(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = "tiny-hydrostatic-two-level";
+  scene.duration_s = 0.1;
+  scene.rigidBodies = [];
+  scene.container = {
+    ...scene.container,
+    width_m: 0.8,
+    height_m: 0.8,
+    depth_m: 0.8,
+    fillFraction: 0.75,
+    top: "open",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "tank-fill";
+  scene.fluid.surfaceTension_N_m = 0;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  return scene;
+}
+
+/**
  * A tank sized so the finest solver grid is exactly 16x8x16 cells: a 2x2 x/z
  * arrangement of 8-cubed fluid bricks at one brick of height. Water starts as
  * a full-height column filling exactly one brick quadrant and dam-breaks
@@ -118,6 +147,13 @@ export function createGardenSvoLightingScene(): SceneDescription {
   scene.systems = { ...scene.systems, fluid: false };
   scene.container.fillFraction = 0;
   scene.voxelDomain = { finestCellSize_m: 0.025, brickSize_cells: 8 };
+  // A low dusk grade lets the warm lamppost fixture carry the composition.
+  // The sky remains bright enough to preserve foliage detail and readable
+  // shadow fill instead of collapsing unlit surfaces to black.
+  scene.lighting = {
+    directional: { intensity: 0.09 },
+    environment: { diffuseScale: 0.12, specularScale: 0.25 },
+  };
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
@@ -166,7 +202,7 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     id: "garden-svo-lighting",
     name: "Garden · SVO lighting study",
     group: "Garden",
-    description: "A fluid-free garden for validating SVO mip-cone lighting, soft shadows, and ambient occlusion without initializing simulation authority.",
+    description: "A fluid-free dusk garden lit by a warm lamppost for validating SVO mip-cone lighting, soft shadows, and ambient occlusion without initializing simulation authority.",
     create: createGardenSvoLightingScene,
     camera: gardenCamera,
     background: "garden"
@@ -234,6 +270,15 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     background: "default",
     create: createBrickQuadDamBreakScene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.2, z: 0 } }
+  },
+  {
+    id: "hydrostatic-power-two-level",
+    name: "Octree · tiny hydrostatic",
+    group: "Comparisons",
+    description: "A 16³ settled tank for the first power-diagram oracle. With Maximum leaf 2³ and interface band 3, its wet pressure grid contains both unit and two-cell leaves.",
+    background: "default",
+    create: createTinyHydrostaticScene,
+    camera: { distance_m: 1.85, target_m: { x: 0, y: 0.35, z: 0 } }
   },
   {
     id: "ocean-seiche",

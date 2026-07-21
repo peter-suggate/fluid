@@ -40,7 +40,7 @@ test("Section 4.3 hybrid is opt-in, separately sized, and requires an explicit S
 test("Section 4.3 hybrid has a three-layer boundary/transition band and paired k=8 L2 smoothing", () => {
   assert.equal(OCTREE_SECTION43_BOUNDARY_BAND_LAYERS, 3);
   assert.equal(OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS, 8);
-  assert.equal(OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS, 16);
+  assert.equal(OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS, 128);
   assert.match(octreeMGPCGShader, /boundaryGap=h\.diagonal-offDiagonalSum/);
   assert.match(octreeMGPCGShader, /headers\[e\.row\]\.size!=h\.size/);
   assert.match(octreeMGPCGShader, /dilateHybridBandAtoB/);

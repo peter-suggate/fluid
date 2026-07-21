@@ -68,16 +68,16 @@ test("binding 6 consumes the 96-byte producer table while the legacy debug ABI r
   assert.match(dryRendererSource, /\{ binding: 6, resource: source\.pbrMaterials!\.binding \}/);
   assert.doesNotMatch(dryRendererSource, /binding: 6, resource: source\.materials/);
   assert.match(dryRendererSource, /@group\(0\) @binding\(10\)/);
-  assert.match(dryRendererSource, /@group\(0\) @binding\(11\) var<storage,read> svoStructuralGeometry/);
-  assert.match(dryRendererSource, /@group\(0\) @binding\(12\) var<storage,read> svoStructuralLeafStates/);
+  assert.doesNotMatch(dryRendererSource, /svoStructuralGeometry|svoStructuralLeafStates/,
+    "the dry pass must not retain structural fluid-march payload bindings");
   assert.match(readFileSync(new URL("../lib/webgpu-voxel-debug.ts", import.meta.url), "utf8"), /materials: GPUBufferBinding/,
     "inspection keeps its compact legacy material binding");
 });
 
 test("published count, revision, direct identity, flags, and material functions are enforced in WGSL", () => {
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 368, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32, fluidDomainWordOffset: 36,
-    primitiveCandidateWordOffset: 40, finePhiWordOffset: 44, nodeMipWordOffset: 84, nodeMipAtlasWordOffset: 88,
+    sizeBytes: 192, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
+    primitiveCandidateWordOffset: 36, nodeMipWordOffset: 40, nodeMipAtlasWordOffset: 44,
   });
   assert.match(dryRendererSource, /const visibilityFlags = \(ambientOcclusionEnabled \? SVO_DRY_VISIBILITY_FLAGS\.exactContact \| SVO_DRY_VISIBILITY_FLAGS\.ambientOcclusion : 0\)[^]*SVO_DRY_VISIBILITY_FLAGS\.exactShadow[^]*SVO_DRY_VISIBILITY_FLAGS\.coneLightingRequested/,
     "the visibility lane keeps ambient occlusion, shadows, and requested cone lighting independently switchable");

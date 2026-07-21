@@ -43,7 +43,7 @@ function mockDevice(textures: MockTexture[], pipelines: GPURenderPipelineDescrip
 
 const frame: SparseVoxelTemporalFrameState = {
   camera: { position_m: [0, 1, 3], forward: [0, 0, -1], right: [1, 0, 0], up: [0, 1, 0] },
-  deltaTime_s: 1 / 60, cellSize_m: 0.025, paused: false, composition: "dry-before-legacy-water",
+  deltaTime_s: 1 / 60, cellSize_m: 0.025, paused: false, composition: "dry-before-raster-water",
 };
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
@@ -132,7 +132,7 @@ test("production integration invalidates history outside smooth SVO and resolves
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const water = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
   assert.match(renderer, /if \(!useSvoDryScene\) this\.svoDryScenePipeline\?\.invalidateTemporalHistory\(\)/);
-  assert.match(renderer, /composition: "dry-before-legacy-water"/);
+  assert.match(renderer, /composition: "dry-before-raster-water"/);
   assert.match(renderer, /if \(!replacementResult\) this\.svoDryScenePipeline\?\.invalidateTemporalHistory\(\)/);
   assert.match(renderer, /beginningOfPassWriteIndex: 16, endOfPassWriteIndex: 17/);
   assert.match(readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8"), /dryPublicationGeneration\(\)->u32\{return select\(0u,publicationState\[3\]/,
@@ -143,7 +143,7 @@ test("production integration invalidates history outside smooth SVO and resolves
   assert.match(water, /compositeBindGroupFor\(sparseSceneResult\.sampledTargetView\)/);
   const replacement = water.indexOf("drySceneReplacement?.(encoder, this.sceneTexture");
   const interfaces = water.indexOf("interfacePass(\"Water + spray front interfaces\"", replacement);
-  assert.ok(replacement >= 0 && interfaces > replacement, "dry temporal history resolves before legacy water and spray composition");
+  assert.ok(replacement >= 0 && interfaces > replacement, "dry temporal history resolves before raster water and spray composition");
 });
 
 test("real GPU resolve preserves a seeded nonzero dry HDR target", {

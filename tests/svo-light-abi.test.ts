@@ -70,6 +70,18 @@ test("packed identity lane carries type, stable ID, owner, and revision", () => 
   assert.deepEqual([...floats.slice(12, 16)], [1, 0, 0, 0.5]);
 });
 
+test("garden point fixture packs one-sample identity and conservative emitter endpoint", () => {
+  const scene = getScenePreset("garden-svo-lighting").create();
+  const point = buildSvoSceneLights(scene).records.find(({ kind }) => kind === "point");
+  assert.ok(point);
+  assert.equal(point.radius_m, 0.18);
+  const packed = packSvoLightRecords([point]);
+  const words = new Uint32Array(packed.buffer);
+  const floats = new Float32Array(packed.buffer);
+  assert.equal(words[24], SVO_LIGHT_KINDS.point);
+  assert.ok(Math.abs(floats[20] - 0.18) < 1e-6);
+});
+
 test("invalid shape/capacity/identity inputs fail before upload", () => {
   const base = buildSvoSceneLights(getScenePreset("water-box-dam-break").create()).records[0];
   assert.throws(() => canonicalSvoLightRecord({ ...base, lightId: 0 }), /reserved/);

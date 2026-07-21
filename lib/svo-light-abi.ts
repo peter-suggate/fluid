@@ -42,6 +42,7 @@ export interface SvoLightRecord {
   halfWidth_m: number;
   axisV: Vec3Tuple;
   halfHeight_m: number;
+  /** Area radius, or the finite emissive endpoint radius for a point fixture. */
   radius_m: number;
   sourceKey: string;
 }
@@ -68,7 +69,7 @@ export function canonicalSvoLightRecord(input: SvoLightRecord): SvoLightRecord {
   const range_m = input.kind === "directional" ? 0 : input.range_m;
   if (!Number.isFinite(range_m) || range_m < 0) throw new RangeError("SVO light range must be finite and non-negative");
   if (!Number.isFinite(input.intensity) || input.intensity < 0) throw new RangeError("SVO light intensity must be finite and non-negative");
-  const radius_m = input.kind === "sphereArea" ? input.radius_m : 0;
+  const radius_m = input.kind === "sphereArea" || input.kind === "point" ? input.radius_m : 0;
   const halfWidth_m = input.kind === "rectangleArea" ? input.halfWidth_m : 0;
   const halfHeight_m = input.kind === "rectangleArea" ? input.halfHeight_m : 0;
   if (![radius_m, halfWidth_m, halfHeight_m].every((value) => Number.isFinite(value) && value >= 0)) {
@@ -93,18 +94,36 @@ export function canonicalSvoLightRecord(input: SvoLightRecord): SvoLightRecord {
   });
 }
 
-function proxyAreaLight(proxy: EnvironmentProxyPrimitive, ownerBase: number, revision: number): SvoLightRecord | undefined {
+function proxyPhysicalLight(proxy: EnvironmentProxyPrimitive, ownerBase: number, revision: number): SvoLightRecord | undefined {
   if (!(proxy.material.emission > 0) || !proxy.tags.includes("light")) return undefined;
   const common = {
     lightId: proxy.ownerIndex + 2,
     ownerId: ownerBase + proxy.ownerIndex,
     revision,
     position_m: [proxy.center_m.x, proxy.center_m.y, proxy.center_m.z] as Vec3Tuple,
-    range_m: Math.max(1, 6 * Math.sqrt(proxy.material.emission)),
+    // Point fixtures use a deliberately finite influence radius. This avoids
+    // spending shadow work on negligible contributions outside the authored
+    // garden composition and keeps their inverse-square energy bounded.
+    range_m: proxy.tags.includes("point-light")
+      ? Math.min(4.5, Math.max(1, 3 * Math.sqrt(proxy.material.emission)))
+      : Math.max(1, 6 * Math.sqrt(proxy.material.emission)),
     colorLinear: proxy.material.colorLinear,
     intensity: proxy.material.emission,
     sourceKey: proxy.key,
   };
+  if (proxy.tags.includes("point-light")) return canonicalSvoLightRecord({
+    ...common,
+    kind: "point",
+    direction: [0, -1, 0], axisU: [1, 0, 0], axisV: [0, 0, 1],
+    halfWidth_m: 0, halfHeight_m: 0,
+    // The shader still samples one point at the center, but stops its shadow
+    // ray at the visible emitter surface so the lantern cannot shadow itself.
+    radius_m: proxy.kind === "ellipsoid"
+      ? Math.max(proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z)
+      : proxy.kind === "cylinder"
+        ? Math.max(proxy.radius_m, proxy.halfHeight_m)
+        : Math.max(proxy.halfSize_m.x, proxy.halfSize_m.y, proxy.halfSize_m.z),
+  });
   if (proxy.kind !== "box") {
     const radius_m = proxy.kind === "ellipsoid"
       ? Math.cbrt(proxy.radius_m.x * proxy.radius_m.y * proxy.radius_m.z)
@@ -174,14 +193,14 @@ export function buildSvoSceneLights(scene: SceneDescription, options: BuildSvoSc
   const directional = canonicalSvoLightRecord({
     lightId: 1, ownerId: 0xffff_ffff, revision, kind: "directional",
     position_m: [0, 0, 0], range_m: 0,
-    direction: options.directionalDirection ?? [-0.45, 0.86, 0.28],
-    colorLinear: options.directionalColor ?? [1.04, 1, 0.91],
-    intensity: options.directionalIntensity ?? 1,
+    direction: options.directionalDirection ?? scene.lighting?.directional?.direction ?? [-0.45, 0.86, 0.28],
+    colorLinear: options.directionalColor ?? scene.lighting?.directional?.colorLinear ?? [1.04, 1, 0.91],
+    intensity: options.directionalIntensity ?? scene.lighting?.directional?.intensity ?? 1,
     axisU: [1, 0, 0], halfWidth_m: 0, axisV: [0, 0, 1], halfHeight_m: 0, radius_m: 0,
     sourceKey: "authored/directional",
   });
   const catalog = buildEnvironmentProxyCatalog(scene, options.environmentId ?? scene.environment ?? "default");
-  const fixtures = environmentProxyPrimitives(catalog).map((proxy) => proxyAreaLight(proxy, scene.rigidBodies.length, revision))
+  const fixtures = environmentProxyPrimitives(catalog).map((proxy) => proxyPhysicalLight(proxy, scene.rigidBodies.length, revision))
     .filter((light): light is SvoLightRecord => Boolean(light));
   const selected = fixtures.slice().sort((a, b) => importance(b) - importance(a) || a.lightId - b.lightId).slice(0, maximumRecords - 1);
   const selectedIds = new Set(selected.map((light) => light.lightId));
