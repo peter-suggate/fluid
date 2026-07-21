@@ -92,6 +92,8 @@ export interface RasterWaterEncodeResult {
   surfaceUpdated: boolean;
   causticsUpdated: boolean;
   sprayRendered: boolean;
+  /** False only when a fluid-less scene skipped the per-frame interface passes, so their timestamps are absent. */
+  interfacesEncoded: boolean;
 }
 
 export interface WaterSurfacePresentationDiagnostics {
@@ -1217,6 +1219,8 @@ export class RasterWaterPipeline {
   private extractedRevision = -1;
   private lastExtractionAt_ms = -Infinity;
   private causticsValid = false;
+  private sceneHasFluid = true;
+  private dryInterfaceClearsEncoded = false;
   private secondaryParticles?: SecondaryParticleRenderPipeline;
   private sparseSurface?: SparseSurfaceBandGPUSource;
   private adaptiveOctree?: UnifiedOctreeConsumerSource;
@@ -1555,7 +1559,19 @@ export class RasterWaterPipeline {
     this.frontDepth = depth("Water front depth"); this.backDepth = depth("Water back depth");
     this.causticTexture?.destroy(); this.causticTexture = this.device.createTexture({ label: "Refracted floor caustics", size: [384,384], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     this.causticsValid = false;
+    this.dryInterfaceClearsEncoded = false;
     this.targetKey = key; this.rebuildBindGroups();
+  }
+
+  /**
+   * Scene-level fact from the runtime plan. A fluid-less scene has no water
+   * geometry to draw, so the per-frame front/back interface passes reduce to
+   * their clears; those are encoded once and the passes skipped thereafter.
+   */
+  setSceneHasFluid(hasFluid: boolean) {
+    if (this.sceneHasFluid === hasFluid) return;
+    this.sceneHasFluid = hasFluid;
+    this.dryInterfaceClearsEncoded = false;
   }
 
   private rebuildBindGroups() {
@@ -1712,10 +1728,21 @@ export class RasterWaterPipeline {
     // Encode both draws in one pass per side so spray does not force two extra
     // full-resolution attachment load/store cycles.
     const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",timestampWrites?:TimestampRange)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.secondaryParticles?.encodeOpticalInterface(pass,side);pass.end();};
-    interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.frontInterfaces);interfacePass("Water + spray back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.backInterfaces);
+    const interfacesEncoded = this.sceneHasFluid || !this.dryInterfaceClearsEncoded;
+    if (this.sceneHasFluid) {
+      interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.frontInterfaces);interfacePass("Water + spray back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.backInterfaces);
+    } else if (!this.dryInterfaceClearsEncoded) {
+      // A fluid-less scene draws no interface geometry, so the passes reduce to
+      // their clears. Encoding those once leaves the composite's "no interface"
+      // inputs bit-identical to the per-frame cleared state.
+      const clearPass=(label:string,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,timestampWrites?:TimestampRange)=>{encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})}).end();};
+      clearPass("Dry-scene front interface clear",this.frontPosition,this.frontNormal,this.frontDepth,timestamps?.frontInterfaces);
+      clearPass("Dry-scene back interface clear",this.backPosition,this.backNormal,this.backDepth,timestamps?.backInterfaces);
+      this.dryInterfaceClearsEncoded = true;
+    }
     const compositeBindGroup = sparseSceneResult ? this.compositeBindGroupFor(sparseSceneResult.sampledTargetView) : this.compositeBindGroup;
     if (!compositeBindGroup) return false;
-    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.adaptiveOctree&&!this.globalFineLevelSet?this.adaptiveCompositePipeline:this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface, causticsUpdated: updateCaustics, sprayRendered: false };
+    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.adaptiveOctree&&!this.globalFineLevelSet?this.adaptiveCompositePipeline:this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface, causticsUpdated: updateCaustics, sprayRendered: false, interfacesEncoded };
   }
 
   destroy() {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { planSvoWideFanout } from "../lib/svo-wide-fanout";
-import { packSvoWideFanout, createWebgpuSvoWideFanoutTraversalWGSL } from "../lib/webgpu-svo-wide-fanout";
+import { packSvoWideFanout, createWebgpuSvoWideFanoutTraversalWGSL, validateSvoWidePackedPlan } from "../lib/webgpu-svo-wide-fanout";
 import { webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
 
 type Variant = "canonical" | "wide";
@@ -52,11 +52,13 @@ function denseFixture() {
       }
     }
   }
-  const wide = packSvoWideFanout(planSvoWideFanout({ sourceGeneration: 1, generation: 1, maximumDepth: depth, terminals }));
-  return { nodes, leaves, wide, nodeCount, leafCount };
+  const widePlan = planSvoWideFanout({ sourceGeneration: 1, generation: 1, maximumDepth: depth, terminals });
+  const wide = packSvoWideFanout(widePlan);
+  return { nodes, leaves, widePlan, wide, nodeCount, leafCount };
 }
 
-function shader(variant: Variant, nodeCount: number, leafCount: number, pageCount: number, descriptorCount: number): string {
+function shader(variant: Variant, nodeCount: number, leafCount: number, publication: { generation: number; pageCount: number; descriptorCount: number }): string {
+  const { generation, pageCount, descriptorCount } = publication;
   const slopeScale = Math.min(1, 4 / Math.abs(originX));
   const rayExpression = rayProfile === "parallel"
     ? `SvoRay(vec3f(${originX.toFixed(1)},4.0,2.0),0.0,vec3f(1.0,0.0,0.0),${(Math.abs(originX) + 256).toFixed(1)})`
@@ -68,10 +70,10 @@ function shader(variant: Variant, nodeCount: number, leafCount: number, pageCoun
     ? "@group(0) @binding(5) var<storage,read_write> output:array<vec4u>;"
     : "@group(0) @binding(3) var<storage,read_write> output:array<vec4u>;";
   const wideBody = productionFallback ? `
-  var wideCursor:SvoWideTraversalCursor;var canonicalCursor:SvoTraversalContinuation;let publication=SvoWidePublication(1u,1u,${pageCount}u,${descriptorCount}u);
+  var wideCursor:SvoWideTraversalCursor;var canonicalCursor:SvoTraversalContinuation;let publication=SvoWidePublication(${generation}u,${generation}u,${pageCount}u,${descriptorCount}u);
   var useWide=svoWideCursorInitialize(&wideCursor,ray,mapping,publication,1u);
   for(var i=0u;i<32u;i+=1u){var hit:SvoTraversalHit;if(useWide){hit=svoWideCursorNext(&wideCursor,SvoRay(ray.origin,minimum,ray.direction,ray.tMax),mapping,${depth}u,publication,1u);if(hit.status==SVO_STATUS_INVALID_TOPOLOGY){useWide=false;svoTraversalContinuationBegin(SvoRay(ray.origin,minimum,ray.direction,ray.tMax),mapping,&canonicalCursor);hit=svoTraversalContinuationNext(SvoRay(ray.origin,minimum,ray.direction,ray.tMax),mapping,${depth}u,&canonicalCursor);}}else{if(i==0u){svoTraversalContinuationBegin(ray,mapping,&canonicalCursor);}hit=svoTraversalContinuationNext(SvoRay(ray.origin,minimum,ray.direction,ray.tMax),mapping,${depth}u,&canonicalCursor);}visits+=hit.visits;status=hit.status;if(hit.status!=SVO_STATUS_HIT){break;}hits+=1u;hash=((hash*16777619u)^(hit.nodeIndex*31u+hit.leafIndex))^(hit.voxelOffset+hit.level*65537u)^bitcast<u32>(hit.tEnter)^bitcast<u32>(hit.tExit);minimum=hit.tExit+1e-5;}` : `
-  var wideCursor:SvoWideTraversalCursor;let publication=SvoWidePublication(1u,1u,${pageCount}u,${descriptorCount}u);let ready=svoWideCursorInitialize(&wideCursor,ray,mapping,publication,1u);
+  var wideCursor:SvoWideTraversalCursor;let publication=SvoWidePublication(${generation}u,${generation}u,${pageCount}u,${descriptorCount}u);let ready=svoWideCursorInitialize(&wideCursor,ray,mapping,publication,1u);
   for(var i=0u;i<32u&&ready;i+=1u){let hit=svoWideCursorNext(&wideCursor,SvoRay(ray.origin,minimum,ray.direction,ray.tMax),mapping,${depth}u,publication,1u);visits+=hit.visits;status=hit.status;if(hit.status!=SVO_STATUS_HIT){break;}hits+=1u;hash=((hash*16777619u)^(hit.nodeIndex*31u+hit.leafIndex))^(hit.voxelOffset+hit.level*65537u)^bitcast<u32>(hit.tEnter)^bitcast<u32>(hit.tExit);minimum=hit.tExit+1e-5;}`;
   const body = variant === "wide" ? wideBody : `
   var cursor:SvoTraversalContinuation;svoTraversalContinuationBegin(ray,mapping,&cursor);
@@ -101,6 +103,16 @@ const validationErrors: string[] = [];
 device.addEventListener("uncapturederror", (event) => validationErrors.push((event as GPUUncapturedErrorEvent).error.message));
 const fixture = denseFixture(), control = buffer(device, "control", new Uint32Array(32));
 if (malformedWidePage) fixture.wide.pages[6] += 1;
+// The publication fence: full semantic validation (including canonical node and
+// leaf cross-checks) runs once here. A rejected publication is never sampled;
+// the wide shader sees no capability and the production path stays canonical.
+const publishValidation = validateSvoWidePackedPlan(fixture.wide, fixture.widePlan,
+  { nodes: fixture.nodes, leaves: fixture.leaves, nodeCount: fixture.nodeCount, leafCount: fixture.leafCount });
+assert.equal(publishValidation.status === "ready", !malformedWidePage,
+  `publish-time validation must ${malformedWidePage ? "reject a malformed" : "accept a well-formed"} publication`);
+const widePublication = publishValidation.status === "ready"
+  ? { generation: 1, pageCount: fixture.wide.control[0], descriptorCount: fixture.wide.control[1] }
+  : { generation: 0, pageCount: 0, descriptorCount: 0 };
 const nodes = buffer(device, "nodes", fixture.nodes), leaves = buffer(device, "leaves", fixture.leaves);
 const pages = buffer(device, "wide pages", fixture.wide.pages), descriptors = buffer(device, "wide descriptors", fixture.wide.descriptors);
 const outputBytes = invocationCount * 16;
@@ -109,10 +121,13 @@ const targets = new Map<Variant, { pipeline: GPUComputePipeline; bindGroup: GPUB
 for (const variant of ["canonical", "wide"] as const) {
   const output = device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }); outputs.set(variant, output);
   readbacks.set(variant, device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }));
-  const shaderModule = device.createShaderModule({ code: shader(variant, fixture.nodeCount, fixture.leafCount, fixture.wide.control[0], fixture.wide.control[1]) });
+  const shaderModule = device.createShaderModule({ code: shader(variant, fixture.nodeCount, fixture.leafCount, widePublication) });
   const info = await shaderModule.getCompilationInfo(); assert.deepEqual(info.messages.filter(x => x.type === "error").map(x => x.message), []);
   const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint: "benchmarkMain" } });
-  const entries: GPUBindGroupEntry[] = [{ binding: 0, resource: { buffer: control } }, { binding: 1, resource: { buffer: nodes } }, { binding: 2, resource: { buffer: leaves } }];
+  const entries: GPUBindGroupEntry[] = [{ binding: 0, resource: { buffer: control } }, { binding: 2, resource: { buffer: leaves } }];
+  // The slimmed wide traversal no longer touches svoNodes; without the
+  // canonical fallback composed in, the auto layout drops that binding.
+  if (variant === "canonical" || productionFallback) entries.push({ binding: 1, resource: { buffer: nodes } });
   if (variant === "wide") entries.push({ binding: 3, resource: { buffer: pages } }, { binding: 4, resource: { buffer: descriptors } }, { binding: 5, resource: { buffer: output } });
   else entries.push({ binding: 3, resource: { buffer: output } });
   targets.set(variant, { pipeline, bindGroup: device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }) });
@@ -154,11 +169,16 @@ for (let cycle = 0; cycle < cycles; cycle += 1) for (const variant of (cycle % 2
 }
 const canonicalMs = median(samples.canonical), wideMs = median(samples.wide);
 console.log(JSON.stringify({ phase: "svo-wide-fanout-gpu-benchmark", adapter: adapter.info, invocationCount, cycles, dispatchesPerSample, originX, productionFallback, rayProfile, malformedWidePage,
+  publishValidation: publishValidation.status,
   outputParity: { exact: invocationCount, mismatches: 0 },
-  lookups: { canonicalNodeRecords: canonicalVisits, widePageRecords: wideVisits, wideTerminalNodeRecords: terminalHits,
-    wideEffectiveStructuralRecords: wideVisits + terminalHits,
+  // Per-terminal canonical node cross-validation now happens once at publish,
+  // so terminals cost zero structural node records per ray. Leaf records are
+  // payload loads (voxel offset) that both variants perform per hit.
+  lookups: { canonicalNodeRecords: canonicalVisits, widePageRecords: wideVisits, wideTerminalNodeRecords: 0,
+    terminalLeafPayloadRecords: terminalHits,
+    wideEffectiveStructuralRecords: wideVisits,
     pageOnlyReductionPercent: (1 - wideVisits / canonicalVisits) * 100,
-    effectiveStructuralReductionPercent: (1 - (wideVisits + terminalHits) / canonicalVisits) * 100 },
+    effectiveStructuralReductionPercent: (1 - wideVisits / canonicalVisits) * 100 },
   timing: { canonicalMedian_ms: canonicalMs, wideMedian_ms: wideMs, speedup: canonicalMs / wideMs, improvementPercent: (1 - wideMs / canonicalMs) * 100 } }, null, 2));
 assert.deepEqual(validationErrors, []);
 timing.unmap(); for (const resource of [control, nodes, leaves, pages, descriptors, ...outputs.values(), ...readbacks.values(), resolve, timing]) resource.destroy(); querySet.destroy(); device.destroy();

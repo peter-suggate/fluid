@@ -163,7 +163,8 @@ test("WGSL helper consumes packed topology directly with bounded traversal", () 
   assert.match(webgpuSvoTraversalWGSL, /svoTraversalContinuationAdvance\(continuation\);\n      return hit/);
   assert.match(webgpuSvoTraversalWGSL, /currentBounds = svoChildBounds\(parentBounds, nearest\.octant\)/);
   assert.match(webgpuSvoTraversalWGSL, /currentBoundsValid = false/);
-  assert.match(webgpuSvoTraversalWGSL, /stackSize \+ candidateCount - 1u/);
+  assert.match(webgpuSvoTraversalWGSL, /stackSize == SVO_STACK_CAPACITY/);
+  assert.doesNotMatch(webgpuSvoTraversalWGSL, /array<SvoCandidate, 8>/);
   assert.doesNotMatch(webgpuSvoTraversalWGSL, /svoRayAabb\(ray, svoNodeBounds\(child, mapping\)\)/);
   assert.match(webgpuSvoTraversalWGSL, /countOneBits\(mask/);
   assert.match(webgpuSvoTraversalWGSL, /fn svoBrickVoxelIndex/);

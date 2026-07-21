@@ -99,7 +99,7 @@ export function planWebgpuSvoWideFanoutAllocation(capacity: WebGPUSvoWideFanoutC
     allocatedBytes: controlBytes + pageBytes + descriptorBytes + microMipBytes };
 }
 
-export type WebGPUSvoWideFanoutEncodeStatus = "encoded" | "unchanged" | "capacity-exhausted" | "destroyed";
+export type WebGPUSvoWideFanoutEncodeStatus = "encoded" | "unchanged" | "capacity-exhausted" | "invalid" | "destroyed";
 
 function unorm8(value: number): number {
   return Math.max(0, Math.min(255, Math.round(value * 255)));
@@ -177,7 +177,11 @@ export class WebGPUSvoWideFanout {
     this.microMipBuffer = device.createBuffer({ label: "SVO wide-fanout opacity micro-mips", size: this.allocation.microMipBytes, usage: storage });
   }
 
-  encode(_encoder: GPUCommandEncoder, plan: SvoWideFanoutPlan): WebGPUSvoWideFanoutEncodeStatus {
+  encode(
+    _encoder: GPUCommandEncoder,
+    plan: SvoWideFanoutPlan,
+    canonical?: SvoWideCanonicalTopologyView,
+  ): WebGPUSvoWideFanoutEncodeStatus {
     if (this.destroyed) return "destroyed";
     if (this.published) {
       if (this.published.generation !== plan.generation || this.published.sourceGeneration !== plan.sourceGeneration) {
@@ -194,6 +198,10 @@ export class WebGPUSvoWideFanout {
       return "capacity-exhausted";
     }
     const packed = packSvoWideFanout(plan);
+    // The publication is immutable, so every semantic invariant the traversal
+    // relies on is proven exactly once here. Failure publishes nothing: the
+    // renderer sees no capability and stays on canonical traversal.
+    if (validateSvoWidePackedPlan(packed, plan, canonical).status !== "ready") return "invalid";
     if (packed.pages.byteLength > 0) this.device.queue.writeBuffer(this.pageBuffer, 0, packed.pages);
     if (packed.descriptors.byteLength > 0) this.device.queue.writeBuffer(this.descriptorBuffer, 0, packed.descriptors);
     if (packed.microMips.byteLength > 0) this.device.queue.writeBuffer(this.microMipBuffer, 0, packed.microMips);
@@ -345,6 +353,131 @@ export function validateSvoWideFanoutPublication(view: SvoWidePackedPublicationV
   return { status: "ready", generation, sourceGeneration, pageCount, descriptorCount };
 }
 
+/** Canonical packed-topology arrays used for publish-time terminal cross-checks. */
+export interface SvoWideCanonicalTopologyView {
+  /** 8 words per node: mortonLow, mortonHigh, level, childMask, firstChild, childCount, leafIndex, reserved. */
+  nodes: Uint32Array;
+  /** 4 words per leaf: nodeIndex, voxelOffset, localIndex, reserved. */
+  leaves: Uint32Array;
+  nodeCount?: number;
+  leafCount?: number;
+}
+
+const CANONICAL_NODE_WORDS = 8;
+const CANONICAL_LEAF_WORDS = 4;
+
+function mortonWordsAtLevel(coordinate: readonly [number, number, number], level: number): readonly [number, number] {
+  let morton = 0n;
+  for (let bit = 0; bit < level; bit += 1) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      morton |= BigInt((coordinate[axis] >> bit) & 1) << BigInt(3 * bit + axis);
+    }
+  }
+  return splitMorton(morton);
+}
+
+/**
+ * Prove at publish time everything the traversal loop previously re-proved per
+ * ray: the packed arrays are a faithful encoding of the plan, page/descriptor
+ * hierarchy links agree with the plan geometry, and (when a canonical view is
+ * supplied) every terminal descriptor agrees with the canonical node/leaf
+ * records it references. A publication that fails here must never be sampled;
+ * the GPU hot loop keeps only memory-safety clamps.
+ */
+export function validateSvoWidePackedPlan(
+  packed: PackedSvoWideFanout,
+  plan: SvoWideFanoutPlan,
+  canonical?: SvoWideCanonicalTopologyView,
+): SvoWidePublicationValidation {
+  const invalid = (reason: string): SvoWidePublicationValidation => ({ status: "invalid", reason });
+  const base = validateSvoWideFanoutPublication({ ...packed, expectedSourceGeneration: plan.sourceGeneration });
+  if (base.status !== "ready") return base;
+  if (base.generation !== plan.generation || base.pageCount !== plan.pages.length
+      || base.descriptorCount !== plan.descriptorCount
+      || packed.control[SVO_WIDE_GPU_LAYOUT.controlWords.maximumDepth] !== plan.maximumDepth) {
+    return invalid("Packed wide control record does not match its plan");
+  }
+  if (plan.pages.length > 0 && (plan.pages[0].level !== 0 || plan.pages[0].morton !== 0n)) {
+    return invalid("Wide directory root must anchor the canonical origin");
+  }
+  let nodeCount = 0;
+  let leafCount = 0;
+  if (canonical) {
+    nodeCount = canonical.nodeCount ?? Math.floor(canonical.nodes.length / CANONICAL_NODE_WORDS);
+    leafCount = canonical.leafCount ?? Math.floor(canonical.leaves.length / CANONICAL_LEAF_WORDS);
+    if (!Number.isInteger(nodeCount) || nodeCount < 0 || nodeCount * CANONICAL_NODE_WORDS > canonical.nodes.length
+        || !Number.isInteger(leafCount) || leafCount < 0 || leafCount * CANONICAL_LEAF_WORDS > canonical.leaves.length) {
+      return invalid("Canonical cross-check view bounds are inconsistent");
+    }
+  }
+  let descriptorIndex = 0;
+  for (const page of plan.pages) {
+    const pageBase = page.index * SVO_WIDE_GPU_LAYOUT.pageWords;
+    const [mortonLow, mortonHigh] = splitMorton(page.morton);
+    const [expectedLow, expectedHigh] = mortonWordsAtLevel(
+      [page.coordinate[0], page.coordinate[1], page.coordinate[2]], page.level);
+    if (mortonLow !== expectedLow || mortonHigh !== expectedHigh) {
+      return invalid("Wide page Morton key does not match its coordinate");
+    }
+    if (packed.pages[pageBase] !== mortonLow || packed.pages[pageBase + 1] !== mortonHigh
+        || packed.pages[pageBase + 2] !== page.level
+        || packed.pages[pageBase + 3] !== page.occupancyLow || packed.pages[pageBase + 4] !== page.occupancyHigh
+        || packed.pages[pageBase + 5] !== descriptorIndex || packed.pages[pageBase + 6] !== page.descriptors.length) {
+      return invalid("Packed wide page header does not match its plan");
+    }
+    for (const descriptor of page.descriptors) {
+      const words = packed.descriptors.subarray(
+        descriptorIndex * SVO_WIDE_GPU_LAYOUT.descriptorWords, (descriptorIndex + 1) * SVO_WIDE_GPU_LAYOUT.descriptorWords);
+      descriptorIndex += 1;
+      const kind = SVO_WIDE_GPU_LAYOUT.descriptorKinds[descriptor.kind];
+      const meta = (kind | (descriptor.slot << 2) | (descriptor.sourceLevel << 8)) >>> 0;
+      const reference = descriptor.kind === "page" ? descriptor.pageIndex : descriptor.sourceNodeIndex;
+      const sourceLeaf = descriptor.kind === "page" ? SVO_WIDE_INVALID_INDEX : descriptor.sourceLeafIndex;
+      if (words[0] !== meta || words[1] !== reference || words[2] !== sourceLeaf
+          || words[3] !== packSvoWideOpacity(descriptor.opacity)) {
+        return invalid("Packed wide descriptor does not match its plan");
+      }
+      const slotCoordinate = [descriptor.slot & 3, (descriptor.slot >> 2) & 3, (descriptor.slot >> 4) & 3] as const;
+      const globalCoordinate = [
+        page.coordinate[0] * 4 + slotCoordinate[0],
+        page.coordinate[1] * 4 + slotCoordinate[1],
+        page.coordinate[2] * 4 + slotCoordinate[2],
+      ] as const;
+      if (descriptor.kind === "page") {
+        const child = plan.pages[descriptor.pageIndex];
+        if (!child || child.index !== descriptor.pageIndex || child.level !== page.level + 2
+            || child.level !== descriptor.sourceLevel
+            || child.coordinate[0] !== globalCoordinate[0] || child.coordinate[1] !== globalCoordinate[1]
+            || child.coordinate[2] !== globalCoordinate[2]) {
+          return invalid("Wide child page geometry does not match its parent slot");
+        }
+        continue;
+      }
+      const divisor = 2 ** (page.level + 2 - descriptor.sourceLevel);
+      const terminalCoordinate = [
+        Math.floor(globalCoordinate[0] / divisor),
+        Math.floor(globalCoordinate[1] / divisor),
+        Math.floor(globalCoordinate[2] / divisor),
+      ] as const;
+      if (!canonical) continue;
+      if (descriptor.sourceNodeIndex >= nodeCount || descriptor.sourceLeafIndex >= leafCount) {
+        return invalid("Wide terminal references are outside the canonical topology");
+      }
+      const nodeBase = descriptor.sourceNodeIndex * CANONICAL_NODE_WORDS;
+      const leafBase = descriptor.sourceLeafIndex * CANONICAL_LEAF_WORDS;
+      const [terminalLow, terminalHigh] = mortonWordsAtLevel(terminalCoordinate, descriptor.sourceLevel);
+      if (canonical.nodes[nodeBase + 2] !== descriptor.sourceLevel
+          || canonical.nodes[nodeBase + 6] !== descriptor.sourceLeafIndex
+          || canonical.leaves[leafBase] !== descriptor.sourceNodeIndex
+          || canonical.nodes[nodeBase] !== terminalLow || canonical.nodes[nodeBase + 1] !== terminalHigh) {
+        return invalid("Wide terminal disagrees with its canonical node and leaf records");
+      }
+    }
+  }
+  if (descriptorIndex !== plan.descriptorCount) return invalid("Wide descriptor stream does not cover its plan");
+  return base;
+}
+
 /**
  * Binding-free WGSL helpers. The consumer owns bind groups and buffer names;
  * this fragment only defines the shared ABI, rank/addressing, and mip decode.
@@ -409,10 +542,16 @@ fn svoWideMicroMipOffset(lod: u32) -> u32 {
  * Resumable near-to-far traversal over the optional 4^3 hierarchy.
  *
  * This fragment deliberately depends on the canonical traversal library for
- * SvoMapping, SvoRay, SvoTraversalHit, svoNodes/svoLeaves, status constants,
- * Morton decode, and ray/AABB intersection. A page-local DDA visits at most ten
+ * SvoMapping, SvoRay, SvoTraversalHit, svoLeaves, status constants, Morton
+ * decode, and ray/AABB intersection. A page-local DDA visits at most ten
  * cells for a non-degenerate ray; parent DDA frames survive both tail descent
  * and returned terminal leaves. Only the two traversal payloads are bound.
+ *
+ * The publication is immutable and semantically validated once at publish
+ * (validateSvoWidePackedPlan inside WebGPUSvoWideFanout.encode), so the hot
+ * loop keeps only memory-safety clamps: index bounds, stack capacity, work
+ * budgets, and the degenerate-ray boundary-tie detection needed for the
+ * exactness fallback. Page headers are re-checked once per first entry.
  */
 export const webgpuSvoWideFanoutTraversalWGSL = /* wgsl */`
 ${webgpuSvoWideFanoutHelpersWGSL}
@@ -554,6 +693,13 @@ fn svoWideCursorNext(
   }
   let inverseDirection = 1.0 / ray.direction;
   let visitLimit = min(max(mapping.maxVisits, 1u), SVO_WIDE_MAXIMUM_PAGE_VISITS);
+  // The page record and its derived Morton coordinate and bounds are loop
+  // invariants of every cell step inside one page; refresh them only when the
+  // active frame changes so steps stay load- and decode-free.
+  var cachedPageIndex = 0xffffffffu;
+  var page: SvoWidePage;
+  var pageCoordinate = vec3u(0u);
+  var pageBounds = mat2x3f();
   for (var guard = 0u; guard < SVO_WIDE_MAXIMUM_PAGE_VISITS * SVO_WIDE_MAXIMUM_CELL_STEPS; guard += 1u) {
     if ((*cursor).depth == 0u) {
       (*cursor).state = SVO_WIDE_CURSOR_COMPLETE;
@@ -565,6 +711,12 @@ fn svoWideCursorNext(
       (*cursor).state = SVO_WIDE_CURSOR_INVALID;
       return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
     }
+    if (frame.pageIndex != cachedPageIndex) {
+      cachedPageIndex = frame.pageIndex;
+      page = svoWidePages[frame.pageIndex];
+      pageCoordinate = svoWidePageCoordinate(page);
+      pageBounds = svoWideCanonicalBounds(page.level, pageCoordinate, mapping);
+    }
     if (frame.entered == 0u) {
       if (callVisits >= visitLimit) {
         (*cursor).state = SVO_WIDE_CURSOR_EXHAUSTED;
@@ -574,11 +726,13 @@ fn svoWideCursorNext(
       (*cursor).frames[frameIndex] = frame;
       (*cursor).pageVisits += 1u;
       callVisits += 1u;
-    }
-    let page = svoWidePages[frame.pageIndex];
-    if (!svoWidePageHeaderValid(page, frame.pageIndex, publication, mapping)) {
-      (*cursor).state = SVO_WIDE_CURSOR_INVALID;
-      return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+      // Semantic header consistency is proven once at publish time; re-check
+      // only on first entry so a corrupted upload still fails closed without
+      // per-step validation traffic.
+      if (!svoWidePageHeaderValid(page, frame.pageIndex, publication, mapping)) {
+        (*cursor).state = SVO_WIDE_CURSOR_INVALID;
+        return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
+      }
     }
     if (page.level > maximumTraversalDepth) {
       (*cursor).state = SVO_WIDE_CURSOR_EXHAUSTED;
@@ -593,8 +747,6 @@ fn svoWideCursorNext(
       return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
     }
     (*cursor).frames[frameIndex].cellSteps += 1u;
-    let pageCoordinate = svoWidePageCoordinate(page);
-    let pageBounds = svoWideCanonicalBounds(page.level, pageCoordinate, mapping);
     let pageExtent = pageBounds[1] - pageBounds[0];
     let probeT = frame.nextT;
     let localPointRaw = (ray.origin + ray.direction * probeT - pageBounds[0]) / pageExtent;
@@ -659,13 +811,8 @@ fn svoWideCursorNext(
         (*cursor).state = SVO_WIDE_CURSOR_INVALID;
         return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
       }
-      let child = svoWidePages[descriptor.reference];
-      if (!svoWidePageHeaderValid(child, descriptor.reference, publication, mapping)
-          || child.level != sourceLevel
-          || any(svoWidePageCoordinate(child) != slotGlobalCoordinate)) {
-        (*cursor).state = SVO_WIDE_CURSOR_INVALID;
-        return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
-      }
+      // The child page's header, level, and Morton coordinate were proven to
+      // match this slot at publish time; the child is validated on entry.
       (*cursor).frames[(*cursor).depth] = SvoWideCursorFrame(
         descriptor.reference, max(frame.nextT, slotInterval.y), slotExit, 0u, 0u);
       (*cursor).depth += 1u;
@@ -684,11 +831,12 @@ fn svoWideCursorNext(
     }
     let terminalDivisor = 1u << (page.level + 2u - sourceLevel);
     let terminalCoordinate = slotGlobalCoordinate / terminalDivisor;
-    let node = svoNodes[descriptor.reference];
+    // The canonical node record was cross-validated against this terminal at
+    // publish time (level, leaf back-pointer, Morton coordinate). The leaf is
+    // still loaded because the hit needs its voxel offset; its back-pointer is
+    // a free consistency compare on already-loaded data.
     let leaf = svoLeaves[descriptor.sourceLeaf];
-    if (node.address.z != sourceLevel || node.links.z != descriptor.sourceLeaf
-        || leaf.topology.x != descriptor.reference
-        || any(svoDecodeMorton(node.address.x, node.address.y, node.address.z) != terminalCoordinate)) {
+    if (leaf.topology.x != descriptor.reference) {
       (*cursor).state = SVO_WIDE_CURSOR_INVALID;
       return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
     }

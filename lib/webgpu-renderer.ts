@@ -327,7 +327,7 @@ export interface RenderStageTimings {
 
 export const RENDER_TIMESTAMP_QUERY_COUNT = 22;
 
-export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, surfaceUpdated: boolean, sprayRendered = true, svoTemporalEncoded = false, causticsUpdated = false, overlaysEncoded = false): RenderStageTimings {
+export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, surfaceUpdated: boolean, sprayRendered = true, svoTemporalEncoded = false, causticsUpdated = false, overlaysEncoded = false, interfacesEncoded = true): RenderStageTimings {
   if (times.length < 16) throw new Error("Render timestamp sample must contain 16 query values");
   const duration = (start: number, end: number) => {
     const milliseconds = Number(times[end] - times[start]) / 1e6;
@@ -341,8 +341,8 @@ export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, surfaceUpd
   const caustics_ms = causticsUpdated && times.length >= 20 ? duration(18, 19) : undefined;
   const dryScene_ms = duration(2, 3);
   const svoTemporal_ms = svoTemporalEncoded && times.length >= 18 ? duration(16, 17) : undefined;
-  const interfaceFront_ms = duration(4, 5);
-  const interfaceBack_ms = duration(6, 7);
+  const interfaceFront_ms = interfacesEncoded ? duration(4, 5) : 0;
+  const interfaceBack_ms = interfacesEncoded ? duration(6, 7) : 0;
   const interfaces_ms = interfaceFront_ms + interfaceBack_ms;
   const overlays_ms = overlaysEncoded && times.length >= RENDER_TIMESTAMP_QUERY_COUNT ? duration(20, 21) : undefined;
   const opticalComposite_ms = duration(8, 9);
@@ -1423,6 +1423,7 @@ export class FluidLabRenderer {
         return replacementResult;
       }
       : undefined;
+    this.waterPipeline.setSceneHasFluid(Boolean(sceneRuntime.fluidSolver));
     const rasterResult = this.waterPipeline.encode(
       encoder, this.presentationTexture,
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1,
@@ -1581,9 +1582,9 @@ export class FluidLabRenderer {
       cpuPhysicsSubmit_ms+=performance.now()-deferredPhysicsStart;
     }
     if(renderReadback){
-      const readback=renderReadback,sampledContext=timingContext,sampledEpoch=this.renderTimingEpoch,surfaceUpdated=rasterResult.surfaceUpdated,causticsUpdated=rasterResult.causticsUpdated,sampledSprayRendered=rasterResult.sprayRendered,sampledSvoTemporalEncoded=svoTemporalEncoded,sampledOverlaysEncoded=overlaysEncoded;
+      const readback=renderReadback,sampledContext=timingContext,sampledEpoch=this.renderTimingEpoch,surfaceUpdated=rasterResult.surfaceUpdated,causticsUpdated=rasterResult.causticsUpdated,sampledSprayRendered=rasterResult.sprayRendered,sampledSvoTemporalEncoded=svoTemporalEncoded,sampledOverlaysEncoded=overlaysEncoded,sampledInterfacesEncoded=rasterResult.interfacesEncoded;
       void readback.mapAsync(GPUMapMode.READ).then(()=>{
-        const stage=decodeRenderStageTimestamps(new BigUint64Array(readback.getMappedRange()),surfaceUpdated,sampledSprayRendered,sampledSvoTemporalEncoded,causticsUpdated,sampledOverlaysEncoded);
+        const stage=decodeRenderStageTimestamps(new BigUint64Array(readback.getMappedRange()),surfaceUpdated,sampledSprayRendered,sampledSvoTemporalEncoded,causticsUpdated,sampledOverlaysEncoded,sampledInterfacesEncoded);
         const currentTimingEpoch=this.renderTimingContext===sampledContext&&this.renderTimingEpoch===sampledEpoch;
         if(currentTimingEpoch&&hasResolvedRenderTimestampSample(stage)){
           this.gpuSurfaceExtraction_ms=stage.surfaceExtraction_ms;this.gpuCaustics_ms=stage.caustics_ms;this.gpuDryScene_ms=stage.dryScene_ms;this.gpuSvoTemporal_ms=stage.svoTemporal_ms;this.gpuInterfaceFront_ms=stage.interfaceFront_ms;this.gpuInterfaceBack_ms=stage.interfaceBack_ms;this.gpuInterfaces_ms=stage.interfaces_ms;this.gpuSprayFront_ms=stage.sprayFront_ms;this.gpuSprayBack_ms=stage.sprayBack_ms;this.gpuSprayRender_ms=stage.sprayRender_ms;this.gpuOpticalComposite_ms=stage.opticalComposite_ms;this.gpuOverlays_ms=stage.overlays_ms;this.gpuUpscale_ms=stage.upscale_ms;this.gpuRender_ms=stage.total_ms;this.renderTimingSampleId+=1;

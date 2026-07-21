@@ -44,6 +44,14 @@ test("disabled spray contributes no stale render time", () => {
   assert.equal(result.total_ms, 27);
 });
 
+test("skipped dry-scene interface passes contribute no stale interface time", () => {
+  const result = decodeRenderStageTimestamps(timestamps, true, true, false, false, false, false);
+  assert.equal(result.interfaceFront_ms, 0);
+  assert.equal(result.interfaceBack_ms, 0);
+  assert.equal(result.interfaces_ms, 0);
+  assert.equal(result.total_ms, 23);
+});
+
 test("SVO temporal resolve has an independent timestamp interval", () => {
   const withTemporal = [...timestamps, 40_000_000n, 44_000_000n];
   assert.equal(RENDER_TIMESTAMP_QUERY_COUNT, 22);

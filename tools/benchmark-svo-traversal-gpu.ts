@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
 
 type Variant = "baseline" | "optimized";
-type Comparison = "parent-bounds" | "morton-decode" | "carried-bounds";
+type Comparison = "expansion" | "morton-decode";
 type FixtureKind = "dense" | "deep-sparse";
 
 interface PackedFixture {
@@ -25,7 +25,7 @@ const warmups = positiveInteger(process.env.FLUID_SVO_TRAVERSAL_WARMUPS ?? "4", 
 const cycles = positiveInteger(process.env.FLUID_SVO_TRAVERSAL_CYCLES ?? "12", "cycles");
 const dispatchesPerSample = positiveInteger(process.env.FLUID_SVO_TRAVERSAL_DISPATCHES ?? "1", "dispatches per sample");
 const traversalsPerInvocation = positiveInteger(process.env.FLUID_SVO_TRAVERSAL_RAYS_PER_INVOCATION ?? "4", "rays per invocation");
-const comparison = benchmarkComparison(process.env.FLUID_SVO_TRAVERSAL_COMPARISON ?? "parent-bounds");
+const comparison = benchmarkComparison(process.env.FLUID_SVO_TRAVERSAL_COMPARISON ?? "expansion");
 const fixtureKind = benchmarkFixture(process.env.FLUID_SVO_TRAVERSAL_FIXTURE ?? "dense");
 const amplifiedMortonDecodesPerTraversal = comparison === "morton-decode" ? 64 : 0;
 const workgroupSizes = (process.env.FLUID_SVO_TRAVERSAL_WORKGROUPS ?? "32,64,128,256")
@@ -41,8 +41,12 @@ function positiveInteger(value: string, label: string): number {
 }
 
 function benchmarkComparison(value: string): Comparison {
-  if (value === "parent-bounds" || value === "morton-decode" || value === "carried-bounds") return value;
-  throw new RangeError("comparison must be parent-bounds, morton-decode, or carried-bounds");
+  if (value === "expansion" || value === "morton-decode") return value;
+  if (value === "parent-bounds" || value === "carried-bounds") {
+    throw new RangeError(`comparison "${value}" was retired: its baseline reconstructed pre-carried-bounds traversal `
+      + "text that no longer exists in the library; use \"expansion\" (candidate-array vs in-stack insertion) instead");
+  }
+  throw new RangeError("comparison must be expansion or morton-decode");
 }
 
 function benchmarkFixture(value: string): FixtureKind {
@@ -106,20 +110,145 @@ function deepSparseFixture(maximumDepth = 21): PackedFixture {
   return { nodes, leaves, depth: maximumDepth, brickSize: 4 };
 }
 
-function parentBoundsBaselineTraversalWGSL(): string {
-  const optimizedTraversal = carriedBoundsBaselineTraversalWGSL();
-  const rootOptimized = "  let inverseDirection = 1.0 / ray.direction;\n  let rootInterval = svoRayAabbWithInverse(ray, inverseDirection, svoNodeBounds(svoNodes[0], mapping));";
-  const rootBaseline = "  let rootInterval = svoRayAabb(ray, svoNodeBounds(svoNodes[0], mapping));";
-  const childOptimized = "    let parentBounds = svoNodeBounds(node, mapping);";
-  const childIntervalOptimized = "      let interval = svoRayAabbWithInverse(ray, inverseDirection, svoChildBounds(parentBounds, octant));";
-  const childIntervalBaseline = "      let interval = svoRayAabb(ray, svoNodeBounds(child, mapping));";
-  assert.ok(optimizedTraversal.includes(rootOptimized), "optimized root traversal signature changed");
-  assert.ok(optimizedTraversal.includes(childOptimized), "optimized parent-bounds signature changed");
-  assert.ok(optimizedTraversal.includes(childIntervalOptimized), "optimized child traversal signature changed");
-  return optimizedTraversal
-    .replace(rootOptimized, rootBaseline)
-    .replace(`${childOptimized}\n`, "")
-    .replace(childIntervalOptimized, childIntervalBaseline);
+/**
+ * Replace one top-level WGSL function (located by its `fn name(` header and
+ * brace matching) so baseline construction never touches the rest of the
+ * library source — in particular svoTraversalContinuationNext, which shares
+ * textual shapes with svoTraverseWithDepthLimit.
+ */
+function replaceWgslFunction(source: string, name: string, replacement: string): string {
+  const header = `fn ${name}(`;
+  const start = source.indexOf(header);
+  assert.ok(start >= 0, `WGSL function not found: ${name}`);
+  assert.equal(source.indexOf(header, start + 1), -1, `WGSL function ${name} is not unique`);
+  const braceStart = source.indexOf("{", start);
+  assert.ok(braceStart >= 0, `WGSL function ${name} has no body`);
+  let depth = 0;
+  let end = -1;
+  for (let index = braceStart; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) { end = index + 1; break; }
+    }
+  }
+  assert.ok(end > 0, `WGSL function ${name} has unbalanced braces`);
+  return source.slice(0, start) + replacement + source.slice(end);
+}
+
+/**
+ * Verbatim snapshot of svoTraverseWithDepthLimit as it stood on main (commit
+ * 2162041) before the in-stack streaming expansion landed: each internal node
+ * insertion-sorts up to eight SvoCandidate entries into a function-local
+ * scratch array and copies the deferred ones onto the stack afterwards. The
+ * "expansion" comparison splices this over the current function so baseline
+ * and optimized variants compile against the same library helpers.
+ */
+const CANDIDATE_ARRAY_EXPANSION_BASELINE = `fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalDepth: u32) -> SvoTraversalHit {
+  if (svoControl[12] != 0u) { return svoMiss(SVO_STATUS_SOURCE_OVERFLOW, 0u); }
+  if (mapping.nodeCount == 0u) { return svoMiss(SVO_STATUS_MISS, 0u); }
+  let root = svoNodes[0];
+  if (root.address.x != 0u || root.address.y != 0u || root.address.z != 0u) {
+    return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, 0u);
+  }
+  let inverseDirection = 1.0 / ray.direction;
+  let rootBounds = svoRootBounds(mapping);
+  let rootInterval = svoRayAabbWithInverse(ray, inverseDirection, rootBounds);
+  if (rootInterval.x == 0.0) { return svoMiss(SVO_STATUS_MISS, 0u); }
+  var stack: array<SvoStackEntry, 32>;
+  var stackSize = 0u;
+  var current = SvoStackEntry(0u, rootInterval.y, rootInterval.z);
+  var currentBounds = rootBounds;
+  var currentBoundsValid = true;
+  var visits = 0u;
+  let visitLimit = min(max(mapping.maxVisits, 1u), SVO_MAX_VISITS);
+  var traversalGuard = 0u;
+  while (traversalGuard <= SVO_MAX_VISITS) {
+    traversalGuard += 1u;
+    if (visits >= visitLimit) { return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits); }
+    if (current.nodeIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
+    let node = svoNodes[current.nodeIndex];
+    visits += 1u;
+    if (node.address.z > mapping.maximumDepth) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
+    if (node.address.z > maximumTraversalDepth) { return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits); }
+    if (node.links.z != SVO_INVALID) {
+      if (node.links.z >= mapping.leafCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
+      let leaf = svoLeaves[node.links.z];
+      if (leaf.topology.x != current.nodeIndex) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
+      return SvoTraversalHit(SVO_STATUS_HIT, visits, current.nodeIndex, node.links.z,
+        leaf.topology.y, node.address.z, current.tEnter, current.tExit);
+    }
+    let mask = node.address.w & 0xffu;
+    if (mask == 0u) {
+      if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
+      stackSize -= 1u;
+      current = stack[stackSize];
+      currentBoundsValid = false;
+      continue;
+    }
+    if (node.links.x == SVO_INVALID || countOneBits(mask) != node.links.y) {
+      return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+    }
+    var parentBounds = currentBounds;
+    if (!currentBoundsValid) { parentBounds = svoNodeBounds(node, mapping); }
+    var candidates: array<SvoCandidate, 8>;
+    var candidateCount = 0u;
+    for (var octant = 0u; octant < 8u; octant += 1u) {
+      if ((mask & (1u << octant)) == 0u) { continue; }
+      let childIndex = node.links.x + svoPopcountBefore(mask, octant);
+      if (childIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
+      let child = svoNodes[childIndex];
+      if (child.address.z != node.address.z + 1u) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
+      let childBounds = svoChildBounds(parentBounds, octant);
+      let interval = svoRayAabbWithInverse(ray, inverseDirection, childBounds);
+      if (interval.x == 0.0) { continue; }
+      var insertion = candidateCount;
+      loop {
+        if (insertion == 0u) { break; }
+        let previous = candidates[insertion - 1u];
+        let ordered = previous.tEnter < interval.y
+          || (previous.tEnter == interval.y && (previous.tExit < interval.z
+          || (previous.tExit == interval.z && previous.octant <= octant)));
+        if (ordered) { break; }
+        candidates[insertion] = previous;
+        insertion -= 1u;
+      }
+      candidates[insertion] = SvoCandidate(childIndex, octant, interval.y, interval.z);
+      candidateCount += 1u;
+    }
+    if (candidateCount == 0u) {
+      if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
+      stackSize -= 1u;
+      current = stack[stackSize];
+      currentBoundsValid = false;
+      continue;
+    }
+    if (stackSize + candidateCount - 1u > SVO_STACK_CAPACITY) {
+      return svoMiss(SVO_STATUS_STACK_OVERFLOW, visits);
+    }
+    var remaining = candidateCount;
+    loop {
+      if (remaining <= 1u) { break; }
+      remaining -= 1u;
+      let deferred = candidates[remaining];
+      stack[stackSize] = SvoStackEntry(deferred.nodeIndex, deferred.tEnter, deferred.tExit);
+      stackSize += 1u;
+    }
+    let nearest = candidates[0];
+    current = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
+    currentBounds = svoChildBounds(parentBounds, nearest.octant);
+    currentBoundsValid = true;
+  }
+  return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits);
+}`;
+
+function expansionBaselineTraversalWGSL(): string {
+  assert.ok(!webgpuSvoTraversalWGSL.includes("var candidates: array<SvoCandidate, 8>;"),
+    "library still uses the candidate-array expansion; the expansion baseline would measure nothing");
+  assert.ok(webgpuSvoTraversalWGSL.includes("struct SvoCandidate"),
+    "baseline snapshot needs the SvoCandidate struct from the library");
+  return replaceWgslFunction(webgpuSvoTraversalWGSL, "svoTraverseWithDepthLimit", CANDIDATE_ARRAY_EXPANSION_BASELINE);
 }
 
 function mortonDecodeBaselineTraversalWGSL(): string {
@@ -156,119 +285,13 @@ fn svoDecodeMorton(low: u32, high: u32, level: u32) -> vec3u {
   return webgpuSvoTraversalWGSL.replace(optimized, baseline);
 }
 
-function carriedBoundsBaselineTraversalWGSL(): string {
-  const structsOptimized = `struct SvoStackEntry { nodeIndex: u32, tEnter: f32, tExit: f32 }
-struct SvoCandidate { nodeIndex: u32, octant: u32, tEnter: f32, tExit: f32 }`;
-  const structBaseline = "struct SvoStackEntry { nodeIndex: u32, octant: u32, tEnter: f32, tExit: f32 }";
-  const rootBoundsHelper = `fn svoRootBounds(mapping: SvoMapping) -> mat2x3f {
-  let scale = f32((1u << mapping.maximumDepth) * mapping.brickSize);
-  return mat2x3f(mapping.worldOrigin, mapping.worldOrigin + scale * mapping.cellSize);
-}
-
-`;
-  const rootOptimized = `  let root = svoNodes[0];
-  if (root.address.x != 0u || root.address.y != 0u || root.address.z != 0u) {
-    return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, 0u);
-  }
-  let inverseDirection = 1.0 / ray.direction;
-  let rootBounds = svoRootBounds(mapping);
-  let rootInterval = svoRayAabbWithInverse(ray, inverseDirection, rootBounds);`;
-  const rootBaseline = `  let inverseDirection = 1.0 / ray.direction;
-  let rootInterval = svoRayAabbWithInverse(ray, inverseDirection, svoNodeBounds(svoNodes[0], mapping));`;
-  const initialOptimized = `  var stack: array<SvoStackEntry, 32>;
-  var stackSize = 0u;
-  var current = SvoStackEntry(0u, rootInterval.y, rootInterval.z);
-  var currentBounds = rootBounds;
-  var currentBoundsValid = true;`;
-  const initialBaseline = `  var stack: array<SvoStackEntry, 32>;
-  var stackSize = 1u;
-  stack[0] = SvoStackEntry(0u, 0u, rootInterval.y, rootInterval.z);`;
-  const loopOptimized = `    traversalGuard += 1u;
-    if (visits >= visitLimit) { return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits); }
-    if (current.nodeIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }`;
-  const loopBaseline = `    traversalGuard += 1u;
-    if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
-    if (visits >= visitLimit) { return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits); }
-    stackSize -= 1u;
-    let current = stack[stackSize];
-    if (current.nodeIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }`;
-  const emptyOptimized = `    if (mask == 0u) {
-      if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
-      stackSize -= 1u;
-      current = stack[stackSize];
-      currentBoundsValid = false;
-      continue;
-    }`;
-  const emptyBaseline = "    if (mask == 0u) { continue; }";
-  const parentOptimized = `    var parentBounds = currentBounds;
-    if (!currentBoundsValid) { parentBounds = svoNodeBounds(node, mapping); }
-    var candidates: array<SvoCandidate, 8>;`;
-  const parentBaseline = `    let parentBounds = svoNodeBounds(node, mapping);
-    var candidates: array<SvoStackEntry, 8>;`;
-  const childOptimized = `      let childBounds = svoChildBounds(parentBounds, octant);
-      let interval = svoRayAabbWithInverse(ray, inverseDirection, childBounds);`;
-  const childBaseline = "      let interval = svoRayAabbWithInverse(ray, inverseDirection, svoChildBounds(parentBounds, octant));";
-  const candidateOptimized = "      candidates[insertion] = SvoCandidate(childIndex, octant, interval.y, interval.z);";
-  const candidateBaseline = "      candidates[insertion] = SvoStackEntry(childIndex, octant, interval.y, interval.z);";
-  const finishOptimized = `    if (candidateCount == 0u) {
-      if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
-      stackSize -= 1u;
-      current = stack[stackSize];
-      currentBoundsValid = false;
-      continue;
-    }
-    if (stackSize + candidateCount - 1u > SVO_STACK_CAPACITY) {
-      return svoMiss(SVO_STATUS_STACK_OVERFLOW, visits);
-    }
-    var remaining = candidateCount;
-    loop {
-      if (remaining <= 1u) { break; }
-      remaining -= 1u;
-      let deferred = candidates[remaining];
-      stack[stackSize] = SvoStackEntry(deferred.nodeIndex, deferred.tEnter, deferred.tExit);
-      stackSize += 1u;
-    }
-    let nearest = candidates[0];
-    current = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
-    currentBounds = svoChildBounds(parentBounds, nearest.octant);
-    currentBoundsValid = true;`;
-  const finishBaseline = `    if (stackSize + candidateCount > SVO_STACK_CAPACITY) {
-      return svoMiss(SVO_STATUS_STACK_OVERFLOW, visits);
-    }
-    var remaining = candidateCount;
-    loop {
-      if (remaining == 0u) { break; }
-      remaining -= 1u;
-      stack[stackSize] = candidates[remaining];
-      stackSize += 1u;
-    }`;
-  for (const signature of [structsOptimized, rootBoundsHelper, rootOptimized, initialOptimized, loopOptimized,
-    emptyOptimized, parentOptimized, childOptimized, candidateOptimized, finishOptimized]) {
-    assert.ok(webgpuSvoTraversalWGSL.includes(signature), "carried-bounds traversal signature changed");
-  }
-  return webgpuSvoTraversalWGSL
-    .replace(structsOptimized, structBaseline)
-    .replace(rootBoundsHelper, "")
-    .replace(rootOptimized, rootBaseline)
-    .replace(initialOptimized, initialBaseline)
-    .replace(loopOptimized, loopBaseline)
-    .replace(emptyOptimized, emptyBaseline)
-    .replace(parentOptimized, parentBaseline)
-    .replace(childOptimized, childBaseline)
-    .replace(candidateOptimized, candidateBaseline)
-    .replace(finishOptimized, finishBaseline);
-}
-
 function baselineTraversalWGSL(): string {
   if (comparison === "morton-decode") return mortonDecodeBaselineTraversalWGSL();
-  if (comparison === "carried-bounds") return carriedBoundsBaselineTraversalWGSL();
-  return parentBoundsBaselineTraversalWGSL();
+  return expansionBaselineTraversalWGSL();
 }
 
 function shader(variant: Variant, workgroupSize: number, fixture: PackedFixture): string {
-  const traversal = variant === "optimized"
-    ? comparison === "parent-bounds" ? carriedBoundsBaselineTraversalWGSL() : webgpuSvoTraversalWGSL
-    : baselineTraversalWGSL();
+  const traversal = variant === "optimized" ? webgpuSvoTraversalWGSL : baselineTraversalWGSL();
   const extent = 2 ** fixture.depth * fixture.brickSize;
   return `${traversal}
 struct BenchmarkResult { status: u32, visits: u32, nodeIndex: u32, leafIndex: u32 }
@@ -482,10 +505,13 @@ console.log(JSON.stringify({
   fixtureKind,
   adapter: adapter.info,
   fixture: { depth: fixture.depth, nodes: fixture.nodes.length / 8, leaves: fixture.leaves.length / 4,
-    baselineStackEntryBytes: comparison === "morton-decode" ? 12 : 16,
-    optimizedStackEntryBytes: comparison === "parent-bounds" ? 16 : 12,
-    baselineCandidateEntryBytes: 16,
-    optimizedCandidateEntryBytes: 16,
+    baselineStackEntryBytes: 12,
+    optimizedStackEntryBytes: 12,
+    baselineExpansionScratchWords: comparison === "expansion" ? 32 : 0,
+    optimizedExpansionScratchWords: comparison === "expansion" ? 7 : 0,
+    expansionScratchNote: comparison === "expansion"
+      ? "baseline: array<SvoCandidate, 8> = 32 words; optimized: nearest SvoCandidate (4) + deferred SvoStackEntry (3) in registers"
+      : "expansion scratch identical in both variants for this comparison",
     stackCapacity: 32,
     invocationCount: width * height, rayCount: width * height * traversalsPerInvocation,
     allHitInvocationCount: hitInvocationCount, averageNodeVisits: visitSum / (width * height * traversalsPerInvocation) },
