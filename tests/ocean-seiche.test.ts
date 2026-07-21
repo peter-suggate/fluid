@@ -64,7 +64,8 @@ test("ocean scene is registered in the UI presets and the smoke harness with lea
   assert.match(preset.description, /32/);
   assert.ok(isSmokeScenarioId("ocean-seiche"));
   const scenario = createSmokeScenario("ocean-seiche");
-  assert.equal(scenario.scene.numerics.surfaceColumnsOverride, 25600);
+  assert.equal(scenario.scene.voxelDomain.finestCellSize_m, 0.025);
+  assert.equal(scenario.scene.voxelDomain.brickSize_cells, 8);
   assert.equal(scenario.scene.fluid.surfaceTension_N_m, 0);
   assert.equal(scenario.scene.container.width_m, 8.0);
   assert.equal(scenario.scene.container.height_m, 2.4);

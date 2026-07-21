@@ -3,15 +3,17 @@ import test from "node:test";
 import { chooseTallCellBase, createSingleTallCellProbeControlLayout, createSingleTallCellProbeLayout, createTallCellLayout, limitNeighboringTallCellBases, tallCellFluxSampleCount, tallCellSettings } from "../lib/tall-cell-grid";
 import { cloneScene, defaultScene } from "../lib/model";
 
-test("restricted tall-cell presets retain cubic resolution and represent the vertical dam face with tall columns", () => {
-  const expectedEquivalent = { balanced: 110_000, high: 500_000, ultra: 1_200_000 } as const;
+test("restricted tall-cell quality presets share the scene-authored lattice and represent tall columns", () => {
+  const scene = cloneScene(defaultScene);
+  scene.voxelDomain.finestCellSize_m = 0.02;
   for (const quality of ["balanced", "high", "ultra"] as const) {
-    const layout = createTallCellLayout(defaultScene, quality);
-    assert.ok(Math.abs(layout.equivalentUniformCellCount / expectedEquivalent[quality] - 1) < 0.16);
+    const layout = createTallCellLayout(scene, quality);
+    assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [60, 45, 40]);
+    assert.equal(layout.equivalentUniformCellCount, 108_000);
     assert.ok(layout.settings.regularLayers >= tallCellSettings[quality].regularLayers);
     assert.ok(layout.columnBases.every((base) => base <= tallCellSettings[quality].maximumTallHeight));
     assert.ok(layout.columnBases.some((base) => base > 3), "the default layout keeps genuinely tall cells (the 2026-07-16 audit removed the parity clamp)");
-    assert.ok(layout.compressionRatio < 0.85, `tall cells must compress the grid (got ${layout.compressionRatio})`);
+    assert.ok(layout.compressionRatio < 0.95, `tall cells must compress the grid (got ${layout.compressionRatio})`);
     assert.ok(layout.columnBases.some((base) => base >= 2));
     assert.equal(layout.packedNy, layout.settings.regularLayers + 2);
     assert.ok(Math.abs(layout.cellSize_m.x / layout.cellSize_m.y - 1) < 0.04);
@@ -28,6 +30,8 @@ test("restricted tall-cell presets retain cubic resolution and represent the ver
 
 test("deep water changes vertical extent without degrading surface resolution", () => {
   const shallowScene = cloneScene(defaultScene), deepScene = cloneScene(defaultScene);
+  shallowScene.voxelDomain.finestCellSize_m = 0.02;
+  deepScene.voxelDomain.finestCellSize_m = 0.02;
   shallowScene.container.height_m = 0.9;
   deepScene.container.height_m = 4.5;
   deepScene.container.fillFraction = 0.8;
@@ -37,8 +41,8 @@ test("deep water changes vertical extent without degrading surface resolution", 
   assert.equal(deep.nx, shallow.nx);
   assert.equal(deep.nz, shallow.nz);
   assert.ok(Math.abs(deep.cellSize_m.x - shallow.cellSize_m.x) < 1e-12);
-  assert.ok(deep.compressionRatio < 0.12);
-  assert.ok(deep.packedSampleCount * 7 < deep.equivalentUniformCellCount);
+  assert.ok(deep.compressionRatio < 0.16);
+  assert.ok(deep.packedSampleCount * 6 < deep.equivalentUniformCellCount);
 });
 
 test("surface band satisfies the requested liquid and air halos when possible", () => {

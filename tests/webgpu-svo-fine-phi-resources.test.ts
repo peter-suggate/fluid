@@ -84,25 +84,25 @@ function structuralDomain(
 
 test("dam-break fine owner domain stays solver-local inside the padded scene SVO", () => {
   const scene = getScenePreset("dam-break-boxes").create();
-  const layout = createTallCellLayout(scene, "balanced", 2048, { surfaceColumns: 2_500 });
+  const layout = createTallCellLayout(scene, "balanced", 2048);
   const primitives = environmentProxyPrimitives(buildEnvironmentProxyCatalog(scene, scene.environment ?? "default"), true);
   const sceneDomain = planSparseSceneDomain(
     scene, [layout.nx, layout.fineNy, layout.nz], 8,
     primitives.map((primitive) => ({ min: primitive.aabb_m.min, max: primitive.aabb_m.max })),
     { conservativePaddingCells: 1 },
   );
-  assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [61, 46, 41]);
-  assert.deepEqual(sceneDomain.sceneDimensionsCells, [352, 232, 296]);
-  assert.deepEqual(sceneDomain.solverGridOriginCells, [144, 8, 128]);
+  assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [60, 45, 40]);
+  assert.deepEqual(sceneDomain.solverGridOriginCells, [144, 8, 120]);
   const resolved = resolveSvoFinePhiOwnerDomain(structuralDomain(
     sceneDomain.sceneDimensionsCells,
     sceneDomain.solverGridOriginCells.map((value) => value / 8) as [number, number, number],
     [Math.ceil(layout.nx / 8), Math.ceil(layout.fineNy / 8), Math.ceil(layout.nz / 8)],
   ), { fineDimensions: [layout.nx * 2, layout.fineNy * 2, layout.nz * 2], refinementFactor: 2 });
   assert.deepEqual(resolved, {
-    ownerDimensionsCells: [352, 232, 296], ownerDimensionsBricks: [44, 29, 37],
-    sourceDimensionsCells: [61, 46, 41], sourceDimensionsBricks: [8, 6, 6],
-    sourceOriginCells: [144, 8, 128], refinementFactor: 2,
+    ownerDimensionsCells: sceneDomain.sceneDimensionsCells,
+    ownerDimensionsBricks: sceneDomain.sceneDimensionsCells.map((value) => Math.ceil(value / 8)),
+    sourceDimensionsCells: [60, 45, 40], sourceDimensionsBricks: [8, 6, 5],
+    sourceOriginCells: [144, 8, 120], refinementFactor: 2,
   });
 });
 

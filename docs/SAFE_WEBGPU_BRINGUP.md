@@ -28,7 +28,7 @@ FLUID_BRINGUP_STAGE=one-step npm run test:webgpu:bringup-stage
 The default is the deliberately small balanced dam-break grid: 384 finest
 columns, or exactly `24 x 18 x 16` cubic cells for the default box. It still
 uses compact face transport, authoritative power projection, MGPCG, and the
-factor-4 global fine lattice. Override `FLUID_SURFACE_COLUMNS` only after all
+factor-4 global fine lattice. Override `FLUID_VOXEL_CELL_SIZE` only after all
 five stages pass at 384.
 
 Those settings are also the normal balanced browser product preset, not hidden query
@@ -91,7 +91,7 @@ into an unauthenticated remote mutation surface.
 Use this exact bounded browser query (shown across lines only for readability):
 
 ```text
-?gpu=safe&method=octree&scene=water-box-dam-break&quality=balanced&render=raster&voxels=smooth&param.octree.surfaceColumns=384&param.octree.faceVelocityTransport=on&param.octree.globalFineLevelSetFactor=4&param.octree.powerDiagramProjection=authoritative&param.octree.secondaryParticles=off&param.octree.maximumLeafSize=16
+?gpu=safe&method=octree&scene=water-box-dam-break&quality=balanced&render=raster&voxels=smooth&param.octree.faceVelocityTransport=on&param.octree.globalFineLevelSetFactor=4&param.octree.powerDiagramProjection=authoritative&param.octree.secondaryParticles=off&param.octree.maximumLeafSize=16
 ```
 
 Keep the tab visible and focused because solver scheduling and presentation use

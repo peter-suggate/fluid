@@ -128,7 +128,7 @@ function priorityProxy(scene: SceneDescription, proxy: EnvironmentProxyPrimitive
   // Anything at or below 1.5 nominal cells is vulnerable to camera-dependent
   // disappearance in cell-centre voxelization and therefore remains a direct
   // analytic/default-camera acceptance priority.
-  const thinThreshold = Math.max(1.5 * scene.nominalResolution.length_m, .025 * Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m));
+  const thinThreshold = Math.max(1.5 * scene.voxelDomain.finestCellSize_m, .025 * Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m));
   return Math.min(...dimensions(proxy)) <= thinThreshold
     || proxy.tags.some((tag) => ["fixture", "monitor", "instrument", "fruit", "flower", "watering-can"].includes(tag));
 }

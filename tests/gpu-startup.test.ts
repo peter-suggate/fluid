@@ -50,17 +50,17 @@ test("safe browser bring-up fails closed when the bounded workload drifts", () =
   const violations = safeBrowserGPUBringupViolations({
     ...valid,
     quality: "ultra",
-    methodValues: { ...valid.methodValues, surfaceColumns: 768, pressureIterations: 400, sparseSurfaceBandCells: 16, sparseSurfacePageFraction: 1 },
+    methodValues: { ...valid.methodValues, unexpectedSpatialControl: 768, pressureIterations: 400, sparseSurfaceBandCells: 16, sparseSurfacePageFraction: 1 },
     diagnosticsOpen: true,
     rightPanel: "performance",
     stageCapturePhase: "reading",
     search: "?gpu=safe&gpuTimestamps=1&panel=performance",
   });
   for (const expected of [
-    "quality must be balanced", "finest columns must be 384", "diagnostics panel must remain closed",
+    "quality must be balanced", "diagnostics panel must remain closed",
     "all right-side panels must remain closed", "GPU stage capture/readback must be idle", "GPU timestamps must be off",
   ]) assert.ok(violations.includes(expected), `missing violation: ${expected}`);
-  assert.ok(violations.some((value) => value.includes("pressureIterations") && value.includes("sparseSurfaceBandCells") && value.includes("sparseSurfacePageFraction")));
+  assert.ok(violations.some((value) => value.includes("unexpectedSpatialControl") && value.includes("pressureIterations") && value.includes("sparseSurfaceBandCells") && value.includes("sparseSurfacePageFraction")));
   assert.ok(violations.some((value) => value.includes("gpuTimestamps") && value.includes("panel")));
 });
 

@@ -30,13 +30,24 @@ import {
   FLUID_BRICK_WORKLIST_WORDS,
 } from "./webgpu-fluid-brick-residency";
 
-export type VoxelRenderMode = "smooth" | "raw-voxels" | "brick-grid";
+export type VoxelRenderMode = "smooth" | "raw-voxels" | "surface-voxels" | "brick-grid";
 /** Sparse inspection is deliberately unavailable to the production hybrid mode. */
 export type VoxelDebugMode = Exclude<VoxelRenderMode, "smooth">;
 
 export const SPARSE_VOXEL_DEBUG_RECORD_STRIDE = 48;
 export const SPARSE_VOXEL_DEBUG_MATERIAL_STRIDE = 32;
 export const SPARSE_VOXEL_DEBUG_ACTIVE = 1;
+/** One power of two of terminal coarsening expands to at most 2x2x2 cells. */
+export const SURFACE_VOXEL_MAXIMUM_INSTANCES_PER_RECORD = 8;
+
+export function surfaceVoxelInstanceCapacity(voxelCapacity: number): number {
+  if (!Number.isSafeInteger(voxelCapacity) || voxelCapacity < 0) {
+    throw new RangeError("Surface voxel capacity must be a non-negative safe integer");
+  }
+  const capacity = Math.max(1, voxelCapacity) * SURFACE_VOXEL_MAXIMUM_INSTANCES_PER_RECORD;
+  if (!Number.isSafeInteger(capacity)) throw new RangeError("Surface voxel instance capacity exceeds safe integer range");
+  return capacity;
+}
 export const SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS = Object.freeze({
   resident: FLUID_BRICK_RESIDENT,
   core: FLUID_BRICK_CORE,
@@ -390,7 +401,7 @@ export type SparseVoxelDebugSource = SparseVoxelRenderSource;
 
 export interface VoxelDebugPlan {
   enabled: boolean;
-  recordKind: "none" | "voxels" | "bricks";
+  recordKind: "none" | "voxels" | "surface-voxels" | "bricks";
   capacity: number;
   computeWorkgroups: number;
   verticesPerInstance: number;
@@ -404,16 +415,16 @@ export function voxelDebugPlan(
   mode: VoxelDebugMode,
   source: Pick<SparseVoxelRenderSource, "voxelCapacity" | "brickCapacity">
 ): VoxelDebugPlan {
-  const raw = mode === "raw-voxels";
-  const capacity = Math.max(0, Math.floor(raw ? source.voxelCapacity : source.brickCapacity));
+  const voxelMode = mode === "raw-voxels" || mode === "surface-voxels";
+  const capacity = Math.max(0, Math.floor(voxelMode ? source.voxelCapacity : source.brickCapacity));
   const overlayCapacity = Math.max(0, Math.floor(source.brickCapacity));
   return {
     enabled: capacity > 0,
-    recordKind: raw ? "voxels" : "bricks",
+    recordKind: mode === "surface-voxels" ? "surface-voxels" : voxelMode ? "voxels" : "bricks",
     capacity,
     computeWorkgroups: Math.ceil(capacity / 64),
-    verticesPerInstance: raw ? 36 : 24,
-    topology: raw ? "triangle-list" : "line-list",
+    verticesPerInstance: voxelMode ? 36 : 24,
+    topology: voxelMode ? "triangle-list" : "line-list",
     overlayCapacity,
     overlayWorkgroups: Math.ceil(overlayCapacity / 64)
   };
@@ -464,7 +475,13 @@ struct DrawArguments {
   firstVertex: u32,
   firstInstance: u32,
 }
-struct CompactSettings { capacity: u32, overlayCapacity: u32, padding1: u32, padding2: u32 }
+struct CompactSettings {
+  capacity: u32,
+  overlayCapacity: u32,
+  instanceCapacity: u32,
+  maximumDepth: u32,
+  finestCell: vec4f,
+}
 
 @group(0) @binding(0) var<storage, read> voxelRecords: array<SpatialRecord>;
 @group(0) @binding(1) var<storage, read> voxelCount: Count;
@@ -477,6 +494,7 @@ struct CompactSettings { capacity: u32, overlayCapacity: u32, padding1: u32, pad
 @group(0) @binding(8) var<storage, read_write> overlayDrawArguments: DrawArguments;
 
 const ACTIVE: u32 = 1u;
+const INVALID: u32 = 0xffffffffu;
 // CORE(2) | HALO(4) | ACTIVATED(8): residency bits are only ever published
 // into brick-record flags for fluid solver leaves, so they double as the
 // fluid-versus-environment discriminator for the outline overlay.
@@ -519,6 +537,63 @@ fn compactVoxels(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_in
   // The CPU dispatch is bounded by instance capacity, and count cannot exceed
   // the source binding length. This guard also makes malformed bindings safe.
   if (slot < arrayLength(&instances)) { instances[slot] = record; }
+}
+
+fn claimSurfaceInstance() -> u32 {
+  let limit = min(compactSettings.instanceCapacity, arrayLength(&instances));
+  var expected = atomicLoad(&drawArguments.instanceCount);
+  loop {
+    if (expected >= limit) { return INVALID; }
+    let result = atomicCompareExchangeWeak(&drawArguments.instanceCount, expected, expected + 1u);
+    if (result.exchanged) { return expected; }
+    expected = result.old_value;
+  }
+}
+
+fn emitSurfaceVoxel(record: SpatialRecord, coordinate: vec3u, subdivisions: vec3u) {
+  let slot = claimSurfaceInstance();
+  if (slot == INVALID) { return; }
+  let cellExtent = record.extent.xyz / vec3f(subdivisions);
+  instances[slot] = SpatialRecord(
+    vec4f(record.origin.xyz + vec3f(coordinate) * cellExtent, 0.0),
+    vec4f(cellExtent, 0.0),
+    vec4u(record.materialAndFlags.xy, compactSettings.maximumDepth, record.materialAndFlags.w)
+  );
+}
+
+@compute @workgroup_size(64)
+fn compactSurfaceVoxels(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) lid: u32) {
+  let blocks = (compactSettings.capacity + 63u) / 64u;
+  let dispatchX = min(blocks, 65535u);
+  let index = (wid.x + wid.y * dispatchX) * 64u + lid;
+  let count = min(min(voxelCount.value, arrayLength(&voxelRecords)), compactSettings.capacity);
+  if (index >= count || any(compactSettings.finestCell.xyz <= vec3f(0.0))) { return; }
+  let record = voxelRecords[index];
+  if ((record.materialAndFlags.y & ACTIVE) == 0u || any(record.extent.xyz <= vec3f(0.0))) { return; }
+
+  // The sparse-world producer contract permits at most one power of two of
+  // environment coarsening, matching the conservative 8x instance arena.
+  let subdivisions = max(vec3u(1u), vec3u(round(record.extent.xyz / compactSettings.finestCell.xyz)));
+
+  // Emit each boundary subcell once. This is O(surface area), rather than
+  // walking the coarse voxel's volume, and preserves the existing cube gaps
+  // and screen-space silhouette treatment in the render pass.
+  for (var y = 0u; y < subdivisions.y; y += 1u) {
+    for (var x = 0u; x < subdivisions.x; x += 1u) {
+      emitSurfaceVoxel(record, vec3u(x, y, 0u), subdivisions);
+      if (subdivisions.z > 1u) { emitSurfaceVoxel(record, vec3u(x, y, subdivisions.z - 1u), subdivisions); }
+    }
+  }
+  for (var z = 1u; z + 1u < subdivisions.z; z += 1u) {
+    for (var x = 0u; x < subdivisions.x; x += 1u) {
+      emitSurfaceVoxel(record, vec3u(x, 0u, z), subdivisions);
+      if (subdivisions.y > 1u) { emitSurfaceVoxel(record, vec3u(x, subdivisions.y - 1u, z), subdivisions); }
+    }
+    for (var y = 1u; y + 1u < subdivisions.y; y += 1u) {
+      emitSurfaceVoxel(record, vec3u(0u, y, z), subdivisions);
+      if (subdivisions.x > 1u) { emitSurfaceVoxel(record, vec3u(subdivisions.x - 1u, y, z), subdivisions); }
+    }
+  }
 }
 
 @compute @workgroup_size(64)
@@ -817,6 +892,7 @@ export class SparseVoxelDebugRenderer {
   private prepareRawPipeline?: GPUComputePipeline;
   private prepareGridPipeline?: GPUComputePipeline;
   private compactVoxelPipeline?: GPUComputePipeline;
+  private compactSurfaceVoxelPipeline?: GPUComputePipeline;
   private compactBrickPipeline?: GPUComputePipeline;
   private compactFluidBrickPipeline?: GPUComputePipeline;
   private rawPipeline?: GPURenderPipeline;
@@ -873,10 +949,11 @@ export class SparseVoxelDebugRenderer {
     const renderLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.renderLayout] });
     const compute = (label: string, entryPoint: string) => this.device.createComputePipelineAsync({ label, layout: computeLayout, compute: { module: computeModule, entryPoint } });
     const depthStencil: GPUDepthStencilState = { format: this.options.depthFormat, depthWriteEnabled: true, depthCompare: "less-equal" };
-    [this.prepareRawPipeline, this.prepareGridPipeline, this.compactVoxelPipeline, this.compactBrickPipeline, this.compactFluidBrickPipeline] = await Promise.all([
+    [this.prepareRawPipeline, this.prepareGridPipeline, this.compactVoxelPipeline, this.compactSurfaceVoxelPipeline, this.compactBrickPipeline, this.compactFluidBrickPipeline] = await Promise.all([
       compute("Prepare raw voxel draw", "prepareRaw"),
       compute("Prepare sparse brick grid draw", "prepareGrid"),
       compute("Compact visible sparse voxels", "compactVoxels"),
+      compute("Expand finest surface voxels", "compactSurfaceVoxels"),
       compute("Compact visible sparse bricks", "compactBricks"),
       compute("Compact resident fluid brick outlines", "compactFluidBricks")
     ]);
@@ -928,7 +1005,7 @@ export class SparseVoxelDebugRenderer {
       })
     ]);
     this.uniformBuffer = this.device.createBuffer({ label: "Sparse voxel debug view", size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.compactSettingsBuffer = this.device.createBuffer({ label: "Sparse voxel debug compaction settings", size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.compactSettingsBuffer = this.device.createBuffer({ label: "Sparse voxel debug compaction settings", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.indirectBuffer = this.device.createBuffer({ label: "Sparse voxel debug indirect draw", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     this.overlayIndirectBuffer = this.device.createBuffer({ label: "Sparse voxel debug overlay indirect draw", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     this.initialized = true;
@@ -962,10 +1039,10 @@ export class SparseVoxelDebugRenderer {
     this.rebuildBindings();
   }
 
-  private rebuildBindings(): void {
+  private rebuildBindings(minimumInstanceCapacity = 0): void {
     const source = this.source;
     if (!this.initialized || !source || !this.computeLayout || !this.renderLayout || !this.uniformBuffer || !this.compactSettingsBuffer || !this.indirectBuffer || !this.overlayIndirectBuffer) return;
-    const requiredCapacity = Math.max(1, source.voxelCapacity, source.brickCapacity);
+    const requiredCapacity = Math.max(1, source.voxelCapacity, source.brickCapacity, minimumInstanceCapacity);
     if (!this.instanceBuffer || requiredCapacity > this.instanceCapacity) {
       this.instanceBuffer?.destroy();
       this.instanceBuffer = this.device.createBuffer({
@@ -1009,23 +1086,44 @@ export class SparseVoxelDebugRenderer {
     if (this.sourceRevision !== this.source.revision) this.rebuildBindings();
     const plan = voxelDebugPlan(options.mode, this.source);
     if (!plan.enabled || !this.computeBindGroup || !this.renderBindGroup || !this.uniformBuffer || !this.indirectBuffer) return false;
+    const structuralDomain = this.source.structural?.domain;
+    if (options.mode === "surface-voxels" && (!structuralDomain || structuralDomain.cellSize_m.some((value) => !Number.isFinite(value) || value <= 0))) return false;
+    if (options.mode === "surface-voxels") {
+      const requiredSurfaceCapacity = surfaceVoxelInstanceCapacity(this.source.voxelCapacity);
+      const requiredSurfaceBytes = requiredSurfaceCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE;
+      const maximumBindingBytes = Number(this.device.limits?.maxStorageBufferBindingSize ?? Number.MAX_SAFE_INTEGER);
+      // Never publish an arbitrary geographic prefix if the complete bounded
+      // expansion cannot be bound on this device.
+      if (!Number.isSafeInteger(requiredSurfaceBytes) || requiredSurfaceBytes > maximumBindingBytes) return false;
+      if (this.instanceCapacity < requiredSurfaceCapacity) this.rebuildBindings(requiredSurfaceCapacity);
+      if (!this.computeBindGroup || !this.renderBindGroup || this.instanceCapacity < requiredSurfaceCapacity) return false;
+    }
     const light = normalizeDirection(options.lightDirection ?? [0.35, 0.84, 0.41]);
     const uniforms = new Float32Array(36);
     uniforms.set(options.viewProjection, 0);
     uniforms.set([...options.cameraPosition, 1], 16);
     uniforms.set([...light, 0], 20);
-    uniforms.set([options.mode === "raw-voxels" ? 1 : 2, options.gridOpacity ?? 0.82, options.exposure ?? 1, this.source.materialCount], 24);
+    uniforms.set([options.mode === "brick-grid" ? 2 : options.mode === "surface-voxels" ? 3 : 1, options.gridOpacity ?? 0.82, options.exposure ?? 1, this.source.materialCount], 24);
     uniforms.set([...options.containerBounds.min, 0], 28);
     uniforms.set([...options.containerBounds.max, options.containerClosedTop ? 1 : 0], 32);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
-    this.device.queue.writeBuffer(this.compactSettingsBuffer!, 0, new Uint32Array([plan.capacity, plan.overlayCapacity, 0, 0]));
+    const compactSettings = new ArrayBuffer(32);
+    new Uint32Array(compactSettings, 0, 4).set([
+      plan.capacity,
+      plan.overlayCapacity,
+      this.instanceCapacity,
+      structuralDomain?.maximumDepth ?? 0,
+    ]);
+    new Float32Array(compactSettings, 16, 4).set([...(structuralDomain?.cellSize_m ?? [1, 1, 1]), 0]);
+    this.device.queue.writeBuffer(this.compactSettingsBuffer!, 0, compactSettings);
 
-    const voxelMode = options.mode === "raw-voxels";
-    const compute = encoder.beginComputePass({ label: options.mode === "raw-voxels" ? "Prepare raw sparse voxels" : "Prepare sparse brick grid" });
+    const voxelMode = options.mode !== "brick-grid";
+    const surfaceMode = options.mode === "surface-voxels";
+    const compute = encoder.beginComputePass({ label: surfaceMode ? "Prepare finest surface voxels" : voxelMode ? "Prepare raw sparse voxels" : "Prepare sparse brick grid" });
     compute.setBindGroup(0, this.computeBindGroup);
     compute.setPipeline(voxelMode ? this.prepareRawPipeline! : this.prepareGridPipeline!);
     compute.dispatchWorkgroups(1);
-    compute.setPipeline(voxelMode ? this.compactVoxelPipeline! : this.compactBrickPipeline!);
+    compute.setPipeline(surfaceMode ? this.compactSurfaceVoxelPipeline! : voxelMode ? this.compactVoxelPipeline! : this.compactBrickPipeline!);
     compute.dispatchWorkgroups(...voxelDebugDispatch(plan.computeWorkgroups));
     if (plan.overlayWorkgroups > 0 && this.compactFluidBrickPipeline) {
       compute.setPipeline(this.compactFluidBrickPipeline);
@@ -1034,7 +1132,7 @@ export class SparseVoxelDebugRenderer {
     compute.end();
 
     const pass = encoder.beginRenderPass({
-      label: options.mode === "raw-voxels" ? "Raw sparse voxel inspection" : "Sparse brick boundary inspection",
+      label: surfaceMode ? "Finest surface voxel inspection" : voxelMode ? "Raw sparse voxel inspection" : "Sparse brick boundary inspection",
       colorAttachments: [{
         view: options.colorTarget,
         clearValue: { r: 0.008, g: 0.012, b: 0.018, a: 1 },

@@ -27,12 +27,12 @@ function expectSource(source: string, pattern: RegExp, message: string): void {
   assert.ok(pattern.test(source), message);
 }
 
-test("raster presentation is the default while SVO remains selectable", () => {
-  assert.equal(DEFAULT_SVO_RENDER_MODE, "raster");
+test("SVO presentation is the WebGPU default while raster remains selectable", () => {
+  assert.equal(DEFAULT_SVO_RENDER_MODE, "svo");
   assert.equal(DEFAULT_SVO_LIGHTING_MODE, "cone");
   assert.deepEqual(DEFAULT_SVO_LIGHTING_OPTIONS, { shadowsEnabled: true, ambientOcclusionEnabled: true });
   expectSource(rendererSource, /svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE/,
-    "callers which do not opt in must use the bounded raster presentation");
+    "callers which do not override presentation must use sparse voxels");
   expectSource(rendererSource, /DEFAULT_SVO_LIGHTING_MODE[^]*DEFAULT_SVO_RENDER_MODE[^]*type SvoLightingMode[^]*type SvoRenderMode[^]*from "\.\/svo-render-mode"/,
     "renderer must consume the canonical render and lighting toggles");
   expectSource(viewportSource, /ui\.svoLightingMode,[^]*shadowsEnabled: ui\.svoShadowsEnabled,[^]*ambientOcclusionEnabled: ui\.svoAmbientOcclusionEnabled,[^]*overlay: ui\.svoCostOverlay/,

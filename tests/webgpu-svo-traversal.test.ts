@@ -4,6 +4,7 @@ import test from "node:test";
 import { planAdaptiveSparseBrickOctree } from "../lib/adaptive-sparse-brick-plan";
 import { packSparseBrickPlan, planSparseBrickOctree } from "../lib/sparse-brick-octree";
 import {
+  compareSvoIntersectionArithmetic,
   createWebgpuSvoTraversalWGSL,
   intersectSvoRayAabb,
   svoBrickVoxelIndex,
@@ -11,6 +12,7 @@ import {
   webgpuSvoTraversalWGSL,
   type SvoPackedTopologyView,
   type SvoWorldMapping,
+  type SvoTraversalWorkDiagnostics,
 } from "../lib/webgpu-svo-traversal";
 
 const mapping: SvoWorldMapping = {
@@ -141,9 +143,36 @@ test("WGSL helper consumes packed topology directly with bounded traversal", () 
   assert.match(webgpuSvoTraversalWGSL, /SVO_STACK_CAPACITY: u32 = 32u/);
   assert.match(webgpuSvoTraversalWGSL, /SVO_MAX_VISITS: u32 = 256u/);
   assert.match(webgpuSvoTraversalWGSL, /svoNodeBounds/);
+  assert.match(webgpuSvoTraversalWGSL, /let inverseDirection = 1\.0 \/ ray\.direction/);
+  assert.match(webgpuSvoTraversalWGSL, /fn svoChildBounds/);
+  assert.match(webgpuSvoTraversalWGSL, /svoRayAabbWithInverse\(ray, inverseDirection, svoChildBounds\(parentBounds, octant\)\)/);
+  assert.doesNotMatch(webgpuSvoTraversalWGSL, /svoRayAabb\(ray, svoNodeBounds\(child, mapping\)\)/);
   assert.match(webgpuSvoTraversalWGSL, /countOneBits\(mask/);
   assert.match(webgpuSvoTraversalWGSL, /fn svoBrickVoxelIndex/);
   assert.doesNotMatch(webgpuSvoTraversalWGSL, /DebugRecord|voxelRecords|brickRecords/);
   assert.match(createWebgpuSvoTraversalWGSL({ group: 2, control: 4, nodes: 5, leaves: 6 }), /@group\(2\) @binding\(5\) var<storage, read> svoNodes/);
   assert.equal(svoBrickVoxelIndex(512, [2, 3, 1], 8), 602);
+});
+
+test("dense structural fixture quantifies eliminated child-bound decode and division work", () => {
+  const coordinates = Array.from({ length: 8 }, (_, octant) => ({
+    x: octant & 1,
+    y: (octant >> 1) & 1,
+    z: (octant >> 2) & 1,
+  }));
+  const topology = packedView(planSparseBrickOctree(coordinates, { brickSize: 4, maximumDepth: 1 }));
+  const localMapping: SvoWorldMapping = { origin: [0, 0, 0], cellSize: [1, 1, 1], brickSize: 4, maximumDepth: 1 };
+  const diagnostics: SvoTraversalWorkDiagnostics = { rootAabbTests: 0, internalNodesExpanded: 0, childAabbTests: 0 };
+  const result = traversePackedSvo(
+    { origin: [-1, -1, -1], direction: [1, 1.125, 1.25] },
+    topology,
+    localMapping,
+    { diagnostics },
+  );
+  assert.equal(result.status, "hit");
+  assert.deepEqual(diagnostics, { rootAabbTests: 1, internalNodesExpanded: 1, childAabbTests: 8 });
+  assert.deepEqual(compareSvoIntersectionArithmetic(diagnostics), {
+    previous: { mortonBoundsDecodes: 9, rayDirectionDivisions: 27 },
+    optimized: { mortonBoundsDecodes: 2, rayDirectionDivisions: 3 },
+  });
 });

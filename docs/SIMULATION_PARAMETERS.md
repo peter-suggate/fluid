@@ -44,6 +44,8 @@ Edited in the **scene configuration modal**; part of `SceneDescription`
 | Random seed | `randomSeed` | reproducibility manifest |
 | Rigid bodies | `rigidBodies[]` | rigid solver + coupling |
 | Terrain heightfield | `terrain` (base level + basin/mound features) | GPU solvers (static solid columns), initial fluid state, rigid ground contact, renderer (garden environment); the CPU reference ignores it |
+| Finest voxel spacing | `voxelDomain.finestCellSize_m` | shared x/y/z lattice for GPU fluid, sparse scene geometry, and SVO rendering |
+| Sparse brick edge | `voxelDomain.brickSize_cells` | shared terminal payload size; 4³/8³ for renderer-only scenes, 8³ required while fluid owner pages are active |
 
 ## Common numerics (serialized, consumed by every method)
 
@@ -65,7 +67,6 @@ the per-parameter override (sparse, per method, resettable to the preset).
 | Parameter | Tier | Meaning |
 | --- | --- | --- |
 | Pressure V-cycles | coarse | multigrid refinement cycles after the initial full cycle (default 8; the remeshed dam-settling convergence floor) |
-| Surface columns | fine | target x/z column count (horizontal resolution) |
 | Surface band layers | fine | cubic cells kept around the free surface (auto-grows if the surface spans more) |
 | Neighbor base delta | fine | max tall-cell base step between adjacent columns |
 | Remesh interval | fine | steps between band re-planning passes |
@@ -74,7 +75,6 @@ the per-parameter override (sparse, per method, resettable to the preset).
 | Parameter | Tier | Meaning |
 | --- | --- | --- |
 | PCG iterations | coarse | maximum tall-column LDLᵀ-preconditioned CG iterations; convergence targets the scene relative tolerance |
-| Finest columns | fine | target finest x/z lattice size on which quadtree leaves are formed |
 | Adaptivity | fine | Ando--Batty Eq. 38 blend: 0 is uniform, 1 permits full quadtree coarsening |
 
 The optical depth remains the paper's chosen one quarter of liquid depth.
@@ -85,7 +85,6 @@ not user controls.
 | Parameter | Tier | Meaning |
 | --- | --- | --- |
 | Jacobi iterations | coarse | damped-Jacobi pressure sweeps per step (preset 64/80/96) |
-| Grid columns | fine | target x/z column count for the matched full-depth cubic grid |
 
 ### CPU reference (`cpu-reference`)
 | Parameter | Tier | Meaning |
@@ -100,15 +99,15 @@ budget and relative tolerance come from the scene numerics in both roles.
 
 ## Increasing realism — recommended order
 
-1. **Quality preset** (coarse): raises grid resolution and pressure effort
-   together with method-appropriate ratios.
+1. **Unified voxel domain** (scene): reduce `finestCellSize_m` to raise spatial
+   resolution coherently for every GPU method and sparse renderer.
 2. **Pressure effort** (coarse, per method): tightens incompressibility at
    impacts — visible as less volume "bounce" and crisper splashes.
 3. **Fixed/max dt** (fine, scene modal): smaller steps reduce advection
    smearing and CFL alerts in impact-heavy scenes (the paper presets already
    use 1/180–1/360 s).
-4. **Surface band layers / surface columns** (fine, tall-cell): more detail
-   where the free surface actually is.
+4. **Surface band layers** (fine, tall-cell): more stored support where the
+   free surface actually is; this does not alter the scene lattice.
 5. **Viscosity and surface tension** (scene modal): physical realism for
    small-scale features; note σ is outside the tall-cell paper scope.
 

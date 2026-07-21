@@ -19,7 +19,9 @@ test("SVO cost diagnostic controls are bounded and retain a production-off defau
     overlay: "off", maximumTraversalDepth: 21, maximumNodeVisits: 256, overlayOpacity: 0.82,
   });
   assert.equal(svoCostOverlayCode("traversal-depth"), 1);
-  assert.equal(svoCostOverlayCode("exhaustion"), 7);
+  assert.equal(svoCostOverlayCode("brick-tests"), 3);
+  assert.equal(svoCostOverlayCode("mip-steps"), 8);
+  assert.equal(svoCostOverlayCode("exhaustion"), 10);
   assert.deepEqual(normalizeSvoRenderDiagnostics({
     overlay: "total-cost", maximumTraversalDepth: 99, maximumNodeVisits: 0, overlayOpacity: 2,
   }), { overlay: "total-cost", maximumTraversalDepth: 21, maximumNodeVisits: 1, overlayOpacity: 1 });
@@ -53,9 +55,12 @@ test("dry shader measures topology, field, candidate, and shadow work before app
   assert.match(svoDrySceneShader, /mapping\.maxVisits=min\(mapping\.maxVisits,dryDiagnosticMaximumNodeVisits\(\)\)/);
   assert.match(svoDrySceneShader, /fn dryTraverse\([^]*svoTraverseWithDepthLimit/);
   assert.match(svoDrySceneShader, /dryPrimaryNodeVisits\+=leaf\.visits/);
+  assert.match(svoDrySceneShader, /dryPrimaryLeafVisits\+=1u/);
+  assert.match(svoDrySceneShader, /dryPrimaryEmptyBrickSkips\+=1u/);
   assert.match(svoDrySceneShader, /dryPrimaryFieldSteps\+=fluid\.fieldSteps/);
   assert.match(svoDrySceneShader, /dryCandidateWorkItems\+=candidate\.workItems/);
   assert.match(svoDrySceneShader, /dryShadowNodeVisits\+=result\.nodeVisits/);
+  assert.match(svoDrySceneShader, /dryMipSteps\+=1u/);
   assert.match(svoDrySceneShader, /targets\.radianceDepth=dryCostOverlay\(targets\.radianceDepth\)/);
   assert.match(rendererSource, /svoCostOverlayCode\(activeSvoDiagnostics\.overlay\)/);
   assert.match(rendererSource, /diagnosticsKey/);

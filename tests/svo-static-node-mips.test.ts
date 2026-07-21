@@ -9,6 +9,7 @@ function scene(terrain = false): SceneDescription {
   return {
     schemaVersion: "1.0.0", sceneId: "static-node-mip-test", environment: "garden", randomSeed: 1, duration_s: 1,
     container: { width_m: 16, height_m: 8, depth_m: 16, fillFraction: 0, top: "open", fluidWallMode: "free-slip" },
+    voxelDomain: { finestCellSize_m: 1, brickSize_cells: 8 },
     terrain: terrain ? { baseHeight_m: .5, features: [] } : undefined,
     fluid: { density_kg_m3: 1_000, dynamicViscosity_Pa_s: .001, surfaceTension_N_m: .07, gravity_m_s2: { x: 0, y: -9.81, z: 0 }, initialCondition: "tank-fill" },
     nominalResolution: { length_m: 1 },

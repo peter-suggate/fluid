@@ -11,36 +11,49 @@ mode and preserved-but-ignored only by an explicit migration tool.
 {
   "schemaVersion": "1.0.0",
   "sceneId": "static-water-001",
+  "systems": {"fluid": true},
   "randomSeed": 1,
   "duration_s": 2.0,
   "container": {
-    "size_m": [1.0, 1.0, 1.0],
-    "origin_m": [0.0, 0.0, 0.0],
+    "width_m": 1.0,
+    "height_m": 1.0,
+    "depth_m": 1.0,
+    "fillFraction": 0.5,
     "top": "open",
     "fluidWallMode": "free-slip"
+  },
+  "voxelDomain": {
+    "finestCellSize_m": 0.025,
+    "brickSize_cells": 8
   },
   "fluid": {
     "density_kg_m3": 998.2,
     "dynamicViscosity_Pa_s": 0.001002,
-    "gravity_m_s2": [0.0, -9.80665, 0.0],
-    "initialRegions": [
-      {"shape": "box", "min_m": [0.0, 0.0, 0.0], "max_m": [1.0, 0.5, 1.0]}
-    ]
+    "surfaceTension_N_m": 0.072,
+    "gravity_m_s2": {"x": 0.0, "y": -9.80665, "z": 0.0},
+    "initialCondition": "tank-fill"
   },
   "nominalResolution": {"length_m": 0.025},
   "rigidBodies": [],
   "numerics": {
-    "clock": {"mode": "fixed", "fixedDt_s": 0.001, "maxDt_s": 0.004},
-    "eulerian": {
-      "cellSize_m": 0.025,
-      "pressureRelativeTolerance": 1e-8,
-      "pressureMaxIterations": 1000,
-      "advection": "semi-lagrangian-rk2",
-      "interface": "volume-of-fluid"
-    }
+    "fixedDt_s": 0.001,
+    "maxDt_s": 0.004,
+    "pressureRelativeTolerance": 1e-8,
+    "pressureMaxIterations": 1000
   }
 }
 ```
+
+`voxelDomain` is required; loaders do not synthesize it from
+`nominalResolution`. Its finest spacing is the sole GPU spatial-resolution
+authority and its brick edge is shared by the sparse scene and SVO renderer.
+Renderer-only scenes may select 4³ or 8³-cell terminal bricks. Fluid-enabled
+scenes currently require 8³ bricks because their owner-page lifecycle is
+8³-native; the loader fails fast instead of silently degrading a 4³ request.
+`nominalResolution` remains only the CPU reference-oracle resolution.
+`systems.fluid` defaults to enabled when omitted; setting it to `false`
+requests a static render world without fluid authority, coupling, or water
+presentation.
 
 ## Terrain heightfield (optional)
 

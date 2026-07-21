@@ -47,6 +47,22 @@ test("props outside the tank add local environment bricks without filling the ro
   assert.ok(distantProp.brickDimensions[0] > 250, "bounds describe the full scene without densely allocating them");
 });
 
+test("authored world bounds enlarge the shared address space without allocating empty bricks", () => {
+  const scene = sceneWithUnitCells();
+  const baseline = planSparseSceneDomain(scene, [8, 8, 8], 4, []);
+  const bounded = planSparseSceneDomain(scene, [8, 8, 8], 4, [], {
+    worldBounds_m: {
+      min: { x: -20, y: -4, z: -8 },
+      max: { x: 24, y: 12, z: 16 },
+    },
+  });
+
+  assert.deepEqual(bounded.worldOrigin_m, { x: -20, y: -4, z: -8 });
+  assert.deepEqual(bounded.sceneDimensionsCells, [44, 16, 24]);
+  assert.deepEqual(bounded.solverGridOriginCells, [16, 4, 4]);
+  assert.equal(bounded.coordinates.length, baseline.coordinates.length);
+});
+
 test("solver and environment covers are deduplicated and remain non-overlapping", () => {
   const scene = sceneWithUnitCells();
   const domain = planSparseSceneDomain(scene, [8, 8, 8], 4, [

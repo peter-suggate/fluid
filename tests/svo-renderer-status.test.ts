@@ -16,7 +16,7 @@ const ready: EffectiveRendererConditions = {
   svoEncoded: true,
 };
 
-test("effective renderer status preserves raster default and reports successful SVO", () => {
+test("effective renderer status preserves explicit raster and reports the SVO default lifecycle", () => {
   assert.deepEqual(resolveEffectiveRendererStatus("raster", {
     pipelineAvailable: false,
     sourceAvailable: false,
@@ -29,8 +29,9 @@ test("effective renderer status preserves raster default and reports successful 
     effectiveMode: "svo",
   });
   assert.deepEqual(useDiagnosticsStore.getInitialState().effectiveRendererStatus, {
-    requestedMode: "raster",
+    requestedMode: "svo",
     effectiveMode: "raster",
+    fallbackReason: "missing-source",
   });
 });
 

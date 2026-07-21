@@ -142,7 +142,7 @@ export function VisualPanel() {
         <RangeControl label="Maximum node visits" unit="nodes" value={svoMaximumNodeVisits} min={1} max={256} step={1} displayDigits={0} onChange={setSvoMaximumNodeVisits} hint="Per-call SVO node budget. Lower values expose expensive rays by exhausting them earlier." />
         <RangeControl label="Overlay opacity" unit="%" value={svoOverlayOpacity * 100} min={10} max={100} step={1} displayDigits={0} onChange={(value) => setSvoOverlayOpacity(value / 100)} />
       </>}
-      <small className="control-hint">Heatmaps use shader counters from the rendered ray: topology depth and visits, signed-distance samples, analytic candidate work, and hard-shadow traversal. Depth and node limits change the diagnostic traversal budget.</small>
+      <small className="control-hint">Heatmaps use shader counters from the rendered ray: topology nodes, tested and skipped payload bricks, signed-distance samples, analytic candidates, wide-mip cone steps, and exact shadow traversal. Depth and node limits change the diagnostic traversal budget.</small>
     </section>
 
     <section className="panel-section utility-controls">
@@ -155,7 +155,7 @@ export function VisualPanel() {
         Active: {effectiveRendererStatus.effectiveMode === "svo" ? "Sparse voxels" : "Raster"}
         {effectiveRendererStatus.fallbackReason ? ` fallback · ${rendererFallbackLabels[effectiveRendererStatus.fallbackReason]}` : ""}
       </small>
-      <small className="control-hint">Raster is the interactive default. Sparse voxels consumes the octree directly for explicit rendering diagnostics and A/B comparisons.</small>
+      <small className="control-hint">Sparse voxels is the WebGPU default and consumes the octree directly. Raster remains available for explicit fallback and A/B comparisons.</small>
       <div className="section-heading"><h2>Lighting</h2><span>SVO QUALITY</span></div>
       <div className="segmented compact" role="group" aria-label="SVO lighting quality">
         <button disabled={svoRenderMode !== "svo"} className={svoLightingMode === "direct" ? "active" : ""} onClick={() => setSvoLightingMode("direct")}>Direct</button>
@@ -173,9 +173,10 @@ export function VisualPanel() {
       <div className="segmented compact">
         <button className={voxelRenderMode === "smooth" ? "active" : ""} onClick={() => setVoxelRenderMode("smooth")}>Hybrid</button>
         <button className={voxelRenderMode === "raw-voxels" ? "active" : ""} onClick={() => setVoxelRenderMode("raw-voxels")}>Raw voxels</button>
+        <button className={voxelRenderMode === "surface-voxels" ? "active" : ""} onClick={() => setVoxelRenderMode("surface-voxels")}>Finest surface</button>
         <button className={voxelRenderMode === "brick-grid" ? "active" : ""} onClick={() => setVoxelRenderMode("brick-grid")}>Brick grid</button>
       </div>
-      <small className="control-hint">Hybrid renders the finished scene. Raw draws each wet compact octree cell as a separated cube; Brick grid outlines every live compact leaf. Both inspection views use indirect GPU draws with no topology readback.</small>
+      <small className="control-hint">Hybrid renders the finished scene. Raw preserves adaptive cell sizes; Finest surface subdivides their visible shells to the scene&apos;s finest cell size; Brick grid outlines every live compact leaf. Inspection stays GPU-only with indirect draws.</small>
     </section>
 
     {octree && <section className="panel-section utility-controls paper-pipeline-inspector" data-testid="paper-pipeline-inspector">

@@ -215,8 +215,6 @@ export interface VoxelScenePlan {
 }
 
 export interface PlanVoxelSceneOptions {
-  voxelSize_m?: number;
-  brickCells?: number;
   /** Defaults to half the voxel diagonal, sufficient for centre-sampled conservative candidates. */
   conservativePadding_m?: number;
 }
@@ -495,8 +493,8 @@ function unionBounds(bounds: VoxelAabb[]): VoxelAabb {
 }
 
 export function planVoxelScene(scene: SceneDescription, options: PlanVoxelSceneOptions = {}): VoxelScenePlan {
-  const voxelSize_m = options.voxelSize_m ?? scene.nominalResolution.length_m;
-  const brickCells = options.brickCells ?? 8;
+  const voxelSize_m = scene.voxelDomain.finestCellSize_m;
+  const brickCells = scene.voxelDomain.brickSize_cells;
   if (!(voxelSize_m > 0) || !Number.isFinite(voxelSize_m)) throw new Error("Voxel size must be finite and positive");
   if (!Number.isInteger(brickCells) || brickCells < 2 || brickCells > 32 || (brickCells & (brickCells - 1)) !== 0) {
     throw new Error("Brick cell count must be a power of two in [2, 32]");

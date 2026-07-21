@@ -63,7 +63,6 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     .filter((key) => JSON.stringify(values[key]) !== JSON.stringify(canonical[key]));
   const approvedQueryKeys = new Set([
     "gpu", "method", "scene", "quality", "render", "voxels",
-    "param.octree.surfaceColumns",
     "param.octree.faceVelocityTransport",
     "param.octree.globalFineLevelSetFactor",
     "param.octree.powerDiagramProjection",
@@ -76,7 +75,6 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     config.methodId !== "octree" && "method must be octree",
     config.quality !== "balanced" && "quality must be balanced",
     !config.exactScene && "scene parameters must match the authored dam-break preset",
-    Number(values.surfaceColumns) !== 384 && "finest columns must be 384",
     values.faceVelocityTransport !== "on" && "compact face transport must be on",
     values.globalFineLevelSetFactor !== "4" && "global fine level set must be factor 4",
     values.powerDiagramProjection !== "authoritative" && "power projection must be authoritative",

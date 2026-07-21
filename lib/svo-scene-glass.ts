@@ -103,7 +103,7 @@ function positiveInteger(value: number, maximum: number, label: string): number 
 function cellSize(scene: SceneDescription, input: number | SvoVec3 | undefined): SvoVec3 {
   const value: SvoVec3 = typeof input === "number"
     ? [input, input, input]
-    : input ?? [scene.nominalResolution.length_m, scene.nominalResolution.length_m, scene.nominalResolution.length_m];
+    : input ?? [scene.voxelDomain.finestCellSize_m, scene.voxelDomain.finestCellSize_m, scene.voxelDomain.finestCellSize_m];
   if (value.some((component) => !Number.isFinite(component) || component <= 0)) {
     throw new RangeError("SVO scene glass cell size must contain finite positive components");
   }
@@ -111,7 +111,7 @@ function cellSize(scene: SceneDescription, input: number | SvoVec3 | undefined):
 }
 
 function glassThickness(scene: SceneDescription): number {
-  return Math.max(0.002, Math.min(0.012, scene.nominalResolution.length_m * 0.25));
+  return Math.max(0.002, Math.min(0.012, scene.voxelDomain.finestCellSize_m * 0.25));
 }
 
 function pane(

@@ -67,7 +67,6 @@ async function assertComputeSentinel(device: GPUDevice): Promise<number> {
 
 function solverValues(): MethodParamValues {
   const values = octreeMethod.presetFor("balanced");
-  values.surfaceColumns = Number(process.env.FLUID_SURFACE_COLUMNS ?? 384);
   values.leafSolver = process.env.FLUID_OCTREE_LEAF_SOLVER ?? "mgpcg";
   values.faceVelocityTransport = process.env.FLUID_OCTREE_FACE_TRANSPORT === "0" ? "off" : "on";
   values.powerDiagramProjection = process.env.FLUID_OCTREE_POWER_PROJECTION ?? "authoritative";
@@ -107,6 +106,7 @@ try {
     }
     if (stage !== "compute-sentinel") {
       const scenario = createSmokeScenario("dam-break-ui");
+      scenario.scene.voxelDomain.finestCellSize_m = Number(process.env.FLUID_VOXEL_CELL_SIZE ?? 0.05);
       const validationErrors: string[] = [];
       let lastInitializationCompleted = 0;
       device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));

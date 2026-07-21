@@ -4,7 +4,9 @@ import { pathToFileURL } from "node:url";
 import {
   SPARSE_VOXEL_DEBUG_MATERIAL_STRIDE,
   SPARSE_VOXEL_DEBUG_RECORD_STRIDE,
+  SURFACE_VOXEL_MAXIMUM_INSTANCES_PER_RECORD,
   SparseVoxelDebugRenderer,
+  surfaceVoxelInstanceCapacity,
   voxelDebugComputeShader,
   voxelDebugPlan,
   voxelDebugRenderShader
@@ -21,14 +23,18 @@ test("public sparse voxel render source is structural and exposes only inspectio
     voxelRecords: binding, voxelCount: binding, brickRecords: binding, brickCount: binding, materials: binding,
     voxelCapacity: 64, brickCapacity: 8, materialCount: 3, revision: 7
   } satisfies SparseVoxelRenderSource;
-  const modes = ["raw-voxels", "brick-grid"] as const;
-  assert.deepEqual(modes.map((mode) => voxelDebugPlan(mode, source).recordKind), ["voxels", "bricks"]);
+  const modes = ["raw-voxels", "surface-voxels", "brick-grid"] as const;
+  assert.deepEqual(modes.map((mode) => voxelDebugPlan(mode, source).recordKind), ["voxels", "surface-voxels", "bricks"]);
 });
 
-test("voxel inspection plans raw voxels and brick grids from one source", () => {
+test("voxel inspection plans adaptive, finest-surface, and brick-grid views from one source", () => {
   const source = { voxelCapacity: 129, brickCapacity: 65 };
   assert.deepEqual(voxelDebugPlan("raw-voxels", source), {
     enabled: true, recordKind: "voxels", capacity: 129, computeWorkgroups: 3, verticesPerInstance: 36, topology: "triangle-list",
+    overlayCapacity: 65, overlayWorkgroups: 2
+  });
+  assert.deepEqual(voxelDebugPlan("surface-voxels", source), {
+    enabled: true, recordKind: "surface-voxels", capacity: 129, computeWorkgroups: 3, verticesPerInstance: 36, topology: "triangle-list",
     overlayCapacity: 65, overlayWorkgroups: 2
   });
   assert.deepEqual(voxelDebugPlan("brick-grid", source), {
@@ -38,6 +44,9 @@ test("voxel inspection plans raw voxels and brick grids from one source", () => 
   assert.equal(voxelDebugPlan("brick-grid", { voxelCapacity: 1, brickCapacity: 0 }).enabled, false);
   assert.equal(voxelDebugPlan("raw-voxels", { voxelCapacity: 1, brickCapacity: 0 }).overlayWorkgroups, 0,
     "sources without brick records draw no residency outlines");
+  assert.equal(SURFACE_VOXEL_MAXIMUM_INSTANCES_PER_RECORD, 8);
+  assert.equal(surfaceVoxelInstanceCapacity(source.voxelCapacity), 129 * 8,
+    "every source record reserves its complete 2x2x2 finest-shell expansion");
 });
 
 test("fluid brick residency outlines compact separately and color by state", () => {
@@ -69,6 +78,13 @@ test("voxel debug ABI and shaders retain GPU material color and indirect instanc
   assert.match(voxelDebugComputeShader, /drawArguments\.vertexCount = 24u/);
   assert.match(voxelDebugComputeShader, /materialAndFlags\.y & ACTIVE/);
   assert.match(voxelDebugComputeShader, /compactSettings\.capacity/);
+  assert.match(voxelDebugComputeShader, /fn compactSurfaceVoxels/);
+  assert.match(voxelDebugComputeShader, /record\.extent\.xyz \/ compactSettings\.finestCell\.xyz/,
+    "surface inspection derives finest-cell subdivisions from structural world spacing");
+  assert.match(voxelDebugComputeShader, /fn claimSurfaceInstance[\s\S]*atomicCompareExchangeWeak/,
+    "expanded surface voxels cannot publish an indirect count beyond their bounded instance arena");
+  assert.match(voxelDebugComputeShader, /for \(var z = 1u; z \+ 1u < subdivisions\.z/,
+    "coarse cells emit only their unique boundary shell rather than walking their interior volume");
   assert.match(voxelDebugRenderShader, /let material = materials\[/);
   assert.match(voxelDebugRenderShader, /material\.baseColor\.a <= 0\.001\) \{ discard; \}/);
   assert.match(voxelDebugRenderShader, /let separatedCorner = mix\(vec3f\(0\.035\), vec3f\(0\.965\), corner\);/,
@@ -138,7 +154,11 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
     "raw cubes remain two-sided because backend framebuffer orientation reverses their standalone clip-space winding");
   renderer.setSource({
     voxelRecords: binding, voxelCount: binding, brickRecords: binding, brickCount: binding, materials: binding,
-    voxelCapacity: 80, brickCapacity: 20, materialCount: 2, revision: 1
+    voxelCapacity: 80, brickCapacity: 20, materialCount: 2, revision: 1,
+    structural: { domain: {
+      worldOrigin_m: [0, 0, 0], cellSize_m: [0.25, 0.25, 0.25],
+      dimensionsCells: [8, 8, 8], brickSize: 8, maximumDepth: 2,
+    } } as unknown as SparseVoxelRenderSource["structural"],
   });
   const common = {
     colorTarget: {} as GPUTextureView, depthTarget: {} as GPUTextureView,
@@ -148,19 +168,22 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
     containerClosedTop: false
   };
   assert.equal(renderer.encode(encoder, { ...common, mode: "raw-voxels", depthLoadOp: "clear", colorLoadOp: "clear" }), true);
+  assert.equal(renderer.encode(encoder, { ...common, mode: "surface-voxels", depthLoadOp: "clear", colorLoadOp: "clear" }), true);
   assert.equal(renderer.encode(encoder, { ...common, mode: "brick-grid" }), true);
-  assert.equal(indirectDraws, 4, "each mode draws its primary records plus the fluid residency outline overlay");
+  assert.equal(indirectDraws, 6, "each mode draws its primary records plus the fluid residency outline overlay");
   assert.deepEqual(paneDraws, [
+    [6, 1, 0, 3], [6, 1, 0, 0], [6, 1, 0, 1], [6, 1, 0, 2], [6, 1, 0, 4],
     [6, 1, 0, 3], [6, 1, 0, 0], [6, 1, 0, 1], [6, 1, 0, 2], [6, 1, 0, 4]
-  ], "open tank panes draw back-to-front after opaque voxels");
+  ], "both voxel modes draw open tank panes back-to-front after opaque voxels");
   assert.equal(renderDescriptors[0].depthStencilAttachment?.depthClearValue, 1);
   const firstColorAttachment = Array.from(renderDescriptors[0].colorAttachments)[0];
   assert.equal(firstColorAttachment?.loadOp, "clear");
   assert.deepEqual(firstColorAttachment?.clearValue, { r: 0.008, g: 0.012, b: 0.018, a: 1 });
-  assert.equal(writes.length, 4, "each voxel view uploads only view and declared capacity");
+  assert.equal(writes.length, 6, "each voxel view uploads only view and declared capacity");
 
   renderer.setSource(undefined);
-  assert.ok(destroyed.includes("Sparse voxel debug instances (80)"), "detaching inspection releases the capacity-sized voxel arena");
+  assert.ok(destroyed.includes("Sparse voxel debug instances (80)"), "surface mode retires the raw-sized voxel arena");
+  assert.ok(destroyed.includes("Sparse voxel debug instances (640)"), "detaching inspection releases the complete surface-expansion arena");
   assert.ok(destroyed.includes("Sparse voxel debug overlay instances (20)"), "detaching inspection releases the overlay arena");
   renderer.destroy();
   renderer.destroy();
@@ -168,6 +191,7 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
   assert.deepEqual(destroyed.sort(), [
     "Sparse voxel debug compaction settings",
     "Sparse voxel debug indirect draw",
+    "Sparse voxel debug instances (640)",
     "Sparse voxel debug instances (80)",
     "Sparse voxel debug overlay indirect draw",
     "Sparse voxel debug overlay instances (20)",

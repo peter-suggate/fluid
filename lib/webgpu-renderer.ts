@@ -157,9 +157,9 @@ export type OptionalRendererPipeline =
   | "secondary-particles";
 
 /**
- * Pipeline compilation requested by the current presentation mode. The
- * default paused raster-water frame deliberately requests none of these: it
- * needs only the authoritative water pipeline and the final upscale.
+ * Pipeline compilation requested by the current presentation mode. Explicit
+ * raster mode requests none of these; the WebGPU default requests the sparse
+ * dry-scene renderer alongside the authoritative water path.
  */
 export function optionalRendererPipelineRequests(
   gridOverlay: GridOverlayConfig | undefined,
@@ -193,6 +193,17 @@ export interface SimulationRunConfig {
 export function structuralMethodValues(config: SimulationRunConfig): MethodParamValues {
   const runtime = new Set(getMethod(config.methodId).runtimeParamKeys ?? []);
   return Object.fromEntries(Object.entries(config.values).filter(([key]) => !runtime.has(key)));
+}
+
+/** Static renderer worlds are method-independent; fluid worlds require a GPU solver factory. */
+export function canInitializeGPUSceneSource(scene: SceneDescription, methodId: string): boolean {
+  const method = getMethod(methodId);
+  return !planSceneRuntime(scene, { methodId }).fluidSolver || Boolean(method.createSolver || method.createSolverAsync);
+}
+
+/** Content identity for every construction-time input captured by the GPU scene source. */
+export function gpuSceneSolverKey(scene: SceneDescription, config: SimulationRunConfig): string {
+  return `${config.simulationEpoch ?? 0}:fluid-${planSceneRuntime(scene, { methodId: config.methodId }).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment ?? "default"}:${JSON.stringify(scene.voxelDomain)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.container.top}:${scene.container.fluidWallMode}:${JSON.stringify(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
 }
 
 export type GPUStatus =
@@ -811,7 +822,7 @@ export class FluidLabRenderer {
     this.techniqueAuditOverlayPipeline?.setOwnerRows(pressureSamples);
   }
 
-  private solverKey(scene:SceneDescription,config:SimulationRunConfig){return`${config.simulationEpoch??0}:fluid-${planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment??"default"}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialBrickSeeds_m??null)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow??null)}`;}
+  private solverKey(scene:SceneDescription,config:SimulationRunConfig){return gpuSceneSolverKey(scene,config);}
 
   private resetGPUQueueTracking() {
     this.gpuPendingBatches = 0;
@@ -909,7 +920,7 @@ export class FluidLabRenderer {
 
   private beginGPUFluidInitialization(scene:SceneDescription,config:SimulationRunConfig,key:string){
     if(!this.device||this.disposed||this.deviceLost)return;
-    const method=getMethod(config.methodId);if(!method.createSolver)return;
+    const method=getMethod(config.methodId);if(!canInitializeGPUSceneSource(scene,config.methodId))return;
     this.gpuFluidInitializationAbort?.abort();
     const abort=new AbortController();this.gpuFluidInitializationAbort=abort;
     const device=this.device,generation=++this.gpuFluidRequestGeneration,startedAt_ms=performance.now();
@@ -945,7 +956,7 @@ export class FluidLabRenderer {
     const create:Promise<GPUSolverInstance>=prepare().then(()=>{
       if(abort.signal.aborted||this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
       if (!planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver) {
-        return WebGPUStaticSvoScene.create(device, scene, config.quality, config.values, report, abort.signal);
+        return WebGPUStaticSvoScene.create(device, scene, config.quality, report, abort.signal);
       }
       return method.createSolverAsync
         ? method.createSolverAsync(device,scene,config.quality,config.values,this.gpuRigidLoadCallback,report,abort.signal)
@@ -1001,8 +1012,7 @@ export class FluidLabRenderer {
 
   private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig, time_s: number) {
     if (!this.device || this.disposed || this.deviceLost) return undefined;
-    const method = getMethod(config.methodId);
-    if (!method.createSolver) return undefined;
+    if (!canInitializeGPUSceneSource(scene, config.methodId)) return undefined;
     const key=this.solverKey(scene,config);
     if(!this.gpuFluid||key!==this.gpuFluidKey){if(this.gpuFluidPendingKey!==key)this.beginGPUFluidInitialization(scene,config,key);return undefined;}
     // A timeline reset is represented by simulationEpoch in the key above.
@@ -1168,7 +1178,10 @@ export class FluidLabRenderer {
     const basis = cameraBasis(camera), position = basis.position;
     const physicsStart=performance.now();
     if (backend === "webgpu" && gridOverlay?.axis !== "off") this.gpuFluid?.ensureGridDiagnosticTextures?.();
-    const readyGPUFluid = backend === "webgpu" ? this.currentGPUFluid(scene, config, time_s) : undefined;
+    const sceneRuntime = planSceneRuntime(scene, { methodId: config.methodId, renderMode: svoRenderMode });
+    const readyGPUFluid = backend === "webgpu" || !sceneRuntime.fluidSolver
+      ? this.currentGPUFluid(scene, config, time_s)
+      : undefined;
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
       gridOverlay, voxelRenderMode, svoRenderMode, this.simulationRunning,
       Boolean((readyGPUFluid ?? this.gpuFluid)?.secondaryParticles),
@@ -1253,7 +1266,7 @@ export class FluidLabRenderer {
       // options.w carries the largest represented adaptive pressure-cell
       // width. The grid overlay uses it to normalize its categorical scale
       // palette to the hierarchy that can actually exist in this solver.
-      activeSvoDiagnostics.maximumTraversalDepth * 512 + activeSvoDiagnostics.maximumNodeVisits, scene.nominalResolution.length_m, Math.min(bodies.length, 12), gpuInfo?.quadtreeMaximumFluidScale ?? 1,
+      activeSvoDiagnostics.maximumTraversalDepth * 512 + activeSvoDiagnostics.maximumNodeVisits, scene.voxelDomain.finestCellSize_m, Math.min(bodies.length, 12), gpuInfo?.quadtreeMaximumFluidScale ?? 1,
       // Field mode: 1 = raw occupancy, 2 = packed tall-cell level set,
       // 3 = uniform-layout level set (quadtree resident phi).
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "restricted-tall-cell" ? 2 : gpuInfo.gridKind === "quadtree-tall-cell" || gpuInfo.gridKind === "octree" ? 3 : 1) : fluid ? 1 : 0,

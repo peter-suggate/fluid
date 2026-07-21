@@ -65,7 +65,6 @@ for (const initialCondition of ["dam-break", "tank-fill"] as const) {
 test("dam-break level-set reference is its represented t=0 volume, not the binary seed count", () => {
   const scene = cloneScene(defaultScene);
   scene.fluid.initialCondition = "dam-break";
-  scene.numerics.surfaceColumnsOverride = 384;
   const layout = createTallCellLayout(scene, "balanced", 2048, { regularLayers: 12 });
   assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [24, 18, 16]);
   assert.equal(layout.initialVolumeCellSum, 1632, "binary geometry retains the exact wet-cell count");
@@ -82,7 +81,6 @@ test("level-set reference applies terrain openness before the packed-row fixed-p
   scene.fluid.initialCondition = "tank-fill";
   scene.rigidBodies = [];
   scene.terrain = { baseHeight_m: 0.137, features: [] };
-  scene.numerics.surfaceColumnsOverride = 384;
   const layout = createTallCellLayout(scene, "balanced", 2048, { regularLayers: 12 });
   assert.equal(layout.referenceLiquidVolume_cells, independentlyReduceInitialPhi(scene, layout));
 
@@ -94,7 +92,9 @@ test("level-set reference applies terrain openness before the packed-row fixed-p
 });
 
 test("dam-break tall endpoint samples are independent point values", () => {
-  const layout = createTallCellLayout(defaultScene, "balanced");
+  const scene = cloneScene(defaultScene);
+  scene.voxelDomain.finestCellSize_m = 0.02;
+  const layout = createTallCellLayout(scene, "balanced");
   let distinct = false;
   for (let z = 0; z < layout.nz && !distinct; z += 1) for (let x = 0; x < layout.nx && !distinct; x += 1) {
     const bottom = layout.initialPhi[x + layout.nx * layout.packedNy * z];

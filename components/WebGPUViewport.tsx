@@ -16,6 +16,7 @@ import { advancePresentationClock, presentationFrameDue, presentationStateChange
 import { getScenePreset } from "@/lib/scenes";
 import { gpuStageCapture } from "@/lib/gpu-stage-capture";
 import { SVO_COST_OVERLAY_LABELS } from "@/lib/svo-render-diagnostics";
+import { recordPresentedFrame } from "@/lib/presentation-frame-rate";
 import {
   acquireBrowserGPULease,
   GPU_MANUAL_START_EVENT,
@@ -237,6 +238,7 @@ export function WebGPUViewport() {
           return;
         }
         simulation.recordFrame(metrics, renderer.presentationResolution);
+        if (metrics.cpuRenderEncode_ms > 0) recordPresentedFrame(now_ms);
         // A pending presentation returns zero encode time. Retry that same
         // paused state on the next paced callback instead of considering it
         // painted before any command buffer was submitted.

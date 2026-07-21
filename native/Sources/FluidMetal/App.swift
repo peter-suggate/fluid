@@ -295,8 +295,10 @@ enum SelfTest {
             && scene.sceneId == "interactive-water-box"
             && abs(scene.container.width_m - 1.2) < 1e-6
             && abs(scene.fluid.density_kg_m3 - 998.2) < 1e-3
+            && abs(scene.voxelDomain.finestCellSize_m - 0.05) < 1e-6
+            && scene.voxelDomain.brickSize_cells == 8
             && scene.rigidBodies.count == 2
-            && Quality.m1Max.targetCells > Quality.ultra.targetCells
+            && Quality.m1Max.pressureIterations > Quality.ultra.pressureIterations
         guard valid else { fputs("FluidMetal contract tests FAILED\n", stderr); exit(1) }
         print("FluidMetal contract tests PASS")
     }

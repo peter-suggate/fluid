@@ -113,7 +113,7 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   couplingState: emptyCoupling,
   gpuStatus: { state: "initializing", label: "Initializing WebGPU" },
   gpuInfo: null,
-  effectiveRendererStatus: { requestedMode: "raster", effectiveMode: "raster" },
+  effectiveRendererStatus: { requestedMode: "svo", effectiveMode: "raster", fallbackReason: "missing-source" },
   waterSurfacePresentation: null,
   frameMs: 0,
   resolution: "—",

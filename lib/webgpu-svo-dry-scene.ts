@@ -684,7 +684,7 @@ fn dryNodeMipAt(position_m:vec3f,lodIn:f32)->DryNodeMipLookup{
 struct DryConeVisibility{transmittance:f32,valid:u32}
 fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32)->DryConeVisibility{
   if(!dryNodeMipReady()){return DryConeVisibility(1.0,0u);}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;
-  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let voxelWidth=minimumVoxel*exp2(floor(lod));let stepWidth=min(max(voxelWidth,diameter*.5),maximumDistance_m-distance);let lookup=dryNodeMipAt(origin_m+direction*distance,lod);if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}let conservativeCoverage=max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15);let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/voxelWidth);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
+  for(var stepIndex=0u;stepIndex<48u&&distance<maximumDistance_m&&transmittance>.005;stepIndex+=1u){dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let voxelWidth=minimumVoxel*exp2(floor(lod));let stepWidth=min(max(voxelWidth,diameter*.5),maximumDistance_m-distance);let lookup=dryNodeMipAt(origin_m+direction*distance,lod);if(lookup.valid==0u){return DryConeVisibility(1.0,0u);}let conservativeCoverage=max(lookup.sample.solidMean,lookup.sample.solidMaximum*.15);let alpha=svoNodeMipCoverageOpacity(conservativeCoverage,stepWidth/voxelWidth);transmittance*=1.0-alpha;distance+=max(stepWidth,minimumVoxel*.25);}
   return DryConeVisibility(clamp(transmittance,0.0,1.0),1u);
 }
 fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
@@ -724,7 +724,7 @@ const DRY_GBUFFER_SHADOW_DEFERRED:u32=8u;
 const DRY_GBUFFER_FLUID_SURFACE:u32=128u;const DRY_GBUFFER_INSIDE_FLUID:u32=512u;
 const DRY_REVERSED_Z_NEAR_M:f32=0.01;
 var<private> dryFluidPrimaryFailure:u32;var<private> dryFluidInsideAtStart:u32;var<private> dryPrimitiveCandidateFailure:u32;var<private> dryVisibilityIgnoredOwner:u32;var<private> dryThickGlassEnabled:u32;var<private> dryThickGlassFailure:u32;var<private> dryShadowTracingEnabled:u32;
-var<private> dryPrimaryNodeVisits:u32;var<private> dryPrimaryLeafVisits:u32;var<private> dryPrimaryMaximumDepth:u32;var<private> dryPrimaryFieldSteps:u32;var<private> dryCandidateWorkItems:u32;var<private> dryShadowNodeVisits:u32;var<private> dryShadowLeafVisits:u32;var<private> dryShadowWorkItems:u32;var<private> dryTraversalFailure:u32;
+var<private> dryPrimaryNodeVisits:u32;var<private> dryPrimaryLeafVisits:u32;var<private> dryPrimaryEmptyBrickSkips:u32;var<private> dryPrimaryMaximumDepth:u32;var<private> dryPrimaryFieldSteps:u32;var<private> dryCandidateWorkItems:u32;var<private> dryShadowNodeVisits:u32;var<private> dryShadowLeafVisits:u32;var<private> dryShadowWorkItems:u32;var<private> dryMipSteps:u32;var<private> dryTraversalFailure:u32;
 fn dryConfiguredMapping()->SvoMapping{
   var mapping=dry.mapping;
   mapping.maxVisits=min(mapping.maxVisits,dryDiagnosticMaximumNodeVisits());
@@ -741,12 +741,15 @@ fn dryCostOverlay(radianceDepth:vec4f)->vec4f{
   let mode=u32(round(max(uniforms.cameraPosition.w,0.0)));if(mode==0u){return radianceDepth;}
   let depthCost=f32(dryPrimaryMaximumDepth)/f32(dryDiagnosticMaximumDepth());
   let nodeCost=f32(dryPrimaryNodeVisits)/f32(dryDiagnosticMaximumNodeVisits());
+  let brickCost=f32(dryPrimaryLeafVisits)/48.0;
+  let emptyBrickCost=f32(dryPrimaryEmptyBrickSkips)/48.0;
   let fieldCost=f32(dryPrimaryFieldSteps)/f32(${SVO_STRUCTURAL_FLUID_PRIMARY_LIMITS.fieldSteps});
   let candidateCost=f32(dryCandidateWorkItems)/f32(${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES * 2});
   let shadowCost=f32(dryShadowNodeVisits+dryShadowLeafVisits+dryShadowWorkItems)/f32(${(SVO_VISIBILITY_LIMITS.nodeVisits + SVO_VISIBILITY_LIMITS.leafVisits + SVO_VISIBILITY_LIMITS.workItems) * SVO_DRY_SCENE_MAX_SHADED_LIGHTS});
-  var cost=depthCost;if(mode==2u){cost=nodeCost;}else if(mode==3u){cost=fieldCost;}else if(mode==4u){cost=candidateCost;}else if(mode==5u){cost=shadowCost;}else if(mode==6u){cost=max(max(depthCost,nodeCost),max(max(fieldCost,candidateCost),shadowCost));}
+  let mipCost=f32(dryMipSteps)/192.0;
+  var cost=depthCost;if(mode==2u){cost=nodeCost;}else if(mode==3u){cost=brickCost;}else if(mode==4u){cost=emptyBrickCost;}else if(mode==5u){cost=fieldCost;}else if(mode==6u){cost=candidateCost;}else if(mode==7u){cost=shadowCost;}else if(mode==8u){cost=mipCost;}else if(mode==9u){cost=max(max(depthCost,nodeCost),max(max(max(brickCost,emptyBrickCost),max(fieldCost,candidateCost)),max(shadowCost,mipCost)));}
   var overlayColor=dryCostRamp(cost);
-  if(mode==7u){
+  if(mode==10u){
     var failure=dryTraversalFailure;
     if(dryPrimitiveCandidateFailure==DRY_GBUFFER_WORK_EXHAUSTED||dryFluidPrimaryFailure==DRY_GBUFFER_WORK_EXHAUSTED){failure=max(failure,1u);}
     if(dryPrimitiveCandidateFailure==DRY_GBUFFER_INVALID_FIELD||dryFluidPrimaryFailure==DRY_GBUFFER_INVALID_FIELD){failure=2u;}
@@ -986,7 +989,7 @@ fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
   if(dry.metadata.x<=${SVO_DRY_SCENE_DIRECT_PRIMITIVE_LIMIT}u){
     let candidate=tracePrimitiveCandidates(ro,rd,0.0,DRY_MISS,${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES * 2}u,false);dryCandidateWorkItems+=candidate.workItems;if(candidate.status!=DRY_CANDIDATE_COMPLETE){dryPrimitiveCandidateFailure=select(DRY_GBUFFER_INVALID_FIELD,DRY_GBUFFER_WORK_EXHAUSTED,candidate.status==DRY_CANDIDATE_EXHAUSTED);}return candidate.hit;
   }
-  var minimum=0.0;let mapping=dryConfiguredMapping();for(var leafVisit=0u;leafVisit<48u;leafVisit+=1u){let ray=SvoRay(ro,minimum,rd,DRY_MISS);let leaf=dryTraverse(ray,mapping);dryPrimaryNodeVisits+=leaf.visits;if(leaf.status!=SVO_STATUS_HIT){if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){dryTraversalFailure=max(dryTraversalFailure,1u);}else if(leaf.status!=SVO_STATUS_MISS){dryTraversalFailure=2u;}break;}dryPrimaryLeafVisits+=1u;dryPrimaryMaximumDepth=max(dryPrimaryMaximumDepth,leaf.level);let payloadHit=traceLeafPayload(ro,rd,leaf);if(payloadHit.t<DRY_MISS){return payloadHit;}minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);} return missHit();
+  var minimum=0.0;let mapping=dryConfiguredMapping();for(var leafVisit=0u;leafVisit<48u;leafVisit+=1u){let ray=SvoRay(ro,minimum,rd,DRY_MISS);let leaf=dryTraverse(ray,mapping);dryPrimaryNodeVisits+=leaf.visits;if(leaf.status!=SVO_STATUS_HIT){if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){dryTraversalFailure=max(dryTraversalFailure,1u);}else if(leaf.status!=SVO_STATUS_MISS){dryTraversalFailure=2u;}break;}dryPrimaryLeafVisits+=1u;dryPrimaryMaximumDepth=max(dryPrimaryMaximumDepth,leaf.level);let payloadHit=traceLeafPayload(ro,rd,leaf);if(payloadHit.t<DRY_MISS){return payloadHit;}dryPrimaryEmptyBrickSkips+=1u;minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);} return missHit();
 }
 
 struct DryGlassHit{hit:SvoThinGlassHit,recordIndex:u32}
@@ -1305,7 +1308,7 @@ fn dryFragmentOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut
 }
 
 @fragment fn fragmentMain(input:VertexOut)->DryFragmentOut {
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryPrimitiveCandidateFailure=0u;dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryMaximumDepth=0u;dryPrimaryFieldSteps=0u;dryCandidateWorkItems=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryTraversalFailure=0u;let temporalShadowSampling=uniforms.viewport.w>=0.0&&(dry.materialPublication.w&2u)!=0u;let shadowParity=(u32(input.position.x)+u32(input.position.y)+u32(uniforms.viewport.w))&1u;dryShadowTracingEnabled=select(1u,select(0u,1u,shadowParity==0u),temporalShadowSampling);let thickBinderValid=thickGlass.metadata.x>0u&&thickGlass.metadata.x<=${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u&&thickGlass.metadata.y!=0u&&thickGlass.metadata.w==${SVO_DRY_THICK_GLASS_BINDER_VERSION}u;dryThickGlassEnabled=select(0u,1u,thickBinderValid&&dry.fluidDomainMode.w!=2u);
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryPrimitiveCandidateFailure=0u;dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryMaximumDepth=0u;dryPrimaryFieldSteps=0u;dryCandidateWorkItems=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;let temporalShadowSampling=uniforms.viewport.w>=0.0&&(dry.materialPublication.w&2u)!=0u;let shadowParity=(u32(input.position.x)+u32(input.position.y)+u32(uniforms.viewport.w))&1u;dryShadowTracingEnabled=select(1u,select(0u,1u,shadowParity==0u),temporalShadowSampling);let thickBinderValid=thickGlass.metadata.x>0u&&thickGlass.metadata.x<=${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u&&thickGlass.metadata.y!=0u&&thickGlass.metadata.w==${SVO_DRY_THICK_GLASS_BINDER_VERSION}u;dryThickGlassEnabled=select(0u,1u,thickBinderValid&&dry.fluidDomainMode.w!=2u);
   if(dry.fluidDomainMode.w==2u){
     let solid=traceDrySolidScene(ro,rd);let sceneDistance=max(max(uniforms.container.x,uniforms.container.y),uniforms.container.z)*8.0;
     if(dryPrimitiveCandidateFailure!=0u){return dryFragmentOut(svoGBufferMiss(vec3f(.22,.005,.02),DRY_GBUFFER_FIELD_ANALYTIC,dryPublicationGeneration(),dryPrimitiveCandidateFailure,4096u),0.0);}

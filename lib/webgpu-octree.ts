@@ -1146,8 +1146,9 @@ export class WebGPUOctreeProjection {
       this.directPagedTopology, surfacePagesRequested, sceneHasTerrain(scene), scene.rigidBodies.length,
       sparseWorldCompatibilityRequested,
     );
+    const sparseWorldBrickSize = scene.voxelDomain.brickSize_cells;
     if (allocateSparseWorld) this.sparseBrickWorld = new OctreeSparseBrickWorld(device, scene, [dims.nx, dims.ny, dims.nz], {
-      brickSize: 8,
+      brickSize: sparseWorldBrickSize,
       haloCells: topologyHaloCells,
       // Canonical faces/pages own the simulation fields. Retain only the wet
       // bulk worklist needed by owner-page lifecycle, not a duplicate 3D
@@ -1155,7 +1156,7 @@ export class WebGPUOctreeProjection {
       brickAtlas: faceTransportEnabled && !compactAtlasDiagnostic ? "off" : options.brickAtlas ?? "mirror",
       bulkResidencyOnly: faceTransportEnabled,
       brickPreActivation: options.brickPreActivation ?? true,
-      topologyTileBricks: this.topologyTileSize / 8
+      topologyTileBricks: this.topologyTileSize / sparseWorldBrickSize
     });
     const analyticBootstrapPlan = analyticSparseBootstrap ? planOctreeAnalyticBootstrapBounds({
       dimensions: [dims.nx, dims.ny, dims.nz],

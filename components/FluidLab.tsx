@@ -19,6 +19,7 @@ import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PerformancePanel } from "./PerformancePanel";
 import { TransportBar } from "./TransportBar";
 import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
+import { FrameRateCounter } from "./FrameRateCounter";
 import type { GPUStatus } from "@/lib/webgpu-renderer";
 import { getEnvironmentPreset } from "@/lib/environments";
 import { getScenePreset } from "@/lib/scenes";
@@ -156,6 +157,7 @@ export function FluidLab() {
 
       <RecordingPlaybackModal />
       <SceneConfigPopover />
+      <FrameRateCounter />
     </main>
   );
 }

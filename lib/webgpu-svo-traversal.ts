@@ -60,6 +60,45 @@ export interface SvoTraversalOptions {
   stackCapacity?: number;
   /** Defaults to node zero, the canonical sparse-brick root. */
   rootNodeIndex?: number;
+  /** Optional mutable counters for deterministic traversal-work diagnostics. */
+  diagnostics?: SvoTraversalWorkDiagnostics;
+}
+
+export interface SvoTraversalWorkDiagnostics {
+  rootAabbTests: number;
+  internalNodesExpanded: number;
+  childAabbTests: number;
+}
+
+export interface SvoIntersectionArithmeticComparison {
+  previous: { mortonBoundsDecodes: number; rayDirectionDivisions: number };
+  optimized: { mortonBoundsDecodes: number; rayDirectionDivisions: number };
+}
+
+/**
+ * Compare the canonical intersection arithmetic before and after parent-bound
+ * derivation. `nonParallelAxes` is three for a general ray and may be lower for
+ * axis-aligned diagnostic rays; the optimized path still forms one vec3
+ * reciprocal because camera rays are ordinarily non-parallel on every axis.
+ */
+export function compareSvoIntersectionArithmetic(
+  diagnostics: SvoTraversalWorkDiagnostics,
+  nonParallelAxes = 3,
+): SvoIntersectionArithmeticComparison {
+  if (!Number.isInteger(nonParallelAxes) || nonParallelAxes < 1 || nonParallelAxes > 3) {
+    throw new RangeError("Non-parallel SVO ray axes must be an integer from 1 to 3");
+  }
+  const intersectionTests = diagnostics.rootAabbTests + diagnostics.childAabbTests;
+  return {
+    previous: {
+      mortonBoundsDecodes: intersectionTests,
+      rayDirectionDivisions: intersectionTests * nonParallelAxes,
+    },
+    optimized: {
+      mortonBoundsDecodes: diagnostics.rootAabbTests + diagnostics.internalNodesExpanded,
+      rayDirectionDivisions: 3,
+    },
+  };
 }
 
 export interface SvoLeafHit extends SvoRayInterval {
@@ -201,6 +240,12 @@ export function traversePackedSvo(
   mapping: SvoWorldMapping,
   options: SvoTraversalOptions = {},
 ): SvoTraversalResult {
+  const diagnostics = options.diagnostics;
+  if (diagnostics) {
+    diagnostics.rootAabbTests = 0;
+    diagnostics.internalNodesExpanded = 0;
+    diagnostics.childAabbTests = 0;
+  }
   finiteVec3(mapping.origin, "SVO world origin");
   finiteVec3(mapping.cellSize, "SVO cell size");
   if (mapping.cellSize.some((component) => component <= 0)) throw new RangeError("SVO cell size must be positive");
@@ -228,6 +273,7 @@ export function traversePackedSvo(
   }
   const rootLevel = topology.nodes[rootNodeIndex * NODE_WORDS + 2];
   if (rootLevel > mapping.maximumDepth) return invalid(0, "Node level exceeds maximum depth");
+  if (diagnostics) diagnostics.rootAabbTests += 1;
   const rootInterval = intersectSvoRayAabb(ray, nodeBounds(topology.nodes, rootNodeIndex, mapping));
   if (!rootInterval) return { status: "miss", visits: 0 };
 
@@ -268,6 +314,7 @@ export function traversePackedSvo(
     const recordedChildCount = topology.nodes[base + 5];
     if (childMask === 0) continue;
     if (firstChild === SPARSE_BRICK_INVALID_INDEX) return invalid(visits, "Non-empty child mask has no first child");
+    if (diagnostics) diagnostics.internalNodesExpanded += 1;
     const childHits: StackEntry[] = [];
     let discoveredChildCount = 0;
     for (let octant = 0; octant < 8; octant += 1) {
@@ -277,6 +324,7 @@ export function traversePackedSvo(
       if (childIndex >= nodeCount) return invalid(visits, "Child range exceeds the published topology");
       const childBase = childIndex * NODE_WORDS;
       if (topology.nodes[childBase + 2] !== level + 1) return invalid(visits, "Child level is not parent level plus one");
+      if (diagnostics) diagnostics.childAabbTests += 1;
       const interval = intersectSvoRayAabb(ray, nodeBounds(topology.nodes, childIndex, mapping));
       if (interval) childHits.push({ nodeIndex: childIndex, octant, ...interval });
     }
@@ -378,6 +426,10 @@ fn svoNodeBounds(node: SvoNode, mapping: SvoMapping) -> mat2x3f {
 }
 
 fn svoRayAabb(ray: SvoRay, bounds: mat2x3f) -> vec3f {
+  return svoRayAabbWithInverse(ray, 1.0 / ray.direction, bounds);
+}
+
+fn svoRayAabbWithInverse(ray: SvoRay, inverseDirection: vec3f, bounds: mat2x3f) -> vec3f {
   var enter = ray.tMin;
   var exit = ray.tMax;
   for (var axis = 0u; axis < 3u; axis += 1u) {
@@ -388,14 +440,20 @@ fn svoRayAabb(ray: SvoRay, bounds: mat2x3f) -> vec3f {
     if (direction == 0.0) {
       if (origin < lower || origin > upper) { return vec3f(0.0); }
     } else {
-      let first = (lower - origin) / direction;
-      let second = (upper - origin) / direction;
+      let first = (lower - origin) * inverseDirection[axis];
+      let second = (upper - origin) * inverseDirection[axis];
       enter = max(enter, min(first, second));
       exit = min(exit, max(first, second));
       if (exit < enter) { return vec3f(0.0); }
     }
   }
   return vec3f(1.0, enter, exit);
+}
+
+fn svoChildBounds(parent: mat2x3f, octant: u32) -> mat2x3f {
+  let middle = (parent[0] + parent[1]) * 0.5;
+  let high = vec3f(f32(octant & 1u), f32((octant >> 1u) & 1u), f32((octant >> 2u) & 1u));
+  return mat2x3f(mix(parent[0], middle, high), mix(middle, parent[1], high));
 }
 
 fn svoPopcountBefore(mask: u32, octant: u32) -> u32 {
@@ -410,7 +468,8 @@ fn svoBrickVoxelIndex(voxelOffset: u32, local: vec3u, brickSize: u32) -> u32 {
 fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalDepth: u32) -> SvoTraversalHit {
   if (svoControl[12] != 0u) { return svoMiss(SVO_STATUS_SOURCE_OVERFLOW, 0u); }
   if (mapping.nodeCount == 0u) { return svoMiss(SVO_STATUS_MISS, 0u); }
-  let rootInterval = svoRayAabb(ray, svoNodeBounds(svoNodes[0], mapping));
+  let inverseDirection = 1.0 / ray.direction;
+  let rootInterval = svoRayAabbWithInverse(ray, inverseDirection, svoNodeBounds(svoNodes[0], mapping));
   if (rootInterval.x == 0.0) { return svoMiss(SVO_STATUS_MISS, 0u); }
   var stack: array<SvoStackEntry, 32>;
   var stackSize = 1u;
@@ -441,6 +500,7 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
     if (node.links.x == SVO_INVALID || countOneBits(mask) != node.links.y) {
       return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
     }
+    let parentBounds = svoNodeBounds(node, mapping);
     var candidates: array<SvoStackEntry, 8>;
     var candidateCount = 0u;
     for (var octant = 0u; octant < 8u; octant += 1u) {
@@ -449,7 +509,7 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
       if (childIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
       let child = svoNodes[childIndex];
       if (child.address.z != node.address.z + 1u) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
-      let interval = svoRayAabb(ray, svoNodeBounds(child, mapping));
+      let interval = svoRayAabbWithInverse(ray, inverseDirection, svoChildBounds(parentBounds, octant));
       if (interval.x == 0.0) { continue; }
       var insertion = candidateCount;
       loop {

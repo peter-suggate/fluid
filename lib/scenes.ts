@@ -34,9 +34,9 @@ export function createBrickQuadDamBreakScene(): SceneDescription {
   scene.fluid.initialCondition = "dam-break";
   scene.fluid.initialBrickSeeds_m = [{ ...BRICK_QUAD_DAM_SEED_M }];
   delete scene.fluid.inflow;
-  // 256 columns over the 0.8 m square footprint give 16x16 columns of 0.05 m
-  // cells; the 0.4 m height then yields exactly 8 fine layers (one brick).
-  scene.numerics.surfaceColumnsOverride = 256;
+  // The 0.05 m scene lattice gives exactly 16x8x16 cells: one 8-cell brick
+  // high and a 2x2 brick footprint.
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
   return scene;
 }
 
@@ -61,9 +61,8 @@ export function createOceanSeicheScene(): SceneDescription {
   // the same physical scope as the deep-water A/B preset.
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
-  // 25600 columns over the 8.0 x 2.0 m footprint give 320x80 columns of
-  // 0.025 m cells; the 2.4 m height then yields exactly 96 fine layers.
-  scene.numerics.surfaceColumnsOverride = 25600;
+  // The authored scene lattice gives exactly 320x96x80 cells of 0.025 m.
+  scene.voxelDomain = { finestCellSize_m: 0.025, brickSize_cells: 8 };
   // The raised slab: brick tiers x {0,1}, y tier 9 (cells 72..79 — directly
   // on the 72-cell pool surface), and every z tier. Seeds are the world-space
   // centres of those 8-cubed bricks at the exact grid above.
@@ -118,6 +117,7 @@ export function createGardenSvoLightingScene(): SceneDescription {
   scene.sceneId = "garden-svo-lighting-study";
   scene.systems = { ...scene.systems, fluid: false };
   scene.container.fillFraction = 0;
+  scene.voxelDomain = { finestCellSize_m: 0.025, brickSize_cells: 8 };
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
