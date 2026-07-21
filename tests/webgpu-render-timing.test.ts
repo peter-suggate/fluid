@@ -121,4 +121,10 @@ test("renderer-mode epochs reject stale asynchronous timing readbacks", () => {
     "rolling averages must never mix raster and SVO timing epochs");
   assert.match(panel, /renderTimed \? `Last presentation \$\{renderPerFrame_ms\.toFixed\(2\)\} ms on GPU` : "Awaiting presentation timestamp"/,
     "the panel must not present an unavailable timestamp as a real 0.00 ms measurement");
+  assert.match(panel, /!timestampQueriesSupported \? "GPU timestamps unavailable · CPU \+ queue fences only"/,
+    "an adapter without timestamp-query support must not look like a GPU that executed no passes");
+  assert.match(panel, /measuredStages\.length \? `\$\{submissionEnvelope_ms\.toFixed\(2\)\} ms` : "—"/,
+    "the GPU lane total must remain unavailable until at least one hardware timing sample resolves");
+  assert.match(panel, /Physics encode \+ submit[^]*Build commands \+ queue\.submit/,
+    "the CPU encode interval must not be described as GPU execution time");
 });
