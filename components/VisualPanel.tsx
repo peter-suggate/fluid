@@ -21,6 +21,10 @@ export function VisualPanel() {
   const setSvoRenderMode = useUIStore((state) => state.setSvoRenderMode);
   const svoLightingMode = useUIStore((state) => state.svoLightingMode);
   const setSvoLightingMode = useUIStore((state) => state.setSvoLightingMode);
+  const svoShadowsEnabled = useUIStore((state) => state.svoShadowsEnabled);
+  const setSvoShadowsEnabled = useUIStore((state) => state.setSvoShadowsEnabled);
+  const svoAmbientOcclusionEnabled = useUIStore((state) => state.svoAmbientOcclusionEnabled);
+  const setSvoAmbientOcclusionEnabled = useUIStore((state) => state.setSvoAmbientOcclusionEnabled);
   const svoCostOverlay = useUIStore((state) => state.svoCostOverlay);
   const setSvoCostOverlay = useUIStore((state) => state.setSvoCostOverlay);
   const svoMaximumTraversalDepth = useUIStore((state) => state.svoMaximumTraversalDepth);
@@ -152,12 +156,16 @@ export function VisualPanel() {
         {effectiveRendererStatus.fallbackReason ? ` fallback · ${rendererFallbackLabels[effectiveRendererStatus.fallbackReason]}` : ""}
       </small>
       <small className="control-hint">Raster is the interactive default. Sparse voxels consumes the octree directly for explicit rendering diagnostics and A/B comparisons.</small>
-      <div className="section-heading"><h2>SVO lighting</h2><span>VISIBILITY CACHE</span></div>
-      <div className="segmented compact" role="group" aria-label="SVO lighting">
-        <button disabled={svoRenderMode !== "svo"} className={svoLightingMode === "direct" ? "active" : ""} onClick={() => setSvoLightingMode("direct")}>Exact direct</button>
-        <button disabled={svoRenderMode !== "svo"} className={svoLightingMode === "cone" ? "active" : ""} onClick={() => setSvoLightingMode("cone")}>Mip cones</button>
+      <div className="section-heading"><h2>Lighting</h2><span>SVO QUALITY</span></div>
+      <div className="segmented compact" role="group" aria-label="SVO lighting quality">
+        <button disabled={svoRenderMode !== "svo"} className={svoLightingMode === "direct" ? "active" : ""} onClick={() => setSvoLightingMode("direct")}>Direct</button>
+        <button disabled={svoRenderMode !== "svo"} className={svoLightingMode === "cone" ? "active" : ""} onClick={() => setSvoLightingMode("cone")}>Beautiful</button>
       </div>
-      <small className="control-hint">Mip cones use a disposable wide-fanout opacity hierarchy derived from the same complete world-octree generation. Missing or stale pages fall back to exact SVO visibility.</small>
+      <div className="segmented compact" role="group" aria-label="SVO lighting effects">
+        <button disabled={svoRenderMode !== "svo"} aria-pressed={svoShadowsEnabled} className={svoShadowsEnabled ? "active" : ""} onClick={() => setSvoShadowsEnabled(!svoShadowsEnabled)}>Shadows</button>
+        <button disabled={svoRenderMode !== "svo"} aria-pressed={svoAmbientOcclusionEnabled} className={svoAmbientOcclusionEnabled ? "active" : ""} onClick={() => setSvoAmbientOcclusionEnabled(!svoAmbientOcclusionEnabled)}>Ambient occlusion</button>
+      </div>
+      <small className="control-hint">Beautiful uses the wide-fanout mip hierarchy for soft visibility. Shadows and ambient occlusion are independent; stale mip pages fall back to exact SVO visibility.</small>
     </section>
 
     <section className="panel-section utility-controls">

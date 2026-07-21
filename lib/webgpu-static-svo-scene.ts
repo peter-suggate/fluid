@@ -28,6 +28,7 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
 
   private readonly world: OctreeSparseBrickWorld;
   private readonly solidCells: GPUBuffer;
+  private accountedWorldBytes: number;
   private destroyed = false;
 
   private constructor(
@@ -93,6 +94,7 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
       brickPreActivation: false,
     });
     this.sparseVoxelSceneSource = this.world.sceneSource;
+    this.accountedWorldBytes = this.world.allocatedBytes;
     const h = Math.min(layout.cellSize_m.x, layout.cellSize_m.y, layout.cellSize_m.z);
     this.info = {
       nx: layout.nx,
@@ -123,6 +125,20 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
       simulationLag_s: 0,
       stabilityFlags: [],
     };
+  }
+
+  /**
+   * Raw-voxel and brick-grid records are intentionally absent from normal SVO
+   * startup. Materialize them on first inspection, matching the dynamic
+   * octree solver's lazy debug-source contract without starting a fluid
+   * solver for a renderer-only scene.
+   */
+  get sparseVoxelRenderSource() {
+    const source = this.world.ensureInspectionSource();
+    const worldBytes = this.world.allocatedBytes;
+    this.info.allocatedBytes += worldBytes - this.accountedWorldBytes;
+    this.accountedWorldBytes = worldBytes;
+    return source;
   }
 
   static async create(

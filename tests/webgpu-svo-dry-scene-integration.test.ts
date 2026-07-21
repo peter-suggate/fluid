@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
-import { DEFAULT_SVO_LIGHTING_MODE, DEFAULT_SVO_RENDER_MODE } from "../lib/svo-render-mode";
+import { DEFAULT_SVO_LIGHTING_MODE, DEFAULT_SVO_LIGHTING_OPTIONS, DEFAULT_SVO_RENDER_MODE } from "../lib/svo-render-mode";
 import {
   canConsumeSparseVoxelPrimitiveCandidates,
   canEncodeSparseVoxelDryScene,
@@ -17,9 +17,11 @@ import { candidateBackedDrySceneFixture } from "./svo-dry-scene-test-fixture";
 const rendererUrl = new URL("../lib/webgpu-renderer.ts", import.meta.url);
 const waterUrl = new URL("../lib/webgpu-water-pipeline.ts", import.meta.url);
 const drySceneUrl = new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url);
+const viewportUrl = new URL("../components/WebGPUViewport.tsx", import.meta.url);
 const rendererSource = readFileSync(rendererUrl, "utf8");
 const waterSource = readFileSync(waterUrl, "utf8");
 const drySceneSource = existsSync(drySceneUrl) ? readFileSync(drySceneUrl, "utf8") : "";
+const viewportSource = readFileSync(viewportUrl, "utf8");
 
 function expectSource(source: string, pattern: RegExp, message: string): void {
   assert.ok(pattern.test(source), message);
@@ -28,10 +30,13 @@ function expectSource(source: string, pattern: RegExp, message: string): void {
 test("raster presentation is the default while SVO remains selectable", () => {
   assert.equal(DEFAULT_SVO_RENDER_MODE, "raster");
   assert.equal(DEFAULT_SVO_LIGHTING_MODE, "cone");
+  assert.deepEqual(DEFAULT_SVO_LIGHTING_OPTIONS, { shadowsEnabled: true, ambientOcclusionEnabled: true });
   expectSource(rendererSource, /svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE/,
     "callers which do not opt in must use the bounded raster presentation");
   expectSource(rendererSource, /DEFAULT_SVO_LIGHTING_MODE[^]*DEFAULT_SVO_RENDER_MODE[^]*type SvoLightingMode[^]*type SvoRenderMode[^]*from "\.\/svo-render-mode"/,
     "renderer must consume the canonical render and lighting toggles");
+  expectSource(viewportSource, /ui\.svoLightingMode,[^]*shadowsEnabled: ui\.svoShadowsEnabled,[^]*ambientOcclusionEnabled: ui\.svoAmbientOcclusionEnabled,[^]*overlay: ui\.svoCostOverlay/,
+    "viewport must pass lighting effects before the diagnostics argument in the renderer contract");
 });
 
 test("the water pipeline replacement callback is fail-safe and replaces rather than overlays raster", () => {

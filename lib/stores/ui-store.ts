@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { defaultCamera, type CameraState } from "../model";
 import {
   DEFAULT_SVO_LIGHTING_MODE,
+  DEFAULT_SVO_LIGHTING_OPTIONS,
   DEFAULT_SVO_RENDER_MODE,
   type SvoLightingMode,
   type SvoRenderMode,
@@ -30,6 +31,8 @@ interface UIStore {
   svoRenderMode: SvoRenderMode;
   /** Exact direct visibility or the generation-checked wide-mip cone cache. */
   svoLightingMode: SvoLightingMode;
+  svoShadowsEnabled: boolean;
+  svoAmbientOcclusionEnabled: boolean;
   svoCostOverlay: SvoCostOverlayMode;
   svoMaximumTraversalDepth: number;
   svoMaximumNodeVisits: number;
@@ -45,6 +48,8 @@ interface UIStore {
   setVoxelRenderMode: (mode: VoxelRenderMode) => void;
   setSvoRenderMode: (mode: SvoRenderMode) => void;
   setSvoLightingMode: (mode: SvoLightingMode) => void;
+  setSvoShadowsEnabled: (enabled: boolean) => void;
+  setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSvoCostOverlay: (mode: SvoCostOverlayMode) => void;
   setSvoMaximumTraversalDepth: (depth: number) => void;
   setSvoMaximumNodeVisits: (visits: number) => void;
@@ -63,6 +68,8 @@ export const useUIStore = create<UIStore>((set) => ({
   voxelRenderMode: "smooth",
   svoRenderMode: DEFAULT_SVO_RENDER_MODE,
   svoLightingMode: DEFAULT_SVO_LIGHTING_MODE,
+  svoShadowsEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled,
+  svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
   svoCostOverlay: DEFAULT_SVO_RENDER_DIAGNOSTICS.overlay,
   svoMaximumTraversalDepth: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumTraversalDepth,
   svoMaximumNodeVisits: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumNodeVisits,
@@ -81,6 +88,8 @@ export const useUIStore = create<UIStore>((set) => ({
   setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode }),
   setSvoRenderMode: (svoRenderMode) => set({ svoRenderMode }),
   setSvoLightingMode: (svoLightingMode) => set({ svoLightingMode }),
+  setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
+  setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSvoCostOverlay: (svoCostOverlay) => set({ svoCostOverlay }),
   setSvoMaximumTraversalDepth: (svoMaximumTraversalDepth) => set((state) => ({
     svoMaximumTraversalDepth: normalizeSvoRenderDiagnostics({

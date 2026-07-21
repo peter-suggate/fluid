@@ -25,14 +25,20 @@ test("viewport utility panels are mutually exclusive", () => {
   useUIStore.setState(initial, true);
 });
 
-test("presentation defaults to raster while cone lighting remains the fail-soft SVO preference", () => {
+test("presentation defaults to raster while beautiful lighting effects remain the SVO preference", () => {
   const initial = useUIStore.getInitialState();
   useUIStore.setState(initial, true);
   assert.equal(useUIStore.getState().svoRenderMode, "raster");
   assert.equal(useUIStore.getState().svoLightingMode, "cone");
+  assert.equal(useUIStore.getState().svoShadowsEnabled, true);
+  assert.equal(useUIStore.getState().svoAmbientOcclusionEnabled, true);
   useUIStore.getState().setSvoRenderMode("svo");
   useUIStore.getState().setSvoLightingMode("direct");
+  useUIStore.getState().setSvoShadowsEnabled(false);
+  useUIStore.getState().setSvoAmbientOcclusionEnabled(false);
   assert.equal(useUIStore.getState().svoRenderMode, "svo");
   assert.equal(useUIStore.getState().svoLightingMode, "direct");
+  assert.equal(useUIStore.getState().svoShadowsEnabled, false);
+  assert.equal(useUIStore.getState().svoAmbientOcclusionEnabled, false);
   useUIStore.setState(initial, true);
 });

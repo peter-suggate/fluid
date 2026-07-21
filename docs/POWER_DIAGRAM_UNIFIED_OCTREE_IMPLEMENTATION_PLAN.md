@@ -487,14 +487,14 @@ factor-8 quality claims.
 
 ### Review findings to action
 
-1. **Resolved:** the 7.7 MB `lib/generated/octree-power-catalog.{ts,bin}` pair
-   is an explicitly ignored deterministic build artifact. Dev, build, unit,
-   WebGPU, targeted power/runtime, and shader-validation npm entry points
-   generate it before loading application modules. CI runs
-   `npm run verify:octree-power-catalog`, which generates once, independently
-   rebuilds and byte-compares once, then checks the embedded format version,
-   generator-source hash, binary SHA-256, and decoder contract. A clean
-   checkout therefore has no dependency on an unpublished local binary.
+1. **Resolved:** the deterministic
+   `lib/generated/octree-power-catalog.{ts,bin}` pair is checked in. Dev,
+   build, unit, WebGPU, targeted power/runtime, and shader-validation entry
+   points consume it directly. When the generator or topology inputs change,
+   `npm run generate:octree-power-catalog` intentionally refreshes the pair;
+   `npm run verify:octree-power-catalog` independently rebuilds and
+   byte-compares it, then checks the embedded format version,
+   generator-source hash, binary SHA-256, and decoder contract.
 2. The production row arena caps incidence at 24 entries while the catalog
    manifest proves a maximum of 30. Bump the arena and memory plan before any
    authority attempt, or fail-closed overflow will silently roll back forever.

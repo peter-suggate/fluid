@@ -238,6 +238,37 @@ test("SVO lighting round-trips exact direct while cone remains the canonical fai
   assert.equal(parseQueryState("?svoLighting=invalid").ui.svoLightingMode, "cone");
 });
 
+test("SVO shadows and ambient occlusion round-trip as independent finished-image options", () => {
+  const disabled = parseQueryState("?render=svo&svoShadows=0&svoAO=0");
+  assert.equal(disabled.ui.svoShadowsEnabled, false);
+  assert.equal(disabled.ui.svoAmbientOcclusionEnabled, false);
+  const disabledQuery = serializeQueryState("?svoShadows=1&svoAO=1", {
+    presetId: disabled.presetId,
+    scene: disabled.scene,
+  }, {
+    methodId: disabled.methodId,
+    quality: disabled.quality,
+    overrides: disabled.overrides,
+  }, disabled.ui);
+  const query = new URLSearchParams(disabledQuery);
+  assert.equal(query.get("svoShadows"), "0");
+  assert.equal(query.get("svoAO"), "0");
+
+  const defaults = parseQueryState("?svoShadows=1&svoAO=1");
+  assert.equal(defaults.ui.svoShadowsEnabled, true);
+  assert.equal(defaults.ui.svoAmbientOcclusionEnabled, true);
+  const defaultQuery = serializeQueryState("?svoShadows=0&svoAO=0", {
+    presetId: defaults.presetId,
+    scene: defaults.scene,
+  }, {
+    methodId: defaults.methodId,
+    quality: defaults.quality,
+    overrides: defaults.overrides,
+  }, defaults.ui);
+  assert.equal(new URLSearchParams(defaultQuery).has("svoShadows"), false);
+  assert.equal(new URLSearchParams(defaultQuery).has("svoAO"), false);
+});
+
 test("viewport utility panels round-trip through one mutually exclusive query state", () => {
   const initialUI = useUIStore.getInitialState();
   const query = serializeQueryState("?diagnostics=1", {

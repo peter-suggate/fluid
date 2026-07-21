@@ -17,4 +17,6 @@ test("visual controls clearly separate production renderer choice from debug rep
   assert.match(panel, /setSvoRenderMode\("raster"\)[^]*>Raster<\/button>/);
   assert.match(panel, /setSvoRenderMode\("svo"\)[^]*>Sparse voxels<\/button>/);
   assert.match(panel, /setVoxelRenderMode\("raw-voxels"\)[^]*>Raw voxels<\/button>/);
+  assert.match(panel, /aria-label="SVO lighting quality"[^]*setSvoLightingMode\("direct"\)[^]*>Direct<\/button>[^]*setSvoLightingMode\("cone"\)[^]*>Beautiful<\/button>/);
+  assert.match(panel, /aria-label="SVO lighting effects"[^]*setSvoShadowsEnabled[^]*>Shadows<\/button>[^]*setSvoAmbientOcclusionEnabled[^]*>Ambient occlusion<\/button>/);
 });

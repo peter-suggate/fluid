@@ -19,8 +19,10 @@ import { buildSvoSceneThickGlass } from "./svo-scene-thick-glass";
 import { buildSvoTerrainMaterial } from "./svo-terrain-material";
 import {
   DEFAULT_SVO_LIGHTING_MODE,
+  DEFAULT_SVO_LIGHTING_OPTIONS,
   DEFAULT_SVO_RENDER_MODE,
   type SvoLightingMode,
+  type SvoLightingOptions,
   type SvoRenderMode,
 } from "./svo-render-mode";
 import type { SparseVoxelTemporalFrameState } from "./webgpu-svo-temporal-accumulator";
@@ -404,9 +406,6 @@ export class FluidLabRenderer {
   private svoPrimitiveCandidatesSupported = true;
   private svoLightingSupported = true;
   private svoPipelineAvailable = false;
-  /** Hard SVO shadow rays are an opt-in diagnostic until their frame cost is interactive. */
-  private readonly svoShadowVisibilityEnabled = typeof location !== "undefined"
-    && new URLSearchParams(location.search).get("svoShadowVisibility") === "1";
   /** Internal A/B: temporal-off also restores full-rate shadow visibility. */
   private readonly svoTemporalAccumulationEnabled = typeof location === "undefined" || new URLSearchParams(location.search).get("svoTemporal") !== "0";
   private presentationFrameIndex = 0;
@@ -981,7 +980,7 @@ export class FluidLabRenderer {
         glassRecords:sceneGlass.packedRecords,glassCacheKey:sceneGlass.cacheKey,
         thickGlassRecords:sceneThickGlass.packedRecords,thickGlassRevision:sceneThickGlass.revision,thickGlassCacheKey:sceneThickGlass.cacheKey,thickGlassReplacedThinPaneId:thickReplacedPaneId,
         primaryCompositeOwnedGlassPaneIdBase:compositorOwnedGlass[0]?.paneId,primaryCompositeOwnedGlassPaneCount:compositorOwnedGlass.length,
-        shadowVisibilityEnabled:this.svoShadowVisibilityEnabled,...lightingMirrors,
+        ...lightingMirrors,
       };
       const thickGlassBound=resolveSparseVoxelThickGlassBinderStatus(candidateDrySceneData)==="bound";
       this.svoGlassSupported=!sceneGlass.metadata.some(({key,opaqueCutoutKey})=>Boolean(opaqueCutoutKey)&&(!thickGlassBound||!thickReplacedPaneKeys.has(key)));
@@ -1149,7 +1148,7 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.activeRenderScale * 100)}%)`;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE, svoLightingMode: SvoLightingMode = DEFAULT_SVO_LIGHTING_MODE, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE, svoLightingMode: SvoLightingMode = DEFAULT_SVO_LIGHTING_MODE, svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS): RendererFrameMetrics {
     if (!this.device || this.disposed || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     this.resize(this.rasterRenderScale);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
@@ -1164,7 +1163,7 @@ export class FluidLabRenderer {
       this.svoDryScenePipeline?.invalidateTemporalHistory();
       this.beginRenderTimingEpoch();
     }
-    const timingContext = `${config.methodId}:${config.quality}:shadow-${this.svoShadowVisibilityEnabled ? "on" : "off"}:temporal-${this.svoTemporalAccumulationEnabled ? "on" : "off"}:lighting-${svoLightingMode}:${voxelRenderMode}:${svoRenderMode}`;
+    const timingContext = `${config.methodId}:${config.quality}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:temporal-${this.svoTemporalAccumulationEnabled ? "on" : "off"}:lighting-${svoLightingMode}:${voxelRenderMode}:${svoRenderMode}`;
     if (timingContext !== this.renderTimingContext) { this.renderTimingContext = timingContext; this.beginRenderTimingEpoch(); }
     const basis = cameraBasis(camera), position = basis.position;
     const physicsStart=performance.now();
@@ -1233,7 +1232,7 @@ export class FluidLabRenderer {
         body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z,
       ]),
     ].join("|");
-    const checkerboardShadowsEligible = this.svoTemporalAccumulationEnabled && this.svoShadowVisibilityEnabled
+    const checkerboardShadowsEligible = this.svoTemporalAccumulationEnabled && svoLightingOptions.shadowsEnabled
       && svoRenderMode === "svo" && voxelRenderMode === "smooth" && requestedSvoDiagnostics.overlay === "off"
       && this.svoDryScenePipeline?.fluidRenderOwnership.legacyComposite === true;
     if (!checkerboardShadowsEligible || shadowStabilityKey !== this.svoShadowStabilityKey) {
@@ -1297,6 +1296,7 @@ export class FluidLabRenderer {
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }
     this.svoDryScenePipeline?.setLightingMode(svoLightingMode);
+    this.svoDryScenePipeline?.setLightingOptions(svoLightingOptions);
     const cpuDataUpload_ms=performance.now()-uploadStart,renderStart=performance.now();
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     let stageCapture: PendingGPUStageCapture | undefined;
@@ -1319,7 +1319,7 @@ export class FluidLabRenderer {
     const fluidRenderOwnership = useSvoDryScene ? this.svoDryScenePipeline?.fluidRenderOwnership : undefined;
     const drySceneReuseKey = fluidRenderOwnership?.legacyComposite ? [
       this.gpuFluidGeneration, scene.sceneId, environmentId, selectedBodyId ?? "",
-      diagnosticsKey, svoLightingMode,
+      diagnosticsKey, svoLightingMode, svoLightingOptions.shadowsEnabled, svoLightingOptions.ambientOcclusionEnabled,
       basis.position.x, basis.position.y, basis.position.z,
       basis.forward.x, basis.forward.y, basis.forward.z,
       basis.right.x, basis.right.y, basis.right.z,

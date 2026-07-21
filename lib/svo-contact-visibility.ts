@@ -6,11 +6,12 @@ import {
 import type { SvoVec3 } from "./webgpu-svo-traversal";
 
 /**
- * Bounded short-range diffuse visibility. The production gate remains off
- * until live timing proves that secondary traversal fits the dry-scene budget.
+ * Bounded short-range diffuse visibility. Beautiful SVO presentation enables
+ * it by default, while the public ambient-occlusion control can bypass all
+ * secondary traversal.
  */
 export const SVO_CONTACT_VISIBILITY_CONTRACT = Object.freeze({
-  enabledByDefault: false,
+  enabledByDefault: true,
   sampleCount: 2,
   maximumNodeVisitsPerSample: 64,
   maximumLeafVisitsPerSample: 16,

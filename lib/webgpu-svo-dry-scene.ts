@@ -71,7 +71,7 @@ import {
   type SvoGpuPickingReadbackResult,
 } from "./webgpu-svo-picking-readback";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
-import { DEFAULT_SVO_LIGHTING_MODE, type SvoLightingMode } from "./svo-render-mode";
+import { DEFAULT_SVO_LIGHTING_MODE, DEFAULT_SVO_LIGHTING_OPTIONS, type SvoLightingMode, type SvoLightingOptions } from "./svo-render-mode";
 import type { DrySceneReplacementResult, TimestampRange } from "./webgpu-water-pipeline";
 import { SparseVoxelTemporalAccumulator, type SparseVoxelTemporalFrameState } from "./webgpu-svo-temporal-accumulator";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
@@ -122,9 +122,9 @@ export interface SparseVoxelDrySceneData {
   fluidPrimaryMode?: SvoFluidPrimaryMode;
   /** Explicit experimental gate; omission forces the complete legacy-water path. */
   directFluidMediaEndToEndValidated?: boolean;
-  /** Experimental bounded indirect-diffuse contact visibility; default is intentionally off pending timing acceptance. */
+  /** Scene capability gate for bounded indirect-diffuse contact visibility. */
   contactVisibilityEnabled?: boolean;
-  /** Diagnostic primary/shadow split; omission keeps production hard visibility enabled. */
+  /** Scene capability gate for shadow visibility; omission keeps shadows available. */
   shadowVisibilityEnabled?: boolean;
   lightDirection?: readonly [number, number, number];
   lightColor?: readonly [number, number, number];
@@ -229,6 +229,7 @@ export const SVO_DRY_VISIBILITY_FLAGS = Object.freeze({
   exactContact: 1 << 0,
   exactShadow: 1 << 1,
   coneLightingRequested: 1 << 2,
+  ambientOcclusion: 1 << 3,
 } as const);
 
 export const SVO_TERRAIN_FAST_MIN_VERTICAL = 0.35;
@@ -1134,9 +1135,10 @@ fn dryContactVisibilityDirection(geometricNormalIn:vec3f,featureId:u32,sampleInd
   let signValue=select(1.0,-1.0,sampleIndex!=0u);return normalize(geometricNormal+signValue*(.55*tangent+.2*bitangent));
 }
 fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32,ownerId:u32)->vec3f {
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion}u)==0u){return vec3f(1.0);}
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){
-    let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(1.0);}var visibility=0.0;let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let origin=position+normalize(geometricNormal)*cellScale*.2;
-    for(var sampleIndex=0u;sampleIndex<4u;sampleIndex+=1u){let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let cone=dryConeVisibility(origin,rotated,.62,radius);if(cone.valid==0u){return vec3f(1.0);}let rigidBlocker=nearestBodyIgnoring(origin,rotated,ownerId);visibility+=select(cone.transmittance,0.0,rigidBlocker.t<radius);}return vec3f(clamp(visibility*.25,0.0,1.0));
+    let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(1.0);}var visibility=0.0;var coneValid=true;let cellScale=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let origin=position+normalize(geometricNormal)*cellScale*.2;
+    for(var sampleIndex=0u;sampleIndex<4u;sampleIndex+=1u){let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let cone=dryConeVisibility(origin,rotated,.62,radius);if(cone.valid==0u){coneValid=false;break;}let rigidBlocker=nearestBodyIgnoring(origin,rotated,ownerId);visibility+=select(cone.transmittance,0.0,rigidBlocker.t<radius);}if(coneValid){return vec3f(clamp(visibility*.25,0.0,1.0));}
   }
   if((dry.materialPublication.w&1u)==0u){return vec3f(1.0);}
   let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(0.0);}let biasCells=select(${SVO_CONTACT_VISIBILITY_CONTRACT.smoothBiasCells},${SVO_CONTACT_VISIBILITY_CONTRACT.hardFeatureBiasCells},featureId!=SVO_FEATURE_SMOOTH);var visibility=vec3f(0.0);
@@ -1384,6 +1386,7 @@ export class SparseVoxelDrySceneRenderer {
   private scene?: SparseVoxelDrySceneData;
   private fineFluidCapability?: SvoFineFluidGpuCapability;
   private lightingMode: SvoLightingMode = DEFAULT_SVO_LIGHTING_MODE;
+  private lightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS;
 
   constructor(
     private readonly device: GPUDevice,
@@ -1494,6 +1497,18 @@ export class SparseVoxelDrySceneRenderer {
     }
   }
 
+  /** Enable finished-image visibility effects without rebuilding scene-owned resources. */
+  setLightingOptions(options: SvoLightingOptions): void {
+    if (options.shadowsEnabled === this.lightingOptions.shadowsEnabled
+      && options.ambientOcclusionEnabled === this.lightingOptions.ambientOcclusionEnabled) return;
+    this.lightingOptions = { ...options };
+    this.clearReusableFrame();
+    this.temporalAccumulator.invalidate();
+    if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) {
+      this.writeParams(this.source, this.scene);
+    }
+  }
+
   private writeParams(source: SparseVoxelSceneRenderSource, scene: SparseVoxelDrySceneData): void {
     const structural = source.structural!;
     const pbrMaterials = source.pbrMaterials!;
@@ -1506,9 +1521,11 @@ export class SparseVoxelDrySceneRenderer {
     floats.set(scene.lightColor ?? [1.04, 1.0, 0.91], 20);
     words.set([scene.terrainMaterialId ?? 0xffff_ffff, (scene.glassRecords?.byteLength ?? 0) / SVO_THIN_GLASS_RECORD_STRIDE_BYTES, scene.primaryCompositeOwnedGlassPaneIdBase ?? 0xffff_ffff, scene.primaryCompositeOwnedGlassPaneCount ?? 0], SVO_DRY_SCENE_PARAMS_LAYOUT.terrainWordOffset);
     if (scene.terrainMaterialMetadata) words.set(scene.terrainMaterialMetadata, SVO_DRY_SCENE_PARAMS_LAYOUT.terrainMaterialWordOffset);
-    const visibilityFlags = (scene.contactVisibilityEnabled ? SVO_DRY_VISIBILITY_FLAGS.exactContact : 0)
-      | (scene.shadowVisibilityEnabled === false ? 0 : SVO_DRY_VISIBILITY_FLAGS.exactShadow)
-      | (this.lightingMode === "cone" ? SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested : 0);
+    const shadowsEnabled = this.lightingOptions.shadowsEnabled && scene.shadowVisibilityEnabled !== false;
+    const ambientOcclusionEnabled = this.lightingOptions.ambientOcclusionEnabled && scene.contactVisibilityEnabled !== false;
+    const visibilityFlags = (ambientOcclusionEnabled ? SVO_DRY_VISIBILITY_FLAGS.exactContact | SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion : 0)
+      | (shadowsEnabled ? SVO_DRY_VISIBILITY_FLAGS.exactShadow : 0)
+      | (this.lightingMode === "cone" && (shadowsEnabled || ambientOcclusionEnabled) ? SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested : 0);
     words.set([pbrMaterials.count, pbrMaterials.revision, pbrMaterials.strideBytes, visibilityFlags], SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset);
     const fluidDimensions = structural.domain.dimensionsCells ?? [0, 0, 0];
     words.set([...fluidDimensions, svoFluidPrimaryModeWord(scene.fluidPrimaryMode, scene.directFluidMediaEndToEndValidated)], SVO_DRY_SCENE_PARAMS_LAYOUT.fluidDomainWordOffset);

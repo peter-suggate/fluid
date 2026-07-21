@@ -8,8 +8,20 @@ export const SVO_LIGHTING_MODES = ["direct", "cone"] as const;
 
 export type SvoLightingMode = typeof SVO_LIGHTING_MODES[number];
 
+/** User-facing visibility effects layered over the selected lighting backend. */
+export type SvoLightingOptions = Readonly<{
+  shadowsEnabled: boolean;
+  ambientOcclusionEnabled: boolean;
+}>;
+
 /** Cone lighting is fail-soft: unavailable caches retain exact direct SVO lighting. */
 export const DEFAULT_SVO_LIGHTING_MODE: SvoLightingMode = "cone";
+
+/** The presentation preset aims for the finished image; each effect remains independently switchable. */
+export const DEFAULT_SVO_LIGHTING_OPTIONS: SvoLightingOptions = Object.freeze({
+  shadowsEnabled: true,
+  ambientOcclusionEnabled: true,
+});
 
 /**
  * Default to the bounded raster presentation. The SVO dry-scene replacement

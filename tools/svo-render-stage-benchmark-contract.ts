@@ -13,7 +13,7 @@ export interface SVORenderStageBenchmarkRun {
   readonly cycleIndex: number;
   readonly variant: SVORenderStageBenchmarkVariant;
   readonly url: string;
-  readonly query: Readonly<Record<"svoShadowVisibility" | "svoTemporal", "0" | "1">>;
+  readonly query: Readonly<Record<"svoShadows" | "svoAO" | "svoTemporal", "0" | "1">>;
   readonly expectedTimingContextFragment: string;
   readonly outputResolution: SVORenderStageBenchmarkResolution;
   readonly internalResolution: SVORenderStageBenchmarkResolution;
@@ -34,16 +34,16 @@ const variants: Readonly<Record<SVORenderStageBenchmarkVariant, {
   readonly expectedTimingContextFragment: string;
 }>> = Object.freeze({
   production: Object.freeze({
-    query: Object.freeze({ svoShadowVisibility: "1", svoTemporal: "1" }),
-    expectedTimingContextFragment: "shadow-on:temporal-on:smooth:svo",
+    query: Object.freeze({ svoShadows: "1", svoAO: "1", svoTemporal: "1" }),
+    expectedTimingContextFragment: "shadow-on:ao-on:temporal-on:lighting-cone:smooth:svo",
   }),
   "full-rate-shadows": Object.freeze({
-    query: Object.freeze({ svoShadowVisibility: "1", svoTemporal: "0" }),
-    expectedTimingContextFragment: "shadow-on:temporal-off:smooth:svo",
+    query: Object.freeze({ svoShadows: "1", svoAO: "1", svoTemporal: "0" }),
+    expectedTimingContextFragment: "shadow-on:ao-on:temporal-off:lighting-cone:smooth:svo",
   }),
   "primary-only": Object.freeze({
-    query: Object.freeze({ svoShadowVisibility: "0", svoTemporal: "0" }),
-    expectedTimingContextFragment: "shadow-off:temporal-off:smooth:svo",
+    query: Object.freeze({ svoShadows: "0", svoAO: "0", svoTemporal: "0" }),
+    expectedTimingContextFragment: "shadow-off:ao-off:temporal-off:lighting-cone:smooth:svo",
   }),
 });
 
@@ -103,4 +103,3 @@ export function buildSVORenderStageBenchmarkPlan(options: {
     ]),
   });
 }
-
