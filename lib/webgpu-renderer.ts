@@ -1003,7 +1003,10 @@ export class FluidLabRenderer {
       this.resetGPUQueueTracking();
       report({phase:"drain",taskId:"solver.drain",label:"Previous GPU work drained",completed:1,total:1});
     };
-    const create:Promise<GPUSolverInstance>=prepare().then(()=>{
+    // Annotated because the two branches return different solver classes: without
+    // it the inferred TResult1 pins to WebGPUStaticSvoScene and rejects the
+    // GPUSolverInstance branch.
+    const create:Promise<GPUSolverInstance>=prepare().then(async ():Promise<GPUSolverInstance>=>{
       if(abort.signal.aborted||this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
       if (!planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver) {
         return WebGPUStaticSvoScene.create(device, scene, config.quality, report, abort.signal);
