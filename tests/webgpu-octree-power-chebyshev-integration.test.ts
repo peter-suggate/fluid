@@ -86,7 +86,7 @@ test("three production dam-break generations keep power CSR authoritative throug
     cwd: process.cwd(), encoding: "utf8", timeout: 75_000, killSignal: "SIGKILL",
     maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, FLUID_SCENE: "dam-break-ui", FLUID_METHOD: "octree",
-      FLUID_TARGET_S: "0.012", FLUID_ORACLE_STEPS: "3", FLUID_SURFACE_COLUMNS: "2400",
+      FLUID_TARGET_S: "0.012", FLUID_ORACLE_STEPS: "3", FLUID_VOXEL_CELL_SIZE: "0.02",
       FLUID_PRESSURE_CYCLES: "128", FLUID_OCTREE_LEAF_SOLVER: "chebyshev",
       FLUID_CPU_ORACLE: "0", FLUID_FIELD_STATS: "0", FLUID_DISABLE_TIMESTAMPS: "1",
       FLUID_OCTREE_FACE_TRANSPORT: "1", FLUID_OCTREE_POWER_PROJECTION: "authoritative",

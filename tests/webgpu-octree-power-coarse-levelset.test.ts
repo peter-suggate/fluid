@@ -15,6 +15,7 @@ import {
   unpackOctreePowerCoarseLevelSetControl,
 } from "../lib/webgpu-octree-power-coarse-levelset";
 import { OCTREE_POWER_TOPOLOGY_VALID, WebGPUOctreePowerTopology } from "../lib/webgpu-octree-power-topology";
+import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 
 test("WP8 planner is compact-row bounded and exposes independent coarse/fine diagnostics", () => {
   const plan = planOctreePowerCoarseLevelSet(32, 6);
@@ -28,6 +29,10 @@ test("WP8 planner is compact-row bounded and exposes independent coarse/fine dia
     "the WGSL no-causal-simplex failure must have a named host diagnostic bit");
   assert.doesNotMatch(octreePowerCoarseLevelSetShader, /nearestFallback|bestKnown|nearestKnown/,
     "Section 4.2 redistance must fail closed when no causal Delaunay simplex exists");
+  assert.match(octreePowerCoarseLevelSetShader, /causalTetraCandidate/);
+  assert.match(octreePowerCoarseLevelSetShader, /causalTriangleCandidate/);
+  assert.match(octreePowerCoarseLevelSetShader, /causalEdgeCandidate/,
+    "transition redistance must include lower-dimensional causal simplex updates");
   assert.match(octreePowerCoarseLevelSetShader,
     /source\.flags&\(PHI_VALID\|PHI_FINITE\)\)\!=\(PHI_VALID\|PHI_FINITE\)[\s\S]*fail\(row,INVALID_SOURCE\)/);
   assert.match(octreePowerCoarseLevelSetShader,
@@ -135,7 +140,10 @@ test("Dawn runs live-row advection, redistance, and O(rows) fine aggregate corre
 }, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as { create(options: string[]): GPU; globals: Record<string, unknown> };
   Object.assign(globalThis, dawn.globals); const nativeGpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
-  const adapter = await nativeGpu.requestAdapter(); assert.ok(adapter); const device = await adapter.requestDevice();
+  const adapter = await nativeGpu.requestAdapter(); assert.ok(adapter); const device = await adapter.requestDevice({
+    requiredFeatures: optionalFluidDeviceFeatures(adapter.features),
+    requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+  });
   const compilation = await device.createShaderModule({ code: octreePowerCoarseLevelSetShader }).getCompilationInfo();
   assert.deepEqual(compilation.messages.filter((message) => message.type === "error"), []);
   const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));

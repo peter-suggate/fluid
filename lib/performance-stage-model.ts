@@ -52,8 +52,8 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
     const pressureLabel = pressureSolver ? `Octree leaf pressure · ${pressureSolver}` : "Octree leaf pressure · Chebyshev-Jacobi";
     return [
       stage({
-        key: "topology", label: "Octree rebuild + 2:1 balance", shortLabel: "OCTREE", value: value(contextMatches, snapshot.gpuLayerConstruction_ms), className: "stage-topology", group: "compute", active: active(snapshot, "topology"),
-        description: "Resets the dense owner map, refines leaves from the resident signed-distance sizing field, and applies enough 2:1 balancing rounds for the selected maximum leaf size entirely on the GPU.", reads: ["signed distance φ", "maximum leaf size", "adaptivity"], writes: ["balanced octree owner map"], dependsOn: ["uploads"], sync: "Regenerated once at the start of every GPU advance with no topology readback."
+        key: "topology", label: "Owner residency + balanced octree", shortLabel: "OCTREE", value: value(contextMatches, snapshot.gpuLayerConstruction_ms), className: "stage-topology", group: "compute", active: active(snapshot, "topology"),
+        description: "Evolves owner-page residency and indirect worklists, selects changed topology, resets and refines resident tiles from sparse signed-distance summaries, runs every 2:1 balance round, and republishes the persistent liquid-leaf frontier.", reads: ["coarse / global-fine φ", "owner pages", "surface candidates", "adaptivity"], writes: ["balanced octree owners", "resident worklists", "liquid-leaf frontier"], dependsOn: ["uploads"], sync: "Timestamped across the complete rebuild, including every CFL substep, with no topology readback."
       }),
       stage({
         key: "advection", label: "Velocity transport preparation + advection", shortLabel: "ADVECT", value: value(contextMatches, snapshot.gpuAdvection_ms), className: "stage-advection", group: "compute", active: active(snapshot, "advection"),
@@ -61,11 +61,11 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
       }),
       stage({
         key: "pressure", label: pressureLabel, shortLabel: "LEAF SOLVE", value: value(contextMatches, snapshot.gpuPressure_ms), className: "stage-pressure", group: "compute", active: active(snapshot, "pressure"),
-        description: "Compacts and assembles octree rows once, then applies a Chebyshev-accelerated polynomial with one row-parallel SpMV per pass. Rigid scenes keep the same path by exchanging pressure impulses at the next presentation boundary instead of reducing Kᵀp inside every iterate.", reads: ["octree row matrix", "predicted velocity", "signed distance φ", "lagged rigid velocity"], writes: ["octree leaf pressure p", "next-batch rigid impulse"], dependsOn: ["advection"]
+        description: "Compacts liquid rows, generates power descriptors and generalized faces, assembles the second-order power operator and Section 4.3 first-order preconditioner, then runs the selected pressure solve through its final iterate. This range includes the complete PCG/V-cycle work rather than stopping at assembly.", reads: ["balanced octree", "power-face velocity", "fine / coarse φ", "solid apertures"], writes: ["power-face operator", "octree pressure p", "solver residuals"], dependsOn: ["advection"]
       }),
       stage({
         key: "projection", label: "Finite-volume octree projection", shortLabel: "PROJECT", value: value(contextMatches, snapshot.gpuProjection_ms), className: "stage-projection", group: "compute", active: active(snapshot, "projection"),
-        description: "Applies coarse/fine pressure fluxes to the dense face velocity field while preserving the finite-volume face-area weighting of the octree solve.", reads: ["leaf pressure p", "octree owner map", "predicted velocity"], writes: ["projected velocity"], dependsOn: ["pressure"]
+        description: "Applies the solved pressure jump to the same generalized power faces used by assembly, reconstructs canonical octree and regular-face velocities, enforces solid constraints, and publishes the projected field consumed by fine-interface transport.", reads: ["power faces", "leaf pressure p", "solid constraints", "predicted face velocity"], writes: ["projected power faces", "canonical face velocity", "regular velocity samples"], dependsOn: ["pressure"]
       }),
       stage({
         key: "extrapolation", label: "Narrow-band velocity extrapolation", shortLabel: "EXTEND", value: value(contextMatches, snapshot.gpuExtrapolation_ms), className: "stage-extrapolation", group: "compute", active: active(snapshot, "extrapolation"),
@@ -77,7 +77,7 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
       }),
       stage({
         key: "surface-update", label: "Level-set transport + volume control", shortLabel: "SURFACE φ", value: value(contextMatches, snapshot.gpuSurfaceUpdate_ms), className: "stage-surface-update", group: "compute", active: active(snapshot, "surfaceUpdate"),
-        description: "Advects the authoritative level set with the extrapolated velocity, restores signed distance, culls isolated debris, and applies GPU-only volume feedback.", reads: ["extrapolated velocity", "signed distance φ"], writes: ["advected signed distance φ", "surface reductions"], dependsOn: ["materialization"]
+        description: "Adapts surface pages, seeds and transports the global-fine level set from reconstructed power velocity, redistances it, applies volume correction, restricts a corrected coarse φ directory, publishes sparse sizing summaries, and commits or rolls back the generation transactionally.", reads: ["projected / extrapolated power velocity", "current fine and coarse φ", "surface pages"], writes: ["next global-fine φ", "corrected coarse φ", "surface summaries", "publication generation"], dependsOn: ["materialization"]
       }),
       rigid("surface-update"),
       spray("rigid"),
@@ -87,7 +87,7 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
       }),
       stage({
         key: "sparse-publication", label: "Sparse scene fluid publication", shortLabel: "PUBLISH", value: value(contextMatches, snapshot.gpuSparsePublication_ms), className: "stage-publication", group: "compute", active: active(snapshot, "sparsePublication"),
-        description: "Materializes resident fluid payloads into the shared sparse-brick octree, clears retired payloads, and publishes compact voxel and brick records for scene consumers.", reads: ["active and retired worklists", "level set φ", "projected velocity", "solid occupancy"], writes: ["sparse brick payloads", "voxel and brick records"], dependsOn: ["fluid-residency"]
+        description: "Publishes the current fluid generation into the shared sparse scene representation consumed by SVO traversal and inspection, including compact payloads and retirement-safe records.", reads: ["resident worklists", "fine / coarse φ", "projected velocity", "solid occupancy"], writes: ["SVO fluid payload", "voxel and brick records", "scene generation"], dependsOn: ["fluid-residency"]
       }),
       diagnostics("sparse-publication"),
       overhead("diagnostics")

@@ -29,7 +29,7 @@ export const SVO_GBUFFER_LAYOUT = Object.freeze({
   },
   debugSidecar: {
     format: "rgba32uint" as SvoGBufferFormat, bytes: 16,
-    encoding: "optional storage record or diagnostic-only pass: steps, refinement, packed fluid diagnostics, topology visits",
+    encoding: "reserved optional storage record for diagnostic-only passes",
   },
 } as const);
 
@@ -48,24 +48,20 @@ export const SVO_GBUFFER_PRECISION = Object.freeze({
 } as const);
 
 export const SVO_GBUFFER_FIELD_SOURCES = Object.freeze({
-  none: 0, structuralDiscrete: 1, fluidCoarse: 2, fluidFine: 3,
+  none: 0, structuralDiscrete: 1,
   analyticPrimitive: 4, terrainHeightfield: 5, rasterFallback: 6,
 } as const);
 export type SvoGBufferFieldSource = typeof SVO_GBUFFER_FIELD_SOURCES[keyof typeof SVO_GBUFFER_FIELD_SOURCES];
 
-export const SVO_GBUFFER_MOTION_KINDS = Object.freeze({ static: 0, rigid: 1, fluid: 2 } as const);
+export const SVO_GBUFFER_MOTION_KINDS = Object.freeze({ static: 0, rigid: 1 } as const);
 export type SvoGBufferMotionKind = typeof SVO_GBUFFER_MOTION_KINDS[keyof typeof SVO_GBUFFER_MOTION_KINDS];
-
-export const SVO_GBUFFER_GRADIENT_SCHEMES = Object.freeze({ none: 0, central: 1, mixed: 2, fallback: 3 } as const);
-export type SvoGBufferGradientScheme = typeof SVO_GBUFFER_GRADIENT_SCHEMES[keyof typeof SVO_GBUFFER_GRADIENT_SCHEMES];
 
 /** These sixteen bits occupy metadata bits 4..19. */
 export const SVO_GBUFFER_FLAGS = Object.freeze({
   validSurface: 1 << 0, miss: 1 << 1, depthValid: 1 << 2,
   geometricNormalValid: 1 << 3, shadingNormalValid: 1 << 4,
-  motionValid: 1 << 5, mediaValid: 1 << 6, fluidSurface: 1 << 7,
-  hardFeature: 1 << 8, insideFluidAtStart: 1 << 9,
-  refinementConverged: 1 << 10, boundaryFallback: 1 << 11,
+  motionValid: 1 << 5, mediaValid: 1 << 6,
+  hardFeature: 1 << 8,
   workExhausted: 1 << 12, invalidField: 1 << 13,
   staleGeneration: 1 << 14, nonresident: 1 << 15,
 } as const);
@@ -78,18 +74,6 @@ export type SvoGBufferFailure = typeof SVO_GBUFFER_FAILURES[keyof typeof SVO_GBU
 
 /** Four metadata bits are available to preserve the authored local feature. */
 export const SVO_GBUFFER_FEATURES = Object.freeze({ smooth: 0, boxFaceX: 1, boxFaceY: 2, boxFaceZ: 3 } as const);
-
-export interface SvoGBufferFluidDiagnostics {
-  traceSteps: number;
-  refinementIterations: number;
-  gradientScheme: SvoGBufferGradientScheme;
-  interpolationCorners: number;
-  crossedLeaves: number;
-  boundaryFallbacks: number;
-  topologyNodeVisits: number;
-  insideFluidAtStart: boolean;
-  refinementConverged: boolean;
-}
 
 export interface SvoGBufferHit {
   status: "hit";
@@ -107,7 +91,6 @@ export interface SvoGBufferHit {
   fieldSource: SvoGBufferFieldSource;
   localTopologyGeneration: number;
   featureId: number;
-  fluid?: SvoGBufferFluidDiagnostics;
   /** Diagnostic flags only; the packer supplies canonical validity bits. */
   additionalFlags?: number;
 }
@@ -118,7 +101,6 @@ export interface SvoGBufferMiss {
   fieldSource?: SvoGBufferFieldSource;
   localTopologyGeneration?: number;
   failure?: SvoGBufferFailure;
-  fluid?: Partial<SvoGBufferFluidDiagnostics>;
   additionalFlags?: number;
 }
 export type SvoGBufferPixel = SvoGBufferHit | SvoGBufferMiss;
@@ -244,42 +226,6 @@ export function unpackSvoGBufferVelocity(packed: number): { velocity_m_s: SvoVec
   };
 }
 
-function defaultFluid(fluid: Partial<SvoGBufferFluidDiagnostics> | undefined): SvoGBufferFluidDiagnostics {
-  return {
-    traceSteps: fluid?.traceSteps ?? 0,
-    refinementIterations: fluid?.refinementIterations ?? 0,
-    gradientScheme: fluid?.gradientScheme ?? SVO_GBUFFER_GRADIENT_SCHEMES.none,
-    interpolationCorners: fluid?.interpolationCorners ?? 0,
-    crossedLeaves: fluid?.crossedLeaves ?? 0,
-    boundaryFallbacks: fluid?.boundaryFallbacks ?? 0,
-    topologyNodeVisits: fluid?.topologyNodeVisits ?? 0,
-    insideFluidAtStart: fluid?.insideFluidAtStart ?? false,
-    refinementConverged: fluid?.refinementConverged ?? false,
-  };
-}
-
-function packFluidDetails(fluid: SvoGBufferFluidDiagnostics): number {
-  return (uint(fluid.gradientScheme, 3, "Gradient scheme")
-    | uint(fluid.interpolationCorners, 8, "Interpolation corner count") << 2
-    | uint(fluid.crossedLeaves, UINT16_MAX, "Crossed-leaf count") << 6
-    | (fluid.insideFluidAtStart ? 1 << 22 : 0)
-    | (fluid.refinementConverged ? 1 << 23 : 0)
-    | uint(fluid.boundaryFallbacks, 255, "Boundary-fallback count") << 24) >>> 0;
-}
-
-function unpackFluidDetails(details: number, sidecar: Uint32Array): SvoGBufferFluidDiagnostics {
-  return {
-    traceSteps: sidecar[0], refinementIterations: sidecar[1],
-    gradientScheme: (details & 3) as SvoGBufferGradientScheme,
-    interpolationCorners: details >>> 2 & 0xf,
-    crossedLeaves: details >>> 6 & UINT16_MAX,
-    boundaryFallbacks: details >>> 24,
-    topologyNodeVisits: sidecar[3],
-    insideFluidAtStart: (details & 1 << 22) !== 0,
-    refinementConverged: (details & 1 << 23) !== 0,
-  };
-}
-
 function failureFlag(failure: SvoGBufferFailure): number {
   if (failure === SVO_GBUFFER_FAILURES.workExhausted) return SVO_GBUFFER_FLAGS.workExhausted;
   if (failure === SVO_GBUFFER_FAILURES.invalidField) return SVO_GBUFFER_FLAGS.invalidField;
@@ -310,13 +256,6 @@ export function packSvoGBufferPixel(pixel: SvoGBufferPixel): SvoPackedGBufferPix
   const packedSurface = new Uint32Array(4);
   const identityMedia = new Uint16Array(4);
   const debugSidecar = new Uint32Array(4);
-  const fluid = defaultFluid(pixel.fluid);
-  debugSidecar.set([
-    uint(fluid.traceSteps, UINT32_MAX, "Trace step count"),
-    uint(fluid.refinementIterations, UINT32_MAX, "Refinement iteration count"),
-    packFluidDetails(fluid),
-    uint(fluid.topologyNodeVisits, UINT32_MAX, "Topology-node visit count"),
-  ]);
 
   if (pixel.status === "miss") {
     const failure = uint(pixel.failure ?? SVO_GBUFFER_FAILURES.noIntersection, 255, "G-buffer failure") as SvoGBufferFailure;
@@ -338,13 +277,10 @@ export function packSvoGBufferPixel(pixel: SvoGBufferPixel): SvoPackedGBufferPix
     uint(pixel.materialId, UINT16_MAX, "Material ID"), uint(pixel.ownerId, UINT16_MAX, "Owner ID"),
     uint(pixel.mediumBefore, UINT16_MAX, "Medium-before ID"), uint(pixel.mediumAfter, UINT16_MAX, "Medium-after ID"),
   ]);
-  const fluidSurface = pixel.fieldSource === SVO_GBUFFER_FIELD_SOURCES.fluidCoarse || pixel.fieldSource === SVO_GBUFFER_FIELD_SOURCES.fluidFine;
   const canonicalFlags = SVO_GBUFFER_FLAGS.validSurface | SVO_GBUFFER_FLAGS.depthValid
     | SVO_GBUFFER_FLAGS.geometricNormalValid | SVO_GBUFFER_FLAGS.shadingNormalValid | SVO_GBUFFER_FLAGS.mediaValid
-    | (pixel.motionValid ? SVO_GBUFFER_FLAGS.motionValid : 0) | (fluidSurface ? SVO_GBUFFER_FLAGS.fluidSurface : 0)
-    | (pixel.featureId !== SVO_GBUFFER_FEATURES.smooth ? SVO_GBUFFER_FLAGS.hardFeature : 0)
-    | (fluid.insideFluidAtStart ? SVO_GBUFFER_FLAGS.insideFluidAtStart : 0)
-    | (fluid.refinementConverged ? SVO_GBUFFER_FLAGS.refinementConverged : 0);
+    | (pixel.motionValid ? SVO_GBUFFER_FLAGS.motionValid : 0)
+    | (pixel.featureId !== SVO_GBUFFER_FEATURES.smooth ? SVO_GBUFFER_FLAGS.hardFeature : 0);
   packedSurface[3] = packMetadata(pixel.fieldSource, canonicalFlags | (pixel.additionalFlags ?? 0), SVO_GBUFFER_FAILURES.none, pixel.featureId);
   return { radianceDepth, packedSurface, identityMedia, debugSidecar };
 }
@@ -356,12 +292,11 @@ export function unpackSvoGBufferPixel(packed: SvoPackedGBufferPixel): SvoGBuffer
   }
   const radianceLinear = packed.radianceDepth.slice(0, 3).map(decodeSvoGBufferFloat16) as unknown as SvoVec3;
   const metadata = unpackMetadata(packed.packedSurface[3]);
-  const fluid = unpackFluidDetails(packed.debugSidecar[2], packed.debugSidecar);
   if ((metadata.flags & SVO_GBUFFER_FLAGS.validSurface) === 0) {
     return {
       status: "miss", radianceLinear, fieldSource: metadata.fieldSource,
       localTopologyGeneration: packed.packedSurface[1], failure: metadata.failure,
-      fluid, additionalFlags: metadata.flags,
+      additionalFlags: metadata.flags,
     };
   }
   const velocity = unpackSvoGBufferVelocity(packed.packedSurface[2]);
@@ -374,7 +309,7 @@ export function unpackSvoGBufferPixel(packed: SvoPackedGBufferPixel): SvoGBuffer
     velocity_m_s: velocity.velocity_m_s, motionKind: velocity.motionKind,
     motionValid: (metadata.flags & SVO_GBUFFER_FLAGS.motionValid) !== 0,
     fieldSource: metadata.fieldSource, localTopologyGeneration: packed.packedSurface[1],
-    featureId: metadata.featureId, fluid, additionalFlags: metadata.flags,
+    featureId: metadata.featureId, additionalFlags: metadata.flags,
   };
 }
 
@@ -420,9 +355,8 @@ export function makeSvoGBufferTemporalNormalWord(normal: SvoVec3): number { retu
 export const svoGBufferWGSL = /* wgsl */ `
 const SVO_GBUFFER_VALID_SURFACE:u32=1u;const SVO_GBUFFER_MISS:u32=2u;const SVO_GBUFFER_DEPTH_VALID:u32=4u;
 const SVO_GBUFFER_GEOMETRIC_NORMAL_VALID:u32=8u;const SVO_GBUFFER_SHADING_NORMAL_VALID:u32=16u;
-const SVO_GBUFFER_MOTION_VALID:u32=32u;const SVO_GBUFFER_MEDIA_VALID:u32=64u;const SVO_GBUFFER_FLUID_SURFACE:u32=128u;
-const SVO_GBUFFER_HARD_FEATURE:u32=256u;const SVO_GBUFFER_FIELD_NONE:u32=0u;const SVO_GBUFFER_FIELD_FLUID_COARSE:u32=2u;
-const SVO_GBUFFER_FIELD_FLUID_FINE:u32=3u;const SVO_GBUFFER_FEATURE_SMOOTH:u32=0u;const SVO_GBUFFER_FEATURE_BOX_X:u32=1u;
+const SVO_GBUFFER_MOTION_VALID:u32=32u;const SVO_GBUFFER_MEDIA_VALID:u32=64u;const SVO_GBUFFER_HARD_FEATURE:u32=256u;
+const SVO_GBUFFER_FIELD_NONE:u32=0u;const SVO_GBUFFER_FEATURE_SMOOTH:u32=0u;const SVO_GBUFFER_FEATURE_BOX_X:u32=1u;
 const SVO_GBUFFER_MAX_VELOCITY_M_S:f32=64.0;
 struct SvoGBufferTargets{@location(0) radianceDepth:vec4f,@location(1) packedSurface:vec4u,@location(2) identityMedia:vec4u}
 struct SvoGBufferFeatureNormal{normal:vec3f,featureId:u32}

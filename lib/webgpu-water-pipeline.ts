@@ -17,7 +17,6 @@ import {
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES,
 } from "./webgpu-octree-power-coarse-levelset";
-import type { SvoFluidRenderOwnership } from "./svo-fluid-media-path";
 import {
   validateGlobalFineLevelSetConsumerSource,
   validateUnifiedOctreeConsumerSource,
@@ -80,6 +79,7 @@ export function surfaceExtractionRepresentation(hasAdaptiveOctree: boolean, hasS
 export type TimestampRange = { querySet: GPUQuerySet; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number };
 export interface RasterWaterTimestampRanges {
   extraction: TimestampRange;
+  caustics: TimestampRange;
   scene: TimestampRange;
   frontInterfaces: TimestampRange;
   backInterfaces: TimestampRange;
@@ -90,6 +90,7 @@ export interface RasterWaterTimestampRanges {
 
 export interface RasterWaterEncodeResult {
   surfaceUpdated: boolean;
+  causticsUpdated: boolean;
   sprayRendered: boolean;
 }
 
@@ -154,24 +155,6 @@ export function waterSurfaceGeometrySource(
 /** Adaptive geometry may seed global presentation only before any mesh exists. */
 export function globalFineFallbackMaySeedRenderer(vertexCount: number, authorityLatch: number): boolean {
   return vertexCount === 0 && authorityLatch === 0;
-}
-
-export interface RasterWaterStagePlan {
-  dryTarget: "internal-refraction" | "presentation-output";
-  extractSurface: boolean;
-  renderInterfaces: boolean;
-  compositeOptics: boolean;
-}
-
-/** CPU-visible mirror of the atomic presentation branch used by `encode`. */
-export function rasterWaterStagePlan(fluidOwnership?: SvoFluidRenderOwnership): RasterWaterStagePlan {
-  if (!fluidOwnership?.directStructuralMedia) {
-    return { dryTarget: "internal-refraction", extractSurface: true, renderInterfaces: true, compositeOptics: true };
-  }
-  if (fluidOwnership.legacyExtraction || fluidOwnership.legacyInterfaces || fluidOwnership.legacyComposite) {
-    throw new Error("Direct structural fluid media must atomically suppress every legacy water stage");
-  }
-  return { dryTarget: "presentation-output", extractSurface: false, renderInterfaces: false, compositeOptics: false };
 }
 
 /**
@@ -1630,12 +1613,7 @@ export class RasterWaterPipeline {
     return bindGroup;
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, timestamps?: RasterWaterTimestampRanges, drySceneReplacement?: DrySceneReplacementEncoder, fluidOwnership?: SvoFluidRenderOwnership): RasterWaterEncodeResult | false {
-    const stagePlan = rasterWaterStagePlan(fluidOwnership);
-    if (stagePlan.dryTarget === "presentation-output") {
-      if (!("createView" in output) || !drySceneReplacement?.(encoder, output, timestamps?.scene)) return false;
-      return { surfaceUpdated: false, sprayRendered: false };
-    }
+  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, timestamps?: RasterWaterTimestampRanges, drySceneReplacement?: DrySceneReplacementEncoder): RasterWaterEncodeResult | false {
     const geometryDimensions = this.globalFineLevelSet?.sampleDimensions ?? (this.adaptiveOctree
       ? [nx * this.adaptiveOctree.pageResolution, ny * this.adaptiveOctree.pageResolution, nz * this.adaptiveOctree.pageResolution] as const
       : this.sparseSurface?.fineDimensions ?? [nx, ny, nz] as const);
@@ -1723,7 +1701,7 @@ export class RasterWaterPipeline {
       this.extractedRevision = revision; this.lastExtractionAt_ms = advancePresentationClock(this.lastExtractionAt_ms, now_ms);
     }
     if (updateCaustics) {
-      const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}]});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.surfaceBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();
+      const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.caustics}:{})});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.surfaceBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();
       this.causticsValid = true;
     }
     const sparseSceneResult = drySceneReplacement?.(encoder, this.sceneTexture, timestamps?.scene) ?? false;
@@ -1737,7 +1715,7 @@ export class RasterWaterPipeline {
     interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.frontInterfaces);interfacePass("Water + spray back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.backInterfaces);
     const compositeBindGroup = sparseSceneResult ? this.compositeBindGroupFor(sparseSceneResult.sampledTargetView) : this.compositeBindGroup;
     if (!compositeBindGroup) return false;
-    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.adaptiveOctree&&!this.globalFineLevelSet?this.adaptiveCompositePipeline:this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface, sprayRendered: false };
+    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.adaptiveOctree&&!this.globalFineLevelSet?this.adaptiveCompositePipeline:this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface, causticsUpdated: updateCaustics, sprayRendered: false };
   }
 
   destroy() {

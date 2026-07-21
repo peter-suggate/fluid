@@ -203,7 +203,13 @@ export function WebGPUViewport() {
         const method = useMethodStore.getState();
         const state = useDiagnosticsStore.getState();
         const runtime = useRuntimeStore.getState();
-        const pausedPresentation = runtime.runState === "paused" ? [
+        // A profiler needs newly completed submissions, not repeated snapshots
+        // of the last on-change frame. Static dry scenes have no fluid solver
+        // and are paused by design, so keep presenting while PERF is visible.
+        // FluidLabRenderer still admits only one presentation at a time.
+        const continuousPerformancePresentation = runtime.runState === "paused"
+          && ui.rightPanel === "performance";
+        const pausedPresentation = runtime.runState === "paused" && !continuousPerformancePresentation ? [
           sceneState, ui, method, state.bodies, state.fluidRenderState, state.gpuInfo,
           simulation.time(), renderer.presentationRevision,
           gpuStageCapture.getSnapshot().revision,

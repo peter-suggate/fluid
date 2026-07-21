@@ -120,8 +120,8 @@ test("primary pane optics are exact, two-sided, identity preserving, and one-que
   assert.match(svoDrySceneShader, /fn shadeThinGlass\([^]*svoThinGlassOptics\(record,glass\.hit,incidentIor\)/);
   assert.match(svoDrySceneShader, /reflected\*optics\.fresnel\+transmitted\*optics\.netTransmittance/);
   assert.match(svoDrySceneShader, /svoThinGlassMaterialId\(record\),svoThinGlassOwnerId\(record\),svoThinGlassPaneId\(record\)/);
-  assert.match(svoDrySceneShader, /fn dryThinGlassIncidentIor\(medium:u32\)->f32[^]*medium==DRY_MEDIUM_WATER/,
-    "the future fluid-boundary adapter must select water IOR only after coincident exits are resolved");
+  assert.match(svoDrySceneShader, /fn dryThinGlassIncidentIor\(\)->f32\{return 1\.0;\}/,
+    "the dry pass must leave fluid-interface optics to the raster water pass");
 
   const opticsStart = svoDrySceneShader.indexOf("fn shadeThinGlass(");
   const opticsEnd = svoDrySceneShader.indexOf("fn dryThickGlassEmission", opticsStart);

@@ -9,7 +9,6 @@ import {
   SVO_GBUFFER_FEATURES,
   SVO_GBUFFER_FIELD_SOURCES,
   SVO_GBUFFER_FLAGS,
-  SVO_GBUFFER_GRADIENT_SCHEMES,
   SVO_GBUFFER_LAYOUT,
   SVO_GBUFFER_MOTION_KINDS,
   SVO_GBUFFER_PRECISION,
@@ -50,23 +49,11 @@ const hit: SvoGBufferHit = {
   mediumBefore: 12,
   mediumAfter: 0xab,
   velocity_m_s: [1.25, -0.03125, 27.7],
-  motionKind: SVO_GBUFFER_MOTION_KINDS.fluid,
+  motionKind: SVO_GBUFFER_MOTION_KINDS.rigid,
   motionValid: true,
-  fieldSource: SVO_GBUFFER_FIELD_SOURCES.fluidCoarse,
+  fieldSource: SVO_GBUFFER_FIELD_SOURCES.analyticPrimitive,
   localTopologyGeneration: 0xffff_fffe,
   featureId: SVO_GBUFFER_FEATURES.smooth,
-  fluid: {
-    traceSteps: 513,
-    refinementIterations: 8,
-    gradientScheme: SVO_GBUFFER_GRADIENT_SCHEMES.mixed,
-    interpolationCorners: 8,
-    crossedLeaves: 17,
-    boundaryFallbacks: 3,
-    topologyNodeVisits: 12_345,
-    insideFluidAtStart: true,
-    refinementConverged: true,
-  },
-  additionalFlags: SVO_GBUFFER_FLAGS.boundaryFallback,
 };
 
 test("core production targets fit the baseline 32-byte WebGPU color-attachment limit", () => {
@@ -85,7 +72,7 @@ test("core production targets fit the baseline 32-byte WebGPU color-attachment l
     SVO_GBUFFER_LAYOUT.packedSurface.location,
     SVO_GBUFFER_LAYOUT.identityMedia.location,
   ], [0, 1, 2]);
-  assert.match(SVO_GBUFFER_LAYOUT.debugSidecar.encoding, /storage record or diagnostic-only pass/);
+  assert.match(SVO_GBUFFER_LAYOUT.debugSidecar.encoding, /diagnostic-only passes/);
 });
 
 test("binary16 CPU mirror is round-to-nearest-even and declares depth precision", () => {
@@ -125,9 +112,7 @@ test("core packing preserves HDR, depth, two normals, exact identity/generation,
     fieldSource: hit.fieldSource, generation: hit.localTopologyGeneration,
     featureId: hit.featureId, motionKind: hit.motionKind,
   });
-  assert.deepEqual(decoded.fluid, hit.fluid);
-  assert.ok((decoded.additionalFlags! & SVO_GBUFFER_FLAGS.fluidSurface) !== 0);
-  assert.ok((decoded.additionalFlags! & SVO_GBUFFER_FLAGS.boundaryFallback) !== 0);
+  assert.deepEqual(Array.from(packed.debugSidecar), [0, 0, 0, 0]);
 });
 
 test("velocity saturates to the declared range and preserves motion kind", () => {
@@ -139,13 +124,12 @@ test("velocity saturates to the declared range and preserves motion kind", () =>
   assert.equal(decoded.motionKind, SVO_GBUFFER_MOTION_KINDS.rigid);
 });
 
-test("miss encoding uses zero distance and validity, retaining failure and optional debug counters", () => {
+test("miss encoding uses zero distance and validity while retaining failure identity", () => {
   const packed = packSvoGBufferPixel({
     status: "miss", radianceLinear: [0.1, 0.25, 2],
-    fieldSource: SVO_GBUFFER_FIELD_SOURCES.fluidFine,
+    fieldSource: SVO_GBUFFER_FIELD_SOURCES.structuralDiscrete,
     localTopologyGeneration: 19,
     failure: SVO_GBUFFER_FAILURES.staleGeneration,
-    fluid: { traceSteps: 42, crossedLeaves: 4, topologyNodeVisits: 400 },
   });
   assert.equal(packed.radianceDepth[3], 0);
   assert.equal(packed.packedSurface[0], 0);
@@ -157,8 +141,7 @@ test("miss encoding uses zero distance and validity, retaining failure and optio
   assert.ok((decoded.additionalFlags! & SVO_GBUFFER_FLAGS.validSurface) === 0);
   assert.ok((decoded.additionalFlags! & SVO_GBUFFER_FLAGS.miss) !== 0);
   assert.ok((decoded.additionalFlags! & SVO_GBUFFER_FLAGS.staleGeneration) !== 0);
-  assert.equal(decoded.fluid?.traceSteps, 42);
-  assert.equal(decoded.fluid?.topologyNodeVisits, 400);
+  assert.deepEqual(Array.from(packed.debugSidecar), [0, 0, 0, 0]);
 });
 
 test("linear ray distance reconstructs world position independently of direction magnitude", () => {

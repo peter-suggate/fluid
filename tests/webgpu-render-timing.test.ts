@@ -19,6 +19,8 @@ test("raster timestamps retain each presentation stage", () => {
     total_ms: 32,
     surfaceExtraction_ms: 2,
     dryScene_ms: 3,
+    interfaceFront_ms: 4,
+    interfaceBack_ms: 5,
     interfaces_ms: 9,
     sprayFront_ms: 2,
     sprayBack_ms: 3,
@@ -44,13 +46,30 @@ test("disabled spray contributes no stale render time", () => {
 
 test("SVO temporal resolve has an independent timestamp interval", () => {
   const withTemporal = [...timestamps, 40_000_000n, 44_000_000n];
-  assert.equal(RENDER_TIMESTAMP_QUERY_COUNT, 18);
+  assert.equal(RENDER_TIMESTAMP_QUERY_COUNT, 22);
   const result = decodeRenderStageTimestamps(withTemporal, true, true, true);
   assert.equal(result.dryScene_ms, 3);
   assert.equal(result.svoTemporal_ms, 4);
   assert.equal(result.total_ms, 36);
   assert.equal(decodeRenderStageTimestamps(withTemporal, true, true, false).svoTemporal_ms, undefined,
     "raster frames must never report stale values from the reserved SVO interval");
+});
+
+test("caustics and optional inspection overlays contribute to the complete presentation total", () => {
+  const complete = [
+    ...timestamps,
+    40_000_000n, 44_000_000n,
+    45_000_000n, 47_000_000n,
+    48_000_000n, 51_000_000n,
+  ];
+  const result = decodeRenderStageTimestamps(complete, true, true, true, true, true);
+  assert.equal(result.caustics_ms, 2);
+  assert.equal(result.overlays_ms, 3);
+  assert.equal(result.total_ms, 41);
+  const inactive = decodeRenderStageTimestamps(complete, true, true, true, false, false);
+  assert.equal(inactive.caustics_ms, undefined);
+  assert.equal(inactive.overlays_ms, undefined);
+  assert.equal(inactive.total_ms, 36);
 });
 
 test("an all-zero query resolve is unavailable rather than a measured zero-time frame", () => {

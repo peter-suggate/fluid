@@ -960,7 +960,14 @@ export class WebGPUUniformEulerianSolver {
     if(projection.globalFineLevelSetSource){
       const readiness=initialGlobalFineAuthorityReadiness(fine,
         { externallySeededColdBootstrap: true });
-      if(!readiness.ready)throw new Error(`Paused t=0 authority rejected: ${readiness.label}`);
+      if(!readiness.ready){
+        const failureRow=await projection.readPowerCoarseFailureRow(fine?.coarseControl?.[1]??0xffff_ffff);
+        const powerFailure=await projection.readGlobalFinePowerPublicationFailure(
+          fine?.faceBandPowerPublicationControl?.[1]??0xffff_ffff);
+        throw new Error(`Paused t=0 authority rejected: ${readiness.label}${failureRow
+          ? `; coarseFailureRow=${JSON.stringify(failureRow)}`:""}${powerFailure
+          ? `; powerPublicationFailure=${JSON.stringify(powerFailure)}`:""}`);
+      }
       this.applyGlobalFineDiagnostics(fine!);
       const c=this.scene.container;
       const baseCellVolume_m3=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);
@@ -1029,6 +1036,8 @@ export class WebGPUUniformEulerianSolver {
   get powerFaceTransferControl() { return this.octreeProjection?.powerFaceTransferControl; }
   get powerFaceSeedControl() { return this.octreeProjection?.powerFaceSeedControl; }
   get powerOperatorControl() { return this.octreeProjection?.powerOperatorControl; }
+  /** QA-only passthrough for the authoritative Section 4.3 solver status. */
+  get mgpcgControl() { return this.octreeProjection?.mgpcgControl; }
   get powerFaceControl() { return this.octreeProjection?.powerFaceControl; }
   get powerFaceSiteIndex() { return this.octreeProjection?.powerFaceSiteIndex; }
   get powerDescriptorControl() { return this.octreeProjection?.powerDescriptorControl; }
@@ -1038,8 +1047,12 @@ export class WebGPUUniformEulerianSolver {
   get powerCatalogEntryHeaders() { return this.octreeProjection?.powerCatalogEntryHeaders; }
   get powerCatalogFaces() { return this.octreeProjection?.powerCatalogFaces; }
   get powerLeafHeaders() { return this.octreeProjection?.powerLeafHeaders; }
+  get powerLeafEntries() { return this.octreeProjection?.powerLeafEntries; }
+  get powerPressureBuffer() { return this.octreeProjection?.powerPressureBuffer; }
   get powerLeafFrontier() { return this.octreeProjection?.powerLeafFrontier; }
   get topologyTileWorklist() { return this.octreeProjection?.topologyTileWorklist; }
+  get adaptiveSurfaceCandidateControl() { return this.octreeProjection?.adaptiveSurfaceCandidateControl; }
+  get adaptiveSurfaceLeaves() { return this.octreeProjection?.adaptiveSurfaceLeaves; }
   get powerOwnerArena() { return this.octreeProjection?.powerOwnerArena; }
   get adaptiveSurfacePageSource() { return this.octreeProjection?.adaptiveSurfacePageSource; }
   get octreeTechniqueDebugSource() { return this.octreeProjection?.techniqueDebugSource; }
@@ -1049,6 +1062,7 @@ export class WebGPUUniformEulerianSolver {
   get globalFineRedistanceControl() { return this.octreeProjection?.globalFineRedistanceControl; }
   get globalFineVolumeControl() { return this.octreeProjection?.globalFineVolumeControl; }
   get globalFinePowerVelocityControl() { return this.octreeProjection?.globalFinePowerVelocityControl; }
+  get globalFinePowerProjectionControl() { return this.octreeProjection?.globalFinePowerProjectionControl; }
   get globalFinePowerVelocitySampleControl() { return this.octreeProjection?.globalFinePowerVelocitySampleControl; }
   get globalFineCoarseLevelSetControl() { return this.octreeProjection?.globalFineCoarseLevelSetControl; }
   get globalFineFaceBandControl() { return this.octreeProjection?.globalFineFaceBandControl; }
@@ -1467,18 +1481,29 @@ export class WebGPUUniformEulerianSolver {
       if (timing && this.querySet) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end(); }
     } else if (this.octreeProjection) {
       const timing = this.timing("layerConstruction_ms");
-      inlineRebuildEncoded = this.octreeProjection.encodeInlineRebuild(encoder, timing && this.querySet ? {
-        querySet: this.querySet,
-        beginningOfPassWriteIndex: timing.start,
-        endOfPassWriteIndex: timing.end,
-      } : undefined);
+      if (timing && this.querySet) {
+        const marker = encoder.beginComputePass({ label: "Octree topology timing start", timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.start } }); marker.end();
+      }
+      inlineRebuildEncoded = this.octreeProjection.encodeInlineRebuild(encoder);
+      if (timing && this.querySet) {
+        const marker = encoder.beginComputePass({ label: "Octree topology timing end", timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end();
+      }
     }
     for (let substep = 0; substep < substeps; substep += 1) {
       // The first rebuild was encoded above so topology is ready before any
       // dynamics. If CFL control subdivides this advance, phi moves after each
       // projection; rebuild again before the next substep so a newly exposed
       // interface can never remain inside a coarse pressure leaf.
-      if (substep > 0 && this.octreeProjection) this.octreeProjection.encodeInlineRebuild(encoder);
+      if (substep > 0 && this.octreeProjection) {
+        const timing = this.timing("layerConstruction_ms");
+        if (timing && this.querySet) {
+          const marker = encoder.beginComputePass({ label: "Octree substep topology timing start", timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.start } }); marker.end();
+        }
+        this.octreeProjection.encodeInlineRebuild(encoder);
+        if (timing && this.querySet) {
+          const marker = encoder.beginComputePass({ label: "Octree substep topology timing end", timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end();
+        }
+      }
       // U3 compact-face authority owns advection, forces, divergence, and
       // projection inside WebGPUOctreeProjection. The shared dense kernels are
       // not merely redundant here: dispatching them would address the 1x1
@@ -1612,9 +1637,13 @@ export class WebGPUUniformEulerianSolver {
         // velocity. Sampling the previous frame here was the one-frame lag
         // that froze crests and newly exposed interface cells.
         const surfaceTiming = this.timing("surfaceUpdate_ms");
-        this.adaptiveProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s, surfaceTiming && this.querySet ? {
-          querySet: this.querySet, beginningOfPassWriteIndex: surfaceTiming.start, endOfPassWriteIndex: surfaceTiming.end
-        } : undefined);
+        if (surfaceTiming && this.querySet) {
+          const marker = encoder.beginComputePass({ label: "Adaptive surface timing start", timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: surfaceTiming.start } }); marker.end();
+        }
+        this.adaptiveProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s);
+        if (surfaceTiming && this.querySet) {
+          const marker = encoder.beginComputePass({ label: "Adaptive surface timing end", timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: surfaceTiming.end } }); marker.end();
+        }
         captureTexture("surface-update", this.octreeProjection && !this.octreeProjection.hasDenseLevelSetPublication
           ? undefined : this.adaptiveProjection.levelSetTexture);
       } else {

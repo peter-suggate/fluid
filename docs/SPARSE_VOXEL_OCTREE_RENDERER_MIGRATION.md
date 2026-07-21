@@ -1238,8 +1238,13 @@ Add entries chronologically; supersede rather than rewriting old decisions.
 | 2026-07-19 | D13 | Use a bounded static balanced BVH for small authored analytic catalogs, stored after primitive records in binding 7, and keep the existing SVO leaf-payload traversal for catalogs above 64 entries. | This removes the primary and shadow full-table loops without adding a fragment storage binding or CPU readback. Conservative float-padded bounds retain thin/rotated features; exact intersections still own normals, identities, and deterministic ties. Missing or corrupt candidate publication produces the typed `missing-primitive-candidates` raster fallback, and invalid/exhausted GPU traversal fails closed. | M5, M7, M8 |
 | 2026-07-19 | D11 | Make direct structural-fluid ownership one atomic handoff that disables legacy extraction, interface rendering, and composition together, and fail back to the complete legacy-water path until end-to-end optics are explicitly validated. | Prevents double-rendering and also prevents a half-disabled raster-water pipeline while the bounded direct media path is integrated and measured. | M9, M11–M12 |
 | 2026-07-19 | D12 | Compile the direct structural-media branch into the production dry shader and water-pipeline owner now, but require an explicit per-scene end-to-end validation gate before mode word `2` or legacy-stage suppression can activate. | Exercises the real resource, shader, and presentation seams without changing the shipped SVO-dry plus raster-water default or permitting double-rendering. | M9, M11–M12 |
+| 2026-07-21 | D14 | Retire the experimental structural-fluid marcher and make raster extraction/composition the sole water presentation path. | Removes duplicate fine-phi staging, fluid visibility/media traversal, fluid G-buffer/picking diagnostics, and mixed ownership. Solver fast marching/redistance, power-diagram sparse-grid publication, solid coupling, and dry-scene object picking remain authoritative and unchanged. | Supersedes D11–D12 and retires E-M3/E-M4 fluid-render staging plus the fluid portions of E-M7/E-M9 |
 
 ## Evidence ledger
+
+Entries E-M3, E-M4, E-M7, and E-M9 below are retained as historical evidence
+of the retired experiment; their structural-fluid rendering claims are not
+current architecture.
 
 Each entry should name committed artifacts, raw benchmark files, commands,
 adapter metadata, and accepted deviations.

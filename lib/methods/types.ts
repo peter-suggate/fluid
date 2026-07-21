@@ -90,6 +90,12 @@ export interface GPUSolverInstance {
   readonly adaptiveSurfacePageSource?: OctreeSurfacePageSource;
   /** Exact compact topology/geometry buffers for paper-technique overlays. */
   readonly octreeTechniqueDebugSource?: OctreeTechniqueDebugSource;
+  /** QA-only active compact pressure potential, indexed by power-leaf row. */
+  readonly powerPressureBuffer?: GPUBuffer;
+  /** QA-only compact leaf headers; 48 bytes per pressure row. */
+  readonly powerLeafHeaders?: GPUBuffer;
+  /** QA-only compact pressure CSR entries; `(neighborRow:u32, coefficient:f32)`. */
+  readonly powerLeafEntries?: GPUBuffer;
   /** True only after the complete t=0 sparse authority has passed its queue fence. */
   readonly initialSparseAuthorityReady?: boolean;
   /** Row-independent, globally indexed sparse fine level-set bricks. */
@@ -99,6 +105,7 @@ export interface GPUSolverInstance {
   readonly globalFineRedistanceControl?: GPUBuffer;
   readonly globalFineVolumeControl?: GPUBuffer;
   readonly globalFinePowerVelocityControl?: GPUBuffer;
+  readonly globalFinePowerProjectionControl?: GPUBuffer;
   /** Diagnostic-only Stage-B point-sampler transaction used by fine transport. */
   readonly globalFinePowerVelocitySampleControl?: GPUBuffer;
   readonly globalFineCoarseLevelSetControl?: GPUBuffer;

@@ -307,7 +307,12 @@ function normalizedEntry(configuration: OctreePowerTopologyConfiguration, canoni
   }));
   const uniform = observedRegularOffsets.size === regularOffsets.size
     && [...regularOffsets].every((key) => observedRegularOffsets.has(key));
-  const tetrahedra = uniform ? [] : localDelaunayTetrahedra(anchor, configuration.sites, canonical, selectorByGeometry);
+  // Keep the ordinary-Delaunay fan even for nominally uniform entries. The
+  // runtime uses trilinear interpolation only while all eight exact cube
+  // corners exist; a body-diagonal coarse owner can invalidate one octant
+  // without changing the 18 face/edge descriptor. In that octant Section 6.2
+  // still needs this entry's genuine local tetrahedra.
+  const tetrahedra = localDelaunayTetrahedra(anchor, configuration.sites, canonical, selectorByGeometry);
   const boundaryKey = boundaries.length === 0 ? "" : JSON.stringify(boundaries.map((boundary) => {
     const normal = vector(transformPowerVector(boundary.normal, canonical.transform));
     const relativeOffset = scalar((boundary.offset - boundary.normal.reduce((sum, value, axis) => sum + value * anchor.center[axis], 0)) / anchor.size);

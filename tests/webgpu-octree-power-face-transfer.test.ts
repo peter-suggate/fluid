@@ -39,10 +39,12 @@ test("power-face transfer uses ordered-site keys and deterministic radix order",
     "generalized transfer must never read a retired dense velocity texture");
 });
 
-test("projection captures generalized DOFs and applies them after rollback seed", () => {
+test("pressure assembly keeps the current transported axis seed instead of stale generalized DOFs", () => {
   const assembly = (WebGPUOctreeProjection.prototype as unknown as { encodePowerAssemblyMirror?: () => void })
     .encodePowerAssemblyMirror?.toString?.() ?? WebGPUOctreeProjection.toString();
-  assert.ok(assembly.indexOf("powerFaceSeed") < assembly.indexOf("powerFaceTransfer"));
+  assert.match(assembly, /powerFaceSeed/);
+  assert.doesNotMatch(assembly, /powerFaceTransfer\?\.encodeApply/,
+    "previous-frame projected faces must not erase current transport or body forces before pressure assembly");
   assert.equal(typeof WebGPUOctreePowerFaceTransfer.prototype.encodeApply, "function");
   assert.equal(typeof WebGPUOctreePowerFaceTransfer.prototype.encodeCapture, "function");
   assert.match(WebGPUOctreePowerFaceTransfer.prototype.encodeCapture.toString(),

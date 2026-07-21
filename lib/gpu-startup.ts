@@ -166,18 +166,18 @@ export function automaticGPURecoveryEnabled(search: string): boolean {
 }
 
 /**
- * Timestamp writes have caused silent first-step failures on the local
- * Dawn/Metal path. Browser timing instrumentation is therefore diagnostic
- * opt-in, never part of the correctness configuration.
+ * Request hardware timestamps for normal browser sessions so the performance
+ * panel can report GPU work without a hidden URL opt-in. Bounded safe bring-up
+ * retains its timestamp-free correctness configuration, and gpuTimestamps=0
+ * remains an explicit escape hatch for driver diagnosis.
  */
 export function optionalBrowserTimestampFeatures(
   search: string,
   features: { has(feature: string): boolean },
 ): GPUFeatureName[] {
-  return new URLSearchParams(search).get("gpuTimestamps") === "1"
-    && features.has("timestamp-query")
-    ? ["timestamp-query"]
-    : [];
+  const query = new URLSearchParams(search);
+  if (query.get("gpu") === "safe" || query.get("gpuTimestamps") === "0") return [];
+  return features.has("timestamp-query") ? ["timestamp-query"] : [];
 }
 
 export const GPU_MANUAL_START_EVENT = "fluid-lab:start-gpu";

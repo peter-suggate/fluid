@@ -20,6 +20,7 @@ import { unpackOctreeFaceBandControl } from "../lib/webgpu-octree-face-fast-marc
 import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "../lib/webgpu-octree-sparse-bricks";
 import { environmentIndex } from "../lib/environments";
+import { OCTREE_POWER_FACE_RECORD_BYTES, OCTREE_POWER_INVALID_ROW } from "../lib/octree-power-operator";
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "../lib/terrain";
 import { compactOctreeFieldEvidenceIsAcceptable, compactOctreePublicationHeaderEvidence,
   reconstructCompactOctreeOccupancyField,
@@ -173,6 +174,12 @@ const opticalAlphaOverride = process.env.FLUID_OPTICAL_ALPHA === undefined ? und
 const deepSpeedGradientOverride = process.env.FLUID_SIZING_DEEP_SPEED === undefined ? undefined : Number(process.env.FLUID_SIZING_DEEP_SPEED);
 const rebuildTopologyOverride = process.env.FLUID_REBUILD_TOPOLOGY === undefined ? undefined : process.env.FLUID_REBUILD_TOPOLOGY !== "0";
 const maximumLeafSizeOverride = process.env.FLUID_MAXIMUM_LEAF_SIZE === undefined ? undefined : Number(process.env.FLUID_MAXIMUM_LEAF_SIZE);
+const octreeInterfaceBandOverride = process.env.FLUID_OCTREE_INTERFACE_BAND === undefined
+  ? undefined : Number(process.env.FLUID_OCTREE_INTERFACE_BAND);
+if (octreeInterfaceBandOverride !== undefined
+  && (!Number.isInteger(octreeInterfaceBandOverride) || octreeInterfaceBandOverride < 0)) {
+  throw new Error("FLUID_OCTREE_INTERFACE_BAND must be a non-negative integer");
+}
 const octreeAdaptivityOverride = process.env.FLUID_OCTREE_ADAPTIVITY === undefined ? undefined : Number(process.env.FLUID_OCTREE_ADAPTIVITY);
 const octreeLeafSolverOverride = process.env.FLUID_OCTREE_LEAF_SOLVER;
 if (octreeLeafSolverOverride !== undefined && !["auto", "dense", "compact", "chebyshev", "mgpcg", "megakernel"].includes(octreeLeafSolverOverride)) throw new Error("FLUID_OCTREE_LEAF_SOLVER must be auto, dense, compact, chebyshev, mgpcg, or megakernel");
@@ -652,6 +659,7 @@ interface GlobalFineGenerationDiagnostics {
   powerVelocityRows?: number;
   powerVelocityReconstructed?: number;
   powerVelocityFallbacks?: number;
+  powerProjectionControl?: readonly number[];
   faceBandFlags?: number;
   faceBandFirstError?: number;
   faceBandRows?: number;
@@ -680,12 +688,14 @@ async function readGlobalFineGenerationDiagnostics(
   const volumeControl = solver.globalFineVolumeControl;
   const powerVelocityControl = (solver as GPUSolverInstance & { globalFinePowerVelocityControl?: GPUBuffer })
     .globalFinePowerVelocityControl;
+  const powerProjectionControl = (solver as GPUSolverInstance & { globalFinePowerProjectionControl?: GPUBuffer })
+    .globalFinePowerProjectionControl;
   const faceBandControl = solver.globalFineFaceBandControl;
   const faceBandPlan = solver.globalFineFaceBandPlan;
   const pageCapacity = source.plan.maximumResidentBricks;
   const samplesPerBrick = source.plan.samplesPerBrick;
   const [worklistBytes, metadataBytes, flagBytes, phiBytes, coarseBytes, seedBytes, topologyBytes,
-    transportBytes, redistanceBytes, volumeBytes, powerVelocityBytes, faceBandBytes] = await Promise.all([
+    transportBytes, redistanceBytes, volumeBytes, powerVelocityBytes, powerProjectionBytes, faceBandBytes] = await Promise.all([
     readBufferBinding(device, { buffer: source.worklist }, (5 + pageCapacity) * 4),
     readBufferBinding(device, { buffer: source.metadata }, pageCapacity * 40),
     readBufferBinding(device, { buffer: source.flags }, pageCapacity * samplesPerBrick * 4),
@@ -702,6 +712,7 @@ async function readGlobalFineGenerationDiagnostics(
     redistanceControl ? readBufferBinding(device, { buffer: redistanceControl }, 16) : Promise.resolve(undefined),
     volumeControl ? readBufferBinding(device, { buffer: volumeControl }, 64) : Promise.resolve(undefined),
     powerVelocityControl ? readBufferBinding(device, { buffer: powerVelocityControl }, 32) : Promise.resolve(undefined),
+    powerProjectionControl ? readBufferBinding(device, { buffer: powerProjectionControl }, 64) : Promise.resolve(undefined),
     faceBandControl ? readBufferBinding(device, { buffer: faceBandControl }, 64) : Promise.resolve(undefined),
   ]);
   const worklist = new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset, worklistBytes.byteLength / 4);
@@ -774,6 +785,9 @@ async function readGlobalFineGenerationDiagnostics(
   const powerVelocity = powerVelocityBytes
     ? new Uint32Array(powerVelocityBytes.buffer, powerVelocityBytes.byteOffset, powerVelocityBytes.byteLength / 4)
     : undefined;
+  const powerProjection = powerProjectionBytes
+    ? new Uint32Array(powerProjectionBytes.buffer, powerProjectionBytes.byteOffset, powerProjectionBytes.byteLength / 4)
+    : undefined;
   const faceBand = faceBandBytes
     ? unpackOctreeFaceBandControl(new Uint32Array(faceBandBytes.buffer, faceBandBytes.byteOffset,
       faceBandBytes.byteLength / 4))
@@ -790,7 +804,8 @@ async function readGlobalFineGenerationDiagnostics(
     pageMetadataBytes: pageCapacity * 40,
     pageWorklistBytes: (5 + pageCapacity) * 4,
     diagnosticReadbackBytes: [worklistBytes, metadataBytes, flagBytes, phiBytes, coarseBytes, seedBytes,
-      topologyBytes, transportBytes, redistanceBytes, volumeBytes, powerVelocityBytes, faceBandBytes]
+      topologyBytes, transportBytes, redistanceBytes, volumeBytes, powerVelocityBytes, powerProjectionBytes,
+      faceBandBytes]
       .reduce((sum, bytes) => sum + (bytes?.byteLength ?? 0), 0),
     publicationValid: worklist[1] === source.generation && worklist[3] === 1 && worklist[4] === 1
       && activePages > 0 && taggedMetadataPages >= activePages && malformedActivePages === 0
@@ -823,6 +838,7 @@ async function readGlobalFineGenerationDiagnostics(
       volumeLookupFailures: volume[14], volumeStaleOwners: volume[15] } : {}),
     ...(powerVelocity ? { powerVelocityFlags: powerVelocity[0], powerVelocityRows: powerVelocity[2],
       powerVelocityReconstructed: powerVelocity[5], powerVelocityFallbacks: powerVelocity[6] } : {}),
+    ...(powerProjection ? { powerProjectionControl: Array.from(powerProjection) } : {}),
     ...(faceBand ? { faceBandFlags: faceBand.flags, faceBandFirstError: faceBand.firstError,
       faceBandRows: faceBand.rowCount, faceBandFaces: faceBand.faceCount,
       faceBandIncidences: faceBand.incidenceCount, faceBandGeneration: faceBand.generation,
@@ -1326,7 +1342,7 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
     const [hashBytes, metadataBytes, flagBytes, phiBytes, worklistBytes, coarseBytes, coarseControlBytes,
       topologyBytes, transportBytes, redistanceBytes, volumeBytes, faceBandBytes,
       faceBandTransitionBytes, faceBandTransientPowerBytes, faceBandPointFieldBytes, faceBandPowerPublicationBytes,
-      powerVelocityBytes, powerVelocitySampleBytes] = await Promise.all([
+      powerVelocityBytes, powerProjectionBytes, powerVelocitySampleBytes] = await Promise.all([
       readBufferBinding(device, { buffer: source.hash }, source.plan.hashCapacity * 8),
       readBufferBinding(device, { buffer: source.metadata }, source.plan.maximumResidentBricks * 40),
       readBufferBinding(device, { buffer: source.flags }, sampleWords * 4),
@@ -1352,7 +1368,7 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
         ? readBufferBinding(device, { buffer: solver.globalFineFaceBandControl }, 64)
         : Promise.resolve(undefined),
       solver.globalFineFaceBandTransitionControl
-        ? readBufferBinding(device, { buffer: solver.globalFineFaceBandTransitionControl }, 128)
+        ? readBufferBinding(device, { buffer: solver.globalFineFaceBandTransitionControl }, 160)
         : Promise.resolve(undefined),
       solver.globalFineFaceBandTransientPowerControl
         ? readBufferBinding(device, { buffer: solver.globalFineFaceBandTransientPowerControl }, 64)
@@ -1365,6 +1381,9 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
         : Promise.resolve(undefined),
       solver.globalFinePowerVelocityControl
         ? readBufferBinding(device, { buffer: solver.globalFinePowerVelocityControl }, 32)
+        : Promise.resolve(undefined),
+      solver.globalFinePowerProjectionControl
+        ? readBufferBinding(device, { buffer: solver.globalFinePowerProjectionControl }, 64)
         : Promise.resolve(undefined),
       solver.globalFinePowerVelocitySampleControl
         ? readBufferBinding(device, { buffer: solver.globalFinePowerVelocitySampleControl }, 32)
@@ -1405,6 +1424,8 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
         faceBandPowerPublicationBytes.byteLength / 4) } : {}),
       ...(powerVelocityBytes ? { powerVelocityControl: new Uint32Array(powerVelocityBytes.buffer,
         powerVelocityBytes.byteOffset, powerVelocityBytes.byteLength / 4) } : {}),
+      ...(powerProjectionBytes ? { powerProjectionControl: new Uint32Array(powerProjectionBytes.buffer,
+        powerProjectionBytes.byteOffset, powerProjectionBytes.byteLength / 4) } : {}),
       ...(powerVelocitySampleBytes ? { powerVelocitySampleControl: new Uint32Array(
         powerVelocitySampleBytes.buffer, powerVelocitySampleBytes.byteOffset,
         powerVelocitySampleBytes.byteLength / 4) } : {}),
@@ -1493,6 +1514,7 @@ interface GPUSmokeResult {
   octreePowerFaceDiagnostics?: OctreePowerFaceDiagnostics;
   octreePowerTopologyDiagnostics?: OctreePowerTopologyDiagnostics;
   octreeMGPCGDiagnostics?: OctreeMGPCGDiagnostics;
+  hydrostaticPowerDiagnostics?: HydrostaticPowerDiagnostics;
   stabilityEnvelope?: StabilityEnvelope;
   energyTrace: MechanicalEnergySample[];
   checkpoints: Array<{
@@ -1514,6 +1536,292 @@ interface OctreePowerTopologyDiagnostics {
   firstInvalidRow?: { row: number; descriptor: number; topologyCode: number; transformAndFlags: number;
     volume: number; reserved: number; cell: number; size: number;
     ownerNeighborhood?: Array<{ direction: number; probe: [number, number, number]; origin: [number, number, number]; size: number; invalid: boolean }> };
+}
+
+interface HydrostaticPowerDiagnostics {
+  rowCount: number;
+  faceCount: number;
+  leafSizeHistogram: Record<string, number>;
+  transitionFaceCount: number;
+  obliqueTransitionFaceCount: number;
+  maximumTransitionNormalVelocity_m_s: number;
+  topology: {
+    validRowCount: number;
+    invalidRowCount: number;
+    rowsWithTetrahedra: number;
+    transitionRowCount: number;
+    transitionTetrahedronCount: number;
+  };
+  geometry: { invalidFaceCount: number; maximumNormalLengthError: number };
+  incidence: { incidenceCount: number; invalidEntryCount: number; reciprocityFailureCount: number };
+  pressureRows: {
+    finiteRowCount: number;
+    invalidRowCount: number;
+    entryCount: number;
+    reciprocityFailureCount: number;
+    /** PCG solves A q = -storedFluxRhs. */
+    relativeResidual: number;
+    /** Residual obtained by substituting q=dt*|g|*(H-y) into the published rows. */
+    analyticRelativeResidual: number;
+  };
+  velocityReconstruction?: {
+    flags: number;
+    rowCount: number;
+    faceCount: number;
+    incidenceCount: number;
+    reconstructedCount: number;
+    fallbackCount: number;
+  };
+  operator?: {
+    flags: number;
+    firstError: number;
+    rowCount: number;
+    faceCount: number;
+    incidenceCount: number;
+    entryCount: number;
+    projectedCount: number;
+  };
+  pressurePotential: {
+    dt_s: number;
+    relativeL2Error: number;
+    maximumAbsoluteError_m2_s: number;
+    maximumAbsolutePressureError_Pa: number;
+    maximumExpected_m2_s: number;
+    maximumObserved_m2_s: number;
+  };
+  maximumSpeed_m_s: number;
+  maximumDivergence_s: number;
+  volumeDrift: number;
+}
+
+async function readHydrostaticPowerDiagnostics(
+  device: GPUDevice,
+  solver: GPUSolverInstance,
+  scene: SceneDescription,
+  faceDiagnostics: OctreePowerFaceDiagnostics | undefined,
+): Promise<HydrostaticPowerDiagnostics | undefined> {
+  const rowCount = faceDiagnostics?.rowCount ?? 0;
+  const faceCount = faceDiagnostics?.faceCount ?? 0;
+  const headersBuffer = solver.powerLeafHeaders;
+  const entriesBuffer = solver.powerLeafEntries;
+  const pressureBuffer = solver.powerPressureBuffer;
+  const debug = solver.octreeTechniqueDebugSource;
+  if (rowCount === 0 || faceCount === 0 || !headersBuffer || !entriesBuffer || !pressureBuffer || !debug) return undefined;
+  const structuralSolver = solver as GPUSolverInstance & { powerOperatorControl?: GPUBuffer };
+  const incidenceCount = faceDiagnostics?.incidenceCount ?? 0;
+  const [headerBytes, pressureBytes, faceBytes, normalBytes, centroidBytes, metricBytes, tetraHeaderBytes,
+    incidenceRowBytes, incidenceBytes, velocityControlBytes, operatorControlBytes] = await Promise.all([
+    readBufferBinding(device, { buffer: headersBuffer }, rowCount * 48),
+    readBufferBinding(device, { buffer: pressureBuffer }, rowCount * 4),
+    readBufferBinding(device, debug.powerFaces, faceCount * OCTREE_POWER_FACE_RECORD_BYTES),
+    readBufferBinding(device, debug.faceNormals, faceCount * 16),
+    readBufferBinding(device, debug.faceCentroids, faceCount * 16),
+    readBufferBinding(device, debug.topologyMetrics, rowCount * 16),
+    readBufferBinding(device, debug.tetrahedronHeaders, debug.tetrahedronHeaders.buffer.size),
+    readBufferBinding(device, debug.incidenceRows, (rowCount + 1) * 16),
+    readBufferBinding(device, debug.incidence, incidenceCount * 8),
+    solver.globalFinePowerVelocityControl
+      ? readBufferBinding(device, { buffer: solver.globalFinePowerVelocityControl }, 32) : Promise.resolve(undefined),
+    structuralSolver.powerOperatorControl
+      ? readBufferBinding(device, { buffer: structuralSolver.powerOperatorControl }, 64) : Promise.resolve(undefined),
+  ]);
+  const headers = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, rowCount * 12);
+  const headerFloats = new Float32Array(headerBytes.buffer, headerBytes.byteOffset, rowCount * 12);
+  const pressure = new Float32Array(pressureBytes.buffer, pressureBytes.byteOffset, rowCount);
+  const faces = new Uint32Array(faceBytes.buffer, faceBytes.byteOffset, faceCount * 8);
+  const faceFloats = new Float32Array(faceBytes.buffer, faceBytes.byteOffset, faceCount * 8);
+  const normals = new Float32Array(normalBytes.buffer, normalBytes.byteOffset, faceCount * 4);
+  const centroids = new Float32Array(centroidBytes.buffer, centroidBytes.byteOffset, faceCount * 4);
+  const metrics = new Uint32Array(metricBytes.buffer, metricBytes.byteOffset, rowCount * 4);
+  const metricFloats = new Float32Array(metricBytes.buffer, metricBytes.byteOffset, rowCount * 4);
+  const tetraHeaders = new Uint32Array(tetraHeaderBytes.buffer, tetraHeaderBytes.byteOffset,
+    tetraHeaderBytes.byteLength / 4);
+  const incidenceRows = new Uint32Array(incidenceRowBytes.buffer, incidenceRowBytes.byteOffset,
+    (rowCount + 1) * 4);
+  const incidences = new Uint32Array(incidenceBytes.buffer, incidenceBytes.byteOffset, incidenceCount * 2);
+  const incidenceSigns = new Int32Array(incidenceBytes.buffer, incidenceBytes.byteOffset, incidenceCount * 2);
+  const histogram: Record<string, number> = {};
+  const sizes = new Uint32Array(rowCount);
+  const dt_s = solver.info.lastDt_s ?? scene.numerics.maxDt_s;
+  const h = scene.container.height_m / solver.info.ny;
+  const surfaceY = scene.container.fillFraction * scene.container.height_m;
+  const gravity = Math.abs(scene.fluid.gravity_m_s2.y);
+  let squaredError = 0, squaredReference = 0, maximumAbsoluteError = 0;
+  let maximumExpected = 0, maximumObserved = 0;
+  const expectedPressure = new Float64Array(rowCount);
+  let finitePressureRows = 0, invalidPressureRows = 0, entryCount = 0;
+  let validTopologyRows = 0, invalidTopologyRows = 0, rowsWithTetrahedra = 0;
+  let transitionRowCount = 0, transitionTetrahedronCount = 0;
+  for (let row = 0; row < rowCount; row += 1) {
+    const cell = headers[row * 12], size = headers[row * 12 + 3];
+    sizes[row] = size;
+    histogram[String(size)] = (histogram[String(size)] ?? 0) + 1;
+    const y = Math.floor(cell / solver.info.nx) % solver.info.ny;
+    const centerY = (y + 0.5 * size) * h;
+    const expected = dt_s * gravity * Math.max(0, surfaceY - centerY);
+    expectedPressure[row] = expected;
+    const observed = pressure[row];
+    const error = observed - expected;
+    const weight = metricFloats[row * 4 + 2] * size ** 3;
+    squaredError += weight * error * error;
+    squaredReference += weight * expected * expected;
+    maximumAbsoluteError = Math.max(maximumAbsoluteError, Math.abs(error));
+    maximumExpected = Math.max(maximumExpected, expected);
+    maximumObserved = Math.max(maximumObserved, Math.abs(observed));
+    const diagonal = headerFloats[row * 12 + 4], rhs = headerFloats[row * 12 + 5];
+    const start = headers[row * 12 + 1], count = headers[row * 12 + 2];
+    entryCount = Math.max(entryCount, start + count);
+    if (Number.isFinite(observed) && Number.isFinite(diagonal) && diagonal > 0 && Number.isFinite(rhs)) {
+      finitePressureRows += 1;
+    } else invalidPressureRows += 1;
+    const topologyCode = metrics[row * 4], topologyFlags = metrics[row * 4 + 1];
+    const tetraOffset = topologyCode * 3;
+    const tetraCount = topologyCode !== OCTREE_POWER_INVALID_ROW && tetraOffset + 2 < tetraHeaders.length
+      ? tetraHeaders[tetraOffset + 1] : 0;
+    if ((topologyFlags & 0x8000_0000) !== 0 && tetraCount > 0) {
+      validTopologyRows += 1; rowsWithTetrahedra += 1;
+      if ((tetraHeaders[tetraOffset + 2] & 1) === 0) {
+        transitionRowCount += 1; transitionTetrahedronCount += tetraCount;
+      }
+    } else invalidTopologyRows += 1;
+  }
+  const entryBytes = entryCount > 0
+    ? await readBufferBinding(device, { buffer: entriesBuffer }, entryCount * 8) : new Uint8Array();
+  const entries = new Uint32Array(entryBytes.buffer, entryBytes.byteOffset, entryCount * 2);
+  const entryFloats = new Float32Array(entryBytes.buffer, entryBytes.byteOffset, entryCount * 2);
+  const pressureEntryMap = new Map<string, number>();
+  let pressureEntryInvalid = 0;
+  for (let row = 0; row < rowCount; row += 1) {
+    const start = headers[row * 12 + 1], count = headers[row * 12 + 2], seen = new Set<number>();
+    for (let local = 0; local < count; local += 1) {
+      const index = start + local, neighbor = entries[index * 2], coefficient = entryFloats[index * 2 + 1];
+      if (neighbor >= rowCount || neighbor === row || seen.has(neighbor)
+        || !Number.isFinite(coefficient) || coefficient <= 0) pressureEntryInvalid += 1;
+      else { seen.add(neighbor); pressureEntryMap.set(`${row}:${neighbor}`, coefficient); }
+    }
+  }
+  let pressureReciprocityFailures = pressureEntryInvalid;
+  for (const [key, coefficient] of pressureEntryMap) {
+    const [row, neighbor] = key.split(":");
+    const reverse = pressureEntryMap.get(`${neighbor}:${row}`);
+    if (reverse === undefined || Math.abs(reverse - coefficient) > 2e-4 * Math.max(1, Math.abs(coefficient))) {
+      pressureReciprocityFailures += 1;
+    }
+  }
+  let residualSquared = 0, analyticResidualSquared = 0, rhsSquared = 0;
+  for (let row = 0; row < rowCount; row += 1) {
+    let applied = headerFloats[row * 12 + 4] * pressure[row];
+    let analyticApplied = headerFloats[row * 12 + 4] * expectedPressure[row];
+    const start = headers[row * 12 + 1], count = headers[row * 12 + 2];
+    for (let local = 0; local < count; local += 1) {
+      const index = start + local, neighbor = entries[index * 2];
+      if (neighbor < rowCount) {
+        const coefficient = entryFloats[index * 2 + 1];
+        applied -= coefficient * pressure[neighbor];
+        analyticApplied -= coefficient * expectedPressure[neighbor];
+      }
+    }
+    // emitPowerRows stores the integrated predicted flux. Projection adds
+    // A*q to that flux, so both MGPCG and the paper-facing equation solve
+    // A*q = -storedFluxRhs.
+    const rhs = headerFloats[row * 12 + 5], residual = applied + rhs;
+    const analyticResidual = analyticApplied + rhs;
+    residualSquared += residual * residual;
+    analyticResidualSquared += analyticResidual * analyticResidual;
+    rhsSquared += rhs * rhs;
+  }
+  let transitionFaceCount = 0, obliqueTransitionFaceCount = 0, invalidFaceCount = 0;
+  let maximumNormalLengthError = 0, maximumTransitionNormalVelocity = 0, maximumFaceNormalVelocity = 0;
+  const faceIncidenceCount = new Uint32Array(faceCount), faceIncidenceSignSum = new Int32Array(faceCount);
+  const integratedFlux = new Float64Array(rowCount);
+  let invalidIncidenceEntries = 0;
+  for (let face = 0; face < faceCount; face += 1) {
+    const negative = faces[face * 8], positive = faces[face * 8 + 1];
+    const area = faceFloats[face * 8 + 5], inverseDistance = faceFloats[face * 8 + 6];
+    const openFraction = faceFloats[face * 8 + 7], normalVelocity = faceFloats[face * 8 + 4];
+    const nx = normals[face * 4], ny = normals[face * 4 + 1], nz = normals[face * 4 + 2];
+    const normalLengthError = Math.abs(Math.hypot(nx, ny, nz) - 1);
+    maximumNormalLengthError = Math.max(maximumNormalLengthError, normalLengthError);
+    maximumFaceNormalVelocity = Math.max(maximumFaceNormalVelocity, Math.abs(normalVelocity));
+    const centroidFinite = Number.isFinite(centroids[face * 4]) && Number.isFinite(centroids[face * 4 + 1])
+      && Number.isFinite(centroids[face * 4 + 2]);
+    if (negative >= rowCount || (positive !== OCTREE_POWER_INVALID_ROW && positive >= rowCount)
+      || !Number.isFinite(area) || area <= 0 || !Number.isFinite(inverseDistance) || inverseDistance <= 0
+      || !Number.isFinite(openFraction) || openFraction < 0 || openFraction > 1
+      || !Number.isFinite(normalVelocity) || !centroidFinite
+      || !Number.isFinite(normalLengthError) || normalLengthError > 2e-4) {
+      invalidFaceCount += 1;
+    }
+    if (negative < rowCount && Number.isFinite(area) && Number.isFinite(openFraction) && Number.isFinite(normalVelocity)) {
+      const flux = area * openFraction * normalVelocity;
+      integratedFlux[negative] += flux;
+      if (positive !== OCTREE_POWER_INVALID_ROW && positive < rowCount) integratedFlux[positive] -= flux;
+    }
+    if (negative >= rowCount || positive === OCTREE_POWER_INVALID_ROW || positive >= rowCount
+      || sizes[negative] === sizes[positive]) continue;
+    transitionFaceCount += 1;
+    maximumTransitionNormalVelocity = Math.max(maximumTransitionNormalVelocity, Math.abs(normalVelocity));
+    const dominant = Math.max(Math.abs(nx), Math.abs(ny), Math.abs(nz));
+    if (dominant < 1 - 1e-5) obliqueTransitionFaceCount += 1;
+  }
+  for (let row = 0; row < rowCount; row += 1) {
+    const count = incidenceRows[row * 4 + 1], start = incidenceRows[row * 4 + 3];
+    if (start > incidenceCount || count > incidenceCount - start) { invalidIncidenceEntries += 1; continue; }
+    for (let local = 0; local < count; local += 1) {
+      const index = start + local, face = incidences[index * 2], sign = incidenceSigns[index * 2 + 1];
+      if (face >= faceCount || (sign !== 1 && sign !== -1)) { invalidIncidenceEntries += 1; continue; }
+      const expected = faces[face * 8] === row ? 1 : faces[face * 8 + 1] === row ? -1 : 0;
+      if (sign !== expected) { invalidIncidenceEntries += 1; continue; }
+      faceIncidenceCount[face] += 1; faceIncidenceSignSum[face] += sign;
+    }
+  }
+  let incidenceReciprocityFailures = 0;
+  for (let face = 0; face < faceCount; face += 1) {
+    const boundary = faces[face * 8 + 1] === OCTREE_POWER_INVALID_ROW;
+    if (faceIncidenceCount[face] !== (boundary ? 1 : 2)
+      || faceIncidenceSignSum[face] !== (boundary ? 1 : 0)) incidenceReciprocityFailures += 1;
+  }
+  let maximumPowerDivergence = 0;
+  for (let row = 0; row < rowCount; row += 1) {
+    const size = sizes[row], physicalVolume = metricFloats[row * 4 + 2] * (size * h) ** 3;
+    const divergence = integratedFlux[row] / physicalVolume;
+    maximumPowerDivergence = Math.max(maximumPowerDivergence,
+      Number.isFinite(divergence) ? Math.abs(divergence) : Infinity);
+  }
+  const velocityControl = velocityControlBytes
+    ? new Uint32Array(velocityControlBytes.buffer, velocityControlBytes.byteOffset, 8) : undefined;
+  const operatorControl = operatorControlBytes
+    ? new Uint32Array(operatorControlBytes.buffer, operatorControlBytes.byteOffset, 16) : undefined;
+  return {
+    rowCount, faceCount, leafSizeHistogram: histogram, transitionFaceCount, obliqueTransitionFaceCount,
+    maximumTransitionNormalVelocity_m_s: maximumTransitionNormalVelocity,
+    topology: { validRowCount: validTopologyRows, invalidRowCount: invalidTopologyRows,
+      rowsWithTetrahedra, transitionRowCount, transitionTetrahedronCount },
+    geometry: { invalidFaceCount, maximumNormalLengthError },
+    incidence: { incidenceCount, invalidEntryCount: invalidIncidenceEntries,
+      reciprocityFailureCount: incidenceReciprocityFailures },
+    pressureRows: { finiteRowCount: finitePressureRows, invalidRowCount: invalidPressureRows,
+      entryCount, reciprocityFailureCount: pressureReciprocityFailures,
+      relativeResidual: Math.sqrt(residualSquared / Math.max(rhsSquared, 1e-30)),
+      analyticRelativeResidual: Math.sqrt(analyticResidualSquared / Math.max(rhsSquared, 1e-30)) },
+    velocityReconstruction: velocityControl ? { flags: velocityControl[0], rowCount: velocityControl[2],
+      faceCount: velocityControl[3], incidenceCount: velocityControl[4], reconstructedCount: velocityControl[5],
+      fallbackCount: velocityControl[6] } : undefined,
+    operator: operatorControl ? { flags: operatorControl[0], firstError: operatorControl[1],
+      rowCount: operatorControl[2], faceCount: operatorControl[3], incidenceCount: operatorControl[4],
+      entryCount: operatorControl[5], projectedCount: operatorControl[6] } : undefined,
+    pressurePotential: {
+      dt_s,
+      relativeL2Error: Math.sqrt(squaredError / Math.max(squaredReference, 1e-30)),
+      maximumAbsoluteError_m2_s: maximumAbsoluteError,
+      maximumAbsolutePressureError_Pa: maximumAbsoluteError * scene.fluid.density_kg_m3 / Math.max(dt_s, 1e-30),
+      maximumExpected_m2_s: maximumExpected,
+      maximumObserved_m2_s: maximumObserved,
+    },
+    maximumSpeed_m_s: maximumFaceNormalVelocity,
+    maximumDivergence_s: maximumPowerDivergence,
+    volumeDrift: solver.info.volumeDrift ?? Infinity,
+  };
 }
 
 interface MechanicalEnergySample {
@@ -1704,6 +2012,7 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     octreePowerFaceDiagnostics: result.octreePowerFaceDiagnostics,
     octreePowerTopologyDiagnostics: result.octreePowerTopologyDiagnostics,
     octreeMGPCGDiagnostics: result.octreeMGPCGDiagnostics,
+    hydrostaticPowerDiagnostics: result.hydrostaticPowerDiagnostics,
     stabilityEnvelope: result.stabilityEnvelope,
     energyTraceSummary: energyTraceSummary(result.energyTrace),
     validationErrors: result.validationErrors
@@ -1769,6 +2078,9 @@ async function runGPU(
   if (method.id === "octree" && scenarioId === "ocean-seiche") values.maximumLeafSize = 32;
   if (method.id === "octree" && maximumLeafSizeOverride !== undefined) values.maximumLeafSize = maximumLeafSizeOverride;
   if (method.id === "octree" && octreeAdaptivityOverride !== undefined) values.adaptivity = octreeAdaptivityOverride;
+  if (method.id === "octree" && octreeInterfaceBandOverride !== undefined) {
+    values.interfaceRefinementBandCells = octreeInterfaceBandOverride;
+  }
   if (method.id === "octree" && octreeLeafSolverOverride !== undefined) values.leafSolver = octreeLeafSolverOverride;
   if (method.id === "octree" && octreeWarmStartOverride !== undefined) values.pressureWarmStart = octreeWarmStartOverride ? "on" : "off";
   if (method.id === "octree" && octreeFaceVelocityMirror) values.faceVelocityMirror = "on";
@@ -1822,7 +2134,10 @@ async function runGPU(
       // browser-safe construction path. A synchronous smoke constructor would
       // silently exercise only the rollback solver while still claiming it
       // requested authority.
-      ? await method.createSolverAsync(instrumentedDevice, scene, quality, values, undefined, () => {})
+      ? await method.createSolverAsync(instrumentedDevice, scene, quality, values, undefined, (progress) => {
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          record: "solver-initialization", ...progress }));
+      })
       : method.createSolver!(instrumentedDevice, scene, quality, values);
   const construction_ms = performance.now() - constructionStarted;
   const actualGrid: [number, number, number] = [solver.info.nx, solver.info.ny, solver.info.nz];
@@ -1851,6 +2166,34 @@ async function runGPU(
     console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
       phase: "initial-global-fine-raster", ...initialGlobalFineRaster }));
   }
+  if (powerGenerationAuditRequested && method.id === "octree") {
+    const initialAudit = solver as GPUSolverInstance & {
+      adaptiveSurfaceCandidateControl?: GPUBuffer; adaptiveSurfaceLeaves?: GPUBuffer;
+    };
+    if (initialAudit.adaptiveSurfaceCandidateControl && initialAudit.adaptiveSurfaceLeaves) {
+      const [candidateBytes, leafBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: initialAudit.adaptiveSurfaceCandidateControl }, 32),
+        readBufferBinding(device, { buffer: initialAudit.adaptiveSurfaceLeaves }, initialAudit.adaptiveSurfaceLeaves.size),
+      ]);
+      const candidates = new Uint32Array(candidateBytes.buffer, candidateBytes.byteOffset, 8);
+      const leaves = new Uint32Array(leafBytes.buffer, leafBytes.byteOffset, leafBytes.byteLength / 4);
+      const leafFloats = new Float32Array(leafBytes.buffer, leafBytes.byteOffset, leafBytes.byteLength / 4);
+      let live = 0, core = 0, halo = 0, minimumPhi = Infinity, maximumPhi = -Infinity;
+      for (let row = 0; row + 15 < leaves.length; row += 16) {
+        const flags = leaves[row + 4];
+        if ((flags & 32) !== 0) live += 1;
+        if ((flags & 2) !== 0) core += 1;
+        if ((flags & 4) !== 0) halo += 1;
+        if ((flags & 32) !== 0) {
+          minimumPhi = Math.min(minimumPhi, leafFloats[row + 8]);
+          maximumPhi = Math.max(maximumPhi, leafFloats[row + 8]);
+        }
+      }
+      console.log(JSON.stringify({ scenario: scenarioId, method: method.id,
+        phase: "initial-surface-candidate-audit", control: Array.from(candidates),
+        leaves: { live, core, halo, minimumPhi, maximumPhi } }));
+    }
+  }
   const runStarted = performance.now();
   let steps = 0, samplingWall_ms = 0, matched: Awaited<ReturnType<typeof readCubicVolumeField>> | undefined;
   // The perturbed cadence remains exclusive to the quadtree dam-break
@@ -1865,6 +2208,13 @@ async function runGPU(
     maximumComponentCount: 0, minimumDominantComponentFraction: 1,
     nonFiniteVelocityCount: 0, sampledSteps: 0
   } : undefined;
+  // Compact-octree spatial QA reconstructs occupancy on the finest cubic
+  // lattice, whereas the conservative controller integrates adaptive cell
+  // volumes. Compare this estimator with its own accepted reset-time field;
+  // mixing the two baselines manufactures drift even when both are stable.
+  const initialExact = method.id === "octree" && (collectStabilityEnvelope || energyEverySteps > 0)
+    ? await readCubicVolumeField(device, solver) : undefined;
+  const spatialExactReference = initialExact?.summary.cellSum;
   // The UI uses a fixed cadence.  The long regression deliberately perturbs
   // that cadence while respecting maxDt so topology transfer and projection
   // are exercised with genuinely different timestep sizes.
@@ -1874,14 +2224,14 @@ async function runGPU(
   let previousSampledMechanicalEnergy = 0;
   if (energyEverySteps > 0) {
     await device.queue.onSubmittedWorkDone();
-    const initial = await readCubicVolumeField(device, solver);
+    const initial = initialExact ?? await readCubicVolumeField(device, solver);
     const spacing = {
       x: scene.container.width_m / solver.info.nx,
       y: scene.container.height_m / solver.info.ny,
       z: scene.container.depth_m / solver.info.nz
     };
     const potential = gravitationalPotentialEnergyProxy(initial.field, solver.info.nx, solver.info.ny, solver.info.nz, spacing, scene.fluid.gravity_m_s2);
-    const exactReference = referenceVolumeCells(solver.info);
+    const exactReference = spatialExactReference ?? referenceVolumeCells(solver.info);
     const sample: MechanicalEnergySample = {
       time_s: 0,
       gravitationalPotentialEnergyProxy: potential,
@@ -1930,6 +2280,7 @@ async function runGPU(
         powerLeafHeaders?: GPUBuffer; powerDescriptorRows?: GPUBuffer; powerTopologyMetrics?: GPUBuffer;
         powerLeafFrontier?: GPUBuffer; topologyTileWorklist?: GPUBuffer;
         powerCatalogEntryHeaders?: GPUBuffer; powerCatalogFaces?: GPUBuffer;
+        adaptiveSurfaceCandidateControl?: GPUBuffer;
       };
       const axisSource = (solver as GPUSolverInstance).adaptiveFaceMirrorSource;
       if (!audited.powerFaceControl || !audited.powerFaceTransferControl || !audited.powerFaceSeedControl || !audited.powerOperatorControl
@@ -1963,12 +2314,14 @@ async function runGPU(
       const floatBits = (word: number) => new Float32Array(new Uint32Array([word]).buffer)[0];
       const audit = {
         step: steps,
+        requestedTime, stepDt, submittedTime: solver.info.submittedTime_s,
         axis: axis ? { faceCount: axis[0], overflow: axis[1] !== 0, faceCapacity: axis[2], rowCapacity: axis[3],
           maximumIncidence: axis[4], incidenceOverflowAppends: axis[5] } : undefined,
         faces: { rowCount: face[0], faceCount: face[1], incidenceCount: face[2], flags: face[3],
           firstInvalid: face[4], invalidCount: face[5], generation: face[7], valid: face[8] === 0x8000_0000,
           lookupMissCount: face[9], firstInvalidSlot: face[12], firstInvalidNeighbor: face[13], firstInvalidDetail: face[14],
-          firstInvalidRow: face[15] },
+          firstInvalidRow: face[15], firstInvalidLiquidPhi: floatBits(face[13]),
+          firstInvalidAirPhi: floatBits(face[15]) },
         transfer: { previousFaceCount: transfer[0], valid: transfer[1] === 0x8000_0000,
           flags: transfer[2], generation: transfer[3], exactFaces: transfer[4], fallbackFaces: transfer[5],
           maximumFaceSpeed: floatBits(transfer[6]), sourceFlags: transfer[7] },
@@ -2037,8 +2390,12 @@ async function runGPU(
         const fine = await readGlobalFineGenerationDiagnostics(device, solver);
         const summaryBytes = audited.globalFineSummaryDirectory
           ? await readBufferBinding(device, { buffer: audited.globalFineSummaryDirectory }, 64) : undefined;
+        const candidateBytes = audited.adaptiveSurfaceCandidateControl
+          ? await readBufferBinding(device, { buffer: audited.adaptiveSurfaceCandidateControl }, 32) : undefined;
         const summary = summaryBytes
           ? new Uint32Array(summaryBytes.buffer, summaryBytes.byteOffset, 16) : undefined;
+        const candidates = candidateBytes
+          ? new Uint32Array(candidateBytes.buffer, candidateBytes.byteOffset, 8) : undefined;
         console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "power-source-audit", step: steps,
           compactionRows: audit.faces.rowCount,
           fineTopology: fine ? { flags: fine.topologyFlags, published: fine.topologyPublished,
@@ -2049,7 +2406,10 @@ async function runGPU(
             interfaces: fine.coarseInterfaceEntries, malformed: fine.coarseMalformedEntries } : undefined,
           summary: summary ? { flags: summary[0], generation: summary[1], entries: summary[2],
             hashCapacity: summary[3], dimensions: [summary[4], summary[5], summary[6]], maximumLevel: summary[7],
-            maximumProbes: summary[8], state: summary[9], hierarchyKeys: summary[10] } : undefined }));
+            maximumProbes: summary[8], state: summary[9], hierarchyKeys: summary[10] } : undefined,
+          surfaceCandidates: candidates ? { count: candidates[0], dispatch: [candidates[1], candidates[2], candidates[3]],
+            generation: candidates[4], published: candidates[5], error: candidates[6], capacity: candidates[7] }
+            : undefined }));
       }
       const failure = !audit.faces.valid || audit.faces.flags !== 0 || audit.faces.rowCount === 0
         || audit.faces.faceCount === 0 || audit.faces.incidenceCount === 0 || audit.faces.invalidCount !== 0
@@ -2280,7 +2640,7 @@ async function runGPU(
         pressure: classifyLocation(sample.maxPressureLocation),
         pressureResidual: classifyLocation(sample.maxPressureResidualLocation)
       } : undefined;
-      const exactReference = referenceVolumeCells(sample);
+      const exactReference = spatialExactReference ?? referenceVolumeCells(sample);
       const exactVolumeDrift = (exact.summary.cellSum - exactReference) / Math.max(1, Math.abs(exactReference));
       if (shouldSampleEnergy && preProjectionVelocity && postProjectionVelocity) {
         const potential = gravitationalPotentialEnergyProxy(exact.field, sample.nx, sample.ny, sample.nz, spacing, scene.fluid.gravity_m_s2);
@@ -2536,6 +2896,9 @@ async function runGPU(
   const octreeMGPCGDiagnostics = mgpcgControlBytes
     ? decodeOctreeMGPCGDiagnostics(new Uint32Array(mgpcgControlBytes.buffer, mgpcgControlBytes.byteOffset, 16))
     : undefined;
+  const hydrostaticPowerDiagnostics = scenarioId === "hydrostatic-power-two-level" && method.id === "octree"
+    ? await readHydrostaticPowerDiagnostics(device, solver, scene, octreePowerFaceDiagnostics)
+    : undefined;
   await device.queue.onSubmittedWorkDone();
   const result: GPUSmokeResult = {
     method: resultMethod, info, grid: [info.nx, info.ny, info.nz], matchedField: matched.field,
@@ -2548,7 +2911,7 @@ async function runGPU(
     initialGlobalFineGeneration, initialGlobalFineRaster, finalGlobalFineGeneration, finalGlobalFineRaster,
     octreeFaceMirrorDiagnostics,
     octreePowerFaceTransferDiagnostics, octreePowerFaceDiagnostics, octreePowerTopologyDiagnostics,
-    octreeMGPCGDiagnostics,
+    octreeMGPCGDiagnostics, hydrostaticPowerDiagnostics,
     stabilityEnvelope, energyTrace, checkpoints
   };
   reportResult(scenarioId, result);
@@ -2860,6 +3223,138 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         "octree requested the global fine level set but did not expose a live GPU source");
       fail(octree.info.globalFineLevelSetFactor === expectedFactor,
         `octree global fine factor ${octree.info.globalFineLevelSetFactor ?? "unknown"} differs from requested ${expectedFactor}`);
+    }
+    if (scenarioId === "hydrostatic-power-two-level") {
+      const hydrostatic = octree.hydrostaticPowerDiagnostics;
+      fail(octree.grid.every((value) => value === 16),
+        `hydrostatic power grid ${octree.grid.join("x")} is not the intended 16x16x16 domain`);
+      fail(!!hydrostatic, "hydrostatic power diagnostics were not published");
+      const sizes = hydrostatic?.leafSizeHistogram ?? {};
+      fail((sizes["1"] ?? 0) > 0 && (sizes["2"] ?? 0) > 0,
+        `hydrostatic power grid did not contain both size-1 and size-2 liquid leaves: ${JSON.stringify(sizes)}`);
+      fail(Object.keys(sizes).every((size) => size === "1" || size === "2"),
+        `hydrostatic power grid contained an unexpected leaf size: ${JSON.stringify(sizes)}`);
+      fail((hydrostatic?.transitionFaceCount ?? 0) > 0,
+        "hydrostatic power grid did not publish a cross-scale generalized face");
+      fail((hydrostatic?.obliqueTransitionFaceCount ?? 0) > 0,
+        "hydrostatic power grid did not publish an oblique cross-scale power face");
+      fail((octree.info.quadtreeMaximumNeighborRatio ?? Infinity) <= 2,
+        `hydrostatic octree violated 2:1 balance: ${octree.info.quadtreeMaximumNeighborRatio}`);
+      fail(octree.info.globalFineFaceBandTransitionValid === true
+        && (octree.info.globalFineFaceBandTransitionRows ?? 0) > 0
+        && (octree.info.globalFineFaceBandTransitionAdjacencyCount ?? 0) > 0,
+      `hydrostatic Section 5 Delaunay face band did not publish live transition adjacency: ${JSON.stringify({
+        valid: octree.info.globalFineFaceBandTransitionValid,
+        rows: octree.info.globalFineFaceBandTransitionRows,
+        adjacency: octree.info.globalFineFaceBandTransitionAdjacencyCount,
+      })}`);
+      fail(octree.info.globalFineFaceBandValid === true
+        && octree.info.globalFineFaceBandFlags === 0
+        && (octree.info.globalFineFaceBandFaceCount ?? 0) > 0
+        && octree.info.globalFineFaceBandAcceptedCount === octree.info.globalFineFaceBandFaceCount
+        && octree.info.globalFineFaceBandUnresolvedCount === 0
+        && octree.info.globalFineFaceBandSampleFailures === 0
+        && octree.info.globalFineFaceBandCoarsePhiFailures === 0,
+      `hydrostatic Section 5 face fast march is incomplete: ${JSON.stringify({
+        valid: octree.info.globalFineFaceBandValid,
+        flags: octree.info.globalFineFaceBandFlags,
+        faces: octree.info.globalFineFaceBandFaceCount,
+        accepted: octree.info.globalFineFaceBandAcceptedCount,
+        unresolved: octree.info.globalFineFaceBandUnresolvedCount,
+        sampleFailures: octree.info.globalFineFaceBandSampleFailures,
+        coarsePhiFailures: octree.info.globalFineFaceBandCoarsePhiFailures,
+      })}`);
+      fail(octree.info.globalFineFaceBandTransientPowerValid === true
+        && octree.info.globalFineFaceBandTransientPowerFlags === 0
+        && (octree.info.globalFineFaceBandTransientPowerRows ?? 0) > 0
+        && octree.info.globalFineFaceBandTransientPowerEmitted
+          === octree.info.globalFineFaceBandTransientPowerSampled
+        && octree.info.globalFineFaceBandTransientPowerValidated
+          === octree.info.globalFineFaceBandTransientPowerRows,
+      `hydrostatic Section 5 transient power graph is incomplete: ${JSON.stringify({
+        valid: octree.info.globalFineFaceBandTransientPowerValid,
+        flags: octree.info.globalFineFaceBandTransientPowerFlags,
+        rows: octree.info.globalFineFaceBandTransientPowerRows,
+        emitted: octree.info.globalFineFaceBandTransientPowerEmitted,
+        sampled: octree.info.globalFineFaceBandTransientPowerSampled,
+        validated: octree.info.globalFineFaceBandTransientPowerValidated,
+      })}`);
+      fail(octree.info.globalFineFaceBandPointFieldValid === true
+        && octree.info.globalFineFaceBandPointFieldFlags === 0
+        && (octree.info.globalFineFaceBandPointFieldRows ?? 0) > 0
+        && octree.info.globalFineFaceBandPointFieldSolved === octree.info.globalFineFaceBandPointFieldRows,
+      `hydrostatic Section 5 point field is incomplete: ${JSON.stringify({
+        valid: octree.info.globalFineFaceBandPointFieldValid,
+        flags: octree.info.globalFineFaceBandPointFieldFlags,
+        rows: octree.info.globalFineFaceBandPointFieldRows,
+        solved: octree.info.globalFineFaceBandPointFieldSolved,
+      })}`);
+      fail(octree.info.globalFineFaceBandPowerPublicationValid === true
+        && octree.info.globalFineFaceBandPowerPublicationFlags === 0
+        && octree.info.globalFineFaceBandPowerPublicationFaces === hydrostatic?.faceCount
+        && (octree.info.globalFineFaceBandPowerPublicationTargets ?? 0) > 0
+        && octree.info.globalFineFaceBandPowerPublicationInterpolated
+          === octree.info.globalFineFaceBandPowerPublicationTargets
+        && octree.info.globalFineFaceBandPowerPublicationCommitted
+          === octree.info.globalFineFaceBandPowerPublicationTargets
+        && octree.info.globalFineFaceBandPowerGeneration === octree.octreePowerFaceDiagnostics?.generation,
+      `hydrostatic Section 5 final power publication is incomplete: ${JSON.stringify({
+        valid: octree.info.globalFineFaceBandPowerPublicationValid,
+        flags: octree.info.globalFineFaceBandPowerPublicationFlags,
+        faces: octree.info.globalFineFaceBandPowerPublicationFaces,
+        targets: octree.info.globalFineFaceBandPowerPublicationTargets,
+        interpolated: octree.info.globalFineFaceBandPowerPublicationInterpolated,
+        committed: octree.info.globalFineFaceBandPowerPublicationCommitted,
+        powerGeneration: octree.info.globalFineFaceBandPowerGeneration,
+      })}`);
+      fail(hydrostatic?.topology.invalidRowCount === 0
+        && hydrostatic.topology.validRowCount === hydrostatic.rowCount
+        && hydrostatic.topology.rowsWithTetrahedra === hydrostatic.rowCount
+        && hydrostatic.topology.transitionRowCount > 0
+        && hydrostatic.topology.transitionTetrahedronCount > 0,
+      `hydrostatic live Delaunay topology is incomplete: ${JSON.stringify(hydrostatic?.topology)}`);
+      fail(hydrostatic?.geometry.invalidFaceCount === 0
+        && hydrostatic.geometry.maximumNormalLengthError <= 2e-4,
+      `hydrostatic power-face geometry is invalid: ${JSON.stringify(hydrostatic?.geometry)}`);
+      fail(hydrostatic?.incidence.invalidEntryCount === 0
+        && hydrostatic.incidence.reciprocityFailureCount === 0,
+      `hydrostatic signed face incidence is not reciprocal: ${JSON.stringify(hydrostatic?.incidence)}`);
+      fail(hydrostatic?.pressureRows.invalidRowCount === 0
+        && hydrostatic.pressureRows.finiteRowCount === hydrostatic.rowCount
+        && hydrostatic.pressureRows.entryCount > 0
+        && hydrostatic.pressureRows.reciprocityFailureCount === 0
+        && hydrostatic.pressureRows.relativeResidual <= 5e-3,
+      `hydrostatic pressure CSR is invalid or does not satisfy A*q=-storedFluxRhs: ${JSON.stringify(hydrostatic?.pressureRows)}`);
+      fail((hydrostatic?.pressureRows.analyticRelativeResidual ?? Infinity) <= 0.02,
+      `analytic hydrostatic q does not satisfy the assembled GPU rows: ${JSON.stringify(hydrostatic?.pressureRows)}`);
+      fail(hydrostatic?.velocityReconstruction?.flags === 0x8000_0000
+        && hydrostatic.velocityReconstruction.rowCount === hydrostatic.rowCount
+        && hydrostatic.velocityReconstruction.faceCount === hydrostatic.faceCount
+        && hydrostatic.velocityReconstruction.incidenceCount === hydrostatic.incidence.incidenceCount
+        && hydrostatic.velocityReconstruction.reconstructedCount === hydrostatic.rowCount
+        && hydrostatic.velocityReconstruction.fallbackCount === 0,
+      `hydrostatic power velocity reconstruction is invalid: ${JSON.stringify(hydrostatic?.velocityReconstruction)}`);
+      fail(hydrostatic?.operator?.flags === 0xc000_0000
+        && hydrostatic.operator.firstError === OCTREE_POWER_INVALID_ROW
+        && hydrostatic.operator.rowCount === hydrostatic.rowCount
+        && hydrostatic.operator.faceCount === hydrostatic.faceCount
+        && hydrostatic.operator.incidenceCount === hydrostatic.incidence.incidenceCount
+        && hydrostatic.operator.entryCount > 0
+        && hydrostatic.operator.projectedCount === hydrostatic.faceCount,
+      `hydrostatic generalized pressure operator is invalid: ${JSON.stringify(hydrostatic?.operator)}`);
+      fail((hydrostatic?.pressurePotential.relativeL2Error ?? Infinity) <= 0.02,
+        `hydrostatic pressure-potential relative L2 error ${hydrostatic?.pressurePotential.relativeL2Error} exceeds 2%`);
+      fail((hydrostatic?.pressurePotential.maximumAbsoluteError_m2_s ?? Infinity)
+        <= 0.02 * (hydrostatic?.pressurePotential.maximumExpected_m2_s ?? 0),
+      `hydrostatic pressure-potential L-infinity error ${hydrostatic?.pressurePotential.maximumAbsoluteError_m2_s} exceeds 2% of ${hydrostatic?.pressurePotential.maximumExpected_m2_s}`);
+      fail((hydrostatic?.maximumTransitionNormalVelocity_m_s ?? Infinity) <= 0.002,
+        `hydrostatic transition faces generated ${hydrostatic?.maximumTransitionNormalVelocity_m_s} m/s (limit 0.002)`);
+      fail((hydrostatic?.maximumSpeed_m_s ?? Infinity) <= 0.002,
+        `hydrostatic final power faces generated ${hydrostatic?.maximumSpeed_m_s} m/s (limit 0.002)`);
+      fail((hydrostatic?.maximumDivergence_s ?? Infinity) <= 0.02,
+        `hydrostatic final power-cell divergence ${hydrostatic?.maximumDivergence_s} 1/s exceeds 0.02`);
+      fail(Math.abs(hydrostatic?.volumeDrift ?? Infinity) <= 1e-4,
+        `hydrostatic rest volume drift ${hydrostatic?.volumeDrift} exceeds 1e-4`);
     }
     if (globalFineGenerationTransitionRequested) {
       const container = createSmokeScenario(scenarioId).scene.container;

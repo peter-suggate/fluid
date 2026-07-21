@@ -32,13 +32,20 @@ test("fine volume classifies compact-air overlap only through the authoritative 
   assert.doesNotMatch(shader, /requested=select\(0u,rowCountSource|headers\[found\.x\]/,
     "target N+1 volume must not validate coarse N through rebuilt N+1 row buffers");
   assert.match(shader,
-    /if\(ownership\.y==OWNER_ABSENT\)\{expectedAir=select\(0u,1u,value>=0\.0\);fineVolume=occupancy\(value,h\)\*cellVolume;area=\.5\*h\*h;samples=1u;\}/,
+    /if\(ownership\.y==OWNER_ABSENT\)\{expectedAir=select\(0u,1u,value>=0\.0\);fineVolume=occupancy\(value,h\)\*cellVolume;area=select\(0\.,h\*h,abs\(value\)<=\.5\*h\);samples=1u;\}/,
     "fine liquid inside the proven coarse-air complement must replace zero occupancy, not require a pressure row");
   assert.match(shader,
     /elseif\(ownership\.y!=OWNER_FOUND\)\{lookupFailure=1u;errors\|=ERROR_OWNER;\}/,
     "malformed and probe-exhausted directory queries remain publication-fatal");
   assert.doesNotMatch(shader, /OWNER_ABSENT\)\{if\(value>=0\.0\)/,
     "fine-only liquid must not be confused with an uncertain owner lookup");
+  assert.match(shader,
+    /letflat=fineLinearWorkgroup\(w,n\)\*64u\+lid;if\(flat==0u\)\{control\.corrected=1u;\}leta=activeSample\(flat\)/,
+    "the completed correction pass must publish independently of whether sparse sample zero is valid");
+  assert.match(shader, /fnoccupancy\(value:f32,width:f32\)->f32\{returnclamp\(\.5-value\/width,0\.,1\.\);\}/,
+    "the conservative controller must use the same compact-field Heaviside width as the published-field QA");
+  assert.match(shader, /fnfinalizeMeasuredFineVolume\(\)\{finalizeCorrectedMeasurement\(false\);\}/,
+    "publication telemetry must be remeasured after both bounded correction passes");
 });
 
 test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces and changing band coverage", {
@@ -201,9 +208,14 @@ test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces
   device.queue.writeBuffer(airSampleDirectory, 0, staleDirectory);
   const stale = await readAirControl();
   assert.equal(stale.flags & 4, 4, "a found key outside the owner buffers is stale, not air");
-  assert.ok(stale.staleOwnerSamples > 0);
+  assert.ok(stale.lookupFailureSamples > 0,
+    "owner validation must classify a stale directory row as a malformed lookup before sampling it");
 
-  device.queue.writeBuffer(airSampleDirectory, 0, directory([2, 1, 1], []));
+  // Retain one published liquid-set row so the directory/control pair stays
+  // authoritative while cell zero exercises its proven empty-slot complement.
+  const liquidComplement = directory([2, 1, 1], [1], () => 0.5);
+  liquidComplement[8 + (hash(1) & 7) * 8 + 6] = 0;
+  device.queue.writeBuffer(airSampleDirectory, 0, liquidComplement);
   const missingLiquid = await readAirControl();
   assert.equal(missingLiquid.flags, 0x8000_0000,
     "fine liquid in the authoritative coarse-air complement contributes against zero coarse occupancy");

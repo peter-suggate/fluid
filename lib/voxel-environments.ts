@@ -314,6 +314,8 @@ function buildGarden(b: ProxyBuilder, scene: SceneDescription, s: number): void 
   const gill = C(.55, .52, .49);
   const stem = C(.78, .75, .71);
   const pebble = C(.68, .67, .64);
+  const lampMetal = C(.10, .085, .065);
+  const lampGlow = C(1.0, .48, .19);
   b.cylinder("tree-big/trunk", "tree-trunk", V(-.45 * s, g + .15 * s, -.117 * s), .055 * s, .15 * s, trunk, 0, ["tree"]);
   b.ellipsoid("tree-big/canopy-main", "leaf-foliage", V(-.40 * s, g + .50 * s, -.08 * s), V(.30 * s, .24 * s, .28 * s), canopy, 0, ["tree"]);
   b.ellipsoid("tree-big/canopy-side", "leaf-foliage", V(-.56 * s, g + .42 * s, -.20 * s), V(.17 * s, .14 * s, .16 * s), cmul(canopy, .92), 0, ["tree"]);
@@ -336,6 +338,16 @@ function buildGarden(b: ProxyBuilder, scene: SceneDescription, s: number): void 
   b.ellipsoid("pebble-1/body", "stone-pebble", V(.21 * s, g + .02 * s, -.29 * s), V(.05 * s, .034 * s, .046 * s), pebble, 0, ["pebble"]);
   b.ellipsoid("pebble-2/body", "stone-pebble", V(.26 * s, g + .015 * s, -.325 * s), V(.036 * s, .024 * s, .033 * s), cmul(pebble, .9), 0, ["pebble"]);
   b.ellipsoid("pebble-3/body", "stone-pebble", V(-.05 * s, g + .02 * s, .31 * s), V(.045 * s, .03 * s, .042 * s), cmul(pebble, .95), 0, ["pebble"]);
+  if (scene.sceneId !== "garden-svo-lighting-study") return;
+  // The lighting-study composition needed an actual fixture: previously the
+  // garden catalog contained trees, mushrooms and pebbles but no lamppost.
+  // Keep the source just inside the right bank so its inverse-square pool
+  // reaches the pond while the pole and cap produce a recognizable silhouette.
+  const lampX = .32 * s, lampZ = .24 * s;
+  b.cylinder("lamppost/base", "lamp-metal", V(lampX, g + .02 * s, lampZ), .05 * s, .02 * s, cmul(lampMetal, .72), 0, ["lamppost", "fixture"]);
+  b.cylinder("lamppost/pole", "lamp-metal", V(lampX, g + .17 * s, lampZ), .012 * s, .13 * s, lampMetal, 0, ["lamppost", "fixture"]);
+  b.ellipsoid("lamppost/lantern", "emissive-fixture", V(lampX, g + .35 * s, lampZ), V(.05 * s, .06 * s, .05 * s), lampGlow, 11.0, ["lamppost", "lantern", "fixture", "light", "point-light"]);
+  b.cylinder("lamppost/cap", "lamp-metal", V(lampX, g + .43 * s, lampZ), .06 * s, .012 * s, cmul(lampMetal, .82), 0, ["lamppost", "fixture"]);
 }
 
 /**

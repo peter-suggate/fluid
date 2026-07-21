@@ -4,7 +4,10 @@ import test from "node:test";
 import { parseScene, serializeScene, validateScene } from "../lib/model";
 import { getScenePreset, scenePresets } from "../lib/scenes";
 import { planSceneRuntime } from "../lib/scene-runtime";
+import { buildSvoSceneLights } from "../lib/svo-light-abi";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
+import { buildEnvironmentProxyCatalog } from "../lib/voxel-environments";
+import { buildOctreeSvoEnvironmentLightingPublication } from "../lib/webgpu-octree-sparse-bricks";
 import { canInitializeGPUSceneSource, gpuSceneSolverKey, type SimulationRunConfig } from "../lib/webgpu-renderer";
 
 test("garden SVO lighting preset is a valid fluid-free static scene", () => {
@@ -36,6 +39,46 @@ test("garden SVO lighting preset is a valid fluid-free static scene", () => {
   const roundTrip = parseScene(serializeScene(scene));
   assert.equal(roundTrip.systems?.fluid, false);
   assert.deepEqual(roundTrip.voxelDomain, scene.voxelDomain);
+  assert.deepEqual(roundTrip.lighting, scene.lighting);
+
+  roundTrip.lighting = { directional: { intensity: -1 }, environment: { diffuseScale: Number.NaN } };
+  assert.ok(validateScene(roundTrip).includes("Scene directional-light intensity must be non-negative and finite"));
+  assert.ok(validateScene(roundTrip).includes("Scene environment diffuse scale must be non-negative and finite"));
+});
+
+test("garden lighting study authors a bounded warm point light on visible lamppost geometry", () => {
+  const scene = getScenePreset("garden-svo-lighting").create();
+  const catalog = buildEnvironmentProxyCatalog(scene, "garden");
+  const lantern = catalog.primitives.find(({ key }) => key === "garden/lamppost/lantern");
+  assert.ok(lantern, "the garden previously had no lamppost; its emitter must now be real scene geometry");
+  assert.ok(catalog.primitives.some(({ key }) => key === "garden/lamppost/pole"));
+  assert.ok(catalog.primitives.some(({ key }) => key === "garden/lamppost/cap"));
+  assert.ok(lantern.tags.includes("point-light"));
+
+  const lights = buildSvoSceneLights(scene);
+  const point = lights.records.find(({ sourceKey }) => sourceKey === lantern.key);
+  const directional = lights.records[0];
+  assert.ok(point);
+  assert.equal(point.kind, "point");
+  assert.ok(point.position_m.every((value, index) => Math.abs(value - [0.96, 1.43, 0.72][index]) < 1e-12));
+  assert.equal(point.range_m, 4.5, "finite range bounds shadow traversal and distant energy");
+  assert.equal(point.radius_m, 0.18,
+    "point visibility ends at the authored lantern globe instead of its center");
+  assert.deepEqual(point.colorLinear, [1, 0.48, 0.19]);
+  assert.equal(point.intensity, 11);
+  assert.equal(directional.kind, "directional");
+  assert.equal(directional.intensity, 0.09);
+  const luminance = (color: readonly [number, number, number]) => .2126 * color[0] + .7152 * color[1] + .0722 * color[2];
+  assert.ok(point.intensity * luminance(point.colorLinear) > 60 * directional.intensity * luminance(directional.colorLinear),
+    "the local warm fixture, not the residual directional fill, must carry the composition");
+
+  const environment = buildOctreeSvoEnvironmentLightingPublication(scene);
+  assert.equal(environment.record.diffuseScale, 0.12);
+  assert.equal(environment.record.specularScale, 0.25);
+
+  const ordinaryGarden = buildEnvironmentProxyCatalog(getScenePreset("garden-pond").create(), "garden");
+  assert.equal(ordinaryGarden.primitives.some(({ key }) => key.includes("/lamppost/")), false,
+    "the authored fixture belongs to the lighting study, not every garden simulation");
 });
 
 test("garden lighting scene rebuilds its complete lattice from scene voxel controls", () => {
@@ -129,6 +172,11 @@ test("GPU scene rebuild identity includes captured container and owner-layout in
   scene.rigidBodies = scene.rigidBodies.slice(1);
   assert.notEqual(gpuSceneSolverKey(scene, config), changedTop,
     "rigid roster changes environment owner offsets and must rebuild the dry-scene source");
+
+  const changedBodies = gpuSceneSolverKey(scene, config);
+  scene.lighting = { ...scene.lighting, environment: { ...scene.lighting?.environment, diffuseScale: 0.25 } };
+  assert.notEqual(gpuSceneSolverKey(scene, config), changedBodies,
+    "authored lighting changes must rebuild matching GPU publications");
 });
 
 test("static SVO scenes lazily expose raw-voxel inspection records", () => {

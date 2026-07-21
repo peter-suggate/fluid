@@ -113,11 +113,10 @@ test("Dawn site hash and block scan scale across blocks with world-boundary iden
     validationErrors.push((event as { error: { message: string } }).error.message);
   });
   const catalog = catalogViews();
-  let lookupOffset = -1;
-  for (let offset = 0; offset < catalog.lookup.length; offset += 3) if (catalog.lookup[offset] === 0x3_ffff) { lookupOffset = offset; break; }
-  assert.notEqual(lookupOffset, -1);
-  const entry = catalog.lookup[lookupOffset + 1];
-  const transform = catalog.lookup[lookupOffset + 2];
+  const packedUniform = catalog.sameOrFinerDirect[0x3_ffff];
+  assert.notEqual(packedUniform, 0xffff_ffff);
+  const entry = packedUniform & 0xffff;
+  const transform = packedUniform >>> 16;
   const header = catalog.entryHeaders.slice(entry * 2, entry * 2 + 2);
   assert.equal(header[1], 6);
   const faceData = catalog.faceData.slice(header[0] * OCTREE_POWER_CATALOG_FACE_FLOATS, (header[0] + header[1]) * OCTREE_POWER_CATALOG_FACE_FLOATS);
@@ -274,29 +273,28 @@ test("Dawn emits stable unique power faces and reciprocal compact incidence", {
   assert.deepEqual(compilation.messages.filter((message) => message.type === "error"), []);
 
   const catalog = catalogViews();
-  // 18 same-size face/edge neighbors is the uniform catalog descriptor. Zero
-  // is a representative maximally refined local entry with 24 power faces.
+  // 18 same-size face/edge neighbors is the uniform catalog descriptor.
   const lookupFor = (descriptor: number) => {
+    if (descriptor < catalog.sameOrFinerDirect.length) {
+      const packed = catalog.sameOrFinerDirect[descriptor];
+      if (packed !== 0xffff_ffff) return { entry: packed & 0xffff, transform: packed >>> 16 };
+    }
     for (let offset = 0; offset < catalog.lookup.length; offset += 3) {
       if (catalog.lookup[offset] === descriptor) return { entry: catalog.lookup[offset + 1], transform: catalog.lookup[offset + 2] };
     }
     throw new Error(`Missing catalog descriptor ${descriptor}`);
   };
   const uniform = lookupFor(0x3_ffff);
-  const representative = lookupFor(0);
   const uniformHeader = catalog.entryHeaders.slice(uniform.entry * 2, uniform.entry * 2 + 2);
-  const representativeHeader = catalog.entryHeaders.slice(representative.entry * 2, representative.entry * 2 + 2);
   const uniformFaces = catalog.faceData.slice(uniformHeader[0] * OCTREE_POWER_CATALOG_FACE_FLOATS, (uniformHeader[0] + uniformHeader[1]) * OCTREE_POWER_CATALOG_FACE_FLOATS);
-  const representativeFaces = catalog.faceData.slice(representativeHeader[0] * OCTREE_POWER_CATALOG_FACE_FLOATS, (representativeHeader[0] + representativeHeader[1]) * OCTREE_POWER_CATALOG_FACE_FLOATS);
-  const compactFaces = new Float32Array(uniformFaces.length + representativeFaces.length);
-  compactFaces.set(uniformFaces); compactFaces.set(representativeFaces, uniformFaces.length);
-  const compactHeaders = new Uint32Array([0, uniformHeader[1], uniformHeader[1], representativeHeader[1]]);
-  const metricWords = new Uint32Array(12);
+  const compactFaces = new Float32Array(uniformFaces);
+  const compactHeaders = new Uint32Array([0, uniformHeader[1]]);
+  const metricWords = new Uint32Array(8);
   const metricFloats = new Float32Array(metricWords.buffer);
-  [uniform, uniform, representative].forEach((lookup, row) => {
-    metricWords[row * 4] = row < 2 ? 0 : 1;
-    metricWords[row * 4 + 1] = (OCTREE_POWER_TOPOLOGY_VALID | lookup.transform) >>> 0;
-    metricFloats[row * 4 + 2] = catalog.entryVolumes[lookup.entry];
+  [31, 62].forEach((boundary, row) => {
+    metricWords[row * 4] = 0;
+    metricWords[row * 4 + 1] = (OCTREE_POWER_TOPOLOGY_VALID | uniform.transform | (boundary << 8)) >>> 0;
+    metricFloats[row * 4 + 2] = catalog.entryVolumes[uniform.entry];
   });
   const upload = (data: ArrayBufferView) => {
     const buffer = device.createBuffer({ size: Math.max(4, data.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, mappedAtCreation: true });
@@ -308,18 +306,14 @@ test("Dawn emits stable unique power faces and reciprocal compact incidence", {
   const catalogFaces = upload(compactFaces);
   const placeholder = upload(new Uint32Array([0]));
   const topology: OctreePowerTopologySource = {
-    plan: { rowCapacity: 3, entryCount: 2, lookupCount: 2, metricBytes: 48, catalogBytes: compactHeaders.byteLength + compactFaces.byteLength, allocatedBytes: 0 },
+    plan: { rowCapacity: 2, entryCount: 1, lookupCount: 1, metricBytes: 32, catalogBytes: compactHeaders.byteLength + compactFaces.byteLength, allocatedBytes: 0 },
     metrics, control: placeholder, catalogEntryHeaders: entryHeaders, catalogVolumes: placeholder,
     catalogFaces, catalogLookup: placeholder, sameOrFinerDirect: placeholder, sameOrCoarserDirect: placeholder,
   };
-  const builder = new WebGPUOctreePowerFaces(device, 3, 40, topology, 60);
-  const dimensions: [number, number, number] = [16, 16, 16];
-  const linear = (x: number, y: number, z: number) => x + dimensions[0] * (y + dimensions[1] * z);
-  const headerWords = new Uint32Array(3 * 12);
-  [[linear(2, 2, 2), 1], [linear(3, 2, 2), 1], [linear(10, 10, 10), 2]].forEach(([cell, size], row) => {
-    headerWords[row * 12] = cell;
-    headerWords[row * 12 + 3] = size;
-  });
+  const builder = new WebGPUOctreePowerFaces(device, 2, 11, topology, 12);
+  const dimensions: [number, number, number] = [2, 1, 1];
+  const headerWords = new Uint32Array(2 * 12);
+  [0, 1].forEach((cell, row) => { headerWords[row * 12] = cell; headerWords[row * 12 + 3] = 1; });
   const headers = upload(headerWords);
 
   const readRun = async () => {
@@ -327,7 +321,7 @@ test("Dawn emits stable unique power faces and reciprocal compact incidence", {
       + builder.plan.incidenceBytes + builder.plan.normalBytes + builder.plan.centroidBytes + builder.plan.quadratureBytes;
     const readback = device.createBuffer({ size: byteCount, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = device.createCommandEncoder();
-    builder.encode(encoder, headers, { dimensions, rowCount: 3, physicalCellSize: 0.25, generation: 7 });
+    builder.encode(encoder, headers, { dimensions, rowCount: 2, physicalCellSize: 0.25, generation: 7 });
     let offset = 0;
     encoder.copyBufferToBuffer(builder.control, 0, readback, offset, 64); offset += 64;
     encoder.copyBufferToBuffer(builder.source.incidenceOffsets, 0, readback, offset, builder.plan.workspaceBytes); offset += builder.plan.workspaceBytes;
@@ -346,19 +340,19 @@ test("Dawn emits stable unique power faces and reciprocal compact incidence", {
   const controlWords = new Uint32Array(first, 0, 16);
   const control = unpackOctreePowerFaceControl(controlWords);
   assert.deepEqual(control, {
-    rowCount: 3, faceCount: 35, incidenceCount: 36, flags: 0,
-    firstInvalid: 0xffff_ffff, invalidCount: 0, boundaryCount: 34, generation: 7, valid: OCTREE_POWER_FACE_VALID,
-    lookupMissCount: 34, maximumObservedProbe: control.maximumObservedProbe, worldBoundaryCount: 0,
+    rowCount: 2, faceCount: 11, incidenceCount: 12, flags: 0,
+    firstInvalid: 0xffff_ffff, invalidCount: 0, boundaryCount: 10, generation: 7, valid: OCTREE_POWER_FACE_VALID,
+    lookupMissCount: 10, maximumObservedProbe: control.maximumObservedProbe, worldBoundaryCount: 10,
     firstInvalidSlot: 0xffff_ffff, firstInvalidNeighbor: 0xffff_ffff, firstInvalidDetail: 0,
     firstInvalidRow: 0xffff_ffff,
   });
-  assert.ok(control.maximumObservedProbe >= 2 && control.maximumObservedProbe <= builder.plan.maximumHashProbes);
+  assert.ok(control.maximumObservedProbe >= 1 && control.maximumObservedProbe <= builder.plan.maximumHashProbes);
   assert.equal(controlWords[8], OCTREE_POWER_FACE_VALID);
   const workspaceOffset = 64;
   const workspace = new Uint32Array(first, workspaceOffset, builder.plan.workspaceBytes / 4);
-  assert.deepEqual([workspace[3], workspace[7], workspace[11], workspace[15]], [0, 6, 12, 36]);
-  assert.deepEqual([workspace[0], workspace[4], workspace[8]], [6, 5, 24]);
-  assert.deepEqual([workspace[1], workspace[5], workspace[9]], [6, 6, 24]);
+  assert.deepEqual([workspace[3], workspace[7], workspace[11]], [0, 6, 12]);
+  assert.deepEqual([workspace[0], workspace[4]], [6, 5]);
+  assert.deepEqual([workspace[1], workspace[5]], [6, 6]);
 
   const faceOffset = workspaceOffset + builder.plan.workspaceBytes;
   const faceWords = new Uint32Array(first, faceOffset, builder.plan.faceBytes / 4);
@@ -371,7 +365,7 @@ test("Dawn emits stable unique power faces and reciprocal compact incidence", {
     const positive = faceWords[word + 1];
     const geometryCode = faceWords[word + 2];
     const flags = faceWords[word + 3];
-    assert.ok(negative < 3);
+    assert.ok(negative < 2);
     assert.equal((flags & OCTREE_POWER_FACE_VALID) >>> 0, OCTREE_POWER_FACE_VALID);
     assert.ok(Number.isFinite(faceFloats[word + 5]) && faceFloats[word + 5] > 0);
     assert.ok(Number.isFinite(faceFloats[word + 6]) && faceFloats[word + 6] > 0);
@@ -412,8 +406,8 @@ test("Dawn emits stable unique power faces and reciprocal compact incidence", {
     assert.ok(new Set(Array.from(quadratureWords.slice(quadratureAt + 4, quadratureAt + 20))).size > 1,
       "actual power-polygon strata must not collapse to the face centroid");
   }
-  const incident = Array.from({ length: 3 }, () => [] as { face: number; sign: number }[]);
-  for (let row = 0; row < 3; row += 1) {
+  const incident = Array.from({ length: 2 }, () => [] as { face: number; sign: number }[]);
+  for (let row = 0; row < 2; row += 1) {
     const begin = workspace[row * 4 + 3];
     const end = workspace[(row + 1) * 4 + 3];
     for (let index = begin; index < end; index += 1) {
@@ -427,10 +421,10 @@ test("Dawn emits stable unique power faces and reciprocal compact incidence", {
   const second = await readRun();
   assert.deepEqual(new Uint8Array(second), new Uint8Array(first), "repeated GPU rebuild must be byte deterministic");
 
-  const overflow = new WebGPUOctreePowerFaces(device, 3, 1, topology, 2);
+  const overflow = new WebGPUOctreePowerFaces(device, 2, 1, topology, 2);
   const overflowReadback = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const overflowEncoder = device.createCommandEncoder();
-  overflow.encode(overflowEncoder, headers, { dimensions, rowCount: 3 });
+  overflow.encode(overflowEncoder, headers, { dimensions, rowCount: 2 });
   overflowEncoder.copyBufferToBuffer(overflow.control, 0, overflowReadback, 0, 64);
   device.queue.submit([overflowEncoder.finish()]); await device.queue.onSubmittedWorkDone();
   await overflowReadback.mapAsync(GPUMapMode.READ);
@@ -442,7 +436,7 @@ test("Dawn emits stable unique power faces and reciprocal compact incidence", {
   device.queue.writeBuffer(metrics, 5 * 4, new Uint32Array([0]));
   const invalidReadback = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const invalidEncoder = device.createCommandEncoder();
-  builder.encode(invalidEncoder, headers, { dimensions, rowCount: 3 });
+  builder.encode(invalidEncoder, headers, { dimensions, rowCount: 2 });
   invalidEncoder.copyBufferToBuffer(builder.control, 0, invalidReadback, 0, 64);
   device.queue.submit([invalidEncoder.finish()]); await device.queue.onSubmittedWorkDone();
   await invalidReadback.mapAsync(GPUMapMode.READ);

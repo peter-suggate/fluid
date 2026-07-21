@@ -9,6 +9,8 @@ import type { WaterSurfacePresentationDiagnostics } from "../webgpu-water-pipeli
 
 export interface PerformanceSnapshot {
   methodId: string;
+  /** Effective renderer for this exact sample; requested SVO may have fallen back to raster. */
+  effectiveRenderMode: "svo" | "raster";
   renderTimingContext?: string;
   renderTimingEpoch: number;
   renderTimingSampleId: number;
@@ -54,17 +56,21 @@ export interface PerformanceSnapshot {
   gpuOverhead_ms: number;
   gpuRender_ms: number;
   gpuSurfaceExtraction_ms: number;
+  gpuCaustics_ms: number;
   gpuDryScene_ms: number;
   gpuSvoTemporal_ms: number;
+  gpuInterfaceFront_ms: number;
+  gpuInterfaceBack_ms: number;
   gpuInterfaces_ms: number;
   gpuSprayFront_ms: number;
   gpuSprayBack_ms: number;
   gpuSprayRender_ms: number;
   gpuOpticalComposite_ms: number;
   gpuUpscale_ms: number;
+  gpuOverlays_ms: number;
 }
 
-export const emptyPerformance: PerformanceSnapshot = { methodId: "", renderTimingEpoch: 0, renderTimingSampleId: 0, gpuPhysicsTimingAvailable: false, gpuRenderTimestampSupported: false, gpuRenderTimingAvailable: false, cpuSimulation_ms: 0, cpuFrame_ms: 0, cpuPhysicsSubmit_ms: 0, cpuDataUpload_ms: 0, cpuRenderEncode_ms: 0, adaptiveRebuildWall_ms: 0, adaptiveRebuildPending: false, adaptiveInlineTopology: false, adaptiveRebuildBlockedFrames: 0, adaptiveRebuildCompletedCount: 0, adaptiveGPUConstructionKernel_ms: 0, adaptiveGPUSparsePack_ms: 0, adaptiveCPUTopologyPack_ms: 0, adaptiveCPURedistance_ms: 0, adaptiveCPUQuadtreeDecode_ms: 0, adaptiveCPUTallGrid_ms: 0, adaptiveCPUVariationalAssembly_ms: 0, adaptiveCPUSystemPack_ms: 0, adaptiveCPUICFactorization_ms: 0, adaptiveCPUResourceUpload_ms: 0, gpuActiveStages: [], gpuPreparation_ms: 0, gpuLayerConstruction_ms: 0, gpuAdvection_ms: 0, gpuConditioning_ms: 0, gpuRemeshing_ms: 0, gpuPressure_ms: 0, gpuProjection_ms: 0, gpuExtrapolation_ms: 0, gpuMaterialization_ms: 0, gpuSurfaceUpdate_ms: 0, gpuRigid_ms: 0, gpuSpraySimulation_ms: 0, gpuFluidResidency_ms: 0, gpuSparsePublication_ms: 0, gpuDiagnostics_ms: 0, gpuOverhead_ms: 0, gpuRender_ms: 0, gpuSurfaceExtraction_ms: 0, gpuDryScene_ms: 0, gpuSvoTemporal_ms: 0, gpuInterfaces_ms: 0, gpuSprayFront_ms: 0, gpuSprayBack_ms: 0, gpuSprayRender_ms: 0, gpuOpticalComposite_ms: 0, gpuUpscale_ms: 0 };
+export const emptyPerformance: PerformanceSnapshot = { methodId: "", effectiveRenderMode: "raster", renderTimingEpoch: 0, renderTimingSampleId: 0, gpuPhysicsTimingAvailable: false, gpuRenderTimestampSupported: false, gpuRenderTimingAvailable: false, cpuSimulation_ms: 0, cpuFrame_ms: 0, cpuPhysicsSubmit_ms: 0, cpuDataUpload_ms: 0, cpuRenderEncode_ms: 0, adaptiveRebuildWall_ms: 0, adaptiveRebuildPending: false, adaptiveInlineTopology: false, adaptiveRebuildBlockedFrames: 0, adaptiveRebuildCompletedCount: 0, adaptiveGPUConstructionKernel_ms: 0, adaptiveGPUSparsePack_ms: 0, adaptiveCPUTopologyPack_ms: 0, adaptiveCPURedistance_ms: 0, adaptiveCPUQuadtreeDecode_ms: 0, adaptiveCPUTallGrid_ms: 0, adaptiveCPUVariationalAssembly_ms: 0, adaptiveCPUSystemPack_ms: 0, adaptiveCPUICFactorization_ms: 0, adaptiveCPUResourceUpload_ms: 0, gpuActiveStages: [], gpuPreparation_ms: 0, gpuLayerConstruction_ms: 0, gpuAdvection_ms: 0, gpuConditioning_ms: 0, gpuRemeshing_ms: 0, gpuPressure_ms: 0, gpuProjection_ms: 0, gpuExtrapolation_ms: 0, gpuMaterialization_ms: 0, gpuSurfaceUpdate_ms: 0, gpuRigid_ms: 0, gpuSpraySimulation_ms: 0, gpuFluidResidency_ms: 0, gpuSparsePublication_ms: 0, gpuDiagnostics_ms: 0, gpuOverhead_ms: 0, gpuRender_ms: 0, gpuSurfaceExtraction_ms: 0, gpuCaustics_ms: 0, gpuDryScene_ms: 0, gpuSvoTemporal_ms: 0, gpuInterfaceFront_ms: 0, gpuInterfaceBack_ms: 0, gpuInterfaces_ms: 0, gpuSprayFront_ms: 0, gpuSprayBack_ms: 0, gpuSprayRender_ms: 0, gpuOpticalComposite_ms: 0, gpuOverlays_ms: 0, gpuUpscale_ms: 0 };
 
 /** Sum only measurements that were actually produced by timestamp queries. */
 export function measuredGPUTime_ms(sample: PerformanceSnapshot) {

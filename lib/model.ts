@@ -44,6 +44,20 @@ export interface SceneDescription {
   };
   /** Visible environment is part of the unified scene representation, not merely a backdrop. */
   environment?: EnvironmentId;
+  /** Optional image-free lighting grade consumed by the SVO renderer. */
+  lighting?: {
+    /** Scene-linear directional key. Omitted fields retain the environment defaults. */
+    directional?: {
+      direction?: readonly [number, number, number];
+      colorLinear?: readonly [number, number, number];
+      intensity?: number;
+    };
+    /** Multipliers for the diffuse and prefiltered-specular environment terms. */
+    environment?: {
+      diffuseScale?: number;
+      specularScale?: number;
+    };
+  };
   randomSeed: number;
   duration_s: number;
   container: {
@@ -172,6 +186,19 @@ export function validateScene(scene: SceneDescription): string[] {
   if (scene.schemaVersion !== "1.0.0") errors.push("Unsupported schema version");
   if (!scene.sceneId?.trim()) errors.push("Scene ID is required");
   if (scene.systems?.fluid !== undefined && typeof scene.systems.fluid !== "boolean") errors.push("Scene fluid-system flag must be boolean");
+  const lighting = scene.lighting;
+  if (lighting?.directional?.direction) {
+    const direction = lighting.directional.direction;
+    if (direction.length !== 3 || !direction.every(Number.isFinite) || Math.hypot(...direction) <= 1e-12) errors.push("Scene directional-light direction must be finite and non-zero");
+  }
+  if (lighting?.directional?.colorLinear) {
+    const color = lighting.directional.colorLinear;
+    if (color.length !== 3 || !color.every((value) => Number.isFinite(value) && value >= 0)) errors.push("Scene directional-light color must contain three non-negative finite channels");
+  }
+  if (lighting?.directional?.intensity !== undefined && (!Number.isFinite(lighting.directional.intensity) || lighting.directional.intensity < 0)) errors.push("Scene directional-light intensity must be non-negative and finite");
+  for (const [value, label] of [[lighting?.environment?.diffuseScale, "diffuse"], [lighting?.environment?.specularScale, "specular"]] as const) {
+    if (value !== undefined && (!Number.isFinite(value) || value < 0)) errors.push(`Scene environment ${label} scale must be non-negative and finite`);
+  }
   if (!Number.isInteger(scene.randomSeed) || scene.randomSeed < 0) errors.push("Random seed must be a non-negative integer");
   if (!(scene.duration_s > 0)) errors.push("Duration must be positive");
   const c = scene.container;

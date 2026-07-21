@@ -25,6 +25,7 @@ export interface CompactOctreeFieldSnapshot {
   readonly faceBandPointFieldControl?: Uint32Array;
   readonly faceBandPowerPublicationControl?: Uint32Array;
   readonly powerVelocityControl?: Uint32Array;
+  readonly powerProjectionControl?: Uint32Array;
   readonly powerVelocitySampleControl?: Uint32Array;
 }
 
@@ -55,6 +56,7 @@ export interface CompactOctreeFieldEvidence {
   readonly faceBandPointFieldControl?: readonly number[];
   readonly faceBandPowerPublicationControl?: readonly number[];
   readonly powerVelocityControl?: readonly number[];
+  readonly powerProjectionControl?: readonly number[];
   readonly powerVelocitySampleControl?: readonly number[];
 }
 
@@ -96,6 +98,7 @@ export interface CompactOctreePublicationHeaderEvidence {
   readonly faceBandPointFieldControl?: readonly number[];
   readonly faceBandPowerPublicationControl?: readonly number[];
   readonly powerVelocityControl?: readonly number[];
+  readonly powerProjectionControl?: readonly number[];
   readonly powerVelocitySampleControl?: readonly number[];
 }
 
@@ -121,7 +124,7 @@ export function compactOctreePublicationHeaderEvidence(
     | "faceBandControl" | "faceBandTransitionControl" | "faceBandTransientPowerControl"
     | "faceBandPointFieldControl"
     | "faceBandPowerPublicationControl"
-    | "powerVelocityControl" | "powerVelocitySampleControl">,
+    | "powerVelocityControl" | "powerProjectionControl" | "powerVelocitySampleControl">,
 ): CompactOctreePublicationHeaderEvidence {
   const worklist = snapshot.worklist, coarse = snapshot.coarseDirectory;
   const coarseControl = snapshot.coarseControl, topology = snapshot.topologyControl;
@@ -162,6 +165,7 @@ export function compactOctreePublicationHeaderEvidence(
     ...(snapshot.faceBandPowerPublicationControl
       ? { faceBandPowerPublicationControl: Array.from(snapshot.faceBandPowerPublicationControl) } : {}),
     ...(snapshot.powerVelocityControl ? { powerVelocityControl: Array.from(snapshot.powerVelocityControl) } : {}),
+    ...(snapshot.powerProjectionControl ? { powerProjectionControl: Array.from(snapshot.powerProjectionControl) } : {}),
     ...(snapshot.powerVelocitySampleControl
       ? { powerVelocitySampleControl: Array.from(snapshot.powerVelocitySampleControl) } : {}),
   };

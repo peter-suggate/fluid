@@ -16,11 +16,12 @@
 export const OCTREE_MGPCG_PRECONDITIONER_KIND = "additive-geometric-aggregate-diagonal" as const;
 export const OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS = 8;
 export const OCTREE_SECTION43_BOUNDARY_BAND_LAYERS = 3;
-// The paper reports convergence in 6-10 PCG iterations. A 16-iteration fixed
-// GPU schedule leaves margin while bounding command-buffer size; failure to
-// converge is reported instead of silently encoding the UI's Jacobi-scale
-// 128-400 iteration budget through the much richer hybrid preconditioner.
-export const OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS = 16;
+// The paper reports convergence in 6-10 PCG iterations for its production
+// hierarchy. Our sparse GPU hierarchy is an approximation (notably at the
+// graph-ring boundary band), so retain a bounded tail for difficult topology
+// generations. Kernels already stop on the GPU as soon as convergence is
+// published; this cap bounds the encoded fallback schedule only.
+export const OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS = 128;
 
 export type OctreePCGPreconditionerKind = "aggregate" | "section43-hybrid";
 

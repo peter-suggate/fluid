@@ -28,8 +28,6 @@ import {
 import type { SparseVoxelTemporalFrameState } from "./webgpu-svo-temporal-accumulator";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoCostOverlayCode, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
 import { isGPUInitializationAbort } from "./gpu-initialization";
-import { createWebgpuSvoFinePhiResources, WebGPUSvoFinePhiResources } from "./webgpu-svo-fine-phi-resources";
-import type { SvoFineFluidGpuCapability } from "./webgpu-svo-fine-phi-stager";
 import { encodeGPUStageTextureCapture, gpuStageCapture, type PendingGPUStageCapture } from "./gpu-stage-capture";
 import { createGlobalFineLevelSetConsumerSource, createUnifiedOctreeConsumerAdapters, createUnifiedOctreeConsumerSource } from "./octree-consumer-sampling";
 import { OCTREE_TECHNIQUE_OVERLAY_CODES, isOctreeTechniqueOverlayMode, type OctreeTechniqueOverlayMode } from "./octree-technique-debug";
@@ -43,11 +41,19 @@ import { planSceneRuntime } from "./scene-runtime";
 export type SimulationBackend = "webgpu" | "cpu-reference";
 export const MAX_PRESENTATION_GAP_MS = 1000 / 60;
 export const SVO_SHADOW_HISTORY_WARMUP_FRAMES = 2;
+export const SVO_CAMERA_CHANGING_FRAME = -2;
 
 export function svoShadowTemporalFrame(enabled: boolean, stableFrames: number, presentationFrameIndex: number): number {
   return enabled && stableFrames >= SVO_SHADOW_HISTORY_WARMUP_FRAMES
     ? Math.max(0, Math.floor(presentationFrameIndex)) % 16_777_216
     : -1;
+}
+
+/** Preserve shadow-temporal eligibility while also publishing camera motion to dry-scene shading. */
+export function svoDrySceneTemporalFrame(shadowTemporalFrame: number, cameraStableFrames: number): number {
+  return cameraStableFrames >= SVO_SHADOW_HISTORY_WARMUP_FRAMES
+    ? shadowTemporalFrame
+    : SVO_CAMERA_CHANGING_FRAME;
 }
 
 export function presentationPriorityDue(lastFrameAt_ms: number, now_ms: number) {
@@ -203,7 +209,7 @@ export function canInitializeGPUSceneSource(scene: SceneDescription, methodId: s
 
 /** Content identity for every construction-time input captured by the GPU scene source. */
 export function gpuSceneSolverKey(scene: SceneDescription, config: SimulationRunConfig): string {
-  return `${config.simulationEpoch ?? 0}:fluid-${planSceneRuntime(scene, { methodId: config.methodId }).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment ?? "default"}:${JSON.stringify(scene.voxelDomain)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.container.top}:${scene.container.fluidWallMode}:${JSON.stringify(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
+  return `${config.simulationEpoch ?? 0}:fluid-${planSceneRuntime(scene, { methodId: config.methodId }).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment ?? "default"}:${JSON.stringify(scene.lighting ?? null)}:${JSON.stringify(scene.voxelDomain)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.container.top}:${scene.container.fluidWallMode}:${JSON.stringify(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
 }
 
 export type GPUStatus =
@@ -279,14 +285,18 @@ export interface RendererFrameMetrics {
   cpuRenderEncode_ms: number;
   gpuRender_ms?: number;
   gpuSurfaceExtraction_ms?: number;
+  gpuCaustics_ms?: number;
   gpuDryScene_ms?: number;
   gpuSvoTemporal_ms?: number;
+  gpuInterfaceFront_ms?: number;
+  gpuInterfaceBack_ms?: number;
   gpuInterfaces_ms?: number;
   gpuSprayFront_ms?: number;
   gpuSprayBack_ms?: number;
   gpuSprayRender_ms?: number;
   gpuOpticalComposite_ms?: number;
   gpuUpscale_ms?: number;
+  gpuOverlays_ms?: number;
   methodId?: string;
   /** Renderer mode plus a monotonic epoch; stale readbacks cannot cross it. */
   renderTimingContext?: string;
@@ -301,19 +311,23 @@ export interface RendererFrameMetrics {
 export interface RenderStageTimings {
   total_ms: number;
   surfaceExtraction_ms?: number;
+  caustics_ms?: number;
   dryScene_ms?: number;
   svoTemporal_ms?: number;
+  interfaceFront_ms: number;
+  interfaceBack_ms: number;
   interfaces_ms?: number;
   sprayFront_ms: number;
   sprayBack_ms: number;
   sprayRender_ms: number;
   opticalComposite_ms: number;
   upscale_ms: number;
+  overlays_ms?: number;
 }
 
-export const RENDER_TIMESTAMP_QUERY_COUNT = 18;
+export const RENDER_TIMESTAMP_QUERY_COUNT = 22;
 
-export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, surfaceUpdated: boolean, sprayRendered = true, svoTemporalEncoded = false): RenderStageTimings {
+export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, surfaceUpdated: boolean, sprayRendered = true, svoTemporalEncoded = false, causticsUpdated = false, overlaysEncoded = false): RenderStageTimings {
   if (times.length < 16) throw new Error("Render timestamp sample must contain 16 query values");
   const duration = (start: number, end: number) => {
     const milliseconds = Number(times[end] - times[start]) / 1e6;
@@ -324,13 +338,17 @@ export function decodeRenderStageTimestamps(times: ArrayLike<bigint>, surfaceUpd
   const sprayBack_ms = sprayRendered ? duration(14, 15) : 0;
   const sprayRender_ms = sprayFront_ms + sprayBack_ms;
   const surfaceExtraction_ms = surfaceUpdated ? duration(0, 1) : undefined;
+  const caustics_ms = causticsUpdated && times.length >= 20 ? duration(18, 19) : undefined;
   const dryScene_ms = duration(2, 3);
-  const svoTemporal_ms = svoTemporalEncoded && times.length >= RENDER_TIMESTAMP_QUERY_COUNT ? duration(16, 17) : undefined;
-  const interfaces_ms = duration(4, 5) + duration(6, 7);
+  const svoTemporal_ms = svoTemporalEncoded && times.length >= 18 ? duration(16, 17) : undefined;
+  const interfaceFront_ms = duration(4, 5);
+  const interfaceBack_ms = duration(6, 7);
+  const interfaces_ms = interfaceFront_ms + interfaceBack_ms;
+  const overlays_ms = overlaysEncoded && times.length >= RENDER_TIMESTAMP_QUERY_COUNT ? duration(20, 21) : undefined;
   const opticalComposite_ms = duration(8, 9);
   return {
-    total_ms: (surfaceExtraction_ms ?? 0) + dryScene_ms + (svoTemporal_ms ?? 0) + interfaces_ms + sprayRender_ms + opticalComposite_ms + upscale_ms,
-    surfaceExtraction_ms, dryScene_ms, ...(svoTemporal_ms === undefined ? {} : { svoTemporal_ms }), interfaces_ms, sprayFront_ms, sprayBack_ms, sprayRender_ms, opticalComposite_ms, upscale_ms
+    total_ms: (surfaceExtraction_ms ?? 0) + (caustics_ms ?? 0) + dryScene_ms + (svoTemporal_ms ?? 0) + interfaces_ms + sprayRender_ms + opticalComposite_ms + (overlays_ms ?? 0) + upscale_ms,
+    surfaceExtraction_ms, ...(caustics_ms === undefined ? {} : { caustics_ms }), dryScene_ms, ...(svoTemporal_ms === undefined ? {} : { svoTemporal_ms }), interfaceFront_ms, interfaceBack_ms, interfaces_ms, sprayFront_ms, sprayBack_ms, sprayRender_ms, opticalComposite_ms, ...(overlays_ms === undefined ? {} : { overlays_ms }), upscale_ms
   };
 }
 
@@ -429,11 +447,11 @@ export class FluidLabRenderer {
   /** Internal A/B: temporal-off also restores full-rate shadow visibility. */
   private readonly svoTemporalAccumulationEnabled = typeof location === "undefined" || new URLSearchParams(location.search).get("svoTemporal") !== "0";
   private presentationFrameIndex = 0;
+  private svoCameraStabilityKey = "";
+  private svoCameraStableFrames = 0;
   private svoShadowStabilityKey = "";
   private svoShadowStableFrames = 0;
   private svoRenderDiagnosticsKey = "";
-  /** Optional renderer-owned fine field; never changes legacy raster-water ownership. */
-  private svoFinePhiResources?: WebGPUSvoFinePhiResources;
   private gpuPendingBatches = 0;
   private lastGPUCompletionAt_ms = -Infinity;
   private lastGPUCompletedTime_s = 0;
@@ -463,14 +481,18 @@ export class FluidLabRenderer {
   private lastRenderQueryAt = -Infinity;
   private gpuRender_ms?: number;
   private gpuSurfaceExtraction_ms?: number;
+  private gpuCaustics_ms?: number;
   private gpuDryScene_ms?: number;
   private gpuSvoTemporal_ms?: number;
+  private gpuInterfaceFront_ms?: number;
+  private gpuInterfaceBack_ms?: number;
   private gpuInterfaces_ms?: number;
   private gpuSprayFront_ms?: number;
   private gpuSprayBack_ms?: number;
   private gpuSprayRender_ms?: number;
   private gpuOpticalComposite_ms?: number;
   private gpuUpscale_ms?: number;
+  private gpuOverlays_ms?: number;
   private renderTimingContext = "";
   private renderTimingEpoch = 0;
   private renderTimingSampleId = 0;
@@ -502,30 +524,6 @@ export class FluidLabRenderer {
     if (previous?.requestedMode === status.requestedMode && previous.effectiveMode === status.effectiveMode && previous.fallbackReason === status.fallbackReason) return;
     this.lastEffectiveRendererStatus = status;
     this.effectiveRendererStatusCallback?.(status);
-  }
-
-  /** Future visibility binders may consume this read-only capability explicitly. */
-  get svoFineFluidCapability(): SvoFineFluidGpuCapability | undefined {
-    return this.svoFinePhiResources?.capability();
-  }
-
-  private detachSvoFinePhiResources() {
-    const resources = this.svoFinePhiResources;
-    this.svoFinePhiResources = undefined;
-    try { resources?.destroy(); } catch { /* Device loss or solver retirement can invalidate resources first. */ }
-  }
-
-  private attachSvoFinePhiResources(solver: GPUSolverInstance) {
-    this.detachSvoFinePhiResources();
-    try {
-      this.svoFinePhiResources = createWebgpuSvoFinePhiResources(
-        this.device!, solver.sparseVoxelSceneSource, solver.sparseSurfaceBand,
-      );
-    } catch (error) {
-      // Fine staging is optional and always falls back to the complete coarse
-      // structural field; never fail solver startup or take water ownership.
-      console.warn("SVO fine-phi renderer staging unavailable; retaining coarse visibility", error);
-    }
   }
 
   private ensureOptionalPipeline<T>(
@@ -639,7 +637,6 @@ export class FluidLabRenderer {
       (pipeline) => {
         this.svoDryScenePipeline = pipeline;
         this.svoPipelineAvailable = true;
-        pipeline.setFineFluidCapability(this.svoFineFluidCapability);
         pipeline.setSource(this.svoDrySceneSource, this.svoDrySceneData);
         if (this.presentationTexture) pipeline.ensureSize(this.presentationTexture.width, this.presentationTexture.height);
         this.reportStaticSvoAttachment();
@@ -756,7 +753,6 @@ export class FluidLabRenderer {
       // after recovery: its resources belong to the dead device and any bind
       // group mixing them with the replacement device fails validation.
       this.gpuFluidRequestGeneration += 1;
-      this.detachSvoFinePhiResources();
       try { fluid?.destroy(); } catch { /* Resources may already be invalid after device loss. */ }
       // Breadcrumbs for hang diagnosis: the last known solver state narrows a
       // watchdog reset down to a stage without needing a reproduction.
@@ -909,14 +905,18 @@ export class FluidLabRenderer {
     this.lastRenderQueryAt = -Infinity;
     this.gpuRender_ms = undefined;
     this.gpuSurfaceExtraction_ms = undefined;
+    this.gpuCaustics_ms = undefined;
     this.gpuDryScene_ms = undefined;
     this.gpuSvoTemporal_ms = undefined;
+    this.gpuInterfaceFront_ms = undefined;
+    this.gpuInterfaceBack_ms = undefined;
     this.gpuInterfaces_ms = undefined;
     this.gpuSprayFront_ms = undefined;
     this.gpuSprayBack_ms = undefined;
     this.gpuSprayRender_ms = undefined;
     this.gpuOpticalComposite_ms = undefined;
     this.gpuUpscale_ms = undefined;
+    this.gpuOverlays_ms = undefined;
   }
 
   /** Preserve the live timing identity on paced callbacks that submit no frame. */
@@ -925,14 +925,18 @@ export class FluidLabRenderer {
     return {
       gpuRender_ms: this.gpuRender_ms,
       gpuSurfaceExtraction_ms: this.gpuSurfaceExtraction_ms,
+      gpuCaustics_ms: this.gpuCaustics_ms,
       gpuDryScene_ms: this.gpuDryScene_ms,
       gpuSvoTemporal_ms: this.gpuSvoTemporal_ms,
+      gpuInterfaceFront_ms: this.gpuInterfaceFront_ms,
+      gpuInterfaceBack_ms: this.gpuInterfaceBack_ms,
       gpuInterfaces_ms: this.gpuInterfaces_ms,
       gpuSprayFront_ms: this.gpuSprayFront_ms,
       gpuSprayBack_ms: this.gpuSprayBack_ms,
       gpuSprayRender_ms: this.gpuSprayRender_ms,
       gpuOpticalComposite_ms: this.gpuOpticalComposite_ms,
       gpuUpscale_ms: this.gpuUpscale_ms,
+      gpuOverlays_ms: this.gpuOverlays_ms,
       methodId,
       renderTimingContext: `${this.renderTimingContext}:epoch-${this.renderTimingEpoch}`,
       renderTimingEpoch: this.renderTimingEpoch,
@@ -993,7 +997,7 @@ export class FluidLabRenderer {
         this.secondaryParticlePipeline?.setSource(undefined);
         this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);this.voxelInspectionSource=undefined;
         this.voxelDebugPipeline?.setSource(undefined);this.voxelDebugSourceGeneration=-1;
-        this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.svoDryScenePipeline?.setSource(undefined,undefined);this.detachSvoFinePhiResources();
+        this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.svoDryScenePipeline?.setSource(undefined,undefined);
         previous.destroy();previousDestroyedForReset=true;
       }
       this.resetGPUQueueTracking();
@@ -1017,7 +1021,7 @@ export class FluidLabRenderer {
       const staticRenderScene=!planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver;
       if(staticRenderScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Static SVO scene ready; fluid authority intentionally bypassed";this.pendingInitialRasterPresentation=undefined;this.pendingStaticSvoPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,startedAt_ms,attached:false,submitted:false};}
       else{solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false};}
-      this.updateRenderSources(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);this.voxelInspectionSource=undefined;this.voxelDebugPipeline?.setSource(undefined);this.voxelDebugSourceGeneration=-1;this.attachSvoFinePhiResources(solver);
+      this.updateRenderSources(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);this.voxelInspectionSource=undefined;this.voxelDebugPipeline?.setSource(undefined);this.voxelDebugSourceGeneration=-1;
       const sparseSceneSource=solver.sparseVoxelSceneSource;
       const scenePrimitives=buildSvoScenePrimitives(scene);
       const sceneGlass=buildSvoSceneGlass(scene,{cellSize_m:sparseSceneSource?.structural?.domain.cellSize_m});
@@ -1046,7 +1050,6 @@ export class FluidLabRenderer {
       const drySceneData:SparseVoxelDrySceneData|undefined=this.svoTerrainSupported&&this.svoGlassSupported&&this.svoMaterialsSupported&&this.svoPrimitiveCandidatesSupported&&this.svoLightingSupported?candidateDrySceneData:undefined;
       this.svoSourceAvailable=canEncodeSparseVoxelDryScene(sparseSceneSource,drySceneData);
       this.svoDrySceneSource=sparseSceneSource;this.svoDrySceneData=drySceneData;
-      this.svoDryScenePipeline?.setFineFluidCapability(this.svoFineFluidCapability);
       this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData);
       if(staticRenderScene){
         if(this.failedOptionalPipelines.has("svo-dry-scene"))this.failPendingStaticSvoPresentation();
@@ -1291,12 +1294,19 @@ export class FluidLabRenderer {
     if (gpuInfo && this.gpuFluid && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const compactSurface=Boolean(this.gpuFluid.adaptiveFaceVelocitySource&&this.gpuFluid.adaptiveSurfacePageSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture);}
     let cpuPhysicsSubmit_ms=performance.now()-physicsStart;const uploadStart=performance.now();
     if (backend === "cpu-reference") this.uploadFluid(fluid);
-    const shadowStabilityKey = [
-      this.gpuFluidGeneration, scene.sceneId, scene.randomSeed, environmentId, diagnosticsKey, selectedBodyId ?? "",
+    const cameraStabilityKey = [
       basis.position.x, basis.position.y, basis.position.z,
       basis.forward.x, basis.forward.y, basis.forward.z,
       basis.right.x, basis.right.y, basis.right.z,
       basis.up.x, basis.up.y, basis.up.z,
+    ].join("|");
+    if (cameraStabilityKey !== this.svoCameraStabilityKey) {
+      this.svoCameraStabilityKey = cameraStabilityKey;
+      this.svoCameraStableFrames = 0;
+    } else this.svoCameraStableFrames += 1;
+    const shadowStabilityKey = [
+      this.gpuFluidGeneration, scene.sceneId, scene.randomSeed, environmentId, diagnosticsKey, selectedBodyId ?? "",
+      cameraStabilityKey,
       ...bodies.flatMap((body) => [
         body.description.id, body.description.shape,
         body.description.dimensions_m.x, body.description.dimensions_m.y, body.description.dimensions_m.z,
@@ -1305,20 +1315,20 @@ export class FluidLabRenderer {
       ]),
     ].join("|");
     const checkerboardShadowsEligible = this.svoTemporalAccumulationEnabled && svoLightingOptions.shadowsEnabled
-      && svoRenderMode === "svo" && voxelRenderMode === "smooth" && requestedSvoDiagnostics.overlay === "off"
-      && this.svoDryScenePipeline?.fluidRenderOwnership.legacyComposite === true;
+      && svoRenderMode === "svo" && voxelRenderMode === "smooth" && requestedSvoDiagnostics.overlay === "off";
     if (!checkerboardShadowsEligible || shadowStabilityKey !== this.svoShadowStabilityKey) {
       this.svoShadowStabilityKey = checkerboardShadowsEligible ? shadowStabilityKey : "";
       this.svoShadowStableFrames = 0;
       this.svoDryScenePipeline?.invalidateTemporalHistory();
     } else this.svoShadowStableFrames += 1;
     const shadowTemporalFrame = svoShadowTemporalFrame(checkerboardShadowsEligible, this.svoShadowStableFrames, this.presentationFrameIndex);
+    const drySceneTemporalFrame = svoDrySceneTemporalFrame(shadowTemporalFrame, this.svoCameraStableFrames);
     this.presentationFrameIndex += 1;
     const techniqueModeCode = gridOverlay?.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode)
       ? OCTREE_TECHNIQUE_OVERLAY_CODES[gridOverlay.mode]
       : 0;
     const uniform = new Float32Array([
-      this.presentationTexture.width, this.presentationTexture.height, time_s, shadowTemporalFrame,
+      this.presentationTexture.width, this.presentationTexture.height, time_s, drySceneTemporalFrame,
       position.x, position.y, position.z, svoCostOverlayCode(activeSvoDiagnostics.overlay),
       camera.target_m.x, camera.target_m.y, camera.target_m.z, activeSvoDiagnostics.overlayOpacity,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
@@ -1372,11 +1382,6 @@ export class FluidLabRenderer {
     const cpuDataUpload_ms=performance.now()-uploadStart,renderStart=performance.now();
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     let stageCapture: PendingGPUStageCapture | undefined;
-    const fineSource = backend === "webgpu" ? this.gpuFluid?.sparseSurfaceBand : undefined;
-    if (fineSource && this.svoFinePhiResources) {
-      const fineStatus = this.svoFinePhiResources.encode(encoder, fineSource);
-      if (fineStatus === "source-changed" || fineStatus === "destroyed") this.detachSvoFinePhiResources();
-    }
     // A raw/brick toggle while paused still needs one fresh materialization;
     // regular solver encodes clear this pending request, avoiding duplication.
     this.voxelInspectionSource?.inspectionPublication?.encodePending?.(encoder);
@@ -1388,24 +1393,10 @@ export class FluidLabRenderer {
     let svoEncoded = false, svoTemporalEncoded = false;
     const useSvoDryScene = svoRenderMode === "svo" && voxelRenderMode === "smooth";
     if (!useSvoDryScene) this.svoDryScenePipeline?.invalidateTemporalHistory();
-    const fluidRenderOwnership = useSvoDryScene ? this.svoDryScenePipeline?.fluidRenderOwnership : undefined;
-    const drySceneReuseKey = fluidRenderOwnership?.legacyComposite ? [
-      this.gpuFluidGeneration, scene.sceneId, environmentId, selectedBodyId ?? "",
-      diagnosticsKey, svoLightingMode, svoLightingOptions.shadowsEnabled, svoLightingOptions.ambientOcclusionEnabled,
-      basis.position.x, basis.position.y, basis.position.z,
-      basis.forward.x, basis.forward.y, basis.forward.z,
-      basis.right.x, basis.right.y, basis.right.z,
-      basis.up.x, basis.up.y, basis.up.z,
-      ...bodies.flatMap((body) => [
-        body.description.id,
-        body.position_m.x, body.position_m.y, body.position_m.z,
-        body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z,
-      ]),
-    ].join("|") : undefined;
     const drySceneReplacement = useSvoDryScene
       ? (replacementEncoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, timestampWrites?: import("./webgpu-water-pipeline").TimestampRange) => {
         const cellSize_m = this.svoDryScenePipeline?.temporalCellSize_m ?? 0;
-        const temporalFrame: SparseVoxelTemporalFrameState | undefined = fluidRenderOwnership?.legacyComposite && this.svoTemporalAccumulationEnabled ? {
+        const temporalFrame: SparseVoxelTemporalFrameState | undefined = this.svoTemporalAccumulationEnabled ? {
           camera: {
             position_m: [basis.position.x, basis.position.y, basis.position.z],
             forward: [basis.forward.x, basis.forward.y, basis.forward.z],
@@ -1415,13 +1406,17 @@ export class FluidLabRenderer {
           deltaTime_s: this.simulationRunning ? gpuInfo?.lastDt_s ?? 0 : 0,
           cellSize_m,
           paused: !this.simulationRunning,
-          composition: "dry-before-legacy-water",
+          composition: "dry-before-raster-water",
         } : undefined;
         if (!temporalFrame) this.svoDryScenePipeline?.invalidateTemporalHistory();
         const temporalTimestampWrites = sampleRenderGPU && this.renderQuerySet
           ? { querySet: this.renderQuerySet, beginningOfPassWriteIndex: 16, endOfPassWriteIndex: 17 }
           : undefined;
-        const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, timestampWrites, temporalFrame, temporalTimestampWrites, drySceneReuseKey) ?? false;
+        // SVO visibility and shading are presentation work, not an on-change
+        // cache. Execute them for every submitted frame so dynamic sparse
+        // publications, lighting, and temporal sampling can never be hidden
+        // behind a host-computed scene key.
+        const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, timestampWrites, temporalFrame, temporalTimestampWrites) ?? false;
         svoEncoded = Boolean(replacementResult);
         svoTemporalEncoded = Boolean(replacementResult && this.svoDryScenePipeline?.temporalEncodedLastFrame);
         if (!replacementResult) this.svoDryScenePipeline?.invalidateTemporalHistory();
@@ -1435,6 +1430,7 @@ export class FluidLabRenderer {
       gpuInfo?.encodedSteps ?? fluid?.revision ?? 0,
       sampleRenderGPU&&this.renderQuerySet?{
         extraction:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1},
+        caustics:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:18,endOfPassWriteIndex:19},
         scene:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:2,endOfPassWriteIndex:3},
         frontInterfaces:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:4,endOfPassWriteIndex:5},
         backInterfaces:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:6,endOfPassWriteIndex:7},
@@ -1443,7 +1439,6 @@ export class FluidLabRenderer {
         composite:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:8,endOfPassWriteIndex:9}
       }:undefined,
       drySceneReplacement,
-      fluidRenderOwnership,
     );
     if (!rasterResult) throw new Error("Raster optics pipeline is not ready");
     const pendingInitialRaster = this.pendingInitialRasterPresentation;
@@ -1505,6 +1500,10 @@ export class FluidLabRenderer {
       inspectionMode: voxelRenderMode !== "smooth",
       svoEncoded,
     }));
+    const overlaysEncoded = voxelRenderMode !== "smooth" || Boolean(gridOverlay && gridOverlay.axis !== "off");
+    if (overlaysEncoded && sampleRenderGPU && this.renderQuerySet) {
+      const marker = encoder.beginComputePass({ label: "Inspection and overlays timing start", timestampWrites: { querySet: this.renderQuerySet, endOfPassWriteIndex: 20 } }); marker.end();
+    }
     if (voxelRenderMode !== "smooth" && this.voxelDebugDepth) {
       const sceneExtent = Math.hypot(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
       this.voxelDebugPipeline?.encode(encoder, {
@@ -1537,6 +1536,9 @@ export class FluidLabRenderer {
         this.techniqueAuditOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);
       }
     }
+    if (overlaysEncoded && sampleRenderGPU && this.renderQuerySet) {
+      const marker = encoder.beginComputePass({ label: "Inspection and overlays timing end", timestampWrites: { querySet: this.renderQuerySet, beginningOfPassWriteIndex: 21 } }); marker.end();
+    }
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}],...(sampleRenderGPU&&this.renderQuerySet?{timestampWrites:{querySet:this.renderQuerySet,beginningOfPassWriteIndex:10,endOfPassWriteIndex:11}}:{})});
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();
     let renderReadback:GPUBuffer|undefined;if(sampleRenderGPU&&this.renderQuerySet&&this.renderQueryResolve){this.lastRenderQueryAt=renderStart;this.renderReadbackPending=true;this.renderReadbackPendingEpoch=this.renderTimingEpoch;encoder.resolveQuerySet(this.renderQuerySet,0,RENDER_TIMESTAMP_QUERY_COUNT,this.renderQueryResolve,0);renderReadback=this.device.createBuffer({size:RENDER_TIMESTAMP_QUERY_COUNT*8,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});encoder.copyBufferToBuffer(this.renderQueryResolve,0,renderReadback,0,RENDER_TIMESTAMP_QUERY_COUNT*8);}
@@ -1549,7 +1551,7 @@ export class FluidLabRenderer {
     void this.device.queue.onSubmittedWorkDone().then(async()=>{
       if(this.disposed||this.deviceLost||this.device!==presentationDevice)return;
       const completedAt_ms=performance.now();
-      if(this.simulationRunning&&this.gpuFluid&&Number.isFinite(this.lastPresentationCompletedAt_ms)){
+      if(this.gpuFluid&&Number.isFinite(this.lastPresentationCompletedAt_ms)){
         this.gpuFluid.info.gpuPresentationWall_ms=Math.max(0,completedAt_ms-this.lastPresentationCompletedAt_ms);
       }
       this.presentationPending=false;this.lastPresentationCompletedAt_ms=completedAt_ms;
@@ -1579,12 +1581,12 @@ export class FluidLabRenderer {
       cpuPhysicsSubmit_ms+=performance.now()-deferredPhysicsStart;
     }
     if(renderReadback){
-      const readback=renderReadback,sampledContext=timingContext,sampledEpoch=this.renderTimingEpoch,surfaceUpdated=rasterResult.surfaceUpdated,sampledSprayRendered=rasterResult.sprayRendered,sampledSvoTemporalEncoded=svoTemporalEncoded;
+      const readback=renderReadback,sampledContext=timingContext,sampledEpoch=this.renderTimingEpoch,surfaceUpdated=rasterResult.surfaceUpdated,causticsUpdated=rasterResult.causticsUpdated,sampledSprayRendered=rasterResult.sprayRendered,sampledSvoTemporalEncoded=svoTemporalEncoded,sampledOverlaysEncoded=overlaysEncoded;
       void readback.mapAsync(GPUMapMode.READ).then(()=>{
-        const stage=decodeRenderStageTimestamps(new BigUint64Array(readback.getMappedRange()),surfaceUpdated,sampledSprayRendered,sampledSvoTemporalEncoded);
+        const stage=decodeRenderStageTimestamps(new BigUint64Array(readback.getMappedRange()),surfaceUpdated,sampledSprayRendered,sampledSvoTemporalEncoded,causticsUpdated,sampledOverlaysEncoded);
         const currentTimingEpoch=this.renderTimingContext===sampledContext&&this.renderTimingEpoch===sampledEpoch;
         if(currentTimingEpoch&&hasResolvedRenderTimestampSample(stage)){
-          this.gpuSurfaceExtraction_ms=stage.surfaceExtraction_ms;this.gpuDryScene_ms=stage.dryScene_ms;this.gpuSvoTemporal_ms=stage.svoTemporal_ms;this.gpuInterfaces_ms=stage.interfaces_ms;this.gpuSprayFront_ms=stage.sprayFront_ms;this.gpuSprayBack_ms=stage.sprayBack_ms;this.gpuSprayRender_ms=stage.sprayRender_ms;this.gpuOpticalComposite_ms=stage.opticalComposite_ms;this.gpuUpscale_ms=stage.upscale_ms;this.gpuRender_ms=stage.total_ms;this.renderTimingSampleId+=1;
+          this.gpuSurfaceExtraction_ms=stage.surfaceExtraction_ms;this.gpuCaustics_ms=stage.caustics_ms;this.gpuDryScene_ms=stage.dryScene_ms;this.gpuSvoTemporal_ms=stage.svoTemporal_ms;this.gpuInterfaceFront_ms=stage.interfaceFront_ms;this.gpuInterfaceBack_ms=stage.interfaceBack_ms;this.gpuInterfaces_ms=stage.interfaces_ms;this.gpuSprayFront_ms=stage.sprayFront_ms;this.gpuSprayBack_ms=stage.sprayBack_ms;this.gpuSprayRender_ms=stage.sprayRender_ms;this.gpuOpticalComposite_ms=stage.opticalComposite_ms;this.gpuOverlays_ms=stage.overlays_ms;this.gpuUpscale_ms=stage.upscale_ms;this.gpuRender_ms=stage.total_ms;this.renderTimingSampleId+=1;
           if(!this.simulationRunning&&this.pausedTimingNotificationEpoch!==sampledEpoch){this.pausedTimingNotificationEpoch=sampledEpoch;this.pausedPresentationRevision+=1;}
         }else if(currentTimingEpoch&&!this.simulationRunning&&this.pausedTimingRetryEpoch!==sampledEpoch){
           this.pausedTimingRetryEpoch=sampledEpoch;this.lastRenderQueryAt=-Infinity;this.pausedPresentationRevision+=1;
@@ -1613,7 +1615,6 @@ export class FluidLabRenderer {
     this.gpuFluidPendingKey = "";
     this.resetGPUQueueTracking();
     this.gpuFluidGeneration += 1;
-    this.detachSvoFinePhiResources();
     try { fluid?.destroy(); } catch { /* Device loss can invalidate solver resources first. */ }
     for (const retired of this.retiredGPUFluids) { try { retired.destroy(); } catch { /* Best-effort cleanup after device loss. */ } }
     this.retiredGPUFluids.clear();

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { octreeProjectionShader } from "../lib/webgpu-octree";
+import { WebGPUOctreeProjection, octreeProjectionShader } from "../lib/webgpu-octree";
 import { fineLevelSetSummaryWGSL } from "../lib/webgpu-octree-fine-levelset-summary";
 import {
   OCTREE_POWER_COARSE_LEVELSET_VALID,
@@ -52,8 +52,23 @@ test("packed coarse generation cannot alter any pre-existing pressure-capacity f
   assert.ok(uses.every((use) => !use.includes("!= 0u") || use.includes("&")), uses.join("\n"));
 });
 
-test("fine-corrected intervals drive wet/refinement classification and invalid directories retain rollback", () => {
-  assert.match(octreeProjectionShader, /if\(coarse\.authority\)\{return coarse\.minimumPhi<0\.0;\}/);
+test("fine-corrected intervals drive refinement while exact centre phi drives wet classification", () => {
+  assert.match(octreeProjectionShader,
+    /if\(coarse\.authority&&coarse\.leafSize==owner\.size\)\{return coarse\.phi<0\.0;\}/,
+    "a coarse interval may classify only its exact pressure leaf, never all newly refined children");
+  assert.match(octreeProjectionShader,
+    /if\(coarse\.authority&&coarse\.leafSize==0u\)\{return false;\}[\s\S]*if\(coarse\.authority&&coarse\.maximumPhi<0\.0\)\{return true;\}[\s\S]*return legacyOwnerPhiPoint\(sampleCentre\)<0\.0;/,
+    "resized interface leaves recover their own page-native centre sign while directory misses remain explicit air");
+  assert.match(octreeProjectionShader,
+    /Topology renewal runs while the persistent frontier hash is being[\s\S]*return max\(params\.cellRelax\.x/,
+    "interface classification must not read the frontier hash while appendFrontier mutates it");
+  assert.match(octreeProjectionShader,
+    /let fine=fineLeafSummary\(origin,owner\.size\);[\s\S]*if\(fine\.found&&fine\.complete&&fine\.coarseAuthority\)/,
+    "recurring frontier phase selection consumes the current exact global-fine summary");
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
+  assert.match(rebuild,
+    /filterFrontierPipeline[\s\S]*setBindGroup\(0,this\.fineSummarySizingGroup\)[\s\S]*appendFrontierActivePipeline/,
+    "frontier filtering uses the old row map, then append switches to current fine-summary authority");
   assert.match(fineLevelSetSummaryWGSL, /mergeCoarsePhiSummaries/);
   assert.match(fineLevelSetSummaryWGSL, /coarse\.state!=PUBLISHED[\s\S]*coarse\.generation&0x3fffffffu/);
   assert.match(fineLevelSetSummaryWGSL, /atomicOr\(&directory\[base\+7u\],1u\)/,

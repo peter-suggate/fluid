@@ -75,7 +75,7 @@ test("one uniform arena preserves exact published records without adding a stora
   assert.deepEqual(arena.slice(SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.environmentWordOffset), scene.environmentLightingRecord);
   assert.match(svoDrySceneShader, /@group\(0\) @binding\(13\) var<uniform> dryLighting:DryLightingArena/);
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.find(({ binding }) => binding === 13), { binding: 13, type: "uniform" });
-  assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length, 10);
+  assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length, 8);
 });
 
 test("directional, point, sphere, and rectangle lighting share bounded stable visibility work", () => {
@@ -88,6 +88,8 @@ test("directional, point, sphere, and rectangle lighting share bounded stable vi
   assert.match(svoDrySceneShader, /sampleIndex<2u/);
   assert.match(svoDrySceneShader, /let emitterFacing=max\(dot\(normalize\(light\.directionCone\.xyz\),-towardLight\),0\.0\)/,
     "one-sided rectangle emitters cannot leak light through their back face");
+  assert.match(svoDrySceneShader, /let visibilityDistance=select\(distance,max\(0\.0,distance-light\.shape\.x\),light\.identity\.x==SVO_LIGHT_POINT\)/,
+    "point attenuation stays center-based while the shadow endpoint stops at the emissive surface");
   assert.match(svoDrySceneShader, /svoEnvironmentDiffuseIrradiance\(dryLighting\.environment,hit\.normal\)/);
   assert.match(svoDrySceneShader, /dryEnvironment\(reflected,surface\.roughness\)\*fresnel/);
   assert.match(svoDrySceneShader, /dryEnvironment\(reflect\(rd,glass\.hit\.geometricNormal\),\.04\)/);

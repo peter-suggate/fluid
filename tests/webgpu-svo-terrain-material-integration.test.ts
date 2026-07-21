@@ -56,11 +56,11 @@ test("production garden metadata is packed into the existing dry uniform without
   assert.match(rendererSource, /terrainMaterialMetadata:terrainMaterial\?\.packedMetadata,terrainMaterialCacheKey:terrainMaterial\?\.cacheKey/);
   assert.equal(SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES, 16);
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 368, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32, fluidDomainWordOffset: 36,
-    primitiveCandidateWordOffset: 40, finePhiWordOffset: 44, nodeMipWordOffset: 84, nodeMipAtlasWordOffset: 88,
+    sizeBytes: 192, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
+    primitiveCandidateWordOffset: 36, nodeMipWordOffset: 40, nodeMipAtlasWordOffset: 44,
   });
   assert.match(svoDrySceneShader, /terrainMaterial:SvoTerrainMaterialMetadata/);
-  assert.match(svoDrySceneShader, /@binding\(11\) var<storage,read> svoStructuralGeometry/);
+  assert.doesNotMatch(svoDrySceneShader, /svoStructuralGeometry|svoStructuralLeafStates/);
   assert.match(svoDrySceneShader, /@group\(0\) @binding\(10\) var<storage,read> glassPanes/);
 });
 

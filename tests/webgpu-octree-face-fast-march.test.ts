@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -37,7 +38,10 @@ import {
   OCTREE_POWER_SAME_OR_COARSER_FLAG,
   sitesForSameOrCoarserPowerDescriptor,
 } from "../lib/octree-power-descriptor";
-import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "../lib/generated/octree-power-catalog";
+import {
+  OCTREE_GENERATED_POWER_CATALOG_MANIFEST,
+  decodeGeneratedOctreePowerCatalog,
+} from "../lib/generated/octree-power-catalog";
 import {
   OCTREE_REGULAR_BAND_INCIDENCE_PER_ROW,
   OCTREE_REGULAR_BAND_OWNED_FACES_PER_ROW,
@@ -89,6 +93,47 @@ test("Section 5 face-band phases retain paper order and batch each checkpoint in
     /run\("seedCentroids"[\s\S]*run\("initialize"[\s\S]*run\("buildHeap"[\s\S]*run\("marchHeap"[\s\S]*run\("validate"[\s\S]*run\("reconstruct"[\s\S]*run\("publish"/);
   assert.match(source.slice(publication),
     /run\("preparePowerPublication"[\s\S]*run\("mapPowerFaceBands"[\s\S]*run\("interpolatePowerFaces"[\s\S]*run\("projectPowerFaces"[\s\S]*run\("publishPowerFaces"[\s\S]*run\("commitPowerFaces"/);
+});
+
+test("co-spherical entry 7946 closes its axial-star octahedron with an exact runtime Delaunay tetrahedron", () => {
+  const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
+  const catalog = decodeGeneratedOctreePowerCatalog(bytes.buffer.slice(
+    bytes.byteOffset, bytes.byteOffset + bytes.byteLength,
+  ));
+  const entry = 7946;
+  const [first, count, flags] = catalog.tetrahedronHeaders.slice(entry * 3, entry * 3 + 3);
+  assert.deepEqual([first, count, flags], [244170, 8, 0]);
+  const point = [-0.375, -0.375, -0.375] as const;
+  const cross = (a: readonly number[], b: readonly number[]) => [
+    a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0],
+  ] as const;
+  const dot = (a: readonly number[], b: readonly number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const weights = (p: readonly number[], a: readonly number[], b: readonly number[], c: readonly number[]) => {
+    const determinant = dot(a, cross(b, c));
+    const wa = dot(p, cross(b, c)) / determinant;
+    const wb = dot(a, cross(p, c)) / determinant;
+    const wc = dot(a, cross(b, p)) / determinant;
+    return [1 - wa - wb - wc, wa, wb, wc];
+  };
+  const contained = (value: readonly number[]) => value.every((component) => component >= -2e-6 && component <= 1.000002);
+  const selectorPoint = (selector: number) => Array.from(
+    catalog.tetrahedronVertexData.slice(selector * 4, selector * 4 + 3),
+  );
+  assert.equal(Array.from({ length: count }, (_, local) => {
+    const packed = catalog.tetrahedronData[first + local];
+    return weights(point, selectorPoint(packed & 255), selectorPoint((packed >>> 8) & 255),
+      selectorPoint((packed >>> 16) & 255));
+  }).some(contained), false, "the static axial fan leaves the central octahedron uncovered");
+
+  const body = [-1, -1, -1], edgeA = [0, -1, -1], edgeB = [-1, 0, -1];
+  assert.deepEqual(weights(point, body, edgeA, edgeB).map((value) => value === 0 ? 0 : value),
+    [0.625, 0.375, 0, 0]);
+  const runtimeDelaunay = wgslFunction("surroundingOwnerDelaunayVector");
+  assert.match(runtimeDelaunay,
+    /for\(varcorner=0u;corner<8u[\s\S]*dot\(delta,delta\)<radius2-tolerance/,
+    "the runtime path enumerates actual surrounding owners and requires an empty circumsphere");
+  assert.doesNotMatch(runtimeDelaunay, /nearest|project/,
+    "the exact co-spherical repair never projects to a nearest carrier");
 });
 
 test("Section 5 admits only one clean same-generation fine/coarse publication", () => {
@@ -184,8 +229,8 @@ test("factor-4 GPU face band is compact, bounded, and has no fine velocity chann
     "S0, S1, and S2 metric owners retain complete catalog adjacency");
   assert.equal(plan.transitionAdjacencyBytes,
     plan.transitionAdjacencyCapacity * OCTREE_FACE_BAND_TRANSITION_ADJACENCY_BYTES);
-  assert.equal(OCTREE_FACE_BAND_TRANSITION_CONTROL_BYTES, 128,
-    "the transition producer retains its gate plus one bounded first-owner-mismatch record");
+  assert.equal(OCTREE_FACE_BAND_TRANSITION_CONTROL_BYTES, 160,
+    "the transition producer retains its ABI-stable gate/failure record and appended S4 prefix");
   assert.equal(OCTREE_FACE_BAND_POWER_PUBLICATION_CONTROL_BYTES, 64);
   assert.equal(plan.powerVelocityScratchBytes, plan.powerFaceCapacity * 16,
     "split regular-to-power scratch carries scalar bits, target marker, and both mapped endpoint bands");
@@ -591,6 +636,7 @@ test("GPU face band closes endpoints before deterministic frontier marching", ()
 });
 
 test("fine bricks bound work while coarse phi remains sign-only topology metadata", () => {
+  const reconstruct = wgslFunction("reconstructBandRowVelocity");
   assert.doesNotMatch(octreeFaceBandWGSL, /guardPhi/,
     "storage guard pages must never invent signed-distance authority");
   assert.doesNotMatch(octreeFaceBandWGSL, /coarseSummary|physicalCellSize\*f32\(max/,
@@ -606,9 +652,23 @@ test("fine bricks bound work while coarse phi remains sign-only topology metadat
   assert.match(octreeFaceBandWGSL,
     /insertRow\(ownerCell,globalRow,ROW_COARSE\|ROW_CORE\|signFlag,owner\.size\)/,
     "row identity and seed sign remain separate from later fine signed-distance publication");
-  assert.match(octreeFaceBandWGSL,
+  assert.match(reconstruct,
     /abs\(negativeArea\[axis\]-targetArea\)>tolerance\|\|abs\(positiveArea\[axis\]-targetArea\)>tolerance/,
     "every provisional component requires complete accepted regular-face area on both sides");
+  assert.match(reconstruct,
+    /letclosure=\(r\.flags&ROW_SUPPORT3_NODE\)!=0u/,
+    "only the terminal S3 interpolation-support node tier may close a missing graph side");
+  assert.match(reconstruct,
+    /closure&&negativeArea\[axis\]==0\.&&positiveArea\[axis\]>=targetArea[\s\S]*negativeSum\[axis\]=positiveSum\[axis\]/,
+    "S3 closure copies an actual complete accepted carrier side, never a synthetic scalar");
+  assert.match(reconstruct,
+    /closure&&positiveArea\[axis\]==0\.&&negativeArea\[axis\]>=targetArea[\s\S]*positiveSum\[axis\]=negativeSum\[axis\]/,
+    "the symmetric S3 closure is likewise limited to a wholly absent side");
+  assert.match(reconstruct,
+    /else\{if\(closure\)\{return;\}fail\(INCOMPLETE,row\);return;\}/,
+    "an unused incomplete S3 support row remains unpublished, while every S0-S2 target still fails globally");
+  assert.doesNotMatch(reconstruct, /ROW_SUPPORT3_ENDPOINT/,
+    "terminal endpoint rows are not vector targets and cannot weaken reconstruction");
 });
 
 test("paper Section 5 orders LIVE regular faces by the current two-resolution phi at their actual centroids", () => {
@@ -624,7 +684,7 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
   assert.match(emit, /!reconstructable&&neighbor>=transitionControl\.support2End/,
     "S3-only topology support must not create a marched LIVE face");
   assert.match(emit, /!endpointOnly&&reconstructable/,
-    "only an open-world face incident to vector-reconstructed S0-S2 is marched");
+    "only an open-world face incident to metric-resolved S0-S2 is marched");
 
   const sampler = wgslFunction("finePhiAtFaceCentroid");
   assert.match(sampler,
@@ -669,7 +729,7 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
     "distance authority is published only after an exact current centroid sample succeeds");
   const summary = wgslFunction("summarizeBandRowPhi");
   assert.match(summary, /row>=transitionControl\.support2End/,
-    "only vector-reconstructed S0-S2 rows publish current-phi summaries; S3 endpoints never do");
+    "only metric-resolved S0-S2 rows publish current-phi summaries; S3 closure rows never do");
   assert.match(summary,
     /minimum=min\(minimum,face\.phi\);maximum=max\(maximum,face\.phi\)/,
     "row min/max are reductions of real sampled incident face positions");
@@ -758,13 +818,14 @@ test("top-side nonuniform transition uses explicit physical world faces", () => 
     valid: false, closedComponents: 0, openPlanes: 0,
   });
   const emit = wgslFunction("emitTransientBandPowerGraph");
-  assert.match(emit, /letworld=geometry\.neighborSize==0\./,
-    "the boundary-aware catalog's zero size ratio is the only world-plane sentinel");
   assert.match(emit,
-    /letoutward=select\(exact\.normal\[axis\]>.9996,exact\.normal\[axis\]<-\.9996,atNegative\)[\s\S]*if\(plane!=0u\|\|!outward\)/,
-    "each positive-area world face proves exactly one axis plane and its signed outward unit normal");
-  assert.match(emit, /letdeclared=\(metric\.transformFlags>>8u\)&63u[\s\S]*\(declared&plane\)==0u/,
-    "a geometric world face must also be declared by the resolved boundary-aware metric");
+    /letboundaryBit=transientWorldBoundaryBit\(geometry\);letworld=geometry\.neighborSize==0\.\|\|\(boundaryBit&declared\)!=0u/,
+    "a declared out-of-domain ghost site and the catalog's zero-size sentinel both denote a world face");
+  assert.match(emit,
+    /if\(world\)\{plane=boundaryBit&declared;if\(plane==0u\)/,
+    "the resolved boundary-aware metric is the authority for a world face's physical plane");
+  assert.doesNotMatch(emit, /exact\.centroid\[axis\]|letoutward=/,
+    "a clipped slanted ghost-site face is not rejected by re-deriving an axis plane from its centroid or normal");
   const sample = wgslFunction("sampleTransientBandPowerFaces");
   assert.match(sample, /if\(\(p\.closedBoundaryMask&plane\)==0u\)/,
     "closed and open planes are applied independently per physical world face");
@@ -791,8 +852,11 @@ test("air-side sampler bind-group ABI has one entry per binding", () => {
 test("row reconstruction binds the accepted face records it dereferences", () => {
   const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
   assert.match(source,
-    /run\("reconstruct",\[\[0,this\.params\],\[5,this\.control\],\[6,this\.rows\],\[12,this\.faces\],\[14,this\.incidence\],\[15,this\.state\],\[32,this\.transitionControl\],\[44,this\.provisionalVelocities\],\[48,this\.pointFieldControl\]\]/,
+    /run\("reconstruct",\[\[0,this\.params\],\[5,this\.control\],\[6,this\.rows\],\[12,this\.faces\],\[14,this\.incidence\],\[15,this\.state\],\[19,this\.velocities\],\[32,this\.transitionControl\],\[44,this\.provisionalVelocities\],\[48,this\.pointFieldControl\]\]/,
     "auto-layout must receive the accepted face records reconstruction dereferences");
+  assert.match(source,
+    /run\("reconstructDeep",\[\[0,this\.params\],\[6,this\.rows\],\[12,this\.faces\],\[14,this\.incidence\],\[15,this\.state\],\[19,this\.velocities\],\[32,this\.transitionControl\],\[44,this\.provisionalVelocities\]\]/,
+    "S4 carrier reconstruction must bind only its accepted-face graph and output vectors");
 });
 
 test("band-phi extension binds the shared failure control", () => {
@@ -995,7 +1059,8 @@ test("live support prefixes dispatch sparse closure even when S0 reservation con
     support1End: 42,
     support2End: 102,
     support3NodeEnd: 150,
-  }), [1, 1, 1, 1], "live sparse prefixes, not zero static role caps, control closure work");
+    support4NodeEnd: 198,
+  }), [1, 1, 1, 1, 1], "live sparse prefixes, not zero static role caps, control closure work");
   const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
   for (const [tier, offset] of [["Support0", 24], ["Support1", 36],
     ["Support2", 48], ["Support3", 60]] as const) {
@@ -1039,10 +1104,10 @@ test("catalog/uniform closure inserts exact owner/coarse rows and never clamps a
     "WGSL closure indexing must share the generated catalog neighbor-row bound");
 
   const enumerate = wgslFunction("enumerateSupportRequests");
-  assert.match(enumerate, /for\(varrequest=0u;request<18u;request\+=1u\)/,
-    "uniform anchors request exactly the paper's six face and twelve edge neighbors");
-  assert.doesNotMatch(enumerate, /request<26u/,
-    "the 18-bit descriptor says nothing about eight corner-only owners");
+  assert.match(octreeFaceBandWGSL, /const UNIFORM_GUARDS:u32=26u/,
+    "uniform cube interpolation closes the complete surrounding 3x3x3 owner block");
+  assert.match(enumerate, /for\(varrequest=0u;request<UNIFORM_GUARDS;request\+=1u\)/,
+    "uniform anchors request all 18 catalog neighbors plus eight exact body-diagonal carriers");
   assert.match(enumerate, /letselectors=array<u32,3>\(packed&255u,\(packed>>8u\)&255u,\(packed>>16u\)&255u\)/,
     "every catalog tetrahedron selector is enumerated from the generated packed record");
   assert.doesNotMatch(enumerate, /clamp\(/,
@@ -1054,8 +1119,10 @@ test("catalog/uniform closure inserts exact owner/coarse rows and never clamps a
     "an invalid catalog selector is publication-fatal, never silently skipped");
   assert.match(resolve, /letvertex=tetraVertices\[candidate\.selector\]\.v/,
     "guard demand geometry comes from the exact catalog selector vertex");
-  assert.match(resolve, /letdirection=DESCRIPTOR_DIRECTIONS\[request\]/,
+  assert.match(resolve, /direction=DESCRIPTOR_DIRECTIONS\[request\]/,
     "uniform closure uses the same canonical face/edge directions as descriptor construction");
+  assert.match(resolve, /direction=BODY_DIAGONAL_DIRECTIONS\[request-18u\]/,
+    "the eight cube-corner carrier requests remain exact same-size owner offsets");
   assert.match(resolve, /letexact=ownerAt\(origin\)/,
     "each catalog demand resolves through the live adaptive owner authority");
   assert.match(resolve,
@@ -1143,11 +1210,11 @@ test("paper Section 5 regular-to-power publication is fail-closed and centroid b
   const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
   const prepare = source.match(/run\("preparePowerPublication",\[([\s\S]*?)\],1,pass\)/)?.[1];
   assert.ok(prepare);
-  for (const binding of [0, 5, 32, 36, 37, 38, 39, 40, 41]) {
+  for (const binding of [0, 5, 32, 36, 37, 38, 39, 40, 41, 48]) {
     assert.match(prepare, new RegExp(`\\[${binding},`));
   }
-  assert.doesNotMatch(prepare, /\[48,/,
-    "regular-to-power publication must precede and cannot depend on the final point-field transaction");
+  assert.match(prepare, /\[48,this\.pointFieldControl\]/,
+    "regular-to-power publication must consume the complete final point-field transaction");
   const map = source.match(/run\("mapPowerFaceBands",\[([\s\S]*?)\],Math\.ceil/)?.[1];
   assert.ok(map);
   for (const binding of [0, 35, 37, 40, 41]) {
@@ -1159,7 +1226,9 @@ test("paper Section 5 regular-to-power publication is fail-closed and centroid b
   }
   const interpolate = source.match(/run\("interpolatePowerFaces",\[([\s\S]*?)\],Math\.ceil/)?.[1];
   assert.ok(interpolate);
-  for (const binding of [0, 1, 6, 7, 44, 27, 28, 29, 30, 39, 40, 41]) {
+  assert.match(interpolate, /\[19,this\.velocities\]/,
+    "centroid interpolation must use the final S0/S1 plus support-row velocity field");
+  for (const binding of [0, 1, 6, 7, 19, 27, 28, 29, 30, 39, 40, 41]) {
     assert.match(interpolate, new RegExp(`\\[${binding},`));
   }
   for (const binding of [5, 12, 14, 15, 35, 36, 37, 38]) {
@@ -1277,9 +1346,12 @@ test("Section 5 final point field consumes one complete transient physical power
   assert.match(sample,
     /if\(negativeValid&&positiveValid\)\{full=\.5\*\(negative\.xyz\+positive\.xyz\);\}elseif\(negativeValid\)\{full=negative\.xyz;\}elseif\(positiveValid\)\{full=positive\.xyz;\}/,
     "S1 faces may use their valid incident interpolant when the opposite S2 interpolant would require unbuilt S3 vectors");
+  assert.doesNotMatch(sample,
+    /negativeTarget&&!negativeValid|positiveTarget&&!positiveValid/,
+    "a T-junction centroid is located by whichever endpoint's paper cube/tetrahedron contains it");
   assert.match(sample,
-    /if\(\(negativeTarget&&!negativeValid\)\|\|\(positiveTarget&&!positiveValid\)\)\{transientFail\(POINT_SAMPLE,faceIndex\)/,
-    "one-sided closure cannot hide a broken interpolant on either authoritative S0/S1 endpoint");
+    /elseif\(positiveValid\)\{full=positive\.xyz;\}else\{transientFail\(POINT_SAMPLE,faceIndex\)/,
+    "the physical face still fails closed when neither endpoint interpolation contains its centroid");
   assert.match(sample, /scalar=dot\(full,face\.normal\.xyz\)/,
     "the exact-centroid vector is projected once to the committed normal scalar");
   assert.match(octreeFaceBandWGSL, /determinant<=1e-7\*trace\*trace\*trace/);
@@ -1289,9 +1361,11 @@ test("Section 5 final point field consumes one complete transient physical power
   assert.match(octreeFaceBandWGSL,
     /fn seedOpenWorldNormal[\s\S]*pf\.normalVelocity\/n\[axis\]/,
     "the one-sided open regular face inherits the matching pre-extrapolation power-face scalar");
-  assert.match(octreeFaceBandWGSL,
-    /atomicLoad\(&powerPublication\.committedCount\)!=targets[\s\S]*pointFail\(POINT_SOURCE,0u\)/,
-    "final cell vectors cannot start until every targeted physical power-face scalar commits");
+  assert.doesNotMatch(wgslFunction("prepareBandPointField"), /powerPublication/,
+    "the transient physical graph must break the former point-field/power-publication cycle");
+  assert.match(wgslFunction("preparePowerPublication"),
+    /atomicLoad\(&pointControl\.valid\)!=VALID|pointControl\.generation!=p\.generation/,
+    "production power faces require the complete same-generation point field");
   const physical = wgslFunction("accumulateBandTransientPowerLS");
   assert.match(physical,
     /letorientation=f32\(item\.sign\);letnormal=orientation\*face\.normal\.xyz;letu=orientation\*face\.normalVelocity/,
@@ -1309,9 +1383,7 @@ test("Section 5 final point field consumes one complete transient physical power
 
   const schedule = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
   const provisionalAt = schedule.indexOf('run("publish"');
-  const preparePowerAt = schedule.indexOf('run("preparePowerPublication"', provisionalAt);
-  const commitAt = schedule.indexOf('run("commitPowerFaces"', preparePowerAt);
-  const prepareTransientAt = schedule.indexOf('run("prepareTransientPower"', commitAt);
+  const prepareTransientAt = schedule.indexOf('run("prepareTransientPower"', provisionalAt);
   const emitTransientAt = schedule.indexOf('run("emitTransientPower"', prepareTransientAt);
   const sampleTransientAt = schedule.indexOf('run("sampleTransientPower"', emitTransientAt);
   const validateTransientAt = schedule.indexOf('run("validateTransientPower"', sampleTransientAt);
@@ -1319,12 +1391,15 @@ test("Section 5 final point field consumes one complete transient physical power
   const preparePointAt = schedule.indexOf('run("preparePointField"', publishTransientAt);
   const physicalAt = schedule.indexOf('run("accumulatePhysicalPoint"', preparePointAt);
   const solveAt = schedule.indexOf('run("solvePoint"', physicalAt);
-  assert.ok(provisionalAt >= 0 && preparePowerAt > provisionalAt && commitAt > preparePowerAt
-    && prepareTransientAt > commitAt && emitTransientAt > prepareTransientAt
+  const publishPointAt = schedule.indexOf('run("publishPoint"', solveAt);
+  const preparePowerAt = schedule.indexOf('run("preparePowerPublication"', publishPointAt);
+  const commitAt = schedule.indexOf('run("commitPowerFaces"', preparePowerAt);
+  assert.ok(provisionalAt >= 0 && prepareTransientAt > provisionalAt && emitTransientAt > prepareTransientAt
     && sampleTransientAt > emitTransientAt && validateTransientAt > sampleTransientAt
     && publishTransientAt > validateTransientAt && preparePointAt > publishTransientAt
-    && physicalAt > preparePointAt && solveAt > physicalAt,
-  "paper order is regular march -> production publication -> all-band physical graph -> final cell-centre LS");
+    && physicalAt > preparePointAt && solveAt > physicalAt && publishPointAt > solveAt
+    && preparePowerAt > publishPointAt && commitAt > preparePowerAt,
+  "paper order is regular march -> all-band physical graph -> final cell-centre LS -> production publication");
   const physicalBindings = schedule.match(/run\("accumulatePhysicalPoint",\[([\s\S]*?)\],0,pass,24\)/)?.[1];
   assert.ok(physicalBindings);
   assert.equal(physicalBindings.match(/\[\d+,/g)?.length, 7,

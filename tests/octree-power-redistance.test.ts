@@ -51,7 +51,9 @@ test("coarse transition redistance exactly reconstructs a planar signed-distance
 test("coarse tetrahedral redistance is distinct from uniform fine-grid redistance", () => {
   const catalog = buildOctreePowerCatalog([{ descriptor: 0x3ffff, anchorKey: "0,0,0/2",
     sites: sitesForSameOrFinerPowerDescriptor(0x3ffff) }]); const uniform = catalog.entries[0];
-  assert.equal(uniform.uniform, true); assert.equal(uniform.tetrahedra.length, 0);
+  assert.equal(uniform.uniform, true);
+  assert.ok(uniform.tetrahedra.length > 0,
+    "uniform entries retain their cube tetrahedra for Section 5 velocity interpolation");
   assert.throws(() => redistanceOctreePowerCatalogCell(uniform, catalog.tetrahedronVertexData,
     Array(catalog.tetrahedronVertexData.length / 4).fill(0), 1, 1), /transition-only/);
   assert.match(octreePowerRedistanceShader, /Tetrahedral coarse-octree redistance|updatePowerDistance/);

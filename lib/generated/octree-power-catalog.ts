@@ -7,11 +7,11 @@ export const OCTREE_GENERATED_POWER_CATALOG_MANIFEST = Object.freeze({
   "maximumFaceIncidence": 30,
   "maximumNeighborRows": 30,
   "maximumTetrahedra": 56,
-  "byteCount": 8994896,
+  "byteCount": 8995760,
   "worstFloat32GeometryError": 5.739706909757558e-8,
   "generatorVersion": 3,
-  "generatorHash": "dcc5b8c432d7cf7885680d5b8fcf5bed054fcbf35e241494cf87b8c754077a90",
-  "binarySha256": "b1ea157d6e75edbb6e1481b0e8e51f4ac1fe6c7c47b1f230220ee76b384d0050"
+  "generatorHash": "4ba4317e7d43f029c3bcee7c79a9d25ccc5194ca634ff92ac223bb0601fe3a64",
+  "binarySha256": "ab525c27d6a72386b14ef9e8aa91d04fdf42ac5a1c9b4634bc929600ed40ead7"
 } as const);
 
 export interface GeneratedOctreePowerCatalogViews {

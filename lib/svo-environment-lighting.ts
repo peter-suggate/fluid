@@ -29,6 +29,11 @@ export interface SvoEnvironmentLightingBuild {
   cacheKey: string;
 }
 
+export interface SvoEnvironmentLightingOptions {
+  diffuseScale?: number;
+  specularScale?: number;
+}
+
 interface EnvironmentPalette {
   lower: LinearRgb;
   upper: LinearRgb;
@@ -102,15 +107,19 @@ export function canonicalSvoEnvironmentLightingRecord(input: SvoEnvironmentLight
 }
 
 /** Build one selected image-free fallback from the existing authored palette. */
-export function svoEnvironmentLightingRecord(environmentId: EnvironmentId, revision = 1): SvoEnvironmentLightingRecord {
+export function svoEnvironmentLightingRecord(
+  environmentId: EnvironmentId,
+  revision = 1,
+  options: SvoEnvironmentLightingOptions = {},
+): SvoEnvironmentLightingRecord {
   const palette = PALETTES[environmentId];
   return canonicalSvoEnvironmentLightingRecord({
     environmentId,
     revision,
     lowerRadianceLinear: palette.lower,
-    diffuseScale: 1,
+    diffuseScale: options.diffuseScale ?? 1,
     upperRadianceLinear: palette.upper,
-    specularScale: 1,
+    specularScale: options.specularScale ?? 1,
     accentRadianceLinear: palette.accent,
     accentPower: 3,
     keyLightColorLinear: palette.keyColor,
@@ -222,8 +231,12 @@ function fnvStep(hash: number, value: number): number {
   return Math.imul((hash ^ value) >>> 0, 0x01000193) >>> 0;
 }
 
-export function buildSvoEnvironmentLighting(environmentId: EnvironmentId, revision = 1): SvoEnvironmentLightingBuild {
-  const record = svoEnvironmentLightingRecord(environmentId, revision);
+export function buildSvoEnvironmentLighting(
+  environmentId: EnvironmentId,
+  revision = 1,
+  options: SvoEnvironmentLightingOptions = {},
+): SvoEnvironmentLightingBuild {
+  const record = svoEnvironmentLightingRecord(environmentId, revision, options);
   const packedRecord = packSvoEnvironmentLightingRecords([record]);
   let hash = 0x811c9dc5;
   for (const word of packedRecord) for (const shift of [0, 8, 16, 24]) hash = fnvStep(hash, (word >>> shift) & 0xff);

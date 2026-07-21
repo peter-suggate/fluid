@@ -180,10 +180,13 @@ fn fail(error:u32,index:u32){atomicOr(&seed.flags,error);atomicMin(&seed.firstEr
 fn rowCount()->u32{return atomicLoad(&seed.rowCount);}fn faceCount()->u32{return atomicLoad(&seed.faceCount);}
 @compute @workgroup_size(1) fn preparePowerFaceSeed(){atomicStore(&seed.flags,0u);atomicStore(&seed.firstError,INVALID);
   atomicStore(&seed.seededCount,0u);atomicStore(&seed.valid,0u);atomicStore(&seed.fallbackCount,0u);
+  atomicStore(&seed.forwardFlags,0u);atomicStore(&seed.forwardFirstError,INVALID);atomicStore(&seed.forwardSeededCount,0u);atomicStore(&seed.forwardValid,0u);
   atomicStore(&seed.seedMaxBits,0u);atomicStore(&seed.axisRowMaxBits,0u);atomicStore(&seed.projectedRowMaxBits,0u);atomicStore(&seed.axisOutputMaxBits,0u);
   if(arrayLength(&powerControl)<9u||arrayLength(&axisControl)<6u){atomicStore(&seed.rowCount,0u);atomicStore(&seed.faceCount,0u);fail(CAPACITY,0u);return;}
   atomicStore(&seed.rowCount,powerControl[0]);atomicStore(&seed.faceCount,powerControl[1]);atomicStore(&seed.generation,powerControl[7]);
-  if(powerControl[3]!=0u||powerControl[8]!=VALID||axisControl[1]!=0u){fail(SOURCE,0u);}
+  if(powerControl[3]!=0u){fail(SOURCE,1u);}
+  if(powerControl[8]!=VALID){fail(SOURCE,2u);}
+  if(axisControl[1]!=0u){fail(SOURCE,3u);}
   if(powerControl[0]>params.rowCapacity||powerControl[0]>axisControl[3]||powerControl[1]>params.powerFaceCapacity
     ||powerControl[1]>arrayLength(&powerFaces)||powerControl[1]>arrayLength(&powerNormals)
     ||axisControl[0]>params.axisFaceCapacity||axisControl[0]>arrayLength(&axisFaces)){fail(CAPACITY,0u);}}
@@ -204,8 +207,8 @@ fn rowCount()->u32{return atomicLoad(&seed.rowCount);}fn faceCount()->u32{return
   var velocity=rowVelocities[face.negativeRow].xyz;if(face.positiveRow!=INVALID){if(face.positiveRow>=rowCount()){fail(INCIDENCE,index);return;}velocity=0.5*(velocity+rowVelocities[face.positiveRow].xyz);}
   let normalVelocity=dot(velocity,n);if(!finite(normalVelocity)){fail(NONFINITE,index);return;}powerFaces[index].normalVelocity=normalVelocity;atomicMax(&seed.seedMaxBits,bitcast<u32>(abs(normalVelocity)));atomicAdd(&seed.seededCount,1u);}
 @compute @workgroup_size(1) fn publishPowerFaceSeed(){if(atomicLoad(&seed.flags)==0u&&atomicLoad(&seed.seededCount)==faceCount()){
-  atomicStore(&seed.valid,VALID);}else{atomicStore(&seed.valid,0u);}}
-@compute @workgroup_size(1) fn preparePowerToAxis(){atomicStore(&seed.forwardFlags,atomicLoad(&seed.flags));atomicStore(&seed.forwardFirstError,atomicLoad(&seed.firstError));atomicStore(&seed.forwardSeededCount,atomicLoad(&seed.seededCount));atomicStore(&seed.forwardValid,atomicLoad(&seed.valid));atomicStore(&seed.flags,0u);atomicStore(&seed.firstError,INVALID);
+  atomicStore(&seed.valid,VALID);}else{atomicStore(&seed.valid,0u);}atomicStore(&seed.forwardFlags,atomicLoad(&seed.flags));atomicStore(&seed.forwardFirstError,atomicLoad(&seed.firstError));atomicStore(&seed.forwardSeededCount,atomicLoad(&seed.seededCount));atomicStore(&seed.forwardValid,atomicLoad(&seed.valid));}
+@compute @workgroup_size(1) fn preparePowerToAxis(){atomicStore(&seed.flags,0u);atomicStore(&seed.firstError,INVALID);
   atomicStore(&seed.seededCount,0u);atomicStore(&seed.valid,0u);atomicStore(&seed.fallbackCount,0u);
   atomicStore(&seed.projectedRowMaxBits,0u);atomicStore(&seed.axisOutputMaxBits,0u);
   if(arrayLength(&operatorControl)<7u||arrayLength(&powerControl)<9u||arrayLength(&axisControl)<6u){fail(CAPACITY,0u);return;}
