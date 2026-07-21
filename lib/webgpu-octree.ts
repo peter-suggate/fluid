@@ -383,6 +383,8 @@ export function decodeOctreeOwnerWord(word: number, cell: readonly [number, numb
 export interface OctreeProjectionPipelineReachability {
   readonly leafSolver: "dense" | "compact" | "chebyshev" | "mgpcg" | "megakernel";
   readonly segmentedProjection: boolean;
+  readonly denseVelocityProjection: boolean;
+  readonly solidRasterization: boolean;
   readonly extrapolationSweeps: number;
   readonly sparseExtrapolation: boolean;
   readonly hasDensePhiSnapshot: boolean;
@@ -393,6 +395,8 @@ export function octreeProjectionPipelineRequired(
   entryPoint: string,
   config: OctreeProjectionPipelineReachability,
 ): boolean {
+  if (entryPoint === "rasterizeSolids" || entryPoint === "rasterizeSolidsActive"
+    || entryPoint === "rasterizeSolidsRetired") return config.solidRasterization;
   if (entryPoint === "jacobi") return config.leafSolver === "dense";
   if (entryPoint === "iterateLeaves") return config.leafSolver === "compact";
   if (entryPoint === "iterateChebyshev") return config.leafSolver === "chebyshev";
@@ -400,8 +404,12 @@ export function octreeProjectionPipelineRequired(
   if (entryPoint === "reduceResidualPartials" || entryPoint === "reduceResidualTotal") {
     return config.leafSolver === "chebyshev";
   }
-  if (entryPoint === "project") return !config.segmentedProjection;
-  if (entryPoint === "projectSmallLeaves" || entryPoint === "projectLeaves") return config.segmentedProjection;
+  if (entryPoint === "reconstructSmallGradients" || entryPoint === "reconstructGradients"
+    || entryPoint === "passThroughPressureOverflow") return config.denseVelocityProjection;
+  if (entryPoint === "project") return config.denseVelocityProjection && !config.segmentedProjection;
+  if (entryPoint === "projectSmallLeaves" || entryPoint === "projectLeaves") {
+    return config.denseVelocityProjection && config.segmentedProjection;
+  }
   if (entryPoint === "extrapolateSeed" || entryPoint === "extrapolate") {
     return config.extrapolationSweeps > 0 && !config.sparseExtrapolation;
   }
@@ -1760,6 +1768,8 @@ export class WebGPUOctreeProjection {
     return {
       leafSolver: this.leafSolver,
       segmentedProjection: Boolean(this.faceTransport) || this.extrapolationSweeps > 0,
+      denseVelocityProjection: !this.faceTransport,
+      solidRasterization: this.hasDenseSolidCells,
       extrapolationSweeps: this.extrapolationSweeps,
       sparseExtrapolation: this.usesSparseVelocityExtrapolation,
       hasDensePhiSnapshot: this.hasDensePhiSnapshot,
@@ -1771,7 +1781,12 @@ export class WebGPUOctreeProjection {
   }
 
   private assignCompletePipelines(compiled: GPUComputePipeline[]) {
-    const fallback = compiled[0];
+    // Reachability deliberately omits entry points that this configuration
+    // cannot execute (for example rigid solid rasterization in a body-free
+    // validation scene).  Slot zero is therefore not guaranteed to be one of
+    // the compiled programs on a fresh device; cached scenes used to mask this
+    // by supplying a previously complete tuple.
+    const fallback = compiled.find((pipeline) => pipeline !== undefined);
     if (!fallback) throw new Error("Octree base pipeline compilation did not publish a fallback slot");
     WebGPUOctreeProjection.pipelineEntryPoints.forEach((_, index) => { compiled[index] ??= fallback; });
     this.assignPipelines(compiled);
@@ -1827,15 +1842,15 @@ export class WebGPUOctreeProjection {
     // Keep the fixed assignment/cache ABI without asking Dawn to specialize
     // entry points unreachable from this immutable solver configuration.
     this.assignCompletePipelines(compiled);
-    // Warm every user-selectable leaf specialization once per device. A leaf
-    // size change should rebuild data, not stop the interface to compile a
-    // program variant the settings UI already advertised.
-    for (let size = 32; size >= 2; size >>= 1) this.refineLevelPipelines.set(size, {
+    // Sizes 16 and 32 use the coarse worklist kernels below. The immutable
+    // maximum participates in the cache key, so variants above it cannot be
+    // reused by the replacement solver created for a settings change.
+    for (let size = Math.min(8, this.maxLeafSize); size >= 2; size >>= 1) this.refineLevelPipelines.set(size, {
       full: this.device.createComputePipeline(this.refinementDescriptor("refineTopology", size)),
       active: this.device.createComputePipeline(this.refinementDescriptor("refineTopologyActive", size)),
       retired: this.device.createComputePipeline(this.refinementDescriptor("refineTopologyRetired", size)),
     });
-    for (let size = 32; size >= 16; size >>= 1) {
+    for (let size = this.maxLeafSize; size >= 16; size >>= 1) {
       this.refineCoarsePipelines.set(size, {
         full: this.device.createComputePipeline(this.refinementDescriptor("refineTopologyCoarse", size)),
         active: this.device.createComputePipeline(this.refinementDescriptor("refineTopologyCoarseActive", size)),
@@ -1922,7 +1937,7 @@ export class WebGPUOctreeProjection {
         },
       });
     });
-    for (let size = 32; size >= 2; size >>= 1) {
+    for (let size = Math.min(8, this.maxLeafSize); size >= 2; size >>= 1) {
       if (cached?.refine.has(size)) continue;
       const level: Partial<{ full: GPUComputePipeline; active: GPUComputePipeline; retired: GPUComputePipeline }> = {};
       const definitions = [
@@ -1940,7 +1955,7 @@ export class WebGPUOctreeProjection {
         },
       }));
     }
-    for (let size = 32; size >= 16; size >>= 1) {
+    for (let size = this.maxLeafSize; size >= 16; size >>= 1) {
       for (const operation of ["refine", "balance"] as const) {
         if ((operation === "refine" ? cached?.refineCoarse : cached?.balanceCoarse)?.has(size)) continue;
         const pipelines: Partial<{ full: GPUComputePipeline; active: GPUComputePipeline; retired: GPUComputePipeline }> = {};
@@ -2958,22 +2973,23 @@ export class WebGPUOctreeProjection {
       project.setBindGroup(0, finalInA ? this.couplingGroups.pressureA : this.couplingGroups.pressureB);
       project.dispatchWorkgroups(...this.workgroups);
     }
-    // A leaf-constant pressure basis constrains the integrated leaf flux but
-    // has no gradient on the dense faces inside a coarse leaf. Reconstruct an
-    // affine gradient into non-origin slots of the alternate pressure buffer;
-    // project then applies it only to those internal faces, leaving every
-    // solved coarse/fine boundary flux unchanged.
-    project.setPipeline(this.reconstructSmallGradientsPipeline); project.setBindGroup(0, finalGroup);
-    project.dispatchWorkgroupsIndirect(this.solveDispatch, 0);
-    project.setPipeline(this.reconstructGradientsPipeline); project.dispatchWorkgroupsIndirect(this.solveDispatch, 12);
-    if (this.faceTransport || this.extrapolationSweeps > 0) {
-      project.setPipeline(this.projectSmallLeavesPipeline); project.dispatchWorkgroupsIndirect(this.solveDispatch, 0);
-      project.setPipeline(this.projectLeavesPipeline); project.dispatchWorkgroupsIndirect(this.solveDispatch, 12);
-    } else {
-      this.dispatch(project, this.projectPipeline, finalGroup);
+    if (!this.faceTransport) {
+      // A leaf-constant pressure basis constrains the integrated leaf flux but
+      // has no gradient on the dense faces inside a coarse leaf. Reconstruct
+      // an affine gradient only while the dense compatibility velocity is an
+      // authority; compact-face cutover binds a 1x1 sentinel here.
+      project.setPipeline(this.reconstructSmallGradientsPipeline); project.setBindGroup(0, finalGroup);
+      project.dispatchWorkgroupsIndirect(this.solveDispatch, 0);
+      project.setPipeline(this.reconstructGradientsPipeline); project.dispatchWorkgroupsIndirect(this.solveDispatch, 12);
+      if (this.extrapolationSweeps > 0) {
+        project.setPipeline(this.projectSmallLeavesPipeline); project.dispatchWorkgroupsIndirect(this.solveDispatch, 0);
+        project.setPipeline(this.projectLeavesPipeline); project.dispatchWorkgroupsIndirect(this.solveDispatch, 12);
+      } else {
+        this.dispatch(project, this.projectPipeline, finalGroup);
+      }
+      project.setPipeline(this.pressureOverflowPipeline); project.setBindGroup(0, finalGroup);
+      project.dispatchWorkgroupsIndirect(this.pressureOverflowDispatch, 0);
     }
-    project.setPipeline(this.pressureOverflowPipeline); project.setBindGroup(0, finalGroup);
-    project.dispatchWorkgroupsIndirect(this.pressureOverflowDispatch, 0);
     project.end();
     if (this.powerPolicy.authoritative && this.powerSolidFaces) this.powerSolidFaces.encodePressureImpulses(encoder, finalInA);
     else this.solidFaces?.encodePressureImpulses(encoder, finalInA);

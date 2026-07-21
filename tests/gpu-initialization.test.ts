@@ -56,7 +56,12 @@ test("octree initialization has no hand-maintained pipeline totals and fences wa
   assert.match(uniform, /uniformPipelineCache/, "structural rebuilds must reuse immutable programs");
   assert.match(octree, /initializationTasks\(\): GPUInitializationTask\[\]/);
   assert.match(octree, /octreePipelineCache/);
-  assert.match(octree, /for \(let size = 32; size >= 2;/, "all leaf-size variants should be warmed before the settings UI advertises them");
+  assert.match(octree, /for \(let size = Math\.min\(8, this\.maxLeafSize\); size >= 2;/,
+    "startup should warm only regular refinement variants the immutable solver can dispatch");
+  assert.match(octree, /for \(let size = this\.maxLeafSize; size >= 16;/,
+    "coarse refinement warming should start at the immutable solver maximum");
+  assert.doesNotMatch(octree, /for \(let size = 32; size >= 2;/,
+    "regular refinement must not compile the coarse-only 16/32 variants");
   assert.match(uniform, /await this\.device\.queue\.onSubmittedWorkDone\(\)/);
   assert.match(controller, /Preparing GPU work plan/);
   assert.match(fluidLab, /Applying simulation settings/);

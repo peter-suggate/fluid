@@ -23,19 +23,37 @@ test("row-indexed octree startup skips the unreachable dense Jacobi specializati
   const product = {
     leafSolver: "mgpcg",
     segmentedProjection: true,
+    denseVelocityProjection: false,
+    solidRasterization: false,
     extrapolationSweeps: 0,
     sparseExtrapolation: false,
     hasDensePhiSnapshot: false,
   } as const;
   assert.equal(octreeProjectionPipelineRequired("jacobi", product), false);
   assert.equal(octreeProjectionPipelineRequired("project", product), false);
+  assert.equal(octreeProjectionPipelineRequired("reconstructSmallGradients", product), false);
+  assert.equal(octreeProjectionPipelineRequired("reconstructGradients", product), false);
+  assert.equal(octreeProjectionPipelineRequired("projectLeaves", product), false);
+  assert.equal(octreeProjectionPipelineRequired("passThroughPressureOverflow", product), false);
+  assert.equal(octreeProjectionPipelineRequired("rasterizeSolids", product), false);
   assert.equal(octreeProjectionPipelineRequired("extrapolate", product), false);
   assert.equal(octreeProjectionPipelineRequired("refreshSnapshotDense", product), false);
-  assert.equal(octreeProjectionPipelineRequired("projectLeaves", product), true);
+  assert.equal(octreeProjectionPipelineRequired("projectLeaves", {
+    ...product, denseVelocityProjection: true,
+  }), true, "dense compatibility retains its segmented leaf projector");
+  assert.equal(octreeProjectionPipelineRequired("rasterizeSolidsActive", {
+    ...product, solidRasterization: true,
+  }), true, "terrain and rigid scenes retain solid rasterization");
   assert.equal(octreeProjectionPipelineRequired("jacobi", { ...product, leafSolver: "dense" }), true,
     "the explicit dense validation solver must retain its Jacobi pipeline");
   assert.equal(octreeProjectionPipelineRequired("assembleSystem", product), true);
   assert.match(octreeSource, /if \(!this\.basePipelineRequired\(entryPoint\)\) return/);
+  assert.match(octreeSource, /for \(let size = Math\.min\(8, this\.maxLeafSize\); size >= 2; size >>= 1\)/,
+    "fine refinement startup must not compile coarse or unreachable leaf sizes");
+  assert.match(octreeSource, /for \(let size = this\.maxLeafSize; size >= 16; size >>= 1\)/,
+    "coarse refinement startup must stop at this solver's immutable maximum");
+  assert.match(octreeSource, /if \(!this\.faceTransport\) \{[\s\S]*this\.reconstructSmallGradientsPipeline[\s\S]*this\.pressureOverflowPipeline/,
+    "compact-face authority must not encode the retired dense velocity projection chain");
 });
 
 test("octree pipeline cache keys include stable constants and reachability", () => {
