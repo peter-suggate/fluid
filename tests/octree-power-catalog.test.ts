@@ -11,7 +11,12 @@ import {
   canonicalizeOctreePowerConfiguration,
   resolveOctreePowerCatalogDescriptor,
 } from "../lib/octree-power-catalog";
-import { OCTREE_CUBE_TRANSFORMS, inverseCubeTransform, transformPowerVector } from "../lib/octree-power-topology";
+import {
+  OCTREE_CUBE_TRANSFORMS,
+  inverseCubeTransform,
+  octreePowerCoarseMaskNeedsAcuteRepair,
+  transformPowerVector,
+} from "../lib/octree-power-topology";
 import {
   sitesForSameOrCoarserPowerDescriptor,
   sitesForSameOrFinerPowerDescriptor,
@@ -33,18 +38,15 @@ function uniformSites(): OctreePowerSite[] {
 }
 
 function transitionSites(): OctreePowerSite[] {
-  return [
-    createOctreePowerSite("a", [0, 0, 0], 2),
-    createOctreePowerSite("nx", [-2, 0, 0], 2), createOctreePowerSite("ny", [0, -2, 0], 2),
-    createOctreePowerSite("nz", [0, 0, -2], 2),
-    createOctreePowerSite("px", [2, 0, 0], 1), createOctreePowerSite("py", [0, 2, 0], 1),
-    createOctreePowerSite("pz", [0, 0, 2], 1),
-  ];
+  // Use a reachable, fully graded Section 6.2 neighborhood. The former
+  // hand-authored seven-site fixture was not an octree topology and emitted
+  // an obtuse current-cell simplex that the paper explicitly excludes.
+  return [...sitesForSameOrFinerPowerDescriptor(0)];
 }
 
-function transformedSites(sites: readonly OctreePowerSite[], transformCode: number): OctreePowerSite[] {
+function transformedSites(sites: readonly OctreePowerSite[], transformCode: number, anchorKey: string): OctreePowerSite[] {
   const transform = OCTREE_CUBE_TRANSFORMS[transformCode];
-  const anchor = sites.find((site) => site.key === "a")!;
+  const anchor = sites.find((site) => site.key === anchorKey)!;
   return sites.map((site) => {
     const relative = site.center.map((value, axis) => value - anchor.center[axis]) as [number, number, number];
     const center = transformPowerVector(relative, transform).map((value, axis) => value + anchor.center[axis]);
@@ -54,12 +56,13 @@ function transformedSites(sites: readonly OctreePowerSite[], transformCode: numb
 
 test("catalog canonicalizes rotations and safe reflections into one entry", () => {
   const original = transitionSites();
-  const rotated = transformedSites(original, 17);
+  const anchorKey = "0,0,0/2";
+  const rotated = transformedSites(original, 17, anchorKey);
   assert.equal(canonicalizeOctreePowerConfiguration(original[0], original).key,
     canonicalizeOctreePowerConfiguration(rotated[0], rotated).key);
   const catalog = buildOctreePowerCatalog([
-    { descriptor: 100, anchorKey: "a", sites: original },
-    { descriptor: 101, anchorKey: "a", sites: rotated },
+    { descriptor: 100, anchorKey, sites: original },
+    { descriptor: 101, anchorKey, sites: rotated },
   ]);
   assert.equal(catalog.entries.length, 1);
   assert.equal(catalog.lookup.length, 2);
@@ -70,7 +73,7 @@ test("catalog canonicalizes rotations and safe reflections into one entry", () =
 test("catalog emits deterministic compact typed arrays and geometry manifest", () => {
   const configurations = [
     { descriptor: 0, anchorKey: "a", sites: uniformSites() },
-    { descriptor: 1, anchorKey: "a", sites: transitionSites() },
+    { descriptor: 1, anchorKey: "0,0,0/2", sites: transitionSites() },
   ];
   const a = buildOctreePowerCatalog(configurations);
   const b = buildOctreePowerCatalog([...configurations].reverse());
@@ -112,11 +115,18 @@ test("generated exhaustive catalog decodes within the fixed budget and proven bo
   assert.equal(views.tetrahedronHeaders.length, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount * 3);
   assert.ok(views.tetrahedronData.length > 0);
   assert.equal(views.tetrahedronVertexData.length, 75 * 4);
-  for (const direct of [views.sameOrFinerDirect, views.sameOrCoarserDirect]) {
-    assert.ok([...direct].every((packed) => packed !== 0xffff_ffff
-      && (packed & 0xffff) < OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount
-      && (packed >>> 16) < 48));
-  }
+  assert.ok([...views.sameOrFinerDirect].every((packed) => packed !== 0xffff_ffff
+    && (packed & 0xffff) < OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount
+    && (packed >>> 16) < 48));
+  views.sameOrCoarserDirect.forEach((packed, low) => {
+    const excluded = octreePowerCoarseMaskNeedsAcuteRepair(low >>> 3);
+    assert.equal(packed === 0xffff_ffff, excluded,
+      `same/coarser descriptor ${low} must be invalid exactly when acute grading is required`);
+    if (!excluded) {
+      assert.ok((packed & 0xffff) < OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount);
+      assert.ok((packed >>> 16) < 48);
+    }
+  });
   assert.ok([...views.entryVolumes].every((volume) => volume > 0 && Number.isFinite(volume)));
   assert.equal(typeof fetchGeneratedOctreePowerCatalog, "function");
   for (let offset = 0; offset < views.faceData.length; offset += OCTREE_POWER_CATALOG_FACE_FLOATS) {
@@ -141,7 +151,8 @@ test("generated exhaustive catalog decodes within the fixed budget and proven bo
       const denominator = lengths[0] * lengths[1] * lengths[2] + dot(a, b) * lengths[2]
         + dot(a, c) * lengths[1] + dot(b, c) * lengths[0];
       const angle = 2 * Math.atan2(Math.abs(determinant), denominator);
-      assert.ok(angle > 0 && angle < 4 * Math.PI, `entry ${entry} tetrahedron ${local} has an invalid solid angle`);
+      assert.ok(angle > 0 && angle <= Math.PI / 2 + 1e-6,
+        `entry ${entry} tetrahedron ${local} violates the paper's nonobtuse current-cell condition`);
     }
   }
 });
@@ -179,7 +190,7 @@ test("every nonuniform tetra selector set contains exactly every power-face neig
     assert.ok(selectorGeometry.size <= OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumNeighborRows);
     checked += 1;
   }
-  assert.equal(checked, 6_471,
+  assert.equal(checked, 6_472,
     "the exhaustive nonuniform catalog is the authority for terminal support closure");
 });
 

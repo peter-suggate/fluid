@@ -4,6 +4,7 @@ import { scenePresets } from "@/lib/scenes";
 import { simulation } from "@/lib/simulation/controller";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
+import { planSceneRuntime } from "@/lib/scene-runtime";
 
 const groups = [...new Set(scenePresets.map((preset) => preset.group))];
 
@@ -28,7 +29,7 @@ export function ScenePanel() {
           ))}
         </select>
       </label>
-      <div className="scene-meta"><span>{scene.sceneId}</span><span>seed {scene.randomSeed}</span></div>
+      <div className="scene-meta"><span>{scene.sceneId}</span><span>{!planSceneRuntime(scene).fluidSolver ? "static SVO · no fluid" : `seed ${scene.randomSeed}`}</span></div>
       <button className={`drop-button${sceneModalOpen ? " active" : ""}`} onClick={() => setSceneModalOpen(!sceneModalOpen)} data-testid="configure-scene" aria-expanded={sceneModalOpen}>Configure scene…</button>
     </section>
   );

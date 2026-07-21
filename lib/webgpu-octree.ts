@@ -349,9 +349,8 @@ export interface OctreeOwnerAllocationPlan {
 }
 
 /**
- * One self-decodable word per finest cell. Size-one leaves need no stored
- * origin (the queried cell is the origin); coarser dyadic owners use their
- * alignment to fit exponent and three coordinates in the remaining bits.
+ * One self-decodable word per finest cell. The queried cell plus dyadic size
+ * determines the aligned origin, so no bounded coordinate packing is needed.
  */
 export function planOctreeOwnerAllocation(cellCount: number): OctreeOwnerAllocationPlan {
   if (!Number.isSafeInteger(cellCount) || cellCount < 1) throw new Error("Octree owner cell count must be a positive integer");
@@ -364,12 +363,12 @@ export interface OctreePackedOwner { readonly origin: readonly [number, number, 
 
 export function encodeOctreeOwnerWord(origin: readonly [number, number, number], size: number): number {
   if (![1, 2, 4, 8, 16, 32].includes(size)) throw new RangeError("Octree owner size must be dyadic from 1 through 32");
-  if (origin.some((value) => !Number.isSafeInteger(value) || value < 0 || value >= 1024 || value % size !== 0)) {
-    throw new RangeError("Octree owner origin must be aligned and fit ten bits per axis");
+  if (origin.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 0xffffffff || value % size !== 0)) {
+    throw new RangeError("Octree owner origin must be an aligned unsigned 32-bit coordinate");
   }
   if (size === 1) return 0x8000_0000;
   const exponent = Math.log2(size);
-  return (exponent | ((origin[0] >> exponent) << 3) | ((origin[1] >> exponent) << 12) | ((origin[2] >> exponent) << 21)) >>> 0;
+  return exponent;
 }
 
 export function decodeOctreeOwnerWord(word: number, cell: readonly [number, number, number]): OctreePackedOwner {
@@ -377,10 +376,45 @@ export function decodeOctreeOwnerWord(word: number, cell: readonly [number, numb
   if ((packed & 0x8000_0000) !== 0) return { origin: [...cell] as [number, number, number], size: 1 };
   const exponent = packed & 7;
   if (exponent < 1 || exponent > 5) return { origin: [...cell] as [number, number, number], size: 1 };
-  return {
-    origin: [((packed >>> 3) & 511) << exponent, ((packed >>> 12) & 511) << exponent, ((packed >>> 21) & 511) << exponent],
-    size: 1 << exponent,
-  };
+  const size = 1 << exponent;
+  return { origin: cell.map((value) => Math.floor(value / size) * size) as [number, number, number], size };
+}
+
+export interface OctreeProjectionPipelineReachability {
+  readonly leafSolver: "dense" | "compact" | "chebyshev" | "mgpcg" | "megakernel";
+  readonly segmentedProjection: boolean;
+  readonly extrapolationSweeps: number;
+  readonly sparseExtrapolation: boolean;
+  readonly hasDensePhiSnapshot: boolean;
+}
+
+/** Compile only entry points reachable from the immutable solver configuration. */
+export function octreeProjectionPipelineRequired(
+  entryPoint: string,
+  config: OctreeProjectionPipelineReachability,
+): boolean {
+  if (entryPoint === "jacobi") return config.leafSolver === "dense";
+  if (entryPoint === "iterateLeaves") return config.leafSolver === "compact";
+  if (entryPoint === "iterateChebyshev") return config.leafSolver === "chebyshev";
+  if (entryPoint === "solveLeaves") return config.leafSolver === "megakernel";
+  if (entryPoint === "reduceResidualPartials" || entryPoint === "reduceResidualTotal") {
+    return config.leafSolver === "chebyshev";
+  }
+  if (entryPoint === "project") return !config.segmentedProjection;
+  if (entryPoint === "projectSmallLeaves" || entryPoint === "projectLeaves") return config.segmentedProjection;
+  if (entryPoint === "extrapolateSeed" || entryPoint === "extrapolate") {
+    return config.extrapolationSweeps > 0 && !config.sparseExtrapolation;
+  }
+  if (entryPoint === "extrapolateSeedSparse" || entryPoint === "extrapolateSparse") {
+    return config.extrapolationSweeps > 0 && config.sparseExtrapolation;
+  }
+  if (entryPoint === "copyExtrapolatedSparse") {
+    return config.extrapolationSweeps % 2 === 1 && config.sparseExtrapolation;
+  }
+  if (["markChangedTiles", "buildDirtyWorklist", "refreshSnapshotTiles", "refreshSnapshotDense"].includes(entryPoint)) {
+    return config.hasDensePhiSnapshot;
+  }
+  return true;
 }
 
 export interface OctreeLeafFrontierAllocationPlan {
@@ -1719,7 +1753,30 @@ export class WebGPUOctreeProjection {
     ] = compiled;
   }
 
-  private pipelineCacheKey() { return this.rowIndexedPressure ? "row-indexed" : "dense"; }
+  private pipelineReachability(): OctreeProjectionPipelineReachability {
+    return {
+      leafSolver: this.leafSolver,
+      segmentedProjection: Boolean(this.faceTransport) || this.extrapolationSweeps > 0,
+      extrapolationSweeps: this.extrapolationSweeps,
+      sparseExtrapolation: this.usesSparseVelocityExtrapolation,
+      hasDensePhiSnapshot: this.hasDensePhiSnapshot,
+    };
+  }
+
+  private basePipelineRequired(entryPoint: string) {
+    return octreeProjectionPipelineRequired(entryPoint, this.pipelineReachability());
+  }
+
+  private assignCompletePipelines(compiled: GPUComputePipeline[]) {
+    const fallback = compiled[0];
+    if (!fallback) throw new Error("Octree base pipeline compilation did not publish a fallback slot");
+    WebGPUOctreeProjection.pipelineEntryPoints.forEach((_, index) => { compiled[index] ??= fallback; });
+    this.assignPipelines(compiled);
+  }
+
+  private pipelineCacheKey() {
+    return WebGPUOctreeProjection.pipelineEntryPoints.filter((entryPoint) => this.basePipelineRequired(entryPoint)).join("|");
+  }
 
   private applyPipelineCache(entry: OctreePipelineCacheEntry) {
     this.assignPipelines(entry.base);
@@ -1750,7 +1807,15 @@ export class WebGPUOctreeProjection {
   }
 
   private createPipelinesSync() {
-    this.assignPipelines(WebGPUOctreeProjection.pipelineEntryPoints.map((entryPoint) => this.device.createComputePipeline(this.descriptor(entryPoint))));
+    const compiled: GPUComputePipeline[] = [];
+    WebGPUOctreeProjection.pipelineEntryPoints.forEach((entryPoint, index) => {
+      if (this.basePipelineRequired(entryPoint)) {
+        compiled[index] = this.device.createComputePipeline(this.descriptor(entryPoint));
+      }
+    });
+    // Keep the fixed assignment/cache ABI without asking Dawn to specialize
+    // entry points unreachable from this immutable solver configuration.
+    this.assignCompletePipelines(compiled);
     // Warm every user-selectable leaf specialization once per device. A leaf
     // size change should rebuild data, not stop the interface to compile a
     // program variant the settings UI already advertised.
@@ -1825,15 +1890,27 @@ export class WebGPUOctreeProjection {
       ? [{ id: "octree.pipeline-cache", phase: "adaptive-topology", label: "Reuse compiled adaptive programs", run: () => this.applyPipelineCache(cached) }]
       : [];
     const compiled = new Array<GPUComputePipeline>(entries.length);
-    if (!cached) entries.forEach((entryPoint, index) => tasks.push({
-      id: `octree.pipeline.${entryPoint}`,
-      phase: "adaptive-topology",
-      label: `Compile octree ${entryPoint}`,
-      run: async () => {
-        compiled[index] = await this.device.createComputePipelineAsync(this.descriptor(entryPoint));
-        if (index === entries.length - 1) this.assignPipelines(compiled);
-      },
-    }));
+    let lastRequiredBaseIndex = -1;
+    if (!cached) entries.forEach((entryPoint, index) => {
+      if (this.basePipelineRequired(entryPoint)) lastRequiredBaseIndex = index;
+    });
+    if (!cached) entries.forEach((entryPoint, index) => {
+      if (!this.basePipelineRequired(entryPoint)) return;
+      tasks.push({
+        id: `octree.pipeline.${entryPoint}`,
+        phase: "adaptive-topology",
+        label: `Compile octree ${entryPoint}`,
+        run: async () => {
+          compiled[index] = await this.device.createComputePipelineAsync(this.descriptor(entryPoint));
+          if (index === lastRequiredBaseIndex) {
+            // Reusing a live pipeline for unreachable slots keeps the fixed
+            // assignment/cache tuple stable; those properties are never read
+            // by this configuration's encode branches.
+            this.assignCompletePipelines(compiled);
+          }
+        },
+      });
+    });
     for (let size = 32; size >= 2; size >>= 1) {
       if (cached?.refine.has(size)) continue;
       const level: Partial<{ full: GPUComputePipeline; active: GPUComputePipeline; retired: GPUComputePipeline }> = {};
@@ -1933,7 +2010,8 @@ export class WebGPUOctreeProjection {
     const operatorPlan = planOctreePowerGPUOperator(rowCapacity, faceCapacity, entryCapacity, maximumIncidence);
     if (facePlan.faceBytes > maximumStorageBytes || facePlan.normalBytes > maximumStorageBytes
       || facePlan.centroidBytes > maximumStorageBytes || facePlan.quadratureBytes > maximumStorageBytes
-      || facePlan.incidenceBytes > maximumStorageBytes || operatorPlan.arenaBytes > maximumStorageBytes) {
+      || facePlan.incidenceBytes > maximumStorageBytes || facePlan.boundaryQueryBytes > maximumStorageBytes
+      || operatorPlan.arenaBytes > maximumStorageBytes) {
       throw new RangeError("Power-diagram compact arenas exceed this adapter's storage-buffer binding limit");
     }
     this.powerDescriptor = tracePowerInit("descriptor", () => new WebGPUOctreePowerDescriptor(this.device, rowCapacity));
@@ -2300,7 +2378,7 @@ export class WebGPUOctreeProjection {
     // untouched, so these guarded publications reproduce the projected
     // rollback rather than exposing partial scratch values.
     if (this.powerFaceSeed && this.powerOperator) {
-      this.powerFaceSeed.encodePowerToAxis(encoder, this.powerOperator.control);
+      this.powerFaceSeed.encodePowerToAxis(encoder, this.powerOperator.control, true);
       this.powerFaceTransfer?.encodeCapture(encoder);
     }
   }
@@ -2527,7 +2605,7 @@ export class WebGPUOctreeProjection {
   get extrapolationSweepCount() { return this.extrapolationSweeps; }
   get pressureSolverLabel() {
     if (this.leafSolver === "mgpcg" && this.mgpcg?.plan.preconditionerKind === "section43-hybrid") {
-      return `Octree power PCG · Section 4.3 hybrid · up to ${this.mgpcg.iterationBudget} iterations · k=8 paired L2 boundary smoothing · ${this.firstOrderVCycle?.plan.levelCount ?? 0}-level L1 V-cycle`;
+      return `Octree power PCG · Section 4.3 hybrid · up to ${this.mgpcg.iterationBudget} iterations · k=8 paired L2 boundary smoothing on a 3 graph-ring band approximation · ${this.firstOrderVCycle?.plan.levelCount ?? 0}-level L1 V-cycle`;
     }
     if (this.leafSolver === "mgpcg") return `Octree matrix-free aggregate PCG · up to ${this.iterations} iterations · ${this.mgpcg?.plan.hierarchyLevelCount ?? 0} additive levels · experimental`;
     if (this.leafSolver === "chebyshev") return `Octree Chebyshev-Jacobi · ${Math.ceil(this.iterations / 4)} parallel polynomial passes${this.couplingHasDynamicBodies ? " · frame-lagged rigid coupling" : ""}`;
@@ -2548,9 +2626,28 @@ export class WebGPUOctreeProjection {
       this.scene.container.depth_m / this.dims.nz,
     ];
     this.powerGeneration = (this.powerGeneration + 1) >>> 0;
+    const boundaryFine = this.globalFineBootstrapped
+      ? (this.globalFineCurrentIsA ? this.globalFineSourceA : this.globalFineSourceB)
+      : this.globalFineSourceA;
+    // Paper Sections 4.1/5 require free-surface pressure to evaluate signed
+    // distance at both actual cell centres.  Before the first fine-band
+    // publication the authored analytic field is that authority; recurring
+    // generations consume the current two-sided sparse fine field directly.
+    // If neither exists, internal boundary publication fails closed in the
+    // face builder instead of synthesizing an affine air value.
+    const boundaryPhi = boundaryFine ? {
+      mode: this.globalFineBootstrapped ? "fine" as const : "analytic" as const,
+      fine: boundaryFine,
+      container: [this.scene.container.width_m, this.scene.container.height_m,
+        this.scene.container.depth_m] as const,
+      fillFraction: this.scene.container.fillFraction,
+      initialCondition: this.scene.fluid.initialCondition,
+    } : undefined;
     const faceOptions = { dimensions, rowCount: this.compaction,
       physicalCellSize: spacing[0], generation: this.powerGeneration,
-      closedBoundaryMask: octreePowerClosedBoundaryMask(this.scene.container.top === "closed") } as const;
+      closedBoundaryMask: octreePowerClosedBoundaryMask(this.scene.container.top === "closed"),
+      ...(boundaryPhi ? { boundaryPhi } : {}),
+    } as const;
     // Geometry descriptors must come from the octree topology authority, not
     // the phase-row index used to resolve incident pressure rows.  A missing
     // phase row does not mean that the spatial leaf is absent: synthesizing a
@@ -2615,7 +2712,7 @@ export class WebGPUOctreeProjection {
       generation: this.powerGeneration,
       projectionControl: this.powerOperator.control,
     });
-    this.powerFaceSeed.encodePowerToAxis(encoder, this.powerOperator.control);
+    this.powerFaceSeed.encodePowerToAxis(encoder, this.powerOperator.control, true);
     this.powerFaceTransfer?.encodeCapture(encoder);
   }
 
@@ -2783,9 +2880,9 @@ export class WebGPUOctreeProjection {
     // Unsupported terrain/rigid/hydrostatic operators remain fail-closed at
     // construction; the observational mirror still computes parity.
     this.faceMirror?.encodeProjection(encoder, finalInA);
-    // The axis projection above is the rollback publication. A valid power
-    // projection replaces it conservatively for every compact-face consumer;
-    // failure leaves the already-published rollback generation untouched.
+    // The axis projection above remains available only to explicit
+    // compatibility modes. In authoritative mode the power publication either
+    // replaces it completely or marks the compact face authority invalid.
     this.encodePowerVelocityPublication(encoder);
     this.solidFaces?.encodePostProjectionConstraint(encoder);
     // Paper Section 5 velocity extrapolation: projected power faces are first
@@ -3290,6 +3387,7 @@ export class WebGPUOctreeProjection {
       metadata: { buffer: fine.metadata },
       worklist: { buffer: fine.worklist },
       sampleFlags: { buffer: fine.flags },
+      phi: { buffer: fine.phi },
       topologyControl: { buffer: fineTopology.control },
       redistanceControl: { buffer: fineRedistance.control },
     } : undefined;
@@ -3717,20 +3815,21 @@ fn bulkResidentCell(workgroup: vec3u, localIndex: u32) -> vec3u {
   return brick * brickSize + local;
 }
 fn index(p: vec3u) -> u32 { return p.x + params.dimsMax.x * (p.y + params.dimsMax.y * p.z); }
-fn packOrigin(p: vec3u) -> u32 { return p.x | (p.y << 10u) | (p.z << 20u); }
-fn unpackOrigin(word: u32) -> vec3u { return vec3u(word & 1023u, (word >> 10u) & 1023u, (word >> 20u) & 1023u); }
+fn packOrigin(p: vec3u) -> u32 { return index(p); }
+fn unpackOrigin(word: u32) -> vec3u {
+  let plane = params.dimsMax.x * params.dimsMax.y;
+  return vec3u(word % params.dimsMax.x, (word / params.dimsMax.x) % params.dimsMax.y, word / plane);
+}
 const PACKED_FINE_OWNER: u32 = 0x80000000u;
 fn encodeOwner(origin: vec3u, size: u32) -> u32 {
   if (size == 1u) { return PACKED_FINE_OWNER; }
-  let exponent = u32(firstTrailingBit(size));
-  let aligned = origin >> vec3u(exponent);
-  return exponent | (aligned.x << 3u) | (aligned.y << 12u) | (aligned.z << 21u);
+  return u32(firstTrailingBit(size));
 }
 fn decodeOwner(word: u32, cell: vec3u) -> Owner {
   if ((word & PACKED_FINE_OWNER) != 0u) { return Owner(packOrigin(cell), 1u); }
   let exponent = word & 7u;
   if (exponent == 0u || exponent > 5u) { return Owner(packOrigin(cell), 1u); }
-  let origin = vec3u((word >> 3u) & 511u, (word >> 12u) & 511u, (word >> 21u) & 511u) << vec3u(exponent);
+  let origin = (cell >> vec3u(exponent)) << vec3u(exponent);
   return Owner(packOrigin(origin), 1u << exponent);
 }
 fn canonicalOwner(cell: vec3u) -> Owner {
@@ -4755,7 +4854,33 @@ fn paperProbe(origin: vec3u, size: u32, direction: vec3i) -> vec3i {
   }
   return probe;
 }
+fn paperStrictlyObtuseCoarseMask(mask: u32) -> bool {
+  return mask == 25u || mask == 42u || mask == 52u || mask == 57u || mask == 58u || mask == 60u;
+}
+fn repairPaperAcuteNeighbors(origin: vec3u, size: u32) {
+  // The six same/coarser bits are X/Y/Z faces followed by XY/XZ/YZ edges,
+  // oriented away from this child's parent. Exactly six masks contain a
+  // unique ordinary-Delaunay simplex with current-cell solid angle > pi/2.
+  // Split its sole coarse face before descriptor publication; this changes
+  // the local link to the paper's nonobtuse Cartesian limiting case without
+  // inventing a redistance fallback.
+  let child = (origin / vec3u(size)) & vec3u(1u);
+  let outward = vec3i(select(-1, 1, child.x == 1u), select(-1, 1, child.y == 1u), select(-1, 1, child.z == 1u));
+  let wanted = array<vec3i,6>(vec3i(outward.x,0,0), vec3i(0,outward.y,0), vec3i(0,0,outward.z),
+    vec3i(outward.x,outward.y,0), vec3i(outward.x,0,outward.z), vec3i(0,outward.y,outward.z));
+  var mask = 0u;
+  for (var bit = 0u; bit < 6u; bit += 1u) {
+    let probe = paperProbe(origin, size, wanted[bit]);
+    if (valid(probe) && ownerAt(probe).size == size * 2u) { mask |= 1u << bit; }
+  }
+  if (!paperStrictlyObtuseCoarseMask(mask)) { return; }
+  let faceBit = u32(firstTrailingBit(mask & 7u));
+  if (faceBit >= 3u) { return; }
+  let coarse = ownerAt(paperProbe(origin, size, wanted[faceBit]));
+  if (coarse.size == size * 2u) { splitLeaf(unpackOrigin(coarse.packedOrigin), coarse.size); }
+}
 fn repairPaperMixedNeighbors(origin: vec3u, size: u32) {
+  repairPaperAcuteNeighbors(origin, size);
   var finer = false; var coarser = false;
   for (var bit = 0u; bit < 18u; bit += 1u) {
     let probe = paperProbe(origin, size, PAPER_DIRECTIONS[bit]); if (!valid(probe)) { continue; }
@@ -4772,6 +4897,17 @@ fn repairPaperMixedNeighbors(origin: vec3u, size: u32) {
 
 fn balanceTopologyAt(gid: vec3u) {
   if (any(gid >= dims())) { return; }
+  // The portable balance dispatch is rooted at even coordinates. Inspect its
+  // complete 2^3 child block so a unit-size anchor can request splitting the
+  // implicated size-two coarse face before descriptor publication.
+  let unitBase = gid & vec3u(0xfffffffeu);
+  for (var childIndex = 0u; childIndex < 8u; childIndex += 1u) {
+    let child = vec3u(childIndex & 1u, (childIndex >> 1u) & 1u, (childIndex >> 2u) & 1u);
+    let q = unitBase + child;
+    if (any(q >= dims())) { continue; }
+    let unitOwner = ownerAt(vec3i(q));
+    if (unitOwner.size == 1u && isOrigin(q, unitOwner)) { repairPaperAcuteNeighbors(q, 1u); }
+  }
   let owner = ownerAt(vec3i(gid));
   if (owner.size >= 2u && owner.size <= 16u && isOrigin(gid, owner)) { repairPaperMixedNeighbors(gid, owner.size); }
   // Size-16+ leaves use the cooperative entry point below.
@@ -6096,13 +6232,13 @@ struct Params { dimsMax: vec4u, cellRelax: vec4f, control: vec4u, solve: vec4f, 
 fn dims() -> vec3u { return params.dimsMax.xyz; }
 fn valid(p: vec3i) -> bool { return all(p >= vec3i(0)) && all(p < vec3i(dims())); }
 fn index(p: vec3u) -> u32 { return p.x + params.dimsMax.x * (p.y + params.dimsMax.y * p.z); }
-fn packOrigin(p: vec3u) -> u32 { return p.x | (p.y << 10u) | (p.z << 20u); }
-fn unpackOrigin(word: u32) -> vec3u { return vec3u(word & 1023u, (word >> 10u) & 1023u, (word >> 20u) & 1023u); }
+fn packOrigin(p: vec3u) -> u32 { return index(p); }
+fn unpackOrigin(word: u32) -> vec3u { let plane=params.dimsMax.x*params.dimsMax.y;return vec3u(word%params.dimsMax.x,(word/params.dimsMax.x)%params.dimsMax.y,word/plane); }
 fn decodeOwner(word: u32, cell: vec3u) -> Owner {
   if ((word & 0x80000000u) != 0u) { return Owner(packOrigin(cell), 1u); }
   let exponent = word & 7u;
   if (exponent == 0u || exponent > 5u) { return Owner(packOrigin(cell), 1u); }
-  let origin = vec3u((word >> 3u) & 511u, (word >> 12u) & 511u, (word >> 21u) & 511u) << vec3u(exponent);
+  let origin = (cell >> vec3u(exponent)) << vec3u(exponent);
   return Owner(packOrigin(origin), 1u << exponent);
 }
 fn canonicalOwner(cell: vec3u) -> Owner { var size=min(params.dimsMax.w,8u);var origin=(cell/vec3u(size))*vec3u(size);loop{if(all(origin+vec3u(size)<=dims())||size==1u){break;}size>>=1u;origin=(cell/vec3u(size))*vec3u(size);}return Owner(packOrigin(origin),size); }
@@ -6183,13 +6319,13 @@ struct Params { dimsMax: vec4u, cellRelax: vec4f, control: vec4u, solve: vec4f, 
 fn dims() -> vec3u { return params.dimsMax.xyz; }
 fn valid(p: vec3i) -> bool { return all(p >= vec3i(0)) && all(p < vec3i(dims())); }
 fn index(p: vec3u) -> u32 { return p.x + params.dimsMax.x * (p.y + params.dimsMax.y * p.z); }
-fn packOrigin(p: vec3u) -> u32 { return p.x | (p.y << 10u) | (p.z << 20u); }
-fn unpackOrigin(word: u32) -> vec3u { return vec3u(word & 1023u, (word >> 10u) & 1023u, (word >> 20u) & 1023u); }
+fn packOrigin(p: vec3u) -> u32 { return index(p); }
+fn unpackOrigin(word: u32) -> vec3u { let plane=params.dimsMax.x*params.dimsMax.y;return vec3u(word%params.dimsMax.x,(word/params.dimsMax.x)%params.dimsMax.y,word/plane); }
 fn decodeOwner(word: u32, cell: vec3u) -> Owner {
   if ((word & 0x80000000u) != 0u) { return Owner(packOrigin(cell), 1u); }
   let exponent = word & 7u;
   if (exponent == 0u || exponent > 5u) { return Owner(packOrigin(cell), 1u); }
-  let origin = vec3u((word >> 3u) & 511u, (word >> 12u) & 511u, (word >> 21u) & 511u) << vec3u(exponent);
+  let origin = (cell >> vec3u(exponent)) << vec3u(exponent);
   return Owner(packOrigin(origin), 1u << exponent);
 }
 fn canonicalOwner(cell: vec3u) -> Owner { var size=min(params.dimsMax.w,8u);var origin=(cell/vec3u(size))*vec3u(size);loop{if(all(origin+vec3u(size)<=dims())||size==1u){break;}size>>=1u;origin=(cell/vec3u(size))*vec3u(size);}return Owner(packOrigin(origin),size); }

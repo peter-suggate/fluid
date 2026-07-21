@@ -13,12 +13,14 @@ test("renderer presentation source reaches the diagnostics store and panel with 
   const controller = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
   const panel = readFileSync(new URL("../components/DiagnosticsPanel.tsx", import.meta.url), "utf8");
 
-  for (const field of ["surfaceGeometrySource", "globalFineCrossingPublished", "presentationFallbackActive"]) {
+  for (const field of ["surfaceGeometrySource", "globalFineAttachedGeneration", "meshPublicationGeneration", "globalFineCrossingPublished", "presentationFallbackActive"]) {
     assert.match(renderer, new RegExp(field), `${field} must cross the renderer metrics boundary`);
   }
   assert.match(controller, /waterSurfacePresentation:\s*metrics\.waterSurfacePresentation\s*\?\?\s*null/);
   assert.match(pipeline, /query\.get\("diagnostics"\) === "1"/,
     "opening the canonical diagnostics panel must enable its presentation readback");
+  assert.match(pipeline, /query\.get\("panel"\) === "visual"/,
+    "the Render inspector must enable the bounded presentation proof it displays");
   assert.match(panel, /testId="water-surface-presentation-source"/);
   assert.match(panel, /GLOBAL FINE \/ COARSE/);
   assert.match(panel, /ADAPTIVE FALLBACK/);

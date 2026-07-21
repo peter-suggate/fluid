@@ -351,17 +351,32 @@ test("face phi uses the paper's fine field then the redistanced dry-owner cube/D
   const extend = wgslFunction("extendBandRowPhi");
   assert.match(initialize, /finePhiAtFaceCentroid\(center\).*exactCoarseCellScalar/s,
     "current fine row centres and exact compact rows seed the coarse field");
-  assert.match(extend,
-    /letdistance=length\(center-neighborCenter\)\*fp\.fineWidth\*f32\(fp\.fineFactor\);letcandidate=max\(0\.,sign\*source\.x\+distance\)/,
-    "dry owners receive a sign-aware metric fast-march update rather than a constant-air magnitude");
+  assert.match(extend, /localTetraEikonal\(rowIndex,sign\)/,
+    "transition dry owners use their local Delaunay Eikonal update");
+  assert.match(wgslFunction("localTetraEikonal"),
+    /transitionAdjacency\[at\].*solveTranspose3\(a,b,c,known\).*candidate=\(bb\+sqrt/s,
+    "the transition update solves |grad phi|=1 on the row-local catalog tetrahedra");
+  assert.match(wgslFunction("nonobtuseIncidentSolidAngle"),
+    /denominator=la\*lb\*lc\+dot\(a,b\)\*lc\+dot\(a,c\)\*lb\+dot\(b,c\)\*la.*denominator\+2e-5\*scale>=determinant/s,
+    "the runtime consumer enforces the paper's nonobtuse incident-solid-angle contract");
 
   const interpolant = wgslFunction("coarsePhiAtPoint");
   assert.match(interpolant, /for\(varcorner=0u;corner<8u;corner\+=1u\)/,
     "uniform regions enumerate the regular cube vertices");
-  assert.match(interpolant, /letweight=.*if\(weight==0\.\)\{continue;\}.*compactScalar/s,
+  assert.match(interpolant, /letweight=.*if\(weight==0\.\)\{continue;\}.*compactPublishedBandScalar/s,
     "uniform interpolation requires exactly the nonzero product-weight cube vertices");
   assert.match(interpolant, /tetraWeights\(point,tetraVertices\[selectors\.x\]\.v\.xyz,tetraVertices\[selectors\.y\]\.v\.xyz,tetraVertices\[selectors\.z\]\.v\.xyz\)/,
     "T-junction regions use the generated local Delaunay tetrahedron");
+  assert.match(interpolant,
+    /localTetraBandScalar\(anchor,local,0u,selectors\.x.*localTetraBandScalar\(anchor,local,1u,selectors\.y.*localTetraBandScalar\(anchor,local,2u,selectors\.z/s,
+    "the selected tetrahedron consumes the exact adjacency rows validated by the closure transaction");
+  const localScalar = wgslFunction("localTetraBandScalar");
+  assert.match(localScalar,
+    /transitionAdjacency\[at\].*adjacency\.band==anchor.*returnpublishedBandScalar\(neighbor\)/s,
+    "in-domain Delaunay vertices must not repeat a fallible row-hash lookup after adjacency validation");
+  assert.match(localScalar,
+    /if\(all\(origin>=vec3i\(0\)\)&&all\(origin\+vec3i\(i32\(size\)\)<=vec3i\(p\.dims\)\)\)\{returnvec2f\(0\.\);\}/,
+    "only a genuine boundary extension may bypass the published adjacency row");
 
   const transitionPhase = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
   const fineBindings = transitionPhase.match(/run\("sampleFacePhi",\[([\s\S]*?)\],Math\.ceil/)?.[1];
@@ -370,29 +385,30 @@ test("face phi uses the paper's fine field then the redistanced dry-owner cube/D
   for (const binding of [0, 1, 2, 5, 8, 12, 24, 51]) {
     assert.match(fineBindings, new RegExp(`\\[${binding},`));
   }
-  for (const binding of [0, 1, 5, 6, 7, 12, 25, 27, 28, 29, 30, 42]) {
+  for (const binding of [0, 5, 6, 7, 12, 27, 28, 29, 30, 31]) {
     assert.match(coarseBindings, new RegExp(`\\[${binding},`));
   }
+  for (const binding of [1, 25, 42]) assert.doesNotMatch(coarseBindings, new RegExp(`\\[${binding},`));
 });
 
 test("cube and Delaunay interpolants load only vertices that geometrically contribute", () => {
-  for (const [functionName, selectorLoader] of [
-    ["coarsePhiAtPoint", "selectorScalar"],
-    ["centroidVector", "selectorVector"],
-    ["marchedCentroidVector", "provisionalSelectorVector"],
-    ["finalPointVector", "finalSelectorVector"],
+  for (const [functionName, selectorLoad] of [
+    ["coarsePhiAtPoint", "localTetraBandScalar(anchor,local,0u,selectors.x"],
+    ["centroidVector", "selectorVector(anchor,selectors.x"],
+    ["marchedCentroidVector", "provisionalSelectorVector(anchor,selectors.x"],
+    ["finalPointVector", "finalSelectorVector(anchor,selectors.x"],
   ] as const) {
     const source = wgslFunction(functionName);
     const weightsAt = source.indexOf("letweights=tetraWeights");
     const containedAt = source.indexOf("if(!contained(weights)){continue;}", weightsAt);
-    const loadAt = source.indexOf(`${selectorLoader}(anchor,selectors.x`, containedAt);
+    const loadAt = source.indexOf(selectorLoad, containedAt);
     assert.ok(weightsAt >= 0 && containedAt > weightsAt && loadAt > containedAt,
       `${functionName} must select the paper's containing tetrahedron before loading its values`);
   }
 
   const diagnostic = wgslFunction("diagnoseCoarsePhiAtPoint");
   assert.match(diagnostic,
-    /letweights=tetraWeights[^;]+;if\(!contained\(weights\)\)\{continue;\}varphiRecord=diagnoseSelectorScalar/,
+    /letweights=tetraWeights[^;]+;if\(!contained\(weights\)\)\{continue;\}varphiRecord=diagnoseLocalTetraBandScalar/,
     "failure telemetry must inspect only a selected tetrahedron dependency");
 
   for (const [functionName, cornerLoader] of [
@@ -450,7 +466,7 @@ test("transition diagnostics preserve the exact pre-emission catalog failure", (
   assert.deepEqual(unpackOctreeFaceBandTransitionControl(words), {
     flags: 8, firstError: 17, rowCount: 3582, transitionRows: 211, adjacencyCount: 917,
     ready: false, transferReady: false, invalidSource: false, capacityFailure: false,
-    unresolvedAdjacency: false, invalidBandDescriptor: true,
+    unresolvedAdjacency: false, invalidBandDescriptor: true, acuteGrading: false,
     detailFlags: 36, malformedGeometry: false, belowDomain: false, aboveDomain: true,
     misalignedGeometry: false, ownerMismatch: false, missingBandRow: true,
     rowOutOfRange: false, ownerSizeMismatch: false,
@@ -462,6 +478,32 @@ test("transition diagnostics preserve the exact pre-emission catalog failure", (
   assert.equal(unpackOctreeFaceBandTransitionControl(words).ready, true);
   assert.equal(unpackOctreeFaceBandTransitionControl(words).transferReady, true);
   assert.throws(() => unpackOctreeFaceBandTransitionControl(new Uint32Array(7)), /eight/);
+});
+
+test("transition diagnostics distinguish an escaped acute-grading mask", () => {
+  const words = new Uint32Array(32);
+  const descriptor = (OCTREE_POWER_SAME_OR_COARSER_FLAG | (25 << 3) | 3) >>> 0;
+  words[0] = OCTREE_FACE_BAND_TRANSITION_ERROR.acuteGrading;
+  words[1] = 73;
+  words.set([
+    73, OCTREE_FACE_BAND_OWNER_FAILURE_STAGE.acuteGrading, 9123, 2,
+    descriptor, 0xffff_ffff, 0, 25,
+  ], 16);
+  const decoded = unpackOctreeFaceBandTransitionControl(words);
+  assert.equal(decoded.acuteGrading, true);
+  assert.equal(decoded.invalidBandDescriptor, false);
+  assert.equal(decoded.ownerFailure, undefined);
+  assert.deepEqual(decoded.acuteGradingFailure, {
+    band: 73, rowCell: 9123, rowSize: 2, descriptor, coarseMask: 25,
+  });
+
+  const describe = wgslFunction("describeBandRow");
+  assert.match(describe,
+    /varcoarseMask=0u.*coarseMask\|=1u<<coarseBit.*strictlyObtuseCoarseMask\(coarseMask\).*recordAcuteGradingFailure\(band,row,descriptor,coarseMask\).*transitionFail\(TRANSITION_ACUTE_GRADING,band\)/,
+    "the dry-band descriptor producer must attribute an excluded mask before direct lookup");
+  assert.match(wgslFunction("recordAcuteGradingFailure"),
+    /failureStage=OWNER_FAILURE_ACUTE_GRADING.*failureDescriptor=descriptor.*failureSelector=mask/,
+    "the existing transition payload preserves the row, raw descriptor, and six-bit mask");
 });
 
 test("transition diagnostics decode one atomically claimed exact-owner mismatch", () => {
@@ -524,7 +566,7 @@ test("GPU face band closes endpoints before deterministic frontier marching", ()
     "stale or unpublished Stage-A vectors must fail the complete face-band generation");
   assert.doesNotMatch(octreeFaceBandWGSL, /AxisFace|axisFaces|axisIncidence/,
     "regular face seeds must not bypass Stage A through packed exact-axis faces");
-  assert.match(octreeFaceBandWGSL, /!finite\(f\.phi\)\|\|f\.phi>0\./,
+  assert.match(octreeFaceBandWGSL, /!finite\(f\.phi\)\)\{return;\}if\(f\.phi>0\.\)\{f\.pad=1u/,
     "seed membership uses the sampled face-centroid signed distance itself");
   assert.match(octreeFaceBandWGSL, /centroidVector\(f\.negativeRow,f\.centroid\.xyz\)/,
     "regular-face seeds evaluate the full Stage-B vector at the actual face centroid");
@@ -645,14 +687,14 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
     /f\.flags&SEED.*atomicStore\(&states\[i\]\.status,ACCEPTED\).*letat=atomicAdd\(&frontier\[0\],1u\).*frontier\[p\.faceCapacity-at\]/s,
     "parallel initialization retains accepted seeds in a disjoint tail list");
   assert.match(wgslFunction("discoverHeapRow"),
-    /sourcePhi>abs\(targetRecord\.phi\)\+1e-6.*atomicCompareExchangeWeak\(&states\[targetFace\]\.status,UNKNOWN,TRIAL\).*if\(claimed\)\{states\[targetFace\]\.pad=sourceFace;if\(pushFaceHeap\(targetFace\)\).*marchTrials/s,
+    /sourceArrival>faceArrival\(targetRecord\.phi\)\+1e-6.*atomicCompareExchangeWeak\(&states\[targetFace\]\.status,UNKNOWN,TRIAL\).*if\(claimed\)\{states\[targetFace\]\.pad=sourceFace;if\(pushFaceHeap\(targetFace\)\).*marchTrials/s,
     "only causal neighbors of the accepted front enter the heap, exactly once");
   assert.match(wgslFunction("discoverHeapRow"),
     /if\(observed==TRIAL&&faceHeapBefore\(sourceFace,states\[targetFace\]\.pad\)\)\{states\[targetFace\]\.pad=sourceFace;\}/,
     "later directed offers improve the retained source deterministically without another heap push");
   assert.match(wgslFunction("faceHeapBefore"),
-    /ap<bp.*ap>bp.*af\.globalFace<bf\.globalFace.*af\.globalFace>bf\.globalFace.*a<b/s,
-    "the heap order is deterministic in |phi|, stable face id, then slot");
+    /ap=faceArrival\(af\.phi\).*bp=faceArrival\(bf\.phi\).*ap<bp.*ap>bp.*af\.globalFace<bf\.globalFace.*af\.globalFace>bf\.globalFace.*a<b/s,
+    "the heap order is deterministic in liquid-zero/air-phi arrival, stable face id, then slot");
   assert.match(wgslFunction("marchFaceHeapChunk"),
     /for\(varlocal=0u;local<1024u;local\+=1u\).*popFaceHeap\(\).*recordedAcceptedPredecessor.*status,ACCEPTED.*discoverHeapFromAccepted\(targetFace\)/s,
     "each watchdog-safe GPU chunk performs a fixed bounded number of paper fast-march pops");
@@ -661,8 +703,10 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
   const recorded = wgslFunction("recordedAcceptedPredecessor");
   assert.match(recorded, /sourceFace=states\[targetFace\]\.pad/);
   assert.match(recorded, /states\[sourceFace\]\.status\)!=ACCEPTED/);
-  assert.match(recorded, /abs\(sourceRecord\.phi\)>abs\(targetRecord\.phi\)\+1e-6/,
+  assert.match(recorded, /faceArrival\(sourceRecord\.phi\)>faceArrival\(targetRecord\.phi\)\+1e-6/,
     "the retained asymmetric offer is revalidated as accepted and causal at pop time");
+  assert.match(wgslFunction("faceArrival"), /max\(phi,0\.\)/,
+    "all liquid interpolation faces are zero-arrival boundary data even when their centroid is farther from the interface than the first air face");
   const consider = wgslFunction("consider");
   assert.match(consider, /targetRecord\.flags&\(LIVE\|PHI_VALID\)/);
   assert.match(consider, /accepted\.flags&\(LIVE\|PHI_VALID\)/,
@@ -676,8 +720,8 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
     /run\("sampleFacePhi",\[\[0,this\.params\],\[1,input\.fine\.params\],\[2,input\.fine\.metadata\],\[5,this\.control\],\[8,input\.fine\.flags\],\[12,this\.faces\],\[24,input\.fine\.phi\],\[51,input\.fine\.hash\]\]/,
     "the fine sampler retains its bounded sparse-page layout");
   assert.match(schedule,
-    /run\("sampleFaceCoarsePhi",\[\[0,this\.params\],\[1,input\.fine\.params\],\[5,this\.control\],\[6,this\.rows\],\[7,this\.rowHash\],\[12,this\.faces\],\[25,input\.coarsePhiDirectory\],\[27,this\.transitionMetrics\],\[28,tetrahedronHeaders\],\[29,tetrahedra\],\[30,tetrahedronVertices\],\[42,input\.fineTopologyControl\]\]/,
-    "the ordered coarse sampler binds the current octree phi and local Delaunay catalog separately");
+    /run\("sampleFaceCoarsePhi",\[\[0,this\.params\],\[5,this\.control\],\[6,this\.rows\],\[7,this\.rowHash\],\[12,this\.faces\],\[27,this\.transitionMetrics\],\[28,tetrahedronHeaders\],\[29,tetrahedra\],\[30,tetrahedronVertices\],\[31,this\.transitionAdjacency\]\]/,
+    "the ordered coarse sampler consumes the committed row phi through its validated local Delaunay adjacency");
   assert.match(schedule,
     /run\("commitBandPhi",\[\[5,this\.control\],\[6,this\.rows\],\[19,currentPhi\],\[32,this\.transitionControl\]\]/,
     "the row-field commit binds its exact scalar-publication prefix and output globals");
@@ -687,8 +731,11 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
     /base%MAX_ENDPOINTS!=0u.*recordBandPhiEdgeGroup\(base,MAX_ENDPOINTS\)/,
     "endpoint parent capture uses the distinct 24-request regular-face stride");
   assert.match(wgslFunction("extendBandRowPhi"),
-    /edge=atomicLoad\(&pointStatus\[rowIndex\]\).*loop\{if\(edge==INVALID\|\|edge>=arrayLength\(&transientPowerIncidences\)\)\{break;\}.*best=min\(best,max\(0\.,sign\*source\.x\+distance\)\).*edge=bitcast<u32>\(item\.sign\)/s,
-    "support-only interpolation nodes minimize metric distance over every exact closure-parent edge");
+    /lowerSimplexCandidate\(rowIndex,sign\).*localTetraEikonal\(rowIndex,sign\)/s,
+    "terminal support edges remain causal lower-dimensional simplices while transition rows use local tetrahedra");
+  assert.match(wgslFunction("lowerSimplexCandidate"),
+    /edge=atomicLoad\(&pointStatus\[rowIndex\]\).*best=min\(best,abs\(source\.x\)\+length\(center-bandCenter\(parent\)\)\*unit\).*edge=bitcast<u32>\(item\.sign\)/s,
+    "support-only nodes traverse every exact closure-parent edge");
   const emitAt = schedule.indexOf('run("emit"');
   const sampleAt = schedule.indexOf('run("sampleFacePhi"', emitAt);
   const initializePhiAt = schedule.indexOf('run("initializeBandPhi"', sampleAt);
@@ -746,6 +793,13 @@ test("row reconstruction binds the accepted face records it dereferences", () =>
   assert.match(source,
     /run\("reconstruct",\[\[0,this\.params\],\[5,this\.control\],\[6,this\.rows\],\[12,this\.faces\],\[14,this\.incidence\],\[15,this\.state\],\[32,this\.transitionControl\],\[44,this\.provisionalVelocities\],\[48,this\.pointFieldControl\]\]/,
     "auto-layout must receive the accepted face records reconstruction dereferences");
+});
+
+test("band-phi extension binds the shared failure control", () => {
+  const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
+  assert.match(source,
+    /run\("extendBandPhi",\[\[0,this\.params\],\[1,input\.fine\.params\],\[5,this\.control\],\[6,this\.rows\]/,
+    "lower-simplex capacity failures must have the control buffer bound at binding 5");
 });
 
 test("2:1 face emission publishes bounded incidence directly", () => {
@@ -893,6 +947,8 @@ test("support-closure stages stay within portable auto-layout bind groups", () =
     return [...call.matchAll(/\[(\d+),/g)].map((match) => Number(match[1]));
   };
   assert.deepEqual(bindings("enumerateSupport1"), [6, 27, 28, 29, 32, 43]);
+  assert.deepEqual(bindings("extendBandPhi"), [0, 1, 5, 6, 12, 14, 19, 27, 31, 44, 47, 53],
+    "uniform/local-Delaunay Eikonal propagation uses two uniforms and the portable maximum ten storage bindings");
   const resolveBindings = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase)
     .match(/constresolveOwnerBindings=\[([\s\S]*?)\];/)?.[1];
   assert.ok(resolveBindings);
@@ -1160,7 +1216,7 @@ test("factor-4/factor-8 production schedule publishes and consumes the face-marc
     "the face band must reuse the exact Stage-B catalog source");
   assert.match(faceBand, /powerFaces:this\.powerFaces\.source/,
     "the completed face marcher must transactionally republish onto generalized power faces");
-  const republish = faceBand.indexOf("this.powerFaceSeed.encodePowerToAxis(encoder,this.powerOperator.control)");
+  const republish = faceBand.indexOf("this.powerFaceSeed.encodePowerToAxis(encoder,this.powerOperator.control,true)");
   const recapture = faceBand.indexOf("this.powerFaceTransfer?.encodeCapture(encoder)", republish);
   assert.ok(republish > faceBand.indexOf("this.globalFineFaceFastMarch.encodePhase(encoder") && recapture > republish,
     "the extrapolated power field must return to compact face transport and the exact topology-transfer snapshot");

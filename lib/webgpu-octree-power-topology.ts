@@ -6,6 +6,7 @@ import {
 } from "./generated/octree-power-catalog";
 import { OCTREE_POWER_CATALOG_FACE_FLOATS } from "./octree-power-catalog";
 import { OCTREE_POWER_ROW_METRIC_BYTES } from "./octree-power-operator";
+import { octreePowerCoarseMaskNeedsAcuteRepair } from "./octree-power-topology";
 
 export const OCTREE_POWER_TOPOLOGY_CONTROL_BYTES = 32;
 export const OCTREE_POWER_TOPOLOGY_VALID = 0x8000_0000;
@@ -86,9 +87,16 @@ export function planOctreePowerTopology(rowCapacityValue: number, catalog: Gener
       throw new RangeError("Power catalog lookup is invalid");
     }
   }
-  for (const direct of [catalog.sameOrFinerDirect, catalog.sameOrCoarserDirect]) for (const packed of direct) {
-    if (packed === 0xffff_ffff || (packed & 0xffff) >= entryCount || (packed >>> 16) >= 48) {
-      throw new RangeError("Power catalog direct lookup is invalid");
+  for (const packed of catalog.sameOrFinerDirect) if (packed === 0xffff_ffff
+    || (packed & 0xffff) >= entryCount || (packed >>> 16) >= 48) {
+    throw new RangeError("Power catalog same/finer direct lookup is invalid");
+  }
+  for (let descriptor = 0; descriptor < catalog.sameOrCoarserDirect.length; descriptor += 1) {
+    const packed = catalog.sameOrCoarserDirect[descriptor];
+    const gradingExclusion = octreePowerCoarseMaskNeedsAcuteRepair(descriptor >>> 3);
+    if (packed === 0xffff_ffff ? !gradingExclusion
+      : gradingExclusion || (packed & 0xffff) >= entryCount || (packed >>> 16) >= 48) {
+      throw new RangeError("Power catalog same/coarser acute-grading lookup is invalid");
     }
   }
   const metricBytes = rowCapacity * OCTREE_POWER_ROW_METRIC_BYTES;

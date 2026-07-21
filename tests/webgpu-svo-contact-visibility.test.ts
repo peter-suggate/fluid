@@ -20,7 +20,7 @@ test("contact visibility is production-compiled but default-off with a branch be
   const gate = contact.indexOf("if((dry.materialPublication.w&1u)==0u){return vec3f(1.0);}");
   const trace = contact.indexOf("svoTraceVisibility(");
   assert.ok(gate >= 0 && trace > gate, "the default gate must return before secondary SVO work");
-  assert.match(drySceneSource, /scene\.contactVisibilityEnabled \? 1 : 0/,
+  assert.match(drySceneSource, /scene\.contactVisibilityEnabled \? SVO_DRY_VISIBILITY_FLAGS\.exactContact : 0/,
     "omitting the capability must leave the contact bit clear");
   assert.doesNotMatch(drySceneSource, /contactVisibilityEnabled\s*:\s*true/,
     "no shipped scene may silently opt into the unaccepted timing cost");
@@ -58,7 +58,7 @@ test("contact radius, bias, and directions are finite, edge-aware, and temporall
 
 test("contact visibility attenuates indirect diffuse only and adds no storage binding", () => {
   const shade = shaderFunction("shadeDryOpaque", "shadeThinGlass");
-  assert.match(shade, /let contactVisibility=dryContactVisibility\(position,hit\.normal,hit\.featureId\)/);
+  assert.match(shade, /let contactVisibility=dryContactVisibility\(position,hit\.normal,hit\.featureId,hit\.ownerId\)/);
   assert.match(shade, /let diffuseEnvironment=[^;]*\*contactVisibility\/UNIFIED_PI/);
   assert.match(shade, /let specularEnvironment=dryEnvironment\(reflected,surface\.roughness\)\*fresnel/);
   assert.match(shade, /return max\(surface\.emissive\+diffuseEnvironment\+specularEnvironment\+direct,vec3f\(0\.0\)\)/);

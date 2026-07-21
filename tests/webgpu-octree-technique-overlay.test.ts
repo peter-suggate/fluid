@@ -19,9 +19,9 @@ test("paper-technique modes have stable non-legacy uniform codes", () => {
   assert.deepEqual([...OCTREE_TECHNIQUE_OVERLAY_MODES], [
     "power-cells", "power-faces", "delaunay-tetrahedra", "transition-band", "power-operator",
     "octree-lifecycle", "fine-band-lifecycle", "operator-diagonal", "operator-rhs",
-    "operator-reciprocity", "operator-open-fraction", "tetra-validity", "section5-face-band",
+    "operator-reciprocity", "operator-open-fraction", "tetra-validity", "section5-face-band", "global-fine-phi",
   ]);
-  assert.deepEqual(Object.values(OCTREE_TECHNIQUE_OVERLAY_CODES), [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
+  assert.deepEqual(Object.values(OCTREE_TECHNIQUE_OVERLAY_CODES), [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
   for (const mode of OCTREE_TECHNIQUE_OVERLAY_MODES) assert.equal(isOctreeTechniqueOverlayMode(mode), true);
   assert.equal(isOctreeTechniqueOverlayMode("structure"), false);
 });
@@ -35,6 +35,10 @@ test("technique overlay composes independently from live compact GPU buffers", (
   assert.match(overlaySource, /Octree Section 5 face-band overlay/);
   assert.match(overlaySource, /@binding\(7\) var<storage,read> transitionControl/,
     "the Section 5 overlay must stay within seven fragment storage bindings");
+  assert.match(overlaySource, /@binding\(8\) var<storage,read> finePhi:array<f32>/,
+    "the paper φ view must read the direct factor-m field without a CPU mirror");
+  assert.match(overlaySource, /abs\(length\(gradient\)-1\.0\)/,
+    "the paper φ view must expose the signed-distance Eikonal residual");
   assert.match(overlaySource, /first==f\.globalFace\|\|first==index/,
     "bounded owner telemetry must preserve the existing first-error spatial face highlight");
   assert.match(overlaySource, /var acceptedInk=0\.0;var trialInk=0\.0;var unresolvedInk=0\.0/,
@@ -83,10 +87,12 @@ test("render panel exposes the second-tranche lifecycle and validity audits", ()
   assert.match(panelSource, /paired endpoint\/sign and reverse-CSR incidence agree/);
   assert.match(panelSource, /area-weighted incident-face fraction/);
   assert.match(panelSource, /selector, degeneracy, or reconstructed-volume mismatch/);
-  assert.match(panelSource, /volume \{driftLabel\(physicalVolumeDrift\)\} · \{volumeSource\}/,
-    "the render cockpit must expose physical volume drift from the existing authoritative telemetry");
+  assert.match(panelSource, /\{globalFineVolumeEstimate \? "pre-correction occupancy" : "volume"\} \{driftLabel\(physicalVolumeDrift\)\} · \{volumeSource\}/,
+    "the render cockpit must identify global-fine drift as a pre-correction occupancy estimate");
   assert.match(panelSource, /represented \{driftLabel\(representedVolumeDrift\)\}/,
-    "the render cockpit must distinguish represented-volume drift");
+    "the render cockpit must retain represented-volume drift only when it is independent");
+  assert.match(panelSource, /engineering supplement, not part of the paper&apos;s Section 5 algorithm/,
+    "the implementation's optional global phi shift must not be attributed to the paper");
   assert.match(panelSource, /exact unresolved split: heap-bound trial, accepted-predecessor scheduler defect, or disconnected/,
     "the Section 5 legend must identify the solver-owned unresolved classifier");
 });
@@ -96,7 +102,7 @@ test("render panel makes paper structures explorable as slices or a full volume"
   assert.match(panelSource, />Slice</);
   assert.match(panelSource, />Full volume</);
   assert.match(panelSource, /setGridOverlayAxis\("volume"\)/);
-  assert.match(panelSource, /disabled=\{!octree \|\| !paperTechniqueMode\}/,
+  assert.match(panelSource, /disabled=\{!octree \|\| !paperVolumeCapable\}/,
     "legacy texture fields must remain slice-only");
   assert.match(panelSource, /Volume opacity/);
   assert.match(panelSource, /camera ray through the complete live structure with front-to-back alpha compositing/);

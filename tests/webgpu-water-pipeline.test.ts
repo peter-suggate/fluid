@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { OCTREE_SURFACE_LEAF_RECORD_BYTES } from "../lib/webgpu-octree-surface-pages";
+import {
+  OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
+  OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES,
+} from "../lib/webgpu-octree-power-coarse-levelset";
+import { SPARSE_SURFACE_CONTROL_BYTES } from "../lib/webgpu-sparse-surface-band";
 import {
   activeCubeCapacity,
   compositeShader,
@@ -12,6 +19,7 @@ import {
   surfaceExtractionRepresentation,
   surfaceExtractionShader,
   surfaceVertexCapacity,
+  WATER_SPARSE_FALLBACK_BYTES,
   WATER_INTERFACE_CULL_MODES
 } from "../lib/webgpu-water-pipeline";
 
@@ -83,8 +91,8 @@ test("adaptive octree pages drive the production mesh without a dense publicatio
   assert.match(surfaceExtractionShader, /fn extractAdaptiveMain/);
   assert.match(surfaceExtractionShader, /fn extractAdaptiveLeafMain/);
   assert.match(surfaceExtractionShader, /adaptiveArena\[adaptiveParams\.offsets1\.x\+4u\+item\]/);
-  assert.match(surfaceExtractionShader, /adaptiveOrigin\(leaf\.packedOrigin\)\*resolution\+local/);
-  assert.match(surfaceExtractionShader, /classifyCubeScaled\(vec3i\(adaptiveOrigin\(leaf\.packedOrigin\)\*resolution\),max\(1u,leaf\.size\*resolution\)\)/);
+  assert.match(surfaceExtractionShader, /adaptiveLeafOrigin\(leaf\)\*resolution\+local/);
+  assert.match(surfaceExtractionShader, /classifyCubeScaled\(vec3i\(adaptiveLeafOrigin\(leaf\)\*resolution\),max\(1u,leaf\.size\*resolution\)\)/);
   const leafExtraction = surfaceExtractionShader.match(/fn extractAdaptiveLeafMain[\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(leafExtraction, /\(leaf\.flags&32u\)==0u/,
     "all live affine leaves are presentation-authoritative even without a CORE residency hint");
@@ -95,6 +103,32 @@ test("adaptive octree pages drive the production mesh without a dense publicatio
   assert.doesNotMatch(surfaceExtractionShader.match(/fn extractAdaptiveMain[\s\S]*?\n\}/)?.[0] ?? "", /textureLoad\(volume/);
   assert.match(surfaceExtractionShader, /activeCubes: array<vec2u>/, "adaptive owner propagation must retain the 8-byte worklist record");
   assert.match(surfaceExtractionShader, /adaptiveOwnerRow = \(packedCube\.x >> 26u\)/, "polygonisation must restore the classifier's owner row from the existing record");
+});
+
+test("disabled water storage satisfies sparse-control, adaptive-leaf, and coarse-directory ABIs", () => {
+  assert.equal(SPARSE_SURFACE_CONTROL_BYTES, 16 * 4,
+    "the real allocator control and its stats readback publish sixteen words");
+  assert.equal(OCTREE_SURFACE_LEAF_RECORD_BYTES, 64,
+    "one adaptive leaf contains eight scalar words plus phi and motion vec4s");
+  assert.equal(
+    OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES
+      + OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
+    64,
+    "the compact coarse directory requires its header and at least one runtime-sized entry",
+  );
+  assert.equal(WATER_SPARSE_FALLBACK_BYTES,
+    Math.max(
+      SPARSE_SURFACE_CONTROL_BYTES,
+      OCTREE_SURFACE_LEAF_RECORD_BYTES,
+      OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES
+        + OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
+    ));
+  const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
+  assert.match(source,
+    /Water sparse-control fallback"\s*,\s*size:\s*WATER_SPARSE_FALLBACK_BYTES/,
+    "the buffer bound at adaptive-leaf binding 13 must not retain the obsolete 48-byte record size");
+  assert.match(source,
+    /binding:\s*13,\s*resource:\s*adaptive\?\.leaves\s*\?\?\s*\{\s*buffer:\s*this\.fallbackSparseControl\s*\}/);
 });
 
 test("the prepare kernel sizes the indirect polygonise dispatch from the worklist", () => {

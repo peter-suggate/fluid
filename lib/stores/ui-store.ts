@@ -1,6 +1,11 @@
 import { create } from "zustand";
 import { defaultCamera, type CameraState } from "../model";
-import { DEFAULT_SVO_RENDER_MODE, type SvoRenderMode } from "../svo-render-mode";
+import {
+  DEFAULT_SVO_LIGHTING_MODE,
+  DEFAULT_SVO_RENDER_MODE,
+  type SvoLightingMode,
+  type SvoRenderMode,
+} from "../svo-render-mode";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoCostOverlayMode } from "../svo-render-diagnostics";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 import type { VoxelRenderMode } from "../webgpu-voxel-debug";
@@ -23,6 +28,8 @@ interface UIStore {
   voxelRenderMode: VoxelRenderMode;
   /** Production scene presentation; independent of sparse inspection overlays. */
   svoRenderMode: SvoRenderMode;
+  /** Exact direct visibility or the generation-checked wide-mip cone cache. */
+  svoLightingMode: SvoLightingMode;
   svoCostOverlay: SvoCostOverlayMode;
   svoMaximumTraversalDepth: number;
   svoMaximumNodeVisits: number;
@@ -37,6 +44,7 @@ interface UIStore {
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setVoxelRenderMode: (mode: VoxelRenderMode) => void;
   setSvoRenderMode: (mode: SvoRenderMode) => void;
+  setSvoLightingMode: (mode: SvoLightingMode) => void;
   setSvoCostOverlay: (mode: SvoCostOverlayMode) => void;
   setSvoMaximumTraversalDepth: (depth: number) => void;
   setSvoMaximumNodeVisits: (visits: number) => void;
@@ -54,6 +62,7 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlayMode: "structure",
   voxelRenderMode: "smooth",
   svoRenderMode: DEFAULT_SVO_RENDER_MODE,
+  svoLightingMode: DEFAULT_SVO_LIGHTING_MODE,
   svoCostOverlay: DEFAULT_SVO_RENDER_DIAGNOSTICS.overlay,
   svoMaximumTraversalDepth: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumTraversalDepth,
   svoMaximumNodeVisits: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumNodeVisits,
@@ -71,6 +80,7 @@ export const useUIStore = create<UIStore>((set) => ({
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
   setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode }),
   setSvoRenderMode: (svoRenderMode) => set({ svoRenderMode }),
+  setSvoLightingMode: (svoLightingMode) => set({ svoLightingMode }),
   setSvoCostOverlay: (svoCostOverlay) => set({ svoCostOverlay }),
   setSvoMaximumTraversalDepth: (svoMaximumTraversalDepth) => set((state) => ({
     svoMaximumTraversalDepth: normalizeSvoRenderDiagnostics({

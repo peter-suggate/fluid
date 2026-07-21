@@ -51,6 +51,7 @@ function makeMinimalPowerPrepassSources(device: GPUDevice): {
   const faceSource: OctreePowerFaceSource = {
     plan: { rowCapacity: 1, faceCapacity: 1, incidenceCapacity: 2, faceBytes: 32,
       normalBytes: 16, centroidBytes: 16, quadratureBytes: 80, incidenceBytes: 16, workspaceBytes: 32,
+      boundaryQueryBytes: 32,
       hashCapacity: 1, hashBytes: 16, scanBlockCount: 1, scanBytes: 16,
       maximumHashProbes: 1, allocatedBytes: 208 },
     faces, faceNormals, faceCentroids, faceQuadrature: storage(80), incidenceRows, incidenceOffsets: incidenceRows,

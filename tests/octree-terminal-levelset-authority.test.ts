@@ -123,7 +123,7 @@ test("global-fine QA diagnostics read the published GPU controls without steerin
     "face-band rejection telemetry must retain the catalog-Delaunay gate preceding face emission");
   assert.match(diagnostics, /redistance\.control,0,readback,720,48/,
     "redistance rejection telemetry must retain its complete twelve-word control");
-  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:768/,
+  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:800/,
     "the compact evidence packet accounts for the final controls and bounded transition failure payload");
   assert.match(diagnostics, /this\.globalFineFaceFastMarch\.pointFieldControl,0,readback,560,32/,
     "final cell-centre LS failures must be attributable independently of graph construction");

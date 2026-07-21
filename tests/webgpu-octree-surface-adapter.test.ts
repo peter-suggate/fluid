@@ -18,16 +18,16 @@ test("surface adapter allocation follows compact rows, not domain depth", () => 
   const plan = planOctreeSurfaceAdapter(100);
   assert.deepEqual(plan, {
     rowCapacity: 100,
-    leafBytes: 4_800,
+    leafBytes: 6_400,
     candidateBytes: 800,
-    allocatedBytes: 10_640,
+    allocatedBytes: 13_840,
   });
   assert.equal(planOctreeSurfaceAdapter(100).allocatedBytes, plan.allocatedBytes);
   assert.throws(() => planOctreeSurfaceAdapter(0), /must be positive/);
 });
 
 test("adapter shader publishes the SurfaceLeaf and indirect candidate ABIs", () => {
-  assert.match(octreeSurfaceAdapterShader, /struct SurfaceLeaf \{ packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f \}/);
+  assert.match(octreeSurfaceAdapterShader, /struct SurfaceLeaf \{ originX:u32,originY:u32,originZ:u32,size:u32,flags:u32/);
   assert.match(octreeSurfaceAdapterShader, /row<rowControl\[0\]/,
     "surface indexing must consume the compact pressure row count directly");
   assert.match(octreeSurfaceAdapterShader, /fn sampleMotionComponent/);
@@ -39,6 +39,11 @@ test("adapter shader publishes the SurfaceLeaf and indirect candidate ABIs", () 
     "pressure/topology overflow must reject the candidate generation");
   assert.match(octreeSurfaceAdapterShader, /let flags=LIVE\|candidateFlags/,
     "all live leaves must remain hash-addressable even when they have no fine page");
+  assert.match(octreeSurfaceAdapterShader,
+    /fn airCellKey\(p:vec3u\)->u32\{return p\.x\+dims\(\)\.x\*\(p\.y\+dims\(\)\.y\*p\.z\)\+1u;\}/,
+    "previous-generation air aliases retain exact linear identities beyond coordinate 1023");
+  assert.doesNotMatch(octreeSurfaceAdapterShader, /p\.x\|\(p\.y<<10u\)/,
+    "previous-generation air lookup must not use a 10:10:10 key");
   assert.match(WebGPUOctreeSurfaceAdapter.toString().replace(/\s+/g, ""),
     /mappedAtCreation:true[\s\S]*rowCapacity/,
     "the immutable candidate control template carries dispatch, validity, and capacity words");
@@ -105,16 +110,16 @@ test("Dawn adapts live compact rows into surface pages without dense allocations
     { texture: levelSet }, bytes(phiUpload), { bytesPerRow: 256, rowsPerImage: 1 }, [4, 1, 1],
   );
   const faceControl = make(new Uint32Array([1, 0, 1, 2, 1, 0]));
-  const faceData = new ArrayBuffer(24), faceU32 = new Uint32Array(faceData), faceF32 = new Float32Array(faceData);
-  faceU32.set([0, 1, 1, 4]); faceF32[4] = 3; faceF32[5] = 1;
+  const faceData = new ArrayBuffer(32), faceU32 = new Uint32Array(faceData), faceF32 = new Float32Array(faceData);
+  faceU32.set([0, 1, 1, 0, 0, 4]); faceF32[6] = 3; faceF32[7] = 1;
   const faces = make(new Uint8Array(faceData));
-  const incidenceWords = new Uint32Array(50);
+  const incidenceWords = new Uint32Array(98);
   incidenceWords[0] = 1; incidenceWords[1] = 1;
-  incidenceWords[2] = 0; incidenceWords[26] = 0;
+  incidenceWords[2] = 0; incidenceWords[50] = 0;
   const incidence = make(incidenceWords);
   const parity = make(new Uint32Array(8));
   const faceSource: OctreeFaceMirrorSource = {
-    plan: { rowCapacity: 2, faceCapacity: 1, faceBytes: 24, incidenceBytes: 200, allocatedBytes: 284 },
+    plan: { rowCapacity: 2, faceCapacity: 1, faceBytes: 32, incidenceBytes: 392, allocatedBytes: 484 },
     control: faceControl, faces, incidence, parity,
   };
   device.pushErrorScope("validation"); device.pushErrorScope("internal");
@@ -131,10 +136,10 @@ test("Dawn adapts live compact rows into surface pages without dense allocations
     const encoder = device.createCommandEncoder();
     surfaceAdapter.encode(encoder);
     pages.encodeLifecycle(encoder);
-    const leafReadback = device.createBuffer({ size: 96, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const leafReadback = device.createBuffer({ size: 128, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const candidateReadback = device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const arenaReadback = device.createBuffer({ size: pages.plan.arenaBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    encoder.copyBufferToBuffer(surfaceAdapter.leaves, 0, leafReadback, 0, 96);
+    encoder.copyBufferToBuffer(surfaceAdapter.leaves, 0, leafReadback, 0, 128);
     encoder.copyBufferToBuffer(surfaceAdapter.countAndDispatch, 0, candidateReadback, 0, 32);
     encoder.copyBufferToBuffer(surfaceAdapter.candidates, 0, candidateReadback, 32, 16);
     encoder.copyBufferToBuffer(pages.arena, 0, arenaReadback, 0, pages.plan.arenaBytes);
@@ -164,10 +169,10 @@ test("Dawn adapts live compact rows into surface pages without dense allocations
       { row: 0, flags: OCTREE_SURFACE_STATE.halo },
       { row: 1, flags: OCTREE_SURFACE_STATE.core },
     ]);
-    assert.equal(leafWords[0], 0); assert.equal(leafWords[1], 1);
-    assert.equal(leafWords[12], 1); assert.equal(leafWords[13], 1);
-    assert.equal(leafFloats[8], 3); assert.equal(leafFloats[9], 0); assert.equal(leafFloats[10], 0);
-    assert.equal(leafFloats[20], 3); assert.equal(leafFloats[23], 3);
+    assert.deepEqual([...leafWords.slice(0, 4)], [0, 0, 0, 1]);
+    assert.deepEqual([...leafWords.slice(16, 20)], [1, 0, 0, 1]);
+    assert.equal(leafFloats[12], 3); assert.equal(leafFloats[13], 0); assert.equal(leafFloats[14], 0);
+    assert.equal(leafFloats[28], 3); assert.equal(leafFloats[31], 3);
     const arenaWords = new Uint32Array(arenaCopy);
     assert.equal(arenaWords[3], 0, "surface lifecycle must remain authoritative");
     assert.equal(arenaWords[6], 2, "adapter candidates must activate both pages");

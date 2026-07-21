@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { WebGPUOctreePhiDifferential } from "../lib/webgpu-octree-phi-diagnostic";
+import { WebGPUOctreePhiDifferential, pagedPhiDifferentialShader } from "../lib/webgpu-octree-phi-diagnostic";
 import { planOctreeSurfacePages, type OctreeSurfacePageSource } from "../lib/webgpu-octree-surface-pages";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
+
+test("paged-phi diagnostic resolves full-domain air-alias identities", () => {
+  assert.match(pagedPhiDifferentialShader,
+    /fn airCellKey\(p:vec3u\)->u32\{return p\.x\+params\.dimsTile\.x\*\(p\.y\+params\.dimsTile\.y\*p\.z\)\+1u;\}/);
+  assert.match(pagedPhiDifferentialShader, /let key=airCellKey\(p\)/);
+  assert.doesNotMatch(pagedPhiDifferentialShader, /p\.x\|\(p\.y<<10u\)/,
+    "diagnostics must query the same exact linear key as surface publication");
+});
 
 function bytes(data: ArrayBufferView): Uint8Array<ArrayBuffer> {
   const result = new Uint8Array(data.byteLength);
@@ -29,8 +37,8 @@ test("Dawn differential reports exact tile coverage, fallbacks, error, and worst
   arenaWords.fill(0xffff_ffff, plan.pageTableOffsetWords, plan.pageTableOffsetWords + plan.leafCapacity);
   arenaWords[plan.hashOffsetWords] = 1;
   const arena = device.createBuffer({ size: plan.arenaBytes, usage: storage }); device.queue.writeBuffer(arena, 0, arenaWords);
-  const leafData = new ArrayBuffer(plan.leafCapacity * 48), leafU32 = new Uint32Array(leafData), leafF32 = new Float32Array(leafData);
-  leafU32.set([0, 4, 1 << 5, 0]); leafF32.set([0, 1, 0, 0], 4);
+  const leafData = new ArrayBuffer(plan.leafCapacity * 64), leafU32 = new Uint32Array(leafData), leafF32 = new Float32Array(leafData);
+  leafU32.set([0, 0, 0, 4, 1 << 5, 0, 0, 0]); leafF32.set([0, 1, 0, 0], 8);
   const leaves = device.createBuffer({ size: leafData.byteLength, usage: storage }); device.queue.writeBuffer(leaves, 0, bytes(new Uint8Array(leafData)));
   const worklistWords = new Uint32Array(32); worklistWords[0] = 1; worklistWords[1] = 1; worklistWords[16] = 0;
   const worklist = device.createBuffer({ size: 128, usage: storage }); device.queue.writeBuffer(worklist, 0, worklistWords);

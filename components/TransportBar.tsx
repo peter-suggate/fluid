@@ -11,6 +11,7 @@ import { useMethodStore } from "@/lib/stores/method-store";
 import { PRESENTATION_FPS, frameInterval_ms } from "@/lib/frame-pacing";
 import { requestManualGPUStop } from "@/lib/gpu-startup";
 import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
+import { planSceneRuntime } from "@/lib/scene-runtime";
 
 function TimingSlider({ label, unit, value, min, max, step, integer = false, detail, onCommit, disabled = false }: { label: string; unit: string; value: number; min: number; max: number; step: number; integer?: boolean; detail: (value: number) => string; onCommit: (value: number) => void; disabled?: boolean }) {
   const [draft, setDraft] = useState(value);
@@ -36,6 +37,7 @@ export function TransportBar() {
   const simRate = useRuntimeStore((state) => state.simRate);
   const maxDt = useSceneStore((state) => state.scene.numerics.maxDt_s);
   const fixedDt = useSceneStore((state) => state.scene.numerics.fixedDt_s);
+  const staticRenderScene = useSceneStore((state) => !planSceneRuntime(state.scene).fluidSolver);
   const patchNumerics = useSceneStore((state) => state.patchNumerics);
   const gpuLag = useDiagnosticsStore((state) => state.gpuInfo?.simulationLag_s);
   const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
@@ -55,7 +57,7 @@ export function TransportBar() {
   const applyingGPUSettings = gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild";
   const initialSceneReady = methodId !== "octree" || (gpuInfo?.initialSparseAuthorityReady === true
     && gpuInfo?.initialRasterSurfaceReady === true);
-  const transportLocked = webgpu && (gpuStatus.state !== "ready" || !initialSceneReady);
+  const transportLocked = staticRenderScene || (webgpu && (gpuStatus.state !== "ready" || !initialSceneReady));
   const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
   const fixedRate_hz = 1 / fixedDt;
   const gpuStepRate_hz = 1 / maxDt;
@@ -94,7 +96,7 @@ export function TransportBar() {
   return (
     <footer className="transport-bar">
       <div className="transport-controls">
-        <button disabled={transportLocked || browserSafetyLocked} className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : safeBringup ? "Continuous play is disabled during bounded GPU bring-up" : transportLocked ? "Simulation controls unlock after the initial GPU scene is ready" : runState === "running" ? "Pause simulation" : "Play simulation"}>{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
+        <button disabled={transportLocked || browserSafetyLocked} className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : staticRenderScene ? "Fluid simulation is disabled for this renderer validation scene" : safeBringup ? "Continuous play is disabled during bounded GPU bring-up" : transportLocked ? "Simulation controls unlock after the initial GPU scene is ready" : runState === "running" ? "Pause simulation" : "Play simulation"}>{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
         <button disabled={browserPolicyPending || transportLocked || safeStepLocked} onClick={() => { if (safeBringup) setSafeStepRequested(true); simulation.singleStep(); }} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : transportLocked ? "Single step unavailable until the initial GPU scene is ready" : safeStepLocked ? "The bounded browser GPU step has already been requested" : "Single fluid clock step"}>STEP</button>
         <button disabled={browserSafetyLocked} onClick={() => {
           if (recordingStatus === "recording") simulationRecording.stop(simulation.time());
@@ -118,7 +120,9 @@ export function TransportBar() {
           <TimingSlider disabled={transportLocked || browserSafetyLocked} key={`fixed-${fixedDt}`} label="FIXED STEP" unit="Hz" value={fixedRate_hz} min={Math.min(30, fixedRate_hz)} max={Math.max(2000, fixedRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms rigid`} onCommit={commitFixedRate} />
           <TimingSlider disabled={transportLocked || browserSafetyLocked} key={`gpu-${fixedDt}-${maxDt}`} label="GPU STEP" unit="Hz" value={gpuStepRate_hz} min={1} max={fixedRate_hz} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms max`} onCommit={commitGpuStepRate} />
         </div>
-        {webgpu
+        {staticRenderScene
+          ? <span className="continuous-run" title="This preset initializes the static sparse scene and renderer only.">STATIC SVO · FLUID SOLVER DISABLED</span>
+          : webgpu
           ? <span className="continuous-run" title={`Physics fills measured GPU slack between presentations · present every ${frameInterval_ms().toFixed(2)} ms · rigid step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>MAX SIM THROUGHPUT · PRESENT {PRESENTATION_FPS} FPS</span>
           : <span className="continuous-run" title={`CPU reference simulation · present every ${frameInterval_ms().toFixed(2)} ms · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT {PRESENTATION_FPS} FPS</span>}
       </div>

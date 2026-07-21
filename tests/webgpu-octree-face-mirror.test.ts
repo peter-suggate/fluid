@@ -13,7 +13,7 @@ import { WebGPUUniformEulerianSolver } from "../lib/webgpu-uniform-eulerian";
 
 test("octree face mirror has a compact bounded ABI", () => {
   const plan = planOctreeFaceMirror(1024);
-  assert.equal(OCTREE_GPU_FACE_RECORD_BYTES, 24);
+  assert.equal(OCTREE_GPU_FACE_RECORD_BYTES, 32);
   assert.equal(OCTREE_GPU_FACE_INCIDENCE_PER_ROW, 48);
   assert.equal(OCTREE_GPU_FACE_CANDIDATES_PER_ROW, 24);
   assert.equal(plan.faceCapacity, 24_576);
@@ -51,6 +51,8 @@ test("GPU face store deterministically publishes canonical orientation and signe
   assert.match(octreeFaceMirrorShader, /!neighborLiquid\|\|side>0/,
     "internal faces must publish only from their spatially negative leaf");
   assert.match(octreeFaceMirrorShader, /negativeRow: u32, positiveRow: u32/);
+  assert.match(octreeFaceMirrorShader, /originX: u32, originY: u32, originZ: u32/);
+  assert.doesNotMatch(octreeFaceMirrorShader, /face\.packedOrigin/);
   assert.match(octreeFaceMirrorShader, /appendIncidence\(negative,faceIndex\);appendIncidence\(positive,faceIndex\)/);
   assert.match(octreeFaceMirrorShader, /fn countFaces/);
   assert.match(octreeFaceMirrorShader, /fn scanFaceCounts/);
@@ -84,6 +86,10 @@ test("face classification switches from dense bootstrap to authoritative surface
   assert.match(octreeFaceMirrorShader, /r==2u\|\|r==4u/);
   assert.match(octreeFaceMirrorShader, /surfaceArena\[6\]>0u/);
   assert.match(octreeFaceMirrorShader, /if\(!pagedPhiAvailable\(\)\)\{return textureLoad\(levelSetIn,p,0\)\.x;\}/);
+  assert.match(octreeFaceMirrorShader, /fn airCellKey\(p: vec3u\) -> u32 \{ return index\(p\) \+ 1u; \}/,
+    "face classification must query the exact full-domain linear air-alias key");
+  assert.doesNotMatch(octreeFaceMirrorShader, /p\.x \| \(p\.y << 10u\)/,
+    "face classification must not truncate air-side coordinates to 10:10:10");
   assert.match(octreeFaceMirrorShader, /!surfaceContains\(leaf,point\)/,
     "air-side face classification must continue the owner plane beyond its page rather than clamp liquid phi");
   assert.equal(typeof WebGPUOctreeFaceMirror.prototype.setSurfacePageSource, "function");

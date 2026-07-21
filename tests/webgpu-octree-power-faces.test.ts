@@ -16,6 +16,7 @@ import {
   OCTREE_POWER_FACE_WORLD_BOUNDARY_SHIFT,
   WebGPUOctreePowerFaces,
   octreePowerClosedBoundaryMask,
+  octreePowerBoundaryPhiShader,
   octreePowerFaceShader,
   planOctreePowerFaces,
   unpackOctreePowerFaceControl,
@@ -44,8 +45,9 @@ test("power-face planner allocates compact live face and incidence stores", () =
   assert.equal(plan.workspaceBytes, 101 * 16);
   assert.equal(plan.hashCapacity, 256);
   assert.equal(plan.scanBlockCount, 1);
+  assert.equal(plan.boundaryQueryBytes, 640 * 32);
   assert.equal(plan.allocatedBytes, plan.faceBytes + plan.normalBytes + plan.centroidBytes + plan.quadratureBytes + plan.incidenceBytes + plan.workspaceBytes
-    + plan.hashBytes + plan.scanBytes + 64 + 64);
+    + plan.hashBytes + plan.scanBytes + plan.boundaryQueryBytes + 64 + 96);
   assert.throws(() => planOctreePowerFaces(1, 2, 5), /two incidences/);
 });
 
@@ -59,7 +61,7 @@ test("power-face boundary policy preserves geometric world identity and scene-op
     "power-face construction must receive the authored container policy used by the Section 5 face band");
 
   const compactShader = octreePowerFaceShader.replace(/\s+/g, "");
-  assert.match(compactShader, /structParams\{dimensionsRowCount:vec4u,capacitiesGeneration:vec4u,physical:vec4f,boundaryPolicy:vec4u\}/);
+  assert.match(compactShader, /structParams\{dimensionsRowCount:vec4u,capacitiesGeneration:vec4u,physical:vec4f,boundaryPolicy:vec4u,containerFill:vec4f,phiPolicy:vec4u\}/);
   assert.match(compactShader,
     /letgeometricWorld=world&declared;if\(geometricWorld!=0u\)\{letopen=select\(OPEN_BOUNDARY,0u,\(params\.boundaryPolicy\.x&geometricWorld\)!=0u\);returnBOUNDARY\|open\|\(geometricWorld<<WORLD_BOUNDARY_SHIFT\)/,
     "catalog boundary bits identify world geometry while the scene mask alone selects open versus closed");
@@ -68,6 +70,32 @@ test("power-face boundary policy preserves geometric world identity and scene-op
   assert.match(compactShader,
     /letworld=\(face\.flags>>WORLD_BOUNDARY_SHIFT\)&63u;if\(world!=0u\).*letboundaryDistance=dot\(geometry\.centroid-rowCenter\(face\.negativeRow\),geometry\.normal\).*face\.inverseDistance=1\.0\/boundaryDistance/s,
     "an open world plane uses exact row-centre-to-boundary distance instead of free-surface theta");
+});
+
+test("power free-surface coefficients use actual signed cell-centre phi without repair or floor", () => {
+  const geometry = octreePowerFaceShader.replace(/\s+/g, "");
+  const sampler = octreePowerBoundaryPhiShader.replace(/\s+/g, "");
+  assert.match(geometry,
+    /BoundaryPhiQuery\(vec4f\(rowCenter\(face\.negativeRow\),1\.0\),vec4f\(geometry\.neighborCenter,1\.0\)\)/,
+    "geometry must publish the actual liquid and absent-air power-cell centres");
+  assert.match(sampler, /letliquid=sampleAuthority\(query\.liquidCenter\.xyz\);letair=sampleAuthority\(query\.airCenter\.xyz\)/,
+    "both pressure samples must come from the selected signed-distance authority");
+  assert.match(sampler, /lettheta=\(-liquid\.x\)\/\(air\.x-liquid\.x\)/,
+    "the Ghost Fluid fraction must use the two signed cell-centre values");
+  assert.doesNotMatch(sampler, /abs\(liquid\.x\)|abs\(air\.x\)|clamp\([^)]*theta|0\.05/,
+    "authoritative power pressure must not repair signs or floor theta");
+  assert.match(sampler, /if\(liquid\.y==0\.0\|\|air\.y==0\.0\)\{failBoundary/,
+    "missing narrow-band support must reject publication rather than estimate phi");
+  assert.match(sampler, /worklist\[1\]!=fineParams\.generation\|\|worklist\[3\]!=1u\|\|worklist\[4\]!=1u/,
+    "fine pressure sampling must require the current all-or-nothing GPU publication header");
+  assert.match(octreeProjectionSource,
+    /const boundaryFine = this\.globalFineBootstrapped\s*\? \(this\.globalFineCurrentIsA \? this\.globalFineSourceA : this\.globalFineSourceB\)\s*:\s*this\.globalFineSourceA/,
+    "pressure assembly must bind the current fine generation, with source A used only as the analytic bootstrap binding");
+  assert.match(octreeProjectionSource,
+    /mode: this\.globalFineBootstrapped \? "fine" as const : "analytic" as const/,
+    "only the cold operator may use the authored analytic signed distance");
+  const bindings = [...octreePowerBoundaryPhiShader.matchAll(/@binding\((\d+)\)/g)].map((match) => Number(match[1]));
+  assert.equal(new Set(bindings).size, 10, "boundary sampling stays at the practical ten-binding ceiling");
 });
 
 test("Dawn site hash and block scan scale across blocks with world-boundary identity", {
@@ -223,10 +251,9 @@ test("power-face WGSL uses count/scan/emit and no atomic public append", () => {
   assert.match(octreePowerFaceShader, /rows\[row\]\.faceOffset\+localFace/);
   assert.doesNotMatch(octreePowerFaceShader, /atomicAdd\(&control\.faceCount/);
   assert.match(octreePowerFaceShader, /PowerFaceRecord\(row,neighbor,geometryCode,flags,0\.0,geometry\.area,geometry\.inverseDistance,1\.0\)/);
-  assert.match(octreePowerFaceShader, /airPhi=abs\(liquidPhi\+dot\(phiField\.xyz,deltaGrid\)\)/);
-  assert.match(octreePowerFaceShader, /abs\(liquidPhi\)\/max\(abs\(liquidPhi\)\+abs\(airPhi\)/);
-  assert.match(octreePowerFaceShader, /clamp\(abs\(liquidPhi\)\/max\(abs\(liquidPhi\)\+abs\(airPhi\),1e-12\),0\.05,1\.0\)/,
-    "generalized CSR and projection must share the bounded 20x ghost coefficient");
+  assert.match(octreePowerFaceShader, /fn buildPowerBoundaryPhiQueries/);
+  assert.doesNotMatch(octreePowerFaceShader, /airPhi=abs|liquidPhi\+dot|0\.05/,
+    "face geometry must not synthesize or floor a free-surface coefficient");
 });
 
 test("Dawn emits stable unique power faces and reciprocal compact incidence", {

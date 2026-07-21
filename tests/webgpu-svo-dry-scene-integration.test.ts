@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
-import { DEFAULT_SVO_RENDER_MODE } from "../lib/svo-render-mode";
+import { DEFAULT_SVO_LIGHTING_MODE, DEFAULT_SVO_RENDER_MODE } from "../lib/svo-render-mode";
 import {
   canConsumeSparseVoxelPrimitiveCandidates,
   canEncodeSparseVoxelDryScene,
@@ -27,10 +27,11 @@ function expectSource(source: string, pattern: RegExp, message: string): void {
 
 test("raster presentation is the default while SVO remains selectable", () => {
   assert.equal(DEFAULT_SVO_RENDER_MODE, "raster");
+  assert.equal(DEFAULT_SVO_LIGHTING_MODE, "cone");
   expectSource(rendererSource, /svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE/,
     "callers which do not opt in must use the bounded raster presentation");
-  expectSource(rendererSource, /import \{ DEFAULT_SVO_RENDER_MODE, type SvoRenderMode \} from "\.\/svo-render-mode"/,
-    "renderer must consume the canonical SvoRenderMode toggle");
+  expectSource(rendererSource, /DEFAULT_SVO_LIGHTING_MODE[^]*DEFAULT_SVO_RENDER_MODE[^]*type SvoLightingMode[^]*type SvoRenderMode[^]*from "\.\/svo-render-mode"/,
+    "renderer must consume the canonical render and lighting toggles");
 });
 
 test("the water pipeline replacement callback is fail-safe and replaces rather than overlays raster", () => {
@@ -69,7 +70,7 @@ test("the direct renderer exposes a source-aware replacement texture contract", 
     "candidate leaves must use the shared five-kind analytic ray contract");
   assert.doesNotMatch(primitiveHit, /svoEvaluatePrimitive|svoPrimitiveDistance_m|svoEllipsoidClosestPoint_m/,
     "ray hits must not run the bounded ellipsoid closest-point distance solve to recover a normal");
-  assert.match(drySceneSource, /fn nearestBody\([^]*bodyBoundingSphereVisible\(ro,rd,body,0\.0,best\.t\)/,
+  assert.match(drySceneSource, /fn nearestBodyIgnoring\([^]*bodyBoundingSphereVisible\(ro,rd,body,0\.0,best\.t\)/,
     "primary rays must reject distant dynamic bodies in world space before exact local intersection");
   for (const binding of ["structural.control", "structural.nodes", "structural.leaves", "structural.materialOwners", "structural.publication.state", "source.pbrMaterials!.binding"]) {
     assert.ok(drySceneSource.includes(binding), `direct rendering must bind ${binding}`);
@@ -77,8 +78,13 @@ test("the direct renderer exposes a source-aware replacement texture contract", 
 });
 
 test("every dry-shader group-zero declaration has one layout and bind-group entry", () => {
-  const declarations = [...svoDrySceneShader.matchAll(/@group\(0\)\s+@binding\((\d+)\)\s+var<(uniform|storage,\s*read)>/g)]
-    .map((match) => ({ binding: Number(match[1]), type: match[2] === "uniform" ? "uniform" : "read-only-storage" }))
+  const declarations = [...svoDrySceneShader.matchAll(/@group\(0\)\s+@binding\((\d+)\)\s+var(?:(?:<(uniform|storage,\s*read)>)|\s+[^:]+:\s*(texture_3d<f32>|texture_2d<u32>|sampler))/g)]
+    .map((match) => ({
+      binding: Number(match[1]),
+      type: match[2] === "uniform" ? "uniform" : match[2] ? "read-only-storage"
+        : match[3] === "texture_3d<f32>" ? "texture-3d-float"
+        : match[3] === "texture_2d<u32>" ? "texture-2d-uint" : "filtering-sampler",
+    }))
     .sort((a, b) => a.binding - b.binding);
   assert.deepEqual(declarations, [...SVO_DRY_SCENE_BINDING_CONTRACT],
     "the production layout contract must enumerate every shader declaration, including optional uniform binders");
@@ -92,6 +98,12 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
     "every declared/layout binding must have a resource in the sole production bind-group variant");
   assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length, 10,
     "optional uniform binders must not exceed the portable fragment storage limit");
+  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-3).map(({ binding, type }) => [binding, type]), [
+    [16, "texture-3d-float"], [17, "filtering-sampler"], [18, "texture-2d-uint"],
+  ], "cone lighting must consume sampled resources rather than an eleventh fragment storage buffer");
+  assert.match(drySceneSource, /nodeMip\?\.view \?\? this\.nodeMipFallbackAtlasView/);
+  assert.match(drySceneSource, /nodeMip\?\.sampler \?\? this\.nodeMipFallbackSampler/);
+  assert.match(drySceneSource, /nodeMip\?\.directoryView \?\? this\.nodeMipFallbackDirectoryView/);
 });
 
 test("unavailable structural fields fail over to raster before GPU encoding", () => {

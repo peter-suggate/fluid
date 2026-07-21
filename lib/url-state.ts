@@ -5,7 +5,14 @@ import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets } f
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
 import { useUIStore, type RightPanel } from "./stores/ui-store";
-import { DEFAULT_SVO_RENDER_MODE, isSvoRenderMode, type SvoRenderMode } from "./svo-render-mode";
+import {
+  DEFAULT_SVO_LIGHTING_MODE,
+  DEFAULT_SVO_RENDER_MODE,
+  isSvoLightingMode,
+  isSvoRenderMode,
+  type SvoLightingMode,
+  type SvoRenderMode,
+} from "./svo-render-mode";
 import type { GPUQuality } from "./tall-cell-grid";
 import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
 import type { VoxelRenderMode } from "./webgpu-voxel-debug";
@@ -61,6 +68,7 @@ type UIQueryState = {
   gridOverlayMode: GridOverlayMode;
   voxelRenderMode: VoxelRenderMode;
   svoRenderMode: SvoRenderMode;
+  svoLightingMode: SvoLightingMode;
 };
 
 type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
@@ -165,6 +173,7 @@ export function parseQueryState(search: string): QueryState {
   const gridMode = query.get("gridMode");
   const voxels = query.get("voxels");
   const render = query.get("render");
+  const svoLighting = query.get("svoLighting");
   const requestedPanel = query.get("panel");
   // One-way migration for shared pre-sidebar links. Serialization always emits
   // the mutually exclusive panel state instead of restoring the old UI flag.
@@ -199,7 +208,8 @@ export function parseQueryState(search: string): QueryState {
         : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "surface" || gridMode === "faces" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || (gridMode !== null && isOctreeTechniqueOverlayMode(gridMode)) ? gridMode : initialUI.gridOverlayMode,
       voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode,
-      svoRenderMode: isSvoRenderMode(render) ? render : DEFAULT_SVO_RENDER_MODE
+      svoRenderMode: isSvoRenderMode(render) ? render : DEFAULT_SVO_RENDER_MODE,
+      svoLightingMode: isSvoLightingMode(svoLighting) ? svoLighting : DEFAULT_SVO_LIGHTING_MODE,
     }
   };
 }
@@ -207,7 +217,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "panel"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === "render" || key === "voxels" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === "render" || key === "svoLighting" || key === "voxels" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
@@ -224,6 +234,7 @@ export function serializeQueryState(
   query.set("scene", sceneState.presetId);
   query.set("quality", methodState.quality);
   if (uiState.svoRenderMode !== DEFAULT_SVO_RENDER_MODE) query.set("render", uiState.svoRenderMode);
+  if (uiState.svoLightingMode !== DEFAULT_SVO_LIGHTING_MODE) query.set("svoLighting", uiState.svoLightingMode);
   if (uiState.voxelRenderMode !== "smooth") query.set("voxels", uiState.voxelRenderMode);
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");

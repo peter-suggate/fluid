@@ -22,7 +22,7 @@ test("generated power catalog carries a verified format version and content hash
   const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   const header = new Uint32Array(data, 0, 24);
 
-  assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.generatorVersion, 2);
+  assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.generatorVersion, 3);
   assert.match(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.generatorHash, /^[0-9a-f]{64}$/);
   assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.binarySha256, hash);
   assert.equal(header[0], OCTREE_GENERATED_POWER_CATALOG_MAGIC);

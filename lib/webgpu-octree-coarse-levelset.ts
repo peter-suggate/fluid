@@ -203,7 +203,7 @@ export class WebGPUOctreeCoarseLevelSet {
 export const octreeCoarsePhiCorrectionShader = /* wgsl */ `
 struct Params { rowCount:u32, contributionCount:u32, rowCapacity:u32, maximumPerRow:u32, generation:u32, pad0:u32, pad1:u32, pad2:u32 }
 struct CoarsePhi { phi:f32, minimumPhi:f32, maximumPhi:f32, flags:u32 }
-struct SurfaceLeaf { packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f }
+struct SurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct FineContribution { phi:f32, distanceSquared:f32, valid:u32, pad:u32 }
 struct Control { flags:atomic<u32>, firstErrorRow:atomic<u32>, rowCount:u32, contributionCount:u32, correctedRows:atomic<u32>, interfaceRows:atomic<u32>, generation:u32, reserved:u32 }
 @group(0) @binding(0) var<uniform> params:Params;

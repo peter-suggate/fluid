@@ -50,7 +50,7 @@ test("factor-8 B4 source contracts map, activate, redistance, summarize, and gat
     /new WebGPUOctreeFaceFastMarch\([\s\S]*?this\.powerFaces\.plan\.faceCapacity/,
     "the factor-8 face marcher must retain the bounded generalized-face capacity");
   assert.match(projection,
-    /this\.globalFineFaceFastMarch\.encode\([\s\S]*?powerFaces:\s*this\.powerFaces\.source/,
+    /this\.globalFineFaceFastMarch\.encodePhase\([\s\S]*?powerFaces:\s*this\.powerFaces\.source/,
     "the production factor-8 publication must receive the authoritative power-face source");
 });
 
@@ -72,12 +72,12 @@ test("Dawn publishes a production-sized factor-8 interface and one-ring with bou
   // One compact SurfaceLeaf per x/z column along a horizontal interface.
   // At factor eight each leaf covers 2^3 globally keyed bricks; the topology
   // pass must deduplicate these and add the paper's complete block one-ring.
-  const leafCount = 60 * 40; const leafBytes = new ArrayBuffer(leafCount * 48);
+  const leafCount = 60 * 40; const leafBytes = new ArrayBuffer(leafCount * 64);
   const words = new Uint32Array(leafBytes); const floats = new Float32Array(leafBytes);
   for (let z = 0; z < 40; z += 1) for (let x = 0; x < 60; x += 1) {
-    const row = x + 60 * z, base = row * 12;
-    words[base] = x | (10 << 10) | (z << 20); words[base + 1] = 1; words[base + 2] = 2;
-    floats[base + 4] = 0; floats[base + 6] = 1;
+    const row = x + 60 * z, base = row * 16;
+    words[base] = x; words[base + 1] = 10; words[base + 2] = z; words[base + 3] = 1; words[base + 4] = 2;
+    floats[base + 8] = 0; floats[base + 10] = 1;
   }
   const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   const leaves = device.createBuffer({ size: leafBytes.byteLength, usage: storage });

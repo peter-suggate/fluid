@@ -19,6 +19,8 @@ export function VisualPanel() {
   const setVoxelRenderMode = useUIStore((state) => state.setVoxelRenderMode);
   const svoRenderMode = useUIStore((state) => state.svoRenderMode);
   const setSvoRenderMode = useUIStore((state) => state.setSvoRenderMode);
+  const svoLightingMode = useUIStore((state) => state.svoLightingMode);
+  const setSvoLightingMode = useUIStore((state) => state.setSvoLightingMode);
   const svoCostOverlay = useUIStore((state) => state.svoCostOverlay);
   const setSvoCostOverlay = useUIStore((state) => state.setSvoCostOverlay);
   const svoMaximumTraversalDepth = useUIStore((state) => state.svoMaximumTraversalDepth);
@@ -44,10 +46,13 @@ export function VisualPanel() {
   const volumeOpacity = Math.max(0.05, gridOverlaySlice);
   const sliceOverlay = overlayActive && !volumeOverlay;
   const paperTechniqueMode = isOctreeTechniqueOverlayMode(gridOverlayMode);
+  const paperVolumeCapable = paperTechniqueMode && gridOverlayMode !== "global-fine-phi";
   const paperStages = paperPipelineStages(gpuInfo, waterSurfacePresentation);
   const activePaperVisual = paperVisualAuthority(gridOverlayMode, gridOverlayAxis, paperStages, gpuInfo);
   const section5SpatialFailures = paperSection5SpatialFailures(gpuInfo);
-  const completedSteps = gpuInfo?.encodedSteps ?? 0;
+  const encodedSteps = gpuInfo?.encodedSteps ?? 0;
+  const t0SceneReady = gpuInfo?.initialSparseAuthorityReady === true
+    && gpuInfo?.initialRasterSurfaceReady === true;
   const volumeSource = ({
     "global-fine": "global-fine",
     "adaptive-pages": "adaptive pages",
@@ -57,6 +62,10 @@ export function VisualPanel() {
   } as const)[gpuInfo?.volumeTelemetrySource ?? "unavailable"];
   const physicalVolumeDrift = gpuInfo?.volumeDrift;
   const representedVolumeDrift = gpuInfo?.representedVolumeDrift;
+  const globalFineVolumeEstimate = gpuInfo?.volumeTelemetrySource === "global-fine";
+  const representedVolumeAliasesPrimary = physicalVolumeDrift !== undefined
+    && representedVolumeDrift !== undefined
+    && physicalVolumeDrift === representedVolumeDrift;
   const driftLabel = (value: number | undefined) => value === undefined
     ? "—"
     : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(2)}%`;
@@ -143,6 +152,12 @@ export function VisualPanel() {
         {effectiveRendererStatus.fallbackReason ? ` fallback · ${rendererFallbackLabels[effectiveRendererStatus.fallbackReason]}` : ""}
       </small>
       <small className="control-hint">Raster is the interactive default. Sparse voxels consumes the octree directly for explicit rendering diagnostics and A/B comparisons.</small>
+      <div className="section-heading"><h2>SVO lighting</h2><span>VISIBILITY CACHE</span></div>
+      <div className="segmented compact" role="group" aria-label="SVO lighting">
+        <button disabled={svoRenderMode !== "svo"} className={svoLightingMode === "direct" ? "active" : ""} onClick={() => setSvoLightingMode("direct")}>Exact direct</button>
+        <button disabled={svoRenderMode !== "svo"} className={svoLightingMode === "cone" ? "active" : ""} onClick={() => setSvoLightingMode("cone")}>Mip cones</button>
+      </div>
+      <small className="control-hint">Mip cones use a disposable wide-fanout opacity hierarchy derived from the same complete world-octree generation. Missing or stale pages fall back to exact SVO visibility.</small>
     </section>
 
     <section className="panel-section utility-controls">
@@ -158,14 +173,15 @@ export function VisualPanel() {
     {octree && <section className="panel-section utility-controls paper-pipeline-inspector" data-testid="paper-pipeline-inspector">
       <div className="section-heading"><h2>Paper pipeline inspector</h2><span>LIVE GPU AUTHORITY</span></div>
       <div className="paper-authority-summary" data-testid="paper-authority-summary">
-        <span className={gpuInfo?.initialSparseAuthorityReady ? "summary-current" : "summary-waiting"}>t=0 {gpuInfo?.initialSparseAuthorityReady ? "ready" : "waiting"}</span>
-        <span>{completedSteps === 0 ? "pre-step state" : `latest step ${completedSteps}`}</span>
+        <span className={t0SceneReady ? "summary-current" : "summary-waiting"}>t=0 scene {t0SceneReady ? "ready" : "waiting"}</span>
+        <span>{encodedSteps === 0 ? "pre-step state" : `encoded substep ${encodedSteps}`}</span>
         <span>power gen {gpuInfo?.powerDiagramGeneration ?? "—"}</span>
         <span>fine gen {gpuInfo?.globalFineGeneration ?? "—"}</span>
-        <span>raster {waterSurfacePresentation?.surfaceGeometrySource ?? "pending"}</span>
-        <span className={physicalVolumeDrift === undefined ? "summary-waiting" : Math.abs(physicalVolumeDrift) < 0.01 ? "summary-current" : "summary-warning"}>volume {driftLabel(physicalVolumeDrift)} · {volumeSource}</span>
-        <span className={representedVolumeDrift === undefined ? "summary-waiting" : Math.abs(representedVolumeDrift) < 0.05 ? "summary-current" : "summary-warning"}>represented {driftLabel(representedVolumeDrift)}</span>
+        <span>raster {waterSurfacePresentation?.surfaceGeometrySource ?? "pending"} · attached {waterSurfacePresentation?.globalFineAttachedGeneration ?? "—"} / mesh {waterSurfacePresentation?.meshPublicationGeneration ?? "—"}</span>
+        <span className={physicalVolumeDrift === undefined ? "summary-waiting" : Math.abs(physicalVolumeDrift) < 0.01 ? "summary-current" : "summary-warning"}>{globalFineVolumeEstimate ? "pre-correction occupancy" : "volume"} {driftLabel(physicalVolumeDrift)} · {volumeSource}</span>
+        {!representedVolumeAliasesPrimary && <span className={representedVolumeDrift === undefined ? "summary-waiting" : Math.abs(representedVolumeDrift) < 0.05 ? "summary-current" : "summary-warning"}>represented {driftLabel(representedVolumeDrift)}</span>}
       </div>
+      {globalFineVolumeEstimate && <small className="control-hint" data-testid="global-fine-volume-semantics">Global-fine drift is a smoothed-occupancy estimate measured before the bounded φ shift. The global φ shift is an engineering supplement, not part of the paper&apos;s Section 5 algorithm.</small>}
       <div className={`paper-active-visual stage-${activePaperVisual.tone}`} data-testid="paper-active-visual">
         <span>ACTIVE VIEW</span>
         <div><strong>{activePaperVisual.label}</strong><small>{activePaperVisual.frame} · {activePaperVisual.detail}</small></div>
@@ -201,7 +217,7 @@ export function VisualPanel() {
         <div className="segmented compact" role="group" aria-label="Diagnostic geometry">
           <button className={gridOverlayAxis === "off" ? "active" : ""} onClick={() => setGridOverlayAxis("off")}>Off</button>
           <button className={sliceOverlay ? "active" : ""} onClick={() => setGridOverlayAxis(volumeOverlay || gridOverlayAxis === "off" ? "z" : gridOverlayAxis)}>Slice</button>
-          <button className={volumeOverlay ? "active" : ""} disabled={!octree || !paperTechniqueMode} onClick={() => { setGridOverlaySlice(volumeOpacity); setGridOverlayAxis("volume"); }}>Full volume</button>
+          <button className={volumeOverlay ? "active" : ""} disabled={!octree || !paperVolumeCapable} onClick={() => { setGridOverlaySlice(volumeOpacity); setGridOverlayAxis("volume"); }}>Full volume</button>
         </div>
         {sliceOverlay && <div className="segmented compact" role="group" aria-label="Slice axis">
           <button className={gridOverlayAxis === "z" ? "active" : ""} onClick={() => setGridOverlayAxis("z")}>Z</button>
@@ -243,6 +259,7 @@ export function VisualPanel() {
           <div className="segmented compact" role="group" aria-label="Unified octree lifecycle">
             <button className={gridOverlayMode === "octree-lifecycle" ? "active" : ""} onClick={() => selectOverlayMode("octree-lifecycle")}>Octree lifecycle</button>
             <button className={gridOverlayMode === "fine-band-lifecycle" ? "active" : ""} aria-label="Inspect fine band and interface seeds" onClick={() => selectOverlayMode("fine-band-lifecycle")}>Fine band</button>
+            <button className={gridOverlayMode === "global-fine-phi" ? "active" : ""} aria-label="Inspect global fine phi values and Eikonal residual" onClick={() => { setGridOverlayMode("global-fine-phi"); if (gridOverlayAxis === "volume") setGridOverlayAxis("z"); }}>Fine φ values</button>
             <button className={gridOverlayMode === "section5-face-band" ? "active" : ""} aria-label="Inspect Section 5 face march" onClick={() => selectOverlayMode("section5-face-band")}>Face march</button>
           </div>
           <small className="control-hint" data-testid="fine-publication-gates">{finePublicationGates.map((gate) =>
@@ -263,7 +280,7 @@ export function VisualPanel() {
     </section>
 
     {overlayActive && <section className="panel-section grid-key" data-testid="grid-legend">
-      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {volumeOverlay ? "FULL VOLUME" : `${gridOverlayAxis.toUpperCase()} SLICE`}{gridOverlayMode !== "structure" ? ` · ${{ resolution: "COMPACT LEAF LEVEL", surface: "SPARSE SURFACE BAND", faces: "SPARSE VELOCITY FACES", optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU", "power-cells": "POWER SITES / CELLS", "power-faces": "POWER PRIMAL-DUAL GEOMETRY", "delaunay-tetrahedra": "LOCAL DELAUNAY TETRAHEDRA", "transition-band": "BOUNDARY / LEVEL TRANSITIONS", "power-operator": "POWER LAPLACIAN COEFFICIENTS", "octree-lifecycle": "OCTREE REBUILD LIFECYCLE", "fine-band-lifecycle": "FINE-BAND PUBLICATION LIFECYCLE", "section5-face-band": "SECTION 5 REGULAR-FACE MARCH", "operator-diagonal": "OPERATOR DIAGONAL", "operator-rhs": "OPERATOR RIGHT-HAND SIDE", "operator-reciprocity": "FACE RECIPROCITY AUDIT", "operator-open-fraction": "FACE OPEN FRACTION", "tetra-validity": "TETRAHEDRON VALIDITY" }[gridOverlayMode]}` : ""}</strong>
+      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {volumeOverlay ? "FULL VOLUME" : `${gridOverlayAxis.toUpperCase()} SLICE`}{gridOverlayMode !== "structure" ? ` · ${{ resolution: "COMPACT LEAF LEVEL", surface: "SPARSE SURFACE BAND", faces: "SPARSE VELOCITY FACES", optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: octree ? "PRESSURE POTENTIAL dt·p/ρ" : "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU", "power-cells": "POWER SITES / CELLS", "power-faces": "POWER PRIMAL-DUAL GEOMETRY", "delaunay-tetrahedra": "LOCAL DELAUNAY TETRAHEDRA", "transition-band": "BOUNDARY / LEVEL TRANSITIONS", "power-operator": "POWER LAPLACIAN COEFFICIENTS", "octree-lifecycle": "OCTREE REBUILD LIFECYCLE", "fine-band-lifecycle": "FINE-BAND PUBLICATION LIFECYCLE", "global-fine-phi": "PAPER FINE φ / |∇φ|−1", "section5-face-band": "SECTION 5 REGULAR-FACE MARCH", "operator-diagonal": "OPERATOR DIAGONAL", "operator-rhs": "OPERATOR RIGHT-HAND SIDE", "operator-reciprocity": "FACE RECIPROCITY AUDIT", "operator-open-fraction": "FACE OPEN FRACTION", "tetra-validity": "TETRAHEDRON VALIDITY" }[gridOverlayMode]}` : ""}</strong>
       {gridOverlayMode === "structure" && <>
         {tall && <span><i className="sw sw-tall" />tall cell · liquid</span>}
         {tall && <span><i className="sw sw-tall-dry" />tall cell · air</span>}
@@ -327,7 +344,7 @@ export function VisualPanel() {
       {gridOverlayMode === "transition-band" && <>
         <span><i className="sw" style={{ background: "#ef720f" }} />orange · level-transition row</span>
         <span><i className="sw" style={{ background: "#f51867" }} />pink · domain/free boundary row</span>
-        <span>These are the causal rows for transition interpolation and the paper&apos;s localized second-order smoothing work.</span>
+        <span>These are boundary and level-transition seed rows. The pressure solver dilates them into the implementation&apos;s graph-ring approximation of the paper&apos;s about-three-voxel localized second-order smoothing band.</span>
       </>}
       {gridOverlayMode === "power-operator" && <>
         <span><i className="sw" style={{ background: "linear-gradient(90deg,#15489a,#18bf8c,#ed2d12)" }} />max incident A/d coefficient · low to high</span>
@@ -350,6 +367,13 @@ export function VisualPanel() {
         <span><i className="sw" style={{ background: "#10255e" }} />dark blue · valid compact coarse authority outside fine allocation</span>
         <span><i className="sw" style={{ background: "#ff1738" }} />red · failed, stale, or inconsistent publication</span>
         <span>Colors come from the live sparse hash, page metadata, worklist, sample flags, and transaction controls.</span>
+      </>}
+      {gridOverlayMode === "global-fine-phi" && <>
+        <span><i className="sw" style={{ background: "linear-gradient(90deg,#1973eb,#f5f5e6,#ed7829)" }} />paper fine-lattice φ/h · liquid (−), zero crossing, air (+)</span>
+        <span><i className="sw" style={{ background: "#f505b8" }} />magenta · |∇φ|−1 residual reaches 0.25 or more</span>
+        <span><i className="sw" style={{ background: "#ffffff" }} />white · φ=0 crossing</span>
+        <span><i className="sw" style={{ background: "#ff0610" }} />red · stale/rejected redistance or missing stencil neighbor inside resident support</span>
+        <span>Direct factor-m Section 5 signed-distance samples. This slice is a paper quantity; it does not show the separate engineering volume-correction estimate.</span>
       </>}
       {gridOverlayMode === "section5-face-band" && <>
         <span><i className="sw" style={{ background: "#f51680" }} />pink · interface-core owner row</span>
@@ -415,7 +439,7 @@ export function VisualPanel() {
         <span>color saturates at |∇·u| Δt = 1</span>
       </>}
       {gridOverlayMode === "pressure" && <>
-        <span><i className="sw" style={{ background: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)" }} />{octree ? "affine pressure reconstructed from leaf DOFs" : "latest fine MLS pressure"}</span>
+        <span><i className="sw" style={{ background: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)" }} />{octree ? "affine pressure potential dt·p/ρ reconstructed from leaf DOFs (m²/s)" : "latest fine MLS pressure (Pa)"}</span>
       </>}
       {gridOverlayMode === "projection" && <>
         <span><i className="sw" style={{ background: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)" }} />|u after − u before| · normalized by live max speed</span>

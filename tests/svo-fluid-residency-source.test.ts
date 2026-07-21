@@ -79,7 +79,7 @@ test("legacy stats remain published while GPUFluidBrickResidency retains lifecyc
   const residencyDestroy = residency.slice(residency.indexOf("  destroy(): void {"));
   assert.match(residencyDestroy, /this\.states\.destroy\(\)/);
   assert.match(residencyDestroy, /this\.worklist\.destroy\(\)/);
-  assert.match(residencyDestroy, /this\.leafStates\.destroy\(\)/);
+  assert.match(residencyDestroy, /this\.leafStatesBuffer\.destroy\(\)/);
 });
 
 test("WGSL decode is binding-free and requires explicit state/list inputs", () => {

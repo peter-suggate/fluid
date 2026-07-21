@@ -204,7 +204,7 @@ test("packed owner authority removes one persistent word per finest cell", () =>
   assert.equal(ocean.legacyDenseBytes, 19_660_800);
   assert.equal(ocean.savedBytes, 9_830_400);
   for (const size of [1, 2, 4, 8, 16, 32]) {
-    const origin = [1024 - size, 512 - size, 256 - size] as const;
+    const origin = [1_500_032 - size, 1_250_016 - size, 1_100_000 - size] as const;
     const cell = [origin[0] + size - 1, origin[1] + size - 1, origin[2] + size - 1] as const;
     assert.deepEqual(decodeOctreeOwnerWord(encodeOctreeOwnerWord(origin, size), cell), { origin: [...origin], size });
   }

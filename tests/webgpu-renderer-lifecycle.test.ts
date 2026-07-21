@@ -186,7 +186,7 @@ test("reset replacement attaches only after complete t=0 sparse authority is res
     renderer.indexOf("private beginGPUFluidInitialization"),
     renderer.indexOf("private currentGPUFluid"),
   );
-  assert.match(transaction, /const create=prepare\(\)\.then\([\s\S]*method\.createSolverAsync/);
+  assert.match(transaction, /const create:Promise<GPUSolverInstance>=prepare\(\)\.then\([\s\S]*method\.createSolverAsync/);
   assert.match(transaction, /this\.gpuFluidPending=create\.then\(\(solver\)=>[\s\S]*this\.gpuFluid=solver/,
     "only the fully warmed create promise may publish the replacement solver");
 });

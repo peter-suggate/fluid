@@ -6,9 +6,12 @@ import {
   OCTREE_POWER_TOPOLOGY_VALID,
   type OctreePowerTopologySource,
 } from "./webgpu-octree-power-topology";
+import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
 
 export const OCTREE_POWER_FACE_INCIDENCE_BYTES = 8;
 export const OCTREE_POWER_FACE_CONTROL_BYTES = 64;
+export const OCTREE_POWER_FACE_PARAMETER_BYTES = 96;
+export const OCTREE_POWER_FACE_BOUNDARY_QUERY_BYTES = 32;
 export const OCTREE_POWER_FACE_QUADRATURE_SAMPLES = 16;
 // Exact centroid plus sixteen packed f16 tangent-plane coordinates. The
 // samples are equal-area strata of the clipped world-space power polygon.
@@ -57,6 +60,7 @@ export interface OctreePowerFacePlan {
   readonly hashBytes: number;
   readonly scanBlockCount: number;
   readonly scanBytes: number;
+  readonly boundaryQueryBytes: number;
   readonly maximumHashProbes: number;
   readonly allocatedBytes: number;
 }
@@ -70,6 +74,19 @@ export interface OctreePowerFaceEncodeOptions {
   readonly generation?: number;
   /** Closed world faces in `x-, y-, z-, z+, y+, x+` bit order. */
   readonly closedBoundaryMask?: number;
+  /**
+   * Signed-distance authority for internal liquid/air pressure faces.  The
+   * analytic mode is the authored t=0 field; fine mode is the current
+   * published two-sided Section 5 band.  No estimate is substituted when a
+   * requested sample is unavailable.
+   */
+  readonly boundaryPhi?: {
+    readonly mode: "analytic" | "fine";
+    readonly fine: Pick<WebGPUFineLevelSetBrickSource, "params" | "hash" | "metadata" | "worklist" | "flags" | "phi">;
+    readonly container: readonly [number, number, number];
+    readonly fillFraction: number;
+    readonly initialCondition: "dam-break" | "tank-fill";
+  };
 }
 
 export interface OctreePowerFaceControl {
@@ -142,20 +159,22 @@ export function planOctreePowerFaces(
   const hashBytes = hashCapacity * 16;
   const scanBlockCount = Math.ceil(rowCapacity / OCTREE_POWER_FACE_SCAN_BLOCK_SIZE);
   const scanBytes = scanBlockCount * 16;
+  const boundaryQueryBytes = faceCapacity * OCTREE_POWER_FACE_BOUNDARY_QUERY_BYTES;
   return {
     rowCapacity,
     faceCapacity,
     incidenceCapacity,
     faceBytes, normalBytes, centroidBytes, quadratureBytes,
     incidenceBytes,
-    workspaceBytes,
+    workspaceBytes, boundaryQueryBytes,
     hashCapacity,
     hashBytes,
     scanBlockCount,
     scanBytes,
     maximumHashProbes: OCTREE_POWER_FACE_MAX_HASH_PROBES,
     allocatedBytes: faceBytes + normalBytes + centroidBytes + quadratureBytes + incidenceBytes + workspaceBytes + hashBytes + scanBytes
-      + OCTREE_POWER_FACE_CONTROL_BYTES + 64,
+      + boundaryQueryBytes
+      + OCTREE_POWER_FACE_CONTROL_BYTES + OCTREE_POWER_FACE_PARAMETER_BYTES,
   };
 }
 
@@ -199,6 +218,7 @@ export class WebGPUOctreePowerFaces {
   readonly siteIndex: GPUBuffer;
   private readonly workspace: GPUBuffer;
   private readonly scanBlocks: GPUBuffer;
+  private readonly boundaryQueries: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly preparePipeline: GPUComputePipeline;
   private readonly clearIndexPipeline: GPUComputePipeline;
@@ -211,7 +231,8 @@ export class WebGPUOctreePowerFaces {
   private readonly sortIncidencePipeline: GPUComputePipeline;
   private readonly normalPipeline: GPUComputePipeline;
   private readonly quadraturePipeline: GPUComputePipeline;
-  private readonly ghostPipeline: GPUComputePipeline;
+  private readonly boundaryQueryPipeline: GPUComputePipeline;
+  private readonly boundaryPhiPipeline: GPUComputePipeline;
   private readonly publishPipeline: GPUComputePipeline;
   private destroyed = false;
 
@@ -235,12 +256,13 @@ export class WebGPUOctreePowerFaces {
     this.workspace = device.createBuffer({ label: "Octree power face row workspace", size: this.plan.workspaceBytes, usage: storage });
     this.siteIndex = device.createBuffer({ label: "Octree power face site index", size: this.plan.hashBytes, usage: storage });
     this.scanBlocks = device.createBuffer({ label: "Octree power face scan blocks", size: this.plan.scanBytes, usage: storage });
+    this.boundaryQueries = device.createBuffer({ label: "Octree power face boundary phi queries", size: this.plan.boundaryQueryBytes, usage: storage });
     // Offsets alias the workspace: RowWork.incidenceOffset is word 3 of each 16-byte row.
     // A separate compact copy would add memory and a sixth pass; consumers bind this
     // range with a 16-byte stride through the shared RowWork ABI.
     this.incidenceOffsets = this.workspace;
     this.control = device.createBuffer({ label: "Octree power face control", size: OCTREE_POWER_FACE_CONTROL_BYTES, usage: storage });
-    this.params = device.createBuffer({ label: "Octree power face parameters", size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Octree power face parameters", size: OCTREE_POWER_FACE_PARAMETER_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const shaderModule = device.createShaderModule({ label: "Octree power face construction", code: octreePowerFaceShader });
     const pipeline = (label: string, entryPoint: string) => device.createComputePipeline({
       label, layout: "auto", compute: { module: shaderModule, entryPoint },
@@ -256,7 +278,15 @@ export class WebGPUOctreePowerFaces {
     this.sortIncidencePipeline = pipeline("Sort octree power face incidence", "sortPowerIncidenceRows");
     this.normalPipeline = pipeline("Publish octree power face normals", "publishPowerFaceNormals");
     this.quadraturePipeline = pipeline("Publish octree power face polygon quadrature", "publishPowerFaceQuadrature");
-    this.ghostPipeline = pipeline("Publish octree power ghost phi", "publishPowerGhostPhi");
+    this.boundaryQueryPipeline = pipeline("Build octree power boundary phi queries", "buildPowerBoundaryPhiQueries");
+    const boundaryPhiModule = device.createShaderModule({
+      label: "Octree power boundary phi sampling",
+      code: octreePowerBoundaryPhiShader,
+    });
+    this.boundaryPhiPipeline = device.createComputePipeline({
+      label: "Sample octree power boundary phi", layout: "auto",
+      compute: { module: boundaryPhiModule, entryPoint: "samplePowerBoundaryPhi" },
+    });
     this.publishPipeline = pipeline("Publish octree power faces", "publishPowerFaces");
   }
 
@@ -286,6 +316,20 @@ export class WebGPUOctreePowerFaces {
       physicalCellSize, this.plan.hashCapacity, this.plan.scanBlockCount, this.plan.maximumHashProbes,
     ]));
     this.device.queue.writeBuffer(this.params, 48, new Uint32Array([closedBoundaryMask, 0, 0, 0]));
+    const boundaryPhi = options.boundaryPhi;
+    const container = boundaryPhi?.container ?? [0, 0, 0];
+    if (boundaryPhi && (!container.every((value) => Number.isFinite(value) && value > 0)
+      || !Number.isFinite(boundaryPhi.fillFraction) || boundaryPhi.fillFraction < 0 || boundaryPhi.fillFraction > 1)) {
+      throw new RangeError("Power-face boundary phi scene parameters are invalid");
+    }
+    this.device.queue.writeBuffer(this.params, 64, new Float32Array([
+      ...container, boundaryPhi?.fillFraction ?? 0,
+    ]));
+    this.device.queue.writeBuffer(this.params, 80, new Uint32Array([
+      boundaryPhi?.mode === "analytic" ? 1 : boundaryPhi?.mode === "fine" ? 2 : 0,
+      boundaryPhi?.initialCondition === "dam-break" ? 2 : boundaryPhi ? 1 : 0,
+      0, 0,
+    ]));
     if (typeof options.rowCount !== "number") encoder.copyBufferToBuffer(options.rowCount, 0, this.params, 12, 4);
     return typeof options.rowCount === "number"
       ? Math.min(options.rowCount, this.plan.rowCapacity)
@@ -340,6 +384,7 @@ export class WebGPUOctreePowerFaces {
     const normals = { binding: 11, resource: resource(this.faceNormals) };
     const centroids = { binding: 12, resource: resource(this.faceCentroids) };
     const quadrature = { binding: 13, resource: resource(this.faceQuadrature) };
+    const boundaryQueries = { binding: 14, resource: resource(this.boundaryQueries) };
     if (available > 0) {
       const groups = Math.ceil(available / 64);
       run("Count deterministic power faces", this.countPipeline, groups,
@@ -358,8 +403,24 @@ export class WebGPUOctreePowerFaces {
         Math.ceil(this.plan.faceCapacity / 64), [params, headers, metrics, entries, catalog, faces, control, normals, centroids]);
       run("Publish deterministic power face polygon quadrature", this.quadraturePipeline,
         Math.ceil(this.plan.faceCapacity / 64), [params, headers, metrics, entries, catalog, faces, control, quadrature]);
-      run("Publish deterministic power ghost phi", this.ghostPipeline,
-        Math.ceil(this.plan.faceCapacity / 64), [params, headers, metrics, entries, catalog, faces, control]);
+      run("Build deterministic power boundary phi queries", this.boundaryQueryPipeline,
+        Math.ceil(this.plan.faceCapacity / 64), [params, headers, metrics, entries, catalog, faces, control, boundaryQueries]);
+      const boundaryPhi = options.boundaryPhi;
+      if (boundaryPhi) {
+        run("Sample deterministic power boundary phi", this.boundaryPhiPipeline,
+          Math.ceil(this.plan.faceCapacity / 64), [
+            { binding: 0, resource: resource(this.params) },
+            { binding: 1, resource: resource(boundaryPhi.fine.params) },
+            { binding: 2, resource: resource(boundaryPhi.fine.hash) },
+            { binding: 3, resource: resource(boundaryPhi.fine.metadata) },
+            { binding: 4, resource: resource(boundaryPhi.fine.worklist) },
+            { binding: 5, resource: resource(boundaryPhi.fine.flags) },
+            { binding: 6, resource: resource(boundaryPhi.fine.phi) },
+            { binding: 7, resource: resource(this.faces) },
+            { binding: 8, resource: resource(this.boundaryQueries) },
+            { binding: 9, resource: resource(this.control) },
+          ]);
+      }
     }
     run("Publish power face control", this.publishPipeline, 1, [rows, control]);
   }
@@ -374,14 +435,14 @@ export class WebGPUOctreePowerFaces {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.faces.destroy(); this.faceNormals.destroy(); this.faceCentroids.destroy(); this.faceQuadrature.destroy(); this.incidence.destroy(); this.workspace.destroy(); this.siteIndex.destroy(); this.scanBlocks.destroy();
+    this.faces.destroy(); this.faceNormals.destroy(); this.faceCentroids.destroy(); this.faceQuadrature.destroy(); this.incidence.destroy(); this.workspace.destroy(); this.siteIndex.destroy(); this.scanBlocks.destroy(); this.boundaryQueries.destroy();
     this.control.destroy(); this.params.destroy();
   }
 }
 
 export const octreePowerFaceShader = /* wgsl */ `
 ${octreePowerCatalogWGSL}
-struct Params { dimensionsRowCount:vec4u, capacitiesGeneration:vec4u, physical:vec4f, boundaryPolicy:vec4u }
+struct Params { dimensionsRowCount:vec4u, capacitiesGeneration:vec4u, physical:vec4f, boundaryPolicy:vec4u, containerFill:vec4f, phiPolicy:vec4u }
 struct LeafHeader { cell:u32, entryStart:u32, entryCount:u32, size:u32, diagonal:f32, rhs:f32, pad0:u32, pad1:u32, gradient:vec4f }
 struct PowerRowMetric { topologyCode:u32, transformAndFlags:u32, volume:f32, reserved:u32 }
 struct CatalogEntry { firstFace:u32, faceCount:u32 }
@@ -389,6 +450,7 @@ struct RowWork { faceCount:u32, incidenceCount:u32, faceOffset:u32, incidenceOff
 struct PowerIncidence { face:u32, sign:i32 }
 struct SiteIndexEntry { cellPlusOne:atomic<u32>, size:u32, row:u32, published:atomic<u32> }
 struct FaceQuadrature { centroidArea:vec4f, sampleUV:array<u32,${OCTREE_POWER_FACE_QUADRATURE_SAMPLES}> }
+struct BoundaryPhiQuery { liquidCenter:vec4f, airCenter:vec4f }
 struct Control { rowCount:atomic<u32>, faceCount:atomic<u32>, incidenceCount:atomic<u32>, flags:atomic<u32>, firstInvalid:atomic<u32>, invalidCount:atomic<u32>, boundaryCount:atomic<u32>, generation:atomic<u32>, valid:atomic<u32>, lookupMissCount:atomic<u32>, maximumObservedProbe:atomic<u32>, worldBoundaryCount:atomic<u32>, pad0:atomic<u32>, pad1:atomic<u32>, pad2:atomic<u32>, pad3:atomic<u32> }
 @group(0) @binding(0) var<uniform> params:Params;
 @group(0) @binding(1) var<storage,read> headers:array<LeafHeader>;
@@ -404,6 +466,7 @@ struct Control { rowCount:atomic<u32>, faceCount:atomic<u32>, incidenceCount:ato
 @group(0) @binding(11) var<storage,read_write> faceNormals:array<vec4f>;
 @group(0) @binding(12) var<storage,read_write> faceCentroids:array<vec4f>;
 @group(0) @binding(13) var<storage,read_write> faceQuadrature:array<FaceQuadrature>;
+@group(0) @binding(14) var<storage,read_write> boundaryPhiQueries:array<BoundaryPhiQuery>;
 const INVALID:u32=${OCTREE_POWER_INVALID_ROW}u;
 const TOPOLOGY_VALID:u32=${OCTREE_POWER_TOPOLOGY_VALID}u;
 const FACE_VALID:u32=${OCTREE_POWER_FACE_VALID}u;
@@ -514,8 +577,9 @@ var<workgroup> incidenceScan:array<u32,${OCTREE_POWER_FACE_SCAN_BLOCK_SIZE}>;
     if(any(abs(uv)>vec2f(65500.0))||!all(vec2<bool>(finite(uv.x),finite(uv.y)))){failGeometry(face.negativeRow,slot,256u);return;}
     faceQuadrature[faceIndex].sampleUV[sample]=pack2x16float(uv);
   }}
-@compute @workgroup_size(64) fn publishPowerGhostPhi(@builtin(global_invocation_id) gid:vec3u){let faceIndex=gid.x;
-  if(faceIndex>=atomicLoad(&control.faceCount)||faceIndex>=arrayLength(&powerFaces)){return;}var face=powerFaces[faceIndex];if((face.flags&OPEN_BOUNDARY)==0u){return;}let slot=face.geometryCode&0xffffu;let geometry=reconstructSlot(face.negativeRow,slot);let phiField=headers[face.negativeRow].gradient;let metric=metrics[face.negativeRow];let localFace=catalogFace(face.negativeRow,slot);let deltaGrid=f32(headers[face.negativeRow].size)*inversePowerTransform(localFace.neighborOffsetSize.xyz,metric.transformAndFlags&63u);
+@compute @workgroup_size(64) fn buildPowerBoundaryPhiQueries(@builtin(global_invocation_id) gid:vec3u){let faceIndex=gid.x;
+  if(faceIndex>=atomicLoad(&control.faceCount)||faceIndex>=arrayLength(&powerFaces)||faceIndex>=arrayLength(&boundaryPhiQueries)){return;}
+  boundaryPhiQueries[faceIndex]=BoundaryPhiQuery(vec4f(0.0),vec4f(0.0));var face=powerFaces[faceIndex];if((face.flags&OPEN_BOUNDARY)==0u){return;}let slot=face.geometryCode&0xffffu;let geometry=reconstructSlot(face.negativeRow,slot);
     let world=(face.flags>>WORLD_BOUNDARY_SHIFT)&63u;
     if(world!=0u){
       // World-open pressure is Dirichlet at the physical boundary plane.  All
@@ -525,15 +589,128 @@ var<workgroup> incidenceScan:array<u32,${OCTREE_POWER_FACE_SCAN_BLOCK_SIZE}>;
       if(!finite(boundaryDistance)||boundaryDistance<=1e-12){failGeometry(face.negativeRow,slot,512u);return;}
       face.inverseDistance=1.0/boundaryDistance;powerFaces[faceIndex]=face;return;
     }
-    let liquidPhi=phiField.w;
-    // The compact pressure topology is the phase authority for this generation:
-    // a missing incident site is air. Sparse redistance supplies its measured
-    // affine distance magnitude and may have crossed zero after topology publication.
-    let airPhi=abs(liquidPhi+dot(phiField.xyz,deltaGrid));
-    // Generalized faces carry one inverse-distance coefficient shared by CSR
-    // and projection, so use the proven 0.05 velocity-kick floor consistently.
-    let theta=clamp(abs(liquidPhi)/max(abs(liquidPhi)+abs(airPhi),1e-12),0.05,1.0);
-    if(!finite(liquidPhi)||!finite(airPhi)||liquidPhi>0.0||!finite(theta)||theta<=0.0){failGeometry(face.negativeRow,slot,64u);return;}
-    face.inverseDistance=geometry.inverseDistance/theta;powerFaces[faceIndex]=face;}
+    // Paper Sections 4.1 and 5 require phi at the two actual cell centres.
+    // Query construction is separate from sparse sampling to keep both
+    // portable WebGPU layouts below ten bindings.  A missing authority is a
+    // publication error, never an affine or sign-repaired substitute.
+    if(params.phiPolicy.x==0u||geometry.neighborSize<=0.0){failGeometry(face.negativeRow,slot,1024u);return;}
+    boundaryPhiQueries[faceIndex]=BoundaryPhiQuery(vec4f(rowCenter(face.negativeRow),1.0),vec4f(geometry.neighborCenter,1.0));}
 @compute @workgroup_size(1) fn publishPowerFaces(){let terminal=arrayLength(&rows)-1u;let nonempty=atomicLoad(&control.rowCount)>0u&&atomicLoad(&control.faceCount)>0u&&atomicLoad(&control.incidenceCount)>0u;if(atomicLoad(&control.flags)==0u&&atomicLoad(&control.invalidCount)==0u&&rows[terminal].faceCount==FACE_VALID&&nonempty){atomicStore(&control.valid,FACE_VALID);}else{if(!nonempty){atomicOr(&control.flags,INVALID_HEADER);atomicMin(&control.firstInvalid,0u);atomicAdd(&control.invalidCount,1u);}atomicStore(&control.faceCount,0u);atomicStore(&control.incidenceCount,0u);atomicStore(&control.valid,0u);}}
+`;
+
+/**
+ * Paper-facing free-surface pressure coefficient publication.  The liquid and
+ * air query positions are the power-cell centres emitted by the geometry
+ * kernel above.  Analytic sampling is used only for the authored cold field;
+ * every recurring generation samples the current signed fine lattice.
+ */
+export const octreePowerBoundaryPhiShader = /* wgsl */ `
+${octreePowerCatalogWGSL}
+struct FaceParams { dimensionsRowCount:vec4u, capacitiesGeneration:vec4u, physical:vec4f, boundaryPolicy:vec4u, containerFill:vec4f, phiPolicy:vec4u }
+struct FineParams {
+  brickDimensions:vec3u, brickResolution:u32,
+  sampleDimensions:vec3u, samplesPerBrick:u32,
+  domainOrigin:vec3f, fineCellWidth:f32,
+  hashCapacity:u32, maximumHashProbes:u32, pageCapacity:u32, generation:u32,
+  activeCount:u32, invalid:u32, fineFactor:u32, timestep:f32,
+}
+struct BoundaryPhiQuery { liquidCenter:vec4f, airCenter:vec4f }
+struct Control { rowCount:atomic<u32>, faceCount:atomic<u32>, incidenceCount:atomic<u32>, flags:atomic<u32>, firstInvalid:atomic<u32>, invalidCount:atomic<u32>, boundaryCount:atomic<u32>, generation:atomic<u32>, valid:atomic<u32>, lookupMissCount:atomic<u32>, maximumObservedProbe:atomic<u32>, worldBoundaryCount:atomic<u32>, pad0:atomic<u32>, pad1:atomic<u32>, pad2:atomic<u32>, pad3:atomic<u32> }
+@group(0) @binding(0) var<uniform> faceParams:FaceParams;
+@group(0) @binding(1) var<uniform> fineParams:FineParams;
+@group(0) @binding(2) var<storage,read> pageHash:array<u32>;
+@group(0) @binding(3) var<storage,read> metadata:array<u32>;
+@group(0) @binding(4) var<storage,read> worklist:array<u32>;
+@group(0) @binding(5) var<storage,read> sampleFlags:array<u32>;
+@group(0) @binding(6) var<storage,read> signedPhi:array<f32>;
+@group(0) @binding(7) var<storage,read_write> powerFaces:array<PowerFaceRecord>;
+@group(0) @binding(8) var<storage,read> queries:array<BoundaryPhiQuery>;
+@group(0) @binding(9) var<storage,read_write> control:Control;
+const INVALID:u32=0xffffffffu;
+const SAMPLE_VALID:u32=1u;
+const INVALID_GEOMETRY:u32=${OCTREE_POWER_FACE_ERROR.invalidGeometry}u;
+fn finite(value:f32)->bool{return value==value&&abs(value)<=3.402823e38;}
+fn failBoundary(row:u32,slot:u32,detail:u32){
+  atomicOr(&control.flags,INVALID_GEOMETRY);let previous=atomicMin(&control.firstInvalid,row);
+  if(row<previous){atomicStore(&control.pad0,slot);atomicStore(&control.pad1,INVALID);atomicStore(&control.pad2,detail);}
+  atomicAdd(&control.invalidCount,1u);
+}
+fn hashKey(key:u32)->u32{return ((key^(key>>16u))*0x9e3779b1u)&(fineParams.hashCapacity-1u);}
+fn packBrick(coord:vec3u)->u32{return coord.x+fineParams.brickDimensions.x*(coord.y+fineParams.brickDimensions.y*coord.z);}
+fn lookupBrick(key:u32)->u32{
+  if(fineParams.hashCapacity==0u||(fineParams.hashCapacity&(fineParams.hashCapacity-1u))!=0u){return INVALID;}
+  let start=hashKey(key);
+  for(var probe=0u;probe<32u;probe+=1u){
+    if(probe>=fineParams.maximumHashProbes){break;}
+    let slot=(start+probe)&(fineParams.hashCapacity-1u);let stored=pageHash[slot*2u];
+    if(stored==key){
+      let id=pageHash[slot*2u+1u];if(id>=fineParams.pageCapacity){return INVALID;}
+      let base=id*10u;
+      if(metadata[base]!=id||metadata[base+1u]!=key||metadata[base+2u]!=fineParams.generation){return INVALID;}
+      return id;
+    }
+    if(stored==INVALID){return INVALID;}
+  }
+  return INVALID;
+}
+fn loadFine(coord:vec3i)->vec2f{
+  if(any(coord<vec3i(0))||any(coord>=vec3i(fineParams.sampleDimensions))){return vec2f(0.0);}
+  let q=vec3u(coord);let brick=q/fineParams.brickResolution;let local=q-brick*fineParams.brickResolution;
+  let id=lookupBrick(packBrick(brick));if(id==INVALID){return vec2f(0.0);}
+  let localIndex=local.x+fineParams.brickResolution*(local.y+fineParams.brickResolution*local.z);
+  let index=id*fineParams.samplesPerBrick+localIndex;
+  if(index>=arrayLength(&sampleFlags)||index>=arrayLength(&signedPhi)||(sampleFlags[index]&SAMPLE_VALID)==0u){return vec2f(0.0);}
+  let value=signedPhi[index];if(!finite(value)){return vec2f(0.0);}
+  return vec2f(value,1.0);
+}
+fn sampleFine(position:vec3f)->vec2f{
+  if(!(fineParams.fineCellWidth>0.0)||arrayLength(&worklist)<5u||worklist[0]==0u
+    ||worklist[0]>fineParams.pageCapacity||worklist[1]!=fineParams.generation
+    ||worklist[3]!=1u||worklist[4]!=1u){return vec2f(0.0);}
+  let lattice=(position-fineParams.domainOrigin)/fineParams.fineCellWidth-vec3f(0.5);
+  let maximum=vec3f(fineParams.sampleDimensions)-vec3f(1.0);
+  if(any(lattice<vec3f(0.0))||any(lattice>maximum)){return vec2f(0.0);}
+  let base=vec3i(floor(lattice));let fraction=fract(lattice);var value=0.0;
+  for(var z=0;z<2;z+=1){for(var y=0;y<2;y+=1){for(var x=0;x<2;x+=1){
+    let weight=select(1.0-fraction.x,fraction.x,x==1)*select(1.0-fraction.y,fraction.y,y==1)*select(1.0-fraction.z,fraction.z,z==1);
+    if(weight==0.0){continue;}
+    let sample=loadFine(base+vec3i(x,y,z));if(sample.y==0.0){return vec2f(0.0);}
+    value+=weight*sample.x;
+  }}}
+  return vec2f(value,1.0);
+}
+fn boxDistance(point:vec3f,centre:vec3f,halfExtent:vec3f)->f32{
+  let q=abs(point-centre)-halfExtent;
+  return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);
+}
+fn sampleAnalytic(position:vec3f)->vec2f{
+  let container=faceParams.containerFill.xyz;let fill=faceParams.containerFill.w;
+  if(any(container<=vec3f(0.0))||fill<0.0||fill>1.0){return vec2f(0.0);}
+  if(faceParams.phiPolicy.y==1u){return vec2f(position.y-fill*container.y,1.0);}
+  if(faceParams.phiPolicy.y!=2u){return vec2f(0.0);}
+  let heightFraction=max(0.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));
+  let halfExtent=0.5*vec3f(footprintFraction*container.x,heightFraction*container.y,footprintFraction*container.z);
+  return vec2f(boxDistance(position,halfExtent,halfExtent),1.0);
+}
+fn sampleAuthority(position:vec3f)->vec2f{
+  if(faceParams.phiPolicy.x==1u){return sampleAnalytic(position);}
+  if(faceParams.phiPolicy.x==2u){return sampleFine(position);}
+  return vec2f(0.0);
+}
+@compute @workgroup_size(64)
+fn samplePowerBoundaryPhi(@builtin(global_invocation_id) gid:vec3u){
+  let faceIndex=gid.x;if(faceIndex>=atomicLoad(&control.faceCount)||faceIndex>=arrayLength(&powerFaces)||faceIndex>=arrayLength(&queries)){return;}
+  let query=queries[faceIndex];if(query.liquidCenter.w==0.0){return;}
+  var face=powerFaces[faceIndex];let slot=face.geometryCode&0xffffu;
+  let liquid=sampleAuthority(query.liquidCenter.xyz);let air=sampleAuthority(query.airCenter.xyz);
+  if(liquid.y==0.0||air.y==0.0){failBoundary(face.negativeRow,slot,2048u);return;}
+  // Ghost Fluid Method interface fraction from the two signed cell-centre
+  // samples required by paper Sections 4.1 and 5.  No abs repair or floor.
+  if(!finite(liquid.x)||!finite(air.x)||!(liquid.x<0.0)||!(air.x>0.0)){
+    failBoundary(face.negativeRow,slot,4096u);return;
+  }
+  let theta=(-liquid.x)/(air.x-liquid.x);
+  if(!finite(theta)||!(theta>0.0)||theta>1.0){failBoundary(face.negativeRow,slot,8192u);return;}
+  face.inverseDistance=face.inverseDistance/theta;powerFaces[faceIndex]=face;
+}
 `;

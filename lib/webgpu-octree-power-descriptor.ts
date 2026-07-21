@@ -15,6 +15,7 @@ import {
   encodeSameOrCoarserPowerDescriptor,
   encodeSameOrFinerPowerDescriptor,
 } from "./octree-power-descriptor";
+import { octreePowerCoarseMaskNeedsAcuteRepair } from "./octree-power-topology";
 
 export const OCTREE_POWER_LEAF_HEADER_BYTES = 48;
 export const OCTREE_POWER_DESCRIPTOR_CONTROL_BYTES = 32;
@@ -34,6 +35,8 @@ export const OCTREE_POWER_DESCRIPTOR_ERROR = Object.freeze({
   mixedGrading: 1 << 3,
   gradingRatio: 1 << 4,
   capacity: 1 << 5,
+  /** Strictly-obtuse same/coarser simplex escaped the topology repair pass. */
+  acuteGrading: 1 << 6,
 } as const);
 
 export interface OctreePowerDescriptorControl {
@@ -273,6 +276,11 @@ export function describeOctreePowerRow(
     const index = OCTREE_POWER_NEIGHBOR_DIRECTIONS.findIndex((candidate) => candidate.every((value, axis) => value === direction[axis]));
     return index >= 0 && sizes[index] === row.size * 2;
   }) as [boolean, boolean, boolean, boolean, boolean, boolean];
+  const coarseMask = coarseNeighbors.reduce((word, coarse, bit) => coarse ? word | (1 << bit) : word, 0);
+  if (octreePowerCoarseMaskNeedsAcuteRepair(coarseMask)) {
+    return { descriptor: OCTREE_POWER_DESCRIPTOR_INVALID,
+      flags: OCTREE_POWER_DESCRIPTOR_ERROR.acuteGrading, kind: "invalid" };
+  }
   return { descriptor: (encodeSameOrCoarserPowerDescriptor({ child, coarseNeighbors })
     | (boundaryMask << OCTREE_POWER_DESCRIPTOR_BOUNDARY_SHIFT)) >>> 0, flags: 0, kind: "same-or-coarser" };
 }
@@ -380,7 +388,7 @@ const OWNER_MAGIC:u32=0x4f574e52u;
 const COARSER_FLAG:u32=0x80000000u;
 const MALFORMED_HEADER:u32=1u;
 const MALFORMED_OWNER:u32=2u;
-const MIXED_GRADING:u32=8u;
+const MIXED_GRADING:u32=8u;const ACUTE_GRADING:u32=64u;
 const GRADING_RATIO:u32=16u;
 const CAPACITY:u32=32u;
 const DIRECTIONS:array<vec3i,18>=array<vec3i,18>(
@@ -393,14 +401,14 @@ fn volumeFits()->bool{let d=dims();return d.x!=0u&&d.y!=0u&&d.z!=0u&&d.x<=0xffff
 fn cellCoord(cell:u32)->vec3u{let d=dims();return vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));}
 fn canonicalOwner(cell:vec3u)->Owner{var size=min(params.dimensionsMaximumLeaf.w,8u);loop{let origin=(cell/vec3u(size))*vec3u(size);if(all(vec3u(size)<=dims())&&all(origin<=dims()-vec3u(size))){return Owner(origin,size,0u);}if(size==1u){return Owner(cell,1u,1u);}size>>=1u;}}
 fn ownerValid(owner:Owner,cell:vec3u)->bool{return owner.invalid==0u&&supportedSize(owner.size)&&owner.size<=params.dimensionsMaximumLeaf.w&&all(vec3u(owner.size)<=dims())&&all(owner.origin<=dims()-vec3u(owner.size))&&all(owner.origin%vec3u(owner.size)==vec3u(0u))&&all(cell>=owner.origin)&&all(cell<owner.origin+vec3u(owner.size));}
-fn decodeDenseOwner(word:u32,cell:vec3u)->Owner{if(word==0x80000000u){return Owner(cell,1u,0u);}let exponent=word&7u;if((word&0xc0000000u)!=0u||exponent==0u||exponent>5u){return Owner(cell,1u,1u);}let size=1u<<exponent;let origin=vec3u((word>>3u)&511u,(word>>12u)&511u,(word>>21u)&511u)<<vec3u(exponent);var result=Owner(origin,size,0u);result.invalid=select(1u,0u,ownerValid(result,cell));return result;}
-fn decodePagedOwner(word:u32,cell:vec3u)->Owner{if((word&0x80000000u)!=0u){return Owner(cell,1u,0u);}let exponent=word&7u;if(exponent==0u||exponent>5u){return Owner(cell,1u,0u);}let size=1u<<exponent;let origin=vec3u((word>>3u)&511u,(word>>12u)&511u,(word>>21u)&511u)<<vec3u(exponent);return Owner(origin,size,0u);}
+fn decodeDenseOwner(word:u32,cell:vec3u)->Owner{if(word==0x80000000u){return Owner(cell,1u,0u);}let exponent=word&7u;if((word&0xc0000000u)!=0u||exponent==0u||exponent>5u){return Owner(cell,1u,1u);}let size=1u<<exponent;let origin=(cell>>vec3u(exponent))<<vec3u(exponent);var result=Owner(origin,size,0u);result.invalid=select(1u,0u,ownerValid(result,cell));return result;}
+fn decodePagedOwner(word:u32,cell:vec3u)->Owner{if((word&0x80000000u)!=0u){return Owner(cell,1u,0u);}let exponent=word&7u;if(exponent==0u||exponent>5u){return Owner(cell,1u,0u);}let size=1u<<exponent;let origin=(cell>>vec3u(exponent))<<vec3u(exponent);return Owner(origin,size,0u);}
 fn pagedOwners()->bool{let mode=params.rowCountGenerationModeCapacity.z;if(mode==1u){return false;}if(mode==2u){return true;}return arrayLength(&owners)>15u&&owners[15]==OWNER_MAGIC;}
 fn pagedOwner(cell:vec3u)->Owner{if(arrayLength(&owners)<=15u||owners[15]!=OWNER_MAGIC){return Owner(cell,1u,1u);}let freeOffset=owners[5];let payloadOffset=owners[6];let capacity=owners[3];if(capacity==0u||freeOffset<=16u||((freeOffset-16u)&1u)!=0u||payloadOffset>=arrayLength(&owners)){return Owner(cell,1u,1u);}let hashCapacity=(freeOffset-16u)/2u;if(hashCapacity==0u||16u+2u*hashCapacity>arrayLength(&owners)){return Owner(cell,1u,1u);}let bd=(dims()+vec3u(7u))/8u;let brick=cell/8u;if(any(brick>=bd)||bd.x>0xffffffffu/bd.y){return Owner(cell,1u,1u);}let logical=brick.x+brick.y*bd.x+brick.z*bd.x*bd.y;let key=logical+1u;var slot=(logical*0x9e3779b1u)%hashCapacity;var encoded=0u;var found=false;for(var probe=0u;probe<hashCapacity;probe+=1u){let observed=owners[16u+slot];if(observed==key){encoded=owners[16u+hashCapacity+slot];found=true;break;}if(observed==0u){break;}slot=select(slot+1u,0u,slot+1u==hashCapacity);}if(!found||encoded==0u||encoded==INVALID||encoded>capacity){return canonicalOwner(cell);}let local=cell%vec3u(8u);let localIndex=local.x+local.y*8u+local.z*64u;let physical=encoded-1u;if(payloadOffset>=arrayLength(&owners)||physical>(arrayLength(&owners)-payloadOffset-1u)/512u){return canonicalOwner(cell);}let word=owners[payloadOffset+physical*512u+localIndex];if(word==0u||word==INVALID){return canonicalOwner(cell);}return decodePagedOwner(word,cell);}
 fn hashSite(cell:u32,size:u32)->u32{var value=cell^(size*0x9e3779b9u);value=(value^(value>>16u))*0x7feb352du;value=(value^(value>>15u))*0x846ca68bu;return value^(value>>16u);}
 fn indexedOwner(cell:vec3u,preferredSize:u32)->Owner{let capacity=arrayLength(&owners)/4u;if(capacity==0u||(capacity&(capacity-1u))!=0u){return Owner(cell,1u,1u);}let mask=capacity-1u;for(var size=1u;size<=params.dimensionsMaximumLeaf.w;size<<=1u){let origin=(cell/vec3u(size))*vec3u(size);let linear=origin.x+dims().x*(origin.y+dims().y*origin.z);let base=hashSite(linear,size)&mask;for(var probe=0u;probe<32u;probe+=1u){let slot=(base+probe)&mask;let observed=owners[slot*4u];if(observed==0u){break;}if(observed==linear+1u&&owners[slot*4u+1u]==size){return Owner(origin,size,0u);}}}var size=preferredSize;loop{let origin=(cell/vec3u(size))*vec3u(size);if(all(origin<=dims()-vec3u(size))){return Owner(origin,size,0u);}if(size==1u){return Owner(cell,1u,0u);}size>>=1u;}}
 fn ownerAt(cell:vec3u,preferredSize:u32)->Owner{if(params.rowCountGenerationModeCapacity.z==3u){return indexedOwner(cell,preferredSize);}if(pagedOwners()){return pagedOwner(cell);}if(!volumeFits()){return Owner(cell,1u,1u);}let index=cell.x+dims().x*(cell.y+dims().y*cell.z);if(index>=arrayLength(&owners)){return Owner(cell,1u,1u);}return decodeDenseOwner(owners[index],cell);}
-fn failRow(row:u32,flags:u32,detail:u32){descriptors[row]=0x40000000u|(flags&63u)|(detail<<6u);atomicAdd(&control.errorCount,1u);atomicMin(&control.firstInvalid,row);atomicOr(&control.flags,flags);}
+fn failRow(row:u32,flags:u32,detail:u32){descriptors[row]=0x40000000u|(flags&127u)|(detail<<7u);atomicAdd(&control.errorCount,1u);atomicMin(&control.firstInvalid,row);atomicOr(&control.flags,flags);}
 @compute @workgroup_size(1) fn preparePowerDescriptors(){let requested=select(0u,rowCountSource[0],arrayLength(&rowCountSource)>0u);atomicStore(&control.rowCount,requested);atomicStore(&control.validCount,0u);atomicStore(&control.errorCount,0u);atomicStore(&control.firstInvalid,INVALID);atomicStore(&control.flags,0u);atomicStore(&control.sameOrFinerCount,0u);atomicStore(&control.sameOrCoarserCount,0u);atomicStore(&control.generation,params.rowCountGenerationModeCapacity.y);if(arrayLength(&indirectDispatch)>=3u){indirectDispatch[0]=0u;indirectDispatch[1]=1u;indirectDispatch[2]=1u;}}
 @compute @workgroup_size(64) fn generatePowerDescriptors(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) workgroups:vec3u,@builtin(local_invocation_index) lid:u32){
   let row=(wid.x+wid.y*workgroups.x)*64u+lid;let requested=atomicLoad(&control.rowCount);
@@ -431,7 +439,7 @@ fn failRow(row:u32,flags:u32,detail:u32){descriptors[row]=0x40000000u|(flags&63u
   if(flags!=0u){failRow(row,flags,firstDetail);return;}
   var descriptor=boundaryMask<<24u;
   if(!coarser){for(var bit=0u;bit<18u;bit+=1u){if(sizes[bit]==header.size){descriptor|=1u<<bit;}}atomicAdd(&control.sameOrFinerCount,1u);}
-  else{let child=(origin/vec3u(header.size))&vec3u(1u);descriptor|=COARSER_FLAG|child.x|(child.y<<1u)|(child.z<<2u);let outward=vec3i(select(-1,1,child.x==1u),select(-1,1,child.y==1u),select(-1,1,child.z==1u));let wanted=array<vec3i,6>(vec3i(outward.x,0,0),vec3i(0,outward.y,0),vec3i(0,0,outward.z),vec3i(outward.x,outward.y,0),vec3i(outward.x,0,outward.z),vec3i(0,outward.y,outward.z));for(var coarseBit=0u;coarseBit<6u;coarseBit+=1u){for(var bit=0u;bit<18u;bit+=1u){if(all(DIRECTIONS[bit]==wanted[coarseBit])&&sizes[bit]==header.size*2u){descriptor|=1u<<(coarseBit+3u);}}}atomicAdd(&control.sameOrCoarserCount,1u);}
+  else{let child=(origin/vec3u(header.size))&vec3u(1u);descriptor|=COARSER_FLAG|child.x|(child.y<<1u)|(child.z<<2u);let outward=vec3i(select(-1,1,child.x==1u),select(-1,1,child.y==1u),select(-1,1,child.z==1u));let wanted=array<vec3i,6>(vec3i(outward.x,0,0),vec3i(0,outward.y,0),vec3i(0,0,outward.z),vec3i(outward.x,outward.y,0),vec3i(outward.x,0,outward.z),vec3i(0,outward.y,outward.z));var coarseMask=0u;for(var coarseBit=0u;coarseBit<6u;coarseBit+=1u){for(var bit=0u;bit<18u;bit+=1u){if(all(DIRECTIONS[bit]==wanted[coarseBit])&&sizes[bit]==header.size*2u){descriptor|=1u<<(coarseBit+3u);coarseMask|=1u<<coarseBit;}}}if(coarseMask==25u||coarseMask==42u||coarseMask==52u||coarseMask==57u||coarseMask==58u||coarseMask==60u){failRow(row,ACUTE_GRADING,coarseMask);return;}atomicAdd(&control.sameOrCoarserCount,1u);}
   descriptors[row]=descriptor;atomicAdd(&control.validCount,1u);
 }
 @compute @workgroup_size(1) fn publishPowerDescriptors(){let requested=atomicLoad(&control.rowCount);let available=min(requested,min(arrayLength(&headers),arrayLength(&descriptors)));if(available<requested){atomicAdd(&control.errorCount,requested-available);atomicMin(&control.firstInvalid,available);atomicOr(&control.flags,CAPACITY);}if(arrayLength(&indirectDispatch)<3u){atomicOr(&control.flags,CAPACITY);return;}if(atomicLoad(&control.errorCount)!=0u||atomicLoad(&control.validCount)!=requested){indirectDispatch[0]=0u;indirectDispatch[1]=1u;indirectDispatch[2]=1u;return;}let groups=(requested+63u)/64u;let x=min(groups,65535u);indirectDispatch[0]=x;indirectDispatch[1]=select(1u,(groups+x-1u)/x,x>0u);indirectDispatch[2]=1u;}

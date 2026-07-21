@@ -42,7 +42,7 @@ const FACE_BAND_ERRORS = [
   [32, "phi"], [64, "unresolved"], [128, "incomplete"], [256, "outside fine band"],
 ] as const;
 const TRANSITION_ERRORS = [
-  [1, "source"], [2, "capacity"], [4, "adjacency"], [8, "descriptor"],
+  [1, "source"], [2, "capacity"], [4, "adjacency"], [8, "descriptor"], [16, "acute grading"],
 ] as const;
 const POWER_ERRORS = [
   [1, "source"], [2, "capacity"], [4, "missing row"], [8, "face"],

@@ -125,11 +125,28 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
     "finite panes must attenuate rather than become opaque shadow blockers");
   assert.match(svoDrySceneShader, /fn dryGlassBoundingSphereVisible\([^]*record\.extentIorEpsilon\.xy[^]*record\.centerThickness\.w[^]*radius\*radius/,
     "pane tracing must conservatively reject distant finite sheets in world space before local transforms");
-  assert.match(svoDrySceneShader, /compositeOwned\|\|!dryGlassBoundingSphereVisible\(record,ro,rd,tMin_m,bestT\)[^]*continue[^]*svoThinGlassIntersect/,
+  assert.match(svoDrySceneShader, /compositeOwned\|\|thickReplaced\|\|!dryGlassBoundingSphereVisible\(record,ro,rd,tMin_m,bestT\)[^]*continue[^]*svoThinGlassIntersect/,
     "both primary and shadow pane queries must apply the conservative gate before exact intersection");
   assert.match(adapter, /optics\.netTransmittance[^]*dryVisibilityTransmissionStep/);
   assert.doesNotMatch(adapter, /shadeUnifiedSurface|dryHardVisibility/,
     "visibility intersection must never recurse into shading");
+});
+
+test("cone visibility is generation-checked and falls back to exact SVO visibility", () => {
+  assert.match(svoDrySceneShader, /fn dryNodeMipReady\(\)->bool\{return dry\.nodeMip\.w!=0u&&dry\.nodeMip\.x!=0u&&dry\.nodeMip\.x==publicationState\[2\]&&dry\.nodeMip\.y>0u&&dry\.nodeMip\.z>0u;\}/,
+    "the sampled cache must require a complete matching directory publication");
+  const lightStart = svoDrySceneShader.indexOf("fn dryLightVisibility(");
+  const lightEnd = svoDrySceneShader.indexOf("fn dryContactVisibilityRadius", lightStart);
+  const lightVisibility = svoDrySceneShader.slice(lightStart, lightEnd);
+  assert.match(lightVisibility, /dry\.materialPublication\.w&4u[^]*dryConeVisibility\([^]*if\(cone\.valid!=0u\)\{[^]*return vec3f\(cone\.transmittance\);\}/);
+  assert.ok(lightVisibility.indexOf("svoTraceVisibility", lightVisibility.indexOf("dryConeVisibility")) > 0,
+    "a missing or stale cone result must continue through exact bounded visibility");
+  const contactStart = svoDrySceneShader.indexOf("fn dryContactVisibility(");
+  const contactEnd = svoDrySceneShader.indexOf("fn dryEnvironment(", contactStart);
+  assert.match(svoDrySceneShader.slice(contactStart, contactEnd), /dry\.materialPublication\.w&4u[^]*dryNodeMipReady\(\)[^]*for\(var sampleIndex=0u;sampleIndex<4u/,
+    "cone AO uses four bounded hemisphere samples only when the cache is ready");
+  assert.match(svoDrySceneShader, /diffuseEnvironment=[^;]*\*contactVisibility\/UNIFIED_PI[^]*specularEnvironment=dryEnvironment/,
+    "AO must modulate diffuse environment only, leaving direct light, emission, and specular environment intact");
 });
 
 test("invalid or exhausted shadow work fails closed and raster/timing fallback remains intact", () => {

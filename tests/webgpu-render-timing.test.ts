@@ -65,7 +65,7 @@ test("renderer-mode epochs reject stale asynchronous timing readbacks", () => {
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const controller = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
   const panel = readFileSync(new URL("../components/PerformancePanel.tsx", import.meta.url), "utf8");
-  assert.match(renderer, /timingContext = `\$\{config\.methodId\}:\$\{config\.quality\}:shadow-\$\{[^}]+\}:temporal-\$\{[^}]+\}:\$\{voxelRenderMode\}:\$\{svoRenderMode\}`/);
+  assert.match(renderer, /timingContext = `\$\{config\.methodId\}:\$\{config\.quality\}:shadow-\$\{[^}]+\}:temporal-\$\{[^}]+\}:lighting-\$\{svoLightingMode\}:\$\{voxelRenderMode\}:\$\{svoRenderMode\}`/);
   assert.match(renderer, /beginRenderTimingEpoch\(\)[^]*this\.renderTimingEpoch \+= 1/);
   assert.match(renderer, /beginRenderTimingEpoch\(\)[^]*this\.lastRenderQueryAt = -Infinity;[^]*this\.gpuRender_ms = undefined/,
     "a mode epoch must bypass the 250 ms cadence and sample its first presentation");

@@ -55,6 +55,7 @@ function mockDevice(textures: MockTexture[], renderDescriptors: GPURenderPipelin
     createShaderModule() { return { getCompilationInfo: async () => ({ messages: [] }) }; },
     createBindGroup() { return {}; },
     createBindGroupLayout() { return {}; },
+    createSampler() { return {}; },
     createPipelineLayout() { return {}; },
     async createRenderPipelineAsync(descriptor: GPURenderPipelineDescriptor) { renderDescriptors.push(descriptor); return {}; },
     queue: { writeBuffer() {} },

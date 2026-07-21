@@ -17,7 +17,12 @@ import { buildSvoScenePrimitives } from "./svo-scene-primitives";
 import { buildSvoSceneGlass } from "./svo-scene-glass";
 import { buildSvoSceneThickGlass } from "./svo-scene-thick-glass";
 import { buildSvoTerrainMaterial } from "./svo-terrain-material";
-import { DEFAULT_SVO_RENDER_MODE, type SvoRenderMode } from "./svo-render-mode";
+import {
+  DEFAULT_SVO_LIGHTING_MODE,
+  DEFAULT_SVO_RENDER_MODE,
+  type SvoLightingMode,
+  type SvoRenderMode,
+} from "./svo-render-mode";
 import type { SparseVoxelTemporalFrameState } from "./webgpu-svo-temporal-accumulator";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoCostOverlayCode, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
 import { isGPUInitializationAbort } from "./gpu-initialization";
@@ -30,6 +35,8 @@ import { OctreeTechniqueOverlayPipeline } from "./webgpu-octree-technique-overla
 import { automaticGPURecoveryEnabled, optionalBrowserTimestampFeatures } from "./gpu-startup";
 import { OctreeTechniqueAuditOverlayPipeline } from "./webgpu-octree-technique-audit-overlay";
 import { initialRasterPresentationReadiness } from "./gpu-t0-presentation";
+import { WebGPUStaticSvoScene } from "./webgpu-static-svo-scene";
+import { planSceneRuntime } from "./scene-runtime";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 export const MAX_PRESENTATION_GAP_MS = 1000 / 60;
@@ -805,7 +812,7 @@ export class FluidLabRenderer {
     this.techniqueAuditOverlayPipeline?.setOwnerRows(pressureSamples);
   }
 
-  private solverKey(scene:SceneDescription,config:SimulationRunConfig){return`${config.simulationEpoch??0}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment??"default"}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialBrickSeeds_m??null)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow??null)}`;}
+  private solverKey(scene:SceneDescription,config:SimulationRunConfig){return`${config.simulationEpoch??0}:fluid-${planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment??"default"}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialBrickSeeds_m??null)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.container.fluidWallMode}:${JSON.stringify(scene.fluid.inflow??null)}`;}
 
   private resetGPUQueueTracking() {
     this.gpuPendingBatches = 0;
@@ -879,6 +886,8 @@ export class FluidLabRenderer {
       ...(water ? { waterSurfacePresentation: {
         surfaceGeometrySource: water.surfaceGeometrySource,
         globalFineAttached: water.globalFineAttached,
+        globalFineAttachedGeneration: water.globalFineAttachedGeneration,
+        meshPublicationGeneration: water.meshPublicationGeneration,
         globalFineCrossingPublished: water.globalFineCrossingPublished,
         presentationFallbackActive: water.presentationFallbackActive,
       } } : {}),
@@ -934,8 +943,11 @@ export class FluidLabRenderer {
       this.resetGPUQueueTracking();
       report({phase:"drain",taskId:"solver.drain",label:"Previous GPU work drained",completed:1,total:1});
     };
-    const create=prepare().then(()=>{
+    const create:Promise<GPUSolverInstance>=prepare().then(()=>{
       if(abort.signal.aborted||this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
+      if (!planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver) {
+        return WebGPUStaticSvoScene.create(device, scene, config.quality, config.values, report, abort.signal);
+      }
       return method.createSolverAsync
         ? method.createSolverAsync(device,scene,config.quality,config.values,this.gpuRigidLoadCallback,report,abort.signal)
         : new Promise<GPUSolverInstance>((resolve,reject)=>setTimeout(()=>{try{resolve(method.createSolver!(device,scene,config.quality,config.values,this.gpuRigidLoadCallback));}catch(error){reject(error);}},0));
@@ -946,8 +958,9 @@ export class FluidLabRenderer {
       report({phase:"attach",taskId:"solver.attach",label:"Attach warmed solver",completed:reportedCompleted,total:reportedTotal+1});
       solver.applyRuntimeValues?.(config.values);
       this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUReadbackAt_ms=-Infinity;this.adaptiveWaterAttached=false;
-      solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";
-      this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false};
+      const staticRenderScene=!planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver;
+      if(staticRenderScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Static SVO scene ready; fluid authority intentionally bypassed";this.pendingInitialRasterPresentation=undefined;}
+      else{solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false};}
       this.updateRenderSources(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);this.voxelInspectionSource=undefined;this.voxelDebugPipeline?.setSource(undefined);this.voxelDebugSourceGeneration=-1;this.attachSvoFinePhiResources(solver);
       const sparseSceneSource=solver.sparseVoxelSceneSource;
       const scenePrimitives=buildSvoScenePrimitives(scene);
@@ -981,7 +994,9 @@ export class FluidLabRenderer {
       this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData);
       this.pausedPresentationRevision+=1;
       if(previous&&previous!==solver&&!previousDestroyedForReset)this.retireGPUFluid(previous);
-      this.gpuInfoCallback?.(solver.info);this.onStatus({state:"initializing",label:"Warmed solver attached; publishing fenced t=0 raster surface",phase:"presentation",completed:reportedCompleted,total:reportedTotal+1,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false});
+      this.gpuInfoCallback?.(solver.info);
+      if(staticRenderScene)this.onStatus({state:"ready",label:"Static SVO renderer ready",adapter:this.adapterName});
+      else this.onStatus({state:"initializing",label:"Warmed solver attached; publishing fenced t=0 raster surface",phase:"presentation",completed:reportedCompleted,total:reportedTotal+1,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false});
     }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.pendingInitialRasterPresentation=undefined;if(isGPUInitializationAbort(error))return;if(previous)this.onStatus({state:"ready",label:error instanceof Error?`Solver rebuild failed; previous solver retained: ${error.message}`:"Solver rebuild failed; previous solver retained",adapter:this.adapterName});else this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed"});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration){this.gpuFluidPending=undefined;if(this.gpuFluidInitializationAbort===abort)this.gpuFluidInitializationAbort=undefined;}});
   }
 
@@ -1134,7 +1149,7 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.activeRenderScale * 100)}%)`;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE, svoLightingMode: SvoLightingMode = DEFAULT_SVO_LIGHTING_MODE, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS): RendererFrameMetrics {
     if (!this.device || this.disposed || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
     this.resize(this.rasterRenderScale);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return {cpuFrame_ms:0,cpuPhysicsSubmit_ms:0,cpuDataUpload_ms:0,cpuRenderEncode_ms:0};
@@ -1149,7 +1164,7 @@ export class FluidLabRenderer {
       this.svoDryScenePipeline?.invalidateTemporalHistory();
       this.beginRenderTimingEpoch();
     }
-    const timingContext = `${config.methodId}:${config.quality}:shadow-${this.svoShadowVisibilityEnabled ? "on" : "off"}:temporal-${this.svoTemporalAccumulationEnabled ? "on" : "off"}:${voxelRenderMode}:${svoRenderMode}`;
+    const timingContext = `${config.methodId}:${config.quality}:shadow-${this.svoShadowVisibilityEnabled ? "on" : "off"}:temporal-${this.svoTemporalAccumulationEnabled ? "on" : "off"}:lighting-${svoLightingMode}:${voxelRenderMode}:${svoRenderMode}`;
     if (timingContext !== this.renderTimingContext) { this.renderTimingContext = timingContext; this.beginRenderTimingEpoch(); }
     const basis = cameraBasis(camera), position = basis.position;
     const physicsStart=performance.now();
@@ -1281,6 +1296,7 @@ export class FluidLabRenderer {
       });
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }
+    this.svoDryScenePipeline?.setLightingMode(svoLightingMode);
     const cpuDataUpload_ms=performance.now()-uploadStart,renderStart=performance.now();
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     let stageCapture: PendingGPUStageCapture | undefined;
@@ -1303,7 +1319,7 @@ export class FluidLabRenderer {
     const fluidRenderOwnership = useSvoDryScene ? this.svoDryScenePipeline?.fluidRenderOwnership : undefined;
     const drySceneReuseKey = fluidRenderOwnership?.legacyComposite ? [
       this.gpuFluidGeneration, scene.sceneId, environmentId, selectedBodyId ?? "",
-      diagnosticsKey,
+      diagnosticsKey, svoLightingMode,
       basis.position.x, basis.position.y, basis.position.z,
       basis.forward.x, basis.forward.y, basis.forward.z,
       basis.right.x, basis.right.y, basis.right.z,

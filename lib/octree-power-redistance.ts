@@ -7,12 +7,17 @@ import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
 export const OCTREE_POWER_REDISTANCE_QUERY_BYTES = 48;
 export const OCTREE_POWER_REDISTANCE_CONTROL_BYTES = 32;
 export const OCTREE_POWER_REDISTANCE_VALID = 0x8000_0000;
-export const OCTREE_POWER_REDISTANCE_NEAREST = 0x4000_0000;
-export const OCTREE_POWER_REDISTANCE_ERROR = Object.freeze({ capacity: 1, invalidQuery: 2, noKnownNeighbor: 4 } as const);
+export const OCTREE_POWER_REDISTANCE_ERROR = Object.freeze({
+  capacity: 1,
+  invalidQuery: 2,
+  noCausalSimplex: 4,
+  /** @deprecated ABI alias retained for older diagnostic consumers. */
+  noKnownNeighbor: 4,
+} as const);
 
 export interface OctreePowerRedistanceResult {
   readonly signedDistance: number;
-  readonly mode: "tetrahedron" | "nearest";
+  readonly mode: "tetrahedron";
   readonly tetrahedron: number;
 }
 
@@ -70,7 +75,8 @@ export function redistanceOctreePowerCatalogCell(
     const solidAngleDenominator = lengths[0] * lengths[1] * lengths[2] + dot(columns[0], columns[1]) * lengths[2]
       + dot(columns[0], columns[2]) * lengths[1] + dot(columns[1], columns[2]) * lengths[0];
     const solidAngleNumerator = Math.abs(dot(columns[0], cross(columns[1], columns[2])));
-    if (!(solidAngleDenominator > solidAngleNumerator + tolerance)) return;
+    const angleTolerance = tolerance * Math.max(1, Math.abs(solidAngleDenominator), solidAngleNumerator);
+    if (solidAngleDenominator + angleTolerance < solidAngleNumerator) return;
     const a = solveTranspose(columns, known as [number, number, number]);
     const b = solveTranspose(columns, [1, 1, 1]);
     if (!a || !b) return;
@@ -87,15 +93,7 @@ export function redistanceOctreePowerCatalogCell(
     if (candidate < best) { best = candidate; bestTetrahedron = tetrahedron; }
   });
   if (Number.isFinite(best)) return { signedDistance: sign * best, mode: "tetrahedron", tetrahedron: bestTetrahedron };
-  let nearest = Infinity;
-  for (let selector = 0; selector < selectorCount; selector += 1) {
-    const value = neighborMagnitudes[selector];
-    if (value === undefined || !Number.isFinite(value) || value < 0) continue;
-    const offset: PowerVec3 = [tetrahedronVertexData[selector * 4], tetrahedronVertexData[selector * 4 + 1], tetrahedronVertexData[selector * 4 + 2]];
-    nearest = Math.min(nearest, value + Math.sqrt(dot(offset, offset)) * anchorSize);
-  }
-  if (!Number.isFinite(nearest)) throw new RangeError("Power redistance requires at least one known neighbor");
-  return { signedDistance: sign * nearest, mode: "nearest", tetrahedron: 0xffff_ffff };
+  throw new RangeError("Power redistance has no causal nonobtuse Delaunay simplex");
 }
 
 export interface OctreePowerRedistancePlan {
@@ -193,12 +191,12 @@ struct Control { flags:atomic<u32>, firstError:atomic<u32>, queryCount:u32, upda
 @group(0) @binding(2) var<storage,read> magnitudes:array<f32>;@group(0) @binding(3) var<storage,read> vertices:array<TetraVertex>;
 @group(0) @binding(4) var<storage,read> tetrahedra:array<u32>;@group(0) @binding(5) var<storage,read_write> results:array<f32>;
 @group(0) @binding(6) var<storage,read_write> statuses:array<u32>;@group(0) @binding(7) var<storage,read_write> control:Control;
-const VALID:u32=0x80000000u;const NEAREST:u32=0x40000000u;const CAPACITY:u32=1u;const INVALID_QUERY:u32=2u;const NO_KNOWN:u32=4u;const UNIFORM:u32=1u;
+const VALID:u32=0x80000000u;const CAPACITY:u32=1u;const INVALID_QUERY:u32=2u;const NO_KNOWN:u32=4u;const UNIFORM:u32=1u;
 fn finite(value:f32)->bool{return (bitcast<u32>(value)&0x7f800000u)!=0x7f800000u;}fn fail(index:u32,flag:u32){atomicOr(&control.flags,flag);atomicMin(&control.firstError,index);statuses[index]=flag;}
 fn solveTranspose(a:vec3f,b:vec3f,c:vec3f,rhs:vec3f)->vec4f{let determinant=dot(a,cross(b,c));if(!finite(determinant)||abs(determinant)<=1e-10){return vec4f(0.0);}let value=(rhs.x*cross(b,c)+rhs.y*cross(c,a)+rhs.z*cross(a,b))/determinant;return vec4f(value,1.0);}
 fn solveColumns(a:vec3f,b:vec3f,c:vec3f,rhs:vec3f)->vec4f{let determinant=dot(a,cross(b,c));if(!finite(determinant)||abs(determinant)<=1e-10){return vec4f(0.0);}return vec4f(dot(rhs,cross(b,c)),dot(a,cross(rhs,c)),dot(a,cross(b,rhs)),determinant);}
-fn acuteAnchorSolidAngle(a:vec3f,b:vec3f,c:vec3f,tolerance:f32)->bool{let denominator=length(a)*length(b)*length(c)+dot(a,b)*length(c)+dot(a,c)*length(b)+dot(b,c)*length(a);let numerator=abs(dot(a,cross(b,c)));return denominator>numerator+tolerance;}
-@compute @workgroup_size(64) fn updatePowerDistance(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(index>=params.queryCount||index>=params.queryCapacity){return;}if(params.queryCount>params.queryCapacity||index>=arrayLength(&queries)||index>=arrayLength(&results)||index>=arrayLength(&statuses)){return;}let query=queries[index];if(query.output>=arrayLength(&results)||query.output>=arrayLength(&statuses)||(query.flags&UNIFORM)!=0u||query.firstFace>arrayLength(&vertices)||query.faceCount>arrayLength(&vertices)-query.firstFace||query.firstTetrahedron>arrayLength(&tetrahedra)||query.tetrahedronCount>arrayLength(&tetrahedra)-query.firstTetrahedron||query.vertexStart>arrayLength(&magnitudes)||query.vertexCount>arrayLength(&magnitudes)-query.vertexStart||query.vertexCount<query.faceCount||!finite(query.data.x)||query.data.x<=0.0||abs(query.data.y)!=1.0){fail(index,INVALID_QUERY);return;}let tolerance=max(0.0,query.data.z);var best=1e30;var bestTetra=0xffffffffu;for(var local=0u;local<query.tetrahedronCount;local+=1u){let packed=tetrahedra[query.firstTetrahedron+local];let selectors=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);if(any(selectors>=vec3u(query.faceCount))){fail(index,INVALID_QUERY);return;}let known=vec3f(magnitudes[query.vertexStart+selectors.x],magnitudes[query.vertexStart+selectors.y],magnitudes[query.vertexStart+selectors.z]);if(any(known<vec3f(0.0))||!finite(known.x)||!finite(known.y)||!finite(known.z)){continue;}let a=query.data.x*vertices[query.firstFace+selectors.x].offsetSize.xyz;let b=query.data.x*vertices[query.firstFace+selectors.y].offsetSize.xyz;let c=query.data.x*vertices[query.firstFace+selectors.z].offsetSize.xyz;if(!acuteAnchorSolidAngle(a,b,c,tolerance)){continue;}let av=solveTranspose(a,b,c,known);let bv=solveTranspose(a,b,c,vec3f(1.0));if(av.w==0.0||bv.w==0.0){continue;}let quadratic=dot(bv.xyz,bv.xyz);let projection=dot(av.xyz,bv.xyz);let constant=dot(av.xyz,av.xyz)-1.0;let discriminant=projection*projection-quadratic*constant;if(quadratic<=0.0||discriminant < -tolerance){continue;}let candidate=(projection+sqrt(max(0.0,discriminant)))/quadratic;if(!finite(candidate)||candidate+tolerance<max(known.x,max(known.y,known.z))){continue;}let gradient=av.xyz-candidate*bv.xyz;let ray=solveColumns(a,b,c,-gradient);if(ray.w==0.0){continue;}let coefficients=ray.xyz/ray.w;let sum=coefficients.x+coefficients.y+coefficients.z;if(sum<=tolerance||any(coefficients/sum<vec3f(-tolerance))){continue;}if(candidate<best){best=candidate;bestTetra=local;}}
-if(bestTetra!=0xffffffffu){results[query.output]=query.data.y*best;statuses[query.output]=VALID|bestTetra;atomicAdd(&control.tetrahedron,1u);atomicAdd(&control.updated,1u);return;}var nearest=1e30;for(var selector=0u;selector<query.faceCount;selector+=1u){let known=magnitudes[query.vertexStart+selector];if(!finite(known)||known<0.0){continue;}let offset=vertices[query.firstFace+selector].offsetSize.xyz;nearest=min(nearest,known+length(offset)*query.data.x);}if(nearest>=1e29){fail(index,NO_KNOWN);return;}results[query.output]=query.data.y*nearest;statuses[query.output]=VALID|NEAREST;atomicAdd(&control.nearest,1u);atomicAdd(&control.updated,1u);}
+fn nonobtuseAnchorSolidAngle(a:vec3f,b:vec3f,c:vec3f,tolerance:f32)->bool{let denominator=length(a)*length(b)*length(c)+dot(a,b)*length(c)+dot(a,c)*length(b)+dot(b,c)*length(a);let numerator=abs(dot(a,cross(b,c)));return denominator+tolerance*max(1.,max(abs(denominator),numerator))>=numerator;}
+@compute @workgroup_size(64) fn updatePowerDistance(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(index>=params.queryCount||index>=params.queryCapacity){return;}if(params.queryCount>params.queryCapacity||index>=arrayLength(&queries)||index>=arrayLength(&results)||index>=arrayLength(&statuses)){return;}let query=queries[index];if(query.output>=arrayLength(&results)||query.output>=arrayLength(&statuses)||(query.flags&UNIFORM)!=0u||query.firstFace>arrayLength(&vertices)||query.faceCount>arrayLength(&vertices)-query.firstFace||query.firstTetrahedron>arrayLength(&tetrahedra)||query.tetrahedronCount>arrayLength(&tetrahedra)-query.firstTetrahedron||query.vertexStart>arrayLength(&magnitudes)||query.vertexCount>arrayLength(&magnitudes)-query.vertexStart||query.vertexCount<query.faceCount||!finite(query.data.x)||query.data.x<=0.0||abs(query.data.y)!=1.0){fail(index,INVALID_QUERY);return;}let tolerance=max(0.0,query.data.z);var best=1e30;var bestTetra=0xffffffffu;for(var local=0u;local<query.tetrahedronCount;local+=1u){let packed=tetrahedra[query.firstTetrahedron+local];let selectors=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);if(any(selectors>=vec3u(query.faceCount))){fail(index,INVALID_QUERY);return;}let known=vec3f(magnitudes[query.vertexStart+selectors.x],magnitudes[query.vertexStart+selectors.y],magnitudes[query.vertexStart+selectors.z]);if(any(known<vec3f(0.0))||!finite(known.x)||!finite(known.y)||!finite(known.z)){continue;}let a=query.data.x*vertices[query.firstFace+selectors.x].offsetSize.xyz;let b=query.data.x*vertices[query.firstFace+selectors.y].offsetSize.xyz;let c=query.data.x*vertices[query.firstFace+selectors.z].offsetSize.xyz;if(!nonobtuseAnchorSolidAngle(a,b,c,tolerance)){continue;}let av=solveTranspose(a,b,c,known);let bv=solveTranspose(a,b,c,vec3f(1.0));if(av.w==0.0||bv.w==0.0){continue;}let quadratic=dot(bv.xyz,bv.xyz);let projection=dot(av.xyz,bv.xyz);let constant=dot(av.xyz,av.xyz)-1.0;let discriminant=projection*projection-quadratic*constant;if(quadratic<=0.0||discriminant < -tolerance){continue;}let candidate=(projection+sqrt(max(0.0,discriminant)))/quadratic;if(!finite(candidate)||candidate+tolerance<max(known.x,max(known.y,known.z))){continue;}let gradient=av.xyz-candidate*bv.xyz;let ray=solveColumns(a,b,c,-gradient);if(ray.w==0.0){continue;}let coefficients=ray.xyz/ray.w;let sum=coefficients.x+coefficients.y+coefficients.z;if(sum<=tolerance||any(coefficients/sum<vec3f(-tolerance))){continue;}if(candidate<best){best=candidate;bestTetra=local;}}
+if(bestTetra==0xffffffffu){fail(index,NO_KNOWN);return;}results[query.output]=query.data.y*best;statuses[query.output]=VALID|bestTetra;atomicAdd(&control.tetrahedron,1u);atomicAdd(&control.updated,1u);}
 @compute @workgroup_size(1) fn publishPowerDistance(){if(params.queryCount>params.queryCapacity||params.queryCount>arrayLength(&queries)||params.queryCount>arrayLength(&results)||params.queryCount>arrayLength(&statuses)){atomicOr(&control.flags,CAPACITY);atomicMin(&control.firstError,min(params.queryCount,params.queryCapacity));return;}if(atomicLoad(&control.flags)==0u&&atomicLoad(&control.updated)==params.queryCount){atomicStore(&control.flags,VALID);}}
 `;

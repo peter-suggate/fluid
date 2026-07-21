@@ -27,6 +27,12 @@ test("power-face seed planner is bounded by compact row and face capacities", ()
     "reverse publication must reject least-squares amplification instead of clamping it");
   assert.match(octreePowerFaceSeedShader, /face\.negativeRow==INVALID&&face\.positiveRow==INVALID/,
     "reverse publication must accept either canonical one-sided axis-face orientation and reject only an empty face");
+  assert.match(octreePowerFaceSeedShader,
+    /rejectFailedAuthoritativePowerToAxis[\s\S]*axisControl\[1\]=1u/,
+    "authoritative power failure must invalidate compact axis authority instead of exposing its compatibility result");
+  assert.match(WebGPUOctreePowerFaceSeed.prototype.encodePowerToAxis.toString(),
+    /if\(authoritative\)[\s\S]*reverseRejectPipeline/,
+    "fail-closed invalidation must remain opt-in for explicit compatibility modes");
 });
 
 test("Dawn seeds a non-axis power face from transferred compact face velocity", {
@@ -42,20 +48,20 @@ test("Dawn seeds a non-axis power face from transferred compact face velocity", 
       .set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)); buffer.unmap(); return buffer;
   };
   const axisControl = upload(new Uint32Array([6, 0, 6, 1, 6, 0]));
-  const axisWords = new Uint32Array(6 * 6); const axisFloats = new Float32Array(axisWords.buffer);
+  const axisWords = new Uint32Array(6 * 8); const axisFloats = new Float32Array(axisWords.buffer);
   [2, 2, 4, 4, 6, 6].forEach((velocity, face) => {
-    const at = face * 6; axisWords[at] = 0; axisWords[at + 1] = 0xffff_ffff;
-    axisWords[at + 3] = Math.floor(face / 2); axisFloats[at + 4] = velocity; axisFloats[at + 5] = 1;
+    const at = face * 8; axisWords[at] = 0; axisWords[at + 1] = 0xffff_ffff;
+    axisWords[at + 5] = Math.floor(face / 2); axisFloats[at + 6] = velocity; axisFloats[at + 7] = 1;
   });
   // The compact mirror canonically emits both one-sided orientations.  Keep a
   // negative-boundary face in this round-trip fixture so reverse publication
   // cannot accidentally assume that negativeRow is always live.
-  axisWords[6] = 0xffff_ffff; axisWords[7] = 0;
+  axisWords[8] = 0xffff_ffff; axisWords[9] = 0;
   const axisFaces = upload(axisWords); const incidenceWords = new Uint32Array(25); incidenceWords[0] = 6;
   incidenceWords.set([0, 1, 2, 3, 4, 5], 1); const axisIncidence = upload(incidenceWords);
   const placeholder = upload(new Uint32Array([0]));
   const axis: OctreeFaceMirrorSource = {
-    plan: { rowCapacity: 1, faceCapacity: 6, faceBytes: 144, incidenceBytes: 100, offsetBytes: 8, allocatedBytes: 252 },
+    plan: { rowCapacity: 1, faceCapacity: 6, faceBytes: 192, incidenceBytes: 100, offsetBytes: 8, allocatedBytes: 300 },
     control: axisControl, faces: axisFaces, incidence: axisIncidence, parity: placeholder,
   };
   const powerControlWords = new Uint32Array(16); powerControlWords[0] = 1; powerControlWords[1] = 4;
@@ -80,7 +86,7 @@ test("Dawn seeds a non-axis power face from transferred compact face velocity", 
   const powerIncidence = upload(powerIncidenceWords);
   const power: OctreePowerFaceSource = {
     plan: { rowCapacity: 1, faceCapacity: 4, incidenceCapacity: 4, faceBytes: 128, normalBytes: 64, centroidBytes: 64, quadratureBytes: 320,
-      incidenceBytes: 32, workspaceBytes: 32, hashCapacity: 2, hashBytes: 32, scanBlockCount: 1,
+      incidenceBytes: 32, workspaceBytes: 32, boundaryQueryBytes: 128, hashCapacity: 2, hashBytes: 32, scanBlockCount: 1,
       scanBytes: 16, maximumHashProbes: 32, allocatedBytes: 0 },
     faces: powerFaces, faceNormals: normals, faceCentroids: placeholder, faceQuadrature: placeholder, incidenceRows: powerRows, incidenceOffsets: powerRows,
     incidence: powerIncidence, control: powerControl, siteIndex: placeholder,
@@ -116,7 +122,7 @@ test("Dawn seeds a non-axis power face from transferred compact face velocity", 
   const axisResult = new Float32Array(reverseResult, 32, axisWords.length);
   assert.equal(reverseControl[0], 0); assert.equal(reverseControl[4], 6);
   assert.equal(reverseControl[6], OCTREE_POWER_FACE_SEED_VALID);
-  [3, 3, 5, 5, 7, 7].forEach((expected, index) => assert.ok(Math.abs(axisResult[index * 6 + 4] - expected) < 2e-5));
+  [3, 3, 5, 5, 7, 7].forEach((expected, index) => assert.ok(Math.abs(axisResult[index * 8 + 6] - expected) < 2e-5));
   seed.destroy(); readback.destroy(); axisControl.destroy(); axisFaces.destroy(); axisIncidence.destroy();
   reverseReadback.destroy(); operatorControl.destroy(); powerControl.destroy(); powerFaces.destroy(); normals.destroy();
   powerRows.destroy(); powerIncidence.destroy(); placeholder.destroy(); device.destroy();

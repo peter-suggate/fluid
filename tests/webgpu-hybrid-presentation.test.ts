@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES } from "../lib/webgpu-octree";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const uniformEulerianSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
@@ -35,10 +36,15 @@ test("raw voxel and brick-grid inspection retain the GPU sparse source", () => {
   assert.match(rendererSource, /colorLoadOp: "clear"/);
   assert.match(uniformEulerianSource, /Initial sparse authority: \$\{descriptor\.label\}/);
   assert.match(uniformEulerianSource, /this\.octreeProjection\.encodeInitialSparseAuthorityPhase\(initialSparseScene, phase\)/);
+  assert.deepEqual(OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.map(({ id }) => id), [
+    "cold-topology", "power-operator-authority", "surface-global-fine",
+    "section5-face-band-topology", "section5-face-band-transitions",
+    "section5-face-band-fast-march", "section5-face-band-power-publication",
+    "sparse-render-world",
+  ], "t=0 must publish compact topology, coarse power phi, fine pages, transition face band, and indexed narrow-band authority in dependency order");
   assert.match(octreeProjectionSource,
-    /encodeInitialSparseAuthorityPhase[\s\S]*encodeColdBootstrapRebuild\(encoder\)[\s\S]*this\.encode\(encoder[\s\S]*encodeSurface\(encoder, 0\)[\s\S]*encodeGlobalFineFaceBand\(encoder\)[\s\S]*encodeSparseBrickWorld\(encoder\)/,
-    "t=0 must publish compact topology, coarse power phi, fine pages, transition face band, and indexed narrow-band authority in dependency order",
-  );
+    /case "cold-topology": this\.encodeColdBootstrapRebuild\(encoder\)[\s\S]*case "power-operator-authority": this\.encode\(encoder[\s\S]*case "surface-global-fine": this\.encodeSurface\(encoder, 0\)[\s\S]*case "section5-face-band-topology": this\.encodeGlobalFineFaceBandPhase\(encoder, "topology-build"\)[\s\S]*case "section5-face-band-power-publication": this\.encodeGlobalFineFaceBandPhase\(encoder, "power-publication"\)[\s\S]*case "sparse-render-world": this\.encodeSparseBrickWorld\(encoder\)/,
+    "each ordered checkpoint must dispatch its corresponding sparse-authority stage");
   assert.doesNotMatch(rendererSource, /mode: "smooth", colorTarget/,
     "the renderer must never send smooth mode through the cube inspection pipeline");
 });

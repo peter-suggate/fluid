@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { getScenePreset } from "../lib/scenes";
@@ -10,6 +9,7 @@ import {
   canConsumeSparseVoxelLighting,
   packSparseVoxelDrySceneLightingArena,
   SVO_DRY_SCENE_AREA_LIGHT_SAMPLES,
+  SVO_DRY_SCENE_BINDING_CONTRACT,
   SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT,
   SVO_DRY_SCENE_MAX_SHADED_LIGHTS,
   svoDrySceneShader,
@@ -74,8 +74,7 @@ test("one uniform arena preserves exact published records without adding a stora
   );
   assert.deepEqual(arena.slice(SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.environmentWordOffset), scene.environmentLightingRecord);
   assert.match(svoDrySceneShader, /@group\(0\) @binding\(13\) var<uniform> dryLighting:DryLightingArena/);
-  const renderer = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
-  assert.match(renderer, /binding: 13, visibility: GPUShaderStage\.FRAGMENT, buffer: \{ type: "uniform" \}/);
+  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.find(({ binding }) => binding === 13), { binding: 13, type: "uniform" });
   assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length, 10);
 });
 

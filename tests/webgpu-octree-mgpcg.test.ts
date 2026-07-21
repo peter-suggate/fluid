@@ -50,6 +50,8 @@ test("Section 4.3 hybrid has a three-layer boundary/transition band and paired k
   const source = WebGPUOctreeMGPCG.toString();
   assert.match(source, /firstOrderVCycle|encodeCorrection/);
   assert.match(source, /OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS/);
+  assert.match(WebGPUOctreeProjection.toString(), /3 graph-ring band approximation/,
+    "the visible solver label must not describe graph dilation as an exact three-voxel paper band");
 });
 
 test("authoritative power projection constructs and selects the Section 4.3 L1 V-cycle", () => {

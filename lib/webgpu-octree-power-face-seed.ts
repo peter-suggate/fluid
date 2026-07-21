@@ -59,6 +59,7 @@ export class WebGPUOctreePowerFaceSeed {
   private readonly reverseReconstructPipeline: GPUComputePipeline;
   private readonly reversePublishPipeline: GPUComputePipeline;
   private readonly reverseFinalizePipeline: GPUComputePipeline;
+  private readonly reverseRejectPipeline: GPUComputePipeline;
   private readonly reverseCommitPipeline: GPUComputePipeline;
   private destroyed = false;
 
@@ -91,11 +92,12 @@ export class WebGPUOctreePowerFaceSeed {
     this.reverseReconstructPipeline = pipeline("reconstructPowerRowVelocity");
     this.reversePublishPipeline = pipeline("publishAxisFaceVelocity");
     this.reverseFinalizePipeline = pipeline("publishPowerToAxis");
+    this.reverseRejectPipeline = pipeline("rejectFailedAuthoritativePowerToAxis");
     this.reverseCommitPipeline = pipeline("commitPowerToAxis");
   }
 
-  /** Conservatively republishes the projected power field for legacy compact consumers. */
-  encodePowerToAxis(encoder: GPUCommandEncoder, projectedOperatorControl: GPUBuffer): void {
+  /** Conservatively republishes the projected power field for compact regular-face consumers. */
+  encodePowerToAxis(encoder: GPUCommandEncoder, projectedOperatorControl: GPUBuffer, authoritative = false): void {
     if (this.destroyed) throw new Error("Power-face velocity seed is destroyed");
     const group = (pipeline: GPUComputePipeline, bindings: readonly [number, GPUBuffer][]) => this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0), entries: bindings.map(([binding, buffer]) => ({ binding, resource: { buffer } })),
@@ -114,6 +116,8 @@ export class WebGPUOctreePowerFaceSeed {
       Math.ceil(this.axis.plan.faceCapacity / 64), [[1, this.axis.control], [2, this.axis.faces],
         [7, this.rowVelocities], [9, this.control], [13, this.axisVelocityScratch]]);
     run("Finalize power-to-axis velocity publication", this.reverseFinalizePipeline, 1,
+      [[1, this.axis.control], [9, this.control]]);
+    if (authoritative) run("Reject failed authoritative power-to-axis publication", this.reverseRejectPipeline, 1,
       [[1, this.axis.control], [9, this.control]]);
     run("Commit power-to-axis velocity publication", this.reverseCommitPipeline,
       Math.ceil(this.axis.plan.faceCapacity / 64), [[1, this.axis.control], [2, this.axis.faces],
@@ -152,11 +156,11 @@ export class WebGPUOctreePowerFaceSeed {
 
 export const octreePowerFaceSeedShader = /* wgsl */ `
 struct Params { rowCapacity:u32,powerFaceCapacity:u32,axisFaceCapacity:u32,axisIncidencePerRow:u32 }
-struct AxisFace { negativeRow:u32,positiveRow:u32,packedOrigin:u32,axisSpan:u32,normalVelocity:f32,area:f32 }
+struct AxisFace { negativeRow:u32,positiveRow:u32,originX:u32,originY:u32,originZ:u32,axisSpan:u32,normalVelocity:f32,area:f32 }
 struct PowerFace { negativeRow:u32,positiveRow:u32,geometryCode:u32,flags:u32,normalVelocity:f32,area:f32,inverseDistance:f32,openFraction:f32 }
 struct SeedControl { flags:atomic<u32>,firstError:atomic<u32>,rowCount:atomic<u32>,faceCount:atomic<u32>,seededCount:atomic<u32>,generation:atomic<u32>,valid:atomic<u32>,fallbackCount:atomic<u32>,seedMaxBits:atomic<u32>,axisRowMaxBits:atomic<u32>,projectedRowMaxBits:atomic<u32>,axisOutputMaxBits:atomic<u32>,forwardFlags:atomic<u32>,forwardFirstError:atomic<u32>,forwardSeededCount:atomic<u32>,forwardValid:atomic<u32> }
 @group(0) @binding(0) var<uniform> params:Params;
-@group(0) @binding(1) var<storage,read> axisControl:array<u32>;
+@group(0) @binding(1) var<storage,read_write> axisControl:array<u32>;
 @group(0) @binding(2) var<storage,read_write> axisFaces:array<AxisFace>;
 @group(0) @binding(3) var<storage,read> axisIncidence:array<u32>;
 @group(0) @binding(4) var<storage,read> powerControl:array<u32>;
@@ -236,6 +240,8 @@ fn rowCount()->u32{return atomicLoad(&seed.rowCount);}fn faceCount()->u32{return
   let value=velocity[axis];if(!finite(value)||index>=arrayLength(&axisVelocityScratch)){fail(NONFINITE,index);return;}axisVelocityScratch[index]=value;atomicMax(&seed.axisOutputMaxBits,bitcast<u32>(abs(value)));atomicAdd(&seed.seededCount,1u);}
 @compute @workgroup_size(1) fn publishPowerToAxis(){if(atomicLoad(&seed.flags)==0u&&atomicLoad(&seed.seededCount)==axisControl[0]){
   atomicStore(&seed.valid,VALID);}else{atomicStore(&seed.valid,0u);}}
+@compute @workgroup_size(1) fn rejectFailedAuthoritativePowerToAxis(){if(atomicLoad(&seed.valid)!=VALID&&arrayLength(&axisControl)>1u){
+  axisControl[1]=1u;}}
 @compute @workgroup_size(64) fn commitPowerToAxis(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;
   if(atomicLoad(&seed.valid)!=VALID||index>=axisControl[0]||index>=arrayLength(&axisFaces)||index>=arrayLength(&axisVelocityScratch)){return;}
   axisFaces[index].normalVelocity=axisVelocityScratch[index];}

@@ -7,9 +7,16 @@ export const OCTREE_FACE_TRANSPORT_PARAMETER_BYTES = 48;
 export const OCTREE_FACE_TRANSFER_RECORD_BYTES = 24;
 export const OCTREE_FACE_TRANSFER_MAX_SOURCES = 4;
 export const OCTREE_FACE_TRANSFER_INVALID = 0xffffffff;
+export const OCTREE_FACE_KEY_WORDS = 4;
+export const OCTREE_FACE_KEY_BYTES = OCTREE_FACE_KEY_WORDS * 4;
+
+export type OctreeFaceOrigin = readonly [number, number, number];
 
 export interface OctreeFaceTransferDescriptor {
-  readonly packedOrigin: number;
+  /** Full-width canonical origin. New publications must use this field. */
+  readonly origin?: OctreeFaceOrigin;
+  /** Legacy 10:10:10 origin accepted only for migration compatibility. */
+  readonly packedOrigin?: number;
   readonly axisSpan: number;
   readonly normalVelocity: number;
 }
@@ -27,16 +34,49 @@ export interface OctreeFaceTopologyTransfer {
   readonly packedRecords: Uint32Array;
 }
 
-function transferFaceKey(packedOrigin: number, axisSpan: number): string {
-  return `${packedOrigin >>> 0}:${axisSpan >>> 0}`;
+function validU32(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff;
 }
 
-function unpackTransferOrigin(word: number): [number, number, number] {
+function unpackLegacyTransferOrigin(word: number): [number, number, number] {
   return [word & 1023, (word >>> 10) & 1023, (word >>> 20) & 1023];
 }
 
-function packTransferOrigin(origin: readonly [number, number, number]): number {
-  return (origin[0] | (origin[1] << 10) | (origin[2] << 20)) >>> 0;
+export function octreeFaceDescriptorOrigin(face: OctreeFaceTransferDescriptor): [number, number, number] {
+  const explicit = face.origin;
+  if (explicit !== undefined) {
+    if (explicit.length !== 3 || explicit.some((value) => !validU32(value))) {
+      throw new RangeError("Face origin coordinates must be unsigned 32-bit integers");
+    }
+    if (face.packedOrigin !== undefined) {
+      const legacy = unpackLegacyTransferOrigin(face.packedOrigin >>> 0);
+      if (legacy.some((value, axis) => value !== explicit[axis])) {
+        throw new RangeError("Explicit and legacy face origins disagree");
+      }
+    }
+    return [explicit[0], explicit[1], explicit[2]];
+  }
+  if (!validU32(face.packedOrigin ?? -1)) throw new RangeError("Face descriptor requires a valid origin");
+  return unpackLegacyTransferOrigin(face.packedOrigin! >>> 0);
+}
+
+/** Exact, endian-independent four-word canonical face key ABI. */
+export function encodeOctreeFaceKey(origin: OctreeFaceOrigin, axisSpan: number): Uint32Array {
+  if (origin.length !== 3 || origin.some((value) => !validU32(value)) || !validU32(axisSpan)) {
+    throw new RangeError("Face keys require unsigned 32-bit origin coordinates and axis/span");
+  }
+  return new Uint32Array([origin[0], origin[1], origin[2], axisSpan]);
+}
+
+export function decodeOctreeFaceKey(words: ArrayLike<number>): { origin: [number, number, number]; axisSpan: number } {
+  if (words.length < OCTREE_FACE_KEY_WORDS) throw new RangeError("Face key requires four words");
+  const values = [words[0], words[1], words[2], words[3]];
+  if (values.some((value) => !validU32(value))) throw new RangeError("Face key words must be unsigned 32-bit integers");
+  return { origin: [values[0], values[1], values[2]], axisSpan: values[3] };
+}
+
+function transferFaceKey(origin: OctreeFaceOrigin, axisSpan: number): string {
+  return `${origin[0]}:${origin[1]}:${origin[2]}:${axisSpan >>> 0}`;
 }
 
 /**
@@ -50,7 +90,13 @@ export function buildOctreeFaceTopologyTransfer(
   previous: readonly OctreeFaceTransferDescriptor[],
   next: readonly OctreeFaceTransferDescriptor[],
 ): OctreeFaceTopologyTransfer {
-  const oldByKey = new Map(previous.map((face, index) => [transferFaceKey(face.packedOrigin, face.axisSpan), index]));
+  const oldByKey = new Map<string, number>();
+  previous.forEach((face, index) => {
+    const origin = octreeFaceDescriptorOrigin(face);
+    const key = transferFaceKey(origin, face.axisSpan);
+    if (oldByKey.has(key)) throw new RangeError("Face transfer source contains a duplicate canonical key");
+    oldByKey.set(key, index);
+  });
   const records: OctreeFaceTransferRecord[] = [];
   const velocities = new Float32Array(next.length);
   const invalidSources: [number, number, number, number] = [
@@ -59,15 +105,15 @@ export function buildOctreeFaceTopologyTransfer(
   ];
   for (let newFace = 0; newFace < next.length; newFace += 1) {
     const face = next[newFace];
+    const origin = octreeFaceDescriptorOrigin(face);
     const axis = face.axisSpan & 3;
     const span = face.axisSpan >>> 2;
     if (axis > 2 || span < 1 || (span & (span - 1)) !== 0) throw new RangeError("Face transfer requires a dyadic span and valid axis");
-    const exact = oldByKey.get(transferFaceKey(face.packedOrigin, face.axisSpan));
+    const exact = oldByKey.get(transferFaceKey(origin, face.axisSpan));
     if (exact !== undefined) {
       const oldFaces: [number, number, number, number] = [exact, ...invalidSources.slice(1)] as [number, number, number, number];
       records.push({ newFace, sourceCount: 1, oldFaces }); velocities[newFace] = previous[exact].normalVelocity; continue;
     }
-    const origin = unpackTransferOrigin(face.packedOrigin);
     const tangentialA = (axis + 1) % 3; const tangentialB = (axis + 2) % 3;
     if (span > 1) {
       const half = span >>> 1; const fine: number[] = [];
@@ -75,7 +121,7 @@ export function buildOctreeFaceTopologyTransfer(
         const candidate: [number, number, number] = [...origin];
         candidate[tangentialA] += (quadrant & 1) === 0 ? 0 : half;
         candidate[tangentialB] += (quadrant & 2) === 0 ? 0 : half;
-        const index = oldByKey.get(transferFaceKey(packTransferOrigin(candidate), axis | (half << 2)));
+        const index = oldByKey.get(transferFaceKey(candidate, axis | (half << 2)));
         if (index !== undefined) fine.push(index);
       }
       if (fine.length === 4) {
@@ -88,7 +134,7 @@ export function buildOctreeFaceTopologyTransfer(
     const coarseSpan = span * 2; const coarseOrigin: [number, number, number] = [...origin];
     coarseOrigin[tangentialA] = Math.floor(coarseOrigin[tangentialA] / coarseSpan) * coarseSpan;
     coarseOrigin[tangentialB] = Math.floor(coarseOrigin[tangentialB] / coarseSpan) * coarseSpan;
-    const coarse = oldByKey.get(transferFaceKey(packTransferOrigin(coarseOrigin), axis | (coarseSpan << 2)));
+    const coarse = oldByKey.get(transferFaceKey(coarseOrigin, axis | (coarseSpan << 2)));
     if (coarse !== undefined) {
       const oldFaces: [number, number, number, number] = [coarse, ...invalidSources.slice(1)] as [number, number, number, number];
       records.push({ newFace, sourceCount: 1, oldFaces }); velocities[newFace] = previous[coarse].normalVelocity; continue;
@@ -197,8 +243,8 @@ export class WebGPUOctreeFaceTransport {
     if (cellSize.some((value) => !Number.isFinite(value) || value <= 0)) {
       throw new RangeError("Octree face transport cell sizes must be finite and positive");
     }
-    if (dimensions.some((value) => !Number.isSafeInteger(value) || value < 1 || value > 1023)) {
-      throw new RangeError("Octree face transport dimensions must be positive integers no greater than 1023");
+    if (dimensions.some((value) => !Number.isSafeInteger(value) || value < 1 || value > 0xffffffff)) {
+      throw new RangeError("Octree face transport dimensions must be positive unsigned 32-bit integers");
     }
     this.device = device;
     this.source = source;
@@ -332,7 +378,7 @@ export class WebGPUOctreeFaceTransport {
 }
 
 export const octreeFaceTransportShader = /* wgsl */ `
-struct FaceRecord { negativeRow: u32, positiveRow: u32, packedOrigin: u32, axisSpan: u32, normalVelocity: f32, area: f32 }
+struct FaceRecord { negativeRow: u32, positiveRow: u32, originX: u32, originY: u32, originZ: u32, axisSpan: u32, normalVelocity: f32, area: f32 }
 struct TransportParams { dtAcceleration: vec4f, cellSize: vec4f, dimensions: vec4u }
 @group(0) @binding(0) var<storage, read_write> control: array<atomic<u32>>;
 @group(0) @binding(1) var<storage, read_write> faces: array<FaceRecord>;
@@ -345,17 +391,17 @@ struct TransportParams { dtAcceleration: vec4f, cellSize: vec4f, dimensions: vec
 const INVALID = 0xffffffffu;
 const INCIDENCE_PER_ROW = ${OCTREE_CONSUMER_MAX_FACE_CANDIDATES}u;
 
-fn unpackOrigin(word: u32) -> vec3u { return vec3u(word & 1023u, (word >> 10u) & 1023u, (word >> 20u) & 1023u); }
+fn faceOrigin(face: FaceRecord) -> vec3u { return vec3u(face.originX, face.originY, face.originZ); }
 fn faceAxis(face: FaceRecord) -> u32 { return face.axisSpan & 3u; }
 fn faceSpan(face: FaceRecord) -> u32 { return face.axisSpan >> 2u; }
 fn component(value: vec3f, axis: u32) -> f32 { return select(select(value.z, value.y, axis == 1u), value.x, axis == 0u); }
 fn faceCentre(face: FaceRecord) -> vec3f {
-  let axis = faceAxis(face); let span = f32(faceSpan(face)); var p = vec3f(unpackOrigin(face.packedOrigin));
+  let axis = faceAxis(face); let span = f32(faceSpan(face)); var p = vec3f(faceOrigin(face));
   p[(axis + 1u) % 3u] += 0.5 * span; p[(axis + 2u) % 3u] += 0.5 * span;
   return p * params.cellSize.xyz;
 }
 fn domainBoundary(face: FaceRecord) -> bool {
-  let axis=faceAxis(face);let coordinate=unpackOrigin(face.packedOrigin)[axis];
+  let axis=faceAxis(face);let coordinate=faceOrigin(face)[axis];
   return (face.negativeRow==INVALID||face.positiveRow==INVALID)
     && (coordinate==0u||coordinate==params.dimensions[axis]);
 }

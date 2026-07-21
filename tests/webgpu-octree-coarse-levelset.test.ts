@@ -56,15 +56,15 @@ test("Dawn bootstraps adapter-style live rows and corrects compact coarse phi wi
   const compilation = await device.createShaderModule({ code: octreeCoarsePhiCorrectionShader }).getCompilationInfo();
   assert.deepEqual(compilation.messages.filter((message) => message.type === "error"), []);
   const coarse = new WebGPUOctreeCoarseLevelSet(device, 2);
-  const leafData = new ArrayBuffer(2 * 48), leafWords = new Uint32Array(leafData), leafFloats = new Float32Array(leafData);
+  const leafData = new ArrayBuffer(2 * 64), leafWords = new Uint32Array(leafData), leafFloats = new Float32Array(leafData);
   for (let row = 0; row < 2; row += 1) {
-    const base = row * 12;
-    leafWords[base] = row * 8;
-    leafWords[base + 1] = 8;
-    leafWords[base + 2] = OCTREE_SURFACE_STATE.live;
-    leafFloats[base + 4] = row === 0 ? -2 : 3;
+    const base = row * 16;
+    leafWords[base] = row * 8; leafWords[base + 1] = 0; leafWords[base + 2] = 0;
+    leafWords[base + 3] = 8;
+    leafWords[base + 4] = OCTREE_SURFACE_STATE.live;
+    leafFloats[base + 8] = row === 0 ? -2 : 3;
   }
-  assert.equal(leafWords[2], OCTREE_SURFACE_STATE.live); assert.equal(leafWords[14], OCTREE_SURFACE_STATE.live);
+  assert.equal(leafWords[4], OCTREE_SURFACE_STATE.live); assert.equal(leafWords[20], OCTREE_SURFACE_STATE.live);
   const leaves = device.createBuffer({ size: leafData.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     mappedAtCreation: true });

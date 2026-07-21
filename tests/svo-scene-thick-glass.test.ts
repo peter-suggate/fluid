@@ -40,9 +40,9 @@ test("lamp globes preserve the source analytic owner/material identity", () => {
     const coverage = buildSvoEnvironmentCoverage(scene, environmentId);
     for (const metadata of publication.metadata) {
       const entry = coverage.entries.find(({ key }) => key === metadata.sourceKey);
-      assert.equal(entry?.status, "degraded", "opaque production fallback remains explicit");
+      assert.equal(entry?.status, "complete", "the bound analytic volume replaces the opaque fallback");
       assert.equal(entry?.plannedThickGlassId, metadata.glassId);
-      assert.equal(entry?.plannedThickGlassContract, "analytic-thick-glass-unbound");
+      assert.equal(entry?.plannedThickGlassContract, "analytic-thick-glass-bound");
     }
   }
 });
@@ -60,9 +60,9 @@ test("station observation lens has stable elliptical identity and explicit repla
 
   const coverage = buildSvoEnvironmentCoverage(scene, "research-station");
   const curvedPort = coverage.entries.find(({ key }) => key === "research-station/shell/procedural-portholes");
-  assert.equal(curvedPort?.status, "unsupported", "production remains fail-closed until its binder lands");
+  assert.equal(curvedPort?.status, "complete", "the bound analytic volume replaces the procedural gap");
   assert.equal(curvedPort?.plannedThickGlassId, lens.glassId);
-  assert.equal(curvedPort?.plannedThickGlassContract, "analytic-thick-glass-unbound");
+  assert.equal(curvedPort?.plannedThickGlassContract, "analytic-thick-glass-bound");
   assert.equal(coverage.summary.thickGlassVolumes, 1);
 });
 

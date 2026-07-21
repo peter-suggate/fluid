@@ -26,7 +26,7 @@ test("paper pipeline inspector identifies one fully current authority chain", ()
     globalFineFaceBandPointFieldValid: true, globalFineFaceBandPowerPublicationValid: true,
     globalFineFaceBandPowerFineGeneration: 17, globalFineFaceBandPowerGeneration: 9,
     pressureSolver: "Section 4.3 hybrid MGPCG", pressureRelativeResidual: 8e-5,
-  }), { surfaceGeometrySource: "global-fine-coarse", globalFineAttached: true, globalFineCrossingPublished: true, presentationFallbackActive: false });
+  }), { surfaceGeometrySource: "global-fine-coarse", globalFineAttached: true, globalFineAttachedGeneration: 17, meshPublicationGeneration: 17, globalFineCrossingPublished: true, presentationFallbackActive: false });
   assert.ok(stages.length >= 8);
   assert.equal(stages.find((stage) => stage.id === "extrapolation")?.state, "PUBLISHED");
   assert.equal(stages.find((stage) => stage.id === "pressure")?.state, "CONVERGED");
@@ -40,17 +40,42 @@ test("stale Section 5 and retained raster generations are visibly distinct from 
     globalFineFaceBandTransientPowerValid: true, globalFineFaceBandPointFieldValid: true,
     globalFineFaceBandPowerPublicationValid: true,
     globalFineFaceBandPowerFineGeneration: 19, globalFineFaceBandPowerGeneration: 10,
-  }), { surfaceGeometrySource: "retained-previous", globalFineAttached: true, globalFineCrossingPublished: false, presentationFallbackActive: true });
+  }), { surfaceGeometrySource: "retained-previous", globalFineAttached: true, globalFineAttachedGeneration: 20, meshPublicationGeneration: 19, globalFineCrossingPublished: false, presentationFallbackActive: true });
   assert.equal(stages.find((stage) => stage.id === "extrapolation")?.tone, "stale");
   assert.equal(stages.find((stage) => stage.id === "raster")?.state, "STALE");
 });
 
+test("no-causal-simplex coarse phi failure is attributed to grading coverage", () => {
+  const stages = paperPipelineStages(info({
+    globalFinePublished: true, globalFineRolledBack: false, globalFineGeneration: 17,
+    globalFineSeedError: 0, globalFineTopologyFlags: 0, globalFineDownstreamFinalizeReason: 0,
+    globalFineCoarseLevelSetFlags: 512,
+    globalFineCoarseLevelSetFirstErrorRow: 37,
+  }), undefined);
+  const fine = stages.find((stage) => stage.id === "fine");
+  assert.equal(fine?.state, "REJECTED");
+  assert.match(fine?.detail ?? "", /no causal non-obtuse simplex at row 37/);
+  assert.match(fine?.detail ?? "", /acute-simplex grading\/refinement coverage failed/);
+});
+
 test("one-click presets cover the requested paper structures without new diagnostic products", () => {
   assert.deepEqual(PAPER_VISUAL_PRESETS.map((preset) => preset.id), [
-    "power-cells", "power-faces", "transitions", "fine-band", "section5-march", "velocity", "pressure", "operator", "raster",
+    "power-cells", "power-faces", "transitions", "fine-band", "fine-phi-values", "section5-march", "velocity", "pressure", "operator", "raster",
   ]);
   assert.equal(PAPER_VISUAL_PRESETS.find((preset) => preset.id === "raster")?.axis, "off");
   assert.equal(PAPER_VISUAL_PRESETS.find((preset) => preset.id === "fine-band")?.mode, "fine-band-lifecycle");
+  assert.equal(PAPER_VISUAL_PRESETS.find((preset) => preset.id === "fine-phi-values")?.mode, "global-fine-phi");
+});
+
+test("raster CURRENT requires attached and mesh generations to match live fine authority", () => {
+  const gpu = info({ globalFineGeneration: 21 });
+  const stale = paperPipelineStages(gpu, {
+    surfaceGeometrySource: "global-fine-coarse", globalFineAttached: true,
+    globalFineAttachedGeneration: 21, meshPublicationGeneration: 20,
+    globalFineCrossingPublished: true, presentationFallbackActive: false,
+  }).find((stage) => stage.id === "raster");
+  assert.equal(stale?.state, "STALE");
+  assert.match(stale?.detail ?? "", /attached 21 · mesh 20 · live 21/);
 });
 
 test("active visual reports its exact authority and t=0/latest-step identity", () => {
@@ -67,7 +92,7 @@ test("active visual reports its exact authority and t=0/latest-step identity", (
   assert.equal(fine.frame, "t=0 preflight");
   const stepped = paperVisualAuthority("power-faces", "volume", stages, { ...gpu, encodedSteps: 3 });
   assert.equal(stepped.stageId, "power");
-  assert.equal(stepped.frame, "latest completed step 3");
+  assert.equal(stepped.frame, "latest encoded substep 3");
 });
 
 test("Section 5 audit exposes bounded first failures and existing inspect overlays", () => {
@@ -119,6 +144,23 @@ test("Section 5 audit exposes bounded first failures and existing inspect overla
     /heap 15,479 high-water · 13,237\/15,479 pops\/trials · 16\/16 chunks/);
   assert.equal(audit.find((item) => item.id === "transition")?.state, "CURRENT");
   assert.equal(audit.find((item) => item.id === "transient-power")?.inspectMode, "power-faces");
+});
+
+test("Section 5 audit preserves escaped acute mask attribution for Render Inspect", () => {
+  const audit = paperSection5SpatialFailures(info({
+    globalFineGeneration: 7, globalFineFaceBandGeneration: 7,
+    globalFineFaceBandTransitionFlags: 16,
+    globalFineFaceBandTransitionValid: false,
+    globalFineFaceBandTransitionFirstError: 91,
+    globalFineFaceBandAcuteGradingFailure: {
+      band: 12, rowCell: 91, rowSize: 2, descriptor: 0xa580_0039, coarseMask: 57,
+    },
+  }));
+  const transition = audit.find((item) => item.id === "transition");
+  assert.equal(transition?.state, "REJECTED");
+  assert.equal(transition?.first,
+    "escaped acute grading: band 12 · row 91 size 2 · coarse mask 0x39 · raw descriptor 0xa5800039");
+  assert.equal(transition?.inspectMode, "delaunay-tetrahedra");
 });
 
 test("Section 5 audit never labels valid but cross-generation controls current", () => {

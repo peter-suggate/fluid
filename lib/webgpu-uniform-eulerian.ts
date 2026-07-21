@@ -858,6 +858,10 @@ export class WebGPUUniformEulerianSolver {
   }
 
   private applyGlobalFineDiagnostics(value: InitialGlobalFineAuthorityDiagnostics) {
+    const coarse=unpackOctreePowerCoarseLevelSetControl(value.coarseControl ?? [
+      value.coarseControlFlags,0,0,0,0,0,0,0,0,0,0,value.coarseControlGeneration,
+      value.coarseControlValid,0,0,0,
+    ]);
     const faceBand=unpackOctreeFaceBandControl([...value.faceBandControl,
       ...(value.faceBandMarchControl ?? [])]);
     const transition=unpackOctreeFaceBandTransitionControl([...value.faceBandTransitionControl,
@@ -883,6 +887,8 @@ export class WebGPUUniformEulerianSolver {
     this.info.globalFineFaceBandPowerPublicationFlags=value.faceBandPowerPublicationControl[0];
     this.info.globalFineFaceBandTransientPowerFlags=value.faceBandTransientPowerControl[0];
     this.info.globalFineFaceBandPointFieldFlags=value.faceBandPointFieldControl[0];
+    this.info.globalFineCoarseLevelSetFlags=coarse.flags;
+    this.info.globalFineCoarseLevelSetFirstErrorRow=coarse.firstErrorRow;
     this.info.globalFineFaceBandFirstError=faceBand.firstError;
     this.info.globalFineFaceBandRowCount=faceBand.rowCount;
     this.info.globalFineFaceBandFaceCount=faceBand.faceCount;
@@ -912,6 +918,7 @@ export class WebGPUUniformEulerianSolver {
     this.info.globalFineFaceBandTransitionSupport3Rows=transition.support3NodeRowCount;
     this.info.globalFineFaceBandTransitionEndpointRows=transition.endpointRowCount;
     this.info.globalFineFaceBandBoundaryGhostRequests=transition.boundaryGhostRequests;
+    this.info.globalFineFaceBandAcuteGradingFailure=transition.acuteGradingFailure;
     this.info.globalFineFaceBandPhiFailureCounts=transition.phiFailureCounts;
     this.info.globalFineFaceBandPhiFailure=transition.phiFailure;
     this.info.globalFineFaceBandTransientPowerFirstError=transientPower.firstError;

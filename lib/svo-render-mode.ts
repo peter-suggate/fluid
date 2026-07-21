@@ -3,6 +3,14 @@ export const SVO_RENDER_MODES = ["raster", "svo"] as const;
 
 export type SvoRenderMode = typeof SVO_RENDER_MODES[number];
 
+/** Lighting backends for the direct sparse-scene renderer. */
+export const SVO_LIGHTING_MODES = ["direct", "cone"] as const;
+
+export type SvoLightingMode = typeof SVO_LIGHTING_MODES[number];
+
+/** Cone lighting is fail-soft: unavailable caches retain exact direct SVO lighting. */
+export const DEFAULT_SVO_LIGHTING_MODE: SvoLightingMode = "cone";
+
 /**
  * Default to the bounded raster presentation. The SVO dry-scene replacement
  * shares the physics queue and remains opt-in until its worst-case frame cost
@@ -12,4 +20,8 @@ export const DEFAULT_SVO_RENDER_MODE: SvoRenderMode = "raster";
 
 export function isSvoRenderMode(value: unknown): value is SvoRenderMode {
   return typeof value === "string" && (SVO_RENDER_MODES as readonly string[]).includes(value);
+}
+
+export function isSvoLightingMode(value: unknown): value is SvoLightingMode {
+  return typeof value === "string" && (SVO_LIGHTING_MODES as readonly string[]).includes(value);
 }

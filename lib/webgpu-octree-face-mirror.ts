@@ -2,7 +2,13 @@ import { OCTREE_CONSUMER_MAX_FACE_CANDIDATES } from "./octree-consumer-sampling"
 import { WebGPUOctreeFaceTopologyTransfer } from "./webgpu-octree-face-transfer";
 import { validateOctreeSurfacePageSource, type OctreeSurfacePageSource } from "./webgpu-octree-surface-pages";
 
-export const OCTREE_GPU_FACE_RECORD_BYTES = 24;
+/**
+ * Canonical face ABI: two incident rows, an explicit u32 origin per axis,
+ * axis/span, normal velocity, and area.  Origins deliberately do not reuse
+ * the legacy 10:10:10 leaf packing: connected worlds may be wider than 1023
+ * finest cells on any axis without aliasing their physical faces.
+ */
+export const OCTREE_GPU_FACE_RECORD_BYTES = 32;
 // A row owns at most 6*4 fragments and can receive the same bound from
 // neighbouring publishers. Keep both halves in one row-local slab.
 export const OCTREE_GPU_FACE_INCIDENCE_PER_ROW = OCTREE_CONSUMER_MAX_FACE_CANDIDATES;
@@ -349,11 +355,11 @@ export class WebGPUOctreeFaceMirror {
 }
 
 export const octreeFaceMirrorShader = /* wgsl */ `
-struct Owner { packedOrigin: u32, size: u32 }
+struct Owner { origin: vec3u, size: u32 }
 struct Params { dimsMax: vec4u, cellRelax: vec4f, control: vec4u, solve: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowDirectionLength: vec4f, physical: vec4f, pressureCapacity: vec4u, hydrostatic: vec4f }
 struct LeafHeader { cell: u32, entryStart: u32, entryCount: u32, size: u32, diagonal: f32, rhs: f32, pad0: u32, pad1: u32, gradient: vec4f }
-struct SurfaceLeaf { packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f }
-struct FaceRecord { negativeRow: u32, positiveRow: u32, packedOrigin: u32, axisSpan: u32, normalVelocity: f32, area: f32 }
+struct SurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
+struct FaceRecord { negativeRow: u32, positiveRow: u32, originX: u32, originY: u32, originZ: u32, axisSpan: u32, normalVelocity: f32, area: f32 }
 struct Candidate { valid: bool, axis: u32, side: i32, span: u32, origin: vec3u, neighbor: Owner, neighborLiquid: bool }
 
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
@@ -384,17 +390,21 @@ const INCIDENCE_PER_ROW = ${OCTREE_GPU_FACE_INCIDENCE_PER_ROW}u;
 fn dims() -> vec3u { return params.dimsMax.xyz; }
 fn valid(p: vec3i) -> bool { return all(p >= vec3i(0)) && all(p < vec3i(dims())); }
 fn index(p: vec3u) -> u32 { return p.x + params.dimsMax.x * (p.y + params.dimsMax.y * p.z); }
-fn unpackOrigin(word: u32) -> vec3u { return vec3u(word & 1023u, (word >> 10u) & 1023u, (word >> 20u) & 1023u); }
-fn packOrigin(p: vec3u) -> u32 { return p.x | (p.y << 10u) | (p.z << 20u); }
+fn airCellKey(p: vec3u) -> u32 { return index(p) + 1u; }
+fn faceOrigin(face: FaceRecord) -> vec3u { return vec3u(face.originX, face.originY, face.originZ); }
+fn leafOrigin(leaf: SurfaceLeaf) -> vec3u { return vec3u(leaf.originX, leaf.originY, leaf.originZ); }
 fn cellCoord(c: u32) -> vec3u { let nx=params.dimsMax.x;let ny=params.dimsMax.y;return vec3u(c%nx,(c/nx)%ny,c/(nx*ny)); }
 fn decodeOwner(word: u32, cell: vec3u) -> Owner {
-  if ((word & 0x80000000u) != 0u) { return Owner(packOrigin(cell), 1u); }
+  if ((word & 0x80000000u) != 0u) { return Owner(cell, 1u); }
   let exponent = word & 7u;
-  if (exponent == 0u || exponent > 5u) { return Owner(packOrigin(cell), 1u); }
-  let origin = vec3u((word >> 3u) & 511u, (word >> 12u) & 511u, (word >> 21u) & 511u) << vec3u(exponent);
-  return Owner(packOrigin(origin), 1u << exponent);
+  if (exponent == 0u || exponent > 5u) { return Owner(cell, 1u); }
+  let size = 1u << exponent;
+  // The queried cell and dyadic size fully determine the aligned owner.
+  // Ignoring the legacy embedded coordinates removes their 1023-cell cap
+  // while remaining compatible with every already-published owner word.
+  return Owner((cell / vec3u(size)) * vec3u(size), size);
 }
-fn canonicalOwner(cell: vec3u) -> Owner { var size=min(params.dimsMax.w,8u);var origin=(cell/vec3u(size))*vec3u(size);loop{if(all(origin+vec3u(size)<=dims())||size==1u){return Owner(packOrigin(origin),size);}size>>=1u;origin=(cell/vec3u(size))*vec3u(size);} }
+fn canonicalOwner(cell: vec3u) -> Owner { var size=min(params.dimsMax.w,8u);var origin=(cell/vec3u(size))*vec3u(size);loop{if(all(origin+vec3u(size)<=dims())||size==1u){return Owner(origin,size);}size>>=1u;origin=(cell/vec3u(size))*vec3u(size);} }
 fn ownerPageEncoded(logical:u32)->u32{
   let freeListOffset=owners[5];if(freeListOffset<=16u||((freeListOffset-16u)&1u)!=0u){return 0u;}
   let hashCapacity=(freeListOffset-16u)/2u;let key=logical+1u;var slot=(logical*0x9e3779b1u)%hashCapacity;
@@ -409,14 +419,14 @@ fn ownerAt(p: vec3i) -> Owner {
 fn ownerAtIndex(cell: u32) -> Owner { return ownerAt(vec3i(cellCoord(cell))); }
 fn pagedPhiAvailable()->bool{let r=surfaceParams.shape.z;return (r==2u||r==4u)&&arrayLength(&surfaceArena)>6u&&surfaceArena[3]==0u&&surfaceArena[6]>0u;}
 fn surfaceHash(q:vec3u)->u32{var h=(q.x*73856093u)^(q.y*19349663u)^(q.z*83492791u);h^=h>>16u;return h;}
-fn airAliasRow(q:vec3u)->u32{let mask=surfaceParams.spare0.y-1u;var slot=surfaceHash(q)&mask;let key=packOrigin(q)+1u;for(var probe=0u;probe<32u;probe+=1u){let at=surfaceParams.spare0.x+2u*slot;let stored=surfaceArena[at];if(stored==0u){break;}if(stored==key){let encoded=surfaceArena[at+1u];if(encoded!=0u){let row=0xffffffffu-encoded;if(row<surfaceParams.shape.x&&row<arrayLength(&surfaceLeaves)){return row;}}}slot=(slot+1u)&mask;}return INVALID;}
+fn airAliasRow(q:vec3u)->u32{let mask=surfaceParams.spare0.y-1u;var slot=surfaceHash(q)&mask;let key=airCellKey(q);for(var probe=0u;probe<32u;probe+=1u){let at=surfaceParams.spare0.x+2u*slot;let stored=surfaceArena[at];if(stored==0u){break;}if(stored==key){let encoded=surfaceArena[at+1u];if(encoded!=0u){let row=0xffffffffu-encoded;if(row<surfaceParams.shape.x&&row<arrayLength(&surfaceLeaves)){return row;}}}slot=(slot+1u)&mask;}return INVALID;}
 fn surfaceLoad(base:u32,q:vec3u)->f32{let r=surfaceParams.shape.z;return bitcast<f32>(surfaceArena[base+q.x+r*(q.y+r*q.z)]);}
-fn surfaceContains(leaf:SurfaceLeaf,point:vec3f)->bool{let origin=vec3f(unpackOrigin(leaf.packedOrigin));return all(point>=origin)&&all(point<origin+vec3f(f32(leaf.size)));}
-fn surfaceFallback(leaf:SurfaceLeaf,point:vec3f)->f32{let origin=vec3f(unpackOrigin(leaf.packedOrigin));let centre=origin+vec3f(0.5*f32(leaf.size));return leaf.phiGradient.x+dot(leaf.phiGradient.yzw,point-centre);}
-fn surfacePagePhi(row:u32,point:vec3f)->f32{let leaf=surfaceLeaves[row];let origin=vec3f(unpackOrigin(leaf.packedOrigin));let slot=surfaceArena[surfaceParams.offsets0.x+row];if(slot==INVALID||slot>=surfaceParams.shape.y||!surfaceContains(leaf,point)){return surfaceFallback(leaf,point);}let r=surfaceParams.shape.z;let grid=clamp((point-origin)/f32(leaf.size)*f32(r)-vec3f(0.5),vec3f(0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1),vec3u(r-1u));let t=fract(grid);let base=surfaceParams.offsets1.z+slot*surfaceParams.shape.w;return mix(mix(mix(surfaceLoad(base,a),surfaceLoad(base,vec3u(b.x,a.y,a.z)),t.x),mix(surfaceLoad(base,vec3u(a.x,b.y,a.z)),surfaceLoad(base,vec3u(b.x,b.y,a.z)),t.x),t.y),mix(mix(surfaceLoad(base,vec3u(a.x,a.y,b.z)),surfaceLoad(base,vec3u(b.x,a.y,b.z)),t.x),mix(surfaceLoad(base,vec3u(a.x,b.y,b.z)),surfaceLoad(base,b),t.x),t.y),t.z);}
+fn surfaceContains(leaf:SurfaceLeaf,point:vec3f)->bool{let origin=vec3f(leafOrigin(leaf));return all(point>=origin)&&all(point<origin+vec3f(f32(leaf.size)));}
+fn surfaceFallback(leaf:SurfaceLeaf,point:vec3f)->f32{let origin=vec3f(leafOrigin(leaf));let centre=origin+vec3f(0.5*f32(leaf.size));return leaf.phiGradient.x+dot(leaf.phiGradient.yzw,point-centre);}
+fn surfacePagePhi(row:u32,point:vec3f)->f32{let leaf=surfaceLeaves[row];let origin=vec3f(leafOrigin(leaf));let slot=surfaceArena[surfaceParams.offsets0.x+row];if(slot==INVALID||slot>=surfaceParams.shape.y||!surfaceContains(leaf,point)){return surfaceFallback(leaf,point);}let r=surfaceParams.shape.z;let grid=clamp((point-origin)/f32(leaf.size)*f32(r)-vec3f(0.5),vec3f(0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1),vec3u(r-1u));let t=fract(grid);let base=surfaceParams.offsets1.z+slot*surfaceParams.shape.w;return mix(mix(mix(surfaceLoad(base,a),surfaceLoad(base,vec3u(b.x,a.y,a.z)),t.x),mix(surfaceLoad(base,vec3u(a.x,b.y,a.z)),surfaceLoad(base,vec3u(b.x,b.y,a.z)),t.x),t.y),mix(mix(surfaceLoad(base,vec3u(a.x,a.y,b.z)),surfaceLoad(base,vec3u(b.x,a.y,b.z)),t.x),mix(surfaceLoad(base,vec3u(a.x,b.y,b.z)),surfaceLoad(base,b),t.x),t.y),t.z);}
 fn phi(p: vec3i) -> f32 { if (!valid(p)) { return 3.402823e38; }if(!pagedPhiAvailable()){return textureLoad(levelSetIn,p,0).x;}let owner=ownerAt(p);let row=frontierRow(owner);if(row!=INVALID&&row<arrayLength(&surfaceLeaves)){return surfacePagePhi(row,vec3f(p)+vec3f(0.5));}let airRow=airAliasRow(vec3u(p));if(airRow!=INVALID){return surfacePagePhi(airRow,vec3f(p)+vec3f(0.5));}return max(params.cellRelax.x,max(params.cellRelax.y,params.cellRelax.z))*max(1.0,params.solve.w); }
 fn ownerPhi(owner: Owner) -> f32 {
-  let centre = vec3f(unpackOrigin(owner.packedOrigin)) + vec3f(0.5 * f32(owner.size - 1u));
+  let centre = vec3f(owner.origin) + vec3f(0.5 * f32(owner.size - 1u));
   let a = vec3u(floor(centre)); let b = min(a + vec3u(1u), dims() - vec3u(1u)); let t = fract(centre);
   let p000=phi(vec3i(a));let p100=phi(vec3i(vec3u(b.x,a.y,a.z)));let p010=phi(vec3i(vec3u(a.x,b.y,a.z)));let p110=phi(vec3i(vec3u(b.x,b.y,a.z)));
   let p001=phi(vec3i(vec3u(a.x,a.y,b.z)));let p101=phi(vec3i(vec3u(b.x,a.y,b.z)));let p011=phi(vec3i(vec3u(a.x,b.y,b.z)));let p111=phi(vec3i(b));
@@ -427,15 +437,15 @@ fn axisVector(axis: u32) -> vec3i { return select(select(vec3i(0,0,1),vec3i(0,1,
 fn frontierMapBase()->u32{return 4u+2u*atomicLoad(&control[3]);}
 fn frontierHashCapacity()->u32{return (arrayLength(&frontier)-frontierMapBase())/2u;}
 fn frontierHash(cell:u32)->u32{var h=cell*747796405u+2891336453u;h^=h>>16u;h*=2246822519u;h^=h>>13u;return h;}
-fn frontierRow(owner:Owner)->u32{let cell=index(unpackOrigin(owner.packedOrigin));let cap=frontierHashCapacity();var slot=frontierHash(cell)&(cap-1u);let key=cell+1u;for(var probe=0u;probe<32u;probe+=1u){let stored=atomicLoad(&frontier[frontierMapBase()+2u*slot]);if(stored==0u){break;}if(stored==key){let word=atomicLoad(&frontier[frontierMapBase()+2u*slot+1u]);return select(INVALID,word-2u,word>=2u);}slot=(slot+1u)&(cap-1u);}return INVALID;}
+fn frontierRow(owner:Owner)->u32{let cell=index(owner.origin);let cap=frontierHashCapacity();var slot=frontierHash(cell)&(cap-1u);let key=cell+1u;for(var probe=0u;probe<32u;probe+=1u){let stored=atomicLoad(&frontier[frontierMapBase()+2u*slot]);if(stored==0u){break;}if(stored==key){let word=atomicLoad(&frontier[frontierMapBase()+2u*slot+1u]);return select(INVALID,word-2u,word>=2u);}slot=(slot+1u)&(cap-1u);}return INVALID;}
 fn compactRowIndex(gid: vec3u) -> u32 { return gid.x + gid.y * compaction[2] * 256u; }
 
 fn candidate(header: LeafHeader, slot: u32) -> Candidate {
   let face=slot/4u;let quadrant=slot%4u;let axis=face/2u;let side=select(-1,1,(face&1u)==1u);let size=header.size;let half=max(1u,size/2u);
-  let origin=unpackOrigin(ownerAtIndex(header.cell).packedOrigin);var local=vec3u(0u);local[axis]=select(0u,size-1u,side>0);
+  let origin=ownerAtIndex(header.cell).origin;var local=vec3u(0u);local[axis]=select(0u,size-1u,side>0);
   local[(axis+1u)%3u]=select(0u,half,(quadrant&1u)!=0u);local[(axis+2u)%3u]=select(0u,half,(quadrant&2u)!=0u);
   let outside=vec3i(origin+local)+side*axisVector(axis);
-  if(!valid(outside)){var faceOrigin=origin;faceOrigin[axis]=select(origin[axis],origin[axis]+size,side>0);return Candidate(quadrant==0u,axis,side,size,faceOrigin,Owner(0u,0u),false);}
+  if(!valid(outside)){var faceOrigin=origin;faceOrigin[axis]=select(origin[axis],origin[axis]+size,side>0);return Candidate(quadrant==0u,axis,side,size,faceOrigin,Owner(vec3u(0u),0u),false);}
   let neighbor=ownerAt(outside);let finer=neighbor.size<size;if(!finer&&quadrant!=0u){return Candidate(false,axis,side,0u,origin,neighbor,false);}
   let span=select(size,neighbor.size,finer);var faceOrigin=origin;faceOrigin[axis]=select(origin[axis],origin[axis]+size,side>0);
   faceOrigin[(axis+1u)%3u]+=select(0u,half,(quadrant&1u)!=0u);faceOrigin[(axis+2u)%3u]+=select(0u,half,(quadrant&2u)!=0u);
@@ -478,7 +488,7 @@ fn publishFaces(@builtin(global_invocation_id) gid: vec3u) {
     var velocity=0.0;let areaCell=select(select(params.cellRelax.x*params.cellRelax.y,params.cellRelax.x*params.cellRelax.z,c.axis==1u),params.cellRelax.y*params.cellRelax.z,c.axis==0u);
     for(var b=0u;b<c.span;b+=1u){for(var a=0u;a<c.span;a+=1u){var q=c.origin;q[c.axis]-=1u;q[(c.axis+1u)%3u]+=a;q[(c.axis+2u)%3u]+=b;if(all(q<dims())){velocity+=component(textureLoad(velocityIn,vec3i(q),0).xyz,c.axis);}}}
     velocity/=f32(c.span*c.span);let neighborRow=select(INVALID,frontierRow(c.neighbor),c.neighborLiquid);let negative=select(neighborRow,row,c.side>0);let positive=select(row,neighborRow,c.side>0);
-    faces[faceIndex]=FaceRecord(negative,positive,packOrigin(c.origin),c.axis|(c.span<<2u),velocity,areaCell*f32(c.span*c.span));appendIncidence(negative,faceIndex);appendIncidence(positive,faceIndex);
+    faces[faceIndex]=FaceRecord(negative,positive,c.origin.x,c.origin.y,c.origin.z,c.axis|(c.span<<2u),velocity,areaCell*f32(c.span*c.span));appendIncidence(negative,faceIndex);appendIncidence(positive,faceIndex);
   }
 }
 
@@ -515,14 +525,14 @@ fn faceDistance(a:Owner,b:Owner,axis:u32,phiA:f32,phiB:f32)->f32{
 }
 @compute @workgroup_size(256)
 fn projectFaces(@builtin(global_invocation_id) gid:vec3u){let faceIndex=gid.x;if(faceIndex>=min(atomicLoad(&control[0]),atomicLoad(&control[2]))||atomicLoad(&control[1])!=0u){return;}
-  var face=faces[faceIndex];let axis=face.axisSpan&3u;let origin=unpackOrigin(face.packedOrigin);let negativePoint=vec3i(origin)-axisVector(axis);let positivePoint=vec3i(origin);
+  var face=faces[faceIndex];let axis=face.axisSpan&3u;let origin=faceOrigin(face);let negativePoint=vec3i(origin)-axisVector(axis);let positivePoint=vec3i(origin);
   if(!valid(negativePoint)||!valid(positivePoint)){face.normalVelocity=0.0;faces[faceIndex]=face;return;}
   let negativeOwner=ownerAt(negativePoint);let positiveOwner=ownerAt(positivePoint);let negativePhi=ownerPhi(negativeOwner);let positivePhi=ownerPhi(positiveOwner);
   face.normalVelocity-=(facePressure(face.positiveRow)-facePressure(face.negativeRow))/max(faceDistance(negativeOwner,positiveOwner,axis,negativePhi,positivePhi),1e-7);faces[faceIndex]=face;
 }
 @compute @workgroup_size(256)
 fn reduceProjectionParity(@builtin(global_invocation_id) gid:vec3u){let faceIndex=gid.x;if(faceIndex>=min(atomicLoad(&control[0]),atomicLoad(&control[2]))||atomicLoad(&control[1])!=0u){return;}
-  let face=faces[faceIndex];let axis=face.axisSpan&3u;let span=face.axisSpan>>2u;let origin=unpackOrigin(face.packedOrigin);var reference=0.0;
+  let face=faces[faceIndex];let axis=face.axisSpan&3u;let span=face.axisSpan>>2u;let origin=faceOrigin(face);var reference=0.0;
   for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){var q=origin;q[axis]-=1u;q[(axis+1u)%3u]+=a;q[(axis+2u)%3u]+=b;if(all(q<dims())){reference+=component(textureLoad(projectedVelocity,vec3i(q),0).xyz,axis);}}}reference/=f32(span*span);
   let difference=abs(face.normalVelocity-reference);atomicMax(&parity[4],bitcast<u32>(difference));atomicMax(&parity[5],bitcast<u32>(abs(reference)));if(difference>max(1e-5,abs(reference)*1e-5)){atomicAdd(&parity[6],1u);}atomicAdd(&parity[7],1u);
 }

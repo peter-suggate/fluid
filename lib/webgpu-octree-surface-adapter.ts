@@ -2,7 +2,7 @@
  * GPU adapter from compact pressure/topology rows to the surface-page ABI.
  *
  * The adapter aliases the existing compact topology and adaptive face arena.
- * Its only persistent storage is one 48-byte SurfaceLeaf and one 8-byte
+ * Its only persistent storage is one 64-byte SurfaceLeaf and one 8-byte
  * candidate slot per possible compact row, plus the 32-byte publication header.
  * It never allocates from the finest bounding-box volume.
  */
@@ -94,7 +94,7 @@ function positiveDyadic(value: number, label: string): number {
 }
 
 export const octreeSurfaceCandidateShader = /* wgsl */ `
-struct SurfaceLeaf { packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f }
+struct SurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct Candidate { row:u32,flags:u32 }
 struct Params { dimsCapacity:vec4u,selection:vec4u,cellHalo:vec4f }
 @group(0) @binding(0) var<uniform> params:Params;
@@ -162,8 +162,8 @@ export class WebGPUOctreeSurfaceAdapter {
     }
     const dimensions = topology.dimensions;
     dimensions.forEach((value, axis) => {
-      if (!Number.isSafeInteger(value) || value < 1 || value > 1024) {
-        throw new RangeError(`Octree surface dimension ${axis} must be in [1, 1024]`);
+      if (!Number.isSafeInteger(value) || value < 1 || value > 0xffffffff) {
+        throw new RangeError(`Octree surface dimension ${axis} must be an unsigned 32-bit integer`);
       }
     });
     topology.cellSize.forEach((value, axis) => {
@@ -331,8 +331,8 @@ export class WebGPUOctreeSurfaceAdapter {
 
 export const octreeSurfaceAdapterShader = /* wgsl */ `
 struct LeafHeader { cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f }
-struct FaceRecord { negativeRow:u32,positiveRow:u32,packedOrigin:u32,axisSpan:u32,normalVelocity:f32,area:f32 }
-struct SurfaceLeaf { packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f }
+struct FaceRecord { negativeRow:u32,positiveRow:u32,originX:u32,originY:u32,originZ:u32,axisSpan:u32,normalVelocity:f32,area:f32 }
+struct SurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct Params { dimsCapacity:vec4u, selection:vec4u, cellHalo:vec4f }
 @group(0) @binding(0) var<storage,read> leafHeaders:array<LeafHeader>;
 @group(0) @binding(1) var<storage,read> rowControl:array<u32>;
@@ -351,8 +351,10 @@ const INCIDENCE_PER_ROW=${OCTREE_CONSUMER_MAX_FACE_CANDIDATES}u;const MAX_FACE_C
 fn dims()->vec3u{return params.dimsCapacity.xyz;}
 fn cellCount()->u32{return dims().x*dims().y*dims().z;}
 fn coord(cell:u32)->vec3u{return vec3u(cell%dims().x,(cell/dims().x)%dims().y,cell/(dims().x*dims().y));}
-fn packOrigin(p:vec3u)->u32{return p.x|(p.y<<10u)|(p.z<<20u);}
-fn unpackOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
+// Matches the topology's existing u32 linear-cell identity.  The +1 sentinel
+// encoding is collision-safe across every axis representable by that domain.
+fn airCellKey(p:vec3u)->u32{return p.x+dims().x*(p.y+dims().y*p.z)+1u;}
+fn leafOrigin(leaf:SurfaceLeaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
 fn valid(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(dims()));}
 fn analyticInitialPhi(point:vec3f)->f32{
   let fill=bitcast<f32>(params.selection.w);let world=vec3f((point.x/f32(dims().x)-0.5)*params.cellHalo.x*f32(dims().x),point.y*params.cellHalo.y,(point.z/f32(dims().z)-0.5)*params.cellHalo.z*f32(dims().z));
@@ -366,17 +368,17 @@ fn analyticInitialPhi(point:vec3f)->f32{
 // only 4^3 pages silently rejects the production 2^3 configuration.
 fn pagedPhiAvailable()->bool{let r=pageParams.shape.z;return (r==2u||r==4u)&&arrayLength(&pageArena)>7u&&pageArena[3]==0u&&pageArena[6]>0u&&pageArena[7]>0u;}
 fn surfaceHash(q:vec3u)->u32{var h=(q.x*73856093u)^(q.y*19349663u)^(q.z*83492791u);h^=h>>16u;return h;}
-fn previousContains(row:u32,p:vec3f)->bool{let leaf=previousLeaves[row];let o=vec3f(unpackOrigin(leaf.packedOrigin));return all(p>=o)&&all(p<o+vec3f(f32(leaf.size)));}
+fn previousContains(row:u32,p:vec3f)->bool{let leaf=previousLeaves[row];let o=vec3f(leafOrigin(leaf));return all(p>=o)&&all(p<o+vec3f(f32(leaf.size)));}
 fn previousRow(p:vec3f)->u32{let mask=pageParams.offsets2.y-1u;for(var size=1u;size<=32u;size<<=1u){var slot=surfaceHash(vec3u(max(vec3f(0),floor(p/f32(size)))))&mask;for(var probe=0u;probe<32u;probe+=1u){let encoded=pageArena[pageParams.offsets1.y+slot];if(encoded==0u){break;}let row=encoded-1u;if(row<pageParams.shape.x&&row<arrayLength(&previousLeaves)&&previousContains(row,p)){return row;}slot=(slot+1u)&mask;}}return INVALID;}
-fn airAliasRow(q:vec3u)->u32{let mask=pageParams.spare0.y-1u;var slot=surfaceHash(q)&mask;let key=packOrigin(q)+1u;for(var probe=0u;probe<32u;probe+=1u){let at=pageParams.spare0.x+2u*slot;let stored=pageArena[at];if(stored==0u){break;}if(stored==key){let encoded=pageArena[at+1u];if(encoded!=0u){let row=0xffffffffu-encoded;if(row<pageParams.shape.x&&row<arrayLength(&previousLeaves)){return row;}}}slot=(slot+1u)&mask;}return INVALID;}
+fn airAliasRow(q:vec3u)->u32{let mask=pageParams.spare0.y-1u;var slot=surfaceHash(q)&mask;let key=airCellKey(q);for(var probe=0u;probe<32u;probe+=1u){let at=pageParams.spare0.x+2u*slot;let stored=pageArena[at];if(stored==0u){break;}if(stored==key){let encoded=pageArena[at+1u];if(encoded!=0u){let row=0xffffffffu-encoded;if(row<pageParams.shape.x&&row<arrayLength(&previousLeaves)){return row;}}}slot=(slot+1u)&mask;}return INVALID;}
 fn pageLoad(base:u32,q:vec3u)->f32{let r=pageParams.shape.z;return bitcast<f32>(pageArena[base+q.x+r*(q.y+r*q.z)]);}
-fn previousFallback(leaf:SurfaceLeaf,p:vec3f)->f32{let c=vec3f(unpackOrigin(leaf.packedOrigin))+vec3f(0.5*f32(leaf.size));let physicalGradient=leaf.phiGradient.yzw/max(params.cellHalo.xyz,vec3f(1e-9));let boundedGradient=physicalGradient/max(1.0,length(physicalGradient))*params.cellHalo.xyz;return leaf.phiGradient.x+dot(boundedGradient,p-c);}
-fn previousPhi(row:u32,p:vec3f)->f32{let leaf=previousLeaves[row];let slot=pageArena[pageParams.offsets0.x+row];if(slot==INVALID||slot>=pageParams.shape.y){return previousFallback(leaf,p);}let o=vec3f(unpackOrigin(leaf.packedOrigin));let r=pageParams.shape.z;let grid=clamp((p-o)/f32(leaf.size)*f32(r)-vec3f(0.5),vec3f(0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1),vec3u(r-1u));let t=fract(grid);let base=pageParams.offsets1.z+slot*pageParams.shape.w;return mix(mix(mix(pageLoad(base,a),pageLoad(base,vec3u(b.x,a.y,a.z)),t.x),mix(pageLoad(base,vec3u(a.x,b.y,a.z)),pageLoad(base,vec3u(b.x,b.y,a.z)),t.x),t.y),mix(mix(pageLoad(base,vec3u(a.x,a.y,b.z)),pageLoad(base,vec3u(b.x,a.y,b.z)),t.x),mix(pageLoad(base,vec3u(a.x,b.y,b.z)),pageLoad(base,b),t.x),t.y),t.z);}
+fn previousFallback(leaf:SurfaceLeaf,p:vec3f)->f32{let c=vec3f(leafOrigin(leaf))+vec3f(0.5*f32(leaf.size));let physicalGradient=leaf.phiGradient.yzw/max(params.cellHalo.xyz,vec3f(1e-9));let boundedGradient=physicalGradient/max(1.0,length(physicalGradient))*params.cellHalo.xyz;return leaf.phiGradient.x+dot(boundedGradient,p-c);}
+fn previousPhi(row:u32,p:vec3f)->f32{let leaf=previousLeaves[row];let slot=pageArena[pageParams.offsets0.x+row];if(slot==INVALID||slot>=pageParams.shape.y){return previousFallback(leaf,p);}let o=vec3f(leafOrigin(leaf));let r=pageParams.shape.z;let grid=clamp((p-o)/f32(leaf.size)*f32(r)-vec3f(0.5),vec3f(0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1),vec3u(r-1u));let t=fract(grid);let base=pageParams.offsets1.z+slot*pageParams.shape.w;return mix(mix(mix(pageLoad(base,a),pageLoad(base,vec3u(b.x,a.y,a.z)),t.x),mix(pageLoad(base,vec3u(a.x,b.y,a.z)),pageLoad(base,vec3u(b.x,b.y,a.z)),t.x),t.y),mix(mix(pageLoad(base,vec3u(a.x,a.y,b.z)),pageLoad(base,vec3u(b.x,a.y,b.z)),t.x),mix(pageLoad(base,vec3u(a.x,b.y,b.z)),pageLoad(base,b),t.x),t.y),t.z);}
 var<private> currentRow:u32=INVALID;
 fn phi(p:vec3i)->f32{let q=clamp(p,vec3i(0),vec3i(dims())-vec3i(1));if(!pagedPhiAvailable()){if(params.selection.z!=0u){return analyticInitialPhi(vec3f(q)+vec3f(0.5));}return textureLoad(levelSet,q,0).x;}let point=vec3f(q)+vec3f(0.5);let row=previousRow(point);if(row!=INVALID){return previousPhi(row,point);}let airRow=airAliasRow(vec3u(q));if(airRow!=INVALID){return clamp(previousFallback(previousLeaves[airRow],point),0.01*min(params.cellHalo.x,min(params.cellHalo.y,params.cellHalo.z)),params.cellHalo.w);}if(currentRow<arrayLength(&previousLeaves)){return previousFallback(previousLeaves[currentRow],point);}return params.cellHalo.w;}
 fn faceAxis(face:FaceRecord)->u32{return face.axisSpan&3u;}
 fn faceSpan(face:FaceRecord)->u32{return face.axisSpan>>2u;}
-fn faceCentre(face:FaceRecord)->vec3f{let axis=faceAxis(face);var p=vec3f(unpackOrigin(face.packedOrigin));let half=0.5*f32(faceSpan(face));p[(axis+1u)%3u]+=half;p[(axis+2u)%3u]+=half;return p;}
+fn faceCentre(face:FaceRecord)->vec3f{let axis=faceAxis(face);var p=vec3f(vec3u(face.originX,face.originY,face.originZ));let half=0.5*f32(faceSpan(face));p[(axis+1u)%3u]+=half;p[(axis+2u)%3u]+=half;return p;}
 fn liveRow(row:u32,header:LeafHeader)->bool{
   // This is the compact row count that drives pressure and face publication in
   // the same command stream. Consuming it directly avoids a second frontier
@@ -391,6 +393,6 @@ fn sampleMotionComponent(point:vec3f,row:u32,axis:u32)->f32{
 fn sampleMotion(point:vec3f,row:u32)->vec3f{return vec3f(sampleMotionComponent(point,row,0u),sampleMotionComponent(point,row,1u),sampleMotionComponent(point,row,2u));}
 fn interfaceRange(origin:vec3u,size:u32,centrePhi:f32)->vec2f{let radius=0.5*f32(size)*length(params.cellHalo.xyz);var range=vec2f(centrePhi-radius,centrePhi+radius);let half=i32(size/2u);let c=vec3i(origin)+vec3i(half);for(var axis=0u;axis<3u;axis+=1u){var negative=c;var positive=c;negative[axis]=i32(origin[axis])-1;positive[axis]=i32(origin[axis]+size);if(valid(negative)){let value=phi(negative);range=vec2f(min(range.x,value),max(range.y,value));}if(valid(positive)){let value=phi(positive);range=vec2f(min(range.x,value),max(range.y,value));}}return range;}
 @compute @workgroup_size(64) fn buildSurfaceLeaves(@builtin(global_invocation_id) gid:vec3u){
-  let row=gid.x;if(row>=params.dimsCapacity.w||row>=arrayLength(&leafHeaders)||row>=arrayLength(&surfaceLeaves)){return;}currentRow=row;let header=leafHeaders[row];if(header.size==0u||!liveRow(row,header)){surfaceLeaves[row].flags=0u;return;}let origin=coord(header.cell);let centre=vec3f(origin)+vec3f(0.5*f32(header.size));let sampleCell=vec3i(clamp(vec3u(centre),vec3u(0),dims()-vec3u(1)));let centrePhi=phi(sampleCell);let dx=0.5*(phi(sampleCell+vec3i(1,0,0))-phi(sampleCell-vec3i(1,0,0)));let dy=0.5*(phi(sampleCell+vec3i(0,1,0))-phi(sampleCell-vec3i(0,1,0)));let dz=0.5*(phi(sampleCell+vec3i(0,0,1))-phi(sampleCell-vec3i(0,0,1)));let range=interfaceRange(origin,header.size,centrePhi);let core=range.x<=0.0&&range.y>=0.0;let halo=!core&&abs(centrePhi)<=params.cellHalo.w;let candidateFlags=select(select(0u,HALO,halo),CORE,core);let flags=LIVE|candidateFlags;let motion=sampleMotion(centre,row);surfaceLeaves[row]=SurfaceLeaf(packOrigin(origin),header.size,flags,0u,vec4f(centrePhi,dx,dy,dz),vec4f(motion,length(motion)));
+  let row=gid.x;if(row>=params.dimsCapacity.w||row>=arrayLength(&leafHeaders)||row>=arrayLength(&surfaceLeaves)){return;}currentRow=row;let header=leafHeaders[row];if(header.size==0u||!liveRow(row,header)){surfaceLeaves[row].flags=0u;return;}let origin=coord(header.cell);let centre=vec3f(origin)+vec3f(0.5*f32(header.size));let sampleCell=vec3i(clamp(vec3u(centre),vec3u(0),dims()-vec3u(1)));let centrePhi=phi(sampleCell);let dx=0.5*(phi(sampleCell+vec3i(1,0,0))-phi(sampleCell-vec3i(1,0,0)));let dy=0.5*(phi(sampleCell+vec3i(0,1,0))-phi(sampleCell-vec3i(0,1,0)));let dz=0.5*(phi(sampleCell+vec3i(0,0,1))-phi(sampleCell-vec3i(0,0,1)));let range=interfaceRange(origin,header.size,centrePhi);let core=range.x<=0.0&&range.y>=0.0;let halo=!core&&abs(centrePhi)<=params.cellHalo.w;let candidateFlags=select(select(0u,HALO,halo),CORE,core);let flags=LIVE|candidateFlags;let motion=sampleMotion(centre,row);surfaceLeaves[row]=SurfaceLeaf(origin.x,origin.y,origin.z,header.size,flags,0u,0u,0u,vec4f(centrePhi,dx,dy,dz),vec4f(motion,length(motion)));
 }
 `;

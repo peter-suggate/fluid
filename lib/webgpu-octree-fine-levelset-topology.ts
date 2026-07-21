@@ -121,7 +121,7 @@ export function fineLevelSetLeafSeedAllocatedBytes(maximumResidentBricks: number
   if (!Number.isSafeInteger(hashCapacity) || hashCapacity < 1 || (hashCapacity & (hashCapacity - 1)) !== 0) {
     throw new RangeError("Fine seed hash capacity must be a positive power of two");
   }
-  return (2 + 7 * maximumResidentBricks + 2 * hashCapacity) * 4 + 32;
+  return (2 + 9 * maximumResidentBricks + 2 * hashCapacity) * 4 + 32;
 }
 
 export const FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES = 32 + 96 + 8 + 64 + 32;
@@ -139,7 +139,7 @@ export class WebGPUFineLevelSetLeafSeeds {
       target.plan.maximumResidentBricks, target.plan.hashCapacity,
     );
     this.buffer = device.createBuffer({ label: "global fine brick seed keys",
-      size: (2 + 7 * target.plan.maximumResidentBricks + 2 * target.plan.hashCapacity) * 4,
+      size: (2 + 9 * target.plan.maximumResidentBricks + 2 * target.plan.hashCapacity) * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.params = device.createBuffer({ label: "global fine seed parameters", size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -462,7 +462,7 @@ fn currentLookup(key:u32)->u32{let start=hashKey(key);for(var probe=0u;probe<32u
  let slot=(start+probe)&(params.hashCapacity-1u);let stored=sourceA[slot*2u];if(stored==key){return sourceA[slot*2u+1u];}if(stored==INVALID){return INVALID;}}return INVALID;}
 fn externalSeedHash(key:u32)->u32{var value=key*0x9e3779b1u;value=(value^(value>>16u))*0x7feb352du;return value^(value>>15u);}
 fn externalSeedPhi(key:u32,finestPoint:vec3f)->f32{if(params.affineSeeds==0u){return 3.402823e38;}let keyBase=2u+params.pageCapacity;let valueBase=keyBase+params.hashCapacity;let planeBase=valueBase+params.hashCapacity;let start=externalSeedHash(key)&(params.hashCapacity-1u);
- for(var probe=0u;probe<32u;probe+=1u){let slot=(start+probe)&(params.hashCapacity-1u);let stored=externalSeeds[keyBase+slot];if(stored==key){let seed=externalSeeds[valueBase+slot];if(seed>=params.pageCapacity){return 3.402823e38;}let base=planeBase+seed*6u;let packed=externalSeeds[base];let leafOrigin=vec3f(vec3u(packed&1023u,(packed>>10u)&1023u,(packed>>20u)&1023u));let size=f32(externalSeeds[base+1u]);let centre=leafOrigin+vec3f(0.5*size);let value=bitcast<f32>(externalSeeds[base+2u]);let gradient=vec3f(bitcast<f32>(externalSeeds[base+3u]),bitcast<f32>(externalSeeds[base+4u]),bitcast<f32>(externalSeeds[base+5u]));return value+dot(gradient,finestPoint-centre);}if(stored==INVALID){break;}}
+ for(var probe=0u;probe<32u;probe+=1u){let slot=(start+probe)&(params.hashCapacity-1u);let stored=externalSeeds[keyBase+slot];if(stored==key){let seed=externalSeeds[valueBase+slot];if(seed>=params.pageCapacity){return 3.402823e38;}let base=planeBase+seed*8u;let leafOrigin=vec3f(vec3u(externalSeeds[base],externalSeeds[base+1u],externalSeeds[base+2u]));let size=f32(externalSeeds[base+3u]);let centre=leafOrigin+vec3f(0.5*size);let value=bitcast<f32>(externalSeeds[base+4u]);let gradient=vec3f(bitcast<f32>(externalSeeds[base+5u]),bitcast<f32>(externalSeeds[base+6u]),bitcast<f32>(externalSeeds[base+7u]));return value+dot(gradient,finestPoint-centre);}if(stored==INVALID){break;}}
  return 3.402823e38;}
 fn linearInvocation(wid:vec3u,nwg:vec3u,local:u32)->u32{return fineLinearWorkgroup(wid,nwg)*64u+local;}
 @compute @workgroup_size(64) fn clearDesiredGeneration(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let item=linearInvocation(wid,nwg,local);if(item<params.hashCapacity*2u){atomicStore(&targetA[item],INVALID);}if(item<5u+params.pageCapacity){targetB[item]=0u;}if(item<8u&&item!=6u){atomicStore(&control[item],0u);}if(item==6u){atomicStore(&control[6],params.dilationBrickRings);}}
@@ -496,30 +496,30 @@ fn targetLookup(key:u32)->u32{let slot=nextSlot(key);if(slot==INVALID){return IN
 export const fineLevelSetLeafSeedWGSL = /* wgsl */ `
 const CORE:u32=2u;
 struct Params { header:vec4u,tail:vec4u }
-struct SurfaceLeaf { packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f }
+struct SurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct Candidate { row:u32,flags:u32 }
 @group(0) @binding(0) var<uniform> params:Params;
 @group(0) @binding(1) var<storage,read> leaves:array<SurfaceLeaf>;
 @group(0) @binding(2) var<storage,read> candidates:array<Candidate>;
 @group(0) @binding(3) var<storage,read> candidateControl:array<u32>;
 @group(0) @binding(4) var<storage,read_write> seeds:array<u32>;
-fn unpackOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
+fn leafOrigin(leaf:SurfaceLeaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
 fn brickDimensions()->vec3u{return vec3u(params.header.z,params.header.w,params.tail.x);}
 fn packBrick(coord:vec3u)->u32{let dims=brickDimensions();return coord.x+dims.x*(coord.y+dims.y*coord.z);}
 fn seedHash(key:u32)->u32{var value=key*0x9e3779b1u;value=(value^(value>>16u))*0x7feb352du;return value^(value>>15u);}
 fn seedKeyBase()->u32{return 2u+params.tail.y;}fn seedValueBase()->u32{return seedKeyBase()+params.tail.w;}fn seedPlaneBase()->u32{return seedValueBase()+params.tail.w;}
 fn clearSeeds(){seeds[0]=0u;seeds[1]=0u;for(var slot=0u;slot<params.tail.w;slot+=1u){seeds[seedKeyBase()+slot]=0xffffffffu;seeds[seedValueBase()+slot]=0xffffffffu;}}
-fn appendSeed(key:u32,leaf:SurfaceLeaf){let hashCapacity=params.tail.w;let start=seedHash(key)&(hashCapacity-1u);for(var probe=0u;probe<32u;probe+=1u){let slot=(start+probe)&(hashCapacity-1u);let at=seedKeyBase()+slot;let stored=seeds[at];if(stored==key){return;}if(stored==0xffffffffu){let count=seeds[0];if(count>=params.tail.y){seeds[1]=1u;return;}seeds[at]=key;seeds[seedValueBase()+slot]=count;seeds[2u+count]=key;let base=seedPlaneBase()+count*6u;seeds[base]=leaf.packedOrigin;seeds[base+1u]=leaf.size;seeds[base+2u]=bitcast<u32>(leaf.phiGradient.x);seeds[base+3u]=bitcast<u32>(leaf.phiGradient.y);seeds[base+4u]=bitcast<u32>(leaf.phiGradient.z);seeds[base+5u]=bitcast<u32>(leaf.phiGradient.w);seeds[0]=count+1u;return;}}seeds[1]=2u;}
+fn appendSeed(key:u32,leaf:SurfaceLeaf){let hashCapacity=params.tail.w;let start=seedHash(key)&(hashCapacity-1u);for(var probe=0u;probe<32u;probe+=1u){let slot=(start+probe)&(hashCapacity-1u);let at=seedKeyBase()+slot;let stored=seeds[at];if(stored==key){return;}if(stored==0xffffffffu){let count=seeds[0];if(count>=params.tail.y){seeds[1]=1u;return;}seeds[at]=key;seeds[seedValueBase()+slot]=count;seeds[2u+count]=key;let base=seedPlaneBase()+count*8u;seeds[base]=leaf.originX;seeds[base+1u]=leaf.originY;seeds[base+2u]=leaf.originZ;seeds[base+3u]=leaf.size;seeds[base+4u]=bitcast<u32>(leaf.phiGradient.x);seeds[base+5u]=bitcast<u32>(leaf.phiGradient.y);seeds[base+6u]=bitcast<u32>(leaf.phiGradient.z);seeds[base+7u]=bitcast<u32>(leaf.phiGradient.w);seeds[0]=count+1u;return;}}seeds[1]=2u;}
 @compute @workgroup_size(1) fn emitSeeds(){clearSeeds();let count=min(candidateControl[0],arrayLength(&candidates));
  for(var candidate=0u;candidate<count;candidate+=1u){let item=candidates[candidate];if((item.flags&CORE)==0u||item.row>=arrayLength(&leaves)){continue;}
-  let leaf=leaves[item.row];let origin=unpackOrigin(leaf.packedOrigin);let first=origin*params.header.x/params.header.y;
+  let leaf=leaves[item.row];let origin=leafOrigin(leaf);let first=origin*params.header.x/params.header.y;
   var last=(origin+vec3u(max(1u,leaf.size)))*params.header.x-vec3u(1);last/=params.header.y;last=min(last,brickDimensions()-vec3u(1));
   for(var z=first.z;z<=last.z;z+=1u){for(var y=first.y;y<=last.y;y+=1u){for(var x=first.x;x<=last.x;x+=1u){
    appendSeed(packBrick(vec3u(x,y,z)),leaf);if(seeds[1]!=0u){return;}
   }}}
  }}
 @compute @workgroup_size(1) fn emitAllInterfaceSeeds(){clearSeeds();let count=min(candidateControl[0],arrayLength(&leaves));
- for(var row=0u;row<count;row+=1u){let leaf=leaves[row];if((leaf.flags&CORE)==0u){continue;}let origin=unpackOrigin(leaf.packedOrigin);let first=origin*params.header.x/params.header.y;
+ for(var row=0u;row<count;row+=1u){let leaf=leaves[row];if((leaf.flags&CORE)==0u){continue;}let origin=leafOrigin(leaf);let first=origin*params.header.x/params.header.y;
   var last=(origin+vec3u(max(1u,leaf.size)))*params.header.x-vec3u(1);last/=params.header.y;last=min(last,brickDimensions()-vec3u(1));
   for(var z=first.z;z<=last.z;z+=1u){for(var y=first.y;y<=last.y;y+=1u){for(var x=first.x;x<=last.x;x+=1u){appendSeed(packBrick(vec3u(x,y,z)),leaf);if(seeds[1]!=0u){return;}}}}
  }}

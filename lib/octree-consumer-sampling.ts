@@ -367,7 +367,7 @@ export function planOctreeConsumerTraffic(input: OctreeConsumerTrafficInputs): O
   // Dense trilinear sampling: eight texels. Adaptive phi: leaf record/table + eight page values.
   const denseFieldReadBytes = input.velocityQueries * 8 * 16 + input.phiQueries * 8 * 4;
   const adaptiveFieldReadBytesUpperBound = input.velocityQueries
-    * (8 + input.averageFaceCandidatesPerVelocityQuery * (4 + 24))
+    * (8 + input.averageFaceCandidatesPerVelocityQuery * (4 + 32))
     + input.phiQueries * (4 + 48 + 8 * 4);
   return {
     densePersistentBytes,
@@ -386,25 +386,25 @@ export function planOctreeConsumerTraffic(input: OctreeConsumerTrafficInputs): O
  */
 export const octreeConsumerSamplingWGSL = /* wgsl */ `
 const OCTREE_CONSUMER_MAX_FACES = 48u;
-struct OctreeConsumerFaceSample { packedOrigin:u32, axisSpan:u32, normalVelocity:f32, pad:u32 }
-struct OctreeConsumerSurfaceLeaf { packedOrigin:u32, size:u32, flags:u32, pad:u32, phiGradient:vec4f }
+struct OctreeConsumerFaceSample { originX:u32, originY:u32, originZ:u32, axisSpan:u32, normalVelocity:f32, pad:u32 }
+struct OctreeConsumerSurfaceLeaf { originX:u32, originY:u32, originZ:u32, size:u32, phiGradient:vec4f }
 fn octreeConsumerOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
 fn octreeConsumerAxis(face:OctreeConsumerFaceSample)->u32{return face.axisSpan&3u;}
 fn octreeConsumerSpan(face:OctreeConsumerFaceSample)->u32{return face.axisSpan>>2u;}
-fn octreeConsumerCentre(face:OctreeConsumerFaceSample)->vec3f{let axis=octreeConsumerAxis(face);var p=vec3f(octreeConsumerOrigin(face.packedOrigin));let span=0.5*f32(octreeConsumerSpan(face));p[(axis+1u)%3u]+=span;p[(axis+2u)%3u]+=span;return p;}
+fn octreeConsumerCentre(face:OctreeConsumerFaceSample)->vec3f{let axis=octreeConsumerAxis(face);var p=vec3f(vec3u(face.originX,face.originY,face.originZ));let span=0.5*f32(octreeConsumerSpan(face));p[(axis+1u)%3u]+=span;p[(axis+2u)%3u]+=span;return p;}
 fn octreeConsumerComponent(point:vec3f,axis:u32,candidates:array<OctreeConsumerFaceSample,48>,count:u32,fallback:f32)->f32{
   var weighted=0.0;var weights=0.0;var nearest=fallback;var nearestD2=3.402823e38;
   for(var i=0u;i<min(count,OCTREE_CONSUMER_MAX_FACES);i+=1u){let face=candidates[i];if(octreeConsumerAxis(face)!=axis){continue;}let delta=point-octreeConsumerCentre(face);let d2=dot(delta,delta);if(d2<nearestD2){nearestD2=d2;nearest=face.normalVelocity;}let support=max(1.0,f32(octreeConsumerSpan(face)));let weight=1.0/max(0.0625*support*support,d2);weighted+=weight*face.normalVelocity;weights+=weight;}
   return select(nearest,weighted/weights,weights>0.0);
 }
 fn octreeConsumerVelocity(point:vec3f,candidates:array<OctreeConsumerFaceSample,48>,count:u32,fallback:vec3f)->vec3f{return vec3f(octreeConsumerComponent(point,0u,candidates,count,fallback.x),octreeConsumerComponent(point,1u,candidates,count,fallback.y),octreeConsumerComponent(point,2u,candidates,count,fallback.z));}
-fn octreeConsumerFallbackPhi(point:vec3f,leaf:OctreeConsumerSurfaceLeaf)->f32{let centre=vec3f(octreeConsumerOrigin(leaf.packedOrigin))+vec3f(0.5*f32(leaf.size));return leaf.phiGradient.x+dot(leaf.phiGradient.yzw,point-centre);}
+fn octreeConsumerFallbackPhi(point:vec3f,leaf:OctreeConsumerSurfaceLeaf)->f32{let centre=vec3f(vec3u(leaf.originX,leaf.originY,leaf.originZ))+vec3f(0.5*f32(leaf.size));return leaf.phiGradient.x+dot(leaf.phiGradient.yzw,point-centre);}
 fn octreeConsumerPageIndex(q:vec3u,resolution:u32)->u32{return q.x+resolution*(q.y+resolution*q.z);}
 // The including shader supplies octreeConsumerPageLoad(base,index), normally
 // as one storage-buffer read. This keeps the shared ABI genuinely 2^3/4^3
 // dynamic instead of smuggling every page through a fixed 64-value parameter.
 fn octreeConsumerPhi(point:vec3f,leaf:OctreeConsumerSurfaceLeaf,pageBase:u32,pageResolution:u32,hasPage:bool)->f32{
-  if(!hasPage||(pageResolution!=2u&&pageResolution!=4u)){return octreeConsumerFallbackPhi(point,leaf);}let r=pageResolution;let origin=vec3f(octreeConsumerOrigin(leaf.packedOrigin));let grid=clamp((point-origin)/f32(leaf.size)*f32(r)-vec3f(0.5),vec3f(0.0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1u),vec3u(r-1u));let t=fract(grid);
+  if(!hasPage||(pageResolution!=2u&&pageResolution!=4u)){return octreeConsumerFallbackPhi(point,leaf);}let r=pageResolution;let origin=vec3f(vec3u(leaf.originX,leaf.originY,leaf.originZ));let grid=clamp((point-origin)/f32(leaf.size)*f32(r)-vec3f(0.5),vec3f(0.0),vec3f(f32(r-1u)));let a=vec3u(floor(grid));let b=min(a+vec3u(1u),vec3u(r-1u));let t=fract(grid);
   let c000=octreeConsumerPageLoad(pageBase,octreeConsumerPageIndex(a,r));let c100=octreeConsumerPageLoad(pageBase,octreeConsumerPageIndex(vec3u(b.x,a.y,a.z),r));let c010=octreeConsumerPageLoad(pageBase,octreeConsumerPageIndex(vec3u(a.x,b.y,a.z),r));let c110=octreeConsumerPageLoad(pageBase,octreeConsumerPageIndex(vec3u(b.x,b.y,a.z),r));let c001=octreeConsumerPageLoad(pageBase,octreeConsumerPageIndex(vec3u(a.x,a.y,b.z),r));let c101=octreeConsumerPageLoad(pageBase,octreeConsumerPageIndex(vec3u(b.x,a.y,b.z),r));let c011=octreeConsumerPageLoad(pageBase,octreeConsumerPageIndex(vec3u(a.x,b.y,b.z),r));let c111=octreeConsumerPageLoad(pageBase,octreeConsumerPageIndex(b,r));return mix(mix(mix(c000,c100,t.x),mix(c010,c110,t.x),t.y),mix(mix(c001,c101,t.x),mix(c011,c111,t.x),t.y),t.z);
 }
 `;

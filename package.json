@@ -59,6 +59,7 @@
     "benchmark:rigid": "node --import tsx tools/run-rigid-benchmarks.ts",
     "benchmark:octree-leaves": "node --import tsx tools/benchmark-octree-leaf-sizes.ts",
     "benchmark:svo": "node --import tsx tools/benchmark-svo.ts",
+    "benchmark:svo-derived": "node --import tsx tools/benchmark-svo-derived-hierarchy.ts",
     "benchmark:svo-render-stages": "node --import tsx tools/benchmark-svo-render-stages.ts",
     "baseline:svo": "node --import tsx tools/capture-svo-baselines.ts",
     "report:svo-scenes": "node --import tsx tools/report-svo-scene-coverage.ts",

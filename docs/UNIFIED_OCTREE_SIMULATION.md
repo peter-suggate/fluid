@@ -83,20 +83,15 @@ in the same unsubmitted encoder remains a known lifetime gap. The bounded
 default dam-break path uses one surface substep; lifting that bound requires
 the same invocation-stable allocation treatment before it is authoritative.
 
-Pressure remains on canonical octree faces. The target follow-up is the paper's
-Section 4.3 hybrid PCG preconditioner: a first-order adaptive multigrid V-cycle
-bracketed by paired second-order smoothing near boundaries and level
-transitions. The currently wired matrix-free aggregate-PCG path is an
-experimental scaffold, not that V-cycle. A separate non-wired Section 4.3 path
-now provides the three-layer boundary/transition classification and paired
-eight-iteration second-order smoothing schedule. A bounded sparse first-order
-Galerkin V-cycle now implements its injected interface with Cartesian L1 face
-weights and adjoint adjacent-level transfers, but projection construction does
-not select it. The first-order free-surface boundary anchor is still
-provisional, and adaptive GPU symmetry/convergence gates remain before this
-path can claim authority. This work is intentionally sequenced after the
-dense-field cutover because replacing the pressure preconditioner does not by
-itself reduce phi or renderer bandwidth.
+Admitted power authority now selects the paper's Section 4.3 hybrid PCG
+preconditioner. It captures the Cartesian/GFM first-order rows before power L2
+publication, applies paired `k=8` second-order smoothing near boundaries and
+level transitions, runs the sparse SPD first-order Galerkin V-cycle, and then
+applies the matching eight post-smoothing iterations. The localized band is
+currently three compact L2 graph rings, an explicitly diagnosed approximation
+of the paper's "about 3 voxels" physical band. Aggregate PCG and Chebyshev are
+explicit compatibility modes and are not permitted to masquerade as Section
+4.3 authority.
 
 Research references:
 

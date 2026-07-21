@@ -68,7 +68,7 @@ test("Dawn classifies oblique rigid and terrain apertures and publishes paired r
   const placeholder = upload(new Uint32Array(4));
   const source: OctreePowerFaceSource = {
     plan: { rowCapacity: 1, faceCapacity: 1, incidenceCapacity: 2, faceBytes: 32, normalBytes: 16,
-      centroidBytes: 16, quadratureBytes: 80, incidenceBytes: 16, workspaceBytes: 32, hashCapacity: 2, hashBytes: 32,
+      centroidBytes: 16, quadratureBytes: 80, incidenceBytes: 16, workspaceBytes: 32, boundaryQueryBytes: 32, hashCapacity: 2, hashBytes: 32,
       maximumHashProbes: 32, scanBlockCount: 1, scanBytes: 16, allocatedBytes: 0 },
     faces, faceNormals: normals, faceCentroids: centroids, faceQuadrature: quadrature, incidenceRows: placeholder,
     incidenceOffsets: placeholder, incidence: placeholder, control: faceControl, siteIndex: placeholder,

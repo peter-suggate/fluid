@@ -52,21 +52,28 @@ export function paperPipelineStages(
     && (info.pressureRequiredEntries ?? 0) > 0
     && info.pressureCapacityOverflow !== true;
   stages.push(powerHealthy
-    ? { id: "power", section: "§4.2", label: "Power cells, faces & CSR", state: "AUTHORITATIVE", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureRequiredRows?.toLocaleString()} rows · ${info.pressureRequiredEntries?.toLocaleString()} incidences · exact live power-face graph` }
+    ? { id: "power", section: "§4.1–4.2/§6", label: "Power cells, faces & CSR", state: "AUTHORITATIVE", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureRequiredRows?.toLocaleString()} rows · ${info.pressureRequiredEntries?.toLocaleString()} incidences · exact live power-face graph` }
     : info.powerDiagramFallbackReason || (t0Ready && info.powerDiagramProjection === "authoritative")
-      ? { id: "power", section: "§4.2", label: "Power cells, faces & CSR", state: "REJECTED", tone: "rejected", generation: generation(powerGeneration), detail: info.powerDiagramFallbackReason ?? "Authoritative power publication is incomplete." }
-      : pending("power", "§4.2", "Power cells, faces & CSR", "Waiting for the compact power topology and generalized faces."));
+      ? { id: "power", section: "§4.1–4.2/§6", label: "Power cells, faces & CSR", state: "REJECTED", tone: "rejected", generation: generation(powerGeneration), detail: info.powerDiagramFallbackReason ?? "Authoritative power publication is incomplete." }
+      : pending("power", "§4.1–4.2/§6", "Power cells, faces & CSR", "Waiting for the compact power topology and generalized faces."));
 
   const fineRejected = info.globalFineRolledBack === true
     || info.globalFinePublished === false
     || (info.globalFineSeedError ?? 0) !== 0
     || (info.globalFineTopologyFlags ?? 0) !== 0
+    || (info.globalFineCoarseLevelSetFlags ?? 0) !== 0
     || (info.globalFineDownstreamFinalizeReason ?? 0) !== 0;
   const fineHealthy = info.globalFinePublished === true && !fineRejected && (fineGeneration ?? 0) > 0;
+  const noCausalSimplex = ((info.globalFineCoarseLevelSetFlags ?? 0) & 512) !== 0;
+  const coarseFailure = noCausalSimplex
+    ? ` · no causal non-obtuse simplex at row ${info.globalFineCoarseLevelSetFirstErrorRow?.toLocaleString() ?? "?"}; acute-simplex grading/refinement coverage failed`
+    : (info.globalFineCoarseLevelSetFlags ?? 0) !== 0
+      ? ` · coarse φ 0x${(info.globalFineCoarseLevelSetFlags ?? 0).toString(16)}`
+      : "";
   stages.push(fineHealthy
     ? { id: "fine", section: "§5", label: "Fine φ interface & support band", state: "PUBLISHED", tone: "healthy", generation: generation(fineGeneration), detail: `${info.globalFineSeedCount ?? 0} interface seeds · ${info.globalFineInterfaceBricks ?? 0} interface → ${info.globalFineActiveBricks ?? 0} active bricks` }
     : fineRejected
-      ? { id: "fine", section: "§5", label: "Fine φ interface & support band", state: "REJECTED", tone: "rejected", generation: generation(fineGeneration), detail: `seed fault ${info.globalFineSeedError ?? 0} · topology 0x${(info.globalFineTopologyFlags ?? 0).toString(16)} · downstream 0x${(info.globalFineDownstreamFinalizeReason ?? 0).toString(16)}` }
+      ? { id: "fine", section: "§5", label: "Fine φ interface & support band", state: "REJECTED", tone: "rejected", generation: generation(fineGeneration), detail: `seed fault ${info.globalFineSeedError ?? 0} · topology 0x${(info.globalFineTopologyFlags ?? 0).toString(16)} · downstream 0x${(info.globalFineDownstreamFinalizeReason ?? 0).toString(16)}${coarseFailure}` }
       : pending("fine", "§5", "Fine φ interface & support band", "Waiting for interface seeds, neighbor ring, and same-generation publication."));
 
   stages.push(info.globalFineRedistanceCommitted === true
@@ -113,18 +120,27 @@ export function paperPipelineStages(
   const residual = info.pressureRelativeResidual;
   stages.push(powerHealthy && section43
     ? (info.encodedSteps ?? 0) === 0
-      ? { id: "pressure", section: "§4.3", label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureSolver} · operator and preconditioner are ready; convergence is evaluated after the first solve.` }
+      ? { id: "pressure", section: "§4.3", label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureSolver} · operator, preconditioner, and fenced t=0 solve are ready; dynamic-step convergence appears after stepping.` }
       : { id: "pressure", section: "§4.3", label: "Pressure projection", state: residual !== undefined && residual <= 1e-4 ? "CONVERGED" : "CHECK", tone: residual !== undefined && residual <= 1e-4 ? "healthy" : "warning", generation: generation(powerGeneration), detail: residual === undefined ? `${info.pressureSolver} · latest solve residual is unavailable` : `${info.pressureSolver} · relative residual ${residual.toExponential(2)} (target 1e-4)` }
     : t0Ready
       ? { id: "pressure", section: "§4.3", label: "Pressure projection", state: "REJECTED", tone: "rejected", generation: generation(powerGeneration), detail: info.pressureSolver ?? "Section 4.3 pressure authority is unavailable." }
       : pending("pressure", "§4.3", "Pressure projection", "Waiting for the authoritative power operator and first-order V-cycle path."));
 
+  const rasterGenerationCurrent = water?.globalFineAttachedGeneration !== undefined
+    && water.meshPublicationGeneration !== undefined
+    && water.globalFineAttachedGeneration === fineGeneration
+    && water.meshPublicationGeneration === fineGeneration;
+  const rasterGenerations = water
+    ? `attached ${water.globalFineAttachedGeneration ?? "?"} · mesh ${water.meshPublicationGeneration ?? "?"} · live ${fineGeneration ?? "?"}`
+    : "generation evidence unavailable";
   stages.push(!water
     ? pending("raster", "render", "Fine/coarse raster surface", "Waiting for bounded renderer diagnostics.")
-    : water.surfaceGeometrySource === "global-fine-coarse" && water.globalFineCrossingPublished
-      ? { id: "raster", section: "render", label: "Fine/coarse raster surface", state: "CURRENT", tone: "healthy", generation: generation(fineGeneration), detail: "Raster geometry is attached to the admitted global-fine/coarse zero crossing." }
+    : water.surfaceGeometrySource === "global-fine-coarse" && water.globalFineCrossingPublished && rasterGenerationCurrent
+      ? { id: "raster", section: "render", label: "Fine/coarse raster surface", state: "CURRENT", tone: "healthy", generation: generation(fineGeneration), detail: `Raster geometry is attached to the admitted same-generation global-fine/coarse zero crossing · ${rasterGenerations}.` }
+      : water.surfaceGeometrySource === "global-fine-coarse" && water.globalFineCrossingPublished
+        ? { id: "raster", section: "render", label: "Fine/coarse raster surface", state: "STALE", tone: "stale", generation: generation(fineGeneration), detail: `A crossing is drawn, but same-generation publication is not proven · ${rasterGenerations}.` }
       : water.surfaceGeometrySource === "retained-previous"
-        ? { id: "raster", section: "render", label: "Fine/coarse raster surface", state: "STALE", tone: "stale", generation: generation(fineGeneration), detail: "The last complete mesh is retained; the current generation was not admitted." }
+        ? { id: "raster", section: "render", label: "Fine/coarse raster surface", state: "STALE", tone: "stale", generation: generation(fineGeneration), detail: `The last complete mesh is retained; the current generation was not admitted · ${rasterGenerations}.` }
         : water.surfaceGeometrySource === "adaptive-fallback"
           ? { id: "raster", section: "render", label: "Fine/coarse raster surface", state: "FALLBACK", tone: "warning", generation: generation(fineGeneration), detail: "Presentation uses adaptive fallback geometry; simulation authority is unchanged." }
           : { id: "raster", section: "render", label: "Fine/coarse raster surface", state: "REJECTED", tone: "rejected", generation: generation(fineGeneration), detail: `No current crossing is drawn (${water.surfaceGeometrySource}).` });
@@ -159,6 +175,7 @@ const PAPER_VISUAL_LABELS: Readonly<Partial<Record<GridOverlayMode, string>>> = 
   "power-cells": "Power cells", "power-faces": "Power faces", "delaunay-tetrahedra": "Delaunay tetrahedra",
   "transition-band": "Transition band", "power-operator": "Power operator", "octree-lifecycle": "Octree lifecycle",
   "fine-band-lifecycle": "Fine-band lifecycle", "operator-diagonal": "Operator diagonal",
+  "global-fine-phi": "Global-fine φ / Eikonal residual",
   "operator-rhs": "Operator RHS", "operator-reciprocity": "Face reciprocity",
   "operator-open-fraction": "Face open fraction", "tetra-validity": "Tetrahedron validity",
   "section5-face-band": "Section 5 face march",
@@ -166,7 +183,7 @@ const PAPER_VISUAL_LABELS: Readonly<Partial<Record<GridOverlayMode, string>>> = 
 
 function visualStageId(mode: GridOverlayMode, axis: GridOverlayConfig["axis"]): string {
   if (axis === "off") return "raster";
-  if (mode === "fine-band-lifecycle" || mode === "phi" || mode === "surface") return "fine";
+  if (mode === "fine-band-lifecycle" || mode === "global-fine-phi" || mode === "phi" || mode === "surface") return "fine";
   if (mode === "speed" || mode === "faces" || mode === "section5-face-band") return "extrapolation";
   if (mode === "pressure" || mode === "divergence" || mode === "projection"
     || mode === "power-operator" || mode.startsWith("operator-")) return "pressure";
@@ -194,7 +211,7 @@ export function paperVisualAuthority(
     state: stage.state,
     tone: stage.tone,
     generation: stage.generation,
-    frame: steps === 0 ? "t=0 preflight" : `latest completed step ${steps}`,
+    frame: steps === 0 ? "t=0 preflight" : `latest encoded substep ${steps}`,
     detail: stage.detail,
   };
 }
@@ -229,6 +246,12 @@ function phiOwnerFailureCounts(info: GPUEulerianInfo): string {
   const counts = info.globalFineFaceBandPhiFailureCounts;
   if (!counts) return "owner causes unavailable";
   return `owner causes row ${counts.missingRow} / coarse ${counts.exactCoarseMiss} / metric ${counts.invalidMetric} / selector ${counts.invalidSelector}`;
+}
+
+function firstAcuteGradingFailure(info: GPUEulerianInfo): string | undefined {
+  const failure = info.globalFineFaceBandAcuteGradingFailure;
+  if (!failure) return undefined;
+  return `escaped acute grading: band ${failure.band.toLocaleString()} · row ${failure.rowCell.toLocaleString()} size ${failure.rowSize.toLocaleString()} · coarse mask 0x${failure.coarseMask.toString(16).padStart(2, "0")} · raw descriptor 0x${failure.descriptor.toString(16).padStart(8, "0")}`;
 }
 
 function faceMarchSchedule(info: GPUEulerianInfo): string {
@@ -266,7 +289,7 @@ export function paperSection5SpatialFailures(
     {
       id: "transition", label: "Delaunay transfer",
       state: state((info.globalFineFaceBandTransitionFlags ?? 0) === 0 && info.globalFineFaceBandTransitionValid === true, bandFresh),
-      first: firstIndex(info.globalFineFaceBandTransitionFirstError, "first row"),
+      first: firstAcuteGradingFailure(info) ?? firstIndex(info.globalFineFaceBandTransitionFirstError, "first row"),
       counts: `${info.globalFineFaceBandTransitionRows ?? 0} transition rows · ${info.globalFineFaceBandTransitionAdjacencyCount ?? 0} tetra adjacencies · support ${info.globalFineFaceBandTransitionCoreRows ?? 0}→${info.globalFineFaceBandTransitionSupport1Rows ?? 0}→${info.globalFineFaceBandTransitionSupport2Rows ?? 0}→${info.globalFineFaceBandTransitionSupport3Rows ?? 0}→${info.globalFineFaceBandTransitionEndpointRows ?? 0}`,
       inspectMode: "delaunay-tetrahedra",
     },
@@ -300,6 +323,7 @@ export const PAPER_VISUAL_PRESETS: readonly PaperVisualPreset[] = [
   { id: "power-faces", label: "Power faces", description: "Primal faces, dual links, normals, boundaries", mode: "power-faces", axis: "volume" },
   { id: "transitions", label: "Delaunay", description: "Local tetrahedra and transition rows", mode: "delaunay-tetrahedra", axis: "volume" },
   { id: "fine-band", label: "Fine φ", description: "Interface seeds, frontier, known redistance support", mode: "fine-band-lifecycle", axis: "volume" },
+  { id: "fine-phi-values", label: "Fine φ values", description: "Paper fine-lattice φ and |∇φ|−1 residual", mode: "global-fine-phi", axis: "z" },
   { id: "section5-march", label: "Section 5 march", description: "Dry support rows and accepted/trial/unresolved faces", mode: "section5-face-band", axis: "volume" },
   { id: "velocity", label: "Velocity air", description: "Live extrapolated air-band speed", mode: "speed", axis: "z" },
   { id: "pressure", label: "Pressure / residual", description: "Mapped pressure plus live numeric residual", mode: "pressure", axis: "z" },

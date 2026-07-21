@@ -153,14 +153,21 @@ test("WGSL exposes guarded lifecycle, hierarchy, transport and redistance", () =
   assert.match(octreeSurfacePageShader, /atomicLoad\(&arena\[3\]\)!=0u/);
   assert.match(octreeSurfacePageShader, /prepareDispatch/);
   assert.match(octreeSurfacePageShader, /abs\(x\)\+abs\(y\)\+abs\(z\)>radius/);
+  assert.match(octreeSurfacePageShader,
+    /fn airCellKey\(p:vec3u\)->u32\{return p\.x\+params\.spare1\.x\*\(p\.y\+params\.spare1\.y\*p\.z\)\+1u;\}/,
+    "air-side ghost aliases use the exact u32 linear-cell identity across the full domain");
+  assert.doesNotMatch(octreeSurfacePageShader, /p\.x\|\(p\.y<<10u\)/,
+    "air-side keys must not truncate coordinates to a 10:10:10 payload");
   assert.match(octreeSurfacePageShader, /let encodedRow=0xffffffffu-row/);
   assert.match(octreeSurfacePageShader, /@group\(0\) @binding\(5\) var<storage,read> previousLeaves/);
   assert.match(octreeSurfacePageShader, /fn previousPageRow/);
-  assert.match(octreeSurfacePageShader, /previousLeaves\[oldRow\]\.pad/);
+  assert.match(octreeSurfacePageShader, /previousLeaves\[oldRow\]\.pad0/);
   assert.match(octreeSurfacePageShader, /claimPreviousPage\(oldRow,row,slot\)/,
     "row-attached pages must migrate by spatial leaf identity when topology compaction reorders rows");
-  assert.match(octreeSurfacePageShader, /leaves\[row\]\.pad=slot/,
+  assert.match(octreeSurfacePageShader, /leaves\[row\]\.pad0=slot/,
     "publication must carry the spatial page slot in the existing leaf record");
+  assert.doesNotMatch(octreeSurfacePageShader, /\.pad\b/,
+    "surface-page shaders must use the current 64-byte SurfaceLeaf pad0 ABI field");
   const lifecycle = WebGPUOctreeSurfacePages.prototype.encodeLifecycle.toString();
   assert.doesNotMatch(lifecycle, /dispatchWorkgroupsIndirect\(this\.candidateSource\.countAndDispatch/,
     "candidate control is a storage binding and must not alias INDIRECT usage in the same pass");
@@ -194,13 +201,13 @@ test("Dawn allocates, transports and redistances leaf-attached pages", {
     const buffer = device.createBuffer({ size: Math.max(4, data.byteLength), usage });
     device.queue.writeBuffer(buffer, 0, bytes(data)); owned.push(buffer); return buffer;
   };
-  const leafData = new ArrayBuffer(2 * 48), leafU32 = new Uint32Array(leafData), leafF32 = new Float32Array(leafData);
-  // packed origin, size, flags, pad; phi, gradient; velocity, speed.
-  leafU32.set([0, 1, 0, 0], 0); leafF32.set([-0.25, 1, 0, 0, 0.1, 0, 0, 0.1], 4);
-  leafU32.set([1, 1, 0, 0], 12); leafF32.set([0.75, 1, 0, 0, 0.1, 0, 0, 0.1], 16);
+  const leafData = new ArrayBuffer(2 * 64), leafU32 = new Uint32Array(leafData), leafF32 = new Float32Array(leafData);
+  // explicit origin xyz, size, flags/padding; phi/gradient; velocity/speed.
+  leafU32.set([0, 0, 0, 1, 0, 0, 0, 0], 0); leafF32.set([-0.25, 1, 0, 0, 0.1, 0, 0, 0.1], 8);
+  leafU32.set([1, 0, 0, 1, 0, 0, 0, 0], 16); leafF32.set([0.75, 1, 0, 0, 0.1, 0, 0, 0.1], 24);
   const leaves = make(new Uint8Array(leafData), GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
   const candidates = make(new Uint32Array([0, OCTREE_SURFACE_STATE.core, 1, OCTREE_SURFACE_STATE.halo]), GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
-  const candidateControl = make(new Uint32Array([2, 1, 1, 1]), GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT);
+  const candidateControl = make(new Uint32Array([2, 1, 1, 1]), GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT);
   const publishedPhi = device.createTexture({
     size: [2, 1, 1], dimension: "3d", format: "r32float",
     usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC,
@@ -234,7 +241,7 @@ test("Dawn allocates, transports and redistances leaf-attached pages", {
       words[pages.plan.airHashOffsetWords + 2 * slot + 1],
     ] as const);
     assert.ok(airRecords.some(([key, encodedRow]) => key === 2 && encodedRow === 0xffff_ffff),
-      `the positive-x air cell keeps its exact packed key and incident core row: ${JSON.stringify(airRecords.filter(([key, row]) => key !== 0 || row !== 0))}`);
+      `the positive-x air cell keeps its exact linear key and incident core row: ${JSON.stringify(airRecords.filter(([key, row]) => key !== 0 || row !== 0))}`);
     const samples = floats.slice(pages.plan.phiAOffsetWords, pages.plan.phiAOffsetWords + 2 * pages.plan.samplesPerPage);
     assert.ok(Array.from(samples).every(Number.isFinite));
     assert.ok(Array.from(published).every(Number.isFinite));
@@ -249,12 +256,12 @@ test("Dawn allocates, transports and redistances leaf-attached pages", {
     assert.ok(Number.isFinite(diagnostics.correctionShiftCells));
     assert.ok(Math.abs(diagnostics.correctionShiftCells) <= 1.5);
 
-    const escapedLeafData = new ArrayBuffer(48), escapedLeafU32 = new Uint32Array(escapedLeafData), escapedLeafF32 = new Float32Array(escapedLeafData);
-    escapedLeafU32.set([0, 1, 0, 0], 0);
-    escapedLeafF32.set([-0.25, 1, 0, 0, 4, 0, 0, 4], 4);
+    const escapedLeafData = new ArrayBuffer(64), escapedLeafU32 = new Uint32Array(escapedLeafData), escapedLeafF32 = new Float32Array(escapedLeafData);
+    escapedLeafU32.set([0, 0, 0, 1, 0, 0, 0, 0], 0);
+    escapedLeafF32.set([-0.25, 1, 0, 0, 4, 0, 0, 4], 8);
     const escapedLeaves = make(new Uint8Array(escapedLeafData), GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     const escapedCandidates = make(new Uint32Array([0, OCTREE_SURFACE_STATE.core]), GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
-    const escapedControl = make(new Uint32Array([1, 1, 1, 1]), GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT);
+    const escapedControl = make(new Uint32Array([1, 1, 1, 1]), GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT);
     const escapedPages = new WebGPUOctreeSurfacePages(device, {
       leaves: escapedLeaves, candidates: { candidates: escapedCandidates, countAndDispatch: escapedControl },
     }, 1, [2, 1, 1], [1, 1, 1], { maximumPages: 1, maximumResidentFraction: 1, maximumSegments: 8 });
@@ -267,7 +274,8 @@ test("Dawn allocates, transports and redistances leaf-attached pages", {
     assert.equal(escapedDiagnostics.adapterCandidateRows, 1);
     assert.equal(escapedDiagnostics.adapterDispatchX, 1);
     assert.equal(escapedDiagnostics.departureOutsideResidentBand, 8);
-    assert.equal(escapedDiagnostics.overflowCode & (1 << 6), 1 << 6, "resident-band departure closes the page authority gate");
+    assert.equal(escapedDiagnostics.overflowCode & (1 << 6), 0,
+      "resident-band departure uses the sparse affine fallback without poisoning page authority");
     escapedPages.destroy();
 
     const overflowPages = new WebGPUOctreeSurfacePages(device, {

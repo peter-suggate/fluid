@@ -4,7 +4,9 @@ import { pathToFileURL } from "node:url";
 
 import {
   buildOctreeFaceTopologyTransfer,
+  decodeOctreeFaceKey,
   decodeOctreeFaceVelocityDiagnostics,
+  encodeOctreeFaceKey,
   OCTREE_FACE_TRANSPORT_CFL_BYTES,
   OCTREE_FACE_TRANSPORT_PARAMETER_BYTES,
   octreeFaceTransportShader,
@@ -78,6 +80,16 @@ test("topology transfer preserves exact faces, prolongs coarse values, and restr
   assert.equal(exact.records[0].sourceCount, 1);
 });
 
+test("canonical face keys retain origins beyond the legacy ten-bit axes", () => {
+  const origin = [65_537, 2_000_000, 0xffff_ff00] as const;
+  const words = encodeOctreeFaceKey(origin, 2 | (8 << 2));
+  assert.deepEqual(decodeOctreeFaceKey(words), { origin: [...origin], axisSpan: 34 });
+  const previous = [{ origin, axisSpan: 34, normalVelocity: 9 }];
+  const transfer = buildOctreeFaceTopologyTransfer(previous, previous);
+  assert.equal(transfer.velocities[0], 9);
+  assert.throws(() => buildOctreeFaceTopologyTransfer([...previous, ...previous], previous), /duplicate canonical/);
+});
+
 test("Dawn executes adaptive face advection, gravity, publication, and CFL", async (t) => {
   const runtime = process.env.WEBGPU_NODE_MODULE;
   if (!runtime) { t.skip("set WEBGPU_NODE_MODULE for GPU face-transport checks"); return; }
@@ -97,31 +109,31 @@ test("Dawn executes adaptive face advection, gravity, publication, and CFL", asy
   device.addEventListener("uncapturederror", (event: unknown) => errors.push((event as { error: { message: string } }).error.message));
   const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   const control = device.createBuffer({ size: 16, usage: storage });
-  const faces = device.createBuffer({ size: 4 * 24, usage: storage });
+  const faces = device.createBuffer({ size: 4 * 32, usage: storage });
   const incidence = device.createBuffer({ size: 49 * 4, usage: storage });
   const parity = device.createBuffer({ size: 16, usage: storage });
   device.queue.writeBuffer(control, 0, new Uint32Array([1, 0, 4, 1]));
-  const record = new ArrayBuffer(24);
+  const record = new ArrayBuffer(32);
   const recordU32 = new Uint32Array(record); const recordF32 = new Float32Array(record);
-  recordU32.set([0, 0xffffffff, 1 << 10, 1 | (1 << 2)]); // one interior free-surface y face, span one
-  recordF32[4] = 2; recordF32[5] = 1;
+  recordU32.set([0, 0xffffffff, 0, 1, 0, 1 | (1 << 2)]); // one interior free-surface y face, span one
+  recordF32[6] = 2; recordF32[7] = 1;
   device.queue.writeBuffer(faces, 0, record);
   const incidenceWords = new Uint32Array(25); incidenceWords[0] = 1; incidenceWords[1] = 0;
   device.queue.writeBuffer(incidence, 0, incidenceWords);
   const source: OctreeFaceMirrorSource = {
-    plan: { rowCapacity: 1, faceCapacity: 4, faceBytes: 96, incidenceBytes: 100, allocatedBytes: 228 },
+    plan: { rowCapacity: 1, faceCapacity: 4, faceBytes: 128, incidenceBytes: 100, allocatedBytes: 260 },
     control, faces, incidence, parity,
   };
   const transport = new WebGPUOctreeFaceTransport(device, source, [1, 1, 1]);
   const encoder = device.createCommandEncoder();
   transport.encode(encoder, { dt: 0.1, acceleration: [0, -10, 0], reseedFromMirror: true });
-  const faceReadback = device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const faceReadback = device.createBuffer({ size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const cflReadback = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  encoder.copyBufferToBuffer(faces, 0, faceReadback, 0, 24);
+  encoder.copyBufferToBuffer(faces, 0, faceReadback, 0, 32);
   encoder.copyBufferToBuffer(transport.cfl, 0, cflReadback, 0, 16);
   device.queue.submit([encoder.finish()]);
   await Promise.all([faceReadback.mapAsync(GPUMapMode.READ), cflReadback.mapAsync(GPUMapMode.READ)]);
-  const transported = new Float32Array(faceReadback.getMappedRange().slice(0))[4];
+  const transported = new Float32Array(faceReadback.getMappedRange().slice(0))[6];
   const cflBytes = cflReadback.getMappedRange().slice(0);
   const cfl = new Float32Array(cflBytes)[0];
   const cflWords = new Uint32Array(cflBytes);

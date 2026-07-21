@@ -226,7 +226,7 @@ export class WebGPUOctreeSolidFaces {
 }
 
 export const octreeSolidFaceShader = /* wgsl */ `
-struct FaceRecord { negativeRow:u32, positiveRow:u32, packedOrigin:u32, axisSpan:u32, normalVelocity:f32, area:f32 }
+struct FaceRecord { negativeRow:u32, positiveRow:u32, originX:u32, originY:u32, originZ:u32, axisSpan:u32, normalVelocity:f32, area:f32 }
 struct ApertureRecord { openFraction:f32, solidNormalVelocity:f32, dominantOwner:i32, sampleMask:u32 }
 struct RigidBody { positionShape:vec4f, dimensions:vec4f, orientation:vec4f, linearVelocity:vec4f, angularVelocity:vec4f, inverseMassInertia:vec4f, angularMomentumRestitution:vec4f, material:vec4f }
 struct Params { dimsMax:vec4u, cellRelax:vec4f, control:vec4u, solve:vec4f, container:vec4f, inflowPositionRadius:vec4f, inflowDirectionLength:vec4f, physical:vec4f, pressureCapacity:vec4u, hydrostatic:vec4f }
@@ -240,7 +240,6 @@ struct Params { dimsMax:vec4u, cellRelax:vec4f, control:vec4u, solve:vec4f, cont
 @group(0) @binding(6) var<storage,read_write> diagnostics:array<atomic<u32>>;
 @group(0) @binding(7) var<storage,read> pressure:array<f32>;
 const INVALID=0xffffffffu;const SAMPLE_AXIS=4u;const SAMPLE_COUNT=16u;const FIXED_SCALE=1000000.0;const MAX_FIXED=2000000000.0;
-fn unpackOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
 fn axisVector(axis:u32)->vec3f{return select(select(vec3f(0,0,1),vec3f(0,1,0),axis==1u),vec3f(1,0,0),axis==0u);}
 fn component(v:vec3f,axis:u32)->f32{return select(select(v.z,v.y,axis==1u),v.x,axis==0u);}
 fn qConjugate(q:vec4f)->vec4f{return vec4f(q.x,-q.yzw);}
@@ -252,7 +251,7 @@ fn bodySdf(body:RigidBody,world:vec3f)->f32{let p=localPoint(body,world);let d=b
   if(shape==2){let q=vec3f(p.x,p.y-clamp(p.y,-0.5*d.y,0.5*d.y),p.z);return length(q)-d.x;}
   let q=vec2f(length(p.xz)-d.x,abs(p.y)-0.5*d.y);return length(max(q,vec2f(0)))+min(max(q.x,q.y),0.0);
 }
-fn worldFaceSample(face:FaceRecord,sample:u32)->vec3f{let axis=face.axisSpan&3u;let span=f32(face.axisSpan>>2u);let origin=vec3f(unpackOrigin(face.packedOrigin));let a=f32(sample%SAMPLE_AXIS)+0.5;let b=f32(sample/SAMPLE_AXIS)+0.5;var grid=origin;grid[(axis+1u)%3u]+=span*a/f32(SAMPLE_AXIS);grid[(axis+2u)%3u]+=span*b/f32(SAMPLE_AXIS);let h=params.cellRelax.xyz;return vec3f(-0.5*params.container.x+grid.x*h.x,grid.y*h.y,-0.5*params.container.z+grid.z*h.z);}
+fn worldFaceSample(face:FaceRecord,sample:u32)->vec3f{let axis=face.axisSpan&3u;let span=f32(face.axisSpan>>2u);let origin=vec3f(f32(face.originX),f32(face.originY),f32(face.originZ));let a=f32(sample%SAMPLE_AXIS)+0.5;let b=f32(sample/SAMPLE_AXIS)+0.5;var grid=origin;grid[(axis+1u)%3u]+=span*a/f32(SAMPLE_AXIS);grid[(axis+2u)%3u]+=span*b/f32(SAMPLE_AXIS);let h=params.cellRelax.xyz;return vec3f(-0.5*params.container.x+grid.x*h.x,grid.y*h.y,-0.5*params.container.z+grid.z*h.z);}
 fn sampleOwner(world:vec3f)->i32{var best=3.402823e38;var owner=-1;for(var i=0u;i<min(params.control.w,12u);i+=1u){let distance=bodySdf(bodies[i],world);if(distance<best){best=distance;owner=i32(i);}}return select(-1,owner,best<0.0);}
 fn normalVelocity(owner:i32,world:vec3f,axis:u32)->f32{if(owner<0){return 0.0;}let body=bodies[u32(owner)];let velocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,world-body.positionShape.xyz);return component(velocity,axis);}
 fn faceValid(index:u32)->bool{if(faceControl[1]!=0u||faceControl[0]>faceControl[2]||params.control.w>12u){atomicOr(&diagnostics[0],1u);return false;}return index<faceControl[0]&&index<faceControl[2]&&index<arrayLength(&faces)&&index<arrayLength(&apertures);}

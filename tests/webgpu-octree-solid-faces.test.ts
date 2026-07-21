@@ -61,16 +61,16 @@ test("Dawn classifies an adaptive cut face and conserves its pressure reaction",
   device.addEventListener("uncapturederror", (event: unknown) => errors.push((event as { error: { message: string } }).error.message));
   const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   const control = device.createBuffer({ size: 16, usage: storage });
-  const faces = device.createBuffer({ size: 4 * 24, usage: storage });
+  const faces = device.createBuffer({ size: 4 * 32, usage: storage });
   const incidence = device.createBuffer({ size: 4, usage: storage });
   const parity = device.createBuffer({ size: 16, usage: storage });
   device.queue.writeBuffer(control, 0, new Uint32Array([1, 0, 4, 2]));
-  const face = new ArrayBuffer(24); const faceU32 = new Uint32Array(face); const faceF32 = new Float32Array(face);
-  faceU32.set([0, 1, 1, 2 << 2]); // x-normal face at x=1, covering a 2x2 fragment
-  faceF32[4] = 0; faceF32[5] = 4;
+  const face = new ArrayBuffer(32); const faceU32 = new Uint32Array(face); const faceF32 = new Float32Array(face);
+  faceU32.set([0, 1, 1, 0, 0, 2 << 2]); // x-normal face at x=1, covering a 2x2 fragment
+  faceF32[6] = 0; faceF32[7] = 4;
   device.queue.writeBuffer(faces, 0, face);
   const source: OctreeFaceMirrorSource = {
-    plan: { rowCapacity: 2, faceCapacity: 4, faceBytes: 96, incidenceBytes: 4, allocatedBytes: 132 },
+    plan: { rowCapacity: 2, faceCapacity: 4, faceBytes: 128, incidenceBytes: 4, allocatedBytes: 164 },
     control, faces, incidence, parity,
   };
   const bodies = device.createBuffer({ size: 12 * 128, usage: storage });
@@ -101,15 +101,19 @@ test("Dawn classifies an adaptive cut face and conserves its pressure reaction",
   const diagnosticReadback = device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const controlReadback = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const exchangeReadback = device.createBuffer({ size: 12 * 12 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  const faceReadback = device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const faceReadback = device.createBuffer({ size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   encoder.copyBufferToBuffer(solids.apertures, 0, apertureReadback, 0, solids.plan.apertureBytes);
   encoder.copyBufferToBuffer(solids.bodyImpulses, 0, impulseReadback, 0, solids.plan.impulseBytes);
   encoder.copyBufferToBuffer(solids.diagnostics, 0, diagnosticReadback, 0, 48);
   encoder.copyBufferToBuffer(control, 0, controlReadback, 0, 16);
   encoder.copyBufferToBuffer(rigidExchange, 0, exchangeReadback, 0, 12 * 12 * 4);
-  encoder.copyBufferToBuffer(faces, 0, faceReadback, 0, 24);
+  encoder.copyBufferToBuffer(faces, 0, faceReadback, 0, 32);
   device.queue.submit([encoder.finish()]);
-  await Promise.all([apertureReadback.mapAsync(GPUMapMode.READ), impulseReadback.mapAsync(GPUMapMode.READ), diagnosticReadback.mapAsync(GPUMapMode.READ), controlReadback.mapAsync(GPUMapMode.READ), exchangeReadback.mapAsync(GPUMapMode.READ), faceReadback.mapAsync(GPUMapMode.READ)]);
+  // Dawn/Metal has historically been fragile when mapping this many small
+  // buffers concurrently; sequential maps retain the same submitted snapshot.
+  for (const readback of [apertureReadback, impulseReadback, diagnosticReadback, controlReadback, exchangeReadback, faceReadback]) {
+    await readback.mapAsync(GPUMapMode.READ);
+  }
   const apertureBytes = apertureReadback.getMappedRange().slice(0); const apertureF32 = new Float32Array(apertureBytes); const apertureI32 = new Int32Array(apertureBytes);
   const diagnosticBytes = diagnosticReadback.getMappedRange().slice(0);
   const controlBytes = controlReadback.getMappedRange().slice(0);
@@ -125,7 +129,7 @@ test("Dawn classifies an adaptive cut face and conserves its pressure reaction",
   assert.equal(signedDiagnostics[4], 1_000_000); assert.equal(signedDiagnostics[7], -1_000_000);
   assert.equal(signedDiagnostics[4] + signedDiagnostics[7], 0);
   assert.equal(new Int32Array(exchangeReadback.getMappedRange())[0], 1_000_000);
-  assert.ok(Math.abs(new Float32Array(faceReadback.getMappedRange())[4] - 0.75) < 1e-6, "face flux must blend 75% fluid velocity with 25% solid velocity");
+  assert.ok(Math.abs(new Float32Array(faceReadback.getMappedRange())[6] - 0.75) < 1e-6, "face flux must blend 75% fluid velocity with 25% solid velocity");
   await device.queue.onSubmittedWorkDone();
   assert.deepEqual(errors, []);
   apertureReadback.unmap(); impulseReadback.unmap(); diagnosticReadback.unmap(); controlReadback.unmap(); exchangeReadback.unmap(); faceReadback.unmap();

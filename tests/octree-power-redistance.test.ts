@@ -7,7 +7,7 @@ import { sitesForSameOrFinerPowerDescriptor } from "../lib/octree-power-descript
 import { decodeGeneratedOctreePowerCatalog } from "../lib/generated/octree-power-catalog";
 import {
   OCTREE_POWER_REDISTANCE_CONTROL_BYTES,
-  OCTREE_POWER_REDISTANCE_VALID,
+  OCTREE_POWER_REDISTANCE_ERROR,
   WebGPUOctreePowerRedistance,
   octreePowerRedistanceShader,
   planOctreePowerRedistance,
@@ -41,8 +41,11 @@ test("coarse transition redistance exactly reconstructs a planar signed-distance
   const negative = redistanceOctreePowerCatalogCell(entry, vertexData, magnitudes, 1, -1);
   close(negative.signedDistance, -10, 1e-10);
   const sparse = magnitudes.map((value, index) => index === 0 ? value : undefined);
-  assert.equal(redistanceOctreePowerCatalogCell(entry, vertexData, sparse, 1, 1).mode, "nearest");
-  assert.throws(() => redistanceOctreePowerCatalogCell(entry, vertexData, sparse.map(() => undefined), 1, 1), /known neighbor/);
+  assert.throws(() => redistanceOctreePowerCatalogCell(entry, vertexData, sparse, 1, 1),
+    /no causal nonobtuse Delaunay simplex/,
+    "Section 4.2 redistance must not silently replace an unavailable causal tetrahedral update with a nearest value");
+  assert.throws(() => redistanceOctreePowerCatalogCell(entry, vertexData, sparse.map(() => undefined), 1, 1),
+    /no causal nonobtuse Delaunay simplex/);
 });
 
 test("coarse tetrahedral redistance is distinct from uniform fine-grid redistance", () => {
@@ -55,7 +58,7 @@ test("coarse tetrahedral redistance is distinct from uniform fine-grid redistanc
   assert.doesNotMatch(octreePowerRedistanceShader, /fine|page|brick/i);
 });
 
-test("Dawn matches the CPU tetrahedral update and counts nearest fallback", {
+test("Dawn matches the CPU tetrahedral update and fails closed without a causal simplex", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for GPU power-redistance checks",
 }, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as { create(options: string[]): GPU; globals: Record<string, unknown> };
@@ -94,10 +97,9 @@ test("Dawn matches the CPU tetrahedral update and counts nearest fallback", {
   encoder.copyBufferToBuffer(redistance.results, 0, readback, OCTREE_POWER_REDISTANCE_CONTROL_BYTES, redistance.plan.resultBytes);
   device.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ); const result = readback.getMappedRange().slice(0); readback.unmap();
   assert.deepEqual(unpackOctreePowerRedistanceControl(new Uint32Array(result, 0, 8)), {
-    flags: OCTREE_POWER_REDISTANCE_VALID, firstError: 0xffff_ffff, queryCount: 2, updatedCount: 2,
-    tetrahedronCount: 1, nearestFallbackCount: 1, reserved: 0, generation: 31,
+    flags: OCTREE_POWER_REDISTANCE_ERROR.noCausalSimplex, firstError: 1, queryCount: 2, updatedCount: 1,
+    tetrahedronCount: 1, nearestFallbackCount: 0, reserved: 0, generation: 31,
   });
   const distances = new Float32Array(result, OCTREE_POWER_REDISTANCE_CONTROL_BYTES, 2); close(distances[0], -10);
-  assert.ok(Number.isFinite(distances[1]) && distances[1] > 0);
   readback.destroy(); queries.destroy(); known.destroy(); redistance.destroy(); topology.destroy(); device.destroy();
 });

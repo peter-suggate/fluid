@@ -18,7 +18,7 @@ export const OCTREE_SURFACE_PAGE_RESOLUTION = 2 as const;
  * standalone transported band; dam-break cold start currently uses ~37%.
  */
 export const OCTREE_UNIFIED_SURFACE_RESIDENT_FRACTION = 0.40;
-export const OCTREE_SURFACE_LEAF_RECORD_BYTES = 48;
+export const OCTREE_SURFACE_LEAF_RECORD_BYTES = 64;
 export const OCTREE_SURFACE_CANDIDATE_BYTES = 8;
 export const OCTREE_SURFACE_CONTROL_WORDS = 16;
 export const OCTREE_SURFACE_MAX_BACKTRACE_SEGMENTS = 16;
@@ -94,7 +94,7 @@ export interface OctreeSurfaceCandidateSource {
 }
 
 export interface OctreeSurfacePageResources {
-  /** Array of 48-byte SurfaceLeaf records matching the WGSL ABI below. */
+  /** Array of 64-byte SurfaceLeaf records matching the full-width WGSL ABI below. */
   leaves: GPUBuffer;
   /** Previous compact-row generation, including the published spatial page slot in `pad`. */
   previousLeaves?: GPUBuffer;
@@ -635,7 +635,7 @@ export class WebGPUOctreeSurfacePages {
 }
 
 export const octreeSurfacePageShader = /* wgsl */ `
-struct SurfaceLeaf { packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f }
+struct SurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct Candidate { row:u32,flags:u32 }
 struct Params { shape:vec4u, offsets0:vec4u, offsets1:vec4u, offsets2:vec4u, cellDt:vec4f, spare0:vec4u, spare1:vec4u, spare2:vec4u }
 @group(0) @binding(0) var<storage,read_write> leaves:array<SurfaceLeaf>;
@@ -645,16 +645,19 @@ struct Params { shape:vec4u, offsets0:vec4u, offsets1:vec4u, offsets2:vec4u, cel
 @group(0) @binding(4) var<uniform> params:Params;
 @group(0) @binding(5) var<storage,read> previousLeaves:array<SurfaceLeaf>;
 const INVALID=0xffffffffu; const CLAIMED=0x80000000u; const RESIDENT=1u; const CORE=2u; const HALO=4u; const DESIRED=8u; const ACTIVATED=16u; const LIVE=32u; const DEPARTURE_OUTSIDE_BAND=64u;
-fn unpackOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
-fn packOrigin(p:vec3u)->u32{return p.x|(p.y<<10u)|(p.z<<20u);}
+fn leafOrigin(leaf:SurfaceLeaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
+// Exact identity in the existing u32-linear topology domain.  The coordinate
+// hash chooses a probe chain; this key distinguishes collisions without
+// truncating any axis to ten bits.  +1 reserves zero for an empty slot.
+fn airCellKey(p:vec3u)->u32{return p.x+params.spare1.x*(p.y+params.spare1.y*p.z)+1u;}
 fn pageTable(row:u32)->u32{return atomicLoad(&arena[params.offsets0.x+row]);}
 fn state(row:u32)->u32{return atomicLoad(&arena[params.offsets0.y+row]);}
 fn pageWord(offset:u32,slot:u32,local:u32)->u32{return offset+slot*params.shape.w+local;}
 fn loadPhi(offset:u32,slot:u32,local:u32)->f32{return bitcast<f32>(atomicLoad(&arena[pageWord(offset,slot,local)]));}
 fn storePhi(offset:u32,slot:u32,local:u32,value:f32){atomicStore(&arena[pageWord(offset,slot,local)],bitcast<u32>(value));}
 fn hashCoord(q:vec3u)->u32{var h=(q.x*73856093u)^(q.y*19349663u)^(q.z*83492791u);h^=h>>16u;return h;}
-fn leafContains(leaf:SurfaceLeaf,p:vec3f)->bool{let o=vec3f(unpackOrigin(leaf.packedOrigin));return all(p>=o)&&all(p<o+vec3f(f32(leaf.size)));}
-fn leafFallback(leaf:SurfaceLeaf,p:vec3f)->f32{let c=vec3f(unpackOrigin(leaf.packedOrigin))+vec3f(0.5*f32(leaf.size));let physicalGradient=leaf.phiGradient.yzw/max(params.cellDt.xyz,vec3f(1e-9));let boundedPhysical=physicalGradient/max(1.0,length(physicalGradient));let cellGradient=boundedPhysical*params.cellDt.xyz;return leaf.phiGradient.x+dot(cellGradient,p-c);}
+fn leafContains(leaf:SurfaceLeaf,p:vec3f)->bool{let o=vec3f(leafOrigin(leaf));return all(p>=o)&&all(p<o+vec3f(f32(leaf.size)));}
+fn leafFallback(leaf:SurfaceLeaf,p:vec3f)->f32{let c=vec3f(leafOrigin(leaf))+vec3f(0.5*f32(leaf.size));let physicalGradient=leaf.phiGradient.yzw/max(params.cellDt.xyz,vec3f(1e-9));let boundedPhysical=physicalGradient/max(1.0,length(physicalGradient));let cellGradient=boundedPhysical*params.cellDt.xyz;return leaf.phiGradient.x+dot(cellGradient,p-c);}
 fn localIndex(q:vec3u)->u32{return q.x+params.shape.z*(q.y+params.shape.z*q.z);}
 fn findLeafRow(p:vec3f,hintRow:u32)->u32{
   if(any(p<vec3f(0.0))||any(p>=vec3f(params.spare1.xyz))){return INVALID;}
@@ -672,7 +675,7 @@ fn findResidentRow(p:vec3f,fallbackRow:u32)->u32{let row=findLeafRow(p,fallbackR
 fn residentBandRow(p:vec3f,hintRow:u32)->u32{let row=findLeafRow(p,hintRow);if(row==INVALID||(state(row)&RESIDENT)==0u){return INVALID;}let slot=pageTable(row);return select(INVALID,row,slot<params.shape.y);}
 fn samplePage(row:u32,p:vec3f,offset:u32)->f32{
   let leaf=leaves[row];let slot=pageTable(row);if(slot==INVALID||slot>=params.shape.y||!leafContains(leaf,p)){return leafFallback(leaf,p);}
-  let origin=vec3f(unpackOrigin(leaf.packedOrigin));let grid=clamp((p-origin)/f32(leaf.size)*f32(params.shape.z)-vec3f(0.5),vec3f(0.0),vec3f(f32(params.shape.z-1u)));
+  let origin=vec3f(leafOrigin(leaf));let grid=clamp((p-origin)/f32(leaf.size)*f32(params.shape.z)-vec3f(0.5),vec3f(0.0),vec3f(f32(params.shape.z-1u)));
   let a=vec3u(floor(grid));let b=min(a+vec3u(1u),vec3u(params.shape.z-1u));let t=fract(grid);
   let c000=loadPhi(offset,slot,localIndex(a));let c100=loadPhi(offset,slot,localIndex(vec3u(b.x,a.y,a.z)));let c010=loadPhi(offset,slot,localIndex(vec3u(a.x,b.y,a.z)));let c110=loadPhi(offset,slot,localIndex(vec3u(b.x,b.y,a.z)));
   let c001=loadPhi(offset,slot,localIndex(vec3u(a.x,a.y,b.z)));let c101=loadPhi(offset,slot,localIndex(vec3u(b.x,a.y,b.z)));let c011=loadPhi(offset,slot,localIndex(vec3u(a.x,b.y,b.z)));let c111=loadPhi(offset,slot,localIndex(b));
@@ -681,14 +684,14 @@ fn samplePage(row:u32,p:vec3f,offset:u32)->f32{
 fn hierarchicalPhi(ownerRow:u32,p:vec3f,offset:u32)->f32{let row=findResidentRow(p,ownerRow);return samplePage(row,p,offset);}
 fn invocation(gid:vec3u)->vec3u{let stream=gid.x+gid.y*65535u*256u;let count=atomicLoad(&arena[params.offsets1.x]);if(stream>=count*params.shape.w){return vec3u(INVALID);}return vec3u(atomicLoad(&arena[params.offsets1.x+4u+stream/params.shape.w]),stream%params.shape.w,stream);}
 fn localCoord(local:u32)->vec3u{return vec3u(local%params.shape.z,(local/params.shape.z)%params.shape.z,local/(params.shape.z*params.shape.z));}
-fn samplePosition(row:u32,local:u32)->vec3f{let leaf=leaves[row];return vec3f(unpackOrigin(leaf.packedOrigin))+(vec3f(localCoord(local))+vec3f(0.5))*f32(leaf.size)/f32(params.shape.z);}
+fn samplePosition(row:u32,local:u32)->vec3f{let leaf=leaves[row];return vec3f(leafOrigin(leaf))+(vec3f(localCoord(local))+vec3f(0.5))*f32(leaf.size)/f32(params.shape.z);}
 fn activeRow(item:u32)->u32{let count=atomicLoad(&arena[params.offsets1.x]);if(item>=count){return INVALID;}return atomicLoad(&arena[params.offsets1.x+4u+item]);}
 fn centrePhi(row:u32)->f32{let slot=pageTable(row);if(slot==INVALID||slot>=params.shape.y){return 0.0;}let lo=params.shape.z/2u-1u;let hi=params.shape.z/2u;var value=0.0;for(var z=lo;z<=hi;z+=1u){for(var y=lo;y<=hi;y+=1u){for(var x=lo;x<=hi;x+=1u){value+=loadPhi(params.offsets1.z,slot,localIndex(vec3u(x,y,z)));}}}return value*0.125;}
 fn smoothVolume(value:f32)->f32{return clamp(0.5-value/max(1e-9,4.0*params.cellDt.y),0.0,1.0);}
 fn conservativeAdd(word:u32,value:u32){let old=atomicAdd(&arena[word],value);if(old>0xffffffffu-value){atomicOr(&arena[3],32u);}}
-fn previousPageRow(leaf:SurfaceLeaf)->u32{if(leaf.size==0u){return INVALID;}let q=unpackOrigin(leaf.packedOrigin)/leaf.size;let mask=params.offsets2.y-1u;var at=hashCoord(q)&mask;for(var probe=0u;probe<32u;probe+=1u){let encoded=atomicLoad(&arena[params.offsets1.y+at]);if(encoded==0u){break;}if(encoded!=INVALID){let oldRow=encoded-1u;if(oldRow<params.shape.x&&oldRow<arrayLength(&previousLeaves)){let oldLeaf=previousLeaves[oldRow];if(oldLeaf.packedOrigin==leaf.packedOrigin&&oldLeaf.size==leaf.size){return oldRow;}}}at=(at+1u)&mask;}return INVALID;}
+fn previousPageRow(leaf:SurfaceLeaf)->u32{if(leaf.size==0u){return INVALID;}let q=leafOrigin(leaf)/leaf.size;let mask=params.offsets2.y-1u;var at=hashCoord(q)&mask;for(var probe=0u;probe<32u;probe+=1u){let encoded=atomicLoad(&arena[params.offsets1.y+at]);if(encoded==0u){break;}if(encoded!=INVALID){let oldRow=encoded-1u;if(oldRow<params.shape.x&&oldRow<arrayLength(&previousLeaves)){let oldLeaf=previousLeaves[oldRow];if(all(leafOrigin(oldLeaf)==leafOrigin(leaf))&&oldLeaf.size==leaf.size){return oldRow;}}}at=(at+1u)&mask;}return INVALID;}
 fn claimPreviousPage(oldRow:u32,newRow:u32,slot:u32)->bool{for(var attempt=0u;attempt<16u;attempt+=1u){let result=atomicCompareExchangeWeak(&arena[params.offsets0.w+slot],oldRow,newRow|CLAIMED);if(result.exchanged){return true;}if(result.old_value!=oldRow){return false;}}return false;}
-@compute @workgroup_size(64) fn resetLeaves(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;if(row>=params.shape.x){return;}let current=leaves[row];atomicStore(&arena[params.offsets0.x+row],INVALID);atomicStore(&arena[params.offsets0.y+row],0u);if(current.size!=0u&&(current.flags&LIVE)!=0u){let oldRow=previousPageRow(current);if(oldRow!=INVALID){let slot=previousLeaves[oldRow].pad;if(slot<params.shape.y&&claimPreviousPage(oldRow,row,slot)){atomicStore(&arena[params.offsets0.x+row],slot);atomicStore(&arena[params.offsets0.y+row],RESIDENT);}}}if(row==0u){atomicStore(&arena[3],0u);atomicStore(&arena[4],0u);atomicStore(&arena[5],0u);atomicStore(&arena[6],0u);atomicStore(&arena[7],params.offsets2.z);atomicStore(&arena[8],0u);atomicStore(&arena[9],0u);atomicStore(&arena[10],0u);atomicStore(&arena[11],0u);atomicStore(&arena[12],candidateControl[0]);atomicStore(&arena[params.offsets1.x],0u);}}
+@compute @workgroup_size(64) fn resetLeaves(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;if(row>=params.shape.x){return;}let current=leaves[row];atomicStore(&arena[params.offsets0.x+row],INVALID);atomicStore(&arena[params.offsets0.y+row],0u);if(current.size!=0u&&(current.flags&LIVE)!=0u){let oldRow=previousPageRow(current);if(oldRow!=INVALID){let slot=previousLeaves[oldRow].pad0;if(slot<params.shape.y&&claimPreviousPage(oldRow,row,slot)){atomicStore(&arena[params.offsets0.x+row],slot);atomicStore(&arena[params.offsets0.y+row],RESIDENT);}}}if(row==0u){atomicStore(&arena[3],0u);atomicStore(&arena[4],0u);atomicStore(&arena[5],0u);atomicStore(&arena[6],0u);atomicStore(&arena[7],params.offsets2.z);atomicStore(&arena[8],0u);atomicStore(&arena[9],0u);atomicStore(&arena[10],0u);atomicStore(&arena[11],0u);atomicStore(&arena[12],candidateControl[0]);atomicStore(&arena[params.offsets1.x],0u);}}
 @compute @workgroup_size(64) fn markCandidates(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;if(i>=candidateControl[0]){return;}if(i>=arrayLength(&candidates)){atomicOr(&arena[3],1u);return;}let c=candidates[i];if(c.row>=params.shape.x){atomicOr(&arena[3],1u);return;}atomicOr(&arena[params.offsets0.y+c.row],DESIRED|(c.flags&(CORE|HALO)));}
 fn pushFree(slot:u32){let free=atomicAdd(&arena[0],1u);if(free<params.shape.y){atomicStore(&arena[params.offsets0.z+free],slot);atomicAdd(&arena[5],1u);}else{atomicOr(&arena[3],2u);}}
 fn releaseClaim(slot:u32,claimed:u32){for(var attempt=0u;attempt<16u;attempt+=1u){let result=atomicCompareExchangeWeak(&arena[params.offsets0.w+slot],claimed,claimed&~CLAIMED);if(result.exchanged||result.old_value!=claimed){return;}}atomicOr(&arena[3],2u);}
@@ -696,9 +699,9 @@ fn releaseClaim(slot:u32,claimed:u32){for(var attempt=0u;attempt<16u;attempt+=1u
 fn popFree()->u32{var slot=INVALID;loop{let count=atomicLoad(&arena[0]);if(count==0u){break;}let result=atomicCompareExchangeWeak(&arena[0],count,count-1u);if(result.exchanged){slot=atomicLoad(&arena[params.offsets0.z+count-1u]);break;}}return slot;}
 fn claimPage(row:u32)->bool{for(var attempt=0u;attempt<16u;attempt+=1u){let claimed=atomicCompareExchangeWeak(&arena[params.offsets0.x+row],INVALID,INVALID-1u);if(claimed.exchanged){return true;}if(claimed.old_value!=INVALID){return false;}}return false;}
 @compute @workgroup_size(64) fn allocatePages(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;if(i>=candidateControl[0]){return;}if(i>=arrayLength(&candidates)){atomicOr(&arena[3],1u);return;}let row=candidates[i].row;if(row>=params.shape.x||(state(row)&DESIRED)==0u||pageTable(row)!=INVALID||!claimPage(row)){return;}let slot=popFree();if(slot==INVALID){atomicStore(&arena[params.offsets0.x+row],INVALID);atomicOr(&arena[3],4u);return;}atomicStore(&arena[params.offsets0.x+row],slot);atomicStore(&arena[params.offsets0.w+slot],row);atomicOr(&arena[params.offsets0.y+row],RESIDENT|ACTIVATED);atomicAdd(&arena[4],1u);}
-fn insertHash(row:u32){let leaf=leaves[row];let q=unpackOrigin(leaf.packedOrigin)/max(1u,leaf.size);let mask=params.offsets2.y-1u;var slot=hashCoord(q)&mask;for(var probe=0u;probe<32u;probe+=1u){let result=atomicCompareExchangeWeak(&arena[params.offsets1.y+slot],0u,row+1u);if(result.exchanged||result.old_value==row+1u){return;}slot=(slot+1u)&mask;}atomicOr(&arena[3],16u);}
+fn insertHash(row:u32){let leaf=leaves[row];let q=leafOrigin(leaf)/max(1u,leaf.size);let mask=params.offsets2.y-1u;var slot=hashCoord(q)&mask;for(var probe=0u;probe<32u;probe+=1u){let result=atomicCompareExchangeWeak(&arena[params.offsets1.y+slot],0u,row+1u);if(result.exchanged||result.old_value==row+1u){return;}slot=(slot+1u)&mask;}atomicOr(&arena[3],16u);}
 fn insertAirAlias(p:vec3u,row:u32){
-  let mask=params.spare0.y-1u;var slot=hashCoord(p)&mask;let key=packOrigin(p)+1u;
+  let mask=params.spare0.y-1u;var slot=hashCoord(p)&mask;let key=airCellKey(p);
   // The exact cell key and complemented row form one compact cell -> incident
   // leaf record. atomicMax makes duplicate dilation deterministic: the
   // smallest incident row wins independently of invocation order.
@@ -708,7 +711,7 @@ fn insertAirAlias(p:vec3u,row:u32){
   // signed owner background remain authoritative when this bounded table is full.
 }
 fn publishAirAliases(row:u32){
-  let leaf=leaves[row];let o=unpackOrigin(leaf.packedOrigin);let d=vec3i(params.spare1.xyz);let radius=i32(params.spare0.z);
+  let leaf=leaves[row];let o=leafOrigin(leaf);let d=vec3i(params.spare1.xyz);let radius=i32(params.spare0.z);
   // An axis-connected dilation covers every bounded finite-difference and
   // backtrace neighbor without materializing a finest-resolution tile.
   for(var z=-radius;z<=radius;z+=1){for(var y=-radius;y<=radius;y+=1){for(var x=-radius;x<=radius;x+=1){
@@ -717,7 +720,7 @@ fn publishAirAliases(row:u32){
     let point=vec3f(q)+vec3f(0.5);if(leafFallback(leaf,point)>=0.0){insertAirAlias(vec3u(q),row);}
   }}}
 }
-@compute @workgroup_size(64) fn publishPages(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;if(row>=params.shape.x){return;}let leaf=leaves[row];let s=state(row);leaves[row].pad=INVALID;if(((leaf.flags&LIVE)==0u&&(s&DESIRED)==0u)||leaf.size==0u){return;}insertHash(row);if((s&RESIDENT)==0u){return;}let slot=pageTable(row);if(slot>=params.shape.y){return;}leaves[row].pad=slot;if(leaf.size==1u){atomicAdd(&arena[8],1u);}else{atomicAdd(&arena[9],1u);}atomicMax(&arena[10],leaf.size);if(leaf.size==1u&&(s&CORE)!=0u){publishAirAliases(row);}let out=atomicAdd(&arena[params.offsets1.x],1u);if(out>=params.shape.y){atomicOr(&arena[3],8u);return;}atomicStore(&arena[params.offsets1.x+4u+out],row);}
+@compute @workgroup_size(64) fn publishPages(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;if(row>=params.shape.x){return;}let leaf=leaves[row];let s=state(row);leaves[row].pad0=INVALID;if(((leaf.flags&LIVE)==0u&&(s&DESIRED)==0u)||leaf.size==0u){return;}insertHash(row);if((s&RESIDENT)==0u){return;}let slot=pageTable(row);if(slot>=params.shape.y){return;}leaves[row].pad0=slot;if(leaf.size==1u){atomicAdd(&arena[8],1u);}else{atomicAdd(&arena[9],1u);}atomicMax(&arena[10],leaf.size);if(leaf.size==1u&&(s&CORE)!=0u){publishAirAliases(row);}let out=atomicAdd(&arena[params.offsets1.x],1u);if(out>=params.shape.y){atomicOr(&arena[3],8u);return;}atomicStore(&arena[params.offsets1.x+4u+out],row);}
 @compute @workgroup_size(1) fn prepareDispatch(){let count=min(atomicLoad(&arena[params.offsets1.x]),params.shape.y);let groups=max(1u,(count*params.shape.w+255u)/256u);atomicStore(&arena[1],count);atomicStore(&arena[6],count);atomicMax(&arena[2],count);atomicStore(&arena[params.offsets1.x+1u],min(65535u,groups));atomicStore(&arena[params.offsets1.x+2u],max(1u,(groups+65534u)/65535u));atomicStore(&arena[params.offsets1.x+3u],1u);}
 @compute @workgroup_size(256) fn initializeActivatedPages(@builtin(global_invocation_id) gid:vec3u){let item=invocation(gid);if(item.x==INVALID||atomicLoad(&arena[3])!=0u||(state(item.x)&ACTIVATED)==0u){return;}let p=samplePosition(item.x,item.y);storePhi(params.offsets1.z,pageTable(item.x),item.y,leafFallback(leaves[item.x],p));}
 @compute @workgroup_size(64) fn reduceReferenceVolume(@builtin(global_invocation_id) gid:vec3u){let row=activeRow(gid.x);if(row==INVALID||atomicLoad(&arena[3])!=0u){return;}conservativeAdd(13u,u32(round(smoothVolume(centrePhi(row))*4096.0)));}
@@ -756,14 +759,13 @@ fn redistance(row:u32,local:u32,inputOffset:u32)->f32{let p=samplePosition(row,l
 `;
 
 export const octreeSurfaceDensePublicationShader = /* wgsl */ `
-struct SurfaceLeaf { packedOrigin:u32,size:u32,flags:u32,pad:u32,phiGradient:vec4f,motion:vec4f }
+struct SurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct Params { shape:vec4u, offsets0:vec4u, offsets1:vec4u, offsets2:vec4u, cellDt:vec4f, spare0:vec4u, spare1:vec4u, spare2:vec4u }
 @group(0) @binding(0) var<storage,read> leaves:array<SurfaceLeaf>;
 @group(0) @binding(1) var<storage,read> arena:array<u32>;
 @group(0) @binding(2) var<uniform> params:Params;
 @group(0) @binding(3) var densePhi:texture_storage_3d<r32float,write>;
 const INVALID=0xffffffffu;
-fn unpackOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
 fn pageWord(slot:u32,local:u32)->u32{return params.offsets1.z+slot*params.shape.w+local;}
 fn phi(slot:u32,q:vec3u)->f32{let local=q.x+params.shape.z*(q.y+params.shape.z*q.z);return bitcast<f32>(arena[pageWord(slot,local)]);}
 @compute @workgroup_size(64) fn publishDensePhi(@builtin(global_invocation_id) gid:vec3u){
@@ -773,6 +775,6 @@ fn phi(slot:u32,q:vec3u)->f32{let local=q.x+params.shape.z*(q.y+params.shape.z*q
   // average of the central 2^3 samples. Runtime pages select finest (size-one)
   // interface leaves, so publication updates exactly one topology cell.
   let lo=params.shape.z/2u-1u;let hi=params.shape.z/2u;var value=0.0;for(var z=lo;z<=hi;z+=1u){for(var y=lo;y<=hi;y+=1u){for(var x=lo;x<=hi;x+=1u){value+=phi(slot,vec3u(x,y,z));}}}
-  let origin=unpackOrigin(leaves[row].packedOrigin);textureStore(densePhi,origin,vec4f(value*0.125,0,0,0));
+  let leaf=leaves[row];let origin=vec3u(leaf.originX,leaf.originY,leaf.originZ);textureStore(densePhi,origin,vec4f(value*0.125,0,0,0));
 }
 `;
