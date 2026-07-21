@@ -249,6 +249,17 @@ export function globalFineSurfaceDispatch(pageCapacity: number, samplesPerBrick:
   return [x, y, 1] as const;
 }
 
+/** One cooperative workgroup per compact coarse-phi hash entry. */
+export function globalFineCoarseSurfaceDispatch(hashCapacity: number): readonly [number, number, number] {
+  if (!Number.isSafeInteger(hashCapacity) || hashCapacity < 1) {
+    throw new RangeError("Global coarse extraction capacity must be a positive integer");
+  }
+  const x = Math.min(65_535, hashCapacity);
+  const y = Math.ceil(hashCapacity / 65_535);
+  if (y > 65_535) throw new RangeError("Global coarse extraction exceeds the WebGPU dispatch limit");
+  return [x, y, 1] as const;
+}
+
 export const surfaceExtractionShader = /* wgsl */ `
 struct Uniforms {
   viewport: vec4f,
@@ -1662,7 +1673,7 @@ export class RasterWaterPipeline {
         compute.setBindGroup(0, this.globalExtractBindGroup);
         compute.setPipeline(this.extractGlobalFinePipeline);
         compute.dispatchWorkgroups(...globalFineSurfaceDispatch(globalFine.pageCapacity, globalFine.samplesPerBrick));
-        if(globalFine.coarsePhiHashCapacity){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(Math.ceil(globalFine.coarsePhiHashCapacity/256));}
+        if(globalFine.coarsePhiHashCapacity){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(...globalFineCoarseSurfaceDispatch(globalFine.coarsePhiHashCapacity));}
         compute.setBindGroup(0,this.globalPolygoniseBindGroup);
         compute.setPipeline(this.polygoniseGlobalFineScanPipeline);compute.dispatchWorkgroups(1);
         compute.setPipeline(this.polygoniseGlobalFineEmitPipeline);compute.dispatchWorkgroups(this.globalFineEmitWorkgroups,6);

@@ -84,6 +84,12 @@ test("projection derives compact owner capacity and keeps overflow on the canoni
     "missing physical pages retain the deterministic coarse-owner lookup");
 });
 
+test("adaptive owner-page claims retry weak CAS at the same hash slot", () => {
+  assert.match(projectionSource,
+    /var expected = observed;[\s\S]*retry < 16u[\s\S]*atomicCompareExchangeWeak\(&owners\[keyWord\], expected, key\)[\s\S]*expected = claim\.old_value[\s\S]*expected != observed/,
+    "a spurious weak-CAS failure must not advance to another slot for the same logical owner page");
+});
+
 test("packed owner words round-trip every leaf size and max-32 owners across brick seams", () => {
   const sizes: OctreeOwnerLeafSize[] = [1, 2, 4, 8, 16, 32];
   for (const size of sizes) {

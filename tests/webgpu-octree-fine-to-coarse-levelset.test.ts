@@ -21,6 +21,16 @@ test("fine-to-coarse restriction rejects an unpublished or stale fine source", (
     "the prepare pass must bind the fine worklist and topology transaction it validates");
 });
 
+test("resident fine-band samples may lead the compact liquid-row set", () => {
+  const rowAndSample = fineToCoarseLevelSetWGSL.match(/fn rowAndSample[\s\S]*?return vec2u\(r,s\.logical\);}/)?.[0] ?? "";
+  assert.match(rowAndSample, /atomicAdd\(&control\.unowned,1u\)/,
+    "unowned fine samples remain observable");
+  assert.match(rowAndSample, /maximumUnownedLiquidMagnitude/,
+    "advancing non-positive misses retain a magnitude diagnostic");
+  assert.doesNotMatch(rowAndSample, /atomicOr\(&control\.flags,UNOWNED\)/,
+    "a resident fine sample does not require a compact pressure-row fallback");
+});
+
 test("Dawn builds deterministic O(rows) factor-4/factor-8 aggregates and preserves zero crossings", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE",
 }, async () => {

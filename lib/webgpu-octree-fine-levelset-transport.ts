@@ -9,7 +9,7 @@ import type {
 } from "./webgpu-octree-face-fast-march";
 import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
 
-export const FINE_LEVELSET_TRANSPORT_CONTROL_BYTES = 32;
+export const FINE_LEVELSET_TRANSPORT_CONTROL_BYTES = 64;
 
 export interface FineLevelSetGPUTransportControl {
   departureOutsideBand: number;
@@ -20,6 +20,12 @@ export interface FineLevelSetGPUTransportControl {
   maximumDisplacementFineCells: number;
   faceBandUnavailable: number;
   velocityUnavailable: number;
+  invalidVelocityStatus?: number;
+  nonpositiveVelocityResult?: number;
+  velocityStatusReasonOr?: number;
+  firstInvalidVelocityStatus?: number;
+  firstInvalidVelocityLocalIndex?: number;
+  firstInvalidVelocityPosition?: readonly [number, number, number];
 }
 
 export type FineLevelSetGPUBoundaryPolicy = "strict" | "closed-neumann";
@@ -112,7 +118,15 @@ export function unpackFineLevelSetGPUTransportControl(words: ArrayLike<number>):
   return { departureOutsideBand: Number(words[0]) >>> 0, nonfiniteVelocity: Number(words[1]) >>> 0,
     processed: Number(words[2]) >>> 0, committed: Number(words[3]) !== 0,
     extrapolatedVelocity: Number(words[4]) >>> 0, maximumDisplacementFineCells: Number(words[5]) >>> 0,
-    faceBandUnavailable: Number(words[6]) >>> 0, velocityUnavailable: Number(words[7]) >>> 0 };
+    faceBandUnavailable: Number(words[6]) >>> 0, velocityUnavailable: Number(words[7]) >>> 0,
+    ...(words.length >= 12 ? { invalidVelocityStatus: Number(words[8]) >>> 0,
+      nonpositiveVelocityResult: Number(words[9]) >>> 0,
+      velocityStatusReasonOr: Number(words[10]) >>> 0,
+      firstInvalidVelocityStatus: Number(words[11]) >>> 0 } : {}),
+    ...(words.length >= 16 ? { firstInvalidVelocityLocalIndex: Number(words[12]) >>> 0,
+      firstInvalidVelocityPosition: [new Float32Array(new Uint32Array([Number(words[13]) >>> 0]).buffer)[0],
+        new Float32Array(new Uint32Array([Number(words[14]) >>> 0]).buffer)[0],
+        new Float32Array(new Uint32Array([Number(words[15]) >>> 0]).buffer)[0]] as const } : {}) };
 }
 
 /**
@@ -139,9 +153,9 @@ export class WebGPUFineLevelSetTransport {
     private readonly device: GPUDevice,
     readonly source: WebGPUFineLevelSetBrickSource,
     private readonly velocityPrepass: Pick<WebGPUOctreePowerVelocityPrepass, "encodeFromPositions" | "source">,
-    /** Paper Section 5 air-band velocity authority. Stage-B remains the
-     * interpolation path inside liquid; positive-air samples are replaced by
-     * velocities fast-marched over regular octree faces. */
+    /** Paper Section 5 face-band velocity authority. Stage B remains the
+     * primary liquid interpolant; positive-air samples and exact local-catalog
+     * coverage misses are completed from fast-marched regular octree faces. */
     private readonly faceBand?: Pick<WebGPUOctreeFaceFastMarch, "encodeAirSamples">,
   ) {
     this.queryCapacity = source.plan.maximumResidentBricks * source.plan.samplesPerBrick;
@@ -200,7 +214,8 @@ export class WebGPUFineLevelSetTransport {
     }
     this.device.queue.writeBuffer(this.chunkParameters, 0, this.chunkParameterWords);
     this.device.queue.writeBuffer(this.source.params, 76, new Float32Array([options.timestep]));
-    this.device.queue.writeBuffer(this.control, 0, new Uint32Array(8));
+    const resetControl = new Uint32Array(16); resetControl[11] = 0xffff_ffff; resetControl[12] = 0xffff_ffff;
+    this.device.queue.writeBuffer(this.control, 0, resetControl);
     const binding = (buffer: GPUBuffer): GPUBufferBinding => ({ buffer });
     const run = (pipeline: GPUComputePipeline, entries: readonly GPUBindGroupEntry[], label: string,
       workgroups = Math.ceil(this.positionCapacity / 64), tiled = false) => {
@@ -283,7 +298,7 @@ const INVALID:u32=0xffffffffu;const VALID:u32=1u;const VELOCITY_VALID:u32=0x8000
 struct Params{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
  domainOrigin:vec3f,fineCellWidth:f32,hashCapacity:u32,maximumHashProbes:u32,pageCapacity:u32,generation:u32,
  activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32}
-struct Control{departureOutsideBand:atomic<u32>,nonfiniteVelocity:atomic<u32>,processed:atomic<u32>,committed:atomic<u32>,extrapolatedVelocity:atomic<u32>,maximumDisplacementFineCells:atomic<u32>,faceBandUnavailable:atomic<u32>,velocityUnavailable:atomic<u32>}
+struct Control{departureOutsideBand:atomic<u32>,nonfiniteVelocity:atomic<u32>,processed:atomic<u32>,committed:atomic<u32>,extrapolatedVelocity:atomic<u32>,maximumDisplacementFineCells:atomic<u32>,faceBandUnavailable:atomic<u32>,velocityUnavailable:atomic<u32>,invalidVelocityStatus:atomic<u32>,nonpositiveVelocityResult:atomic<u32>,velocityStatusReasonOr:atomic<u32>,firstInvalidVelocityStatus:atomic<u32>,firstInvalidVelocityLocalIndex:atomic<u32>,firstInvalidVelocityX:atomic<u32>,firstInvalidVelocityY:atomic<u32>,firstInvalidVelocityZ:atomic<u32>}
 struct Chunk{base:u32,transportBandDistance:f32,closedDomainBoundary:u32}
 @group(0)@binding(0)var<uniform>params:Params;@group(0)@binding(1)var<storage,read>pageHash:array<u32>;
 @group(0)@binding(2)var<storage,read>metadata:array<u32>;@group(0)@binding(3)var<storage,read>worklist:array<u32>;
@@ -314,7 +329,7 @@ fn trilinear(x:vec3f)->vec2f{let raw=(x-params.domainOrigin)/params.fineCellWidt
  if(abs(phi[index])>=chunk.transportBandDistance){return;}
  let brick=unpackBrick(metadata[a.x*10u+1u]);let q=brick*params.brickResolution+localCoord(a.y);positions[local]=vec4f(params.domainOrigin+(vec3f(q)+.5)*params.fineCellWidth,1);}
 @compute @workgroup_size(64)fn advanceFineTrajectories(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=arrayLength(&positions)||positions[i].w<=0.){return;}
- if(i>=arrayLength(&velocities)||i>=arrayLength(&velocityStatus)){atomicAdd(&control.velocityUnavailable,1u);positions[i].w=0.;return;}let status=velocityStatus[i];if((status&0x08000000u)!=0u){atomicAdd(&control.faceBandUnavailable,1u);}if((status&VELOCITY_VALID)==0u||velocities[i].w<=0.){atomicAdd(&control.velocityUnavailable,1u);positions[i].w=0.;return;}if(!finite3(velocities[i].xyz)){atomicAdd(&control.nonfiniteVelocity,1u);positions[i].w=0.;return;}
+ if(i>=arrayLength(&velocities)||i>=arrayLength(&velocityStatus)){atomicAdd(&control.velocityUnavailable,1u);positions[i].w=0.;return;}let status=velocityStatus[i];if((status&0x08000000u)!=0u){atomicAdd(&control.faceBandUnavailable,1u);}if((status&VELOCITY_VALID)==0u){atomicAdd(&control.invalidVelocityStatus,1u);atomicOr(&control.velocityStatusReasonOr,status);let claim=atomicCompareExchangeWeak(&control.firstInvalidVelocityLocalIndex,INVALID,i);if(claim.exchanged){atomicStore(&control.firstInvalidVelocityStatus,status);atomicStore(&control.firstInvalidVelocityX,bitcast<u32>(positions[i].x));atomicStore(&control.firstInvalidVelocityY,bitcast<u32>(positions[i].y));atomicStore(&control.firstInvalidVelocityZ,bitcast<u32>(positions[i].z));}atomicAdd(&control.velocityUnavailable,1u);positions[i].w=0.;return;}if(velocities[i].w<=0.){atomicAdd(&control.nonpositiveVelocityResult,1u);atomicAdd(&control.velocityUnavailable,1u);positions[i].w=0.;return;}if(!finite3(velocities[i].xyz)){atomicAdd(&control.nonfiniteVelocity,1u);positions[i].w=0.;return;}
  if((velocityStatus[i]&0x10000000u)!=0u){atomicAdd(&control.extrapolatedVelocity,1u);}
  let next=positions[i].xyz-(params.timestep/f32(params.fineFactor))*velocities[i].xyz;if(!finite3(next)){atomicAdd(&control.nonfiniteVelocity,1u);positions[i].w=0.;return;}positions[i]=vec4f(next,1);}
 @compute @workgroup_size(64)fn sampleFineDepartures(@builtin(global_invocation_id)g:vec3u){let local=g.x;if(local>=arrayLength(&positions)||positions[local].w<=0.){return;}let flat=chunk.base+local;let a=activeSample(flat);if(a.x==INVALID){return;}let brick=unpackBrick(metadata[a.x*10u+1u]);let q=brick*params.brickResolution+localCoord(a.y);let origin=params.domainOrigin+(vec3f(q)+.5)*params.fineCellWidth;let displacement=u32(ceil(length(positions[local].xyz-origin)/params.fineCellWidth));atomicMax(&control.maximumDisplacementFineCells,displacement);let value=trilinear(positions[local].xyz);if(value.y==0.){atomicAdd(&control.departureOutsideBand,1u);return;}workA[a.x*params.samplesPerBrick+a.y]=value.x;atomicAdd(&control.processed,1u);}

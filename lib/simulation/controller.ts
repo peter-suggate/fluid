@@ -264,6 +264,7 @@ class SimulationController {
 
   loadPreset(presetId: string) {
     const preset = getScenePreset(presetId);
+    if (preset.methodProfile) useMethodStore.getState().applyProfile(preset.methodProfile);
     const scene = preset.create();
     this.reset(scene, preset.id);
     useUIStore.getState().setCamera(cameraForPreset(preset));

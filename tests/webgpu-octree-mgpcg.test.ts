@@ -67,9 +67,21 @@ test("matrix-free aggregate PCG uses additive transfers and GPU-only convergence
   assert.match(octreeMGPCGShader, /value-=e\.coefficient\*fieldValue/);
   assert.match(octreeMGPCGShader, /restrictResidual/);
   assert.match(octreeMGPCGShader, /prolongateCorrection/);
-  assert.match(octreeMGPCGShader, /r\*preconditioned\[row\]/);
+  assert.match(octreeMGPCGShader, /residual\[row\]\*preconditioned\[row\]/);
   assert.match(octreeMGPCGShader, /atomicStore\(&control\[1\],1u\)/);
+  assert.match(octreeMGPCGShader, /fn reduceUpdatedResidual/);
+  const encodeSource = WebGPUOctreeMGPCG.prototype.encode.toString();
+  const update = encodeSource.indexOf("rows(this.stages.update)");
+  const residualGate = encodeSource.indexOf("single(this.stages.updatedResidualReduction)", update);
+  const nextPreconditioner = encodeSource.indexOf("this.applyPreconditioner", update);
+  assert.ok(update >= 0 && update < residualGate && residualGate < nextPreconditioner,
+    "PCG must test the updated residual before another preconditioner application");
+  assert.equal(octreeMGPCGShader.match(/atomicAdd\(&control\[2\],1u\)/g)?.length, 1,
+    "an immediately converged pressure update must still count as one iteration");
   assert.doesNotMatch(WebGPUOctreeProjection.prototype.encode.toString(), /mapAsync|getMappedRange/);
+  assert.match(octreeMGPCGShader,
+    /var observed=atomicLoad\(&hierarchy\[at\]\);[\s\S]*retry<16u[\s\S]*observed=claim\.old_value/,
+    "the rollback aggregate hierarchy must retry a spurious weak-CAS failure at the same slot");
 });
 
 test("aggregate preconditioner is not mislabeled as the paper Section 4.3 hybrid V-cycle", () => {

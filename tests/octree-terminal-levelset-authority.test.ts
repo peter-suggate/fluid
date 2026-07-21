@@ -49,15 +49,18 @@ test("production surface recurrence advects, redistances, and fine-corrects comp
     "the compact-coarse publication epoch must come from the fine source it restricts, not an optimistic host counter");
 
   const schedule = compact(WebGPUOctreePowerCoarseLevelSet.prototype.encode);
+  const migrate = schedule.indexOf('dispatch("migrate"');
   const prepare = schedule.indexOf('dispatch("prepare",1)');
+  const clear = schedule.indexOf('dispatch("clearSamples"');
   const advect = schedule.indexOf('dispatch("advect"');
   const redistance = schedule.indexOf('dispatch("redistance"');
   const validate = schedule.indexOf('dispatch("validateFine"');
   const publish = schedule.indexOf('dispatch("publish"');
   const finalize = schedule.indexOf('dispatch("finalize",1)');
-  assert.ok(prepare >= 0 && prepare < advect && advect < redistance && redistance < validate
+  assert.ok(migrate >= 0 && migrate < prepare && prepare < clear && clear < advect
+    && advect < redistance && redistance < validate
     && validate < publish && publish < finalize,
-  "coarse evolution must remain prepare -> advect -> redistance -> validate fine -> publish -> finalize");
+  "coarse evolution must remain spatial migrate -> prepare/clear -> advect -> redistance -> validate fine -> publish -> finalize");
 });
 
 test("production substep keeps topology, pressure/power projection, and fine surface recurrence in one command stream", () => {
@@ -123,7 +126,7 @@ test("global-fine QA diagnostics read the published GPU controls without steerin
     "face-band rejection telemetry must retain the catalog-Delaunay gate preceding face emission");
   assert.match(diagnostics, /redistance\.control,0,readback,720,48/,
     "redistance rejection telemetry must retain its complete twelve-word control");
-  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:800/,
+  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:864/,
     "the compact evidence packet accounts for the final controls and bounded transition failure payload");
   assert.match(diagnostics, /this\.globalFineFaceFastMarch\.pointFieldControl,0,readback,560,32/,
     "final cell-centre LS failures must be attributable independently of graph construction");

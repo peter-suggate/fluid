@@ -33,6 +33,13 @@ import type { OctreeTechniqueDebugSource } from "../octree-technique-debug";
 export type MethodParamValue = number | string | boolean;
 export type MethodParamValues = Record<string, MethodParamValue>;
 
+/** An authored, reproducible solver configuration attached to validation scenes. */
+export interface MethodProfile {
+  methodId: string;
+  quality: GPUQuality;
+  overrides: MethodParamValues;
+}
+
 interface ParamBase {
   key: string;
   label: string;
@@ -109,6 +116,7 @@ export interface GPUSolverInstance {
   /** Diagnostic-only Stage-B point-sampler transaction used by fine transport. */
   readonly globalFinePowerVelocitySampleControl?: GPUBuffer;
   readonly globalFineCoarseLevelSetControl?: GPUBuffer;
+  readonly globalFineRestrictionControl?: GPUBuffer;
   /** Diagnostic-only Section 5 regular-face extrapolation header and exact capacity plan. */
   readonly globalFineFaceBandControl?: GPUBuffer;
   /** Diagnostic-only catalog-Delaunay transition gate preceding regular-face emission. */

@@ -8,6 +8,7 @@ import { useSceneStore } from "../lib/stores/scene-store";
 import { useDiagnosticsStore } from "../lib/stores/diagnostics-store";
 import type { GPUEulerianInfo } from "../lib/webgpu-eulerian";
 import { useMethodStore } from "../lib/stores/method-store";
+import { resolvedMethodValues } from "../lib/stores/method-store";
 
 test("adding a rigid body does not pause a running simulation", () => {
   const originalScene = cloneScene(useSceneStore.getState().scene);
@@ -152,4 +153,36 @@ test("safe browser bring-up admits one step and rejects continuous running", (t)
   simulation.tick(1_100);
   assert.equal(useRuntimeStore.getState().runState, "paused");
   assert.equal(simulation.time(), 0.004, "continuous scheduling must remain disabled in safe mode");
+});
+
+test("loading the minimal power dam applies its reproducible Dawn solver profile", () => {
+  const originalScene = cloneScene(useSceneStore.getState().scene);
+  const originalRunState = useRuntimeStore.getState().runState;
+  const originalMethod = useMethodStore.getState();
+  try {
+    originalMethod.setMethodId("octree");
+    originalMethod.setQuality("ultra");
+    originalMethod.setParam("octree", "maximumLeafSize", "16");
+    originalMethod.setParam("octree", "powerDiagramProjection", "off");
+
+    simulation.loadPreset("minimal-power-dam-break");
+
+    const method = useMethodStore.getState();
+    const values = resolvedMethodValues(method);
+    assert.equal(method.methodId, "octree");
+    assert.equal(method.quality, "balanced");
+    assert.equal(values.maximumLeafSize, "2");
+    assert.equal(values.interfaceRefinementBandCells, 3);
+    assert.equal(values.faceVelocityTransport, "on");
+    assert.equal(values.globalFineLevelSetFactor, "4");
+    assert.equal(values.powerDiagramProjection, "authoritative");
+  } finally {
+    useMethodStore.setState({
+      methodId: originalMethod.methodId,
+      quality: originalMethod.quality,
+      overrides: originalMethod.overrides,
+    });
+    simulation.reset(originalScene);
+    useRuntimeStore.getState().setRunState(originalRunState);
+  }
 });

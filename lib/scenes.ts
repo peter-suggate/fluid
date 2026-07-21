@@ -3,6 +3,7 @@ import { createPaperScenario } from "./paper-scenarios";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import { terrainHeightAt } from "./terrain";
 import type { EnvironmentId } from "./environments";
+import type { MethodProfile } from "./methods";
 
 export interface ScenePreset {
   id: string;
@@ -11,9 +12,23 @@ export interface ScenePreset {
   description: string;
   create(): SceneDescription;
   camera?: Partial<CameraState>;
+  /** Exact solver profile required for a numerical comparison/validation preset. */
+  methodProfile?: MethodProfile;
   /** Art-directed background that is part of this preset's presentation. */
   background: EnvironmentId;
 }
+
+export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
+  methodId: "octree",
+  quality: "balanced",
+  overrides: Object.freeze({
+    maximumLeafSize: "2",
+    interfaceRefinementBandCells: 3,
+    faceVelocityTransport: "on",
+    globalFineLevelSetFactor: "4",
+    powerDiagramProjection: "authoritative",
+  }),
+});
 
 /** World-space centre of the single seeded 8-cubed fluid brick (the -x/-z quadrant). */
 export const BRICK_QUAD_DAM_SEED_M = { x: -0.2, y: 0.2, z: -0.2 };
@@ -42,6 +57,68 @@ export function createTinyHydrostaticScene(): SceneDescription {
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  return scene;
+}
+
+/**
+ * A larger hydrostatic oracle with an intentionally cell-cut free surface.
+ * Its 32x24x16 lattice is deep enough for a materially larger unit/two-cell
+ * pressure layout while remaining small enough for an isolated Dawn smoke.
+ */
+export function createLargeHydrostaticScene(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = "large-hydrostatic-offset";
+  scene.duration_s = 0.1;
+  scene.rigidBodies = [];
+  scene.container = {
+    ...scene.container,
+    width_m: 1.6,
+    height_m: 1.2,
+    depth_m: 0.8,
+    // 61/96 of 1.2 m = 0.7625 m = 15.25 cells at h = 0.05 m.
+    fillFraction: 61 / 96,
+    top: "open",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "tank-fill";
+  scene.fluid.surfaceTension_N_m = 0;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  return scene;
+}
+
+/**
+ * A minimal three-dimensional analytic dam break on the 16-cubed paper path.
+ * A 23/64-domain reservoir has an exact ten-cell footprint: the smallest
+ * clean rational fill that leaves a two-cell liquid interior after the
+ * four-cell interface refinement band.
+ * Keeping the authored dam initializer (rather than imported brick geometry)
+ * preserves authoritative generalized-face projection at t=0.
+ */
+export function createMinimalPowerDamBreakScene(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = "minimal-power-dam-break";
+  scene.duration_s = 0.1;
+  scene.rigidBodies = [];
+  scene.container = {
+    ...scene.container,
+    width_m: 0.8,
+    height_m: 0.8,
+    depth_m: 0.8,
+    fillFraction: 23 / 64,
+    top: "open",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "dam-break";
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
   return scene;
@@ -277,8 +354,29 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     group: "Comparisons",
     description: "A 16³ settled tank for the first power-diagram oracle. With Maximum leaf 2³ and interface band 3, its wet pressure grid contains both unit and two-cell leaves.",
     background: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     create: createTinyHydrostaticScene,
     camera: { distance_m: 1.85, target_m: { x: 0, y: 0.35, z: 0 } }
+  },
+  {
+    id: "hydrostatic-power-large-offset",
+    name: "Octree · larger hydrostatic",
+    group: "Comparisons",
+    description: "A 32x24x16 settled tank with a cell-cut free surface. Maximum leaf 2³ exercises a larger unit/two-cell pressure layout than the tiny oracle.",
+    background: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    create: createLargeHydrostaticScene,
+    camera: { distance_m: 2.75, target_m: { x: 0, y: 0.5, z: 0 } }
+  },
+  {
+    id: "minimal-power-dam-break",
+    name: "Octree · minimal dam break",
+    group: "Comparisons",
+    description: "The analytic 12.5%-volume dam initializer collapses inside a 16³ tank, providing the smallest dynamic authoritative power-projection scene.",
+    background: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    create: createMinimalPowerDamBreakScene,
+    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } }
   },
   {
     id: "ocean-seiche",

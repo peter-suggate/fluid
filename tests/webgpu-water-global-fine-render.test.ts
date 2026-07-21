@@ -12,6 +12,7 @@ import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bri
 import {
   extractionPrepareShader,
   globalFineFallbackMaySeedRenderer,
+  globalFineCoarseSurfaceDispatch,
   globalFineSurfaceDispatch,
   RasterWaterPipeline,
   surfaceExtractionShader,
@@ -134,16 +135,29 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
   assert.deepEqual(globalFineSurfaceDispatch(8, 4 ** 3), [2, 1, 1]);
   assert.deepEqual(globalFineSurfaceDispatch(65_536, 8 ** 3), [65_535, 3, 1]);
   assert.throws(() => globalFineSurfaceDispatch(0, 64), /positive integers/);
+  assert.deepEqual(globalFineCoarseSurfaceDispatch(8_192), [8_192, 1, 1]);
+  assert.deepEqual(globalFineCoarseSurfaceDispatch(65_536), [65_535, 2, 1]);
   assert.match(surfaceExtractionShader, /sparseActivePages\[1u\]!=sparseParams\.brickDims\.w/,
     "a stale worklist generation must fail closed");
   assert.match(globalFineSurfaceClassificationShader, /sampleCoarseOctreePhi/,
     "missing fine samples must query compact coarse-octree phi");
   assert.doesNotMatch(globalFineSurfaceClassificationShader, /textureLoad|texture_3d/,
     "global fine classification must not reach dense phi texture authority");
-  assert.match(globalFineSurfaceClassificationShader, /fineCubeFullyValid\(base,i32\(scale\)\)/,
-    "coarse extraction may disappear only when fine validity covers all eight coarse corners");
+  assert.match(globalFineSurfaceClassificationShader, /fineOwnsCube\(candidate\)/,
+    "each unit cube must have exactly one fine-or-coarse lower-anchor owner");
+  assert.doesNotMatch(globalFineSurfaceClassificationShader, /classifyScaled\([^;]*i32\(scale\)\)/,
+    "coarse fallback must not place scaled tetrahedra beside unit fine tetrahedra");
   assert.doesNotMatch(globalFineSurfaceClassificationShader, /fineValid\(centre\)/,
     "a single valid centre sample must not suppress a partially covered coarse leaf");
+  assert.match(globalFineSurfaceClassificationShader,
+    /let lowX=select\(0u,1u,origin\.x==0u\);let lowY=select\(0u,1u,origin\.y==0u\);let lowZ=select\(0u,1u,origin\.z==0u\)/,
+    "coarse fallback must enumerate low-wall and floor lattice bases");
+  assert.match(globalFineSurfaceClassificationShader,
+    /let sx=scale\+lowX;let sy=scale\+lowY;let sz=scale\+lowZ;let total=sx\*sy\*sz/,
+    "coarse fallback must use a unit-lattice Cartesian product at edges and corners");
+  assert.match(globalFineSurfaceClassificationShader,
+    /@builtin\(workgroup_id\)group:vec3u,@builtin\(local_invocation_index\)local:u32[\s\S]*for\(var index=local;index<total;index\+=256u\)/,
+    "one workgroup must cooperatively subdivide a coarse leaf instead of risking a scalar scale-cubed loop");
   assert.match(globalFineClassifiedScanShader, /vertexAllocator\)==0xffffffffu\)\{return;/,
     "an unpublished A/B generation must retain the previous surface draw count");
   assert.match(globalFineSurfaceClassificationShader,
@@ -246,7 +260,6 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
 
   const extractLayout = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-    { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
@@ -282,6 +295,10 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
   const classify = device.createComputePipeline({
     layout: pipelineLayout,
     compute: { module: extractModule, entryPoint: "extractGlobalFineMain" },
+  });
+  const classifyCoarse = device.createComputePipeline({
+    layout: pipelineLayout,
+    compute: { module: extractModule, entryPoint: "extractGlobalCoarseMain" },
   });
   const polygonPipelineLayout=device.createPipelineLayout({bindGroupLayouts:[polygonLayout]});
   const count=device.createComputePipeline({layout:device.createPipelineLayout({bindGroupLayouts:[countLayout]}),compute:{module:device.createShaderModule({code:globalFineClassifiedCountShader}),entryPoint:"countGlobalFineTriangles"}});
@@ -332,7 +349,6 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     device.queue.writeTexture({ texture: volume }, coarsePhi,
       { bytesPerRow: 256, rowsPerImage: 2 }, [2, 2, 2]);
     const vertices = device.createBuffer({ size: 2 * 1024 * 1024, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    const classifyVertexDummy = device.createBuffer({ size: 32, usage: GPUBufferUsage.STORAGE });
     const drawArgs = initializedBuffer(device, new Uint32Array([0, 1, 0, 0, 0, 0, 0]),
       GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
     const cubes = device.createBuffer({ size: 256 * 1024, usage: GPUBufferUsage.STORAGE });
@@ -341,7 +357,7 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     const dispatch = device.createBuffer({ size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const extractGroup = device.createBindGroup({ layout: extractLayout, entries: [
       { binding: 0, resource: { buffer: uniform } },
-      { binding: 3, resource: { buffer: classifyVertexDummy } }, { binding: 4, resource: { buffer: drawArgs } },
+      { binding: 4, resource: { buffer: drawArgs } },
       { binding: 5, resource: { buffer: cubes } }, { binding: 7, resource: source.hash },
       { binding: 6, resource: { buffer: cubeValues } },
       { binding: 8, resource: source.worklist },
@@ -365,16 +381,20 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
       { binding: 0, resource: { buffer: drawArgs } }, { binding: 1, resource: { buffer: cubes } },
       { binding: 2, resource: { buffer: dispatch } },
     ] });
-    const readback = device.createBuffer({ size: 120, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const cubeReadbackOffset = 120;
+    const readback = device.createBuffer({ size: cubeReadbackOffset + cubes.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = device.createCommandEncoder();
     const classifyPass = encoder.beginComputePass();
     classifyPass.setPipeline(classify); classifyPass.setBindGroup(0, extractGroup);
     classifyPass.dispatchWorkgroups(...globalFineSurfaceDispatch(source.pageCapacity, source.samplesPerBrick));
+    classifyPass.setPipeline(classifyCoarse);
+    classifyPass.dispatchWorkgroups(...globalFineCoarseSurfaceDispatch(8));
     classifyPass.setBindGroup(0,polygonGroup);classifyPass.setPipeline(scan);classifyPass.dispatchWorkgroups(1);
     classifyPass.setPipeline(emitAll);classifyPass.dispatchWorkgroups(512,6);classifyPass.end();void emit;void prepare;void prepareGroup;
     void countGroup;void count;
     encoder.copyBufferToBuffer(drawArgs, 0, readback, 0, 24);
     encoder.copyBufferToBuffer(vertices, 0, readback, 24, 96);
+    encoder.copyBufferToBuffer(cubes, 0, readback, cubeReadbackOffset, cubes.size);
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
     await readback.mapAsync(GPUMapMode.READ);
@@ -386,6 +406,16 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     assert.ok([...firstTriangle].every(Number.isFinite), `factor ${factor} geometry must remain finite`);
     assert.ok(firstTriangle[3] === 1 && firstTriangle[11] === 1 && firstTriangle[19] === 1,
       `factor ${factor} must emit three live positions`);
+    assert.ok(counters[4] * 8 <= cubes.size, `factor ${factor} classified cube worklist must not clip`);
+    const classified = new Uint32Array(bytes, cubeReadbackOffset, counters[4] * 2);
+    const bases = new Set<string>();
+    for (let cube = 0; cube < counters[4]; cube += 1) {
+      const packedXZ = classified[cube * 2], packedYScale = classified[cube * 2 + 1];
+      assert.equal(packedYScale >>> 16, 1, `factor ${factor} coarse/fine cube ${cube} must use unit scale`);
+      const key = `${packedXZ & 0xffff},${packedYScale & 0xffff},${packedXZ >>> 16}`;
+      assert.equal(bases.has(key), false, `factor ${factor} cube base ${key} must have one canonical owner`);
+      bases.add(key);
+    }
     // Production A/B cutover: make the fine generation stale and invalidate
     // the compact coarse directory.  The classifier must leave generation A's
     // finite mesh draw count intact instead of publishing an empty B frame.
@@ -408,7 +438,7 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     assert.equal(retained[4], 0, `factor ${factor} invalid B must classify no stale cubes`);
     assert.equal(retained[5], 0xffff_ffff, `factor ${factor} invalid B must remain unpublished`);
     retainedReadback.destroy();
-    for (const buffer of [uniform, renderParams, vertices, classifyVertexDummy, drawArgs, cubes,
+    for (const buffer of [uniform, renderParams, vertices, drawArgs, cubes,
       cubeValues, cubeOffsets, dispatch, readback, coarseDirectory, topologyControl]) buffer.destroy();
     volume.destroy(); owner.destroy();
   }

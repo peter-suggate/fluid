@@ -615,8 +615,9 @@ test("GPU face band closes endpoints before deterministic frontier marching", ()
     "seed membership uses the sampled face-centroid signed distance itself");
   assert.match(octreeFaceBandWGSL, /centroidVector\(f\.negativeRow,f\.centroid\.xyz\)/,
     "regular-face seeds evaluate the full Stage-B vector at the actual face centroid");
-  assert.match(octreeFaceBandWGSL, /if\(rows\[band\]\.minimumPhi<0\.\)\{return;\}/,
-    "Stage B overrides only definitely-air cells, never mixed-sign cells");
+  assert.match(octreeFaceBandWGSL,
+    /let stageBStatus=sampleStatus\[i\];let stageBReason=stageBStatus&255u;let needsDualCompletion=\(stageBStatus&VALID\)==0u&&\(stageBReason==4u\|\|stageBReason==8u\);if\(rows\[band\]\.minimumPhi<0\.&&!needsDualCompletion\)\{return;\}/,
+    "Section 5 completes true Stage-B failures without mistaking valid tetrahedron indices 4 or 8 for failure reasons");
   assert.match(octreeFaceBandWGSL,
     /let owner=ownerAt\(q\);if\(owner\.valid==0u\)[\s\S]*let ownerCell=cell\(owner\.origin\);let band=sampleBandRow\(ownerCell\)/,
     "air sampling must resolve the containing adaptive owner before looking up its origin-keyed band row");
@@ -629,8 +630,8 @@ test("GPU face band closes endpoints before deterministic frontier marching", ()
     /band==INVALID[^}]+sampleStatus\[i\]=SAMPLE_FAILED/,
     "a missing classification row is a structural failure, not proof of liquid");
   assert.match(octreeFaceBandWGSL,
-    /control\.generation!=sp\.fineGeneration[\s\S]*if\(rows\[band\]\.minimumPhi<0\.\)\{return;\}[\s\S]*sampleStatus\[i\]=SAMPLE_EVALUATE/,
-    "only an exact current liquid row may preserve Stage B; positive air still requires published extrapolation");
+    /control\.generation!=sp\.fineGeneration[\s\S]*minimumPhi<0\.&&!needsDualCompletion[\s\S]*sampleStatus\[i\]=SAMPLE_EVALUATE/,
+    "only an exact current liquid row may preserve Stage B; air and uncovered dual octants require published completion");
   assert.doesNotMatch(octreeFaceBandWGSL, /sampleBandRow\(vec3u\(floor\(grid\)\)/,
     "queries inside coarse owners must not use a non-origin finest-cell key");
 });

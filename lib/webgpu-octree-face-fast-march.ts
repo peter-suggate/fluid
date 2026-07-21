@@ -1447,7 +1447,8 @@ export class WebGPUOctreeFaceFastMarch {
     }
   }
 
-  /** Override Stage-B results only for positive-air compact rows. */
+  /** Complete Stage-B for positive-air rows and exact catalog-simplex coverage
+   * misses using the published Section 5 regular-face point field. */
   encodeAirSamples(encoder: GPUCommandEncoder, positions: GPUBuffer | GPUBufferBinding,
     results: GPUBuffer, statuses: GPUBuffer,
     options: OctreeFaceBandSampleOptions): void {
@@ -1856,7 +1857,7 @@ fn sampleBandRow(cellKey:u32)->u32{let start=hash(cellKey+1u)&(sp.rowHashCapacit
  // Only the exact current owner row can prove that Stage B is sampling liquid.
  // Missing classification remains structural failure; definitely-positive air
  // requires a valid fast-marched regular-face vector.
- let ownerCell=cell(owner.origin);let band=sampleBandRow(ownerCell);if(band==INVALID||band>=sp.rowCapacity||band>=pointControl.pad||band>=arrayLength(&rows)){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_ROW;return;}if(control.generation!=sp.fineGeneration||pointControl.generation!=sp.fineGeneration){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_GENERATION;return;}if(rows[band].cell!=ownerCell||rows[band].size!=owner.size||(rows[band].flags&ROW_PHI)==0u){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_ROW;return;}if(rows[band].minimumPhi<0.){return;}sampleResults[i].w=bitcast<f32>(band);sampleStatus[i]=SAMPLE_EVALUATE;}
+ let ownerCell=cell(owner.origin);let band=sampleBandRow(ownerCell);if(band==INVALID||band>=sp.rowCapacity||band>=pointControl.pad||band>=arrayLength(&rows)){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_ROW;return;}if(control.generation!=sp.fineGeneration||pointControl.generation!=sp.fineGeneration){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_GENERATION;return;}if(rows[band].cell!=ownerCell||rows[band].size!=owner.size||(rows[band].flags&ROW_PHI)==0u){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_ROW;return;}let stageBStatus=sampleStatus[i];let stageBReason=stageBStatus&255u;let needsDualCompletion=(stageBStatus&VALID)==0u&&(stageBReason==4u||stageBReason==8u);if(rows[band].minimumPhi<0.&&!needsDualCompletion){return;}sampleResults[i].w=bitcast<f32>(band);sampleStatus[i]=SAMPLE_EVALUATE;}
 @compute @workgroup_size(64)fn evaluateAirBandVelocity(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=sp.count||i>=arrayLength(&positions)||i>=arrayLength(&sampleResults)||i>=arrayLength(&sampleStatus)||sampleStatus[i]!=SAMPLE_EVALUATE){return;}let band=bitcast<u32>(sampleResults[i].w);let velocity=locateFinalPointVector(band,positions[i].xyz/sp.cellSize);if(!velocityValid(velocity)){let reason=u32(round(max(1.,-velocity.w)));sampleResults[i]=velocity;sampleStatus[i]=SAMPLE_FAILED|((16u+min(reason,11u))&255u);return;}sampleResults[i]=velocity;sampleStatus[i]=SAMPLE_EVALUATED;}
 @compute @workgroup_size(64)fn finalizeAirBandVelocity(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=sp.count||i>=arrayLength(&sampleStatus)){return;}let status=sampleStatus[i];if(status!=SAMPLE_EVALUATE&&status!=SAMPLE_EVALUATED&&(status&SAMPLE_FAILED)==0u){return;}if(status==SAMPLE_EVALUATED&&atomicLoad(&control.valid)==VALID&&control.generation==sp.fineGeneration&&atomicLoad(&pointControl.valid)==VALID&&atomicLoad(&pointControl.flags)==0u&&pointControl.generation==sp.fineGeneration){sampleStatus[i]=VALID|EXTRAPOLATED;return;}sampleStatus[i]=FACE_BAND_UNAVAILABLE|(status&255u);atomicAdd(&control.sampleFailures,1u);}
 `;

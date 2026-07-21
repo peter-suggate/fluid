@@ -48,7 +48,7 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
   const source = readFileSync(new URL("../lib/webgpu-octree-power-coarse-levelset.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /guardRejectedFineCoarseEntryPoints|coarseFineTransactionEntryPoints|\.replace(?:All)?\(/,
     "transaction guards and scratch addressing must be authored directly in WGSL");
-  const entryPoints = ["preparePowerCoarsePhi", "clearPowerCoarsePhiSamples", "advectPowerCoarsePhi",
+  const entryPoints = ["migratePowerCoarsePhiSource", "preparePowerCoarsePhi", "clearPowerCoarsePhiSamples", "advectPowerCoarsePhi",
     "redistancePowerCoarsePhi", "validatePowerCoarseFineCorrection", "publishPowerCoarsePhi",
     "finalizePowerCoarsePhi"];
   assert.match(octreePowerCoarseLevelSetShader,
@@ -59,9 +59,15 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
       `${entryPoint} must exit before any control, record, scratch, or directory write`);
   }
   const encode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
-  for (const bindings of ["[0,13,14,15,16]", "[0,15,16]", "[0,1,2,5,6,7,8,9,13,16]",
+  for (const bindings of ["[0,1,8,14,15,16]", "[0,13,14,15,16]", "[0,15,16]", "[0,1,2,5,6,7,8,9,13,16]",
     "[0,1,2,3,4,5,6,9,13,16]", "[0,11,12,13,16]", "[0,1,2,9,11,12,8,13,15,16]",
     "[0,13,15,16]"]) assert.ok(encode.includes(bindings.replace(/\s+/g, "")));
+  assert.match(octreePowerCoarseLevelSetShader,
+    /migratePowerCoarsePhiSource[\s\S]*previousSampleAtCurrentLeaf\(header\)/,
+    "recurring coarse phi must be sampled by spatial leaf identity before row-indexed advection");
+  assert.match(octreePowerCoarseLevelSetShader,
+    /MIGRATED_AIR[\s\S]*output\.flags&\(~MIGRATED_AIR\)[\s\S]*output\.flags&MIGRATED_AIR[\s\S]*fail\(row,INVALID_SOURCE\)/,
+    "a newly wet row missing old coarse support must receive a valid fine correction or fail closed");
 });
 
 test("coarse publication snapshots physical power-cell volume with phi authority", () => {

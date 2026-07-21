@@ -15,6 +15,7 @@ export interface CompactOctreeFieldSnapshot {
   readonly coarseDirectory: Uint32Array;
   /** Sixteen-word WebGPUOctreePowerCoarseLevelSet control ABI. */
   readonly coarseControl?: Uint32Array;
+  readonly fineRestrictionControl?: Uint32Array;
   readonly topologyControl?: Uint32Array;
   readonly transportControl?: Uint32Array;
   readonly redistanceControl?: Uint32Array;
@@ -27,6 +28,7 @@ export interface CompactOctreeFieldSnapshot {
   readonly powerVelocityControl?: Uint32Array;
   readonly powerProjectionControl?: Uint32Array;
   readonly powerVelocitySampleControl?: Uint32Array;
+  readonly mgpcgControl?: Uint32Array;
 }
 
 export interface CompactOctreeFieldEvidence {
@@ -58,6 +60,7 @@ export interface CompactOctreeFieldEvidence {
   readonly powerVelocityControl?: readonly number[];
   readonly powerProjectionControl?: readonly number[];
   readonly powerVelocitySampleControl?: readonly number[];
+  readonly mgpcgControl?: readonly number[];
 }
 
 export interface CompactOctreePublicationHeaderEvidence {
@@ -79,6 +82,14 @@ export interface CompactOctreePublicationHeaderEvidence {
   readonly coarseControlContributionCount?: number;
   readonly coarseControlGeneration?: number;
   readonly coarseControlValid?: number;
+  readonly fineRestrictionCount?: number;
+  readonly fineRestrictionMaximumPerRow?: number;
+  readonly fineRestrictionFlags?: number;
+  readonly fineRestrictionUnowned?: number;
+  readonly fineRestrictionRows?: number;
+  readonly fineRestrictionValid?: number;
+  readonly fineRestrictionFirstUnownedLiquidLogical?: number;
+  readonly fineRestrictionMaximumUnownedLiquidMagnitude?: number;
   readonly topologyFlags?: number;
   readonly topologyInterfaceBricks?: number;
   readonly topologyDesiredBricks?: number;
@@ -100,6 +111,7 @@ export interface CompactOctreePublicationHeaderEvidence {
   readonly powerVelocityControl?: readonly number[];
   readonly powerProjectionControl?: readonly number[];
   readonly powerVelocitySampleControl?: readonly number[];
+  readonly mgpcgControl?: readonly number[];
 }
 
 export interface CompactOctreeFieldReconstruction extends CompactOctreeFieldEvidence {
@@ -120,14 +132,15 @@ export function compactOctreeFieldEvidenceIsAcceptable(evidence: CompactOctreeFi
 /** Header-only evidence is safe to report even when a publication is invalid. */
 export function compactOctreePublicationHeaderEvidence(
   snapshot: Pick<CompactOctreeFieldSnapshot, "generation" | "worklist" | "coarseDirectory" | "coarseControl"
-    | "topologyControl" | "transportControl" | "redistanceControl" | "volumeControl"
+    | "fineRestrictionControl" | "topologyControl" | "transportControl" | "redistanceControl" | "volumeControl"
     | "faceBandControl" | "faceBandTransitionControl" | "faceBandTransientPowerControl"
     | "faceBandPointFieldControl"
     | "faceBandPowerPublicationControl"
-    | "powerVelocityControl" | "powerProjectionControl" | "powerVelocitySampleControl">,
+    | "powerVelocityControl" | "powerProjectionControl" | "powerVelocitySampleControl" | "mgpcgControl">,
 ): CompactOctreePublicationHeaderEvidence {
   const worklist = snapshot.worklist, coarse = snapshot.coarseDirectory;
-  const coarseControl = snapshot.coarseControl, topology = snapshot.topologyControl;
+  const coarseControl = snapshot.coarseControl, restriction = snapshot.fineRestrictionControl,
+    topology = snapshot.topologyControl;
   return {
     fineGeneration: snapshot.generation,
     ...(worklist.length >= 5 ? {
@@ -152,6 +165,15 @@ export function compactOctreePublicationHeaderEvidence(
       topologyCapacityOrDilation: topology[6],
       downstreamFinalizeReason: topology[7],
     } : {}),
+    ...(restriction && restriction.length >= 6 ? {
+      fineRestrictionCount: restriction[0], fineRestrictionMaximumPerRow: restriction[1],
+      fineRestrictionFlags: restriction[2], fineRestrictionUnowned: restriction[3],
+      fineRestrictionRows: restriction[4], fineRestrictionValid: restriction[5],
+      ...(restriction.length >= 8 ? {
+        fineRestrictionFirstUnownedLiquidLogical: restriction[6],
+        fineRestrictionMaximumUnownedLiquidMagnitude: finiteFloat(restriction, 7),
+      } : {}),
+    } : {}),
     ...(snapshot.transportControl ? { transportControl: Array.from(snapshot.transportControl) } : {}),
     ...(snapshot.redistanceControl ? { redistanceControl: Array.from(snapshot.redistanceControl) } : {}),
     ...(snapshot.volumeControl ? { volumeControl: Array.from(snapshot.volumeControl) } : {}),
@@ -168,6 +190,7 @@ export function compactOctreePublicationHeaderEvidence(
     ...(snapshot.powerProjectionControl ? { powerProjectionControl: Array.from(snapshot.powerProjectionControl) } : {}),
     ...(snapshot.powerVelocitySampleControl
       ? { powerVelocitySampleControl: Array.from(snapshot.powerVelocitySampleControl) } : {}),
+    ...(snapshot.mgpcgControl ? { mgpcgControl: Array.from(snapshot.mgpcgControl) } : {}),
   };
 }
 

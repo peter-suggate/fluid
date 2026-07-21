@@ -1,7 +1,13 @@
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { createPaperScenario } from "../lib/paper-scenarios";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M } from "../lib/garden-scene";
-import { createBrickQuadDamBreakScene, createOceanSeicheScene, createTinyHydrostaticScene } from "../lib/scenes";
+import {
+  createBrickQuadDamBreakScene,
+  createLargeHydrostaticScene,
+  createMinimalPowerDamBreakScene,
+  createOceanSeicheScene,
+  createTinyHydrostaticScene,
+} from "../lib/scenes";
 
 export const smokeScenarioIds = [
   "dam-break-ui",
@@ -14,6 +20,8 @@ export const smokeScenarioIds = [
   "garden-dam-break",
   "brick-quad-dam-break",
   "hydrostatic-power-two-level",
+  "hydrostatic-power-large-offset",
+  "minimal-power-dam-break",
   "ocean-seiche"
 ] as const;
 
@@ -102,6 +110,30 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
     return {
       id,
       description: "16-cubed settled tank with room for unit and two-cell power-diagram leaves",
+      scene,
+      oracleSteps: 1,
+      target_s: scene.numerics.maxDt_s,
+    };
+  }
+
+  if (id === "hydrostatic-power-large-offset") {
+    const scene = createLargeHydrostaticScene();
+    scene.environment = "default";
+    return {
+      id,
+      description: "32x24x16 settled tank with a cell-cut free surface and a larger two-level pressure grid",
+      scene,
+      oracleSteps: 1,
+      target_s: scene.numerics.maxDt_s,
+    };
+  }
+
+  if (id === "minimal-power-dam-break") {
+    const scene = createMinimalPowerDamBreakScene();
+    scene.environment = "default";
+    return {
+      id,
+      description: "minimal two-level analytic dam reservoir collapsing in a 16-cubed tank",
       scene,
       oracleSteps: 1,
       target_s: scene.numerics.maxDt_s,
