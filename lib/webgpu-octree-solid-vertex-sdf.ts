@@ -194,7 +194,7 @@ const SOURCE:u32=${OCTREE_SOLID_VERTEX_SDF_ERROR.source}u;const CAPACITY:u32=${O
 const HEADER:u32=${OCTREE_SOLID_VERTEX_SDF_ERROR.header}u;const NONFINITE:u32=${OCTREE_SOLID_VERTEX_SDF_ERROR.nonfinite}u;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn fail(code:u32,index:u32){atomicOr(&arena.control[0],code);atomicMin(&arena.control[6],index);}
-fn heightAtVertex(g:vec2f)->f32{let extent=vec2i(textureDimensions(terrain));if(any(extent<=vec2i(0))){return bitcast<f32>(0x7fc00000u);}
+fn heightAtVertex(g:vec2f)->f32{let extent=vec2i(textureDimensions(terrain));if(any(extent<=vec2i(0))){return 0.0;}
   let p=g-vec2f(0.5);let base=vec2i(floor(p));let t=clamp(p-vec2f(base),vec2f(0),vec2f(1));
   let hi=extent-vec2i(1);let a=textureLoad(terrain,clamp(base,vec2i(0),hi),0).x;let b=textureLoad(terrain,clamp(base+vec2i(1,0),vec2i(0),hi),0).x;
   let c=textureLoad(terrain,clamp(base+vec2i(0,1),vec2i(0),hi),0).x;let d=textureLoad(terrain,clamp(base+vec2i(1),vec2i(0),hi),0).x;

@@ -27,6 +27,13 @@ test("WebGPU transport stays locked until the fenced t=0 authority is ready", ()
   assert.ok(validation > fence && publication > validation,
     "readiness must follow the bounded fine/coarse and pressure authority proof");
   assert.match(phaseWarmup, /if \(phase === "sparse-render-world"\)[\s\S]*initialSparseAuthorityPublished = true/);
+  const batchedWarmup = solverSource.slice(
+    solverSource.indexOf("private async publishInitialSparseSceneBatched"),
+    solverSource.indexOf("private applyGlobalFineDiagnostics"),
+  );
+  assert.match(batchedWarmup,
+    /encodeInitialSparseAuthority\(initialSparseScene\)[\s\S]*queue\.submit\(\[initialSparseScene\.finish\(\)\]\)[\s\S]*onSubmittedWorkDone\(\)[\s\S]*validateInitialSparseAuthority\(\)[\s\S]*initialSparseAuthorityPublished = true/,
+    "default readiness must follow the combined authority fence and bounded validation");
   const authoritySwitch = octreeSource.slice(
     octreeSource.indexOf("encodeInitialSparseAuthorityPhase"),
     octreeSource.indexOf("private encodeGlobalFineFaceBand", octreeSource.indexOf("encodeInitialSparseAuthorityPhase")),

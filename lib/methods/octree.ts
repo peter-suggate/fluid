@@ -3,6 +3,7 @@ import { numberValue, type MethodParamSpec, type MethodParamValues, type Simulat
 import type { GPUQuality } from "../tall-cell-grid";
 import type { SceneDescription } from "../model";
 import { sceneHasTerrain } from "../terrain";
+import { fencedSparseAuthorityBringupEnabled } from "../gpu-startup";
 
 const params: MethodParamSpec[] = [
   { kind: "number", key: "pressureIterations", label: "Pressure effort", unit: "iterations", min: 16, max: 400, step: 8, digits: 0, default: 128, tier: "coarse", hint: "The paper-authoritative Section 4.3 solve encodes up to 128 PCG iterations with GPU early-out; the paper reports 6–10 iterations with its production hierarchy. Explicit compatibility solvers use this adjustable effort budget." },
@@ -59,6 +60,11 @@ const options = (scene: SceneDescription, quality: GPUQuality, values: MethodPar
   brickSparseTransportPreparation: values.brickSparseTransport !== "off" && values.brickSparseTransport !== false,
   brickSparseOccupancyFluxPreparation: values.brickSparseOccupancyFlux !== "off" && values.brickSparseOccupancyFlux !== false,
   hydrostaticSplit: values.hydrostaticSplit === "on" || values.hydrostaticSplit === true,
+  // Browser safe mode and the Dawn diagnostic can explicitly request phase
+  // fences. The solver additionally forces them when timestamp-query is active.
+  fencedInitialSparseAuthority: fencedSparseAuthorityBringupEnabled(
+    typeof location === "undefined" ? "" : location.search,
+  ) || (typeof process !== "undefined" && process.env?.FLUID_SAFE_BRINGUP === "1"),
   pressureIterations: numberValue(values, params, "pressureIterations"),
   // The spray component is allocated once; visibility/simulation is a live
   // runtime setting so toggling it never rebuilds the pressure solver.

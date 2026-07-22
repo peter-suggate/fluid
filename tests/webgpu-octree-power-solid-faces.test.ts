@@ -146,3 +146,11 @@ test("solid aperture shaders consume clipped power-polygon quadrature, never an 
     "terrain authority must retain a same-generation compact-face rollback seed");
   assert.doesNotMatch(`${octreePowerSolidFaceShader}\n${octreePowerSolidImpulseShader}`, /SAMPLE_AXIS|equivalent area square|sample%/);
 });
+
+test("generalized solid-face WGSL avoids non-representable NaN constants", () => {
+  assert.doesNotMatch(octreePowerSolidFaceShader, /bitcast<f32>\(0x7fc00000u\)/,
+    "browser Tint rejects a constant NaN even when the no-terrain branch is unreachable");
+  assert.match(octreePowerSolidFaceShader,
+    /if\(any\(extent<=vec2i\(0\)\)\)\{return 0\.0;\}/,
+    "terrain-disabled calls retain a finite fallback; params.counts.z remains the authority gate");
+});

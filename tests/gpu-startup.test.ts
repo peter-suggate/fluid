@@ -4,6 +4,7 @@ import {
   acquireBrowserGPULease,
   automaticGPURecoveryEnabled,
   BROWSER_GPU_LOCK_NAME,
+  fencedSparseAuthorityBringupEnabled,
   optionalBrowserTimestampFeatures,
   resolveGPUStartupMode,
   safeBrowserGPUBringupEnabled,
@@ -25,6 +26,13 @@ test("GPU startup query has explicit safe, manual, and automatic modes", () => {
   assert.equal(resolveGPUStartupMode("", { ...dam, presetId: "water-box-tank-fill" }), "automatic");
   assert.equal(resolveGPUStartupMode("", { ...dam, methodId: "cpu" }), "automatic");
   assert.equal(resolveGPUStartupMode("?gpu=unexpected", dam), "manual", "unknown input must not bypass the safe default");
+});
+
+test("sparse authority phase fencing is diagnostic-only", () => {
+  assert.equal(fencedSparseAuthorityBringupEnabled(""), false);
+  assert.equal(fencedSparseAuthorityBringupEnabled("?gpu=on"), false);
+  assert.equal(fencedSparseAuthorityBringupEnabled("?gpu=safe"), true);
+  assert.equal(fencedSparseAuthorityBringupEnabled("?safeBringup=1"), true);
 });
 
 test("safe browser bring-up fails closed when the bounded workload drifts", () => {

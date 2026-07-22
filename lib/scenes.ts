@@ -30,6 +30,17 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   }),
 });
 
+/** The larger offset tank needs one additional interface-support cell to keep
+ * its unit/two-cell Section 5 band free of acute grading. This mirrors the
+ * isolated Dawn oracle instead of inheriting the tiny 16-cubed profile. */
+export const LARGE_HYDROSTATIC_POWER_METHOD_PROFILE: MethodProfile = Object.freeze({
+  ...POWER_VALIDATION_METHOD_PROFILE,
+  overrides: Object.freeze({
+    ...POWER_VALIDATION_METHOD_PROFILE.overrides,
+    interfaceRefinementBandCells: 4,
+  }),
+});
+
 /** World-space centre of the single seeded 8-cubed fluid brick (the -x/-z quadrant). */
 export const BRICK_QUAD_DAM_SEED_M = { x: -0.2, y: 0.2, z: -0.2 };
 
@@ -364,7 +375,7 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     group: "Comparisons",
     description: "A 32x24x16 settled tank with a cell-cut free surface. Maximum leaf 2³ exercises a larger unit/two-cell pressure layout than the tiny oracle.",
     background: "default",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    methodProfile: LARGE_HYDROSTATIC_POWER_METHOD_PROFILE,
     create: createLargeHydrostaticScene,
     camera: { distance_m: 2.75, target_m: { x: 0, y: 0.5, z: 0 } }
   },

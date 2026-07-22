@@ -60,7 +60,16 @@ import {
 } from "./webgpu-octree-fine-levelset-volume";
 
 export type UniformVelocityTransport = GPUVelocityTransport;
-export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Octree-only A/B: subtract a fixed tank-fill rest-surface reference. */ hydrostaticSplit?: boolean; /** A/B switch; sparse is used only by safe octree mirror sources. */ brickSparseVelocityAdvection?: boolean; /** Independently dispatch current/predicted transport preparation over the safe bulk worklist. */ brickSparseTransportPreparation?: boolean; /** Independently reduce column occupancy and conservative flux scales over the safe bulk worklist. */ brickSparseOccupancyFluxPreparation?: boolean; /** Allocate escaped spray droplets. */ secondaryParticles?: boolean; /** Live enable state when the component is allocated. */ secondaryParticlesEnabled?: boolean; secondaryParticleCapacity?: number; /** Bounded near-interface particle-to-level-set correction; zero keeps spray strictly one-way. */ secondaryParticleSurfaceCorrection?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
+export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Octree-only A/B: subtract a fixed tank-fill rest-surface reference. */ hydrostaticSplit?: boolean; /** Retain eight individually fenced t=0 authority phases; timestamp-capable devices also force this correctness path. */ fencedInitialSparseAuthority?: boolean; /** A/B switch; sparse is used only by safe octree mirror sources. */ brickSparseVelocityAdvection?: boolean; /** Independently dispatch current/predicted transport preparation over the safe bulk worklist. */ brickSparseTransportPreparation?: boolean; /** Independently reduce column occupancy and conservative flux scales over the safe bulk worklist. */ brickSparseOccupancyFluxPreparation?: boolean; /** Allocate escaped spray droplets. */ secondaryParticles?: boolean; /** Live enable state when the component is allocated. */ secondaryParticlesEnabled?: boolean; secondaryParticleCapacity?: number; /** Bounded near-interface particle-to-level-set correction; zero keeps spray strictly one-way. */ secondaryParticleSurfaceCorrection?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
+
+/** Timestamp-enabled Metal/WebGPU queues need submit boundaries between the
+ * dependency-heavy t=0 Section 4/5 publications. Without them, larger face
+ * bands can observe incomplete predecessor data even though the commands are
+ * ordered in one buffer. Keep the fast combined path for timestamp-free
+ * devices and make the explicit diagnostic switch additive. */
+export function initialSparseAuthorityFencesEnabled(explicit: boolean, timestampQueries: boolean): boolean {
+  return explicit || timestampQueries;
+}
 
 // Pipeline objects are immutable and device-scoped. Rebuilding buffers or
 // textures for a settings change must not ask the browser/driver to compile
@@ -483,6 +492,7 @@ export class WebGPUUniformEulerianSolver {
   private readonly quadtreeInlineRebuild: boolean;
   private disposed = false;
   private initialSparseAuthorityPublished = false;
+  private readonly fencedInitialSparseAuthority: boolean;
   private baseAllocatedBytes = 0;
 
   constructor(
@@ -495,6 +505,10 @@ export class WebGPUUniformEulerianSolver {
     const c = scene.container, matched = createTallCellLayout(scene, quality, device.limits.maxTextureDimension3D, options.tallCellSettings);
     const nx = matched.nx, ny = matched.fineNy, nz = matched.nz;
     this.velocityTransport = options.velocityTransport ?? "maccormack";
+    this.fencedInitialSparseAuthority = initialSparseAuthorityFencesEnabled(
+      options.fencedInitialSparseAuthority === true,
+      device.features.has("timestamp-query"),
+    );
     this.densitySharpening = options.densitySharpening ?? true;
     this.sparseVelocityAdvectionRequested = options.brickSparseVelocityAdvection ?? true;
     // Kept as an explicit A/B until a sparse-domain scene proves a win. A
@@ -847,7 +861,7 @@ export class WebGPUUniformEulerianSolver {
     if(this.quadtreeProjection)tasks.push({id:"quadtree.pipeline-set",phase:"adaptive-topology",label:"Compile adaptive pressure pipeline set",run:()=>this.quadtreeProjection!.initializePipelines(()=>{})});
     else if(this.octreeProjection)tasks.push(...this.octreeProjection.initializationTasks());
     if(this.secondaryParticleSystem)tasks.push(...this.secondaryParticleSystem.initializationTasks());
-    if (this.octreeProjection) {
+    if (this.octreeProjection && this.fencedInitialSparseAuthority) {
       let previousTaskId: string | undefined;
       OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.forEach((authorityPhase, index) => {
         const id = index === 0 ? "solver.warmup" : `solver.warmup.${authorityPhase.id}`;
@@ -857,6 +871,10 @@ export class WebGPUUniformEulerianSolver {
           run: () => this.publishInitialSparseScenePhase(authorityPhase.id) });
         previousTaskId = id;
       });
+    } else if (this.octreeProjection) {
+      tasks.push({ id: "solver.warmup", phase: "warmup",
+        label: "Publish and validate initial sparse scene",
+        run: () => this.publishInitialSparseSceneBatched() });
     } else {
       tasks.push({id:"solver.warmup",phase:"warmup",label:"Finish initial GPU uploads",run:()=>this.publishInitialSparseScene()});
     }
@@ -885,6 +903,27 @@ export class WebGPUUniformEulerianSolver {
       this.initialSparseAuthorityPublished = true;
       this.applyOctreeInfo(this.octreeProjection);
     }
+  }
+
+  /** Product startup: all Section 4/5 dependencies are encoded in-order in
+   * one command buffer. WebGPU dispatch usage scopes make the writes visible
+   * to later dispatches without phase submissions or CPU fences. The single
+   * fence precedes the bounded validation readbacks and readiness latch. */
+  private async publishInitialSparseSceneBatched() {
+    const projection = this.octreeProjection;
+    if (!projection) throw new Error("Sparse authority batch requires an octree projection");
+    this.initialSparseAuthorityPublished = false;
+    const initialSparseScene = this.device.createCommandEncoder({
+      label: "Initial sparse authority: combined Section 4/5 publication",
+    });
+    projection.encodeInitialSparseAuthority(initialSparseScene);
+    this.device.queue.submit([initialSparseScene.finish()]);
+    projection.retireSubmittedEncoder(initialSparseScene);
+    await this.device.queue.onSubmittedWorkDone();
+    projection.finishInlineRebuild();
+    await this.validateInitialSparseAuthority();
+    this.initialSparseAuthorityPublished = true;
+    this.applyOctreeInfo(projection);
   }
 
   private applyGlobalFineDiagnostics(value: InitialGlobalFineAuthorityDiagnostics) {
@@ -1028,8 +1067,12 @@ export class WebGPUUniformEulerianSolver {
   private async publishInitialSparseScene() {
     this.initialSparseAuthorityPublished = false;
     if (this.octreeProjection) {
-      for (const phase of OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES) {
-        await this.publishInitialSparseScenePhase(phase.id);
+      if (this.fencedInitialSparseAuthority) {
+        for (const phase of OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES) {
+          await this.publishInitialSparseScenePhase(phase.id);
+        }
+      } else {
+        await this.publishInitialSparseSceneBatched();
       }
     } else {
       // This fence covers constructor-time texture uploads for non-octree
