@@ -5,7 +5,6 @@ import {
 
 export const OCTREE_FACE_TRANSFER_DIAGNOSTIC_BYTES = 32;
 const SORT_PARAMETER_STRIDE = 256;
-const PREVIOUS_FACE_RECORD_BYTES = 20;
 const RADIX_BITS = 4;
 const RADIX_BINS = 1 << RADIX_BITS;
 // Stable LSD order: axis/span, z, y, then x.  The resulting order is the
@@ -16,6 +15,7 @@ export const OCTREE_FACE_PREVIOUS_CONTROL_BYTES = 64;
 export const OCTREE_FACE_PREVIOUS_RECORD_BYTES = 20;
 export const OCTREE_FACE_PREVIOUS_GENERATION_OFFSET_BYTES = 52;
 export const OCTREE_FACE_PREVIOUS_VALID_OFFSET_BYTES = 56;
+export const OCTREE_FACE_PREVIOUS_PUBLICATION_HEADER_BYTES = 64;
 const SORT_DISPATCH_BYTES = 36;
 const VALIDATE_DISPATCH_OFFSET = 12;
 const TRANSFER_DISPATCH_OFFSET = 24;
@@ -27,6 +27,8 @@ export interface OctreeFaceTransferPlan {
   readonly previousFaceBytes: number;
   readonly indexBytes: number;
   readonly recordBytes: number;
+  readonly publicationBytes: number;
+  readonly transferRecordOffsetBytes: number;
   readonly scratchBytes: number;
   readonly histogramBytes: number;
   readonly parameterBytes: number;
@@ -49,16 +51,14 @@ export interface OctreeFacePreviousGenerationSource {
 
 /**
  * Compact, sorted generation-N Cartesian faces retained during the generation
- * N+1 topology rebuild. Only `[0, control[0])` records and sorted indices are
- * live. `control[13]` is the source generation and `control[14]` is VALID only
- * after the radix validation pass has completed without an error.
+ * N+1 topology rebuild. The first 64 bytes are a self-describing header:
+ * live count, capacity, generation, validity, record offset in words, and
+ * record stride in words. It is followed by the exact-key-sorted live prefix.
  */
 export interface OctreeFacePreviousPublication {
-  readonly control: GPUBuffer;
-  readonly faces: GPUBuffer;
-  readonly sortedIndices: GPUBuffer;
+  readonly buffer: GPUBuffer;
   readonly faceCapacity: number;
-  readonly sortCapacity: number;
+  readonly byteLength: number;
 }
 
 function radixDigitsForMaximum(maximumInclusive: number): number {
@@ -102,17 +102,20 @@ export function planOctreeFaceTopologyTransfer(
   const previousFaceBytes = faceCapacity * OCTREE_FACE_PREVIOUS_RECORD_BYTES;
   const indexBytes = sortCapacity * 4;
   const recordBytes = options.retainRecords ? faceCapacity * OCTREE_FACE_TRANSFER_RECORD_BYTES : 0;
-  // Audit records are published only after sorting, so their arena can also
-  // serve as the radix ping-pong index. This keeps the shader at WebGPU's
-  // minimum eight storage-buffer bindings.
-  const scratchBytes = Math.max(OCTREE_FACE_TRANSFER_RECORD_BYTES, indexBytes, recordBytes);
+  const publicationBytes = OCTREE_FACE_PREVIOUS_PUBLICATION_HEADER_BYTES + previousFaceBytes;
+  const transferRecordOffsetBytes = publicationBytes;
+  // Once radix sorting finishes, validation replaces the scratch indices with
+  // directly consumable sorted faces. Optional audit records follow that live
+  // publication and never alias it.
+  const scratchBytes = Math.max(indexBytes, publicationBytes + recordBytes);
   const histogramBytes = Math.ceil(sortCapacity / RADIX_BLOCK_SIZE) * RADIX_BINS * 4;
   const parameterBytes = Math.max(256, sortPasses * SORT_PARAMETER_STRIDE);
   return {
     faceCapacity,
     sortCapacity,
     sortPasses,
-    previousFaceBytes, indexBytes, recordBytes, scratchBytes, histogramBytes,
+    previousFaceBytes, indexBytes, recordBytes, publicationBytes, transferRecordOffsetBytes,
+    scratchBytes, histogramBytes,
     parameterBytes, dispatchBytes: SORT_DISPATCH_BYTES,
     allocatedBytes: OCTREE_FACE_PREVIOUS_CONTROL_BYTES + previousFaceBytes + indexBytes + scratchBytes + histogramBytes
       + parameterBytes + OCTREE_FACE_TRANSFER_DIAGNOSTIC_BYTES + SORT_DISPATCH_BYTES,
@@ -200,7 +203,10 @@ export class WebGPUOctreeFaceTopologyTransfer {
     const pipeline = (label: string, entryPoint: string): GPUComputePipeline => device.createComputePipeline({
       label,
       layout: pipelineLayout,
-      compute: { module: shaderModule, entryPoint, constants: { retainTransferRecords: this.plan.recordBytes > 0 ? 1 : 0 } },
+      compute: { module: shaderModule, entryPoint, constants: {
+        retainTransferRecords: this.plan.recordBytes > 0 ? 1 : 0,
+        transferRecordBaseWords: this.plan.transferRecordOffsetBytes / 4,
+      } },
     });
     this.preparePipeline = pipeline("Prepare previous octree face sort", "prepareSort");
     this.prepareDispatchPipeline = pipeline("Publish previous octree face live radix dispatch", "publishSortDispatch");
@@ -304,8 +310,8 @@ export class WebGPUOctreeFaceTopologyTransfer {
   }
 
   get previousPublication(): OctreeFacePreviousPublication {
-    return { control: this.previousControl, faces: this.previousFaces, sortedIndices: this.sortedIndices,
-      faceCapacity: this.plan.faceCapacity, sortCapacity: this.plan.sortCapacity };
+    return { buffer: this.records, faceCapacity: this.plan.faceCapacity,
+      byteLength: this.plan.publicationBytes };
   }
 }
 
@@ -325,6 +331,7 @@ struct SortParams { shift: u32, field: u32, capacity: u32, blockCapacity: u32 }
 @group(0) @binding(7) var<uniform> sortParams: SortParams;
 @group(0) @binding(8) var<storage, read_write> radixHistograms: array<atomic<u32>>;
 override retainTransferRecords: bool = false;
+override transferRecordBaseWords: u32 = 0u;
 const INVALID = 0xffffffffu;
 const VALID = 0x80000000u;
 const RADIX_MASK = 15u;
@@ -332,7 +339,7 @@ fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 
 fn publishTransfer(record: TransferRecord) {
   if (retainTransferRecords) {
-    let base = record.newFace * 6u;
+    let base = transferRecordBaseWords + record.newFace * 6u;
     sortScratch[base] = record.newFace; sortScratch[base + 1u] = record.sourceCount;
     sortScratch[base + 2u] = record.old0; sortScratch[base + 3u] = record.old1;
     sortScratch[base + 4u] = record.old2; sortScratch[base + 5u] = record.old3;
@@ -372,7 +379,10 @@ fn captureFaces(@builtin(global_invocation_id) gid: vec3u) {
   let count = min(previousControl[0], previousControl[2]);
   if (gid.x >= count) { return; }
   let source = nextFaces[gid.x];
-  previousFaces[gid.x] = PreviousFace(source.originX, source.originY, source.originZ, source.axisSpan, source.normalVelocity);
+  let validArea=finite(source.area)&&source.area>0.;
+  if(!validArea){atomicAdd(&diagnostics[2],1u);atomicStore(&diagnostics[3],1u);}
+  previousFaces[gid.x] = PreviousFace(source.originX, source.originY, source.originZ, source.axisSpan,
+    source.normalVelocity);
 }
 
 @compute @workgroup_size(1)
@@ -462,6 +472,8 @@ fn radixScatter(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invoca
 fn validateTopology(@builtin(global_invocation_id) gid: vec3u) {
   let previousCount=min(previousControl[0],previousControl[2]);
   if(gid.x<previousCount){let index=sortedIndices[gid.x];let old=previousFaces[index];
+    let base=16u+gid.x*5u;sortScratch[base]=old.originX;sortScratch[base+1u]=old.originY;
+    sortScratch[base+2u]=old.originZ;sortScratch[base+3u]=old.axisSpan;sortScratch[base+4u]=bitcast<u32>(old.normalVelocity);
     if(!finite(old.normalVelocity)){atomicAdd(&diagnostics[2],1u);atomicStore(&diagnostics[3],1u);}
     if(gid.x>0u){let prior=previousFaces[sortedIndices[gid.x-1u]];if(prior.originX==old.originX&&prior.originY==old.originY&&prior.originZ==old.originZ&&prior.axisSpan==old.axisSpan){atomicAdd(&diagnostics[2],1u);atomicStore(&diagnostics[3],1u);}}
   }
@@ -473,10 +485,12 @@ fn validateTopology(@builtin(global_invocation_id) gid: vec3u) {
 @compute @workgroup_size(1)
 fn publishPreviousFaces() {
   let count = min(previousControl[0], previousControl[2]);
-  previousControl[14] = select(0u, VALID,
+  let valid=select(0u, VALID,
     previousControl[13] != 0u && previousControl[1] == 0u
       && previousControl[0] <= previousControl[2] && atomicLoad(&diagnostics[3]) == 0u
       && (count == 0u || previousControl[4] > 0u));
+  previousControl[14]=valid;sortScratch[0]=count;sortScratch[1]=previousControl[2];
+  sortScratch[2]=previousControl[13];sortScratch[3]=valid;sortScratch[4]=16u;sortScratch[5]=5u;
 }
 
 fn publishHash(face:FaceRecord){let h=(face.originX*0x9e3779b9u)^(face.originY*0x85ebca6bu)^(face.originZ*0xc2b2ae35u)^face.axisSpan;atomicXor(&diagnostics[4],h);atomicXor(&diagnostics[5],bitcast<u32>(face.normalVelocity)*(h|1u));atomicAdd(&diagnostics[6],1u);}

@@ -3438,6 +3438,10 @@ export class WebGPUOctreeProjection {
           }, productionBoundary ? (detail, completedEncoder) =>
             productionBoundary("fineTransport", completedEncoder, detail) : undefined);
           this.energyLedger?.encodeFinePotential(encoder, "postFineTransport", transport.source);
+          // Topology may reuse the shared physical payload pool. Capture the
+          // transported old phi by logical sample before that reuse, then
+          // intersect it with the new generation after topology publication.
+          this.energyLedger?.encodeFineCommonCapture(encoder, transport.source);
           transportEncoded = true;
           splitProductionPhase("fineTransport");
         }
@@ -3463,11 +3467,17 @@ export class WebGPUOctreeProjection {
             safetyBrickRings: 1,
           }, true);
           this.energyLedger?.encodeFinePotential(encoder, "postFineTopology", this.globalFineSourceB!);
+          if (publicationTransport) this.energyLedger?.encodeFineCommonTopologyPair(
+            encoder, publicationTransport.source, this.globalFineSourceB!,
+          );
           splitProductionPhase("fineTopology");
           beginFineRedistanceTiming();
           publicationRedistance.encode(encoder, { bandCells: redistanceBandCells, residualTolerance: 1,
             method: this.fineRedistanceMethod });
           this.energyLedger?.encodeFinePotential(encoder, "postFineRedistance", this.globalFineSourceB!);
+          if (publicationTransport) this.energyLedger?.encodeFineCommonPotential(
+            encoder, "postFineRedistanceCommon", this.globalFineSourceB!.generation, this.globalFineSourceB!,
+          );
           publicationVolume?.encode(encoder);
           this.energyLedger?.encodeFinePotential(encoder, "postFineVolumeCorrection", this.globalFineSourceB!);
           splitProductionPhase("fineRedistance");
@@ -3484,11 +3494,17 @@ export class WebGPUOctreeProjection {
             safetyBrickRings: 1,
           }, true);
           this.energyLedger?.encodeFinePotential(encoder, "postFineTopology", this.globalFineSourceA!);
+          if (publicationTransport) this.energyLedger?.encodeFineCommonTopologyPair(
+            encoder, publicationTransport.source, this.globalFineSourceA!,
+          );
           splitProductionPhase("fineTopology");
           beginFineRedistanceTiming();
           publicationRedistance.encode(encoder, { bandCells: redistanceBandCells, residualTolerance: 1,
             method: this.fineRedistanceMethod });
           this.energyLedger?.encodeFinePotential(encoder, "postFineRedistance", this.globalFineSourceA!);
+          if (publicationTransport) this.energyLedger?.encodeFineCommonPotential(
+            encoder, "postFineRedistanceCommon", this.globalFineSourceA!.generation, this.globalFineSourceA!,
+          );
           publicationVolume?.encode(encoder);
           this.energyLedger?.encodeFinePotential(encoder, "postFineVolumeCorrection", this.globalFineSourceA!);
           splitProductionPhase("fineRedistance");
