@@ -13,6 +13,15 @@ import type { VoxelRenderMode } from "../webgpu-voxel-debug";
 
 export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | null;
 
+export const DEFAULT_RIGHT_PANEL_WIDTH = 620;
+export const MIN_RIGHT_PANEL_WIDTH = 300;
+export const MAX_RIGHT_PANEL_WIDTH = 960;
+
+export function normalizeRightPanelWidth(width: number) {
+  if (!Number.isFinite(width)) return DEFAULT_RIGHT_PANEL_WIDTH;
+  return Math.round(Math.max(MIN_RIGHT_PANEL_WIDTH, Math.min(MAX_RIGHT_PANEL_WIDTH, width)));
+}
+
 /** Viewport state: camera, selection, open panels, and debug controls. */
 interface UIStore {
   camera: CameraState;
@@ -20,6 +29,7 @@ interface UIStore {
   sceneModalOpen: boolean;
   diagnosticsOpen: boolean;
   rightPanel: RightPanel;
+  rightPanelWidth: number;
   /** Fig. 2-style grid cross-section drawn on a slice plane in the scene. */
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
@@ -44,6 +54,7 @@ interface UIStore {
   setSceneModalOpen: (open: boolean) => void;
   setDiagnosticsOpen: (open: boolean) => void;
   setRightPanel: (panel: RightPanel) => void;
+  setRightPanelWidth: (width: number) => void;
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
@@ -65,6 +76,7 @@ export const useUIStore = create<UIStore>((set) => ({
   sceneModalOpen: false,
   diagnosticsOpen: false,
   rightPanel: null,
+  rightPanelWidth: DEFAULT_RIGHT_PANEL_WIDTH,
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
@@ -86,6 +98,7 @@ export const useUIStore = create<UIStore>((set) => ({
     rightPanel: diagnosticsOpen ? "diagnostics" : state.rightPanel === "diagnostics" ? null : state.rightPanel
   })),
   setRightPanel: (rightPanel) => set({ rightPanel, diagnosticsOpen: rightPanel === "diagnostics" }),
+  setRightPanelWidth: (rightPanelWidth) => set({ rightPanelWidth: normalizeRightPanelWidth(rightPanelWidth) }),
   setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),

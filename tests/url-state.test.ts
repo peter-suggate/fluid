@@ -300,6 +300,24 @@ test("viewport utility panels round-trip through one mutually exclusive query st
   assert.equal(parseQueryState(query).ui.rightPanel, "visual");
 });
 
+test("right panel width round-trips through the query state", () => {
+  const parsed = parseQueryState("?panel=bodies&panelWidth=734");
+  assert.equal(parsed.ui.rightPanel, "bodies");
+  assert.equal(parsed.ui.rightPanelWidth, 734);
+
+  const query = serializeQueryState("?panelWidth=stale", {
+    presetId: parsed.presetId,
+    scene: parsed.scene,
+  }, {
+    methodId: parsed.methodId,
+    quality: parsed.quality,
+    overrides: parsed.overrides,
+  }, parsed.ui);
+  assert.equal(new URLSearchParams(query).get("panelWidth"), "734");
+  assert.equal(parseQueryState("?panelWidth=20").ui.rightPanelWidth, 620);
+  assert.equal(parseQueryState("?panelWidth=2000").ui.rightPanelWidth, 620);
+});
+
 test("legacy performance query links open the performance sidebar and canonicalize", () => {
   const parsed = parseQueryState("?performance=1");
   assert.equal(parsed.ui.rightPanel, "performance");
