@@ -23,6 +23,7 @@ test("native sparse pyramid allocation is bounded by row capacity, not dense dom
   assert.equal(narrow.transferStride, 40_000);
   assert.ok(wide.levelCount > narrow.levelCount);
   assert.equal(wide.stateBytes, 27 * wide.levelCount * wide.levelStride * 4);
+  assert.equal(wide.dispatchBytes, wide.levelCount * 32 + 32);
   assert.ok(!("cellCount" in wide));
   assert.throws(() => planOctreeSPGridVCycle({ dimensions: [16, 16, 16],
     rowCapacity: SPGRID_MAXIMUM_ROW_CAPACITY + 1 }), /bounded/);
@@ -74,6 +75,10 @@ test("fixed LDLT bottom operation is exact, linear, symmetric, and positive", ()
 });
 
 test("GPU source stores one transfer record and consumes it in both adjoint directions", () => {
+  assert.match(octreeSPGridVCycleShader, /clearCorrection[\s\S]*r<rows\(\)&&!stopped\(\)/,
+    "post-convergence correction clears must be write-free");
+  assert.match(octreeSPGridVCycleShader, /zeroVectors[\s\S]*i>=count\(l\)\|\|stopped\(\)/,
+    "post-convergence sparse-level clears must be write-free");
   const bindings = [...octreeSPGridVCycleShader.matchAll(/@group\(0\) @binding\((\d+)\)/g)]
     .map((match) => Number(match[1]));
   assert.equal(new Set(bindings).size, bindings.length,
@@ -105,6 +110,12 @@ test("GPU source stores one transfer record and consumes it in both adjoint dire
 });
 
 test("every SPGrid auto-layout binds the complete reachable resource ABI", () => {
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.resetInvalidBuffers, [4, 5],
+    "the conditional cold reset reaches only the topology and state arenas");
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.clearCorrection, [0, 3, 7, 9],
+    "correction clearing observes the solver stop gate before writing output");
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.zeroVectors, [0, 4, 5, 6, 7],
+    "vector clearing observes the solver stop gate before touching sparse slots");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.seedRhs, [0, 1, 3, 4, 5, 7, 8],
     "native-level RHS seeding reads the captured leaf size and must bind headers");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.publish, [0, 1, 3, 4, 5, 7, 9],
@@ -150,24 +161,87 @@ test("one correction uses one compute-pass transition, ordered dispatches, and c
   cycle.destroy();
 });
 
-test("shared-pass ABI emits no nested pass or command-encoder clear", () => {
+test("setup retires the prior live generation without unconditional full-buffer clears", () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
-  const buffer = (size: number, usage = 31) => ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
+  const created: Array<{ label?: string; size: number; usage: number; buffer: GPUBuffer }> = [];
+  const buffer = (size: number, usage = 31, label?: string) => ({ size, usage, label, destroy() {} }) as unknown as GPUBuffer;
   const device = { queue: { writeBuffer() {} },
-    createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage), createShaderModule: () => ({}),
-    createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }), createBindGroup: () => ({}),
+    createBuffer: ({ label, size, usage }: { label?: string; size: number; usage: number }) => {
+      const gpuBuffer = buffer(size, usage, label); created.push({ label, size, usage, buffer: gpuBuffer }); return gpuBuffer;
+    }, createShaderModule: () => ({}),
+    createComputePipeline: ({ label }: { label: string }) => ({ label, getBindGroupLayout: () => ({}) }), createBindGroup: () => ({}),
   } as unknown as GPUDevice;
   const cycle = new WebGPUOctreeSPGridVCycle(device, { leafHeaders: buffer(48 * 32), leafEntries: buffer(256) },
     { dimensions: [8, 8, 8], rowCapacity: 32, finestCellWidth: 1 });
-  let nested = 0, clears = 0, dispatches = 0;
-  const encoder = { beginComputePass() { nested += 1; throw new Error("nested pass"); }, clearBuffer() { clears += 1; } } as unknown as GPUCommandEncoder;
-  const pass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() { dispatches += 1; },
-    dispatchWorkgroupsIndirect() { dispatches += 1; }, end() {} } as unknown as GPUComputePassEncoder;
+  const events: string[] = []; let dispatches = 0, current = "";
+  const encoder = {
+    clearBuffer() { throw new Error("warm SPGrid setup must not clear full buffers"); },
+    beginComputePass() { events.push("begin"); return {
+      setPipeline(pipeline: { label: string }) { current = pipeline.label.replace("SPGrid V-cycle · ", ""); }, setBindGroup() {},
+      dispatchWorkgroups() { dispatches += 1; events.push(`direct:${current}`); },
+      dispatchWorkgroupsIndirect(source: GPUBuffer, offset: number) {
+        dispatches += 1; events.push(`indirect:${current}:${offset}:${String((source as GPUBuffer & { label?: string }).label)}`);
+      },
+      end() { events.push("end"); } }; },
+    copyBufferToBuffer(source: GPUBuffer, sourceOffset: number, destination: GPUBuffer, destinationOffset: number, size: number) {
+      assert.equal(sourceOffset, 0); assert.equal(destinationOffset, 0); assert.equal(size, cycle.plan.dispatchBytes);
+      events.push(`copy:${String((source as GPUBuffer & { label?: string }).label)}->${String((destination as GPUBuffer & { label?: string }).label)}`);
+    },
+  } as unknown as GPUCommandEncoder;
   const input = { rowCount: buffer(64), solverControl: buffer(64), rhs: buffer(128), correction: buffer(128) };
-  cycle.encodeSetup(encoder, input, pass); const setupDispatches = dispatches;
-  cycle.encodeCorrection(encoder, input, pass);
-  assert.equal(nested, 0); assert.equal(clears, 0);
-  assert.equal(dispatches - setupDispatches, cycle.encodedCorrectionDispatchCount);
+  cycle.encodeSetup(encoder, input);
+  assert.equal(dispatches, cycle.encodedSetupDispatchCount);
+  assert.equal(events[0], "begin");
+  assert.equal(events[1], `indirect:resetInvalidBuffers:${cycle.plan.levelCount * 32 + 8}:SPGrid live indirect dispatches`);
+  assert.deepEqual(events.slice(2, 2 + cycle.plan.levelCount), Array.from({ length: cycle.plan.levelCount }, (_, level) =>
+    `indirect:retireSlots:${level * 32 + 8}:SPGrid live indirect dispatches`));
+  assert.equal(events[2 + cycle.plan.levelCount], "direct:retireRows");
+  assert.equal(events[3 + cycle.plan.levelCount], "direct:resetSetupMetadata");
+  assert.ok(events.indexOf("direct:finalizeLifecycle") < events.indexOf("end"));
+  assert.deepEqual(events.slice(-2), ["end",
+    "copy:SPGrid worklist counts and published dispatches->SPGrid live indirect dispatches"]);
+  const metadata = created.find((entry) => entry.label === "SPGrid worklist counts and published dispatches")!;
+  const indirect = created.find((entry) => entry.label === "SPGrid live indirect dispatches")!;
+  assert.equal(metadata.usage & GPUBufferUsage.COPY_SRC, GPUBufferUsage.COPY_SRC);
+  assert.equal(metadata.usage & GPUBufferUsage.INDIRECT, 0, "writable metadata must never be an indirect source");
+  assert.equal(indirect.usage, GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT);
+  assert.equal(indirect.usage & GPUBufferUsage.STORAGE, 0, "indirect arguments must never be writable storage");
+  cycle.destroy();
+});
+
+test("failed generations publish a conditional full reset and successful generations retire exact live slots", () => {
+  assert.match(octreeSPGridVCycleShader, /fn previousValid\(\)->bool/);
+  assert.match(octreeSPGridVCycleShader,
+    /fn retireSlots[\s\S]*!previousValid\(\)\|\|i>=count\(l\)[\s\S]*for\(var c=0u;c<27u;c\+=1u\)/);
+  assert.match(octreeSPGridVCycleShader,
+    /fn resetInvalidBuffers[\s\S]*i<arrayLength\(&topology\)[\s\S]*i<arrayLength\(&state\)/);
+  assert.match(octreeSPGridVCycleShader,
+    /fn finalizeLifecycle[\s\S]*atomicLoad\(&control\[0\]\)==0u[\s\S]*atomicStore\(&dispatchMeta\[base\],1u\)[\s\S]*let words=max\(arrayLength\(&topology\),arrayLength\(&state\)\)/);
+  assert.doesNotMatch(WebGPUOctreeSPGridVCycle.prototype.encodeSetup.toString(), /clearBuffer/,
+    "successful recurring generations must not write full sparse capacity");
+});
+
+test("correction consumes per-level live slot and transfer dispatch offsets", () => {
+  Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
+  const buffer = (size: number, usage = 31, label?: string) => ({ size, usage, label, destroy() {} }) as unknown as GPUBuffer;
+  const device = { queue: { writeBuffer() {} },
+    createBuffer: ({ label, size, usage }: { label?: string; size: number; usage: number }) => buffer(size, usage, label),
+    createShaderModule: () => ({}), createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }), createBindGroup: () => ({}),
+  } as unknown as GPUDevice;
+  const cycle = new WebGPUOctreeSPGridVCycle(device, { leafHeaders: buffer(48 * 32), leafEntries: buffer(256) },
+    { dimensions: [8, 8, 8], rowCapacity: 32, finestCellWidth: 1 });
+  const offsets: number[] = []; const sources = new Set<GPUBuffer>(); let direct = 0;
+  const pass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() { direct += 1; },
+    dispatchWorkgroupsIndirect(source: GPUBuffer, offset: number) { sources.add(source); offsets.push(offset); }, end() {} } as unknown as GPUComputePassEncoder;
+  const encoder = { beginComputePass: () => pass } as unknown as GPUCommandEncoder;
+  const input = { rowCount: buffer(64), solverControl: buffer(64), rhs: buffer(128), correction: buffer(128) };
+  cycle.encodeCorrection(encoder, input);
+  assert.equal(direct, 3, "only correction clear, RHS seed, and publication use row-capacity dispatches");
+  assert.equal(offsets.length, cycle.encodedCorrectionDispatchCount - direct);
+  assert.equal(sources.size, 1, "all correction work must consume the dedicated indirect buffer");
+  assert.ok(offsets.includes(8) && offsets.includes(20), "level zero uses distinct slot and transfer records");
+  assert.ok(offsets.includes((cycle.plan.levelCount - 1) * 32 + 8), "the bottom level uses its own live slot record");
+  assert.ok(offsets.every((offset) => offset % 32 === 8 || offset % 32 === 20));
   cycle.destroy();
 });
 
@@ -185,7 +259,8 @@ test("Dawn accepts the native sparse V-cycle shader", {
   const info = await shaderModule.getCompilationInfo();
   const errors = info.messages.filter((message) => message.type === "error");
   assert.deepEqual(errors.map((message) => `${message.lineNum}:${message.linePos} ${message.message}`), []);
-  for (const entryPoint of ["clearTopology", "clearState", "clearDispatch", "clearCorrection", "emitCells", "emitGhostAliases",
+  for (const entryPoint of ["resetInvalidBuffers", "retireSlots", "retireRows", "resetSetupMetadata", "finalizeLifecycle",
+    "clearCorrection", "emitCells", "emitGhostAliases",
     "buildTransfers", "buildStencil", "ensureDiagonal", "finalizeIndirect", "zeroVectors", "seedRhs", "applyA",
     "applyB", "jacobiAtoB", "jacobiBtoA", "formResidual", "restrictResidual", "ghostValueAccumulate", "exactBottom",
     "prolongCorrection", "ghostValuePropagate", "publish"]) {

@@ -23,6 +23,15 @@ test("pressure solve UI reports an isolated completion fence instead of a whole-
   assert.match(panelSource, /PRODUCTION ADVANCE · QUEUE-BOUNDARY SAMPLE/);
   assert.match(panelSource, /TOPOLOGY \+ ADVECT/);
   assert.match(panelSource, /PRESSURE \+ PROJECT/);
+  for (const label of ["PRESSURE ASSEMBLY + SETUP", "MGPCG SOLVE", "POWER PROJECT + PUBLISH",
+    "FACE-BAND TOPOLOGY", "TRANSITION ADJACENCY", "FACE FAST MARCH",
+    "FACE-BAND POWER PUBLISH", "COMPATIBILITY PROJECTION"]) {
+    assert.match(panelSource, new RegExp(label.replaceAll("+", "\\+")));
+  }
+  for (const label of ["LEAF COMPACTION + L1", "POWER TOPOLOGY + FACES", "OLD-FACE ADVECT + REPAIR",
+    "POWER OPERATOR + RHS", "FINAL PRESSURE ROWS"]) {
+    assert.match(panelSource, new RegExp(label.replaceAll("+", "\\+")));
+  }
   assert.match(panelSource, /FINE SURFACE TOTAL/);
   for (const label of ["FINE PREP + SEEDS", "FINE TRANSPORT", "FINE TOPOLOGY", "REDISTANCE + VOLUME",
     "RESTRICT + COARSE φ", "PAGE SURFACE", "OTHER COUPLING"]) assert.match(panelSource, new RegExp(label.replace("+", "\\+")));
@@ -64,6 +73,34 @@ test("production profiler splits a real advance at queue submission boundaries",
   assert.match(uniformSource, /productionPhaseProbeActive/);
   assert.match(uniformSource, /submitCurrentEncoder\("topologyAdvection", true\)/);
   assert.match(uniformSource, /submitCurrentEncoder\("pressureProjection", true\)/);
+  assert.match(uniformSource, /productionBoundary: productionPhaseProbeActive \?/,
+    "ordinary advances must not receive intrusive pressure queue boundaries");
+  for (const phase of ["pressureAssemblySetup", "mgpcgSolve", "powerProjectionPublication",
+    "faceBandTopologyBuild", "faceBandTransitionAdjacency", "faceBandFastMarch",
+    "faceBandPowerPublicationCapture", "remainingCompatibilityProjection"]) {
+    assert.match(octreeSource, new RegExp(phase));
+    assert.match(uniformSource, new RegExp(`${phase}: 0`));
+    assert.match(uniformSource, new RegExp(`${phase}_ms`));
+  }
+  for (const phase of ["pressureLeafCompactionL1Capture", "faceMirrorTransportRhs", "powerDescriptorTopologyFaces",
+    "oldFaceAdvectionRepair", "powerOperatorRhsAssembly", "finalPressureRowAssembly"]) {
+    assert.match(octreeSource, new RegExp(phase));
+    assert.match(uniformSource, new RegExp(`${phase}: 0`));
+    assert.match(uniformSource, new RegExp(`${phase}_ms`));
+  }
+  assert.match(octreeSource, /encodeCapture\(encoder\);\s*splitProductionPhase\("pressureLeafCompactionL1Capture"\)/);
+  assert.match(octreeSource, /encodeRhs\(encoder[\s\S]*splitProductionPhase\("faceMirrorTransportRhs"\)/);
+  assert.match(octreeSource, /faces\.encode\(encoder[\s\S]*splitProductionPhase\("powerDescriptorTopologyFaces"\)/);
+  assert.match(octreeSource, /encodeRepairPowerFaceAdvection[\s\S]*splitProductionPhase\("oldFaceAdvectionRepair"\)/);
+  assert.match(octreeSource, /encodeAssemblyFromControl[\s\S]*splitProductionPhase\("powerOperatorRhsAssembly"\)/);
+  assert.match(octreeSource, /encodeLeafRowPublication[\s\S]*splitProductionPhase\("finalPressureRowAssembly"\)/);
+  assert.match(octreeSource, /splitProductionPhase\("pressureAssemblySetup"\)[\s\S]*this\.mgpcg!\.encode[\s\S]*splitProductionPhase\("mgpcgSolve"\)/,
+    "MGPCG must be isolated between closed pressure setup and solve submissions");
+  assert.match(octreeSource, /splitProductionPhase\("powerProjectionPublication"\)[\s\S]*encodeGlobalFineFaceBand/);
+  assert.match(octreeSource, /phase === "topology-build"[\s\S]*"faceBandTopologyBuild"[\s\S]*"faceBandPowerPublicationCapture"/);
+  assert.match(octreeSource, /splitProductionPhase\("remainingCompatibilityProjection"\);[\s\S]*return encoder/);
+  assert.match(uniformSource, /await productionQueueReadyAtPromise;\s*let previousCompletedAt = performance\.now\(\)/,
+    "the first phase baseline must exclude host advance encoding time");
   assert.match(uniformSource, /finePreparation: 0, fineTransport: 0, fineTopology: 0/);
   assert.match(uniformSource, /fineRedistance: 0, fineRestriction: 0, pageSurface: 0/);
   assert.match(octreeSource, /splitProductionPhase\("fineTransport"\)/);
@@ -95,6 +132,10 @@ test("production profiler splits a real advance at queue submission boundaries",
   assert.match(uniformSource, /submitCurrentEncoder\(phase, true, detail\)/);
   assert.match(uniformSource, /fineTransportSegments = new Map/);
   assert.match(panelSource, /no shader instrumentation or atomics are added/);
+  assert.match(panelSource, /phaseProbeInflation[\s\S]*<= 1\.25/,
+    "the UI must reject a boundary replay whose synchronization changes the measured workload");
+  assert.match(panelSource, /PRODUCTION PHASE PROFILE · REJECTED/);
+  assert.match(panelSource, /single submission · Dawn parity contract/);
 });
 
 test("octree solver reports only its own host encode and bounded pass schedule", () => {

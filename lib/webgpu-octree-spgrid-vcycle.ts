@@ -303,6 +303,7 @@ export interface OctreeSPGridVCyclePlan {
   readonly transferStride: number;
   readonly topologyBytes: number;
   readonly stateBytes: number;
+  readonly dispatchBytes: number;
   readonly allocatedBytes: number;
   readonly rowDispatch: readonly [number, number, number];
   readonly slotDispatch: readonly [number, number, number];
@@ -328,6 +329,8 @@ export interface OctreeSPGridVCycleSource { readonly leafHeaders: GPUBuffer; rea
 // power diagrams in Aanjaneya et al. (2017), Section 4.2.
 const STATE_CHANNELS = 27;
 const TOPOLOGY_HEADER_WORDS = 16;
+const DISPATCH_RECORD_BYTES_PER_LEVEL = 32;
+const DISPATCH_LIFECYCLE_BYTES = 32;
 /** Explicit row bound; the constructor also fails closed on device limits. */
 export const SPGRID_MAXIMUM_ROW_CAPACITY = 16_384;
 
@@ -361,23 +364,28 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
   const transferWords = (levelCount - 1) * transferStride * 3;
   const topologyBytes = (TOPOLOGY_HEADER_WORDS + rowMapWords + worklistWords + transferWords) * 4;
   const stateBytes = STATE_CHANNELS * levelCount * levelStride * 4;
-  return { rowCapacity, levelCount, levelStride, transferStride, topologyBytes, stateBytes,
-    allocatedBytes: topologyBytes + stateBytes + levelCount * 32 + levelCount * 64,
+  const dispatchBytes = levelCount * DISPATCH_RECORD_BYTES_PER_LEVEL + DISPATCH_LIFECYCLE_BYTES;
+  return { rowCapacity, levelCount, levelStride, transferStride, topologyBytes, stateBytes, dispatchBytes,
+    // Storage-authored counts and indirect arguments must be separate WebGPU
+    // buffers; the final term is the per-level uniform parameter storage.
+    allocatedBytes: topologyBytes + stateBytes + 2 * dispatchBytes + levelCount * 64,
     rowDispatch: dispatchFor(rowCapacity), slotDispatch: dispatchFor(levelStride), transferDispatch: dispatchFor(transferStride) };
 }
 
 export type OctreeSPGridVCyclePipelineName = "emitCells" | "emitGhostAliases" | "buildTransfers" | "buildStencil" | "ensureDiagonal" | "finalizeIndirect"
-  | "clearTopology" | "clearState" | "clearDispatch" | "clearCorrection"
+  | "resetInvalidBuffers" | "retireSlots" | "retireRows" | "resetSetupMetadata" | "finalizeLifecycle" | "clearCorrection"
   | "zeroVectors" | "seedRhs" | "applyA" | "applyB" | "jacobiAtoB" | "jacobiBtoA"
   | "formResidual" | "restrictResidual" | "ghostValueAccumulate" | "exactBottom"
   | "prolongCorrection" | "ghostValuePropagate" | "publish";
 
 export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePipelineName, readonly number[]>> = Object.freeze({
-  clearTopology: [4], clearState: [5], clearDispatch: [6], clearCorrection: [0, 3, 9],
+  resetInvalidBuffers: [4, 5], retireSlots: [0, 4, 5, 6], retireRows: [0, 3, 4, 6],
+  resetSetupMetadata: [0, 6], finalizeLifecycle: [0, 3, 4, 5, 6, 7],
+  clearCorrection: [0, 3, 7, 9],
   emitCells: [0, 1, 3, 4, 5, 6, 7], emitGhostAliases: [0, 1, 2, 3, 4, 5, 6, 7],
   buildTransfers: [0, 1, 3, 4, 5, 6, 7],
   buildStencil: [0, 1, 2, 3, 4, 5, 7], ensureDiagonal: [0, 4, 5, 6], finalizeIndirect: [0, 6],
-  zeroVectors: [0, 4, 5, 6], seedRhs: [0, 1, 3, 4, 5, 7, 8], applyA: [0, 4, 5, 6, 7],
+  zeroVectors: [0, 4, 5, 6, 7], seedRhs: [0, 1, 3, 4, 5, 7, 8], applyA: [0, 4, 5, 6, 7],
   applyB: [0, 4, 5, 6, 7], jacobiAtoB: [0, 4, 5, 6, 7], jacobiBtoA: [0, 4, 5, 6, 7],
   formResidual: [0, 4, 5, 6, 7], restrictResidual: [0, 4, 5, 6, 7],
   ghostValueAccumulate: [0, 4, 5, 6, 7],
@@ -411,6 +419,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly topology: GPUBuffer;
   private readonly state: GPUBuffer;
   private readonly dispatchMeta: GPUBuffer;
+  private readonly indirectDispatch: GPUBuffer;
   private readonly params: readonly GPUBuffer[];
   private readonly pipelines: Readonly<Record<OctreeSPGridVCyclePipelineName, GPUComputePipeline>>;
   private readonly groups = new Map<string, CachedGroup>();
@@ -442,8 +451,10 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.capturedEntries = device.createBuffer({ label: "SPGrid captured L1 entries", size: source.leafEntries.size, usage: storage });
     this.topology = device.createBuffer({ label: "SPGrid native sparse topology/worklists/transfers", size: this.plan.topologyBytes, usage: storage });
     this.state = device.createBuffer({ label: "SPGrid six-face stencils and vectors", size: this.plan.stateBytes, usage: storage });
-    this.dispatchMeta = device.createBuffer({ label: "SPGrid worklist counts and indirect dispatches", size: this.plan.levelCount * 32,
-      usage: storage });
+    this.dispatchMeta = device.createBuffer({ label: "SPGrid worklist counts and published dispatches", size: this.plan.dispatchBytes,
+      usage: storage | GPUBufferUsage.COPY_SRC });
+    this.indirectDispatch = device.createBuffer({ label: "SPGrid live indirect dispatches", size: this.plan.dispatchBytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
     const damping = Math.max(0.05, Math.min(0.95, options.damping ?? 2 / 3));
     this.params = Object.freeze(Array.from({ length: this.plan.levelCount }, (_, level) => {
       const buffer = device.createBuffer({ label: `SPGrid level ${level} parameters`, size: 64,
@@ -460,9 +471,10 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       layout: "auto", compute: { module: shaderModule, entryPoint } });
     this.pipelines = Object.freeze(Object.fromEntries((Object.keys(OCTREE_SPGRID_VCYCLE_BINDINGS) as OctreeSPGridVCyclePipelineName[]).map((name) => [name, make(name)])) as Record<OctreeSPGridVCyclePipelineName, GPUComputePipeline>);
     const l = this.plan.levelCount;
-    // Three clears, finest-cell emission, one transfer build per adjacent
-    // level, the finest stencil build, then diagonal/finalization per level.
-    this.encodedSetupDispatchCount = 3 * l + 5;
+    // One conditional cold reset, live retirement per level, row-map/reset
+    // bookkeeping, finest-cell emission, transfer construction, stencil
+    // construction, diagonal/finalization per level, and lifecycle publish.
+    this.encodedSetupDispatchCount = 4 * l + 6;
     this.encodedCorrectionDispatchCount = l + 4 + (l - 1) * (2 * this.pre + 2 * this.post + 6);
     this.encodedCorrectionPassCount = this.encodedCorrectionDispatchCount;
     this.diagnostics = Object.freeze({ levelCount: l, coarsestCapacity: this.plan.levelStride,
@@ -477,13 +489,17 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     encoder.copyBufferToBuffer(this.source.leafEntries, 0, this.capturedEntries, 0, this.capturedEntries.size);
   }
 
-  encodeSetup(encoder: GPUCommandEncoder, input: { solverControl: GPUBuffer; rowCount: GPUBuffer },
-    sharedPass?: GPUComputePassEncoder): void {
+  encodeSetup(encoder: GPUCommandEncoder, input: { solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     this.assertLive();
-    const pass = sharedPass ?? encoder.beginComputePass({ label: "SPGrid V-cycle · rebuild native pyramid" });
-    this.run(pass, "clearTopology", 0, input, dispatchFor(this.plan.topologyBytes / 4));
-    this.run(pass, "clearState", 0, input, dispatchFor(this.plan.stateBytes / 4));
-    this.run(pass, "clearDispatch", 0, input, dispatchFor(this.plan.levelCount * 8));
+    const pass = encoder.beginComputePass({ label: "SPGrid V-cycle · rebuild native pyramid" });
+    this.bind(pass, "resetInvalidBuffers", 0, input);
+    pass.dispatchWorkgroupsIndirect(this.indirectDispatch, this.plan.levelCount * DISPATCH_RECORD_BYTES_PER_LEVEL + 8);
+    for (let level = 0; level < this.plan.levelCount; level += 1) {
+      this.bind(pass, "retireSlots", level, input);
+      pass.dispatchWorkgroupsIndirect(this.indirectDispatch, level * DISPATCH_RECORD_BYTES_PER_LEVEL + 8);
+    }
+    this.run(pass, "retireRows", 0, input, this.plan.rowDispatch);
+    this.run(pass, "resetSetupMetadata", 0, input, [1, 1, 1]);
     this.run(pass, "emitCells", 0, input, this.plan.rowDispatch);
     this.run(pass, "emitGhostAliases", 0, input, this.plan.rowDispatch);
     for (let level = 0; level < this.plan.levelCount - 1; level += 1) this.run(pass, "buildTransfers", level, input, this.plan.slotDispatch);
@@ -492,7 +508,12 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       this.run(pass, "ensureDiagonal", level, input, this.plan.slotDispatch);
       this.run(pass, "finalizeIndirect", level, input, [1, 1, 1]);
     }
-    if (!sharedPass) pass.end();
+    this.run(pass, "finalizeLifecycle", 0, input, [1, 1, 1]);
+    pass.end();
+    // dispatchMeta remains STORAGE-only inside compute passes. Copying its
+    // finalized records after the setup boundary gives correction a distinct
+    // INDIRECT-only source and avoids a whole-pass storage/indirect conflict.
+    encoder.copyBufferToBuffer(this.dispatchMeta, 0, this.indirectDispatch, 0, this.plan.dispatchBytes);
   }
 
   encodeCorrection(encoder: GPUCommandEncoder, input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer },
@@ -527,12 +548,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
 
   private runIndirect(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
     input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }, transfer: boolean): void {
-    // WebGPU usage scopes cover an entire compute pass: a buffer cannot be
-    // writable storage while also supplying indirect arguments in that pass.
-    // Keep the one-pass schedule and dispatch the bounded sparse capacities;
-    // every kernel exits against the GPU-authored live count.
     this.bind(pass, name, level, input);
-    pass.dispatchWorkgroups(...(transfer ? this.plan.transferDispatch : this.plan.slotDispatch));
+    pass.dispatchWorkgroupsIndirect(this.indirectDispatch, level * 32 + (transfer ? 20 : 8));
   }
   private run(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
     input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer },
@@ -559,6 +576,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   destroy(): void {
     if (this.destroyed) return; this.destroyed = true; this.groups.clear();
     this.capturedHeaders.destroy(); this.capturedEntries.destroy(); this.topology.destroy(); this.state.destroy(); this.dispatchMeta.destroy();
+    this.indirectDispatch.destroy();
     for (const buffer of this.params) buffer.destroy();
   }
 }
@@ -596,6 +614,8 @@ fn transferBase()->u32{return workBase()+levels()*stride();}fn rowMap(l:u32,r:u3
 fn workSlot(l:u32,i:u32)->u32{return atomicLoad(&topology[workBase()+l*stride()+i]);}
 fn transferWord(l:u32,i:u32,w:u32)->u32{return transferBase()+(l*transferStride()+i)*3u+w;}
 fn count(l:u32)->u32{return atomicLoad(&dispatchMeta[l*8u]);}fn transferCount(l:u32)->u32{return atomicLoad(&dispatchMeta[l*8u+1u]);}
+fn lifecycleBase()->u32{return levels()*8u;}fn previousValid()->bool{return atomicLoad(&dispatchMeta[lifecycleBase()])==1u;}
+fn previousRows()->u32{return atomicLoad(&dispatchMeta[lifecycleBase()+1u]);}
 fn genericIndex(g:vec3u)->u32{return g.x+g.y*65535u*64u;}
 fn dims(l:u32)->vec3u{let s=1u<<l;return (p.dimsLevel.xyz+vec3u(s-1u))/s;}fn coordKey(q:vec3u,l:u32)->u32{let d=dims(l);return q.x+d.x*(q.y+d.y*q.z)+1u;}
 fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;return vec3u(v%d.x,(v/d.x)%d.y,v/(d.x*d.y));}
@@ -623,10 +643,19 @@ fn ownedContactSlot(l:u32,row:u32,other:u32)->u32{let h=headers[row];let native=
  let slot=find(l,contactCoord(h,headers[other],l));if(slot==INVALID||atomicLoad(&state[at(OWNER,l,slot)])!=row+1u){return INVALID;}return slot;}
 fn appendTransfer(l:u32,fine:u32,coarse:u32,weight:f32){let i=atomicAdd(&dispatchMeta[l*8u+1u],1u);if(i>=transferStride()){report(OVERFLOW);return;}
  atomicStore(&topology[transferWord(l,i,0u)],fine);atomicStore(&topology[transferWord(l,i,1u)],coarse);atomicStore(&topology[transferWord(l,i,2u)],bitcast<u32>(weight));}
-@compute @workgroup_size(64) fn clearTopology(@builtin(global_invocation_id) g:vec3u){let i=genericIndex(g);if(i<arrayLength(&topology)){atomicStore(&topology[i],0u);}}
-@compute @workgroup_size(64) fn clearState(@builtin(global_invocation_id) g:vec3u){let i=genericIndex(g);if(i<arrayLength(&state)){atomicStore(&state[i],0u);}}
-@compute @workgroup_size(64) fn clearDispatch(@builtin(global_invocation_id) g:vec3u){let i=genericIndex(g);if(i<arrayLength(&dispatchMeta)){atomicStore(&dispatchMeta[i],0u);}}
-@compute @workgroup_size(64) fn clearCorrection(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()){outputCorrection[r]=0.0;}}
+// A successful generation records every occupied hash slot exactly once in
+// its worklist. Retiring that live prefix is therefore equivalent to clearing
+// the full sparse arena, without writing tens of megabytes of empty capacity.
+@compute @workgroup_size(64) fn resetInvalidBuffers(@builtin(global_invocation_id) g:vec3u){let i=genericIndex(g);
+ if(i<arrayLength(&topology)){atomicStore(&topology[i],0u);}if(i<arrayLength(&state)){atomicStore(&state[i],0u);}}
+@compute @workgroup_size(64) fn retireSlots(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();
+ if(!previousValid()||i>=count(l)){return;}let s=workSlot(l,i);for(var c=0u;c<27u;c+=1u){atomicStore(&state[at(c,l,s)],0u);}}
+@compute @workgroup_size(64) fn retireRows(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);
+ if(!previousValid()||r>=max(rows(),previousRows())){return;}for(var l=0u;l<levels();l+=1u){atomicStore(&topology[rowMapBase()+l*p.capacity.x+r],0u);}}
+@compute @workgroup_size(1) fn resetSetupMetadata(){for(var i=0u;i<levels()*8u;i+=1u){atomicStore(&dispatchMeta[i],0u);}
+ let base=lifecycleBase();atomicStore(&dispatchMeta[base],0u);atomicStore(&dispatchMeta[base+1u],0u);
+ for(var i=2u;i<8u;i+=1u){atomicStore(&dispatchMeta[base+i],0u);}}
+@compute @workgroup_size(64) fn clearCorrection(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){outputCorrection[r]=0.0;}}
 @compute @workgroup_size(64) fn emitCells(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r>=rows()||stopped()){return;}let h=headers[r];
  let native=firstTrailingBit(h.size);for(var l=native;l<levels();l+=1u){let scale=1u<<l;let flag=select(MG_ONLY,ACTIVE,l==native);
   let q=originOf(h)/scale;var slot=INVALID;if(l==native){slot=insertOwned(l,q,flag,r);}else{slot=insert(l,q,flag);}
@@ -660,7 +689,15 @@ fn addFace(l:u32,own:u32,a:vec3u,b:vec3u,c:f32)->bool{let d=vec3i(b)-vec3i(a);va
 @compute @workgroup_size(1) fn finalizeIndirect(){let l=level();let n=count(l);let t=transferCount(l);let nb=(n+63u)/64u;let tb=(t+63u)/64u;
  atomicStore(&dispatchMeta[l*8u+2u],min(65535u,max(1u,nb)));atomicStore(&dispatchMeta[l*8u+3u],max(1u,(nb+65534u)/65535u));atomicStore(&dispatchMeta[l*8u+4u],1u);
  atomicStore(&dispatchMeta[l*8u+5u],min(65535u,max(1u,tb)));atomicStore(&dispatchMeta[l*8u+6u],max(1u,(tb+65534u)/65535u));atomicStore(&dispatchMeta[l*8u+7u],1u);}
-@compute @workgroup_size(64) fn zeroVectors(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)){return;}let s=workSlot(l,i);
+@compute @workgroup_size(1) fn finalizeLifecycle(){let base=lifecycleBase();if(atomicLoad(&control[0])==0u){
+ atomicStore(&dispatchMeta[base],1u);atomicStore(&dispatchMeta[base+1u],rows());return;}
+ // A failed insertion may have claimed a hash slot before discovering that
+ // its live worklist overflowed. Publish a conditional full reset for the
+ // next generation rather than trusting an incomplete retirement list.
+ let words=max(arrayLength(&topology),arrayLength(&state));let blocks=(words+63u)/64u;let x=min(65535u,blocks);
+ atomicStore(&dispatchMeta[base],0u);atomicStore(&dispatchMeta[base+1u],0u);atomicStore(&dispatchMeta[base+2u],x);
+ atomicStore(&dispatchMeta[base+3u],select(0u,(blocks+x-1u)/x,x>0u));atomicStore(&dispatchMeta[base+4u],1u);}
+@compute @workgroup_size(64) fn zeroVectors(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)||stopped()){return;}let s=workSlot(l,i);
  for(var c=RHS;c<=RESIDUAL;c+=1u){storef(c,l,s,0.0);}}
 @compute @workgroup_size(64) fn seedRhs(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let v=inputRhs[r];let native=firstTrailingBit(headers[r].size);
  if(!finite(v)){report(NONFINITE);}else{atomicAddF(at(RHS,native,rowMap(native,r)),v);}}}

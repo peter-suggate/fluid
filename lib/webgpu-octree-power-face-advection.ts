@@ -195,6 +195,25 @@ export function interpolateRegularAxisFaceComponent(
   return Number.isFinite(cubic) ? Math.max(minimum, Math.min(maximum, cubic)) : linear;
 }
 
+/**
+ * Owner-independent form of the paper's regular staggered interpolant.
+ *
+ * Section 5 extrapolates velocity on regular octree faces outside the liquid
+ * before velocity advection.  Consequently, a valid regular-grid sample must
+ * not depend on locating a liquid pressure cell at the query point.  The
+ * staggered lattice itself determines the interpolation cell.
+ */
+export function interpolateRegularAxisFaceComponentAtSize(
+  pointGrid: readonly [number, number, number],
+  size: number,
+  axis: 0 | 1 | 2,
+  sample: (origin: readonly [number, number, number], axis: 0 | 1 | 2, size: number) => number | undefined,
+): number | undefined {
+  if (![...pointGrid, size].every(Number.isFinite) || !Number.isSafeInteger(size) || size < 1) return undefined;
+  const ownerOrigin = pointGrid.map((value) => Math.floor(value / size) * size) as [number, number, number];
+  return interpolateRegularAxisFaceComponent(pointGrid, ownerOrigin, size, axis, sample);
+}
+
 export class WebGPUOctreePowerFaceAdvection {
   readonly plan: OctreePowerOldMeshAdvectionPlan;
   readonly control: GPUBuffer;
@@ -421,10 +440,13 @@ fn axisOriginInDomain(raw:vec3i,axis:u32,size:u32)->bool{
  for(var d=0u;d<3u;d+=1u){if(d!=axis&&o[d]+size>p.dims[d]){return false;}}return true;
 }
 fn cubicWeight(offset:u32,t:f32)->f32{let t2=t*t;let t3=t2*t;if(offset==0u){return -.5*t+t2-.5*t3;}if(offset==1u){return 1.-2.5*t2+1.5*t3;}if(offset==2u){return .5*t+2.*t2-1.5*t3;}return -.5*t2+.5*t3;}
-fn regularAxisComponent(x:vec3f,h:vec4u,axis:u32)->vec2f{
- let o=vec3u(h.x%p.dims.x,(h.x/p.dims.x)%p.dims.y,h.x/(p.dims.x*p.dims.y));let size=h.w;if(size==0u){return vec2f(0.);}
- let s=f32(size);let g=x/p.cellSize;let center=vec3f(o)+.5*s;var low=vec3i(0);var t=vec3f(0.);
- for(var d=0u;d<3u;d+=1u){if(d==axis){low[d]=i32(o[d]);t[d]=(g[d]-f32(low[d]))/s;}else{low[d]=select(i32(o[d]),i32(o[d])-i32(size),g[d]<center[d]);t[d]=(g[d]-(f32(low[d])+.5*s))/s;}}
+fn regularAxisComponentAtSize(x:vec3f,size:u32,axis:u32)->vec2f{
+ if(size==0u){return vec2f(0.);}let s=f32(size);let g=x/p.cellSize;var low=vec3i(0);var t=vec3f(0.);
+ // Section 5 extrapolates the regular octree-face field outside the liquid.
+ // Locate the staggered interpolation cell from that field itself; requiring
+ // a liquid pressure-row owner here would make the extrapolated air band
+ // unreachable during the characteristic trace.
+ for(var d=0u;d<3u;d+=1u){if(d==axis){low[d]=i32(floor(g[d]/s))*i32(size);t[d]=(g[d]-f32(low[d]))/s;}else{low[d]=i32(floor((g[d]-.5*s)/s))*i32(size);t[d]=(g[d]-(f32(low[d])+.5*s))/s;}}
  if(any(t<vec3f(-2e-5))||any(t>vec3f(1.00002))){return vec2f(0.);}t=clamp(t,vec3f(0.),vec3f(1.));
  // Preserve the exact staggered DOF without touching irrelevant neighbors.
  if(all(t<=vec3f(1e-7))){if(!axisOriginInDomain(low,axis,size)){return vec2f(0.);}return findAxis(vec3u(low),axis,size);}
@@ -440,10 +462,18 @@ fn regularAxisComponent(x:vec3f,h:vec4u,axis:u32)->vec2f{
  for(var stencil=0u;stencil<64u;stencil+=1u){let offsets=vec3u(stencil&3u,(stencil>>2u)&3u,(stencil>>4u)&3u);let w=cubicWeight(offsets.x,t.x)*cubicWeight(offsets.y,t.y)*cubicWeight(offsets.z,t.z);if(abs(w)<=1e-10){continue;}let raw=low+(vec3i(offsets)-vec3i(1))*i32(size);if(!axisOriginInDomain(raw,axis,size)){return vec2f(linear,1.);}let sample=findAxis(vec3u(raw),axis,size);if(sample.y==0.){return vec2f(linear,1.);}cubic+=w*sample.x;}
  if(!finite(cubic)){return vec2f(linear,1.);}return vec2f(clamp(cubic,minimum,maximum),1.);
 }
+fn regularVector(x:vec3f)->vec4f{
+ var size=1u;loop{
+  let vx=regularAxisComponentAtSize(x,size,0u);let vy=regularAxisComponentAtSize(x,size,1u);let vz=regularAxisComponentAtSize(x,size,2u);
+  if(vx.y>0.&&vy.y>0.&&vz.y>0.){return vec4f(vx.x,vy.x,vz.x,1.);}
+  if(size>=p.maximumLeafSize){break;}size*=2u;
+ }
+ return vec4f(0.,0.,0.,-13.);
+}
 fn inv(x:vec3f,c:u32)->vec3f{let bits=c&7u;let q=x*vec3f(select(1.,-1.,(bits&1u)!=0u),select(1.,-1.,(bits&2u)!=0u),select(1.,-1.,(bits&4u)!=0u));let k=(c/8u)%6u;if(k==0u){return q;}if(k==1u){return q.xzy;}if(k==2u){return q.yxz;}if(k==3u){return q.zxy;}if(k==4u){return q.yzx;}return q.zyx;}
 fn weights(point:vec3f,a:vec3f,b:vec3f,c:vec3f)->vec4f{let d=dot(a,cross(b,c));if(abs(d)<=1e-9){return vec4f(-1.);}let q=vec3f(dot(point,cross(b,c)),dot(a,cross(point,c)),dot(a,cross(b,point)))/d;return vec4f(1.-q.x-q.y-q.z,q);}
 fn contained(w:vec4f)->bool{return all(w>=vec4f(-2e-5))&&all(w<=vec4f(1.00002));}
-fn bad(code:f32)->vec4f{return vec4f(0.,0.,0.,-code);}fn sampleOld(x:vec3f)->vec4f{let oldRows=atomicLoad(&control.faceCount);let row=owner(x);if(row==INVALID||row>=oldRows||row>=p.rowCapacity){return bad(1.);}let h=header(row);let m=metric(row);let anchor=velocity(row);if(anchor.w<=0.||m.x>=arrayLength(&tetraHeaders)||(m.y&VALID)==0u){return bad(2.);}let o=vec3u(h.x%p.dims.x,(h.x/p.dims.x)%p.dims.y,h.x/(p.dims.x*p.dims.y));let size=h.w;let center=(vec3f(o)+.5*f32(size))*p.cellSize;let th=tetraHeaders[m.x];if((th.flags&1u)!=0u){let vx=regularAxisComponent(x,h,0u);let vy=regularAxisComponent(x,h,1u);let vz=regularAxisComponent(x,h,2u);if(vx.y==0.||vy.y==0.||vz.y==0.){return bad(13.);}return vec4f(vx.x,vy.x,vz.x,1.);}
+fn bad(code:f32)->vec4f{return vec4f(0.,0.,0.,-code);}fn sampleOld(x:vec3f)->vec4f{let oldRows=atomicLoad(&control.faceCount);let row=owner(x);if(row==INVALID||row>=oldRows||row>=p.rowCapacity){let regular=regularVector(x);return select(bad(1.),regular,regular.w>0.);}let h=header(row);let m=metric(row);let anchor=velocity(row);if(anchor.w<=0.||m.x>=arrayLength(&tetraHeaders)||(m.y&VALID)==0u){return bad(2.);}let o=vec3u(h.x%p.dims.x,(h.x/p.dims.x)%p.dims.y,h.x/(p.dims.x*p.dims.y));let size=h.w;let center=(vec3f(o)+.5*f32(size))*p.cellSize;let th=tetraHeaders[m.x];if((th.flags&1u)!=0u){let vx=regularAxisComponentAtSize(x,size,0u);let vy=regularAxisComponentAtSize(x,size,1u);let vz=regularAxisComponentAtSize(x,size,2u);if(vx.y==0.||vy.y==0.||vz.y==0.){return bad(13.);}return vec4f(vx.x,vy.x,vz.x,1.);}
  let point=inv((x-center)/(f32(size)*p.cellSize),m.y&63u);if(th.first>arrayLength(&tetrahedra)||th.count>arrayLength(&tetrahedra)-th.first){return bad(7.);}for(var local=0u;local<th.count;local+=1u){let packed=tetrahedra[th.first+local];let s=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);if(any(s>=vec3u(arrayLength(&vertices)))){return bad(8.);}let w=weights(point,vertices[s.x].v.xyz,vertices[s.y].v.xyz,vertices[s.z].v.xyz);if(!contained(w)){continue;}var vv:array<vec4f,3>;for(var k=0u;k<3u;k+=1u){let q=vertices[s[k]].v;let ns=u32(round(f32(size)*q.w));let nc=center+f32(size)*p.cellSize*inv(q.xyz,m.y&63u);let no=round(nc/p.cellSize-.5*f32(ns));if(any(no<vec3f(0))){return bad(9.);}let n=vec3u(no);let r=find(n.x+p.dims.x*(n.y+p.dims.y*n.z),ns);if(r==INVALID||r>=oldRows){return bad(10.);}vv[k]=velocity(r);if(vv[k].w<=0.){return bad(11.);}}let result=w.x*anchor.xyz+w.y*vv[0].xyz+w.z*vv[1].xyz+w.w*vv[2].xyz;return vec4f(result,1.);}return bad(12.);}
 // A power-face centroid lies on the boundary of two dual interpolation
 // elements.  The paper's dual cube/tetrahedral interpolant includes that

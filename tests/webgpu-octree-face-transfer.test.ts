@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import {
   OCTREE_FACE_TRANSFER_DIAGNOSTIC_BYTES,
   octreeFaceTopologyTransferShader,
+  octreeFaceTransferRadixFields,
   planOctreeFaceTopologyTransfer,
   WebGPUOctreeFaceTopologyTransfer,
 } from "../lib/webgpu-octree-face-transfer";
@@ -18,12 +19,22 @@ test("topology transfer uses compact radix-sort storage", () => {
   assert.equal(plan.previousFaceBytes, 125_488 * 20);
   assert.equal(plan.recordBytes, 0);
   assert.equal(plan.scratchBytes, plan.indexBytes);
+  assert.equal(plan.dispatchBytes, 36);
   assert.equal(OCTREE_FACE_TRANSFER_DIAGNOSTIC_BYTES, 32);
-  assert.equal(plan.allocatedBytes, 3_599_344);
+  assert.equal(plan.allocatedBytes, 3_599_428);
+  const uiSized = planOctreeFaceTopologyTransfer(165_888, { keyDimensions: [24, 18, 16] });
+  assert.equal(uiSized.sortPasses, 8,
+    "exact immutable bounds remove the 24 provably-zero high-nibble passes");
+  assert.deepEqual(octreeFaceTransferRadixFields([24, 18, 16]), [
+    { field: 0, digits: 2 }, { field: 1, digits: 2 },
+    { field: 2, digits: 2 }, { field: 3, digits: 2 },
+  ]);
+  assert.equal(planOctreeFaceTopologyTransfer(1, { keyDimensions: [1_000_000, 1, 1] }).sortPasses, 13,
+    "large domains retain every exact origin/span nibble they need");
   const inspected = planOctreeFaceTopologyTransfer(125_488, { retainRecords: true });
   assert.equal(inspected.recordBytes, 125_488 * 24);
   assert.equal(inspected.scratchBytes, inspected.recordBytes);
-  assert.equal(inspected.allocatedBytes, 6_086_768);
+  assert.equal(inspected.allocatedBytes, 6_086_852);
   assert.throws(() => planOctreeFaceTopologyTransfer(0), /positive/);
 });
 
@@ -31,6 +42,21 @@ test("GPU topology transfer has exact, prolongation, restriction, and fail-close
   assert.match(octreeFaceTopologyTransferShader, /fn radixHistogram/);
   assert.match(octreeFaceTopologyTransferShader, /fn radixPrefix/);
   assert.match(octreeFaceTopologyTransferShader, /fn radixScatter/);
+  assert.match(octreeFaceTopologyTransferShader,
+    /fn publishSortDispatch[\s\S]*previousControl\[4\] = \(count \+ 255u\) \/ 256u/,
+    "the captured GPU count publishes the rounded live radix dispatch");
+  assert.match(octreeFaceTopologyTransferShader,
+    /fn publishTransferDispatches[\s\S]*max\(oldCount, nextCount\)[\s\S]*previousControl\[10\] = \(nextCount \+ 255u\) \/ 256u/,
+    "validation covers both generations while transfer is bounded by the new generation");
+  assert.match(octreeFaceTopologyTransferShader,
+    /let rounded = previousControl\[4\] \* 256u;[\s\S]*select\(INVALID, gid\.x, gid\.x < count\)/,
+    "the final live block must initialize every padding lane to INVALID");
+  assert.equal(octreeFaceTopologyTransferShader.match(/block < previousControl\[4\]/g)?.length, 2,
+    "prefix totals and offsets must scan only the live block prefix");
+  const scatter = octreeFaceTopologyTransferShader.slice(octreeFaceTopologyTransferShader.indexOf("fn radixScatter"),
+    octreeFaceTopologyTransferShader.indexOf("fn validateTopology"));
+  assert.doesNotMatch(scatter.slice(0, scatter.lastIndexOf("workgroupBarrier")), /return;/,
+    "all 256 scatter lanes must reach both workgroup barriers");
   assert.match(octreeFaceTopologyTransferShader, /struct PreviousFace \{ originX: u32, originY: u32, originZ: u32, axisSpan: u32, normalVelocity: f32 \}/);
   assert.match(octreeFaceTopologyTransferShader, /fn findFace/);
   assert.match(octreeFaceTopologyTransferShader, /childCount == 4u/);
@@ -38,6 +64,59 @@ test("GPU topology transfer has exact, prolongation, restriction, and fail-close
   assert.match(octreeFaceTopologyTransferShader, /parentSpan = span \* 2u/);
   assert.match(octreeFaceTopologyTransferShader, /atomicStore\(&diagnostics\[3\], 1u\)/);
   assert.match(octreeFaceTopologyTransferShader, /publishHash/);
+});
+
+test("all radix data stages consume one storage-separated GPU-authored live dispatch", () => {
+  Object.assign(globalThis, {
+    GPUBufferUsage: { STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, UNIFORM: 8, INDIRECT: 16 },
+    GPUShaderStage: { COMPUTE: 1 },
+  });
+  const created: Array<{ label?: string; usage: number; buffer: GPUBuffer }> = [];
+  const buffer = (size: number, usage = 31, label?: string) => ({ size, usage, label, destroy() {} }) as unknown as GPUBuffer;
+  const device = {
+    queue: { writeBuffer() {} },
+    createBuffer({ label, size, usage }: { label?: string; size: number; usage: number }) {
+      const gpuBuffer = buffer(size, usage, label); created.push({ label, usage, buffer: gpuBuffer }); return gpuBuffer;
+    },
+    createBindGroupLayout: () => ({}), createShaderModule: () => ({}), createPipelineLayout: () => ({}),
+    createComputePipeline: ({ label }: { label: string }) => ({ label }), createBindGroup: () => ({}),
+  } as unknown as GPUDevice;
+  const source: OctreeFaceMirrorSource = {
+    plan: { rowCapacity: 64, faceCapacity: 1_000, faceBytes: 32_000, incidenceBytes: 4, allocatedBytes: 32_004 },
+    control: buffer(16), faces: buffer(32_000), incidence: buffer(4), parity: buffer(16),
+  };
+  const transfer = new WebGPUOctreeFaceTopologyTransfer(device, source);
+  const direct: string[] = [], indirect: Array<{ label: string; source: GPUBuffer; offset: number }> = [], copies: unknown[][] = [];
+  let current = "";
+  const encoder = {
+    clearBuffer() {},
+    copyBufferToBuffer(...args: unknown[]) { copies.push(args); },
+    beginComputePass() { return {
+      setPipeline(pipeline: { label: string }) { current = pipeline.label; }, setBindGroup() {},
+      dispatchWorkgroups() { direct.push(current); },
+      dispatchWorkgroupsIndirect(sourceBuffer: GPUBuffer, offset: number) { indirect.push({ label: current, source: sourceBuffer, offset }); },
+      end() {},
+    }; },
+  } as unknown as GPUCommandEncoder;
+  transfer.encodeCapture(encoder);
+  transfer.encodeTransfer(encoder);
+  const dispatch = created.find((entry) => entry.label === "Previous octree face live radix dispatch")!;
+  assert.equal(dispatch.usage, GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT);
+  assert.equal(dispatch.usage & GPUBufferUsage.STORAGE, 0);
+  assert.ok(copies.some((copy) => (copy[0] as { label?: string }).label === "Previous octree face control"
+    && copy[1] === 16 && copy[2] === dispatch.buffer && copy[4] === 12));
+  assert.equal(indirect.length, 4 + 2 * 32);
+  assert.ok(indirect.every((item) => item.source === dispatch.buffer));
+  assert.equal(indirect.filter((item) => item.offset === 0).length, 2 + 2 * 32,
+    "capture, sort initialization, histogram, and scatter consume the old live-count dispatch");
+  assert.equal(indirect.filter((item) => item.offset === 12).length, 1);
+  assert.equal(indirect.filter((item) => item.offset === 24).length, 1);
+  assert.equal(indirect.filter((item) => item.label.startsWith("Histogram previous")).length, 32);
+  assert.equal(indirect.filter((item) => item.label.startsWith("Scatter previous")).length, 32);
+  assert.equal(indirect.filter((item) => item.label === "Prepare previous octree face sort").length, 1);
+  assert.ok(!direct.some((label) => /Capture compact|Prepare previous octree face sort|Histogram previous|Scatter previous|Validate octree|Transfer canonical/.test(label)),
+    "no face data stage may dispatch the fixed capacity");
+  transfer.destroy();
 });
 
 test("face publication captures old IDs before rebuild and transfers after deterministic emit", () => {

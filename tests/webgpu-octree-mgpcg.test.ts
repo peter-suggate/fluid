@@ -70,13 +70,15 @@ test("Section 4.3 hybrid has a three-layer band and symmetry-locked paired L2 sm
   assert.equal(normalizeOctreeSection43IterationCap(undefined), 128);
   assert.equal(normalizeOctreeSection43IterationCap(7), 8);
   assert.equal(normalizeOctreeSection43IterationCap(400), 128);
-  assert.equal(OCTREE_SECTION43_SMALL_DOMAIN_MAXIMUM_CELLS, 16 ** 3);
-  assert.equal(OCTREE_SECTION43_SMALL_DOMAIN_PCG_ITERATIONS, 32);
-  assert.equal(octreeSection43RecordedIterationCap(128, 16 ** 3), 32,
-    "the mini domain must not encode ninety-six known-empty PCG iterations");
-  assert.equal(octreeSection43RecordedIterationCap(16, 16 ** 3), 16,
+  assert.equal(OCTREE_SECTION43_SMALL_DOMAIN_MAXIMUM_CELLS, 8_192);
+  assert.equal(OCTREE_SECTION43_SMALL_DOMAIN_PCG_ITERATIONS, 12);
+  assert.equal(octreeSection43RecordedIterationCap(128, 16 ** 3), 12,
+    "the mini domain retains headroom over the measured eight-iteration envelope");
+  assert.equal(octreeSection43RecordedIterationCap(10, 16 ** 3), 10,
     "an explicitly tighter small-domain cap remains authoritative");
-  assert.equal(octreeSection43RecordedIterationCap(128, 16 ** 3 + 1), 128,
+  assert.equal(octreeSection43RecordedIterationCap(128, 24 * 18 * 16), 12,
+    "the exact browser mini dam break retains headroom over its measured seven-iteration envelope");
+  assert.equal(octreeSection43RecordedIterationCap(128, 8_193), 128,
     "larger domains retain the fail-closed recorded tail");
   assert.throws(() => octreeSection43RecordedIterationCap(128, 0), /positive integer/);
   assert.equal(normalizeOctreeSection43BoundarySmoothing(undefined), 8);
@@ -93,6 +95,9 @@ test("Section 4.3 hybrid has a three-layer band and symmetry-locked paired L2 sm
   assert.match(octreeMGPCGShader, /headers\[e\.row\]\.size!=h\.size/);
   assert.match(octreeMGPCGShader, /dilateHybridBandAtoB/);
   assert.match(octreeMGPCGShader, /dilateHybridBandBtoA/);
+  assert.match(octreeMGPCGShader,
+    /clearHybridPreconditioner[\s\S]*row>=params\.dimsCapacity\.w\|\|stopped\(\)/,
+    "the convergence tail must not clear row-capacity hybrid vectors");
   assert.match(octreeMGPCGShader, /formHybridL1Residual/);
   assert.match(octreeMGPCGShader, /addHybridL1Correction/);
   const source = WebGPUOctreeMGPCG.toString();
@@ -127,7 +132,7 @@ test("Section 4.3 Jacobi--M1--Jacobi composition is linear, symmetric, and posit
     "the fixed hybrid schedule must be linear");
 });
 
-test("Section 4.3 tuning keeps equal pre/post sweeps, exact dispatch accounting, and one pass", () => {
+test("Section 4.3 tuning keeps equal pre/post sweeps and exact dispatch accounting", () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8 } });
   let passes = 0, dispatches = 0, currentStage = "";
   const events: string[] = [];
@@ -148,9 +153,10 @@ test("Section 4.3 tuning keeps equal pre/post sweeps, exact dispatch accounting,
     encodedCorrectionDispatchCount: correctionDispatches,
     encodedSetupDispatchCount: 3,
     encodedPassTransitionCount: 1,
-    encodeSetup(_encoder: GPUCommandEncoder, _input: unknown, pass?: GPUComputePassEncoder) {
-      assert.ok(pass, "MGPCG must lend its active pass to V-cycle setup");
+    encodeSetup(encoder: GPUCommandEncoder) {
+      const pass = encoder.beginComputePass();
       for (let dispatch = 0; dispatch < 3; dispatch += 1) pass.dispatchWorkgroups(1);
+      pass.end();
     },
     encodeCorrection(_encoder: GPUCommandEncoder, _input: unknown, pass?: GPUComputePassEncoder) {
       assert.ok(pass, "MGPCG must lend its active pass to every V-cycle correction");
@@ -202,8 +208,8 @@ test("Section 4.3 tuning keeps equal pre/post sweeps, exact dispatch accounting,
     + maximumIterations * (6 + preconditionerDispatches) + 2;
   assert.equal(dispatches, expectedDispatches);
   assert.equal(solver.encodedDispatchCount, expectedDispatches);
-  assert.equal(passes, 1);
-  assert.equal(solver.encodedPassTransitionCount, 1);
+  assert.equal(passes, 2);
+  assert.equal(solver.encodedPassTransitionCount, 2);
   solver.destroy();
 });
 
@@ -258,7 +264,7 @@ test("fixed PCG replay retains immutable bind groups instead of rebuilding descr
     firstOrderVCycle: {
       operatorOrder: 1, isSymmetricPositiveDefinite: true, allocatedBytes: 0,
       encodedCorrectionPassCount: 1, encodedSetupDispatchCount: 1,
-      encodeSetup(_encoder, _input, pass) { pass?.dispatchWorkgroups(1); },
+      encodeSetup(encoder) { const pass = encoder.beginComputePass(); pass.dispatchWorkgroups(1); pass.end(); },
       encodeCorrection(_encoder, _input, pass) { pass?.dispatchWorkgroups(1); },
     },
   }, { dimensions: [16, 16, 16], rowCapacity: 256, maximumIterations: 128 });
@@ -271,13 +277,13 @@ test("fixed PCG replay retains immutable bind groups instead of rebuilding descr
   solver.encode(encoder, pressureA, pressureB);
   const firstGroups = bindGroups, firstPasses = passes, firstDispatches = dispatches;
   assert.equal(firstPasses, solver.encodedPassTransitionCount,
-    "the complete pressure schedule should use one ordered compute pass");
+    "hierarchy publication and the pressure solve must use separate ordered passes");
   assert.equal(solver.encodedPassCount, solver.encodedDispatchCount,
     "the legacy count remains an exact dispatch-count alias");
   assert.equal(firstDispatches, solver.encodedDispatchCount,
     "reported pressure dispatch count must equal the command stream actually emitted");
   solver.encode(encoder, pressureA, pressureB);
-  assert.equal(passes, firstPasses * 2, "a second replay should add only one pass transition");
+  assert.equal(passes, firstPasses * 2, "a second replay should add the same two pass transitions");
   assert.ok(firstDispatches > firstGroups * 30, `${firstDispatches} dispatches should share ${firstGroups} descriptors`);
   assert.equal(bindGroups, firstGroups, "a second fixed replay must allocate no bind groups");
   solver.destroy();

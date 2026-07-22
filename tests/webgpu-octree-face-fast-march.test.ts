@@ -104,6 +104,19 @@ test("co-spherical entry 7946 closes its axial-star octahedron in the immutable 
   const catalog = decodeGeneratedOctreePowerCatalog(bytes.buffer.slice(
     bytes.byteOffset, bytes.byteOffset + bytes.byteLength,
   ));
+  let maximumSelectorCoordinate = 0;
+  const selectorSizeRatios = new Set<number>();
+  for (let offset = 0; offset < catalog.tetrahedronVertexData.length; offset += 4) {
+    maximumSelectorCoordinate = Math.max(maximumSelectorCoordinate,
+      Math.abs(catalog.tetrahedronVertexData[offset]),
+      Math.abs(catalog.tetrahedronVertexData[offset + 1]),
+      Math.abs(catalog.tetrahedronVertexData[offset + 2]));
+    selectorSizeRatios.add(catalog.tetrahedronVertexData[offset + 3]);
+  }
+  assert.equal(maximumSelectorCoordinate, 1.5,
+    "the bounded spatial fallback radius must cover every generated selector");
+  assert.deepEqual([...selectorSizeRatios].sort((a, b) => a - b), [0.5, 1, 2],
+    "the catalog fallback enumerates every dyadic owner scale");
   const entry = 7946;
   const [first, count, flags] = catalog.tetrahedronHeaders.slice(entry * 3, entry * 3 + 3);
   assert.deepEqual([first, count, flags], [361244, 40, 0]);
@@ -137,6 +150,14 @@ test("co-spherical entry 7946 closes its axial-star octahedron in the immutable 
   assert.match(runtimeDelaunay,
     /for\(varcorner=0u;corner<8u[\s\S]*dot\(delta,delta\)<radius2-tolerance/,
     "the runtime path enumerates actual surrounding owners and requires an empty circumsphere");
+  assert.match(runtimeDelaunay, /containingPublishedRow\(probe\)/,
+    "surrounding owners are resolved by the immutable spatial directory");
+  assert.match(runtimeDelaunay, /probe>=vec3i\(p\.dims\)[\s\S]*\{continue;\}/,
+    "world-boundary probes retain the legacy in-domain subset");
+  assert.doesNotMatch(runtimeDelaunay, /candidate<rowCount/,
+    "co-spherical repair must never scan the published row arena");
+  assert.match(wgslFunction("containingPublishedRow"), /r\.cell==cell\(origin\)&&r\.size==size/,
+    "spatial-directory hits must match the exact queried owner origin and size");
   assert.doesNotMatch(runtimeDelaunay, /nearest|project/,
     "the exact co-spherical repair never projects to a nearest carrier");
   assert.match(runtimeDelaunay,
@@ -186,7 +207,7 @@ test("co-spherical entry 7946 closes its axial-star octahedron in the immutable 
     /encoder\.copyBufferToBuffer\(input\.advectionControl,8\*4,this\.repairParams,5\*4,4\)/,
     "the repair dispatch consumes the exact GPU-published face-count transaction");
   assert.equal(repairEncoder.match(/encoder\.beginComputePass/g)?.length, 4,
-    "cold publication plus repair prepare, bulk, and finalize each own a dependency-fenced pass");
+    "cold publication plus repair prepare, transition, and finalize each own a dependency-fenced pass");
   assert.match(repairEncoder,
     /prepare\.dispatchWorkgroups\(1\);prepare\.end\(\);constrepair=.*repair\.end\(\);constfinalize=/,
     "the live count and every per-face status publish before their consumers");
@@ -422,7 +443,13 @@ test("face-band control diagnostics distinguish fail-closed causes", () => {
 test("air-band evaluation is atomic-free while preserving exact fallback and boundary sampling", () => {
   const locate = wgslFunction("locateFinalPointVectorMeasured");
   assert.match(locate, /candidateRowsTested\+=1u/,
-    "every O(rows) candidate-loop iteration is counted, including skipped endpoint rows");
+    "each bounded local catalog candidate is counted");
+  assert.match(locate, /for\(vardz=-2i;dz<=2i[\s\S]*for\(vardy=-2i;dy<=2i[\s\S]*for\(vardx=-2i;dx<=2i/,
+    "catalog candidates cover the proven five-cubed selector-radius box");
+  assert.match(locate, /if\(candidate>=bestRow\)\{continue;\}[\s\S]*bestRow=candidate;bestValue=value/,
+    "spatial enumeration preserves the old ascending-row result");
+  assert.doesNotMatch(locate, /candidate<count|min\(p\.rowCapacity/,
+    "the recurring sampler must not do work proportional to allocated row capacity");
   assert.match(locate, /surroundingOwnerDelaunayVectorMeasured\(pointGrid\)/);
   assert.match(wgslFunction("locateFinalPointVector"),
     /returnlocateFinalPointVectorMeasured\(initialAnchor,pointGrid\)\.value/,
@@ -1614,9 +1641,11 @@ test("factor-4/factor-8 production schedule publishes and consumes the face-marc
   assert.match(faceBand, /powerFaces:this\.powerFaces\.source/,
     "the completed face marcher must transactionally republish onto generalized power faces");
   const republish = faceBand.indexOf("this.powerFaceSeed.encodePowerToAxis(encoder,this.powerOperator.control,true)");
-  const recapture = faceBand.indexOf("this.powerFaceTransfer?.encodeCapture(encoder)", republish);
+  const recapture = faceBand.indexOf("this.powerFaceAdvection?.encodeCapture(encoder", republish);
   assert.ok(republish > faceBand.indexOf("this.globalFineFaceFastMarch.encodePhase(encoder") && recapture > republish,
-    "the extrapolated power field must return to compact face transport and the exact topology-transfer snapshot");
+    "the extrapolated power field must return to compact face transport and the next old-mesh snapshot");
+  assert.doesNotMatch(faceBand, /powerFaceTransfer\?\.encodeCapture/,
+    "the unused generalized-face transfer must not sort a dead snapshot");
 
   const transport = compact(WebGPUFineLevelSetTransport.prototype.encode);
   const stageB = transport.indexOf("this.velocityPrepass.encodeFromPositions");

@@ -29,20 +29,26 @@ test("octree projection constructs only the paper sparse-grid pyramid", () => {
   assert.doesNotMatch(mgpcgSource, /buildHierarchyMap|solveCoarseAggregates|prolongateCorrection/);
 });
 
-test("MGPCG and the nested SPGrid V-cycle share one dependency-ordered compute pass", () => {
+test("SPGrid publishes live indirect work before the dependency-ordered MGPCG solve pass", () => {
   assert.match(mgpcgSource, /get encodedDispatchCount\(\): number/);
   assert.match(mgpcgSource, /get encodedPassCount\(\): number \{ return this\.encodedDispatchCount; \}/);
-  assert.match(mgpcgSource, /readonly encodedPassTransitionCount = 1/);
-  assert.equal(spgridCycleSource.match(/sharedPass\?: GPUComputePassEncoder/g)?.length, 2);
-  assert.equal(spgridCycleSource.match(/sharedPass \?\? encoder\.beginComputePass/g)?.length, 2);
-  assert.equal(spgridCycleSource.match(/if \(!sharedPass\) pass\.end\(\)/g)?.length, 2);
+  assert.match(mgpcgSource, /readonly encodedPassTransitionCount = 2/);
+  assert.equal(spgridCycleSource.match(/sharedPass\?: GPUComputePassEncoder/g)?.length, 1,
+    "only correction may join the active MGPCG pass");
+  assert.equal(spgridCycleSource.match(/sharedPass \?\? encoder\.beginComputePass/g)?.length, 1);
+  assert.equal(spgridCycleSource.match(/if \(!sharedPass\) pass\.end\(\)/g)?.length, 1);
   assert.doesNotMatch(spgridCycleSource, /encoder\.clearBuffer\(/);
+  assert.match(spgridCycleSource, /dispatchWorkgroupsIndirect\(this\.indirectDispatch[\s\S]*resetInvalidBuffers/);
+  assert.match(spgridCycleSource, /"retireSlots"/);
+  assert.match(spgridCycleSource, /pass\.end\(\);[\s\S]*encoder\.copyBufferToBuffer\(this\.dispatchMeta, 0, this\.indirectDispatch/);
+  assert.match(spgridCycleSource, /dispatchWorkgroupsIndirect\(this\.indirectDispatch/);
 
   const encodeStart = mgpcgSource.indexOf("  encode(encoder: GPUCommandEncoder");
   const encodeEnd = mgpcgSource.indexOf("\n  private applyPreconditioner", encodeStart);
   const encode = mgpcgSource.slice(encodeStart, encodeEnd);
   assert.equal(encode.match(/beginComputePass\(/g)?.length, 1);
-  assert.match(encode, /this\.source\.firstOrderVCycle\.encodeSetup\([\s\S]*, pass\)/);
+  assert.match(encode, /this\.source\.firstOrderVCycle\.encodeSetup\([\s\S]*\);[\s\S]*const pass = encoder\.beginComputePass/);
+  assert.doesNotMatch(encode, /encodeSetup\([\s\S]*, pass\)/);
   assert.match(encode, /pass\.end\(\)/);
 });
 

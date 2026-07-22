@@ -160,6 +160,7 @@ const includeFinalFieldStats = process.env.FLUID_FIELD_STATS !== "0";
  * run when an upstream publication generation is stale. */
 const performanceProfileRequested = process.env.FLUID_PERFORMANCE_PROFILE === "1";
 const performanceReadbacksEnabled = process.env.FLUID_PERFORMANCE_READBACKS !== "0";
+const gpuCommandAuditRequested = process.env.FLUID_GPU_COMMAND_AUDIT === "1";
 const requireSpatialField = process.env.FLUID_REQUIRE_SPATIAL_FIELD === "1";
 const runCPUOracle = process.env.FLUID_CPU_ORACLE !== "0";
 const cpuMaximumCells = Number(process.env.FLUID_CPU_MAX_CELLS ?? 250_000);
@@ -1948,6 +1949,168 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
   };
 }
 
+type GPUCommandAuditBucket = { calls: number; bytes: number };
+interface GPUCommandAuditReport {
+  writeBuffer: GPUCommandAuditBucket;
+  writeTexture: GPUCommandAuditBucket;
+  clearBuffer: GPUCommandAuditBucket;
+  copyBufferToBuffer: GPUCommandAuditBucket;
+  bufferAllocations: GPUCommandAuditBucket;
+  bindGroups: number;
+  commandEncoders: number;
+  commandBuffers: number;
+  computePasses: number;
+  dispatches: number;
+  indirectDispatches: number;
+  submissions: number;
+  submittedCommandBuffers: number;
+  completionFences: number;
+  writeBufferByLabel: Record<string, GPUCommandAuditBucket>;
+  clearBufferByLabel: Record<string, GPUCommandAuditBucket>;
+  copyBufferToBufferByLabel: Record<string, GPUCommandAuditBucket>;
+  bufferAllocationsByLabel: Record<string, GPUCommandAuditBucket>;
+  commandEncodersByLabel: Record<string, GPUCommandAuditBucket>;
+  computePassesByLabel: Record<string, GPUCommandAuditBucket>;
+}
+
+class GPUCommandAudit {
+  private writeBuffer = { calls: 0, bytes: 0 };
+  private writeTexture = { calls: 0, bytes: 0 };
+  private clearBuffer = { calls: 0, bytes: 0 };
+  private copyBufferToBuffer = { calls: 0, bytes: 0 };
+  private bufferAllocations = { calls: 0, bytes: 0 };
+  private bindGroups = 0;
+  private commandEncoders = 0;
+  private commandBuffers = 0;
+  private computePasses = 0;
+  private dispatches = 0;
+  private indirectDispatches = 0;
+  private submissions = 0;
+  private submittedCommandBuffers = 0;
+  private completionFences = 0;
+  private readonly writeBufferByLabel = new Map<string, GPUCommandAuditBucket>();
+  private readonly clearBufferByLabel = new Map<string, GPUCommandAuditBucket>();
+  private readonly copyBufferToBufferByLabel = new Map<string, GPUCommandAuditBucket>();
+  private readonly bufferAllocationsByLabel = new Map<string, GPUCommandAuditBucket>();
+  private readonly commandEncodersByLabel = new Map<string, GPUCommandAuditBucket>();
+  private readonly computePassesByLabel = new Map<string, GPUCommandAuditBucket>();
+
+  private label(value: { label?: string } | undefined, fallback: string): string {
+    return value?.label?.trim() || fallback;
+  }
+  private add(map: Map<string, GPUCommandAuditBucket>, label: string, bytes = 0): void {
+    const bucket = map.get(label) ?? { calls: 0, bytes: 0 };
+    bucket.calls += 1; bucket.bytes += bytes; map.set(label, bucket);
+  }
+  private record(bucket: GPUCommandAuditBucket, bytes: number): void {
+    bucket.calls += 1; bucket.bytes += bytes;
+  }
+  reset(): void {
+    for (const bucket of [this.writeBuffer, this.writeTexture, this.clearBuffer,
+      this.copyBufferToBuffer, this.bufferAllocations]) { bucket.calls = 0; bucket.bytes = 0; }
+    this.bindGroups = 0; this.commandEncoders = 0; this.commandBuffers = 0;
+    this.computePasses = 0; this.dispatches = 0; this.indirectDispatches = 0;
+    this.submissions = 0; this.submittedCommandBuffers = 0; this.completionFences = 0;
+    for (const map of [this.writeBufferByLabel, this.clearBufferByLabel, this.bufferAllocationsByLabel,
+      this.copyBufferToBufferByLabel, this.commandEncodersByLabel, this.computePassesByLabel]) map.clear();
+  }
+  recordWriteBuffer(buffer: GPUBuffer, bytes: number): void {
+    this.record(this.writeBuffer, bytes); this.add(this.writeBufferByLabel, this.label(buffer, "<unlabeled buffer>"), bytes);
+  }
+  recordWriteTexture(bytes: number): void { this.record(this.writeTexture, bytes); }
+  recordClearBuffer(buffer: GPUBuffer, bytes: number): void {
+    this.record(this.clearBuffer, bytes); this.add(this.clearBufferByLabel, this.label(buffer, "<unlabeled buffer>"), bytes);
+  }
+  recordCopyBuffer(source: GPUBuffer, destination: GPUBuffer, bytes: number): void {
+    this.record(this.copyBufferToBuffer, bytes);
+    this.add(this.copyBufferToBufferByLabel,
+      `${this.label(source, "<unlabeled buffer>")} -> ${this.label(destination, "<unlabeled buffer>")}`, bytes);
+  }
+  recordBufferAllocation(descriptor: GPUBufferDescriptor): void {
+    const bytes = Number(descriptor.size); this.record(this.bufferAllocations, bytes);
+    this.add(this.bufferAllocationsByLabel, descriptor.label?.trim() || "<unlabeled buffer>", bytes);
+  }
+  recordBindGroup(): void { this.bindGroups += 1; }
+  recordCommandEncoder(descriptor?: GPUCommandEncoderDescriptor): void {
+    this.commandEncoders += 1;
+    this.add(this.commandEncodersByLabel, descriptor?.label?.trim() || "<unlabeled encoder>");
+  }
+  recordCommandBuffer(): void { this.commandBuffers += 1; }
+  recordComputePass(descriptor?: GPUComputePassDescriptor): void {
+    this.computePasses += 1;
+    this.add(this.computePassesByLabel, descriptor?.label?.trim() || "<unlabeled compute pass>");
+  }
+  recordDispatch(indirect: boolean): void {
+    this.dispatches += 1; if (indirect) this.indirectDispatches += 1;
+  }
+  recordSubmit(commandBufferCount: number): void {
+    this.submissions += 1; this.submittedCommandBuffers += commandBufferCount;
+  }
+  recordFence(): void { this.completionFences += 1; }
+  private object(map: Map<string, GPUCommandAuditBucket>): Record<string, GPUCommandAuditBucket> {
+    return Object.fromEntries(Array.from(map.entries()).sort((left, right) =>
+      right[1].bytes - left[1].bytes || right[1].calls - left[1].calls || left[0].localeCompare(right[0])));
+  }
+  snapshot(): GPUCommandAuditReport {
+    return {
+      writeBuffer: { ...this.writeBuffer }, writeTexture: { ...this.writeTexture },
+      clearBuffer: { ...this.clearBuffer }, copyBufferToBuffer: { ...this.copyBufferToBuffer },
+      bufferAllocations: { ...this.bufferAllocations }, bindGroups: this.bindGroups,
+      commandEncoders: this.commandEncoders, commandBuffers: this.commandBuffers,
+      computePasses: this.computePasses, dispatches: this.dispatches,
+      indirectDispatches: this.indirectDispatches, submissions: this.submissions,
+      submittedCommandBuffers: this.submittedCommandBuffers, completionFences: this.completionFences,
+      writeBufferByLabel: this.object(this.writeBufferByLabel),
+      clearBufferByLabel: this.object(this.clearBufferByLabel),
+      copyBufferToBufferByLabel: this.object(this.copyBufferToBufferByLabel),
+      bufferAllocationsByLabel: this.object(this.bufferAllocationsByLabel),
+      commandEncodersByLabel: this.object(this.commandEncodersByLabel),
+      computePassesByLabel: this.object(this.computePassesByLabel),
+    };
+  }
+}
+
+function writtenByteLength(data: GPUAllowSharedBufferSource, dataOffset = 0, size?: number): number {
+  if (size !== undefined) return size;
+  const byteLength = ArrayBuffer.isView(data) ? data.byteLength : data.byteLength;
+  return Math.max(0, byteLength - dataOffset);
+}
+
+function auditComputePass(pass: GPUComputePassEncoder, audit: GPUCommandAudit): GPUComputePassEncoder {
+  return new Proxy(pass, { get(target, property) {
+    if (property === "dispatchWorkgroups") return (...args: Parameters<GPUComputePassEncoder["dispatchWorkgroups"]>) => {
+      audit.recordDispatch(false); return Reflect.apply(target.dispatchWorkgroups, target, args);
+    };
+    if (property === "dispatchWorkgroupsIndirect") return (...args: Parameters<GPUComputePassEncoder["dispatchWorkgroupsIndirect"]>) => {
+      audit.recordDispatch(true); return Reflect.apply(target.dispatchWorkgroupsIndirect, target, args);
+    };
+    const value = Reflect.get(target, property, target);
+    return typeof value === "function" ? value.bind(target) : value;
+  } }) as GPUComputePassEncoder;
+}
+
+function auditCommandEncoder(encoder: GPUCommandEncoder, audit: GPUCommandAudit): GPUCommandEncoder {
+  return new Proxy(encoder, { get(target, property) {
+    if (property === "clearBuffer") return (buffer: GPUBuffer, offset = 0, size?: number) => {
+      const bytes = size ?? Math.max(0, buffer.size - offset); audit.recordClearBuffer(buffer, bytes);
+      return target.clearBuffer(buffer, offset, size);
+    };
+    if (property === "copyBufferToBuffer") return (source: GPUBuffer, sourceOffset: number, destination: GPUBuffer,
+      destinationOffset: number, size: number) => {
+      audit.recordCopyBuffer(source, destination, size);
+      return target.copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size);
+    };
+    if (property === "beginComputePass") return (descriptor?: GPUComputePassDescriptor) => {
+      audit.recordComputePass(descriptor); return auditComputePass(target.beginComputePass(descriptor), audit);
+    };
+    if (property === "finish") return (descriptor?: GPUCommandBufferDescriptor) => {
+      audit.recordCommandBuffer(); return target.finish(descriptor);
+    };
+    const value = Reflect.get(target, property, target);
+    return typeof value === "function" ? value.bind(target) : value;
+  } }) as GPUCommandEncoder;
+}
+
 interface GPUSmokeResult {
   method: string;
   info: GPUEulerianInfo;
@@ -1965,8 +2128,12 @@ interface GPUSmokeResult {
   /** Solver-loop wall time excluding deliberate full-field QA readbacks. */
   simulationWall_ms: number;
   steps: number;
+  gpuCommandAudit?: GPUCommandAuditReport;
   /** Accepted steps whose live power topology, faces, transfer, and MGPCG publication passed the generation audit. */
   powerGenerationAuditedSteps: number;
+  /** Iteration envelope observed by the existing per-generation pressure audit;
+   * this adds no readback beyond the correctness audit itself. */
+  mgpcgIterationAudit?: { samples: number; minimum: number; maximum: number; histogram: Record<string, number> };
   /** Historical transition telemetry for diagnosing when adaptivity was lost.
    * It must never substitute for a live final-topology assertion. */
   powerTransitionWitness?: PowerTransitionWitness;
@@ -2561,7 +2728,9 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
   const info = result.info;
   console.log(JSON.stringify({
     scenario, method: result.method, phase: "result", construction_ms: Math.round(result.construction_ms), runtime_ms: Math.round(result.runtime_ms), simulationWall_ms: Math.round(result.simulationWall_ms), steps: result.steps,
+    gpuCommandAudit: result.gpuCommandAudit,
     powerGenerationAuditedSteps: result.powerGenerationAuditedSteps,
+    mgpcgIterationAudit: result.mgpcgIterationAudit,
     powerTransitionWitness: result.powerTransitionWitness,
     cpuAdvanceEncodeBreakdown: result.info.cpuAdvanceEncodeBreakdown,
     gpuAdvancePhaseWall: info.gpuAdvancePhaseWall,
@@ -2735,8 +2904,44 @@ async function runGPU(
   void device.lost.then((info) => { lost = info; });
   const validationErrors: string[] = [];
   device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
+  const commandAudit = gpuCommandAuditRequested ? new GPUCommandAudit() : undefined;
+  const instrumentedQueue = commandAudit ? new Proxy(device.queue, {
+    get(target, property) {
+      if (property === "writeBuffer") return (buffer: GPUBuffer, bufferOffset: number,
+        data: GPUAllowSharedBufferSource, dataOffset = 0, size?: number) => {
+        commandAudit.recordWriteBuffer(buffer, writtenByteLength(data, dataOffset, size));
+        return target.writeBuffer(buffer, bufferOffset, data, dataOffset, size);
+      };
+      if (property === "writeTexture") return (destination: GPUTexelCopyTextureInfo,
+        data: GPUAllowSharedBufferSource, dataLayout: GPUTexelCopyBufferLayout, size: GPUExtent3D) => {
+        commandAudit.recordWriteTexture(writtenByteLength(data));
+        return target.writeTexture(destination, data, dataLayout, size);
+      };
+      if (property === "submit") return (commandBuffers: Iterable<GPUCommandBuffer>) => {
+        const submitted = Array.from(commandBuffers); commandAudit.recordSubmit(submitted.length);
+        return target.submit(submitted);
+      };
+      if (property === "onSubmittedWorkDone") return () => {
+        commandAudit.recordFence(); return target.onSubmittedWorkDone();
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  }) as GPUQueue : device.queue;
   const instrumentedDevice = new Proxy(device, {
     get(target, property) {
+      if (property === "queue") return instrumentedQueue;
+      if (property === "createBuffer") return (descriptor: GPUBufferDescriptor) => {
+        commandAudit?.recordBufferAllocation(descriptor); return target.createBuffer(descriptor);
+      };
+      if (property === "createBindGroup") return (descriptor: GPUBindGroupDescriptor) => {
+        commandAudit?.recordBindGroup(); return target.createBindGroup(descriptor);
+      };
+      if (property === "createCommandEncoder") return (descriptor?: GPUCommandEncoderDescriptor) => {
+        commandAudit?.recordCommandEncoder(descriptor);
+        const encoder = target.createCommandEncoder(descriptor);
+        return commandAudit ? auditCommandEncoder(encoder, commandAudit) : encoder;
+      };
       if (property === "createComputePipeline") return (descriptor: GPUComputePipelineDescriptor) => {
         const started = performance.now(), result = target.createComputePipeline(descriptor);
         console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "pipeline", entryPoint: descriptor.compute.entryPoint, elapsed_ms: Math.round(performance.now() - started) }));
@@ -2882,6 +3087,10 @@ async function runGPU(
         leaves: { live, core, halo, minimumPhi, maximumPhi } }));
     }
   }
+  // Construction and t=0 publication have separate costs. The command audit
+  // below measures only recurring advance work and explicitly requested
+  // profiler/readback activity after the initialized solver is warm.
+  commandAudit?.reset();
   const runStarted = performance.now();
   let steps = 0, samplingWall_ms = 0, matched: Awaited<ReturnType<typeof readCubicVolumeField>> | undefined;
   // The perturbed cadence remains exclusive to the quadtree dam-break
@@ -2953,6 +3162,9 @@ async function runGPU(
   let nextCheckpoint_s = checkpointEvery_s;
   let previousAuditedPowerGeneration = 0;
   let powerGenerationAuditedSteps = 0;
+  let mgpcgIterationMinimum = Number.POSITIVE_INFINITY;
+  let mgpcgIterationMaximum = 0;
+  const mgpcgIterationHistogram: Record<string, number> = {};
   let powerTransitionWitness: PowerTransitionWitness | undefined;
   let topologyTransitionDeepCell: number | undefined;
   while ((solver.info.submittedTime_s ?? 0) + 1e-9 < target_s) {
@@ -2992,9 +3204,9 @@ async function runGPU(
         powerBoundaryFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
       };
       const axisSource = (solver as GPUSolverInstance).adaptiveFaceMirrorSource;
-      if (!audited.powerFaceControl || !audited.powerFaceTransferControl || !audited.powerFaceSeedControl || !audited.powerOperatorControl
+      if (!audited.powerFaceControl || !audited.powerFaceSeedControl || !audited.powerOperatorControl
         || !audited.powerDescriptorControl || !audited.powerTopologyControl) {
-        const missing = (["powerFaceControl", "powerFaceTransferControl", "powerFaceSeedControl", "powerOperatorControl",
+        const missing = (["powerFaceControl", "powerFaceSeedControl", "powerOperatorControl",
           "powerDescriptorControl", "powerTopologyControl"] as const).filter((name) => !audited[name]);
         throw new Error(`power generation audit step ${steps} is missing authoritative control buffers: ${missing.join(", ")}; `
           + `ready=${solver.info.powerDiagramReady} authoritative=${solver.info.powerDiagramAuthoritative} `
@@ -3003,7 +3215,8 @@ async function runGPU(
       const [faceBytes, transferBytes, seedBytes, advectionBytes, solidBytes, operatorBytes,
         descriptorBytes, topologyBytes, axisBytes, coarsePhiBytes, powerVelocityBytes] = await Promise.all([
         readBufferBinding(device, { buffer: audited.powerFaceControl }, 64),
-        readBufferBinding(device, { buffer: audited.powerFaceTransferControl }, 32),
+        audited.powerFaceTransferControl
+          ? readBufferBinding(device, { buffer: audited.powerFaceTransferControl }, 32) : Promise.resolve(undefined),
         readBufferBinding(device, { buffer: audited.powerFaceSeedControl }, 64),
         audited.powerFaceAdvectionControl
           ? readBufferBinding(device, { buffer: audited.powerFaceAdvectionControl }, 64) : Promise.resolve(undefined),
@@ -3021,7 +3234,8 @@ async function runGPU(
           : Promise.resolve(undefined),
       ]);
       const face = new Uint32Array(faceBytes.buffer, faceBytes.byteOffset, 16);
-      const transfer = new Uint32Array(transferBytes.buffer, transferBytes.byteOffset, 8);
+      const transfer = transferBytes
+        ? new Uint32Array(transferBytes.buffer, transferBytes.byteOffset, 8) : undefined;
       const seed = new Uint32Array(seedBytes.buffer, seedBytes.byteOffset, 16);
       const advection = advectionBytes
         ? new Uint32Array(advectionBytes.buffer, advectionBytes.byteOffset, 16) : undefined;
@@ -3031,6 +3245,12 @@ async function runGPU(
         ? await readBufferBinding(device, { buffer: audited.mgpcgControl }, 64) : undefined;
       const mgpcg = mgpcgBytes ? new Uint32Array(mgpcgBytes.buffer, mgpcgBytes.byteOffset, 16) : undefined;
       const mgpcgDiagnostics = mgpcg ? decodeOctreeMGPCGDiagnostics(mgpcg) : undefined;
+      if (mgpcgDiagnostics) {
+        mgpcgIterationMinimum = Math.min(mgpcgIterationMinimum, mgpcgDiagnostics.iterations);
+        mgpcgIterationMaximum = Math.max(mgpcgIterationMaximum, mgpcgDiagnostics.iterations);
+        const key = String(mgpcgDiagnostics.iterations);
+        mgpcgIterationHistogram[key] = (mgpcgIterationHistogram[key] ?? 0) + 1;
+      }
       const descriptor = new Uint32Array(descriptorBytes.buffer, descriptorBytes.byteOffset, 8);
       const topology = new Uint32Array(topologyBytes.buffer, topologyBytes.byteOffset, 8);
       const axis = axisBytes ? new Uint32Array(axisBytes.buffer, axisBytes.byteOffset, 6) : undefined;
@@ -3053,9 +3273,9 @@ async function runGPU(
           firstInvalidRow: face[4], firstInvalidPad3: face[15],
           firstInvalidLiquidPhi: faceGeometryFailure ? floatBits(face[13]) : undefined,
           firstInvalidAirPhi: faceGeometryFailure ? floatBits(face[15]) : undefined },
-        transfer: { previousFaceCount: transfer[0], valid: transfer[1] === 0x8000_0000,
+        transfer: transfer ? { previousFaceCount: transfer[0], valid: transfer[1] === 0x8000_0000,
           flags: transfer[2], generation: transfer[3], exactFaces: transfer[4], fallbackFaces: transfer[5],
-          maximumFaceSpeed: floatBits(transfer[6]), sourceFlags: transfer[7] },
+          maximumFaceSpeed: floatBits(transfer[6]), sourceFlags: transfer[7] } : undefined,
         oldMeshAdvection: advection ? { flags: advection[0], firstError: advection[1], oldRowCount: advection[2],
           advectedFaces: advection[3], generation: advection[4], oldGeneration: advection[5],
           valid: advection[6] === 0x8000_0000, coldFallback: advection[7] !== 0, targetFaceCount: advection[8],
@@ -3142,7 +3362,7 @@ async function runGPU(
       if (powerStageAuditLog) {
         console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "power-stage-audit",
           step: steps, generation: audit.faces.generation, ...audit.velocityStages,
-          topologyTransferMaximum: audit.transfer.maximumFaceSpeed }));
+          topologyTransferMaximum: audit.transfer?.maximumFaceSpeed }));
       }
       if (process.env.FLUID_OWNER_AUDIT === "1") {
         const issues = await auditOwnerLatticeConsistency(device, solver, [solver.info.nx, solver.info.ny, solver.info.nz]);
@@ -3350,7 +3570,6 @@ async function runGPU(
         || audit.descriptor.validCount !== audit.descriptor.rowCount || audit.descriptor.errorCount !== 0
         || audit.descriptor.flags !== 0 || audit.topology.invalidCount !== 0 || audit.topology.flags !== 0
         || audit.topology.resolvedCount !== audit.descriptor.rowCount
-        || !audit.transfer.valid || audit.transfer.flags !== 0 || audit.transfer.sourceFlags !== 0
         || !audit.velocityStages.seedValid || audit.velocityStages.seedFlags !== 0
         || audit.velocityStages.operatorFlags !== 0xc000_0000
         || !octreeMGPCGDiagnosticsAreAcceptable(mgpcgDiagnostics)
@@ -4101,7 +4320,15 @@ async function runGPU(
     finalSummary: final?.summary, finalTallCellActivity: final?.tallCellActivity,
     finalTallVolumeGaps: final?.tallVolumeGaps, validationErrors,
     construction_ms, runtime_ms: performance.now() - runStarted, simulationWall_ms, steps,
-    powerGenerationAuditedSteps, powerTransitionWitness, velocitySummary,
+    gpuCommandAudit: commandAudit?.snapshot(),
+    powerGenerationAuditedSteps,
+    mgpcgIterationAudit: powerGenerationAuditedSteps > 0 ? {
+      samples: powerGenerationAuditedSteps,
+      minimum: Number.isFinite(mgpcgIterationMinimum) ? mgpcgIterationMinimum : 0,
+      maximum: mgpcgIterationMaximum,
+      histogram: mgpcgIterationHistogram,
+    } : undefined,
+    powerTransitionWitness, velocitySummary,
     velocityParityField, velocityParityVolume: final?.field, compactVelocityRaster,
     initialFluidBrickStats, sparseVoxelStats, hybridPresentationStats,
     initialGlobalFineGeneration, initialGlobalFineRaster, finalGlobalFineGeneration, finalGlobalFineRaster,

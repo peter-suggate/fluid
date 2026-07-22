@@ -26,6 +26,128 @@ kernel fusion, ordering of independent records, or how topology is indexed.
 
 ## Required pipeline
 
+### Measured baseline and topology spine
+
+There are two separate Dawn authorities. `test:webgpu:dam-ui-performance` is
+the exact browser parity lane: the canonical `water-box-dam-break` preset,
+24x18x16 grid, 0.008 s GPU outer step, factor-4 fine level set, Metal adapter,
+and the evolved third 30-advance profiler sample. The 16x16x16
+`minimal-power-dam-break` remains the longer numerical regression lane; it is
+not a substitute geometry for UI performance. `test:webgpu:dam-ui-throughput`
+differs from the parity lane only by disabling intrusive profiler readbacks and
+is the optimization throughput authority.
+
+The one-time browser calibration measured an ordinary single-submission
+production advance at 86.6 ms. The matching profiler-free Dawn run measured
+5.559 s for 62 advances, or 89.7 ms/advance: a 3.5% difference. The exact Dawn
+phase sample measured 85.51 ms and attributed 47.25 ms to pressure/project and
+35.67 ms to fine surface. Rendering was outside the production physics fence.
+The browser's boundary-split replay instead took 3704.6 ms (2050.5 ms charged
+to fine surface and 1483.1 ms to pressure) because it submitted and fenced at
+every semantic boundary. Fine transport has the most boundaries, so that
+replay inverted the true ordering. The UI now rejects a split sample whose
+total exceeds the ordinary production fence by more than 25%; rejected phase
+ratios are not performance evidence.
+
+The current exact UI throughput trace still encodes 114,761 dispatches, 67,642
+indirect dispatches, and 13,701 compute passes in 62 advances: about 1,851
+dispatches and 221 pass transitions per advance. It also clears 1.556 GB and
+copies 551 MB over the run, or 25.1 MB of clears and 8.9 MB of copies per
+advance. The dominant recurring clears are fixed-capacity physical power faces
+(13.27 MB/advance), the face mirror (5.31 MB/advance), old interpolation mesh
+(2.10 MB/advance), physical incidence (1.99 MB/advance), and radix histograms
+(0.50 MB/advance). These capacity writes and launch counts—not a UI graph—are
+the baseline the next structural changes must remove.
+
+The original 16x16x16 62-step warm baseline was 14.414 s. Removing a dead
+old-mesh snapshot reduced that to 11.322 s. The current profiler-free run is
+4.015 s, or 64.8 ms/advance, with zero validation errors. It remains useful for
+fast iteration but is intentionally reported separately from the exact UI
+scene.
+
+One deliberately incomplete eight-owner local-search experiment reduced a
+comparable 11.35 s warm run to 4.195 s. It was rejected after a checked-in
+catalog counterexample proved that the eight owners do not form a complete
+candidate set. The production replacement enumerates the complete 5x5x5
+dyadic origin neighbourhood at each legal leaf size, validates exact row
+identity through `rowHash`, and preserves lowest-row selection. It reduced the
+same 62-step Dawn contract to 4.797 s with no validation errors. Its four
+air-evaluator segments totalled 5.46 ms instead of the former 81.4 ms. This is
+the first accepted structural result: capacity-sized row search, not the
+catalog interpolation arithmetic, was the evaluator bottleneck.
+
+Replacing SPGrid's direct full-capacity correction schedule with live indirect
+work reduced the 62-step contract again to 4.562 s, about 4.9%. The modest wall
+change despite a roughly 17x workgroup-count reduction is important evidence:
+dispatch count alone was not the dominant remaining limit. The corrected
+queue-boundary trace attributed 53.0 ms to pressure/projection, only 7.36 ms of
+which was the isolated pressure solve, while Section 5 fine transport used
+12.86 ms and its exact evaluator used 5.46 ms. Subsequent work therefore
+instruments and removes capacity traffic inside the mixed pressure/topology
+bucket rather than tuning the already bounded evaluator.
+
+The pressure command tail is currently capped at 12 iterations only for the
+measured launch-bound envelope up to 8192 finest cells. Exact audits observed a
+maximum of 7 iterations over all 62 UI generations and 8 over the 500-step
+minimal regression. This is an interim small-solve schedule, not the ocean
+architecture: larger domains retain the correctness-preserving 128-iteration
+fallback until the residual-driven persistent/hierarchical solver below
+replaces both fixed tails.
+
+Exact key dimensions now bound face-transfer radix work. The 24x18x16 scene
+requires eight nibble passes rather than an unconditional 32; larger domains
+derive as many digits as their coordinates require. This removed 4,464 passes,
+2,976 indirect dispatches, and 97.5 MB of clears over 62 advances without
+assuming a maximum scene size. Stopped MGPCG and SPGrid tails also no longer
+rewrite hybrid/correction vectors after device-published convergence.
+
+The current 500-step numerical gate passes with zero validation errors,
+maximum pressure relative residual 9.96e-5, maximum exact volume drift 0.329%,
+one connected component, and no non-finite velocities. It also confirms that
+energy dissipation remains unresolved: mechanical-energy retention is 92.96%
+at 0.2 s, 44.91% at 0.5 s, 40.79% at 1 s, and 39.45% at 2 s. Performance work
+must not hide that numerical debt behind a shorter or different scene.
+
+The target topology is one generic radix/scan/compact spine. Every topology
+product is a counted, sorted A/B publication: a small header containing its
+live count, generation, validity, and indirect dispatch dimensions followed by
+a payload whose only readable region is `[0, count)`. The inactive tail is
+stale and is neither cleared nor searched. Construction emits fixed-fanout
+candidate records, stable-radix-sorts their exact keys, marks runs, scans run
+heads, compacts unique records, and builds adjacency as sorted ranges or CSR.
+Morton order is a locality aid; exact cell, level, and relation words remain
+part of identity.
+
+The old publication remains immutable while the next one is built. A sorted
+old/new merge carries forward unchanged rows and their numerical state, emits
+additions, retires removals, and publishes the new header only after validation.
+The same warm scratch arena supplies ping-pong keys and values, flags, offsets,
+block totals, radix histograms, segment heads, and indirect arguments. Active
+workgroups overwrite the scratch prefix they consume, so recurring execution
+has no capacity-sized clears, capacity-sized searches, global append counters,
+CAS hash insertion, or other recurring atomics.
+
+The first reusable primitive should be a counted radix-set builder; the
+canonical sorted `(cell, size) -> row` leaf publication then becomes the spine
+for owner and site lookup, face-key generation, fine-brick seeding, support
+closure, parent reduction, and warm generation transfer. Downstream consumers
+use bounded gathers, binary search, or sorted merge joins against this
+publication rather than rebuilding separate hashes. Each transition must be
+measured first on the exact 24x18x16 UI Dawn throughput lane, then preserve the
+longer 16x16x16 minimal dam-break regression gate.
+
+The primitive has two size classes. A live set that fits one workgroup uses a
+fused local histogram/scan/scatter path so a small scene does not pay a long
+dispatch floor. Larger sets use explicit hierarchical block scan, block-total
+scan, and carry/scatter passes. Merrill and Garland's single-pass decoupled
+look-back scan approaches copy bandwidth on CUDA, but it requires relative
+progress between workgroups. Portable WGSL supplies barriers only at workgroup
+scope, and published progress testing reports that Apple and ARM GPUs do not
+support the commonly assumed linear occupancy-bound model. Therefore the
+portable WebGPU path must not spin on another workgroup's publication. Its
+cross-workgroup dependencies are command-ordered passes; its atomics, if any
+exist during migration, cannot be synchronization dependencies.
+
 ### 1. Build topology as sorted immutable data
 
 1. Emit one or a fixed number of Morton/key records per source item. No append
@@ -138,9 +260,10 @@ A performance change is accepted only when all of these hold:
 1. `npm run test:webgpu:dam-ui-performance` reproduces the exact browser scene,
    resolved default octree profile, 24x18x16 grid, 0.008 s GPU advance cap,
    timestamp/readback mode, and evolved third 30-advance profiler sample.
-2. The changed phase improves its queue-boundary wall time on repeated Metal
-   runs. Total advance wall time must not regress or merely move the cost to an
-   adjacent phase.
+2. `npm run test:webgpu:dam-ui-throughput` improves the single-submission wall
+   time on repeated Metal runs. A split phase sample is accepted for attribution
+   only when its total is no more than 25% above the ordinary production fence;
+   otherwise it is rejected rather than used to claim a phase improvement.
 3. The two-step exact Dawn smoke has zero validation errors and identical
    publication/authority acceptance.
 4. The 500-step minimal dam-break gate completes exactly, remains finite and
@@ -157,5 +280,8 @@ optimization, and regression measurement use Dawn exclusively.
 
 - [Aanjaneya et al. 2017](papers/aanjaneya-2017-power-liquids.txt)
 - [Work-efficient parallel prefix sum](https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda)
+- [Single-pass parallel prefix scan with decoupled look-back](https://research.nvidia.com/sites/default/files/pubs/2016-03_Single-pass-Parallel-Prefix/nvr-2016-002.pdf)
+- [GPU workgroup progress models](https://arxiv.org/abs/2109.06132)
+- [WGSL memory and synchronization model](https://gpuweb.github.io/gpuweb/wgsl/#memory-model)
 - [GPU radix sorting](https://research.nvidia.com/publication/2009-05_designing-efficient-sorting-algorithms-manycore-gpus)
 - [Morton-key hierarchy construction](https://research.nvidia.com/publication/2012-06_maximizing-parallelism-construction-bvhs-octrees-and-k-d-trees)
