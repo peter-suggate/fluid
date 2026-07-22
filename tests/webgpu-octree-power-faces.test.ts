@@ -275,8 +275,10 @@ test("power-face WGSL uses count/scan/emit and no atomic public append", () => {
   assert.match(octreePowerFaceShader, /PowerFaceRecord\(row,neighbor,geometryCode,flags,0\.0,geometry\.area,geometry\.inverseDistance,1\.0\)/);
   assert.match(octreePowerFaceShader, /fn buildPowerBoundaryPhiQueries/);
   assert.match(octreePowerFaceShader,
-    /if\(!validReconstruction\(face\)\)\{failGeometryTopology\(row,slot,4096u,metric\.topologyCode,metric\.transformAndFlags\);return;\}/,
+    /let\s+reconstructionFailure=reconstructionError\(face\);if\(reconstructionFailure!=0u\)\{failGeometryTopology\(row,slot,4096u\|reconstructionFailure,metric\.topologyCode,metric\.transformAndFlags\);return;\}/,
     "an invalid catalog reconstruction must retain its row, slot, topology code, and transform for the viewport failure marker");
+  assert.match(octreePowerFaceShader, /fn reconstructionError\(face:ReconstructedPowerFace\)->u32\{/,
+    "catalog validation must expose a scalar reason code instead of relying on a compound backend predicate");
   assert.doesNotMatch(octreePowerFaceShader, /airPhi=abs|liquidPhi\+dot|0\.05/,
     "face geometry must not synthesize or floor a free-surface coefficient");
 });
