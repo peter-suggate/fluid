@@ -6,11 +6,13 @@ import {
   SPGRID_CELL_FLAG,
   SPGRID_MAXIMUM_ROW_CAPACITY,
   WebGPUOctreeSPGridVCycle,
+  buildSPGridParentGatherCSR,
   buildSPGridPyramidOracle,
   octreeSPGridVCycleShader,
   planOctreeSPGridVCycle,
   prolongSPGrid,
   restrictSPGrid,
+  restrictSPGridParentGather,
   solveSPGridBottomLDLT,
 } from "../lib/webgpu-octree-spgrid-vcycle";
 
@@ -61,6 +63,52 @@ test("stored trilinear restriction and prolongation are exact adjoints", () => {
   }
 });
 
+test("parent-owned CSR preserves boundary duplicates and the exact transfer adjoint", () => {
+  const pyramid = buildSPGridPyramidOracle([
+    { origin: [0, 0, 0], size: 1 }, { origin: [1, 0, 0], size: 1 }, { origin: [0, 1, 0], size: 1 },
+  ], 2);
+  const records = pyramid.transfers[0], fineCount = pyramid.levels[0].coordinates.length;
+  const coarseCount = pyramid.levels[1].coordinates.length;
+  const duplicate = records.find((record, index) => records.some((other, otherIndex) => otherIndex !== index
+    && other.fine === record.fine && other.coarse === record.coarse));
+  assert.ok(duplicate, "clamped boundary interpolation must retain duplicate records");
+  const csr = buildSPGridParentGatherCSR(records, fineCount, coarseCount);
+  for (let coarse = 0; coarse < coarseCount; coarse += 1) {
+    assert.deepEqual(csr.recordIndices.slice(csr.offsets[coarse], csr.offsets[coarse + 1]),
+      records.flatMap((record, index) => record.coarse === coarse ? [index] : []),
+      "parent ranges retain stable source-record order including duplicates");
+  }
+  const fine = Array.from({ length: fineCount }, (_, index) => 0.3 + 0.7 * index);
+  const coarse = Array.from({ length: coarseCount }, (_, index) => -0.2 + 0.4 * index);
+  const scattered = restrictSPGrid(fine, records, coarseCount);
+  const gathered = restrictSPGridParentGather(fine, records, csr);
+  assert.deepEqual(gathered, scattered);
+  const prolonged = prolongSPGrid(coarse, records, fineCount);
+  assert.ok(Math.abs(dot(gathered, coarse) - dot(fine, prolonged)) < 1e-12,
+    "parent-owned restriction remains the exact transpose of fine-owned prolongation");
+});
+
+test("parent-owned restriction has a bounded dispatch and atomic-removal target", () => {
+  Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
+  const buffer = (size: number, usage = 31) => ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
+  const device = { queue: { writeBuffer() {} }, createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
+    createShaderModule: () => ({}), createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }), createBindGroup: () => ({}),
+  } as unknown as GPUDevice;
+  const cycle = new WebGPUOctreeSPGridVCycle(device, { leafHeaders: buffer(48 * 128), leafEntries: buffer(4_096) },
+    { dimensions: [16, 16, 16], rowCapacity: 128, finestCellWidth: 1 });
+  assert.equal(cycle.diagnostics.restrictionScatterDispatchCount, cycle.plan.levelCount - 1);
+  assert.equal(cycle.diagnostics.restrictionAtomicAddUpperBound,
+    8 * (cycle.plan.levelCount - 1) * cycle.plan.levelStride);
+  assert.equal(cycle.diagnostics.parentGatherDispatchCount, cycle.plan.levelCount - 1);
+  assert.equal(cycle.diagnostics.parentGatherAtomicAddCount, 0);
+  const restriction = octreeSPGridVCycleShader.slice(octreeSPGridVCycleShader.indexOf("fn restrictAndGhostAccumulate"),
+    octreeSPGridVCycleShader.indexOf("fn exactBottom"));
+  assert.match(restriction, /atomicAddF\(at\(RHS,l\+1u,transfer\.coarse\),transfer\.weight\*residualValue\)/);
+  assert.equal(restriction.match(/atomicAddF/g)?.length, 1,
+    "the combined restriction kernel has one remaining scatter-add site");
+  cycle.destroy();
+});
+
 test("fixed LDLT bottom operation is exact, linear, symmetric, and positive", () => {
   const operator = [[4, -1, 0], [-1, 4, -1], [0, -1, 3]];
   const x = [1, -2, 0.5], y = [-0.25, 3, 2];
@@ -74,7 +122,7 @@ test("fixed LDLT bottom operation is exact, linear, symmetric, and positive", ()
   assert.throws(() => solveSPGridBottomLDLT([[0]], [1]), /not SPD/);
 });
 
-test("GPU source stores one transfer record and consumes it in both adjoint directions", () => {
+test("GPU correction owns transfers by fine slot and shares one exact adjoint mapping", () => {
   assert.match(octreeSPGridVCycleShader, /clearCorrection[\s\S]*r<rows\(\)&&!stopped\(\)/,
     "post-convergence correction clears must be write-free");
   assert.match(octreeSPGridVCycleShader, /zeroVectors[\s\S]*i>=count\(l\)\|\|stopped\(\)/,
@@ -84,16 +132,17 @@ test("GPU source stores one transfer record and consumes it in both adjoint dire
   assert.equal(new Set(bindings).size, bindings.length,
     "every WGSL binding must have exactly one module-scope declaration");
   assert.match(octreeSPGridVCycleShader, /appendTransfer\(l,fine,c,weight\)/);
-  assert.match(octreeSPGridVCycleShader, /fn restrictResidual/);
-  assert.match(octreeSPGridVCycleShader, /fn prolongCorrection/);
-  assert.match(octreeSPGridVCycleShader, /fn ghostValueAccumulate/);
-  assert.match(octreeSPGridVCycleShader, /fn ghostValuePropagate/);
-  assert.match(octreeSPGridVCycleShader, /if\(w!=1\.0\).*atomicAddF\(at\(RHS,l\+1u,c\),loadf\(RESIDUAL,l,f\)\)/s,
-    "GhostValueAccumulate applies E transpose through a unit copy record");
-  assert.match(octreeSPGridVCycleShader, /if\(w!=1\.0\).*storef\(A,l,f,loadf\(A,l\+1u,c\)\)/s,
-    "GhostValuePropagate applies E through the same unit copy record");
-  assert.match(octreeSPGridVCycleShader, /w\*loadf\(RESIDUAL,l,f\)/);
-  assert.match(octreeSPGridVCycleShader, /w\*loadf\(A,l\+1u,c\)/);
+  assert.match(octreeSPGridVCycleShader, /fn correctionTransfer/);
+  assert.match(octreeSPGridVCycleShader, /fn restrictAndGhostAccumulate/);
+  assert.match(octreeSPGridVCycleShader, /fn prolongAndGhostPropagate/);
+  assert.equal(octreeSPGridVCycleShader.match(/correctionTransfer\(l,fine,corner\)/g)?.length, 2,
+    "restriction and prolongation must consume the same transfer mapping");
+  const prolong = octreeSPGridVCycleShader.slice(octreeSPGridVCycleShader.indexOf("fn prolongAndGhostPropagate"),
+    octreeSPGridVCycleShader.indexOf("fn publish", octreeSPGridVCycleShader.indexOf("fn prolongAndGhostPropagate")));
+  assert.doesNotMatch(prolong, /atomicAddF/,
+    "one fine invocation owns its complete prolongation sum");
+  assert.match(octreeSPGridVCycleShader, /transfer\.weight\*residualValue/);
+  assert.match(octreeSPGridVCycleShader, /transfer\.weight\*loadf\(A,l\+1u,transfer\.coarse\)/);
   assert.match(octreeSPGridVCycleShader, /const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u/);
   assert.match(octreeSPGridVCycleShader, /fn mergeClass/);
   assert.match(octreeSPGridVCycleShader, /fn contactCoord/);
@@ -150,6 +199,8 @@ test("one correction uses one compute-pass transition, ordered dispatches, and c
   cycle.encodeCorrection(encoder, input);
   assert.equal(passes - setupPasses, 1);
   assert.equal(dispatches - before, cycle.encodedCorrectionDispatchCount);
+  assert.equal(cycle.encodedCorrectionDispatchCount, 57,
+    "fine-owned transfer kernels delete two dispatches at each of four non-bottom levels");
   assert.equal(cycle.encodedCorrectionPassCount, cycle.encodedCorrectionDispatchCount,
     "legacy pass-count accounting means ordered dispatches");
   assert.equal(cycle.encodedPassTransitionCount, 1);
@@ -221,7 +272,7 @@ test("failed generations publish a conditional full reset and successful generat
     "successful recurring generations must not write full sparse capacity");
 });
 
-test("correction consumes per-level live slot and transfer dispatch offsets", () => {
+test("correction consumes only per-level live slot dispatches", () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
   const buffer = (size: number, usage = 31, label?: string) => ({ size, usage, label, destroy() {} }) as unknown as GPUBuffer;
   const device = { queue: { writeBuffer() {} },
@@ -239,9 +290,10 @@ test("correction consumes per-level live slot and transfer dispatch offsets", ()
   assert.equal(direct, 3, "only correction clear, RHS seed, and publication use row-capacity dispatches");
   assert.equal(offsets.length, cycle.encodedCorrectionDispatchCount - direct);
   assert.equal(sources.size, 1, "all correction work must consume the dedicated indirect buffer");
-  assert.ok(offsets.includes(8) && offsets.includes(20), "level zero uses distinct slot and transfer records");
+  assert.ok(offsets.includes(8), "level zero consumes its live slot record");
   assert.ok(offsets.includes((cycle.plan.levelCount - 1) * 32 + 8), "the bottom level uses its own live slot record");
-  assert.ok(offsets.every((offset) => offset % 32 === 8 || offset % 32 === 20));
+  assert.ok(offsets.every((offset) => offset % 32 === 8),
+    "fine-owned transfer kernels no longer launch one invocation per transfer record");
   cycle.destroy();
 });
 
@@ -262,8 +314,8 @@ test("Dawn accepts the native sparse V-cycle shader", {
   for (const entryPoint of ["resetInvalidBuffers", "retireSlots", "retireRows", "resetSetupMetadata", "finalizeLifecycle",
     "clearCorrection", "emitCells", "emitGhostAliases",
     "buildTransfers", "buildStencil", "ensureDiagonal", "finalizeIndirect", "zeroVectors", "seedRhs", "applyA",
-    "applyB", "jacobiAtoB", "jacobiBtoA", "formResidual", "restrictResidual", "ghostValueAccumulate", "exactBottom",
-    "prolongCorrection", "ghostValuePropagate", "publish"]) {
+    "applyB", "jacobiAtoB", "jacobiBtoA", "formResidual", "restrictAndGhostAccumulate", "exactBottom",
+    "prolongAndGhostPropagate", "publish"]) {
     device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint } });
   }
   const validationError = await device.popErrorScope();

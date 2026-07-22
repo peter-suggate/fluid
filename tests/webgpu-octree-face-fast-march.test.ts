@@ -69,7 +69,7 @@ function wgslFunction(name: string, wgsl = octreeFaceBandWGSL): string {
   assert.fail(`unterminated WGSL function ${name}`);
 }
 
-test("Section 5 face-band phases retain paper order and batch each checkpoint into one compute pass", () => {
+test("Section 5 face-band phases retain paper order and fence support key/value publications", () => {
   assert.deepEqual(OCTREE_FACE_BAND_ENCODE_PHASES, [
     "topology-build", "transition-adjacency", "fast-march", "power-publication",
   ]);
@@ -82,17 +82,20 @@ test("Section 5 face-band phases retain paper order and batch each checkpoint in
   const march = source.indexOf('case"fast-march"', transitions);
   const publication = source.indexOf('case"power-publication"', march);
   assert.ok(topology >= 0 && transitions > topology && march > transitions && publication > march);
-  assert.equal(source.match(/computePass\("/g)?.length, 4,
-    "the four fenceable checkpoints must replace the old pass-per-dispatch schedule");
-  assert.equal(source.match(/encoder\.beginComputePass/g)?.length, 1,
-    "all checkpoint passes must use the shared batched compute-pass helper");
+  assert.equal(source.match(/computePass\("/g)?.length, 3,
+    "topology, march, and power publication remain batched checkpoints");
+  assert.equal(source.match(/encoder\.beginComputePass/g)?.length, 3,
+    "transition closure owns an explicit initial pass and synchronized continuation constructor");
   assert.match(source.slice(topology, transitions),
     /run\("prepare"[\s\S]*run\("map"[\s\S]*run\("indexGlobalRows"/);
   assert.match(source.slice(topology, transitions),
-    /run\("map"[\s\S]*0,pass,0\)/,
+    /run\("map"[\s\S]*0,pass\d*,0\)/,
     "fine-row discovery must dispatch from the live GPU worklist rather than brick capacity");
   assert.match(source.slice(transitions, march),
     /run\("prepareTransition"[\s\S]*run\("resolveTransition"[\s\S]*run\("transition"[\s\S]*run\("emit"[\s\S]*run\("sampleFacePhi"[\s\S]*run\("sampleFaceCoarsePhi"[\s\S]*run\("reducePhiFailure"[\s\S]*run\("publishPhiFailure"[\s\S]*run\("summarizeRowPhi"[\s\S]*run\("gateTransition"/);
+  assert.match(source.slice(transitions, march),
+    /run\("insertSupport1"[\s\S]*synchronizeTransitionStorage\(\)[\s\S]*run\("recordBandPhiEdges"[\s\S]*run\("captureSupport1"[\s\S]*synchronizeTransitionStorage\(\)[\s\S]*run\("resolveSupport1Topology"/,
+    "a pass boundary makes each split hash key/value publication visible before its first consumer");
   assert.match(source.slice(march, publication),
     /run\("seedCentroids"[\s\S]*run\("initialize"[\s\S]*run\("linkCpt"[\s\S]*run\("jumpCpt"[\s\S]*run\("resolveCpt"[\s\S]*run\("prepareBfs"[\s\S]*propagateBfs[\s\S]*run\("validate"[\s\S]*run\("reconstruct"[\s\S]*run\("publish"/);
   assert.match(source.slice(publication),
@@ -235,14 +238,19 @@ test("Section 5 admits only one clean same-generation fine/coarse publication", 
     "GPU admission must not reinterpret rejected A/B scratch as current paper authority");
 });
 
-test("topology discovery never waits across workgroups and clears only its owned indices", () => {
+test("topology discovery lets duplicate producers exit and fences split key/value publication", () => {
   const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
   const insert = octreeFaceBandWGSL.slice(
     octreeFaceBandWGSL.indexOf("fn insertRow"),
     octreeFaceBandWGSL.indexOf("fn rowOf"),
   );
   assert.match(insert, /if\(result\.old_value==key\)\{return INVALID;\}/,
-    "a duplicate claimant must let the winning invocation publish without occupying the GPU");
+    "a duplicate claimant must let the winning producer run without a cross-workgroup wait");
+  assert.doesNotMatch(wgslFunction("publishedRow"), /for\(|loop\{/,
+    "a consumer must not spin on another workgroup's split key/value publication");
+  assert.match(source.slice(source.indexOf('case"transition-adjacency"'), source.indexOf('case"fast-march"')),
+    /run\("enumerateSupport1"[\s\S]*synchronizeTransitionStorage\(\)[\s\S]*run\("resolveSupportOwners"[\s\S]*synchronizeTransitionStorage\(\)[\s\S]*run\("insertSupport1"/,
+    "command-ordered passes, not cross-workgroup polling, publish each support candidate stage");
   assert.doesNotMatch(insert, /\bloop\s*\{/,
     "same-key row publication must not use an unbounded cross-workgroup wait");
   assert.match(wgslFunction("prepareFaceBand"),
@@ -263,10 +271,16 @@ test("topology discovery never waits across workgroups and clears only its owned
 
   const transitions = source.slice(source.indexOf('case"transition-adjacency"'),
     source.indexOf('case"fast-march"'));
-  assert.match(transitions, /clearBuffer\(this\.faces\)/,
-    "capacity-scanned LIVE face flags are reset immediately before face construction");
+  assert.doesNotMatch(transitions, /clearBuffer\(this\.faces\)/,
+    "the 64-byte sparse face arena must not be cleared when all consumers use its active prefix");
   assert.match(transitions, /clearBuffer\(this\.incidence,0,this\.plan\.rowCapacity\*4\)/,
     "only per-row incidence counters are reset; payload is overwritten before use");
+  assert.match(transitions,
+    /run\("captureEndpoints"[\s\S]*run\("retireFaceSlots"[\s\S]*0,pass,228\)[\s\S]*run\("emit"/,
+    "endpoint capture must publish the active face-slot prefix before only its LIVE words are retired");
+  assert.match(wgslFunction("retireBandFaceSlots"),
+    /letcount=min\(p\.faceCapacity,transitionControl\.endpointEnd\*p\.ownedFacesPerRow\)[\s\S]*faces\[g\.x\]\.flags=0u/,
+    "face retirement writes one word per active slot instead of clearing every 64-byte record");
   assert.match(octreeFaceBandWGSL, /atomicStore\(&states\[i\]\.status,UNKNOWN\)/,
     "every live face receives fresh march state after the capacity-wide state clear is removed");
 });
@@ -308,8 +322,10 @@ test("factor-4 GPU face band is compact, bounded, and has no fine velocity chann
   assert.equal(plan.stateBytes, plan.faceCapacity * OCTREE_FACE_BAND_STATE_BYTES);
   assert.equal(plan.cptParentBytes, plan.faceCapacity * 4,
     "each race-free CPT snapshot stores one parent index per face");
-  assert.equal(plan.frontierBytes, 216,
-    "one map record and live row/candidate records replace every capacity-sized support dispatch");
+  assert.equal(plan.frontierBytes, 240,
+    "one map record plus live support and final row/face prefix records replace capacity-sized dispatches");
+  assert.equal(plan.bandFaceBytes - plan.faceCapacity * 4, 4_976_640,
+    "the UI-sized domain retires LIVE words rather than rewriting 4.98 MiB of inactive face payload");
   assert.equal(plan.allocatedBytes,
     plan.bandFaceBytes + plan.incidenceBytes + plan.stateBytes + 2 * plan.cptParentBytes,
     "legacy and production accounting both include the two CPT snapshots");
@@ -1116,11 +1132,13 @@ test("GPU CPT binds its complete causal face graph within the portable limit", (
   assert.match(implementation, /jumpCpt:pipeline\("jumpFaceClosestPoints"\)/,
     "the pointer-jump WGSL entry point must have a live production pipeline");
   assert.match(source,
-    /run\("linkCpt",\[\[0,this\.params\],\[5,this\.control\],\[6,this\.rows\],\[12,this\.faces\],\[14,this\.incidence\],\[15,this\.state\],\[27,this\.transitionMetrics\],\[31,this\.transitionAdjacency\],\[32,this\.transitionControl\],\[56,this\.cptParentsA\]\],Math\.ceil\(this\.plan\.faceCapacity\/64\),pass\)/,
+    /run\("linkCpt",\[\[0,this\.params\],\[5,this\.control\],\[6,this\.rows\],\[12,this\.faces\],\[14,this\.incidence\],\[15,this\.state\],\[27,this\.transitionMetrics\],\[31,this\.transitionAdjacency\],\[32,this\.transitionControl\],\[56,this\.cptParentsA\]\],0,pass\d*,228\)/,
     "CPT construction binds every resource used by the local Delaunay predecessor graph");
   assert.match(source,
-    /for\(letround=0;round<this\.cptPlan\.jumpRounds;round\+=1\)\{run\("jumpCpt",\[\[0,this\.params\],\[5,this\.control\],\[12,this\.faces\],\[15,this\.state\],\[56,currentParents\],\[57,nextParents\]\],Math\.ceil\(this\.plan\.faceCapacity\/64\),pass\);\[currentParents,nextParents\]=\[nextParents,currentParents\]\}/,
+    /for\(letround=0;round<this\.cptPlan\.jumpRounds;round\+=1\)\{run\("jumpCpt",\[\[0,this\.params\],\[5,this\.control\],\[12,this\.faces\],\[15,this\.state\],\[56,currentParents\],\[57,nextParents\]\],0,pass\d*,228\);\[currentParents,nextParents\]=\[nextParents,currentParents\]\}/,
     "the host dispatches the planned logarithmic number of race-free ping-pong jumps");
+  assert.doesNotMatch(source, /Math\.ceil\(this\.plan\.faceCapacity\/64\)/,
+    "no face stage may return to a fixed-capacity dispatch tail");
   assert.match(source,
     /run\("resolveCpt",\[\[0,this\.params\],\[5,this\.control\],\[12,this\.faces\],\[15,this\.state\],\[56,currentParents\]\]/,
     "resolution consumes the final contracted parent snapshot");
@@ -1228,7 +1246,7 @@ test("catalog-Delaunay transition adjacency has a bounded fail-closed producer A
     /let expectedOwner=ownerAt\(neighborOrigin\);if\(!ownerContains\(expectedOwner,neighborOrigin\)\|\|expectedOwner\.size!=neighborSize\|\|any\(expectedOwner\.origin!=neighborOrigin\)\)/,
     "catalog neighbor geometry must first resolve to the exact authoritative adaptive owner");
   assert.match(octreeFaceBandWGSL,
-    /let neighbor=rowOf\(cell\(neighborOrigin\)\);if\(neighbor==INVALID\)[\s\S]*?if\(neighbor>=atomicLoad\(&control\.rowCount\)\|\|neighbor>=arrayLength\(&rows\)\)[\s\S]*?if\(rows\[neighbor\]\.size!=neighborSize\)/,
+    /let neighborCell=cell\(neighborOrigin\);let neighbor=rowOf\(neighborCell\);if\(neighbor==INVALID\)[\s\S]*?if\(neighbor>=atomicLoad\(&control\.rowCount\)\|\|neighbor>=arrayLength\(&rows\)\)[\s\S]*?if\(rows\[neighbor\]\.size!=neighborSize\)/,
     "catalog neighbors must distinguish a missing band row, row-range failure, and dyadic size mismatch");
   assert.match(octreeFaceBandWGSL,
     /atomicStore\(&transitionControl\.detailFlags,0u\)/,
@@ -1362,7 +1380,7 @@ test("support-closure stages stay within portable auto-layout bind groups", () =
     .match(/constrecordPhiEdgeBindings=\[([\s\S]*?)\];/)?.[1];
   assert.ok(recordBindings);
   assert.deepEqual([...recordBindings.matchAll(/\[(\d+),/g)].map((match) => Number(match[1])),
-    [0, 5, 7, 43, 47, 53],
+    [0, 5, 7, 32, 43, 47, 53],
     "bounded incoming scalar edges reuse later transient-power scratch in a separate portable stage");
 });
 
@@ -1423,7 +1441,7 @@ test("live support prefixes dispatch sparse closure even when S0 reservation con
     /letappended=transitionControl\.support4NodeEnd-transitionControl\.support3NodeEnd[\s\S]*appended\*MAX_GUARDS/,
     "S5 candidate discovery consumes only rows newly appended by the S4 closure");
   assert.match(source,
-    /run\("preparePointDispatch"[\s\S]*run\("preparePointRows"[\s\S]*0,pass,24\)/,
+    /run\("preparePointDispatch"[\s\S]*run\("preparePointRows"[\s\S]*0,pass\d*,24\)/,
     "the final S0+S1 point field also consumes the live published prefix rather than a zero role cap");
 });
 
@@ -1588,7 +1606,7 @@ test("paper Section 5 regular-to-power publication is fail-closed and centroid b
     "the interpolation stage must consume the completed endpoint mapping instead of repeating hash lookup");
 
   const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
-  const prepare = source.match(/run\("preparePowerPublication",\[([\s\S]*?)\],1,pass\)/)?.[1];
+  const prepare = source.match(/run\("preparePowerPublication",\[([\s\S]*?)\],1,pass\d*\)/)?.[1];
   assert.ok(prepare);
   for (const binding of [0, 5, 32, 36, 37, 38, 39, 40, 41, 48]) {
     assert.match(prepare, new RegExp(`\\[${binding},`));
@@ -1834,7 +1852,7 @@ test("Section 5 final point field consumes one complete transient physical power
     /clearBuffer\(this\.transientPower(?:Faces|Incidence|Rows|Control)\)/,
     "counted transient publication does not clear any fixed-capacity arena");
   assert.match(schedule,
-    /run\("sampleTransientPower"[\s\S]*Math\.ceil\(this\.plan\.rowCapacity\/64\),pass\)/,
+    /run\("sampleTransientPower"[\s\S]*Math\.ceil\(this\.plan\.rowCapacity\/64\),pass\d*\)/,
     "one invocation samples all owned slots for a live row");
   const provisionalAt = schedule.indexOf('run("publish"');
   const prepareTransientAt = schedule.indexOf('run("prepareTransientPower"', provisionalAt);

@@ -26,6 +26,15 @@ export interface SPGridTransferRecord {
   readonly weight: number;
 }
 
+/** Stable parent-owned traversal of the immutable transfer records. The GPU
+ * replacement for restriction must publish this exact layout before it can
+ * replace scatter atomics with one deterministic gather per coarse slot. */
+export interface SPGridParentGatherCSR {
+  readonly coarseCount: number;
+  readonly offsets: readonly number[];
+  readonly recordIndices: readonly number[];
+}
+
 export interface SPGridOracleLevel {
   readonly scale: number;
   readonly coordinates: readonly (readonly [number, number, number])[];
@@ -266,6 +275,57 @@ export function restrictSPGrid(fine: readonly number[], records: readonly SPGrid
   return result;
 }
 
+/** Stable counting-sort oracle for the future GPU parent-key radix/CSR stage.
+ * Repeated boundary records remain repeated indices; coalescing them would
+ * change both interpolation weights and floating-point accumulation order. */
+export function buildSPGridParentGatherCSR(
+  records: readonly SPGridTransferRecord[],
+  fineCount: number,
+  coarseCount: number,
+): SPGridParentGatherCSR {
+  if (!Number.isSafeInteger(fineCount) || fineCount < 0 || !Number.isSafeInteger(coarseCount) || coarseCount < 0) {
+    throw new RangeError("SPGrid parent-gather dimensions must be non-negative integers");
+  }
+  const offsets = new Array<number>(coarseCount + 1).fill(0);
+  records.forEach((record, index) => {
+    if (!Number.isSafeInteger(record.fine) || record.fine < 0 || record.fine >= fineCount
+      || !Number.isSafeInteger(record.coarse) || record.coarse < 0 || record.coarse >= coarseCount
+      || !(record.weight >= 0) || !Number.isFinite(record.weight)) {
+      throw new RangeError(`Invalid SPGrid parent-gather record ${index}`);
+    }
+    offsets[record.coarse + 1] += 1;
+  });
+  for (let coarse = 0; coarse < coarseCount; coarse += 1) offsets[coarse + 1] += offsets[coarse];
+  const cursors = offsets.slice(0, -1), recordIndices = new Array<number>(records.length);
+  records.forEach((record, index) => { recordIndices[cursors[record.coarse]++] = index; });
+  return Object.freeze({ coarseCount, offsets: Object.freeze(offsets), recordIndices: Object.freeze(recordIndices) });
+}
+
+/** Atomic-free restriction oracle: one parent owns each sum and traverses a
+ * stable range. It consumes the original records so duplicate boundary
+ * weights and the exact P/P^T relationship remain unchanged. */
+export function restrictSPGridParentGather(
+  fine: readonly number[],
+  records: readonly SPGridTransferRecord[],
+  csr: SPGridParentGatherCSR,
+): number[] {
+  if (csr.offsets.length !== csr.coarseCount + 1 || csr.recordIndices.length !== records.length
+    || csr.offsets[0] !== 0 || csr.offsets.at(-1) !== records.length) {
+    throw new RangeError("Invalid SPGrid parent-gather CSR");
+  }
+  const result = new Array<number>(csr.coarseCount).fill(0);
+  for (let coarse = 0; coarse < csr.coarseCount; coarse += 1) {
+    let sum = 0;
+    for (let cursor = csr.offsets[coarse]; cursor < csr.offsets[coarse + 1]; cursor += 1) {
+      const record = records[csr.recordIndices[cursor]];
+      if (record.coarse !== coarse || record.fine >= fine.length) throw new RangeError("Corrupt SPGrid parent-gather range");
+      sum += record.weight * fine[record.fine];
+    }
+    result[coarse] = sum;
+  }
+  return result;
+}
+
 /** Exact transpose of restrictSPGrid because it consumes the same immutable records. */
 export function prolongSPGrid(coarse: readonly number[], records: readonly SPGridTransferRecord[], fineCount: number): number[] {
   const result = new Array<number>(fineCount).fill(0);
@@ -375,8 +435,8 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
 export type OctreeSPGridVCyclePipelineName = "emitCells" | "emitGhostAliases" | "buildTransfers" | "buildStencil" | "ensureDiagonal" | "finalizeIndirect"
   | "resetInvalidBuffers" | "retireSlots" | "retireRows" | "resetSetupMetadata" | "finalizeLifecycle" | "clearCorrection"
   | "zeroVectors" | "seedRhs" | "applyA" | "applyB" | "jacobiAtoB" | "jacobiBtoA"
-  | "formResidual" | "restrictResidual" | "ghostValueAccumulate" | "exactBottom"
-  | "prolongCorrection" | "ghostValuePropagate" | "publish";
+  | "formResidual" | "restrictAndGhostAccumulate" | "exactBottom"
+  | "prolongAndGhostPropagate" | "publish";
 
 export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePipelineName, readonly number[]>> = Object.freeze({
   resetInvalidBuffers: [4, 5], retireSlots: [0, 4, 5, 6], retireRows: [0, 3, 4, 6],
@@ -387,10 +447,9 @@ export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePi
   buildStencil: [0, 1, 2, 3, 4, 5, 7], ensureDiagonal: [0, 4, 5, 6], finalizeIndirect: [0, 6],
   zeroVectors: [0, 4, 5, 6, 7], seedRhs: [0, 1, 3, 4, 5, 7, 8], applyA: [0, 4, 5, 6, 7],
   applyB: [0, 4, 5, 6, 7], jacobiAtoB: [0, 4, 5, 6, 7], jacobiBtoA: [0, 4, 5, 6, 7],
-  formResidual: [0, 4, 5, 6, 7], restrictResidual: [0, 4, 5, 6, 7],
-  ghostValueAccumulate: [0, 4, 5, 6, 7],
+  formResidual: [0, 4, 5, 6, 7], restrictAndGhostAccumulate: [0, 1, 3, 4, 5, 6, 7],
   exactBottom: [0, 4, 5, 6, 7],
-  prolongCorrection: [0, 4, 5, 6, 7], ghostValuePropagate: [0, 4, 5, 6, 7],
+  prolongAndGhostPropagate: [0, 1, 3, 4, 5, 6, 7],
   publish: [0, 1, 3, 4, 5, 7, 9],
 });
 
@@ -413,7 +472,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   readonly encodedSetupDispatchCount: number;
   readonly encodedCorrectionDispatchCount: number;
   readonly diagnostics: Readonly<{ levelCount: number; coarsestCapacity: number; maximumTransferRecordsPerLevel: number;
-    correctionDispatchCount: number; correctionPassTransitions: number; bottomOperation: "exact-single-cell"; coarsestDegreesOfFreedom: 1 }>;
+    correctionDispatchCount: number; correctionPassTransitions: number; restrictionScatterDispatchCount: number;
+    restrictionAtomicAddUpperBound: number; parentGatherDispatchCount: number; parentGatherAtomicAddCount: 0;
+    bottomOperation: "exact-single-cell"; coarsestDegreesOfFreedom: 1 }>;
   private readonly capturedHeaders: GPUBuffer;
   private readonly capturedEntries: GPUBuffer;
   private readonly topology: GPUBuffer;
@@ -475,11 +536,14 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // bookkeeping, finest-cell emission, transfer construction, stencil
     // construction, diagonal/finalization per level, and lifecycle publish.
     this.encodedSetupDispatchCount = 4 * l + 6;
-    this.encodedCorrectionDispatchCount = l + 4 + (l - 1) * (2 * this.pre + 2 * this.post + 6);
+    this.encodedCorrectionDispatchCount = l + 4 + (l - 1) * (2 * this.pre + 2 * this.post + 4);
     this.encodedCorrectionPassCount = this.encodedCorrectionDispatchCount;
     this.diagnostics = Object.freeze({ levelCount: l, coarsestCapacity: this.plan.levelStride,
       maximumTransferRecordsPerLevel: this.plan.transferStride, correctionDispatchCount: this.encodedCorrectionDispatchCount,
-      correctionPassTransitions: 1, bottomOperation: "exact-single-cell" as const, coarsestDegreesOfFreedom: 1 as const });
+      correctionPassTransitions: 1, restrictionScatterDispatchCount: l - 1,
+      restrictionAtomicAddUpperBound: 8 * (l - 1) * this.plan.levelStride,
+      parentGatherDispatchCount: l - 1, parentGatherAtomicAddCount: 0 as const,
+      bottomOperation: "exact-single-cell" as const, coarsestDegreesOfFreedom: 1 as const });
     this.allocatedBytes = this.plan.allocatedBytes + this.capturedHeaders.size + this.capturedEntries.size;
   }
 
@@ -526,13 +590,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     for (let level = 0; level < this.plan.levelCount - 1; level += 1) {
       this.smooth(pass, level, this.pre, input); this.runIndirect(pass, "applyA", level, input, false);
       this.runIndirect(pass, "formResidual", level, input, false);
-      this.runIndirect(pass, "restrictResidual", level, input, true);
-      this.runIndirect(pass, "ghostValueAccumulate", level, input, true);
+      this.runIndirect(pass, "restrictAndGhostAccumulate", level, input, false);
     }
     this.runIndirect(pass, "exactBottom", this.plan.levelCount - 1, input, false);
     for (let level = this.plan.levelCount - 2; level >= 0; level -= 1) {
-      this.runIndirect(pass, "prolongCorrection", level, input, true);
-      this.runIndirect(pass, "ghostValuePropagate", level, input, true);
+      this.runIndirect(pass, "prolongAndGhostPropagate", level, input, false);
       this.smooth(pass, level, this.post, input);
     }
     this.run(pass, "publish", 0, input, this.plan.rowDispatch); if (!sharedPass) pass.end();
@@ -585,6 +647,7 @@ export const octreeSPGridVCycleShader = /* wgsl */ `
 struct Params{dimsLevel:vec4u,capacity:vec4u,dispatchSmooth:vec4u,solve:vec2u,weights:vec2f}
 struct LeafHeader{cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f}
 struct LeafEntry{row:u32,coefficient:f32}
+struct TransferTarget{coarse:u32,weight:f32}
 @group(0) @binding(0) var<uniform> p:Params;
 @group(0) @binding(1) var<storage,read> headers:array<LeafHeader>;
 @group(0) @binding(2) var<storage,read> entries:array<LeafEntry>;
@@ -722,26 +785,35 @@ fn jacobi(slot:u32,src:u32,dst:u32){let l=level();let d=loadf(DIAG,l,slot);if(!(
  if(smoothable(l,s)){jacobi(s,B,A);}else{storef(A,l,s,loadf(B,l,s));}}}
 @compute @workgroup_size(64) fn formResidual(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){let s=workSlot(l,i);
  storef(RESIDUAL,l,s,select(-loadf(AX,l,s),loadf(RHS,l,s)-loadf(AX,l,s),smoothable(l,s)));}}
-@compute @workgroup_size(64) fn restrictResidual(@builtin(global_invocation_id) g:vec3u){let i=transferIndex(g);let l=level();if(i>=transferCount(l)||stopped()){return;}
- let f=atomicLoad(&topology[transferWord(l,i,0u)]);if((atomicLoad(&state[at(FLAGS,l,f)])&GHOST)!=0u){return;}
- let c=atomicLoad(&topology[transferWord(l,i,1u)]);let w=bitcast<f32>(atomicLoad(&topology[transferWord(l,i,2u)]));atomicAddF(at(RHS,l+1u,c),w*loadf(RESIDUAL,l,f));}
-// Aanjaneya et al. (2017), Section 4.2 GhostValueAccumulate: fine
-// contact-ghost partial results are copied back with E^T.  The exact same
-// immutable unit transfer record is consumed by GhostValuePropagate below.
-@compute @workgroup_size(64) fn ghostValueAccumulate(@builtin(global_invocation_id) g:vec3u){let i=transferIndex(g);let l=level();if(i>=transferCount(l)||stopped()){return;}
- let f=atomicLoad(&topology[transferWord(l,i,0u)]);if((atomicLoad(&state[at(FLAGS,l,f)])&GHOST)==0u){return;}
- let c=atomicLoad(&topology[transferWord(l,i,1u)]);let w=bitcast<f32>(atomicLoad(&topology[transferWord(l,i,2u)]));
- if(w!=1.0){report(OVERFLOW);return;}atomicAddF(at(RHS,l+1u,c),loadf(RESIDUAL,l,f));}
+// Return the unique transfer target owned by one fine slot/corner. Both E^T
+// restriction and E prolongation call this function, so their weights cannot
+// diverge. Setup has already inserted every returned coarse cell.
+fn correctionTransfer(l:u32,fine:u32,corner:u32)->TransferTarget{let flags=atomicLoad(&state[at(FLAGS,l,fine)]);
+ let q=decode(atomicLoad(&state[at(KEY,l,fine)]),l);if((flags&GHOST)!=0u){if(corner!=0u){return TransferTarget(INVALID,0.0);}
+  let encodedOwner=atomicLoad(&state[at(OWNER,l,fine)]);if(encodedOwner==0u||encodedOwner>rows()){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
+  let owner=encodedOwner-1u;let native=firstTrailingBit(headers[owner].size);let coarse=select(find(l+1u,q/2u),rowMap(l+1u,owner),l+1u==native);
+  if(coarse==INVALID){report(OVERFLOW);}return TransferTarget(coarse,1.0);}
+ if(corner>=8u){return TransferTarget(INVALID,0.0);}let base=q/2u;
+ let side=vec3i(select(-1,1,(q.x&1u)!=0u),select(-1,1,(q.y&1u)!=0u),select(-1,1,(q.z&1u)!=0u));var targetCoord=vec3i(base);var weight=1.0;
+ for(var axis=0u;axis<3u;axis+=1u){if((corner&(1u<<axis))!=0u){targetCoord[axis]+=side[axis];weight*=0.25;}else{weight*=0.75;}}
+ let cq=min(vec3u(max(targetCoord,vec3i(0))),dims(l+1u)-vec3u(1u));let coarse=find(l+1u,cq);if(coarse==INVALID){report(OVERFLOW);}
+ return TransferTarget(coarse,weight);}
+// Section 4.2 restriction and GhostValueAccumulate share one fine-owned
+// dispatch. Coarse destinations still require atomic sums until setup publishes
+// the inverse parent CSR; the exact E^T weights are shared with prolongation.
+@compute @workgroup_size(64) fn restrictAndGhostAccumulate(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)||stopped()){return;}
+ let fine=workSlot(l,i);let ghost=(atomicLoad(&state[at(FLAGS,l,fine)])&GHOST)!=0u;let residualValue=loadf(RESIDUAL,l,fine);let targetCount=select(8u,1u,ghost);
+ for(var corner=0u;corner<targetCount;corner+=1u){let transfer=correctionTransfer(l,fine,corner);if(transfer.coarse==INVALID){return;}
+  atomicAddF(at(RHS,l+1u,transfer.coarse),transfer.weight*residualValue);}}
 @compute @workgroup_size(64) fn exactBottom(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>0u||stopped()){return;}if(count(l)!=1u){report(NONPOSITIVE);return;}
  let s=workSlot(l,0u);let d=loadf(DIAG,l,s);if(!(d>0.0)){report(NONPOSITIVE);return;}let x=loadf(RHS,l,s)/d;if(!finite(x)){report(NONFINITE);}else{storef(A,l,s,x);}}
-@compute @workgroup_size(64) fn prolongCorrection(@builtin(global_invocation_id) g:vec3u){let i=transferIndex(g);let l=level();if(i>=transferCount(l)||stopped()){return;}
- let f=atomicLoad(&topology[transferWord(l,i,0u)]);if((atomicLoad(&state[at(FLAGS,l,f)])&GHOST)!=0u){return;}
- let c=atomicLoad(&topology[transferWord(l,i,1u)]);let w=bitcast<f32>(atomicLoad(&topology[transferWord(l,i,2u)]));atomicAddF(at(A,l,f),w*loadf(A,l+1u,c));}
-// Section 4.2 GhostValuePropagate: E is an exact copy, not interpolation.
-@compute @workgroup_size(64) fn ghostValuePropagate(@builtin(global_invocation_id) g:vec3u){let i=transferIndex(g);let l=level();if(i>=transferCount(l)||stopped()){return;}
- let f=atomicLoad(&topology[transferWord(l,i,0u)]);if((atomicLoad(&state[at(FLAGS,l,f)])&GHOST)==0u){return;}
- let c=atomicLoad(&topology[transferWord(l,i,1u)]);let w=bitcast<f32>(atomicLoad(&topology[transferWord(l,i,2u)]));
- if(w!=1.0){report(OVERFLOW);return;}storef(A,l,f,loadf(A,l+1u,c));}
+// One fine invocation owns the complete interpolation sum, deleting all
+// prolongation atomics. GhostValuePropagate is the unit-copy branch of the
+// same E mapping rather than a second dispatch.
+@compute @workgroup_size(64) fn prolongAndGhostPropagate(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)||stopped()){return;}
+ let fine=workSlot(l,i);let ghost=(atomicLoad(&state[at(FLAGS,l,fine)])&GHOST)!=0u;let targetCount=select(8u,1u,ghost);var value=select(loadf(A,l,fine),0.0,ghost);
+ for(var corner=0u;corner<targetCount;corner+=1u){let transfer=correctionTransfer(l,fine,corner);if(transfer.coarse==INVALID){return;}
+  value+=transfer.weight*loadf(A,l+1u,transfer.coarse);}if(!finite(value)){report(NONFINITE);}else{storef(A,l,fine,value);}}
 @compute @workgroup_size(64) fn publish(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let native=firstTrailingBit(headers[r].size);
  let v=loadf(A,native,rowMap(native,r));if(!finite(v)){report(NONFINITE);}else{outputCorrection[r]=v;}}}
 `;

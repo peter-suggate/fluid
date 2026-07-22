@@ -4,6 +4,10 @@ import { pathToFileURL } from "node:url";
 
 import {
   OCTREE_FACE_TRANSFER_DIAGNOSTIC_BYTES,
+  OCTREE_FACE_PREVIOUS_CONTROL_BYTES,
+  OCTREE_FACE_PREVIOUS_GENERATION_OFFSET_BYTES,
+  OCTREE_FACE_PREVIOUS_RECORD_BYTES,
+  OCTREE_FACE_PREVIOUS_VALID_OFFSET_BYTES,
   octreeFaceTopologyTransferShader,
   octreeFaceTransferRadixFields,
   planOctreeFaceTopologyTransfer,
@@ -17,6 +21,10 @@ test("topology transfer uses compact radix-sort storage", () => {
   assert.equal(plan.sortCapacity, 131_072);
   assert.equal(plan.sortPasses, 32);
   assert.equal(plan.previousFaceBytes, 125_488 * 20);
+  assert.equal(OCTREE_FACE_PREVIOUS_RECORD_BYTES, 20);
+  assert.equal(OCTREE_FACE_PREVIOUS_CONTROL_BYTES, 64);
+  assert.equal(OCTREE_FACE_PREVIOUS_GENERATION_OFFSET_BYTES, 52);
+  assert.equal(OCTREE_FACE_PREVIOUS_VALID_OFFSET_BYTES, 56);
   assert.equal(plan.recordBytes, 0);
   assert.equal(plan.scratchBytes, plan.indexBytes);
   assert.equal(plan.dispatchBytes, 36);
@@ -79,7 +87,8 @@ test("all radix data stages consume one storage-separated GPU-authored live disp
       const gpuBuffer = buffer(size, usage, label); created.push({ label, usage, buffer: gpuBuffer }); return gpuBuffer;
     },
     createBindGroupLayout: () => ({}), createShaderModule: () => ({}), createPipelineLayout: () => ({}),
-    createComputePipeline: ({ label }: { label: string }) => ({ label }), createBindGroup: () => ({}),
+    createComputePipeline: ({ label }: { label: string }) => ({ label }),
+    createBindGroup: ({ label }: { label: string }) => ({ label }),
   } as unknown as GPUDevice;
   const source: OctreeFaceMirrorSource = {
     plan: { rowCapacity: 64, faceCapacity: 1_000, faceBytes: 32_000, incidenceBytes: 4, allocatedBytes: 32_004 },
@@ -87,19 +96,30 @@ test("all radix data stages consume one storage-separated GPU-authored live disp
   };
   const transfer = new WebGPUOctreeFaceTopologyTransfer(device, source);
   const direct: string[] = [], indirect: Array<{ label: string; source: GPUBuffer; offset: number }> = [], copies: unknown[][] = [];
+  const bound: Array<{ pipeline: string; group: string }> = [];
   let current = "";
   const encoder = {
     clearBuffer() {},
     copyBufferToBuffer(...args: unknown[]) { copies.push(args); },
     beginComputePass() { return {
-      setPipeline(pipeline: { label: string }) { current = pipeline.label; }, setBindGroup() {},
+      setPipeline(pipeline: { label: string }) { current = pipeline.label; },
+      setBindGroup(_index: number, group: { label: string }) { bound.push({ pipeline: current, group: group.label }); },
       dispatchWorkgroups() { direct.push(current); },
       dispatchWorkgroupsIndirect(sourceBuffer: GPUBuffer, offset: number) { indirect.push({ label: current, source: sourceBuffer, offset }); },
       end() {},
     }; },
   } as unknown as GPUCommandEncoder;
-  transfer.encodeCapture(encoder);
+  const generation = buffer(64, 31, "Power-face generation control");
+  transfer.encodeCapture(encoder, { buffer: generation, offsetBytes: 28 });
   transfer.encodeTransfer(encoder);
+  const previous = transfer.previousPublication;
+  assert.equal(previous.faceCapacity, transfer.plan.faceCapacity);
+  assert.equal(previous.sortCapacity, transfer.plan.sortCapacity);
+  assert.ok(copies.some((copy) => copy[0] === generation && copy[1] === 28
+    && copy[2] === previous.control && copy[3] === OCTREE_FACE_PREVIOUS_GENERATION_OFFSET_BYTES && copy[4] === 4),
+  "the previous publication generation must be copied from the GPU authority, not inferred on the host");
+  assert.ok(direct.includes("Publish compact previous octree faces"),
+    "generation validity publishes only after sorted-key validation");
   const dispatch = created.find((entry) => entry.label === "Previous octree face live radix dispatch")!;
   assert.equal(dispatch.usage, GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT);
   assert.equal(dispatch.usage & GPUBufferUsage.STORAGE, 0);
@@ -116,12 +136,35 @@ test("all radix data stages consume one storage-separated GPU-authored live disp
   assert.equal(indirect.filter((item) => item.label === "Prepare previous octree face sort").length, 1);
   assert.ok(!direct.some((label) => /Capture compact|Prepare previous octree face sort|Histogram previous|Scatter previous|Validate octree|Transfer canonical/.test(label)),
     "no face data stage may dispatch the fixed capacity");
+  assert.equal(bound.find((item) => item.pipeline === "Prepare previous octree face sort")?.group,
+    "Octree face topology transfer bindings",
+    "an even radix plan starts in canonical A and therefore also finishes in canonical A");
+
+  const oddStart = bound.length;
+  const odd = new WebGPUOctreeFaceTopologyTransfer(device, source, { keyDimensions: [1_000_000, 16, 16] });
+  assert.equal(odd.plan.sortPasses % 2, 1, "the regression domain must exercise odd radix parity");
+  odd.encodeTransfer(encoder);
+  const oddBindings = bound.slice(oddStart);
+  assert.equal(oddBindings.find((item) => item.pipeline === "Prepare previous octree face sort")?.group,
+    "Octree face topology transfer swapped radix bindings",
+    "an odd radix plan initializes scratch so its last scatter lands in canonical A without a copy");
+  assert.ok(oddBindings.filter((item) => item.pipeline.startsWith("Histogram previous"))
+    .every((item, index) => item.group === (index % 2 === 0
+      ? "Octree face topology transfer swapped radix bindings"
+      : "Octree face topology transfer bindings")),
+  "odd radix passes must ping-pong from scratch to canonical storage");
+  for (const pipeline of ["Validate octree face topology transfer", "Transfer canonical octree face velocities"]) {
+    assert.equal(oddBindings.find((item) => item.pipeline === pipeline)?.group,
+      "Octree face topology transfer bindings",
+      `${pipeline} must consume canonical A regardless of radix parity`);
+  }
+  odd.destroy();
   transfer.destroy();
 });
 
 test("face publication captures old IDs before rebuild and transfers after deterministic emit", () => {
   const encode = WebGPUOctreeFaceMirror.prototype.encodeTopology.toString().replace(/\s+/g, "");
-  const capture = encode.indexOf("this.topologyTransfer?.encodeCapture(encoder)");
+  const capture = encode.indexOf("this.topologyTransfer?.encodeCapture(encoder,previousGeneration)");
   const clear = encode.indexOf("encoder.clearBuffer(this.control");
   const emit = encode.indexOf("this.emitPipeline");
   const transfer = encode.indexOf("this.topologyTransfer?.encodeTransfer(encoder)");
@@ -158,7 +201,11 @@ test("Dawn preserves canonical velocities through exact, prolongation, and restr
     plan: { rowCapacity: 1, faceCapacity: capacity, faceBytes: capacity * 32, incidenceBytes: 4, allocatedBytes: capacity * 32 + 36 },
     control, faces, incidence, parity,
   };
-  const transfer = new WebGPUOctreeFaceTopologyTransfer(device, source, { retainRecords: true });
+  const transfer = new WebGPUOctreeFaceTopologyTransfer(device, source, {
+    retainRecords: true, keyDimensions: [1_000_000, 16, 16],
+  });
+  assert.equal(transfer.plan.sortPasses % 2, 1,
+    "Dawn transfer coverage must exercise an odd exact-key radix plan");
   const descriptor = (origin: readonly [number, number, number], span: number, velocity: number): ArrayBuffer => {
     const bytes = new ArrayBuffer(32); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
     u32.set([0, 0xffffffff, origin[0], origin[1], origin[2], span << 2]); f32[6] = velocity; f32[7] = span * span; return bytes;

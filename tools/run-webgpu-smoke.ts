@@ -31,6 +31,7 @@ import { compactOctreeFieldEvidenceIsAcceptable, compactOctreePublicationHeaderE
 import { decodeOctreeMGPCGDiagnostics, octreeMGPCGDiagnosticsAreAcceptable,
   type OctreeMGPCGDiagnostics } from "./webgpu-smoke-pressure";
 import { compactLiquidVelocityDiagnostic, compactMechanicalEnergyDiagnostic, compactPowerFaceIntegratedFlux, compactPowerFaceMetricKineticEnergy } from "./webgpu-smoke-power-diagnostics";
+import type { OctreeEnergyLedgerSnapshot } from "../lib/webgpu-octree-energy-ledger";
 import { OCTREE_POWER_VELOCITY_VALID } from "../lib/webgpu-octree-power-velocity";
 import { compareVelocityFields, DAM_BREAK_VELOCITY_PARITY_LIMITS, rasterizeCompactPowerCellVelocities,
   velocityParityFailures, type CompactVelocityRaster, type VelocityParityMetrics } from "./webgpu-smoke-velocity-parity";
@@ -209,6 +210,11 @@ if (octreeGlobalFineFactorOverride !== undefined && !["off", "4", "8"].includes(
   throw new Error("FLUID_OCTREE_GLOBAL_FINE_FACTOR must be off, 4, or 8");
 }
 const powerGenerationAuditRequested = process.env.FLUID_POWER_GENERATION_AUDIT === "1";
+const powerEnergyLedgerRequested = process.env.FLUID_POWER_ENERGY_LEDGER === "1";
+const powerEnergyLedgerStepCapacity = Number(process.env.FLUID_POWER_ENERGY_LEDGER_STEPS ?? 512);
+if (!Number.isSafeInteger(powerEnergyLedgerStepCapacity) || powerEnergyLedgerStepCapacity < 1) {
+  throw new Error("FLUID_POWER_ENERGY_LEDGER_STEPS must be a positive integer");
+}
 const powerGenerationAuditLog = process.env.FLUID_POWER_GENERATION_AUDIT_LOG !== "0";
 const powerStageAuditLog = process.env.FLUID_POWER_STAGE_AUDIT === "1";
 const powerAuditEverySteps = Number(process.env.FLUID_POWER_AUDIT_EVERY_STEPS ?? 1);
@@ -1971,6 +1977,8 @@ interface GPUCommandAuditReport {
   bufferAllocationsByLabel: Record<string, GPUCommandAuditBucket>;
   commandEncodersByLabel: Record<string, GPUCommandAuditBucket>;
   computePassesByLabel: Record<string, GPUCommandAuditBucket>;
+  dispatchesByPassLabel: Record<string, GPUCommandAuditBucket>;
+  indirectDispatchesByPassLabel: Record<string, GPUCommandAuditBucket>;
 }
 
 class GPUCommandAudit {
@@ -1994,6 +2002,8 @@ class GPUCommandAudit {
   private readonly bufferAllocationsByLabel = new Map<string, GPUCommandAuditBucket>();
   private readonly commandEncodersByLabel = new Map<string, GPUCommandAuditBucket>();
   private readonly computePassesByLabel = new Map<string, GPUCommandAuditBucket>();
+  private readonly dispatchesByPassLabel = new Map<string, GPUCommandAuditBucket>();
+  private readonly indirectDispatchesByPassLabel = new Map<string, GPUCommandAuditBucket>();
 
   private label(value: { label?: string } | undefined, fallback: string): string {
     return value?.label?.trim() || fallback;
@@ -2012,7 +2022,8 @@ class GPUCommandAudit {
     this.computePasses = 0; this.dispatches = 0; this.indirectDispatches = 0;
     this.submissions = 0; this.submittedCommandBuffers = 0; this.completionFences = 0;
     for (const map of [this.writeBufferByLabel, this.clearBufferByLabel, this.bufferAllocationsByLabel,
-      this.copyBufferToBufferByLabel, this.commandEncodersByLabel, this.computePassesByLabel]) map.clear();
+      this.copyBufferToBufferByLabel, this.commandEncodersByLabel, this.computePassesByLabel,
+      this.dispatchesByPassLabel, this.indirectDispatchesByPassLabel]) map.clear();
   }
   recordWriteBuffer(buffer: GPUBuffer, bytes: number): void {
     this.record(this.writeBuffer, bytes); this.add(this.writeBufferByLabel, this.label(buffer, "<unlabeled buffer>"), bytes);
@@ -2040,8 +2051,9 @@ class GPUCommandAudit {
     this.computePasses += 1;
     this.add(this.computePassesByLabel, descriptor?.label?.trim() || "<unlabeled compute pass>");
   }
-  recordDispatch(indirect: boolean): void {
-    this.dispatches += 1; if (indirect) this.indirectDispatches += 1;
+  recordDispatch(passLabel: string, indirect: boolean): void {
+    this.dispatches += 1; this.add(this.dispatchesByPassLabel, passLabel);
+    if (indirect) { this.indirectDispatches += 1; this.add(this.indirectDispatchesByPassLabel, passLabel); }
   }
   recordSubmit(commandBufferCount: number): void {
     this.submissions += 1; this.submittedCommandBuffers += commandBufferCount;
@@ -2066,6 +2078,8 @@ class GPUCommandAudit {
       bufferAllocationsByLabel: this.object(this.bufferAllocationsByLabel),
       commandEncodersByLabel: this.object(this.commandEncodersByLabel),
       computePassesByLabel: this.object(this.computePassesByLabel),
+      dispatchesByPassLabel: this.object(this.dispatchesByPassLabel),
+      indirectDispatchesByPassLabel: this.object(this.indirectDispatchesByPassLabel),
     };
   }
 }
@@ -2076,13 +2090,14 @@ function writtenByteLength(data: GPUAllowSharedBufferSource, dataOffset = 0, siz
   return Math.max(0, byteLength - dataOffset);
 }
 
-function auditComputePass(pass: GPUComputePassEncoder, audit: GPUCommandAudit): GPUComputePassEncoder {
+function auditComputePass(pass: GPUComputePassEncoder, audit: GPUCommandAudit,
+  passLabel: string): GPUComputePassEncoder {
   return new Proxy(pass, { get(target, property) {
     if (property === "dispatchWorkgroups") return (...args: Parameters<GPUComputePassEncoder["dispatchWorkgroups"]>) => {
-      audit.recordDispatch(false); return Reflect.apply(target.dispatchWorkgroups, target, args);
+      audit.recordDispatch(passLabel, false); return Reflect.apply(target.dispatchWorkgroups, target, args);
     };
     if (property === "dispatchWorkgroupsIndirect") return (...args: Parameters<GPUComputePassEncoder["dispatchWorkgroupsIndirect"]>) => {
-      audit.recordDispatch(true); return Reflect.apply(target.dispatchWorkgroupsIndirect, target, args);
+      audit.recordDispatch(passLabel, true); return Reflect.apply(target.dispatchWorkgroupsIndirect, target, args);
     };
     const value = Reflect.get(target, property, target);
     return typeof value === "function" ? value.bind(target) : value;
@@ -2101,7 +2116,9 @@ function auditCommandEncoder(encoder: GPUCommandEncoder, audit: GPUCommandAudit)
       return target.copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size);
     };
     if (property === "beginComputePass") return (descriptor?: GPUComputePassDescriptor) => {
-      audit.recordComputePass(descriptor); return auditComputePass(target.beginComputePass(descriptor), audit);
+      audit.recordComputePass(descriptor);
+      return auditComputePass(target.beginComputePass(descriptor), audit,
+        descriptor?.label?.trim() || "<unlabeled compute pass>");
     };
     if (property === "finish") return (descriptor?: GPUCommandBufferDescriptor) => {
       audit.recordCommandBuffer(); return target.finish(descriptor);
@@ -2160,6 +2177,7 @@ interface GPUSmokeResult {
   octreePowerTopologyDiagnostics?: OctreePowerTopologyDiagnostics;
   octreeMGPCGDiagnostics?: OctreeMGPCGDiagnostics;
   powerProjectionDiagnostics?: PowerProjectionDiagnostics;
+  powerEnergyLedger?: OctreeEnergyLedgerSnapshot;
   stabilityEnvelope?: StabilityEnvelope;
   energyTrace: MechanicalEnergySample[];
   checkpoints: Array<{
@@ -2865,6 +2883,7 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     octreePowerTopologyDiagnostics: result.octreePowerTopologyDiagnostics,
     octreeMGPCGDiagnostics: result.octreeMGPCGDiagnostics,
     powerProjectionDiagnostics: result.powerProjectionDiagnostics,
+    powerEnergyLedger: result.powerEnergyLedger,
     stabilityEnvelope: result.stabilityEnvelope,
     energyTraceSummary: energyTraceSummary(result.energyTrace),
     validationErrors: result.validationErrors
@@ -2977,6 +2996,10 @@ async function runGPU(
     values.interfaceRefinementBandCells = octreeInterfaceBandOverride;
   }
   if (method.id === "octree" && octreeGlobalFineFactorOverride !== undefined) values.globalFineLevelSetFactor = octreeGlobalFineFactorOverride;
+  if (method.id === "octree" && powerEnergyLedgerRequested) {
+    values.energyLedger = true;
+    values.energyLedgerStepCapacity = powerEnergyLedgerStepCapacity;
+  }
   if (method.id === "quadtree-tall-cell" && quadtreePreconditionerOverride !== undefined) values.preconditioner = quadtreePreconditionerOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeStaleStepsOverride !== undefined) values.topologyStaleSteps = quadtreeStaleStepsOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeInlineRebuildOverride !== undefined) values.inlineRebuild = quadtreeInlineRebuildOverride;
@@ -4313,6 +4336,9 @@ async function runGPU(
     }
   }
   await device.queue.onSubmittedWorkDone();
+  const powerEnergyLedger = powerEnergyLedgerRequested && method.id === "octree"
+    ? await (solver as GPUSolverInstance).readPowerEnergyLedger?.()
+    : undefined;
   const result: GPUSmokeResult = {
     method: resultMethod, info, grid: [info.nx, info.ny, info.nz], matchedField: matched.field,
     matchedSummary: matched.summary, compactFieldEvidence: matched.compactFieldEvidence,
@@ -4334,7 +4360,7 @@ async function runGPU(
     initialGlobalFineGeneration, initialGlobalFineRaster, finalGlobalFineGeneration, finalGlobalFineRaster,
     octreeFaceMirrorDiagnostics,
     octreePowerFaceTransferDiagnostics, octreePowerFaceDiagnostics, octreePowerTopologyDiagnostics,
-    octreeMGPCGDiagnostics, powerProjectionDiagnostics,
+    octreeMGPCGDiagnostics, powerProjectionDiagnostics, powerEnergyLedger,
     stabilityEnvelope, energyTrace, checkpoints
   };
   reportResult(scenarioId, result);

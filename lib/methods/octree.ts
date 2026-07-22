@@ -62,6 +62,9 @@ const options = (scene: SceneDescription, quality: GPUQuality, values: MethodPar
     extrapolationSweeps: 4,
     leafSolver: "auto" as const,
     pressureWarmStart: true,
+    energyLedger: values.energyLedger === true || values.energyLedger === "on",
+    energyLedgerStepCapacity: typeof values.energyLedgerStepCapacity === "number"
+      ? values.energyLedgerStepCapacity : undefined,
   }
 });
 

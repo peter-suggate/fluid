@@ -749,6 +749,8 @@ export class WebGPUUniformEulerianSolver {
         pressureWarmStart: options.octree.pressureWarmStart,
         pressureRowCapacity: options.octree.pressureRowCapacity,
         powerDiagramProjection: options.octree.powerDiagramProjection,
+        energyLedger: options.octree.energyLedger,
+        energyLedgerStepCapacity: options.octree.energyLedgerStepCapacity,
       }, options.deferPipelineCompilation);
       this.applyOctreeInfo(this.octreeProjection);
       if (this.adaptiveFaceVelocityCutover && !this.octreeProjection.adaptiveFaceVelocityAuthority) {
@@ -1186,6 +1188,7 @@ export class WebGPUUniformEulerianSolver {
   get mgpcgControl() { return this.octreeProjection?.mgpcgControl; }
   get powerFaceControl() { return this.octreeProjection?.powerFaceControl; }
   get powerFaceSource() { return this.octreeProjection?.powerFaceSource; }
+  readPowerEnergyLedger() { return this.octreeProjection?.readEnergyLedger(); }
   get powerBoundaryPhiQueries() { return this.octreeProjection?.powerBoundaryPhiQueries; }
   get ownerLatticeDebug() { return this.octreeProjection?.ownerLatticeDebug; }
   get powerBoundaryFineSource() { return this.octreeProjection?.powerBoundaryFineSource; }
