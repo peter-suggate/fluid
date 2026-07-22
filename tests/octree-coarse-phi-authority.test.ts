@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { WebGPUOctreeProjection, octreeProjectionShader } from "../lib/webgpu-octree";
-import { fineLevelSetSummaryWGSL } from "../lib/webgpu-octree-fine-levelset-summary";
+import { fineLevelSetSummaryWGSL, WebGPUFineLevelSetSummaries } from "../lib/webgpu-octree-fine-levelset-summary";
 import {
   OCTREE_POWER_COARSE_LEVELSET_VALID,
   octreePowerCoarseDirectoryIsAuthoritative,
@@ -63,7 +63,7 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
     /Topology renewal runs while the persistent frontier hash is being[\s\S]*return max\(params\.cellRelax\.x/,
     "interface classification must not read the frontier hash while appendFrontier mutates it");
   assert.match(octreeProjectionShader,
-    /let fine=fineLeafSummary\(origin,owner\.size\);[\s\S]*if\(fine\.found\)\{[\s\S]*fine\.centerValid[\s\S]*else if\(fine\.complete\)/,
+    /let fine=fineLeafSummary\(origin,owner\.size\);[\s\S]*if\(fine\.found\)\{[\s\S]*fine\.centerValid[\s\S]*else if\(fine\.complete&&!fine\.coarseAuthority\)/,
     "recurring frontier phase selection consumes a current centre stencil independently of complete sparse coverage");
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
   assert.match(rebuild,
@@ -74,9 +74,18 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
   assert.match(fineLevelSetSummaryWGSL, /atomicOr\(&directory\[base\+6u\],COARSE_AUTHORITY\)/,
     "an exact corrected-coarse leaf marks the unified summary authoritative");
   assert.match(octreeProjectionShader, /result\.coarseAuthority = \(entryFlags & 0x80000000u\) != 0u/);
+  assert.match(octreeProjectionShader,
+    /else if\(fine\.complete&&!fine\.coarseAuthority\)\{/,
+    "coarse-only summaries must preserve the exact coarse cell-centre phase used by power-boundary sampling");
   assert.match(fineLevelSetSummaryWGSL,
-    /atomicAddFloat\(&directory\[base\+7u\],centerPhi\)/,
-    "the former authority word now accumulates exact fine cell-centre interpolation contributions");
+    /let next=bitcast<u32>\(bitcast<f32>\(old\)\+centerPhi\);let sumResult=atomicCompareExchangeWeak\(&directory\[base\+7u\],old,next\)/,
+    "interval propagation retains its bounded centre accumulator before the exact node-centre overwrite");
+  assert.match(fineLevelSetSummaryWGSL,
+    /fn summarizeFineCenters[\s\S]*let span=brickSide\*resolution;let centerLow=coord\*span\+vec3u\(span\/2u-1u\)[\s\S]*mask==0xffu[\s\S]*CENTER_COMPLETE/,
+    "every dyadic node receives an exact eight-sample current-fine centre stencil");
+  assert.match(WebGPUFineLevelSetSummaries.prototype.encode.toString(),
+    /this\.centerPipeline[\s\S]*source\.metadata[\s\S]*source\.flags[\s\S]*source\.phi[\s\S]*source\.hash/,
+    "exact centres are sampled from the current fine generation before topology renewal");
   assert.match(fineLevelSetSummaryWGSL,
     /centreMask\|=1u<<\(delta\.x\+2u\*delta\.y\+4u\*delta\.z\)[\s\S]*centerMasks\[l\.x\]\|=centerMasks\[l\.x\+stride\][\s\S]*centerMasks\[0\]<<CENTER_SHIFT/,
     "all eight centre corners remain attributable across factor-4 and factor-8 brick hierarchy merges");

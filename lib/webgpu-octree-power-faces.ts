@@ -771,11 +771,14 @@ fn samplePowerBoundaryPhi(@builtin(global_invocation_id) gid:vec3u){
     if(faceParams.phiPolicy.z==1u){powerFaces[faceIndex].flags=face.flags|COARSE_PENDING;return;}
     failBoundary(face.negativeRow,slot,2048u,liquid.x,air.x);return;
   }
-  // Ghost Fluid Method interface fraction from the two signed cell-centre
-  // samples required by paper Sections 4.1 and 5.  No abs repair or floor.
+  // A pressure row and its signed-distance authority must describe the same
+  // publication. Do not conceal a crossed row centre with a bounded
+  // degenerate coefficient: a stale row set is a failed 2017 generation.
   if(!finite(liquid.x)||!finite(air.x)||!(liquid.x<0.0)||!(air.x>0.0)){
     failBoundary(face.negativeRow,slot,4096u,liquid.x,air.x);return;
   }
+  // Ghost-fluid zero crossing from the two current cell-centre samples used
+  // by the embedded-boundary treatment described in Sections 4.1 and 5.
   let theta=(-liquid.x)/(air.x-liquid.x);
   if(!finite(theta)||!(theta>0.0)||theta>1.0){failBoundary(face.negativeRow,slot,8192u,liquid.x,air.x);return;}
   face.inverseDistance=face.inverseDistance/theta;powerFaces[faceIndex]=face;
@@ -817,17 +820,9 @@ fn resolveCoarsePowerBoundaryPhi(@builtin(global_invocation_id) gid:vec3u){
   let liquid=sampleCoarseOctreePhi(query.liquidCenter.xyz);
   let air=sampleCoarseOctreePhi(query.airCenter.xyz);
   if(!coarseAvailable(liquid)||!coarseAvailable(air)){failBoundary(face.negativeRow,slot,2050u,liquid,air);return;}
-  // Ghost Fluid Method fraction from the coarse cell-centre samples.  The
-  // coarse row classification is one publication behind this build, so a
-  // fast-moving interface can legitimately sweep past a liquid row centre
-  // before the row set re-grades.  The paper delegates that regime to the
-  // GFM literature; the standard Gibou et al. 2002 treatment is the theta
-  // floor below, never a rejected generation.
-  var theta=1.0;
-  if(liquid<0.0&&air>0.0){theta=(-liquid)/(air-liquid);}
-  else if(liquid>=0.0){theta=0.0;}
-  if(!finite(theta)){failBoundary(face.negativeRow,slot,8194u,liquid,air);return;}
-  theta=clamp(theta,0.01,1.0);
+  if(!(liquid<0.0)||!(air>0.0)){failBoundary(face.negativeRow,slot,4098u,liquid,air);return;}
+  let theta=(-liquid)/(air-liquid);
+  if(!finite(theta)||!(theta>0.0)||theta>1.0){failBoundary(face.negativeRow,slot,8194u,liquid,air);return;}
   face.inverseDistance=face.inverseDistance/theta;powerFaces[faceIndex]=face;
 }
 `;

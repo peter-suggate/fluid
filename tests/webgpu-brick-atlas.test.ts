@@ -20,6 +20,8 @@ import {
   FLUID_BRICK_RESIDENT,
   GPUFluidBrickResidency,
   fluidBrickResidencyShader,
+  sparseSurfaceCandidateResidencyShader,
+  surfaceCandidateResidencyShader,
 } from "../lib/webgpu-fluid-brick-residency";
 import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { legacyUniformComputeShader, retiredBulkFluxScaleClearShader, retiredBulkTransportClearShader, retiredBulkVelocityClearShader } from "../lib/webgpu-eulerian";
@@ -51,6 +53,28 @@ test("uniform kernels bind the optional bulk worklist declared by every entry po
     "sparse-only reverse and occupancy groups must decode the live worklist with live atlas dimensions");
   assert.doesNotMatch(legacyUniformComputeShader, /struct ScheduledCell \{[^}]*\bactive\s*:/,
     "WGSL reserved keywords cannot be used as structure members");
+});
+
+test("2017 pressure topology survives independently of the fine-phi candidate band", () => {
+  for (const shader of [surfaceCandidateResidencyShader, sparseSurfaceCandidateResidencyShader]) {
+    assert.match(shader,
+      /fn markPressureTiles[\s\S]*\(leaf\.flags&LIVE\)==0u[\s\S]*first\.z-1[\s\S]*last\.z\+1/,
+      "every live pressure leaf must retain its surrounding Section 4.2 support tiles");
+    const pressureStage = shader.indexOf("fn markPressureTiles");
+    const surfaceStage = shader.indexOf("fn markSurfaceCandidates");
+    assert.ok(pressureStage >= 0 && pressureStage < surfaceStage,
+      "pressure support must be authored independently from Section 5 surface candidates");
+    const pressureBody = shader.slice(pressureStage, surfaceStage);
+    assert.doesNotMatch(pressureBody, /CORE|HALO/,
+      "a live pressure leaf may not disappear merely because it is outside the fine-phi band");
+  }
+  const host = readFileSync(new URL("../lib/webgpu-fluid-brick-residency.ts", import.meta.url), "utf8");
+  assert.match(host,
+    /Mark live pressure topology tiles[\s\S]*Mark adaptive surface brick residency[\s\S]*Emit adaptive surface topology tiles/,
+    "the pressure and fine-interface requirements must be unioned before topology publication");
+  assert.match(host,
+    /Topology tile active and retired worklists[\s\S]{0,180}GPUBufferUsage\.INDIRECT/,
+    "the admitted tile publication must be legal as the owner-page transaction's indirect source");
 });
 
 test("octree atlas diagnostics stay internal while compact authority keeps only bulk residency", () => {

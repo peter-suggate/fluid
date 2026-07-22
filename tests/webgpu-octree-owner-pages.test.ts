@@ -27,6 +27,21 @@ import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/w
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 const projectionSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 
+test("simulation owner lifecycle fences begin, retirement, and activation", () => {
+  const encode = WebGPUOctreeSimulationOwnerPages.prototype.encode.toString();
+  assert.equal((encode.match(/beginComputePass/g) ?? []).length, 6,
+    "topology-tile and compatibility lifecycles each fence their three allocator phases");
+  assert.ok(encode.indexOf("Activate topology-tile owner pages")
+    < encode.indexOf("Retire topology-tile owner pages"),
+  "the next paper-stencil support set must publish before the prior set can retire");
+  assert.ok(encode.indexOf("Retire simulation octree owner pages")
+    < encode.indexOf("Activate simulation octree owner pages"),
+  "the legacy brick-list fallback retains its bounded reuse order");
+  const bootstrap = WebGPUOctreeSimulationOwnerPages.prototype.encodeAnalyticBootstrap.toString();
+  assert.equal((bootstrap.match(/beginComputePass/g) ?? []).length, 2,
+    "analytic allocation must observe its completed lifecycle reset");
+});
+
 test("octree owner page planning halves the full-capacity owner payload and obeys byte ceilings", () => {
   const ocean = planOctreeOwnerPages([288, 96, 64]);
   assert.deepEqual(ocean.brickDimensions, [36, 12, 8]);
@@ -82,6 +97,20 @@ test("projection derives compact owner capacity and keeps overflow on the canoni
     "owner-page exhaustion must fail the topology pass closed");
   assert.match(projectionSource, /return Owner\(packOrigin\(origin\), size\)/,
     "missing physical pages retain the deterministic coarse-owner lookup");
+});
+
+test("authoritative owner residency follows topology tiles and materializes the paper stencil ring", () => {
+  assert.match(projectionSource,
+    /tileWorklist: this\.topologyResidency\.tileWorklist,[\s\S]*tileSizeCells: this\.topologyTileSize,[\s\S]*tileListCapacity: this\.topologyResidency\.tilePublicationCapacity/);
+  assert.match(projectionSource, /this\.ownerPages\?\.encode\(encoder\)/,
+    "the topology transaction must complete before reset/refine and frontier emission");
+  const lifecycle = readFileSync(new URL("../lib/webgpu-octree-owner-pages.ts", import.meta.url), "utf8");
+  assert.match(lifecycle, /fn activateTopologyTilePages/);
+  assert.match(lifecycle, /fn retireTopologyTilePages/);
+  assert.match(lifecycle, /activate\.dispatchWorkgroupsIndirect[\s\S]*FLUID_TILE_ACTIVE_CANDIDATE_DISPATCH_OFFSET_BYTES[\s\S]*retire\.dispatchWorkgroupsIndirect[\s\S]*FLUID_TILE_RETIRED_CANDIDATE_DISPATCH_OFFSET_BYTES/,
+    "activation is transactionally ordered before retirement");
+  assert.match(lifecycle, /activateSeededTopologyPage\(logical, brick, dimensions, tileSize\)/,
+    "every resident topology page carries exact dyadic owner words rather than an implicit zero fallback");
 });
 
 test("adaptive owner-page claims scan the whole probe chain before reusing a tombstone", () => {

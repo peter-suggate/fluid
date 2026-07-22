@@ -67,16 +67,16 @@ test("summary sizing aliases binding 4 without adding storage bindings or pressu
     "the only pressureIn access reachable from summary-bound refinement is the raw bitcast reader");
   assert.doesNotMatch(callGraph, /pressureOut\[/);
   assert.match(callGraph,
-    /result\.centerPhi = bitcast<f32>\(fineSummaryWord\(base \+ 7u\)\);[\s\S]*result\.centerValid = size == 1u/,
-    "word 7 is exact fine centre phi and may authorize only a complete size-1 leaf");
+    /result\.centerPhi = bitcast<f32>\(fineSummaryWord\(base \+ 7u\)\);[\s\S]*result\.centerValid = \(entryFlags & 0x3fc00000u\) == 0x3fc00000u/,
+    "word 7 is the exact current fine phi at every dyadic summary node centre");
   assert.match(callGraph,
-    /let fineComplete = fineSummaryWord\(base \+ 5u\) == expectedBricks[\s\S]*result\.complete = result\.coarseAuthority \|\| fineComplete;[\s\S]*result\.centerValid = size == 1u && \(entryFlags & 0x3fc00000u\) == 0x3fc00000u/,
+    /let fineComplete = fineSummaryWord\(base \+ 5u\) == expectedBricks[\s\S]*result\.complete = result\.coarseAuthority \|\| fineComplete;[\s\S]*result\.centerValid = \(entryFlags & 0x3fc00000u\) == 0x3fc00000u/,
     "exact centre evidence is independent of whole sparse-brick completeness");
   assert.doesNotMatch(callGraph, /result\.centerValid =[^;]*!result\.coarseAuthority/,
     "a unified fine+coarse entry must retain its exact fine phase classifier");
   assert.match(octreeProjectionShader,
-    /if\(fine\.found\)\{[\s\S]*if\(owner\.size==1u&&fine\.centerValid\)\{wet=fine\.centerPhi<0\.0;\}/,
-    "recurring pressure leaves consume a current complete centre stencil even when the sparse brick is partial");
+    /if\(fine\.found\)\{[\s\S]*if\(fine\.centerValid\)\{wet=fine\.centerPhi<0\.0;\}/,
+    "recurring pressure leaves of every size consume their current complete centre stencil");
 });
 
 test("Dawn compiles summary-consuming refinement at the portable ten-storage-buffer limit", {

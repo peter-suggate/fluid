@@ -929,6 +929,7 @@ export const WATER_INTERFACE_CULL_MODES = Object.freeze({
 export const surfaceRasterShader = /* wgsl */ `
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f }
 struct SurfaceVertex { position:vec4f, normal:vec4f }
+override interfaceCoverageExpansionPixels:f32=0.0;
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage,read> vertices: array<SurfaceVertex>;
 struct Out { @builtin(position) clip:vec4f, @location(0) world:vec3f, @location(1) normal:vec3f }
@@ -941,7 +942,19 @@ fn project(world:vec3f)->vec4f {
   return vec4f(ndc*depth,clamp(depth/50.0,0.0,1.0)*depth,depth);
 }
 @vertex fn surfaceVertex(@builtin(vertex_index) index:u32)->Out {
-  let v=vertices[index]; var o:Out; o.clip=project(v.position.xyz);o.world=v.position.xyz;o.normal=normalize(v.normal.xyz);return o;
+  let v=vertices[index]; var o:Out; o.clip=project(v.position.xyz);o.world=v.position.xyz;o.normal=normalize(v.normal.xyz);
+  // A closed liquid/wall silhouette is shared by a front-facing free-surface
+  // triangle and a back-facing wall triangle. The raster top-left rule can
+  // otherwise give their exact shared edge to the back pass alone at one
+  // pixel. Expand only front-facing triangle coverage by a sub-pixel amount;
+  // back faces remain culled, so actual holes are still visible to the strict
+  // back-without-front smoke oracle.
+  if(interfaceCoverageExpansionPixels>0.0){
+    let first=index-index%3u;let c0=project(vertices[first].position.xyz);let c1=project(vertices[first+1u].position.xyz);let c2=project(vertices[first+2u].position.xyz);
+    let center=(c0.xy/c0.w+c1.xy/c1.w+c2.xy/c2.w)/3.0;var ndc=o.clip.xy/o.clip.w;let radial=ndc-center;
+    if(dot(radial,radial)>1e-12){ndc+=normalize(radial)*interfaceCoverageExpansionPixels*vec2f(2.0/max(u.viewport.x,1.0),2.0/max(u.viewport.y,1.0));o.clip.x=ndc.x*o.clip.w;o.clip.y=ndc.y*o.clip.w;}
+  }
+  return o;
 }
 struct SurfaceOut { @location(0) position:vec4f, @location(1) normal:vec4f }
 @fragment fn surfaceFragment(input:Out)->SurfaceOut {
@@ -1368,13 +1381,13 @@ export class RasterWaterPipeline {
     this.preparePipeline = await compute("Preparing surface dispatch",{ label: "Prepare polygonise dispatch", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.prepareLayout] }), compute: { module: prepare, entryPoint: "prepareMain" } });
     this.polygoniseDispatchBuffer = this.device.createBuffer({ label: "Water polygonise dispatch arguments", size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const surfacePipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.surfaceLayout] });
-    const surfaceDescriptor = (label: string, cullMode: GPUCullMode): GPURenderPipelineDescriptor => ({
-      label, layout: surfacePipelineLayout, vertex: { module: surface, entryPoint: "surfaceVertex" },
+    const surfaceDescriptor = (label: string, cullMode: GPUCullMode, coverageExpansionPixels = 0): GPURenderPipelineDescriptor => ({
+      label, layout: surfacePipelineLayout, vertex: { module: surface, entryPoint: "surfaceVertex", constants: { interfaceCoverageExpansionPixels: coverageExpansionPixels } },
       fragment: { module: surface, entryPoint: "surfaceFragment", targets: [{ format: "rgba16float" }, { format: "rgba16float" }] },
       primitive: { topology: "triangle-list", frontFace: "ccw", cullMode },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
     });
-    this.surfaceFrontPipeline = await render("Rendering front water interfaces",surfaceDescriptor("Raster water front interfaces", WATER_INTERFACE_CULL_MODES.front));
+    this.surfaceFrontPipeline = await render("Rendering front water interfaces",surfaceDescriptor("Raster water front interfaces", WATER_INTERFACE_CULL_MODES.front,0.75));
     this.surfaceBackPipeline = await render("Rendering back water interfaces",surfaceDescriptor("Raster water back interfaces", WATER_INTERFACE_CULL_MODES.back));
     this.causticPipeline = await render("Projecting water caustics",{
       label: "Project refracted caustics", layout: surfacePipelineLayout, vertex: { module: caustic, entryPoint: "causticVertex" },

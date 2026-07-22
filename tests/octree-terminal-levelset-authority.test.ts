@@ -51,6 +51,12 @@ test("production surface recurrence advects, redistances, and fine-corrects comp
     "cold bootstrap coarse phi is an initialization dependency, not a substitute for restricting the accepted fine generation");
   assert.match(surface.slice(recurringSchedule), /generation:correctedFine\.generation&1073741823/,
     "the compact-coarse publication epoch must come from the fine source it restricts, not an optimistic host counter");
+  assert.match(surface,
+    /constredistanceBandCells=Math\.min\(256,bandCells\+this\.globalFineLevelSet\.plan\.fineFactor\+2\)/,
+    "the resident band must include the transported band, complete backtrace, and the sqrt(3)-cell trilinear stencil");
+  assert.match(surface,
+    /redistanceBandFineCells:redistanceBandCells[\s\S]*publicationRedistance\.encode\(encoder,\{bandCells:redistanceBandCells/,
+    "topology allocation and redistance must use the same authored Section 5 band radius");
 
   const schedule = compact(WebGPUOctreePowerCoarseLevelSet.prototype.encode);
   const migrate = schedule.indexOf('dispatch("migrate"');
@@ -134,8 +140,10 @@ test("global-fine QA diagnostics read the published GPU controls without steerin
     "face-band rejection telemetry must retain the catalog-Delaunay gate preceding face emission");
   assert.match(diagnostics, /redistance\.control,0,readback,720,48/,
     "redistance rejection telemetry must retain its complete twelve-word control");
-  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:896/,
-    "the compact evidence packet accounts for the appended transport failure payload");
+  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:900/,
+    "the compact evidence packet accounts for transport detail and the Section 5 seed prefix");
+  assert.match(diagnostics, /topology\.control,32,readback,896,4/,
+    "the pre-dilation interface prefix is attributable without moving the stable topology header");
   assert.match(diagnostics, /this\.globalFineFaceFastMarch\.pointFieldControl,0,readback,560,32/,
     "final cell-centre LS failures must be attributable independently of graph construction");
   assert.match(diagnostics, /this\.globalFineFaceFastMarch\.transientPowerControl,0,readback,592,64/,
@@ -143,6 +151,7 @@ test("global-fine QA diagnostics read the published GPU controls without steerin
   assert.match(diagnostics, /this\.globalFineFaceFastMarch\.transitionControl,64,readback,656,64/,
     "the first exact-owner mismatch must be available without a second unbounded diagnostic scan");
   assert.match(diagnostics, /published:words\[6\]!==0,rolledBack:words\[7\]!==0/);
+  assert.match(diagnostics, /interfaceSeedBricks:words\[224\]/);
   assert.match(diagnostics, /activeBricks:words\[10\],generation:words\[11\]/);
   assert.match(diagnostics,
     /coarseDirectoryState:words\[16\],coarseDirectoryGeneration:words\[17\][\s\S]*coarseControlGeneration:words\[35\],coarseControlValid:words\[36\]/);

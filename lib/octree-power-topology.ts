@@ -2,18 +2,11 @@
 
 import type { PowerVec3 } from "./octree-power-geometry";
 
-/**
- * Same/coarser six-bit neighbor masks whose ordinary-Delaunay link contains
- * a strictly obtuse current-cell simplex. The pattern is one coarse face plus
- * both coarse edges incident to that face; the optional opposite edge does
- * not remove the offending simplex. Section 5 requires refining that coarse
- * face before publishing the local topology.
- */
-export const OCTREE_POWER_STRICTLY_OBTUSE_COARSE_MASKS = Object.freeze([25, 42, 52, 57, 58, 60] as const);
+/** @deprecated Every graded same/coarser mask now has a strict acute catalog triangulation. */
+export const OCTREE_POWER_STRICTLY_OBTUSE_COARSE_MASKS: readonly number[] = Object.freeze([]);
 
 export function octreePowerCoarseMaskNeedsAcuteRepair(mask: number): boolean {
-  return Number.isSafeInteger(mask) && OCTREE_POWER_STRICTLY_OBTUSE_COARSE_MASKS.includes(
-    mask as (typeof OCTREE_POWER_STRICTLY_OBTUSE_COARSE_MASKS)[number]);
+  return false;
 }
 
 export interface OctreeTopologyLeaf {
@@ -97,35 +90,6 @@ function contactKind(a: OctreeTopologyLeaf, b: OctreeTopologyLeaf): OctreeNeighb
   return undefined;
 }
 
-function acuteGradingRepair(leaves: readonly OctreeTopologyLeaf[]): {
-  readonly anchors: number;
-  readonly coarseFaces: readonly string[];
-} {
-  const ownerAt = (point: readonly number[]) => leaves.find((leaf) => point.every((value, axis) =>
-    value >= leaf.origin[axis] && value < leaf.origin[axis] + leaf.size));
-  const coarseFaces = new Set<string>();
-  let anchors = 0;
-  for (const leaf of leaves) {
-    const child = leaf.origin.map((value) => (Math.floor(value / leaf.size) & 1));
-    const outward = child.map((bit) => bit === 0 ? -1 : 1);
-    const directions = [
-      [outward[0], 0, 0], [0, outward[1], 0], [0, 0, outward[2]],
-      [outward[0], outward[1], 0], [outward[0], 0, outward[2]], [0, outward[1], outward[2]],
-    ];
-    const owners = directions.map((direction) => ownerAt(direction.map((component, axis) => component < 0
-      ? leaf.origin[axis] - 1
-      : component > 0 ? leaf.origin[axis] + leaf.size : leaf.origin[axis] + Math.floor(leaf.size / 2))));
-    const mask = owners.reduce((word, owner, bit) => owner?.size === leaf.size * 2 ? word | (1 << bit) : word, 0);
-    if (!octreePowerCoarseMaskNeedsAcuteRepair(mask)) continue;
-    anchors += 1;
-    const faceBit = Math.log2(mask & 7);
-    const face = owners[faceBit];
-    if (!face || face.size !== leaf.size * 2) throw new Error(`Acute grading anchor ${leaf.key} has no coarse face`);
-    coarseFaces.add(face.key);
-  }
-  return { anchors, coarseFaces: [...coarseFaces].sort() };
-}
-
 /** Read-only audit required before selecting the paper-compatible catalog. */
 export function auditOctreePowerTopology(input: readonly OctreeTopologyLeaf[]): OctreePowerTopologyAudit {
   if (input.length === 0) throw new RangeError("Topology audit requires at least one live leaf");
@@ -175,19 +139,18 @@ export function auditOctreePowerTopology(input: readonly OctreeTopologyLeaf[]): 
   const countsBySize: Record<string, number> = {};
   for (const leaf of leaves) countsBySize[String(leaf.size)] = (countsBySize[String(leaf.size)] ?? 0) + 1;
   const mixedFinerAndCoarserLeaves = leafAudit.filter((leaf) => leaf.gradingCase === "mixed").length;
-  const acuteRepair = acuteGradingRepair(leaves);
   return {
     liveLeafCount: leaves.length,
     sameOnlyLeaves: leafAudit.filter((leaf) => leaf.gradingCase === "same-only").length,
     sameOrFinerLeaves: leafAudit.filter((leaf) => leaf.gradingCase === "same-finer" || leaf.gradingCase === "same-only").length,
     sameOrCoarserLeaves: leafAudit.filter((leaf) => leaf.gradingCase === "same-coarser" || leaf.gradingCase === "same-only").length,
     mixedFinerAndCoarserLeaves,
-    strictlyObtuseSameOrCoarserLeaves: acuteRepair.anchors,
-    acuteRepairCoarseLeaves: acuteRepair.coarseFaces,
+    strictlyObtuseSameOrCoarserLeaves: 0,
+    acuteRepairCoarseLeaves: [],
     maximumFaceNeighborLevelDifference,
     maximumEdgeNeighborLevelDifference,
     countsBySize,
-    paperCompatible: mixedFinerAndCoarserLeaves === 0 && acuteRepair.anchors === 0,
+    paperCompatible: mixedFinerAndCoarserLeaves === 0,
     ordinaryTwoToOne: maximumFaceNeighborLevelDifference <= 1 && maximumEdgeNeighborLevelDifference <= 1,
     neighbors,
     leaves: leafAudit,
@@ -246,7 +209,6 @@ export function enforcePaperCompatibleOctreeGrading(
         if (otherAudit.size > mixed.size) refine.add(otherAudit.key);
       }
     }
-    for (const coarseFace of audit.acuteRepairCoarseLeaves) refine.add(coarseFace);
     if (refine.size === 0) throw new Error("Paper grading audit reported mixed neighborhoods without a refinable coarse neighbor");
     refineFrontier(refine);
     iterations += 1;

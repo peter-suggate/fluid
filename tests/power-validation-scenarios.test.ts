@@ -125,14 +125,17 @@ test("isolated Dawn commands pin the authored adaptive power configurations", ()
 
   const dam = packageJson.scripts["test:webgpu:minimal-power-dam-break"];
   assert.match(dam, /FLUID_SCENE=minimal-power-dam-break/);
-  assert.match(dam, /FLUID_TARGET_S=0\.2/);
-  assert.match(dam, /FLUID_ORACLE_STEPS=50/);
-  assert.match(dam, /FLUID_EXPECT_EXACT_STEPS=50/);
-  assert.match(dam, /FLUID_CHECKPOINT_EVERY_S=0\.2/);
+  assert.match(dam, /FLUID_TARGET_S=2(?:\s|$)/);
+  assert.match(dam, /FLUID_ORACLE_STEPS=500/);
+  assert.match(dam, /FLUID_EXPECT_EXACT_STEPS=500/);
+  assert.match(dam, /FLUID_CHECKPOINT_EVERY_S=0\.1/);
   assert.match(dam, /FLUID_EXPECT_GRID=16,16,16/);
   assert.match(dam, /FLUID_MAXIMUM_LEAF_SIZE=2/);
   assert.match(dam, /FLUID_OCTREE_INTERFACE_BAND=3/);
   assert.match(dam, /FLUID_POWER_AUDIT_EVERY_STEPS=1/);
+  assert.match(dam, /FLUID_WEBGPU_SMOKE_TIMEOUT_MS=240000/);
+  assert.doesNotMatch(dam, /FLUID_DISABLE_TIMESTAMPS=1/,
+    "the exhaustive regression must use the UI's timestamp-enabled submission path");
 
   const motion = packageJson.scripts["test:webgpu:minimal-power-dam-break-motion"];
   assert.match(motion, /FLUID_TARGET_S=0\.5/);
@@ -168,8 +171,25 @@ test("moving dam Dawn regression crosses the rejected generation and checks open
   assert.match(command, /FLUID_CHECKPOINT_EVERY_S=0\.016/,
     "the rejected generation must be bracketed by fenced raster/publication checkpoints");
   const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+  assert.match(smoke, /powerTransitionWitness = await readPowerTransitionWitness/,
+    "the long dynamic run retains historical topology only for failure localization");
+  assert.match(smoke,
+    /expectedLeafSizes\.every\(\(size\) => \(sizes\[size\] \?\? 0\) > 0\)/,
+    "the regression must require both leaf scales in the live final topology");
+  assert.doesNotMatch(smoke,
+    /dynamicTransitionWitness\?\.(?:leafSizeHistogram|transitionFaceCount|obliqueTransitionFaceCount|maximumTransitionSizeRatio|transitionRowCount|transitionTetrahedronCount)\s*\?\?/,
+    "a historical transition must never replace final topology diagnostics");
+  assert.match(smoke, /maximumProjectedVariationalResidual[\s\S]*?<= 1e-6/,
+    "moving free-surface incompressibility must be gated by the Eq. (3)-form operator residual");
+  assert.doesNotMatch(smoke, /minimal dam per-step power-cell divergence/,
+    "the unweighted full-cell divergence reduction is not the paper's cut-cell variational residual");
   assert.match(smoke, /observed\?\.backOnlyInterfacePixels === 0/);
   assert.match(smoke, /reverse\?\.backOnlyInterfacePixels === 0/);
+  assert.match(smoke,
+    /observed\?\.damExposedCornerCapPixels\?\.\[0\][\s\S]*observed\?\.damExposedCornerCapPixels\?\.\[1\]/,
+    "the t=0 Dawn raster must require both exposed dam faces at their shared +x/+z corner");
+  assert.match(smoke, /damBreakFractions\(scene\.container\.fillFraction\)/,
+    "the raster oracle must inspect the authored dam corner rather than only the tank-wall corner");
   assert.doesNotMatch(smoke, /minimumPairedFraction/,
     "an uncapped liquid\/air surface must not be judged as a closed wall-capped solid");
 });

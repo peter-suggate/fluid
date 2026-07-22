@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PAPER_VISUAL_PRESETS, paperPipelineStages, paperSection5SpatialFailures, paperVisualAuthority } from "../lib/paper-pipeline-diagnostics";
+import { PAPER_VISUAL_PRESETS, paperPipelineHealthFlags, paperPipelineStages, paperSection5SpatialFailures, paperVisualAuthority } from "../lib/paper-pipeline-diagnostics";
 import type { GPUEulerianInfo } from "../lib/webgpu-eulerian";
 
 function info(patch: Partial<GPUEulerianInfo> = {}): GPUEulerianInfo {
@@ -43,6 +43,23 @@ test("stale Section 5 and retained raster generations are visibly distinct from 
   }), { surfaceGeometrySource: "retained-previous", globalFineAttached: true, globalFineAttachedGeneration: 20, meshPublicationGeneration: 19, globalFineCrossingPublished: false, presentationFallbackActive: true });
   assert.equal(stages.find((stage) => stage.id === "extrapolation")?.tone, "stale");
   assert.equal(stages.find((stage) => stage.id === "raster")?.state, "STALE");
+});
+
+test("always-visible health flags expose rejected and stale 2017 authority", () => {
+  const flags = paperPipelineHealthFlags(info({
+    initialSparseAuthorityReady: true,
+    powerDiagramProjection: "authoritative", powerDiagramAuthoritative: true,
+    pressureRequiredRows: 10, pressureRequiredEntries: 30,
+    globalFinePublished: true, globalFineRolledBack: true, globalFineGeneration: 20,
+    globalFineTopologyFlags: 4, globalFineDownstreamFinalizeReason: 8,
+    globalFineFaceBandValid: true, globalFineFaceBandTransitionValid: true,
+    globalFineFaceBandTransientPowerValid: true, globalFineFaceBandPointFieldValid: true,
+    globalFineFaceBandPowerPublicationValid: true,
+    globalFineFaceBandPowerFineGeneration: 19, globalFineFaceBandPowerGeneration: 10,
+    powerDiagramGeneration: 11,
+  }));
+  assert.ok(flags.includes("2017-fine-rejected"));
+  assert.ok(flags.includes("2017-extrapolation-stale"));
 });
 
 test("no-causal-simplex coarse phi failure is attributed to grading coverage", () => {

@@ -103,10 +103,26 @@ test("partial apertures use the same open area in assembly and projection", () =
   assert.equal(coefficient, interior.area * interior.inverseDistance * interior.openFraction);
 });
 
-test("ghost-fluid boundary distance follows the bounded dual-edge crossing", () => {
+test("ghost-fluid boundary distance follows the exact dual-edge crossing", () => {
   close(octreePowerBoundaryDistance(-0.25, 0.75, 2), 0.5);
-  close(octreePowerBoundaryDistance(-1e-6, 1, 2), 0.02);
+  close(octreePowerBoundaryDistance(-1e-6, 1, 2), 2e-6 / 1.000001);
   assert.throws(() => octreePowerBoundaryDistance(1, -1, 2), /liquid\/air phi/);
+  assert.throws(() => octreePowerBoundaryDistance(0, 1, 2), /liquid\/air phi/);
+});
+
+test("CPU oracle includes an open zero-pressure boundary in assembly and projection", () => {
+  const site = createOctreePowerSite("liquid", [0, 0, 0], 1);
+  const operator = buildOctreePowerOperator([site], powerBoxBoundary([0, 0, 0], [1, 1, 1]), {
+    boundaryDistance: (_negative, face) => face.boundaryKey === "x+" ? 0.25 : undefined,
+    normalVelocity: (_centroid, _normal, _negative, positive) => positive ? 0 : 1,
+  });
+  const open = operator.faces.find((face) => face.boundaryKey === "x+");
+  assert.ok(open);
+  close(open.inverseDistance, 4);
+  close(operator.rows[0].diagonal, open.area * open.inverseDistance);
+  const pressure = [-0.25];
+  const projected = projectOctreePowerFaceVelocities(operator, pressure);
+  close(projected[open.id], 0);
 });
 
 test("uniform center row exactly reproduces six-point coefficients", () => {

@@ -101,6 +101,8 @@ export interface GPUSolverInstance {
   readonly powerPressureBuffer?: GPUBuffer;
   /** QA-only compact leaf headers; 48 bytes per pressure row. */
   readonly powerLeafHeaders?: GPUBuffer;
+  /** QA-only reconstructed vec4 velocity, indexed by power-leaf row. */
+  readonly powerCellVelocityBuffer?: GPUBuffer;
   /** QA-only compact pressure CSR entries; `(neighborRow:u32, coefficient:f32)`. */
   readonly powerLeafEntries?: GPUBuffer;
   /** True only after the complete t=0 sparse authority has passed its queue fence. */
@@ -124,6 +126,8 @@ export interface GPUSolverInstance {
   };
   /** QA-only generation/slot sampled by the last power boundary build. */
   readonly powerBoundaryFineSource?: { generation: number; generationSlot: 0 | 1 };
+  /** QA-only exact sparse source sampled by the last power boundary build. */
+  readonly powerBoundaryFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
   /** Diagnostic-only Stage-B point-sampler transaction used by fine transport. */
   readonly globalFinePowerVelocitySampleControl?: GPUBuffer;
   readonly globalFineCoarseLevelSetControl?: GPUBuffer;
@@ -141,6 +145,8 @@ export interface GPUSolverInstance {
   readonly globalFineFaceBandPlan?: OctreeFaceBandGPUPlan;
   /** Failure-only bounded readback for a disconnected Section-5 face. */
   readGlobalFineDisconnectedFaceFailure?(index: number): Promise<unknown> | undefined;
+  /** Failure-only bounded readback for a retained Section-5 interpolation row. */
+  readGlobalFineBandRowFailure?(index: number): Promise<unknown> | undefined;
   /** GPU-authored rigid records matching the renderer's four-vec4 body ABI. */
   readonly rigidRenderBuffer?: GPUBuffer;
   /** GPU-authored 128-byte primitive-motion sidecars, including conservative swept bounds. */

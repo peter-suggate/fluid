@@ -78,6 +78,15 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
   assert.match(topology,
     /var value=sampleCoarseOctreePhi\(position\);let seeded=externalSeedPhi[\s\S]*if\(finite\(seeded\)\)\{value=seeded;\}/,
     "endpoint support preserves the paper's coarse phi unless a real interface affine seed is finite");
+  assert.match(topology,
+    /fn exactAnalyticSeedPhi[\s\S]*heightFraction=max\(0\.92,fill\)[\s\S]*length\(max\(q,vec3f\(0\.0\)\)\)\+min\(max\(q\.x,max\(q\.y,q\.z\)\),0\.0\)/,
+    "the cold authored dam is sampled exactly on the independent fine SPGrid instead of flattened to a coarse leaf plane");
+  assert.match(topology,
+    /fn externalSeedPhi[\s\S]*currentFinePopulated\(\)[\s\S]*exactAnalyticSeedPhi/,
+    "exact analytic initialization is cold-start only; recurring generations preserve transported fine phi");
+  assert.match(topology,
+    /let first=vec3f\(brick\*params\.brickResolution\)\/f32\(params\.fineFactor\);let last=vec3f\(\(brick\+vec3u\(1u\)\)\*params\.brickResolution\)\/f32\(params\.fineFactor\)/,
+    "an analytic interface aligned with an SPGrid page boundary must seed the adjacent page supports");
 });
 
 test("Dawn endpoint seeds cover exact factor-4/factor-8 trilinear support without replacing interface phi", {

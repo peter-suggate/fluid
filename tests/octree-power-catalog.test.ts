@@ -14,10 +14,10 @@ import {
 import {
   OCTREE_CUBE_TRANSFORMS,
   inverseCubeTransform,
-  octreePowerCoarseMaskNeedsAcuteRepair,
   transformPowerVector,
 } from "../lib/octree-power-topology";
 import {
+  OCTREE_POWER_SAME_OR_COARSER_FLAG,
   sitesForSameOrCoarserPowerDescriptor,
   sitesForSameOrFinerPowerDescriptor,
 } from "../lib/octree-power-descriptor";
@@ -99,14 +99,40 @@ test("catalog rejects duplicate descriptors and unbounded configurations", () =>
   assert.throws(() => buildOctreePowerCatalog([{ descriptor: 8, anchorKey: "a", sites: [lonely] }]), /empty or unbounded/);
 });
 
+test("co-spherical same/coarser links choose strict-acute row-local Delaunay tetrahedra", () => {
+  const dot = (a: readonly number[], b: readonly number[]) => a.reduce((sum, value, axis) => sum + value * b[axis], 0);
+  const cross = (a: readonly number[], b: readonly number[]) => [
+    a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0],
+  ];
+  for (const mask of [25, 42, 52, 57, 58, 60]) {
+    const descriptor = (OCTREE_POWER_SAME_OR_COARSER_FLAG | (mask << 3)) >>> 0;
+    const catalog = buildOctreePowerCatalog([{
+      descriptor, anchorKey: "anchor", sites: sitesForSameOrCoarserPowerDescriptor(descriptor),
+    }]);
+    let maximumSolidAngle = 0;
+    for (const tetrahedron of catalog.entries[0].tetrahedra) {
+      const [a, b, c] = tetrahedron.map((selector) =>
+        [...catalog.tetrahedronVertexData.slice(selector * 4, selector * 4 + 3)]);
+      const determinant = Math.abs(dot(a, cross(b, c)));
+      const lengths = [a, b, c].map((value) => Math.hypot(...value));
+      const denominator = lengths[0] * lengths[1] * lengths[2] + dot(a, b) * lengths[2]
+        + dot(a, c) * lengths[1] + dot(b, c) * lengths[0];
+      maximumSolidAngle = Math.max(maximumSolidAngle, 2 * Math.atan2(determinant, denominator));
+    }
+    assert.ok(catalog.entries[0].tetrahedra.length > 0, `mask ${mask}`);
+    assert.ok(maximumSolidAngle < Math.PI / 2 - 1e-8,
+      `mask ${mask} maximum solid angle ${maximumSolidAngle} must be strictly below pi/2`);
+  }
+});
+
 test("generated exhaustive catalog decodes within the fixed budget and proven bounds", () => {
   const bytes = readFileSync(join(process.cwd(), "lib/generated/octree-power-catalog.bin"));
   const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   const views = decodeGeneratedOctreePowerCatalog(data);
   assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount, 1_608);
   assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence, 30);
-  assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumNeighborRows, 30);
-  assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra, 56);
+  assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumNeighborRows, 36);
+  assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra, 68);
   assert.ok(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.byteCount < OCTREE_POWER_CATALOG_WARNING_BYTES);
   assert.equal(views.entryHeaders.length, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount * 2);
   assert.equal(views.lookup.length, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount * 3);
@@ -119,13 +145,9 @@ test("generated exhaustive catalog decodes within the fixed budget and proven bo
     && (packed & 0xffff) < OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount
     && (packed >>> 16) < 48));
   views.sameOrCoarserDirect.forEach((packed, low) => {
-    const excluded = octreePowerCoarseMaskNeedsAcuteRepair(low >>> 3);
-    assert.equal(packed === 0xffff_ffff, excluded,
-      `same/coarser descriptor ${low} must be invalid exactly when acute grading is required`);
-    if (!excluded) {
-      assert.ok((packed & 0xffff) < OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount);
-      assert.ok((packed >>> 16) < 48);
-    }
+    assert.notEqual(packed, 0xffff_ffff, `same/coarser descriptor ${low} must be directly addressable`);
+    assert.ok((packed & 0xffff) < OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount);
+    assert.ok((packed >>> 16) < 48);
   });
   assert.ok([...views.entryVolumes].every((volume) => volume > 0 && Number.isFinite(volume)));
   assert.equal(typeof fetchGeneratedOctreePowerCatalog, "function");
@@ -157,7 +179,7 @@ test("generated exhaustive catalog decodes within the fixed budget and proven bo
   }
 });
 
-test("every nonuniform tetra selector set contains exactly every power-face neighbor", () => {
+test("every nonuniform tetra selector set contains every power-face neighbor", () => {
   const bytes = readFileSync(join(process.cwd(), "lib/generated/octree-power-catalog.bin"));
   const views = decodeGeneratedOctreePowerCatalog(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
@@ -185,12 +207,12 @@ test("every nonuniform tetra selector set contains exactly every power-face neig
     const faceCount = views.entryHeaders[entry * 2 + 1];
     const faceGeometry = new Set(Array.from({ length: faceCount }, (_, local) =>
       key(views.faceData, (faceFirst + local) * OCTREE_POWER_CATALOG_FACE_FLOATS)));
-    assert.deepEqual(selectorGeometry, faceGeometry,
-      `entry ${entry} selector geometry must exactly close its face endpoints`);
+    assert.ok([...faceGeometry].every((geometry) => selectorGeometry.has(geometry)),
+      `entry ${entry} selector geometry must close every face endpoint`);
     assert.ok(selectorGeometry.size <= OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumNeighborRows);
     checked += 1;
   }
-  assert.equal(checked, 6_472,
+  assert.equal(checked, 6_474,
     "the exhaustive nonuniform catalog is the authority for terminal support closure");
 });
 

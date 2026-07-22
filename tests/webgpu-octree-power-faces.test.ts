@@ -75,7 +75,7 @@ test("power-face boundary policy preserves geometric world identity and scene-op
     "an open world plane uses exact row-centre-to-boundary distance instead of free-surface theta");
 });
 
-test("power free-surface coefficients use actual signed cell-centre phi without repair or floor", () => {
+test("power free-surface coefficients use strict current signed cell-centre crossings", () => {
   const geometry = octreePowerFaceShader.replace(/\s+/g, "");
   const sampler = octreePowerBoundaryPhiShader.replace(/\s+/g, "");
   assert.match(geometry,
@@ -83,10 +83,12 @@ test("power free-surface coefficients use actual signed cell-centre phi without 
     "geometry must publish the actual liquid and absent-air power-cell centres");
   assert.match(sampler, /letliquid=sampleAuthority\(query\.liquidCenter\.xyz\);letair=sampleAuthority\(query\.airCenter\.xyz\)/,
     "both pressure samples must come from the selected signed-distance authority");
-  assert.match(sampler, /lettheta=\(-liquid\.x\)\/\(air\.x-liquid\.x\)/,
+  assert.match(sampler, /theta=\(-liquid\.x\)\/\(air\.x-liquid\.x\)/,
     "the Ghost Fluid fraction must use the two signed cell-centre values");
-  assert.doesNotMatch(sampler, /abs\(liquid\.x\)|abs\(air\.x\)|clamp\([^)]*theta|0\.05/,
+  assert.doesNotMatch(sampler, /abs\(liquid\.x\)|abs\(air\.x\)|clamp\([^)]*theta|0\.0[15]/,
     "authoritative power pressure must not repair signs or floor theta");
+  assert.match(sampler, /!\(liquid\.x<0\.0\)\|\|!\(air\.x>0\.0\)/,
+    "row classification and boundary samples must belong to the same publication");
   assert.match(sampler,
     /if\(faceParams\.phiPolicy\.z==1u\)\{powerFaces\[faceIndex\]\.flags=face\.flags\|COARSE_PENDING;return;\}\s*failBoundary/,
     "missing narrow-band support defers to the published coarse octree authority (paper Section 5) and rejects only when that authority is unbound");
@@ -94,8 +96,11 @@ test("power free-surface coefficients use actual signed cell-centre phi without 
   assert.match(coarseResolve,
     /letliquid=sampleCoarseOctreePhi\(query\.liquidCenter\.xyz\);\s*letair=sampleCoarseOctreePhi\(query\.airCenter\.xyz\)/,
     "the coarse resolve pass samples both dual-edge centres from one authority so a face never mixes fine and coarse phi");
-  assert.match(coarseResolve, /theta=clamp\(theta,0\.01,1\.0\)/,
-    "coarse GFM uses the standard Gibou et al. 2002 theta floor because the lagged row classification can trail a fast interface");
+  assert.match(coarseResolve,
+    /if\(!\(liquid<0\.0\)\|\|!\(air>0\.0\)\)\{failBoundary[\s\S]*lettheta=\(-liquid\)\/\(air-liquid\)/,
+    "the coarse fallback must reject stale row classification and retain the exact current crossing");
+  assert.doesNotMatch(coarseResolve, /clamp\([^)]*theta|0\.0[15]/,
+    "the coarse authority must not hide a generation mismatch behind a theta floor");
   assert.match(coarseResolve, /if\(!coarseAvailable\(liquid\)\|\|!coarseAvailable\(air\)\)\{failBoundary/,
     "an unpublished coarse directory still rejects the generation instead of estimating phi");
   assert.match(sampler, /worklist\[1\]!=fineParams\.generation\|\|worklist\[3\]!=1u\|\|worklist\[4\]!=1u/,
@@ -274,6 +279,14 @@ test("power-face WGSL uses count/scan/emit and no atomic public append", () => {
     "an invalid catalog reconstruction must retain its row, slot, topology code, and transform for the viewport failure marker");
   assert.doesNotMatch(octreePowerFaceShader, /airPhi=abs|liquidPhi\+dot|0\.05/,
     "face geometry must not synthesize or floor a free-surface coefficient");
+});
+
+test("fine power-boundary phi rejects a one-generation phase crossing", () => {
+  assert.match(octreePowerBoundaryPhiShader,
+    /!\(liquid\.x<0\.0\)\|\|!\(air\.x>0\.0\)[\s\S]*failBoundary/,
+    "a row crossed by the current interface must fail the generation instead of solving a stale system");
+  assert.doesNotMatch(octreePowerBoundaryPhiShader, /abs\(liquid\.x\)|abs\(air\.x\)|clamp\([^)]*theta/,
+    "phase validation must neither repair signs nor floor the interface fraction");
 });
 
 test("Dawn emits stable unique power faces and reciprocal compact incidence", {

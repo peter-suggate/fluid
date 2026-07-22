@@ -3,8 +3,9 @@ import { pathToFileURL } from "node:url";
 import { initializeRigidBodies } from "../lib/rigid-body";
 import type { GPUInitializationProgress, GPUSolverInstance, MethodParamValues } from "../lib/methods/types";
 import { octreeMethod } from "../lib/methods/octree";
+import { viewportFailureIndicator } from "../lib/viewport-failure-diagnostics";
 import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { createSmokeScenario } from "./webgpu-smoke-scenarios";
+import { createSmokeScenario, isSmokeScenarioId } from "./webgpu-smoke-scenarios";
 import {
   parseWebGPUBringupStage,
   reachedSolverResourceBoundary,
@@ -102,7 +103,9 @@ try {
       console.log(JSON.stringify({ phase: "compute-sentinel", stage, passed: true, value: observed }));
     }
     if (stage !== "compute-sentinel") {
-      const scenario = createSmokeScenario("dam-break-ui");
+      const scenarioId = process.env.FLUID_BRINGUP_SCENE ?? "dam-break-ui";
+      if (!isSmokeScenarioId(scenarioId)) throw new Error(`Unknown FLUID_BRINGUP_SCENE: ${scenarioId}`);
+      const scenario = createSmokeScenario(scenarioId);
       scenario.scene.voxelDomain.finestCellSize_m = Number(process.env.FLUID_VOXEL_CELL_SIZE ?? 0.05);
       const validationErrors: string[] = [];
       let lastInitializationCompleted = 0;
@@ -114,6 +117,10 @@ try {
         if (stage === "solver-resources" && reachedSolverResourceBoundary(snapshot)) throw new SolverResourceBoundary();
       };
       try {
+        // The UI's safe startup fences every authority phase. Dawn must use
+        // the identical ordering or a browser-only initialization defect can
+        // hide inside the combined-command-buffer product path.
+        process.env.FLUID_SAFE_BRINGUP = "1";
         solver = await octreeMethod.createSolverAsync!(device, scenario.scene, "balanced", solverValues(), undefined, progress);
       } catch (error) {
         if (!(error instanceof SolverResourceBoundary)) throw error;
@@ -131,17 +138,32 @@ try {
         if (validationErrors.length > 0) {
           throw new Error(`sparse-t0 validation failed: ${validationErrors.join("; ")}`);
         }
-        console.log(JSON.stringify({ phase: "sparse-t0", stage, passed: true, grid: [solver.info.nx, solver.info.ny, solver.info.nz], allocatedBytes: solver.info.allocatedBytes }));
+        console.log(JSON.stringify({ phase: "sparse-t0", stage, passed: true, scenario: scenarioId,
+          startupMode: "phase-fenced", grid: [solver.info.nx, solver.info.ny, solver.info.nz],
+          allocatedBytes: solver.info.allocatedBytes }));
       }
       if (stage === "one-step") {
         const requestedTime_s = scenario.scene.numerics.maxDt_s;
         const accepted = solver!.advanceTo(requestedTime_s, initializeRigidBodies(scenario.scene.rigidBodies));
         if (!accepted) throw new Error("solver refused the first bounded advance");
-        const info = await solver!.readStats();
+        // `advanceTo` only submits. The UI admits a generation after its GPU
+        // completion fence, so the isolated Dawn checkpoint must not inspect
+        // the host-side submitted clock and call that a completed step.
+        await device.queue.onSubmittedWorkDone();
+        solver!.info.completedTime_s = Math.max(solver!.info.completedTime_s ?? 0,
+          solver!.info.submittedTime_s ?? 0);
+        const info = { ...await solver!.readStats() };
         await flushGPUErrorDelivery(device);
         if (lost) throw new Error(`device lost during first step: ${lost.reason} ${lost.message}`);
         if ((info.encodedSteps ?? 0) !== 1 || (info.submittedTime_s ?? 0) < requestedTime_s) {
           throw new Error(`one-step checkpoint did not complete exactly one submission: steps=${info.encodedSteps}, submitted=${info.submittedTime_s}`);
+        }
+        if ((info.completedTime_s ?? 0) + 1e-9 < requestedTime_s) {
+          throw new Error(`one-step checkpoint did not reach its GPU completion fence: completed=${info.completedTime_s}, requested=${requestedTime_s}`);
+        }
+        const authorityFailure = viewportFailureIndicator(info, undefined, scenario.scene);
+        if (authorityFailure?.tone === "rejected") {
+          throw new Error(`one-step authority rejected: ${authorityFailure.stage}: ${authorityFailure.detail}`);
         }
         if (validationErrors.length > 0 || info.gpuValidationError) throw new Error(`one-step validation failed: ${[...validationErrors, info.gpuValidationError].filter(Boolean).join("; ")}`);
         console.log(JSON.stringify({ phase: "one-step", stage, passed: true, encodedSteps: info.encodedSteps, submittedTime_s: info.submittedTime_s, completedTime_s: info.completedTime_s, nonFiniteCount: info.nonFiniteCount, stabilityFlags: info.stabilityFlags }));

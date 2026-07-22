@@ -7,6 +7,7 @@ import { uniformMethod } from "../lib/methods/uniform";
 import { quadtreeTallCellMethod } from "../lib/methods/quadtree-tall-cell";
 import { octreeMethod } from "../lib/methods/octree";
 import { maximumFluidScale } from "../lib/quadtree-tall-cell-grid";
+import { damBreakFractions } from "../lib/initial-fluid";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../lib/rigid-body";
 import type { SceneDescription } from "../lib/model";
 import { createSingleTallCellProbeControlLayout, createSingleTallCellProbeLayout, createTallCellLayout, tallCellSettings, type SingleTallCellProbeOptions } from "../lib/tall-cell-grid";
@@ -29,6 +30,10 @@ import { compactOctreeFieldEvidenceIsAcceptable, compactOctreePublicationHeaderE
   type CompactOctreeFieldEvidence } from "./webgpu-smoke-compact-field";
 import { decodeOctreeMGPCGDiagnostics, octreeMGPCGDiagnosticsAreAcceptable,
   type OctreeMGPCGDiagnostics } from "./webgpu-smoke-pressure";
+import { compactPowerFaceIntegratedFlux, compactPowerFaceMetricKineticEnergy } from "./webgpu-smoke-power-diagnostics";
+import { OCTREE_POWER_VELOCITY_VALID } from "../lib/webgpu-octree-power-velocity";
+import { compareVelocityFields, DAM_BREAK_VELOCITY_PARITY_LIMITS, rasterizeCompactPowerCellVelocities,
+  velocityParityFailures, type CompactVelocityRaster, type VelocityParityMetrics } from "./webgpu-smoke-velocity-parity";
 import { narrowVerticalSlitMetrics, type NarrowVerticalSlitMetrics } from "./raster-slit-metrics";
 import { viewportFailureIndicator } from "../lib/viewport-failure-diagnostics";
 import {
@@ -555,6 +560,10 @@ interface HybridPresentationSmokeStats {
   pairedInterfacePixels: number;
   frontOnlyInterfacePixels: number;
   backOnlyInterfacePixels: number;
+  /** First isolated screen-space witnesses where a back crossing has no front crossing. */
+  backOnlyInterfaceLocations?: readonly (readonly [number, number])[];
+  /** World-space back-interface positions for the corresponding witnesses. */
+  backOnlyInterfacePositions_m?: readonly (readonly [number, number, number])[];
   frontInterfaceHash: number;
   backInterfaceHash: number;
   rendererValidationErrorCount: number;
@@ -569,6 +578,10 @@ interface HybridPresentationSmokeStats {
   vertexCapacity?: number;
   activeCubeCapacity?: number;
   narrowVerticalSlits: NarrowVerticalSlitMetrics;
+  /** Front-facing pixels lying on a side-wall cap within 0.4 fine cells of each x/z corner. */
+  wallCornerCapPixels?: readonly [number, number, number, number];
+  /** Pixels on the two exposed vertical dam faces next to their shared +x/+z corner. */
+  damExposedCornerCapPixels?: readonly [number, number];
   frontInterfaceBounds_m?: readonly [readonly [number, number, number], readonly [number, number, number]];
   reverseView?: {
     frontInterfacePixels: number;
@@ -576,9 +589,13 @@ interface HybridPresentationSmokeStats {
     pairedInterfacePixels: number;
     frontOnlyInterfacePixels: number;
     backOnlyInterfacePixels: number;
+    backOnlyInterfaceLocations?: readonly (readonly [number, number])[];
+    backOnlyInterfacePositions_m?: readonly (readonly [number, number, number])[];
     frontInterfaceHash: number;
     backInterfaceHash: number;
     narrowVerticalSlits: NarrowVerticalSlitMetrics;
+    wallCornerCapPixels?: readonly [number, number, number, number];
+    damExposedCornerCapPixels?: readonly [number, number];
     frontInterfaceBounds_m?: readonly [readonly [number, number, number], readonly [number, number, number]];
   };
   globalFineAuthorityTransition?: {
@@ -731,8 +748,9 @@ async function readGlobalFineGenerationDiagnostics(
   device: GPUDevice,
   solver: GPUSolverInstance,
   probeBrickKeys: readonly number[] = [],
+  sourceOverride?: WebGPUFineLevelSetBrickSource,
 ): Promise<GlobalFineGenerationDiagnostics | undefined> {
-  const source = solver.globalFineLevelSetSource;
+  const source = sourceOverride ?? solver.globalFineLevelSetSource;
   if (!source) return undefined;
   const transportControl = (solver as GPUSolverInstance & { globalFineTransportControl?: GPUBuffer })
     .globalFineTransportControl;
@@ -1108,10 +1126,29 @@ async function smokeRenderHybridPresentation(
         const interfaceRowWords = interfaceBytesPerRow / 2;
         let frontInterfacePixels = 0, backInterfacePixels = 0, pairedInterfacePixels = 0;
         let frontOnlyInterfacePixels = 0, backOnlyInterfacePixels = 0;
+        const backOnlyInterfaceLocations: [number, number][] = [];
+        const backOnlyInterfacePositions_m: [number, number, number][] = [];
         let frontInterfaceHash = 0x811c_9dc5, backInterfaceHash = 0x811c_9dc5;
         const fold = (hash: number, value: number) => Math.imul((hash ^ value) >>> 0, 0x0100_0193) >>> 0;
         const frontMinimum: [number, number, number] = [Infinity, Infinity, Infinity];
         const frontMaximum: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+        const wallCornerCapPixels: [number, number, number, number] = [0, 0, 0, 0];
+        const damExposedCornerCapPixels: [number, number] = [0, 0];
+        const fineCellWidth = globalFineLevelSet?.fineCellWidth ?? scene.voxelDomain.finestCellSize_m;
+        const wallPlaneTolerance = Math.max(5e-4, 0.08 * fineCellWidth);
+        const cornerTangentialBand = 0.4 * fineCellWidth;
+        const dam = damBreakFractions(scene.container.fillFraction);
+        const damMaximum = [
+          -0.5 * scene.container.width_m + dam.width * scene.container.width_m,
+          dam.height * scene.container.height_m,
+          -0.5 * scene.container.depth_m + dam.depth * scene.container.depth_m,
+        ] as const;
+        const wallCorners = [
+          [-0.5 * scene.container.width_m, -0.5 * scene.container.depth_m],
+          [-0.5 * scene.container.width_m, 0.5 * scene.container.depth_m],
+          [0.5 * scene.container.width_m, -0.5 * scene.container.depth_m],
+          [0.5 * scene.container.width_m, 0.5 * scene.container.depth_m],
+        ] as const;
         const frontMask = new Uint8Array(width * height);
         for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
           const at = y * interfaceRowWords + x * 4;
@@ -1125,6 +1162,22 @@ async function smokeRenderHybridPresentation(
           if (frontPresent) {
             frontInterfacePixels += 1;
             frontMask[x + y * width] = 1;
+            const px = decodeFloat16(interfaceWords[at]);
+            const py = decodeFloat16(interfaceWords[at + 1]);
+            const pz = decodeFloat16(interfaceWords[at + 2]);
+            for (let corner = 0; corner < wallCorners.length; corner += 1) {
+              const dx = Math.abs(px - wallCorners[corner][0]);
+              const dz = Math.abs(pz - wallCorners[corner][1]);
+              if ((dx <= wallPlaneTolerance && dz <= cornerTangentialBand)
+                || (dz <= wallPlaneTolerance && dx <= cornerTangentialBand)) wallCornerCapPixels[corner] += 1;
+            }
+            if (scene.fluid.initialCondition === "dam-break"
+              && py >= fineCellWidth && py <= damMaximum[1] - fineCellWidth) {
+              const damDx = Math.abs(px - damMaximum[0]);
+              const damDz = Math.abs(pz - damMaximum[2]);
+              if (damDx <= wallPlaneTolerance && damDz <= cornerTangentialBand) damExposedCornerCapPixels[0] += 1;
+              if (damDz <= wallPlaneTolerance && damDx <= cornerTangentialBand) damExposedCornerCapPixels[1] += 1;
+            }
             for (let axis = 0; axis < 3; axis += 1) {
               const value = decodeFloat16(interfaceWords[at + axis]);
               frontMinimum[axis] = Math.min(frontMinimum[axis], value);
@@ -1134,15 +1187,28 @@ async function smokeRenderHybridPresentation(
           if (backPresent) backInterfacePixels += 1;
           if (frontPresent && backPresent) pairedInterfacePixels += 1;
           else if (frontPresent) frontOnlyInterfacePixels += 1;
-          else if (backPresent) backOnlyInterfacePixels += 1;
+          else if (backPresent) {
+            backOnlyInterfacePixels += 1;
+            if (backOnlyInterfaceLocations.length < 16) {
+              backOnlyInterfaceLocations.push([x, y]);
+              backOnlyInterfacePositions_m.push([
+                decodeFloat16(interfaceWords[backAt]),
+                decodeFloat16(interfaceWords[backAt + 1]),
+                decodeFloat16(interfaceWords[backAt + 2]),
+              ]);
+            }
+          }
         }
         const narrowVerticalSlits = narrowVerticalSlitMetrics(frontMask, width, height);
         interfaceReadback.unmap();
         return { initializeWall_ms, frameWall_ms: performance.now() - frameStarted,
           bodyCount: presentationBodies.length, width, height, frontInterfacePixels, backInterfacePixels,
           pairedInterfacePixels, frontOnlyInterfacePixels, backOnlyInterfacePixels,
+          backOnlyInterfaceLocations, backOnlyInterfacePositions_m,
           frontInterfaceHash, backInterfaceHash,
           narrowVerticalSlits,
+          wallCornerCapPixels,
+          damExposedCornerCapPixels,
           ...(presentationDiagnostics ? {
             surfaceGeometrySource: presentationDiagnostics.surfaceGeometrySource,
             globalFineAuthorityLatch: presentationDiagnostics.globalFineAuthorityLatch,
@@ -1206,9 +1272,13 @@ async function smokeRenderHybridPresentation(
       pairedInterfacePixels: reverse.pairedInterfacePixels,
       frontOnlyInterfacePixels: reverse.frontOnlyInterfacePixels,
       backOnlyInterfacePixels: reverse.backOnlyInterfacePixels,
+      backOnlyInterfaceLocations: reverse.backOnlyInterfaceLocations,
+      backOnlyInterfacePositions_m: reverse.backOnlyInterfacePositions_m,
       frontInterfaceHash: reverse.frontInterfaceHash,
       backInterfaceHash: reverse.backInterfaceHash,
       narrowVerticalSlits: reverse.narrowVerticalSlits,
+      wallCornerCapPixels: reverse.wallCornerCapPixels,
+      damExposedCornerCapPixels: reverse.damExposedCornerCapPixels,
       ...(reverse.frontInterfaceBounds_m ? { frontInterfaceBounds_m: reverse.frontInterfaceBounds_m } : {}),
     }, rendererValidationErrorCount: 0, rendererUncapturedErrorCount: 0,
       ...(globalFineAuthorityTransition ? { globalFineAuthorityTransition } : {}) };
@@ -1333,12 +1403,21 @@ async function readVelocityTexture3D(
   spacing = { x: 1, y: 1, z: 1 },
   dt_s = 0
 ): Promise<VelocityStageSummary> {
+  const velocity = await readVelocityField3D(device, texture, width, height, depth);
+  return summarizeVelocityField(velocity, width, height, depth, volume, spacing, dt_s, "backward");
+}
+
+async function readVelocityField3D(
+  device: GPUDevice, texture: GPUTexture, width: number, height: number, depth: number,
+) {
   const raw = await readRgbaTexture3D(device, texture, width, height, depth);
   const velocity = new Float32Array(width * height * depth * 3);
   for (let index = 0; index < width * height * depth; index += 1) {
-    velocity[3 * index] = raw[4 * index]; velocity[3 * index + 1] = raw[4 * index + 1]; velocity[3 * index + 2] = raw[4 * index + 2];
+    velocity[3 * index] = raw[4 * index];
+    velocity[3 * index + 1] = raw[4 * index + 1];
+    velocity[3 * index + 2] = raw[4 * index + 2];
   }
-  return summarizeVelocityField(velocity, width, height, depth, volume, spacing, dt_s, "backward");
+  return velocity;
 }
 
 /**
@@ -1389,6 +1468,37 @@ async function readTallVelocityField3D(
     }
   }
   return velocity;
+}
+
+async function readCompactOctreeVelocityField3D(
+  device: GPUDevice,
+  solver: GPUSolverInstance,
+  dimensions: readonly [number, number, number],
+): Promise<(CompactVelocityRaster & {
+  publicationValid: boolean;
+  rowCount: number;
+  reconstructedRows: number;
+}) | undefined> {
+  const controlBuffer = solver.globalFinePowerVelocityControl;
+  const headerBuffer = solver.powerLeafHeaders;
+  const velocityBuffer = solver.powerCellVelocityBuffer;
+  if (!controlBuffer || !headerBuffer || !velocityBuffer) return undefined;
+  const controlBytes = await readBufferBinding(device, { buffer: controlBuffer }, 32);
+  const control = new Uint32Array(controlBytes.buffer, controlBytes.byteOffset, 8);
+  const rowCount = control[2] >>> 0, reconstructedRows = control[5] >>> 0;
+  if (rowCount === 0 || rowCount * 48 > headerBuffer.size || rowCount * 16 > velocityBuffer.size) return undefined;
+  const [headerBytes, velocityBytes] = await Promise.all([
+    readBufferBinding(device, { buffer: headerBuffer }, rowCount * 48),
+    readBufferBinding(device, { buffer: velocityBuffer }, rowCount * 16),
+  ]);
+  const headers = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, rowCount * 12);
+  const velocities = new Float32Array(velocityBytes.buffer, velocityBytes.byteOffset, rowCount * 4);
+  return {
+    ...rasterizeCompactPowerCellVelocities(headers, velocities, rowCount, dimensions),
+    publicationValid: control[0] === OCTREE_POWER_VELOCITY_VALID && reconstructedRows === rowCount,
+    rowCount,
+    reconstructedRows,
+  };
 }
 
 function velocityDifferenceMagnitude(left: Float32Array, right: Float32Array) {
@@ -1842,7 +1952,19 @@ interface GPUSmokeResult {
   steps: number;
   /** Accepted steps whose live power topology, faces, transfer, and MGPCG publication passed the generation audit. */
   powerGenerationAuditedSteps: number;
+  /** Historical transition telemetry for diagnosing when adaptivity was lost.
+   * It must never substitute for a live final-topology assertion. */
+  powerTransitionWitness?: PowerTransitionWitness;
   velocitySummary?: VelocityStageSummary;
+  /** Final collocated cubic velocity and exactly aligned occupancy for the
+   * dam-break octree/tall-cell parity gate. */
+  velocityParityField?: Float32Array;
+  velocityParityVolume?: Float32Array;
+  compactVelocityRaster?: Omit<CompactVelocityRaster, "field"> & {
+    publicationValid: boolean;
+    rowCount: number;
+    reconstructedRows: number;
+  };
   initialFluidBrickStats?: FluidBrickSnapshot;
   sparseVoxelStats?: SparseVoxelSmokeStats;
   hybridPresentationStats?: HybridPresentationSmokeStats;
@@ -1946,7 +2068,81 @@ interface PowerProjectionDiagnostics {
   };
   maximumSpeed_m_s: number;
   maximumDivergence_s: number;
+  /** Final generalized-face velocity norm in the pressure operator's H metric. */
+  metricKineticEnergyProxy: number;
   volumeDrift: number;
+}
+
+interface PowerTransitionWitness {
+  step: number;
+  generation: number;
+  leafSizeHistogram: Record<string, number>;
+  transitionFaceCount: number;
+  obliqueTransitionFaceCount: number;
+  maximumTransitionSizeRatio: number;
+  transitionRowCount: number;
+  transitionTetrahedronCount: number;
+}
+
+async function readPowerTransitionWitness(
+  device: GPUDevice,
+  solver: GPUSolverInstance,
+  step: number,
+  generation: number,
+  rowCount: number,
+  faceCount: number,
+): Promise<PowerTransitionWitness | undefined> {
+  const headersBuffer = solver.powerLeafHeaders;
+  const debug = solver.octreeTechniqueDebugSource;
+  if (!headersBuffer || !debug || rowCount === 0 || faceCount === 0) return undefined;
+  const [headerBytes, faceBytes, normalBytes, metricBytes, tetraHeaderBytes] = await Promise.all([
+    readBufferBinding(device, { buffer: headersBuffer }, rowCount * 48),
+    readBufferBinding(device, debug.powerFaces, faceCount * OCTREE_POWER_FACE_RECORD_BYTES),
+    readBufferBinding(device, debug.faceNormals, faceCount * 16),
+    readBufferBinding(device, debug.topologyMetrics, rowCount * 16),
+    readBufferBinding(device, debug.tetrahedronHeaders, debug.tetrahedronHeaders.buffer.size),
+  ]);
+  const headers = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, rowCount * 12);
+  const faces = new Uint32Array(faceBytes.buffer, faceBytes.byteOffset, faceCount * 8);
+  const normals = new Float32Array(normalBytes.buffer, normalBytes.byteOffset, faceCount * 4);
+  const metrics = new Uint32Array(metricBytes.buffer, metricBytes.byteOffset, rowCount * 4);
+  const tetraHeaders = new Uint32Array(tetraHeaderBytes.buffer, tetraHeaderBytes.byteOffset,
+    tetraHeaderBytes.byteLength / 4);
+  const leafSizeHistogram: Record<string, number> = {};
+  for (let row = 0; row < rowCount; row += 1) {
+    const size = headers[row * 12 + 3];
+    leafSizeHistogram[String(size)] = (leafSizeHistogram[String(size)] ?? 0) + 1;
+  }
+  let transitionFaceCount = 0, obliqueTransitionFaceCount = 0, maximumTransitionSizeRatio = 1;
+  for (let face = 0; face < faceCount; face += 1) {
+    const negative = faces[face * 8], positive = faces[face * 8 + 1];
+    if (negative >= rowCount || positive >= rowCount) continue;
+    const negativeSize = headers[negative * 12 + 3], positiveSize = headers[positive * 12 + 3];
+    if (negativeSize === positiveSize) continue;
+    transitionFaceCount += 1;
+    maximumTransitionSizeRatio = Math.max(maximumTransitionSizeRatio,
+      Math.max(negativeSize, positiveSize) / Math.max(1, Math.min(negativeSize, positiveSize)));
+    const dominant = Math.max(Math.abs(normals[face * 4]), Math.abs(normals[face * 4 + 1]),
+      Math.abs(normals[face * 4 + 2]));
+    if (dominant < 1 - 1e-5) obliqueTransitionFaceCount += 1;
+  }
+  let transitionRowCount = 0, transitionTetrahedronCount = 0;
+  for (let row = 0; row < rowCount; row += 1) {
+    const topologyCode = metrics[row * 4], topologyFlags = metrics[row * 4 + 1];
+    const tetraOffset = topologyCode * 3;
+    if (topologyCode === OCTREE_POWER_INVALID_ROW || tetraOffset + 2 >= tetraHeaders.length
+      || (topologyFlags & 0x8000_0000) === 0) continue;
+    const tetraCount = tetraHeaders[tetraOffset + 1];
+    if (tetraCount > 0 && (tetraHeaders[tetraOffset + 2] & 1) === 0) {
+      transitionRowCount += 1;
+      transitionTetrahedronCount += tetraCount;
+    }
+  }
+  if ((leafSizeHistogram["1"] ?? 0) === 0 || (leafSizeHistogram["2"] ?? 0) === 0
+    || transitionFaceCount === 0 || obliqueTransitionFaceCount === 0
+    || transitionRowCount === 0 || transitionTetrahedronCount === 0) return undefined;
+  return { step, generation, leafSizeHistogram, transitionFaceCount, obliqueTransitionFaceCount,
+    maximumTransitionSizeRatio, transitionRowCount, transitionTetrahedronCount };
 }
 
 async function readPowerProjectionDiagnostics(
@@ -2137,6 +2333,7 @@ async function readPowerProjectionDiagnostics(
   const transitionSizePairHistogram: Record<string, number> = {};
   let maximumTransitionSizeRatio = 1;
   let maximumNormalLengthError = 0, maximumTransitionNormalVelocity = 0, maximumFaceNormalVelocity = 0;
+  let metricKineticEnergyProxy = 0;
   const faceIncidenceCount = new Uint32Array(faceCount), faceIncidenceSignSum = new Int32Array(faceCount);
   const integratedFlux = new Float64Array(rowCount);
   let invalidIncidenceEntries = 0;
@@ -2158,10 +2355,17 @@ async function readPowerProjectionDiagnostics(
       invalidFaceCount += 1;
     }
     if (negative < rowCount && Number.isFinite(area) && Number.isFinite(openFraction) && Number.isFinite(normalVelocity)) {
-      const flux = area * openFraction * normalVelocity;
+      // The solid-face pass has already folded the aperture into the compact
+      // normal velocity. Match emitPowerRows/computePowerDivergence by using
+      // the power-face area once; multiplying by openFraction here again
+      // understates the projected flux residual on cut faces.
+      const flux = compactPowerFaceIntegratedFlux(area, normalVelocity);
       integratedFlux[negative] += flux;
       if (positive !== OCTREE_POWER_INVALID_ROW && positive < rowCount) integratedFlux[positive] -= flux;
     }
+    const metricEnergy = compactPowerFaceMetricKineticEnergy(area, inverseDistance, openFraction, normalVelocity);
+    metricKineticEnergyProxy = Number.isFinite(metricKineticEnergyProxy) && Number.isFinite(metricEnergy)
+      ? metricKineticEnergyProxy + metricEnergy : Infinity;
     if (negative >= rowCount || positive === OCTREE_POWER_INVALID_ROW || positive >= rowCount
       || sizes[negative] === sizes[positive]) continue;
     transitionFaceCount += 1;
@@ -2237,6 +2441,7 @@ async function readPowerProjectionDiagnostics(
     },
     maximumSpeed_m_s: maximumFaceNormalVelocity,
     maximumDivergence_s: maximumPowerDivergence,
+    metricKineticEnergyProxy,
     volumeDrift: solver.info.volumeDrift ?? Infinity,
   };
 }
@@ -2328,6 +2533,7 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
   console.log(JSON.stringify({
     scenario, method: result.method, phase: "result", construction_ms: Math.round(result.construction_ms), runtime_ms: Math.round(result.runtime_ms), simulationWall_ms: Math.round(result.simulationWall_ms), steps: result.steps,
     powerGenerationAuditedSteps: result.powerGenerationAuditedSteps,
+    powerTransitionWitness: result.powerTransitionWitness,
     cpuAdvanceEncodeBreakdown: result.info.cpuAdvanceEncodeBreakdown,
     simulatedTime_s: info.simulatedTime_s, submittedTime_s: info.submittedTime_s, completedTime_s: info.completedTime_s,
     grid: [info.nx, info.storedNy, info.nz], cubicGrid: result.grid,
@@ -2688,6 +2894,7 @@ async function runGPU(
   let nextCheckpoint_s = checkpointEvery_s;
   let previousAuditedPowerGeneration = 0;
   let powerGenerationAuditedSteps = 0;
+  let powerTransitionWitness: PowerTransitionWitness | undefined;
   let topologyTransitionDeepCell: number | undefined;
   while ((solver.info.submittedTime_s ?? 0) + 1e-9 < target_s) {
     const stepDt = perturbCadence
@@ -2708,8 +2915,10 @@ async function runGPU(
       // step. Match the renderer's lifecycle contract before auditing it.
       await awaitAdvanceCompletion();
       const audited = solver as GPUSolverInstance & {
-        powerFaceControl?: GPUBuffer; powerFaceTransferControl?: GPUBuffer; powerFaceSiteIndex?: GPUBuffer;
-        powerFaceSeedControl?: GPUBuffer; powerOperatorControl?: GPUBuffer; mgpcgControl?: GPUBuffer;
+        powerFaceControl?: GPUBuffer; powerFaceSource?: { faces: GPUBuffer; faceNormals: GPUBuffer; faceCentroids: GPUBuffer };
+        powerFaceTransferControl?: GPUBuffer; powerFaceSiteIndex?: GPUBuffer;
+        powerFaceSeedControl?: GPUBuffer; powerFaceAdvectionControl?: GPUBuffer; powerSolidFaceControl?: GPUBuffer;
+        powerOperatorControl?: GPUBuffer; mgpcgControl?: GPUBuffer;
         powerDescriptorControl?: GPUBuffer; powerTopologyControl?: GPUBuffer;
         globalFineCoarseLevelSetControl?: GPUBuffer;
         globalFinePowerVelocityControl?: GPUBuffer;
@@ -2721,6 +2930,7 @@ async function runGPU(
         adaptiveSurfaceCandidateControl?: GPUBuffer;
         powerBoundaryPhiQueries?: GPUBuffer;
         powerBoundaryFineSource?: { generation: number; generationSlot: 0 | 1 };
+        powerBoundaryFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
       };
       const axisSource = (solver as GPUSolverInstance).adaptiveFaceMirrorSource;
       if (!audited.powerFaceControl || !audited.powerFaceTransferControl || !audited.powerFaceSeedControl || !audited.powerOperatorControl
@@ -2731,11 +2941,15 @@ async function runGPU(
           + `ready=${solver.info.powerDiagramReady} authoritative=${solver.info.powerDiagramAuthoritative} `
           + `fallback=${solver.info.powerDiagramFallbackReason ?? "none"}`);
       }
-      const [faceBytes, transferBytes, seedBytes, operatorBytes, descriptorBytes, topologyBytes, axisBytes,
-        coarsePhiBytes, powerVelocityBytes] = await Promise.all([
+      const [faceBytes, transferBytes, seedBytes, advectionBytes, solidBytes, operatorBytes,
+        descriptorBytes, topologyBytes, axisBytes, coarsePhiBytes, powerVelocityBytes] = await Promise.all([
         readBufferBinding(device, { buffer: audited.powerFaceControl }, 64),
         readBufferBinding(device, { buffer: audited.powerFaceTransferControl }, 32),
         readBufferBinding(device, { buffer: audited.powerFaceSeedControl }, 64),
+        audited.powerFaceAdvectionControl
+          ? readBufferBinding(device, { buffer: audited.powerFaceAdvectionControl }, 64) : Promise.resolve(undefined),
+        audited.powerSolidFaceControl
+          ? readBufferBinding(device, { buffer: audited.powerSolidFaceControl }, 64) : Promise.resolve(undefined),
         readBufferBinding(device, { buffer: audited.powerOperatorControl }, 64),
         readBufferBinding(device, { buffer: audited.powerDescriptorControl }, 32),
         readBufferBinding(device, { buffer: audited.powerTopologyControl }, 32),
@@ -2750,6 +2964,9 @@ async function runGPU(
       const face = new Uint32Array(faceBytes.buffer, faceBytes.byteOffset, 16);
       const transfer = new Uint32Array(transferBytes.buffer, transferBytes.byteOffset, 8);
       const seed = new Uint32Array(seedBytes.buffer, seedBytes.byteOffset, 16);
+      const advection = advectionBytes
+        ? new Uint32Array(advectionBytes.buffer, advectionBytes.byteOffset, 16) : undefined;
+      const solid = solidBytes ? new Uint32Array(solidBytes.buffer, solidBytes.byteOffset, 16) : undefined;
       const operator = new Uint32Array(operatorBytes.buffer, operatorBytes.byteOffset, 16);
       const mgpcgBytes = audited.mgpcgControl
         ? await readBufferBinding(device, { buffer: audited.mgpcgControl }, 64) : undefined;
@@ -2780,6 +2997,22 @@ async function runGPU(
         transfer: { previousFaceCount: transfer[0], valid: transfer[1] === 0x8000_0000,
           flags: transfer[2], generation: transfer[3], exactFaces: transfer[4], fallbackFaces: transfer[5],
           maximumFaceSpeed: floatBits(transfer[6]), sourceFlags: transfer[7] },
+        oldMeshAdvection: advection ? { flags: advection[0], firstError: advection[1], oldRowCount: advection[2],
+          advectedFaces: advection[3], generation: advection[4], oldGeneration: advection[5],
+          valid: advection[6] === 0x8000_0000, coldFallback: advection[7] !== 0, targetFaceCount: advection[8],
+          attemptFlags: advection[9], attemptFirstError: advection[10], attemptAdvectedFaces: advection[11],
+          attemptValid: advection[12] === 0x8000_0000,
+          firstInterpolationStage: advection[13] === 0xffff_ffff ? undefined : advection[13] & 3,
+          firstInterpolationFace: advection[13] === 0xffff_ffff ? undefined : Math.floor(advection[13] / 4),
+          firstInterpolationReason: advection[14] === 0xffff_ffff ? undefined : advection[14] & 15,
+          firstInterpolationReasonFace: advection[14] === 0xffff_ffff ? undefined : Math.floor(advection[14] / 16),
+          retainedBandFailureReason: advection[15] === 0xffff_ffff ? undefined : advection[15] & 0xff,
+          retainedBandFailureAnchor: advection[15] === 0xffff_ffff ? undefined : advection[15] >>> 8 }
+          : undefined,
+        solidFaces: solid ? { flags: solid[0], processedFaces: solid[1], cutFaces: solid[2],
+          occupiedSamples: solid[3], faceCount: solid[4], rigidBodyCount: solid[5], terrainEnabled: solid[6] !== 0,
+          valid: solid[7] === 0x8000_0000, vertexGeneration: solid[14], rollbackGeneration: solid[15] }
+          : undefined,
         velocityStages: { axisRowInputMaximum: floatBits(seed[9]), axisToPowerSeedMaximum: floatBits(seed[8]),
           projectionInputMaximum: floatBits(operator[8]), projectionOutputMaximum: floatBits(operator[9]),
           projectedRowMaximum: floatBits(seed[10]), powerToAxisOutputMaximum: floatBits(seed[11]),
@@ -3067,6 +3300,27 @@ async function runGPU(
             || audit.coarsePhi.advected !== audit.coarsePhi.rowCount))
         || audit.faces.generation <= previousAuditedPowerGeneration;
       if (failure) {
+        let oldMeshFailure: unknown;
+        const oldMeshFace = audit.oldMeshAdvection?.firstInterpolationFace;
+        if (oldMeshFace !== undefined && audited.powerFaceSource
+          && oldMeshFace < audit.faces.faceCount) {
+          const [recordBytes, normalBytes, centroidBytes] = await Promise.all([
+            readBufferBinding(device, { buffer: audited.powerFaceSource.faces,
+              offset: oldMeshFace * 32, size: 32 }, 32),
+            readBufferBinding(device, { buffer: audited.powerFaceSource.faceNormals,
+              offset: oldMeshFace * 16, size: 16 }, 16),
+            readBufferBinding(device, { buffer: audited.powerFaceSource.faceCentroids,
+              offset: oldMeshFace * 16, size: 16 }, 16),
+          ]);
+          const recordWords = new Uint32Array(recordBytes.buffer, recordBytes.byteOffset, 8);
+          const recordFloats = new Float32Array(recordBytes.buffer, recordBytes.byteOffset, 8);
+          oldMeshFailure = { face: oldMeshFace, stage: audit.oldMeshAdvection?.firstInterpolationStage,
+            negativeRow: recordWords[0], positiveRow: recordWords[1], geometryCode: recordWords[2],
+            flags: recordWords[3], normalVelocity: recordFloats[4], area: recordFloats[5],
+            inverseDistance: recordFloats[6], openFraction: recordFloats[7],
+            normal: Array.from(new Float32Array(normalBytes.buffer, normalBytes.byteOffset, 4)),
+            centroid: Array.from(new Float32Array(centroidBytes.buffer, centroidBytes.byteOffset, 4)) };
+        }
         let duplicateSite: { slot: number; cellPlusOne?: number; size?: number; row?: number; published?: number;
           firstInvalidRow: number; firstInvalidHeader?: { cell: number; size: number };
           matchingHeaderRows: number[] } | undefined;
@@ -3080,6 +3334,15 @@ async function runGPU(
           && audit.coarsePhi.firstError < audit.coarsePhi.rowCount
           && coarseFailureReader.readPowerCoarseFailureRow
           ? await coarseFailureReader.readPowerCoarseFailureRow(audit.coarsePhi.firstError)
+          : undefined;
+        const bandFailureReader = solver as GPUSolverInstance & {
+          readGlobalFineBandRowFailure?: (row: number) => Promise<unknown>;
+        };
+        const retainedBandFailure = audit.oldMeshAdvection?.retainedBandFailureAnchor !== undefined
+          && audit.oldMeshAdvection.retainedBandFailureAnchor < 0xffff_ffff
+          && bandFailureReader.readGlobalFineBandRowFailure
+          ? await bandFailureReader.readGlobalFineBandRowFailure(
+            audit.oldMeshAdvection.retainedBandFailureAnchor)
           : undefined;
         const slot = audit.faces.firstInvalidSlot;
         // firstInvalid is the ordered failure key. pad3 is detail storage used
@@ -3173,6 +3436,28 @@ async function runGPU(
                     inverseDistance: raw[11] / size_m,
                   },
                 };
+                const sampledFine = audited.powerBoundaryFineLevelSetSource;
+                if (sampledFine) {
+                  const reconstructed = invalidGeometry.reconstructed as {
+                    neighborCenter: [number, number, number];
+                  };
+                  const liquidCenter = center as [number, number, number];
+                  const airCenter = reconstructed.neighborCenter;
+                  const probeKeys = [...new Set([
+                    ...fineTrilinearBrickKeysAtPosition(sampledFine, liquidCenter),
+                    ...fineTrilinearBrickKeysAtPosition(sampledFine, airCenter),
+                  ])];
+                  const sampledFineDiagnostics = await readGlobalFineGenerationDiagnostics(
+                    device, solver, probeKeys, sampledFine,
+                  );
+                  invalidGeometry.sampledFine = sampledFineDiagnostics ? {
+                    generation: sampledFineDiagnostics.generation,
+                    generationSlot: sampledFineDiagnostics.generationSlot,
+                    publicationValid: sampledFineDiagnostics.publicationValid,
+                    liquidCenter, airCenter, probeKeys,
+                    pages: sampledFineDiagnostics.probedPages,
+                  } : undefined;
+                }
                 if (audited.globalFineSummaryDirectory) {
                   const summaryBytes = await readBufferBinding(device,
                     { buffer: audited.globalFineSummaryDirectory }, audited.globalFineSummaryDirectory.size);
@@ -3327,8 +3612,15 @@ async function runGPU(
         // low-level diagnosis, but Dawn may not silently classify a UI-visible
         // rejection differently.
         const uiFailure = viewportFailureIndicator({ ...await solver.readStats() }, undefined, scene);
-        throw new Error(`power generation audit failed at step ${steps}: ${JSON.stringify({ uiFailure, ...audit, coarsePhiFailure, duplicateSite, invalidGeometry, reciprocalFace, axisIncidence,
+        throw new Error(`power generation audit failed at step ${steps}: ${JSON.stringify({ uiFailure, ...audit, oldMeshFailure, retainedBandFailure, coarsePhiFailure, duplicateSite, invalidGeometry, reciprocalFace, axisIncidence,
           diagnosticBuffers: { siteIndex: Boolean(siteIndex), siteIndexSize: siteIndex?.size, leafHeaders: Boolean(leafHeaders) } })}`);
+      }
+      // Retain the first cross-scale generation only to diagnose when a live
+      // topology was lost. Aanjaneya et al. has no Section 6.4 smoothing rule,
+      // and this historical record cannot satisfy final-state acceptance.
+      if (scenarioId === "minimal-power-dam-break" && !powerTransitionWitness) {
+        powerTransitionWitness = await readPowerTransitionWitness(device, solver, steps,
+          audit.faces.generation, audit.faces.rowCount, audit.faces.faceCount);
       }
       previousAuditedPowerGeneration = audit.faces.generation;
       powerGenerationAuditedSteps += 1;
@@ -3527,6 +3819,23 @@ async function runGPU(
       ? await readTallVelocityTexture3D(device, velocityTexture, info.nx, info.storedNy, info.nz, info.ny, await readFloatTexture2D(device, solver.columnBaseTexture, info.nx, info.nz), final.field, finalSpacing, scene.numerics.maxDt_s)
       : await readVelocityTexture3D(device, velocityTexture, info.nx, info.ny, info.nz, final.field, finalSpacing, scene.numerics.maxDt_s))
     : undefined;
+  let velocityParityField: Float32Array | undefined;
+  let compactVelocityRaster: GPUSmokeResult["compactVelocityRaster"];
+  if (scenarioId === "dam-break-ui" && final) {
+    if (method.id === "tall-cell" && velocityTexture && info.gridKind === "restricted-tall-cell") {
+      const bases = await readFloatTexture2D(device, solver.columnBaseTexture, info.nx, info.nz);
+      velocityParityField = await readTallVelocityField3D(
+        device, velocityTexture, info.nx, info.storedNy, info.nz, info.ny, bases,
+      );
+    } else if (method.id === "octree") {
+      const compact = await readCompactOctreeVelocityField3D(device, solver, [info.nx, info.ny, info.nz]);
+      if (compact) {
+        const { field, ...evidence } = compact;
+        velocityParityField = field;
+        compactVelocityRaster = evidence;
+      }
+    }
+  }
   const hybridPresentationStats = sparseStatsRequested && method.id === "octree"
     ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies)
     : undefined;
@@ -3701,7 +4010,8 @@ async function runGPU(
     finalSummary: final?.summary, finalTallCellActivity: final?.tallCellActivity,
     finalTallVolumeGaps: final?.tallVolumeGaps, validationErrors,
     construction_ms, runtime_ms: performance.now() - runStarted, simulationWall_ms, steps,
-    powerGenerationAuditedSteps, velocitySummary,
+    powerGenerationAuditedSteps, powerTransitionWitness, velocitySummary,
+    velocityParityField, velocityParityVolume: final?.field, compactVelocityRaster,
     initialFluidBrickStats, sparseVoxelStats, hybridPresentationStats,
     initialGlobalFineGeneration, initialGlobalFineRaster, finalGlobalFineGeneration, finalGlobalFineRaster,
     octreeFaceMirrorDiagnostics,
@@ -3736,6 +4046,18 @@ function runMatchedCPUOracle(scenarioId: SmokeScenarioId, grid: [number, number,
     diagnostics: solver.diagnostics, fieldStats: summary
   }));
   return { field, summary, diagnostics: solver.diagnostics };
+}
+
+function damBreakVelocityParityMetrics(results: GPUSmokeResult[]): VelocityParityMetrics | undefined {
+  const octree = results.find((result) => result.method === "octree");
+  const tall = results.find((result) => result.method === "tall-cell");
+  if (!octree || !tall || !octree.grid.every((value, axis) => value === tall.grid[axis])
+    || !octree.velocityParityField || !tall.velocityParityField
+    || !octree.velocityParityVolume || !tall.velocityParityVolume) return undefined;
+  return compareVelocityFields(
+    octree.velocityParityField, tall.velocityParityField,
+    octree.velocityParityVolume, tall.velocityParityVolume,
+  );
 }
 
 function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[]) {
@@ -3791,8 +4113,10 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       }
     }
     if (minimumPeakSpeed_m_s !== undefined) {
-      fail((result.stabilityEnvelope?.peakLiquidSpeed_m_s ?? 0) >= minimumPeakSpeed_m_s,
-        `${result.method} peak sampled motion speed ${result.stabilityEnvelope?.peakLiquidSpeed_m_s ?? "unknown"} m/s is below ${minimumPeakSpeed_m_s} m/s`);
+      const observedMotionSpeed_m_s = result.stabilityEnvelope?.peakLiquidSpeed_m_s
+        ?? result.powerProjectionDiagnostics?.maximumSpeed_m_s ?? result.info.maxSpeed_m_s ?? 0;
+      fail(observedMotionSpeed_m_s >= minimumPeakSpeed_m_s,
+        `${result.method} observed motion speed ${observedMotionSpeed_m_s} m/s is below ${minimumPeakSpeed_m_s} m/s`);
     }
     fail(result.validationErrors.length === 0, `${result.method} WebGPU validation errors: ${result.validationErrors.join("; ")}`);
     fail((result.info.nonFiniteCount ?? 0) === 0, `${result.method} reported ${result.info.nonFiniteCount} non-finite values`);
@@ -3987,8 +4311,8 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       fail((envelope?.peakLiquidSpeed_m_s ?? Infinity) <= 5, `quadtree dam-break peak liquid speed ${envelope?.peakLiquidSpeed_m_s} m/s exceeds 5 m/s`);
       fail((envelope?.peakComponentCfl ?? Infinity) <= 1, `quadtree dam-break peak CFL ${envelope?.peakComponentCfl} exceeds one cell`);
       fail((envelope?.maximumProjectionEnergyRatio ?? Infinity) <= 1.1, `quadtree pressure projection amplified kinetic energy by ${envelope?.maximumProjectionEnergyRatio}`);
-      // Results Sec. 5: every paper example uses ICCG with relative residual
-      // 1e-4. A topology transition is not allowed to weaken that criterion.
+      // The 1e-4 relative-residual limit is this regression's float32 QA
+      // policy. A topology transition is not allowed to weaken it.
       fail((envelope?.maximumPressureRelativeResidual ?? Infinity) <= 1e-4, `quadtree dam-break pressure residual peaked at ${envelope?.maximumPressureRelativeResidual}`);
       fail((envelope?.maximumExactVolumeDrift ?? Infinity) <= 0.02, `quadtree dam-break level-set volume drift peaked at ${envelope?.maximumExactVolumeDrift}`);
       fail((quadtree.info.compressionRatio ?? Infinity) <= 0.25, `quadtree dam-break compression ratio ${quadtree.info.compressionRatio} exceeds the 0.25 adaptivity budget`);
@@ -4038,7 +4362,7 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       fail(octree.info.pressureSolver?.includes("Section 4.3 hybrid") === true,
         `octree authoritative power projection selected the wrong pressure solver: ${octree.info.pressureSolver ?? "unknown"}`);
       fail(octreeMGPCGDiagnosticsAreAcceptable(octree.octreeMGPCGDiagnostics),
-        `octree authoritative Section 4.3 MGPCG did not converge to relative residual 1e-4: ${JSON.stringify(octree.octreeMGPCGDiagnostics)}`);
+        `octree authoritative Section 4.3 MGPCG missed the float32 QA relative-residual limit 1e-4: ${JSON.stringify(octree.octreeMGPCGDiagnostics)}`);
     }
     if (octreeGlobalFineFactorOverride === "4" || octreeGlobalFineFactorOverride === "8") {
       const expectedFactor = Number(octreeGlobalFineFactorOverride);
@@ -4065,16 +4389,26 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       fail(!!power, "power projection diagnostics were not published");
       const sizes = power?.leafSizeHistogram ?? {};
       const expectedLeafSizes = ["1", "2"];
-      fail(expectedLeafSizes.every((size) => (sizes[size] ?? 0) > 0),
-        `power grid did not contain every expected liquid leaf size ${expectedLeafSizes.join(",")}: ${JSON.stringify(sizes)}`);
+      const dynamicTransitionWitness = scenarioId === "minimal-power-dam-break"
+        ? octree.powerTransitionWitness : undefined;
+      const requireTransitionWitness = scenarioId !== "minimal-power-dam-break" || powerGenerationAuditRequested;
+      if (requireTransitionWitness) {
+        fail(expectedLeafSizes.every((size) => (sizes[size] ?? 0) > 0),
+          `power run did not contain every expected liquid leaf size ${expectedLeafSizes.join(",")}: ${JSON.stringify({ final: sizes, witness: dynamicTransitionWitness })}`);
+      }
       fail(Object.keys(sizes).every((size) => expectedLeafSizes.includes(size)),
         `power grid contained an unexpected leaf size: ${JSON.stringify(sizes)}`);
-      fail((power?.transitionFaceCount ?? 0) > 0,
-        "power grid did not publish a cross-scale generalized face");
-      fail((power?.obliqueTransitionFaceCount ?? 0) > 0,
-        "power grid did not publish an oblique cross-scale power face");
-      fail((power?.maximumTransitionSizeRatio ?? Infinity) <= 2,
-        `power grid transition size ratio ${power?.maximumTransitionSizeRatio} exceeds 2:1`);
+      const transitionFaceCount = power?.transitionFaceCount ?? 0;
+      const obliqueTransitionFaceCount = power?.obliqueTransitionFaceCount ?? 0;
+      const maximumTransitionSizeRatio = power?.maximumTransitionSizeRatio ?? Infinity;
+      if (requireTransitionWitness) {
+        fail(transitionFaceCount > 0,
+          "power run did not publish a cross-scale generalized face");
+        fail(obliqueTransitionFaceCount > 0,
+          "power run did not publish an oblique cross-scale power face");
+      }
+      fail(maximumTransitionSizeRatio <= 2,
+        `power grid transition size ratio ${maximumTransitionSizeRatio} exceeds 2:1`);
       fail((octree.info.quadtreeMaximumNeighborRatio ?? Infinity) <= 2,
         `hydrostatic octree violated 2:1 balance: ${octree.info.quadtreeMaximumNeighborRatio}`);
       if (!coarseOnlyOctreeRequested) {
@@ -4146,12 +4480,13 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         powerGeneration: octree.info.globalFineFaceBandPowerGeneration,
       })}`);
       }
+      const transitionRowCount = power?.topology.transitionRowCount ?? 0;
+      const transitionTetrahedronCount = power?.topology.transitionTetrahedronCount ?? 0;
       fail(power?.topology.invalidRowCount === 0
         && power.topology.validRowCount === power.rowCount
         && power.topology.rowsWithTetrahedra === power.rowCount
-        && power.topology.transitionRowCount > 0
-        && power.topology.transitionTetrahedronCount > 0,
-      `live Delaunay topology is incomplete: ${JSON.stringify(power?.topology)}`);
+        && (!requireTransitionWitness || (transitionRowCount > 0 && transitionTetrahedronCount > 0)),
+      `live Delaunay topology is incomplete: ${JSON.stringify({ final: power?.topology, witness: dynamicTransitionWitness })}`);
       fail(power?.geometry.invalidFaceCount === 0
         && power.geometry.maximumNormalLengthError <= 2e-4,
       `power-face geometry is invalid: ${JSON.stringify(power?.geometry)}`);
@@ -4210,27 +4545,38 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
           `hydrostatic rest volume drift ${power?.volumeDrift} exceeds 1e-4`);
       } else if (scenarioId === "minimal-power-dam-break") {
         const dt_s = power?.pressurePotential.dt_s ?? Infinity;
+        const envelope = octree.stabilityEnvelope;
         const finestCellSize_m = createSmokeScenario(scenarioId).scene.voxelDomain?.finestCellSize_m ?? 0;
         const powerCfl = (power?.maximumSpeed_m_s ?? Infinity) * dt_s / finestCellSize_m;
         fail(Number.isFinite(power?.maximumSpeed_m_s) && (power?.maximumSpeed_m_s ?? 0) > 1e-3,
           `minimal dam release is frozen: authoritative power speed ${power?.maximumSpeed_m_s} m/s`);
         fail(Number.isFinite(powerCfl) && powerCfl > 0 && powerCfl <= 1,
           `minimal dam authoritative power CFL ${powerCfl} is outside (0, 1]`);
-        fail((power?.maximumDivergence_s ?? Infinity) * dt_s <= 0.012,
-          `minimal dam per-step power-cell divergence ${(power?.maximumDivergence_s ?? Infinity) * dt_s} exceeds 0.012`);
+        // Paper Eq. (3) is the variational residual [grad]^T[V A][F grad]p
+        // - [grad]^T[V A]u*. The legacy full-cell divergence reduction omits
+        // those face-volume, open-area, and liquid-fraction weights and is not
+        // a valid incompressibility gate for moving free-surface cut cells.
+        if (powerGenerationAuditRequested) {
+          fail((envelope?.maximumProjectedVariationalResidual ?? Infinity) <= 1e-6,
+            `minimal dam Eq. (3)-form projected residual ${envelope?.maximumProjectedVariationalResidual} exceeds the 1e-6 QA gate`);
+        }
         fail(Math.abs(power?.volumeDrift ?? Infinity) <= 0.01,
           `minimal dam final compact volume drift ${power?.volumeDrift} exceeds 1%`);
-        const envelope = octree.stabilityEnvelope;
-        if (!coarseOnlyOctreeRequested) {
-          fail((envelope?.maximumExactVolumeDrift ?? Infinity) <= 0.01,
-            `minimal dam transient exact-volume drift ${envelope?.maximumExactVolumeDrift} exceeds 1%`);
+        // The UI-parity motion smoke deliberately performs no per-step field
+        // readbacks. Apply transient gates only when their envelope was
+        // requested; the exhaustive Dawn command above requests and checks it.
+        if (envelope) {
+          if (!coarseOnlyOctreeRequested) {
+            fail(envelope.maximumExactVolumeDrift <= 0.01,
+              `minimal dam transient exact-volume drift ${envelope.maximumExactVolumeDrift} exceeds 1%`);
+          }
+          fail(envelope.maximumComponentCount === 1
+            && envelope.minimumDominantComponentFraction >= 0.98,
+          `minimal dam liquid disconnected: ${JSON.stringify({
+            maximumComponentCount: envelope.maximumComponentCount,
+            minimumDominantComponentFraction: envelope.minimumDominantComponentFraction,
+          })}`);
         }
-        fail((envelope?.maximumComponentCount ?? Infinity) === 1
-          && (envelope?.minimumDominantComponentFraction ?? -Infinity) >= 0.98,
-        `minimal dam liquid disconnected: ${JSON.stringify({
-          maximumComponentCount: envelope?.maximumComponentCount,
-          minimumDominantComponentFraction: envelope?.minimumDominantComponentFraction,
-        })}`);
         if (!coarseOnlyOctreeRequested) {
           const generation = octree.finalGlobalFineGeneration;
           fail(generation?.transportCommitted === true
@@ -4260,7 +4606,7 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
     if (globalFineGenerationTransitionRequested) {
       const container = createSmokeScenario(scenarioId).scene.container;
       const assertAuthoritativeRaster = (label: string, publishedGeneration: number | undefined,
-        observed: HybridPresentationSmokeStats | undefined) => {
+        observed: HybridPresentationSmokeStats | undefined, requireInitialDamCornerCaps = false) => {
         const bounds = observed?.frontInterfaceBounds_m;
         const boundsFinite = bounds !== undefined && bounds.flat(2).every(Number.isFinite);
         const tolerance = Math.max(container.width_m, container.height_m, container.depth_m) * 1e-4;
@@ -4288,6 +4634,11 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
             `${label} contains narrow vertical surface slits: ${JSON.stringify(observed?.narrowVerticalSlits)}`);
           fail(reverse?.narrowVerticalSlits.count === 0,
             `${label} reverse view contains narrow vertical surface slits: ${JSON.stringify(reverse?.narrowVerticalSlits)}`);
+          if (requireInitialDamCornerCaps) fail((reverse?.wallCornerCapPixels?.[0] ?? 0) >= 8,
+            `${label} has a chamfered -x/-z reservoir corner instead of two wall-owned caps: ${JSON.stringify(reverse?.wallCornerCapPixels)}`);
+          if (requireInitialDamCornerCaps) fail((observed?.damExposedCornerCapPixels?.[0] ?? 0) >= 4
+            && (observed?.damExposedCornerCapPixels?.[1] ?? 0) >= 4,
+          `${label} is missing one or both exposed +x/+z dam-corner faces: ${JSON.stringify(observed?.damExposedCornerCapPixels)}`);
         }
         fail(observed?.surfaceGeometrySource === "global-fine-coarse"
           && observed.globalFineCrossingPublished === true
@@ -4314,7 +4665,8 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       const initialGeneration = octree.initialGlobalFineGeneration;
       fail(initialGeneration?.publicationValid === true && (initialGeneration.generation ?? 0) > 0,
         `octree t=0 global-fine generation is not published: ${JSON.stringify(initialGeneration)}`);
-      assertAuthoritativeRaster("octree t=0 raster", initialGeneration?.generation, octree.initialGlobalFineRaster);
+      assertAuthoritativeRaster("octree t=0 raster", initialGeneration?.generation, octree.initialGlobalFineRaster,
+        scenarioId === "minimal-power-dam-break");
       const generation = octree.finalGlobalFineGeneration;
       const raster = octree.finalGlobalFineRaster;
       fail(generation?.publicationValid === true && (generation.generation ?? 0) > 0 && (generation.activePages ?? 0) > 0,
@@ -4427,6 +4779,22 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
           const peakRatio = octreePeak / Math.max(tallPeak, 1e-9);
           fail(Number.isFinite(peakRatio) && peakRatio >= 0.5 && peakRatio <= 2,
             `octree authoritative power peak-speed ratio ${peakRatio} (${octreePeak} / ${tallPeak} m/s) is outside [0.5, 2] versus tall-cell`);
+        }
+        const compactVelocity = octree.compactVelocityRaster;
+        const cubicCellCount = octree.grid[0] * octree.grid[1] * octree.grid[2];
+        fail(!!octree.velocityParityField && !!octree.velocityParityVolume,
+          "octree did not publish its final compact power-cell velocity parity readback");
+        fail(!!tall.velocityParityField && !!tall.velocityParityVolume,
+          "tall-cell did not publish its final collocated velocity parity readback");
+        fail(compactVelocity?.publicationValid === true,
+          `octree compact velocity publication was invalid: ${JSON.stringify(compactVelocity)}`);
+        fail(compactVelocity?.coveredCells === cubicCellCount && compactVelocity.overlapCells === 0
+          && compactVelocity.invalidRows === 0,
+        `octree compact velocity raster did not form a clean ${cubicCellCount}-cell partition: ${JSON.stringify(compactVelocity)}`);
+        const velocityMetrics = damBreakVelocityParityMetrics(results);
+        fail(velocityMetrics !== undefined, "octree/tall-cell final velocity parity metrics were unavailable");
+        if (velocityMetrics) for (const failure of velocityParityFailures(velocityMetrics)) {
+          fail(false, `octree/tall-cell ${failure} failed declared limits ${JSON.stringify(DAM_BREAK_VELOCITY_PARITY_LIMITS)}; metrics ${JSON.stringify(velocityMetrics)}`);
         }
         const finalComparison = compareScalarFields(
           octree.finalSummary ? octree.checkpoints.at(-1)?.field ?? octree.matchedField : octree.matchedField,
@@ -4578,6 +4946,22 @@ try {
     }
     const results: GPUSmokeResult[] = [];
     for (const method of methods) results.push(await runGPU(scenarioId, method, target_s, oracleSteps));
+    const velocityParity = scenarioId === "dam-break-ui" ? damBreakVelocityParityMetrics(results) : undefined;
+    const velocityParityOctree = results.find((result) => result.method === "octree");
+    const velocityParityTall = results.find((result) => result.method === "tall-cell");
+    if (scenarioId === "dam-break-ui" && velocityParityOctree && velocityParityTall
+      && velocityParityOctree.grid.every((value, axis) => value === velocityParityTall.grid[axis])) {
+      console.log(JSON.stringify({
+        scenario: scenarioId,
+        phase: "velocity-parity",
+        candidate: "octree",
+        reference: "tall-cell",
+        metrics: velocityParity,
+        limits: DAM_BREAK_VELOCITY_PARITY_LIMITS,
+        failures: velocityParity ? velocityParityFailures(velocityParity) : ["velocity parity readback unavailable"],
+        compactRaster: velocityParityOctree.compactVelocityRaster,
+      }));
+    }
     if (!performanceProfileRequested) failures.push(...invariantFailures(scenarioId, results));
 
     const tallResult = results.find((result) => result.method === "tall-cell"), uniformResult = results.find((result) => result.method === (singleTallCellProbe ? "tall-cell-control" : "uniform"));

@@ -18,6 +18,7 @@ import {
   surfaceExtractionDispatchPlan,
   surfaceExtractionRepresentation,
   surfaceExtractionShader,
+  surfaceRasterShader,
   surfaceVertexCapacity,
   WATER_SPARSE_FALLBACK_BYTES,
   WATER_INTERFACE_CULL_MODES
@@ -44,6 +45,16 @@ test("the optical composite locally refines rigid contacts and terminates water 
 
 test("outward water triangles preserve camera-entry interfaces after framebuffer Y inversion", () => {
   assert.deepEqual(WATER_INTERFACE_CULL_MODES, { front: "back", back: "front" });
+});
+
+test("front interface rasterization conservatively covers shared liquid-wall silhouettes", () => {
+  assert.match(surfaceRasterShader, /override interfaceCoverageExpansionPixels:f32=0\.0/);
+  assert.match(surfaceRasterShader, /first=index-index%3u/,
+    "coverage expansion must use each triangle centroid, not move the physical mesh");
+  const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
+  assert.match(source, /surfaceFrontPipeline\s*=.*WATER_INTERFACE_CULL_MODES\.front,0\.75/);
+  assert.match(source, /surfaceBackPipeline\s*=.*WATER_INTERFACE_CULL_MODES\.back\)\)/,
+    "back coverage remains exact so the back-without-front smoke gate still detects holes");
 });
 
 test("surface extraction follows the fixed presentation cadence", () => {

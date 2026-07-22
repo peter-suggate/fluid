@@ -5,14 +5,42 @@ import {
   OCTREE_SECTION43_BOUNDARY_BAND_LAYERS,
   OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS,
   OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS,
+  OCTREE_SECTION43_SMALL_DOMAIN_MAXIMUM_CELLS,
+  OCTREE_SECTION43_SMALL_DOMAIN_PCG_ITERATIONS,
   WebGPUOctreeMGPCG,
   octreeMGPCGShader,
   normalizeOctreeSection43BoundarySmoothing,
   normalizeOctreeSection43IterationCap,
+  octreeSection43RecordedIterationCap,
   planOctreeMGPCG,
 } from "../lib/webgpu-octree-mgpcg";
 import { octreePowerOperatorShader } from "../lib/webgpu-octree-power-operator";
 import { WebGPUOctreeProjection } from "../lib/webgpu-octree";
+import { solveSPGridBottomLDLT } from "../lib/webgpu-octree-spgrid-vcycle";
+
+const dot = (left: readonly number[], right: readonly number[]) =>
+  left.reduce((sum, value, row) => sum + value * right[row], 0);
+const multiply = (matrix: readonly (readonly number[])[], vector: readonly number[]) =>
+  matrix.map((row) => dot(row, vector));
+
+/** CPU transcription of Section 4.3 steps 1--3. This is intentionally an
+ * algebra oracle rather than another production preconditioner. */
+function applySection43Oracle(l2: readonly (readonly number[])[], l1: readonly (readonly number[])[],
+  band: readonly boolean[], rhs: readonly number[], iterations = 8, omega = 2 / 3): number[] {
+  const pressure = new Array<number>(rhs.length).fill(0);
+  const smooth = () => {
+    const product = multiply(l2, pressure);
+    for (let row = 0; row < pressure.length; row += 1) {
+      if (band[row]) pressure[row] += omega * (rhs[row] - product[row]) / l2[row][row];
+    }
+  };
+  for (let iteration = 0; iteration < iterations; iteration += 1) smooth();
+  const residual = multiply(l2, pressure).map((value, row) => rhs[row] - value);
+  const correction = solveSPGridBottomLDLT(l1, residual);
+  for (let row = 0; row < pressure.length; row += 1) pressure[row] += correction[row];
+  for (let iteration = 0; iteration < iterations; iteration += 1) smooth();
+  return pressure;
+}
 
 test("Section 4.3 MGPCG allocation is bounded by compact rows", () => {
   const small = planOctreeMGPCG({ dimensions: [64, 48, 32], rowCapacity: 10_000 });
@@ -42,12 +70,26 @@ test("Section 4.3 hybrid has a three-layer band and symmetry-locked paired L2 sm
   assert.equal(normalizeOctreeSection43IterationCap(undefined), 128);
   assert.equal(normalizeOctreeSection43IterationCap(7), 8);
   assert.equal(normalizeOctreeSection43IterationCap(400), 128);
+  assert.equal(OCTREE_SECTION43_SMALL_DOMAIN_MAXIMUM_CELLS, 16 ** 3);
+  assert.equal(OCTREE_SECTION43_SMALL_DOMAIN_PCG_ITERATIONS, 32);
+  assert.equal(octreeSection43RecordedIterationCap(128, 16 ** 3), 32,
+    "the mini domain must not encode ninety-six known-empty PCG iterations");
+  assert.equal(octreeSection43RecordedIterationCap(16, 16 ** 3), 16,
+    "an explicitly tighter small-domain cap remains authoritative");
+  assert.equal(octreeSection43RecordedIterationCap(128, 16 ** 3 + 1), 128,
+    "larger domains retain the fail-closed recorded tail");
+  assert.throws(() => octreeSection43RecordedIterationCap(128, 0), /positive integer/);
   assert.equal(normalizeOctreeSection43BoundarySmoothing(undefined), 8);
   assert.equal(normalizeOctreeSection43BoundarySmoothing(1), 2);
   assert.equal(normalizeOctreeSection43BoundarySmoothing(7), 8,
     "odd inputs must round to an even ping/pong schedule");
   assert.equal(normalizeOctreeSection43BoundarySmoothing(32), 16);
   assert.match(octreeMGPCGShader, /boundaryGap=h\.diagonal-offDiagonalSum/);
+  assert.match(octreeMGPCGShader, /\(h\.pad0&ROW_BOUNDARY\)!=0u\|\|boundaryGap/,
+    "closed and cut solid rows must enter the paper's boundary smoother even without a Dirichlet gap");
+  assert.match(octreePowerOperatorShader,
+    /\(face\.flags&\(BOUNDARY\|OPEN_BOUNDARY\)\)!=0u\|\|face\.openFraction<1\.0[\s\S]*arena\[base\+3u\]=rowFlags/,
+    "authoritative face assembly must publish explicit boundary incidence for MGPCG");
   assert.match(octreeMGPCGShader, /headers\[e\.row\]\.size!=h\.size/);
   assert.match(octreeMGPCGShader, /dilateHybridBandAtoB/);
   assert.match(octreeMGPCGShader, /dilateHybridBandBtoA/);
@@ -58,6 +100,31 @@ test("Section 4.3 hybrid has a three-layer band and symmetry-locked paired L2 sm
   assert.match(source, /boundarySmoothingIterations/);
   assert.match(WebGPUOctreeProjection.toString(), /3 graph-ring band approximation/,
     "the visible solver label must not describe graph dilation as an exact three-voxel paper band");
+});
+
+test("Section 4.3 Jacobi--M1--Jacobi composition is linear, symmetric, and positive", () => {
+  // Deliberately use unequal diagonals and a disconnected smoothing mask: a
+  // diagonal-only or all-domain oracle would not exercise the paper's banded
+  // L2 relaxation argument. L1 is a different SPD first-order operator.
+  const l2 = [
+    [5, -1, 0, 0, 0], [-1, 6, -2, 0, 0], [0, -2, 7, -1, 0],
+    [0, 0, -1, 5, -1], [0, 0, 0, -1, 3],
+  ];
+  const l1 = [
+    [4, -1, 0, 0, 0], [-1, 5, -1, 0, 0], [0, -1, 4, -1, 0],
+    [0, 0, -1, 4, -1], [0, 0, 0, -1, 3],
+  ];
+  const band = [true, true, false, true, false];
+  const x = [0.7, -1.3, 0.25, 2.1, -0.4], y = [-0.2, 0.9, 1.7, -0.6, 0.3];
+  const mx = applySection43Oracle(l2, l1, band, x);
+  const my = applySection43Oracle(l2, l1, band, y);
+  assert.ok(Math.abs(dot(x, my) - dot(y, mx)) < 1e-11,
+    "matching pre/post Jacobi around an SPD M1 must produce a symmetric map");
+  assert.ok(dot(x, mx) > 0 && dot(y, my) > 0,
+    "the Section 4.3 map must remain a valid positive PCG preconditioner");
+  const combined = applySection43Oracle(l2, l1, band, x.map((value, row) => value - 0.37 * y[row]));
+  assert.ok(combined.every((value, row) => Math.abs(value - mx[row] + 0.37 * my[row]) < 1e-11),
+    "the fixed hybrid schedule must be linear");
 });
 
 test("Section 4.3 tuning keeps equal pre/post sweeps, exact dispatch accounting, and one pass", () => {

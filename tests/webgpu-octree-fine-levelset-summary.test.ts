@@ -4,7 +4,8 @@ import { pathToFileURL } from "node:url";
 import { FineLevelSetBrickOracle, packFineLevelSetBrickKey, planFineLevelSetBricks } from
   "../lib/octree-fine-levelset-bricks";
 import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
-import { FINE_LEVELSET_SUMMARY_VALID, planFineLevelSetSummaryLeafLookup, WebGPUFineLevelSetSummaries } from
+import { FINE_LEVELSET_SUMMARY_CENTER_COMPLETE, FINE_LEVELSET_SUMMARY_VALID,
+  planFineLevelSetSummaryLeafLookup, WebGPUFineLevelSetSummaries } from
   "../lib/webgpu-octree-fine-levelset-summary";
 
 function findSummaryEntry(words: Uint32Array, hashCapacity: number, key: number): number | undefined {
@@ -87,7 +88,8 @@ test("Dawn publishes exact factor-4/factor-8 fine cell-centre phase in summary w
     const base = findSummaryEntry(words, summaries.plan.hashCapacity, lookup.key); assert.notEqual(base, undefined);
     assert.equal(words[base! + 4], lookup.expectedSampleCount);
     assert.equal(words[base! + 5], lookup.expectedBrickCount);
-    assert.equal(words[base! + 6], 0);
+    assert.equal(words[base! + 6] & FINE_LEVELSET_SUMMARY_CENTER_COMPLETE,
+      FINE_LEVELSET_SUMMARY_CENTER_COMPLETE);
     assert.ok(Math.abs(floats[base! + 7] - (-0.25)) < 1e-6,
       `factor ${factor} centre phi ${floats[base! + 7]}`);
     summaries.destroy(); owner.destroy(); readback.destroy();
