@@ -15,6 +15,7 @@ import { PRESENTATION_FPS } from "@/lib/frame-pacing";
 import { captureTargetForStage, gpuStageCapture, type GPUStageCaptureArtifact, type GPUStageCaptureLane } from "@/lib/gpu-stage-capture";
 
 const formatMs = (value: number, available = true, active = true) => !available ? "—" : !active ? "idle" : value > 0 ? `${value.toFixed(value < 1 ? 3 : 2)} ms` : "< timer resolution";
+const FINE_SURFACE_COMPONENT_KEYS = new Set(["fine-transport", "fine-topology", "fine-redistance"]);
 
 function CapturePreview({ artifact }: { artifact: GPUStageCaptureArtifact }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -81,11 +82,23 @@ export function PerformancePanel() {
     { key: "overlays", label: "Inspection + diagnostic overlays", shortLabel: "OVERLAYS", value: contextMatches ? snapshot.gpuOverlays_ms : 0, className: "stage-overhead", timer: "render", group: "graphics", active: snapshot.gpuOverlays_ms > 0, description: "Renders raw-voxel or brick inspection and any enabled grid, technique, or audit overlay after optical composition.", reads: ["sparse scene records", "diagnostic fields", "water color"], writes: ["annotated presentation target"], dependsOn: ["composite"] },
     { key: "upscale", label: "Final upscale", shortLabel: "UPSCALE", value: contextMatches ? snapshot.gpuUpscale_ms : 0, className: "stage-upscale", timer: "render", group: "graphics", active: true, description: "Resolves the internal render target into the presentation surface.", reads: ["water color / inspection target"], writes: ["swapchain"], dependsOn: [snapshot.gpuOverlays_ms > 0 ? "overlays" : "composite"], sync: "Presentation boundary" }
   ];
-  const gpuStages = [...physicsStages, ...adaptiveTopologyStages, ...renderStages];
   const stageTimed = (stage: PerformanceStage) => stage.timer === "physics" ? physicsTimed : stage.timer === "render" ? renderTimed : contextMatches && snapshot.adaptiveRebuildCompletedCount > 0;
   const pressureStage = physicsStages.find((stage) => stage.key === "pressure");
   const pressureObservedWall_ms = activeMethodId === "octree" ? gpuInfo?.gpuPressureSolveObservedWall_ms : undefined;
   const advancePhaseWall = activeMethodId === "octree" ? gpuInfo?.gpuAdvancePhaseWall : undefined;
+  const fineSurfaceTimestamp_ms = activeMethodId === "octree"
+    ? snapshot.gpuFineTransport_ms + snapshot.gpuFineTopology_ms + snapshot.gpuFineRedistance_ms
+    : 0;
+  // Metal can collapse the shared fine-stage timestamp boundaries to zero.
+  // Replace those unresolved component rows with the independently fenced
+  // production interval so the dominant work appears once with a real value.
+  const fineSurfaceObservedWall_ms = advancePhaseWall?.surfaceCoupling_ms;
+  const fineSurfaceNeedsWallFallback = fineSurfaceObservedWall_ms !== undefined
+    && (!physicsTimed || fineSurfaceTimestamp_ms <= 0);
+  const displayedPhysicsStages = fineSurfaceNeedsWallFallback
+    ? physicsStages.filter((stage) => !FINE_SURFACE_COMPONENT_KEYS.has(stage.key))
+    : physicsStages;
+  const gpuStages = [...displayedPhysicsStages, ...adaptiveTopologyStages, ...renderStages];
   const lastAdvance = advanceWallBreakdown(gpuInfo);
   const measuredStages = [...physicsStages, ...renderStages].filter(stageTimed);
   const cpuOther = Math.max(0, snapshot.cpuFrame_ms - snapshot.cpuPhysicsSubmit_ms - snapshot.cpuDataUpload_ms - snapshot.cpuRenderEncode_ms);
@@ -208,16 +221,17 @@ export function PerformancePanel() {
     ? pressureObservedWall_ms : stage.value;
   const stageRows = (stages: PerformanceStage[], scale = stageScale(stages)) => stages.map((stage) => <button key={stage.key} className={`perf-row${selectedStage?.key === stage.key ? " selected" : ""}`} onClick={() => setSelectedStageKey(stage.key)} title={stage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${stage.label} · ${pressureObservedWall_ms.toFixed(1)} ms isolated submission wall · GPU timestamp ${formatMs(stage.value, stageTimed(stage), stage.active)}` : `${stage.label} · ${formatMs(stage.value, stageTimed(stage), stage.active)}`}>
     <i className={stage.className} />
-    <span>{stage.key === "pressure" && pressureObservedWall_ms !== undefined ? "PRESSURE WALL" : stage.shortLabel}</span>
+    <span>{stage.key === "pressure" && pressureObservedWall_ms !== undefined ? "PRESSURE" : stage.shortLabel}</span>
     <div className="perf-row-bar">{stage.active && observedStageValue(stage) > 0 && (stageTimed(stage) || stage.key === "pressure" && pressureObservedWall_ms !== undefined) && <b className={stage.className} style={{ width: `${Math.max(1, observedStageValue(stage) / scale * 100)}%` }} />}</div>
-    <output>{stage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${pressureObservedWall_ms.toFixed(1)} ms wall` : formatMs(stage.value, stageTimed(stage), stage.active)}</output>
+    <output>{stage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${pressureObservedWall_ms.toFixed(1)} ms` : formatMs(stage.value, stageTimed(stage), stage.active)}</output>
   </button>);
   // A completion fence is the only portable observation that catches work
   // missing from timestamp ranges. Keep the residual visible while running;
   // hiding it was precisely how a 250 ms advance looked like a 0.08 ms one.
   const untimedAdvance_ms = advancePhaseWall ? 0 : lastAdvance ? Math.max(0, lastAdvance.queueFence_ms
     - (pressureObservedWall_ms ?? 0) - otherTimestampedPhysics_ms) : 0;
-  const physicsRowScale = Math.max(stageScale(physicsStages, untimedAdvance_ms), pressureObservedWall_ms ?? 0);
+  const physicsRowScale = Math.max(stageScale(displayedPhysicsStages, untimedAdvance_ms), pressureObservedWall_ms ?? 0,
+    fineSurfaceNeedsWallFallback ? fineSurfaceObservedWall_ms : 0);
   const cpuScale = Math.max(...cpuStages.map((stage) => stage.value), .01);
   const encodeScale = Math.max(...encodeStages.map((stage) => stage.value), .01);
   const physicsTimingLag_s = Math.max(0, (gpuInfo?.completedTime_s ?? snapshot.gpuPhysicsTimingSimulation_s) - snapshot.gpuPhysicsTimingSimulation_s);
@@ -251,7 +265,8 @@ export function PerformancePanel() {
         <div className="perf-budget-row">
           <span>GPU</span>
           <div className="perf-track" aria-label={`${(paused ? 0 : schedule.physicsPerFrame_ms).toFixed(2)} milliseconds physics and ${renderPerFrame_ms.toFixed(2)} milliseconds presentation against a ${budget.toFixed(2)} millisecond deadline`}>
-            {!paused && physicsStages.map((stage) => stage.active && observedStageValue(stage) > 0 && (stageTimed(stage) || stage.key === "pressure" && pressureObservedWall_ms !== undefined) && <button key={stage.key} className={`perf-flame ${stage.className}${selectedStage?.key === stage.key ? " selected" : ""}`} style={{ width: `${observedStageValue(stage) * schedule.advancesPerFrame / heroScale * 100}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${stage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${pressureObservedWall_ms.toFixed(1)} ms isolated wall` : formatMs(stage.value)} × ${schedule.advancesPerFrame.toFixed(2)} advances / frame`}><span>{stage.key === "pressure" && pressureObservedWall_ms !== undefined ? "PRESSURE WALL" : stage.shortLabel}</span></button>)}
+            {!paused && displayedPhysicsStages.map((stage) => stage.active && observedStageValue(stage) > 0 && (stageTimed(stage) || stage.key === "pressure" && pressureObservedWall_ms !== undefined) && <button key={stage.key} className={`perf-flame ${stage.className}${selectedStage?.key === stage.key ? " selected" : ""}`} style={{ width: `${observedStageValue(stage) * schedule.advancesPerFrame / heroScale * 100}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${stage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${pressureObservedWall_ms.toFixed(1)} ms isolated completion` : formatMs(stage.value)} × ${schedule.advancesPerFrame.toFixed(2)} advances / frame`}><span>{stage.key === "pressure" && pressureObservedWall_ms !== undefined ? "PRESSURE" : stage.shortLabel}</span></button>)}
+            {!paused && fineSurfaceNeedsWallFallback && <span className="perf-flame stage-surface-update" style={{ width: `${fineSurfaceObservedWall_ms * schedule.advancesPerFrame / heroScale * 100}%` }} title={`Fine surface + coupling · ${fineSurfaceObservedWall_ms.toFixed(1)} ms queue-observed completion × ${schedule.advancesPerFrame.toFixed(2)} advances / frame`}><span>FINE SURFACE</span></span>}
             {renderStages.map((stage) => stageTimed(stage) && stage.active && stage.value > 0 && <button key={stage.key} className={`perf-flame ${stage.className}${selectedStage?.key === stage.key ? " selected" : ""}`} style={{ width: `${stage.value / heroScale * 100}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value)}`}><span>{stage.shortLabel}</span></button>)}
             <b className="perf-tick" style={{ left: `${budgetTick}%` }} />
           </div>
@@ -319,16 +334,22 @@ export function PerformancePanel() {
           <dl>
             <div><dt>TOPOLOGY + ADVECT</dt><dd>{advancePhaseWall.topologyAdvection_ms.toFixed(1)} ms</dd><small>queue fence delta</small></div>
             <div><dt>PRESSURE + PROJECT</dt><dd>{advancePhaseWall.pressureProjection_ms.toFixed(1)} ms</dd><small>{pressureObservedWall_ms === undefined ? "production command stream" : `${pressureObservedWall_ms.toFixed(1)} solver replay · ${Math.max(0, advancePhaseWall.pressureProjection_ms - pressureObservedWall_ms).toFixed(1)} assembly/project`}</small></div>
-            <div><dt>SURFACE + COUPLE</dt><dd>{advancePhaseWall.surfaceCoupling_ms.toFixed(1)} ms</dd><small>queue fence delta</small></div>
+            <div data-testid="fine-surface-observed"><dt>FINE SURFACE + COUPLE</dt><dd>{advancePhaseWall.surfaceCoupling_ms.toFixed(1)} ms</dd><small>queue-observed completion · includes fine transport, topology, redistance and coupling</small></div>
             <div><dt>PUBLISH + DIAG</dt><dd>{advancePhaseWall.publicationDiagnostics_ms.toFixed(1)} ms</dd><small>queue fence delta</small></div>
           </dl>
           <p>One real production advance is split into ordered command buffers every 30 advances. Adjacent completion fences include WebGPU implementation, driver, and GPU work, so the former non-pressure residual is assigned to the phase that actually delayed the queue.</p>
         </div>}
         <div className="perf-rows">
-          {stageRows(physicsStages, physicsRowScale)}
+          {stageRows(displayedPhysicsStages, physicsRowScale)}
+          {fineSurfaceNeedsWallFallback && <div className="perf-row perf-row-observed-surface" data-testid="fine-surface-observed-row" title="Queue-observed production completion for fine level-set transport, fine narrow-band topology, redistance/publication, and coupling. Shown because the corresponding Metal timestamp subdivisions are unavailable or below timer resolution.">
+            <i className="stage-surface-update" />
+            <span>FINE SURFACE</span>
+            <div className="perf-row-bar"><b className="stage-surface-update" style={{ width: `${Math.max(1, fineSurfaceObservedWall_ms / physicsRowScale * 100)}%` }} /></div>
+            <output>{fineSurfaceObservedWall_ms.toFixed(1)} ms</output>
+          </div>}
           {untimedAdvance_ms > 0 && <div className="perf-row perf-row-untimed" title={pressureObservedWall_ms !== undefined ? "Exact production completion wall remaining after the isolated pressure wall and other hardware-timestamped work are removed. This is measured non-pressure work, but it remains unlocalized among topology, assembly, projection, surface, publication, queue scheduling, and completion callback latency." : "Submission-to-completion wall time not covered by the physics timestamp range. Portable WebGPU cannot split untimestamped commands, earlier queue work, telemetry, driver scheduling, and promise callback latency, so this is reported as unattributed rather than GPU execution."}>
             <i />
-            <span>{pressureObservedWall_ms !== undefined ? "NON-PRESSURE WALL" : "UNATTRIBUTED WALL"}</span>
+            <span>{pressureObservedWall_ms !== undefined ? "NON-PRESSURE" : "UNATTRIBUTED"}</span>
             <div className="perf-row-bar"><b style={{ width: `${Math.max(1, untimedAdvance_ms / physicsRowScale * 100)}%` }} /></div>
             <output>{untimedAdvance_ms.toFixed(1)} ms {pressureObservedWall_ms !== undefined ? "unlocalized" : "wall"}</output>
           </div>}
@@ -370,7 +391,7 @@ export function PerformancePanel() {
       <header>
         <span className={selectedStage.className} />
         <div><small>{selectedStage.group.toUpperCase()} PASS · {selectedStage.timer === "physics" ? "PHYSICS QUEUE" : selectedStage.timer === "render" ? "PRESENTATION" : "ASYNC WORKER"}</small><h2>{selectedStage.label}</h2></div>
-        <strong>{selectedStage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${pressureObservedWall_ms.toFixed(1)} ms wall` : formatMs(selectedStage.value, stageTimed(selectedStage), selectedStage.active)}</strong>
+        <strong>{selectedStage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${pressureObservedWall_ms.toFixed(1)} ms` : formatMs(selectedStage.value, stageTimed(selectedStage), selectedStage.active)}</strong>
       </header>
       <p>{selectedStage.description}</p>
       <div className="perf-io">

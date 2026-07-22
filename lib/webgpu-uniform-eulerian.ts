@@ -79,6 +79,12 @@ export function initialSparseAuthorityFencesEnabled(explicit: boolean, timestamp
 // through createComputePipelineAsync.
 const uniformPipelineCache = new WeakMap<GPUDevice, Map<UniformVelocityTransport, GPUComputePipeline[]>>();
 
+/** Queue-boundary profiling is intrusive, so sample sparsely after publishing
+ * one ordinary post-t=0 transport step. The early sample makes the dominant
+ * fine-surface wall visible before a short manual run reaches step 30. */
+const OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_STEPS = 30;
+const OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP = 2;
+
 /** Explicit capillary-wave stability bound for a finest cell. */
 export function capillaryStableDt_s(
   density_kg_m3: number,
@@ -467,6 +473,8 @@ export class WebGPUUniformEulerianSolver {
   // `committed: false` look like a real Section 5 rejection in the viewport.
   private pressureWallProbeLastStep = 0;
   private pressureWallProbeSampleId = 0;
+  private advancePhaseWallLastStep = OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP
+    - OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_STEPS;
   private advancePhaseWallSampleId = 0;
   private profiledAdvancePending = false;
   private profiledAdvanceCompletion?: Promise<void>;
@@ -1648,7 +1656,9 @@ export class WebGPUUniformEulerianSolver {
     // queries collapse below their resolution.
     const productionPhaseProbeActive = this.performanceReadbacksEnabled && Boolean(this.octreeProjection)
       && !this.pressureWallProbePending
-      && (this.info.encodedSteps ?? 0) - this.pressureWallProbeLastStep >= 30;
+      && (this.info.encodedSteps ?? 0) - this.advancePhaseWallLastStep
+        >= OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_STEPS;
+    if (productionPhaseProbeActive) this.advancePhaseWallLastStep = this.info.encodedSteps ?? 0;
     const productionQueueReadyAtPromise = productionPhaseProbeActive
       ? this.device.queue.onSubmittedWorkDone().then(() => performance.now())
       : undefined;
