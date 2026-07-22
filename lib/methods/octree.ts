@@ -6,34 +6,9 @@ import { sceneHasTerrain } from "../terrain";
 import { fencedSparseAuthorityBringupEnabled } from "../gpu-startup";
 
 const params: MethodParamSpec[] = [
-  { kind: "select", key: "powerMultigridHierarchy", label: "Pressure hierarchy", default: "aggregate-galerkin", tier: "coarse", options: [{ value: "aggregate-galerkin", label: "Current Galerkin · rollback" }, { value: "paper-pyramid", label: "Paper sparse pyramid · A/B" }], hint: "Selects only the first-order M1 V-cycle inside the same Section 4.3 PCG solve. The paper pyramid uses native active/ghost sparse-grid levels and exact-adjoint transfers; current Galerkin remains authoritative until the Dawn endurance gates pass." },
-  { kind: "number", key: "powerPcgIterationCap", label: "Experimental PCG cap", unit: "iterations", min: 8, max: 128, step: 1, digits: 0, default: 128, tier: "fine", hint: "Diagnostic limit for the currently recorded Section 4.3 schedule. Keep 128 for normal simulation: longer dam-break runs contain rare topology generations that exhaust 16 even when nearby solves converge in 7-9 iterations." },
-  { kind: "number", key: "powerBoundarySmoothingIterations", label: "Boundary smoothing", unit: "paired sweeps", min: 2, max: 16, step: 2, digits: 0, default: 8, tier: "fine", hint: "Matching pre/post L2 sweeps in the three-cell boundary and level-transition band. One even value controls both sides and preserves ping-pong parity, so experiments cannot break PCG symmetry; the paper uses 8." },
-  { kind: "number", key: "pressureIterations", label: "Compatibility pressure effort", unit: "sweeps", min: 16, max: 400, step: 8, digits: 0, default: 128, tier: "fine", hint: "Effort used only by Chebyshev/Jacobi compatibility solvers. It does not change the authoritative Power PCG cap above." },
-  { kind: "select", key: "leafSolver", label: "Pressure solver", default: "auto", tier: "fine", options: [{ value: "auto", label: "Auto · Section 4.3 for power" }, { value: "mgpcg", label: "Section 4.3 hybrid" }, { value: "chebyshev", label: "Chebyshev compatibility" }], hint: "Auto selects the paper's Section 4.3 hybrid PCG preconditioner when power authority is admitted. Chebyshev is an explicit comparison mode, not a same-frame fallback for rejected paper authority." },
-  { kind: "number", key: "adaptivity", label: "Octree adaptivity", unit: "", min: 0, max: 1, step: 0.1, digits: 1, default: 1, tier: "coarse", hint: "Debug quality/performance sweep: 0 forces finest pressure cells everywhere; 1 enables full signed-distance-graded coarsening." },
-  { kind: "select", key: "secondaryParticles", label: "Secondary liquid", default: "off", tier: "coarse", update: "runtime", options: [{ value: "on", label: "Spray droplets" }, { value: "off", label: "Off" }], hint: "One-way GPU droplets preserve escaped splash detail without changing liquid mass or pressure." },
-  { kind: "number", key: "secondaryParticleCapacity", label: "Particle budget", unit: "particles", min: 4_096, max: 65_536, step: 1_024, digits: 0, default: 16_384, tier: "fine", hint: "Fixed GPU ring capacity. Full rings overwrite the oldest slots without allocating or reading back." },
-  { kind: "number", key: "secondaryParticleSurfaceCorrection", label: "Particle surface correction", unit: "", min: 0, max: 1, step: 0.1, digits: 1, default: 0, tier: "fine", hint: "Optionally folds only near-interface spray markers back into phi. Each substep is capped to 0.2 cell and detached droplets remain render-only; zero preserves the proven one-way path." },
-  { kind: "select", key: "maximumLeafSize", label: "Maximum leaf", default: "16", tier: "fine", options: [{ value: "2", label: "2³ cells" }, { value: "4", label: "4³ cells" }, { value: "8", label: "8³ cells" }, { value: "16", label: "16³ cells" }, { value: "32", label: "32³ cells" }], hint: "Largest dyadic pressure cell. Interface bands stay fine while distant bulk air, water, and solid regions can collapse to much larger cells, then enforce 2:1 balance." },
-  { kind: "number", key: "interfaceRefinementBandCells", label: "Interface refinement band", unit: "cells", min: 0, max: 32, step: 1, digits: 0, default: 4, tier: "fine", hint: "Pure air, water, or solid leaves farther than this many finest cells from liquid or solid interfaces may stay at the maximum leaf size. Lower values make all bulk regions coarser." },
-  { kind: "number", key: "surfaceDetailStrength", label: "Dynamic surface detail", unit: "", min: 0, max: 1, step: 0.1, digits: 1, default: 0, tier: "fine", hint: "Widens the finest pressure band by up to eight cells where the surface is sharply curved or locally straining. Zero is the proven fixed-band path." },
-  { kind: "select", key: "faceVelocityTransport", label: "Adaptive velocity", default: "on", tier: "fine", options: [{ value: "on", label: "Compact octree faces" }, { value: "off", label: "Dense compatibility" }], hint: "Transports and projects velocity directly on canonical octree faces. Unsupported terrain, hydrostatic, and rigid host-cutover cases retain the dense compatibility path." },
-  { kind: "select", key: "sparseSurfaceBand", label: "Sparse surface field", default: "off", tier: "fine", options: [{ value: "authoritative", label: "Adaptive detail patches" }, { value: "mirror", label: "Mirror / parity" }, { value: "off", label: "Dense only" }], hint: "Optional fine two-sided phi pages for curvature or velocity-strain detail. Off keeps the octree's nominal-resolution level set authoritative; mirror and authoritative modes remain available for comparison." },
-  { kind: "select", key: "surfaceRefinementFactor", label: "Surface refinement", default: "2", tier: "fine", options: [{ value: "1", label: "1× parity" }, { value: "2", label: "2× linear" }, { value: "4", label: "4× experimental" }], hint: "Fine samples per transport-cell edge inside resident surface pages. Memory follows active surface area instead of refining the full 3D domain." },
-  { kind: "select", key: "globalFineLevelSetFactor", label: "Global fine lattice", default: "4", tier: "fine", options: [{ value: "off", label: "Leaf-page compatibility" }, { value: "4", label: "4× indexed narrow band" }, { value: "8", label: "8× experimental" }], hint: "The product path uses a 4× globally indexed sparse narrow band, independent of octree rows. Compact coarse octree phi supplies sign and distance outside the valid band; factor 8 remains experimental." },
-  { kind: "select", key: "powerDiagramProjection", label: "Power projection", default: "authoritative", tier: "fine", options: [{ value: "off", label: "Axis compatibility" }, { value: "mirror", label: "Power mirror" }, { value: "authoritative", label: "Power authority" }], hint: "The cubic dam-break uses catalog power faces and the Section 4.3 hybrid solver. A rejected authoritative generation stops publication and stepping; axis mode remains an explicit comparison path." },
-  { kind: "number", key: "sparseSurfaceBandCells", label: "Fine surface support", unit: "fine cells", min: 2, max: 16, step: 1, digits: 0, default: 4, tier: "fine", hint: "Minimum signed-distance support on both sides of phi=0. Velocity backtrace and stencil margins are added automatically." },
-  { kind: "number", key: "sparseSurfacePageFraction", label: "Surface page budget", unit: "domain fraction", min: 0.1, max: 1, step: 0.05, digits: 2, default: 0.75, tier: "fine", hint: "Hard physical pool as a fraction of the virtual fine page lattice. Exhaustion is reported and atomically falls back to dense extraction; it never indexes beyond the pool." },
-  { kind: "select", key: "pressureWarmStart", label: "Pressure warm start", default: "on", tier: "fine", options: [{ value: "on", label: "On (previous field)" }, { value: "off", label: "Off (cold start)" }], hint: "Seed each compacted leaf solve with the previous step's pressure instead of clearing to zero, so the polynomial refines an already-good field. The legacy dense ladder always cold-starts." },
-  { kind: "select", key: "hydrostaticSplit", label: "Hydrostatic reference", default: "off", tier: "fine", options: [{ value: "off", label: "Absolute pressure" }, { value: "on", label: "Deviation pressure A/B" }], hint: "Experimental octree-only A/B for body-free tank fills without inflow. Subtracts a fixed rest-surface reference, with perturbation pressure carrying surface displacement. Unsupported scenes fail closed to absolute pressure." },
-  { kind: "select", key: "brickAtlas", label: "Brick atlas ownership", default: "mirror", tier: "fine", options: [{ value: "mirror", label: "Mirror + validate" }, { value: "authoritative", label: "Authoritative A/B" }, { value: "off", label: "Off" }], hint: "Compatibility-path A/B for pooled phi/velocity atlas tiles. Compact face authority keeps only the deep-liquid residency worklist and suppresses this duplicate payload; FLUID_OCTREE_COMPACT_BRICK_ATLAS=1 restores it for diagnostics." },
-  { kind: "select", key: "brickSparseSurface", label: "Brick-sparse surface", default: "on", tier: "fine", options: [{ value: "on", label: "Resident worklist" }, { value: "off", label: "Dense A/B" }], hint: "Runs coarse phi advection, redistancing, and volume correction only over velocity-swept resident bricks. The dense texture is retained as a compatibility mirror while remaining kernels migrate." },
-  { kind: "select", key: "brickSparseAdvection", label: "Brick-sparse velocity", default: "on", tier: "fine", options: [{ value: "on", label: "Resident worklist" }, { value: "off", label: "Dense A/B" }], hint: "Dispatches velocity predictor, reverse, and MacCormack correction over the GPU-authored wet-domain brick list; retired bricks are explicitly zeroed." },
-  { kind: "select", key: "brickSparseTransport", label: "Brick-sparse transport prep", default: "off", tier: "fine", options: [{ value: "off", label: "Dense (ocean default)" }, { value: "on", label: "Resident worklist A/B" }], hint: "Builds current and predicted padded transport fields only for wet-domain bricks. The widened full-footprint ocean retains most bricks, so this remains an opt-in A/B until a sparse-domain benchmark proves a win." },
-  { kind: "select", key: "brickSparseOccupancyFlux", label: "Brick-sparse occupancy/flux", default: "off", tier: "fine", options: [{ value: "off", label: "Dense (A/B baseline)" }, { value: "on", label: "Resident worklist A/B" }], hint: "Reduces column occupancy and conservative VOF flux limits over wet-domain bricks while retaining their dense compatibility textures. Column maxima use an area-only atomic resolve; retired flux cells restore invalid-neighbor limits." },
-  { kind: "select", key: "brickSparseExtrapolation", label: "Brick-sparse extrapolation", default: "off", tier: "fine", options: [{ value: "off", label: "Dense (A/B baseline)" }, { value: "on", label: "Resident worklist A/B" }], hint: "Runs the post-projection velocity extrapolation seed and narrow-band sweeps over the GPU-authored wet-domain brick list. Retired velocity bricks are explicitly zeroed; this remains opt-in until benchmarked." },
-  { kind: "select", key: "brickPreActivation", label: "Brick pre-activation", default: "on", tier: "fine", options: [{ value: "on", label: "Velocity swept" }, { value: "off", label: "Phi band only" }], hint: "Widens brick residency support by the velocity swept per step and activates the downstream face-neighbor of interface bricks, so a moving front never advects into an unscheduled brick." }
+  { kind: "select", key: "globalFineLevelSetFactor", label: "Surface tracking", default: "4", tier: "coarse", options: [{ value: "4", label: "4× fine band · paper default" }, { value: "off", label: "Coarse octree only · faster" }, { value: "8", label: "8× fine band · experimental" }], hint: "The paper tracks the interface on a separate 4× or 8× sparse narrow band. Coarse-only still uses the power-diagram pressure solve, but transports and redistances octree phi directly and cannot preserve sub-cell surface detail." },
+  { kind: "select", key: "maximumLeafSize", label: "Largest pressure cell", default: "16", tier: "fine", options: [{ value: "2", label: "2³ finest cells" }, { value: "4", label: "4³ finest cells" }, { value: "8", label: "8³ finest cells" }, { value: "16", label: "16³ finest cells" }, { value: "32", label: "32³ finest cells" }], hint: "Largest dyadic octree cell away from interfaces. The topology remains strictly 2:1 graded for valid power-diagram stencils." },
+  { kind: "number", key: "interfaceRefinementBandCells", label: "Pressure refinement band", unit: "finest cells", min: 0, max: 32, step: 1, digits: 0, default: 4, tier: "fine", hint: "Keeps the octree pressure grid fine around liquid and solid interfaces. This is distinct from the separate high-resolution surface-tracking band." }
 ];
 
 const maximumLeafSize = (value: unknown): 2 | 4 | 8 | 16 | 32 => {
@@ -71,12 +46,10 @@ const options = (scene: SceneDescription, quality: GPUQuality, values: MethodPar
     typeof location === "undefined" ? "" : location.search,
   ) || (typeof process !== "undefined" && process.env?.FLUID_SAFE_BRINGUP === "1"),
   pressureIterations: numberValue(values, params, "pressureIterations"),
-  // The spray component is allocated once; visibility/simulation is a live
-  // runtime setting so toggling it never rebuilds the pressure solver.
-  secondaryParticles: true,
-  secondaryParticlesEnabled: values.secondaryParticles !== "off" && values.secondaryParticles !== false,
-  secondaryParticleCapacity: numberValue(values, params, "secondaryParticleCapacity"),
-  secondaryParticleSurfaceCorrection: numberValue(values, params, "secondaryParticleSurfaceCorrection"),
+  // Compact power-face authority has no compatible secondary-particle
+  // sampler. Keep the unreachable legacy component explicitly disabled.
+  secondaryParticles: false,
+  secondaryParticlesEnabled: false,
   octree: {
     pressureIterations: numberValue(values, params, "pressureIterations"),
     powerPcgIterationCap: numberValue(values, params, "powerPcgIterationCap"),
@@ -112,35 +85,30 @@ const options = (scene: SceneDescription, quality: GPUQuality, values: MethodPar
 
 export const octreeMethod: SimulationMethod = {
   id: "octree",
-  label: "GPU octree",
-  shortLabel: "Octree",
-  badge: "GPU OCTREE",
-  description: "Fully GPU-resident 3D adaptive pressure cells driven by an independently transported signed-distance level set.",
-  detail: "pressure-only dyadic octree, GPU-resident factor-4 signed-distance narrow band, compact face transport, catalog power cells, Section 4.3 hybrid PCG with fail-closed paper authority, strict 2:1 smoothing, frame-lagged variational rigid-body coupling, and no topology readbacks",
+  label: "Power-diagram octree",
+  shortLabel: "Power octree",
+  badge: "POWER OCTREE",
+  description: "GPU-resident adaptive power cells with the paper's sparse-pyramid pressure solve and optional high-resolution interface band.",
+  detail: "2:1-graded dyadic octree, power-cell face velocities, Section 4.3 sparse-pyramid hybrid PCG, factor-4 signed-distance narrow band by default, frame-lagged variational rigid-body coupling, and no topology readbacks",
   backend: "webgpu",
-  qualityLabels: { balanced: "bounded workload", high: "higher solver effort", ultra: "maximum solver effort" },
+  qualityLabels: { balanced: "paper defaults", high: "paper defaults", ultra: "paper defaults" },
+  showQualityControl: false,
   params,
-  pressureMapping: "Admitted power authority uses the paper's Section 4.3 hybrid PCG with a safe 128-iteration recorded tail and GPU early-out at relative residual 1e-4. The paper reports 6–10 iterations for its optimized sparse-grid hierarchy; lower caps remain diagnostic-only until this implementation matches that hierarchy.",
-  presetFor: (quality) => ({
-    powerMultigridHierarchy: "aggregate-galerkin",
+  pressureMapping: "The paper's sparse-grid V-cycle preconditions the Section 4.3 power-diagram PCG solve. Eight symmetric boundary sweeps match the paper; a 128-iteration recorded tail provides a fail-closed safety cap beyond its reported 6–10 typical iterations.",
+  presetFor: () => ({
+    powerMultigridHierarchy: "paper-pyramid",
     powerPcgIterationCap: 128,
     powerBoundarySmoothingIterations: 8,
-    pressureIterations: quality === "balanced" ? 128 : quality === "high" ? 320 : 400,
+    pressureIterations: 128,
     adaptivity: 1,
-    secondaryParticles: "off",
-    secondaryParticleCapacity: 16_384,
-    secondaryParticleSurfaceCorrection: 0,
     maximumLeafSize: "16",
     interfaceRefinementBandCells: 4,
     surfaceDetailStrength: 0,
     faceVelocityTransport: "on",
     sparseSurfaceBand: "off",
     surfaceRefinementFactor: "2",
-    // Bring the complete paper path up on the bounded cubic grid first. The
-    // existing high/ultra allocations remain explicit compatibility presets until
-    // their staged memory and endurance gates have passed.
-    globalFineLevelSetFactor: quality === "balanced" ? "4" : "off",
-    powerDiagramProjection: quality === "balanced" ? "authoritative" : "off",
+    globalFineLevelSetFactor: "4",
+    powerDiagramProjection: "authoritative",
     leafSolver: "auto",
     sparseSurfaceBandCells: 4,
     sparseSurfacePageFraction: 0.75,
@@ -153,7 +121,6 @@ export const octreeMethod: SimulationMethod = {
     brickSparseExtrapolation: "off",
     brickPreActivation: "on"
   }),
-  runtimeParamKeys: ["secondaryParticles"],
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, options(scene, quality, values)),
   createSolverAsync: (device, scene, quality, values, onRigidLoads, onProgress, signal) => WebGPUUniformEulerianSolver.createAsync(
     device, scene, quality, onRigidLoads, options(scene, quality, values),

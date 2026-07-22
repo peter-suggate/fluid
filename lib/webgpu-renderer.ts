@@ -1112,6 +1112,7 @@ export class FluidLabRenderer {
       : initialRasterPresentationReadiness({
           solverAttached: true,
           initialSparseAuthorityReady: pending.solver.initialSparseAuthorityReady === true,
+          globalFineRequired: pending.solver.info.globalFineLevelSetEnabled !== false,
           globalFineAttached: Boolean(pending.solver.globalFineLevelSetSource),
           adaptiveSurfaceAttached: this.adaptiveWaterAttached,
           surfaceExtractionSubmitted: pending.submitted,
@@ -1488,11 +1489,12 @@ export class FluidLabRenderer {
     );
     if (!rasterResult) throw new Error("Raster optics pipeline is not ready");
     const pendingInitialRaster = this.pendingInitialRasterPresentation;
+    const initialRasterGlobalFineRequired = readyGPUFluid?.info.globalFineLevelSetEnabled !== false;
     const initialRasterSubmission = pendingInitialRaster
       && !pendingInitialRaster.submitted
       && pendingInitialRaster.solver === readyGPUFluid
       && readyGPUFluid.initialSparseAuthorityReady === true
-      && Boolean(readyGPUFluid.globalFineLevelSetSource)
+      && (!initialRasterGlobalFineRequired || Boolean(readyGPUFluid.globalFineLevelSetSource))
       && this.adaptiveWaterAttached
       && rasterResult.surfaceUpdated
       ? pendingInitialRaster

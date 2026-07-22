@@ -78,10 +78,12 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.equal(octreeMethod.backend, "webgpu");
   assert.equal(octreeMethod.presetFor("balanced").pressureIterations, 128);
   assert.equal(octreeMethod.presetFor("balanced").powerPcgIterationCap, 128);
-  assert.equal(octreeMethod.presetFor("balanced").powerMultigridHierarchy, "aggregate-galerkin");
-  assert.equal(octreeMethod.params.find((spec) => spec.key === "powerMultigridHierarchy")?.tier, "coarse");
-  assert.equal(octreeMethod.params.find((spec) => spec.key === "powerPcgIterationCap")?.tier, "fine");
-  assert.equal(octreeMethod.params.find((spec) => spec.key === "pressureIterations")?.tier, "fine");
+  assert.equal(octreeMethod.presetFor("balanced").powerMultigridHierarchy, "paper-pyramid");
+  assert.equal(octreeMethod.showQualityControl, false,
+    "legacy quality tiers must not obscure the explicit power-method controls");
+  assert.deepEqual(octreeMethod.params.map((spec) => spec.key), [
+    "globalFineLevelSetFactor", "maximumLeafSize", "interfaceRefinementBandCells",
+  ], "the product UI must omit compatibility, mirror, and bring-up switches");
   assert.equal(octreeMethod.params.some((spec) => spec.key === "surfaceColumns"), false,
     "scene voxelDomain is the sole spatial-resolution authority");
   const layout = createTallCellLayout(defaultScene, "balanced", 2_048);
@@ -93,13 +95,12 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "16");
   assert.equal(octreeMethod.presetFor("high").maximumLeafSize, "16");
   assert.equal(octreeMethod.presetFor("balanced").adaptivity, 1);
-  assert.equal(octreeMethod.params.find((spec) => spec.key === "secondaryParticles")?.default, "off");
-  assert.equal(octreeMethod.presetFor("balanced").secondaryParticles, "off");
+  assert.equal(octreeMethod.params.some((spec) => spec.key === "secondaryParticles"), false,
+    "unsupported spray must not be exposed by compact power-face authority");
   assert.match(octreeMethod.detail, /no topology readbacks/);
-  assert.match(octreeMethod.detail, /Section 4\.3 hybrid PCG/);
-  assert.match(octreeMethod.detail, /fail-closed paper authority/);
+  assert.match(octreeMethod.detail, /Section 4\.3 sparse-pyramid hybrid PCG/);
   assert.match(octreeMethod.detail, /rigid-body coupling/);
-  assert.match(octreeMethod.description, /signed-distance level set/);
+  assert.match(octreeMethod.description, /sparse-pyramid pressure solve/);
   const maximumLeaf = octreeMethod.params.find((spec) => spec.key === "maximumLeafSize");
   assert.ok(maximumLeaf && maximumLeaf.kind === "select");
   assert.equal(maximumLeaf.default, "16");
@@ -108,25 +109,18 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(octreeSource, /rounded >= 32/);
   const interfaceBand = octreeMethod.params.find((spec) => spec.key === "interfaceRefinementBandCells");
   assert.ok(interfaceBand && interfaceBand.kind === "number" && interfaceBand.tier === "fine" && interfaceBand.default === 4);
-  const surfaceRefinement = octreeMethod.params.find((spec) => spec.key === "surfaceRefinementFactor");
-  assert.ok(surfaceRefinement && surfaceRefinement.kind === "select" && surfaceRefinement.default === "2");
-  assert.deepEqual(surfaceRefinement.options.map((option) => option.value), ["1", "2", "4"]);
   const globalFine = octreeMethod.params.find((spec) => spec.key === "globalFineLevelSetFactor");
-  assert.ok(globalFine && globalFine.kind === "select" && globalFine.default === "4");
-  assert.deepEqual(globalFine.options.map((option) => option.value), ["off", "4", "8"]);
-  const powerProjection = octreeMethod.params.find((spec) => spec.key === "powerDiagramProjection");
-  assert.ok(powerProjection && powerProjection.kind === "select" && powerProjection.default === "authoritative");
-  assert.deepEqual(powerProjection.options.map((option) => option.value), ["off", "mirror", "authoritative"]);
-  assert.equal(octreeMethod.presetFor("balanced").globalFineLevelSetFactor, "4",
-    "the balanced product path must request the factor-4 global fine lattice");
-  assert.equal(octreeMethod.presetFor("balanced").powerDiagramProjection, "authoritative",
-    "the balanced product path must request power authority");
+  assert.ok(globalFine && globalFine.kind === "select" && globalFine.default === "4" && globalFine.tier === "coarse");
+  assert.deepEqual(globalFine.options.map((option) => option.value), ["4", "off", "8"]);
+  assert.equal(globalFine.options[1].label, "Coarse octree only · faster");
+  assert.match(globalFine.hint ?? "", /still uses the power-diagram pressure solve/);
   assert.equal(octreeMethod.presetFor("balanced").leafSolver, "auto",
     "auto admits Section 4.3 only after power authority passes its fail-closed policy");
-  for (const quality of ["high", "ultra"] as const) {
-    assert.equal(octreeMethod.presetFor(quality).globalFineLevelSetFactor, "off",
-      `${quality} must remain an explicit compatibility preset until its memory/endurance gate passes`);
-    assert.equal(octreeMethod.presetFor(quality).powerDiagramProjection, "off");
+  for (const quality of ["balanced", "high", "ultra"] as const) {
+    const preset = octreeMethod.presetFor(quality);
+    assert.equal(preset.globalFineLevelSetFactor, "4", `${quality} must default to the paper's factor-4 band`);
+    assert.equal(preset.powerDiagramProjection, "authoritative", `${quality} must retain power authority`);
+    assert.equal(preset.powerMultigridHierarchy, "paper-pyramid", `${quality} must use the paper pyramid`);
   }
   assert.match(smokeSource, /FLUID_OCTREE_POWER_PROJECTION/);
   assert.match(smokeSource, /FLUID_OCTREE_GLOBAL_FINE_FACTOR/);
@@ -136,19 +130,8 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(octreeProjectionShader, /override surfacePageResolution: u32 = 2u/);
   assert.doesNotMatch(`${octreeSource}\n${uniformSolverSource}`, /airRefinementBandCells/);
   assert.match(uniformSolverSource, /interfaceRefinementBandCells: options\.octree\.interfaceRefinementBandCells \?\? 4/);
-  const surfaceDetail = octreeMethod.params.find((spec) => spec.key === "surfaceDetailStrength");
-  assert.ok(surfaceDetail && surfaceDetail.kind === "number" && surfaceDetail.default === 0);
   for (const quality of ["balanced", "high", "ultra"] as const) {
     assert.equal(octreeMethod.presetFor(quality).surfaceDetailStrength, 0, "dynamic refinement must be uniformly opt-in across quality presets");
-  }
-  const particleCorrection = octreeMethod.params.find((spec) => spec.key === "secondaryParticleSurfaceCorrection");
-  assert.ok(particleCorrection && particleCorrection.kind === "number" && particleCorrection.default === 0);
-  for (const quality of ["balanced", "high", "ultra"] as const) {
-    assert.equal(octreeMethod.presetFor(quality).secondaryParticleSurfaceCorrection, 0, "particle feedback must be uniformly opt-in across quality presets");
-  }
-  const adaptiveVelocity = octreeMethod.params.find((spec) => spec.key === "faceVelocityTransport");
-  assert.ok(adaptiveVelocity && adaptiveVelocity.kind === "select" && adaptiveVelocity.default === "on");
-  for (const quality of ["balanced", "high", "ultra"] as const) {
     assert.equal(octreeMethod.presetFor(quality).faceVelocityTransport, "on",
       "compact octree-face velocity must be enabled across production quality presets");
   }
@@ -161,10 +144,8 @@ test("octree is a registered GPU method with dam-break defaults", () => {
     "the dense host allocation must remain fail-closed for unsupported scenes");
   assert.match(octreeSource, /this\.extrapolationSweeps = faceTransportEnabled \? 0 : requestedExtrapolationSweeps/,
     "compact face authority must not retain the full-domain texture extrapolation ladder");
-  const warmStart = octreeMethod.params.find((spec) => spec.key === "pressureWarmStart");
-  assert.ok(warmStart && warmStart.kind === "select" && warmStart.tier === "fine" && warmStart.default === "on");
-  // Options are copied field-by-field into the solver; a dropped key would
-  // silently revert the UI toggle to its default.
+  assert.equal(octreeMethod.params.some((spec) => spec.key === "pressureWarmStart"), false,
+    "pressure warm-start policy is an internal solver detail, not a product setting");
   assert.match(octreeSource, /pressureWarmStart\?: boolean/);
   assert.match(uniformSolverSource, /pressureWarmStart: options\.octree\.pressureWarmStart/);
   const encode = WebGPUOctreeProjection.prototype.encode.toString();
@@ -286,9 +267,9 @@ test("compact scan and coarse-task scratch follows pressure and active-tile boun
     "coarse indirect work must retain every row through a two-dimensional dispatch");
 });
 
-test("octree hydrostatic reference is a default-off fixed-rest-surface A/B", () => {
-  const control = octreeMethod.params.find((spec) => spec.key === "hydrostaticSplit");
-  assert.ok(control && control.kind === "select" && control.default === "off");
+test("octree hydrostatic experiment stays internal and default-off", () => {
+  assert.equal(octreeMethod.params.some((spec) => spec.key === "hydrostaticSplit"), false,
+    "the fixed-reference A/B must not appear in the power-method product UI");
   assert.equal(octreeMethod.presetFor("balanced").hydrostaticSplit, "off");
   for (const method of simulationMethods.filter((candidate) => candidate.id !== "octree")) {
     assert.equal(method.params.some((spec) => spec.key === "hydrostaticSplit"), false,

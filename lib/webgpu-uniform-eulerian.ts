@@ -1158,6 +1158,7 @@ export class WebGPUUniformEulerianSolver {
   get globalFinePowerProjectionControl() { return this.octreeProjection?.globalFinePowerProjectionControl; }
   get globalFinePowerVelocitySampleControl() { return this.octreeProjection?.globalFinePowerVelocitySampleControl; }
   get globalFineCoarseLevelSetControl() { return this.octreeProjection?.globalFineCoarseLevelSetControl; }
+  readPowerCoarseFailureRow(row: number) { return this.octreeProjection?.readPowerCoarseFailureRow(row); }
   get globalFineRestrictionControl() { return this.octreeProjection?.globalFineRestrictionControl; }
   get globalFineFaceBandControl() { return this.octreeProjection?.globalFineFaceBandControl; }
   get globalFineFaceBandTransitionControl() {

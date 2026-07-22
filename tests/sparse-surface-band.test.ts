@@ -117,7 +117,7 @@ test("optional fine dynamics is bounded but does not replace the global pressure
   assert.match(sparseSurfaceDynamicsShader, /return vec3f\(0\.0\)/, "missing pages impose the coarse-velocity boundary condition");
 });
 
-test("octree defaults leave fine surface refinement disabled while retaining its controls", () => {
+test("superseded adaptive surface patches stay disabled and out of the product UI", () => {
   for (const quality of ["balanced", "high", "ultra"] as const) {
     const preset = octreeMethod.presetFor(quality);
     assert.equal(preset.sparseSurfaceBand, "off");
@@ -125,9 +125,8 @@ test("octree defaults leave fine surface refinement disabled while retaining its
     assert.equal(preset.sparseSurfaceBandCells, 4);
     assert.equal(preset.sparseSurfacePageFraction, 0.75);
   }
-  const mode = octreeMethod.params.find((candidate) => candidate.key === "sparseSurfaceBand");
-  assert.ok(mode?.kind === "select");
-  assert.deepEqual(mode.options.map((option) => option.value), ["authoritative", "mirror", "off"]);
+  assert.equal(octreeMethod.params.some((candidate) => candidate.key === "sparseSurfaceBand"), false);
+  assert.equal(octreeMethod.params.some((candidate) => candidate.key === "surfaceRefinementFactor"), false);
 });
 
 test("raster extraction and solver-grid inspection consume the same live sparse surface", () => {

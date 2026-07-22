@@ -7,6 +7,7 @@ import { OCTREE_POWER_CATALOG_FACE_FLOATS } from "../lib/octree-power-catalog";
 import { OCTREE_POWER_FACE_RECORD_BYTES } from "../lib/octree-power-operator";
 import {
   OCTREE_POWER_FACE_BOUNDARY,
+  OCTREE_POWER_FACE_BOUNDARY_FALLBACK_BYTES,
   OCTREE_POWER_CLOSED_BOUNDARY_MASK_WITH_CLOSED_TOP,
   OCTREE_POWER_CLOSED_BOUNDARY_MASK_WITH_OPEN_TOP,
   OCTREE_POWER_FACE_ERROR,
@@ -48,7 +49,8 @@ test("power-face planner allocates compact live face and incidence stores", () =
   assert.equal(plan.scanBlockCount, 1);
   assert.equal(plan.boundaryQueryBytes, 640 * 32);
   assert.equal(plan.allocatedBytes, plan.faceBytes + plan.normalBytes + plan.centroidBytes + plan.quadratureBytes + plan.incidenceBytes + plan.workspaceBytes
-    + plan.hashBytes + plan.scanBytes + plan.boundaryQueryBytes + 64 + 96);
+    + plan.hashBytes + plan.scanBytes + plan.boundaryQueryBytes + 64 + 96
+    + OCTREE_POWER_FACE_BOUNDARY_FALLBACK_BYTES);
   assert.throws(() => planOctreePowerFaces(1, 2, 5), /two incidences/);
 });
 
@@ -99,11 +101,17 @@ test("power free-surface coefficients use actual signed cell-centre phi without 
   assert.match(sampler, /worklist\[1\]!=fineParams\.generation\|\|worklist\[3\]!=1u\|\|worklist\[4\]!=1u/,
     "fine pressure sampling must require the current all-or-nothing GPU publication header");
   assert.match(octreeProjectionSource,
-    /const useCurrentFineBoundary = this\.globalFineBootstrapped && this\.powerAdvancingPressureSteps > 0;[\s\S]*const boundaryFine = useCurrentFineBoundary\s*\? \(this\.globalFineCurrentIsA \? this\.globalFineSourceA : this\.globalFineSourceB\)\s*:\s*this\.globalFineSourceA/,
-    "advancing pressure assembly must bind the current fine generation, with source A retained only for the authored t=0 solve");
+    /const useCurrentFineBoundary = this\.globalFineBootstrapped && this\.powerAdvancingPressureSteps > 0;[\s\S]*const useCurrentCoarseBoundary = !useCurrentFineBoundary[\s\S]*this\.powerCoarseLevelSetBootstrapped/,
+    "advancing pressure assembly must choose the current fine band or the independently evolved coarse field");
   assert.match(octreeProjectionSource,
-    /mode: useCurrentFineBoundary \? "fine" as const : "analytic" as const/,
-    "only the authored t=0 operator may use the analytic signed distance");
+    /mode: useCurrentFineBoundary \? "fine" as const[\s\S]*useCurrentCoarseBoundary \? "coarse" as const : "analytic" as const/,
+    "only the authored t=0 operator may use analytic phi; coarse-only recurrence must bind coarse mode");
+  assert.match(octreeProjectionSource,
+    /this\.powerCoarseLevelSet = new WebGPUOctreeCoarseLevelSet[\s\S]*if \(this\.globalFineSourceA && this\.globalFineSourceB\)/,
+    "coarse phi must be allocated independently, before optional fine-only resources");
+  assert.match(octreeProjectionSource,
+    /Coarse-only paper mode:[\s\S]*this\.powerCoarseLevelSetSchedule\.encode/,
+    "the fine-off surface path must still advect and redistance coarse octree phi");
   const bindings = [...octreePowerBoundaryPhiShader.matchAll(/@binding\((\d+)\)/g)].map((match) => Number(match[1]));
   assert.equal(new Set(bindings).size, 10, "boundary sampling stays at the practical ten-binding ceiling");
 });

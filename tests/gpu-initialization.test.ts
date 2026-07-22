@@ -36,11 +36,9 @@ test("GPU initialization rejects duplicate and unsatisfied task dependencies", a
   await assert.rejects(() => dependent.run([{ id: "late", phase: "warmup", label: "Late", dependencies: ["missing"], run() {} }]), /ran before missing/);
 });
 
-test("runtime method values do not invalidate the structural solver fingerprint", () => {
-  const base = { methodId: "octree", quality: "balanced" as const, values: { maximumLeafSize: "16", secondaryParticles: "on" } };
-  const disabled = { ...base, values: { ...base.values, secondaryParticles: "off" } };
-  assert.deepEqual(structuralMethodValues(base), { maximumLeafSize: "16" });
-  assert.deepEqual(structuralMethodValues(disabled), { maximumLeafSize: "16" });
+test("power-octree method values are structural after unsupported spray is removed", () => {
+  const config = { methodId: "octree", quality: "balanced" as const, values: { maximumLeafSize: "16" } };
+  assert.deepEqual(structuralMethodValues(config), { maximumLeafSize: "16" });
 });
 
 test("octree initialization has no hand-maintained pipeline totals and fences warm-up", () => {

@@ -185,6 +185,9 @@ export interface SimulationMethod {
   backend: "webgpu" | "cpu";
   /** Per-quality flavour text for the quality selector. */
   qualityLabels: Record<GPUQuality, string>;
+  /** Hide the generic quality selector when the method exposes its relevant
+   * scientific trade-offs directly. */
+  showQualityControl?: boolean;
   /**
    * Method-specific parameters. Common parameters (resolution, time step,
    * pressure solve effort) live in the scene numerics and are declared once

@@ -76,9 +76,11 @@ test("production substep keeps topology, pressure/power projection, and fine sur
     "each production substep must rebuild coarse topology, solve/project power rows, then transport fine phi");
   assert.doesNotMatch(advance.slice(rebuild, surface), /queue\.submit|mapAsync|getMappedRange/,
     "the vertical slice must rely on command-stream ordering rather than a CPU authority handoff");
-  const submit = advance.indexOf("this.device.queue.submit([encoder.finish()])", surface);
-  const retire = advance.indexOf("this.octreeProjection?.retireSubmittedEncoder(encoder)", submit);
-  assert.ok(submit > surface && retire > submit,
+  const submitCall = advance.indexOf('submitCurrentEncoder("publicationDiagnostics",false)', surface);
+  const finish = advance.indexOf("constcommandBuffer=submittedEncoder.finish()");
+  const submit = advance.indexOf("this.device.queue.submit([commandBuffer])", finish);
+  const retire = advance.indexOf("this.octreeProjection?.retireSubmittedEncoder(submittedEncoder)", submit);
+  assert.ok(submitCall > surface && finish >= 0 && submit > finish && retire > submit,
     "invocation-stable coarse parameters may be reused only after the owning encoder is submitted");
 });
 

@@ -13,6 +13,7 @@ export const OCTREE_POWER_FACE_INCIDENCE_BYTES = 8;
 export const OCTREE_POWER_FACE_CONTROL_BYTES = 64;
 export const OCTREE_POWER_FACE_PARAMETER_BYTES = 96;
 export const OCTREE_POWER_FACE_BOUNDARY_QUERY_BYTES = 32;
+export const OCTREE_POWER_FACE_BOUNDARY_FALLBACK_BYTES = 160;
 export const OCTREE_POWER_FACE_QUADRATURE_SAMPLES = 16;
 // Exact centroid plus sixteen packed f16 tangent-plane coordinates. The
 // samples are equal-area strata of the clipped world-space power polygon.
@@ -89,8 +90,10 @@ export interface OctreePowerFaceEncodeOptions {
    * requested sample is unavailable.
    */
   readonly boundaryPhi?: {
-    readonly mode: "analytic" | "fine";
-    readonly fine: Pick<WebGPUFineLevelSetBrickSource, "params" | "hash" | "metadata" | "worklist" | "flags" | "phi">;
+    readonly mode: "analytic" | "fine" | "coarse";
+    /** Fine storage is absent in coarse-only mode. The face builder binds
+     * inert private buffers while the coarse resolve pass owns every query. */
+    readonly fine?: Pick<WebGPUFineLevelSetBrickSource, "params" | "hash" | "metadata" | "worklist" | "flags" | "phi">;
     /**
      * Published coarse-octree signed-distance directory (paper Section 5).
      * Outside the resident fine band the coarse level set is the cell-centre
@@ -197,7 +200,8 @@ export function planOctreePowerFaces(
     maximumHashProbes: OCTREE_POWER_FACE_MAX_HASH_PROBES,
     allocatedBytes: faceBytes + normalBytes + centroidBytes + quadratureBytes + incidenceBytes + workspaceBytes + hashBytes + scanBytes
       + boundaryQueryBytes
-      + OCTREE_POWER_FACE_CONTROL_BYTES + OCTREE_POWER_FACE_PARAMETER_BYTES,
+      + OCTREE_POWER_FACE_CONTROL_BYTES + OCTREE_POWER_FACE_PARAMETER_BYTES
+      + OCTREE_POWER_FACE_BOUNDARY_FALLBACK_BYTES,
   };
 }
 
@@ -257,6 +261,8 @@ export class WebGPUOctreePowerFaces {
   private readonly boundaryQueryPipeline: GPUComputePipeline;
   private readonly boundaryPhiPipeline: GPUComputePipeline;
   private readonly boundaryCoarsePipeline: GPUComputePipeline;
+  private readonly boundaryPhiFallbackParams: GPUBuffer;
+  private readonly boundaryPhiFallbackStorage: GPUBuffer;
   private readonly publishPipeline: GPUComputePipeline;
   private destroyed = false;
 
@@ -319,6 +325,14 @@ export class WebGPUOctreePowerFaces {
       label: "Resolve octree power boundary phi from coarse octree", layout: "auto",
       compute: { module: boundaryCoarseModule, entryPoint: "resolveCoarsePowerBoundaryPhi" },
     });
+    this.boundaryPhiFallbackParams = device.createBuffer({
+      label: "Inert power boundary fine-phi parameters", size: 96,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.boundaryPhiFallbackStorage = device.createBuffer({
+      label: "Inert power boundary fine-phi storage", size: 64,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
     this.publishPipeline = pipeline("Publish octree power faces", "publishPowerFaces");
   }
 
@@ -358,9 +372,9 @@ export class WebGPUOctreePowerFaces {
       ...container, boundaryPhi?.fillFraction ?? 0,
     ]));
     this.device.queue.writeBuffer(this.params, 80, new Uint32Array([
-      boundaryPhi?.mode === "analytic" ? 1 : boundaryPhi?.mode === "fine" ? 2 : 0,
+      boundaryPhi?.mode === "analytic" ? 1 : boundaryPhi?.mode === "fine" ? 2 : boundaryPhi?.mode === "coarse" ? 3 : 0,
       boundaryPhi?.initialCondition === "dam-break" ? 2 : boundaryPhi ? 1 : 0,
-      boundaryPhi?.mode === "fine" && boundaryPhi.coarse ? 1 : 0, 0,
+      (boundaryPhi?.mode === "fine" || boundaryPhi?.mode === "coarse") && boundaryPhi.coarse ? 1 : 0, 0,
     ]));
     if (typeof options.rowCount !== "number") encoder.copyBufferToBuffer(options.rowCount, 0, this.params, 12, 4);
     return typeof options.rowCount === "number"
@@ -439,20 +453,21 @@ export class WebGPUOctreePowerFaces {
         Math.ceil(this.plan.faceCapacity / 64), [params, headers, metrics, entries, catalog, faces, control, boundaryQueries]);
       const boundaryPhi = options.boundaryPhi;
       if (boundaryPhi) {
+        const fine = boundaryPhi.fine;
         run("Sample deterministic power boundary phi", this.boundaryPhiPipeline,
           Math.ceil(this.plan.faceCapacity / 64), [
             { binding: 0, resource: resource(this.params) },
-            { binding: 1, resource: resource(boundaryPhi.fine.params) },
-            { binding: 2, resource: resource(boundaryPhi.fine.hash) },
-            { binding: 3, resource: resource(boundaryPhi.fine.metadata) },
-            { binding: 4, resource: resource(boundaryPhi.fine.worklist) },
-            { binding: 5, resource: resource(boundaryPhi.fine.flags) },
-            { binding: 6, resource: resource(boundaryPhi.fine.phi) },
+            { binding: 1, resource: resource(fine?.params ?? this.boundaryPhiFallbackParams) },
+            { binding: 2, resource: resource(fine?.hash ?? this.boundaryPhiFallbackStorage) },
+            { binding: 3, resource: resource(fine?.metadata ?? this.boundaryPhiFallbackStorage) },
+            { binding: 4, resource: resource(fine?.worklist ?? this.boundaryPhiFallbackStorage) },
+            { binding: 5, resource: resource(fine?.flags ?? this.boundaryPhiFallbackStorage) },
+            { binding: 6, resource: resource(fine?.phi ?? this.boundaryPhiFallbackStorage) },
             { binding: 7, resource: resource(this.faces) },
             { binding: 8, resource: resource(this.boundaryQueries) },
             { binding: 9, resource: resource(this.control) },
           ]);
-        if (boundaryPhi.mode === "fine" && boundaryPhi.coarse) {
+        if ((boundaryPhi.mode === "fine" || boundaryPhi.mode === "coarse") && boundaryPhi.coarse) {
           run("Resolve power boundary phi from coarse octree", this.boundaryCoarsePipeline,
             Math.ceil(this.plan.faceCapacity / 64), [
               { binding: 0, resource: resource(this.faces) },
@@ -478,6 +493,7 @@ export class WebGPUOctreePowerFaces {
     if (this.destroyed) return;
     this.destroyed = true;
     this.faces.destroy(); this.faceNormals.destroy(); this.faceCentroids.destroy(); this.faceQuadrature.destroy(); this.incidence.destroy(); this.workspace.destroy(); this.siteIndex.destroy(); this.scanBlocks.destroy(); this.boundaryQueries.destroy();
+    this.boundaryPhiFallbackParams.destroy(); this.boundaryPhiFallbackStorage.destroy();
     this.control.destroy(); this.params.destroy();
   }
 }

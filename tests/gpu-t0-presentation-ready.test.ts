@@ -65,6 +65,32 @@ test("diagnostics mode confirms only a current fine/coarse crossing", () => {
   assert.equal(initialRasterPresentationReadiness({ ...base, diagnosticsRequired: true }).state, "pending");
 });
 
+test("coarse-only octree reaches t=0 readiness without allocating a global-fine source", () => {
+  const coarse = { ...base, globalFineRequired: false, globalFineAttached: false } as const;
+  assert.deepEqual(initialRasterPresentationReadiness(coarse), {
+    ready: true,
+    state: "gpu-authoritative",
+    label: "WebGPU t=0 ready · coarse-octree raster publication fenced",
+  });
+
+  const confirmed = initialRasterPresentationReadiness({
+    ...coarse,
+    diagnosticsRequired: true,
+    diagnostics: diagnostic("adaptive-octree", 12),
+  });
+  assert.equal(confirmed.ready, true);
+  assert.equal(confirmed.state, "crossing-confirmed");
+  assert.match(confirmed.label, /coarse-octree raster crossing confirmed/);
+
+  const empty = initialRasterPresentationReadiness({
+    ...coarse,
+    diagnosticsRequired: true,
+    diagnostics: diagnostic("empty", 0),
+  });
+  assert.equal(empty.ready, false);
+  assert.equal(empty.state, "failed-closed");
+});
+
 test("renderer publishes ready only after first raster submission completion and controller retains both locks", () => {
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const controller = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
@@ -78,7 +104,7 @@ test("renderer publishes ready only after first raster submission completion and
     "diagnostics mode must settle from the readback belonging to the fenced t=0 submission");
   assert.match(renderer, /state: "blocked", label: outcome\.label/,
     "an empty or retained raster diagnostic must remain attached but fail transport closed");
-  assert.match(renderer, /readyGPUFluid\.globalFineLevelSetSource/);
+  assert.match(renderer, /initialRasterGlobalFineRequired[\s\S]*readyGPUFluid\.globalFineLevelSetSource/);
   assert.match(renderer, /this\.adaptiveWaterAttached[\s\S]*rasterResult\.surfaceUpdated/);
   assert.match(controller, /initialSparseAuthorityReady === true[\s\S]*initialRasterSurfaceReady === true/);
   assert.match(transport, /initialSparseAuthorityReady === true[\s\S]*initialRasterSurfaceReady === true/);
