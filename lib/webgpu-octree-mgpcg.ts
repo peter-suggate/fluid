@@ -5,6 +5,12 @@ export const OCTREE_SECTION43_BOUNDARY_BAND_LAYERS = 3;
  * production hierarchy converges in 6-10 iterations, but our approximation
  * has rare topology generations that require more than 16. */
 export const OCTREE_SECTION43_DEFAULT_PCG_ITERATIONS = 128;
+/** Small power-octree solves are launch-bound long before they are ALU-bound.
+ * Keep enough recorded iterations for more than three times the paper's
+ * reported 6--10 iteration range, while retaining the 128-dispatch-tail
+ * fallback for larger and less predictable domains. */
+export const OCTREE_SECTION43_SMALL_DOMAIN_PCG_ITERATIONS = 32;
+export const OCTREE_SECTION43_SMALL_DOMAIN_MAXIMUM_CELLS = 16 ** 3;
 // The paper reports convergence in 6-10 PCG iterations for its production
 // hierarchy. Our sparse GPU hierarchy is an approximation (notably at the
 // graph-ring boundary band), so retain a bounded tail for difficult topology
@@ -15,6 +21,19 @@ export const OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS = 128;
 export function normalizeOctreeSection43IterationCap(value: number | undefined): number {
   const requested = value ?? OCTREE_SECTION43_DEFAULT_PCG_ITERATIONS;
   return Math.max(8, Math.min(OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS, Math.round(requested)));
+}
+
+export function octreeSection43RecordedIterationCap(
+  requested: number | undefined,
+  finestCellCount: number,
+): number {
+  if (!Number.isSafeInteger(finestCellCount) || finestCellCount < 1) {
+    throw new RangeError("Section 4.3 finest-cell count must be a positive integer");
+  }
+  const normalized = normalizeOctreeSection43IterationCap(requested);
+  return finestCellCount <= OCTREE_SECTION43_SMALL_DOMAIN_MAXIMUM_CELLS
+    ? Math.min(normalized, OCTREE_SECTION43_SMALL_DOMAIN_PCG_ITERATIONS)
+    : normalized;
 }
 
 export function normalizeOctreeSection43BoundarySmoothing(value: number | undefined): number {
@@ -373,6 +392,7 @@ struct LeafEntry { row:u32,coefficient:f32 }
 
 const INVALID_ROW:u32=0xffffffffu;const INVALID_ROW_ERROR:u32=1u;
 const NONFINITE:u32=4u;const NONPOSITIVE:u32=8u;const NONCONVERGENCE:u32=16u;
+const ROW_BOUNDARY:u32=1u;
 fn finite(value:f32)->bool{return value==value&&abs(value)<=3.402823e38;}
 fn liveRows()->u32{return min(select(0u,counts[0],arrayLength(&counts)>0u),params.dimsCapacity.w);}
 fn rowIndex(gid:vec3u)->u32{return gid.x+gid.y*params.hierarchy.w*64u;}
@@ -415,7 +435,8 @@ fn smoothHybridValue(row:u32,useB:bool)->f32{let current=hybridValue(row,useB);i
   let h=headers[row];var offDiagonalSum=0.0;var transition=false;
   for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=liveRows()||!finite(e.coefficient)){report(INVALID_ROW_ERROR);continue;}
     offDiagonalSum+=e.coefficient;transition=transition||headers[e.row].size!=h.size;}
-  let boundaryGap=h.diagonal-offDiagonalSum;let boundary=boundaryGap>1e-5*max(1.0,h.diagonal);
+  let boundaryGap=h.diagonal-offDiagonalSum;
+  let boundary=(h.pad0&ROW_BOUNDARY)!=0u||boundaryGap>1e-5*max(1.0,h.diagonal);
   hybridBandA[row]=select(0u,1u,boundary||transition);}
 @compute @workgroup_size(64) fn dilateHybridBandAtoB(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||failed()){return;}
   var bandValue=hybridBandA[row];let h=headers[row];for(var j=0u;j<h.entryCount&&bandValue==0u;j+=1u){let neighbor=entries[h.entryStart+j].row;

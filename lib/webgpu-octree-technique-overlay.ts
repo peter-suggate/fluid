@@ -296,8 +296,15 @@ fn fineAddress(q:vec3i)->u32 {
   let local=uq-brick*fine.brickResolution;let localIndex=local.x+fine.brickResolution*(local.y+fine.brickResolution*local.z);let address=page*fine.samplesPerBrick+localIndex;
   return select(INVALID,address,address<arrayLength(&sampleFlags)&&address<arrayLength(&finePhi)&&(sampleFlags[address]&VALID)!=0u);
 }
+fn renderWorldToFine(point:vec3f)->vec3f {
+  // The solver's sparse fine lattice uses its local [0, extent] frame while
+  // rendering centres x/z around the tank.  domainOrigin belongs to the
+  // solver frame and must not be subtracted from centred render coordinates.
+  let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);
+  return (point-minimum)/max(fine.fineCellWidth,1e-9);
+}
 fn fineState(point:vec3f)->FineState {
-  let relative=(point-fine.domainOrigin)/max(fine.fineCellWidth,1e-9);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return FineState(vec3f(0.0),0.0,INVALID);}let q=vec3u(floor(relative));let brick=q/max(fine.brickResolution,1u);let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);
+  let relative=renderWorldToFine(point);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return FineState(vec3f(0.0),0.0,INVALID);}let q=vec3u(floor(relative));let brick=q/max(fine.brickResolution,1u);let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);
   if(arrayLength(&topologyControl)>0u&&topologyControl[0]!=0u){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}if(arrayLength(&redistanceControl)>4u&&redistanceControl[4]!=0u){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}
   let page=pageOf(key);if(page==INVALID){let desired=arrayLength(&topologyControl)>4u&&topologyControl[4]==0u;return FineState(select(vec3f(0.03,0.10,0.34),vec3f(1.0,0.34,0.04),desired),select(0.045,0.34,desired),key);}
   if(page>=fine.pageCapacity||page*10u+3u>=arrayLength(&metadata)||metadata[page*10u+2u]!=fine.generation||arrayLength(&worklist)<=1u||worklist[1]!=fine.generation){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}
@@ -307,7 +314,7 @@ fn fineState(point:vec3f)->FineState {
 }
 fn globalFinePhi(point:vec3f)->vec4f {
   if(arrayLength(&topologyControl)==0u||topologyControl[0]!=0u||arrayLength(&redistanceControl)<=4u||redistanceControl[3]==0u||redistanceControl[4]!=0u){return vec4f(1.0,0.01,0.06,0.96);}
-  let relative=(point-fine.domainOrigin)/max(fine.fineCellWidth,1e-9);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return vec4f(0.0);}
+  let relative=renderWorldToFine(point);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return vec4f(0.0);}
   let q=vec3i(floor(relative));let centerAddress=fineAddress(q);if(centerAddress==INVALID){return vec4f(0.02,0.06,0.18,0.08);}
   let center=finePhi[centerAddress];if(center!=center||abs(center)>=3.402823e38){return vec4f(1.0,0.01,0.06,0.96);}
   var gradient=vec3f(0.0);var complete=true;let h=max(fine.fineCellWidth,1e-9);

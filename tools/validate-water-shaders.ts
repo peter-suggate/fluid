@@ -49,6 +49,7 @@ import { globalFineClassifiedCountShader, globalFineClassifiedEmitShader, global
 import { fineLevelSetGPUQueryTransportWGSL } from "../lib/webgpu-octree-fine-levelset-transport";
 import { fineLevelSetVolumeCorrectionWGSL } from "../lib/webgpu-octree-fine-levelset-volume";
 import { fineLevelSetRedistanceWGSL } from "../lib/webgpu-octree-fine-levelset-redistance";
+import { fineLevelSetSummaryWGSL } from "../lib/webgpu-octree-fine-levelset-summary";
 import { globalFineSurfaceClassificationShader } from "../lib/webgpu-water-global-fine-classify";
 
 const naga = process.env.NAGA ?? "naga";
@@ -62,6 +63,7 @@ const shaders = {
   "global-fine-query-transport": fineLevelSetGPUQueryTransportWGSL,
   "global-fine-volume-correction": fineLevelSetVolumeCorrectionWGSL,
   "global-fine-fast-march": fineLevelSetRedistanceWGSL,
+  "global-fine-summary": fineLevelSetSummaryWGSL,
   "extraction-prepare": extractionPrepareShader,
   "surface-raster": surfaceRasterShader,
   caustics: causticShader,

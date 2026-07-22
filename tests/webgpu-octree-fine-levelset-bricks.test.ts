@@ -26,6 +26,7 @@ import {
   FINE_LEVELSET_TOPOLOGY_FINALIZE_REASON,
   fineLevelSetLeafSeedWGSL,
   makeFineLevelSetTopologyWGSL,
+  FINE_LEVELSET_DIRECT_DILATION_MAXIMUM_BRICKS,
   planFineLevelSetLeafBrickBounds,
   planFineLevelSetChebyshevFloodPasses,
   planFineLevelSetTopologyBand,
@@ -59,7 +60,7 @@ test("fine transport diagnostics decode the exact first invalid velocity positio
   });
 });
 
-test("fine topology dilation covers displacement, interpolation, redistance, and a safety brick", () => {
+test("fine topology takes the larger trajectory/redistance radius plus the paper one-ring", () => {
   assert.deepEqual(planFineLevelSetTopologyBand(4, {
     maximumBacktraceFineCells: 8,
     interpolationSupportFineCells: 1,
@@ -69,8 +70,8 @@ test("fine topology dilation covers displacement, interpolation, redistance, and
     interpolationSupportFineCells: 1,
     redistanceBandFineCells: 32,
     safetyBrickRings: 1,
-    requiredFineCells: 41,
-    dilationBrickRings: 12,
+    requiredFineCells: 32,
+    dilationBrickRings: 9,
   });
   assert.throws(() => planFineLevelSetTopologyBand(4, {
     maximumBacktraceFineCells: 1, interpolationSupportFineCells: 1,
@@ -90,11 +91,13 @@ test("fine topology discovers and pre-dilates the complete support with a logari
   assert.match(wgsl, /@compute@workgroup_size\(64\)fndiscoverInterfaceBricks/);
   assert.match(wgsl, /@compute@workgroup_size\(64\)fninsertExternalSeeds/);
   assert.match(wgsl, /@compute@workgroup_size\(64\)fndilateDesiredRing/);
+  assert.match(wgsl, /@compute@workgroup_size\(64\)fndilateDesiredFromSeeds/);
   assert.match(wgsl,
     /fninsertDesired\(key:u32\)[\s\S]*atomicCompareExchangeWeak\(&targetA\[slot\*2u\],INVALID,key\)/,
     "parallel discovery must atomically deduplicate desired pages");
   assert.match(wgsl,
-    /fnbeginDesiredDilation\(\)\{targetB\[0\]=0u;targetB\[1\]=min\(atomicLoad\(&control\[2\]\),params\.pageCapacity\);\}/);
+    /fnbeginDesiredDilation\(\)\{targetB\[0\]=0u;targetB\[1\]=min\(atomicLoad\(&control\[2\]\),params\.pageCapacity\);atomicStore\(&control\[8\],targetB\[1\]\);\}/,
+    "the exact interface/endpoint prefix must be frozen before allocation-halo dilation");
   assert.match(wgsl,
     /fndilateDesiredRing[\s\S]*letradius=targetB\[0\];letlayerEnd=targetB\[1\];[\s\S]*letexpansion=min\(radius\+1u,params\.dilationBrickRings-radius\)[\s\S]*targetB\[5u\+work\]/,
     "each pass expands the complete prior Chebyshev ball by a doubling radius");
@@ -107,18 +110,27 @@ test("fine topology discovers and pre-dilates the complete support with a logari
   assert.match(encode, /dilationBrickRings=bandPlan\.dilationBrickRings/,
     "topology must allocate transport, interpolation, redistance, and safety support before redistance");
   assert.match(encode,
-    /floodPasses=planFineLevelSetChebyshevFloodPasses\(dilationBrickRings\)[\s\S]*for\(letflood=0;flood<floodPasses;flood\+=1\)[\s\S]*this\.dilatePipeline[\s\S]*this\.advanceDilationPipeline/,
-    "host dispatch count must be logarithmic in the requested support radius");
+    /logicalBrickCount<=FINE_LEVELSET_DIRECT_DILATION_MAXIMUM_BRICKS[\s\S]*this\.directDilationPipeline[\s\S]*floodPasses=planFineLevelSetChebyshevFloodPasses\(dilationBrickRings\)[\s\S]*this\.dilatePipeline[\s\S]*this\.advanceDilationPipeline/,
+    "mini lattices use one direct expansion while larger lattices retain logarithmic flooding");
+  assert.match(wgsl,
+    /fndilateDesiredFromSeeds[\s\S]*seedCount=targetB\[1\][\s\S]*completeCapacity=params\.pageCapacity>=logicalBricks[\s\S]*insertDesired/,
+    "direct dilation must consume only the frozen seed prefix and preserve capacity overflow detection");
   assert.match(encode,
     /this\.beginDilationPipeline[\s\S]*?,1,\[0,6,7\]\)/,
     "beginDesiredDilation reads params.pageCapacity as well as the worklist/control buffers");
   assert.match(encode,
     /this\.advanceDilationPipeline[\s\S]*?,1,\[0,6,7\]\)/,
     "advanceDesiredDilation must bind the params buffer used to clip its next frontier");
+  assert.equal(encode.match(/beginComputePass/g)?.length, 1,
+    "the launch-bound topology chain must remain in one ordered compute pass");
+  const finalize = WebGPUFineLevelSetTopology.prototype.encodeFinalizePublication.toString().replace(/\s+/g, "");
+  assert.equal(finalize.match(/beginComputePass/g)?.length, 1,
+    "publication validation and failure-only rollback must share one ordered compute pass");
   assert.equal(planFineLevelSetChebyshevFloodPasses(0), 0);
   assert.equal(planFineLevelSetChebyshevFloodPasses(1), 1);
   assert.equal(planFineLevelSetChebyshevFloodPasses(6), 3);
   assert.equal(planFineLevelSetChebyshevFloodPasses(12), 4);
+  assert.equal(FINE_LEVELSET_DIRECT_DILATION_MAXIMUM_BRICKS, 15 ** 3);
 });
 
 test("B4 leaf seeds cover all eight factor-8 bricks per finest cell", () => {
@@ -151,6 +163,10 @@ test("fine topology telemetry labels exact requirements and overflow lower bound
   assert.equal(published.requiredDesiredBricksExact, true);
   assert.equal(published.dilationBrickRings, 7);
   assert.equal(published.downstreamFinalizeReason, 0);
+  assert.equal(published.interfaceSeedBricks, undefined,
+    "legacy eight-word diagnostic snapshots remain decodable");
+  const prefixed = unpackFineLevelSetGPUTopologyControl([0, 7, 35, 35, 1, 0, 7, 0, 11]);
+  assert.equal(prefixed.interfaceSeedBricks, 11);
   const overflow = unpackFineLevelSetGPUTopologyControl([1, 7, 32, 0, 1, 1, 33, 0]);
   assert.equal(overflow.desiredBricks, 32);
   assert.equal(overflow.requiredDesiredBricks, 33);
@@ -181,11 +197,30 @@ test("fine topology keeps cold failure unpublished and separates recurring suppo
     "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
   ).replace(/\s+/g, "");
   assert.match(shader,
-    /fninsertExternalSeeds[\s\S]*if\(currentPublished&&\(tagged==INVALID\|\|\(tagged&RECURRING_SUPPORT\)==0u\)\)\{return;\}/,
+    /fncurrentFinePopulated\(\)->bool\{returncurrentFinePublished\(\)&&currentWorklist\[0\]>0u;\}/,
+    "a structurally published empty A/B slot remains a cold bootstrap source");
+  assert.match(shader,
+    /fninsertExternalSeeds[\s\S]*letrecurring=currentFinePopulated\(\)[\s\S]*if\(recurring&&!endpoint\)\{return;\}/,
     "a published generation admits only explicitly tagged recurring support keys");
   assert.match(shader,
-    /fnexternalSeedPhi[\s\S]*params\.affineSeeds==0u\|\|currentFinePublished\(\)[\s\S]*return3\.402823e38/,
+    /fnexternalSeedPhi[\s\S]*params\.affineSeeds==0u\|\|currentFinePopulated\(\)[\s\S]*return3\.402823e38/,
     "recurring pages initialize from coarse phi rather than a compact affine bootstrap plane");
+  assert.match(shader,
+    /fnexternalAffineInterfaceBrick[\s\S]*for\(varcorner=0u;corner<8u;corner\+=1u\)[\s\S]*returnminimum<=0\.0&&maximum>=0\.0/,
+    "cold affine keys enter the pre-dilation prefix only when their page contains a zero crossing");
+  assert.match(shader,
+    /letfirst=vec3f\(brick\*params\.brickResolution\)\/f32\(params\.fineFactor\);letlast=vec3f\(\(brick\+vec3u\(1u\)\)\*params\.brickResolution\)\/f32\(params\.fineFactor\)/,
+    "interface admission must include shared page boundaries instead of testing sample centres only");
+  const alignedFace = 1;
+  const centreBounds = [[0.125, 0.875], [1.125, 1.875]] as const;
+  const supportBounds = [[0, 1], [1, 2]] as const;
+  assert.ok(centreBounds.every(([first, last]) => !((first - alignedFace) <= 0 && (last - alignedFace) >= 0)),
+    "the regression fixture must reproduce centre-only rejection on both sides of an aligned face");
+  assert.ok(supportBounds.every(([first, last]) => (first - alignedFace) <= 0 && (last - alignedFace) >= 0),
+    "both page supports must admit their shared zero face for deterministic one-ring ownership");
+  assert.match(shader,
+    /if\(!recurring&&!endpoint&&!externalAffineInterfaceBrick\(key\)\)\{return;\}/,
+    "the published-empty t0 path cannot collapse to a zero interface prefix or seed the entire affine leaf set");
   assert.match(shader,
     /fnrollbackFailedGeneration[\s\S]*if\(!currentPublished\)\{targetB\[0\]=0u;targetB\[1\]=params\.nextGeneration;targetB\[2\]=0u;targetB\[3\]=0u;targetB\[4\]=0u;atomicStore\(&control\[4\],0u\);atomicStore\(&control\[5\],1u\);return;\}/,
     "failure before a first valid fine generation must remain explicitly unpublished");
@@ -277,6 +312,13 @@ test("fine topology binds exactly the resources reachable from every compute ent
       "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}");
     topology.encode(encoder);
     topology.encodeFinalizePublication(encoder, { redistance: buffer });
+    const largePlan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0],
+      finestCellDimensions: [17, 17, 17], finestCellWidth: 1, fineFactor: 4,
+      brickResolution: 4, maximumResidentBricks: 1 });
+    const largeCurrent = { ...current, plan: largePlan };
+    const largeNext = { ...next, plan: largePlan };
+    new WebGPUFineLevelSetTopology(device, largeCurrent, largeNext,
+      "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}").encode(encoder);
   } finally {
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
     else Reflect.deleteProperty(globalThis, "GPUBufferUsage");
@@ -312,8 +354,8 @@ test("transport hook requires an injected octree velocity sampler and factor-rat
     /abs\(phi\[index\]\)>=chunk\.transportBandDistance/,
     "transport must leave the outer valid band available only as backtrace/interpolation support");
   assert.match(fineLevelSetGPUQueryTransportWGSL,
-    /if\(chunk\.closedDomainBoundary==0u&&\(any\(raw<vec3f\(0\.\)\)\|\|any\(raw>sampleMax\)\)\)\{return vec2f\(0\.\);\}/,
-    "wall ghosts require an explicit closed-domain policy");
+    /if\(chunk\.closedDomainBoundary==0u&&\(any\(raw<vec3f\(0\.\)\)\|\|raw\.x>sampleMax\.x\|\|raw\.z>sampleMax\.z\|\|\(raw\.y>sampleMax\.y&&chunk\.openTopBoundary==0u\)\)\)\{return vec3f\(0\.,0\.,1\.\);\}/,
+    "wall ghosts require an explicit closed-domain or authored open-top policy");
   assert.match(fineLevelSetGPUQueryTransportWGSL,
     /workA\[index\]=phi\[index\];\s*if\(abs\(phi\[index\]\)>=chunk\.transportBandDistance\)\{return;\}/,
     "support-only samples must preserve phi before the shared scratch is committed");
@@ -333,6 +375,15 @@ test("transport hook requires an injected octree velocity sampler and factor-rat
     /select\(0u,8u,!transportValid\)/,
     "an unavailable Section 5 transport must be visible as the exact downstream rejection reason");
   assert.match(source, /atomicLoad\(&control\.departureOutsideBand\)!=0u/);
+  assert.match(fineLevelSetGPUQueryTransportWGSL,
+    /value\.y==0\.\)[\s\S]*firstInvalidVelocityStatus,0x04000000u\|u32\(value\.z\)[\s\S]*positions\[local\]\.x/,
+    "a rejected departure must retain its failure class and first physical coordinate for sparse-band forensics");
+  assert.match(fineLevelSetGPUQueryTransportWGSL,
+    /wallTolerance=1e-3[\s\S]*raw<vec3f\(-\.5-wallTolerance\)[\s\S]*raw>wall\+vec3f\(wallTolerance\)/,
+    "wall-centred characteristics must tolerate floating-point drift while non-open exterior departures still reject");
+  assert.match(fineLevelSetGPUQueryTransportWGSL,
+    /above\.y&&chunk\.openTopBoundary==0u[\s\S]*extendBoundary=chunk\.closedDomainBoundary!=0u\|\|chunk\.openTopBoundary!=0u/,
+    "only an authored open ceiling may extend an exterior top characteristic onto the boundary sample");
   assert.doesNotMatch(source, /velocity(?:Texture|Grid|Buffer)/);
 });
 
@@ -356,6 +407,15 @@ test("fine redistance exposes fixed JFA-CPT strides and a selectable FMM oracle"
   assert.match(fineLevelSetJFACPTWGSL,
     /var bestD=LARGE;if\(best!=INVALID\)\{let delta=point-materializedClosestPoint\(best\);bestD=dot\(delta,delta\);\}/,
     "each flood must cache the current winner's distance instead of recomputing its closest point per candidate");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /fn resolvedDistance\(seed:u32,q:vec3u\)->f32\{if\(seed==INVALID\)\{return bandDistance\(\);\}return length/,
+    "a reachable distance must remain unclamped so beyond-band seeds cannot masquerade as exact-cutoff samples");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /fn resolvedSeed\(index:u32\)->u32\{return select\(workB\[index\],workA\[index\],p\.distanceInB!=0u\);\}/,
+    "the final distance channel must retain the opposite channel's closest-point identity");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /if\(resolvedSeed\(index\)==INVALID\|\|d>bandDistance\(\)\)\{flags\[index\]=0u;\}/,
+    "the closed cutoff may publish only a sample reached from a real interface seed");
   assert.doesNotMatch(fineLevelSetJFACPTWGSL, /fn betterSeed/,
     "candidate comparison must evaluate each closest point only once");
   assert.match(fineLevelSetJFACPTWGSL,

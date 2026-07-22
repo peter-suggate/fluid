@@ -279,7 +279,7 @@ struct Control { flags:atomic<u32>,firstError:atomic<u32>,rowCount:atomic<u32>,f
 // binding, so ordinary Chebyshev projection retains its existing layout.
 @group(0) @binding(9) var<storage,read_write> solverControl:array<atomic<u32>>;
 const INVALID:u32=${OCTREE_POWER_INVALID_ROW}u;const ASSEMBLED:u32=0x80000000u;const PROJECTED:u32=0x40000000u;
-const OPEN_BOUNDARY:u32=2u;
+const BOUNDARY:u32=1u;const OPEN_BOUNDARY:u32=2u;const ROW_BOUNDARY:u32=1u;
 const CAPACITY:u32=1u;const INVALID_FACE:u32=2u;const NONFINITE_FACE:u32=4u;const INCIDENCE_OVERFLOW:u32=8u;
 const ENTRY_OVERFLOW:u32=16u;const INVALID_VOLUME:u32=32u;const INVALID_PRESSURE:u32=64u;const INVALID_STATE:u32=128u;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
@@ -315,22 +315,23 @@ fn validFace(face:PowerFaceRecord)->bool{return face.negativeRow<rowCount()&&fac
   for(var row=0u;row<rowCount();row+=1u){let count=arena[entryOffsetBase()+row];arena[entryOffsetBase()+row]=total;total+=count;
     if(total>entryCapacity()){report(ENTRY_OVERFLOW,row);return;}}arena[entryOffsetBase()+rowCount()]=total;atomicStore(&control.entryCount,total);}
 @compute @workgroup_size(64) fn emitPowerRows(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;if(row>=rowCount()||atomicLoad(&control.flags)!=0u){return;}
-  let b=begin(row);let e=end(row);var rhs=0.0;var diagonal=0.0;var local=0u;
+  let b=begin(row);let e=end(row);var rhs=0.0;var diagonal=0.0;var local=0u;var rowFlags=0u;
   for(var cursor=b;cursor<e;cursor+=1u){let item=incidences[cursor];let face=faces[item.face];rhs+=f32(item.sign)*face.area*face.normalVelocity;
+    if((face.flags&(BOUNDARY|OPEN_BOUNDARY))!=0u||face.openFraction<1.0){rowFlags|=ROW_BOUNDARY;}
     let other=neighbor(face,row);if(other==INVALID){if((face.flags&OPEN_BOUNDARY)!=0u){diagonal+=face.openFraction*face.area*face.inverseDistance;}continue;}var first=true;for(var earlier=b;earlier<cursor;earlier+=1u){if(neighbor(faces[incidences[earlier].face],row)==other){first=false;break;}}
     if(!first){continue;}var coefficient=0.0;for(var merge=cursor;merge<e;merge+=1u){let merged=faces[incidences[merge].face];
       if(neighbor(merged,row)==other){coefficient+=merged.openFraction*merged.area*merged.inverseDistance;}}
     if(!finite(coefficient)||coefficient<0.0){report(NONFINITE_FACE,item.face);return;}let output=arena[entryOffsetBase()+row]+local;
     arena[entryBase()+output*2u]=other;arena[entryBase()+output*2u+1u]=bitcast<u32>(coefficient);diagonal+=coefficient;local+=1u;
   }if(!finite(rhs)||!finite(diagonal)){report(NONFINITE_FACE,row);return;}let base=row*4u;arena[base]=bitcast<u32>(diagonal);
-  arena[base+1u]=bitcast<u32>(rhs);arena[base+2u]=bitcast<u32>(values[row]);arena[base+3u]=0u;}
+  arena[base+1u]=bitcast<u32>(rhs);arena[base+2u]=bitcast<u32>(values[row]);arena[base+3u]=rowFlags;}
 @compute @workgroup_size(1) fn publishPowerRows(){if(atomicLoad(&control.flags)==0u){atomicStore(&control.flags,ASSEMBLED);}}
 @compute @workgroup_size(64) fn publishPowerLeafRows(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;
   if(atomicLoad(&control.flags)!=ASSEMBLED||row>=rowCount()||row>=arrayLength(&leafHeaders)){return;}
   let start=arena[entryOffsetBase()+row];let finish=arena[entryOffsetBase()+row+1u];
   if(start>finish||finish>atomicLoad(&control.entryCount)||finish>arrayLength(&leafEntries)){return;}
   var header=leafHeaders[row];let base=row*4u;header.entryStart=start;header.entryCount=finish-start;
-  header.diagonal=bitcast<f32>(arena[base]);header.rhs=bitcast<f32>(arena[base+1u]);header.pad0=0u;header.pad1=0u;leafHeaders[row]=header;
+  header.diagonal=bitcast<f32>(arena[base]);header.rhs=bitcast<f32>(arena[base+1u]);header.pad0=arena[base+3u];header.pad1=0u;leafHeaders[row]=header;
   for(var index=start;index<finish;index+=1u){leafEntries[index]=LeafEntry(arena[entryBase()+index*2u],bitcast<f32>(arena[entryBase()+index*2u+1u]));}}
 fn preparePowerProjectionState(){let old=atomicLoad(&control.flags);atomicStore(&control.pad2,old);atomicStore(&control.pad3,atomicLoad(&control.firstError));atomicStore(&control.projectedCount,0u);
   atomicStore(&control.pad0,0u);atomicStore(&control.pad1,0u);

@@ -144,6 +144,7 @@ export class WebGPUFineLevelSetSummaries {
   private readonly basePipeline: GPUComputePipeline;
   private readonly coarsePipeline: GPUComputePipeline;
   private readonly parentPipeline: GPUComputePipeline;
+  private readonly centerPipeline: GPUComputePipeline;
   private readonly finalizePipeline: GPUComputePipeline;
   private destroyed = false;
 
@@ -162,7 +163,9 @@ export class WebGPUFineLevelSetSummaries {
       compute: { module: shaderModule, entryPoint } });
     this.resetPipeline = pipeline("resetFineSummaries"); this.basePipeline = pipeline("summarizeFineBricks");
     this.coarsePipeline = pipeline("mergeCoarsePhiSummaries");
-    this.parentPipeline = pipeline("propagateFineSummaries"); this.finalizePipeline = pipeline("finalizeFineSummaries");
+    this.parentPipeline = pipeline("propagateFineSummaries");
+    this.centerPipeline = pipeline("summarizeFineCenters");
+    this.finalizePipeline = pipeline("finalizeFineSummaries");
   }
 
   encode(encoder: GPUCommandEncoder, source: WebGPUFineLevelSetBrickSource,
@@ -180,9 +183,12 @@ export class WebGPUFineLevelSetSummaries {
       data.set([this.finePlan.maximumResidentBricks, this.plan.hashCapacity,
         this.finePlan.maximumHashProbes, source.generation], 4);
       data.set([level, this.plan.levelOffsets[level], dims[0] * dims[1] * dims[2]], 8);
-      // WGSL vec3 members are 16-byte aligned: word 11 and words 17..19 are
-      // explicit host-side padding in this 96-byte uniform ABI.
+      // WGSL vec3 members are 16-byte aligned: word 11 and words 18..19 are
+      // explicit host-side padding in this 96-byte uniform ABI. Word 17 is
+      // the source fine-page hash capacity; the summary directory has its
+      // independent capacity in word 5.
       data.set(dims, 12); data[15] = this.plan.maximumLevel; data[16] = this.plan.hierarchyKeyCapacity;
+      data[17] = this.finePlan.hashCapacity;
       data.set(this.finePlan.finestCellDimensions, 20);
       this.device.queue.writeBuffer(this.params[level], 0, data);
     }
@@ -206,6 +212,16 @@ export class WebGPUFineLevelSetSummaries {
       run(this.parentPipeline, bind(this.parentPipeline, this.params[level + 1], [[5, this.directory]]),
         Math.ceil(this.plan.hashCapacity / 64), `Propagate global fine summaries level ${level + 1}`);
     }
+    // Parent propagation conservatively merges intervals and counts, but its
+    // child-centre sum is not the geometric centre of a larger dyadic node.
+    // Sample the current fine publication at every node centre before coarse
+    // rows are merged, so a newly rebuilt pressure leaf never consults a
+    // previous row directory for its phase.
+    for (let level = 0; level <= this.plan.maximumLevel; level += 1) {
+      run(this.centerPipeline, bind(this.centerPipeline, this.params[level], [[1, source.metadata],
+        [3, source.flags], [4, source.phi], [5, this.directory], [7, source.hash]]),
+      Math.ceil(this.plan.hashCapacity / 64), `Sample global fine summary centres level ${level}`);
+    }
     if (coarse) run(this.coarsePipeline,
       bind(this.coarsePipeline, this.params[0], [[5, this.directory], [6, coarse.directory]]),
       Math.ceil(coarse.hashCapacity / 64), "Merge corrected coarse phi into fine summaries");
@@ -221,9 +237,9 @@ export class WebGPUFineLevelSetSummaries {
  * Each sparse entry is eight words: key, ordered min/max phi, min |phi|,
  * exact sample/brick counts, flags, then an atomic f32 sum.  Flags reserve
  * bit 31 for corrected-coarse authority and low bits for fail-closed errors.
- * The final sum is the eight trilinear fine samples at each finest-cell
- * centre; parents sum brick shares, and consumers only interpret it at the
- * size-1 node where it is a single cell-centre phi.
+ * The final word is overwritten after propagation with the eight-sample
+ * trilinear value at each dyadic node's own geometric centre. This lets every
+ * newly rebuilt pressure leaf consume the current fine level set directly.
  */
 export const fineLevelSetSummaryWGSL = /* wgsl */ `
 ${fineLevelSetLinearWorkgroupWGSL}
@@ -231,13 +247,15 @@ const INVALID:u32=0xffffffffu;const VALID:u32=1u;const PUBLISHED:u32=0x80000000u
 const CAPACITY:u32=1u;const HASH:u32=2u;const STALE:u32=4u;const NONFINITE:u32=8u;
 const COARSE_AUTHORITY:u32=0x80000000u;const CENTER_SHIFT:u32=22u;const CENTER_COMPLETE:u32=0x3fc00000u;
 struct P{baseDims:vec3u,samplesPerBrick:u32,pageCapacity:u32,hashCapacity:u32,maxProbes:u32,generation:u32,
- level:u32,levelOffset:u32,levelKeyCount:u32,levelDims:vec3u,maximumLevel:u32,hierarchyKeyCapacity:u32,finestDims:vec3u,pad:u32}
+ level:u32,levelOffset:u32,levelKeyCount:u32,levelDims:vec3u,maximumLevel:u32,hierarchyKeyCapacity:u32,
+ pageHashCapacity:u32,pad0:u32,pad1:u32,finestDims:vec3u,pad:u32}
 @group(0)@binding(0)var<uniform>p:P;@group(0)@binding(1)var<storage,read_write>a:array<u32>;
 @group(0)@binding(2)var<storage,read_write>b:array<u32>;@group(0)@binding(3)var<storage,read_write>c:array<u32>;
 @group(0)@binding(4)var<storage,read_write>d:array<u32>;@group(0)@binding(5)var<storage,read_write>directory:array<atomic<u32>>;
 struct CoarseEntry{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,physicalVolume:f32}
 struct CoarseDirectory{state:u32,generation:u32,hashCapacity:u32,maximumLeafSize:u32,dimensions:vec3u,physicalCellSize:f32,entries:array<CoarseEntry>}
 @group(0)@binding(6)var<storage,read>coarse:CoarseDirectory;
+@group(0)@binding(7)var<storage,read>pageHash:array<u32>;
 var<workgroup> minimumPhi:array<f32,64>;var<workgroup> maximumPhi:array<f32,64>;
 var<workgroup> minimumAbsolutePhi:array<f32,64>;var<workgroup> centerContribution:array<f32,64>;
 var<workgroup> validSamples:array<u32,64>;var<workgroup> centerMasks:array<u32,64>;
@@ -245,11 +263,12 @@ var<workgroup> errors:array<u32,64>;
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn ordered(v:f32)->u32{let bits=bitcast<u32>(v);return select(bits^0x80000000u,~bits,(bits&0x80000000u)!=0u);}
 fn hash(key:u32)->u32{var v=key*0x9e3779b1u;v=(v^(v>>16u))*0x7feb352du;return v^(v>>15u);}
+fn finePageHash(key:u32)->u32{return ((key^(key>>16u))*0x9e3779b1u)&(p.pageHashCapacity-1u);}
+fn finePage(key:u32)->u32{if(p.pageHashCapacity==0u||(p.pageHashCapacity&(p.pageHashCapacity-1u))!=0u){return INVALID;}let start=finePageHash(key);for(var probe=0u;probe<32u;probe+=1u){if(probe>=p.maxProbes){break;}let slot=(start+probe)&(p.pageHashCapacity-1u);if(slot*2u+1u>=arrayLength(&pageHash)){return INVALID;}let stored=pageHash[slot*2u];if(stored==key){let id=pageHash[slot*2u+1u];let base=id*10u;if(id>=p.pageCapacity||base+2u>=arrayLength(&a)||a[base]!=id||a[base+1u]!=key||a[base+2u]!=p.generation){return INVALID;}return id;}if(stored==INVALID){return INVALID;}}return INVALID;}
 fn entryBase(slot:u32)->u32{return 16u+slot*8u;}
-fn atomicAddFloat(address:ptr<storage,atomic<u32>,read_write>,value:f32){var old=atomicLoad(address);loop{let next=bitcast<u32>(bitcast<f32>(old)+value);let result=atomicCompareExchangeWeak(address,old,next);if(result.exchanged){return;}old=result.old_value;}}
 fn merge(key:u32,minPhi:f32,maxPhi:f32,minAbs:f32,samples:u32,bricks:u32,flags:u32,centerPhi:f32){let start=hash(key)&(p.hashCapacity-1u);
  for(var probe=0u;probe<32u;probe+=1u){if(probe>=p.maxProbes){break;}let slot=(start+probe)&(p.hashCapacity-1u);let base=entryBase(slot);let result=atomicCompareExchangeWeak(&directory[base],INVALID,key);
-  if(result.exchanged||result.old_value==key){if(result.exchanged){atomicAdd(&directory[2],1u);}atomicMin(&directory[base+1u],ordered(minPhi));atomicMax(&directory[base+2u],ordered(maxPhi));atomicMin(&directory[base+3u],bitcast<u32>(minAbs));atomicAdd(&directory[base+4u],samples);atomicAdd(&directory[base+5u],bricks);atomicOr(&directory[base+6u],flags);atomicAddFloat(&directory[base+7u],centerPhi);return;}}
+  if(result.exchanged||result.old_value==key){if(result.exchanged){atomicAdd(&directory[2],1u);}atomicMin(&directory[base+1u],ordered(minPhi));atomicMax(&directory[base+2u],ordered(maxPhi));atomicMin(&directory[base+3u],bitcast<u32>(minAbs));atomicAdd(&directory[base+4u],samples);atomicAdd(&directory[base+5u],bricks);atomicOr(&directory[base+6u],flags);var old=atomicLoad(&directory[base+7u]);loop{let next=bitcast<u32>(bitcast<f32>(old)+centerPhi);let sumResult=atomicCompareExchangeWeak(&directory[base+7u],old,next);if(sumResult.exchanged){break;}old=sumResult.old_value;}return;}}
  atomicOr(&directory[0],HASH);}
 @compute @workgroup_size(64)fn resetFineSummaries(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let flat=fineLinearWorkgroup(w,n)*64u+lid;if(flat==0u){atomicStore(&directory[0],0u);atomicStore(&directory[1],p.generation);atomicStore(&directory[2],0u);atomicStore(&directory[3],p.hashCapacity);atomicStore(&directory[4],p.baseDims.x);atomicStore(&directory[5],p.baseDims.y);atomicStore(&directory[6],p.baseDims.z);atomicStore(&directory[7],p.maximumLevel);atomicStore(&directory[8],p.maxProbes);atomicStore(&directory[9],0u);atomicStore(&directory[10],p.hierarchyKeyCapacity);}
  if(flat==0u){atomicStore(&directory[11],p.samplesPerBrick);}
@@ -260,5 +279,6 @@ fn merge(key:u32,minPhi:f32,maxPhi:f32,minAbs:f32,samples:u32,bricks:u32,flags:u
  if(l.x==0u&&page<activeCount){if(errors[0]!=0u){atomicOr(&directory[0],errors[0]);}else if(validSamples[0]>0u){let id=b[5u+page];let key=a[id*10u+1u];if(key>=p.levelKeyCount){atomicOr(&directory[0],STALE);}else{merge(key,minimumPhi[0],maximumPhi[0],minimumAbsolutePhi[0],validSamples[0],1u,centerMasks[0]<<CENTER_SHIFT,centerContribution[0]);}}}}
 @compute @workgroup_size(64)fn mergeCoarsePhiSummaries(@builtin(global_invocation_id)g:vec3u){let sourceSlot=g.x;if(sourceSlot>=coarse.hashCapacity||sourceSlot>=arrayLength(&coarse.entries)||coarse.state!=PUBLISHED||(coarse.generation&0x3fffffffu)!=(p.generation&0x3fffffffu)||any(coarse.dimensions!=p.finestDims)){return;}let e=coarse.entries[sourceSlot];if(e.cellPlusOne==0u||(e.flags&9u)!=9u||e.size==0u||(e.size&(e.size-1u))!=0u||!finite(e.phi)||!finite(e.minimumPhi)||!finite(e.maximumPhi)||e.minimumPhi>e.phi||e.phi>e.maximumPhi){return;}let ratio=p.baseDims/p.finestDims;if(ratio.x==0u||any(ratio!=vec3u(ratio.x))){return;}var side=e.size*ratio.x;if((side&(side-1u))!=0u){return;}let cell=e.cellPlusOne-1u;let origin=vec3u(cell%p.finestDims.x,(cell/p.finestDims.x)%p.finestDims.y,cell/(p.finestDims.x*p.finestDims.y));var offset=0u;var ld=p.baseDims;var remaining=side;loop{if(remaining==1u){break;}offset+=ld.x*ld.y*ld.z;ld=(ld+vec3u(1u))/2u;remaining>>=1u;}let brickOrigin=origin*ratio.x;if(any(brickOrigin%vec3u(side)!=vec3u(0u))){return;}let q=brickOrigin/side;let key=offset+q.x+ld.x*(q.y+ld.y*q.z);let ma=select(min(abs(e.minimumPhi),abs(e.maximumPhi)),0.0,e.minimumPhi<=0.0&&e.maximumPhi>=0.0);let start=hash(key)&(p.hashCapacity-1u);for(var probe=0u;probe<32u;probe+=1u){if(probe>=p.maxProbes){break;}let slot=(start+probe)&(p.hashCapacity-1u);let base=entryBase(slot);let result=atomicCompareExchangeWeak(&directory[base],INVALID,key);if(result.exchanged||result.old_value==key){if(result.exchanged){atomicAdd(&directory[2],1u);}atomicMin(&directory[base+1u],ordered(e.minimumPhi));atomicMax(&directory[base+2u],ordered(e.maximumPhi));atomicMin(&directory[base+3u],bitcast<u32>(ma));atomicOr(&directory[base+6u],COARSE_AUTHORITY);return;}}atomicOr(&directory[0],HASH);}
 @compute @workgroup_size(64)fn propagateFineSummaries(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let flat=fineLinearWorkgroup(w,n)*64u+lid;if(flat>=p.hashCapacity){return;}let sourceBase=entryBase(flat);let key=atomicLoad(&directory[sourceBase]);let previousLevel=p.level-1u;var previousOffset=0u;var previousDims=p.baseDims;for(var level=0u;level<previousLevel;level+=1u){previousOffset+=previousDims.x*previousDims.y*previousDims.z;previousDims=(previousDims+vec3u(1u))/2u;}let previousCount=previousDims.x*previousDims.y*previousDims.z;if(key<previousOffset||key>=previousOffset+previousCount){return;}let local=key-previousOffset;let xy=previousDims.x*previousDims.y;let z=local/xy;let rem=local-z*xy;let y=rem/previousDims.x;let coord=vec3u(rem-y*previousDims.x,y,z);let parent=coord/2u;let parentKey=p.levelOffset+parent.x+p.levelDims.x*(parent.y+p.levelDims.y*parent.z);let samples=atomicLoad(&directory[sourceBase+4u]);if(samples==0u){return;}merge(parentKey,bitcast<f32>(atomicLoad(&directory[sourceBase+1u])^select(0x80000000u,0xffffffffu,(atomicLoad(&directory[sourceBase+1u])&0x80000000u)==0u)),bitcast<f32>(atomicLoad(&directory[sourceBase+2u])^select(0x80000000u,0xffffffffu,(atomicLoad(&directory[sourceBase+2u])&0x80000000u)==0u)),bitcast<f32>(atomicLoad(&directory[sourceBase+3u])),samples,atomicLoad(&directory[sourceBase+5u]),atomicLoad(&directory[sourceBase+6u]),bitcast<f32>(atomicLoad(&directory[sourceBase+7u])));}
+@compute @workgroup_size(64)fn summarizeFineCenters(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let flat=fineLinearWorkgroup(w,n)*64u+lid;if(flat>=p.hashCapacity){return;}let base=entryBase(flat);let key=atomicLoad(&directory[base]);if(key<p.levelOffset||key>=p.levelOffset+p.levelKeyCount){return;}let localKey=key-p.levelOffset;let xy=p.levelDims.x*p.levelDims.y;let z=localKey/xy;let rem=localKey-z*xy;let y=rem/p.levelDims.x;let coord=vec3u(rem-y*p.levelDims.x,y,z);let resolution=select(4u,8u,p.samplesPerBrick==512u);let brickSide=1u<<p.level;let span=brickSide*resolution;let centerLow=coord*span+vec3u(span/2u-1u);var center=0.0;var mask=0u;for(var corner=0u;corner<8u;corner+=1u){let delta=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);let q=centerLow+delta;let brick=q/resolution;if(any(brick>=p.baseDims)){continue;}let pageKey=brick.x+p.baseDims.x*(brick.y+p.baseDims.y*brick.z);let id=finePage(pageKey);if(id==INVALID){continue;}let within=q-brick*resolution;let index=id*p.samplesPerBrick+within.x+resolution*(within.y+resolution*within.z);if(index>=arrayLength(&c)||index>=arrayLength(&d)||(c[index]&VALID)==0u){continue;}let value=bitcast<f32>(d[index]);if(!finite(value)){atomicOr(&directory[0],NONFINITE);continue;}center+=0.125*value;mask|=1u<<corner;}atomicAnd(&directory[base+6u],~CENTER_COMPLETE);atomicStore(&directory[base+7u],0u);if(mask==0xffu){atomicStore(&directory[base+7u],bitcast<u32>(center));atomicOr(&directory[base+6u],CENTER_COMPLETE);}}
 @compute @workgroup_size(1)fn finalizeFineSummaries(){if(atomicLoad(&directory[0])==0u){atomicStore(&directory[9],PUBLISHED);}else{atomicStore(&directory[9],0u);}}
 `;

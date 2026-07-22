@@ -52,6 +52,7 @@ import {
 import { WebGPUOctreePowerOperator, planOctreePowerGPUOperator } from "./webgpu-octree-power-operator";
 import { WebGPUOctreePowerFaceSeed } from "./webgpu-octree-power-face-seed";
 import { WebGPUOctreePowerFaceTransfer } from "./webgpu-octree-power-face-transfer";
+import { WebGPUOctreePowerFaceAdvection } from "./webgpu-octree-power-face-advection";
 import { WebGPUOctreePowerSolidFaces } from "./webgpu-octree-power-solid-faces";
 import { WebGPUOctreeSolidVertexSdf } from "./webgpu-octree-solid-vertex-sdf";
 import { WebGPUOctreePowerVelocity } from "./webgpu-octree-power-velocity";
@@ -62,7 +63,7 @@ import {
 import {
   OCTREE_SECTION43_DEFAULT_PCG_ITERATIONS,
   WebGPUOctreeMGPCG,
-  normalizeOctreeSection43IterationCap,
+  octreeSection43RecordedIterationCap,
   type OctreeFirstOrderSPDVCycle,
 } from "./webgpu-octree-mgpcg";
 import { WebGPUOctreeSPGridVCycle } from "./webgpu-octree-spgrid-vcycle";
@@ -1018,6 +1019,7 @@ export class WebGPUOctreeProjection {
   private powerFaces?: WebGPUOctreePowerFaces;
   private powerOperator?: WebGPUOctreePowerOperator;
   private powerFaceSeed?: WebGPUOctreePowerFaceSeed;
+  private powerFaceAdvection?: WebGPUOctreePowerFaceAdvection;
   private powerFaceTransfer?: WebGPUOctreePowerFaceTransfer;
   private powerSolidFaces?: WebGPUOctreePowerSolidFaces;
   private powerSolidVertices?: WebGPUOctreeSolidVertexSdf;
@@ -1046,8 +1048,9 @@ export class WebGPUOctreeProjection {
     this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
     this.surfaceDetailStrength = Math.max(0, Math.min(1, options.surfaceDetailStrength ?? 0));
     this.iterations = Math.max(8, Math.min(400, Math.round(options.pressureIterations)));
-    this.powerPcgIterationCap = normalizeOctreeSection43IterationCap(
+    this.powerPcgIterationCap = octreeSection43RecordedIterationCap(
       options.powerPcgIterationCap ?? OCTREE_SECTION43_DEFAULT_PCG_ITERATIONS,
+      count,
     );
     const requestedExtrapolationSweeps = Math.max(0, Math.min(8, Math.round(options.extrapolationSweeps ?? 4)));
     // Kept opt-in until the widened-ocean A/B demonstrates that worklist
@@ -1310,6 +1313,11 @@ export class WebGPUOctreeProjection {
           activeTileLimits: this.analyticBootstrapWorklist.plan.activeTileLimits,
           activeTileCount: this.analyticBootstrapWorklist.plan.activeTileCount,
         } : undefined,
+        {
+          tileWorklist: this.topologyResidency.tileWorklist,
+          tileSizeCells: this.topologyTileSize,
+          tileListCapacity: this.topologyResidency.tilePublicationCapacity,
+        },
       );
       this.topology = this.ownerPages.arena;
     } else {
@@ -1473,7 +1481,8 @@ export class WebGPUOctreeProjection {
       leafCount: approximateLeaves, pressureSampleCount: approximateLeaves, liquidDofCount: approximateLeaves,
       faceCount: 0, mlsProjectionRowCount: 0, tallSegmentCount: 0, ghostFaceCount: 0,
       maximumNeighborRatio: 2, maximumFluidScale: this.maxLeafSize, compressionRatio: approximateLeaves / Math.max(1, count),
-      allocatedBytes: this.topology.size + (this.ownerPages ? 32 : 0) + this.solidCells.size + phiSnapshotAllocation.allocatedBytes + surfaceStateAllocation.allocatedBytes
+      allocatedBytes: this.topology.size + (this.ownerPages ? 32 : 0) + this.solidCells.size
+        + phiSnapshotAllocation.allocatedBytes + surfaceStateAllocation.allocatedBytes
         + this.pressureA.size + this.pressureB.size + this.leafHeaders.size + this.leafEntries.size
         + this.leafFrontier.size + this.compaction.size + this.fineSummaryFallback.size + 192
         + (this.mgpcg?.plan.allocatedBytes ?? 0)
@@ -1625,8 +1634,19 @@ export class WebGPUOctreeProjection {
           const logicalBrickCount = brickDimensions.reduce((product, value) => product * value, 1);
           const legacyCapacity = Math.ceil(this.adaptiveSurfacePages.plan.pageCapacity
             * (globalFineFactor / brickResolution) ** 3 * 2);
-          const redistanceBandFineCells = Math.min(256, Math.max(4,
+          const transportBandFineCells = Math.min(256, Math.max(4,
             this.interfaceRefinementBandCells * globalFineFactor));
+          // Section 5 transports every sample in the authored narrow band.
+          // The resident topology must therefore also hold the complete
+          // backtrace and trilinear stencil beyond that band.  A 3-D
+          // trilinear corner can be sqrt(3) fine cells from the query, so its
+          // signed-distance support needs two cells rather than one.
+          // The redistancer retains reachable samples on the closed authored
+          // cutoff.  Two cells are therefore sufficient for the complete
+          // ceil(sqrt(3)) trilinear corner reach; an unreachable cutoff
+          // sentinel is still rejected by seed identity.
+          const redistanceBandFineCells = Math.min(256,
+            transportBandFineCells + globalFineFactor + 2);
           const physicalBand = planFineLevelSetTopologyBand(brickResolution, {
             maximumBacktraceFineCells: globalFineFactor,
             interpolationSupportFineCells: 1,
@@ -1669,7 +1689,13 @@ export class WebGPUOctreeProjection {
           this.globalFineLevelSet = new WebGPUFineLevelSetBricks(device, globalPlan);
           this.globalFineSourceA = this.globalFineLevelSet.initializeEmptyGPUGeneration(1);
           this.globalFineSourceB = this.globalFineLevelSet.prepareGPUGeneration(2);
-          this.globalFineSeeds = new WebGPUFineLevelSetLeafSeeds(device, this.globalFineSourceB);
+          const exactAnalyticFineSeed = this.analyticSparseBootstrap
+            && (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
+            ? { initialCondition: this.scene.fluid.initialCondition,
+              fillFraction: this.scene.container.fillFraction }
+            : undefined;
+          this.globalFineSeeds = new WebGPUFineLevelSetLeafSeeds(
+            device, this.globalFineSourceB, exactAnalyticFineSeed);
           this.globalFineRedistanceA = new WebGPUFineLevelSetRedistance(device, this.globalFineSourceA);
           this.globalFineRedistanceB = new WebGPUFineLevelSetRedistance(device, this.globalFineSourceB);
           this.globalFineSummaries = new WebGPUFineLevelSetSummaries(device, globalPlan,
@@ -2108,6 +2134,8 @@ export class WebGPUOctreeProjection {
     }
     if (this.powerPolicy.authoritative && this.faceMirror) {
       this.powerFaceSeed = tracePowerInit("face-seed", () => new WebGPUOctreePowerFaceSeed(this.device, this.faceMirror!.source, this.powerFaces!.source));
+      this.powerFaceAdvection = tracePowerInit("face-advection", () => new WebGPUOctreePowerFaceAdvection(
+        this.device, this.powerTopology!.source, this.powerFaces!.source));
       this.powerFaceTransfer = tracePowerInit("face-transfer", () => new WebGPUOctreePowerFaceTransfer(this.device, this.powerFaces!.source, this.leafHeaders,
         [this.dims.nx, this.dims.ny, this.dims.nz]));
       if (sceneHasTerrain(this.scene)) {
@@ -2140,15 +2168,14 @@ export class WebGPUOctreeProjection {
         this.device, velocityChunkCapacity, this.powerTopology.source, this.powerFaces.source,
       );
       if (this.faceMirror) {
-        // Ando--Batty Section 7.1 redistances phi throughout the entire domain,
-        // rather than only near the interface.  The transient owner graph is
-        // also domain-complete, so a band-width iteration cap can strand dry
-        // support rows with no signed-distance value.  A Manhattan traversal
-        // across the finest lattice is a conservative bound for both the phi
-        // Jacobi propagation and the face closest-point graph.
-        const maximumDomainGraphDepth = Math.max(1, this.dims.nx + this.dims.ny + this.dims.nz);
-        const bandPhiRelaxationRounds = maximumDomainGraphDepth;
-        const maximumCptGraphDepth = maximumDomainGraphDepth;
+        // Aanjaneya et al. (2017), Section 5 extrapolates velocity only through
+        // the fine interface band needed by characteristic backtraces. Keep
+        // the face graph bounded by that authored physical band; a whole-domain
+        // graph would violate the sparse narrow-band construction.
+        const maximumNarrowBandGraphDepth = Math.min(256, Math.max(4,
+          this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4)));
+        const bandPhiRelaxationRounds = maximumNarrowBandGraphDepth;
+        const maximumCptGraphDepth = maximumNarrowBandGraphDepth;
         this.globalFineFaceFastMarch = new WebGPUOctreeFaceFastMarch(
           this.device, this.globalFineSourceA, rowCapacity, bandPhiRelaxationRounds,
           maximumCptGraphDepth, this.powerFaces.plan.faceCapacity,
@@ -2456,6 +2483,27 @@ export class WebGPUOctreeProjection {
     if (this.powerFaceSeed && this.powerOperator) {
       this.powerFaceSeed.encodePowerToAxis(encoder, this.powerOperator.control, true);
       this.powerFaceTransfer?.encodeCapture(encoder);
+      // Aanjaneya et al. (2017), Section 5 extrapolates the regular octree-face
+      // field and interpolates it back to the power faces before the next
+      // characteristic trace. Reconstruct and retain the complete OLD
+      // cell-centred interpolation mesh from that committed extrapolated field;
+      // retaining the earlier post-projection/pre-extrapolation vectors leaves
+      // air-side departure points without the paper's velocity extension.
+      this.powerVelocity.encodeFromFaceControl(encoder, {
+        faces: this.powerFaces.source.faces,
+        faceNormals: this.powerFaces.source.faceNormals,
+        incidenceRows: this.powerFaces.source.incidenceRows,
+        incidences: this.powerFaces.source.incidence,
+      }, this.powerFaces.source.control, {
+        maximumIncidencePerRow: OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence,
+        generation: this.powerGeneration,
+        projectionControl: this.powerOperator.control,
+      });
+      this.powerFaceAdvection?.encodeCapture(encoder, {
+        leafHeaders: this.leafHeaders,
+        rowVelocities: this.powerVelocity.velocities,
+        velocityControl: this.powerVelocity.control,
+      });
     }
   }
 
@@ -2755,14 +2803,43 @@ export class WebGPUOctreeProjection {
     });
     topology.encode(encoder, descriptor.descriptors, this.compaction, spacing);
     faces.encode(encoder, this.leafHeaders, faceOptions, true);
-    // The compact axis field has already been topology-transferred and
-    // advected. It is the current-time transport authority. A generalized-face
-    // snapshot captured after the previous projection is stale here: applying
-    // it over this seed would erase this step's transport/acceleration on
-    // every stable face and give the Poisson solve a patchy RHS.  Keep exact
-    // generalized capture for diagnostics/future upstream transfer work, but
-    // do not overwrite the current predicted velocity after seeding.
+    // Cold generation 1 is initialized from the authored regular field.  On
+    // every recurring generation Aanjaneya et al. (2017), Section 5 instead
+    // traces each new generalized-face centroid into the captured OLD power
+    // mesh, interpolates the old full vector, and projects onto the new normal.
+    // The seed is deliberately encoded first only as cold-start storage; the
+    // recurrent advector overwrites every face or invalidates the seed gate.
     this.powerFaceSeed?.encode(encoder);
+    const repairFromRetainedFaceBand = this.globalFineBootstrapped
+      && Boolean(this.globalFineFaceFastMarch && this.powerTopology);
+    this.powerFaceAdvection?.encodeAdvect(encoder, {
+      seedControl: this.powerFaceSeed!.control,
+      dimensions,
+      physicalCellSize: spacing[0],
+      maximumLeafSize: this.maxLeafSize,
+      generation: this.powerGeneration,
+      timestep: this.faceTransportDt_s,
+      deferInterpolationFailures: repairFromRetainedFaceBand,
+    });
+    if (repairFromRetainedFaceBand && this.globalFineFaceFastMarch && this.powerFaceAdvection
+      && this.powerTopology) {
+      this.globalFineFaceFastMarch.encodeRepairPowerFaceAdvection(encoder, {
+        faces: this.powerFaces!.source,
+        advectionControl: this.powerFaceAdvection.control,
+        seedControl: this.powerFaceSeed!.control,
+        dimensions,
+        maximumLeafSize: this.maxLeafSize,
+        physicalCellSize: spacing[0],
+        timestep: this.faceTransportDt_s,
+        // The face band is published before fine transport increments the
+        // live generation.  Old-mesh tracing therefore consumes the retained
+        // band epoch: generation 2 at cold start, then live minus one.
+        fineGeneration: Math.max(2, this.globalFineGeneration - 1),
+        powerGeneration: this.powerGeneration,
+        powerTopology: this.powerTopology.source,
+        closedTop: this.scene.container.top === "closed",
+      });
+    }
     // Equation (1) splits external forces from advection, while Section 4.1
     // stores the authoritative normal velocity at every power face. Apply
     // gravity in that native basis so oblique transition faces receive g.n dt
@@ -2818,6 +2895,14 @@ export class WebGPUOctreeProjection {
       maximumIncidencePerRow: OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence,
       generation: this.powerGeneration,
       projectionControl: this.powerOperator.control,
+    });
+    // Retain the complete old interpolation mesh before any following
+    // topology rebuild can overwrite compact headers, metrics, or the site
+    // directory. Generation N+1 consumes this snapshot directly.
+    this.powerFaceAdvection?.encodeCapture(encoder, {
+      leafHeaders: this.leafHeaders,
+      rowVelocities: this.powerVelocity.velocities,
+      velocityControl: this.powerVelocity.control,
     });
     this.powerFaceSeed.encodePowerToAxis(encoder, this.powerOperator.control, true);
     this.powerFaceTransfer?.encodeCapture(encoder);
@@ -3210,6 +3295,10 @@ export class WebGPUOctreeProjection {
           resource: { buffer: this.powerCoarseLevelSetSchedule!.sampleSource.directory } };
         const bandCells = Math.min(256, Math.max(4,
           this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4)));
+        // Match allocation planning above.  The final two cells cover the
+        // complete 3-D trilinear stencil at the closed authored cutoff.
+        const redistanceBandCells = Math.min(256,
+          bandCells + this.globalFineLevelSet!.plan.fineFactor + 2);
         const transport = this.globalFineCurrentIsA ? this.globalFineTransportA : this.globalFineTransportB;
         let transportEncoded = false;
         if (this.globalFineBootstrapped && transport && this.powerFaceSeed && this.powerVelocity) {
@@ -3225,6 +3314,7 @@ export class WebGPUOctreeProjection {
             powerTopology: this.powerTopology!.source,
             generation: this.powerGeneration,
             boundaryPolicy: "closed-neumann",
+            openTopBoundary: this.scene.container.top !== "closed",
             transportBandCells: Math.min(256, Math.max(4,
               this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4))),
           });
@@ -3248,12 +3338,11 @@ export class WebGPUOctreeProjection {
             // Express that same physical displacement on the fine lattice.
             maximumBacktraceFineCells: this.globalFineLevelSet!.plan.fineFactor,
             interpolationSupportFineCells: 1,
-            redistanceBandFineCells: bandCells,
+            redistanceBandFineCells: redistanceBandCells,
             safetyBrickRings: 1,
           }, true);
           beginFineRedistanceTiming();
-          publicationRedistance.encode(encoder, { bandCells: Math.min(256,
-            bandCells + this.globalFineLevelSet!.plan.fineFactor + 1), residualTolerance: 1,
+          publicationRedistance.encode(encoder, { bandCells: redistanceBandCells, residualTolerance: 1,
             method: this.fineRedistanceMethod });
           publicationVolume?.encode(encoder);
         } else {
@@ -3265,12 +3354,11 @@ export class WebGPUOctreeProjection {
           publicationTopology.encode(encoder, seeds, [compactCoarseEntry], {
             maximumBacktraceFineCells: this.globalFineLevelSet!.plan.fineFactor,
             interpolationSupportFineCells: 1,
-            redistanceBandFineCells: bandCells,
+            redistanceBandFineCells: redistanceBandCells,
             safetyBrickRings: 1,
           }, true);
           beginFineRedistanceTiming();
-          publicationRedistance.encode(encoder, { bandCells: Math.min(256,
-            bandCells + this.globalFineLevelSet!.plan.fineFactor + 1), residualTolerance: 1,
+          publicationRedistance.encode(encoder, { bandCells: redistanceBandCells, residualTolerance: 1,
             method: this.fineRedistanceMethod });
           publicationVolume?.encode(encoder);
         }
@@ -3600,14 +3688,31 @@ export class WebGPUOctreeProjection {
   get adaptiveFaceVelocitySource() { return this.faceTransport?.velocitySource; }
   get powerFaceTransferControl() { return this.powerFaceTransfer?.control; }
   get powerFaceSeedControl() { return this.powerFaceSeed?.control; }
+  /** QA-only Section 5 recurrent old-mesh advection publication status. */
+  get powerFaceAdvectionControl() { return this.powerFaceAdvection?.control; }
+  /** QA-only generalized solid-aperture prerequisite consumed by row assembly. */
+  get powerSolidFaceControl() { return this.powerSolidFaces?.control; }
   get powerOperatorControl() { return this.powerOperator?.control; }
   /** QA-only MGPCG status; simulation authority consumes this buffer directly on GPU. */
   get mgpcgControl() { return this.mgpcg?.control; }
   get powerFaceControl() { return this.powerFaces?.control; }
+  /** QA-only generalized face records used to localize recurrent advection failures. */
+  get powerFaceSource() { return this.powerFaces?.source; }
   /** QA-only exact liquid/air cell-centre queries authored before boundary-phi sampling. */
   get powerBoundaryPhiQueries() { return this.powerFaces?.source.boundaryPhiQueries; }
   /** QA-only identity of the sparse fine source sampled by the last face build. */
   get powerBoundaryFineSource() { return this.lastPowerBoundaryFineSource; }
+  /** QA-only exact sparse source sampled by the last power-boundary build.
+   * The surface phase may already have toggled the public current slot when a
+   * later publication fails, so generation/slot metadata alone is not enough
+   * to reproduce a boundary-authority disagreement. */
+  get powerBoundaryFineLevelSetSource(): WebGPUFineLevelSetBrickSource | undefined {
+    const sampled = this.lastPowerBoundaryFineSource;
+    if (!sampled) return undefined;
+    const source = this.globalFineSourceA?.generationSlot === sampled.generationSlot
+      ? this.globalFineSourceA : this.globalFineSourceB;
+    return source?.generation === sampled.generation ? source : undefined;
+  }
   get powerFaceSiteIndex() { return this.powerFaces?.source.siteIndex; }
   get powerDescriptorControl() { return this.powerDescriptor?.control; }
   get powerTopologyControl() { return this.powerTopology?.control; }
@@ -3677,6 +3782,9 @@ export class WebGPUOctreeProjection {
    * observational UI telemetry adds no simulation-sized work or readback. */
   get powerPublicationGeneration() { return this.powerGeneration; }
   get powerLeafHeaders() { return this.leafHeaders; }
+  /** Exposes the already-live Section 5 cell-vector reconstruction to bounded
+   * smoke readback; this does not allocate or materialize a dense GPU field. */
+  get powerCellVelocityBuffer() { return this.powerVelocity?.velocities; }
   get powerLeafEntries() { return this.leafEntries; }
   /** QA-only active compact pressure potential, indexed by leaf row. */
   get powerPressureBuffer() { return this.latestPressureInA ? this.pressureA : this.pressureB; }
@@ -3803,6 +3911,9 @@ export class WebGPUOctreeProjection {
   readGlobalFineDisconnectedFaceFailure(index: number) {
     return this.globalFineFaceFastMarch?.readDisconnectedFaceFailure(index);
   }
+  readGlobalFineBandRowFailure(index: number) {
+    return this.globalFineFaceFastMarch?.readBandRowFailure(index);
+  }
   readGlobalFinePowerPublicationFailure(index: number) {
     const march = this.globalFineFaceFastMarch, faces = this.powerFaces?.source;
     return march && faces ? march.readPowerPublicationFailure(index, faces) : undefined;
@@ -3825,8 +3936,9 @@ export class WebGPUOctreeProjection {
     // 48-byte redistance control [720, 768), then the face-march heap
     // completion diagnostics [768, 800), the power projection producer
     // control [800, 864), then the appended transport detail suffix
-    // [864, 896). Existing prefixes remain ABI-stable.
-    const readback = this.device.createBuffer({ label: "Global fine QA diagnostics", size: 896,
+    // [864, 896), then the topology's pre-dilation Section 5 prefix count at
+    // [896, 900). Existing prefixes remain ABI-stable.
+    const readback = this.device.createBuffer({ label: "Global fine QA diagnostics", size: 900,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read global fine QA diagnostics" });
     encoder.copyBufferToBuffer(this.globalFineSeeds.buffer, 0, readback, 0, 8);
@@ -3866,16 +3978,18 @@ export class WebGPUOctreeProjection {
     if (this.lastGlobalFineTransport) {
       encoder.copyBufferToBuffer(this.lastGlobalFineTransport.control, 32, readback, 864, 32);
     }
+    encoder.copyBufferToBuffer(topology.control, 32, readback, 896, 4);
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
       return {
         seedControl: Array.from(words.slice(0, 2)),
-        topologyControl: Array.from(words.slice(2, 10)),
+        topologyControl: [...words.slice(2, 10), words[224]],
         worklistHeader: Array.from(words.slice(10, 15)),
         seedCount: words[0], seedError: words[1], topologyFlags: words[2],
         interfaceBricks: words[3], desiredBricks: words[4], activatedBricks: words[5],
+        interfaceSeedBricks: words[224],
         published: words[6] !== 0, rolledBack: words[7] !== 0,
         downstreamFinalizeReason: words[9], activeBricks: words[10], generation: words[11],
         configuredFineGeneration: fine.generation, fineGenerationSlot: fine.generationSlot,
@@ -4006,7 +4120,7 @@ export class WebGPUOctreeProjection {
     this.adaptiveSurfacePages?.destroy();
     this.adaptiveSurfaceAdapter?.destroy();
     this.pagedPhiDifferential?.destroy();
-    this.fineToPowerCoarseLevelSet?.destroy(); this.powerCoarseLevelSetSchedule?.destroy(); this.powerCoarseLevelSet?.destroy(); this.powerVelocity?.destroy(); this.powerSolidFaces?.destroy(); this.powerSolidVertices?.destroy(); this.powerFaceTransfer?.destroy(); this.powerFaceSeed?.destroy(); this.powerDescriptor?.destroy(); this.powerTopology?.destroy(); this.powerFaces?.destroy(); this.powerOperator?.destroy();
+    this.fineToPowerCoarseLevelSet?.destroy(); this.powerCoarseLevelSetSchedule?.destroy(); this.powerCoarseLevelSet?.destroy(); this.powerVelocity?.destroy(); this.powerSolidFaces?.destroy(); this.powerSolidVertices?.destroy(); this.powerFaceTransfer?.destroy(); this.powerFaceAdvection?.destroy(); this.powerFaceSeed?.destroy(); this.powerDescriptor?.destroy(); this.powerTopology?.destroy(); this.powerFaces?.destroy(); this.powerOperator?.destroy();
     this.powerVolumes?.destroy(); this.powerVolumeParams?.destroy();
     this.phiSnapshotTexture.destroy();
     this.levelSetFallbackTexture?.destroy();
@@ -4615,10 +4729,10 @@ fn pressureDistance(a: Owner, b: Owner, axis: u32) -> f32 {
 fn pressureDistanceFromPhi(a: Owner, b: Owner, axis: u32, phiA: f32, phiB: f32) -> f32 {
   let full = 0.5 * f32(a.size + b.size) * cellWidth(axis);
   if ((phiA < 0.0) == (phiB < 0.0)) { return full; }
-  // Ghost-fluid/Ando--Batty distance: p=0 lies at the zero crossing of the
-  // resident level set, not at the neighbouring air leaf centre. The lower
-  // bound is a geometric degeneracy guard equivalent to the quadtree's
-  // bounded free-surface weight, not a pressure tuning coefficient.
+  // First-order ghost-fluid distance used by the L1 preconditioner: p=0 lies
+  // at the resident level-set crossing, not at the neighbouring air centre.
+  // The lower bound is an implementation degeneracy guard, not an equation
+  // attributed to Aanjaneya et al. 2017.
   let liquidPhi = select(phiB, phiA, phiA < 0.0);
   let airPhi = select(phiA, phiB, phiA < 0.0);
   let theta = clamp(abs(liquidPhi) / max(abs(liquidPhi) + abs(airPhi), 1e-12), 0.01, 1.0);
@@ -5081,11 +5195,11 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
     // coexist in the unified entry. Coarse authority must not hide the exact
     // fine centre: pure-coarse entries have zero fine counts and therefore
     // fail fineComplete without overloading centerPhi=0 as evidence.
-    // Ando--Batty Sections 6.1 and 7.1 require the new octree to consume the
-    // current advected level set. The centre interpolation needs eight fine
-    // samples, not a fully populated sparse brick, so track that stencil
-    // independently from interval completeness.
-    result.centerValid = size == 1u && (entryFlags & 0x3fc00000u) == 0x3fc00000u
+    // Section 5 requires the new octree to consume the current advected level
+    // set. The summary publication evaluates the eight fine samples around
+    // this dyadic node's own geometric centre, so the evidence applies to
+    // every pressure-leaf size and remains independent of interval coverage.
+    result.centerValid = (entryFlags & 0x3fc00000u) == 0x3fc00000u
       && fineSummaryFinite(result.centerPhi);
     return result;
   }
@@ -5110,6 +5224,10 @@ fn powerClosedWallStripIntersects(origin: vec3u, size: u32) -> bool {
     || ((flags & 2u) != 0u && high.y > d.y - min(width, d.y));
 }
 
+fn authoritativePowerTopology() -> bool {
+  return (u32(round(params.container.w)) & 4u) != 0u;
+}
+
 fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   if (powerClosedWallStripIntersects(origin, size)) { return true; }
   var closestSurface = 3.402823e38; var minimumPhi = 3.402823e38; var maximumPhi = -3.402823e38; var minimumSolid = 1.0; var maximumSolid = 0.0;
@@ -5117,9 +5235,17 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   let finestWidth = max(params.cellRelax.x, max(params.cellRelax.y, params.cellRelax.z));
   let baseBand = max(0.0, params.solve.w);
   let fineSummary = fineLeafSummary(origin, size);
-  // A crossing observed by any published sparse descendant is already enough
-  // to force refinement.  Absence is never interpreted as air or liquid.
-  if (fineSummary.found && fineSummary.minimumPhi < 0.0 && fineSummary.maximumPhi >= 0.0) { return true; }
+  // Section 4's power cells are specifically allowed to cross the free
+  // surface and remain adaptive. Section 5 keeps the factor-m fine level set
+  // on a separate narrow-band SPGrid and corrects coarse octree phi wherever
+  // that band is valid; it does not prescribe unit pressure cells throughout
+  // the band. Keep the old surface-driven sizing only for the compatibility
+  // solver. The authoritative power path therefore retains genuine coarse /
+  // fine topology across the interface instead of refining away the very
+  // T-junctions handled by the paper's power diagram.
+  let surfaceDrivenRefinement = !authoritativePowerTopology();
+  if (surfaceDrivenRefinement && fineSummary.found
+      && fineSummary.minimumPhi < 0.0 && fineSummary.maximumPhi >= 0.0) { return true; }
   if (fineSummary.complete) {
     closestSurface = fineSummary.minimumAbsolutePhi;
     minimumPhi = fineSummary.minimumPhi; maximumPhi = fineSummary.maximumPhi;
@@ -5153,7 +5279,7 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   if (adaptivity <= 0.0) { return true; }
   let crossesSurface = minimumPhi < 0.0 && maximumPhi >= 0.0;
   let crossesSolidBoundary = maximumSolid - minimumSolid > 1e-5 || (maximumSolid > 1e-5 && maximumSolid < 1.0 - 1e-5);
-  if (crossesSurface || crossesSolidBoundary) { return true; }
+  if ((surfaceDrivenRefinement && crossesSurface) || crossesSolidBoundary) { return true; }
   if (minimumSolid >= 1.0 - 1e-5) { return false; }
   // This only widens the fine support band; it cannot coarsen a leaf selected
   // by the baseline signed-distance rule. Velocity span estimates deformation
@@ -5163,7 +5289,7 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   let strainActivity = select(0.0, length(maximumSurfaceVelocity - minimumSurfaceVelocity) * params.physical.z / max(finestWidth, 1e-6), hasSurfaceSample);
   let detailActivity = surfaceDetailStrengthValue() * clamp(max(strainActivity, 2.0 * maximumCurvatureProxy), 0.0, 1.0);
   let effectiveBand = baseBand + 8.0 * detailActivity;
-  return closestSurface < effectiveBand * finestWidth;
+  return surfaceDrivenRefinement && closestSurface < effectiveBand * finestWidth;
 }
 
 fn splitLeaf(origin: vec3u, size: u32) {
@@ -5294,33 +5420,7 @@ fn paperProbe(origin: vec3u, size: u32, direction: vec3i) -> vec3i {
   }
   return probe;
 }
-fn paperStrictlyObtuseCoarseMask(mask: u32) -> bool {
-  return mask == 25u || mask == 42u || mask == 52u || mask == 57u || mask == 58u || mask == 60u;
-}
-fn repairPaperAcuteNeighbors(origin: vec3u, size: u32) {
-  // The six same/coarser bits are X/Y/Z faces followed by XY/XZ/YZ edges,
-  // oriented away from this child's parent. Exactly six masks contain a
-  // unique ordinary-Delaunay simplex with current-cell solid angle > pi/2.
-  // Split its sole coarse face before descriptor publication; this changes
-  // the local link to the paper's nonobtuse Cartesian limiting case without
-  // inventing a redistance fallback.
-  let child = (origin / vec3u(size)) & vec3u(1u);
-  let outward = vec3i(select(-1, 1, child.x == 1u), select(-1, 1, child.y == 1u), select(-1, 1, child.z == 1u));
-  let wanted = array<vec3i,6>(vec3i(outward.x,0,0), vec3i(0,outward.y,0), vec3i(0,0,outward.z),
-    vec3i(outward.x,outward.y,0), vec3i(outward.x,0,outward.z), vec3i(0,outward.y,outward.z));
-  var mask = 0u;
-  for (var bit = 0u; bit < 6u; bit += 1u) {
-    let probe = paperProbe(origin, size, wanted[bit]);
-    if (valid(probe) && ownerAt(probe).size == size * 2u) { mask |= 1u << bit; }
-  }
-  if (!paperStrictlyObtuseCoarseMask(mask)) { return; }
-  let faceBit = u32(firstTrailingBit(mask & 7u));
-  if (faceBit >= 3u) { return; }
-  let coarse = ownerAt(paperProbe(origin, size, wanted[faceBit]));
-  if (coarse.size == size * 2u) { splitLeaf(unpackOrigin(coarse.packedOrigin), coarse.size); }
-}
 fn repairPaperMixedNeighbors(origin: vec3u, size: u32) {
-  repairPaperAcuteNeighbors(origin, size);
   var finer = false; var coarser = false;
   for (var bit = 0u; bit < 18u; bit += 1u) {
     let probe = paperProbe(origin, size, PAPER_DIRECTIONS[bit]); if (!valid(probe)) { continue; }
@@ -5337,23 +5437,11 @@ fn repairPaperMixedNeighbors(origin: vec3u, size: u32) {
 
 fn balanceTopologyAt(gid: vec3u) {
   if (any(gid >= dims())) { return; }
-  // The portable balance dispatch is rooted at even coordinates. Inspect its
-  // complete 2^3 child block so a unit-size anchor can request splitting the
-  // implicated size-two coarse face before descriptor publication.
-  let unitBase = gid & vec3u(0xfffffffeu);
-  for (var childIndex = 0u; childIndex < 8u; childIndex += 1u) {
-    let child = vec3u(childIndex & 1u, (childIndex >> 1u) & 1u, (childIndex >> 2u) & 1u);
-    let q = unitBase + child;
-    if (any(q >= dims())) { continue; }
-    let unitOwner = ownerAt(vec3i(q));
-    if (unitOwner.size == 1u && isOrigin(q, unitOwner)) { repairPaperAcuteNeighbors(q, 1u); }
-  }
   let owner = ownerAt(vec3i(gid));
   if (owner.size >= 2u && owner.size <= 16u && isOrigin(gid, owner)) { repairPaperMixedNeighbors(gid, owner.size); }
   // Size-16+ leaves use the cooperative entry point below.
   if (owner.size > 2u && owner.size < 16u && isOrigin(gid, owner) && neighborTooFine(gid, owner.size)) { splitLeaf(gid, owner.size); }
 }
-
 
 @compute @workgroup_size(4,4,4)
 fn balanceTopology(@builtin(global_invocation_id) gid: vec3u) { balanceTopologyAt(gid * 2u); }
@@ -5610,8 +5698,13 @@ fn currentPressureOwnerWet(owner: Owner) -> bool {
   let origin=unpackOrigin(owner.packedOrigin);let fine=fineLeafSummary(origin,owner.size);
   var wet=liquidOwner(owner);
   if(fine.found){
-    if(owner.size==1u&&fine.centerValid){wet=fine.centerPhi<0.0;}
-    else if(fine.complete){
+    if(fine.centerValid){wet=fine.centerPhi<0.0;}
+    // A coarse-only summary is the paper's separate octree level set, not a
+    // license to reclassify the same cell through the legacy surface pages.
+    // Keep liquidOwner's exact coarse-centre decision so frontier membership
+    // and the power-boundary ghost-fluid sample consume one generation and
+    // one authority.  Only a complete fine interval may refine that decision.
+    else if(fine.complete&&!fine.coarseAuthority){
       if(fine.maximumPhi<0.0){wet=true;}
       else if(fine.minimumPhi>=0.0){wet=false;}
       else{let centre=vec3f(origin)+vec3f(0.5*f32(owner.size-1u));wet=legacyOwnerPhiPoint(centre)<0.0;}

@@ -12,7 +12,6 @@ import {
   sitesForSameOrCoarserPowerDescriptor,
   sitesForSameOrFinerPowerDescriptor,
 } from "../lib/octree-power-descriptor";
-import { octreePowerCoarseMaskNeedsAcuteRepair } from "../lib/octree-power-topology";
 import {
   OCTREE_POWER_DESCRIPTOR_ERROR,
   OCTREE_POWER_DESCRIPTOR_BOUNDARY_MASK,
@@ -58,13 +57,12 @@ test("CPU descriptor generation reproduces every uniquely graded immutable catal
     ...enumerateCanonicalSameOrFinerPowerDescriptors(),
     ...Array.from({ length: 512 }, (_, low) => {
       const mask = low >>> 3;
-      if (octreePowerCoarseMaskNeedsAcuteRepair(mask)) return undefined;
       const coarseNeighbors = Array.from({ length: 6 }, (_, bit) => (mask & (1 << bit)) !== 0);
       return encodeSameOrCoarserPowerDescriptor({
         child: [low & 1, (low >> 1) & 1, (low >> 2) & 1] as [0 | 1, 0 | 1, 0 | 1],
         coarseNeighbors: coarseNeighbors as [boolean, boolean, boolean, boolean, boolean, boolean],
       });
-    }).filter((descriptor): descriptor is number => descriptor !== undefined),
+    }),
   ];
   let redundantUniformCoarser = 0, checked = 0;
   for (const descriptor of descriptors) {
@@ -128,7 +126,7 @@ test("CPU oracle reports grading/owner errors and encodes domain boundaries as v
     (1 << 0) | (1 << 1) | (1 << 2));
 });
 
-test("CPU and GPU descriptor publication fail closed on every strictly-obtuse coarse mask", () => {
+test("CPU and GPU descriptor publication admit every co-spherical coarse mask", () => {
   const offset = [10, 10, 10] as const;
   const describe = (mask: number) => {
     const descriptor = (OCTREE_POWER_SAME_OR_COARSER_FLAG | (mask << 3)) >>> 0;
@@ -146,30 +144,24 @@ test("CPU and GPU descriptor publication fail closed on every strictly-obtuse co
   };
 
   for (const mask of [25, 42, 52, 57, 58, 60]) {
-    assert.deepEqual(describe(mask), {
-      descriptor: OCTREE_POWER_DESCRIPTOR_INVALID,
-      flags: OCTREE_POWER_DESCRIPTOR_ERROR.acuteGrading,
-      kind: "invalid",
-    }, `coarse mask ${mask}`);
+    const described = describe(mask);
+    assert.equal(described.flags, 0, `coarse mask ${mask}`);
+    assert.equal(described.kind, "same-or-coarser", `coarse mask ${mask}`);
+    assert.notEqual(described.descriptor, OCTREE_POWER_DESCRIPTOR_INVALID, `coarse mask ${mask}`);
   }
-  assert.equal(describe(24).flags, 0, "splitting mask 25's unique coarse face must make the row publishable");
-  assert.equal(describe(56).flags, 0, "splitting masks 57/58/60's unique coarse face must make the row publishable");
   const catalog = catalogViews();
-  for (const repairedMask of [24, 40, 48, 56]) {
-    const packed = catalog.sameOrCoarserDirect[repairedMask << 3];
+  for (const mask of [25, 42, 52, 57, 58, 60]) {
+    const packed = catalog.sameOrCoarserDirect[mask << 3];
     const entry = packed & 0xffff;
-    assert.notEqual(packed, 0xffff_ffff, `repaired mask ${repairedMask} must be directly addressable`);
-    assert.equal(catalog.tetrahedronHeaders[entry * 3 + 1], 8,
-      `repaired mask ${repairedMask} must retain its eight right-angle transition simplices`);
+    assert.notEqual(packed, 0xffff_ffff, `co-spherical mask ${mask} must be directly addressable`);
+    assert.ok(catalog.tetrahedronHeaders[entry * 3 + 1] > 0,
+      `co-spherical mask ${mask} must retain its local tetrahedra`);
     assert.equal(catalog.tetrahedronHeaders[entry * 3 + 2] & 1, 0,
-      `repaired mask ${repairedMask} remains a transition entry; equality at pi/2 is the causal limiting case`);
+      `co-spherical mask ${mask} remains a transition entry`);
   }
-  assert.match(octreePowerDescriptorShader,
-    /coarseMask==25u\|\|coarseMask==42u\|\|coarseMask==52u\|\|coarseMask==57u\|\|coarseMask==58u\|\|coarseMask==60u/);
-  assert.match(octreePowerDescriptorShader, /failRow\(row,ACUTE_GRADING,coarseMask\);return/,
-    "an unrepaired live descriptor must suppress the all-or-nothing indirect publication");
-  assert.match(octreePowerDescriptorShader, /flags&127u\)\|\(detail<<7u\)/,
-    "the row-local failure payload must retain the acute-grading bit as well as its six-bit mask");
+  assert.doesNotMatch(octreePowerDescriptorShader,
+    /coarseMask==25u|failRow\(row,ACUTE_GRADING/,
+    "descriptor publication must not refine away a catalog-valid co-spherical link");
 });
 
 test("uniform descriptor constrains face and edge owners but not refined corner-only cells", () => {
@@ -203,25 +195,31 @@ test("dense owner helpers match the production owner word and reject malformed w
   assert.equal(decodeDenseOctreePowerOwner(0xffff_ffff, [3, 2, 1], dimensions, 32).invalid, true);
 });
 
-test("paged descriptor decoding matches projection generation sentinels on the captured transition row", () => {
+test("paged descriptor decoding fails closed on missing and reserved owner words", () => {
   const rowCell = [0, 8, 10] as const;
-  const rowWord = packDenseOctreePowerOwner(rowCell, 2);
+  const rowWord = 1; // simulation pages store the bare size exponent
   assert.deepEqual(decodePagedOctreePowerOwner(rowWord, rowCell, [60, 45, 40], 4), {
     origin: rowCell, size: 2,
   });
-  assert.deepEqual(decodePagedOctreePowerOwner(0xffff_ffff, rowCell, [60, 45, 40], 4), {
-    origin: [0, 8, 8], size: 4,
-  });
-  assert.deepEqual(decodePagedOctreePowerOwner(0, rowCell, [60, 45, 40], 4), {
-    origin: [0, 8, 8], size: 4,
-  });
-  assert.deepEqual(decodePagedOctreePowerOwner(0x8000_0123, rowCell, [60, 45, 40], 4), {
+  for (const word of [0, 0xffff_ffff, 0x8000_0123, 6, 0x0000_0102]) {
+    assert.equal(decodePagedOctreePowerOwner(word, rowCell, [60, 45, 40], 4).invalid, true,
+      `reserved owner word ${word.toString(16)}`);
+  }
+  assert.deepEqual(decodePagedOctreePowerOwner(0x8000_0000, rowCell, [60, 45, 40], 4), {
     origin: rowCell, size: 1,
   });
   assert.match(octreePowerDescriptorShader, /word==0u\|\|word==INVALID/);
   assert.match(octreePowerDescriptorShader,
-    /!found\|\|encoded==0u\|\|encoded==INVALID\|\|encoded>capacity\)\{return canonicalOwner\(cell\)/,
-    "generation-transition page-table values must resolve exactly like projection ownerAt");
+    /!found\|\|encoded==0u\|\|encoded==INVALID\|\|encoded>capacity\)\{return Owner\(cell,1u,1u\)/,
+    "a missing, reserved, or out-of-range page must invalidate descriptor publication");
+  assert.match(octreePowerDescriptorShader,
+    /owners\[7\]==0u\|\|owners\[7\]!=params\.rowCountGenerationModeCapacity\.y/,
+    "the sparse owner arena must be from the descriptor's requested generation");
+  assert.doesNotMatch(octreePowerDescriptorShader, /fn canonicalOwner/,
+    "descriptor probes must not synthesize owners for incomplete topology pages");
+  assert.match(octreePowerDescriptorShader,
+    /fn indexedOwner[\s\S]*return Owner\(cell,max\(1u,preferredSize\),1u\);\}/,
+    "the bounded live-index substitute must also invalidate a miss instead of synthesizing topology");
   assert.match(octreePowerDescriptorShader, /return decodePagedOwner\(word,cell\)/);
 });
 

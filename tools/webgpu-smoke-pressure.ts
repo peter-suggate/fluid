@@ -28,7 +28,7 @@ export function decodeOctreeMGPCGDiagnostics(words: Uint32Array): OctreeMGPCGDia
   };
 }
 
-/** Paper-result acceptance: ICCG/PCG solves use a 1e-4 relative residual. */
+/** Float32 Dawn QA policy; the 2017 paper reports iteration counts, not this tolerance. */
 export function octreeMGPCGDiagnosticsAreAcceptable(
   value: OctreeMGPCGDiagnostics | undefined,
   maximumRelativeResidualSquared = 1e-8,

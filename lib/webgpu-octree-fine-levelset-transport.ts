@@ -45,8 +45,10 @@ export interface FineLevelSetGPUTransportOptions {
   maximumHashProbes?: number;
   /** Destination band transported this step; outer valid samples are interpolation support only. */
   transportBandCells?: number;
-  /** Closed containers extend cell-centred phi constantly through the in-domain wall half-cell. */
+  /** Closed boundaries extend cell-centred phi constantly through the in-domain wall half-cell. */
   boundaryPolicy?: FineLevelSetGPUBoundaryPolicy;
+  /** Open ceilings extend the top air field normally for outflow characteristics. */
+  openTopBoundary?: boolean;
 }
 
 export interface FineLevelSetGPUTransportPlan {
@@ -211,6 +213,7 @@ export class WebGPUFineLevelSetTransport {
       chunkFloats[chunk * this.plan.chunkParameterStride / 4 + 1]
         = transportBandCells * this.source.plan.fineCellWidth;
       this.chunkParameterWords[chunk * this.plan.chunkParameterStride / 4 + 2] = closedDomainBoundary;
+      this.chunkParameterWords[chunk * this.plan.chunkParameterStride / 4 + 3] = options.openTopBoundary ? 1 : 0;
     }
     this.device.queue.writeBuffer(this.chunkParameters, 0, this.chunkParameterWords);
     this.device.queue.writeBuffer(this.source.params, 76, new Float32Array([options.timestep]));
@@ -239,7 +242,7 @@ export class WebGPUFineLevelSetTransport {
     const chunkCapacity = this.velocityPrepass.source.queryCapacity;
     for (let chunk = 0; chunk < this.plan.chunkCount; chunk += 1) {
       const chunkBinding: GPUBufferBinding = { buffer: this.chunkParameters,
-        offset: chunk * this.plan.chunkParameterStride, size: 12 };
+        offset: chunk * this.plan.chunkParameterStride, size: 16 };
       run(this.preparePipeline, [...common, { binding: 5, resource: binding(this.source.phi) },
         { binding: 6, resource: binding(this.source.workA) },
         { binding: 10, resource: binding(this.positions) },
@@ -253,6 +256,7 @@ export class WebGPUFineLevelSetTransport {
         this.faceBand?.encodeAirSamples(encoder, positionSlice,
           this.velocityPrepass.source.results, this.velocityPrepass.source.statuses, {
             dimensions: options.dimensions,
+            maximumLeafSize: options.maximumLeafSize,
             queryCount: count,
             physicalCellSize: options.physicalCellSize,
             owners: options.ownerTopology!,
@@ -299,7 +303,7 @@ struct Params{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,s
  domainOrigin:vec3f,fineCellWidth:f32,hashCapacity:u32,maximumHashProbes:u32,pageCapacity:u32,generation:u32,
  activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32}
 struct Control{departureOutsideBand:atomic<u32>,nonfiniteVelocity:atomic<u32>,processed:atomic<u32>,committed:atomic<u32>,extrapolatedVelocity:atomic<u32>,maximumDisplacementFineCells:atomic<u32>,faceBandUnavailable:atomic<u32>,velocityUnavailable:atomic<u32>,invalidVelocityStatus:atomic<u32>,nonpositiveVelocityResult:atomic<u32>,velocityStatusReasonOr:atomic<u32>,firstInvalidVelocityStatus:atomic<u32>,firstInvalidVelocityLocalIndex:atomic<u32>,firstInvalidVelocityX:atomic<u32>,firstInvalidVelocityY:atomic<u32>,firstInvalidVelocityZ:atomic<u32>}
-struct Chunk{base:u32,transportBandDistance:f32,closedDomainBoundary:u32}
+struct Chunk{base:u32,transportBandDistance:f32,closedDomainBoundary:u32,openTopBoundary:u32}
 @group(0)@binding(0)var<uniform>params:Params;@group(0)@binding(1)var<storage,read>pageHash:array<u32>;
 @group(0)@binding(2)var<storage,read>metadata:array<u32>;@group(0)@binding(3)var<storage,read>worklist:array<u32>;
 @group(0)@binding(4)var<storage,read>sampleFlags:array<u32>;@group(0)@binding(5)var<storage,read_write>phi:array<f32>;
@@ -315,12 +319,20 @@ fn unpackBrick(key:u32)->vec3u{let xy=params.brickDimensions.x*params.brickDimen
 fn localCoord(local:u32)->vec3u{let r=params.brickResolution;let z=local/(r*r);let q=local-z*r*r;let y=q/r;return vec3u(q-y*r,y,z);}
 fn hashKey(key:u32)->u32{return ((key^(key>>16u))*0x9e3779b1u)&(params.hashCapacity-1u);}fn packBrick(q:vec3u)->u32{return q.x+params.brickDimensions.x*(q.y+params.brickDimensions.y*q.z);}
 fn lookup(key:u32)->u32{let start=hashKey(key);for(var probe=0u;probe<32u;probe+=1u){if(probe>=params.maximumHashProbes){break;}let slot=(start+probe)&(params.hashCapacity-1u);let stored=pageHash[slot*2u];if(stored==key){let id=pageHash[slot*2u+1u];if(id>=params.pageCapacity){return INVALID;}let base=id*10u;if(metadata[base]!=id||metadata[base+1u]!=key||metadata[base+2u]!=params.generation){return INVALID;}return id;}if(stored==INVALID){return INVALID;}}return INVALID;}
-fn loadFine(q:vec3i)->vec2f{if(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions))){return vec2f(0);}
- let uq=vec3u(q);let brick=uq/params.brickResolution;let local=uq-brick*params.brickResolution;let id=lookup(packBrick(brick));if(id==INVALID){return vec2f(0);}
- let i=id*params.samplesPerBrick+local.x+params.brickResolution*(local.y+params.brickResolution*local.z);if((sampleFlags[i]&VALID)==0u){return vec2f(0);}
- let v=phi[i];if(v!=v||abs(v)>=LARGE){return vec2f(0);}return vec2f(v,1);}
-fn trilinear(x:vec3f)->vec2f{let raw=(x-params.domainOrigin)/params.fineCellWidth-vec3f(.5);let wall=vec3f(params.sampleDimensions)-vec3f(.5);if(any(raw<vec3f(-.5))||any(raw>wall)){return vec2f(0.);}let sampleMax=vec3f(params.sampleDimensions)-vec3f(1.);if(chunk.closedDomainBoundary==0u&&(any(raw<vec3f(0.))||any(raw>sampleMax))){return vec2f(0.);}let lattice=select(raw,clamp(raw,vec3f(0.),sampleMax),chunk.closedDomainBoundary!=0u);let base=vec3i(floor(lattice));let f=fract(lattice);var v=0.;
- for(var z=0;z<2;z+=1){for(var y=0;y<2;y+=1){for(var x0=0;x0<2;x0+=1){let w=select(1.-f.x,f.x,x0==1)*select(1.-f.y,f.y,y==1)*select(1.-f.z,f.z,z==1);if(w==0.){continue;}let q=loadFine(base+vec3i(x0,y,z));if(q.y==0.){return vec2f(0);}v+=w*q.x;}}}return vec2f(v,1);}
+fn loadFine(q:vec3i)->vec3f{if(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions))){return vec3f(0.,0.,1.);}
+ let uq=vec3u(q);let brick=uq/params.brickResolution;let local=uq-brick*params.brickResolution;let id=lookup(packBrick(brick));if(id==INVALID){return vec3f(0.,0.,2.);}
+ let i=id*params.samplesPerBrick+local.x+params.brickResolution*(local.y+params.brickResolution*local.z);if((sampleFlags[i]&VALID)==0u){return vec3f(0.,0.,3.);}
+ let v=phi[i];if(v!=v||abs(v)>=LARGE){return vec3f(0.,0.,4.);}return vec3f(v,1.,0.);}
+fn trilinear(x:vec3f)->vec3f{let raw=(x-params.domainOrigin)/params.fineCellWidth-vec3f(.5);let wall=vec3f(params.sampleDimensions)-vec3f(.5);let wallTolerance=1e-3;
+ // Section 5 traces and interpolates the old level set.  A closed-domain
+ // characteristic may land on the physical wall, half a sample beyond the
+ // outer cell centre.  Accept small integration drift around that wall.  An
+ // authored open ceiling extends the top value normally for outflow; every
+ // other materially exterior trace still fails publication instead of
+ // sampling an absent sparse brick.
+ let below=raw<vec3f(-.5-wallTolerance);let above=raw>wall+vec3f(wallTolerance);
+ if(any(below)||above.x||above.z||(above.y&&chunk.openTopBoundary==0u)){return vec3f(0.,0.,1.);}let sampleMax=vec3f(params.sampleDimensions)-vec3f(1.);if(chunk.closedDomainBoundary==0u&&(any(raw<vec3f(0.))||raw.x>sampleMax.x||raw.z>sampleMax.z||(raw.y>sampleMax.y&&chunk.openTopBoundary==0u))){return vec3f(0.,0.,1.);}let extendBoundary=chunk.closedDomainBoundary!=0u||chunk.openTopBoundary!=0u;let lattice=select(raw,clamp(raw,vec3f(0.),sampleMax),extendBoundary);let base=vec3i(floor(lattice));let f=fract(lattice);var v=0.;
+ for(var z=0;z<2;z+=1){for(var y=0;y<2;y+=1){for(var x0=0;x0<2;x0+=1){let w=select(1.-f.x,f.x,x0==1)*select(1.-f.y,f.y,y==1)*select(1.-f.z,f.z,z==1);if(w==0.){continue;}let q=loadFine(base+vec3i(x0,y,z));if(q.y==0.){return q;}v+=w*q.x;}}}return vec3f(v,1.,0.);}
 @compute @workgroup_size(64)fn prepareFineTrajectories(@builtin(global_invocation_id)g:vec3u){let local=g.x;if(local>=arrayLength(&positions)){return;}positions[local]=vec4f(0);let flat=chunk.base+local;let a=activeSample(flat);if(a.x==INVALID){return;}let index=a.x*params.samplesPerBrick+a.y;if((sampleFlags[index]&VALID)==0u){return;}
  // Section 5 assigns an interpolated value only to traced starting cells.
  // Preserve the outer valid halo verbatim so the all-valid commit below can
@@ -332,7 +344,7 @@ fn trilinear(x:vec3f)->vec2f{let raw=(x-params.domainOrigin)/params.fineCellWidt
  if(i>=arrayLength(&velocities)||i>=arrayLength(&velocityStatus)){atomicAdd(&control.velocityUnavailable,1u);positions[i].w=0.;return;}let status=velocityStatus[i];if((status&0x08000000u)!=0u){atomicAdd(&control.faceBandUnavailable,1u);}if((status&VELOCITY_VALID)==0u){atomicAdd(&control.invalidVelocityStatus,1u);atomicOr(&control.velocityStatusReasonOr,status);let claim=atomicCompareExchangeWeak(&control.firstInvalidVelocityLocalIndex,INVALID,i);if(claim.exchanged){atomicStore(&control.firstInvalidVelocityStatus,status);atomicStore(&control.firstInvalidVelocityX,bitcast<u32>(positions[i].x));atomicStore(&control.firstInvalidVelocityY,bitcast<u32>(positions[i].y));atomicStore(&control.firstInvalidVelocityZ,bitcast<u32>(positions[i].z));}atomicAdd(&control.velocityUnavailable,1u);positions[i].w=0.;return;}if(velocities[i].w<=0.){atomicAdd(&control.nonpositiveVelocityResult,1u);atomicAdd(&control.velocityUnavailable,1u);positions[i].w=0.;return;}if(!finite3(velocities[i].xyz)){atomicAdd(&control.nonfiniteVelocity,1u);positions[i].w=0.;return;}
  if((velocityStatus[i]&0x10000000u)!=0u){atomicAdd(&control.extrapolatedVelocity,1u);}
  let next=positions[i].xyz-(params.timestep/f32(params.fineFactor))*velocities[i].xyz;if(!finite3(next)){atomicAdd(&control.nonfiniteVelocity,1u);positions[i].w=0.;return;}positions[i]=vec4f(next,1);}
-@compute @workgroup_size(64)fn sampleFineDepartures(@builtin(global_invocation_id)g:vec3u){let local=g.x;if(local>=arrayLength(&positions)||positions[local].w<=0.){return;}let flat=chunk.base+local;let a=activeSample(flat);if(a.x==INVALID){return;}let brick=unpackBrick(metadata[a.x*10u+1u]);let q=brick*params.brickResolution+localCoord(a.y);let origin=params.domainOrigin+(vec3f(q)+.5)*params.fineCellWidth;let displacement=u32(ceil(length(positions[local].xyz-origin)/params.fineCellWidth));atomicMax(&control.maximumDisplacementFineCells,displacement);let value=trilinear(positions[local].xyz);if(value.y==0.){atomicAdd(&control.departureOutsideBand,1u);return;}workA[a.x*params.samplesPerBrick+a.y]=value.x;atomicAdd(&control.processed,1u);}
+@compute @workgroup_size(64)fn sampleFineDepartures(@builtin(global_invocation_id)g:vec3u){let local=g.x;if(local>=arrayLength(&positions)||positions[local].w<=0.){return;}let flat=chunk.base+local;let a=activeSample(flat);if(a.x==INVALID){return;}let brick=unpackBrick(metadata[a.x*10u+1u]);let q=brick*params.brickResolution+localCoord(a.y);let origin=params.domainOrigin+(vec3f(q)+.5)*params.fineCellWidth;let displacement=u32(ceil(length(positions[local].xyz-origin)/params.fineCellWidth));atomicMax(&control.maximumDisplacementFineCells,displacement);let value=trilinear(positions[local].xyz);if(value.y==0.){atomicAdd(&control.departureOutsideBand,1u);let claim=atomicCompareExchangeWeak(&control.firstInvalidVelocityLocalIndex,INVALID,local);if(claim.exchanged){atomicStore(&control.firstInvalidVelocityStatus,0x04000000u|u32(value.z));atomicStore(&control.firstInvalidVelocityX,bitcast<u32>(positions[local].x));atomicStore(&control.firstInvalidVelocityY,bitcast<u32>(positions[local].y));atomicStore(&control.firstInvalidVelocityZ,bitcast<u32>(positions[local].z));}return;}workA[a.x*params.samplesPerBrick+a.y]=value.x;atomicAdd(&control.processed,1u);}
 @compute @workgroup_size(1)fn publishFineTransport(){if(atomicLoad(&control.departureOutsideBand)==0u&&atomicLoad(&control.nonfiniteVelocity)==0u&&atomicLoad(&control.velocityUnavailable)==0u){atomicStore(&control.committed,1u);}}
 @compute @workgroup_size(64)fn commitFineTransport(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){if(atomicLoad(&control.committed)==0u){return;}let flat=fineLinearWorkgroup(w,n)*64u+lid;let a=activeSample(flat);if(a.x==INVALID){return;}let index=a.x*params.samplesPerBrick+a.y;if((sampleFlags[index]&VALID)!=0u){phi[index]=workA[index];}}
 `;
@@ -413,7 +425,8 @@ fn loadFine(q:vec3i)->vec2f{
 fn sampleFineTrilinear(position:vec3f)->vec2f{
   let raw=(position-params.domainOrigin)/params.fineCellWidth-vec3f(0.5);
   let wall=vec3f(params.sampleDimensions)-vec3f(0.5);
-  if(any(raw<vec3f(-0.5))||any(raw>wall)){return vec2f(0.0,0.0);}
+  let wallTolerance=1e-3;
+  if(any(raw<vec3f(-0.5-wallTolerance))||any(raw>wall+vec3f(wallTolerance))){return vec2f(0.0,0.0);}
   let sampleMaximum=vec3f(params.sampleDimensions)-vec3f(1.0);
   if(!CLOSED_DOMAIN_BOUNDARY&&(any(raw<vec3f(0.0))||any(raw>sampleMaximum))){return vec2f(0.0,0.0);}
   let lattice=select(raw,clamp(raw,vec3f(0.0),sampleMaximum),CLOSED_DOMAIN_BOUNDARY);

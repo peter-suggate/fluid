@@ -72,6 +72,16 @@ test("octree pipeline cache keys include stable constants and reachability", () 
     "cache-key object entries must be serialized in a stable key order");
 });
 
+test("paper grading preserves catalog-valid co-spherical masks", () => {
+  assert.doesNotMatch(octreeProjectionShader,
+    /paperStrictlyObtuseCoarseMask|repairPaperAcuteNeighbors|repairPaperAcuteTopology/,
+    "row-local catalog triangulation must replace topology mutation for co-spherical links");
+  assert.doesNotMatch(octreeSource, /paperAcuteColor|repairPaperAcutePipeline/,
+    "the host must not schedule the removed refinement cascade");
+  assert.match(octreeProjectionShader, /fn repairPaperMixedNeighbors/,
+    "the paper's exclusive same\/coarser or same\/finer grading rule remains enforced");
+});
+
 test("octree is a registered GPU method with dam-break defaults", () => {
   assert.ok(simulationMethods.includes(octreeMethod));
   assert.equal(octreeMethod.id, "octree");
@@ -163,6 +173,18 @@ test("bounded power-vs-tall Dawn comparison uses one exact active-tall grid", ()
   assert.match(smokeSource, /scene\.voxelDomain\.finestCellSize_m = voxelCellSizeOverride/,
     "the smoke comparison must change the shared scene lattice directly");
   assert.match(smokeSource, /refusing to step a mismatched comparison/);
+});
+
+test("regular dam Dawn regression reaches the post-impact half-second interval", () => {
+  const command = packageManifest.scripts["test:webgpu:dam-octree"];
+  assert.ok(command);
+  assert.match(command, /FLUID_SCENE=dam-break-ui/);
+  assert.match(command, /FLUID_METHOD=octree/);
+  assert.match(command, /FLUID_TARGET_S=0\.5/);
+  assert.match(command, /FLUID_MAX_DT=0\.004/);
+  assert.match(command, /FLUID_ORACLE_STEPS=125/);
+  assert.match(command, /FLUID_EXPECT_EXACT_STEPS=125/,
+    "the default regression must not silently stop before the former 0.27 s topology failure");
 });
 
 test("compact octree pressure capacity scales with domain surface area", () => {
@@ -350,7 +372,8 @@ test("octree pressure solve uses the variational solid face constraint", () => {
   assert.match(assemble, /let coefficient = open \* area \/ max\(distance/);
   assert.match(assemble, /constrainedFaceVelocity\(faceCell, axis, solid\)/);
   assert.match(octreeProjectionShader, /open \* component\(velocityAt\(faceCell\), axis\) \+ solid\.fraction \* component\(solidVelocity/);
-  assert.match(octreeProjectionShader, /if \(crossesSurface \|\| crossesSolidBoundary\) \{ return true; \}/,
+  assert.match(octreeProjectionShader,
+    /if \(\(surfaceDrivenRefinement && crossesSurface\) \|\| crossesSolidBoundary\) \{ return true; \}/,
     "solid interfaces must force finest octree leaves");
 });
 
@@ -410,7 +433,7 @@ test("coarse topology loops remain runtime-bounded at maximum leaf 16 and 32", (
     "pipeline specialization must not unroll the coarse balance loops at 16/32");
 });
 
-test("octree refinement is graded by resident signed distance rather than bulk VOF occupancy", () => {
+test("power topology remains adaptive across the free surface while compatibility refinement uses signed distance", () => {
   assert.match(octreeProjectionShader, /levelSetIn: texture_3d<f32>/);
   assert.doesNotMatch(octreeProjectionShader, /volumeIn/, "the octree solve must not bind the diagnostic VOF field");
   assert.match(octreeProjectionShader,
@@ -419,8 +442,12 @@ test("octree refinement is graded by resident signed distance rather than bulk V
   assert.match(octreeProjectionShader, /if \(minimumSolid >= 1\.0 - 1e-5\) \{ return false; \}/,
     "fully solid bulk leaves should be allowed to stay coarse");
   assert.match(octreeProjectionShader, /let effectiveBand = baseBand \+ 8\.0 \* detailActivity/);
-  assert.match(octreeProjectionShader, /return closestSurface < effectiveBand \* finestWidth;/,
-    "pure air and liquid leaves should use the explicit band plus bounded local detail support");
+  assert.match(octreeProjectionShader,
+    /let surfaceDrivenRefinement = !authoritativePowerTopology\(\);[\s\S]*return surfaceDrivenRefinement && closestSurface < effectiveBand \* finestWidth;/,
+    "the separate Section 5 narrow band must not force authoritative power cells to unit resolution");
+  assert.match(octreeProjectionShader,
+    /if \(surfaceDrivenRefinement && fineSummary\.found[\s\S]*fineSummary\.minimumPhi < 0\.0 && fineSummary\.maximumPhi >= 0\.0\) \{ return true; \}/,
+    "surface crossings remain a compatibility sizing rule, not a power-topology requirement");
   assert.match(octreeProjectionShader, /surfaceDetailStrengthValue\(\) \* clamp\(max\(strainActivity, 2\.0 \* maximumCurvatureProxy\)/);
   assert.match(octreeProjectionShader, /surfaceDetailStrengthValue\(\) > 0\.0/,
     "zero decoded detail strength must skip activity sampling while analytic sparse sentinels retain baseline sizing");

@@ -27,6 +27,7 @@ import { useSceneStore } from "@/lib/stores/scene-store";
 import { requestManualGPUStart } from "@/lib/gpu-startup";
 import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
 import { MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH } from "@/lib/stores/ui-store";
+import { paperPipelineHealthFlags } from "@/lib/paper-pipeline-diagnostics";
 
 function RightPanelResizer() {
   const rightPanelWidth = useUIStore((state) => state.rightPanelWidth);
@@ -119,7 +120,8 @@ export function FluidLab() {
   const backend = method.backend === "cpu" ? "cpu-reference" : "webgpu";
   const environment = getEnvironmentPreset(getScenePreset(presetId).background);
   const healthFlags = backend === "webgpu"
-    ? [...(gpuInfo?.stabilityFlags ?? []), ...(gpuInfo?.nonFiniteCount ? ["non-finite-values"] : [])]
+    ? [...(gpuInfo?.stabilityFlags ?? []), ...(gpuInfo?.nonFiniteCount ? ["non-finite-values"] : []),
+      ...(gpuInfo?.gridKind === "octree" ? paperPipelineHealthFlags(gpuInfo) : [])]
     : [...(fluidState?.nanCount ? ["non-finite-values"] : []), ...(fluidState && !fluidState.pressureConverged ? ["pressure-not-converged"] : [])];
 
   useLayoutEffect(() => startQueryStateSync(() => simulation.reset()), []);

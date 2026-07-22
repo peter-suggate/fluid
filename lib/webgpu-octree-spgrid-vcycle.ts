@@ -13,6 +13,13 @@ export interface SPGridLeafOracle {
   readonly size: number;
 }
 
+/** One undirected pressure coupling from the captured adaptive L1 graph. */
+export interface SPGridContactOracle {
+  readonly negative: number;
+  readonly positive: number;
+  readonly coefficient: number;
+}
+
 export interface SPGridTransferRecord {
   readonly fine: number;
   readonly coarse: number;
@@ -23,6 +30,8 @@ export interface SPGridOracleLevel {
   readonly scale: number;
   readonly coordinates: readonly (readonly [number, number, number])[];
   readonly flags: readonly number[];
+  /** Owning adaptive leaf.  Multigrid-only aggregate cells use -1. */
+  readonly owners?: readonly number[];
 }
 
 export interface SPGridPyramidOracle {
@@ -31,7 +40,140 @@ export interface SPGridPyramidOracle {
   readonly transfers: readonly (readonly SPGridTransferRecord[])[];
 }
 
+export interface SPGridContactLevelOracle {
+  readonly scale: number;
+  readonly coordinates: readonly (readonly [number, number, number])[];
+  readonly flags: readonly number[];
+  readonly owners: readonly number[];
+  /** E: exact GhostValuePropagate map, row-major slot-by-leaf. */
+  readonly propagate: Float64Array;
+  /** E^T: exact GhostValueAccumulate map, row-major leaf-by-slot. */
+  readonly accumulate: Float64Array;
+  /** B: sparse-level contact operator, row-major slot-by-slot. */
+  readonly slotOperator: Float64Array;
+  /** E^T B E, row-major leaf-by-leaf. */
+  readonly assembledOperator: Float64Array;
+}
+
 const coordinateKey = (value: readonly [number, number, number]) => `${value[0]},${value[1]},${value[2]}`;
+
+function contactCoordinate(owner: SPGridLeafOracle, neighbour: SPGridLeafOracle, scale: number): [number, number, number] {
+  const result: [number, number, number] = [0, 0, 0];
+  for (let axis = 0; axis < 3; axis += 1) {
+    const begin = owner.origin[axis], end = begin + owner.size;
+    const otherBegin = neighbour.origin[axis], otherEnd = otherBegin + neighbour.size;
+    let sample: number;
+    if (otherBegin >= end) sample = end - 0.5 * scale;
+    else if (otherEnd <= begin) sample = begin + 0.5 * scale;
+    else sample = Math.max(begin + 0.5 * scale, Math.min(end - 0.5 * scale, 0.5 * (otherBegin + otherEnd)));
+    result[axis] = Math.floor(sample / scale);
+  }
+  return result;
+}
+
+function transposeDense(matrix: ArrayLike<number>, rows: number, columns: number): Float64Array {
+  const result = new Float64Array(columns * rows);
+  for (let row = 0; row < rows; row += 1) for (let column = 0; column < columns; column += 1) {
+    result[column * rows + row] = matrix[row * columns + column];
+  }
+  return result;
+}
+
+function multiplyDense(a: ArrayLike<number>, aRows: number, shared: number, b: ArrayLike<number>, bColumns: number): Float64Array {
+  if (a.length !== aRows * shared || b.length !== shared * bColumns) throw new RangeError("SPGrid dense oracle dimensions disagree");
+  const result = new Float64Array(aRows * bColumns);
+  for (let row = 0; row < aRows; row += 1) for (let column = 0; column < bColumns; column += 1) {
+    let sum = 0;
+    for (let inner = 0; inner < shared; inner += 1) sum += a[row * shared + inner] * b[inner * bColumns + column];
+    result[row * bColumns + column] = sum;
+  }
+  return result;
+}
+
+/**
+ * Bounded assembled oracle for Aanjaneya et al. (2017), Section 4.2.
+ *
+ * A coarse adaptive leaf has one ghost alias for every distinct fine-grid
+ * contact cell.  Face contacts therefore create a face patch and power-face
+ * edge contacts create the corresponding edge aliases.  E copies a leaf
+ * value to every alias (`GhostValuePropagate`); accumulation is the same
+ * immutable incidence list traversed in reverse, so it is exactly E^T.
+ */
+export function buildSPGridContactLevelOracle(
+  leaves: readonly SPGridLeafOracle[],
+  contacts: readonly SPGridContactOracle[],
+  level: number,
+  anchors: readonly number[] = leaves.map(() => 1),
+): SPGridContactLevelOracle {
+  if (!Number.isSafeInteger(level) || level < 0) throw new RangeError("SPGrid contact level must be a non-negative integer");
+  if (anchors.length !== leaves.length) throw new RangeError("SPGrid contact anchors disagree with the leaf count");
+  const scale = 2 ** level, native = leaves.map((leaf, index) => {
+    assertPowerOfTwo(leaf.size, `SPGrid leaf ${index} size`);
+    if (leaf.origin.some((value) => !Number.isSafeInteger(value) || value < 0 || value % leaf.size !== 0)) {
+      throw new RangeError(`SPGrid leaf ${index} origin is not aligned to its size`);
+    }
+    return Math.round(Math.log2(leaf.size));
+  });
+  const slots = new Map<string, { coordinate: [number, number, number]; owner: number; flags: number }>();
+  const addOwned = (coordinate: [number, number, number], owner: number, flags: number) => {
+    const key = coordinateKey(coordinate), old = slots.get(key);
+    if (old !== undefined) {
+      if (old.owner !== owner) throw new RangeError(`Overlapping SPGrid owners ${old.owner} and ${owner} at ${key}`);
+      old.flags = (old.flags & SPGRID_CELL_FLAG.active) !== 0 || (flags & SPGRID_CELL_FLAG.active) !== 0
+        ? SPGRID_CELL_FLAG.active : SPGRID_CELL_FLAG.ghost;
+      return;
+    }
+    slots.set(key, { coordinate, owner, flags });
+  };
+  leaves.forEach((leaf, owner) => {
+    if (native[owner] === level) addOwned(leaf.origin.map((value) => value / scale) as [number, number, number], owner, SPGRID_CELL_FLAG.active);
+  });
+  contacts.forEach((contact, contactIndex) => {
+    if (!Number.isSafeInteger(contact.negative) || !Number.isSafeInteger(contact.positive)
+      || contact.negative < 0 || contact.positive < 0 || contact.negative >= leaves.length || contact.positive >= leaves.length
+      || contact.negative === contact.positive || !(contact.coefficient > 0) || !Number.isFinite(contact.coefficient)) {
+      throw new RangeError(`Invalid SPGrid contact ${contactIndex}`);
+    }
+    for (const [owner, neighbour] of [[contact.negative, contact.positive], [contact.positive, contact.negative]] as const) {
+      if (native[owner] > level && native[neighbour] <= level) {
+        addOwned(contactCoordinate(leaves[owner], leaves[neighbour], scale), owner, SPGRID_CELL_FLAG.ghost);
+      }
+    }
+  });
+  const cells = [...slots.values()], slotCount = cells.length, leafCount = leaves.length;
+  const slotByOwnerCoordinate = new Map(cells.map((cell, index) => [`${cell.owner}:${coordinateKey(cell.coordinate)}`, index]));
+  const propagate = new Float64Array(slotCount * leafCount);
+  cells.forEach((cell, slot) => { propagate[slot * leafCount + cell.owner] = 1; });
+  const accumulate = transposeDense(propagate, slotCount, leafCount), slotOperator = new Float64Array(slotCount * slotCount);
+  // Split an adaptive leaf's Dirichlet/solid anchor evenly among its aliases;
+  // E^T B E therefore retains the original leaf anchor exactly.
+  const aliasesPerOwner = new Uint32Array(leafCount);
+  cells.forEach((cell) => { aliasesPerOwner[cell.owner] += 1; });
+  cells.forEach((cell, slot) => {
+    const anchor = anchors[cell.owner];
+    if (!(anchor >= 0) || !Number.isFinite(anchor)) throw new RangeError(`Invalid SPGrid anchor for leaf ${cell.owner}`);
+    slotOperator[slot * slotCount + slot] += anchor / aliasesPerOwner[cell.owner];
+  });
+  contacts.forEach((contact) => {
+    const a = contactCoordinate(leaves[contact.negative], leaves[contact.positive], scale);
+    const b = contactCoordinate(leaves[contact.positive], leaves[contact.negative], scale);
+    const negative = slotByOwnerCoordinate.get(`${contact.negative}:${coordinateKey(a)}`);
+    const positive = slotByOwnerCoordinate.get(`${contact.positive}:${coordinateKey(b)}`);
+    // A contact belongs to this uniform level only when both endpoint storage
+    // cells exist here (native active or a spawned contact ghost).
+    if (negative === undefined || positive === undefined) return;
+    const c = contact.coefficient;
+    slotOperator[negative * slotCount + negative] += c;
+    slotOperator[positive * slotCount + positive] += c;
+    slotOperator[negative * slotCount + positive] -= c;
+    slotOperator[positive * slotCount + negative] -= c;
+  });
+  const bTimesE = multiplyDense(slotOperator, slotCount, slotCount, propagate, leafCount);
+  const assembledOperator = multiplyDense(accumulate, leafCount, slotCount, bTimesE, leafCount);
+  return Object.freeze({ scale, coordinates: Object.freeze(cells.map((cell) => cell.coordinate)),
+    flags: Object.freeze(cells.map((cell) => cell.flags)), owners: Object.freeze(cells.map((cell) => cell.owner)),
+    propagate, accumulate, slotOperator, assembledOperator });
+}
 
 function assertPowerOfTwo(value: number, label: string): void {
   if (!Number.isSafeInteger(value) || value < 1 || (value & (value - 1)) !== 0) {
@@ -180,9 +322,13 @@ export interface OctreeSPGridVCycleOptions {
 
 export interface OctreeSPGridVCycleSource { readonly leafHeaders: GPUBuffer; readonly leafEntries: GPUBuffer }
 
-const STATE_CHANNELS = 14;
+// Key/class/diagonal, six Cartesian and twelve octree-edge coefficients, five
+// vectors, and the adaptive owner of active/ghost storage.  The three groups
+// of four edge directions are the additional offset grids introduced for
+// power diagrams in Aanjaneya et al. (2017), Section 4.2.
+const STATE_CHANNELS = 27;
 const TOPOLOGY_HEADER_WORDS = 16;
-/** Bounded so the worst-case 12-level state remains below 128 MiB. */
+/** Explicit row bound; the constructor also fails closed on device limits. */
 export const SPGRID_MAXIMUM_ROW_CAPACITY = 16_384;
 
 function positiveInteger(value: number, label: string): number {
@@ -207,9 +353,10 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
     throw new RangeError("SPGrid maximumLevels would truncate the exact one-cell bottom level");
   }
   const levelCount = Math.max(2, requiredLevels);
-  // Up to four sparse native/MG-only cells per live row at a level, held below
-  // 50% hash occupancy. Overflow is fail-closed in solverControl.
-  const levelStride = nextPowerOfTwo(rowCapacity * 8), transferStride = rowCapacity * 8;
+  // A balanced 2:1 leaf can expose all eight children as distinct contact
+  // ghosts.  Reserve twice that worst-case population so the open-addressed
+  // table stays below 50% occupancy; overflow remains fail-closed.
+  const levelStride = nextPowerOfTwo(rowCapacity * 16), transferStride = rowCapacity * 8;
   const rowMapWords = levelCount * rowCapacity, worklistWords = levelCount * levelStride;
   const transferWords = (levelCount - 1) * transferStride * 3;
   const topologyBytes = (TOPOLOGY_HEADER_WORDS + rowMapWords + worklistWords + transferWords) * 4;
@@ -219,20 +366,24 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
     rowDispatch: dispatchFor(rowCapacity), slotDispatch: dispatchFor(levelStride), transferDispatch: dispatchFor(transferStride) };
 }
 
-type PipelineName = "emitCells" | "buildTransfers" | "buildStencil" | "ensureDiagonal" | "finalizeIndirect"
+export type OctreeSPGridVCyclePipelineName = "emitCells" | "emitGhostAliases" | "buildTransfers" | "buildStencil" | "ensureDiagonal" | "finalizeIndirect"
   | "clearTopology" | "clearState" | "clearDispatch" | "clearCorrection"
   | "zeroVectors" | "seedRhs" | "applyA" | "applyB" | "jacobiAtoB" | "jacobiBtoA"
-  | "formResidual" | "restrictResidual" | "exactBottom" | "prolongCorrection" | "publish";
+  | "formResidual" | "restrictResidual" | "ghostValueAccumulate" | "exactBottom"
+  | "prolongCorrection" | "ghostValuePropagate" | "publish";
 
-const BINDINGS: Readonly<Record<PipelineName, readonly number[]>> = Object.freeze({
+export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePipelineName, readonly number[]>> = Object.freeze({
   clearTopology: [4], clearState: [5], clearDispatch: [6], clearCorrection: [0, 3, 9],
-  emitCells: [0, 1, 3, 4, 5, 6, 7], buildTransfers: [0, 4, 5, 6, 7],
+  emitCells: [0, 1, 3, 4, 5, 6, 7], emitGhostAliases: [0, 1, 2, 3, 4, 5, 6, 7],
+  buildTransfers: [0, 1, 3, 4, 5, 6, 7],
   buildStencil: [0, 1, 2, 3, 4, 5, 7], ensureDiagonal: [0, 4, 5, 6], finalizeIndirect: [0, 6],
-  zeroVectors: [0, 4, 5, 6], seedRhs: [0, 3, 4, 5, 7, 8], applyA: [0, 4, 5, 6, 7],
+  zeroVectors: [0, 4, 5, 6], seedRhs: [0, 1, 3, 4, 5, 7, 8], applyA: [0, 4, 5, 6, 7],
   applyB: [0, 4, 5, 6, 7], jacobiAtoB: [0, 4, 5, 6, 7], jacobiBtoA: [0, 4, 5, 6, 7],
   formResidual: [0, 4, 5, 6, 7], restrictResidual: [0, 4, 5, 6, 7],
+  ghostValueAccumulate: [0, 4, 5, 6, 7],
   exactBottom: [0, 4, 5, 6, 7],
-  prolongCorrection: [0, 4, 5, 6, 7], publish: [0, 3, 4, 5, 7, 9],
+  prolongCorrection: [0, 4, 5, 6, 7], ghostValuePropagate: [0, 4, 5, 6, 7],
+  publish: [0, 1, 3, 4, 5, 7, 9],
 });
 
 type CachedGroup = { rowCount: GPUBuffer; control: GPUBuffer; rhs?: GPUBuffer; correction?: GPUBuffer; group: GPUBindGroup };
@@ -261,7 +412,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly state: GPUBuffer;
   private readonly dispatchMeta: GPUBuffer;
   private readonly params: readonly GPUBuffer[];
-  private readonly pipelines: Readonly<Record<PipelineName, GPUComputePipeline>>;
+  private readonly pipelines: Readonly<Record<OctreeSPGridVCyclePipelineName, GPUComputePipeline>>;
   private readonly groups = new Map<string, CachedGroup>();
   private readonly pre: number;
   private readonly post: number;
@@ -305,14 +456,14 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       device.queue.writeBuffer(buffer, 0, words); return buffer;
     }));
     const shaderModule = device.createShaderModule({ label: "Paper native sparse SPGrid V-cycle", code: octreeSPGridVCycleShader });
-    const make = (entryPoint: PipelineName) => device.createComputePipeline({ label: `SPGrid V-cycle · ${entryPoint}`,
+    const make = (entryPoint: OctreeSPGridVCyclePipelineName) => device.createComputePipeline({ label: `SPGrid V-cycle · ${entryPoint}`,
       layout: "auto", compute: { module: shaderModule, entryPoint } });
-    this.pipelines = Object.freeze(Object.fromEntries((Object.keys(BINDINGS) as PipelineName[]).map((name) => [name, make(name)])) as Record<PipelineName, GPUComputePipeline>);
+    this.pipelines = Object.freeze(Object.fromEntries((Object.keys(OCTREE_SPGRID_VCYCLE_BINDINGS) as OctreeSPGridVCyclePipelineName[]).map((name) => [name, make(name)])) as Record<OctreeSPGridVCyclePipelineName, GPUComputePipeline>);
     const l = this.plan.levelCount;
     // Three clears, finest-cell emission, one transfer build per adjacent
     // level, the finest stencil build, then diagonal/finalization per level.
-    this.encodedSetupDispatchCount = 3 * l + 4;
-    this.encodedCorrectionDispatchCount = l + 4 + (l - 1) * (2 * this.pre + 2 * this.post + 4);
+    this.encodedSetupDispatchCount = 3 * l + 5;
+    this.encodedCorrectionDispatchCount = l + 4 + (l - 1) * (2 * this.pre + 2 * this.post + 6);
     this.encodedCorrectionPassCount = this.encodedCorrectionDispatchCount;
     this.diagnostics = Object.freeze({ levelCount: l, coarsestCapacity: this.plan.levelStride,
       maximumTransferRecordsPerLevel: this.plan.transferStride, correctionDispatchCount: this.encodedCorrectionDispatchCount,
@@ -334,6 +485,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.run(pass, "clearState", 0, input, dispatchFor(this.plan.stateBytes / 4));
     this.run(pass, "clearDispatch", 0, input, dispatchFor(this.plan.levelCount * 8));
     this.run(pass, "emitCells", 0, input, this.plan.rowDispatch);
+    this.run(pass, "emitGhostAliases", 0, input, this.plan.rowDispatch);
     for (let level = 0; level < this.plan.levelCount - 1; level += 1) this.run(pass, "buildTransfers", level, input, this.plan.slotDispatch);
     this.run(pass, "buildStencil", 0, input, this.plan.rowDispatch);
     for (let level = 0; level < this.plan.levelCount; level += 1) {
@@ -352,11 +504,15 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.run(pass, "seedRhs", 0, input, this.plan.rowDispatch);
     for (let level = 0; level < this.plan.levelCount - 1; level += 1) {
       this.smooth(pass, level, this.pre, input); this.runIndirect(pass, "applyA", level, input, false);
-      this.runIndirect(pass, "formResidual", level, input, false); this.runIndirect(pass, "restrictResidual", level, input, true);
+      this.runIndirect(pass, "formResidual", level, input, false);
+      this.runIndirect(pass, "restrictResidual", level, input, true);
+      this.runIndirect(pass, "ghostValueAccumulate", level, input, true);
     }
     this.runIndirect(pass, "exactBottom", this.plan.levelCount - 1, input, false);
     for (let level = this.plan.levelCount - 2; level >= 0; level -= 1) {
-      this.runIndirect(pass, "prolongCorrection", level, input, true); this.smooth(pass, level, this.post, input);
+      this.runIndirect(pass, "prolongCorrection", level, input, true);
+      this.runIndirect(pass, "ghostValuePropagate", level, input, true);
+      this.smooth(pass, level, this.post, input);
     }
     this.run(pass, "publish", 0, input, this.plan.rowDispatch); if (!sharedPass) pass.end();
   }
@@ -369,7 +525,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     }
   }
 
-  private runIndirect(pass: GPUComputePassEncoder, name: PipelineName, level: number,
+  private runIndirect(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
     input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }, transfer: boolean): void {
     // WebGPU usage scopes cover an entire compute pass: a buffer cannot be
     // writable storage while also supplying indirect arguments in that pass.
@@ -378,12 +534,12 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.bind(pass, name, level, input);
     pass.dispatchWorkgroups(...(transfer ? this.plan.transferDispatch : this.plan.slotDispatch));
   }
-  private run(pass: GPUComputePassEncoder, name: PipelineName, level: number,
+  private run(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
     input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer },
     dispatch: readonly [number, number, number]): void {
     this.bind(pass, name, level, input); pass.dispatchWorkgroups(...dispatch);
   }
-  private bind(pass: GPUComputePassEncoder, name: PipelineName, level: number,
+  private bind(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
     input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     const pipeline = this.pipelines[name], key = `${name}:${level}`, cached = this.groups.get(key);
     let group = cached?.group;
@@ -391,7 +547,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       || cached.rhs !== input.rhs || cached.correction !== input.correction) {
       const buffers = [this.params[level], this.capturedHeaders, this.capturedEntries, input.rowCount, this.topology,
         this.state, this.dispatchMeta, input.solverControl, input.rhs, input.correction];
-      group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: BINDINGS[name].map((binding) => ({
+      group = this.device.createBindGroup({ label: `SPGrid V-cycle · ${name} · level ${level}`,
+        layout: pipeline.getBindGroupLayout(0), entries: OCTREE_SPGRID_VCYCLE_BINDINGS[name].map((binding) => ({
         binding, resource: { buffer: buffers[binding]! },
       })) });
       this.groups.set(key, { rowCount: input.rowCount, control: input.solverControl, rhs: input.rhs, correction: input.correction, group });
@@ -423,7 +580,9 @@ struct LeafEntry{row:u32,coefficient:f32}
 const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;const INVALID=0xffffffffu;
 const OVERFLOW=2u;const NONFINITE=4u;const NONPOSITIVE=8u;
 const KEY=0u;const FLAGS=1u;const DIAG=2u;const XP=3u;const XM=4u;const YP=5u;const YM=6u;const ZP=7u;const ZM=8u;
-const RHS=9u;const A=10u;const B=11u;const AX=12u;const RESIDUAL=13u;
+const XYPP=9u;const XYPM=10u;const XYMP=11u;const XYMM=12u;const XZPP=13u;const XZPM=14u;const XZMP=15u;const XZMM=16u;
+const YZPP=17u;const YZPM=18u;const YZMP=19u;const YZMM=20u;
+const RHS=21u;const A=22u;const B=23u;const AX=24u;const RESIDUAL=25u;const OWNER=26u;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn stopped()->bool{return atomicLoad(&control[0])!=0u||atomicLoad(&control[1])!=0u;}
 fn report(flag:u32){atomicOr(&control[0],flag);}fn rows()->u32{return min(rowCounts[0],p.capacity.x);}fn level()->u32{return p.dimsLevel.w;}
 fn stride()->u32{return p.capacity.z;}fn levels()->u32{return p.capacity.y;}fn transferStride()->u32{return p.capacity.w;}
@@ -448,8 +607,20 @@ fn insert(l:u32,q:vec3u,flags:u32)->u32{let key=coordKey(min(q,dims(l)-vec3u(1u)
   if(c.exchanged){mergeClass(at(FLAGS,l,slot),flags);let w=atomicAdd(&dispatchMeta[l*8u],1u);if(w>=stride()){report(OVERFLOW);return INVALID;}
    atomicStore(&topology[workBase()+l*stride()+w],slot);return slot;}old=c.old_value;if(old==key){mergeClass(at(FLAGS,l,slot),flags);return slot;}}
  slot=(slot+1u)&(stride()-1u);}report(OVERFLOW);return INVALID;}
+fn insertOwned(l:u32,q:vec3u,flags:u32,owner:u32)->u32{let slot=insert(l,q,flags);if(slot==INVALID){return INVALID;}let encoded=owner+1u;
+ for(var retry=0u;retry<16u;retry+=1u){let old=atomicLoad(&state[at(OWNER,l,slot)]);if(old==encoded){return slot;}if(old!=0u){report(OVERFLOW);return INVALID;}
+  let claim=atomicCompareExchangeWeak(&state[at(OWNER,l,slot)],0u,encoded);if(claim.exchanged||claim.old_value==encoded){return slot;}}
+ report(OVERFLOW);return INVALID;}
 fn find(l:u32,q:vec3u)->u32{let key=coordKey(q,l);var slot=hash(key);for(var probe=0u;probe<256u;probe+=1u){let old=atomicLoad(&state[at(KEY,l,slot)]);
  if(old==key){return slot;}if(old==0u){return INVALID;}slot=(slot+1u)&(stride()-1u);}return INVALID;}
+fn originOf(h:LeafHeader)->vec3u{return vec3u(h.cell%p.dimsLevel.x,(h.cell/p.dimsLevel.x)%p.dimsLevel.y,h.cell/(p.dimsLevel.x*p.dimsLevel.y));}
+fn contactCoord(own:LeafHeader,other:LeafHeader,l:u32)->vec3u{let scale=1u<<l;let begin=originOf(own);let finish=begin+vec3u(own.size);
+ let otherBegin=originOf(other);let otherFinish=otherBegin+vec3u(other.size);var result=vec3u(0u);
+ for(var axis=0u;axis<3u;axis+=1u){if(otherBegin[axis]>=finish[axis]){result[axis]=(finish[axis]-1u)/scale;}
+  else if(otherFinish[axis]<=begin[axis]){result[axis]=begin[axis]/scale;}else{let centre=(2u*otherBegin[axis]+other.size)/(2u*scale);
+   result[axis]=clamp(centre,begin[axis]/scale,(finish[axis]-1u)/scale);}}return result;}
+fn ownedContactSlot(l:u32,row:u32,other:u32)->u32{let h=headers[row];let native=firstTrailingBit(h.size);if(l>=native){return rowMap(l,row);}
+ let slot=find(l,contactCoord(h,headers[other],l));if(slot==INVALID||atomicLoad(&state[at(OWNER,l,slot)])!=row+1u){return INVALID;}return slot;}
 fn appendTransfer(l:u32,fine:u32,coarse:u32,weight:f32){let i=atomicAdd(&dispatchMeta[l*8u+1u],1u);if(i>=transferStride()){report(OVERFLOW);return;}
  atomicStore(&topology[transferWord(l,i,0u)],fine);atomicStore(&topology[transferWord(l,i,1u)],coarse);atomicStore(&topology[transferWord(l,i,2u)],bitcast<u32>(weight));}
 @compute @workgroup_size(64) fn clearTopology(@builtin(global_invocation_id) g:vec3u){let i=genericIndex(g);if(i<arrayLength(&topology)){atomicStore(&topology[i],0u);}}
@@ -457,20 +628,33 @@ fn appendTransfer(l:u32,fine:u32,coarse:u32,weight:f32){let i=atomicAdd(&dispatc
 @compute @workgroup_size(64) fn clearDispatch(@builtin(global_invocation_id) g:vec3u){let i=genericIndex(g);if(i<arrayLength(&dispatchMeta)){atomicStore(&dispatchMeta[i],0u);}}
 @compute @workgroup_size(64) fn clearCorrection(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()){outputCorrection[r]=0.0;}}
 @compute @workgroup_size(64) fn emitCells(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r>=rows()||stopped()){return;}let h=headers[r];
- for(var l=0u;l<levels();l+=1u){let scale=1u<<l;let native=firstTrailingBit(h.size);let flag=select(select(MG_ONLY,ACTIVE,l==native),GHOST,l<native);
-  let slot=insert(l,decode(coordKey(vec3u(h.cell%p.dimsLevel.x,(h.cell/p.dimsLevel.x)%p.dimsLevel.y,h.cell/(p.dimsLevel.x*p.dimsLevel.y))/scale,l),l),flag);
+ let native=firstTrailingBit(h.size);for(var l=native;l<levels();l+=1u){let scale=1u<<l;let flag=select(MG_ONLY,ACTIVE,l==native);
+  let q=originOf(h)/scale;var slot=INVALID;if(l==native){slot=insertOwned(l,q,flag,r);}else{slot=insert(l,q,flag);}
   if(slot!=INVALID){atomicStore(&topology[rowMapBase()+l*p.capacity.x+r],slot);}}}
+@compute @workgroup_size(64) fn emitGhostAliases(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r>=rows()||stopped()){return;}let h=headers[r];
+ if(h.entryStart+h.entryCount>arrayLength(&entries)){report(OVERFLOW);return;}let native=firstTrailingBit(h.size);for(var j=0u;j<h.entryCount;j+=1u){let other=entries[h.entryStart+j].row;
+  if(other>=rows()){report(OVERFLOW);continue;}let otherNative=firstTrailingBit(headers[other].size);for(var l=otherNative;l<native;l+=1u){
+   let ghostSlot=insertOwned(l,contactCoord(h,headers[other],l),GHOST,r);if(ghostSlot==INVALID){return;}}}}
 @compute @workgroup_size(64) fn buildTransfers(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)||l+1u>=levels()||stopped()){return;}
- let fine=workSlot(l,i);let q=decode(atomicLoad(&state[at(KEY,l,fine)]),l);let flags=atomicLoad(&state[at(FLAGS,l,fine)]);if((flags&GHOST)!=0u){let c=insert(l+1u,q/2u,MG_ONLY);
-  if(c!=INVALID){appendTransfer(l,fine,c,1.0);}return;}let base=q/2u;let side=vec3i(select(-1,1,(q.x&1u)!=0u),select(-1,1,(q.y&1u)!=0u),select(-1,1,(q.z&1u)!=0u));
+ let fine=workSlot(l,i);let q=decode(atomicLoad(&state[at(KEY,l,fine)]),l);let flags=atomicLoad(&state[at(FLAGS,l,fine)]);if((flags&GHOST)!=0u){let encodedOwner=atomicLoad(&state[at(OWNER,l,fine)]);
+  if(encodedOwner==0u||encodedOwner>rows()){report(OVERFLOW);return;}let owner=encodedOwner-1u;let native=firstTrailingBit(headers[owner].size);var c=INVALID;
+  if(l+1u==native){c=rowMap(l+1u,owner);}else{c=insertOwned(l+1u,q/2u,GHOST,owner);}if(c!=INVALID){appendTransfer(l,fine,c,1.0);}return;}
+ let base=q/2u;let side=vec3i(select(-1,1,(q.x&1u)!=0u),select(-1,1,(q.y&1u)!=0u),select(-1,1,(q.z&1u)!=0u));
  for(var corner=0u;corner<8u;corner+=1u){var targetCoord=vec3i(base);var weight=1.0;for(var axis=0u;axis<3u;axis+=1u){if((corner&(1u<<axis))!=0u){targetCoord[axis]+=side[axis];weight*=0.25;}else{weight*=0.75;}}
   let cq=vec3u(max(targetCoord,vec3i(0)));let c=insert(l+1u,cq,MG_ONLY);if(c!=INVALID){appendTransfer(l,fine,c,weight);}}}
-fn addFace(l:u32,own:u32,a:vec3u,b:vec3u,c:f32){let d=vec3i(b)-vec3i(a);var ch=0u;if(all(d==vec3i(1,0,0))){ch=XP;}else if(all(d==vec3i(-1,0,0))){ch=XM;}
- else if(all(d==vec3i(0,1,0))){ch=YP;}else if(all(d==vec3i(0,-1,0))){ch=YM;}else if(all(d==vec3i(0,0,1))){ch=ZP;}else if(all(d==vec3i(0,0,-1))){ch=ZM;}else{return;}atomicAddF(at(ch,l,own),c);}
+fn addFace(l:u32,own:u32,a:vec3u,b:vec3u,c:f32)->bool{let d=vec3i(b)-vec3i(a);var ch=0u;if(all(d==vec3i(1,0,0))){ch=XP;}else if(all(d==vec3i(-1,0,0))){ch=XM;}
+ else if(all(d==vec3i(0,1,0))){ch=YP;}else if(all(d==vec3i(0,-1,0))){ch=YM;}else if(all(d==vec3i(0,0,1))){ch=ZP;}else if(all(d==vec3i(0,0,-1))){ch=ZM;}
+ else if(all(d==vec3i(1,1,0))){ch=XYPP;}else if(all(d==vec3i(1,-1,0))){ch=XYPM;}else if(all(d==vec3i(-1,1,0))){ch=XYMP;}else if(all(d==vec3i(-1,-1,0))){ch=XYMM;}
+ else if(all(d==vec3i(1,0,1))){ch=XZPP;}else if(all(d==vec3i(1,0,-1))){ch=XZPM;}else if(all(d==vec3i(-1,0,1))){ch=XZMP;}else if(all(d==vec3i(-1,0,-1))){ch=XZMM;}
+ else if(all(d==vec3i(0,1,1))){ch=YZPP;}else if(all(d==vec3i(0,1,-1))){ch=YZPM;}else if(all(d==vec3i(0,-1,1))){ch=YZMP;}else if(all(d==vec3i(0,-1,-1))){ch=YZMM;}else{return false;}
+ atomicAddF(at(ch,l,own),c);return true;}
 @compute @workgroup_size(64) fn buildStencil(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r>=rows()||stopped()){return;}let h=headers[r];var sum=0.0;
- for(var j=0u;j<h.entryCount;j+=1u){sum+=entries[h.entryStart+j].coefficient;}let anchor=max(0.0,h.diagonal-sum);for(var l=0u;l<levels();l+=1u){let own=rowMap(l,r);
-  atomicAddF(at(DIAG,l,own),anchor);let ownQ=decode(atomicLoad(&state[at(KEY,l,own)]),l);for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=rows()){continue;}
-   let other=rowMap(l,e.row);if(other!=own){atomicAddF(at(DIAG,l,own),e.coefficient);addFace(l,own,ownQ,decode(atomicLoad(&state[at(KEY,l,other)]),l),e.coefficient);}}}}
+ if(h.entryStart+h.entryCount>arrayLength(&entries)){report(OVERFLOW);return;}for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=rows()||!finite(e.coefficient)||e.coefficient<0.0){report(OVERFLOW);continue;}sum+=e.coefficient;}
+ let anchor=max(0.0,h.diagonal-sum);let native=firstTrailingBit(h.size);for(var l=0u;l<levels();l+=1u){if(l>=native){let canonical=rowMap(l,r);atomicAddF(at(DIAG,l,canonical),anchor);}
+  for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=rows()){continue;}let otherNative=firstTrailingBit(headers[e.row].size);
+   if(l<native&&l<otherNative){continue;}let own=ownedContactSlot(l,r,e.row);let other=ownedContactSlot(l,e.row,r);
+   if(own==INVALID||other==INVALID){report(OVERFLOW);continue;}if(other!=own){atomicAddF(at(DIAG,l,own),e.coefficient);let ownQ=decode(atomicLoad(&state[at(KEY,l,own)]),l);
+    if(!addFace(l,own,ownQ,decode(atomicLoad(&state[at(KEY,l,other)]),l),e.coefficient)){report(OVERFLOW);}}}}}
 @compute @workgroup_size(64) fn ensureDiagonal(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)){return;}let s=workSlot(l,i);
  if(loadf(DIAG,l,s)<=1e-20){storef(DIAG,l,s,1.0);}}
 @compute @workgroup_size(1) fn finalizeIndirect(){let l=level();let n=count(l);let t=transferCount(l);let nb=(n+63u)/64u;let tb=(t+63u)/64u;
@@ -478,24 +662,49 @@ fn addFace(l:u32,own:u32,a:vec3u,b:vec3u,c:f32){let d=vec3i(b)-vec3i(a);var ch=0
  atomicStore(&dispatchMeta[l*8u+5u],min(65535u,max(1u,tb)));atomicStore(&dispatchMeta[l*8u+6u],max(1u,(tb+65534u)/65535u));atomicStore(&dispatchMeta[l*8u+7u],1u);}
 @compute @workgroup_size(64) fn zeroVectors(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)){return;}let s=workSlot(l,i);
  for(var c=RHS;c<=RESIDUAL;c+=1u){storef(c,l,s,0.0);}}
-@compute @workgroup_size(64) fn seedRhs(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let v=inputRhs[r];if(!finite(v)){report(NONFINITE);}else{atomicAddF(at(RHS,0u,rowMap(0u,r)),v);}}}
+@compute @workgroup_size(64) fn seedRhs(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let v=inputRhs[r];let native=firstTrailingBit(headers[r].size);
+ if(!finite(v)){report(NONFINITE);}else{atomicAddF(at(RHS,native,rowMap(native,r)),v);}}}
 fn neighbour(l:u32,q:vec3u,axis:u32,positive:bool)->u32{var v=vec3i(q);v[axis]+=select(-1,1,positive);if(any(v<vec3i(0))||any(vec3u(v)>=dims(l))){return INVALID;}return find(l,vec3u(v));}
+fn offsetNeighbour(l:u32,q:vec3u,d:vec3i)->u32{let v=vec3i(q)+d;if(any(v<vec3i(0))||any(vec3u(v)>=dims(l))){return INVALID;}return find(l,vec3u(v));}
 fn apply(slot:u32,source:u32){let l=level();let q=decode(atomicLoad(&state[at(KEY,l,slot)]),l);var value=loadf(DIAG,l,slot)*loadf(source,l,slot);
  let channels=array<u32,6>(XP,XM,YP,YM,ZP,ZM);for(var k=0u;k<6u;k+=1u){let c=loadf(channels[k],l,slot);let other=neighbour(l,q,k/2u,(k&1u)==0u);
-  if(other!=INVALID){value-=c*loadf(source,l,other);}}storef(AX,l,slot,value);}
+  if(other!=INVALID){value-=c*loadf(source,l,other);}}
+ let edgeChannels=array<u32,12>(XYPP,XYPM,XYMP,XYMM,XZPP,XZPM,XZMP,XZMM,YZPP,YZPM,YZMP,YZMM);
+ let edgeOffsets=array<vec3i,12>(vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),
+  vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));
+ for(var k=0u;k<12u;k+=1u){let c=loadf(edgeChannels[k],l,slot);let other=offsetNeighbour(l,q,edgeOffsets[k]);if(other!=INVALID){value-=c*loadf(source,l,other);}}
+ storef(AX,l,slot,value);}
 fn smoothable(l:u32,s:u32)->bool{return(atomicLoad(&state[at(FLAGS,l,s)])&GHOST)==0u;}
-@compute @workgroup_size(64) fn applyA(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){let s=workSlot(l,i);if(smoothable(l,s)){apply(s,A);}}}
-@compute @workgroup_size(64) fn applyB(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){let s=workSlot(l,i);if(smoothable(l,s)){apply(s,B);}}}
+@compute @workgroup_size(64) fn applyA(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){apply(workSlot(l,i),A);}}
+@compute @workgroup_size(64) fn applyB(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){apply(workSlot(l,i),B);}}
 fn jacobi(slot:u32,src:u32,dst:u32){let l=level();let d=loadf(DIAG,l,slot);if(!(d>0.0)){report(NONPOSITIVE);return;}let x=loadf(src,l,slot)+p.weights.x*(loadf(RHS,l,slot)-loadf(AX,l,slot))/d;
  if(!finite(x)){report(NONFINITE);}else{storef(dst,l,slot,x);}}
-@compute @workgroup_size(64) fn jacobiAtoB(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){let s=workSlot(l,i);if(smoothable(l,s)){jacobi(s,A,B);}}}
-@compute @workgroup_size(64) fn jacobiBtoA(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){let s=workSlot(l,i);if(smoothable(l,s)){jacobi(s,B,A);}}}
-@compute @workgroup_size(64) fn formResidual(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){let s=workSlot(l,i);storef(RESIDUAL,l,s,select(loadf(RHS,l,s)-loadf(AX,l,s),loadf(RHS,l,s),!smoothable(l,s)));}}
+@compute @workgroup_size(64) fn jacobiAtoB(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){let s=workSlot(l,i);
+ if(smoothable(l,s)){jacobi(s,A,B);}else{storef(B,l,s,loadf(A,l,s));}}}
+@compute @workgroup_size(64) fn jacobiBtoA(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){let s=workSlot(l,i);
+ if(smoothable(l,s)){jacobi(s,B,A);}else{storef(A,l,s,loadf(B,l,s));}}}
+@compute @workgroup_size(64) fn formResidual(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){let s=workSlot(l,i);
+ storef(RESIDUAL,l,s,select(-loadf(AX,l,s),loadf(RHS,l,s)-loadf(AX,l,s),smoothable(l,s)));}}
 @compute @workgroup_size(64) fn restrictResidual(@builtin(global_invocation_id) g:vec3u){let i=transferIndex(g);let l=level();if(i>=transferCount(l)||stopped()){return;}
- let f=atomicLoad(&topology[transferWord(l,i,0u)]);let c=atomicLoad(&topology[transferWord(l,i,1u)]);let w=bitcast<f32>(atomicLoad(&topology[transferWord(l,i,2u)]));atomicAddF(at(RHS,l+1u,c),w*loadf(RESIDUAL,l,f));}
+ let f=atomicLoad(&topology[transferWord(l,i,0u)]);if((atomicLoad(&state[at(FLAGS,l,f)])&GHOST)!=0u){return;}
+ let c=atomicLoad(&topology[transferWord(l,i,1u)]);let w=bitcast<f32>(atomicLoad(&topology[transferWord(l,i,2u)]));atomicAddF(at(RHS,l+1u,c),w*loadf(RESIDUAL,l,f));}
+// Aanjaneya et al. (2017), Section 4.2 GhostValueAccumulate: fine
+// contact-ghost partial results are copied back with E^T.  The exact same
+// immutable unit transfer record is consumed by GhostValuePropagate below.
+@compute @workgroup_size(64) fn ghostValueAccumulate(@builtin(global_invocation_id) g:vec3u){let i=transferIndex(g);let l=level();if(i>=transferCount(l)||stopped()){return;}
+ let f=atomicLoad(&topology[transferWord(l,i,0u)]);if((atomicLoad(&state[at(FLAGS,l,f)])&GHOST)==0u){return;}
+ let c=atomicLoad(&topology[transferWord(l,i,1u)]);let w=bitcast<f32>(atomicLoad(&topology[transferWord(l,i,2u)]));
+ if(w!=1.0){report(OVERFLOW);return;}atomicAddF(at(RHS,l+1u,c),loadf(RESIDUAL,l,f));}
 @compute @workgroup_size(64) fn exactBottom(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>0u||stopped()){return;}if(count(l)!=1u){report(NONPOSITIVE);return;}
  let s=workSlot(l,0u);let d=loadf(DIAG,l,s);if(!(d>0.0)){report(NONPOSITIVE);return;}let x=loadf(RHS,l,s)/d;if(!finite(x)){report(NONFINITE);}else{storef(A,l,s,x);}}
 @compute @workgroup_size(64) fn prolongCorrection(@builtin(global_invocation_id) g:vec3u){let i=transferIndex(g);let l=level();if(i>=transferCount(l)||stopped()){return;}
- let f=atomicLoad(&topology[transferWord(l,i,0u)]);let c=atomicLoad(&topology[transferWord(l,i,1u)]);let w=bitcast<f32>(atomicLoad(&topology[transferWord(l,i,2u)]));atomicAddF(at(A,l,f),w*loadf(A,l+1u,c));}
-@compute @workgroup_size(64) fn publish(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let v=loadf(A,0u,rowMap(0u,r));if(!finite(v)){report(NONFINITE);}else{outputCorrection[r]=v;}}}
+ let f=atomicLoad(&topology[transferWord(l,i,0u)]);if((atomicLoad(&state[at(FLAGS,l,f)])&GHOST)!=0u){return;}
+ let c=atomicLoad(&topology[transferWord(l,i,1u)]);let w=bitcast<f32>(atomicLoad(&topology[transferWord(l,i,2u)]));atomicAddF(at(A,l,f),w*loadf(A,l+1u,c));}
+// Section 4.2 GhostValuePropagate: E is an exact copy, not interpolation.
+@compute @workgroup_size(64) fn ghostValuePropagate(@builtin(global_invocation_id) g:vec3u){let i=transferIndex(g);let l=level();if(i>=transferCount(l)||stopped()){return;}
+ let f=atomicLoad(&topology[transferWord(l,i,0u)]);if((atomicLoad(&state[at(FLAGS,l,f)])&GHOST)==0u){return;}
+ let c=atomicLoad(&topology[transferWord(l,i,1u)]);let w=bitcast<f32>(atomicLoad(&topology[transferWord(l,i,2u)]));
+ if(w!=1.0){report(OVERFLOW);return;}storef(A,l,f,loadf(A,l+1u,c));}
+@compute @workgroup_size(64) fn publish(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let native=firstTrailingBit(headers[r].size);
+ let v=loadf(A,native,rowMap(native,r));if(!finite(v)){report(NONFINITE);}else{outputCorrection[r]=v;}}}
 `;

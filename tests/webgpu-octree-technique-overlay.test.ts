@@ -39,6 +39,11 @@ test("technique overlay composes independently from live compact GPU buffers", (
     "the paper φ view must read the direct factor-m field without a CPU mirror");
   assert.match(overlaySource, /abs\(length\(gradient\)-1\.0\)/,
     "the paper φ view must expose the signed-distance Eikonal residual");
+  assert.match(overlaySource,
+    /fn renderWorldToFine[\s\S]*vec3f\(-0\.5\*u\.container\.x,0\.0,-0\.5\*u\.container\.z\)[\s\S]*\(point-minimum\)/,
+    "fine diagnostics must translate the renderer's centred x/z world into the solver-local lattice");
+  assert.doesNotMatch(overlaySource, /let relative=\(point-fine\.domainOrigin\)/,
+    "centred render coordinates must never be sampled directly as solver-local fine coordinates");
   assert.match(overlaySource, /first==f\.globalFace\|\|first==index/,
     "bounded owner telemetry must preserve the existing first-error spatial face highlight");
   assert.match(overlaySource, /var acceptedInk=0\.0;var trialInk=0\.0;var unresolvedInk=0\.0/,
@@ -93,6 +98,10 @@ test("render panel exposes the second-tranche lifecycle and validity audits", ()
     "the render cockpit must retain represented-volume drift only when it is independent");
   assert.match(panelSource, /engineering supplement, not part of the paper&apos;s Section 5 algorithm/,
     "the implementation's optional global phi shift must not be attributed to the paper");
+  assert.match(panelSource, /expected medial ridges can also appear/,
+    "the centered-gradient diagnostic must not mislabel signed-distance kinks as publication failures");
+  assert.match(panelSource, /Residual next to the white zero crossing audits redistancing; interior equal-distance ridges are nondifferentiable/,
+    "the paper fine-phi legend must separate interface quality from expected medial-axis residual");
   assert.match(panelSource, /exact unresolved split: heap-bound trial, accepted-predecessor scheduler defect, or disconnected/,
     "the Section 5 legend must identify the solver-owned unresolved classifier");
 });

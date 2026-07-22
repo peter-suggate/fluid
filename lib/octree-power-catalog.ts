@@ -147,6 +147,57 @@ function ordinaryDelaunayAtAnchor(a: PowerVec3, b: PowerVec3, c: PowerVec3,
   });
 }
 
+interface LinkTriangulation {
+  readonly maximumSolidAngle: number;
+  readonly triangles: readonly (readonly [number, number, number])[];
+}
+
+/**
+ * Triangulates one cyclic, co-spherical Delaunay link without restricting the
+ * answer to a fan. A fan is sufficient for triangles and quadrilaterals, but
+ * adaptive same/coarser links can contain five or more vertices and their
+ * minimum-angle diagonalization need not share a common root.
+ */
+function triangulateDelaunayLink(
+  cycle: readonly number[],
+  positionBySelector: ReadonlyMap<number, PowerVec3>,
+  ordinaryPositions: readonly PowerVec3[],
+): LinkTriangulation | undefined {
+  if (cycle.length < 3) return undefined;
+  const dot = (a: PowerVec3, b: PowerVec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a: PowerVec3, b: PowerVec3): PowerVec3 => [
+    a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0],
+  ];
+  const memo = new Map<string, LinkTriangulation | undefined>();
+  const solve = (first: number, last: number): LinkTriangulation | undefined => {
+    if (last - first < 2) return { maximumSolidAngle: 0, triangles: [] };
+    const key = `${first}:${last}`;
+    if (memo.has(key)) return memo.get(key);
+    let best: LinkTriangulation | undefined;
+    let bestSignature = "";
+    for (let middle = first + 1; middle < last; middle += 1) {
+      const left = solve(first, middle), right = solve(middle, last);
+      if (!left || !right) continue;
+      const triangle = [cycle[first], cycle[middle], cycle[last]] as const;
+      const positions = triangle.map((selector) => positionBySelector.get(selector)!);
+      if (Math.abs(dot(positions[0], cross(positions[1], positions[2]))) <= 1e-10) continue;
+      if (!ordinaryDelaunayAtAnchor(positions[0], positions[1], positions[2], ordinaryPositions)) continue;
+      const angle = solidAngle(positions[0], positions[1], positions[2]);
+      const triangles = [...left.triangles, ...right.triangles, triangle];
+      const maximumSolidAngle = Math.max(left.maximumSolidAngle, right.maximumSolidAngle, angle);
+      const signature = triangles.map((entry) => [...entry].sort((a, b) => a - b).join(",")).sort().join(";");
+      if (!best || maximumSolidAngle < best.maximumSolidAngle - 1e-12
+        || (Math.abs(maximumSolidAngle - best.maximumSolidAngle) <= 1e-12 && signature < bestSignature)) {
+        best = { maximumSolidAngle, triangles };
+        bestSignature = signature;
+      }
+    }
+    memo.set(key, best);
+    return best;
+  };
+  return solve(0, cycle.length - 1);
+}
+
 function localDelaunayTetrahedra(
   anchor: OctreePowerSite,
   sites: readonly OctreePowerSite[],
@@ -163,26 +214,32 @@ function localDelaunayTetrahedra(
   });
   const ordinaryAnchor = ordinarySites.find((site) => site.key === anchor.key)!;
   const cell = constructOctreePowerCell(ordinaryAnchor, ordinarySites);
-  const siteByKey = new Map(sites.map((site) => [site.key, site]));
-  const selectorByFaceKey = new Map(cell.faces.map((face) => {
-    const source = siteByKey.get(face.incidentSiteKey!)!;
+  // A co-spherical site can touch the ordinary Voronoi cell only along an
+  // edge or vertex. It then has no positive-area power face, but is still a
+  // valid vertex of a degenerate Delaunay triangulation. Retaining only
+  // cell.faces loses exactly those alternate vertices and can force an
+  // otherwise avoidable obtuse tetrahedron.
+  const selectorBySiteKey = new Map(sites.filter((site) => site.key !== anchor.key).map((source) => {
     const relative = source.center.map((value, axis) => (value - anchor.center[axis]) / anchor.size) as [number, number, number];
     const offset = vector(transformPowerVector(relative, canonical.transform));
     const selector = selectorByGeometry.get(JSON.stringify([...offset, scalar(source.size / anchor.size)]));
     if (selector === undefined) throw new Error("Delaunay vertex is absent from the global selector table");
-    return [face.incidentSiteKey!, selector] as const;
+    return [source.key, selector] as const;
   }));
   const positionBySelector = new Map<number, PowerVec3>();
-  for (const [key, selector] of selectorByFaceKey) {
+  for (const [key, selector] of selectorBySiteKey) {
     const site = ordinarySites.find((candidate) => candidate.key === key)!;
     positionBySelector.set(selector, site.center.map((value) => value / 4) as [number, number, number]);
   }
   const ordinaryPositions = ordinarySites.filter((site) => site.key !== anchor.key)
     .map((site): PowerVec3 => [site.center[0] / 4, site.center[1] / 4, site.center[2] / 4]);
-  const vertexTolerance2 = (ordinaryAnchor.size * 4e-8) ** 2;
-  const selectorsAtVertex = (vertex: PowerVec3) => cell.faces.flatMap((face) =>
-    face.vertices.some((candidate) => distanceSquared(candidate, vertex) <= vertexTolerance2)
-      ? [selectorByFaceKey.get(face.incidentSiteKey!)!] : []);
+  const selectorsAtVertex = (vertex: PowerVec3) => {
+    const radius2 = distanceSquared(ordinaryAnchor.center, vertex);
+    const tolerance = Math.max(1, radius2) * 2e-8;
+    return ordinarySites.flatMap((site) => site.key === anchor.key
+      || Math.abs(distanceSquared(site.center, vertex) - radius2) > tolerance
+      ? [] : [selectorBySiteKey.get(site.key)!]);
+  };
   const tetrahedra: [number, number, number][] = [];
   const seen = new Set<string>();
   for (const vertex of cell.vertices) {
@@ -205,37 +262,28 @@ function localDelaunayTetrahedra(
       const a = positionBySelector.get(left)!, b = positionBySelector.get(right)!;
       return Math.atan2(dot(a, bitangent), dot(a, tangent)) - Math.atan2(dot(b, bitangent), dot(b, tangent)) || left - right;
     });
-    // Co-spherical cases admit several Delaunay triangulations. Select the
-    // stable fan with the smallest maximum anchor solid angle; Section 5
-    // requires every incident solid angle to stay below pi/2.
-    let cycle: number[] | undefined, bestAngle = Infinity;
+    // Co-spherical cases admit several Delaunay triangulations. Cyclically
+    // normalize the polygon, then consider every non-crossing diagonalization
+    // and minimize its largest current-cell solid angle.
+    let cycle: number[] | undefined;
     for (let root = 0; root < selectors.length; root += 1) {
       const candidate = [...selectors.slice(root), ...selectors.slice(0, root)];
-      let maximum = 0;
-      for (let index = 1; index + 1 < candidate.length; index += 1) maximum = Math.max(maximum,
-        solidAngle(positionBySelector.get(candidate[0])!, positionBySelector.get(candidate[index])!, positionBySelector.get(candidate[index + 1])!));
-      if (maximum < bestAngle - 1e-12 || (Math.abs(maximum - bestAngle) <= 1e-12 && candidate[0] < cycle![0])) {
-        bestAngle = maximum; cycle = candidate;
-      }
+      if (!cycle || candidate.join(",") < cycle.join(",")) cycle = candidate;
     }
-    if (!cycle) throw new Error("Local Delaunay tetrahedralization has no stable fan");
-    for (let index = 1; index + 1 < cycle.length; index += 1) {
-      const triple = [cycle[0], cycle[index], cycle[index + 1]] as [number, number, number];
+    if (!cycle) throw new Error("Local Delaunay tetrahedralization has no stable cycle");
+    const triangulation = triangulateDelaunayLink(cycle, positionBySelector, ordinaryPositions);
+    if (!triangulation) throw new Error("Local Delaunay link has no valid triangulation");
+    for (const triple of triangulation.triangles) {
       const positions = triple.map((selector) => positionBySelector.get(selector)!);
-      const determinant = dot(positions[0], cross(positions[1], positions[2]));
-      if (Math.abs(determinant) <= 1e-10) continue;
-      if (!ordinaryDelaunayAtAnchor(positions[0], positions[1], positions[2], ordinaryPositions)) {
-        throw new Error(`Local tetrahedron is not ordinary Delaunay at current cell ${anchor.key}`);
-      }
       const angle = solidAngle(positions[0], positions[1], positions[2]);
       // Equality is the Cartesian limiting case used by the regular Eikonal
-      // update. Strictly obtuse transition simplices must be removed by the
-      // topology grading rule before this configuration reaches the catalog.
+      // update. Every adaptive transition link must admit a nonobtuse local
+      // Delaunay triangulation without imposing an additional topology split.
       if (angle > Math.PI / 2 + 1e-10) {
-        throw new Error(`Local Delaunay tetrahedron has obtuse current-cell solid angle ${angle} at ${anchor.key}`);
+        throw new Error(`Local Delaunay tetrahedron ${triple.join(",")} from a ${cycle.length}-vertex link has obtuse current-cell solid angle ${angle} at ${anchor.key}`);
       }
       const key = [...triple].sort((a, b) => a - b).join(",");
-      if (!seen.has(key)) { seen.add(key); tetrahedra.push(triple); }
+      if (!seen.has(key)) { seen.add(key); tetrahedra.push([...triple]); }
     }
   }
   return tetrahedra.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
@@ -427,7 +475,10 @@ export function buildOctreePowerCatalog(configurations: readonly OctreePowerTopo
       configurationCount: entries.length,
       descriptorCount: lookup.length,
       maximumFaceIncidence: Math.max(...entries.map((entry) => entry.faces.length)),
-      maximumNeighborRows: Math.max(...entries.map((entry) => new Set(entry.faces.map((face) => JSON.stringify([face.neighborOffset, face.neighborSizeRatio]))).size)),
+      maximumNeighborRows: Math.max(...entries.map((entry) => Math.max(
+        new Set(entry.faces.map((face) => JSON.stringify([face.neighborOffset, face.neighborSizeRatio]))).size,
+        new Set(entry.tetrahedra.flat()).size,
+      ))),
       maximumTetrahedra: Math.max(...entries.map((entry) => entry.tetrahedra.length)),
       byteCount,
       worstFloat32GeometryError,

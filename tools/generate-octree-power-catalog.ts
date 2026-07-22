@@ -20,7 +20,6 @@ import {
 import {
   OCTREE_CUBE_TRANSFORMS,
   composeCubeTransforms,
-  octreePowerCoarseMaskNeedsAcuteRepair,
   transformPowerVector,
 } from "../lib/octree-power-topology";
 
@@ -30,7 +29,7 @@ const binaryPath = join(outputDirectory, "octree-power-catalog.bin");
 const modulePath = join(outputDirectory, "octree-power-catalog.ts");
 const MAGIC = 0x504f_5743;
 const HEADER_WORDS = 24;
-const GENERATOR_VERSION = 3;
+const GENERATOR_VERSION = 4;
 
 const interiorConfigurations: OctreePowerTopologyConfiguration[] = enumerateCanonicalSameOrFinerPowerDescriptors().map((descriptor) => ({
   descriptor,
@@ -38,11 +37,6 @@ const interiorConfigurations: OctreePowerTopologyConfiguration[] = enumerateCano
   sites: sitesForSameOrFinerPowerDescriptor(descriptor),
 }));
 for (let child = 0; child < 8; child += 1) for (let mask = 0; mask < 64; mask += 1) {
-  // The GPU/CPU grading pass refines the unique coarse face in these masks
-  // before descriptor publication, so they are deliberately not catalog
-  // states. Leaving their direct slots invalid makes a missed repair fail
-  // closed instead of activating the former nearest-neighbor path.
-  if (octreePowerCoarseMaskNeedsAcuteRepair(mask)) continue;
   const descriptor = encodeSameOrCoarserPowerDescriptor({
     child: [child & 1, (child >> 1) & 1, (child >> 2) & 1] as [0 | 1, 0 | 1, 0 | 1],
     coarseNeighbors: [0, 1, 2, 3, 4, 5].map((bit) => (mask & (1 << bit)) !== 0) as [boolean, boolean, boolean, boolean, boolean, boolean],
@@ -126,7 +120,6 @@ for (let descriptor = 0; descriptor <= OCTREE_POWER_SAME_OR_FINER_MASK; descript
   }
 }
 for (let low = 0; low < 512; low += 1) {
-  if (octreePowerCoarseMaskNeedsAcuteRepair(low >>> 3)) continue;
   const descriptor = (OCTREE_POWER_SAME_OR_COARSER_FLAG | low) >>> 0;
   const child = [low & 1, (low >> 1) & 1, (low >> 2) & 1];
   const outward = child.map((bit) => bit === 0 ? -1 : 1);

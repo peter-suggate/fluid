@@ -379,10 +379,10 @@ export function VisualPanel() {
       </>}
       {gridOverlayMode === "global-fine-phi" && <>
         <span><i className="sw" style={{ background: "linear-gradient(90deg,#1973eb,#f5f5e6,#ed7829)" }} />paper fine-lattice φ/h · liquid (−), zero crossing, air (+)</span>
-        <span><i className="sw" style={{ background: "#f505b8" }} />magenta · |∇φ|−1 residual reaches 0.25 or more</span>
+        <span><i className="sw" style={{ background: "#f505b8" }} />magenta · centered-gradient |∇φ|−1 residual reaches 0.25; expected medial ridges can also appear</span>
         <span><i className="sw" style={{ background: "#ffffff" }} />white · φ=0 crossing</span>
         <span><i className="sw" style={{ background: "#ff0610" }} />red · stale/rejected redistance or missing stencil neighbor inside resident support</span>
-        <span>Direct factor-m Section 5 signed-distance samples. This slice is a paper quantity; it does not show the separate engineering volume-correction estimate.</span>
+        <span>Direct factor-m Section 5 signed-distance samples. Residual next to the white zero crossing audits redistancing; interior equal-distance ridges are nondifferentiable. This slice does not show the separate engineering volume-correction estimate.</span>
       </>}
       {gridOverlayMode === "section5-face-band" && <>
         <span><i className="sw" style={{ background: "#f51680" }} />pink · interface-core owner row</span>

@@ -166,9 +166,13 @@ test("reset replacement attaches only after complete t=0 sparse authority is res
   const encode = warmup.indexOf("encodeInitialSparseAuthorityPhase(initialSparseScene, phase)");
   const submit = warmup.indexOf("queue.submit([initialSparseScene.finish()])", encode);
   const fence = warmup.indexOf("await this.device.queue.onSubmittedWorkDone()", submit);
+  const validation = warmup.indexOf("await this.device.popErrorScope()", fence);
   const refreshAllocation = warmup.indexOf("this.applyOctreeInfo(this.octreeProjection)", fence);
-  assert.ok(encode >= 0 && submit > encode && fence > submit,
+  assert.ok(encode >= 0 && submit > encode && fence > submit && validation > fence,
     "every bounded bootstrap phase must be fenced without a CPU simulation readback");
+  assert.match(warmup,
+    /pushErrorScope\("validation"\)[\s\S]*Initial sparse authority \$\{phase\} validation failed/,
+    "the UI must surface the first phase-local WebGPU ABI failure instead of a poisoned downstream authority report");
   assert.ok(refreshAllocation > fence,
     "the final render-world task must refresh complete telemetry only after its fence");
   assert.match(warmup, /if \(phase === "sparse-render-world"\)[\s\S]*initialSparseAuthorityPublished = true/,

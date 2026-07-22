@@ -2,16 +2,16 @@
 export const OCTREE_GENERATED_POWER_CATALOG_MAGIC = 0x504f5743;
 export const OCTREE_GENERATED_POWER_CATALOG_MANIFEST = Object.freeze({
   "version": 4,
-  "configurationCount": 8081,
+  "configurationCount": 8083,
   "descriptorCount": 1608,
   "maximumFaceIncidence": 30,
-  "maximumNeighborRows": 30,
-  "maximumTetrahedra": 56,
-  "byteCount": 8995760,
+  "maximumNeighborRows": 36,
+  "maximumTetrahedra": 68,
+  "byteCount": 9472424,
   "worstFloat32GeometryError": 5.739706909757558e-8,
-  "generatorVersion": 3,
-  "generatorHash": "4ba4317e7d43f029c3bcee7c79a9d25ccc5194ca634ff92ac223bb0601fe3a64",
-  "binarySha256": "ab525c27d6a72386b14ef9e8aa91d04fdf42ac5a1c9b4634bc929600ed40ead7"
+  "generatorVersion": 4,
+  "generatorHash": "b078bab2fce14342da38c83955ca27f2f8bf8e48d7dfdb8cb4dfc5ef5098989f",
+  "binarySha256": "671d5c8092440d6fb898feddd52c414e7bd2f1c6da3c62f1bb768985c67a79ac"
 } as const);
 
 export interface GeneratedOctreePowerCatalogViews {

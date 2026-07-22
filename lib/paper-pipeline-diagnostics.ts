@@ -148,6 +148,21 @@ export function paperPipelineStages(
   return stages;
 }
 
+/**
+ * Compact authority failures for the always-visible UI health chip.  These
+ * are derived from the same published controls as the detailed inspector, so
+ * a rejected or stale 2017 topology cannot be hidden behind otherwise finite
+ * generic stability reductions. Pending stages are intentionally omitted
+ * while the initial fenced transaction is still being assembled.
+ */
+export function paperPipelineHealthFlags(
+  info: GPUEulerianInfo | null | undefined,
+): readonly string[] {
+  return paperPipelineStages(info, undefined)
+    .filter((stage) => stage.tone === "rejected" || stage.tone === "stale")
+    .map((stage) => `2017-${stage.id}-${stage.state.toLowerCase()}`);
+}
+
 export interface PaperVisualPreset {
   readonly id: string;
   readonly label: string;

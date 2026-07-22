@@ -65,19 +65,75 @@ fn phi(qi:vec3i)->f32{
 fn fineValid(q:vec3u)->bool{if(any(q>=params.sampleDimensions)){return false;}let r=max(1u,params.brickResolution);let brick=q/r;if(any(brick>=params.brickDimensions)){return false;}let local=q-brick*r;let key=brick.x+params.brickDimensions.x*(brick.y+params.brickDimensions.y*brick.z);let id=pageLookup(key);if(id==INVALID){return false;}let index=id*params.samplesPerBrick+local.x+r*(local.y+r*local.z);return index<arrayLength(&fineFlags)&&index<arrayLength(&finePhi)&&(fineFlags[index]&1u)!=0u&&finite(finePhi[index]);}
 fn fineOwnsCube(base:vec3i)->bool{let q=max(base-vec3i(1),vec3i(0));return all(q<vec3i(params.sampleDimensions))&&fineValid(vec3u(q));}
 fn occupancy(value:f32)->f32{let band=4.0*u.container.y/max(f32(params.sampleDimensions.y),1.0);return clamp(0.5-value/band,0.0,1.0);}
-fn lattice(p:vec3i)->f32{
+// The ordinary halo represents one closed tank wall with an exterior air
+// sample. At an x/z tank edge a single Cartesian-product halo cube cannot
+// represent both perpendicular wall caps: marching tetrahedra turns the two
+// planes into a diagonal chamfer. Boundary modes 1 and 2 give that edge cube
+// two explicit owners. The x-wall owner mirrors z through the edge; the
+// z-wall owner mirrors x. Their zero sets meet on the exact tank corner.
+fn latticeForWall(p:vec3i,wallMode:u32)->f32{
   let dims=vec3i(params.sampleDimensions);
-  if(p.x<=0||p.z<=0||p.x>=dims.x+1||p.z>=dims.z+1||p.y>=dims.y+1){return 0.0;}
-  return occupancy(phi(vec3i(p.x-1,max(p.y-1,0),p.z-1)));
+  if(p.y>=dims.y+1){return 0.0;}
+  var x=p.x-1;var z=p.z-1;
+  if(p.x<=0||p.x>=dims.x+1){
+    if(wallMode!=2u){return 0.0;}x=clamp(x,0,dims.x-1);
+  }
+  if(p.z<=0||p.z>=dims.z+1){
+    if(wallMode!=1u){return 0.0;}z=clamp(z,0,dims.z-1);
+  }
+  return occupancy(phi(vec3i(x,max(p.y-1,0),z)));
 }
-fn classifyScaled(base:vec3i,scale:i32){
-  if(any(base<vec3i(0))||any(base>=vec3i(params.sampleDimensions+vec3u(1u)))){return;}
-  let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
-  var v=array<f32,8>();var lo=1.0;var hi=0.0;for(var i=0;i<8;i+=1){v[i]=lattice(base+o[i]*scale);lo=min(lo,v[i]);hi=max(hi,v[i]);}
+fn emitClassifiedCubeTagged(base:vec3i,scale:i32,lo:f32,hi:f32,a:vec4f,b:vec4f,tag:u32){
   if(lo>=0.5||hi<0.5){return;}atomicStore(&drawArgs.globalFineAuthorityLatch,1u);atomicMin(&drawArgs.vertexAllocator,0u);let slot=atomicAdd(&drawArgs.activeCubeCount,1u);
   if(slot>=arrayLength(&activeCubes)||slot*2u+1u>=arrayLength(&cubeValues)){return;}
-  activeCubes[slot]=vec2u(u32(base.x)|(u32(base.z)<<16u),u32(base.y)|(u32(scale)<<16u));
-  cubeValues[slot*2u]=vec4f(v[0],v[1],v[2],v[3]);cubeValues[slot*2u+1u]=vec4f(v[4],v[5],v[6],v[7]);
+  activeCubes[slot]=vec2u(u32(base.x)|(u32(base.z)<<16u),u32(base.y)|((u32(scale)|tag)<<16u));cubeValues[slot*2u]=a;cubeValues[slot*2u+1u]=b;
+}
+fn emitClassifiedCube(base:vec3i,scale:i32,lo:f32,hi:f32,a:vec4f,b:vec4f){
+  emitClassifiedCubeTagged(base,scale,lo,hi,a,b,0u);
+}
+fn classifyScaledForWall(base:vec3i,scale:i32,wallMode:u32){
+  if(any(base<vec3i(0))||any(base>=vec3i(params.sampleDimensions+vec3u(1u)))){return;}
+  let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
+  var v=array<f32,8>();var lo=1.0;var hi=0.0;for(var i=0;i<8;i+=1){v[i]=latticeForWall(base+o[i]*scale,wallMode);lo=min(lo,v[i]);hi=max(hi,v[i]);}
+  emitClassifiedCube(base,scale,lo,hi,vec4f(v[0],v[1],v[2],v[3]),vec4f(v[4],v[5],v[6],v[7]));
+}
+fn cubeCornerIndex(x:u32,y:u32,z:u32)->u32{
+  if(z==0u){return select(x,3u-x,y==1u);}return select(4u+x,7u-x,y==1u);
+}
+// A signed distance to an axis-aligned liquid box has one inside x/z corner,
+// two equally distant side samples, and an extruded profile in y. A single
+// tetrahedral scalar cube rounds that exact L-shaped zero set into the
+// shrunken corner visible in the renderer. Recognize only this sharp,
+// vertically extruded configuration and give each plane its own cube values,
+// just as the tank-edge caps above have separate owners.
+fn classifySharpInteriorXZCorner(base:vec3i,scale:i32)->bool{
+  let dims=vec3i(params.sampleDimensions);if(base.x<=0||base.z<=0||base.x>=dims.x||base.z>=dims.z){return false;}
+  let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
+  var raw=array<f32,8>();for(var i=0;i<8;i+=1){let p=base+o[i]*scale;raw[i]=phi(vec3i(p.x-1,max(p.y-1,0),p.z-1));}
+  let bottom=array<u32,4>(0u,1u,4u,5u);let top=array<u32,4>(3u,2u,7u,6u);let tolerance=0.15*params.settings.w;
+  var inside=INVALID;
+  for(var q=0u;q<4u;q+=1u){let sx=q^1u;let sz=q^2u;let sd=q^3u;
+    let extruded=abs(raw[bottom[q]]-raw[top[q]])<=tolerance&&abs(raw[bottom[sx]]-raw[top[sx]])<=tolerance&&abs(raw[bottom[sz]]-raw[top[sz]])<=tolerance&&abs(raw[bottom[sd]]-raw[top[sd]])<=tolerance;
+    let sharp=raw[bottom[q]]<0.0&&raw[top[q]]<0.0&&raw[bottom[sx]]>0.0&&raw[top[sx]]>0.0&&raw[bottom[sz]]>0.0&&raw[top[sz]]>0.0&&raw[bottom[sd]]>0.0&&raw[top[sd]]>0.0;
+    let symmetric=abs(raw[bottom[q]]+raw[bottom[sx]])<=tolerance&&abs(raw[bottom[q]]+raw[bottom[sz]])<=tolerance&&abs(raw[bottom[sx]]-raw[bottom[sz]])<=tolerance;
+    if(extruded&&sharp&&symmetric){inside=q;break;}
+  }
+  if(inside==INVALID){return false;}
+  let insideX=inside&1u;let insideZ=(inside>>1u)&1u;var vx=array<f32,8>();var vz=array<f32,8>();var xlo=1.0;var xhi=0.0;var zlo=1.0;var zhi=0.0;
+  for(var i=0u;i<8u;i+=1u){let c=vec3u(o[i]);vx[i]=occupancy(raw[cubeCornerIndex(c.x,c.y,insideZ)]);vz[i]=occupancy(raw[cubeCornerIndex(insideX,c.y,c.z)]);xlo=min(xlo,vx[i]);xhi=max(xhi,vx[i]);zlo=min(zlo,vz[i]);zhi=max(zhi,vz[i]);}
+  // Descriptor bits 8..9 select the cap plane; bits 10..11 select which
+  // half-cube is liquid. Polygonisation clips only positions, preserving the
+  // exact axis normal encoded by vx/vz.
+  let sideTag=(insideX<<10u)|(insideZ<<11u);
+  emitClassifiedCubeTagged(base,scale,xlo,xhi,vec4f(vx[0],vx[1],vx[2],vx[3]),vec4f(vx[4],vx[5],vx[6],vx[7]),(1u<<8u)|sideTag);
+  emitClassifiedCubeTagged(base,scale,zlo,zhi,vec4f(vz[0],vz[1],vz[2],vz[3]),vec4f(vz[4],vz[5],vz[6],vz[7]),(2u<<8u)|sideTag);
+  return true;
+}
+fn classifyScaled(base:vec3i,scale:i32){
+  let dims=vec3i(params.sampleDimensions);let xWall=base.x==0||base.x==dims.x;let zWall=base.z==0||base.z==dims.z;
+  if(xWall&&zWall){classifyScaledForWall(base,scale,1u);classifyScaledForWall(base,scale,2u);return;}
+  if(!xWall&&!zWall&&classifySharpInteriorXZCorner(base,scale)){return;}
+  classifyScaledForWall(base,scale,0u);
 }
 @compute @workgroup_size(256)
 fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){

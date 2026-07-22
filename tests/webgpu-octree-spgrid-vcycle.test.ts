@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import {
+  OCTREE_SPGRID_VCYCLE_BINDINGS,
   SPGRID_CELL_FLAG,
   SPGRID_MAXIMUM_ROW_CAPACITY,
   WebGPUOctreeSPGridVCycle,
@@ -21,7 +22,7 @@ test("native sparse pyramid allocation is bounded by row capacity, not dense dom
   assert.equal(narrow.levelStride, wide.levelStride);
   assert.equal(narrow.transferStride, 40_000);
   assert.ok(wide.levelCount > narrow.levelCount);
-  assert.equal(wide.stateBytes, 14 * wide.levelCount * wide.levelStride * 4);
+  assert.equal(wide.stateBytes, 27 * wide.levelCount * wide.levelStride * 4);
   assert.ok(!("cellCount" in wide));
   assert.throws(() => planOctreeSPGridVCycle({ dimensions: [16, 16, 16],
     rowCapacity: SPGRID_MAXIMUM_ROW_CAPACITY + 1 }), /bounded/);
@@ -73,16 +74,45 @@ test("fixed LDLT bottom operation is exact, linear, symmetric, and positive", ()
 });
 
 test("GPU source stores one transfer record and consumes it in both adjoint directions", () => {
+  const bindings = [...octreeSPGridVCycleShader.matchAll(/@group\(0\) @binding\((\d+)\)/g)]
+    .map((match) => Number(match[1]));
+  assert.equal(new Set(bindings).size, bindings.length,
+    "every WGSL binding must have exactly one module-scope declaration");
   assert.match(octreeSPGridVCycleShader, /appendTransfer\(l,fine,c,weight\)/);
   assert.match(octreeSPGridVCycleShader, /fn restrictResidual/);
   assert.match(octreeSPGridVCycleShader, /fn prolongCorrection/);
+  assert.match(octreeSPGridVCycleShader, /fn ghostValueAccumulate/);
+  assert.match(octreeSPGridVCycleShader, /fn ghostValuePropagate/);
+  assert.match(octreeSPGridVCycleShader, /if\(w!=1\.0\).*atomicAddF\(at\(RHS,l\+1u,c\),loadf\(RESIDUAL,l,f\)\)/s,
+    "GhostValueAccumulate applies E transpose through a unit copy record");
+  assert.match(octreeSPGridVCycleShader, /if\(w!=1\.0\).*storef\(A,l,f,loadf\(A,l\+1u,c\)\)/s,
+    "GhostValuePropagate applies E through the same unit copy record");
   assert.match(octreeSPGridVCycleShader, /w\*loadf\(RESIDUAL,l,f\)/);
   assert.match(octreeSPGridVCycleShader, /w\*loadf\(A,l\+1u,c\)/);
   assert.match(octreeSPGridVCycleShader, /const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u/);
   assert.match(octreeSPGridVCycleShader, /fn mergeClass/);
+  assert.match(octreeSPGridVCycleShader, /fn contactCoord/);
+  assert.match(octreeSPGridVCycleShader, /fn insertOwned/);
+  assert.match(octreeSPGridVCycleShader, /fn emitGhostAliases/);
+  assert.match(octreeSPGridVCycleShader, /const XYPP=9u.*const YZPP=17u/s,
+    "the production stencil retains all twelve directed octree-edge contacts");
+  assert.match(octreeSPGridVCycleShader, /let edgeChannels=array<u32,12>/);
+  assert.doesNotMatch(octreeSPGridVCycleShader, /select\([^\n]*insert\([^\n]*insertOwned/,
+    "WGSL select eagerly evaluates both insertion paths");
   assert.match(octreeSPGridVCycleShader, /fn smoothable/);
   assert.match(octreeSPGridVCycleShader, /fn exactBottom/);
   assert.doesNotMatch(octreeSPGridVCycleShader, /while\s*\([^)]*atomicLoad/, "no cross-workgroup spin barrier is permitted");
+});
+
+test("every SPGrid auto-layout binds the complete reachable resource ABI", () => {
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.seedRhs, [0, 1, 3, 4, 5, 7, 8],
+    "native-level RHS seeding reads the captured leaf size and must bind headers");
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.publish, [0, 1, 3, 4, 5, 7, 9],
+    "native-level correction publication likewise reads the captured leaf size");
+  for (const [entryPoint, bindings] of Object.entries(OCTREE_SPGRID_VCYCLE_BINDINGS)) {
+    assert.equal(new Set(bindings).size, bindings.length, `${entryPoint} must not bind a resource twice`);
+    assert.ok(bindings.length <= 10, `${entryPoint} exceeds the portable storage-buffer stage budget`);
+  }
 });
 
 test("one correction uses one compute-pass transition, ordered dispatches, and cached descriptors", () => {
@@ -155,10 +185,10 @@ test("Dawn accepts the native sparse V-cycle shader", {
   const info = await shaderModule.getCompilationInfo();
   const errors = info.messages.filter((message) => message.type === "error");
   assert.deepEqual(errors.map((message) => `${message.lineNum}:${message.linePos} ${message.message}`), []);
-  for (const entryPoint of ["clearTopology", "clearState", "clearDispatch", "clearCorrection", "emitCells",
+  for (const entryPoint of ["clearTopology", "clearState", "clearDispatch", "clearCorrection", "emitCells", "emitGhostAliases",
     "buildTransfers", "buildStencil", "ensureDiagonal", "finalizeIndirect", "zeroVectors", "seedRhs", "applyA",
-    "applyB", "jacobiAtoB", "jacobiBtoA", "formResidual", "restrictResidual", "exactBottom",
-    "prolongCorrection", "publish"]) {
+    "applyB", "jacobiAtoB", "jacobiBtoA", "formResidual", "restrictResidual", "ghostValueAccumulate", "exactBottom",
+    "prolongCorrection", "ghostValuePropagate", "publish"]) {
     device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint } });
   }
   const validationError = await device.popErrorScope();

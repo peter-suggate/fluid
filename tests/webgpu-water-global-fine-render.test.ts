@@ -123,6 +123,25 @@ test("global fine planar surfaces publish outward CCW triangles for front-face c
   assert.ok(triangles > 500, "the oracle must cover many orientations, offsets, and tetrahedron cases");
 });
 
+test("global fine side-wall caps meet at the exact x/z tank edge", () => {
+  const cap = (axis: 0 | 2, normal: V3) => tetrahedra.flatMap(ids => {
+    const points = ids.map(index => cubeCorners[index]);
+    const values = ids.map(index => cubeCorners[index][axis]);
+    return tetraSurface(points, values, normal);
+  });
+  const xCap = cap(0, [-1, 0, 0]);
+  const zCap = cap(2, [0, 0, -1]);
+  const tolerance = 1e-12;
+  assert.ok(xCap.length > 0 && zCap.length > 0);
+  assert.ok(xCap.flat().every(point => Math.abs(point[0] - 0.5) <= tolerance),
+    "the x-wall owner must remain on the x-wall plane instead of forming a diagonal chamfer");
+  assert.ok(zCap.flat().every(point => Math.abs(point[2] - 0.5) <= tolerance),
+    "the z-wall owner must remain on the z-wall plane instead of forming a diagonal chamfer");
+  assert.ok(xCap.flat().some(point => Math.abs(point[0] - 0.5) <= tolerance && Math.abs(point[2] - 0.5) <= tolerance)
+    && zCap.flat().some(point => Math.abs(point[0] - 0.5) <= tolerance && Math.abs(point[2] - 0.5) <= tolerance),
+  "the two independently owned caps must share the exact tank-corner edge");
+});
+
 function compactCoarsePlane(device: GPUDevice): GPUBuffer {
   const capacity=8, bytes=new ArrayBuffer(32+capacity*32), u32=new Uint32Array(bytes), f32=new Float32Array(bytes);
   u32.set([0x80000000,1,capacity,1,2,2,2],0);f32[7]=1;
@@ -155,6 +174,18 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
   assert.match(globalFineSurfaceClassificationShader,
     /let sx=scale\+lowX;let sy=scale\+lowY;let sz=scale\+lowZ;let total=sx\*sy\*sz/,
     "coarse fallback must use a unit-lattice Cartesian product at edges and corners");
+  assert.match(globalFineSurfaceClassificationShader,
+    /if\(xWall&&zWall\)\{classifyScaledForWall\(base,scale,1u\);classifyScaledForWall\(base,scale,2u\);return;\}/,
+    "an x/z edge cube must publish two wall-owned caps rather than one diagonal scalar-field chamfer");
+  assert.match(globalFineSurfaceClassificationShader,
+    /fn classifySharpInteriorXZCorner[\s\S]*extruded&&sharp&&symmetric[\s\S]*emitClassifiedCubeTagged\(base,scale,xlo,xhi[\s\S]*emitClassifiedCubeTagged\(base,scale,zlo,zhi/,
+    "an exact axis-aligned liquid corner must retain its two independently owned faces");
+  assert.match(globalFineClassifiedEmitShader,
+    /fn clipped[\s\S]*mode==1u[\s\S]*r\.z=base\.z\+scale\*select\(\.5\*q\.z,\.5\+\.5\*q\.z,high\)[\s\S]*mode==2u[\s\S]*r\.x=base\.x\+scale\*select\(\.5\*q\.x,\.5\+\.5\*q\.x,high\)/,
+    "separate corner owners must terminate on their shared half-cell edge rather than occlude each other");
+  assert.match(globalFineSurfaceClassificationShader,
+    /if\(p\.x<=0\|\|p\.x>=dims\.x\+1\)\{[\s\S]*wallMode!=2u[\s\S]*if\(p\.z<=0\|\|p\.z>=dims\.z\+1\)\{[\s\S]*wallMode!=1u/,
+    "each edge cap must mirror only through its tangential wall and retain air across its owned normal wall");
   assert.match(globalFineSurfaceClassificationShader,
     /@builtin\(workgroup_id\)group:vec3u,@builtin\(local_invocation_index\)local:u32[\s\S]*for\(var index=local;index<total;index\+=256u\)/,
     "one workgroup must cooperatively subdivide a coarse leaf instead of risking a scalar scale-cubed loop");

@@ -58,6 +58,9 @@ export interface OctreePowerOperator {
 export interface OctreePowerOperatorOptions {
   readonly openFraction?: (negative: OctreePowerSite, positive: OctreePowerSite | undefined, face: PowerFaceGeometry) => number;
   readonly normalVelocity?: (centroid: PowerVec3, normal: PowerVec3, negative: OctreePowerSite, positive?: OctreePowerSite) => number;
+  /** Positive row-centre-to-Dirichlet distance for an open/free-surface face.
+   * Undefined keeps a geometric boundary Neumann-closed. */
+  readonly boundaryDistance?: (negative: OctreePowerSite, face: PowerFaceGeometry) => number | undefined;
 }
 
 const distance = (a: PowerVec3, b: PowerVec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
@@ -105,7 +108,14 @@ export function buildOctreePowerOperator(
       }
       const normalVelocity = options.normalVelocity?.(geometry.centroid, geometry.normal, sites[negativeRow], positive) ?? 0;
       if (!Number.isFinite(normalVelocity)) throw new RangeError(`Power face ${geometry.key} velocity must be finite`);
-      const inverseDistance = positive ? 1 / distance(sites[negativeRow].center, positive.center) : 0;
+      const openBoundaryDistance = positive ? undefined
+        : options.boundaryDistance?.(sites[negativeRow], geometry);
+      if (openBoundaryDistance !== undefined
+        && (!Number.isFinite(openBoundaryDistance) || openBoundaryDistance <= 0)) {
+        throw new RangeError(`Power face ${geometry.key} boundary distance must be positive and finite`);
+      }
+      const inverseDistance = positive ? 1 / distance(sites[negativeRow].center, positive.center)
+        : openBoundaryDistance === undefined ? 0 : 1 / openBoundaryDistance;
       const id = faces.length;
       faces.push({
         id,
@@ -131,10 +141,15 @@ export function buildOctreePowerOperator(
     for (const item of incidence[row]) {
       const face = faces[item.face];
       rhs += item.sign * face.area * face.normalVelocity;
-      const neighbor = face.negativeRow === row ? face.positiveRow : face.negativeRow;
-      if (neighbor === OCTREE_POWER_INVALID_ROW) continue;
       const coefficient = face.openFraction * face.area * face.inverseDistance;
       if (!(coefficient >= 0) || !Number.isFinite(coefficient)) throw new Error(`Power face ${face.key} has an invalid coefficient`);
+      const neighbor = face.negativeRow === row ? face.positiveRow : face.negativeRow;
+      if (neighbor === OCTREE_POWER_INVALID_ROW) {
+        // A positive inverse distance marks a zero-pressure Dirichlet face;
+        // closed Neumann geometry retains inverseDistance=0.
+        diagonal += coefficient;
+        continue;
+      }
       diagonal += coefficient;
       coefficients.set(neighbor, (coefficients.get(neighbor) ?? 0) + coefficient);
     }
@@ -176,14 +191,15 @@ export function octreePowerBoundaryDistance(
   liquidPhi: number,
   airPhi: number,
   dualDistance: number,
-  minimumTheta = 0.01,
 ): number {
-  if (![liquidPhi, airPhi, dualDistance, minimumTheta].every(Number.isFinite) || liquidPhi > 0 || airPhi < 0
-    || dualDistance <= 0 || minimumTheta <= 0 || minimumTheta > 1) {
-    throw new RangeError("Power free-surface crossing needs finite liquid/air phi, positive distance, and bounded theta");
+  if (![liquidPhi, airPhi, dualDistance].every(Number.isFinite) || !(liquidPhi < 0) || !(airPhi > 0)
+    || dualDistance <= 0) {
+    throw new RangeError("Power free-surface crossing needs finite strict liquid/air phi and positive distance");
   }
-  const denominator = liquidPhi - airPhi;
-  const theta = Math.max(minimumTheta, Math.min(1, Math.abs(denominator) > 1e-12 ? liquidPhi / denominator : minimumTheta));
+  const theta = -liquidPhi / (airPhi - liquidPhi);
+  if (!(theta > 0 && theta <= 1) || !Number.isFinite(theta)) {
+    throw new RangeError("Power free-surface crossing produced an invalid interface fraction");
+  }
   return theta * dualDistance;
 }
 
@@ -195,9 +211,12 @@ export function projectOctreePowerFaceVelocities(
   if (pressure.length !== operator.rows.length || pressure.some((value) => !Number.isFinite(value)) || !Number.isFinite(pressureScale)) {
     throw new RangeError("Power projection pressure must be finite and match the row count");
   }
-  return operator.faces.map((face) => face.positiveRow === OCTREE_POWER_INVALID_ROW ? face.normalVelocity
-    : face.normalVelocity - pressureScale * (pressure[face.positiveRow] - pressure[face.negativeRow])
-      * face.inverseDistance * face.openFraction);
+  return operator.faces.map((face) => {
+    if (face.positiveRow === OCTREE_POWER_INVALID_ROW && face.inverseDistance === 0) return face.normalVelocity;
+    const positivePressure = face.positiveRow === OCTREE_POWER_INVALID_ROW ? 0 : pressure[face.positiveRow];
+    return face.normalVelocity - pressureScale * (positivePressure - pressure[face.negativeRow])
+      * face.inverseDistance * face.openFraction;
+  });
 }
 
 export function octreePowerDivergence(

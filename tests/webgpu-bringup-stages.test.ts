@@ -51,10 +51,19 @@ test("launcher owns the child-process timeout and worker owns exclusive GPU clea
     "every fenced warmup subphase must be visibly identified before and after submission");
   assert.match(worker, /record: "solver-initialization", boundary, stage/);
   assert.match(worker, /initialSparseAuthorityReady/);
+  assert.match(worker, /process\.env\.FLUID_SAFE_BRINGUP = "1"/,
+    "Dawn must reproduce the safe browser's separately fenced authority phases");
+  assert.match(worker, /FLUID_BRINGUP_SCENE/,
+    "the isolated ladder must admit the exact UI scene without a second launcher");
+  assert.match(worker, /startupMode: "phase-fenced"/);
   assert.match(worker, /sparse-t0 validation failed/);
   assert.equal(worker.match(/await flushGPUErrorDelivery\(device\)/g)?.length, 3,
     "resource, sparse-t0, and one-step verdicts must all flush delayed uncaptured errors");
   assert.match(worker, /\(info\.encodedSteps \?\? 0\) !== 1/);
+  assert.match(worker, /await device\.queue\.onSubmittedWorkDone\(\);[\s\S]*info\.completedTime_s/,
+    "one-step must fence GPU completion before it can report a pass");
+  assert.match(worker, /viewportFailureIndicator\(info, undefined, scenario\.scene\)/,
+    "the Dawn verdict must decode the same rejected authority state as the UI");
   assert.match(worker, /await rm\(EXCLUSIVE_LOCK/);
   assert.match(fullSmoke, /Never run this smoke and browser GPU validation concurrently/);
 });

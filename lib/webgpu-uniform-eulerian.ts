@@ -152,6 +152,7 @@ export interface InitialGlobalFineAuthorityDiagnostics extends GlobalFineVolumeP
   readonly seedError: number;
   readonly topologyFlags: number;
   readonly interfaceBricks: number;
+  readonly interfaceSeedBricks?: number;
   readonly desiredBricks: number;
   readonly activatedBricks: number;
   readonly activeBricks: number;
@@ -222,6 +223,7 @@ export function initialGlobalFineAuthorityEvidence(value: InitialGlobalFineAutho
   const topologyWords=value.topologyControl??[
     value.topologyFlags,value.interfaceBricks,value.desiredBricks,value.activatedBricks,
     value.published?1:0,value.rolledBack?1:0,0,value.downstreamFinalizeReason,
+    ...(value.interfaceSeedBricks === undefined ? [] : [value.interfaceSeedBricks]),
   ];
   const redistanceWords=value.redistanceControlDetailed??value.redistanceControl;
   const volumeBytes=new ArrayBuffer(64);new Uint32Array(volumeBytes).set(value.volumeControl.slice(0,16));
@@ -908,13 +910,31 @@ export class WebGPUUniformEulerianSolver {
     if (!this.octreeProjection) throw new Error("Sparse authority phase requires an octree projection");
     if (phase === "cold-topology") this.initialSparseAuthorityPublished = false;
     const descriptor = OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.find((candidate) => candidate.id === phase)!;
+    this.device.pushErrorScope("validation");
+    let validationScopeOpen = true;
     const initialSparseScene = this.device.createCommandEncoder({
       label: `Initial sparse authority: ${descriptor.label}`,
     });
-    this.octreeProjection.encodeInitialSparseAuthorityPhase(initialSparseScene, phase);
-    this.device.queue.submit([initialSparseScene.finish()]);
-    this.octreeProjection.retireSubmittedEncoder(initialSparseScene);
-    await this.device.queue.onSubmittedWorkDone();
+    try {
+      this.octreeProjection.encodeInitialSparseAuthorityPhase(initialSparseScene, phase);
+      this.device.queue.submit([initialSparseScene.finish()]);
+      this.octreeProjection.retireSubmittedEncoder(initialSparseScene);
+      await this.device.queue.onSubmittedWorkDone();
+      const validationError = await this.device.popErrorScope();
+      validationScopeOpen = false;
+      if (validationError) {
+        throw new Error(`Initial sparse authority ${phase} validation failed: ${validationError.message}`);
+      }
+    } catch (error) {
+      if (validationScopeOpen) {
+        const validationError = await this.device.popErrorScope().catch(() => null);
+        validationScopeOpen = false;
+        if (validationError) {
+          throw new Error(`Initial sparse authority ${phase} validation failed: ${validationError.message}`);
+        }
+      }
+      throw error;
+    }
     if (phase === "cold-topology") this.octreeProjection.finishInlineRebuild();
     if (phase === "sparse-render-world") {
       await this.validateInitialSparseAuthority();
@@ -934,13 +954,31 @@ export class WebGPUUniformEulerianSolver {
     const projection = this.octreeProjection;
     if (!projection) throw new Error("Sparse authority batch requires an octree projection");
     this.initialSparseAuthorityPublished = false;
+    this.device.pushErrorScope("validation");
+    let validationScopeOpen = true;
     const initialSparseScene = this.device.createCommandEncoder({
       label: "Initial sparse authority: combined Section 4/5 publication",
     });
-    projection.encodeInitialSparseAuthority(initialSparseScene);
-    this.device.queue.submit([initialSparseScene.finish()]);
-    projection.retireSubmittedEncoder(initialSparseScene);
-    await this.device.queue.onSubmittedWorkDone();
+    try {
+      projection.encodeInitialSparseAuthority(initialSparseScene);
+      this.device.queue.submit([initialSparseScene.finish()]);
+      projection.retireSubmittedEncoder(initialSparseScene);
+      await this.device.queue.onSubmittedWorkDone();
+      const validationError = await this.device.popErrorScope();
+      validationScopeOpen = false;
+      if (validationError) {
+        throw new Error(`Initial sparse authority combined validation failed: ${validationError.message}`);
+      }
+    } catch (error) {
+      if (validationScopeOpen) {
+        const validationError = await this.device.popErrorScope().catch(() => null);
+        validationScopeOpen = false;
+        if (validationError) {
+          throw new Error(`Initial sparse authority combined validation failed: ${validationError.message}`);
+        }
+      }
+      throw error;
+    }
     projection.finishInlineRebuild();
     await this.validateInitialSparseAuthority();
     this.initialSparseAuthorityPublished = true;
@@ -1128,13 +1166,17 @@ export class WebGPUUniformEulerianSolver {
   get adaptiveFaceVelocitySource() { return this.octreeProjection?.adaptiveFaceVelocitySource; }
   get powerFaceTransferControl() { return this.octreeProjection?.powerFaceTransferControl; }
   get powerFaceSeedControl() { return this.octreeProjection?.powerFaceSeedControl; }
+  get powerFaceAdvectionControl() { return this.octreeProjection?.powerFaceAdvectionControl; }
+  get powerSolidFaceControl() { return this.octreeProjection?.powerSolidFaceControl; }
   get powerOperatorControl() { return this.octreeProjection?.powerOperatorControl; }
   /** QA-only passthrough for the authoritative Section 4.3 solver status. */
   get mgpcgControl() { return this.octreeProjection?.mgpcgControl; }
   get powerFaceControl() { return this.octreeProjection?.powerFaceControl; }
+  get powerFaceSource() { return this.octreeProjection?.powerFaceSource; }
   get powerBoundaryPhiQueries() { return this.octreeProjection?.powerBoundaryPhiQueries; }
   get ownerLatticeDebug() { return this.octreeProjection?.ownerLatticeDebug; }
   get powerBoundaryFineSource() { return this.octreeProjection?.powerBoundaryFineSource; }
+  get powerBoundaryFineLevelSetSource() { return this.octreeProjection?.powerBoundaryFineLevelSetSource; }
   get powerFaceSiteIndex() { return this.octreeProjection?.powerFaceSiteIndex; }
   get powerDescriptorControl() { return this.octreeProjection?.powerDescriptorControl; }
   get powerTopologyControl() { return this.octreeProjection?.powerTopologyControl; }
@@ -1181,6 +1223,9 @@ export class WebGPUUniformEulerianSolver {
   get globalFineFaceBandPlan() { return this.octreeProjection?.globalFineFaceBandPlan; }
   readGlobalFineDisconnectedFaceFailure(index: number) {
     return this.octreeProjection?.readGlobalFineDisconnectedFaceFailure(index);
+  }
+  readGlobalFineBandRowFailure(index: number) {
+    return this.octreeProjection?.readGlobalFineBandRowFailure(index);
   }
   /** Exact host compatibility allocation delta; adaptive resources are owned/accounted by the octree projection. */
   get octreeHostAllocation() { return this.hostAllocation; }
