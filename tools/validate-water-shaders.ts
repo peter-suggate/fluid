@@ -24,7 +24,6 @@ import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
 import { octreeSparseBrickDebugPublicationShader } from "../lib/webgpu-octree-sparse-bricks";
 import { octreeProjectionShader } from "../lib/webgpu-octree";
 import { octreeMGPCGShader } from "../lib/webgpu-octree-mgpcg";
-import { octreeFirstOrderVCycleShader } from "../lib/webgpu-octree-first-order-vcycle";
 import { octreeFaceBandWGSL } from "../lib/webgpu-octree-face-fast-march";
 import { octreePowerVelocityPrepareFromFaceControlShader, octreePowerVelocityShader } from "../lib/webgpu-octree-power-velocity";
 import { octreePowerCoarseLevelSetShader } from "../lib/webgpu-octree-power-coarse-levelset";
@@ -83,7 +82,6 @@ const shaders = {
   "sparse-brick-debug-publication": octreeSparseBrickDebugPublicationShader,
   "octree-projection": octreeProjectionShader,
   "octree-pcg-section43-hybrid": octreeMGPCGShader,
-  "octree-first-order-vcycle": octreeFirstOrderVCycleShader,
   "octree-face-band-fast-march": octreeFaceBandWGSL,
   "octree-power-velocity-face-authority-gate": octreePowerVelocityPrepareFromFaceControlShader,
   "octree-power-velocity-reconstruction": octreePowerVelocityShader,

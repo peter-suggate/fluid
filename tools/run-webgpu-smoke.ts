@@ -154,19 +154,6 @@ const cpuMaximumCells = Number(process.env.FLUID_CPU_MAX_CELLS ?? 250_000);
 const cpuMarkerSamplesPerAxis = Number(process.env.FLUID_CPU_MARKERS_PER_AXIS ?? 1);
 const oracleStepsOverride = process.env.FLUID_ORACLE_STEPS === undefined ? undefined : Number(process.env.FLUID_ORACLE_STEPS);
 const pressureCyclesOverride = process.env.FLUID_PRESSURE_CYCLES === undefined ? undefined : Number(process.env.FLUID_PRESSURE_CYCLES);
-const powerPcgCapOverride = process.env.FLUID_POWER_PCG_CAP === undefined ? undefined : Number(process.env.FLUID_POWER_PCG_CAP);
-if (powerPcgCapOverride !== undefined && (!Number.isFinite(powerPcgCapOverride) || powerPcgCapOverride < 8 || powerPcgCapOverride > 128)) throw new Error("FLUID_POWER_PCG_CAP must be between 8 and 128");
-const powerBoundarySmoothingOverride = process.env.FLUID_POWER_BOUNDARY_SMOOTHING === undefined
-  ? undefined : Number(process.env.FLUID_POWER_BOUNDARY_SMOOTHING);
-if (powerBoundarySmoothingOverride !== undefined && (!Number.isInteger(powerBoundarySmoothingOverride)
-  || powerBoundarySmoothingOverride < 2 || powerBoundarySmoothingOverride > 16
-  || powerBoundarySmoothingOverride % 2 !== 0)) {
-  throw new Error("FLUID_POWER_BOUNDARY_SMOOTHING must be an even integer between 2 and 16");
-}
-const powerMultigridHierarchyOverride = process.env.FLUID_OCTREE_PRESSURE_HIERARCHY;
-if (powerMultigridHierarchyOverride !== undefined && !["aggregate-galerkin", "paper-pyramid"].includes(powerMultigridHierarchyOverride)) {
-  throw new Error("FLUID_OCTREE_PRESSURE_HIERARCHY must be aggregate-galerkin or paper-pyramid");
-}
 const pressureWarmStartOverride = process.env.FLUID_PRESSURE_WARM_START === undefined ? undefined : process.env.FLUID_PRESSURE_WARM_START !== "0";
 const quadtreeMegakernelOverride = process.env.FLUID_QUADTREE_MEGAKERNEL === undefined ? undefined : process.env.FLUID_QUADTREE_MEGAKERNEL !== "0";
 const quadtreePressureSolverOverride = process.env.FLUID_QUADTREE_PRESSURE_SOLVER;
@@ -204,19 +191,6 @@ if (octreeInterfaceBandOverride !== undefined
   && (!Number.isInteger(octreeInterfaceBandOverride) || octreeInterfaceBandOverride < 0)) {
   throw new Error("FLUID_OCTREE_INTERFACE_BAND must be a non-negative integer");
 }
-const octreeAdaptivityOverride = process.env.FLUID_OCTREE_ADAPTIVITY === undefined ? undefined : Number(process.env.FLUID_OCTREE_ADAPTIVITY);
-const octreeLeafSolverOverride = process.env.FLUID_OCTREE_LEAF_SOLVER;
-if (octreeLeafSolverOverride !== undefined && !["auto", "dense", "compact", "chebyshev", "mgpcg", "megakernel"].includes(octreeLeafSolverOverride)) throw new Error("FLUID_OCTREE_LEAF_SOLVER must be auto, dense, compact, chebyshev, mgpcg, or megakernel");
-const octreeWarmStartOverride = process.env.FLUID_OCTREE_WARM_START === undefined ? undefined : process.env.FLUID_OCTREE_WARM_START !== "0";
-const octreeFaceVelocityMirror = process.env.FLUID_OCTREE_FACE_MIRROR === "1";
-const octreeFaceVelocityRhs = process.env.FLUID_OCTREE_FACE_RHS === "1";
-const octreeFaceVelocityTransport = process.env.FLUID_OCTREE_FACE_TRANSPORT === undefined
-  ? undefined
-  : process.env.FLUID_OCTREE_FACE_TRANSPORT === "1";
-const octreePowerProjectionOverride = process.env.FLUID_OCTREE_POWER_PROJECTION;
-if (octreePowerProjectionOverride !== undefined && !["off", "mirror", "authoritative"].includes(octreePowerProjectionOverride)) {
-  throw new Error("FLUID_OCTREE_POWER_PROJECTION must be off, mirror, or authoritative");
-}
 const octreeGlobalFineFactorOverride = process.env.FLUID_OCTREE_GLOBAL_FINE_FACTOR;
 if (octreeGlobalFineFactorOverride !== undefined && !["off", "4", "8"].includes(octreeGlobalFineFactorOverride)) {
   throw new Error("FLUID_OCTREE_GLOBAL_FINE_FACTOR must be off, 4, or 8");
@@ -234,18 +208,6 @@ if (powerBoundaryQueryAuditKeys.some((key) => !Number.isSafeInteger(key) || key 
   throw new Error("FLUID_POWER_BOUNDARY_QUERY_AUDIT_KEYS must contain comma-separated unsigned brick keys");
 }
 const topologyTransitionAuditLog = process.env.FLUID_TOPOLOGY_TRANSITION_AUDIT === "1";
-const hydrostaticSplitOverride = process.env.FLUID_HYDROSTATIC_SPLIT === undefined ? undefined : process.env.FLUID_HYDROSTATIC_SPLIT !== "0";
-const brickAtlasOverride = process.env.FLUID_BRICK_ATLAS === undefined ? undefined : process.env.FLUID_BRICK_ATLAS !== "0";
-const brickAtlasModeOverride = process.env.FLUID_BRICK_ATLAS_MODE;
-if (brickAtlasModeOverride !== undefined && !["off", "mirror", "authoritative"].includes(brickAtlasModeOverride)) {
-  throw new Error("FLUID_BRICK_ATLAS_MODE must be off, mirror, or authoritative");
-}
-const brickPreActivationOverride = process.env.FLUID_BRICK_PRE_ACTIVATION === undefined ? undefined : process.env.FLUID_BRICK_PRE_ACTIVATION !== "0";
-const brickSparseSurfaceOverride = process.env.FLUID_BRICK_SPARSE_SURFACE === undefined ? undefined : process.env.FLUID_BRICK_SPARSE_SURFACE !== "0";
-const brickSparseAdvectionOverride = process.env.FLUID_BRICK_SPARSE_ADVECTION === undefined ? undefined : process.env.FLUID_BRICK_SPARSE_ADVECTION !== "0";
-const brickSparseTransportOverride = process.env.FLUID_BRICK_SPARSE_TRANSPORT === undefined ? undefined : process.env.FLUID_BRICK_SPARSE_TRANSPORT !== "0";
-const brickSparseOccupancyFluxOverride = process.env.FLUID_BRICK_SPARSE_OCCUPANCY_FLUX === undefined ? undefined : process.env.FLUID_BRICK_SPARSE_OCCUPANCY_FLUX !== "0";
-const brickSparseExtrapolationOverride = process.env.FLUID_BRICK_SPARSE_EXTRAPOLATION === undefined ? undefined : process.env.FLUID_BRICK_SPARSE_EXTRAPOLATION !== "0";
 const quadtreeStaleStepsOverride = process.env.FLUID_QUADTREE_STALE_STEPS === undefined ? undefined : Number(process.env.FLUID_QUADTREE_STALE_STEPS);
 const quadtreeInlineRebuildOverride = process.env.FLUID_QUADTREE_INLINE === undefined ? undefined : process.env.FLUID_QUADTREE_INLINE !== "0";
 const quadtreePreconditionerOverride = process.env.FLUID_QUADTREE_PRECONDITIONER;
@@ -2490,6 +2452,13 @@ async function runGPU(
   oracleSteps: number
 ): Promise<GPUSmokeResult> {
   const scenario = createSmokeScenario(scenarioId), scene = applySceneOverrides(scenario.scene);
+  const authoredProfile = scenario.methodProfile?.methodId === method.id
+    ? scenario.methodProfile : undefined;
+  // Validation presets are authored once for the UI. Native Dawn starts from
+  // that exact quality/profile and only then applies explicitly requested
+  // diagnostic overrides; do not maintain a second implicit solver preset in
+  // package.json.
+  const solverQuality = authoredProfile?.quality ?? quality;
   // Validation comparisons author the exact same scene lattice on every backend.
   if (voxelCellSizeOverride !== undefined) scene.voxelDomain.finestCellSize_m = voxelCellSizeOverride;
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
@@ -2522,18 +2491,11 @@ async function runGPU(
   }) as GPUDevice;
   const bodies = initializeRigidBodies(scene.rigidBodies);
   const constructionStarted = performance.now();
-  const values = method.presetFor(quality);
+  const values = method.presetFor(solverQuality);
+  if (authoredProfile) Object.assign(values, authoredProfile.overrides);
   if (method.id === "tall-cell" && pressureCyclesOverride !== undefined) values.pressureCycles = pressureCyclesOverride;
   if (method.id === "tall-cell" && pressureWarmStartOverride !== undefined) values.pressureWarmStart = pressureWarmStartOverride ? "on" : "off";
   if ((method.id === "quadtree-tall-cell" || method.id === "octree") && pressureCyclesOverride !== undefined) values.pressureIterations = pressureCyclesOverride;
-  if (method.id === "octree") {
-    // Preserve FLUID_PRESSURE_CYCLES as a convenient legacy A/B override, but
-    // let the specifically named cap win when both are supplied.
-    if (pressureCyclesOverride !== undefined) values.powerPcgIterationCap = pressureCyclesOverride;
-    if (powerPcgCapOverride !== undefined) values.powerPcgIterationCap = powerPcgCapOverride;
-    if (powerBoundarySmoothingOverride !== undefined) values.powerBoundarySmoothingIterations = powerBoundarySmoothingOverride;
-    if (powerMultigridHierarchyOverride !== undefined) values.powerMultigridHierarchy = powerMultigridHierarchyOverride;
-  }
   if (method.id === "quadtree-tall-cell" && pressureWarmStartOverride !== undefined) values.pressureWarmStart = pressureWarmStartOverride ? "on" : "off";
   if (method.id === "quadtree-tall-cell" && quadtreeMegakernelOverride !== undefined) values.megakernelSolve = quadtreeMegakernelOverride;
   if (method.id === "quadtree-tall-cell" && quadtreePressureSolverOverride !== undefined) values.pressureSolver = quadtreePressureSolverOverride;
@@ -2549,26 +2511,10 @@ async function runGPU(
   // raised cap here. FLUID_MAXIMUM_LEAF_SIZE still wins below for A/B runs.
   if (method.id === "octree" && scenarioId === "ocean-seiche") values.maximumLeafSize = 32;
   if (method.id === "octree" && maximumLeafSizeOverride !== undefined) values.maximumLeafSize = maximumLeafSizeOverride;
-  if (method.id === "octree" && octreeAdaptivityOverride !== undefined) values.adaptivity = octreeAdaptivityOverride;
   if (method.id === "octree" && octreeInterfaceBandOverride !== undefined) {
     values.interfaceRefinementBandCells = octreeInterfaceBandOverride;
   }
-  if (method.id === "octree" && octreeLeafSolverOverride !== undefined) values.leafSolver = octreeLeafSolverOverride;
-  if (method.id === "octree" && octreeWarmStartOverride !== undefined) values.pressureWarmStart = octreeWarmStartOverride ? "on" : "off";
-  if (method.id === "octree" && octreeFaceVelocityMirror) values.faceVelocityMirror = "on";
-  if (method.id === "octree" && octreeFaceVelocityRhs) values.faceVelocityRhs = "on";
-  if (method.id === "octree" && octreeFaceVelocityTransport !== undefined) values.faceVelocityTransport = octreeFaceVelocityTransport ? "on" : "off";
-  if (method.id === "octree" && octreePowerProjectionOverride !== undefined) values.powerDiagramProjection = octreePowerProjectionOverride;
   if (method.id === "octree" && octreeGlobalFineFactorOverride !== undefined) values.globalFineLevelSetFactor = octreeGlobalFineFactorOverride;
-  if (method.id === "octree" && hydrostaticSplitOverride !== undefined) values.hydrostaticSplit = hydrostaticSplitOverride ? "on" : "off";
-  if (method.id === "octree" && brickAtlasOverride !== undefined) values.brickAtlas = brickAtlasOverride ? "mirror" : "off";
-  if (method.id === "octree" && brickAtlasModeOverride !== undefined) values.brickAtlas = brickAtlasModeOverride;
-  if (method.id === "octree" && brickPreActivationOverride !== undefined) values.brickPreActivation = brickPreActivationOverride ? "on" : "off";
-  if (method.id === "octree" && brickSparseSurfaceOverride !== undefined) values.brickSparseSurface = brickSparseSurfaceOverride ? "on" : "off";
-  if (method.id === "octree" && brickSparseAdvectionOverride !== undefined) values.brickSparseAdvection = brickSparseAdvectionOverride ? "on" : "off";
-  if (method.id === "octree" && brickSparseTransportOverride !== undefined) values.brickSparseTransport = brickSparseTransportOverride ? "on" : "off";
-  if (method.id === "octree" && brickSparseOccupancyFluxOverride !== undefined) values.brickSparseOccupancyFlux = brickSparseOccupancyFluxOverride ? "on" : "off";
-  if (method.id === "octree" && brickSparseExtrapolationOverride !== undefined) values.brickSparseExtrapolation = brickSparseExtrapolationOverride ? "on" : "off";
   if (method.id === "quadtree-tall-cell" && quadtreePreconditionerOverride !== undefined) values.preconditioner = quadtreePreconditionerOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeStaleStepsOverride !== undefined) values.topologyStaleSteps = quadtreeStaleStepsOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeInlineRebuildOverride !== undefined) values.inlineRebuild = quadtreeInlineRebuildOverride;
@@ -2587,12 +2533,12 @@ async function runGPU(
   if (method.id === "tall-cell" && hierarchyOverride !== undefined) values.hierarchicalExtrapolation = hierarchyOverride ? "on" : "off";
   const probeLayout = singleTallCellProbe && (method.id === "tall-cell" || method.id === "uniform")
     ? method.id === "tall-cell"
-      ? createSingleTallCellProbeLayout(scene, quality, device.limits.maxTextureDimension3D, singleTallCellProbe)
-      : createSingleTallCellProbeControlLayout(scene, quality, device.limits.maxTextureDimension3D, singleTallCellProbe)
+      ? createSingleTallCellProbeLayout(scene, solverQuality, device.limits.maxTextureDimension3D, singleTallCellProbe)
+      : createSingleTallCellProbeControlLayout(scene, solverQuality, device.limits.maxTextureDimension3D, singleTallCellProbe)
     : undefined;
   const resultMethod = singleTallCellProbe && method.id === "uniform" ? "tall-cell-control" : method.id;
   const solver = probeLayout
-    ? new WebGPUEulerianSolver(instrumentedDevice, scene, quality, undefined, {
+    ? new WebGPUEulerianSolver(instrumentedDevice, scene, solverQuality, undefined, {
       layoutOverride: probeLayout,
       pressureCycles: typeof values.pressureCycles === "number" ? values.pressureCycles : 2,
       pressureWarmStart: values.pressureWarmStart !== "off",
@@ -2601,22 +2547,34 @@ async function runGPU(
       referenceVolumeScale: typeof values.referenceVolumeScale === "number" ? values.referenceVolumeScale : undefined,
       hierarchicalExtrapolation: values.hierarchicalExtrapolation !== "off"
     })
-    : method.id === "octree" && octreePowerProjectionOverride !== undefined && method.createSolverAsync
-      // The power catalog is an initialization task in the production
-      // browser-safe construction path. A synchronous smoke constructor would
-      // silently exercise only the rollback solver while still claiming it
-      // requested authority.
-      ? await method.createSolverAsync(instrumentedDevice, scene, quality, values, undefined, (progress) => {
+    : method.id === "octree" && method.createSolverAsync
+      // The power catalog and fenced t=0 sparse authority are initialization
+      // tasks in the production browser path. Dawn must use the same async
+      // constructor even when authority came from an authored UI profile
+      // instead of a command-line override.
+      ? await method.createSolverAsync(instrumentedDevice, scene, solverQuality, values, undefined, (progress) => {
         console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
           record: "solver-initialization", ...progress }));
       })
-      : method.createSolver!(instrumentedDevice, scene, quality, values);
+      : method.createSolver!(instrumentedDevice, scene, solverQuality, values);
   const construction_ms = performance.now() - constructionStarted;
   const actualGrid: [number, number, number] = [solver.info.nx, solver.info.ny, solver.info.nz];
   if (expectedGridOverride && actualGrid.some((value, axis) => value !== expectedGridOverride[axis])) {
     throw new Error(`${scenarioId}/${resultMethod} constructed ${actualGrid.join("x")} instead of FLUID_EXPECT_GRID=${expectedGridOverride.join("x")}; refusing to step a mismatched comparison`);
   }
-  console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod, phase: "constructed", construction_ms: Math.round(construction_ms), grid: [solver.info.nx, solver.info.storedNy, solver.info.nz], cubicGrid: [solver.info.nx, solver.info.ny, solver.info.nz] }));
+  console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod, phase: "constructed",
+    construction_ms: Math.round(construction_ms), quality: solverQuality,
+    authoredMethodProfile: authoredProfile,
+    grid: [solver.info.nx, solver.info.storedNy, solver.info.nz],
+    cubicGrid: [solver.info.nx, solver.info.ny, solver.info.nz] }));
+  /** Match the renderer's admission boundary. A profiled octree advance
+   * submits its phases asynchronously; queue.onSubmittedWorkDone() alone can
+   * resolve between those submissions and expose a torn generation. */
+  const awaitAdvanceCompletion = async () => {
+    const pending = (solver as GPUSolverInstance).pendingAdvanceCompletion;
+    if (pending) await pending;
+    await device.queue.onSubmittedWorkDone();
+  };
   // Raw voxel/brick records are a lazy inspection product. Merely reading the
   // getter allocates their large publication arenas, so production timing and
   // memory runs must not request them unless the explicit sparse audit is on.
@@ -2743,15 +2701,12 @@ async function runGPU(
     }
     steps += 1;
     const auditThisPowerStep = steps % powerAuditEverySteps === 0 || requestedTime + 1e-9 >= target_s;
-    if (powerGenerationAuditRequested && auditThisPowerStep && method.id === "octree"
-      && octreePowerProjectionOverride === "authoritative") {
+    if (powerGenerationAuditRequested && auditThisPowerStep && method.id === "octree") {
       // Every thirtieth octree advance may be submitted as serial profiler
       // phases. A queue fence taken before those asynchronous submissions are
       // enqueued observes the preceding valid generation, not the accepted
       // step. Match the renderer's lifecycle contract before auditing it.
-      const pendingAdvanceCompletion = (solver as GPUSolverInstance).pendingAdvanceCompletion;
-      if (pendingAdvanceCompletion) await pendingAdvanceCompletion;
-      await device.queue.onSubmittedWorkDone();
+      await awaitAdvanceCompletion();
       const audited = solver as GPUSolverInstance & {
         powerFaceControl?: GPUBuffer; powerFaceTransferControl?: GPUBuffer; powerFaceSiteIndex?: GPUBuffer;
         powerFaceSeedControl?: GPUBuffer; powerOperatorControl?: GPUBuffer; mgpcgControl?: GPUBuffer;
@@ -3380,19 +3335,19 @@ async function runGPU(
     }
     if (steps === oracleSteps) {
       const samplingStartedAt = performance.now();
-      await device.queue.onSubmittedWorkDone();
+      await awaitAdvanceCompletion();
       solver.info.completedTime_s = Math.max(solver.info.completedTime_s ?? 0, solver.info.submittedTime_s ?? 0);
       solver.info.simulatedTime_s = solver.info.submittedTime_s;
       if (exactStepCount !== undefined) await solver.readStats();
       if (!collectStabilityEnvelope && !performanceProfileRequested) matched = await readCubicVolumeField(device, solver);
       samplingWall_ms += performance.now() - samplingStartedAt;
     }
-    if (steps % 30 === 0) await device.queue.onSubmittedWorkDone();
+    if (steps % 30 === 0) await awaitAdvanceCompletion();
     const shouldReport = reportEvery > 0 && steps % reportEvery === 0;
     const shouldSampleEnergy = energyEverySteps > 0 && steps % energyEverySteps === 0;
     if (shouldReport || shouldSampleEnergy || collectStabilityEnvelope) {
       const samplingStartedAt = performance.now();
-      await device.queue.onSubmittedWorkDone();
+      await awaitAdvanceCompletion();
       solver.info.simulatedTime_s = solver.info.submittedTime_s;
       const sample = await solver.readStats();
       const isRestrictedTall = sample.gridKind === "restricted-tall-cell";
@@ -3522,7 +3477,7 @@ async function runGPU(
     }
     if (checkpointEvery_s > 0 && (solver.info.submittedTime_s ?? 0) + 1e-9 >= nextCheckpoint_s) {
       const samplingStartedAt = performance.now();
-      await device.queue.onSubmittedWorkDone();
+      await awaitAdvanceCompletion();
       const cubic = steps === oracleSteps && matched ? matched : await readCubicVolumeField(device, solver);
       let preProjectionVelocity: Float32Array | undefined, postProjectionVelocity: Float32Array | undefined;
       if (singleTallCellProbe && solver.info.gridKind === "restricted-tall-cell") {
@@ -3545,7 +3500,7 @@ async function runGPU(
     if (lost) throw new Error(`${method.id} device lost: ${lost.message || lost.reason}`);
   }
   const simulationWall_ms = Math.max(0, performance.now() - runStarted - samplingWall_ms);
-  await device.queue.onSubmittedWorkDone();
+  await awaitAdvanceCompletion();
   solver.info.completedTime_s = Math.max(solver.info.completedTime_s ?? 0, solver.info.submittedTime_s ?? 0);
   solver.info.simulatedTime_s = solver.info.submittedTime_s;
   const info = { ...await solver.readStats() };
@@ -4069,7 +4024,7 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
     fail((octree.info.quadtreeMaximumNeighborRatio ?? Infinity) <= 2, `octree neighbor ratio ${octree.info.quadtreeMaximumNeighborRatio} exceeds 2:1`);
     fail((octree.info.quadtreeTopologyReadbackBytes ?? Infinity) === 0,
       `octree simulation topology performed ${octree.info.quadtreeTopologyReadbackBytes ?? "unknown"} CPU readback bytes`);
-    if (octreePowerProjectionOverride === "authoritative") {
+    {
       fail(octree.info.powerDiagramProjection === "authoritative",
         `octree requested authoritative power projection but reported ${octree.info.powerDiagramProjection ?? "unknown"}`);
       fail(octree.info.powerDiagramReady === true && octree.info.powerDiagramAuthoritative === true,
@@ -4314,23 +4269,20 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
           && bounds![0][1] >= -tolerance && bounds![1][1] <= container.height_m + tolerance
           && bounds![0][2] >= -0.5 * container.depth_m - tolerance
           && bounds![1][2] <= 0.5 * container.depth_m + tolerance;
-        const pairedFraction = (value: {
-          frontInterfacePixels: number; backInterfacePixels: number; pairedInterfacePixels: number;
-        } | undefined) => (value?.pairedInterfacePixels ?? 0)
-          / Math.max(1, (value?.frontInterfacePixels ?? 0) + (value?.backInterfacePixels ?? 0)
-            - (value?.pairedInterfacePixels ?? 0));
         const reverse = observed?.reverseView;
-        // The released 16^3 dam develops view-dependent silhouette pixels at
-        // its moving contact edge. Retain a strong two-sided surface check,
-        // with a one-point allowance for that evolved coarse-grid silhouette.
-        const minimumPairedFraction = scenarioId === "minimal-power-dam-break" ? 0.69 : 0.7;
+        // This extraction is the liquid/air zero set, not a wall-capped closed
+        // solid. As the dam wets the floor and container walls, legitimate
+        // front rays increasingly have no second liquid/air crossing; a fixed
+        // front/back Jaccard threshold therefore measures contact area, not
+        // missing triangles. Depth peeling still gives a strict invariant:
+        // every back hit must have a front hit on that ray in both views.
         fail((observed?.frontInterfacePixels ?? 0) > 0 && (observed?.backInterfacePixels ?? 0) > 0,
-          `${label} did not rasterize a closed front/back interface: ${JSON.stringify(observed)}`);
-        fail(pairedFraction(observed) >= minimumPairedFraction,
-          `${label} front/back intersection Jaccard coverage is below ${100 * minimumPairedFraction}%: ${JSON.stringify(observed)}`);
+          `${label} did not rasterize both front and back liquid/air crossings: ${JSON.stringify(observed)}`);
+        fail(observed?.backOnlyInterfacePixels === 0,
+          `${label} depth peeling exposed back crossings without front crossings: ${JSON.stringify(observed)}`);
         fail((reverse?.frontInterfacePixels ?? 0) > 0 && (reverse?.backInterfacePixels ?? 0) > 0
-          && pairedFraction(reverse) >= minimumPairedFraction,
-        `${label} reverse view exposes missing or one-sided water faces: ${JSON.stringify(reverse)}`);
+          && reverse?.backOnlyInterfacePixels === 0,
+        `${label} reverse depth peeling exposed back crossings without front crossings: ${JSON.stringify(reverse)}`);
         if (scenarioId === "minimal-power-dam-break") {
           fail(observed?.narrowVerticalSlits.count === 0,
             `${label} contains narrow vertical surface slits: ${JSON.stringify(observed?.narrowVerticalSlits)}`);
@@ -4469,7 +4421,7 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         fail(impact.summary.enclosedAirCells <= 8, `octree dam-break formed ${impact.summary.enclosedAirCells} enclosed air cells near impact`);
       }
       if (tall && octree.grid.every((value, axis) => value === tall.grid[axis])) {
-        if (octreePowerProjectionOverride === "authoritative") {
+        {
           const octreePeak = envelope?.peakLiquidSpeed_m_s ?? Infinity;
           const tallPeak = tall.stabilityEnvelope?.peakLiquidSpeed_m_s ?? 0;
           const peakRatio = octreePeak / Math.max(tallPeak, 1e-9);

@@ -67,9 +67,6 @@ async function assertComputeSentinel(device: GPUDevice): Promise<number> {
 
 function solverValues(): MethodParamValues {
   const values = octreeMethod.presetFor("balanced");
-  values.leafSolver = process.env.FLUID_OCTREE_LEAF_SOLVER ?? "mgpcg";
-  values.faceVelocityTransport = process.env.FLUID_OCTREE_FACE_TRANSPORT === "0" ? "off" : "on";
-  values.powerDiagramProjection = process.env.FLUID_OCTREE_POWER_PROJECTION ?? "authoritative";
   values.globalFineLevelSetFactor = process.env.FLUID_OCTREE_GLOBAL_FINE_FACTOR ?? "4";
   return values;
 }

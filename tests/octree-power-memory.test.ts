@@ -176,9 +176,10 @@ test("coarse phi schedule bootstraps and fine-corrects at dt0 before recurring a
   const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const calls = [...source.matchAll(/this\.powerCoarseLevelSetSchedule\.encode\([\s\S]*?\n\s*}\);/g)]
     .map((match) => match[0]);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.match(calls[0], /dt:\s*0,/); assert.doesNotMatch(calls[0], /dt:\s*dt_s,/);
   assert.match(calls[1], /dt:\s*coarseBootstrappedThisStep\s*\?\s*0\s*:\s*dt_s,/);
+  assert.match(calls[2], /dt:\s*dt_s,/);
 });
 
 test("coarse schedule parameters use one encoder-local arena across cold bootstrap and 64 substeps", () => {

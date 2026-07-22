@@ -664,8 +664,10 @@ test("fine bricks bound work while coarse phi remains sign-only topology metadat
   assert.doesNotMatch(octreeFaceBandWGSL, /coarseSummary|physicalCellSize\*f32\(max/,
     "a directory miss must not synthesize a signed-distance magnitude");
   assert.match(wgslFunction("coarseSignFlag"),
-    /letentry=coarseCellSeedRecord\(owner\.origin,owner\.size\);if\(entry\.w==0\.\)\{returnROW_COARSE_AIR;\}/,
-    "only a miss in the complete spatial coarse publication is positive-air complement membership");
+    /letentry=coarseCellSeedRecord\(owner\.origin,owner\.size\);if\(entry\.w==0\.\)\{returnROW_COARSE_MIXED;\}/,
+    "a spatial coarse-directory miss remains unsigned until neighboring-cell redistance resolves it");
+  assert.match(wgslFunction("extendBandRowPhi"), /if\(sign==0\.\).*nearestSignedNeighbor/s,
+    "whole-domain redistance propagates a measured neighboring sign instead of fabricating air");
   assert.match(octreeFaceBandWGSL,
     /let owner=ownerAt\(q\);if\(owner\.valid==0u\)\{fail\(SOURCE,cell\(q\)\);return;\}/,
     "missing owner topology must fail closed");
@@ -919,12 +921,14 @@ test("GPU CPT binds its complete causal face graph within the portable limit", (
   assert.deepEqual(planOctreeFaceBandCPT(384), { maximumGraphDepth: 384, jumpRounds: 9 });
 });
 
-test("band-phi Jacobi rounds stay band-bounded while CPT depth scales only logarithmically", () => {
+test("band-phi Jacobi covers the complete domain while CPT contraction stays logarithmic", () => {
   const projection = compact(WebGPUOctreeProjection);
   assert.match(projection,
-    /bandPhiRelaxationRounds=Math\.max\(1,2\*this\.interfaceRefinementBandCells\+4\)/);
+    /maximumDomainGraphDepth=Math\.max\(1,this\.dims\.nx\+this\.dims\.ny\+this\.dims\.nz\)/);
   assert.match(projection,
-    /maximumCptGraphDepth=Math\.max\(1,2\*Math\.max\(this\.dims\.nx,this\.dims\.ny,this\.dims\.nz\)\)/);
+    /bandPhiRelaxationRounds=maximumDomainGraphDepth/);
+  assert.match(projection,
+    /maximumCptGraphDepth=maximumDomainGraphDepth/);
   assert.match(projection,
     /rowCapacity,bandPhiRelaxationRounds,maximumCptGraphDepth,this\.powerFaces\.plan\.faceCapacity/);
   const schedule = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);

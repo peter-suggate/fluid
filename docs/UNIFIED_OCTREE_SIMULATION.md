@@ -140,13 +140,10 @@ The earlier atomic mirror was a scaffold. It has been replaced by the
 deterministic topology above; the face store is now the input to the
 authoritative U2/U3 path rather than a permanent dense duplicate.
 
-The 2026-07-19 Dawn/Metal dam-break gate passed for both mirror-only and
-face-RHS-authoritative 50-step runs. The authoritative run ended with 50,690
-published faces, 15,686 compared liquid rows, zero mismatches, no overflow,
-maximum absolute RHS error `3.96e-9`, no WebGPU validation errors, and all
-smoke invariants passing. Reproduce the parity gates with
-`npm run test:webgpu:octree-face-parity` and
-`npm run test:webgpu:octree-face-rhs`.
+The deterministic face topology, RHS, and projection parity contracts remain
+covered by the focused octree runtime tests. `npm run
+test:webgpu:octree-face-transport` exercises the automatic paper-path face
+transport in Dawn without selecting a retired mirror or RHS mode.
 
 ### U2 — adaptive projection authority (complete for supported scenes)
 
@@ -160,11 +157,10 @@ smoke invariants passing. Reproduce the parity gates with
 - Reapplies the solid normal constraint after projection when adaptive rigid
   faces are present.
 
-Authority is deliberately fail-closed. Terrain and the experimental
-hydrostatic split still use the dense-compatible path. Moving rigid bodies are
-supported only through the adaptive solid-face module and without terrain.
-The compact path is selected by the octree `faceVelocityTransport` option; the
-smoke harness exposes it as `FLUID_OCTREE_FACE_TRANSPORT=1`.
+Authority is deliberately fail-closed. Terrain and other unsupported geometry
+use the dense-compatible path. Moving rigid bodies are supported only through
+the adaptive solid-face module and without terrain. The paper method selects
+compact face transport automatically; it is no longer a user-facing A/B mode.
 
 ### U3 — adaptive transport authority (complete for the same cutover)
 

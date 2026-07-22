@@ -117,16 +117,10 @@ test("optional fine dynamics is bounded but does not replace the global pressure
   assert.match(sparseSurfaceDynamicsShader, /return vec3f\(0\.0\)/, "missing pages impose the coarse-velocity boundary condition");
 });
 
-test("superseded adaptive surface patches stay disabled and out of the product UI", () => {
-  for (const quality of ["balanced", "high", "ultra"] as const) {
-    const preset = octreeMethod.presetFor(quality);
-    assert.equal(preset.sparseSurfaceBand, "off");
-    assert.equal(preset.surfaceRefinementFactor, "2");
-    assert.equal(preset.sparseSurfaceBandCells, 4);
-    assert.equal(preset.sparseSurfacePageFraction, 0.75);
-  }
+test("superseded adaptive surface patches are absent from product configuration", () => {
   assert.equal(octreeMethod.params.some((candidate) => candidate.key === "sparseSurfaceBand"), false);
   assert.equal(octreeMethod.params.some((candidate) => candidate.key === "surfaceRefinementFactor"), false);
+  assert.equal(Object.hasOwn(octreeMethod.presetFor("balanced"), "sparseSurfaceBand"), false);
 });
 
 test("raster extraction and solver-grid inspection consume the same live sparse surface", () => {

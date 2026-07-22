@@ -1,12 +1,11 @@
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
+import type { MethodProfile } from "../lib/methods";
 import { createPaperScenario } from "../lib/paper-scenarios";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M } from "../lib/garden-scene";
 import {
   createBrickQuadDamBreakScene,
-  createLargeHydrostaticScene,
-  createMinimalPowerDamBreakScene,
   createOceanSeicheScene,
-  createTinyHydrostaticScene,
+  getScenePreset,
 } from "../lib/scenes";
 
 export const smokeScenarioIds = [
@@ -41,6 +40,10 @@ export interface SmokeScenario {
   oracleSteps: number;
   /** Default GPU observation duration; FLUID_TARGET_S can override it. */
   target_s: number;
+  /** UI-authored solver profile, when the scenario is a validation preset.
+   * Dawn consumes this same object so the browser and native smoke cannot
+   * silently drift through duplicated command-line overrides. */
+  methodProfile?: MethodProfile;
 }
 
 export function isSmokeScenarioId(value: string): value is SmokeScenarioId {
@@ -105,38 +108,41 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
   }
 
   if (id === "hydrostatic-power-two-level") {
-    const scene = createTinyHydrostaticScene();
-    scene.environment = "default";
+    const preset = getScenePreset(id), scene = preset.create();
     return {
       id,
       description: "16-cubed settled tank with room for unit and two-cell power-diagram leaves",
       scene,
       oracleSteps: 50,
       target_s: 50 * scene.numerics.maxDt_s,
+      methodProfile: preset.methodProfile,
     };
   }
 
   if (id === "hydrostatic-power-large-offset") {
-    const scene = createLargeHydrostaticScene();
-    scene.environment = "default";
+    const preset = getScenePreset(id), scene = preset.create();
     return {
       id,
       description: "32x24x16 settled tank with a cell-cut free surface and a larger two-level pressure grid",
       scene,
       oracleSteps: 1,
       target_s: scene.numerics.maxDt_s,
+      methodProfile: preset.methodProfile,
     };
   }
 
   if (id === "minimal-power-dam-break") {
-    const scene = createMinimalPowerDamBreakScene();
-    scene.environment = "default";
+    const preset = getScenePreset(id), scene = preset.create();
     return {
       id,
       description: "minimal two-level analytic dam reservoir collapsing in a 16-cubed tank",
       scene,
       oracleSteps: 50,
-      target_s: 50 * scene.numerics.maxDt_s,
+      // The browser's first rejected moving-surface generation has appeared
+      // just beyond 0.4 s. The default Dawn matrix must cross that boundary,
+      // not stop at the earlier 50-step initialization oracle.
+      target_s: 0.5,
+      methodProfile: preset.methodProfile,
     };
   }
 

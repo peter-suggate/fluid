@@ -59,7 +59,6 @@ test("tiny hydrostatic isolated Dawn command pins the two-level paper path", () 
   assert.match(command, /FLUID_EXPECT_EXACT_STEPS=50/);
   assert.match(command, /FLUID_MAXIMUM_LEAF_SIZE=2/);
   assert.match(command, /FLUID_OCTREE_INTERFACE_BAND=3/);
-  assert.match(command, /FLUID_OCTREE_POWER_PROJECTION=authoritative/);
   assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
   assert.match(command, /FLUID_POWER_GENERATION_AUDIT=1/);
   assert.match(command, /FLUID_POWER_AUDIT_EVERY_STEPS=1/);

@@ -2,7 +2,6 @@
 
 Status: D1/D2 vertical slice implemented, later milestones remain planned,
 2026-07-19. This is a cross-cutting companion to
-`docs/VAST_OCEAN_ACTIVITY_SPARSITY_PLAN.md` and
 `docs/SPARSE_VOXEL_OCTREE_RENDERER_MIGRATION.md`.
 
 ## Current implementation

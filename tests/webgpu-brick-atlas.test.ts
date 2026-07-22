@@ -55,14 +55,13 @@ test("uniform kernels bind the optional bulk worklist declared by every entry po
 
 test("octree atlas diagnostics stay internal while compact authority keeps only bulk residency", () => {
   assert.equal(octreeMethod.params.some((candidate) => candidate.key === "brickAtlas"), false);
-  assert.equal(octreeMethod.presetFor?.("balanced").brickAtlas, "mirror");
+  assert.equal(Object.hasOwn(octreeMethod.presetFor?.("balanced") ?? {}, "brickAtlas"), false);
 
   const method = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
   const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
   const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const sparseWorld = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
-  const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
-  assert.match(method, /brickAtlas: brickAtlasMode\(values\.brickAtlas\)/);
+  assert.match(method, /brickAtlas: "mirror"/);
   assert.match(uniform, /brickAtlas: options\.octree\.brickAtlas \?\? "mirror"/);
   assert.match(projection, /brickAtlas: faceTransportEnabled && !compactAtlasDiagnostic \? "off" : options\.brickAtlas \?\? "mirror"/);
   assert.match(projection, /bulkResidencyOnly: faceTransportEnabled/);
@@ -71,22 +70,13 @@ test("octree atlas diagnostics stay internal while compact authority keeps only 
   assert.match(sparseWorld, /get atlasSamplingSource/);
   assert.match(projection, /get fluidBrickAtlasSamplingSource/);
   assert.match(uniform, /get fluidBrickAtlasSamplingSource/);
-  assert.match(smoke, /FLUID_BRICK_ATLAS_MODE/);
-  assert.match(method, /brickSparseVelocityAdvection: values\.brickSparseAdvection !== "off"/);
-  assert.match(method, /brickSparseTransportPreparation: values\.brickSparseTransport !== "off"/);
-  assert.match(method, /brickSparseOccupancyFluxPreparation: values\.brickSparseOccupancyFlux !== "off"/);
-  assert.match(method, /brickSparseExtrapolation: values\.brickSparseExtrapolation !== "off"/);
-  assert.match(smoke, /FLUID_BRICK_SPARSE_ADVECTION/);
-  assert.match(smoke, /FLUID_BRICK_SPARSE_TRANSPORT/);
-  assert.match(smoke, /FLUID_BRICK_SPARSE_OCCUPANCY_FLUX/);
-  assert.match(smoke, /FLUID_BRICK_SPARSE_EXTRAPOLATION/);
+  assert.match(method, /brickSparseVelocityAdvection: true/);
+  assert.match(method, /brickSparseTransportPreparation: false/);
+  assert.match(method, /brickSparseOccupancyFluxPreparation: false/);
+  assert.match(method, /brickSparseExtrapolation: false/);
   assert.equal(octreeMethod.params.some((candidate) => candidate.key === "brickSparseTransport"), false);
-  assert.equal(octreeMethod.presetFor?.("balanced").brickSparseTransport, "off");
   assert.equal(octreeMethod.params.some((candidate) => candidate.key === "brickSparseOccupancyFlux"), false);
-  assert.equal(octreeMethod.presetFor?.("balanced").brickSparseOccupancyFlux, "off");
   assert.equal(octreeMethod.params.some((candidate) => candidate.key === "brickSparseExtrapolation"), false);
-  assert.equal(octreeMethod.presetFor?.("balanced").brickSparseExtrapolation, "off");
-  assert.match(smoke, /\["off", "mirror", "authoritative"\]/);
   assert.doesNotMatch(sparseWorld, /encodeAtlasToDense\(/,
     "authoritative remains infrastructure-only until consumers are ported");
 });
