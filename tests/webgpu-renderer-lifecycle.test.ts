@@ -70,7 +70,8 @@ test("renderer retains end-to-end advance wall time across paused redraws", () =
   );
   assert.match(submit, /encodeStartedAt_ms = performance\.now\(\)[\s\S]*submitNextPreparedGPUAdvance/);
   assert.match(submit, /cpuAdvanceEncode_ms = encodeCompletedAt_ms - encodeStartedAt_ms/);
-  assert.match(submit, /gpuAdvanceWall_ms = completedAt_ms - encodeStartedAt_ms/);
+  assert.match(submit, /physicsQueueWall_ms = Math\.max\(0, completedAt_ms - queueReadyAt_ms\)/);
+  assert.match(submit, /gpuAdvanceWall_ms = cpuAdvanceEncode_ms \+ physicsQueueWall_ms/);
 });
 
 test("paused solver attachment and raw publication each request exactly one presentation", () => {

@@ -84,7 +84,7 @@ async function assertComputeSentinel(device: GPUDevice): Promise<void> {
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
   try {
-    const module = device.createShaderModule({
+    const shaderModule = device.createShaderModule({
       label: "WebGPU smoke compute sentinel",
       code: `
 @group(0) @binding(0) var<storage, read_write> output: array<u32>;
@@ -95,7 +95,7 @@ fn sentinel() { output[0] = 0x4f435452u; }
     const pipeline = await device.createComputePipelineAsync({
       label: "WebGPU smoke compute sentinel",
       layout: "auto",
-      compute: { module, entryPoint: "sentinel" },
+      compute: { module: shaderModule, entryPoint: "sentinel" },
     });
     const bindGroup = device.createBindGroup({
       label: "WebGPU smoke compute sentinel",
@@ -143,12 +143,30 @@ if (minimumDamSpread_m !== undefined && (!Number.isFinite(minimumDamSpread_m) ||
 if (exactStepCount !== undefined && maxDtOverride === undefined) throw new Error("FLUID_EXPECT_EXACT_STEPS requires FLUID_MAX_DT so submitted/completed time is unambiguous");
 const reportEvery = Number(process.env.FLUID_REPORT_EVERY ?? 0);
 const includeFinalFieldStats = process.env.FLUID_FIELD_STATS !== "0";
+/** Timing-only mode keeps solver/control/timestamp readbacks while omitting
+ * compact cubic reconstruction and scene quality gates. The reconstruction
+ * is not part of simulationWall_ms and can independently reject a measurable
+ * run when an upstream publication generation is stale. */
+const performanceProfileRequested = process.env.FLUID_PERFORMANCE_PROFILE === "1";
 const requireSpatialField = process.env.FLUID_REQUIRE_SPATIAL_FIELD === "1";
 const runCPUOracle = process.env.FLUID_CPU_ORACLE !== "0";
 const cpuMaximumCells = Number(process.env.FLUID_CPU_MAX_CELLS ?? 250_000);
 const cpuMarkerSamplesPerAxis = Number(process.env.FLUID_CPU_MARKERS_PER_AXIS ?? 1);
 const oracleStepsOverride = process.env.FLUID_ORACLE_STEPS === undefined ? undefined : Number(process.env.FLUID_ORACLE_STEPS);
 const pressureCyclesOverride = process.env.FLUID_PRESSURE_CYCLES === undefined ? undefined : Number(process.env.FLUID_PRESSURE_CYCLES);
+const powerPcgCapOverride = process.env.FLUID_POWER_PCG_CAP === undefined ? undefined : Number(process.env.FLUID_POWER_PCG_CAP);
+if (powerPcgCapOverride !== undefined && (!Number.isFinite(powerPcgCapOverride) || powerPcgCapOverride < 8 || powerPcgCapOverride > 128)) throw new Error("FLUID_POWER_PCG_CAP must be between 8 and 128");
+const powerBoundarySmoothingOverride = process.env.FLUID_POWER_BOUNDARY_SMOOTHING === undefined
+  ? undefined : Number(process.env.FLUID_POWER_BOUNDARY_SMOOTHING);
+if (powerBoundarySmoothingOverride !== undefined && (!Number.isInteger(powerBoundarySmoothingOverride)
+  || powerBoundarySmoothingOverride < 2 || powerBoundarySmoothingOverride > 16
+  || powerBoundarySmoothingOverride % 2 !== 0)) {
+  throw new Error("FLUID_POWER_BOUNDARY_SMOOTHING must be an even integer between 2 and 16");
+}
+const powerMultigridHierarchyOverride = process.env.FLUID_OCTREE_PRESSURE_HIERARCHY;
+if (powerMultigridHierarchyOverride !== undefined && !["aggregate-galerkin", "paper-pyramid"].includes(powerMultigridHierarchyOverride)) {
+  throw new Error("FLUID_OCTREE_PRESSURE_HIERARCHY must be aggregate-galerkin or paper-pyramid");
+}
 const pressureWarmStartOverride = process.env.FLUID_PRESSURE_WARM_START === undefined ? undefined : process.env.FLUID_PRESSURE_WARM_START !== "0";
 const quadtreeMegakernelOverride = process.env.FLUID_QUADTREE_MEGAKERNEL === undefined ? undefined : process.env.FLUID_QUADTREE_MEGAKERNEL !== "0";
 const quadtreePressureSolverOverride = process.env.FLUID_QUADTREE_PRESSURE_SOLVER;
@@ -1091,7 +1109,7 @@ async function smokeRenderHybridPresentation(
     const adaptiveOctree = solver.adaptiveFaceMirrorSource && solver.adaptiveFaceVelocitySource && solver.adaptiveSurfacePageSource
       ? createUnifiedOctreeConsumerSource(solver.adaptiveFaceMirrorSource, solver.adaptiveSurfacePageSource)
       : undefined;
-    let globalFineLevelSet = solver.globalFineLevelSetSource
+    const globalFineLevelSet = solver.globalFineLevelSetSource
       ? createGlobalFineLevelSetConsumerSource(solver.globalFineLevelSetSource)
       : undefined;
     if (verifyGlobalFineAuthorityTransition && !globalFineLevelSet) {
@@ -2508,6 +2526,14 @@ async function runGPU(
   if (method.id === "tall-cell" && pressureCyclesOverride !== undefined) values.pressureCycles = pressureCyclesOverride;
   if (method.id === "tall-cell" && pressureWarmStartOverride !== undefined) values.pressureWarmStart = pressureWarmStartOverride ? "on" : "off";
   if ((method.id === "quadtree-tall-cell" || method.id === "octree") && pressureCyclesOverride !== undefined) values.pressureIterations = pressureCyclesOverride;
+  if (method.id === "octree") {
+    // Preserve FLUID_PRESSURE_CYCLES as a convenient legacy A/B override, but
+    // let the specifically named cap win when both are supplied.
+    if (pressureCyclesOverride !== undefined) values.powerPcgIterationCap = pressureCyclesOverride;
+    if (powerPcgCapOverride !== undefined) values.powerPcgIterationCap = powerPcgCapOverride;
+    if (powerBoundarySmoothingOverride !== undefined) values.powerBoundarySmoothingIterations = powerBoundarySmoothingOverride;
+    if (powerMultigridHierarchyOverride !== undefined) values.powerMultigridHierarchy = powerMultigridHierarchyOverride;
+  }
   if (method.id === "quadtree-tall-cell" && pressureWarmStartOverride !== undefined) values.pressureWarmStart = pressureWarmStartOverride ? "on" : "off";
   if (method.id === "quadtree-tall-cell" && quadtreeMegakernelOverride !== undefined) values.megakernelSolve = quadtreeMegakernelOverride;
   if (method.id === "quadtree-tall-cell" && quadtreePressureSolverOverride !== undefined) values.pressureSolver = quadtreePressureSolverOverride;
@@ -2658,7 +2684,7 @@ async function runGPU(
   // lattice, whereas the conservative controller integrates adaptive cell
   // volumes. Compare this estimator with its own accepted reset-time field;
   // mixing the two baselines manufactures drift even when both are stable.
-  const initialExact = method.id === "octree" && (collectStabilityEnvelope || energyEverySteps > 0)
+  const initialExact = !performanceProfileRequested && method.id === "octree" && (collectStabilityEnvelope || energyEverySteps > 0)
     ? await readCubicVolumeField(device, solver) : undefined;
   const spatialExactReference = initialExact?.summary.cellSum;
   // The UI uses a fixed cadence.  The long regression deliberately perturbs
@@ -3319,7 +3345,7 @@ async function runGPU(
       solver.info.completedTime_s = Math.max(solver.info.completedTime_s ?? 0, solver.info.submittedTime_s ?? 0);
       solver.info.simulatedTime_s = solver.info.submittedTime_s;
       if (exactStepCount !== undefined) await solver.readStats();
-      if (!collectStabilityEnvelope) matched = await readCubicVolumeField(device, solver);
+      if (!collectStabilityEnvelope && !performanceProfileRequested) matched = await readCubicVolumeField(device, solver);
       samplingWall_ms += performance.now() - samplingStartedAt;
     }
     if (steps % 30 === 0) await device.queue.onSubmittedWorkDone();
@@ -3487,7 +3513,10 @@ async function runGPU(
   if (info.gpuValidationError && !validationErrors.includes(info.gpuValidationError)) {
     validationErrors.push(info.gpuValidationError);
   }
-  matched ??= await readCubicVolumeField(device, solver);
+  matched ??= performanceProfileRequested
+    ? { field: new Float32Array(info.nx * info.ny * info.nz),
+      summary: summarizeScalarField(new Float32Array(info.nx * info.ny * info.nz), info.nx, info.ny, info.nz) }
+    : await readCubicVolumeField(device, solver);
   const final = includeFinalFieldStats && steps !== oracleSteps ? await readCubicVolumeField(device, solver) : matched;
   const finalSolver = solver as GPUSolverInstance & { velocityTexture?: GPUTexture; powerFaceTransferControl?: GPUBuffer;
     powerFaceControl?: GPUBuffer; powerDescriptorControl?: GPUBuffer; powerTopologyControl?: GPUBuffer;
@@ -4539,7 +4568,7 @@ try {
     }
     const results: GPUSmokeResult[] = [];
     for (const method of methods) results.push(await runGPU(scenarioId, method, target_s, oracleSteps));
-    failures.push(...invariantFailures(scenarioId, results));
+    if (!performanceProfileRequested) failures.push(...invariantFailures(scenarioId, results));
 
     const tallResult = results.find((result) => result.method === "tall-cell"), uniformResult = results.find((result) => result.method === (singleTallCellProbe ? "tall-cell-control" : "uniform"));
     if (tallResult && uniformResult) {
@@ -4610,7 +4639,10 @@ try {
     if (cpu) for (const result of results) {
       console.log(JSON.stringify({ scenario: scenarioId, phase: "discrepancy", left: result.method, right: "cpu-reference", oracleSteps, metrics: compareScalarFields(result.matchedField, cpu.field, ...grid) }));
     }
-    console.log(JSON.stringify({ scenario: scenarioId, phase: "scenario-complete", passedInvariants: invariantFailures(scenarioId, results).length === 0 }));
+    console.log(JSON.stringify({ scenario: scenarioId, phase: "scenario-complete",
+      performanceProfile: performanceProfileRequested,
+      passedInvariants: performanceProfileRequested ? undefined : invariantFailures(scenarioId, results).length === 0,
+      qualityGates: performanceProfileRequested ? "skipped" : "evaluated" }));
   }
 } finally {
   Reflect.deleteProperty(globalThis, "navigator");

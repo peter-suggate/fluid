@@ -17,8 +17,8 @@ test("renderer presentation source reaches the diagnostics store and panel with 
     assert.match(renderer, new RegExp(field), `${field} must cross the renderer metrics boundary`);
   }
   assert.match(controller, /waterSurfacePresentation:\s*metrics\.waterSurfacePresentation\s*\?\?\s*null/);
-  assert.match(pipeline, /get adaptiveDiagnosticsReadbackEnabled\(\) \{ return true; \}/,
-    "the ordinary UI must receive presentation failures without a diagnostics query flag");
+  assert.match(pipeline, /get adaptiveDiagnosticsReadbackEnabled\(\) \{ return this\.performanceReadbacksEnabled; \}/,
+    "the ordinary UI receives presentation failures unless the explicit maximum-throughput switch disables readbacks");
   assert.match(pipeline, /lastAdaptiveDiagnosticEncodeAt_ms < 250/,
     "the ordinary presentation proof must use the same bounded cadence as solver telemetry");
   assert.match(pipeline, /adaptiveDiagnosticsFullRateRequested/,

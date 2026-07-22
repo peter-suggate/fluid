@@ -11,6 +11,9 @@ export const OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES = 32;
 export const OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES = 32;
 /** One cold bootstrap plus the solver's bounded 64 encoded surface substeps. */
 export const OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS = 65;
+/** Portable dynamic-uniform/storage binding alignment. Each command encoder
+ * owns one arena, so parameter data cannot alias another unsubmitted encoder. */
+export const OCTREE_POWER_COARSE_LEVELSET_PARAM_STRIDE = 256;
 export const OCTREE_POWER_COARSE_LEVELSET_ERROR = Object.freeze({
   capacity: 1, invalidRow: 2, invalidVelocity: 4, invalidCatalog: 8,
   invalidFineOffsets: 16, invalidFineSample: 32, fineContributionBound: 64,
@@ -23,6 +26,7 @@ export interface OctreePowerCoarseLevelSetPlan {
   readonly scratchBytes: number;
   readonly sampleHashCapacity: number;
   readonly sampleDirectoryBytes: number;
+  readonly parameterArenaBytes: number;
   readonly allocatedBytes: number;
 }
 
@@ -111,9 +115,12 @@ export function planOctreePowerCoarseLevelSet(rowCapacityValue: number, redistan
   let sampleHashCapacity = 1; while (sampleHashCapacity < rowCapacity * 2) sampleHashCapacity *= 2;
   const sampleDirectoryBytes = OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES
     + sampleHashCapacity * OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES;
+  const parameterArenaBytes = OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS
+    * (redistancePasses + 1) * OCTREE_POWER_COARSE_LEVELSET_PARAM_STRIDE;
   return { rowCapacity, redistancePasses, scratchBytes, sampleHashCapacity, sampleDirectoryBytes,
+    parameterArenaBytes,
     allocatedBytes: scratchBytes + sampleDirectoryBytes + OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES
-      + OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS * (64 * (redistancePasses + 1) + 4) + 32
+      + parameterArenaBytes + 4 + 32
       + (rowCapacity + 1) * 4 + OCTREE_FINE_PHI_CONTRIBUTION_BYTES };
 }
 
@@ -131,14 +138,14 @@ export class WebGPUOctreePowerCoarseLevelSet {
   readonly control: GPUBuffer;
   readonly sampleDirectory: GPUBuffer;
   private readonly scratch: GPUBuffer;
-  private readonly params: readonly GPUBuffer[]; private readonly hostRowCount: readonly GPUBuffer[];
-  private readonly redistanceParams: readonly (readonly GPUBuffer[])[];
+  private readonly maximumRowCount: GPUBuffer;
   private readonly emptyOffsets: GPUBuffer; private readonly emptyContributions: GPUBuffer;
   private readonly validFineControl: GPUBuffer;
   private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
-  private readonly encoderInvocationCounts = new WeakMap<GPUCommandEncoder, number>();
-  private activeEncoder?: GPUCommandEncoder;
-  private encodeSlot = 0;
+  private readonly encoderArenas = new WeakMap<GPUCommandEncoder, {
+    readonly params: GPUBuffer; invocationCount: number;
+  }>();
+  private readonly liveParameterArenas = new Set<GPUBuffer>();
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly coarse: WebGPUOctreeCoarseLevelSet,
@@ -151,15 +158,9 @@ export class WebGPUOctreePowerCoarseLevelSet {
     this.scratch = device.createBuffer({ label: "Power coarse phi advection/redistance", size: this.plan.scratchBytes, usage: storage });
     this.control = device.createBuffer({ label: "Power coarse phi schedule control", size: OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES, usage: storage });
     this.sampleDirectory = device.createBuffer({ label: "Power coarse phi sample directory", size: this.plan.sampleDirectoryBytes, usage: storage });
-    this.params = Array.from({ length: OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS }, (_, slot) =>
-      device.createBuffer({ label: `Power coarse phi schedule params ${slot}`, size: 64,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
-    this.redistanceParams = Array.from({ length: OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS }, (_, slot) =>
-      Array.from({ length: this.plan.redistancePasses }, (_, iteration) =>
-        device.createBuffer({ label: `Power coarse phi redistance params ${slot}:${iteration}`, size: 64,
-          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })));
-    this.hostRowCount = Array.from({ length: OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS }, (_, slot) =>
-      device.createBuffer({ label: `Power coarse phi host row count ${slot}`, size: 4, usage: storage }));
+    this.maximumRowCount = device.createBuffer({ label: "Power coarse phi maximum row count", size: 4,
+      usage: storage });
+    device.queue.writeBuffer(this.maximumRowCount, 0, new Uint32Array([this.plan.rowCapacity]));
     this.emptyOffsets = device.createBuffer({ label: "Empty fine correction offsets", size: (this.plan.rowCapacity + 1) * 4, usage: storage });
     this.emptyContributions = device.createBuffer({ label: "Empty fine correction contribution", size: OCTREE_FINE_PHI_CONTRIBUTION_BYTES, usage: storage });
     this.validFineControl = device.createBuffer({ label: "Valid host fine-correction control", size: 32, usage: storage });
@@ -175,25 +176,22 @@ export class WebGPUOctreePowerCoarseLevelSet {
 
   encode(encoder: GPUCommandEncoder, input: OctreePowerCoarseLevelSetInput, options: OctreePowerCoarseLevelSetOptions): void {
     if (this.destroyed) throw new Error("Power coarse level-set schedule is destroyed");
-    if (this.activeEncoder && this.activeEncoder !== encoder) {
-      throw new Error("Power coarse level-set encoder must be submitted and retired before encoding another command buffer");
+    let arena = this.encoderArenas.get(encoder);
+    if (!arena) {
+      const params = this.device.createBuffer({ label: "Power coarse phi encoder parameter arena",
+        size: this.plan.parameterArenaBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      arena = { params, invocationCount: 0 };
+      this.encoderArenas.set(encoder, arena); this.liveParameterArenas.add(params);
     }
-    this.activeEncoder = encoder;
-    const encoderInvocation = this.encoderInvocationCounts.get(encoder) ?? 0;
+    const encoderInvocation = arena.invocationCount;
     if (encoderInvocation >= OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS) {
-      throw new RangeError("Power coarse level-set encoder exceeds its 65 invocation-stable parameter slots");
+      throw new RangeError("Power coarse level-set encoder exceeds its 65 parameter-arena invocations");
     }
-    this.encoderInvocationCounts.set(encoder, encoderInvocation + 1);
-    // A single solver command encoder owns at most 64 surface substeps; the
-    // per-encoder guard above therefore prevents wrap within unsubmitted work.
-    // Across solver encoders, advanceTo submits before returning, so a later
-    // queue.writeBuffer is ordered after every earlier use of the recycled
-    // slot even when that submission has not completed on the device yet.
-    const slot = this.encodeSlot; this.encodeSlot = (this.encodeSlot + 1) % OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS;
-    const params = this.params[slot], redistanceParams = this.redistanceParams[slot];
+    arena.invocationCount += 1;
+    const invocationBase = encoderInvocation * (this.plan.redistancePasses + 1)
+      * OCTREE_POWER_COARSE_LEVELSET_PARAM_STRIDE;
     const maximumRows = typeof input.rowCount === "number" ? u32(input.rowCount, "Power coarse-phi row count") : this.plan.rowCapacity;
     if (maximumRows > this.plan.rowCapacity) throw new RangeError("Power coarse-phi row count exceeds capacity");
-    if (typeof input.rowCount === "number") this.device.queue.writeBuffer(this.hostRowCount[slot], 0, new Uint32Array([maximumRows]));
     const dimensions = options.dimensions.map((value) => positiveInteger(value, "Power coarse-phi dimension")) as [number, number, number];
     const hashCapacity = positiveInteger(options.hashCapacity, "Power coarse-phi hash capacity");
     if ((hashCapacity & (hashCapacity - 1)) !== 0) throw new RangeError("Power coarse-phi hash capacity must be a power of two");
@@ -211,18 +209,23 @@ export class WebGPUOctreePowerCoarseLevelSet {
     words.set([...dimensions, this.plan.rowCapacity, maximumRows, contributionCount, maximumPerRow, generation]);
     floats.set([options.physicalCellSize, options.dt], 8); words.set([this.plan.redistancePasses, hashCapacity,
       maximumHashProbes, fine ? (fine.aggregated ? 2 : 1) : 0, maximumLeafSize], 10);
-    this.device.queue.writeBuffer(params, 0, data);
-    redistanceParams.forEach((buffer, iteration) => { const copy = data.slice(0); new Uint32Array(copy)[15] = iteration;
-      this.device.queue.writeBuffer(buffer, 0, copy); });
-    const rowCountSource = typeof input.rowCount === "number" ? this.hostRowCount[slot] : input.rowCount;
-    if (gpuFineCounts) encoder.copyBufferToBuffer(fine!.contributionCount as GPUBuffer, 0, params, 20, 8);
+    this.device.queue.writeBuffer(arena.params, invocationBase, data);
+    for (let iteration = 0; iteration < this.plan.redistancePasses; iteration += 1) {
+      const copy = data.slice(0); new Uint32Array(copy)[15] = iteration;
+      this.device.queue.writeBuffer(arena.params,
+        invocationBase + (iteration + 1) * OCTREE_POWER_COARSE_LEVELSET_PARAM_STRIDE, copy);
+    }
+    const rowCountSource = typeof input.rowCount === "number" ? this.maximumRowCount : input.rowCount;
+    if (gpuFineCounts) encoder.copyBufferToBuffer(fine!.contributionCount as GPUBuffer, 0,
+      arena.params, invocationBase + 20, 8);
     const offsets = fine?.rowOffsets ?? this.emptyOffsets, contributions = fine?.contributions ?? this.emptyContributions;
     const fineControl = gpuFineCounts ? fine!.contributionCount as GPUBuffer : this.validFineControl;
-    const common = new Map<number, GPUBuffer>([[0, params], [1, input.headers], [2, this.topology.metrics],
-      [3, this.topology.catalogTetrahedronHeaders!], [4, this.topology.catalogTetrahedra!],
-      [5, this.topology.catalogTetrahedronVertices!], [6, input.siteIndex], [7, input.cellVelocities],
-      [8, this.coarse.records], [9, this.scratch], [11, offsets], [12, contributions],
-      [13, this.control], [14, rowCountSource], [15, this.sampleDirectory], [16, fineControl]]);
+    const binding = (buffer: GPUBuffer, offset = 0, size?: number): GPUBufferBinding => ({ buffer, offset, ...(size ? { size } : {}) });
+    const common = new Map<number, GPUBufferBinding>([[0, binding(arena.params, invocationBase, 64)], [1, binding(input.headers)], [2, binding(this.topology.metrics)],
+      [3, binding(this.topology.catalogTetrahedronHeaders!)], [4, binding(this.topology.catalogTetrahedra!)],
+      [5, binding(this.topology.catalogTetrahedronVertices!)], [6, binding(input.siteIndex)], [7, binding(input.cellVelocities)],
+      [8, binding(this.coarse.records)], [9, binding(this.scratch)], [11, binding(offsets)], [12, binding(contributions)],
+      [13, binding(this.control)], [14, binding(rowCountSource)], [15, binding(this.sampleDirectory)], [16, binding(fineControl)]]);
     const bindings: Record<string, readonly number[]> = {
       migrate: [0, 1, 8, 14, 15, 16], prepare: [0, 13, 14, 15, 16],
       clearSamples: [0, 15, 16], advect: [0, 1, 2, 5, 6, 7, 8, 9, 13, 16],
@@ -232,7 +235,7 @@ export class WebGPUOctreePowerCoarseLevelSet {
     };
     const dispatch = (name: keyof typeof bindings, workgroups: number) => {
       const pipeline = this.pipelines[name], group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
-        entries: bindings[name].map((binding) => ({ binding, resource: { buffer: common.get(binding)! } })) });
+        entries: bindings[name].map((binding) => ({ binding, resource: common.get(binding)! })) });
       const pass = encoder.beginComputePass({ label: name }); pass.setPipeline(pipeline); pass.setBindGroup(0, group);
       pass.dispatchWorkgroups(workgroups); pass.end();
     };
@@ -250,22 +253,21 @@ export class WebGPUOctreePowerCoarseLevelSet {
     dispatch("validateFine", Math.max(1, Math.ceil(maximumRows / 64)));
     if (maximumRows > 0) dispatch("applyFine", Math.ceil(maximumRows / 64));
     for (let iteration = 0; iteration < this.plan.redistancePasses; iteration += 1) {
-      common.set(0, redistanceParams[iteration]);
+      common.set(0, binding(arena.params,
+        invocationBase + (iteration + 1) * OCTREE_POWER_COARSE_LEVELSET_PARAM_STRIDE, 64));
       if (maximumRows > 0) dispatch("redistance", Math.ceil(maximumRows / 64));
     }
-    common.set(0, params);
+    common.set(0, binding(arena.params, invocationBase, 64));
     if (maximumRows > 0) dispatch("publish", Math.ceil(maximumRows / 64));
     dispatch("finalize", 1);
   }
 
-  /** Call immediately after submitting the finished encoder. Queue ordering
-   * then makes its parameter slots safe for the next command buffer's writes. */
+  /** Call after submitting a finished encoder to release its private arena.
+   * Other command buffers may be encoded before this call because their
+   * parameter storage is disjoint. */
   retireSubmittedEncoder(encoder: GPUCommandEncoder): void {
-    if (!this.activeEncoder) return;
-    if (this.activeEncoder !== encoder) {
-      throw new Error("Power coarse level-set can retire only its active submitted encoder");
-    }
-    this.encoderInvocationCounts.delete(encoder); this.activeEncoder = undefined; this.encodeSlot = 0;
+    const arena = this.encoderArenas.get(encoder); if (!arena) return;
+    this.encoderArenas.delete(encoder); this.liveParameterArenas.delete(arena.params); arena.params.destroy();
   }
 
   get sampleSource(): OctreePowerCoarseLevelSetSampleSource {
@@ -275,8 +277,8 @@ export class WebGPUOctreePowerCoarseLevelSet {
 
   destroy(): void { if (this.destroyed) return; this.destroyed = true;
     this.scratch.destroy(); this.control.destroy(); this.sampleDirectory.destroy();
-    this.params.forEach((buffer) => buffer.destroy()); this.hostRowCount.forEach((buffer) => buffer.destroy());
-    this.redistanceParams.forEach((buffers) => buffers.forEach((buffer) => buffer.destroy()));
+    this.maximumRowCount.destroy();
+    this.liveParameterArenas.forEach((buffer) => buffer.destroy()); this.liveParameterArenas.clear();
     this.emptyOffsets.destroy(); this.emptyContributions.destroy(); this.validFineControl.destroy(); }
 }
 
@@ -320,7 +322,7 @@ struct Control { flags:atomic<u32>, firstError:atomic<u32>, rowCount:u32, advect
 @group(0) @binding(16) var<storage,read> fineControl:array<u32>;
 const INVALID:u32=0xffffffffu;const VALID:u32=0x80000000u;const CAPACITY:u32=1u;const INVALID_ROW:u32=2u;const INVALID_VELOCITY:u32=4u;const INVALID_CATALOG:u32=8u;const INVALID_FINE_OFFSETS:u32=16u;const INVALID_FINE_SAMPLE:u32=32u;const FINE_BOUND:u32=64u;const INVALID_SOURCE:u32=256u;const NO_CAUSAL_SIMPLEX:u32=512u;
 const PHI_VALID:u32=${OCTREE_COARSE_PHI_FLAG.valid}u;const PHI_CORRECTED:u32=${OCTREE_COARSE_PHI_FLAG.correctedFromFine}u;const PHI_INTERFACE:u32=${OCTREE_COARSE_PHI_FLAG.containsInterface}u;const PHI_FINITE:u32=${OCTREE_COARSE_PHI_FLAG.finite}u;const MIGRATED_AIR:u32=16u;const UNIFORM:u32=1u;
-fn finite(v:f32)->bool{return (bitcast<u32>(v)&0x7f800000u)!=0x7f800000u;}fn sourceRequested()->u32{return select(0u,rowCountSource[0],arrayLength(&rowCountSource)>0u);}fn requested()->u32{return control.rowCount;}fn rejectedFine()->bool{return params.hasFine!=0u&&(arrayLength(&fineControl)<6u||fineControl[0]==INVALID||fineControl[5]!=VALID);}fn dims()->vec3u{return params.dimensionsCapacity.xyz;}
+fn finite(v:f32)->bool{return (bitcast<u32>(v)&0x7f800000u)!=0x7f800000u;}fn sourceRequested()->u32{return min(params.countsGeneration.x,select(0u,rowCountSource[0],arrayLength(&rowCountSource)>0u));}fn requested()->u32{return control.rowCount;}fn rejectedFine()->bool{return params.hasFine!=0u&&(arrayLength(&fineControl)<6u||fineControl[0]==INVALID||fineControl[5]!=VALID);}fn dims()->vec3u{return params.dimensionsCapacity.xyz;}
 fn coord(cell:u32)->vec3u{let d=dims();return vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));}fn center(row:u32)->vec3f{return (vec3f(coord(headers[row].cell))+0.5*f32(headers[row].size))*params.physical.x;}fn size(row:u32)->f32{return f32(headers[row].size)*params.physical.x;}
 fn inverseTransform(value:vec3f,code:u32)->vec3f{let bits=code&7u;let q=value*vec3f(select(1.0,-1.0,(bits&1u)!=0u),select(1.0,-1.0,(bits&2u)!=0u),select(1.0,-1.0,(bits&4u)!=0u));let p=(code/8u)%6u;if(p==0u){return q.xyz;}if(p==1u){return q.xzy;}if(p==2u){return q.yxz;}if(p==3u){return q.zxy;}if(p==4u){return q.yzx;}return q.zyx;}
 fn hashSite(cell:u32,s:u32)->u32{var v=cell^(s*0x9e3779b9u);v=(v^(v>>16u))*0x7feb352du;v=(v^(v>>15u))*0x846ca68bu;return v^(v>>16u);}fn findSite(c:vec3f,s:f32)->u32{let grid=s/params.physical.x;let o=c/params.physical.x-0.5*grid;let rounded=round(o);if(abs(grid-round(grid))>2e-4||any(abs(o-rounded)>vec3f(2e-4))||any(rounded<vec3f(0.0))||any(rounded>=vec3f(dims()))){return INVALID;}let q=vec3u(rounded);let cell=q.x+dims().x*(q.y+dims().y*q.z);let capacity=min(params.hashCapacity,arrayLength(&siteIndex));if(capacity==0u){return INVALID;}let mask=capacity-1u;let base=hashSite(cell,u32(round(grid)))&mask;for(var probe=0u;probe<min(params.maximumHashProbes,capacity);probe+=1u){let slot=(base+probe)&mask;let observed=atomicLoad(&siteIndex[slot].cellPlusOne);if(observed==0u){return INVALID;}if(observed==cell+1u&&siteIndex[slot].size==u32(round(grid))){return siteIndex[slot].row;}}return INVALID;}

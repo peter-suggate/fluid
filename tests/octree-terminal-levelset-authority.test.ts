@@ -62,9 +62,9 @@ test("production surface recurrence advects, redistances, and fine-corrects comp
   const publish = schedule.indexOf('dispatch("publish"');
   const finalize = schedule.indexOf('dispatch("finalize",1)');
   assert.ok(migrate >= 0 && migrate < prepare && prepare < clear && clear < advect
-    && advect < redistance && redistance < validate
+    && advect < validate && validate < redistance
     && validate < publish && publish < finalize,
-  "coarse evolution must remain spatial migrate -> prepare/clear -> advect -> redistance -> validate fine -> publish -> finalize");
+  "coarse evolution must remain spatial migrate -> prepare/clear -> advect -> validate fine -> redistance -> publish -> finalize");
 });
 
 test("production substep keeps topology, pressure/power projection, and fine surface recurrence in one command stream", () => {

@@ -86,6 +86,21 @@ not user controls.
 | --- | --- | --- |
 | Jacobi iterations | coarse | damped-Jacobi pressure sweeps per step (preset 64/80/96) |
 
+### Power octree (`octree`)
+| Parameter | Tier | Meaning |
+| --- | --- | --- |
+| Pressure hierarchy | coarse | `Current Galerkin` is the rollback/default; `Paper sparse pyramid` opts into the native sparse-grid A/B implementation |
+| Experimental PCG cap | fine | diagnostic bound on the currently recorded Section 4.3 schedule (default 128, range 8–128); a longer Dawn dam break exhausts 16 on rare topology transitions |
+| Boundary smoothing | fine | symmetry-locked even number of matching pre/post L2 sweeps in the boundary/transition band (default 8, range 2–16); the paper uses 8 |
+| Compatibility pressure effort | fine | Chebyshev/Jacobi sweep budget used only when the Section 4.3 power projection is disabled |
+
+The method and performance panels report **iterations executed / cap**. The
+cap provides convergence headroom, but the instantaneous executed count is not
+a safe predictor for later topology generations. The solver now records its
+entire dependency-ordered fixed schedule in one compute pass; the cap therefore
+changes dispatch count without recreating the former per-dispatch pass-transition
+wall. Keep 128 for normal runs; lower values are A/B diagnostics.
+
 ### CPU reference (`cpu-reference`)
 | Parameter | Tier | Meaning |
 | --- | --- | --- |
@@ -102,7 +117,9 @@ budget and relative tolerance come from the scene numerics in both roles.
 1. **Unified voxel domain** (scene): reduce `finestCellSize_m` to raise spatial
    resolution coherently for every GPU method and sparse renderer.
 2. **Pressure effort** (coarse, per method): tightens incompressibility at
-   impacts — visible as less volume "bounce" and crisper splashes.
+   impacts — visible as less volume "bounce" and crisper splashes. The power
+   octree's PCG cap is an Advanced diagnostic, not a quality control; retain
+   its safe default during normal simulation.
 3. **Fixed/max dt** (fine, scene modal): smaller steps reduce advection
    smearing and CFL alerts in impact-heavy scenes (the paper presets already
    use 1/180–1/360 s).

@@ -160,8 +160,22 @@ velocity strain activates a detail patch.
 - Pressure solver: the normal cubic dam-break path uses matrix-free PCG with
   the paper's Section 4.3 hybrid preconditioner: paired eight-sweep smoothing
   of the second-order boundary/transition rows around a first-order Galerkin
-  octree V-cycle. The authority path is hard-capped at 16 PCG iterations (the
-  paper reports 6–10); convergence is decided on the GPU. Row-parallel
+  octree V-cycle. The current authority path retains a safe 128-iteration
+  recorded tail; convergence is decided on the GPU at relative residual 1e-4.
+  Although the paper reports 6–10 iterations, a longer Dawn dam break exposed
+  rare topology generations that exhaust a cap of 16 in this implementation.
+  Lower caps (8–128) are therefore diagnostic-only. The coarse **Pressure
+  hierarchy** control keeps the established Galerkin cycle as the default and
+  offers the paper-style native sparse-uniform-grid pyramid as an explicit A/B
+  path while its endurance gates are evaluated.
+  The complete fixed PCG schedule is recorded in one dependency-ordered WebGPU
+  compute pass; dispatch count remains visible separately from actual pass
+  transitions. The Advanced **Boundary smoothing** control changes the paper's
+  default eight L2 sweeps in symmetric pre/post pairs, so the UI cannot create
+  a non-SPD preconditioner accidentally.
+  The Method panel reports actual executed iterations beside the encoded cap,
+  while compatibility Chebyshev/Jacobi effort remains a separate Advanced
+  control. Row-parallel
   Chebyshev semi-iteration is
   retained as the explicit fail-closed rollback.
   In that rollback, balanced quality's 128-sweep effort maps to 32 polynomial

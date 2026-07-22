@@ -63,8 +63,9 @@ test("fine-to-coarse restriction allocation is O(rows), independent of fine samp
   const small = planFineToCoarseLevelSet(41_728, 64);
   const factor8 = planFineToCoarseLevelSet(41_728, 213_648 * 64);
   assert.equal(factor8.allocatedBytes, small.allocatedBytes);
-  assert.equal(factor8.aggregateScratchBytes, 41_728 * 24);
-  assert.ok(factor8.allocatedBytes < 2_000_000,
+  assert.equal(factor8.aggregateScratchBytes, 41_728 * 48,
+    "each row owns four scalar atomics plus eight deterministic center-corner samples");
+  assert.ok(factor8.allocatedBytes < 3_000_000,
     "factor-8 restriction must not allocate per-resident-sample owners or contributions");
 });
 
@@ -180,22 +181,26 @@ test("coarse phi schedule bootstraps and fine-corrects at dt0 before recurring a
   assert.match(calls[1], /dt:\s*coarseBootstrappedThisStep\s*\?\s*0\s*:\s*dt_s,/);
 });
 
-test("coarse schedule parameters are invocation-stable across cold bootstrap and 64 substeps", () => {
+test("coarse schedule parameters use one encoder-local arena across cold bootstrap and 64 substeps", () => {
   const plan = planOctreePowerCoarseLevelSet(32, 6);
-  assert.equal(plan.allocatedBytes, 32_728,
-    "allocation must include all 65 main/redistance/count slots, valid-fine control, and empty correction buffers");
+  assert.equal(plan.allocatedBytes, 119_832,
+    "allocation must include one aligned 65-invocation arena, valid-fine control, and empty correction buffers");
+  assert.equal(plan.parameterArenaBytes, 65 * 7 * 256);
   const constructor = WebGPUOctreePowerCoarseLevelSet.toString().replace(/\s+/g, "");
   const encode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
+  const retire = WebGPUOctreePowerCoarseLevelSet.prototype.retireSubmittedEncoder.toString().replace(/\s+/g, "");
   assert.equal(OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS, 65);
-  assert.match(constructor, /Array\.from\(\{length:OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS\}/,
-    "every encoded invocation needs a distinct uniform slot until the command buffer is submitted");
+  assert.doesNotMatch(constructor, /this\.params=Array\.from|this\.redistanceParams=Array\.from|activeEncoder/);
+  assert.match(encode, /this\.encoderArenas\.get\(encoder\)/);
+  assert.match(encode, /Powercoarsephiencoderparameterarena/);
+  assert.match(encode, /invocationBase=encoderInvocation\*\(this\.plan\.redistancePasses\+1\)\*OCTREE_POWER_COARSE_LEVELSET_PARAM_STRIDE/);
   assert.match(encode,
-    /constslot=this\.encodeSlot;this\.encodeSlot=\(this\.encodeSlot\+1\)%OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS;constparams=this\.params\[slot\],redistanceParams=this\.redistanceParams\[slot\]/);
-  assert.match(encode,
-    /encoderInvocation>=OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS\)\{thrownewRangeError\("Powercoarselevel-setencoderexceedsits65invocation-stableparameterslots"\)/,
-    "one command encoder must fail before a parameter slot can wrap and alias an earlier pass");
-  assert.doesNotMatch(encode, /writeBuffer\(this\.params,/,
-    "later host writes must not overwrite parameters already referenced by an earlier encoded pass");
+    /encoderInvocation>=OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS\)\{thrownewRangeError\("Powercoarselevel-setencoderexceedsits65parameter-arenainvocations"\)/,
+    "one command encoder must fail before its aligned arena can wrap");
+  assert.doesNotMatch(encode, /submittedandretired|activeEncoder/,
+    "encoding a second command buffer must not depend on submission or retirement of the first");
+  assert.match(retire, /encoderArenas\.delete\(encoder\)/);
+  assert.match(retire, /arena\.params\.destroy\(\)/);
 });
 
 test("fine-to-coarse capacity diagnostics decode fail-closed control words", () => {

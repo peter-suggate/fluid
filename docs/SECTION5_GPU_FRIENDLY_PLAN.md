@@ -1,6 +1,6 @@
 # GPU-Friendly Section 5: Restructuring Plan
 
-Status: proposed (analysis complete, not yet implemented)
+Status: implemented through Phase 5 (Phase 6 deferred by its evidence gate)
 Paper: Aanjaneya, Gao, Liu, Batty, Sifakis 2017, *Power Diagrams and Sparse
 Paged Grids for High Resolution Adaptive Liquids*, Section 5.
 Scope: the surface pipeline only — fine narrow-band level set (topology,
@@ -8,6 +8,82 @@ advection, redistance), coarse companion level set, face-band velocity
 reconstruction/extrapolation, and regular-face-to-power-face publication.
 The Section 4 variational power-diagram pressure discretization is out of
 scope and unchanged.
+
+## Implementation record (2026-07-22)
+
+Phases 0–5 are now the product path: dedicated Section 5 timestamps use the
+existing asynchronous query readback; topology pre-allocates the complete
+support with a logarithmic Chebyshev flood; JFA-CPT is the default fixed-pass
+redistance; face velocity propagation uses parallel CPT/BFS rather than the
+single-lane heap; seed and adaptive-owner scans are parallel; support captures
+write their next indirect arguments directly; coarse-phi parameters use an
+encoder-local arena; and startup publishes the initial sparse authority in one
+submission/fence by default. `?safeBringup=1`, `?gpu=safe`, or
+`FLUID_SAFE_BRINGUP=1` retains the eight fenced diagnostic checkpoints.
+`FLUID_FINE_REDISTANCE=fmm` selects the fixed-resident diagnostic oracle only
+for at most 256 logical samples; larger requests fail before encoding so an
+accidental production opt-in cannot monopolize a single backend submission.
+
+The post-implementation audit also tightened four contracts that the initial
+landing did not satisfy:
+
+- band-phi relaxation is again bounded solely by band width (12 rounds for
+  B4); CPT graph depth has a separate domain-derived bound used only to plan
+  9–10 logarithmic pointer-jump rounds on the measured grids;
+- the CPT jump kernel is now constructed and dispatched between graph linking
+  and constant-time resolution, using ping-pong parent snapshots so no jump
+  reads a value another workgroup is mutating;
+- JFA materializes each seed's axial direction and 24-bit subcell fraction in
+  otherwise-unused sample-flag bits, propagates resident sample indices, keeps
+  the current winner distance locally, and evaluates each stride candidate
+  once. Floods therefore do no seed hash lookup or six-neighbor phi walk and
+  require no new buffer, binding, dispatch, or accounted byte;
+- incomplete or out-of-order shared timestamp boundaries now suppress the
+  complete aggregate and its children instead of publishing an impossible
+  duration from an unresolved zero query.
+
+Two attempted removals were rejected by evidence rather than hidden:
+
+- the face-band phi graph extension remains for closure-only rows. Direct fine
+  CPT coverage left 2,994 boundary/Delaunay closure rows without authority;
+  the fail-closed extension is required until closest-point carriers cover the
+  complete closure graph;
+- the isolated fixed-resident FMM oracle still triggers a Dawn/Metal process
+  fault when dispatched, despite compiling and despite removal of allocation
+  and indirect-dispatch dependencies. Its bucket work is parallel and reads a
+  frozen distance snapshot, but the backend fault remains; the 256-sample host
+  guard prevents dam-break-scale dispatch. The default JFA path passes Dawn; the
+  quantitative JFA-vs-FMM displacement gate therefore remains open on this
+  backend and no oracle rebaseline was made.
+
+Acceptance evidence from the integrated tree:
+
+- 179 focused source/ABI tests are green (170 pass, 9 expected GPU skips), and
+  the affected factor-4/factor-8 Dawn seed, JFA, portability, and P7 tests
+  pass;
+- both batched and safe-bring-up one-step UI dam smokes publish 19,935/19,935
+  faces with zero unresolved rows and no validation errors; their harnesses
+  stop only on the existing zero-CFL assertion for that one-step setup;
+- the 50-step minimal power dam reaches all 50 steps with every fine generation
+  committed, all final 11,749/11,749 band faces accepted, and no WebGPU
+  validation errors. It ends on the downstream pressure threshold
+  `0.01296999613907457 > 0.012`; the pre-change baseline stopped earlier at step 44 on a
+  power-face generation audit;
+- a timestamp-enabled 10-step rerun publishes no impossible values after the
+  decoder guard. Dawn returned an incomplete boundary chain, so every affected
+  Section 5 field was correctly reported unavailable (`0`) rather than treated
+  as performance evidence; post-change wall-clock capture remains an open gate;
+- the 24×18×16 UI grid uses 5,742 of 6,912 resident fine bricks (16.9% brick
+  headroom; 5,879,808 of 7,077,888 payload bytes), while the deliberately
+  capacity-tight 16³ smoke uses all 4,096 configured bricks without overflow;
+- a dedicated Dawn capacity checkpoint now exercises the production-width
+  60×45×40 factor-8 B4 lattice with the complete twelve-ring topology band.
+  A full maximum-area planar interface publishes exactly 280,800 desired/active
+  bricks into the production physical-band capacity of 337,500: 56,700 bricks
+  (16.8% of capacity) remain, with 287,539,200 of 345,600,000 four-channel payload
+  bytes active. The checkpoint uses the full Chebyshev support and performs no
+  corner trimming; it proves this production-width planar case, not arbitrary
+  fragmented-interface geometry, so overflow telemetry remains authoritative.
 
 ## 0. The paper's mandate, restated
 
@@ -54,7 +130,7 @@ Audited hot spots (file:line refs from the 2026-07-22 audit):
 | H3 | Support-tier closure S0→S6 (`webgpu-octree-face-fast-march.ts:1130–1233`) | ~7 serialized tiers; each tier's indirect args written by the previous tier's capture kernel; ~90 dispatches in one pass | Latency-bound chain of thin dispatches |
 | H4 | Band-phi Jacobi ping-pong (face band, :1282–1289) 12 rounds; coarse redistance ping-pong 8 rounds (`webgpu-octree-power-coarse-levelset.ts` :252–255); summary pyramid per level | O(band)/O(levels) short passes | Acceptable order, fusable |
 | H5 | Serial single-thread scans: `emitSeeds` (`webgpu-octree-fine-levelset-topology.ts:547`), `completeAdaptiveOwners` (`webgpu-octree-face-fast-march.ts:1214`) | `dispatchWorkgroups(1)` `@workgroup_size(1)` | Latency spikes proportional to leaf count |
-| H6 | Startup: 8 fenced submissions, each `submit` + `await onSubmittedWorkDone` (`webgpu-uniform-eulerian.ts:866–888`, phases `webgpu-octree.ts:96–105`) | 8 full CPU–GPU round trips; the plan doc still says 5 | Where the 120 s warmup timeout and >3 min serial-FMM incidents live |
+| H6 | Pre-change startup: 8 fenced submissions, each `submit` + `await onSubmittedWorkDone` (`webgpu-uniform-eulerian.ts:866–888`, phases `webgpu-octree.ts:96–105`) | 8 full CPU–GPU round trips; now one by default, with all 8 retained in safe mode | Where the 120 s warmup timeout and >3 min serial-FMM incidents lived |
 | H7 | Encoder/param coupling: 65 invocation-stable uniform slots requiring submit-and-retire before the next encode (`webgpu-octree-power-coarse-levelset.ts:154–191,263`) | Structural fence-like constraint | Blocks multi-step encoding |
 | H8 | Observability: no dedicated timestamps — fine redistance is folded into `surface-update`, the face band into `projection`/`power-projection` (`lib/performance-stage-model.ts:71,101`) | — | Cannot prove or size wins |
 
@@ -182,8 +258,8 @@ render world as **one or two submissions** (spec guarantees ordering). Keep
 the per-phase fencing as a `?safeBringup=1` diagnostic mode — its purpose
 (localizing Dawn/driver failures to a bounded phase) is real and the
 timeout-forensics history in this repo justifies keeping it available. The
-default path should not pay 8 round trips. Also update the plan doc's stale
-"five fenced submissions" wording to match `webgpu-octree.ts:96–105`.
+implemented default path pays one submission/fence; safe mode retains the
+eight diagnostic phase boundaries from `webgpu-octree.ts:96–105`.
 
 ### P7 — Encoder/param slot coupling (H7)
 
@@ -227,11 +303,23 @@ residual telemetry unchanged; §18.12-style capacity checkpoint re-measured
 and reported (expected higher residency, must stay under configured
 capacity with stated headroom).
 
+Gate result (2026-07-22): the Dawn 60×45×40 factor-8 B4 checkpoint requests
+the production twelve-ring support around the domain's maximum-area plane and
+publishes 280,800/337,500 resident bricks with no topology flags or rollback
+(56,700 bricks, 16.8%, free). The
+source contract now assigns allocation and out-of-domain clipping to topology;
+redistance consumes the immutable generation and never allocates pages. This
+is a deterministic full-plane capacity case rather than a proof for every
+possible interface topology; production overflow remains fail-closed.
+
 ### Phase 2 — JFA-CPT fine redistance (P1)
 Implement subcell seed + jump flood + signed resolve on the pre-dilated
 band, storing packed cp records in the existing `workA`/`workB` channels
 (§18.4). Deterministic tie-break on (distance, seed key). Bucketed FMM
-retained behind `fineRedistance=fmm` as oracle.
+retained behind `fineRedistance=fmm` as a small diagnostic oracle. The host
+rejects more than 256 logical samples before encoding because the current
+Dawn/Metal backend faults even with parallel bucket dispatches; it is not a
+dam-break-scale oracle on this backend.
 Objective structural change: fine redistance becomes **1 compute pass,
 ~8–10 dispatches, fixed at encode time** (vs. 42-bucket chain). No atomics,
 no indirect dependency on live page count.
@@ -247,11 +335,15 @@ oracle diff attached as evidence, never silently.
 Delete `marchFaceHeapChunk`. Wet-face-sourced closest-point gather for the
 regular band (reusing Phase 2 CPT where the fine band overlaps; face-graph
 BFS layers — 4–8 layer dispatches — for power/transition faces). Band-phi
-Jacobi rounds replaced by the same CPT resolve.
+Jacobi remains a separate, band-bounded 12-round closure conditioner. CPT
+graph depth is used only to plan logarithmic pointer jumps, followed by one
+constant-time resolve; an eight-layer BFS remains a bounded rare-case repair.
 Objective structural change: extrapolation goes from
 `ceil(faceCapacity/1024)` serial single-lane dispatches + 12 Jacobi rounds
-to **≤ 12 fully parallel dispatches**; the last `@workgroup_size(1)` kernel
-in the hot path is gone.
+to **link + ceil(log2 graph depth) jumps + resolve + eight repair layers**, all
+fully parallel (20 dispatches at the 768-deep bound); the Jacobi loop remains
+12 rounds and never inherits the domain bound. The last `@workgroup_size(1)`
+kernel in the hot path is gone.
 Gates: divergence-free-band audit unchanged; drag-sphere rigid-coupling
 probe numbers within tolerance; velocity-extrapolation IoU vs. oracle on
 the smoke harness meets the existing parity bar; extrapolation stage time
@@ -267,7 +359,8 @@ purely structural); dispatch counts asserted in a source-contract test.
 
 ### Phase 5 — Startup de-fencing (P6)
 Default path: ≤ 2 submissions with one final fence + authority validation;
-`?safeBringup=1` retains 8-phase fencing. Fix the stale doc wording.
+`?safeBringup=1` retains 8-phase fencing. Keep the documented startup counts
+aligned with the implementation.
 Objective: startup CPU–GPU round trips 8 → 1–2; t=0 wall time drops by the
 sum of 6–7 fence latencies plus per-submission driver overhead; smaller
 exposure window for the known Dawn unreaped-child hang.
@@ -284,12 +377,44 @@ Gates: 300-frame endurance with K>1; no visible surface artifacts at brick
 boundaries in the porcelain scenes; escape-flag path proven by a forced-CFL
 test.
 
+**Decision (2026-07-22): deferred; do not land K>1 yet.**  The optional entry
+condition is not met by the evidence currently in the repository:
+
+- the only post-change-driven topology measurement is the calm-scene
+  `3.9 ms -> 0.2 ms` result above, which says that skipping whole rebuilds
+  would target at most a small residual in the one measured steady-state
+  case;
+- Phase 0 now exposes `fineTopology_ms` and `fineRedistance_ms` through the
+  existing asynchronous timestamp readback, but no post-Phase-2 dam-break or
+  ocean-seiche capture of those fields has been checked in.  Dispatch-count
+  reduction is not a substitute for the wall-clock measurement required by
+  this phase;
+- the product path still advances a transactionally published A/B fine
+  generation every step.  There is no Russo-Smereka repair operator or GPU
+  escape controller in the implementation, so introducing only a host-side
+  frame counter would create stale generations rather than implement P5;
+- the transported-payload 300-frame gate is deliberately disabled until the
+  Section-5 velocity-coverage gate passes, and there is currently no
+  forced-CFL escape test or porcelain brick-boundary visual baseline.  Thus
+  none of the three Phase-6 acceptance gates can yet support a K>1 default.
+
+The implementation therefore stays at K=1: every accepted surface step
+transports, rebuilds the fine topology, runs the fixed-dispatch JFA-CPT
+redistance, and publishes one complete generation.  The existing coarse
+octree change-driven dirty-tile worklist remains the proven amortization
+mechanism; it avoids stale pressure topology while reducing calm-scene work.
+Re-open P5 only after a successful 300-frame transported-payload run and
+timestamp captures show `fineTopology_ms + fineRedistance_ms` is material in
+both an interface-heavy dam break and ocean-seiche.  Any subsequent K>1 A/B
+must land the PDE repair, device-owned escape/indirect-force path, forced-CFL
+test, porcelain comparison, and endurance gate together.
+
 ## 5. Summary of objective benefits
 
 | Metric | Today | After plan | Basis |
 |---|---|---|---|
 | Fine redistance ordered dispatches | 595 (86 passes, 42 causal buckets) | ~8–10 (1 pass) | P1/P3; JFA is O(log band) |
-| Extrapolation | serial 1-lane heap, `ceil(faceCap/1024)` chained dispatches + 12 Jacobi rounds | ≤ 12 parallel dispatches | P2; CPT/BFS |
+| Extrapolation | serial 1-lane heap, `ceil(faceCap/1024)` chained dispatches + 12 Jacobi rounds | parallel CPT link + 9–10 jumps + resolve + 8 repair layers; separate 12 band-bounded Jacobi rounds | P2; CPT/BFS |
 | Face-band dispatches (transitions phase) | ~90 serialized | ~40 | P4 fusion |
 | Startup CPU–GPU round trips | 8 fenced submissions | 1–2 (8 behind debug flag) | Spec-guaranteed intra-submission ordering |
 | Mid-march page allocation | 504 dispatches/step (12 × 42) | 0 (pre-dilated band) | P3 |
@@ -310,9 +435,12 @@ untouched.
   gate in Phase 2; FIM fallback ready.
 - **Fingerprint/bit-exactness contracts break**: planned re-baselining with
   oracle evidence; never silent (Phase 2 gate).
-- **Wider resident band raises memory**: re-run the §18.12 capacity
-  checkpoint; factor-8 payload already measured at 273 MB active — dilation
-  adds ring bricks proportional to interface area; report, don't assume.
+- **Wider resident band raises memory**: the re-run §18.12-style checkpoint
+  records 280,800 active bricks and 287,539,200 four-channel payload bytes for
+  a production-width maximum-area planar factor-8/twelve-ring case, leaving 16.8% of its
+  337,500-brick capacity. Chebyshev corners are intentionally retained: no
+  smaller support metric has been proved for backtrace plus interpolation.
+  Fragmented-interface overflow remains fail-closed and must still be reported.
 - **Sparse page boundaries in JFA strides**: floods run in fine-lattice
   coordinates through the page hash (neighbor-page IDs are already cached,
   §18.3); a stride that lands on a non-resident brick reads "no seed", which

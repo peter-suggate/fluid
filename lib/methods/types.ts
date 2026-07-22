@@ -159,6 +159,11 @@ export interface GPUSolverInstance {
   ensureGridDiagnosticTextures?(): void;
   /** Apply configuration explicitly classified as runtime-safe by the method. */
   applyRuntimeValues?(values: MethodParamValues): void;
+  /** Enable recurring profiler timestamps and observational GPU readbacks. */
+  setPerformanceReadbacksEnabled?(enabled: boolean): void;
+  /** Resolves after an intrusive, serially-fenced advance has submitted and
+   * completed every phase. Normal single-submission advances leave this unset. */
+  readonly pendingAdvanceCompletion?: Promise<void>;
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean;
   readStats(): Promise<GPUEulerianInfo>;
   destroy(): void;

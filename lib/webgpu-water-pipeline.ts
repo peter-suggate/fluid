@@ -1247,6 +1247,7 @@ export class RasterWaterPipeline {
   private adaptiveDiagnosticCompletion?: Promise<AdaptiveWaterRenderDiagnostics | undefined>;
   private lastAdaptiveDiagnostics?: AdaptiveWaterRenderDiagnostics;
   private lastAdaptiveDiagnosticEncodeAt_ms = -Infinity;
+  private performanceReadbacksEnabled = true;
   private pendingAdaptiveDiagnosticShape?: readonly [number, number, number, number];
   private pendingAdaptiveDiagnosticGlobalFine = false;
   private pendingAdaptiveDiagnosticGlobalFineGeneration?: number;
@@ -1479,14 +1480,16 @@ export class RasterWaterPipeline {
     return typeof process !== "undefined" && process.env?.FLUID_WATER_DIAGNOSTICS === "1";
   }
 
-  /** Presentation failure evidence is part of the normal UI contract.  The
-   * renderer uses this bit for the fenced t=0 readiness decision as well as
-   * the persistent viewport alert; it must therefore not depend on a query
-   * flag. */
-  get adaptiveDiagnosticsReadbackEnabled() { return true; }
+  /** Presentation failure evidence is part of the normal UI contract unless
+   * the user explicitly chooses the readback-free maximum-throughput mode. */
+  get adaptiveDiagnosticsReadbackEnabled() { return this.performanceReadbacksEnabled; }
+
+  setPerformanceReadbacksEnabled(enabled: boolean) {
+    this.performanceReadbacksEnabled = enabled;
+  }
 
   private encodeAdaptiveDiagnostics(encoder: GPUCommandEncoder, adaptive: UnifiedOctreeConsumerSource) {
-    if (this.adaptiveDiagnosticPending || !this.indirectBuffer) return;
+    if (!this.performanceReadbacksEnabled || this.adaptiveDiagnosticPending || !this.indirectBuffer) return;
     const now_ms = performance.now();
     // The normal UI needs failure evidence, not a frame-rate-synchronous
     // telemetry stream. Match the solver's bounded 250 ms readback cadence;

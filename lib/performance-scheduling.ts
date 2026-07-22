@@ -24,6 +24,40 @@ export type AdvanceWallTimingInput = {
   gpuStep_ms?: number;
 };
 
+export type CompletionFrameAccountingInput = {
+  targetFps: number;
+  completionWall_ms?: number;
+  completionSimulation_s?: number;
+  timestampedGPU_ms: number;
+  cpu_ms: number;
+};
+
+/** Convert queue-confirmed simulation throughput into the wall time required
+ * to advance one target-rate simulation frame. Unlike timestamp queries this
+ * envelope includes queue waits, untimestamped commands, telemetry, browser
+ * scheduling, and completion-callback latency. The residual is deliberately
+ * labelled unattributed: portable WebGPU cannot split those causes further. */
+export function completionFrameAccounting(input: CompletionFrameAccountingInput) {
+  const wall_ms = input.completionWall_ms;
+  const simulation_s = input.completionSimulation_s;
+  const targetFps = positive(input.targetFps, 60);
+  if (wall_ms === undefined || simulation_s === undefined
+    || !Number.isFinite(wall_ms) || !Number.isFinite(simulation_s)
+    || wall_ms <= 0 || simulation_s <= 0) return null;
+  const wallFrame_ms = wall_ms / (simulation_s * targetFps);
+  const timestampedGPU_ms = nonNegative(input.timestampedGPU_ms);
+  const cpu_ms = nonNegative(input.cpu_ms);
+  // CPU and GPU can overlap, so summing them would manufacture accounted
+  // time. Their maximum is the defensible lower bound inside the wall envelope.
+  const accounted_ms = Math.min(wallFrame_ms, Math.max(timestampedGPU_ms, cpu_ms));
+  return {
+    wallFrame_ms,
+    accounted_ms,
+    unattributed_ms: Math.max(0, wallFrame_ms - accounted_ms),
+    realtimeRate: simulation_s * 1000 / wall_ms,
+  };
+}
+
 /** Last completed advance, kept separate from continuously sampled presentation
  * frames so a paused manual-step hitch cannot be overwritten by idle redraws. */
 export function advanceWallBreakdown(input: AdvanceWallTimingInput | null | undefined) {
