@@ -21,7 +21,19 @@ test("pressure solve UI reports an isolated completion fence instead of a whole-
   assert.match(panelSource, /PRODUCTION ADVANCE · QUEUE-BOUNDARY SAMPLE/);
   assert.match(panelSource, /TOPOLOGY \+ ADVECT/);
   assert.match(panelSource, /PRESSURE \+ PROJECT/);
-  assert.match(panelSource, /FINE SURFACE \+ COUPLE/);
+  assert.match(panelSource, /FINE SURFACE TOTAL/);
+  for (const label of ["FINE PREP + SEEDS", "FINE TRANSPORT", "FINE TOPOLOGY", "REDISTANCE + VOLUME",
+    "RESTRICT + COARSE φ", "PAGE SURFACE", "OTHER COUPLING"]) assert.match(panelSource, new RegExp(label.replace("+", "\\+")));
+  assert.match(panelSource, /\(gpuInfo\?\.globalFineTransportEncodedPasses \?\? 0\) > 0/,
+    "transport schedule must remain hidden for octree methods that initialize the optional counters to zero");
+  assert.match(panelSource, /\(gpuInfo\?\.globalFineLevelSetLogicalBrickCount \?\? 0\) > 0/,
+    "fine occupancy must remain hidden when no global fine lattice is allocated");
+  assert.match(panelSource, /globalFineTransportQueryCapacity/);
+  assert.match(panelSource, /globalFineTransportChunkCount/);
+  assert.match(panelSource, /globalFineTransportSegmentCount/);
+  assert.match(panelSource, /globalFineTransportVertexScratchBytes/);
+  assert.match(panelSource, /no per-query vertex scratch/);
+  assert.match(panelSource, /globalFineTransportPrepassScratchBytes/);
   assert.match(panelSource, /<span>FINE SURFACE<\/span>/);
   assert.match(panelSource, /fine-surface-observed-row/);
   assert.match(panelSource, /displayedPhysicsStages = fineSurfaceNeedsWallFallback/);
@@ -40,9 +52,21 @@ test("production profiler splits a real advance at queue submission boundaries",
   assert.match(uniformSource, /productionPhaseProbeActive/);
   assert.match(uniformSource, /submitCurrentEncoder\("topologyAdvection", true\)/);
   assert.match(uniformSource, /submitCurrentEncoder\("pressureProjection", true\)/);
+  assert.match(uniformSource, /finePreparation: 0, fineTransport: 0, fineTopology: 0/);
+  assert.match(uniformSource, /fineRedistance: 0, fineRestriction: 0, pageSurface: 0/);
+  assert.match(octreeSource, /splitProductionPhase\("fineTransport"\)/);
+  assert.match(octreeSource, /splitProductionPhase\("finePreparation"\)/);
+  assert.match(octreeSource, /splitProductionPhase\("fineTopology"\)/);
+  assert.match(octreeSource, /splitProductionPhase\("fineRedistance"\)/);
+  assert.match(octreeSource, /splitProductionPhase\("fineRestriction"\)/);
+  assert.match(octreeSource, /splitProductionPhase\("pageSurface"\)/);
+  assert.match(octreeSource, /planFineLevelSetGPUTransportPasses\(/);
+  assert.match(octreeSource, /globalFineTransportEncodedPasses = transportPasses\.encodedPasses/);
+  assert.match(uniformSource, /globalFineTransportEncodedPasses: octree\.globalFineTransportEncodedPasses/);
   assert.match(uniformSource, /submitCurrentEncoder\("surfaceCoupling", true\)/);
   assert.match(uniformSource, /submitCurrentEncoder\("publicationDiagnostics", false\)/);
   assert.match(uniformSource, /gpuAdvancePhaseWall =/);
+  assert.match(panelSource, /seven additional queue boundaries only in this intrusive sample/);
 });
 
 test("octree solver reports only its own host encode and bounded pass schedule", () => {

@@ -21,22 +21,26 @@ import {
 } from "../lib/webgpu-octree-fine-levelset-transport";
 
 test("trajectory prepass is bounded GPU-only Stage-B work", () => {
-  assert.match(buildPowerTrajectoryQueriesWGSL, /buildPowerTrajectoryQueries/);
+  assert.match(buildPowerTrajectoryQueriesWGSL, /sampleDirectPowerVelocity/);
   assert.doesNotMatch(buildPowerTrajectoryQueriesWGSL, /texture|readback/i);
   const productionBuilder = makePowerVelocityPrepassBuilderWGSL();
-  assert.doesNotMatch(productionBuilder, /nearestOwner|nearestFallback|0x10000000u/,
+  assert.doesNotMatch(productionBuilder, /nearestOwner|nearestFallback|vertexStart/,
     "missing containing owners must be resolved only by the Section 5 face-band publication");
-  assert.match(productionBuilder, /fn interpolationOwner\(x:vec3f\)->u32\{return owner\(x\);\}/,
-    "Stage B starts from the exact adaptive owner; Section 5 completes uncovered dual octants");
-  assert.match(productionBuilder, /let row=interpolationOwner\(x\.xyz\);if\(row==0xffffffffu\)/,
-    "liquid transition samples may relocate to a neighboring incident cube or tetrahedron");
+  assert.match(productionBuilder, /let row=owner\(x\.xyz\);if\(row==0xffffffffu\)/,
+    "direct Stage B starts from the exact adaptive owner");
+  assert.match(productionBuilder, /let va=neighborVelocity[\s\S]*let vb=neighborVelocity[\s\S]*let vc=neighborVelocity/,
+    "transition samples gather only the containing tetrahedron's three neighbor velocities");
+  assert.doesNotMatch(productionBuilder, /76u|vertexVelocities/,
+    "direct Stage B must not materialize 76 velocity vectors per query");
   assert.deepEqual(planOctreePowerVelocityPrepass(4096, 256), {
     queryCapacity: 4096,
-    queryBytes: 196_608,
-    vertexVelocityBytes: 4_980_736,
-    scratchBytes: 5_177_344,
-    samplerBytes: 81_968,
-    allocatedBytes: 5_259_376,
+    rowCapacity: 1,
+    queryBytes: 0,
+    vertexVelocityBytes: 0,
+    rowDescriptorBytes: 256,
+    scratchBytes: 256,
+    samplerBytes: 82_032,
+    allocatedBytes: 82_288,
   });
 });
 
@@ -50,34 +54,36 @@ test("factor-4 small dam break batches paper Section 5 transport within portable
     minStorageBufferOffsetAlignment: 256,
   };
   const velocityChunkCapacity = planOctreePowerVelocityChunkCapacity(queryCapacity, portableLimits);
-  assert.equal(OCTREE_POWER_PREPASS_TARGET_QUERY_CAPACITY, 65_536);
-  assert.equal(velocityChunkCapacity, 65_536);
+  assert.equal(OCTREE_POWER_PREPASS_TARGET_QUERY_CAPACITY, Number.MAX_SAFE_INTEGER);
+  assert.equal(velocityChunkCapacity, queryCapacity);
   assert.deepEqual(planOctreePowerVelocityPrepass(velocityChunkCapacity, 256), {
-    queryCapacity: 65_536,
-    queryBytes: 3_145_728,
-    vertexVelocityBytes: 79_691_776,
-    scratchBytes: 82_837_504,
-    samplerBytes: 1_310_768,
-    allocatedBytes: 84_148_336,
+    queryCapacity,
+    rowCapacity: 1,
+    queryBytes: 0,
+    vertexVelocityBytes: 0,
+    rowDescriptorBytes: 256,
+    scratchBytes: 256,
+    samplerBytes: 8_847_472,
+    allocatedBytes: 8_847_728,
   });
 
   const previous = planFineLevelSetGPUTransport(queryCapacity, 4_096);
   const current = planFineLevelSetGPUTransport(queryCapacity, velocityChunkCapacity);
   assert.equal(previous.chunkCount, 108);
-  assert.equal(current.chunkCount, 7);
+  assert.equal(current.chunkCount, 1);
   assert.deepEqual(planFineLevelSetGPUTransportPasses(previous, 4), {
     chunkCount: 108,
     segmentCount: 4,
-    passesPerSegment: 6,
-    passesPerChunk: 26,
-    encodedPasses: 2_810,
+    passesPerSegment: 5,
+    passesPerChunk: 22,
+    encodedPasses: 2_379,
   });
   assert.deepEqual(planFineLevelSetGPUTransportPasses(current, 4), {
-    chunkCount: 7,
+    chunkCount: 1,
     segmentCount: 4,
-    passesPerSegment: 6,
-    passesPerChunk: 26,
-    encodedPasses: 184,
+    passesPerSegment: 5,
+    passesPerChunk: 22,
+    encodedPasses: 25,
   });
 });
 
@@ -93,7 +99,7 @@ test("non-divisible final transport chunk keeps its tail inactive without droppi
     finalChunkLive: 49_152,
     finalChunkInactive: 16_384,
   });
-  assert.equal(planFineLevelSetGPUTransportPasses(transport, 4).encodedPasses, 184);
+  assert.equal(planFineLevelSetGPUTransportPasses(transport, 4).encodedPasses, 157);
 
   // Every chunk first zeros its complete fixed-capacity position arena. The
   // activeSample(flat) guard then leaves the non-divisible tail at w=0, and
@@ -101,23 +107,21 @@ test("non-divisible final transport chunk keeps its tail inactive without droppi
   assert.match(fineLevelSetGPUQueryTransportWGSL,
     /positions\[local\]=vec4f\(0\);let flat=chunk\.base\+local;let a=activeSample\(flat\);if\(a\.x==INVALID\)\{return;\}/);
   assert.match(makePowerVelocityPrepassBuilderWGSL(),
-    /if\(x\.w<=0\.0\)\{word\(qb\+4u,0x20000000u\);[^}]*return;\}/);
+    /if\(x\.w<=0\.\)\{results\[i\]=vec4f\(0\.,0\.,0\.,1\.\);statuses\[i\]=VALID\|INACTIVE;/);
 });
 
 test("velocity chunk planning respects tighter binding and offset limits", () => {
   const limits = {
-    maxStorageBufferBindingSize: 8 * 1024 * 1024,
+    maxStorageBufferBindingSize: 4 * 1024 * 1024,
     maxBufferSize: 256 * 1024 * 1024,
     maxComputeWorkgroupsPerDimension: 65_535,
     minStorageBufferOffsetAlignment: 256,
   };
   const capacity = planOctreePowerVelocityChunkCapacity(442_368, limits);
-  assert.ok(capacity < OCTREE_POWER_PREPASS_TARGET_QUERY_CAPACITY);
+  assert.equal(capacity, 262_144);
   assert.equal((capacity * 16) % limits.minStorageBufferOffsetAlignment, 0);
-  assert.ok(planOctreePowerVelocityPrepass(capacity, 256).scratchBytes
-    <= limits.maxStorageBufferBindingSize);
-  assert.ok(planOctreePowerVelocityPrepass(capacity + 16, 256).scratchBytes
-    > limits.maxStorageBufferBindingSize);
+  assert.ok(capacity * 16 <= limits.maxStorageBufferBindingSize);
+  assert.ok((capacity + 16) * 16 > limits.maxStorageBufferBindingSize);
   assert.equal(planOctreePowerVelocityChunkCapacity(7, limits), 7,
     "a single final batch does not need a following aligned slice");
 });
@@ -128,7 +132,9 @@ async function runSegmentQueries(segmentCount: 4 | 8): Promise<void> {
   };
   Object.assign(globalThis, dawn.globals);
   const gpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
-  const adapter = await gpu.requestAdapter(); assert.ok(adapter); const device = await adapter.requestDevice();
+  const adapter = await gpu.requestAdapter(); assert.ok(adapter); const device = await adapter.requestDevice({
+    requiredLimits: { maxStorageBuffersPerShaderStage: 10 },
+  });
   const raw = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
   const catalog = decodeGeneratedOctreePowerCatalog(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
   const topology = new WebGPUOctreePowerTopology(device, 8, catalog);
@@ -160,6 +166,7 @@ async function runSegmentQueries(segmentCount: 4 | 8): Promise<void> {
   const positions = upload(positionData), readback = device.createBuffer({ size: segmentCount * 16,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
+  prepass.encodeRowDescriptors(encoder, headerBuffer);
   prepass.encodeFromPositions(encoder, positions, headerBuffer, velocity.velocities,
     { dimensions: [2, 2, 2], physicalCellSize: 1, maximumLeafSize: 1, queryCount: segmentCount });
   encoder.copyBufferToBuffer(prepass.source.results, 0, readback, 0, segmentCount * 16);
@@ -184,7 +191,9 @@ test("Dawn fails closed when a trajectory query has no containing power owner", 
   };
   Object.assign(globalThis, dawn.globals);
   const adapter = await dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]).requestAdapter();
-  assert.ok(adapter); const device = await adapter.requestDevice();
+  assert.ok(adapter); const device = await adapter.requestDevice({
+    requiredLimits: { maxStorageBuffersPerShaderStage: 10 },
+  });
   const raw = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
   const catalog = decodeGeneratedOctreePowerCatalog(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
   const topology = new WebGPUOctreePowerTopology(device, 1, catalog);
@@ -213,6 +222,7 @@ test("Dawn fails closed when a trajectory query has no containing power owner", 
   const positions = upload(new Float32Array([1.5, 0.5, 0.5, 1]));
   const readback = device.createBuffer({ size: 20, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
+  prepass.encodeRowDescriptors(encoder, headerBuffer);
   prepass.encodeFromPositions(encoder, positions, headerBuffer, velocity.velocities, {
     dimensions: [2, 1, 1], physicalCellSize: 1, maximumLeafSize: 1, queryCount: 1,
   });

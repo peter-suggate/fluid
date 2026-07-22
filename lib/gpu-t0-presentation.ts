@@ -28,6 +28,14 @@ export interface InitialRasterPresentationReadiness {
   readonly label: string;
 }
 
+/** Only the power-octree method has a separately published sparse authority
+ * and adaptive raster source that must cross a presentation fence before the
+ * transport can unlock. Dense and regular tall-cell methods attach their
+ * direct field textures atomically with the warmed solver. */
+export function requiresFencedInitialRasterPresentation(methodId: string): boolean {
+  return methodId === "octree";
+}
+
 /**
  * CPU mirror of the paused t=0 presentation gate. Without an opt-in readback,
  * completion relies on the renderer's GPU-only draw-argument transaction. The

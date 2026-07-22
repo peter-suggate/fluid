@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { initialRasterPresentationReadiness } from "../lib/gpu-t0-presentation";
+import { initialRasterPresentationReadiness, requiresFencedInitialRasterPresentation } from "../lib/gpu-t0-presentation";
 import type { AdaptiveWaterRenderDiagnostics } from "../lib/webgpu-water-pipeline";
 
 const base = {
@@ -31,6 +31,13 @@ function diagnostic(
     presentationFallbackActive: surfaceGeometrySource === "adaptive-fallback" || surfaceGeometrySource === "retained-previous",
   };
 }
+
+test("only the power octree requires the sparse t=0 raster fence", () => {
+  assert.equal(requiresFencedInitialRasterPresentation("octree"), true);
+  for (const method of ["tall-cell", "quadtree-tall-cell", "uniform", "cpu-reference"]) {
+    assert.equal(requiresFencedInitialRasterPresentation(method), false, method);
+  }
+});
 
 test("paused t=0 stays locked until every solver, source, extraction, and fence prerequisite completes", () => {
   for (const key of [
@@ -99,6 +106,8 @@ test("renderer publishes ready only after first raster submission completion and
 
   assert.doesNotMatch(renderer, /gpuInfoCallback\?\.\(solver\.info\);this\.onStatus\(\{state:"ready",label:"WebGPU solver ready"/);
   assert.match(renderer, /Warmed solver attached; publishing fenced t=0 raster surface/);
+  assert.match(renderer, /fencedInitialRaster=requiresFencedInitialRasterPresentation\(config\.methodId\)/);
+  assert.match(renderer, /WebGPU direct-field solver ready/);
   assert.match(renderer, /initialRasterSubmission[\s\S]*queue\.onSubmittedWorkDone\(\)\.then\(async\(\)=>[\s\S]*settleInitialRasterPresentation/);
   assert.match(renderer, /adaptiveDiagnosticsCompletion=await adaptiveDiagnosticsCompletion[\s\S]*settleInitialRasterPresentation|initialDiagnostics=await adaptiveDiagnosticsCompletion[\s\S]*settleInitialRasterPresentation/,
     "diagnostics mode must settle from the readback belonging to the fenced t=0 submission");

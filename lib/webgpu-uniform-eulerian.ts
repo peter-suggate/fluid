@@ -172,6 +172,7 @@ export interface InitialGlobalFineAuthorityDiagnostics extends GlobalFineVolumeP
   readonly redistanceControlDetailed?: readonly number[];
   readonly faceBandControl: readonly number[];
   readonly faceBandMarchControl?: readonly number[];
+  readonly faceBandSearchControl?: readonly number[];
   readonly faceBandTransitionControl: readonly number[];
   readonly faceBandTransitionOwnerFailure?: readonly number[];
   readonly faceBandPointFieldControl: readonly number[];
@@ -260,7 +261,7 @@ export function initialGlobalFineAuthorityEvidence(value: InitialGlobalFineAutho
     restriction:{...restriction,errors:namedControlBits(restriction.flags,FINE_TO_COARSE_LEVELSET_ERROR)},
     section5:{
       faceBand:unpackOctreeFaceBandControl([...value.faceBandControl,
-        ...(value.faceBandMarchControl ?? [])]),
+        ...(value.faceBandMarchControl ?? []), ...(value.faceBandSearchControl ?? [])]),
       transition:unpackOctreeFaceBandTransitionControl(transitionWords),
       pointField:unpackOctreeFaceBandPointFieldControl(value.faceBandPointFieldControl),
       transientPower:unpackOctreeFaceBandTransientPowerControl(value.faceBandTransientPowerControl),
@@ -315,7 +316,7 @@ export function initialGlobalFineAuthorityReadiness(
     return rejected("fine-to-coarse level-set restriction did not publish");
   }
   const faceBand = unpackOctreeFaceBandControl([...value.faceBandControl,
-    ...(value.faceBandMarchControl ?? [])]);
+    ...(value.faceBandMarchControl ?? []), ...(value.faceBandSearchControl ?? [])]);
   const transition = unpackOctreeFaceBandTransitionControl(value.faceBandTransitionControl);
   const pointField = unpackOctreeFaceBandPointFieldControl(value.faceBandPointFieldControl);
   const transientPower = unpackOctreeFaceBandTransientPowerControl(value.faceBandTransientPowerControl);
@@ -991,7 +992,7 @@ export class WebGPUUniformEulerianSolver {
       value.coarseControlValid,0,0,0,
     ]);
     const faceBand=unpackOctreeFaceBandControl([...value.faceBandControl,
-      ...(value.faceBandMarchControl ?? [])]);
+      ...(value.faceBandMarchControl ?? []), ...(value.faceBandSearchControl ?? [])]);
     const transition=unpackOctreeFaceBandTransitionControl([...value.faceBandTransitionControl,
       ...(value.faceBandTransitionOwnerFailure ?? [])]);
     const pointField=unpackOctreeFaceBandPointFieldControl(value.faceBandPointFieldControl);
@@ -1035,6 +1036,13 @@ export class WebGPUUniformEulerianSolver {
     this.info.globalFineFaceBandMarchCapExhausted=faceBand.marchCapExhausted;
     this.info.globalFineFaceBandMarchUnresolvedWithPredecessor=faceBand.marchUnresolvedWithAcceptedPredecessor;
     this.info.globalFineFaceBandMarchDisconnected=faceBand.marchDisconnected;
+    this.info.globalFineFaceBandDirectAnchorSuccess=faceBand.directAnchorSuccess;
+    this.info.globalFineFaceBandFullRowFallbackInvocations=faceBand.fullRowFallbackInvocations;
+    this.info.globalFineFaceBandFullRowCandidateRowsTested=faceBand.fullRowCandidateRowsTested;
+    this.info.globalFineFaceBandSurroundingOwnerFallbackInvocations=faceBand.surroundingOwnerFallbackInvocations;
+    this.info.globalFineFaceBandSurroundingOwnerRowsTested=faceBand.surroundingOwnerRowsTested;
+    this.info.globalFineFaceBandAirSamplesSelected=faceBand.airSamplesSelected;
+    this.info.globalFineFaceBandAirSamplesEvaluated=faceBand.airSamplesEvaluated;
     this.info.globalFineFaceBandTransitionFirstError=transition.firstError;
     this.info.globalFineFaceBandTransitionRowCount=transition.rowCount;
     this.info.globalFineFaceBandTransitionRows=transition.transitionRows;
@@ -1185,6 +1193,8 @@ export class WebGPUUniformEulerianSolver {
   get powerCatalogEntryHeaders() { return this.octreeProjection?.powerCatalogEntryHeaders; }
   get powerCatalogFaces() { return this.octreeProjection?.powerCatalogFaces; }
   get powerLeafHeaders() { return this.octreeProjection?.powerLeafHeaders; }
+  /** QA-only passthrough for compact reconstructed-velocity readback. */
+  get powerCellVelocityBuffer() { return this.octreeProjection?.powerCellVelocityBuffer; }
   get powerLeafEntries() { return this.octreeProjection?.powerLeafEntries; }
   get powerPressureBuffer() { return this.octreeProjection?.powerPressureBuffer; }
   get powerLeafFrontier() { return this.octreeProjection?.powerLeafFrontier; }
@@ -1424,6 +1434,13 @@ export class WebGPUUniformEulerianSolver {
       globalFineLevelSetLogicalBrickCount: octree.globalFineLevelSetLogicalBrickCount,
       globalFineLevelSetEnabled: projection.globalFineLevelSetSource !== undefined,
       globalFineLevelSetFactor: projection.globalFineLevelSetSource?.plan.fineFactor,
+      globalFineTransportQueryCapacity: octree.globalFineTransportQueryCapacity,
+      globalFineTransportChunkCapacity: octree.globalFineTransportChunkCapacity,
+      globalFineTransportChunkCount: octree.globalFineTransportChunkCount,
+      globalFineTransportSegmentCount: octree.globalFineTransportSegmentCount,
+      globalFineTransportEncodedPasses: octree.globalFineTransportEncodedPasses,
+      globalFineTransportPrepassScratchBytes: octree.globalFineTransportPrepassScratchBytes,
+      globalFineTransportVertexScratchBytes: octree.globalFineTransportVertexScratchBytes,
       frontierListCapacity: octree.frontierListCapacity,
       frontierRequiredLeaves: octree.frontierRequiredLeaves,
       frontierCapacityOverflow: octree.frontierCapacityOverflow,
@@ -1714,7 +1731,8 @@ export class WebGPUUniformEulerianSolver {
     if(this.secondaryParticlesEnabled&&this.secondaryParticleSystem&&this.secondaryParticleSamplingSource)this.secondaryParticleSystem.prepareStep(dt,this.secondaryParticleSamplingSource);
     if (gpuStageCapture.matches("physics", "pressure") || gpuStageCapture.matches("physics", "topology")) this.ensureGridDiagnosticTextures();
     this.querySegments = []; this.queryCount = 0; if (!this.validationChecked) this.device.pushErrorScope("validation");
-    type ProductionPhase = "topologyAdvection" | "pressureProjection" | "surfaceCoupling" | "publicationDiagnostics";
+    type ProductionPhase = "topologyAdvection" | "pressureProjection" | "finePreparation" | "fineTransport" | "fineTopology"
+      | "fineRedistance" | "fineRestriction" | "pageSurface" | "surfaceCoupling" | "publicationDiagnostics";
     let encoder = this.device.createCommandEncoder({ label: "Uniform GPU fluid step" });
     const totalTiming = this.timing("total_ms");
     const productionPhaseSegments: Array<{ phase: ProductionPhase; encoder: GPUCommandEncoder; commandBuffer: GPUCommandBuffer }> = [];
@@ -1960,6 +1978,10 @@ export class WebGPUUniformEulerianSolver {
               querySet: this.querySet,
               fineTopologyStartWriteIndex: surfaceTiming.firstBoundary,
               fineRedistanceStartWriteIndex: surfaceTiming.secondBoundary,
+            } : undefined, productionPhaseProbeActive ? (phase, completedEncoder) => {
+              if (completedEncoder !== encoder) throw new Error("Octree surface profiler encoder identity drifted");
+              submitCurrentEncoder(phase, true);
+              return encoder;
             } : undefined);
         } else {
           this.adaptiveProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s);
@@ -2038,7 +2060,11 @@ export class WebGPUUniformEulerianSolver {
       this.profiledAdvancePending = true;
       const completion = (async () => {
         let previousCompletedAt = await productionQueueReadyAtPromise;
-        const totals = { topologyAdvection: 0, pressureProjection: 0, surfaceCoupling: 0, publicationDiagnostics: 0 };
+        const totals: Record<ProductionPhase, number> = {
+          topologyAdvection: 0, pressureProjection: 0, finePreparation: 0, fineTransport: 0, fineTopology: 0,
+          fineRedistance: 0, fineRestriction: 0, pageSurface: 0, surfaceCoupling: 0,
+          publicationDiagnostics: 0,
+        };
         const firstBoundaryAt = previousCompletedAt;
         for (const segment of phaseSegments) {
           if (this.disposed) return;
@@ -2056,7 +2082,15 @@ export class WebGPUUniformEulerianSolver {
           simulation_s: sampledSimulation_s,
           topologyAdvection_ms: totals.topologyAdvection,
           pressureProjection_ms: totals.pressureProjection,
-          surfaceCoupling_ms: totals.surfaceCoupling,
+          surfaceCoupling_ms: totals.finePreparation + totals.fineTransport + totals.fineTopology + totals.fineRedistance
+            + totals.fineRestriction + totals.pageSurface + totals.surfaceCoupling,
+          finePreparation_ms: totals.finePreparation,
+          fineTransport_ms: totals.fineTransport,
+          fineTopology_ms: totals.fineTopology,
+          fineRedistance_ms: totals.fineRedistance,
+          fineRestriction_ms: totals.fineRestriction,
+          pageSurface_ms: totals.pageSurface,
+          remainingSurfaceCoupling_ms: totals.surfaceCoupling,
           publicationDiagnostics_ms: totals.publicationDiagnostics,
           total_ms: Math.max(0, previousCompletedAt - firstBoundaryAt),
         };

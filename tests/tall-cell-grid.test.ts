@@ -3,6 +3,14 @@ import test from "node:test";
 import { chooseTallCellBase, createSingleTallCellProbeControlLayout, createSingleTallCellProbeLayout, createTallCellLayout, limitNeighboringTallCellBases, tallCellFluxSampleCount, tallCellSettings } from "../lib/tall-cell-grid";
 import { cloneScene, defaultScene } from "../lib/model";
 
+test("balanced UI lattice selects genuine restricted tall cells by default", () => {
+  const layout = createTallCellLayout(defaultScene, "balanced");
+  assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [24, 18, 16]);
+  assert.equal(layout.planning.requestedRegularLayers, 12);
+  assert.equal(layout.planning.ordinaryGridFallback, false);
+  assert.ok(layout.columnBases.some((base) => base >= 2));
+});
+
 test("restricted tall-cell quality presets share the scene-authored lattice and represent tall columns", () => {
   const scene = cloneScene(defaultScene);
   scene.voxelDomain.finestCellSize_m = 0.02;

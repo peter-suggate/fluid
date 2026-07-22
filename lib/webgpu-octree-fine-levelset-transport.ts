@@ -91,10 +91,9 @@ export function planFineLevelSetGPUTransport(queryCapacity: number,
 
 /**
  * Static command-count contract for Section 5's piecewise-linear trace.
- * Each segment retains a fresh Stage-B query build, prepare/sample/publish,
- * optional air-band override, and trajectory advance.  Batching changes only
- * how many starting samples share those passes; it never removes a velocity
- * evaluation from the paper's m-segment trace.
+ * Each segment retains a fresh direct Stage-B prepare/sample/publish,
+ * optional air-band override, and trajectory advance. A row descriptor pass
+ * is shared by all segments because row geometry is invariant during a trace.
  */
 export function planFineLevelSetGPUTransportPasses(
   plan: Pick<FineLevelSetGPUTransportPlan, "chunkCount">,
@@ -104,14 +103,14 @@ export function planFineLevelSetGPUTransportPasses(
   if (!Number.isSafeInteger(plan.chunkCount) || plan.chunkCount < 1) {
     throw new RangeError("Fine transport pass plan requires at least one chunk");
   }
-  const passesPerSegment = 5 + (includesFaceBand ? 1 : 0);
+  const passesPerSegment = 4 + (includesFaceBand ? 1 : 0);
   const passesPerChunk = 2 + segmentCount * passesPerSegment;
   return {
     chunkCount: plan.chunkCount,
     segmentCount,
     passesPerSegment,
     passesPerChunk,
-    encodedPasses: plan.chunkCount * passesPerChunk + 2,
+    encodedPasses: 1 + plan.chunkCount * passesPerChunk + 2,
   };
 }
 
@@ -154,7 +153,8 @@ export class WebGPUFineLevelSetTransport {
   constructor(
     private readonly device: GPUDevice,
     readonly source: WebGPUFineLevelSetBrickSource,
-    private readonly velocityPrepass: Pick<WebGPUOctreePowerVelocityPrepass, "encodeFromPositions" | "source">,
+    private readonly velocityPrepass: Pick<WebGPUOctreePowerVelocityPrepass,
+      "encodeRowDescriptors" | "encodeFromPositions" | "source">,
     /** Paper Section 5 face-band velocity authority. Stage B remains the
      * primary liquid interpolant; positive-air samples and exact local-catalog
      * coverage misses are completed from fast-marched regular octree faces. */
@@ -239,6 +239,7 @@ export class WebGPUFineLevelSetTransport {
     const prepassOptions = { dimensions: options.dimensions, physicalCellSize: options.physicalCellSize,
       maximumLeafSize: options.maximumLeafSize, queryCount: this.queryCapacity,
       generation: options.generation, maximumHashProbes: options.maximumHashProbes };
+    this.velocityPrepass.encodeRowDescriptors(encoder, options.headers);
     const chunkCapacity = this.velocityPrepass.source.queryCapacity;
     for (let chunk = 0; chunk < this.plan.chunkCount; chunk += 1) {
       const chunkBinding: GPUBufferBinding = { buffer: this.chunkParameters,

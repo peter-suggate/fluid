@@ -74,7 +74,10 @@ export interface SingleTallCellProbeOptions {
 // Quality controls storage/work around the scene-authored lattice. Spatial
 // resolution belongs exclusively to SceneDescription.voxelDomain.
 export const tallCellSettings: Record<GPUQuality, TallCellSettings> = {
-  balanced: { regularLayers: 24, liquidHalo: 8, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
+  // Twelve layers keeps the default 24 x 18 x 16 UI dam-break on the genuine
+  // restricted backend. Higher quality levels deliberately retain wider bands
+  // and may reach the uniform-grid limit in shallow scenes.
+  balanced: { regularLayers: 12, liquidHalo: 8, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
   high: { regularLayers: 32, liquidHalo: 16, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
   ultra: { regularLayers: 40, liquidHalo: 24, airHalo: 8, maximumNeighborDelta: 5, maximumTallHeight: 4096, remeshInterval: 1 }
 };
