@@ -3,7 +3,9 @@ import type { PerformanceSnapshot } from "./stores/diagnostics-store";
 const physicsTimingFields = new Set<keyof PerformanceSnapshot>([
   "gpuPreparation_ms", "gpuLayerConstruction_ms", "gpuAdvection_ms", "gpuConditioning_ms",
   "gpuRemeshing_ms", "gpuPressure_ms", "gpuPowerAssembly_ms", "gpuPressureSolve_ms",
-  "gpuProjection_ms", "gpuPowerProjection_ms", "gpuVelocityProjection_ms", "gpuSurfaceUpdate_ms",
+  "gpuProjection_ms", "gpuPowerProjection_ms", "gpuVelocityProjection_ms",
+  "gpuFaceBand_ms", "gpuFaceMarch_ms", "gpuPowerPublication_ms", "gpuSurfaceUpdate_ms",
+  "gpuFineTopology_ms", "gpuFineTransport_ms", "gpuFineRedistance_ms",
   "gpuExtrapolation_ms", "gpuMaterialization_ms", "gpuRigid_ms", "gpuSpraySimulation_ms",
   "gpuFluidResidency_ms", "gpuSparsePublication_ms", "gpuDiagnostics_ms", "gpuOverhead_ms"
 ]);
@@ -20,12 +22,19 @@ export function averagePerformanceSnapshots(samples: PerformanceSnapshot[], fall
   const latest = samples[samples.length - 1];
   const averaged: PerformanceSnapshot = { ...latest };
   const writable = averaged as unknown as Record<string, number>;
+  const physicsSamplesById = new Map<number, PerformanceSnapshot>();
+  const legacyPhysicsSamples: PerformanceSnapshot[] = [];
+  for (const sample of samples.filter((candidate) => candidate.gpuPhysicsTimingAvailable)) {
+    if (sample.gpuPhysicsTimingSampleId > 0) physicsSamplesById.set(sample.gpuPhysicsTimingSampleId, sample);
+    else legacyPhysicsSamples.push(sample);
+  }
+  const uniquePhysicsSamples = [...legacyPhysicsSamples, ...physicsSamplesById.values()];
 
   for (const [rawKey, value] of Object.entries(latest)) {
     if (typeof value !== "number") continue;
     const key = rawKey as keyof PerformanceSnapshot;
     const eligible = physicsTimingFields.has(key)
-      ? samples.filter((sample) => sample.gpuPhysicsTimingAvailable)
+      ? uniquePhysicsSamples
       : renderTimingFields.has(key)
         ? samples.filter((sample) => sample.gpuRenderTimingAvailable)
         : samples;
@@ -34,6 +43,9 @@ export function averagePerformanceSnapshots(samples: PerformanceSnapshot[], fall
   }
 
   averaged.gpuPhysicsTimingAvailable = samples.some((sample) => sample.gpuPhysicsTimingAvailable);
+  averaged.gpuPhysicsTimingSampleId = latest.gpuPhysicsTimingSampleId;
+  averaged.gpuPhysicsTimingSimulation_s = latest.gpuPhysicsTimingSimulation_s;
+  averaged.gpuPhysicsTimingReadbackWall_ms = latest.gpuPhysicsTimingReadbackWall_ms;
   averaged.gpuRenderTimingAvailable = samples.some((sample) => sample.gpuRenderTimingAvailable);
   averaged.gpuRenderTimestampSupported = samples.some((sample) => sample.gpuRenderTimestampSupported);
   averaged.gpuActiveStages = [...new Set(samples.filter((sample) => sample.gpuPhysicsTimingAvailable).flatMap((sample) => sample.gpuActiveStages))];

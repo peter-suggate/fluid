@@ -84,10 +84,19 @@ test("projection derives compact owner capacity and keeps overflow on the canoni
     "missing physical pages retain the deterministic coarse-owner lookup");
 });
 
-test("adaptive owner-page claims retry weak CAS at the same hash slot", () => {
+test("adaptive owner-page claims scan the whole probe chain before reusing a tombstone", () => {
   assert.match(projectionSource,
-    /var expected = observed;[\s\S]*retry < 16u[\s\S]*atomicCompareExchangeWeak\(&owners\[keyWord\], expected, key\)[\s\S]*expected = claim\.old_value[\s\S]*expected != observed/,
-    "a spurious weak-CAS failure must not advance to another slot for the same logical owner page");
+    /if \(observed == key\) \{ return awaitOwnerPagePublication\(16u \+ hashCapacity \+ slot\); \}/,
+    "an existing owner-page entry must be found anywhere in the probe chain before any claim");
+  assert.match(projectionSource,
+    /if \(observed == 0xffffffffu\) \{ if \(reusable == 0xffffffffu\) \{ reusable = slot; \} \}/,
+    "tombstones are remembered but never claimed before the chain scan completes, or the same key is inserted twice and its shadowed physical page leaks");
+  assert.match(projectionSource,
+    /atomicStore\(&owners\[keyWord\], 0xffffffffu\);\s*return awaitOwnerPagePublication\(16u \+ hashCapacity \+ duplicate\);/,
+    "a racing same-key claim later in the probe chain rolls itself back before allocating");
+  assert.match(projectionSource,
+    /fn awaitOwnerPagePublication[\s\S]*wait < 4096u[\s\S]*atomicStore\(&owners\[2\], 1u\); return 0u;/,
+    "waiting on a sibling creation is bounded and the residual case fails the rebuild closed instead of silently dropping the owner write");
 });
 
 test("packed owner words round-trip every leaf size and max-32 owners across brick seams", () => {
@@ -453,7 +462,9 @@ test("simulation owner pages consume GPU brick residency and reuse retired slots
     assert.deepEqual([...state.slice(16, 18)].sort(), [1, 2]);
     const retained = state[17];
     state = await publish([2], [0]);
-    assert.equal(state[16], 0); assert.equal(state[17], retained); assert.ok(state[18] > 0 && state[18] !== retained); assert.equal(state[19], 0);
+    // Retirement tombstones the key word (0xffffffff) instead of zeroing it,
+    // so probe chains for keys displaced past this slot stay intact.
+    assert.equal(state[16], 0xffff_ffff); assert.equal(state[17], retained); assert.ok(state[18] > 0 && state[18] !== retained); assert.equal(state[19], 0);
     assert.equal(state[2], 0); assert.equal(state[1], 2);
     await device.queue.onSubmittedWorkDone(); assert.deepEqual(validationErrors, []);
   } finally { pages.destroy(); worklist.destroy(); readback.destroy(); device.destroy(); }

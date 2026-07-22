@@ -72,6 +72,10 @@ export function MethodPanel() {
         <span>{(fluidRenderState.nx * fluidRenderState.ny * fluidRenderState.nz).toLocaleString()} cells · binary64</span>
       </div>}
       {coarse.map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}
+      {methodId === "octree" && gpuInfo?.pressureSolver?.includes("Section 4.3 hybrid") && <div className="grid-readout" title="Actual GPU convergence work compared with the currently encoded safety cap">
+        <strong>{gpuInfo.quadtreePressureIterationsUsed ?? "—"} / {gpuInfo.quadtreePressureIterationBudget ?? "—"}</strong>
+        <span>PCG iterations executed / cap · {gpuInfo.quadtreePressureConverged === undefined ? "awaiting telemetry" : gpuInfo.quadtreePressureConverged ? "converged" : "cap exhausted"} · {gpuInfo.quadtreeMultigridLevelCount ?? "—"} pyramid levels · {gpuInfo.quadtreeMultigridCoarsestDofs ?? "—"} coarse DOFs</span>
+      </div>}
       {fine.length > 0 && <details className="advanced-params">
         <summary>Advanced</summary>
         {fine.map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}

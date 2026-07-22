@@ -804,9 +804,12 @@ fn activatePages(
   let logical = changes[item];
   if (logical >= params.counts.x) { return; }
   if (lid == 0u) {
+    // No lane may return between here and the trailing barrier: a lane-zero
+    // early return leaves the other lanes at a divergent workgroupBarrier,
+    // which the WGSL uniformity analysis rejects at pipeline creation.
     let pageWord = pageValueWord(logical, true);
-    if (pageWord == INVALID) { atomicAdd(&arena[3], 1u); return; }
-    loop {
+    if (pageWord == INVALID) { atomicAdd(&arena[3], 1u); }
+    else { loop {
       let current = atomicLoad(&arena[pageWord]);
       if (current != 0u) { break; }
       let reserve = atomicCompareExchangeWeak(&arena[pageWord], 0u, INVALID);
@@ -826,7 +829,7 @@ fn activatePages(
       atomicMax(&arena[2], resident);
       atomicAdd(&arena[5], 1u);
       break;
-    }
+    } }
   }
   workgroupBarrier();
   let slot = workgroupUniformLoad(&activatedSlot);

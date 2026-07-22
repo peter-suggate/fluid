@@ -52,6 +52,10 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
     const pressureLabel = pressureSolver ? `Octree leaf pressure · ${pressureSolver}` : "Octree leaf pressure · Chebyshev-Jacobi";
     const splitPowerPressure = active(snapshot, "powerAssembly") && active(snapshot, "pressureSolve");
     const splitPowerProjection = active(snapshot, "powerProjection") && active(snapshot, "velocityProjection");
+    const splitSection5FaceProjection = active(snapshot, "faceBand") && active(snapshot, "faceMarch")
+      && active(snapshot, "powerPublication");
+    const splitSection5Surface = active(snapshot, "fineTransport") && active(snapshot, "fineTopology")
+      && active(snapshot, "fineRedistance");
     const pressureStages = splitPowerPressure ? [
       stage({
         key: "power-assembly", label: "Power rows + operator assembly", shortLabel: "POWER BUILD", value: value(contextMatches, snapshot.gpuPowerAssembly_ms), className: "stage-pressure", group: "compute", active: true,
@@ -65,14 +69,28 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
       key: "pressure", label: pressureLabel, shortLabel: "LEAF SOLVE", value: value(contextMatches, snapshot.gpuPressure_ms), className: "stage-pressure", group: "compute", active: active(snapshot, "pressure"),
       description: "Compacts liquid rows, generates power descriptors and generalized faces, assembles the second-order power operator and Section 4.3 first-order preconditioner, then runs the selected pressure solve through its final iterate. This range includes the complete PCG/V-cycle work rather than stopping at assembly.", reads: ["balanced octree", "power-face velocity", "fine / coarse φ", "solid apertures"], writes: ["power-face operator", "octree pressure p", "solver residuals"], dependsOn: ["advection"]
     })];
-    const projectionStages = splitPowerProjection ? [
+    const powerProjectionStages = splitSection5FaceProjection ? [
       stage({
-        key: "power-projection", label: "Generalized power-face projection", shortLabel: "POWER PROJECT", value: value(contextMatches, snapshot.gpuPowerProjection_ms), className: "stage-projection", group: "compute", active: true,
-        description: "Applies the solved pressure jump to generalized faces, publishes the canonical adaptive normal velocities, enforces power-face solid constraints, and reconstructs and fast-marches the regular fine-band velocities used by interface transport.", reads: ["power faces", "leaf pressure p", "solid constraints", "predicted face velocity"], writes: ["projected power faces", "canonical adaptive velocity", "fine-band velocity"], dependsOn: ["pressure"], sync: "Shares one timestamp boundary with compatibility projection; the two values exactly partition the existing projection interval."
+        key: "face-band", label: "Section 5 face-band construction", shortLabel: "FACE BAND", value: value(contextMatches, snapshot.gpuFaceBand_ms), className: "stage-projection", group: "compute", active: true,
+        description: "Projects generalized faces, reconstructs the regular fine-band support, and builds its transition adjacency. This shared interval begins with generalized-face projection setup so the three Section 5 face intervals exactly partition power projection.", reads: ["power faces", "leaf pressure p", "fine / coarse φ", "transition catalog"], writes: ["projected power faces", "regular face-band rows", "transition adjacency"], dependsOn: ["pressure"], sync: "Shares hardware timestamp boundaries with face march and power publication; together they exactly equal power projection."
       }),
       stage({
+        key: "face-march", label: "Section 5 face velocity march", shortLabel: "FACE MARCH", value: value(contextMatches, snapshot.gpuFaceMarch_ms), className: "stage-projection", group: "compute", active: true,
+        description: "Extrapolates reconstructed regular-face velocities through the fine narrow band in closest-to-interface order.", reads: ["regular face-band rows", "fine / coarse φ", "projected face seeds"], writes: ["air-extended fine-band velocity"], dependsOn: ["face-band"]
+      }),
+      stage({
+        key: "power-publication", label: "Section 5 power-face publication", shortLabel: "POWER PUB", value: value(contextMatches, snapshot.gpuPowerPublication_ms), className: "stage-publication", group: "compute", active: true,
+        description: "Transfers the marched regular-face vectors back to generalized power faces, validates the all-or-nothing publication, and closes power-projection diagnostics before compatibility projection begins.", reads: ["air-extended fine-band velocity", "power-face centroids and normals"], writes: ["published power-face normal velocity", "publication control"], dependsOn: ["face-march"]
+      }),
+    ] : [stage({
+        key: "power-projection", label: "Generalized power-face projection", shortLabel: "POWER PROJECT", value: value(contextMatches, snapshot.gpuPowerProjection_ms), className: "stage-projection", group: "compute", active: true,
+        description: "Applies the solved pressure jump to generalized faces, publishes the canonical adaptive normal velocities, enforces power-face solid constraints, and reconstructs and fast-marches the regular fine-band velocities used by interface transport.", reads: ["power faces", "leaf pressure p", "solid constraints", "predicted face velocity"], writes: ["projected power faces", "canonical adaptive velocity", "fine-band velocity"], dependsOn: ["pressure"], sync: "Shares one timestamp boundary with compatibility projection; the two values exactly partition the existing projection interval."
+      })];
+    const projectionStages = splitPowerProjection ? [
+      ...powerProjectionStages,
+      stage({
         key: "projection", label: "Compatibility-field projection", shortLabel: "FIELD PROJECT", value: value(contextMatches, snapshot.gpuVelocityProjection_ms), className: "stage-projection", group: "compute", active: true,
-        description: "Reconstructs and projects the regular compatibility velocity field, applies body coupling and pressure impulses, and records projection parity diagnostics.", reads: ["leaf pressure p", "projected power faces", "rigid coupling state"], writes: ["regular velocity samples", "body pressure impulses", "projection parity"], dependsOn: ["power-projection"]
+        description: "Reconstructs and projects the regular compatibility velocity field, applies body coupling and pressure impulses, and records projection parity diagnostics.", reads: ["leaf pressure p", "projected power faces", "rigid coupling state"], writes: ["regular velocity samples", "body pressure impulses", "projection parity"], dependsOn: [splitSection5FaceProjection ? "power-publication" : "power-projection"]
       }),
     ] : [stage({
       key: "projection", label: "Finite-volume octree projection", shortLabel: "PROJECT", value: value(contextMatches, snapshot.gpuProjection_ms), className: "stage-projection", group: "compute", active: active(snapshot, "projection"),
@@ -97,11 +115,23 @@ export function physicsPerformanceStages({ methodId, snapshot, contextMatches, p
         key: "materialization", label: "Adaptive overlay materialization", shortLabel: "MAP FIELDS", value: value(contextMatches, snapshot.gpuMaterialization_ms), className: "stage-materialization", group: "compute", active: active(snapshot, "materialization"),
         description: "Materializes the resident owner map, pressure ownership, mapped pressure, and projected divergence into 3D textures for adaptive diagnostics and overlays.", reads: ["octree owners", "leaf pressure p", "projected velocity", "signed distance φ"], writes: ["topology overlay", "pressure overlay", "divergence overlay"], dependsOn: ["extrapolation"]
       }),
+      ...(splitSection5Surface ? [
       stage({
+        key: "fine-transport", label: "Fine level-set transport", shortLabel: "FINE MOVE", value: value(contextMatches, snapshot.gpuFineTransport_ms), className: "stage-surface-update", group: "compute", active: true,
+        description: "Prepares surface authority and compact seeds, then traces the global-fine level set through the reconstructed power velocity. Setup is assigned to this first shared interval so the three fine ranges exactly partition surface update.", reads: ["projected / extrapolated power velocity", "current fine and coarse φ"], writes: ["transported fine φ", "transport control"], dependsOn: ["materialization"], sync: "Shares hardware timestamp boundaries with fine topology and redistance; together they exactly equal surface update."
+      }),
+      stage({
+        key: "fine-topology", label: "Fine narrow-band topology", shortLabel: "FINE TOPO", value: value(contextMatches, snapshot.gpuFineTopology_ms), className: "stage-surface-update", group: "compute", active: true,
+        description: "Rebuilds the sparse fine-page set around the transported interface, activating newly required pages and retiring stale topology within the pending generation.", reads: ["transported fine φ", "interface seeds", "coarse φ directory"], writes: ["next fine-page topology", "topology publication control"], dependsOn: ["fine-transport"]
+      }),
+      stage({
+        key: "fine-redistance", label: "Fine redistance + publication", shortLabel: "FINE DIST", value: value(contextMatches, snapshot.gpuFineRedistance_ms), className: "stage-surface-update", group: "compute", active: true,
+        description: "Restores signed distance on the new fine band, applies volume correction, restricts corrected coarse φ, publishes summaries, and commits or rolls back the generation transactionally.", reads: ["transported fine φ", "next fine-page topology", "coarse volume authority"], writes: ["redistanced fine φ", "corrected coarse φ", "surface summaries", "publication generation"], dependsOn: ["fine-topology"]
+      })] : [stage({
         key: "surface-update", label: "Level-set transport + volume control", shortLabel: "SURFACE φ", value: value(contextMatches, snapshot.gpuSurfaceUpdate_ms), className: "stage-surface-update", group: "compute", active: active(snapshot, "surfaceUpdate"),
         description: "Adapts surface pages, seeds and transports the global-fine level set from reconstructed power velocity, redistances it, applies volume correction, restricts a corrected coarse φ directory, publishes sparse sizing summaries, and commits or rolls back the generation transactionally.", reads: ["projected / extrapolated power velocity", "current fine and coarse φ", "surface pages"], writes: ["next global-fine φ", "corrected coarse φ", "surface summaries", "publication generation"], dependsOn: ["materialization"]
-      }),
-      rigid("surface-update"),
+      })]),
+      rigid(splitSection5Surface ? "fine-redistance" : "surface-update"),
       spray("rigid"),
       stage({
         key: "fluid-residency", label: "Fluid brick residency", shortLabel: "RESIDENCY", value: value(contextMatches, snapshot.gpuFluidResidency_ms), className: "stage-residency", group: "compute", active: active(snapshot, "fluidResidency"),

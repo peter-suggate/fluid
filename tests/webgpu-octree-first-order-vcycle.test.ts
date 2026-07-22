@@ -108,7 +108,7 @@ test("GPU L1 path filters axis faces and exposes adjacent-level ghost transfers"
 
 test("repeated L1 V-cycles reuse per-level bind groups", () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8 } });
-  let bindGroups = 0, passes = 0;
+  let bindGroups = 0, passes = 0, dispatches = 0;
   const buffer = (size: number, usage = 7) => ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
   const device = {
     queue: { writeBuffer() {} },
@@ -122,14 +122,22 @@ test("repeated L1 V-cycles reuse per-level bind groups", () => {
   }, { dimensions: [16, 16, 16], rowCapacity: 128, maximumLevels: 5, finestCellWidth: 1 });
   const encoder = {
     clearBuffer() {}, copyBufferToBuffer() {},
-    beginComputePass: () => { passes += 1; return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; },
+    beginComputePass: () => { passes += 1; return { setPipeline() {}, setBindGroup() {},
+      dispatchWorkgroups() { dispatches += 1; }, end() {} }; },
   } as unknown as GPUCommandEncoder;
   const rowCount = buffer(64), control = buffer(64), rhs = buffer(512), correction = buffer(512);
   cycle.encodeSetup(encoder, { rowCount, solverControl: control });
   cycle.encodeCorrection(encoder, { rowCount, solverControl: control, rhs, correction });
-  const firstGroups = bindGroups, firstPasses = passes;
+  const firstGroups = bindGroups, firstPasses = passes, firstDispatches = dispatches;
+  assert.equal(firstPasses, 2, "setup and correction should each use one ordered compute pass");
+  assert.equal(cycle.encodedPassTransitionCount, 1);
+  assert.equal(cycle.encodedCorrectionPassCount, cycle.encodedCorrectionDispatchCount,
+    "the legacy count remains an exact dispatch-count alias");
+  assert.equal(firstDispatches - 3, cycle.encodedCorrectionDispatchCount,
+    "reported V-cycle dispatch count must equal the correction command stream");
   cycle.encodeCorrection(encoder, { rowCount, solverControl: control, rhs, correction });
-  assert.ok(firstPasses > firstGroups, `${firstPasses} dispatch passes should share ${firstGroups} descriptors`);
+  assert.equal(passes, firstPasses + 1, "a repeated correction adds one compute pass, not one per dispatch");
+  assert.ok(firstDispatches > firstGroups, `${firstDispatches} dispatches should share ${firstGroups} descriptors`);
   assert.equal(bindGroups, firstGroups, "a repeated correction must allocate no bind groups");
   cycle.destroy();
 });

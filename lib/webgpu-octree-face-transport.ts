@@ -409,7 +409,12 @@ fn validRow(row: u32) -> bool { return row != INVALID && row < atomicLoad(&contr
 
 // Resolution-aware one-ring interpolation. With 2:1 balance and CFL <= 1,
 // both departure and arrival lie inside the adjacent leaves represented by
-// these two bounded incidence slabs. Face span controls the support radius.
+// these two bounded incidence slabs. Weights form a span-aware tent product:
+// on a uniform lattice this is exact per-axis staggered (MAC) interpolation
+// and reproduces each face's own sample, so resampling at rest adds no
+// numerical diffusion (Aanjaneya et al. 2017 Sec. 5 reverts to "standard
+// per-axis face-based velocity interpolation" away from level transitions);
+// across 2:1 transitions it degrades to a normalized partition-of-unity blend.
 fn sampleComponent(point: vec3f, axis: u32, rowA: u32, rowB: u32, fallback: f32) -> f32 {
   var weighted = 0.0; var weights = 0.0; var nearest = fallback; var nearestD2 = 3.402823e38; var visited=0u;
   for (var side = 0u; side < 2u; side += 1u) {
@@ -422,7 +427,8 @@ fn sampleComponent(point: vec3f, axis: u32, rowA: u32, rowB: u32, fallback: f32)
       let candidate = faces[index]; if (faceAxis(candidate) != axis) { continue; }
       let delta = (point - faceCentre(candidate)) / params.cellSize.xyz; let d2 = dot(delta, delta);
       if (d2 < nearestD2) { nearestD2 = d2; nearest = velocityIn[index]; }
-      let support = max(1.0, f32(faceSpan(candidate))); let weight = 1.0 / max(0.0625 * support * support, d2);
+      let support = max(1.0, f32(faceSpan(candidate))); let tent = max(vec3f(0.0), vec3f(1.0) - abs(delta) / support);
+      let weight = tent.x * tent.y * tent.z;
       weighted += weight * velocityIn[index]; weights += weight;
     }
   }

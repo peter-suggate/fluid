@@ -115,6 +115,7 @@ export function WebGPUViewport() {
       (time_s) => simulation.gpuAdvanceCompleted(time_s),
       (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus })
     );
+    renderer.setPerformanceReadbacksEnabled(useUIStore.getState().performanceReadbacksEnabled);
     let safeSimulationEpoch: number | undefined;
     const syncRunState = (runState: ReturnType<typeof useRuntimeStore.getState>["runState"]) => {
       const submittedTime_s = renderer.setSimulationRunning(runState === "running");
@@ -227,6 +228,7 @@ export function WebGPUViewport() {
         const method = useMethodStore.getState();
         const state = useDiagnosticsStore.getState();
         const runtime = useRuntimeStore.getState();
+        renderer.setPerformanceReadbacksEnabled(ui.performanceReadbacksEnabled);
         // A profiler needs newly completed submissions, not repeated snapshots
         // of the last on-change frame. Static dry scenes have no fluid solver
         // and are paused by design, so keep presenting while PERF is visible.
@@ -352,7 +354,7 @@ export function WebGPUViewport() {
       const ray = pointerRay(event);
       const grab = sliceGrabHit(ray.origin, ray.direction);
       if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
-      if (simulation.backend === "webgpu" && rendererRef.current) {
+      if (simulation.backend === "webgpu" && rendererRef.current && useUIStore.getState().performanceReadbacksEnabled) {
         const pointerId=event.pointerId,timeStamp=event.timeStamp,x=event.clientX,y=event.clientY;
         pointerRef.current={id:pointerId,x,y,action:"pick"};
         const rect=event.currentTarget.getBoundingClientRect();

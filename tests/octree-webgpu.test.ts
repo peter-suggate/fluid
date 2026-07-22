@@ -77,6 +77,11 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.equal(octreeMethod.id, "octree");
   assert.equal(octreeMethod.backend, "webgpu");
   assert.equal(octreeMethod.presetFor("balanced").pressureIterations, 128);
+  assert.equal(octreeMethod.presetFor("balanced").powerPcgIterationCap, 128);
+  assert.equal(octreeMethod.presetFor("balanced").powerMultigridHierarchy, "aggregate-galerkin");
+  assert.equal(octreeMethod.params.find((spec) => spec.key === "powerMultigridHierarchy")?.tier, "coarse");
+  assert.equal(octreeMethod.params.find((spec) => spec.key === "powerPcgIterationCap")?.tier, "fine");
+  assert.equal(octreeMethod.params.find((spec) => spec.key === "pressureIterations")?.tier, "fine");
   assert.equal(octreeMethod.params.some((spec) => spec.key === "surfaceColumns"), false,
     "scene voxelDomain is the sole spatial-resolution authority");
   const layout = createTallCellLayout(defaultScene, "balanced", 2_048);

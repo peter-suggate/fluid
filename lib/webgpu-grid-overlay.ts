@@ -302,7 +302,7 @@ fn octreeFaceAudit(row:u32,point:vec3f)->OctreeFaceAudit{
   var weighted=vec3f(0.0);var weights=vec3f(0.0);
   for(var local=0u;local<count;local+=1u){let at=rowCapacity+row*OCTREE_FACE_INCIDENCE_PER_ROW+local;if(at>=arrayLength(&octreeIncidence)){result.fault|=8u;break;}let faceIndex=octreeIncidence[at];if(faceIndex>=octreeFaceControl[0]||faceIndex>=octreeFaceControl[2]||faceIndex>=arrayLength(&octreeFaces)){result.fault|=8u;continue;}
     let face=octreeFaces[faceIndex];let axis=face.axisSpan&3u;let span=face.axisSpan>>2u;if(axis>2u||span==0u||abs(face.normalVelocity)>3.402823e38||!(face.negativeRow==row||face.positiveRow==row)){result.fault|=8u;continue;}
-    var centre=vec3f(vec3u(face.originX,face.originY,face.originZ));centre[(axis+1u)%3u]+=0.5*f32(span);centre[(axis+2u)%3u]+=0.5*f32(span);let delta=point-centre;let distanceSquared=dot(delta,delta);let support=f32(max(1u,span));let weight=1.0/max(0.0625*support*support,distanceSquared);
+    var centre=vec3f(vec3u(face.originX,face.originY,face.originZ));centre[(axis+1u)%3u]+=0.5*f32(span);centre[(axis+2u)%3u]+=0.5*f32(span);let delta=point-centre;let support=f32(max(1u,span));let tent=max(vec3f(0.0),vec3f(1.0)-abs(delta)/support);let weight=tent.x*tent.y*tent.z;
     weighted[axis]+=weight*face.normalVelocity;weights[axis]+=weight;result.axisMask|=1u<<axis;result.count+=1u;
   }
   for(var axis=0u;axis<3u;axis+=1u){if(weights[axis]>0.0){result.velocity[axis]=weighted[axis]/weights[axis];}}

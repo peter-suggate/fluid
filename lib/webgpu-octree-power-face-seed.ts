@@ -60,6 +60,7 @@ export class WebGPUOctreePowerFaceSeed {
   private readonly reversePreparePipeline: GPUComputePipeline;
   private readonly reverseReconstructPipeline: GPUComputePipeline;
   private readonly reversePublishPipeline: GPUComputePipeline;
+  private readonly reverseOverridePipeline: GPUComputePipeline;
   private readonly reverseFinalizePipeline: GPUComputePipeline;
   private readonly reverseRejectPipeline: GPUComputePipeline;
   private readonly reverseCommitPipeline: GPUComputePipeline;
@@ -96,6 +97,7 @@ export class WebGPUOctreePowerFaceSeed {
     this.reversePreparePipeline = pipeline("preparePowerToAxis");
     this.reverseReconstructPipeline = pipeline("reconstructPowerRowVelocity");
     this.reversePublishPipeline = pipeline("publishAxisFaceVelocity");
+    this.reverseOverridePipeline = pipeline("overrideHomologousAxisVelocity");
     this.reverseFinalizePipeline = pipeline("publishPowerToAxis");
     this.reverseRejectPipeline = pipeline("rejectFailedAuthoritativePowerToAxis");
     this.reverseCommitPipeline = pipeline("commitPowerToAxis");
@@ -120,6 +122,10 @@ export class WebGPUOctreePowerFaceSeed {
     run("Publish projected power velocity to compact Cartesian faces", this.reversePublishPipeline,
       Math.ceil(this.axis.plan.faceCapacity / 64), [[1, this.axis.control], [2, this.axis.faces],
         [7, this.rowVelocities], [9, this.control], [13, this.axisVelocityScratch]]);
+    run("Copy homologous projected power velocities exactly", this.reverseOverridePipeline,
+      Math.ceil(this.axis.plan.faceCapacity / 64), [[1, this.axis.control], [2, this.axis.faces],
+        [5, this.power.faces], [6, this.power.faceNormals], [9, this.control],
+        [11, this.power.incidenceRows], [12, this.power.incidence], [13, this.axisVelocityScratch]]);
     run("Finalize power-to-axis velocity publication", this.reverseFinalizePipeline, 1,
       [[1, this.axis.control], [9, this.control]]);
     if (authoritative) run("Reject failed authoritative power-to-axis publication", this.reverseRejectPipeline, 1,
@@ -145,7 +151,8 @@ export class WebGPUOctreePowerFaceSeed {
       Math.ceil(this.plan.rowCapacity / 64), [[0, this.params], [1, this.axis.control], [2, this.axis.faces],
         [3, this.axis.incidence], [7, this.rowVelocities], [8, this.rowStatus], [9, this.control]]);
     run("Project transferred velocities onto power faces", this.seedPipeline,
-      Math.ceil(this.plan.faceCapacity / 64), [[5, this.power.faces], [6, this.power.faceNormals],
+      Math.ceil(this.plan.faceCapacity / 64), [[0, this.params], [1, this.axis.control], [2, this.axis.faces],
+        [3, this.axis.incidence], [5, this.power.faces], [6, this.power.faceNormals],
         [7, this.rowVelocities], [9, this.control]]);
     run("Publish canonical power-face velocity seed", this.publishPipeline, 1, [[9, this.control]]);
   }
@@ -211,6 +218,55 @@ const INCIDENCE:u32=4u;const INCOMPLETE:u32=8u;const NORMAL:u32=16u;const NONFIN
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn fail(error:u32,index:u32){atomicOr(&seed.flags,error);atomicMin(&seed.firstError,index);}
 fn rowCount()->u32{return atomicLoad(&seed.rowCount);}fn faceCount()->u32{return atomicLoad(&seed.faceCount);}
+fn dominantAxis(n:vec3f)->u32{let a=abs(n);var axis=0u;if(a.y>a.x){axis=1u;}if(a.z>a[axis]){axis=2u;}return axis;}
+// Paper Sections 4.2/5: a power face that is homologous to an octree face
+// carries the SAME normal-velocity degree of freedom. Both bridges below copy
+// that scalar exactly for axis-aligned faces instead of resampling through
+// cell-centre vector averages: the averaging round trip (axis -> cell -> power
+// before the solve, power -> cell -> axis after projection) acts as a
+// [1 2 1]/4 smoother on every face every step and visibly damps sloshing.
+// Reconstruction remains for genuinely new power-diagram faces (edge
+// neighbours and slanted transition faces). Returns (value, found).
+fn homologousAxisVelocity(face:PowerFace,n:vec3f)->vec2f{
+  let axis=dominantAxis(n);let nAxis=n[axis];if(abs(nAxis)<0.999){return vec2f(0.0);}
+  let axisRows=axisControl[3];let row=face.negativeRow;if(row>=axisRows||row>=arrayLength(&axisIncidence)){return vec2f(0.0);}
+  let count=min(axisIncidence[row],params.axisIncidencePerRow);
+  for(var local=0u;local<count;local+=1u){let at=axisRows+row*params.axisIncidencePerRow+local;if(at>=arrayLength(&axisIncidence)){break;}
+    let faceIndex=axisIncidence[at];if(faceIndex>=axisControl[0]||faceIndex>=arrayLength(&axisFaces)){continue;}
+    let axisFace=axisFaces[faceIndex];if((axisFace.axisSpan&3u)!=axis||!finite(axisFace.normalVelocity)){continue;}
+    let ordered=axisFace.negativeRow==face.negativeRow&&axisFace.positiveRow==face.positiveRow;
+    let swapped=axisFace.negativeRow==face.positiveRow&&axisFace.positiveRow==face.negativeRow;
+    if(!ordered&&!swapped){continue;}
+    if(face.positiveRow==INVALID){
+      // The two same-axis wall faces of one cell share this row pair; the
+      // live row slot encodes which side the face lies on.
+      let outward=select(-1.0,1.0,axisFace.negativeRow!=INVALID);
+      if(nAxis*outward<0.0){continue;}
+    }
+    return vec2f(axisFace.normalVelocity*nAxis,1.0);
+  }
+  return vec2f(0.0);
+}
+fn homologousPowerVelocity(face:AxisFace,axis:u32)->vec2f{
+  var row=face.negativeRow;if(row==INVALID){row=face.positiveRow;}
+  if(row>=rowCount()||row+1u>=arrayLength(&powerRows)){return vec2f(0.0);}
+  let begin=powerRows[row].w;let end=powerRows[row+1u].w;
+  for(var cursor=begin;cursor<end;cursor+=1u){if(cursor>=arrayLength(&powerIncidence)){break;}
+    let faceIndex=powerIncidence[cursor].x;if(faceIndex>=faceCount()||faceIndex>=arrayLength(&powerFaces)||faceIndex>=arrayLength(&powerNormals)){continue;}
+    let power=powerFaces[faceIndex];
+    let ordered=power.negativeRow==face.negativeRow&&power.positiveRow==face.positiveRow;
+    let swapped=power.negativeRow==face.positiveRow&&power.positiveRow==face.negativeRow;
+    if(!ordered&&!swapped){continue;}
+    let n=powerNormals[faceIndex].xyz;let nAxis=n[axis];if(abs(nAxis)<0.999){continue;}
+    if(face.negativeRow==INVALID||face.positiveRow==INVALID){
+      let outward=select(-1.0,1.0,face.negativeRow!=INVALID);
+      if(nAxis*outward<0.0){continue;}
+    }
+    if(!finite(power.normalVelocity)){continue;}
+    return vec2f(power.normalVelocity*nAxis,1.0);
+  }
+  return vec2f(0.0);
+}
 @compute @workgroup_size(1) fn preparePowerFaceSeed(){atomicStore(&seed.flags,0u);atomicStore(&seed.firstError,INVALID);
   atomicStore(&seed.seededCount,0u);atomicStore(&seed.valid,0u);atomicStore(&seed.fallbackCount,0u);
   atomicStore(&seed.forwardFlags,0u);atomicStore(&seed.forwardFirstError,INVALID);atomicStore(&seed.forwardSeededCount,0u);atomicStore(&seed.forwardValid,0u);
@@ -239,6 +295,8 @@ fn rowCount()->u32{return atomicLoad(&seed.rowCount);}fn faceCount()->u32{return
   let n=powerNormals[index].xyz;let n2=dot(n,n);if(!all(vec3<bool>(finite(n.x),finite(n.y),finite(n.z)))||!finite(n2)||abs(n2-1.0)>4e-4){fail(NORMAL,index);return;}
   var velocity=rowVelocities[face.negativeRow].xyz;if(face.positiveRow!=INVALID){if(face.positiveRow>=rowCount()){fail(INCIDENCE,index);return;}velocity=0.5*(velocity+rowVelocities[face.positiveRow].xyz);}
   var normalVelocity=dot(velocity,n);
+  let homologous=homologousAxisVelocity(face,n);
+  if(homologous.y!=0.0){normalVelocity=homologous.x;}else{atomicAdd(&seed.fallbackCount,1u);}
   // Container walls are not part of the terrain/rigid aperture classifier.
   // Enforce their authored no-through-flow condition here; otherwise the
   // cell-centred reconstruction gives a bottom wall half of the gravity kick
@@ -290,6 +348,13 @@ fn rowCount()->u32{return atomicLoad(&seed.rowCount);}fn faceCount()->u32{return
   var velocity=vec3f(0.0);if(face.negativeRow!=INVALID){velocity=rowVelocities[face.negativeRow].xyz;}else{velocity=rowVelocities[face.positiveRow].xyz;}
   if(face.negativeRow!=INVALID&&face.positiveRow!=INVALID){velocity=0.5*(velocity+rowVelocities[face.positiveRow].xyz);}
   let value=velocity[axis];if(!finite(value)||index>=arrayLength(&axisVelocityScratch)){fail(NONFINITE,index);return;}axisVelocityScratch[index]=value;atomicMax(&seed.axisOutputMaxBits,bitcast<u32>(abs(value)));atomicAdd(&seed.seededCount,1u);}
+// Runs in a dedicated pass (its own auto layout) so the least-squares
+// fallback publication above stays within the 8-storage-buffer stage limit.
+@compute @workgroup_size(64) fn overrideHomologousAxisVelocity(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;
+  if(index>=axisControl[0]||index>=arrayLength(&axisFaces)||index>=arrayLength(&axisVelocityScratch)||atomicLoad(&seed.flags)!=0u){return;}
+  let face=axisFaces[index];let axis=face.axisSpan&3u;if(axis>=3u){return;}
+  let projected=homologousPowerVelocity(face,axis);
+  if(projected.y!=0.0&&finite(projected.x)){axisVelocityScratch[index]=projected.x;}}
 @compute @workgroup_size(1) fn publishPowerToAxis(){if(atomicLoad(&seed.flags)==0u&&atomicLoad(&seed.seededCount)==axisControl[0]){
   atomicStore(&seed.valid,VALID);}else{atomicStore(&seed.valid,0u);}}
 @compute @workgroup_size(1) fn rejectFailedAuthoritativePowerToAxis(){if(atomicLoad(&seed.valid)!=VALID&&arrayLength(&axisControl)>1u){

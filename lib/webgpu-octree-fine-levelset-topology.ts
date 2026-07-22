@@ -55,6 +55,16 @@ export interface FineLevelSetLeafBrickBounds {
   readonly brickCount: number;
 }
 
+/** Number of fixed GPU expansions needed to fill an exact Chebyshev ball.
+ * Expansion radii grow 0 -> 1 -> 3 -> 7 ... and clamp at the requested
+ * radius, so the dispatch count is logarithmic without over-dilating. */
+export function planFineLevelSetChebyshevFloodPasses(dilationBrickRings: number): number {
+  if (!Number.isSafeInteger(dilationBrickRings) || dilationBrickRings < 0) {
+    throw new RangeError("Fine topology dilation radius must be a non-negative integer");
+  }
+  return dilationBrickRings === 0 ? 0 : Math.ceil(Math.log2(dilationBrickRings + 1));
+}
+
 /**
  * CPU mirror of the SurfaceLeaf -> global fine-page mapping used by the seed
  * shader.  With B4 pages, factor four maps a finest cell to one page while
@@ -128,7 +138,10 @@ export function fineLevelSetLeafSeedAllocatedBytes(maximumResidentBricks: number
   if (!Number.isSafeInteger(hashCapacity) || hashCapacity < 1 || (hashCapacity & (hashCapacity - 1)) !== 0) {
     throw new RangeError("Fine seed hash capacity must be a positive power of two");
   }
-  return (2 + 9 * maximumResidentBricks + 2 * hashCapacity) * 4 + 48;
+  // The seed ABI itself is unchanged.  Two words per resident page are a
+  // private scan arena: this is enough for one block sum per 64 input rows
+  // plus the candidate-row bitset without coupling the scan to a CPU readback.
+  return (6 + 11 * maximumResidentBricks + 2 * hashCapacity) * 4 + 64;
 }
 
 export const FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES = 32 + 96 + 8 + 64 + 32;
@@ -138,9 +151,8 @@ export class WebGPUFineLevelSetLeafSeeds {
   readonly buffer: GPUBuffer;
   readonly allocatedBytes: number;
   private readonly params: GPUBuffer;
-  private readonly pipeline: GPUComputePipeline;
-  private readonly allLeavesPipeline: GPUComputePipeline;
-  private readonly allLeavesAndPowerBoundaryPipeline: GPUComputePipeline;
+  private readonly scratch: GPUBuffer;
+  private readonly pipelines: Record<string, GPUComputePipeline>;
 
   constructor(private readonly device: GPUDevice, readonly target: WebGPUFineLevelSetBrickSource) {
     this.allocatedBytes = fineLevelSetLeafSeedAllocatedBytes(
@@ -149,61 +161,120 @@ export class WebGPUFineLevelSetLeafSeeds {
     this.buffer = device.createBuffer({ label: "global fine brick seed keys",
       size: (2 + 9 * target.plan.maximumResidentBricks + 2 * target.plan.hashCapacity) * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.params = device.createBuffer({ label: "global fine seed parameters", size: 48,
+    this.params = device.createBuffer({ label: "global fine seed parameters", size: 64,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.scratch = device.createBuffer({ label: "global fine deterministic seed scan",
+      size: (2 * target.plan.maximumResidentBricks + 4) * 4, usage: GPUBufferUsage.STORAGE });
     const shaderModule = device.createShaderModule({ label: "SurfaceLeaf to global fine seeds", code: fineLevelSetLeafSeedWGSL });
-    this.pipeline = device.createComputePipeline({ label: "Emit global fine seed keys", layout: "auto",
-      compute: { module: shaderModule, entryPoint: "emitSeeds" } });
-    this.allLeavesPipeline = device.createComputePipeline({ label: "Emit global fine seeds from all interface leaves", layout: "auto",
-      compute: { module: shaderModule, entryPoint: "emitAllInterfaceSeeds" } });
-    this.allLeavesAndPowerBoundaryPipeline = device.createComputePipeline({
-      label: "Emit global fine seeds from interface leaves and power boundary endpoints", layout: "auto",
-      compute: { module: shaderModule, entryPoint: "emitAllInterfaceAndPowerBoundarySeeds" },
-    });
+    const entryPoints = ["clearSeedState", "markCandidateRows", "classifyCandidateLeafBlocks",
+      "claimCandidateLeafOwners", "claimAllLeafOwners", "classifyAllLeafBlocks",
+      "scanLeafSeedBlocks", "emitCandidateLeafSeeds", "emitAllLeafSeeds", "finalizeLeafHash",
+      "claimPowerEndpointOwners", "classifyPowerEndpointBlocks", "scanPowerEndpointBlocks",
+      "emitPowerEndpointSeeds"];
+    this.pipelines = Object.fromEntries(entryPoints.map((entryPoint) => [entryPoint,
+      device.createComputePipeline({ label: `Global fine seed ${entryPoint}`, layout: "auto",
+        compute: { module: shaderModule, entryPoint } })]));
   }
 
-  private writeParams(): void {
+  private bindingBytes(binding: GPUBufferBinding): number {
+    return binding.size ?? binding.buffer.size - (binding.offset ?? 0);
+  }
+
+  private writeParams(leafCapacity: number, endpointCapacity: number): { leafBlocks: number; endpointBlocks: number } {
     const plan = this.target.plan;
-    const bytes = new ArrayBuffer(48); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
+    const leafBlocks = Math.max(1, Math.ceil(leafCapacity / 64));
+    const endpointBlocks = Math.max(1, Math.ceil(endpointCapacity / 64));
+    const eligibilityWords = Math.ceil(leafCapacity / 32);
+    const requiredScratchWords = Math.max(leafBlocks, endpointBlocks) + 2 + eligibilityWords;
+    if (requiredScratchWords > this.scratch.size / 4) {
+      throw new RangeError(`Fine seed scan requires ${requiredScratchWords} words, capacity is ${this.scratch.size / 4}`);
+    }
+    const bytes = new ArrayBuffer(64); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
     u32.set([plan.fineFactor, plan.brickResolution, ...plan.brickDimensions,
       plan.maximumResidentBricks, plan.logicalBrickCount, plan.hashCapacity]);
     f32.set([...plan.domainOrigin, plan.fineCellWidth], 8);
+    u32.set([leafCapacity, leafBlocks, endpointCapacity, endpointBlocks], 12);
     this.device.queue.writeBuffer(this.params, 0, bytes);
+    return { leafBlocks, endpointBlocks };
+  }
+
+  private group(entryPoint: string, entries: GPUBindGroupEntry[]): GPUBindGroup {
+    const bindings: Record<string, readonly number[]> = {
+      clearSeedState: [0, 4, 7], markCandidateRows: [0, 2, 3, 7],
+      claimCandidateLeafOwners: [0, 1, 3, 4, 7], claimAllLeafOwners: [0, 1, 3, 4, 7],
+      classifyCandidateLeafBlocks: [0, 1, 3, 4, 7], classifyAllLeafBlocks: [0, 1, 3, 4, 7],
+      scanLeafSeedBlocks: [0, 4, 7], emitCandidateLeafSeeds: [0, 1, 3, 4, 7],
+      emitAllLeafSeeds: [0, 1, 3, 4, 7], claimPowerEndpointOwners: [0, 4, 5, 6],
+      finalizeLeafHash: [0, 4],
+      classifyPowerEndpointBlocks: [0, 4, 5, 6, 7], scanPowerEndpointBlocks: [0, 4, 7],
+      emitPowerEndpointSeeds: [0, 4, 5, 6, 7],
+    };
+    const used = new Set(bindings[entryPoint]);
+    return this.device.createBindGroup({ layout: this.pipelines[entryPoint].getBindGroupLayout(0),
+      entries: entries.filter((entry) => used.has(entry.binding)) });
+  }
+
+  private run(pass: GPUComputePassEncoder, entryPoint: string, workgroups: number,
+    entries: GPUBindGroupEntry[]): void {
+    pass.setPipeline(this.pipelines[entryPoint]); pass.setBindGroup(0, this.group(entryPoint, entries));
+    pass.dispatchWorkgroups(workgroups);
   }
 
   encode(encoder: GPUCommandEncoder, leaves: GPUBufferBinding, candidates: GPUBufferBinding,
     candidateCountAndDispatch: GPUBufferBinding): FineLevelSetGPUSeedSource {
-    this.writeParams();
-    this.device.queue.writeBuffer(this.buffer, 0, new Uint32Array(2));
-    const group = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
+    const leafCapacity = Math.floor(this.bindingBytes(leaves) / 64);
+    const candidateCapacity = Math.floor(this.bindingBytes(candidates) / 8);
+    const { leafBlocks } = this.writeParams(leafCapacity, 0);
+    const entries: GPUBindGroupEntry[] = [
       { binding: 0, resource: { buffer: this.params } }, { binding: 1, resource: leaves },
       { binding: 2, resource: candidates }, { binding: 3, resource: candidateCountAndDispatch },
-      { binding: 4, resource: { buffer: this.buffer } },
-    ] });
+      { binding: 4, resource: { buffer: this.buffer } }, { binding: 7, resource: { buffer: this.scratch } },
+    ];
     const pass = encoder.beginComputePass({ label: "Seed global fine bricks from SurfaceLeaf candidates" });
-    pass.setPipeline(this.pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(1); pass.end();
+    this.run(pass, "clearSeedState", Math.ceil(Math.max(2 * this.target.plan.hashCapacity,
+      Math.ceil(leafCapacity / 32), 2) / 64), entries);
+    this.run(pass, "markCandidateRows", Math.max(1, Math.ceil(candidateCapacity / 64)), entries);
+    this.run(pass, "claimCandidateLeafOwners", leafBlocks, entries);
+    this.run(pass, "classifyCandidateLeafBlocks", leafBlocks, entries);
+    this.run(pass, "scanLeafSeedBlocks", 1, entries);
+    this.run(pass, "emitCandidateLeafSeeds", leafBlocks, entries);
+    this.run(pass, "finalizeLeafHash", Math.ceil(this.target.plan.maximumResidentBricks / 64), entries);
+    pass.end();
     return { buffer: this.buffer, affineValues: true };
   }
 
   encodeFromAllInterfaceLeaves(encoder: GPUCommandEncoder, leaves: GPUBufferBinding,
     rowCount: GPUBufferBinding, powerBoundary?: FineLevelSetPowerBoundarySeedSource): FineLevelSetGPUSeedSource {
-    this.writeParams(); this.device.queue.writeBuffer(this.buffer, 0, new Uint32Array(2));
-    const pipeline = powerBoundary ? this.allLeavesAndPowerBoundaryPipeline : this.allLeavesPipeline;
+    const leafCapacity = Math.floor(this.bindingBytes(leaves) / 64);
+    const endpointCapacity = powerBoundary ? Math.floor(this.bindingBytes(powerBoundary.queries) / 32) : 0;
+    const { leafBlocks, endpointBlocks } = this.writeParams(leafCapacity, endpointCapacity);
     const entries: GPUBindGroupEntry[] = [
       { binding: 0, resource: { buffer: this.params } }, { binding: 1, resource: leaves },
       { binding: 3, resource: rowCount }, { binding: 4, resource: { buffer: this.buffer } },
+      { binding: 7, resource: { buffer: this.scratch } },
     ];
     if (powerBoundary) entries.push(
       { binding: 5, resource: powerBoundary.queries },
       { binding: 6, resource: powerBoundary.control },
     );
-    const group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
     const pass = encoder.beginComputePass({ label: "Seed global fine bricks from every interface leaf" });
-    pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(1); pass.end();
+    this.run(pass, "clearSeedState", Math.ceil(Math.max(2 * this.target.plan.hashCapacity, 2) / 64), entries);
+    this.run(pass, "claimAllLeafOwners", leafBlocks, entries);
+    this.run(pass, "classifyAllLeafBlocks", leafBlocks, entries);
+    this.run(pass, "scanLeafSeedBlocks", 1, entries);
+    this.run(pass, "emitAllLeafSeeds", leafBlocks, entries);
+    this.run(pass, "finalizeLeafHash", Math.ceil(this.target.plan.maximumResidentBricks / 64), entries);
+    if (powerBoundary) {
+      this.run(pass, "claimPowerEndpointOwners", endpointBlocks, entries);
+      this.run(pass, "classifyPowerEndpointBlocks", endpointBlocks, entries);
+      this.run(pass, "scanPowerEndpointBlocks", 1, entries);
+      this.run(pass, "emitPowerEndpointSeeds", endpointBlocks, entries);
+    }
+    pass.end();
     return { buffer: this.buffer, affineValues: true };
   }
 
-  destroy(): void { this.buffer.destroy(); this.params.destroy(); }
+  destroy(): void { this.buffer.destroy(); this.params.destroy(); this.scratch.destroy(); }
 }
 
 export function unpackFineLevelSetGPUTopologyControl(words: ArrayLike<number>): FineLevelSetGPUTopologyControl {
@@ -313,19 +384,17 @@ export class WebGPUFineLevelSetTopology {
       redistanceBandFineCells: 0,
       safetyBrickRings: 1,
     });
-    // Paper Section 5 starts the new SPGrid generation with interface blocks
-    // plus exactly one block 1-ring. The distance march, not topology
-    // pre-dilation, activates every additional page required by the physical
-    // band. Retired pages are absent because the target hash/metadata/worklist
-    // are rebuilt from this initial set before marching.
-    const initialDilationBrickRings = bandPlan.safetyBrickRings;
+    // Redistance consumes an immutable resident generation. Allocate the full
+    // transport + interpolation + signed-distance support before either FMM
+    // or JFA-CPT starts; no distance pass is permitted to mutate page tables.
+    const dilationBrickRings = bandPlan.dilationBrickRings;
     const bytes = new ArrayBuffer(96); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
     u32.set(plan.brickDimensions, 0); u32[3] = plan.brickResolution;
     u32.set(plan.sampleDimensions, 4); u32[7] = plan.samplesPerBrick;
     f32.set(plan.domainOrigin, 8); f32[11] = plan.fineCellWidth;
     u32.set([plan.hashCapacity, plan.maximumHashProbes, plan.maximumResidentBricks,
       this.current.generation, this.next.generation, plan.fineFactor], 12);
-    u32[18] = seedSource?.affineValues ? 1 : 0; u32[19] = initialDilationBrickRings;
+    u32[18] = seedSource?.affineValues ? 1 : 0; u32[19] = dilationBrickRings;
     u32[20] = deferPublication ? 1 : 0;
     this.device.queue.writeBuffer(this.params, 0, bytes);
     this.device.queue.writeBuffer(this.control, 0, new Uint32Array(8));
@@ -367,16 +436,16 @@ export class WebGPUFineLevelSetTopology {
       [0, 5, 6, 7]);
     run(this.discoverPipeline, discoverEntries, "Discover global fine interface bricks",
       Math.ceil(plan.maximumResidentBricks / 64), [0, 1, 2, 3, 4, 5, 6, 7]);
-    // Section 5 rebuilds interface blocks and their 1-ring after every
-    // advection. The compact source tags only exact power-endpoint support for
-    // recurring insertion; ordinary affine SurfaceLeaf keys remain cold-only.
+    // The compact source tags only exact power-endpoint support for recurring
+    // insertion; ordinary affine SurfaceLeaf keys remain cold-only.
     run(this.externalSeedPipeline, discoverEntries, "Insert external global fine seed bricks",
       Math.ceil(plan.maximumResidentBricks / 64), [0, 2, 5, 6, 7, 8]);
     run(this.beginDilationPipeline, discoverEntries, "Begin global fine topology dilation", 1, [0, 6, 7]);
-    for (let ring = 0; ring < initialDilationBrickRings; ring += 1) {
-      run(this.dilatePipeline, discoverEntries, `Dilate global fine topology ring ${ring + 1}`,
+    const floodPasses = planFineLevelSetChebyshevFloodPasses(dilationBrickRings);
+    for (let flood = 0; flood < floodPasses; flood += 1) {
+      run(this.dilatePipeline, discoverEntries, `Flood global fine topology support ${flood + 1}`,
         Math.ceil(plan.maximumResidentBricks / 64), [0, 5, 6, 7]);
-      run(this.advanceDilationPipeline, discoverEntries, `Advance global fine topology ring ${ring + 1}`,
+      run(this.advanceDilationPipeline, discoverEntries, `Advance global fine topology support ${flood + 1}`,
         1, [0, 6, 7]);
     }
     run(this.snapshotPipeline, snapshotEntries, "Snapshot current global fine payload", plan.maximumResidentBricks,
@@ -495,8 +564,11 @@ fn linearInvocation(wid:vec3u,nwg:vec3u,local:u32)->u32{return fineLinearWorkgro
 @compute @workgroup_size(64) fn discoverInterfaceBricks(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);let rawCount=sourceB[0];if(work==0u&&rawCount>params.pageCapacity){atomicOr(&control[0],MALFORMED);}let activeCount=min(rawCount,params.pageCapacity);if(work>=activeCount){return;}let id=sourceB[5u+work];if(id>=params.pageCapacity||sourceA[id*10u+2u]!=params.currentGeneration){atomicOr(&control[0],MALFORMED);return;}var interfaceBrick=false;for(var sample=0u;sample<params.samplesPerBrick&&!interfaceBrick;sample+=1u){let index=id*params.samplesPerBrick+sample;if((sourceC[index]&VALID)==0u){continue;}let center=bitcast<f32>(sourceD[index]);if(!finite(center)){atomicOr(&control[0],MALFORMED);continue;}for(var direction=0u;direction<6u;direction+=1u){let neighbor=currentNeighbor(id,sample,direction);if(neighbor==INVALID||(sourceC[neighbor]&VALID)==0u){continue;}let other=bitcast<f32>(sourceD[neighbor]);if(finite(other)&&(other<0.0)!=(center<0.0)){interfaceBrick=true;break;}}}if(interfaceBrick){atomicAdd(&control[1],1u);insertDesired(sourceA[id*10u+1u]);}}
 @compute @workgroup_size(64) fn insertExternalSeeds(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let currentPublished=sourceB[1]==params.currentGeneration&&sourceB[3]==1u&&sourceB[4]==1u;let seed=linearInvocation(wid,nwg,local);if(arrayLength(&externalSeeds)<2u){return;}let rawCount=externalSeeds[0];let available=arrayLength(&externalSeeds)-2u;if(seed==0u&&(externalSeeds[1]!=0u||rawCount>params.pageCapacity||rawCount>available)){atomicOr(&control[0],CAPACITY);atomicMax(&control[6],max(rawCount,params.pageCapacity+1u));}let count=min(rawCount,min(params.pageCapacity,available));if(seed>=count){return;}let key=externalSeeds[2u+seed];let tagged=externalSeedTaggedValue(key);if(currentPublished&&(tagged==INVALID||(tagged&RECURRING_SUPPORT)==0u)){return;}if(key<params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z){insertDesired(key);}else{atomicOr(&control[0],MALFORMED);}}
 @compute @workgroup_size(1) fn beginDesiredDilation(){targetB[0]=0u;targetB[1]=min(atomicLoad(&control[2]),params.pageCapacity);}
-@compute @workgroup_size(64) fn dilateDesiredRing(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);let layerStart=targetB[0];let layerEnd=targetB[1];if(atomicLoad(&control[0])!=0u||work>=layerEnd-layerStart){return;}let center=vec3i(unpackBrick(targetB[5u+layerStart+work]));for(var dz=-1;dz<=1;dz+=1){for(var dy=-1;dy<=1;dy+=1){for(var dx=-1;dx<=1;dx+=1){if(dx==0&&dy==0&&dz==0){continue;}let q=center+vec3i(dx,dy,dz);if(all(q>=vec3i(0))&&all(q<vec3i(params.brickDimensions))){insertDesired(packBrick(vec3u(q)));}}}}}
-@compute @workgroup_size(1) fn advanceDesiredDilation(){let priorEnd=targetB[1];targetB[0]=priorEnd;targetB[1]=min(atomicLoad(&control[2]),params.pageCapacity);}
+// Every dispatch expands the already-complete Chebyshev ball by min(r+1,
+// remaining) cells. The exact radii are 0,1,3,7... clamped to the requested
+// support, hence O(log R) dispatches and no conservative over-dilation.
+@compute @workgroup_size(64) fn dilateDesiredRing(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);let radius=targetB[0];let layerEnd=targetB[1];if(atomicLoad(&control[0])!=0u||radius>=params.dilationBrickRings||work>=layerEnd){return;}let expansion=min(radius+1u,params.dilationBrickRings-radius);let center=vec3i(unpackBrick(targetB[5u+work]));let step=i32(expansion);for(var dz=-step;dz<=step;dz+=1){for(var dy=-step;dy<=step;dy+=1){for(var dx=-step;dx<=step;dx+=1){let q=center+vec3i(dx,dy,dz);if(all(q>=vec3i(0))&&all(q<vec3i(params.brickDimensions))){insertDesired(packBrick(vec3u(q)));}}}}}
+@compute @workgroup_size(1) fn advanceDesiredDilation(){let radius=targetB[0];let expansion=min(radius+1u,params.dilationBrickRings-radius);targetB[0]=radius+expansion;targetB[1]=min(atomicLoad(&control[2]),params.pageCapacity);}
 fn nextSlot(key:u32)->u32{let start=hashKey(key);for(var probe=0u;probe<32u;probe+=1u){if(probe>=params.maximumHashProbes){break;}
  let slot=(start+probe)&(params.hashCapacity-1u);let stored=sourceB[slot*2u];if(stored==key){return slot;}if(stored==INVALID){return INVALID;}}return INVALID;}
 fn updateDesiredId(key:u32,id:u32){let slot=nextSlot(key);if(slot==INVALID){atomicOr(&control[0],HASH);return;}sourceB[slot*2u+1u]=id;}
@@ -520,8 +592,8 @@ fn targetLookup(key:u32)->u32{let slot=nextSlot(key);if(slot==INVALID){return IN
 }
 
 export const fineLevelSetLeafSeedWGSL = /* wgsl */ `
-const CORE:u32=2u;const RECURRING_SUPPORT:u32=0x80000000u;
-struct Params { header:vec4u,tail:vec4u,fineDomain:vec4f }
+const CORE:u32=2u;const RECURRING_SUPPORT:u32=0x80000000u;const INVALID:u32=0xffffffffu;const ENDPOINT_OWNER:u32=0x40000000u;
+struct Params { header:vec4u,tail:vec4u,fineDomain:vec4f,scan:vec4u }
 struct SurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct Candidate { row:u32,flags:u32 }
 struct BoundaryPhiQuery { liquidCenter:vec4f,airCenter:vec4f }
@@ -529,34 +601,48 @@ struct BoundaryPhiQuery { liquidCenter:vec4f,airCenter:vec4f }
 @group(0) @binding(1) var<storage,read> leaves:array<SurfaceLeaf>;
 @group(0) @binding(2) var<storage,read> candidates:array<Candidate>;
 @group(0) @binding(3) var<storage,read> candidateControl:array<u32>;
-@group(0) @binding(4) var<storage,read_write> seeds:array<u32>;
+@group(0) @binding(4) var<storage,read_write> seeds:array<atomic<u32>>;
 @group(0) @binding(5) var<storage,read> boundaryQueries:array<BoundaryPhiQuery>;
 @group(0) @binding(6) var<storage,read> powerFaceControl:array<u32>;
+@group(0) @binding(7) var<storage,read_write> scratch:array<atomic<u32>>;
 fn leafOrigin(leaf:SurfaceLeaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
 fn brickDimensions()->vec3u{return vec3u(params.header.z,params.header.w,params.tail.x);}
 fn packBrick(coord:vec3u)->u32{let dims=brickDimensions();return coord.x+dims.x*(coord.y+dims.y*coord.z);}
 fn seedHash(key:u32)->u32{var value=key*0x9e3779b1u;value=(value^(value>>16u))*0x7feb352du;return value^(value>>15u);}
 fn seedKeyBase()->u32{return 2u+params.tail.y;}fn seedValueBase()->u32{return seedKeyBase()+params.tail.w;}fn seedPlaneBase()->u32{return seedValueBase()+params.tail.w;}
-fn clearSeeds(){seeds[0]=0u;seeds[1]=0u;for(var slot=0u;slot<params.tail.w;slot+=1u){seeds[seedKeyBase()+slot]=0xffffffffu;seeds[seedValueBase()+slot]=0xffffffffu;}}
-fn appendSeed(key:u32,leaf:SurfaceLeaf,recurringSupport:bool){let hashCapacity=params.tail.w;let start=seedHash(key)&(hashCapacity-1u);for(var probe=0u;probe<32u;probe+=1u){let slot=(start+probe)&(hashCapacity-1u);let at=seedKeyBase()+slot;let stored=seeds[at];if(stored==key){if(recurringSupport){seeds[seedValueBase()+slot]|=RECURRING_SUPPORT;}return;}if(stored==0xffffffffu){let count=seeds[0];if(count>=params.tail.y){seeds[1]=1u;return;}seeds[at]=key;seeds[seedValueBase()+slot]=count|select(0u,RECURRING_SUPPORT,recurringSupport);seeds[2u+count]=key;let base=seedPlaneBase()+count*8u;seeds[base]=leaf.originX;seeds[base+1u]=leaf.originY;seeds[base+2u]=leaf.originZ;seeds[base+3u]=leaf.size;seeds[base+4u]=bitcast<u32>(leaf.phiGradient.x);seeds[base+5u]=bitcast<u32>(leaf.phiGradient.y);seeds[base+6u]=bitcast<u32>(leaf.phiGradient.z);seeds[base+7u]=bitcast<u32>(leaf.phiGradient.w);seeds[0]=count+1u;return;}}seeds[1]=2u;}
-// Boundary endpoints extend residency only. max-finite deliberately fails
-// externalSeedPhi's strict finite test, so newly covered pages initialize from
-// the paper's coarse level set. Interface leaves are appended first; duplicate
-// keys retain their cold affine seed and gain only the recurring-support tag.
-fn appendPowerEndpointSupport(position:vec3f){if(!(params.fineDomain.w>0.0)||any(position<params.fineDomain.xyz)){return;}let lattice=(position-params.fineDomain.xyz)/params.fineDomain.w-vec3f(0.5);let base=vec3i(floor(lattice));let sampleDims=brickDimensions()*params.header.y;let support=SurfaceLeaf(0u,0u,0u,1u,0u,0u,0u,0u,vec4f(3.402823e38,0.0,0.0,0.0),vec4f(0.0));for(var z=0;z<2;z+=1){for(var y=0;y<2;y+=1){for(var x=0;x<2;x+=1){let q=base+vec3i(x,y,z);if(all(q>=vec3i(0))&&all(q<vec3i(sampleDims))){appendSeed(packBrick(vec3u(q)/params.header.y),support,true);}}}}}
-@compute @workgroup_size(1) fn emitSeeds(){clearSeeds();let count=min(candidateControl[0],arrayLength(&candidates));
- for(var candidate=0u;candidate<count;candidate+=1u){let item=candidates[candidate];if((item.flags&CORE)==0u||item.row>=arrayLength(&leaves)){continue;}
-  let leaf=leaves[item.row];let origin=leafOrigin(leaf);let first=origin*params.header.x/params.header.y;
-  var last=(origin+vec3u(max(1u,leaf.size)))*params.header.x-vec3u(1);last/=params.header.y;last=min(last,brickDimensions()-vec3u(1));
-  for(var z=first.z;z<=last.z;z+=1u){for(var y=first.y;y<=last.y;y+=1u){for(var x=first.x;x<=last.x;x+=1u){
-   appendSeed(packBrick(vec3u(x,y,z)),leaf,false);if(seeds[1]!=0u){return;}
-  }}}
- }}
-fn emitAllInterfaceSeedBody(){clearSeeds();let count=min(candidateControl[0],arrayLength(&leaves));
- for(var row=0u;row<count;row+=1u){let leaf=leaves[row];if((leaf.flags&CORE)==0u){continue;}let origin=leafOrigin(leaf);let first=origin*params.header.x/params.header.y;
-  var last=(origin+vec3u(max(1u,leaf.size)))*params.header.x-vec3u(1);last/=params.header.y;last=min(last,brickDimensions()-vec3u(1));
-  for(var z=first.z;z<=last.z;z+=1u){for(var y=first.y;y<=last.y;y+=1u){for(var x=first.x;x<=last.x;x+=1u){appendSeed(packBrick(vec3u(x,y,z)),leaf,false);if(seeds[1]!=0u){return;}}}}
- }}
-@compute @workgroup_size(1) fn emitAllInterfaceSeeds(){emitAllInterfaceSeedBody();}
-@compute @workgroup_size(1) fn emitAllInterfaceAndPowerBoundarySeeds(){emitAllInterfaceSeedBody();if(arrayLength(&powerFaceControl)<9u||powerFaceControl[3]!=0u||powerFaceControl[8]!=0x80000000u){return;}let count=min(powerFaceControl[1],arrayLength(&boundaryQueries));for(var face=0u;face<count;face+=1u){let query=boundaryQueries[face];if(query.liquidCenter.w==0.0||query.airCenter.w==0.0){continue;}appendPowerEndpointSupport(query.liquidCenter.xyz);appendPowerEndpointSupport(query.airCenter.xyz);if(seeds[1]!=0u){return;}}}
+// scanBlocks stores both its total at blockCount and its base at
+// blockCount+1. Keep the eligibility bitset after that two-word footer so the
+// emission dispatch observes the same classified rows as the claim dispatch.
+fn scanBlockBase()->u32{return max(params.scan.y,params.scan.w)+2u;}fn eligibleWord(row:u32)->u32{return scanBlockBase()+row/32u;}
+fn leafCount(leaf:SurfaceLeaf)->u32{let origin=leafOrigin(leaf);let first=origin*params.header.x/params.header.y;var last=(origin+vec3u(max(1u,leaf.size)))*params.header.x-vec3u(1);last=min(last/params.header.y,brickDimensions()-vec3u(1));let extent=last-first+vec3u(1);return extent.x*extent.y*extent.z;}
+fn leafKey(leaf:SurfaceLeaf,local:u32)->u32{let origin=leafOrigin(leaf);let first=origin*params.header.x/params.header.y;var last=(origin+vec3u(max(1u,leaf.size)))*params.header.x-vec3u(1);last=min(last/params.header.y,brickDimensions()-vec3u(1));let extent=last-first+vec3u(1);let x=local%extent.x;let yz=local/extent.x;let y=yz%extent.y;let z=yz/extent.y;return packBrick(first+vec3u(x,y,z));}
+fn hashSlot(key:u32)->u32{let start=seedHash(key)&(params.tail.w-1u);for(var probe=0u;probe<32u;probe+=1u){let slot=(start+probe)&(params.tail.w-1u);let stored=atomicLoad(&seeds[seedKeyBase()+slot]);if(stored==key){return slot;}if(stored==INVALID){return INVALID;}}return INVALID;}
+fn claimLeaf(key:u32,row:u32){let start=seedHash(key)&(params.tail.w-1u);var probe=0u;loop{if(probe>=32u){atomicMax(&seeds[1],2u);return;}let slot=(start+probe)&(params.tail.w-1u);let result=atomicCompareExchangeWeak(&seeds[seedKeyBase()+slot],INVALID,key);if(result.exchanged||result.old_value==key){atomicMin(&seeds[seedValueBase()+slot],row);return;}if(result.old_value!=INVALID){probe+=1u;}}}
+fn writeLeaf(index:u32,key:u32,leaf:SurfaceLeaf){if(index>=params.tail.y){return;}atomicStore(&seeds[2u+index],key);let base=seedPlaneBase()+index*8u;atomicStore(&seeds[base],leaf.originX);atomicStore(&seeds[base+1u],leaf.originY);atomicStore(&seeds[base+2u],leaf.originZ);atomicStore(&seeds[base+3u],leaf.size);atomicStore(&seeds[base+4u],bitcast<u32>(leaf.phiGradient.x));atomicStore(&seeds[base+5u],bitcast<u32>(leaf.phiGradient.y));atomicStore(&seeds[base+6u],bitcast<u32>(leaf.phiGradient.z));atomicStore(&seeds[base+7u],bitcast<u32>(leaf.phiGradient.w));}
+@compute @workgroup_size(64) fn clearSeedState(@builtin(global_invocation_id)gid:vec3u){let item=gid.x;if(item==0u){atomicStore(&seeds[0],0u);atomicStore(&seeds[1],0u);}if(item<params.tail.w){atomicStore(&seeds[seedKeyBase()+item],INVALID);atomicStore(&seeds[seedValueBase()+item],INVALID);}let words=(params.scan.x+31u)/32u;if(item<words){atomicStore(&scratch[scanBlockBase()+item],0u);}}
+@compute @workgroup_size(64) fn markCandidateRows(@builtin(global_invocation_id)gid:vec3u){let index=gid.x;let count=min(candidateControl[0],arrayLength(&candidates));if(index>=count){return;}let item=candidates[index];if((item.flags&CORE)!=0u&&item.row<params.scan.x){atomicOr(&scratch[eligibleWord(item.row)],1u<<(item.row&31u));}}
+fn rowEligible(row:u32,candidatesOnly:bool)->bool{if(row>=params.scan.x||row>=arrayLength(&leaves)){return false;}if(candidatesOnly){return (atomicLoad(&scratch[eligibleWord(row)])&(1u<<(row&31u)))!=0u;}if(row>=candidateControl[0]){return false;}return (leaves[row].flags&CORE)!=0u;}
+fn ownsLeafKey(row:u32,key:u32)->bool{let slot=hashSlot(key);return slot!=INVALID&&atomicLoad(&seeds[seedValueBase()+slot])==row;}
+fn claimLeafRow(row:u32,candidatesOnly:bool){if(!rowEligible(row,candidatesOnly)){return;}let leaf=leaves[row];let count=leafCount(leaf);for(var local=0u;local<count;local+=1u){claimLeaf(leafKey(leaf,local),row);}}
+@compute @workgroup_size(64) fn claimCandidateLeafOwners(@builtin(global_invocation_id)gid:vec3u){claimLeafRow(gid.x,true);}
+@compute @workgroup_size(64) fn claimAllLeafOwners(@builtin(global_invocation_id)gid:vec3u){claimLeafRow(gid.x,false);}
+var<workgroup> counts:array<u32,64>;var<workgroup> scanValues:array<u32,256>;
+fn ownedLeafCount(row:u32,candidatesOnly:bool)->u32{if(!rowEligible(row,candidatesOnly)){return 0u;}let leaf=leaves[row];let candidates=leafCount(leaf);var count=0u;for(var local=0u;local<candidates;local+=1u){count+=select(0u,1u,ownsLeafKey(row,leafKey(leaf,local)));}return count;}
+fn classifyLeafBlock(wid:u32,lid:u32,candidatesOnly:bool){let row=wid*64u+lid;counts[lid]=ownedLeafCount(row,candidatesOnly);workgroupBarrier();if(lid==0u){var total=0u;for(var i=0u;i<64u;i+=1u){total+=counts[i];}atomicStore(&scratch[wid],total);}}
+@compute @workgroup_size(64) fn classifyCandidateLeafBlocks(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32){classifyLeafBlock(wid.x,lid,true);}
+@compute @workgroup_size(64) fn classifyAllLeafBlocks(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32){classifyLeafBlock(wid.x,lid,false);}
+fn scanBlocks(lid:u32,blockCount:u32,base:u32){let chunk=(blockCount+255u)/256u;let first=lid*chunk;let last=min(first+chunk,blockCount);var subtotal=0u;for(var block=first;block<last;block+=1u){subtotal+=atomicLoad(&scratch[block]);}scanValues[lid]=subtotal;workgroupBarrier();for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lid>=offset){add=scanValues[lid-offset];}workgroupBarrier();scanValues[lid]+=add;workgroupBarrier();}var cursor=base+scanValues[lid]-subtotal;for(var block=first;block<last;block+=1u){let value=atomicLoad(&scratch[block]);atomicStore(&scratch[block],cursor-base);cursor+=value;}if(last==blockCount){atomicStore(&scratch[blockCount],cursor-base);atomicStore(&scratch[blockCount+1u],base);atomicStore(&seeds[0],min(cursor,params.tail.y));if(cursor>params.tail.y){atomicMax(&seeds[1],1u);}}}
+@compute @workgroup_size(256) fn scanLeafSeedBlocks(@builtin(local_invocation_index)lid:u32){scanBlocks(lid,params.scan.y,0u);}
+fn emitLeafBlock(wid:u32,lid:u32,candidatesOnly:bool){let row=wid*64u+lid;let count=ownedLeafCount(row,candidatesOnly);counts[lid]=count;workgroupBarrier();var localOffset=0u;for(var i=0u;i<lid;i+=1u){localOffset+=counts[i];}if(count==0u){return;}let leaf=leaves[row];let candidates=leafCount(leaf);var output=atomicLoad(&scratch[wid])+localOffset;for(var local=0u;local<candidates;local+=1u){let key=leafKey(leaf,local);if(ownsLeafKey(row,key)){writeLeaf(output,key,leaf);output+=1u;}}}
+@compute @workgroup_size(64) fn emitCandidateLeafSeeds(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32){emitLeafBlock(wid.x,lid,true);}
+@compute @workgroup_size(64) fn emitAllLeafSeeds(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32){emitLeafBlock(wid.x,lid,false);}
+@compute @workgroup_size(64) fn finalizeLeafHash(@builtin(global_invocation_id)gid:vec3u){let index=gid.x;if(index>=atomicLoad(&seeds[0])){return;}let slot=hashSlot(atomicLoad(&seeds[2u+index]));if(slot==INVALID){atomicMax(&seeds[1],2u);}else{atomicStore(&seeds[seedValueBase()+slot],index);}}
+fn endpointValid()->bool{return arrayLength(&powerFaceControl)>=9u&&powerFaceControl[3]==0u&&powerFaceControl[8]==0x80000000u;}
+fn endpointKey(face:u32,ordinal:u32)->vec2u{if(!endpointValid()||face>=min(powerFaceControl[1],min(params.scan.z,arrayLength(&boundaryQueries)))){return vec2u(0u);}let query=boundaryQueries[face];if(query.liquidCenter.w==0.0||query.airCenter.w==0.0||!(params.fineDomain.w>0.0)){return vec2u(0u);}let position=select(query.liquidCenter.xyz,query.airCenter.xyz,ordinal>=8u);if(any(position<params.fineDomain.xyz)){return vec2u(0u);}let local=ordinal&7u;let lattice=(position-params.fineDomain.xyz)/params.fineDomain.w-vec3f(0.5);let q=vec3i(floor(lattice))+vec3i(i32(local&1u),i32((local>>1u)&1u),i32((local>>2u)&1u));let sampleDims=brickDimensions()*params.header.y;if(any(q<vec3i(0))||any(q>=vec3i(sampleDims))){return vec2u(0u);}return vec2u(1u,packBrick(vec3u(q)/params.header.y));}
+fn claimEndpoint(key:u32,token:u32){let start=seedHash(key)&(params.tail.w-1u);var probe=0u;loop{if(probe>=32u){atomicMax(&seeds[1],2u);return;}let slot=(start+probe)&(params.tail.w-1u);let result=atomicCompareExchangeWeak(&seeds[seedKeyBase()+slot],INVALID,key);if(result.exchanged){atomicMin(&seeds[seedValueBase()+slot],ENDPOINT_OWNER|token);return;}if(result.old_value==key){let value=atomicLoad(&seeds[seedValueBase()+slot]);if(value<ENDPOINT_OWNER||(value&RECURRING_SUPPORT)!=0u){atomicOr(&seeds[seedValueBase()+slot],RECURRING_SUPPORT);}else{atomicMin(&seeds[seedValueBase()+slot],ENDPOINT_OWNER|token);}return;}if(result.old_value!=INVALID){probe+=1u;}}}
+@compute @workgroup_size(64) fn claimPowerEndpointOwners(@builtin(global_invocation_id)gid:vec3u){let face=gid.x;if(atomicLoad(&seeds[1])!=0u){return;}for(var local=0u;local<16u;local+=1u){let item=endpointKey(face,local);if(item.x!=0u){claimEndpoint(item.y,face*16u+local);}}}
+fn endpointOwnerCount(face:u32)->u32{var count=0u;for(var local=0u;local<16u;local+=1u){let item=endpointKey(face,local);if(item.x==0u){continue;}let slot=hashSlot(item.y);if(slot!=INVALID&&atomicLoad(&seeds[seedValueBase()+slot])==(ENDPOINT_OWNER|(face*16u+local))){count+=1u;}}return count;}
+@compute @workgroup_size(64) fn classifyPowerEndpointBlocks(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32){let face=wid.x*64u+lid;counts[lid]=select(0u,endpointOwnerCount(face),atomicLoad(&seeds[1])==0u);workgroupBarrier();if(lid==0u){var total=0u;for(var i=0u;i<64u;i+=1u){total+=counts[i];}atomicStore(&scratch[wid.x],total);}}
+@compute @workgroup_size(256) fn scanPowerEndpointBlocks(@builtin(local_invocation_index)lid:u32){scanBlocks(lid,params.scan.w,atomicLoad(&seeds[0]));}
+@compute @workgroup_size(64) fn emitPowerEndpointSeeds(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32){let face=wid.x*64u+lid;let count=endpointOwnerCount(face);counts[lid]=count;workgroupBarrier();var localOffset=0u;for(var i=0u;i<lid;i+=1u){localOffset+=counts[i];}var cursor=atomicLoad(&scratch[params.scan.w+1u])+atomicLoad(&scratch[wid.x])+localOffset;for(var local=0u;local<16u;local+=1u){let item=endpointKey(face,local);if(item.x==0u){continue;}let slot=hashSlot(item.y);if(slot==INVALID||atomicLoad(&seeds[seedValueBase()+slot])!=(ENDPOINT_OWNER|(face*16u+local))){continue;}if(cursor<params.tail.y){atomicStore(&seeds[2u+cursor],item.y);atomicStore(&seeds[seedValueBase()+slot],cursor|RECURRING_SUPPORT);let base=seedPlaneBase()+cursor*8u;atomicStore(&seeds[base],0u);atomicStore(&seeds[base+1u],0u);atomicStore(&seeds[base+2u],0u);atomicStore(&seeds[base+3u],1u);atomicStore(&seeds[base+4u],bitcast<u32>(3.402823e38));for(var word=5u;word<8u;word+=1u){atomicStore(&seeds[base+word],0u);}}cursor+=1u;}}
 `;

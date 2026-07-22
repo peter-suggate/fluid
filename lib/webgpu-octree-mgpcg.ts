@@ -16,12 +16,28 @@
 export const OCTREE_MGPCG_PRECONDITIONER_KIND = "additive-geometric-aggregate-diagonal" as const;
 export const OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS = 8;
 export const OCTREE_SECTION43_BOUNDARY_BAND_LAYERS = 3;
+/** Safe recorded tail for the current WebGPU implementation. The paper's
+ * production hierarchy converges in 6-10 iterations, but our approximation
+ * has rare topology generations that require more than 16. */
+export const OCTREE_SECTION43_DEFAULT_PCG_ITERATIONS = 128;
 // The paper reports convergence in 6-10 PCG iterations for its production
 // hierarchy. Our sparse GPU hierarchy is an approximation (notably at the
 // graph-ring boundary band), so retain a bounded tail for difficult topology
 // generations. Kernels already stop on the GPU as soon as convergence is
 // published; this cap bounds the encoded fallback schedule only.
 export const OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS = 128;
+
+export function normalizeOctreeSection43IterationCap(value: number | undefined): number {
+  const requested = value ?? OCTREE_SECTION43_DEFAULT_PCG_ITERATIONS;
+  return Math.max(8, Math.min(OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS, Math.round(requested)));
+}
+
+export function normalizeOctreeSection43BoundarySmoothing(value: number | undefined): number {
+  const requested = value ?? OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS;
+  // The fixed ping/pong publication reads A after the pre-sweeps and B after
+  // the post-sweeps, so k must remain even as well as symmetry-locked.
+  return Math.max(2, Math.min(16, Math.round(requested / 2) * 2));
+}
 
 export type OctreePCGPreconditionerKind = "aggregate" | "section43-hybrid";
 
@@ -37,16 +53,24 @@ export interface OctreeFirstOrderSPDVCycle {
   readonly operatorOrder: 1;
   readonly isSymmetricPositiveDefinite: true;
   readonly allocatedBytes: number;
+  /** Ordered compute dispatches emitted by one correction. */
+  readonly encodedCorrectionPassCount: number;
+  readonly encodedCorrectionDispatchCount?: number;
+  /** Ordered compute dispatches emitted by hierarchy setup. */
+  readonly encodedSetupDispatchCount?: number;
+  /** Standalone pass transitions; optional so alternate hierarchy
+   * implementations remain source-compatible with the batching extension. */
+  readonly encodedPassTransitionCount?: number;
   encodeSetup(encoder: GPUCommandEncoder, input: {
     readonly solverControl: GPUBuffer;
     readonly rowCount: GPUBuffer;
-  }): void;
+  }, sharedPass?: GPUComputePassEncoder): void;
   encodeCorrection(encoder: GPUCommandEncoder, input: {
     readonly rhs: GPUBuffer;
     readonly correction: GPUBuffer;
     readonly solverControl: GPUBuffer;
     readonly rowCount: GPUBuffer;
-  }): void;
+  }, sharedPass?: GPUComputePassEncoder): void;
 }
 
 export const OCTREE_MGPCG_ERROR = Object.freeze({
@@ -75,6 +99,9 @@ export interface OctreeMGPCGOptions {
   readonly rowCapacity: number;
   readonly maximumLeafSize: number;
   readonly maximumIterations: number;
+  /** Matching pre/post L2 sweeps in the Section 4.3 boundary band. A single
+   * value deliberately preserves the symmetry required by ordinary PCG. */
+  readonly boundarySmoothingIterations?: number;
   readonly relativeTolerance?: number;
   readonly maximumHierarchyLevels?: number;
   /** Hybrid requires an explicit SPD L1 V-cycle; aggregate is rollback only. */
@@ -158,8 +185,30 @@ export class WebGPUOctreeMGPCG {
   /** Immutable descriptors shared by every replay of a stage. */
   private readonly stageGroups = new Map<Stage, CachedStageGroup>();
   private readonly maximumIterations: number;
+  readonly boundarySmoothingIterations: number;
   private readonly device: GPUDevice;
   private destroyed = false;
+
+  /** Fixed host-authored dispatch schedule size. GPU early-out does not remove
+   * these commands, so retain the existing observable beside wall timing. */
+  get encodedDispatchCount(): number {
+    const preconditionerPasses = this.plan.preconditionerKind === "section43-hybrid"
+      ? 4 + 2 * this.boundarySmoothingIterations
+        + (this.source.firstOrderVCycle!.encodedCorrectionDispatchCount
+        ?? this.source.firstOrderVCycle!.encodedCorrectionPassCount)
+      : 5;
+    const setupPasses = this.plan.preconditionerKind === "section43-hybrid"
+      ? 4 + (this.source.firstOrderVCycle!.encodedSetupDispatchCount ?? 3)
+      : 2;
+    return 3 + setupPasses + preconditionerPasses + 1
+      + this.maximumIterations * (6 + preconditionerPasses) + 2;
+  }
+
+  /** Backward-compatible alias retained for existing diagnostics consumers. */
+  get encodedPassCount(): number { return this.encodedDispatchCount; }
+
+  /** The complete fixed solve is one dependency-ordered compute pass. */
+  readonly encodedPassTransitionCount = 1;
 
   constructor(device: GPUDevice, private readonly source: OctreeMGPCGSource, options: OctreeMGPCGOptions) {
     this.device = device;
@@ -174,6 +223,9 @@ export class WebGPUOctreeMGPCG {
     this.maximumIterations = this.plan.preconditionerKind === "section43-hybrid"
       ? Math.min(OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS, requestedIterations)
       : requestedIterations;
+    this.boundarySmoothingIterations = normalizeOctreeSection43BoundarySmoothing(
+      options.boundarySmoothingIterations,
+    );
     if (source.leafHeaders.size < this.plan.rowCapacity * 48) throw new RangeError("MGPCG LeafHeader capacity is too small");
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const vector = (label: string) => device.createBuffer({ label, size: Math.max(4, this.plan.vectorBytes), usage: storage });
@@ -207,14 +259,15 @@ export class WebGPUOctreeMGPCG {
     // dot products legitimately become much smaller than 1e-12 when physical
     // cells or open fractions are small.
     floats[10] = 1e-30;
-    words[11] = OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS;
+    words[11] = this.boundarySmoothingIterations;
     words[12] = OCTREE_SECTION43_BOUNDARY_BAND_LAYERS;
     floats[13] = 2 / 3;
     device.queue.writeBuffer(this.params, 0, words);
 
-    const module = device.createShaderModule({ label: "Octree matrix-free PCG", code: octreeMGPCGShader });
+    const shaderModule = device.createShaderModule({ label: "Octree matrix-free PCG", code: octreeMGPCGShader });
     const pipeline = (entryPoint: string, bindings: readonly number[]): Stage => ({
-      pipeline: device.createComputePipeline({ label: `Octree MGPCG · ${entryPoint}`, layout: "auto", compute: { module, entryPoint } }),
+      pipeline: device.createComputePipeline({ label: `Octree MGPCG · ${entryPoint}`, layout: "auto",
+        compute: { module: shaderModule, entryPoint } }),
       bindings,
     });
     this.stages = Object.freeze({
@@ -223,10 +276,12 @@ export class WebGPUOctreeMGPCG {
       residual: pipeline("formInitialResidual", [0, 1, 3, 5, 7, 11]),
       hierarchyMap: pipeline("buildHierarchyMap", [0, 1, 3, 9, 11]),
       hierarchyDiagonal: pipeline("buildHierarchyDiagonal", [0, 1, 2, 3, 9, 11]),
+      clearAggregatePreconditioner: pipeline("clearAggregatePreconditioner", [0, 9]),
       preconditionFine: pipeline("preconditionFine", [0, 1, 3, 5, 6, 11]),
       restrict: pipeline("restrictResidual", [0, 3, 5, 9, 11]),
       coarse: pipeline("solveCoarseAggregates", [0, 9, 11]),
       prolong: pipeline("prolongateCorrection", [0, 3, 6, 9, 11]),
+      clearHybridPreconditioner: pipeline("clearHybridPreconditioner", [0, 13, 14, 15, 16]),
       classifyHybridBand: pipeline("classifyHybridBand", [0, 1, 2, 3, 11, 17]),
       dilateHybridBandAtoB: pipeline("dilateHybridBandAtoB", [0, 1, 2, 3, 11, 17, 18]),
       dilateHybridBandBtoA: pipeline("dilateHybridBandBtoA", [0, 1, 2, 3, 11, 17, 18]),
@@ -259,8 +314,9 @@ export class WebGPUOctreeMGPCG {
       pressureOut, this.control, this.x,
       this.hybridA, this.hybridB, this.hybridRhs, this.hybridCorrection,
       this.hybridBandA, this.hybridBandB] as const;
-    const rows = (stage: Stage) => this.run(encoder, stage, this.plan.dispatch, buffers);
-    const single = (stage: Stage) => this.run(encoder, stage, [1, 1, 1], buffers);
+    const pass = encoder.beginComputePass({ label: "Octree MGPCG solve" });
+    const rows = (stage: Stage) => this.run(pass, stage, this.plan.dispatch, buffers);
+    const single = (stage: Stage) => this.run(pass, stage, [1, 1, 1], buffers);
 
     rows(this.stages.initialize);
     rows(this.stages.multiplyX);
@@ -268,13 +324,13 @@ export class WebGPUOctreeMGPCG {
     if (this.plan.preconditionerKind === "section43-hybrid") {
       this.source.firstOrderVCycle!.encodeSetup(encoder, {
         solverControl: this.control, rowCount: this.source.rowCount,
-      });
-      this.prepareHybridBand(encoder, buffers);
+      }, pass);
+      this.prepareHybridBand(pass, buffers);
     } else {
       rows(this.stages.hierarchyMap);
       rows(this.stages.hierarchyDiagonal);
     }
-    this.applyPreconditioner(encoder, buffers);
+    this.applyPreconditioner(encoder, pass, buffers);
     single(this.stages.initialReduction);
     for (let iteration = 0; iteration < this.maximumIterations; iteration += 1) {
       rows(this.stages.multiplyDirection);
@@ -284,67 +340,68 @@ export class WebGPUOctreeMGPCG {
       // particular, do not let a numerically exhausted r enter the fixed SPD
       // Section 4.3 V-cycle and turn an already-converged solve into failure.
       single(this.stages.updatedResidualReduction);
-      this.applyPreconditioner(encoder, buffers);
+      this.applyPreconditioner(encoder, pass, buffers);
       single(this.stages.nextReduction);
       rows(this.stages.direction);
     }
     single(this.stages.finalize);
     rows(this.stages.publish);
+    pass.end();
   }
 
-  private applyPreconditioner(encoder: GPUCommandEncoder, buffers: readonly (GPUBuffer | undefined)[]): void {
+  private applyPreconditioner(encoder: GPUCommandEncoder, pass: GPUComputePassEncoder,
+    buffers: readonly (GPUBuffer | undefined)[]): void {
     if (this.plan.preconditionerKind === "section43-hybrid") {
-      this.applySection43HybridPreconditioner(encoder, buffers);
+      this.applySection43HybridPreconditioner(encoder, pass, buffers);
       return;
     }
-    const levelWords = this.plan.hierarchyLevelCount * this.plan.hierarchyStride;
     // Keep maps, keys, and aggregate diagonals; reset only the additive
     // aggregate RHS/corrections for this PCG preconditioner application. This
     // is not restriction/coarse solve/prolongation in a multigrid V-cycle.
-    encoder.clearBuffer(this.hierarchy, levelWords * 3 * 4, levelWords * 2 * 4);
-    this.run(encoder, this.stages.preconditionFine, this.plan.dispatch, buffers);
-    this.run(encoder, this.stages.restrict, this.plan.dispatch, buffers);
-    this.run(encoder, this.stages.coarse, this.plan.dispatch, buffers);
-    this.run(encoder, this.stages.prolong, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.clearAggregatePreconditioner, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.preconditionFine, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.restrict, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.coarse, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.prolong, this.plan.dispatch, buffers);
   }
 
-  private prepareHybridBand(encoder: GPUCommandEncoder, buffers: readonly (GPUBuffer | undefined)[]): void {
+  private prepareHybridBand(pass: GPUComputePassEncoder, buffers: readonly (GPUBuffer | undefined)[]): void {
     this.requireHybridBuffers();
-    this.run(encoder, this.stages.classifyHybridBand, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.classifyHybridBand, this.plan.dispatch, buffers);
     // Section 4.3 uses a band about three voxels wide. Three deterministic
     // compact-row graph dilations are the first sparse approximation; exact
     // physical-distance classification remains part of the L1 hierarchy work.
-    this.run(encoder, this.stages.dilateHybridBandAtoB, this.plan.dispatch, buffers);
-    this.run(encoder, this.stages.dilateHybridBandBtoA, this.plan.dispatch, buffers);
-    this.run(encoder, this.stages.dilateHybridBandAtoB, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.dilateHybridBandAtoB, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.dilateHybridBandBtoA, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.dilateHybridBandAtoB, this.plan.dispatch, buffers);
   }
 
   private applySection43HybridPreconditioner(encoder: GPUCommandEncoder,
+    pass: GPUComputePassEncoder,
     buffers: readonly (GPUBuffer | undefined)[]): void {
     const cycle = this.source.firstOrderVCycle;
-    const { hybridA, hybridB, hybridRhs, hybridCorrection } = this.requireHybridBuffers();
-    encoder.clearBuffer(hybridA); encoder.clearBuffer(hybridB);
-    encoder.clearBuffer(hybridRhs); encoder.clearBuffer(hybridCorrection);
+    const { hybridRhs, hybridCorrection } = this.requireHybridBuffers();
+    this.run(pass, this.stages.clearHybridPreconditioner, this.plan.dispatch, buffers);
 
     // p0=0; k=8 damped-Jacobi iterations of L2 p=q inside the fixed band.
-    for (let i = 0; i < OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS; i += 1) {
-      this.run(encoder, i % 2 === 0 ? this.stages.smoothHybridAtoB : this.stages.smoothHybridBtoA,
+    for (let i = 0; i < this.boundarySmoothingIterations; i += 1) {
+      this.run(pass, i % 2 === 0 ? this.stages.smoothHybridAtoB : this.stages.smoothHybridBtoA,
         this.plan.dispatch, buffers);
     }
     // k is even, so p1 is in A. Form r1=q-L2*p1 and apply the required SPD L1
     // V-cycle. The interface owns its sparse first-order operator/transfers.
-    this.run(encoder, this.stages.formHybridL1Residual, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.formHybridL1Residual, this.plan.dispatch, buffers);
     cycle!.encodeCorrection(encoder, {
       rhs: hybridRhs, correction: hybridCorrection, solverControl: this.control,
       rowCount: this.source.rowCount,
-    });
+    }, pass);
     // p2=p1+delta starts in B, followed by the matching k post-iterations.
-    this.run(encoder, this.stages.addHybridL1Correction, this.plan.dispatch, buffers);
-    for (let i = 0; i < OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS; i += 1) {
-      this.run(encoder, i % 2 === 0 ? this.stages.smoothHybridBtoA : this.stages.smoothHybridAtoB,
+    this.run(pass, this.stages.addHybridL1Correction, this.plan.dispatch, buffers);
+    for (let i = 0; i < this.boundarySmoothingIterations; i += 1) {
+      this.run(pass, i % 2 === 0 ? this.stages.smoothHybridBtoA : this.stages.smoothHybridAtoB,
         this.plan.dispatch, buffers);
     }
-    this.run(encoder, this.stages.publishHybridPreconditioner, this.plan.dispatch, buffers);
+    this.run(pass, this.stages.publishHybridPreconditioner, this.plan.dispatch, buffers);
   }
 
   private requireHybridBuffers(): {
@@ -360,7 +417,7 @@ export class WebGPUOctreeMGPCG {
       hybridBandB: this.hybridBandB };
   }
 
-  private run(encoder: GPUCommandEncoder, stage: Stage, dispatch: readonly [number, number, number], buffers: readonly (GPUBuffer | undefined)[]): void {
+  private run(pass: GPUComputePassEncoder, stage: Stage, dispatch: readonly [number, number, number], buffers: readonly (GPUBuffer | undefined)[]): void {
     // A fixed PCG schedule replays these stages thousands of times. Rebuilding
     // identical bind groups for every dispatch was pure main-thread/driver
     // work; WebGPU bind groups are immutable and safe to retain.
@@ -372,8 +429,7 @@ export class WebGPUOctreeMGPCG {
       entries: stage.bindings.map((binding) => ({ binding, resource: { buffer: buffers[binding]! } })),
     });
     if (!unchanged) this.stageGroups.set(stage, { resources: [...buffers], group });
-    const pass = encoder.beginComputePass({ label: stage.pipeline.label });
-    pass.setPipeline(stage.pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(...dispatch); pass.end();
+    pass.setPipeline(stage.pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(...dispatch);
   }
 
   private assertLive(): void { if (this.destroyed) throw new Error("Octree MGPCG solver is destroyed"); }
@@ -474,6 +530,10 @@ fn findAggregate(row:u32,level:u32)->u32{let key=aggregateKey(row,level)+1u;var 
       if(atomicLoad(&hierarchy[offset(mapBase(),level,e.row)])==slot){value-=e.coefficient;}}
     atomicAddFloat(offset(diagonalBase(),level,slot),value);}}
 
+@compute @workgroup_size(64) fn clearAggregatePreconditioner(@builtin(global_invocation_id) gid:vec3u){let slot=rowIndex(gid);if(slot>=stride()){return;}
+  for(var level=0u;level<levels();level+=1u){atomicStore(&hierarchy[offset(rhsBase(),level,slot)],0u);
+    atomicStore(&hierarchy[offset(solutionBase(),level,slot)],0u);}}
+
 @compute @workgroup_size(64) fn preconditionFine(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
   let diagonal=headers[row].diagonal;preconditioned[row]=select(0.0,residual[row]/diagonal,diagonal>epsilon());}
 @compute @workgroup_size(64) fn restrictResidual(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
@@ -486,6 +546,9 @@ fn findAggregate(row:u32,level:u32)->u32{let key=aggregateKey(row,level)+1u;var 
   let scale=1.0/f32(levels()+1u);value*=scale;for(var level=0u;level<levels();level+=1u){let slot=atomicLoad(&hierarchy[offset(mapBase(),level,row)]);
     if(slot!=INVALID_ROW){value+=scale*bitcast<f32>(atomicLoad(&hierarchy[offset(solutionBase(),level,slot)]));}}
   if(!finite(value)){reportAt(NONFINITE,12u,row,value);}else{preconditioned[row]=value;}}
+
+@compute @workgroup_size(64) fn clearHybridPreconditioner(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=params.dimsCapacity.w){return;}
+  hybridA[row]=0.0;hybridB[row]=0.0;hybridRhs[row]=0.0;hybridCorrection[row]=0.0;}
 
 @compute @workgroup_size(64) fn classifyHybridBand(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||failed()){return;}
   let h=headers[row];var offDiagonalSum=0.0;var transition=false;

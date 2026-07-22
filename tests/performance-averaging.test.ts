@@ -37,6 +37,15 @@ test("timing epoch and accepted-sample identities remain discrete metadata", () 
   assert.equal(averaged.renderTimingSampleId, 44);
 });
 
+test("repeated UI frames do not overweight one asynchronous physics sample", () => {
+  const first = { ...sample(3, 3), gpuPhysicsTimingSampleId: 10 };
+  const repeated = { ...sample(6, 3), gpuPhysicsTimingSampleId: 10 };
+  const second = { ...sample(9, 9), gpuPhysicsTimingSampleId: 11 };
+  const averaged = averagePerformanceSnapshots([first, repeated, second], emptyPerformance);
+  assert.equal(averaged.gpuPressure_ms, 6);
+  assert.equal(averaged.gpuPhysicsTimingSampleId, 11);
+});
+
 test("averaging preserves the union of conditional stages in the selected window", () => {
   const first = { ...sample(3, 3), gpuActiveStages: ["preparation", "advection", "remeshing"] as PerformanceSnapshot["gpuActiveStages"] };
   const second = { ...sample(6, 6), gpuActiveStages: ["preparation", "advection"] as PerformanceSnapshot["gpuActiveStages"] };
@@ -59,5 +68,18 @@ test("averaging carries the power-diagram timing subdivisions", () => {
   assert.deepEqual(
     [averaged.gpuPowerAssembly_ms, averaged.gpuPressureSolve_ms, averaged.gpuPowerProjection_ms, averaged.gpuVelocityProjection_ms],
     [3, 4, 5, 2],
+  );
+});
+
+test("averaging carries the Section 5 timing subdivisions", () => {
+  const first = { ...sample(3, 5), gpuFaceBand_ms: 1, gpuFaceMarch_ms: 2, gpuPowerPublication_ms: 3,
+    gpuFineTopology_ms: 4, gpuFineTransport_ms: 5, gpuFineRedistance_ms: 6 };
+  const second = { ...sample(6, 9), gpuFaceBand_ms: 3, gpuFaceMarch_ms: 4, gpuPowerPublication_ms: 5,
+    gpuFineTopology_ms: 6, gpuFineTransport_ms: 7, gpuFineRedistance_ms: 8 };
+  const averaged = averagePerformanceSnapshots([first, second], emptyPerformance);
+  assert.deepEqual(
+    [averaged.gpuFaceBand_ms, averaged.gpuFaceMarch_ms, averaged.gpuPowerPublication_ms,
+      averaged.gpuFineTopology_ms, averaged.gpuFineTransport_ms, averaged.gpuFineRedistance_ms],
+    [2, 3, 4, 5, 6, 7],
   );
 });

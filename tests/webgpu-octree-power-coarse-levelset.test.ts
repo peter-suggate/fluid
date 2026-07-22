@@ -20,7 +20,8 @@ import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/w
 test("WP8 planner is compact-row bounded and exposes independent coarse/fine diagnostics", () => {
   const plan = planOctreePowerCoarseLevelSet(32, 6);
   assert.equal(plan.scratchBytes, 32 * 16 * 2);
-  assert.ok(plan.allocatedBytes < 48_000);
+  assert.ok(plan.allocatedBytes < 128_000,
+    "the aligned encoder-local parameter arena remains a small row-independent allocation");
   assert.match(octreePowerCoarseLevelSetShader, /redistancePowerCoarsePhi/);
   assert.match(octreePowerCoarseLevelSetShader, /validatePowerCoarseFineCorrection/);
   assert.match(octreePowerCoarseLevelSetShader, /nonobtuseAnchorSolidAngle|fn nonobtuse/);
@@ -144,6 +145,11 @@ test("every coarse schedule bind group equals transitive WGSL reachability", () 
       topology as unknown as ConstructorParameters<typeof WebGPUOctreePowerCoarseLevelSet>[2], 1);
     schedule.encode(encoder, { headers: buffer, cellVelocities: buffer, siteIndex: buffer, rowCount: 1 },
       { dimensions: [1, 1, 1], physicalCellSize: 1, dt: 0, hashCapacity: 1, generation: 1 });
+    const secondEncoder = { beginComputePass: () => pass, copyBufferToBuffer() {} } as unknown as GPUCommandEncoder;
+    assert.doesNotThrow(() => schedule.encode(secondEncoder,
+      { headers: buffer, cellVelocities: buffer, siteIndex: buffer, rowCount: 1 },
+      { dimensions: [1, 1, 1], physicalCellSize: 1, dt: 0, hashCapacity: 1, generation: 2 }),
+    "a second command buffer must be encodable before the first is submitted or retired");
   } finally {
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
     else Reflect.deleteProperty(globalThis, "GPUBufferUsage");

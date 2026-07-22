@@ -13,8 +13,12 @@ import {
 import { fineLevelSetGPUQueryTransportWGSL, makeFineLevelSetTransportWGSL, WebGPUFineLevelSetTransport,
   unpackFineLevelSetGPUTransportControl } from "../lib/webgpu-octree-fine-levelset-transport";
 import {
+  FINE_LEVELSET_FMM_MAX_DIAGNOSTIC_SAMPLES,
   WebGPUFineLevelSetRedistance,
+  fineLevelSetJFACPTWGSL,
   fineLevelSetRedistanceWGSL,
+  planFineLevelSetJFAStrides,
+  resolveFineLevelSetRedistanceMethod,
   unpackFineLevelSetGPURedistanceControl,
 } from "../lib/webgpu-octree-fine-levelset-redistance";
 import {
@@ -23,6 +27,7 @@ import {
   fineLevelSetLeafSeedWGSL,
   makeFineLevelSetTopologyWGSL,
   planFineLevelSetLeafBrickBounds,
+  planFineLevelSetChebyshevFloodPasses,
   planFineLevelSetTopologyBand,
   WebGPUFineLevelSetLeafSeeds,
   WebGPUFineLevelSetTopology,
@@ -73,7 +78,7 @@ test("fine topology dilation covers displacement, interpolation, redistance, and
   }), /at least one publication safety ring/);
 });
 
-test("fine topology discovers and dilates pages in parallel with an exact staged one-ring bootstrap", () => {
+test("fine topology discovers and pre-dilates the complete support with a logarithmic Chebyshev flood", () => {
   const wgsl = makeFineLevelSetTopologyWGSL(
     "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
   ).replace(/\s+/g, "");
@@ -91,25 +96,29 @@ test("fine topology discovers and dilates pages in parallel with an exact staged
   assert.match(wgsl,
     /fnbeginDesiredDilation\(\)\{targetB\[0\]=0u;targetB\[1\]=min\(atomicLoad\(&control\[2\]\),params\.pageCapacity\);\}/);
   assert.match(wgsl,
-    /fndilateDesiredRing[\s\S]*letlayerStart=targetB\[0\];letlayerEnd=targetB\[1\];[\s\S]*targetB\[5u\+layerStart\+work\]/,
-    "each pass must consume only the previous frontier, not pages appended during that pass");
+    /fndilateDesiredRing[\s\S]*letradius=targetB\[0\];letlayerEnd=targetB\[1\];[\s\S]*letexpansion=min\(radius\+1u,params\.dilationBrickRings-radius\)[\s\S]*targetB\[5u\+work\]/,
+    "each pass expands the complete prior Chebyshev ball by a doubling radius");
   assert.match(wgsl,
-    /fnadvanceDesiredDilation\(\)\{letpriorEnd=targetB\[1\];targetB\[0\]=priorEnd;targetB\[1\]=min\(atomicLoad\(&control\[2\]\),params\.pageCapacity\);\}/);
+    /fnadvanceDesiredDilation\(\)[\s\S]*targetB\[0\]=radius\+expansion;targetB\[1\]=min\(atomicLoad\(&control\[2\]\),params\.pageCapacity\);\}/);
   assert.match(wgsl,
     /rawCount>params\.pageCapacity\|\|rawCount>available[\s\S]*atomicOr\(&control\[0\],CAPACITY\);atomicMax\(&control\[6\],max\(rawCount,params\.pageCapacity\+1u\)\)/,
     "truncated external seed lists must fail closed with a strict capacity lower bound");
 
-  assert.match(encode, /initialDilationBrickRings=bandPlan\.safetyBrickRings/,
-    "Section 5 bootstrap remains the interface plus its explicit safety ring");
+  assert.match(encode, /dilationBrickRings=bandPlan\.dilationBrickRings/,
+    "topology must allocate transport, interpolation, redistance, and safety support before redistance");
   assert.match(encode,
-    /for\(letring=0;ring<initialDilationBrickRings;ring\+=1\)[\s\S]*this\.dilatePipeline[\s\S]*this\.advanceDilationPipeline/,
-    "host pass boundaries must advance one exact Chebyshev frontier per ring");
+    /floodPasses=planFineLevelSetChebyshevFloodPasses\(dilationBrickRings\)[\s\S]*for\(letflood=0;flood<floodPasses;flood\+=1\)[\s\S]*this\.dilatePipeline[\s\S]*this\.advanceDilationPipeline/,
+    "host dispatch count must be logarithmic in the requested support radius");
   assert.match(encode,
     /this\.beginDilationPipeline[\s\S]*?,1,\[0,6,7\]\)/,
     "beginDesiredDilation reads params.pageCapacity as well as the worklist/control buffers");
   assert.match(encode,
     /this\.advanceDilationPipeline[\s\S]*?,1,\[0,6,7\]\)/,
     "advanceDesiredDilation must bind the params buffer used to clip its next frontier");
+  assert.equal(planFineLevelSetChebyshevFloodPasses(0), 0);
+  assert.equal(planFineLevelSetChebyshevFloodPasses(1), 1);
+  assert.equal(planFineLevelSetChebyshevFloodPasses(6), 3);
+  assert.equal(planFineLevelSetChebyshevFloodPasses(12), 4);
 });
 
 test("B4 leaf seeds cover all eight factor-8 bricks per finest cell", () => {
@@ -129,8 +138,11 @@ test("B4 leaf seeds cover all eight factor-8 bricks per finest cell", () => {
   assert.throws(() => planFineLevelSetLeafBrickBounds(factor8, [5, 4, 3], 2), /outside/);
 
   assert.match(fineLevelSetLeafSeedWGSL,
-    /let first=origin\*params\.header\.x\/params\.header\.y;[\s\S]*last\/=params\.header\.y/,
+    /let first=origin\*params\.header\.x\/params\.header\.y;[\s\S]*last=min\(last\/params\.header\.y/,
     "seed publication must map leaf bounds by fineFactor / brickResolution on every axis");
+  assert.match(fineLevelSetLeafSeedWGSL,
+    /scanBlockBase\(\)->u32\{return max\(params\.scan\.y,params\.scan\.w\)\+2u;\}/,
+    "the scan total/base footer must not overlap the candidate-row eligibility bitset");
 });
 
 test("fine topology telemetry labels exact requirements and overflow lower bounds", () => {
@@ -330,7 +342,86 @@ test("fine redistance applies its inclusive residual tolerance at telemetry prec
   assert.doesNotMatch(fineLevelSetRedistanceWGSL, /if\(residual>p\.tolerance\)/);
 });
 
-test("every fine redistance pipeline names an existing WGSL compute entry point", () => {
+test("fine redistance exposes fixed JFA-CPT strides and a selectable FMM oracle", () => {
+  assert.equal(FINE_LEVELSET_FMM_MAX_DIAGNOSTIC_SAMPLES, 256,
+    "the backend-gated oracle must stay limited to four B4 diagnostic pages");
+  assert.deepEqual(planFineLevelSetJFAStrides(21), [32, 16, 8, 4, 2, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(1), [1, 1]);
+  assert.equal(resolveFineLevelSetRedistanceMethod(undefined), "jfa-cpt");
+  assert.equal(resolveFineLevelSetRedistanceMethod("fmm"), "fmm");
+  assert.throws(() => resolveFineLevelSetRedistanceMethod("heap"), /Unknown/);
+  assert.match(fineLevelSetJFACPTWGSL,
+    /d<bestD\|\|\(d==bestD&&seedStableKey\(candidate\)<seedStableKey\(best\)\)/,
+    "equal-distance propagation must choose the stable global sample key");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /var bestD=LARGE;if\(best!=INVALID\)\{let delta=point-materializedClosestPoint\(best\);bestD=dot\(delta,delta\);\}/,
+    "each flood must cache the current winner's distance instead of recomputing its closest point per candidate");
+  assert.doesNotMatch(fineLevelSetJFACPTWGSL, /fn betterSeed/,
+    "candidate comparison must evaluate each closest point only once");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /flags\[index\]\|=INTERFACE\|\(closest<<SAMPLE_FLAG_BITS\)/,
+    "seeding must materialize the subcell closest point into otherwise-unused sample flag bits");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /fn materializedClosestPoint\(index:u32\)[^}]*flags\[index\]>>SAMPLE_FLAG_BITS[^}]*CP_FRACTION_MASK/,
+    "flood comparisons must read the cached closest point without re-walking neighboring phi");
+  assert.doesNotMatch(fineLevelSetJFACPTWGSL,
+    /fn materializedClosestPoint\([^}]*sampleIndex|fn materializedClosestPoint\([^}]*pageOf/,
+    "cached closest-point lookup must not perform a sparse hash lookup");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /flags\[index\]&INTERFACE\)!=0u\)\{seed=index;\}/,
+    "interface seeds must retain the FMM oracle's subcell zero-crossing samples");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /seed==INVALID&&abs\(bitcast<f32>\(phi\[index\]\)\)<bandDistance\(\)[\s\S]*control\.unresolved/,
+    "a JFA propagation miss inside transported narrow-band support must fail publication");
+});
+
+test("sparse diagonal JFA landing gaps deterministically reject narrow-band publication", () => {
+  const brickResolution = 4; const dimensions = [6, 6, 1] as const;
+  const nearRing = [[0, 0, 0], [1, 0, 0], [0, 1, 0]] as const;
+  const farRing = [[4, 4, 0], [3, 4, 0], [5, 4, 0], [4, 3, 0], [4, 5, 0]] as const;
+  const residentBricks = new Set([...nearRing, ...farRing].map((q) => q.join(",")));
+  const residentSamples: [number, number, number][] = [];
+  for (let z = 0; z < dimensions[2] * brickResolution; z += 1) {
+    for (let y = 0; y < dimensions[1] * brickResolution; y += 1) {
+      for (let x = 0; x < dimensions[0] * brickResolution; x += 1) {
+        if (residentBricks.has([Math.floor(x / 4), Math.floor(y / 4), Math.floor(z / 4)].join(","))) {
+          residentSamples.push([x, y, z]);
+        }
+      }
+    }
+  }
+  const key = (q: readonly number[]) => q.join(",");
+  let reachable = new Set(residentSamples
+    .filter(([x, y]) => x < 8 && y < 8)
+    .map(key));
+  for (const stride of planFineLevelSetJFAStrides(7)) {
+    const next = new Set(reachable);
+    for (const q of residentSamples) {
+      let found = false;
+      for (let dz = -1; dz <= 1 && !found; dz += 1) {
+        for (let dy = -1; dy <= 1 && !found; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (reachable.has(key([q[0] + dx * stride, q[1] + dy * stride, q[2] + dz * stride]))) {
+              found = true; break;
+            }
+          }
+        }
+      }
+      if (found) next.add(key(q));
+    }
+    reachable = next;
+  }
+  assert.equal(reachable.has(key([16, 16, 0])), false,
+    "the disconnected diagonal island has no resident landing chain from the interface seeds");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /seed==INVALID&&abs\(bitcast<f32>\(phi\[index\]\)\)<bandDistance\(\)\)\{atomicAdd\(&control\.unresolved,1u\);\}/,
+    "an unreachable transported narrow-band sample must reject finalization");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /atomicLoad\(&control\.unresolved\)==0u[\s\S]*atomicStore\(&control\.committed,1u\)/,
+    "publication cannot commit while a sparse propagation gap is unresolved");
+});
+
+test("every constructed fine redistance pipeline names an existing WGSL compute entry point", () => {
   const pipelineEntryPoints = [...WebGPUFineLevelSetRedistance.toString()
     .matchAll(/pipeline\("([A-Za-z0-9_]+)"\)/g)]
     .map((match) => match[1]);
@@ -338,10 +429,16 @@ test("every fine redistance pipeline names an existing WGSL compute entry point"
     .matchAll(/@compute\s+@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z0-9_]+)/g)]
     .map((match) => match[1]);
 
-  assert.equal(pipelineEntryPoints.length, 20,
-    "the constructor should expose the complete bounded fine-lattice fast-march pipeline sequence");
-  assert.deepEqual(new Set(pipelineEntryPoints), new Set(shaderEntryPoints),
-    "pipeline construction and WGSL compute entry points must remain in exact parity");
+  assert.equal(pipelineEntryPoints.length, 9);
+  assert.ok(pipelineEntryPoints.every((entryPoint) => shaderEntryPoints.includes(entryPoint)));
+  assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
+    /this\.(?:request|prepareRequest|dedupe|classify|initializeRequest|linkRequest|copyPublication|reservePublication|installLinks|publishRequest|finishActivation)Pipeline/,
+    "the FMM oracle must not construct the old mid-march allocator chain");
+  const jfaEntryPoints = [...WebGPUFineLevelSetRedistance.toString()
+    .matchAll(/jfaPipeline\("([A-Za-z0-9_]+)"\)/g)].map((match) => match[1]);
+  const jfaShaderEntryPoints = [...fineLevelSetJFACPTWGSL
+    .matchAll(/@compute\s+@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z0-9_]+)/g)].map((match) => match[1]);
+  assert.deepEqual(new Set(jfaEntryPoints), new Set(jfaShaderEntryPoints));
 });
 
 test("fine redistance binds exactly the resources reachable from each compute entry point", () => {
@@ -380,33 +477,31 @@ test("fine redistance binds exactly the resources reachable from each compute en
     for (const fineFactor of [4, 8] as const) {
       new WebGPUFineLevelSetRedistance(device, {
         ...source, plan: { ...source.plan, fineFactor },
-      } as never).encode(encoder, { bandCells: 1 });
+      } as never).encode(encoder, { bandCells: 2 });
     }
+    assert.throws(() => new WebGPUFineLevelSetRedistance(device, {
+      ...source, plan: { ...source.plan, brickDimensions: [2, 2, 2], sampleDimensions: [8, 8, 8] },
+    } as never).encode(encoder, { bandCells: 2, method: "fmm" }),
+    /limited to 256 logical samples/);
   } finally {
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
     else Reflect.deleteProperty(globalThis, "GPUBufferUsage");
   }
 
   const expected: Record<string, number[]> = {
-    initializeControl: [0, 3, 8], prepareActiveDispatch: [0, 3, 9],
-    initializeDistances: [0, 2, 3, 4, 5, 6, 8], seedDistances: [0, 2, 3, 4, 5, 6, 8],
-    marchBucket: [0, 2, 3, 4, 6, 8], requestPages: [0, 2, 3, 4, 6, 7, 8],
-    prepareRequestDispatch: [0, 8, 9], deduplicateRequests: [0, 7, 8],
-    classifyRequests: [0, 1, 4, 7, 8], initializeRequestedPages: [0, 2, 4, 5, 6, 7, 8],
-    linkRequestedPages: [0, 1, 2, 7, 8], copyPublicationTable: [0, 1, 7, 8],
-    reservePublicationSlots: [0, 7, 8], installReverseLinks: [0, 2, 7, 8],
-    publishRequestedPages: [0, 1, 3, 7, 8], finishActivation: [0, 3, 8],
-    advanceBucket: [8], validateDistances: [0, 2, 3, 4, 6, 8],
-    finalizeDistances: [0, 3, 8], commitDistances: [0, 2, 3, 4, 5, 6, 8],
+    initializeJFAControl: [0, 3, 8], seedClosestPoints: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    jumpFloodAToB: [0, 1, 2, 3, 4, 6, 7], jumpFloodBToA: [0, 1, 2, 3, 4, 6, 7],
+    resolveClosestPointsBToA: [0, 2, 3, 4, 5, 6, 7, 8],
+    validateJFADistances: [0, 1, 2, 3, 4, 6, 7, 8],
+    finalizeJFADistances: [0, 3, 8], commitJFADistances: [0, 2, 3, 4, 5, 6, 7, 8],
   };
   assert.deepEqual(Object.fromEntries([...observed].map(([entryPoint, bindings]) =>
     [entryPoint, [...bindings].sort((a, b) => a - b)])), expected);
 });
 
-test("factor-4 product redistance preserves every causal dispatch in 86 compute passes", () => {
+test("factor-4 product JFA-CPT redistance is one pass with fixed dispatches", () => {
   const passes: string[][] = [];
   let currentPipeline = "";
-  let scratchClearCount = 0;
   const device = {
     limits: { maxComputeWorkgroupsPerDimension: 65_535 }, queue: { writeBuffer() {} },
     createBuffer: () => ({}), createShaderModule: () => ({}),
@@ -422,7 +517,7 @@ test("factor-4 product redistance preserves every causal dispatch in 86 compute 
       samplesPerBrick: 64, hashCapacity: 2, maximumHashProbes: 2, maximumResidentBricks: 1,
       fineCellWidth: 0.25 } };
   const encoder = {
-    clearBuffer(target: GPUBuffer) { if (target === source.workB) scratchClearCount += 1; },
+    clearBuffer() {},
     beginComputePass() {
       const commands: string[] = []; passes.push(commands);
       return {
@@ -444,62 +539,48 @@ test("factor-4 product redistance preserves every causal dispatch in 86 compute 
     else Reflect.deleteProperty(globalThis, "GPUBufferUsage");
   }
 
-  const march = ["marchBucket", "requestPages"];
-  const activation = ["prepareRequestDispatch", "deduplicateRequests", "classifyRequests",
-    "initializeRequestedPages", "linkRequestedPages", "copyPublicationTable", "reservePublicationSlots",
-    "installReverseLinks", "publishRequestedPages", "finishActivation", "prepareActiveDispatch", "advanceBucket"];
-  assert.equal(passes.length, 86, "21 fine cells require 42 half-cell buckets, two passes each, plus endpoints");
-  assert.equal(scratchClearCount, 42, "each causal bucket retains its dedupe/publication scratch clear boundary");
-  assert.deepEqual(passes[0], ["initializeControl", "prepareActiveDispatch", "initializeDistances", "seedDistances"]);
-  for (let bucket = 0; bucket < 42; bucket += 1) {
-    assert.deepEqual(passes[1 + bucket * 2], march);
-    assert.deepEqual(passes[2 + bucket * 2], activation);
-  }
-  assert.deepEqual(passes.at(-1), ["validateDistances", "finalizeDistances", "commitDistances"]);
-  assert.equal(passes.flat().length, 595, "pass batching must not remove or repeat any algorithm dispatch");
+  assert.equal(passes.length, 1);
+  assert.deepEqual(passes[0], ["initializeJFAControl", "seedClosestPoints",
+    "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB", "jumpFloodBToA",
+    "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB", "resolveClosestPointsBToA",
+    "validateJFADistances", "finalizeJFADistances", "commitJFADistances"]);
+  assert.equal(passes[0].slice(1, 10).length, 9,
+    "the 21-cell distance transform is one seed, seven floods, and one resolve dispatch");
 });
 
-test("factor-4/factor-8 B4 redistance is distance-ordered FMM with march-driven pages and strict band validity", () => {
+test("factor-4/factor-8 B4 redistance keeps fixed-resident FMM as an oracle", () => {
   assert.doesNotMatch(fineLevelSetRedistanceWGSL, /relaxDistances|Jacobi|fn pop\(|fn push\(|marchDistances/,
     "fixed whole-band relaxation is not the Section 5 fine-grid march");
   assert.match(fineLevelSetRedistanceWGSL,
     /fn bucketUpper\(\)->f32\{return f32\(atomicLoad\(&control\.bucket\)\+1u\)\*\(\.5\*p\.fineWidth\);\}/,
     "half-cell buckets stay below the h/sqrt(3) minimum 3-D upwind increment");
-  assert.match(fineLevelSetRedistanceWGSL, /@compute @workgroup_size\(64\)fn marchBucket/,
-    "distance work must run in parallel rather than one capacity-wide invocation");
+  assert.match(fineLevelSetRedistanceWGSL,
+    /@compute @workgroup_size\(64\)fn snapshotKnownDistances[\s\S]*snapshot\[index\]=select\(LARGE,distance\[index\],\(flags\[index\]&KNOWN\)!=0u\);/,
+    "each FMM bucket must freeze its causal input before the parallel update");
+  assert.match(fineLevelSetRedistanceWGSL,
+    /@compute @workgroup_size\(64\)fn marchBucket/,
+    "the opt-in FMM oracle must not serialize the complete resident sample set onto one GPU lane");
   assert.doesNotMatch(fineLevelSetRedistanceWGSL, /activateRequests|@workgroup_size\(1\)fn .*for\(var request/,
     "page activation must not retain a serial capacity-wide fallback entry point");
-  assert.match(fineLevelSetRedistanceWGSL,
-    /@compute @workgroup_size\(64\)fn deduplicateRequests[\s\S]*@compute @workgroup_size\(64\)fn initializeRequestedPages/,
-    "requests must be deduplicated and initialized with bounded parallel kernels");
   const encode = WebGPUFineLevelSetRedistance.prototype.encode.toString().replace(/\s+/g, "");
-  assert.match(encode, /dispatchWorkgroupsIndirect\(this\.indirect,offset\)/);
-  assert.match(encode, /indirectRun\(this\.marchPipeline/,
-    "each bucket must dispatch from the live active-page count");
+  assert.doesNotMatch(encode, /dispatchWorkgroupsIndirect|this\.indirect/,
+    "the validation oracle uses the same fixed-capacity direct dispatch shape as JFA");
+  assert.match(encode, /run\(this\.snapshotPipeline,[\s\S]*this\.source\.plan\.maximumResidentBricks,pass\)[\s\S]*run\(this\.marchPipeline,[\s\S]*this\.source\.plan\.maximumResidentBricks,pass\)/,
+    "each oracle bucket must snapshot and march the resident pages in parallel");
   assert.match(encode, /options\.bandCells\*2/,
     "both quality factors march a bounded number of half-cell buckets");
   const encodeSource = WebGPUFineLevelSetRedistance.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(encodeSource, /fineFactor!==4&&this\.source\.plan\.fineFactor!==8/,
     "factor eight must run the same global fine-coordinate FMM instead of failing at the product gate");
-  assert.match(fineLevelSetRedistanceWGSL,
-    /\(flags\[index\]&FRONTIER\)!=0u&&distance\[index\]\+p\.fineWidth<bandDistance\(\)/,
-    "only the accepted causal frontier may request another page inside the physical band");
-  assert.match(encode,
-    /this\.initializeRequestPipeline[\s\S]*this\.linkRequestPipeline[\s\S]*this\.reservePublicationPipeline[\s\S]*this\.installLinksPipeline[\s\S]*this\.publishRequestPipeline/,
-    "page payloads and forward/reverse links must complete before hash publication");
-  assert.match(fineLevelSetRedistanceWGSL,
-    /atomicStore\(&pageHash\[slot\*2u\+1u\],id\);atomicStore\(&pageHash\[slot\*2u\],key\)/,
-    "the page ID must be visible before its hash key publication fence");
-  assert.match(fineLevelSetRedistanceWGSL,
-    /fn finishActivation\(\)[\s\S]*atomicStore\(&worklist\[0\],count\)/,
-    "the live worklist count must publish only after all page hash entries complete");
+  assert.doesNotMatch(encode, /requestPipeline|dedupePipeline|publishRequestPipeline|clearBuffer\(this\.source\.workB/,
+    "redistance must never mutate fixed topology residency");
   assert.match(fineLevelSetRedistanceWGSL,
     /if\(d>=bandDistance\(\)\|\|\(flags\[flat\]&KNOWN\)==0u\)\{flags\[flat\]=0u;\}/,
     "allocated hazard pages outside the completed narrow band must lose fine authority");
 
   const topologyEncode = WebGPUFineLevelSetTopology.prototype.encode.toString().replace(/\s+/g, "");
-  assert.match(topologyEncode, /initialDilationBrickRings=bandPlan\.safetyBrickRings/,
-    "each A/B target starts from interface blocks plus exactly the requested one-ring hazard support");
+  assert.match(topologyEncode, /dilationBrickRings=bandPlan\.dilationBrickRings/,
+    "each A/B target starts with the complete redistance support resident");
 
   const topologyWGSL = makeFineLevelSetTopologyWGSL("fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}");
   assert.match(topologyWGSL,
@@ -509,8 +590,9 @@ test("factor-4/factor-8 B4 redistance is distance-ordered FMM with march-driven 
     "the target generation must clear every metadata row before dense reassignment");
 });
 
-test("Dawn factor-4 bucket FMM activates a physical band beyond the initial one-ring topology", {
-  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for GPU fine-levelset checks",
+test("opt-in Dawn reproducer: factor-4 fixed-resident FMM consumes the pre-dilated physical band", {
+  skip: !process.env.WEBGPU_NODE_MODULE || process.env.FLUID_RUN_FINE_FMM_ORACLE !== "1"
+    ? "set WEBGPU_NODE_MODULE and FLUID_RUN_FINE_FMM_ORACLE=1 for the backend-gated FMM reproducer" : false,
 }, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
     create(options: string[]): GPU; globals: Record<string, unknown>;
@@ -518,8 +600,8 @@ test("Dawn factor-4 bucket FMM activates a physical band beyond the initial one-
   Object.assign(globalThis, dawn.globals);
   const adapter = await dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]).requestAdapter();
   assert.ok(adapter); const device = await adapter.requestDevice(); device.pushErrorScope("validation");
-  const plan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0], finestCellDimensions: [6, 1, 1],
-    finestCellWidth: 1, fineFactor: 4, brickResolution: 4, maximumResidentBricks: 6 });
+  const plan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0], finestCellDimensions: [4, 1, 1],
+    finestCellWidth: 1, fineFactor: 4, brickResolution: 4, maximumResidentBricks: 4 });
   const oracle = new FineLevelSetBrickOracle(plan);
   oracle.publishInterfaceAndRing([packFineLevelSetBrickKey(plan, [2, 0, 0])], ([x]) => x - 2.5);
   const owner = new WebGPUFineLevelSetBricks(device, plan);
@@ -534,10 +616,11 @@ test("Dawn factor-4 bucket FMM activates a physical band beyond the initial one-
     interpolationSupportFineCells: 0, redistanceBandFineCells: 7, safetyBrickRings: 1 });
   device.queue.submit([topologyEncoder.finish()]); await device.queue.onSubmittedWorkDone();
   if (process.env.FLUID_FINE_FMM_REPORT === "1") console.error("fine-fmm-dynamic topology-complete");
-  const topologyValidationError = await device.popErrorScope(); assert.equal(topologyValidationError, null);
+  const topologyValidationError = await device.popErrorScope();
+  assert.equal(topologyValidationError?.message ?? null, null);
   device.pushErrorScope("validation");
   const encoder = device.createCommandEncoder();
-  redistance.encode(encoder, { bandCells: 7, residualTolerance: 1 });
+  redistance.encode(encoder, { bandCells: 7, residualTolerance: 1, method: "fmm" });
   encoder.copyBufferToBuffer(redistance.control, 0, readback, 0, 48);
   encoder.copyBufferToBuffer(target.worklist, 0, readback, 48, 20);
   const started = performance.now(); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
@@ -549,14 +632,59 @@ test("Dawn factor-4 bucket FMM activates a physical band beyond the initial one-
   const worklist = new Uint32Array(bytes, 48, 5);
   assert.equal(control.flags, 0); assert.equal(control.firstError, 0xffff_ffff);
   assert.equal(control.unresolvedCells, 0); assert.equal(control.committed, true);
-  assert.ok(control.activatedPages > 0, "the causal front must allocate beyond the initial topology ring");
-  assert.ok(control.finalPages > control.initialPages);
+  assert.equal(control.activatedPages, 0, "redistance may not allocate pages");
+  assert.equal(control.finalPages, control.initialPages);
+  assert.equal(control.initialPages, plan.maximumResidentBricks,
+    "the topology flood must make the complete bounded domain resident first");
   assert.equal(worklist[0], control.finalPages);
   assert.equal(worklist[1], 2);
   if (process.env.FLUID_FINE_FMM_REPORT === "1") {
     console.error(`fine-fmm-dynamic ${JSON.stringify({ elapsedMs, ...control })}`);
   }
   readback.destroy(); redistance.destroy(); topology.destroy(); owner.destroy(); device.destroy();
+});
+
+test("opt-in Dawn backend reproducer: sparse diagonal JFA support gap dispatch", {
+  skip: !process.env.WEBGPU_NODE_MODULE || process.env.FLUID_RUN_SPARSE_JFA_GAP !== "1"
+    ? "set WEBGPU_NODE_MODULE and FLUID_RUN_SPARSE_JFA_GAP=1 for the Dawn sparse-gap reproducer" : false,
+}, async () => {
+  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
+    create(options: string[]): GPU; globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, dawn.globals);
+  const adapter = await dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]).requestAdapter();
+  assert.ok(adapter); const device = await adapter.requestDevice(); device.pushErrorScope("validation");
+  const plan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0], finestCellDimensions: [6, 6, 2],
+    finestCellWidth: 1, fineFactor: 4, brickResolution: 4, maximumResidentBricks: 16 });
+  const oracle = new FineLevelSetBrickOracle(plan);
+  const near = packFineLevelSetBrickKey(plan, [0, 0, 0]);
+  const diagonal = packFineLevelSetBrickKey(plan, [4, 4, 0]);
+  // Two axial one-rings form disconnected diagonal islands. Only the near
+  // island crosses zero; the far island deliberately claims transported
+  // narrow-band values so a missed CPT propagation must reject publication.
+  oracle.publishInterfaceAndRing([near, diagonal], ([x, y]) =>
+    x > 3 && y > 3 ? 0.25 : x - 0.375);
+  const owner = new WebGPUFineLevelSetBricks(device, plan);
+  const source = owner.uploadGeneration(oracle.exportGPUGeneration());
+  const redistance = new WebGPUFineLevelSetRedistance(device, source);
+  const readback = device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder();
+  redistance.encode(encoder, { bandCells: 7, residualTolerance: 1 });
+  encoder.copyBufferToBuffer(redistance.control, 0, readback, 0, 48);
+  device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+  const validationError = await device.popErrorScope(); assert.equal(validationError, null);
+  await readback.mapAsync(GPUMapMode.READ);
+  const control = unpackFineLevelSetGPURedistanceControl(
+    new Uint32Array(readback.getMappedRange().slice(0), 0, 12));
+  readback.unmap();
+  assert.ok(control.seedCount > 0);
+  // This is the intended result once the Dawn/Metal backend fault is cleared;
+  // the deterministic test above owns the always-on fail-closed contract.
+  assert.ok(control.unresolvedCells > 0,
+    "a narrow-band island unreachable through resident JFA landing points must be reported");
+  assert.equal(control.committed, false);
+  assert.equal(control.flags, 0, "a propagation gap is a publication rejection, not a shader fault");
+  readback.destroy(); redistance.destroy(); owner.destroy(); device.destroy();
 });
 
 test("Dawn atomically rolls back a downstream-rejected fine generation and accepts a retry", {
@@ -810,7 +938,7 @@ test("Dawn indexes global factor-4 bricks and returns coarse phi for missing/out
   const overflowWords = new Uint32Array(overflowReadback.getMappedRange().slice(0)); overflowReadback.unmap();
   const overflowControl = unpackFineLevelSetGPUTopologyControl(overflowWords);
   assert.notEqual(overflowControl.flags, 0);
-  assert.equal(overflowControl.requiredDesiredBricks, smallCurrent.plan.maximumResidentBricks + 1);
+  assert.ok(overflowControl.requiredDesiredBricks > smallCurrent.plan.maximumResidentBricks);
   assert.equal(overflowControl.requiredDesiredBricksExact, false);
   assert.equal(overflowControl.published, true);
   assert.equal(overflowControl.rolledBack, true);
@@ -819,12 +947,12 @@ test("Dawn indexes global factor-4 bricks and returns coarse phi for missing/out
   const bootstrapOwner = new WebGPUFineLevelSetBricks(device, plan);
   const emptyCurrent = bootstrapOwner.initializeEmptyGPUGeneration(1);
   const bootstrapNext = bootstrapOwner.prepareGPUGeneration(2);
-  const leafBuffer = new ArrayBuffer(48); const leafWords = new Uint32Array(leafBuffer);
-  const leafFloats = new Float32Array(leafBuffer); leafWords[0] = 0; leafWords[1] = 1;
+  const leafBuffer = new ArrayBuffer(64); const leafWords = new Uint32Array(leafBuffer);
+  const leafFloats = new Float32Array(leafBuffer); leafWords[3] = 1; leafWords[4] = 2;
   // Bootstrap must copy interface values, not merely keys: this affine plane
   // crosses zero inside the first globally keyed factor-4 brick.
-  leafFloats[4] = 0; leafFloats[5] = 1;
-  const bootstrapLeaves = device.createBuffer({ size: 48, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  leafFloats[8] = 0; leafFloats[9] = 1;
+  const bootstrapLeaves = device.createBuffer({ size: 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const bootstrapCandidates = device.createBuffer({ size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const bootstrapCandidateControl = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   device.queue.writeBuffer(bootstrapLeaves, 0, leafWords);

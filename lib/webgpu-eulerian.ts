@@ -27,9 +27,15 @@ export type GPUPhysicsStageId =
   | "projection"
   | "powerProjection"
   | "velocityProjection"
+  | "faceBand"
+  | "faceMarch"
+  | "powerPublication"
   | "extrapolation"
   | "materialization"
   | "surfaceUpdate"
+  | "fineTopology"
+  | "fineTransport"
+  | "fineRedistance"
   | "rigidCoupling"
   | "spray"
   | "fluidResidency"
@@ -52,9 +58,21 @@ export interface GPUPhysicsTimings {
   powerProjection_ms: number;
   /** Diagnostic subdivision of projection_ms for the regular finite-volume compatibility field. */
   velocityProjection_ms: number;
+  /** Section 5 face-band construction, including the generalized-face setup preceding it. */
+  faceBand_ms: number;
+  /** Section 5 regular-face narrow-band fast march. */
+  faceMarch_ms: number;
+  /** Section 5 regular-face-to-power-face publication and validation tail. */
+  powerPublication_ms: number;
   extrapolation_ms: number;
   materialization_ms: number;
   surfaceUpdate_ms: number;
+  /** Section 5 fine-page topology range, including surface setup assigned to its shared interval. */
+  fineTopology_ms: number;
+  /** Section 5 fine-level-set transport range. */
+  fineTransport_ms: number;
+  /** Section 5 fine redistance and transactional publication tail. */
+  fineRedistance_ms: number;
   rigidCoupling_ms: number;
   spray_ms: number;
   fluidResidency_ms: number;
@@ -69,6 +87,18 @@ export interface GPUPhysicsTimings {
 export type GPUPhysicsTimingField = Exclude<keyof GPUPhysicsTimings, "activeStages">;
 export const GPU_PHYSICS_TIMESTAMP_CAPACITY = 2048;
 
+export interface GPUPhysicsTimestampSegment {
+  name: GPUPhysicsTimingField;
+  start: number;
+  end: number;
+  /**
+   * Complete temporally ordered boundary chain shared by a partitioned
+   * aggregate. A child is publishable only when every boundary in its parent
+   * partition resolved and the whole chain is monotonic.
+   */
+  requiredBoundaries?: readonly number[];
+}
+
 export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): GPUPhysicsTimings {
   return {
     preparation_ms: 0,
@@ -82,9 +112,15 @@ export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): 
     projection_ms: 0,
     powerProjection_ms: 0,
     velocityProjection_ms: 0,
+    faceBand_ms: 0,
+    faceMarch_ms: 0,
+    powerPublication_ms: 0,
     extrapolation_ms: 0,
     materialization_ms: 0,
     surfaceUpdate_ms: 0,
+    fineTopology_ms: 0,
+    fineTransport_ms: 0,
+    fineRedistance_ms: 0,
     rigidCoupling_ms: 0,
     spray_ms: 0,
     fluidResidency_ms: 0,
@@ -94,6 +130,54 @@ export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): 
     total_ms: 0,
     activeStages
   };
+}
+
+/**
+ * Decode timestamp ranges defensively. WebGPU query resolve leaves an
+ * unwritten query at zero on the backends we use; subtracting a valid shared
+ * boundary from that zero produces a finite but impossible multi-hour stage.
+ * Treat an entire field as unavailable when any of its encoded ranges is
+ * unresolved, out of bounds, or temporally out of order.
+ */
+export function decodeGPUPhysicsTimestampSegments(
+  timestamps: ArrayLike<bigint>,
+  segments: readonly GPUPhysicsTimestampSegment[],
+): Partial<Record<GPUPhysicsTimingField, number>> {
+  const decoded: Partial<Record<GPUPhysicsTimingField, number>> = {};
+  const invalid = new Set<GPUPhysicsTimingField>();
+  for (const segment of segments) {
+    const boundaries = segment.requiredBoundaries ?? [segment.start, segment.end];
+    let previous: bigint | undefined;
+    let valid = boundaries.length >= 2
+      && boundaries.includes(segment.start)
+      && boundaries.includes(segment.end)
+      && boundaries.indexOf(segment.start) <= boundaries.indexOf(segment.end);
+    for (const index of boundaries) {
+      if (!valid || !Number.isInteger(index) || index < 0 || index >= timestamps.length) {
+        valid = false;
+        break;
+      }
+      const timestamp = timestamps[index];
+      if (timestamp === undefined || timestamp === 0n
+        || (previous !== undefined && timestamp < previous)) {
+        valid = false;
+        break;
+      }
+      previous = timestamp;
+    }
+    if (!valid) {
+      invalid.add(segment.name);
+      continue;
+    }
+    const elapsed_ms = Number(timestamps[segment.end] - timestamps[segment.start]) / 1e6;
+    if (!Number.isFinite(elapsed_ms) || elapsed_ms < 0) {
+      invalid.add(segment.name);
+      continue;
+    }
+    decoded[segment.name] = (decoded[segment.name] ?? 0) + elapsed_ms;
+  }
+  for (const name of invalid) decoded[name] = 0;
+  return decoded;
 }
 
 export function categorizedGPUPhysicsTime_ms(timings: GPUPhysicsTimings) {
@@ -385,6 +469,14 @@ export interface GPUEulerianInfo {
   maximumTallCellHeight?: number;
   encodedSteps?: number;
   gpuStep_ms?: number;
+  /** Monotonic identity of the latest decoded physics timestamp query set. */
+  gpuPhysicsTimingSampleId?: number;
+  /** Submitted simulation time represented by the latest timestamp sample. */
+  gpuPhysicsTimingSimulation_s?: number;
+  /** Host wall latency from the timestamp copy submission until map completion. */
+  gpuPhysicsTimingReadbackWall_ms?: number;
+  /** Full host wall duration of the latest periodic diagnostics/readback fan-out. */
+  gpuTelemetryWall_ms?: number;
   gpuQueueWall_ms?: number;
   gpuQueueSimulation_s?: number;
   /** Presentation-sized physics batches submitted but not yet queue-confirmed. */
@@ -395,11 +487,39 @@ export interface GPUEulerianInfo {
   gpuBatchWall_ms?: number;
   /** Main-thread time spent encoding and submitting the latest GPU advance. */
   cpuAdvanceEncode_ms?: number;
+  /** Intrusive pressure-only submission-to-completion sample. Unlike timestamp
+   * queries this includes WebGPU implementation and driver command processing. */
+  gpuPressureSolveObservedWall_ms?: number;
+  /** Host encode time for the isolated pressure-only probe command buffer. */
+  cpuPressureSolveProbeEncode_ms?: number;
+  gpuPressureSolveObservedSampleId?: number;
+  gpuPressureSolveObservedSimulation_s?: number;
+  /** Monotonic wall spent in intrusive pressure replays. The renderer uses
+   * its delta to keep profiler self-time out of production cadence. */
+  gpuProfilerWallTotal_ms?: number;
+  /** Intrusive production sample split at real command-buffer submission
+   * boundaries. Unlike shader timestamps these intervals include Dawn, driver,
+   * queue scheduling, and GPU completion work for each production phase. */
+  gpuAdvancePhaseWall?: {
+    sampleId: number;
+    simulation_s: number;
+    topologyAdvection_ms: number;
+    pressureProjection_ms: number;
+    surfaceCoupling_ms: number;
+    publicationDiagnostics_ms: number;
+    total_ms: number;
+  };
   /** Solver-side attribution for the latest command encode. These regions are
    * host timings only; shader execution remains covered by timestamp queries. */
   cpuAdvanceEncodeBreakdown?: {
     setup_ms: number;
     topology_ms: number;
+    /** Exact host time spent emitting the pressure solver itself. */
+    pressureSolve_ms: number;
+    /** Compute dispatches in the last pressure solver schedule. */
+    pressureSolvePassCount: number;
+    /** Actual compute-pass begin/end transitions around those dispatches. */
+    pressureSolvePassTransitionCount: number;
     pressureProjection_ms: number;
     surface_ms: number;
     publication_ms: number;
@@ -411,6 +531,10 @@ export interface GPUEulerianInfo {
   gpuBatchSimulation_s?: number;
   /** Wall interval between the two latest ordered batch completions. */
   gpuCompletionWall_ms?: number;
+  /** Portion of gpuCompletionWall_ms consumed by intrusive profiler work. */
+  gpuCompletionProfilerWall_ms?: number;
+  /** Completion interval with known intrusive profiler work removed. */
+  gpuCompletionProductionWall_ms?: number;
   /** Simulation time confirmed during gpuCompletionWall_ms. */
   gpuCompletionSimulation_s?: number;
   /** Wall interval between queue-confirmed presentation completions. */
@@ -1544,11 +1668,12 @@ export class WebGPUEulerianSolver {
   private multigrid:TallCellMultigrid;
   private velocityHierarchy?:TallCellVelocityHierarchy;
   private reductionBuffer:GPUBuffer;private governorBuffer:GPUBuffer;private phiDispatchBuffer:GPUBuffer;private rigidBuffer:GPUBuffer;private rigidExchangeBuffer:GPUBuffer;private rigidSystem:WebGPURigidBodySystem;private nextColumnBases:GPUBuffer;private smoothedColumnBases:GPUBuffer;private querySet?:GPUQuerySet;private queryResolve?:GPUBuffer;
-  private querySegments: Array<{name:GPUPhysicsTimingField;start:number;end:number}>=[];private queryCount=0;
+  private querySegments: GPUPhysicsTimestampSegment[]=[];private queryCount=0;
   private lastTime = 0;
   private lastFrameDt = 0;
   private readbackPending = false;
   private wallTimingPending = false;
+  private performanceReadbacksEnabled = true;
   private validationChecked = false;
   private stepIndex = 0;
   private readonly inflowBoundary?: InflowGridBoundary;
@@ -1700,7 +1825,8 @@ export class WebGPUEulerianSolver {
   private dispatch(pass: GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(this.info.nx/4),Math.ceil(this.info.storedNy/4),Math.ceil(this.info.nz/4));}
   private dispatchPhiIndirect(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup,slot:number){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroupsIndirect(this.phiDispatchBuffer,slot*16);}
   private dispatchColumns(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(this.info.nx/8),Math.ceil(this.info.nz/8));}
-  private timing(name:GPUPhysicsTimingField){if(!this.querySet||this.queryCount+2>GPU_PHYSICS_TIMESTAMP_CAPACITY)return undefined;const segment={name,start:this.queryCount++,end:this.queryCount++};this.querySegments.push(segment);return segment;}
+  setPerformanceReadbacksEnabled(enabled:boolean){this.performanceReadbacksEnabled=enabled;if(!enabled)this.info.gpuStep_ms=undefined;}
+  private timing(name:GPUPhysicsTimingField){if(!this.performanceReadbacksEnabled||!this.querySet||this.queryCount+2>GPU_PHYSICS_TIMESTAMP_CAPACITY)return undefined;const segment={name,start:this.queryCount++,end:this.queryCount++};this.querySegments.push(segment);return segment;}
 
   advanceTo(time_s:number,bodies:RigidBodyState[]=[]){
     const advance=planGPUAdvance(time_s,this.lastTime,this.scene.numerics.maxDt_s);if(!advance)return false;const delta=advance.dt_s;if(delta<1e-6){this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;return true;}this.lastTime=advance.nextTime_s;this.info.submittedTime_s=this.lastTime;this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;const c=this.scene.container,rho=this.scene.fluid.density_kg_m3,sigma=0;
@@ -1735,12 +1861,12 @@ export class WebGPUEulerianSolver {
     if(activeBodies.length>0){const cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);this.rigidSystem.encode(encoder,delta,cellVolume,1,h.y);}
     this.stepIndex+=1;
     {const timing=this.timing("diagnostics_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:totalTiming.end}});pass.end();}if(this.querySet&&this.queryResolve&&this.queryCount>0)encoder.resolveQuerySet(this.querySet,0,this.queryCount,this.queryResolve,0);
-    const submittedAt=performance.now();this.device.queue.submit([encoder.finish()]);stageCapture?.afterSubmit();if(!this.wallTimingPending){this.wallTimingPending=true;void this.device.queue.onSubmittedWorkDone().then(()=>{this.info.gpuQueueWall_ms=performance.now()-submittedAt;this.info.gpuQueueSimulation_s=delta;}).catch(()=>{ /* Device loss is handled by the renderer. */ }).finally(()=>{this.wallTimingPending=false;});}
+    const submittedAt=performance.now();this.device.queue.submit([encoder.finish()]);stageCapture?.afterSubmit();if(this.performanceReadbacksEnabled&&!this.wallTimingPending){this.wallTimingPending=true;void this.device.queue.onSubmittedWorkDone().then(()=>{this.info.gpuQueueWall_ms=performance.now()-submittedAt;this.info.gpuQueueSimulation_s=delta;}).catch(()=>{ /* Device loss is handled by the renderer. */ }).finally(()=>{this.wallTimingPending=false;});}
     if(!this.validationChecked){this.validationChecked=true;void this.device.popErrorScope().then(error=>{if(error)console.error(`GPU fluid validation: ${error.message}`);}).catch(()=>{ /* Device loss is handled by the renderer. */ });}return true;
   }
 
   async readStats(){
-    if(this.stepIndex===0)return this.info;
+    if(!this.performanceReadbacksEnabled||this.stepIndex===0)return this.info;
     if(this.readbackPending)return this.info;
     this.readbackPending=true;
     const diagnosticBytes=128,governorBytes=16,queryOffset=diagnosticBytes+governorBytes,querySegments=[...this.querySegments],queryBytes=this.queryResolve?this.queryCount*8:0;
@@ -1788,10 +1914,11 @@ export class WebGPUEulerianSolver {
       const measuredFrameDt=(this.info.lastDt_s??0)*(this.info.lastSubsteps??1);this.info.stabilityFlags=classifyTallCellStability({nonFiniteCount:this.info.nonFiniteCount,pressureRelativeResidual:this.info.pressureRelativeResidual,maxComponentCfl:this.info.maxComponentCfl,highCflCellCount:this.info.highCflCellCount,maxDivergenceBefore_s:this.info.maxDivergenceBefore_s,maxDivergenceAfter_s:this.info.maxDivergenceAfter_s,dt_s:measuredFrameDt||this.lastFrameDt});
       if(queryBytes>0){
         const times=new BigUint64Array(buffer.getMappedRange(queryOffset,queryBytes));
-        const stageByField:Partial<Record<GPUPhysicsTimingField,GPUPhysicsStageId>>={preparation_ms:"preparation",layerConstruction_ms:"topology",advection_ms:"advection",conditioning_ms:"conditioning",remeshing_ms:"remeshing",pressure_ms:"pressure",projection_ms:"projection",extrapolation_ms:"extrapolation",materialization_ms:"materialization",surfaceUpdate_ms:"surfaceUpdate",rigidCoupling_ms:"rigidCoupling",diagnostics_ms:"diagnostics"};
+        const stageByField:Partial<Record<GPUPhysicsTimingField,GPUPhysicsStageId>>={preparation_ms:"preparation",layerConstruction_ms:"topology",advection_ms:"advection",conditioning_ms:"conditioning",remeshing_ms:"remeshing",pressure_ms:"pressure",powerAssembly_ms:"powerAssembly",pressureSolve_ms:"pressureSolve",projection_ms:"projection",powerProjection_ms:"powerProjection",velocityProjection_ms:"velocityProjection",faceBand_ms:"faceBand",faceMarch_ms:"faceMarch",powerPublication_ms:"powerPublication",extrapolation_ms:"extrapolation",materialization_ms:"materialization",surfaceUpdate_ms:"surfaceUpdate",fineTopology_ms:"fineTopology",fineTransport_ms:"fineTransport",fineRedistance_ms:"fineRedistance",rigidCoupling_ms:"rigidCoupling",spray_ms:"spray",fluidResidency_ms:"fluidResidency",sparsePublication_ms:"sparsePublication",diagnostics_ms:"diagnostics"};
         const activeStages=[...new Set(querySegments.map(segment=>stageByField[segment.name]).filter((stage):stage is GPUPhysicsStageId=>Boolean(stage)))];
         const timings=emptyGPUPhysicsTimings(activeStages);
-        for(const segment of querySegments){const elapsed=Number(times[segment.end])-Number(times[segment.start]);timings[segment.name]+=Math.max(0,elapsed)/1e6;}
+        const decoded=decodeGPUPhysicsTimestampSegments(times,querySegments);
+        for(const name of new Set(querySegments.map(segment=>segment.name)))timings[name]=decoded[name]??0;
         const categorized=categorizedGPUPhysicsTime_ms(timings);timings.total_ms=Math.max(timings.total_ms,categorized);timings.overhead_ms=Math.max(0,timings.total_ms-categorized);this.info.gpuTimings=timings;this.info.gpuStep_ms=timings.total_ms;
       }
       buffer.unmap();

@@ -71,12 +71,12 @@ lookup. Inactive regions obtain their sign from the adaptive hierarchy. The
 supported body-free path therefore needs neither a persistent dense phi
 publication nor a parallel sparse-brick simulation world after bootstrap.
 
-The coarse level-set schedule owns 65 invocation-stable parameter slots: one
-cold bootstrap plus the solver's bounded 64 surface substeps in a single
-command encoder. Production submits that encoder before `advanceTo` returns
-and explicitly retires it before another encoder may use the schedule; the
-runtime rejects either a second unretired encoder or a 66th invocation. This
-is the supported product contract, not a general concurrent-encoder ring.
+The coarse level-set schedule owns one aligned parameter arena per command
+encoder, sized for one cold bootstrap plus the solver's bounded 64 surface
+substeps. Every invocation and redistance pass receives a disjoint offset.
+Multiple command buffers can therefore be encoded before any is submitted;
+retirement only releases the submitted encoder's private arena. A 66th
+invocation in one encoder still fails before it could alias earlier data.
 Fine-to-coarse restriction, topology finalization, and fine transport still
 have one mutable parameter allocation each, so more than one surface substep
 in the same unsubmitted encoder remains a known lifetime gap. The bounded

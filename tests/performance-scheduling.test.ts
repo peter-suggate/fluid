@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advanceWallBreakdown, measuredGPUUtilization, performanceSchedule } from "../lib/performance-scheduling";
+import { advanceWallBreakdown, completionFrameAccounting, measuredGPUUtilization, performanceSchedule } from "../lib/performance-scheduling";
 
 test("performance scheduling separates a presentation frame from a submission batch", () => {
   const schedule = performanceSchedule({
@@ -53,4 +53,20 @@ test("last advance wall time preserves CPU encode and untimestamped queue delay"
     wall_ms: 258,
   });
   assert.equal(advanceWallBreakdown({}), null);
+});
+
+test("completion accounting exposes wall time absent from timestamps", () => {
+  assert.deepEqual(completionFrameAccounting({
+    targetFps: 60,
+    completionWall_ms: 250,
+    completionSimulation_s: 0.004,
+    timestampedGPU_ms: 5,
+    cpu_ms: 3,
+  }), {
+    wallFrame_ms: 1041.6666666666667,
+    accounted_ms: 5,
+    unattributed_ms: 1036.6666666666667,
+    realtimeRate: 0.016,
+  });
+  assert.equal(completionFrameAccounting({ targetFps: 60, timestampedGPU_ms: 1, cpu_ms: 1 }), null);
 });

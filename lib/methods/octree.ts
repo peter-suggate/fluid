@@ -6,7 +6,10 @@ import { sceneHasTerrain } from "../terrain";
 import { fencedSparseAuthorityBringupEnabled } from "../gpu-startup";
 
 const params: MethodParamSpec[] = [
-  { kind: "number", key: "pressureIterations", label: "Pressure effort", unit: "iterations", min: 16, max: 400, step: 8, digits: 0, default: 128, tier: "coarse", hint: "The paper-authoritative Section 4.3 solve encodes up to 128 PCG iterations with GPU early-out; the paper reports 6–10 iterations with its production hierarchy. Explicit compatibility solvers use this adjustable effort budget." },
+  { kind: "select", key: "powerMultigridHierarchy", label: "Pressure hierarchy", default: "aggregate-galerkin", tier: "coarse", options: [{ value: "aggregate-galerkin", label: "Current Galerkin · rollback" }, { value: "paper-pyramid", label: "Paper sparse pyramid · A/B" }], hint: "Selects only the first-order M1 V-cycle inside the same Section 4.3 PCG solve. The paper pyramid uses native active/ghost sparse-grid levels and exact-adjoint transfers; current Galerkin remains authoritative until the Dawn endurance gates pass." },
+  { kind: "number", key: "powerPcgIterationCap", label: "Experimental PCG cap", unit: "iterations", min: 8, max: 128, step: 1, digits: 0, default: 128, tier: "fine", hint: "Diagnostic limit for the currently recorded Section 4.3 schedule. Keep 128 for normal simulation: longer dam-break runs contain rare topology generations that exhaust 16 even when nearby solves converge in 7-9 iterations." },
+  { kind: "number", key: "powerBoundarySmoothingIterations", label: "Boundary smoothing", unit: "paired sweeps", min: 2, max: 16, step: 2, digits: 0, default: 8, tier: "fine", hint: "Matching pre/post L2 sweeps in the three-cell boundary and level-transition band. One even value controls both sides and preserves ping-pong parity, so experiments cannot break PCG symmetry; the paper uses 8." },
+  { kind: "number", key: "pressureIterations", label: "Compatibility pressure effort", unit: "sweeps", min: 16, max: 400, step: 8, digits: 0, default: 128, tier: "fine", hint: "Effort used only by Chebyshev/Jacobi compatibility solvers. It does not change the authoritative Power PCG cap above." },
   { kind: "select", key: "leafSolver", label: "Pressure solver", default: "auto", tier: "fine", options: [{ value: "auto", label: "Auto · Section 4.3 for power" }, { value: "mgpcg", label: "Section 4.3 hybrid" }, { value: "chebyshev", label: "Chebyshev compatibility" }], hint: "Auto selects the paper's Section 4.3 hybrid PCG preconditioner when power authority is admitted. Chebyshev is an explicit comparison mode, not a same-frame fallback for rejected paper authority." },
   { kind: "number", key: "adaptivity", label: "Octree adaptivity", unit: "", min: 0, max: 1, step: 0.1, digits: 1, default: 1, tier: "coarse", hint: "Debug quality/performance sweep: 0 forces finest pressure cells everywhere; 1 enables full signed-distance-graded coarsening." },
   { kind: "select", key: "secondaryParticles", label: "Secondary liquid", default: "off", tier: "coarse", update: "runtime", options: [{ value: "on", label: "Spray droplets" }, { value: "off", label: "Off" }], hint: "One-way GPU droplets preserve escaped splash detail without changing liquid mass or pressure." },
@@ -46,6 +49,8 @@ const globalFineLevelSetFactor = (value: unknown): 4 | 8 | undefined =>
   Number(value) >= 8 ? 8 : Number(value) >= 4 ? 4 : undefined;
 const powerDiagramProjection = (value: unknown): "off" | "mirror" | "authoritative" =>
   value === "authoritative" || value === "mirror" ? value : "off";
+const powerMultigridHierarchy = (value: unknown): "aggregate-galerkin" | "paper-pyramid" =>
+  value === "paper-pyramid" ? "paper-pyramid" : "aggregate-galerkin";
 const sparseSurfaceBand = (value: unknown): "off" | "mirror" | "authoritative" => value === "authoritative" || value === "mirror" ? value : "off";
 const brickAtlasMode = (value: unknown): "off" | "mirror" | "authoritative" =>
   value === "off" || value === false ? "off" : value === "authoritative" ? "authoritative" : "mirror";
@@ -74,6 +79,9 @@ const options = (scene: SceneDescription, quality: GPUQuality, values: MethodPar
   secondaryParticleSurfaceCorrection: numberValue(values, params, "secondaryParticleSurfaceCorrection"),
   octree: {
     pressureIterations: numberValue(values, params, "pressureIterations"),
+    powerPcgIterationCap: numberValue(values, params, "powerPcgIterationCap"),
+    powerBoundarySmoothingIterations: numberValue(values, params, "powerBoundarySmoothingIterations"),
+    powerMultigridHierarchy: powerMultigridHierarchy(values.powerMultigridHierarchy),
     faceVelocityMirror: values.faceVelocityMirror === true || values.faceVelocityMirror === "on",
     faceVelocityRhs: values.faceVelocityRhs === true || values.faceVelocityRhs === "on",
     faceVelocityTransport: values.faceVelocityTransport !== false && values.faceVelocityTransport !== "off",
@@ -112,8 +120,11 @@ export const octreeMethod: SimulationMethod = {
   backend: "webgpu",
   qualityLabels: { balanced: "bounded workload", high: "higher solver effort", ultra: "maximum solver effort" },
   params,
-  pressureMapping: "Admitted power authority uses the paper's Section 4.3 hybrid PCG with up to 128 encoded iterations and GPU early-out; the paper reports 6–10 iterations with its production hierarchy. Explicit compatibility modes use the adjustable pressure-effort budget; neither solve reads topology or row counts back.",
+  pressureMapping: "Admitted power authority uses the paper's Section 4.3 hybrid PCG with a safe 128-iteration recorded tail and GPU early-out at relative residual 1e-4. The paper reports 6–10 iterations for its optimized sparse-grid hierarchy; lower caps remain diagnostic-only until this implementation matches that hierarchy.",
   presetFor: (quality) => ({
+    powerMultigridHierarchy: "aggregate-galerkin",
+    powerPcgIterationCap: 128,
+    powerBoundarySmoothingIterations: 8,
     pressureIterations: quality === "balanced" ? 128 : quality === "high" ? 320 : 400,
     adaptivity: 1,
     secondaryParticles: "off",

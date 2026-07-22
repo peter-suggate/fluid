@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.
 test("uniform and adaptive rigid coupling stays resident while telemetry remains pooled", () => {
   const statsHelper = source.slice(source.indexOf("private statsReadback()"), source.indexOf("private retireQuadtreeProjection"));
   const stats = source.slice(source.indexOf("async readStats()"), source.indexOf("\n  destroy()"));
-  const advance = source.slice(source.indexOf("advanceTo(time_s"), source.indexOf("async readStats()"));
+  const advance = source.slice(source.indexOf("advanceTo(time_s"), source.indexOf("private applyPhysicsTimingReadback"));
 
   assert.match(statsHelper, /this\.statsReadbackBuffer \?\?=/, "statistics lazily allocate one staging buffer");
   assert.doesNotMatch(stats, /createBuffer\(/, "each statistics poll must not allocate a GPU buffer");
@@ -22,7 +22,7 @@ test("uniform and adaptive rigid coupling stays resident while telemetry remains
 
 test("compact octree velocity telemetry bypasses dense velocity reduction", () => {
   const stats = source.slice(source.indexOf("async readStats()"), source.indexOf("\n  destroy()"));
-  const advance = source.slice(source.indexOf("advanceTo(time_s"), source.indexOf("async readStats()"));
+  const advance = source.slice(source.indexOf("advanceTo(time_s"), source.indexOf("private applyPhysicsTimingReadback"));
   assert.match(advance, /if \(!this\.adaptiveFaceVelocityCutover\)[\s\S]*this\.reductionPipeline/, "dense velocity reduction is disabled after compact-face cutover");
   assert.match(stats, /readAdaptiveFaceVelocityDiagnostics\(\)/, "telemetry reads the compact face reduction");
   assert.match(stats, /this\.info\.maxSpeed_m_s = faceVelocityDiagnostics\.maxSpeed_m_s/);

@@ -24,6 +24,7 @@ import {
   octreeFaceBandMarchKeyBefore,
   octreeFaceBandWGSL,
   planOctreeFaceBandGPU,
+  planOctreeFaceBandCPT,
   planOctreeFaceBandLiveSupportDispatch,
   planOctreeFaceBandMarchHeap,
   resolveOctreeFaceBandUniformSupportRequest,
@@ -90,7 +91,7 @@ test("Section 5 face-band phases retain paper order and batch each checkpoint in
   assert.match(source.slice(transitions, march),
     /run\("prepareTransition"[\s\S]*run\("resolveTransition"[\s\S]*run\("transition"[\s\S]*run\("emit"[\s\S]*run\("sampleFacePhi"[\s\S]*run\("sampleFaceCoarsePhi"[\s\S]*run\("reducePhiFailure"[\s\S]*run\("publishPhiFailure"[\s\S]*run\("summarizeRowPhi"[\s\S]*run\("gateTransition"/);
   assert.match(source.slice(march, publication),
-    /run\("seedCentroids"[\s\S]*run\("initialize"[\s\S]*run\("buildHeap"[\s\S]*run\("marchHeap"[\s\S]*run\("validate"[\s\S]*run\("reconstruct"[\s\S]*run\("publish"/);
+    /run\("seedCentroids"[\s\S]*run\("initialize"[\s\S]*run\("linkCpt"[\s\S]*run\("jumpCpt"[\s\S]*run\("resolveCpt"[\s\S]*run\("prepareBfs"[\s\S]*propagateBfs[\s\S]*run\("validate"[\s\S]*run\("reconstruct"[\s\S]*run\("publish"/);
   assert.match(source.slice(publication),
     /run\("preparePowerPublication"[\s\S]*run\("mapPowerFaceBands"[\s\S]*run\("interpolatePowerFaces"[\s\S]*run\("projectPowerFaces"[\s\S]*run\("publishPowerFaces"[\s\S]*run\("commitPowerFaces"/);
 });
@@ -222,6 +223,19 @@ test("factor-4 GPU face band is compact, bounded, and has no fine velocity chann
     "the allocation must match the WGSL row ABI with representative/min/max phi");
   assert.equal(plan.bandFaceBytes, plan.faceCapacity * OCTREE_FACE_BAND_FACE_BYTES);
   assert.equal(plan.stateBytes, plan.faceCapacity * OCTREE_FACE_BAND_STATE_BYTES);
+  assert.equal(plan.cptParentBytes, plan.faceCapacity * 4,
+    "each race-free CPT snapshot stores one parent index per face");
+  assert.equal(plan.frontierBytes, 72,
+    "only the six live indirect records remain after deleting the serial face heap");
+  assert.equal(plan.allocatedBytes,
+    plan.bandFaceBytes + plan.incidenceBytes + plan.stateBytes + 2 * plan.cptParentBytes,
+    "legacy and production accounting both include the two CPT snapshots");
+  assert.match(compact(planOctreeFaceBandGPU),
+    /gpuAllocatedBytes:rowBytes\+bandFaceBytes\+incidenceBytes\+stateBytes\+2\*cptParentBytes\+hashBytes/,
+    "complete GPU accounting includes both CPT buffers exactly once");
+  const implementation = compact(WebGPUOctreeFaceFastMarch);
+  assert.doesNotMatch(implementation, /frontierA|nextFrontier|binding\(16\).*frontier|binding\(17\).*frontier/,
+    "the retired serial-heap scratch and shader bindings must not be allocated");
   assert.equal(plan.velocityBytes, plan.rowCapacity * 16,
     "only transient regular octree rows receive full vectors; fine samples do not");
   assert.equal(plan.transitionAdjacencyCapacity,
@@ -382,10 +396,17 @@ test("face phi uses the paper's fine field then the redistanced dry-owner cube/D
   const exactCoarseCell = wgslFunction("exactCoarseCellScalar");
   assert.match(exactCoarseCell, /validCoarse\(\).*coarseSlot\(cell\(origin\),size\)/,
     "redistance seeds read only the current exact compact octree owner record");
-  assert.match(exactCoarseCell, /\(entry\.flags&9u\)!=9u.*entry\.minimumPhi>entry\.phi\|\|entry\.phi>entry\.maximumPhi/,
+  const coarseEntry = wgslFunction("coarseEntryRecord");
+  assert.match(coarseEntry, /\(entry\.flags&9u\)!=9u.*entry\.minimumPhi>entry\.phi\|\|entry\.phi>entry\.maximumPhi/,
     "malformed or stale coarse signed distance is rejected");
   assert.doesNotMatch(exactCoarseCell, /ROW_COARSE_AIR|select\([^)]*,[^)]*,entry/,
     "exact seeds cannot synthesize a sign or capped distance");
+  const coarseSeed = wgslFunction("coarseCellSeedRecord");
+  assert.match(coarseSeed,
+    /letexact=coarseEntryRecord\(coarseSlot\(cell\(origin\),size\)\).*letq=min\(origin\+vec3u\(size\/2u\),p\.dims-vec3u\(1u\)\).*coarseSlot\(cell\(priorOrigin\),scale\)/s,
+    "a changed leaf samples the same-time spatial coarse publication at its centre");
+  assert.match(coarseSeed, /if\(scale>=coarsePhi\.maximumLeafSize\)\{break;\}scale\*=2u/,
+    "spatial migration is bounded by the published octree hierarchy");
   const coarseCell = wgslFunction("coarseCellScalar");
   assert.match(coarseCell, /rowOf\(cell\(origin\)\).*row\.flags&ROW_PHI.*row\.representativePhi/s,
     "the complete transient owner field has priority at dry interpolation vertices");
@@ -394,8 +415,8 @@ test("face phi uses the paper's fine field then the redistanced dry-owner cube/D
 
   const initialize = wgslFunction("initializeBandRowPhi");
   const extend = wgslFunction("extendBandRowPhi");
-  assert.match(initialize, /finePhiAtFaceCentroid\(center\).*exactCoarseCellScalar/s,
-    "current fine row centres and exact compact rows seed the coarse field");
+  assert.match(initialize, /finePhiAtFaceCentroid\(center\).*coarseCellSeedScalar/s,
+    "the paper's current fine field has priority over the spatial coarse level-set seed");
   assert.match(extend, /localTetraEikonal\(rowIndex,sign\)/,
     "transition dry owners use their local Delaunay Eikonal update");
   assert.match(wgslFunction("localTetraEikonal"),
@@ -590,7 +611,7 @@ test("transition diagnostics decode one deterministic face-phi interpolation fai
   });
 });
 
-test("GPU face band closes endpoints before deterministic frontier marching", () => {
+test("GPU face band closes endpoints before deterministic parallel CPT", () => {
   assert.doesNotMatch(octreeFaceBandWGSL, /\b(?:active|target|global)\b/,
     "Dawn/WebGPU reserve active, target, and global as future keywords");
   assert.match(octreeFaceBandWGSL,
@@ -600,7 +621,7 @@ test("GPU face band closes endpoints before deterministic frontier marching", ()
     "row-hash values use row+1 publication and subtract exactly once");
   assert.match(octreeFaceBandWGSL,
     /ap<\(\*bestPhi\)\|\|\(ap==\(\*bestPhi\)&&\(globalFace<\(\*bestGlobal\)/,
-    "heap resolution uses closest-|phi| then stable-face-ID tie breaking");
+    "fallback resolution uses closest-|phi| then stable-face-ID tie breaking");
   assert.match(octreeFaceBandWGSL, /atomicLoad\(&control\.unresolvedCount\)==0u/);
   assert.match(octreeFaceBandWGSL, /sampleStatus\[i\]=VALID\|EXTRAPOLATED/,
     "air-side Stage-B publication is explicitly marked extrapolated");
@@ -642,8 +663,9 @@ test("fine bricks bound work while coarse phi remains sign-only topology metadat
     "storage guard pages must never invent signed-distance authority");
   assert.doesNotMatch(octreeFaceBandWGSL, /coarseSummary|physicalCellSize\*f32\(max/,
     "a directory miss must not synthesize a signed-distance magnitude");
-  assert.match(octreeFaceBandWGSL, /if\(slot==INVALID\)\{return ROW_COARSE_AIR;\}/,
-    "the coarse complement is retained only as positive-air sign membership");
+  assert.match(wgslFunction("coarseSignFlag"),
+    /letentry=coarseCellSeedRecord\(owner\.origin,owner\.size\);if\(entry\.w==0\.\)\{returnROW_COARSE_AIR;\}/,
+    "only a miss in the complete spatial coarse publication is positive-air complement membership");
   assert.match(octreeFaceBandWGSL,
     /let owner=ownerAt\(q\);if\(owner\.valid==0u\)\{fail\(SOURCE,cell\(q\)\);return;\}/,
     "missing owner topology must fail closed");
@@ -745,22 +767,22 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
   assert.match(wgslFunction("initializeFaceMarch"), /states\[i\]\.pad=INVALID/,
     "every non-seed starts without a stale directed discovery offer");
   assert.match(wgslFunction("initializeFaceMarch"),
-    /f\.flags&SEED.*atomicStore\(&states\[i\]\.status,ACCEPTED\).*letat=atomicAdd\(&frontier\[0\],1u\).*frontier\[p\.faceCapacity-at\]/s,
-    "parallel initialization retains accepted seeds in a disjoint tail list");
-  assert.match(wgslFunction("discoverHeapRow"),
-    /sourceArrival>faceArrival\(targetRecord\.phi\)\+1e-6.*atomicCompareExchangeWeak\(&states\[targetFace\]\.status,UNKNOWN,TRIAL\).*if\(claimed\)\{states\[targetFace\]\.pad=sourceFace;if\(pushFaceHeap\(targetFace\)\).*marchTrials/s,
-    "only causal neighbors of the accepted front enter the heap, exactly once");
-  assert.match(wgslFunction("discoverHeapRow"),
-    /if\(observed==TRIAL&&faceHeapBefore\(sourceFace,states\[targetFace\]\.pad\)\)\{states\[targetFace\]\.pad=sourceFace;\}/,
-    "later directed offers improve the retained source deterministically without another heap push");
+    /f\.flags&SEED.*states\[i\]\.parent=i.*atomicStore\(&states\[i\]\.status,ACCEPTED\)/s,
+    "parallel initialization publishes each wet carrier as a CPT root");
+  assert.match(wgslFunction("linkFaceClosestPoints"),
+    /closestPredecessorTopology\(face\.negativeRow,faceIndex,&best\).*closestPredecessorTopology\(face\.positiveRow,faceIndex,&best\).*states\[faceIndex\]\.parent=best.*status,TRIAL/s,
+    "every air face independently links to its deterministic decreasing-phi predecessor");
   assert.match(wgslFunction("faceHeapBefore"),
     /ap=faceArrival\(af\.phi\).*bp=faceArrival\(bf\.phi\).*ap<bp.*ap>bp.*af\.globalFace<bf\.globalFace.*af\.globalFace>bf\.globalFace.*a<b/s,
-    "the heap order is deterministic in liquid-zero/air-phi arrival, stable face id, then slot");
-  assert.match(wgslFunction("marchFaceHeapChunk"),
-    /for\(varlocal=0u;local<1024u;local\+=1u\).*popFaceHeap\(\).*recordedAcceptedPredecessor.*status,ACCEPTED.*discoverHeapFromAccepted\(targetFace\)/s,
-    "each watchdog-safe GPU chunk performs a fixed bounded number of paper fast-march pops");
-  assert.doesNotMatch(wgslFunction("marchFaceHeapChunk"), /acceptedFacePredecessor/,
-    "a target-local tetrahedralization cannot erase the source-local edge that discovered the trial");
+    "the CPT predecessor order is deterministic in liquid-zero/air-phi arrival, stable face id, then slot");
+  assert.match(wgslFunction("jumpFaceClosestPoints"),
+    /parent=cptParentInput\[faceIndex\].*ancestor=cptParentInput\[parent\].*cptParentOutput\[faceIndex\]=select\(parent,ancestor/s,
+    "parallel pointer jumping reads an immutable predecessor snapshot and writes the other buffer");
+  assert.doesNotMatch(wgslFunction("jumpFaceClosestPoints"), /states\[.*\]\.parent=/,
+    "one jump dispatch never mutates the parent graph another lane is reading");
+  assert.match(wgslFunction("resolveFaceClosestPoints"),
+    /states\[root\]\.status\)!=ACCEPTED.*faces\[root\]\.flags&SEED.*states\[faceIndex\]\.velocity=states\[root\]\.velocity/s,
+    "only a validated wet CPT root can publish an extrapolated carrier");
   const recorded = wgslFunction("recordedAcceptedPredecessor");
   assert.match(recorded, /sourceFace=states\[targetFace\]\.pad/);
   assert.match(recorded, /states\[sourceFace\]\.status\)!=ACCEPTED/);
@@ -800,13 +822,15 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
   const emitAt = schedule.indexOf('run("emit"');
   const sampleAt = schedule.indexOf('run("sampleFacePhi"', emitAt);
   const initializePhiAt = schedule.indexOf('run("initializeBandPhi"', sampleAt);
-  const extendPhiAt = schedule.indexOf('run("extendBandPhi"', initializePhiAt);
+  const seedPhiAt = schedule.indexOf('run("seedBandPhiFaces"', initializePhiAt);
+  const extendPhiAt = schedule.indexOf('run("extendBandPhi"', seedPhiAt);
   const commitPhiAt = schedule.indexOf('run("commitBandPhi"', extendPhiAt);
   const coarseSampleAt = schedule.indexOf('run("sampleFaceCoarsePhi"', commitPhiAt);
   const summaryAt = schedule.indexOf('run("summarizeRowPhi"', coarseSampleAt);
   const gateAt = schedule.indexOf('run("gateTransition"', summaryAt);
   assert.ok(emitAt >= 0 && sampleAt > emitAt && initializePhiAt > sampleAt
-    && extendPhiAt > initializePhiAt && commitPhiAt > extendPhiAt && coarseSampleAt > commitPhiAt
+    && seedPhiAt > initializePhiAt && extendPhiAt > seedPhiAt && commitPhiAt > extendPhiAt
+    && coarseSampleAt > commitPhiAt
     && summaryAt > coarseSampleAt && gateAt > summaryAt,
     "face topology, current phi, row summaries, then transaction gate is the only publication order");
 });
@@ -860,11 +884,9 @@ test("row reconstruction binds the accepted face records it dereferences", () =>
     "S4 carrier reconstruction must bind only its accepted-face graph and output vectors");
 });
 
-test("band-phi extension binds the shared failure control", () => {
+test("band phi retains fail-closed graph extension for closure-only rows", () => {
   const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
-  assert.match(source,
-    /run\("extendBandPhi",\[\[0,this\.params\],\[1,input\.fine\.params\],\[5,this\.control\],\[6,this\.rows\]/,
-    "lower-simplex capacity failures must have the control buffer bound at binding 5");
+  assert.match(source, /run\("initializeBandPhi"[\s\S]*run\("seedBandPhiFaces"[\s\S]*run\("extendBandPhi"[\s\S]*run\("commitBandPhi"/);
 });
 
 test("2:1 face emission publishes bounded incidence directly", () => {
@@ -874,13 +896,41 @@ test("2:1 face emission publishes bounded incidence directly", () => {
   assert.doesNotMatch(source, /run\("incidence"/);
 });
 
-test("GPU heap march binds its complete causal face graph within the portable limit", () => {
+test("GPU CPT binds its complete causal face graph within the portable limit", () => {
   const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
+  const implementation = compact(WebGPUOctreeFaceFastMarch);
+  assert.match(implementation, /jumpCpt:pipeline\("jumpFaceClosestPoints"\)/,
+    "the pointer-jump WGSL entry point must have a live production pipeline");
   assert.match(source,
-    /run\("buildHeap",\[\[0,this\.params\],\[5,this\.control\],\[6,this\.rows\],\[12,this\.faces\],\[14,this\.incidence\],\[15,this\.state\],\[16,this\.frontierA\],\[27,this\.transitionMetrics\],\[31,this\.transitionAdjacency\],\[32,this\.transitionControl\]\],1,pass\)/,
-    "heap construction binds every resource used by discovered-front expansion");
+    /run\("linkCpt",\[\[0,this\.params\],\[5,this\.control\],\[6,this\.rows\],\[12,this\.faces\],\[14,this\.incidence\],\[15,this\.state\],\[27,this\.transitionMetrics\],\[31,this\.transitionAdjacency\],\[32,this\.transitionControl\],\[56,this\.cptParentsA\]\],Math\.ceil\(this\.plan\.faceCapacity\/64\),pass\)/,
+    "CPT construction binds every resource used by the local Delaunay predecessor graph");
   assert.match(source,
-    /run\("marchHeap",\[\[0,this\.params\],\[5,this\.control\],\[6,this\.rows\],\[12,this\.faces\],\[14,this\.incidence\],\[15,this\.state\],\[16,this\.frontierA\],\[27,this\.transitionMetrics\],\[31,this\.transitionAdjacency\],\[32,this\.transitionControl\]\],1,pass\)/);
+    /for\(letround=0;round<this\.cptPlan\.jumpRounds;round\+=1\)\{run\("jumpCpt",\[\[0,this\.params\],\[5,this\.control\],\[12,this\.faces\],\[15,this\.state\],\[56,currentParents\],\[57,nextParents\]\],Math\.ceil\(this\.plan\.faceCapacity\/64\),pass\);\[currentParents,nextParents\]=\[nextParents,currentParents\]\}/,
+    "the host dispatches the planned logarithmic number of race-free ping-pong jumps");
+  assert.match(source,
+    /run\("resolveCpt",\[\[0,this\.params\],\[5,this\.control\],\[12,this\.faces\],\[15,this\.state\],\[56,currentParents\]\]/,
+    "resolution consumes the final contracted parent snapshot");
+  assert.doesNotMatch(wgslFunction("resolveFaceClosestPoints"), /for\(/,
+    "the resolver validates one contracted root instead of chasing an O(domain) chain");
+  assert.match(source, /run\("prepareBfs"[\s\S]*propagateBfs/,
+    "positive-phi plateaus use deterministic parallel BFS after the fast CPT forest");
+  assert.match(wgslFunction("considerBfsRow"), /states\[candidate\]\.depth>=layer/,
+    "a layer never observes payload written by another invocation in the same dispatch");
+  assert.deepEqual(planOctreeFaceBandCPT(384), { maximumGraphDepth: 384, jumpRounds: 9 });
+});
+
+test("band-phi Jacobi rounds stay band-bounded while CPT depth scales only logarithmically", () => {
+  const projection = compact(WebGPUOctreeProjection);
+  assert.match(projection,
+    /bandPhiRelaxationRounds=Math\.max\(1,2\*this\.interfaceRefinementBandCells\+4\)/);
+  assert.match(projection,
+    /maximumCptGraphDepth=Math\.max\(1,2\*Math\.max\(this\.dims\.nx,this\.dims\.ny,this\.dims\.nz\)\)/);
+  assert.match(projection,
+    /rowCapacity,bandPhiRelaxationRounds,maximumCptGraphDepth,this\.powerFaces\.plan\.faceCapacity/);
+  const schedule = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
+  assert.match(schedule, /round<this\.bandPhiRelaxationRounds.*run\("extendBandPhi"/s);
+  assert.doesNotMatch(schedule, /round<this\.cptPlan\.maximumGraphDepth.*run\("extendBandPhi"/s);
+  assert.deepEqual(planOctreeFaceBandCPT(768), { maximumGraphDepth: 768, jumpRounds: 10 });
 });
 
 test("face emission binds only globals statically used by its auto layout", () => {
@@ -1013,7 +1063,7 @@ test("support-closure stages stay within portable auto-layout bind groups", () =
   };
   assert.deepEqual(bindings("enumerateSupport1"), [6, 27, 28, 29, 32, 43]);
   assert.deepEqual(bindings("extendBandPhi"), [0, 1, 5, 6, 12, 14, 19, 27, 31, 44, 47, 53],
-    "uniform/local-Delaunay Eikonal propagation uses two uniforms and the portable maximum ten storage bindings");
+    "closure-only scalar support retains its portable bounded graph solve");
   const resolveBindings = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase)
     .match(/constresolveOwnerBindings=\[([\s\S]*?)\];/)?.[1];
   assert.ok(resolveBindings);
@@ -1063,10 +1113,10 @@ test("live support prefixes dispatch sparse closure even when S0 reservation con
     support4NodeEnd: 198,
   }), [1, 1, 1, 1, 1], "live sparse prefixes, not zero static role caps, control closure work");
   const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
-  for (const [tier, offset] of [["Support0", 24], ["Support1", 36],
-    ["Support2", 48], ["Support3", 60]] as const) {
-    assert.match(source, new RegExp(`run\\("prepare${tier}Dispatch"[\\s\\S]*0,pass,${offset}\\)`));
-  }
+  assert.match(source, /run\("prepareSupport0Dispatch"[\s\S]*0,pass,24\)/);
+  for (const [capture, offset] of [["captureSupport1", 36], ["captureSupport2", 48],
+    ["captureSupport3", 60]] as const) assert.match(source,
+    new RegExp(`run\\("${capture}"[\\s\\S]*0,pass,${offset}\\)`));
   assert.match(source,
     /run\("preparePointDispatch"[\s\S]*run\("preparePointRows"[\s\S]*0,pass,24\)/,
     "the final S0+S1 point field also consumes the live published prefix rather than a zero role cap");
@@ -1265,7 +1315,7 @@ test("factor-4/factor-8 production schedule publishes and consumes the face-marc
   }).encodeGlobalFineFaceBandPhase);
   const powerToAxis = projection.indexOf("this.encodePowerVelocityPublication(encoder)");
   const constrain = projection.indexOf("this.solidFaces?.encodePostProjectionConstraint(encoder)", powerToAxis);
-  const faceMarch = projection.indexOf("this.encodeGlobalFineFaceBand(encoder)", constrain);
+  const faceMarch = projection.indexOf("this.encodeGlobalFineFaceBand(encoder", constrain);
   const divergence = projection.indexOf("this.faceMirror?.encodeProjectedDivergence(encoder)", faceMarch);
   assert.ok(powerToAxis >= 0 && constrain > powerToAxis && faceMarch > constrain && divergence > faceMarch,
     "power -> regular faces -> solid constraint -> face march must precede downstream publication");

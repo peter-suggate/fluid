@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { adaptiveTopologyPerformanceStages, physicsPerformanceStages } from "../lib/performance-stage-model";
 import { emptyPerformance, measuredGPUTime_ms, type PerformanceSnapshot } from "../lib/stores/diagnostics-store";
-import { categorizedGPUPhysicsTime_ms, emptyGPUPhysicsTimings, GPU_PHYSICS_TIMESTAMP_CAPACITY, type GPUPhysicsStageId } from "../lib/webgpu-eulerian";
+import {
+  categorizedGPUPhysicsTime_ms,
+  decodeGPUPhysicsTimestampSegments,
+  emptyGPUPhysicsTimings,
+  GPU_PHYSICS_TIMESTAMP_CAPACITY,
+  type GPUPhysicsStageId,
+  type GPUPhysicsTimestampSegment,
+} from "../lib/webgpu-eulerian";
 
 const snapshot = (methodId: string, activeStages: GPUPhysicsStageId[]): PerformanceSnapshot => ({
   ...emptyPerformance,
@@ -20,9 +27,15 @@ const snapshot = (methodId: string, activeStages: GPUPhysicsStageId[]): Performa
   gpuProjection_ms: methodId === "quadtree-tall-cell" ? 0 : 7,
   gpuPowerProjection_ms: methodId === "octree" ? 3 : 0,
   gpuVelocityProjection_ms: methodId === "octree" ? 4 : 0,
+  gpuFaceBand_ms: methodId === "octree" ? 1 : 0,
+  gpuFaceMarch_ms: methodId === "octree" ? 1 : 0,
+  gpuPowerPublication_ms: methodId === "octree" ? 1 : 0,
   gpuExtrapolation_ms: methodId === "octree" ? 12 : 0,
   gpuMaterialization_ms: methodId === "octree" ? 13 : 0,
   gpuSurfaceUpdate_ms: methodId === "quadtree-tall-cell" || methodId === "octree" ? 8 : 0,
+  gpuFineTopology_ms: methodId === "octree" ? 3 : 0,
+  gpuFineTransport_ms: methodId === "octree" ? 2 : 0,
+  gpuFineRedistance_ms: methodId === "octree" ? 3 : 0,
   gpuRigid_ms: 9,
   gpuSpraySimulation_ms: methodId === "octree" ? 14 : 0,
   gpuFluidResidency_ms: methodId === "octree" ? 15 : 0,
@@ -76,6 +89,28 @@ test("power-diagram timestamps split assembly, solve, and projection without dou
   assert.equal(stages.reduce((sum, stage) => sum + stage.value, 0), measuredGPUTime_ms(sample));
 });
 
+test("Section 5 timestamps replace their aggregates without double-counting", () => {
+  const activeStages: GPUPhysicsStageId[] = ["topology", "advection", "pressure", "powerAssembly", "pressureSolve",
+    "projection", "powerProjection", "velocityProjection", "faceBand", "faceMarch", "powerPublication",
+    "extrapolation", "materialization", "surfaceUpdate", "fineTopology", "fineTransport", "fineRedistance",
+    "rigidCoupling", "spray", "fluidResidency", "sparsePublication", "diagnostics"];
+  const { sample, stages } = stagesFor("octree", activeStages);
+  assert.deepEqual(stages.filter((stage) => ["face-band", "face-march", "power-publication"].includes(stage.key))
+    .map((stage) => [stage.key, stage.value, stage.dependsOn[0]]), [
+      ["face-band", 1, "pressure"],
+      ["face-march", 1, "face-band"],
+      ["power-publication", 1, "face-march"],
+    ]);
+  assert.deepEqual(stages.filter((stage) => ["fine-transport", "fine-topology", "fine-redistance"].includes(stage.key))
+    .map((stage) => [stage.key, stage.value, stage.dependsOn[0]]), [
+      ["fine-transport", 2, "materialization"],
+      ["fine-topology", 3, "fine-transport"],
+      ["fine-redistance", 3, "fine-topology"],
+    ]);
+  assert.equal(stages.some((stage) => stage.key === "power-projection" || stage.key === "surface-update"), false);
+  assert.equal(stages.reduce((sum, stage) => sum + stage.value, 0), measuredGPUTime_ms(sample));
+});
+
 test("asynchronous quadtree topology is not repeated in the per-advance physics total", () => {
   const sample = snapshot("quadtree-tall-cell", ["advection", "pressure", "surfaceUpdate", "diagnostics"]);
   const stages = physicsPerformanceStages({ methodId: "quadtree-tall-cell", snapshot: sample, contextMatches: true, topologyPath: "async" });
@@ -119,9 +154,51 @@ test("expanded physics accounting includes every named category", () => {
 });
 
 test("timestamp capacity covers the worst 64-substep wrapper trace", () => {
-  // Power pressure/projection each use three query values for an aggregate and
-  // two exact child intervals, adding only two values per substep.
-  const worstCaseQueries = 2 + 2 + 64 * (9 * 2 + 2) + 3 * 2;
+  // Pressure uses one shared split boundary. Nested power/face projection
+  // uses five values and fine surface uses four, adding six values per step.
+  const worstCaseQueries = 2 + 2 + 64 * (9 * 2 + 6) + 3 * 2;
   assert.ok(GPU_PHYSICS_TIMESTAMP_CAPACITY >= worstCaseQueries);
   assert.equal(GPU_PHYSICS_TIMESTAMP_CAPACITY * 8, 16384);
+});
+
+test("shared timestamp partitions decode only when every boundary is resolved and monotonic", () => {
+  const requiredBoundaries = [0, 1, 2, 3];
+  const segments: GPUPhysicsTimestampSegment[] = [
+    { name: "surfaceUpdate_ms", start: 0, end: 3, requiredBoundaries },
+    { name: "fineTransport_ms", start: 0, end: 1, requiredBoundaries },
+    { name: "fineTopology_ms", start: 1, end: 2, requiredBoundaries },
+    { name: "fineRedistance_ms", start: 2, end: 3, requiredBoundaries },
+  ];
+  assert.deepEqual(decodeGPUPhysicsTimestampSegments(
+    new BigUint64Array([1_000_000n, 3_000_000n, 7_000_000n, 10_000_000n]),
+    segments,
+  ), {
+    surfaceUpdate_ms: 9,
+    fineTransport_ms: 2,
+    fineTopology_ms: 4,
+    fineRedistance_ms: 3,
+  });
+
+  for (const timestamps of [
+    new BigUint64Array([0n, 3_000_000n, 7_000_000n, 10_000_000n]),
+    new BigUint64Array([1_000_000n, 8_000_000n, 7_000_000n, 10_000_000n]),
+  ]) {
+    assert.deepEqual(decodeGPUPhysicsTimestampSegments(timestamps, segments), {
+      surfaceUpdate_ms: 0,
+      fineTransport_ms: 0,
+      fineTopology_ms: 0,
+      fineRedistance_ms: 0,
+    });
+  }
+});
+
+test("one invalid repeated timestamp range suppresses the whole timing field", () => {
+  const segments: GPUPhysicsTimestampSegment[] = [
+    { name: "pressure_ms", start: 0, end: 1 },
+    { name: "pressure_ms", start: 2, end: 3 },
+  ];
+  assert.deepEqual(decodeGPUPhysicsTimestampSegments(
+    new BigUint64Array([1_000_000n, 2_000_000n, 0n, 4_000_000n]),
+    segments,
+  ), { pressure_ms: 0 });
 });

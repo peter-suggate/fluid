@@ -115,8 +115,6 @@ export function applyFirstOrderVCycleOracle(operator: DenseSymmetricOperator,
 }
 
 const STATE_CHANNELS = 8;
-const MAP = 0, KEYS = 1, COUNTS = 2, DIAGONAL = 3;
-const RHS = 4, SOLUTION_A = 5, SOLUTION_B = 6, WORK = 7;
 
 function positiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} must be a positive integer`);
@@ -151,7 +149,8 @@ export function planOctreeFirstOrderVCycle(options: Pick<OctreeFirstOrderVCycleO
   };
 }
 
-type PipelineName = "setupMaps" | "setupDiagonal" | "copyRhs" | "applyA" | "applyB"
+type PipelineName = "clearState" | "clearVectors" | "clearWork"
+  | "setupMaps" | "setupDiagonal" | "copyRhs" | "applyA" | "applyB"
   | "jacobiAtoB" | "jacobiBtoA" | "formResidual" | "ghostAccumulate"
   | "ghostPropagate" | "publish";
 type CachedBindGroup = {
@@ -162,6 +161,7 @@ type CachedBindGroup = {
   readonly group: GPUBindGroup;
 };
 const PIPELINE_BINDINGS: Readonly<Record<PipelineName, readonly number[]>> = Object.freeze({
+  clearState: [0, 4], clearVectors: [0, 4], clearWork: [0, 4],
   setupMaps: [0, 1, 3, 4, 5], setupDiagonal: [0, 1, 2, 3, 4, 5],
   copyRhs: [0, 3, 4, 5, 6], applyA: [0, 1, 2, 3, 4, 5], applyB: [0, 1, 2, 3, 4, 5],
   jacobiAtoB: [0, 4, 5], jacobiBtoA: [0, 4, 5], formResidual: [0, 4, 5],
@@ -192,6 +192,26 @@ export class WebGPUOctreeFirstOrderVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly postIterations: number;
   private readonly coarsestIterations: number;
   private destroyed = false;
+
+  get encodedCorrectionDispatchCount(): number {
+    const transferLevels = this.plan.levelCount - 1;
+    const operatorClears = transferLevels * (this.preIterations + this.postIterations + 1)
+      + this.coarsestIterations;
+    return 3
+      + transferLevels * (2 * this.preIterations + 2 * this.postIterations + 4)
+      + 2 * this.coarsestIterations + operatorClears;
+  }
+
+
+  /** Backward-compatible alias retained for the MGPCG integration ABI. */
+  get encodedCorrectionPassCount(): number { return this.encodedCorrectionDispatchCount; }
+
+  /** clearState, setupMaps, and setupDiagonal. */
+  readonly encodedSetupDispatchCount = 3;
+
+  /** A standalone correction is one ordered compute pass. When MGPCG lends
+   * its active pass, the correction adds no compute-pass transition. */
+  readonly encodedPassTransitionCount = 1;
 
   constructor(private readonly device: GPUDevice, private readonly source: OctreeFirstOrderVCycleSource,
     options: OctreeFirstOrderVCycleOptions) {
@@ -237,11 +257,13 @@ export class WebGPUOctreeFirstOrderVCycle implements OctreeFirstOrderSPDVCycle {
       floats[12] = damping; floats[13] = 1e-30; floats[14] = options.finestCellWidth;
       device.queue.writeBuffer(buffer, 0, words); return buffer;
     }));
-    const module = device.createShaderModule({ label: "Octree sparse first-order V-cycle", code: octreeFirstOrderVCycleShader });
+    const shaderModule = device.createShaderModule({ label: "Octree sparse first-order V-cycle", code: octreeFirstOrderVCycleShader });
     const pipeline = (entryPoint: PipelineName) => device.createComputePipeline({
-      label: `Octree L1 V-cycle · ${entryPoint}`, layout: "auto", compute: { module, entryPoint },
+      label: `Octree L1 V-cycle · ${entryPoint}`, layout: "auto", compute: { module: shaderModule, entryPoint },
     });
     this.pipelines = Object.freeze({
+      clearState: pipeline("clearState"), clearVectors: pipeline("clearVectors"),
+      clearWork: pipeline("clearWork"),
       setupMaps: pipeline("setupMaps"), setupDiagonal: pipeline("setupDiagonal"),
       copyRhs: pipeline("copyRhs"), applyA: pipeline("applyA"), applyB: pipeline("applyB"),
       jacobiAtoB: pipeline("jacobiAtoB"), jacobiBtoA: pipeline("jacobiBtoA"),
@@ -263,61 +285,66 @@ export class WebGPUOctreeFirstOrderVCycle implements OctreeFirstOrderSPDVCycle {
       this.source.leafEntries.size);
   }
 
-  encodeSetup(encoder: GPUCommandEncoder, input: { solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
-    this.assertLive(); encoder.clearBuffer(this.state);
-    this.runRows(encoder, "setupMaps", 0, input.rowCount, input.solverControl);
-    this.runRows(encoder, "setupDiagonal", 0, input.rowCount, input.solverControl);
+  encodeSetup(encoder: GPUCommandEncoder, input: { solverControl: GPUBuffer; rowCount: GPUBuffer },
+    sharedPass?: GPUComputePassEncoder): void {
+    this.assertLive();
+    const pass = sharedPass ?? encoder.beginComputePass({ label: "Octree L1 V-cycle setup" });
+    this.runSlots(pass, "clearState", 0, input.rowCount, input.solverControl);
+    this.runRows(pass, "setupMaps", 0, input.rowCount, input.solverControl);
+    this.runRows(pass, "setupDiagonal", 0, input.rowCount, input.solverControl);
+    if (!sharedPass) pass.end();
   }
 
   encodeCorrection(encoder: GPUCommandEncoder, input: {
     rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer;
-  }): void {
+  }, sharedPass?: GPUComputePassEncoder): void {
     this.assertLive();
+    const pass = sharedPass ?? encoder.beginComputePass({ label: "Octree L1 V-cycle correction" });
     // Preserve maps/keys/member counts/diagonals; reset all per-application
-    // vectors. Contiguous channel storage makes this one bounded clear.
-    const vectorOffset = this.channelOffset(RHS);
-    encoder.clearBuffer(this.state, vectorOffset, this.plan.stateBytes - vectorOffset);
-    this.runRows(encoder, "copyRhs", 0, input.rowCount, input.solverControl, input.rhs, input.correction);
+    // vectors with a bounded dispatch so the ordered V-cycle stays in one pass.
+    this.runSlots(pass, "clearVectors", 0, input.rowCount, input.solverControl, input.rhs, input.correction);
+    this.runRows(pass, "copyRhs", 0, input.rowCount, input.solverControl, input.rhs, input.correction);
     for (let level = 0; level < this.plan.levelCount - 1; level += 1) {
-      this.smooth(encoder, level, this.preIterations, input);
-      this.applyOperator(encoder, level, false, input);
-      this.runSlots(encoder, "formResidual", level, input.rowCount, input.solverControl, input.rhs, input.correction);
-      this.runRows(encoder, "ghostAccumulate", level, input.rowCount, input.solverControl, input.rhs, input.correction);
+      this.smooth(pass, level, this.preIterations, input);
+      this.applyOperator(pass, level, false, input);
+      this.runSlots(pass, "formResidual", level, input.rowCount, input.solverControl, input.rhs, input.correction);
+      this.runRows(pass, "ghostAccumulate", level, input.rowCount, input.solverControl, input.rhs, input.correction);
     }
-    this.smooth(encoder, this.plan.levelCount - 1, this.coarsestIterations, input);
+    this.smooth(pass, this.plan.levelCount - 1, this.coarsestIterations, input);
     for (let level = this.plan.levelCount - 2; level >= 0; level -= 1) {
-      this.runRows(encoder, "ghostPropagate", level, input.rowCount, input.solverControl, input.rhs, input.correction);
-      this.smooth(encoder, level, this.postIterations, input);
+      this.runRows(pass, "ghostPropagate", level, input.rowCount, input.solverControl, input.rhs, input.correction);
+      this.smooth(pass, level, this.postIterations, input);
     }
-    this.runRows(encoder, "publish", 0, input.rowCount, input.solverControl, input.rhs, input.correction);
+    this.runRows(pass, "publish", 0, input.rowCount, input.solverControl, input.rhs, input.correction);
+    if (!sharedPass) pass.end();
   }
 
-  private smooth(encoder: GPUCommandEncoder, level: number, iterations: number,
+  private smooth(pass: GPUComputePassEncoder, level: number, iterations: number,
     input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     for (let iteration = 0; iteration < iterations; iteration += 1) {
       const useB = (iteration & 1) !== 0;
-      this.applyOperator(encoder, level, useB, input);
-      this.runSlots(encoder, useB ? "jacobiBtoA" : "jacobiAtoB", level,
+      this.applyOperator(pass, level, useB, input);
+      this.runSlots(pass, useB ? "jacobiBtoA" : "jacobiAtoB", level,
         input.rowCount, input.solverControl, input.rhs, input.correction);
     }
   }
 
-  private applyOperator(encoder: GPUCommandEncoder, level: number, useB: boolean,
+  private applyOperator(pass: GPUComputePassEncoder, level: number, useB: boolean,
     input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
-    encoder.clearBuffer(this.state, this.levelOffset(WORK, level), this.plan.hierarchyStride * 4);
-    this.runRows(encoder, useB ? "applyB" : "applyA", level,
+    this.runSlots(pass, "clearWork", level, input.rowCount, input.solverControl, input.rhs, input.correction);
+    this.runRows(pass, useB ? "applyB" : "applyA", level,
       input.rowCount, input.solverControl, input.rhs, input.correction);
   }
 
-  private runRows(encoder: GPUCommandEncoder, name: PipelineName, level: number,
+  private runRows(pass: GPUComputePassEncoder, name: PipelineName, level: number,
     rowCount: GPUBuffer, solverControl: GPUBuffer, rhs?: GPUBuffer, correction?: GPUBuffer): void {
-    this.run(encoder, name, level, this.plan.rowDispatch, rowCount, solverControl, rhs, correction);
+    this.run(pass, name, level, this.plan.rowDispatch, rowCount, solverControl, rhs, correction);
   }
-  private runSlots(encoder: GPUCommandEncoder, name: PipelineName, level: number,
+  private runSlots(pass: GPUComputePassEncoder, name: PipelineName, level: number,
     rowCount: GPUBuffer, solverControl: GPUBuffer, rhs?: GPUBuffer, correction?: GPUBuffer): void {
-    this.run(encoder, name, level, this.plan.slotDispatch, rowCount, solverControl, rhs, correction);
+    this.run(pass, name, level, this.plan.slotDispatch, rowCount, solverControl, rhs, correction);
   }
-  private run(encoder: GPUCommandEncoder, name: PipelineName, level: number,
+  private run(pass: GPUComputePassEncoder, name: PipelineName, level: number,
     dispatch: readonly [number, number, number], rowCount: GPUBuffer, solverControl: GPUBuffer,
     rhs?: GPUBuffer, correction?: GPUBuffer): void {
     const pipeline = this.pipelines[name], key = `${name}:${level}`;
@@ -334,16 +361,9 @@ export class WebGPUOctreeFirstOrderVCycle implements OctreeFirstOrderSPDVCycle {
       group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
       this.bindGroups.set(key, { rowCount, solverControl, rhs, correction, group });
     }
-    const pass = encoder.beginComputePass({ label: pipeline.label }); pass.setPipeline(pipeline);
-    pass.setBindGroup(0, group); pass.dispatchWorkgroups(...dispatch); pass.end();
+    pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(...dispatch);
   }
 
-  private channelOffset(channel: number): number {
-    return channel * this.plan.levelCount * this.plan.hierarchyStride * 4;
-  }
-  private levelOffset(channel: number, level: number): number {
-    return this.channelOffset(channel) + level * this.plan.hierarchyStride * 4;
-  }
   private assertLive(): void { if (this.destroyed) throw new Error("Octree L1 V-cycle is destroyed"); }
   destroy(): void { if (this.destroyed) return; this.destroyed = true; this.bindGroups.clear(); this.state.destroy();
     this.firstOrderHeaders.destroy(); this.firstOrderEntries.destroy(); for (const buffer of this.levelParams) buffer.destroy(); }
@@ -415,6 +435,16 @@ fn boundaryAnchor(row:u32)->f32{let h=headers[row];var coupled=0.0;for(var j=0u;
   if(!finite(value)||value < -2e-5*scale){report(NONPOSITIVE);return 0.0;}return max(0.0,value);}
 fn solution(channel:u32,l:u32,slot:u32)->f32{return loadFloat(channel,l,slot);}
 fn activeSlot(slot:u32,l:u32)->bool{return slot<stride()&&atomicLoad(&state[at(COUNTS,l,slot)])>0u;}
+
+// Buffer clears are compute stages rather than command-encoder operations so
+// dependent dispatches can remain in one ordered compute pass. Each stage is
+// bounded by the allocated sparse hierarchy stride and level count.
+@compute @workgroup_size(64) fn clearState(@builtin(global_invocation_id) gid:vec3u){let slot=slotIndex(gid);if(slot>=stride()){return;}
+  for(var channel=0u;channel<8u;channel+=1u){for(var l=0u;l<levels();l+=1u){atomicStore(&state[at(channel,l,slot)],0u);}}}
+@compute @workgroup_size(64) fn clearVectors(@builtin(global_invocation_id) gid:vec3u){let slot=slotIndex(gid);if(slot>=stride()){return;}
+  for(var channel=RHS;channel<=WORK;channel+=1u){for(var l=0u;l<levels();l+=1u){atomicStore(&state[at(channel,l,slot)],0u);}}}
+@compute @workgroup_size(64) fn clearWork(@builtin(global_invocation_id) gid:vec3u){let slot=slotIndex(gid);if(slot<stride()){
+  atomicStore(&state[at(WORK,level(),slot)],0u);}}
 
 @compute @workgroup_size(64) fn setupMaps(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=rows()||stopped()){return;}
   atomicStore(&state[at(MAP,0u,row)],row);atomicStore(&state[at(COUNTS,0u,row)],1u);for(var l=1u;l<levels();l+=1u){let slot=findAggregate(row,l);
