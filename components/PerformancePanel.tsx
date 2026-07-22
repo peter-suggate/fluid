@@ -35,7 +35,7 @@ export function PerformancePanel() {
   const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const activeMethodId = useMethodStore((state) => state.methodId);
-  const sprayEnabled = useMethodStore((state) => state.methodId === "octree" && state.overrides.octree?.secondaryParticles !== "off" && state.overrides.octree?.secondaryParticles !== false);
+  const sprayEnabled = (gpuInfo?.secondaryParticleCapacity ?? 0) > 0;
   const maxDt_s = useSceneStore((state) => state.scene.numerics.maxDt_s);
   const runState = useRuntimeStore((state) => state.runState);
   const observedSimRate = useRuntimeStore((state) => state.simRate);

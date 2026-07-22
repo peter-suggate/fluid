@@ -9,6 +9,10 @@ export type InitialRasterSurfaceState =
 export interface InitialRasterPresentationPrerequisites {
   readonly solverAttached: boolean;
   readonly initialSparseAuthorityReady: boolean;
+  /** The paper surface path requires a global-fine source. Coarse-only octree
+   * mode intentionally has no such allocation and publishes its adaptive
+   * coarse surface directly instead. */
+  readonly globalFineRequired?: boolean;
   readonly globalFineAttached: boolean;
   readonly adaptiveSurfaceAttached: boolean;
   readonly surfaceExtractionSubmitted: boolean;
@@ -26,30 +30,33 @@ export interface InitialRasterPresentationReadiness {
 
 /**
  * CPU mirror of the paused t=0 presentation gate. Without an opt-in readback,
- * completion relies on the renderer's GPU-only draw-argument transaction: the
- * global crossing latch selects the fine/coarse mesh. Diagnostics mode proves
- * a non-empty current crossing; an adaptive fallback is useful for inspection
- * but is not the paper's t=0 presentation authority and therefore stays locked.
+ * completion relies on the renderer's GPU-only draw-argument transaction. The
+ * paper path requires the global crossing latch; coarse-only mode deliberately
+ * has no global-fine allocation and accepts a non-empty adaptive coarse mesh.
  */
 export function initialRasterPresentationReadiness(
   input: InitialRasterPresentationPrerequisites,
 ): InitialRasterPresentationReadiness {
   if (!input.solverAttached) return { ready: false, state: "pending", label: "Waiting for warmed solver attachment" };
   if (!input.initialSparseAuthorityReady) return { ready: false, state: "pending", label: "Waiting for fenced sparse authority" };
-  if (!input.globalFineAttached) return { ready: false, state: "pending", label: "Waiting for global-fine renderer source" };
+  const globalFineRequired = input.globalFineRequired !== false;
+  if (globalFineRequired && !input.globalFineAttached) return { ready: false, state: "pending", label: "Waiting for global-fine renderer source" };
   if (!input.adaptiveSurfaceAttached) return { ready: false, state: "pending", label: "Waiting for adaptive raster fallback source" };
   if (!input.surfaceExtractionSubmitted) return { ready: false, state: "pending", label: "Waiting for t=0 raster extraction submission" };
   if (!input.presentationFenceCompleted) return { ready: false, state: "pending", label: "Waiting for t=0 presentation fence" };
 
   const diagnostic = input.diagnostics;
   if (diagnostic) {
-    const currentCrossing = diagnostic.globalFineCrossingPublished
-      && diagnostic.surfaceGeometrySource === "global-fine-coarse";
+    const currentCrossing = globalFineRequired
+      ? diagnostic.globalFineCrossingPublished && diagnostic.surfaceGeometrySource === "global-fine-coarse"
+      : diagnostic.surfaceGeometrySource === "adaptive-octree";
     if (diagnostic.vertexCount > 0 && currentCrossing) {
       return {
         ready: true,
         state: "crossing-confirmed",
-        label: "WebGPU t=0 ready · global-fine/coarse raster crossing confirmed",
+        label: globalFineRequired
+          ? "WebGPU t=0 ready · global-fine/coarse raster crossing confirmed"
+          : "WebGPU t=0 ready · coarse-octree raster crossing confirmed",
       };
     }
     return {
@@ -65,6 +72,8 @@ export function initialRasterPresentationReadiness(
   return {
     ready: true,
     state: "gpu-authoritative",
-    label: "WebGPU t=0 ready · GPU raster publication fenced",
+    label: globalFineRequired
+      ? "WebGPU t=0 ready · GPU raster publication fenced"
+      : "WebGPU t=0 ready · coarse-octree raster publication fenced",
   };
 }

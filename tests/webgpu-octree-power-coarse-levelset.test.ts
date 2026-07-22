@@ -40,6 +40,15 @@ test("WP8 planner is compact-row bounded and exposes independent coarse/fine dia
   assert.match(octreePowerCoarseLevelSetShader,
     /source\.flags&\(PHI_VALID\|PHI_FINITE\)\)\!=\(PHI_VALID\|PHI_FINITE\)[\s\S]*fail\(row,INVALID_SOURCE\)/);
   assert.match(octreePowerCoarseLevelSetShader,
+    /source\.flags&\(PHI_CORRECTED\|PHI_INTERFACE\)\)\!=0u/,
+    "advected coarse interface rows remain fixed redistance seeds when no fine correction exists");
+  assert.match(octreePowerCoarseLevelSetShader,
+    /seedPhi[\s\S]*source\.phi<0\.0&&seedPhi>=0\.0[\s\S]*fixedSeed=true/,
+    "coarse-only redistance must refresh fixed seeds from current sign-crossing neighbors");
+  assert.match(octreePowerCoarseLevelSetShader,
+    /shiftedMinimum=min\(value,source\.minimumPhi\+shift\)[\s\S]*shiftedMaximum=max\(value,source\.maximumPhi\+shift\)/,
+    "advection must keep phi inside its shifted extrema despite one-ULP cancellation");
+  assert.match(octreePowerCoarseLevelSetShader,
     /if\(params\.physical\.y>0\.0&&\(!finite\(velocity\.x\)[\s\S]*velocity\.w<=0\.0\)\)\{fail\(row,INVALID_VELOCITY\)/,
     "the dt=0 bootstrap must not depend on a Stage-A velocity fit");
   assert.match(octreePowerCoarseLevelSetShader,
@@ -71,13 +80,13 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
     /migratePowerCoarsePhiSource[\s\S]*previousSampleAtCurrentLeaf\(header\)/,
     "recurring coarse phi must be sampled by spatial leaf identity before row-indexed advection");
   assert.match(octreePowerCoarseLevelSetShader,
-    /MIGRATED_AIR[\s\S]*output\.flags&\(~MIGRATED_AIR\)[\s\S]*output\.flags&MIGRATED_AIR[\s\S]*fail\(row,INVALID_SOURCE\)/,
-    "a newly wet row missing old coarse support must receive a valid fine correction or fail closed");
+    /output\.flags&MIGRATED_AIR[\s\S]*params\.hasFine!=0u[\s\S]*fail\(row,INVALID_SOURCE\)[\s\S]*output\.flags&=~MIGRATED_AIR/,
+    "fine mode must reject an uncorrected migrated row while coarse-only mode publishes its explicit positive-air complement");
   assert.match(octreePowerCoarseLevelSetShader,
-    /applyExactFineCorrection[\s\S]*output\.flags=.*PHI_CORRECTED[\s\S]*redistancePowerCoarsePhi[\s\S]*source\.flags&PHI_CORRECTED[\s\S]*return;/,
+    /applyExactFineCorrection[\s\S]*output\.flags=.*PHI_CORRECTED[\s\S]*redistancePowerCoarsePhi[\s\S]*source\.flags&\(PHI_CORRECTED\|PHI_INTERFACE\)[\s\S]*return;/,
     "valid cell-center fine aggregates are fixed coarse seeds during the local Delaunay sweep");
   assert.match(octreePowerCoarseLevelSetShader,
-    /let metric=metrics\[row\];if\(\(metric\.transformAndFlags&VALID\)==0u\)\{fail\(row,INVALID_ROW\);return;\}if\(\(source\.flags&PHI_CORRECTED\)!=0u\)/,
+    /let metric=metrics\[row\];if\(\(metric\.transformAndFlags&VALID\)==0u\)\{fail\(row,INVALID_ROW\);return;\}var fixedSeed=/,
     "a fine correction cannot bypass invalid topology validation");
   const scheduleEncode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString();
   assert.match(scheduleEncode,

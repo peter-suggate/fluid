@@ -13,29 +13,27 @@ const smokeSource = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.
 const methodPanelSource = readFileSync(new URL("../components/MethodPanel.tsx", import.meta.url), "utf8");
 const performancePanelSource = readFileSync(new URL("../components/PerformancePanel.tsx", import.meta.url), "utf8");
 
-test("paper pressure hierarchy is an explicit A/B with the proven 128-tail default", () => {
-  const hierarchy = octreeMethod.params.find((parameter) => parameter.key === "powerMultigridHierarchy");
-  assert.ok(hierarchy && hierarchy.kind === "select");
-  assert.equal(hierarchy.default, "aggregate-galerkin");
-  assert.deepEqual(hierarchy.options.map((option) => option.value), ["aggregate-galerkin", "paper-pyramid"]);
+test("paper pressure hierarchy is the product default with an internal rollback", () => {
+  assert.equal(octreeMethod.params.some((parameter) => parameter.key === "powerMultigridHierarchy"), false,
+    "implementation-history A/B choices must not leak into the product UI");
 
   for (const quality of ["balanced", "high", "ultra"] as const) {
     const preset = octreeMethod.presetFor(quality);
-    assert.equal(preset.powerMultigridHierarchy, "aggregate-galerkin",
-      `${quality} must retain the endurance-proven rollback hierarchy`);
+    assert.equal(preset.powerMultigridHierarchy, "paper-pyramid",
+      `${quality} must use the paper's sparse-grid V-cycle`);
     assert.equal(preset.powerPcgIterationCap, 128,
       `${quality} must retain the safe recorded PCG tail`);
   }
 
   assert.match(methodSource,
     /powerMultigridHierarchy: powerMultigridHierarchy\(values\.powerMultigridHierarchy\)/,
-    "the UI value must cross the method boundary into projection options");
+    "the diagnostic rollback override must cross the method boundary into projection options");
   assert.match(uniformSource,
     /powerMultigridHierarchy: options\.octree\.powerMultigridHierarchy/,
     "the uniform host must not drop the hierarchy selector while constructing the octree projection");
 });
 
-test("octree projection keeps both pressure hierarchies and selects the paper pyramid only by opt-in", () => {
+test("octree projection defaults to the paper pyramid and retains the Galerkin rollback", () => {
   assert.match(octreeSource, /powerMultigridHierarchy\?: "aggregate-galerkin" \| "paper-pyramid"/);
   assert.match(octreeSource, /WebGPUOctreeFirstOrderVCycle/,
     "the current aggregate/Galerkin hierarchy remains the rollback implementation");
@@ -107,13 +105,10 @@ test("Dawn performance mode isolates stepping wall time from compact-field QA", 
   assert.match(smokeSource, /qualityGates: performanceProfileRequested \? "skipped" : "evaluated"/);
 });
 
-test("boundary smoothing is one symmetry-locked even control from UI through MGPCG", () => {
-  const smoothing = octreeMethod.params.find(
+test("boundary smoothing is a locked paper invariant with a diagnostic override", () => {
+  assert.equal(octreeMethod.params.some(
     (parameter) => parameter.key === "powerBoundarySmoothingIterations",
-  );
-  assert.ok(smoothing && smoothing.kind === "number");
-  assert.equal(smoothing.default, 8, "the paper's paired boundary smoothing count is the default");
-  assert.equal(smoothing.step, 2, "the UI must not offer odd ping/pong schedules");
+  ), false, "users must not be offered symmetry-breaking pressure internals");
   assert.equal(octreeMethod.presetFor("balanced").powerBoundarySmoothingIterations, 8);
 
   assert.match(methodSource,

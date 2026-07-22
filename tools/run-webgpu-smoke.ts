@@ -2745,11 +2745,19 @@ async function runGPU(
     const auditThisPowerStep = steps % powerAuditEverySteps === 0 || requestedTime + 1e-9 >= target_s;
     if (powerGenerationAuditRequested && auditThisPowerStep && method.id === "octree"
       && octreePowerProjectionOverride === "authoritative") {
+      // Every thirtieth octree advance may be submitted as serial profiler
+      // phases. A queue fence taken before those asynchronous submissions are
+      // enqueued observes the preceding valid generation, not the accepted
+      // step. Match the renderer's lifecycle contract before auditing it.
+      const pendingAdvanceCompletion = (solver as GPUSolverInstance).pendingAdvanceCompletion;
+      if (pendingAdvanceCompletion) await pendingAdvanceCompletion;
       await device.queue.onSubmittedWorkDone();
       const audited = solver as GPUSolverInstance & {
         powerFaceControl?: GPUBuffer; powerFaceTransferControl?: GPUBuffer; powerFaceSiteIndex?: GPUBuffer;
         powerFaceSeedControl?: GPUBuffer; powerOperatorControl?: GPUBuffer; mgpcgControl?: GPUBuffer;
         powerDescriptorControl?: GPUBuffer; powerTopologyControl?: GPUBuffer;
+        globalFineCoarseLevelSetControl?: GPUBuffer;
+        globalFinePowerVelocityControl?: GPUBuffer;
         globalFineSummaryDirectory?: GPUBuffer;
         powerLeafHeaders?: GPUBuffer; powerDescriptorRows?: GPUBuffer; powerTopologyMetrics?: GPUBuffer;
         powerLeafFrontier?: GPUBuffer; topologyTileWorklist?: GPUBuffer;
@@ -2768,7 +2776,8 @@ async function runGPU(
           + `ready=${solver.info.powerDiagramReady} authoritative=${solver.info.powerDiagramAuthoritative} `
           + `fallback=${solver.info.powerDiagramFallbackReason ?? "none"}`);
       }
-      const [faceBytes, transferBytes, seedBytes, operatorBytes, descriptorBytes, topologyBytes, axisBytes] = await Promise.all([
+      const [faceBytes, transferBytes, seedBytes, operatorBytes, descriptorBytes, topologyBytes, axisBytes,
+        coarsePhiBytes, powerVelocityBytes] = await Promise.all([
         readBufferBinding(device, { buffer: audited.powerFaceControl }, 64),
         readBufferBinding(device, { buffer: audited.powerFaceTransferControl }, 32),
         readBufferBinding(device, { buffer: audited.powerFaceSeedControl }, 64),
@@ -2776,6 +2785,12 @@ async function runGPU(
         readBufferBinding(device, { buffer: audited.powerDescriptorControl }, 32),
         readBufferBinding(device, { buffer: audited.powerTopologyControl }, 32),
         axisSource ? readBufferBinding(device, { buffer: axisSource.control }, 24) : Promise.resolve(undefined),
+        audited.globalFineCoarseLevelSetControl
+          ? readBufferBinding(device, { buffer: audited.globalFineCoarseLevelSetControl }, 64)
+          : Promise.resolve(undefined),
+        audited.globalFinePowerVelocityControl
+          ? readBufferBinding(device, { buffer: audited.globalFinePowerVelocityControl }, 32)
+          : Promise.resolve(undefined),
       ]);
       const face = new Uint32Array(faceBytes.buffer, faceBytes.byteOffset, 16);
       const transfer = new Uint32Array(transferBytes.buffer, transferBytes.byteOffset, 8);
@@ -2788,6 +2803,10 @@ async function runGPU(
       const descriptor = new Uint32Array(descriptorBytes.buffer, descriptorBytes.byteOffset, 8);
       const topology = new Uint32Array(topologyBytes.buffer, topologyBytes.byteOffset, 8);
       const axis = axisBytes ? new Uint32Array(axisBytes.buffer, axisBytes.byteOffset, 6) : undefined;
+      const coarsePhi = coarsePhiBytes
+        ? new Uint32Array(coarsePhiBytes.buffer, coarsePhiBytes.byteOffset, 16) : undefined;
+      const powerVelocity = powerVelocityBytes
+        ? new Uint32Array(powerVelocityBytes.buffer, powerVelocityBytes.byteOffset, 8) : undefined;
       const floatBits = (word: number) => new Float32Array(new Uint32Array([word]).buffer)[0];
       const faceGeometryFailure = (face[3] & 8) !== 0;
       const faceNeighborFailure = (face[3] & (16 | 64)) !== 0;
@@ -2825,6 +2844,15 @@ async function runGPU(
           firstInvalid: descriptor[3], flags: descriptor[4], generation: descriptor[7] },
         topology: { invalidCount: topology[0], firstInvalid: topology[1], flags: topology[2],
           resolvedCount: topology[3], version: topology[4] },
+        coarsePhi: coarsePhi ? { flags: coarsePhi[0], firstError: coarsePhi[1], rowCount: coarsePhi[2],
+          advected: coarsePhi[3], uniformUpdates: coarsePhi[4], transitionUpdates: coarsePhi[5],
+          nearestFallbacks: coarsePhi[6], passes: coarsePhi[7], correctedRows: coarsePhi[8],
+          interfaceRows: coarsePhi[9], generation: coarsePhi[11], valid: coarsePhi[12] === 0x8000_0000 }
+          : undefined,
+        powerVelocity: powerVelocity ? { flags: powerVelocity[0], firstError: powerVelocity[1],
+          rowCount: powerVelocity[2], faceCount: powerVelocity[3], incidenceCount: powerVelocity[4],
+          reconstructedCount: powerVelocity[5], fallbackCount: powerVelocity[6], generation: powerVelocity[7] }
+          : undefined,
       };
       if (topologyTransitionAuditLog) {
         const transitionHeaders = audited.powerLeafHeaders;
@@ -3079,6 +3107,9 @@ async function runGPU(
         || !audit.velocityStages.seedValid || audit.velocityStages.seedFlags !== 0
         || audit.velocityStages.operatorFlags !== 0xc000_0000
         || !octreeMGPCGDiagnosticsAreAcceptable(mgpcgDiagnostics)
+        || (octreeGlobalFineFactorOverride === "off"
+          && (!audit.coarsePhi?.valid || audit.coarsePhi.flags !== 0
+            || audit.coarsePhi.advected !== audit.coarsePhi.rowCount))
         || audit.faces.generation <= previousAuditedPowerGeneration;
       if (failure) {
         let duplicateSite: { slot: number; cellPlusOne?: number; size?: number; row?: number; published?: number;
@@ -3087,6 +3118,14 @@ async function runGPU(
         let reciprocalFace: unknown;
         let invalidGeometry: Record<string, unknown> | undefined;
         let axisIncidence: unknown;
+        const coarseFailureReader = solver as GPUSolverInstance & {
+          readPowerCoarseFailureRow?: (row: number) => Promise<unknown>;
+        };
+        const coarsePhiFailure = audit.coarsePhi && !audit.coarsePhi.valid
+          && audit.coarsePhi.firstError < audit.coarsePhi.rowCount
+          && coarseFailureReader.readPowerCoarseFailureRow
+          ? await coarseFailureReader.readPowerCoarseFailureRow(audit.coarsePhi.firstError)
+          : undefined;
         const slot = audit.faces.firstInvalidSlot;
         // firstInvalid is the ordered failure key. pad3 is detail storage used
         // by later face/boundary stages and is not an authoritative row ID.
@@ -3333,7 +3372,7 @@ async function runGPU(
         // low-level diagnosis, but Dawn may not silently classify a UI-visible
         // rejection differently.
         const uiFailure = viewportFailureIndicator({ ...await solver.readStats() }, undefined, scene);
-        throw new Error(`power generation audit failed at step ${steps}: ${JSON.stringify({ uiFailure, ...audit, duplicateSite, invalidGeometry, reciprocalFace, axisIncidence,
+        throw new Error(`power generation audit failed at step ${steps}: ${JSON.stringify({ uiFailure, ...audit, coarsePhiFailure, duplicateSite, invalidGeometry, reciprocalFace, axisIncidence,
           diagnosticBuffers: { siteIndex: Boolean(siteIndex), siteIndexSize: siteIndex?.size, leafHeaders: Boolean(leafHeaders) } })}`);
       }
       previousAuditedPowerGeneration = audit.faces.generation;
@@ -3747,6 +3786,7 @@ function runMatchedCPUOracle(scenarioId: SmokeScenarioId, grid: [number, number,
 function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[]) {
   const failures: string[] = [];
   const fail = (condition: boolean, message: string) => { if (!condition) failures.push(`${scenarioId}: ${message}`); };
+  const coarseOnlyOctreeRequested = octreeGlobalFineFactorOverride === "off";
   for (const result of results) {
     if (exactStepCount !== undefined) {
       const expectedTime_s = exactStepCount * maxDtOverride!;
@@ -3762,21 +3802,27 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
     const exhaustivePowerScenario = scenarioId === "hydrostatic-power-two-level"
       || scenarioId === "minimal-power-dam-break";
     if (exhaustivePowerScenario && powerGenerationAuditRequested && result.method === "octree") {
-      fail(result.steps >= 50, `octree completed only ${result.steps} steps; exhaustive power validation requires at least 50`);
+      if (exactStepCount === undefined) {
+        fail(result.steps >= 50, `octree completed only ${result.steps} steps; exhaustive power validation requires at least 50`);
+      }
       fail(result.powerGenerationAuditedSteps === result.steps,
         `octree audited ${result.powerGenerationAuditedSteps} of ${result.steps} power generations`);
       const envelope = result.stabilityEnvelope;
       fail((envelope?.sampledSteps ?? 0) === result.steps,
         `octree sampled pressure and volume on ${envelope?.sampledSteps ?? 0} of ${result.steps} steps`);
-      fail((envelope?.invalidVolumeSampleCount ?? Infinity) === 0,
-        `octree produced ${envelope?.invalidVolumeSampleCount ?? "unknown"} invalid per-step volume fields`);
+      if (!coarseOnlyOctreeRequested) {
+        fail((envelope?.invalidVolumeSampleCount ?? Infinity) === 0,
+          `octree produced ${envelope?.invalidVolumeSampleCount ?? "unknown"} invalid per-step volume fields`);
+      }
       fail((envelope?.nonFiniteVelocityCount ?? Infinity) === 0,
         `octree encountered ${envelope?.nonFiniteVelocityCount ?? "unknown"} non-finite velocities`);
       fail((envelope?.maximumPressureRelativeResidual ?? Infinity) <= 1e-4,
         `octree per-step pressure residual peaked at ${envelope?.maximumPressureRelativeResidual}`);
-      const maximumVolumeDrift = scenarioId === "hydrostatic-power-two-level" ? 1e-4 : 0.01;
-      fail((envelope?.maximumExactVolumeDrift ?? Infinity) <= maximumVolumeDrift,
-        `octree per-step volume drift peaked at ${envelope?.maximumExactVolumeDrift}; limit ${maximumVolumeDrift}`);
+      if (!coarseOnlyOctreeRequested) {
+        const maximumVolumeDrift = scenarioId === "hydrostatic-power-two-level" ? 1e-4 : 0.01;
+        fail((envelope?.maximumExactVolumeDrift ?? Infinity) <= maximumVolumeDrift,
+          `octree per-step volume drift peaked at ${envelope?.maximumExactVolumeDrift}; limit ${maximumVolumeDrift}`);
+      }
     }
     if (requireSpatialField) {
       fail(result.matchedField.length === result.grid[0] * result.grid[1] * result.grid[2],
@@ -4046,6 +4092,12 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
       fail(octree.info.globalFineLevelSetFactor === expectedFactor,
         `octree global fine factor ${octree.info.globalFineLevelSetFactor ?? "unknown"} differs from requested ${expectedFactor}`);
     }
+    if (coarseOnlyOctreeRequested) {
+      fail(octree.info.globalFineLevelSetEnabled === false,
+        "octree requested coarse-only mode but reported a live global fine level set");
+      fail(octree.info.globalFineLevelSetAllocatedBytes === 0,
+        `octree coarse-only mode allocated ${octree.info.globalFineLevelSetAllocatedBytes ?? "unknown"} global-fine bytes`);
+    }
     const powerValidationScenario = scenarioId === "hydrostatic-power-two-level"
       || scenarioId === "hydrostatic-power-large-offset"
       || scenarioId === "minimal-power-dam-break";
@@ -4070,7 +4122,8 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         `power grid transition size ratio ${power?.maximumTransitionSizeRatio} exceeds 2:1`);
       fail((octree.info.quadtreeMaximumNeighborRatio ?? Infinity) <= 2,
         `hydrostatic octree violated 2:1 balance: ${octree.info.quadtreeMaximumNeighborRatio}`);
-      fail(octree.info.globalFineFaceBandTransitionValid === true
+      if (!coarseOnlyOctreeRequested) {
+        fail(octree.info.globalFineFaceBandTransitionValid === true
         && (octree.info.globalFineFaceBandTransitionRows ?? 0) > 0
         && (octree.info.globalFineFaceBandTransitionAdjacencyCount ?? 0) > 0,
       `hydrostatic Section 5 Delaunay face band did not publish live transition adjacency: ${JSON.stringify({
@@ -4128,7 +4181,7 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         && octree.info.globalFineFaceBandPowerPublicationCommitted
           === octree.info.globalFineFaceBandPowerPublicationTargets
         && octree.info.globalFineFaceBandPowerGeneration === octree.octreePowerFaceDiagnostics?.generation,
-      `hydrostatic Section 5 final power publication is incomplete: ${JSON.stringify({
+        `hydrostatic Section 5 final power publication is incomplete: ${JSON.stringify({
         valid: octree.info.globalFineFaceBandPowerPublicationValid,
         flags: octree.info.globalFineFaceBandPowerPublicationFlags,
         faces: octree.info.globalFineFaceBandPowerPublicationFaces,
@@ -4137,6 +4190,7 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         committed: octree.info.globalFineFaceBandPowerPublicationCommitted,
         powerGeneration: octree.info.globalFineFaceBandPowerGeneration,
       })}`);
+      }
       fail(power?.topology.invalidRowCount === 0
         && power.topology.validRowCount === power.rowCount
         && power.topology.rowsWithTetrahedra === power.rowCount
@@ -4212,16 +4266,19 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         fail(Math.abs(power?.volumeDrift ?? Infinity) <= 0.01,
           `minimal dam final compact volume drift ${power?.volumeDrift} exceeds 1%`);
         const envelope = octree.stabilityEnvelope;
-        fail((envelope?.maximumExactVolumeDrift ?? Infinity) <= 0.01,
-          `minimal dam transient exact-volume drift ${envelope?.maximumExactVolumeDrift} exceeds 1%`);
+        if (!coarseOnlyOctreeRequested) {
+          fail((envelope?.maximumExactVolumeDrift ?? Infinity) <= 0.01,
+            `minimal dam transient exact-volume drift ${envelope?.maximumExactVolumeDrift} exceeds 1%`);
+        }
         fail((envelope?.maximumComponentCount ?? Infinity) === 1
           && (envelope?.minimumDominantComponentFraction ?? -Infinity) >= 0.98,
         `minimal dam liquid disconnected: ${JSON.stringify({
           maximumComponentCount: envelope?.maximumComponentCount,
           minimumDominantComponentFraction: envelope?.minimumDominantComponentFraction,
         })}`);
-        const generation = octree.finalGlobalFineGeneration;
-        fail(generation?.transportCommitted === true
+        if (!coarseOnlyOctreeRequested) {
+          const generation = octree.finalGlobalFineGeneration;
+          fail(generation?.transportCommitted === true
           && (generation.transportProcessed ?? 0) > 0
           && generation.transportDepartureOutsideBand === 0
           && generation.transportNonfiniteVelocity === 0
@@ -4237,11 +4294,12 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
           velocityUnavailable: generation?.transportVelocityUnavailable,
           maximumDisplacementFineCells: generation?.transportMaximumDisplacementFineCells,
         })}`);
-        fail(generation?.topologyRolledBack === false && generation?.topologyFinalizeReason === 0,
+          fail(generation?.topologyRolledBack === false && generation?.topologyFinalizeReason === 0,
           `minimal dam final topology publication rolled back: ${JSON.stringify({
             rolledBack: generation?.topologyRolledBack,
             finalizeReason: generation?.topologyFinalizeReason,
           })}`);
+        }
       }
     }
     if (globalFineGenerationTransitionRequested) {

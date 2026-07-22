@@ -1,6 +1,6 @@
 "use client";
 
-import { RangeControl, Segmented } from "./controls";
+import { RangeControl } from "./controls";
 import { getMethod, type MethodParamSpec } from "@/lib/methods";
 import type { GPUQuality } from "@/lib/tall-cell-grid";
 import { simulation } from "@/lib/simulation/controller";
@@ -49,20 +49,18 @@ export function MethodPanel() {
     <section className="panel-section" data-testid="method-panel" aria-busy={gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild"}>
       <div className="section-heading"><h2>Method</h2><span>{method.backend === "webgpu" ? "WebGPU f32" : "CPU binary64"}</span></div>
       {gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild" && <div className="method-apply-state" role="status"><i aria-hidden="true" /><span><strong>APPLYING</strong>{gpuStatus.operation ?? gpuStatus.label}</span></div>}
-      <Segmented
-        ariaLabel="Simulation method"
-        value={methodId}
-        options={[{ value: "octree", label: "Voxel octree", title: "Unified sparse-brick voxel scene and fluid" }]}
-        onChange={(value) => simulation.setMethod(value)}
-      />
-      <label className="select-control" title={method.pressureMapping}>
+      <div className="method-identity" title={method.description}>
+        <strong>{method.label}</strong>
+        <span>Sparse pyramid PCG · power-cell faces</span>
+      </div>
+      {method.showQualityControl !== false && <label className="select-control" title={method.pressureMapping}>
         <span>Quality</span>
         <select aria-label="Simulation quality" value={quality} onChange={(event) => simulation.setQuality(event.target.value as GPUQuality)}>
           {(["balanced", "high", "ultra"] as const).map((level) => (
             <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)} · {method.qualityLabels[level]}</option>
           ))}
         </select>
-      </label>
+      </label>}
       {method.backend === "webgpu" && gpuInfo && <div className="grid-readout" title="The grid the selected quality and parameters actually allocated" data-testid="grid-readout">
         <strong>{gpuInfo.nx} × {gpuInfo.ny} × {gpuInfo.nz}</strong>
         <span>{gpuInfo.cellCount.toLocaleString()} samples · {(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB</span>

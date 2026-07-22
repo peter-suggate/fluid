@@ -53,11 +53,8 @@ test("uniform kernels bind the optional bulk worklist declared by every entry po
     "WGSL reserved keywords cannot be used as structure members");
 });
 
-test("octree atlas ownership defaults to mirror but compact authority keeps only bulk residency", () => {
-  const parameter = octreeMethod.params.find((candidate) => candidate.key === "brickAtlas");
-  assert.ok(parameter && parameter.kind === "select");
-  assert.equal(parameter.default, "mirror");
-  assert.deepEqual(parameter.options.map((option) => option.value), ["mirror", "authoritative", "off"]);
+test("octree atlas diagnostics stay internal while compact authority keeps only bulk residency", () => {
+  assert.equal(octreeMethod.params.some((candidate) => candidate.key === "brickAtlas"), false);
   assert.equal(octreeMethod.presetFor?.("balanced").brickAtlas, "mirror");
 
   const method = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
@@ -83,17 +80,11 @@ test("octree atlas ownership defaults to mirror but compact authority keeps only
   assert.match(smoke, /FLUID_BRICK_SPARSE_TRANSPORT/);
   assert.match(smoke, /FLUID_BRICK_SPARSE_OCCUPANCY_FLUX/);
   assert.match(smoke, /FLUID_BRICK_SPARSE_EXTRAPOLATION/);
-  const transport = octreeMethod.params.find((candidate) => candidate.key === "brickSparseTransport");
-  assert.ok(transport && transport.kind === "select");
-  assert.equal(transport.default, "off", "the no-win full-footprint ocean A/B stays opt-in");
+  assert.equal(octreeMethod.params.some((candidate) => candidate.key === "brickSparseTransport"), false);
   assert.equal(octreeMethod.presetFor?.("balanced").brickSparseTransport, "off");
-  const occupancyFlux = octreeMethod.params.find((candidate) => candidate.key === "brickSparseOccupancyFlux");
-  assert.ok(occupancyFlux && occupancyFlux.kind === "select");
-  assert.equal(occupancyFlux.default, "off", "atomic column reduction remains a measured opt-in");
+  assert.equal(octreeMethod.params.some((candidate) => candidate.key === "brickSparseOccupancyFlux"), false);
   assert.equal(octreeMethod.presetFor?.("balanced").brickSparseOccupancyFlux, "off");
-  const extrapolation = octreeMethod.params.find((candidate) => candidate.key === "brickSparseExtrapolation");
-  assert.ok(extrapolation && extrapolation.kind === "select");
-  assert.equal(extrapolation.default, "off", "sparse extrapolation remains opt-in until the widened-ocean A/B wins");
+  assert.equal(octreeMethod.params.some((candidate) => candidate.key === "brickSparseExtrapolation"), false);
   assert.equal(octreeMethod.presetFor?.("balanced").brickSparseExtrapolation, "off");
   assert.match(smoke, /\["off", "mirror", "authoritative"\]/);
   assert.doesNotMatch(sparseWorld, /encodeAtlasToDense\(/,

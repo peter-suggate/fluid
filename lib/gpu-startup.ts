@@ -77,7 +77,6 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     "param.octree.faceVelocityTransport",
     "param.octree.globalFineLevelSetFactor",
     "param.octree.powerDiagramProjection",
-    "param.octree.secondaryParticles",
     "param.octree.maximumLeafSize",
   ]);
   const unapprovedQueryKeys = [...new Set([...query.keys()].filter((key) => !approvedQueryKeys.has(key)))];
@@ -89,7 +88,6 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     values.faceVelocityTransport !== "on" && "compact face transport must be on",
     values.globalFineLevelSetFactor !== "4" && "global fine level set must be factor 4",
     values.powerDiagramProjection !== "authoritative" && "power projection must be authoritative",
-    values.secondaryParticles !== "off" && "secondary particles must be off",
     values.maximumLeafSize !== "16" && "maximum leaf size must be 16",
     parameterDrift.length > 0 && `method profile drifted: ${parameterDrift.join(", ")}`,
     config.voxelRenderMode !== "smooth" && "voxel inspection must be smooth/off",

@@ -877,6 +877,9 @@ export class WebGPUOctreeProjection {
   private powerCoarseLevelSetSchedule?: WebGPUOctreePowerCoarseLevelSet;
   private fineToPowerCoarseLevelSet?: WebGPUFineToCoarseLevelSet;
   private powerCoarseLevelSetBootstrapped = false;
+  /** Generation of the currently scheduled coarse-octree phi publication.
+   * It advances independently when the optional global fine band is off. */
+  private powerCoarseLevelSetGeneration = 2;
   private globalFineSourceA?: WebGPUFineLevelSetBrickSource;
   private globalFineSourceB?: WebGPUFineLevelSetBrickSource;
   private globalFineCurrentIsA = true;
@@ -2090,27 +2093,30 @@ export class WebGPUOctreeProjection {
     this.powerFaces = tracePowerInit("faces", () => new WebGPUOctreePowerFaces(this.device, rowCapacity, faceCapacity, this.powerTopology!.source, incidenceCapacity));
     this.powerOperator = tracePowerInit("operator", () => new WebGPUOctreePowerOperator(this.device, rowCapacity, faceCapacity, entryCapacity, maximumIncidence));
     this.powerVelocity = tracePowerInit("velocity", () => new WebGPUOctreePowerVelocity(this.device, rowCapacity));
+    // The paper evolves coarse octree phi regardless of whether the optional
+    // factor-4/factor-8 interface band exists. It is also the complete
+    // inside/outside and cell-centre boundary authority in coarse-only mode.
+    this.powerCoarseLevelSet = new WebGPUOctreeCoarseLevelSet(this.device, rowCapacity);
+    this.powerCoarseLevelSetSchedule = new WebGPUOctreePowerCoarseLevelSet(
+      this.device, this.powerCoarseLevelSet, this.powerTopology.source,
+    );
+    const coarseDirectory = this.powerCoarseLevelSetSchedule.sampleSource.directory;
+    // Binding 15 is a dual ABI. Power topology/pressure groups consume the
+    // compact coarse-phi directory; sparse extrapolation retains its dedicated
+    // bulk-worklist groups and therefore never observes it.
+    this.groups = {
+      ab: this.createProjectionGroup(this.resources.velocityIn, this.resources.velocityOut,
+        this.pressureA, this.pressureB, undefined, coarseDirectory),
+      ba: this.createProjectionGroup(this.resources.velocityIn, this.resources.velocityOut,
+        this.pressureB, this.pressureA, undefined, coarseDirectory),
+      extrapolateOut: this.groups.extrapolateOut,
+      extrapolateScratch: this.groups.extrapolateScratch,
+    };
+    this.fineSummarySizingGroup = this.createProjectionGroup(
+      this.resources.velocityIn, this.resources.velocityOut,
+      this.globalFineSummaries?.directory ?? this.fineSummaryFallback, this.pressureB,
+      undefined, coarseDirectory);
     if (this.globalFineSourceA && this.globalFineSourceB) {
-      this.powerCoarseLevelSet = new WebGPUOctreeCoarseLevelSet(this.device, rowCapacity);
-      this.powerCoarseLevelSetSchedule = new WebGPUOctreePowerCoarseLevelSet(
-        this.device, this.powerCoarseLevelSet, this.powerTopology.source,
-      );
-      const coarseDirectory = this.powerCoarseLevelSetSchedule.sampleSource.directory;
-      // Binding 15 is a dual ABI. Global-fine pressure/topology groups consume
-      // the compact coarse-phi directory; sparse extrapolation retains its
-      // dedicated bulk-worklist groups and therefore never observes it.
-      this.groups = {
-        ab: this.createProjectionGroup(this.resources.velocityIn, this.resources.velocityOut,
-          this.pressureA, this.pressureB, undefined, coarseDirectory),
-        ba: this.createProjectionGroup(this.resources.velocityIn, this.resources.velocityOut,
-          this.pressureB, this.pressureA, undefined, coarseDirectory),
-        extrapolateOut: this.groups.extrapolateOut,
-        extrapolateScratch: this.groups.extrapolateScratch,
-      };
-      this.fineSummarySizingGroup = this.createProjectionGroup(
-        this.resources.velocityIn, this.resources.velocityOut,
-        this.globalFineSummaries?.directory ?? this.fineSummaryFallback, this.pressureB,
-        undefined, coarseDirectory);
       this.fineToPowerCoarseLevelSet = new WebGPUFineToCoarseLevelSet(this.device, rowCapacity,
         this.globalFineSourceA.plan.maximumResidentBricks * this.globalFineSourceA.plan.samplesPerBrick);
       const compactCoarse = this.powerCoarseLevelSetSchedule.sampleSource;
@@ -2476,7 +2482,7 @@ export class WebGPUOctreeProjection {
     // for the next topology rebuild. Queue this expected generation before the
     // command buffer; later surface publication uses its own parameter buffer.
     if (this.powerCoarseLevelSetSchedule) {
-      const generation = this.globalFineGeneration & 0x3fff_ffff;
+      const generation = this.powerCoarseLevelSetGeneration & 0x3fff_ffff;
       const flags = (this.pressureWarmStart ? 1 : 0) | (generation << 2);
       this.device.queue.writeBuffer(this.params, 140, new Uint32Array([flags >>> 0]));
     }
@@ -2720,9 +2726,11 @@ export class WebGPUOctreeProjection {
     // administrative publication is not an advection step and must not move
     // the initial Dirichlet surface used by the analytic cold solve.
     const useCurrentFineBoundary = this.globalFineBootstrapped && this.powerAdvancingPressureSteps > 0;
+    const useCurrentCoarseBoundary = !useCurrentFineBoundary
+      && this.powerCoarseLevelSetBootstrapped && this.powerAdvancingPressureSteps > 0;
     const boundaryFine = useCurrentFineBoundary
       ? (this.globalFineCurrentIsA ? this.globalFineSourceA : this.globalFineSourceB)
-      : this.globalFineSourceA;
+      : undefined;
     this.lastPowerBoundaryFineSource = boundaryFine
       ? { generation: boundaryFine.generation, generationSlot: boundaryFine.generationSlot }
       : undefined;
@@ -2737,20 +2745,21 @@ export class WebGPUOctreeProjection {
     // boundary sampling resolves band-exterior query centres from the
     // published coarse directory instead of rejecting the generation.
     const boundaryCoarseDirectory = this.powerCoarseLevelSetSchedule?.sampleSource.directory;
-    const boundaryPhi = boundaryFine ? {
-      mode: useCurrentFineBoundary ? "fine" as const : "analytic" as const,
-      fine: boundaryFine,
-      ...(useCurrentFineBoundary && boundaryCoarseDirectory
+    const boundaryPhi = {
+      mode: useCurrentFineBoundary ? "fine" as const
+        : useCurrentCoarseBoundary ? "coarse" as const : "analytic" as const,
+      ...(boundaryFine ? { fine: boundaryFine } : {}),
+      ...((useCurrentFineBoundary || useCurrentCoarseBoundary) && boundaryCoarseDirectory
         ? { coarse: { directory: boundaryCoarseDirectory } } : {}),
       container: [this.scene.container.width_m, this.scene.container.height_m,
         this.scene.container.depth_m] as const,
       fillFraction: this.scene.container.fillFraction,
       initialCondition: this.scene.fluid.initialCondition,
-    } : undefined;
+    };
     const faceOptions = { dimensions, rowCount: this.compaction,
       physicalCellSize: spacing[0], generation: this.powerGeneration,
       closedBoundaryMask: octreePowerClosedBoundaryMask(this.scene.container.top === "closed"),
-      ...(boundaryPhi ? { boundaryPhi } : {}),
+      boundaryPhi,
     } as const;
     // Geometry descriptors must come from the octree topology authority, not
     // the phase-row index used to resolve incident pressure rows.  A missing
@@ -3197,7 +3206,8 @@ export class WebGPUOctreeProjection {
             dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
             physicalCellSize: this.scene.container.width_m / this.dims.nx,
             dt: 0, hashCapacity: this.powerFaces.plan.hashCapacity,
-            maximumLeafSize: this.maxLeafSize, generation: this.globalFineGeneration & 0x3fff_ffff,
+            maximumLeafSize: this.maxLeafSize,
+            generation: this.powerCoarseLevelSetGeneration & 0x3fff_ffff,
           });
           this.powerCoarseLevelSetBootstrapped = true;
           coarseBootstrappedThisStep = true;
@@ -3310,6 +3320,7 @@ export class WebGPUOctreeProjection {
             dt: coarseBootstrappedThisStep ? 0 : dt_s, hashCapacity: this.powerFaces.plan.hashCapacity,
             maximumLeafSize: this.maxLeafSize, generation: correctedFine.generation & 0x3fff_ffff,
           });
+          this.powerCoarseLevelSetGeneration = correctedFine.generation & 0x3fff_ffff;
         }
         if (correctedFine && this.powerCoarseLevelSetSchedule) {
           const coarse = this.powerCoarseLevelSetSchedule.sampleSource;
@@ -3318,6 +3329,26 @@ export class WebGPUOctreeProjection {
         }
         this.globalFineCurrentIsA = !this.globalFineCurrentIsA;
         this.globalFineBootstrapped = true;
+      } else if (!coarseBootstrappedThisStep && this.powerCoarseLevelSetBootstrapped
+        && this.powerCoarseLevelSetSchedule && this.powerVelocity && this.powerFaces) {
+        // Coarse-only paper mode: advect and locally redistance octree phi
+        // directly. No fine topology, transport, restriction, or correction
+        // is allocated or dispatched.
+        this.powerCoarseLevelSetGeneration = (this.powerCoarseLevelSetGeneration + 1) & 0x3fff_ffff;
+        if (this.powerCoarseLevelSetGeneration === 0) this.powerCoarseLevelSetGeneration = 1;
+        this.powerCoarseLevelSetSchedule.encode(encoder, {
+          headers: this.leafHeaders,
+          cellVelocities: this.powerVelocity.velocities,
+          siteIndex: this.powerFaces.source.siteIndex,
+          rowCount: this.compaction,
+        }, {
+          dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
+          physicalCellSize: this.scene.container.width_m / this.dims.nx,
+          dt: dt_s,
+          hashCapacity: this.powerFaces.plan.hashCapacity,
+          maximumLeafSize: this.maxLeafSize,
+          generation: this.powerCoarseLevelSetGeneration,
+        });
       }
       beginFineRedistanceTiming();
       this.adaptiveSurfacePages.encodeLifecycle(encoder);
