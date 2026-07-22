@@ -1,19 +1,4 @@
-/**
- * Matrix-free PCG for compact octree pressure rows with an additive geometric-
- * aggregate diagonal preconditioner.
- *
- * The solver consumes the same LeafHeader/LeafEntry publication used by the
- * power-face projector. Its hierarchy is a sparse collection of independent
- * aggregate diagonal solves built from live row origins on the GPU; no
- * finest-domain field, host row-count readback, or assembled coarse matrix is
- * created.
- *
- * Authoritative power projection injects the sparse first-order V-cycle and
- * selects the Section 4.3 hybrid. The additive aggregate solve remains only as
- * a bounded compatibility/rollback preconditioner for non-authoritative use.
- */
-
-export const OCTREE_MGPCG_PRECONDITIONER_KIND = "additive-geometric-aggregate-diagonal" as const;
+/** Matrix-free Section 4.3 hybrid PCG for compact power-diagram rows. */
 export const OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS = 8;
 export const OCTREE_SECTION43_BOUNDARY_BAND_LAYERS = 3;
 /** Safe recorded tail for the current WebGPU implementation. The paper's
@@ -39,15 +24,12 @@ export function normalizeOctreeSection43BoundarySmoothing(value: number | undefi
   return Math.max(2, Math.min(16, Math.round(requested / 2) * 2));
 }
 
-export type OctreePCGPreconditionerKind = "aggregate" | "section43-hybrid";
-
 /**
  * The missing middle operation in the paper's Section 4.3 preconditioner.
  * Implementations own their sparse first-order operator, pyramid, and the
  * GhostValuePropagate/GhostValueAccumulate transfers described in Section 4.2.
  * They must encode an SPD linear correction from rhs to correction and report
- * any GPU-side failure through solverControl. No implementation is supplied by
- * the aggregate-PCG path, so the hybrid cannot be selected accidentally.
+ * any GPU-side failure through solverControl.
  */
 export interface OctreeFirstOrderSPDVCycle {
   readonly operatorOrder: 1;
@@ -75,21 +57,15 @@ export interface OctreeFirstOrderSPDVCycle {
 
 export const OCTREE_MGPCG_ERROR = Object.freeze({
   invalidRow: 1 << 0,
-  hierarchyOverflow: 1 << 1,
   nonFinite: 1 << 2,
   nonPositiveOperator: 1 << 3,
   nonConvergence: 1 << 4,
 } as const);
 
 export interface OctreeMGPCGPlan {
-  readonly preconditionerKind: OctreePCGPreconditionerKind;
   readonly rowCapacity: number;
-  readonly hierarchyLevelCount: number;
-  readonly hierarchyStride: number;
-  readonly baseAggregateSize: number;
   readonly dispatch: readonly [number, number, number];
   readonly vectorBytes: number;
-  readonly hierarchyBytes: number;
   readonly hybridBytes: number;
   readonly allocatedBytes: number;
 }
@@ -97,15 +73,11 @@ export interface OctreeMGPCGPlan {
 export interface OctreeMGPCGOptions {
   readonly dimensions: readonly [number, number, number];
   readonly rowCapacity: number;
-  readonly maximumLeafSize: number;
   readonly maximumIterations: number;
   /** Matching pre/post L2 sweeps in the Section 4.3 boundary band. A single
    * value deliberately preserves the symmetry required by ordinary PCG. */
   readonly boundarySmoothingIterations?: number;
   readonly relativeTolerance?: number;
-  readonly maximumHierarchyLevels?: number;
-  /** Hybrid requires an explicit SPD L1 V-cycle; aggregate is rollback only. */
-  readonly preconditionerKind?: OctreePCGPreconditionerKind;
 }
 
 export interface OctreeMGPCGSource {
@@ -115,7 +87,7 @@ export interface OctreeMGPCGSource {
   readonly leafEntries: GPUBuffer;
   /** Compact publication whose first u32 is the live row count. */
   readonly rowCount: GPUBuffer;
-  readonly firstOrderVCycle?: OctreeFirstOrderSPDVCycle;
+  readonly firstOrderVCycle: OctreeFirstOrderSPDVCycle;
 }
 
 function positiveInteger(value: number, label: string): number {
@@ -123,34 +95,18 @@ function positiveInteger(value: number, label: string): number {
   return value;
 }
 
-export function planOctreeMGPCG(options: Pick<OctreeMGPCGOptions,
-  "dimensions" | "rowCapacity" | "maximumLeafSize" | "maximumHierarchyLevels" | "preconditionerKind">): OctreeMGPCGPlan {
+export function planOctreeMGPCG(options: Pick<OctreeMGPCGOptions, "dimensions" | "rowCapacity">): OctreeMGPCGPlan {
   const rowCapacity = positiveInteger(options.rowCapacity, "MGPCG row capacity");
-  const [nx, ny, nz] = options.dimensions.map((value) => positiveInteger(value, "MGPCG dimension")) as [number, number, number];
-  const maximumLeafSize = positiveInteger(options.maximumLeafSize, "MGPCG maximum leaf size");
-  const baseAggregateSize = Math.min(1 << 30, maximumLeafSize * 2);
-  const width = Math.max(nx, ny, nz);
-  const requiredLevels = Math.max(1, Math.ceil(Math.log2(Math.max(1, width / baseAggregateSize))) + 1);
-  const hierarchyLevelCount = Math.min(Math.max(1, options.maximumHierarchyLevels ?? 12), requiredLevels);
-  // One slot per possible row is sufficient because every aggregate owns at
-  // least one row.  Level-zero starts above the maximum leaf width, keeping
-  // the hash comfortably below full occupancy in ordinary graded trees.
-  const hierarchyStride = rowCapacity;
+  options.dimensions.forEach((value) => positiveInteger(value, "MGPCG dimension"));
   const blocks = Math.ceil(rowCapacity / 64);
   const dispatchX = Math.min(65_535, Math.max(1, blocks));
   const dispatchY = Math.max(1, Math.ceil(blocks / dispatchX));
   const vectorBytes = rowCapacity * 4;
-  const preconditionerKind = options.preconditionerKind ?? "aggregate";
-  // maps, hash keys, aggregate diagonals, aggregate RHS, additive correction.
-  const hierarchyBytes = preconditionerKind === "aggregate"
-    ? hierarchyLevelCount * hierarchyStride * 5 * 4 : 0;
   // solution ping/pong, first-order RHS/correction, and two u32 band masks.
-  const hybridBytes = preconditionerKind === "section43-hybrid" ? vectorBytes * 6 : 0;
+  const hybridBytes = vectorBytes * 6;
   return {
-    preconditionerKind, rowCapacity, hierarchyLevelCount, hierarchyStride,
-    baseAggregateSize, dispatch: [dispatchX, dispatchY, 1], vectorBytes,
-    hierarchyBytes, hybridBytes,
-    allocatedBytes: vectorBytes * 5 + hierarchyBytes + hybridBytes + 64 + 64,
+    rowCapacity, dispatch: [dispatchX, dispatchY, 1], vectorBytes, hybridBytes,
+    allocatedBytes: vectorBytes * 5 + hybridBytes + 64 + 64,
   };
 }
 
@@ -174,13 +130,12 @@ export class WebGPUOctreeMGPCG {
   private readonly preconditioned: GPUBuffer;
   private readonly direction: GPUBuffer;
   private readonly product: GPUBuffer;
-  private readonly hierarchy: GPUBuffer;
-  private readonly hybridA?: GPUBuffer;
-  private readonly hybridB?: GPUBuffer;
-  private readonly hybridRhs?: GPUBuffer;
-  private readonly hybridCorrection?: GPUBuffer;
-  private readonly hybridBandA?: GPUBuffer;
-  private readonly hybridBandB?: GPUBuffer;
+  private readonly hybridA: GPUBuffer;
+  private readonly hybridB: GPUBuffer;
+  private readonly hybridRhs: GPUBuffer;
+  private readonly hybridCorrection: GPUBuffer;
+  private readonly hybridBandA: GPUBuffer;
+  private readonly hybridBandB: GPUBuffer;
   private readonly stages: Readonly<Record<string, Stage>>;
   /** Immutable descriptors shared by every replay of a stage. */
   private readonly stageGroups = new Map<Stage, CachedStageGroup>();
@@ -192,14 +147,10 @@ export class WebGPUOctreeMGPCG {
   /** Fixed host-authored dispatch schedule size. GPU early-out does not remove
    * these commands, so retain the existing observable beside wall timing. */
   get encodedDispatchCount(): number {
-    const preconditionerPasses = this.plan.preconditionerKind === "section43-hybrid"
-      ? 4 + 2 * this.boundarySmoothingIterations
-        + (this.source.firstOrderVCycle!.encodedCorrectionDispatchCount
-        ?? this.source.firstOrderVCycle!.encodedCorrectionPassCount)
-      : 5;
-    const setupPasses = this.plan.preconditionerKind === "section43-hybrid"
-      ? 4 + (this.source.firstOrderVCycle!.encodedSetupDispatchCount ?? 3)
-      : 2;
+    const preconditionerPasses = 4 + 2 * this.boundarySmoothingIterations
+      + (this.source.firstOrderVCycle.encodedCorrectionDispatchCount
+      ?? this.source.firstOrderVCycle.encodedCorrectionPassCount);
+    const setupPasses = 4 + (this.source.firstOrderVCycle.encodedSetupDispatchCount ?? 3);
     return 3 + setupPasses + preconditionerPasses + 1
       + this.maximumIterations * (6 + preconditionerPasses) + 2;
   }
@@ -213,16 +164,12 @@ export class WebGPUOctreeMGPCG {
   constructor(device: GPUDevice, private readonly source: OctreeMGPCGSource, options: OctreeMGPCGOptions) {
     this.device = device;
     this.plan = planOctreeMGPCG(options);
-    if (this.plan.preconditionerKind === "section43-hybrid") {
-      const cycle = source.firstOrderVCycle;
-      if (!cycle || cycle.operatorOrder !== 1 || cycle.isSymmetricPositiveDefinite !== true) {
-        throw new Error("Section 4.3 hybrid PCG requires an explicit SPD first-order V-cycle");
-      }
+    const cycle = source.firstOrderVCycle;
+    if (!cycle || cycle.operatorOrder !== 1 || cycle.isSymmetricPositiveDefinite !== true) {
+      throw new Error("Section 4.3 hybrid PCG requires an explicit SPD first-order V-cycle");
     }
     const requestedIterations = Math.max(1, Math.min(1_000, Math.round(options.maximumIterations)));
-    this.maximumIterations = this.plan.preconditionerKind === "section43-hybrid"
-      ? Math.min(OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS, requestedIterations)
-      : requestedIterations;
+    this.maximumIterations = Math.min(OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS, requestedIterations);
     this.boundarySmoothingIterations = normalizeOctreeSection43BoundarySmoothing(
       options.boundarySmoothingIterations,
     );
@@ -234,22 +181,18 @@ export class WebGPUOctreeMGPCG {
     this.preconditioned = vector("Octree MGPCG preconditioned residual");
     this.direction = vector("Octree MGPCG direction");
     this.product = vector("Octree MGPCG matrix product");
-    this.hierarchy = device.createBuffer({ label: "Octree MGPCG sparse hierarchy", size: Math.max(4, this.plan.hierarchyBytes), usage: storage });
-    if (this.plan.preconditionerKind === "section43-hybrid") {
-      this.hybridA = vector("Octree Section 4.3 L2 smoother A");
-      this.hybridB = vector("Octree Section 4.3 L2 smoother B");
-      this.hybridRhs = vector("Octree Section 4.3 L1 residual");
-      this.hybridCorrection = vector("Octree Section 4.3 L1 correction");
-      this.hybridBandA = vector("Octree Section 4.3 boundary band A");
-      this.hybridBandB = vector("Octree Section 4.3 boundary band B");
-    }
+    this.hybridA = vector("Octree Section 4.3 L2 smoother A");
+    this.hybridB = vector("Octree Section 4.3 L2 smoother B");
+    this.hybridRhs = vector("Octree Section 4.3 L1 residual");
+    this.hybridCorrection = vector("Octree Section 4.3 L1 correction");
+    this.hybridBandA = vector("Octree Section 4.3 boundary band A");
+    this.hybridBandB = vector("Octree Section 4.3 boundary band B");
     this.control = device.createBuffer({ label: "Octree MGPCG solve control", size: 64, usage: storage });
     this.params = device.createBuffer({ label: "Octree MGPCG parameters", size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     const words = new Uint32Array(16); const floats = new Float32Array(words.buffer);
     words[0] = options.dimensions[0]; words[1] = options.dimensions[1]; words[2] = options.dimensions[2];
-    words[3] = this.plan.rowCapacity; words[4] = this.plan.hierarchyLevelCount;
-    words[5] = this.plan.hierarchyStride; words[6] = this.plan.baseAggregateSize; words[7] = this.plan.dispatch[0];
+    words[3] = this.plan.rowCapacity; words[7] = this.plan.dispatch[0];
     words[8] = this.maximumIterations;
     // This implementation clamps the relative tolerance to an f32-practical
     // floor. It is an engineering choice, not a tolerance specified by the
@@ -274,13 +217,6 @@ export class WebGPUOctreeMGPCG {
       initialize: pipeline("initializeMGPCG", [0, 1, 2, 3, 4, 5, 6, 7, 11, 12]),
       multiplyX: pipeline("multiplyX", [0, 1, 2, 3, 7, 11, 12]),
       residual: pipeline("formInitialResidual", [0, 1, 3, 5, 7, 11]),
-      hierarchyMap: pipeline("buildHierarchyMap", [0, 1, 3, 9, 11]),
-      hierarchyDiagonal: pipeline("buildHierarchyDiagonal", [0, 1, 2, 3, 9, 11]),
-      clearAggregatePreconditioner: pipeline("clearAggregatePreconditioner", [0, 9]),
-      preconditionFine: pipeline("preconditionFine", [0, 1, 3, 5, 6, 11]),
-      restrict: pipeline("restrictResidual", [0, 3, 5, 9, 11]),
-      coarse: pipeline("solveCoarseAggregates", [0, 9, 11]),
-      prolong: pipeline("prolongateCorrection", [0, 3, 6, 9, 11]),
       clearHybridPreconditioner: pipeline("clearHybridPreconditioner", [0, 13, 14, 15, 16]),
       classifyHybridBand: pipeline("classifyHybridBand", [0, 1, 2, 3, 11, 17]),
       dilateHybridBandAtoB: pipeline("dilateHybridBandAtoB", [0, 1, 2, 3, 11, 17, 18]),
@@ -308,9 +244,8 @@ export class WebGPUOctreeMGPCG {
       throw new RangeError("MGPCG pressure buffer capacity is too small");
     }
     encoder.clearBuffer(this.control);
-    encoder.clearBuffer(this.hierarchy);
     const buffers = [this.params, this.source.leafHeaders, this.source.leafEntries, this.source.rowCount,
-      pressureIn, this.residual, this.preconditioned, this.direction, this.product, this.hierarchy,
+      pressureIn, this.residual, this.preconditioned, this.direction, this.product, undefined,
       pressureOut, this.control, this.x,
       this.hybridA, this.hybridB, this.hybridRhs, this.hybridCorrection,
       this.hybridBandA, this.hybridBandB] as const;
@@ -321,15 +256,10 @@ export class WebGPUOctreeMGPCG {
     rows(this.stages.initialize);
     rows(this.stages.multiplyX);
     rows(this.stages.residual);
-    if (this.plan.preconditionerKind === "section43-hybrid") {
-      this.source.firstOrderVCycle!.encodeSetup(encoder, {
-        solverControl: this.control, rowCount: this.source.rowCount,
-      }, pass);
-      this.prepareHybridBand(pass, buffers);
-    } else {
-      rows(this.stages.hierarchyMap);
-      rows(this.stages.hierarchyDiagonal);
-    }
+    this.source.firstOrderVCycle.encodeSetup(encoder, {
+      solverControl: this.control, rowCount: this.source.rowCount,
+    }, pass);
+    this.prepareHybridBand(pass, buffers);
     this.applyPreconditioner(encoder, pass, buffers);
     single(this.stages.initialReduction);
     for (let iteration = 0; iteration < this.maximumIterations; iteration += 1) {
@@ -351,22 +281,10 @@ export class WebGPUOctreeMGPCG {
 
   private applyPreconditioner(encoder: GPUCommandEncoder, pass: GPUComputePassEncoder,
     buffers: readonly (GPUBuffer | undefined)[]): void {
-    if (this.plan.preconditionerKind === "section43-hybrid") {
-      this.applySection43HybridPreconditioner(encoder, pass, buffers);
-      return;
-    }
-    // Keep maps, keys, and aggregate diagonals; reset only the additive
-    // aggregate RHS/corrections for this PCG preconditioner application. This
-    // is not restriction/coarse solve/prolongation in a multigrid V-cycle.
-    this.run(pass, this.stages.clearAggregatePreconditioner, this.plan.dispatch, buffers);
-    this.run(pass, this.stages.preconditionFine, this.plan.dispatch, buffers);
-    this.run(pass, this.stages.restrict, this.plan.dispatch, buffers);
-    this.run(pass, this.stages.coarse, this.plan.dispatch, buffers);
-    this.run(pass, this.stages.prolong, this.plan.dispatch, buffers);
+    this.applySection43HybridPreconditioner(encoder, pass, buffers);
   }
 
   private prepareHybridBand(pass: GPUComputePassEncoder, buffers: readonly (GPUBuffer | undefined)[]): void {
-    this.requireHybridBuffers();
     this.run(pass, this.stages.classifyHybridBand, this.plan.dispatch, buffers);
     // Section 4.3 uses a band about three voxels wide. Three deterministic
     // compact-row graph dilations are the first sparse approximation; exact
@@ -380,7 +298,6 @@ export class WebGPUOctreeMGPCG {
     pass: GPUComputePassEncoder,
     buffers: readonly (GPUBuffer | undefined)[]): void {
     const cycle = this.source.firstOrderVCycle;
-    const { hybridRhs, hybridCorrection } = this.requireHybridBuffers();
     this.run(pass, this.stages.clearHybridPreconditioner, this.plan.dispatch, buffers);
 
     // p0=0; k=8 damped-Jacobi iterations of L2 p=q inside the fixed band.
@@ -391,8 +308,8 @@ export class WebGPUOctreeMGPCG {
     // k is even, so p1 is in A. Form r1=q-L2*p1 and apply the required SPD L1
     // V-cycle. The interface owns its sparse first-order operator/transfers.
     this.run(pass, this.stages.formHybridL1Residual, this.plan.dispatch, buffers);
-    cycle!.encodeCorrection(encoder, {
-      rhs: hybridRhs, correction: hybridCorrection, solverControl: this.control,
+    cycle.encodeCorrection(encoder, {
+      rhs: this.hybridRhs, correction: this.hybridCorrection, solverControl: this.control,
       rowCount: this.source.rowCount,
     }, pass);
     // p2=p1+delta starts in B, followed by the matching k post-iterations.
@@ -402,19 +319,6 @@ export class WebGPUOctreeMGPCG {
         this.plan.dispatch, buffers);
     }
     this.run(pass, this.stages.publishHybridPreconditioner, this.plan.dispatch, buffers);
-  }
-
-  private requireHybridBuffers(): {
-    hybridA: GPUBuffer; hybridB: GPUBuffer; hybridRhs: GPUBuffer;
-    hybridCorrection: GPUBuffer; hybridBandA: GPUBuffer; hybridBandB: GPUBuffer;
-  } {
-    if (!this.hybridA || !this.hybridB || !this.hybridRhs || !this.hybridCorrection
-      || !this.hybridBandA || !this.hybridBandB) {
-      throw new Error("Section 4.3 hybrid buffers are unavailable");
-    }
-    return { hybridA: this.hybridA, hybridB: this.hybridB, hybridRhs: this.hybridRhs,
-      hybridCorrection: this.hybridCorrection, hybridBandA: this.hybridBandA,
-      hybridBandB: this.hybridBandB };
   }
 
   private run(pass: GPUComputePassEncoder, stage: Stage, dispatch: readonly [number, number, number], buffers: readonly (GPUBuffer | undefined)[]): void {
@@ -438,9 +342,9 @@ export class WebGPUOctreeMGPCG {
     if (this.destroyed) return; this.destroyed = true;
     this.stageGroups.clear();
     this.x.destroy(); this.residual.destroy(); this.preconditioned.destroy(); this.direction.destroy();
-    this.product.destroy(); this.hierarchy.destroy(); this.control.destroy(); this.params.destroy();
-    this.hybridA?.destroy(); this.hybridB?.destroy(); this.hybridRhs?.destroy();
-    this.hybridCorrection?.destroy(); this.hybridBandA?.destroy(); this.hybridBandB?.destroy();
+    this.product.destroy(); this.control.destroy(); this.params.destroy();
+    this.hybridA.destroy(); this.hybridB.destroy(); this.hybridRhs.destroy();
+    this.hybridCorrection.destroy(); this.hybridBandA.destroy(); this.hybridBandB.destroy();
   }
 }
 
@@ -457,7 +361,6 @@ struct LeafEntry { row:u32,coefficient:f32 }
 @group(0) @binding(6) var<storage,read_write> preconditioned:array<f32>;
 @group(0) @binding(7) var<storage,read_write> direction:array<f32>;
 @group(0) @binding(8) var<storage,read_write> product:array<f32>;
-@group(0) @binding(9) var<storage,read_write> hierarchy:array<atomic<u32>>;
 @group(0) @binding(10) var<storage,read_write> pressureOut:array<f32>;
 @group(0) @binding(11) var<storage,read_write> control:array<atomic<u32>>;
 @group(0) @binding(12) var<storage,read_write> pressure:array<f32>;
@@ -468,17 +371,13 @@ struct LeafEntry { row:u32,coefficient:f32 }
 @group(0) @binding(17) var<storage,read_write> hybridBandA:array<u32>;
 @group(0) @binding(18) var<storage,read_write> hybridBandB:array<u32>;
 
-const INVALID_ROW:u32=0xffffffffu;const INVALID_ROW_ERROR:u32=1u;const HASH_OVERFLOW:u32=2u;
+const INVALID_ROW:u32=0xffffffffu;const INVALID_ROW_ERROR:u32=1u;
 const NONFINITE:u32=4u;const NONPOSITIVE:u32=8u;const NONCONVERGENCE:u32=16u;
 fn finite(value:f32)->bool{return value==value&&abs(value)<=3.402823e38;}
 fn liveRows()->u32{return min(select(0u,counts[0],arrayLength(&counts)>0u),params.dimsCapacity.w);}
 fn rowIndex(gid:vec3u)->u32{return gid.x+gid.y*params.hierarchy.w*64u;}
-fn levels()->u32{return params.hierarchy.x;}fn stride()->u32{return params.hierarchy.y;}
 fn tolerance()->f32{return bitcast<f32>(params.solve.y);}fn epsilon()->f32{return bitcast<f32>(params.solve.z);}
 fn hybridOmega()->f32{return bitcast<f32>(params.padding.y);}
-fn mapBase()->u32{return 0u;}fn keyBase()->u32{return levels()*stride();}
-fn diagonalBase()->u32{return 2u*levels()*stride();}fn rhsBase()->u32{return 3u*levels()*stride();}
-fn solutionBase()->u32{return 4u*levels()*stride();}fn offset(base:u32,level:u32,slot:u32)->u32{return base+level*stride()+slot;}
 fn failed()->bool{return atomicLoad(&control[0])!=0u;}fn stopped()->bool{return failed()||atomicLoad(&control[1])!=0u;}
 fn report(flag:u32){atomicOr(&control[0],flag);}
 // Words 10-12 are observational diagnostics only: the first failing stage,
@@ -493,9 +392,6 @@ fn reportAt(flag:u32,stage:u32,row:u32,value:f32){
     if(claim.old_value!=0u){return;}
   }
 }
-fn atomicAddFloat(at:u32,value:f32){if(!finite(value)){report(NONFINITE);return;}var old=atomicLoad(&hierarchy[at]);
-  loop{let current=bitcast<f32>(old);if(!finite(current)){report(NONFINITE);return;}
-    let exchange=atomicCompareExchangeWeak(&hierarchy[at],old,bitcast<u32>(current+value));if(exchange.exchanged){return;}old=exchange.old_value;}}
 fn fieldValue(row:u32,useDirection:bool)->f32{return select(pressure[row],direction[row],useDirection);}
 fn applyA(row:u32,useDirection:bool)->f32{let h=headers[row];if(!finite(h.diagonal)||h.diagonal<=0.0){return 0.0;}
   var value=h.diagonal*fieldValue(row,useDirection);for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=liveRows()||!finite(e.coefficient)){report(INVALID_ROW_ERROR);continue;}value-=e.coefficient*fieldValue(e.row,useDirection);}return value;}
@@ -506,46 +402,11 @@ fn applyHybridL2(row:u32,useB:bool)->f32{let h=headers[row];if(!finite(h.diagona
 fn smoothHybridValue(row:u32,useB:bool)->f32{let current=hybridValue(row,useB);if(hybridBandB[row]==0u){return current;}
   let diagonal=headers[row].diagonal;let next=current+hybridOmega()*(residual[row]-applyHybridL2(row,useB))/diagonal;
   if(!finite(next)){reportAt(NONFINITE,3u,row,next);return current;}return next;}
-fn cellCoord(cell:u32)->vec3u{let nx=params.dimsCapacity.x;let ny=params.dimsCapacity.y;return vec3u(cell%nx,(cell/nx)%ny,cell/(nx*ny));}
-fn aggregateKey(row:u32,level:u32)->u32{let block=params.hierarchy.z<<level;let q=cellCoord(headers[row].cell)/block;
-  let d=(params.dimsCapacity.xyz+vec3u(block-1u))/block;return q.x+d.x*(q.y+d.y*q.z);}
-fn hashKey(key:u32)->u32{var h=key*0x9e3779b1u;h=(h^(h>>16u))*0x7feb352du;return (h^(h>>15u))%stride();}
-fn findAggregate(row:u32,level:u32)->u32{let key=aggregateKey(row,level)+1u;var slot=hashKey(key);
-  for(var probe=0u;probe<64u;probe+=1u){let at=offset(keyBase(),level,slot);var observed=atomicLoad(&hierarchy[at]);
-    for(var retry=0u;retry<16u;retry+=1u){if(observed==key){return slot;}if(observed!=0u){break;}let claim=atomicCompareExchangeWeak(&hierarchy[at],0u,key);
-      if(claim.exchanged){return slot;}observed=claim.old_value;if(retry==15u&&observed==0u){report(HASH_OVERFLOW);return INVALID_ROW;}}
-    slot=(slot+1u)%stride();}report(HASH_OVERFLOW);return INVALID_ROW;}
-
 @compute @workgroup_size(64) fn initializeMGPCG(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()){return;}
   let h=headers[row];if(h.entryStart+h.entryCount>arrayLength(&entries)||!finite(h.diagonal)||h.diagonal<=0.0||!finite(h.rhs)){report(INVALID_ROW_ERROR);return;}
   var seed=pressureSeed[row];if(!finite(seed)){reportAt(NONFINITE,1u,row,seed);seed=0.0;}pressure[row]=seed;residual[row]=0.0;preconditioned[row]=0.0;direction[row]=0.0;}
 @compute @workgroup_size(64) fn multiplyX(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!failed()){direction[row]=applyA(row,false);}}
 @compute @workgroup_size(64) fn formInitialResidual(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!failed()){let r=-headers[row].rhs-direction[row];if(!finite(r)){reportAt(NONFINITE,2u,row,r);}else{residual[row]=r;}}}
-
-@compute @workgroup_size(64) fn buildHierarchyMap(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||failed()){return;}
-  for(var level=0u;level<levels();level+=1u){let slot=findAggregate(row,level);atomicStore(&hierarchy[offset(mapBase(),level,row)],slot);}}
-@compute @workgroup_size(64) fn buildHierarchyDiagonal(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||failed()){return;}let h=headers[row];
-  for(var level=0u;level<levels();level+=1u){let slot=atomicLoad(&hierarchy[offset(mapBase(),level,row)]);if(slot==INVALID_ROW){continue;}var value=h.diagonal;
-    for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=liveRows()){report(INVALID_ROW_ERROR);continue;}
-      if(atomicLoad(&hierarchy[offset(mapBase(),level,e.row)])==slot){value-=e.coefficient;}}
-    atomicAddFloat(offset(diagonalBase(),level,slot),value);}}
-
-@compute @workgroup_size(64) fn clearAggregatePreconditioner(@builtin(global_invocation_id) gid:vec3u){let slot=rowIndex(gid);if(slot>=stride()){return;}
-  for(var level=0u;level<levels();level+=1u){atomicStore(&hierarchy[offset(rhsBase(),level,slot)],0u);
-    atomicStore(&hierarchy[offset(solutionBase(),level,slot)],0u);}}
-
-@compute @workgroup_size(64) fn preconditionFine(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
-  let diagonal=headers[row].diagonal;preconditioned[row]=select(0.0,residual[row]/diagonal,diagonal>epsilon());}
-@compute @workgroup_size(64) fn restrictResidual(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
-  for(var level=0u;level<levels();level+=1u){let slot=atomicLoad(&hierarchy[offset(mapBase(),level,row)]);if(slot!=INVALID_ROW){atomicAddFloat(offset(rhsBase(),level,slot),residual[row]);}}}
-@compute @workgroup_size(64) fn solveCoarseAggregates(@builtin(global_invocation_id) gid:vec3u){let slot=rowIndex(gid);if(slot>=stride()||stopped()){return;}
-  for(var level=0u;level<levels();level+=1u){let key=atomicLoad(&hierarchy[offset(keyBase(),level,slot)]);if(key==0u){continue;}
-    let diagonal=bitcast<f32>(atomicLoad(&hierarchy[offset(diagonalBase(),level,slot)]));let rhs=bitcast<f32>(atomicLoad(&hierarchy[offset(rhsBase(),level,slot)]));
-    let correction=select(0.0,rhs/diagonal,finite(diagonal)&&diagonal>epsilon());atomicStore(&hierarchy[offset(solutionBase(),level,slot)],bitcast<u32>(correction));}}
-@compute @workgroup_size(64) fn prolongateCorrection(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}var value=preconditioned[row];
-  let scale=1.0/f32(levels()+1u);value*=scale;for(var level=0u;level<levels();level+=1u){let slot=atomicLoad(&hierarchy[offset(mapBase(),level,row)]);
-    if(slot!=INVALID_ROW){value+=scale*bitcast<f32>(atomicLoad(&hierarchy[offset(solutionBase(),level,slot)]));}}
-  if(!finite(value)){reportAt(NONFINITE,12u,row,value);}else{preconditioned[row]=value;}}
 
 @compute @workgroup_size(64) fn clearHybridPreconditioner(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=params.dimsCapacity.w){return;}
   hybridA[row]=0.0;hybridB[row]=0.0;hybridRhs[row]=0.0;hybridCorrection[row]=0.0;}

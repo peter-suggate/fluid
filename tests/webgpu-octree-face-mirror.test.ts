@@ -9,7 +9,6 @@ import {
   WebGPUOctreeFaceMirror,
 } from "../lib/webgpu-octree-face-mirror";
 import { adaptiveFaceRhsIsSupported, WebGPUOctreeProjection } from "../lib/webgpu-octree";
-import { WebGPUUniformEulerianSolver } from "../lib/webgpu-uniform-eulerian";
 
 test("octree face mirror has a compact bounded ABI", () => {
   const plan = planOctreeFaceMirror(1024);
@@ -35,14 +34,8 @@ test("adaptive face RHS authority fails closed around unsupported boundary opera
   assert.equal(adaptiveFaceRhsIsSupported(true, false, 0, true), false);
   const construction = WebGPUOctreeProjection.toString();
   assert.match(construction, /const faceTransportEnabled\s*=\s*faceTransportRequested\s*&&\s*this\.faceRhsAuthority/);
-  assert.match(construction, /options\.faceVelocityMirror\s*\|\|\s*options\.faceVelocityRhs\s*\|\|\s*faceTransportEnabled/,
+  assert.match(construction, /if\(faceTransportEnabled\)/,
     "a default transport request must not allocate the compact face store when authority is unsupported");
-});
-
-test("octree solver construction forwards adaptive face migration flags", () => {
-  const construction = WebGPUUniformEulerianSolver.toString();
-  assert.match(construction, /faceVelocityMirror:\s*options\.octree\.faceVelocityMirror/);
-  assert.match(construction, /faceVelocityRhs:\s*options\.octree\.faceVelocityRhs/);
 });
 
 test("GPU face store deterministically publishes canonical orientation and signed incidence", () => {

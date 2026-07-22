@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  OCTREE_MGPCG_PRECONDITIONER_KIND,
   OCTREE_SECTION43_DEFAULT_PCG_ITERATIONS,
   OCTREE_SECTION43_BOUNDARY_BAND_LAYERS,
   OCTREE_SECTION43_MAXIMUM_PCG_ITERATIONS,
@@ -15,28 +14,23 @@ import {
 import { octreePowerOperatorShader } from "../lib/webgpu-octree-power-operator";
 import { WebGPUOctreeProjection } from "../lib/webgpu-octree";
 
-test("MGPCG allocation is bounded by compact rows and sparse levels", () => {
-  const small = planOctreeMGPCG({ dimensions: [64, 48, 32], rowCapacity: 10_000, maximumLeafSize: 16 });
-  const wide = planOctreeMGPCG({ dimensions: [1024, 48, 32], rowCapacity: 10_000, maximumLeafSize: 16 });
+test("Section 4.3 MGPCG allocation is bounded by compact rows", () => {
+  const small = planOctreeMGPCG({ dimensions: [64, 48, 32], rowCapacity: 10_000 });
+  const wide = planOctreeMGPCG({ dimensions: [1024, 48, 32], rowCapacity: 10_000 });
   assert.equal(small.rowCapacity, wide.rowCapacity);
-  assert.ok(wide.hierarchyLevelCount > small.hierarchyLevelCount);
-  assert.equal(wide.hierarchyBytes, wide.hierarchyLevelCount * wide.rowCapacity * 5 * 4);
+  assert.equal(wide.allocatedBytes, small.allocatedBytes);
+  assert.equal(wide.hybridBytes, wide.vectorBytes * 6);
   assert.ok(!("cellCount" in wide), "planner must not expose a finest-domain allocation");
+  assert.ok(!("hierarchyBytes" in wide), "the deleted aggregate hierarchy must not be allocated");
 });
 
-test("Section 4.3 hybrid is opt-in, separately sized, and requires an explicit SPD L1 V-cycle", () => {
-  const aggregate = planOctreeMGPCG({ dimensions: [64, 48, 32], rowCapacity: 10_000, maximumLeafSize: 16 });
-  const hybrid = planOctreeMGPCG({ dimensions: [64, 48, 32], rowCapacity: 10_000, maximumLeafSize: 16,
-    preconditionerKind: "section43-hybrid" });
-  assert.equal(aggregate.preconditionerKind, "aggregate");
-  assert.equal(aggregate.hybridBytes, 0);
-  assert.equal(hybrid.preconditionerKind, "section43-hybrid");
-  assert.equal(hybrid.hierarchyBytes, 0, "aggregate hierarchy is not the hybrid's L1 V-cycle");
+test("Section 4.3 hybrid is the only preconditioner and requires an explicit SPD L1 V-cycle", () => {
+  const hybrid = planOctreeMGPCG({ dimensions: [64, 48, 32], rowCapacity: 10_000 });
   assert.equal(hybrid.hybridBytes, hybrid.vectorBytes * 6);
   assert.throws(() => new WebGPUOctreeMGPCG({} as GPUDevice, {
     leafHeaders: {} as GPUBuffer, leafEntries: {} as GPUBuffer, rowCount: {} as GPUBuffer,
-  }, { dimensions: [64, 48, 32], rowCapacity: 10_000, maximumLeafSize: 16,
-    maximumIterations: 16, preconditionerKind: "section43-hybrid" }),
+    firstOrderVCycle: undefined as never,
+  }, { dimensions: [64, 48, 32], rowCapacity: 10_000, maximumIterations: 16 }),
   /requires an explicit SPD first-order V-cycle/);
 });
 
@@ -101,8 +95,8 @@ test("Section 4.3 tuning keeps equal pre/post sweeps, exact dispatch accounting,
   };
   const maximumIterations = 2;
   const solver = new WebGPUOctreeMGPCG(device, source, {
-    dimensions: [16, 16, 16], rowCapacity: 128, maximumLeafSize: 4, maximumIterations,
-    preconditionerKind: "section43-hybrid", boundarySmoothingIterations: 7,
+    dimensions: [16, 16, 16], rowCapacity: 128, maximumIterations,
+    boundarySmoothingIterations: 7,
   });
   const encoder = {
     clearBuffer() {},
@@ -148,17 +142,15 @@ test("Section 4.3 tuning keeps equal pre/post sweeps, exact dispatch accounting,
 
 test("authoritative power projection constructs and selects the Section 4.3 L1 V-cycle", () => {
   const source = WebGPUOctreeProjection.toString();
-  assert.match(source, /new WebGPUOctreeFirstOrderVCycle/);
-  assert.match(source, /preconditionerKind:\s*this\.powerPolicy\.authoritative\s*\?\s*"section43-hybrid"/);
+  assert.match(source, /new WebGPUOctreeSPGridVCycle/);
+  assert.doesNotMatch(source, /WebGPUOctreeFirstOrderVCycle|aggregate-galerkin/);
   assert.match(source, /firstOrderVCycle\?\.encodeCapture\(encoder\)/,
     "L1 rows must be captured before power publication replaces the shared CSR");
 });
 
-test("matrix-free aggregate PCG uses additive transfers and GPU-only convergence", () => {
-  assert.equal(OCTREE_MGPCG_PRECONDITIONER_KIND, "additive-geometric-aggregate-diagonal");
+test("matrix-free Section 4.3 PCG uses GPU-only convergence without aggregate rollback kernels", () => {
   assert.match(octreeMGPCGShader, /value-=e\.coefficient\*fieldValue/);
-  assert.match(octreeMGPCGShader, /restrictResidual/);
-  assert.match(octreeMGPCGShader, /prolongateCorrection/);
+  assert.doesNotMatch(octreeMGPCGShader, /restrictResidual|prolongateCorrection|buildHierarchyMap/);
   assert.match(octreeMGPCGShader, /residual\[row\]\*preconditioned\[row\]/);
   assert.match(octreeMGPCGShader, /atomicStore\(&control\[1\],1u\)/);
   assert.match(octreeMGPCGShader, /fn reduceUpdatedResidual/);
@@ -171,16 +163,7 @@ test("matrix-free aggregate PCG uses additive transfers and GPU-only convergence
   assert.equal(octreeMGPCGShader.match(/atomicAdd\(&control\[2\],1u\)/g)?.length, 1,
     "an immediately converged pressure update must still count as one iteration");
   assert.doesNotMatch(WebGPUOctreeProjection.prototype.encode.toString(), /mapAsync|getMappedRange/);
-  assert.match(octreeMGPCGShader,
-    /var observed=atomicLoad\(&hierarchy\[at\]\);[\s\S]*retry<16u[\s\S]*observed=claim\.old_value/,
-    "the rollback aggregate hierarchy must retry a spurious weak-CAS failure at the same slot");
-});
-
-test("aggregate preconditioner is not mislabeled as the paper Section 4.3 hybrid V-cycle", () => {
-  const source = WebGPUOctreeProjection.toString();
-  assert.doesNotMatch(source, /matrix-free MGPCG/);
-  assert.doesNotMatch(source, /"multigrid"/);
-  assert.doesNotMatch(octreeMGPCGShader, /GhostValuePropagate|GhostValueAccumulate/);
+  assert.doesNotMatch(octreeMGPCGShader, /hierarchy:array|aggregateKey|solveCoarseAggregates/);
 });
 
 test("power projection publication is gated by MGPCG success", () => {
@@ -205,7 +188,13 @@ test("fixed PCG replay retains immutable bind groups instead of rebuilding descr
   } as unknown as GPUDevice;
   const solver = new WebGPUOctreeMGPCG(device, {
     leafHeaders: buffer(48 * 256), leafEntries: buffer(8 * 1024), rowCount: buffer(64),
-  }, { dimensions: [16, 16, 16], rowCapacity: 256, maximumLeafSize: 4, maximumIterations: 128 });
+    firstOrderVCycle: {
+      operatorOrder: 1, isSymmetricPositiveDefinite: true, allocatedBytes: 0,
+      encodedCorrectionPassCount: 1, encodedSetupDispatchCount: 1,
+      encodeSetup(_encoder, _input, pass) { pass?.dispatchWorkgroups(1); },
+      encodeCorrection(_encoder, _input, pass) { pass?.dispatchWorkgroups(1); },
+    },
+  }, { dimensions: [16, 16, 16], rowCapacity: 256, maximumIterations: 128 });
   const encoder = {
     clearBuffer() {},
     beginComputePass: () => { passes += 1; return { setPipeline() {}, setBindGroup() {},

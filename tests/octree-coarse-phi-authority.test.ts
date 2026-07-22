@@ -63,8 +63,8 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
     /Topology renewal runs while the persistent frontier hash is being[\s\S]*return max\(params\.cellRelax\.x/,
     "interface classification must not read the frontier hash while appendFrontier mutates it");
   assert.match(octreeProjectionShader,
-    /let fine=fineLeafSummary\(origin,owner\.size\);[\s\S]*if\(fine\.found&&fine\.complete\)/,
-    "recurring frontier phase selection consumes any complete current global-fine summary");
+    /let fine=fineLeafSummary\(origin,owner\.size\);[\s\S]*if\(fine\.found\)\{[\s\S]*fine\.centerValid[\s\S]*else if\(fine\.complete\)/,
+    "recurring frontier phase selection consumes a current centre stencil independently of complete sparse coverage");
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
   assert.match(rebuild,
     /setBindGroup\(0,\s*active\s*\?\s*this\.fineSummarySizingGroup\s*:\s*this\.groups\.ab\)[\s\S]*filterFrontierPipeline[\s\S]*appendFrontierActivePipeline/,
@@ -77,6 +77,9 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
   assert.match(fineLevelSetSummaryWGSL,
     /atomicAddFloat\(&directory\[base\+7u\],centerPhi\)/,
     "the former authority word now accumulates exact fine cell-centre interpolation contributions");
+  assert.match(fineLevelSetSummaryWGSL,
+    /centreMask\|=1u<<\(delta\.x\+2u\*delta\.y\+4u\*delta\.z\)[\s\S]*centerMasks\[l\.x\]\|=centerMasks\[l\.x\+stride\][\s\S]*centerMasks\[0\]<<CENTER_SHIFT/,
+    "all eight centre corners remain attributable across factor-4 and factor-8 brick hierarchy merges");
   assert.match(octreeProjectionShader, /if \(!fineSummary\.complete\)[\s\S]*legacyPhi/,
     "a missing exact coarse/fine summary remains inconclusive and executes the rollback scan");
   assert.match(octreeProjectionShader, /if\(coarse\.authority\)\{return coarseClassificationPhi\(coarse\);\}[\s\S]*return legacyPhi\(p\);/);

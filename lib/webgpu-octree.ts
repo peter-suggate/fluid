@@ -65,7 +65,6 @@ import {
   normalizeOctreeSection43IterationCap,
   type OctreeFirstOrderSPDVCycle,
 } from "./webgpu-octree-mgpcg";
-import { WebGPUOctreeFirstOrderVCycle } from "./webgpu-octree-first-order-vcycle";
 import { WebGPUOctreeSPGridVCycle } from "./webgpu-octree-spgrid-vcycle";
 import {
   OCTREE_FACE_BAND_ENCODE_PHASES,
@@ -136,18 +135,12 @@ const octreePipelineCache = new WeakMap<GPUDevice, Map<string, OctreePipelineCac
 
 export interface OctreeProjectionOptions {
   pressureIterations: number;
-  /** First-order M1 hierarchy used inside the authoritative Section 4.3 hybrid. */
-  powerMultigridHierarchy?: "aggregate-galerkin" | "paper-pyramid";
   /** Section 4.3 iterations recorded before GPU early-out. Kept separate from
    * compatibility-solver effort so the UI control always means what it says. */
   powerPcgIterationCap?: number;
   /** Matching pre/post L2 boundary-band sweeps. Kept as one control so the
    * Section 4.3 preconditioner cannot be made asymmetric from the UI. */
   powerBoundarySmoothingIterations?: number;
-  /** Default-off migration mirror for the canonical adaptive velocity-face ABI. */
-  faceVelocityMirror?: boolean;
-  /** Default-off A/B: replace assembled divergence RHS with the face mirror. */
-  faceVelocityRhs?: boolean;
   /** Method-default U3: advect and force canonical face velocities compactly. */
   faceVelocityTransport?: boolean;
   /** Solve for pressure relative to a fixed tank-fill rest-surface reference. */
@@ -185,9 +178,7 @@ export interface OctreeProjectionOptions {
   extrapolationSweeps?: number;
   /**
    * Leaf pressure solve strategy. "auto" selects the Section 4.3 hybrid PCG
-   * for admitted power authority and Chebyshev otherwise. An explicit
-   * non-authoritative "mgpcg" request retains the aggregate preconditioner as
-   * a rollback path. Both consume the same compact rows.
+   * for admitted power authority and Chebyshev otherwise.
    * the liquid leaf origins, assembles each row's diagonal / flux / merged
    * neighbor table once per solve, then applies a Chebyshev-accelerated
    * polynomial in row-parallel indirect dispatches. "compact" retains the
@@ -778,7 +769,7 @@ type OctreeFirstOrderVCycleImplementation = OctreeFirstOrderSPDVCycle & {
  * leaf origins and resolves those rows through the compact frontier hash.
  */
 export class WebGPUOctreeProjection {
-  readonly preconditioner: "jacobi" | "additive-aggregate" | "section43-hybrid";
+  readonly preconditioner: "jacobi" | "section43-hybrid";
   readonly canEncodeInlineRebuild = true;
   readonly info: {
     leafCount: number;
@@ -989,7 +980,6 @@ export class WebGPUOctreeProjection {
   private readonly surfaceDetailStrength: number;
   private readonly iterations: number;
   private readonly powerPcgIterationCap: number;
-  private readonly powerMultigridHierarchy: "aggregate-galerkin" | "paper-pyramid";
   private readonly extrapolationSweeps: number;
   private readonly sparseExtrapolationRequested: boolean;
   private readonly leafSolver: "dense" | "compact" | "chebyshev" | "mgpcg" | "megakernel";
@@ -1059,8 +1049,6 @@ export class WebGPUOctreeProjection {
     this.powerPcgIterationCap = normalizeOctreeSection43IterationCap(
       options.powerPcgIterationCap ?? OCTREE_SECTION43_DEFAULT_PCG_ITERATIONS,
     );
-    this.powerMultigridHierarchy = options.powerMultigridHierarchy === "paper-pyramid"
-      ? "paper-pyramid" : "aggregate-galerkin";
     const requestedExtrapolationSweeps = Math.max(0, Math.min(8, Math.round(options.extrapolationSweeps ?? 4)));
     // Kept opt-in until the widened-ocean A/B demonstrates that worklist
     // decoding beats the dense 4^3 dispatch for this short stencil ladder.
@@ -1091,7 +1079,7 @@ export class WebGPUOctreeProjection {
       || options.powerDiagramProjection === "authoritative";
     const adaptiveSolidFaces = scene.rigidBodies.length > 0 && !sceneHasTerrain(scene);
     this.faceRhsAuthority = adaptiveFaceRhsIsSupported(
-      options.faceVelocityRhs === true || faceTransportRequested,
+      faceTransportRequested,
       sceneHasTerrain(scene),
       scene.rigidBodies.length,
       this.hydrostaticSplit,
@@ -1147,10 +1135,8 @@ export class WebGPUOctreeProjection {
       terrainEmbeddedBoundaryAvailable && faceTransportEnabled);
     this.leafSolver = requested === "auto"
       ? (this.powerPolicy.authoritative ? "mgpcg" : "chebyshev")
-      : requested;
-    this.preconditioner = this.leafSolver === "mgpcg"
-      ? (this.powerPolicy.authoritative ? "section43-hybrid" : "additive-aggregate")
-      : "jacobi";
+      : requested === "mgpcg" && !this.powerPolicy.authoritative ? "chebyshev" : requested;
+    this.preconditioner = this.leafSolver === "mgpcg" ? "section43-hybrid" : "jacobi";
     this.rowIndexedPressure = this.leafSolver !== "dense";
     this.encodedSolvePasses = Math.ceil(this.iterations / 4);
     this.pressureCapacity = planOctreePressureCapacity(
@@ -1382,14 +1368,10 @@ export class WebGPUOctreeProjection {
     // origin-to-row hash. Compatibility solvers retain the dense direct map.
     this.leafFrontier = device.createBuffer({ label: "Persistent octree leaf frontier", size: this.frontierAllocation.allocatedBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     if (this.leafSolver === "mgpcg") {
-      if (this.powerPolicy.authoritative) {
-        const source = { leafHeaders: this.leafHeaders, leafEntries: this.leafEntries };
-        const cycleOptions = { dimensions: [dims.nx, dims.ny, dims.nz] as const,
-          rowCapacity: this.pressureCapacity.rowCapacity, finestCellWidth: cell.x };
-        this.firstOrderVCycle = this.powerMultigridHierarchy === "paper-pyramid"
-          ? new WebGPUOctreeSPGridVCycle(device, source, cycleOptions)
-          : new WebGPUOctreeFirstOrderVCycle(device, source, cycleOptions);
-      }
+      const source = { leafHeaders: this.leafHeaders, leafEntries: this.leafEntries };
+      const cycleOptions = { dimensions: [dims.nx, dims.ny, dims.nz] as const,
+        rowCapacity: this.pressureCapacity.rowCapacity, finestCellWidth: cell.x };
+      this.firstOrderVCycle = new WebGPUOctreeSPGridVCycle(device, source, cycleOptions);
       this.mgpcg = new WebGPUOctreeMGPCG(device, {
         leafHeaders: this.leafHeaders,
         leafEntries: this.leafEntries,
@@ -1398,12 +1380,9 @@ export class WebGPUOctreeProjection {
       }, {
         dimensions: [dims.nx, dims.ny, dims.nz],
         rowCapacity: this.pressureCapacity.rowCapacity,
-        maximumLeafSize: this.maxLeafSize,
-        maximumIterations: this.powerPolicy.authoritative
-          ? this.powerPcgIterationCap : this.iterations,
+        maximumIterations: this.powerPcgIterationCap,
         boundarySmoothingIterations: options.powerBoundarySmoothingIterations,
         relativeTolerance: scene.numerics.pressureRelativeTolerance,
-        preconditionerKind: this.powerPolicy.authoritative ? "section43-hybrid" : "aggregate",
       });
     }
     // Words 8..15 hold one-workgroup-per-tile coarse topology dispatches: the
@@ -1534,7 +1513,7 @@ export class WebGPUOctreeProjection {
     };
     // An unsupported authority request still builds the observational mirror;
     // only the RHS replacement is suppressed.
-    if (options.faceVelocityMirror || options.faceVelocityRhs || faceTransportEnabled) {
+    if (faceTransportEnabled) {
       this.faceMirror = new WebGPUOctreeFaceMirror(device, {
         velocity: resources.velocityIn,
         levelSet: this.levelSetTexture,
@@ -2161,11 +2140,15 @@ export class WebGPUOctreeProjection {
         this.device, velocityChunkCapacity, this.powerTopology.source, this.powerFaces.source,
       );
       if (this.faceMirror) {
-        // Phi relaxation is bounded by the physical interface band. CPT graph
-        // depth is a separate conservative domain bound which pointer jumping
-        // contracts logarithmically; it must never inflate the Jacobi loop.
-        const bandPhiRelaxationRounds = Math.max(1, 2 * this.interfaceRefinementBandCells + 4);
-        const maximumCptGraphDepth = Math.max(1, 2 * Math.max(this.dims.nx, this.dims.ny, this.dims.nz));
+        // Ando--Batty Section 7.1 redistances phi throughout the entire domain,
+        // rather than only near the interface.  The transient owner graph is
+        // also domain-complete, so a band-width iteration cap can strand dry
+        // support rows with no signed-distance value.  A Manhattan traversal
+        // across the finest lattice is a conservative bound for both the phi
+        // Jacobi propagation and the face closest-point graph.
+        const maximumDomainGraphDepth = Math.max(1, this.dims.nx + this.dims.ny + this.dims.nz);
+        const bandPhiRelaxationRounds = maximumDomainGraphDepth;
+        const maximumCptGraphDepth = maximumDomainGraphDepth;
         this.globalFineFaceFastMarch = new WebGPUOctreeFaceFastMarch(
           this.device, this.globalFineSourceA, rowCapacity, bandPhiRelaxationRounds,
           maximumCptGraphDepth, this.powerFaces.plan.faceCapacity,
@@ -2697,12 +2680,9 @@ export class WebGPUOctreeProjection {
   finishInlineRebuild() { this.info.topologyReuseCount += 1; }
   get extrapolationSweepCount() { return this.extrapolationSweeps; }
   get pressureSolverLabel() {
-    if (this.leafSolver === "mgpcg" && this.mgpcg?.plan.preconditionerKind === "section43-hybrid") {
-      const hierarchy = this.powerMultigridHierarchy === "paper-pyramid"
-        ? "paper sparse-grid pyramid A/B" : "current aggregate-Galerkin rollback";
-      return `Octree power PCG · Section 4.3 hybrid · ${hierarchy} · up to ${this.mgpcg.iterationBudget} iterations · k=${this.mgpcg.boundarySmoothingIterations} paired L2 boundary smoothing on a 3 graph-ring band approximation · ${this.firstOrderVCycle?.plan.levelCount ?? 0}-level L1 V-cycle`;
+    if (this.leafSolver === "mgpcg" && this.mgpcg) {
+      return `Octree power PCG · Section 4.3 hybrid · paper sparse-grid pyramid A/B · up to ${this.mgpcg.iterationBudget} iterations · k=${this.mgpcg.boundarySmoothingIterations} paired L2 boundary smoothing on a 3 graph-ring band approximation · ${this.firstOrderVCycle?.plan.levelCount ?? 0}-level L1 V-cycle`;
     }
-    if (this.leafSolver === "mgpcg") return `Octree matrix-free aggregate PCG · up to ${this.iterations} iterations · ${this.mgpcg?.plan.hierarchyLevelCount ?? 0} additive levels · experimental`;
     if (this.leafSolver === "chebyshev") return `Octree Chebyshev-Jacobi · ${Math.ceil(this.iterations / 4)} parallel polynomial passes${this.couplingHasDynamicBodies ? " · frame-lagged rigid coupling" : ""}`;
     if (this.leafSolver === "megakernel" && !this.couplingHasDynamicBodies) return `Octree persistent Jacobi · up to ${this.iterations} sweeps`;
     return `Octree weighted Jacobi · ${this.iterations} fixed GPU sweeps`;
@@ -5085,7 +5065,7 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
     let maximumPhi = fineSummaryOrderedFloat(fineSummaryWord(base + 2u));
     let minimumAbsolutePhi = bitcast<f32>(fineSummaryWord(base + 3u));
     let entryFlags = fineSummaryWord(base + 6u);
-    if ((entryFlags & 0x7fffffffu) != 0u || !fineSummaryFinite(minimumPhi)
+    if ((entryFlags & 0x003fffffu) != 0u || !fineSummaryFinite(minimumPhi)
         || !fineSummaryFinite(maximumPhi) || !fineSummaryFinite(minimumAbsolutePhi)) { return result; }
     let expectedBricks = brickSide * brickSide * brickSide;
     result.found = true; result.minimumPhi = minimumPhi; result.maximumPhi = maximumPhi;
@@ -5101,7 +5081,11 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
     // coexist in the unified entry. Coarse authority must not hide the exact
     // fine centre: pure-coarse entries have zero fine counts and therefore
     // fail fineComplete without overloading centerPhi=0 as evidence.
-    result.centerValid = size == 1u && fineComplete
+    // Ando--Batty Sections 6.1 and 7.1 require the new octree to consume the
+    // current advected level set. The centre interpolation needs eight fine
+    // samples, not a fully populated sparse brick, so track that stencil
+    // independently from interval completeness.
+    result.centerValid = size == 1u && (entryFlags & 0x3fc00000u) == 0x3fc00000u
       && fineSummaryFinite(result.centerPhi);
     return result;
   }
@@ -5625,11 +5609,13 @@ fn filterFrontier(@builtin(global_invocation_id) gid: vec3u) {
 fn currentPressureOwnerWet(owner: Owner) -> bool {
   let origin=unpackOrigin(owner.packedOrigin);let fine=fineLeafSummary(origin,owner.size);
   var wet=liquidOwner(owner);
-  if(fine.found&&fine.complete){
-    if(fine.maximumPhi<0.0){wet=true;}
-    else if(fine.minimumPhi>=0.0){wet=false;}
-    else if(owner.size==1u&&fine.centerValid){wet=fine.centerPhi<0.0;}
-    else{let centre=vec3f(origin)+vec3f(0.5*f32(owner.size-1u));wet=legacyOwnerPhiPoint(centre)<0.0;}
+  if(fine.found){
+    if(owner.size==1u&&fine.centerValid){wet=fine.centerPhi<0.0;}
+    else if(fine.complete){
+      if(fine.maximumPhi<0.0){wet=true;}
+      else if(fine.minimumPhi>=0.0){wet=false;}
+      else{let centre=vec3f(origin)+vec3f(0.5*f32(owner.size-1u));wet=legacyOwnerPhiPoint(centre)<0.0;}
+    }
   }
   return wet;
 }

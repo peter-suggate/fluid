@@ -74,10 +74,9 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     .filter((key) => JSON.stringify(values[key]) !== JSON.stringify(canonical[key]));
   const approvedQueryKeys = new Set([
     "gpu", "method", "scene", "quality", "render", "voxels",
-    "param.octree.faceVelocityTransport",
     "param.octree.globalFineLevelSetFactor",
-    "param.octree.powerDiagramProjection",
     "param.octree.maximumLeafSize",
+    "param.octree.interfaceRefinementBandCells",
   ]);
   const unapprovedQueryKeys = [...new Set([...query.keys()].filter((key) => !approvedQueryKeys.has(key)))];
   return [
@@ -85,9 +84,7 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     config.methodId !== "octree" && "method must be octree",
     config.quality !== "balanced" && "quality must be balanced",
     !config.exactScene && "scene parameters must match the authored dam-break preset",
-    values.faceVelocityTransport !== "on" && "compact face transport must be on",
     values.globalFineLevelSetFactor !== "4" && "global fine level set must be factor 4",
-    values.powerDiagramProjection !== "authoritative" && "power projection must be authoritative",
     values.maximumLeafSize !== "16" && "maximum leaf size must be 16",
     parameterDrift.length > 0 && `method profile drifted: ${parameterDrift.join(", ")}`,
     config.voxelRenderMode !== "smooth" && "voxel inspection must be smooth/off",

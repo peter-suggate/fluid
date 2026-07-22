@@ -72,16 +72,21 @@ test("minimal power dam uses a two-level authoritative analytic initializer in a
 
 test("both power-validation scenes are shared by presets and the smoke registry", () => {
   for (const id of ["hydrostatic-power-large-offset", "minimal-power-dam-break"] as const) {
-    assert.equal(getScenePreset(id).id, id);
+    const preset = getScenePreset(id);
+    assert.equal(preset.id, id);
     assert.ok(isSmokeScenarioId(id));
-    assert.deepEqual(validateScene(createSmokeScenario(id).scene), []);
+    const smoke = createSmokeScenario(id);
+    assert.deepEqual(validateScene(smoke.scene), []);
+    assert.deepEqual(smoke.scene, preset.create(), `${id} Dawn scene must be the UI preset scene`);
+    assert.equal(smoke.methodProfile, preset.methodProfile,
+      `${id} Dawn method profile must be the UI preset profile`);
   }
   const hydro = createSmokeScenario("hydrostatic-power-large-offset");
   assert.equal(hydro.oracleSteps, 1);
   assert.equal(hydro.target_s, 0.004);
   const dam = createSmokeScenario("minimal-power-dam-break");
   assert.equal(dam.oracleSteps, 50);
-  assert.equal(dam.target_s, 0.2);
+  assert.equal(dam.target_s, 0.5);
 });
 
 test("power-validation UI presets carry the exact authoritative Dawn method profile", () => {
@@ -130,22 +135,41 @@ test("isolated Dawn commands pin the authored adaptive power configurations", ()
   assert.match(dam, /FLUID_POWER_AUDIT_EVERY_STEPS=1/);
 
   const motion = packageJson.scripts["test:webgpu:minimal-power-dam-break-motion"];
-  assert.match(motion, /FLUID_TARGET_S=0\.4/);
-  assert.match(motion, /FLUID_CHECKPOINT_EVERY_S=0\.1/);
+  assert.match(motion, /FLUID_TARGET_S=0\.5/);
+  assert.match(motion, /FLUID_CHECKPOINT_EVERY_S=0\.016/);
   assert.match(motion, /FLUID_MIN_PEAK_SPEED_M_S=0\.1/);
   assert.match(motion, /FLUID_MIN_DAM_SPREAD_M=0\.05/);
-  assert.match(motion, /FLUID_MAXIMUM_LEAF_SIZE=2/);
-  assert.match(motion, /FLUID_OCTREE_INTERFACE_BAND=3/);
+  assert.match(motion, /FLUID_EXPECT_GRID=16,16,16/);
+  assert.match(motion, /FLUID_RASTER_CHECKPOINTS=1/);
+  assert.match(motion, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/);
+  assert.match(motion, /FLUID_WEBGPU_SMOKE_TIMEOUT_MS=240000/);
+  assert.doesNotMatch(motion, /FLUID_(?:QUALITY|MAX_DT|VOXEL_CELL_SIZE|MAXIMUM_LEAF_SIZE|OCTREE_INTERFACE_BAND|OCTREE_GLOBAL_FINE_FACTOR)=/,
+    "UI-parity smoke must consume the preset profile instead of duplicating solver settings");
+  assert.doesNotMatch(motion, /FLUID_(?:STABILITY_ENVELOPE|DISABLE_TIMESTAMPS|POWER_GENERATION_AUDIT|POWER_STAGE_AUDIT)=/,
+    "UI-parity smoke must not add a per-step audit/readback cadence absent from the UI");
 
   for (const command of [hydro, dam]) {
     assert.match(command, /FLUID_STABILITY_ENVELOPE=1/);
     assert.match(command, /FLUID_RASTER_CHECKPOINTS=1/);
     assert.match(command, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/);
-    assert.match(command, /FLUID_OCTREE_ADAPTIVITY=1/);
-    assert.match(command, /FLUID_OCTREE_FACE_TRANSPORT=1/);
-    assert.match(command, /FLUID_OCTREE_POWER_PROJECTION=authoritative/);
     assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
     assert.match(command, /FLUID_POWER_GENERATION_AUDIT=1/);
     assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
   }
+});
+
+test("moving dam Dawn regression crosses the rejected generation and checks open-surface peeling", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const command = packageJson.scripts["test:webgpu:minimal-power-dam-break-motion"];
+  assert.match(command, /FLUID_TARGET_S=0\.5/,
+    "the regression must pass the former t=0.412 s failure instead of stopping at 0.4 s");
+  assert.match(command, /FLUID_CHECKPOINT_EVERY_S=0\.016/,
+    "the rejected generation must be bracketed by fenced raster/publication checkpoints");
+  const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+  assert.match(smoke, /observed\?\.backOnlyInterfacePixels === 0/);
+  assert.match(smoke, /reverse\?\.backOnlyInterfacePixels === 0/);
+  assert.doesNotMatch(smoke, /minimumPairedFraction/,
+    "an uncapped liquid\/air surface must not be judged as a closed wall-capped solid");
 });

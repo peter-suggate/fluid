@@ -4,6 +4,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { octreeProjectionShader } from "../lib/webgpu-octree";
 import {
+  FINE_LEVELSET_SUMMARY_CENTER_COMPLETE,
   FINE_LEVELSET_SUMMARY_COARSE_AUTHORITY,
   fineLevelSetSummaryRefinementSignal,
   planFineLevelSetSummaryLeafLookup,
@@ -36,6 +37,10 @@ test("a published zero crossing always refines while absent coverage can never a
   assert.equal(fineLevelSetSummaryRefinementSignal({ ...base,
     entryFlags: FINE_LEVELSET_SUMMARY_COARSE_AUTHORITY | 1,
   }, lookup, 0.5), "fallback", "low entry-flag bits remain fail-closed errors");
+  assert.equal(fineLevelSetSummaryRefinementSignal({ ...base,
+    entryFlags: FINE_LEVELSET_SUMMARY_CENTER_COMPLETE,
+  }, lookup, 0.5), "complete-no-crossing",
+  "centre-stencil completeness is evidence, not an entry error");
   assert.equal(fineLevelSetSummaryRefinementSignal({ ...base, minimumAbsolutePhi: 0.25 }, lookup, 0.5), "refine");
   assert.equal(fineLevelSetSummaryRefinementSignal(base, lookup, 0.5), "complete-no-crossing");
 });
@@ -65,13 +70,13 @@ test("summary sizing aliases binding 4 without adding storage bindings or pressu
     /result\.centerPhi = bitcast<f32>\(fineSummaryWord\(base \+ 7u\)\);[\s\S]*result\.centerValid = size == 1u/,
     "word 7 is exact fine centre phi and may authorize only a complete size-1 leaf");
   assert.match(callGraph,
-    /let fineComplete = fineSummaryWord\(base \+ 5u\) == expectedBricks[\s\S]*result\.complete = result\.coarseAuthority \|\| fineComplete;[\s\S]*result\.centerValid = size == 1u && fineComplete/,
-    "coarse interval authority may coexist with, but cannot mask, complete exact fine-centre evidence");
+    /let fineComplete = fineSummaryWord\(base \+ 5u\) == expectedBricks[\s\S]*result\.complete = result\.coarseAuthority \|\| fineComplete;[\s\S]*result\.centerValid = size == 1u && \(entryFlags & 0x3fc00000u\) == 0x3fc00000u/,
+    "exact centre evidence is independent of whole sparse-brick completeness");
   assert.doesNotMatch(callGraph, /result\.centerValid =[^;]*!result\.coarseAuthority/,
     "a unified fine+coarse entry must retain its exact fine phase classifier");
   assert.match(octreeProjectionShader,
-    /else if\(owner\.size==1u&&fine\.centerValid\)\{wet=fine\.centerPhi<0\.0;\}/,
-    "mixed recurring pressure leaves use current fine phase instead of stale coarse phi");
+    /if\(fine\.found\)\{[\s\S]*if\(owner\.size==1u&&fine\.centerValid\)\{wet=fine\.centerPhi<0\.0;\}/,
+    "recurring pressure leaves consume a current complete centre stencil even when the sparse brick is partial");
 });
 
 test("Dawn compiles summary-consuming refinement at the portable ten-storage-buffer limit", {

@@ -215,7 +215,7 @@ velocity strain activates a detail patch.
   one compute unit; it only wins once solves converge in a few iterations.
   `compact` keeps the 128-dispatch compact-row Jacobi ladder and `dense` keeps
   the legacy one-thread-per-finest-cell ladder for A/B
-  (`FLUID_OCTREE_LEAF_SOLVER` in the smoke harness).
+  for internal compatibility-path validation only.
 - Rigid bodies use the adaptive solver's variational volume-of-solid contract.
   Eight corner samples produce a sub-cell solid fraction `s`; each finest
   sub-face then carries the constraint flux `(1-s) u_fluid + s u_solid`, and
@@ -301,7 +301,5 @@ The dam-break gate measures interface-face growth and enclosed air as well as
 volume and dominant-component size, so fragmented topology cannot pass merely
 because its integrated volume remains correct.
 The late-time volume/coherence regression is
-`npm run test:webgpu:dam-octree-soak` (10 simulated seconds).
-`npm run test:webgpu:dam-octree-uniform-pressure` forces adaptivity to zero for
-the finest-pressure-grid quality control; the matched dense-solver comparison
-remains `npm run test:webgpu:dam-octree-compare`.
+`npm run test:webgpu:dam-octree-soak` (10 simulated seconds). The matched
+dense-solver comparison remains `npm run test:webgpu:dam-octree-compare`.

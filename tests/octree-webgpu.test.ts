@@ -76,9 +76,6 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.ok(simulationMethods.includes(octreeMethod));
   assert.equal(octreeMethod.id, "octree");
   assert.equal(octreeMethod.backend, "webgpu");
-  assert.equal(octreeMethod.presetFor("balanced").pressureIterations, 128);
-  assert.equal(octreeMethod.presetFor("balanced").powerPcgIterationCap, 128);
-  assert.equal(octreeMethod.presetFor("balanced").powerMultigridHierarchy, "paper-pyramid");
   assert.equal(octreeMethod.showQualityControl, false,
     "legacy quality tiers must not obscure the explicit power-method controls");
   assert.deepEqual(octreeMethod.params.map((spec) => spec.key), [
@@ -94,7 +91,6 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.ok(Math.abs(defaultScene.container.width_m / layout.nx - defaultScene.container.depth_m / layout.nz) < 1e-12);
   assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "16");
   assert.equal(octreeMethod.presetFor("high").maximumLeafSize, "16");
-  assert.equal(octreeMethod.presetFor("balanced").adaptivity, 1);
   assert.equal(octreeMethod.params.some((spec) => spec.key === "secondaryParticles"), false,
     "unsupported spray must not be exposed by compact power-face authority");
   assert.match(octreeMethod.detail, /no topology readbacks/);
@@ -114,15 +110,10 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.deepEqual(globalFine.options.map((option) => option.value), ["4", "off", "8"]);
   assert.equal(globalFine.options[1].label, "Coarse octree only · faster");
   assert.match(globalFine.hint ?? "", /still uses the power-diagram pressure solve/);
-  assert.equal(octreeMethod.presetFor("balanced").leafSolver, "auto",
-    "auto admits Section 4.3 only after power authority passes its fail-closed policy");
   for (const quality of ["balanced", "high", "ultra"] as const) {
     const preset = octreeMethod.presetFor(quality);
     assert.equal(preset.globalFineLevelSetFactor, "4", `${quality} must default to the paper's factor-4 band`);
-    assert.equal(preset.powerDiagramProjection, "authoritative", `${quality} must retain power authority`);
-    assert.equal(preset.powerMultigridHierarchy, "paper-pyramid", `${quality} must use the paper pyramid`);
   }
-  assert.match(smokeSource, /FLUID_OCTREE_POWER_PROJECTION/);
   assert.match(smokeSource, /FLUID_OCTREE_GLOBAL_FINE_FACTOR/);
   assert.match(octreeSource, /pageResolution: options\.surfaceRefinementFactor === 4 \? 4 : 2/,
     "surface consumers must default to the bandwidth-oriented 2-cubed page ABI");
@@ -130,14 +121,9 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(octreeProjectionShader, /override surfacePageResolution: u32 = 2u/);
   assert.doesNotMatch(`${octreeSource}\n${uniformSolverSource}`, /airRefinementBandCells/);
   assert.match(uniformSolverSource, /interfaceRefinementBandCells: options\.octree\.interfaceRefinementBandCells \?\? 4/);
-  for (const quality of ["balanced", "high", "ultra"] as const) {
-    assert.equal(octreeMethod.presetFor(quality).surfaceDetailStrength, 0, "dynamic refinement must be uniformly opt-in across quality presets");
-    assert.equal(octreeMethod.presetFor(quality).faceVelocityTransport, "on",
-      "compact octree-face velocity must be enabled across production quality presets");
-  }
   const methodSource = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
-  assert.match(methodSource, /faceVelocityTransport: values\.faceVelocityTransport !== false && values\.faceVelocityTransport !== "off"/,
-    "missing saved values must migrate to the compact default");
+  assert.match(methodSource, /faceVelocityTransport: true/);
+  assert.match(methodSource, /powerDiagramProjection: "authoritative"/);
   assert.match(methodSource, /requiresCompatibilityGeometry\(scene\)[\s\S]*\? undefined : globalFineLevelSetFactor/,
     "terrain and imported\/seeded geometry must not inherit the balanced factor-4 allocation");
   assert.match(uniformSolverSource, /adaptiveFaceRhsIsSupported\([\s\S]*sceneHasTerrain\(scene\)[\s\S]*scene\.rigidBodies\.length[\s\S]*this\.hydrostaticSplit/,
@@ -163,7 +149,6 @@ test("bounded power-vs-tall Dawn comparison uses one exact active-tall grid", ()
   assert.match(command, /FLUID_VOXEL_CELL_SIZE=0\.05/);
   assert.match(command, /FLUID_EXPECT_GRID=24,18,16/);
   assert.match(command, /FLUID_REGULAR_LAYERS=12/);
-  assert.match(command, /FLUID_OCTREE_POWER_PROJECTION=authoritative/);
   assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
   assert.doesNotMatch(packageManifest.scripts["test:webgpu:dam-power-fine-parity"], /FLUID_VOXEL_CELL_SIZE=0\.02/,
     "the named comparison path must not retain the former 2400-column allocation");
@@ -270,16 +255,13 @@ test("compact scan and coarse-task scratch follows pressure and active-tile boun
 test("octree hydrostatic experiment stays internal and default-off", () => {
   assert.equal(octreeMethod.params.some((spec) => spec.key === "hydrostaticSplit"), false,
     "the fixed-reference A/B must not appear in the power-method product UI");
-  assert.equal(octreeMethod.presetFor("balanced").hydrostaticSplit, "off");
   for (const method of simulationMethods.filter((candidate) => candidate.id !== "octree")) {
     assert.equal(method.params.some((spec) => spec.key === "hydrostaticSplit"), false,
       `${method.id} must not expose the octree hydrostatic experiment`);
   }
   const methodSource = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
-  assert.match(methodSource, /hydrostaticSplit: values\.hydrostaticSplit === "on"/);
+  assert.match(methodSource, /hydrostaticSplit: false/);
   assert.match(uniformSolverSource, /this\.hydrostaticSplit = options\.hydrostaticSplit === true[\s\S]*scene\.fluid\.initialCondition === "tank-fill"[\s\S]*scene\.fluid\.inflow === undefined[\s\S]*scene\.rigidBodies\.length === 0/);
-  assert.match(smokeSource, /FLUID_HYDROSTATIC_SPLIT/);
-  assert.match(smokeSource, /method\.id === "octree" && hydrostaticSplitOverride/);
 
   assert.match(legacyUniformComputeShader, /texture_storage_2d<rg32float, write>/);
   assert.match(legacyUniformComputeShader, /fn hydrostaticSplit\(\) -> bool/);
@@ -579,8 +561,8 @@ test("octree compacted leaf solve scans, assembles once, and iterates over rows 
     octreeProjectionShader.indexOf("fn appendFrontierAt"));
   assert.match(filter, /currentPressureOwnerWet\(owner\)/,
     "persistent pressure rows must retire when the current fine authority changes phase");
-  assert.match(filter, /fineLeafSummary\(origin,owner\.size\)[\s\S]*fine\.minimumPhi>=0\.0[\s\S]*fine\.centerPhi<0\.0[\s\S]*legacyOwnerPhiPoint/,
-    "frontier filtering and insertion must share the complete fine-summary classifier");
+  assert.match(filter, /fineLeafSummary\(origin,owner\.size\)[\s\S]*fine\.centerValid[\s\S]*fine\.centerPhi<0\.0/,
+    "frontier filtering and insertion use current fine centre evidence even for a partial sparse brick");
   assert.match(octreeProjectionShader, /var running = scanPairs\[lid\] - sum;/);
   const emit = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn emitLeaves"), octreeProjectionShader.indexOf("fn compactRowIndex"));
   assert.match(emit, /frontierCell\(current, slot\)/);
