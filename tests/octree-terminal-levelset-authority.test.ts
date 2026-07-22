@@ -140,8 +140,8 @@ test("global-fine QA diagnostics read the published GPU controls without steerin
     "face-band rejection telemetry must retain the catalog-Delaunay gate preceding face emission");
   assert.match(diagnostics, /redistance\.control,0,readback,720,48/,
     "redistance rejection telemetry must retain its complete twelve-word control");
-  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:900/,
-    "the compact evidence packet accounts for transport detail and the Section 5 seed prefix");
+  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:932/,
+    "the compact evidence packet accounts for transport detail, the Section 5 seed prefix, and march completion diagnostics");
   assert.match(diagnostics, /topology\.control,32,readback,896,4/,
     "the pre-dilation interface prefix is attributable without moving the stable topology header");
   assert.match(diagnostics, /this\.globalFineFaceFastMarch\.pointFieldControl,0,readback,560,32/,

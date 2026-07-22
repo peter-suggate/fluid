@@ -175,16 +175,16 @@ test("bounded power-vs-tall Dawn comparison uses one exact active-tall grid", ()
   assert.match(smokeSource, /refusing to step a mismatched comparison/);
 });
 
-test("regular dam Dawn regression reaches the post-impact half-second interval", () => {
+test("regular dam Dawn regression matches the UI cadence through two seconds", () => {
   const command = packageManifest.scripts["test:webgpu:dam-octree"];
   assert.ok(command);
   assert.match(command, /FLUID_SCENE=dam-break-ui/);
   assert.match(command, /FLUID_METHOD=octree/);
-  assert.match(command, /FLUID_TARGET_S=0\.5/);
-  assert.match(command, /FLUID_MAX_DT=0\.004/);
-  assert.match(command, /FLUID_ORACLE_STEPS=125/);
-  assert.match(command, /FLUID_EXPECT_EXACT_STEPS=125/,
-    "the default regression must not silently stop before the former 0.27 s topology failure");
+  assert.match(command, /FLUID_TARGET_S=2/);
+  assert.match(command, /FLUID_MAX_DT=0\.008/);
+  assert.match(command, /FLUID_ORACLE_STEPS=250/);
+  assert.match(command, /FLUID_EXPECT_EXACT_STEPS=250/,
+    "the default regression must run the browser cadence through the full requested interval");
 });
 
 test("compact octree pressure capacity scales with domain surface area", () => {

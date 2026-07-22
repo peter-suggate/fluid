@@ -341,6 +341,7 @@ export interface GPUEulerianInfo {
   globalFineFaceBandSurroundingOwnerRowsTested?: number;
   globalFineFaceBandAirSamplesSelected?: number;
   globalFineFaceBandAirSamplesEvaluated?: number;
+  globalFineFaceBandConnectivityFallbacks?: number;
   globalFineFaceBandTransitionFirstError?: number;
   globalFineFaceBandTransitionRowCount?: number;
   globalFineFaceBandTransitionRows?: number;
@@ -523,6 +524,20 @@ export interface GPUEulerianInfo {
     surfaceCoupling_ms: number;
     finePreparation_ms?: number;
     fineTransport_ms?: number;
+    /** Queue-observed descriptor packing and trajectory initialization. */
+    fineTransportSetup_ms?: number;
+    /** Queue-observed semantic stages, aggregated across chunks by trajectory segment. */
+    fineTransportSegments?: readonly {
+      segment: number;
+      directStageB_ms: number;
+      airBand_ms: number;
+      airBandClassify_ms: number;
+      airBandEvaluate_ms: number;
+      airBandFinalize_ms: number;
+      trajectoryAdvance_ms: number;
+    }[];
+    /** Departure sampling plus transport validation and commit. */
+    fineTransportFinalize_ms?: number;
     fineTopology_ms?: number;
     fineRedistance_ms?: number;
     fineRestriction_ms?: number;

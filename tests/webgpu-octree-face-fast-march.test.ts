@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   OCTREE_FACE_BAND_FACE_BYTES,
@@ -21,6 +22,7 @@ import {
   OCTREE_FACE_BAND_ENCODE_PHASES,
   WebGPUOctreeFaceFastMarch,
   classifyOctreeFaceBandBoundaryCrossing,
+  makeOctreeFaceBandAirSampleWGSL,
   octreeFaceBandCoarseGenerationPairIsValid,
   octreeFaceBandMarchKeyBefore,
   octreeFaceBandWGSL,
@@ -53,8 +55,8 @@ import { WebGPUOctreeProjection } from "../lib/webgpu-octree";
 
 const compact = (value: { toString(): string }): string => value.toString().replace(/\s+/g, "");
 
-function wgslFunction(name: string): string {
-  const source = compact(octreeFaceBandWGSL);
+function wgslFunction(name: string, wgsl = octreeFaceBandWGSL): string {
+  const source = compact(wgsl);
   const start = source.indexOf(`fn${name}(`);
   assert.notEqual(start, -1, `missing WGSL function ${name}`);
   const open = source.indexOf("{", start);
@@ -324,8 +326,8 @@ test("factor-4 GPU face band is compact, bounded, and has no fine velocity chann
   assert.equal(OCTREE_FACE_BAND_TRANSIENT_CONTROL_BYTES, 64);
   assert.equal(plan.transientPowerFaceBytes, 13_271_040,
     "the default 24x18x16 dam-break plan accounts for the complete 12.66 MiB physical-face arena");
-  assert.equal(plan.maximumDirectWorkgroups, 3_888,
-    "the largest fixed-capacity graph/closure scan is explicitly planned for adapter admission");
+  assert.equal(plan.maximumDirectWorkgroups, Math.ceil(Math.max(plan.rowCapacity, plan.faceCapacity,
+    plan.guardCandidateCapacity, plan.powerFaceCapacity, plan.transientPowerFaceCapacity) / 64));
   assert.match(compact(WebGPUOctreeFaceFastMarch),
     /this\.plan\.maximumDirectWorkgroups>device\.limits\.maxComputeWorkgroupsPerDimension/,
     "a buffer-admissible plan still fails closed when its one-dimensional dispatch would exceed the adapter limit");
@@ -391,10 +393,11 @@ test("face march heap has an exact topology-capacity pop bound and deterministic
 
 test("face-band control diagnostics distinguish fail-closed causes", () => {
   assert.equal(OCTREE_FACE_BAND_CONTROL_BYTES, 128);
-  const words = new Uint32Array(31);
+  const words = new Uint32Array(32);
   words.set([1 | 2 | 64 | 128, 91, 120, 315, 630, 7, 0x8000_0000, 11, 8, 300, 15, 0, 4, 27, 3, 44]);
   words.set([307, 315, 307, 2, 4, 3, 1, 11], 16);
   words.set([273, 42, 88_200, 7, 19_600, 315, 315], 24);
+  words[31] = 9;
   assert.deepEqual(unpackOctreeFaceBandControl(words), {
     flags: 195, firstError: 91, rowCount: 120, faceCount: 315, incidenceCount: 630,
     generation: 7, valid: false, maximumDepth: 11, seedCount: 8, acceptedCount: 300,
@@ -406,6 +409,7 @@ test("face-band control diagnostics distinguish fail-closed causes", () => {
     directAnchorSuccess: 273, fullRowFallbackInvocations: 42,
     fullRowCandidateRowsTested: 88_200, surroundingOwnerFallbackInvocations: 7,
     surroundingOwnerRowsTested: 19_600, airSamplesSelected: 315, airSamplesEvaluated: 315,
+    connectivityFallbacks: 9,
     capacityFailure: true, hashProbeFailure: true,
     invalidSource: false, invalidRow: false, invalidFace: false, invalidPhi: false,
     unresolved: true, incompleteVector: true, outsideFineBand: false,
@@ -415,7 +419,7 @@ test("face-band control diagnostics distinguish fail-closed causes", () => {
   assert.throws(() => unpackOctreeFaceBandControl(new Uint32Array(12)), /at least 13/);
 });
 
-test("air-band evaluation measures exact row-scan fallback work without changing generic callers", () => {
+test("air-band evaluation is atomic-free while preserving exact fallback and boundary sampling", () => {
   const locate = wgslFunction("locateFinalPointVectorMeasured");
   assert.match(locate, /candidateRowsTested\+=1u/,
     "every O(rows) candidate-loop iteration is counted, including skipped endpoint rows");
@@ -423,22 +427,85 @@ test("air-band evaluation measures exact row-scan fallback work without changing
   assert.match(wgslFunction("locateFinalPointVector"),
     /returnlocateFinalPointVectorMeasured\(initialAnchor,pointGrid\)\.value/,
     "power publication and retained repair preserve the existing pure sampler wrapper");
-  const classify = wgslFunction("classifyAirBandVelocity");
-  assert.match(classify, /storeSampleStatus\(i,SAMPLE_EVALUATE\);addAirSearchCounter\(5u,1u\)/);
-  const evaluate = wgslFunction("evaluateAirBandVelocity");
-  assert.match(evaluate, /addAirSearchCounter\(6u,1u\)/);
-  assert.match(evaluate,
-    /addAirSearchCounter\(2u,measured\.candidateRowsTested\)/);
-  assert.match(evaluate,
-    /addAirSearchCounter\(4u,measured\.surroundingRowsTested\)/);
+  const hot = makeOctreeFaceBandAirSampleWGSL();
+  assert.doesNotMatch(hot, /\batomic(?:Add|CompareExchangeWeak|Load|Max|Min|Or|Store)\b/,
+    "the recurring sampler has no atomic operation");
+  assert.match(hot, /@binding\(7\)var<storage,read>rowHash:array<u32>/,
+    "the cold-built row hash is immutable during recurring transport");
+  assert.match(hot, /@binding\(23\)var<storage,read_write>sampleStatus:array<u32>/,
+    "exclusive per-query statuses use ordinary stores");
+  assert.match(wgslFunction("finalPointVector", hot), /finalSignedVector\(cornerOrigin,row\.size\)/,
+    "ordinary same-size cube interpolation performs the exact immutable row-hash lookup");
+  assert.match(wgslFunction("finalTetraPointVector", hot), /finalSelectorVector\(anchor,selectors\.[xyz]/,
+    "catalog interpolation preserves the exact selector-to-owner lookup");
+  const classify = wgslFunction("classifyAirBandVelocity", hot);
+  assert.match(classify, /sampleStatus\[i\]=SAMPLE_EVALUATE/);
+  const boundary = wgslFunction("airSampleGrid", hot);
+  assert.match(boundary, /p\.closedBoundaryMask&negativeBoundaryBit\(axis\).*grid\[axis\]=0\./,
+    "Stage-B velocity constantly extends through closed negative container walls");
+  assert.match(boundary, /p\.closedBoundaryMask&positiveBoundaryBit\(axis\).*openCeiling=axis==1u&&!closed.*grid\[axis\]=f32\(sp\.dims\[axis\]\)-1e-5/,
+    "Stage-B velocity extends through closed positive walls and the authored open ceiling");
+  const evaluate = wgslFunction("evaluateAirBandVelocity", hot);
+  assert.match(evaluate, /letsample=airSampleGrid\(positions\[i\]\.xyz\)/,
+    "classification and evaluation consume one identical boundary-adjusted point");
+  assert.match(evaluate, /locateFinalPointVectorMeasured\(band,sample\.xyz\)\.value/);
   assert.doesNotMatch(evaluate, /\bcontrol\b/,
     "the 10-buffer evaluator must not make face-band control reachable");
-  const aggregate = wgslFunction("aggregateAirBandSearchCounters");
-  assert.match(aggregate,
-    /letbase=airSearchCounterBase\(\)[\s\S]*atomicAdd\(&control\.fullRowCandidateRowsTested,atomicLoad\(&sampleStatus\[base\+2u\]\)\)/);
   const encode = compact(WebGPUOctreeFaceFastMarch.prototype.encodeAirSamples);
-  assert.match(encode, /dispatch\(this\.sampleAggregatePipeline,aggregateEntries,1\)/,
-    "the one-thread fold must run exactly once, not once per query workgroup");
+  assert.doesNotMatch(encode, /sampleAggregatePipeline|aggregateEntries|clearBuffer\(statuses/,
+    "the recurring sampler has no serialized diagnostic fold or counter tail");
+});
+
+test("Dawn compiles every atomic-free recurring air-sampler entry at the ten-storage limit", {
+  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for recurring air-sampler checks",
+}, async () => {
+  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
+    create(options: string[]): GPU; globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, dawn.globals);
+  const adapter = await dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]).requestAdapter();
+  assert.ok(adapter);
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } });
+  const module = device.createShaderModule({ code: makeOctreeFaceBandAirSampleWGSL() });
+  const errors = (await module.getCompilationInfo()).messages.filter(message => message.type === "error");
+  assert.deepEqual(errors, []);
+  device.pushErrorScope("validation");
+  for (const entryPoint of ["classifyAirBandVelocity", "evaluateAirBandVelocity", "finalizeAirBandVelocity"]) {
+    device.createComputePipeline({ layout: "auto", compute: { module, entryPoint } });
+  }
+  assert.equal(await device.popErrorScope(), null);
+  const storage = (words: Uint32Array<ArrayBuffer>, extraUsage = 0) => {
+    const buffer = device.createBuffer({ size: Math.max(4, words.byteLength),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | extraUsage });
+    device.queue.writeBuffer(buffer, 0, words);
+    return buffer;
+  };
+  const controlWords = new Uint32Array(32); controlWords[5] = 7; controlWords[6] = 0x8000_0000;
+  const pointWords = new Uint32Array(8); pointWords[3] = 7; pointWords[5] = 0x8000_0000;
+  const sampleWords = new Uint32Array(12); sampleWords[5] = 4; sampleWords[9] = 7;
+  const statuses = storage(new Uint32Array([0x0200_0000, 0x0100_0123, 0x8000_0000, 0x0400_0000]),
+    GPUBufferUsage.COPY_SRC);
+  const control = storage(controlWords), point = storage(pointWords), params = device.createBuffer({ size: 48,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(params, 0, sampleWords);
+  const finalize = device.createComputePipeline({ layout: "auto", compute: { module,
+    entryPoint: "finalizeAirBandVelocity" } });
+  const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+  pass.setPipeline(finalize); pass.setBindGroup(0, device.createBindGroup({
+    layout: finalize.getBindGroupLayout(0), entries: [
+      { binding: 5, resource: { buffer: control } }, { binding: 20, resource: { buffer: params } },
+      { binding: 23, resource: { buffer: statuses } }, { binding: 48, resource: { buffer: point } },
+    ],
+  })); pass.dispatchWorkgroups(1); pass.end();
+  const readback = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  encoder.copyBufferToBuffer(statuses, 0, readback, 0, 16); device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  assert.deepEqual(Array.from(new Uint32Array(readback.getMappedRange())),
+    [0x9000_0000, 0x0800_0123, 0x8000_0000, 0x0800_0000],
+    "ordinary status stores preserve the exact authority/failure publication ABI");
+  readback.unmap();
+  for (const buffer of [statuses, control, point, params, readback]) buffer.destroy();
+  device.destroy();
 });
 
 test("uniform catalog support still honors every Section 6.1 same/coarser owner", () => {
@@ -967,12 +1034,11 @@ test("top-side nonuniform transition uses explicit physical world faces", () => 
 
 test("air-side sampler bind-group ABI has one entry per binding", () => {
   const source = String(WebGPUOctreeFaceFastMarch.prototype.encodeAirSamples);
-  const groups = [...source.matchAll(/const (classify|evaluate|aggregate|finalize)Entries\s*=\s*\[([\s\S]*?)\];/g)]
+  const groups = [...source.matchAll(/const (classify|evaluate|finalize)Entries\s*=\s*\[([\s\S]*?)\];/g)]
     .map((match) => Array.from(match[2].matchAll(/binding:\s*(\d+)/g), (item) => Number(item[1])));
   assert.deepEqual(groups, [
     [0, 20, 21, 5, 6, 7, 22, 23, 26, 32, 48],
     [0, 6, 7, 19, 20, 21, 22, 23, 27, 28, 29, 30],
-    [5, 23],
     [5, 20, 23, 48],
   ]);
   for (const bindings of groups) assert.equal(new Set(bindings).size, bindings.length);
@@ -1022,8 +1088,14 @@ test("GPU CPT binds its complete causal face graph within the portable limit", (
     "the resolver validates one contracted root instead of chasing an O(domain) chain");
   assert.match(source, /run\("prepareBfs"[\s\S]*propagateBfs/,
     "positive-phi plateaus use deterministic parallel BFS after the fast CPT forest");
+  assert.match(source, /propagateBfs[\s\S]*propagateConnectivity[\s\S]*run\("validate"/,
+    "a bounded seed-connected pass closes discrete face-centred phi minima before strict validation");
   assert.match(wgslFunction("considerBfsRow"), /states\[candidate\]\.depth>=layer/,
     "a layer never observes payload written by another invocation in the same dispatch");
+  assert.match(wgslFunction("considerBfsRow"), /faceBfsCausal!=0u&&faceArrival/,
+    "only the second bounded pass may cross a shallow positive-air local minimum");
+  assert.match(wgslFunction("propagateFaceBfsLayer"), /connectivityFallbacks/,
+    "every non-causal completion remains visible in generation diagnostics");
   assert.deepEqual(planOctreeFaceBandCPT(384), { maximumGraphDepth: 384, jumpRounds: 9 });
 });
 

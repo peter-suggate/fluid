@@ -84,7 +84,7 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
     // page, distance, work, and control inputs; product JFA is a separate
     // module. No individual entry point exceeds the portable ten-storage
     // limit.
-    topology: 14, velocityPrepass: 10, transport: 10, redistance: 7,
+    topology: 14, velocityPrepass: 10, transport: 12, redistance: 7,
     // Summary publication also reads the corrected compact-coarse directory
     // so the single consumer hash can cover both fine and coarse authority.
     // Restriction also declares the fine topology transaction control. Its

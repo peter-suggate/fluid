@@ -66,7 +66,13 @@ Object.assign(globalThis, globals);
 // must still select its worker_threads transport here: Dawn's worker wrapper
 // does not preserve typed-array inputs used by the topology packer.
 Reflect.deleteProperty(globalThis, "Worker");
-const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
+const dawnOptions = [
+  `backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`,
+  ...(process.env.FLUID_WEBGPU_ADAPTER ? [`adapter=${process.env.FLUID_WEBGPU_ADAPTER}`] : []),
+  ...(process.env.FLUID_WEBGPU_DAWN_FEATURES
+    ? [`enable-dawn-features=${process.env.FLUID_WEBGPU_DAWN_FEATURES}`] : []),
+];
+const gpu = create(dawnOptions);
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
 
 const COMPUTE_SENTINEL_WORD = 0x4f43_5452;
@@ -1009,6 +1015,7 @@ async function readGlobalFineGenerationDiagnostics(
       faceBandSurroundingOwnerRowsTested: faceBand.surroundingOwnerRowsTested,
       faceBandAirSamplesSelected: faceBand.airSamplesSelected,
       faceBandAirSamplesEvaluated: faceBand.airSamplesEvaluated,
+      faceBandConnectivityFallbacks: faceBand.connectivityFallbacks,
       faceBandRowCapacity: faceBandPlan?.rowCapacity, faceBandFaceCapacity: faceBandPlan?.faceCapacity } : {}),
   };
 }
@@ -2565,7 +2572,8 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     gpuQueueSimulation_s: info.gpuQueueSimulation_s,
     gpuTelemetryWall_ms: info.gpuTelemetryWall_ms,
     gpuPhysicsTimingReadbackWall_ms: info.gpuPhysicsTimingReadbackWall_ms,
-    simulatedTime_s: info.simulatedTime_s, submittedTime_s: info.submittedTime_s, completedTime_s: info.completedTime_s,
+    simulatedTime_s: info.simulatedTime_s, submittedTime_s: info.submittedTime_s,
+    completedTime_s: info.completedTime_s, lastDt_s: info.lastDt_s, lastSubsteps: info.lastSubsteps,
     grid: [info.nx, info.storedNy, info.nz], cubicGrid: result.grid,
     allocatedBytes: info.allocatedBytes,
     encodedSteps: info.encodedSteps, gridKind: info.gridKind, compressionRatio: info.compressionRatio,
@@ -2813,7 +2821,7 @@ async function runGPU(
   }
   console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod, phase: "constructed",
     construction_ms: Math.round(construction_ms), quality: solverQuality,
-    authoredMethodProfile: authoredProfile,
+    authoredMethodProfile: authoredProfile, resolvedMethodValues: values, dawnOptions,
     grid: [solver.info.nx, solver.info.storedNy, solver.info.nz],
     cubicGrid: [solver.info.nx, solver.info.ny, solver.info.nz] }));
   solver.setPerformanceReadbacksEnabled?.(performanceReadbacksEnabled);

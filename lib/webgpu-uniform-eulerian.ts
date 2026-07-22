@@ -42,7 +42,8 @@ import {
   unpackFineLevelSetGPUTopologyControl,
 } from "./webgpu-octree-fine-levelset-topology";
 import { unpackFineLevelSetGPURedistanceControl } from "./webgpu-octree-fine-levelset-redistance";
-import { unpackFineLevelSetGPUTransportControl } from "./webgpu-octree-fine-levelset-transport";
+import { unpackFineLevelSetGPUTransportControl,
+  type FineLevelSetTransportBoundary } from "./webgpu-octree-fine-levelset-transport";
 import { FINE_TO_COARSE_LEVELSET_ERROR, unpackFineToCoarseGPUControl } from "./webgpu-octree-fine-to-coarse-levelset";
 import { planOctreeHostAllocation, type OctreeHostAllocationPlan } from "./octree-host-allocation";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
@@ -82,7 +83,7 @@ const uniformPipelineCache = new WeakMap<GPUDevice, Map<UniformVelocityTransport
 /** Queue-boundary profiling is intrusive, so sample sparsely after publishing
  * one ordinary post-t=0 transport step. The early sample makes the dominant
  * fine-surface wall visible before a short manual run reaches step 30. */
-const OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_STEPS = 30;
+const OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_ADVANCES = 30;
 const OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP = 2;
 
 /** Explicit capillary-wave stability bound for a finest cell. */
@@ -476,8 +477,10 @@ export class WebGPUUniformEulerianSolver {
   // `committed: false` look like a real Section 5 rejection in the viewport.
   private pressureWallProbeLastStep = 0;
   private pressureWallProbeSampleId = 0;
-  private advancePhaseWallLastStep = OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP
-    - OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_STEPS;
+  /** Accepted outer GPU advances, distinct from adaptive physics substeps. */
+  private profilerAdvanceCount = 0;
+  private advancePhaseWallLastAdvance = OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP
+    - OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_ADVANCES;
   private advancePhaseWallSampleId = 0;
   private profiledAdvancePending = false;
   private profiledAdvanceCompletion?: Promise<void>;
@@ -1043,6 +1046,7 @@ export class WebGPUUniformEulerianSolver {
     this.info.globalFineFaceBandSurroundingOwnerRowsTested=faceBand.surroundingOwnerRowsTested;
     this.info.globalFineFaceBandAirSamplesSelected=faceBand.airSamplesSelected;
     this.info.globalFineFaceBandAirSamplesEvaluated=faceBand.airSamplesEvaluated;
+    this.info.globalFineFaceBandConnectivityFallbacks=faceBand.connectivityFallbacks;
     this.info.globalFineFaceBandTransitionFirstError=transition.firstError;
     this.info.globalFineFaceBandTransitionRowCount=transition.rowCount;
     this.info.globalFineFaceBandTransitionRows=transition.transitionRows;
@@ -1461,7 +1465,7 @@ export class WebGPUUniformEulerianSolver {
   get pendingAdvanceCompletion() { return this.profiledAdvanceCompletion; }
 
   private schedulePressureWallProbe(simulation_s: number): void {
-    const step = this.info.encodedSteps ?? 0;
+    const step = this.profilerAdvanceCount;
     if (!this.performanceReadbacksEnabled || !this.octreeProjection || this.pressureWallProbePending
       || step - this.pressureWallProbeLastStep < 30) return;
     this.pressureWallProbePending = true;
@@ -1678,6 +1682,7 @@ export class WebGPUUniformEulerianSolver {
     }
     const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s); if (!advance) return false;
     const delta = advance.dt_s; if (delta < 1e-6) { this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; return true; }
+    this.profilerAdvanceCount += 1;
     const cpuAdvanceStartedAt_ms = performance.now();
     let cpuTopologyEncode_ms = 0, cpuPressureProjectionEncode_ms = 0, cpuPressureSolveEncode_ms = 0;
     let pressureSolvePassCount = 0, pressureSolvePassTransitionCount = 0;
@@ -1718,9 +1723,9 @@ export class WebGPUUniformEulerianSolver {
     // queries collapse below their resolution.
     const productionPhaseProbeActive = this.performanceReadbacksEnabled && Boolean(this.octreeProjection)
       && !this.pressureWallProbePending
-      && (this.info.encodedSteps ?? 0) - this.advancePhaseWallLastStep
-        >= OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_STEPS;
-    if (productionPhaseProbeActive) this.advancePhaseWallLastStep = this.info.encodedSteps ?? 0;
+      && this.profilerAdvanceCount - this.advancePhaseWallLastAdvance
+        >= OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_ADVANCES;
+    if (productionPhaseProbeActive) this.advancePhaseWallLastAdvance = this.profilerAdvanceCount;
     const productionQueueReadyAtPromise = productionPhaseProbeActive
       ? this.device.queue.onSubmittedWorkDone().then(() => performance.now())
       : undefined;
@@ -1735,12 +1740,15 @@ export class WebGPUUniformEulerianSolver {
       | "fineRedistance" | "fineRestriction" | "pageSurface" | "surfaceCoupling" | "publicationDiagnostics";
     let encoder = this.device.createCommandEncoder({ label: "Uniform GPU fluid step" });
     const totalTiming = this.timing("total_ms");
-    const productionPhaseSegments: Array<{ phase: ProductionPhase; encoder: GPUCommandEncoder; commandBuffer: GPUCommandBuffer }> = [];
+    const productionPhaseSegments: Array<{ phase: ProductionPhase; encoder: GPUCommandEncoder;
+      commandBuffer: GPUCommandBuffer; detail?: FineLevelSetTransportBoundary }> = [];
     let submittedAt = 0;
-    const submitCurrentEncoder = (phase: ProductionPhase, createNext: boolean) => {
+    const submitCurrentEncoder = (phase: ProductionPhase, createNext: boolean,
+      detail?: FineLevelSetTransportBoundary) => {
       const submittedEncoder = encoder;
       const commandBuffer = submittedEncoder.finish();
-      if (productionPhaseProbeActive) productionPhaseSegments.push({ phase, encoder: submittedEncoder, commandBuffer });
+      if (productionPhaseProbeActive) productionPhaseSegments.push({ phase, encoder: submittedEncoder,
+        commandBuffer, ...(detail ? { detail } : {}) });
       else {
         if (submittedAt === 0) submittedAt = performance.now();
         this.device.queue.submit([commandBuffer]);
@@ -1978,9 +1986,9 @@ export class WebGPUUniformEulerianSolver {
               querySet: this.querySet,
               fineTopologyStartWriteIndex: surfaceTiming.firstBoundary,
               fineRedistanceStartWriteIndex: surfaceTiming.secondBoundary,
-            } : undefined, productionPhaseProbeActive ? (phase, completedEncoder) => {
+            } : undefined, productionPhaseProbeActive ? (phase, completedEncoder, detail) => {
               if (completedEncoder !== encoder) throw new Error("Octree surface profiler encoder identity drifted");
-              submitCurrentEncoder(phase, true);
+              submitCurrentEncoder(phase, true, detail);
               return encoder;
             } : undefined);
         } else {
@@ -2065,6 +2073,10 @@ export class WebGPUUniformEulerianSolver {
           fineRedistance: 0, fineRestriction: 0, pageSurface: 0, surfaceCoupling: 0,
           publicationDiagnostics: 0,
         };
+        let fineTransportSetup_ms = 0, fineTransportFinalize_ms = 0;
+        const fineTransportSegments = new Map<number, { segment: number; directStageB_ms: number;
+          airBand_ms: number; airBandClassify_ms: number; airBandEvaluate_ms: number;
+          airBandFinalize_ms: number; trajectoryAdvance_ms: number }>();
         const firstBoundaryAt = previousCompletedAt;
         for (const segment of phaseSegments) {
           if (this.disposed) return;
@@ -2073,7 +2085,27 @@ export class WebGPUUniformEulerianSolver {
           this.octreeProjection?.retireSubmittedEncoder(segment.encoder);
           await this.device.queue.onSubmittedWorkDone();
           const completedAt = performance.now();
-          totals[segment.phase] += completedAt - previousCompletedAt;
+          const elapsed_ms = completedAt - previousCompletedAt;
+          totals[segment.phase] += elapsed_ms;
+          if (segment.phase === "fineTransport") {
+            const detail = segment.detail;
+            if (!detail) fineTransportFinalize_ms += elapsed_ms;
+            else if (detail.kind === "setup") fineTransportSetup_ms += elapsed_ms;
+            else {
+              const entry = fineTransportSegments.get(detail.segment) ?? { segment: detail.segment,
+                directStageB_ms: 0, airBand_ms: 0, airBandClassify_ms: 0, airBandEvaluate_ms: 0,
+                airBandFinalize_ms: 0, trajectoryAdvance_ms: 0 };
+              if (detail.kind === "directStageB") entry.directStageB_ms += elapsed_ms;
+              else if (detail.kind === "trajectoryAdvance") entry.trajectoryAdvance_ms += elapsed_ms;
+              else {
+                entry.airBand_ms += elapsed_ms;
+                if (detail.kind === "classifyAirBandVelocity") entry.airBandClassify_ms += elapsed_ms;
+                else if (detail.kind === "evaluateAirBandVelocity") entry.airBandEvaluate_ms += elapsed_ms;
+                else entry.airBandFinalize_ms += elapsed_ms;
+              }
+              fineTransportSegments.set(detail.segment, entry);
+            }
+          }
           previousCompletedAt = completedAt;
         }
         if (this.disposed) return;
@@ -2086,6 +2118,9 @@ export class WebGPUUniformEulerianSolver {
             + totals.fineRestriction + totals.pageSurface + totals.surfaceCoupling,
           finePreparation_ms: totals.finePreparation,
           fineTransport_ms: totals.fineTransport,
+          fineTransportSetup_ms,
+          fineTransportSegments: Array.from(fineTransportSegments.values()).sort((a, b) => a.segment - b.segment),
+          fineTransportFinalize_ms,
           fineTopology_ms: totals.fineTopology,
           fineRedistance_ms: totals.fineRedistance,
           fineRestriction_ms: totals.fineRestriction,

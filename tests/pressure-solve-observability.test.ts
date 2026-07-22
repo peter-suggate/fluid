@@ -6,6 +6,8 @@ const panelSource = readFileSync(new URL("../components/PerformancePanel.tsx", i
 const methodPanelSource = readFileSync(new URL("../components/MethodPanel.tsx", import.meta.url), "utf8");
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 const uniformSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+const transportSource = readFileSync(new URL("../lib/webgpu-octree-fine-levelset-transport.ts", import.meta.url), "utf8");
+const faceBandSource = readFileSync(new URL("../lib/webgpu-octree-face-fast-march.ts", import.meta.url), "utf8");
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 
 test("pressure solve UI reports an isolated completion fence instead of a whole-advance bound", () => {
@@ -34,6 +36,14 @@ test("pressure solve UI reports an isolated completion fence instead of a whole-
   assert.match(panelSource, /globalFineTransportVertexScratchBytes/);
   assert.match(panelSource, /no per-query vertex scratch/);
   assert.match(panelSource, /globalFineTransportPrepassScratchBytes/);
+  assert.match(panelSource, /TRANSPORT SETUP/);
+  assert.match(panelSource, /direct Stage-B/);
+  assert.match(panelSource, /air completion/);
+  assert.match(panelSource, /classify \{segment\.airBandClassify_ms/);
+  assert.match(panelSource, /evaluate \{segment\.airBandEvaluate_ms/);
+  assert.match(panelSource, /finalize \{segment\.airBandFinalize_ms/);
+  assert.match(panelSource, /trajectory advance/);
+  assert.match(panelSource, /TRANSPORT FINALIZE/);
   assert.match(panelSource, /<span>FINE SURFACE<\/span>/);
   assert.match(panelSource, /fine-surface-observed-row/);
   assert.match(panelSource, /displayedPhysicsStages = fineSurfaceNeedsWallFallback/);
@@ -46,9 +56,11 @@ test("production profiler splits a real advance at queue submission boundaries",
     "the first interactive step must publish transport diagnostics before intrusive profiling begins");
   assert.match(uniformSource, /OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP = 2/,
     "the first queue-attributed phase sample must follow one ordinary transport step");
-  assert.match(uniformSource, /advancePhaseWallLastStep = OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP/);
-  assert.match(uniformSource, /this\.advancePhaseWallLastStep\s*>= OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_STEPS/);
-  assert.match(uniformSource, /this\.advancePhaseWallLastStep = this\.info\.encodedSteps/);
+  assert.match(uniformSource, /advancePhaseWallLastAdvance = OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP/);
+  assert.match(uniformSource, /this\.profilerAdvanceCount - this\.advancePhaseWallLastAdvance/,
+    "profiler cadence must count accepted browser advances, not adaptive inner substeps");
+  assert.match(uniformSource, /OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_ADVANCES/);
+  assert.match(uniformSource, /this\.advancePhaseWallLastAdvance = this\.profilerAdvanceCount/);
   assert.match(uniformSource, /productionPhaseProbeActive/);
   assert.match(uniformSource, /submitCurrentEncoder\("topologyAdvection", true\)/);
   assert.match(uniformSource, /submitCurrentEncoder\("pressureProjection", true\)/);
@@ -66,7 +78,23 @@ test("production profiler splits a real advance at queue submission boundaries",
   assert.match(uniformSource, /submitCurrentEncoder\("surfaceCoupling", true\)/);
   assert.match(uniformSource, /submitCurrentEncoder\("publicationDiagnostics", false\)/);
   assert.match(uniformSource, /gpuAdvancePhaseWall =/);
-  assert.match(panelSource, /seven additional queue boundaries only in this intrusive sample/);
+  assert.match(transportSource, /kind: "directStageB"/);
+  for (const stage of ["classifyAirBandVelocity", "evaluateAirBandVelocity", "finalizeAirBandVelocity"]) {
+    assert.match(transportSource, new RegExp(stage));
+    assert.match(faceBandSource, new RegExp(`splitStage\\("${stage}"`));
+  }
+  assert.match(faceBandSource, /if \(!boundary\)[\s\S]*dispatch\(pass, this\.sampleClassifyPipeline[\s\S]*dispatch\(pass, this\.sampleEvaluatePipeline[\s\S]*dispatch\(pass, this\.sampleFinalizePipeline/,
+    "ordinary advances must retain one unsplit air-sample compute pass");
+  assert.match(transportSource, /kind: "trajectoryAdvance"/);
+  assert.match(transportSource, /boundary\(detail, encoder\)/,
+    "fine transport profiling must split command buffers without shader instrumentation");
+  assert.match(octreeSource, /encoder = transport\.encode\(encoder/,
+    "the caller must retain the replacement encoder across granular boundaries");
+  assert.match(octreeSource, /globalFinePublicationByEncoder\.set\(encoder, publicationTargetIsA\)/,
+    "A\/B publication must remain registered on the encoder that owns restriction\/finalization");
+  assert.match(uniformSource, /submitCurrentEncoder\(phase, true, detail\)/);
+  assert.match(uniformSource, /fineTransportSegments = new Map/);
+  assert.match(panelSource, /no shader instrumentation or atomics are added/);
 });
 
 test("octree solver reports only its own host encode and bounded pass schedule", () => {

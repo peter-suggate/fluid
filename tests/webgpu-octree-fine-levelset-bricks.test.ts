@@ -360,11 +360,13 @@ test("transport hook requires an injected octree velocity sampler and factor-rat
     /workA\[index\]=phi\[index\];\s*if\(abs\(phi\[index\]\)>=chunk\.transportBandDistance\)\{return;\}/,
     "support-only samples must preserve phi before the shared scratch is committed");
   assert.match(fineLevelSetGPUQueryTransportWGSL,
-    /status&0x08000000u[\s\S]*control\.faceBandUnavailable[\s\S]*control\.velocityUnavailable/,
+    /status&0x08000000u[\s\S]*flags\|=FACE_UNAVAILABLE[\s\S]*flags\|=INVALID_STATUS\|VELOCITY_UNAVAILABLE/,
     "transport diagnostics must distinguish face-band coverage from unavailable Stage-B velocity");
   assert.match(fineLevelSetGPUQueryTransportWGSL,
-    /atomicLoad\(&control\.velocityUnavailable\)==0u\)\{atomicStore\(&control\.committed,1u\)/,
+    /control\.committed=select\(0u,1u,s0\[0\]==0u&&s1\[0\]==0u&&s7\[0\]==0u\)/,
     "an unavailable velocity must remain a hard transport publication failure");
+  assert.doesNotMatch(fineLevelSetGPUQueryTransportWGSL, /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
+    "recurring fine transport must reduce deterministic per-query outcomes without atomics");
   const publication = makeFineLevelSetTopologyWGSL(
     "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
   ).replace(/\s+/g, "");
@@ -376,11 +378,11 @@ test("transport hook requires an injected octree velocity sampler and factor-rat
     "an unavailable Section 5 transport must be visible as the exact downstream rejection reason");
   assert.match(source, /atomicLoad\(&control\.departureOutsideBand\)!=0u/);
   assert.match(fineLevelSetGPUQueryTransportWGSL,
-    /value\.y==0\.\)[\s\S]*firstInvalidVelocityStatus,0x04000000u\|u32\(value\.z\)[\s\S]*positions\[local\]\.x/,
+    /value\.y==0\.\)[\s\S]*outcomes\[local\]=vec2u\(packOutcome\(flags,extrapolated,displacement\),0x04000000u\|u32\(value\.z\)\)[\s\S]*bitcast<u32>\(positions\[i\]\.x\)/,
     "a rejected departure must retain its failure class and first physical coordinate for sparse-band forensics");
   assert.match(fineLevelSetGPUQueryTransportWGSL,
-    /wallTolerance=1e-3[\s\S]*raw<vec3f\(-\.5-wallTolerance\)[\s\S]*raw>wall\+vec3f\(wallTolerance\)/,
-    "wall-centred characteristics must tolerate floating-point drift while non-open exterior departures still reject");
+    /chunk\.closedDomainBoundary==0u&&\(any\(below\)\|\|above\.x\|\|above\.z\|\|\(above\.y&&chunk\.openTopBoundary==0u\)\)/,
+    "closed-wall Neumann extension must absorb exterior integration drift while strict boundaries reject it");
   assert.match(fineLevelSetGPUQueryTransportWGSL,
     /above\.y&&chunk\.openTopBoundary==0u[\s\S]*extendBoundary=chunk\.closedDomainBoundary!=0u\|\|chunk\.openTopBoundary!=0u/,
     "only an authored open ceiling may extend an exterior top characteristic onto the boundary sample");

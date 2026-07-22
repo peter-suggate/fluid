@@ -53,8 +53,8 @@ export function DiagnosticsPanel() {
     && gpuInfo.volumeDrift === gpuInfo.representedVolumeDrift;
   const waterRasterGenerationCurrent = waterSurfacePresentation?.globalFineAttachedGeneration !== undefined
     && waterSurfacePresentation.meshPublicationGeneration !== undefined
-    && waterSurfacePresentation.globalFineAttachedGeneration === gpuInfo?.globalFineGeneration
-    && waterSurfacePresentation.meshPublicationGeneration === gpuInfo?.globalFineGeneration;
+    && waterSurfacePresentation.globalFineAttachedGeneration
+      === waterSurfacePresentation.meshPublicationGeneration;
   return (
     <aside className="right-panel panel-scroll diagnostics-panel">
       <section className="panel-section diagnostics-head">
@@ -130,7 +130,7 @@ export function DiagnosticsPanel() {
                 : waterSurfacePresentation.surfaceGeometrySource === "retained-previous" ? "RETAINED PREVIOUS MESH"
                   : waterSurfacePresentation.surfaceGeometrySource === "adaptive-octree" ? "ADAPTIVE OCTREE" : "EMPTY"}
             unit={waterSurfacePresentation.globalFineCrossingPublished
-              ? `${waterRasterGenerationCurrent ? "current" : "unproven/current mismatch"} fine/coarse crossing · attached gen ${waterSurfacePresentation.globalFineAttachedGeneration ?? "?"} · mesh gen ${waterSurfacePresentation.meshPublicationGeneration ?? "?"} · live gen ${gpuInfo?.globalFineGeneration ?? "?"}`
+              ? `${waterRasterGenerationCurrent ? "current" : "unproven/current mismatch"} fine/coarse crossing · attached gen ${waterSurfacePresentation.globalFineAttachedGeneration ?? "?"} · mesh gen ${waterSurfacePresentation.meshPublicationGeneration ?? "?"} · sampled gen ${gpuInfo?.globalFineGeneration ?? "?"}`
               : waterSurfacePresentation.presentationFallbackActive
                 ? "presentation fallback only · solver authority unchanged"
                 : waterSurfacePresentation.globalFineAttached

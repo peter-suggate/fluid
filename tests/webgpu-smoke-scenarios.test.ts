@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { validateScene } from "../lib/model";
+import { getScenePreset } from "../lib/scenes";
 import {
   compareScalarFields,
   compareSingleTallCellNeighborhood,
@@ -21,6 +23,37 @@ test("native WebGPU matrix covers the UI dam break, equilibrium, moving boundari
   assert.ok(createSmokeScenario("deep-water").scene.container.height_m >= 20);
   assert.ok(createSmokeScenario("hose-tank").scene.fluid.inflow);
   assert.ok(createSmokeScenario("sphere-jet").scene.rigidBodies.length > 0);
+});
+
+test("dam-break-ui is the exact browser preset, including its two-rate timestep contract", () => {
+  const browser = getScenePreset("water-box-dam-break").create();
+  const dawn = createSmokeScenario("dam-break-ui").scene;
+  assert.deepEqual(dawn, browser);
+  assert.equal(dawn.numerics.fixedDt_s, 0.004);
+  assert.equal(dawn.numerics.maxDt_s, 0.008);
+});
+
+test("Dawn performance reproduction reaches the UI's evolved third profiler sample", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const command = packageJson.scripts["test:webgpu:dam-ui-performance"];
+  assert.match(command, /FLUID_SCENE=dam-break-ui/);
+  assert.match(command, /FLUID_METHOD=octree/);
+  assert.match(command, /FLUID_TARGET_S=0\.496/);
+  assert.match(command, /FLUID_MAX_DT=0\.008/,
+    "Dawn must retain the browser's GPU outer-step cap instead of forcing the 0.004 s validation rate");
+  assert.match(command, /FLUID_ORACLE_STEPS=62/);
+  assert.match(command, /FLUID_EXPECT_EXACT_STEPS=62/);
+  assert.match(command, /FLUID_EXPECT_GRID=24,18,16/);
+  assert.match(command, /FLUID_WEBGPU_BACKEND=metal/);
+  assert.match(command, /FLUID_WEBGPU_ADAPTER='Apple M1 Max'/);
+  assert.match(command, /FLUID_WEBGPU_DAWN_FEATURES=skip_validation/,
+    "performance calibration must use release-like Dawn command processing; correctness gates retain validation");
+  assert.match(command, /FLUID_PERFORMANCE_PROFILE=1/);
+  assert.match(command, /FLUID_PERFORMANCE_READBACKS=1/);
+  assert.doesNotMatch(command, /FLUID_DISABLE_TIMESTAMPS=1/);
+  assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
 });
 
 test("single-tall-cell differential separates the probe stencil from the far field", () => {

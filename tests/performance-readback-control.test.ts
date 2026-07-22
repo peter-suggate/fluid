@@ -29,7 +29,7 @@ test("maximum-throughput mode gates every recurring profiler readback at encode 
     "uniform and octree timing ranges must not be allocated");
   assert.match(uniform, /const productionPhaseProbeActive = this\.performanceReadbacksEnabled/,
     "queue-boundary command-buffer splitting must remain disabled in maximum-throughput mode");
-  assert.match(uniform, /productionPhaseProbeActive \? \(phase, completedEncoder\) =>/,
+  assert.match(uniform, /productionPhaseProbeActive \? \(phase, completedEncoder, detail\) =>/,
     "the octree surface must receive no split callback outside an active intrusive sample");
   assert.match(uniform, /if \(!this\.performanceReadbacksEnabled \|\| \(this\.info\.encodedSteps/,
     "uniform and octree diagnostic maps must return before encoding copies");

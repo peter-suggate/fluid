@@ -172,17 +172,18 @@ export function automaticGPURecoveryEnabled(search: string): boolean {
 }
 
 /**
- * Request hardware timestamps for normal browser sessions so the performance
- * panel can report GPU work without a hidden URL opt-in. Bounded safe bring-up
- * retains its timestamp-free correctness configuration, and gpuTimestamps=0
- * remains an explicit escape hatch for driver diagnosis.
+ * Keep normal browser sessions on the same timestamp-free correctness path as
+ * the authored Dawn scenarios. Hardware timestamps are an explicit profiling
+ * opt-in because enabling them changes sparse-authority startup scheduling on
+ * timestamp-capable devices; a default instrumentation choice must not change
+ * the simulation being validated.
  */
 export function optionalBrowserTimestampFeatures(
   search: string,
   features: { has(feature: string): boolean },
 ): GPUFeatureName[] {
   const query = new URLSearchParams(search);
-  if (query.get("gpu") === "safe" || query.get("gpuTimestamps") === "0") return [];
+  if (query.get("gpu") === "safe" || query.get("gpuTimestamps") !== "1") return [];
   return features.has("timestamp-query") ? ["timestamp-query"] : [];
 }
 
