@@ -86,6 +86,7 @@ import { resolveFineLevelSetRedistanceMethod, WebGPUFineLevelSetRedistance,
 import { planFineLevelSetGPUTransportPasses,
   WebGPUFineLevelSetTransport, type FineLevelSetTransportBoundary } from "./webgpu-octree-fine-levelset-transport";
 import { WebGPUFineLevelSetVolumeCorrection } from "./webgpu-octree-fine-levelset-volume";
+import { WebGPUOctreeEnergyLedger, type OctreeEnergyLedgerSnapshot } from "./webgpu-octree-energy-ledger";
 import { planFineLevelSetGPUSummaries, WebGPUFineLevelSetSummaries } from "./webgpu-octree-fine-levelset-summary";
 import {
   planFineLevelSetTopologyBand,
@@ -200,6 +201,11 @@ export interface OctreeProjectionOptions {
   pressureRowCapacity?: number;
   /** Migration switch for the generalized power-diagram pressure path. */
   powerDiagramProjection?: "off" | "mirror" | "authoritative";
+  /** Observational GPU-only stage energy reductions. Disabled by default and
+   * never consumed by a simulation publication or acceptance gate. */
+  energyLedger?: boolean;
+  /** Fixed retained-step ring for the optional energy ledger. */
+  energyLedgerStepCapacity?: number;
 }
 
 /** Queue-fenced production checkpoints used only by the sparse intrusive
@@ -1051,6 +1057,9 @@ export class WebGPUOctreeProjection {
   private powerVolumePipeline?: GPUComputePipeline;
   private powerVolumeGroup?: GPUBindGroup;
   private powerGeneration = 0;
+  private energyLedger?: WebGPUOctreeEnergyLedger;
+  private readonly energyLedgerRequested: boolean;
+  private readonly energyLedgerStepCapacity: number;
   private powerLifecycleDisposed = false;
 
   constructor(
@@ -1062,6 +1071,8 @@ export class WebGPUOctreeProjection {
     deferPipelineCompilation = false
   ) {
     const count = dims.nx * dims.ny * dims.nz;
+    this.energyLedgerRequested = options.energyLedger === true;
+    this.energyLedgerStepCapacity = options.energyLedgerStepCapacity ?? 512;
     this.directPagedTopology = typeof process === "undefined"
       || process.env?.FLUID_OCTREE_DIRECT_PAGED_PHI !== "0";
     this.fineRedistanceMethod = resolveFineLevelSetRedistanceMethod(options.fineRedistanceMethod
@@ -2245,6 +2256,18 @@ export class WebGPUOctreeProjection {
         this.device, this.globalFineSourceB, coarseVolumeSource, this.globalFineVolumeA.control,
       );
     }
+    if (this.energyLedgerRequested && this.powerPolicy.authoritative && this.globalFineSourceA) {
+      const fineSampleCapacity = this.globalFineSourceA.plan.maximumResidentBricks
+        * this.globalFineSourceA.plan.samplesPerBrick;
+      this.energyLedger = new WebGPUOctreeEnergyLedger(
+        this.device,
+        this.powerFaces.plan.faceCapacity,
+        fineSampleCapacity,
+        [this.scene.fluid.gravity_m_s2.x, this.scene.fluid.gravity_m_s2.y, this.scene.fluid.gravity_m_s2.z],
+        this.energyLedgerStepCapacity,
+      );
+      this.info.allocatedBytes += this.energyLedger.plan.allocatedBytes;
+    }
     this.powerVolumeParams = this.device.createBuffer({ label: "Octree power-volume parameters", size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const cellVolume = (this.scene.container.width_m / this.dims.nx)
@@ -2795,6 +2818,10 @@ export class WebGPUOctreeProjection {
     const volumePipeline = this.powerVolumePipeline;
     const volumeGroup = this.powerVolumeGroup;
     if (!descriptor || !topology || !faces || !operator || !volumes || !volumePipeline || !volumeGroup) return encoder;
+    this.energyLedger?.beginStep();
+    const oldPowerGeneration = this.powerGeneration;
+    const targetPowerGeneration = (this.powerGeneration + 1) >>> 0;
+    this.energyLedger?.encodeFaceMetric(encoder, "oldFaceCapture", oldPowerGeneration, faces.source);
     const splitProductionPhase = (phase: OctreePressureProjectionProfilePhase) => {
       if (productionBoundary) encoder = productionBoundary(phase, encoder);
     };
@@ -2804,7 +2831,7 @@ export class WebGPUOctreeProjection {
       this.scene.container.height_m / this.dims.ny,
       this.scene.container.depth_m / this.dims.nz,
     ];
-    this.powerGeneration = (this.powerGeneration + 1) >>> 0;
+    this.powerGeneration = targetPowerGeneration;
     // The first advancing pressure solve is still at the authored t=0
     // interface. Warmup publishes the fine-band data structure, but that
     // administrative publication is not an advection step and must not move
@@ -2897,6 +2924,7 @@ export class WebGPUOctreeProjection {
         closedTop: this.scene.container.top === "closed",
       });
     }
+    this.energyLedger?.encodeFaceMetric(encoder, "postRemap", this.powerGeneration, faces.source);
     // Equation (1) splits external forces from advection, while Section 4.1
     // stores the authoritative normal velocity at every power face. Apply
     // gravity in that native basis so oblique transition faces receive g.n dt
@@ -2908,6 +2936,7 @@ export class WebGPUOctreeProjection {
         this.scene.fluid.gravity_m_s2.z,
       ], this.faceTransportDt_s);
     }
+    this.energyLedger?.encodeFaceMetric(encoder, "postGravity", this.powerGeneration, faces.source);
     this.powerSolidVertices?.encode(encoder, {
       dimensions,
       physicalSpacing: spacing,
@@ -2921,6 +2950,7 @@ export class WebGPUOctreeProjection {
       terrainEnabled: sceneHasTerrain(this.scene),
       pressureImpulseScale: this.faceTransportDt_s,
     });
+    this.energyLedger?.encodeFaceMetric(encoder, "postSolidConstraint", this.powerGeneration, faces.source);
     splitProductionPhase("oldFaceAdvectionRepair");
     const pass = encoder.beginComputePass({ label: "Publish physical power-cell volumes" });
     pass.setPipeline(volumePipeline); pass.setBindGroup(0, volumeGroup);
@@ -2940,6 +2970,7 @@ export class WebGPUOctreeProjection {
     if (!this.powerFaces || !this.powerOperator) return;
     this.powerOperator.encodeProjectionFromControl(encoder, this.powerFaces.faces, this.powerFaces.source,
       pressure, this.powerFaces.control, 1, this.leafSolver === "mgpcg" ? this.mgpcg?.control : undefined);
+    this.energyLedger?.encodeFaceMetric(encoder, "postProjection", this.powerGeneration, this.powerFaces.source);
     this.powerSolidFaces?.encodePostProjectionConstraint(encoder);
   }
 
@@ -3083,7 +3114,9 @@ export class WebGPUOctreeProjection {
         this.firstOrderVCycle?.encodeCapture(encoder);
         splitProductionPhase("pressureLeafCompactionL1Capture");
         if (this.faceMirror) {
-          this.faceMirror.encodeTopology(encoder, this.solveDispatch);
+          this.faceMirror.encodeTopology(encoder, this.solveDispatch, this.powerFaces
+            ? { buffer: this.powerFaces.control, offsetBytes: 7 * 4 }
+            : undefined);
           this.faceTransport?.encode(encoder, {
             dt: this.faceTransportDt_s,
             acceleration: this.powerPolicy.authoritative ? [0, 0, 0] : [
@@ -3201,6 +3234,9 @@ export class WebGPUOctreeProjection {
     splitProductionPhase("powerProjectionPublication");
     encoder = this.encodeGlobalFineFaceBand(encoder, detailedTimestampWrites?.section5FacePhaseBoundaries,
       detailedTimestampWrites?.productionBoundary);
+    if (this.powerFaces) this.energyLedger?.encodeFaceMetric(
+      encoder, "postFaceBandPublication", this.powerGeneration, this.powerFaces.source,
+    );
     // Diagnose the actual authority visible to fine transport: axis rollback
     // for off/mirror, or the all-or-nothing power-to-axis reconstruction.
     this.faceMirror?.encodeProjectedDivergence(encoder);
@@ -3383,6 +3419,7 @@ export class WebGPUOctreeProjection {
         // bucket so the queue-boundary profiler names the measured work.
         splitProductionPhase("finePreparation");
         if (this.globalFineBootstrapped && transport && this.powerFaceSeed && this.powerVelocity) {
+          this.energyLedger?.encodeFinePotential(encoder, "preFineTransport", transport.source);
           this.lastGlobalFineTransport = transport;
           encoder = transport.encode(encoder, {
             timestep: dt_s,
@@ -3400,6 +3437,7 @@ export class WebGPUOctreeProjection {
               this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4))),
           }, productionBoundary ? (detail, completedEncoder) =>
             productionBoundary("fineTransport", completedEncoder, detail) : undefined);
+          this.energyLedger?.encodeFinePotential(encoder, "postFineTransport", transport.source);
           transportEncoded = true;
           splitProductionPhase("fineTransport");
         }
@@ -3424,11 +3462,14 @@ export class WebGPUOctreeProjection {
             redistanceBandFineCells: redistanceBandCells,
             safetyBrickRings: 1,
           }, true);
+          this.energyLedger?.encodeFinePotential(encoder, "postFineTopology", this.globalFineSourceB!);
           splitProductionPhase("fineTopology");
           beginFineRedistanceTiming();
           publicationRedistance.encode(encoder, { bandCells: redistanceBandCells, residualTolerance: 1,
             method: this.fineRedistanceMethod });
+          this.energyLedger?.encodeFinePotential(encoder, "postFineRedistance", this.globalFineSourceB!);
           publicationVolume?.encode(encoder);
+          this.energyLedger?.encodeFinePotential(encoder, "postFineVolumeCorrection", this.globalFineSourceB!);
           splitProductionPhase("fineRedistance");
         } else {
           this.globalFineGeneration += 1;
@@ -3442,11 +3483,14 @@ export class WebGPUOctreeProjection {
             redistanceBandFineCells: redistanceBandCells,
             safetyBrickRings: 1,
           }, true);
+          this.energyLedger?.encodeFinePotential(encoder, "postFineTopology", this.globalFineSourceA!);
           splitProductionPhase("fineTopology");
           beginFineRedistanceTiming();
           publicationRedistance.encode(encoder, { bandCells: redistanceBandCells, residualTolerance: 1,
             method: this.fineRedistanceMethod });
+          this.energyLedger?.encodeFinePotential(encoder, "postFineRedistance", this.globalFineSourceA!);
           publicationVolume?.encode(encoder);
+          this.energyLedger?.encodeFinePotential(encoder, "postFineVolumeCorrection", this.globalFineSourceA!);
           splitProductionPhase("fineRedistance");
         }
         publicationTopology.encodeFinalizePublication(encoder, {
@@ -3795,6 +3839,8 @@ export class WebGPUOctreeProjection {
   get powerFaceControl() { return this.powerFaces?.control; }
   /** QA-only generalized face records used to localize recurrent advection failures. */
   get powerFaceSource() { return this.powerFaces?.source; }
+  /** Explicit one-shot readback of the opt-in observational energy ring. */
+  readEnergyLedger(): Promise<OctreeEnergyLedgerSnapshot> | undefined { return this.energyLedger?.read(); }
   /** QA-only exact liquid/air cell-centre queries authored before boundary-phi sampling. */
   get powerBoundaryPhiQueries() { return this.powerFaces?.source.boundaryPhiQueries; }
   /** QA-only identity of the sparse fine source sampled by the last face build. */
@@ -4222,7 +4268,7 @@ export class WebGPUOctreeProjection {
     this.adaptiveSurfacePages?.destroy();
     this.adaptiveSurfaceAdapter?.destroy();
     this.pagedPhiDifferential?.destroy();
-    this.fineToPowerCoarseLevelSet?.destroy(); this.powerCoarseLevelSetSchedule?.destroy(); this.powerCoarseLevelSet?.destroy(); this.powerVelocity?.destroy(); this.powerSolidFaces?.destroy(); this.powerSolidVertices?.destroy(); this.powerFaceAdvection?.destroy(); this.powerFaceSeed?.destroy(); this.powerDescriptor?.destroy(); this.powerTopology?.destroy(); this.powerFaces?.destroy(); this.powerOperator?.destroy();
+    this.energyLedger?.destroy(); this.fineToPowerCoarseLevelSet?.destroy(); this.powerCoarseLevelSetSchedule?.destroy(); this.powerCoarseLevelSet?.destroy(); this.powerVelocity?.destroy(); this.powerSolidFaces?.destroy(); this.powerSolidVertices?.destroy(); this.powerFaceAdvection?.destroy(); this.powerFaceSeed?.destroy(); this.powerDescriptor?.destroy(); this.powerTopology?.destroy(); this.powerFaces?.destroy(); this.powerOperator?.destroy();
     this.powerVolumes?.destroy(); this.powerVolumeParams?.destroy();
     this.phiSnapshotTexture.destroy();
     this.levelSetFallbackTexture?.destroy();

@@ -14,6 +14,7 @@ import type { WebGPUFineLevelSetBrickSource } from "../webgpu-octree-fine-levels
 import type { GPUInitializationPhase } from "../gpu-initialization";
 import type { OctreeFaceBandGPUPlan } from "../webgpu-octree-face-fast-march";
 import type { OctreeTechniqueDebugSource } from "../octree-technique-debug";
+import type { OctreeEnergyLedgerSnapshot } from "../webgpu-octree-energy-ledger";
 
 /**
  * Method plugin contract.
@@ -115,6 +116,8 @@ export interface GPUSolverInstance {
   readonly globalFineVolumeControl?: GPUBuffer;
   readonly globalFinePowerVelocityControl?: GPUBuffer;
   readonly globalFinePowerProjectionControl?: GPUBuffer;
+  /** Explicit final/read-on-demand access to the opt-in GPU energy ring. */
+  readPowerEnergyLedger?(): Promise<OctreeEnergyLedgerSnapshot> | undefined;
   /** QA-only exact power-face endpoint queries; never affects publication. */
   readonly powerBoundaryPhiQueries?: GPUBuffer;
   /** QA-only packed owner lattice readback for topology forensics. */

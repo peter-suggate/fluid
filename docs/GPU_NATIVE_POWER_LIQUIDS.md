@@ -49,15 +49,25 @@ replay inverted the true ordering. The UI now rejects a split sample whose
 total exceeds the ordinary production fence by more than 25%; rejected phase
 ratios are not performance evidence.
 
-The current exact UI throughput trace still encodes 114,761 dispatches, 67,642
-indirect dispatches, and 13,701 compute passes in 62 advances: about 1,851
-dispatches and 221 pass transitions per advance. It also clears 1.556 GB and
-copies 551 MB over the run, or 25.1 MB of clears and 8.9 MB of copies per
-advance. The dominant recurring clears are fixed-capacity physical power faces
-(13.27 MB/advance), the face mirror (5.31 MB/advance), old interpolation mesh
-(2.10 MB/advance), physical incidence (1.99 MB/advance), and radix histograms
-(0.50 MB/advance). These capacity writes and launch counts—not a UI graph—are
-the baseline the next structural changes must remove.
+The accepted live-prefix topology trace now completes 62 exact advances in
+4.240 s, or 68.39 ms/advance, a 23.73% improvement over the calibrated
+89.66 ms/advance baseline. It encodes 114,575 dispatches, 63,736 indirect
+dispatches, and 15,499 compute passes: about 1,848 dispatches and 250 pass
+transitions per advance. The pass count includes explicit publication fences
+between Section 5 candidate emission, owner resolution, and row insertion.
+Those fences fixed a measured schedule-sensitive generation-95 row-publication
+failure while removing an invalid cross-workgroup polling loop. Even with the
+additional correctness boundaries, wall time fell.
+
+The same trace clears 273,720,576 bytes and copies 551,117,504 bytes over the
+run, or 4.41 MB of clears and 8.89 MB of copies per advance. Counted face-slot
+retirement removed the former 5.31 MB/advance Section 5 face-arena clear; the
+remaining dominant clear is now the old interpolation mesh at 2.10 MB/advance.
+The dominant copy remains the canonical face publication into that retained
+mesh at 5.31 MB/advance, followed by SPGrid's captured L1 entries at
+1.99 MB/advance. Recurring clear traffic is down 82.4% from the original exact
+trace. Copy traffic is unchanged apart from four bytes per advance carrying
+the previous-face generation into a new fail-closed compact publication.
 
 The original 16x16x16 62-step warm baseline was 14.414 s. Removing a dead
 old-mesh snapshot reduced that to 11.322 s. The current profiler-free run is
@@ -94,6 +104,17 @@ architecture: larger domains retain the correctness-preserving 128-iteration
 fallback until the residual-driven persistent/hierarchical solver below
 replaces both fixed tails.
 
+At six hierarchy levels and the 12-iteration recorded cap, MGPCG alone encodes
+1,252 dispatches per advance—67.8% of every dispatch in the exact UI trace.
+The GPU convergence word prevents arithmetic after convergence but cannot
+remove already encoded commands. Fusing restriction with ghost accumulation
+and prolongation with ghost propagation removed 130 commands per advance;
+prolongation is now one deterministic fine-owned sum/store with no floating
+point atomics. The small-domain cooperative replacement is
+therefore accepted only if it preserves the Section 4.3 hybrid operator while
+collapsing the whole solve to a small fixed kernel sequence. Moving the
+remaining 1,252 calls behind indirect early-outs is not a throughput result.
+
 Exact key dimensions now bound face-transfer radix work. The 24x18x16 scene
 requires eight nibble passes rather than an unconditional 32; larger domains
 derive as many digits as their coordinates require. This removed 4,464 passes,
@@ -102,11 +123,21 @@ assuming a maximum scene size. Stopped MGPCG and SPGrid tails also no longer
 rewrite hybrid/correction vectors after device-published convergence.
 
 The current 500-step numerical gate passes with zero validation errors,
-maximum pressure relative residual 9.96e-5, maximum exact volume drift 0.329%,
+maximum pressure relative residual 9.99e-5, maximum exact volume drift 0.3012%,
 one connected component, and no non-finite velocities. It also confirms that
-energy dissipation remains unresolved: mechanical-energy retention is 92.96%
-at 0.2 s, 44.91% at 0.5 s, 40.79% at 1 s, and 39.45% at 2 s. Performance work
+energy dissipation remains unresolved: mechanical-energy retention is 93.07%
+at 0.2 s, 44.94% at 0.5 s, 40.83% at 1 s, and 39.46% at 2 s. Performance work
 must not hide that numerical debt behind a shorter or different scene.
+
+An opt-in fixed-ring GPU energy ledger now measures authoritative boundaries
+without adding any default-path allocation, command, readback, or fence. Its
+first moving UI-equivalent step measured face kinetic proxy changes of
+0.00014777 after gravity, 0.00012349 after projection (-16.4%), and 0.00012206
+after face-band publication (a further -1.15%). Fine transport changed the
+resident potential proxy by only -0.034% in that step. Topology/redistance
+measurements currently change resident support, so their raw delta is recorded
+but is not yet labeled dissipation; the next ledger revision must compare a
+common immutable sample set.
 
 The target topology is one generic radix/scan/compact spine. Every topology
 product is a counted, sorted A/B publication: a small header containing its

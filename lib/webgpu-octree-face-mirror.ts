@@ -1,5 +1,6 @@
 import { OCTREE_CONSUMER_MAX_FACE_CANDIDATES } from "./octree-consumer-sampling";
-import { WebGPUOctreeFaceTopologyTransfer } from "./webgpu-octree-face-transfer";
+import { WebGPUOctreeFaceTopologyTransfer, type OctreeFacePreviousGenerationSource,
+  type OctreeFacePreviousPublication } from "./webgpu-octree-face-transfer";
 import { validateOctreeSurfacePageSource, type OctreeSurfacePageSource } from "./webgpu-octree-surface-pages";
 
 /**
@@ -83,6 +84,8 @@ export interface OctreeFaceMirrorSource {
   projectedDivergence?: GPUBuffer;
   projectedDivergenceOffset?: number;
   topologyTransferDiagnostics?: GPUBuffer;
+  /** Generation-coherent compact previous faces, sorted by exact Cartesian key. */
+  previousFacePublication?: OctreeFacePreviousPublication;
 }
 
 /**
@@ -273,12 +276,13 @@ export class WebGPUOctreeFaceMirror {
   }
 
   /** Publish faces and restore old canonical velocities onto the new IDs. */
-  encodeTopology(encoder: GPUCommandEncoder, rowDispatch: GPUBuffer): void {
+  encodeTopology(encoder: GPUCommandEncoder, rowDispatch: GPUBuffer,
+    previousGeneration?: OctreeFacePreviousGenerationSource): void {
     // Face records still contain the previous presentation here, even though
     // leaf topology has already changed. Capture them before publication
     // overwrites the arena; the transfer is applied after the new deterministic
     // IDs exist. The cold publication deliberately retains its dense seed.
-    if (this.topologyPublished) this.topologyTransfer?.encodeCapture(encoder);
+    if (this.topologyPublished) this.topologyTransfer?.encodeCapture(encoder, previousGeneration);
     encoder.clearBuffer(this.control, 0, 8);
     encoder.clearBuffer(this.control, 16, 8);
     encoder.clearBuffer(this.incidence, 0, this.plan.rowCapacity * 4);
@@ -344,6 +348,7 @@ export class WebGPUOctreeFaceMirror {
       projectionParity: this.parity, projectionParityOffset: 16,
       projectedDivergence: this.parity, projectedDivergenceOffset: 32,
       topologyTransferDiagnostics: this.topologyTransfer?.diagnostics,
+      previousFacePublication: this.topologyTransfer?.previousPublication,
     };
   }
 
