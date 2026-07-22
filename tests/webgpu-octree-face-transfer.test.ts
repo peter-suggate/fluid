@@ -6,6 +6,7 @@ import {
   OCTREE_FACE_TRANSFER_DIAGNOSTIC_BYTES,
   OCTREE_FACE_PREVIOUS_CONTROL_BYTES,
   OCTREE_FACE_PREVIOUS_GENERATION_OFFSET_BYTES,
+  OCTREE_FACE_PREVIOUS_PUBLICATION_HEADER_BYTES,
   OCTREE_FACE_PREVIOUS_RECORD_BYTES,
   OCTREE_FACE_PREVIOUS_VALID_OFFSET_BYTES,
   octreeFaceTopologyTransferShader,
@@ -25,11 +26,13 @@ test("topology transfer uses compact radix-sort storage", () => {
   assert.equal(OCTREE_FACE_PREVIOUS_CONTROL_BYTES, 64);
   assert.equal(OCTREE_FACE_PREVIOUS_GENERATION_OFFSET_BYTES, 52);
   assert.equal(OCTREE_FACE_PREVIOUS_VALID_OFFSET_BYTES, 56);
+  assert.equal(OCTREE_FACE_PREVIOUS_PUBLICATION_HEADER_BYTES, 64);
   assert.equal(plan.recordBytes, 0);
-  assert.equal(plan.scratchBytes, plan.indexBytes);
+  assert.equal(plan.publicationBytes, 64 + 125_488 * 20);
+  assert.equal(plan.scratchBytes, plan.publicationBytes);
   assert.equal(plan.dispatchBytes, 36);
   assert.equal(OCTREE_FACE_TRANSFER_DIAGNOSTIC_BYTES, 32);
-  assert.equal(plan.allocatedBytes, 3_599_428);
+  assert.equal(plan.allocatedBytes, 5_584_964);
   const uiSized = planOctreeFaceTopologyTransfer(165_888, { keyDimensions: [24, 18, 16] });
   assert.equal(uiSized.sortPasses, 8,
     "exact immutable bounds remove the 24 provably-zero high-nibble passes");
@@ -41,8 +44,9 @@ test("topology transfer uses compact radix-sort storage", () => {
     "large domains retain every exact origin/span nibble they need");
   const inspected = planOctreeFaceTopologyTransfer(125_488, { retainRecords: true });
   assert.equal(inspected.recordBytes, 125_488 * 24);
-  assert.equal(inspected.scratchBytes, inspected.recordBytes);
-  assert.equal(inspected.allocatedBytes, 6_086_852);
+  assert.equal(inspected.transferRecordOffsetBytes, inspected.publicationBytes);
+  assert.equal(inspected.scratchBytes, inspected.publicationBytes + inspected.recordBytes);
+  assert.equal(inspected.allocatedBytes, 8_596_676);
   assert.throws(() => planOctreeFaceTopologyTransfer(0), /positive/);
 });
 
@@ -72,6 +76,9 @@ test("GPU topology transfer has exact, prolongation, restriction, and fail-close
   assert.match(octreeFaceTopologyTransferShader, /parentSpan = span \* 2u/);
   assert.match(octreeFaceTopologyTransferShader, /atomicStore\(&diagnostics\[3\], 1u\)/);
   assert.match(octreeFaceTopologyTransferShader, /publishHash/);
+  assert.match(octreeFaceTopologyTransferShader,
+    /let base=16u\+gid\.x\*5u;sortScratch\[base\]=old\.originX.*sortScratch\[base\+4u\]=bitcast<u32>\(old\.normalVelocity\)/s,
+    "the existing live validation dispatch materializes a directly searchable sorted publication");
 });
 
 test("all radix data stages consume one storage-separated GPU-authored live dispatch", () => {
@@ -114,9 +121,10 @@ test("all radix data stages consume one storage-separated GPU-authored live disp
   transfer.encodeTransfer(encoder);
   const previous = transfer.previousPublication;
   assert.equal(previous.faceCapacity, transfer.plan.faceCapacity);
-  assert.equal(previous.sortCapacity, transfer.plan.sortCapacity);
+  assert.equal(previous.byteLength, transfer.plan.publicationBytes);
+  const previousControl = created.find((entry) => entry.label === "Previous octree face control")!.buffer;
   assert.ok(copies.some((copy) => copy[0] === generation && copy[1] === 28
-    && copy[2] === previous.control && copy[3] === OCTREE_FACE_PREVIOUS_GENERATION_OFFSET_BYTES && copy[4] === 4),
+    && copy[2] === previousControl && copy[3] === OCTREE_FACE_PREVIOUS_GENERATION_OFFSET_BYTES && copy[4] === 4),
   "the previous publication generation must be copied from the GPU authority, not inferred on the host");
   assert.ok(direct.includes("Publish compact previous octree faces"),
     "generation validity publishes only after sorted-key validation");
@@ -238,7 +246,8 @@ test("Dawn preserves canonical velocities through exact, prolongation, and restr
   const recordReadback = device.createBuffer({ size: capacity * 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const diagnosticReadback = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   encoder.copyBufferToBuffer(faces, 0, faceReadback, 0, capacity * 32);
-  encoder.copyBufferToBuffer(transfer.records, 0, recordReadback, 0, capacity * 24);
+  encoder.copyBufferToBuffer(transfer.records, transfer.plan.transferRecordOffsetBytes,
+    recordReadback, 0, capacity * 24);
   encoder.copyBufferToBuffer(transfer.diagnostics, 0, diagnosticReadback, 0, 16);
   device.queue.submit([encoder.finish()]);
   await Promise.all([faceReadback.mapAsync(GPUMapMode.READ), recordReadback.mapAsync(GPUMapMode.READ), diagnosticReadback.mapAsync(GPUMapMode.READ)]);

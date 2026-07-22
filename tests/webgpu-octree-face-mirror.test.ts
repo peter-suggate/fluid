@@ -66,7 +66,7 @@ test("GPU face store deterministically publishes canonical orientation and signe
   assert.match(mirrorEncode, /if\(applyRhs\)/);
   assert.match(mirrorEncode, /this\.applyRhsPipeline/);
   const solve = WebGPUOctreeProjection.prototype.encode.toString().replace(/\s+/g, "");
-  assert.match(solve, /this\.faceMirror\.encodeTopology\(encoder,this\.solveDispatch\)/);
+  assert.match(solve, /this\.faceMirror\.encodeTopology\(encoder,this\.solveDispatch,this\.powerFaces\?\{buffer:this\.powerFaces\.control,offsetBytes:7\*4\}:void0\)/);
   assert.match(solve, /this\.faceMirror\.encodeRhs\(encoder,this\.solveDispatch,this\.faceRhsAuthority\)/);
   assert.ok(solve.indexOf("this.faceMirror.encodeTopology") > solve.indexOf("pressure.end()"));
   assert.ok(solve.indexOf("this.faceMirror.encodeRhs") < solve.indexOf("this.iterateChebyshevPipeline"));

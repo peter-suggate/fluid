@@ -24,13 +24,10 @@ test("old-mesh velocity plan retains headers, topology metrics, full vectors, an
   assert.equal(plan.headerBytes, 128 * 48);
   assert.equal(plan.metricOffsetBytes, plan.headerBytes);
   assert.equal(plan.velocityOffsetBytes, plan.headerBytes + 128 * 16);
-  assert.equal(plan.axisControlOffsetBytes, plan.headerBytes + 128 * 32);
-  assert.equal(plan.axisFaceOffsetBytes, plan.axisControlOffsetBytes + 32);
-  assert.equal(plan.axisFaceCapacity, 512);
-  assert.equal(plan.axisHashCapacity, 1024);
-  assert.equal(plan.axisHashOffsetBytes, plan.axisFaceOffsetBytes + 512 * 32);
-  assert.equal(plan.arenaBytes, plan.axisHashOffsetBytes + 1024 * 4);
+  assert.equal(plan.siteOffsetBytes, plan.headerBytes + 128 * 32);
   assert.equal(plan.siteBytes, 256 * 16);
+  assert.equal(plan.arenaBytes, plan.siteOffsetBytes + plan.siteBytes);
+  assert.equal(plan.allocatedBytes, plan.arenaBytes + 64 + 80);
 });
 
 test("old-mesh parameter upload follows the WGSL vec3 uniform ABI", () => {
@@ -40,7 +37,7 @@ test("old-mesh parameter upload follows the WGSL vec3 uniform ABI", () => {
     metricOffsetWords: 303, velocityOffsetWords: 404,
     dimensions: [16, 32, 64], maximumLeafSize: 8, generation: 7,
     physicalCellSize: 0.125, timestep: 0.025,
-    axisControlOffsetWords: 505, axisFaceOffsetWords: 606, axisHashOffsetWords: 707,
+    siteOffsetWords: 505,
   });
   assert.equal(data.byteLength, 80);
   const words = new Uint32Array(data), floats = new Float32Array(data);
@@ -48,7 +45,7 @@ test("old-mesh parameter upload follows the WGSL vec3 uniform ABI", () => {
   assert.deepEqual(Array.from(words.slice(5, 8)), [0, 0, 0], "vec3 alignment padding is explicit");
   assert.deepEqual(Array.from(words.slice(8, 13)), [16, 32, 64, 8, 7]);
   assert.equal(floats[13], 0.125); assert.ok(Math.abs(floats[14] - 0.025) < 1e-7);
-  assert.deepEqual(Array.from(words.slice(16, 19)), [505, 606, 707]);
+  assert.deepEqual(Array.from(words.slice(16, 19)), [505, 0, 0]);
 });
 
 test("Section 5 CPU oracle backtraces a full vector and projects only at the new face", () => {
@@ -104,9 +101,14 @@ test("old-mesh GPU authority is generation-coherent and uses cube/catalog interp
   assert.match(octreePowerOldMeshCaptureWGSL,
     /velocityControl\[0\]!=VALID.*velocityControl\[2\]!=rows.*velocityControl\[5\]!=rows.*velocityControl\[7\]!=generation/,
     "only a complete full-vector publication from the same old generation may be captured");
-  assert.match(octreePowerOldMeshCaptureWGSL,
-    /indexOldAxisFaces.*axisHash\(face\).*atomicCompareExchangeWeak/s,
-    "the same old generation retains a bounded spatial index of staggered regular faces");
+  assert.doesNotMatch(octreePowerOldMeshCaptureWGSL, /indexOldAxisFaces|axisHash|atomicCompareExchangeWeak/,
+    "the old mesh must not rebuild a second Cartesian-face hash");
+  assert.match(octreePowerOldMeshAdvectionWGSL,
+    /fn findAxis.*var low=0u;var high=count;while\(low<high\).*compareAxis\(axisFace\(mid\),o,axisSpan\)/s,
+    "regular-axis lookup binary-searches the topology transfer's sorted live prefix");
+  assert.match(octreePowerOldMeshAdvectionWGSL,
+    /axisPublication\[3\]!=VALID.*axisPublication\[2\]!=oldGeneration/s,
+    "the shared Cartesian-face publication remains validity- and generation-coherent");
   assert.match(octreePowerOldMeshAdvectionWGSL,
     /oldGeneration\+1u!=p\.generation.*fail\(GENERATION,0u\)/,
     "a missing or stale old generation must fail closed");
@@ -140,6 +142,17 @@ test("old-mesh GPU authority is generation-coherent and uses cube/catalog interp
     "every successfully traced face publishes the stable scratch status");
   assert.doesNotMatch(octreePowerOldMeshAdvectionWGSL, /faceKey|homologous|applyExactPowerTransfer/,
     "the authoritative recurrent path has no same-face identity transfer masquerading as advection");
+});
+
+test("old-mesh capture retains full vectors but does not duplicate canonical Cartesian faces", () => {
+  const capture = compact(WebGPUOctreePowerFaceAdvection.prototype.encodeCapture);
+  assert.match(capture, /input\.leafHeaders.*topology\.metrics.*input\.rowVelocities.*faces\.siteIndex/s,
+    "the old full-vector interpolation mesh and site ownership remain unchanged");
+  assert.doesNotMatch(capture, /axis\.control|axis\.faces|clearBuffer|captureAxisPipeline|indexOldAxisFaces/,
+    "the shared sorted publication removes both the duplicate copy and local hash construction");
+  const plan = planOctreePowerOldMeshAdvection(4_096, 98_304, 8_192);
+  assert.equal(plan.arenaBytes, 4_096 * (48 + 16 + 16) + 8_192 * 16,
+    "the old arena contains only headers, metrics, row vectors, and the existing site directory");
 });
 
 test("old-mesh interpolation admits an exact liquid-air dual boundary only through its incident element", () => {
@@ -179,8 +192,8 @@ test("Section 5 captures only the final extrapolated vectors for the next rebuil
   assert.equal(compact(WebGPUOctreePowerFaceAdvection.prototype.encodeAdvect)
     .match(/encoder\.beginComputePass/g)?.length, 3,
   "prepare, bulk advection, and publication use separate storage-dependency passes");
-  assert.deepEqual(OCTREE_POWER_OLD_MESH_PREPARE_BINDINGS, [0, 1, 4, 5, 6, 7, 8]);
-  assert.deepEqual(OCTREE_POWER_OLD_MESH_ADVECT_BINDINGS, [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12]);
+  assert.deepEqual(OCTREE_POWER_OLD_MESH_PREPARE_BINDINGS, [0, 1, 4, 5, 6, 7, 8, 13]);
+  assert.deepEqual(OCTREE_POWER_OLD_MESH_ADVECT_BINDINGS, [0, 1, 2, 5, 6, 7, 8, 10, 11, 12, 13]);
   assert.deepEqual(OCTREE_POWER_OLD_MESH_FINALIZE_BINDINGS, [1, 8]);
   assert.match(compact(WebGPUOctreePowerFaceAdvection.prototype.encodeAdvect),
     /group\(this\.preparePipeline,OCTREE_POWER_OLD_MESH_PREPARE_BINDINGS\).*group\(this\.advectPipeline,OCTREE_POWER_OLD_MESH_ADVECT_BINDINGS\).*group\(this\.finalizePipeline,OCTREE_POWER_OLD_MESH_FINALIZE_BINDINGS\)/,

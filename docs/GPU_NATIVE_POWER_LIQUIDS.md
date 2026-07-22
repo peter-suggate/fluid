@@ -59,15 +59,24 @@ Those fences fixed a measured schedule-sensitive generation-95 row-publication
 failure while removing an invalid cross-workgroup polling loop. Even with the
 additional correctness boundaries, wall time fell.
 
-The same trace clears 273,720,576 bytes and copies 551,117,504 bytes over the
-run, or 4.41 MB of clears and 8.89 MB of copies per advance. Counted face-slot
-retirement removed the former 5.31 MB/advance Section 5 face-arena clear; the
-remaining dominant clear is now the old interpolation mesh at 2.10 MB/advance.
-The dominant copy remains the canonical face publication into that retained
-mesh at 5.31 MB/advance, followed by SPGrid's captured L1 entries at
-1.99 MB/advance. Recurring clear traffic is down 82.4% from the original exact
-trace. Copy traffic is unchanged apart from four bytes per advance carrying
-the previous-face generation into a new fail-closed compact publication.
+Direct consumption of the sorted compact previous-face publication then
+removed the duplicate regular-axis face arena, its CAS hash build, and the
+capacity hash clear. The exact 62-step trace now clears 143,697,152 bytes and
+copies 221,994,224 bytes, or 2.32 MB of clears and 3.58 MB of copies per
+advance. This deletes 7.41 MB of explicit recurring copy/clear traffic, four
+commands, and 5.14 MB of allocation per UI-equivalent step. Recurring clear
+traffic is down 90.8% from the original exact trace. The remaining dominant
+copy is SPGrid's captured L1 entries at 1.99 MB/advance; the remaining largest
+clears are surface pages (0.59 MB), face-radix histograms (0.52 MB), and the
+Section 5 least-squares accumulator (0.33 MB).
+
+This compact lookup is an architectural zero-atomic step, not a wall-time
+claim. Two exact runs measured 4.278 s and 4.409 s (69.0--71.1 ms/advance)
+against 4.240 s immediately before the switch. The saved construction traffic
+is partly exchanged for repeated global binary searches during interpolation.
+A sparse prefix directory over the sorted key publication is therefore the
+next required lookup primitive; restoring a separately built CAS hash would
+recreate the representation this change removed.
 
 The original 16x16x16 62-step warm baseline was 14.414 s. Removing a dead
 old-mesh snapshot reduced that to 11.322 s. The current profiler-free run is
@@ -134,10 +143,13 @@ without adding any default-path allocation, command, readback, or fence. Its
 first moving UI-equivalent step measured face kinetic proxy changes of
 0.00014777 after gravity, 0.00012349 after projection (-16.4%), and 0.00012206
 after face-band publication (a further -1.15%). Fine transport changed the
-resident potential proxy by only -0.034% in that step. Topology/redistance
-measurements currently change resident support, so their raw delta is recorded
-but is not yet labeled dissipation; the next ledger revision must compare a
-common immutable sample set.
+resident potential proxy by only -0.034% in that step. The ledger now freezes
+the old/new valid-coordinate intersection before topology reuse and evaluates
+later stages on exactly that immutable support. On 361,408 common samples,
+topology publication was exactly neutral; redistance changed potential by
+-1.642% and represented volume by -0.384%, a -1.263% change in potential per
+represented volume. This localizes a real redistance loss without confusing it
+with residency changes.
 
 The target topology is one generic radix/scan/compact spine. Every topology
 product is a counted, sorted A/B publication: a small header containing its
@@ -283,6 +295,13 @@ dominate a small scene.
   rejection, and numerical Dawn parity before wall-time measurement.
 - Replacing atomics with many extra passes is not success. Atomics, dispatches,
   pass transitions, bytes moved, and wall time are joint constraints.
+- An on-the-fly parent-owned restriction gather removed every restriction data
+  atomic without adding a dispatch, but each parent searched a 4x4x4 fine
+  neighbourhood and compared up to eight transfer corners. Exact UI Dawn A/B
+  measured 4.581 s versus 4.278 s for the prior scatter, a 7.1% regression.
+  It was removed. The accepted zero-atomic successor must build deterministic
+  parent ranges once per topology generation and reuse them across every
+  preconditioner application.
 
 ## Acceptance gates
 
