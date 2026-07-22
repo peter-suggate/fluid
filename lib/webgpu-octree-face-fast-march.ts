@@ -187,6 +187,9 @@ export interface OctreeFaceBandControlSnapshot {
   readonly airSamplesSelected: number;
   /** Classified air samples actually entered by the Stage-B evaluation dispatch. */
   readonly airSamplesEvaluated: number;
+  /** Faces completed by the bounded graph-connectivity fallback after the
+   * signed-distance ordering reached a discrete positive-air local minimum. */
+  readonly connectivityFallbacks: number;
   readonly capacityFailure: boolean;
   readonly hashProbeFailure: boolean;
   readonly invalidSource: boolean;
@@ -594,6 +597,7 @@ export function unpackOctreeFaceBandControl(words: ArrayLike<number>): OctreeFac
     surroundingOwnerRowsTested: Number(words[28] ?? 0) >>> 0,
     airSamplesSelected: Number(words[29] ?? 0) >>> 0,
     airSamplesEvaluated: Number(words[30] ?? 0) >>> 0,
+    connectivityFallbacks: Number(words[31] ?? 0) >>> 0,
     capacityFailure: (flags & OCTREE_FACE_BAND_ERROR.capacity) !== 0,
     hashProbeFailure: (flags & OCTREE_FACE_BAND_ERROR.hashProbe) !== 0,
     invalidSource: (flags & OCTREE_FACE_BAND_ERROR.invalidSource) !== 0,
@@ -710,6 +714,14 @@ export interface OctreeFaceBandSampleOptions {
   /** Explicit current catalog authority for strict local point evaluation. */
   readonly powerTopology: OctreePowerTopologySource;
 }
+
+/** Semantic stages exposed only to the intrusive host queue-fence profiler. */
+export type OctreeFaceBandAirSampleStage = "classifyAirBandVelocity"
+  | "evaluateAirBandVelocity" | "finalizeAirBandVelocity";
+export type OctreeFaceBandAirSampleBoundary = (
+  stage: OctreeFaceBandAirSampleStage,
+  encoder: GPUCommandEncoder,
+) => GPUCommandEncoder;
 
 function positive(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} must be a positive integer`);
@@ -918,7 +930,6 @@ export class WebGPUOctreeFaceFastMarch {
   private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
   private readonly sampleClassifyPipeline: GPUComputePipeline;
   private readonly sampleEvaluatePipeline: GPUComputePipeline;
-  private readonly sampleAggregatePipeline: GPUComputePipeline;
   private readonly sampleFinalizePipeline: GPUComputePipeline;
   private readonly preparePowerAdvectionRepairPipeline: GPUComputePipeline;
   private readonly repairPowerAdvectionPipeline: GPUComputePipeline;
@@ -1090,13 +1101,23 @@ export class WebGPUOctreeFaceFastMarch {
       publishPowerFaces: pipeline("publishPowerFaceVelocity"),
       commitPowerFaces: pipeline("commitPowerFaceVelocity") };
     for (let layer = 1; layer <= this.faceBfsLayers; layer += 1) {
-      pipelines[`propagateBfs${layer}`] = pipeline("propagateFaceBfsLayer", { faceBfsLayer: layer });
+      pipelines[`propagateBfs${layer}`] = pipeline("propagateFaceBfsLayer",
+        { faceBfsLayer: layer, faceBfsCausal: 1 });
+      pipelines[`propagateConnectivity${layer}`] = pipeline("propagateFaceBfsLayer",
+        { faceBfsLayer: this.faceBfsLayers + layer, faceBfsCausal: 0 });
     }
     this.pipelines = Object.freeze(pipelines);
-    this.sampleClassifyPipeline = pipeline("classifyAirBandVelocity");
-    this.sampleEvaluatePipeline = pipeline("evaluateAirBandVelocity");
-    this.sampleAggregatePipeline = pipeline("aggregateAirBandSearchCounters");
-    this.sampleFinalizePipeline = pipeline("finalizeAirBandVelocity");
+    // Recurring transport reads an immutable face-band publication. Compile it
+    // separately so hashes, status words, and publication controls are ordinary
+    // storage values; the mixed topology module necessarily declares those same
+    // buffers atomic while it is constructing the publication.
+    const sampleModule = device.createShaderModule({ label: "atomic-free octree face-band air sampler",
+      code: makeOctreeFaceBandAirSampleWGSL() });
+    const samplePipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
+      layout: "auto", compute: { module: sampleModule, entryPoint } });
+    this.sampleClassifyPipeline = samplePipeline("classifyAirBandVelocity");
+    this.sampleEvaluatePipeline = samplePipeline("evaluateAirBandVelocity");
+    this.sampleFinalizePipeline = samplePipeline("finalizeAirBandVelocity");
     this.preparePowerAdvectionRepairPipeline = pipeline("preparePowerFaceAdvectionBandRepair");
     this.repairPowerAdvectionPipeline = pipeline("repairPowerFaceAdvectionFromBand");
     this.finalizePowerAdvectionPipeline = pipeline("finalizePowerFaceAdvectionFromBand");
@@ -1410,6 +1431,19 @@ export class WebGPUOctreeFaceFastMarch {
               [31, this.transitionAdjacency], [32, this.transitionControl]],
             Math.ceil(this.plan.faceCapacity / 64), pass);
           }
+          // Face-centred samples of an otherwise valid signed-distance field
+          // can form a shallow positive-air local minimum on the mixed-axis
+          // regular-face graph. The causal pass above cannot leave that basin,
+          // even though its surrounding faces already carry seed-rooted
+          // velocities. Finish only those still-UNKNOWN components with a
+          // bounded, deterministic connectivity BFS. Validation below remains
+          // strict: a genuinely disconnected component still rejects.
+          for (let layer = 1; layer <= this.faceBfsLayers; layer += 1) {
+            run(`propagateConnectivity${layer}`, [[0, this.params], [5, this.control], [6, this.rows],
+              [12, this.faces], [14, this.incidence], [15, this.state], [27, this.transitionMetrics],
+              [31, this.transitionAdjacency], [32, this.transitionControl]],
+            Math.ceil(this.plan.faceCapacity / 64), pass);
+          }
           run("validate", [[0, this.params], [5, this.control], [6, this.rows], [12, this.faces],
             [14, this.incidence], [15, this.state], [27, this.transitionMetrics],
             [31, this.transitionAdjacency], [32, this.transitionControl]],
@@ -1550,11 +1584,12 @@ export class WebGPUOctreeFaceFastMarch {
    * misses using the published Section 5 regular-face point field. */
   encodeAirSamples(encoder: GPUCommandEncoder, positions: GPUBuffer | GPUBufferBinding,
     results: GPUBuffer, statuses: GPUBuffer,
-    options: OctreeFaceBandSampleOptions): void {
+    options: OctreeFaceBandSampleOptions,
+    boundary?: OctreeFaceBandAirSampleBoundary): GPUCommandEncoder {
     this.assertLive();
     const count = positive(options.queryCount, "Face-band sample count");
-    if (statuses.size < count * 4 + 32) {
-      throw new RangeError("Face-band sample status buffer needs eight reserved diagnostic words");
+    if (statuses.size < count * 4) {
+      throw new RangeError("Face-band sample status buffer is smaller than the query count");
     }
     if (!Number.isFinite(options.physicalCellSize) || options.physicalCellSize <= 0) {
       throw new RangeError("Face-band sample physical cell size must be finite and positive");
@@ -1590,29 +1625,35 @@ export class WebGPUOctreeFaceFastMarch {
       { binding: 28, resource: { buffer: tetrahedronHeaders } }, { binding: 29, resource: { buffer: tetrahedra } },
       { binding: 30, resource: { buffer: tetrahedronVertices } },
     ];
-    const aggregateEntries: GPUBindGroupEntry[] = [
-      { binding: 5, resource: { buffer: this.control } },
-      { binding: 23, resource: { buffer: statuses } },
-    ];
     const finalizeEntries: GPUBindGroupEntry[] = [
       { binding: 5, resource: { buffer: this.control } }, { binding: 20, resource: { buffer: this.sampleParams } },
       { binding: 23, resource: { buffer: statuses } }, { binding: 48, resource: { buffer: this.pointFieldControl } },
     ];
-    encoder.clearBuffer(statuses, statuses.size - 32, 32);
-    const pass = encoder.beginComputePass({ label: "Sample extrapolated air-side octree velocity" });
-    const dispatch = (pipeline: GPUComputePipeline, entries: GPUBindGroupEntry[], workgroups: number) => {
+    const dispatch = (pass: GPUComputePassEncoder, pipeline: GPUComputePipeline,
+      entries: GPUBindGroupEntry[], workgroups: number) => {
       pass.setPipeline(pipeline); pass.setBindGroup(0, this.device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0), entries })); pass.dispatchWorkgroups(workgroups);
     };
     const queryWorkgroups = Math.ceil(count / 64);
-    dispatch(this.sampleClassifyPipeline, classifyEntries, queryWorkgroups);
-    dispatch(this.sampleEvaluatePipeline, evaluateEntries, queryWorkgroups);
-    // The aggregate entry point has @workgroup_size(1) and folds the reserved
-    // tail exactly once. Dispatching it like a per-query kernel multiplies
-    // every diagnostic by queryWorkgroups (4,096 at the factor-4 mini dam).
-    dispatch(this.sampleAggregatePipeline, aggregateEntries, 1);
-    dispatch(this.sampleFinalizePipeline, finalizeEntries, queryWorkgroups);
-    pass.end();
+    if (!boundary) {
+      const pass = encoder.beginComputePass({ label: "Sample extrapolated air-side octree velocity" });
+      dispatch(pass, this.sampleClassifyPipeline, classifyEntries, queryWorkgroups);
+      dispatch(pass, this.sampleEvaluatePipeline, evaluateEntries, queryWorkgroups);
+      dispatch(pass, this.sampleFinalizePipeline, finalizeEntries, queryWorkgroups);
+      pass.end();
+      return encoder;
+    }
+    const splitStage = (stage: OctreeFaceBandAirSampleStage, pipeline: GPUComputePipeline,
+      entries: GPUBindGroupEntry[]) => {
+      const pass = encoder.beginComputePass({ label: `Profile ${stage}` });
+      dispatch(pass, pipeline, entries, queryWorkgroups);
+      pass.end();
+      encoder = boundary(stage, encoder);
+    };
+    splitStage("classifyAirBandVelocity", this.sampleClassifyPipeline, classifyEntries);
+    splitStage("evaluateAirBandVelocity", this.sampleEvaluatePipeline, evaluateEntries);
+    splitStage("finalizeAirBandVelocity", this.sampleFinalizePipeline, finalizeEntries);
+    return encoder;
   }
 
   /** Complete a recurrent Section 5 characteristic wherever the compact
@@ -1719,7 +1760,8 @@ export class WebGPUOctreeFaceFastMarch {
   }
 
   get source(): OctreeFaceBandSource { return { plan: this.plan, control: this.control, rows: this.rows,
-    rowHash: this.rowHash, faces: this.faces, incidence: this.incidence, velocities: this.velocities, state: this.state,
+    rowHash: this.rowHash, faces: this.faces, incidence: this.incidence, velocities: this.velocities,
+    state: this.state,
     transitionAdjacency: this.transitionAdjacency, transitionControl: this.transitionControl,
     transitionMetrics: this.transitionMetrics, powerPublicationControl: this.powerPublicationControl,
     pointFieldControl: this.pointFieldControl, transientPowerControl: this.transientPowerControl }; }
@@ -1912,8 +1954,86 @@ export class WebGPUOctreeFaceFastMarch {
   private assertLive(): void { if (this.destroyed) throw new Error("Octree face-band marcher is destroyed"); }
 }
 
+function wgslFunctionDeclaration(source: string, name: string): string {
+  const match = new RegExp(`\\bfn\\s+${name}\\s*\\(`).exec(source);
+  if (!match) throw new Error(`Missing face-band WGSL function ${name}`);
+  const open = source.indexOf("{", match.index);
+  if (open < 0) throw new Error(`Malformed face-band WGSL function ${name}`);
+  let depth = 0;
+  for (let cursor = open; cursor < source.length; cursor += 1) {
+    if (source[cursor] === "{") depth += 1;
+    else if (source[cursor] === "}" && --depth === 0) return source.slice(match.index, cursor + 1);
+  }
+  throw new Error(`Unterminated face-band WGSL function ${name}`);
+}
+
+/**
+ * Recurring Section 5 air completion over an immutable face-band publication.
+ * The topology shader below uses atomics while constructing its hashes and
+ * controls. Once published, this dedicated module binds the identical bytes as
+ * ordinary read-only structures and gives every query exclusive ownership of
+ * its result/status slot. No atomic operation is reachable from these entries.
+ */
+export function makeOctreeFaceBandAirSampleWGSL(): string {
+  const functions = [
+    "finite", "hash", "cell", "invalidOwner", "decodeOwner", "decodePagedOwner", "residentCanonicalOwner",
+    "ownerAt", "coord", "negativeBoundaryBit", "positiveBoundaryBit", "velocityValid", "powerTransform",
+    "inversePowerTransform", "velocityExtendedOrigin", "reflectComponents", "finalCellVector", "supportCellVector",
+    "supportSelectorCellVector", "supportContainingVector", "finalSignedVector", "finalSelectorVector",
+    "tetraWeights", "contained", "invalidPointVector", "invalidPointVectorAt", "uniformCubeContains",
+    "finalTetraPointVector", "finalPointVector",
+    "surroundingOwnerDelaunayVectorMeasured", "locateFinalPointVectorMeasured",
+    "airSampleGrid",
+  ].map(name => wgslFunctionDeclaration(octreeFaceBandWGSL, name)).join("\n");
+  const source = /* wgsl */ `
+struct P{dims:vec3u,maximumLeaf:u32,rowCapacity:u32,faceCapacity:u32,rowHashCapacity:u32,faceHashCapacity:u32,siteHashCapacity:u32,powerRowCapacity:u32,generation:u32,maximumRounds:u32,ownersPerBrick:u32,powerGeneration:u32,axisStride:u32,ownedFacesPerRow:u32,closedBoundaryMask:u32,pad0:u32,pad1:u32,pad2:u32}
+struct Row{cell:u32,globalRow:u32,flags:u32,size:u32,representativePhi:f32,minimumPhi:f32,maximumPhi:f32,padf:f32}
+struct Owner{origin:vec3u,size:u32,valid:u32}
+struct Metric{topology:u32,transformFlags:u32,volume:f32,reserved:u32}
+struct TetraHeader{first:u32,count:u32,flags:u32}struct TetraVertex{v:vec4f}
+struct SurroundingOwnerVectorMeasurement{value:vec4f,rowsTested:u32}
+struct LocatedFinalPointVector{value:vec4f,directSuccess:u32,fullRowFallback:u32,candidateRowsTested:u32,surroundingFallback:u32,surroundingRowsTested:u32}
+struct C{flags:u32,firstError:u32,rowCount:u32,faceCount:u32,incidenceCount:u32,generation:u32,valid:u32,maximumDepth:u32,seedCount:u32,acceptedCount:u32,unresolvedCount:u32,initialRows:u32,sampleFailures:u32,coarsePhiFallbacks:u32,coarsePhiFailures:u32,bandPhiExtensions:u32,marchHeapHighWater:u32,marchPops:u32,marchTrials:u32,marchChunks:u32,marchChunkBound:u32,marchCapExhausted:u32,marchUnresolvedWithPredecessor:u32,marchDisconnected:u32,directAnchorSuccess:u32,fullRowFallbackInvocations:u32,fullRowCandidateRowsTested:u32,surroundingOwnerFallbackInvocations:u32,surroundingOwnerRowsTested:u32,airSamplesSelected:u32,airSamplesEvaluated:u32,pad31:u32}
+struct PointControl{flags:u32,firstError:u32,rowCount:u32,generation:u32,solved:u32,valid:u32,wallContributions:u32,pad:u32}
+struct TransitionControl{flags:u32,firstError:u32,rowCount:u32,transitionRows:u32,adjacencyCount:u32,ready:u32,transferReady:u32,detailFlags:u32,coreEnd:u32,support1End:u32,support2End:u32,support3NodeEnd:u32,endpointEnd:u32,boundaryGhostRequests:u32,hierarchyReady:u32,phiFailureCounts:u32,failureBand:u32,failureStage:u32,failureRowCell:u32,failureRowSize:u32,failureDescriptor:u32,failureTopology:u32,failureTransformFlags:u32,failureSelector:u32,failureRawX:u32,failureRawY:u32,failureRawZ:u32,failureRequestedSize:u32,failureResolvedCell:u32,failureBoundaryFlips:u32,failureOwnerCell:u32,failureOwnerSizeValid:u32,support4NodeEnd:u32,support5NodeEnd:u32,support6NodeEnd:u32,support7NodeEnd:u32,pad35:u32,pad36:u32,pad37:u32,pad38:u32}
+struct SampleP{dims:vec3u,maximumLeaf:u32,siteHashCapacity:u32,count:u32,rowHashCapacity:u32,rowCapacity:u32,cellSize:f32,fineGeneration:u32,p1:u32,p2:u32}
+@group(0)@binding(0)var<uniform>p:P;
+@group(0)@binding(5)var<storage,read>control:C;
+@group(0)@binding(6)var<storage,read>rows:array<Row>;
+@group(0)@binding(7)var<storage,read>rowHash:array<u32>;
+@group(0)@binding(19)var<storage,read>rowVelocities:array<vec4f>;
+@group(0)@binding(20)var<uniform>sp:SampleP;
+@group(0)@binding(21)var<storage,read>positions:array<vec4f>;
+@group(0)@binding(22)var<storage,read_write>sampleResults:array<vec4f>;
+@group(0)@binding(23)var<storage,read_write>sampleStatus:array<u32>;
+@group(0)@binding(26)var<storage,read>owners:array<u32>;
+@group(0)@binding(27)var<storage,read>metrics:array<Metric>;
+@group(0)@binding(28)var<storage,read>tetraHeaders:array<TetraHeader>;
+@group(0)@binding(29)var<storage,read>tetrahedra:array<u32>;
+@group(0)@binding(30)var<storage,read>tetraVertices:array<TetraVertex>;
+@group(0)@binding(32)var<storage,read>transitionControl:TransitionControl;
+@group(0)@binding(48)var<storage,read>pointControl:PointControl;
+const INVALID:u32=0xffffffffu;const VALID:u32=0x80000000u;const EXTRAPOLATED:u32=0x10000000u;const FACE_BAND_UNAVAILABLE:u32=0x08000000u;
+const ROW_PHI:u32=1u;const ROW_SUPPORT2:u32=16u;const ROW_SUPPORT3_NODE:u32=32u;const ROW_SUPPORT3_ENDPOINT:u32=64u;
+const SAMPLE_EVALUATE:u32=0x04000000u;const SAMPLE_EVALUATED:u32=0x02000000u;const SAMPLE_FAILED:u32=0x01000000u;
+const SAMPLE_FAIL_DOMAIN:u32=1u;const SAMPLE_FAIL_OWNER:u32=2u;const SAMPLE_FAIL_ROW:u32=3u;const SAMPLE_FAIL_GENERATION:u32=4u;
+${functions}
+fn rowOf(cellKey:u32)->u32{let key=cellKey+1u;let start=hash(key)&(p.rowHashCapacity-1u);for(var probe=0u;probe<32u;probe+=1u){let slot=(start+probe)&(p.rowHashCapacity-1u);let observed=rowHash[slot*2u];if(observed==0u){return INVALID;}if(observed==key){let encoded=rowHash[slot*2u+1u];return select(INVALID,encoded-1u,encoded!=0u&&encoded!=INVALID);}}return INVALID;}
+fn sampleBandRow(cellKey:u32)->u32{let start=hash(cellKey+1u)&(sp.rowHashCapacity-1u);for(var probe=0u;probe<32u;probe+=1u){let slot=(start+probe)&(sp.rowHashCapacity-1u);let observed=rowHash[slot*2u];if(observed==0u){return INVALID;}if(observed==cellKey+1u){let encoded=rowHash[slot*2u+1u];return select(INVALID,encoded-1u,encoded!=0u&&encoded!=INVALID);}}return INVALID;}
+fn retainedBandAnchor(pointGrid:vec3f)->u32{if(any(pointGrid<vec3f(0))||any(pointGrid>=vec3f(sp.dims))){return INVALID;}let q=vec3u(floor(pointGrid));var size=1u;loop{let origin=(q/vec3u(size))*vec3u(size);let band=sampleBandRow(cell(origin));if(band!=INVALID&&band<sp.rowCapacity&&band<transitionControl.support7NodeEnd&&band<arrayLength(&rows)){let row=rows[band];if(row.cell==cell(origin)&&row.size==size&&(row.flags&ROW_SUPPORT3_ENDPOINT)==0u){return band;}}if(size>=sp.maximumLeaf){break;}size<<=1u;}return INVALID;}
+@compute @workgroup_size(64)fn classifyAirBandVelocity(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=sp.count||i>=arrayLength(&positions)||i>=arrayLength(&sampleResults)||i>=arrayLength(&sampleStatus)||positions[i].w<=0.){return;}let sample=airSampleGrid(positions[i].xyz);if(sample.w==0.){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_DOMAIN;return;}let grid=sample.xyz;let q=vec3u(floor(grid));let owner=ownerAt(q);if(owner.valid==0u){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_OWNER;return;}let band=retainedBandAnchor(grid);if(band==INVALID||band>=sp.rowCapacity||band>=transitionControl.support7NodeEnd||band>=arrayLength(&rows)){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_ROW;return;}if(control.generation!=sp.fineGeneration||pointControl.generation!=sp.fineGeneration){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_GENERATION;return;}if((rows[band].flags&ROW_PHI)==0u){sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_ROW;return;}let stageBStatus=sampleStatus[i];let stageBReason=stageBStatus&255u;let needsDualCompletion=(stageBStatus&VALID)==0u&&(stageBReason==4u||stageBReason==8u);if(rows[band].minimumPhi<0.&&!needsDualCompletion){return;}sampleResults[i].w=bitcast<f32>(band);sampleStatus[i]=SAMPLE_EVALUATE;}
+@compute @workgroup_size(64)fn evaluateAirBandVelocity(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=sp.count||i>=arrayLength(&positions)||i>=arrayLength(&sampleResults)||i>=arrayLength(&sampleStatus)||sampleStatus[i]!=SAMPLE_EVALUATE){return;}let band=bitcast<u32>(sampleResults[i].w);let sample=airSampleGrid(positions[i].xyz);if(sample.w==0.){sampleResults[i]=invalidPointVector(SAMPLE_FAIL_DOMAIN);sampleStatus[i]=SAMPLE_FAILED|SAMPLE_FAIL_DOMAIN;return;}let velocity=locateFinalPointVectorMeasured(band,sample.xyz).value;if(!velocityValid(velocity)){let reason=u32(round(max(1.,-velocity.w)));sampleResults[i]=velocity;sampleStatus[i]=SAMPLE_FAILED|((band&0xffffu)<<8u)|((16u+min(reason,11u))&255u);return;}sampleResults[i]=velocity;sampleStatus[i]=SAMPLE_EVALUATED;}
+@compute @workgroup_size(64)fn finalizeAirBandVelocity(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=sp.count||i>=arrayLength(&sampleStatus)){return;}let status=sampleStatus[i];if(status!=SAMPLE_EVALUATE&&status!=SAMPLE_EVALUATED&&(status&SAMPLE_FAILED)==0u){return;}if(status==SAMPLE_EVALUATED&&control.valid==VALID&&control.generation==sp.fineGeneration&&pointControl.valid==VALID&&pointControl.flags==0u&&pointControl.generation==sp.fineGeneration){sampleStatus[i]=VALID|EXTRAPOLATED;return;}sampleStatus[i]=FACE_BAND_UNAVAILABLE|(status&0x00ffffffu);}
+`;
+  if (/\\batomic(?:Add|And|CompareExchangeWeak|Exchange|Load|Max|Min|Or|Store|Sub|Xor)?\\b/.test(source)) {
+    throw new Error("Recurring face-band air sampler must not contain atomic operations");
+  }
+  return source;
+}
+
 export const octreeFaceBandWGSL = /* wgsl */ `
 override faceBfsLayer:u32=1u;
+override faceBfsCausal:u32=1u;
 struct P{dims:vec3u,maximumLeaf:u32,rowCapacity:u32,faceCapacity:u32,rowHashCapacity:u32,faceHashCapacity:u32,siteHashCapacity:u32,powerRowCapacity:u32,generation:u32,maximumRounds:u32,ownersPerBrick:u32,powerGeneration:u32,axisStride:u32,ownedFacesPerRow:u32,closedBoundaryMask:u32,pad0:u32,pad1:u32,pad2:u32}
 struct FineP{brickDims:vec3u,brickResolution:u32,sampleDims:vec3u,samplesPerBrick:u32,domainOrigin:vec3f,fineWidth:f32,hashCapacity:u32,maxProbes:u32,pageCapacity:u32,generation:u32,activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32}
 struct Site{cellPlusOne:atomic<u32>,size:u32,row:u32,pad:u32}
@@ -1924,7 +2044,7 @@ struct CatalogEntry{firstFace:u32,faceCount:u32}struct PowerCatalogFace{neighbor
 struct Metric{topology:u32,transformFlags:u32,volume:f32,reserved:u32}struct TetraHeader{first:u32,count:u32,flags:u32}struct TetraVertex{v:vec4f}struct GuardCandidate{band:u32,selector:u32,cell:u32,size:u32}struct TransitionAdjacency{band:u32,a:u32,b:u32,c:u32}struct TransitionControl{flags:atomic<u32>,firstError:atomic<u32>,rowCount:u32,transitionRows:atomic<u32>,adjacencyCount:atomic<u32>,ready:atomic<u32>,transferReady:u32,detailFlags:atomic<u32>,coreEnd:u32,support1End:u32,support2End:u32,support3NodeEnd:u32,endpointEnd:u32,boundaryGhostRequests:atomic<u32>,hierarchyReady:atomic<u32>,phiFailureCounts:atomic<u32>,failureBand:atomic<u32>,failureStage:u32,failureRowCell:u32,failureRowSize:u32,failureDescriptor:u32,failureTopology:u32,failureTransformFlags:u32,failureSelector:u32,failureRawX:u32,failureRawY:u32,failureRawZ:u32,failureRequestedSize:u32,failureResolvedCell:u32,failureBoundaryFlips:u32,failureOwnerCell:u32,failureOwnerSizeValid:u32,support4NodeEnd:u32,support5NodeEnd:u32,support6NodeEnd:u32,support7NodeEnd:u32,pad35:u32,pad36:u32,pad37:u32,pad38:u32}
 struct Face{negativeRow:u32,positiveRow:u32,axisSpan:u32,globalFace:u32,velocity:vec4f,centroid:vec4f,phi:f32,area:f32,flags:u32,pad:u32}
 struct PhiDiagnostic{origin:vec3i,size:u32,anchor:u32,path:u32,selector:u32,cause:u32,detail:u32}
-struct State{velocity:vec4f,parent:u32,depth:u32,status:atomic<u32>,pad:u32}struct C{flags:atomic<u32>,firstError:atomic<u32>,rowCount:atomic<u32>,faceCount:atomic<u32>,incidenceCount:atomic<u32>,generation:u32,valid:atomic<u32>,maximumDepth:atomic<u32>,seedCount:atomic<u32>,acceptedCount:atomic<u32>,unresolvedCount:atomic<u32>,initialRows:atomic<u32>,sampleFailures:atomic<u32>,coarsePhiFallbacks:atomic<u32>,coarsePhiFailures:atomic<u32>,bandPhiExtensions:atomic<u32>,marchHeapHighWater:atomic<u32>,marchPops:atomic<u32>,marchTrials:atomic<u32>,marchChunks:atomic<u32>,marchChunkBound:u32,marchCapExhausted:atomic<u32>,marchUnresolvedWithPredecessor:atomic<u32>,marchDisconnected:atomic<u32>,directAnchorSuccess:atomic<u32>,fullRowFallbackInvocations:atomic<u32>,fullRowCandidateRowsTested:atomic<u32>,surroundingOwnerFallbackInvocations:atomic<u32>,surroundingOwnerRowsTested:atomic<u32>,airSamplesSelected:atomic<u32>,airSamplesEvaluated:atomic<u32>,pad31:u32}
+struct State{velocity:vec4f,parent:u32,depth:u32,status:atomic<u32>,pad:u32}struct C{flags:atomic<u32>,firstError:atomic<u32>,rowCount:atomic<u32>,faceCount:atomic<u32>,incidenceCount:atomic<u32>,generation:u32,valid:atomic<u32>,maximumDepth:atomic<u32>,seedCount:atomic<u32>,acceptedCount:atomic<u32>,unresolvedCount:atomic<u32>,initialRows:atomic<u32>,sampleFailures:atomic<u32>,coarsePhiFallbacks:atomic<u32>,coarsePhiFailures:atomic<u32>,bandPhiExtensions:atomic<u32>,marchHeapHighWater:atomic<u32>,marchPops:atomic<u32>,marchTrials:atomic<u32>,marchChunks:atomic<u32>,marchChunkBound:u32,marchCapExhausted:atomic<u32>,marchUnresolvedWithPredecessor:atomic<u32>,marchDisconnected:atomic<u32>,directAnchorSuccess:atomic<u32>,fullRowFallbackInvocations:atomic<u32>,fullRowCandidateRowsTested:atomic<u32>,surroundingOwnerFallbackInvocations:atomic<u32>,surroundingOwnerRowsTested:atomic<u32>,airSamplesSelected:atomic<u32>,airSamplesEvaluated:atomic<u32>,connectivityFallbacks:atomic<u32>}
 struct PowerFace{negativeRow:u32,positiveRow:u32,geometryCode:u32,flags:u32,normalVelocity:f32,area:f32,inverseDistance:f32,openFraction:f32}struct PowerPublication{flags:atomic<u32>,firstError:atomic<u32>,faceCount:u32,targetCount:atomic<u32>,interpolatedCount:atomic<u32>,committedCount:atomic<u32>,fineGeneration:u32,powerGeneration:u32,valid:atomic<u32>,p0:u32,p1:u32,p2:u32,p3:u32,p4:u32,p5:u32,p6:u32}struct PowerRowWork{faceCount:u32,incidenceCount:u32,faceOffset:u32,incidenceOffset:u32}struct PowerIncidence{face:u32,sign:i32}
 struct TransientPowerFace{negativeRow:u32,positiveRow:u32,flags:u32,pad:u32,normal:vec4f,centroid:vec4f,normalVelocity:f32,area:f32,inverseDistance:f32,padf:f32}struct TransientPowerControl{flags:atomic<u32>,firstError:atomic<u32>,rowCount:u32,faceSlots:u32,emitted:atomic<u32>,sampled:atomic<u32>,validated:atomic<u32>,generation:u32,valid:atomic<u32>,p0:u32,p1:u32,p2:u32,p3:u32,p4:u32,p5:u32,p6:u32}
 struct SampleP{dims:vec3u,maximumLeaf:u32,siteHashCapacity:u32,count:u32,rowHashCapacity:u32,rowCapacity:u32,cellSize:f32,fineGeneration:u32,p1:u32,p2:u32}
@@ -2163,9 +2283,9 @@ fn closestPredecessorTopology(row:u32,targetFace:u32,best:ptr<function,u32>){if(
 @compute @workgroup_size(64)fn jumpFaceClosestPoints(@builtin(global_invocation_id)g:vec3u){let faceIndex=g.x;if(faceIndex==0u){atomicAdd(&control.marchChunks,1u);}if(faceIndex>=p.faceCapacity||faceIndex>=arrayLength(&faces)||faceIndex>=arrayLength(&states)||faceIndex>=arrayLength(&cptParentInput)||faceIndex>=arrayLength(&cptParentOutput)||(faces[faceIndex].flags&LIVE)==0u){return;}let parent=cptParentInput[faceIndex];if(parent>=p.faceCapacity||parent>=arrayLength(&cptParentInput)){cptParentOutput[faceIndex]=INVALID;return;}let ancestor=cptParentInput[parent];cptParentOutput[faceIndex]=select(parent,ancestor,ancestor<p.faceCapacity&&ancestor<arrayLength(&cptParentInput));}
 @compute @workgroup_size(64)fn resolveFaceClosestPoints(@builtin(global_invocation_id)g:vec3u){let faceIndex=g.x;if(faceIndex>=p.faceCapacity||faceIndex>=arrayLength(&faces)||faceIndex>=arrayLength(&states)||faceIndex>=arrayLength(&cptParentInput)||(faces[faceIndex].flags&LIVE)==0u||atomicLoad(&states[faceIndex].status)!=TRIAL){return;}let root=cptParentInput[faceIndex];if(root>=p.faceCapacity||root>=arrayLength(&faces)||root>=arrayLength(&states)||atomicLoad(&states[root].status)!=ACCEPTED||(faces[root].flags&SEED)==0u||!velocityValid(states[root].velocity)){atomicStore(&states[faceIndex].status,REJECTED);return;}states[faceIndex].velocity=states[root].velocity;states[faceIndex].parent=faces[root].globalFace;atomicStore(&states[faceIndex].status,ACCEPTED);atomicAdd(&control.marchPops,1u);atomicAdd(&control.acceptedCount,1u);atomicMax(&control.maximumDepth,states[faceIndex].depth);}
 @compute @workgroup_size(64)fn prepareFaceBfsFallback(@builtin(global_invocation_id)g:vec3u){let faceIndex=g.x;if(faceIndex==0u){atomicStore(&control.marchChunks,0u);}if(faceIndex>=p.faceCapacity||faceIndex>=arrayLength(&faces)||faceIndex>=arrayLength(&states)||(faces[faceIndex].flags&LIVE)==0u){return;}if(atomicLoad(&states[faceIndex].status)==REJECTED){states[faceIndex].parent=INVALID;states[faceIndex].depth=INVALID;states[faceIndex].pad=INVALID;atomicStore(&states[faceIndex].status,UNKNOWN);}}
-fn considerBfsRow(row:u32,targetFace:u32,layer:u32,best:ptr<function,u32>,bestPhi:ptr<function,f32>,bestGlobal:ptr<function,u32>){if(row==INVALID||row>=p.rowCapacity||row>=arrayLength(&incidence)){return;}let targetRecord=faces[targetFace];let targetArrival=faceArrival(targetRecord.phi);let count=min(atomicLoad(&incidence[row]),p.axisStride);for(var local=0u;local<count;local+=1u){let candidate=atomicLoad(&incidence[p.rowCapacity+row*p.axisStride+local]);if(candidate==targetFace||candidate>=p.faceCapacity||candidate>=arrayLength(&faces)||candidate>=arrayLength(&states)||atomicLoad(&states[candidate].status)!=ACCEPTED||states[candidate].depth>=layer){continue;}let accepted=faces[candidate];if((accepted.flags&(LIVE|PHI_VALID))!=(LIVE|PHI_VALID)||!finite(accepted.phi)){continue;}let ap=abs(accepted.phi);let globalFace=accepted.globalFace;if(faceArrival(accepted.phi)<=targetArrival+1e-6&&(ap<(*bestPhi)||(ap==(*bestPhi)&&(globalFace<(*bestGlobal)||(globalFace==(*bestGlobal)&&candidate<(*best)))))){*best=candidate;*bestPhi=ap;*bestGlobal=globalFace;}}}
+fn considerBfsRow(row:u32,targetFace:u32,layer:u32,best:ptr<function,u32>,bestPhi:ptr<function,f32>,bestGlobal:ptr<function,u32>){if(row==INVALID||row>=p.rowCapacity||row>=arrayLength(&incidence)){return;}let targetRecord=faces[targetFace];let targetArrival=faceArrival(targetRecord.phi);let count=min(atomicLoad(&incidence[row]),p.axisStride);for(var local=0u;local<count;local+=1u){let candidate=atomicLoad(&incidence[p.rowCapacity+row*p.axisStride+local]);if(candidate==targetFace||candidate>=p.faceCapacity||candidate>=arrayLength(&faces)||candidate>=arrayLength(&states)||atomicLoad(&states[candidate].status)!=ACCEPTED||states[candidate].depth>=layer){continue;}let accepted=faces[candidate];if((accepted.flags&(LIVE|PHI_VALID))!=(LIVE|PHI_VALID)||!finite(accepted.phi)||(faceBfsCausal!=0u&&faceArrival(accepted.phi)>targetArrival+1e-6)){continue;}let ap=abs(accepted.phi);let globalFace=accepted.globalFace;if(ap<(*bestPhi)||(ap==(*bestPhi)&&(globalFace<(*bestGlobal)||(globalFace==(*bestGlobal)&&candidate<(*best))))){*best=candidate;*bestPhi=ap;*bestGlobal=globalFace;}}}
 fn considerBfsTopology(row:u32,targetFace:u32,layer:u32,best:ptr<function,u32>,bestPhi:ptr<function,f32>,bestGlobal:ptr<function,u32>){if(row==INVALID||row>=transitionControl.endpointEnd||row>=arrayLength(&rows)||(rows[row].flags&ROW_SUPPORT3_ENDPOINT)!=0u){return;}considerBfsRow(row,targetFace,layer,best,bestPhi,bestGlobal);if(row>=transitionControl.support2End||row>=arrayLength(&metrics)){return;}let count=min(metrics[row].reserved,MAX_TETRA);for(var local=0u;local<count;local+=1u){let at=row*MAX_TETRA+local;if(at>=arrayLength(&transitionAdjacency)){return;}let adjacency=transitionAdjacency[at];if(adjacency.band!=row){continue;}considerBfsRow(adjacency.a,targetFace,layer,best,bestPhi,bestGlobal);considerBfsRow(adjacency.b,targetFace,layer,best,bestPhi,bestGlobal);considerBfsRow(adjacency.c,targetFace,layer,best,bestPhi,bestGlobal);}}
-@compute @workgroup_size(64)fn propagateFaceBfsLayer(@builtin(global_invocation_id)g:vec3u){let faceIndex=g.x;if(faceIndex>=p.faceCapacity||faceIndex>=arrayLength(&faces)||faceIndex>=arrayLength(&states)||(faces[faceIndex].flags&LIVE)==0u||atomicLoad(&states[faceIndex].status)!=UNKNOWN){return;}let layer=faceBfsLayer;let face=faces[faceIndex];var best=INVALID;var bestPhi=3.402823e38;var bestGlobal=INVALID;considerBfsTopology(face.negativeRow,faceIndex,layer,&best,&bestPhi,&bestGlobal);considerBfsTopology(face.positiveRow,faceIndex,layer,&best,&bestPhi,&bestGlobal);if(best==INVALID){return;}states[faceIndex].velocity=states[best].velocity;states[faceIndex].parent=faces[best].globalFace;states[faceIndex].depth=layer;atomicStore(&states[faceIndex].status,ACCEPTED);atomicAdd(&control.acceptedCount,1u);atomicMax(&control.maximumDepth,layer);atomicMax(&control.marchChunks,layer);}
+@compute @workgroup_size(64)fn propagateFaceBfsLayer(@builtin(global_invocation_id)g:vec3u){let faceIndex=g.x;if(faceIndex>=p.faceCapacity||faceIndex>=arrayLength(&faces)||faceIndex>=arrayLength(&states)||(faces[faceIndex].flags&LIVE)==0u||atomicLoad(&states[faceIndex].status)!=UNKNOWN){return;}let layer=faceBfsLayer;let face=faces[faceIndex];var best=INVALID;var bestPhi=3.402823e38;var bestGlobal=INVALID;considerBfsTopology(face.negativeRow,faceIndex,layer,&best,&bestPhi,&bestGlobal);considerBfsTopology(face.positiveRow,faceIndex,layer,&best,&bestPhi,&bestGlobal);if(best==INVALID){return;}states[faceIndex].velocity=states[best].velocity;states[faceIndex].parent=faces[best].globalFace;states[faceIndex].depth=layer;atomicStore(&states[faceIndex].status,ACCEPTED);atomicAdd(&control.acceptedCount,1u);if(faceBfsCausal==0u){atomicAdd(&control.connectivityFallbacks,1u);}atomicMax(&control.maximumDepth,layer);atomicMax(&control.marchChunks,layer);}
 fn auditDisconnectedRow(row:u32,targetFace:u32,best:ptr<function,u32>,bestPhi:ptr<function,f32>,neighborCount:ptr<function,u32>,nonincreasingCount:ptr<function,u32>,acceptedCount:ptr<function,u32>){if(row==INVALID||row>=p.rowCapacity||row>=arrayLength(&incidence)){return;}let targetArrival=faceArrival(faces[targetFace].phi);let count=min(atomicLoad(&incidence[row]),p.axisStride);for(var local=0u;local<count;local+=1u){let candidate=atomicLoad(&incidence[p.rowCapacity+row*p.axisStride+local]);if(candidate==targetFace||candidate>=p.faceCapacity||candidate>=arrayLength(&faces)||candidate>=arrayLength(&states)){continue;}let record=faces[candidate];if((record.flags&(LIVE|PHI_VALID))!=(LIVE|PHI_VALID)||!finite(record.phi)){continue;}*neighborCount+=1u;let candidatePhi=abs(record.phi);if(faceArrival(record.phi)<=targetArrival+1e-6){*nonincreasingCount+=1u;}if(atomicLoad(&states[candidate].status)==ACCEPTED){*acceptedCount+=1u;}if(candidatePhi<(*bestPhi)||(candidatePhi==(*bestPhi)&&record.globalFace<faces[*best].globalFace)){*best=candidate;*bestPhi=candidatePhi;}}}
 fn auditDisconnectedTopology(row:u32,targetFace:u32,best:ptr<function,u32>,bestPhi:ptr<function,f32>,neighborCount:ptr<function,u32>,nonincreasingCount:ptr<function,u32>,acceptedCount:ptr<function,u32>){if(row==INVALID||row>=transitionControl.endpointEnd||row>=arrayLength(&rows)||(rows[row].flags&ROW_SUPPORT3_ENDPOINT)!=0u){return;}auditDisconnectedRow(row,targetFace,best,bestPhi,neighborCount,nonincreasingCount,acceptedCount);if(row>=transitionControl.support2End||row>=arrayLength(&metrics)){return;}let count=min(metrics[row].reserved,MAX_TETRA);for(var local=0u;local<count;local+=1u){let at=row*MAX_TETRA+local;if(at>=arrayLength(&transitionAdjacency)){return;}let adjacency=transitionAdjacency[at];if(adjacency.band!=row){continue;}auditDisconnectedRow(adjacency.a,targetFace,best,bestPhi,neighborCount,nonincreasingCount,acceptedCount);auditDisconnectedRow(adjacency.b,targetFace,best,bestPhi,neighborCount,nonincreasingCount,acceptedCount);auditDisconnectedRow(adjacency.c,targetFace,best,bestPhi,neighborCount,nonincreasingCount,acceptedCount);}}
 fn recordDisconnectedFace(i:u32,face:Face){var claimed=false;loop{let result=atomicCompareExchangeWeak(&transitionControl.failureBand,INVALID,i);if(result.exchanged){claimed=true;break;}if(result.old_value!=INVALID){break;}}if(!claimed){return;}var best=INVALID;var bestPhi=3.402823e38;var neighborCount=0u;var nonincreasingCount=0u;var acceptedCount=0u;auditDisconnectedTopology(face.negativeRow,i,&best,&bestPhi,&neighborCount,&nonincreasingCount,&acceptedCount);auditDisconnectedTopology(face.positiveRow,i,&best,&bestPhi,&neighborCount,&nonincreasingCount,&acceptedCount);var bestGlobal=INVALID;var bestPhiBits=0u;var bestStatus=INVALID;var bestFlags=INVALID;var bestParent=INVALID;if(best!=INVALID){bestGlobal=faces[best].globalFace;bestPhiBits=bitcast<u32>(faces[best].phi);bestStatus=atomicLoad(&states[best].status);bestFlags=faces[best].flags;bestParent=states[best].parent;}transitionControl.failureStage=OWNER_FAILURE_DISCONNECTED_FACE;transitionControl.failureRowCell=face.globalFace;transitionControl.failureRowSize=face.negativeRow;transitionControl.failureDescriptor=face.positiveRow;transitionControl.failureTopology=face.flags;transitionControl.failureTransformFlags=bitcast<u32>(face.phi);transitionControl.failureSelector=best;transitionControl.failureRawX=bestGlobal;transitionControl.failureRawY=bestPhiBits;transitionControl.failureRawZ=bestStatus;transitionControl.failureRequestedSize=neighborCount;transitionControl.failureResolvedCell=nonincreasingCount;transitionControl.failureBoundaryFlips=acceptedCount;transitionControl.failureOwnerCell=bestFlags;transitionControl.failureOwnerSizeValid=bestParent;}
@@ -2300,14 +2420,19 @@ fn storeBandRepairFailure(index:u32,stage:u32,value:vec4f){let reason=u32(max(1.
 @compute @workgroup_size(64)fn repairPowerFaceAdvectionFromBand(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=sp.count||i>=arrayLength(&powerFaces)||i>=arrayLength(&powerFaceNormals)||i>=arrayLength(&powerFaceCentroids)){return;}let priorStatus=bitcast<u32>(powerFaceCentroids[i].w);if(priorStatus==STATUS_VALID){return;}var face=powerFaces[i];if((face.flags&POWER_FACE_VALID)==0u){powerFaceCentroids[i].w=bitcast<f32>((1u<<8u)|25u);return;}if(face.positiveRow==INVALID&&(face.flags&POWER_FACE_BOUNDARY)!=0u&&(face.flags&POWER_FACE_OPEN_BOUNDARY)==0u){face.normalVelocity=0.;powerFaces[i]=face;powerFaceCentroids[i].w=bitcast<f32>(STATUS_VALID);return;}let n=powerFaceNormals[i].xyz;let x=powerFaceCentroids[i].xyz;let v0=retainedBandIncidentVector(x,n);if(!velocityValid(v0)){storeBandRepairFailure(i,1u,v0);return;}let dt=bitcast<f32>(sp.p1);let vm=retainedBandIncidentVector(x-.5*dt*v0.xyz,n);if(!velocityValid(vm)){storeBandRepairFailure(i,2u,vm);return;}let va=retainedBandIncidentVector(x-dt*vm.xyz,n);if(!velocityValid(va)){storeBandRepairFailure(i,3u,va);return;}let value=dot(va.xyz,n);if(!finite(value)){powerFaceCentroids[i].w=bitcast<f32>((3u<<8u)|22u);return;}face.normalVelocity=value;powerFaces[i]=face;powerFaceCentroids[i].w=bitcast<f32>(STATUS_VALID);}
 @compute @workgroup_size(1)fn finalizePowerFaceAdvectionFromBand(){let requestedFaces=atomicLoad(&oldAdvectionControl[8]);var completed=0u;for(var i=0u;i<requestedFaces&&i<arrayLength(&powerFaceCentroids);i+=1u){let status=bitcast<u32>(powerFaceCentroids[i].w);if(status==STATUS_VALID){completed+=1u;}else if(status!=0u){let stage=(status>>8u)&3u;let detail=((status>>10u)<<8u)|(status&255u);oldAdvectionFail(i,stage,detail);}else{oldAdvectionFail(i,1u,(i<<8u)|26u);}}atomicStore(&oldAdvectionControl[3],completed);if(atomicLoad(&oldAdvectionControl[0])==0u&&requestedFaces>0u&&completed==requestedFaces){atomicStore(&oldAdvectionControl[6],VALID);atomicStore(&oldAdvectionSeed[6],VALID);}else{if(atomicLoad(&oldAdvectionControl[0])==0u){oldAdvectionFail(0u,1u,23u);}atomicStore(&oldAdvectionControl[6],0u);atomicStore(&oldAdvectionSeed[6],0u);}}
 fn loadSampleStatus(i:u32)->u32{return atomicLoad(&sampleStatus[i]);}fn storeSampleStatus(i:u32,value:u32){atomicStore(&sampleStatus[i],value);}fn airSearchCounterBase()->u32{return arrayLength(&sampleStatus)-8u;}fn addAirSearchCounter(slot:u32,value:u32){atomicAdd(&sampleStatus[airSearchCounterBase()+slot],value);}
-@compute @workgroup_size(64)fn classifyAirBandVelocity(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=sp.count||i>=arrayLength(&positions)||i>=arrayLength(&sampleResults)||i>=arrayLength(&sampleStatus)||positions[i].w<=0.){return;}let grid=positions[i].xyz/sp.cellSize;if(any(grid<vec3f(0))||any(grid>=vec3f(sp.dims))){storeSampleStatus(i,SAMPLE_FAILED|SAMPLE_FAIL_DOMAIN);return;}let q=vec3u(floor(grid));let owner=ownerAt(q);if(owner.valid==0u){storeSampleStatus(i,SAMPLE_FAILED|SAMPLE_FAIL_OWNER);return;}
+// Section 5 extends characteristics constantly through solid container walls,
+// just as transported phi uses a Neumann ghost there. The authored open
+// ceiling also uses the limiting interior vector for outflow. A coordinate
+// outside any genuinely open non-ceiling boundary remains fail-closed.
+fn airSampleGrid(world:vec3f)->vec4f{var grid=world/sp.cellSize;if(!finite(grid.x)||!finite(grid.y)||!finite(grid.z)){return vec4f(0);}for(var axis=0u;axis<3u;axis+=1u){if(grid[axis]<0.){if((p.closedBoundaryMask&negativeBoundaryBit(axis))==0u){return vec4f(0);}grid[axis]=0.;}if(grid[axis]>=f32(sp.dims[axis])){let closed=(p.closedBoundaryMask&positiveBoundaryBit(axis))!=0u;let openCeiling=axis==1u&&!closed;if(!closed&&!openCeiling){return vec4f(0);}grid[axis]=f32(sp.dims[axis])-1e-5;}}return vec4f(grid,1.);}
+@compute @workgroup_size(64)fn classifyAirBandVelocity(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=sp.count||i>=arrayLength(&positions)||i>=arrayLength(&sampleResults)||i>=arrayLength(&sampleStatus)||positions[i].w<=0.){return;}let sample=airSampleGrid(positions[i].xyz);if(sample.w==0.){storeSampleStatus(i,SAMPLE_FAILED|SAMPLE_FAIL_DOMAIN);return;}let grid=sample.xyz;let q=vec3u(floor(grid));let owner=ownerAt(q);if(owner.valid==0u){storeSampleStatus(i,SAMPLE_FAILED|SAMPLE_FAIL_OWNER);return;}
  // Section 5 extrapolates on adaptive octree faces. Band rows are keyed by
  // the containing owner's origin, not by every finest cell inside that owner.
  // Only the exact current owner row can prove that Stage B is sampling liquid.
  // Missing classification remains structural failure; definitely-positive air
  // requires a valid fast-marched regular-face vector.
  let band=retainedBandAnchor(grid);if(band==INVALID||band>=sp.rowCapacity||band>=transitionControl.support7NodeEnd||band>=arrayLength(&rows)){storeSampleStatus(i,SAMPLE_FAILED|SAMPLE_FAIL_ROW);return;}if(control.generation!=sp.fineGeneration||pointControl.generation!=sp.fineGeneration){storeSampleStatus(i,SAMPLE_FAILED|SAMPLE_FAIL_GENERATION);return;}if((rows[band].flags&ROW_PHI)==0u){storeSampleStatus(i,SAMPLE_FAILED|SAMPLE_FAIL_ROW);return;}let stageBStatus=loadSampleStatus(i);let stageBReason=stageBStatus&255u;let needsDualCompletion=(stageBStatus&VALID)==0u&&(stageBReason==4u||stageBReason==8u);if(rows[band].minimumPhi<0.&&!needsDualCompletion){return;}sampleResults[i].w=bitcast<f32>(band);storeSampleStatus(i,SAMPLE_EVALUATE);addAirSearchCounter(5u,1u);}
-@compute @workgroup_size(64)fn evaluateAirBandVelocity(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=sp.count||i>=arrayLength(&positions)||i>=arrayLength(&sampleResults)||i>=arrayLength(&sampleStatus)||loadSampleStatus(i)!=SAMPLE_EVALUATE){return;}addAirSearchCounter(6u,1u);let band=bitcast<u32>(sampleResults[i].w);let measured=locateFinalPointVectorMeasured(band,positions[i].xyz/sp.cellSize);addAirSearchCounter(0u,measured.directSuccess);addAirSearchCounter(1u,measured.fullRowFallback);addAirSearchCounter(2u,measured.candidateRowsTested);addAirSearchCounter(3u,measured.surroundingFallback);addAirSearchCounter(4u,measured.surroundingRowsTested);let velocity=measured.value;if(!velocityValid(velocity)){let reason=u32(round(max(1.,-velocity.w)));sampleResults[i]=velocity;
+@compute @workgroup_size(64)fn evaluateAirBandVelocity(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i>=sp.count||i>=arrayLength(&positions)||i>=arrayLength(&sampleResults)||i>=arrayLength(&sampleStatus)||loadSampleStatus(i)!=SAMPLE_EVALUATE){return;}addAirSearchCounter(6u,1u);let band=bitcast<u32>(sampleResults[i].w);let sample=airSampleGrid(positions[i].xyz);if(sample.w==0.){sampleResults[i]=invalidPointVector(SAMPLE_FAIL_DOMAIN);storeSampleStatus(i,SAMPLE_FAILED|SAMPLE_FAIL_DOMAIN);return;}let measured=locateFinalPointVectorMeasured(band,sample.xyz);addAirSearchCounter(0u,measured.directSuccess);addAirSearchCounter(1u,measured.fullRowFallback);addAirSearchCounter(2u,measured.candidateRowsTested);addAirSearchCounter(3u,measured.surroundingFallback);addAirSearchCounter(4u,measured.surroundingRowsTested);let velocity=measured.value;if(!velocityValid(velocity)){let reason=u32(round(max(1.,-velocity.w)));sampleResults[i]=velocity;
   // QA payload only: bits 8..23 identify the exact retained Delaunay anchor.
   // The low byte remains the structural reason and SAMPLE_FAILED remains the
   // authority bit, so this cannot admit or alter a velocity sample.

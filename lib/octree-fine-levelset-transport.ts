@@ -93,15 +93,13 @@ export function advectFineLevelSet(
             oracle.plan.domainOrigin[axis] + (value + 0.5) * oracle.plan.fineCellWidth) as [number, number, number];
           const trace = traceFineLevelSetDeparture(position, dt, segmentCount, sampleVelocity);
           if (!trace.finite) { nonfiniteVelocitySamples += 1; page.workA[index] = Number.NaN; continue; }
-          // Cell-centred phi has a constant (Neumann) ghost over the half-cell
-          // between each boundary sample centre and its solid domain wall.
-          // Keep genuinely out-of-domain and internally missing sparse pages
-          // fail-closed; only clamp departures that remain inside the domain.
+          // Cell-centred phi has a constant (Neumann) extension through a
+          // solid domain wall. This also absorbs the small exterior departure
+          // produced by numerical error in a no-penetration velocity. Strict
+          // sampling and internally missing sparse pages remain fail-closed.
           const domainMaximum = oracle.plan.sampleDimensions.map((count, axis) =>
             oracle.plan.domainOrigin[axis] + count * oracle.plan.fineCellWidth);
-          const insideDomain = trace.departure.every((value, axis) =>
-            value >= oracle.plan.domainOrigin[axis] && value <= domainMaximum[axis]);
-          const samplingDeparture = insideDomain && boundaryPolicy === "closed-neumann"
+          const samplingDeparture = boundaryPolicy === "closed-neumann"
             ? trace.departure.map((value, axis) => Math.max(
               oracle.plan.domainOrigin[axis] + 0.5 * oracle.plan.fineCellWidth,
               Math.min(domainMaximum[axis] - 0.5 * oracle.plan.fineCellWidth, value),

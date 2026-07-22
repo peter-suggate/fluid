@@ -74,8 +74,9 @@ test("factor-8 transport keeps trajectory storage chunk-bounded", () => {
   const plan = planFineLevelSetGPUTransport(samples, chunk);
   assert.equal(plan.positionCapacity, chunk);
   assert.equal(plan.positionBytes, chunk * 16);
+  assert.equal(plan.outcomeBytes, chunk * 8);
   assert.equal(plan.chunkCount, 4096);
-  assert.ok(plan.allocatedBytes < 1_200_000,
+  assert.ok(plan.allocatedBytes < 1_500_000,
     "transport must not allocate a max-resident-sample trajectory array per A/B generation");
 });
 

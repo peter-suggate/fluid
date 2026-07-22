@@ -85,7 +85,7 @@ import {
 import { resolveFineLevelSetRedistanceMethod, WebGPUFineLevelSetRedistance,
   type FineLevelSetRedistanceMethod } from "./webgpu-octree-fine-levelset-redistance";
 import { planFineLevelSetGPUTransportPasses,
-  WebGPUFineLevelSetTransport } from "./webgpu-octree-fine-levelset-transport";
+  WebGPUFineLevelSetTransport, type FineLevelSetTransportBoundary } from "./webgpu-octree-fine-levelset-transport";
 import { WebGPUFineLevelSetVolumeCorrection } from "./webgpu-octree-fine-levelset-volume";
 import { planFineLevelSetGPUSummaries, WebGPUFineLevelSetSummaries } from "./webgpu-octree-fine-levelset-summary";
 import {
@@ -3268,7 +3268,8 @@ export class WebGPUOctreeProjection {
       fineTopologyStartWriteIndex: number;
       fineRedistanceStartWriteIndex: number;
     }, productionBoundary?: (phase: "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance"
-      | "fineRestriction" | "pageSurface", encoder: GPUCommandEncoder) => GPUCommandEncoder) {
+      | "fineRestriction" | "pageSurface", encoder: GPUCommandEncoder,
+      detail?: FineLevelSetTransportBoundary) => GPUCommandEncoder) {
     const splitProductionPhase = (phase: "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance"
       | "fineRestriction" | "pageSurface") => {
       if (productionBoundary) encoder = productionBoundary(phase, encoder);
@@ -3346,7 +3347,7 @@ export class WebGPUOctreeProjection {
         splitProductionPhase("finePreparation");
         if (this.globalFineBootstrapped && transport && this.powerFaceSeed && this.powerVelocity) {
           this.lastGlobalFineTransport = transport;
-          transport.encode(encoder, {
+          encoder = transport.encode(encoder, {
             timestep: dt_s,
             headers: this.leafHeaders,
             rowVelocities: this.powerVelocity.velocities,
@@ -3360,7 +3361,8 @@ export class WebGPUOctreeProjection {
             openTopBoundary: this.scene.container.top !== "closed",
             transportBandCells: Math.min(256, Math.max(4,
               this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4))),
-          });
+          }, productionBoundary ? (detail, completedEncoder) =>
+            productionBoundary("fineTransport", completedEncoder, detail) : undefined);
           transportEncoded = true;
           splitProductionPhase("fineTransport");
         }

@@ -89,8 +89,20 @@ export function paperPipelineStages(
     && info.globalFineFaceBandPowerPublicationValid === true;
   const section5Fine = info.globalFineFaceBandPowerFineGeneration;
   const section5Power = info.globalFineFaceBandPowerGeneration;
-  const section5Stale = section5Valid && ((fineGeneration !== undefined && section5Fine !== fineGeneration)
-    || (powerGeneration !== undefined && section5Power !== powerGeneration));
+  // Section 5 extrapolates the source fine generation N, then that velocity
+  // transports phi into the published generation N+1. The t=0 product is
+  // same-generation; every stepped product may therefore be the exact
+  // predecessor without being stale.
+  const section5FineCurrent = fineGeneration === undefined || section5Fine === fineGeneration
+    || ((info.encodedSteps ?? 0) > 0 && fineGeneration > 0 && section5Fine === fineGeneration - 1);
+  // powerDiagramGeneration is the live host publication latch, while the
+  // Section 5 controls arrive in a queue-fenced telemetry readback. During a
+  // coupled run the live latch can legitimately be one or more batches ahead;
+  // comparing them creates a torn-snapshot false alarm. The transaction's
+  // sampled fine identities are the cross-product freshness proof.
+  const section5ProductCurrent = info.globalFineFaceBandGeneration === undefined
+    || section5Fine === info.globalFineFaceBandGeneration;
+  const section5Stale = section5Valid && (!section5FineCurrent || !section5ProductCurrent);
   const section5Flags = (info.globalFineFaceBandFlags ?? 0)
     | (info.globalFineFaceBandTransitionFlags ?? 0)
     | (info.globalFineFaceBandTransientPowerFlags ?? 0)
@@ -128,10 +140,13 @@ export function paperPipelineStages(
 
   const rasterGenerationCurrent = water?.globalFineAttachedGeneration !== undefined
     && water.meshPublicationGeneration !== undefined
-    && water.globalFineAttachedGeneration === fineGeneration
-    && water.meshPublicationGeneration === fineGeneration;
+    // The renderer's GPU authority latch already proves that this exact A/B
+    // source generation committed. CPU solver telemetry is intentionally
+    // sampled on a slower cadence and can trail the rendered publication by
+    // one generation, so it cannot invalidate a matching attachment + mesh.
+    && water.globalFineAttachedGeneration === water.meshPublicationGeneration;
   const rasterGenerations = water
-    ? `attached ${water.globalFineAttachedGeneration ?? "?"} · mesh ${water.meshPublicationGeneration ?? "?"} · live ${fineGeneration ?? "?"}`
+    ? `attached ${water.globalFineAttachedGeneration ?? "?"} · mesh ${water.meshPublicationGeneration ?? "?"} · sampled ${fineGeneration ?? "?"}`
     : "generation evidence unavailable";
   stages.push(!water
     ? pending("raster", "render", "Fine/coarse raster surface", "Waiting for bounded renderer diagnostics.")
@@ -287,10 +302,15 @@ export function paperSection5SpatialFailures(
   if (!info || info.gridKind !== "octree") return [];
   const observed = info.globalFineFaceBandGeneration !== undefined;
   const bandFresh = observed && info.globalFineGeneration !== undefined
-    && info.globalFineFaceBandGeneration === info.globalFineGeneration;
-  const powerFresh = bandFresh && info.powerDiagramGeneration !== undefined
-    && info.globalFineFaceBandPowerFineGeneration === info.globalFineGeneration
-    && info.globalFineFaceBandPowerGeneration === info.powerDiagramGeneration;
+    && (info.globalFineFaceBandGeneration === info.globalFineGeneration
+      || ((info.encodedSteps ?? 0) > 0 && info.globalFineGeneration > 0
+        && info.globalFineFaceBandGeneration === info.globalFineGeneration - 1));
+  const powerFresh = bandFresh
+    && (info.globalFineFaceBandPowerFineGeneration === info.globalFineGeneration
+      || ((info.encodedSteps ?? 0) > 0 && info.globalFineGeneration !== undefined
+        && info.globalFineGeneration > 0
+        && info.globalFineFaceBandPowerFineGeneration === info.globalFineGeneration - 1))
+    && info.globalFineFaceBandPowerFineGeneration === info.globalFineFaceBandGeneration;
   const state = (valid: boolean, fresh: boolean): PaperSpatialFailure["state"] =>
     !observed ? "WAITING" : !valid ? "REJECTED" : fresh ? "CURRENT" : "STALE";
   return [

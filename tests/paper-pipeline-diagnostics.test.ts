@@ -39,10 +39,46 @@ test("stale Section 5 and retained raster generations are visibly distinct from 
     globalFineFaceBandValid: true, globalFineFaceBandTransitionValid: true,
     globalFineFaceBandTransientPowerValid: true, globalFineFaceBandPointFieldValid: true,
     globalFineFaceBandPowerPublicationValid: true,
+    globalFineFaceBandGeneration: 20,
     globalFineFaceBandPowerFineGeneration: 19, globalFineFaceBandPowerGeneration: 10,
   }), { surfaceGeometrySource: "retained-previous", globalFineAttached: true, globalFineAttachedGeneration: 20, meshPublicationGeneration: 19, globalFineCrossingPublished: false, presentationFallbackActive: true });
   assert.equal(stages.find((stage) => stage.id === "extrapolation")?.tone, "stale");
   assert.equal(stages.find((stage) => stage.id === "raster")?.state, "STALE");
+});
+
+test("stepped Section 5 product is current for the exact fine source predecessor", () => {
+  const stages = paperPipelineStages(info({
+    initialSparseAuthorityReady: true, encodedSteps: 34,
+    powerDiagramGeneration: 35, globalFineGeneration: 36,
+    globalFineFaceBandValid: true, globalFineFaceBandTransitionValid: true,
+    globalFineFaceBandTransientPowerValid: true, globalFineFaceBandPointFieldValid: true,
+    globalFineFaceBandPowerPublicationValid: true,
+    globalFineFaceBandGeneration: 35,
+    globalFineFaceBandPowerFineGeneration: 35, globalFineFaceBandPowerGeneration: 35,
+  }), undefined);
+  assert.equal(stages.find((stage) => stage.id === "extrapolation")?.state, "PUBLISHED");
+  assert.equal(paperSection5SpatialFailures(info({
+    encodedSteps: 34, globalFineGeneration: 36, powerDiagramGeneration: 35,
+    globalFineFaceBandGeneration: 35, globalFineFaceBandPowerFineGeneration: 35,
+    globalFineFaceBandPowerGeneration: 35, globalFineFaceBandValid: true,
+    globalFineFaceBandTransitionValid: true, globalFineFaceBandTransientPowerValid: true,
+    globalFineFaceBandPointFieldValid: true, globalFineFaceBandPowerPublicationValid: true,
+  }))[0]?.state, "CURRENT");
+});
+
+test("live power latch may lead queue-fenced Section 5 telemetry without a stale alert", () => {
+  const gpu = info({
+    initialSparseAuthorityReady: true, encodedSteps: 32,
+    powerDiagramGeneration: 33, globalFineGeneration: 31,
+    globalFineFaceBandGeneration: 31,
+    globalFineFaceBandValid: true, globalFineFaceBandTransitionValid: true,
+    globalFineFaceBandTransientPowerValid: true, globalFineFaceBandPointFieldValid: true,
+    globalFineFaceBandPowerPublicationValid: true,
+    globalFineFaceBandPowerFineGeneration: 31, globalFineFaceBandPowerGeneration: 31,
+  });
+  assert.equal(paperPipelineStages(gpu, undefined).find((stage) => stage.id === "extrapolation")?.state, "PUBLISHED");
+  assert.ok(!paperPipelineHealthFlags(gpu).includes("2017-extrapolation-stale"));
+  assert.equal(paperSection5SpatialFailures(gpu).find((stage) => stage.id === "power-publication")?.state, "CURRENT");
 });
 
 test("always-visible health flags expose rejected and stale 2017 authority", () => {
@@ -55,6 +91,7 @@ test("always-visible health flags expose rejected and stale 2017 authority", () 
     globalFineFaceBandValid: true, globalFineFaceBandTransitionValid: true,
     globalFineFaceBandTransientPowerValid: true, globalFineFaceBandPointFieldValid: true,
     globalFineFaceBandPowerPublicationValid: true,
+    globalFineFaceBandGeneration: 20,
     globalFineFaceBandPowerFineGeneration: 19, globalFineFaceBandPowerGeneration: 10,
     powerDiagramGeneration: 11,
   }));
@@ -84,7 +121,7 @@ test("one-click presets cover the requested paper structures without new diagnos
   assert.equal(PAPER_VISUAL_PRESETS.find((preset) => preset.id === "fine-phi-values")?.mode, "global-fine-phi");
 });
 
-test("raster CURRENT requires attached and mesh generations to match live fine authority", () => {
+test("raster CURRENT requires matching GPU-latched attachment and mesh, independent of sampled telemetry lag", () => {
   const gpu = info({ globalFineGeneration: 21 });
   const stale = paperPipelineStages(gpu, {
     surfaceGeometrySource: "global-fine-coarse", globalFineAttached: true,
@@ -92,7 +129,14 @@ test("raster CURRENT requires attached and mesh generations to match live fine a
     globalFineCrossingPublished: true, presentationFallbackActive: false,
   }).find((stage) => stage.id === "raster");
   assert.equal(stale?.state, "STALE");
-  assert.match(stale?.detail ?? "", /attached 21 · mesh 20 · live 21/);
+  assert.match(stale?.detail ?? "", /attached 21 · mesh 20 · sampled 21/);
+  const current = paperPipelineStages(gpu, {
+    surfaceGeometrySource: "global-fine-coarse", globalFineAttached: true,
+    globalFineAttachedGeneration: 22, meshPublicationGeneration: 22,
+    globalFineCrossingPublished: true, presentationFallbackActive: false,
+  }).find((stage) => stage.id === "raster");
+  assert.equal(current?.state, "CURRENT");
+  assert.match(current?.detail ?? "", /attached 22 · mesh 22 · sampled 21/);
 });
 
 test("active visual reports its exact authority and t=0/latest-step identity", () => {

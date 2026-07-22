@@ -92,15 +92,15 @@ test("departure outside the sparse band invalidates the update without coarse fa
   field.residentPages().forEach((page, index) => assert.deepEqual(page.phi, before[index]));
 });
 
-test("fine advection uses a constant half-cell ghost at solid domain walls", () => {
+test("fine advection uses a constant Neumann extension at solid domain walls", () => {
   const strictField = fullyResidentOracle(4, [2, 1, 1], ([x]) => x - 0.75);
-  const strict = advectFineLevelSet(strictField, 0.25, () => [0.5, 0, 0]);
+  const strict = advectFineLevelSet(strictField, 0.5, () => [0.5, 0, 0]);
   assert.ok(strict.departureOutsideResidentBand > 0,
     "strict sparse sampling must not silently manufacture a wall ghost");
   const field = fullyResidentOracle(4, [2, 1, 1], ([x]) => x - 0.75);
-  const diagnostics = advectFineLevelSet(field, 0.25, () => [0.5, 0, 0], 4, "closed-neumann");
+  const diagnostics = advectFineLevelSet(field, 0.5, () => [0.5, 0, 0], 4, "closed-neumann");
   assert.equal(diagnostics.departureOutsideResidentBand, 0,
-    "an in-domain backtrace between the wall and first sample centre must clamp to the boundary sample");
+    "a backtrace slightly through a solid wall must clamp to the boundary sample");
   assert.equal(diagnostics.committed, true);
 });
 

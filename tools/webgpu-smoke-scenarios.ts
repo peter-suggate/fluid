@@ -168,12 +168,14 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
   scene.environment = id === "deep-water" ? "research-station" : "default";
   scene.rigidBodies = [];
   if (id === "dam-break-ui") {
-    scene.sceneId = "smoke-ui-dam-break";
-    scene.fluid.initialCondition = "dam-break";
-    delete scene.fluid.inflow;
-    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = process.env.FLUID_MAX_DT ? Number(process.env.FLUID_MAX_DT) : 0.004;
-    if (process.env.FLUID_SURFACE_TENSION !== undefined) scene.fluid.surfaceTension_N_m = Number(process.env.FLUID_SURFACE_TENSION);
-    return { id, description: "actual UI dam break with the default capillary and wall settings", scene, oracleSteps: 2, target_s: 0.2 };
+    // This identifier is a parity contract, not a similar hand-authored smoke
+    // scene. Construct it through the same preset factory as the browser so
+    // scene identity, both timesteps, capillarity, walls, and future authored
+    // defaults cannot silently diverge. Diagnostic overrides are applied by
+    // run-webgpu-smoke only after this canonical scene has been obtained.
+    const uiScene = getScenePreset("water-box-dam-break").create();
+    return { id, description: "exact browser water-box dam-break preset", scene: uiScene,
+      oracleSteps: 2, target_s: 0.2 };
   }
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;

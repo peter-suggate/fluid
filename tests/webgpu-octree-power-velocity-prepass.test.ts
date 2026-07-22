@@ -32,6 +32,10 @@ test("trajectory prepass is bounded GPU-only Stage-B work", () => {
     "transition samples gather only the containing tetrahedron's three neighbor velocities");
   assert.doesNotMatch(productionBuilder, /76u|vertexVelocities/,
     "direct Stage B must not materialize 76 velocity vectors per query");
+  assert.doesNotMatch(productionBuilder, /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
+    "recurring direct Stage B must use immutable reads and deterministic reductions, never atomics");
+  assert.match(productionBuilder, /var<storage,read>sites:array<SI>/,
+    "the cold-built site hash is immutable during recurring transport");
   assert.deepEqual(planOctreePowerVelocityPrepass(4096, 256), {
     queryCapacity: 4096,
     rowCapacity: 1,
@@ -39,8 +43,8 @@ test("trajectory prepass is bounded GPU-only Stage-B work", () => {
     vertexVelocityBytes: 0,
     rowDescriptorBytes: 256,
     scratchBytes: 256,
-    samplerBytes: 82_032,
-    allocatedBytes: 82_288,
+    samplerBytes: 84_080,
+    allocatedBytes: 84_336,
   });
 });
 
@@ -63,8 +67,8 @@ test("factor-4 small dam break batches paper Section 5 transport within portable
     vertexVelocityBytes: 0,
     rowDescriptorBytes: 256,
     scratchBytes: 256,
-    samplerBytes: 8_847_472,
-    allocatedBytes: 8_847_728,
+    samplerBytes: 9_068_656,
+    allocatedBytes: 9_068_912,
   });
 
   const previous = planFineLevelSetGPUTransport(queryCapacity, 4_096);
@@ -75,15 +79,15 @@ test("factor-4 small dam break batches paper Section 5 transport within portable
     chunkCount: 108,
     segmentCount: 4,
     passesPerSegment: 5,
-    passesPerChunk: 22,
-    encodedPasses: 2_379,
+    passesPerChunk: 23,
+    encodedPasses: 2_487,
   });
   assert.deepEqual(planFineLevelSetGPUTransportPasses(current, 4), {
     chunkCount: 1,
     segmentCount: 4,
     passesPerSegment: 5,
-    passesPerChunk: 22,
-    encodedPasses: 25,
+    passesPerChunk: 23,
+    encodedPasses: 26,
   });
 });
 
@@ -99,13 +103,13 @@ test("non-divisible final transport chunk keeps its tail inactive without droppi
     finalChunkLive: 49_152,
     finalChunkInactive: 16_384,
   });
-  assert.equal(planFineLevelSetGPUTransportPasses(transport, 4).encodedPasses, 157);
+  assert.equal(planFineLevelSetGPUTransportPasses(transport, 4).encodedPasses, 164);
 
   // Every chunk first zeros its complete fixed-capacity position arena. The
   // activeSample(flat) guard then leaves the non-divisible tail at w=0, and
   // the Stage-B builder rejects that sentinel before any owner/hash query.
   assert.match(fineLevelSetGPUQueryTransportWGSL,
-    /positions\[local\]=vec4f\(0\);let flat=chunk\.base\+local;let a=activeSample\(flat\);if\(a\.x==INVALID\)\{return;\}/);
+    /positions\[local\]=vec4f\(0\);outcomes\[local\]=vec2u\(0u,INVALID\);let flat=chunk\.base\+local;let a=activeSample\(flat\);if\(a\.x==INVALID\)\{return;\}/);
   assert.match(makePowerVelocityPrepassBuilderWGSL(),
     /if\(x\.w<=0\.\)\{results\[i\]=vec4f\(0\.,0\.,0\.,1\.\);statuses\[i\]=VALID\|INACTIVE;/);
 });

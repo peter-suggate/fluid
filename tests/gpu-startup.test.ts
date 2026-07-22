@@ -220,9 +220,9 @@ test("automatic device recovery is opt-in", () => {
   assert.equal(automaticGPURecoveryEnabled("?gpuRecovery=1"), true);
 });
 
-test("browser timestamp queries default on for profiling with explicit safe-mode and driver opt-outs", () => {
+test("browser timestamp queries are explicit so normal UI and Dawn use the same correctness path", () => {
   const supported = new Set(["timestamp-query"]);
-  assert.deepEqual(optionalBrowserTimestampFeatures("", supported), ["timestamp-query"]);
+  assert.deepEqual(optionalBrowserTimestampFeatures("", supported), []);
   assert.deepEqual(optionalBrowserTimestampFeatures("?gpuTimestamps=0", supported), []);
   assert.deepEqual(optionalBrowserTimestampFeatures("?gpuTimestamps=1", supported), ["timestamp-query"]);
   assert.deepEqual(optionalBrowserTimestampFeatures("?gpu=safe", supported), []);
