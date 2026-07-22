@@ -308,8 +308,8 @@ test("factor-4 GPU face band is compact, bounded, and has no fine velocity chann
   assert.equal(plan.stateBytes, plan.faceCapacity * OCTREE_FACE_BAND_STATE_BYTES);
   assert.equal(plan.cptParentBytes, plan.faceCapacity * 4,
     "each race-free CPT snapshot stores one parent index per face");
-  assert.equal(plan.frontierBytes, 72,
-    "only the six live indirect records remain after deleting the serial face heap");
+  assert.equal(plan.frontierBytes, 216,
+    "one map record and live row/candidate records replace every capacity-sized support dispatch");
   assert.equal(plan.allocatedBytes,
     plan.bandFaceBytes + plan.incidenceBytes + plan.stateBytes + 2 * plan.cptParentBytes,
     "legacy and production accounting both include the two CPT snapshots");
@@ -347,6 +347,16 @@ test("factor-4 GPU face band is compact, bounded, and has no fine velocity chann
   assert.equal(OCTREE_FACE_BAND_TRANSIENT_CONTROL_BYTES, 64);
   assert.equal(plan.transientPowerFaceBytes, 13_271_040,
     "the default 24x18x16 dam-break plan accounts for the complete 12.66 MiB physical-face arena");
+  const retiredArenaBytes = plan.transientPowerFaceBytes + plan.transientPowerIncidenceBytes
+    + plan.transientPowerRowBytes + OCTREE_FACE_BAND_TRANSIENT_CONTROL_BYTES;
+  const activeFlagBytes = plan.rowCapacity
+    * OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence * 4;
+  assert.equal(retiredArenaBytes, 15_372_368,
+    "the old publication cleared 14.66 MiB of fixed-capacity arenas per advance");
+  assert.equal(activeFlagBytes, 829_440,
+    "even a full live prefix retires only one four-byte flag per catalog slot");
+  assert.equal(retiredArenaBytes - activeFlagBytes, 14_542_928,
+    "active-prefix overwrite removes at least 13.87 MiB of recurring writes at full occupancy");
   assert.equal(plan.maximumDirectWorkgroups, Math.ceil(Math.max(plan.rowCapacity, plan.faceCapacity,
     plan.guardCandidateCapacity, plan.powerFaceCapacity, plan.transientPowerFaceCapacity) / 64));
   assert.match(compact(WebGPUOctreeFaceFastMarch),
@@ -801,6 +811,9 @@ test("GPU face band closes endpoints before deterministic parallel CPT", () => {
     "a required 2:1 subface fails when its exact endpoint support row is absent");
   assert.match(octreeFaceBandWGSL, /let encoded=atomicLoad\(&rowHash\[slot\*2u\+1u\]\);return select\(INVALID,encoded-1u,encoded!=0u&&encoded!=INVALID\)/,
     "row-hash values use row+1 publication and subtract exactly once");
+  assert.match(compact(wgslFunction("insertRow")),
+    /for\(varprobe=0u;probe<32u;probe\+=1u\).*?for\(varretry=0u;retry<32u;retry\+=1u\).*?atomicCompareExchangeWeak.*?if\(result\.old_value==0u\)\{continue;\}.*?if\(occupied==0u\)\{fail\(HASH,cellKey\);returnINVALID;\}/,
+    "a spurious weak-CAS failure must retry the same slot or fail closed instead of leaving a lookup-terminating hole");
   assert.match(octreeFaceBandWGSL,
     /ap<\(\*bestPhi\)\|\|\(ap==\(\*bestPhi\)&&\(globalFace<\(\*bestGlobal\)/,
     "fallback resolution uses closest-|phi| then stable-face-ID tie breaking");
@@ -1304,6 +1317,18 @@ test("Section 5 closes S0 through terminal endpoint support before building S0/S
 
 test("support-closure stages stay within portable auto-layout bind groups", () => {
   const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
+  const singleGroupBindings = (pipeline: string): number[] => {
+    const call = source.match(new RegExp(`run\\("${pipeline}",\\[([\\s\\S]*?)\\],1,pass\\)`))?.[1];
+    assert.ok(call, `missing encoded ${pipeline} single-workgroup bind group`);
+    return [...call.matchAll(/\[(\d+),/g)].map((match) => Number(match[1]));
+  };
+  assert.deepEqual(singleGroupBindings("prepareSupport0Dispatch"), [18, 32, 43],
+    "support dispatch capacity checks bind both their indirect output and candidate arena");
+  for (const pipeline of ["captureSupport1", "captureSupport2", "captureSupport3", "captureSupport4",
+    "captureSupport5", "captureSupport6", "captureSupport7"]) {
+    assert.deepEqual(singleGroupBindings(pipeline), [0, 5, 18, 32, 43],
+      `${pipeline} binds every resource reachable through writeSupportTierDispatch`);
+  }
   const bindings = (pipeline: string): number[] => {
     const call = source.match(new RegExp(`run\\("${pipeline}",\\[([\\s\\S]*?)\\],(?:Math\\.ceil|0,pass)`))?.[1];
     assert.ok(call, `missing encoded ${pipeline} bind group`);
@@ -1371,9 +1396,32 @@ test("live support prefixes dispatch sparse closure even when S0 reservation con
   }), [1, 1, 1, 1, 1], "live sparse prefixes, not zero static role caps, control closure work");
   const source = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
   assert.match(source, /run\("prepareSupport0Dispatch"[\s\S]*0,pass,24\)/);
-  for (const [capture, offset] of [["captureSupport1", 36], ["captureSupport2", 48],
-    ["captureSupport3", 60]] as const) assert.match(source,
+  for (const [capture, offset] of [["captureSupport1", 48], ["captureSupport2", 72],
+    ["captureSupport3", 96], ["captureSupport4", 120], ["captureSupport5", 144],
+    ["captureSupport6", 168], ["captureSupport7", 192]] as const) assert.match(source,
     new RegExp(`run\\("${capture}"[\\s\\S]*0,pass,${offset}\\)`));
+  for (const offset of [36, 60, 84, 108, 132, 156]) {
+    assert.match(source, new RegExp(`run\\("resolveSupportOwners"[\\s\\S]{0,80}0,pass,${offset}\\)`),
+      `candidate work at byte ${offset} must consume a GPU-authored live-prefix dispatch`);
+  }
+  assert.match(source, /run\("insertEndpoints"[\s\S]{0,80}0,pass,204\)/,
+    "endpoint candidates consume their GPU-authored live-prefix dispatch");
+  assert.doesNotMatch(source, /candidateWorkgroups/,
+    "support closure never dispatches the shared candidate capacity");
+  for (const offset of [36, 60, 84, 108, 132, 156, 204]) {
+    assert.match(source, new RegExp(`run\\("clearSupportCandidates"[\\s\\S]{0,80}0,pass,${offset}\\)`),
+      `the padded live prefix at byte ${offset} is retired without touching the capacity tail`);
+  }
+  assert.match(wgslFunction("enumerateSupportRequests"),
+    /for\(varrequest=0u;request<MAX_GUARDS;request\+=1u\).*GuardCandidate\(INVALID,INVALID,INVALID,0u\)/,
+    "each live fixed-fanout owner exclusively retires and rewrites its candidate record range");
+  const capture4 = wgslFunction("captureSupport4NodeBoundary");
+  assert.match(capture4,
+    /writeSupportDispatch\(30u,transitionControl\.support4NodeEnd-transitionControl\.support2End\)/,
+    "deep topology revisits the cumulative S3+S4 range required by buildDeepTransitionAdjacency");
+  assert.match(capture4,
+    /letappended=transitionControl\.support4NodeEnd-transitionControl\.support3NodeEnd[\s\S]*appended\*MAX_GUARDS/,
+    "S5 candidate discovery consumes only rows newly appended by the S4 closure");
   assert.match(source,
     /run\("preparePointDispatch"[\s\S]*run\("preparePointRows"[\s\S]*0,pass,24\)/,
     "the final S0+S1 point field also consumes the live published prefix rather than a zero role cap");
@@ -1699,6 +1747,15 @@ test("Section 5 final point field consumes one complete transient physical power
     assert.match(octreeFaceBandWGSL, new RegExp(`fn ${entry}\\b`), `${entry} must exist in WGSL`);
   }
   const emit = wgslFunction("emitTransientBandPowerGraph");
+  const prepareTransient = wgslFunction("prepareTransientBandPowerGraph");
+  assert.match(prepareTransient,
+    /faceSlots=transientPowerControl\.rowCount\*POINT_MAX_FACES/,
+    "the transient graph publishes only its current row-slot prefix");
+  assert.match(prepareTransient, /rowCount>p\.rowCapacity/,
+    "a corrupt live prefix fails closed before addressing the fixed arenas");
+  assert.match(emit,
+    /for\(varretired=0u;retired<POINT_MAX_FACES;retired\+=1u\)\{transientPowerFaces\[base\+retired\]\.flags=0u;\}/,
+    "each current row retires sparse face flags before publishing new owners");
   assert.match(emit, /neighbor>=transitionControl\.support2End/,
     "S0/S1 physical faces may use S2 carriers, but never an unclosed endpoint");
   assert.match(emit, /reverseSlot=transientReciprocalSlot\(row,neighbor\)/,
@@ -1716,7 +1773,7 @@ test("Section 5 final point field consumes one complete transient physical power
   assert.match(emit, /if\(row>neighbor\)\{continue;\}/,
     "one owner materializes each shared interior face exactly once");
   assert.match(emit,
-    /transientPowerIncidences\[row\*POINT_MAX_FACES\+slot\]=PowerIncidence\(faceIndex,1\)[\s\S]*PowerIncidence\(faceIndex,-1\)/,
+    /letbase=row\*POINT_MAX_FACES[\s\S]*transientPowerIncidences\[base\+slot\]=PowerIncidence\(faceIndex,1\)[\s\S]*PowerIncidence\(faceIndex,-1\)/,
     "both endpoint rows receive reciprocal signed incidence to the same face record");
   const polygon = wgslFunction("transientFacePolygon");
   assert.match(polygon,
@@ -1728,6 +1785,9 @@ test("Section 5 final point field consumes one complete transient physical power
   assert.match(polygon, /epsilon=max\(1e-6,1e-5\*scale\)/,
     "transient clipping uses the same scale-relative tolerance as production sharedGeometry");
   const sample = wgslFunction("sampleTransientBandPowerFaces");
+  assert.match(sample,
+    /letrow=g\.x[\s\S]*row>=transientPowerControl\.rowCount[\s\S]*for\(varslot=0u;slot<POINT_MAX_FACES/,
+    "sampling is row-count bounded instead of scanning the face-slot capacity");
   assert.match(sample,
     /marchedCentroidVector\(face\.negativeRow,face\.centroid\.xyz\)[\s\S]*marchedCentroidVector\(face\.positiveRow,face\.centroid\.xyz\)/,
     "both endpoint carriers are interpolated at the exact shared physical centroid");
@@ -1770,6 +1830,12 @@ test("Section 5 final point field consumes one complete transient physical power
     "no catalog-local invented scalar fallback remains callable");
 
   const schedule = compact(WebGPUOctreeFaceFastMarch.prototype.encodePhase);
+  assert.doesNotMatch(schedule,
+    /clearBuffer\(this\.transientPower(?:Faces|Incidence|Rows|Control)\)/,
+    "counted transient publication does not clear any fixed-capacity arena");
+  assert.match(schedule,
+    /run\("sampleTransientPower"[\s\S]*Math\.ceil\(this\.plan\.rowCapacity\/64\),pass\)/,
+    "one invocation samples all owned slots for a live row");
   const provisionalAt = schedule.indexOf('run("publish"');
   const prepareTransientAt = schedule.indexOf('run("prepareTransientPower"', provisionalAt);
   const emitTransientAt = schedule.indexOf('run("emitTransientPower"', prepareTransientAt);
