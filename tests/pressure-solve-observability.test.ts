@@ -15,17 +15,28 @@ test("pressure solve UI reports an isolated completion fence instead of a whole-
   assert.match(panelSource, /COMMAND STREAM/);
   assert.match(panelSource, /SUBMIT → COMPLETE/);
   assert.match(panelSource, /exact pressure-only fence/);
-  assert.match(panelSource, /PRESSURE WALL/);
-  assert.match(panelSource, /NON-PRESSURE WALL/);
+  assert.match(panelSource, /\? "PRESSURE" : stage\.shortLabel/);
+  assert.match(panelSource, /\? "NON-PRESSURE" : "UNATTRIBUTED"/);
   assert.match(panelSource, /queue-boundary sample below localizes the rest/);
   assert.match(panelSource, /PRODUCTION ADVANCE · QUEUE-BOUNDARY SAMPLE/);
   assert.match(panelSource, /TOPOLOGY \+ ADVECT/);
   assert.match(panelSource, /PRESSURE \+ PROJECT/);
+  assert.match(panelSource, /FINE SURFACE \+ COUPLE/);
+  assert.match(panelSource, /<span>FINE SURFACE<\/span>/);
+  assert.match(panelSource, /fine-surface-observed-row/);
+  assert.match(panelSource, /displayedPhysicsStages = fineSurfaceNeedsWallFallback/);
+  assert.match(panelSource, /FINE_SURFACE_COMPONENT_KEYS\.has\(stage\.key\)/);
+  assert.doesNotMatch(panelSource, /PRESSURE WALL|FINE SURFACE WALL|NON-PRESSURE WALL|UNATTRIBUTED WALL/);
 });
 
 test("production profiler splits a real advance at queue submission boundaries", () => {
   assert.match(uniformSource, /pressureWallProbeLastStep = 0/,
     "the first interactive step must publish transport diagnostics before intrusive profiling begins");
+  assert.match(uniformSource, /OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP = 2/,
+    "the first queue-attributed phase sample must follow one ordinary transport step");
+  assert.match(uniformSource, /advancePhaseWallLastStep = OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP/);
+  assert.match(uniformSource, /this\.advancePhaseWallLastStep\s*>= OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_STEPS/);
+  assert.match(uniformSource, /this\.advancePhaseWallLastStep = this\.info\.encodedSteps/);
   assert.match(uniformSource, /productionPhaseProbeActive/);
   assert.match(uniformSource, /submitCurrentEncoder\("topologyAdvection", true\)/);
   assert.match(uniformSource, /submitCurrentEncoder\("pressureProjection", true\)/);
