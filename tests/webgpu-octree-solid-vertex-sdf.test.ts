@@ -54,4 +54,7 @@ test("GPU publication is generation-tagged and fail-closed", () => {
   assert.match(octreeSolidVertexSdfShader, /rollbackSeedControl\[5\]==params\.publication\.x/);
   assert.doesNotMatch(octreeSolidVertexSdfShader, /dims\.x\*params\.dims\.y\*params\.dims\.z\*8u/,
     "storage must remain compact-row-scaled");
+  assert.doesNotMatch(octreeSolidVertexSdfShader, /bitcast<f32>\(0x7fc00000u\)/,
+    "portable WGSL must not construct a constant NaN in an unreachable texture guard");
+  assert.match(octreeSolidVertexSdfShader, /if\(any\(extent<=vec2i\(0\)\)\)\{return 0\.0;\}/);
 });

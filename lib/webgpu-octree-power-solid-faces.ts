@@ -293,7 +293,7 @@ fn tangentBasis(n:vec3f)->mat2x3f{let helper=select(vec3f(0,1,0),vec3f(1,0,0),ab
 fn samplePoint(index:u32,sample:u32)->vec3f{let n=normals[index].xyz;let basis=tangentBasis(n);let q=quadrature[index];let uv=unpack2x16float(q.sampleUV[sample])*sqrt(q.centroidArea.w);
   return q.centroidArea.xyz+basis[0]*uv.x+basis[1]*uv.y;}
 fn rigidWorld(point:vec3f)->vec3f{return point-vec3f(0.5*params.container.x,0.0,0.5*params.container.z);}
-fn terrainHeightAt(grid:vec2f)->f32{let extent=vec2i(textureDimensions(terrain));if(any(extent<=vec2i(0))){return bitcast<f32>(0x7fc00000u);}
+fn terrainHeightAt(grid:vec2f)->f32{let extent=vec2i(textureDimensions(terrain));if(any(extent<=vec2i(0))){return 0.0;}
   let p=grid-vec2f(0.5);let base=vec2i(floor(p));let t=clamp(p-vec2f(base),vec2f(0),vec2f(1));let hi=extent-vec2i(1);
   let a=textureLoad(terrain,clamp(base,vec2i(0),hi),0).x;let b=textureLoad(terrain,clamp(base+vec2i(1,0),vec2i(0),hi),0).x;
   let c=textureLoad(terrain,clamp(base+vec2i(0,1),vec2i(0),hi),0).x;let d=textureLoad(terrain,clamp(base+vec2i(1),vec2i(0),hi),0).x;

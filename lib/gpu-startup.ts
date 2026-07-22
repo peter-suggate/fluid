@@ -28,6 +28,17 @@ export function safeBrowserGPUBringupEnabled(search: string): boolean {
   return new URLSearchParams(search).get("gpu") === "safe";
 }
 
+/**
+ * Explicitly request phase-by-phase sparse-authority fences for driver
+ * diagnosis. Timestamp-capable devices also select those fences inside the
+ * solver because their instrumented queue needs the same t=0 ordering guard;
+ * this query remains useful on timestamp-free devices and in safe bring-up.
+ */
+export function fencedSparseAuthorityBringupEnabled(search: string): boolean {
+  const query = new URLSearchParams(search);
+  return query.get("gpu") === "safe" || query.get("safeBringup") === "1";
+}
+
 /** Any reset/rebuild epoch after consent invalidates the one-shot session. */
 export function safeBrowserSimulationEpochChanged(
   safeMode: boolean,

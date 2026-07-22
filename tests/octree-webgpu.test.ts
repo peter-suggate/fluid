@@ -10,6 +10,7 @@ import { defaultScene } from "../lib/model";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
 import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreePressureCouplingShader, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import { quadtreeSurfaceShader, WebGPUQuadtreeSurfaceState } from "../lib/webgpu-quadtree-builder";
+import { initialSparseAuthorityFencesEnabled } from "../lib/webgpu-uniform-eulerian";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
@@ -809,7 +810,11 @@ test("octree compact solve dispatches cover rows with two-dimensional tiles", ()
   assert.doesNotMatch(octreeProjectionShader, /compaction\[2\] = min\(/);
 });
 
-test("octree materializes its t=0 authority through internally fenced Section 5 submissions", () => {
+test("octree batches timestamp-free t=0 authority and fences timestamp-enabled publication", () => {
+  assert.equal(initialSparseAuthorityFencesEnabled(false, false), false);
+  assert.equal(initialSparseAuthorityFencesEnabled(true, false), true);
+  assert.equal(initialSparseAuthorityFencesEnabled(false, true), true,
+    "timestamp instrumentation must retain submit boundaries across the Section 5 dependency chain");
   assert.deepEqual(OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.map(({ id }) => id), [
     "cold-topology", "power-operator-authority", "surface-global-fine",
     "section5-face-band-topology", "section5-face-band-transitions",
@@ -827,11 +832,14 @@ test("octree materializes its t=0 authority through internally fenced Section 5 
     uniformSolverSource.indexOf("private initializationTasks"),
     uniformSolverSource.indexOf("private async publishInitialSparseScenePhase"),
   );
+  assert.match(warmupTasks, /this\.octreeProjection && this\.fencedInitialSparseAuthority/);
   assert.match(warmupTasks, /OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES\.forEach/);
   assert.match(warmupTasks, /const id = index === 0 \? "solver\.warmup" : `solver\.warmup\.\$\{authorityPhase\.id\}`/,
     "the first warmup task must remain the safe pre-submit resource boundary");
   assert.match(warmupTasks, /dependencies: \[previousTaskId\]/,
-    "each later warmup phase must depend on its fenced predecessor");
+    "safe bring-up phases must depend on their fenced predecessor");
+  assert.match(warmupTasks, /Publish and validate initial sparse scene[\s\S]*publishInitialSparseSceneBatched\(\)/,
+    "normal startup must expose one combined warmup task");
   const phaseWarmup = uniformSolverSource.slice(
     uniformSolverSource.indexOf("private async publishInitialSparseScenePhase"),
     uniformSolverSource.indexOf("/** Publish a complete t=0 scene"),
@@ -846,5 +854,18 @@ test("octree materializes its t=0 authority through internally fenced Section 5 
   assert.match(phaseWarmup,
     /if \(phase === "sparse-render-world"\) \{[\s\S]*this\.initialSparseAuthorityPublished = true/,
     "only the sparse-render-world task may publish initial readiness");
+  const batchedWarmup = uniformSolverSource.slice(
+    uniformSolverSource.indexOf("private async publishInitialSparseSceneBatched"),
+    uniformSolverSource.indexOf("private applyGlobalFineDiagnostics"),
+  );
+  assert.match(batchedWarmup, /projection\.encodeInitialSparseAuthority\(initialSparseScene\)/);
+  assert.equal((batchedWarmup.match(/queue\.submit/g) ?? []).length, 1,
+    "normal authority publication must use one submission");
+  const batchSubmit = batchedWarmup.indexOf("this.device.queue.submit([initialSparseScene.finish()])");
+  const batchFence = batchedWarmup.indexOf("await this.device.queue.onSubmittedWorkDone()", batchSubmit);
+  const batchValidation = batchedWarmup.indexOf("await this.validateInitialSparseAuthority()", batchFence);
+  const batchReady = batchedWarmup.indexOf("this.initialSparseAuthorityPublished = true", batchValidation);
+  assert.ok(batchSubmit >= 0 && batchFence > batchSubmit && batchValidation > batchFence && batchReady > batchValidation,
+    "combined publication must submit once, fence once, validate, then publish readiness");
   assert.match(octreeSource, /reset-time grid[\s\S]{0,120}zero-initialized topology storage as finest 1\^3/);
 });

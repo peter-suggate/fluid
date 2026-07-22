@@ -4,6 +4,7 @@ import test from "node:test";
 import { damBreakFractions } from "../lib/initial-fluid";
 import { validateScene } from "../lib/model";
 import {
+  LARGE_HYDROSTATIC_POWER_METHOD_PROFILE,
   POWER_VALIDATION_METHOD_PROFILE,
   createLargeHydrostaticScene,
   createMinimalPowerDamBreakScene,
@@ -95,9 +96,15 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
       powerDiagramProjection: "authoritative",
     },
   });
-  for (const id of ["hydrostatic-power-two-level", "hydrostatic-power-large-offset", "minimal-power-dam-break"] as const) {
+  for (const id of ["hydrostatic-power-two-level", "minimal-power-dam-break"] as const) {
     assert.equal(getScenePreset(id).methodProfile, POWER_VALIDATION_METHOD_PROFILE);
   }
+  assert.deepEqual(LARGE_HYDROSTATIC_POWER_METHOD_PROFILE, {
+    ...POWER_VALIDATION_METHOD_PROFILE,
+    overrides: { ...POWER_VALIDATION_METHOD_PROFILE.overrides, interfaceRefinementBandCells: 4 },
+  });
+  assert.equal(getScenePreset("hydrostatic-power-large-offset").methodProfile,
+    LARGE_HYDROSTATIC_POWER_METHOD_PROFILE);
 });
 
 test("isolated Dawn commands pin the authored adaptive power configurations", () => {
