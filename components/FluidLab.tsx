@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { getMethod } from "@/lib/methods";
 import { defaultCamera } from "@/lib/model";
 import { simulation } from "@/lib/simulation/controller";
@@ -26,6 +26,51 @@ import { getScenePreset } from "@/lib/scenes";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { requestManualGPUStart } from "@/lib/gpu-startup";
 import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
+import { MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH } from "@/lib/stores/ui-store";
+
+function RightPanelResizer() {
+  const rightPanelWidth = useUIStore((state) => state.rightPanelWidth);
+  const setRightPanelWidth = useUIStore((state) => state.setRightPanelWidth);
+  const dragStart = useRef<{ pointerX: number; width: number } | null>(null);
+
+  const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragStart.current = { pointerX: event.clientX, width: rightPanelWidth };
+  };
+  const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (!dragStart.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    setRightPanelWidth(dragStart.current.width + dragStart.current.pointerX - event.clientX);
+  };
+  const finishResize = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    dragStart.current = null;
+  };
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 50 : 10;
+    if (event.key === "ArrowLeft") setRightPanelWidth(rightPanelWidth + step);
+    else if (event.key === "ArrowRight") setRightPanelWidth(rightPanelWidth - step);
+    else if (event.key === "Home") setRightPanelWidth(MIN_RIGHT_PANEL_WIDTH);
+    else if (event.key === "End") setRightPanelWidth(MAX_RIGHT_PANEL_WIDTH);
+    else return;
+    event.preventDefault();
+  };
+
+  return <div
+    className="right-panel-resizer"
+    role="separator"
+    aria-label="Resize panel"
+    aria-orientation="vertical"
+    aria-valuemin={MIN_RIGHT_PANEL_WIDTH}
+    aria-valuemax={MAX_RIGHT_PANEL_WIDTH}
+    aria-valuenow={rightPanelWidth}
+    tabIndex={0}
+    onPointerDown={onPointerDown}
+    onPointerMove={onPointerMove}
+    onPointerUp={finishResize}
+    onPointerCancel={finishResize}
+    onKeyDown={onKeyDown}
+  />;
+}
 
 function GPUInitializationPanel({ status }: { status: Extract<GPUStatus, { state: "initializing" }> }) {
   const [now, setNow] = useState(() => performance.now());
@@ -66,6 +111,7 @@ export function FluidLab() {
   const diagnosticsOpen = useUIStore((state) => state.diagnosticsOpen);
   const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
   const rightPanel = useUIStore((state) => state.rightPanel);
+  const rightPanelWidth = useUIStore((state) => state.rightPanelWidth);
   const setRightPanel = useUIStore((state) => state.setRightPanel);
   const presetId = useSceneStore((state) => state.presetId);
   const fluidState = useDiagnosticsStore((state) => state.fluidState);
@@ -93,7 +139,7 @@ export function FluidLab() {
   };
 
   return (
-    <main className="lab-shell" data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(rightPanel)} data-right-panel={rightPanel ?? "closed"}>
+    <main className="lab-shell" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties} data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(rightPanel)} data-right-panel={rightPanel ?? "closed"}>
       <aside className="left-panel panel-scroll">
         <div className="brand"><span className="brand-mark">FL</span><div><strong>Fluid Lab</strong><small>WEBGPU CFD WORKBENCH</small></div></div>
         <ScenePanel />
@@ -132,8 +178,8 @@ export function FluidLab() {
         <nav className="utility-panel-tabs" aria-label="Viewport panels">
           <button className={rightPanel === "visual" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visual" ? null : "visual")} aria-expanded={rightPanel === "visual"} title="Render and debug controls">RENDER</button>
           <button className={rightPanel === "bodies" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "bodies" ? null : "bodies")} aria-expanded={rightPanel === "bodies"} title="Rigid body controls">BODIES</button>
-          <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAG</button>
-          <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Live performance profiler">PERF</button>
+          <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAGNOSTICS</button>
+          <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Live performance profiler">PERFORMANCE</button>
         </nav>
         {gpuStatus.state === "initializing" && <GPUInitializationPanel status={gpuStatus} />}
         {gpuStatus.state === "manual" && <div className="gpu-fallback gpu-manual-start" role="status">
@@ -149,6 +195,7 @@ export function FluidLab() {
         {gpuStatus.state === "unavailable" && <div className="gpu-fallback"><strong>3D renderer unavailable</strong><p>{gpuStatus.label}</p><small>The scene editor, serialization, and CPU validation remain available.</small></div>}
       </section>
 
+      {rightPanel && <RightPanelResizer />}
       {rightPanel === "visual" && <VisualPanel />}
       {rightPanel === "bodies" && <RigidBodyPanel />}
       {diagnosticsOpen && <DiagnosticsPanel />}

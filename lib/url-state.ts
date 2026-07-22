@@ -4,7 +4,7 @@ import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets } from "./scenes";
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
-import { useUIStore, type RightPanel } from "./stores/ui-store";
+import { DEFAULT_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, useUIStore, type RightPanel } from "./stores/ui-store";
 import {
   DEFAULT_SVO_LIGHTING_MODE,
   DEFAULT_SVO_LIGHTING_OPTIONS,
@@ -65,6 +65,7 @@ type UIQueryState = {
   sceneModalOpen: boolean;
   diagnosticsOpen: boolean;
   rightPanel: RightPanel;
+  rightPanelWidth: number;
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
   gridOverlayMode: GridOverlayMode;
@@ -206,6 +207,7 @@ export function parseQueryState(search: string): QueryState {
       sceneModalOpen: query.get("sceneConfig") === "1",
       diagnosticsOpen: rightPanel === "diagnostics",
       rightPanel,
+      rightPanelWidth: numberParam(query, "panelWidth", DEFAULT_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH),
       gridOverlayAxis: grid === "off" || grid === "x" || grid === "y" || grid === "z" || grid === "volume" ? grid : initialUI.gridOverlayAxis,
       gridOverlaySlice: grid === "volume"
         ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
@@ -221,7 +223,7 @@ export function parseQueryState(search: string): QueryState {
 }
 
 function isManagedKey(key: string) {
-  return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "panel"
+  return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "panel" || key === "panelWidth"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
     || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "voxels" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
@@ -247,6 +249,7 @@ export function serializeQueryState(
   const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
   if (rightPanel === "diagnostics") query.set("diagnostics", "1");
   else if (rightPanel) query.set("panel", rightPanel);
+  if (uiState.rightPanelWidth !== DEFAULT_RIGHT_PANEL_WIDTH) query.set("panelWidth", String(uiState.rightPanelWidth));
   if (uiState.sceneModalOpen) query.set("sceneConfig", "1");
   if (uiState.gridOverlayAxis !== "off") query.set("grid", uiState.gridOverlayAxis);
   if (uiState.gridOverlaySlice !== 0.5) query.set("gridSlice", String(uiState.gridOverlaySlice));

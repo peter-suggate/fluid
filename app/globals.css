@@ -32,10 +32,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   grid-template-areas: "left view right" "transport transport transport";
   background: #071210;
 }
-.lab-shell[data-right-panel-open="true"] { grid-template-columns: 340px minmax(420px, 1fr) 300px; }
-/* The profiler gets a wide sidebar; the viewport keeps rendering the live
-   scene so profiled frames reflect the real workload. */
-.lab-shell[data-right-panel="performance"] { grid-template-columns: 340px minmax(420px, 1fr) 620px; }
+.lab-shell[data-right-panel-open="true"] { grid-template-columns: 340px minmax(420px, 1fr) var(--right-panel-width, 620px); }
 
 .brand { position: sticky; z-index: 5; top: 0; min-height: 66px; display: flex; align-items: center; gap: 12px; padding: 0 17px; border-bottom: 1px solid var(--line); background: rgba(5, 15, 14, .97); backdrop-filter: blur(20px); }
 .brand-mark { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid rgba(131, 241, 209, .45); color: var(--accent); font: 700 11px/1 var(--mono); letter-spacing: -.08em; box-shadow: inset 0 0 18px rgba(131,241,209,.08), 0 0 24px rgba(131,241,209,.05); }
@@ -54,6 +51,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .left-panel, .right-panel { background: var(--panel); min-height: 0; }
 .left-panel { grid-area: left; border-right: 1px solid var(--line); }
 .right-panel { grid-area: right; border-left: 1px solid var(--line); }
+.right-panel-resizer { position: relative; z-index: 12; grid-area: right; width: 9px; height: 100%; align-self: stretch; justify-self: start; transform: translateX(-4px); cursor: col-resize; touch-action: none; }
+.right-panel-resizer::after { content: ""; position: absolute; inset: 0 3px; background: transparent; transition: background .16s ease, box-shadow .16s ease; }
+.right-panel-resizer:hover::after, .right-panel-resizer:focus-visible::after { background: var(--accent); box-shadow: 0 0 10px rgba(131,241,209,.42); }
 .panel-scroll { overflow: auto; scrollbar-width: thin; scrollbar-color: #24403a transparent; }
 .panel-section { padding: 17px 17px 18px; border-bottom: 1px solid var(--line); }
 .eyebrow { margin: 0 0 9px; color: var(--accent); font: 600 9px/1.4 var(--mono); letter-spacing: .13em; }
@@ -110,8 +110,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .frame-rate-counter { position: fixed; z-index: 40; top: 15px; right: 16px; min-width: 61px; height: 31px; padding: 0 9px; display: flex; align-items: baseline; justify-content: center; gap: 5px; border: 1px solid rgba(131,241,209,.26); background: rgba(5,18,16,.86); color: var(--accent-strong); font-family: var(--mono); font-variant-numeric: tabular-nums; backdrop-filter: blur(14px); pointer-events: none; }
 .frame-rate-counter strong { font-size: 12px; line-height: 1; }
 /* Keep the meter over the viewport's corner, clear of any open right panel. */
-.lab-shell[data-right-panel-open="true"] .frame-rate-counter { right: 316px; }
-.lab-shell[data-right-panel="performance"] .frame-rate-counter { right: 636px; }
+.lab-shell[data-right-panel-open="true"] .frame-rate-counter { right: calc(var(--right-panel-width, 620px) + 16px); }
 .frame-rate-counter span { color: var(--muted); font-size: 7px; font-weight: 650; letter-spacing: .1em; }
 .environment-chip { min-height: 31px; margin-right: 69px; padding: 4px 9px 4px 5px; display: grid; grid-template-columns: 35px auto; grid-template-rows: 10px 12px; column-gap: 8px; border: 1px solid var(--line); background: rgba(5,18,16,.73); color: var(--muted); text-align: left; backdrop-filter: blur(14px); }
 .environment-chip > span { grid-row: 1 / 3; width: 35px; display: flex; align-self: stretch; overflow: hidden; border: 1px solid rgba(255,255,255,.12); }
@@ -574,8 +573,8 @@ button.perf-row:hover { border-color: var(--line); background: rgba(255,255,255,
 
 @media (max-width: 1180px) {
   .lab-shell { grid-template-columns: 290px minmax(380px, 1fr) 0; }
-  .lab-shell[data-right-panel-open="true"] { grid-template-columns: 290px minmax(380px, 1fr) 270px; }
-  .lab-shell[data-right-panel="performance"] { grid-template-columns: 290px minmax(0,1fr); }
+  .lab-shell[data-right-panel-open="true"] { grid-template-columns: 290px minmax(380px, 1fr) min(var(--right-panel-width, 620px), calc(100vw - 670px)); }
+  .lab-shell[data-right-panel-open="true"] .frame-rate-counter { right: calc(min(var(--right-panel-width, 620px), calc(100vw - 670px)) + 16px); }
   .quiet-button:first-child { display: none; }
   .transport-bar { grid-template-columns: 290px 1fr 300px; }
   .scene-popover { left: 302px; }
@@ -588,6 +587,8 @@ button.perf-row:hover { border-color: var(--line); background: rgba(255,255,255,
   .lab-shell, .lab-shell[data-right-panel-open="true"] { min-height: 798px; height: auto; grid-template-columns: 230px 1fr; grid-template-rows: 560px auto 58px; grid-template-areas: "left view" "left right" "transport transport"; }
   .scene-popover { left: 242px; }
   .right-panel { border-top: 1px solid var(--line); border-left: 0; }
+  .right-panel-resizer { display: none; }
+  .lab-shell[data-right-panel-open="true"] .frame-rate-counter { right: 16px; }
   .perf-source { display: none; }
   .perf-meta { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .perf-meta > div { border-bottom: 1px solid rgba(168,226,215,.07); }
