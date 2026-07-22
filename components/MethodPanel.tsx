@@ -1,7 +1,7 @@
 "use client";
 
-import { RangeControl } from "./controls";
-import { getMethod, type MethodParamSpec } from "@/lib/methods";
+import { RangeControl, Segmented } from "./controls";
+import { getMethod, interactiveSimulationMethods, type MethodParamSpec } from "@/lib/methods";
 import type { GPUQuality } from "@/lib/tall-cell-grid";
 import { simulation } from "@/lib/simulation/controller";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
@@ -49,9 +49,19 @@ export function MethodPanel() {
     <section className="panel-section" data-testid="method-panel" aria-busy={gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild"}>
       <div className="section-heading"><h2>Method</h2><span>{method.backend === "webgpu" ? "WebGPU f32" : "CPU binary64"}</span></div>
       {gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild" && <div className="method-apply-state" role="status"><i aria-hidden="true" /><span><strong>APPLYING</strong>{gpuStatus.operation ?? gpuStatus.label}</span></div>}
+      <Segmented
+        ariaLabel="Simulation method"
+        value={methodId}
+        options={interactiveSimulationMethods.map((candidate) => ({
+          value: candidate.id,
+          label: candidate.id === "tall-cell" ? "Regular tall cells" : candidate.shortLabel,
+          title: candidate.id === "tall-cell" ? `Experimental · ${candidate.description}` : candidate.description,
+        }))}
+        onChange={(value) => simulation.setMethod(value)}
+      />
       <div className="method-identity" title={method.description}>
-        <strong>{method.label}</strong>
-        <span>Sparse pyramid PCG · power-cell faces</span>
+        <strong>{method.label}{methodId === "tall-cell" ? " · Experimental" : ""}</strong>
+        <span>{method.description}</span>
       </div>
       {method.showQualityControl !== false && <label className="select-control" title={method.pressureMapping}>
         <span>Quality</span>
@@ -64,6 +74,10 @@ export function MethodPanel() {
       {method.backend === "webgpu" && gpuInfo && <div className="grid-readout" title="The grid the selected quality and parameters actually allocated" data-testid="grid-readout">
         <strong>{gpuInfo.nx} × {gpuInfo.ny} × {gpuInfo.nz}</strong>
         <span>{gpuInfo.cellCount.toLocaleString()} samples · {(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB</span>
+      </div>}
+      {methodId === "tall-cell" && gpuInfo && <div className={`method-runtime-note${gpuInfo.gridKind === "restricted-tall-cell" ? "" : " warning"}`} role="status">
+        <strong>{gpuInfo.gridKind === "restricted-tall-cell" ? "Restricted tall-cell grid active" : "Uniform-grid fallback active"}</strong>
+        <span>{gpuInfo.gridKind === "restricted-tall-cell" ? `${gpuInfo.regularLayers} regular surface layers · ${((gpuInfo.activeCompressionRatio ?? gpuInfo.compressionRatio) * 100).toFixed(0)}% active storage` : "This scene and surface-band setting leave insufficient depth for a tall cell."}</span>
       </div>}
       {method.backend === "cpu" && fluidRenderState && <div className="grid-readout" title="The MAC grid the selected cell size actually allocated" data-testid="grid-readout">
         <strong>{fluidRenderState.nx} × {fluidRenderState.ny} × {fluidRenderState.nz}</strong>

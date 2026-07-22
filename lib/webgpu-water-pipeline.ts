@@ -946,8 +946,10 @@ fn project(world:vec3f)->vec4f {
   // A closed liquid/wall silhouette is shared by a front-facing free-surface
   // triangle and a back-facing wall triangle. The raster top-left rule can
   // otherwise give their exact shared edge to the back pass alone at one
-  // pixel. Expand only front-facing triangle coverage by a sub-pixel amount;
-  // back faces remain culled, so actual holes are still visible to the strict
+  // pixel. Expand only front-facing triangle coverage by one conservative
+  // raster pixel; the 0.75-pixel margin still left a reproducible back-only
+  // wall-corner sample in the reverse Dawn view at t=0.368 s. Back faces
+  // remain culled, so actual holes are still visible to the strict
   // back-without-front smoke oracle.
   if(interfaceCoverageExpansionPixels>0.0){
     let first=index-index%3u;let c0=project(vertices[first].position.xyz);let c1=project(vertices[first+1u].position.xyz);let c2=project(vertices[first+2u].position.xyz);
@@ -1387,7 +1389,7 @@ export class RasterWaterPipeline {
       primitive: { topology: "triangle-list", frontFace: "ccw", cullMode },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
     });
-    this.surfaceFrontPipeline = await render("Rendering front water interfaces",surfaceDescriptor("Raster water front interfaces", WATER_INTERFACE_CULL_MODES.front,0.75));
+    this.surfaceFrontPipeline = await render("Rendering front water interfaces",surfaceDescriptor("Raster water front interfaces", WATER_INTERFACE_CULL_MODES.front,1.0));
     this.surfaceBackPipeline = await render("Rendering back water interfaces",surfaceDescriptor("Raster water back interfaces", WATER_INTERFACE_CULL_MODES.back));
     this.causticPipeline = await render("Projecting water caustics",{
       label: "Project refracted caustics", layout: surfacePipelineLayout, vertex: { module: caustic, entryPoint: "causticVertex" },

@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   OCTREE_FACE_BAND_FACE_BYTES,
+  OCTREE_FACE_BAND_CONTROL_BYTES,
   OCTREE_FACE_BAND_ROW_BYTES,
   OCTREE_FACE_BAND_STATE_BYTES,
   OCTREE_FACE_BAND_TRANSITION_ADJACENCY_BYTES,
@@ -130,7 +131,7 @@ test("co-spherical entry 7946 closes its axial-star octahedron in the immutable 
   const body = [-1, -1, -1], edgeA = [0, -1, -1], edgeB = [-1, 0, -1];
   assert.deepEqual(weights(point, body, edgeA, edgeB).map((value) => value === 0 ? 0 : value),
     [0.625, 0.375, 0, 0]);
-  const runtimeDelaunay = wgslFunction("surroundingOwnerDelaunayVector");
+  const runtimeDelaunay = wgslFunction("surroundingOwnerDelaunayVectorMeasured");
   assert.match(runtimeDelaunay,
     /for\(varcorner=0u;corner<8u[\s\S]*dot\(delta,delta\)<radius2-tolerance/,
     "the runtime path enumerates actual surrounding owners and requires an empty circumsphere");
@@ -389,9 +390,11 @@ test("face march heap has an exact topology-capacity pop bound and deterministic
 });
 
 test("face-band control diagnostics distinguish fail-closed causes", () => {
-  const words = new Uint32Array(24);
+  assert.equal(OCTREE_FACE_BAND_CONTROL_BYTES, 128);
+  const words = new Uint32Array(31);
   words.set([1 | 2 | 64 | 128, 91, 120, 315, 630, 7, 0x8000_0000, 11, 8, 300, 15, 0, 4, 27, 3, 44]);
   words.set([307, 315, 307, 2, 4, 3, 1, 11], 16);
+  words.set([273, 42, 88_200, 7, 19_600, 315, 315], 24);
   assert.deepEqual(unpackOctreeFaceBandControl(words), {
     flags: 195, firstError: 91, rowCount: 120, faceCount: 315, incidenceCount: 630,
     generation: 7, valid: false, maximumDepth: 11, seedCount: 8, acceptedCount: 300,
@@ -400,6 +403,9 @@ test("face-band control diagnostics distinguish fail-closed causes", () => {
     marchHeapHighWater: 307, marchPops: 315, marchTrials: 307, marchChunks: 2,
     marchChunkBound: 4, marchCapExhausted: 3,
     marchUnresolvedWithAcceptedPredecessor: 1, marchDisconnected: 11,
+    directAnchorSuccess: 273, fullRowFallbackInvocations: 42,
+    fullRowCandidateRowsTested: 88_200, surroundingOwnerFallbackInvocations: 7,
+    surroundingOwnerRowsTested: 19_600, airSamplesSelected: 315, airSamplesEvaluated: 315,
     capacityFailure: true, hashProbeFailure: true,
     invalidSource: false, invalidRow: false, invalidFace: false, invalidPhi: false,
     unresolved: true, incompleteVector: true, outsideFineBand: false,
@@ -407,6 +413,32 @@ test("face-band control diagnostics distinguish fail-closed causes", () => {
   words.set([0, 0xffff_ffff, 120, 315, 630, 7, 0x8000_0000, 11, 8, 315, 0, 0, 4]);
   assert.equal(unpackOctreeFaceBandControl(words).valid, true);
   assert.throws(() => unpackOctreeFaceBandControl(new Uint32Array(12)), /at least 13/);
+});
+
+test("air-band evaluation measures exact row-scan fallback work without changing generic callers", () => {
+  const locate = wgslFunction("locateFinalPointVectorMeasured");
+  assert.match(locate, /candidateRowsTested\+=1u/,
+    "every O(rows) candidate-loop iteration is counted, including skipped endpoint rows");
+  assert.match(locate, /surroundingOwnerDelaunayVectorMeasured\(pointGrid\)/);
+  assert.match(wgslFunction("locateFinalPointVector"),
+    /returnlocateFinalPointVectorMeasured\(initialAnchor,pointGrid\)\.value/,
+    "power publication and retained repair preserve the existing pure sampler wrapper");
+  const classify = wgslFunction("classifyAirBandVelocity");
+  assert.match(classify, /storeSampleStatus\(i,SAMPLE_EVALUATE\);addAirSearchCounter\(5u,1u\)/);
+  const evaluate = wgslFunction("evaluateAirBandVelocity");
+  assert.match(evaluate, /addAirSearchCounter\(6u,1u\)/);
+  assert.match(evaluate,
+    /addAirSearchCounter\(2u,measured\.candidateRowsTested\)/);
+  assert.match(evaluate,
+    /addAirSearchCounter\(4u,measured\.surroundingRowsTested\)/);
+  assert.doesNotMatch(evaluate, /\bcontrol\b/,
+    "the 10-buffer evaluator must not make face-band control reachable");
+  const aggregate = wgslFunction("aggregateAirBandSearchCounters");
+  assert.match(aggregate,
+    /letbase=airSearchCounterBase\(\)[\s\S]*atomicAdd\(&control\.fullRowCandidateRowsTested,atomicLoad\(&sampleStatus\[base\+2u\]\)\)/);
+  const encode = compact(WebGPUOctreeFaceFastMarch.prototype.encodeAirSamples);
+  assert.match(encode, /dispatch\(this\.sampleAggregatePipeline,aggregateEntries,1\)/,
+    "the one-thread fold must run exactly once, not once per query workgroup");
 });
 
 test("uniform catalog support still honors every Section 6.1 same/coarser owner", () => {
@@ -679,7 +711,7 @@ test("GPU face band closes endpoints before deterministic parallel CPT", () => {
     /ap<\(\*bestPhi\)\|\|\(ap==\(\*bestPhi\)&&\(globalFace<\(\*bestGlobal\)/,
     "fallback resolution uses closest-|phi| then stable-face-ID tie breaking");
   assert.match(octreeFaceBandWGSL, /atomicLoad\(&control\.unresolvedCount\)==0u/);
-  assert.match(octreeFaceBandWGSL, /sampleStatus\[i\]=VALID\|EXTRAPOLATED/,
+  assert.match(octreeFaceBandWGSL, /storeSampleStatus\(i,VALID\|EXTRAPOLATED\)/,
     "air-side Stage-B publication is explicitly marked extrapolated");
   assert.match(octreeFaceBandWGSL, /binding\(10\)var<storage,read>powerRowVelocities:array<vec4f>/,
     "regular face seeds consume Stage-A least-squares row vectors");
@@ -693,7 +725,7 @@ test("GPU face band closes endpoints before deterministic parallel CPT", () => {
   assert.match(octreeFaceBandWGSL, /centroidVector\(f\.negativeRow,f\.centroid\.xyz\)/,
     "regular-face seeds evaluate the full Stage-B vector at the actual face centroid");
   assert.match(octreeFaceBandWGSL,
-    /let stageBStatus=sampleStatus\[i\];let stageBReason=stageBStatus&255u;let needsDualCompletion=\(stageBStatus&VALID\)==0u&&\(stageBReason==4u\|\|stageBReason==8u\);if\(rows\[band\]\.minimumPhi<0\.&&!needsDualCompletion\)\{return;\}/,
+    /let stageBStatus=loadSampleStatus\(i\);let stageBReason=stageBStatus&255u;let needsDualCompletion=\(stageBStatus&VALID\)==0u&&\(stageBReason==4u\|\|stageBReason==8u\);if\(rows\[band\]\.minimumPhi<0\.&&!needsDualCompletion\)\{return;\}/,
     "Section 5 completes true Stage-B failures without mistaking valid tetrahedron indices 4 or 8 for failure reasons");
   assert.match(octreeFaceBandWGSL,
     /let owner=ownerAt\(q\);if\(owner\.valid==0u\)[\s\S]*let band=retainedBandAnchor\(grid\)/,
@@ -704,10 +736,10 @@ test("GPU face band closes endpoints before deterministic parallel CPT", () => {
   assert.match(octreeFaceBandWGSL, /control\.generation!=sp\.fineGeneration/,
     "the sampled regular-face band must match the transported fine generation");
   assert.match(octreeFaceBandWGSL,
-    /band==INVALID[^}]+sampleStatus\[i\]=SAMPLE_FAILED/,
+    /band==INVALID[^}]+storeSampleStatus\(i,SAMPLE_FAILED/,
     "a missing classification row is a structural failure, not proof of liquid");
   assert.match(octreeFaceBandWGSL,
-    /control\.generation!=sp\.fineGeneration[\s\S]*minimumPhi<0\.&&!needsDualCompletion[\s\S]*sampleStatus\[i\]=SAMPLE_EVALUATE/,
+    /control\.generation!=sp\.fineGeneration[\s\S]*minimumPhi<0\.&&!needsDualCompletion[\s\S]*storeSampleStatus\(i,SAMPLE_EVALUATE\)/,
     "only an exact current liquid row may preserve Stage B; air and uncovered dual octants require published completion");
   assert.doesNotMatch(octreeFaceBandWGSL, /sampleBandRow\(vec3u\(floor\(grid\)\)/,
     "queries inside coarse owners must not use a non-origin finest-cell key");
@@ -935,14 +967,17 @@ test("top-side nonuniform transition uses explicit physical world faces", () => 
 
 test("air-side sampler bind-group ABI has one entry per binding", () => {
   const source = String(WebGPUOctreeFaceFastMarch.prototype.encodeAirSamples);
-  const groups = [...source.matchAll(/const (classify|evaluate|finalize)Entries\s*=\s*\[([\s\S]*?)\];/g)]
+  const groups = [...source.matchAll(/const (classify|evaluate|aggregate|finalize)Entries\s*=\s*\[([\s\S]*?)\];/g)]
     .map((match) => Array.from(match[2].matchAll(/binding:\s*(\d+)/g), (item) => Number(item[1])));
   assert.deepEqual(groups, [
     [0, 20, 21, 5, 6, 7, 22, 23, 26, 32, 48],
     [0, 6, 7, 19, 20, 21, 22, 23, 27, 28, 29, 30],
+    [5, 23],
     [5, 20, 23, 48],
   ]);
   for (const bindings of groups) assert.equal(new Set(bindings).size, bindings.length);
+  assert.equal(groups[1].filter((binding) => ![0, 20].includes(binding)).length, 10,
+    "the exact evaluator stays at the portable ten-storage-buffer limit");
   assert.doesNotMatch(source, /powerFaces|faceNormals/,
     "compact-wet equivalence may override fine queries but must not claim persistent power-face authority");
 });
@@ -1522,6 +1557,37 @@ test("factor-4/factor-8 production schedule publishes and consumes the face-marc
     "the face marcher must override the exact result/status pair consumed by trajectory advancement");
   assert.match(transport.slice(airBand, advance), /owners:options\.ownerTopology/,
     "every air-band query must resolve the same adaptive owner authority as row publication");
+});
+
+test("fine A/B consumers retain the submitted publication during an unpublished target probe", () => {
+  type PublicationHarness = {
+    globalFineCurrentIsA: boolean;
+    globalFinePublishedIsA: boolean;
+    globalFinePublicationByEncoder: WeakMap<object, boolean>;
+    powerCoarseLevelSetSchedule?: { retireSubmittedEncoder(encoder: object): void };
+    retireSubmittedEncoder(encoder: object): void;
+  };
+  const harness = Object.create(WebGPUOctreeProjection.prototype) as PublicationHarness;
+  const targetEncoder = {};
+  harness.globalFineCurrentIsA = false;
+  harness.globalFinePublishedIsA = true;
+  harness.globalFinePublicationByEncoder = new WeakMap([[targetEncoder, false]]);
+  assert.equal(harness.globalFinePublishedIsA, true,
+    "encoding/reset-time probing of unpublished B must leave consumers on submitted A");
+  harness.retireSubmittedEncoder(targetEncoder);
+  assert.equal(harness.globalFinePublishedIsA, false,
+    "only submission of the encoder carrying B finalize/restriction publishes B");
+
+  const surface = compact(WebGPUOctreeProjection.prototype.encodeSurface);
+  const register = surface.indexOf("this.globalFinePublicationByEncoder.set(encoder,publicationTargetIsA)");
+  const boundary = surface.indexOf('splitProductionPhase("fineRestriction")', register);
+  const advance = surface.indexOf("this.globalFineCurrentIsA=publicationTargetIsA", boundary);
+  assert.ok(register >= 0 && boundary > register && advance > boundary,
+    "the target parity must be attached before the fine-restriction encoder can be split/submitted");
+  assert.match(compact(Object.getOwnPropertyDescriptor(
+    WebGPUOctreeProjection.prototype, "globalFineLevelSetSource",
+  )!.get!), /this\.globalFinePublishedIsA\?this\.globalFineSourceA:this\.globalFineSourceB/,
+  "renderer and QA source selection must ignore optimistic encode parity");
 });
 
 test("Section 5 final point field consumes one complete transient physical power graph", () => {

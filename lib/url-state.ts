@@ -1,4 +1,4 @@
-import { defaultMethodId, simulationMethods, type MethodParamValue, type MethodParamValues } from "./methods";
+import { defaultMethodId, interactiveMethodId, simulationMethods, type MethodParamValue, type MethodParamValues } from "./methods";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets } from "./scenes";
@@ -311,10 +311,9 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void) {
   const hydrate = () => {
     applyingUrl = true;
     const state = parseQueryState(window.location.search);
-    // The interactive application has one scene authority. Legacy method IDs
-    // remain parseable for offline comparison tooling, but UI hydration always
-    // resolves to the unified sparse-brick octree.
-    useMethodStore.setState({ methodId: "octree", quality: state.quality, overrides: state.overrides });
+    // Offline comparison methods remain parseable and serializable, while the
+    // interactive application admits only the choices exposed by its picker.
+    useMethodStore.setState({ methodId: interactiveMethodId(state.methodId), quality: state.quality, overrides: state.overrides });
     useSceneStore.getState().setScene(state.scene, state.presetId);
     useUIStore.setState(state.ui);
     applyingUrl = false;

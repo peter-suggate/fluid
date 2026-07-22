@@ -30,7 +30,7 @@ import { compactOctreeFieldEvidenceIsAcceptable, compactOctreePublicationHeaderE
   type CompactOctreeFieldEvidence } from "./webgpu-smoke-compact-field";
 import { decodeOctreeMGPCGDiagnostics, octreeMGPCGDiagnosticsAreAcceptable,
   type OctreeMGPCGDiagnostics } from "./webgpu-smoke-pressure";
-import { compactPowerFaceIntegratedFlux, compactPowerFaceMetricKineticEnergy } from "./webgpu-smoke-power-diagnostics";
+import { compactLiquidVelocityDiagnostic, compactMechanicalEnergyDiagnostic, compactPowerFaceIntegratedFlux, compactPowerFaceMetricKineticEnergy } from "./webgpu-smoke-power-diagnostics";
 import { OCTREE_POWER_VELOCITY_VALID } from "../lib/webgpu-octree-power-velocity";
 import { compareVelocityFields, DAM_BREAK_VELOCITY_PARITY_LIMITS, rasterizeCompactPowerCellVelocities,
   velocityParityFailures, type CompactVelocityRaster, type VelocityParityMetrics } from "./webgpu-smoke-velocity-parity";
@@ -153,6 +153,7 @@ const includeFinalFieldStats = process.env.FLUID_FIELD_STATS !== "0";
  * is not part of simulationWall_ms and can independently reject a measurable
  * run when an upstream publication generation is stale. */
 const performanceProfileRequested = process.env.FLUID_PERFORMANCE_PROFILE === "1";
+const performanceReadbacksEnabled = process.env.FLUID_PERFORMANCE_READBACKS !== "0";
 const requireSpatialField = process.env.FLUID_REQUIRE_SPATIAL_FIELD === "1";
 const runCPUOracle = process.env.FLUID_CPU_ORACLE !== "0";
 const cpuMaximumCells = Number(process.env.FLUID_CPU_MAX_CELLS ?? 250_000);
@@ -786,7 +787,7 @@ async function readGlobalFineGenerationDiagnostics(
     volumeControl ? readBufferBinding(device, { buffer: volumeControl }, 64) : Promise.resolve(undefined),
     powerVelocityControl ? readBufferBinding(device, { buffer: powerVelocityControl }, 32) : Promise.resolve(undefined),
     powerProjectionControl ? readBufferBinding(device, { buffer: powerProjectionControl }, 64) : Promise.resolve(undefined),
-    faceBandControl ? readBufferBinding(device, { buffer: faceBandControl }, 64) : Promise.resolve(undefined),
+    faceBandControl ? readBufferBinding(device, { buffer: faceBandControl }, 128) : Promise.resolve(undefined),
   ]);
   const worklist = new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset, worklistBytes.byteLength / 4);
   const metadata = new Uint32Array(metadataBytes.buffer, metadataBytes.byteOffset, metadataBytes.byteLength / 4);
@@ -1001,6 +1002,13 @@ async function readGlobalFineGenerationDiagnostics(
       faceBandValid: faceBand.valid, faceBandMaximumDepth: faceBand.maximumDepth,
       faceBandSeeds: faceBand.seedCount, faceBandAccepted: faceBand.acceptedCount,
       faceBandUnresolved: faceBand.unresolvedCount, faceBandSampleFailures: faceBand.sampleFailures,
+      faceBandDirectAnchorSuccess: faceBand.directAnchorSuccess,
+      faceBandFullRowFallbackInvocations: faceBand.fullRowFallbackInvocations,
+      faceBandFullRowCandidateRowsTested: faceBand.fullRowCandidateRowsTested,
+      faceBandSurroundingOwnerFallbackInvocations: faceBand.surroundingOwnerFallbackInvocations,
+      faceBandSurroundingOwnerRowsTested: faceBand.surroundingOwnerRowsTested,
+      faceBandAirSamplesSelected: faceBand.airSamplesSelected,
+      faceBandAirSamplesEvaluated: faceBand.airSamplesEvaluated,
       faceBandRowCapacity: faceBandPlan?.rowCapacity, faceBandFaceCapacity: faceBandPlan?.faceCapacity } : {}),
   };
 }
@@ -1797,7 +1805,7 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
         ? readBufferBinding(device, { buffer: solver.globalFineVolumeControl }, 64)
         : Promise.resolve(undefined),
       solver.globalFineFaceBandControl
-        ? readBufferBinding(device, { buffer: solver.globalFineFaceBandControl }, 64)
+        ? readBufferBinding(device, { buffer: solver.globalFineFaceBandControl }, 128)
         : Promise.resolve(undefined),
       solver.globalFineFaceBandTransitionControl
         ? readBufferBinding(device, { buffer: solver.globalFineFaceBandTransitionControl }, 160)
@@ -1989,6 +1997,20 @@ interface GPUSmokeResult {
     globalFineGeneration?: GlobalFineGenerationDiagnostics;
     preProjectionVelocity?: Float32Array;
     postProjectionVelocity?: Float32Array;
+    compactMechanicalEnergy?: ReturnType<typeof compactMechanicalEnergyDiagnostic> & {
+      publicationValid: boolean;
+      rowCount: number;
+      reconstructedRows: number;
+      coveredCells: number;
+      overlapCells: number;
+      invalidRows: number;
+      liquidCellCount: number;
+      finiteLiquidCellCount: number;
+      liquidVolumeCellSum: number;
+      finiteLiquidVolumeCellSum: number;
+      maximumLiquidComponentSpeed_m_s: number;
+      nonFiniteLiquidComponentCount: number;
+    };
   }>;
 }
 
@@ -2535,6 +2557,14 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     powerGenerationAuditedSteps: result.powerGenerationAuditedSteps,
     powerTransitionWitness: result.powerTransitionWitness,
     cpuAdvanceEncodeBreakdown: result.info.cpuAdvanceEncodeBreakdown,
+    gpuAdvancePhaseWall: info.gpuAdvancePhaseWall,
+    gpuPressureSolveObservedWall_ms: info.gpuPressureSolveObservedWall_ms,
+    cpuPressureSolveProbeEncode_ms: info.cpuPressureSolveProbeEncode_ms,
+    gpuPressureSolveObservedSampleId: info.gpuPressureSolveObservedSampleId,
+    gpuQueueWall_ms: info.gpuQueueWall_ms,
+    gpuQueueSimulation_s: info.gpuQueueSimulation_s,
+    gpuTelemetryWall_ms: info.gpuTelemetryWall_ms,
+    gpuPhysicsTimingReadbackWall_ms: info.gpuPhysicsTimingReadbackWall_ms,
     simulatedTime_s: info.simulatedTime_s, submittedTime_s: info.submittedTime_s, completedTime_s: info.completedTime_s,
     grid: [info.nx, info.storedNy, info.nz], cubicGrid: result.grid,
     allocatedBytes: info.allocatedBytes,
@@ -2568,6 +2598,17 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     globalFineLevelSetLogicalBrickCount: info.globalFineLevelSetLogicalBrickCount,
     globalFineLevelSetEnabled: info.globalFineLevelSetEnabled,
     globalFineLevelSetFactor: info.globalFineLevelSetFactor,
+    globalFineInterfaceBricks: info.globalFineInterfaceBricks,
+    globalFineDesiredBricks: info.globalFineDesiredBricks,
+    globalFineActivatedBricks: info.globalFineActivatedBricks,
+    globalFineActiveBricks: info.globalFineActiveBricks,
+    globalFineTransportQueryCapacity: info.globalFineTransportQueryCapacity,
+    globalFineTransportChunkCapacity: info.globalFineTransportChunkCapacity,
+    globalFineTransportChunkCount: info.globalFineTransportChunkCount,
+    globalFineTransportSegmentCount: info.globalFineTransportSegmentCount,
+    globalFineTransportEncodedPasses: info.globalFineTransportEncodedPasses,
+    globalFineTransportPrepassScratchBytes: info.globalFineTransportPrepassScratchBytes,
+    globalFineTransportVertexScratchBytes: info.globalFineTransportVertexScratchBytes,
     frontierListCapacity: info.frontierListCapacity,
     frontierRequiredLeaves: info.frontierRequiredLeaves,
     frontierCapacityOverflow: info.frontierCapacityOverflow,
@@ -2639,6 +2680,8 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
         presentationFallbackActive: raster.presentationFallbackActive,
         globalFineAuthorityTransition: raster.globalFineAuthorityTransition } : undefined,
     })),
+    compactMechanicalEnergyCheckpoints: result.checkpoints.flatMap(({ time_s, compactMechanicalEnergy }) =>
+      compactMechanicalEnergy ? [{ time_s, ...compactMechanicalEnergy }] : []),
     octreeFaceMirrorDiagnostics: result.octreeFaceMirrorDiagnostics,
     octreePowerFaceTransferDiagnostics: result.octreePowerFaceTransferDiagnostics,
     octreePowerFaceDiagnostics: result.octreePowerFaceDiagnostics,
@@ -2773,6 +2816,7 @@ async function runGPU(
     authoredMethodProfile: authoredProfile,
     grid: [solver.info.nx, solver.info.storedNy, solver.info.nz],
     cubicGrid: [solver.info.nx, solver.info.ny, solver.info.nz] }));
+  solver.setPerformanceReadbacksEnabled?.(performanceReadbacksEnabled);
   /** Match the renderer's admission boundary. A profiled octree advance
    * submits its phases asynchronously; queue.onSubmittedWorkDone() alone can
    * resolve between those submissions and expose a torn generation. */
@@ -2848,9 +2892,16 @@ async function runGPU(
   // lattice, whereas the conservative controller integrates adaptive cell
   // volumes. Compare this estimator with its own accepted reset-time field;
   // mixing the two baselines manufactures drift even when both are stable.
-  const initialExact = !performanceProfileRequested && method.id === "octree" && (collectStabilityEnvelope || energyEverySteps > 0)
+  const initialExact = !performanceProfileRequested && method.id === "octree"
+    && (collectStabilityEnvelope || energyEverySteps > 0 || checkpointEvery_s > 0)
     ? await readCubicVolumeField(device, solver) : undefined;
   const spatialExactReference = initialExact?.summary.cellSum;
+  const initialPotentialEnergyProxy = initialExact ? gravitationalPotentialEnergyProxy(initialExact.field,
+    solver.info.nx, solver.info.ny, solver.info.nz, {
+      x: scene.container.width_m / solver.info.nx,
+      y: scene.container.height_m / solver.info.ny,
+      z: scene.container.depth_m / solver.info.nz,
+    }, scene.fluid.gravity_m_s2) : undefined;
   // The UI uses a fixed cadence.  The long regression deliberately perturbs
   // that cadence while respecting maxDt so topology transfer and projection
   // are exercised with genuinely different timestep sizes.
@@ -3778,6 +3829,38 @@ async function runGPU(
         if (staged.preProjectionVelocityTexture) preProjectionVelocity = await readTallVelocityField3D(device, staged.preProjectionVelocityTexture, solver.info.nx, solver.info.storedNy, solver.info.nz, solver.info.ny, bases);
         if (staged.velocityTexture) postProjectionVelocity = await readTallVelocityField3D(device, staged.velocityTexture, solver.info.nx, solver.info.storedNy, solver.info.nz, solver.info.ny, bases);
       }
+      let compactMechanicalEnergy: GPUSmokeResult["checkpoints"][number]["compactMechanicalEnergy"];
+      if (method.id === "octree" && initialPotentialEnergyProxy !== undefined
+        && (solver as GPUSolverInstance).adaptiveFaceVelocitySource !== undefined) {
+        const compact = await readCompactOctreeVelocityField3D(device, solver,
+          [solver.info.nx, solver.info.ny, solver.info.nz]);
+        if (compact) {
+          const spacing = {
+            x: scene.container.width_m / solver.info.nx,
+            y: scene.container.height_m / solver.info.ny,
+            z: scene.container.depth_m / solver.info.nz,
+          };
+          const velocity = compactLiquidVelocityDiagnostic(compact.field, cubic.field,
+            spacing.x * spacing.y * spacing.z);
+          const potential = gravitationalPotentialEnergyProxy(cubic.field, solver.info.nx, solver.info.ny,
+            solver.info.nz, spacing, scene.fluid.gravity_m_s2);
+          compactMechanicalEnergy = {
+            ...compactMechanicalEnergyDiagnostic(initialPotentialEnergyProxy, potential, velocity.kineticEnergyProxy),
+            publicationValid: compact.publicationValid,
+            rowCount: compact.rowCount,
+            reconstructedRows: compact.reconstructedRows,
+            coveredCells: compact.coveredCells,
+            overlapCells: compact.overlapCells,
+            invalidRows: compact.invalidRows,
+            liquidCellCount: velocity.liquidCellCount,
+            finiteLiquidCellCount: velocity.finiteLiquidCellCount,
+            liquidVolumeCellSum: velocity.liquidVolumeCellSum,
+            finiteLiquidVolumeCellSum: velocity.finiteLiquidVolumeCellSum,
+            maximumLiquidComponentSpeed_m_s: velocity.maximumLiquidComponentSpeed_m_s,
+            nonFiniteLiquidComponentCount: velocity.nonFiniteLiquidComponentCount,
+          };
+        }
+      }
       const raster = rasterCheckpointRequested && method.id === "octree"
         ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies,
           globalFineGenerationTransitionRequested)
@@ -3785,7 +3868,7 @@ async function runGPU(
       const globalFineGeneration = globalFineGenerationTransitionRequested && method.id === "octree"
         ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
       checkpoints.push({ time_s: solver.info.submittedTime_s ?? 0, field: cubic.field, summary: cubic.summary,
-        raster, globalFineGeneration, preProjectionVelocity, postProjectionVelocity });
+        raster, globalFineGeneration, preProjectionVelocity, postProjectionVelocity, compactMechanicalEnergy });
       while (nextCheckpoint_s <= (solver.info.submittedTime_s ?? 0) + 1e-9) nextCheckpoint_s += checkpointEvery_s;
       samplingWall_ms += performance.now() - samplingStartedAt;
     }

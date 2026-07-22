@@ -84,7 +84,8 @@ import {
 } from "./webgpu-octree-fine-levelset-bricks";
 import { resolveFineLevelSetRedistanceMethod, WebGPUFineLevelSetRedistance,
   type FineLevelSetRedistanceMethod } from "./webgpu-octree-fine-levelset-redistance";
-import { WebGPUFineLevelSetTransport } from "./webgpu-octree-fine-levelset-transport";
+import { planFineLevelSetGPUTransportPasses,
+  WebGPUFineLevelSetTransport } from "./webgpu-octree-fine-levelset-transport";
 import { WebGPUFineLevelSetVolumeCorrection } from "./webgpu-octree-fine-levelset-volume";
 import { planFineLevelSetGPUSummaries, WebGPUFineLevelSetSummaries } from "./webgpu-octree-fine-levelset-summary";
 import {
@@ -829,6 +830,13 @@ export class WebGPUOctreeProjection {
     globalFineLevelSetAllocatedBytes: number;
     globalFineLevelSetResidentBrickCapacity: number;
     globalFineLevelSetLogicalBrickCount: number;
+    globalFineTransportQueryCapacity: number;
+    globalFineTransportChunkCapacity: number;
+    globalFineTransportChunkCount: number;
+    globalFineTransportSegmentCount: number;
+    globalFineTransportEncodedPasses: number;
+    globalFineTransportPrepassScratchBytes: number;
+    globalFineTransportVertexScratchBytes: number;
   };
   levelSetMismatchFraction = 0;
   relativeResidual?: number;
@@ -874,7 +882,11 @@ export class WebGPUOctreeProjection {
   private powerCoarseLevelSetGeneration = 2;
   private globalFineSourceA?: WebGPUFineLevelSetBrickSource;
   private globalFineSourceB?: WebGPUFineLevelSetBrickSource;
+  /** Slot consumed by the command stream currently being encoded. */
   private globalFineCurrentIsA = true;
+  /** Last slot whose producing encoder has actually been queue-submitted. */
+  private globalFinePublishedIsA = true;
+  private readonly globalFinePublicationByEncoder = new WeakMap<GPUCommandEncoder, boolean>();
   private globalFineBootstrapped = false;
   private globalFineGeneration = 2;
   private lastPowerBoundaryFineSource?: { generation: number; generationSlot: 0 | 1 };
@@ -1519,6 +1531,13 @@ export class WebGPUOctreeProjection {
       globalFineLevelSetAllocatedBytes: 0,
       globalFineLevelSetResidentBrickCapacity: 0,
       globalFineLevelSetLogicalBrickCount: 0,
+      globalFineTransportQueryCapacity: 0,
+      globalFineTransportChunkCapacity: 0,
+      globalFineTransportChunkCount: 0,
+      globalFineTransportSegmentCount: 0,
+      globalFineTransportEncodedPasses: 0,
+      globalFineTransportPrepassScratchBytes: 0,
+      globalFineTransportVertexScratchBytes: 0,
     };
     // An unsupported authority request still builds the observational mirror;
     // only the RHS replacement is suppressed.
@@ -2135,7 +2154,7 @@ export class WebGPUOctreeProjection {
     if (this.powerPolicy.authoritative && this.faceMirror) {
       this.powerFaceSeed = tracePowerInit("face-seed", () => new WebGPUOctreePowerFaceSeed(this.device, this.faceMirror!.source, this.powerFaces!.source));
       this.powerFaceAdvection = tracePowerInit("face-advection", () => new WebGPUOctreePowerFaceAdvection(
-        this.device, this.powerTopology!.source, this.powerFaces!.source));
+        this.device, this.powerTopology!.source, this.powerFaces!.source, this.faceMirror!.source));
       this.powerFaceTransfer = tracePowerInit("face-transfer", () => new WebGPUOctreePowerFaceTransfer(this.device, this.powerFaces!.source, this.leafHeaders,
         [this.dims.nx, this.dims.ny, this.dims.nz]));
       if (sceneHasTerrain(this.scene)) {
@@ -2187,6 +2206,15 @@ export class WebGPUOctreeProjection {
       this.globalFineTransportB = new WebGPUFineLevelSetTransport(
         this.device, this.globalFineSourceB, this.globalFineVelocityPrepass, this.globalFineFaceFastMarch,
       );
+      const transportPasses = planFineLevelSetGPUTransportPasses(
+        this.globalFineTransportA.plan, this.globalFineSourceA.plan.fineFactor, Boolean(this.globalFineFaceFastMarch));
+      this.info.globalFineTransportQueryCapacity = this.globalFineTransportA.queryCapacity;
+      this.info.globalFineTransportChunkCapacity = this.globalFineTransportA.plan.velocityChunkCapacity;
+      this.info.globalFineTransportChunkCount = transportPasses.chunkCount;
+      this.info.globalFineTransportSegmentCount = transportPasses.segmentCount;
+      this.info.globalFineTransportEncodedPasses = transportPasses.encodedPasses;
+      this.info.globalFineTransportPrepassScratchBytes = this.globalFineVelocityPrepass.plan.scratchBytes;
+      this.info.globalFineTransportVertexScratchBytes = this.globalFineVelocityPrepass.plan.vertexVelocityBytes;
     }
     this.powerVolumes = this.device.createBuffer({ label: "Octree physical power-cell volumes", size: rowCapacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -2228,6 +2256,7 @@ export class WebGPUOctreeProjection {
       faces: this.powerFaces.plan.allocatedBytes,
       operator: this.powerOperator.plan.allocatedBytes,
       faceSeed: this.powerFaceSeed?.plan.allocatedBytes ?? 0,
+      faceAdvection: this.powerFaceAdvection?.plan.allocatedBytes ?? 0,
       faceTransfer: this.powerFaceTransfer?.plan.allocatedBytes ?? 0,
       solidVertices: this.powerSolidVertices?.plan.allocatedBytes ?? 0,
       solidFaces: this.powerSolidFaces?.plan.allocatedBytes ?? 0,
@@ -2413,6 +2442,11 @@ export class WebGPUOctreeProjection {
 
   /** Retire invocation-stable coarse-phi parameter slots after queue submit. */
   retireSubmittedEncoder(encoder: GPUCommandEncoder) {
+    const publishedIsA = this.globalFinePublicationByEncoder.get(encoder);
+    if (publishedIsA !== undefined) {
+      this.globalFinePublishedIsA = publishedIsA;
+      this.globalFinePublicationByEncoder.delete(encoder);
+    }
     this.powerCoarseLevelSetSchedule?.retireSubmittedEncoder(encoder);
   }
 
@@ -2896,15 +2930,15 @@ export class WebGPUOctreeProjection {
       generation: this.powerGeneration,
       projectionControl: this.powerOperator.control,
     });
-    // Retain the complete old interpolation mesh before any following
-    // topology rebuild can overwrite compact headers, metrics, or the site
-    // directory. Generation N+1 consumes this snapshot directly.
+    // Publish the paper's regular-region staggered field before retaining the
+    // complete old interpolation mesh. Generation N+1 consumes exact per-axis
+    // faces in cubes and full cell vectors only at transition tetrahedra.
+    this.powerFaceSeed.encodePowerToAxis(encoder, this.powerOperator.control, true);
     this.powerFaceAdvection?.encodeCapture(encoder, {
       leafHeaders: this.leafHeaders,
       rowVelocities: this.powerVelocity.velocities,
       velocityControl: this.powerVelocity.control,
     });
-    this.powerFaceSeed.encodePowerToAxis(encoder, this.powerOperator.control, true);
     this.powerFaceTransfer?.encodeCapture(encoder);
   }
 
@@ -3233,7 +3267,12 @@ export class WebGPUOctreeProjection {
       querySet: GPUQuerySet;
       fineTopologyStartWriteIndex: number;
       fineRedistanceStartWriteIndex: number;
-    }) {
+    }, productionBoundary?: (phase: "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance"
+      | "fineRestriction" | "pageSurface", encoder: GPUCommandEncoder) => GPUCommandEncoder) {
+    const splitProductionPhase = (phase: "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance"
+      | "fineRestriction" | "pageSurface") => {
+      if (productionBoundary) encoder = productionBoundary(phase, encoder);
+    };
     let fineTopologyBoundaryWritten = false;
     let fineRedistanceBoundaryWritten = false;
     const writeFineBoundary = (label: string, writeIndex: number | undefined) => {
@@ -3301,6 +3340,10 @@ export class WebGPUOctreeProjection {
           bandCells + this.globalFineLevelSet!.plan.fineFactor + 2);
         const transport = this.globalFineCurrentIsA ? this.globalFineTransportA : this.globalFineTransportB;
         let transportEncoded = false;
+        // Adapter publication, coarse bootstrap and compact interface seeding
+        // precede characteristic transport. Keep them out of the transport
+        // bucket so the queue-boundary profiler names the measured work.
+        splitProductionPhase("finePreparation");
         if (this.globalFineBootstrapped && transport && this.powerFaceSeed && this.powerVelocity) {
           this.lastGlobalFineTransport = transport;
           transport.encode(encoder, {
@@ -3319,6 +3362,7 @@ export class WebGPUOctreeProjection {
               this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4))),
           });
           transportEncoded = true;
+          splitProductionPhase("fineTransport");
         }
         beginFineTopologyTiming();
         let publicationTopology: WebGPUFineLevelSetTopology;
@@ -3341,10 +3385,12 @@ export class WebGPUOctreeProjection {
             redistanceBandFineCells: redistanceBandCells,
             safetyBrickRings: 1,
           }, true);
+          splitProductionPhase("fineTopology");
           beginFineRedistanceTiming();
           publicationRedistance.encode(encoder, { bandCells: redistanceBandCells, residualTolerance: 1,
             method: this.fineRedistanceMethod });
           publicationVolume?.encode(encoder);
+          splitProductionPhase("fineRedistance");
         } else {
           this.globalFineGeneration += 1;
           this.globalFineLevelSet!.repurposeGPUGeneration(this.globalFineSourceA!, this.globalFineGeneration);
@@ -3357,10 +3403,12 @@ export class WebGPUOctreeProjection {
             redistanceBandFineCells: redistanceBandCells,
             safetyBrickRings: 1,
           }, true);
+          splitProductionPhase("fineTopology");
           beginFineRedistanceTiming();
           publicationRedistance.encode(encoder, { bandCells: redistanceBandCells, residualTolerance: 1,
             method: this.fineRedistanceMethod });
           publicationVolume?.encode(encoder);
+          splitProductionPhase("fineRedistance");
         }
         publicationTopology.encodeFinalizePublication(encoder, {
           redistance: publicationRedistance.control,
@@ -3395,7 +3443,13 @@ export class WebGPUOctreeProjection {
           this.globalFineSummaries?.encode(encoder, correctedFine,
             { directory: coarse.directory, hashCapacity: coarse.hashCapacity });
         }
-        this.globalFineCurrentIsA = !this.globalFineCurrentIsA;
+        const publicationTargetIsA = !this.globalFineCurrentIsA;
+        // Register on the encoder that owns finalize/restriction before a
+        // production boundary can finish and replace it. Public parity moves
+        // only when retireSubmittedEncoder sees this exact encoder submitted.
+        this.globalFinePublicationByEncoder.set(encoder, publicationTargetIsA);
+        splitProductionPhase("fineRestriction");
+        this.globalFineCurrentIsA = publicationTargetIsA;
         this.globalFineBootstrapped = true;
       } else if (!coarseBootstrappedThisStep && this.powerCoarseLevelSetBootstrapped
         && this.powerCoarseLevelSetSchedule && this.powerVelocity && this.powerFaces) {
@@ -3446,6 +3500,7 @@ export class WebGPUOctreeProjection {
         };
       }
       if (this.globalFineLevelSet && !this.surfacePagesBootstrapped) this.surfacePagesBootstrapped = true;
+      splitProductionPhase("pageSurface");
       return;
     }
     // Compact transport has no trustworthy dense velocity texture. Until the
@@ -3729,10 +3784,10 @@ export class WebGPUOctreeProjection {
     const tetrahedronVertices = topology?.catalogTetrahedronVertices;
     if (!surface || !topology || !faces || !tetrahedronHeaders || !tetrahedra || !tetrahedronVertices) return undefined;
     const fine = this.globalFineBootstrapped
-      ? (this.globalFineCurrentIsA ? this.globalFineSourceA : this.globalFineSourceB)
+      ? (this.globalFinePublishedIsA ? this.globalFineSourceA : this.globalFineSourceB)
       : undefined;
-    const fineTopology = this.globalFineCurrentIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
-    const fineRedistance = this.globalFineCurrentIsA ? this.globalFineRedistanceA : this.globalFineRedistanceB;
+    const fineTopology = this.globalFinePublishedIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
+    const fineRedistance = this.globalFinePublishedIsA ? this.globalFineRedistanceA : this.globalFineRedistanceB;
     const fineBandLifecycle = fine && fineTopology && fineRedistance ? {
       params: { buffer: fine.params },
       hash: { buffer: fine.hash },
@@ -3825,10 +3880,10 @@ export class WebGPUOctreeProjection {
    * Topology sizing and pressure fractions still require the terminal coarse-phi cutover. */
   get globalFineLevelSetSource(): WebGPUFineLevelSetBrickSource | undefined {
     if (!this.globalFineLevelSet || !this.globalFineBootstrapped) return undefined;
-    const fine = this.globalFineCurrentIsA ? this.globalFineSourceA : this.globalFineSourceB;
+    const fine = this.globalFinePublishedIsA ? this.globalFineSourceA : this.globalFineSourceB;
     if (!fine) return undefined;
     const coarse = this.powerCoarseLevelSetSchedule?.sampleSource;
-    const topology = this.globalFineCurrentIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
+    const topology = this.globalFinePublishedIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
     return { ...fine,
       ...(coarse ? { coarsePhiDirectory: coarse.directory, coarsePhiHashCapacity: coarse.hashCapacity } : {}),
       ...(topology ? { topologyControl: topology.control } : {}),
@@ -3847,7 +3902,7 @@ export class WebGPUOctreeProjection {
   get globalFineTransportControl(): GPUBuffer | undefined { return this.lastGlobalFineTransport?.control; }
   /** Diagnostic-only status for the redistance transaction that produced the current fine slot. */
   get globalFineRedistanceControl(): GPUBuffer | undefined {
-    return this.globalFineCurrentIsA ? this.globalFineRedistanceA?.control : this.globalFineRedistanceB?.control;
+    return this.globalFinePublishedIsA ? this.globalFineRedistanceA?.control : this.globalFineRedistanceB?.control;
   }
   /** Diagnostic-only shared total-volume transaction for both fine slots. */
   get globalFineVolumeControl(): GPUBuffer | undefined { return this.globalFineVolumeA?.control; }
@@ -3926,9 +3981,9 @@ export class WebGPUOctreeProjection {
    * These counters are observational and never participate in simulation
    * scheduling or authority selection. */
   async readGlobalFineLevelSetDiagnostics() {
-    const fine = this.globalFineCurrentIsA ? this.globalFineSourceA : this.globalFineSourceB;
-    const topology = this.globalFineCurrentIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
-    const redistance = this.globalFineCurrentIsA ? this.globalFineRedistanceA : this.globalFineRedistanceB;
+    const fine = this.globalFinePublishedIsA ? this.globalFineSourceA : this.globalFineSourceB;
+    const topology = this.globalFinePublishedIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
+    const redistance = this.globalFinePublishedIsA ? this.globalFineRedistanceA : this.globalFineRedistanceB;
     if (!fine || !topology || !this.globalFineSeeds) return undefined;
     // Exact packed layout (bytes): existing chain [0, 560), point-field
     // control [560, 592), transient physical graph control [592, 656),
@@ -3937,8 +3992,9 @@ export class WebGPUOctreeProjection {
     // completion diagnostics [768, 800), the power projection producer
     // control [800, 864), then the appended transport detail suffix
     // [864, 896), then the topology's pre-dilation Section 5 prefix count at
-    // [896, 900). Existing prefixes remain ABI-stable.
-    const readback = this.device.createBuffer({ label: "Global fine QA diagnostics", size: 900,
+    // [896, 900), and face-band search counters [900, 932). Existing prefixes
+    // remain ABI-stable.
+    const readback = this.device.createBuffer({ label: "Global fine QA diagnostics", size: 932,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read global fine QA diagnostics" });
     encoder.copyBufferToBuffer(this.globalFineSeeds.buffer, 0, readback, 0, 8);
@@ -3979,6 +4035,9 @@ export class WebGPUOctreeProjection {
       encoder.copyBufferToBuffer(this.lastGlobalFineTransport.control, 32, readback, 864, 32);
     }
     encoder.copyBufferToBuffer(topology.control, 32, readback, 896, 4);
+    if (this.globalFineFaceFastMarch) {
+      encoder.copyBufferToBuffer(this.globalFineFaceFastMarch.control, 96, readback, 900, 32);
+    }
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
@@ -3993,7 +4052,7 @@ export class WebGPUOctreeProjection {
         published: words[6] !== 0, rolledBack: words[7] !== 0,
         downstreamFinalizeReason: words[9], activeBricks: words[10], generation: words[11],
         configuredFineGeneration: fine.generation, fineGenerationSlot: fine.generationSlot,
-        scheduledFineGeneration: this.globalFineGeneration, currentFineIsA: this.globalFineCurrentIsA,
+        scheduledFineGeneration: this.globalFineGeneration, currentFineIsA: this.globalFinePublishedIsA,
         coarseDirectoryHeader: Array.from(words.slice(16, 24)),
         coarseControl: Array.from(words.slice(24, 40)),
         fineRestrictionControl: Array.from(words.slice(40, 48)),
@@ -4014,6 +4073,7 @@ export class WebGPUOctreeProjection {
         volumeControl: Array.from(words.slice(60, 76)),
         faceBandControl: Array.from(words.slice(76, 92)),
         faceBandMarchControl: Array.from(words.slice(192, 200)),
+        faceBandSearchControl: Array.from(words.slice(225, 233)),
         powerVelocityControl: Array.from(words.slice(92, 100)),
         powerProjectionControl: Array.from(words.slice(200, 216)),
         powerVelocitySampleControl: Array.from(words.slice(100, 108)),

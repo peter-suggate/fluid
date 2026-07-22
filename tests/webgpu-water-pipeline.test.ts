@@ -52,7 +52,7 @@ test("front interface rasterization conservatively covers shared liquid-wall sil
   assert.match(surfaceRasterShader, /first=index-index%3u/,
     "coverage expansion must use each triangle centroid, not move the physical mesh");
   const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
-  assert.match(source, /surfaceFrontPipeline\s*=.*WATER_INTERFACE_CULL_MODES\.front,0\.75/);
+  assert.match(source, /surfaceFrontPipeline\s*=.*WATER_INTERFACE_CULL_MODES\.front,1\.0/);
   assert.match(source, /surfaceBackPipeline\s*=.*WATER_INTERFACE_CULL_MODES\.back\)\)/,
     "back coverage remains exact so the back-without-front smoke gate still detects holes");
 });

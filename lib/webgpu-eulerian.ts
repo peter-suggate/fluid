@@ -268,6 +268,14 @@ export interface GPUEulerianInfo {
   /** Global, uniformly indexed sparse fine narrow-band level set. */
   globalFineLevelSetEnabled?: boolean;
   globalFineLevelSetFactor?: 4 | 8;
+  /** Static Section 5 transport schedule; these host-known values require no readback. */
+  globalFineTransportQueryCapacity?: number;
+  globalFineTransportChunkCapacity?: number;
+  globalFineTransportChunkCount?: number;
+  globalFineTransportSegmentCount?: number;
+  globalFineTransportEncodedPasses?: number;
+  globalFineTransportPrepassScratchBytes?: number;
+  globalFineTransportVertexScratchBytes?: number;
   /** QA-only global-fine handoff/publication counters. */
   globalFineSeedCount?: number;
   globalFineSeedError?: number;
@@ -326,6 +334,13 @@ export interface GPUEulerianInfo {
   globalFineFaceBandMarchCapExhausted?: number;
   globalFineFaceBandMarchUnresolvedWithPredecessor?: number;
   globalFineFaceBandMarchDisconnected?: number;
+  globalFineFaceBandDirectAnchorSuccess?: number;
+  globalFineFaceBandFullRowFallbackInvocations?: number;
+  globalFineFaceBandFullRowCandidateRowsTested?: number;
+  globalFineFaceBandSurroundingOwnerFallbackInvocations?: number;
+  globalFineFaceBandSurroundingOwnerRowsTested?: number;
+  globalFineFaceBandAirSamplesSelected?: number;
+  globalFineFaceBandAirSamplesEvaluated?: number;
   globalFineFaceBandTransitionFirstError?: number;
   globalFineFaceBandTransitionRowCount?: number;
   globalFineFaceBandTransitionRows?: number;
@@ -506,6 +521,13 @@ export interface GPUEulerianInfo {
     topologyAdvection_ms: number;
     pressureProjection_ms: number;
     surfaceCoupling_ms: number;
+    finePreparation_ms?: number;
+    fineTransport_ms?: number;
+    fineTopology_ms?: number;
+    fineRedistance_ms?: number;
+    fineRestriction_ms?: number;
+    pageSurface_ms?: number;
+    remainingSurfaceCoupling_ms?: number;
     publicationDiagnostics_ms: number;
     total_ms: number;
   };

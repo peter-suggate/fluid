@@ -830,6 +830,7 @@ test("Dawn indexes global factor-4 bricks and returns coarse phi for missing/out
     const statuses = device.createBuffer({ size: chunkCapacity * 4, usage: storage });
     const sampleControl = device.createBuffer({ size: 32, usage: storage }); const offsets: number[] = [];
     const prepass = { source: { results, statuses, control: sampleControl, queryCapacity: chunkCapacity },
+      encodeRowDescriptors() {},
       encodeFromPositions(_encoder: GPUCommandEncoder, positions: GPUBuffer | GPUBufferBinding,
         _headers: GPUBuffer, _rowVelocities: GPUBuffer, options: { queryCount?: number }) {
         assert.equal(options.queryCount, chunkCapacity); assert.ok("buffer" in positions); offsets.push(positions.offset ?? 0);

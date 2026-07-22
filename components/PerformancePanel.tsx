@@ -334,10 +334,26 @@ export function PerformancePanel() {
           <dl>
             <div><dt>TOPOLOGY + ADVECT</dt><dd>{advancePhaseWall.topologyAdvection_ms.toFixed(1)} ms</dd><small>queue fence delta</small></div>
             <div><dt>PRESSURE + PROJECT</dt><dd>{advancePhaseWall.pressureProjection_ms.toFixed(1)} ms</dd><small>{pressureObservedWall_ms === undefined ? "production command stream" : `${pressureObservedWall_ms.toFixed(1)} solver replay · ${Math.max(0, advancePhaseWall.pressureProjection_ms - pressureObservedWall_ms).toFixed(1)} assembly/project`}</small></div>
-            <div data-testid="fine-surface-observed"><dt>FINE SURFACE + COUPLE</dt><dd>{advancePhaseWall.surfaceCoupling_ms.toFixed(1)} ms</dd><small>queue-observed completion · includes fine transport, topology, redistance and coupling</small></div>
+            <div data-testid="fine-surface-observed"><dt>FINE SURFACE TOTAL</dt><dd>{advancePhaseWall.surfaceCoupling_ms.toFixed(1)} ms</dd><small>sum of the queue-observed sections below</small></div>
+            <div><dt>1 · FINE PREP + SEEDS</dt><dd>{advancePhaseWall.finePreparation_ms?.toFixed(1) ?? "—"} ms</dd><small>surface adapter, coarse bootstrap and compact interface seeds</small></div>
+            <div><dt>2 · FINE TRANSPORT</dt><dd>{advancePhaseWall.fineTransport_ms?.toFixed(1) ?? "—"} ms</dd><small>piecewise characteristic + power interpolation</small></div>
+            <div><dt>3 · FINE TOPOLOGY</dt><dd>{advancePhaseWall.fineTopology_ms?.toFixed(1) ?? "—"} ms</dd><small>discover, dilate, snapshot, assign, initialize, link</small></div>
+            <div><dt>4 · REDISTANCE + VOLUME</dt><dd>{advancePhaseWall.fineRedistance_ms?.toFixed(1) ?? "—"} ms</dd><small>distance reconstruction and volume correction</small></div>
+            <div><dt>5 · RESTRICT + COARSE φ</dt><dd>{advancePhaseWall.fineRestriction_ms?.toFixed(1) ?? "—"} ms</dd><small>publication gate, fine→coarse restriction, coarse update</small></div>
+            <div><dt>6 · PAGE SURFACE</dt><dd>{advancePhaseWall.pageSurface_ms?.toFixed(1) ?? "—"} ms</dd><small>page lifecycle, transport and compatibility publication</small></div>
+            <div><dt>7 · OTHER COUPLING</dt><dd>{advancePhaseWall.remainingSurfaceCoupling_ms?.toFixed(1) ?? "—"} ms</dd><small>rigid coupling and spray after surface publication</small></div>
             <div><dt>PUBLISH + DIAG</dt><dd>{advancePhaseWall.publicationDiagnostics_ms.toFixed(1)} ms</dd><small>queue fence delta</small></div>
           </dl>
-          <p>One real production advance is split into ordered command buffers every 30 advances. Adjacent completion fences include WebGPU implementation, driver, and GPU work, so the former non-pressure residual is assigned to the phase that actually delayed the queue.</p>
+          {(gpuInfo?.globalFineTransportEncodedPasses ?? 0) > 0 && <div className="perf-submission">
+            <span>FINE TRANSPORT SCHEDULE · {gpuInfo?.globalFineTransportQueryCapacity?.toLocaleString() ?? "—"} capacity samples · {gpuInfo?.globalFineTransportChunkCount ?? "—"} chunks × {gpuInfo?.globalFineTransportSegmentCount ?? "—"} trajectory segments · {gpuInfo?.globalFineTransportVertexScratchBytes === 0 ? "no per-query vertex scratch" : gpuInfo?.globalFineTransportVertexScratchBytes === undefined ? "vertex scratch pending" : `${(gpuInfo.globalFineTransportVertexScratchBytes / (1024 * 1024)).toFixed(1)} MiB vertex scratch / chunk`} · {gpuInfo?.globalFineTransportPrepassScratchBytes === undefined ? "descriptor scratch pending" : `${(gpuInfo.globalFineTransportPrepassScratchBytes / 1024).toFixed(0)} KiB shared descriptor scratch`}</span>
+            <output>{gpuInfo?.globalFineTransportEncodedPasses?.toLocaleString() ?? "—"} passes</output>
+          </div>}
+          {gpuInfo?.globalFineFaceBandAirSamplesSelected !== undefined && <div className="perf-submission" data-testid="face-band-search-counters">
+            <span>FACE-BAND SEARCH · {(gpuInfo.globalFineFaceBandDirectAnchorSuccess ?? 0).toLocaleString()} direct-anchor hits · {(gpuInfo.globalFineFaceBandFullRowFallbackInvocations ?? 0).toLocaleString()} full-row fallbacks / {(gpuInfo.globalFineFaceBandFullRowCandidateRowsTested ?? 0).toLocaleString()} rows tested · {(gpuInfo.globalFineFaceBandSurroundingOwnerFallbackInvocations ?? 0).toLocaleString()} surrounding-owner fallbacks / {(gpuInfo.globalFineFaceBandSurroundingOwnerRowsTested ?? 0).toLocaleString()} rows tested</span>
+            <output>{(gpuInfo.globalFineFaceBandAirSamplesSelected ?? 0).toLocaleString()} / {(gpuInfo.globalFineFaceBandAirSamplesEvaluated ?? 0).toLocaleString()} selected / evaluated</output>
+          </div>}
+          {(gpuInfo?.globalFineLevelSetLogicalBrickCount ?? 0) > 0 && <p>Resident fine bricks: {(gpuInfo?.globalFineActiveBricks ?? 0).toLocaleString()} / {gpuInfo?.globalFineLevelSetLogicalBrickCount?.toLocaleString() ?? "—"} ({(100 * (gpuInfo?.globalFineActiveBricks ?? 0) / (gpuInfo?.globalFineLevelSetLogicalBrickCount ?? 1)).toFixed(1)}%). The profiler reports this occupancy beside transport so a nominally sparse band that is effectively dense is immediately visible.</p>}
+          <p>One real production advance is split into ordered command buffers every 30 advances. The fine-surface section uses seven additional queue boundaries only in this intrusive sample, exposing whether the visible 300+ ms update comes from seed preparation, trajectory transport, topology construction, redistance, restriction, page maintenance, or later coupling.</p>
         </div>}
         <div className="perf-rows">
           {stageRows(displayedPhysicsStages, physicsRowScale)}
