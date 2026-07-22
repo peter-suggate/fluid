@@ -23,7 +23,8 @@ import { createTallCellLayout } from "./tall-cell-grid";
 import { planGPUAdvance } from "./tall-cell-diagnostics";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "./inflow-boundary";
 import { quadtreeChebyshevSpectrum, WebGPUQuadtreeTallCellProjection, type QuadtreeTallCellProjectionOptions } from "./webgpu-quadtree-tall-cell";
-import { adaptiveFaceRhsIsSupported, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, WebGPUOctreeProjection, type OctreeProjectionOptions } from "./webgpu-octree";
+import { adaptiveFaceRhsIsSupported, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, WebGPUOctreeProjection,
+  type OctreePressureProjectionProfilePhase, type OctreeProjectionOptions } from "./webgpu-octree";
 import {
   unpackOctreeFaceBandControl,
   unpackOctreeFaceBandPointFieldControl,
@@ -1736,8 +1737,9 @@ export class WebGPUUniformEulerianSolver {
     if(this.secondaryParticlesEnabled&&this.secondaryParticleSystem&&this.secondaryParticleSamplingSource)this.secondaryParticleSystem.prepareStep(dt,this.secondaryParticleSamplingSource);
     if (gpuStageCapture.matches("physics", "pressure") || gpuStageCapture.matches("physics", "topology")) this.ensureGridDiagnosticTextures();
     this.querySegments = []; this.queryCount = 0; if (!this.validationChecked) this.device.pushErrorScope("validation");
-    type ProductionPhase = "topologyAdvection" | "pressureProjection" | "finePreparation" | "fineTransport" | "fineTopology"
-      | "fineRedistance" | "fineRestriction" | "pageSurface" | "surfaceCoupling" | "publicationDiagnostics";
+    type ProductionPhase = "topologyAdvection" | "pressureProjection" | OctreePressureProjectionProfilePhase
+      | "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance" | "fineRestriction"
+      | "pageSurface" | "surfaceCoupling" | "publicationDiagnostics";
     let encoder = this.device.createCommandEncoder({ label: "Uniform GPU fluid step" });
     const totalTiming = this.timing("total_ms");
     const productionPhaseSegments: Array<{ phase: ProductionPhase; encoder: GPUCommandEncoder;
@@ -1928,7 +1930,7 @@ export class WebGPUUniformEulerianSolver {
               : this.splitTiming("projection_ms", "powerProjection_ms", "velocityProjection_ms"),
           };
           const cpuStageStartedAt_ms = performance.now();
-          this.octreeProjection.encode(
+          encoder = this.octreeProjection.encode(
             encoder,
             this.info.nx,
             this.info.ny,
@@ -1949,6 +1951,11 @@ export class WebGPUUniformEulerianSolver {
                   faceMarchStartWriteIndex: powerTimings.projection.firstChildBoundary,
                   powerPublicationStartWriteIndex: powerTimings.projection.secondChildBoundary,
                 } : undefined,
+              productionBoundary: productionPhaseProbeActive ? (phase, completedEncoder) => {
+                if (completedEncoder !== encoder) throw new Error("Octree pressure profiler encoder identity drifted");
+                submitCurrentEncoder(phase, true);
+                return encoder;
+              } : undefined,
               extrapolation: this.octreeProjection.extrapolationSweepCount > 0 ? timestampWrites(this.timing("extrapolation_ms")) : undefined,
               materialization: this.octreeProjection.hasDiagnosticTextures ? timestampWrites(this.timing("materialization_ms")) : undefined
             }
@@ -2067,9 +2074,17 @@ export class WebGPUUniformEulerianSolver {
       const phaseSegments = productionPhaseSegments.slice();
       this.profiledAdvancePending = true;
       const completion = (async () => {
-        let previousCompletedAt = await productionQueueReadyAtPromise;
+        await productionQueueReadyAtPromise;
+        let previousCompletedAt = performance.now();
         const totals: Record<ProductionPhase, number> = {
-          topologyAdvection: 0, pressureProjection: 0, finePreparation: 0, fineTransport: 0, fineTopology: 0,
+          topologyAdvection: 0, pressureProjection: 0,
+          pressureAssemblySetup: 0, pressureLeafCompactionL1Capture: 0,
+          faceMirrorTransportRhs: 0, powerDescriptorTopologyFaces: 0, oldFaceAdvectionRepair: 0,
+          powerOperatorRhsAssembly: 0, finalPressureRowAssembly: 0,
+          mgpcgSolve: 0, powerProjectionPublication: 0,
+          faceBandTopologyBuild: 0, faceBandTransitionAdjacency: 0, faceBandFastMarch: 0,
+          faceBandPowerPublicationCapture: 0, remainingCompatibilityProjection: 0,
+          finePreparation: 0, fineTransport: 0, fineTopology: 0,
           fineRedistance: 0, fineRestriction: 0, pageSurface: 0, surfaceCoupling: 0,
           publicationDiagnostics: 0,
         };
@@ -2109,11 +2124,36 @@ export class WebGPUUniformEulerianSolver {
           previousCompletedAt = completedAt;
         }
         if (this.disposed) return;
+        const remainingCompatibilityProjection_ms = totals.remainingCompatibilityProjection
+          + totals.pressureProjection;
+        const pressureAssemblySetup_ms = totals.pressureAssemblySetup
+          + totals.pressureLeafCompactionL1Capture + totals.faceMirrorTransportRhs
+          + totals.powerDescriptorTopologyFaces
+          + totals.oldFaceAdvectionRepair + totals.powerOperatorRhsAssembly
+          + totals.finalPressureRowAssembly;
+        const pressureProjection_ms = pressureAssemblySetup_ms + totals.mgpcgSolve
+          + totals.powerProjectionPublication + totals.faceBandTopologyBuild
+          + totals.faceBandTransitionAdjacency + totals.faceBandFastMarch
+          + totals.faceBandPowerPublicationCapture + remainingCompatibilityProjection_ms;
         this.info.gpuAdvancePhaseWall = {
           sampleId: ++this.advancePhaseWallSampleId,
           simulation_s: sampledSimulation_s,
           topologyAdvection_ms: totals.topologyAdvection,
-          pressureProjection_ms: totals.pressureProjection,
+          pressureProjection_ms,
+          pressureAssemblySetup_ms,
+          pressureLeafCompactionL1Capture_ms: totals.pressureLeafCompactionL1Capture,
+          faceMirrorTransportRhs_ms: totals.faceMirrorTransportRhs,
+          powerDescriptorTopologyFaces_ms: totals.powerDescriptorTopologyFaces,
+          oldFaceAdvectionRepair_ms: totals.oldFaceAdvectionRepair,
+          powerOperatorRhsAssembly_ms: totals.powerOperatorRhsAssembly,
+          finalPressureRowAssembly_ms: totals.finalPressureRowAssembly,
+          mgpcgSolve_ms: totals.mgpcgSolve,
+          powerProjectionPublication_ms: totals.powerProjectionPublication,
+          faceBandTopologyBuild_ms: totals.faceBandTopologyBuild,
+          faceBandTransitionAdjacency_ms: totals.faceBandTransitionAdjacency,
+          faceBandFastMarch_ms: totals.faceBandFastMarch,
+          faceBandPowerPublicationCapture_ms: totals.faceBandPowerPublicationCapture,
+          remainingCompatibilityProjection_ms,
           surfaceCoupling_ms: totals.finePreparation + totals.fineTransport + totals.fineTopology + totals.fineRedistance
             + totals.fineRestriction + totals.pageSurface + totals.surfaceCoupling,
           finePreparation_ms: totals.finePreparation,

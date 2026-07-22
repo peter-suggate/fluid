@@ -395,12 +395,12 @@ test("fine redistance applies its inclusive residual tolerance at telemetry prec
   assert.doesNotMatch(fineLevelSetRedistanceWGSL, /if\(residual>p\.tolerance\)/);
 });
 
-test("fine redistance exposes fixed JFA-CPT strides and a selectable FMM oracle", () => {
-  assert.equal(FINE_LEVELSET_FMM_MAX_DIAGNOSTIC_SAMPLES, 256,
-    "the backend-gated oracle must stay limited to four B4 diagnostic pages");
+test("fine redistance defaults to the paper's FMM and retains selectable JFA-CPT strides", () => {
+  assert.equal(FINE_LEVELSET_FMM_MAX_DIAGNOSTIC_SAMPLES, 0xffff_fffe,
+    "the fixed-resident oracle is bounded by its 32-bit logical-sample key");
   assert.deepEqual(planFineLevelSetJFAStrides(21), [32, 16, 8, 4, 2, 1, 1]);
   assert.deepEqual(planFineLevelSetJFAStrides(1), [1, 1]);
-  assert.equal(resolveFineLevelSetRedistanceMethod(undefined), "jfa-cpt");
+  assert.equal(resolveFineLevelSetRedistanceMethod(undefined), "fmm");
   assert.equal(resolveFineLevelSetRedistanceMethod("fmm"), "fmm");
   assert.throws(() => resolveFineLevelSetRedistanceMethod("heap"), /Unknown/);
   assert.match(fineLevelSetJFACPTWGSL,
@@ -539,12 +539,13 @@ test("fine redistance binds exactly the resources reachable from each compute en
     for (const fineFactor of [4, 8] as const) {
       new WebGPUFineLevelSetRedistance(device, {
         ...source, plan: { ...source.plan, fineFactor },
-      } as never).encode(encoder, { bandCells: 2 });
+      } as never).encode(encoder, { bandCells: 2, method: "jfa-cpt" });
     }
     assert.throws(() => new WebGPUFineLevelSetRedistance(device, {
-      ...source, plan: { ...source.plan, brickDimensions: [2, 2, 2], sampleDimensions: [8, 8, 8] },
+      ...source, plan: { ...source.plan, brickDimensions: [16_384, 16_384, 1],
+        sampleDimensions: [65_536, 65_536, 1] },
     } as never).encode(encoder, { bandCells: 2, method: "fmm" }),
-    /limited to 256 logical samples/);
+    /logical sample keys must fit in 32 bits/);
   } finally {
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
     else Reflect.deleteProperty(globalThis, "GPUBufferUsage");
@@ -561,7 +562,7 @@ test("fine redistance binds exactly the resources reachable from each compute en
     [entryPoint, [...bindings].sort((a, b) => a - b)])), expected);
 });
 
-test("factor-4 product JFA-CPT redistance is one pass with fixed dispatches", () => {
+test("factor-4 comparison JFA-CPT redistance is one pass with fixed dispatches", () => {
   const passes: string[][] = [];
   let currentPipeline = "";
   const device = {
@@ -595,7 +596,8 @@ test("factor-4 product JFA-CPT redistance is one pass with fixed dispatches", ()
   try {
     // Product default: 4 interface cells * factor 4, plus factor + one
     // transport/interpolation support cell at publication = 21 fine cells.
-    new WebGPUFineLevelSetRedistance(device, source as never).encode(encoder, { bandCells: 21 });
+    new WebGPUFineLevelSetRedistance(device, source as never).encode(encoder,
+      { bandCells: 21, method: "jfa-cpt" });
   } finally {
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
     else Reflect.deleteProperty(globalThis, "GPUBufferUsage");
@@ -731,7 +733,7 @@ test("opt-in Dawn backend reproducer: sparse diagonal JFA support gap dispatch",
   const redistance = new WebGPUFineLevelSetRedistance(device, source);
   const readback = device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
-  redistance.encode(encoder, { bandCells: 7, residualTolerance: 1 });
+  redistance.encode(encoder, { bandCells: 7, residualTolerance: 1, method: "jfa-cpt" });
   encoder.copyBufferToBuffer(redistance.control, 0, readback, 0, 48);
   device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
   const validationError = await device.popErrorScope(); assert.equal(validationError, null);

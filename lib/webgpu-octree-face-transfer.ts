@@ -10,8 +10,12 @@ const RADIX_BITS = 4;
 const RADIX_BINS = 1 << RADIX_BITS;
 // Stable LSD order: axis/span, z, y, then x.  The resulting order is the
 // lexicographic full-width (x,y,z,axisSpan) canonical face key.
-const RADIX_PASSES = (32 / RADIX_BITS) * 4;
+const FULL_WIDTH_RADIX_PASSES = (32 / RADIX_BITS) * 4;
 const RADIX_BLOCK_SIZE = 256;
+const PREVIOUS_CONTROL_BYTES = 64;
+const SORT_DISPATCH_BYTES = 36;
+const VALIDATE_DISPATCH_OFFSET = 12;
+const TRANSFER_DISPATCH_OFFSET = 24;
 
 export interface OctreeFaceTransferPlan {
   readonly faceCapacity: number;
@@ -23,12 +27,41 @@ export interface OctreeFaceTransferPlan {
   readonly scratchBytes: number;
   readonly histogramBytes: number;
   readonly parameterBytes: number;
+  readonly dispatchBytes: number;
   readonly allocatedBytes: number;
 }
 
 export interface OctreeFaceTransferOptions {
   /** Full source maps are an inspection product and are not needed to transfer velocity. */
   readonly retainRecords?: boolean;
+  /** Immutable finest-grid dimensions. Larger/ocean domains retain every
+   * exact key nibble they require; only provably-zero high nibbles are gone. */
+  readonly keyDimensions?: readonly [number, number, number];
+}
+
+function radixDigitsForMaximum(maximumInclusive: number): number {
+  if (!Number.isSafeInteger(maximumInclusive) || maximumInclusive < 0 || maximumInclusive > 0xffff_ffff) {
+    throw new RangeError("Octree face radix key bound must fit in u32");
+  }
+  return Math.max(1, Math.ceil(Math.log2(maximumInclusive + 1) / RADIX_BITS));
+}
+
+export function octreeFaceTransferRadixFields(
+  dimensions?: readonly [number, number, number],
+): readonly { field: number; digits: number }[] {
+  if (!dimensions) return [0, 1, 2, 3].map((field) => ({ field, digits: 32 / RADIX_BITS }));
+  dimensions.forEach((value) => {
+    if (!Number.isSafeInteger(value) || value < 1 || value > 0x3fff_ffff) {
+      throw new RangeError("Octree face radix dimensions must be positive and leave two axis/span bits");
+    }
+  });
+  const maximumSpan = Math.max(...dimensions);
+  return [
+    { field: 0, digits: radixDigitsForMaximum(maximumSpan * 4 + 2) },
+    { field: 1, digits: radixDigitsForMaximum(dimensions[2]) },
+    { field: 2, digits: radixDigitsForMaximum(dimensions[1]) },
+    { field: 3, digits: radixDigitsForMaximum(dimensions[0]) },
+  ];
 }
 
 export function planOctreeFaceTopologyTransfer(
@@ -42,7 +75,8 @@ export function planOctreeFaceTopologyTransfer(
   // slots carry INVALID and sort after every live descriptor.
   let sortCapacity = RADIX_BLOCK_SIZE;
   while (sortCapacity < faceCapacity) sortCapacity *= 2;
-  const sortPasses = RADIX_PASSES;
+  const sortPasses = octreeFaceTransferRadixFields(options.keyDimensions)
+    .reduce((sum, field) => sum + field.digits, 0);
   const previousFaceBytes = faceCapacity * PREVIOUS_FACE_RECORD_BYTES;
   const indexBytes = sortCapacity * 4;
   const recordBytes = options.retainRecords ? faceCapacity * OCTREE_FACE_TRANSFER_RECORD_BYTES : 0;
@@ -57,9 +91,9 @@ export function planOctreeFaceTopologyTransfer(
     sortCapacity,
     sortPasses,
     previousFaceBytes, indexBytes, recordBytes, scratchBytes, histogramBytes,
-    parameterBytes,
-    allocatedBytes: 16 + previousFaceBytes + indexBytes + scratchBytes + histogramBytes
-      + parameterBytes + OCTREE_FACE_TRANSFER_DIAGNOSTIC_BYTES,
+    parameterBytes, dispatchBytes: SORT_DISPATCH_BYTES,
+    allocatedBytes: PREVIOUS_CONTROL_BYTES + previousFaceBytes + indexBytes + scratchBytes + histogramBytes
+      + parameterBytes + OCTREE_FACE_TRANSFER_DIAGNOSTIC_BYTES + SORT_DISPATCH_BYTES,
   };
 }
 
@@ -82,6 +116,9 @@ export class WebGPUOctreeFaceTopologyTransfer {
   private readonly sortedIndices: GPUBuffer;
   private readonly radixHistograms: GPUBuffer;
   private readonly sortParams: GPUBuffer;
+  private readonly sortDispatch: GPUBuffer;
+  private readonly prepareDispatchPipeline: GPUComputePipeline;
+  private readonly prepareTransferDispatchPipeline: GPUComputePipeline;
   private readonly preparePipeline: GPUComputePipeline;
   private readonly capturePipeline: GPUComputePipeline;
   private readonly histogramPipeline: GPUComputePipeline;
@@ -96,7 +133,7 @@ export class WebGPUOctreeFaceTopologyTransfer {
     this.source = source;
     this.plan = planOctreeFaceTopologyTransfer(source.plan.faceCapacity, options);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-    this.previousControl = device.createBuffer({ label: "Previous octree face control", size: 16, usage: storage });
+    this.previousControl = device.createBuffer({ label: "Previous octree face control", size: PREVIOUS_CONTROL_BYTES, usage: storage });
     this.previousFaces = device.createBuffer({ label: "Previous canonical octree faces", size: this.plan.previousFaceBytes, usage: storage });
     this.sortedIndices = device.createBuffer({ label: "Sorted previous octree face IDs", size: this.plan.indexBytes, usage: storage });
     this.records = device.createBuffer({ label: "Octree face radix scratch and optional transfer records", size: this.plan.scratchBytes, usage: storage });
@@ -107,19 +144,25 @@ export class WebGPUOctreeFaceTopologyTransfer {
       size: this.plan.parameterBytes,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+    this.sortDispatch = device.createBuffer({ label: "Previous octree face live radix dispatch", size: SORT_DISPATCH_BYTES,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
     const words = new Uint32Array(this.plan.parameterBytes / 4);
     let passIndex = 0;
-    for (let field = 0; field < 4; field += 1) {
-      for (let shift = 0; shift < 32; shift += RADIX_BITS) {
+    for (const field of octreeFaceTransferRadixFields(options.keyDimensions)) {
+      for (let digit = 0; digit < field.digits; digit += 1) {
+        const shift = digit * RADIX_BITS;
         const offset = (passIndex * SORT_PARAMETER_STRIDE) / 4;
-        words.set([shift, field, this.plan.sortCapacity, Math.ceil(this.plan.sortCapacity / RADIX_BLOCK_SIZE)], offset);
+        words.set([shift, field.field, this.plan.sortCapacity, Math.ceil(this.plan.sortCapacity / RADIX_BLOCK_SIZE)], offset);
         passIndex += 1;
       }
+    }
+    if (passIndex !== this.plan.sortPasses || passIndex > FULL_WIDTH_RADIX_PASSES) {
+      throw new Error("Octree face radix parameter plan drifted from its exact key width");
     }
     device.queue.writeBuffer(this.sortParams, 0, words);
 
     const layout = device.createBindGroupLayout({ label: "Octree face topology transfer layout", entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
@@ -137,6 +180,8 @@ export class WebGPUOctreeFaceTopologyTransfer {
       compute: { module: shaderModule, entryPoint, constants: { retainTransferRecords: this.plan.recordBytes > 0 ? 1 : 0 } },
     });
     this.preparePipeline = pipeline("Prepare previous octree face sort", "prepareSort");
+    this.prepareDispatchPipeline = pipeline("Publish previous octree face live radix dispatch", "publishSortDispatch");
+    this.prepareTransferDispatchPipeline = pipeline("Publish octree face validation and transfer dispatches", "publishTransferDispatches");
     this.capturePipeline = pipeline("Capture compact previous octree faces", "captureFaces");
     this.histogramPipeline = pipeline("Histogram previous octree face keys", "radixHistogram");
     this.prefixPipeline = pipeline("Prefix octree face radix blocks", "radixPrefix");
@@ -160,43 +205,48 @@ export class WebGPUOctreeFaceTopologyTransfer {
 
   encodeCapture(encoder: GPUCommandEncoder): void {
     encoder.copyBufferToBuffer(this.source.control, 0, this.previousControl, 0, 16);
-    const capture = encoder.beginComputePass({ label: "Capture compact previous octree faces" });
-    capture.setPipeline(this.capturePipeline);
-    capture.setBindGroup(0, this.bindGroup, [0]);
-    capture.dispatchWorkgroups(Math.ceil(this.plan.faceCapacity / RADIX_BLOCK_SIZE));
+    let capture = encoder.beginComputePass({ label: "Prepare compact previous octree face capture" });
+    capture.setPipeline(this.prepareDispatchPipeline); capture.setBindGroup(0, this.bindGroup, [0]); capture.dispatchWorkgroups(1);
     capture.end();
+    encoder.copyBufferToBuffer(this.previousControl, 16, this.sortDispatch, 0, 12);
+    capture = encoder.beginComputePass({ label: "Capture compact previous octree faces" });
+    capture.setPipeline(this.capturePipeline); capture.setBindGroup(0, this.bindGroup, [0]);
+    capture.dispatchWorkgroupsIndirect(this.sortDispatch, 0); capture.end();
   }
 
   encodeTransfer(encoder: GPUCommandEncoder): void {
     encoder.clearBuffer(this.diagnostics);
-    const groups = Math.ceil(this.plan.sortCapacity / RADIX_BLOCK_SIZE);
+    const dispatches = encoder.beginComputePass({ label: "Prepare octree face transfer live dispatches" });
+    dispatches.setPipeline(this.prepareTransferDispatchPipeline); dispatches.setBindGroup(0, this.bindGroup, [0]);
+    dispatches.dispatchWorkgroups(1); dispatches.end();
+    encoder.copyBufferToBuffer(this.previousControl, 28, this.sortDispatch, VALIDATE_DISPATCH_OFFSET, 24);
     const prepare = encoder.beginComputePass({ label: "Prepare previous octree face topology" });
     prepare.setPipeline(this.preparePipeline);
     prepare.setBindGroup(0, this.bindGroup, [0]);
-    prepare.dispatchWorkgroups(groups);
+    prepare.dispatchWorkgroupsIndirect(this.sortDispatch, 0);
     prepare.end();
     for (let passIndex = 0; passIndex < this.plan.sortPasses; passIndex += 1) {
       const group = passIndex % 2 === 0 ? this.bindGroup : this.swappedBindGroup;
       encoder.clearBuffer(this.radixHistograms);
       const histogram = encoder.beginComputePass({ label: "Histogram previous octree face topology" });
       histogram.setPipeline(this.histogramPipeline); histogram.setBindGroup(0, group, [passIndex * SORT_PARAMETER_STRIDE]);
-      histogram.dispatchWorkgroups(groups); histogram.end();
+      histogram.dispatchWorkgroupsIndirect(this.sortDispatch, 0); histogram.end();
       const prefix = encoder.beginComputePass({ label: "Prefix previous octree face topology" });
       prefix.setPipeline(this.prefixPipeline); prefix.setBindGroup(0, group, [passIndex * SORT_PARAMETER_STRIDE]);
       prefix.dispatchWorkgroups(1); prefix.end();
       const scatter = encoder.beginComputePass({ label: "Scatter previous octree face topology" });
       scatter.setPipeline(this.scatterPipeline); scatter.setBindGroup(0, group, [passIndex * SORT_PARAMETER_STRIDE]);
-      scatter.dispatchWorkgroups(groups); scatter.end();
+      scatter.dispatchWorkgroupsIndirect(this.sortDispatch, 0); scatter.end();
     }
     const validate = encoder.beginComputePass({ label: "Validate octree face topology transfer" });
     validate.setPipeline(this.validatePipeline);
     validate.setBindGroup(0, this.bindGroup, [0]);
-    validate.dispatchWorkgroups(Math.ceil(this.plan.faceCapacity / 256));
+    validate.dispatchWorkgroupsIndirect(this.sortDispatch, VALIDATE_DISPATCH_OFFSET);
     validate.end();
     const transfer = encoder.beginComputePass({ label: "Transfer canonical octree face velocities" });
     transfer.setPipeline(this.transferPipeline);
     transfer.setBindGroup(0, this.bindGroup, [0]);
-    transfer.dispatchWorkgroups(Math.ceil(this.plan.faceCapacity / 256));
+    transfer.dispatchWorkgroupsIndirect(this.sortDispatch, TRANSFER_DISPATCH_OFFSET);
     transfer.end();
   }
 
@@ -208,6 +258,7 @@ export class WebGPUOctreeFaceTopologyTransfer {
     this.records.destroy();
     this.diagnostics.destroy();
     this.sortParams.destroy();
+    this.sortDispatch.destroy();
   }
 }
 
@@ -216,7 +267,7 @@ struct FaceRecord { negativeRow: u32, positiveRow: u32, originX: u32, originY: u
 struct PreviousFace { originX: u32, originY: u32, originZ: u32, axisSpan: u32, normalVelocity: f32 }
 struct TransferRecord { newFace: u32, sourceCount: u32, old0: u32, old1: u32, old2: u32, old3: u32 }
 struct SortParams { shift: u32, field: u32, capacity: u32, blockCapacity: u32 }
-@group(0) @binding(0) var<storage, read> previousControl: array<u32>;
+@group(0) @binding(0) var<storage, read_write> previousControl: array<u32>;
 @group(0) @binding(1) var<storage, read_write> previousFaces: array<PreviousFace>;
 @group(0) @binding(2) var<storage, read_write> nextControl: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> nextFaces: array<FaceRecord>;
@@ -276,11 +327,31 @@ fn captureFaces(@builtin(global_invocation_id) gid: vec3u) {
   previousFaces[gid.x] = PreviousFace(source.originX, source.originY, source.originZ, source.axisSpan, source.normalVelocity);
 }
 
+@compute @workgroup_size(1)
+fn publishSortDispatch() {
+  let count = min(previousControl[0], previousControl[2]);
+  previousControl[4] = (count + 255u) / 256u;
+  previousControl[5] = 1u;
+  previousControl[6] = 1u;
+}
+
+@compute @workgroup_size(1)
+fn publishTransferDispatches() {
+  let oldCount = min(previousControl[0], previousControl[2]);
+  let nextCount = min(atomicLoad(&nextControl[0]), atomicLoad(&nextControl[2]));
+  previousControl[7] = (max(oldCount, nextCount) + 255u) / 256u;
+  previousControl[8] = 1u; previousControl[9] = 1u;
+  previousControl[10] = (nextCount + 255u) / 256u;
+  previousControl[11] = 1u; previousControl[12] = 1u;
+}
+
 @compute @workgroup_size(256)
 fn prepareSort(@builtin(global_invocation_id) gid: vec3u) {
-  if (gid.x >= sortParams.capacity) { return; }
-  sortedIndices[gid.x] = select(INVALID, gid.x, gid.x < min(previousControl[0], previousControl[2]));
-  if (gid.x < min(previousControl[0], previousControl[2])) { let face = previousFaces[gid.x]; let axis = face.axisSpan & 3u; let span = face.axisSpan >> 2u;
+  let count = min(previousControl[0], previousControl[2]);
+  let rounded = previousControl[4] * 256u;
+  if (gid.x >= rounded || gid.x >= sortParams.capacity) { return; }
+  sortedIndices[gid.x] = select(INVALID, gid.x, gid.x < count);
+  if (gid.x < count) { let face = previousFaces[gid.x]; let axis = face.axisSpan & 3u; let span = face.axisSpan >> 2u;
     if (axis > 2u || span == 0u || (span & (span - 1u)) != 0u) { atomicAdd(&diagnostics[2], 1u); atomicStore(&diagnostics[3], 1u); }
   }
 }
@@ -299,7 +370,6 @@ fn radixBin(index: u32) -> u32 { return (radixKey(index) >> sortParams.shift) & 
 
 @compute @workgroup_size(256)
 fn radixHistogram(@builtin(global_invocation_id) gid: vec3u, @builtin(workgroup_id) wid: vec3u) {
-  if (gid.x >= sortParams.capacity) { return; }
   let bin = radixBin(sortedIndices[gid.x]);
   atomicAdd(&radixHistograms[bin * sortParams.blockCapacity + wid.x], 1u);
 }
@@ -308,14 +378,14 @@ var<workgroup> radixTotals: array<u32, 16>;
 @compute @workgroup_size(16)
 fn radixPrefix(@builtin(local_invocation_id) lid: vec3u) {
   let bin = lid.x; var total = 0u;
-  for (var block = 0u; block < sortParams.blockCapacity; block += 1u) {
+  for (var block = 0u; block < previousControl[4]; block += 1u) {
     total += atomicLoad(&radixHistograms[bin * sortParams.blockCapacity + block]);
   }
   radixTotals[bin] = total;
   workgroupBarrier();
   var cursor = 0u;
   for (var prior = 0u; prior < bin; prior += 1u) { cursor += radixTotals[prior]; }
-  for (var block = 0u; block < sortParams.blockCapacity; block += 1u) {
+  for (var block = 0u; block < previousControl[4]; block += 1u) {
     let address = bin * sortParams.blockCapacity + block;
     let count = atomicLoad(&radixHistograms[address]);
     atomicStore(&radixHistograms[address], cursor); cursor += count;

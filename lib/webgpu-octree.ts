@@ -51,7 +51,6 @@ import {
 } from "./webgpu-octree-power-faces";
 import { WebGPUOctreePowerOperator, planOctreePowerGPUOperator } from "./webgpu-octree-power-operator";
 import { WebGPUOctreePowerFaceSeed } from "./webgpu-octree-power-face-seed";
-import { WebGPUOctreePowerFaceTransfer } from "./webgpu-octree-power-face-transfer";
 import { WebGPUOctreePowerFaceAdvection } from "./webgpu-octree-power-face-advection";
 import { WebGPUOctreePowerSolidFaces } from "./webgpu-octree-power-solid-faces";
 import { WebGPUOctreeSolidVertexSdf } from "./webgpu-octree-solid-vertex-sdf";
@@ -202,6 +201,19 @@ export interface OctreeProjectionOptions {
   /** Migration switch for the generalized power-diagram pressure path. */
   powerDiagramProjection?: "off" | "mirror" | "authoritative";
 }
+
+/** Queue-fenced production checkpoints used only by the sparse intrusive
+ * profiler. Ordinary advances omit the callback and retain one submission. */
+export type OctreePressureProjectionProfilePhase = "pressureAssemblySetup" | "mgpcgSolve"
+  | "pressureLeafCompactionL1Capture" | "faceMirrorTransportRhs"
+  | "powerDescriptorTopologyFaces" | "oldFaceAdvectionRepair"
+  | "powerOperatorRhsAssembly" | "finalPressureRowAssembly"
+  | "powerProjectionPublication" | "faceBandTopologyBuild" | "faceBandTransitionAdjacency"
+  | "faceBandFastMarch" | "faceBandPowerPublicationCapture" | "remainingCompatibilityProjection";
+export type OctreePressureProjectionProfileBoundary = (
+  phase: OctreePressureProjectionProfilePhase,
+  encoder: GPUCommandEncoder,
+) => GPUCommandEncoder;
 
 export interface OctreePowerProjectionPolicy {
   readonly requested: "off" | "mirror" | "authoritative";
@@ -1032,7 +1044,6 @@ export class WebGPUOctreeProjection {
   private powerOperator?: WebGPUOctreePowerOperator;
   private powerFaceSeed?: WebGPUOctreePowerFaceSeed;
   private powerFaceAdvection?: WebGPUOctreePowerFaceAdvection;
-  private powerFaceTransfer?: WebGPUOctreePowerFaceTransfer;
   private powerSolidFaces?: WebGPUOctreePowerSolidFaces;
   private powerSolidVertices?: WebGPUOctreeSolidVertexSdf;
   private powerVolumes?: GPUBuffer;
@@ -1556,6 +1567,7 @@ export class WebGPUOctreeProjection {
       }, this.pressureCapacity.rowCapacity, {
         preserveTopologyVelocities: faceTransportEnabled
           && (typeof process === "undefined" || process.env?.FLUID_OCTREE_FACE_TRANSFER !== "0"),
+        dimensions: [dims.nx, dims.ny, dims.nz],
       });
       this.info.allocatedBytes += this.faceMirror.plan.allocatedBytes;
       if (this.faceRhsAuthority && adaptiveSolidFaces) {
@@ -2155,8 +2167,6 @@ export class WebGPUOctreeProjection {
       this.powerFaceSeed = tracePowerInit("face-seed", () => new WebGPUOctreePowerFaceSeed(this.device, this.faceMirror!.source, this.powerFaces!.source));
       this.powerFaceAdvection = tracePowerInit("face-advection", () => new WebGPUOctreePowerFaceAdvection(
         this.device, this.powerTopology!.source, this.powerFaces!.source, this.faceMirror!.source));
-      this.powerFaceTransfer = tracePowerInit("face-transfer", () => new WebGPUOctreePowerFaceTransfer(this.device, this.powerFaces!.source, this.leafHeaders,
-        [this.dims.nx, this.dims.ny, this.dims.nz]));
       if (sceneHasTerrain(this.scene)) {
         this.powerSolidVertices = tracePowerInit("solid-vertex-sdf", () => new WebGPUOctreeSolidVertexSdf(
           this.device, rowCapacity, this.leafHeaders, this.compaction, this.resources.terrain, this.powerFaceSeed!.control,
@@ -2257,7 +2267,7 @@ export class WebGPUOctreeProjection {
       operator: this.powerOperator.plan.allocatedBytes,
       faceSeed: this.powerFaceSeed?.plan.allocatedBytes ?? 0,
       faceAdvection: this.powerFaceAdvection?.plan.allocatedBytes ?? 0,
-      faceTransfer: this.powerFaceTransfer?.plan.allocatedBytes ?? 0,
+      faceTransfer: 0,
       solidVertices: this.powerSolidVertices?.plan.allocatedBytes ?? 0,
       solidFaces: this.powerSolidFaces?.plan.allocatedBytes ?? 0,
       velocity: this.powerVelocity.plan.allocatedBytes,
@@ -2461,7 +2471,7 @@ export class WebGPUOctreeProjection {
     querySet: GPUQuerySet;
     faceMarchStartWriteIndex: number;
     powerPublicationStartWriteIndex: number;
-  }) {
+  }, productionBoundary?: OctreePressureProjectionProfileBoundary): GPUCommandEncoder {
     const writeBoundary = (label: string, writeIndex: number | undefined) => {
       if (!timing || writeIndex === undefined) return;
       const marker = encoder.beginComputePass({ label, timestampWrites: {
@@ -2476,7 +2486,16 @@ export class WebGPUOctreeProjection {
       } else if (phase === "fast-march") {
         writeBoundary("Section 5 power publication timing start", timing?.powerPublicationStartWriteIndex);
       }
+      if (productionBoundary) {
+        const profilePhase: OctreePressureProjectionProfilePhase = phase === "topology-build"
+          ? "faceBandTopologyBuild"
+          : phase === "transition-adjacency" ? "faceBandTransitionAdjacency"
+          : phase === "fast-march" ? "faceBandFastMarch"
+          : "faceBandPowerPublicationCapture";
+        encoder = productionBoundary(profilePhase, encoder);
+      }
     }
+    return encoder;
   }
 
   /** Encode one independently fenceable Section 5 face-band checkpoint. */
@@ -2516,7 +2535,6 @@ export class WebGPUOctreeProjection {
     // rollback rather than exposing partial scratch values.
     if (this.powerFaceSeed && this.powerOperator) {
       this.powerFaceSeed.encodePowerToAxis(encoder, this.powerOperator.control, true);
-      this.powerFaceTransfer?.encodeCapture(encoder);
       // Aanjaneya et al. (2017), Section 5 extrapolates the regular octree-face
       // field and interpolates it back to the power faces before the next
       // characteristic trace. Reconstruct and retain the complete OLD
@@ -2770,12 +2788,16 @@ export class WebGPUOctreeProjection {
     return `Octree weighted Jacobi · ${this.iterations} fixed GPU sweeps`;
   }
 
-  private encodePowerAssemblyMirror(encoder: GPUCommandEncoder): void {
+  private encodePowerAssemblyMirror(encoder: GPUCommandEncoder,
+    productionBoundary?: OctreePressureProjectionProfileBoundary): GPUCommandEncoder {
     const descriptor = this.powerDescriptor, topology = this.powerTopology, faces = this.powerFaces;
     const operator = this.powerOperator, volumes = this.powerVolumes;
     const volumePipeline = this.powerVolumePipeline;
     const volumeGroup = this.powerVolumeGroup;
-    if (!descriptor || !topology || !faces || !operator || !volumes || !volumePipeline || !volumeGroup) return;
+    if (!descriptor || !topology || !faces || !operator || !volumes || !volumePipeline || !volumeGroup) return encoder;
+    const splitProductionPhase = (phase: OctreePressureProjectionProfilePhase) => {
+      if (productionBoundary) encoder = productionBoundary(phase, encoder);
+    };
     const dimensions: [number, number, number] = [this.dims.nx, this.dims.ny, this.dims.nz];
     const spacing: [number, number, number] = [
       this.scene.container.width_m / this.dims.nx,
@@ -2837,6 +2859,7 @@ export class WebGPUOctreeProjection {
     });
     topology.encode(encoder, descriptor.descriptors, this.compaction, spacing);
     faces.encode(encoder, this.leafHeaders, faceOptions, true);
+    splitProductionPhase("powerDescriptorTopologyFaces");
     // Cold generation 1 is initialized from the authored regular field.  On
     // every recurring generation Aanjaneya et al. (2017), Section 5 instead
     // traces each new generalized-face centroid into the captured OLD power
@@ -2898,15 +2921,19 @@ export class WebGPUOctreeProjection {
       terrainEnabled: sceneHasTerrain(this.scene),
       pressureImpulseScale: this.faceTransportDt_s,
     });
+    splitProductionPhase("oldFaceAdvectionRepair");
     const pass = encoder.beginComputePass({ label: "Publish physical power-cell volumes" });
     pass.setPipeline(volumePipeline); pass.setBindGroup(0, volumeGroup);
     pass.dispatchWorkgroups(Math.ceil(this.pressureCapacity.rowCapacity / 64)); pass.end();
     operator.encodeAssemblyFromControl(encoder, faces.faces, faces.source, volumes, faces.control,
       this.powerPolicy.authoritative ? this.powerFaceSeed?.control : undefined,
       this.powerPolicy.authoritative ? this.powerSolidFaces?.control : undefined);
+    splitProductionPhase("powerOperatorRhsAssembly");
     if (this.powerPolicy.authoritative) {
       operator.encodeLeafRowPublication(encoder, this.leafHeaders, this.leafEntries);
     }
+    splitProductionPhase("finalPressureRowAssembly");
+    return encoder;
   }
 
   private encodePowerProjectionMirror(encoder: GPUCommandEncoder, pressure: GPUBuffer): void {
@@ -2930,16 +2957,11 @@ export class WebGPUOctreeProjection {
       generation: this.powerGeneration,
       projectionControl: this.powerOperator.control,
     });
-    // Publish the paper's regular-region staggered field before retaining the
-    // complete old interpolation mesh. Generation N+1 consumes exact per-axis
-    // faces in cubes and full cell vectors only at transition tetrahedra.
+    // Publish the projected regular-region staggered field for Section 5. Do
+    // not retain it here: the face marcher immediately replaces its air-side
+    // extension and the post-march publication below is the only snapshot that
+    // can be consumed by the next topology rebuild.
     this.powerFaceSeed.encodePowerToAxis(encoder, this.powerOperator.control, true);
-    this.powerFaceAdvection?.encodeCapture(encoder, {
-      leafHeaders: this.leafHeaders,
-      rowVelocities: this.powerVelocity.velocities,
-      velocityControl: this.powerVelocity.control,
-    });
-    this.powerFaceTransfer?.encodeCapture(encoder);
   }
 
   private encodeFrontierRows(
@@ -2976,10 +2998,12 @@ export class WebGPUOctreeProjection {
         faceMarchStartWriteIndex: number;
         powerPublicationStartWriteIndex: number;
       };
+      /** Intrusive-only queue boundary callback. Omitted by normal advances. */
+      productionBoundary?: OctreePressureProjectionProfileBoundary;
       extrapolation?: GPUComputePassTimestampWrites;
       materialization?: GPUComputePassTimestampWrites;
     }
-  ) {
+  ): GPUCommandEncoder {
     const linear = (pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, blocks: number, group = this.groups.ab) => {
       pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(blocks, 1, 1);
     };
@@ -3008,6 +3032,11 @@ export class WebGPUOctreeProjection {
     const phaseBoundaryTimestampWrites = (boundary: { querySet: GPUQuerySet; writeIndex: number } | undefined) => boundary ? {
       querySet: boundary.querySet, beginningOfPassWriteIndex: boundary.writeIndex,
     } : undefined;
+    const splitProductionPhase = (phase: OctreePressureProjectionProfilePhase) => {
+      if (detailedTimestampWrites?.productionBoundary) {
+        encoder = detailedTimestampWrites.productionBoundary(phase, encoder);
+      }
+    };
     if (timestampWrites?.beginningOfPassWriteIndex !== undefined) {
       const marker = encoder.beginComputePass({ label: "Power pressure timing start", timestampWrites: {
         querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex,
@@ -3052,6 +3081,7 @@ export class WebGPUOctreeProjection {
         // the exact Cartesian/GFM rows before power publication replaces the
         // shared compact header/entry buffers with L2 coefficients.
         this.firstOrderVCycle?.encodeCapture(encoder);
+        splitProductionPhase("pressureLeafCompactionL1Capture");
         if (this.faceMirror) {
           this.faceMirror.encodeTopology(encoder, this.solveDispatch);
           this.faceTransport?.encode(encoder, {
@@ -3066,7 +3096,8 @@ export class WebGPUOctreeProjection {
           this.solidFaces?.encodeClassifyAndConstrain(encoder);
           this.faceMirror.encodeRhs(encoder, this.solveDispatch, this.faceRhsAuthority);
         }
-        this.encodePowerAssemblyMirror(encoder);
+        splitProductionPhase("faceMirrorTransportRhs");
+        encoder = this.encodePowerAssemblyMirror(encoder, detailedTimestampWrites?.productionBoundary);
         const pressureBoundary = phaseBoundaryTimestampWrites(detailedTimestampWrites?.pressurePhaseBoundary);
         pressure = encoder.beginComputePass({ label: "Octree leaf pressure solve", ...(pressureBoundary ? { timestampWrites: pressureBoundary } : {}) });
       }
@@ -3076,6 +3107,7 @@ export class WebGPUOctreeProjection {
         // warm start in initialInA; MGPCG publishes into the opposite existing
         // pressure buffer and keeps Chebyshev's two-buffer rollback intact.
         pressure.end();
+        splitProductionPhase("pressureAssemblySetup");
         const pressureIn = initialInA ? this.pressureA : this.pressureB;
         const pressureOut = initialInA ? this.pressureB : this.pressureA;
         const pressureSolveEncodeStartedAt_ms = performance.now();
@@ -3085,6 +3117,7 @@ export class WebGPUOctreeProjection {
         this.info.pressureSolvePassTransitionCount = this.mgpcg!.encodedPassTransitionCount;
         pressureBufferSwaps = 1;
         this.latestPressureInA = !initialInA;
+        splitProductionPhase("mgpcgSolve");
       } else {
         const pressureSolveEncodeStartedAt_ms = performance.now();
         if (useMegakernel) {
@@ -3165,7 +3198,9 @@ export class WebGPUOctreeProjection {
     // reconstructed onto regular octree faces, constrained at solids, then
     // fast-marched through the current fine narrow band before factor-m
     // trajectories are traced.
-    this.encodeGlobalFineFaceBand(encoder, detailedTimestampWrites?.section5FacePhaseBoundaries);
+    splitProductionPhase("powerProjectionPublication");
+    encoder = this.encodeGlobalFineFaceBand(encoder, detailedTimestampWrites?.section5FacePhaseBoundaries,
+      detailedTimestampWrites?.productionBoundary);
     // Diagnose the actual authority visible to fine transport: axis rollback
     // for off/mirror, or the all-or-nothing power-to-axis reconstruction.
     this.faceMirror?.encodeProjectedDivergence(encoder);
@@ -3247,6 +3282,8 @@ export class WebGPUOctreeProjection {
     }
     this.encodeOverlayMaterialization(encoder, finalInA, detailedTimestampWrites?.materialization);
     if (this.powerPolicy.authoritative && this.faceTransportDt_s > 0) this.powerAdvancingPressureSteps += 1;
+    splitProductionPhase("remainingCompatibilityProjection");
+    return encoder;
   }
 
   /** Publish lazily allocated diagnostic textures from the live owner map.
@@ -3743,7 +3780,10 @@ export class WebGPUOctreeProjection {
   get sparseSurfaceBandSource(): SparseSurfaceBandGPUSource | undefined { return this.sparseSurfaceBand?.source; }
   get adaptiveFaceMirrorSource() { return this.faceMirror?.source; }
   get adaptiveFaceVelocitySource() { return this.faceTransport?.velocitySource; }
-  get powerFaceTransferControl() { return this.powerFaceTransfer?.control; }
+  // The generalized-face transfer implementation remains available for
+  // experiments, but production transport never applies it: the paper path
+  // reconstructs and advects the regular old-mesh field instead.
+  get powerFaceTransferControl(): GPUBuffer | undefined { return undefined; }
   get powerFaceSeedControl() { return this.powerFaceSeed?.control; }
   /** QA-only Section 5 recurrent old-mesh advection publication status. */
   get powerFaceAdvectionControl() { return this.powerFaceAdvection?.control; }
@@ -4182,7 +4222,7 @@ export class WebGPUOctreeProjection {
     this.adaptiveSurfacePages?.destroy();
     this.adaptiveSurfaceAdapter?.destroy();
     this.pagedPhiDifferential?.destroy();
-    this.fineToPowerCoarseLevelSet?.destroy(); this.powerCoarseLevelSetSchedule?.destroy(); this.powerCoarseLevelSet?.destroy(); this.powerVelocity?.destroy(); this.powerSolidFaces?.destroy(); this.powerSolidVertices?.destroy(); this.powerFaceTransfer?.destroy(); this.powerFaceAdvection?.destroy(); this.powerFaceSeed?.destroy(); this.powerDescriptor?.destroy(); this.powerTopology?.destroy(); this.powerFaces?.destroy(); this.powerOperator?.destroy();
+    this.fineToPowerCoarseLevelSet?.destroy(); this.powerCoarseLevelSetSchedule?.destroy(); this.powerCoarseLevelSet?.destroy(); this.powerVelocity?.destroy(); this.powerSolidFaces?.destroy(); this.powerSolidVertices?.destroy(); this.powerFaceAdvection?.destroy(); this.powerFaceSeed?.destroy(); this.powerDescriptor?.destroy(); this.powerTopology?.destroy(); this.powerFaces?.destroy(); this.powerOperator?.destroy();
     this.powerVolumes?.destroy(); this.powerVolumeParams?.destroy();
     this.phiSnapshotTexture.destroy();
     this.levelSetFallbackTexture?.destroy();

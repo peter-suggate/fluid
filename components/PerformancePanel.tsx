@@ -85,7 +85,16 @@ export function PerformancePanel() {
   const stageTimed = (stage: PerformanceStage) => stage.timer === "physics" ? physicsTimed : stage.timer === "render" ? renderTimed : contextMatches && snapshot.adaptiveRebuildCompletedCount > 0;
   const pressureStage = physicsStages.find((stage) => stage.key === "pressure");
   const pressureObservedWall_ms = activeMethodId === "octree" ? gpuInfo?.gpuPressureSolveObservedWall_ms : undefined;
-  const advancePhaseWall = activeMethodId === "octree" ? gpuInfo?.gpuAdvancePhaseWall : undefined;
+  const advancePhaseWallRaw = activeMethodId === "octree" ? gpuInfo?.gpuAdvancePhaseWall : undefined;
+  const lastAdvance = advanceWallBreakdown(gpuInfo);
+  // A boundary-split replay is diagnostic only. Some browser/Metal paths pay
+  // a large submit+fence cost for every split, which is multiplied most in
+  // fine transport because it has the most semantic boundaries. Reject that
+  // sample instead of presenting synchronization overhead as kernel time.
+  const phaseProbeInflation = advancePhaseWallRaw && lastAdvance && lastAdvance.queueFence_ms > 0
+    ? advancePhaseWallRaw.total_ms / lastAdvance.queueFence_ms : undefined;
+  const advancePhaseWall = phaseProbeInflation === undefined || phaseProbeInflation <= 1.25
+    ? advancePhaseWallRaw : undefined;
   const fineSurfaceTimestamp_ms = activeMethodId === "octree"
     ? snapshot.gpuFineTransport_ms + snapshot.gpuFineTopology_ms + snapshot.gpuFineRedistance_ms
     : 0;
@@ -99,7 +108,6 @@ export function PerformancePanel() {
     ? physicsStages.filter((stage) => !FINE_SURFACE_COMPONENT_KEYS.has(stage.key))
     : physicsStages;
   const gpuStages = [...displayedPhysicsStages, ...adaptiveTopologyStages, ...renderStages];
-  const lastAdvance = advanceWallBreakdown(gpuInfo);
   const measuredStages = [...physicsStages, ...renderStages].filter(stageTimed);
   const cpuOther = Math.max(0, snapshot.cpuFrame_ms - snapshot.cpuPhysicsSubmit_ms - snapshot.cpuDataUpload_ms - snapshot.cpuRenderEncode_ms);
   const cpuStages = [
@@ -327,13 +335,35 @@ export function PerformancePanel() {
             <div><dt>COMMAND STREAM</dt><dd>{encodeBreakdown ? `${encodeBreakdown.pressureSolvePassTransitionCount.toLocaleString()} passes` : "—"}</dd><small>{encodeBreakdown?.pressureSolvePassCount.toLocaleString() ?? "—"} dispatches · {gpuInfo?.quadtreePressureIterationsUsed ?? "—"} / {gpuInfo?.quadtreePressureIterationBudget ?? "—"} iterations</small></div>
             <div><dt>SUBMIT → COMPLETE</dt><dd>{pressureObservedWall_ms === undefined ? "sampling…" : `${pressureObservedWall_ms.toFixed(1)} ms`}</dd><small>exact pressure-only fence</small></div>
           </dl>
-          <p>This replay starts only after the production queue drains, writes to the inactive pressure buffer, and fences before simulation resumes. It measures WebGPU implementation, driver, and GPU completion cost that hardware shader timestamps omit. The production fence is {lastAdvance ? `${lastAdvance.queueFence_ms.toFixed(1)} ms` : "pending"}; the queue-boundary sample below localizes the rest of the real advance.</p>
+          <p>This replay starts only after the production queue drains, writes to the inactive pressure buffer, and fences before simulation resumes. It measures WebGPU implementation, driver, and GPU completion cost that hardware shader timestamps omit. The production fence is {lastAdvance ? `${lastAdvance.queueFence_ms.toFixed(1)} ms` : "pending"}; {advancePhaseWallRaw && !advancePhaseWall ? "the boundary-split trace below is rejected because synchronization changed the workload." : "the queue-boundary sample below localizes the rest of the real advance."}</p>
+        </div>}
+        {activeMethodId === "octree" && advancePhaseWallRaw && !advancePhaseWall && <div className="perf-pressure-observation" aria-label="Rejected production phase profile" data-testid="phase-profile-rejected">
+          <header><div><small>PRODUCTION PHASE PROFILE · REJECTED</small><strong>{advancePhaseWallRaw.total_ms.toFixed(1)} ms intrusive split wall</strong></div><output>{phaseProbeInflation?.toFixed(1)}× BOUNDARY INFLATION</output></header>
+          <dl>
+            <div><dt>ORDINARY PRODUCTION ADVANCE</dt><dd>{lastAdvance ? `${lastAdvance.queueFence_ms.toFixed(1)} ms` : "—"}</dd><small>single submission · Dawn parity contract</small></div>
+            <div><dt>SPLIT PROFILER REPLAY</dt><dd>{advancePhaseWallRaw.total_ms.toFixed(1)} ms</dd><small>many submit → completion fences</small></div>
+          </dl>
+          <p>The split replay is more than 25% slower than the ordinary production advance, so its phase ratios are invalid. Fine transport crosses the most profiler boundaries and would otherwise be charged the most synchronization overhead. Rendering is outside this production-advance fence.</p>
         </div>}
         {activeMethodId === "octree" && advancePhaseWall && <div className="perf-pressure-observation" aria-label="Production advance queue boundary timing">
           <header><div><small>PRODUCTION ADVANCE · QUEUE-BOUNDARY SAMPLE</small><strong>{advancePhaseWall.total_ms.toFixed(1)} ms attributed wall</strong></div><output>REAL ADVANCE · SAMPLE #{advancePhaseWall.sampleId}</output></header>
           <dl>
             <div><dt>TOPOLOGY + ADVECT</dt><dd>{advancePhaseWall.topologyAdvection_ms.toFixed(1)} ms</dd><small>queue fence delta</small></div>
             <div><dt>PRESSURE + PROJECT</dt><dd>{advancePhaseWall.pressureProjection_ms.toFixed(1)} ms</dd><small>{pressureObservedWall_ms === undefined ? "production command stream" : `${pressureObservedWall_ms.toFixed(1)} solver replay · ${Math.max(0, advancePhaseWall.pressureProjection_ms - pressureObservedWall_ms).toFixed(1)} assembly/project`}</small></div>
+            <div><dt>P1 · PRESSURE ASSEMBLY + SETUP</dt><dd>{advancePhaseWall.pressureAssemblySetup_ms.toFixed(1)} ms</dd><small>leaf compaction, operator assembly and preconditioner setup</small></div>
+            <div><dt>P1A · LEAF COMPACTION + L1</dt><dd>{advancePhaseWall.pressureLeafCompactionL1Capture_ms.toFixed(1)} ms</dd><small>compact pressure rows and capture the Cartesian/GFM V-cycle</small></div>
+            <div><dt>P1B · FACE MIRROR + RHS</dt><dd>{advancePhaseWall.faceMirrorTransportRhs_ms.toFixed(1)} ms</dd><small>regular-face topology transfer, transport, constraints and RHS</small></div>
+            <div><dt>P1C · POWER TOPOLOGY + FACES</dt><dd>{advancePhaseWall.powerDescriptorTopologyFaces_ms.toFixed(1)} ms</dd><small>descriptor resolution, power topology and generalized faces</small></div>
+            <div><dt>P1D · OLD-FACE ADVECT + REPAIR</dt><dd>{advancePhaseWall.oldFaceAdvectionRepair_ms.toFixed(1)} ms</dd><small>power old-mesh transport and retained-band repair</small></div>
+            <div><dt>P1E · POWER OPERATOR + RHS</dt><dd>{advancePhaseWall.powerOperatorRhsAssembly_ms.toFixed(1)} ms</dd><small>physical volumes and generalized-face pressure operator</small></div>
+            <div><dt>P1F · FINAL PRESSURE ROWS</dt><dd>{advancePhaseWall.finalPressureRowAssembly_ms.toFixed(1)} ms</dd><small>publish the authoritative L2 rows consumed by MGPCG</small></div>
+            <div><dt>P2 · MGPCG SOLVE</dt><dd>{advancePhaseWall.mgpcgSolve_ms.toFixed(1)} ms</dd><small>Section 4.3 hierarchy and Krylov solve</small></div>
+            <div><dt>P3 · POWER PROJECT + PUBLISH</dt><dd>{advancePhaseWall.powerProjectionPublication_ms.toFixed(1)} ms</dd><small>projected generalized-face authority before Section 5</small></div>
+            <div><dt>P4 · FACE-BAND TOPOLOGY</dt><dd>{advancePhaseWall.faceBandTopologyBuild_ms.toFixed(1)} ms</dd><small>Section 5 regular-face topology build</small></div>
+            <div><dt>P5 · TRANSITION ADJACENCY</dt><dd>{advancePhaseWall.faceBandTransitionAdjacency_ms.toFixed(1)} ms</dd><small>catalog transition closure and face emission</small></div>
+            <div><dt>P6 · FACE FAST MARCH</dt><dd>{advancePhaseWall.faceBandFastMarch_ms.toFixed(1)} ms</dd><small>regular-face velocity extrapolation</small></div>
+            <div><dt>P7 · FACE-BAND POWER PUBLISH</dt><dd>{advancePhaseWall.faceBandPowerPublicationCapture_ms.toFixed(1)} ms</dd><small>power-face publication and old-mesh capture</small></div>
+            <div><dt>P8 · COMPATIBILITY PROJECTION</dt><dd>{advancePhaseWall.remainingCompatibilityProjection_ms.toFixed(1)} ms</dd><small>remaining projection, extrapolation, materialization and capture tail</small></div>
             <div data-testid="fine-surface-observed"><dt>FINE SURFACE TOTAL</dt><dd>{advancePhaseWall.surfaceCoupling_ms.toFixed(1)} ms</dd><small>sum of the queue-observed sections below</small></div>
             <div><dt>1 · FINE PREP + SEEDS</dt><dd>{advancePhaseWall.finePreparation_ms?.toFixed(1) ?? "—"} ms</dd><small>surface adapter, coarse bootstrap and compact interface seeds</small></div>
             <div><dt>2 · FINE TRANSPORT</dt><dd>{advancePhaseWall.fineTransport_ms?.toFixed(1) ?? "—"} ms</dd><small>piecewise characteristic + power interpolation</small></div>
@@ -392,7 +422,7 @@ export function PerformancePanel() {
           <div className="perf-row-bar">{stage.value > 0 && <b className="seg-cpu" style={{ width: `${Math.max(1, stage.value / cpuScale * 100)}%` }} />}</div>
           <output>{formatMs(stage.value)}</output>
         </div>)}</div>
-        {lastAdvance && <div className="perf-submission"><span>LAST PHYSICS ADVANCE · CPU encode {lastAdvance.encode_ms.toFixed(1)} ms + submission→completion {lastAdvance.queueFence_ms.toFixed(1)} ms · timestamped GPU {lastAdvance.timestampedGPU_ms.toFixed(3)} ms · {advancePhaseWall ? `queue-attributed by phase sample #${advancePhaseWall.sampleId}` : `unattributed wall ${lastAdvance.untimestampedQueue_ms.toFixed(1)} ms`}</span><output>{lastAdvance.wall_ms.toFixed(1)} ms wall</output></div>}
+        {lastAdvance && <div className="perf-submission"><span>LAST PHYSICS ADVANCE · CPU encode {lastAdvance.encode_ms.toFixed(1)} ms + submission→completion {lastAdvance.queueFence_ms.toFixed(1)} ms · timestamped GPU {lastAdvance.timestampedGPU_ms.toFixed(3)} ms · {advancePhaseWall ? `queue-attributed by phase sample #${advancePhaseWall.sampleId}` : advancePhaseWallRaw ? `phase sample rejected at ${phaseProbeInflation?.toFixed(1)}× boundary inflation` : `unattributed wall ${lastAdvance.untimestampedQueue_ms.toFixed(1)} ms`}</span><output>{lastAdvance.wall_ms.toFixed(1)} ms wall</output></div>}
         {encodeStages.length > 0 && <>
           <header><small>LAST PHYSICS ENCODE · SOLVER ATTRIBUTION</small><output>{encodeStages.reduce((sum, stage) => sum + stage.value, 0).toFixed(1)} ms</output></header>
           <div className="perf-rows">{encodeStages.map((stage) => <div key={stage.key} className="perf-row" title={`${stage.label} · host command construction only`}>

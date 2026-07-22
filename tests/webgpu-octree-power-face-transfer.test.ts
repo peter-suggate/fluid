@@ -47,6 +47,8 @@ test("pressure assembly keeps the current transported axis seed instead of stale
     "authoritative body force must be applied directly on generalized faces");
   assert.doesNotMatch(assembly, /powerFaceTransfer\?\.encodeApply/,
     "previous-frame projected faces must not erase current transport or body forces before pressure assembly");
+  assert.doesNotMatch(WebGPUOctreeProjection.toString(), /powerFaceTransfer\?\.encodeCapture/,
+    "an unapplied generalized-face snapshot is dead production work");
   assert.equal(typeof WebGPUOctreePowerFaceTransfer.prototype.encodeApply, "function");
   assert.equal(typeof WebGPUOctreePowerFaceTransfer.prototype.encodeCapture, "function");
   assert.match(WebGPUOctreePowerFaceTransfer.prototype.encodeCapture.toString(),

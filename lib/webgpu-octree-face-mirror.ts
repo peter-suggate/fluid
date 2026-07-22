@@ -67,6 +67,8 @@ export interface OctreeFaceMirrorOptions {
   preserveTopologyVelocities?: boolean;
   /** Retain face-index transfer records for inspection. Production needs only the counters. */
   retainTopologyTransferRecords?: boolean;
+  /** Exact finest-grid bounds for dimension-scaled canonical-key radix work. */
+  dimensions?: readonly [number, number, number];
 }
 
 export interface OctreeFaceMirrorSource {
@@ -245,6 +247,7 @@ export class WebGPUOctreeFaceMirror {
     if (options.preserveTopologyVelocities) {
       this.topologyTransfer = new WebGPUOctreeFaceTopologyTransfer(device, this.source, {
         retainRecords: options.retainTopologyTransferRecords,
+        keyDimensions: options.dimensions,
       });
       this.plan = { ...this.plan, allocatedBytes: this.plan.allocatedBytes + this.topologyTransfer.plan.allocatedBytes };
     }

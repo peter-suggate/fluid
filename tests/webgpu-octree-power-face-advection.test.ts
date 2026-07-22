@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   advectPowerFaceFromOldVector,
   interpolateRegularAxisFaceComponent,
+  interpolateRegularAxisFaceComponentAtSize,
   OCTREE_POWER_OLD_MESH_ADVECT_BINDINGS,
   OCTREE_POWER_OLD_MESH_FINALIZE_BINDINGS,
   OCTREE_POWER_OLD_MESH_ADVECTION_PARAMETER_BYTES,
@@ -87,6 +88,18 @@ test("regular staggered interpolation uses bounded higher-order support away fro
     "the recurrent sampler must not silently fall back to the first-order low-pass value");
 });
 
+test("Section 5 regular interpolation is located from the extrapolated face lattice without a liquid owner", () => {
+  const observed: string[] = [];
+  const value = interpolateRegularAxisFaceComponentAtSize([6.25, 5.5, 4.5], 1, 0,
+    (origin, axis, size) => {
+      observed.push(`${origin.join(",")}/${axis}/${size}`);
+      return origin[0];
+    });
+  assert.equal(value, 6.25);
+  assert.ok(observed.includes("6,5,4/0/1"));
+  assert.ok(observed.includes("7,5,4/0/1"));
+});
+
 test("old-mesh GPU authority is generation-coherent and uses cube/catalog interpolation", () => {
   assert.match(octreePowerOldMeshCaptureWGSL,
     /velocityControl\[0\]!=VALID.*velocityControl\[2\]!=rows.*velocityControl\[5\]!=rows.*velocityControl\[7\]!=generation/,
@@ -98,8 +111,17 @@ test("old-mesh GPU authority is generation-coherent and uses cube/catalog interp
     /oldGeneration\+1u!=p\.generation.*fail\(GENERATION,0u\)/,
     "a missing or stale old generation must fail closed");
   assert.match(octreePowerOldMeshAdvectionWGSL,
-    /if\(\(th\.flags&1u\)!=0u\).*regularAxisComponent\(x,h,0u\).*regularAxisComponent\(x,h,1u\).*regularAxisComponent\(x,h,2u\)/s,
-    "ordinary regions use the paper's staggered per-axis interpolant");
+    /let row=owner\(x\);if\(row==INVALID.*\{let regular=regularVector\(x\);return select\(bad\(1\.\),regular,regular\.w>0\.\);\}/s,
+    "a missing liquid pressure owner falls back to the paper's extrapolated regular face field");
+  assert.match(octreePowerOldMeshAdvectionWGSL,
+    /if\(\(th\.flags&1u\)!=0u\)\{let vx=regularAxisComponentAtSize\(x,size,0u\).*return vec4f\(vx\.x,vy\.x,vz\.x,1\.\);\}/s,
+    "a published regular owner samples its exact staggered level");
+  assert.doesNotMatch(octreePowerOldMeshAdvectionWGSL,
+    /let regular=regularVector\(x\);if\(regular\.w>0\.\)\{return regular;\}.*let row=owner\(x\)/s,
+    "a complete regular stencil must never bypass a transition owner's catalog tetrahedra");
+  assert.match(compact(octreePowerOldMeshAdvectionWGSL),
+    /fnregularVector\(x:vec3f\)->vec4f\{varsize=1u;loop\{letvx=regularAxisComponentAtSize\(x,size,0u\);letvy=regularAxisComponentAtSize\(x,size,1u\);letvz=regularAxisComponentAtSize\(x,size,2u\)/,
+    "ordinary regions locate a complete same-level staggered vector without a pressure owner");
   assert.doesNotMatch(octreePowerOldMeshAdvectionWGSL,
     /if\(\(th\.flags&1u\)!=0u\).*result\+=w\*v\.xyz/s,
     "ordinary regions must not reconstruct through the dissipative cell-centred round trip");
@@ -136,7 +158,7 @@ test("recurrent advection retains its attempt verdict after the following snapsh
     /control\.p1=atomicLoad\(&control\.flags\);control\.p2=atomicLoad\(&control\.firstError\);control\.p3=atomicLoad\(&control\.advected\);control\.p4=atomicLoad\(&control\.valid\)/);
 });
 
-test("projection captures old vectors after projection and consumes them on the next rebuild", () => {
+test("Section 5 captures only the final extrapolated vectors for the next rebuild", () => {
   const rebuild = compact((WebGPUOctreeProjection.prototype as unknown as {
     encodePowerAssemblyMirror: (encoder: GPUCommandEncoder) => void;
   }).encodePowerAssemblyMirror);
@@ -145,12 +167,10 @@ test("projection captures old vectors after projection and consumes them on the 
   const publication = compact((WebGPUOctreeProjection.prototype as unknown as {
     encodePowerVelocityPublication: (encoder: GPUCommandEncoder) => void;
   }).encodePowerVelocityPublication);
-  assert.match(publication,
-    /this\.powerVelocity\.encodeFromFaceControl\(encoder,.*this\.powerFaceAdvection\?\.encodeCapture\(encoder,/,
-    "the projected full cell vectors are captured before a subsequent topology can overwrite their mesh");
-  assert.ok(publication.indexOf("this.powerFaceSeed.encodePowerToAxis")
-    < publication.indexOf("this.powerFaceAdvection?.encodeCapture"),
-  "the projected staggered field must publish before the old generation snapshot");
+  assert.match(publication, /this\.powerVelocity\.encodeFromFaceControl\(encoder,.*this\.powerFaceSeed\.encodePowerToAxis\(encoder,/,
+    "the projected field must still seed Section 5");
+  assert.doesNotMatch(publication, /encodeCapture/,
+    "the pre-extrapolation snapshot is overwritten in the same command stream and must not be recorded");
   assert.doesNotMatch(rebuild, /powerFaceTransfer\?\.encodeApply/,
     "exact generalized-face identity transfer is not an authoritative rebuild step");
   assert.match(compact(WebGPUOctreePowerFaceAdvection.prototype.encodeAdvect),
@@ -175,4 +195,6 @@ test("Section 5 retains the extrapolated old full-vector mesh for the next topol
   const capture = source.indexOf("this.powerFaceAdvection?.encodeCapture", reconstruct);
   assert.ok(publication >= 0 && reverse > publication && reconstruct > reverse && capture > reconstruct,
     "the committed face-marched field must become the retained old interpolation mesh");
+  assert.equal(source.match(/powerFaceAdvection\?\.encodeCapture/g)?.length, 1,
+    "exactly one old interpolation snapshot must be retained per advance");
 });

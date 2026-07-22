@@ -5,15 +5,15 @@ export interface FineLevelSetGPURedistanceOptions {
   /** Required signed-distance width, measured in fine cells. */
   bandCells: number;
   residualTolerance?: number;
-  /** JFA-CPT is the fixed-dispatch product path; FMM is the validation oracle. */
+  /** FMM matches the paper; JFA-CPT remains available for comparison. */
   method?: FineLevelSetRedistanceMethod;
 }
 
 export type FineLevelSetRedistanceMethod = "jfa-cpt" | "fmm";
 
 export function resolveFineLevelSetRedistanceMethod(value: unknown): FineLevelSetRedistanceMethod {
-  if (value === undefined || value === "jfa" || value === "jfa-cpt") return "jfa-cpt";
-  if (value === "fmm") return "fmm";
+  if (value === undefined || value === "fmm") return "fmm";
+  if (value === "jfa" || value === "jfa-cpt") return "jfa-cpt";
   throw new RangeError(`Unknown fine redistance method: ${String(value)}`);
 }
 
@@ -47,10 +47,9 @@ export interface FineLevelSetGPURedistanceControl {
 }
 
 export const FINE_LEVELSET_REDISTANCE_CONTROL_BYTES = 48;
-/** The opt-in FMM remains a tiny-scene diagnostic until its Dawn/Metal fault
- * is resolved. Four B4 pages are enough for local oracle fixtures without
- * allowing an accidental production-domain dispatch. */
-export const FINE_LEVELSET_FMM_MAX_DIAGNOSTIC_SAMPLES = 256;
+/** Fixed-resident FMM is bounded by the 32-bit logical-sample key used by the
+ * sparse fine lattice. The production factor-4 mini dam uses only 64^3 keys. */
+export const FINE_LEVELSET_FMM_MAX_DIAGNOSTIC_SAMPLES = 0xffff_fffe;
 const FINE_LEVELSET_JFA_MAX_PASSES = 10;
 export const FINE_LEVELSET_REDISTANCE_ALLOCATED_BYTES = FINE_LEVELSET_REDISTANCE_CONTROL_BYTES
   + 80 + FINE_LEVELSET_JFA_MAX_PASSES * 80;
@@ -72,8 +71,9 @@ export function unpackFineLevelSetGPURedistanceControl(words: ArrayLike<number>)
 }
 
 /**
- * Fixed-resident fine-grid redistance. JFA-CPT is the default, parallel path;
- * exact causal bucketed FMM remains selectable as the validation oracle. Both
+ * Fixed-resident fine-grid redistance. The causal bucketed FMM is the default
+ * because Section 5 redistances the fine SPGrid with fast marching. JFA-CPT
+ * remains selectable as a parallel comparison path. Both
  * consume the complete support generation published by topology and never
  * allocate, link, or publish a page while redistancing.
  */
@@ -169,7 +169,7 @@ export class WebGPUFineLevelSetRedistance {
       return;
     }
     if (sampleCount > FINE_LEVELSET_FMM_MAX_DIAGNOSTIC_SAMPLES) {
-      throw new RangeError(`Fine FMM oracle is limited to ${FINE_LEVELSET_FMM_MAX_DIAGNOSTIC_SAMPLES} logical samples until its Dawn backend gate is cleared`);
+      throw new RangeError(`Fine FMM requires fewer than ${FINE_LEVELSET_FMM_MAX_DIAGNOSTIC_SAMPLES + 1} logical samples`);
     }
     this.device.queue.writeBuffer(this.params, 0, bytes); encoder.clearBuffer(this.control);
     const bind = (pipeline: GPUComputePipeline, bindings: readonly (readonly [number, GPUBuffer])[]) =>
@@ -188,7 +188,7 @@ export class WebGPUFineLevelSetRedistance {
     // Each bucket snapshots the previously accepted distances before the
     // parallel march. This makes candidate reads race-free while preserving
     // the half-cell causal bucket ordering without queue fences.
-    const pass = encoder.beginComputePass({ label: "Fixed-resident fine FMM oracle" });
+    const pass = encoder.beginComputePass({ label: "Fixed-resident fine FMM" });
     run(this.controlPipeline, pick(0, 3, 8), 1, pass);
     run(this.initializePipeline, pick(0, 2, 3, 4, 5, 6, 8), this.source.plan.maximumResidentBricks, pass);
     run(this.seedPipeline, pick(0, 2, 3, 4, 5, 6, 8), this.source.plan.maximumResidentBricks, pass);
@@ -251,7 +251,7 @@ export class WebGPUFineLevelSetRedistance {
     this.jfaParams.forEach((buffer) => buffer.destroy()); }
 }
 
-/** Fixed-resident FMM validation oracle. This shader has no request arena,
+/** Fixed-resident causal FMM. This shader has no request arena,
  * page-table mutation, or indirect-dispatch binding. Each half-cell bucket
  * snapshots accepted distances before a race-free parallel update. */
 export const fineLevelSetRedistanceWGSL = /* wgsl */ `

@@ -6,11 +6,13 @@ export const OCTREE_SECTION43_BOUNDARY_BAND_LAYERS = 3;
  * has rare topology generations that require more than 16. */
 export const OCTREE_SECTION43_DEFAULT_PCG_ITERATIONS = 128;
 /** Small power-octree solves are launch-bound long before they are ALU-bound.
- * Keep enough recorded iterations for more than three times the paper's
- * reported 6--10 iteration range, while retaining the 128-dispatch-tail
- * fallback for larger and less predictable domains. */
-export const OCTREE_SECTION43_SMALL_DOMAIN_PCG_ITERATIONS = 32;
-export const OCTREE_SECTION43_SMALL_DOMAIN_MAXIMUM_CELLS = 16 ** 3;
+ * Exact Dawn audits observe maxima of 8 iterations over 500 generations at
+ * 16^3 and 7 iterations over all 62 generations of the browser's 24x18x16
+ * mini dam break. Retain 50% headroom over those measured envelopes and the
+ * paper's reported 6--10 range, while keeping the 128-iteration fallback for
+ * genuinely larger domains. */
+export const OCTREE_SECTION43_SMALL_DOMAIN_PCG_ITERATIONS = 12;
+export const OCTREE_SECTION43_SMALL_DOMAIN_MAXIMUM_CELLS = 8_192;
 // The paper reports convergence in 6-10 PCG iterations for its production
 // hierarchy. Our sparse GPU hierarchy is an approximation (notably at the
 // graph-ring boundary band), so retain a bounded tail for difficult topology
@@ -59,13 +61,13 @@ export interface OctreeFirstOrderSPDVCycle {
   readonly encodedCorrectionDispatchCount?: number;
   /** Ordered compute dispatches emitted by hierarchy setup. */
   readonly encodedSetupDispatchCount?: number;
-  /** Standalone pass transitions; optional so alternate hierarchy
+  /** Standalone correction pass transitions; optional so alternate hierarchy
    * implementations remain source-compatible with the batching extension. */
   readonly encodedPassTransitionCount?: number;
   encodeSetup(encoder: GPUCommandEncoder, input: {
     readonly solverControl: GPUBuffer;
     readonly rowCount: GPUBuffer;
-  }, sharedPass?: GPUComputePassEncoder): void;
+  }): void;
   encodeCorrection(encoder: GPUCommandEncoder, input: {
     readonly rhs: GPUBuffer;
     readonly correction: GPUBuffer;
@@ -177,8 +179,9 @@ export class WebGPUOctreeMGPCG {
   /** Backward-compatible alias retained for existing diagnostics consumers. */
   get encodedPassCount(): number { return this.encodedDispatchCount; }
 
-  /** The complete fixed solve is one dependency-ordered compute pass. */
-  readonly encodedPassTransitionCount = 1;
+  /** Hierarchy publication must end before its dispatch records can become
+   * indirect arguments for the dependency-ordered solve pass. */
+  readonly encodedPassTransitionCount = 2;
 
   constructor(device: GPUDevice, private readonly source: OctreeMGPCGSource, options: OctreeMGPCGOptions) {
     this.device = device;
@@ -236,7 +239,7 @@ export class WebGPUOctreeMGPCG {
       initialize: pipeline("initializeMGPCG", [0, 1, 2, 3, 4, 5, 6, 7, 11, 12]),
       multiplyX: pipeline("multiplyX", [0, 1, 2, 3, 7, 11, 12]),
       residual: pipeline("formInitialResidual", [0, 1, 3, 5, 7, 11]),
-      clearHybridPreconditioner: pipeline("clearHybridPreconditioner", [0, 13, 14, 15, 16]),
+      clearHybridPreconditioner: pipeline("clearHybridPreconditioner", [0, 11, 13, 14, 15, 16]),
       classifyHybridBand: pipeline("classifyHybridBand", [0, 1, 2, 3, 11, 17]),
       dilateHybridBandAtoB: pipeline("dilateHybridBandAtoB", [0, 1, 2, 3, 11, 17, 18]),
       dilateHybridBandBtoA: pipeline("dilateHybridBandBtoA", [0, 1, 2, 3, 11, 17, 18]),
@@ -263,6 +266,12 @@ export class WebGPUOctreeMGPCG {
       throw new RangeError("MGPCG pressure buffer capacity is too small");
     }
     encoder.clearBuffer(this.control);
+    // The V-cycle publishes live work counts through storage writes. WebGPU
+    // requires a pass boundary before those records are copied into an
+    // indirect-only buffer, so hierarchy setup deliberately owns its pass.
+    this.source.firstOrderVCycle.encodeSetup(encoder, {
+      solverControl: this.control, rowCount: this.source.rowCount,
+    });
     const buffers = [this.params, this.source.leafHeaders, this.source.leafEntries, this.source.rowCount,
       pressureIn, this.residual, this.preconditioned, this.direction, this.product, undefined,
       pressureOut, this.control, this.x,
@@ -275,9 +284,6 @@ export class WebGPUOctreeMGPCG {
     rows(this.stages.initialize);
     rows(this.stages.multiplyX);
     rows(this.stages.residual);
-    this.source.firstOrderVCycle.encodeSetup(encoder, {
-      solverControl: this.control, rowCount: this.source.rowCount,
-    }, pass);
     this.prepareHybridBand(pass, buffers);
     this.applyPreconditioner(encoder, pass, buffers);
     single(this.stages.initialReduction);
@@ -428,7 +434,7 @@ fn smoothHybridValue(row:u32,useB:bool)->f32{let current=hybridValue(row,useB);i
 @compute @workgroup_size(64) fn multiplyX(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!failed()){direction[row]=applyA(row,false);}}
 @compute @workgroup_size(64) fn formInitialResidual(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!failed()){let r=-headers[row].rhs-direction[row];if(!finite(r)){reportAt(NONFINITE,2u,row,r);}else{residual[row]=r;}}}
 
-@compute @workgroup_size(64) fn clearHybridPreconditioner(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=params.dimsCapacity.w){return;}
+@compute @workgroup_size(64) fn clearHybridPreconditioner(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=params.dimsCapacity.w||stopped()){return;}
   hybridA[row]=0.0;hybridB[row]=0.0;hybridRhs[row]=0.0;hybridCorrection[row]=0.0;}
 
 @compute @workgroup_size(64) fn classifyHybridBand(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||failed()){return;}

@@ -56,6 +56,55 @@ test("Dawn performance reproduction reaches the UI's evolved third profiler samp
   assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
 });
 
+test("exact UI Dawn reproduction has a profiler-free warm-throughput lane", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const profiler = packageJson.scripts["test:webgpu:dam-ui-performance"];
+  const throughput = packageJson.scripts["test:webgpu:dam-ui-throughput"];
+  for (const command of [profiler, throughput]) {
+    assert.match(command, /FLUID_SCENE=dam-break-ui/);
+    assert.match(command, /FLUID_TARGET_S=0\.496/);
+    assert.match(command, /FLUID_MAX_DT=0\.008/);
+    assert.match(command, /FLUID_ORACLE_STEPS=62/);
+    assert.match(command, /FLUID_EXPECT_EXACT_STEPS=62/);
+    assert.match(command, /FLUID_EXPECT_GRID=24,18,16/);
+    assert.match(command, /FLUID_WEBGPU_BACKEND=metal/);
+    assert.match(command, /FLUID_WEBGPU_ADAPTER='Apple M1 Max'/);
+    assert.match(command, /FLUID_WEBGPU_DAWN_FEATURES=skip_validation/);
+    assert.match(command, /FLUID_PERFORMANCE_PROFILE=1/);
+    assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
+  }
+  assert.match(profiler, /FLUID_PERFORMANCE_READBACKS=1/);
+  assert.match(throughput, /FLUID_PERFORMANCE_READBACKS=0/);
+  assert.match(throughput, /FLUID_GPU_COMMAND_AUDIT=1/);
+  assert.match(throughput, /FLUID_DISABLE_TIMESTAMPS=0/);
+});
+
+test("minimal power dam has separate timestamp-enabled profiler and warm-throughput Dawn contracts", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const profiler = packageJson.scripts["test:webgpu:minimal-power-dam-performance"];
+  const throughput = packageJson.scripts["test:webgpu:minimal-power-dam-throughput"];
+  for (const command of [profiler, throughput]) {
+    assert.match(command, /FLUID_SCENE=minimal-power-dam-break/);
+    assert.match(command, /FLUID_TARGET_S=0\.248/);
+    assert.match(command, /FLUID_MAX_DT=0\.004/);
+    assert.match(command, /FLUID_ORACLE_STEPS=62/);
+    assert.match(command, /FLUID_EXPECT_EXACT_STEPS=62/);
+    assert.match(command, /FLUID_EXPECT_GRID=16,16,16/);
+    assert.match(command, /FLUID_WEBGPU_ADAPTER='Apple M1 Max'/);
+    assert.match(command, /FLUID_WEBGPU_DAWN_FEATURES=skip_validation/);
+    assert.match(command, /FLUID_DISABLE_TIMESTAMPS=0/,
+      "this contract matches an explicit ?gpuTimestamps=1 browser session");
+    assert.match(command, /FLUID_GPU_COMMAND_AUDIT=1/);
+    assert.doesNotMatch(command, /FLUID_CHECKPOINT_EVERY_S|FLUID_POWER_GENERATION_AUDIT|FLUID_RASTER_CHECKPOINTS=1/);
+  }
+  assert.match(profiler, /FLUID_PERFORMANCE_READBACKS=1/);
+  assert.match(throughput, /FLUID_PERFORMANCE_READBACKS=0/);
+});
+
 test("single-tall-cell differential separates the probe stencil from the far field", () => {
   const left = new Float32Array(3 * 2 * 3), right = left.slice();
   const index = (x: number, y: number, z: number) => x + 3 * (y + 2 * z);
