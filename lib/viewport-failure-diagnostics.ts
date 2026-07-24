@@ -52,20 +52,6 @@ export function viewportFailureLocation(
     };
   }
 
-  const acute = info.globalFineFaceBandAcuteGradingFailure;
-  if (acute && acute.rowCell !== 0xffff_ffff && info.nx > 0 && info.ny > 0) {
-    const plane = info.nx * info.ny;
-    const z = Math.floor(acute.rowCell / plane);
-    const remainder = acute.rowCell - z * plane;
-    const y = Math.floor(remainder / info.nx);
-    const x = remainder - y * info.nx;
-    const half = Math.max(1, acute.rowSize) * 0.5;
-    return {
-      location_m: gridPointToWorld([x + half, y + half, z + half], info, scene),
-      locationLabel: `first failed row ${acute.rowCell.toLocaleString()}`,
-    };
-  }
-
   const transport = info.globalFineTransportFirstInvalidVelocityPosition_m;
   if (transport && [transport.x, transport.y, transport.z].every(Number.isFinite)) {
     return {
@@ -78,13 +64,6 @@ export function viewportFailureLocation(
     };
   }
 
-  if (finiteTriple(info.pagedPhiDifferentialMaxCell)) {
-    const cell = info.pagedPhiDifferentialMaxCell;
-    return {
-      location_m: gridPointToWorld([cell[0] + 0.5, cell[1] + 0.5, cell[2] + 0.5], info, scene),
-      locationLabel: "largest recorded φ mismatch",
-    };
-  }
   return {};
 }
 

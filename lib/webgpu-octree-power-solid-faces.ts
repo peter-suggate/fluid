@@ -4,8 +4,9 @@ import {
   OCTREE_SOLID_VERTEX_SDF_VALID,
   type OctreeSolidVertexSdfSource,
 } from "./webgpu-octree-solid-vertex-sdf";
+import { PassBroker } from "./webgpu-pass-broker";
 
-export const OCTREE_POWER_SOLID_APERTURE_BYTES = 16;
+export const OCTREE_POWER_SOLID_APERTURE_BYTES = 32;
 export const OCTREE_POWER_SOLID_CONTROL_BYTES = 64;
 export const OCTREE_POWER_SOLID_VALID = 0x8000_0000;
 export const OCTREE_POWER_SOLID_IMPULSE_WORDS = 8;
@@ -87,11 +88,12 @@ export class WebGPUOctreePowerSolidFaces {
   private readonly constrainPipeline: GPUComputePipeline;
   private readonly lockPipeline: GPUComputePipeline;
   private readonly impulsePipeline: GPUComputePipeline;
+  private readonly impulseFinishPipeline: GPUComputePipeline;
   private readonly classifyGroup: GPUBindGroup;
   private readonly impulseGroups: readonly [GPUBindGroup, GPUBindGroup];
   private readonly exchangePipeline?: GPUComputePipeline;
   private readonly exchangeGroup?: GPUBindGroup;
-  private readonly fallbackVertexArena?: GPUBuffer;
+  private readonly invalidVertexArena?: GPUBuffer;
   private destroyed = false;
 
   constructor(
@@ -106,8 +108,9 @@ export class WebGPUOctreePowerSolidFaces {
     this.control = device.createBuffer({ label: "Octree power solid control", size: OCTREE_POWER_SOLID_CONTROL_BYTES, usage: storage });
     this.params = device.createBuffer({ label: "Octree power solid parameters", size: 64,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const fallback = (label: string, size: number) => device.createBuffer({ label, size, usage: storage });
-    this.fallbackVertexArena = resources.solidVertices ? undefined : fallback("Invalid solid vertex-SDF publication fallback", 96);
+    this.invalidVertexArena = resources.solidVertices ? undefined : device.createBuffer({
+      label: "Unpublished solid vertex-SDF sentinel", size: 96, usage: storage,
+    });
     const shaderModule = device.createShaderModule({ label: "Octree generalized power solid faces", code: octreePowerSolidFaceShader });
     const classifyLayout = device.createBindGroupLayout({ label: "Octree power solid classification layout", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -139,7 +142,7 @@ export class WebGPUOctreePowerSolidFaces {
       { binding: 6, resource: { buffer: this.apertures } },
       { binding: 7, resource: { buffer: this.control } },
       { binding: 8, resource: resources.terrain.createView() },
-      { binding: 9, resource: { buffer: resources.solidVertices?.arena ?? this.fallbackVertexArena! } },
+      { binding: 9, resource: { buffer: resources.solidVertices?.arena ?? this.invalidVertexArena! } },
     ] });
     const impulseLayout = device.createBindGroupLayout({ label: "Octree power solid impulse layout", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -155,7 +158,9 @@ export class WebGPUOctreePowerSolidFaces {
     const impulsePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [impulseLayout] });
     const impulseModule = device.createShaderModule({ label: "Octree generalized power solid impulses", code: octreePowerSolidImpulseShader });
     this.impulsePipeline = device.createComputePipeline({ label: "Accumulate generalized power solid pressure reactions",
-      layout: impulsePipelineLayout, compute: { module: impulseModule, entryPoint: "accumulatePowerSolidImpulses" } });
+      layout: impulsePipelineLayout, compute: { module: impulseModule, entryPoint: "reducePowerSolidBodyImpulses" } });
+    this.impulseFinishPipeline = device.createComputePipeline({ label: "Publish generalized power solid pressure reactions",
+      layout: impulsePipelineLayout, compute: { module: impulseModule, entryPoint: "finishPowerSolidImpulses" } });
     const impulseGroup = (pressure: GPUBuffer) => device.createBindGroup({ label: "Octree power solid impulse bindings", layout: impulseLayout, entries: [
       { binding: 0, resource: { buffer: resources.faces.faces } },
       { binding: 1, resource: { buffer: resources.faces.faceNormals } },
@@ -186,28 +191,29 @@ export class WebGPUOctreePowerSolidFaces {
     }
   }
 
-  encodeClassifyAndConstrain(encoder: GPUCommandEncoder, options: OctreePowerSolidEncodeOptions): void {
+  encodeClassifyAndConstrain(broker: PassBroker, options: OctreePowerSolidEncodeOptions): void {
     this.assertLive();
     this.writeOptions(options);
-    encoder.clearBuffer(this.bodyImpulses); encoder.clearBuffer(this.control);
     const groups = Math.ceil(this.plan.faceCapacity / 64);
-    this.run(encoder, "Classify generalized power solid apertures", this.classifyPipeline, groups, this.classifyGroup);
-    this.run(encoder, "Publish generalized power solid apertures", this.finishPipeline, 1, this.classifyGroup);
-    this.run(encoder, "Apply generalized power solid flux", this.constrainPipeline, groups, this.classifyGroup);
+    this.run(broker, "Classify generalized power solid apertures", this.classifyPipeline, groups, this.classifyGroup);
+    this.run(broker, "Publish generalized power solid apertures", this.finishPipeline, 1, this.classifyGroup);
+    this.run(broker, "Apply generalized power solid flux", this.constrainPipeline, groups, this.classifyGroup);
   }
 
-  encodePostProjectionConstraint(encoder: GPUCommandEncoder): void {
+  encodePostProjectionConstraint(broker: PassBroker): void {
     this.assertLive();
-    this.run(encoder, "Lock closed generalized power faces", this.lockPipeline,
+    this.run(broker, "Lock closed generalized power faces", this.lockPipeline,
       Math.ceil(this.plan.faceCapacity / 64), this.classifyGroup);
   }
 
-  encodePressureImpulses(encoder: GPUCommandEncoder, pressureInA: boolean): void {
+  encodePressureImpulses(broker: PassBroker, pressureInA: boolean): void {
     this.assertLive();
-    this.run(encoder, "Accumulate generalized power solid pressure reactions", this.impulsePipeline,
-      Math.ceil(this.plan.faceCapacity / 64), this.impulseGroups[pressureInA ? 0 : 1]);
+    this.run(broker, "Accumulate generalized power solid pressure reactions", this.impulsePipeline,
+      Math.ceil(this.plan.bodyCapacity / 64), this.impulseGroups[pressureInA ? 0 : 1]);
+    this.run(broker, "Publish generalized power solid pressure reactions", this.impulseFinishPipeline,
+      1, this.impulseGroups[pressureInA ? 0 : 1]);
     if (this.exchangePipeline && this.exchangeGroup) {
-      this.run(encoder, "Publish generalized power rigid exchange", this.exchangePipeline,
+      this.run(broker, "Publish generalized power rigid exchange", this.exchangePipeline,
         Math.ceil(this.plan.bodyCapacity / 64), this.exchangeGroup);
     }
   }
@@ -234,7 +240,7 @@ export class WebGPUOctreePowerSolidFaces {
   destroy(): void {
     if (this.destroyed) return; this.destroyed = true;
     this.apertures.destroy(); this.bodyImpulses.destroy(); this.control.destroy(); this.params.destroy();
-    this.fallbackVertexArena?.destroy();
+    this.invalidVertexArena?.destroy();
   }
 
   private writeOptions(options: OctreePowerSolidEncodeOptions): void {
@@ -253,9 +259,9 @@ export class WebGPUOctreePowerSolidFaces {
     this.device.queue.writeBuffer(this.params, 0, bytes);
   }
 
-  private run(encoder: GPUCommandEncoder, label: string, pipeline: GPUComputePipeline, groups: number, group: GPUBindGroup): void {
-    const pass = encoder.beginComputePass({ label }); pass.setPipeline(pipeline); pass.setBindGroup(0, group);
-    pass.dispatchWorkgroups(groups); pass.end();
+  private run(broker: PassBroker, label: string, pipeline: GPUComputePipeline, groups: number, group: GPUBindGroup): void {
+    const pass = broker.compute({ label }); pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroups(groups);
   }
 
   private assertLive(): void { if (this.destroyed) throw new Error("Octree power solid faces are destroyed"); }
@@ -263,7 +269,7 @@ export class WebGPUOctreePowerSolidFaces {
 
 export const octreePowerSolidFaceShader = /* wgsl */ `
 struct PowerFace { negativeRow:u32,positiveRow:u32,geometryCode:u32,flags:u32,normalVelocity:f32,area:f32,inverseDistance:f32,openFraction:f32 }
-struct Aperture { openFraction:f32,solidNormalVelocity:f32,dominantOwner:i32,sampleMask:u32 }
+struct Aperture { openFraction:f32,solidNormalVelocity:f32,dominantOwner:i32,sampleMask:u32,ownerCodes:vec2u,statusFlags:u32,stats:u32 }
 struct FaceQuadrature { centroidArea:vec4f,sampleUV:array<u32,16> }
 struct RigidBody { positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f }
 struct Params { counts:vec4u,dims:vec4u,spacing:vec4f,container:vec4f }
@@ -274,7 +280,7 @@ struct Params { counts:vec4u,dims:vec4u,spacing:vec4f,container:vec4f }
 @group(0) @binding(4) var<storage,read> bodies:array<RigidBody,${GPU_RIGID_BODY_CAPACITY}>;
 @group(0) @binding(5) var<uniform> params:Params;
 @group(0) @binding(6) var<storage,read_write> apertures:array<Aperture>;
-@group(0) @binding(7) var<storage,read_write> control:array<atomic<u32>>;
+@group(0) @binding(7) var<storage,read_write> control:array<u32>;
 @group(0) @binding(8) var terrain:texture_2d<f32>;
 struct SolidVertexArena { control:array<u32,16>,values:array<u32> }
 @group(0) @binding(9) var<storage,read> solidVertices:SolidVertexArena;
@@ -310,23 +316,26 @@ fn validVertexRow(row:u32)->bool{if(params.counts.z==0u){return true;}if(row>=fa
 fn validFace(index:u32)->bool{if(index>=faceControl[1]||index>=arrayLength(&faces)||index>=arrayLength(&normals)||index>=arrayLength(&quadrature)||index>=arrayLength(&apertures)){return false;}
   let f=faces[index];let n=normals[index].xyz;let c=quadrature[index].centroidArea;return validVertexRow(f.negativeRow)&&(f.positiveRow==INVALID||validVertexRow(f.positiveRow))
     &&(f.flags&FACE_VALID)!=0u&&finite(f.area)&&f.area>0.0&&finite(f.normalVelocity)&&abs(length(n)-1.0)<2e-3&&all(vec4<bool>(finite(c.x),finite(c.y),finite(c.z),finite(c.w)))&&c.w>0.0&&abs(c.w-f.area)<=max(2e-5,f.area*5e-4);}
-@compute @workgroup_size(64) fn classifyPowerSolidFaces(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(index>=params.counts.x){return;}if(!sourceValid()){atomicOr(&control[0],1u);return;}if(index>=faceControl[1]){return;}if(!validFace(index)){atomicOr(&control[0],2u);return;}
-  var occupied=0u;var mask=0u;var velocity=0.0;var counts:array<u32,${GPU_RIGID_BODY_CAPACITY}>;var terrainCount=0u;let n=normals[index].xyz;
-  for(var sample=0u;sample<SAMPLE_COUNT;sample+=1u){let point=samplePoint(index,sample);let owner=sampleOwner(point);if(owner!=-1){occupied+=1u;mask|=1u<<sample;velocity+=solidVelocity(owner,point,n);if(owner>=0){counts[u32(owner)]+=1u;}else{terrainCount+=1u;}}}
+fn invalidAperture(flag:u32)->Aperture{return Aperture(0.0,0.0,-1,0u,vec2u(0xffffffffu),flag,0u);}
+fn storeOwner(codes:ptr<function,vec2u>,sample:u32,owner:i32){let code=select(select(15u,14u,owner==-2),u32(owner),owner>=0);let lane=sample>>3u;let shift=(sample&7u)*4u;(*codes)[lane]=((*codes)[lane]&~(15u<<shift))|(code<<shift);}
+@compute @workgroup_size(64) fn classifyPowerSolidFaces(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(index>=params.counts.x){return;}if(!sourceValid()){apertures[index]=invalidAperture(1u);return;}if(index>=faceControl[1]){return;}if(!validFace(index)){apertures[index]=invalidAperture(2u);return;}
+  var occupied=0u;var mask=0u;var velocity=0.0;var counts:array<u32,${GPU_RIGID_BODY_CAPACITY}>;var terrainCount=0u;var ownerCodes=vec2u(0xffffffffu);let n=normals[index].xyz;
+  for(var sample=0u;sample<SAMPLE_COUNT;sample+=1u){let point=samplePoint(index,sample);let owner=sampleOwner(point);storeOwner(&ownerCodes,sample,owner);if(owner!=-1){occupied+=1u;mask|=1u<<sample;velocity+=solidVelocity(owner,point,n);if(owner>=0){counts[u32(owner)]+=1u;}else{terrainCount+=1u;}}}
   var dominant=select(-1,-2,terrainCount>0u);var largest=terrainCount;for(var i=0u;i<params.counts.y;i+=1u){if(counts[i]>largest){largest=counts[i];dominant=i32(i);}}
-  apertures[index]=Aperture(1.0-f32(occupied)/f32(SAMPLE_COUNT),select(0.0,velocity/f32(occupied),occupied>0u),dominant,mask);
-  atomicAdd(&control[1],1u);if(occupied>0u&&occupied<SAMPLE_COUNT){atomicAdd(&control[2],1u);}atomicAdd(&control[3],occupied);}
-@compute @workgroup_size(1) fn finishPowerSolidFaces(){let count=select(0u,faceControl[1],arrayLength(&faceControl)>=9u);atomicStore(&control[4],count);atomicStore(&control[5],params.counts.y);atomicStore(&control[6],params.counts.z);
-  atomicStore(&control[14],solidVertices.control[4]);atomicStore(&control[15],solidVertices.control[8]);
-  if(atomicLoad(&control[0])==0u&&sourceValid()&&atomicLoad(&control[1])==count){atomicStore(&control[7],SOLID_VALID);}else{atomicStore(&control[7],0u);}}
-@compute @workgroup_size(64) fn constrainPowerSolidFaces(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(atomicLoad(&control[7])!=SOLID_VALID||index>=atomicLoad(&control[4])){return;}var f=faces[index];let a=apertures[index];f.openFraction=a.openFraction;f.normalVelocity=a.openFraction*f.normalVelocity+(1.0-a.openFraction)*a.solidNormalVelocity;faces[index]=f;}
-@compute @workgroup_size(64) fn lockClosedPowerSolidFaces(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(atomicLoad(&control[7])!=SOLID_VALID||index>=atomicLoad(&control[4])){return;}var f=faces[index];let a=apertures[index];if(a.openFraction<=0.0){f.normalVelocity=a.solidNormalVelocity;faces[index]=f;}}
+  let cut=occupied>0u&&occupied<SAMPLE_COUNT;apertures[index]=Aperture(1.0-f32(occupied)/f32(SAMPLE_COUNT),select(0.0,velocity/f32(occupied),occupied>0u),dominant,mask,ownerCodes,0u,1u|(select(0u,1u,cut)<<1u)|(occupied<<8u));}
+@compute @workgroup_size(1) fn finishPowerSolidFaces(){let count=select(0u,faceControl[1],arrayLength(&faceControl)>=9u);var flags=0u;var processed=0u;var cut=0u;var occupied=0u;
+  for(var index=0u;index<count;index+=1u){let record=apertures[index];flags|=record.statusFlags;processed+=record.stats&1u;cut+=(record.stats>>1u)&1u;occupied+=record.stats>>8u;}
+  control[0]=flags;control[1]=processed;control[2]=cut;control[3]=occupied;control[4]=count;control[5]=params.counts.y;control[6]=params.counts.z;
+  control[7]=select(0u,SOLID_VALID,flags==0u&&sourceValid()&&processed==count);for(var word=8u;word<14u;word+=1u){control[word]=0u;}
+  control[14]=solidVertices.control[4];control[15]=solidVertices.control[8];}
+@compute @workgroup_size(64) fn constrainPowerSolidFaces(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(control[7]!=SOLID_VALID||index>=control[4]){return;}var f=faces[index];let a=apertures[index];f.openFraction=a.openFraction;f.normalVelocity=a.openFraction*f.normalVelocity+(1.0-a.openFraction)*a.solidNormalVelocity;faces[index]=f;}
+@compute @workgroup_size(64) fn lockClosedPowerSolidFaces(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(control[7]!=SOLID_VALID||index>=control[4]){return;}var f=faces[index];let a=apertures[index];if(a.openFraction<=0.0){f.normalVelocity=a.solidNormalVelocity;faces[index]=f;}}
 `;
 
 // A separate module keeps both stages within WebGPU's portable eight-storage-buffer limit.
 export const octreePowerSolidImpulseShader = /* wgsl */ `
 struct PowerFace { negativeRow:u32,positiveRow:u32,geometryCode:u32,flags:u32,normalVelocity:f32,area:f32,inverseDistance:f32,openFraction:f32 }
-struct Aperture { openFraction:f32,solidNormalVelocity:f32,dominantOwner:i32,sampleMask:u32 }
+struct Aperture { openFraction:f32,solidNormalVelocity:f32,dominantOwner:i32,sampleMask:u32,ownerCodes:vec2u,statusFlags:u32,stats:u32 }
 struct FaceQuadrature { centroidArea:vec4f,sampleUV:array<u32,16> }
 struct RigidBody { positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f }
 struct Params { counts:vec4u,dims:vec4u,spacing:vec4f,container:vec4f }
@@ -336,38 +345,36 @@ struct Params { counts:vec4u,dims:vec4u,spacing:vec4f,container:vec4f }
 @group(0) @binding(3) var<storage,read> bodies:array<RigidBody,${GPU_RIGID_BODY_CAPACITY}>;
 @group(0) @binding(4) var<storage,read> apertures:array<Aperture>;
 @group(0) @binding(5) var<uniform> params:Params;
-@group(0) @binding(6) var<storage,read_write> impulses:array<atomic<i32>>;
-@group(0) @binding(7) var<storage,read_write> control:array<atomic<u32>>;
+@group(0) @binding(6) var<storage,read_write> impulses:array<i32>;
+@group(0) @binding(7) var<storage,read_write> control:array<u32>;
 @group(0) @binding(8) var<storage,read> pressure:array<f32>;
 const VALID:u32=${OCTREE_POWER_SOLID_VALID}u;const INVALID:u32=0xffffffffu;const SAMPLE_COUNT:u32=16u;
 const FIXED_SCALE:f32=1000000.0;const MAX_FIXED:f32=2000000000.0;
-fn qConjugate(q:vec4f)->vec4f{return vec4f(q.x,-q.yzw);}
-fn qRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);return v+2.0*(q.x*uv+cross(q.yzw,uv));}
-fn localPoint(body:RigidBody,world:vec3f)->vec3f{return qRotate(qConjugate(body.orientation),world-body.positionShape.xyz);}
-fn bodySdf(body:RigidBody,world:vec3f)->f32{let p=localPoint(body,world);let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
-  if(shape==0){return length(p)-d.x;}if(shape==1){let q=abs(p)-0.5*d;return length(max(q,vec3f(0)))+min(max(q.x,max(q.y,q.z)),0.0);}
-  if(shape==2){let q=vec3f(p.x,p.y-clamp(p.y,-0.5*d.y,0.5*d.y),p.z);return length(q)-d.x;}
-  let q=vec2f(length(p.xz)-d.x,abs(p.y)-0.5*d.y);return length(max(q,vec2f(0)))+min(max(q.x,q.y),0.0);}
 fn tangentBasis(n:vec3f)->mat2x3f{let helper=select(vec3f(0,1,0),vec3f(1,0,0),abs(n.x)<0.75);let a=normalize(cross(helper,n));return mat2x3f(a,cross(n,a));}
 fn samplePoint(index:u32,sample:u32)->vec3f{let n=normals[index].xyz;let basis=tangentBasis(n);let q=quadrature[index];let uv=unpack2x16float(q.sampleUV[sample])*sqrt(q.centroidArea.w);
   return q.centroidArea.xyz+basis[0]*uv.x+basis[1]*uv.y;}
 fn rigidWorld(point:vec3f)->vec3f{return point-vec3f(0.5*params.container.x,0.0,0.5*params.container.z);}
-fn sampleBody(world:vec3f)->i32{var best=3.402823e38;var owner=-1;for(var i=0u;i<params.counts.y;i+=1u){let d=bodySdf(bodies[i],world);if(d<best){best=d;owner=i32(i);}}return select(-1,owner,best<0.0);}
 fn pressureAt(row:u32)->f32{if(row==INVALID||row>=arrayLength(&pressure)){return 0.0;}return pressure[row];}
-fn checkedFixed(value:f32)->i32{if(!(value==value)||abs(value*FIXED_SCALE)>MAX_FIXED){atomicOr(&control[0],4u);return 0;}return i32(round(value*FIXED_SCALE));}
-fn addReaction(owner:u32,force:vec3f,world:vec3f){if(owner>=params.counts.y||owner*8u+5u>=arrayLength(&impulses)){atomicOr(&control[0],8u);return;}let torque=cross(world-bodies[owner].positionShape.xyz,force);let base=owner*8u;
-  atomicAdd(&impulses[base],checkedFixed(force.x));atomicAdd(&impulses[base+1u],checkedFixed(force.y));atomicAdd(&impulses[base+2u],checkedFixed(force.z));
-  atomicAdd(&impulses[base+3u],checkedFixed(torque.x));atomicAdd(&impulses[base+4u],checkedFixed(torque.y));atomicAdd(&impulses[base+5u],checkedFixed(torque.z));
-  atomicAdd(&control[8],bitcast<u32>(checkedFixed(force.x)));atomicAdd(&control[9],bitcast<u32>(checkedFixed(force.y)));atomicAdd(&control[10],bitcast<u32>(checkedFixed(force.z)));
-  atomicAdd(&control[11],bitcast<u32>(checkedFixed(-force.x)));atomicAdd(&control[12],bitcast<u32>(checkedFixed(-force.y)));atomicAdd(&control[13],bitcast<u32>(checkedFixed(-force.z)));}
-@compute @workgroup_size(64) fn accumulatePowerSolidImpulses(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;if(atomicLoad(&control[7])!=VALID||index>=atomicLoad(&control[4])){return;}let aperture=apertures[index];if(aperture.sampleMask==0u||aperture.dominantOwner<0){return;}let face=faces[index];let scalar=params.container.w*face.area*(pressureAt(face.negativeRow)-pressureAt(face.positiveRow))/f32(SAMPLE_COUNT);let n=normals[index].xyz;
-  for(var sample=0u;sample<SAMPLE_COUNT;sample+=1u){if((aperture.sampleMask&(1u<<sample))==0u){continue;}let point=samplePoint(index,sample);let world=rigidWorld(point);let owner=sampleBody(world);if(owner>=0){addReaction(u32(owner),n*scalar,world);}}}
+struct FixedResult { value:i32,flags:u32 }
+fn checkedFixed(value:f32)->FixedResult{if(!(value==value)||abs(value*FIXED_SCALE)>MAX_FIXED){return FixedResult(0,4u);}return FixedResult(i32(round(value*FIXED_SCALE)),0u);}
+fn sampleOwner(aperture:Aperture,sample:u32)->u32{return(aperture.ownerCodes[sample>>3u]>>((sample&7u)*4u))&15u;}
+@compute @workgroup_size(64) fn reducePowerSolidBodyImpulses(@builtin(global_invocation_id) gid:vec3u){let owner=gid.x;if(owner*8u+7u>=arrayLength(&impulses)){return;}let base=owner*8u;for(var word=0u;word<8u;word+=1u){impulses[base+word]=0;}
+  if(control[7]!=VALID||owner>=params.counts.y){return;}var force=vec3f(0);var torque=vec3f(0);
+  for(var index=0u;index<control[4];index+=1u){let aperture=apertures[index];if(aperture.sampleMask==0u){continue;}let face=faces[index];let scalar=params.container.w*face.area*(pressureAt(face.negativeRow)-pressureAt(face.positiveRow))/f32(SAMPLE_COUNT);let n=normals[index].xyz;
+    for(var sample=0u;sample<SAMPLE_COUNT;sample+=1u){if((aperture.sampleMask&(1u<<sample))==0u||sampleOwner(aperture,sample)!=owner){continue;}let sampleForce=n*scalar;let world=rigidWorld(samplePoint(index,sample));force+=sampleForce;torque+=cross(world-bodies[owner].positionShape.xyz,sampleForce);}}
+  let fx=checkedFixed(force.x);let fy=checkedFixed(force.y);let fz=checkedFixed(force.z);let tx=checkedFixed(torque.x);let ty=checkedFixed(torque.y);let tz=checkedFixed(torque.z);
+  impulses[base]=fx.value;impulses[base+1u]=fy.value;impulses[base+2u]=fz.value;impulses[base+3u]=tx.value;impulses[base+4u]=ty.value;impulses[base+5u]=tz.value;
+  impulses[base+6u]=i32(fx.flags|fy.flags|fz.flags|tx.flags|ty.flags|tz.flags);}
+@compute @workgroup_size(1) fn finishPowerSolidImpulses(){var total=vec3f(0);var flags=control[0];for(var owner=0u;owner<params.counts.y;owner+=1u){let base=owner*8u;if(base+6u>=arrayLength(&impulses)){flags|=8u;break;}
+  flags|=u32(impulses[base+6u]);total+=vec3f(f32(impulses[base]),f32(impulses[base+1u]),f32(impulses[base+2u]));}
+  let fx=checkedFixed(total.x/FIXED_SCALE);let fy=checkedFixed(total.y/FIXED_SCALE);let fz=checkedFixed(total.z/FIXED_SCALE);flags|=fx.flags|fy.flags|fz.flags;control[0]=flags;
+  control[8]=bitcast<u32>(fx.value);control[9]=bitcast<u32>(fy.value);control[10]=bitcast<u32>(fz.value);control[11]=bitcast<u32>(-fx.value);control[12]=bitcast<u32>(-fy.value);control[13]=bitcast<u32>(-fz.value);}
 `;
 
 export const octreePowerSolidExchangeShader = /* wgsl */ `
 @group(0) @binding(0) var<storage,read> staged:array<i32>;
-@group(0) @binding(1) var<storage,read_write> exchange:array<atomic<i32>>;
+@group(0) @binding(1) var<storage,read_write> exchange:array<i32>;
 @group(0) @binding(2) var<storage,read> control:array<u32>;
 const VALID:u32=${OCTREE_POWER_SOLID_VALID}u;
-@compute @workgroup_size(64) fn publishPowerSolidExchange(@builtin(global_invocation_id) gid:vec3u){let body=gid.x;if(control[0]!=0u||control[7]!=VALID||body>=control[5]||body*8u+5u>=arrayLength(&staged)||body*12u+5u>=arrayLength(&exchange)){return;}for(var word=0u;word<6u;word+=1u){atomicAdd(&exchange[body*12u+word],staged[body*8u+word]);}}
+@compute @workgroup_size(64) fn publishPowerSolidExchange(@builtin(global_invocation_id) gid:vec3u){let body=gid.x;if(control[0]!=0u||control[7]!=VALID||body>=control[5]||body*8u+5u>=arrayLength(&staged)||body*12u+5u>=arrayLength(&exchange)){return;}for(var word=0u;word<6u;word+=1u){exchange[body*12u+word]=staged[body*8u+word];}}
 `;

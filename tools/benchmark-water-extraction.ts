@@ -1,5 +1,6 @@
 import { pathToFileURL } from "node:url";
 import { getScenePreset } from "../lib/scenes";
+import { DynamicGPUPerformanceTraceRecorder } from "../lib/performance-trace";
 import { createTallCellLayout, type GPUQuality } from "../lib/tall-cell-grid";
 import { activeCubeCapacity, extractionPrepareShader, surfaceExtractionDispatchPlan, surfaceExtractionShader, surfaceVertexCapacity, type SurfaceExtractionDispatchPlan } from "../lib/webgpu-water-pipeline";
 
@@ -131,7 +132,7 @@ console.log(JSON.stringify({
   warmups,
   iterations,
   adapter: adapterInfo ? { vendor: adapterInfo.vendor, architecture: adapterInfo.architecture, device: adapterInfo.device, description: adapterInfo.description } : undefined,
-  timestampUnit: "GPU timestamp-query nanoseconds converted to milliseconds"
+  timingSource: "generic exhaustive GPU performance trace"
 }));
 
 try {
@@ -226,31 +227,39 @@ try {
     device.queue.submit([warmupEncoder.finish()]);
     await device.queue.onSubmittedWorkDone();
 
-    const querySet = device.createQuerySet({ type: "timestamp", count: iterations * 4 });
-    const queryResolve = device.createBuffer({ size: iterations * 4 * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-    const queryReadback = device.createBuffer({ size: iterations * 4 * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const samples: Sample[] = [];
     const timedEncoder = device.createCommandEncoder({ label: `${sceneId} alternating extraction samples` });
-    let query = 0;
-    const sampleOrder: Array<{ variant: Variant; pair: number; order: number; start: number; end: number }> = [];
+    const traceRecorder = new DynamicGPUPerformanceTraceRecorder(
+      device,
+      1,
+      "presentation",
+      `surface-extraction:${sceneId}:${quality}`,
+      iterations * 2 + 1,
+    );
+    traceRecorder.begin(timedEncoder);
+    const sampleOrder: Array<{ variant: Variant; pair: number; order: number }> = [];
     for (let pair = 0; pair < iterations; pair += 1) {
       const variants = (pair % 2 === 0 ? ["full-volume", "restricted-band"] : ["restricted-band", "full-volume"]) as Variant[];
       for (let order = 0; order < variants.length; order += 1) {
-        const variant = variants[order], start = query++, end = query++;
+        const variant = variants[order];
         timedEncoder.clearBuffer(indirect);
-        const pass = timedEncoder.beginComputePass({ timestampWrites: { querySet, beginningOfPassWriteIndex: start, endOfPassWriteIndex: end } });
+        const pass = timedEncoder.beginComputePass();
         encodeVariant(pass, variant, variant === "full-volume" ? fullPlan : restrictedPlan, pipelines, bindGroup, production);
         pass.end();
-        sampleOrder.push({ variant, pair, order, start, end });
+        traceRecorder.completePhase(timedEncoder, {
+          id: "surface-extraction",
+          label: `${variant === "full-volume" ? "Full-volume" : "Restricted-band"} extraction ${pair + 1}`,
+        });
+        sampleOrder.push({ variant, pair, order });
       }
     }
-    timedEncoder.resolveQuerySet(querySet, 0, query, queryResolve, 0);
-    timedEncoder.copyBufferToBuffer(queryResolve, 0, queryReadback, 0, query * 8);
+    traceRecorder.resolve(timedEncoder);
     device.queue.submit([timedEncoder.finish()]);
-    await queryReadback.mapAsync(GPUMapMode.READ);
-    const timestamps = new BigUint64Array(queryReadback.getMappedRange());
-    for (const item of sampleOrder) samples.push({ ...item, duration_ms: Number(timestamps[item.end] - timestamps[item.start]) / 1e6 });
-    queryReadback.unmap();
+    const performanceTrace = await traceRecorder.read();
+    if (!performanceTrace) throw new Error(`${sceneId}: generic extraction trace did not resolve`);
+    for (let index = 0; index < sampleOrder.length; index += 1) {
+      samples.push({ ...sampleOrder[index], duration_ms: performanceTrace.phases[index].duration_ms });
+    }
 
     const fullCountReadback = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const restrictedCountReadback = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -306,13 +315,14 @@ try {
         medianSpeedup: fullDistribution.median_ms / Math.max(1e-12, restrictedDistribution.median_ms),
         medianSpeedupConfidence95: bootstrapMedianSpeedup(pairs)
       },
+      performanceTrace,
       rawSamples: samples,
       validationErrors
     }));
     if (fullVertexCount !== restrictedVertexCount) throw new Error(`${sceneId}: restricted extraction emitted ${restrictedVertexCount} vertices; full extraction emitted ${fullVertexCount}`);
     if (validationErrors.length) throw new Error(`${sceneId}: WebGPU validation errors: ${validationErrors.join("; ")}`);
 
-    for (const resource of [fullCountReadback, restrictedCountReadback, queryReadback, queryResolve, querySet, indirect, vertices, activeCubes, dispatchArgs, bases, volume, uniformBuffer]) resource.destroy();
+    for (const resource of [fullCountReadback, restrictedCountReadback, indirect, vertices, activeCubes, dispatchArgs, bases, volume, uniformBuffer]) resource.destroy();
   }
 } finally {
   device.destroy();

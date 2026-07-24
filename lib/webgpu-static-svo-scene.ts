@@ -86,8 +86,6 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     this.world = new OctreeSparseBrickWorld(device, scene, dimensions, {
       brickSize: scene.voxelDomain.brickSize_cells,
       haloCells: 0,
-      brickAtlas: "off",
-      bulkResidencyOnly: false,
       brickPreActivation: false,
     });
     this.sparseVoxelSceneSource = this.world.sceneSource;

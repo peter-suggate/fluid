@@ -24,7 +24,7 @@ export interface GPUQuadtreePackedResult {
     factorAuxWords: Uint32Array<ArrayBuffer>; factorLevelCount: number; levelsOffset: number; rowOffsetsOffset: number; rowEntriesOffset: number;
     couplingByBodyOffset: number; couplingByDofOffset: number; couplingTableOffset: number; couplingBodyCount: number;
     couplingDistinctDofs: number; couplingBodyIndices: number[]; dofSamplesBase: number; mlsRowCount: number;
-    cellPressureSamples: Uint32Array<ArrayBuffer>; icFactorization_ms: number; lineOffsetsBase: number; lineDofsBase: number;
+    cellPressureSamples: Uint32Array<ArrayBuffer>; lineOffsetsBase: number; lineDofsBase: number;
     lineCount: number; blockTableOffset: number; blockCount: number;
   };
   leafCount: number;
@@ -35,7 +35,6 @@ export interface GPUQuadtreePackedResult {
   tallSegmentCount: number;
   maximumNeighborRatio: number;
   maximumFluidScale: number;
-  gpuWall_ms: number;
   /** Exact-size resources handed straight to the pressure projection. */
   resident?: GPUQuadtreeResidentResources;
 }
@@ -740,7 +739,7 @@ export class WebGPUQuadtreePackBuilder {
   }
 
   async build(packedCells: Uint32Array, levelSet: GPUTexture, hints: GPUQuadtreePackHints, resident = false, opticalLayer?: GPUBuffer, retriesRemaining = 2): Promise<GPUQuadtreePackedResult | undefined> {
-    const startedAt = performance.now(), capacities = this.ensure(hints), b = this.buffers!, { nx, ny, nz } = this.dims, cells2 = nx * nz, cells3 = cells2 * ny;
+    const capacities = this.ensure(hints), b = this.buffers!, { nx, ny, nz } = this.dims, cells2 = nx * nz, cells3 = cells2 * ny;
     this.device.queue.writeBuffer(b.topology, 0, packedCells.buffer as ArrayBuffer, packedCells.byteOffset, packedCells.byteLength); const paramData = new ArrayBuffer(64);
     new Uint32Array(paramData, 0, 4).set([nx, ny, nz, 0]); new Float32Array(paramData, 16, 4).set([this.cell.x, this.cell.y, this.cell.z, Math.max(0, this.opticalDepthFraction)]);
     new Uint32Array(paramData, 32, 4).set([capacities.segmentCapacity, capacities.sampleCapacity, capacities.dofCapacity, capacities.faceCapacity]);
@@ -798,7 +797,7 @@ export class WebGPUQuadtreePackBuilder {
     const rowOffsetsOffset = 0, rowEntriesOffset = dofCount + 1, blockTableOffset = rowEntriesOffset, couplingByBodyOffset = blockTableOffset, couplingByDofOffset = couplingByBodyOffset + 1, couplingTableOffset = couplingByDofOffset + 1, dofSamplesBase = couplingTableOffset;
     const metadata = {
       factorLevelCount: 1, levelsOffset: 0, rowOffsetsOffset, rowEntriesOffset, couplingByBodyOffset, couplingByDofOffset, couplingTableOffset,
-      couplingBodyCount: 0, couplingDistinctDofs: 0, couplingBodyIndices: [] as number[], dofSamplesBase, mlsRowCount: 0, icFactorization_ms: 0,
+      couplingBodyCount: 0, couplingDistinctDofs: 0, couplingBodyIndices: [] as number[], dofSamplesBase, mlsRowCount: 0,
       lineOffsetsBase: auxWords, lineDofsBase: auxWords, lineCount: 0, blockTableOffset, blockCount: 0
     };
     if (resident) {
@@ -838,7 +837,7 @@ export class WebGPUQuadtreePackBuilder {
       const pass = copy.beginComputePass(); pass.setPipeline(this.unpackCellFieldsPipeline); pass.setBindGroup(0, textureGroup);
       pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); pass.end();
       this.device.queue.submit([copy.finish()]);
-      return { leafCount, pressureSampleCount, dofCount, faceCount, ghostFaceCount, tallSegmentCount, maximumNeighborRatio, maximumFluidScale: 100, gpuWall_ms: performance.now() - startedAt, resident: resources, packed: {
+      return { leafCount, pressureSampleCount, dofCount, faceCount, ghostFaceCount, tallSegmentCount, maximumNeighborRatio, maximumFluidScale: 100, resident: resources, packed: {
         faces: new Uint8Array(0), rowOffsets: new Uint32Array(0), rowEntries: new Uint8Array(0), matrixWords: new Uint32Array(0), cellProjection: new Float32Array(0), cellTopology: new Uint32Array(0),
         factorColumns: new Uint8Array(0), factorEntries: new Uint8Array(0), factorAuxWords: new Uint32Array(0), cellPressureSamples: new Uint32Array(0), ...metadata
       } };
@@ -855,7 +854,7 @@ export class WebGPUQuadtreePackBuilder {
       const mapped = readback.getMappedRange(); faces = new Uint8Array(mapped, offsets[0], faceBytes).slice(); rowOffsets = new Uint32Array(mapped, offsets[1], dofCount + 1).slice(); rowEntries = new Uint8Array(mapped, offsets[2], rowEntryBytes).slice(); matrixWords = new Uint32Array(mapped, offsets[3], matrixBytes / 4).slice();
       cellProjection = new Float32Array(mapped, offsets[4], cells3 * 4).slice(); cellPressureSamples = new Uint32Array(mapped, offsets[5], cells3 * 4).slice(); cellTopology = new Uint32Array(mapped, offsets[6], cells3 * 2).slice(); factorAuxWords = new Uint32Array(mapped, offsets[7], auxWords).slice();
     } finally { readback.unmap(); readback.destroy(); }
-    return { leafCount, pressureSampleCount, dofCount, faceCount, ghostFaceCount, tallSegmentCount, maximumNeighborRatio, maximumFluidScale: 100, gpuWall_ms: performance.now() - startedAt, packed: {
+    return { leafCount, pressureSampleCount, dofCount, faceCount, ghostFaceCount, tallSegmentCount, maximumNeighborRatio, maximumFluidScale: 100, packed: {
       faces, rowOffsets, rowEntries, matrixWords, cellProjection, cellTopology, factorColumns: new Uint8Array(Math.max(1, dofCount + 1) * 8), factorEntries: new Uint8Array(0), factorAuxWords,
       cellPressureSamples, ...metadata
     } };

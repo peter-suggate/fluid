@@ -11,11 +11,17 @@ import { useSceneStore } from "../stores/scene-store";
 import { useMethodStore, resolvedMethodValues } from "../stores/method-store";
 import type { MethodParamValue } from "../methods";
 import { useRuntimeStore } from "../stores/runtime-store";
-import { useDiagnosticsStore, emptyPerformance, type PerformanceSnapshot } from "../stores/diagnostics-store";
+import { useDiagnosticsStore, emptyPerformanceReport } from "../stores/diagnostics-store";
 import { useUIStore } from "../stores/ui-store";
 import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
 import { planSceneRuntime } from "../scene-runtime";
+import {
+  combineMainThreadPerformanceTraces,
+  CPUPerformanceTrace,
+  performanceTraceMatchesLane,
+  type PerformanceTrace,
+} from "../performance-trace";
 
 export type BodyDragPhase = "start" | "move" | "end";
 
@@ -47,12 +53,13 @@ class SimulationController {
   private lastClock: number | null = null;
   private cpuOracleStep = 0;
   private kinematicDrag: { bodyId: string; position: RigidBodyState["position_m"]; velocity: RigidBodyState["linearVelocity_m_s"] } | null = null;
-  private sampleClock = 0;
-  private cpuSimulationMs = 0;
-  private performance: PerformanceSnapshot = emptyPerformance;
   private rateWallClock = 0;
   private rateSimTime = 0;
   private safeBrowserStepConsumed = false;
+  private cpuTickTraceSampleId = 0;
+  private pendingCpuTickTrace?: PerformanceTrace;
+  private lastPerformanceReportAt_ms = 0;
+  private lastPerformanceReportContext = "";
 
   private safeBrowserBringup(): boolean {
     return typeof location !== "undefined" && safeBrowserGPUBringupEnabled(location.search);
@@ -115,7 +122,13 @@ class SimulationController {
 
   /** Prepare every fixed step owed by the wall clock. GPU admission is renderer-budgeted. */
   tick(now: number) {
-    const tickStart = performance.now();
+    const method = useMethodStore.getState();
+    const cpuTrace = new CPUPerformanceTrace(
+      ++this.cpuTickTraceSampleId,
+      `${method.methodId}:${method.quality}`,
+      { id: "frame-control", label: "Simulation clock + admission" },
+    );
+    try {
     if (this.lastClock === null) this.lastClock = now;
     const elapsed = Math.max(0, (now - this.lastClock) / 1000);
     this.lastClock = now;
@@ -153,6 +166,10 @@ class SimulationController {
     let diagnostics: RigidStepDiagnostics | undefined;
     let fluidDiagnostics: ReturnType<EulerianFluidSolver["step"]> | undefined;
     let latestCoupling: CouplingDiagnostics | undefined;
+    cpuTrace.transition({
+      id: backend === "cpu-reference" ? "velocity-advection" : "frame-control",
+      label: backend === "cpu-reference" ? "CPU reference simulation + coupling" : "GPU target-clock control",
+    });
     if (backend === "webgpu") {
       // The renderer admits GPU work against this target clock. Collapsing
       // accumulated fixed ticks is exact because no host fluid/body evolution
@@ -196,7 +213,9 @@ class SimulationController {
       runtime.setSimRate((committedTime - this.rateSimTime) / ((now - this.rateWallClock) / 1000));
       this.rateWallClock = now; this.rateSimTime = committedTime;
     }
-    this.cpuSimulationMs = performance.now() - tickStart;
+    } finally {
+      this.pendingCpuTickTrace = cpuTrace.finish();
+    }
   }
 
   private applyDragConstraint() {
@@ -244,12 +263,11 @@ class SimulationController {
     this.fluidSolver = this.backend === "cpu-reference" && runtimePlan.fluidSolver ? this.buildFluidSolver(scene) : undefined;
     this.simulationTime = 0; this.gpuCompletedTime = 0; this.accumulator = 0; this.lastClock = null;
     this.rateWallClock = 0; this.rateSimTime = 0;
-    this.cpuOracleStep = 0; this.cpuSimulationMs = 0;
+    this.cpuOracleStep = 0;
     this.kinematicDrag = null;
-    this.performance = emptyPerformance;
     if (!this.safeBrowserBringup()) this.safeBrowserStepConsumed = false;
     this.publishBodies(rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2));
-    useDiagnosticsStore.getState().set({ fluidState: this.fluidSolver?.diagnostics ?? null, fluidRenderState: this.fluidSolver?.getRenderState() ?? null, gpuInfo: null, waterSurfacePresentation: null, couplingState: { displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 }, samples: [], performanceSnapshot: emptyPerformance, performanceHistory: [] });
+    useDiagnosticsStore.getState().set({ fluidState: this.fluidSolver?.diagnostics ?? null, fluidRenderState: this.fluidSolver?.getRenderState() ?? null, gpuInfo: null, waterSurfacePresentation: null, couplingState: { displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 }, samples: [], performanceReport: emptyPerformanceReport, performanceReports: [] });
     const runtime = useRuntimeStore.getState();
     // Publish the new t=0 identity before pausing. Renderer subscribers use
     // this synchronous epoch edge to reject completions from the old queue.
@@ -445,103 +463,38 @@ class SimulationController {
 
   recordFrame(metrics: RendererFrameMetrics, resolution: string) {
     const diagnostics = useDiagnosticsStore.getState();
-    const now = performance.now();
-    const metricSampleDue = now - this.sampleClock > 250;
-    if (metricSampleDue) this.sampleClock = now;
-    const gpu = diagnostics.gpuInfo?.gpuTimings, previous = this.performance;
-    // Timestamp-query wraparound can produce wildly negative or multi-hour
-    // stage times; keep the previous sample rather than displaying garbage.
-    const sane = (value: number | undefined, fallback: number) =>
-      value !== undefined && Number.isFinite(value) && value >= 0 && value < 10_000 ? value : fallback;
     const methodId = metrics.methodId ?? useMethodStore.getState().methodId;
-    const renderTimingContext = metrics.renderTimingContext ?? `${methodId}:legacy`;
-    const samePhysicsMethod = previous.methodId === methodId;
-    const sameRenderContext = previous.renderTimingContext === renderTimingContext;
-    const physicsFallback = samePhysicsMethod ? previous : emptyPerformance;
-    const renderFallback = sameRenderContext ? previous : emptyPerformance;
-    const snapshot: PerformanceSnapshot = {
-      methodId,
-      effectiveRenderMode: diagnostics.effectiveRendererStatus.effectiveMode,
-      renderTimingContext,
-      renderTimingEpoch: metrics.renderTimingEpoch ?? renderFallback.renderTimingEpoch,
-      renderTimingSampleId: metrics.renderTimingSampleId ?? renderFallback.renderTimingSampleId,
-      gpuPhysicsTimingAvailable: Boolean(gpu),
-      gpuPhysicsTimingSampleId: diagnostics.gpuInfo?.gpuPhysicsTimingSampleId ?? physicsFallback.gpuPhysicsTimingSampleId,
-      gpuPhysicsTimingSimulation_s: diagnostics.gpuInfo?.gpuPhysicsTimingSimulation_s ?? physicsFallback.gpuPhysicsTimingSimulation_s,
-      gpuPhysicsTimingReadbackWall_ms: sane(diagnostics.gpuInfo?.gpuPhysicsTimingReadbackWall_ms, physicsFallback.gpuPhysicsTimingReadbackWall_ms),
-      gpuTelemetryWall_ms: sane(diagnostics.gpuInfo?.gpuTelemetryWall_ms, physicsFallback.gpuTelemetryWall_ms),
-      gpuRenderTimestampSupported: Boolean(metrics.gpuRenderTimestampAvailable),
-      gpuRenderTimingAvailable: Boolean(metrics.gpuRenderTimestampAvailable && metrics.gpuRender_ms !== undefined),
-      cpuSimulation_ms: this.cpuSimulationMs,
-      cpuFrame_ms: metrics.cpuFrame_ms,
-      cpuPhysicsSubmit_ms: metrics.cpuPhysicsSubmit_ms,
-      cpuDataUpload_ms: metrics.cpuDataUpload_ms,
-      cpuRenderEncode_ms: metrics.cpuRenderEncode_ms,
-      adaptiveRebuildWall_ms: sane(diagnostics.gpuInfo?.quadtreeRebuildWall_ms, physicsFallback.adaptiveRebuildWall_ms),
-      adaptiveRebuildPending: Boolean(diagnostics.gpuInfo?.quadtreeRebuildPending),
-      adaptiveInlineTopology: Boolean(diagnostics.gpuInfo?.quadtreeInlineRebuild),
-      adaptiveRebuildBlockedFrames: diagnostics.gpuInfo?.quadtreeRebuildBlockedFrames ?? physicsFallback.adaptiveRebuildBlockedFrames,
-      adaptiveRebuildCompletedCount: diagnostics.gpuInfo?.quadtreeRebuildCompletedCount ?? physicsFallback.adaptiveRebuildCompletedCount,
-      adaptiveGPUConstructionKernel_ms: sane(diagnostics.gpuInfo?.quadtreeGPUConstructionKernel_ms, physicsFallback.adaptiveGPUConstructionKernel_ms),
-      adaptiveGPUSparsePack_ms: sane(diagnostics.gpuInfo?.quadtreeGPUSparsePack_ms, physicsFallback.adaptiveGPUSparsePack_ms),
-      adaptiveCPUTopologyPack_ms: sane(diagnostics.gpuInfo?.quadtreeCPUTopologyPack_ms, physicsFallback.adaptiveCPUTopologyPack_ms),
-      adaptiveCPURedistance_ms: sane(diagnostics.gpuInfo?.quadtreeCPURedistance_ms, physicsFallback.adaptiveCPURedistance_ms),
-      adaptiveCPUQuadtreeDecode_ms: sane(diagnostics.gpuInfo?.quadtreeCPUQuadtreeDecode_ms, physicsFallback.adaptiveCPUQuadtreeDecode_ms),
-      adaptiveCPUTallGrid_ms: sane(diagnostics.gpuInfo?.quadtreeCPUTallGrid_ms, physicsFallback.adaptiveCPUTallGrid_ms),
-      adaptiveCPUVariationalAssembly_ms: sane(diagnostics.gpuInfo?.quadtreeCPUVariationalAssembly_ms, physicsFallback.adaptiveCPUVariationalAssembly_ms),
-      adaptiveCPUSystemPack_ms: sane(diagnostics.gpuInfo?.quadtreeCPUSystemPack_ms, physicsFallback.adaptiveCPUSystemPack_ms),
-      adaptiveCPUICFactorization_ms: sane(diagnostics.gpuInfo?.quadtreeCPUICFactorization_ms, physicsFallback.adaptiveCPUICFactorization_ms),
-      adaptiveCPUResourceUpload_ms: sane(diagnostics.gpuInfo?.quadtreeCPUResourceUpload_ms, physicsFallback.adaptiveCPUResourceUpload_ms),
-      gpuActiveStages: gpu?.activeStages ?? physicsFallback.gpuActiveStages,
-      gpuPreparation_ms: sane(gpu?.preparation_ms, physicsFallback.gpuPreparation_ms),
-      gpuLayerConstruction_ms: sane(gpu?.layerConstruction_ms, physicsFallback.gpuLayerConstruction_ms),
-      gpuAdvection_ms: sane(gpu?.advection_ms, physicsFallback.gpuAdvection_ms),
-      gpuConditioning_ms: sane(gpu?.conditioning_ms, physicsFallback.gpuConditioning_ms),
-      gpuRemeshing_ms: sane(gpu?.remeshing_ms, physicsFallback.gpuRemeshing_ms),
-      gpuPressure_ms: sane(gpu?.pressure_ms, physicsFallback.gpuPressure_ms),
-      gpuPowerAssembly_ms: sane(gpu?.powerAssembly_ms, physicsFallback.gpuPowerAssembly_ms),
-      gpuPressureSolve_ms: sane(gpu?.pressureSolve_ms, physicsFallback.gpuPressureSolve_ms),
-      gpuProjection_ms: sane(gpu?.projection_ms, physicsFallback.gpuProjection_ms),
-      gpuPowerProjection_ms: sane(gpu?.powerProjection_ms, physicsFallback.gpuPowerProjection_ms),
-      gpuVelocityProjection_ms: sane(gpu?.velocityProjection_ms, physicsFallback.gpuVelocityProjection_ms),
-      gpuFaceBand_ms: sane(gpu?.faceBand_ms, physicsFallback.gpuFaceBand_ms),
-      gpuFaceMarch_ms: sane(gpu?.faceMarch_ms, physicsFallback.gpuFaceMarch_ms),
-      gpuPowerPublication_ms: sane(gpu?.powerPublication_ms, physicsFallback.gpuPowerPublication_ms),
-      gpuExtrapolation_ms: sane(gpu?.extrapolation_ms, physicsFallback.gpuExtrapolation_ms),
-      gpuMaterialization_ms: sane(gpu?.materialization_ms, physicsFallback.gpuMaterialization_ms),
-      gpuSurfaceUpdate_ms: sane(gpu?.surfaceUpdate_ms, physicsFallback.gpuSurfaceUpdate_ms),
-      gpuFineTopology_ms: sane(gpu?.fineTopology_ms, physicsFallback.gpuFineTopology_ms),
-      gpuFineTransport_ms: sane(gpu?.fineTransport_ms, physicsFallback.gpuFineTransport_ms),
-      gpuFineRedistance_ms: sane(gpu?.fineRedistance_ms, physicsFallback.gpuFineRedistance_ms),
-      gpuRigid_ms: sane(gpu?.rigidCoupling_ms, physicsFallback.gpuRigid_ms),
-      gpuSpraySimulation_ms: sane(gpu?.spray_ms, physicsFallback.gpuSpraySimulation_ms),
-      gpuFluidResidency_ms: sane(gpu?.fluidResidency_ms, physicsFallback.gpuFluidResidency_ms),
-      gpuSparsePublication_ms: sane(gpu?.sparsePublication_ms, physicsFallback.gpuSparsePublication_ms),
-      gpuDiagnostics_ms: sane(gpu?.diagnostics_ms, physicsFallback.gpuDiagnostics_ms),
-      gpuOverhead_ms: sane(gpu?.overhead_ms, physicsFallback.gpuOverhead_ms),
-      gpuRender_ms: sane(metrics.gpuRender_ms, renderFallback.gpuRender_ms),
-      gpuSurfaceExtraction_ms: sane(metrics.gpuSurfaceExtraction_ms, 0),
-      gpuCaustics_ms: sane(metrics.gpuCaustics_ms, 0),
-      gpuDryScene_ms: sane(metrics.gpuDryScene_ms, renderFallback.gpuDryScene_ms),
-      gpuSvoTemporal_ms: sane(metrics.gpuSvoTemporal_ms, renderFallback.gpuSvoTemporal_ms),
-      gpuInterfaceFront_ms: sane(metrics.gpuInterfaceFront_ms, renderFallback.gpuInterfaceFront_ms),
-      gpuInterfaceBack_ms: sane(metrics.gpuInterfaceBack_ms, renderFallback.gpuInterfaceBack_ms),
-      gpuInterfaces_ms: sane(metrics.gpuInterfaces_ms, renderFallback.gpuInterfaces_ms),
-      gpuSprayFront_ms: sane(metrics.gpuSprayFront_ms, renderFallback.gpuSprayFront_ms),
-      gpuSprayBack_ms: sane(metrics.gpuSprayBack_ms, renderFallback.gpuSprayBack_ms),
-      gpuSprayRender_ms: sane(metrics.gpuSprayRender_ms, renderFallback.gpuSprayRender_ms),
-      gpuOpticalComposite_ms: sane(metrics.gpuOpticalComposite_ms, renderFallback.gpuOpticalComposite_ms),
-      gpuOverlays_ms: sane(metrics.gpuOverlays_ms, 0),
-      gpuUpscale_ms: sane(metrics.gpuUpscale_ms, renderFallback.gpuUpscale_ms)
-    };
-    this.performance = snapshot;
+    const context = metrics.context ?? methodId;
+    const capturedAt_ms = performance.now();
     diagnostics.set({
-      frameMs: metrics.cpuFrame_ms,
+      frameMs: metrics.cpu?.total_ms ?? 0,
       resolution,
       waterSurfacePresentation: metrics.waterSurfacePresentation ?? null,
     });
-    const referenceDiagnostics = this.fluidSolver?.diagnostics;
-    diagnostics.pushPerformance(snapshot, metricSampleDue && referenceDiagnostics ? { t: now / 1000, frame_ms: metrics.cpuFrame_ms, volume_drift_pct: referenceDiagnostics.markerVolumeDrift * 100, constraint_error: referenceDiagnostics.divergenceAfter_s, kinetic_energy_J: referenceDiagnostics.kineticEnergy_J } : undefined);
+    const reportDue = context !== this.lastPerformanceReportContext
+      || capturedAt_ms - this.lastPerformanceReportAt_ms >= 100;
+    if (!reportDue) return;
+    this.lastPerformanceReportAt_ms = capturedAt_ms;
+    this.lastPerformanceReportContext = context;
+    const physicsTrace = diagnostics.gpuInfo?.physicsTrace;
+    const rendererCPU = performanceTraceMatchesLane(metrics.cpu, "cpu", "main-thread") ? metrics.cpu : undefined;
+    const controllerCPU = performanceTraceMatchesLane(this.pendingCpuTickTrace, "cpu", "main-thread")
+      ? this.pendingCpuTickTrace
+      : undefined;
+    this.pendingCpuTickTrace = undefined;
+    const cpu = combineMainThreadPerformanceTraces(
+      [controllerCPU, rendererCPU].filter((trace): trace is PerformanceTrace => trace !== undefined),
+      context,
+    );
+    const report = {
+      methodId,
+      context,
+      capturedAt_ms,
+      cpu,
+      physics: performanceTraceMatchesLane(physicsTrace, "gpu", "physics") ? physicsTrace : undefined,
+      presentation: performanceTraceMatchesLane(metrics.presentation, "gpu", "presentation") ? metrics.presentation : undefined,
+    };
+    diagnostics.pushPerformanceReport(report);
   }
 
   // ---- persistence -------------------------------------------------------

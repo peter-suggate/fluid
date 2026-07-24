@@ -23,8 +23,8 @@ test("Dawn preserves a deep dam-break pressure row across bounded recurring topo
     cwd: process.cwd(), encoding: "utf8", timeout: 75_000, killSignal: "SIGKILL", maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, FLUID_SCENE: "dam-break-ui", FLUID_METHOD: "octree",
       FLUID_TARGET_S: "0.008", FLUID_ORACLE_STEPS: "2", FLUID_VOXEL_CELL_SIZE: "0.02",
-      FLUID_PRESSURE_CYCLES: "32", FLUID_CPU_ORACLE: "0", FLUID_FIELD_STATS: "0",
-      FLUID_DISABLE_TIMESTAMPS: "1", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
+      FLUID_CPU_ORACLE: "0", FLUID_FIELD_STATS: "0",
+      FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
       FLUID_POWER_GENERATION_AUDIT: "1", FLUID_POWER_GENERATION_AUDIT_LOG: "0",
       FLUID_TOPOLOGY_TRANSITION_AUDIT: "1" },
   });

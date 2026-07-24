@@ -7,7 +7,10 @@ import {
   OCTREE_TECHNIQUE_OVERLAY_MODES,
   isOctreeTechniqueOverlayMode,
 } from "../lib/octree-technique-debug";
-import { OctreeTechniqueOverlayPipeline } from "../lib/webgpu-octree-technique-overlay";
+import {
+  OctreeTechniqueOverlayPipeline,
+  octreeTechniqueSection5FaceBandShader,
+} from "../lib/webgpu-octree-technique-overlay";
 import { OctreeTechniqueAuditOverlayPipeline } from "../lib/webgpu-octree-technique-audit-overlay";
 
 const overlaySource = readFileSync(new URL("../lib/webgpu-octree-technique-overlay.ts", import.meta.url), "utf8");
@@ -46,10 +49,12 @@ test("technique overlay composes independently from live compact GPU buffers", (
     "centred render coordinates must never be sampled directly as solver-local fine coordinates");
   assert.match(overlaySource, /first==f\.globalFace\|\|first==index/,
     "bounded owner telemetry must preserve the existing first-error spatial face highlight");
-  assert.match(overlaySource, /var acceptedInk=0\.0;var trialInk=0\.0;var unresolvedInk=0\.0/,
-    "accepted, heap-trial, and unresolved faces must remain spatially distinct inside a mixed row");
+  assert.match(overlaySource, /var acceptedInk=0\.0;var unresolvedInk=0\.0/,
+    "closest-point-resolved and unresolved faces must remain spatially distinct inside a mixed row");
+  assert.doesNotMatch(overlaySource, /var trialInk=|status==ACCEPTED|status==TRIAL/,
+    "the closest-point overlay must not reconstruct deleted scheduler states");
   assert.match(overlaySource, /if\(firstMatch\)\{color=vec3f\(1\.0,0\.01,0\.05\);alpha=0\.98;\}/,
-    "the exact first-error key must win over row and per-face march-state colors");
+    "the exact first-error key must win over row and per-face extension colors");
   assert.doesNotMatch(overlaySource, /Absence of ROW_PHI on them is therefore valid/,
     "endpoint rows now carry parent-edge φ and must pass the same scalar validity audit");
   assert.doesNotMatch(overlaySource, /mapAsync|copyBufferToBuffer|readback/i,
@@ -71,6 +76,34 @@ test("technique overlay composes independently from live compact GPU buffers", (
     "the planar legacy overlay must not run underneath a full-volume paper view");
 });
 
+test("Section 5 overlay resolves exact rows when octree levels share an origin", () => {
+  const compactShader = octreeTechniqueSection5FaceBandShader.replace(/\s+/g, "");
+  assert.match(compactShader,
+    /fnrowIdentityLess\(cellA:u32,sizeA:u32,cellB:u32,sizeB:u32\)->bool\{returncellA<cellB\|\|\(cellA==cellB&&sizeA<sizeB\);\}/);
+  assert.match(compactShader,
+    /fnfindRowIdentity\(key:u32,size:u32\)->u32\{[\s\S]*rowIdentityLess\(rowDirectory\[mid\*2u\],rows\[row\]\.size,key,size\)[\s\S]*rowDirectory\[low\*2u\]==key&&rows\[row\]\.size==size/,
+    "the overlay binary search compares and validates both identity fields");
+  assert.match(compactShader,
+    /fncontainingRow[\s\S]*varsize=1u;loop\{[\s\S]*findRowIdentity\(cellKey\(origin\),size\)/,
+    "the containing search queries each exact dyadic size");
+  assert.doesNotMatch(compactShader, /\bfnfindRow\(/,
+    "the ambiguous cell-only overlay lookup is deleted");
+
+  const dimensions = [24, 18, 16] as const;
+  const cell = ([x, y, z]: readonly [number, number, number]) =>
+    x + dimensions[0] * (y + dimensions[1] * z);
+  const key = cell([16, 0, 12]);
+  const rows = [
+    { key, size: 1, row: 351 },
+    { key, size: 2, row: 352 },
+  ];
+  const find = (size: number) => rows.find((row) => row.key === key && row.size === size)?.row;
+  assert.equal(key, 5200);
+  assert.equal(find(1), 351,
+    "the size-one overlay row must not be shadowed by the size-two row at the same origin");
+  assert.equal(find(2), 352);
+});
+
 test("render panel exposes and explains exact paper structures", () => {
   for (const label of ["Power cells", "Power faces", "Tetrahedra", "Transitions", "Operator"]) {
     assert.match(panelSource, new RegExp(`>${label}<`));
@@ -81,7 +114,7 @@ test("render panel exposes and explains exact paper structures", () => {
 
 test("render panel exposes the second-tranche lifecycle and validity audits", () => {
   for (const label of [
-    "Octree lifecycle", "Fine band", "Face march", "Diagonal", "RHS", "Reciprocity", "Open fraction", "Tetra validity",
+    "Octree lifecycle", "Fine band", "Closest points", "Diagonal", "RHS", "Reciprocity", "Open fraction", "Tetra validity",
   ]) assert.match(panelSource, new RegExp(`>${label}<`));
   for (const mode of [
     "octree-lifecycle", "fine-band-lifecycle", "section5-face-band", "operator-diagonal", "operator-rhs",
@@ -102,8 +135,8 @@ test("render panel exposes the second-tranche lifecycle and validity audits", ()
     "the centered-gradient diagnostic must not mislabel signed-distance kinks as publication failures");
   assert.match(panelSource, /Residual next to the white zero crossing audits redistancing; interior equal-distance ridges are nondifferentiable/,
     "the paper fine-phi legend must separate interface quality from expected medial-axis residual");
-  assert.match(panelSource, /exact unresolved split: heap-bound trial, accepted-predecessor scheduler defect, or disconnected/,
-    "the Section 5 legend must identify the solver-owned unresolved classifier");
+  assert.match(panelSource, /closest-point and liquid-only interpolation failures/,
+    "the Section 5 legend must expose the direct extension failure split");
 });
 
 test("render panel makes paper structures explorable as slices or a full volume", () => {
@@ -118,7 +151,7 @@ test("render panel makes paper structures explorable as slices or a full volume"
   assert.match(panelSource, /Volume opacity scales front-to-back compositing/);
   assert.match(panelSource, /inverted, degenerate, non-finite, or catalog-selector mismatch/);
   assert.match(panelSource, /non-positive diagonal, or non-finite coefficient/);
-  assert.match(panelSource, /desired → newly activated → resident core\/halo → valid coarse authority or fault/);
+  assert.doesNotMatch(panelSource, /desired → newly activated → resident core\/halo → valid coarse authority or fault|SPARSE SURFACE BAND|SPARSE VELOCITY FACES/);
 });
 
 test("Dawn compiles every technique and audit pipeline at portable binding counts", {

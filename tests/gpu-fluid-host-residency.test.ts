@@ -35,6 +35,6 @@ test("power-volume publication reuses its initialization-time bind group", () =>
   const octree = source("lib/webgpu-octree.ts");
   assert.match(octree, /private powerVolumeGroup\?: GPUBindGroup/);
   assert.match(octree, /this\.powerVolumeGroup = this\.device\.createBindGroup/);
-  const encode = octree.slice(octree.indexOf("private encodePowerAssemblyMirror"), octree.indexOf("private encodePowerProjectionMirror"));
+  const encode = octree.slice(octree.indexOf("private encodeNativePowerAssembly"), octree.indexOf("private encodeNativePowerProjection"));
   assert.doesNotMatch(encode, /createBindGroup/);
 });

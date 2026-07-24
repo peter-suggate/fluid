@@ -11,13 +11,9 @@ struct GridInfo: Sendable {
 }
 
 struct FluidMetrics: Sendable {
-    var simulationMS = 0.0
-    var renderMS = 0.0
-    var frameMS = 0.0
     var simulationTime: Float = 0
     var volumeDrift: Float = 0
     var maxSpeed: Float = 0
-    var simulatedPerWallSecond: Float = 0
 }
 
 private struct SolverParams {
@@ -56,7 +52,6 @@ final class MetalFluidSolver: @unchecked Sendable {
     private var pendingImpulses: [(SIMD3<Float>, SIMD3<Float>, Float)] = []
     private(set) var bodies: [RigidBodyState]
     private(set) var metrics = FluidMetrics()
-    private var lastFrame = CACurrentMediaTime()
     private var azimuth: Float = 0.72
     private var elevation: Float = 0.42
     private var distance: Float = 2.65
@@ -234,7 +229,6 @@ final class MetalFluidSolver: @unchecked Sendable {
     func encode(to drawable: CAMetalDrawable) {
         let texture = drawable.texture
         guard inFlight.wait(timeout: .now()) == .success else { return }
-        let frameStart = CACurrentMediaTime()
         let frame = frameIndex % 3; frameIndex += 1
         let now = CACurrentMediaTime()
         let wallDelta = min(max(now - lastWallTime, 0), 0.05); lastWallTime = now
@@ -271,7 +265,6 @@ final class MetalFluidSolver: @unchecked Sendable {
             if !bodies.isEmpty { blit.fill(buffer: exchange, range: 0..<exchange.length, value: 0) }
             blit.endEncoding()
         }
-        let simulationStart = CACurrentMediaTime()
         var encodedSteps = 0
         if isRunning || accumulator >= Double(stepDt) {
             while accumulator >= Double(stepDt), encodedSteps < 1 {
@@ -289,7 +282,6 @@ final class MetalFluidSolver: @unchecked Sendable {
             }
         }
         encode3D(command, pipeline: reduce, buffers: [velocityA, volumeA, reductions, params])
-        let simulationEncoded = CACurrentMediaTime()
         guard let encoder = command.makeComputeCommandEncoder() else { return }
         encoder.label = "Volume raymarch"
         encoder.setComputePipelineState(render)
@@ -302,15 +294,12 @@ final class MetalFluidSolver: @unchecked Sendable {
         encoder.dispatchThreads(MTLSize(width: texture.width, height: texture.height, depth: 1), threadsPerThreadgroup: MTLSize(width: tw, height: th, depth: 1))
         encoder.endEncoding()
         command.present(drawable)
-        let completedSteps = encodedSteps, bodyCount = bodies.count
-        command.addCompletedHandler { [weak self] buffer in
+        let bodyCount = bodies.count
+        command.addCompletedHandler { [weak self] _ in
             guard let self else { return }
-            metrics.simulationMS = max(0, (simulationEncoded - simulationStart) * 1000)
-            if buffer.gpuEndTime > buffer.gpuStartTime { metrics.renderMS = (buffer.gpuEndTime - buffer.gpuStartTime) * 1000 }
             let reduction = reductions.contents().bindMemory(to: UInt32.self, capacity: 4)
             metrics.volumeDrift = (Float(reduction[0]) / 2048 - initialVolumeSum) / initialVolumeSum
             metrics.maxSpeed = Float(bitPattern: reduction[1])
-            metrics.simulatedPerWallSecond = wallDelta > 0 ? Float(completedSteps) * stepDt / Float(wallDelta) : 0
             if bodyCount > 0 {
                 let words = exchange.contents().bindMemory(to: Int32.self, capacity: 12 * 8)
                 var next: [(SIMD3<Float>, SIMD3<Float>, Float)] = []
@@ -325,8 +314,6 @@ final class MetalFluidSolver: @unchecked Sendable {
             inFlight.signal()
         }
         command.commit()
-        let frameNow = CACurrentMediaTime(); metrics.frameMS = (frameNow - lastFrame) * 1000; lastFrame = frameNow
-        _ = frameStart
     }
 
     private func encode3D(_ command: MTLCommandBuffer, pipeline: MTLComputePipelineState, buffers: [MTLBuffer]) {

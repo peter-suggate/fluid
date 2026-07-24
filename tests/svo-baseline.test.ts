@@ -217,22 +217,33 @@ test("M0 capture jobs pair every deterministic case across raster and hybrid SVO
 
 test("M0 timing summaries exclude warmup and retain raw timestamp availability", () => {
   const samples = Array.from({ length: 150 }, (_, index) => ({
-    cpuFrame_ms: index,
-    gpuRender_ms: index / 10,
-    gpuDryScene_ms: index / 20,
-    gpuRenderTimingAvailable: true,
+    methodId: "octree",
+    context: "baseline",
+    capturedAt_ms: index,
+    cpu: {
+      sampleId: index, domain: "cpu" as const, lane: "main-thread" as const, context: "baseline",
+      capturedAt_ms: index, total_ms: index,
+      phases: [{ id: "frame-control" as const, label: "Frame", duration_ms: index }],
+    },
+    presentation: {
+      sampleId: index, domain: "gpu" as const, lane: "presentation" as const, context: "baseline",
+      capturedAt_ms: index, total_ms: index / 10,
+      phases: [
+        { id: "dry-scene" as const, label: "Dry scene", duration_ms: index / 20 },
+        { id: "present" as const, label: "Present", duration_ms: index / 20 },
+      ],
+    },
   }));
   const timing = summarizeSVOBaselineTimings(samples);
   assert.equal(timing.warmupFrames, 30);
   assert.equal(timing.measuredFrames, 120);
-  assert.equal(timing.gpuRender_ms?.minimum, 3);
-  assert.equal(timing.gpuRender_ms?.maximum, 14.9);
-  assert.ok(Math.abs(timing.gpuRender_ms!.p95 - 14.305) < 1e-12);
-  const unavailable = summarizeSVOBaselineTimings(samples.map((sample, index) => ({
-    ...sample, gpuRenderTimingAvailable: index !== 149,
-  })));
-  assert.equal(unavailable.timestampQueriesAvailable, false);
-  assert.equal(unavailable.gpuRender_ms, null);
+  assert.equal(timing.presentationTotal_ms?.minimum, 3);
+  assert.equal(timing.presentationTotal_ms?.maximum, 14.9);
+  assert.ok(Math.abs(timing.presentationTotal_ms!.p95 - 14.305) < 1e-12);
+  const unavailable = summarizeSVOBaselineTimings(samples.map((sample, index) =>
+    index === 149 ? { ...sample, presentation: undefined } : sample));
+  assert.equal(unavailable.presentationTracesAvailable, false);
+  assert.equal(unavailable.presentationTotal_ms, null);
 });
 
 test("M0 manifests fail closed on missing required captures and preserve outstanding readbacks", () => {

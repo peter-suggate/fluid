@@ -21,13 +21,3 @@ export function requiredFluidDeviceLimits(limits: FluidAdapterLimits): Record<st
     maxTextureDimension3D: limits.maxTextureDimension3D,
   };
 }
-
-/**
- * Optional features the fluid paths exploit when the adapter offers them.
- * float32-filterable enables hardware trilinear sampling of the r32float /
- * rgba32float brick-atlas tiles; without it the atlas helpers fall back to
- * manual trilinear interpolation.
- */
-export function optionalFluidDeviceFeatures(features: GPUSupportedFeatures): GPUFeatureName[] {
-  return (["float32-filterable"] as GPUFeatureName[]).filter((feature) => features.has(feature));
-}

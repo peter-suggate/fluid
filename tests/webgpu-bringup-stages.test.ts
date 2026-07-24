@@ -51,8 +51,8 @@ test("launcher owns the child-process timeout and worker owns exclusive GPU clea
     "every fenced warmup subphase must be visibly identified before and after submission");
   assert.match(worker, /record: "solver-initialization", boundary, stage/);
   assert.match(worker, /initialSparseAuthorityReady/);
-  assert.match(worker, /process\.env\.FLUID_SAFE_BRINGUP = "1"/,
-    "Dawn must reproduce the safe browser's separately fenced authority phases");
+  assert.doesNotMatch(worker, /FLUID_SAFE_BRINGUP/,
+    "Dawn and the browser share the sole phase-fenced authority path without a runtime switch");
   assert.match(worker, /FLUID_BRINGUP_SCENE/,
     "the isolated ladder must admit the exact UI scene without a second launcher");
   assert.match(worker, /startupMode: "phase-fenced"/);

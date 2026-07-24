@@ -8,14 +8,22 @@ import { OCTREE_POWER_COARSE_LEVELSET_VALID } from "../lib/webgpu-octree-power-c
 import { WebGPUFineLevelSetVolumeCorrection,
   fineLevelSetVolumeCorrectionWGSL,
   unpackFineLevelSetGPUVolumeControl } from "../lib/webgpu-octree-fine-levelset-volume";
+import { PassBroker } from "../lib/webgpu-pass-broker";
 
 test("fine volume classifies compact-air overlap only through the authoritative coarse directory", () => {
   const shader = fineLevelSetVolumeCorrectionWGSL.replace(/\s+/g, "");
+  const encode = WebGPUFineLevelSetVolumeCorrection.prototype.encode.toString().replace(/\s+/g, "");
+  const measure = WebGPUFineLevelSetVolumeCorrection.prototype.encodeMeasurement.toString().replace(/\s+/g, "");
+  assert.match(encode, /^encode\(broker\)/);
+  assert.doesNotMatch(encode, /newPassBroker|broker\.fence/,
+    "volume correction must remain inside the caller-owned publication pass");
+  assert.match(measure, /^encodeMeasurement\(broker\)\{this\.encodePasses\(broker,false\);?\}$/,
+    "the paper path must measure volume without applying a global phi offset");
   assert.match(shader,
-    /fnvalidDirectory\(\)->bool\{if\(arrayLength\(&coarsePublication\)<13u[\s\S]*coarseDirectory\.state==PUBLISHED[\s\S]*coarseDirectory\.hashCapacity==arrayLength\(&coarseDirectory\.entries\)[\s\S]*all\(coarseDirectory\.dimensions==c\.dimensions\)/,
-    "empty hash slots are meaningful only after the compact-coarse publication header validates");
+    /fnvalidDirectory\(\)->bool\{if\(arrayLength\(&coarsePublication\)<12u[\s\S]*coarseDirectory\.state==PUBLISHED[\s\S]*coarsePublication\[2\]==coarseDirectory\.rowCount[\s\S]*coarseDirectory\.rowCount<=c\.rowCapacity[\s\S]*all\(coarseDirectory\.dimensions==c\.dimensions\)/,
+    "a directory miss is meaningful only after the compact sorted publication header validates");
   assert.match(shader,
-    /coarsePublication\[0\]==0u&&coarsePublication\[2\]>0u[\s\S]*coarsePublication\[11\]==coarseDirectory\.generation&&coarsePublication\[12\]==PUBLISHED/,
+    /coarsePublication\[0\]==0u&&coarsePublication\[2\]>0u[\s\S]*coarsePublication\[10\]==coarseDirectory\.generation&&coarsePublication\[11\]==PUBLISHED/,
     "directory authority must agree with the paired compact-coarse publication control");
   assert.match(shader,
     /generation==fineGeneration\|\|generation==priorFineGeneration/,
@@ -23,11 +31,12 @@ test("fine volume classifies compact-air overlap only through the authoritative 
   assert.match(shader,
     /entry\.row>=coarsePublication\[2\][\s\S]*entry\.physicalVolume<=0\.0/,
     "a malformed entry in the accepted coarse snapshot remains publication-fatal");
-  assert.match(shader, /returnvec2u\(slot,OWNER_FOUND\)/,
-    "fine ownership must retain the hash slot, not reinterpret the historical compact row as a slot");
-  assert.match(shader, /flat<arrayLength\(&coarseDirectory\.entries\)/,
+  assert.match(shader, /returnvec2u\(low,OWNER_FOUND\)/,
+    "fine ownership must retain the sorted directory slot, not reinterpret the pressure row as a slot");
+  assert.match(shader, /flat<coarseDirectory\.rowCount&&flat<arrayLength\(&coarseDirectory\.entries\)/,
     "coarse integration must scan the accepted directory rather than next-topology pressure rows");
-  assert.match(shader, /coarseRows!=coarsePublication\[2\]/,
+  assert.doesNotMatch(shader, /hash|probe|maximumHashProbes/i);
+  assert.match(shader, /result\.rows!=coarsePublication\[2\]/,
     "the accepted directory must contain exactly every published compact row");
   assert.doesNotMatch(shader, /requested=select\(0u,rowCountSource|headers\[found\.x\]/,
     "target N+1 volume must not validate coarse N through rebuilt N+1 row buffers");
@@ -44,8 +53,25 @@ test("fine volume classifies compact-air overlap only through the authoritative 
     "the completed correction pass must publish independently of whether sparse sample zero is valid");
   assert.match(shader, /fnoccupancy\(value:f32,width:f32\)->f32\{returnclamp\(\.5-value\/width,0\.,1\.\);\}/,
     "the conservative controller must use the same compact-field Heaviside width as the published-field QA");
-  assert.match(shader, /fnfinalizeMeasuredFineVolume\(\)\{finalizeCorrectedMeasurement\(false\);\}/,
+  assert.match(shader,
+    /@compute@workgroup_size\(256\)fnfinalizeMeasuredFineVolume\(@builtin\(local_invocation_index\)lid:u32\)\{finalizeCorrectedMeasurement\(false,lid\);\}/,
     "publication telemetry must be remeasured after both bounded correction passes");
+  assert.match(shader,
+    /fnbalancedReductionRange\(count:u32,lid:u32\)->vec2u\{letwidth=count\/256u;letremainder=count%256u;letbegin=lid\*width\+min\(lid,remainder\)/,
+    "final reductions must partition the partial arena into deterministic contiguous lane ranges");
+  for (const entryPoint of ["finalizeCoarseVolume", "finalizeFineVolume",
+    "finalizeCorrectedFineVolume", "finalizeMeasuredFineVolume"]) {
+    assert.match(shader, new RegExp(`@compute@workgroup_size\\(256\\)fn${entryPoint}\\(`),
+      `${entryPoint} must use the cooperative hierarchy`);
+    assert.doesNotMatch(shader, new RegExp(`@compute@workgroup_size\\(1\\)fn${entryPoint}\\(`),
+      `${entryPoint} must not retain a singleton capacity scan`);
+  }
+  assert.match(shader,
+    /fnreduceCoarsePartialHierarchy[\s\S]*for\(vargroup=range\.x;group<range\.y;group\+=1u\)[\s\S]*for\(varstride=128u;stride>0u;stride\/=2u\)/,
+    "coarse partials must be reduced in bounded lane chunks and a fixed tree");
+  assert.match(shader,
+    /fnreduceFinePartialHierarchy[\s\S]*for\(vargroup=range\.x;group<range\.y;group\+=1u\)[\s\S]*for\(varstride=128u;stride>0u;stride\/=2u\)/,
+    "all fine measurements must share the deterministic cooperative reduction");
 });
 
 test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces and changing band coverage", {
@@ -68,20 +94,16 @@ test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces
   const rowCount = device.createBuffer({ size: 4, usage: storage }); device.queue.writeBuffer(rowCount, 0, new Uint32Array([4]));
   const publicationControl = device.createBuffer({ size: 64, usage: storage });
   const writePublication = (buffer: GPUBuffer, rows: number, generation: number) => {
-    const words = new Uint32Array(16); words[2] = rows; words[11] = generation;
-    words[12] = OCTREE_POWER_COARSE_LEVELSET_VALID; device.queue.writeBuffer(buffer, 0, words);
+    const words = new Uint32Array(16); words[2] = rows; words[10] = generation;
+    words[11] = OCTREE_POWER_COARSE_LEVELSET_VALID; device.queue.writeBuffer(buffer, 0, words);
   };
   writePublication(publicationControl, 4, 1);
   const sampleDirectory = device.createBuffer({ size: 32 + 8 * 32, usage: storage });
-  const hash = (cell: number) => { let value = (cell ^ Math.imul(1, 0x9e3779b9)) >>> 0;
-    value = Math.imul((value ^ (value >>> 16)) >>> 0, 0x7feb352d) >>> 0;
-    value = Math.imul((value ^ (value >>> 15)) >>> 0, 0x846ca68b) >>> 0; return (value ^ (value >>> 16)) >>> 0; };
   const directory = (dimensions: readonly [number, number, number], rows: readonly number[],
     phiForRow: (row: number) => number = () => 0) => {
     const words = new Uint32Array(8 + 8 * 8), floats = new Float32Array(words.buffer);
-    words.set([OCTREE_POWER_COARSE_LEVELSET_VALID, 1, 8, 1, ...dimensions], 0); floats[7] = 1;
-    for (const row of rows) {
-      let slot = hash(row) & 7; while (words[8 + slot * 8] !== 0) slot = (slot + 1) & 7;
+    words.set([OCTREE_POWER_COARSE_LEVELSET_VALID, 1, rows.length, 1, ...dimensions], 0); floats[7] = 1;
+    for (const [slot, row] of rows.entries()) {
       const base = 8 + slot * 8, value = phiForRow(row);
       words.set([row + 1, 1], base); floats[base + 2] = value; floats[base + 3] = value;
       floats[base + 4] = value; words[base + 5] = 9; words[base + 6] = row;
@@ -98,7 +120,7 @@ test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces
     const sourceA = owner.prepareGPUGeneration(1); const sourceB = owner.prepareGPUGeneration(2);
     const coarse = { headers, records, physicalVolumes, sampleDirectory, publicationControl, rowCount,
       dimensions: [4, 1, 1] as const,
-      physicalCellSize: 1, maximumLeafSize: 1, sampleHashCapacity: 8 };
+      physicalCellSize: 1, maximumLeafSize: 1, sampleRowCapacity: 8 };
     const volumeA = new WebGPUFineLevelSetVolumeCorrection(device, sourceA, coarse);
     const volumeB = new WebGPUFineLevelSetVolumeCorrection(device, sourceB, coarse, volumeA.control);
     const phases = [[1, 2, false], [2, 3, true], [1, 2, true]] as const;
@@ -130,13 +152,13 @@ test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces
       } device.queue.writeBuffer(records, 0, coarseWords);
       const correction = source.generationSlot === sourceA.generationSlot ? volumeA : volumeB;
       const readback = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-      const encoder = device.createCommandEncoder(); correction.encode(encoder);
+      const encoder = device.createCommandEncoder(); correction.encode(new PassBroker(encoder));
       encoder.copyBufferToBuffer(correction.control, 0, readback, 0, 64); device.queue.submit([encoder.finish()]);
       await device.queue.onSubmittedWorkDone(); await readback.mapAsync(GPUMapMode.READ);
       let control = unpackFineLevelSetGPUVolumeControl(readback.getMappedRange().slice(0)); readback.unmap(); readback.destroy();
       if (phase > 0) {
         const verify = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-        const verifyEncoder = device.createCommandEncoder(); correction.encode(verifyEncoder);
+        const verifyEncoder = device.createCommandEncoder(); correction.encode(new PassBroker(verifyEncoder));
         verifyEncoder.copyBufferToBuffer(correction.control, 0, verify, 0, 64); device.queue.submit([verifyEncoder.finish()]);
         await device.queue.onSubmittedWorkDone(); await verify.mapAsync(GPUMapMode.READ);
         control = unpackFineLevelSetGPUVolumeControl(verify.getMappedRange().slice(0)); verify.unmap(); verify.destroy();
@@ -178,11 +200,11 @@ test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces
   const airVolume = new WebGPUFineLevelSetVolumeCorrection(device, airSource, {
     headers, records, physicalVolumes, sampleDirectory: airSampleDirectory,
     publicationControl: airPublicationControl, rowCount: airRowCount,
-    dimensions: [2, 1, 1], physicalCellSize: 1, maximumLeafSize: 1, sampleHashCapacity: 8,
+    dimensions: [2, 1, 1], physicalCellSize: 1, maximumLeafSize: 1, sampleRowCapacity: 8,
   });
   const readAirControl = async () => {
     const readback = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    const encoder = device.createCommandEncoder(); airVolume.encode(encoder);
+    const encoder = device.createCommandEncoder(); airVolume.encode(new PassBroker(encoder));
     encoder.copyBufferToBuffer(airVolume.control, 0, readback, 0, 64); device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone(); await readback.mapAsync(GPUMapMode.READ);
     const control = unpackFineLevelSetGPUVolumeControl(readback.getMappedRange().slice(0));
@@ -200,11 +222,11 @@ test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces
   device.queue.writeBuffer(airSampleDirectory, 0, exhaustedDirectory);
   const exhausted = await readAirControl();
   assert.equal(exhausted.flags & 4, 4,
-    "probe exhaustion must fail closed even for a positive fine sample");
+    "a malformed live-prefix header must fail closed even for a positive fine sample");
   assert.ok(exhausted.lookupFailureSamples > 0);
 
   const staleDirectory = directory([2, 1, 1], [0], () => -0.5);
-  staleDirectory[8 + (hash(0) & 7) * 8 + 6] = 100;
+  staleDirectory[8 + 6] = 100;
   device.queue.writeBuffer(airSampleDirectory, 0, staleDirectory);
   const stale = await readAirControl();
   assert.equal(stale.flags & 4, 4, "a found key outside the owner buffers is stale, not air");
@@ -214,7 +236,7 @@ test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces
   // Retain one published liquid-set row so the directory/control pair stays
   // authoritative while cell zero exercises its proven empty-slot complement.
   const liquidComplement = directory([2, 1, 1], [1], () => 0.5);
-  liquidComplement[8 + (hash(1) & 7) * 8 + 6] = 0;
+  liquidComplement[8 + 6] = 0;
   device.queue.writeBuffer(airSampleDirectory, 0, liquidComplement);
   const missingLiquid = await readAirControl();
   assert.equal(missingLiquid.flags, 0x8000_0000,

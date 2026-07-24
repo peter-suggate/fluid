@@ -3,42 +3,46 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { octreeProjectionShader, WebGPUOctreeProjection } from "../lib/webgpu-octree";
-import { octreeSurfaceAdapterShader, octreeSurfaceCandidateShader } from "../lib/webgpu-octree-surface-adapter";
+import { octreeFineSeedAdapterShader, octreeFineSeedCandidateShader } from "../lib/webgpu-octree-fine-seed-adapter";
 
 const projectionSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 
-test("cold octree topology evaluates the authored analytic SDF without dense-phi authority", () => {
+test("authored t=0 topology keeps one analytic SDF authority through its first solve", () => {
   assert.match(octreeProjectionShader,
     /fn analyticInitialPhi\(point: vec3f\)[\s\S]*heightFraction = max\(0\.92, fill\)[\s\S]*footprintFraction = sqrt/,
     "dam bootstrap must reproduce the authored fill-preserving analytic block");
   assert.match(octreeProjectionShader,
-    /fn legacyPhi[\s\S]*analyticInitialPhiEnabled\(\)[\s\S]*frontierGeneration\(\) == 0u \|\| !pagedSurfaceBindings\(\) \|\| !pagedSurfaceAuthority\(\)[\s\S]*analyticInitialPhi/,
-    "cold topology, non-page sizing groups, and an unpublished sparse-page generation must retain analytic bootstrap phi");
+    /let exposedMaximum = vec3f[\s\S]*let q = world - exposedMaximum/,
+    "closed tank-contact planes must extend negative phi and leave only the three exposed dam faces");
   assert.match(octreeProjectionShader,
-    /fn pagedSurfaceAuthority\(\)[\s\S]*atomicLoad\(&solidOrSurface\[3\]\) == 0u[\s\S]*atomicLoad\(&solidOrSurface\[6\]\) > 0u[\s\S]*atomicLoad\(&solidOrSurface\[7\]\) > 0u/,
-    "paged phi authority requires a fault-free, non-empty GPU-published generation");
+    /fn phi\(p: vec3i\)[\s\S]*if\(analyticInitialPhiEnabled\(\)\)\{[\s\S]*return analyticInitialPhi[\s\S]*if\(coarse\.authority\)\{return coarseClassificationPhi\(coarse\);\}/,
+    "the first advancing frontier cannot mix corrected-coarse rows with analytic Power-face samples");
   assert.match(octreeProjectionShader,
-    /fn solidAt[\s\S]*if \(pagedSurfaceBindings\(\)\)[\s\S]*fn rasterizeSolidsAt[\s\S]*if \(pagedSurfaceBindings\(\)\)/,
-    "the sparse page ABI must never be decoded as legacy solid-cell storage while authority is pending");
+    /fn currentPressureOwnerWet\(owner: Owner\)[\s\S]*var wet=liquidOwner\(owner\);[\s\S]*if\(analyticInitialPhiEnabled\(\)\)\{return wet;\}/,
+    "fine summaries cannot override frontier membership while the face builder still samples t=0");
+  assert.doesNotMatch(octreeProjectionShader, /legacyPhi|pagedSurface|surfacePagePhi/,
+    "the deleted page authority must not remain as a bootstrap branch");
   assert.match(projectionSource,
-    /hasImportedInitialSeeds[\s\S]*initialCondition === "dam-break"[\s\S]*-20 - this\.surfaceDetailStrength/,
-    "dam/tank scenes select analytic bootstrap while imported seeded shapes retain compatibility staging");
+    /const analyticBootstrapSelector = !this\.analyticSparseBootstrap[\s\S]*initialCondition === "dam-break" \? -20 : -10/,
+    "dam/tank scenes select their analytic bootstrap sentinel while other scenes publish zero");
   assert.match(projectionSource,
-    /hasImportedInitialSeeds \|\| !this\.analyticSparseBootstrap[\s\S]*this\.surfaceDetailStrength/,
-    "dense compatibility scenes must transport their level-set texture instead of retaining the analytic sparse sentinel");
+    /const analyticBootstrapSelector = !useCurrentFineBoundary && !useCurrentCoarseBoundary[\s\S]*queue\.writeBuffer\(this\.params, 124/,
+    "the first completed solve retires analytic classification with the same lifecycle decision used by Power faces");
   assert.doesNotMatch(octreeProjectionShader,
     /analyticInitialPhi\(point: vec3f\)[\s\S]{0,800}textureLoad/,
     "analytic initial classification must not sample the dense level-set texture");
 });
 
-test("first SurfaceLeaf and indexed fine-page generation share analytic bootstrap phi", () => {
-  assert.match(octreeSurfaceAdapterShader,
+test("first fine-seed leaves and indexed global-fine generation share analytic bootstrap phi", () => {
+  assert.match(octreeFineSeedAdapterShader,
     /fn analyticInitialPhi\(point:vec3f\)[\s\S]*heightFraction=max\(0\.92,fill\)[\s\S]*footprintFraction=sqrt/);
-  assert.match(octreeSurfaceAdapterShader,
-    /if\(!pagedPhiAvailable\(\)\)\{if\(params\.selection\.z!=0u\)\{return analyticInitialPhi/);
+  assert.match(octreeFineSeedAdapterShader, /let exposedMaximum=vec3f[\s\S]*let q=world-exposedMaximum/,
+    "fine seed phi must share the coarse closed-wall extension");
+  assert.match(octreeFineSeedAdapterShader,
+    /if\(!coarse&&params\.selection\.z==0u\)\{return;\}[\s\S]*else\{[\s\S]*centrePhi=analyticInitialPhi/);
   assert.match(projectionSource,
     /analyticSparseBootstrap[\s\S]*new Float32Array\(\[Math\.max\(cell\.x, cell\.y, cell\.z\) \* this\.maxLeafSize\]\)[\s\S]*analyticInitialCondition/,
-    "eligible analytic scenes must bind only one format texel while pages are bootstrapped");
+    "eligible analytic scenes must bind only one format texel while global fine is bootstrapped");
 });
 
 test("eligible analytic scenes use the GPU-authored resident cold worklist", () => {
@@ -58,15 +62,14 @@ test("global fine bootstrap accepts interface seeds from coarse octree leaves", 
   const construction = WebGPUOctreeProjection.toString();
   assert.match(construction, /finestLeafSize:\s*this\.maxLeafSize/,
     "fine brick identity is global, so coarse interface leaves must remain eligible seeds");
-  assert.match(octreeSurfaceCandidateShader,
-    /fn selectSurfaceCandidates[\s\S]*leaf\.size>params\.selection\.x[\s\S]*candidateFlags==0u/);
-  assert.match(octreeSurfaceAdapterShader,
-    /radius=0\.5\*f32\(size\)\*length\(params\.cellHalo\.xyz\)[\s\S]*centrePhi-radius,centrePhi\+radius/,
+  assert.match(octreeFineSeedCandidateShader,
+    /fn selectedCandidate[\s\S]*leaf\.size>params\.selection\.x[\s\S]*\(!delta&&selectedFlags==0u\)/);
+  assert.match(octreeFineSeedAdapterShader,
+    /radius=0\.5\*f32\(header\.size\)\*length\(params\.cellHalo\.xyz\)[\s\S]*minimumPhi=centrePhi-radius;maximumPhi=centrePhi\+radius/,
     "coarse interface leaves require a conservative physical phi interval");
 });
 
-test("runtime detail refinement decodes independently from the analytic bootstrap selector", () => {
-  assert.match(octreeProjectionShader, /fn surfaceDetailStrengthValue\(\) -> f32/);
-  assert.doesNotMatch(octreeProjectionShader, /detailActivity = params\.physical\.w/);
-  assert.match(octreeProjectionShader, /detailActivity = surfaceDetailStrengthValue\(\)/);
+test("analytic bootstrap selector no longer carries retired surface-detail policy", () => {
+  assert.doesNotMatch(projectionSource, /surfaceDetailStrength/);
+  assert.doesNotMatch(octreeProjectionShader, /surfaceDetailStrengthValue|detailActivity|maximumCurvatureProxy|strainActivity/);
 });

@@ -10,7 +10,6 @@
 export const FINE_LEVELSET_INVALID = 0xffff_ffff;
 export const FINE_LEVELSET_CHANNELS = 4;
 export const FINE_LEVELSET_NEIGHBOR_COUNT = 6;
-export const FINE_LEVELSET_MAX_HASH_PROBES = 32;
 
 export const FINE_LEVELSET_SAMPLE_FLAGS = Object.freeze({
   valid: 1 << 0,
@@ -32,8 +31,6 @@ export interface FineLevelSetBrickPlanOptions {
   fineFactor: FineLevelSetFactor;
   brickResolution: FineLevelSetBrickResolution;
   maximumResidentBricks: number;
-  maximumHashLoad?: number;
-  maximumHashProbes?: number;
 }
 
 export interface FineLevelSetBrickPlan {
@@ -47,14 +44,10 @@ export interface FineLevelSetBrickPlan {
   brickDimensions: FineLevelSetVec3;
   logicalBrickCount: number;
   maximumResidentBricks: number;
-  maximumHashLoad: number;
-  maximumHashProbes: number;
   samplesPerBrick: number;
   payloadBytesPerBrick: number;
-  hashCapacity: number;
   payloadCapacityBytes: number;
   metadataCapacityBytes: number;
-  pageTableBytes: number;
   worklistBytes: number;
   allocatedBytes: number;
 }
@@ -64,7 +57,6 @@ export interface FineLevelSetBrickMemory {
   activePayloadBytes: number;
   payloadCapacityBytes: number;
   metadataBytes: number;
-  pageTableBytes: number;
   worklistBytes: number;
   fragmentationBytes: number;
   allocatedBytes: number;
@@ -95,11 +87,9 @@ export interface FineLevelSetPublication {
 export interface FineLevelSetGPUGenerationData {
   generation: number;
   activeCount: number;
-  /** key, physical ID pairs; empty slots contain INVALID, INVALID. */
-  hashPairs: Uint32Array;
   /** physical ID, key, generation, flags, then six cached neighbors. */
   metadataWords: Uint32Array;
-  /** count, generation, dispatch x/y/z, then compact physical IDs. */
+  /** count, generation, dispatch, published, valid, then IDs sorted by metadata key. */
   worklistWords: Uint32Array;
   flags: Uint32Array;
   phi: Float32Array;
@@ -121,12 +111,6 @@ function finiteVec3(value: FineLevelSetVec3, label: string): FineLevelSetVec3 {
   return [value[0], value[1], value[2]];
 }
 
-function nextPowerOfTwo(value: number): number {
-  let result = 1;
-  while (result < value) result *= 2;
-  return result;
-}
-
 export function planFineLevelSetBricks(options: FineLevelSetBrickPlanOptions): FineLevelSetBrickPlan {
   const domainOrigin = finiteVec3(options.domainOrigin, "Fine level-set domain origin");
   const finestCellDimensions = options.finestCellDimensions.map((value, axis) =>
@@ -141,14 +125,6 @@ export function planFineLevelSetBricks(options: FineLevelSetBrickPlanOptions): F
     throw new RangeError("Fine level-set brick resolution must be 4 or 8");
   }
   const maximumResidentBricks = positiveInteger(options.maximumResidentBricks, "Fine level-set resident capacity");
-  const maximumHashLoad = options.maximumHashLoad ?? 0.5;
-  if (!Number.isFinite(maximumHashLoad) || maximumHashLoad <= 0 || maximumHashLoad > 0.5) {
-    throw new RangeError("Fine level-set maximum hash load must be in (0, 0.5]");
-  }
-  const maximumHashProbes = options.maximumHashProbes ?? FINE_LEVELSET_MAX_HASH_PROBES;
-  if (!Number.isSafeInteger(maximumHashProbes) || maximumHashProbes < 1 || maximumHashProbes > FINE_LEVELSET_MAX_HASH_PROBES) {
-    throw new RangeError(`Fine level-set maximum hash probes must be in [1, ${FINE_LEVELSET_MAX_HASH_PROBES}]`);
-  }
   const sampleDimensions = finestCellDimensions.map((value) => value * options.fineFactor) as unknown as FineLevelSetVec3;
   if (sampleDimensions.some((value) => !Number.isSafeInteger(value))) {
     throw new RangeError("Fine level-set sample dimensions exceed exact integer range");
@@ -164,21 +140,18 @@ export function planFineLevelSetBricks(options: FineLevelSetBrickPlanOptions): F
   }
   const samplesPerBrick = options.brickResolution ** 3;
   const payloadBytesPerBrick = samplesPerBrick * FINE_LEVELSET_CHANNELS * 4;
-  const hashCapacity = nextPowerOfTwo(Math.ceil(maximumResidentBricks / maximumHashLoad));
-  if (hashCapacity > 0x8000_0000) throw new RangeError("Fine level-set hash capacity exceeds WebGPU indexing range");
   const payloadCapacityBytes = maximumResidentBricks * payloadBytesPerBrick;
   // Two generation-specific metadata copies: id/key/generation/state + six neighbors.
   const metadataCapacityBytes = 2 * maximumResidentBricks * 10 * 4;
-  const pageTableBytes = 2 * hashCapacity * 2 * 4;
-  // count/generation/dispatch xyz followed by physical IDs, for both generations.
+  // count/generation/dispatch/published/valid followed by key-sorted physical IDs, for both generations.
   const worklistBytes = 2 * (5 + maximumResidentBricks) * 4;
-  const allocatedBytes = payloadCapacityBytes + metadataCapacityBytes + pageTableBytes + worklistBytes;
+  const allocatedBytes = payloadCapacityBytes + metadataCapacityBytes + worklistBytes;
   return {
     domainOrigin, finestCellDimensions, finestCellWidth: options.finestCellWidth,
     fineFactor: options.fineFactor, fineCellWidth: options.finestCellWidth / options.fineFactor,
     brickResolution: options.brickResolution, sampleDimensions, brickDimensions, logicalBrickCount,
-    maximumResidentBricks, maximumHashLoad, maximumHashProbes, samplesPerBrick, payloadBytesPerBrick,
-    hashCapacity, payloadCapacityBytes, metadataCapacityBytes, pageTableBytes, worklistBytes, allocatedBytes,
+    maximumResidentBricks, samplesPerBrick, payloadBytesPerBrick,
+    payloadCapacityBytes, metadataCapacityBytes, worklistBytes, allocatedBytes,
   };
 }
 
@@ -239,46 +212,6 @@ export function fineLevelSetAddressAtCoordinate(
     brickKey: packFineLevelSetBrickKey(plan, brickCoord), localIndex };
 }
 
-function hashKey(key: number, mask: number): number {
-  return Math.imul(key ^ (key >>> 16), 0x9e37_79b1) >>> 0 & mask;
-}
-
-class BoundedBrickHash {
-  readonly pairs: Uint32Array;
-
-  constructor(private readonly plan: FineLevelSetBrickPlan) {
-    this.pairs = new Uint32Array(plan.hashCapacity * 2);
-    this.pairs.fill(FINE_LEVELSET_INVALID);
-  }
-
-  insert(key: number, physicalId: number): void {
-    const mask = this.plan.hashCapacity - 1;
-    const start = hashKey(key, mask);
-    for (let probe = 0; probe < this.plan.maximumHashProbes; probe += 1) {
-      const slot = (start + probe) & mask;
-      const prior = this.pairs[slot * 2];
-      if (prior === FINE_LEVELSET_INVALID || prior === key) {
-        this.pairs[slot * 2] = key;
-        this.pairs[slot * 2 + 1] = physicalId;
-        return;
-      }
-    }
-    throw new RangeError(`Fine level-set hash exceeded ${this.plan.maximumHashProbes} probes`);
-  }
-
-  lookup(key: number): number {
-    const mask = this.plan.hashCapacity - 1;
-    const start = hashKey(key, mask);
-    for (let probe = 0; probe < this.plan.maximumHashProbes; probe += 1) {
-      const slot = (start + probe) & mask;
-      const stored = this.pairs[slot * 2];
-      if (stored === key) return this.pairs[slot * 2 + 1];
-      if (stored === FINE_LEVELSET_INVALID) return FINE_LEVELSET_INVALID;
-    }
-    return FINE_LEVELSET_INVALID;
-  }
-}
-
 const NEIGHBOR_DIRECTIONS = [
   [-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1],
 ] as const;
@@ -292,13 +225,11 @@ export class FineLevelSetBrickOracle {
   readonly plan: FineLevelSetBrickPlan;
   private pagesByKey = new Map<number, FineLevelSetBrickPage>();
   private pagesById: Array<FineLevelSetBrickPage | undefined>;
-  private hash: BoundedBrickHash;
   private generationValue = 0;
 
   constructor(plan: FineLevelSetBrickPlan) {
     this.plan = plan;
     this.pagesById = new Array(plan.maximumResidentBricks);
-    this.hash = new BoundedBrickHash(plan);
   }
 
   get generation(): number { return this.generationValue; }
@@ -311,8 +242,7 @@ export class FineLevelSetBrickOracle {
   pageForKey(key: number): FineLevelSetBrickPage | undefined {
     // Validate before lookup so malformed keys can never alias an empty slot.
     unpackFineLevelSetBrickKey(this.plan, key);
-    const id = this.hash.lookup(key);
-    return id === FINE_LEVELSET_INVALID ? undefined : this.pagesById[id];
+    return this.pagesByKey.get(key);
   }
 
   private createPage(physicalId: number, key: number, generation: number, coarsePhi: FineLevelSetCoarsePhi): FineLevelSetBrickPage {
@@ -409,8 +339,6 @@ export class FineLevelSetBrickOracle {
       nextByKey.set(key, page);
     }
 
-    const nextHash = new BoundedBrickHash(this.plan);
-    for (const [key, page] of nextByKey) nextHash.insert(key, page.physicalId);
     for (const [key, page] of nextByKey) {
       const coord = unpackFineLevelSetBrickKey(this.plan, key);
       for (let directionIndex = 0; directionIndex < NEIGHBOR_DIRECTIONS.length; directionIndex += 1) {
@@ -418,14 +346,13 @@ export class FineLevelSetBrickOracle {
         const neighbor = coord.map((value, axis) => value + direction[axis]) as [number, number, number];
         page.neighborIds[directionIndex] = neighbor.some((value, axis) => value < 0 || value >= this.plan.brickDimensions[axis])
           ? FINE_LEVELSET_INVALID
-          : nextHash.lookup(packFineLevelSetBrickKey(this.plan, neighbor));
+          : nextByKey.get(packFineLevelSetBrickKey(this.plan, neighbor))?.physicalId ?? FINE_LEVELSET_INVALID;
       }
     }
     this.pagesById.fill(undefined);
     for (const page of nextByKey.values()) this.pagesById[page.physicalId] = page;
     const retiredPages = this.pagesByKey.size - reusedPages;
     this.pagesByKey = nextByKey;
-    this.hash = nextHash;
     this.generationValue = nextGeneration;
     const activePhysicalIds = Uint32Array.from([...nextByKey.values()].sort((a, b) => a.key - b.key).map((page) => page.physicalId));
     return {
@@ -524,7 +451,7 @@ export class FineLevelSetBrickOracle {
     const metadataBytes = 2 * residentBricks * 10 * 4;
     return {
       residentBricks, activePayloadBytes, payloadCapacityBytes: this.plan.payloadCapacityBytes,
-      metadataBytes, pageTableBytes: this.plan.pageTableBytes, worklistBytes: this.plan.worklistBytes,
+      metadataBytes, worklistBytes: this.plan.worklistBytes,
       fragmentationBytes: this.plan.payloadCapacityBytes - activePayloadBytes,
       allocatedBytes: this.plan.allocatedBytes,
     };
@@ -552,7 +479,7 @@ export class FineLevelSetBrickOracle {
     });
     return {
       generation: this.generationValue, activeCount: ordered.length,
-      hashPairs: this.hash.pairs.slice(), metadataWords, worklistWords, flags, phi, workA, workB,
+      metadataWords, worklistWords, flags, phi, workA, workB,
     };
   }
 }

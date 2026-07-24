@@ -51,7 +51,10 @@ test("GPU ledger uses the pressure metric and a volume-weighted fine potential m
   assert.match(octreeEnergyLedgerWGSL,
     /\.5\*f\.area\/\(f\.openFraction\*f\.inverseDistance\)\*f\.normalVelocity\*f\.normalVelocity/);
   assert.match(octreeEnergyLedgerWGSL, /energy=-dot\(p\.gravity,position\)\*volume/);
-  assert.match(octreeEnergyLedgerWGSL, /atomicMax\(&control\[1\],p\.step\+1u\)/);
+  assert.match(octreeEnergyLedgerWGSL, /control\[1\]=max\(control\[1\],p\.step\+1u\)/);
+  assert.doesNotMatch(octreeEnergyLedgerWGSL,
+    /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
+    "command-ordered singleton finalizers publish ledger progress without recurring atomics");
   assert.match(octreeEnergyLedgerWGSL, /if\(a\.x==0xffffffffu\)\{invalid=1u;/,
     "a malformed live worklist entry must not disappear from the ledger");
   assert.match(octreeEnergyLedgerWGSL, /\(sampleFlags\[index\]&1u\)==0u\)\{invalid=1u;/,
@@ -68,14 +71,16 @@ test("authoritative stage hooks are ordered and remain opt-in", () => {
   const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
   const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
-  const productionStart = octree.indexOf("private encodePowerAssemblyMirror");
+  const productionStart = octree.indexOf("private encodeNativePowerAssembly");
   const positions = [
     "oldFaceCapture", "postRemap", "postGravity", "postSolidConstraint",
     "postProjection", "postFaceBandPublication",
   ].map((stage) => octree.indexOf(`\"${stage}\"`, productionStart));
   positions.forEach((position) => assert.ok(position >= 0));
   positions.slice(1).forEach((position, index) => assert.ok(position > positions[index]));
-  assert.match(octree, /if \(this\.energyLedgerRequested && this\.powerPolicy\.authoritative/);
+  assert.match(octree, /if \(this\.energyLedgerRequested && this\.globalFineSourceA\)/);
+  assert.doesNotMatch(octree, /powerPolicy/,
+    "the mandatory power authority must not retain a rollback policy switch");
   assert.match(octree,
     /const oldPowerGeneration = this\.powerGeneration;[\s\S]*"oldFaceCapture", oldPowerGeneration/);
   assert.match(uniform, /energyLedger: options\.octree\.energyLedger/);
@@ -87,11 +92,26 @@ test("fine ledger brackets transport, topology, redistance, and correction", () 
   const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   for (const stage of ["preFineTransport", "postFineTransport", "postFineTopology",
     "postFineRedistance", "postFineVolumeCorrection"] as const) {
-    assert.match(source, new RegExp(`encodeFinePotential\\(encoder, \\"${stage}\\"`));
+    assert.match(source, new RegExp(`encodeFinePotential\\([^,]+,\\s*\\"${stage}\\"`));
   }
   assert.match(source,
     /preFineTransport[\s\S]*transport\.encode[\s\S]*postFineTransport[\s\S]*publicationTopology\.encode[\s\S]*postFineTopology[\s\S]*publicationRedistance\.encode[\s\S]*postFineRedistance[\s\S]*publicationVolume\?\.encode[\s\S]*postFineVolumeCorrection/);
   assert.match(source,
     /postFineTransport[\s\S]*encodeFineCommonCapture[\s\S]*publicationTopology\.encode[\s\S]*encodeFineCommonTopologyPair[\s\S]*publicationRedistance\.encode[\s\S]*postFineRedistanceCommon/,
     "the immutable old sample capture must precede topology and its frozen support must survive redistance");
+});
+
+test("all ledger stages share their caller-owned publication broker", () => {
+  const source = readFileSync(new URL("../lib/webgpu-octree-energy-ledger.ts", import.meta.url), "utf8");
+  const faceMethod = source.slice(source.indexOf("encodeFaceMetric("), source.indexOf("/** Append an observational fine reduction"));
+  const fineMethods = source.slice(source.indexOf("encodeFinePotential("), source.indexOf("async read()"));
+  assert.match(faceMethod, /encodeFaceMetric\(broker: PassBroker/);
+  assert.doesNotMatch(faceMethod, /new PassBroker|broker\.fence/,
+    "observational face reductions must not introduce routine publication pass breaks");
+  assert.match(fineMethods, /encodeFinePotential\(broker: PassBroker/);
+  assert.match(fineMethods, /encodeFineCommonCapture\(broker: PassBroker/);
+  assert.match(fineMethods, /encodeFineCommonTopologyPair\(broker: PassBroker/);
+  assert.match(fineMethods, /encodeFineCommonPotential\(broker: PassBroker/);
+  assert.doesNotMatch(fineMethods, /new PassBroker|broker\.fence/,
+    "observational fine reductions must not introduce routine publication pass breaks");
 });

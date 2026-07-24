@@ -10,27 +10,22 @@ import {
   composeCubeTransforms,
   enforcePaperCompatibleOctreeGrading,
   inverseCubeTransform,
-  octreePowerCoarseMaskNeedsAcuteRepair,
   transformPowerVector,
 } from "../lib/octree-power-topology";
 
-test("co-spherical same/coarser masks no longer trigger a topology split", () => {
+test("every co-spherical same/coarser mask is covered without topology refinement", () => {
   for (const mask of [25, 42, 52, 57, 58, 60]) {
-    assert.equal(octreePowerCoarseMaskNeedsAcuteRepair(mask), false, `mask ${mask}`);
     const descriptor = (OCTREE_POWER_SAME_OR_COARSER_FLAG | (mask << 3)) >>> 0;
     const leaves = sitesForSameOrCoarserPowerDescriptor(descriptor).map((site) => ({
       key: site.key, origin: site.origin, size: site.size,
     }));
     const before = auditOctreePowerTopology(leaves);
-    assert.equal(before.strictlyObtuseSameOrCoarserLeaves, 0, `mask ${mask}`);
-    assert.deepEqual(before.acuteRepairCoarseLeaves, [], `mask ${mask}`);
     assert.equal(before.ordinaryTwoToOne, true, `mask ${mask} remains ordinarily 2:1`);
     assert.equal(before.paperCompatible, true, `mask ${mask} is covered by the row-local Delaunay catalog`);
 
     const repaired = enforcePaperCompatibleOctreeGrading(leaves, 100);
     assert.equal(repaired.refinedParents, 0, `mask ${mask}`);
     assert.equal(repaired.iterations, 0, `mask ${mask}`);
-    assert.equal(repaired.audit.strictlyObtuseSameOrCoarserLeaves, 0, `mask ${mask}`);
     assert.equal(repaired.audit.paperCompatible, true, `mask ${mask}`);
     assert.deepEqual(repaired.leaves, [...leaves].sort((a, b) => a.key.localeCompare(b.key)),
       `mask ${mask} must not propagate refinement`);

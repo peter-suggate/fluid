@@ -9,184 +9,16 @@ import { classifyTallCellStability, planGPUAdvance } from "./tall-cell-diagnosti
 import { averageInflowStrength, createInflowGridBoundary, inflowBoundaryWGSL, type InflowGridBoundary } from "./inflow-boundary";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 import { WebGPURigidBodySystem } from "./webgpu-rigid-body";
-import { encodeGPUStageTextureCapture, type PendingGPUStageCapture } from "./gpu-stage-capture";
+import {
+  DynamicGPUPerformanceTraceRecorder,
+  GPUPerformanceTraceRecorder,
+  GPUQueueWallPerformanceTraceRecorder,
+  type PerformanceTrace,
+} from "./performance-trace";
 
 export type { GPUQuality } from "./tall-cell-grid";
 export type GPUGridMethod = "tall-cell" | "quadtree-tall-cell" | "octree" | "uniform";
 export type GPUVelocityTransport = "semi-lagrangian" | "maccormack";
-
-export type GPUPhysicsStageId =
-  | "preparation"
-  | "topology"
-  | "advection"
-  | "conditioning"
-  | "remeshing"
-  | "pressure"
-  | "powerAssembly"
-  | "pressureSolve"
-  | "projection"
-  | "powerProjection"
-  | "velocityProjection"
-  | "faceBand"
-  | "faceMarch"
-  | "powerPublication"
-  | "extrapolation"
-  | "materialization"
-  | "surfaceUpdate"
-  | "fineTopology"
-  | "fineTransport"
-  | "fineRedistance"
-  | "rigidCoupling"
-  | "spray"
-  | "fluidResidency"
-  | "sparsePublication"
-  | "diagnostics";
-
-export interface GPUPhysicsTimings {
-  preparation_ms: number;
-  layerConstruction_ms: number;
-  advection_ms: number;
-  conditioning_ms: number;
-  remeshing_ms: number;
-  pressure_ms: number;
-  /** Diagnostic subdivision of pressure_ms for power-row construction and operator assembly. */
-  powerAssembly_ms: number;
-  /** Diagnostic subdivision of pressure_ms for the pressure iteration/V-cycle work. */
-  pressureSolve_ms: number;
-  projection_ms: number;
-  /** Diagnostic subdivision of projection_ms for generalized-face projection and publication. */
-  powerProjection_ms: number;
-  /** Diagnostic subdivision of projection_ms for the regular finite-volume compatibility field. */
-  velocityProjection_ms: number;
-  /** Section 5 face-band construction, including the generalized-face setup preceding it. */
-  faceBand_ms: number;
-  /** Section 5 regular-face narrow-band fast march. */
-  faceMarch_ms: number;
-  /** Section 5 regular-face-to-power-face publication and validation tail. */
-  powerPublication_ms: number;
-  extrapolation_ms: number;
-  materialization_ms: number;
-  surfaceUpdate_ms: number;
-  /** Section 5 fine-page topology range, including surface setup assigned to its shared interval. */
-  fineTopology_ms: number;
-  /** Section 5 fine-level-set transport range. */
-  fineTransport_ms: number;
-  /** Section 5 fine redistance and transactional publication tail. */
-  fineRedistance_ms: number;
-  rigidCoupling_ms: number;
-  spray_ms: number;
-  fluidResidency_ms: number;
-  sparsePublication_ms: number;
-  diagnostics_ms: number;
-  overhead_ms: number;
-  total_ms: number;
-  /** Stages actually encoded in the sampled advance; zero-duration entries can therefore be shown as idle. */
-  activeStages: GPUPhysicsStageId[];
-}
-
-export type GPUPhysicsTimingField = Exclude<keyof GPUPhysicsTimings, "activeStages">;
-export const GPU_PHYSICS_TIMESTAMP_CAPACITY = 2048;
-
-export interface GPUPhysicsTimestampSegment {
-  name: GPUPhysicsTimingField;
-  start: number;
-  end: number;
-  /**
-   * Complete temporally ordered boundary chain shared by a partitioned
-   * aggregate. A child is publishable only when every boundary in its parent
-   * partition resolved and the whole chain is monotonic.
-   */
-  requiredBoundaries?: readonly number[];
-}
-
-export function emptyGPUPhysicsTimings(activeStages: GPUPhysicsStageId[] = []): GPUPhysicsTimings {
-  return {
-    preparation_ms: 0,
-    layerConstruction_ms: 0,
-    advection_ms: 0,
-    conditioning_ms: 0,
-    remeshing_ms: 0,
-    pressure_ms: 0,
-    powerAssembly_ms: 0,
-    pressureSolve_ms: 0,
-    projection_ms: 0,
-    powerProjection_ms: 0,
-    velocityProjection_ms: 0,
-    faceBand_ms: 0,
-    faceMarch_ms: 0,
-    powerPublication_ms: 0,
-    extrapolation_ms: 0,
-    materialization_ms: 0,
-    surfaceUpdate_ms: 0,
-    fineTopology_ms: 0,
-    fineTransport_ms: 0,
-    fineRedistance_ms: 0,
-    rigidCoupling_ms: 0,
-    spray_ms: 0,
-    fluidResidency_ms: 0,
-    sparsePublication_ms: 0,
-    diagnostics_ms: 0,
-    overhead_ms: 0,
-    total_ms: 0,
-    activeStages
-  };
-}
-
-/**
- * Decode timestamp ranges defensively. WebGPU query resolve leaves an
- * unwritten query at zero on the backends we use; subtracting a valid shared
- * boundary from that zero produces a finite but impossible multi-hour stage.
- * Treat an entire field as unavailable when any of its encoded ranges is
- * unresolved, out of bounds, or temporally out of order.
- */
-export function decodeGPUPhysicsTimestampSegments(
-  timestamps: ArrayLike<bigint>,
-  segments: readonly GPUPhysicsTimestampSegment[],
-): Partial<Record<GPUPhysicsTimingField, number>> {
-  const decoded: Partial<Record<GPUPhysicsTimingField, number>> = {};
-  const invalid = new Set<GPUPhysicsTimingField>();
-  for (const segment of segments) {
-    const boundaries = segment.requiredBoundaries ?? [segment.start, segment.end];
-    let previous: bigint | undefined;
-    let valid = boundaries.length >= 2
-      && boundaries.includes(segment.start)
-      && boundaries.includes(segment.end)
-      && boundaries.indexOf(segment.start) <= boundaries.indexOf(segment.end);
-    for (const index of boundaries) {
-      if (!valid || !Number.isInteger(index) || index < 0 || index >= timestamps.length) {
-        valid = false;
-        break;
-      }
-      const timestamp = timestamps[index];
-      if (timestamp === undefined || timestamp === 0n
-        || (previous !== undefined && timestamp < previous)) {
-        valid = false;
-        break;
-      }
-      previous = timestamp;
-    }
-    if (!valid) {
-      invalid.add(segment.name);
-      continue;
-    }
-    const elapsed_ms = Number(timestamps[segment.end] - timestamps[segment.start]) / 1e6;
-    if (!Number.isFinite(elapsed_ms) || elapsed_ms < 0) {
-      invalid.add(segment.name);
-      continue;
-    }
-    decoded[segment.name] = (decoded[segment.name] ?? 0) + elapsed_ms;
-  }
-  for (const name of invalid) decoded[name] = 0;
-  return decoded;
-}
-
-export function categorizedGPUPhysicsTime_ms(timings: GPUPhysicsTimings) {
-  return timings.preparation_ms + timings.layerConstruction_ms + timings.advection_ms
-    + timings.conditioning_ms + timings.remeshing_ms + timings.pressure_ms
-    + timings.projection_ms + timings.extrapolation_ms + timings.materialization_ms
-    + timings.surfaceUpdate_ms + timings.rigidCoupling_ms + timings.spray_ms
-    + timings.fluidResidency_ms + timings.sparsePublication_ms + timings.diagnostics_ms;
-}
 
 export interface GPUFieldLocation {
   x: number;
@@ -233,34 +65,10 @@ export interface GPUEulerianInfo {
   fluidBulkBrickHaloCount?: number;
   fluidBulkBrickActivatedCount?: number;
   fluidBulkBrickRetiredCount?: number;
-  /** Brick-pooled atlas tiles mirrored from the dense fields plus their validation error. */
-  fluidBrickAtlasCapacity?: number;
-  fluidBrickAtlasResidentTiles?: number;
-  fluidBrickAtlasOverflow?: number;
-  fluidBrickAtlasMaxPhiError?: number;
-  fluidBrickAtlasMaxVelocityError?: number;
-  fluidBrickAtlasMaxPhiErrorManual?: number;
-  fluidBrickAtlasMaxVelocityErrorManual?: number;
-  sparseSurfaceLogicalPages?: number;
-  sparseSurfacePageCapacity?: number;
-  adaptiveSurfacePageCapacity?: number;
-  adaptiveSurfaceActivePages?: number;
-  adaptiveSurfaceCandidatePages?: number;
-  adaptiveSurfaceAdapterCandidateRows?: number;
-  adaptiveSurfaceAdapterDispatchX?: number;
-  adaptiveSurfaceOverflow?: boolean;
-  adaptiveSurfaceOverflowCode?: number;
-  adaptiveSurfaceDepartureFallbacks?: number;
-  adaptiveSurfaceFinestResidentPages?: number;
-  adaptiveSurfaceCoarseResidentPages?: number;
-  adaptiveSurfaceMaximumResidentLeafSize?: number;
-  /** Requested and effective GPU power-diagram projection state. */
-  powerDiagramProjection?: "off" | "mirror" | "authoritative";
   powerDiagramReady?: boolean;
   powerDiagramAuthoritative?: boolean;
   /** Host-known generation stamped into the live GPU power topology/face publication. */
   powerDiagramGeneration?: number;
-  powerDiagramFallbackReason?: string;
   powerDiagramAllocatedBytes?: number;
   globalFineLevelSetAllocatedBytes?: number;
   globalFineLevelSetResidentBrickCapacity?: number;
@@ -323,25 +131,16 @@ export interface GPUEulerianInfo {
   globalFineFaceBandAcceptedCount?: number;
   globalFineFaceBandUnresolvedCount?: number;
   globalFineFaceBandSampleFailures?: number;
-  globalFineFaceBandCoarsePhiFallbacks?: number;
+  globalFineFaceBandCoarsePhiSamples?: number;
   globalFineFaceBandCoarsePhiFailures?: number;
   globalFineFaceBandPhiExtensions?: number;
-  globalFineFaceBandMarchHeapHighWater?: number;
-  globalFineFaceBandMarchPops?: number;
-  globalFineFaceBandMarchTrials?: number;
-  globalFineFaceBandMarchChunks?: number;
-  globalFineFaceBandMarchChunkBound?: number;
-  globalFineFaceBandMarchCapExhausted?: number;
-  globalFineFaceBandMarchUnresolvedWithPredecessor?: number;
-  globalFineFaceBandMarchDisconnected?: number;
-  globalFineFaceBandDirectAnchorSuccess?: number;
-  globalFineFaceBandFullRowFallbackInvocations?: number;
-  globalFineFaceBandFullRowCandidateRowsTested?: number;
-  globalFineFaceBandSurroundingOwnerFallbackInvocations?: number;
-  globalFineFaceBandSurroundingOwnerRowsTested?: number;
-  globalFineFaceBandAirSamplesSelected?: number;
-  globalFineFaceBandAirSamplesEvaluated?: number;
-  globalFineFaceBandConnectivityFallbacks?: number;
+  globalFineFaceBandClosestPointFaces?: number;
+  globalFineFaceBandClosestPointFailures?: number;
+  globalFineFaceBandLiquidInterpolationFailures?: number;
+  globalFineFaceBandCptNoOwnerFailures?: number;
+  globalFineFaceBandCptSupportOwnerFailures?: number;
+  globalFineFaceBandCptNoContainingSimplexFailures?: number;
+  globalFineFaceBandCptMissingLiquidVertexFailures?: number;
   globalFineFaceBandTransitionFirstError?: number;
   globalFineFaceBandTransitionRowCount?: number;
   globalFineFaceBandTransitionRows?: number;
@@ -352,15 +151,6 @@ export interface GPUEulerianInfo {
   globalFineFaceBandTransitionSupport3Rows?: number;
   globalFineFaceBandTransitionEndpointRows?: number;
   globalFineFaceBandBoundaryGhostRequests?: number;
-  /** Existing bounded transition-failure payload, decoded when an excluded
-   * same/coarser mask escapes acute-simplex grading into the dry band. */
-  globalFineFaceBandAcuteGradingFailure?: {
-    readonly band: number;
-    readonly rowCell: number;
-    readonly rowSize: number;
-    readonly descriptor: number;
-    readonly coarseMask: number;
-  };
   globalFineFaceBandPhiFailureCounts?: {
     readonly missingRow: number;
     readonly exactCoarseMiss: number;
@@ -415,23 +205,6 @@ export interface GPUEulerianInfo {
   /** First validation error captured by the solver's diagnostic error scope.
    * Reporting is asynchronous and never feeds simulation state. */
   gpuValidationError?: string;
-  pagedPhiDifferentialSamples?: number;
-  pagedPhiDifferentialComparedSamples?: number;
-  pagedPhiDifferentialMaxAbs?: number;
-  pagedPhiDifferentialMeanAbs?: number;
-  pagedPhiDifferentialSignMismatches?: number;
-  pagedPhiDifferentialHashMisses?: number;
-  pagedPhiDifferentialAffineFallbacks?: number;
-  pagedPhiDifferentialMaxCell?: readonly [number, number, number];
-  pagedPhiDifferentialMaxDensePhi?: number;
-  pagedPhiDifferentialMaxPagedPhi?: number;
-  sparseSurfaceResidentPages?: number;
-  sparseSurfaceCorePages?: number;
-  sparseSurfaceHaloPages?: number;
-  sparseSurfaceActivatedPages?: number;
-  sparseSurfaceRetiredPages?: number;
-  sparseSurfaceOverflow?: number;
-  sparseSurfacePeakPages?: number;
   quality: GPUQuality;
   volumeCellSum?: number;
   representedVolumeCellSum?: number;
@@ -484,114 +257,10 @@ export interface GPUEulerianInfo {
   simulationLag_s?: number;
   maximumTallCellHeight?: number;
   encodedSteps?: number;
-  gpuStep_ms?: number;
-  /** Monotonic identity of the latest decoded physics timestamp query set. */
-  gpuPhysicsTimingSampleId?: number;
-  /** Submitted simulation time represented by the latest timestamp sample. */
-  gpuPhysicsTimingSimulation_s?: number;
-  /** Host wall latency from the timestamp copy submission until map completion. */
-  gpuPhysicsTimingReadbackWall_ms?: number;
-  /** Full host wall duration of the latest periodic diagnostics/readback fan-out. */
-  gpuTelemetryWall_ms?: number;
-  gpuQueueWall_ms?: number;
-  gpuQueueSimulation_s?: number;
   /** Presentation-sized physics batches submitted but not yet queue-confirmed. */
   gpuPendingBatches?: number;
   /** Simulation time represented by submitted, unconfirmed GPU work. */
   gpuInFlightSimulation_s?: number;
-  /** Wall latency from submission to completion of the latest confirmed batch. */
-  gpuBatchWall_ms?: number;
-  /** Main-thread time spent encoding and submitting the latest GPU advance. */
-  cpuAdvanceEncode_ms?: number;
-  /** Intrusive pressure-only submission-to-completion sample. Unlike timestamp
-   * queries this includes WebGPU implementation and driver command processing. */
-  gpuPressureSolveObservedWall_ms?: number;
-  /** Host encode time for the isolated pressure-only probe command buffer. */
-  cpuPressureSolveProbeEncode_ms?: number;
-  gpuPressureSolveObservedSampleId?: number;
-  gpuPressureSolveObservedSimulation_s?: number;
-  /** Monotonic wall spent in intrusive pressure replays. The renderer uses
-   * its delta to keep profiler self-time out of production cadence. */
-  gpuProfilerWallTotal_ms?: number;
-  /** Intrusive production sample split at real command-buffer submission
-   * boundaries. Unlike shader timestamps these intervals include Dawn, driver,
-   * queue scheduling, and GPU completion work for each production phase. */
-  gpuAdvancePhaseWall?: {
-    sampleId: number;
-    simulation_s: number;
-    topologyAdvection_ms: number;
-    pressureProjection_ms: number;
-    pressureAssemblySetup_ms: number;
-    pressureLeafCompactionL1Capture_ms: number;
-    faceMirrorTransportRhs_ms: number;
-    powerDescriptorTopologyFaces_ms: number;
-    oldFaceAdvectionRepair_ms: number;
-    powerOperatorRhsAssembly_ms: number;
-    finalPressureRowAssembly_ms: number;
-    mgpcgSolve_ms: number;
-    powerProjectionPublication_ms: number;
-    faceBandTopologyBuild_ms: number;
-    faceBandTransitionAdjacency_ms: number;
-    faceBandFastMarch_ms: number;
-    faceBandPowerPublicationCapture_ms: number;
-    remainingCompatibilityProjection_ms: number;
-    surfaceCoupling_ms: number;
-    finePreparation_ms?: number;
-    fineTransport_ms?: number;
-    /** Queue-observed descriptor packing and trajectory initialization. */
-    fineTransportSetup_ms?: number;
-    /** Queue-observed semantic stages, aggregated across chunks by trajectory segment. */
-    fineTransportSegments?: readonly {
-      segment: number;
-      directStageB_ms: number;
-      airBand_ms: number;
-      airBandClassify_ms: number;
-      airBandEvaluate_ms: number;
-      airBandFinalize_ms: number;
-      trajectoryAdvance_ms: number;
-    }[];
-    /** Departure sampling plus transport validation and commit. */
-    fineTransportFinalize_ms?: number;
-    fineTopology_ms?: number;
-    fineRedistance_ms?: number;
-    fineRestriction_ms?: number;
-    pageSurface_ms?: number;
-    remainingSurfaceCoupling_ms?: number;
-    publicationDiagnostics_ms: number;
-    total_ms: number;
-  };
-  /** Solver-side attribution for the latest command encode. These regions are
-   * host timings only; shader execution remains covered by timestamp queries. */
-  cpuAdvanceEncodeBreakdown?: {
-    setup_ms: number;
-    topology_ms: number;
-    /** Exact host time spent emitting the pressure solver itself. */
-    pressureSolve_ms: number;
-    /** Compute dispatches in the last pressure solver schedule. */
-    pressureSolvePassCount: number;
-    /** Actual compute-pass begin/end transitions around those dispatches. */
-    pressureSolvePassTransitionCount: number;
-    pressureProjection_ms: number;
-    surface_ms: number;
-    publication_ms: number;
-    finalize_ms: number;
-  };
-  /** End-to-end wall time from starting command encoding through queue completion. */
-  gpuAdvanceWall_ms?: number;
-  /** Simulation time advanced by the latest confirmed batch. */
-  gpuBatchSimulation_s?: number;
-  /** Wall interval between the two latest ordered batch completions. */
-  gpuCompletionWall_ms?: number;
-  /** Portion of gpuCompletionWall_ms consumed by intrusive profiler work. */
-  gpuCompletionProfilerWall_ms?: number;
-  /** Completion interval with known intrusive profiler work removed. */
-  gpuCompletionProductionWall_ms?: number;
-  /** Simulation time confirmed during gpuCompletionWall_ms. */
-  gpuCompletionSimulation_s?: number;
-  /** Wall interval between queue-confirmed presentation completions. */
-  gpuPresentationWall_ms?: number;
-  /** Host-side gap between an empty queue completing and its next physics submission. */
-  gpuQueueStarved_ms?: number;
   initialVolumeCellSum?:number;
   volumeDrift?:number;
   rawVolumeDrift?:number;
@@ -624,21 +293,6 @@ export interface GPUEulerianInfo {
   quadtreeCulledDebrisCells?: number;
   quadtreeVofReconciliationActive?: boolean;
   quadtreeVelocityClampCount?: number;
-  /** Latest asynchronous adaptive topology readback + rebuild latency. */
-  quadtreeRebuildWall_ms?: number;
-  /** GPU construction, vertical sizing, subdivision, smoothing, and compact readback latency. */
-  quadtreeGPUConstruction_ms?: number;
-  quadtreeGPUConstructionKernel_ms?: number;
-  quadtreeGPUSparsePack_ms?: number;
-  /** Remaining host time for exact redistance and sparse variational packing. */
-  quadtreeCPUTopologyPack_ms?: number;
-  quadtreeCPURedistance_ms?: number;
-  quadtreeCPUQuadtreeDecode_ms?: number;
-  quadtreeCPUTallGrid_ms?: number;
-  quadtreeCPUVariationalAssembly_ms?: number;
-  quadtreeCPUSystemPack_ms?: number;
-  quadtreeCPUICFactorization_ms?: number;
-  quadtreeCPUResourceUpload_ms?: number;
   quadtreeTopologyReused?: boolean;
   quadtreeTopologyReuseCount?: number;
   quadtreePressureIterationsUsed?: number;
@@ -648,7 +302,6 @@ export interface GPUEulerianInfo {
   quadtreeFactorLevelCount?: number;
   quadtreeMultigridLevelCount?: number;
   quadtreeMultigridCoarsestDofs?: number;
-  quadtreePressurePhaseTimings?: { setup_ms: number; firstIterations_ms: number; remainingIterations_ms: number; project_ms: number };
   quadtreeRebuildCadenceSteps?: number;
   quadtreeTopologyStaleLimit?: number;
   quadtreeTopologyStaleSteps?: number;
@@ -661,13 +314,14 @@ export interface GPUEulerianInfo {
   /** Render frames whose physics advance was blocked by the latest rebuild. */
   quadtreeRebuildBlockedFrames?: number;
   quadtreeRebuildCompletedCount?: number;
-  gpuTimings?: GPUPhysicsTimings;
   /** Fluid authority remains in resident GPU resources between submissions. */
   hostFluidAuthority?: "gpu-resident" | "cpu-reference";
   /** Simulation-sized host work performed by one authoritative fluid frame. */
   hostSimulationSizedWorkItems?: number;
   /** Must remain false for authoritative octree scheduling. */
   hostSchedulingUsesReadback?: boolean;
+  /** Latest exhaustive, exclusive GPU physics partition. */
+  physicsTrace?: PerformanceTrace;
 }
 
 export interface WebGPUEulerianSolverOptions {
@@ -818,30 +472,6 @@ struct RigidBody {
 // Per-column terrain heights in cell units; params.container.w enables it so
 // terrain-free scenes never pay the extra load. Static for the whole run.
 @group(0) @binding(21) var terrainIn: texture_2d<f32>;
-// Optional bulk-field brick atlas. The page table is INVALID-only for uniform,
-// tall-cell, atlas-off, and authoritative-infrastructure-only paths, making the
-// helper fall back to the established dense transport texture.
-struct BulkAtlasParams {
-  dims: vec4u,
-  brickDims: vec4u,
-  tileGrid: vec4u,
-  capacitySeed: vec4u,
-  cell: vec4f,
-}
-@group(0) @binding(22) var<storage,read> bulkAtlasPageTable: array<u32>;
-@group(0) @binding(23) var bulkAtlasVelocity: texture_3d<f32>;
-@group(0) @binding(24) var<uniform> bulkAtlasParams: BulkAtlasParams;
-// x enables atlas reads; y independently enables GPU-authored sparse targets.
-@group(0) @binding(25) var<uniform> bulkAtlasControl: vec4u;
-// Residency ABI: words 0/count, 12..14/cell64 indirect dispatch, then active
-// (brick,leaf) pairs from word 16. The retired pair stream follows capacity.
-@group(0) @binding(26) var<storage,read> bulkWorklist: array<u32>;
-// Sparse occupancy reduces resident cells into one atomic maximum per x/z
-// column, then publishes the same dense r32float height texture consumed by
-// the unported advection kernels. A zero word represents the historical -1
-// (empty-column) sentinel; occupied y is stored as y+1.
-@group(0) @binding(27) var<storage,read_write> occupancyColumns: array<atomic<u32>>;
-
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn inflowGridDims()->vec3i{return dims();}
 fn valid(p: vec3i) -> bool { let d=dims(); return all(p >= vec3i(0)) && all(p < d); }
@@ -857,7 +487,6 @@ ${inflowBoundaryWGSL}
 fn volume(p: vec3i) -> f32 { if (!valid(p)) { return 0.0; } return textureLoad(volumeIn,p,0).x; }
 fn transportConservativeVolume() -> bool { return params.physical.z > 0.5; }
 fn levelSetAuthority() -> bool { return params.physical.w > 0.5; }
-fn hydrostaticSplit() -> bool { return params.inflowTiming.y > 0.5; }
 fn surfaceValue(p: vec3i) -> f32 {
   if (!valid(p)) { return select(0.0, 5.0 * min(params.cellGravity.x, min(params.cellGravity.y, params.cellGravity.z)), levelSetAuthority()); }
   return textureLoad(surfaceIn, p, 0).x;
@@ -882,58 +511,6 @@ fn sampledFaceVelocity(p:vec3i,component:u32)->f32{
   return textureLoad(transportIn,clampCell(p)+vec3i(1),0)[component];
 }
 fn transportCoordinate(q:vec3f)->vec3f{return (q+vec3f(1.5))/vec3f(dims()+vec3i(2));}
-const BULK_ATLAS_INVALID:u32=0xffffffffu;
-fn bulkAtlasSlot(position:vec3f)->vec4u{
-  if(bulkAtlasControl.x==0u||bulkAtlasParams.capacitySeed.x==0u){return vec4u(BULK_ATLAS_INVALID);}
-  if(any(position<vec3f(0.0))||any(position>vec3f(bulkAtlasParams.dims.xyz-vec3u(1u)))){return vec4u(BULK_ATLAS_INVALID);}
-  let p=clamp(position,vec3f(0.0),vec3f(bulkAtlasParams.dims.xyz-vec3u(1u)));
-  let brick=min(vec3u(floor(p/f32(bulkAtlasParams.dims.w))),bulkAtlasParams.brickDims.xyz-vec3u(1u));
-  let brickIndex=brick.x+bulkAtlasParams.brickDims.x*(brick.y+bulkAtlasParams.brickDims.y*brick.z);
-  if(brickIndex>=arrayLength(&bulkAtlasPageTable)){return vec4u(BULK_ATLAS_INVALID,brick);}
-  let slot=bulkAtlasPageTable[brickIndex];
-  if(slot>=bulkAtlasParams.capacitySeed.x){return vec4u(BULK_ATLAS_INVALID,brick);}
-  return vec4u(slot,brick);
-}
-fn bulkAtlasTileOrigin(slot:u32)->vec3u{
-  let g=bulkAtlasParams.tileGrid;
-  return vec3u(slot%g.x,(slot/g.x)%g.y,slot/(g.x*g.y))*g.w;
-}
-fn bulkAtlasTexel(slot:u32,brick:vec3u,cell:vec3i)->vec3i{
-  return vec3i(bulkAtlasTileOrigin(slot))+cell-vec3i(brick*bulkAtlasParams.dims.w)+vec3i(1);
-}
-fn bulkAtlasSampleVelocity(position:vec3f,slotBrick:vec4u)->vec3f{
-  let p=clamp(position,vec3f(0.0),vec3f(bulkAtlasParams.dims.xyz-vec3u(1u)));
-  let a=vec3i(floor(p));let t=fract(p);let slot=slotBrick.x;let brick=slotBrick.yzw;
-  let v000=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a),0).xyz;
-  let v100=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(1,0,0)),0).xyz;
-  let v010=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(0,1,0)),0).xyz;
-  let v110=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(1,1,0)),0).xyz;
-  let v001=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(0,0,1)),0).xyz;
-  let v101=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(1,0,1)),0).xyz;
-  let v011=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(0,1,1)),0).xyz;
-  let v111=textureLoad(bulkAtlasVelocity,bulkAtlasTexel(slot,brick,a+vec3i(1,1,1)),0).xyz;
-  return mix(mix(mix(v000,v100,t.x),mix(v010,v110,t.x),t.y),mix(mix(v001,v101,t.x),mix(v011,v111,t.x),t.y),t.z);
-}
-struct ScheduledCell { id: vec3i, scheduled: u32 }
-fn sparseCell64Ready()->bool{return bulkWorklist[0]!=0u&&bulkWorklist[12]!=0u&&bulkWorklist[13]!=0u;}
-fn scheduledVelocityCell(wid:vec3u,localIndex:u32,denseGid:vec3u)->ScheduledCell{
-  if(bulkAtlasControl.y==0u){return ScheduledCell(vec3i(denseGid),1u);}
-  let workgroupLinear=wid.x+wid.y*bulkWorklist[12];
-  let stream=workgroupLinear*64u+localIndex;
-  let brickVoxels=bulkAtlasParams.dims.w*bulkAtlasParams.dims.w*bulkAtlasParams.dims.w;
-  let activeIndex=stream/brickVoxels;
-  if(activeIndex>=bulkWorklist[0]){return ScheduledCell(vec3i(0),0u);}
-  let entry=16u+activeIndex*2u;
-  if(entry>=arrayLength(&bulkWorklist)){return ScheduledCell(vec3i(0),0u);}
-  let brickIndex=bulkWorklist[entry];
-  if(brickIndex>=bulkAtlasParams.brickDims.w){return ScheduledCell(vec3i(0),0u);}
-  let b=bulkAtlasParams.brickDims;
-  let brick=vec3u(brickIndex%b.x,(brickIndex/b.x)%b.y,brickIndex/(b.x*b.y));
-  let localLinear=stream-activeIndex*brickVoxels;
-  let size=bulkAtlasParams.dims.w;
-  let local=vec3u(localLinear%size,(localLinear/size)%size,localLinear/(size*size));
-  return ScheduledCell(vec3i(brick*size+local),1u);
-}
 fn interfaceFraction(a:f32,b:f32)->f32{
   // Distance from the liquid cell centre to alpha=0.5 along a grid edge.
   return clamp((a-0.5)/max(abs(a-b),1e-6),0.05,1.0);
@@ -943,7 +520,6 @@ fn sampleVolume(p:vec3f)->f32{
 }
 fn sampleVelocityComponent(p:vec3f,component:u32)->f32{
   var offset=vec3f(0.5);offset[component]=1.0;var lower=vec3f(0.0);lower[component]=-1.0;let q=clamp(p-offset,lower,vec3f(dims()-vec3i(1)));
-  let slotBrick=bulkAtlasSlot(q);if(slotBrick.x!=BULK_ATLAS_INVALID){return bulkAtlasSampleVelocity(q,slotBrick)[component];}
   return textureSampleLevel(transportIn,transportSampler,transportCoordinate(q),0.0)[component];
 }
 fn sampleVelocity(p:vec3f)->vec3f{return vec3f(sampleVelocityComponent(p,0u),sampleVelocityComponent(p,1u),sampleVelocityComponent(p,2u));}
@@ -951,7 +527,6 @@ fn sampleVelocity(p:vec3f)->vec3f{return vec3f(sampleVelocityComponent(p,0u),sam
 // perturbs where the trace samples, not the sampled face values themselves.
 fn transportVectorEstimate(p:vec3f)->vec3f{
   let q=clamp(p-vec3f(0.75),vec3f(-1.0),vec3f(dims()-vec3i(1)));
-  let slotBrick=bulkAtlasSlot(q);if(slotBrick.x!=BULK_ATLAS_INVALID){return bulkAtlasSampleVelocity(q,slotBrick);}
   return textureSampleLevel(transportIn,transportSampler,transportCoordinate(q),0.0).xyz;
 }
 fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{let first=transportVectorEstimate(position);let midpoint=position-0.5*first*dt/h;return position-transportVectorEstimate(midpoint)*dt/h;}
@@ -1026,29 +601,6 @@ fn ambientFluidVelocity(body:RigidBody,p:vec3i,fallback:vec3f)->vec3f{
 }
 fn columnHeight(x:i32,z:i32)->f32{
   let d=dims();if(x<0||x>=d.x||z<0||z>=d.z){return 0.0;}return textureLoad(heightIn,vec2i(x,z),0).x;
-}
-fn hydrostaticSurfaceCells(x:i32,z:i32)->f32{
-  let d=dims();if(x<0||x>=d.x||z<0||z>=d.z){return -1.0;}return textureLoad(heightIn,vec2i(x,z),0).y;
-}
-fn hydrostaticColumnContains(id:vec3i)->bool{
-  let eta=hydrostaticSurfaceCells(id.x,id.z);
-  return eta>=0.0&&f32(id.y)+0.5<eta;
-}
-fn fixedHydrostaticPotentialAtY(yCells:f32)->f32{
-  return -params.cellGravity.w*max((params.inflowTiming.z-yCells)*params.cellGravity.y,0.0);
-}
-fn fixedHydrostaticAcceleration(id:vec3i)->f32{
-  let neighbor=id+vec3i(0,1,0);
-  if(!hydrostaticColumnContains(id)&&!hydrostaticColumnContains(neighbor)){return params.cellGravity.w;}
-  let y0=f32(id.y)+0.5;var y1=f32(neighbor.y)+0.5;
-  let phi0=surfaceValue(id);let phi1=surfaceValue(neighbor);
-  var distance=params.cellGravity.y;
-  if((phi0<0.0)!=(phi1<0.0)){
-    let crossing=clamp(-phi0/(phi1-phi0),0.01,1.0);
-    y1=mix(y0,y1,crossing);distance*=crossing;
-  }
-  let gradient=(fixedHydrostaticPotentialAtY(y1)-fixedHydrostaticPotentialAtY(y0))/max(distance,1e-7);
-  return params.cellGravity.w-gradient;
 }
 fn upwind(face:f32,negative:f32,positive:f32)->f32{return face*select(positive,negative,face>=0.0);}
 fn normalSurfaceOccupancy(id:vec3i)->f32{
@@ -1141,10 +693,7 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
   let qy=id+vec3i(0,1,0);let yOccupancy=surfaceOccupancy(qy);
   let centerLiquid=select(occupancy>=0.5,occupancy>0.5,levelSetAuthority());
   let yLiquid=select(yOccupancy>=0.5,yOccupancy>0.5,levelSetAuthority());
-  if(centerLiquid||yLiquid){
-    if(hydrostaticSplit()){v.y+=fixedHydrostaticAcceleration(id)*dt;}
-    else{v.y+=params.cellGravity.w*dt;}
-  }
+  if(centerLiquid||yLiquid){v.y+=params.cellGravity.w*dt;}
   let qx=id+vec3i(1,0,0);let qz=id+vec3i(0,0,1);
   let xOccupancy=surfaceOccupancy(qx);let zOccupancy=surfaceOccupancy(qz);
   // Balanced-force CSF: pressure and capillary acceleration use the same
@@ -1169,74 +718,26 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
 }
 
 @compute @workgroup_size(4,4,4)
-fn buildTransport(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
-  var padded=vec3i(gid);let d=dims();var id=padded-vec3i(1);
-  if(bulkAtlasControl.y!=0u){
-    let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}
-    id=scheduled.id;if(!valid(id)){return;}padded=id+vec3i(1);
-  }else{
-    if(any(padded>=d+vec3i(2))){return;}
-    if(!valid(id)){textureStore(transportOut,padded,vec4f(0.0));return;}
-  }
+fn buildTransport(@builtin(global_invocation_id) gid:vec3u){
+  let padded=vec3i(gid);let d=dims();let id=padded-vec3i(1);
+  if(any(padded>=d+vec3i(2))){return;}
+  if(!valid(id)){textureStore(transportOut,padded,vec4f(0.0));return;}
   textureStore(transportOut,padded,vec4f(transportVelocity(id),0.0));
 }
 @compute @workgroup_size(4,4,4)
-fn buildFluxScales(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
-  var id=vec3i(gid);
-  if(bulkAtlasControl.y!=0u){let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}id=scheduled.id;}
+fn buildFluxScales(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);
   if(!valid(id)){return;}let dt=params.dimsDt.w;
   textureStore(fluxScalesOut,id,vec4f(donorScale(id,dt),receiverScale(id,dt),0.0,0.0));
 }
 // Highest cell supported by the authoritative surface in each column;
 // advection skips cells well above it after projection zeroes their faces.
-// The second channel is a separate bottom/terrain-connected zero crossing for
-// the hydrostatic reference. Floating sheets and spray never enter that field.
 @compute @workgroup_size(8,8,1)
 fn buildOccupancy(@builtin(global_invocation_id) gid:vec3u){
   let d=dims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}
-  // The GPU-authored list is allowed to be empty during first-publication or
-  // overflow recovery. Sparse mode always launches this area-only sentinel;
-  // it becomes the historical dense y scan only when no indirect work exists.
-  if(bulkAtlasControl.y!=0u&&sparseCell64Ready()){return;}
   var highest=-1.0;
-  if(!hydrostaticSplit()){
-    for(var y:i32=d.y-1;y>=0;y-=1){if(surfaceOccupancy(vec3i(i32(gid.x),y,i32(gid.y)))>0.0001){highest=f32(y);break;}}
-    textureStore(heightOut,vec2i(gid.xy),vec4f(highest,-1.0,0.0,0.0));return;
-  }
-  var referenceTop=-1;var referenceStarted=false;var referenceEnded=false;
-  for(var y:i32=0;y<d.y;y+=1){
-    let p=vec3i(i32(gid.x),y,i32(gid.y));let occupied=surfaceOccupancy(p)>0.0001;
-    if(occupied){highest=f32(y);}
-    if(!referenceEnded&&!cellInsideTerrain(p)){
-      let wet=surfaceLiquid(p);
-      if(!referenceStarted){referenceStarted=wet;if(wet){referenceTop=y;}else{referenceEnded=true;}}
-      else if(wet){referenceTop=y;}else{referenceEnded=true;}
-    }
-  }
-  var eta=-1.0;
-  if(referenceTop>=0){
-    let p=vec3i(i32(gid.x),referenceTop,i32(gid.y));let phi0=surfaceValue(p);let phi1=surfaceValue(p+vec3i(0,1,0));let difference=phi1-phi0;
-    let crossing=select(1.0,clamp(-phi0/difference,0.0,1.0),difference>1e-7);
-    eta=f32(referenceTop)+0.5+crossing;
-  }
-  textureStore(heightOut,vec2i(gid.xy),vec4f(highest,eta,0.0,0.0));
-}
-// Cell64 deliberately visits every resident payload cell. Atomics collapse
-// all y bricks sharing a column without races, including floating/disconnected
-// liquid; the following area-only resolve preserves dense texture semantics.
-@compute @workgroup_size(4,4,4)
-fn buildSparseOccupancy(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
-  let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}
-  let id=scheduled.id;if(!valid(id)||surfaceOccupancy(id)<=0.0001){return;}
-  let d=dims();let column=u32(id.x+d.x*id.z);if(column>=arrayLength(&occupancyColumns)){return;}
-  atomicMax(&occupancyColumns[column],u32(id.y+1));
-}
-@compute @workgroup_size(8,8,1)
-fn resolveSparseOccupancy(@builtin(global_invocation_id) gid:vec3u){
-  let d=dims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}
-  if(!sparseCell64Ready()){return;}
-  let column=gid.x+u32(d.x)*gid.y;if(column>=arrayLength(&occupancyColumns)){return;}
-  textureStore(heightOut,vec2i(gid.xy),vec4f(f32(atomicLoad(&occupancyColumns[column]))-1.0,-1.0,0.0,0.0));
+  for(var y:i32=d.y-1;y>=0;y-=1){if(surfaceOccupancy(vec3i(i32(gid.x),y,i32(gid.y)))>0.0001){highest=f32(y);break;}}
+  textureStore(heightOut,vec2i(gid.xy),vec4f(highest,-1.0,0.0,0.0));
 }
 fn nearInflow(id:vec3i)->bool{
   if(inflowStrength()<=0.0){return false;}
@@ -1251,16 +752,16 @@ fn aboveOccupancy(id:vec3i)->bool{
   return f32(id.y)>occupancy+4.0&&!nearInflow(id);
 }
 @compute @workgroup_size(4,4,4)
-fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
-  let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}let id=scheduled.id;if(!valid(id)){return;}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
+fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));v=applyVelocityForces(id,v,dt,h);
   var advected=volume(id);if(transportConservativeVolume()){advected=advectedVolume(id,dt);}textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(advected,0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));
 }
 
 @compute @workgroup_size(4,4,4)
-fn advect(@builtin(global_invocation_id) gid: vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32) {
-  let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}let id=scheduled.id; if (!valid(id)) { return; }
+fn advect(@builtin(global_invocation_id) gid: vec3u) {
+  let id=vec3i(gid); if (!valid(id)) { return; }
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
   let dt=params.dimsDt.w; let h=params.cellGravity.xyz;
   let cell=vec3f(id);var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
@@ -1274,8 +775,8 @@ fn advect(@builtin(global_invocation_id) gid: vec3u,@builtin(workgroup_id) wid:v
 }
 
 @compute @workgroup_size(4,4,4)
-fn reverseAdvection(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
-  let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}let id=scheduled.id;if(!valid(id)){return;}
+fn reverseAdvection(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
   let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,-dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,-dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,-dt,h));let d=dims();
@@ -1292,8 +793,8 @@ fn boundedMacCormack(id:vec3i,position:vec3f,component:u32,dt:f32,h:vec3f,predic
 }
 
 @compute @workgroup_size(4,4,4)
-fn correctAdvection(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) localIndex:u32){
-  let scheduled=scheduledVelocityCell(wid,localIndex,gid);if(scheduled.scheduled==0u){return;}let id=scheduled.id;if(!valid(id)){return;}
+fn correctAdvection(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
   if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
   let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   let predicted=textureLoad(predictedVelocityIn,id,0).xyz;let original=textureLoad(velocityIn,id,0).xyz;let reversed=textureLoad(reversedVelocityIn,id,0).xyz;
@@ -1598,110 +1099,6 @@ fn sharpenResolve(@builtin(global_invocation_id) gid:vec3u){
 fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let open=(1.0-cellSolidFraction(id))*(1.0-cellTerrainFraction(id));let represented=surfaceOccupancy(id)*open;let conservative=volume(id)*open;atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}
 `;
 
-/** Clear every dense velocity scratch cell belonging to newly retired bricks. */
-export const retiredBulkVelocityClearShader = /* wgsl */ `
-struct BulkAtlasParams {
-  dims: vec4u,
-  brickDims: vec4u,
-  tileGrid: vec4u,
-  capacitySeed: vec4u,
-  cell: vec4f,
-}
-@group(0) @binding(0) var velocityOut: texture_storage_3d<rgba32float,write>;
-@group(0) @binding(1) var<storage,read> worklist: array<u32>;
-@group(0) @binding(2) var<uniform> atlasParams: BulkAtlasParams;
-@compute @workgroup_size(256)
-fn clearRetiredVelocity(@builtin(global_invocation_id) gid:vec3u){
-  let stream=gid.x+gid.y*worklist[5]*256u;
-  let brickSize=atlasParams.dims.w;
-  let brickVoxels=brickSize*brickSize*brickSize;
-  let retiredIndex=stream/brickVoxels;
-  if(retiredIndex>=worklist[4]){return;}
-  let entry=16u+atlasParams.brickDims.w*2u+retiredIndex*2u;
-  if(entry>=arrayLength(&worklist)){return;}
-  let brickIndex=worklist[entry];
-  if(brickIndex>=atlasParams.brickDims.w){return;}
-  let b=atlasParams.brickDims;
-  let brick=vec3u(brickIndex%b.x,(brickIndex/b.x)%b.y,brickIndex/(b.x*b.y));
-  let localLinear=stream-retiredIndex*brickVoxels;
-  let local=vec3u(localLinear%brickSize,(localLinear/brickSize)%brickSize,localLinear/(brickSize*brickSize));
-  let cell=brick*brickSize+local;
-  if(any(cell>=atlasParams.dims.xyz)){return;}
-  textureStore(velocityOut,cell,vec4f(0.0));
-}
-`;
-
-/**
- * Clear retired dense transport payloads without touching the permanent
- * one-texel zero shell. Sparse buildTransport writes only id+1, so the shell
- * remains at WebGPU's zero-initialized resource value for the texture's life.
- */
-export const retiredBulkTransportClearShader = /* wgsl */ `
-struct BulkAtlasParams {
-  dims: vec4u,
-  brickDims: vec4u,
-  tileGrid: vec4u,
-  capacitySeed: vec4u,
-  cell: vec4f,
-}
-@group(0) @binding(0) var transportOut: texture_storage_3d<rgba16float,write>;
-@group(0) @binding(1) var<storage,read> worklist: array<u32>;
-@group(0) @binding(2) var<uniform> atlasParams: BulkAtlasParams;
-@compute @workgroup_size(256)
-fn clearRetiredTransport(@builtin(global_invocation_id) gid:vec3u){
-  let stream=gid.x+gid.y*worklist[5]*256u;
-  let brickSize=atlasParams.dims.w;
-  let brickVoxels=brickSize*brickSize*brickSize;
-  let retiredIndex=stream/brickVoxels;
-  if(retiredIndex>=worklist[4]){return;}
-  let entry=16u+atlasParams.brickDims.w*2u+retiredIndex*2u;
-  if(entry>=arrayLength(&worklist)){return;}
-  let brickIndex=worklist[entry];
-  if(brickIndex>=atlasParams.brickDims.w){return;}
-  let b=atlasParams.brickDims;
-  let brick=vec3u(brickIndex%b.x,(brickIndex/b.x)%b.y,brickIndex/(b.x*b.y));
-  let localLinear=stream-retiredIndex*brickVoxels;
-  let local=vec3u(localLinear%brickSize,(localLinear/brickSize)%brickSize,localLinear/(brickSize*brickSize));
-  let cell=brick*brickSize+local;
-  if(any(cell>=atlasParams.dims.xyz)){return;}
-  textureStore(transportOut,vec3i(cell)+vec3i(1),vec4f(0.0));
-}
-`;
-
-/** Clear compatibility flux limits for cells in newly retired wet bricks. */
-export const retiredBulkFluxScaleClearShader = /* wgsl */ `
-struct BulkAtlasParams {
-  dims: vec4u,
-  brickDims: vec4u,
-  tileGrid: vec4u,
-  capacitySeed: vec4u,
-  cell: vec4f,
-}
-@group(0) @binding(0) var fluxScalesOut: texture_storage_3d<rg32float,write>;
-@group(0) @binding(1) var<storage,read> worklist: array<u32>;
-@group(0) @binding(2) var<uniform> atlasParams: BulkAtlasParams;
-@compute @workgroup_size(256)
-fn clearRetiredFluxScales(@builtin(global_invocation_id) gid:vec3u){
-  let stream=gid.x+gid.y*worklist[5]*256u;
-  let brickSize=atlasParams.dims.w;
-  let brickVoxels=brickSize*brickSize*brickSize;
-  let retiredIndex=stream/brickVoxels;
-  if(retiredIndex>=worklist[4]){return;}
-  let entry=16u+atlasParams.brickDims.w*2u+retiredIndex*2u;
-  if(entry>=arrayLength(&worklist)){return;}
-  let brickIndex=worklist[entry];
-  if(brickIndex>=atlasParams.brickDims.w){return;}
-  let b=atlasParams.brickDims;
-  let brick=vec3u(brickIndex%b.x,(brickIndex/b.x)%b.y,brickIndex/(b.x*b.y));
-  let localLinear=stream-retiredIndex*brickVoxels;
-  let local=vec3u(localLinear%brickSize,(localLinear/brickSize)%brickSize,localLinear/(brickSize*brickSize));
-  let cell=brick*brickSize+local;
-  if(any(cell>=atlasParams.dims.xyz)){return;}
-  // Invalid-neighbor semantics are donor=0, receiver=1.
-  textureStore(fluxScalesOut,cell,vec4f(0.0,1.0,0.0,0.0));
-}
-`;
-
 export class WebGPUEulerianSolver {
   readonly info: GPUEulerianInfo;
   private readonly layout: TallCellLayout;
@@ -1718,13 +1115,13 @@ export class WebGPUEulerianSolver {
   private planSubstepsGroup:GPUBindGroup;private extrapolateFirstGroup:GPUBindGroup;private extrapolateSecondGroup:GPUBindGroup;private extrapolateBackGroup:GPUBindGroup;private phiABGroup:GPUBindGroup;private phiBAGroup:GPUBindGroup;private predictGroup:GPUBindGroup;private reverseGroup:GPUBindGroup;private advectGroup: GPUBindGroup;private pressureRhsGroup:GPUBindGroup; private jacobiABGroup: GPUBindGroup; private jacobiBAGroup: GPUBindGroup; private projectGroup: GPUBindGroup;private rigidGroup:GPUBindGroup; private reductionGroup:GPUBindGroup;private planRemeshGroup:GPUBindGroup;private smoothRemeshFirstGroup:GPUBindGroup;private smoothRemeshSecondGroup:GPUBindGroup;private remapGroup:GPUBindGroup;
   private multigrid:TallCellMultigrid;
   private velocityHierarchy?:TallCellVelocityHierarchy;
-  private reductionBuffer:GPUBuffer;private governorBuffer:GPUBuffer;private phiDispatchBuffer:GPUBuffer;private rigidBuffer:GPUBuffer;private rigidExchangeBuffer:GPUBuffer;private rigidSystem:WebGPURigidBodySystem;private nextColumnBases:GPUBuffer;private smoothedColumnBases:GPUBuffer;private querySet?:GPUQuerySet;private queryResolve?:GPUBuffer;
-  private querySegments: GPUPhysicsTimestampSegment[]=[];private queryCount=0;
+  private reductionBuffer:GPUBuffer;private governorBuffer:GPUBuffer;private phiDispatchBuffer:GPUBuffer;private rigidBuffer:GPUBuffer;private rigidExchangeBuffer:GPUBuffer;private rigidSystem:WebGPURigidBodySystem;private nextColumnBases:GPUBuffer;private smoothedColumnBases:GPUBuffer;
   private lastTime = 0;
   private lastFrameDt = 0;
   private readbackPending = false;
-  private wallTimingPending = false;
-  private performanceReadbacksEnabled = true;
+  private physicsTraceSampleId = 0;
+  private physicsTracePending = false;
+  private lastPhysicsTraceAt_ms = -Infinity;
   private validationChecked = false;
   private stepIndex = 0;
   private readonly inflowBoundary?: InflowGridBoundary;
@@ -1752,12 +1149,8 @@ export class WebGPUEulerianSolver {
     device.queue.writeBuffer(this.governorBuffer,0,new Uint32Array(4));
     this.rigidExchangeBuffer=device.createBuffer({size:GPU_RIGID_EXCHANGE_BYTES,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.rigidSystem=new WebGPURigidBodySystem(device,scene,this.rigidExchangeBuffer,this.terrainTexture);this.rigidBuffer=this.rigidSystem.stateBuffer;this.rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
-    if(device.features.has("timestamp-query")){this.querySet=device.createQuerySet({type:"timestamp",count:GPU_PHYSICS_TIMESTAMP_CAPACITY});this.queryResolve=device.createBuffer({size:GPU_PHYSICS_TIMESTAMP_CAPACITY*8,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});}
     this.nextColumnBases=device.createBuffer({label:"Next tall-cell column bases",size:nx*nz*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     this.smoothedColumnBases=device.createBuffer({label:"Smoothed tall-cell column bases",size:nx*nz*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-    // The restricted solve expands one pressure stage into many multigrid
-    // passes. Queue-completion timing remains reliable across browsers; the
-    // timestamp ring is reserved for the single-pass uniform baseline.
     if(!options.deferPipelineCompilation)device.pushErrorScope("validation");this.shaderModule=device.createShaderModule({label:"Fluid Lab restricted tall-cell kernels",code:tallCellComputeShader});
     this.bindGroupLayout=device.createBindGroupLayout({entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
@@ -1876,9 +1269,6 @@ export class WebGPUEulerianSolver {
   private dispatch(pass: GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(this.info.nx/4),Math.ceil(this.info.storedNy/4),Math.ceil(this.info.nz/4));}
   private dispatchPhiIndirect(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup,slot:number){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroupsIndirect(this.phiDispatchBuffer,slot*16);}
   private dispatchColumns(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline,group:GPUBindGroup){pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(this.info.nx/8),Math.ceil(this.info.nz/8));}
-  setPerformanceReadbacksEnabled(enabled:boolean){this.performanceReadbacksEnabled=enabled;if(!enabled)this.info.gpuStep_ms=undefined;}
-  private timing(name:GPUPhysicsTimingField){if(!this.performanceReadbacksEnabled||!this.querySet||this.queryCount+2>GPU_PHYSICS_TIMESTAMP_CAPACITY)return undefined;const segment={name,start:this.queryCount++,end:this.queryCount++};this.querySegments.push(segment);return segment;}
-
   advanceTo(time_s:number,bodies:RigidBodyState[]=[]){
     const advance=planGPUAdvance(time_s,this.lastTime,this.scene.numerics.maxDt_s);if(!advance)return false;const delta=advance.dt_s;if(delta<1e-6){this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;return true;}this.lastTime=advance.nextTime_s;this.info.submittedTime_s=this.lastTime;this.info.simulatedTime_s=this.lastTime;this.info.simulationLag_s=advance.lag_s;const c=this.scene.container,rho=this.scene.fluid.density_kg_m3,sigma=0;
     // The signed-distance interface retains adaptive transport subdivision,
@@ -1888,44 +1278,42 @@ export class WebGPUEulerianSolver {
     this.lastFrameDt=delta;
     const activeBodies=bodies.slice(0,12);this.rigidSystem.syncBodies(activeBodies);
     const h=this.layout.cellSize_m,s=this.layout.settings,inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;if(this.inflowBoundary){const cellVolume=h.x*h.y*h.z;this.referenceLiquidVolumeCells+=this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume;this.info.referenceLiquidVolume_cells=this.referenceLiquidVolumeCells;}this.device.queue.writeBuffer(this.params,0,new Float32Array([this.info.nx,this.info.storedNy,this.info.nz,delta,h.x,h.y,h.z,this.scene.fluid.gravity_m_s2.y,c.width_m,c.height_m,c.depth_m,4*Math.min(h.x,h.y,h.z)/Math.max(this.scene.numerics.maxDt_s,1e-6),rho,this.scene.fluid.dynamicViscosity_Pa_s,0,this.volumeCorrectionNormalSpeed,sigma,c.fluidWallMode==="no-slip"?1:0,activeBodies.length,this.info.ny,s.regularLayers,s.liquidHalo,s.airHalo,s.maximumNeighborDelta,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,sceneHasTerrain(this.scene)?1:0,0,0]));
-    this.querySegments=[];this.queryCount=0;if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"}),totalTiming=this.timing("total_ms");let stageCapture:PendingGPUStageCapture|undefined;const captureTexture=(stageKey:string,texture:GPUTexture)=>{if(stageCapture)return;stageCapture=encodeGPUStageTextureCapture({device:this.device,encoder,lane:"physics",stageKey,texture,dimension:"3d",dimensions:[this.info.nx,this.info.storedNy,this.info.nz],identity:{methodId:"tall-cell",sceneId:this.scene.sceneId,simulationTime_s:this.lastTime,step:this.stepIndex}});};if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:totalTiming.start}});pass.end();}{const plan=encoder.beginComputePass({label:"Plan phi substeps"});plan.setPipeline(this.planSubstepsPipeline);plan.setBindGroup(0,this.planSubstepsGroup);plan.dispatchWorkgroups(1);plan.end();}encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductionBuffer);
-    const preparationTiming=this.timing("preparation_ms"),reinitialize=this.stepIndex%10===0;
+    if(!this.validationChecked)this.device.pushErrorScope("validation");const encoder=this.device.createCommandEncoder({label:"GPU fluid step"});const shouldTrace=!this.physicsTracePending&&performance.now()-this.lastPhysicsTraceAt_ms>=250;const traceSampleId=shouldTrace?++this.physicsTraceSampleId:0;const physicsTrace=shouldTrace&&GPUPerformanceTraceRecorder.supported(this.device)?new DynamicGPUPerformanceTraceRecorder(this.device,traceSampleId,"physics",`tall-cell:sim-${this.lastTime.toFixed(6)}`,64):undefined;const physicsQueueTrace=shouldTrace?new GPUQueueWallPerformanceTraceRecorder(traceSampleId,"physics",`tall-cell:sim-${this.lastTime.toFixed(6)}`):undefined;physicsTrace?.begin(encoder);{const plan=encoder.beginComputePass({label:"Plan phi substeps"});plan.setPipeline(this.planSubstepsPipeline);plan.setBindGroup(0,this.planSubstepsGroup);plan.dispatchWorkgroups(1);plan.end();}encoder.clearBuffer(this.rigidExchangeBuffer);encoder.clearBuffer(this.reductionBuffer);
+    const reinitialize=this.stepIndex%10===0;
     if(this.velocityHierarchy){
       // The hierarchy fills the whole packed field. The fallback's eight-cell
       // halo also exceeds the four-cell full-frame speed rail.
-      {const pass=encoder.beginComputePass(preparationTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:preparationTiming.start}}:undefined);this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);pass.end();}
+      {const pass=encoder.beginComputePass();this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);pass.end();}
       {const pass=encoder.beginComputePass();this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);pass.end();}
-      this.velocityHierarchy.encode(encoder,!reinitialize&&preparationTiming&&this.querySet?{querySet:this.querySet,endOfPassWriteIndex:preparationTiming.end}:undefined);
+      this.velocityHierarchy.encode(encoder);
       encoder.copyTextureToTexture({texture:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);
-    }else{const passes=Math.max(2,s.airHalo);for(let passIndex=0;passIndex<passes;passIndex+=1){const first=passIndex===0,last=passIndex===passes-1&&!reinitialize;const pass=encoder.beginComputePass(preparationTiming&&this.querySet&&(first||last)?{timestampWrites:{querySet:this.querySet,...(first?{beginningOfPassWriteIndex:preparationTiming.start}:{}),...(last?{endOfPassWriteIndex:preparationTiming.end}:{})}}:undefined);if(passIndex===0)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);else if(passIndex%2===1)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);else this.dispatch(pass,this.extrapolatePipeline,this.extrapolateBackGroup);pass.end();}encoder.copyTextureToTexture({texture:passes%2===0?this.velocityC:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
-    if(reinitialize){const first=encoder.beginComputePass();this.dispatch(first,this.reinitializePhiPipeline,this.phiABGroup);first.end();const second=encoder.beginComputePass(preparationTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:preparationTiming.end}}:undefined);this.dispatch(second,this.reinitializePhiPipeline,this.phiBAGroup);second.end();}
-    const advectionTiming=this.timing("advection_ms");
-    for(let slot=0;slot<8;slot+=1){const transport=encoder.beginComputePass(slot===0&&advectionTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:advectionTiming.start}}:undefined);this.dispatchPhiIndirect(transport,this.transportPhiPipeline,this.phiABGroup,slot);transport.end();const clamp=encoder.beginComputePass();this.dispatchPhiIndirect(clamp,this.clampPhiPipeline,this.phiBAGroup,slot);clamp.end();}
-    {const pass=encoder.beginComputePass();this.dispatch(pass,this.predictPipeline,this.predictGroup);pass.end();if(this.velocityTransport==="maccormack"){const reverse=encoder.beginComputePass();this.dispatch(reverse,this.reversePipeline,this.reverseGroup);reverse.end();}const finish=encoder.beginComputePass(advectionTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:advectionTiming.end}}:undefined);this.dispatch(finish,this.advectPipeline,this.advectGroup);finish.end();encoder.copyTextureToTexture({texture:this.velocityD},{texture:this.velocityB},[this.info.nx,this.info.storedNy,this.info.nz]);}captureTexture("advection",this.velocityB);
+    }else{const passes=Math.max(2,s.airHalo);for(let passIndex=0;passIndex<passes;passIndex+=1){const pass=encoder.beginComputePass();if(passIndex===0)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateFirstGroup);else if(passIndex%2===1)this.dispatch(pass,this.extrapolatePipeline,this.extrapolateSecondGroup);else this.dispatch(pass,this.extrapolatePipeline,this.extrapolateBackGroup);pass.end();}encoder.copyTextureToTexture({texture:passes%2===0?this.velocityC:this.velocityD},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    if(reinitialize){const first=encoder.beginComputePass();this.dispatch(first,this.reinitializePhiPipeline,this.phiABGroup);first.end();const second=encoder.beginComputePass();this.dispatch(second,this.reinitializePhiPipeline,this.phiBAGroup);second.end();}physicsTrace?.completePhase(encoder,{id:"velocity-extrapolation",label:reinitialize?"Velocity extension + SDF maintenance":"Velocity extension"});
+    for(let slot=0;slot<8;slot+=1){const transport=encoder.beginComputePass();this.dispatchPhiIndirect(transport,this.transportPhiPipeline,this.phiABGroup,slot);transport.end();const clamp=encoder.beginComputePass();this.dispatchPhiIndirect(clamp,this.clampPhiPipeline,this.phiBAGroup,slot);clamp.end();}
+    {const pass=encoder.beginComputePass();this.dispatch(pass,this.predictPipeline,this.predictGroup);pass.end();if(this.velocityTransport==="maccormack"){const reverse=encoder.beginComputePass();this.dispatch(reverse,this.reversePipeline,this.reverseGroup);reverse.end();}const finish=encoder.beginComputePass();this.dispatch(finish,this.advectPipeline,this.advectGroup);finish.end();encoder.copyTextureToTexture({texture:this.velocityD},{texture:this.velocityB},[this.info.nx,this.info.storedNy,this.info.nz]);}physicsTrace?.completePhase(encoder,{id:"velocity-advection",label:"Level-set + velocity advection"});
     const remeshed=this.stepIndex>0&&this.stepIndex%s.remeshInterval===0;
-    if(remeshed){const timing=this.timing("remeshing_ms"),extent:[number,number,number]=[this.info.nx,this.info.storedNy,this.info.nz];encoder.copyTextureToTexture({texture:this.volumeA},{texture:this.volumeB},extent);const plan=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatchColumns(plan,this.planRemeshPipeline,this.planRemeshGroup);plan.end();for(let passIndex=0;passIndex<8;passIndex+=1){const smooth=encoder.beginComputePass();this.dispatchColumns(smooth,this.smoothRemeshPipeline,passIndex%2===0?this.smoothRemeshFirstGroup:this.smoothRemeshSecondGroup);smooth.end();}const remap=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(remap,this.remapPipeline,this.remapGroup);remap.end();if(this.pressureWarmStart)encoder.copyTextureToTexture({texture:this.pressureB},{texture:this.pressureA},extent);encoder.copyTextureToTexture({texture:this.heightB},{texture:this.heightA},[this.info.nx,this.info.nz,1]);}else{encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
-    {const timing=this.timing("rigidCoupling_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.rigidPipeline,this.rigidGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    if(remeshed){const extent:[number,number,number]=[this.info.nx,this.info.storedNy,this.info.nz];encoder.copyTextureToTexture({texture:this.volumeA},{texture:this.volumeB},extent);const plan=encoder.beginComputePass();this.dispatchColumns(plan,this.planRemeshPipeline,this.planRemeshGroup);plan.end();for(let passIndex=0;passIndex<8;passIndex+=1){const smooth=encoder.beginComputePass();this.dispatchColumns(smooth,this.smoothRemeshPipeline,passIndex%2===0?this.smoothRemeshFirstGroup:this.smoothRemeshSecondGroup);smooth.end();}const remap=encoder.beginComputePass();this.dispatch(remap,this.remapPipeline,this.remapGroup);remap.end();if(this.pressureWarmStart)encoder.copyTextureToTexture({texture:this.pressureB},{texture:this.pressureA},extent);encoder.copyTextureToTexture({texture:this.heightB},{texture:this.heightA},[this.info.nx,this.info.nz,1]);physicsTrace?.completePhase(encoder,{id:"coarse-grid",label:"Tall-cell remesh + field transfer"});}else{encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);}
+    {const pass=encoder.beginComputePass();this.dispatch(pass,this.rigidPipeline,this.rigidGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}physicsTrace?.completePhase(encoder,{id:"other",label:"Rigid-body coupling"});
     {const pass=encoder.beginComputePass();this.dispatch(pass,this.preReductionPipeline,this.reductionGroup);pass.end();}
-    {const timing=this.timing("pressure_ms");const rhs=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start}}:undefined);this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder,{warmStart:this.pressureWarmStart&&this.stepIndex>0,topologyChanged:this.stepIndex===0||remeshed});if(timing&&this.querySet){const end=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:timing.end}});end.end();}}
-    {const timing=this.timing("projection_ms");encoder.copyTextureToTexture({texture:this.velocityA},{texture:this.velocityC},[this.info.nx,this.info.storedNy,this.info.nz]);const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}
-    if(this.pressureDefectCorrection){const pressureTiming=this.timing("pressure_ms");const rhs=encoder.beginComputePass(pressureTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:pressureTiming.start}}:undefined);this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder,{warmStart:false,topologyChanged:false});if(pressureTiming&&this.querySet){const end=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,endOfPassWriteIndex:pressureTiming.end}});end.end();}const projectionTiming=this.timing("projection_ms");const pass=encoder.beginComputePass(projectionTiming&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:projectionTiming.start,endOfPassWriteIndex:projectionTiming.end}}:undefined);this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}captureTexture("pressure",this.pressureA);captureTexture("projection",this.velocityA);
+    {const rhs=encoder.beginComputePass();this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder,{warmStart:this.pressureWarmStart&&this.stepIndex>0,topologyChanged:this.stepIndex===0||remeshed});}physicsTrace?.completePhase(encoder,{id:"pressure-solve",label:"Tall-cell multigrid pressure"});
+    {encoder.copyTextureToTexture({texture:this.velocityA},{texture:this.velocityC},[this.info.nx,this.info.storedNy,this.info.nz]);const pass=encoder.beginComputePass();this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);}physicsTrace?.completePhase(encoder,{id:"velocity-projection",label:"Tall-cell velocity projection"});
+    if(this.pressureDefectCorrection){const rhs=encoder.beginComputePass();this.dispatch(rhs,this.buildRhsPipeline,this.pressureRhsGroup);rhs.end();this.multigrid.encode(encoder,{warmStart:false,topologyChanged:false});physicsTrace?.completePhase(encoder,{id:"pressure-solve",label:"Pressure defect correction"});const pass=encoder.beginComputePass();this.dispatch(pass,this.projectPipeline,this.projectGroup);pass.end();encoder.copyTextureToTexture({texture:this.velocityB},{texture:this.velocityA},[this.info.nx,this.info.storedNy,this.info.nz]);encoder.copyTextureToTexture({texture:this.volumeB},{texture:this.volumeA},[this.info.nx,this.info.storedNy,this.info.nz]);physicsTrace?.completePhase(encoder,{id:"velocity-projection",label:"Defect-correction projection"});}
     if(activeBodies.length>0){const cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);this.rigidSystem.encode(encoder,delta,cellVolume,1,h.y);}
     this.stepIndex+=1;
-    {const timing=this.timing("diagnostics_ms");const pass=encoder.beginComputePass(timing&&this.querySet?{timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:timing.start,endOfPassWriteIndex:timing.end}}:undefined);this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}if(totalTiming&&this.querySet){const pass=encoder.beginComputePass({timestampWrites:{querySet:this.querySet,beginningOfPassWriteIndex:totalTiming.end}});pass.end();}if(this.querySet&&this.queryResolve&&this.queryCount>0)encoder.resolveQuerySet(this.querySet,0,this.queryCount,this.queryResolve,0);
-    const submittedAt=performance.now();this.device.queue.submit([encoder.finish()]);stageCapture?.afterSubmit();if(this.performanceReadbacksEnabled&&!this.wallTimingPending){this.wallTimingPending=true;void this.device.queue.onSubmittedWorkDone().then(()=>{this.info.gpuQueueWall_ms=performance.now()-submittedAt;this.info.gpuQueueSimulation_s=delta;}).catch(()=>{ /* Device loss is handled by the renderer. */ }).finally(()=>{this.wallTimingPending=false;});}
+    {const pass=encoder.beginComputePass();this.dispatch(pass,this.reductionPipeline,this.reductionGroup);pass.end();}physicsTrace?.completePhase(encoder,{id:"adaptive-publication",label:"Rigid integration + diagnostics publication"});physicsTrace?.resolve(encoder);
+    const submittedAt=performance.now();physicsQueueTrace?.begin();this.device.queue.submit([encoder.finish()]);const physicsQueueTraceRead=physicsQueueTrace?.read(this.device.queue);const physicsTraceRead=physicsTrace?physicsTrace.read().then(trace=>trace??physicsQueueTraceRead).catch(()=>physicsQueueTraceRead):physicsQueueTraceRead;if(physicsTraceRead){this.lastPhysicsTraceAt_ms=submittedAt;this.physicsTracePending=true;void physicsTraceRead.then(trace=>{if(trace)this.info.physicsTrace=trace;}).catch(()=>physicsTrace?.destroy()).finally(()=>{this.physicsTracePending=false;});}
     if(!this.validationChecked){this.validationChecked=true;void this.device.popErrorScope().then(error=>{if(error)console.error(`GPU fluid validation: ${error.message}`);}).catch(()=>{ /* Device loss is handled by the renderer. */ });}return true;
   }
 
   async readStats(){
-    if(!this.performanceReadbacksEnabled||this.stepIndex===0)return this.info;
+    if(this.stepIndex===0)return this.info;
     if(this.readbackPending)return this.info;
     this.readbackPending=true;
-    const diagnosticBytes=128,governorBytes=16,queryOffset=diagnosticBytes+governorBytes,querySegments=[...this.querySegments],queryBytes=this.queryResolve?this.queryCount*8:0;
-    const buffer=this.device.createBuffer({size:queryOffset+queryBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    const diagnosticBytes=128,governorBytes=16;
+    const buffer=this.device.createBuffer({size:diagnosticBytes+governorBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
     const encoder=this.device.createCommandEncoder();
     encoder.copyBufferToBuffer(this.reductionBuffer,0,buffer,0,diagnosticBytes);
     encoder.copyBufferToBuffer(this.governorBuffer,0,buffer,diagnosticBytes,governorBytes);
-    if(this.queryResolve&&queryBytes>0)encoder.copyBufferToBuffer(this.queryResolve,0,buffer,queryOffset,queryBytes);
     this.device.queue.submit([encoder.finish()]);
     try{
       await buffer.mapAsync(GPUMapMode.READ);
@@ -1963,19 +1351,10 @@ export class WebGPUEulerianSolver {
       this.info.highCflCellCount=words[31];
       this.info.lastSubsteps=governorWords[1];this.info.lastDt_s=decodePositiveFloat(governorWords[2]);this.info.encodedSteps=governorWords[3];
       const measuredFrameDt=(this.info.lastDt_s??0)*(this.info.lastSubsteps??1);this.info.stabilityFlags=classifyTallCellStability({nonFiniteCount:this.info.nonFiniteCount,pressureRelativeResidual:this.info.pressureRelativeResidual,maxComponentCfl:this.info.maxComponentCfl,highCflCellCount:this.info.highCflCellCount,maxDivergenceBefore_s:this.info.maxDivergenceBefore_s,maxDivergenceAfter_s:this.info.maxDivergenceAfter_s,dt_s:measuredFrameDt||this.lastFrameDt});
-      if(queryBytes>0){
-        const times=new BigUint64Array(buffer.getMappedRange(queryOffset,queryBytes));
-        const stageByField:Partial<Record<GPUPhysicsTimingField,GPUPhysicsStageId>>={preparation_ms:"preparation",layerConstruction_ms:"topology",advection_ms:"advection",conditioning_ms:"conditioning",remeshing_ms:"remeshing",pressure_ms:"pressure",powerAssembly_ms:"powerAssembly",pressureSolve_ms:"pressureSolve",projection_ms:"projection",powerProjection_ms:"powerProjection",velocityProjection_ms:"velocityProjection",faceBand_ms:"faceBand",faceMarch_ms:"faceMarch",powerPublication_ms:"powerPublication",extrapolation_ms:"extrapolation",materialization_ms:"materialization",surfaceUpdate_ms:"surfaceUpdate",fineTopology_ms:"fineTopology",fineTransport_ms:"fineTransport",fineRedistance_ms:"fineRedistance",rigidCoupling_ms:"rigidCoupling",spray_ms:"spray",fluidResidency_ms:"fluidResidency",sparsePublication_ms:"sparsePublication",diagnostics_ms:"diagnostics"};
-        const activeStages=[...new Set(querySegments.map(segment=>stageByField[segment.name]).filter((stage):stage is GPUPhysicsStageId=>Boolean(stage)))];
-        const timings=emptyGPUPhysicsTimings(activeStages);
-        const decoded=decodeGPUPhysicsTimestampSegments(times,querySegments);
-        for(const name of new Set(querySegments.map(segment=>segment.name)))timings[name]=decoded[name]??0;
-        const categorized=categorizedGPUPhysicsTime_ms(timings);timings.total_ms=Math.max(timings.total_ms,categorized);timings.overhead_ms=Math.max(0,timings.total_ms-categorized);this.info.gpuTimings=timings;this.info.gpuStep_ms=timings.total_ms;
-      }
       buffer.unmap();
     }catch(error){console.error("Tall-cell diagnostics readback failed",error);}finally{buffer.destroy();this.readbackPending=false;}
     return this.info;
   }
 
-  destroy(){this.multigrid.destroy();this.velocityHierarchy?.destroy();for(const t of [this.velocityA,this.velocityB,this.velocityC,this.velocityD,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.solidA,this.solidB,this.heightA,this.heightB,this.terrainTexture])t.destroy();this.params.destroy();this.reductionBuffer.destroy();this.governorBuffer.destroy();this.phiDispatchBuffer.destroy();this.rigidSystem.destroy();this.rigidExchangeBuffer.destroy();this.nextColumnBases.destroy();this.smoothedColumnBases.destroy();this.querySet?.destroy();this.queryResolve?.destroy();}
+  destroy(){this.multigrid.destroy();this.velocityHierarchy?.destroy();for(const t of [this.velocityA,this.velocityB,this.velocityC,this.velocityD,this.pressureA,this.pressureB,this.volumeA,this.volumeB,this.solidA,this.solidB,this.heightA,this.heightB,this.terrainTexture])t.destroy();this.params.destroy();this.reductionBuffer.destroy();this.governorBuffer.destroy();this.phiDispatchBuffer.destroy();this.rigidSystem.destroy();this.rigidExchangeBuffer.destroy();this.nextColumnBases.destroy();this.smoothedColumnBases.destroy();}
 }

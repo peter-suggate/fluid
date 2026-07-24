@@ -21,7 +21,7 @@ test("larger hydrostatic oracle is a 32x24x16 body-free tank with a quarter-cell
     height_m: 1.2,
     depth_m: 0.8,
     fillFraction: 61 / 96,
-    top: "open",
+    top: "closed",
     fluidWallMode: "free-slip",
   });
   assert.equal(scene.container.height_m * scene.container.fillFraction, 0.7625);
@@ -49,7 +49,7 @@ test("minimal power dam uses a two-level authoritative analytic initializer in a
     height_m: 0.8,
     depth_m: 0.8,
     fillFraction: 23 / 64,
-    top: "open",
+    top: "closed",
     fluidWallMode: "free-slip",
   });
   assert.equal(scene.fluid.initialCondition, "dam-break");
@@ -96,9 +96,7 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
     overrides: {
       maximumLeafSize: "2",
       interfaceRefinementBandCells: 3,
-      faceVelocityTransport: "on",
       globalFineLevelSetFactor: "4",
-      powerDiagramProjection: "authoritative",
     },
   });
   for (const id of ["hydrostatic-power-two-level", "minimal-power-dam-break"] as const) {
@@ -134,8 +132,6 @@ test("isolated Dawn commands pin the authored adaptive power configurations", ()
   assert.match(dam, /FLUID_OCTREE_INTERFACE_BAND=3/);
   assert.match(dam, /FLUID_POWER_AUDIT_EVERY_STEPS=1/);
   assert.match(dam, /FLUID_WEBGPU_SMOKE_TIMEOUT_MS=240000/);
-  assert.doesNotMatch(dam, /FLUID_DISABLE_TIMESTAMPS=1/,
-    "the exhaustive regression must use the UI's timestamp-enabled submission path");
 
   const motion = packageJson.scripts["test:webgpu:minimal-power-dam-break-motion"];
   assert.match(motion, /FLUID_TARGET_S=0\.5/);
@@ -192,4 +188,22 @@ test("moving dam Dawn regression crosses the rejected generation and checks open
     "the raster oracle must inspect the authored dam corner rather than only the tank-wall corner");
   assert.doesNotMatch(smoke, /minimumPairedFraction/,
     "an uncapped liquid\/air surface must not be judged as a closed wall-capped solid");
+});
+
+test("per-generation Dawn audit records the owner arena's independent self-publication clock", () => {
+  const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+  assert.match(smoke,
+    /readBufferBinding\(device,\s*\{ buffer: audited\.powerOwnerArena \}, 64\)/,
+    "each audited step must read the complete 16-word owner control packet");
+  assert.match(smoke,
+    /const ownerControl = unpackOctreeOwnerPageControl\(ownerArena\)[\s\S]*ownerArena: \{[\s\S]*\.\.\.ownerControl/,
+    "the result must decode the complete owner control packet through its canonical ABI");
+  assert.match(smoke,
+    /publicationValid: octreePowerOwnerArenaPublicationIsValid\(ownerArena\)[\s\S]*powerGeneration: face\[7\][\s\S]*generationMatchesPowerClock: ownerControl\.acceptedGeneration === face\[7\]/,
+    "owner self-publication and its relationship to the independent power clock remain separately visible");
+  assert.match(smoke, /ownerArenaAudit: lastOwnerArenaAudit/,
+    "the final result record must preserve successful owner evidence even when verbose generation logging is disabled");
+  assert.match(smoke,
+    /Owner topology has an independent generation namespace[\s\S]*!audit\.ownerArena\.publicationValid/,
+    "admission validates the owner transaction itself and never requires equality with the power clock");
 });

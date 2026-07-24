@@ -6,9 +6,11 @@ import {
   WEBGPU_SMOKE_KILL_REAP_MS,
   WEBGPU_SMOKE_TERMINATE_GRACE_MS,
 } from "./webgpu-smoke-isolation";
+import { dawnReproductionForSmokeEnvironment } from "../lib/webgpu-failure-reproduction";
 
 const timeout_ms = parseWebGPUSmokeTimeout(process.env.FLUID_WEBGPU_SMOKE_TIMEOUT_MS);
 const worker = fileURLToPath(new URL("./run-webgpu-smoke-isolated-worker.ts", import.meta.url));
+const reproduction = dawnReproductionForSmokeEnvironment(process.env);
 
 console.error("SAFETY: close every browser WebGPU tab before this isolated Dawn smoke. Never run Dawn and browser GPU validation concurrently.");
 const child = spawn(process.execPath, ["--import", "tsx", worker], {
@@ -22,6 +24,7 @@ console.log(JSON.stringify({
   timeout_ms,
   exclusiveLock: WEBGPU_EXCLUSIVE_LOCK,
   isolation: "child-process",
+  ...(reproduction ? { reproduction } : {}),
 }));
 
 let timedOut = false;

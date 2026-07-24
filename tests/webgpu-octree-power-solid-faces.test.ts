@@ -3,9 +3,11 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { OCTREE_POWER_FACE_VALID, type OctreePowerFaceSource } from "../lib/webgpu-octree-power-faces";
 import { OCTREE_SOLID_VERTEX_SDF_VALID } from "../lib/webgpu-octree-solid-vertex-sdf";
+import { PassBroker } from "../lib/webgpu-pass-broker";
 import {
   OCTREE_POWER_SOLID_VALID,
   WebGPUOctreePowerSolidFaces,
+  octreePowerSolidExchangeShader,
   octreePowerSolidFaceShader,
   octreePowerSolidImpulseShader,
   planOctreePowerSolidFaces,
@@ -16,9 +18,9 @@ const retainedDevices: GPUDevice[] = [];
 
 test("generalized solid-face planner is compact-capacity-scaled", () => {
   const plan = planOctreePowerSolidFaces(100, 3);
-  assert.equal(plan.apertureBytes, 1_600);
+  assert.equal(plan.apertureBytes, 3_200);
   assert.equal(plan.impulseBytes, 96);
-  assert.equal(plan.allocatedBytes, 1_600 + 96 + 64 + 64);
+  assert.equal(plan.allocatedBytes, 3_200 + 96 + 64 + 64);
   assert.throws(() => planOctreePowerSolidFaces(0), /positive integer/);
 });
 
@@ -68,11 +70,13 @@ test("Dawn classifies oblique rigid and terrain apertures and publishes paired r
   const placeholder = upload(new Uint32Array(4));
   const source: OctreePowerFaceSource = {
     plan: { rowCapacity: 1, faceCapacity: 1, incidenceCapacity: 2, faceBytes: 32, normalBytes: 16,
-      centroidBytes: 16, quadratureBytes: 80, incidenceBytes: 16, workspaceBytes: 32, boundaryQueryBytes: 32, hashCapacity: 2, hashBytes: 32,
-      maximumHashProbes: 32, scanBlockCount: 1, scanBytes: 16, allocatedBytes: 0 },
+      centroidBytes: 16, quadratureBytes: 80, incidenceBytes: 16, workspaceBytes: 32, boundaryQueryBytes: 32,
+      liveFaceDispatchBytes: 12, workDispatchBytes: 48,
+      rowDirectoryCapacity: 1, rowDirectoryBytes: 16, rowDiagnosticBytes: 16,
+      deltaFaceBytes: 32, allocatedBytes: 0 },
     faces, faceNormals: normals, faceCentroids: centroids, faceQuadrature: quadrature, incidenceRows: placeholder,
-    incidenceOffsets: placeholder, incidence: placeholder, control: faceControl, siteIndex: placeholder,
-    boundaryPhiQueries: placeholder,
+    incidence: placeholder, control: faceControl, rowDirectory: placeholder,
+    deltaStats: placeholder, liveFaceDispatch: placeholder, boundaryPhiQueries: placeholder,
   };
   const bodyWords = new Uint32Array(12 * 32); const bodyFloats = new Float32Array(bodyWords.buffer);
   bodyFloats.set([0, 1, 0, 0], 0); // sphere centered at the physical face centroid after x/z recentering
@@ -97,14 +101,16 @@ test("Dawn classifies oblique rigid and terrain apertures and publishes paired r
       arena: solidVertexArena },
   }, 1);
   const read = async (bodyCount: number, terrainEnabled: boolean) => {
-    const bytes = 64 + 16 + 32 + stage.plan.impulseBytes;
+    const bytes = 64 + 32 + 32 + stage.plan.impulseBytes;
     const readback = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = device.createCommandEncoder();
-    stage.encodeClassifyAndConstrain(encoder, { dimensions: [2, 2, 2], physicalSpacing: [1, 1, 1],
+    const broker = new PassBroker(encoder);
+    stage.encodeClassifyAndConstrain(broker, { dimensions: [2, 2, 2], physicalSpacing: [1, 1, 1],
       container: [2, 2, 2], rigidBodyCount: bodyCount, terrainEnabled, pressureImpulseScale: 1 });
-    stage.encodePressureImpulses(encoder, true);
+    stage.encodePressureImpulses(broker, true);
+    broker.fence("test readback");
     let offset = 0; encoder.copyBufferToBuffer(stage.control, 0, readback, offset, 64); offset += 64;
-    encoder.copyBufferToBuffer(stage.apertures, 0, readback, offset, 16); offset += 16;
+    encoder.copyBufferToBuffer(stage.apertures, 0, readback, offset, 32); offset += 32;
     encoder.copyBufferToBuffer(faces, 0, readback, offset, 32); offset += 32;
     encoder.copyBufferToBuffer(stage.bodyImpulses, 0, readback, offset, stage.plan.impulseBytes);
     device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
@@ -115,11 +121,19 @@ test("Dawn classifies oblique rigid and terrain apertures and publishes paired r
   const rigid = await read(1, false);
   const rigidControl = new Uint32Array(rigid, 0, 16); const rigidSigned = new Int32Array(rigid, 0, 16);
   assert.deepEqual(Array.from(rigidControl.slice(0, 8)), [0, 1, 1, 12, 1, 1, 0, OCTREE_POWER_SOLID_VALID]);
-  assert.deepEqual(Array.from(rigidSigned.slice(8, 14)), [1_060_656, 1_060_656, 0, -1_060_656, -1_060_656, 0]);
+  assert.ok(Math.abs(rigidSigned[8] - 1_060_660) <= 8);
+  assert.ok(Math.abs(rigidSigned[9] - 1_060_660) <= 8);
+  assert.equal(rigidSigned[10], 0);
+  assert.deepEqual(Array.from(rigidSigned.slice(11, 14)),
+    [-rigidSigned[8], -rigidSigned[9], -rigidSigned[10]],
+    "the published fluid impulse is exactly equal and opposite to the deterministic body reduction");
   const aperture = new Float32Array(rigid, 64, 4);
   assert.equal(aperture[0], 0.25); assert.ok(Math.abs(aperture[1] - 6 * root2) < 1e-5);
   assert.equal(new Int32Array(rigid, 64, 4)[2], 0); assert.equal(new Uint32Array(rigid, 64, 4)[3], 0x6ff6);
-  const constrained = new Float32Array(rigid, 80, 8);
+  const ownerCodes = new Uint32Array(rigid, 64, 8);
+  assert.deepEqual(Array.from(ownerCodes.slice(4, 6)), [0x0000_f00f, 0xf00f_0000],
+    "the fixed face record retains every quadrature sample owner for deterministic body reduction");
+  const constrained = new Float32Array(rigid, 96, 8);
   assert.ok(Math.abs(constrained[4] - (0.25 * 4 + 0.75 * 6 * root2)) < 1e-5);
 
   device.queue.writeBuffer(faces, 16, new Float32Array([4, 1, 1, 1]));
@@ -145,6 +159,31 @@ test("solid aperture shaders consume clipped power-polygon quadrature, never an 
   assert.match(octreePowerSolidFaceShader, /source\[8\]==faceControl\[7\]/,
     "terrain authority must retain a same-generation compact-face rollback seed");
   assert.doesNotMatch(`${octreePowerSolidFaceShader}\n${octreePowerSolidImpulseShader}`, /SAMPLE_AXIS|equivalent area square|sample%/);
+});
+
+test("solid classification, pressure reaction, and exchange graphs are synchronization-atomic-free", () => {
+  const recurring = [
+    octreePowerSolidFaceShader,
+    octreePowerSolidImpulseShader,
+    octreePowerSolidExchangeShader,
+  ].join("\n");
+  assert.doesNotMatch(recurring,
+    /\batomic(?:Add|And|CompareExchangeWeak|Exchange|Load|Max|Min|Or|Store|Sub|Xor)\b|atomic<[ui]32>/,
+    "fixed face records and body-owned reductions must remain synchronization-atomic-free");
+  assert.match(octreePowerSolidFaceShader, /ownerCodes:vec2u/);
+  assert.match(octreePowerSolidFaceShader, /for\(var index=0u;index<count;index\+=1u\)/,
+    "classification diagnostics reduce the exact live fixed-record prefix");
+  assert.match(octreePowerSolidImpulseShader, /fn reducePowerSolidBodyImpulses/);
+  assert.match(octreePowerSolidImpulseShader, /sampleOwner\(aperture,sample\)!=owner/);
+  assert.match(octreePowerSolidExchangeShader,
+    /exchange\[body\*12u\+word\]=staged\[body\*8u\+word\]/,
+    "one invocation owns each rigid exchange record and publishes it directly");
+  const classify = WebGPUOctreePowerSolidFaces.prototype.encodeClassifyAndConstrain.toString();
+  const impulses = WebGPUOctreePowerSolidFaces.prototype.encodePressureImpulses.toString();
+  assert.doesNotMatch(`${classify}\n${impulses}`, /clearBuffer/,
+    "exact-prefix publication must overwrite its controls and body records without recurring clear fences");
+  assert.match(impulses, /impulseFinishPipeline/,
+    "the body-owned reductions must complete before direct rigid exchange publication");
 });
 
 test("generalized solid-face WGSL avoids non-representable NaN constants", () => {

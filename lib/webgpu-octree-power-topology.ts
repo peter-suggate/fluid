@@ -6,11 +6,22 @@ import {
 } from "./generated/octree-power-catalog";
 import { OCTREE_POWER_CATALOG_FACE_FLOATS } from "./octree-power-catalog";
 import { OCTREE_POWER_ROW_METRIC_BYTES } from "./octree-power-operator";
+import {
+  OCTREE_POWER_ROW_DELTA_VALID,
+  assertOctreePowerRowDeltaLayout,
+  type OctreePowerRowDeltaSource,
+} from "./webgpu-octree-power-descriptor";
+import { PassBroker } from "./webgpu-pass-broker";
 
 export const OCTREE_POWER_TOPOLOGY_CONTROL_BYTES = 32;
+// WGSL ControlArena: two 32-byte controls followed by two independently
+// 16-byte-aligned vec3u dispatches and two scalar counters.
+const OCTREE_POWER_TOPOLOGY_CONTROL_ARENA_BYTES = 112;
 export const OCTREE_POWER_TOPOLOGY_VALID = 0x8000_0000;
 export const OCTREE_POWER_TOPOLOGY_BOUNDARY_SHIFT = 8;
 export const OCTREE_POWER_TOPOLOGY_BOUNDARY_MASK = 0x0000_3f00;
+/** The 18 occupied same-level neighbours of an interior Cartesian bulk cell. */
+export const OCTREE_POWER_REGULAR_DESCRIPTOR = 0x0003_ffff;
 export const OCTREE_POWER_TOPOLOGY_ERROR = Object.freeze({
   anisotropicCell: 1 << 0,
   lookupMiss: 1 << 1,
@@ -34,6 +45,8 @@ export interface OctreePowerTopologySource {
   readonly catalogEntryHeaders: GPUBuffer;
   readonly catalogVolumes: GPUBuffer;
   readonly catalogFaces: GPUBuffer;
+  /** Section 6.3 diagonal plus eighteen canonical face-slot coefficients. */
+  readonly catalogCoefficients: GPUBuffer;
   readonly catalogTetrahedronHeaders?: GPUBuffer;
   readonly catalogTetrahedra?: GPUBuffer;
   readonly catalogTetrahedronVertices?: GPUBuffer;
@@ -52,11 +65,17 @@ function positiveInteger(value: number, label: string): number {
   return value;
 }
 
+function topologyPublicationArenaBytes(rowCapacity: number): number {
+  const blocks = Math.ceil(rowCapacity / 256);
+  return (3 * rowCapacity + blocks + 1 + 6 * blocks) * 4;
+}
+
 export function planOctreePowerTopology(rowCapacityValue: number, catalog: GeneratedOctreePowerCatalogViews): OctreePowerTopologyPlan {
   const rowCapacity = positiveInteger(rowCapacityValue, "Power topology row capacity");
   if (catalog.lookup.length % 3 !== 0 || catalog.entryHeaders.length % 2 !== 0
     || catalog.faceData.length % OCTREE_POWER_CATALOG_FACE_FLOATS !== 0 || catalog.entryHeaders.length !== catalog.entryVolumes.length * 2
     || catalog.tetrahedronHeaders.length !== catalog.entryVolumes.length * 3
+    || catalog.coefficientData.length !== catalog.entryVolumes.length * 19
     || catalog.tetrahedronVertexData.length % 4 !== 0 || catalog.tetrahedronVertexData.length / 4 > 256
     || catalog.sameOrFinerDirect.length !== 1 << 18 || catalog.sameOrCoarserDirect.length !== 1 << 9) {
     throw new RangeError("Power catalog typed-array shape is invalid");
@@ -99,18 +118,22 @@ export function planOctreePowerTopology(rowCapacityValue: number, catalog: Gener
   const metricBytes = rowCapacity * OCTREE_POWER_ROW_METRIC_BYTES;
   const catalogBytes = catalog.entryHeaders.byteLength + catalog.entryVolumes.byteLength + catalog.faceData.byteLength
     + catalog.lookup.byteLength + catalog.sameOrFinerDirect.byteLength + catalog.sameOrCoarserDirect.byteLength
-    + catalog.tetrahedronHeaders.byteLength + catalog.tetrahedronData.byteLength + catalog.tetrahedronVertexData.byteLength;
+    + catalog.tetrahedronHeaders.byteLength + catalog.tetrahedronData.byteLength + catalog.tetrahedronVertexData.byteLength
+    + catalog.coefficientData.byteLength;
   return { rowCapacity, entryCount, lookupCount, metricBytes, catalogBytes,
-    allocatedBytes: metricBytes + OCTREE_POWER_TOPOLOGY_CONTROL_BYTES + 16 + 4 + catalogBytes };
+    allocatedBytes: 2 * metricBytes + OCTREE_POWER_TOPOLOGY_CONTROL_ARENA_BYTES + 48 + 12 + catalogBytes
+      + topologyPublicationArenaBytes(rowCapacity) };
 }
 
 export class WebGPUOctreePowerTopology {
   readonly plan: OctreePowerTopologyPlan;
   readonly metrics: GPUBuffer;
+  private readonly candidateMetrics: GPUBuffer;
   readonly control: GPUBuffer;
   readonly catalogEntryHeaders: GPUBuffer;
   readonly catalogVolumes: GPUBuffer;
   readonly catalogFaces: GPUBuffer;
+  readonly catalogCoefficients: GPUBuffer;
   readonly catalogTetrahedronHeaders: GPUBuffer;
   readonly catalogTetrahedra: GPUBuffer;
   readonly catalogTetrahedronVertices: GPUBuffer;
@@ -118,16 +141,25 @@ export class WebGPUOctreePowerTopology {
   readonly sameOrFinerDirect: GPUBuffer;
   readonly sameOrCoarserDirect: GPUBuffer;
   private readonly params: GPUBuffer;
-  private readonly hostRowCount: GPUBuffer;
+  private readonly workDispatch: GPUBuffer;
+  private readonly preparePipeline: GPUComputePipeline;
   private readonly resolvePipeline: GPUComputePipeline;
-  private readonly publishPipeline: GPUComputePipeline;
+  private readonly stagePipeline: GPUComputePipeline;
+  private readonly prefixPipeline: GPUComputePipeline;
+  private readonly scatterPipeline: GPUComputePipeline;
+  private readonly commitPipeline: GPUComputePipeline;
+  private readonly finalizePipeline: GPUComputePipeline;
   private readonly layout: GPUBindGroupLayout;
   private readonly device: GPUDevice;
+  private readonly regularPacked: number;
+  private readonly regularVolume: number;
   private destroyed = false;
 
   constructor(device: GPUDevice, rowCapacity: number, catalog: GeneratedOctreePowerCatalogViews) {
     this.device = device;
     this.plan = planOctreePowerTopology(rowCapacity, catalog);
+    this.regularPacked = catalog.sameOrFinerDirect[OCTREE_POWER_REGULAR_DESCRIPTOR];
+    this.regularVolume = catalog.entryVolumes[this.regularPacked & 0xffff];
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const upload = (label: string, data: ArrayBufferView) => {
       const buffer = device.createBuffer({
@@ -144,16 +176,28 @@ export class WebGPUOctreePowerTopology {
       return buffer;
     };
     this.metrics = device.createBuffer({ label: "Octree power row metrics", size: this.plan.metricBytes, usage: storage });
-    this.control = device.createBuffer({ label: "Octree power topology control", size: OCTREE_POWER_TOPOLOGY_CONTROL_BYTES, usage: storage });
-    this.params = device.createBuffer({ label: "Octree power topology params", size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.hostRowCount = device.createBuffer({ label: "Octree power topology host row count", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.candidateMetrics = device.createBuffer({ label: "Octree power row metric candidates", size: this.plan.metricBytes, usage: storage });
+    this.control = device.createBuffer({ label: "Octree power topology control transaction",
+      size: OCTREE_POWER_TOPOLOGY_CONTROL_ARENA_BYTES, usage: storage });
+    this.params = device.createBuffer({ label: "Octree power topology params", size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.workDispatch = device.createBuffer({ label: "Octree power topology work dispatch", size: 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
     this.catalogEntryHeaders = upload("Octree power catalog entry headers", catalog.entryHeaders);
     this.catalogVolumes = upload("Octree power catalog volumes", catalog.entryVolumes);
     this.catalogFaces = upload("Octree power catalog faces", catalog.faceData);
+    this.catalogCoefficients = upload("Octree power Section 6.3 coefficients", catalog.coefficientData);
     this.catalogTetrahedronHeaders = upload("Octree power catalog tetrahedron headers", catalog.tetrahedronHeaders);
     this.catalogTetrahedra = upload("Octree power catalog tetrahedra", catalog.tetrahedronData);
     this.catalogTetrahedronVertices = upload("Octree power catalog tetrahedron vertices", catalog.tetrahedronVertexData);
-    this.catalogLookup = upload("Octree power catalog lookup", catalog.lookup);
+    this.catalogLookup = device.createBuffer({
+      label: "Octree power catalog lookup and exact publication arena",
+      size: catalog.lookup.byteLength + topologyPublicationArenaBytes(rowCapacity),
+      usage: storage,
+      mappedAtCreation: true,
+    });
+    new Uint8Array(this.catalogLookup.getMappedRange(), 0, catalog.lookup.byteLength)
+      .set(new Uint8Array(catalog.lookup.buffer, catalog.lookup.byteOffset, catalog.lookup.byteLength));
+    this.catalogLookup.unmap();
     this.sameOrFinerDirect = upload("Octree power same/finer direct lookup", catalog.sameOrFinerDirect);
     this.sameOrCoarserDirect = upload("Octree power same/coarser direct lookup", catalog.sameOrCoarserDirect);
     this.layout = device.createBindGroupLayout({ label: "Octree power topology layout", entries: [
@@ -161,50 +205,80 @@ export class WebGPUOctreePowerTopology {
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
     const shaderModule = device.createShaderModule({ label: "Octree power topology", code: octreePowerTopologyShader });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
+    this.preparePipeline = device.createComputePipeline({ label: "Prepare octree power topology", layout: pipelineLayout,
+      compute: { module: shaderModule, entryPoint: "preparePowerTopology" } });
     this.resolvePipeline = device.createComputePipeline({ label: "Resolve octree power topology", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "resolvePowerTopology" } });
-    this.publishPipeline = device.createComputePipeline({ label: "Publish octree power topology", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "publishPowerTopology" } });
+    this.stagePipeline = device.createComputePipeline({ label: "Stage exact octree power topology delta", layout: pipelineLayout,
+      compute: { module: shaderModule, entryPoint: "stagePowerTopologyDelta" } });
+    this.prefixPipeline = device.createComputePipeline({ label: "Prefix exact octree power topology blocks", layout: pipelineLayout,
+      compute: { module: shaderModule, entryPoint: "prefixPowerTopologyDelta" } });
+    this.scatterPipeline = device.createComputePipeline({ label: "Scatter exact octree power topology publication rows", layout: pipelineLayout,
+      compute: { module: shaderModule, entryPoint: "scatterPowerTopologyDelta" } });
+    this.commitPipeline = device.createComputePipeline({ label: "Commit changed octree power topology rows", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "commitPowerTopology" } });
+    this.finalizePipeline = device.createComputePipeline({ label: "Finalize octree power topology", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "finalizePowerTopology" } });
   }
 
-  private createGroup(descriptors: GPUBuffer, rowCountSource: GPUBuffer): GPUBindGroup {
+  private createGroup(descriptors: GPUBuffer, rowCountSource: GPUBuffer, rowDelta: OctreePowerRowDeltaSource): GPUBindGroup {
     return this.device.createBindGroup({ label: "Octree power topology bindings", layout: this.layout, entries: [
       { binding: 0, resource: { buffer: this.params } }, { binding: 1, resource: { buffer: descriptors } },
-      { binding: 2, resource: { buffer: this.metrics } }, { binding: 3, resource: { buffer: this.control } },
+      { binding: 2, resource: { buffer: this.candidateMetrics } }, { binding: 3, resource: { buffer: this.control } },
       { binding: 4, resource: { buffer: this.catalogLookup } }, { binding: 5, resource: { buffer: this.catalogVolumes } },
       { binding: 6, resource: { buffer: this.sameOrFinerDirect } }, { binding: 7, resource: { buffer: this.sameOrCoarserDirect } },
       { binding: 8, resource: { buffer: rowCountSource } },
+      { binding: 9, resource: { buffer: rowDelta.rows } },
+      { binding: 10, resource: { buffer: this.metrics } },
     ] });
   }
 
-  encode(encoder: GPUCommandEncoder, descriptors: GPUBuffer, rowCount: number | GPUBuffer, physicalSpacing: readonly [number, number, number]): void {
+  encode(broker: PassBroker, descriptors: GPUBuffer, rowCount: GPUBuffer,
+    physicalSpacing: readonly [number, number, number], rowDelta: OctreePowerRowDeltaSource): void {
     if (this.destroyed) throw new Error("Octree power topology is destroyed");
-    const hostRowCount = typeof rowCount === "number" ? rowCount : this.plan.rowCapacity;
-    if (!Number.isSafeInteger(hostRowCount) || hostRowCount < 0 || hostRowCount > this.plan.rowCapacity) throw new RangeError("Power topology row count exceeds capacity");
-    if (typeof rowCount === "number") this.device.queue.writeBuffer(this.hostRowCount, 0, new Uint32Array([rowCount]));
+    assertOctreePowerRowDeltaLayout(rowDelta, this.plan.rowCapacity, "Power topology");
     const anisotropic = powerCellSpacingIsotropic(physicalSpacing) ? 0 : 1;
-    this.device.queue.writeBuffer(this.params, 0, new Uint32Array([
-      hostRowCount, this.plan.lookupCount,
-      anisotropic, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.version,
-    ]));
-    const group = this.createGroup(descriptors, typeof rowCount === "number" ? this.hostRowCount : rowCount);
-    if (hostRowCount > 0) {
-      const resolve = encoder.beginComputePass({ label: "Resolve power topology descriptors" });
-      resolve.setPipeline(this.resolvePipeline); resolve.setBindGroup(0, group); resolve.dispatchWorkgroups(Math.ceil(hostRowCount / 64)); resolve.end();
-    }
-    const publish = encoder.beginComputePass({ label: "Publish power topology control" });
-    publish.setPipeline(this.publishPipeline); publish.setBindGroup(0, group); publish.dispatchWorkgroups(1); publish.end();
+    const parameterBytes = new ArrayBuffer(48);
+    const parameterWords = new Uint32Array(parameterBytes);
+    parameterWords.set([this.plan.rowCapacity, this.plan.lookupCount, anisotropic,
+      OCTREE_GENERATED_POWER_CATALOG_MANIFEST.version, this.regularPacked, 0, 0, 0]);
+    parameterWords.set([rowDelta.controlOffsetWords, rowDelta.newToOldOffsetWords,
+      rowDelta.affectedRowsOffsetWords, 1], 8);
+    new Float32Array(parameterBytes)[5] = this.regularVolume;
+    this.device.queue.writeBuffer(this.params, 0, parameterBytes);
+    const group = this.createGroup(descriptors, rowCount, rowDelta);
+    let pass = broker.compute({ label: "Prepare power topology delta" });
+    pass.setPipeline(this.preparePipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(1);
+    broker.copyBufferToBuffer(rowDelta.rows, (rowDelta.controlOffsetWords + 12) * 4,
+      this.workDispatch, 0, 12);
+    pass = broker.compute({ label: "Resolve affected power topology rows" });
+    pass.setPipeline(this.resolvePipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
+    broker.copyBufferToBuffer(this.control, 64, this.workDispatch, 0, 12);
+    pass = broker.compute({ label: "Stage exact power topology carry and affected rows" });
+    pass.setPipeline(this.stagePipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
+    pass.setPipeline(this.prefixPipeline); pass.dispatchWorkgroups(1);
+    pass.setPipeline(this.scatterPipeline); pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
+    broker.copyBufferToBuffer(this.control, 80,
+      this.workDispatch, 0, 12);
+    pass = broker.compute({ label: "Commit power topology delta" });
+    pass.setPipeline(this.commitPipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
+    pass.setPipeline(this.finalizePipeline); pass.dispatchWorkgroups(1);
   }
 
   get source(): OctreePowerTopologySource {
     return { plan: this.plan, metrics: this.metrics, control: this.control, catalogEntryHeaders: this.catalogEntryHeaders,
       catalogVolumes: this.catalogVolumes, catalogFaces: this.catalogFaces, catalogLookup: this.catalogLookup,
+      catalogCoefficients: this.catalogCoefficients,
       catalogTetrahedronHeaders: this.catalogTetrahedronHeaders, catalogTetrahedra: this.catalogTetrahedra,
       catalogTetrahedronVertices: this.catalogTetrahedronVertices,
       sameOrFinerDirect: this.sameOrFinerDirect, sameOrCoarserDirect: this.sameOrCoarserDirect };
@@ -213,42 +287,184 @@ export class WebGPUOctreePowerTopology {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.metrics.destroy(); this.control.destroy(); this.params.destroy(); this.hostRowCount.destroy();
-    this.catalogEntryHeaders.destroy(); this.catalogVolumes.destroy(); this.catalogFaces.destroy(); this.catalogLookup.destroy();
+    this.metrics.destroy(); this.candidateMetrics.destroy();
+    this.control.destroy(); this.params.destroy(); this.workDispatch.destroy();
+    this.catalogEntryHeaders.destroy(); this.catalogVolumes.destroy(); this.catalogFaces.destroy(); this.catalogCoefficients.destroy(); this.catalogLookup.destroy();
     this.catalogTetrahedronHeaders.destroy(); this.catalogTetrahedra.destroy();
     this.catalogTetrahedronVertices.destroy();
     this.sameOrFinerDirect.destroy(); this.sameOrCoarserDirect.destroy();
   }
+
 }
 
 export const octreePowerTopologyShader = /* wgsl */ `
-struct Params { rowCount:u32, lookupCount:u32, anisotropic:u32, catalogVersion:u32 }
+struct Params { rowCount:u32, lookupCount:u32, anisotropic:u32, catalogVersion:u32, regularPacked:u32, regularVolume:f32, pad0:u32, pad1:u32, delta:vec4u }
 struct PowerRowMetric { topologyCode:u32, transformAndFlags:u32, volume:f32, reserved:u32 }
-struct CatalogLookup { descriptor:u32, entry:u32, transform:u32 }
 struct Control { invalidCount:u32, firstInvalid:u32, flags:u32, resolvedCount:u32, version:u32, pad0:u32, pad1:u32, pad2:u32 }
+// Candidate is first because it is the public current-attempt diagnostic.
+// Authority is private retained state used only to validate immutable carry.
+struct ControlArena {
+  candidate:Control,
+  authority:Control,
+  blockDispatch:vec3u,
+  commitDispatch:vec3u,
+  publicationCount:u32,
+  blockCount:u32,
+}
 @group(0) @binding(0) var<uniform> params:Params;
 @group(0) @binding(1) var<storage,read> descriptors:array<u32>;
 @group(0) @binding(2) var<storage,read_write> metrics:array<PowerRowMetric>;
-@group(0) @binding(3) var<storage,read_write> control:Control;
-@group(0) @binding(4) var<storage,read> lookup:array<CatalogLookup>;
+@group(0) @binding(3) var<storage,read_write> controlArena:ControlArena;
+@group(0) @binding(4) var<storage,read_write> lookupArena:array<u32>;
 @group(0) @binding(5) var<storage,read> volumes:array<f32>;
 @group(0) @binding(6) var<storage,read> sameOrFinerDirect:array<u32>;
 @group(0) @binding(7) var<storage,read> sameOrCoarserDirect:array<u32>;
 @group(0) @binding(8) var<storage,read> rowCountSource:array<u32>;
+@group(0) @binding(9) var<storage,read> rowDelta:array<u32>;
+@group(0) @binding(10) var<storage,read_write> committedMetrics:array<PowerRowMetric>;
 const INVALID:u32=0xffffffffu;
+const ROW_DELTA_VALID:u32=${OCTREE_POWER_ROW_DELTA_VALID}u;
+const ROW_DELTA_AFFECTED:u32=0x80000000u;
 const VALID:u32=0x80000000u;
 const ANISOTROPIC:u32=1u;
 const LOOKUP_MISS:u32=2u;
 const CAPACITY:u32=8u;
+const REGULAR_DESCRIPTOR:u32=0x3ffffu;
+const STATUS_VALID:u32=0x80000000u;
+const STATUS_PUBLISH:u32=0x40000000u;
+const STATUS_AFFECTED:u32=0x20000000u;
 fn powerTransformVector(value:vec3i,code:u32)->vec3i{
   let signs=vec3i(select(1,-1,(code&1u)!=0u),select(1,-1,(code&2u)!=0u),select(1,-1,(code&4u)!=0u));let permutation=(code/8u)%6u;var q=value;
   if(permutation==1u){q=value.xzy;}else if(permutation==2u){q=value.yxz;}else if(permutation==3u){q=value.yzx;}else if(permutation==4u){q=value.zxy;}else if(permutation==5u){q=value.zyx;}return q*signs;
 }
 fn boundaryDirectionBit(direction:vec3i)->u32{if(direction.x<0){return 0u;}if(direction.y<0){return 1u;}if(direction.z<0){return 2u;}if(direction.z>0){return 3u;}if(direction.y>0){return 4u;}return 5u;}
 fn transformBoundaryMask(mask:u32,transform:u32)->u32{let directions=array<vec3i,6>(vec3i(-1,0,0),vec3i(0,-1,0),vec3i(0,0,-1),vec3i(0,0,1),vec3i(0,1,0),vec3i(1,0,0));var result=0u;for(var bit=0u;bit<6u;bit+=1u){if((mask&(1u<<bit))!=0u){result|=1u<<boundaryDirectionBit(powerTransformVector(directions[bit],transform));}}return result;}
-fn resolveBoundaryEntry(interiorEntry:u32,canonicalMask:u32)->u32{let key=interiorEntry*64u+canonicalMask;var low=0u;var high=min(params.lookupCount,arrayLength(&lookup));while(low<high){let middle=low+(high-low)/2u;let candidate=lookup[middle].descriptor;if(candidate<key){low=middle+1u;}else{high=middle;}}if(low>=min(params.lookupCount,arrayLength(&lookup))||lookup[low].descriptor!=key){return INVALID;}return lookup[low].entry;}
-fn resolveDescriptor(descriptor:u32)->vec2u{let boundary=(descriptor>>24u)&63u;let geometry=descriptor&0xc0ffffffu;var packed=INVALID;if((geometry&0x80000000u)!=0u){let index=geometry&0x1ffu;if((geometry&0x40fffe00u)==0u&&index<arrayLength(&sameOrCoarserDirect)){packed=sameOrCoarserDirect[index];}}else{let index=geometry&0x3ffffu;if((geometry&0x40fc0000u)==0u&&index<arrayLength(&sameOrFinerDirect)){packed=sameOrFinerDirect[index];}}if(packed==INVALID){return vec2u(INVALID);}let transform=packed>>16u;var entry=packed&0xffffu;if(boundary!=0u){entry=resolveBoundaryEntry(entry,transformBoundaryMask(boundary,transform));if(entry==INVALID){return vec2u(INVALID);}}return vec2u(entry,transform);}
+fn resolveBoundaryEntry(interiorEntry:u32,canonicalMask:u32)->u32{let key=interiorEntry*64u+canonicalMask;var low=0u;var high=min(params.lookupCount,arrayLength(&lookupArena)/3u);while(low<high){let middle=low+(high-low)/2u;let candidate=lookupArena[3u*middle];if(candidate<key){low=middle+1u;}else{high=middle;}}if(low>=min(params.lookupCount,arrayLength(&lookupArena)/3u)||lookupArena[3u*low]!=key){return INVALID;}return lookupArena[3u*low+1u];}
+fn resolveDescriptor(descriptor:u32)->vec2u{let boundary=(descriptor>>24u)&63u;let geometry=descriptor&0xc0ffffffu;if(geometry==REGULAR_DESCRIPTOR&&boundary==0u){return vec2u(params.regularPacked&0xffffu,params.regularPacked>>16u);}var packed=INVALID;if((geometry&0x80000000u)!=0u){let index=geometry&0x1ffu;if((geometry&0x40fffe00u)==0u&&index<arrayLength(&sameOrCoarserDirect)){packed=sameOrCoarserDirect[index];}}else{let index=geometry&0x3ffffu;if((geometry&0x40fc0000u)==0u&&index<arrayLength(&sameOrFinerDirect)){packed=sameOrFinerDirect[index];}}if(packed==INVALID){return vec2u(INVALID);}let transform=packed>>16u;var entry=packed&0xffffu;if(boundary!=0u){entry=resolveBoundaryEntry(entry,transformBoundaryMask(boundary,transform));if(entry==INVALID){return vec2u(INVALID);}}return vec2u(entry,transform);}
 fn requestedRows()->u32{return select(0u,rowCountSource[0],arrayLength(&rowCountSource)>0u);}
-@compute @workgroup_size(64) fn resolvePowerTopology(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;let requested=requestedRows();if(row>=requested||row>=arrayLength(&descriptors)||row>=arrayLength(&metrics)){return;}if(params.anisotropic!=0u){metrics[row]=PowerRowMetric(INVALID,0u,0.0,ANISOTROPIC);return;}let descriptor=descriptors[row];let found=resolveDescriptor(descriptor);if(found.x==INVALID||found.x>=arrayLength(&volumes)){metrics[row]=PowerRowMetric(INVALID,0u,0.0,LOOKUP_MISS);return;}let boundary=(descriptor>>16u)&0x3f00u;metrics[row]=PowerRowMetric(found.x,found.y|boundary|VALID,volumes[found.x],0u);}
-@compute @workgroup_size(1) fn publishPowerTopology(){let requested=requestedRows();let available=min(requested,min(arrayLength(&descriptors),arrayLength(&metrics)));var invalidCount=requested-available;var resolvedCount=0u;var firstInvalid=select(INVALID,available,available<requested);var flags=select(0u,ANISOTROPIC,params.anisotropic!=0u);if(available<requested){flags|=CAPACITY;}for(var row=0u;row<available;row+=1u){let metric=metrics[row];if((metric.transformAndFlags&VALID)!=0u){resolvedCount+=1u;}else{invalidCount+=1u;firstInvalid=min(firstInvalid,row);flags|=metric.reserved;}}control.invalidCount=invalidCount;control.firstInvalid=firstInvalid;control.flags=flags;control.resolvedCount=resolvedCount;control.version=params.catalogVersion;}
+fn deltaAccepted(requested:u32)->bool{if(params.delta.x+15u>=arrayLength(&rowDelta)){return false;}let base=params.delta.x;let previous=rowDelta[base+1u];let carried=rowDelta[base+2u];let added=rowDelta[base+3u];let retired=rowDelta[base+4u];let affected=rowDelta[base+6u];return rowDelta[base]==requested&&rowDelta[base+8u]==ROW_DELTA_VALID&&carried<=previous&&affected<=requested&&params.delta.y<=arrayLength(&rowDelta)&&requested<=arrayLength(&rowDelta)-params.delta.y&&params.delta.z<=arrayLength(&rowDelta)&&affected<=arrayLength(&rowDelta)-params.delta.z&&requested==carried+added&&requested==previous+added-retired;}
+fn affectedRow(item:u32)->u32{return rowDelta[params.delta.z+item];}
+fn affectedCount()->u32{return rowDelta[params.delta.x+6u];}
+fn linearItem(wid:vec3u,lid:u32,workgroups:vec3u)->u32{return (wid.x+wid.y*workgroups.x)*64u+lid;}
+fn fail(row:u32,flag:u32){if(row<arrayLength(&metrics)){metrics[row]=PowerRowMetric(INVALID,0u,0.0,flag);}}
+fn metricValid(metric:PowerRowMetric)->bool{return metric.reserved==0u&&(metric.transformAndFlags&VALID)!=0u;}
+fn metricFlags(metric:PowerRowMetric)->u32{return select(CAPACITY,metric.reserved,metric.reserved!=0u);}
+fn dispatchFor(count:u32)->vec3u{let groups=(count+63u)/64u;let x=min(groups,65535u);return vec3u(x,select(1u,(groups+x-1u)/x,x>0u),1u);}
+fn blockDispatchFor(count:u32)->vec3u{let groups=(count+255u)/256u;let x=min(groups,65535u);return vec3u(x,select(1u,(groups+x-1u)/x,x>0u),1u);}
+fn arenaBase()->u32{return 3u*params.lookupCount;}
+fn statusBase()->u32{return arenaBase();}
+fn prefixBase()->u32{return statusBase()+params.rowCount;}
+fn publicationBase()->u32{return prefixBase()+params.rowCount;}
+fn blockOffsetBase()->u32{return publicationBase()+params.rowCount;}
+fn blockSummaryBase()->u32{return blockOffsetBase()+controlArena.blockCount+1u;}
+fn rowListedAffected(row:u32)->bool{var low=0u;var high=affectedCount();while(low<high){let middle=low+(high-low)/2u;if(affectedRow(middle)<row){low=middle+1u;}else{high=middle;}}return low<affectedCount()&&affectedRow(low)==row;}
+fn rejectCandidate(row:u32,flags:u32){controlArena.candidate.invalidCount+=1u;controlArena.candidate.firstInvalid=min(controlArena.candidate.firstInvalid,row);controlArena.candidate.flags|=flags;}
+var<workgroup> publicationScan:array<u32,256>;
+var<workgroup> publicationCounts:array<vec4u,256>;
+var<workgroup> publicationAux:array<vec2u,256>;
+@compute @workgroup_size(1) fn preparePowerTopology(){
+  let requested=requestedRows();
+  let available=min(requested,min(arrayLength(&descriptors),min(arrayLength(&metrics),arrayLength(&committedMetrics))));
+  controlArena.candidate=Control(0u,INVALID,select(0u,ANISOTROPIC,params.anisotropic!=0u),0u,params.catalogVersion,0u,0u,0u);
+  controlArena.blockDispatch=vec3u(0u,1u,1u);controlArena.commitDispatch=vec3u(0u,1u,1u);
+  controlArena.publicationCount=0u;controlArena.blockCount=0u;
+  if(!deltaAccepted(requested)){rejectCandidate(0u,CAPACITY);return;}
+  let previous=rowDelta[params.delta.x+1u];
+  if(previous>arrayLength(&committedMetrics)
+      ||(previous!=0u&&(controlArena.authority.invalidCount!=0u||controlArena.authority.flags!=0u
+        ||controlArena.authority.resolvedCount!=previous||controlArena.authority.version!=params.catalogVersion))){
+    rejectCandidate(0u,CAPACITY);return;
+  }
+  if(available<requested){controlArena.candidate.invalidCount=requested-available;controlArena.candidate.firstInvalid=available;controlArena.candidate.flags|=CAPACITY;}
+  let blocks=(requested+255u)/256u;controlArena.blockCount=blocks;
+  if(blockSummaryBase()+6u*blocks>arrayLength(&lookupArena)){rejectCandidate(0u,CAPACITY);return;}
+  controlArena.blockDispatch=blockDispatchFor(requested);
+}
+@compute @workgroup_size(64) fn resolvePowerTopology(@builtin(local_invocation_index) lid:u32,@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) workgroups:vec3u){
+  let item=linearItem(wid,lid,workgroups);if(item>=affectedCount()||controlArena.candidate.flags!=0u){return;}
+  let row=affectedRow(item);let requested=requestedRows();let available=min(requested,min(arrayLength(&descriptors),arrayLength(&metrics)));
+  if(row>=available){return;}if(params.anisotropic!=0u){fail(row,ANISOTROPIC);return;}
+  if((item>0u&&affectedRow(item-1u)>=row)||(rowDelta[params.delta.y+row]&ROW_DELTA_AFFECTED)==0u){fail(row,CAPACITY);return;}
+  let descriptor=descriptors[row];let found=resolveDescriptor(descriptor);
+  if(found.x==INVALID||found.x>=arrayLength(&volumes)){fail(row,LOOKUP_MISS);return;}
+  let boundary=(descriptor>>16u)&0x3f00u;let geometry=descriptor&0xc0ffffffu;var volume=volumes[found.x];
+  if(geometry==REGULAR_DESCRIPTOR&&boundary==0u){volume=params.regularVolume;}
+  metrics[row]=PowerRowMetric(found.x,found.y|boundary|VALID,volume,0u);
+}
+@compute @workgroup_size(256) fn stagePowerTopologyDelta(
+    @builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) wid:vec3u,
+    @builtin(num_workgroups) workgroups:vec3u){
+  let block=wid.x+wid.y*workgroups.x;let row=block*256u+lane;let requested=requestedRows();var status=0u;
+  if(row<requested&&controlArena.candidate.flags==0u){
+    let encoded=rowDelta[params.delta.y+row];let flagged=(encoded&ROW_DELTA_AFFECTED)!=0u;
+    let listed=rowListedAffected(row);let oldPlusOne=encoded&0x7fffffffu;var metric=PowerRowMetric(INVALID,0u,0.0,CAPACITY);var flags=0u;
+    if(flagged!=listed){flags|=CAPACITY;}
+    if(flagged){metric=metrics[row];status|=STATUS_AFFECTED|STATUS_PUBLISH;}
+    else if(oldPlusOne==0u){flags|=CAPACITY;}
+    else{let old=oldPlusOne-1u;if(old>=controlArena.authority.resolvedCount||old>=arrayLength(&committedMetrics)){flags|=CAPACITY;}
+      else{metric=committedMetrics[old];if(old!=row){metrics[row]=metric;status|=STATUS_PUBLISH;}}}
+    if(!metricValid(metric)){flags|=metricFlags(metric);}else{status|=STATUS_VALID;}
+    status|=flags&255u;lookupArena[statusBase()+row]=status;
+  }
+  let publish=select(0u,1u,(status&STATUS_PUBLISH)!=0u);publicationScan[lane]=publish;workgroupBarrier();
+  for(var offset=1u;offset<256u;offset*=2u){var add=0u;if(lane>=offset){add=publicationScan[lane-offset];}
+    workgroupBarrier();publicationScan[lane]+=add;workgroupBarrier();}
+  if(row<requested){lookupArena[prefixBase()+row]=publicationScan[lane]-publish;}
+  let flags=status&255u;publicationCounts[lane]=vec4u(select(0u,1u,(status&STATUS_VALID)!=0u),
+    select(0u,1u,flags!=0u),flags,select(0u,1u,(status&STATUS_AFFECTED)!=0u));workgroupBarrier();
+  for(var stride=128u;stride>0u;stride/=2u){if(lane<stride){publicationCounts[lane].x+=publicationCounts[lane+stride].x;
+      publicationCounts[lane].y+=publicationCounts[lane+stride].y;publicationCounts[lane].z|=publicationCounts[lane+stride].z;
+      publicationCounts[lane].w+=publicationCounts[lane+stride].w;}workgroupBarrier();}
+  publicationScan[lane]=select(INVALID,row,flags!=0u);workgroupBarrier();
+  for(var stride=128u;stride>0u;stride/=2u){if(lane<stride){publicationScan[lane]=min(publicationScan[lane],publicationScan[lane+stride]);}workgroupBarrier();}
+  if(lane==0u){let at=blockSummaryBase()+6u*block;let counts=publicationCounts[0];
+    lookupArena[at]=counts.x;lookupArena[at+1u]=counts.y;lookupArena[at+2u]=counts.z;
+    lookupArena[at+3u]=publicationScan[0];lookupArena[at+4u]=lookupArena[prefixBase()+min(requested-1u,block*256u+255u)]+select(0u,1u,(lookupArena[statusBase()+min(requested-1u,block*256u+255u)]&STATUS_PUBLISH)!=0u);
+    lookupArena[at+5u]=counts.w;}
+}
+@compute @workgroup_size(256) fn prefixPowerTopologyDelta(@builtin(local_invocation_index) lane:u32){
+  let blocks=controlArena.blockCount;let chunk=(blocks+255u)/256u;let begin=min(blocks,lane*chunk);let end=min(blocks,begin+chunk);
+  var counts=vec4u(0u);var changed=0u;var firstInvalid=INVALID;var affected=0u;
+  for(var block=begin;block<end;block+=1u){let at=blockSummaryBase()+6u*block;counts.x+=lookupArena[at];
+    counts.y+=lookupArena[at+1u];counts.z|=lookupArena[at+2u];counts.w=min(counts.w,lookupArena[at+3u]);
+    firstInvalid=min(firstInvalid,lookupArena[at+3u]);changed+=lookupArena[at+4u];affected+=lookupArena[at+5u];}
+  publicationCounts[lane]=counts;publicationAux[lane]=vec2u(firstInvalid,affected);
+  publicationScan[lane]=changed;workgroupBarrier();
+  for(var offset=1u;offset<256u;offset*=2u){var add=0u;if(lane>=offset){add=publicationScan[lane-offset];}
+    workgroupBarrier();publicationScan[lane]+=add;workgroupBarrier();}
+  var cursor=publicationScan[lane]-changed;
+  for(var block=begin;block<end;block+=1u){let at=blockSummaryBase()+6u*block;lookupArena[blockOffsetBase()+block]=cursor;cursor+=lookupArena[at+4u];}
+  for(var stride=128u;stride>0u;stride/=2u){if(lane<stride){publicationCounts[lane].x+=publicationCounts[lane+stride].x;
+      publicationCounts[lane].y+=publicationCounts[lane+stride].y;publicationCounts[lane].z|=publicationCounts[lane+stride].z;
+      publicationAux[lane].x=min(publicationAux[lane].x,publicationAux[lane+stride].x);
+      publicationAux[lane].y+=publicationAux[lane+stride].y;}workgroupBarrier();}
+  if(lane==0u){let totals=publicationCounts[0];let aux=publicationAux[0];let published=publicationScan[255];lookupArena[blockOffsetBase()+blocks]=published;
+    controlArena.publicationCount=published;controlArena.candidate.resolvedCount=totals.x;
+    controlArena.candidate.invalidCount+=totals.y;controlArena.candidate.flags|=totals.z;
+    controlArena.candidate.firstInvalid=min(controlArena.candidate.firstInvalid,aux.x);
+    if(aux.y!=affectedCount()||totals.x!=requestedRows()){rejectCandidate(0u,CAPACITY);}
+    if(controlArena.candidate.invalidCount==0u&&controlArena.candidate.flags==0u){controlArena.commitDispatch=dispatchFor(published);}
+  }
+}
+@compute @workgroup_size(256) fn scatterPowerTopologyDelta(
+    @builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) wid:vec3u,
+    @builtin(num_workgroups) workgroups:vec3u){
+  if(controlArena.candidate.invalidCount!=0u||controlArena.candidate.flags!=0u){return;}
+  let block=wid.x+wid.y*workgroups.x;let row=block*256u+lane;if(row>=requestedRows()){return;}
+  if((lookupArena[statusBase()+row]&STATUS_PUBLISH)==0u){return;}
+  let output=lookupArena[blockOffsetBase()+block]+lookupArena[prefixBase()+row];
+  if(output<controlArena.publicationCount){lookupArena[publicationBase()+output]=row;}
+}
+@compute @workgroup_size(64) fn commitPowerTopology(@builtin(local_invocation_index) lid:u32,@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) workgroups:vec3u){
+  if(controlArena.candidate.invalidCount!=0u||controlArena.candidate.flags!=0u){return;}
+  let item=linearItem(wid,lid,workgroups);if(item>=controlArena.publicationCount){return;}
+  let row=lookupArena[publicationBase()+item];
+  if(row>=arrayLength(&metrics)||row>=arrayLength(&committedMetrics)){return;}
+  committedMetrics[row]=metrics[row];
+}
+@compute @workgroup_size(1) fn finalizePowerTopology(){
+  let candidate=controlArena.candidate;
+  if(candidate.invalidCount!=0u||candidate.flags!=0u||candidate.resolvedCount!=requestedRows()||candidate.version!=params.catalogVersion){return;}
+  controlArena.authority=candidate;
+}
 `;

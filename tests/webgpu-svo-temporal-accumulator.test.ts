@@ -88,10 +88,9 @@ test("one resolve pass exposes ping-pong HDR without an alias-breaking copy and 
     copyTextureToTexture(source: GPUTexelCopyTextureInfo, destination: GPUTexelCopyTextureInfo) { copies.push({ source, destination }); },
   } as unknown as GPUCommandEncoder;
   const gBuffer = { width: 64, height: 48, radianceDepthOwnership: "external-water-compositor-target", packedSurface: packed, identityMedia: identity, hardwareDepth: {} as GPUTexture } as const;
-  const timestampWrites = { querySet: {} as GPUQuerySet, beginningOfPassWriteIndex: 16, endOfPassWriteIndex: 17 };
-  const firstResolve = accumulator.encode(encoder, current, gBuffer, frame, timestampWrites);
+  const firstResolve = accumulator.encode(encoder, current, gBuffer, frame);
   assert.ok(firstResolve);
-  assert.equal(passes[0].timestampWrites, timestampWrites);
+  assert.equal(passes[0].timestampWrites, undefined);
   assert.equal(Array.from(passes[0].colorAttachments).length, 4);
   assert.equal(copies.length, 0);
   assert.equal(firstResolve.resolvedTexture, textures[4], "the first resolve exposes the next ping-pong HDR texture");
@@ -134,11 +133,11 @@ test("production integration invalidates history outside smooth SVO and resolves
   assert.match(renderer, /if \(!useSvoDryScene\) this\.svoDryScenePipeline\?\.invalidateTemporalHistory\(\)/);
   assert.match(renderer, /composition: "dry-before-raster-water"/);
   assert.match(renderer, /if \(!replacementResult\) this\.svoDryScenePipeline\?\.invalidateTemporalHistory\(\)/);
-  assert.match(renderer, /beginningOfPassWriteIndex: 16, endOfPassWriteIndex: 17/);
+  assert.match(renderer, /id: "dry-scene", label: "Dry scene \+ temporal lighting"/);
   assert.match(readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8"), /dryPublicationGeneration\(\)->u32\{return select\(0u,publicationState\[3\]/,
     "static history identity must not be invalidated by every completed fluid publication");
-  assert.match(renderer, /gpuSvoTemporal_ms=stage\.svoTemporal_ms/);
-  assert.match(water, /drySceneReplacement\?\.\(encoder, this\.sceneTexture, timestamps\?\.scene\)/);
+  assert.doesNotMatch(renderer, /gpuSvoTemporal_ms|renderQuerySet/);
+  assert.match(water, /drySceneReplacement\?\.\(encoder, this\.sceneTexture, tracePhase\)/);
   assert.doesNotMatch(water, /Dry scene HDR[^\n]*GPUTextureUsage\.COPY_DST/);
   assert.match(water, /compositeBindGroupFor\(sparseSceneResult\.sampledTargetView\)/);
   const replacement = water.indexOf("drySceneReplacement?.(encoder, this.sceneTexture");

@@ -2,52 +2,67 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-const solver = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
-const panel = readFileSync(new URL("../components/PerformancePanel.tsx", import.meta.url), "utf8");
-const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
+const source = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
+const octree = source("../lib/webgpu-octree.ts");
+const solver = source("../lib/webgpu-uniform-eulerian.ts");
+const panel = source("../components/PerformancePanel.tsx");
+const renderer = source("../lib/webgpu-renderer.ts");
+const viewport = source("../components/WebGPUViewport.tsx");
 
-const ordered = (source: string, labels: string[]) => {
-  let cursor = -1;
-  for (const label of labels) {
-    const next = source.indexOf(label, cursor + 1);
-    assert.ok(next > cursor, `expected ${label} after byte ${cursor}`);
-    cursor = next;
-  }
-};
-
-test("authoritative power timings cover the solve and complete velocity publication", () => {
-  ordered(octree, [
-    "Power pressure timing start",
-    "this.mgpcg!.encode(encoder, pressureIn, pressureOut)",
-    "Power pressure timing end",
-    "Power projection timing start",
-    "this.encodePowerProjectionMirror",
-    "this.encodePowerVelocityPublication",
-    "this.encodeGlobalFineFaceBand",
-    "Power projection timing end",
-  ]);
+test("authoritative power work maps onto semantic adjacent-boundary phases", () => {
+  for (const mapping of [
+    'mgpcgSolve: { id: "pressure-solve", label: "Selected power pressure solve" }',
+    'powerDescriptorTopologyFaces: { id: "power-topology", label: "Power topology + physical faces" }',
+    'powerProjectionPublication: { id: "velocity-projection", label: "Power-face pressure projection" }',
+    'faceBandClosestPointExtension: { id: "velocity-extrapolation", label: "Closest-point velocity extension" }',
+    'fineTransport: { id: "fine-sdf-advection", label: "Factor-m fine SDF advection" }',
+    'fineRedistance: { id: "fine-sdf-redistance", label: "Fine SDF redistance" }',
+  ]) assert.ok(solver.includes(mapping), mapping);
+  assert.match(solver, /productionBoundary: physicsTrace \|\| segmentedPhysicsTrace \? \(phase, completedEncoder\) => \{[^]*completePhysicsPhase\(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE\[phase\]\)/);
+  assert.match(solver, /physicsTrace\?\.resolve\(encoder\)/);
 });
 
-test("topology, every CFL rebuild, and adaptive surface publication have complete outer ranges", () => {
-  assert.match(solver, /Octree topology timing start[^]*encodeInlineRebuild\(encoder\)[^]*Octree topology timing end/);
-  assert.match(solver, /Octree substep topology timing start[^]*encodeInlineRebuild\(encoder\)[^]*Octree substep topology timing end/);
-  assert.match(solver, /Adaptive surface timing start[^]*adaptiveProjection\.encodeSurface\([^]*Adaptive surface timing end/);
-  assert.match(octree, /beginRange\("Fluid brick residency"[^]*endRange\("Fluid brick residency"[^]*beginRange\("Sparse scene publication"[^]*endRange\("Sparse scene publication"/);
+test("topology, every CFL rebuild, and adaptive surface publication close generic phases", () => {
+  assert.match(solver, /encodeInlineRebuild\(encoder\)[^]*completePhysicsPhase\(encoder, this\.adaptiveProjection/);
+  assert.match(solver, /substep > 0[^]*encodeInlineRebuild\(encoder\)[^]*CFL substep topology refresh/);
+  assert.match(solver, /encodeSurface\(encoder, dt, surfaceInflow[^]*completePhysicsPhase\(completedEncoder, mapped\)/);
+  assert.doesNotMatch(solver + octree, /timing start|timing end|beginRange\(|endRange\(/);
 });
 
-test("performance graph exposes every submitted presentation pass and effective SVO mode", () => {
-  for (const key of ["caustics", "dry-scene", "svo-temporal", "front-interface", "back-interface", "composite", "overlays", "upscale"]) {
-    assert.match(panel, new RegExp(`key: "${key}"`));
-  }
-  assert.match(panel, /snapshot\.effectiveRenderMode === "svo"/);
-  assert.match(panel, /SVO traversal \+ dry shading/);
+test("invalid timestamps fall back to sparse measured phase probes", () => {
+  assert.match(solver, /GPUSegmentedQueueWallPerformanceTraceRecorder/);
+  assert.match(solver, /hardwarePhysicsTraceInvalid = !trace/);
+  assert.match(solver, /SEGMENTED_QUEUE_TRACE_CADENCE_MS/);
+  assert.match(panel, /INTRUSIVE QUEUE CHECKPOINT PROBE/);
+  assert.match(panel, /not GPU execution time/);
+  assert.match(panel, /upper bounds/);
+});
+
+test("physics timing does not create known empty queue segments", () => {
+  assert.doesNotMatch(octree, /splitProductionPhase\("pressureAssemblySetup"\)/);
+  assert.doesNotMatch(solver, /label: "Pressure field materialization"/);
+  assert.doesNotMatch(solver, /label: "Surface coupling \+ generation commit"/);
+});
+
+test("physics UI preserves command-adjacent step labels", () => {
+  assert.match(panel, /trace\.lane === "physics" && trace\.measurementSource !== "gpu-queue-wall"/);
+  assert.match(panel, /return trace;/);
+});
+
+test("performance UI exposes three independent closed ledgers and no combined total", () => {
+  assert.match(panel, /TraceLane trace=\{physics\}/);
+  assert.match(panel, /TraceLane trace=\{presentation\}/);
+  assert.match(panel, /TraceLane trace=\{cpu\}/);
+  assert.match(panel, /OBSERVED TOTAL/);
+  assert.match(panel, /ACCOUNTED PHASE SUM/);
+  assert.match(panel, /CLOSURE ERROR/);
+  assert.match(panel, /CPU and GPU are independent ledgers and are never added together/);
+  assert.doesNotMatch(panel, /cpu\.total_ms\s*\+|physics\.total_ms\s*\+|presentation\.total_ms\s*\+/);
 });
 
 test("production SVO traversal and shading execute for every submitted presentation", () => {
   assert.doesNotMatch(renderer, /drySceneReuseKey|Sparse voxel dry scene reuse timestamp/);
-  assert.match(renderer, /SVO visibility and shading are presentation work[^]*svoDryScenePipeline\?\.encode\(replacementEncoder, target, timestampWrites, temporalFrame, temporalTimestampWrites\)/);
+  assert.match(renderer, /SVO visibility and shading are presentation work[^]*svoDryScenePipeline\?\.encode\(replacementEncoder, target, temporalFrame,/);
   assert.match(viewport, /continuousPerformancePresentation[^]*ui\.rightPanel === "performance"[^]*!continuousPerformancePresentation/,
     "the performance panel must keep a paused static dry scene submitting completion-gated presentations");
 });

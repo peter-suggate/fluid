@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
 import { webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
 
 type Variant = "restart" | "continuation";
@@ -182,30 +183,32 @@ const variants = ["restart", "continuation"] as const;
 for (let warmup = 0; warmup < warmups; warmup += 1) {
   for (const variant of variants) await outputFor(variant);
 }
-const timestampCount = cycles * variants.length * 2;
-const querySet = device.createQuerySet({ type: "timestamp", count: timestampCount });
-const resolve = device.createBuffer({ size: timestampCount * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-const queryReadback = device.createBuffer({ size: timestampCount * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-const labels: Variant[] = [];
-let query = 0;
-const encoder = device.createCommandEncoder();
+const samples: Record<Variant, number[]> = { restart: [], continuation: [] };
+let traceSampleId = 0;
 for (let cycle = 0; cycle < cycles; cycle += 1) {
   const order = cycle % 2 === 0 ? variants : (["continuation", "restart"] as const);
   for (const variant of order) {
+    const encoder = device.createCommandEncoder();
     const target = targets.get(variant)!;
-    const pass = encoder.beginComputePass({ timestampWrites: { querySet, beginningOfPassWriteIndex: query, endOfPassWriteIndex: query + 1 } });
+    const recorder = new GPUPerformanceTraceRecorder(
+      device,
+      ++traceSampleId,
+      "presentation",
+      `svo-continuation:${variant}:cycle-${cycle}`,
+      [{ id: "dry-scene", label: `SVO ${variant} traversal` }],
+    );
+    recorder.boundary(encoder, `${variant} trace start`);
+    const pass = encoder.beginComputePass();
     pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup);
     for (let dispatch = 0; dispatch < dispatches; dispatch += 1) pass.dispatchWorkgroups(Math.ceil(width * height / 128));
-    pass.end(); labels.push(variant); query += 2;
+    pass.end();
+    recorder.boundary(encoder, `${variant} trace complete`);
+    recorder.resolve(encoder);
+    device.queue.submit([encoder.finish()]);
+    const trace = await recorder.read();
+    assert.ok(trace, `${variant} GPU trace was invalid`);
+    samples[variant].push(trace.total_ms / dispatches);
   }
-}
-encoder.resolveQuerySet(querySet, 0, timestampCount, resolve, 0);
-encoder.copyBufferToBuffer(resolve, 0, queryReadback, 0, timestampCount * 8);
-device.queue.submit([encoder.finish()]); await queryReadback.mapAsync(GPUMapMode.READ);
-const timestamps = new BigUint64Array(queryReadback.getMappedRange().slice(0)); queryReadback.unmap();
-const samples: Record<Variant, number[]> = { restart: [], continuation: [] };
-for (let index = 0; index < labels.length; index += 1) {
-  samples[labels[index]].push(Number(timestamps[index * 2 + 1] - timestamps[index * 2]) / 1e6 / dispatches);
 }
 const restartMedian = median(samples.restart), continuationMedian = median(samples.continuation);
 await device.queue.onSubmittedWorkDone();
@@ -228,4 +231,4 @@ console.log(JSON.stringify({
 }, null, 2));
 
 control.destroy(); nodes.destroy(); leaves.destroy(); output.destroy(); readback.destroy();
-resolve.destroy(); queryReadback.destroy(); querySet.destroy(); device.destroy();
+device.destroy();

@@ -3,7 +3,9 @@
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "./generated/octree-power-catalog";
 import type { OctreeTechniqueDebugSource } from "./octree-technique-debug";
-import { OCTREE_REGULAR_BAND_INCIDENCE_PER_ROW } from "./octree-face-fast-march";
+import { OCTREE_REGULAR_BAND_INCIDENCE_PER_ROW } from "./octree-face-band";
+import { makeFineLevelSetSortedWorklistLookupWGSL } from "./webgpu-octree-fine-levelset-bricks";
+import { PassBroker } from "./webgpu-pass-broker";
 
 const sharedWGSL = /* wgsl */ `
 struct Uniforms {
@@ -186,30 +188,29 @@ export const octreeTechniqueSection5FaceBandShader = /* wgsl */ `
 ${sharedWGSL}
 struct Row { cell:u32,globalRow:u32,flags:u32,size:u32,representativePhi:f32,minimumPhi:f32,maximumPhi:f32,padf:f32 }
 struct Face { negativeRow:u32,positiveRow:u32,axisSpan:u32,globalFace:u32,velocity:vec4f,centroid:vec4f,phi:f32,area:f32,flags:u32,pad:u32 }
-struct State { velocity:vec4f,parent:u32,depth:u32,status:u32,pad:u32 }
 struct BandSample { color:vec3f,alpha:f32 }
 @group(0) @binding(0) var<uniform> u:Uniforms;
-@group(0) @binding(1) var<storage,read> rowHash:array<u32>;
+@group(0) @binding(1) var<storage,read> rowDirectory:array<u32>;
 @group(0) @binding(2) var<storage,read> rows:array<Row>;
 @group(0) @binding(3) var<storage,read> faces:array<Face>;
 @group(0) @binding(4) var<storage,read> incidence:array<u32>;
-@group(0) @binding(5) var<storage,read> states:array<State>;
 @group(0) @binding(6) var<storage,read> control:array<u32>;
 @group(0) @binding(7) var<storage,read> transitionControl:array<u32>;
 const INVALID:u32=0xffffffffu;const VALID:u32=0x80000000u;const LIVE:u32=1u;const PHI_VALID:u32=4u;
-const UNKNOWN:u32=0u;const TRIAL:u32=1u;const ACCEPTED:u32=2u;const STRIDE:u32=${OCTREE_REGULAR_BAND_INCIDENCE_PER_ROW}u;
+const STRIDE:u32=${OCTREE_REGULAR_BAND_INCIDENCE_PER_ROW}u;
 fn finite(value:f32)->bool { return value==value&&abs(value)<3.402823e38; }
-fn hashKey(k:u32)->u32 { var v=k*0x9e3779b1u;v=(v^(v>>16u))*0x7feb352du;return v^(v>>15u); }
 fn cellKey(q:vec3u)->u32 { let dims=vec3u(max(u.gridInfo.xyz,vec3f(1.0)));return q.x+dims.x*(q.y+dims.y*q.z); }
-fn findRow(key:u32)->u32 {
-  let capacity=arrayLength(&rowHash)/2u;if(capacity==0u||(capacity&(capacity-1u))!=0u){return INVALID;}
-  let wanted=key+1u;let start=hashKey(wanted)&(capacity-1u);
-  for(var probe=0u;probe<32u;probe+=1u){let slot=(start+probe)&(capacity-1u);let observed=rowHash[slot*2u];if(observed==0u){return INVALID;}if(observed==wanted){let encoded=rowHash[slot*2u+1u];return select(INVALID,encoded-1u,encoded!=0u&&encoded!=INVALID);}}
-  return INVALID;
+fn rowIdentityLess(cellA:u32,sizeA:u32,cellB:u32,sizeB:u32)->bool {
+  return cellA<cellB||(cellA==cellB&&sizeA<sizeB);
+}
+fn findRowIdentity(key:u32,size:u32)->u32 {
+  let count=min(control[2],arrayLength(&rowDirectory)/2u);var low=0u;var high=count;
+  while(low<high){let mid=low+(high-low)/2u;let row=rowDirectory[mid*2u+1u];if(row>=arrayLength(&rows)){return INVALID;}if(rowIdentityLess(rowDirectory[mid*2u],rows[row].size,key,size)){low=mid+1u;}else{high=mid;}}
+  if(low<count){let row=rowDirectory[low*2u+1u];if(row<arrayLength(&rows)&&rowDirectory[low*2u]==key&&rows[row].size==size){return row;}}return INVALID;
 }
 fn containingRow(pointFine:vec3f)->u32 {
   let dims=vec3u(max(u.gridInfo.xyz,vec3f(1.0)));let q=vec3u(clamp(floor(pointFine),vec3f(0.0),vec3f(dims)-vec3f(1.0)));
-  var size=1u;loop{let origin=(q/vec3u(size))*vec3u(size);let row=findRow(cellKey(origin));if(row<arrayLength(&rows)){let r=rows[row];if(r.size==size&&all(q>=origin)&&all(q<origin+vec3u(size))){return row;}}if(size>=32u||size>=max(max(dims.x,dims.y),dims.z)){break;}size*=2u;}return INVALID;
+  var size=1u;loop{let origin=(q/vec3u(size))*vec3u(size);let row=findRowIdentity(cellKey(origin),size);if(row<arrayLength(&rows)&&all(q>=origin)&&all(q<origin+vec3u(size))){return row;}if(size>=32u||size>=max(max(dims.x,dims.y),dims.z)){break;}size*=2u;}return INVALID;
 }
 fn rowSample(row:u32,pointFine:vec3f,volume:bool)->BandSample {
   if(arrayLength(&control)<16u||arrayLength(&transitionControl)<16u||row>=arrayLength(&rows)){return BandSample(vec3f(1.0,0.01,0.08),0.94);}
@@ -217,16 +218,15 @@ fn rowSample(row:u32,pointFine:vec3f,volume:bool)->BandSample {
   let r=rows[row];let first=control[1];var color=vec3f(0.12,0.26,0.52);var alpha=select(0.38,0.075,volume);
   if((r.flags&4u)!=0u){color=vec3f(0.96,0.08,0.50);}else if((r.flags&8u)!=0u){color=vec3f(0.96,0.38,0.05);}else if((r.flags&16u)!=0u){color=vec3f(0.55,0.20,0.76);}else if((r.flags&32u)!=0u){color=vec3f(0.08,0.68,0.82);}else if((r.flags&64u)!=0u){color=vec3f(0.16,0.48,0.88);}
   if((r.flags&1u)==0u||!finite(r.representativePhi)||r.minimumPhi>r.maximumPhi){return BandSample(vec3f(1.0,0.02,0.08),select(0.96,0.55,volume));}
-  let count=min(incidence[row],STRIDE);var accepted=0u;var trial=0u;var unresolved=0u;var acceptedInk=0.0;var trialInk=0.0;var unresolvedInk=0.0;var firstMatch=false;
+  let count=min(incidence[row],STRIDE);var accepted=0u;var unresolved=0u;var acceptedInk=0.0;var unresolvedInk=0.0;var firstMatch=false;
   let footprint=max(0.08,0.9*length(u.gridInfo.xyz/u.container.xyz)*1.44/max(u.viewport.y,1.0));
-  for(var local=0u;local<count;local+=1u){let index=incidence[rowCapacity+row*STRIDE+local];if(index>=arrayLength(&faces)||index>=arrayLength(&states)){unresolved+=1u;continue;}let f=faces[index];let status=states[index].status;let faceValid=(f.flags&(LIVE|PHI_VALID))==(LIVE|PHI_VALID)&&finite(f.phi);if(!faceValid){unresolved+=1u;}else if(status==ACCEPTED){accepted+=1u;}else if(status==TRIAL){trial+=1u;}else{unresolved+=1u;}
-    let axis=f.axisSpan&3u;if(axis<3u){var delta=pointFine-f.centroid.xyz;let plane=abs(delta[axis]);delta[axis]=0.0;let radius=sqrt(max(f.area,1e-6)/3.14159265);let ink=(1.0-smoothstep(0.05,0.22,plane))*(1.0-smoothstep(radius,radius+footprint,length(delta)));if(faceValid&&status==ACCEPTED){acceptedInk=max(acceptedInk,ink);}else if(faceValid&&status==TRIAL){trialInk=max(trialInk,ink);}else{unresolvedInk=max(unresolvedInk,ink);}}
+  for(var local=0u;local<count;local+=1u){let index=incidence[rowCapacity+row*STRIDE+local];if(index>=arrayLength(&faces)){unresolved+=1u;continue;}let f=faces[index];let faceValid=(f.flags&(LIVE|PHI_VALID|32u))==(LIVE|PHI_VALID|32u)&&finite(f.phi);if(faceValid){accepted+=1u;}else{unresolved+=1u;}
+    let axis=f.axisSpan&3u;if(axis<3u){var delta=pointFine-f.centroid.xyz;let plane=abs(delta[axis]);delta[axis]=0.0;let radius=sqrt(max(f.area,1e-6)/3.14159265);let ink=(1.0-smoothstep(0.05,0.22,plane))*(1.0-smoothstep(radius,radius+footprint,length(delta)));if(faceValid){acceptedInk=max(acceptedInk,ink);}else{unresolvedInk=max(unresolvedInk,ink);}}
     firstMatch=firstMatch||first==f.globalFace||first==index;
   }
   firstMatch=firstMatch||first==r.cell||first==row;
-  if(unresolved>0u){color=vec3f(0.88,0.12,0.70);alpha=max(alpha,select(0.88,0.34,volume));}else if(trial>0u){color=vec3f(1.0,0.82,0.03);alpha=max(alpha,select(0.84,0.28,volume));}else if(accepted==count&&count>0u){color=mix(color,vec3f(0.03,0.80,0.68),0.58);}
+  if(unresolved>0u){color=vec3f(0.88,0.12,0.70);alpha=max(alpha,select(0.88,0.34,volume));}else if(accepted==count&&count>0u){color=mix(color,vec3f(0.03,0.80,0.68),0.58);}
   if(acceptedInk>0.01){color=mix(color,vec3f(0.10,0.82,0.72),acceptedInk);alpha=max(alpha,0.92*acceptedInk);}
-  if(trialInk>0.01){color=mix(color,vec3f(1.0,0.80,0.03),trialInk);alpha=max(alpha,0.94*trialInk);}
   if(unresolvedInk>0.01){color=mix(color,vec3f(0.88,0.12,0.70),unresolvedInk);alpha=max(alpha,0.96*unresolvedInk);}
   if(control[0]!=0u&&first==INVALID){color=mix(color,vec3f(1.0,0.02,0.06),0.35);}
   if(firstMatch){color=vec3f(1.0,0.01,0.05);alpha=0.98;}
@@ -275,20 +275,18 @@ fn lifecycleVolume(uv:vec2f)->vec4f {
 
 export const octreeTechniqueFineLifecycleShader = /* wgsl */ `
 ${sharedWGSL}
-struct FineParams { brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,domainOrigin:vec3f,fineCellWidth:f32,hashCapacity:u32,maximumHashProbes:u32,pageCapacity:u32,generation:u32,activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32 }
+struct FineParams { brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,domainOrigin:vec3f,fineCellWidth:f32,worklistCapacity:u32,worklistHeaderWords:u32,pageCapacity:u32,generation:u32,activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32 }
 struct FineState { color:vec3f,alpha:f32,address:u32 }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(0) @binding(1) var<uniform> fine:FineParams;
-@group(0) @binding(2) var<storage,read> pageHash:array<u32>;
+@group(0) @binding(2) var<storage,read> worklist:array<u32>;
 @group(0) @binding(3) var<storage,read> metadata:array<u32>;
-@group(0) @binding(4) var<storage,read> worklist:array<u32>;
 @group(0) @binding(5) var<storage,read> sampleFlags:array<u32>;
 @group(0) @binding(6) var<storage,read> topologyControl:array<u32>;
 @group(0) @binding(7) var<storage,read> redistanceControl:array<u32>;
 @group(0) @binding(8) var<storage,read> finePhi:array<f32>;
-const INVALID:u32=0xffffffffu;const VALID:u32=1u;const INTERFACE:u32=2u;const KNOWN:u32=4u;const TRIAL:u32=8u;const FRONTIER:u32=32u;
-fn hashKey(key:u32)->u32{return ((key^(key>>16u))*0x9e3779b1u)&(fine.hashCapacity-1u);}
-fn pageOf(key:u32)->u32 {let start=hashKey(key);for(var probe=0u;probe<32u;probe+=1u){if(probe>=fine.maximumHashProbes){break;}let slot=(start+probe)&(fine.hashCapacity-1u);let stored=pageHash[slot*2u];if(stored==key){return pageHash[slot*2u+1u];}if(stored==INVALID){return INVALID;}}return INVALID;}
+const INVALID:u32=0xffffffffu;const VALID:u32=1u;const INTERFACE:u32=2u;
+${makeFineLevelSetSortedWorklistLookupWGSL("fine", "metadata", "worklist", "pageOf")}
 fn fineAddress(q:vec3i)->u32 {
   if(any(q<vec3i(0))||any(q>=vec3i(fine.sampleDimensions))){return INVALID;}
   let uq=vec3u(q);let brick=uq/max(fine.brickResolution,1u);let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);let page=pageOf(key);
@@ -309,8 +307,7 @@ fn fineState(point:vec3f)->FineState {
   let page=pageOf(key);if(page==INVALID){let desired=arrayLength(&topologyControl)>4u&&topologyControl[4]==0u;return FineState(select(vec3f(0.03,0.10,0.34),vec3f(1.0,0.34,0.04),desired),select(0.045,0.34,desired),key);}
   if(page>=fine.pageCapacity||page*10u+3u>=arrayLength(&metadata)||metadata[page*10u+2u]!=fine.generation||arrayLength(&worklist)<=1u||worklist[1]!=fine.generation){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}
   let local=q-brick*fine.brickResolution;let localIndex=local.x+fine.brickResolution*(local.y+fine.brickResolution*local.z);let address=page*fine.samplesPerBrick+localIndex;if(address>=arrayLength(&sampleFlags)){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}let flags=sampleFlags[address];
-  if((flags&VALID)==0u){return FineState(vec3f(0.26,0.08,0.48),0.20,address);}if((flags&(FRONTIER|TRIAL))!=0u){return FineState(vec3f(1.0,0.84,0.04),0.88,address);}if((flags&INTERFACE)!=0u){return FineState(vec3f(1.0,0.02,0.44),0.90,address);}
-  let activated=arrayLength(&redistanceControl)>6u&&redistanceControl[6]>0u&&(flags&KNOWN)==0u;if(activated){return FineState(vec3f(1.0,0.48,0.04),0.66,address);}if((flags&KNOWN)!=0u){return FineState(vec3f(0.04,0.72,0.82),0.34,address);}return FineState(vec3f(0.34,0.12,0.62),0.24,address);
+  if((flags&VALID)==0u){return FineState(vec3f(0.26,0.08,0.48),0.20,address);}if((flags&INTERFACE)!=0u){return FineState(vec3f(1.0,0.02,0.44),0.90,address);}return FineState(vec3f(0.04,0.72,0.82),0.34,address);
 }
 fn globalFinePhi(point:vec3f)->vec4f {
   if(arrayLength(&topologyControl)==0u||topologyControl[0]!=0u||arrayLength(&redistanceControl)<=4u||redistanceControl[3]==0u||redistanceControl[4]!=0u){return vec4f(1.0,0.01,0.06,0.96);}
@@ -427,14 +424,14 @@ export class OctreeTechniqueOverlayPipeline {
     }
     const fine=source.fineBandLifecycle;
     if(fine&&this.fineLifecyclePipeline)this.fineLifecycleGroup=this.device.createBindGroup({layout:this.fineLifecyclePipeline.getBindGroupLayout(0),entries:[
-      {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:fine.params},{binding:2,resource:fine.hash},
-      {binding:3,resource:fine.metadata},{binding:4,resource:fine.worklist},{binding:5,resource:fine.sampleFlags},
+      {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:fine.params},{binding:2,resource:fine.worklist},
+      {binding:3,resource:fine.metadata},{binding:5,resource:fine.sampleFlags},
       {binding:6,resource:fine.topologyControl},{binding:7,resource:fine.redistanceControl},{binding:8,resource:fine.phi},
     ]});
     const section5=source.section5FaceBand;
     if(section5&&this.section5FaceBandPipeline)this.section5FaceBandGroup=this.device.createBindGroup({layout:this.section5FaceBandPipeline.getBindGroupLayout(0),entries:[
-      {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:section5.rowHash},{binding:2,resource:section5.rows},
-      {binding:3,resource:section5.faces},{binding:4,resource:section5.incidence},{binding:5,resource:section5.states},
+      {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:section5.rowDirectory},{binding:2,resource:section5.rows},
+      {binding:3,resource:section5.faces},{binding:4,resource:section5.incidence},
       {binding:6,resource:section5.control},{binding:7,resource:section5.transitionControl},
     ]});
   }
@@ -443,7 +440,7 @@ export class OctreeTechniqueOverlayPipeline {
     let pipeline:GPURenderPipeline|undefined;let group:GPUBindGroup|undefined;
     if(modeCode===12||modeCode===14||modeCode===15){pipeline=this.topologyPipeline;group=this.topologyGroup;}
     else if(modeCode===13||modeCode===16){pipeline=this.facePipeline;group=this.faceGroup;}
-    else if(modeCode===17){pipeline=this.lifecyclePipeline;group=this.lifecycleGroup;if(this.lifecycleMembership&&this.lifecycleMembershipPipeline&&this.lifecycleMembershipGroup){encoder.clearBuffer(this.lifecycleMembership);const compute=encoder.beginComputePass({label:"Expand octree topology lifecycle membership"});compute.setPipeline(this.lifecycleMembershipPipeline);compute.setBindGroup(0,this.lifecycleMembershipGroup);compute.dispatchWorkgroups(Math.ceil(this.lifecycleCapacity/64));compute.end();}else{return false;}}
+    else if(modeCode===17){pipeline=this.lifecyclePipeline;group=this.lifecycleGroup;if(this.lifecycleMembership&&this.lifecycleMembershipPipeline&&this.lifecycleMembershipGroup){const broker=new PassBroker(encoder);broker.clearBuffer(this.lifecycleMembership);const compute=broker.compute({label:"Expand octree topology lifecycle membership"});compute.setPipeline(this.lifecycleMembershipPipeline);compute.setBindGroup(0,this.lifecycleMembershipGroup);compute.dispatchWorkgroups(Math.ceil(this.lifecycleCapacity/64));broker.fence("octree topology lifecycle membership complete");}else{return false;}}
     else if(modeCode===18||modeCode===25){pipeline=this.fineLifecyclePipeline;group=this.fineLifecycleGroup;}
     else if(modeCode===24){pipeline=this.section5FaceBandPipeline;group=this.section5FaceBandGroup;}
     else{return false;}

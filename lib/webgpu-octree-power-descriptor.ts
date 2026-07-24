@@ -1,13 +1,8 @@
 /**
- * Standalone GPU producer for paper-compatible octree power descriptors.
- *
- * This mirror consumes the live compact LeafHeader and owner-buffer ABIs but
- * deliberately has no production cutover. Invalid topology publishes a zero
- * indirect dispatch, so a later power-face stage cannot consume partial data.
- * The current immutable catalog contains interior configurations only;
- * consequently any face/edge probe outside the domain is reported as
- * `boundary` and invalidates publication. Boundary power planes need a catalog
- * extension before this mirror can become authoritative for boundary rows.
+ * Authoritative GPU producer for paper-compatible octree power descriptors.
+ * It consumes the compact LeafHeader and immutable owner-page publications.
+ * Invalid topology publishes zero indirect work, and domain boundaries remain
+ * explicit descriptor metadata for the immutable catalog lookup.
  */
 
 import {
@@ -15,12 +10,23 @@ import {
   encodeSameOrCoarserPowerDescriptor,
   encodeSameOrFinerPowerDescriptor,
 } from "./octree-power-descriptor";
+import {
+  OCTREE_OWNER_ARENA_MAGIC,
+  OCTREE_OWNER_PAGE_CONTROL_WORDS,
+  OCTREE_OWNER_PAGE_PUBLICATION_STATUS,
+  unpackOctreeOwnerPageControl,
+} from "./webgpu-octree-owner-pages";
+import { PassBroker } from "./webgpu-pass-broker";
 
 export const OCTREE_POWER_LEAF_HEADER_BYTES = 48;
 export const OCTREE_POWER_DESCRIPTOR_CONTROL_BYTES = 32;
 export const OCTREE_POWER_DESCRIPTOR_DISPATCH_BYTES = 12;
+// WGSL ControlArena: two 32-byte controls followed by two independently
+// 16-byte-aligned vec3u dispatches and two scalar counters.
+const OCTREE_POWER_DESCRIPTOR_CONTROL_ARENA_BYTES = 112;
 export const OCTREE_POWER_DESCRIPTOR_INVALID = 0xffff_ffff;
-export const OCTREE_POWER_OWNER_ARENA_MAGIC = 0x4f57_4e52;
+export const OCTREE_POWER_ROW_DELTA_VALID = 0x5244_4c54;
+export const OCTREE_POWER_ROW_DELTA_CONTROL_WORDS = 16;
 /** Six world-space face directions in OCTREE_POWER_NEIGHBOR_DIRECTIONS order. */
 export const OCTREE_POWER_DESCRIPTOR_BOUNDARY_SHIFT = 24;
 export const OCTREE_POWER_DESCRIPTOR_BOUNDARY_MASK = 0x3f00_0000;
@@ -35,7 +41,6 @@ export const OCTREE_POWER_DESCRIPTOR_ERROR = Object.freeze({
   gradingRatio: 1 << 4,
   capacity: 1 << 5,
   /** Reserved ABI bit retained for decoding older diagnostic captures. */
-  acuteGrading: 1 << 6,
 } as const);
 
 export interface OctreePowerDescriptorControl {
@@ -55,6 +60,55 @@ export interface OctreePowerDescriptorPlan {
   readonly controlBytes: number;
   readonly dispatchBytes: number;
   readonly allocatedBytes: number;
+}
+
+function descriptorPublicationArenaBytes(rowCapacity: number): number {
+  const blocks = Math.ceil(rowCapacity / 256);
+  // Public dispatch, row status/prefix/publication lists, block offsets, and
+  // eight-word exact block summaries. All regions are u32-addressed in WGSL.
+  return (4 + 3 * rowCapacity + blocks + 1 + 9 * blocks) * 4;
+}
+
+/**
+ * Exact immutable old/new row transaction produced with the compact frontier.
+ *
+ * `rows` contains a 16-word control header at `controlOffsetWords`, followed
+ * by the total maps and compact lists at the supplied offsets.  Header words:
+ * current, previous, carried, added, retired, dirty, affected, generation,
+ * valid, dirty-dispatch xyz, affected-dispatch xyz, reserved.
+ */
+export interface OctreePowerRowDeltaSource {
+  readonly rows: GPUBuffer;
+  readonly rowCapacity: number;
+  readonly controlOffsetWords: number;
+  readonly newToOldOffsetWords: number;
+  readonly oldToNewOffsetWords: number;
+  readonly dirtyRowsOffsetWords: number;
+  readonly affectedRowsOffsetWords: number;
+}
+
+/** Assert the complete fixed-capacity row-delta buffer ABI before encoding copies or passes. */
+export function assertOctreePowerRowDeltaLayout(
+  source: OctreePowerRowDeltaSource,
+  rowCapacity: number,
+  label: string,
+): void {
+  const spans = [
+    [source.controlOffsetWords, OCTREE_POWER_ROW_DELTA_CONTROL_WORDS],
+    [source.newToOldOffsetWords, rowCapacity],
+    [source.oldToNewOffsetWords, rowCapacity],
+    [source.dirtyRowsOffsetWords, rowCapacity],
+    [source.affectedRowsOffsetWords, rowCapacity],
+  ] as const;
+  const invalidSpan = spans.some(([offset, count]) =>
+    !Number.isSafeInteger(offset) || offset < 0 || offset > 0xffff_ffff
+    || offset + count > 0x1_0000_0000);
+  const requiredWords = invalidSpan ? Number.POSITIVE_INFINITY
+    : Math.max(...spans.map(([offset, count]) => offset + count));
+  if (source.rowCapacity !== rowCapacity || invalidSpan
+    || !Number.isSafeInteger(source.rows.size) || source.rows.size < requiredWords * 4) {
+    throw new RangeError(`${label} row-delta layout is invalid`);
+  }
 }
 
 export interface OctreePowerLeafRow {
@@ -78,22 +132,14 @@ export interface OctreePowerRowDescriptor {
   readonly kind: "same-or-finer" | "same-or-coarser" | "invalid";
 }
 
-/**
- * Storage choices for the same exact owner partition. `live-index` is a
- * bounded engineering lookup, not a paper topology rule; a miss is invalid
- * and may never be replaced with a caller-selected leaf size.
- */
-export type OctreePowerOwnerMode = "auto" | "dense" | "paged" | "live-index";
-
 export interface OctreePowerDescriptorEncodeOptions {
   readonly dimensions: readonly [number, number, number];
   readonly maximumLeafSize: number;
-  /** Host count for tests/bootstrap. Prefer rowCountBuffer for the normal GPU-resident path. */
-  readonly rowCount?: number;
   /** First u32 is the live compact row count (for example compaction[0]). */
-  readonly rowCountBuffer?: GPUBuffer;
+  readonly rowCountBuffer: GPUBuffer;
   readonly generation?: number;
-  readonly ownerMode?: OctreePowerOwnerMode;
+  /** Exact old/new row mapping and dirty plus one-ring work publication. */
+  readonly rowDelta: OctreePowerRowDeltaSource;
 }
 
 function positiveInteger(value: number, label: string): number {
@@ -113,7 +159,8 @@ export function planOctreePowerDescriptors(rowCapacityValue: number): OctreePowe
     descriptorBytes,
     controlBytes: OCTREE_POWER_DESCRIPTOR_CONTROL_BYTES,
     dispatchBytes: OCTREE_POWER_DESCRIPTOR_DISPATCH_BYTES,
-    allocatedBytes: descriptorBytes + OCTREE_POWER_DESCRIPTOR_CONTROL_BYTES + OCTREE_POWER_DESCRIPTOR_DISPATCH_BYTES + 32 + 4,
+    allocatedBytes: 2 * descriptorBytes + OCTREE_POWER_DESCRIPTOR_CONTROL_ARENA_BYTES
+      + descriptorPublicationArenaBytes(rowCapacity) + OCTREE_POWER_DESCRIPTOR_DISPATCH_BYTES + 48,
   };
 }
 
@@ -131,38 +178,34 @@ export function unpackOctreePowerDescriptorControl(words: ArrayLike<number>): Oc
   };
 }
 
+/**
+ * Validate the owner arena's own immutable publication transaction.
+ *
+ * Owner pages are topology state, so their accepted generation is not in the
+ * power-descriptor generation namespace. A descriptor generation may advance
+ * while the exact same topology publication remains current. Admission is
+ * therefore self-contained: the arena must report one clean committed
+ * generation, no rejected candidate, exact free/resident accounting, and no
+ * invalid entry. There is no previous-generation fallback.
+ */
+export function octreePowerOwnerArenaPublicationIsValid(words: ArrayLike<number>): boolean {
+  if (words.length < 16) return false;
+  const control = unpackOctreeOwnerPageControl(words);
+  return control.magic === OCTREE_OWNER_ARENA_MAGIC
+    && control.acceptedGeneration !== 0
+    && control.status === OCTREE_OWNER_PAGE_PUBLICATION_STATUS.ready
+    && control.observedGeneration === control.acceptedGeneration
+    && control.candidateError === 0
+    && control.invalidEntryCount === 0
+    && control.residentCount <= control.capacity
+    && control.freeCount === control.capacity - control.residentCount;
+}
+
 function contains(owner: OctreePowerOwner, cell: readonly [number, number, number], dimensions: readonly [number, number, number]): boolean {
   return supportedLeafSize(owner.size)
     && owner.origin.every((value, axis) => Number.isSafeInteger(value) && value >= 0
       && value % owner.size === 0 && value + owner.size <= dimensions[axis]
       && cell[axis] >= value && cell[axis] < value + owner.size);
-}
-
-/** Decode the dense u32 owner word used by webgpu-octree.ts. */
-export function decodeDenseOctreePowerOwner(
-  wordValue: number,
-  cell: readonly [number, number, number],
-  dimensions: readonly [number, number, number],
-  maximumLeafSize: number,
-): OctreePowerOwner {
-  const word = wordValue >>> 0;
-  let owner: OctreePowerOwner;
-  if (word === 0x8000_0000) {
-    owner = { origin: [...cell] as [number, number, number], size: 1 };
-  } else {
-    const exponent = word & 7;
-    if ((word & 0xc000_0000) !== 0 || exponent < 1 || exponent > 5) {
-      return { origin: [...cell] as [number, number, number], size: 1, invalid: true };
-    }
-    const size = 1 << exponent;
-    owner = {
-      origin: [((word >>> 3) & 511) << exponent, ((word >>> 12) & 511) << exponent, ((word >>> 21) & 511) << exponent],
-      size,
-    };
-  }
-  return owner.size <= maximumLeafSize && contains(owner, cell, dimensions)
-    ? owner
-    : { ...owner, invalid: true };
 }
 
 /**
@@ -179,36 +222,17 @@ export function decodePagedOctreePowerOwner(
 ): OctreePowerOwner {
   const invalid = (): OctreePowerOwner => ({ origin: [...cell] as [number, number, number], size: 1, invalid: true });
   const word = wordValue >>> 0;
-  if (word === 0x8000_0000) {
-    const owner = { origin: [...cell] as [number, number, number], size: 1 };
-    return maximumLeafSize >= 1 && contains(owner, cell, dimensions) ? owner : invalid();
-  }
-  // Simulation owner pages publish either the exact fine sentinel above or
-  // the bare exponent. Zero, the page-table reservation sentinel, and words
-  // with reserved bits set are not valid owner payloads.
-  if (word < 1 || word > 5) return invalid();
-  const exponent = word;
+  if ((word & 0x8000_0000) === 0) return invalid();
+  const exponent = (word >>> 18) & 7;
+  if (exponent > 5) return invalid();
   const size = 1 << exponent;
+  const brickOrigin = cell.map((value) => Math.floor(value / 8) * 8);
+  const delta = [word & 63, (word >>> 6) & 63, (word >>> 12) & 63].map((value) => value - 32);
   const owner: OctreePowerOwner = {
-    // Paged words carry only a size exponent, so derive the aligned origin
-    // from the queried cell rather than interpreting dense-owner origin bits.
-    origin: cell.map((value) => Math.floor(value / size) * size) as [number, number, number],
+    origin: brickOrigin.map((value, axis) => value + delta[axis]) as [number, number, number],
     size,
   };
   return size <= maximumLeafSize && contains(owner, cell, dimensions) ? owner : invalid();
-}
-
-/** Pack the existing dense owner ABI; useful for parity fixtures. */
-export function packDenseOctreePowerOwner(origin: readonly [number, number, number], size: number): number {
-  if (!supportedLeafSize(size)) throw new RangeError("Dense octree owner size is unsupported");
-  if (origin.some((value) => !Number.isSafeInteger(value) || value < 0 || value % size !== 0)) {
-    throw new RangeError("Dense octree owner origin must be non-negative and size-aligned");
-  }
-  if (size === 1) return 0x8000_0000;
-  const exponent = Math.log2(size);
-  const aligned = origin.map((value) => value >>> exponent);
-  if (aligned.some((value) => value > 511)) throw new RangeError("Dense octree owner origin exceeds its packed field");
-  return (exponent | (aligned[0] << 3) | (aligned[1] << 12) | (aligned[2] << 21)) >>> 0;
 }
 
 /** CPU oracle for one 48-byte LeafHeader row. */
@@ -287,13 +311,18 @@ export function describeOctreePowerRow(
 export class WebGPUOctreePowerDescriptor {
   readonly plan: OctreePowerDescriptorPlan;
   readonly descriptors: GPUBuffer;
+  private readonly candidateDescriptors: GPUBuffer;
   readonly control: GPUBuffer;
   readonly dispatch: GPUBuffer;
+  private readonly workDispatch: GPUBuffer;
   private readonly params: GPUBuffer;
-  private readonly hostRowCount: GPUBuffer;
   private readonly preparePipeline: GPUComputePipeline;
   private readonly generatePipeline: GPUComputePipeline;
-  private readonly publishPipeline: GPUComputePipeline;
+  private readonly stagePipeline: GPUComputePipeline;
+  private readonly prefixPipeline: GPUComputePipeline;
+  private readonly scatterPipeline: GPUComputePipeline;
+  private readonly commitPipeline: GPUComputePipeline;
+  private readonly finalizePipeline: GPUComputePipeline;
   private readonly layout: GPUBindGroupLayout;
   private destroyed = false;
 
@@ -301,10 +330,17 @@ export class WebGPUOctreePowerDescriptor {
     this.plan = planOctreePowerDescriptors(rowCapacity);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.descriptors = device.createBuffer({ label: "Octree power descriptors", size: this.plan.descriptorBytes, usage: storage });
-    this.control = device.createBuffer({ label: "Octree power descriptor control", size: this.plan.controlBytes, usage: storage });
-    this.dispatch = device.createBuffer({ label: "Octree power descriptor dispatch", size: this.plan.dispatchBytes, usage: storage | GPUBufferUsage.INDIRECT });
-    this.params = device.createBuffer({ label: "Octree power descriptor parameters", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.hostRowCount = device.createBuffer({ label: "Octree power descriptor host row count", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.candidateDescriptors = device.createBuffer({ label: "Octree power descriptor candidates", size: this.plan.descriptorBytes, usage: storage });
+    this.control = device.createBuffer({ label: "Octree power descriptor control transaction",
+      size: OCTREE_POWER_DESCRIPTOR_CONTROL_ARENA_BYTES, usage: storage });
+    this.dispatch = device.createBuffer({
+      label: "Octree power descriptor publication arena",
+      size: descriptorPublicationArenaBytes(this.plan.rowCapacity),
+      usage: storage | GPUBufferUsage.INDIRECT,
+    });
+    this.workDispatch = device.createBuffer({ label: "Octree power descriptor work dispatch", size: this.plan.dispatchBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Octree power descriptor parameters", size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.layout = device.createBindGroupLayout({ label: "Octree power descriptor layout", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -313,15 +349,27 @@ export class WebGPUOctreePowerDescriptor {
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
     const shaderModule = device.createShaderModule({ label: "Octree power descriptor generation", code: octreePowerDescriptorShader });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
     this.preparePipeline = device.createComputePipeline({ label: "Prepare octree power descriptors", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "preparePowerDescriptors" } });
     this.generatePipeline = device.createComputePipeline({ label: "Generate octree power descriptors", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "generatePowerDescriptors" } });
-    this.publishPipeline = device.createComputePipeline({ label: "Publish octree power descriptor dispatch", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "publishPowerDescriptors" } });
+    this.stagePipeline = device.createComputePipeline({ label: "Stage exact octree power descriptor delta", layout: pipelineLayout,
+      compute: { module: shaderModule, entryPoint: "stagePowerDescriptorDelta" } });
+    this.prefixPipeline = device.createComputePipeline({ label: "Prefix exact octree power descriptor blocks", layout: pipelineLayout,
+      compute: { module: shaderModule, entryPoint: "prefixPowerDescriptorDelta" } });
+    this.scatterPipeline = device.createComputePipeline({ label: "Scatter exact octree power descriptor publication rows", layout: pipelineLayout,
+      compute: { module: shaderModule, entryPoint: "scatterPowerDescriptorDelta" } });
+    this.commitPipeline = device.createComputePipeline({ label: "Commit changed octree power descriptors", layout: pipelineLayout,
+      compute: { module: shaderModule, entryPoint: "commitPowerDescriptors" } });
+    this.finalizePipeline = device.createComputePipeline({ label: "Finalize octree power descriptors", layout: pipelineLayout,
+      compute: { module: shaderModule, entryPoint: "finalizePowerDescriptors" } });
   }
 
-  encode(encoder: GPUCommandEncoder, leafHeaders: GPUBuffer, owners: GPUBuffer, options: OctreePowerDescriptorEncodeOptions): void {
+  encode(broker: PassBroker, leafHeaders: GPUBuffer, owners: GPUBuffer,
+    options: OctreePowerDescriptorEncodeOptions): void {
     if (this.destroyed) throw new Error("Octree power descriptor generator is destroyed");
     options.dimensions.forEach((value, axis) => positiveInteger(value, `Power descriptor dimension ${axis}`));
     if (options.dimensions.some((value) => value > 0x7fff_ffff)
@@ -330,93 +378,287 @@ export class WebGPUOctreePowerDescriptor {
     }
     positiveInteger(options.maximumLeafSize, "Power descriptor maximum leaf size");
     if (!supportedLeafSize(options.maximumLeafSize)) throw new RangeError("Power descriptor maximum leaf size is unsupported");
-    if ((options.rowCount === undefined) === (options.rowCountBuffer === undefined)) {
-      throw new RangeError("Power descriptor encode needs exactly one host or GPU row count source");
-    }
-    const hostRowCount = options.rowCount ?? this.plan.rowCapacity;
-    if (!Number.isSafeInteger(hostRowCount) || hostRowCount < 0 || hostRowCount > 0xffff_ffff) throw new RangeError("Power descriptor row count must be unsigned");
-    if (options.rowCount !== undefined) this.device.queue.writeBuffer(this.hostRowCount, 0, new Uint32Array([options.rowCount]));
     const generation = options.generation ?? 0;
     if (!Number.isSafeInteger(generation) || generation < 0 || generation > 0xffff_ffff) throw new RangeError("Power descriptor generation must be unsigned");
-    const ownerMode = options.ownerMode === "dense" ? 1 : options.ownerMode === "paged" ? 2
-      : options.ownerMode === "live-index" ? 3 : 0;
+    const delta = options.rowDelta;
+    assertOctreePowerRowDeltaLayout(delta, this.plan.rowCapacity, "Power descriptor");
     this.device.queue.writeBuffer(this.params, 0, new Uint32Array([
-      ...options.dimensions, options.maximumLeafSize, hostRowCount, generation, ownerMode, this.plan.rowCapacity,
+      ...options.dimensions, options.maximumLeafSize, this.plan.rowCapacity, generation, this.plan.rowCapacity, 0,
+      delta.controlOffsetWords, delta.newToOldOffsetWords, delta.affectedRowsOffsetWords, 1,
     ]));
     const group = this.device.createBindGroup({ label: "Octree power descriptor bindings", layout: this.layout, entries: [
       { binding: 0, resource: { buffer: this.params } }, { binding: 1, resource: { buffer: leafHeaders } },
-      { binding: 2, resource: { buffer: owners } }, { binding: 3, resource: { buffer: this.descriptors } },
+      { binding: 2, resource: { buffer: owners } }, { binding: 3, resource: { buffer: this.candidateDescriptors } },
       { binding: 4, resource: { buffer: this.control } }, { binding: 5, resource: { buffer: this.dispatch } },
-      { binding: 6, resource: { buffer: options.rowCountBuffer ?? this.hostRowCount } },
+      { binding: 6, resource: { buffer: options.rowCountBuffer } },
+      { binding: 7, resource: { buffer: delta.rows } },
+      { binding: 8, resource: { buffer: this.descriptors } },
     ] });
-    const prepare = encoder.beginComputePass({ label: "Prepare power descriptor control" });
-    prepare.setPipeline(this.preparePipeline); prepare.setBindGroup(0, group); prepare.dispatchWorkgroups(1); prepare.end();
-    const available = Math.min(hostRowCount, this.plan.rowCapacity);
-    if (available > 0) {
-      const groups = Math.ceil(available / 64);
-      const x = Math.min(groups, 65_535);
-      const generate = encoder.beginComputePass({ label: "Generate power topology descriptors" });
-      generate.setPipeline(this.generatePipeline); generate.setBindGroup(0, group);
-      generate.dispatchWorkgroups(x, Math.ceil(groups / x)); generate.end();
+    let pass = broker.compute({ label: "Prepare power descriptor control" });
+    pass.setPipeline(this.preparePipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(1);
+    broker.copyBufferToBuffer(delta.rows, (delta.controlOffsetWords + 12) * 4,
+      this.workDispatch, 0, this.plan.dispatchBytes);
+    pass = broker.compute({ label: "Resolve affected power descriptors" });
+    pass.setPipeline(this.generatePipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
+    broker.copyBufferToBuffer(this.control, 64, this.workDispatch, 0, this.plan.dispatchBytes);
+    pass = broker.compute({ label: "Stage exact power descriptor carry and affected rows" });
+    pass.setPipeline(this.stagePipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
+    pass.setPipeline(this.prefixPipeline); pass.dispatchWorkgroups(1);
+    pass.setPipeline(this.scatterPipeline);
+    pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
+    broker.copyBufferToBuffer(this.control, 80, this.workDispatch, 0, this.plan.dispatchBytes);
+    pass = broker.compute({ label: "Commit power descriptor publication" });
+    pass.setPipeline(this.commitPipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
+    pass.setPipeline(this.finalizePipeline); pass.dispatchWorkgroups(1);
+  }
+
+  /** Rejection-only readback for the exact candidate descriptor/status named
+   * by the control transaction. It never participates in publication. */
+  async readCandidateFailure(row: number) {
+    if (!Number.isSafeInteger(row) || row < 0 || row >= this.plan.rowCapacity) return undefined;
+    const readback = this.device.createBuffer({
+      label: "Rejected power descriptor candidate",
+      size: 12,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({
+      label: "Read rejected power descriptor candidate",
+    });
+    encoder.copyBufferToBuffer(this.candidateDescriptors, row * 4, readback, 0, 4);
+    encoder.copyBufferToBuffer(this.descriptors, row * 4, readback, 4, 4);
+    encoder.copyBufferToBuffer(this.dispatch, (4 + row) * 4, readback, 8, 4);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const encoded = words[0] >>> 0;
+      return {
+        row,
+        candidate: encoded,
+        committed: words[1] >>> 0,
+        status: words[2] >>> 0,
+        flags: (encoded & 0x4000_0000) !== 0 ? encoded & 127 : 0,
+        detail: (encoded & 0x4000_0000) !== 0 ? (encoded >>> 7) & 0x007f_ffff : 0,
+      };
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
     }
-    const publish = encoder.beginComputePass({ label: "Publish power descriptor dispatch" });
-    publish.setPipeline(this.publishPipeline); publish.setBindGroup(0, group); publish.dispatchWorkgroups(1); publish.end();
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.descriptors.destroy(); this.control.destroy(); this.dispatch.destroy(); this.params.destroy(); this.hostRowCount.destroy();
+    this.descriptors.destroy(); this.candidateDescriptors.destroy(); this.control.destroy(); this.dispatch.destroy(); this.workDispatch.destroy();
+    this.params.destroy();
   }
 }
 
+/**
+ * Descriptor resolution follows the paper's compact 1-ring topology key.
+ * Only affected rows are resolved. Clean rows retain their immutable prior
+ * descriptors by exact row identity. Sorted insertion/removal can move a clean
+ * identity; that representation-only relocation is detected from newToOld and
+ * committed without re-resolving topology. The unchanged transaction publishes
+ * zero descriptor work.
+ */
 export const octreePowerDescriptorShader = /* wgsl */ `
-struct Params { dimensionsMaximumLeaf:vec4u, rowCountGenerationModeCapacity:vec4u }
+struct Params { dimensionsMaximumLeaf:vec4u, rowCountGenerationCapacityReserved:vec4u, delta:vec4u }
 struct LeafHeader { cell:u32, entryStart:u32, entryCount:u32, size:u32, diagonal:f32, rhs:f32, pad0:u32, pad1:u32, gradient:vec4f }
 struct Owner { origin:vec3u, size:u32, invalid:u32 }
-struct Control { rowCount:atomic<u32>, validCount:atomic<u32>, errorCount:atomic<u32>, firstInvalid:atomic<u32>, flags:atomic<u32>, sameOrFinerCount:atomic<u32>, sameOrCoarserCount:atomic<u32>, generation:atomic<u32> }
+struct Control { rowCount:u32, validCount:u32, errorCount:u32, firstInvalid:u32, flags:u32, sameOrFinerCount:u32, sameOrCoarserCount:u32, generation:u32 }
+// The first control is the public result of the current attempt. The hidden
+// authority retains the last accepted counters so a rejected attempt can be
+// diagnosed without permitting stale descriptors to look current.
+struct ControlArena {
+  candidate:Control,
+  authority:Control,
+  blockDispatch:vec3u,
+  commitDispatch:vec3u,
+  publicationCount:u32,
+  blockCount:u32,
+}
 @group(0) @binding(0) var<uniform> params:Params;
 @group(0) @binding(1) var<storage,read> headers:array<LeafHeader>;
 @group(0) @binding(2) var<storage,read> owners:array<u32>;
 @group(0) @binding(3) var<storage,read_write> descriptors:array<u32>;
-@group(0) @binding(4) var<storage,read_write> control:Control;
+@group(0) @binding(4) var<storage,read_write> controlArena:ControlArena;
 @group(0) @binding(5) var<storage,read_write> indirectDispatch:array<u32>;
 @group(0) @binding(6) var<storage,read> rowCountSource:array<u32>;
+@group(0) @binding(7) var<storage,read> rowDelta:array<u32>;
+@group(0) @binding(8) var<storage,read_write> committedDescriptors:array<u32>;
 const INVALID:u32=0xffffffffu;
-const OWNER_MAGIC:u32=0x4f574e52u;
+const ROW_DELTA_VALID:u32=${OCTREE_POWER_ROW_DELTA_VALID}u;
+const ROW_DELTA_AFFECTED:u32=0x80000000u;
+const OWNER_MAGIC:u32=${OCTREE_OWNER_ARENA_MAGIC}u;
+const OWNER_PUBLICATION_READY:u32=${OCTREE_OWNER_PAGE_PUBLICATION_STATUS.ready}u;
+const OWNER_VALID:u32=0x80000000u;
+const OWNER_CONTROL_WORDS:u32=16u;
+const OWNER_FREE_COUNT:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.freeCount}u;
+const OWNER_RESIDENT_COUNT:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.residentCount}u;
+const OWNER_CANDIDATE_ERROR:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.candidateError}u;
+const OWNER_CAPACITY:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.capacity}u;
+const OWNER_RECORD_PAGE_OFFSET:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.ownerRecordPageOffsetWords}u;
+const OWNER_PAGES_OFFSET:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.ownerPagesOffsetWords}u;
+const OWNER_ACCEPTED_GENERATION:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.acceptedGeneration}u;
+const OWNER_PUBLICATION_STATUS:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.status}u;
+const OWNER_OBSERVED_GENERATION:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.observedGeneration}u;
+const OWNER_INVALID_ENTRY_COUNT:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.invalidEntryCount}u;
+const OWNER_ARENA_MAGIC:u32=${OCTREE_OWNER_PAGE_CONTROL_WORDS.magic}u;
+const OWNER_PAGE_VOXELS:u32=512u;
 const COARSER_FLAG:u32=0x80000000u;
 const MALFORMED_HEADER:u32=1u;
 const MALFORMED_OWNER:u32=2u;
-const MIXED_GRADING:u32=8u;const ACUTE_GRADING:u32=64u;
+const MIXED_GRADING:u32=8u;
 const GRADING_RATIO:u32=16u;
 const CAPACITY:u32=32u;
+const STATUS_VALID:u32=0x80000000u;
+const STATUS_COARSER:u32=0x40000000u;
+const STATUS_PUBLISH:u32=0x20000000u;
+const STATUS_AFFECTED:u32=0x10000000u;
 const DIRECTIONS:array<vec3i,18>=array<vec3i,18>(
   vec3i(-1,0,0),vec3i(0,-1,0),vec3i(0,0,-1),vec3i(0,0,1),vec3i(0,1,0),vec3i(1,0,0),
   vec3i(-1,-1,0),vec3i(-1,0,-1),vec3i(-1,0,1),vec3i(-1,1,0),vec3i(0,-1,-1),vec3i(0,-1,1),
   vec3i(0,1,-1),vec3i(0,1,1),vec3i(1,-1,0),vec3i(1,0,-1),vec3i(1,0,1),vec3i(1,1,0));
 fn dims()->vec3u{return params.dimensionsMaximumLeaf.xyz;}
+fn generation()->u32{return params.rowCountGenerationCapacityReserved.y;}
+fn deltaAccepted(requested:u32)->bool{
+  if(params.delta.x>arrayLength(&rowDelta)||arrayLength(&rowDelta)-params.delta.x<16u){return false;}
+  let base=params.delta.x;let previous=rowDelta[base+1u];let carried=rowDelta[base+2u];
+  let added=rowDelta[base+3u];let retired=rowDelta[base+4u];let affected=rowDelta[base+6u];
+  let mapsFit=params.delta.y<=arrayLength(&rowDelta)&&requested<=arrayLength(&rowDelta)-params.delta.y;
+  let affectedFits=params.delta.z<=arrayLength(&rowDelta)&&affected<=arrayLength(&rowDelta)-params.delta.z;
+  return mapsFit&&affectedFits&&rowDelta[base]==requested
+    &&rowDelta[base+7u]==generation()&&rowDelta[base+8u]==ROW_DELTA_VALID
+    &&carried<=previous&&affected<=requested
+    &&requested==carried+added&&requested==previous+added-retired;
+}
+fn affectedRow(item:u32)->u32{return rowDelta[params.delta.z+item];}
 fn supportedSize(size:u32)->bool{return size==1u||size==2u||size==4u||size==8u||size==16u||size==32u;}
 fn volumeFits()->bool{let d=dims();return d.x!=0u&&d.y!=0u&&d.z!=0u&&d.x<=0xffffffffu/d.y&&d.x*d.y<=0xffffffffu/d.z;}
 fn cellCoord(cell:u32)->vec3u{let d=dims();return vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));}
 fn ownerValid(owner:Owner,cell:vec3u)->bool{return owner.invalid==0u&&supportedSize(owner.size)&&owner.size<=params.dimensionsMaximumLeaf.w&&all(vec3u(owner.size)<=dims())&&all(owner.origin<=dims()-vec3u(owner.size))&&all(owner.origin%vec3u(owner.size)==vec3u(0u))&&all(cell>=owner.origin)&&all(cell<owner.origin+vec3u(owner.size));}
-fn decodeDenseOwner(word:u32,cell:vec3u)->Owner{if(word==0x80000000u){return Owner(cell,1u,0u);}let exponent=word&7u;if((word&0xc0000000u)!=0u||exponent==0u||exponent>5u){return Owner(cell,1u,1u);}let size=1u<<exponent;let origin=(cell>>vec3u(exponent))<<vec3u(exponent);var result=Owner(origin,size,0u);result.invalid=select(1u,0u,ownerValid(result,cell));return result;}
-fn decodePagedOwner(word:u32,cell:vec3u)->Owner{if(word==0x80000000u){return Owner(cell,1u,0u);}if(word<1u||word>5u){return Owner(cell,1u,1u);}let size=1u<<word;let origin=(cell>>vec3u(word))<<vec3u(word);var result=Owner(origin,size,0u);result.invalid=select(1u,0u,ownerValid(result,cell));return result;}
-fn pagedOwners()->bool{let mode=params.rowCountGenerationModeCapacity.z;if(mode==1u){return false;}if(mode==2u){return true;}return arrayLength(&owners)>15u&&owners[15]==OWNER_MAGIC;}
-fn pagedOwner(cell:vec3u)->Owner{if(arrayLength(&owners)<=15u||owners[15]!=OWNER_MAGIC){return Owner(cell,1u,1u);}if(owners[7]==0u||owners[7]!=params.rowCountGenerationModeCapacity.y){return Owner(cell,1u,1u);}let freeOffset=owners[5];let payloadOffset=owners[6];let capacity=owners[3];if(capacity==0u||freeOffset<=16u||((freeOffset-16u)&1u)!=0u||payloadOffset>=arrayLength(&owners)){return Owner(cell,1u,1u);}let hashCapacity=(freeOffset-16u)/2u;if(hashCapacity==0u||16u+2u*hashCapacity>arrayLength(&owners)){return Owner(cell,1u,1u);}let bd=(dims()+vec3u(7u))/8u;let brick=cell/8u;if(any(brick>=bd)||bd.x>0xffffffffu/bd.y){return Owner(cell,1u,1u);}let logical=brick.x+brick.y*bd.x+brick.z*bd.x*bd.y;let key=logical+1u;var slot=(logical*0x9e3779b1u)%hashCapacity;var encoded=0u;var found=false;for(var probe=0u;probe<hashCapacity;probe+=1u){let observed=owners[16u+slot];if(observed==key){encoded=owners[16u+hashCapacity+slot];found=true;break;}if(observed==0u){break;}slot=select(slot+1u,0u,slot+1u==hashCapacity);}if(!found||encoded==0u||encoded==INVALID||encoded>capacity){return Owner(cell,1u,1u);}let local=cell%vec3u(8u);let localIndex=local.x+local.y*8u+local.z*64u;let physical=encoded-1u;if(payloadOffset>=arrayLength(&owners)||physical>(arrayLength(&owners)-payloadOffset-1u)/512u){return Owner(cell,1u,1u);}let word=owners[payloadOffset+physical*512u+localIndex];if(word==0u||word==INVALID){return Owner(cell,1u,1u);}return decodePagedOwner(word,cell);}
-fn hashSite(cell:u32,size:u32)->u32{var value=cell^(size*0x9e3779b9u);value=(value^(value>>16u))*0x7feb352du;value=(value^(value>>15u))*0x846ca68bu;return value^(value>>16u);}
-fn indexedOwner(cell:vec3u,preferredSize:u32)->Owner{let capacity=arrayLength(&owners)/4u;if(capacity==0u||(capacity&(capacity-1u))!=0u){return Owner(cell,1u,1u);}let mask=capacity-1u;for(var size=1u;size<=params.dimensionsMaximumLeaf.w;size<<=1u){let origin=(cell/vec3u(size))*vec3u(size);let linear=origin.x+dims().x*(origin.y+dims().y*origin.z);let base=hashSite(linear,size)&mask;for(var probe=0u;probe<32u;probe+=1u){let slot=(base+probe)&mask;let observed=owners[slot*4u];if(observed==0u){break;}if(observed==linear+1u&&owners[slot*4u+1u]==size){return Owner(origin,size,0u);}}}return Owner(cell,max(1u,preferredSize),1u);}
-fn ownerAt(cell:vec3u,preferredSize:u32)->Owner{if(params.rowCountGenerationModeCapacity.z==3u){return indexedOwner(cell,preferredSize);}if(pagedOwners()){return pagedOwner(cell);}if(!volumeFits()){return Owner(cell,1u,1u);}let index=cell.x+dims().x*(cell.y+dims().y*cell.z);if(index>=arrayLength(&owners)){return Owner(cell,1u,1u);}return decodeDenseOwner(owners[index],cell);}
-fn failRow(row:u32,flags:u32,detail:u32){descriptors[row]=0x40000000u|(flags&127u)|(detail<<7u);atomicAdd(&control.errorCount,1u);atomicMin(&control.firstInvalid,row);atomicOr(&control.flags,flags);}
-@compute @workgroup_size(1) fn preparePowerDescriptors(){let requested=select(0u,rowCountSource[0],arrayLength(&rowCountSource)>0u);atomicStore(&control.rowCount,requested);atomicStore(&control.validCount,0u);atomicStore(&control.errorCount,0u);atomicStore(&control.firstInvalid,INVALID);atomicStore(&control.flags,0u);atomicStore(&control.sameOrFinerCount,0u);atomicStore(&control.sameOrCoarserCount,0u);atomicStore(&control.generation,params.rowCountGenerationModeCapacity.y);if(arrayLength(&indirectDispatch)>=3u){indirectDispatch[0]=0u;indirectDispatch[1]=1u;indirectDispatch[2]=1u;}}
-@compute @workgroup_size(64) fn generatePowerDescriptors(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) workgroups:vec3u,@builtin(local_invocation_index) lid:u32){
-  let row=(wid.x+wid.y*workgroups.x)*64u+lid;let requested=atomicLoad(&control.rowCount);
+fn decodePagedOwner(word:u32,cell:vec3u)->Owner{
+  if((word&OWNER_VALID)==0u){return Owner(cell,1u,1u);}
+  let exponent=(word>>18u)&7u;if(exponent>5u){return Owner(cell,1u,1u);}
+  let brickOrigin=vec3i((cell/vec3u(8u))*vec3u(8u));
+  let delta=vec3i(i32(word&63u)-32,i32((word>>6u)&63u)-32,i32((word>>12u)&63u)-32);
+  let signedOrigin=brickOrigin+delta;if(any(signedOrigin<vec3i(0))){return Owner(cell,1u,1u);}
+  let result=Owner(vec3u(signedOrigin),1u<<exponent,0u);
+  return Owner(result.origin,result.size,select(1u,0u,ownerValid(result,cell)));
+}
+fn pagedOwnerPublicationValid()->bool{
+  if(arrayLength(&owners)<OWNER_CONTROL_WORDS||owners[OWNER_ARENA_MAGIC]!=OWNER_MAGIC){return false;}
+  let capacity=owners[OWNER_CAPACITY];let resident=owners[OWNER_RESIDENT_COUNT];
+  let accepted=owners[OWNER_ACCEPTED_GENERATION];
+  return accepted!=0u&&owners[OWNER_PUBLICATION_STATUS]==OWNER_PUBLICATION_READY
+    &&owners[OWNER_OBSERVED_GENERATION]==accepted&&owners[OWNER_CANDIDATE_ERROR]==0u
+    &&owners[OWNER_INVALID_ENTRY_COUNT]==0u&&resident<=capacity
+    &&owners[OWNER_FREE_COUNT]==capacity-resident;
+}
+fn pagedOwner(cell:vec3u)->Owner{
+  if(!pagedOwnerPublicationValid()){return Owner(cell,1u,1u);}
+  let capacity=owners[OWNER_CAPACITY];let resident=min(owners[OWNER_RESIDENT_COUNT],capacity);
+  let recordKeyOffset=OWNER_CONTROL_WORDS;let recordPageOffset=owners[OWNER_RECORD_PAGE_OFFSET];
+  let payloadOffset=owners[OWNER_PAGES_OFFSET];
+  if(capacity==0u||recordPageOffset!=recordKeyOffset+capacity||payloadOffset!=recordPageOffset+capacity
+      ||recordKeyOffset>arrayLength(&owners)||capacity>arrayLength(&owners)-recordKeyOffset
+      ||recordPageOffset>arrayLength(&owners)||capacity>arrayLength(&owners)-recordPageOffset
+      ||payloadOffset>=arrayLength(&owners)){return Owner(cell,1u,1u);}
+  let bd=(dims()+vec3u(7u))/8u;let brick=cell/8u;
+  if(any(brick>=bd)||bd.x>0xffffffffu/bd.y){return Owner(cell,1u,1u);}
+  let layer=bd.x*bd.y;if(brick.z>0xffffffffu/layer){return Owner(cell,1u,1u);}
+  let logical=brick.x+brick.y*bd.x+brick.z*layer;let key=logical+1u;
+  var low=0u;var high=resident;
+  while(low<high){let middle=low+(high-low)/2u;let observed=owners[recordKeyOffset+middle];if(observed<key){low=middle+1u;}else{high=middle;}}
+  if(low>=resident||owners[recordKeyOffset+low]!=key){return Owner(cell,1u,1u);}
+  let encoded=owners[recordPageOffset+low];
+  if(encoded==0u||encoded==INVALID||encoded>capacity){return Owner(cell,1u,1u);}
+  let physical=encoded-1u;let local=cell%vec3u(8u);let localIndex=local.x+local.y*8u+local.z*64u;
+  if(physical>(arrayLength(&owners)-payloadOffset-1u)/OWNER_PAGE_VOXELS){return Owner(cell,1u,1u);}
+  let at=payloadOffset+physical*OWNER_PAGE_VOXELS+localIndex;
+  if(at>=arrayLength(&owners)){return Owner(cell,1u,1u);}
+  return decodePagedOwner(owners[at],cell);
+}
+fn ownerAt(cell:vec3u)->Owner{
+  return pagedOwner(cell);
+}
+fn failRow(row:u32,flags:u32,detail:u32){
+  descriptors[row]=0x40000000u|(flags&127u)|(detail<<7u);
+}
+fn succeedRow(row:u32,descriptor:u32){
+  descriptors[row]=descriptor;
+}
+fn descriptorValid(descriptor:u32)->bool{return descriptor!=INVALID&&(descriptor&0x40000000u)==0u;}
+fn descriptorFlags(descriptor:u32)->u32{return select(CAPACITY,descriptor&127u,(descriptor&0x40000000u)!=0u);}
+fn affectedCount()->u32{return rowDelta[params.delta.x+6u];}
+fn dispatchFor(count:u32)->vec3u{
+  let groups=(count+63u)/64u;let x=min(groups,65535u);
+  return vec3u(x,select(1u,(groups+x-1u)/x,x>0u),1u);
+}
+fn blockDispatchFor(count:u32)->vec3u{
+  let groups=(count+255u)/256u;let x=min(groups,65535u);
+  return vec3u(x,select(1u,(groups+x-1u)/x,x>0u),1u);
+}
+fn blockCount()->u32{return (controlArena.candidate.rowCount+255u)/256u;}
+fn statusBase()->u32{return 4u;}
+fn prefixBase()->u32{return statusBase()+params.rowCountGenerationCapacityReserved.z;}
+fn publicationBase()->u32{return prefixBase()+params.rowCountGenerationCapacityReserved.z;}
+fn blockOffsetBase()->u32{return publicationBase()+params.rowCountGenerationCapacityReserved.z;}
+fn blockSummaryBase()->u32{return blockOffsetBase()+blockCount()+1u;}
+fn rowListedAffected(row:u32)->bool{
+  var low=0u;var high=affectedCount();
+  while(low<high){let middle=low+(high-low)/2u;if(affectedRow(middle)<row){low=middle+1u;}else{high=middle;}}
+  return low<affectedCount()&&affectedRow(low)==row;
+}
+fn rejectCandidate(row:u32,flags:u32){
+  controlArena.candidate.errorCount+=1u;
+  controlArena.candidate.firstInvalid=min(controlArena.candidate.firstInvalid,row);
+  controlArena.candidate.flags|=flags;
+}
+var<workgroup> publicationScan:array<u32,256>;
+var<workgroup> publicationCounts:array<vec4u,256>;
+var<workgroup> publicationFailures:array<vec4u,256>;
+@compute @workgroup_size(1) fn preparePowerDescriptors(){
+  let requested=select(0u,rowCountSource[0],arrayLength(&rowCountSource)>0u);
+  controlArena.candidate=Control(requested,0u,0u,INVALID,0u,0u,0u,generation());
+  controlArena.blockDispatch=vec3u(0u,1u,1u);
+  controlArena.commitDispatch=vec3u(0u,1u,1u);
+  controlArena.publicationCount=0u;controlArena.blockCount=0u;
+  if(arrayLength(&indirectDispatch)>=3u){indirectDispatch[0]=0u;indirectDispatch[1]=1u;indirectDispatch[2]=1u;}
+  let available=min(params.rowCountGenerationCapacityReserved.z,min(arrayLength(&headers),min(arrayLength(&descriptors),arrayLength(&committedDescriptors))));
+  if(available<requested){controlArena.candidate.errorCount=requested-available;controlArena.candidate.firstInvalid=available;controlArena.candidate.flags=CAPACITY;}
+  if(!deltaAccepted(requested)){rejectCandidate(0u,CAPACITY);return;}
+  let previous=rowDelta[params.delta.x+1u];
+  if(previous>arrayLength(&committedDescriptors)
+      ||(previous!=0u&&(controlArena.authority.rowCount!=previous
+        ||controlArena.authority.validCount!=previous||controlArena.authority.errorCount!=0u
+        ||controlArena.authority.flags!=0u))){
+    rejectCandidate(0u,CAPACITY);return;
+  }
+  let blocks=(requested+255u)/256u;
+  let required=blockSummaryBase()+9u*blocks;
+  if(required>arrayLength(&indirectDispatch)){rejectCandidate(0u,CAPACITY);return;}
+  controlArena.blockCount=blocks;controlArena.blockDispatch=blockDispatchFor(requested);
+}
+@compute @workgroup_size(64) fn generatePowerDescriptors(
+    @builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) workgroups:vec3u,@builtin(local_invocation_index) lid:u32){
+  if(controlArena.candidate.flags!=0u){return;}
+  let item=(wid.x+wid.y*workgroups.x)*64u+lid;if(item>=affectedCount()){return;}
+  let row=affectedRow(item);let requested=controlArena.candidate.rowCount;
   if(row>=requested||row>=arrayLength(&headers)||row>=arrayLength(&descriptors)){return;}
+  if((item>0u&&affectedRow(item-1u)>=row)||(rowDelta[params.delta.y+row]&ROW_DELTA_AFFECTED)==0u){
+    failRow(row,CAPACITY,0u);return;
+  }
   let header=headers[row];
   if(!volumeFits()||!supportedSize(params.dimensionsMaximumLeaf.w)||!supportedSize(header.size)||header.size>params.dimensionsMaximumLeaf.w){failRow(row,MALFORMED_HEADER,1u);return;}
   let volume=dims().x*dims().y*dims().z;if(header.cell>=volume){failRow(row,MALFORMED_HEADER,1u);return;}
   let origin=cellCoord(header.cell);
   if(any(origin%vec3u(header.size)!=vec3u(0u))||any(vec3u(header.size)>dims())||any(origin>dims()-vec3u(header.size))){failRow(row,MALFORMED_HEADER,1u);return;}
-  let anchor=ownerAt(origin,header.size);
+  let anchor=ownerAt(origin);
   if(!ownerValid(anchor,origin)||anchor.size!=header.size||any(anchor.origin!=origin)){
     let reasons=select(0u,1u,anchor.invalid!=0u)|select(0u,2u,anchor.size!=header.size)|select(0u,4u,any(anchor.origin!=origin));
     failRow(row,MALFORMED_OWNER,2u|(min(anchor.size,63u)<<5u)|(reasons<<11u));return;
@@ -426,7 +668,7 @@ fn failRow(row:u32,flags:u32,detail:u32){descriptors[row]=0x40000000u|(flags&127
     let direction=DIRECTIONS[bit];var probe=vec3i(0);
     for(var axis=0u;axis<3u;axis+=1u){probe[axis]=select(select(i32(origin[axis]+header.size/2u),i32(origin[axis]+header.size),direction[axis]>0),i32(origin[axis])-1,direction[axis]<0);}
     if(any(probe<vec3i(0))||any(probe>=vec3i(dims()))){if(bit<6u){boundaryMask|=1u<<bit;}sizes[bit]=header.size;continue;}
-    let owner=ownerAt(vec3u(probe),header.size);var localFlags=0u;var reasons=0u;
+    let owner=ownerAt(vec3u(probe));var localFlags=0u;var reasons=0u;
     if(!ownerValid(owner,vec3u(probe))){localFlags|=MALFORMED_OWNER;reasons|=1u;}
     if(all(min(owner.origin+vec3u(owner.size),origin+vec3u(header.size))>max(owner.origin,origin))){localFlags|=MALFORMED_OWNER;reasons|=2u;}
     if(owner.size*2u<header.size||owner.size>header.size*2u){localFlags|=GRADING_RATIO;reasons|=4u;}
@@ -436,9 +678,116 @@ fn failRow(row:u32,flags:u32,detail:u32){descriptors[row]=0x40000000u|(flags&127
   if(finer&&coarser){flags|=MIXED_GRADING;if(firstDetail==0u){firstDetail=31u;}}
   if(flags!=0u){failRow(row,flags,firstDetail);return;}
   var descriptor=boundaryMask<<24u;
-  if(!coarser){for(var bit=0u;bit<18u;bit+=1u){if(sizes[bit]==header.size){descriptor|=1u<<bit;}}atomicAdd(&control.sameOrFinerCount,1u);}
-  else{let child=(origin/vec3u(header.size))&vec3u(1u);descriptor|=COARSER_FLAG|child.x|(child.y<<1u)|(child.z<<2u);let outward=vec3i(select(-1,1,child.x==1u),select(-1,1,child.y==1u),select(-1,1,child.z==1u));let wanted=array<vec3i,6>(vec3i(outward.x,0,0),vec3i(0,outward.y,0),vec3i(0,0,outward.z),vec3i(outward.x,outward.y,0),vec3i(outward.x,0,outward.z),vec3i(0,outward.y,outward.z));for(var coarseBit=0u;coarseBit<6u;coarseBit+=1u){for(var bit=0u;bit<18u;bit+=1u){if(all(DIRECTIONS[bit]==wanted[coarseBit])&&sizes[bit]==header.size*2u){descriptor|=1u<<(coarseBit+3u);}}}atomicAdd(&control.sameOrCoarserCount,1u);}
-  descriptors[row]=descriptor;atomicAdd(&control.validCount,1u);
+  if(!coarser){
+    for(var bit=0u;bit<18u;bit+=1u){if(sizes[bit]==header.size){descriptor|=1u<<bit;}}
+  }else{
+    let child=(origin/vec3u(header.size))&vec3u(1u);
+    descriptor|=COARSER_FLAG|child.x|(child.y<<1u)|(child.z<<2u);
+    let outward=vec3i(select(-1,1,child.x==1u),select(-1,1,child.y==1u),select(-1,1,child.z==1u));
+    let wanted=array<vec3i,6>(vec3i(outward.x,0,0),vec3i(0,outward.y,0),vec3i(0,0,outward.z),vec3i(outward.x,outward.y,0),vec3i(outward.x,0,outward.z),vec3i(0,outward.y,outward.z));
+    for(var coarseBit=0u;coarseBit<6u;coarseBit+=1u){for(var bit=0u;bit<18u;bit+=1u){if(all(DIRECTIONS[bit]==wanted[coarseBit])&&sizes[bit]==header.size*2u){descriptor|=1u<<(coarseBit+3u);}}}
+  }
+  succeedRow(row,descriptor);
 }
-@compute @workgroup_size(1) fn publishPowerDescriptors(){let requested=atomicLoad(&control.rowCount);let available=min(requested,min(arrayLength(&headers),arrayLength(&descriptors)));if(available<requested){atomicAdd(&control.errorCount,requested-available);atomicMin(&control.firstInvalid,available);atomicOr(&control.flags,CAPACITY);}if(arrayLength(&indirectDispatch)<3u){atomicOr(&control.flags,CAPACITY);return;}if(atomicLoad(&control.errorCount)!=0u||atomicLoad(&control.validCount)!=requested){indirectDispatch[0]=0u;indirectDispatch[1]=1u;indirectDispatch[2]=1u;return;}let groups=(requested+63u)/64u;let x=min(groups,65535u);indirectDispatch[0]=x;indirectDispatch[1]=select(1u,(groups+x-1u)/x,x>0u);indirectDispatch[2]=1u;}
+@compute @workgroup_size(256) fn stagePowerDescriptorDelta(
+    @builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) wid:vec3u,
+    @builtin(num_workgroups) workgroups:vec3u){
+  let block=wid.x+wid.y*workgroups.x;let row=block*256u+lane;let requested=controlArena.candidate.rowCount;
+  var status=0u;
+  if(row<requested&&controlArena.candidate.flags==0u){
+    let encoded=rowDelta[params.delta.y+row];let flagged=(encoded&ROW_DELTA_AFFECTED)!=0u;
+    let listed=rowListedAffected(row);let oldPlusOne=encoded&0x7fffffffu;var descriptor=INVALID;var flags=0u;
+    if(flagged!=listed){flags|=CAPACITY;}
+    if(flagged){descriptor=descriptors[row];status|=STATUS_AFFECTED|STATUS_PUBLISH;}
+    else if(oldPlusOne==0u){flags|=CAPACITY;}
+    else{
+      let old=oldPlusOne-1u;
+      if(old>=controlArena.authority.rowCount||old>=arrayLength(&committedDescriptors)){flags|=CAPACITY;}
+      else{descriptor=committedDescriptors[old];if(old!=row){descriptors[row]=descriptor;status|=STATUS_PUBLISH;}}
+    }
+    if(!descriptorValid(descriptor)){flags|=descriptorFlags(descriptor);}
+    else{status|=STATUS_VALID;if((descriptor&COARSER_FLAG)!=0u){status|=STATUS_COARSER;}}
+    status|=flags&127u;indirectDispatch[statusBase()+row]=status;
+  }
+  let publish=select(0u,1u,(status&STATUS_PUBLISH)!=0u);
+  publicationScan[lane]=publish;workgroupBarrier();
+  for(var offset=1u;offset<256u;offset*=2u){var add=0u;if(lane>=offset){add=publicationScan[lane-offset];}
+    workgroupBarrier();publicationScan[lane]+=add;workgroupBarrier();}
+  if(row<requested){indirectDispatch[prefixBase()+row]=publicationScan[lane]-publish;}
+  let valid=select(0u,1u,(status&STATUS_VALID)!=0u);
+  let coarser=select(0u,1u,(status&STATUS_COARSER)!=0u);
+  let flags=status&127u;
+  publicationCounts[lane]=vec4u(valid,valid-coarser,coarser,select(0u,1u,flags!=0u));
+  publicationFailures[lane]=vec4u(flags,select(INVALID,row,flags!=0u),select(0u,1u,(status&STATUS_AFFECTED)!=0u),0u);
+  workgroupBarrier();
+  for(var stride=128u;stride>0u;stride/=2u){if(lane<stride){
+      publicationCounts[lane]+=publicationCounts[lane+stride];
+      publicationFailures[lane].x|=publicationFailures[lane+stride].x;
+      publicationFailures[lane].y=min(publicationFailures[lane].y,publicationFailures[lane+stride].y);
+      publicationFailures[lane].z+=publicationFailures[lane+stride].z;
+    }workgroupBarrier();}
+  if(lane==0u){let at=blockSummaryBase()+9u*block;let counts=publicationCounts[0];let failure=publicationFailures[0];
+    indirectDispatch[at]=counts.x;indirectDispatch[at+1u]=counts.y;indirectDispatch[at+2u]=counts.z;
+    indirectDispatch[at+3u]=counts.w;indirectDispatch[at+4u]=failure.x;indirectDispatch[at+5u]=failure.y;
+    indirectDispatch[at+6u]=publicationScan[255];indirectDispatch[at+7u]=failure.z;indirectDispatch[at+8u]=0u;}
+}
+@compute @workgroup_size(256) fn prefixPowerDescriptorDelta(@builtin(local_invocation_index) lane:u32){
+  let blocks=controlArena.blockCount;let chunk=(blocks+255u)/256u;let begin=min(blocks,lane*chunk);let end=min(blocks,begin+chunk);
+  var counts=vec4u(0u);var failure=vec4u(0u,INVALID,0u,0u);var changed=0u;
+  for(var block=begin;block<end;block+=1u){let at=blockSummaryBase()+9u*block;
+    counts+=vec4u(indirectDispatch[at],indirectDispatch[at+1u],indirectDispatch[at+2u],indirectDispatch[at+3u]);
+    failure.x|=indirectDispatch[at+4u];failure.y=min(failure.y,indirectDispatch[at+5u]);
+    changed+=indirectDispatch[at+6u];failure.z+=indirectDispatch[at+7u];}
+  publicationCounts[lane]=counts;publicationFailures[lane]=failure;publicationScan[lane]=changed;workgroupBarrier();
+  for(var offset=1u;offset<256u;offset*=2u){var add=0u;if(lane>=offset){add=publicationScan[lane-offset];}
+    workgroupBarrier();publicationScan[lane]+=add;workgroupBarrier();}
+  var cursor=publicationScan[lane]-changed;
+  for(var block=begin;block<end;block+=1u){let at=blockSummaryBase()+9u*block;
+    indirectDispatch[blockOffsetBase()+block]=cursor;cursor+=indirectDispatch[at+6u];}
+  for(var stride=128u;stride>0u;stride/=2u){if(lane<stride){
+      publicationCounts[lane]+=publicationCounts[lane+stride];
+      publicationFailures[lane].x|=publicationFailures[lane+stride].x;
+      publicationFailures[lane].y=min(publicationFailures[lane].y,publicationFailures[lane+stride].y);
+      publicationFailures[lane].z+=publicationFailures[lane+stride].z;
+    }workgroupBarrier();}
+  if(lane==0u){let total=publicationCounts[0];let failed=publicationFailures[0];let published=publicationScan[255];
+    indirectDispatch[blockOffsetBase()+blocks]=published;controlArena.publicationCount=published;
+    controlArena.candidate.validCount=total.x;controlArena.candidate.sameOrFinerCount=total.y;
+    controlArena.candidate.sameOrCoarserCount=total.z;controlArena.candidate.errorCount+=total.w;
+    controlArena.candidate.flags|=failed.x;controlArena.candidate.firstInvalid=min(controlArena.candidate.firstInvalid,failed.y);
+    if(failed.z!=affectedCount()||total.x!=controlArena.candidate.rowCount||total.y+total.z!=total.x){
+      rejectCandidate(select(0u,failed.y,failed.y!=INVALID),CAPACITY);
+    }
+    if(controlArena.candidate.errorCount==0u&&controlArena.candidate.flags==0u){
+      controlArena.commitDispatch=dispatchFor(published);
+    }
+  }
+}
+@compute @workgroup_size(256) fn scatterPowerDescriptorDelta(
+    @builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) wid:vec3u,
+    @builtin(num_workgroups) workgroups:vec3u){
+  if(controlArena.candidate.errorCount!=0u||controlArena.candidate.flags!=0u){return;}
+  let block=wid.x+wid.y*workgroups.x;let row=block*256u+lane;
+  if(row>=controlArena.candidate.rowCount){return;}
+  if((indirectDispatch[statusBase()+row]&STATUS_PUBLISH)==0u){return;}
+  let output=indirectDispatch[blockOffsetBase()+block]+indirectDispatch[prefixBase()+row];
+  if(output<controlArena.publicationCount){indirectDispatch[publicationBase()+output]=row;}
+}
+@compute @workgroup_size(64) fn commitPowerDescriptors(
+    @builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) workgroups:vec3u,@builtin(local_invocation_index) lid:u32){
+  if(controlArena.candidate.errorCount!=0u||controlArena.candidate.flags!=0u){return;}
+  let item=(wid.x+wid.y*workgroups.x)*64u+lid;if(item>=controlArena.publicationCount){return;}
+  let row=indirectDispatch[publicationBase()+item];
+  if(row>=arrayLength(&descriptors)||row>=arrayLength(&committedDescriptors)){return;}
+  committedDescriptors[row]=descriptors[row];
+}
+@compute @workgroup_size(1) fn finalizePowerDescriptors(){
+  let candidate=controlArena.candidate;
+  if(candidate.errorCount!=0u||candidate.flags!=0u||candidate.validCount!=candidate.rowCount){return;}
+  controlArena.authority=candidate;
+  if(arrayLength(&indirectDispatch)>=3u){
+    let published=dispatchFor(candidate.rowCount);
+    indirectDispatch[0]=published.x;indirectDispatch[1]=published.y;indirectDispatch[2]=published.z;
+  }
+}
 `;

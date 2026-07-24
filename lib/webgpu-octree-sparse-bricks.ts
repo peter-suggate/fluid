@@ -54,28 +54,21 @@ import {
   type SparseVoxelStructuralRenderSource,
 } from "./webgpu-voxel-debug";
 import { GPUFluidBrickResidency, type FluidBrickResidencyStats } from "./webgpu-fluid-brick-residency";
-import {
-  WebGPUFluidBrickAtlas,
-  type FluidBrickAtlasMode,
-  type FluidBrickAtlasSamplingSource,
-  type FluidBrickAtlasStats,
-} from "./webgpu-brick-atlas";
+import { PassBroker } from "./webgpu-pass-broker";
 
 export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
   /** Air-side support retained for pressure-topology rebuilds. */
   haloCells?: number;
-  /** Brick-pooled phi/velocity atlas ownership; off avoids atlas allocation. */
-  brickAtlas?: "off" | FluidBrickAtlasMode;
-  /** Keep the deep-liquid worklist without allocating atlas field payloads. */
-  bulkResidencyOnly?: boolean;
+  /** Keep the independent deep-liquid topology worklist. */
+  bulkResidency?: boolean;
   /** Velocity-swept residency support plus downstream neighbor activation. */
   brickPreActivation?: boolean;
   /**
    * Power-of-two bricks per topology-tile axis. Topology rebuilds operate on
    * tiles of max(brickSize, maximumLeafSize) cells so a pressure leaf can
-   * never straddle a partial-rebuild boundary; payload residency, the atlas
-   * and dense-field clears remain brick-granular.
+   * never straddle a partial-rebuild boundary; payload residency remains
+   * brick-granular.
    */
   topologyTileBricks?: number;
 }
@@ -84,11 +77,6 @@ export interface OctreeSparseBrickDenseFields {
   levelSet: GPUTexture;
   velocity: GPUTexture;
   solidCells: GPUBuffer;
-}
-
-export interface OctreeSparseBrickTimestampWrites {
-  residency?: GPUComputePassTimestampWrites;
-  publication?: GPUComputePassTimestampWrites;
 }
 
 export interface OctreeSparseBrickEncodePlan {
@@ -397,7 +385,7 @@ fn materializeBricks(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocatio
 `;
 
 const structuralPublicationFinalizeShader = /* wgsl */ `
-@group(0) @binding(0) var<storage, read_write> state: array<atomic<u32>>;
+@group(0) @binding(0) var<storage, read_write> state: array<u32>;
 
 const VALID_FIELDS: u32 = ${
   SPARSE_VOXEL_VALID_FIELDS.topology |
@@ -410,17 +398,17 @@ const VALID_FIELDS: u32 = ${
 
 fn finishFrame(first: bool) {
   if (first) {
-    atomicStore(&state[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}], 1u);
-    atomicStore(&state[${SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision}], 1u);
+    state[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}] = 1u;
+    state[${SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision}] = 1u;
   }
-  atomicAdd(&state[${SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision}], 1u);
-  atomicAdd(&state[${SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision}], 1u);
-  // Fine fluid remains explicitly unavailable (validity bit and revision zero)
-  // until the sparse surface-band atlas is attached to this source.
-  atomicStore(&state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}], VALID_FIELDS);
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision}] += 1u;
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision}] += 1u;
+  // Fine fluid remains explicitly unavailable (validity bit and revision zero);
+  // the global-fine publication is owned directly by the water renderer.
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}] = VALID_FIELDS;
   // This is deliberately last: prior passes and the stores above define one
   // complete structural snapshot for consumers later in the command stream.
-  atomicAdd(&state[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}], 1u);
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}] += 1u;
 }
 
 @compute @workgroup_size(1)
@@ -439,9 +427,8 @@ export class OctreeSparseBrickWorld {
   readonly tree: SparseBrickOctreeGPU;
   /** Narrow two-sided band used by surface and topology scheduling. */
   readonly residency: GPUFluidBrickResidency;
-  /** Full wet-domain residency used only by authoritative bulk field storage. */
+  /** Full wet-domain topology residency, independent of the surface band. */
   readonly bulkResidency?: GPUFluidBrickResidency;
-  readonly atlas?: WebGPUFluidBrickAtlas;
   readonly sceneSource: SparseVoxelSceneRenderSource;
   private readonly preActivation: boolean;
 
@@ -571,11 +558,10 @@ export class OctreeSparseBrickWorld {
       topologyTileBricks: options.topologyTileBricks ?? 1,
     });
     this.preActivation = options.brickPreActivation ?? true;
-    const brickAtlasMode = options.brickAtlas ?? "mirror";
-    if (brickAtlasMode !== "off" || options.bulkResidencyOnly) {
+    if (options.bulkResidency) {
       // Bulk velocity must remain defined throughout deep liquid, while the
-      // surface path wins by visiting only a narrow two-sided band. Keep the
-      // two schedulers independent so atlas authority never widens surface
+      // surface path wins by visiting only a narrow two-sided band. The two
+      // schedulers stay independent so topology support never widens surface
       // redistance back to O(wet volume).
       this.bulkResidency = new GPUFluidBrickResidency(device, dimensions, sceneDomain.cellSize_m, {
         brickSize,
@@ -586,13 +572,6 @@ export class OctreeSparseBrickWorld {
         leafCapacity: this.tree.leafCapacity,
         topologyTileBricks: options.topologyTileBricks ?? 1,
       });
-      if (brickAtlasMode !== "off") {
-        this.atlas = new WebGPUFluidBrickAtlas(device, dimensions, this.bulkResidency, {
-          brickSize,
-          mode: brickAtlasMode,
-          preActivation: this.preActivation,
-        });
-      }
     }
 
     const counts = storageBuffer(device, "Sparse brick source counts", packed.counts.byteLength, packed.counts);
@@ -828,7 +807,7 @@ export class OctreeSparseBrickWorld {
       revision: 1
     };
     this.baseAllocatedBytes = this.tree.allocatedBytes + this.residency.allocatedBytes
-      + (this.bulkResidency?.allocatedBytes ?? 0) + (this.atlas?.allocatedBytes ?? 0)
+      + (this.bulkResidency?.allocatedBytes ?? 0)
       + this.sourceBuffers.reduce((sum, buffer) => sum + buffer.size, 0)
       + this.pbrMaterialBuffer.size + this.lightBuffer.size + this.environmentLightingBuffer.size + this.structuralPublicationState.size
       + this.proxyVoxelizer.allocatedBytes + (this.wideFanout?.allocatedBytes ?? 0)
@@ -837,7 +816,7 @@ export class OctreeSparseBrickWorld {
 
   get allocatedBytes(): number { return this.baseAllocatedBytes + (this.inspection?.allocatedBytes ?? 0); }
 
-  /** Allocate the expanded legacy records only when raw/grid inspection asks for them. */
+  /** Allocate expanded diagnostic records only when raw/grid inspection asks for them. */
   ensureInspectionSource(): SparseVoxelRenderSource {
     if (this.destroyed) throw new Error("Cannot inspect a destroyed sparse-brick world");
     if (this.inspection) return this.inspection.source;
@@ -891,33 +870,10 @@ export class OctreeSparseBrickWorld {
     return source;
   }
 
-  encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, timings: OctreeSparseBrickTimestampWrites = {}, dt_s = 0, bulkAlreadyRefreshed = false): void {
+  encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, dt_s = 0): void {
     if (this.destroyed) return;
-    const beginRange = (label: string, writes?: GPUComputePassTimestampWrites) => {
-      if (writes?.beginningOfPassWriteIndex === undefined) return;
-      const marker = encoder.beginComputePass({ label: `${label} start`, timestampWrites: {
-        querySet: writes.querySet, endOfPassWriteIndex: writes.beginningOfPassWriteIndex
-      } });
-      marker.end();
-    };
-    const endRange = (label: string, writes?: GPUComputePassTimestampWrites) => {
-      if (writes?.endOfPassWriteIndex === undefined) return;
-      const marker = encoder.beginComputePass({ label: `${label} end`, timestampWrites: {
-        querySet: writes.querySet, beginningOfPassWriteIndex: writes.endOfPassWriteIndex
-      } });
-      marker.end();
-    };
-    beginRange("Fluid brick residency", timings.residency);
     this.residency.encode(encoder, fields.levelSet, fields.velocity, { dt_s, preActivation: this.preActivation });
-    // Bulk residency normally refreshes at the head of every solver substep.
-    // Keep a tail refresh for t=0 publication and non-solver callers, while
-    // the solver explicitly suppresses the duplicate publication pass.
-    if (!bulkAlreadyRefreshed) {
-      if (this.atlas) this.atlas.encodeBulkRefresh(encoder, fields.levelSet, fields.velocity, dt_s);
-      else this.bulkResidency?.encode(encoder, fields.levelSet, fields.velocity, { dt_s, preActivation: this.preActivation });
-    }
-    endRange("Fluid brick residency", timings.residency);
-    beginRange("Sparse brick publication", timings.publication);
+    this.bulkResidency?.encode(encoder, fields.levelSet, fields.velocity, { dt_s, preActivation: this.preActivation });
     const inspection = this.inspection;
     const encodePlan = planOctreeSparseBrickEncode(inspection?.publication.enabled ?? false);
     const initialPublication = !this.published;
@@ -946,42 +902,38 @@ export class OctreeSparseBrickWorld {
       this.encodeInspectionPublication(encoder);
       inspection?.publication.markEncoded();
     }
-    // Atlas pages were mirrored with the bulk-residency refresh above (or at
-    // the head of the final solver substep).
-    const finalizer = encoder.beginComputePass({ label: "Finalize sparse voxel structural publication" });
+    const finalizerBroker = new PassBroker(encoder);
+    const finalizer = finalizerBroker.compute({ label: "Finalize sparse voxel structural publication" });
     finalizer.setPipeline(initialPublication ? this.structuralInitialPipeline : this.structuralFramePipeline);
     finalizer.setBindGroup(0, this.structuralFinalizeBindGroup);
     finalizer.dispatchWorkgroups(1);
-    finalizer.end();
-    endRange("Sparse brick publication", timings.publication);
+    finalizerBroker.fence("sparse structural publication finalized");
   }
 
   private encodeInspectionPublication(encoder: GPUCommandEncoder): void {
     const inspection = this.inspection;
     if (!inspection) return;
-    encoder.copyBufferToBuffer(this.tree.control, 8, inspection.voxelCount, 0, 4);
-    encoder.copyBufferToBuffer(this.tree.control, 4, inspection.brickCount, 0, 4);
-    const voxelPass = encoder.beginComputePass({ label: "Publish octree raw voxel records" });
+    const broker = new PassBroker(encoder);
+    broker.copyBufferToBuffer(this.tree.control, 8, inspection.voxelCount, 0, 4);
+    broker.copyBufferToBuffer(this.tree.control, 4, inspection.brickCount, 0, 4);
+    const voxelPass = broker.compute({ label: "Publish octree raw voxel records" });
     voxelPass.setPipeline(inspection.voxelPipeline); voxelPass.setBindGroup(0, inspection.bindGroup);
-    voxelPass.dispatchWorkgroups(...tiledDebugDispatch(this.tree.voxelCapacity, 256)); voxelPass.end();
-    const brickPass = encoder.beginComputePass({ label: "Publish octree sparse brick records" });
+    voxelPass.dispatchWorkgroups(...tiledDebugDispatch(this.tree.voxelCapacity, 256));
+    const brickPass = broker.compute({ label: "Publish octree sparse brick records" });
     brickPass.setPipeline(inspection.brickPipeline); brickPass.setBindGroup(0, inspection.bindGroup);
-    brickPass.dispatchWorkgroups(...tiledDebugDispatch(this.tree.leafCapacity, 64)); brickPass.end();
+    brickPass.dispatchWorkgroups(...tiledDebugDispatch(this.tree.leafCapacity, 64));
+    broker.fence("sparse inspection records published");
   }
 
   readResidencyStats(): Promise<FluidBrickResidencyStats> { return this.residency.readStats(); }
 
   readBulkResidencyStats(): Promise<FluidBrickResidencyStats> | undefined { return this.bulkResidency?.readStats(); }
 
-  get atlasSamplingSource(): FluidBrickAtlasSamplingSource | undefined { return this.atlas?.getSamplingSource(); }
-
-  /** Full wet-domain worklist, independent of optional atlas payload storage. */
+  /** Full wet-domain worklist, independent of the narrow surface band. */
   get bulkResidencyWorklist(): GPUBuffer | undefined { return this.bulkResidency?.worklist; }
 
   /** Persistent wet-domain topology scheduler on compact authority. */
   get topologyResidency(): GPUFluidBrickResidency { return this.bulkResidency ?? this.residency; }
-
-  readAtlasStats(): Promise<FluidBrickAtlasStats> | undefined { return this.atlas?.readStats(); }
 
   destroy(): void {
     if (this.destroyed) return;
@@ -989,7 +941,6 @@ export class OctreeSparseBrickWorld {
     this.tree.destroy();
     this.residency.destroy();
     this.bulkResidency?.destroy();
-    this.atlas?.destroy();
     this.proxyVoxelizer.destroy();
     this.wideFanout?.destroy();
     this.nodeMipPyramid?.destroy();

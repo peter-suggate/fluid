@@ -5,45 +5,13 @@ import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { decodeGeneratedOctreePowerCatalog } from "../lib/generated/octree-power-catalog";
-import { octreePowerVolumeShader, resolveOctreePowerProjectionPolicy } from "../lib/webgpu-octree";
+import { octreePowerVolumeShader } from "../lib/webgpu-octree";
 import { WebGPUOctreePowerDescriptor } from "../lib/webgpu-octree-power-descriptor";
 import { WebGPUOctreePowerFaces } from "../lib/webgpu-octree-power-faces";
 import { WebGPUOctreePowerOperator } from "../lib/webgpu-octree-power-operator";
 import { WebGPUOctreePowerTopology } from "../lib/webgpu-octree-power-topology";
-
-test("power projection policy keeps authority fail-closed while enabling the mirror", () => {
-  assert.deepEqual(resolveOctreePowerProjectionPolicy(undefined, [1, 1, 1], false, 0), {
-    requested: "off", mirrorEnabled: false, authoritative: false,
-  });
-  assert.deepEqual(resolveOctreePowerProjectionPolicy("mirror", [1, 1, 1], false, 0), {
-    requested: "mirror", mirrorEnabled: true, authoritative: false,
-  });
-  const authority = resolveOctreePowerProjectionPolicy("authoritative", [1, 1.1, 1], true, 1);
-  assert.equal(authority.mirrorEnabled, true); assert.equal(authority.authoritative, false);
-  assert.match(authority.fallbackReason!, /isotropic/); assert.match(authority.fallbackReason!, /terrain/);
-  assert.match(authority.fallbackReason!, /rigid/); assert.match(authority.fallbackReason!, /transferred compact face velocity/);
-  assert.deepEqual(resolveOctreePowerProjectionPolicy("authoritative", [1, 1, 1], false, 0, true), {
-    requested: "authoritative", mirrorEnabled: true, authoritative: true,
-  });
-  assert.deepEqual(resolveOctreePowerProjectionPolicy("authoritative", [1, 1, 1], false, 1, true, true), {
-    requested: "authoritative", mirrorEnabled: true, authoritative: true,
-  });
-  assert.match(resolveOctreePowerProjectionPolicy("authoritative", [1, 1, 1], true, 0, true, true)
-    .fallbackReason!, /cell-vertex solid SDF/, "terrain remains fail-closed until its embedded-boundary geometry is supported");
-  assert.match(resolveOctreePowerProjectionPolicy("authoritative", [1, 1, 1], true, 0, true, true)
-    .fallbackReason!, /canonical compact-face rollback seed/,
-  "terrain must not become authoritative from face-aperture quadrature alone");
-  assert.deepEqual(resolveOctreePowerProjectionPolicy(
-    "authoritative", [1, 1, 1], true, 0, true, true, false, true, true,
-  ), { requested: "authoritative", mirrorEnabled: true, authoritative: true },
-  "terrain authority opens only when both vertex SDF and rollback seed inputs exist");
-  const imported = resolveOctreePowerProjectionPolicy(
-    "authoritative", [1, 1, 1], false, 0, true, true, true,
-  );
-  assert.equal(imported.authoritative, false);
-  assert.match(imported.fallbackReason!, /imported\/seeded geometry/,
-    "imported and explicitly seeded shapes retain the compatibility projection");
-});
+import { PassBroker } from "../lib/webgpu-pass-broker";
+import { createColdPowerRowPublication } from "./webgpu-octree-power-row-delta-fixture";
 
 test("Dawn publishes physical power-cell volume from normalized topology metrics", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for GPU power-integration checks",
@@ -90,27 +58,36 @@ test("Dawn compiles and submits the complete GPU-resident power mirror graph", {
   const descriptor = new WebGPUOctreePowerDescriptor(device, 1);
   const topology = new WebGPUOctreePowerTopology(device, 1, catalog);
   const faces = new WebGPUOctreePowerFaces(device, 1, 30, topology.source, 60);
-  const operator = new WebGPUOctreePowerOperator(device, 1, 30, 30, 30);
   const storage = (label: string, size: number) => device.createBuffer({
     label, size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
   });
   const headers = storage("integration leaf headers", 48);
-  const owners = storage("integration dense owners", 4);
-  const volumes = storage("integration physical volumes", 4);
+  const owners = storage("integration owner-page arena", 64);
   const pressure = storage("integration pressure", 4);
   const entries = storage("integration leaf entries", 30 * 8);
+  const operator = new WebGPUOctreePowerOperator(device, 1, 30, 30, 30,
+    { topology: topology.source, leafHeaders: headers, physicalCellSize: 1, physicalCellVolume: 1 });
   const encoder = device.createCommandEncoder();
-  descriptor.encode(encoder, headers, owners, {
-    dimensions: [2, 2, 2], maximumLeafSize: 2, rowCount: 0, generation: 1, ownerMode: "dense",
+  const broker = new PassBroker(encoder);
+  const cold = createColdPowerRowPublication(device, 1, 0, 1);
+  descriptor.encode(broker, headers, owners, {
+    dimensions: [2, 2, 2], maximumLeafSize: 2, rowCountBuffer: cold.rowCount,
+    generation: 1, rowDelta: cold.rowDelta,
   });
-  topology.encode(encoder, descriptor.descriptors, 0, [1, 1, 1]);
-  faces.encode(encoder, headers, { dimensions: [2, 2, 2], rowCount: 0, physicalCellSize: 1, generation: 1 });
-  operator.encodeAssemblyFromControl(encoder, faces.faces, faces.source, volumes, faces.control);
-  operator.encodeLeafRowPublication(encoder, headers, entries);
-  operator.encodeProjectionFromControl(encoder, faces.faces, faces.source, pressure, faces.control);
+  topology.encode(broker, descriptor.descriptors, cold.rowCount, [1, 1, 1], cold.rowDelta);
+  faces.encode(broker, headers,
+    {
+      dimensions: [2, 2, 2], rowCount: cold.rowCount, rowDelta: cold.rowDelta,
+      physicalCellSize: 1, generation: 1,
+    });
+  broker.fence();
+  operator.encodeAssemblyFromControl(broker, faces.faces, faces.source, faces.control);
+  operator.encodeLeafRowPublication(broker, headers, entries);
+  operator.encodeProjectionFromControl(broker, faces.faces, faces.source, pressure, faces.control);
+  broker.fence("complete power integration publication");
   device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-  descriptor.destroy(); topology.destroy(); faces.destroy(); operator.destroy();
-  headers.destroy(); entries.destroy(); owners.destroy(); volumes.destroy(); pressure.destroy(); device.destroy();
+  cold.destroy(); descriptor.destroy(); topology.destroy(); faces.destroy(); operator.destroy();
+  headers.destroy(); entries.destroy(); owners.destroy(); pressure.destroy(); device.destroy();
 });
 
 test("production dam-break RasterWaterPipeline initializes exact layouts and rasterizes signed global fine A", {
@@ -121,8 +98,8 @@ test("production dam-break RasterWaterPipeline initializes exact layouts and ras
     cwd: process.cwd(), encoding: "utf8", timeout: 25_000, killSignal: "SIGKILL", maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, FLUID_SCENE: "dam-break-ui", FLUID_METHOD: "octree",
       FLUID_TARGET_S: "0.004", FLUID_ORACLE_STEPS: "1", FLUID_VOXEL_CELL_SIZE: "0.02",
-      FLUID_PRESSURE_CYCLES: "400", FLUID_STABILITY_ENVELOPE: "1", FLUID_CPU_ORACLE: "0",
-      FLUID_FIELD_STATS: "0", FLUID_DISABLE_TIMESTAMPS: "1",
+      FLUID_STABILITY_ENVELOPE: "1", FLUID_CPU_ORACLE: "0",
+      FLUID_FIELD_STATS: "0",
       FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
       FLUID_GLOBAL_FINE_GENERATION_TRANSITION: "1" },
   });

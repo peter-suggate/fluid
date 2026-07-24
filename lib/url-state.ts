@@ -180,12 +180,9 @@ export function parseQueryState(search: string): QueryState {
   const render = query.get("render");
   const svoLighting = query.get("svoLighting");
   const requestedPanel = query.get("panel");
-  // One-way migration for shared pre-sidebar links. Serialization always emits
-  // the mutually exclusive panel state instead of restoring the old UI flag.
   const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "bodies" || requestedPanel === "diagnostics" || requestedPanel === "performance"
     ? requestedPanel
-    : query.get("performance") === "1" ? "performance"
-    : query.get("diagnostics") === "1" ? "diagnostics" : initialUI.rightPanel;
+    : initialUI.rightPanel;
 
   return {
     methodId,
@@ -212,7 +209,7 @@ export function parseQueryState(search: string): QueryState {
       gridOverlaySlice: grid === "volume"
         ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
         : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
-      gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "surface" || gridMode === "faces" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || (gridMode !== null && isOctreeTechniqueOverlayMode(gridMode)) ? gridMode : initialUI.gridOverlayMode,
+      gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || (gridMode !== null && isOctreeTechniqueOverlayMode(gridMode)) ? gridMode : initialUI.gridOverlayMode,
       voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "surface-voxels" || voxels === "brick-grid" ? voxels : initialUI.voxelRenderMode,
       svoRenderMode: isSvoRenderMode(render) ? render : DEFAULT_SVO_RENDER_MODE,
       svoLightingMode: isSvoLightingMode(svoLighting) ? svoLighting : DEFAULT_SVO_LIGHTING_MODE,
@@ -223,7 +220,7 @@ export function parseQueryState(search: string): QueryState {
 }
 
 function isManagedKey(key: string) {
-  return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "panel" || key === "panelWidth"
+  return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
     || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "voxels" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
@@ -246,9 +243,7 @@ export function serializeQueryState(
   if (uiState.svoShadowsEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled) query.set("svoShadows", uiState.svoShadowsEnabled ? "1" : "0");
   if (uiState.svoAmbientOcclusionEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled) query.set("svoAO", uiState.svoAmbientOcclusionEnabled ? "1" : "0");
   if (uiState.voxelRenderMode !== "smooth") query.set("voxels", uiState.voxelRenderMode);
-  const rightPanel = uiState.rightPanel ?? (uiState.diagnosticsOpen ? "diagnostics" : null);
-  if (rightPanel === "diagnostics") query.set("diagnostics", "1");
-  else if (rightPanel) query.set("panel", rightPanel);
+  if (uiState.rightPanel) query.set("panel", uiState.rightPanel);
   if (uiState.rightPanelWidth !== DEFAULT_RIGHT_PANEL_WIDTH) query.set("panelWidth", String(uiState.rightPanelWidth));
   if (uiState.sceneModalOpen) query.set("sceneConfig", "1");
   if (uiState.gridOverlayAxis !== "off") query.set("grid", uiState.gridOverlayAxis);

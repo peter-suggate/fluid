@@ -42,7 +42,7 @@ const FACE_BAND_ERRORS = [
   [32, "phi"], [64, "unresolved"], [128, "incomplete"], [256, "outside fine band"],
 ] as const;
 const TRANSITION_ERRORS = [
-  [1, "source"], [2, "capacity"], [4, "adjacency"], [8, "descriptor"], [16, "acute grading"],
+  [1, "source"], [2, "capacity"], [4, "adjacency"], [8, "descriptor"],
 ] as const;
 const POWER_ERRORS = [
   [1, "source"], [2, "capacity"], [4, "missing row"], [8, "face"],
@@ -88,7 +88,7 @@ export function finePublicationGateDiagnostics(
       detail: labels(topologyErrors, TOPOLOGY_ERRORS),
     },
     {
-      id: "redistance", label: "Fast march fine phi",
+      id: "redistance", label: "JFA-CPT redistance fine phi",
       state: input.redistanceCommitted ? "ready" : (reason & 2) !== 0 ? "failed" : "waiting",
       detail: input.redistanceCommitted ? "physical band committed"
         : `${input.redistanceUnresolved ?? 0} unresolved samples`,

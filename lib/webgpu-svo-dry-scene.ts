@@ -57,7 +57,7 @@ import {
 } from "./webgpu-svo-picking-readback";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import { DEFAULT_SVO_LIGHTING_MODE, DEFAULT_SVO_LIGHTING_OPTIONS, type SvoLightingMode, type SvoLightingOptions } from "./svo-render-mode";
-import type { DrySceneReplacementResult, TimestampRange } from "./webgpu-water-pipeline";
+import type { DrySceneReplacementResult, RenderPathTracePhase } from "./webgpu-water-pipeline";
 import { SparseVoxelTemporalAccumulator, type SparseVoxelTemporalFrameState } from "./webgpu-svo-temporal-accumulator";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 import { svoNodeMipSamplingWGSL } from "./svo-node-mip-sampling";
@@ -2089,7 +2089,7 @@ export class SparseVoxelDrySceneRenderer {
     }, () => this.pickingFrameToken === frameToken && this.lastPickingTarget === radianceDepth);
   }
 
-  encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, timestampWrites?: TimestampRange, temporalFrame?: SparseVoxelTemporalFrameState, temporalTimestampWrites?: TimestampRange, reuseKey?: string): DrySceneReplacementResult | false {
+  encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, temporalFrame?: SparseVoxelTemporalFrameState, reuseKey?: string, tracePhase?: RenderPathTracePhase): DrySceneReplacementResult | false {
     this.lastTemporalEncoded = false;
     if (!this.pipeline || !this.bindGroup) return false;
     const gBufferViews = this.gBufferTargets.views;
@@ -2105,8 +2105,6 @@ export class SparseVoxelDrySceneRenderer {
     const requiredStableFrames = temporalFrame ? 2 : 1;
     if (frameKey && targetTexture && frameKey === this.reusableKey && targetTexture === this.reusableTarget
       && this.reusableStableFrames >= requiredStableFrames && this.reusableResult) {
-      if (timestampWrites) { const pass = encoder.beginComputePass({ label: "Sparse voxel dry scene reuse timestamp", timestampWrites }); pass.end(); }
-      if (temporalFrame && temporalTimestampWrites) { const pass = encoder.beginComputePass({ label: "Sparse voxel temporal reuse timestamp", timestampWrites: temporalTimestampWrites }); pass.end(); }
       this.lastTemporalEncoded = Boolean(temporalFrame);
       return this.reusableResult;
     }
@@ -2117,24 +2115,19 @@ export class SparseVoxelDrySceneRenderer {
     }
     if (this.rigidMotionSource) encoder.copyBufferToBuffer(this.rigidMotionSource, 0, this.rigidMotionUniformBuffer, 0, SVO_DRY_RIGID_MOTION_UNIFORM_BYTES);
     if (usePrepass) {
-      // The measured span keeps the caller's begin/end indices: begin stamps the
-      // prepass, end stamps the main pass, so timing covers the whole replacement.
       const prepass = encoder.beginRenderPass({
         label: "Sparse voxel cone-lighting prepass",
         colorAttachments: [
           { view: this.conePrepassVisibilityView!, clearValue: { r: 1, g: 1, b: 1, a: 1 }, loadOp: "clear", storeOp: "store" },
           { view: this.conePrepassGeometryView!, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
         ],
-        ...(timestampWrites ? { timestampWrites: { querySet: timestampWrites.querySet, beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } } : {}),
       });
       prepass.setPipeline(this.conePrepassPipeline!);
       prepass.setBindGroup(0, this.bindGroup);
       prepass.draw(3);
       prepass.end();
+      tracePhase?.({ id: "svo-cone-lighting", label: "SVO cone-lighting prepass" });
     }
-    const mainTimestampWrites: GPURenderPassTimestampWrites | undefined = usePrepass && timestampWrites
-      ? { querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex }
-      : undefined;
     const pass = encoder.beginRenderPass({
       label: "Sparse voxel dry scene",
       colorAttachments: [
@@ -2148,18 +2141,19 @@ export class SparseVoxelDrySceneRenderer {
         depthLoadOp: "clear",
         depthStoreOp: "store",
       },
-      ...(mainTimestampWrites ? { timestampWrites: mainTimestampWrites } : (timestampWrites ? { timestampWrites } : {})),
     });
     pass.setPipeline(usePrepass ? this.coneReducedPipeline! : this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     if (usePrepass) pass.setBindGroup(1, this.conePrepassBindGroup!);
     pass.draw(3); pass.end();
+    tracePhase?.({ id: "svo-primary", label: "SVO traversal + dry shading" });
     this.lastPickingTarget = targetTexture;
     const gBuffer = this.gBufferTargets.textures;
     const temporalResolve = temporalFrame && targetTexture && gBuffer
-      ? this.temporalAccumulator.encode(encoder, targetTexture, gBuffer, temporalFrame, temporalTimestampWrites)
+      ? this.temporalAccumulator.encode(encoder, targetTexture, gBuffer, temporalFrame)
       : false;
     this.lastTemporalEncoded = Boolean(temporalResolve);
+    if (temporalResolve) tracePhase?.({ id: "svo-temporal", label: "SVO temporal resolve" });
     const result = { encoded: true, sampledTargetView: temporalResolve ? temporalResolve.resolvedView : targetView } as const;
     if (frameKey && targetTexture) {
       this.reusableStableFrames = frameKey === this.reusableKey && targetTexture === this.reusableTarget ? this.reusableStableFrames + 1 : 1;

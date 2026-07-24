@@ -28,7 +28,8 @@ test("factor-4/factor-8 plans expose exact global-lattice and four-channel memor
   assert.deepEqual(factor8.sampleDimensions, [64, 64, 64]);
   assert.equal(factor8.fineCellWidth, 0.25);
   assert.equal(factor8.payloadBytesPerBrick, factor4.payloadBytesPerBrick);
-  assert.equal(factor4.pageTableBytes, 2 * factor4.hashCapacity * 8);
+  assert.equal(factor4.allocatedBytes,
+    factor4.payloadCapacityBytes + factor4.metadataCapacityBytes + factor4.worklistBytes);
 });
 
 test("packed brick keys are range checked, invertible, and independent of leaf rows", () => {
@@ -126,7 +127,7 @@ test("interface discovery detects a sign change exactly across cached brick neig
   assert.equal(left.neighborIds[1], right.physicalId);
 });
 
-test("memory accounting separates active payload, hash/worklists, and fragmentation", () => {
+test("memory accounting separates active payload, sorted directories, and fragmentation", () => {
   const configured = plan();
   const oracle = new FineLevelSetBrickOracle(configured);
   oracle.publishInterfaceAndRing([packFineLevelSetBrickKey(configured, [0, 0, 0])], () => 1);
@@ -134,13 +135,15 @@ test("memory accounting separates active payload, hash/worklists, and fragmentat
   assert.equal(memory.residentBricks, 4);
   assert.equal(memory.activePayloadBytes, 4 * configured.payloadBytesPerBrick);
   assert.equal(memory.fragmentationBytes, configured.payloadCapacityBytes - memory.activePayloadBytes);
-  assert.equal(memory.pageTableBytes, configured.pageTableBytes);
+  assert.equal(memory.metadataBytes, 2 * memory.residentBricks * 10 * 4);
   assert.equal(memory.worklistBytes, configured.worklistBytes);
   assert.equal(memory.allocatedBytes, configured.allocatedBytes);
   const gpu = oracle.exportGPUGeneration();
-  assert.equal(gpu.hashPairs.length, configured.hashCapacity * 2);
   assert.equal(gpu.metadataWords.length, configured.maximumResidentBricks * 10);
   assert.equal(gpu.worklistWords[0], 4);
+  const ids = [...gpu.worklistWords.slice(5, 5 + gpu.worklistWords[0])];
+  const keys = ids.map((id) => gpu.metadataWords[id * 10 + 1]);
+  assert.deepEqual(keys, [...keys].sort((a, b) => a - b));
 });
 
 test("publication fails closed before mutating the current generation", () => {

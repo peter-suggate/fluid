@@ -1,46 +1,29 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { emptyPerformance, measuredGPUTime_ms, type PerformanceSnapshot } from "../lib/stores/diagnostics-store";
+import { emptyPerformanceReport } from "../lib/stores/diagnostics-store";
 
-test("GPU performance totals exclude unavailable or stale timer values", () => {
-  const stale: PerformanceSnapshot = {
-    ...emptyPerformance,
-    gpuAdvection_ms: 7,
-    gpuPressure_ms: 11,
-    gpuRender_ms: 13
-  };
-  assert.equal(measuredGPUTime_ms(stale), 0);
-  assert.equal(measuredGPUTime_ms({ ...stale, gpuRenderTimingAvailable: true }), 13);
-  assert.equal(measuredGPUTime_ms({ ...stale, gpuPhysicsTimingAvailable: true }), 18);
-  assert.equal(measuredGPUTime_ms({ ...stale, gpuPhysicsTimingAvailable: true, gpuRenderTimingAvailable: true }), 31);
+test("empty performance report claims no lane sample", () => {
+  assert.deepEqual(emptyPerformanceReport, {
+    methodId: "",
+    context: "",
+    capturedAt_ms: 0,
+  });
 });
 
-test("empty performance identifies the renderer without claiming a sample", () => {
-  assert.equal(emptyPerformance.gpuRenderTimestampSupported, false);
-  assert.equal(emptyPerformance.gpuRenderTimingAvailable, false);
-  assert.equal(emptyPerformance.gpuSurfaceExtraction_ms, 0);
-  assert.equal(emptyPerformance.gpuCaustics_ms, 0);
-  assert.equal(emptyPerformance.gpuInterfaceFront_ms, 0);
-  assert.equal(emptyPerformance.gpuInterfaceBack_ms, 0);
-  assert.equal(emptyPerformance.gpuOverlays_ms, 0);
-  assert.equal(emptyPerformance.gpuUpscale_ms, 0);
-  assert.equal(emptyPerformance.gpuExtrapolation_ms, 0);
-  assert.equal(emptyPerformance.gpuMaterialization_ms, 0);
-  assert.equal(emptyPerformance.gpuPowerAssembly_ms, 0);
-  assert.equal(emptyPerformance.gpuPressureSolve_ms, 0);
-  assert.equal(emptyPerformance.gpuPhysicsTimingSampleId, 0);
-  assert.equal(emptyPerformance.gpuPhysicsTimingSimulation_s, 0);
-  assert.equal(emptyPerformance.gpuPowerProjection_ms, 0);
-  assert.equal(emptyPerformance.gpuVelocityProjection_ms, 0);
-  assert.equal(emptyPerformance.gpuFaceBand_ms, 0);
-  assert.equal(emptyPerformance.gpuFaceMarch_ms, 0);
-  assert.equal(emptyPerformance.gpuPowerPublication_ms, 0);
-  assert.equal(emptyPerformance.gpuFineTopology_ms, 0);
-  assert.equal(emptyPerformance.gpuFineTransport_ms, 0);
-  assert.equal(emptyPerformance.gpuFineRedistance_ms, 0);
-  assert.equal(emptyPerformance.gpuFluidResidency_ms, 0);
-  assert.equal(emptyPerformance.gpuSparsePublication_ms, 0);
-  assert.equal(emptyPerformance.adaptiveRebuildWall_ms, 0);
-  assert.equal(emptyPerformance.adaptiveRebuildPending, false);
-  assert.equal(emptyPerformance.adaptiveRebuildBlockedFrames, 0);
+test("controller accepts only exact independently typed lane observations", () => {
+  const controller = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
+  assert.match(controller, /performanceTraceMatchesLane\(metrics\.cpu, "cpu", "main-thread"\)/);
+  assert.match(controller, /performanceTraceMatchesLane\(physicsTrace, "gpu", "physics"\)/);
+  assert.match(controller, /performanceTraceMatchesLane\(metrics\.presentation, "gpu", "presentation"\)/);
+  assert.doesNotMatch(controller, /cpu[^;\n]*\+[^;\n]*(?:physics|presentation)|physics[^;\n]*\+[^;\n]*presentation/);
+});
+
+test("performance publication is throttled independently of per-frame diagnostics", () => {
+  const controller = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
+  const store = readFileSync(new URL("../lib/stores/diagnostics-store.ts", import.meta.url), "utf8");
+
+  assert.match(controller, /capturedAt_ms - this\.lastPerformanceReportAt_ms >= 100/);
+  assert.match(controller, /if \(!reportDue\) return/);
+  assert.match(store, /performanceReports\.slice\(-239\)/);
 });

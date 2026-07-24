@@ -9,22 +9,16 @@ import {
 } from "./webgpu-lighting";
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 import {
-  SPARSE_SURFACE_CONTROL_BYTES,
-  type SparseSurfaceBandGPUSource,
-} from "./webgpu-sparse-surface-band";
-import { OCTREE_SURFACE_LEAF_RECORD_BYTES } from "./webgpu-octree-surface-pages";
-import {
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES,
 } from "./webgpu-octree-power-coarse-levelset";
 import {
   validateGlobalFineLevelSetConsumerSource,
-  validateUnifiedOctreeConsumerSource,
   type GlobalFineLevelSetConsumerSource,
-  type UnifiedOctreeConsumerSource,
 } from "./octree-consumer-sampling";
-import { globalFineClassifiedCountShader, globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedScanShader } from "./webgpu-water-global-fine-tetra";
+import { globalFineClassifiedEmitShader, globalFineClassifiedScanShader } from "./webgpu-water-global-fine-tetra";
 import { globalFineSurfaceClassificationShader } from "./webgpu-water-global-fine-classify";
+import type { GPUTimestampPhase } from "./performance-trace";
 
 /**
  * Rasterized water presentation for the WebGPU renderer.
@@ -44,10 +38,9 @@ export function shouldUpdateWaterSurface(extractedRevision: number, latestRevisi
 /** Raster/body depth separation that activates the local implicit resolver. */
 export const CONTACT_RESOLVE_BAND_CELLS = 1.5;
 
-/** Shared disabled storage must satisfy every struct it can stand in for. */
-export const WATER_SPARSE_FALLBACK_BYTES = Math.max(
-  SPARSE_SURFACE_CONTROL_BYTES,
-  OCTREE_SURFACE_LEAF_RECORD_BYTES,
+/** Shared disabled storage must satisfy the compact coarse-directory ABI. */
+export const WATER_DISABLED_STORAGE_BYTES = Math.max(
+  64,
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES
     + OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
 );
@@ -70,30 +63,8 @@ export interface SurfaceExtractionDispatchPlan {
   bandCubeRows?: number;
 }
 
-export type SurfaceExtractionRepresentation = "adaptive-octree" | "sparse-band" | "dense-texture";
-
-export function surfaceExtractionRepresentation(hasAdaptiveOctree: boolean, hasSparseBand: boolean): SurfaceExtractionRepresentation {
-  return hasAdaptiveOctree ? "adaptive-octree" : hasSparseBand ? "sparse-band" : "dense-texture";
-}
-
-export type TimestampRange = { querySet: GPUQuerySet; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number };
-export interface RasterWaterTimestampRanges {
-  extraction: TimestampRange;
-  caustics: TimestampRange;
-  scene: TimestampRange;
-  frontInterfaces: TimestampRange;
-  backInterfaces: TimestampRange;
-  sprayFront: TimestampRange;
-  sprayBack: TimestampRange;
-  composite: TimestampRange;
-}
-
 export interface RasterWaterEncodeResult {
   surfaceUpdated: boolean;
-  causticsUpdated: boolean;
-  sprayRendered: boolean;
-  /** False only when a fluid-less scene skipped the per-frame interface passes, so their timestamps are absent. */
-  interfacesEncoded: boolean;
 }
 
 export interface WaterSurfacePresentationDiagnostics {
@@ -102,26 +73,13 @@ export interface WaterSurfacePresentationDiagnostics {
   readonly globalFineAttached: boolean;
   /** Generation of the global-fine source captured with this queue-fenced diagnostic. */
   readonly globalFineAttachedGeneration?: number;
-  /** Generation whose zero crossing produced the retained raster mesh, when that mesh is global-fine. */
+  /** GPU-written generation whose zero crossing produced the retained raster mesh, when that mesh is global-fine. */
   readonly meshPublicationGeneration?: number;
   readonly globalFineCrossingPublished: boolean;
   readonly presentationFallbackActive: boolean;
 }
 
-export interface AdaptiveWaterRenderDiagnostics extends WaterSurfacePresentationDiagnostics {
-  readonly leafCapacity: number;
-  readonly pageCapacity: number;
-  readonly pageResolution: number;
-  readonly samplesPerPage: number;
-  readonly surfaceFreePages: number;
-  readonly surfaceAllocatedPages: number;
-  readonly surfaceCandidatePages: number;
-  readonly surfaceActivePages: number;
-  readonly surfaceOverflow: number;
-  readonly finestResidentPages: number;
-  readonly coarseResidentPages: number;
-  readonly maximumResidentLeafSize: number;
-  readonly surfaceDispatch: readonly [number, number, number];
+export interface WaterRenderDiagnostics extends WaterSurfacePresentationDiagnostics {
   readonly vertexCount: number;
   readonly activeCubeCount: number;
   readonly vertexAllocator: number;
@@ -130,33 +88,26 @@ export interface AdaptiveWaterRenderDiagnostics extends WaterSurfacePresentation
 
 export type WaterSurfaceGeometrySource =
   | "global-fine-coarse"
-  | "adaptive-fallback"
   | "retained-previous"
   | "empty"
-  | "adaptive-octree";
+  | "volume";
 
 /**
- * Decodes the renderer-private transaction words. `authorityLatch` trails the
- * four WebGPU indirect-draw arguments, so the required draw `firstInstance`
- * remains zero on devices without the optional indirect-first-instance
- * feature. The latch is presentation evidence only; it never makes a fallback
- * field authoritative for simulation.
+ * Decodes the renderer-private transaction words. `authorityLatch` and the
+ * GPU-written mesh publication generation trail the four WebGPU indirect-draw
+ * arguments, so the required draw `firstInstance` remains zero on devices
+ * without the optional indirect-first-instance feature. The latch is
+ * presentation evidence only; it never makes a presentation field
+ * authoritative for simulation.
  */
 export function waterSurfaceGeometrySource(
   globalFineAttached: boolean,
   vertexCount: number,
   authorityLatch: number,
-  vertexAllocator: number,
 ): WaterSurfaceGeometrySource {
-  if (!globalFineAttached) return vertexCount > 0 ? "adaptive-octree" : "empty";
+  if (!globalFineAttached) return vertexCount > 0 ? "volume" : "empty";
   if (authorityLatch !== 0) return "global-fine-coarse";
-  if (vertexAllocator !== 0xffff_ffff) return "adaptive-fallback";
   return vertexCount > 0 ? "retained-previous" : "empty";
-}
-
-/** Adaptive geometry may seed global presentation only before any mesh exists. */
-export function globalFineFallbackMaySeedRenderer(vertexCount: number, authorityLatch: number): boolean {
-  return vertexCount === 0 && authorityLatch === 0;
 }
 
 /**
@@ -171,10 +122,12 @@ export interface DrySceneReplacementResult {
   readonly sampledTargetView: GPUTextureView;
 }
 
+export type RenderPathTracePhase = (phase: GPUTimestampPhase) => void;
+
 export type DrySceneReplacementEncoder = (
   encoder: GPUCommandEncoder,
   target: GPUTexture | GPUTextureView,
-  timestampWrites?: TimestampRange
+  tracePhase?: RenderPathTracePhase,
 ) => DrySceneReplacementResult | false;
 
 /**
@@ -249,13 +202,13 @@ export function globalFineSurfaceDispatch(pageCapacity: number, samplesPerBrick:
   return [x, y, 1] as const;
 }
 
-/** One cooperative workgroup per compact coarse-phi hash entry. */
-export function globalFineCoarseSurfaceDispatch(hashCapacity: number): readonly [number, number, number] {
-  if (!Number.isSafeInteger(hashCapacity) || hashCapacity < 1) {
+/** One cooperative workgroup per compact coarse-phi row. */
+export function globalFineCoarseSurfaceDispatch(rowCapacity: number): readonly [number, number, number] {
+  if (!Number.isSafeInteger(rowCapacity) || rowCapacity < 1) {
     throw new RangeError("Global coarse extraction capacity must be a positive integer");
   }
-  const x = Math.min(65_535, hashCapacity);
-  const y = Math.ceil(hashCapacity / 65_535);
+  const x = Math.min(65_535, rowCapacity);
+  const y = Math.ceil(rowCapacity / 65_535);
   if (y > 65_535) throw new RangeError("Global coarse extraction exceeds the WebGPU dispatch limit");
   return [x, y, 1] as const;
 }
@@ -302,16 +255,9 @@ struct SparseParams {
 @group(0) @binding(10) var<uniform> sparseParams: SparseParams;
 @group(0) @binding(11) var<storage, read> sparseControl: array<u32>;
 @group(0) @binding(12) var<storage, read> sparseStates: array<u32>;
-struct AdaptiveLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
-struct AdaptiveParams { shape:vec4u, offsets0:vec4u, offsets1:vec4u, offsets2:vec4u, cellDt:vec4f, spare0:vec4u, spare1:vec4u, spare2:vec4u }
-@group(0) @binding(13) var<storage, read> adaptiveLeaves: array<AdaptiveLeaf>;
-@group(0) @binding(14) var<storage, read> adaptiveArena: array<u32>;
-@group(0) @binding(15) var<uniform> adaptiveParams: AdaptiveParams;
 override countOnly = false;
 override sparseField = false;
-override adaptiveField = false;
 override globalFineField = false;
-override globalFineFallback = false;
 
 const SPARSE_INVALID: u32 = 0xffffffffu;
 const SPARSE_CORE: u32 = 2u;
@@ -372,42 +318,12 @@ fn globalPhiAt(cell:vec3i)->f32{if(any(cell<vec3i(0))||any(cell>=vec3i(sparsePar
  if(id==SPARSE_INVALID){return globalCoarsePhi(cell);}let localIndex=local.x+r*(local.y+r*local.z);let index=id*sparseParams.fineDims.w+localIndex;
  if(index>=arrayLength(&sparsePhi)||(sparseControl[index]&1u)==0u){return globalCoarsePhi(cell);}return sparsePhi[index];}
 
-fn adaptiveOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
-fn adaptiveLeafOrigin(leaf:AdaptiveLeaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
-fn adaptiveFallback(leaf:AdaptiveLeaf,p:vec3f)->f32{
-  let c=vec3f(adaptiveLeafOrigin(leaf))+vec3f(0.5*f32(leaf.size));
-  let physicalGradient=leaf.phiGradient.yzw/max(adaptiveParams.cellDt.xyz,vec3f(1e-9));
-  let boundedCellGradient=physicalGradient/max(1.0,length(physicalGradient))*adaptiveParams.cellDt.xyz;
-  return leaf.phiGradient.x+dot(boundedCellGradient,p-c);
-}
-fn adaptivePageSlot(row:u32)->u32{return adaptiveArena[adaptiveParams.offsets0.x+row];}
-fn adaptiveHash(q:vec3u)->u32{var h=(q.x*73856093u)^(q.y*19349663u)^(q.z*83492791u);h^=h>>16u;return h;}
-fn adaptiveContains(leaf:AdaptiveLeaf,p:vec3f)->bool{let o=vec3f(adaptiveLeafOrigin(leaf));return all(p>=o)&&all(p<o+vec3f(f32(leaf.size)));}
-fn adaptiveResidentRow(p:vec3f,fallbackRow:u32)->u32{
-  let h=max(1u,adaptiveLeaves[fallbackRow].size);let q=vec3u(max(vec3f(0.0),floor(p/f32(h))));let mask=adaptiveParams.offsets2.y-1u;var slot=adaptiveHash(q)&mask;
-  for(var probe=0u;probe<16u;probe+=1u){let encoded=adaptiveArena[adaptiveParams.offsets1.y+slot];if(encoded==0u){break;}let row=encoded-1u;if(row<adaptiveParams.shape.x&&adaptiveContains(adaptiveLeaves[row],p)){return row;}slot=(slot+1u)&mask;}
-  return fallbackRow;
-}
-fn adaptiveLoad(slot:u32,resolution:u32,q:vec3u)->f32{return bitcast<f32>(adaptiveArena[adaptiveParams.offsets1.z+slot*adaptiveParams.shape.w+q.x+resolution*(q.y+resolution*q.z)]);}
-fn adaptivePagePhi(row:u32,p:vec3f)->f32{
-  let leaf=adaptiveLeaves[row];let slot=adaptivePageSlot(row);if(slot==SPARSE_INVALID||slot>=adaptiveParams.shape.y||!adaptiveContains(leaf,p)){return adaptiveFallback(leaf,p);}
-  let resolution=adaptiveParams.shape.z;let origin=vec3f(adaptiveLeafOrigin(leaf));let grid=clamp((p-origin)/f32(leaf.size)*f32(resolution)-vec3f(0.5),vec3f(0.0),vec3f(f32(resolution-1u)));
-  let a=vec3u(floor(grid));let b=min(a+vec3u(1u),vec3u(resolution-1u));let t=fract(grid);
-  let c000=adaptiveLoad(slot,resolution,a);let c100=adaptiveLoad(slot,resolution,vec3u(b.x,a.y,a.z));let c010=adaptiveLoad(slot,resolution,vec3u(a.x,b.y,a.z));let c110=adaptiveLoad(slot,resolution,vec3u(b.x,b.y,a.z));
-  let c001=adaptiveLoad(slot,resolution,vec3u(a.x,a.y,b.z));let c101=adaptiveLoad(slot,resolution,vec3u(b.x,a.y,b.z));let c011=adaptiveLoad(slot,resolution,vec3u(a.x,b.y,b.z));let c111=adaptiveLoad(slot,resolution,b);
-  return mix(mix(mix(c000,c100,t.x),mix(c010,c110,t.x),t.y),mix(mix(c001,c101,t.x),mix(c011,c111,t.x),t.y),t.z);
-}
-var<private> adaptiveOwnerRow:u32=0u;
-fn adaptivePhiAt(cell:vec3i)->f32{
-  let p=(vec3f(cell)+vec3f(0.5))/f32(adaptiveParams.shape.z);let row=adaptiveResidentRow(p,adaptiveOwnerRow);return adaptivePagePhi(row,p);
-}
-
 // Level-set fields become a smooth occupancy whose 0.5 contour is phi = 0.
 // The band spans four cells so no corner of a surface-crossing cube saturates
 // (the cube diagonal is under two cells); a saturated corner biases the linear
 // crossing estimate and extracts as cell-pitch lattice artifacts.
 fn occupancyFromPhi(phi: f32) -> f32 {
-  let samplesY = select(select(select(u.gridInfo.y, f32(sparseParams.fineDims.y), sparseField), u.gridInfo.y*f32(adaptiveParams.shape.z), adaptiveField),f32(sparseParams.coarseDims.y),globalFineField);
+  let samplesY = select(select(u.gridInfo.y, f32(sparseParams.fineDims.y), sparseField),f32(sparseParams.coarseDims.y),globalFineField);
   let band = 4.0 * u.container.y / max(samplesY, 1.0);
   return clamp(0.5 - phi / band, 0.0, 1.0);
 }
@@ -438,13 +354,12 @@ fn columnBaseAt(x: i32, z: i32) -> i32 {
 // closes the liquid mesh at glass/floor contacts, so a camera ray always has a
 // usable exit interface as well as a free-surface entry interface.
 fn latticeValue(p: vec3i) -> f32 {
-  let dims = select(select(select(vec3i(u.gridInfo.xyz), vec3i(sparseParams.fineDims.xyz), sparseField), vec3i(u.gridInfo.xyz)*i32(adaptiveParams.shape.z), adaptiveField),vec3i(sparseParams.coarseDims.xyz),globalFineField);
+  let dims = select(select(vec3i(u.gridInfo.xyz), vec3i(sparseParams.fineDims.xyz), sparseField),vec3i(sparseParams.coarseDims.xyz),globalFineField);
   // Side/top boundaries are optical interfaces. The floor is a solid contact,
   // not a water-air surface: extend the bottom cell value to y=0 so extraction
   // cannot create a large horizontal sheet across the tank base.
   if (p.x <= 0 || p.z <= 0 || p.x >= dims.x + 1 || p.z >= dims.z + 1 || p.y >= dims.y + 1) { return 0.0; }
   let cell = vec3i(p.x - 1, max(p.y - 1, 0), p.z - 1);
-  if (adaptiveField) { return occupancyFromPhi(adaptivePhiAt(cell)); }
   if (globalFineField) { return occupancyFromPhi(globalPhiAt(cell)); }
   if (sparseField) { return occupancyFromPhi(sparsePhiAt(cell)); }
   return fieldCell(cell);
@@ -592,14 +507,11 @@ fn classifyGlobalCube(base:vec3i){
 // polygoniseMain so the register footprint of the full-lattice scan stays
 // small enough for the occupancy that hides the load latency.
 fn classifyCubeScaled(base: vec3i, scale: u32) {
-  // Adaptive pages form a pageResolution-times finer virtual lattice.  Using
-  // the coarse solver dimensions here clips almost every page-owned cube
-  // before it reaches the worklist, leaving a valid-but-empty water draw.
-  let fieldDims = select(select(
+  let fieldDims = select(
     select(vec3u(u.gridInfo.xyz), sparseParams.fineDims.xyz, sparseField),
-    vec3u(u.gridInfo.xyz) * adaptiveParams.shape.z,
-    adaptiveField,
-  ),sparseParams.coarseDims.xyz,globalFineField);
+    sparseParams.coarseDims.xyz,
+    globalFineField,
+  );
   let cubeDims = fieldDims + vec3u(1);
   if (any(base < vec3i(0)) || any(vec3u(base) >= cubeDims)) { return; }
   var value = loadCubeCornersScaled(base, i32(scale));
@@ -608,16 +520,6 @@ fn classifyCubeScaled(base: vec3i, scale: u32) {
     minimum = min(minimum, value[i]); maximum = max(maximum, value[i]);
   }
   if (minimum >= 0.5 || maximum < 0.5) { return; }
-  if (globalFineFallback) {
-    var accepted = false;
-    for (var attempt = 0u; attempt < 32u; attempt += 1u) {
-      let claim = atomicCompareExchangeWeak(&drawArgs.vertexAllocator, SPARSE_INVALID, 0u);
-      if (claim.exchanged) { atomicStore(&drawArgs.vertexCount, 0u); accepted = true; break; }
-      if (claim.old_value == 0u) { accepted = true; break; }
-      if (claim.old_value != SPARSE_INVALID) { break; }
-    }
-    if (!accepted) { return; }
-  }
   if (countOnly) {
     // The benchmark's uncapped equivalence count. Counting whole cubes here
     // keeps it exact regardless of the production worklist capacity.
@@ -626,20 +528,7 @@ fn classifyCubeScaled(base: vec3i, scale: u32) {
   }
   let slot = atomicAdd(&drawArgs.activeCubeCount, 1u);
   if (slot < arrayLength(&activeCubes)) {
-    if (adaptiveField) {
-      // Adaptive coordinates need at most 13 bits (1024 coarse cells times
-      // pageResolution <= 4). Reuse the six high bits from x/z and the
-      // nineteen high bits from y/scale to carry a 24-bit owner row plus the
-      // resident-page scale flag. The hot worklist therefore stays 8 bytes.
-      let coordinateMask = 0x1fffu;
-      let owner = adaptiveOwnerRow & 0x00ffffffu;
-      activeCubes[slot] = vec2u(
-        (u32(base.x) & coordinateMask) | ((u32(base.z) & coordinateMask) << 13u) | ((owner & 0x3fu) << 26u),
-        (u32(base.y) & coordinateMask) | ((owner >> 6u) << 13u) | (select(0u, 1u, scale == 1u) << 31u),
-      );
-    } else {
-      activeCubes[slot] = vec2u(u32(base.x) | (u32(base.z) << 16u), u32(base.y) | (scale << 16u));
-    }
+    activeCubes[slot] = vec2u(u32(base.x) | (u32(base.z) << 16u), u32(base.y) | (scale << 16u));
   }
 }
 fn classifyCube(base: vec3i) { classifyCubeScaled(base, 1u); }
@@ -653,13 +542,10 @@ var<workgroup> workgroupBaseSlot: u32;
 // draw count), and each thread then emits into its private slice.
 @compute @workgroup_size(${EXTRACTION_POLYGONISE_WORKGROUP})
 fn polygoniseMain(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_index) localIndex: u32) {
-  // Both polygonisers are dispatched for a sparse surface. Exactly one owns
-  // the shared worklist: fine pages normally, complete coarse extraction if
-  // the bounded allocator reported that any required page was unavailable.
   let activeTotal = min(atomicLoad(&drawArgs.activeCubeCount), arrayLength(&activeCubes));
   // Normal reconstruction needs the selected lattice dimensions as well as
   // the cube-local samples; keep this sixth tetra argument at every LOD.
-  let fieldDimensions=select(select(select(u.gridInfo.xyz,vec3f(sparseParams.fineDims.xyz),sparseField),u.gridInfo.xyz*f32(adaptiveParams.shape.z),adaptiveField),vec3f(sparseParams.coarseDims.xyz),globalFineField);
+  let fieldDimensions=select(select(u.gridInfo.xyz,vec3f(sparseParams.fineDims.xyz),sparseField),vec3f(sparseParams.coarseDims.xyz),globalFineField);
   var base = vec3i(0);
   var cubeScale = 1u;
   var value = array<f32, 8>();
@@ -668,16 +554,8 @@ fn polygoniseMain(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invo
   if (gid.x < activeTotal) {
     validCube = true;
     let packedCube = activeCubes[gid.x];
-    if (adaptiveField) {
-      let coordinateMask = 0x1fffu;
-      base = vec3i(i32(packedCube.x & coordinateMask), i32(packedCube.y & coordinateMask), i32((packedCube.x >> 13u) & coordinateMask));
-      adaptiveOwnerRow = (packedCube.x >> 26u) | (((packedCube.y >> 13u) & 0x3ffffu) << 6u);
-      validCube = adaptiveOwnerRow < arrayLength(&adaptiveLeaves);
-      if (validCube) { cubeScale = select(max(1u, adaptiveLeaves[adaptiveOwnerRow].size * adaptiveParams.shape.z), 1u, (packedCube.y & 0x80000000u) != 0u); }
-    } else {
-      base = vec3i(i32(packedCube.x & 0xffffu), i32(packedCube.y & 0xffffu), i32(packedCube.x >> 16u));
-      cubeScale = max(1u, packedCube.y >> 16u);
-    }
+    base = vec3i(i32(packedCube.x & 0xffffu), i32(packedCube.y & 0xffffu), i32(packedCube.x >> 16u));
+    cubeScale = max(1u, packedCube.y >> 16u);
     if (validCube) {
       value = loadCubeCornersScaled(base, i32(cubeScale));
       vertexCount = 3u * cubeTriangleCount(&value);
@@ -782,25 +660,6 @@ fn extractSparseMain(@builtin(global_invocation_id) gid: vec3u) {
   }
 }
 
-// One invocation per sample in each resident leaf-attached page. Each sample
-// owns the lattice cube above it, so adjacent leaves neither duplicate cubes
-// nor require a dense page table over the finest domain.
-@compute @workgroup_size(256)
-fn extractAdaptiveMain(@builtin(global_invocation_id) gid:vec3u) {
-  // Global dispatches precede both fallback classifiers. vertexCount therefore
-  // remains zero throughout fallback classification and changes only in the
-  // later polygonise dispatch; the allocator CAS below still chooses one seed.
-  if(globalFineFallback&&(atomicLoad(&drawArgs.globalFineAuthorityLatch)!=0u||atomicLoad(&drawArgs.vertexCount)!=0u)){return;}
-  if(adaptiveArena[3]!=0u){return;}
-  let stream=gid.x+gid.y*65535u*256u;let samples=adaptiveParams.shape.w;let activeCount=adaptiveArena[adaptiveParams.offsets1.x];let item=stream/samples;
-  if(item>=activeCount){return;}let row=adaptiveArena[adaptiveParams.offsets1.x+4u+item];if(row>=adaptiveParams.shape.x){return;}
-  let leaf=adaptiveLeaves[row];if(leaf.size!=1u){return;}adaptiveOwnerRow=row;
-  let localIndex=stream-item*samples;let resolution=adaptiveParams.shape.z;let local=vec3u(localIndex%resolution,(localIndex/resolution)%resolution,localIndex/(resolution*resolution));
-  let q=adaptiveLeafOrigin(leaf)*resolution+local;let xBases=array<i32,2>(i32(q.x+1u),0);let yBases=array<i32,2>(i32(q.y+1u),0);let zBases=array<i32,2>(i32(q.z+1u),0);
-  let xCount=select(1u,2u,q.x==0u);let yCount=select(1u,2u,q.y==0u);let zCount=select(1u,2u,q.z==0u);
-  for(var zi=0u;zi<zCount;zi+=1u){for(var yi=0u;yi<yCount;yi+=1u){for(var xi=0u;xi<xCount;xi+=1u){classifyCube(vec3i(xBases[xi],yBases[yi],zBases[zi]));}}}
-}
-
 @compute @workgroup_size(256)
 fn extractGlobalFineMain(@builtin(global_invocation_id) gid:vec3u){
   if(sparseActivePages[1u]!=sparseParams.brickDims.w){return;}
@@ -812,21 +671,6 @@ fn extractGlobalFineMain(@builtin(global_invocation_id) gid:vec3u){
   if(any(q>=sparseParams.coarseDims.xyz)){return;}let xBases=array<i32,2>(i32(q.x+1u),0);let yBases=array<i32,2>(i32(q.y+1u),0);let zBases=array<i32,2>(i32(q.z+1u),0);
   let xCount=select(1u,2u,q.x==0u);let yCount=select(1u,2u,q.y==0u);let zCount=select(1u,2u,q.z==0u);
   for(var zi=0u;zi<zCount;zi+=1u){for(var yi=0u;yi<yCount;yi+=1u){for(var xi=0u;xi<xCount;xi+=1u){classifyGlobalCube(vec3i(xBases[xi],yBases[yi],zBases[zi]));}}}
-}
-
-// Every live leaf has an affine phi plane even when it does not own a detail
-// page. CORE/HALO are residency hints produced by the page adapter, not a
-// prerequisite for presentation: classify the compact nonresident rows and
-// let the eight-corner sign test discard leaves that do not cross phi=0.
-// Resident pages continue through extractAdaptiveMain at their finer spacing.
-@compute @workgroup_size(256)
-fn extractAdaptiveLeafMain(@builtin(global_invocation_id) gid:vec3u) {
-  if(globalFineFallback&&(atomicLoad(&drawArgs.globalFineAuthorityLatch)!=0u||atomicLoad(&drawArgs.vertexCount)!=0u)){return;}
-  let row=gid.x;if(row>=adaptiveParams.shape.x||row>=arrayLength(&adaptiveLeaves)){return;}
-  let leaf=adaptiveLeaves[row];if(leaf.size==0u||(leaf.flags&32u)==0u){return;}
-  let page=adaptivePageSlot(row);if(page!=SPARSE_INVALID&&page<adaptiveParams.shape.y){return;}
-  adaptiveOwnerRow=row;let resolution=adaptiveParams.shape.z;
-  classifyCubeScaled(vec3i(adaptiveLeafOrigin(leaf)*resolution),max(1u,leaf.size*resolution));
 }
 
 // Interior cubes follow the per-column cubic band instead of traversing the
@@ -905,17 +749,13 @@ fn extractWallMain(@builtin(global_invocation_id) gid: vec3u) {
 // while it is consumed by dispatchWorkgroupsIndirect (WebGPU forbids a
 // writable-storage binding and indirect use in the same dispatch scope).
 export const extractionPrepareShader = /* wgsl */ `
-struct IndirectArgs { vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32, activeCubeCount: u32, vertexAllocator: u32, globalFineAuthorityLatch: u32 }
+struct IndirectArgs { vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32, activeCubeCount: u32 }
 struct DispatchArgs { x: u32, y: u32, z: u32 }
 @group(0) @binding(0) var<storage, read> drawArgs: IndirectArgs;
 @group(0) @binding(1) var<storage, read> activeCubes: array<vec2u>;
 @group(0) @binding(2) var<storage, read_write> dispatchArgs: DispatchArgs;
 @compute @workgroup_size(1)
 fn prepareMain() {
-  if (drawArgs.globalFineAuthorityLatch != 0u) {
-    dispatchArgs = DispatchArgs(0u, 1u, 1u);
-    return;
-  }
   let activeTotal = min(drawArgs.activeCubeCount, arrayLength(&activeCubes));
   dispatchArgs = DispatchArgs((activeTotal + ${EXTRACTION_POLYGONISE_WORKGROUP - 1}u) / ${EXTRACTION_POLYGONISE_WORKGROUP}u, 1u, 1u);
 }
@@ -1033,7 +873,6 @@ struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, c
 @group(0) @binding(7) var<storage,read> bodies:array<BodyGPU,12>;
 @group(0) @binding(8) var liquidField:texture_3d<f32>;
 @group(0) @binding(9) var tallCellBases:texture_2d<f32>;
-override adaptiveSurface=false;
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
 fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let r=normalize(cross(f,vec3f(0,1,0)));let up=normalize(cross(r,f));let q=world-u.cameraPosition.xyz;let d=max(dot(q,f),1e-4);let ndc=vec2f(dot(q,r)/(d*u.viewport.x/max(u.viewport.y,1.0)*.72),dot(q,up)/(d*.72));return vec2f(ndc.x*.5+.5,.5-ndc.y*.5);}
@@ -1136,7 +975,7 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=environmentForeground(color,ndc)*(
   let scene=safeSample(sceneTexture,textureUV);var front=safeSample(frontPosition,textureUV);if(front.a<.5){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}var frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
   var n=normalize(safeSample(frontNormal,textureUV).xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
-  if(!adaptiveSurface&&u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}}
+  if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}}
   if(resolvedDrySceneDepth(scene.a)+depthEpsilon<frontDepth){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}
   if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/${WATER_OPTICS.indexOfRefraction.toFixed(3)};var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
   var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
@@ -1183,30 +1022,18 @@ export class RasterWaterPipeline {
   private extractBandPipeline?: GPUComputePipeline;
   private extractTallSidesPipeline?: GPUComputePipeline;
   private extractWallPipeline?: GPUComputePipeline;
-  private extractSparsePipeline?: GPUComputePipeline;
   private extractGlobalFinePipeline?: GPUComputePipeline;
   private extractGlobalCoarsePipeline?: GPUComputePipeline;
-  private extractAdaptivePipeline?: GPUComputePipeline;
-  private extractAdaptiveLeafPipeline?: GPUComputePipeline;
-  private extractAdaptiveFallbackPipeline?: GPUComputePipeline;
-  private extractAdaptiveLeafFallbackPipeline?: GPUComputePipeline;
-  private extractHybridCoarsePipeline?: GPUComputePipeline;
-  private resetSurfaceWorklistPipeline?: GPUComputePipeline;
   private preparePipeline?: GPUComputePipeline;
   private polygonisePipeline?: GPUComputePipeline;
-  private polygoniseSparsePipeline?: GPUComputePipeline;
-  private polygoniseGlobalFineCountPipeline?: GPUComputePipeline;
   private polygoniseGlobalFineScanPipeline?: GPUComputePipeline;
-  private polygoniseGlobalFineEmitPipelines?: GPUComputePipeline[];
   private polygoniseGlobalFineEmitPipeline?: GPUComputePipeline;
   private globalFineEmitWorkgroups = 1;
-  private polygoniseAdaptivePipeline?: GPUComputePipeline;
   private surfaceFrontPipeline?: GPURenderPipeline;
   private surfaceBackPipeline?: GPURenderPipeline;
   private causticPipeline?: GPURenderPipeline;
   private scenePipeline?: GPURenderPipeline;
   private compositePipeline?: GPURenderPipeline;
-  private adaptiveCompositePipeline?: GPURenderPipeline;
   private extractLayout?: GPUBindGroupLayout;
   private globalExtractLayout?: GPUBindGroupLayout;
   private globalPolygoniseLayout?: GPUBindGroupLayout;
@@ -1248,8 +1075,6 @@ export class RasterWaterPipeline {
   private sceneHasFluid = true;
   private dryInterfaceClearsEncoded = false;
   private secondaryParticles?: SecondaryParticleRenderPipeline;
-  private sparseSurface?: SparseSurfaceBandGPUSource;
-  private adaptiveOctree?: UnifiedOctreeConsumerSource;
   private globalFineLevelSet?: GlobalFineLevelSetConsumerSource;
   private globalFineRenderParams?: GPUBuffer;
   private fallbackSparsePageTable?: GPUBuffer;
@@ -1257,16 +1082,13 @@ export class RasterWaterPipeline {
   private fallbackSparsePhi?: GPUBuffer;
   private fallbackSparseParams?: GPUBuffer;
   private fallbackSparseControl?: GPUBuffer;
-  private adaptiveDiagnosticReadback?: GPUBuffer;
-  private adaptiveDiagnosticPending = false;
-  private adaptiveDiagnosticCompletion?: Promise<AdaptiveWaterRenderDiagnostics | undefined>;
-  private lastAdaptiveDiagnostics?: AdaptiveWaterRenderDiagnostics;
-  private lastAdaptiveDiagnosticEncodeAt_ms = -Infinity;
-  private performanceReadbacksEnabled = true;
-  private pendingAdaptiveDiagnosticShape?: readonly [number, number, number, number];
-  private pendingAdaptiveDiagnosticGlobalFine = false;
-  private pendingAdaptiveDiagnosticGlobalFineGeneration?: number;
-  private lastRasterMeshPublicationGeneration?: number;
+  private surfaceDiagnosticReadback?: GPUBuffer;
+  private surfaceDiagnosticPending = false;
+  private surfaceDiagnosticCompletion?: Promise<WaterRenderDiagnostics | undefined>;
+  private lastSurfaceDiagnostics?: WaterRenderDiagnostics;
+  private lastSurfaceDiagnosticEncodeAt_ms = -Infinity;
+  private pendingSurfaceDiagnosticGlobalFine = false;
+  private pendingSurfaceDiagnosticGlobalFineGeneration?: number;
 
   constructor(
     private readonly device: GPUDevice,
@@ -1276,13 +1098,10 @@ export class RasterWaterPipeline {
   ) {}
 
   async initialize(onProgress:(label:string,completed:number,total:number)=>void=()=>{}) {
-    const [extract, globalClassify, globalCount, globalScan, globalEmit, globalEmitAll, prepare, surface, caustic, scene, composite] = await Promise.all([
+    const [extract, globalClassify, globalScan, globalEmitAll, prepare, surface, caustic, scene, composite] = await Promise.all([
       checkedModule(this.device, "Water isosurface extraction", surfaceExtractionShader),
       checkedModule(this.device, "Global fine water classification", globalFineSurfaceClassificationShader),
-      checkedModule(this.device, "Classified global fine count", globalFineClassifiedCountShader),
       checkedModule(this.device, "Classified global fine scan", globalFineClassifiedScanShader),
-      Promise.all(globalFineClassifiedEmitShaders.map((source, index) =>
-        checkedModule(this.device, `Classified global fine tetrahedron ${index}`, source))),
       checkedModule(this.device, "Classified global fine tetrahedra", globalFineClassifiedEmitShader),
       checkedModule(this.device, "Water extraction dispatch prepare", extractionPrepareShader),
       checkedModule(this.device, "Water interface raster", surfaceRasterShader),
@@ -1303,16 +1122,12 @@ export class RasterWaterPipeline {
       ,{ binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
       ,{ binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
       ,{ binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
-      ,{ binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
-      ,{ binding: 14, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
-      ,{ binding: 15, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
     ] });
     this.globalExtractLayout = this.device.createBindGroupLayout({ label: "Global fine water classification bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
@@ -1355,31 +1170,19 @@ export class RasterWaterPipeline {
     ] });
     const extractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.extractLayout] });
     const globalExtractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.globalExtractLayout] });
-    const total=31;let completed=0;
+    const total=15;let completed=0;
     const compute=async(label:string,descriptor:GPUComputePipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createComputePipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
     const render=async(label:string,descriptor:GPURenderPipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createRenderPipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
     this.extractPipeline = await compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractMain" } });
     this.extractBandPipeline = await compute("Classifying restricted water band",{ label: "Classify restricted water band", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractBandMain" } });
     this.extractTallSidesPipeline = await compute("Classifying tall-cell interfaces",{ label: "Classify tall-cell side interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractTallSidesMain" } });
     this.extractWallPipeline = await compute("Classifying water wall interfaces",{ label: "Classify water wall interfaces", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractWallMain" } });
-    this.extractSparsePipeline = await compute("Classifying sparse fine surface pages",{ label: "Classify sparse fine surface pages", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractSparseMain", constants: { sparseField: 1 } } });
     this.extractGlobalFinePipeline = await compute("Classifying global fine surface bricks",{ label: "Classify global fine surface bricks", layout: globalExtractionPipelineLayout, compute: { module: globalClassify, entryPoint: "extractGlobalFineMain" } });
-    this.extractGlobalCoarsePipeline = await compute("Classifying compact coarse surface leaves",{ label: "Classify compact coarse fallback", layout: globalExtractionPipelineLayout, compute: { module: globalClassify, entryPoint: "extractGlobalCoarseMain" } });
-    this.extractAdaptivePipeline = await compute("Classifying adaptive octree surface pages",{ label: "Classify adaptive octree surface pages", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractAdaptiveMain", constants: { adaptiveField: 1 } } });
-    this.extractAdaptiveLeafPipeline = await compute("Classifying adaptive octree surface leaves",{ label: "Classify adaptive octree surface leaves", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractAdaptiveLeafMain", constants: { adaptiveField: 1 } } });
-    this.extractAdaptiveFallbackPipeline = await compute("Classifying adaptive fallback surface pages",{ label: "Classify adaptive fallback surface pages", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractAdaptiveMain", constants: { adaptiveField: 1, globalFineFallback: 1 } } });
-    this.extractAdaptiveLeafFallbackPipeline = await compute("Classifying adaptive fallback surface leaves",{ label: "Classify adaptive fallback surface leaves", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractAdaptiveLeafMain", constants: { adaptiveField: 1, globalFineFallback: 1 } } });
-    this.extractHybridCoarsePipeline = await compute("Classifying coarse surface outside detail patches",{ label: "Classify hybrid coarse surface", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractHybridCoarseMain" } });
-    this.resetSurfaceWorklistPipeline = await compute("Preparing fine detail worklist",{ label: "Reset surface worklist between hierarchy levels", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "resetSurfaceWorklistMain" } });
+    this.extractGlobalCoarsePipeline = await compute("Classifying compact coarse cells",{ label: "Classify compact coarse fallback", layout: globalExtractionPipelineLayout, compute: { module: globalClassify, entryPoint: "extractGlobalCoarseMain" } });
     this.polygonisePipeline = await compute("Building water surface mesh",{ label: "Polygonise surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "polygoniseMain" } });
-    this.polygoniseSparsePipeline = await compute("Building sparse fine water mesh",{ label: "Polygonise sparse fine surface", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "polygoniseMain", constants: { sparseField: 1 } } });
     const globalPolygonLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.globalPolygoniseLayout]});
-    this.polygoniseGlobalFineCountPipeline=await compute("Counting global fine water mesh",{label:"Count classified global fine triangles",layout:globalPolygonLayout,compute:{module:globalCount,entryPoint:"countGlobalFineTriangles"}});
     this.polygoniseGlobalFineScanPipeline=await compute("Scanning global fine water mesh",{label:"Scan classified global fine triangles",layout:globalPolygonLayout,compute:{module:globalScan,entryPoint:"scanGlobalFineTriangles"}});
-    this.polygoniseGlobalFineEmitPipelines=[];
-    for(let tetrahedron=0;tetrahedron<6;tetrahedron+=1)this.polygoniseGlobalFineEmitPipelines.push(await compute(`Emitting global fine tetrahedron ${tetrahedron+1}/6`,{label:`Emit classified global fine tetrahedron ${tetrahedron}`,layout:globalPolygonLayout,compute:{module:globalEmit[tetrahedron],entryPoint:`emitGlobalFineTetra${tetrahedron}`}}));
     this.polygoniseGlobalFineEmitPipeline=await compute("Emitting six global fine tetrahedra",{label:"Emit classified global fine tetrahedra",layout:globalPolygonLayout,compute:{module:globalEmitAll,entryPoint:"emitGlobalFineTetrahedra"}});
-    this.polygoniseAdaptivePipeline = await compute("Building adaptive octree water mesh",{ label: "Polygonise adaptive octree surface", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "polygoniseMain", constants: { adaptiveField: 1 } } });
     this.preparePipeline = await compute("Preparing surface dispatch",{ label: "Prepare polygonise dispatch", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.prepareLayout] }), compute: { module: prepare, entryPoint: "prepareMain" } });
     this.polygoniseDispatchBuffer = this.device.createBuffer({ label: "Water polygonise dispatch arguments", size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const surfacePipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.surfaceLayout] });
@@ -1398,18 +1201,15 @@ export class RasterWaterPipeline {
     });
     this.scenePipeline = await render("Rendering the dry scene",{ label: "Render dry scene for water refraction", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.sceneLayout] }), vertex: { module: scene, entryPoint: "vertexMain" }, fragment: { module: scene, entryPoint: "fragmentMain", targets: [{ format: "rgba16float" }] }, primitive: { topology: "triangle-list" } });
     const compositePipelineLayout=this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeLayout] });
-    const compositeDescriptor=(label:string,adaptiveSurface:number):GPURenderPipelineDescriptor=>({ label, layout: compositePipelineLayout, vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", constants:{adaptiveSurface}, targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } });
-    this.compositePipeline = await render("Compositing water optics",compositeDescriptor("Composite two-interface water optics",0));
-    this.adaptiveCompositePipeline = await render("Compositing adaptive water optics",compositeDescriptor("Composite adaptive two-interface water optics",1));
+    const compositeDescriptor:GPURenderPipelineDescriptor={ label:"Composite two-interface water optics", layout: compositePipelineLayout, vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } };
+    this.compositePipeline = await render("Compositing water optics",compositeDescriptor);
     this.sampler = this.device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.fallbackSparsePageTable = this.device.createBuffer({ label: "Water sparse-page fallback", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.fallbackSparseActivePages = this.device.createBuffer({ label: "Water sparse-active fallback", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     this.fallbackSparsePhi = this.device.createBuffer({ label: "Water sparse-phi fallback", size: 4, usage: GPUBufferUsage.STORAGE });
     this.fallbackSparseParams = this.device.createBuffer({ label: "Water sparse-params fallback", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.globalFineRenderParams = this.device.createBuffer({ label: "Water global fine parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    // This disabled source also occupies the adaptive-leaf binding. WebGPU
-    // validates the complete 64-byte leaf/control minimum before overrides.
-    this.fallbackSparseControl = this.device.createBuffer({ label: "Water sparse-control fallback", size: WATER_SPARSE_FALLBACK_BYTES, usage: GPUBufferUsage.STORAGE });
+    this.fallbackSparseControl = this.device.createBuffer({ label: "Water disabled storage binding", size: WATER_DISABLED_STORAGE_BYTES, usage: GPUBufferUsage.STORAGE });
     this.rebuildBindGroups();
   }
 
@@ -1418,49 +1218,25 @@ export class RasterWaterPipeline {
     this.volume = texture; this.columnBases = columnBases; this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
   }
 
-  setSparseSurface(source: SparseSurfaceBandGPUSource | undefined) {
-    if (this.sparseSurface === source) return;
-    this.sparseSurface = source;
-    this.extractedRevision = -1;
-    this.lastExtractionAt_ms = -Infinity;
-    this.causticsValid = false;
-    this.geometryKey = "";
-    this.rebuildBindGroups();
-  }
-
-  /** Selects the authoritative leaf-page surface without copying or publishing a 3D texture. */
-  setAdaptiveOctree(source: UnifiedOctreeConsumerSource | undefined) {
-    if (source) validateUnifiedOctreeConsumerSource(source);
-    if (source && source.leafCapacity > 0x01000000) throw new RangeError("Adaptive water extraction supports at most 2^24 leaf rows");
-    if (this.adaptiveOctree === source) return;
-    this.adaptiveOctree = source;
-    this.extractedRevision = -1;
-    this.lastExtractionAt_ms = -Infinity;
-    this.causticsValid = false;
-    this.geometryKey = "";
-    this.rebuildBindGroups();
-  }
-
   /** Selects row-independent global fine bricks without synthesizing leaf ownership. */
   setGlobalFineLevelSet(source: GlobalFineLevelSetConsumerSource | undefined) {
     if (source) validateGlobalFineLevelSetConsumerSource(source);
     const previous = this.globalFineLevelSet;
     if (previous === source || (previous && source
       && previous.generation === source.generation
-      && previous.hash.buffer === source.hash.buffer
       && previous.metadata.buffer === source.metadata.buffer
       && previous.worklist.buffer === source.worklist.buffer
       && previous.flags.buffer === source.flags.buffer
       && previous.phi.buffer === source.phi.buffer
       && previous.coarsePhiDirectory?.buffer === source.coarsePhiDirectory?.buffer
-      && previous.coarsePhiHashCapacity === source.coarsePhiHashCapacity
+      && previous.coarsePhiRowCapacity === source.coarsePhiRowCapacity
       && previous.topologyControl?.buffer === source.topologyControl?.buffer)) return;
     this.globalFineLevelSet = source;
     if (source && this.globalFineRenderParams) {
       const bytes = new ArrayBuffer(112); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
       u32.set([...source.sampleDimensions, source.brickResolution], 0);
       u32.set([...source.brickDimensions, source.samplesPerBrick], 4);
-      u32.set([source.hashCapacity, source.maximumHashProbes, source.pageCapacity, source.generation], 8);
+      u32.set([source.pageCapacity, 5, source.pageCapacity, source.generation], 8);
       f32.set([...source.domainOrigin, source.fineCellWidth], 12); f32[16] = source.fineFactor;
       this.device.queue.writeBuffer(this.globalFineRenderParams, 0, bytes);
     }
@@ -1484,87 +1260,67 @@ export class RasterWaterPipeline {
     return texture ? { texture, dimensions: [texture.width, texture.height, 1] as [number, number, number] } : undefined;
   }
 
-  /** Latest bounded GPU readback proving what sparse surface is presented. */
-  get adaptiveRenderDiagnostics() { return this.lastAdaptiveDiagnostics; }
+  /** Latest bounded GPU readback proving what surface geometry is presented. */
+  get surfaceRenderDiagnostics() { return this.lastSurfaceDiagnostics; }
 
-  private adaptiveDiagnosticsFullRateRequested() {
+  private surfaceDiagnosticsFullRateRequested() {
     if (typeof location !== "undefined") {
       const query = new URLSearchParams(location.search);
-      if (query.get("waterdiag") === "1" || query.get("diagnostics") === "1" || query.get("panel") === "diagnostics" || query.get("panel") === "visual") return true;
+      if (query.get("panel") === "diagnostics" || query.get("panel") === "visual") return true;
     }
     return typeof process !== "undefined" && process.env?.FLUID_WATER_DIAGNOSTICS === "1";
   }
 
-  /** Presentation failure evidence is part of the normal UI contract unless
-   * the user explicitly chooses the readback-free maximum-throughput mode. */
-  get adaptiveDiagnosticsReadbackEnabled() { return this.performanceReadbacksEnabled; }
-
-  setPerformanceReadbacksEnabled(enabled: boolean) {
-    this.performanceReadbacksEnabled = enabled;
-  }
-
-  private encodeAdaptiveDiagnostics(encoder: GPUCommandEncoder, adaptive: UnifiedOctreeConsumerSource) {
-    if (!this.performanceReadbacksEnabled || this.adaptiveDiagnosticPending || !this.indirectBuffer) return;
+  private encodeSurfaceDiagnostics(encoder: GPUCommandEncoder) {
+    if (this.surfaceDiagnosticPending || !this.indirectBuffer) return;
     const now_ms = performance.now();
     // The normal UI needs failure evidence, not a frame-rate-synchronous
     // telemetry stream. Match the solver's bounded 250 ms readback cadence;
     // explicit diagnostic/Dawn sessions retain per-capture evidence.
-    if (!this.adaptiveDiagnosticsFullRateRequested()
-      && now_ms - this.lastAdaptiveDiagnosticEncodeAt_ms < 250) return;
-    this.lastAdaptiveDiagnosticEncodeAt_ms = now_ms;
-    this.adaptiveDiagnosticReadback?.destroy();
-    this.adaptiveDiagnosticReadback = this.device.createBuffer({ label: "Adaptive water render diagnostics", size: 128, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    const activeOffsetBytes = (16 + 2 * adaptive.leafCapacity + 2 * adaptive.pageCapacity) * 4;
-    encoder.copyBufferToBuffer(adaptive.surfaceArena.buffer, adaptive.surfaceArena.offset ?? 0, this.adaptiveDiagnosticReadback, 0, 64);
-    encoder.copyBufferToBuffer(adaptive.surfaceArena.buffer, (adaptive.surfaceArena.offset ?? 0) + activeOffsetBytes, this.adaptiveDiagnosticReadback, 64, 16);
-    encoder.copyBufferToBuffer(this.indirectBuffer, 0, this.adaptiveDiagnosticReadback, 80, 28);
-    this.pendingAdaptiveDiagnosticShape = [adaptive.leafCapacity, adaptive.pageCapacity, adaptive.pageResolution, adaptive.pageResolution ** 3];
-    this.pendingAdaptiveDiagnosticGlobalFine = Boolean(this.globalFineLevelSet);
-    this.pendingAdaptiveDiagnosticGlobalFineGeneration = this.globalFineLevelSet?.generation;
-    this.adaptiveDiagnosticPending = true;
+    if (!this.surfaceDiagnosticsFullRateRequested()
+      && now_ms - this.lastSurfaceDiagnosticEncodeAt_ms < 250) return;
+    this.lastSurfaceDiagnosticEncodeAt_ms = now_ms;
+    this.surfaceDiagnosticReadback?.destroy();
+    this.surfaceDiagnosticReadback = this.device.createBuffer({ label: "Water render diagnostics", size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    encoder.copyBufferToBuffer(this.indirectBuffer, 0, this.surfaceDiagnosticReadback, 0, 32);
+    this.pendingSurfaceDiagnosticGlobalFine = Boolean(this.globalFineLevelSet);
+    this.pendingSurfaceDiagnosticGlobalFineGeneration = this.globalFineLevelSet?.generation;
+    this.surfaceDiagnosticPending = true;
   }
 
   /** Called immediately after the frame submission that contains the copies. */
-  completeAdaptiveDiagnostics(): Promise<AdaptiveWaterRenderDiagnostics | undefined> {
-    if (this.adaptiveDiagnosticCompletion) return this.adaptiveDiagnosticCompletion;
-    const readback = this.adaptiveDiagnosticReadback;
-    if (!readback || !this.adaptiveDiagnosticPending) return Promise.resolve(undefined);
+  completeSurfaceDiagnostics(): Promise<WaterRenderDiagnostics | undefined> {
+    if (this.surfaceDiagnosticCompletion) return this.surfaceDiagnosticCompletion;
+    const readback = this.surfaceDiagnosticReadback;
+    if (!readback || !this.surfaceDiagnosticPending) return Promise.resolve(undefined);
     const completion = this.device.queue.onSubmittedWorkDone().then(async () => {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
-      const shape = this.pendingAdaptiveDiagnosticShape ?? [0, 0, 0, 0];
-      const groups = Math.max(1, Math.ceil(words[16] * shape[3] / 256));
-      const globalFineAttached = this.pendingAdaptiveDiagnosticGlobalFine;
-      const globalFineAttachedGeneration = this.pendingAdaptiveDiagnosticGlobalFineGeneration;
-      const surfaceGeometrySource = waterSurfaceGeometrySource(globalFineAttached, words[20], words[26], words[25]);
-      if (surfaceGeometrySource === "global-fine-coarse") {
-        this.lastRasterMeshPublicationGeneration = globalFineAttachedGeneration;
-      } else if (surfaceGeometrySource !== "retained-previous") {
-        this.lastRasterMeshPublicationGeneration = undefined;
-      }
-      this.lastAdaptiveDiagnostics = {
-        leafCapacity: shape[0], pageCapacity: shape[1], pageResolution: shape[2], samplesPerPage: shape[3],
-        surfaceFreePages: words[0], surfaceAllocatedPages: words[4], surfaceCandidatePages: words[12], surfaceActivePages: words[16], surfaceOverflow: words[3],
-        finestResidentPages: words[8], coarseResidentPages: words[9], maximumResidentLeafSize: words[10],
-        surfaceDispatch: [Math.min(65_535, groups), Math.max(1, Math.ceil(groups / 65_535)), 1],
-        vertexCount: words[20], activeCubeCount: words[24], vertexAllocator: words[25],
-        globalFineAuthorityLatch: words[26],
+      const globalFineAttached = this.pendingSurfaceDiagnosticGlobalFine;
+      const globalFineAttachedGeneration = this.pendingSurfaceDiagnosticGlobalFineGeneration;
+      const surfaceGeometrySource = waterSurfaceGeometrySource(globalFineAttached, words[0], words[6]);
+      const meshPublicationGeneration = (surfaceGeometrySource === "global-fine-coarse"
+        || surfaceGeometrySource === "retained-previous") && words[7] !== 0xffff_ffff
+        ? words[7] : undefined;
+      this.lastSurfaceDiagnostics = {
+        vertexCount: words[0], activeCubeCount: words[4], vertexAllocator: words[5],
+        globalFineAuthorityLatch: words[6],
         surfaceGeometrySource,
         globalFineAttached,
         globalFineAttachedGeneration,
-        meshPublicationGeneration: this.lastRasterMeshPublicationGeneration,
+        meshPublicationGeneration,
         globalFineCrossingPublished: surfaceGeometrySource === "global-fine-coarse",
-        presentationFallbackActive: surfaceGeometrySource === "adaptive-fallback" || surfaceGeometrySource === "retained-previous",
+        presentationFallbackActive: surfaceGeometrySource === "retained-previous",
       };
-      console.info("Adaptive water diagnostics", JSON.stringify(this.lastAdaptiveDiagnostics));
-      const result = this.lastAdaptiveDiagnostics;
+      console.info("Water render diagnostics", JSON.stringify(this.lastSurfaceDiagnostics));
+      const result = this.lastSurfaceDiagnostics;
       readback.unmap();
       return result;
     }).catch(() => undefined).finally(() => {
-      this.adaptiveDiagnosticPending = false;
-      if (this.adaptiveDiagnosticCompletion === completion) this.adaptiveDiagnosticCompletion = undefined;
+      this.surfaceDiagnosticPending = false;
+      if (this.surfaceDiagnosticCompletion === completion) this.surfaceDiagnosticCompletion = undefined;
     });
-    this.adaptiveDiagnosticCompletion = completion;
+    this.surfaceDiagnosticCompletion = completion;
     return completion;
   }
 
@@ -1578,14 +1334,15 @@ export class RasterWaterPipeline {
     const maxVertices = surfaceVertexCapacity(nx, ny, nz);
     this.vertexBuffer = this.device.createBuffer({ label: `Extracted water surface (${maxVertices} vertices)`, size: maxVertices * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     // The first 16 bytes are the standard draw-indirect ABI. Renderer-private
-    // counters and the global-fine authority latch trail it; firstInstance must
-    // stay zero unless the optional indirect-first-instance feature is enabled.
-    this.indirectBuffer = this.device.createBuffer({ label: "Water indirect draw arguments and extraction counters", size: 28, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    // counters, global-fine authority latch, and GPU-published mesh generation
+    // trail it; firstInstance must stay zero unless the optional
+    // indirect-first-instance feature is enabled.
+    this.indirectBuffer = this.device.createBuffer({ label: "Water indirect draw arguments and extraction counters", size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.device.queue.writeBuffer(this.indirectBuffer, 28, new Uint32Array([0xffff_ffff]));
     this.activeCubeBuffer = this.device.createBuffer({ label: "Water surface cube worklist", size: activeCubeCapacity(maxVertices) * 8, usage: GPUBufferUsage.STORAGE });
     this.globalCubeValues = this.device.createBuffer({ label: "Global fine classified cube values", size: activeCubeCapacity(maxVertices) * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.globalCubeOffsets = this.device.createBuffer({ label: "Global fine tetrahedron offsets", size: activeCubeCapacity(maxVertices) * 6 * 4, usage: GPUBufferUsage.STORAGE });
     this.globalFineEmitWorkgroups=Math.ceil(activeCubeCapacity(maxVertices)/64);
-    this.lastRasterMeshPublicationGeneration = undefined;
     this.geometryKey = key; this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
   }
 
@@ -1616,26 +1373,20 @@ export class RasterWaterPipeline {
 
   private rebuildBindGroups() {
     this.compositeBindGroups = new WeakMap();
-    const sparse = this.sparseSurface;
-    const adaptive = this.adaptiveOctree;
     const globalFine = this.globalFineLevelSet;
     if (this.extractLayout && this.volume && this.columnBases && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.globalCubeValues && this.fallbackSparsePageTable && this.fallbackSparseActivePages && this.fallbackSparsePhi && this.fallbackSparseParams && this.fallbackSparseControl) this.extractBindGroup = this.device.createBindGroup({ layout: this.extractLayout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 2, resource: this.columnBases.createView() }, { binding: 3, resource: { buffer: this.vertexBuffer } }, { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } },
-      { binding: 7, resource: globalFine?.hash ?? sparse?.pageTable ?? { buffer: this.fallbackSparsePageTable } },
-      { binding: 8, resource: globalFine?.worklist ?? sparse?.activePages ?? { buffer: this.fallbackSparseActivePages } },
-      { binding: 9, resource: globalFine?.phi ?? sparse?.phi ?? { buffer: this.fallbackSparsePhi } },
-      { binding: 10, resource: globalFine ? { buffer: this.globalFineRenderParams! } : sparse?.params ?? { buffer: this.fallbackSparseParams } },
-      { binding: 11, resource: globalFine?.flags ?? sparse?.control ?? { buffer: this.fallbackSparseControl } },
-      { binding: 12, resource: globalFine?.metadata ?? sparse?.states ?? { buffer: this.fallbackSparseControl } }
-      ,{ binding: 13, resource: adaptive?.leaves ?? { buffer: this.fallbackSparseControl } }
-      ,{ binding: 14, resource: adaptive?.surfaceArena ?? { buffer: this.fallbackSparseControl } }
-      ,{ binding: 15, resource: adaptive?.surfaceParams ?? { buffer: this.fallbackSparseParams } }
+      { binding: 7, resource: { buffer: this.fallbackSparsePageTable } },
+      { binding: 8, resource: globalFine?.worklist ?? { buffer: this.fallbackSparseActivePages } },
+      { binding: 9, resource: globalFine?.phi ?? { buffer: this.fallbackSparsePhi } },
+      { binding: 10, resource: globalFine ? { buffer: this.globalFineRenderParams! } : { buffer: this.fallbackSparseParams } },
+      { binding: 11, resource: globalFine?.flags ?? { buffer: this.fallbackSparseControl } },
+      { binding: 12, resource: globalFine?.metadata ?? { buffer: this.fallbackSparseControl } }
     ] });
     if (this.globalExtractLayout && this.indirectBuffer && this.activeCubeBuffer && this.globalCubeValues && this.globalFineRenderParams && this.fallbackSparsePageTable && this.fallbackSparseActivePages && this.fallbackSparsePhi && this.fallbackSparseControl) this.globalExtractBindGroup = this.device.createBindGroup({ layout: this.globalExtractLayout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } },
       { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } },
       { binding: 6, resource: { buffer: this.globalCubeValues } },
-      { binding: 7, resource: globalFine?.hash ?? { buffer: this.fallbackSparsePageTable } },
       { binding: 8, resource: globalFine?.worklist ?? { buffer: this.fallbackSparseActivePages } },
       { binding: 9, resource: globalFine?.phi ?? { buffer: this.fallbackSparsePhi } },
       { binding: 10, resource: { buffer: this.globalFineRenderParams } },
@@ -1669,12 +1420,10 @@ export class RasterWaterPipeline {
     return bindGroup;
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, timestamps?: RasterWaterTimestampRanges, drySceneReplacement?: DrySceneReplacementEncoder): RasterWaterEncodeResult | false {
-    const geometryDimensions = this.globalFineLevelSet?.sampleDimensions ?? (this.adaptiveOctree
-      ? [nx * this.adaptiveOctree.pageResolution, ny * this.adaptiveOctree.pageResolution, nz * this.adaptiveOctree.pageResolution] as const
-      : this.sparseSurface?.fineDimensions ?? [nx, ny, nz] as const);
+  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase): RasterWaterEncodeResult | false {
+    const geometryDimensions = this.globalFineLevelSet?.sampleDimensions ?? [nx, ny, nz] as const;
     this.ensureGeometry(geometryDimensions[0],geometryDimensions[1],geometryDimensions[2]);
-    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractSparsePipeline||!this.extractGlobalFinePipeline||!this.extractGlobalCoarsePipeline||!this.extractAdaptivePipeline||!this.extractAdaptiveLeafPipeline||!this.extractAdaptiveFallbackPipeline||!this.extractAdaptiveLeafFallbackPipeline||!this.extractHybridCoarsePipeline||!this.resetSurfaceWorklistPipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseSparsePipeline||!this.polygoniseGlobalFineCountPipeline||!this.polygoniseGlobalFineScanPipeline||this.polygoniseGlobalFineEmitPipelines?.length!==6||!this.polygoniseGlobalFineEmitPipeline||!this.polygoniseAdaptivePipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.causticPipeline||!this.scenePipeline||!this.compositePipeline||!this.adaptiveCompositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.sceneBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.causticTexture) return false;
+    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractGlobalFinePipeline||!this.extractGlobalCoarsePipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.causticPipeline||!this.scenePipeline||!this.compositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.sceneBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.causticTexture) return false;
     const now_ms = performance.now();
     // Rendering follows the newest available solver revision, but extraction
     // follows the fixed presentation cadence. Unchanged solver revisions
@@ -1686,106 +1435,90 @@ export class RasterWaterPipeline {
         // Preserve the last published draw count while the GPU validates the
         // next A/B generation. Classification clears the sentinel only after
         // observing finite tagged fine data or a published compact-coarse
-        // fallback; an invalid generation therefore retains the previous mesh.
+        // fallback; an invalid generation therefore retains the previous mesh
+        // and its GPU-written publication generation in word 7.
         this.device.queue.writeBuffer(this.indirectBuffer,4,new Uint32Array([1,0,0,0,0xffff_ffff,0]));
       } else {
-        this.device.queue.writeBuffer(this.indirectBuffer,0,new Uint32Array([0,1,0,0,0,0,0]));
+        this.device.queue.writeBuffer(this.indirectBuffer,0,new Uint32Array([0,1,0,0,0,0,0,0xffff_ffff]));
       }
       const plan = surfaceExtractionDispatchPlan(nx, ny, nz, this.volume.depthOrArrayLayers, restrictedTallCell, maximumNeighborDelta);
       // Classify appends surface-crossing cubes to the worklist, the prepare
       // kernel sizes the indirect dispatch, and polygonise emits triangles for
-      // just those cubes. Dispatches in one pass order their storage writes.
-      const compute=encoder.beginComputePass({label:"Extract water isosurface",...(timestamps?{timestampWrites:timestamps.extraction}:{})});compute.setBindGroup(0,this.extractBindGroup);
-      const adaptive = this.adaptiveOctree;
+      // just those cubes. The writable prepare binding and its later INDIRECT
+      // use must occupy distinct WebGPU usage scopes.
+      let compute=encoder.beginComputePass({label:"Extract water isosurface"});compute.setBindGroup(0,this.extractBindGroup);
+      const prepareAndPolygonise=(pipeline:GPUComputePipeline,group:GPUBindGroup)=>{
+        compute.setPipeline(this.preparePipeline!);compute.setBindGroup(0,this.prepareBindGroup!);compute.dispatchWorkgroups(1);
+        compute.end();
+        compute=encoder.beginComputePass({label:"Polygonise water isosurface"});
+        compute.setPipeline(pipeline);compute.setBindGroup(0,group);compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer!,0);
+      };
       const globalFine = this.globalFineLevelSet;
       if (globalFine) {
         compute.setBindGroup(0, this.globalExtractBindGroup);
         compute.setPipeline(this.extractGlobalFinePipeline);
         compute.dispatchWorkgroups(...globalFineSurfaceDispatch(globalFine.pageCapacity, globalFine.samplesPerBrick));
-        if(globalFine.coarsePhiHashCapacity){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(...globalFineCoarseSurfaceDispatch(globalFine.coarsePhiHashCapacity));}
+        if(globalFine.coarsePhiRowCapacity){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(...globalFineCoarseSurfaceDispatch(globalFine.coarsePhiRowCapacity));}
+        compute.end();
+        compute=encoder.beginComputePass({label:"Scan and emit classified global fine surface"});
         compute.setBindGroup(0,this.globalPolygoniseBindGroup);
         compute.setPipeline(this.polygoniseGlobalFineScanPipeline);compute.dispatchWorkgroups(1);
         compute.setPipeline(this.polygoniseGlobalFineEmitPipeline);compute.dispatchWorkgroups(this.globalFineEmitWorkgroups,6);
-        // A newly attached renderer has no old mesh to retain. If neither the
-        // tagged fine generation nor compact coarse authority found a crossing,
-        // let the existing leaf-page representation publish the fallback mesh.
-        // The trailing renderer-private word is a GPU-only authority latch set
-        // by global crossings; the draw ABI's firstInstance remains zero.
-        // validation errors remain visible and no readback steers rendering.
-        if(adaptive){
-          compute.setBindGroup(0,this.extractBindGroup);
-          compute.setPipeline(this.extractAdaptiveLeafFallbackPipeline);compute.dispatchWorkgroups(Math.ceil(adaptive.leafCapacity/256));
-          compute.setPipeline(this.extractAdaptiveFallbackPipeline);compute.dispatchWorkgroupsIndirect(adaptive.surfaceDispatch.buffer,adaptive.surfaceDispatch.offsetBytes);
-          compute.setPipeline(this.preparePipeline);compute.setBindGroup(0,this.prepareBindGroup);compute.dispatchWorkgroups(1);
-          compute.setPipeline(this.polygoniseAdaptivePipeline);compute.setBindGroup(0,this.extractBindGroup);compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer,0);
-        }
-      } else if (surfaceExtractionRepresentation(Boolean(adaptive), Boolean(this.sparseSurface)) === "adaptive-octree" && adaptive) {
-        compute.setPipeline(this.extractAdaptiveLeafPipeline);
-        compute.dispatchWorkgroups(Math.ceil(adaptive.leafCapacity / 256));
-        compute.setPipeline(this.extractAdaptivePipeline);
-        compute.dispatchWorkgroupsIndirect(adaptive.surfaceDispatch.buffer, adaptive.surfaceDispatch.offsetBytes);
-        compute.setPipeline(this.preparePipeline); compute.setBindGroup(0, this.prepareBindGroup); compute.dispatchWorkgroups(1);
-        compute.setPipeline(this.polygoniseAdaptivePipeline); compute.setBindGroup(0, this.extractBindGroup); compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
-      } else if (this.sparseSurface) {
-        // Level 0: retain the complete coarse surface except inside fine detail
-        // cores. Fine halo pages overlap this mesh to make the LOD handoff
-        // watertight even though the cell-centred lattices do not share vertices.
-        compute.setPipeline(this.extractHybridCoarsePipeline);
-        compute.dispatchWorkgroups(Math.ceil((nx + 1) / 4), Math.ceil((ny + 1) / 4), Math.ceil((nz + 1) / 4));
-        compute.setPipeline(this.preparePipeline); compute.setBindGroup(0, this.prepareBindGroup); compute.dispatchWorkgroups(1);
-        compute.setPipeline(this.polygonisePipeline); compute.setBindGroup(0, this.extractBindGroup); compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
-        // Level 1: reuse the compact worklist while retaining the shared vertex
-        // allocator and indirect draw count produced by the coarse pass.
-        compute.setPipeline(this.resetSurfaceWorklistPipeline); compute.dispatchWorkgroups(1);
-        compute.setPipeline(this.extractSparsePipeline);
-        compute.dispatchWorkgroupsIndirect(this.sparseSurface.activePages.buffer, (this.sparseSurface.activePages.offset ?? 0) + 4);
-        compute.setPipeline(this.preparePipeline); compute.setBindGroup(0, this.prepareBindGroup); compute.dispatchWorkgroups(1);
-        compute.setPipeline(this.polygoniseSparsePipeline); compute.setBindGroup(0, this.extractBindGroup); compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
-      } else if (plan.mode === "restricted-band") {
-        compute.setPipeline(this.extractBandPipeline); compute.dispatchWorkgroups(...plan.band!);
-        compute.setPipeline(this.extractTallSidesPipeline); compute.dispatchWorkgroups(...plan.tallSides!);
-        compute.setPipeline(this.extractWallPipeline); compute.dispatchWorkgroups(...plan.walls!);
+        compute.end();
       } else {
-        compute.setPipeline(this.extractPipeline); compute.dispatchWorkgroups(...plan.full!);
+        if (plan.mode === "restricted-band") {
+          compute.setPipeline(this.extractBandPipeline); compute.dispatchWorkgroups(...plan.band!);
+          compute.setPipeline(this.extractTallSidesPipeline); compute.dispatchWorkgroups(...plan.tallSides!);
+          compute.setPipeline(this.extractWallPipeline); compute.dispatchWorkgroups(...plan.walls!);
+        } else {
+          compute.setPipeline(this.extractPipeline); compute.dispatchWorkgroups(...plan.full!);
+        }
+        prepareAndPolygonise(this.polygonisePipeline,this.extractBindGroup);
+        compute.end();
       }
-      if (!this.sparseSurface && !this.adaptiveOctree) {
-        compute.setPipeline(this.preparePipeline); compute.setBindGroup(0, this.prepareBindGroup); compute.dispatchWorkgroups(1);
-        compute.setPipeline(this.polygonisePipeline); compute.setBindGroup(0, this.extractBindGroup); compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
-      }
-      compute.end();
-      if (adaptive) this.encodeAdaptiveDiagnostics(encoder, adaptive);
+      this.encodeSurfaceDiagnostics(encoder);
       this.extractedRevision = revision; this.lastExtractionAt_ms = advancePresentationClock(this.lastExtractionAt_ms, now_ms);
+      tracePhase?.({ id: "surface-extraction", label: "Water surface extraction" });
     }
     if (updateCaustics) {
-      const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.caustics}:{})});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.surfaceBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();
+      const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}]});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.surfaceBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();
       this.causticsValid = true;
+      tracePhase?.({ id: "water-caustics", label: "Water caustic map" });
     }
-    const sparseSceneResult = drySceneReplacement?.(encoder, this.sceneTexture, timestamps?.scene) ?? false;
+    traceBoundary?.();
+    const sparseSceneResult = drySceneReplacement?.(encoder, this.sceneTexture, tracePhase) ?? false;
     if (!sparseSceneResult) {
-      const scene=encoder.beginRenderPass({label:"Dry scene",colorAttachments:[{view:this.sceneTextureView!,clearValue:{r:0,g:0,b:0,a:65504},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.scene}:{})});scene.setPipeline(this.scenePipeline);scene.setBindGroup(0,this.sceneBindGroup);scene.draw(3);scene.end();
+      const scene=encoder.beginRenderPass({label:"Dry scene",colorAttachments:[{view:this.sceneTextureView!,clearValue:{r:0,g:0,b:0,a:65504},loadOp:"clear",storeOp:"store"}]});scene.setPipeline(this.scenePipeline);scene.setBindGroup(0,this.sceneBindGroup);scene.draw(3);scene.end();
+      tracePhase?.({ id: "dry-scene", label: "Raster dry-scene fallback" });
     }
+    traceBoundary?.();
     // Water and spray target the same interface attachments and depth state.
     // Encode both draws in one pass per side so spray does not force two extra
     // full-resolution attachment load/store cycles.
-    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",timestampWrites?:TimestampRange)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.secondaryParticles?.encodeOpticalInterface(pass,side);pass.end();};
-    const interfacesEncoded = this.sceneHasFluid || !this.dryInterfaceClearsEncoded;
+    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back")=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.secondaryParticles?.encodeOpticalInterface(pass,side);pass.end();};
     if (this.sceneHasFluid) {
-      interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front",timestamps?.frontInterfaces);interfacePass("Water + spray back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back",timestamps?.backInterfaces);
+      interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front");
+      tracePhase?.({ id: "water-front-interface", label: "Water + spray front interface" });
+      interfacePass("Water + spray back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back");
+      tracePhase?.({ id: "water-back-interface", label: "Water + spray back interface" });
     } else if (!this.dryInterfaceClearsEncoded) {
       // A fluid-less scene draws no interface geometry, so the passes reduce to
       // their clears. Encoding those once leaves the composite's "no interface"
       // inputs bit-identical to the per-frame cleared state.
-      const clearPass=(label:string,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,timestampWrites?:TimestampRange)=>{encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"},...(timestampWrites?{timestampWrites}:{})}).end();};
-      clearPass("Dry-scene front interface clear",this.frontPosition,this.frontNormal,this.frontDepth,timestamps?.frontInterfaces);
-      clearPass("Dry-scene back interface clear",this.backPosition,this.backNormal,this.backDepth,timestamps?.backInterfaces);
+      const clearPass=(label:string,position:GPUTexture,normal:GPUTexture,depth:GPUTexture)=>{encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}}).end();};
+      clearPass("Dry-scene front interface clear",this.frontPosition,this.frontNormal,this.frontDepth);
+      tracePhase?.({ id: "water-front-interface", label: "Dry-scene front interface clear" });
+      clearPass("Dry-scene back interface clear",this.backPosition,this.backNormal,this.backDepth);
+      tracePhase?.({ id: "water-back-interface", label: "Dry-scene back interface clear" });
       this.dryInterfaceClearsEncoded = true;
     }
+    traceBoundary?.();
     const compositeBindGroup = sparseSceneResult ? this.compositeBindGroupFor(sparseSceneResult.sampledTargetView) : this.compositeBindGroup;
     if (!compositeBindGroup) return false;
-    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}],...(timestamps?{timestampWrites:timestamps.composite}:{})});composite.setPipeline(this.adaptiveOctree&&!this.globalFineLevelSet?this.adaptiveCompositePipeline:this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);composite.end();return { surfaceUpdated: updateSurface, causticsUpdated: updateCaustics, sprayRendered: false, interfacesEncoded };
+    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);composite.end();tracePhase?.({ id: "optical-composite", label: "Optical composite" });traceBoundary?.();return { surfaceUpdated: updateSurface };
   }
 
   destroy() {
-    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.globalCubeValues,this.globalCubeOffsets,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.causticTexture,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.globalFineRenderParams,this.fallbackSparseControl,this.adaptiveDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
+    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.globalCubeValues,this.globalCubeOffsets,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.causticTexture,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.globalFineRenderParams,this.fallbackSparseControl,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

@@ -1,6 +1,63 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import {
+  fineLevelSetFusedTransportPublicationWGSL,
+  WebGPUFineLevelSetTransport,
+} from "../lib/webgpu-octree-fine-levelset-transport";
+import {
+  makeFineLevelSetProductionFusedTransportWGSL,
+} from "../lib/webgpu-octree-fine-levelset-fused-transport";
+
+function wgslFunction(source: string, name: string): string {
+  const shader = source.replace(/\s+/g, "");
+  const start = shader.indexOf(`fn${name}(`);
+  assert.notEqual(start, -1, `missing WGSL function ${name}`);
+  const open = shader.indexOf("{", start);
+  assert.notEqual(open, -1, `missing WGSL body for ${name}`);
+  let depth = 0;
+  for (let cursor = open; cursor < shader.length; cursor += 1) {
+    if (shader[cursor] === "{") depth += 1;
+    else if (shader[cursor] === "}" && --depth === 0) return shader.slice(start, cursor + 1);
+  }
+  assert.fail(`unterminated WGSL function ${name}`);
+}
+
+test("fused air transport consumes the retained power-generation clock", () => {
+  const source = WebGPUFineLevelSetTransport.prototype.encode.toString().replace(/\s+/g, "");
+  assert.match(source,
+    /fineGeneration:this\.source\.generation/,
+    "air-side extrapolation must validate the retained Section 5 face band, not the successor fine generation");
+});
+
+test("production fused transport accepts only the physical input clock or its exact band predecessor", () => {
+  const shader = makeFineLevelSetProductionFusedTransportWGSL();
+  const clock = wgslFunction(shader, "fusedBandGenerationValid");
+  assert.match(clock,
+    /fine=sp\.fineGeneration&mask.*paramsFine=p\.generation&mask.*band=bandControl\(5u\)&mask.*power=p\.powerGeneration&mask.*predecessor=\(fine\+mask\)&mask.*returnparamsFine==fine&&\(band==fine\|\|\(power==fine&&band==predecessor\)\)/s,
+    "the packed production sampler must use the retained physical source clock and one exact predecessor");
+  assert.doesNotMatch(clock, /band[<>]=?|fine-band|predecessor-[1-9]/,
+    "two-old and arbitrary older face bands must remain rejected");
+
+  const sample = wgslFunction(shader, "sampleCompleteVelocity");
+  assert.match(sample,
+    /!fusedBandGenerationValid\(\)\|\|pointWord\(3u\)!=sp\.fineGeneration.*0x01000004u/s,
+    "a stale clock must retain the exact generation-failure diagnostic");
+  assert.match(sample,
+    /bandControl\(6u\)==VELOCITY_VALID&&fusedBandGenerationValid\(\).*pointWord\(3u\)==sp\.fineGeneration/s,
+    "extrapolated publication must recheck the bounded clock predicate");
+});
+
+test("transport reconstructs both old and new interface-page membership", () => {
+  const source = fineLevelSetFusedTransportPublicationWGSL.replace(/\s+/g, "");
+  assert.match(source, /pageOldInterface/,
+    "transport must not trust a carried page-interface bit after topology reuse");
+  assert.match(source, /interfaceBefore=\(previous&PAGE_INTERFACE\)!=0u\|\|pageOldInterface\[0\]!=0u/,
+    "the exact delta must retain pages crossed by the old fine field");
+  assert.match(source,
+    /membershipChanged=pageChanged\[0\]!=0u\|\|interfaceBefore\|\|interfaceNow/,
+    "interface and sample-phase changes must enter the same bounded dirty-halo transaction");
+});
 
 interface FineGenerationJSON {
   generation: number;
@@ -121,7 +178,7 @@ function assertCommittedTransport(label: string, generation: FineGenerationJSON,
     `${label} transport received an unavailable Stage-B or air-band velocity`);
   assert.ok((generation.transportProcessed ?? 0) > 0, `${label} transport processed no fine samples`);
   if (requireFaceBand) assert.ok((generation.transportExtrapolatedVelocity ?? 0) > 0,
-    `${label} did not consume the regular-face fast-marched positive-air band`);
+    `${label} did not consume the regular-face closest-point-extended positive-air band`);
   assert.equal(generation.transportCommitted, true, `${label} transport did not commit its published generation`);
 }
 
@@ -139,8 +196,8 @@ for (const factor of [4, 8] as const) {
       env: { ...process.env, FLUID_SCENE: "dam-break-ui", FLUID_METHOD: "octree",
         FLUID_TARGET_S: "0.008", FLUID_MAX_DT: "0.004", FLUID_EXPECT_EXACT_STEPS: "2",
         FLUID_ORACLE_STEPS: "2", FLUID_VOXEL_CELL_SIZE: "0.05", FLUID_EXPECT_GRID: "24,18,16",
-        FLUID_PRESSURE_CYCLES: "400", FLUID_STABILITY_ENVELOPE: "1", FLUID_CPU_ORACLE: "0",
-        FLUID_FIELD_STATS: "0", FLUID_DISABLE_TIMESTAMPS: "1",
+        FLUID_STABILITY_ENVELOPE: "1", FLUID_CPU_ORACLE: "0",
+        FLUID_FIELD_STATS: "0",
         FLUID_OCTREE_GLOBAL_FINE_FACTOR: String(factor),
         FLUID_GLOBAL_FINE_GENERATION_TRANSITION: "1", FLUID_CHECKPOINT_EVERY_S: "0.004",
         FLUID_RASTER_CHECKPOINTS: "1" },

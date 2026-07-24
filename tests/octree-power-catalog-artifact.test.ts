@@ -29,15 +29,48 @@ test("generated power catalog carries a verified format version and content hash
   const bytes = readFileSync(catalogUrl);
   const hash = createHash("sha256").update(bytes).digest("hex");
   const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  const header = new Uint32Array(data, 0, 24);
+  const header = new Uint32Array(data, 0, 26);
 
-  assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.generatorVersion, 4);
+  assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.generatorVersion, 5);
   assert.match(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.generatorHash, /^[0-9a-f]{64}$/);
   assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.binarySha256, hash);
   assert.equal(header[0], OCTREE_GENERATED_POWER_CATALOG_MAGIC);
   assert.equal(header[1], OCTREE_GENERATED_POWER_CATALOG_MANIFEST.version);
   assert.equal(header[7], bytes.byteLength);
+  assert.equal(header[20], 26);
+  assert.equal(header[25], 19);
   assert.doesNotThrow(() => decodeGeneratedOctreePowerCatalog(data));
+});
+
+test("generated Section 6.3 coefficient channels exactly match every canonical stencil", () => {
+  const bytes = readFileSync(catalogUrl);
+  const catalog = decodeGeneratedOctreePowerCatalog(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  const bits = (value: number) => new Uint32Array(Float32Array.of(value).buffer)[0];
+  assert.equal(catalog.coefficientData.length, catalog.entryVolumes.length * 19);
+  let wideEntries = 0;
+  for (let entry = 0; entry < catalog.entryVolumes.length; entry += 1) {
+    const firstFace = catalog.entryHeaders[entry * 2];
+    const faceCount = catalog.entryHeaders[entry * 2 + 1];
+    if (faceCount > 18) wideEntries += 1;
+    let diagonal = Math.fround(0);
+    for (let slot = 0; slot < faceCount; slot += 1) {
+      const face = (firstFace + slot) * 12;
+      const expected = Math.fround(Math.fround(catalog.faceData[face + 4])
+        * Math.fround(catalog.faceData[face + 11]));
+      diagonal = Math.fround(diagonal + expected);
+      if (slot < 18) {
+        assert.equal(bits(catalog.coefficientData[entry * 19 + 1 + slot]), bits(expected),
+          `entry ${entry}, canonical face slot ${slot}`);
+      }
+    }
+    assert.equal(bits(catalog.coefficientData[entry * 19]), bits(diagonal), `entry ${entry} diagonal`);
+    for (let slot = faceCount; slot < 18; slot += 1) {
+      assert.equal(bits(catalog.coefficientData[entry * 19 + 1 + slot]), bits(0),
+        `entry ${entry}, unused canonical face slot ${slot}`);
+    }
+  }
+  assert.ok(wideEntries > 0, "the exhaustive catalog must exercise semantic cut rows wider than eighteen slots");
 });
 
 function transformBoundaryMask(mask: number, transform: number): number {

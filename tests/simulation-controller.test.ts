@@ -163,7 +163,6 @@ test("loading the minimal power dam applies its reproducible Dawn solver profile
     originalMethod.setMethodId("octree");
     originalMethod.setQuality("ultra");
     originalMethod.setParam("octree", "maximumLeafSize", "16");
-    originalMethod.setParam("octree", "powerDiagramProjection", "off");
 
     simulation.loadPreset("minimal-power-dam-break");
 
@@ -173,9 +172,7 @@ test("loading the minimal power dam applies its reproducible Dawn solver profile
     assert.equal(method.quality, "balanced");
     assert.equal(values.maximumLeafSize, "2");
     assert.equal(values.interfaceRefinementBandCells, 3);
-    assert.equal(values.faceVelocityTransport, "on");
     assert.equal(values.globalFineLevelSetFactor, "4");
-    assert.equal(values.powerDiagramProjection, "authoritative");
   } finally {
     useMethodStore.setState({
       methodId: originalMethod.methodId,

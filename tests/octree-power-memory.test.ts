@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { planFineLevelSetBricks } from "../lib/octree-fine-levelset-bricks";
 import { planOctreeCoarsePhi } from "../lib/webgpu-octree-coarse-levelset";
-import { FINE_LEVELSET_REDISTANCE_ALLOCATED_BYTES } from "../lib/webgpu-octree-fine-levelset-redistance";
+import { fineLevelSetRedistanceAllocatedBytes } from "../lib/webgpu-octree-fine-levelset-redistance";
 import { planFineLevelSetGPUSummaries } from "../lib/webgpu-octree-fine-levelset-summary";
 import { fineLevelSetLeafSeedAllocatedBytes, FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES } from
   "../lib/webgpu-octree-fine-levelset-topology";
@@ -15,7 +15,6 @@ import { FINE_TO_COARSE_LEVELSET_ERROR, unpackFineToCoarseGPUControl } from
 import { OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS, WebGPUOctreePowerCoarseLevelSet,
   planOctreePowerCoarseLevelSet } from "../lib/webgpu-octree-power-coarse-levelset";
 import { planOctreePowerDescriptors } from "../lib/webgpu-octree-power-descriptor";
-import { planOctreePowerFaceTransfer } from "../lib/webgpu-octree-power-face-transfer";
 import { planOctreePowerFaces } from "../lib/webgpu-octree-power-faces";
 import { planOctreePowerGPUOperator } from "../lib/webgpu-octree-power-operator";
 import { planOctreePowerVelocityPrepass } from "../lib/webgpu-octree-power-velocity-prepass";
@@ -30,11 +29,11 @@ function fineArchitectureBytes(factor: 4 | 8, dimensions: readonly [number, numb
     finestCellWidth: 1, fineFactor: factor, brickResolution: 4, maximumResidentBricks: brickCapacity });
   const samples = brickCapacity * bricks.samplesPerBrick;
   const velocityChunk = Math.min(4096, samples);
-  const coarseDirectoryCapacity = planOctreePowerCoarseLevelSet(rowCapacity).sampleHashCapacity;
+  const coarseDirectoryCapacity = planOctreePowerCoarseLevelSet(rowCapacity).rowCapacity;
   const volumeA = planFineLevelSetGPUVolume(rowCapacity, samples, true, coarseDirectoryCapacity);
   const volumeB = planFineLevelSetGPUVolume(rowCapacity, samples, false, coarseDirectoryCapacity);
-  return bricks.allocatedBytes + 2 * 80 + fineLevelSetLeafSeedAllocatedBytes(brickCapacity, bricks.hashCapacity)
-    + 2 * FINE_LEVELSET_REDISTANCE_ALLOCATED_BYTES + 2 * FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES
+  return bricks.allocatedBytes + 2 * 80 + fineLevelSetLeafSeedAllocatedBytes(brickCapacity)
+    + 2 * fineLevelSetRedistanceAllocatedBytes(brickCapacity) + 2 * FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES
     + planOctreePowerVelocityPrepass(velocityChunk).allocatedBytes
     + 2 * planFineLevelSetGPUTransport(samples, velocityChunk).allocatedBytes
     + volumeA.allocatedBytes + volumeB.allocatedBytes
@@ -118,7 +117,7 @@ test("global fine capacity is an explicit surface-area times band plan", () => {
     "a band wider than a tiny domain may conservatively cover that whole domain");
 });
 
-test("fine summary hash reserves merged sparse ancestors instead of capacity at every level", () => {
+test("fine summary budgets exact two-generation deltas and immutable publications", () => {
   const fine = planFineLevelSetBricks({ domainOrigin: [0, 0, 0],
     finestCellDimensions: [60, 45, 40], finestCellWidth: 1,
     fineFactor: 4, brickResolution: 4, maximumResidentBricks: 50_625 });
@@ -126,12 +125,19 @@ test("fine summary hash reserves merged sparse ancestors instead of capacity at 
   assert.equal(summary.fineEntryCapacity, 66_510);
   assert.equal(summary.coarseEntryCapacity, 45_312);
   assert.equal(summary.entryCapacity, 111_822);
-  assert.equal(summary.hashCapacity, 262_144);
-  assert.equal(summary.allocatedBytes, 8_389_344);
-  const legacyHashCapacity = 1_048_576;
-  const legacyBytes = 64 + legacyHashCapacity * 32 + summary.parameterBytes;
-  assert.equal(legacyBytes - summary.allocatedBytes, 25_165_824,
-    "balanced factor-4 must save exactly 24 MiB of over-reserved hierarchy hash");
+  assert.equal(summary.recordCapacity,
+    2 * fine.maximumResidentBricks * summary.levelOffsets.length + 2 * 45_312);
+  assert.equal(summary.sortCapacity % 256, 0);
+  assert.equal(summary.sortCapacity & (summary.sortCapacity - 1), 0,
+    "the bounded cooperative summary transaction uses a power-of-two arena");
+  assert.equal(summary.directoryBytes, 64 + summary.entryCapacity * 32);
+  assert.equal(summary.indirectBytes, 12,
+    "fine-summary recurring work publishes only the exact recompute extent");
+  assert.equal(summary.allocatedBytes,
+    4 * summary.directoryBytes + 2 * summary.recordBytes
+      + summary.carryBytes + summary.workStateBytes + summary.indirectBytes + summary.parameterBytes);
+  assert.ok(summary.recordCapacity >= 2 * fine.maximumResidentBricks * summary.levelOffsets.length,
+    "a disjoint old/new generation must fit without a full-rebuild fallback");
 });
 
 test("parallel total-volume scratch is bounded by compact directory and resident fine samples", () => {
@@ -153,8 +159,7 @@ test("coarse and power allocations scale with compact row/face capacities", () =
   const compact = (rows: number, faces: number) => planOctreePowerDescriptors(rows).allocatedBytes
     + planOctreeCoarsePhi(rows).allocatedBytes + planOctreePowerCoarseLevelSet(rows).allocatedBytes
     + planOctreePowerVelocity(rows).allocatedBytes + planOctreePowerFaces(rows, faces).allocatedBytes
-    + planOctreePowerGPUOperator(rows, faces, rows * 18, 18).allocatedBytes
-    + planOctreePowerFaceTransfer(faces).allocatedBytes;
+    + planOctreePowerGPUOperator(rows, faces, rows * 18, 18).allocatedBytes;
   const low = compact(128, 512), highRows = compact(256, 512), highFaces = compact(128, 1024);
   assert.ok(highRows > low); assert.ok(highFaces > low);
   // None of these planners accepts finest-domain voxel count: compact rows,
@@ -177,17 +182,16 @@ test("coarse phi schedule bootstraps and fine-corrects at dt0 before recurring a
   const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const calls = [...source.matchAll(/this\.powerCoarseLevelSetSchedule\.encode\([\s\S]*?\n\s*}\);/g)]
     .map((match) => match[0]);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 2);
   assert.match(calls[0], /dt:\s*0,/); assert.doesNotMatch(calls[0], /dt:\s*dt_s,/);
   assert.match(calls[1], /dt:\s*coarseBootstrappedThisStep\s*\?\s*0\s*:\s*dt_s,/);
-  assert.match(calls[2], /dt:\s*dt_s,/);
 });
 
-test("coarse schedule parameters use one encoder-local arena across cold bootstrap and 64 substeps", () => {
+test("persistent coarse schedule uses one aligned parameter record per bootstrap/substep", () => {
   const plan = planOctreePowerCoarseLevelSet(32, 6);
-  assert.equal(plan.allocatedBytes, 119_832,
-    "allocation must include one aligned 65-invocation arena, valid-fine control, and empty correction buffers");
-  assert.equal(plan.parameterArenaBytes, 65 * 7 * 256);
+  assert.equal(plan.allocatedBytes, 22_132,
+    "allocation includes one-record-per-invocation arena, immutable coarse candidate, compact value/phase delta, and correction buffers");
+  assert.equal(plan.parameterArenaBytes, 65 * 256);
   const constructor = WebGPUOctreePowerCoarseLevelSet.toString().replace(/\s+/g, "");
   const encode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
   const retire = WebGPUOctreePowerCoarseLevelSet.prototype.retireSubmittedEncoder.toString().replace(/\s+/g, "");
@@ -195,14 +199,21 @@ test("coarse schedule parameters use one encoder-local arena across cold bootstr
   assert.doesNotMatch(constructor, /this\.params=Array\.from|this\.redistanceParams=Array\.from|activeEncoder/);
   assert.match(encode, /this\.encoderArenas\.get\(encoder\)/);
   assert.match(encode, /Powercoarsephiencoderparameterarena/);
-  assert.match(encode, /invocationBase=encoderInvocation\*\(this\.plan\.redistancePasses\+1\)\*OCTREE_POWER_COARSE_LEVELSET_PARAM_STRIDE/);
+  assert.match(encode,
+    /invocationBase=encoderInvocation\*OCTREE_POWER_COARSE_LEVELSET_PARAM_STRIDE/);
+  assert.doesNotMatch(encode, /this\.plan\.redistancePasses\+1|for\(letiteration=/,
+    "the persistent device loop deletes all host-authored per-sweep parameter records");
   assert.match(encode,
     /encoderInvocation>=OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS\)\{thrownewRangeError\("Powercoarselevel-setencoderexceedsits65parameter-arenainvocations"\)/,
     "one command encoder must fail before its aligned arena can wrap");
   assert.doesNotMatch(encode, /submittedandretired|activeEncoder/,
     "encoding a second command buffer must not depend on submission or retirement of the first");
   assert.match(retire, /encoderArenas\.delete\(encoder\)/);
-  assert.match(retire, /arena\.params\.destroy\(\)/);
+  assert.match(retire, /freeParameterArenas\.push\(arena\.params\)/,
+    "retirement returns the arena to the construction-sized pool instead of reallocating it");
+  assert.match(WebGPUOctreePowerCoarseLevelSet.prototype.destroy.toString().replace(/\s+/g, ""),
+    /liveParameterArenas\.forEach\(buffer=>buffer\.destroy\(\)\)/,
+    "destruction releases every pooled parameter arena exactly once");
 });
 
 test("fine-to-coarse capacity diagnostics decode fail-closed control words", () => {

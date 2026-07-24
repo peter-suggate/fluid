@@ -8,7 +8,7 @@
     "height_m": 0.9,
     "depth_m": 0.8,
     "fillFraction": 0.22,
-    "top": "open",
+    "top": "closed",
     "fluidWallMode": "no-slip"
   },
   "voxelDomain": {

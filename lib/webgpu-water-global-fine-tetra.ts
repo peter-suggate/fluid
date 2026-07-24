@@ -6,18 +6,22 @@ const TETS = [
 const value = (corner: number) => `v${corner}`;
 const countCall = (tetra: readonly number[]) => `countTet(${tetra.map(value).join(",")})`;
 
-export const globalFineClassifiedCountShader = /* wgsl */ `
-struct A{vertexCount:atomic<u32>,instanceCount:u32,firstVertex:u32,firstInstance:u32,activeCubeCount:atomic<u32>,vertexAllocator:atomic<u32>}
-@group(0)@binding(4)var<storage,read_write>args:A;@group(0)@binding(5)var<storage,read>cubes:array<vec2u>;@group(0)@binding(6)var<storage,read>values:array<vec4f>;@group(0)@binding(7)var<storage,read_write>offsets:array<u32>;
-fn countTet(a:f32,b:f32,c:f32,d:f32)->u32{let n=select(0u,1u,a>=.5)+select(0u,1u,b>=.5)+select(0u,1u,c>=.5)+select(0u,1u,d>=.5);if(n==0u||n==4u){return 0u;}return select(3u,6u,n==2u);}
-@compute @workgroup_size(64)fn countGlobalFineTriangles(@builtin(global_invocation_id)g:vec3u){let i=g.x;let count=min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),arrayLength(&offsets)));if(i>=count||i*2u+1u>=arrayLength(&values)){return;}let lo=values[i*2u];let hi=values[i*2u+1u];let v0=lo.x;let v1=lo.y;let v2=lo.z;let v3=lo.w;let v4=hi.x;let v5=hi.y;let v6=hi.z;let v7=hi.w;offsets[i]=${TETS.map(countCall).join("+")};}
-`;
-
 export const globalFineClassifiedScanShader = /* wgsl */ `
-struct V{position:vec4f,normal:vec4f}struct A{vertexCount:atomic<u32>,instanceCount:u32,firstVertex:u32,firstInstance:u32,activeCubeCount:atomic<u32>,vertexAllocator:atomic<u32>}
-@group(0)@binding(3)var<storage,read_write>out:array<V>;@group(0)@binding(4)var<storage,read_write>args:A;@group(0)@binding(5)var<storage,read>cubes:array<vec2u>;@group(0)@binding(6)var<storage,read>values:array<vec4f>;@group(0)@binding(7)var<storage,read_write>offsets:array<u32>;
+struct V{position:vec4f,normal:vec4f}struct A{vertexCount:atomic<u32>,instanceCount:u32,firstVertex:u32,firstInstance:u32,activeCubeCount:atomic<u32>,vertexAllocator:atomic<u32>,globalFineAuthorityLatch:atomic<u32>,meshPublicationGeneration:atomic<u32>}struct P{sample:vec4u,bricks:vec4u,table:vec4u,settings:vec4f,cell:vec4f,sizing:vec4f,physical:vec4f}
+@group(0)@binding(3)var<storage,read_write>out:array<V>;@group(0)@binding(4)var<storage,read_write>args:A;@group(0)@binding(5)var<storage,read>cubes:array<vec2u>;@group(0)@binding(6)var<storage,read>values:array<vec4f>;@group(0)@binding(7)var<storage,read_write>offsets:array<u32>;@group(0)@binding(10)var<uniform>p:P;
 fn countTet(a:f32,b:f32,c:f32,d:f32)->u32{let n=select(0u,1u,a>=.5)+select(0u,1u,b>=.5)+select(0u,1u,c>=.5)+select(0u,1u,d>=.5);if(n==0u||n==4u){return 0u;}return select(3u,6u,n==2u);}
-@compute @workgroup_size(1)fn scanGlobalFineTriangles(){if(atomicLoad(&args.vertexAllocator)==0xffffffffu){return;}let count=min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),min(arrayLength(&offsets)/6u,arrayLength(&values)/2u)));var total=0u;for(var i=0u;i<count;i+=1u){let lo=values[i*2u];let hi=values[i*2u+1u];let v0=lo.x;let v1=lo.y;let v2=lo.z;let v3=lo.w;let v4=hi.x;let v5=hi.y;let v6=hi.z;let v7=hi.w;${TETS.map((tetra,index)=>`offsets[i*6u+${index}u]=total;total+=${countCall(tetra)};`).join("")}}let capacity=arrayLength(&out)-arrayLength(&out)%3u;let fitted=min(total,capacity);atomicStore(&args.vertexCount,fitted);atomicStore(&args.vertexAllocator,total);}
+var<workgroup>laneOffsets:array<u32,256>;
+@compute @workgroup_size(256)fn scanGlobalFineTriangles(@builtin(local_invocation_index)lid:u32){
+  let published=atomicLoad(&args.vertexAllocator)!=0xffffffffu;
+  let count=select(0u,min(atomicLoad(&args.activeCubeCount),min(arrayLength(&cubes),min(arrayLength(&offsets)/6u,arrayLength(&values)/2u))),published);
+  let base=count/256u;let extra=count%256u;let begin=lid*base+min(lid,extra);
+  let end=begin+base+select(0u,1u,lid<extra);var localTotal=0u;
+  for(var i=begin;i<end;i+=1u){let lo=values[i*2u];let hi=values[i*2u+1u];let v0=lo.x;let v1=lo.y;let v2=lo.z;let v3=lo.w;let v4=hi.x;let v5=hi.y;let v6=hi.z;let v7=hi.w;localTotal+=${TETS.map(countCall).join("+")};}
+  laneOffsets[lid]=localTotal;workgroupBarrier();
+  if(lid==0u){var total=0u;for(var lane=0u;lane<256u;lane+=1u){let subtotal=laneOffsets[lane];laneOffsets[lane]=total;total+=subtotal;}if(published){let capacity=arrayLength(&out)-arrayLength(&out)%3u;atomicStore(&args.vertexCount,min(total,capacity));atomicStore(&args.vertexAllocator,total);atomicStore(&args.meshPublicationGeneration,p.table.w);}}
+  workgroupBarrier();var cursor=laneOffsets[lid];
+  for(var i=begin;i<end;i+=1u){let lo=values[i*2u];let hi=values[i*2u+1u];let v0=lo.x;let v1=lo.y;let v2=lo.z;let v3=lo.w;let v4=hi.x;let v5=hi.y;let v6=hi.z;let v7=hi.w;${TETS.map((tetra,index)=>`offsets[i*6u+${index}u]=cursor;cursor+=${countCall(tetra)};`).join("")}}
+}
 `;
 
 const cornerPosition = [
@@ -28,7 +32,7 @@ const cornerPosition = [
 function emitShader(tetraIndex: number): string {
   const [a, b, c, d] = TETS[tetraIndex];
   return /* wgsl */ `
-struct U{viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f}struct V{position:vec4f,normal:vec4f}struct A{vertexCount:atomic<u32>,instanceCount:u32,firstVertex:u32,firstInstance:u32,activeCubeCount:atomic<u32>,vertexAllocator:atomic<u32>}struct P{sample:vec4u,bricks:vec4u,table:vec4u,settings:vec4f,cell:vec4f,sizing:vec4f,physical:vec4f}
+struct U{viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f}struct V{position:vec4f,normal:vec4f}struct A{vertexCount:atomic<u32>,instanceCount:u32,firstVertex:u32,firstInstance:u32,activeCubeCount:atomic<u32>,vertexAllocator:atomic<u32>,globalFineAuthorityLatch:atomic<u32>,meshPublicationGeneration:atomic<u32>}struct P{sample:vec4u,bricks:vec4u,table:vec4u,settings:vec4f,cell:vec4f,sizing:vec4f,physical:vec4f}
 @group(0)@binding(0)var<uniform>u:U;@group(0)@binding(3)var<storage,read_write>out:array<V>;@group(0)@binding(4)var<storage,read_write>args:A;@group(0)@binding(5)var<storage,read>cubes:array<vec2u>;@group(0)@binding(6)var<storage,read>values:array<vec4f>;@group(0)@binding(7)var<storage,read_write>offsets:array<u32>;@group(0)@binding(10)var<uniform>p:P;
 fn world(q:vec3f)->vec3f{let x=clamp((q-.5)/vec3f(p.sample.xyz),vec3f(0),vec3f(1));return vec3f(-.5*u.container.x,0,-.5*u.container.z)+x*u.container.xyz;}fn edge(x:vec3f,y:vec3f,a:f32,b:f32)->vec3f{return mix(x,y,clamp((.5-a)/(b-a),.02,.98));}fn countTet(a:f32,b:f32,c:f32,d:f32)->u32{let n=select(0u,1u,a>=.5)+select(0u,1u,b>=.5)+select(0u,1u,c>=.5)+select(0u,1u,d>=.5);if(n==0u||n==4u){return 0u;}return select(3u,6u,n==2u);}
 fn tri(cursor:ptr<function,u32>,a:vec3f,b:vec3f,c:vec3f,n:vec3f){let first=*cursor;*cursor=first+3u;let limit=min(atomicLoad(&args.vertexCount),arrayLength(&out));if(first+3u>limit){return;}let x=V(vec4f(world(a),1),vec4f(n,0));let y=V(vec4f(world(b),1),vec4f(n,0));let z=V(vec4f(world(c),1),vec4f(n,0));out[first]=x;if(dot(cross(y.position.xyz-x.position.xyz,z.position.xyz-x.position.xyz),n)>=0.){out[first+1u]=y;out[first+2u]=z;}else{out[first+1u]=z;out[first+2u]=y;}}

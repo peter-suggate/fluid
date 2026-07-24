@@ -3,8 +3,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { octreeMethod } from "../lib/methods/octree";
 import type { GPUSolverInstance } from "../lib/methods/types";
-import type { GPUPhysicsTimings } from "../lib/webgpu-eulerian";
-import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import type { PaperPhaseId, PerformanceTrace } from "../lib/performance-trace";
+import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE
   ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
@@ -18,7 +18,7 @@ Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gp
 
 const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
 assert.ok(adapter, "WebGPU did not expose an adapter");
-const requestedFeatures = optionalFluidDeviceFeatures(adapter.features);
+const requestedFeatures: GPUFeatureName[] = [];
 if (adapter.features.has("timestamp-query")) requestedFeatures.push("timestamp-query");
 const device = await adapter.requestDevice({
   requiredFeatures: requestedFeatures,
@@ -64,17 +64,26 @@ const sampleSteps = Number(process.env.FLUID_BENCHMARK_SAMPLE_STEPS ?? 7);
 assert.ok(Number.isInteger(warmupSteps) && warmupSteps >= 1);
 assert.ok(Number.isInteger(sampleSteps) && sampleSteps >= 1);
 
-const timingFields = [
-  "layerConstruction_ms",
-  "advection_ms",
-  "pressure_ms",
-  "projection_ms",
-  "extrapolation_ms",
-  "surfaceUpdate_ms",
-  "fluidResidency_ms",
-  "sparsePublication_ms",
-  "total_ms",
-] as const satisfies readonly (keyof GPUPhysicsTimings)[];
+const phaseIds = [
+  "coarse-grid",
+  "power-topology",
+  "velocity-advection",
+  "pressure-system",
+  "pressure-solve",
+  "velocity-projection",
+  "velocity-extrapolation",
+  "fine-sdf-advection",
+  "fine-sdf-redistance",
+  "adaptive-publication",
+  "other",
+] as const satisfies readonly PaperPhaseId[];
+type TraceField = typeof phaseIds[number] | "total";
+const timingFields: readonly TraceField[] = [...phaseIds, "total"];
+
+const phaseDuration_ms = (trace: PerformanceTrace, field: TraceField) => field === "total"
+  ? trace.total_ms
+  : trace.phases.filter((phase) => phase.id === field)
+    .reduce((sum, phase) => sum + phase.duration_ms, 0);
 
 const median = (values: number[]) => {
   const sorted = [...values].sort((a, b) => a - b);
@@ -115,13 +124,13 @@ for (const [configIndex, maximumLeafSize] of leafSizes.entries()) {
     const wall_ms = performance.now() - startedAt;
     const info = await solver.readStats();
     if (step <= warmupSteps) continue;
-    assert.ok(info.gpuTimings, "timestamp query results were not published");
-    for (const field of timingFields) samples[field].push(info.gpuTimings[field]);
+    assert.ok(info.physicsTrace, "generic physics trace was not published");
+    for (const field of timingFields) samples[field].push(phaseDuration_ms(info.physicsTrace, field));
     rowSamples.push(info.quadtreeLiquidDofCount ?? info.activeSampleCount ?? 0);
     iterationSamples.push(info.quadtreePressureIterationsUsed ?? 0);
     wallSamples.push(wall_ms);
   }
-  const medians = Object.fromEntries(timingFields.map((field) => [field, rounded(median(samples[field]))]));
+  const medians = Object.fromEntries(timingFields.map((field) => [`${field}_ms`, rounded(median(samples[field]))]));
   results.push({
     ...(arm !== undefined ? { arm } : {}),
     maximumLeafSize,

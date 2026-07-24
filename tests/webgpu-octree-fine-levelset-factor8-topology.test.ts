@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { FineLevelSetBrickOracle, packFineLevelSetBrickKey,
   planFineLevelSetBricks } from "../lib/octree-fine-levelset-bricks";
 import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
+import { PassBroker } from "../lib/webgpu-pass-broker";
 import { planGlobalFineNarrowBandBrickCapacity, resolveGlobalFineBrickCapacity } from
   "../lib/webgpu-octree";
 import { WebGPUFineLevelSetRedistance } from "../lib/webgpu-octree-fine-levelset-redistance";
@@ -21,17 +22,28 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
     first: [34, 24, 18], last: [35, 25, 19], bricksPerFinestCell: 2, brickCount: 8,
   });
   assert.match(fineLevelSetLeafSeedWGSL,
-    /let first=origin\*params\.header\.x\/params\.header\.y;[\s\S]*last=min\(last\/params\.header\.y/);
+    /fn leafFirst\(leaf:FineSeedLeaf\)->vec3u\{return leafOrigin\(leaf\)\*params\.header\.x\/params\.header\.y;\}[\s\S]*return min\(high\/params\.header\.y/);
   assert.doesNotMatch(fineLevelSetLeafSeedWGSL, /@workgroup_size\(1\)/,
-    "fine seed classification, scan, and compaction must not retain a single-lane hot path");
+    "fine seed classification, sorting, and run compaction must not retain a single-lane hot path");
   assert.match(fineLevelSetLeafSeedWGSL,
-    /claimLeaf[\s\S]*atomicMin[\s\S]*classifyLeafBlock[\s\S]*scanLeafSeedBlocks[\s\S]*emitLeafBlock/,
-    "leaf rows use deterministic earliest-owner classification followed by reduce-then-scan compaction");
+    /classifySourceBlocks[\s\S]*classifyEndpointBlocks[\s\S]*scanSourceBlocks[\s\S]*emitSourceRecords[\s\S]*emitEndpointRecords[\s\S]*sortSeedRecords[\s\S]*classifySeedRuns[\s\S]*scanSeedRuns[\s\S]*emitSeedRuns/,
+    "fixed leaf records use one bounded cooperative ordering transaction followed by run-boundary compaction");
+  assert.doesNotMatch(fineLevelSetLeafSeedWGSL,
+    /histogramOwner|prefixOwner|scatterOwner|histogramKey|prefixKey|scatterKey|radixDigit|radixTotals/,
+    "the old owner/key radix schedule and helpers must stay deleted");
+  assert.match(fineLevelSetLeafSeedWGSL,
+    /fn endpointRecordCount[\s\S]*classifyEndpointBlocks[\s\S]*endpointRecordCount\(face\)[\s\S]*emitEndpointRecords[\s\S]*endpointRecordCount\(face\)/,
+    "power endpoints must reserve and emit only exact in-domain trilinear records");
+  assert.doesNotMatch(fineLevelSetLeafSeedWGSL,
+    /16u\*endpointCount\(\)|validateEndpointCapacity/,
+    "the deleted worst-case endpoint reservation must not reject a sparse exact endpoint set");
 
   const encode = WebGPUFineLevelSetRedistance.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(encode, /fineFactor!==4&&this\.source\.plan\.fineFactor!==8/);
-  assert.match(encode, /if\(method==="jfa-cpt"\)\{this\.encodeJFA\(encoder,bytes,options\.bandCells\);return\}/,
-    "factor-8 selects the same fixed-resident JFA-CPT path as factor-4");
+  assert.match(encode, /this\.encodeJFA\(broker,bytes,options\.bandCells\)/,
+    "factor-8 uses the same mandatory fixed-resident JFA-CPT path as factor-4");
+  assert.doesNotMatch(encode, /method===|fast-sweeping/,
+    "the retired redistance selector must stay deleted");
   assert.doesNotMatch(encode, /requestPipeline|finishActivationPipeline/,
     "redistance no longer interleaves topology allocation with distance propagation");
   assert.deepEqual(planFineLevelSetSummaryLeafLookup(plan.brickDimensions,
@@ -43,11 +55,11 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
     "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
   );
   assert.match(topology,
-    /fn initializeDesiredSamples[\s\S]*if\(any\(q>=params\.sampleDimensions\)\)\{atomicStore\(&targetA\[index\],0u\);targetB\[index\]=0u;return;\}/,
+    /fn initializeDesiredSamples[\s\S]*if\(any\(q>=params\.sampleDimensions\)\)\{targetA\[index\]=0u;targetB\[index\]=0u;\}/,
     "topology owns factor-8 B4 domain clipping before fixed-resident redistance begins");
   assert.match(topology,
-    /redistanceValid=arrayLength\(&redistanceControl\)>=4u&&redistanceControl\[0\]==0u&&redistanceControl\[2\]>0u&&redistanceControl\[3\]!=0u/,
-    "factor-8 topology remains provisional until the full redistance generation commits");
+    /redistanceValid=arrayLength\(&redistanceControl\)>=4u&&redistanceControl\[0\]==0u&&\(redistanceControl\[2\]>0u\|\|pageDelta\[2\]==0u\)&&redistanceControl\[3\]!=0u/,
+    "factor-8 topology remains provisional until redistance commits, while an exact empty dirty set needs no work");
 
   const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const construction = projection.match(/this\.globalFineVelocityPrepass = new WebGPUOctreePowerVelocityPrepass[\s\S]*?this\.globalFineTransportB = new WebGPUFineLevelSetTransport[\s\S]*?\);/)?.[0];
@@ -55,10 +67,10 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
   assert.doesNotMatch(construction, /fineFactor\s*===\s*4/,
     "factor-8 must construct the regular/transition face publication rather than bypassing it");
   assert.match(construction,
-    /new WebGPUOctreeFaceFastMarch\([\s\S]*?this\.powerFaces\.plan\.faceCapacity/,
-    "the factor-8 face marcher must retain the bounded generalized-face capacity");
+    /new WebGPUOctreeFaceClosestPointExtension\([\s\S]*?this\.powerFaces\.plan\.faceCapacity/,
+    "the factor-8 closest-point extension must retain the bounded generalized-face capacity");
   assert.match(projection,
-    /this\.globalFineFaceFastMarch\.encodePhase\([\s\S]*?powerFaces:\s*this\.powerFaces\.source/,
+    /this\.globalFineFaceExtension\.encodePhase\([\s\S]*?powerFaces:\s*this\.powerFaces\.source/,
     "the production factor-8 publication must receive the authoritative power-face source");
   assert.match(fineLevelSetLeafSeedWGSL,
     /endpointValid[\s\S]*powerFaceControl\[3\]==0u&&powerFaceControl\[8\]==0x80000000u/,
@@ -67,13 +79,13 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
     /let local=ordinal&7u;let lattice=\(position-params\.fineDomain\.xyz\)\/params\.fineDomain\.w-vec3f\(0\.5\)/,
     "both endpoint samples retain every trilinear lattice contributor");
   assert.match(fineLevelSetLeafSeedWGSL,
-    /finalizeLeafHash[\s\S]*claimPowerEndpointOwners/,
-    "interface affine seeds are inserted before support-only endpoint keys so duplicates cannot overwrite them");
+    /sortSeedRecords[\s\S]*fn runHasEndpoint[\s\S]*fn emitSeedRuns/,
+    "owner-first stable sorting preserves affine records before support-only endpoint duplicates");
   assert.match(fineLevelSetLeafSeedWGSL,
-    /if\(value<ENDPOINT_OWNER\|\|\(value&RECURRING_SUPPORT\)!=0u\)\{atomicOr\(&seeds\[seedValueBase\(\)\+slot\],RECURRING_SUPPORT\);\}/,
+    /seeds\[seedTagBase\(\)\+output\]=output\|select\(0u,RECURRING_SUPPORT,runHasEndpoint\(index,record\.x\)\)/,
     "an endpoint duplicate preserves the cold affine plane while marking the key for recurring residency");
   assert.match(fineLevelSetLeafSeedWGSL,
-    /atomicStore\(&seeds\[base\+4u\],bitcast<u32>\(3\.402823e38\)\)/,
+    /else\{seeds\[base\]=0u;[\s\S]*seeds\[base\+4u\]=bitcast<u32>\(3\.402823e38\)/,
     "support-only seeds use the strict-invalid sentinel and therefore initialize phi from the coarse level set");
   assert.match(topology,
     /var value=sampleCoarseOctreePhi\(position\);let seeded=externalSeedPhi[\s\S]*if\(finite\(seeded\)\)\{value=seeded;\}/,
@@ -81,6 +93,9 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
   assert.match(topology,
     /fn exactAnalyticSeedPhi[\s\S]*heightFraction=max\(0\.92,fill\)[\s\S]*length\(max\(q,vec3f\(0\.0\)\)\)\+min\(max\(q\.x,max\(q\.y,q\.z\)\),0\.0\)/,
     "the cold authored dam is sampled exactly on the independent fine SPGrid instead of flattened to a coarse leaf plane");
+  assert.match(topology,
+    /exposedMaximum=params\.domainOrigin\+vec3f[\s\S]*let q=point-exposedMaximum/,
+    "cold fine phi must not create interfaces on the three closed tank-contact planes");
   assert.match(topology,
     /fn externalSeedPhi[\s\S]*currentFinePopulated\(\)[\s\S]*exactAnalyticSeedPhi/,
     "exact analytic initialization is cold-start only; recurring generations preserve transported fine phi");
@@ -97,7 +112,8 @@ test("Dawn endpoint seeds cover exact factor-4/factor-8 trilinear support withou
   };
   Object.assign(globalThis, dawn.globals);
   const gpu = dawn.create(["backend=metal"]); const adapter = await gpu.requestAdapter(); assert.ok(adapter);
-  const device = await adapter.requestDevice();
+  assert.ok(adapter.limits.maxStorageBuffersPerShaderStage >= 10);
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } });
   const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   const upload = (data: ArrayBufferView<ArrayBuffer>) => {
     const buffer = device.createBuffer({ size: Math.max(4, data.byteLength), usage: storage });
@@ -110,7 +126,7 @@ test("Dawn endpoint seeds cover exact factor-4/factor-8 trilinear support withou
     const leafBytes = new ArrayBuffer(64); const leafWords = new Uint32Array(leafBytes);
     const leafFloats = new Float32Array(leafBytes);
     leafWords.set([1, 1, 1, 1, 2]); leafFloats[8] = -0.25; leafFloats[9] = 0.5;
-    const leaves = upload(new Uint8Array(leafBytes)); const rowCount = upload(new Uint32Array([1]));
+    const leaves = upload(new Uint8Array(leafBytes)); const rowCount = upload(new Uint32Array([1, 0]));
     const queryFloats = new Float32Array([1.5, 1.5, 1.5, 1, 2.5, 1.5, 1.5, 1]);
     const queries = upload(queryFloats); const controlWords = new Uint32Array(16);
     controlWords[1] = 1; controlWords[8] = 0x8000_0000; const control = upload(controlWords);
@@ -118,22 +134,18 @@ test("Dawn endpoint seeds cover exact factor-4/factor-8 trilinear support withou
     const readback = device.createBuffer({ size: seeds.buffer.size,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = device.createCommandEncoder();
-    seeds.encodeFromAllInterfaceLeaves(encoder, { buffer: leaves }, { buffer: rowCount },
+    const broker = new PassBroker(encoder);
+    seeds.encodeFromAllInterfaceLeaves(broker, { buffer: leaves }, { buffer: rowCount },
       { queries: { buffer: queries }, control: { buffer: control } });
-    encoder.copyBufferToBuffer(seeds.buffer, 0, readback, 0, seeds.buffer.size);
-    device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+    broker.copyBufferToBuffer(seeds.buffer, 0, readback, 0, seeds.buffer.size);
+    device.queue.submit([broker.finish()]); await device.queue.onSubmittedWorkDone();
     await readback.mapAsync(GPUMapMode.READ); const words = new Uint32Array(readback.getMappedRange());
-    const count = words[0], keys = Array.from(words.slice(2, 2 + count));
+    const count = words[0], keys = Array.from(words.slice(4, 4 + count));
     assert.equal(words[1], 0); assert.equal(count, factor === 4 ? 2 : 16);
-    const keyBase = 2 + plan.maximumResidentBricks;
-    const valueBase = keyBase + plan.hashCapacity;
-    const planeBase = valueBase + plan.hashCapacity;
-    for (const key of keys) {
-      let valueIndex = 0xffff_ffff;
-      for (let slot = 0; slot < plan.hashCapacity; slot += 1) {
-        if (words[keyBase + slot] === key) { valueIndex = words[valueBase + slot]; break; }
-      }
-      assert.notEqual(valueIndex, 0xffff_ffff);
+    const tagBase = 4 + plan.maximumResidentBricks;
+    const planeBase = tagBase + plan.maximumResidentBricks;
+    for (const [index, key] of keys.entries()) {
+      let valueIndex = words[tagBase + index];
       const recurringSupport = (valueIndex & 0x8000_0000) !== 0;
       valueIndex &= 0x7fff_ffff;
       const phi = new Float32Array(new Uint32Array([words[planeBase + valueIndex * 8 + 4]]).buffer)[0];
@@ -159,7 +171,8 @@ test("Dawn recurring endpoint support enters a published topology without recurr
   Object.assign(globalThis, dawn.globals);
   const gpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
   const adapter = await gpu.requestAdapter(); assert.ok(adapter);
-  const device = await adapter.requestDevice();
+  assert.ok(adapter.limits.maxStorageBuffersPerShaderStage >= 10);
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } });
   const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   const upload = (data: ArrayBufferView<ArrayBuffer>) => {
     const buffer = device.createBuffer({ size: Math.max(4, data.byteLength), usage: storage });
@@ -182,7 +195,7 @@ test("Dawn recurring endpoint support enters a published topology without recurr
     for (const [row, x] of [0, 4].entries()) {
       const base = row * 16; leafWords.set([x, 0, 0, 1, 2], base); leafFloats[base + 8] = -77;
     }
-    const leaves = upload(new Uint8Array(leafBytes)); const rowCount = upload(new Uint32Array([2]));
+    const leaves = upload(new Uint8Array(leafBytes)); const rowCount = upload(new Uint32Array([2, 0]));
     const queries = upload(new Float32Array([3.5, 0.5, 0.5, 1, 4.5, 0.5, 0.5, 1]));
     const controlWords = new Uint32Array(16); controlWords[1] = 1;
     if (validFaceControl) controlWords[8] = 0x8000_0000;
@@ -192,23 +205,24 @@ test("Dawn recurring endpoint support enters a published topology without recurr
     const topology = new WebGPUFineLevelSetTopology(device, current, next,
       "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x-2.5;}");
 
-    const controlBytes = 32; const metadataBytes = plan.maximumResidentBricks * 10 * 4;
+    const controlBytes = 36; const metadataBytes = plan.maximumResidentBricks * 10 * 4;
     const worklistBytes = (5 + plan.maximumResidentBricks) * 4;
     const phiBytes = plan.maximumResidentBricks * plan.samplesPerBrick * 4;
     const totalBytes = controlBytes + metadataBytes + worklistBytes + phiBytes;
     const readback = device.createBuffer({ size: totalBytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = device.createCommandEncoder();
-    const seedSource = seeds.encodeFromAllInterfaceLeaves(encoder, { buffer: leaves }, { buffer: rowCount },
+    const broker = new PassBroker(encoder);
+    const seedSource = seeds.encodeFromAllInterfaceLeaves(broker, { buffer: leaves }, { buffer: rowCount },
       { queries: { buffer: queries }, control: { buffer: faceControl } });
-    topology.encode(encoder, seedSource);
+    topology.encode(broker, seedSource);
     encoder.copyBufferToBuffer(topology.control, 0, readback, 0, controlBytes);
     encoder.copyBufferToBuffer(next.metadata, 0, readback, controlBytes, metadataBytes);
     encoder.copyBufferToBuffer(next.worklist, 0, readback, controlBytes + metadataBytes, worklistBytes);
     encoder.copyBufferToBuffer(next.phi, 0, readback, controlBytes + metadataBytes + worklistBytes, phiBytes);
     device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
     await readback.mapAsync(GPUMapMode.READ); const bytes = readback.getMappedRange().slice(0); readback.unmap();
-    const topologyControl = unpackFineLevelSetGPUTopologyControl(new Uint32Array(bytes, 0, 8));
+    const topologyControl = unpackFineLevelSetGPUTopologyControl(new Uint32Array(bytes, 0, 9));
     assert.equal(topologyControl.flags, 0); assert.equal(topologyControl.published, true);
     const metadata = new Uint32Array(bytes, controlBytes, metadataBytes / 4);
     const worklist = new Uint32Array(bytes, controlBytes + metadataBytes, worklistBytes / 4);
@@ -244,7 +258,8 @@ test("Dawn production-width factor-8 topology publishes the complete twelve-ring
   };
   Object.assign(globalThis, dawn.globals);
   const gpu = dawn.create(["backend=metal"]); const adapter = await gpu.requestAdapter(); assert.ok(adapter);
-  const device = await adapter.requestDevice();
+  assert.ok(adapter.limits.maxStorageBuffersPerShaderStage >= 10);
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } });
   const brickDimensions = [120, 90, 80] as const;
   const capacityPlan = planGlobalFineNarrowBandBrickCapacity(brickDimensions, 12);
   const maximumResidentBricks = resolveGlobalFineBrickCapacity(
@@ -259,7 +274,7 @@ test("Dawn production-width factor-8 topology publishes the complete twelve-ring
   const owner = new WebGPUFineLevelSetBricks(device, plan);
   const current = owner.initializeEmptyGPUGeneration(1); const next = owner.prepareGPUGeneration(2);
 
-  // One compact SurfaceLeaf per x/y column along the domain's largest planar
+  // One compact FineSeedLeaf per x/y column along the domain's largest planar
   // interface. This stresses the same maximum-area orientation used by the
   // production physical-band capacity planner.
   // At factor eight each leaf covers 2^3 globally keyed bricks; the topology
@@ -275,26 +290,28 @@ test("Dawn production-width factor-8 topology publishes the complete twelve-ring
   }
   const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   const leaves = device.createBuffer({ size: leafBytes.byteLength, usage: storage });
-  const rowCount = device.createBuffer({ size: 4, usage: storage });
+  const rowCount = device.createBuffer({ size: 8, usage: storage });
   device.queue.writeBuffer(leaves, 0, leafBytes); device.queue.writeBuffer(rowCount, 0, new Uint32Array([leafCount]));
   const seeds = new WebGPUFineLevelSetLeafSeeds(device, next);
   const topology = new WebGPUFineLevelSetTopology(device, current, next,
     "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.z-10.5;}");
-  const headerReadback = device.createBuffer({ size: 52, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const headerReadback = device.createBuffer({ size: 56, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
-  topology.encode(encoder, seeds.encodeFromAllInterfaceLeaves(encoder, { buffer: leaves }, { buffer: rowCount }), [], {
+  const broker = new PassBroker(encoder);
+  topology.encode(broker, seeds.encodeFromAllInterfaceLeaves(broker, { buffer: leaves }, { buffer: rowCount }), [], {
     maximumBacktraceFineCells: 8,
     interpolationSupportFineCells: 1,
     redistanceBandFineCells: 32,
     safetyBrickRings: 1,
   });
-  encoder.copyBufferToBuffer(topology.control, 0, headerReadback, 0, 32);
-  encoder.copyBufferToBuffer(next.worklist, 0, headerReadback, 32, 20);
+  encoder.copyBufferToBuffer(topology.control, 0, headerReadback, 0, 36);
+  encoder.copyBufferToBuffer(next.worklist, 0, headerReadback, 36, 20);
   device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
   await headerReadback.mapAsync(GPUMapMode.READ);
   const header = new Uint32Array(headerReadback.getMappedRange().slice(0)); headerReadback.unmap();
   const control = unpackFineLevelSetGPUTopologyControl(header);
-  assert.equal(control.flags, 0); assert.equal(control.published, true); assert.equal(control.rolledBack, false);
+  assert.equal(control.flags, 0, JSON.stringify({ header: [...header], control }));
+  assert.equal(control.published, true); assert.equal(control.rolledBack, false);
   assert.equal(control.interfaceBricks, 0,
     "interfaceBricks counts reused current-generation sign changes; this cold checkpoint is seeded externally");
   assert.equal(control.desiredBricks, 280_800,

@@ -21,7 +21,8 @@ function fineAuthority(): InitialGlobalFineAuthorityDiagnostics {
   publication.set([0, 0xffff_ffff, 21, 7, 7, 7, 2, 3, VALID]);
   return {
     seedCount: 8, seedError: 0, topologyFlags: 0,
-    interfaceBricks: 4, desiredBricks: 20, activatedBricks: 20, activeBricks: 20,
+    interfaceBricks: 4, interfaceSeedBricks: 4,
+    desiredBricks: 20, activatedBricks: 20, activeBricks: 20,
     published: true, rolledBack: false, downstreamFinalizeReason: 0,
     generation: 2, configuredFineGeneration: 2, scheduledFineGeneration: 2,
     coarseDirectoryState: OCTREE_POWER_COARSE_LEVELSET_VALID, coarseDirectoryGeneration: 2,
@@ -61,8 +62,8 @@ test("t=0 fine authority requires the complete paper Section 5 publication", () 
 
 test("t=0 rejection preserves named downstream evidence after device disposal", () => {
   const failed = fineAuthority();
-  const topologyControl = [16, 4, 20, 20, 0, 1, 0, 2 | 4];
-  const redistanceControlDetailed = [1, 900_000, 8, 0, 16, 123, 2, 40, 1, 20, 22, 9];
+  const topologyControl = [16, 4, 20, 20, 0, 1, 0, 2 | 4, 4];
+  const redistanceControlDetailed = [1, 900_000, 8, 0, 16, 123, 2, 40, 1];
   const outcome = initialGlobalFineAuthorityReadiness({
     ...failed,
     topologyFlags: 16,

@@ -25,7 +25,7 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
   scene.container.width_m = 1.2;
   scene.container.height_m = 0.9;
   scene.container.depth_m = 0.8;
-  scene.container.top = "open";
+  scene.container.top = "closed";
   scene.container.fluidWallMode = "free-slip";
   scene.fluid.surfaceTension_N_m = 0;
   // The paper reports 1/30 s. Conservative surface-density transport tolerates

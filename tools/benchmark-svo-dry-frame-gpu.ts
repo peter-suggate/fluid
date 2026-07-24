@@ -33,6 +33,7 @@ import zlib from "node:zlib";
 import { environmentIndex, type EnvironmentId } from "../lib/environments";
 import { cameraPosition } from "../lib/math";
 import { defaultCamera, type CameraState, type SceneDescription } from "../lib/model";
+import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
 import { boundingRadius, initializeRigidBodies } from "../lib/rigid-body";
 import { getScenePreset } from "../lib/scenes";
 import { buildSvoSceneGlass } from "../lib/svo-scene-glass";
@@ -40,7 +41,7 @@ import { buildSvoScenePrimitives } from "../lib/svo-scene-primitives";
 import { buildSvoSceneThickGlass } from "../lib/svo-scene-thick-glass";
 import { buildSvoTerrainMaterial } from "../lib/svo-terrain-material";
 import { MAX_TERRAIN_FEATURES, sceneHasTerrain, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT } from "../lib/terrain";
-import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
 import { WebGPUStaticSvoScene } from "../lib/webgpu-static-svo-scene";
 import {
@@ -257,7 +258,6 @@ const timestampsSupported = adapter.features.has("timestamp-query");
 const device = await adapter.requestDevice({
   requiredFeatures: [
     ...(timestampsSupported ? ["timestamp-query" as GPUFeatureName] : []),
-    ...optionalFluidDeviceFeatures(adapter.features),
   ],
   requiredLimits: requiredFluidDeviceLimits(adapter.limits),
 });
@@ -343,8 +343,8 @@ const target = device.createTexture({
   usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
 });
 
-function encodeFrame(encoder: GPUCommandEncoder, timestampWrites?: { querySet: GPUQuerySet; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number }): void {
-  const result = renderer.encode(encoder, target, timestampWrites);
+function encodeFrame(encoder: GPUCommandEncoder): void {
+  const result = renderer.encode(encoder, target);
   assert.ok(result && result.encoded, "production dry-scene encode declined the frame (raster fallback)");
 }
 
@@ -372,25 +372,28 @@ log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
 // in-flight passes overlap on Metal and would inflate each pass's span.
 // ---------------------------------------------------------------------------
 let timingMethod: string;
-const sharedQuerySet = timestampsSupported ? device.createQuerySet({ type: "timestamp", count: 2 }) : undefined;
-const sharedResolve = timestampsSupported ? device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : undefined;
-const sharedTiming = timestampsSupported ? device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) : undefined;
+let traceSampleId = 0;
 async function timeFrames(count: number, label: string): Promise<number[]> {
   const samples: number[] = [];
-  if (timestampsSupported) {
-    timingMethod = "gpu-timestamp-query-per-render-pass";
-    const querySet = sharedQuerySet!, resolve = sharedResolve!, timing = sharedTiming!;
+  if (GPUPerformanceTraceRecorder.supported(device)) {
+    timingMethod = "generic-performance-trace";
     for (let cycle = 0; cycle < count; cycle += 1) {
       const encoder = device.createCommandEncoder({ label: `${label} cycle ${cycle}` });
-      encodeFrame(encoder, { querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 });
-      encoder.resolveQuerySet(querySet, 0, 2, resolve, 0);
-      encoder.copyBufferToBuffer(resolve, 0, timing, 0, 16);
+      const traceRecorder = new GPUPerformanceTraceRecorder(
+        device,
+        ++traceSampleId,
+        "presentation",
+        `svo-dry-frame:${label}`,
+        [{ id: "dry-scene", label: "SVO traversal + dry shading" }],
+      );
+      traceRecorder.boundary(encoder, `${label} trace start`);
+      encodeFrame(encoder);
+      traceRecorder.boundary(encoder, `${label} trace end`);
+      traceRecorder.resolve(encoder);
       device.queue.submit([encoder.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      await timing.mapAsync(GPUMapMode.READ);
-      const stamps = new BigUint64Array(timing.getMappedRange());
-      samples.push(Number(stamps[1] - stamps[0]) / 1e6);
-      timing.unmap();
+      const trace = await traceRecorder.read();
+      assert.ok(trace, "generic GPU performance trace did not resolve");
+      samples.push(trace.total_ms);
     }
   } else {
     timingMethod = `submit-to-onSubmittedWorkDone-wall-time-over-${encodesPerSample}-encodes`;
@@ -406,7 +409,7 @@ async function timeFrames(count: number, label: string): Promise<number[]> {
   return samples;
 }
 
-timingMethod = timestampsSupported ? "gpu-timestamp-query-per-render-pass" : `submit-to-onSubmittedWorkDone-wall-time-over-${encodesPerSample}-encodes`;
+timingMethod = GPUPerformanceTraceRecorder.supported(device) ? "generic-performance-trace" : `submit-to-onSubmittedWorkDone-wall-time-over-${encodesPerSample}-encodes`;
 const samples = await timeFrames(cycles, "Bench");
 assert.equal(samples.length, cycles);
 assert.deepEqual(validationErrors, [], "GPU validation errors during timing");
@@ -792,9 +795,6 @@ log(`Baseline written to ${outPath}`);
 console.log(JSON.stringify(result, null, 2));
 
 renderer.destroy();
-sharedQuerySet?.destroy();
-sharedResolve?.destroy();
-sharedTiming?.destroy();
 target.destroy();
 uniformBuffer.destroy();
 bodyBuffer.destroy();

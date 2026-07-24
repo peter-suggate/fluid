@@ -151,9 +151,11 @@ test("least-squares reconstruction handles Cartesian and general normals", () =>
     normalVelocity: normal[0] * velocity[0] + normal[1] * velocity[1] + normal[2] * velocity[2],
     weight: index + 1,
   })));
-  assert.equal(result.usedFallback, false);
+  assert.equal(result.valid, true);
   result.velocity.forEach((value, axis) => close(value, velocity[axis]));
-  assert.deepEqual(reconstructPowerVelocity([{ normal: [1, 0, 0], normalVelocity: 3, weight: 1 }], [7, 8, 9]).velocity, [7, 8, 9]);
+  assert.deepEqual(reconstructPowerVelocity([
+    { normal: [1, 0, 0], normalVelocity: 3, weight: 1 },
+  ]), { velocity: [0, 0, 0], determinant: 0, valid: false });
 });
 
 test("power storage planner is compact-capacity-scaled", () => {

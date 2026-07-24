@@ -1,12 +1,12 @@
-import { FINE_LEVELSET_INVALID, FINE_LEVELSET_SAMPLE_FLAGS, type FineLevelSetBrickPlan } from "../lib/octree-fine-levelset-bricks";
+import { FINE_LEVELSET_SAMPLE_FLAGS, type FineLevelSetBrickPlan } from "../lib/octree-fine-levelset-bricks";
 import { OCTREE_COARSE_PHI_FLAG } from "../lib/octree-coarse-levelset";
 import { globalFineCoarseGenerationPairIsValid } from "../lib/octree-consumer-sampling";
 import { OCTREE_POWER_COARSE_LEVELSET_VALID } from "../lib/webgpu-octree-power-coarse-levelset";
+import { unpackFineLevelSetGPURedistanceControl } from "../lib/webgpu-octree-fine-levelset-redistance";
 
 export interface CompactOctreeFieldSnapshot {
   readonly plan: FineLevelSetBrickPlan;
   readonly generation: number;
-  readonly hash: Uint32Array;
   readonly metadata: Uint32Array;
   readonly flags: Uint32Array;
   readonly phi: Float32Array;
@@ -51,6 +51,15 @@ export interface CompactOctreeFieldEvidence {
   /** Complete raw downstream transaction controls, retained for rejection telemetry. */
   readonly transportControl?: readonly number[];
   readonly redistanceControl?: readonly number[];
+  readonly redistanceUnresolvedCells?: number;
+  readonly redistanceMaximumResidualScaled?: number;
+  readonly redistanceSeedCount?: number;
+  readonly redistanceCommitted?: boolean;
+  readonly redistanceFlags?: number;
+  readonly redistanceFirstError?: number;
+  readonly redistanceAcceptedCells?: number;
+  readonly redistanceInitialPages?: number;
+  readonly redistanceFinalPages?: number;
   readonly volumeControl?: readonly number[];
   readonly faceBandControl?: readonly number[];
   readonly faceBandTransitionControl?: readonly number[];
@@ -71,7 +80,7 @@ export interface CompactOctreePublicationHeaderEvidence {
   readonly worklistPublished?: number;
   readonly coarseState?: number;
   readonly coarseGeneration?: number;
-  readonly coarseHashCapacity?: number;
+  readonly coarseRowCount?: number;
   readonly coarseMaximumLeafSize?: number;
   readonly coarseControlFlags?: number;
   readonly coarseControlFirstErrorRow?: number;
@@ -102,6 +111,15 @@ export interface CompactOctreePublicationHeaderEvidence {
   /** Complete raw downstream transaction controls, retained for rejection telemetry. */
   readonly transportControl?: readonly number[];
   readonly redistanceControl?: readonly number[];
+  readonly redistanceUnresolvedCells?: number;
+  readonly redistanceMaximumResidualScaled?: number;
+  readonly redistanceSeedCount?: number;
+  readonly redistanceCommitted?: boolean;
+  readonly redistanceFlags?: number;
+  readonly redistanceFirstError?: number;
+  readonly redistanceAcceptedCells?: number;
+  readonly redistanceInitialPages?: number;
+  readonly redistanceFinalPages?: number;
   readonly volumeControl?: readonly number[];
   readonly faceBandControl?: readonly number[];
   readonly faceBandTransitionControl?: readonly number[];
@@ -141,6 +159,9 @@ export function compactOctreePublicationHeaderEvidence(
   const worklist = snapshot.worklist, coarse = snapshot.coarseDirectory;
   const coarseControl = snapshot.coarseControl, restriction = snapshot.fineRestrictionControl,
     topology = snapshot.topologyControl;
+  const redistance = snapshot.redistanceControl
+    ? unpackFineLevelSetGPURedistanceControl(snapshot.redistanceControl)
+    : undefined;
   return {
     fineGeneration: snapshot.generation,
     ...(worklist.length >= 5 ? {
@@ -148,15 +169,15 @@ export function compactOctreePublicationHeaderEvidence(
       worklistInitialized: worklist[3], worklistPublished: worklist[4],
     } : {}),
     ...(coarse.length >= 4 ? {
-      coarseState: coarse[0], coarseGeneration: coarse[1], coarseHashCapacity: coarse[2],
+      coarseState: coarse[0], coarseGeneration: coarse[1], coarseRowCount: coarse[2],
       coarseMaximumLeafSize: coarse[3],
     } : {}),
     ...(coarseControl && coarseControl.length >= 13 ? {
       coarseControlFlags: coarseControl[0], coarseControlFirstErrorRow: coarseControl[1],
       coarseControlRowCount: coarseControl[2], coarseControlAdvectedRows: coarseControl[3],
-      coarseControlCorrectedRows: coarseControl[8], coarseControlInterfaceRows: coarseControl[9],
-      coarseControlContributionCount: coarseControl[10],
-      coarseControlGeneration: coarseControl[11], coarseControlValid: coarseControl[12],
+      coarseControlCorrectedRows: coarseControl[7], coarseControlInterfaceRows: coarseControl[8],
+      coarseControlContributionCount: coarseControl[9],
+      coarseControlGeneration: coarseControl[10], coarseControlValid: coarseControl[11],
     } : {}),
     ...(topology && topology.length >= 8 ? {
       topologyFlags: topology[0], topologyInterfaceBricks: topology[1],
@@ -175,7 +196,18 @@ export function compactOctreePublicationHeaderEvidence(
       } : {}),
     } : {}),
     ...(snapshot.transportControl ? { transportControl: Array.from(snapshot.transportControl) } : {}),
-    ...(snapshot.redistanceControl ? { redistanceControl: Array.from(snapshot.redistanceControl) } : {}),
+    ...(snapshot.redistanceControl && redistance ? {
+      redistanceControl: Array.from(snapshot.redistanceControl),
+      redistanceUnresolvedCells: redistance.unresolvedCells,
+      redistanceMaximumResidualScaled: redistance.maximumResidualScaled,
+      redistanceSeedCount: redistance.seedCount,
+      redistanceCommitted: redistance.committed,
+      redistanceFlags: redistance.flags,
+      redistanceFirstError: redistance.firstError,
+      redistanceAcceptedCells: redistance.acceptedCells,
+      redistanceInitialPages: redistance.initialPages,
+      redistanceFinalPages: redistance.finalPages,
+    } : {}),
     ...(snapshot.volumeControl ? { volumeControl: Array.from(snapshot.volumeControl) } : {}),
     ...(snapshot.faceBandControl ? { faceBandControl: Array.from(snapshot.faceBandControl) } : {}),
     ...(snapshot.faceBandTransitionControl
@@ -194,15 +226,17 @@ export function compactOctreePublicationHeaderEvidence(
   };
 }
 
-function hashFineKey(key: number, capacity: number): number {
-  return (Math.imul((key ^ (key >>> 16)) >>> 0, 0x9e37_79b1) >>> 0) & (capacity - 1);
+function mortonPart10(value: number): number {
+  let x = value & 1023;
+  x = (x | (x << 16)) & 0x030000ff; x = (x | (x << 8)) & 0x0300f00f;
+  x = (x | (x << 4)) & 0x030c30c3; x = (x | (x << 2)) & 0x09249249;
+  return x >>> 0;
 }
 
-function hashCoarseSite(cell: number, size: number): number {
-  let value = (cell ^ Math.imul(size, 0x9e37_79b9)) >>> 0;
-  value = Math.imul(value ^ (value >>> 16), 0x7feb_352d) >>> 0;
-  value = Math.imul(value ^ (value >>> 15), 0x846c_a68b) >>> 0;
-  return (value ^ (value >>> 16)) >>> 0;
+function coarseMorton(cell: number, dimensions: readonly number[]): number {
+  const x = cell % dimensions[0], y = Math.floor(cell / dimensions[0]) % dimensions[1];
+  const z = Math.floor(cell / (dimensions[0] * dimensions[1]));
+  return (mortonPart10(x) | (mortonPart10(y) << 1) | (mortonPart10(z) << 2)) >>> 0;
 }
 
 function finiteFloat(words: Uint32Array, index: number): number {
@@ -210,9 +244,8 @@ function finiteFloat(words: Uint32Array, index: number): number {
 }
 
 function validateSnapshot(snapshot: CompactOctreeFieldSnapshot, dimensions: readonly [number, number, number]): void {
-  const { plan, generation, hash, metadata, flags, phi, worklist, coarseDirectory, coarseControl, topologyControl } = snapshot;
+  const { plan, generation, metadata, flags, phi, worklist, coarseDirectory, coarseControl, topologyControl } = snapshot;
   if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("Compact octree QA field requires a positive fine generation");
-  if (hash.length !== plan.hashCapacity * 2) throw new Error("Compact octree QA fine hash has the wrong length");
   if (metadata.length !== plan.maximumResidentBricks * 10) throw new Error("Compact octree QA fine metadata has the wrong length");
   const sampleCapacity = plan.maximumResidentBricks * plan.samplesPerBrick;
   if (flags.length !== sampleCapacity || phi.length !== sampleCapacity) throw new Error("Compact octree QA fine payload has the wrong length");
@@ -220,13 +253,35 @@ function validateSnapshot(snapshot: CompactOctreeFieldSnapshot, dimensions: read
   if (coarseControl !== undefined && coarseControl.length < 16) throw new Error("Compact octree QA coarse control has the wrong length");
   if (topologyControl !== undefined && topologyControl.length < 8) throw new Error("Compact octree QA topology control has the wrong length");
   if (coarseDirectory.length < 8) throw new Error("Compact octree QA coarse directory is missing its header");
-  const capacity = coarseDirectory[2];
+  const rowCount = coarseDirectory[2];
   const publication = compactOctreePublicationHeaderEvidence(snapshot);
   if (coarseDirectory[0] !== OCTREE_POWER_COARSE_LEVELSET_VALID) {
     throw new Error(`Compact octree QA coarse publication is not valid: ${JSON.stringify(publication)}`);
   }
   if (!globalFineCoarseGenerationPairIsValid(generation, coarseDirectory[1], topologyControl)) {
-    throw new Error(`Compact octree QA coarse/fine generation mismatch: ${JSON.stringify(publication)}`);
+    const malformedCoarseRows: unknown[] = [];
+    const requiredFlags = OCTREE_COARSE_PHI_FLAG.valid | OCTREE_COARSE_PHI_FLAG.finite;
+    for (let slot = 0; slot < Math.min(rowCount, (coarseDirectory.length - 8) / 8); slot += 1) {
+      const base = 8 + slot * 8;
+      const floats = new Float32Array(coarseDirectory.buffer,
+        coarseDirectory.byteOffset + base * 4, 8);
+      const phi = floats[2], minimumPhi = floats[3], maximumPhi = floats[4];
+      const flags = coarseDirectory[base + 5], row = coarseDirectory[base + 6];
+      const physicalVolume = floats[7];
+      if (coarseDirectory[base] === 0 || coarseDirectory[base + 1] === 0
+        || row >= rowCount || (flags & requiredFlags) !== requiredFlags
+        || !Number.isFinite(phi) || !Number.isFinite(minimumPhi)
+        || !Number.isFinite(maximumPhi) || minimumPhi > phi || phi > maximumPhi
+        || !Number.isFinite(physicalVolume) || physicalVolume <= 0) {
+        malformedCoarseRows.push({ slot, cellPlusOne: coarseDirectory[base],
+          size: coarseDirectory[base + 1], phi, minimumPhi, maximumPhi,
+          flags, row, physicalVolume });
+        if (malformedCoarseRows.length >= 8) break;
+      }
+    }
+    throw new Error(`Compact octree QA coarse/fine generation mismatch: ${JSON.stringify({
+      ...publication, malformedCoarseRows,
+    })}`);
   }
   const worklistClaimsPublication = worklist[0] !== 0 || worklist[1] !== 0
     || worklist[3] !== 0 || worklist[4] !== 0;
@@ -234,12 +289,37 @@ function validateSnapshot(snapshot: CompactOctreeFieldSnapshot, dimensions: read
     && (worklist[1] !== generation || worklist[3] !== 1 || worklist[4] !== 1)) {
     throw new Error(`Compact octree QA fine publication is not valid/current: ${JSON.stringify(publication)}`);
   }
-  if (capacity < 1 || (capacity & (capacity - 1)) !== 0 || coarseDirectory.length !== 8 + capacity * 8) {
-    throw new Error("Compact octree QA coarse directory has an invalid hash capacity");
+  const active = Math.min(worklist[0], plan.maximumResidentBricks);
+  if (5 + active > worklist.length) throw new Error("Compact octree QA fine directory exceeds its worklist");
+  let previousKey = -1;
+  for (let index = 0; index < active; index += 1) {
+    const physicalId = worklist[5 + index], base = physicalId * 10;
+    if (physicalId >= plan.maximumResidentBricks || base + 2 >= metadata.length
+      || metadata[base] !== physicalId || metadata[base + 2] !== generation
+      || metadata[base + 1] <= previousKey) {
+      throw new Error("Compact octree QA fine directory is malformed or not strictly key-sorted");
+    }
+    previousKey = metadata[base + 1];
+  }
+  const rowCapacity = (coarseDirectory.length - 8) / 8;
+  if (!Number.isSafeInteger(rowCapacity) || rowCount < 1 || rowCount > rowCapacity) {
+    throw new Error("Compact octree QA coarse directory has an invalid row count");
   }
   if (dimensions.some((value, axis) => value !== coarseDirectory[4 + axis]
     || value !== plan.finestCellDimensions[axis])) {
     throw new Error("Compact octree QA publication dimensions differ from the requested field");
+  }
+  let priorLevel = -1, priorMorton = -1;
+  for (let slot = 0; slot < rowCount; slot += 1) {
+    const base = 8 + slot * 8, cellPlusOne = coarseDirectory[base], size = coarseDirectory[base + 1];
+    if (cellPlusOne === 0 || size === 0 || (size & (size - 1)) !== 0) {
+      throw new Error("Compact octree QA coarse directory contains a malformed row");
+    }
+    const level = 31 - Math.clz32(size), morton = coarseMorton(cellPlusOne - 1, dimensions);
+    if (level < priorLevel || (level === priorLevel && morton <= priorMorton)) {
+      throw new Error("Compact octree QA coarse directory is not strictly sorted");
+    }
+    priorLevel = level; priorMorton = morton;
   }
   if (plan.domainOrigin.some((value) => value !== 0)) {
     throw new Error("Compact octree QA coarse fallback requires the production zero-origin frame");
@@ -256,35 +336,36 @@ function validateSnapshot(snapshot: CompactOctreeFieldSnapshot, dimensions: read
 }
 
 function finePhiAt(snapshot: CompactOctreeFieldSnapshot, position: readonly [number, number, number]): number | undefined {
-  const { plan, generation, hash, metadata, flags, phi } = snapshot;
+  const { plan, generation, metadata, flags, phi, worklist } = snapshot;
   const q = position.map((value, axis) => Math.floor((value - plan.domainOrigin[axis]) / plan.fineCellWidth));
   if (q.some((value, axis) => value < 0 || value >= plan.sampleDimensions[axis])) return undefined;
   const brick = q.map((value) => Math.floor(value / plan.brickResolution));
   const local = q.map((value, axis) => value - brick[axis] * plan.brickResolution);
   const key = brick[0] + plan.brickDimensions[0] * (brick[1] + plan.brickDimensions[1] * brick[2]);
-  let slot = hashFineKey(key, plan.hashCapacity);
-  for (let probe = 0; probe < Math.min(plan.maximumHashProbes, plan.hashCapacity); probe += 1) {
-    const stored = hash[slot * 2];
-    if (stored === FINE_LEVELSET_INVALID) return undefined;
-    if (stored === key) {
-      const physicalId = hash[slot * 2 + 1];
-      const base = physicalId * 10;
-      if (physicalId >= plan.maximumResidentBricks || metadata[base] !== physicalId
-        || metadata[base + 1] !== key || metadata[base + 2] !== generation) return undefined;
-      const localIndex = local[0] + plan.brickResolution * (local[1] + plan.brickResolution * local[2]);
-      const sampleIndex = physicalId * plan.samplesPerBrick + localIndex;
-      const value = phi[sampleIndex];
-      return (flags[sampleIndex] & FINE_LEVELSET_SAMPLE_FLAGS.valid) !== 0 && Number.isFinite(value)
-        ? value : undefined;
-    }
-    slot = (slot + 1) & (plan.hashCapacity - 1);
+  if (worklist.length < 5 || worklist[1] !== generation || worklist[3] !== 1 || worklist[4] !== 1) return undefined;
+  const count = Math.min(worklist[0], plan.maximumResidentBricks);
+  let low = 0, high = count;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2), physicalId = worklist[5 + middle];
+    const base = physicalId * 10;
+    if (physicalId >= plan.maximumResidentBricks || base + 2 >= metadata.length
+      || metadata[base] !== physicalId || metadata[base + 2] !== generation) return undefined;
+    if (metadata[base + 1] < key) low = middle + 1;
+    else high = middle;
   }
-  return undefined;
+  if (low >= count) return undefined;
+  const physicalId = worklist[5 + low], base = physicalId * 10;
+  if (metadata[base + 1] !== key) return undefined;
+  const localIndex = local[0] + plan.brickResolution * (local[1] + plan.brickResolution * local[2]);
+  const sampleIndex = physicalId * plan.samplesPerBrick + localIndex;
+  const value = phi[sampleIndex];
+  return (flags[sampleIndex] & FINE_LEVELSET_SAMPLE_FLAGS.valid) !== 0 && Number.isFinite(value)
+    ? value : undefined;
 }
 
 function coarsePhiAt(snapshot: CompactOctreeFieldSnapshot, position: readonly [number, number, number]): { phi: number; positiveAir: boolean } {
   const words = snapshot.coarseDirectory;
-  const capacity = words[2], maximumLeafSize = words[3];
+  const rowCount = words[2], maximumLeafSize = words[3];
   const dimensions = [words[4], words[5], words[6]] as const;
   const physicalCellSize = finiteFloat(words, 7);
   const q = position.map((value) => Math.floor(value / physicalCellSize));
@@ -294,18 +375,24 @@ function coarsePhiAt(snapshot: CompactOctreeFieldSnapshot, position: readonly [n
   for (let size = 1; size <= maximumLeafSize; size *= 2) {
     const origin = q.map((value) => Math.floor(value / size) * size);
     const cell = origin[0] + dimensions[0] * (origin[1] + dimensions[1] * origin[2]);
-    let slot = hashCoarseSite(cell, size) & (capacity - 1);
-    for (let probe = 0; probe < Math.min(32, capacity); probe += 1) {
-      const base = 8 + slot * 8, cellPlusOne = words[base];
-      if (cellPlusOne === 0) break;
-      if (cellPlusOne === cell + 1 && words[base + 1] === size) {
+    const wantedLevel = 31 - Math.clz32(size), wantedMorton = coarseMorton(cell, dimensions);
+    let low = 0, high = rowCount;
+    while (low < high) {
+      const middle = low + Math.floor((high - low) / 2), base = 8 + middle * 8;
+      const entryLevel = 31 - Math.clz32(words[base + 1]);
+      const entryMorton = coarseMorton(words[base] - 1, dimensions);
+      if (entryLevel < wantedLevel || (entryLevel === wantedLevel && entryMorton < wantedMorton)) low = middle + 1;
+      else high = middle;
+    }
+    if (low < rowCount) {
+      const base = 8 + low * 8;
+      if (words[base] === cell + 1 && words[base + 1] === size) {
         const value = finiteFloat(words, base + 2);
         if ((words[base + 5] & OCTREE_COARSE_PHI_FLAG.valid) === 0 || !Number.isFinite(value)) {
           throw new Error("Compact octree QA encountered an invalid containing coarse leaf");
         }
         return { phi: value, positiveAir: false };
       }
-      slot = (slot + 1) & (capacity - 1);
     }
   }
   // The production sampler defines an absent containing leaf as the compact

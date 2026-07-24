@@ -10,8 +10,6 @@ import {
 import { createGlobalFineLevelSetConsumerSource } from "../lib/octree-consumer-sampling";
 import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
 import {
-  extractionPrepareShader,
-  globalFineFallbackMaySeedRenderer,
   globalFineCoarseSurfaceDispatch,
   globalFineSurfaceDispatch,
   RasterWaterPipeline,
@@ -19,10 +17,37 @@ import {
   WATER_INTERFACE_CULL_MODES,
   waterSurfaceGeometrySource,
 } from "../lib/webgpu-water-pipeline";
-import { globalFineClassifiedCountShader, globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
-import { globalFineSurfaceClassificationShader } from "../lib/webgpu-water-global-fine-classify";
+import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
+import {
+  GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON,
+  globalFineSurfaceClassificationShader,
+} from "../lib/webgpu-water-global-fine-classify";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
+
+test("hard-clipped sharp corner caps admit only four half-cell zero crossings", () => {
+  assert.ok(GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON <= 1e-3);
+  const eligible = (inside: number, outside: number) =>
+    inside < 0 && outside > 0
+    && Math.abs(-inside / (outside - inside) - 0.5)
+      <= GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON;
+  assert.equal(eligible(-0.5, 0.5), true, "the exact t=0 box corner keeps its two caps");
+  assert.equal(Math.abs(-0.55 + 0.45) <= 0.15, true,
+    "the retired signed-value tolerance admitted a visibly off-center crossing");
+  assert.equal(eligible(-0.55, 0.45), false,
+    "an evolved 0.55-cell crossing must use the ordinary conforming tetra mesh");
+  const compact = globalFineSurfaceClassificationShader.replace(/\s+/g, "");
+  const helper = compact.slice(compact.indexOf("fnhalfCellCrossing("),
+    compact.indexOf("//Asigneddistancetoanaxis-alignedliquidbox"));
+  assert.match(helper,
+    /inside<0\.0&&outside>0\.0&&denominator>0\.0&&abs\(\(-inside\/denominator\)-0\.5\)<=SHARP_CORNER_HALF_CELL_EPSILON/);
+  const classifier = compact.slice(compact.indexOf("fnclassifySharpInteriorXZCorner("),
+    compact.indexOf("fnclassifyScaled(", compact.indexOf("fnclassifySharpInteriorXZCorner(")));
+  assert.equal(classifier.match(/halfCellCrossing\(/g)?.length, 4,
+    "bottom/top x/z crossings must all match the polygonizer's hardcoded half-cube clips");
+  assert.doesNotMatch(classifier, /letsymmetric=/,
+    "a broad signed-value tolerance must not admit visibly off-center moving corners");
+});
 
 function initializedBuffer(device: GPUDevice, data: ArrayBufferView, usage: GPUBufferUsageFlags): GPUBuffer {
   const buffer = device.createBuffer({ size: Math.max(4, data.byteLength), usage, mappedAtCreation: true });
@@ -178,8 +203,8 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
     /if\(xWall&&zWall\)\{classifyScaledForWall\(base,scale,1u\);classifyScaledForWall\(base,scale,2u\);return;\}/,
     "an x/z edge cube must publish two wall-owned caps rather than one diagonal scalar-field chamfer");
   assert.match(globalFineSurfaceClassificationShader,
-    /fn classifySharpInteriorXZCorner[\s\S]*extruded&&sharp&&symmetric[\s\S]*emitClassifiedCubeTagged\(base,scale,xlo,xhi[\s\S]*emitClassifiedCubeTagged\(base,scale,zlo,zhi/,
-    "an exact axis-aligned liquid corner must retain its two independently owned faces");
+    /fn classifySharpInteriorXZCorner[\s\S]*extruded&&sharp&&halfClipped[\s\S]*emitClassifiedCubeTagged\(base,scale,xlo,xhi[\s\S]*emitClassifiedCubeTagged\(base,scale,zlo,zhi/,
+    "an exact half-cell axis-aligned liquid corner must retain its two independently owned faces");
   assert.match(globalFineClassifiedEmitShader,
     /fn clipped[\s\S]*mode==1u[\s\S]*r\.z=base\.z\+scale\*select\(\.5\*q\.z,\.5\+\.5\*q\.z,high\)[\s\S]*mode==2u[\s\S]*r\.x=base\.x\+scale\*select\(\.5\*q\.x,\.5\+\.5\*q\.x,high\)/,
     "separate corner owners must terminate on their shared half-cell edge rather than occlude each other");
@@ -189,8 +214,15 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
   assert.match(globalFineSurfaceClassificationShader,
     /@builtin\(workgroup_id\)group:vec3u,@builtin\(local_invocation_index\)local:u32[\s\S]*for\(var index=local;index<total;index\+=256u\)/,
     "one workgroup must cooperatively subdivide a coarse leaf instead of risking a scalar scale-cubed loop");
-  assert.match(globalFineClassifiedScanShader, /vertexAllocator\)==0xffffffffu\)\{return;/,
+  assert.match(globalFineClassifiedScanShader, /let published=atomicLoad\(&args\.vertexAllocator\)!=0xffffffffu/,
     "an unpublished A/B generation must retain the previous surface draw count");
+  assert.match(globalFineClassifiedScanShader,
+    /if\(published\)\{[\s\S]*atomicStore\(&args\.vertexCount[\s\S]*atomicStore\(&args\.meshPublicationGeneration,p\.table\.w\)/,
+    "the GPU scan that publishes the mesh must commit its exact fine-source generation in the same branch");
+  assert.match(globalFineClassifiedScanShader,
+    /var<workgroup>laneOffsets:array<u32,256>[\s\S]*@workgroup_size\(256\)[\s\S]*let begin=lid\*base\+min\(lid,extra\)[\s\S]*workgroupBarrier\(\)[\s\S]*offsets\[i\*6u\+/,
+    "global-fine mesh allocation must use a deterministic cooperative prefix scan, not one invocation over every cube");
+  assert.doesNotMatch(globalFineClassifiedScanShader, /@workgroup_size\(1\)/);
   assert.match(globalFineSurfaceClassificationShader,
     /if\(lo>=0\.5\|\|hi<0\.5\)\{return;\}atomicStore\(&drawArgs\.globalFineAuthorityLatch,1u\);atomicMin\(&drawArgs\.vertexAllocator,0u\)/,
     "only an actual fine/coarse crossing may claim global renderer authority");
@@ -201,7 +233,13 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
     "a merely published compact directory must not replace a visible mesh with an empty one");
   assert.match(RasterWaterPipeline.prototype.encode.toString(),
     /writeBuffer\(this\.indirectBuffer,4,new Uint32Array\(\[1,0,0,0,(?:0xffff_ffff|4294967295),0\]\)\)/,
-    "global extraction must preserve the mesh while resetting firstInstance and the private authority latch");
+    "global extraction must preserve the mesh generation while resetting firstInstance and the private authority latch");
+  const completeDiagnostics = RasterWaterPipeline.prototype.completeSurfaceDiagnostics.toString();
+  assert.match(completeDiagnostics,
+    /meshPublicationGeneration=\(surfaceGeometrySource==="global-fine-coarse"\|\|surfaceGeometrySource==="retained-previous"\)&&words\[7\]!==(?:0xffffffff|4294967295)\?words\[7\]:(?:undefined|void 0)/,
+    "presentation diagnostics must report the generation committed by the GPU mesh publication");
+  assert.doesNotMatch(completeDiagnostics, /lastRasterMeshPublicationGeneration/,
+    "presentation diagnostics must not infer retained mesh authority from host attachment history");
   assert.doesNotMatch(RasterWaterPipeline.prototype.setGlobalFineLevelSet.toString(), /geometryKey\s*=\s*["']{2}/,
     "a same-shaped unpublished B source must not destroy A's retained geometry allocation");
   const initialize = RasterWaterPipeline.prototype.initialize.toString();
@@ -232,44 +270,81 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
     "production must not revive the legacy dense-texture global override");
   const encode = RasterWaterPipeline.prototype.encode.toString();
   const globalStart = encode.indexOf("if(globalFine){");
-  const adaptiveStart = encode.indexOf("else if(surfaceExtractionRepresentation", globalStart);
-  assert.ok(globalStart >= 0 && adaptiveStart > globalStart,
-    "the single global fine/coarse representation must take authority before leaf-page extraction");
-  assert.doesNotMatch(encode.slice(globalStart, adaptiveStart), /mapAsync|copyBufferToBuffer|textureLoad|volume/,
-    "global extraction must neither read back nor reach a dense/leaf-page compatibility field");
-  const fallbackRetentionGuards = surfaceExtractionShader.match(
-    /globalFineFallback&&\(atomicLoad\(&drawArgs\.globalFineAuthorityLatch\)!=0u\|\|atomicLoad\(&drawArgs\.vertexCount\)!=0u\)/g,
-  ) ?? [];
-  assert.equal(fallbackRetentionGuards.length, 2,
-    "both resident-page and nonresident-leaf fallback classifiers must retain a published mesh");
+  assert.ok(globalStart >= 0, "the single global fine/coarse representation must be encoded");
+  assert.doesNotMatch(`${encode}\n${surfaceExtractionShader}`,
+    /extractAdaptive|polygoniseAdaptive|adaptiveField|globalFineFallback|adaptiveArena|adaptiveLeaves/,
+    "the deleted row-attached page renderer must not remain as a fallback");
   assert.ok((globalFineSurfaceClassificationShader.match(/var<storage/g) ?? []).length <= 10,
     "the global classifier must remain within the conservative Metal storage-binding limit");
-  assert.match(extractionPrepareShader,
-    /if \(drawArgs\.globalFineAuthorityLatch != 0u\) \{[\s\S]*DispatchArgs\(0u, 1u, 1u\)/,
-    "global authority must also suppress the downstream adaptive polygonise dispatch");
-  assert.match(surfaceExtractionShader,
-    /atomicCompareExchangeWeak\(&drawArgs\.vertexAllocator,\s*SPARSE_INVALID,\s*0u\)/,
-    "adaptive fallback must transactionally replace, rather than append to, retained geometry");
-  assert.match(encode,
-    /extractAdaptiveLeafFallbackPipeline[\s\S]*extractAdaptiveFallbackPipeline[\s\S]*polygoniseAdaptivePipeline/,
-    "an empty global publication must fall through to the existing adaptive page renderer");
 });
 
-test("renderer diagnostics distinguish simulation publication from presentation fallback", () => {
-  assert.equal(waterSurfaceGeometrySource(true, 600, 1, 600), "global-fine-coarse");
-  assert.equal(waterSurfaceGeometrySource(true, 600, 0, 600), "adaptive-fallback");
-  assert.equal(waterSurfaceGeometrySource(true, 600, 0, 0xffff_ffff), "retained-previous");
-  assert.equal(waterSurfaceGeometrySource(true, 0, 0, 0xffff_ffff), "empty");
-  assert.equal(waterSurfaceGeometrySource(false, 600, 0, 600), "adaptive-octree");
-  assert.equal(waterSurfaceGeometrySource(false, 0, 0, 0), "empty");
+test("renderer diagnostics distinguish current global publication from retained geometry", () => {
+  assert.equal(waterSurfaceGeometrySource(true, 600, 1), "global-fine-coarse");
+  assert.equal(waterSurfaceGeometrySource(true, 600, 0), "retained-previous");
+  assert.equal(waterSurfaceGeometrySource(true, 0, 0), "empty");
+  assert.equal(waterSurfaceGeometrySource(false, 600, 0), "volume");
+  assert.equal(waterSurfaceGeometrySource(false, 0, 0), "empty");
 });
 
-test("adaptive presentation fallback seeds only a newly attached empty renderer", () => {
-  assert.equal(globalFineFallbackMaySeedRenderer(0, 0), true);
-  assert.equal(globalFineFallbackMaySeedRenderer(918, 0), false,
-    "an unpublished B generation must retain A instead of replacing it with adaptive geometry");
-  assert.equal(globalFineFallbackMaySeedRenderer(0, 1), false,
-    "a current global crossing must retain global ownership even before polygonisation publishes vertices");
+test("Dawn cooperatively scans global-fine cubes in stable cube/tetra order", {
+  skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU global-fine scan checks",
+}, async () => {
+  const dawn = await import(pathToFileURL(modulePath!).href) as {
+    create(options: string[]): GPU;
+    globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, dawn.globals);
+  const adapter = await dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]).requestAdapter();
+  assert.ok(adapter);
+  const device = await adapter.requestDevice();
+  const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
+  const args = initializedBuffer(device, new Uint32Array([99, 1, 0, 0, 2, 0, 0, 0]), storage);
+  const cubes = initializedBuffer(device, new Uint32Array(4), storage);
+  const values = initializedBuffer(device, new Float32Array([
+    1, 0, 0, 0, 0, 0, 0, 0,
+    0, 1, 1, 1, 1, 1, 1, 1,
+  ]), storage);
+  const offsets = initializedBuffer(device, new Uint32Array(12), storage);
+  const output = device.createBuffer({ size: 4096, usage: storage });
+  const parameterWords = new Uint32Array(28);
+  parameterWords[11] = 73;
+  const parameters = initializedBuffer(device, parameterWords, GPUBufferUsage.UNIFORM);
+  const module = device.createShaderModule({ code: globalFineClassifiedScanShader });
+  const pipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module, entryPoint: "scanGlobalFineTriangles" },
+  });
+  const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+    { binding: 3, resource: { buffer: output } },
+    { binding: 4, resource: { buffer: args } },
+    { binding: 5, resource: { buffer: cubes } },
+    { binding: 6, resource: { buffer: values } },
+    { binding: 7, resource: { buffer: offsets } },
+    { binding: 10, resource: { buffer: parameters } },
+  ] });
+  const readback = device.createBuffer({
+    size: 80,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, group);
+  pass.dispatchWorkgroups(1);
+  pass.end();
+  encoder.copyBufferToBuffer(args, 0, readback, 0, 32);
+  encoder.copyBufferToBuffer(offsets, 0, readback, 32, 48);
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  await readback.mapAsync(GPUMapMode.READ);
+  const words = new Uint32Array(readback.getMappedRange().slice(0));
+  readback.unmap();
+  assert.equal(words[0], 36);
+  assert.equal(words[5], 36);
+  assert.equal(words[7], 73, "scan publication must commit the exact GPU-visible source generation");
+  assert.deepEqual([...words.slice(8)], [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33]);
+  for (const buffer of [args, cubes, values, offsets, output, parameters, readback]) buffer.destroy();
+  device.destroy();
 });
 
 test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when B is unpublished", {
@@ -294,17 +369,12 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-    ...[7, 8, 9, 11, 12].map((binding) => ({
+    ...[8, 9, 11, 12].map((binding) => ({
       binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const },
     })),
     { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
     { binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     { binding: 17, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-  ] });
-  const prepareLayout = device.createBindGroupLayout({ entries: [
-    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-    { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
   ] });
   const polygonLayout = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
@@ -314,12 +384,6 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-  ] });
-  const countLayout = device.createBindGroupLayout({ entries: [
-    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-    { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-    { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-    { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
   ] });
   const extractModule = device.createShaderModule({ code: globalFineSurfaceClassificationShader });
   const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [extractLayout] });
@@ -332,14 +396,8 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     compute: { module: extractModule, entryPoint: "extractGlobalCoarseMain" },
   });
   const polygonPipelineLayout=device.createPipelineLayout({bindGroupLayouts:[polygonLayout]});
-  const count=device.createComputePipeline({layout:device.createPipelineLayout({bindGroupLayouts:[countLayout]}),compute:{module:device.createShaderModule({code:globalFineClassifiedCountShader}),entryPoint:"countGlobalFineTriangles"}});
   const scan=device.createComputePipeline({layout:polygonPipelineLayout,compute:{module:device.createShaderModule({code:globalFineClassifiedScanShader}),entryPoint:"scanGlobalFineTriangles"}});
-  const emit=globalFineClassifiedEmitShaders.map((code,index)=>device.createComputePipeline({layout:polygonPipelineLayout,compute:{module:device.createShaderModule({code}),entryPoint:`emitGlobalFineTetra${index}`}}));
   const emitAll=device.createComputePipeline({layout:polygonPipelineLayout,compute:{module:device.createShaderModule({code:globalFineClassifiedEmitShader}),entryPoint:"emitGlobalFineTetrahedra"}});
-  const prepare = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [prepareLayout] }),
-    compute: { module: device.createShaderModule({ code: extractionPrepareShader }), entryPoint: "prepareMain" },
-  });
 
   for (const factor of [4, 8] as const satisfies readonly FineLevelSetFactor[]) {
     const plan = planFineLevelSetBricks({
@@ -365,7 +423,7 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     const paramU32 = new Uint32Array(renderParamBytes), paramF32 = new Float32Array(renderParamBytes);
     paramU32.set([...source.sampleDimensions, source.brickResolution], 0);
     paramU32.set([...source.brickDimensions, source.samplesPerBrick], 4);
-    paramU32.set([source.hashCapacity, source.maximumHashProbes, source.pageCapacity, source.generation], 8);
+    paramU32.set([source.pageCapacity, 5, source.pageCapacity, source.generation], 8);
     paramF32.set([...source.domainOrigin, source.fineCellWidth], 12); paramF32[16] = source.fineFactor;
     const renderParams = initializedBuffer(device, new Uint8Array(renderParamBytes), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     const volume = device.createTexture({
@@ -380,16 +438,16 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     device.queue.writeTexture({ texture: volume }, coarsePhi,
       { bytesPerRow: 256, rowsPerImage: 2 }, [2, 2, 2]);
     const vertices = device.createBuffer({ size: 2 * 1024 * 1024, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    const drawArgs = initializedBuffer(device, new Uint32Array([0, 1, 0, 0, 0, 0, 0]),
+    const drawArgs = initializedBuffer(device, new Uint32Array([0, 1, 0, 0, 0, 0, 0, 0xffff_ffff]),
       GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
-    const cubes = device.createBuffer({ size: 256 * 1024, usage: GPUBufferUsage.STORAGE });
+    const cubes = device.createBuffer({ size: 256 * 1024,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     const cubeValues = device.createBuffer({ size: 1024 * 1024, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     const cubeOffsets = device.createBuffer({ size: 6 * 128 * 1024, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    const dispatch = device.createBuffer({ size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const extractGroup = device.createBindGroup({ layout: extractLayout, entries: [
       { binding: 0, resource: { buffer: uniform } },
       { binding: 4, resource: { buffer: drawArgs } },
-      { binding: 5, resource: { buffer: cubes } }, { binding: 7, resource: source.hash },
+      { binding: 5, resource: { buffer: cubes } },
       { binding: 6, resource: { buffer: cubeValues } },
       { binding: 8, resource: source.worklist },
       { binding: 9, resource: source.phi },
@@ -404,48 +462,53 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
       { binding: 6, resource: { buffer: cubeValues } }, { binding: 7, resource: { buffer: cubeOffsets } },
       { binding: 10, resource: { buffer: renderParams } },
     ] });
-    const countGroup = device.createBindGroup({ layout: countLayout, entries: [
-      { binding: 4, resource: { buffer: drawArgs } }, { binding: 5, resource: { buffer: cubes } },
-      { binding: 6, resource: { buffer: cubeValues } }, { binding: 7, resource: { buffer: cubeOffsets } },
-    ] });
-    const prepareGroup = device.createBindGroup({ layout: prepareLayout, entries: [
-      { binding: 0, resource: { buffer: drawArgs } }, { binding: 1, resource: { buffer: cubes } },
-      { binding: 2, resource: { buffer: dispatch } },
-    ] });
-    const cubeReadbackOffset = 120;
+    const cubeReadbackOffset = 128;
     const readback = device.createBuffer({ size: cubeReadbackOffset + cubes.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    device.pushErrorScope("validation");
     const encoder = device.createCommandEncoder();
     const classifyPass = encoder.beginComputePass();
     classifyPass.setPipeline(classify); classifyPass.setBindGroup(0, extractGroup);
     classifyPass.dispatchWorkgroups(...globalFineSurfaceDispatch(source.pageCapacity, source.samplesPerBrick));
     classifyPass.setPipeline(classifyCoarse);
     classifyPass.dispatchWorkgroups(...globalFineCoarseSurfaceDispatch(8));
-    classifyPass.setBindGroup(0,polygonGroup);classifyPass.setPipeline(scan);classifyPass.dispatchWorkgroups(1);
-    classifyPass.setPipeline(emitAll);classifyPass.dispatchWorkgroups(512,6);classifyPass.end();void emit;void prepare;void prepareGroup;
-    void countGroup;void count;
-    encoder.copyBufferToBuffer(drawArgs, 0, readback, 0, 24);
-    encoder.copyBufferToBuffer(vertices, 0, readback, 24, 96);
+    classifyPass.end();
+    const meshPass = encoder.beginComputePass();
+    meshPass.setBindGroup(0,polygonGroup);meshPass.setPipeline(scan);meshPass.dispatchWorkgroups(1);
+    meshPass.setPipeline(emitAll);meshPass.dispatchWorkgroups(512,6);meshPass.end();
+    encoder.copyBufferToBuffer(drawArgs, 0, readback, 0, 32);
+    encoder.copyBufferToBuffer(vertices, 0, readback, 32, 96);
     encoder.copyBufferToBuffer(cubes, 0, readback, cubeReadbackOffset, cubes.size);
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
+    const validationError = await device.popErrorScope();
+    assert.equal(validationError, null, validationError?.message);
     await readback.mapAsync(GPUMapMode.READ);
     const bytes = readback.getMappedRange().slice(0); readback.unmap();
-    const counters = new Uint32Array(bytes, 0, 6);
-    const firstTriangle = new Float32Array(bytes, 24, 24);
+    const counters = new Uint32Array(bytes, 0, 8);
+    const firstTriangle = new Float32Array(bytes, 32, 24);
     assert.ok(counters[4] > 0, `factor ${factor} must classify at least one fine surface cube`);
     assert.ok(counters[0] >= 3, `factor ${factor} must polygonise visible geometry`);
+    assert.equal(counters[7], source.generation,
+      `factor ${factor} scan must publish the exact GPU-visible fine generation`);
     assert.ok([...firstTriangle].every(Number.isFinite), `factor ${factor} geometry must remain finite`);
     assert.ok(firstTriangle[3] === 1 && firstTriangle[11] === 1 && firstTriangle[19] === 1,
       `factor ${factor} must emit three live positions`);
     assert.ok(counters[4] * 8 <= cubes.size, `factor ${factor} classified cube worklist must not clip`);
     const classified = new Uint32Array(bytes, cubeReadbackOffset, counters[4] * 2);
-    const bases = new Set<string>();
+    const baseOwnerCounts = new Map<string, number>();
     for (let cube = 0; cube < counters[4]; cube += 1) {
       const packedXZ = classified[cube * 2], packedYScale = classified[cube * 2 + 1];
-      assert.equal(packedYScale >>> 16, 1, `factor ${factor} coarse/fine cube ${cube} must use unit scale`);
-      const key = `${packedXZ & 0xffff},${packedYScale & 0xffff},${packedXZ >>> 16}`;
-      assert.equal(bases.has(key), false, `factor ${factor} cube base ${key} must have one canonical owner`);
-      bases.add(key);
+      const descriptor = packedYScale >>> 16;
+      assert.equal(descriptor & 0xff, 1, `factor ${factor} coarse/fine cube ${cube} must use unit scale`);
+      const x = packedXZ & 0xffff, y = packedYScale & 0xffff, z = packedXZ >>> 16;
+      const key = `${x},${y},${z}`;
+      const ownerCount = (baseOwnerCounts.get(key) ?? 0) + 1;
+      const dualWallCorner = (x === 0 || x === source.sampleDimensions[0])
+        && (z === 0 || z === source.sampleDimensions[2]);
+      const sharpCornerOwner = ((descriptor >> 8) & 3) !== 0;
+      assert.ok(ownerCount === 1 || (ownerCount === 2 && (dualWallCorner || sharpCornerOwner)),
+        `factor ${factor} cube base ${key} has ${ownerCount} owners outside an explicit x/z corner`);
+      baseOwnerCounts.set(key, ownerCount);
     }
     // Production A/B cutover: make the fine generation stale and invalidate
     // the compact coarse directory.  The classifier must leave generation A's
@@ -460,17 +523,19 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     invalidPass.dispatchWorkgroups(...globalFineSurfaceDispatch(source.pageCapacity, source.samplesPerBrick));
     invalidPass.setBindGroup(0, polygonGroup); invalidPass.setPipeline(scan); invalidPass.dispatchWorkgroups(1);
     invalidPass.setPipeline(emitAll); invalidPass.dispatchWorkgroups(512, 6); invalidPass.end();
-    const retainedReadback = device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    invalidEncoder.copyBufferToBuffer(drawArgs, 0, retainedReadback, 0, 24);
+    const retainedReadback = device.createBuffer({ size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    invalidEncoder.copyBufferToBuffer(drawArgs, 0, retainedReadback, 0, 32);
     device.queue.submit([invalidEncoder.finish()]); await device.queue.onSubmittedWorkDone();
     await retainedReadback.mapAsync(GPUMapMode.READ);
     const retained = new Uint32Array(retainedReadback.getMappedRange().slice(0)); retainedReadback.unmap();
     assert.equal(retained[0], counters[0], `factor ${factor} invalid B must retain generation A geometry`);
     assert.equal(retained[4], 0, `factor ${factor} invalid B must classify no stale cubes`);
     assert.equal(retained[5], 0xffff_ffff, `factor ${factor} invalid B must remain unpublished`);
+    assert.equal(retained[7], source.generation,
+      `factor ${factor} invalid B must retain generation A's GPU publication word`);
     retainedReadback.destroy();
     for (const buffer of [uniform, renderParams, vertices, drawArgs, cubes,
-      cubeValues, cubeOffsets, dispatch, readback, coarseDirectory, topologyControl]) buffer.destroy();
+      cubeValues, cubeOffsets, readback, coarseDirectory, topologyControl]) buffer.destroy();
     volume.destroy(); owner.destroy();
   }
   const scopedError=await device.popErrorScope();

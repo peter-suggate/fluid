@@ -1,7 +1,6 @@
 import { svoGBufferWGSL } from "./svo-gbuffer";
 import { svoTemporalHistoryWGSL } from "./svo-temporal-history";
 import type { SparseVoxelGBufferTextures } from "./webgpu-svo-gbuffer-targets";
-import type { TimestampRange } from "./webgpu-water-pipeline";
 
 export const SVO_TEMPORAL_ACCUMULATION_LAYOUT = Object.freeze({
   paramsBytes: 160,
@@ -213,7 +212,6 @@ export class SparseVoxelTemporalAccumulator {
     currentTarget: GPUTexture,
     gBuffer: SparseVoxelGBufferTextures,
     frame: SparseVoxelTemporalFrameState,
-    timestampWrites?: TimestampRange,
   ): SparseVoxelTemporalResolve | false {
     if (!this.pipeline || !this.layout || !this.history || currentTarget.width !== this.width || currentTarget.height !== this.height
       || gBuffer.width !== this.width || gBuffer.height !== this.height || frame.composition !== "dry-before-raster-water"
@@ -257,7 +255,7 @@ export class SparseVoxelTemporalAccumulator {
       { view: next.momentsView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
       { view: next.keyAView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
       { view: next.keyBView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
-    ], ...(timestampWrites ? { timestampWrites } : {}) });
+    ] });
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, bindGroup); pass.draw(3); pass.end();
     this.previousIndex = nextIndex; this.previousCamera = frame.camera; this.historyValid = true;
     return { resolvedTexture: next.color, resolvedView: next.colorView };

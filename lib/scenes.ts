@@ -24,14 +24,12 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   overrides: Object.freeze({
     maximumLeafSize: "2",
     interfaceRefinementBandCells: 3,
-    faceVelocityTransport: "on",
     globalFineLevelSetFactor: "4",
-    powerDiagramProjection: "authoritative",
   }),
 });
 
 /** The larger offset tank needs one additional interface-support cell to keep
- * its unit/two-cell Section 5 band free of acute grading. This mirrors the
+ * its unit/two-cell Section 5 band inside complete catalog support. This mirrors the
  * isolated Dawn oracle instead of inheriting the tiny 16-cubed profile. */
 export const LARGE_HYDROSTATIC_POWER_METHOD_PROFILE: MethodProfile = Object.freeze({
   ...POWER_VALIDATION_METHOD_PROFILE,
@@ -60,7 +58,7 @@ export function createTinyHydrostaticScene(): SceneDescription {
     height_m: 0.8,
     depth_m: 0.8,
     fillFraction: 0.75,
-    top: "open",
+    top: "closed",
     fluidWallMode: "free-slip",
   };
   scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
@@ -90,7 +88,7 @@ export function createLargeHydrostaticScene(): SceneDescription {
     depth_m: 0.8,
     // 61/96 of 1.2 m = 0.7625 m = 15.25 cells at h = 0.05 m.
     fillFraction: 61 / 96,
-    top: "open",
+    top: "closed",
     fluidWallMode: "free-slip",
   };
   scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
@@ -122,7 +120,7 @@ export function createMinimalPowerDamBreakScene(): SceneDescription {
     height_m: 0.8,
     depth_m: 0.8,
     fillFraction: 23 / 64,
-    top: "open",
+    top: "closed",
     fluidWallMode: "free-slip",
   };
   scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
@@ -147,7 +145,7 @@ export function createBrickQuadDamBreakScene(): SceneDescription {
   const scene = cloneScene(defaultScene);
   scene.sceneId = "brick-quad-dam-break";
   scene.rigidBodies = [];
-  scene.container = { ...scene.container, width_m: 0.8, height_m: 0.4, depth_m: 0.8, fillFraction: 0.25, top: "open", fluidWallMode: "no-slip" };
+  scene.container = { ...scene.container, width_m: 0.8, height_m: 0.4, depth_m: 0.8, fillFraction: 0.25, top: "closed", fluidWallMode: "no-slip" };
   scene.fluid.initialCondition = "dam-break";
   scene.fluid.initialBrickSeeds_m = [{ ...BRICK_QUAD_DAM_SEED_M }];
   delete scene.fluid.inflow;
@@ -172,7 +170,7 @@ export function createOceanSeicheScene(): SceneDescription {
   const scene = cloneScene(defaultScene);
   scene.sceneId = "ocean-seiche";
   scene.rigidBodies = [];
-  scene.container = { ...scene.container, width_m: 8.0, height_m: 2.4, depth_m: 2.0, fillFraction: 0.75, top: "open", fluidWallMode: "no-slip" };
+  scene.container = { ...scene.container, width_m: 8.0, height_m: 2.4, depth_m: 2.0, fillFraction: 0.75, top: "closed", fluidWallMode: "no-slip" };
   scene.fluid.initialCondition = "tank-fill";
   // A long gravity wave has no meaningful capillary scale; keep the scene in
   // the same physical scope as the deep-water A/B preset.

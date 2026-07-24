@@ -66,3 +66,17 @@ test("2017 pressure comments do not attribute ICCG or the QA tolerance to the pa
   assert.doesNotMatch(pressure, /Paper-result acceptance|ICCG\/PCG solves use a 1e-4/);
   assert.match(pressure, /2017 paper reports iteration counts, not this tolerance/);
 });
+
+test("power-stage audit exposes only native seed and acceleration diagnostics", () => {
+  const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+  assert.match(smoke, /postAccelerationPowerFaceMaximum:\s*floatBits\(seed\[8\]\)/);
+  assert.match(smoke, /initialSeedFlags:\s*seed\[12\]/);
+  assert.match(smoke, /initialSeedFirstError:\s*seed\[13\]/);
+  assert.match(smoke, /initialSeededCount:\s*seed\[14\]/);
+  assert.match(smoke, /initialSeedValid:\s*seed\[15\]/);
+  assert.match(smoke, /postAccelerationFlags:\s*seed\[0\]/);
+  assert.match(smoke, /postAccelerationValid:\s*seed\[6\]/);
+  assert.doesNotMatch(smoke,
+    /axisRowInputMaximum|axisToPowerSeedMaximum|projectedRowMaximum|powerToAxisOutputMaximum|reverseFlags|reverseValid/,
+    "padding and deleted Cartesian transfer stages must not reappear as public diagnostics");
+});

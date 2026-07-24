@@ -132,8 +132,8 @@ test("production dry pass writes three MRTs plus reversed-Z without changing loc
   const reusableView = { label: "reusable dry HDR" } as GPUTextureView;
   const reusableTexture = { width: 64, height: 48, createView: () => reusableView } as GPUTexture;
   const passesBeforeReuse = passCount;
-  const firstReusable = renderer.encode(encoder, reusableTexture, undefined, undefined, undefined, "fixed-camera-and-bodies");
-  const secondReusable = renderer.encode(encoder, reusableTexture, undefined, undefined, undefined, "fixed-camera-and-bodies");
+  const firstReusable = renderer.encode(encoder, reusableTexture, undefined, "fixed-camera-and-bodies");
+  const secondReusable = renderer.encode(encoder, reusableTexture, undefined, "fixed-camera-and-bodies");
   assert.ok(firstReusable && secondReusable);
   assert.equal(passCount, passesBeforeReuse + 1, "an unchanged non-temporal dry frame is rendered once and then reused");
   assert.equal(secondReusable.sampledTargetView, firstReusable.sampledTargetView);
@@ -145,9 +145,9 @@ test("production dry pass writes three MRTs plus reversed-Z without changing loc
     composition: "dry-before-raster-water",
   };
   const passesBeforeTemporalReuse = passCount;
-  const firstTemporal = renderer.encode(encoder, reusableTexture, undefined, temporalFrame, undefined, "fixed-temporal-frame");
-  const secondTemporal = renderer.encode(encoder, reusableTexture, undefined, temporalFrame, undefined, "fixed-temporal-frame");
-  const reusedTemporal = renderer.encode(encoder, reusableTexture, undefined, temporalFrame, undefined, "fixed-temporal-frame");
+  const firstTemporal = renderer.encode(encoder, reusableTexture, temporalFrame, "fixed-temporal-frame");
+  const secondTemporal = renderer.encode(encoder, reusableTexture, temporalFrame, "fixed-temporal-frame");
+  const reusedTemporal = renderer.encode(encoder, reusableTexture, temporalFrame, "fixed-temporal-frame");
   assert.ok(firstTemporal && secondTemporal && reusedTemporal);
   assert.equal(passCount, passesBeforeTemporalReuse + 4,
     "both checkerboard phases render and resolve before an unchanged temporal frame is reused");

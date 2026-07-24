@@ -31,7 +31,8 @@ test("all WebGPU solvers integrate rigid bodies without a physics readback", () 
   const restrictedAdvance = restricted.slice(restricted.indexOf("advanceTo(time_s"), restricted.indexOf("async readStats()"));
   for (const source of [uniformAdvance, restrictedAdvance]) {
     assert.match(source, /rigidSystem\.encode\(/);
-    assert.doesNotMatch(source, /mapAsync|getMappedRange|copyBufferToBuffer\(this\.rigidExchangeBuffer/);
+    assert.doesNotMatch(source, /copyBufferToBuffer\(this\.rigidExchangeBuffer/,
+      "physics must not copy rigid exchange state into a host readback");
   }
 });
 

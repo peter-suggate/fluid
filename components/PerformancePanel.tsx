@@ -1,472 +1,442 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { getMethod } from "@/lib/methods";
-import { measuredGPUTime_ms, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
+import { useMemo, useState } from "react";
+import {
+  averagePerformanceTraces,
+  performanceTraceAccounting,
+  performanceTraceIsExact,
+  type PaperPhaseId,
+  type PerformanceTrace,
+} from "@/lib/performance-trace";
+import { isOctreeTechniqueOverlayMode } from "@/lib/octree-technique-debug";
+import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore } from "@/lib/stores/method-store";
-import { useRuntimeStore } from "@/lib/stores/runtime-store";
-import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
-import { advanceWallBreakdown, completionFrameAccounting, measuredGPUUtilization, performanceSchedule } from "@/lib/performance-scheduling";
-import type { CSSProperties } from "react";
-import { averagePerformanceSnapshots, rollingPerformanceSnapshots } from "@/lib/performance-averaging";
-import { adaptiveTopologyPerformanceStages, physicsPerformanceStages, type PerformanceStage } from "@/lib/performance-stage-model";
-import { PRESENTATION_FPS } from "@/lib/frame-pacing";
-import { captureTargetForStage, gpuStageCapture, type GPUStageCaptureArtifact, type GPUStageCaptureLane } from "@/lib/gpu-stage-capture";
+import type { GridOverlayConfig, GridOverlayMode } from "@/lib/webgpu-renderer";
 
-const formatMs = (value: number, available = true, active = true) => !available ? "—" : !active ? "idle" : value > 0 ? `${value.toFixed(value < 1 ? 3 : 2)} ms` : "< timer resolution";
-const FINE_SURFACE_COMPONENT_KEYS = new Set(["fine-transport", "fine-topology", "fine-redistance"]);
+const formatMs = (value: number) => value < 1 ? `${value.toFixed(3)} ms` : `${value.toFixed(2)} ms`;
+const PHASE_LAYOUT: Readonly<Record<PerformanceTrace["lane"], readonly [PaperPhaseId, string][]>> = {
+  "main-thread": [
+    ["frame-control", "Frame control + simulation admission"],
+    ["scene-upload", "Scene and field uploads"],
+    ["command-encoding", "Presentation command encoding"],
+    ["other", "Post-submit scheduling + other"],
+  ],
+  physics: [
+    ["coarse-grid", "Adaptive coarse-grid topology"],
+    ["power-topology", "Power topology + physical faces"],
+    ["velocity-advection", "Velocity transport + body forces"],
+    ["pressure-system", "Pressure operator + RHS assembly"],
+    ["pressure-solve", "Section 4.3 pressure solve"],
+    ["velocity-projection", "Pressure projection"],
+    ["velocity-extrapolation", "Velocity extrapolation"],
+    ["fine-sdf-advection", "Fine SDF advection"],
+    ["fine-sdf-redistance", "Fine SDF redistance"],
+    ["adaptive-publication", "Adaptive publication"],
+    ["other", "Other measured GPU work"],
+  ],
+  presentation: [
+    ["surface-extraction", "Surface extraction + caustics"],
+    ["dry-scene", "Dry scene + temporal lighting"],
+    ["water-interfaces", "Water interfaces"],
+    ["optical-composite", "Optical composite"],
+    ["inspection-overlay", "Inspection overlays"],
+    ["present", "Final upscale + present"],
+    ["other", "Other measured GPU work"],
+  ],
+};
 
-function CapturePreview({ artifact }: { artifact: GPUStageCaptureArtifact }) {
-  const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const context = ref.current?.getContext("2d");
-    if (!context) return;
-    const image = context.createImageData(artifact.previewWidth, artifact.previewHeight);
-    image.data.set(artifact.previewRgba);
-    context.putImageData(image, 0, 0);
-  }, [artifact]);
-  return <canvas ref={ref} width={artifact.previewWidth} height={artifact.previewHeight} aria-label={`${artifact.label} ${artifact.selectorLabel} preview`} />;
+const SVO_CONE_PRESENTATION_PHASE_LAYOUT: readonly [PaperPhaseId, string][] = [
+  ["surface-extraction", "Water surface extraction"],
+  ["water-caustics", "Water caustic map"],
+  ["svo-cone-lighting", "SVO cone-lighting prepass"],
+  ["svo-primary", "SVO traversal + dry shading"],
+  ["svo-temporal", "SVO temporal resolve"],
+  ["dry-scene", "Raster dry-scene fallback"],
+  ["water-front-interface", "Water + spray front interface"],
+  ["water-back-interface", "Water + spray back interface"],
+  ["optical-composite", "Optical composite"],
+  ["inspection-overlay", "Inspection overlays"],
+  ["present", "Final upscale + present"],
+  ["other", "Other measured GPU work"],
+] as const;
+
+const isSvoConePresentationTrace = (trace: PerformanceTrace) =>
+  trace.lane === "presentation" && trace.context.includes(":lighting-cone:smooth:svo:");
+
+const stabilizePhaseLayout = (trace: PerformanceTrace | undefined) => {
+  if (!trace) return undefined;
+  // Physics producers already emit stable, command-adjacent semantic labels.
+  // Preserve those checkpoints instead of folding distinct work such as
+  // face-band topology, closest-point extension, and publication into one
+  // broad category. The single-phase queue fallback remains normalized below.
+  if (trace.lane === "physics" && trace.measurementSource !== "gpu-queue-wall") {
+    return trace;
+  }
+  const durations = new Map<PaperPhaseId, number>();
+  for (const phase of trace.phases) {
+    durations.set(phase.id, (durations.get(phase.id) ?? 0) + phase.duration_ms);
+  }
+  const layout = isSvoConePresentationTrace(trace)
+    ? SVO_CONE_PRESENTATION_PHASE_LAYOUT
+    : PHASE_LAYOUT[trace.lane];
+  return {
+    ...trace,
+    phases: layout.map(([id, label]) => ({
+      id,
+      label: trace.measurementSource === "gpu-queue-wall" && id === "other"
+        ? "GPU queue completion · hardware timestamps unavailable or invalid"
+        : label,
+      duration_ms: durations.get(id) ?? 0,
+    })),
+  };
+};
+
+const averagedLane = (traces: PerformanceTrace[], windowSize: number) => {
+  const unique = [...new Map(traces.map((trace) => [
+    `${trace.domain}\0${trace.lane}\0${trace.context}\0${trace.sampleId}\0${trace.capturedAt_ms}`,
+    trace,
+  ])).values()];
+  const latest = unique.at(-1);
+  if (!latest) return { trace: undefined, sampleCount: 0 };
+  const latestSegmented = unique.findLast((trace) => trace.measurementSource === "gpu-segmented-queue-wall");
+  const latestHardware = unique.findLast((trace) => trace.measurementSource === "gpu-hardware-timestamp");
+  const source = latestSegmented && latest.capturedAt_ms - latestSegmented.capturedAt_ms <= 10_000
+    ? "gpu-segmented-queue-wall"
+    : latestHardware && latest.capturedAt_ms - latestHardware.capturedAt_ms <= 2_000
+      ? "gpu-hardware-timestamp"
+      : latest.measurementSource;
+  const window = unique.filter((trace) => trace.measurementSource === source).slice(-windowSize);
+  return {
+    trace: stabilizePhaseLayout(averagePerformanceTraces(window)),
+    sampleCount: window.length,
+  };
+};
+
+function TraceLane({ trace, title, sampleCount }: { trace?: PerformanceTrace; title: string; sampleCount: number }) {
+  if (!trace) {
+    return <section className="trace-lane trace-empty"><header><h3>{title}</h3><span>WAITING FOR COMPLETE SAMPLE</span></header></section>;
+  }
+  const scale = Math.max(trace.total_ms, 0.000001);
+  const accounting = performanceTraceAccounting(trace);
+  const exact = accounting.exact;
+  const sourceLabel = trace.measurementSource === "gpu-hardware-timestamp"
+    ? "HARDWARE TIMESTAMPS"
+    : trace.measurementSource === "gpu-segmented-queue-wall"
+      ? "INTRUSIVE QUEUE CHECKPOINT PROBE"
+    : trace.measurementSource === "gpu-queue-wall"
+      ? "QUEUE COMPLETION FALLBACK"
+      : "ACTIVE CPU WALL";
+  const sumLabel = trace.measurementSource === "gpu-hardware-timestamp"
+    ? "GPU EXECUTION SUM"
+    : trace.measurementSource === "cpu-active-wall"
+      ? "ACTIVE WALL SUM"
+      : "QUEUE-WALL SUM";
+  return <section
+    className="trace-lane"
+    data-domain={trace.domain}
+    data-lane={trace.lane}
+    data-observed-total-ms={accounting.observedTotal_ms}
+    data-accounted-ms={accounting.accounted_ms}
+    data-closure-error-ms={accounting.closureError_ms}
+    data-exact={exact}
+    data-measurement-source={trace.measurementSource}
+  >
+    <header>
+      <div className="trace-title-block">
+        <h3>{title}</h3>
+        <div className="trace-meta">
+          <span>AVG {sampleCount} · LATEST {trace.sampleId}</span>
+          <code title={trace.context}>{trace.context}</code>
+          <span>{sourceLabel}</span>
+        </div>
+      </div>
+      <div className="trace-total"><strong>{formatMs(trace.total_ms)}</strong><span>{exact ? sumLabel : "INVALID"}</span></div>
+    </header>
+    {trace.measurementSource === "gpu-queue-wall" && <p className="trace-source-warning">
+      Hardware timestamps were unavailable or invalid for this sample. Total queue wall time is measured exactly; semantic GPU phase attribution requires a valid timestamp sample.
+    </p>}
+    {trace.measurementSource === "gpu-segmented-queue-wall" && <p className="trace-source-warning trace-source-measured">
+      Hardware timestamps were unavailable or invalid. Each row is an intrusive submit-to-queue-callback wall-time checkpoint, not GPU execution time. Submission, synchronization, and browser callback latency make these values upper bounds; use them to locate expensive steps, not to estimate normal simulation throughput.
+    </p>}
+    <div className="trace-stack" aria-label={`${title}: ${formatMs(trace.total_ms)} total`}>
+      {trace.phases.filter((phase) => phase.duration_ms > 0).map((phase, index) => <span
+        key={`${phase.id}-${index}`}
+        className={`trace-segment phase-${phase.id}`}
+        style={{ width: `${phase.duration_ms / scale * 100}%` }}
+        title={`${phase.label}: ${formatMs(phase.duration_ms)}`}
+      />)}
+    </div>
+    <div className="trace-rows">
+      {trace.phases.map((phase, index) => <div className="trace-row" key={`${phase.id}-${index}`}>
+        <i className={`phase-${phase.id}`} />
+        <span>{phase.label}</span>
+        <div><b className={`phase-${phase.id}`} style={{ width: `${phase.duration_ms > 0 ? Math.max(1, phase.duration_ms / scale * 100) : 0}%` }} /></div>
+        <output>{formatMs(phase.duration_ms)}</output>
+      </div>)}
+    </div>
+    <div className="trace-accounting" aria-label={`${title} accounting closure`}>
+      <span><small>OBSERVED TOTAL</small><output>{formatMs(accounting.observedTotal_ms)}</output></span>
+      <span><small>ACCOUNTED PHASE SUM</small><output>{formatMs(accounting.accounted_ms)}</output></span>
+      <span><small>CLOSURE ERROR</small><output>{accounting.closureError_ms === 0 ? "0.000 ms" : formatMs(accounting.closureError_ms)}</output></span>
+    </div>
+  </section>;
 }
 
-/** Averaged frame usage against the presentation target, with a per-stage drill-down. */
+type PaperView = {
+  id: string;
+  figure: string;
+  label: string;
+  description: string;
+  source: string;
+  mode: GridOverlayMode;
+  axis: GridOverlayConfig["axis"];
+  legend: readonly { swatch: string; label: string }[];
+};
+
+const PAPER_VIEWS: readonly PaperView[] = [
+  {
+    id: "layered-grid", figure: "FIG. 6", label: "Fine SDF layer",
+    description: "Interface core, redistanced support, and compact coarse authority outside the fine allocation.",
+    source: "Sparse fine-band hash, sample flags, and publication controls",
+    mode: "fine-band-lifecycle", axis: "z",
+    legend: [
+      { swatch: "#ff168f", label: "interface core" },
+      { swatch: "#15c8db", label: "valid redistanced sample" },
+      { swatch: "#10255e", label: "compact coarse authority" },
+      { swatch: "#ff1738", label: "failed or stale publication" },
+    ],
+  },
+  {
+    id: "coarse-grid", figure: "FIG. 6/8", label: "Adaptive coarse grid",
+    description: "Current compact leaf scale and refinement transitions on an exact scene slice.",
+    source: "Published octree owner map and compact leaf records",
+    mode: "resolution", axis: "z",
+    legend: [
+      { swatch: "#38adbd", label: "finest compact leaf" },
+      { swatch: "#55a8ba", label: "intermediate dyadic leaf" },
+      { swatch: "#152e7a", label: "coarsest compact leaf" },
+      { swatch: "#ff05b8", label: "missing compact owner" },
+    ],
+  },
+  {
+    id: "sdf", figure: "FIG. 6/7", label: "Fine signed distance",
+    description: "Factor-m φ values, the zero crossing, and the centered-gradient Eikonal residual.",
+    source: "Published Section 5 fine-lattice φ samples",
+    mode: "global-fine-phi", axis: "z",
+    legend: [
+      { swatch: "linear-gradient(90deg,#1973eb,#f5f5e6,#ed7829)", label: "liquid (−) · zero · air (+)" },
+      { swatch: "#ffffff", label: "φ = 0 crossing" },
+      { swatch: "#f505b8", label: "|∇φ|−1 residual" },
+      { swatch: "#ff0610", label: "missing or rejected support" },
+    ],
+  },
+  {
+    id: "power-cells", figure: "FIG. 4", label: "Power cells",
+    description: "Pressure sites and exact regular/transition power-cell classification.",
+    source: "Compact leaves, topology descriptors, and generated power catalog",
+    mode: "power-cells", axis: "volume",
+    legend: [
+      { swatch: "#159578", label: "regular Cartesian power cell" },
+      { swatch: "#8c38c7", label: "transition power cell" },
+      { swatch: "#f5ba1a", label: "pressure site" },
+      { swatch: "#ff0303", label: "invalid descriptor or metric" },
+    ],
+  },
+  {
+    id: "power-faces", figure: "FIG. 4", label: "Power face geometry",
+    description: "Primal face planes, dual links, stored normals, and boundary faces.",
+    source: "Published generalized faces, centroids, normals, and incidences",
+    mode: "power-faces", axis: "volume",
+    legend: [
+      { swatch: "#13cfe8", label: "power-face plane" },
+      { swatch: "#8c38c7", label: "dual pressure-site link" },
+      { swatch: "#f5ba1a", label: "stored face normal" },
+      { swatch: "#ff00aa", label: "incomplete publication" },
+    ],
+  },
+  {
+    id: "sparse-pyramid", figure: "FIG. 5", label: "Sparse topology lifecycle",
+    description: "Actual active and retired rebuild tiles; this does not pretend the current implementation has the paper's idealized ghost aliases.",
+    source: "Live topology rebuild tile worklist",
+    mode: "octree-lifecycle", axis: "volume",
+    legend: [
+      { swatch: "#0a193b", label: "unchanged tile" },
+      { swatch: "#16cbdc", label: "active rebuild tile" },
+      { swatch: "#ff6812", label: "retired tile" },
+      { swatch: "#ff1738", label: "invalid lifecycle publication" },
+    ],
+  },
+  {
+    id: "pressure", figure: "§4", label: "Evaluated pressure",
+    description: "Affine pressure potential dt·p/ρ reconstructed from the live leaf degrees of freedom.",
+    source: "Current pressure leaf field",
+    mode: "pressure", axis: "z",
+    legend: [{ swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "low → high pressure potential" }],
+  },
+  {
+    id: "velocity", figure: "§5", label: "Evaluated velocity",
+    description: "Magnitude of the reconstructed projected velocity, including the extrapolated air band.",
+    source: "Current solver velocity publication",
+    mode: "speed", axis: "z",
+    legend: [
+      { swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "zero → live maximum speed" },
+      { swatch: "#b8deda", label: "bright air · extrapolated band" },
+    ],
+  },
+  {
+    id: "projection", figure: "§4.1", label: "Pressure update Δu",
+    description: "Magnitude of u after projection minus u before projection, normalized by live maximum speed.",
+    source: "Current before/after projection fields",
+    mode: "projection", axis: "z",
+    legend: [{ swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "small → large |Δu|" }],
+  },
+  {
+    id: "divergence", figure: "EQ. 2", label: "Divergence closure",
+    description: "Post-projection divergence; the color scale saturates at |∇·u| Δt = 1.",
+    source: "Current projected velocity field",
+    mode: "divergence", axis: "z",
+    legend: [{ swatch: "linear-gradient(90deg,#1548df,#f5f5f5,#e21a14)", label: "compression (−) · zero · expansion (+)" }],
+  },
+  {
+    id: "extrapolation", figure: "§5", label: "Velocity extrapolation",
+    description: "Regular-face support closure, terminal endpoints, and closest-point-resolved velocities.",
+    source: "Live Section 5 face rows, incidences, φ ordering, and closest points",
+    mode: "section5-face-band", axis: "volume",
+    legend: [
+      { swatch: "#f51680", label: "interface-core owner" },
+      { swatch: "#f5610c", label: "first support closure" },
+      { swatch: "#15c8b0", label: "closest-point-resolved face" },
+      { swatch: "#e31fb8", label: "unresolved or invalid-φ face" },
+    ],
+  },
+  {
+    id: "operator", figure: "§6.3", label: "Power operator",
+    description: "Largest incident A/d coefficient with publication and reciprocity failures exposed.",
+    source: "Published power Laplacian rows and generalized face graph",
+    mode: "power-operator", axis: "volume",
+    legend: [
+      { swatch: "linear-gradient(90deg,#15489a,#18bf8c,#ed2d12)", label: "low → high incident coefficient" },
+      { swatch: "#f5ba1a", label: "high diagonal or residual contribution" },
+      { swatch: "#ff0303", label: "invalid or asymmetric operator" },
+    ],
+  },
+] as const;
+
 export function PerformancePanel() {
-  const liveSnapshot = useDiagnosticsStore((state) => state.performanceSnapshot);
-  const history = useDiagnosticsStore((state) => state.performanceHistory);
-  const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
+  const report = useDiagnosticsStore((state) => state.performanceReport);
+  const reports = useDiagnosticsStore((state) => state.performanceReports);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
-  const activeMethodId = useMethodStore((state) => state.methodId);
-  const sprayEnabled = (gpuInfo?.secondaryParticleCapacity ?? 0) > 0;
-  const maxDt_s = useSceneStore((state) => state.scene.numerics.maxDt_s);
-  const runState = useRuntimeStore((state) => state.runState);
-  const observedSimRate = useRuntimeStore((state) => state.simRate);
-  const setRightPanel = useUIStore((state) => state.setRightPanel);
-  const performanceReadbacksEnabled = useUIStore((state) => state.performanceReadbacksEnabled);
-  const setPerformanceReadbacksEnabled = useUIStore((state) => state.setPerformanceReadbacksEnabled);
-  const [selectedStageKey, setSelectedStageKey] = useState("pressure");
-  const [averageWindow, setAverageWindow] = useState(30);
-  const captureState = useSyncExternalStore(gpuStageCapture.subscribe, gpuStageCapture.getSnapshot, gpuStageCapture.getServerSnapshot);
-
-  const method = getMethod(activeMethodId);
-  const matchingHistory = useMemo(
-    () => history.filter((sample) => sample.methodId === activeMethodId && sample.renderTimingContext === liveSnapshot.renderTimingContext),
-    [history, activeMethodId, liveSnapshot.renderTimingContext]
-  );
-  const windowSamples = matchingHistory.slice(-averageWindow);
-  const snapshot = averagePerformanceSnapshots(windowSamples, liveSnapshot);
-  const averagedFrameCount = Math.max(1, windowSamples.length);
-  const contextMatches = snapshot.methodId === activeMethodId && snapshot.renderTimingContext === liveSnapshot.renderTimingContext;
-  const physicsTimed = contextMatches && snapshot.gpuPhysicsTimingAvailable;
-  const renderTimed = contextMatches && snapshot.gpuRenderTimingAvailable;
-  const svoRendered = snapshot.effectiveRenderMode === "svo";
-  const temporalEnabled = svoRendered && Boolean(snapshot.renderTimingContext?.includes(":temporal-true:"));
-  const paused = runState === "paused";
-  // This panel's presence requests continuous, completion-gated presentation
-  // from the viewport even for a static scene whose simulation stays paused.
-  const continuousPausedPresentation = paused;
-  const adaptive = activeMethodId === "quadtree-tall-cell";
-  const budget = 1000 / PRESENTATION_FPS;
-  const topologyPath = snapshot.adaptiveInlineTopology ? "inline" : "async";
-  const physicsStages = method.backend === "webgpu" ? physicsPerformanceStages({ methodId: activeMethodId, snapshot, contextMatches, pressureSolver: gpuInfo?.pressureSolver, topologyPath }) : [];
-  const adaptiveTopologyStages = adaptive && topologyPath === "async" ? adaptiveTopologyPerformanceStages({ snapshot, contextMatches }) : [];
-  const physicsOutputStage = activeMethodId === "octree" ? "sparse-publication" : activeMethodId === "quadtree-tall-cell" ? "surface-update" : activeMethodId === "tall-cell" || activeMethodId === "uniform" ? "projection" : "uploads";
-
-  const renderStages: PerformanceStage[] = [
-    { key: "extract", label: "Surface extraction", shortLabel: "SURFACE", value: contextMatches ? snapshot.gpuSurfaceExtraction_ms : 0, className: "stage-extract", timer: "render", group: "compute", active: true, description: "Extracts visible liquid surface geometry from the signed-distance field.", reads: ["signed distance φ", "active cells"], writes: ["surface vertices", "indirect draw args"], dependsOn: [physicsOutputStage] },
-    { key: "caustics", label: "Water caustic map", shortLabel: "CAUSTICS", value: contextMatches ? snapshot.gpuCaustics_ms : 0, className: "stage-interface", timer: "render", group: "graphics", active: snapshot.gpuCaustics_ms > 0, description: "Updates the light-space water caustic target when the extracted liquid surface changes.", reads: ["surface vertices", "light transform"], writes: ["caustic texture"], dependsOn: ["extract"] },
-    { key: "dry-scene", label: svoRendered ? "SVO traversal + dry shading" : "Raster dry scene", shortLabel: svoRendered ? "SVO SCENE" : "RASTER SCENE", value: contextMatches ? snapshot.gpuDryScene_ms : 0, className: "stage-scene", timer: "render", group: "graphics", active: true, description: svoRendered ? "Traverses the sparse voxel octree and exact scene primitives, then evaluates materials, direct visibility, shadows, media, and environment lighting into the dry color and G-buffer targets." : "Rasterizes the environment and rigid bodies behind the liquid.", reads: svoRendered ? ["published SVO", "materials + lights", "rigid primitives", "camera"] : ["body transforms", "environment", "caustic texture"], writes: svoRendered ? ["dry HDR", "surface G-buffer", "identity / media", "depth"] : ["scene color", "scene depth"], dependsOn: [snapshot.gpuCaustics_ms > 0 ? "caustics" : activeMethodId === "octree" ? "sparse-publication" : "uploads"] },
-    { key: "svo-temporal", label: "SVO temporal resolve", shortLabel: "TEMPORAL", value: contextMatches ? snapshot.gpuSvoTemporal_ms : 0, className: "stage-scene", timer: "render", group: "graphics", active: temporalEnabled, description: "Reprojects, validates, clamps, and filters the SVO dry target before raster water composition.", reads: ["dry G-buffer", "history", "camera + rigid motion"], writes: ["filtered dry color", "history"], dependsOn: ["dry-scene"] },
-    { key: "front-interface", label: sprayEnabled ? "Water + spray front interface" : "Water front interface", shortLabel: "FRONT", value: contextMatches ? snapshot.gpuInterfaceFront_ms : 0, className: "stage-interface", timer: "render", group: "graphics", active: true, description: sprayEnabled ? "Draws the liquid mesh and active spray ellipsoids into the nearest front position, normal, and depth attachments in one render pass." : "Draws the nearest liquid position, normal, and depth attachments.", reads: sprayEnabled ? ["surface vertices", "spray particle ring", "camera"] : ["surface vertices", "camera"], writes: ["front position", "front normal", "front depth"], dependsOn: ["extract"] },
-    { key: "back-interface", label: sprayEnabled ? "Water + spray back interface" : "Water back interface", shortLabel: "BACK", value: contextMatches ? snapshot.gpuInterfaceBack_ms : 0, className: "stage-interface", timer: "render", group: "graphics", active: true, description: sprayEnabled ? "Draws the liquid mesh and active spray ellipsoids into the far back position, normal, and depth attachments in one render pass." : "Draws the far liquid position, normal, and depth attachments used to reconstruct thickness.", reads: sprayEnabled ? ["surface vertices", "spray particle ring", "camera"] : ["surface vertices", "camera"], writes: ["back position", "back normal", "back depth"], dependsOn: ["front-interface"] },
-    { key: "composite", label: "Optical composite", shortLabel: "COMPOSITE", value: contextMatches ? snapshot.gpuOpticalComposite_ms : 0, className: "stage-composite", timer: "render", group: "graphics", active: true, description: "Combines refraction, absorption, reflection, and the dry scene.", reads: ["scene color", "front/back depth", "normals"], writes: ["water color"], dependsOn: [temporalEnabled ? "svo-temporal" : "dry-scene", "back-interface"] },
-    { key: "overlays", label: "Inspection + diagnostic overlays", shortLabel: "OVERLAYS", value: contextMatches ? snapshot.gpuOverlays_ms : 0, className: "stage-overhead", timer: "render", group: "graphics", active: snapshot.gpuOverlays_ms > 0, description: "Renders raw-voxel or brick inspection and any enabled grid, technique, or audit overlay after optical composition.", reads: ["sparse scene records", "diagnostic fields", "water color"], writes: ["annotated presentation target"], dependsOn: ["composite"] },
-    { key: "upscale", label: "Final upscale", shortLabel: "UPSCALE", value: contextMatches ? snapshot.gpuUpscale_ms : 0, className: "stage-upscale", timer: "render", group: "graphics", active: true, description: "Resolves the internal render target into the presentation surface.", reads: ["water color / inspection target"], writes: ["swapchain"], dependsOn: [snapshot.gpuOverlays_ms > 0 ? "overlays" : "composite"], sync: "Presentation boundary" }
-  ];
-  const stageTimed = (stage: PerformanceStage) => stage.timer === "physics" ? physicsTimed : stage.timer === "render" ? renderTimed : contextMatches && snapshot.adaptiveRebuildCompletedCount > 0;
-  const pressureStage = physicsStages.find((stage) => stage.key === "pressure");
-  const pressureObservedWall_ms = activeMethodId === "octree" ? gpuInfo?.gpuPressureSolveObservedWall_ms : undefined;
-  const advancePhaseWallRaw = activeMethodId === "octree" ? gpuInfo?.gpuAdvancePhaseWall : undefined;
-  const lastAdvance = advanceWallBreakdown(gpuInfo);
-  // A boundary-split replay is diagnostic only. Some browser/Metal paths pay
-  // a large submit+fence cost for every split, which is multiplied most in
-  // fine transport because it has the most semantic boundaries. Reject that
-  // sample instead of presenting synchronization overhead as kernel time.
-  const phaseProbeInflation = advancePhaseWallRaw && lastAdvance && lastAdvance.queueFence_ms > 0
-    ? advancePhaseWallRaw.total_ms / lastAdvance.queueFence_ms : undefined;
-  const advancePhaseWall = phaseProbeInflation === undefined || phaseProbeInflation <= 1.25
-    ? advancePhaseWallRaw : undefined;
-  const fineSurfaceTimestamp_ms = activeMethodId === "octree"
-    ? snapshot.gpuFineTransport_ms + snapshot.gpuFineTopology_ms + snapshot.gpuFineRedistance_ms
-    : 0;
-  // Metal can collapse the shared fine-stage timestamp boundaries to zero.
-  // Replace those unresolved component rows with the independently fenced
-  // production interval so the dominant work appears once with a real value.
-  const fineSurfaceObservedWall_ms = advancePhaseWall?.surfaceCoupling_ms;
-  const fineSurfaceNeedsWallFallback = fineSurfaceObservedWall_ms !== undefined
-    && (!physicsTimed || fineSurfaceTimestamp_ms <= 0);
-  const displayedPhysicsStages = fineSurfaceNeedsWallFallback
-    ? physicsStages.filter((stage) => !FINE_SURFACE_COMPONENT_KEYS.has(stage.key))
-    : physicsStages;
-  const gpuStages = [...displayedPhysicsStages, ...adaptiveTopologyStages, ...renderStages];
-  const measuredStages = [...physicsStages, ...renderStages].filter(stageTimed);
-  const cpuOther = Math.max(0, snapshot.cpuFrame_ms - snapshot.cpuPhysicsSubmit_ms - snapshot.cpuDataUpload_ms - snapshot.cpuRenderEncode_ms);
-  const cpuStages = [
-    { key: "simulation", label: method.backend === "cpu" ? "Fluid + rigid solve" : "Rigid bodies + CPU oracle", shortLabel: "SIM", value: snapshot.cpuSimulation_ms, note: method.backend === "cpu" ? "CPU solver" : "Includes the coarse validation solve" },
-    { key: "encode", label: "Physics encode + submit", shortLabel: "ENCODE", value: snapshot.cpuPhysicsSubmit_ms, note: "Build commands + queue.submit" },
-    { key: "upload", label: "Buffer uploads", shortLabel: "UPLOAD", value: snapshot.cpuDataUpload_ms, note: "CPU → GPU" },
-    { key: "render", label: "Render passes encode", shortLabel: "RENDER", value: snapshot.cpuRenderEncode_ms, note: "Submit presentation" },
-    { key: "frame", label: "Frame orchestration", shortLabel: "FRAME", value: cpuOther, note: "Input + scheduling" }
-  ];
-  const cpuTotal = cpuStages.reduce((sum, stage) => sum + stage.value, 0);
-  const timestampedPhysicsPerStep_ms = physicsStages.reduce((sum, stage) => sum + (stageTimed(stage) ? stage.value : 0), 0);
-  const pressureTimestamp_ms = pressureStage && stageTimed(pressureStage) ? pressureStage.value : 0;
-  const otherTimestampedPhysics_ms = Math.max(0, timestampedPhysicsPerStep_ms - pressureTimestamp_ms);
-  const physicsPerStep_ms = lastAdvance?.queueFence_ms ?? (pressureObservedWall_ms === undefined
-    ? timestampedPhysicsPerStep_ms : otherTimestampedPhysics_ms + pressureObservedWall_ms);
-  const renderPerFrame_ms = renderStages.reduce((sum, stage) => sum + (stageTimed(stage) ? stage.value : 0), 0);
-  const measuredGPUAdvance_s = gpuInfo?.gpuQueueSimulation_s && gpuInfo.gpuQueueSimulation_s > 0 ? Math.min(maxDt_s, gpuInfo.gpuQueueSimulation_s) : maxDt_s;
-  const measuredBatchSimulation_s = gpuInfo?.gpuBatchSimulation_s && gpuInfo.gpuBatchSimulation_s > 0 ? gpuInfo.gpuBatchSimulation_s : measuredGPUAdvance_s;
-  const submissionBatchDepth = method.backend === "webgpu" ? Math.min(64, Math.max(1, Math.round(measuredBatchSimulation_s / Math.max(measuredGPUAdvance_s, 1e-9)))) : 1;
-  const pressureSolvesPerAdvance = activeMethodId === "tall-cell" && gpuInfo?.pressureSolver?.includes("defect correction") ? 2 : 1;
-  const schedule = performanceSchedule({
-    targetFps: PRESENTATION_FPS,
-    gpuAdvance_s: measuredGPUAdvance_s,
-    submissionBatchDepth,
-    physicsPerAdvance_ms: physicsPerStep_ms,
-    renderPerFrame_ms,
-    pressureSolvesPerAdvance
-  });
-  const batchGPU_ms = paused ? 0 : schedule.batchGPU_ms;
-  const displayedBatchDepth = paused ? 0 : submissionBatchDepth;
-  const submissionEnvelope_ms = batchGPU_ms + renderPerFrame_ms;
-  const productionCompletionWall_ms = gpuInfo?.gpuCompletionProductionWall_ms ?? gpuInfo?.gpuCompletionWall_ms;
-  const completionRate = productionCompletionWall_ms && gpuInfo?.gpuCompletionSimulation_s
-    ? gpuInfo.gpuCompletionSimulation_s * 1000 / productionCompletionWall_ms
-    : null;
-  const measuredUtilization = paused && !continuousPausedPresentation ? { physics: 0, presentation: 0, total: 0 } : measuredGPUUtilization({
-    physics_ms: paused ? undefined : lastAdvance?.queueFence_ms ?? pressureObservedWall_ms ?? gpuInfo?.gpuStep_ms,
-    physicsCompletionInterval_ms: paused ? undefined : productionCompletionWall_ms,
-    presentation_ms: liveSnapshot.gpuRenderTimingAvailable ? liveSnapshot.gpuRender_ms : undefined,
-    presentationInterval_ms: gpuInfo?.gpuPresentationWall_ms
-  });
-  const measuredUtilizationPercent = measuredUtilization ? measuredUtilization.total * 100 : null;
-  const realtimeDemand_ms = paused ? continuousPausedPresentation ? renderPerFrame_ms : 0 : schedule.gpuDemandPerFrame_ms;
-  const demandPercent = realtimeDemand_ms / budget * 100;
-  const completionAccounting = paused ? null : completionFrameAccounting({
-    targetFps: PRESENTATION_FPS,
-    completionWall_ms: productionCompletionWall_ms,
-    completionSimulation_s: gpuInfo?.gpuCompletionSimulation_s,
-    timestampedGPU_ms: realtimeDemand_ms,
-    cpu_ms: cpuTotal,
-  });
-  const observedFrame_ms = completionAccounting?.wallFrame_ms ?? Math.max(realtimeDemand_ms, cpuTotal);
-  const unattributedWall_ms = completionAccounting?.unattributed_ms ?? 0;
-  const queueStarved_ms = gpuInfo?.gpuQueueStarved_ms ?? 0;
-  const completionGapLabel = queueStarved_ms > .05 ? "QUEUE IDLE" : "UNATTRIBUTED";
-  const frameUsagePercent = observedFrame_ms / budget * 100;
-  const overBudget = frameUsagePercent > 100;
-  const cpuWindow = windowSamples.map((sample) => sample.cpuSimulation_ms + sample.cpuFrame_ms).sort((a, b) => a - b);
-  const cpuP95_ms = cpuWindow.length ? cpuWindow[Math.min(cpuWindow.length - 1, Math.floor(cpuWindow.length * .95))] : cpuTotal;
-  const gpuConstrained = demandPercent > 100;
-  const wallConstrained = Boolean(completionAccounting && completionAccounting.wallFrame_ms > budget);
-  const cpuSpikeConstrained = !paused && cpuP95_ms > budget;
-  const unexplainedSlowdown = !paused && unattributedWall_ms > .05 && queueStarved_ms <= .05;
-  const encodeBreakdown = gpuInfo?.cpuAdvanceEncodeBreakdown;
-  const pressureHostEncode_ms = encodeBreakdown?.pressureSolve_ms;
-  const pressureDevice_ms = pressureStage && stageTimed(pressureStage) ? pressureStage.value : undefined;
-  const pressureObservationAvailable = pressureHostEncode_ms !== undefined || pressureDevice_ms !== undefined
-    || pressureObservedWall_ms !== undefined;
-  const encodeStages = encodeBreakdown ? [
-    { key: "setup", label: "SETUP + PARAMS", value: encodeBreakdown.setup_ms },
-    { key: "topology", label: "TOPOLOGY COMMANDS", value: encodeBreakdown.topology_ms },
-    { key: "pressure", label: "PRESSURE + PROJECT COMMANDS", value: encodeBreakdown.pressureProjection_ms },
-    { key: "surface", label: "SURFACE COMMANDS", value: encodeBreakdown.surface_ms },
-    { key: "publication", label: "PUBLICATION COMMANDS", value: encodeBreakdown.publication_ms },
-    { key: "finalize", label: "FINALIZE + SUBMIT", value: encodeBreakdown.finalize_ms },
-  ] : [];
-  const headroom = budget - observedFrame_ms;
-  const heroScale = Math.max(budget * 1.12, observedFrame_ms, realtimeDemand_ms, cpuTotal, .01);
-  const budgetTick = budget / heroScale * 100;
-  const pausedPresentationNote = renderTimed ? `Last presentation ${renderPerFrame_ms.toFixed(2)} ms on GPU` : "Awaiting presentation timestamp";
-  const verdict = paused
-    ? gpuConstrained ? "Continuous presentation exceeds the frame target" : "Paused · continuous presentation only"
-    : queueStarved_ms > .05 && unattributedWall_ms > .05 ? `${unattributedWall_ms.toFixed(1)} ms queue-starved between advances`
-      : unexplainedSlowdown ? `${unattributedWall_ms.toFixed(1)} ms outside measured work`
-      : wallConstrained ? "Completion envelope exceeds the frame target"
-      : gpuConstrained ? "GPU demand exceeds the frame target"
-      : cpuSpikeConstrained ? "CPU p95 exceeds the frame deadline"
-        : measuredStages.length ? `${headroom.toFixed(2)} ms headroom` : "sampling…";
-
-  const selectedStage = gpuStages.find((stage) => stage.key === selectedStageKey) ?? gpuStages[0];
-  const selectedCaptureLane: GPUStageCaptureLane | undefined = selectedStage?.timer === "render" ? "presentation" : selectedStage?.timer === "physics" ? "physics" : undefined;
-  const selectedCaptureTarget = selectedStage && selectedCaptureLane ? captureTargetForStage(activeMethodId, selectedCaptureLane, selectedStage.key) : undefined;
-  const captureBusy = captureState.phase === "armed" || captureState.phase === "encoding" || captureState.phase === "submitted" || captureState.phase === "reading";
-  const captureDisabledReason = !performanceReadbacksEnabled ? "Enable performance readbacks before capturing a GPU resource" : !selectedCaptureTarget ? "No typed visual resource is registered for this stage" : !selectedStage?.active ? "This stage is idle in the live pipeline" : selectedCaptureLane === "physics" && paused ? "Resume the simulation to capture a physics boundary" : gpuStatus.state !== "ready" ? "GPU is not ready" : undefined;
-  const armSelectedCapture = () => {
-    if (!selectedCaptureTarget || !selectedStage || captureDisabledReason) return;
-    gpuStageCapture.arm({
-      ...selectedCaptureTarget,
-      baseline: {
-        methodId: activeMethodId,
-        renderTimingContext: liveSnapshot.renderTimingContext,
-        stage_ms: selectedStage.value,
-        gpuTotal_ms: measuredGPUTime_ms(snapshot),
-        sampleCount: averagedFrameCount,
-      },
-    });
+  const methodId = useMethodStore((state) => state.methodId);
+  const overlayMode = useUIStore((state) => state.gridOverlayMode);
+  const overlayAxis = useUIStore((state) => state.gridOverlayAxis);
+  const overlaySlice = useUIStore((state) => state.gridOverlaySlice);
+  const setOverlayMode = useUIStore((state) => state.setGridOverlayMode);
+  const setOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
+  const setOverlaySlice = useUIStore((state) => state.setGridOverlaySlice);
+  const [windowSize, setWindowSize] = useState(30);
+  const lanes = useMemo(() => {
+    const matching = reports.filter((candidate) =>
+      candidate.methodId === methodId && candidate.context === report.context);
+    return {
+      cpu: averagedLane(matching.flatMap((sample) => sample.cpu ? [sample.cpu] : []), windowSize),
+      physics: averagedLane(matching.flatMap((sample) => sample.physics ? [sample.physics] : []), windowSize),
+      presentation: averagedLane(matching.flatMap((sample) => sample.presentation ? [sample.presentation] : []), windowSize),
+    };
+  }, [reports, methodId, report.context, windowSize]);
+  const cpu = lanes.cpu.trace;
+  const physics = lanes.physics.trace;
+  const presentation = lanes.presentation.trace;
+  const selectView = (view: PaperView) => {
+    setOverlayMode(view.mode);
+    setOverlayAxis(view.axis);
+    if (view.axis === "volume") setOverlaySlice(0.42);
   };
+  const selectedView = PAPER_VIEWS.find((view) => view.mode === overlayMode);
+  const volumeCapable = isOctreeTechniqueOverlayMode(overlayMode) && overlayMode !== "global-fine-phi";
+  const traces = [cpu, physics, presentation].filter((trace): trace is PerformanceTrace => trace !== undefined);
+  const allExact = traces.length === 3 && traces.every(performanceTraceIsExact);
 
-  const sampleLabel = averageWindow === 1 ? "SINGLE FRAME" : `${averagedFrameCount}-FRAME AVERAGE`;
-  const timestampQueriesSupported = liveSnapshot.gpuRenderTimestampSupported;
-  const timerDescription = !performanceReadbacksEnabled ? "Readbacks off · cached samples frozen · maximum throughput" : gpuStatus.state !== "ready" ? "GPU unavailable" : !timestampQueriesSupported ? "GPU timestamps unavailable · CPU + queue fences only" : continuousPausedPresentation && renderTimed ? "Paused simulation · continuous presentation timestamps" : physicsTimed && renderTimed ? "Hardware timestamps · physics + presentation" : renderTimed ? "Presentation timestamps · physics pending" : physicsTimed ? "Physics timestamps · presentation pending" : "Awaiting timestamp sample";
-  const averagedHistory = rollingPerformanceSnapshots(matchingHistory, averageWindow);
-  const historyValues = averagedHistory.map((sample) => ({ gpu: measuredGPUTime_ms(sample), cpu: sample.cpuSimulation_ms + sample.cpuFrame_ms }));
-  const historyMax = Math.max(budget, ...historyValues.flatMap((sample) => [sample.gpu, sample.cpu]), 0.01);
-  const points = (key: "gpu" | "cpu") => historyValues.map((sample, index) => `${historyValues.length < 2 ? 0 : index / (historyValues.length - 1) * 100},${48 - Math.min(sample[key] / historyMax, 1) * 44}`).join(" ");
-
-  const stageScale = (stages: PerformanceStage[], floor_ms = 0) => Math.max(...stages.map((stage) => stageTimed(stage) && stage.active ? stage.value : 0), floor_ms, .01);
-  const observedStageValue = (stage: PerformanceStage) => stage.key === "pressure" && pressureObservedWall_ms !== undefined
-    ? pressureObservedWall_ms : stage.value;
-  const stageRows = (stages: PerformanceStage[], scale = stageScale(stages)) => stages.map((stage) => <button key={stage.key} className={`perf-row${selectedStage?.key === stage.key ? " selected" : ""}`} onClick={() => setSelectedStageKey(stage.key)} title={stage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${stage.label} · ${pressureObservedWall_ms.toFixed(1)} ms isolated submission wall · GPU timestamp ${formatMs(stage.value, stageTimed(stage), stage.active)}` : `${stage.label} · ${formatMs(stage.value, stageTimed(stage), stage.active)}`}>
-    <i className={stage.className} />
-    <span>{stage.key === "pressure" && pressureObservedWall_ms !== undefined ? "PRESSURE" : stage.shortLabel}</span>
-    <div className="perf-row-bar">{stage.active && observedStageValue(stage) > 0 && (stageTimed(stage) || stage.key === "pressure" && pressureObservedWall_ms !== undefined) && <b className={stage.className} style={{ width: `${Math.max(1, observedStageValue(stage) / scale * 100)}%` }} />}</div>
-    <output>{stage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${pressureObservedWall_ms.toFixed(1)} ms` : formatMs(stage.value, stageTimed(stage), stage.active)}</output>
-  </button>);
-  // A completion fence is the only portable observation that catches work
-  // missing from timestamp ranges. Keep the residual visible while running;
-  // hiding it was precisely how a 250 ms advance looked like a 0.08 ms one.
-  const untimedAdvance_ms = advancePhaseWall ? 0 : lastAdvance ? Math.max(0, lastAdvance.queueFence_ms
-    - (pressureObservedWall_ms ?? 0) - otherTimestampedPhysics_ms) : 0;
-  const physicsRowScale = Math.max(stageScale(displayedPhysicsStages, untimedAdvance_ms), pressureObservedWall_ms ?? 0,
-    fineSurfaceNeedsWallFallback ? fineSurfaceObservedWall_ms : 0);
-  const cpuScale = Math.max(...cpuStages.map((stage) => stage.value), .01);
-  const encodeScale = Math.max(...encodeStages.map((stage) => stage.value), .01);
-  const physicsTimingLag_s = Math.max(0, (gpuInfo?.completedTime_s ?? snapshot.gpuPhysicsTimingSimulation_s) - snapshot.gpuPhysicsTimingSimulation_s);
-
-  return <aside id="performance-panel" className="right-panel panel-scroll performance-panel" aria-label="Performance profiler" data-testid="performance-panel" data-method={activeMethodId}
-    data-render-timing-context={liveSnapshot.renderTimingContext}
-    data-render-timing-epoch={liveSnapshot.renderTimingEpoch}
-    data-render-timing-sample-id={liveSnapshot.renderTimingSampleId}
-    data-physics-timing-sample-id={liveSnapshot.gpuPhysicsTimingSampleId}
-    data-physics-timing-simulation-s={liveSnapshot.gpuPhysicsTimingSimulation_s}
-    data-render-timestamp-supported={liveSnapshot.gpuRenderTimestampSupported}
-    data-render-timing-available={liveSnapshot.gpuRenderTimingAvailable}
-    data-render-timing-total-ms={liveSnapshot.gpuRenderTimingAvailable ? liveSnapshot.gpuRender_ms : undefined}>
-    <header className="perf-header">
-      <div>
-        <p className="eyebrow">LIVE PROFILE · {sampleLabel}</p>
-        <h1>Performance trace</h1>
-        <span className="perf-source"><i />{timerDescription}</span>
-      </div>
-      <button className={`readback-control${performanceReadbacksEnabled ? " enabled" : " disabled"}`} onClick={() => setPerformanceReadbacksEnabled(!performanceReadbacksEnabled)} aria-pressed={performanceReadbacksEnabled} title={performanceReadbacksEnabled ? "Disable recurring GPU timestamp queries, profiler copies, and diagnostic maps for maximum throughput" : "Enable recurring GPU performance measurements"}><small>READBACKS</small><strong>{performanceReadbacksEnabled ? "ON" : "OFF · MAX SPEED"}</strong></button>
-      <label className="averaging-control"><small>AVERAGING</small><select value={averageWindow} onChange={(event) => setAverageWindow(Number(event.target.value))} aria-label="Timing averaging window" disabled={!performanceReadbacksEnabled}><option value="1">1 frame</option><option value="10">10 frames</option><option value="30">30 frames</option><option value="60">60 frames</option><option value="100">100 frames</option></select></label>
-      <button className="panel-close" onClick={() => setRightPanel(null)} aria-label="Close performance profiler">×</button>
+  return <aside id="performance-panel" className="right-panel panel-scroll performance-panel performance-v2" aria-label="Performance and paper field observatory" data-testid="performance-panel" data-method={methodId}>
+    <header className="trace-header">
+      <div><span>POWER LIQUIDS OBSERVATORY</span><h2>Measured work + live fields</h2></div>
+      <div className={`trace-integrity ${allExact ? "valid" : "invalid"}`}><i />{allExact ? "CLOSED ACCOUNTING" : "AWAITING VALID TRACE"}</div>
     </header>
 
-    <section className={`perf-hero${overBudget ? " over-budget" : ""}`} aria-label="Averaged frame usage against the presentation target">
-      <div className="perf-gauge" style={{ "--usage": `${Math.min(100, Math.max(0, frameUsagePercent))}%` } as CSSProperties} title="Averaged frame demand divided by the presentation deadline">
-        <div><strong>{measuredStages.length ? `${frameUsagePercent.toFixed(0)}%` : "—"}</strong><small>OF {PRESENTATION_FPS} HZ FRAME</small></div>
-      </div>
-      <div className="perf-budget">
-        <div className="perf-budget-head"><small>FRAME USAGE VS {PRESENTATION_FPS} HZ TARGET</small><strong>{verdict}</strong></div>
-        <div className="perf-budget-row">
-          <span>GPU</span>
-          <div className="perf-track" aria-label={`${(paused ? 0 : schedule.physicsPerFrame_ms).toFixed(2)} milliseconds physics and ${renderPerFrame_ms.toFixed(2)} milliseconds presentation against a ${budget.toFixed(2)} millisecond deadline`}>
-            {!paused && displayedPhysicsStages.map((stage) => stage.active && observedStageValue(stage) > 0 && (stageTimed(stage) || stage.key === "pressure" && pressureObservedWall_ms !== undefined) && <button key={stage.key} className={`perf-flame ${stage.className}${selectedStage?.key === stage.key ? " selected" : ""}`} style={{ width: `${observedStageValue(stage) * schedule.advancesPerFrame / heroScale * 100}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${stage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${pressureObservedWall_ms.toFixed(1)} ms isolated completion` : formatMs(stage.value)} × ${schedule.advancesPerFrame.toFixed(2)} advances / frame`}><span>{stage.key === "pressure" && pressureObservedWall_ms !== undefined ? "PRESSURE" : stage.shortLabel}</span></button>)}
-            {!paused && fineSurfaceNeedsWallFallback && <span className="perf-flame stage-surface-update" style={{ width: `${fineSurfaceObservedWall_ms * schedule.advancesPerFrame / heroScale * 100}%` }} title={`Fine surface + coupling · ${fineSurfaceObservedWall_ms.toFixed(1)} ms queue-observed completion × ${schedule.advancesPerFrame.toFixed(2)} advances / frame`}><span>FINE SURFACE</span></span>}
-            {renderStages.map((stage) => stageTimed(stage) && stage.active && stage.value > 0 && <button key={stage.key} className={`perf-flame ${stage.className}${selectedStage?.key === stage.key ? " selected" : ""}`} style={{ width: `${stage.value / heroScale * 100}%` }} onClick={() => setSelectedStageKey(stage.key)} title={`${stage.label} · ${formatMs(stage.value)}`}><span>{stage.shortLabel}</span></button>)}
-            <b className="perf-tick" style={{ left: `${budgetTick}%` }} />
-          </div>
-          <output>{measuredStages.length ? `${realtimeDemand_ms.toFixed(2)} ms` : "sampling…"}</output>
-        </div>
-        <div className="perf-budget-row">
-          <span>CPU</span>
-          <div className="perf-track" aria-label={`${cpuTotal.toFixed(2)} milliseconds main-thread work against a ${budget.toFixed(2)} millisecond deadline`}>
-            {cpuStages.map((stage) => stage.value > 0 && <span key={stage.key} className="perf-flame seg-cpu" style={{ width: `${stage.value / heroScale * 100}%` }} title={`${stage.label} · ${formatMs(stage.value)} · ${stage.note}`}><span>{stage.shortLabel}</span></span>)}
-            <b className="perf-tick" style={{ left: `${budgetTick}%` }} />
-          </div>
-          <output>{cpuTotal.toFixed(2)} ms</output>
-        </div>
-        {completionAccounting && <div className="perf-budget-row perf-budget-wall">
-          <span>WALL</span>
-          <div className="perf-track" aria-label={`${completionAccounting.wallFrame_ms.toFixed(2)} milliseconds of observed completion wall time per target-rate simulation frame; ${completionAccounting.unattributed_ms.toFixed(2)} milliseconds are ${queueStarved_ms > .05 ? `queue idle, with ${queueStarved_ms.toFixed(2)} milliseconds observed between consecutive advances` : "outside measured CPU and timestamped GPU work"}`}>
-            {completionAccounting.accounted_ms > 0 && <span className="perf-flame seg-wall-accounted" style={{ width: `${completionAccounting.accounted_ms / heroScale * 100}%` }} title={`Measured CPU/GPU lower bound · ${completionAccounting.accounted_ms.toFixed(2)} ms`} />}
-            {completionAccounting.unattributed_ms > 0 && <span className="perf-flame seg-unattributed" style={{ width: `${completionAccounting.unattributed_ms / heroScale * 100}%` }} title={queueStarved_ms > .05 ? `Queue-starved completion wall · ${completionAccounting.unattributed_ms.toFixed(2)} ms per target-rate frame · latest inter-advance idle ${queueStarved_ms.toFixed(2)} ms` : `Unattributed completion wall · ${completionAccounting.unattributed_ms.toFixed(2)} ms · includes untimestamped commands, queue waits, telemetry, browser scheduling, and completion callback latency`}><span>{completionGapLabel}</span></span>}
-            <b className="perf-tick" style={{ left: `${budgetTick}%` }} />
-          </div>
-          <output>{completionAccounting.wallFrame_ms.toFixed(1)} ms</output>
-        </div>}
-        <div className="perf-budget-key">
-          <span><b className="seg-physics" />physics {paused ? "0.00" : schedule.physicsPerFrame_ms.toFixed(2)}</span>
-          <span><b className="seg-render" />render {renderPerFrame_ms.toFixed(2)}</span>
-          <span><b className="seg-cpu" />cpu {cpuTotal.toFixed(2)}</span>
-          {completionAccounting && <span><b className="seg-unattributed" />{queueStarved_ms > .05 ? "queue idle" : "gap"} {completionAccounting.unattributed_ms.toFixed(1)}</span>}
-          <strong>{budget.toFixed(2)} ms deadline</strong>
-        </div>
-      </div>
+    <section className="trace-summary">
+      <div><small>CPU MAIN THREAD</small><strong>{cpu ? formatMs(cpu.total_ms) : "—"}</strong></div>
+      <div><small>GPU PHYSICS</small><strong>{physics ? formatMs(physics.total_ms) : "—"}</strong></div>
+      <div><small>GPU PRESENTATION</small><strong>{presentation ? formatMs(presentation.total_ms) : "—"}</strong></div>
+      <label><small>AVERAGE</small><select value={windowSize} onChange={(event) => setWindowSize(Number(event.currentTarget.value))}><option value={1}>1 sample</option><option value={10}>10 samples</option><option value={30}>30 samples</option><option value={60}>60 samples</option></select></label>
     </section>
 
-    <section className="perf-meta" aria-label="Measured scheduling summary">
-      <div><small>GPU BUSY</small><strong>{measuredUtilizationPercent === null ? "—" : `${measuredUtilizationPercent.toFixed(0)}%`}</strong><span>{measuredUtilization === null ? "awaiting completion cadence" : paused ? pausedPresentationNote : `${(measuredUtilization.physics * 100).toFixed(0)}% physics · ${(measuredUtilization.presentation * 100).toFixed(0)}% present`}</span></div>
-      <div className={wallConstrained || gpuConstrained || cpuSpikeConstrained ? "constrained" : undefined}><small>{headroom < 0 ? "OVERRUN" : "HEADROOM"}</small><strong>{measuredStages.length || completionAccounting ? `${Math.abs(headroom).toFixed(2)} ms` : "—"}</strong><span>{wallConstrained ? "queue-confirmed completion envelope" : gpuConstrained ? "timestamped GPU demand" : cpuSpikeConstrained ? `CPU p95 ${cpuP95_ms.toFixed(2)} ms` : `per frame at ${PRESENTATION_FPS} Hz`}</span></div>
-      <div><small>{paused ? "LAST PHYSICS ADVANCE" : "SIM CADENCE"}</small><strong>{paused ? lastAdvance ? `${lastAdvance.wall_ms.toFixed(1)} ms wall` : "no advance sampled" : `${schedule.advancesPerFrame.toFixed(2)} adv / frame`}</strong><span>{paused ? lastAdvance ? `CPU encode ${lastAdvance.encode_ms.toFixed(1)} · queue fence ${lastAdvance.queueFence_ms.toFixed(1)} ms` : "presentation redraws continuously" : `×${displayedBatchDepth} per submission · ${schedule.pressureSolvesPerFrame.toFixed(2)} pressure solves`}</span></div>
-      <div><small>OBSERVED RATE</small><strong>{paused ? "—" : observedSimRate === null ? "measuring…" : `×${observedSimRate.toFixed(2)} realtime`}</strong><span>{paused ? "simulation paused" : completionRate === null ? "queue sampling" : `queue completion ×${completionRate.toFixed(2)}${gpuInfo?.gpuCompletionProfilerWall_ms ? ` · ${gpuInfo.gpuCompletionProfilerWall_ms.toFixed(1)} ms profiler excluded` : ""}`}</span></div>
-    </section>
+    <div className="trace-notice">
+      CPU and GPU are independent ledgers and are never added together. Each lane is one adjacent-boundary partition; phase rows sum exactly to that lane&apos;s measured total.
+    </div>
 
-    <section className="perf-history" aria-label="Recent frame history">
-      <header><small>LAST {matchingHistory.length} FRAMES{averageWindow > 1 ? ` · ${averageWindow}-FRAME ROLLING AVERAGE` : " · RAW"}</small><div className="perf-legend"><span><i className="history-gpu" />GPU</span><span><i className="history-cpu" />CPU</span><span><i className="history-budget" />Target</span></div></header>
-      <svg viewBox="0 0 100 50" preserveAspectRatio="none" role="img" aria-label={`Recent timing history; vertical scale zero to ${historyMax.toFixed(1)} milliseconds`}>
-        <line x1="0" y1={48 - budget / historyMax * 44} x2="100" y2={48 - budget / historyMax * 44} />
-        <polyline className="history-gpu" points={points("gpu")} />
-        <polyline className="history-cpu" points={points("cpu")} />
-      </svg>
-      <footer><span>0 ms</span><span>{historyMax.toFixed(1)} ms</span></footer>
-    </section>
+    <TraceLane trace={physics} title="GPU · POWER LIQUIDS ADVANCE" sampleCount={lanes.physics.sampleCount} />
+    <TraceLane trace={presentation} title="GPU · PRESENTATION" sampleCount={lanes.presentation.sampleCount} />
+    <TraceLane trace={cpu} title="CPU · MAIN-THREAD FRAME WORK" sampleCount={lanes.cpu.sampleCount} />
 
-    <section className="perf-breakdown" aria-label="Per-stage breakdown">
-      {physicsStages.length > 0 && <div className="perf-group">
-        <header><small>GPU PHYSICS · PER ADVANCE</small><output>{pressureObservedWall_ms !== undefined ? `${physicsPerStep_ms.toFixed(1)} ms observed · ${timestampedPhysicsPerStep_ms.toFixed(2)} ms timestamped` : !physicsTimed ? "awaiting timestamps" : untimedAdvance_ms > 0 ? `${timestampedPhysicsPerStep_ms.toFixed(2)} ms timestamped · ${(lastAdvance?.queueFence_ms ?? 0).toFixed(1)} ms completion fence` : `${timestampedPhysicsPerStep_ms.toFixed(2)} ms / advance`}</output></header>
-        {activeMethodId === "octree" && pressureObservationAvailable && <div className="perf-pressure-observation" aria-label="Pressure solve timing observation">
-          <header><div><small>PRESSURE SOLVE · ISOLATED PROFILER SAMPLE</small><strong>{pressureObservedWall_ms === undefined ? "sampling pressure-only submission…" : `${pressureObservedWall_ms.toFixed(1)} ms submission wall`}</strong></div><output>INTRUSIVE · EVERY 30 ADVANCES</output></header>
-          <dl>
-            <div><dt>HOST COMMAND ENCODE</dt><dd>{(gpuInfo?.cpuPressureSolveProbeEncode_ms ?? pressureHostEncode_ms) === undefined ? "—" : `${(gpuInfo?.cpuPressureSolveProbeEncode_ms ?? pressureHostEncode_ms)!.toFixed(2)} ms`}</dd><small>pressure-only command buffer</small></div>
-            <div><dt>{performanceReadbacksEnabled ? "GPU KERNEL RANGE" : "CACHED GPU RANGE"}</dt><dd>{pressureDevice_ms === undefined ? "—" : formatMs(pressureDevice_ms)}</dd><small>hardware timestamps</small></div>
-            <div><dt>COMMAND STREAM</dt><dd>{encodeBreakdown ? `${encodeBreakdown.pressureSolvePassTransitionCount.toLocaleString()} passes` : "—"}</dd><small>{encodeBreakdown?.pressureSolvePassCount.toLocaleString() ?? "—"} dispatches · {gpuInfo?.quadtreePressureIterationsUsed ?? "—"} / {gpuInfo?.quadtreePressureIterationBudget ?? "—"} iterations</small></div>
-            <div><dt>SUBMIT → COMPLETE</dt><dd>{pressureObservedWall_ms === undefined ? "sampling…" : `${pressureObservedWall_ms.toFixed(1)} ms`}</dd><small>exact pressure-only fence</small></div>
-          </dl>
-          <p>This replay starts only after the production queue drains, writes to the inactive pressure buffer, and fences before simulation resumes. It measures WebGPU implementation, driver, and GPU completion cost that hardware shader timestamps omit. The production fence is {lastAdvance ? `${lastAdvance.queueFence_ms.toFixed(1)} ms` : "pending"}; {advancePhaseWallRaw && !advancePhaseWall ? "the boundary-split trace below is rejected because synchronization changed the workload." : "the queue-boundary sample below localizes the rest of the real advance."}</p>
-        </div>}
-        {activeMethodId === "octree" && advancePhaseWallRaw && !advancePhaseWall && <div className="perf-pressure-observation" aria-label="Rejected production phase profile" data-testid="phase-profile-rejected">
-          <header><div><small>PRODUCTION PHASE PROFILE · REJECTED</small><strong>{advancePhaseWallRaw.total_ms.toFixed(1)} ms intrusive split wall</strong></div><output>{phaseProbeInflation?.toFixed(1)}× BOUNDARY INFLATION</output></header>
-          <dl>
-            <div><dt>ORDINARY PRODUCTION ADVANCE</dt><dd>{lastAdvance ? `${lastAdvance.queueFence_ms.toFixed(1)} ms` : "—"}</dd><small>single submission · Dawn parity contract</small></div>
-            <div><dt>SPLIT PROFILER REPLAY</dt><dd>{advancePhaseWallRaw.total_ms.toFixed(1)} ms</dd><small>many submit → completion fences</small></div>
-          </dl>
-          <p>The split replay is more than 25% slower than the ordinary production advance, so its phase ratios are invalid. Fine transport crosses the most profiler boundaries and would otherwise be charged the most synchronization overhead. Rendering is outside this production-advance fence.</p>
-        </div>}
-        {activeMethodId === "octree" && advancePhaseWall && <div className="perf-pressure-observation" aria-label="Production advance queue boundary timing">
-          <header><div><small>PRODUCTION ADVANCE · QUEUE-BOUNDARY SAMPLE</small><strong>{advancePhaseWall.total_ms.toFixed(1)} ms attributed wall</strong></div><output>REAL ADVANCE · SAMPLE #{advancePhaseWall.sampleId}</output></header>
-          <dl>
-            <div><dt>TOPOLOGY + ADVECT</dt><dd>{advancePhaseWall.topologyAdvection_ms.toFixed(1)} ms</dd><small>queue fence delta</small></div>
-            <div><dt>PRESSURE + PROJECT</dt><dd>{advancePhaseWall.pressureProjection_ms.toFixed(1)} ms</dd><small>{pressureObservedWall_ms === undefined ? "production command stream" : `${pressureObservedWall_ms.toFixed(1)} solver replay · ${Math.max(0, advancePhaseWall.pressureProjection_ms - pressureObservedWall_ms).toFixed(1)} assembly/project`}</small></div>
-            <div><dt>P1 · PRESSURE ASSEMBLY + SETUP</dt><dd>{advancePhaseWall.pressureAssemblySetup_ms.toFixed(1)} ms</dd><small>leaf compaction, operator assembly and preconditioner setup</small></div>
-            <div><dt>P1A · LEAF COMPACTION + L1</dt><dd>{advancePhaseWall.pressureLeafCompactionL1Capture_ms.toFixed(1)} ms</dd><small>compact pressure rows and capture the Cartesian/GFM V-cycle</small></div>
-            <div><dt>P1B · FACE MIRROR + RHS</dt><dd>{advancePhaseWall.faceMirrorTransportRhs_ms.toFixed(1)} ms</dd><small>regular-face topology transfer, transport, constraints and RHS</small></div>
-            <div><dt>P1C · POWER TOPOLOGY + FACES</dt><dd>{advancePhaseWall.powerDescriptorTopologyFaces_ms.toFixed(1)} ms</dd><small>descriptor resolution, power topology and generalized faces</small></div>
-            <div><dt>P1D · OLD-FACE ADVECT + REPAIR</dt><dd>{advancePhaseWall.oldFaceAdvectionRepair_ms.toFixed(1)} ms</dd><small>power old-mesh transport and retained-band repair</small></div>
-            <div><dt>P1E · POWER OPERATOR + RHS</dt><dd>{advancePhaseWall.powerOperatorRhsAssembly_ms.toFixed(1)} ms</dd><small>physical volumes and generalized-face pressure operator</small></div>
-            <div><dt>P1F · FINAL PRESSURE ROWS</dt><dd>{advancePhaseWall.finalPressureRowAssembly_ms.toFixed(1)} ms</dd><small>publish the authoritative L2 rows consumed by MGPCG</small></div>
-            <div><dt>P2 · MGPCG SOLVE</dt><dd>{advancePhaseWall.mgpcgSolve_ms.toFixed(1)} ms</dd><small>Section 4.3 hierarchy and Krylov solve</small></div>
-            <div><dt>P3 · POWER PROJECT + PUBLISH</dt><dd>{advancePhaseWall.powerProjectionPublication_ms.toFixed(1)} ms</dd><small>projected generalized-face authority before Section 5</small></div>
-            <div><dt>P4 · FACE-BAND TOPOLOGY</dt><dd>{advancePhaseWall.faceBandTopologyBuild_ms.toFixed(1)} ms</dd><small>Section 5 regular-face topology build</small></div>
-            <div><dt>P5 · TRANSITION ADJACENCY</dt><dd>{advancePhaseWall.faceBandTransitionAdjacency_ms.toFixed(1)} ms</dd><small>catalog transition closure and face emission</small></div>
-            <div><dt>P6 · FACE FAST MARCH</dt><dd>{advancePhaseWall.faceBandFastMarch_ms.toFixed(1)} ms</dd><small>regular-face velocity extrapolation</small></div>
-            <div><dt>P7 · FACE-BAND POWER PUBLISH</dt><dd>{advancePhaseWall.faceBandPowerPublicationCapture_ms.toFixed(1)} ms</dd><small>power-face publication and old-mesh capture</small></div>
-            <div><dt>P8 · COMPATIBILITY PROJECTION</dt><dd>{advancePhaseWall.remainingCompatibilityProjection_ms.toFixed(1)} ms</dd><small>remaining projection, extrapolation, materialization and capture tail</small></div>
-            <div data-testid="fine-surface-observed"><dt>FINE SURFACE TOTAL</dt><dd>{advancePhaseWall.surfaceCoupling_ms.toFixed(1)} ms</dd><small>sum of the queue-observed sections below</small></div>
-            <div><dt>1 · FINE PREP + SEEDS</dt><dd>{advancePhaseWall.finePreparation_ms?.toFixed(1) ?? "—"} ms</dd><small>surface adapter, coarse bootstrap and compact interface seeds</small></div>
-            <div><dt>2 · FINE TRANSPORT</dt><dd>{advancePhaseWall.fineTransport_ms?.toFixed(1) ?? "—"} ms</dd><small>piecewise characteristic + power interpolation</small></div>
-            <div><dt>2A · TRANSPORT SETUP</dt><dd>{advancePhaseWall.fineTransportSetup_ms?.toFixed(1) ?? "—"} ms</dd><small>row descriptors + trajectory initialization</small></div>
-            {advancePhaseWall.fineTransportSegments?.map((segment) => <div key={`fine-transport-${segment.segment}`} data-testid="fine-transport-segment"><dt>2{String.fromCharCode(66 + segment.segment)} · SEGMENT {segment.segment + 1}</dt><dd>{(segment.directStageB_ms + segment.airBand_ms + segment.trajectoryAdvance_ms).toFixed(1)} ms</dd><small>direct Stage-B {segment.directStageB_ms.toFixed(1)} · air completion {segment.airBand_ms.toFixed(1)} (classify {segment.airBandClassify_ms.toFixed(1)} · evaluate {segment.airBandEvaluate_ms.toFixed(1)} · finalize {segment.airBandFinalize_ms.toFixed(1)}) · trajectory advance {segment.trajectoryAdvance_ms.toFixed(1)}</small></div>)}
-            <div><dt>2Z · TRANSPORT FINALIZE</dt><dd>{advancePhaseWall.fineTransportFinalize_ms?.toFixed(1) ?? "—"} ms</dd><small>departure sample + validation + commit</small></div>
-            <div><dt>3 · FINE TOPOLOGY</dt><dd>{advancePhaseWall.fineTopology_ms?.toFixed(1) ?? "—"} ms</dd><small>discover, dilate, snapshot, assign, initialize, link</small></div>
-            <div><dt>4 · REDISTANCE + VOLUME</dt><dd>{advancePhaseWall.fineRedistance_ms?.toFixed(1) ?? "—"} ms</dd><small>distance reconstruction and volume correction</small></div>
-            <div><dt>5 · RESTRICT + COARSE φ</dt><dd>{advancePhaseWall.fineRestriction_ms?.toFixed(1) ?? "—"} ms</dd><small>publication gate, fine→coarse restriction, coarse update</small></div>
-            <div><dt>6 · PAGE SURFACE</dt><dd>{advancePhaseWall.pageSurface_ms?.toFixed(1) ?? "—"} ms</dd><small>page lifecycle, transport and compatibility publication</small></div>
-            <div><dt>7 · OTHER COUPLING</dt><dd>{advancePhaseWall.remainingSurfaceCoupling_ms?.toFixed(1) ?? "—"} ms</dd><small>rigid coupling and spray after surface publication</small></div>
-            <div><dt>PUBLISH + DIAG</dt><dd>{advancePhaseWall.publicationDiagnostics_ms.toFixed(1)} ms</dd><small>queue fence delta</small></div>
-          </dl>
-          {(gpuInfo?.globalFineTransportEncodedPasses ?? 0) > 0 && <div className="perf-submission">
-            <span>FINE TRANSPORT SCHEDULE · {gpuInfo?.globalFineTransportQueryCapacity?.toLocaleString() ?? "—"} capacity samples · {gpuInfo?.globalFineTransportChunkCount ?? "—"} chunks × {gpuInfo?.globalFineTransportSegmentCount ?? "—"} trajectory segments · {gpuInfo?.globalFineTransportVertexScratchBytes === 0 ? "no per-query vertex scratch" : gpuInfo?.globalFineTransportVertexScratchBytes === undefined ? "vertex scratch pending" : `${(gpuInfo.globalFineTransportVertexScratchBytes / (1024 * 1024)).toFixed(1)} MiB vertex scratch / chunk`} · {gpuInfo?.globalFineTransportPrepassScratchBytes === undefined ? "descriptor scratch pending" : `${(gpuInfo.globalFineTransportPrepassScratchBytes / 1024).toFixed(0)} KiB shared descriptor scratch`}</span>
-            <output>{gpuInfo?.globalFineTransportEncodedPasses?.toLocaleString() ?? "—"} passes</output>
-          </div>}
-          {gpuInfo?.globalFineFaceBandAirSamplesSelected !== undefined && <div className="perf-submission" data-testid="face-band-search-counters">
-            <span>FACE-BAND SEARCH · {(gpuInfo.globalFineFaceBandDirectAnchorSuccess ?? 0).toLocaleString()} direct-anchor hits · {(gpuInfo.globalFineFaceBandFullRowFallbackInvocations ?? 0).toLocaleString()} full-row fallbacks / {(gpuInfo.globalFineFaceBandFullRowCandidateRowsTested ?? 0).toLocaleString()} rows tested · {(gpuInfo.globalFineFaceBandSurroundingOwnerFallbackInvocations ?? 0).toLocaleString()} surrounding-owner fallbacks / {(gpuInfo.globalFineFaceBandSurroundingOwnerRowsTested ?? 0).toLocaleString()} rows tested</span>
-            <output>{(gpuInfo.globalFineFaceBandAirSamplesSelected ?? 0).toLocaleString()} / {(gpuInfo.globalFineFaceBandAirSamplesEvaluated ?? 0).toLocaleString()} selected / evaluated</output>
-          </div>}
-          {(gpuInfo?.globalFineLevelSetLogicalBrickCount ?? 0) > 0 && <p>Resident fine bricks: {(gpuInfo?.globalFineActiveBricks ?? 0).toLocaleString()} / {gpuInfo?.globalFineLevelSetLogicalBrickCount?.toLocaleString() ?? "—"} ({(100 * (gpuInfo?.globalFineActiveBricks ?? 0) / (gpuInfo?.globalFineLevelSetLogicalBrickCount ?? 1)).toFixed(1)}%). The profiler reports this occupancy beside transport so a nominally sparse band that is effectively dense is immediately visible.</p>}
-          <p>One real production advance is split into ordered command buffers every 30 advances. During this intrusive sample, each trajectory segment is additionally fenced after direct Stage-B sampling, air-band completion, and trajectory advance; no shader instrumentation or atomics are added. The remaining boundaries isolate seed preparation, topology construction, redistance, restriction, page maintenance, and later coupling.</p>
-        </div>}
-        <div className="perf-rows">
-          {stageRows(displayedPhysicsStages, physicsRowScale)}
-          {fineSurfaceNeedsWallFallback && <div className="perf-row perf-row-observed-surface" data-testid="fine-surface-observed-row" title="Queue-observed production completion for fine level-set transport, fine narrow-band topology, redistance/publication, and coupling. Shown because the corresponding Metal timestamp subdivisions are unavailable or below timer resolution.">
-            <i className="stage-surface-update" />
-            <span>FINE SURFACE</span>
-            <div className="perf-row-bar"><b className="stage-surface-update" style={{ width: `${Math.max(1, fineSurfaceObservedWall_ms / physicsRowScale * 100)}%` }} /></div>
-            <output>{fineSurfaceObservedWall_ms.toFixed(1)} ms</output>
-          </div>}
-          {untimedAdvance_ms > 0 && <div className="perf-row perf-row-untimed" title={pressureObservedWall_ms !== undefined ? "Exact production completion wall remaining after the isolated pressure wall and other hardware-timestamped work are removed. This is measured non-pressure work, but it remains unlocalized among topology, assembly, projection, surface, publication, queue scheduling, and completion callback latency." : "Submission-to-completion wall time not covered by the physics timestamp range. Portable WebGPU cannot split untimestamped commands, earlier queue work, telemetry, driver scheduling, and promise callback latency, so this is reported as unattributed rather than GPU execution."}>
-            <i />
-            <span>{pressureObservedWall_ms !== undefined ? "NON-PRESSURE" : "UNATTRIBUTED"}</span>
-            <div className="perf-row-bar"><b style={{ width: `${Math.max(1, untimedAdvance_ms / physicsRowScale * 100)}%` }} /></div>
-            <output>{untimedAdvance_ms.toFixed(1)} ms {pressureObservedWall_ms !== undefined ? "unlocalized" : "wall"}</output>
-          </div>}
-        </div>
-        {snapshot.gpuPhysicsTimingSampleId > 0 && <div className="perf-submission"><span>TIMESTAMP SAMPLE #{snapshot.gpuPhysicsTimingSampleId} · SIM t={snapshot.gpuPhysicsTimingSimulation_s.toFixed(4)} s · {physicsTimingLag_s > 1e-6 ? `${physicsTimingLag_s.toFixed(4)} s behind latest completion` : "latest completed advance"} · map latency {snapshot.gpuPhysicsTimingReadbackWall_ms.toFixed(1)} ms</span><output>{snapshot.gpuTelemetryWall_ms > 0 ? `${snapshot.gpuTelemetryWall_ms.toFixed(1)} ms telemetry cycle` : "telemetry pending"}</output></div>}
-      </div>}
-      {adaptiveTopologyStages.length > 0 && <div className="perf-group">
-        <header><small>ADAPTIVE TOPOLOGY · EVENT-DRIVEN, NOT PER ADVANCE</small><output>{snapshot.adaptiveRebuildWall_ms ? `${snapshot.adaptiveRebuildWall_ms.toFixed(1)} ms wall${snapshot.adaptiveRebuildPending ? " · in flight" : ""}` : "no rebuild sampled"}</output></header>
-        <div className="perf-rows">{stageRows(adaptiveTopologyStages)}</div>
-      </div>}
-      <div className="perf-group">
-        <header><small>GPU PRESENTATION · PER FRAME</small><output>{renderTimed ? `${renderPerFrame_ms.toFixed(2)} ms / frame` : "awaiting timestamps"}</output></header>
-        <div className="perf-rows">{stageRows(renderStages)}</div>
-        <div className="perf-submission"><span>ONE GPU SUBMISSION · ×{displayedBatchDepth} ADVANCES + PRESENT</span><output>{measuredStages.length ? `${submissionEnvelope_ms.toFixed(2)} ms` : "—"}</output></div>
+    <section className="paper-observatory">
+      <header><div><h3>Paper field observatory</h3><small>LIVE GPU PUBLICATIONS · NO FIELD READBACK</small></div><span>{methodId === "octree" ? "OCTREE AUTHORITY" : "SELECT OCTREE FOR FULL SET"}</span></header>
+      <div className="paper-view-grid">
+        {PAPER_VIEWS.map((view) => {
+          const active = overlayMode === view.mode;
+          return <button key={view.id} className={active ? "active" : ""} onClick={() => selectView(view)} aria-pressed={active}>
+            <span>{view.figure}</span><strong>{view.label}</strong><small>{view.description}</small>
+          </button>;
+        })}
       </div>
-      <div className="perf-group">
-        <header><small>CPU · MAIN THREAD</small><output>{cpuTotal.toFixed(2)} ms / frame</output></header>
-        <div className="perf-rows">{cpuStages.map((stage) => <div key={stage.key} className="perf-row" title={`${stage.label} · ${stage.note}`}>
-          <i className="seg-cpu" />
-          <span>{stage.shortLabel}</span>
-          <div className="perf-row-bar">{stage.value > 0 && <b className="seg-cpu" style={{ width: `${Math.max(1, stage.value / cpuScale * 100)}%` }} />}</div>
-          <output>{formatMs(stage.value)}</output>
-        </div>)}</div>
-        {lastAdvance && <div className="perf-submission"><span>LAST PHYSICS ADVANCE · CPU encode {lastAdvance.encode_ms.toFixed(1)} ms + submission→completion {lastAdvance.queueFence_ms.toFixed(1)} ms · timestamped GPU {lastAdvance.timestampedGPU_ms.toFixed(3)} ms · {advancePhaseWall ? `queue-attributed by phase sample #${advancePhaseWall.sampleId}` : advancePhaseWallRaw ? `phase sample rejected at ${phaseProbeInflation?.toFixed(1)}× boundary inflation` : `unattributed wall ${lastAdvance.untimestampedQueue_ms.toFixed(1)} ms`}</span><output>{lastAdvance.wall_ms.toFixed(1)} ms wall</output></div>}
-        {encodeStages.length > 0 && <>
-          <header><small>LAST PHYSICS ENCODE · SOLVER ATTRIBUTION</small><output>{encodeStages.reduce((sum, stage) => sum + stage.value, 0).toFixed(1)} ms</output></header>
-          <div className="perf-rows">{encodeStages.map((stage) => <div key={stage.key} className="perf-row" title={`${stage.label} · host command construction only`}>
-            <i className="seg-cpu" />
-            <span>{stage.label}</span>
-            <div className="perf-row-bar">{stage.value > 0 && <b className="seg-cpu" style={{ width: `${Math.max(1, stage.value / encodeScale * 100)}%` }} />}</div>
-            <output>{formatMs(stage.value)}</output>
-          </div>)}</div>
-          {encodeBreakdown && <div className="perf-submission"><span>PRESSURE SOLVER ONLY · {encodeBreakdown.pressureSolvePassTransitionCount.toLocaleString()} COMPUTE PASSES · {encodeBreakdown.pressureSolvePassCount.toLocaleString()} DISPATCHES · excludes row assembly and velocity projection</span><output>{encodeBreakdown.pressureSolve_ms.toFixed(2)} ms encode</output></div>}
+      <div className="paper-view-controls">
+        <div>
+          <span>VIEW PLANE</span>
+          <div role="group" aria-label="Paper field view plane">
+            {(["x", "y", "z"] as const).map((axis) => <button key={axis} className={overlayAxis === axis ? "active" : ""} onClick={() => setOverlayAxis(axis)}>{axis.toUpperCase()}</button>)}
+            <button className={overlayAxis === "volume" ? "active" : ""} disabled={!volumeCapable} onClick={() => setOverlayAxis("volume")}>VOLUME</button>
+            <button className={overlayAxis === "off" ? "active" : ""} onClick={() => setOverlayAxis("off")}>HIDE</button>
+          </div>
+        </div>
+        {overlayAxis !== "off" && <label>
+          <span>{overlayAxis === "volume" ? "VOLUME OPACITY" : `${overlayAxis.toUpperCase()} SLICE`}</span>
+          <input
+            type="range"
+            min={overlayAxis === "volume" ? 0.05 : 0}
+            max={1}
+            step={overlayAxis === "volume" ? 0.01 : 0.005}
+            value={overlaySlice}
+            onChange={(event) => setOverlaySlice(Number(event.currentTarget.value))}
+            aria-label={overlayAxis === "volume" ? "Paper field volume opacity" : `Paper field ${overlayAxis} slice position`}
+          />
+          <output>{Math.round(overlaySlice * 100)}%</output>
+        </label>}
+      </div>
+      <div className="paper-view-inspector" aria-live="polite">
+        <header>
+          <div><span>ACTIVE FIELD</span><strong>{selectedView?.label ?? overlayMode}</strong></div>
+          <code>{overlayMode} · {overlayAxis === "off" ? "hidden" : overlayAxis}</code>
+        </header>
+        <p>{selectedView?.description ?? "This field was selected in the Render panel and reads the existing GPU publication directly."}</p>
+        {selectedView && <>
+          <small>SOURCE · {selectedView.source}</small>
+          <div className="paper-field-legend" aria-label={`${selectedView.label} legend`}>
+            {selectedView.legend.map((entry) => <span key={entry.label}><i style={{ background: entry.swatch }} />{entry.label}</span>)}
+          </div>
         </>}
+        <footer>{overlayAxis === "volume"
+          ? "Orbit the camera to interrogate the ray-integrated live structure; the slider controls front-to-back opacity."
+          : overlayAxis === "off"
+            ? "Choose X, Y, Z, or an available volume view to display this field."
+            : "Sweep the slider or drag the highlighted slice edge in the viewport. No field is read back to the CPU."}</footer>
+      </div>
+      <div className="paper-live-stats">
+        <div><span>COARSE LEAVES</span><output>{gpuInfo?.quadtreeLeafCount?.toLocaleString() ?? "—"}</output></div>
+        <div><span>POWER FACES</span><output>{gpuInfo?.quadtreeFaceCount?.toLocaleString() ?? "—"}</output></div>
+        <div><span>FINE PAGES</span><output>{gpuInfo?.globalFineLevelSetLogicalBrickCount?.toLocaleString() ?? "—"}</output></div>
+        <div><span>PRESSURE DOFs</span><output>{gpuInfo?.quadtreeLiquidDofCount?.toLocaleString() ?? "—"}</output></div>
+        <div><span>ALLOCATED CELLS</span><output>{gpuInfo?.cellCount.toLocaleString() ?? "—"}</output></div>
+        <div><span>MAX |∇·u|</span><output>{gpuInfo?.maxDivergenceAfter_s !== undefined ? gpuInfo.maxDivergenceAfter_s.toExponential(2) : "—"}</output></div>
       </div>
     </section>
-
-    {selectedStage && <section className="perf-inspector" aria-label="Stage inspector">
-      <header>
-        <span className={selectedStage.className} />
-        <div><small>{selectedStage.group.toUpperCase()} PASS · {selectedStage.timer === "physics" ? "PHYSICS QUEUE" : selectedStage.timer === "render" ? "PRESENTATION" : "ASYNC WORKER"}</small><h2>{selectedStage.label}</h2></div>
-        <strong>{selectedStage.key === "pressure" && pressureObservedWall_ms !== undefined ? `${pressureObservedWall_ms.toFixed(1)} ms` : formatMs(selectedStage.value, stageTimed(selectedStage), selectedStage.active)}</strong>
-      </header>
-      <p>{selectedStage.description}</p>
-      <div className="perf-io">
-        <div><small>READS</small>{selectedStage.reads.map((item) => <span key={item}><i>R</i>{item}</span>)}</div>
-        <div><small>WRITES</small>{selectedStage.writes.map((item) => <span key={item}><i>W</i>{item}</span>)}</div>
-        <div><small>WAITS FOR</small>{selectedStage.dependsOn.map((item) => <span key={item}><i>↳</i>{gpuStages.find((stage) => stage.key === item)?.shortLabel ?? item.toUpperCase()}</span>)}{selectedStage.sync && <span className="sync-detail"><i>⇄</i>{selectedStage.sync}</span>}</div>
-      </div>
-      <div className="perf-capture">
-        <div className="perf-capture-head">
-          <div><small>DIAGNOSTIC RESOURCE</small><strong>{selectedCaptureTarget?.label ?? "Timing and counters only"}</strong><span>{selectedCaptureTarget ? `${selectedCaptureTarget.selectorLabel}${selectedCaptureTarget.units ? ` · ${selectedCaptureTarget.units}` : ""} · centre slice` : captureDisabledReason}</span></div>
-          <span className={`perf-phase phase-${captureState.phase}`}><i />{captureState.phase.toUpperCase()}</span>
-          <button onClick={captureBusy ? () => gpuStageCapture.cancel() : armSelectedCapture} disabled={!captureBusy && Boolean(captureDisabledReason)} title={captureDisabledReason}>{captureBusy ? "CANCEL" : "CAPTURE NEXT"}</button>
-        </div>
-        {captureState.phase === "ready" && captureState.artifact ? <div className="perf-capture-result">
-          <CapturePreview artifact={captureState.artifact} />
-          <div><strong>{captureState.artifact.label.toUpperCase()} · {captureState.artifact.selectorLabel.toUpperCase()} · {captureState.artifact.dimensions.join("×")}</strong><p>{captureState.artifact.interpretation}</p></div>
-          <dl>
-            <div><dt>Clean stage</dt><dd>{captureState.artifact.baseline.stage_ms === undefined ? "—" : `${captureState.artifact.baseline.stage_ms.toFixed(3)} ms`}</dd></div>
-            <div><dt>Range</dt><dd>{Number.isFinite(captureState.artifact.minimum) && Number.isFinite(captureState.artifact.maximum) ? `${captureState.artifact.minimum.toPrecision(3)} → ${captureState.artifact.maximum.toPrecision(3)}` : "Unavailable"}</dd></div>
-            <div><dt>Coverage</dt><dd>{captureState.artifact.totalValues.toLocaleString()} values{captureState.artifact.invalidValues > 0 ? ` · ${captureState.artifact.invalidValues.toLocaleString()} invalid` : ""}</dd></div>
-            <div><dt>Readback wall</dt><dd>{captureState.artifact.readbackWall_ms.toFixed(1)} ms*</dd></div>
-          </dl>
-          <small>* Instrumented completion latency, never used as production stage timing. {(captureState.artifact.stagingBytes / 1024).toFixed(0)} KiB staged asynchronously.</small>
-        </div> : <p>{captureState.message ?? (selectedCaptureTarget ? "Capture the next matching stage boundary. A full-domain GPU summary and a bounded centre-slice preview are read back asynchronously without blocking the queue." : "This stage has no registered texture product; its timing stays visible in the breakdown above.")}</p>}
-        {captureState.phase === "failed" && <small className="perf-capture-error">{captureState.message}</small>}
-      </div>
-    </section>}
   </aside>;
 }

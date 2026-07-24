@@ -1,19 +1,16 @@
 import { combineInitialBrickWet, damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
+import {
+  DynamicGPUPerformanceTraceRecorder,
+  GPUPerformanceTraceRecorder,
+  GPUQueueWallPerformanceTraceRecorder,
+  GPUSegmentedQueueWallPerformanceTraceRecorder,
+  type GPUTimestampPhase,
+} from "./performance-trace";
 import { initializeRigidBodies, type RigidBodyState } from "./rigid-body";
 import {
-  categorizedGPUPhysicsTime_ms,
-  decodeGPUPhysicsTimestampSegments,
-  emptyGPUPhysicsTimings,
-  GPU_PHYSICS_TIMESTAMP_CAPACITY,
   GPU_RIGID_EXCHANGE_BYTES,
   legacyUniformComputeShader,
-  retiredBulkFluxScaleClearShader,
-  retiredBulkTransportClearShader,
-  retiredBulkVelocityClearShader,
   type GPUEulerianInfo,
-  type GPUPhysicsStageId,
-  type GPUPhysicsTimingField,
-  type GPUPhysicsTimestampSegment,
   type GPURigidLoad,
   type GPUVelocityTransport,
   type GPUQuality
@@ -23,15 +20,18 @@ import { createTallCellLayout } from "./tall-cell-grid";
 import { planGPUAdvance } from "./tall-cell-diagnostics";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "./inflow-boundary";
 import { quadtreeChebyshevSpectrum, WebGPUQuadtreeTallCellProjection, type QuadtreeTallCellProjectionOptions } from "./webgpu-quadtree-tall-cell";
-import { adaptiveFaceRhsIsSupported, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, WebGPUOctreeProjection,
-  type OctreePressureProjectionProfilePhase, type OctreeProjectionOptions } from "./webgpu-octree";
+import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, WebGPUOctreeProjection,
+  type OctreeSemanticPhase, type OctreeProjectionOptions } from "./webgpu-octree";
+import { buildFixedAdaptiveOctreePowerGalerkinHierarchy } from "./octree-power-galerkin";
 import {
+  OCTREE_FACE_BAND_ACUTE_TETRA_FAILURE,
+  OCTREE_FACE_BAND_OWNER_FAILURE_STAGE,
   unpackOctreeFaceBandControl,
   unpackOctreeFaceBandPointFieldControl,
   unpackOctreeFaceBandPowerPublication,
   unpackOctreeFaceBandTransientPowerControl,
   unpackOctreeFaceBandTransitionControl,
-} from "./webgpu-octree-face-fast-march";
+} from "./webgpu-octree-face-closest-point";
 import {
   OCTREE_POWER_COARSE_LEVELSET_ERROR,
   OCTREE_POWER_COARSE_LEVELSET_VALID,
@@ -43,37 +43,19 @@ import {
   unpackFineLevelSetGPUTopologyControl,
 } from "./webgpu-octree-fine-levelset-topology";
 import { unpackFineLevelSetGPURedistanceControl } from "./webgpu-octree-fine-levelset-redistance";
-import { unpackFineLevelSetGPUTransportControl,
-  type FineLevelSetTransportBoundary } from "./webgpu-octree-fine-levelset-transport";
+import { unpackFineLevelSetGPUTransportControl } from "./webgpu-octree-fine-levelset-transport";
 import { FINE_TO_COARSE_LEVELSET_ERROR, unpackFineToCoarseGPUControl } from "./webgpu-octree-fine-to-coarse-levelset";
-import { planOctreeHostAllocation, type OctreeHostAllocationPlan } from "./octree-host-allocation";
+import { planUniformHostAllocation, type UniformHostAllocationPlan } from "./octree-host-allocation";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
-import {
-  WebGPUSecondaryParticleSystem,
-  type SecondaryParticleSamplingSource
-} from "./webgpu-secondary-particles";
-import type { SparseSurfaceBandGPUSource } from "./webgpu-sparse-surface-band";
-import type { FluidBrickAtlasSamplingSource } from "./webgpu-brick-atlas";
-import { FLUID_BRICK_ACTIVE_CELL64_DISPATCH_OFFSET_BYTES, FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES } from "./webgpu-fluid-brick-residency";
 import { WebGPURigidBodySystem } from "./webgpu-rigid-body";
 import { GPUInitializationTaskRunner, type GPUInitializationTask } from "./gpu-initialization";
-import { encodeGPUStageTextureCapture, gpuStageCapture, type PendingGPUStageCapture } from "./gpu-stage-capture";
 import {
   FINE_LEVELSET_VOLUME_VALID,
   unpackFineLevelSetGPUVolumeControl,
 } from "./webgpu-octree-fine-levelset-volume";
 
 export type UniformVelocityTransport = GPUVelocityTransport;
-export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Octree-only A/B: subtract a fixed tank-fill rest-surface reference. */ hydrostaticSplit?: boolean; /** Retain eight individually fenced t=0 authority phases; timestamp-capable devices also force this correctness path. */ fencedInitialSparseAuthority?: boolean; /** A/B switch; sparse is used only by safe octree mirror sources. */ brickSparseVelocityAdvection?: boolean; /** Independently dispatch current/predicted transport preparation over the safe bulk worklist. */ brickSparseTransportPreparation?: boolean; /** Independently reduce column occupancy and conservative flux scales over the safe bulk worklist. */ brickSparseOccupancyFluxPreparation?: boolean; /** Allocate escaped spray droplets. */ secondaryParticles?: boolean; /** Live enable state when the component is allocated. */ secondaryParticlesEnabled?: boolean; secondaryParticleCapacity?: number; /** Bounded near-interface particle-to-level-set correction; zero keeps spray strictly one-way. */ secondaryParticleSurfaceCorrection?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
-
-/** Timestamp-enabled Metal/WebGPU queues need submit boundaries between the
- * dependency-heavy t=0 Section 4/5 publications. Without them, larger face
- * bands can observe incomplete predecessor data even though the commands are
- * ordered in one buffer. Keep the fast combined path for timestamp-free
- * devices and make the explicit diagnostic switch additive. */
-export function initialSparseAuthorityFencesEnabled(explicit: boolean, timestampQueries: boolean): boolean {
-  return explicit || timestampQueries;
-}
+export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Allocate escaped spray droplets and set their initial live state. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; /** Bounded near-interface particle-to-level-set correction; zero keeps spray strictly one-way. */ secondaryParticleSurfaceCorrection?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
 
 // Pipeline objects are immutable and device-scoped. Rebuilding buffers or
 // textures for a settings change must not ask the browser/driver to compile
@@ -81,11 +63,35 @@ export function initialSparseAuthorityFencesEnabled(explicit: boolean, timestamp
 // through createComputePipelineAsync.
 const uniformPipelineCache = new WeakMap<GPUDevice, Map<UniformVelocityTransport, GPUComputePipeline[]>>();
 
-/** Queue-boundary profiling is intrusive, so sample sparsely after publishing
- * one ordinary post-t=0 transport step. The early sample makes the dominant
- * fine-surface wall visible before a short manual run reaches step 30. */
-const OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_ADVANCES = 30;
-const OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP = 2;
+const OCTREE_SEMANTIC_TRACE_PHASE: Readonly<Record<OctreeSemanticPhase, GPUTimestampPhase>> = {
+  pressureLeafCompactionL1Capture: { id: "pressure-system", label: "Liquid rows + L1 capture" },
+  powerDescriptorTopologyFaces: { id: "power-topology", label: "Power topology + physical faces" },
+  powerFaceRegularCompletion: { id: "velocity-advection", label: "Generalized-face velocity completion" },
+  powerOperatorRhsAssembly: { id: "pressure-system", label: "Power operator + divergence RHS" },
+  finalPressureRowAssembly: { id: "pressure-system", label: "Final pressure row assembly" },
+  mgpcgSolve: { id: "pressure-solve", label: "Selected power pressure solve" },
+  powerProjectionPublication: { id: "velocity-projection", label: "Power-face pressure projection" },
+  faceBandTopologyBuild: { id: "velocity-extrapolation", label: "Extrapolation face-band topology" },
+  faceBandTransitionAdjacency: { id: "velocity-extrapolation", label: "Transition Delaunay adjacency" },
+  faceBandClosestPointExtension: { id: "velocity-extrapolation", label: "Closest-point velocity extension" },
+  faceBandPowerPublicationCapture: { id: "velocity-extrapolation", label: "Extended power-face publication" },
+  powerProjectionTail: { id: "velocity-projection", label: "Solid impulse + projection publication" },
+};
+
+const FINE_TRACE_PHASE: Readonly<Record<
+  "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance" | "fineRestriction",
+  GPUTimestampPhase
+>> = {
+  finePreparation: { id: "fine-sdf-advection", label: "Fine SDF seed + transport preparation" },
+  fineTransport: { id: "fine-sdf-advection", label: "Factor-m fine SDF advection" },
+  fineTopology: { id: "coarse-grid", label: "Fine narrow-band topology" },
+  fineRedistance: { id: "fine-sdf-redistance", label: "Fine SDF redistance" },
+  fineRestriction: { id: "adaptive-publication", label: "Fine-to-coarse restriction" },
+};
+
+/** Serial queue probes are deliberately sparse because they trade throughput
+ * for portable, per-phase measurements when timestamp queries fail. */
+const SEGMENTED_QUEUE_TRACE_CADENCE_MS = 3_000;
 
 /** Explicit capillary-wave stability bound for a finest cell. */
 export function capillaryStableDt_s(
@@ -154,7 +160,7 @@ export interface InitialGlobalFineAuthorityDiagnostics extends GlobalFineVolumeP
   readonly seedError: number;
   readonly topologyFlags: number;
   readonly interfaceBricks: number;
-  readonly interfaceSeedBricks?: number;
+  readonly interfaceSeedBricks: number;
   readonly desiredBricks: number;
   readonly activatedBricks: number;
   readonly activeBricks: number;
@@ -172,10 +178,16 @@ export interface InitialGlobalFineAuthorityDiagnostics extends GlobalFineVolumeP
   readonly transportControl: readonly number[];
   readonly redistanceControl: readonly number[];
   readonly redistanceControlDetailed?: readonly number[];
+  readonly powerVelocityControl?: readonly number[];
+  readonly powerFaceControl?: readonly number[];
+  readonly powerFaceCandidateControl?: readonly number[];
+  readonly powerRowDeltaControl?: readonly number[];
+  readonly powerDescriptorControl?: readonly number[];
+  readonly powerTopologyControl?: readonly number[];
   readonly faceBandControl: readonly number[];
-  readonly faceBandMarchControl?: readonly number[];
-  readonly faceBandSearchControl?: readonly number[];
+  readonly faceBandCandidateControl?: readonly number[];
   readonly faceBandTransitionControl: readonly number[];
+  readonly faceBandCandidateTransitionControl?: readonly number[];
   readonly faceBandTransitionOwnerFailure?: readonly number[];
   readonly faceBandPointFieldControl: readonly number[];
   readonly faceBandTransientPowerControl: readonly number[];
@@ -226,13 +238,13 @@ export function initialGlobalFineAuthorityEvidence(value: InitialGlobalFineAutho
   const topologyWords=value.topologyControl??[
     value.topologyFlags,value.interfaceBricks,value.desiredBricks,value.activatedBricks,
     value.published?1:0,value.rolledBack?1:0,0,value.downstreamFinalizeReason,
-    ...(value.interfaceSeedBricks === undefined ? [] : [value.interfaceSeedBricks]),
+    value.interfaceSeedBricks,
   ];
   const redistanceWords=value.redistanceControlDetailed??value.redistanceControl;
   const volumeBytes=new ArrayBuffer(64);new Uint32Array(volumeBytes).set(value.volumeControl.slice(0,16));
   const coarseWords=value.coarseControl??[
-    value.coarseControlFlags,0,0,0,0,0,0,0,0,0,0,value.coarseControlGeneration,
-    value.coarseControlValid,0,0,0,
+    value.coarseControlFlags,0,0,0,0,0,0,0,0,0,value.coarseControlGeneration,
+    value.coarseControlValid,0,0,0,0,
   ];
   const restrictionWords=value.fineRestrictionControl??[
     0,0,value.fineRestrictionFlags,value.fineRestrictionUnowned,
@@ -261,10 +273,19 @@ export function initialGlobalFineAuthorityEvidence(value: InitialGlobalFineAutho
     },
     coarse:{...coarse,errors:namedControlBits(coarse.flags,OCTREE_POWER_COARSE_LEVELSET_ERROR)},
     restriction:{...restriction,errors:namedControlBits(restriction.flags,FINE_TO_COARSE_LEVELSET_ERROR)},
+    powerFaces:value.powerFaceControl,
+    powerFaceCandidate:value.powerFaceCandidateControl,
+    powerRowDelta:value.powerRowDeltaControl,
+    powerDescriptor:value.powerDescriptorControl,
+    powerTopology:value.powerTopologyControl,
+    powerVelocity:value.powerVelocityControl,
     section5:{
-      faceBand:unpackOctreeFaceBandControl([...value.faceBandControl,
-        ...(value.faceBandMarchControl ?? []), ...(value.faceBandSearchControl ?? [])]),
+      faceBand:unpackOctreeFaceBandControl(value.faceBandControl),
+      candidateFaceBand:value.faceBandCandidateControl
+        ? unpackOctreeFaceBandControl(value.faceBandCandidateControl) : undefined,
       transition:unpackOctreeFaceBandTransitionControl(transitionWords),
+      candidateTransition:value.faceBandCandidateTransitionControl
+        ? unpackOctreeFaceBandTransitionControl(value.faceBandCandidateTransitionControl) : undefined,
       pointField:unpackOctreeFaceBandPointFieldControl(value.faceBandPointFieldControl),
       transientPower:unpackOctreeFaceBandTransientPowerControl(value.faceBandTransientPowerControl),
       powerPublication:unpackOctreeFaceBandPowerPublication(value.faceBandPowerPublicationControl),
@@ -317,8 +338,7 @@ export function initialGlobalFineAuthorityReadiness(
     || value.fineRestrictionValid !== OCTREE_POWER_COARSE_LEVELSET_VALID) {
     return rejected("fine-to-coarse level-set restriction did not publish");
   }
-  const faceBand = unpackOctreeFaceBandControl([...value.faceBandControl,
-    ...(value.faceBandMarchControl ?? []), ...(value.faceBandSearchControl ?? [])]);
+  const faceBand = unpackOctreeFaceBandControl(value.faceBandControl);
   const transition = unpackOctreeFaceBandTransitionControl(value.faceBandTransitionControl);
   const pointField = unpackOctreeFaceBandPointFieldControl(value.faceBandPointFieldControl);
   const transientPower = unpackOctreeFaceBandTransientPowerControl(value.faceBandTransientPowerControl);
@@ -342,29 +362,34 @@ export interface InitialPowerPressureDiagnostics {
   readonly mgpcgControl?: Uint32Array;
 }
 
-/** Section 4.3 uses PCG to a 1e-4 relative residual. A zero-RHS t=0 solve is
- * valid when the GPU marks it converged and publishes finite residual data. */
+/** Both explicitly selectable power solvers use the same fail-closed control
+ * ABI and 1e-4 native-L2 residual gate. A zero-RHS t=0 solve is valid when the
+ * selected GPU authority marks it converged and publishes finite data. */
 export function initialPowerPressureReadiness(
   value: InitialPowerPressureDiagnostics,
 ): InitialSparseAuthorityReadiness {
-  if (!value.authoritative || !value.solverLabel.includes("Section 4.3 hybrid")) {
-    return { ready: false, label: "Section 4.3 power pressure authority is unavailable" };
+  const section43 = value.solverLabel.includes("Section 4.3 hybrid");
+  const fixedGalerkin = value.solverLabel.includes("fixed native-L2 Galerkin");
+  if (!value.authoritative || (!section43 && !fixedGalerkin)) {
+    return { ready: false, label: "selected power pressure authority is unavailable" };
   }
   if (value.capacityOverflow || value.pressureRows === 0 || value.pressureEntries === 0) {
     return { ready: false, label: "power pressure CSR did not publish" };
   }
   const words = value.mgpcgControl;
-  if (!words || words.length < 16) return { ready: false, label: "Section 4.3 control is unavailable" };
+  if (!words || words.length < 16) return { ready: false, label: "selected pressure control is unavailable" };
   const floats = new Float32Array(words.buffer, words.byteOffset, words.length);
   const residualSquared = floats[4], rhsSquared = floats[5];
   const relativeSquared = residualSquared / Math.max(rhsSquared, 1e-30);
+  const residualAccepted = relativeSquared <= 1e-8
+    || (fixedGalerkin && residualSquared <= value.pressureRows * 1e-14);
   if (words[0] !== 0 || words[1] === 0 || words[3] !== value.pressureRows
     || !Number.isFinite(residualSquared) || residualSquared < 0
     || !Number.isFinite(rhsSquared) || rhsSquared < 0
-    || !Number.isFinite(relativeSquared) || relativeSquared > 1e-8) {
-    return { ready: false, label: "Section 4.3 PCG did not converge to relative residual 1e-4" };
+    || !Number.isFinite(relativeSquared) || !residualAccepted) {
+    return { ready: false, label: "selected pressure solver did not converge through its residual gate" };
   }
-  return { ready: true, label: `Section 4.3 power pressure published (${value.pressureRows} rows)` };
+  return { ready: true, label: `${fixedGalerkin ? "fixed Galerkin" : "Section 4.3"} power pressure published (${value.pressureRows} rows)` };
 }
 
 /**
@@ -385,7 +410,6 @@ export function publishedGlobalFineVolumeCells(
   if (control.flags !== FINE_LEVELSET_VOLUME_VALID || !control.initialized
     || control.generation !== diagnostics.generation || control.coarseRows === 0
     || control.lookupFailureSamples !== 0 || control.staleOwnerSamples !== 0
-    || (control.samples > 0 && !control.corrected)
     || !(control.referenceVolume > 0) || !Number.isFinite(control.referenceVolume)
     || !(control.currentVolume > 0) || !Number.isFinite(control.currentVolume)) return undefined;
   const referenceVolumeCells = control.referenceVolume / baseCellVolume_m3;
@@ -427,81 +451,53 @@ const quadtreePressureDescription = (projection: WebGPUQuadtreeTallCellProjectio
   ? `${quadtreePressureLabel(projection)} · ${projection.info.pressureIterationBudget ?? pressureIterations} fixed passes · spectrum [${quadtreeChebyshevSpectrum.lower}, ${quadtreeChebyshevSpectrum.upper}] · experimental`
   : `${quadtreePressureLabel(projection)} · ${projection.info.pressureIterationBudget ?? pressureIterations} encoded / ${projection.info.pressureIterationHardBudget ?? pressureIterations} hard · relative ${tolerance}`;
 
-/** The main-branch cubic solver retained as an A/B reference backend. */
+/** Shared dense Eulerian host used by the uniform and adaptive product methods. */
 export class WebGPUUniformEulerianSolver {
   readonly info: GPUEulerianInfo;
-  private velocityA: GPUTexture; private velocityB: GPUTexture;
-  private velocityC: GPUTexture; private velocityD: GPUTexture;
-  private pressureA: GPUTexture; private pressureB: GPUTexture;
-  private volumeA: GPUTexture; private volumeB: GPUTexture;
-  private heightA: GPUTexture; private heightB: GPUTexture; private terrainTexture: GPUTexture;
-  private transportA: GPUTexture; private transportB: GPUTexture; private fluxScales: GPUTexture;
-  private transportSampler: GPUSampler;
-  private params: GPUBuffer; private reductionBuffer: GPUBuffer; private sharpenBuffer: GPUBuffer; private occupancyColumns: GPUBuffer; private occupancyCell64Dispatch: GPUBuffer;
-  private bulkAtlasFallbackPageTable: GPUBuffer; private bulkAtlasFallbackParams: GPUBuffer;
-  private bulkAtlasFallbackVelocity: GPUTexture; private bulkAtlasFallbackWorklist: GPUBuffer;
-  private bulkAtlasControlSampleSparse: GPUBuffer; private bulkAtlasControlSampleDense: GPUBuffer; private bulkAtlasControlSparse: GPUBuffer; private bulkAtlasControlOff: GPUBuffer;
+  private velocityA!: GPUTexture; private velocityB!: GPUTexture;
+  private velocityC!: GPUTexture; private velocityD!: GPUTexture;
+  private pressureA!: GPUTexture; private pressureB!: GPUTexture;
+  private volumeA!: GPUTexture; private volumeB!: GPUTexture;
+  private heightA!: GPUTexture; private heightB!: GPUTexture; private terrainTexture: GPUTexture;
+  private transportA!: GPUTexture; private transportB!: GPUTexture; private fluxScales!: GPUTexture;
+  private transportSampler!: GPUSampler;
+  private params?: GPUBuffer; private reductionBuffer?: GPUBuffer; private sharpenBuffer?: GPUBuffer;
   private rigidBuffer: GPUBuffer; private rigidExchangeBuffer: GPUBuffer;
   private rigidSystem: WebGPURigidBodySystem;
   private statsReadbackBuffer?: GPUBuffer;
-  private bindGroupLayout: GPUBindGroupLayout;
+  private bindGroupLayout!: GPUBindGroupLayout;
   private advectPipeline!: GPUComputePipeline; private reversePipeline!: GPUComputePipeline;
   private correctPipeline!: GPUComputePipeline; private jacobiPipeline!: GPUComputePipeline;
   private projectPipeline!: GPUComputePipeline; private rigidPipeline!: GPUComputePipeline; private relaxSolidPhiPipeline!: GPUComputePipeline;
   private reductionPipeline!: GPUComputePipeline;
   private buildTransportPipeline!: GPUComputePipeline; private buildFluxScalesPipeline!: GPUComputePipeline;
-  private buildOccupancyPipeline!: GPUComputePipeline; private buildSparseOccupancyPipeline!: GPUComputePipeline; private resolveSparseOccupancyPipeline!: GPUComputePipeline;
-  private retiredVelocityClearPipeline!: GPUComputePipeline; private retiredVelocityClearLayout: GPUBindGroupLayout;
-  private retiredVelocityClearGroups: GPUBindGroup[] = [];
-  private retiredTransportClearPipeline!: GPUComputePipeline; private retiredTransportClearLayout: GPUBindGroupLayout;
-  private retiredTransportClearGroups: GPUBindGroup[] = [];
-  private retiredFluxScaleClearPipeline!: GPUComputePipeline; private retiredFluxScaleClearLayout: GPUBindGroupLayout;
-  private retiredFluxScaleClearGroup: GPUBindGroup;
+  private buildOccupancyPipeline!: GPUComputePipeline;
   private sharpenComputePipeline!: GPUComputePipeline; private sharpenScatterPipeline!: GPUComputePipeline; private sharpenResolvePipeline!: GPUComputePipeline;
-  private shaderModule:GPUShaderModule;private pipelineLayout:GPUPipelineLayout;private prepPipelineLayout:GPUPipelineLayout;
-  private advectGroup: GPUBindGroup; private reverseGroup: GPUBindGroup; private correctGroup: GPUBindGroup;
-  private jacobiABGroup: GPUBindGroup;
-  private jacobiBAGroup: GPUBindGroup; private projectGroup: GPUBindGroup;
-  private rigidGroup: GPUBindGroup; private reductionGroup: GPUBindGroup; private solidPhiGroup?: GPUBindGroup;
-  private occupancyGroup: GPUBindGroup; private transportFromCurrentGroup: GPUBindGroup; private fluxScaleGroup: GPUBindGroup;
-  private sharpenComputeGroup: GPUBindGroup; private sharpenScatterGroup: GPUBindGroup; private sharpenResolveGroup: GPUBindGroup;
+  private shaderModule!:GPUShaderModule;private pipelineLayout!:GPUPipelineLayout;private prepPipelineLayout!:GPUPipelineLayout;
+  private advectGroup!: GPUBindGroup; private reverseGroup!: GPUBindGroup; private correctGroup!: GPUBindGroup;
+  private jacobiABGroup!: GPUBindGroup;
+  private jacobiBAGroup!: GPUBindGroup; private projectGroup!: GPUBindGroup;
+  private rigidGroup!: GPUBindGroup; private reductionGroup!: GPUBindGroup; private solidPhiGroup?: GPUBindGroup;
+  private occupancyGroup!: GPUBindGroup; private transportFromCurrentGroup!: GPUBindGroup; private fluxScaleGroup!: GPUBindGroup;
+  private sharpenComputeGroup!: GPUBindGroup; private sharpenScatterGroup!: GPUBindGroup; private sharpenResolveGroup!: GPUBindGroup;
   private transportFromPredictedGroup?: GPUBindGroup;
-  private querySet?: GPUQuerySet; private queryResolve?: GPUBuffer;
-  private querySegments: GPUPhysicsTimestampSegment[] = [];
-  private queryCount = 0; private lastTime = 0; private readbackPending = false; private physicsTimingSampleId = 0;
-  private wallTimingPending = false;
-  private performanceReadbacksEnabled = true;
-  private pressureWallProbePending = false;
-  // Leave startup and the first interactive step on the production path. The
-  // t=0 authority readback is intentionally transport-pending; profiling step
-  // one would suppress the first post-transport readback and make that stale
-  // `committed: false` look like a real Section 5 rejection in the viewport.
-  private pressureWallProbeLastStep = 0;
-  private pressureWallProbeSampleId = 0;
-  /** Accepted outer GPU advances, distinct from adaptive physics substeps. */
-  private profilerAdvanceCount = 0;
-  private advancePhaseWallLastAdvance = OCTREE_INITIAL_ADVANCE_PHASE_PROFILE_STEP
-    - OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_ADVANCES;
-  private advancePhaseWallSampleId = 0;
-  private profiledAdvancePending = false;
+  private lastTime = 0;
+  private readbackPending = false;
+  private physicsTraceSampleId = 0;
+  private physicsTracePending = false;
+  private lastPhysicsTraceAt_ms = -Infinity;
+  private lastSegmentedPhysicsTraceAt_ms = -Infinity;
+  private hardwarePhysicsTraceInvalid = false;
   private profiledAdvanceCompletion?: Promise<void>;
   private validationChecked = false;
   private validationPromise?: Promise<void>;
   private readonly inflowBoundary?: InflowGridBoundary;
   private readonly velocityTransport: UniformVelocityTransport;
   private readonly densitySharpening: boolean;
-  private readonly sparseVelocityAdvectionRequested: boolean;
-  private readonly sparseTransportPreparationRequested: boolean;
-  private readonly sparseOccupancyFluxPreparationRequested: boolean;
-  private readonly hydrostaticSplit: boolean;
-  private readonly adaptiveFaceVelocityCutover: boolean;
-  private readonly hostAllocation: OctreeHostAllocationPlan;
+  private readonly hostAllocation?: UniformHostAllocationPlan;
   private readonly transportConservativeVolume: boolean;
   private quadtreeProjection?: WebGPUQuadtreeTallCellProjection;
   private octreeProjection?: WebGPUOctreeProjection;
-  private secondaryParticleSystem?: WebGPUSecondaryParticleSystem;
-  private secondaryParticleSamplingSource?: SecondaryParticleSamplingSource;
-  private secondaryParticlesEnabled = true;
   private readonly retiredQuadtreeProjections = new Set<WebGPUQuadtreeTallCellProjection>();
   private quadtreeRebuildPending = false;
   private quadtreeReadyProjection?: WebGPUQuadtreeTallCellProjection;
@@ -520,7 +516,6 @@ export class WebGPUUniformEulerianSolver {
   private readonly quadtreeInlineRebuild: boolean;
   private disposed = false;
   private initialSparseAuthorityPublished = false;
-  private readonly fencedInitialSparseAuthority: boolean;
   private baseAllocatedBytes = 0;
 
   constructor(
@@ -533,33 +528,10 @@ export class WebGPUUniformEulerianSolver {
     const c = scene.container, matched = createTallCellLayout(scene, quality, device.limits.maxTextureDimension3D, options.tallCellSettings);
     const nx = matched.nx, ny = matched.fineNy, nz = matched.nz;
     this.velocityTransport = options.velocityTransport ?? "maccormack";
-    this.fencedInitialSparseAuthority = initialSparseAuthorityFencesEnabled(
-      options.fencedInitialSparseAuthority === true,
-      device.features.has("timestamp-query"),
-    );
     this.densitySharpening = options.densitySharpening ?? true;
-    this.sparseVelocityAdvectionRequested = options.brickSparseVelocityAdvection ?? true;
-    // Kept as an explicit A/B until a sparse-domain scene proves a win. A
-    // full-footprint ocean retains most bulk bricks, and the indirect decode
-    // currently offsets the saved empty-air stores.
-    this.sparseTransportPreparationRequested = options.brickSparseTransportPreparation ?? false;
-    this.sparseOccupancyFluxPreparationRequested = options.brickSparseOccupancyFluxPreparation ?? false;
-    // The force kernel is shared by all Eulerian methods, but this formulation
-    // is intentionally enabled only when the octree pressure backend owns it.
-    this.hydrostaticSplit = options.hydrostaticSplit === true
-      && options.octree !== undefined
-      && scene.fluid.initialCondition === "tank-fill"
-      && scene.fluid.inflow === undefined
-      && scene.rigidBodies.length === 0;
-    this.adaptiveFaceVelocityCutover = adaptiveFaceRhsIsSupported(
-      options.octree?.faceVelocityTransport === true,
-      sceneHasTerrain(scene),
-      scene.rigidBodies.length,
-      this.hydrostaticSplit,
-    );
-    this.hostAllocation = planOctreeHostAllocation(
-      nx, ny, nz, this.velocityTransport, this.adaptiveFaceVelocityCutover,
-    );
+    this.hostAllocation = options.octree
+      ? undefined
+      : planUniformHostAllocation(nx, ny, nz, this.velocityTransport);
     this.rebuildQuadtreeEachStep = options.quadtreeRebuildTopology ?? true;
     // Narita et al. Algorithm 1 evaluates and subdivides the quadtree on every
     // Advance_Step. A caller may still request a slower experimental cadence,
@@ -570,57 +542,67 @@ export class WebGPUUniformEulerianSolver {
     // stays resident and no readback/upload handshake remains.
     this.quadtreeTopologyStaleLimit = Math.max(0, Math.round(options.quadtreeTopologyStaleSteps ?? 2));
     this.quadtreeInlineRebuild = options.quadtreeInlineRebuild ?? true;
-    this.secondaryParticlesEnabled = options.secondaryParticlesEnabled ?? options.secondaryParticles !== false;
     this.inflowBoundary=scene.fluid.inflow?createInflowGridBoundary(scene.fluid.inflow,scene.container,[nx,ny,nz]):undefined;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     const scalarTexture = (format: GPUTextureFormat, extent: readonly [number, number, number]) => device.createTexture({ size: extent, dimension: "3d", format, usage });
-    const velocityTexture = () => device.createTexture({ size: this.hostAllocation.velocityExtent, dimension: "3d", format: "rgba32float", usage });
-    this.velocityA = velocityTexture(); this.velocityB = velocityTexture();
-    this.velocityC = this.velocityTransport === "maccormack" ? velocityTexture() : this.velocityA;
-    this.velocityD = this.velocityTransport === "maccormack" ? velocityTexture() : this.velocityB;
-    this.pressureA = scalarTexture("r32float", this.hostAllocation.pressureExtent); this.pressureB = scalarTexture("r32float", this.hostAllocation.pressureExtent);
-    this.volumeA = scalarTexture("r32float", this.hostAllocation.volumeExtent); this.volumeB = scalarTexture("r32float", this.hostAllocation.volumeExtent);
+    if (this.hostAllocation) {
+      const velocityTexture = () => device.createTexture({
+        size: this.hostAllocation!.velocityExtent,
+        dimension: "3d",
+        format: "rgba32float",
+        usage,
+      });
+      this.velocityA = velocityTexture();
+      this.velocityB = velocityTexture();
+      this.velocityC = this.velocityTransport === "maccormack" ? velocityTexture() : this.velocityA;
+      this.velocityD = this.velocityTransport === "maccormack" ? velocityTexture() : this.velocityB;
+      this.pressureA = scalarTexture("r32float", this.hostAllocation.pressureExtent);
+      this.pressureB = scalarTexture("r32float", this.hostAllocation.pressureExtent);
+      this.volumeA = scalarTexture("r32float", this.hostAllocation.volumeExtent);
+      this.volumeB = scalarTexture("r32float", this.hostAllocation.volumeExtent);
+    }
     // x retains the historical highest-occupied-cell index used for culling.
     // y carries the octree-only, bottom-connected sub-cell surface eta. Keeping
     // them distinct prevents detached spray from becoming a hydrostatic column.
-    this.heightA = device.createTexture({ label: "Uniform column fallback A", size: [nx, nz], format: "rg32float", usage });
-    this.heightB = device.createTexture({ label: "Uniform column occupancy and hydrostatic reference", size: [nx, nz], format: "rg32float", usage });
+    if (this.hostAllocation) {
+      this.heightA = device.createTexture({
+        label: "Uniform column fallback A",
+        size: [nx, nz],
+        format: "rg32float",
+        usage,
+      });
+      this.heightB = device.createTexture({
+        label: "Uniform column occupancy and hydrostatic reference",
+        size: [nx, nz],
+        format: "rg32float",
+        usage,
+      });
+    }
     this.terrainTexture = device.createTexture({ label: "Uniform terrain heights", size: [nx, nz], format: "r32float", usage });
     // Filterable fp16 transport fields, padded with a zero shell so hardware
     // clamp-to-edge sampling still reads zero at solid wall faces.
-    const transportTexture = (label: string) => device.createTexture({ label, size: this.hostAllocation.transportExtent, dimension: "3d", format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
-    this.transportA = transportTexture("Uniform transport velocity A");
-    this.transportB = this.velocityTransport === "maccormack" ? transportTexture("Uniform transport velocity B") : this.transportA;
-    this.fluxScales = device.createTexture({ label: "Uniform volume flux scales", size: this.hostAllocation.fluxExtent, dimension: "3d", format: "rg32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
-    this.transportSampler = device.createSampler({ minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
-    this.params = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.bulkAtlasFallbackPageTable = device.createBuffer({ label: "Disabled bulk atlas page table", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(this.bulkAtlasFallbackPageTable, 0, new Uint32Array([0xffff_ffff]));
-    this.bulkAtlasFallbackParams = device.createBuffer({ label: "Disabled bulk atlas parameters", size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.bulkAtlasFallbackVelocity = device.createTexture({ label: "Disabled bulk atlas velocity", size: [1, 1, 1], dimension: "3d", format: "rgba32float", usage: GPUTextureUsage.TEXTURE_BINDING });
-    this.bulkAtlasFallbackWorklist = device.createBuffer({ label: "Disabled bulk velocity worklist", size: 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
-    this.bulkAtlasControlSampleSparse = device.createBuffer({ label: "Enable bulk atlas sampling and sparse targets", size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.bulkAtlasControlSampleDense = device.createBuffer({ label: "Enable bulk atlas sampling with dense targets", size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.bulkAtlasControlSparse = device.createBuffer({ label: "Enable sparse bulk targets", size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.bulkAtlasControlOff = device.createBuffer({ label: "Disable bulk atlas sampling", size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(this.bulkAtlasControlSampleSparse, 0, new Uint32Array([1, 1, 0, 0]));
-    device.queue.writeBuffer(this.bulkAtlasControlSampleDense, 0, new Uint32Array([1, 0, 0, 0]));
-    device.queue.writeBuffer(this.bulkAtlasControlSparse, 0, new Uint32Array([0, 1, 0, 0]));
-    this.reductionBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.sharpenBuffer = device.createBuffer({ label: "Uniform sharpening deposits", size: this.hostAllocation.conditioningBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.occupancyColumns = device.createBuffer({ label: "Sparse column occupancy maxima", size: this.sparseOccupancyFluxPreparationRequested ? nx * nz * 4 : 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // Dawn/Metal requires the indirect args to be disjoint from the worklist
-    // simultaneously bound as storage. Stage the producer's byte-48 ABI once
-    // per refresh; payload decoding still reads the original resident list.
-    this.occupancyCell64Dispatch = device.createBuffer({ label: "Sparse occupancy/flux cell64 dispatch", size: 12, usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
+    if (this.hostAllocation) {
+      const transportTexture = (label: string) => device.createTexture({ label, size: this.hostAllocation!.transportExtent, dimension: "3d", format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
+      this.transportA = transportTexture("Uniform transport velocity A");
+      this.transportB = this.velocityTransport === "maccormack" ? transportTexture("Uniform transport velocity B") : this.transportA;
+      this.fluxScales = device.createTexture({ label: "Uniform volume flux scales", size: this.hostAllocation.fluxExtent, dimension: "3d", format: "rg32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
+      this.transportSampler = device.createSampler({ minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
+    }
+    if (this.hostAllocation) this.params = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    if (this.hostAllocation) {
+      this.reductionBuffer = device.createBuffer({
+        label: "Uniform diagnostics reduction",
+        size: 16,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+      });
+      this.sharpenBuffer = device.createBuffer({ label: "Uniform sharpening deposits", size: this.hostAllocation.conditioningBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    }
     this.rigidExchangeBuffer = device.createBuffer({ size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchangeBuffer, this.terrainTexture);
     this.rigidBuffer = this.rigidSystem.stateBuffer;
     this.rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
-    if (device.features.has("timestamp-query")) {
-      this.querySet = device.createQuerySet({ type: "timestamp", count: GPU_PHYSICS_TIMESTAMP_CAPACITY });
-      this.queryResolve = device.createBuffer({ size: GPU_PHYSICS_TIMESTAMP_CAPACITY * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-    }
+    let prepLayout: GPUBindGroupLayout | undefined;
+    if (this.hostAllocation) {
     this.shaderModule = device.createShaderModule({ label: "Fluid Lab uniform reference kernels", code: legacyUniformComputeShader });
     this.bindGroupLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
@@ -643,63 +625,30 @@ export class WebGPUUniformEulerianSolver {
       { binding: 19, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 20, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 21, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } }
-      ,{ binding: 22, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
-      ,{ binding: 23, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
-      ,{ binding: 24, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
-      ,{ binding: 25, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
-      ,{ binding: 26, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
-      ,{ binding: 27, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
     ] });
     // The main layout already carries four storage textures (the per-stage
     // limit), so the transport/flux-scale writers get their own layout.
-    const prepLayout = device.createBindGroupLayout({ entries: [
+    prepLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 16, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba16float", viewDimension: "3d" } },
       { binding: 18, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rg32float", viewDimension: "3d" } },
       { binding: 20, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-      { binding: 24, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      { binding: 25, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      { binding: 26, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
     ] });
     this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] });
     this.prepPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [prepLayout] });
-    this.retiredVelocityClearLayout = device.createBindGroupLayout({ label: "Retired bulk velocity clear layout", entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-    ] });
-    if (!this.adaptiveFaceVelocityCutover) {
-      const retiredClearModule = device.createShaderModule({ label: "Retired bulk velocity clear", code: retiredBulkVelocityClearShader });
-      this.retiredVelocityClearPipeline = device.createComputePipeline({ label: "Clear retired bulk velocities", layout: device.createPipelineLayout({ bindGroupLayouts: [this.retiredVelocityClearLayout] }), compute: { module: retiredClearModule, entryPoint: "clearRetiredVelocity" } });
+    if(!options.deferPipelineCompilation)this.createPipelinesSync();
     }
-    this.retiredTransportClearLayout = device.createBindGroupLayout({ label: "Retired bulk transport clear layout", entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba16float", viewDimension: "3d" } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-    ] });
-    if (!this.adaptiveFaceVelocityCutover) {
-      const retiredTransportClearModule = device.createShaderModule({ label: "Retired bulk transport clear", code: retiredBulkTransportClearShader });
-      this.retiredTransportClearPipeline = device.createComputePipeline({ label: "Clear retired bulk transport fields", layout: device.createPipelineLayout({ bindGroupLayouts: [this.retiredTransportClearLayout] }), compute: { module: retiredTransportClearModule, entryPoint: "clearRetiredTransport" } });
-    }
-    this.retiredFluxScaleClearLayout = device.createBindGroupLayout({ label: "Retired bulk flux-scale clear layout", entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rg32float", viewDimension: "3d" } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-    ] });
-    if (!this.adaptiveFaceVelocityCutover) {
-      const retiredFluxScaleClearModule = device.createShaderModule({ label: "Retired bulk flux-scale clear", code: retiredBulkFluxScaleClearShader });
-      this.retiredFluxScaleClearPipeline = device.createComputePipeline({ label: "Clear retired bulk flux scales", layout: device.createPipelineLayout({ bindGroupLayouts: [this.retiredFluxScaleClearLayout] }), compute: { module: retiredFluxScaleClearModule, entryPoint: "clearRetiredFluxScales" } });
-    }
-    if(!options.deferPipelineCompilation && !this.adaptiveFaceVelocityCutover)this.createPipelinesSync();
-    const pressureIterations = Math.max(8, Math.min(400, Math.round(options.pressureIterations ?? (quality === "balanced" ? 64 : quality === "high" ? 80 : 96))));
+    const pressureIterations = options.octree
+      ? 0
+      : Math.max(8, Math.min(400, Math.round(options.pressureIterations ?? (quality === "balanced" ? 64 : quality === "high" ? 80 : 96))));
     const count = nx * ny * nz;
     this.info = {
       nx, ny, nz, storedNy: ny, cellCount: count, equivalentUniformCells: count,
       compressionRatio: 1, activeCompressionRatio: 1, activeSampleCount: count, regularLayers: ny, maximumNeighborDelta: 0,
       gridKind: "uniform", cellSize_m: Math.max(c.width_m / nx, c.height_m / ny, c.depth_m / nz),
-      pressureIterations, allocatedBytes: this.hostAllocation.allocatedBytes + this.occupancyColumns.size + this.occupancyCell64Dispatch.size, quality, encodedSteps: 0, maximumTallCellHeight: 0,
+      pressureIterations, allocatedBytes: this.hostAllocation?.allocatedBytes ?? 0, quality, encodedSteps: 0, maximumTallCellHeight: 0,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0, simulationLag_s: 0
     };
     this.baseAllocatedBytes = this.info.allocatedBytes;
@@ -721,99 +670,58 @@ export class WebGPUUniformEulerianSolver {
       this.applyQuadtreeInfo(this.quadtreeProjection, pressureIterations);
     } else if (options.octree) {
       this.octreeProjection = new WebGPUOctreeProjection(device, scene, { nx, ny, nz }, {
-        velocityIn: this.velocityB, velocityOut: this.velocityA, velocityScratch: this.velocityD,
         rigidBodies: this.rigidBuffer, rigidExchange: this.rigidExchangeBuffer, terrain: this.terrainTexture,
       }, {
-        pressureIterations,
-        powerPcgIterationCap: options.octree.powerPcgIterationCap,
+        powerPressureSolver: options.octree.powerPressureSolver,
+        powerGalerkinHierarchy: options.octree.powerPressureSolver === "galerkin"
+          ? buildFixedAdaptiveOctreePowerGalerkinHierarchy(
+            [nx, ny, nz],
+            options.octree.maximumLeafSize ?? 16,
+            {
+            transfer: "trilinear",
+            coarsestNodeLimit: 64,
+            },
+          )
+          : undefined,
         powerBoundarySmoothingIterations: options.octree.powerBoundarySmoothingIterations,
-        faceVelocityTransport: options.octree.faceVelocityTransport,
-        hydrostaticSplit: this.hydrostaticSplit,
         maximumLeafSize: options.octree.maximumLeafSize ?? 16,
         adaptivity: options.octree.adaptivity ?? 1,
         interfaceRefinementBandCells: options.octree.interfaceRefinementBandCells ?? 4,
-        surfaceDetailStrength: options.octree.surfaceDetailStrength ?? 0,
-        sparseSurfaceBand: options.octree.sparseSurfaceBand ?? "off",
-        surfaceRefinementFactor: options.octree.surfaceRefinementFactor ?? 2,
-        globalFineLevelSetFactor: options.octree.globalFineLevelSetFactor,
+        globalFineLevelSetFactor: options.octree.globalFineLevelSetFactor ?? 4,
         globalFineLevelSetMaximumBricks: options.octree.globalFineLevelSetMaximumBricks,
-        sparseSurfaceBandCells: options.octree.sparseSurfaceBandCells ?? 4,
-        sparseSurfacePageFraction: options.octree.sparseSurfacePageFraction ?? 0.75,
-        brickAtlas: options.octree.brickAtlas ?? "mirror",
-        brickPreActivation: options.octree.brickPreActivation ?? true,
-        brickSparseSurface: options.octree.brickSparseSurface ?? true,
-        brickSparseExtrapolation: options.octree.brickSparseExtrapolation ?? false,
-        jacobiRelaxation: options.octree.jacobiRelaxation ?? 0.8,
-        extrapolationSweeps: options.octree.extrapolationSweeps ?? 4,
-        leafSolver: options.octree.leafSolver,
-        pressureWarmStart: options.octree.pressureWarmStart,
         pressureRowCapacity: options.octree.pressureRowCapacity,
-        powerDiagramProjection: options.octree.powerDiagramProjection,
         energyLedger: options.octree.energyLedger,
         energyLedgerStepCapacity: options.octree.energyLedgerStepCapacity,
       }, options.deferPipelineCompilation);
       this.applyOctreeInfo(this.octreeProjection);
-      if (this.adaptiveFaceVelocityCutover && !this.octreeProjection.adaptiveFaceVelocityAuthority) {
-        throw new Error("Octree compact-face host cutover requires adaptive face velocity authority");
-      }
-      if (options.secondaryParticles !== false && !this.adaptiveFaceVelocityCutover) {
-        this.secondaryParticleSamplingSource = {
-          surfaceTexture: this.octreeProjection.levelSetTexture,
-          velocityTexture: this.velocityA,
-          columnBaseTexture: this.heightA,
-          fieldLayout: "uniform",
-          surfaceEncoding: "level-set"
-        };
-        this.secondaryParticleSystem = new WebGPUSecondaryParticleSystem(device, { nx, ny, nz }, {
-          width_m: c.width_m,
-          height_m: c.height_m,
-          depth_m: c.depth_m,
-          topOpen: c.top === "open",
-          gravity_m_s2: scene.fluid.gravity_m_s2,
-          density_kg_m3: scene.fluid.density_kg_m3,
-          surfaceTension_N_m: scene.fluid.surfaceTension_N_m,
-          randomSeed: scene.randomSeed
-        }, this.secondaryParticleSamplingSource, options.secondaryParticleCapacity, options.deferPipelineCompilation, options.secondaryParticleSurfaceCorrection ?? 0);
-        this.info.secondaryParticleCapacity = this.secondaryParticleSystem.renderSource.capacity;
-        this.info.allocatedBytes += this.secondaryParticleSystem.allocatedBytes;
-      }
     }
     // The octree's resident level set is the complete liquid state. Keep VOF
     // transport only for the uniform solver and quadtree catastrophe recovery.
     this.transportConservativeVolume = !this.octreeProjection;
-    // Construct every shared-solve bind group only after the adaptive surface
-    // exists. Both adaptive methods use their resident level set as the sole
-    // liquid authority. A compatibility VOF texture stays bound at binding 4,
-    // but the octree path leaves it dormant.
+    // The compact octree owns a separate pipeline graph. Shared dense bind
+    // groups exist only for the uniform and quadtree methods.
+    if (this.hostAllocation) {
     const surfaceAuthority = this.adaptiveProjection?.levelSetTexture ?? this.volumeA;
-    const bulkSource = this.octreeProjection?.fluidBrickAtlasSamplingSource;
-    const sparseTransportSource = this.sparseTransportPreparationRequested
-      && bulkSource?.mode === "mirror" && bulkSource.sparseDispatchSafe ? bulkSource : undefined;
-    const sparseOccupancyFluxSource = this.sparseOccupancyFluxPreparationRequested
-      && bulkSource?.mode === "mirror" && bulkSource.sparseDispatchSafe ? bulkSource : undefined;
-    const prepGroup = (velocity: GPUTexture, transport: GPUTexture, sparseSource?: FluidBrickAtlasSamplingSource) => device.createBindGroup({ layout: prepLayout, entries: [
+    const prepGroup = (velocity: GPUTexture, transport: GPUTexture) => device.createBindGroup({ layout: prepLayout!, entries: [
       { binding: 0, resource: velocity.createView() }, { binding: 4, resource: this.volumeA.createView() },
-      { binding: 6, resource: { buffer: this.params } }, { binding: 16, resource: transport.createView() },
+      { binding: 6, resource: { buffer: this.params! } }, { binding: 16, resource: transport.createView() },
       { binding: 18, resource: this.fluxScales.createView() }, { binding: 20, resource: surfaceAuthority.createView() },
-      { binding: 24, resource: { buffer: sparseSource?.params ?? this.bulkAtlasFallbackParams } },
-      { binding: 25, resource: { buffer: sparseSource ? this.bulkAtlasControlSparse : this.bulkAtlasControlOff } },
-      { binding: 26, resource: { buffer: sparseSource?.bulkWorklist ?? this.bulkAtlasFallbackWorklist } }
     ] });
-    this.transportFromCurrentGroup = prepGroup(this.velocityA, this.transportA, sparseTransportSource);
-    if (this.velocityTransport === "maccormack") this.transportFromPredictedGroup = prepGroup(this.velocityC, this.transportB, sparseTransportSource);
-    this.fluxScaleGroup = prepGroup(this.velocityA, this.transportA, sparseOccupancyFluxSource);
+    this.transportFromCurrentGroup = prepGroup(this.velocityA, this.transportA);
+    if (this.velocityTransport === "maccormack") this.transportFromPredictedGroup = prepGroup(this.velocityC, this.transportB);
+    this.fluxScaleGroup = prepGroup(this.velocityA, this.transportA);
     // Advection groups read the column occupancy from heightB; heightA stays
     // zero for the renderer's uniform column-base fallback.
-    this.occupancyGroup = this.group(this.velocityA, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB, this.velocityA, this.velocityA, this.transportA, surfaceAuthority, false, "occupancy");
+    this.occupancyGroup = this.group(this.velocityA, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB, this.velocityA, this.velocityA, this.transportA, surfaceAuthority);
     this.advectGroup = this.velocityTransport === "maccormack"
-      ? this.group(this.velocityA, this.velocityC, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityB, this.velocityD, this.transportA, surfaceAuthority, true, "velocity")
-      : this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, surfaceAuthority, true, "velocity");
-    this.reverseGroup = this.velocityTransport === "maccormack" ? this.group(this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityB, this.transportB, surfaceAuthority, false, "velocity") : this.advectGroup;
+      ? this.group(this.velocityA, this.velocityC, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityB, this.velocityD, this.transportA, surfaceAuthority)
+      : this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, surfaceAuthority);
+    this.reverseGroup = this.velocityTransport === "maccormack" ? this.group(this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityB, this.transportB, surfaceAuthority) : this.advectGroup;
     // The uniform path samples its current VOF field as the liquid authority.
     // Its correction output is volumeA, so sampling volumeA in the same
     // dispatch would alias one texture as both sampled and writable.
     const correctionSurfaceAuthority = this.adaptiveProjection?.levelSetTexture ?? this.volumeB;
-    this.correctGroup = this.velocityTransport === "maccormack" ? this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityC, this.velocityD, this.transportA, correctionSurfaceAuthority, true, "velocity") : this.advectGroup;
+    this.correctGroup = this.velocityTransport === "maccormack" ? this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityC, this.velocityD, this.transportA, correctionSurfaceAuthority) : this.advectGroup;
     this.jacobiABGroup = this.group(this.velocityB, this.velocityA, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA);
     this.jacobiBAGroup = this.group(this.velocityB, this.velocityA, this.pressureB, this.pressureA, this.volumeB, this.volumeA, this.heightB, this.heightA);
     const finalPressure = pressureIterations % 2 === 0 ? this.pressureA : this.pressureB;
@@ -824,46 +732,18 @@ export class WebGPUUniformEulerianSolver {
     this.sharpenScatterGroup = this.group(this.velocityA, this.velocityB, this.pressureB, this.pressureA, this.volumeA, this.volumeB, this.heightB, this.heightA);
     this.sharpenResolveGroup = this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
     this.reductionGroup = this.group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
-    const clearWorklist = bulkSource?.mode === "mirror" && bulkSource.sparseDispatchSafe ? bulkSource.bulkWorklist : this.bulkAtlasFallbackWorklist;
-    const clearParams = bulkSource?.mode === "mirror" && bulkSource.sparseDispatchSafe ? bulkSource.params : this.bulkAtlasFallbackParams;
-    this.retiredVelocityClearGroups = [this.velocityA, this.velocityB, this.velocityC, this.velocityD].map((velocity) => device.createBindGroup({
-      label: "Retired bulk velocity clear bindings",
-      layout: this.retiredVelocityClearLayout,
-      entries: [
-        { binding: 0, resource: velocity.createView() },
-        { binding: 1, resource: { buffer: clearWorklist } },
-        { binding: 2, resource: { buffer: clearParams } },
-      ],
-    }));
-    this.retiredTransportClearGroups = [...new Set([this.transportA, this.transportB])].map((transport) => device.createBindGroup({
-      label: "Retired bulk transport clear bindings",
-      layout: this.retiredTransportClearLayout,
-      entries: [
-        { binding: 0, resource: transport.createView() },
-        { binding: 1, resource: { buffer: clearWorklist } },
-        { binding: 2, resource: { buffer: clearParams } },
-      ],
-    }));
-    this.retiredFluxScaleClearGroup = device.createBindGroup({
-      label: "Retired bulk flux-scale clear bindings",
-      layout: this.retiredFluxScaleClearLayout,
-      entries: [
-        { binding: 0, resource: this.fluxScales.createView() },
-        { binding: 1, resource: { buffer: clearWorklist } },
-        { binding: 2, resource: { buffer: clearParams } },
-      ],
-    });
-    // Paper Sec 3.9.1 phi-s over either resident adaptive level set: the pass
+    // Paper Sec 3.9.1 phi-s over the quadtree resident level set: the pass
     // aliases the idle uniform pressure slots (pressureIn = pre-pass copy in
     // pressureA, pressureOut = the level-set texture itself). The velocity and
     // volume outputs are bound but never written by relaxSolidPhi.
-    if (this.adaptiveProjection) this.solidPhiGroup = this.group(this.velocityA, this.velocityD, this.pressureA, this.adaptiveProjection.levelSetTexture, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA);
+    if (this.quadtreeProjection) this.solidPhiGroup = this.group(this.velocityA, this.velocityD, this.pressureA, this.quadtreeProjection.levelSetTexture, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA);
+    }
     if (this.octreeProjection && !options.deferPipelineCompilation) this.publishInitialSparseScene();
   }
 
   private pipelineDescriptor(entryPoint:string,prep=false):GPUComputePipelineDescriptor{return{layout:prep?this.prepPipelineLayout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};}
-  private assignPipelines(compiled:GPUComputePipeline[]){this.advectPipeline=compiled[0];this.reversePipeline=compiled[1];this.correctPipeline=compiled[2];this.jacobiPipeline=compiled[3];this.projectPipeline=compiled[4];this.rigidPipeline=compiled[5];this.relaxSolidPhiPipeline=compiled[6];this.reductionPipeline=compiled[7];this.buildOccupancyPipeline=compiled[8];this.buildSparseOccupancyPipeline=compiled[9];this.resolveSparseOccupancyPipeline=compiled[10];this.buildTransportPipeline=compiled[11];this.buildFluxScalesPipeline=compiled[12];this.sharpenComputePipeline=compiled[13];this.sharpenScatterPipeline=compiled[14];this.sharpenResolvePipeline=compiled[15];}
-  private createPipelinesSync(){const pipeline=(entryPoint:string,prep=false)=>this.device.createComputePipeline(this.pipelineDescriptor(entryPoint,prep));const compiled=[pipeline(this.velocityTransport==="maccormack"?"advect":"semiLagrangianAdvection"),pipeline("reverseAdvection"),pipeline("correctAdvection"),pipeline("jacobi"),pipeline("project"),pipeline("coupleRigid"),pipeline("relaxSolidPhi"),pipeline("reduceDiagnostics"),pipeline("buildOccupancy"),pipeline("buildSparseOccupancy"),pipeline("resolveSparseOccupancy"),pipeline("buildTransport",true),pipeline("buildFluxScales",true),pipeline("sharpenCompute"),pipeline("sharpenScatter"),pipeline("sharpenResolve")];this.assignPipelines(compiled);let cache=uniformPipelineCache.get(this.device);if(!cache){cache=new Map();uniformPipelineCache.set(this.device,cache);}cache.set(this.velocityTransport,compiled);}
+  private assignPipelines(compiled:GPUComputePipeline[]){this.advectPipeline=compiled[0];this.reversePipeline=compiled[1];this.correctPipeline=compiled[2];this.jacobiPipeline=compiled[3];this.projectPipeline=compiled[4];this.rigidPipeline=compiled[5];this.relaxSolidPhiPipeline=compiled[6];this.reductionPipeline=compiled[7];this.buildOccupancyPipeline=compiled[8];this.buildTransportPipeline=compiled[9];this.buildFluxScalesPipeline=compiled[10];this.sharpenComputePipeline=compiled[11];this.sharpenScatterPipeline=compiled[12];this.sharpenResolvePipeline=compiled[13];}
+  private createPipelinesSync(){const pipeline=(entryPoint:string,prep=false)=>this.device.createComputePipeline(this.pipelineDescriptor(entryPoint,prep));const compiled=[pipeline(this.velocityTransport==="maccormack"?"advect":"semiLagrangianAdvection"),pipeline("reverseAdvection"),pipeline("correctAdvection"),pipeline("jacobi"),pipeline("project"),pipeline("coupleRigid"),pipeline("relaxSolidPhi"),pipeline("reduceDiagnostics"),pipeline("buildOccupancy"),pipeline("buildTransport",true),pipeline("buildFluxScales",true),pipeline("sharpenCompute"),pipeline("sharpenScatter"),pipeline("sharpenResolve")];this.assignPipelines(compiled);let cache=uniformPipelineCache.get(this.device);if(!cache){cache=new Map();uniformPipelineCache.set(this.device,cache);}cache.set(this.velocityTransport,compiled);}
   static async createAsync(device:GPUDevice,scene:SceneDescription,quality:GPUQuality,onRigidLoads:((loads:GPURigidLoad[])=>void)|undefined,options:WebGPUUniformEulerianOptions,onProgress:(label:string,completed:number,total:number,phase?:string,taskId?:string)=>void,signal:AbortSignal=new AbortController().signal){
     const runner=new GPUInitializationTaskRunner((snapshot)=>onProgress(snapshot.label,snapshot.completed,snapshot.total,snapshot.phase,snapshot.taskId),signal);
     let solver:WebGPUUniformEulerianSolver|undefined;
@@ -875,14 +755,13 @@ export class WebGPUUniformEulerianSolver {
   }
   private initializationTasks():GPUInitializationTask[]{
     const tasks:GPUInitializationTask[]=[];
-    if (!this.adaptiveFaceVelocityCutover) {
+    if (this.hostAllocation) {
       const cached=uniformPipelineCache.get(this.device)?.get(this.velocityTransport);
       if(cached)tasks.push({id:"uniform.pipeline-cache",phase:"solver-pipelines",label:"Reuse compiled simulation programs",run:()=>this.assignPipelines(cached)});
       const definitions=[
         ["Advect velocity",this.velocityTransport==="maccormack"?"advect":"semiLagrangianAdvection",false],["Reverse advection","reverseAdvection",false],
         ["Correct advection","correctAdvection",false],["Relax pressure","jacobi",false],["Project velocity","project",false],
         ["Couple rigid bodies","coupleRigid",false],["Relax solid level set","relaxSolidPhi",false],["Reduce diagnostics","reduceDiagnostics",false],["Build occupancy","buildOccupancy",false],
-        ["Build sparse occupancy","buildSparseOccupancy",false],["Resolve sparse occupancy","resolveSparseOccupancy",false],
         ["Build transport field","buildTransport",true],["Build flux scales","buildFluxScales",true],
         ["Sharpen density","sharpenCompute",false],["Scatter sharpened mass","sharpenScatter",false],["Resolve sharpened mass","sharpenResolve",false]
       ] as const,compiled:GPUComputePipeline[]=new Array(definitions.length);
@@ -890,8 +769,7 @@ export class WebGPUUniformEulerianSolver {
     }
     if(this.quadtreeProjection)tasks.push({id:"quadtree.pipeline-set",phase:"adaptive-topology",label:"Compile adaptive pressure pipeline set",run:()=>this.quadtreeProjection!.initializePipelines(()=>{})});
     else if(this.octreeProjection)tasks.push(...this.octreeProjection.initializationTasks());
-    if(this.secondaryParticleSystem)tasks.push(...this.secondaryParticleSystem.initializationTasks());
-    if (this.octreeProjection && this.fencedInitialSparseAuthority) {
+    if (this.octreeProjection) {
       let previousTaskId: string | undefined;
       OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.forEach((authorityPhase, index) => {
         const id = index === 0 ? "solver.warmup" : `solver.warmup.${authorityPhase.id}`;
@@ -901,10 +779,6 @@ export class WebGPUUniformEulerianSolver {
           run: () => this.publishInitialSparseScenePhase(authorityPhase.id) });
         previousTaskId = id;
       });
-    } else if (this.octreeProjection) {
-      tasks.push({ id: "solver.warmup", phase: "warmup",
-        label: "Publish and validate initial sparse scene",
-        run: () => this.publishInitialSparseSceneBatched() });
     } else {
       tasks.push({id:"solver.warmup",phase:"warmup",label:"Finish initial GPU uploads",run:()=>this.publishInitialSparseScene()});
     }
@@ -942,7 +816,16 @@ export class WebGPUUniformEulerianSolver {
       }
       throw error;
     }
-    if (phase === "cold-topology") this.octreeProjection.finishInlineRebuild();
+    if (phase === "cold-topology") {
+      const failure = await this.octreeProjection.readPowerFrontierFailure();
+      const frontier = failure.frontier;
+      const selector = frontier[2] ?? 0xffff_ffff;
+      const count = selector < 2 ? frontier[selector] ?? 0 : 0;
+      if (selector >= 2 || (frontier[3] ?? 0) === 0 || count === 0) {
+        throw new Error(`Initial sparse authority cold-topology published no liquid-row frontier: ${JSON.stringify(failure)}`);
+      }
+      this.octreeProjection.finishInlineRebuild();
+    }
     if (phase === "sparse-render-world") {
       await this.validateInitialSparseAuthority();
       // This assignment is deliberately inside the final phase task, after
@@ -953,52 +836,12 @@ export class WebGPUUniformEulerianSolver {
     }
   }
 
-  /** Product startup: all Section 4/5 dependencies are encoded in-order in
-   * one command buffer. WebGPU dispatch usage scopes make the writes visible
-   * to later dispatches without phase submissions or CPU fences. The single
-   * fence precedes the bounded validation readbacks and readiness latch. */
-  private async publishInitialSparseSceneBatched() {
-    const projection = this.octreeProjection;
-    if (!projection) throw new Error("Sparse authority batch requires an octree projection");
-    this.initialSparseAuthorityPublished = false;
-    this.device.pushErrorScope("validation");
-    let validationScopeOpen = true;
-    const initialSparseScene = this.device.createCommandEncoder({
-      label: "Initial sparse authority: combined Section 4/5 publication",
-    });
-    try {
-      projection.encodeInitialSparseAuthority(initialSparseScene);
-      this.device.queue.submit([initialSparseScene.finish()]);
-      projection.retireSubmittedEncoder(initialSparseScene);
-      await this.device.queue.onSubmittedWorkDone();
-      const validationError = await this.device.popErrorScope();
-      validationScopeOpen = false;
-      if (validationError) {
-        throw new Error(`Initial sparse authority combined validation failed: ${validationError.message}`);
-      }
-    } catch (error) {
-      if (validationScopeOpen) {
-        const validationError = await this.device.popErrorScope().catch(() => null);
-        validationScopeOpen = false;
-        if (validationError) {
-          throw new Error(`Initial sparse authority combined validation failed: ${validationError.message}`);
-        }
-      }
-      throw error;
-    }
-    projection.finishInlineRebuild();
-    await this.validateInitialSparseAuthority();
-    this.initialSparseAuthorityPublished = true;
-    this.applyOctreeInfo(projection);
-  }
-
   private applyGlobalFineDiagnostics(value: InitialGlobalFineAuthorityDiagnostics) {
     const coarse=unpackOctreePowerCoarseLevelSetControl(value.coarseControl ?? [
-      value.coarseControlFlags,0,0,0,0,0,0,0,0,0,0,value.coarseControlGeneration,
-      value.coarseControlValid,0,0,0,
+      value.coarseControlFlags,0,0,0,0,0,0,0,0,0,value.coarseControlGeneration,
+      value.coarseControlValid,0,0,0,0,
     ]);
-    const faceBand=unpackOctreeFaceBandControl([...value.faceBandControl,
-      ...(value.faceBandMarchControl ?? []), ...(value.faceBandSearchControl ?? [])]);
+    const faceBand=unpackOctreeFaceBandControl(value.faceBandControl);
     const transition=unpackOctreeFaceBandTransitionControl([...value.faceBandTransitionControl,
       ...(value.faceBandTransitionOwnerFailure ?? [])]);
     const pointField=unpackOctreeFaceBandPointFieldControl(value.faceBandPointFieldControl);
@@ -1031,25 +874,16 @@ export class WebGPUUniformEulerianSolver {
     this.info.globalFineFaceBandAcceptedCount=faceBand.acceptedCount;
     this.info.globalFineFaceBandUnresolvedCount=faceBand.unresolvedCount;
     this.info.globalFineFaceBandSampleFailures=faceBand.sampleFailures;
-    this.info.globalFineFaceBandCoarsePhiFallbacks=faceBand.coarsePhiFallbacks;
+    this.info.globalFineFaceBandCoarsePhiSamples=faceBand.coarsePhiSamples;
     this.info.globalFineFaceBandCoarsePhiFailures=faceBand.coarsePhiFailures;
     this.info.globalFineFaceBandPhiExtensions=faceBand.bandPhiExtensions;
-    this.info.globalFineFaceBandMarchHeapHighWater=faceBand.marchHeapHighWater;
-    this.info.globalFineFaceBandMarchPops=faceBand.marchPops;
-    this.info.globalFineFaceBandMarchTrials=faceBand.marchTrials;
-    this.info.globalFineFaceBandMarchChunks=faceBand.marchChunks;
-    this.info.globalFineFaceBandMarchChunkBound=faceBand.marchChunkBound;
-    this.info.globalFineFaceBandMarchCapExhausted=faceBand.marchCapExhausted;
-    this.info.globalFineFaceBandMarchUnresolvedWithPredecessor=faceBand.marchUnresolvedWithAcceptedPredecessor;
-    this.info.globalFineFaceBandMarchDisconnected=faceBand.marchDisconnected;
-    this.info.globalFineFaceBandDirectAnchorSuccess=faceBand.directAnchorSuccess;
-    this.info.globalFineFaceBandFullRowFallbackInvocations=faceBand.fullRowFallbackInvocations;
-    this.info.globalFineFaceBandFullRowCandidateRowsTested=faceBand.fullRowCandidateRowsTested;
-    this.info.globalFineFaceBandSurroundingOwnerFallbackInvocations=faceBand.surroundingOwnerFallbackInvocations;
-    this.info.globalFineFaceBandSurroundingOwnerRowsTested=faceBand.surroundingOwnerRowsTested;
-    this.info.globalFineFaceBandAirSamplesSelected=faceBand.airSamplesSelected;
-    this.info.globalFineFaceBandAirSamplesEvaluated=faceBand.airSamplesEvaluated;
-    this.info.globalFineFaceBandConnectivityFallbacks=faceBand.connectivityFallbacks;
+    this.info.globalFineFaceBandClosestPointFaces=faceBand.closestPointFaces;
+    this.info.globalFineFaceBandClosestPointFailures=faceBand.closestPointFailures;
+    this.info.globalFineFaceBandLiquidInterpolationFailures=faceBand.liquidInterpolationFailures;
+    this.info.globalFineFaceBandCptNoOwnerFailures=faceBand.cptNoOwnerFailures;
+    this.info.globalFineFaceBandCptSupportOwnerFailures=faceBand.cptSupportOwnerFailures;
+    this.info.globalFineFaceBandCptNoContainingSimplexFailures=faceBand.cptNoContainingSimplexFailures;
+    this.info.globalFineFaceBandCptMissingLiquidVertexFailures=faceBand.cptMissingLiquidVertexFailures;
     this.info.globalFineFaceBandTransitionFirstError=transition.firstError;
     this.info.globalFineFaceBandTransitionRowCount=transition.rowCount;
     this.info.globalFineFaceBandTransitionRows=transition.transitionRows;
@@ -1060,7 +894,6 @@ export class WebGPUUniformEulerianSolver {
     this.info.globalFineFaceBandTransitionSupport3Rows=transition.support3NodeRowCount;
     this.info.globalFineFaceBandTransitionEndpointRows=transition.endpointRowCount;
     this.info.globalFineFaceBandBoundaryGhostRequests=transition.boundaryGhostRequests;
-    this.info.globalFineFaceBandAcuteGradingFailure=transition.acuteGradingFailure;
     this.info.globalFineFaceBandPhiFailureCounts=transition.phiFailureCounts;
     this.info.globalFineFaceBandPhiFailure=transition.phiFailure;
     this.info.globalFineFaceBandTransientPowerFirstError=transientPower.firstError;
@@ -1104,11 +937,95 @@ export class WebGPUUniformEulerianSolver {
         { externallySeededColdBootstrap: true });
       if(!readiness.ready){
         const failureRow=await projection.readPowerCoarseFailureRow(fine?.coarseControl?.[1]??0xffff_ffff);
+        const candidate=fine?.powerFaceCandidateControl;
+        const reciprocalPair=candidate&&((candidate[3]??0)&16)!==0
+          ? await projection.readPowerFaceCandidateFailurePair(
+            candidate[4]??0xffff_ffff,candidate[13]??0xffff_ffff)
+          : undefined;
         const powerFailure=await projection.readGlobalFinePowerPublicationFailure(
           fine?.faceBandPowerPublicationControl?.[1]??0xffff_ffff);
+        const powerFrontierFailure=await projection.readPowerFrontierFailure();
+        const ownerPageControl=await projection.readOwnerPageControl();
+        const faceBandWords=fine?.faceBandCandidateControl??fine?.faceBandControl;
+        const faceBand=faceBandWords
+          ? unpackOctreeFaceBandControl(faceBandWords) : undefined;
+        const candidateTransition=fine?.faceBandCandidateTransitionControl
+          ? unpackOctreeFaceBandTransitionControl(fine.faceBandCandidateTransitionControl)
+          : undefined;
+        const transientPower=fine?.faceBandTransientPowerControl
+          ? unpackOctreeFaceBandTransientPowerControl(fine.faceBandTransientPowerControl)
+          : undefined;
+        const transientPowerFailure=transientPower
+          &&transientPower.firstError!==0xffff_ffff
+          ? transientPower.failureDomain==="face"
+            ? {
+                domain:"face",
+                face:await projection.readGlobalFineTransientPowerFaceFailure(transientPower.firstError),
+              }
+            : transientPower.firstError<transientPower.rowCount
+              ? {
+                  domain:"row",
+                  row:await projection.readGlobalFineBandRowFailure(transientPower.firstError),
+                  diagnostic:transientPower.diagnostic,
+                }
+              : {domain:"invalid",firstError:transientPower.firstError}
+          : undefined;
+        const ownerPageFailure=await projection.readOwnerPageForPowerRow(faceBand?.firstError??0);
+        const faceBandCoarseRow=await projection.readPowerCoarseFailureRow(faceBand?.firstError??0);
+        const powerSeedChain=await projection.readPowerSeedChainControls();
+        const descriptorFailure=await projection.readPowerDescriptorCandidateFailure(
+          fine?.powerDescriptorControl?.[3]??0xffff_ffff);
+        const faceBandFailures: { cause: string; detail: unknown }[]=[];
+        if(faceBand){
+          const faceEmission=faceBand.stageFirstFailures.faceEmission;
+          if(faceEmission!==0xffff_ffff){
+            const producerReason=(faceBandWords?.[7]??0)&0xfff;
+            const detail=producerReason===34
+              ? await projection.readGlobalFineCandidateBandIncidenceFailure(faceBand.rowCount)
+              : await projection.readGlobalFineCandidateBandRowFailure(faceEmission);
+            if(detail)faceBandFailures.push({cause:"faceEmission",detail});
+          }
+          if(faceBand.firstPhiFailureSlot!==0xffff_ffff){
+            const detail=await projection.readGlobalFineCandidateBandFaceFailure(faceBand.firstPhiFailureSlot);
+            if(detail)faceBandFailures.push({cause:"phiClosestPoint",detail});
+          }
+          const phiStage=faceBand.stageFirstFailures.phi;
+          if((phiStage&OCTREE_FACE_BAND_ACUTE_TETRA_FAILURE)!==0){
+            const detail=await projection.readGlobalFineCandidateBandAcuteTetraFailure(phiStage);
+            if(detail)faceBandFailures.push({cause:"acuteTetraRealization",detail});
+          }else if(faceBand.firstPhiFailureSlot===0xffff_ffff
+            &&candidateTransition?.ownerFailure?.stage===OCTREE_FACE_BAND_OWNER_FAILURE_STAGE.bandPhi){
+            const detail=await projection.readGlobalFineCandidateBandRowFailure(
+              candidateTransition.ownerFailure.band);
+            if(detail)faceBandFailures.push({cause:"phiRow",detail});
+          }
+          const vectorRow=faceBand.stageFirstFailures.vectorReconstruction;
+          if(vectorRow!==0xffff_ffff&&vectorRow<faceBand.rowCount){
+            const detail=await projection.readGlobalFineCandidateBandRowFailure(vectorRow);
+            if(detail)faceBandFailures.push({cause:"vectorReconstruction",detail});
+          }
+          for(const [cause,slot] of Object.entries(faceBand.firstClosestPointFailureSlotByCause)){
+            if(slot!==0xffff_ffff){
+              const detail=await projection.readGlobalFineCandidateBandFaceFailure(slot);
+              if(detail)faceBandFailures.push({cause,detail});
+            }
+          }
+        }
         throw new Error(`Paused t=0 authority rejected: ${readiness.label}${failureRow
           ? `; coarseFailureRow=${JSON.stringify(failureRow)}`:""}${powerFailure
-          ? `; powerPublicationFailure=${JSON.stringify(powerFailure)}`:""}`);
+          ? `; powerPublicationFailure=${JSON.stringify(powerFailure)}`:""}${reciprocalPair
+          ? `; powerFaceReciprocalPair=${JSON.stringify(reciprocalPair)}`:""}${faceBandFailures.length
+          ? `; faceBandFailures=${JSON.stringify(faceBandFailures)}`:""}; ownerPageControl=${JSON.stringify(ownerPageControl)}`
+          + `${transientPowerFailure
+            ? `; transientPowerFailure=${JSON.stringify(transientPowerFailure)}`:""}`
+          + `${ownerPageFailure?`; ownerPageFailure=${JSON.stringify(ownerPageFailure)}`:""}`
+          + `${faceBandCoarseRow?`; faceBandCoarseRow=${JSON.stringify(faceBandCoarseRow)}`:""}`
+          + `; faceBandProducerFailure=${faceBandWords?.[7]??0xffff_ffff}`
+          + `; powerProjectionControl=${JSON.stringify(fine?.powerProjectionControl??[])}`
+          + `; powerFrontierFailure=${JSON.stringify(powerFrontierFailure)}`
+          + `${descriptorFailure?`; powerDescriptorFailure=${JSON.stringify(descriptorFailure)}`:""}`
+          + `; mgpcg=${JSON.stringify(mgpcg)}`
+          + `${powerSeedChain?`; powerSeedChain=${JSON.stringify(powerSeedChain)}`:""}`);
       }
       this.applyGlobalFineDiagnostics(fine!);
       const c=this.scene.container;
@@ -1120,8 +1037,7 @@ export class WebGPUUniformEulerianSolver {
       this.info.volumeDrift=volume.drift;this.info.representedVolumeDrift=volume.drift;
       this.info.volumeTelemetrySource="global-fine";
     }
-    if(projection.info.powerDiagramProjection==="authoritative"){
-      const pressure=initialPowerPressureReadiness({
+    const pressure=initialPowerPressureReadiness({
         authoritative:projection.info.powerDiagramAuthoritative,
         solverLabel:projection.pressureSolverLabel,
         pressureRows:projection.info.pressureRequiredRows??0,
@@ -1133,20 +1049,15 @@ export class WebGPUUniformEulerianSolver {
       const floats=new Float32Array(mgpcg!.buffer,mgpcg!.byteOffset,mgpcg!.length);
       this.info.quadtreePressureConverged=true;this.info.quadtreePressureIterationsUsed=mgpcg![2];
       this.info.pressureResidual=Math.sqrt(Math.max(0,floats[4]));
-      this.info.pressureRelativeResidual=Math.sqrt(floats[4]/Math.max(floats[5],1e-30));
-    }
+    this.info.pressureRelativeResidual=Math.sqrt(floats[4]/Math.max(floats[5],1e-30));
   }
 
   /** Publish a complete t=0 scene after rigid-solid raster pipelines exist. */
   private async publishInitialSparseScene() {
     this.initialSparseAuthorityPublished = false;
     if (this.octreeProjection) {
-      if (this.fencedInitialSparseAuthority) {
-        for (const phase of OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES) {
-          await this.publishInitialSparseScenePhase(phase.id);
-        }
-      } else {
-        await this.publishInitialSparseSceneBatched();
+      for (const phase of OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES) {
+        await this.publishInitialSparseScenePhase(phase.id);
       }
     } else {
       // This fence covers constructor-time texture uploads for non-octree
@@ -1156,7 +1067,8 @@ export class WebGPUUniformEulerianSolver {
     }
   }
 
-  get volumeTexture() { return this.adaptiveFaceVelocityCutover ? this.octreeProjection!.levelSetTexture : this.volumeA; }
+  get volumeTexture() { return this.octreeProjection?.levelSetTexture ?? this.volumeA; }
+  get pendingAdvanceCompletion() { return this.profiledAdvanceCompletion; }
   get rigidRenderBuffer() { return this.rigidSystem.renderBuffer; }
   get rigidMotionBuffer() { return this.rigidSystem.motionBuffer; }
   setSelectedRigidBody(index: number) { this.rigidSystem.setSelectedIndex(index); }
@@ -1167,7 +1079,7 @@ export class WebGPUUniformEulerianSolver {
   // field through volumeTexture.
   private get adaptiveProjection() { return this.quadtreeProjection ?? this.octreeProjection; }
   get surfaceFieldTexture() { return this.adaptiveProjection?.levelSetTexture ?? this.volumeA; }
-  /** False once compact surface pages have retired the dense bootstrap phi. */
+  /** False once global-fine publication has retired the dense bootstrap phi. */
   get hasDenseSurfaceField() { return this.octreeProjection?.hasDenseLevelSetPublication ?? true; }
   get sparseVoxelSceneSource() { return this.octreeProjection?.sparseVoxelSceneSource; }
   get sparseVoxelRenderSource() {
@@ -1175,11 +1087,6 @@ export class WebGPUUniformEulerianSolver {
     if (this.octreeProjection) this.applyOctreeInfo(this.octreeProjection);
     return source;
   }
-  get fluidBrickAtlasSamplingSource() { return this.octreeProjection?.fluidBrickAtlasSamplingSource; }
-  get sparseSurfaceBand(): SparseSurfaceBandGPUSource | undefined { return this.octreeProjection?.sparseSurfaceBandSource; }
-  get adaptiveFaceMirrorSource() { return this.octreeProjection?.adaptiveFaceMirrorSource; }
-  get adaptiveFaceVelocitySource() { return this.octreeProjection?.adaptiveFaceVelocitySource; }
-  get powerFaceTransferControl() { return this.octreeProjection?.powerFaceTransferControl; }
   get powerFaceSeedControl() { return this.octreeProjection?.powerFaceSeedControl; }
   get powerFaceAdvectionControl() { return this.octreeProjection?.powerFaceAdvectionControl; }
   get powerSolidFaceControl() { return this.octreeProjection?.powerSolidFaceControl; }
@@ -1187,13 +1094,14 @@ export class WebGPUUniformEulerianSolver {
   /** QA-only passthrough for the authoritative Section 4.3 solver status. */
   get mgpcgControl() { return this.octreeProjection?.mgpcgControl; }
   get powerFaceControl() { return this.octreeProjection?.powerFaceControl; }
+  get powerFaceCandidateControl() { return this.octreeProjection?.powerFaceCandidateControl; }
   get powerFaceSource() { return this.octreeProjection?.powerFaceSource; }
   readPowerEnergyLedger() { return this.octreeProjection?.readEnergyLedger(); }
   get powerBoundaryPhiQueries() { return this.octreeProjection?.powerBoundaryPhiQueries; }
   get ownerLatticeDebug() { return this.octreeProjection?.ownerLatticeDebug; }
   get powerBoundaryFineSource() { return this.octreeProjection?.powerBoundaryFineSource; }
   get powerBoundaryFineLevelSetSource() { return this.octreeProjection?.powerBoundaryFineLevelSetSource; }
-  get powerFaceSiteIndex() { return this.octreeProjection?.powerFaceSiteIndex; }
+  get powerFaceRowDirectory() { return this.octreeProjection?.powerFaceRowDirectory; }
   get powerDescriptorControl() { return this.octreeProjection?.powerDescriptorControl; }
   get powerTopologyControl() { return this.octreeProjection?.powerTopologyControl; }
   get powerDescriptorRows() { return this.octreeProjection?.powerDescriptorRows; }
@@ -1206,28 +1114,51 @@ export class WebGPUUniformEulerianSolver {
   get powerLeafEntries() { return this.octreeProjection?.powerLeafEntries; }
   get powerPressureBuffer() { return this.octreeProjection?.powerPressureBuffer; }
   get powerLeafFrontier() { return this.octreeProjection?.powerLeafFrontier; }
+  get powerCompactionControl() { return this.octreeProjection?.powerCompactionControl; }
+  get powerTopologyTileChangeFlags() { return this.octreeProjection?.powerTopologyTileChangeFlags; }
+  get powerTopologyTileStates() { return this.octreeProjection?.powerTopologyTileStates; }
+  get powerFrontierCarryFlags() { return this.octreeProjection?.powerFrontierCarryFlags; }
+  get powerRowDelta() { return this.octreeProjection?.powerRowDelta; }
   get topologyTileWorklist() { return this.octreeProjection?.topologyTileWorklist; }
-  get adaptiveSurfaceCandidateControl() { return this.octreeProjection?.adaptiveSurfaceCandidateControl; }
-  get adaptiveSurfaceLeaves() { return this.octreeProjection?.adaptiveSurfaceLeaves; }
+  get fineSeedCandidateControl() { return this.octreeProjection?.fineSeedCandidateControl; }
+  get fineSeedLeaves() { return this.octreeProjection?.fineSeedLeaves; }
   get powerOwnerArena() { return this.octreeProjection?.powerOwnerArena; }
-  get adaptiveSurfacePageSource() { return this.octreeProjection?.adaptiveSurfacePageSource; }
   get octreeTechniqueDebugSource() { return this.octreeProjection?.techniqueDebugSource; }
   get initialSparseAuthorityReady() { return !this.octreeProjection || this.initialSparseAuthorityPublished; }
   get globalFineLevelSetSource() { return this.octreeProjection?.globalFineLevelSetSource; }
   /** QA-only passthrough for reproducing recurring frontier phase decisions. */
   get globalFineSummaryDirectory() { return this.octreeProjection?.globalFineSummaryDirectory; }
+  get globalFineSummaryDebug() { return this.octreeProjection?.globalFineSummaryDebug; }
   get globalFineTransportControl() { return this.octreeProjection?.globalFineTransportControl; }
+  get globalFineTransportDeltaDebugPair() {
+    return this.octreeProjection?.globalFineTransportDeltaDebugPair;
+  }
+  get globalFineSourceDebugPair() { return this.octreeProjection?.globalFineSourceDebugPair; }
   get globalFineRedistanceControl() { return this.octreeProjection?.globalFineRedistanceControl; }
+  get globalFinePageDeltaDebug() { return this.octreeProjection?.globalFinePageDeltaDebug; }
+  get globalFinePageDeltaDebugPair() { return this.octreeProjection?.globalFinePageDeltaDebugPair; }
   get globalFineVolumeControl() { return this.octreeProjection?.globalFineVolumeControl; }
   get globalFinePowerVelocityControl() { return this.octreeProjection?.globalFinePowerVelocityControl; }
   get globalFinePowerProjectionControl() { return this.octreeProjection?.globalFinePowerProjectionControl; }
   get globalFinePowerVelocitySampleControl() { return this.octreeProjection?.globalFinePowerVelocitySampleControl; }
   get globalFineCoarseLevelSetControl() { return this.octreeProjection?.globalFineCoarseLevelSetControl; }
   readPowerCoarseFailureRow(row: number) { return this.octreeProjection?.readPowerCoarseFailureRow(row); }
+  readPowerFaceCandidateFailurePair(row: number, neighbor: number) {
+    return this.octreeProjection?.readPowerFaceCandidateFailurePair(row, neighbor);
+  }
+  readPowerFaceCandidateFailure(faceIndex: number) {
+    return this.octreeProjection?.readPowerFaceCandidateFailure(faceIndex);
+  }
   get globalFineRestrictionControl() { return this.octreeProjection?.globalFineRestrictionControl; }
   get globalFineFaceBandControl() { return this.octreeProjection?.globalFineFaceBandControl; }
+  get globalFineFaceBandCandidateControl() {
+    return this.octreeProjection?.globalFineFaceBandCandidateControl;
+  }
   get globalFineFaceBandTransitionControl() {
     return this.octreeProjection?.globalFineFaceBandTransitionControl;
+  }
+  get globalFineFaceBandCandidateTransitionControl() {
+    return this.octreeProjection?.globalFineFaceBandCandidateTransitionControl;
   }
   get globalFineFaceBandPointFieldControl() {
     return this.octreeProjection?.globalFineFaceBandPointFieldControl;
@@ -1239,24 +1170,38 @@ export class WebGPUUniformEulerianSolver {
     return this.octreeProjection?.globalFineFaceBandPowerPublicationControl;
   }
   get globalFineFaceBandPlan() { return this.octreeProjection?.globalFineFaceBandPlan; }
-  readGlobalFineDisconnectedFaceFailure(index: number) {
-    return this.octreeProjection?.readGlobalFineDisconnectedFaceFailure(index);
-  }
   readGlobalFineBandRowFailure(index: number) {
     return this.octreeProjection?.readGlobalFineBandRowFailure(index);
   }
-  /** Exact host compatibility allocation delta; adaptive resources are owned/accounted by the octree projection. */
-  get octreeHostAllocation() { return this.hostAllocation; }
-  /** @deprecated Use octreeHostAllocation. */
-  get octreeHostVelocityAllocation() { return this.hostAllocation; }
-  get columnBaseTexture() { return this.heightA; }
+  readGlobalFineCandidateBandRowFailure(index: number) {
+    return this.octreeProjection?.readGlobalFineCandidateBandRowFailure(index);
+  }
+  readGlobalFineBandFaceFailure(slot: number) {
+    return this.octreeProjection?.readGlobalFineBandFaceFailure(slot);
+  }
+  readGlobalFineCandidateBandFaceFailure(slot: number) {
+    return this.octreeProjection?.readGlobalFineCandidateBandFaceFailure(slot);
+  }
+  readGlobalFineCandidateBandIncidenceFailure(rowCount: number) {
+    return this.octreeProjection?.readGlobalFineCandidateBandIncidenceFailure(rowCount);
+  }
+  readGlobalFineTransientPowerFaceFailure(slot: number) {
+    return this.octreeProjection?.readGlobalFineTransientPowerFaceFailure(slot);
+  }
+  readGlobalFineBandAcuteTetraFailure(tagged: number) {
+    return this.octreeProjection?.readGlobalFineBandAcuteTetraFailure(tagged);
+  }
+  readGlobalFineCandidateBandAcuteTetraFailure(tagged: number) {
+    return this.octreeProjection?.readGlobalFineCandidateBandAcuteTetraFailure(tagged);
+  }
+  get columnBaseTexture() { return this.hostAllocation ? this.heightA : undefined; }
   get gridCellTexture() { return this.adaptiveProjection?.topologyTexture; }
-  get velocityTexture() { return this.adaptiveFaceVelocityCutover ? undefined : this.velocityA; }
-  get secondaryParticles() { return this.secondaryParticlesEnabled ? this.secondaryParticleSystem?.renderSource : undefined; }
-  applyRuntimeValues(values: Record<string, string | number | boolean>) { this.secondaryParticlesEnabled = values.secondaryParticles !== "off" && values.secondaryParticles !== false; }
+  get velocityTexture() { return this.octreeProjection ? undefined : this.velocityA; }
+  get secondaryParticles() { return undefined; }
+  applyRuntimeValues(_values: Record<string, string | number | boolean>) {}
   get gridPressureSamplesTexture() { return this.adaptiveProjection?.pressureSamplesTexture; }
   get gridPressureTexture() { return this.adaptiveProjection?.pressureTexture; }
-  get gridDivergenceTexture() { return this.adaptiveProjection?.divergenceTexture; }
+  get gridDivergenceTexture() { return this.octreeProjection ? undefined : this.quadtreeProjection?.divergenceTexture; }
   ensureGridDiagnosticTextures() {
     if (!this.octreeProjection?.ensureDiagnosticTextures()) return;
     const encoder = this.device.createCommandEncoder({ label: "Initialize lazy octree diagnostic fields" });
@@ -1265,11 +1210,11 @@ export class WebGPUUniformEulerianSolver {
     this.applyOctreeInfo(this.octreeProjection);
   }
   /** Instrumentation view: velocity after advection/forces and before quadtree projection. */
-  get preProjectionVelocityTexture() { return this.adaptiveFaceVelocityCutover ? undefined : this.velocityB; }
+  get preProjectionVelocityTexture() { return this.octreeProjection ? undefined : this.velocityB; }
 
   private initializeVolume() {
     const { nx, ny, nz } = this.info, c = this.scene.container;
-    const data = this.adaptiveFaceVelocityCutover ? undefined : new Float32Array(nx * ny * nz), dam = damBreakFractions(c.fillFraction);
+    const data = this.hostAllocation ? new Float32Array(nx * ny * nz) : undefined, dam = damBreakFractions(c.fillFraction);
     const terrainHeights = terrainColumnHeights(this.scene, nx, nz), cellHeight = c.height_m / ny;
     let initialSum = 0;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
@@ -1304,49 +1249,30 @@ export class WebGPUUniformEulerianSolver {
     }
   }
 
-  private group(velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture, pressureOut: GPUTexture, volumeIn: GPUTexture, volumeOut: GPUTexture, heightIn: GPUTexture, heightOut: GPUTexture, predictedVelocity: GPUTexture = velocityIn, reversedVelocity: GPUTexture = velocityIn, transport: GPUTexture = this.transportA, surfaceIn: GPUTexture = this.adaptiveProjection?.levelSetTexture ?? volumeIn, sampleBulkAtlas = false, sparseTargetKind: "none" | "velocity" | "occupancy" = "none") {
-    const candidate = this.octreeProjection?.fluidBrickAtlasSamplingSource;
-    const source: FluidBrickAtlasSamplingSource | undefined = candidate?.mode === "mirror" ? candidate : undefined;
-    const atlas = sampleBulkAtlas ? source : undefined;
-    const sparseRequested = sparseTargetKind === "velocity" ? this.sparseVelocityAdvectionRequested
-      : sparseTargetKind === "occupancy" ? !this.hydrostaticSplit && this.sparseOccupancyFluxPreparationRequested : false;
-    const sparse = sparseRequested && source?.sparseDispatchSafe ? source : undefined;
-    const control = atlas && sparse ? this.bulkAtlasControlSampleSparse : atlas ? this.bulkAtlasControlSampleDense : sparse ? this.bulkAtlasControlSparse : this.bulkAtlasControlOff;
+  private group(velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture, pressureOut: GPUTexture, volumeIn: GPUTexture, volumeOut: GPUTexture, heightIn: GPUTexture, heightOut: GPUTexture, predictedVelocity: GPUTexture = velocityIn, reversedVelocity: GPUTexture = velocityIn, transport: GPUTexture = this.transportA, surfaceIn: GPUTexture = this.adaptiveProjection?.levelSetTexture ?? volumeIn) {
     return this.device.createBindGroup({ layout: this.bindGroupLayout, entries: [
       { binding: 0, resource: velocityIn.createView() }, { binding: 1, resource: velocityOut.createView() },
       { binding: 2, resource: pressureIn.createView() }, { binding: 3, resource: pressureOut.createView() },
       { binding: 4, resource: volumeIn.createView() }, { binding: 5, resource: volumeOut.createView() },
-      { binding: 6, resource: { buffer: this.params } }, { binding: 7, resource: heightIn.createView() },
-      { binding: 8, resource: heightOut.createView() }, { binding: 9, resource: { buffer: this.reductionBuffer } },
+      { binding: 6, resource: { buffer: this.params! } }, { binding: 7, resource: heightIn.createView() },
+      { binding: 8, resource: heightOut.createView() }, { binding: 9, resource: { buffer: this.reductionBuffer! } },
       { binding: 10, resource: { buffer: this.rigidBuffer } }, { binding: 11, resource: { buffer: this.rigidExchangeBuffer } },
       { binding: 12, resource: predictedVelocity.createView() }, { binding: 13, resource: reversedVelocity.createView() },
       { binding: 14, resource: transport.createView() }, { binding: 15, resource: this.transportSampler },
       { binding: 17, resource: this.fluxScales.createView() },
-      { binding: 19, resource: { buffer: this.sharpenBuffer } },
+      { binding: 19, resource: { buffer: this.sharpenBuffer! } },
       { binding: 20, resource: surfaceIn.createView() },
       { binding: 21, resource: this.terrainTexture.createView() },
-      { binding: 22, resource: { buffer: atlas?.pageTable ?? this.bulkAtlasFallbackPageTable } },
-      { binding: 23, resource: atlas?.velocity ?? this.bulkAtlasFallbackVelocity.createView() },
-      { binding: 24, resource: { buffer: (atlas ?? sparse)?.params ?? this.bulkAtlasFallbackParams } },
-      { binding: 25, resource: { buffer: control } },
-      { binding: 26, resource: { buffer: sparse?.bulkWorklist ?? this.bulkAtlasFallbackWorklist } },
-      { binding: 27, resource: { buffer: this.occupancyColumns } }
     ] });
   }
 
-  private dispatch(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup, sparseBulkTargets = false) {
+  private dispatch(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup) {
     pass.setPipeline(pipeline); pass.setBindGroup(0, group);
-    const source = this.octreeProjection?.fluidBrickAtlasSamplingSource;
-    if (sparseBulkTargets && this.sparseVelocityAdvectionRequested && source?.mode === "mirror" && source.sparseDispatchSafe) {
-      pass.dispatchWorkgroupsIndirect(source.bulkWorklist, FLUID_BRICK_ACTIVE_CELL64_DISPATCH_OFFSET_BYTES);
-    } else pass.dispatchWorkgroups(Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4));
+    pass.dispatchWorkgroups(Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4));
   }
-  private dispatchTransport(pass: GPUComputePassEncoder, group: GPUBindGroup, sparseTransportTargets: boolean, paddedWorkgroups: [number, number, number]) {
+  private dispatchTransport(pass: GPUComputePassEncoder, group: GPUBindGroup, paddedWorkgroups: [number, number, number]) {
     pass.setPipeline(this.buildTransportPipeline); pass.setBindGroup(0, group);
-    const source = this.octreeProjection?.fluidBrickAtlasSamplingSource;
-    if (sparseTransportTargets && this.sparseTransportPreparationRequested && source?.mode === "mirror" && source.sparseDispatchSafe) {
-      pass.dispatchWorkgroupsIndirect(source.bulkWorklist, FLUID_BRICK_ACTIVE_CELL64_DISPATCH_OFFSET_BYTES);
-    } else pass.dispatchWorkgroups(...paddedWorkgroups);
+    pass.dispatchWorkgroups(...paddedWorkgroups);
   }
   private applyQuadtreeInfo(projection: WebGPUQuadtreeTallCellProjection, pressureIterations = this.info.pressureIterations) {
     const quadtree = projection.info;
@@ -1371,17 +1297,6 @@ export class WebGPUUniformEulerianSolver {
       quadtreeLevelSetMismatchFraction: projection.levelSetMismatchFraction ?? 0,
       quadtreeCulledDebrisCells: projection.surfaceDiagnostics.culledDebrisCells,
       quadtreeVofReconciliationActive: projection.surfaceDiagnostics.reconciliationActive,
-      quadtreeGPUConstruction_ms: quadtree.gpuConstruction_ms,
-      quadtreeGPUConstructionKernel_ms: quadtree.gpuConstructionKernel_ms,
-      quadtreeGPUSparsePack_ms: quadtree.gpuSparsePack_ms,
-      quadtreeCPUTopologyPack_ms: quadtree.cpuTopologyPack_ms,
-      quadtreeCPURedistance_ms: quadtree.cpuRedistance_ms,
-      quadtreeCPUQuadtreeDecode_ms: quadtree.cpuQuadtreeDecode_ms,
-      quadtreeCPUTallGrid_ms: quadtree.cpuTallGrid_ms,
-      quadtreeCPUVariationalAssembly_ms: quadtree.cpuVariationalAssembly_ms,
-      quadtreeCPUSystemPack_ms: quadtree.cpuSystemPack_ms,
-      quadtreeCPUICFactorization_ms: quadtree.cpuICFactorization_ms,
-      quadtreeCPUResourceUpload_ms: quadtree.cpuResourceUpload_ms,
       quadtreeTopologyReused: quadtree.topologyReused,
       quadtreeTopologyReuseCount: quadtree.topologyReuseCount,
       quadtreePressureIterationsUsed: quadtree.pressureIterationsUsed,
@@ -1392,7 +1307,6 @@ export class WebGPUUniformEulerianSolver {
       quadtreeFactorLevelCount: quadtree.factorLevelCount,
       quadtreeMultigridLevelCount: quadtree.multigridLevelCount,
       quadtreeMultigridCoarsestDofs: quadtree.multigridCoarsestDofs,
-      quadtreePressurePhaseTimings: quadtree.pressurePhaseTimings,
       quadtreeRebuildCadenceSteps: this.quadtreeRebuildInterval,
       // Report the effective path, not merely the preference: coupled and
       // host-factorized pressure variants cannot consume the resident pack.
@@ -1414,8 +1328,8 @@ export class WebGPUUniformEulerianSolver {
       compressionRatio: octree.compressionRatio,
       activeCompressionRatio: octree.compressionRatio,
       activeSampleCount: octree.liquidDofCount,
-      allocatedBytes: this.baseAllocatedBytes + octree.allocatedBytes + (this.secondaryParticleSystem?.allocatedBytes ?? 0),
-      secondaryParticleCapacity: this.secondaryParticleSystem?.renderSource.capacity,
+      allocatedBytes: this.baseAllocatedBytes + octree.allocatedBytes,
+      secondaryParticleCapacity: undefined,
       fluidBrickCapacity: projection.fluidBrickCapacity,
       quadtreeLeafCount: octree.leafCount,
       quadtreePressureSampleCount: octree.pressureSampleCount,
@@ -1431,11 +1345,9 @@ export class WebGPUUniformEulerianSolver {
       pressureRequiredRows: octree.pressureRequiredRows,
       pressureRequiredEntries: octree.pressureRequiredEntries,
       pressureCapacityOverflow: octree.pressureCapacityOverflow,
-      powerDiagramProjection: octree.powerDiagramProjection,
       powerDiagramReady: octree.powerDiagramReady,
       powerDiagramAuthoritative: octree.powerDiagramAuthoritative,
       powerDiagramGeneration: projection.powerPublicationGeneration,
-      powerDiagramFallbackReason: octree.powerDiagramFallbackReason,
       powerDiagramAllocatedBytes: octree.powerDiagramAllocatedBytes,
       globalFineLevelSetAllocatedBytes: octree.globalFineLevelSetAllocatedBytes,
       globalFineLevelSetResidentBrickCapacity: octree.globalFineLevelSetResidentBrickCapacity,
@@ -1462,109 +1374,11 @@ export class WebGPUUniformEulerianSolver {
       hostSchedulingUsesReadback: true,
     });
   }
-  setPerformanceReadbacksEnabled(enabled: boolean) {
-    this.performanceReadbacksEnabled = enabled;
-    if (!enabled) this.info.gpuStep_ms = undefined;
-  }
-  get pendingAdvanceCompletion() { return this.profiledAdvanceCompletion; }
-
-  private schedulePressureWallProbe(simulation_s: number): void {
-    const step = this.profilerAdvanceCount;
-    if (!this.performanceReadbacksEnabled || !this.octreeProjection || this.pressureWallProbePending
-      || step - this.pressureWallProbeLastStep < 30) return;
-    this.pressureWallProbePending = true;
-    this.pressureWallProbeLastStep = step;
-    // Drain production work first. The probe is then the only submission
-    // preceding its fence, so the observation belongs to pressure alone.
-    void this.device.queue.onSubmittedWorkDone().then(async () => {
-      if (this.disposed || !this.performanceReadbacksEnabled || !this.octreeProjection) return;
-      const encoder = this.device.createCommandEncoder({ label: "Pressure-only profiler probe" });
-      const encodeStartedAt_ms = performance.now();
-      if (!this.octreeProjection.encodePressureWallProbe(encoder)) return;
-      const cpuEncode_ms = performance.now() - encodeStartedAt_ms;
-      const submittedAt_ms = performance.now();
-      this.device.queue.submit([encoder.finish()]);
-      await this.device.queue.onSubmittedWorkDone();
-      if (this.disposed) return;
-      this.info.cpuPressureSolveProbeEncode_ms = cpuEncode_ms;
-      this.info.gpuPressureSolveObservedWall_ms = performance.now() - submittedAt_ms;
-      this.info.gpuProfilerWallTotal_ms = (this.info.gpuProfilerWallTotal_ms ?? 0)
-        + this.info.gpuPressureSolveObservedWall_ms;
-      this.info.gpuPressureSolveObservedSampleId = ++this.pressureWallProbeSampleId;
-      this.info.gpuPressureSolveObservedSimulation_s = simulation_s;
-    }).catch(() => { /* Device loss is handled by the renderer. */ }).finally(() => {
-      this.pressureWallProbePending = false;
-    });
-  }
-
-  private timing(name: GPUPhysicsTimingField) {
-    if (!this.performanceReadbacksEnabled || !this.querySet || this.queryCount + 2 > GPU_PHYSICS_TIMESTAMP_CAPACITY) return undefined;
-    const segment = { name, start: this.queryCount++, end: this.queryCount++ }; this.querySegments.push(segment); return segment;
-  }
-
-  /** Partition one aggregate timestamp range at a shared boundary. This adds
-   * one query value, rather than two independent child ranges, and makes the
-   * child durations sum exactly to the existing aggregate. */
-  private splitTiming(totalName: GPUPhysicsTimingField, firstName: GPUPhysicsTimingField, secondName: GPUPhysicsTimingField) {
-    if (!this.performanceReadbacksEnabled || !this.querySet || this.queryCount + 3 > GPU_PHYSICS_TIMESTAMP_CAPACITY) return undefined;
-    const start = this.queryCount++, boundary = this.queryCount++, end = this.queryCount++;
-    const requiredBoundaries = [start, boundary, end];
-    this.querySegments.push(
-      { name: totalName, start, end, requiredBoundaries },
-      { name: firstName, start, end: boundary, requiredBoundaries: [start, boundary, end] },
-      { name: secondName, start: boundary, end, requiredBoundaries: [start, boundary, end] },
-    );
-    return { total: { start, end }, boundary,
-      firstChildBoundary: undefined as number | undefined,
-      secondChildBoundary: undefined as number | undefined };
-  }
-
-  /** Partition one aggregate into three adjacent ranges with two shared
-   * boundaries. The aggregate and all children still resolve through the
-   * existing timestamp buffer and asynchronous map. */
-  private splitTiming3(totalName: GPUPhysicsTimingField, firstName: GPUPhysicsTimingField,
-    secondName: GPUPhysicsTimingField, thirdName: GPUPhysicsTimingField) {
-    if (!this.performanceReadbacksEnabled || !this.querySet || this.queryCount + 4 > GPU_PHYSICS_TIMESTAMP_CAPACITY) return undefined;
-    const start = this.queryCount++, firstBoundary = this.queryCount++;
-    const secondBoundary = this.queryCount++, end = this.queryCount++;
-    const requiredBoundaries = [start, firstBoundary, secondBoundary, end];
-    this.querySegments.push(
-      { name: totalName, start, end, requiredBoundaries },
-      { name: firstName, start, end: firstBoundary, requiredBoundaries: [start, firstBoundary, secondBoundary, end] },
-      { name: secondName, start: firstBoundary, end: secondBoundary, requiredBoundaries: [start, firstBoundary, secondBoundary, end] },
-      { name: thirdName, start: secondBoundary, end, requiredBoundaries: [start, firstBoundary, secondBoundary, end] },
-    );
-    return { total: { start, end }, firstBoundary, secondBoundary };
-  }
-
-  /** Split an aggregate into a three-phase first interval and a final second
-   * interval. Five query values cover both nesting levels without duplicating
-   * any boundary timestamp. */
-  private splitTimingWithFirst3(totalName: GPUPhysicsTimingField, firstName: GPUPhysicsTimingField,
-    firstChildName: GPUPhysicsTimingField, secondChildName: GPUPhysicsTimingField,
-    thirdChildName: GPUPhysicsTimingField, secondName: GPUPhysicsTimingField) {
-    if (!this.performanceReadbacksEnabled || !this.querySet || this.queryCount + 5 > GPU_PHYSICS_TIMESTAMP_CAPACITY) return undefined;
-    const start = this.queryCount++, firstChildBoundary = this.queryCount++;
-    const secondChildBoundary = this.queryCount++, boundary = this.queryCount++, end = this.queryCount++;
-    const requiredBoundaries = [start, firstChildBoundary, secondChildBoundary, boundary, end];
-    this.querySegments.push(
-      { name: totalName, start, end, requiredBoundaries },
-      { name: firstName, start, end: boundary, requiredBoundaries: [start, firstChildBoundary, secondChildBoundary, boundary, end] },
-      { name: firstChildName, start, end: firstChildBoundary, requiredBoundaries: [start, firstChildBoundary, secondChildBoundary, boundary, end] },
-      { name: secondChildName, start: firstChildBoundary, end: secondChildBoundary, requiredBoundaries: [start, firstChildBoundary, secondChildBoundary, boundary, end] },
-      { name: thirdChildName, start: secondChildBoundary, end: boundary, requiredBoundaries: [start, firstChildBoundary, secondChildBoundary, boundary, end] },
-      { name: secondName, start: boundary, end, requiredBoundaries: [start, firstChildBoundary, secondChildBoundary, boundary, end] },
-    );
-    return { total: { start, end }, boundary, firstChildBoundary, secondChildBoundary };
-  }
-
   private statsReadback() {
-    // readbackPending guarantees that this buffer is never copied while it is
-    // mapped. Keep enough room for the fixed query resolve allocation so
-    // regular telemetry does not create/destroy a MAP_READ resource at 30 Hz.
+    // readbackPending guarantees that this buffer is never copied while mapped.
     return this.statsReadbackBuffer ??= this.device.createBuffer({
       label: "Uniform pooled statistics readback",
-      size: 16 + GPU_PHYSICS_TIMESTAMP_CAPACITY * 8,
+      size: 16,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
     });
   }
@@ -1599,7 +1413,6 @@ export class WebGPUUniformEulerianSolver {
   private kickQuadtreeRebuild() {
     const previous = this.quadtreeProjection;
     if (!previous || this.quadtreeRebuildPending) return;
-    const rebuildStartedAt = performance.now();
     this.quadtreeRebuildPending = true;
     this.info.quadtreeRebuildPending = true;
     const bodiesAtKick = this.quadtreeLastBodies.map((body) => structuredClone(body));
@@ -1615,7 +1428,6 @@ export class WebGPUUniformEulerianSolver {
       this.quadtreeRebuildFailureCount = 0;
       this.quadtreeRebuildRetrySteps = 0;
       this.info.quadtreeRebuildPending = false;
-      this.info.quadtreeRebuildWall_ms = performance.now() - rebuildStartedAt;
       this.info.quadtreeRebuildBlockedFrames = this.quadtreeRebuildBlockedFrames;
       if (this.disposed) { if (next !== previous) next.destroy(); return; }
       // Stage the finished projection; advanceTo applies it at the fixed
@@ -1649,10 +1461,7 @@ export class WebGPUUniformEulerianSolver {
   }
 
   advanceTo(time_s: number, bodies: RigidBodyState[] = []) {
-    // Intrusive pressure profiling owns the empty queue until its isolated
-    // completion fence resolves; do not overlap the next production advance.
-    if (this.pressureWallProbePending || this.profiledAdvancePending) return false;
-    if (this.disposed) return false;
+    if (this.disposed || this.profiledAdvanceCompletion) return false;
     // Deterministic bounded-staleness rebuild pipeline. Algorithm 1 wants the
     // quadtree constructed before advection and pressure, but a synchronous
     // handshake costs one full GPU-readback + worker-pack round trip per
@@ -1686,11 +1495,6 @@ export class WebGPUUniformEulerianSolver {
     }
     const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s); if (!advance) return false;
     const delta = advance.dt_s; if (delta < 1e-6) { this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; return true; }
-    this.profilerAdvanceCount += 1;
-    const cpuAdvanceStartedAt_ms = performance.now();
-    let cpuTopologyEncode_ms = 0, cpuPressureProjectionEncode_ms = 0, cpuPressureSolveEncode_ms = 0;
-    let pressureSolvePassCount = 0, pressureSolvePassTransitionCount = 0;
-    let cpuSurfaceEncode_ms = 0, cpuPublicationEncode_ms = 0;
     this.lastTime = advance.nextTime_s; this.info.submittedTime_s = this.lastTime; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
     // Proactive CFL control. The latest completed reduction is the previous
     // projected maximum; gravity is the only unbounded explicit acceleration
@@ -1700,8 +1504,7 @@ export class WebGPUUniformEulerianSolver {
     // Sparse phi advection is semi-Lagrangian and does not force the global
     // pressure solve onto the fine geometric timestep. Preserve the coarse
     // Chebyshev cadence unless explicit fine dynamics is enabled.
-    const surfaceFactor = this.octreeProjection?.requiresFineSurfaceTimestep ? this.octreeProjection.sparseSurfaceRefinementFactor : 1;
-    const hMin = coarseHMin / surfaceFactor;
+    const hMin = coarseHMin;
     const inflowSpeed = this.scene.fluid.inflow ? Math.hypot(this.scene.fluid.inflow.velocity_m_s.x, this.scene.fluid.inflow.velocity_m_s.y, this.scene.fluid.inflow.velocity_m_s.z) : 0;
     // Remaining residency exception: the latest asynchronous speed reduction
     // still selects the bounded host substep count. Section 5 requires the
@@ -1718,62 +1521,59 @@ export class WebGPUUniformEulerianSolver {
       sigma
     ) : 1;
     const dt = delta / substeps; this.info.lastDt_s = dt; this.info.lastSubsteps = substeps;
-    this.octreeProjection?.setHydrostaticTimestep(dt);
+    this.octreeProjection?.setTimestep(dt);
     const activeBodies = bodies.slice(0, 12);
     this.rigidSystem.syncBodies(activeBodies); this.info.encodedSteps = (this.info.encodedSteps ?? 0) + substeps;
-    // On the same cadence as the isolated pressure replay, split one real
-    // production advance into ordered command buffers. A fence captured after
-    // each submit exposes command-processing time that Metal shader timestamp
-    // queries collapse below their resolution.
-    const productionPhaseProbeActive = this.performanceReadbacksEnabled && Boolean(this.octreeProjection)
-      && !this.pressureWallProbePending
-      && this.profilerAdvanceCount - this.advancePhaseWallLastAdvance
-        >= OCTREE_ADVANCE_PHASE_PROFILE_CADENCE_ADVANCES;
-    if (productionPhaseProbeActive) this.advancePhaseWallLastAdvance = this.profilerAdvanceCount;
-    const productionQueueReadyAtPromise = productionPhaseProbeActive
-      ? this.device.queue.onSubmittedWorkDone().then(() => performance.now())
-      : undefined;
+    const traceRequestedAt_ms = performance.now();
+    const timestampTraceUnavailable = !GPUPerformanceTraceRecorder.supported(this.device)
+      || this.hardwarePhysicsTraceInvalid;
+    const shouldSegmentPhysics = Boolean(this.octreeProjection)
+      && !this.physicsTracePending
+      && timestampTraceUnavailable
+      && traceRequestedAt_ms - this.lastSegmentedPhysicsTraceAt_ms >= SEGMENTED_QUEUE_TRACE_CADENCE_MS;
+    const shouldTracePhysics = !this.physicsTracePending
+      && (shouldSegmentPhysics || traceRequestedAt_ms - this.lastPhysicsTraceAt_ms >= 250);
     this.octreeProjection?.setCouplingBodies(activeBodies.length, activeBodies.some((body) => body.inverseMass_kg > 0));
     const inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;
     if(this.adaptiveProjection&&this.inflowBoundary){const cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);this.adaptiveProjection.addSurfaceReferenceVolumeCells(this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume);}
-    this.device.queue.writeBuffer(this.params, 0, new Float32Array([this.info.nx, this.info.ny, this.info.nz, dt, c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz, this.scene.fluid.gravity_m_s2.y, c.width_m, c.height_m, c.depth_m, sceneHasTerrain(this.scene) ? 1 : 0, rho, this.scene.fluid.dynamicViscosity_Pa_s, this.transportConservativeVolume ? 1 : 0, this.adaptiveProjection ? 1 : 0, sigma, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodies.length, c.top === "open" ? 1 : 0,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,this.hydrostaticSplit?1:0,c.fillFraction*this.info.ny,0]));
-    if(this.secondaryParticlesEnabled&&this.secondaryParticleSystem&&this.secondaryParticleSamplingSource)this.secondaryParticleSystem.prepareStep(dt,this.secondaryParticleSamplingSource);
-    if (gpuStageCapture.matches("physics", "pressure") || gpuStageCapture.matches("physics", "topology")) this.ensureGridDiagnosticTextures();
-    this.querySegments = []; this.queryCount = 0; if (!this.validationChecked) this.device.pushErrorScope("validation");
-    type ProductionPhase = "topologyAdvection" | "pressureProjection" | OctreePressureProjectionProfilePhase
-      | "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance" | "fineRestriction"
-      | "pageSurface" | "surfaceCoupling" | "publicationDiagnostics";
+    if (this.params) this.device.queue.writeBuffer(this.params, 0, new Float32Array([this.info.nx, this.info.ny, this.info.nz, dt, c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz, this.scene.fluid.gravity_m_s2.y, c.width_m, c.height_m, c.depth_m, sceneHasTerrain(this.scene) ? 1 : 0, rho, this.scene.fluid.dynamicViscosity_Pa_s, this.transportConservativeVolume ? 1 : 0, this.adaptiveProjection ? 1 : 0, sigma, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodies.length, c.top === "open" ? 1 : 0,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,0,c.fillFraction*this.info.ny,0]));
+    if (!this.validationChecked) this.device.pushErrorScope("validation");
     let encoder = this.device.createCommandEncoder({ label: "Uniform GPU fluid step" });
-    const totalTiming = this.timing("total_ms");
-    const productionPhaseSegments: Array<{ phase: ProductionPhase; encoder: GPUCommandEncoder;
-      commandBuffer: GPUCommandBuffer; detail?: FineLevelSetTransportBoundary }> = [];
-    let submittedAt = 0;
-    const submitCurrentEncoder = (phase: ProductionPhase, createNext: boolean,
-      detail?: FineLevelSetTransportBoundary) => {
-      const submittedEncoder = encoder;
-      const commandBuffer = submittedEncoder.finish();
-      if (productionPhaseProbeActive) productionPhaseSegments.push({ phase, encoder: submittedEncoder,
-        commandBuffer, ...(detail ? { detail } : {}) });
-      else {
-        if (submittedAt === 0) submittedAt = performance.now();
-        this.device.queue.submit([commandBuffer]);
-        this.octreeProjection?.retireSubmittedEncoder(submittedEncoder);
-      }
-      if (createNext) encoder = this.device.createCommandEncoder({ label: `Uniform GPU fluid step · ${phase} complete` });
+    const physicsTraceSampleId = shouldTracePhysics ? ++this.physicsTraceSampleId : 0;
+    const physicsTrace = shouldTracePhysics
+      && !shouldSegmentPhysics
+      && GPUPerformanceTraceRecorder.supported(this.device)
+      ? new DynamicGPUPerformanceTraceRecorder(
+        this.device,
+        physicsTraceSampleId,
+        "physics",
+        `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`,
+        2048,
+      )
+      : undefined;
+    const segmentedPhysicsTrace = shouldSegmentPhysics
+      ? new GPUSegmentedQueueWallPerformanceTraceRecorder(
+        this.device,
+        physicsTraceSampleId,
+        "physics",
+        `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`,
+      )
+      : undefined;
+    const physicsQueueTrace = shouldTracePhysics && !segmentedPhysicsTrace
+      ? new GPUQueueWallPerformanceTraceRecorder(
+        physicsTraceSampleId,
+        "physics",
+        `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`,
+      )
+      : undefined;
+    physicsTrace?.begin(encoder);
+    const completePhysicsPhase = (
+      completedEncoder: GPUCommandEncoder,
+      phase: GPUTimestampPhase,
+    ): GPUCommandEncoder => {
+      physicsTrace?.completePhase(completedEncoder, phase);
+      return segmentedPhysicsTrace?.completePhase(completedEncoder, phase) ?? completedEncoder;
     };
-    const cpuSetupEncode_ms = performance.now() - cpuAdvanceStartedAt_ms;
-    let stageCapture: PendingGPUStageCapture | undefined;
-    const captureTexture = (stageKey: string, texture: GPUTexture | undefined, visualizationDimension: "2d" | "3d" = "3d", sampleType: "float" | "uint" = "float") => {
-      if (!texture || stageCapture) return;
-      stageCapture = encodeGPUStageTextureCapture({
-        device: this.device, encoder, lane: "physics", stageKey, texture,
-        dimension: visualizationDimension,
-        sampleType,
-        dimensions: visualizationDimension === "3d" ? [this.info.nx, this.info.ny, this.info.nz] : [this.info.nx, this.info.nz, 1],
-        identity: { methodId: this.info.gridKind === "restricted-tall-cell" ? "tall-cell" : this.info.gridKind, sceneId: this.scene.sceneId, simulationTime_s: this.lastTime, step: this.info.encodedSteps },
-      });
-    };
-    if (totalTiming && this.querySet) { const pass = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: totalTiming.start } }); pass.end(); }
     encoder.clearBuffer(this.rigidExchangeBuffer);
     // Narita Algorithm 1: regenerate the quadtree at the top of every step.
     // The fully GPU-resident rebuild encodes ahead of advection in the same
@@ -1781,139 +1581,62 @@ export class WebGPUUniformEulerianSolver {
     // the asynchronous pipeline below remains the warmup/regrow/rigid path.
     let inlineRebuildEncoded = false;
     if (this.quadtreeProjection && this.rebuildQuadtreeEachStep && this.quadtreeInlineRebuild && !this.quadtreeRebuildPending && !this.quadtreeReadyProjection && this.quadtreeProjection.canEncodeInlineRebuild) {
-      const timing = this.timing("layerConstruction_ms");
-      if (timing && this.querySet) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.start } }); marker.end(); }
-      const cpuStageStartedAt_ms = performance.now();
       inlineRebuildEncoded = this.quadtreeProjection.encodeInlineRebuild(encoder);
-      cpuTopologyEncode_ms += performance.now() - cpuStageStartedAt_ms;
-      if (timing && this.querySet) { const marker = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end(); }
     } else if (this.octreeProjection) {
-      const timing = this.timing("layerConstruction_ms");
-      if (timing && this.querySet) {
-        const marker = encoder.beginComputePass({ label: "Octree topology timing start", timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.start } }); marker.end();
-      }
-      const cpuStageStartedAt_ms = performance.now();
       inlineRebuildEncoded = this.octreeProjection.encodeInlineRebuild(encoder);
-      cpuTopologyEncode_ms += performance.now() - cpuStageStartedAt_ms;
-      if (timing && this.querySet) {
-        const marker = encoder.beginComputePass({ label: "Octree topology timing end", timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end();
-      }
     }
+    encoder = completePhysicsPhase(encoder, this.adaptiveProjection
+      ? { id: "coarse-grid", label: "Adaptive coarse-grid topology" }
+      : { id: "other", label: "Advance setup" });
     for (let substep = 0; substep < substeps; substep += 1) {
       // The first rebuild was encoded above so topology is ready before any
       // dynamics. If CFL control subdivides this advance, phi moves after each
       // projection; rebuild again before the next substep so a newly exposed
       // interface can never remain inside a coarse pressure leaf.
       if (substep > 0 && this.octreeProjection) {
-        const timing = this.timing("layerConstruction_ms");
-        if (timing && this.querySet) {
-          const marker = encoder.beginComputePass({ label: "Octree substep topology timing start", timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.start } }); marker.end();
-        }
-        const cpuStageStartedAt_ms = performance.now();
         this.octreeProjection.encodeInlineRebuild(encoder);
-        cpuTopologyEncode_ms += performance.now() - cpuStageStartedAt_ms;
-        if (timing && this.querySet) {
-          const marker = encoder.beginComputePass({ label: "Octree substep topology timing end", timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.end } }); marker.end();
-        }
+        encoder = completePhysicsPhase(encoder, { id: "coarse-grid", label: "CFL substep topology refresh" });
       }
       // U3 compact-face authority owns advection, forces, divergence, and
       // projection inside WebGPUOctreeProjection. The shared dense kernels are
       // not merely redundant here: dispatching them would address the 1x1
       // format-only compatibility textures as though they covered the box.
-      if (!this.adaptiveFaceVelocityCutover) {
-      const bulkSource = this.octreeProjection?.fluidBrickAtlasSamplingSource;
-      if (bulkSource?.mode === "mirror") {
-        bulkSource.encodeBulkRefresh(encoder, this.octreeProjection!.levelSetTexture, this.velocityA, dt);
-      }
-      const sparseBulkTargets = this.sparseVelocityAdvectionRequested
-        && bulkSource?.mode === "mirror" && bulkSource.sparseDispatchSafe;
-      const sparseTransportTargets = this.sparseTransportPreparationRequested
-        && bulkSource?.mode === "mirror" && bulkSource.sparseDispatchSafe;
-      // Sparse occupancy records only a column maximum. Hydrostatic eta also
-      // needs a connected zero crossing, so use the dense 2D column scan when
-      // the split is enabled and keep the optional sparse A/B for the old path.
-      const sparseOccupancyFluxTargets = !this.hydrostaticSplit && this.sparseOccupancyFluxPreparationRequested
-        && bulkSource?.mode === "mirror" && bulkSource.sparseDispatchSafe;
-      if (sparseOccupancyFluxTargets) encoder.copyBufferToBuffer(
-        bulkSource.bulkWorklist, FLUID_BRICK_ACTIVE_CELL64_DISPATCH_OFFSET_BYTES,
-        this.occupancyCell64Dispatch, 0, 12,
-      );
-      const sparseExtrapolationTargets = this.octreeProjection?.usesSparseVelocityExtrapolation ?? false;
-      if (bulkSource && (sparseBulkTargets || sparseTransportTargets || sparseOccupancyFluxTargets || sparseExtrapolationTargets)) {
-        const clear = encoder.beginComputePass({ label: "Clear retired sparse compatibility payloads" });
-        if (sparseBulkTargets || sparseExtrapolationTargets) {
-          clear.setPipeline(this.retiredVelocityClearPipeline);
-          for (const group of this.retiredVelocityClearGroups) {
-            clear.setBindGroup(0, group);
-            clear.dispatchWorkgroupsIndirect(bulkSource.bulkWorklist, FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES);
-          }
-        }
-        if (sparseTransportTargets) {
-          clear.setPipeline(this.retiredTransportClearPipeline);
-          for (const group of this.retiredTransportClearGroups) {
-            clear.setBindGroup(0, group);
-            clear.dispatchWorkgroupsIndirect(bulkSource.bulkWorklist, FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES);
-          }
-        }
-        if (sparseOccupancyFluxTargets && this.transportConservativeVolume) {
-          clear.setPipeline(this.retiredFluxScaleClearPipeline);
-          clear.setBindGroup(0, this.retiredFluxScaleClearGroup);
-          clear.dispatchWorkgroupsIndirect(bulkSource.bulkWorklist, FLUID_BRICK_RETIRED_DISPATCH_OFFSET_BYTES);
-        }
-        clear.end();
-      }
+      if (this.hostAllocation) {
       {
-        const timing = this.timing("advection_ms");
         const paddedWorkgroups: [number, number, number] = [Math.ceil((this.info.nx + 2) / 4), Math.ceil((this.info.ny + 2) / 4), Math.ceil((this.info.nz + 2) / 4)];
         // Occupancy, transport extrapolation, and flux scales only read the
         // projected state, so they share one pass ahead of the predictor.
-        if (sparseOccupancyFluxTargets) encoder.clearBuffer(this.occupancyColumns);
-        const prep = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start } } : undefined);
+        const prep = encoder.beginComputePass({ label: "Uniform occupancy and transport preparation" });
         prep.setBindGroup(0, this.occupancyGroup);
-        if (sparseOccupancyFluxTargets) {
-          // Fail closed entirely on-GPU: generation zero / an empty first-step
-          // list executes the dense column scan, while populated frames return
-          // immediately from this area-only sentinel dispatch.
-          prep.setPipeline(this.buildOccupancyPipeline);
-          prep.dispatchWorkgroups(Math.ceil(this.info.nx / 8), Math.ceil(this.info.nz / 8), 1);
-          prep.setPipeline(this.buildSparseOccupancyPipeline);
-          prep.dispatchWorkgroupsIndirect(this.occupancyCell64Dispatch, 0);
-          prep.setPipeline(this.resolveSparseOccupancyPipeline);
-          prep.dispatchWorkgroups(Math.ceil(this.info.nx / 8), Math.ceil(this.info.nz / 8), 1);
-        } else {
-          prep.setPipeline(this.buildOccupancyPipeline);
-          prep.dispatchWorkgroups(Math.ceil(this.info.nx / 8), Math.ceil(this.info.nz / 8), 1);
-        }
-        this.dispatchTransport(prep, this.transportFromCurrentGroup, sparseTransportTargets, paddedWorkgroups);
+        prep.setPipeline(this.buildOccupancyPipeline);
+        prep.dispatchWorkgroups(Math.ceil(this.info.nx / 8), Math.ceil(this.info.nz / 8), 1);
+        this.dispatchTransport(prep, this.transportFromCurrentGroup, paddedWorkgroups);
         if (this.transportConservativeVolume) {
           prep.setPipeline(this.buildFluxScalesPipeline);
           prep.setBindGroup(0, this.fluxScaleGroup);
-          if (sparseOccupancyFluxTargets) prep.dispatchWorkgroupsIndirect(this.occupancyCell64Dispatch, 0);
-          else prep.dispatchWorkgroups(Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4));
+          prep.dispatchWorkgroups(Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4));
         }
         prep.end();
-        const predict = encoder.beginComputePass(timing && this.querySet && this.velocityTransport === "semi-lagrangian" ? { timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.end } } : undefined);
-        this.dispatch(predict, this.advectPipeline, this.advectGroup, sparseBulkTargets); predict.end();
+        const predict = encoder.beginComputePass({ label: "Uniform velocity prediction" });
+        this.dispatch(predict, this.advectPipeline, this.advectGroup); predict.end();
         if (this.velocityTransport === "maccormack" && this.transportFromPredictedGroup) {
-          const predictedTransport = encoder.beginComputePass();
-          this.dispatchTransport(predictedTransport, this.transportFromPredictedGroup, sparseTransportTargets, paddedWorkgroups); predictedTransport.end();
-          const reverse = encoder.beginComputePass(); this.dispatch(reverse, this.reversePipeline, this.reverseGroup, sparseBulkTargets); reverse.end();
-          const correct = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(correct, this.correctPipeline, this.correctGroup, sparseBulkTargets); correct.end();
+          const predictedTransport = encoder.beginComputePass({ label: "Uniform predicted transport preparation" });
+          this.dispatchTransport(predictedTransport, this.transportFromPredictedGroup, paddedWorkgroups); predictedTransport.end();
+          const reverse = encoder.beginComputePass({ label: "Uniform reverse advection" }); this.dispatch(reverse, this.reversePipeline, this.reverseGroup); reverse.end();
+          const correct = encoder.beginComputePass({ label: "Uniform MacCormack correction" }); this.dispatch(correct, this.correctPipeline, this.correctGroup); correct.end();
         }
       }
       if (this.densitySharpening && this.transportConservativeVolume) {
         // Mass-Conserving Eulerian Liquid Simulation Sec 3.5: sharpen the
         // advected density before the pressure solve. volumeB -> volumeA
         // (sharpened, deltas in pressureB) -> volumeB (resolved deposits).
-        const timing = this.timing("conditioning_ms");
-        encoder.clearBuffer(this.sharpenBuffer);
-        const computePass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start } } : undefined); this.dispatch(computePass, this.sharpenComputePipeline, this.sharpenComputeGroup); computePass.end();
-        const scatterPass = encoder.beginComputePass(); this.dispatch(scatterPass, this.sharpenScatterPipeline, this.sharpenScatterGroup); scatterPass.end();
-        const resolvePass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(resolvePass, this.sharpenResolvePipeline, this.sharpenResolveGroup); resolvePass.end();
+        encoder.clearBuffer(this.sharpenBuffer!);
+        const computePass = encoder.beginComputePass({ label: "Uniform density sharpening" }); this.dispatch(computePass, this.sharpenComputePipeline, this.sharpenComputeGroup); computePass.end();
+        const scatterPass = encoder.beginComputePass({ label: "Uniform sharpened-mass scatter" }); this.dispatch(scatterPass, this.sharpenScatterPipeline, this.sharpenScatterGroup); scatterPass.end();
+        const resolvePass = encoder.beginComputePass({ label: "Uniform sharpened-mass resolve" }); this.dispatch(resolvePass, this.sharpenResolvePipeline, this.sharpenResolveGroup); resolvePass.end();
       }
-      captureTexture("advection", this.velocityB);
+      encoder = completePhysicsPhase(encoder, { id: "velocity-advection", label: "Velocity advection + conditioning" });
       }
-      if (productionPhaseProbeActive) submitCurrentEncoder("topologyAdvection", true);
       if (this.adaptiveProjection) {
         if (this.transportConservativeVolume) encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
         const surfaceInflow = inflow && this.inflowBoundary ? {
@@ -1921,101 +1644,52 @@ export class WebGPUUniformEulerianSolver {
           velocity_m_s: inflow.velocity_m_s, apertureScale: this.inflowBoundary.apertureScale,
           strength: inflowStepStrength
         } : undefined;
-        const timestampWrites = (timing: { start: number; end: number } | undefined) => timing && this.querySet ? {
-          querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end
-        } : undefined;
         if (this.octreeProjection) {
-          const powerTimings = this.octreeProjection.info.powerDiagramProjection === "off" ? undefined : {
-            pressure: this.splitTiming("pressure_ms", "powerAssembly_ms", "pressureSolve_ms"),
-            projection: this.octreeProjection.hasGlobalFineFaceTiming
-              ? this.splitTimingWithFirst3("projection_ms", "powerProjection_ms", "faceBand_ms",
-                "faceMarch_ms", "powerPublication_ms", "velocityProjection_ms")
-              : this.splitTiming("projection_ms", "powerProjection_ms", "velocityProjection_ms"),
-          };
-          const cpuStageStartedAt_ms = performance.now();
           encoder = this.octreeProjection.encode(
             encoder,
             this.info.nx,
             this.info.ny,
             this.info.nz,
-            timestampWrites(powerTimings?.pressure?.total ?? this.timing("pressure_ms")),
             {
-              projection: timestampWrites(powerTimings?.projection?.total ?? this.timing("projection_ms")),
-              pressurePhaseBoundary: powerTimings?.pressure && this.querySet ? {
-                querySet: this.querySet, writeIndex: powerTimings.pressure.boundary,
+              productionBoundary: physicsTrace || segmentedPhysicsTrace ? (phase, completedEncoder) => {
+                return completePhysicsPhase(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE[phase]);
               } : undefined,
-              projectionPhaseBoundary: powerTimings?.projection && this.querySet ? {
-                querySet: this.querySet, writeIndex: powerTimings.projection.boundary,
-              } : undefined,
-              section5FacePhaseBoundaries: powerTimings?.projection && this.querySet
-                && powerTimings.projection.firstChildBoundary !== undefined
-                && powerTimings.projection.secondChildBoundary !== undefined ? {
-                  querySet: this.querySet,
-                  faceMarchStartWriteIndex: powerTimings.projection.firstChildBoundary,
-                  powerPublicationStartWriteIndex: powerTimings.projection.secondChildBoundary,
-                } : undefined,
-              productionBoundary: productionPhaseProbeActive ? (phase, completedEncoder) => {
-                if (completedEncoder !== encoder) throw new Error("Octree pressure profiler encoder identity drifted");
-                submitCurrentEncoder(phase, true);
-                return encoder;
-              } : undefined,
-              extrapolation: this.octreeProjection.extrapolationSweepCount > 0 ? timestampWrites(this.timing("extrapolation_ms")) : undefined,
-              materialization: this.octreeProjection.hasDiagnosticTextures ? timestampWrites(this.timing("materialization_ms")) : undefined
             }
           );
-          cpuPressureProjectionEncode_ms += performance.now() - cpuStageStartedAt_ms;
-          cpuPressureSolveEncode_ms += this.octreeProjection.info.cpuPressureSolveEncode_ms;
-          pressureSolvePassCount += this.octreeProjection.info.pressureSolvePassCount;
-          pressureSolvePassTransitionCount += this.octreeProjection.info.pressureSolvePassTransitionCount;
         } else if (this.quadtreeProjection) {
-          const cpuStageStartedAt_ms = performance.now();
-          this.quadtreeProjection.encode(encoder, this.info.nx, this.info.ny, this.info.nz, timestampWrites(this.timing("pressure_ms")));
-          cpuPressureProjectionEncode_ms += performance.now() - cpuStageStartedAt_ms;
+          this.quadtreeProjection.encode(encoder, this.info.nx, this.info.ny, this.info.nz);
+          encoder = completePhysicsPhase(encoder, { id: "pressure-solve", label: "Adaptive pressure + projection" });
         }
-        captureTexture("topology", this.gridCellTexture, "3d", "uint");
-        captureTexture("pressure", this.gridPressureTexture);
-        // Compact faces are the velocity authority in this mode. The host
-        // rgba32float texture is deliberately 1x1 and must never enter a
-        // full-domain capture.
-        captureTexture("projection", this.adaptiveFaceVelocityCutover ? undefined : this.velocityA);
-        if (productionPhaseProbeActive) submitCurrentEncoder("pressureProjection", true);
         // Transport phi from the freshly projected, narrow-band-extrapolated
         // velocity. Sampling the previous frame here was the one-frame lag
         // that froze crests and newly exposed interface cells.
-        const surfaceTiming = this.octreeProjection?.hasGlobalFineSurfaceTiming
-          ? this.splitTiming3("surfaceUpdate_ms", "fineTransport_ms", "fineTopology_ms", "fineRedistance_ms")
-          : this.timing("surfaceUpdate_ms");
-        const surfaceTotalTiming = surfaceTiming && "total" in surfaceTiming ? surfaceTiming.total : surfaceTiming;
-        if (surfaceTotalTiming && this.querySet) {
-          const marker = encoder.beginComputePass({ label: "Adaptive surface timing start", timestampWrites: { querySet: this.querySet, endOfPassWriteIndex: surfaceTotalTiming.start } }); marker.end();
-        }
-        const cpuStageStartedAt_ms = performance.now();
         if (this.octreeProjection) {
-          this.octreeProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s,
-            undefined, surfaceTiming && this.querySet && "firstBoundary" in surfaceTiming ? {
-              querySet: this.querySet,
-              fineTopologyStartWriteIndex: surfaceTiming.firstBoundary,
-              fineRedistanceStartWriteIndex: surfaceTiming.secondBoundary,
-            } : undefined, productionPhaseProbeActive ? (phase, completedEncoder, detail) => {
-              if (completedEncoder !== encoder) throw new Error("Octree surface profiler encoder identity drifted");
-              submitCurrentEncoder(phase, true, detail);
-              return encoder;
+          // Segmented boundary callbacks finish the encoder they are handed;
+          // continuing on the stale reference would finish it a second time.
+          encoder = this.octreeProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s,
+            physicsTrace || segmentedPhysicsTrace ? (phase, completedEncoder) => {
+              const mapped = FINE_TRACE_PHASE[phase as keyof typeof FINE_TRACE_PHASE]
+                ?? { id: "adaptive-publication" as const, label: "Fine surface publication" };
+              return completePhysicsPhase(completedEncoder, mapped);
             } : undefined);
         } else {
           this.adaptiveProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s);
         }
-        cpuSurfaceEncode_ms += performance.now() - cpuStageStartedAt_ms;
-        if (surfaceTotalTiming && this.querySet) {
-          const marker = encoder.beginComputePass({ label: "Adaptive surface timing end", timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: surfaceTotalTiming.end } }); marker.end();
+        if (!this.octreeProjection) {
+          encoder = completePhysicsPhase(
+            encoder,
+            { id: "fine-sdf-redistance", label: "Surface transport + redistance" },
+          );
         }
-        captureTexture("surface-update", this.octreeProjection && !this.octreeProjection.hasDenseLevelSetPublication
-          ? undefined : this.adaptiveProjection.levelSetTexture);
       } else {
-        { const timing = this.timing("pressure_ms"); for (let iteration = 0; iteration < this.info.pressureIterations; iteration += 1) { const first = iteration === 0, last = iteration === this.info.pressureIterations - 1; const pass = encoder.beginComputePass(timing && this.querySet && (first || last) ? { timestampWrites: { querySet: this.querySet, ...(first ? { beginningOfPassWriteIndex: timing.start } : {}), ...(last ? { endOfPassWriteIndex: timing.end } : {}) } } : undefined); this.dispatch(pass, this.jacobiPipeline, iteration % 2 === 0 ? this.jacobiABGroup : this.jacobiBAGroup); pass.end(); } }
-        captureTexture("pressure", this.info.pressureIterations % 2 === 0 ? this.pressureA : this.pressureB);
-        { const timing = this.timing("projection_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined); this.dispatch(pass, this.projectPipeline, this.projectGroup); pass.end(); }
-        captureTexture("projection", this.velocityA);
-        if (productionPhaseProbeActive) submitCurrentEncoder("pressureProjection", true);
+        for (let iteration = 0; iteration < this.info.pressureIterations; iteration += 1) {
+          const pass = encoder.beginComputePass({ label: "Uniform Jacobi pressure iteration" });
+          this.dispatch(pass, this.jacobiPipeline, iteration % 2 === 0 ? this.jacobiABGroup : this.jacobiBAGroup);
+          pass.end();
+        }
+        encoder = completePhysicsPhase(encoder, { id: "pressure-solve", label: "Uniform pressure solve" });
+        { const pass = encoder.beginComputePass({ label: "Uniform pressure projection" }); this.dispatch(pass, this.projectPipeline, this.projectGroup); pass.end(); }
+        encoder = completePhysicsPhase(encoder, { id: "velocity-projection", label: "Uniform velocity projection" });
       }
       // Chentanez & Müller Sec. 3.9.1 runs for every pressure backend. Both
       // adaptive projections constrain the normal face flux variationally;
@@ -2025,25 +1699,16 @@ export class WebGPUUniformEulerianSolver {
       // global K^T p reduction at every pressure iterate. Phi-s relaxation
       // keeps the resident level set sane inside either backend's solids so
       // they displace water instead of carrying sealed liquid plugs.
-      if (activeBodies.length > 0) {
+      if (activeBodies.length > 0 && !this.octreeProjection) {
         if (this.adaptiveProjection && this.solidPhiGroup) {
           encoder.copyTextureToTexture({ texture: this.adaptiveProjection.levelSetTexture }, { texture: this.pressureA }, [this.info.nx, this.info.ny, this.info.nz]);
-          const phiPass = encoder.beginComputePass(); this.dispatch(phiPass, this.relaxSolidPhiPipeline, this.solidPhiGroup); phiPass.end();
+          const phiPass = encoder.beginComputePass({ label: "Uniform solid level-set relaxation" }); this.dispatch(phiPass, this.relaxSolidPhiPipeline, this.solidPhiGroup); phiPass.end();
         }
-        const timing = this.timing("rigidCoupling_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined);
+        const pass = encoder.beginComputePass({ label: "Uniform rigid-body coupling" });
         this.dispatch(pass, this.rigidPipeline, this.rigidGroup); pass.end();
         if (this.transportConservativeVolume) encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
         encoder.copyTextureToTexture({ texture: this.velocityB }, { texture: this.velocityA }, [this.info.nx, this.info.ny, this.info.nz]);
       }
-      if (this.secondaryParticlesEnabled && this.secondaryParticleSystem) {
-        const sprayTiming = this.timing("spray_ms");
-        this.secondaryParticleSystem.encode(encoder, sprayTiming && this.querySet ? {
-          querySet: this.querySet,
-          beginningOfPassWriteIndex: sprayTiming.start,
-          endOfPassWriteIndex: sprayTiming.end
-        } : undefined);
-      }
-      if (productionPhaseProbeActive) submitCurrentEncoder("surfaceCoupling", true);
     }
     if (activeBodies.length > 0) {
       this.quadtreeProjection?.encodeBodyImpulseExchange(encoder, this.rigidExchangeBuffer);
@@ -2054,139 +1719,61 @@ export class WebGPUUniformEulerianSolver {
     // world. The topology and payload stay GPU-resident; rendering consumes
     // compact debug records and subsequent voxel kernels consume the same ABI.
     if (this.octreeProjection) {
-      const timestampWrites = (timing: { start: number; end: number } | undefined) => timing && this.querySet ? {
-        querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end
-      } : undefined;
-          const cpuStageStartedAt_ms = performance.now();
-          this.octreeProjection.encodeSparseBrickWorld(encoder, {
-            residency: timestampWrites(this.timing("fluidResidency_ms")),
-            publication: timestampWrites(this.timing("sparsePublication_ms"))
-          }, dt, this.octreeProjection.fluidBrickAtlasSamplingSource?.mode === "mirror");
-          cpuPublicationEncode_ms += performance.now() - cpuStageStartedAt_ms;
+      this.octreeProjection.encodeSparseBrickWorld(encoder, dt);
     }
-    encoder.clearBuffer(this.reductionBuffer);
-    if (!this.adaptiveFaceVelocityCutover) {
-      const timing = this.timing("diagnostics_ms"), pass = encoder.beginComputePass(timing && this.querySet ? { timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: timing.start, endOfPassWriteIndex: timing.end } } : undefined);
+    if (this.hostAllocation) {
+      encoder.clearBuffer(this.reductionBuffer!);
+      const pass = encoder.beginComputePass({ label: "Uniform diagnostics reduction" });
       this.dispatch(pass, this.reductionPipeline, this.reductionGroup); pass.end();
     }
-    if (totalTiming && this.querySet) { const pass = encoder.beginComputePass({ timestampWrites: { querySet: this.querySet, beginningOfPassWriteIndex: totalTiming.end } }); pass.end(); }
-    if (this.querySet && this.queryResolve && this.queryCount > 0) encoder.resolveQuerySet(this.querySet, 0, this.queryCount, this.queryResolve, 0);
-    submitCurrentEncoder("publicationDiagnostics", false);
-    if (productionPhaseProbeActive && productionQueueReadyAtPromise) {
-      const sampledSimulation_s = this.lastTime;
-      const phaseSegments = productionPhaseSegments.slice();
-      this.profiledAdvancePending = true;
-      const completion = (async () => {
-        await productionQueueReadyAtPromise;
-        let previousCompletedAt = performance.now();
-        const totals: Record<ProductionPhase, number> = {
-          topologyAdvection: 0, pressureProjection: 0,
-          pressureAssemblySetup: 0, pressureLeafCompactionL1Capture: 0,
-          faceMirrorTransportRhs: 0, powerDescriptorTopologyFaces: 0, oldFaceAdvectionRepair: 0,
-          powerOperatorRhsAssembly: 0, finalPressureRowAssembly: 0,
-          mgpcgSolve: 0, powerProjectionPublication: 0,
-          faceBandTopologyBuild: 0, faceBandTransitionAdjacency: 0, faceBandFastMarch: 0,
-          faceBandPowerPublicationCapture: 0, remainingCompatibilityProjection: 0,
-          finePreparation: 0, fineTransport: 0, fineTopology: 0,
-          fineRedistance: 0, fineRestriction: 0, pageSurface: 0, surfaceCoupling: 0,
-          publicationDiagnostics: 0,
-        };
-        let fineTransportSetup_ms = 0, fineTransportFinalize_ms = 0;
-        const fineTransportSegments = new Map<number, { segment: number; directStageB_ms: number;
-          airBand_ms: number; airBandClassify_ms: number; airBandEvaluate_ms: number;
-          airBandFinalize_ms: number; trajectoryAdvance_ms: number }>();
-        const firstBoundaryAt = previousCompletedAt;
-        for (const segment of phaseSegments) {
-          if (this.disposed) return;
-          if (submittedAt === 0) submittedAt = performance.now();
-          this.device.queue.submit([segment.commandBuffer]);
-          this.octreeProjection?.retireSubmittedEncoder(segment.encoder);
-          await this.device.queue.onSubmittedWorkDone();
-          const completedAt = performance.now();
-          const elapsed_ms = completedAt - previousCompletedAt;
-          totals[segment.phase] += elapsed_ms;
-          if (segment.phase === "fineTransport") {
-            const detail = segment.detail;
-            if (!detail) fineTransportFinalize_ms += elapsed_ms;
-            else if (detail.kind === "setup") fineTransportSetup_ms += elapsed_ms;
-            else {
-              const entry = fineTransportSegments.get(detail.segment) ?? { segment: detail.segment,
-                directStageB_ms: 0, airBand_ms: 0, airBandClassify_ms: 0, airBandEvaluate_ms: 0,
-                airBandFinalize_ms: 0, trajectoryAdvance_ms: 0 };
-              if (detail.kind === "directStageB") entry.directStageB_ms += elapsed_ms;
-              else if (detail.kind === "trajectoryAdvance") entry.trajectoryAdvance_ms += elapsed_ms;
-              else {
-                entry.airBand_ms += elapsed_ms;
-                if (detail.kind === "classifyAirBandVelocity") entry.airBandClassify_ms += elapsed_ms;
-                else if (detail.kind === "evaluateAirBandVelocity") entry.airBandEvaluate_ms += elapsed_ms;
-                else entry.airBandFinalize_ms += elapsed_ms;
-              }
-              fineTransportSegments.set(detail.segment, entry);
-            }
-          }
-          previousCompletedAt = completedAt;
-        }
-        if (this.disposed) return;
-        const remainingCompatibilityProjection_ms = totals.remainingCompatibilityProjection
-          + totals.pressureProjection;
-        const pressureAssemblySetup_ms = totals.pressureAssemblySetup
-          + totals.pressureLeafCompactionL1Capture + totals.faceMirrorTransportRhs
-          + totals.powerDescriptorTopologyFaces
-          + totals.oldFaceAdvectionRepair + totals.powerOperatorRhsAssembly
-          + totals.finalPressureRowAssembly;
-        const pressureProjection_ms = pressureAssemblySetup_ms + totals.mgpcgSolve
-          + totals.powerProjectionPublication + totals.faceBandTopologyBuild
-          + totals.faceBandTransitionAdjacency + totals.faceBandFastMarch
-          + totals.faceBandPowerPublicationCapture + remainingCompatibilityProjection_ms;
-        this.info.gpuAdvancePhaseWall = {
-          sampleId: ++this.advancePhaseWallSampleId,
-          simulation_s: sampledSimulation_s,
-          topologyAdvection_ms: totals.topologyAdvection,
-          pressureProjection_ms,
-          pressureAssemblySetup_ms,
-          pressureLeafCompactionL1Capture_ms: totals.pressureLeafCompactionL1Capture,
-          faceMirrorTransportRhs_ms: totals.faceMirrorTransportRhs,
-          powerDescriptorTopologyFaces_ms: totals.powerDescriptorTopologyFaces,
-          oldFaceAdvectionRepair_ms: totals.oldFaceAdvectionRepair,
-          powerOperatorRhsAssembly_ms: totals.powerOperatorRhsAssembly,
-          finalPressureRowAssembly_ms: totals.finalPressureRowAssembly,
-          mgpcgSolve_ms: totals.mgpcgSolve,
-          powerProjectionPublication_ms: totals.powerProjectionPublication,
-          faceBandTopologyBuild_ms: totals.faceBandTopologyBuild,
-          faceBandTransitionAdjacency_ms: totals.faceBandTransitionAdjacency,
-          faceBandFastMarch_ms: totals.faceBandFastMarch,
-          faceBandPowerPublicationCapture_ms: totals.faceBandPowerPublicationCapture,
-          remainingCompatibilityProjection_ms,
-          surfaceCoupling_ms: totals.finePreparation + totals.fineTransport + totals.fineTopology + totals.fineRedistance
-            + totals.fineRestriction + totals.pageSurface + totals.surfaceCoupling,
-          finePreparation_ms: totals.finePreparation,
-          fineTransport_ms: totals.fineTransport,
-          fineTransportSetup_ms,
-          fineTransportSegments: Array.from(fineTransportSegments.values()).sort((a, b) => a.segment - b.segment),
-          fineTransportFinalize_ms,
-          fineTopology_ms: totals.fineTopology,
-          fineRedistance_ms: totals.fineRedistance,
-          fineRestriction_ms: totals.fineRestriction,
-          pageSurface_ms: totals.pageSurface,
-          remainingSurfaceCoupling_ms: totals.surfaceCoupling,
-          publicationDiagnostics_ms: totals.publicationDiagnostics,
-          total_ms: Math.max(0, previousCompletedAt - firstBoundaryAt),
-        };
-        this.info.gpuQueueWall_ms = this.info.gpuAdvancePhaseWall.total_ms;
-        this.info.gpuQueueSimulation_s = delta;
+    encoder = completePhysicsPhase(encoder, { id: "adaptive-publication", label: "Residency + sparse publication + diagnostics" });
+    if (segmentedPhysicsTrace) {
+      this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;
+      this.lastSegmentedPhysicsTraceAt_ms = traceRequestedAt_ms;
+      this.physicsTracePending = true;
+      const completion = segmentedPhysicsTrace.read(
+        this.device.queue,
+        (submittedEncoder) => this.octreeProjection?.retireSubmittedEncoder(submittedEncoder),
+      ).then((trace) => {
+        if (trace && !this.disposed) this.info.physicsTrace = trace;
+      }).finally(() => {
         this.octreeProjection?.releaseDenseBootstrapPhi();
-        stageCapture?.afterSubmit();
-      })();
-      this.profiledAdvanceCompletion = completion.catch(() => { /* Device loss is handled by the renderer. */ }).finally(() => {
-        this.profiledAdvancePending = false;
+        this.physicsTracePending = false;
         this.profiledAdvanceCompletion = undefined;
       });
-    }
-    // The submitted bootstrap command retains its own reference. Later
-    // submissions use paged phi, so the final box-sized level set can die now.
-    if (!productionPhaseProbeActive) {
+      this.profiledAdvanceCompletion = completion;
+    } else {
+      physicsTrace?.resolve(encoder);
+      const submittedEncoder = encoder;
+      physicsQueueTrace?.begin();
+      this.device.queue.submit([submittedEncoder.finish()]);
+      this.octreeProjection?.retireSubmittedEncoder(submittedEncoder);
+      const physicsQueueTraceRead = physicsQueueTrace?.read(this.device.queue);
+      const physicsTraceRead = physicsTrace
+        ? physicsTrace.read()
+          .then((trace) => {
+            this.hardwarePhysicsTraceInvalid = !trace;
+            return trace ?? physicsQueueTraceRead;
+          })
+          .catch(() => {
+            this.hardwarePhysicsTraceInvalid = true;
+            return physicsQueueTraceRead;
+          })
+        : physicsQueueTraceRead;
+      if (physicsTraceRead) {
+        this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;
+        this.physicsTracePending = true;
+        void physicsTraceRead.then((trace) => {
+          if (trace && !this.disposed) this.info.physicsTrace = trace;
+        }).catch(() => {
+          physicsTrace?.destroy();
+        }).finally(() => {
+          this.physicsTracePending = false;
+        });
+      }
+      // The submitted bootstrap command retains its own reference. Later
+      // submissions use global-fine phi, so the final box-sized level set can die now.
       this.octreeProjection?.releaseDenseBootstrapPhi();
-      stageCapture?.afterSubmit();
     }
     // Solver residuals are sampled only through the opt-in telemetry path.
     // Physics submission itself must not initiate a GPU-to-CPU map.
@@ -2214,9 +1801,6 @@ export class WebGPUUniformEulerianSolver {
       if (this.quadtreeRebuildRetrySteps > 0) this.quadtreeRebuildRetrySteps -= 1;
       if (!inlineRebuildEncoded && this.quadtreeRebuildRetrySteps === 0 && !this.quadtreeRebuildPending && !this.quadtreeReadyProjection && this.shouldKickQuadtreeRebuild()) this.kickQuadtreeRebuild();
     }
-    if (!productionPhaseProbeActive && this.performanceReadbacksEnabled && !this.wallTimingPending) { this.wallTimingPending = true; void this.device.queue.onSubmittedWorkDone().then(() => { this.info.gpuQueueWall_ms = performance.now() - submittedAt; this.info.gpuQueueSimulation_s = delta; }).catch(() => { /* Device loss is handled by the renderer. */ }).finally(() => { this.wallTimingPending = false; }); }
-    if (productionPhaseProbeActive) void this.profiledAdvanceCompletion?.then(() => this.schedulePressureWallProbe(this.lastTime));
-    else this.schedulePressureWallProbe(this.lastTime);
     if (!this.validationChecked) {
       this.validationChecked = true;
       this.validationPromise = this.device.popErrorScope().then((error) => {
@@ -2225,85 +1809,32 @@ export class WebGPUUniformEulerianSolver {
         console.error(`Uniform GPU validation: ${error.message}`);
       }).catch(() => { /* Device loss is handled by the renderer. */ });
     }
-    const cpuAttributed_ms = cpuSetupEncode_ms + cpuTopologyEncode_ms + cpuPressureProjectionEncode_ms
-      + cpuSurfaceEncode_ms + cpuPublicationEncode_ms;
-    this.info.cpuAdvanceEncodeBreakdown = {
-      setup_ms: cpuSetupEncode_ms,
-      topology_ms: cpuTopologyEncode_ms,
-      pressureSolve_ms: cpuPressureSolveEncode_ms,
-      pressureSolvePassCount,
-      pressureSolvePassTransitionCount,
-      pressureProjection_ms: cpuPressureProjectionEncode_ms,
-      surface_ms: cpuSurfaceEncode_ms,
-      publication_ms: cpuPublicationEncode_ms,
-      finalize_ms: Math.max(0, performance.now() - cpuAdvanceStartedAt_ms - cpuAttributed_ms),
-    };
     return true;
   }
 
-  private applyPhysicsTimingReadback(buffer: GPUBuffer, queryBytes: number,
-    querySegments: GPUPhysicsTimestampSegment[],
-    simulation_s: number, readbackWall_ms: number) {
-    if (queryBytes <= 0) return;
-    const times = new BigUint64Array(buffer.getMappedRange(16, queryBytes));
-    const stageByField: Partial<Record<GPUPhysicsTimingField, GPUPhysicsStageId>> = { preparation_ms: "preparation", layerConstruction_ms: "topology", advection_ms: "advection", conditioning_ms: "conditioning", remeshing_ms: "remeshing", pressure_ms: "pressure", powerAssembly_ms: "powerAssembly", pressureSolve_ms: "pressureSolve", projection_ms: "projection", powerProjection_ms: "powerProjection", velocityProjection_ms: "velocityProjection", faceBand_ms: "faceBand", faceMarch_ms: "faceMarch", powerPublication_ms: "powerPublication", extrapolation_ms: "extrapolation", materialization_ms: "materialization", surfaceUpdate_ms: "surfaceUpdate", fineTopology_ms: "fineTopology", fineTransport_ms: "fineTransport", fineRedistance_ms: "fineRedistance", rigidCoupling_ms: "rigidCoupling", spray_ms: "spray", fluidResidency_ms: "fluidResidency", sparsePublication_ms: "sparsePublication", diagnostics_ms: "diagnostics" };
-    const activeStages = [...new Set(querySegments.map((segment) => stageByField[segment.name]).filter((stage): stage is GPUPhysicsStageId => Boolean(stage)))];
-    const timings = emptyGPUPhysicsTimings(activeStages);
-    const decoded = decodeGPUPhysicsTimestampSegments(times, querySegments);
-    for (const name of new Set(querySegments.map((segment) => segment.name))) timings[name] = decoded[name] ?? 0;
-    const categorized = categorizedGPUPhysicsTime_ms(timings);
-    /* Empty marker passes may collapse to one timestamp on Metal. Never publish a total smaller than its directly timed real passes. */
-    timings.total_ms = Math.max(timings.total_ms, categorized);
-    timings.overhead_ms = Math.max(0, timings.total_ms - categorized);
-    this.info.gpuTimings = timings;
-    this.info.gpuStep_ms = timings.total_ms;
-    this.info.gpuPhysicsTimingSampleId = ++this.physicsTimingSampleId;
-    this.info.gpuPhysicsTimingSimulation_s = simulation_s;
-    this.info.gpuPhysicsTimingReadbackWall_ms = readbackWall_ms;
-  }
-
   async readStats() {
-    const telemetryStartedAt_ms = performance.now();
-    // The pressure probe requires an actually empty queue. A telemetry copy
-    // submitted after its drain fence was registered would otherwise sit in
-    // front of the probe and be charged to pressure.
-    if (!this.performanceReadbacksEnabled || (this.info.encodedSteps ?? 0) === 0
-      || this.profiledAdvancePending || this.pressureWallProbePending || this.readbackPending) return this.info;
+    if ((this.info.encodedSteps ?? 0) === 0 || this.readbackPending) return this.info;
     this.readbackPending = true;
-    // Capture identity before any await. Awaiting even an already-resolved
-    // validation promise yields to later advances, which can overwrite the
-    // shared query resolve buffer and make a cheap/stale step masquerade as
-    // the advance whose completion wall is currently on screen.
-    const querySegments = this.querySegments.map((segment) => ({ ...segment }));
-    const queryBytes = this.queryResolve ? this.queryCount * 8 : 0;
-    const sampledSimulation_s = this.info.submittedTime_s ?? this.lastTime;
     const buffer = this.statsReadback(), encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(this.reductionBuffer, 0, buffer, 0, 16); if (this.queryResolve && queryBytes > 0) encoder.copyBufferToBuffer(this.queryResolve, 0, buffer, 16, queryBytes);
+    if (this.reductionBuffer) encoder.copyBufferToBuffer(this.reductionBuffer, 0, buffer, 0, 16);
     this.device.queue.submit([encoder.finish()]);
-    const timingReadbackSubmittedAt_ms = performance.now();
     const mapPromise = buffer.mapAsync(GPUMapMode.READ);
-    // Submit the primary timestamp copy first. Deep diagnostics fan out into
-    // independent queue submissions and must never sit ahead of the sample
-    // that explains the advance being profiled.
-    const quadtreeDiagnostics = this.adaptiveProjection?.readSolveDiagnostics(); const surfaceDiagnosticsPromise = this.adaptiveProjection?.readSurfaceDiagnostics(); const faceVelocityDiagnosticsPromise = this.adaptiveFaceVelocityCutover ? this.octreeProjection?.readAdaptiveFaceVelocityDiagnostics() : undefined; const adaptiveSurfaceDiagnosticsPromise = this.octreeProjection?.readAdaptiveSurfacePageDiagnostics(); const globalFineDiagnosticsPromise = this.octreeProjection?.readGlobalFineLevelSetDiagnostics(); const pagedPhiDifferentialPromise = this.octreeProjection?.readPagedPhiDifferential();
+    const quadtreeDiagnostics = this.adaptiveProjection?.readSolveDiagnostics(); const surfaceDiagnosticsPromise = this.adaptiveProjection?.readSurfaceDiagnostics(); const globalFineDiagnosticsPromise = this.octreeProjection?.readGlobalFineLevelSetDiagnostics();
     try {
       await mapPromise;
-      this.applyPhysicsTimingReadback(buffer, queryBytes, querySegments, sampledSimulation_s,
-        performance.now() - timingReadbackSubmittedAt_ms);
-      const [, , surfaceDiagnostics, faceVelocityDiagnostics, adaptiveSurfaceDiagnostics, globalFineDiagnostics, pagedPhiDifferential, fluidBrickStats, fluidBulkBrickStats, sparseSurfaceStats, fluidBrickAtlasStats] = await Promise.all([
-        this.validationPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise, faceVelocityDiagnosticsPromise, adaptiveSurfaceDiagnosticsPromise, globalFineDiagnosticsPromise, pagedPhiDifferentialPromise, this.octreeProjection?.readFluidBrickResidencyStats(), this.octreeProjection?.readFluidBulkBrickResidencyStats(), this.octreeProjection?.readSparseSurfaceBandStats(), this.octreeProjection?.readFluidBrickAtlasStats(),
+      const [, , surfaceDiagnostics, globalFineDiagnostics, fluidBrickStats, fluidBulkBrickStats] = await Promise.all([
+        this.validationPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise, globalFineDiagnosticsPromise, this.octreeProjection?.readFluidBrickResidencyStats(), this.octreeProjection?.readFluidBulkBrickResidencyStats(),
       ]);
-    if(adaptiveSurfaceDiagnostics){this.info.adaptiveSurfacePageCapacity=adaptiveSurfaceDiagnostics.pageCapacity;this.info.adaptiveSurfaceActivePages=adaptiveSurfaceDiagnostics.activePages;this.info.adaptiveSurfaceCandidatePages=adaptiveSurfaceDiagnostics.candidatePages;this.info.adaptiveSurfaceAdapterCandidateRows=adaptiveSurfaceDiagnostics.adapterCandidateRows;this.info.adaptiveSurfaceAdapterDispatchX=adaptiveSurfaceDiagnostics.adapterDispatchX;this.info.adaptiveSurfaceOverflow=adaptiveSurfaceDiagnostics.overflow;this.info.adaptiveSurfaceOverflowCode=adaptiveSurfaceDiagnostics.overflowCode;this.info.adaptiveSurfaceDepartureFallbacks=adaptiveSurfaceDiagnostics.departureOutsideResidentBand;this.info.adaptiveSurfaceFinestResidentPages=adaptiveSurfaceDiagnostics.finestResidentPages;this.info.adaptiveSurfaceCoarseResidentPages=adaptiveSurfaceDiagnostics.coarseResidentPages;this.info.adaptiveSurfaceMaximumResidentLeafSize=adaptiveSurfaceDiagnostics.maximumResidentLeafSize;}
     if(globalFineDiagnostics)this.applyGlobalFineDiagnostics(globalFineDiagnostics);
-    if(pagedPhiDifferential){this.info.pagedPhiDifferentialSamples=pagedPhiDifferential.samples;this.info.pagedPhiDifferentialComparedSamples=pagedPhiDifferential.comparedSamples;this.info.pagedPhiDifferentialMaxAbs=pagedPhiDifferential.maximumAbsoluteMismatch;this.info.pagedPhiDifferentialMeanAbs=pagedPhiDifferential.meanAbsoluteMismatch;this.info.pagedPhiDifferentialSignMismatches=pagedPhiDifferential.signMismatchSamples;this.info.pagedPhiDifferentialHashMisses=pagedPhiDifferential.missingLeafSamples;this.info.pagedPhiDifferentialAffineFallbacks=pagedPhiDifferential.affineFallbackSamples;this.info.pagedPhiDifferentialMaxCell=pagedPhiDifferential.maximumMismatchCell;this.info.pagedPhiDifferentialMaxDensePhi=pagedPhiDifferential.maximumMismatchDensePhi;this.info.pagedPhiDifferentialMaxPagedPhi=pagedPhiDifferential.maximumMismatchPagedPhi;}
     if(fluidBrickStats){this.info.fluidBrickCapacity=fluidBrickStats.capacity;this.info.fluidBrickResidentCount=fluidBrickStats.resident;this.info.fluidBrickCoreCount=fluidBrickStats.core;this.info.fluidBrickHaloCount=fluidBrickStats.halo;this.info.fluidBrickActivatedCount=fluidBrickStats.activated;this.info.fluidBrickRetiredCount=fluidBrickStats.retired;this.info.fluidBrickGeneration=fluidBrickStats.generation;}
     if(fluidBulkBrickStats){this.info.fluidBulkBrickResidentCount=fluidBulkBrickStats.resident;this.info.fluidBulkBrickHaloCount=fluidBulkBrickStats.halo;this.info.fluidBulkBrickActivatedCount=fluidBulkBrickStats.activated;this.info.fluidBulkBrickRetiredCount=fluidBulkBrickStats.retired;}
-    if(fluidBrickAtlasStats){this.info.fluidBrickAtlasCapacity=fluidBrickAtlasStats.capacity;this.info.fluidBrickAtlasResidentTiles=fluidBrickAtlasStats.residentTiles;this.info.fluidBrickAtlasOverflow=fluidBrickAtlasStats.overflow;this.info.fluidBrickAtlasMaxPhiError=fluidBrickAtlasStats.maxAbsPhiError;this.info.fluidBrickAtlasMaxVelocityError=fluidBrickAtlasStats.maxAbsVelocityError;this.info.fluidBrickAtlasMaxPhiErrorManual=fluidBrickAtlasStats.maxAbsPhiErrorManual;this.info.fluidBrickAtlasMaxVelocityErrorManual=fluidBrickAtlasStats.maxAbsVelocityErrorManual;}
-    if(sparseSurfaceStats){this.info.sparseSurfaceLogicalPages=sparseSurfaceStats.logicalPageCount;this.info.sparseSurfacePageCapacity=sparseSurfaceStats.physicalPageCapacity;this.info.sparseSurfaceResidentPages=sparseSurfaceStats.resident;this.info.sparseSurfaceCorePages=sparseSurfaceStats.core;this.info.sparseSurfaceHaloPages=sparseSurfaceStats.halo;this.info.sparseSurfaceActivatedPages=sparseSurfaceStats.activated;this.info.sparseSurfaceRetiredPages=sparseSurfaceStats.retired;this.info.sparseSurfaceOverflow=sparseSurfaceStats.overflow;this.info.sparseSurfacePeakPages=sparseSurfaceStats.peakResident;}
     if (this.quadtreeProjection) this.info.quadtreeVelocityClampCount = this.quadtreeProjection.info.velocityClampCount ?? 0;
-    const words = new Uint32Array(buffer.getMappedRange(0, 16)), initial = Math.max(1, this.info.initialVolumeCellSum ?? 1);
+    const words = this.reductionBuffer
+      ? new Uint32Array(buffer.getMappedRange(0, 16))
+      : new Uint32Array(4);
+    const initial = Math.max(1, this.info.initialVolumeCellSum ?? 1);
     const conservativeVolumeCells=words[3]/2048;this.info.rawVolumeDrift=this.transportConservativeVolume?(conservativeVolumeCells-initial)/initial:undefined;
-    const compactFineExpected=this.adaptiveFaceVelocityCutover&&Boolean(this.octreeProjection?.globalFineLevelSetSource);
+    const compactFineExpected=Boolean(this.octreeProjection?.globalFineLevelSetSource);
     const c=this.scene.container,baseCellVolume_m3=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);
     const compactVolume=compactFineExpected&&globalFineDiagnostics?publishedGlobalFineVolumeCells(globalFineDiagnostics,baseCellVolume_m3):undefined;
     if(compactVolume){
@@ -2315,18 +1846,15 @@ export class WebGPUUniformEulerianSolver {
       this.info.volumeTelemetrySource="global-fine";
     }
     else if(surfaceDiagnostics&&!compactFineExpected){const resolved=sparseSurfaceVolumeCells(surfaceDiagnostics,this.info.initialVolumeCellSum??0),reference=Math.max(1,resolved.referenceVolumeCells);this.info.referenceLiquidVolume_cells=resolved.referenceVolumeCells;this.info.volumeCellSum=resolved.volumeCells;this.info.representedVolumeCellSum=resolved.volumeCells;this.info.volumeDrift=(resolved.volumeCells-reference)/reference;this.info.representedVolumeDrift=this.info.volumeDrift;this.info.volumeTelemetrySource="adaptive-pages";this.info.phiInterfaceCellCount=surfaceDiagnostics.interfaceCells;this.info.volumeCorrectionNormalSpeed_cells_s=surfaceDiagnostics.correctionSpeed;this.info.volumeControlAgreeWeight=surfaceDiagnostics.volumeControlAgreeWeight;this.info.quadtreeCulledDebrisCells=surfaceDiagnostics.culledDebrisCells;this.info.quadtreeLevelSetMismatchFraction=surfaceDiagnostics.mismatchFraction;this.info.quadtreeVofReconciliationActive=surfaceDiagnostics.reconciliationActive;}
-    else if(this.adaptiveFaceVelocityCutover){this.info.referenceLiquidVolume_cells=undefined;this.info.volumeCellSum=undefined;this.info.representedVolumeCellSum=undefined;this.info.volumeDrift=undefined;this.info.representedVolumeDrift=undefined;this.info.volumeTelemetrySource="unavailable";}
+    else if(this.octreeProjection){this.info.referenceLiquidVolume_cells=undefined;this.info.volumeCellSum=undefined;this.info.representedVolumeCellSum=undefined;this.info.volumeDrift=undefined;this.info.representedVolumeDrift=undefined;this.info.volumeTelemetrySource="unavailable";}
     else{this.info.representedVolumeCellSum=words[0]/2048;this.info.representedVolumeDrift=(this.info.representedVolumeCellSum-initial)/initial;this.info.volumeCellSum=conservativeVolumeCells;this.info.volumeDrift=this.info.rawVolumeDrift;this.info.volumeTelemetrySource="dense-volume";}
     // Compact transport never runs the dense reduction which owns words[1].
     // Do not relabel its cleared zero as a measured front at the tank wall.
-    if(!this.adaptiveFaceVelocityCutover){this.info.front_m = -this.scene.container.width_m / 2 + words[1] * this.scene.container.width_m / this.info.nx;this.info.frontTelemetrySource="dense-volume";}
+    if(!this.octreeProjection){this.info.front_m = -this.scene.container.width_m / 2 + words[1] * this.scene.container.width_m / this.info.nx;this.info.frontTelemetrySource="dense-volume";}
     else{this.info.front_m=undefined;this.info.frontTelemetrySource="unavailable";}
-    if (faceVelocityDiagnostics) {
-      this.info.maxSpeed_m_s = faceVelocityDiagnostics.maxSpeed_m_s;
-      this.info.maxComponentCfl = faceVelocityDiagnostics.maxComponentCfl;
-      this.info.nonFiniteCount = faceVelocityDiagnostics.nonFiniteCount;
-      this.info.adaptiveFaceTransportedCount = faceVelocityDiagnostics.transportedFaceCount;
-    } else this.info.maxSpeed_m_s = new Float32Array(new Uint32Array([words[2]]).buffer)[0];
+    this.info.maxSpeed_m_s = this.octreeProjection
+      ? undefined
+      : new Float32Array(new Uint32Array([words[2]]).buffer)[0];
     if (this.quadtreeProjection?.relativeResidual !== undefined) this.info.pressureRelativeResidual = this.quadtreeProjection.relativeResidual;
     if (this.quadtreeProjection?.residualRms !== undefined) this.info.pressureResidual = this.quadtreeProjection.residualRms;
     if (this.octreeProjection?.relativeResidual !== undefined) this.info.pressureRelativeResidual = this.octreeProjection.relativeResidual;
@@ -2339,7 +1867,6 @@ export class WebGPUUniformEulerianSolver {
       this.info.quadtreeFactorLevelCount = this.quadtreeProjection.info.factorLevelCount;
       this.info.quadtreeMultigridLevelCount = this.quadtreeProjection.info.multigridLevelCount;
       this.info.quadtreeMultigridCoarsestDofs = this.quadtreeProjection.info.multigridCoarsestDofs;
-      this.info.quadtreePressurePhaseTimings = this.quadtreeProjection.info.pressurePhaseTimings;
       this.info.pressureSolver = quadtreePressureDescription(this.quadtreeProjection, this.info.pressureIterations, Math.max(this.scene.numerics.pressureRelativeTolerance, 1e-4));
     } else if (this.octreeProjection) {
       this.info.activeSampleCount = this.octreeProjection.info.liquidDofCount;
@@ -2367,7 +1894,6 @@ export class WebGPUUniformEulerianSolver {
       await mapPromise.catch(() => { /* Device loss is handled by the renderer. */ });
       if (buffer.mapState === "mapped") buffer.unmap();
       this.readbackPending = false;
-      this.info.gpuTelemetryWall_ms = performance.now() - telemetryStartedAt_ms;
     }
   }
 
@@ -2378,10 +1904,15 @@ export class WebGPUUniformEulerianSolver {
     this.quadtreeProjection?.destroySharedSurface();
     this.quadtreeProjection?.destroy();
     this.octreeProjection?.destroy();
-    this.secondaryParticleSystem?.destroy();
     for (const projection of this.retiredQuadtreeProjections) projection.destroy();
     this.retiredQuadtreeProjections.clear();
-    for (const texture of new Set([this.velocityA, this.velocityB, this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightA, this.heightB, this.terrainTexture, this.transportA, this.transportB, this.fluxScales])) texture.destroy();
-    this.params.destroy(); this.reductionBuffer.destroy(); this.sharpenBuffer.destroy(); this.occupancyColumns.destroy(); this.occupancyCell64Dispatch.destroy(); this.bulkAtlasFallbackPageTable.destroy(); this.bulkAtlasFallbackParams.destroy(); this.bulkAtlasFallbackVelocity.destroy(); this.bulkAtlasFallbackWorklist.destroy(); this.bulkAtlasControlSampleSparse.destroy(); this.bulkAtlasControlSampleDense.destroy(); this.bulkAtlasControlSparse.destroy(); this.bulkAtlasControlOff.destroy(); this.rigidSystem.destroy(); this.rigidExchangeBuffer.destroy(); this.statsReadbackBuffer?.destroy(); this.querySet?.destroy(); this.queryResolve?.destroy();
+    const textures = this.hostAllocation
+      ? [this.velocityA, this.velocityB, this.velocityC, this.velocityD,
+        this.pressureA, this.pressureB, this.volumeA, this.volumeB,
+        this.heightA, this.heightB, this.terrainTexture,
+        this.transportA, this.transportB, this.fluxScales]
+      : [this.terrainTexture];
+    for (const texture of new Set(textures)) texture.destroy();
+    this.params?.destroy(); this.reductionBuffer?.destroy(); this.sharpenBuffer?.destroy(); this.rigidSystem.destroy(); this.rigidExchangeBuffer.destroy(); this.statsReadbackBuffer?.destroy();
   }
 }

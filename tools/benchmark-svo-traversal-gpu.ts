@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
 import { webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
 
 type Variant = "baseline" | "optimized";
@@ -420,11 +421,6 @@ for (const workgroupSize of workgroupSizes) {
     `optimized workgroup ${workgroupSize} changed traversal output`);
 }
 
-const timestampCount = workgroupSizes.length * 2 * cycles * 2;
-const querySet = device.createQuerySet({ type: "timestamp", count: timestampCount });
-const queryResolve = device.createBuffer({ size: timestampCount * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-const queryReadback = device.createBuffer({ size: timestampCount * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-
 for (const target of pipelines.values()) {
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass(); pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup);
@@ -445,43 +441,40 @@ for (let index = 1; index < warmups; index += 1) {
 await device.queue.onSubmittedWorkDone();
 
 const samples = new Map<string, number[]>();
-let queryIndex = 0;
-const encoder = device.createCommandEncoder();
-for (let cycle = 0; cycle < cycles; cycle += 1) {
-  const sizes = cycle % 2 === 0 ? workgroupSizes : [...workgroupSizes].reverse();
-  for (const workgroupSize of sizes) {
-    const variants: readonly Variant[] = cycle % 2 === 0 ? ["baseline", "optimized"] : ["optimized", "baseline"];
-    for (const variant of variants) {
-      const target = pipelines.get(`${variant}/${workgroupSize}`)!;
-      const pass = encoder.beginComputePass({ timestampWrites: { querySet,
-        beginningOfPassWriteIndex: queryIndex, endOfPassWriteIndex: queryIndex + 1 } });
-      pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup);
-      for (let dispatch = 0; dispatch < dispatchesPerSample; dispatch += 1) {
-        pass.dispatchWorkgroups(Math.ceil(width * height / workgroupSize));
-      }
-      pass.end(); queryIndex += 2;
-    }
-  }
-}
-encoder.resolveQuerySet(querySet, 0, timestampCount, queryResolve, 0);
-encoder.copyBufferToBuffer(queryResolve, 0, queryReadback, 0, timestampCount * 8);
-device.queue.submit([encoder.finish()]);
-await queryReadback.mapAsync(GPUMapMode.READ);
-const timestamps = new BigUint64Array(queryReadback.getMappedRange());
-queryIndex = 0;
+let traceSampleId = 0;
 for (let cycle = 0; cycle < cycles; cycle += 1) {
   const sizes = cycle % 2 === 0 ? workgroupSizes : [...workgroupSizes].reverse();
   for (const workgroupSize of sizes) {
     const variants: readonly Variant[] = cycle % 2 === 0 ? ["baseline", "optimized"] : ["optimized", "baseline"];
     for (const variant of variants) {
       const key = `${variant}/${workgroupSize}`;
+      const encoder = device.createCommandEncoder();
+      const target = pipelines.get(key)!;
+      const recorder = new GPUPerformanceTraceRecorder(
+        device,
+        ++traceSampleId,
+        "presentation",
+        `svo-traversal:${key}:cycle-${cycle}`,
+        [{ id: "dry-scene", label: `SVO ${variant} traversal (${workgroupSize})` }],
+      );
+      recorder.boundary(encoder, `${key} trace start`);
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup);
+      for (let dispatch = 0; dispatch < dispatchesPerSample; dispatch += 1) {
+        pass.dispatchWorkgroups(Math.ceil(width * height / workgroupSize));
+      }
+      pass.end();
+      recorder.boundary(encoder, `${key} trace complete`);
+      recorder.resolve(encoder);
+      device.queue.submit([encoder.finish()]);
+      const trace = await recorder.read();
+      assert.ok(trace, `${key} GPU trace was invalid`);
       const values = samples.get(key) ?? [];
-      values.push(Number(timestamps[queryIndex + 1] - timestamps[queryIndex]) / 1e6);
-      samples.set(key, values); queryIndex += 2;
+      values.push(trace.total_ms);
+      samples.set(key, values);
     }
   }
 }
-queryReadback.unmap();
 
 const rows = workgroupSizes.map((workgroupSize) => {
   const baseline = samples.get(`baseline/${workgroupSize}`)!, optimized = samples.get(`optimized/${workgroupSize}`)!;
@@ -517,12 +510,12 @@ console.log(JSON.stringify({
     allHitInvocationCount: hitInvocationCount, averageNodeVisits: visitSum / (width * height * traversalsPerInvocation) },
   measurement: { warmups, cycles, traversalsPerInvocation, dispatchesPerSample,
     amplifiedMortonDecodesPerTraversal,
-    timestampUnit: "GPU timestamp-query nanoseconds converted to milliseconds",
+    timestampUnit: "Generic GPU performance trace duration in milliseconds",
     equivalence: "status mask, visit sum, and nearest node/leaf hashes are bit-identical for every invocation" },
   results: rows,
   validationErrors,
 }));
 assert.deepEqual(validationErrors, [], `WebGPU validation errors: ${validationErrors.join("; ")}`);
 
-for (const resource of [control, nodes, leaves, output, readback, queryResolve, queryReadback]) resource.destroy();
-querySet.destroy(); device.destroy();
+for (const resource of [control, nodes, leaves, output, readback]) resource.destroy();
+device.destroy();

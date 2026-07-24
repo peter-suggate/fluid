@@ -16,7 +16,7 @@ test("paper pipeline inspector identifies one fully current authority chain", ()
   const stages = paperPipelineStages(info({
     initialSparseAuthorityReady: true,
     encodedSteps: 1,
-    powerDiagramProjection: "authoritative", powerDiagramAuthoritative: true, powerDiagramGeneration: 9,
+    powerDiagramAuthoritative: true, powerDiagramGeneration: 9,
     pressureRequiredRows: 120, pressureRequiredEntries: 840, pressureCapacityOverflow: false,
     globalFinePublished: true, globalFineRolledBack: false, globalFineGeneration: 17,
     globalFineSeedCount: 42, globalFineSeedError: 0, globalFineTopologyFlags: 0,
@@ -31,6 +31,22 @@ test("paper pipeline inspector identifies one fully current authority chain", ()
   assert.equal(stages.find((stage) => stage.id === "extrapolation")?.state, "PUBLISHED");
   assert.equal(stages.find((stage) => stage.id === "pressure")?.state, "CONVERGED");
   assert.equal(stages.find((stage) => stage.id === "raster")?.state, "CURRENT");
+});
+
+test("pipeline inspector reports fixed Galerkin as native L2, not paper Section 4.3", () => {
+  const pressure = paperPipelineStages(info({
+    initialSparseAuthorityReady: true,
+    encodedSteps: 1,
+    powerDiagramAuthoritative: true,
+    pressureRequiredRows: 120,
+    pressureRequiredEntries: 840,
+    pressureCapacityOverflow: false,
+    pressureSolver: "Octree power fixed native-L2 Galerkin · 4 levels · 10 bounded V-cycles · no fallback",
+    pressureRelativeResidual: 1.4e-5,
+  }), undefined).find((stage) => stage.id === "pressure");
+  assert.equal(pressure?.state, "CONVERGED");
+  assert.equal(pressure?.section, "native L2");
+  assert.match(pressure?.detail ?? "", /relative L2 residual/);
 });
 
 test("stale Section 5 and retained raster generations are visibly distinct from current authority", () => {
@@ -84,7 +100,7 @@ test("live power latch may lead queue-fenced Section 5 telemetry without a stale
 test("always-visible health flags expose rejected and stale 2017 authority", () => {
   const flags = paperPipelineHealthFlags(info({
     initialSparseAuthorityReady: true,
-    powerDiagramProjection: "authoritative", powerDiagramAuthoritative: true,
+    powerDiagramAuthoritative: true,
     pressureRequiredRows: 10, pressureRequiredEntries: 30,
     globalFinePublished: true, globalFineRolledBack: true, globalFineGeneration: 20,
     globalFineTopologyFlags: 4, globalFineDownstreamFinalizeReason: 8,
@@ -97,6 +113,25 @@ test("always-visible health flags expose rejected and stale 2017 authority", () 
   }));
   assert.ok(flags.includes("2017-fine-rejected"));
   assert.ok(flags.includes("2017-extrapolation-stale"));
+});
+
+test("GPU flag diagnostics render high bits as unsigned hexadecimal", () => {
+  const stages = paperPipelineStages(info({
+    initialSparseAuthorityReady: true,
+    globalFinePublished: false,
+    globalFineTopologyFlags: 0x8000_0000,
+    globalFineDownstreamFinalizeReason: 0x8000_0001,
+    globalFineCoarseLevelSetFlags: 0x8000_0002,
+    globalFineFaceBandFlags: 0x8000_0000,
+    globalFineFaceBandValid: false,
+  }), undefined);
+  const fine = stages.find((stage) => stage.id === "fine");
+  const extrapolation = stages.find((stage) => stage.id === "extrapolation");
+  assert.match(fine?.detail ?? "", /topology 0x80000000/);
+  assert.match(fine?.detail ?? "", /downstream 0x80000001/);
+  assert.match(fine?.detail ?? "", /coarse φ 0x80000002/);
+  assert.match(extrapolation?.detail ?? "", /combined transaction flags 0x80000000/);
+  assert.doesNotMatch(`${fine?.detail} ${extrapolation?.detail}`, /0x-/);
 });
 
 test("no-causal-simplex coarse phi failure is attributed to grading coverage", () => {
@@ -114,7 +149,7 @@ test("no-causal-simplex coarse phi failure is attributed to grading coverage", (
 
 test("one-click presets cover the requested paper structures without new diagnostic products", () => {
   assert.deepEqual(PAPER_VISUAL_PRESETS.map((preset) => preset.id), [
-    "power-cells", "power-faces", "transitions", "fine-band", "fine-phi-values", "section5-march", "velocity", "pressure", "operator", "raster",
+    "power-cells", "power-faces", "transitions", "fine-band", "fine-phi-values", "section5-closest-point", "velocity", "pressure", "operator", "raster",
   ]);
   assert.equal(PAPER_VISUAL_PRESETS.find((preset) => preset.id === "raster")?.axis, "off");
   assert.equal(PAPER_VISUAL_PRESETS.find((preset) => preset.id === "fine-band")?.mode, "fine-band-lifecycle");
@@ -169,14 +204,11 @@ test("Section 5 audit exposes bounded first failures and existing inspect overla
     globalFineFaceBandUnresolvedCount: 12366,
     globalFineFaceBandCoarsePhiFailures: 337,
     globalFineFaceBandPhiExtensions: 1800,
-    globalFineFaceBandMarchHeapHighWater: 15479,
-    globalFineFaceBandMarchPops: 13237,
-    globalFineFaceBandMarchTrials: 15479,
-    globalFineFaceBandMarchChunks: 16,
-    globalFineFaceBandMarchChunkBound: 16,
-    globalFineFaceBandMarchCapExhausted: 2242,
-    globalFineFaceBandMarchUnresolvedWithPredecessor: 0,
-    globalFineFaceBandMarchDisconnected: 0,
+    globalFineFaceBandSeedCount: 3113,
+    globalFineFaceBandClosestPointFaces: 10000,
+    globalFineFaceBandClosestPointFailures: 124,
+    globalFineFaceBandLiquidInterpolationFailures: 2118,
+    globalFineFaceBandCoarsePhiSamples: 491,
     globalFineFaceBandPhiFailureCounts: {
       missingRow: 2, exactCoarseMiss: 3, invalidMetric: 4, invalidSelector: 5,
     },
@@ -200,28 +232,10 @@ test("Section 5 audit exposes bounded first failures and existing inspect overla
   assert.match(audit.find((item) => item.id === "regular-band")?.counts ?? "",
     /owner causes row 2 \/ coarse 3 \/ metric 4 \/ selector 5/);
   assert.match(audit.find((item) => item.id === "regular-band")?.counts ?? "",
-    /heap pop bound exhausted 2,242 \/ accepted-predecessor scheduler defect 0 \/ disconnected 0/);
-  assert.match(audit.find((item) => item.id === "regular-band")?.counts ?? "",
-    /heap 15,479 high-water · 13,237\/15,479 pops\/trials · 16\/16 chunks/);
+    /3113 liquid seeds · 10000 closest-point faces · 124 closest-point failures · 2118 liquid interpolation failures/);
+  assert.match(audit.find((item) => item.id === "regular-band")?.counts ?? "", /491 coarse φ samples/);
   assert.equal(audit.find((item) => item.id === "transition")?.state, "CURRENT");
   assert.equal(audit.find((item) => item.id === "transient-power")?.inspectMode, "power-faces");
-});
-
-test("Section 5 audit preserves escaped acute mask attribution for Render Inspect", () => {
-  const audit = paperSection5SpatialFailures(info({
-    globalFineGeneration: 7, globalFineFaceBandGeneration: 7,
-    globalFineFaceBandTransitionFlags: 16,
-    globalFineFaceBandTransitionValid: false,
-    globalFineFaceBandTransitionFirstError: 91,
-    globalFineFaceBandAcuteGradingFailure: {
-      band: 12, rowCell: 91, rowSize: 2, descriptor: 0xa580_0039, coarseMask: 57,
-    },
-  }));
-  const transition = audit.find((item) => item.id === "transition");
-  assert.equal(transition?.state, "REJECTED");
-  assert.equal(transition?.first,
-    "escaped acute grading: band 12 · row 91 size 2 · coarse mask 0x39 · raw descriptor 0xa5800039");
-  assert.equal(transition?.inspectMode, "delaunay-tetrahedra");
 });
 
 test("Section 5 audit never labels valid but cross-generation controls current", () => {

@@ -14,7 +14,6 @@ import {
 } from "../lib/webgpu-fluid-brick-residency";
 import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
 import { WebGPUOctreeProjection, octreeProjectionShader } from "../lib/webgpu-octree";
-import { OctreeSparseBrickWorld } from "../lib/webgpu-octree-sparse-bricks";
 
 test("disconnected interface regions independently create multiple resident fluid bricks", () => {
   const options = { haloPhi: 0.2, retireAfterFrames: 2 };
@@ -122,28 +121,30 @@ test("GPU residency derives a topology-tile worklist so leaves never straddle a 
 
 test("pressure topology rebuild consumes the shared topology-tile worklist indirectly", () => {
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
-  assert.match(rebuild, /if\(active\|\|!this\.directPagedTopology\)this\.ownerPages\?\.encode\(encoder\)/,
-    "an unpublished direct-paged worklist must not retire the coarse owner map before full-domain rebuild");
+  assert.match(rebuild, /else if\(active\)\{this\.ownerPages\.encode\(new PassBroker\(encoder\)\)\}/,
+    "owner-page publication must consume every ready topology generation");
+  assert.doesNotMatch(rebuild, /&&this\.ownerPages/,
+    "the sparse owner authority must not retain runtime optionality");
   assert.match(rebuild, /topologyResidency\.tileWorklist/);
   assert.match(rebuild, /dispatchWorkgroupsIndirect/);
   // The former leaf-size gate is gone: after initialization the tile path is
   // the only rebuild domain at every legal (brickSize, maximumLeafSize) pair.
   assert.doesNotMatch(rebuild, /maxLeafSize <= /);
   assert.match(octreeProjectionShader, /fn topologyTileSize\(\) -> u32 \{ return max\(8u, params\.dimsMax\.w\); \}/);
-  assert.match(octreeProjectionShader, /fn residentTopologyCell/);
-  assert.match(octreeProjectionShader, /fn residentTopologyCandidate/);
+  assert.match(octreeProjectionShader, /fn deltaTopologyCell/);
+  assert.match(octreeProjectionShader, /fn deltaTopologyCandidate/);
   assert.match(octreeProjectionShader, /subCoord \* 8u \+ local \* 2u/);
-  assert.match(octreeProjectionShader, /workgroup\.x \+ workgroup\.y \* compaction\[widthWord\]/);
-  assert.match(octreeProjectionShader, /fn rasterizeSolidsActive/);
-  assert.match(octreeProjectionShader, /fn resetTopologyActive/);
-  assert.match(octreeProjectionShader, /fn refineTopologyActive/);
-  assert.match(octreeProjectionShader, /fn balanceTopologyActive/);
+  assert.match(octreeProjectionShader, /workgroup\.x \+ workgroup\.y \* compaction\[8\]/);
+  assert.match(octreeProjectionShader, /fn rasterizeSolidsDelta/);
+  assert.match(octreeProjectionShader, /fn resetTopologyDelta/);
+  assert.match(octreeProjectionShader, /fn refineTopologyDelta/);
+  assert.match(octreeProjectionShader, /fn balanceTopologyDelta/);
 });
 
 test("pressure topology residency covers refinement and 2:1 grading support", () => {
   const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-  assert.match(source, /const topologyHaloCells = this\.interfaceRefinementBandCells/);
-  assert.match(source, /\+ 8 \* this\.surfaceDetailStrength/);
+  assert.match(source, /const topologyHaloCells = this\.interfaceRefinementBandCells;/);
+  assert.doesNotMatch(source, /surfaceDetailStrength/);
   assert.doesNotMatch(source, /\+ \(this\.maxLeafSize - 1\)/, "grading support no longer inflates brick residency");
   assert.match(fluidBrickResidencyShader, /2:1 grading chain travels less than one maximum-leaf tile/);
   assert.match(source, /haloCells: topologyHaloCells/);
@@ -151,26 +152,16 @@ test("pressure topology residency covers refinement and 2:1 grading support", ()
 
 test("retired topology tiles rebuild before leaving the active domain", () => {
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
-  assert.match(rebuild, /FLUID_TILE_RETIRED_DISPATCH_OFFSET_BYTES/);
-  assert.match(rebuild, /dispatchRetired\(this\.resetRetiredPipeline\)/);
-  assert.match(rebuild, /dispatchRetiredCandidates\(level\.retired/);
+  assert.match(rebuild, /copyBufferToBuffer\(this\.compaction,20,this\.solveDispatch,48,12\)/);
+  assert.match(rebuild, /dispatch\(this\.resetPipeline,this\.resetDeltaPipeline\)/);
+  assert.match(rebuild, /dispatchCandidates\(level\.full,level\.delta/);
   assert.match(rebuild, /this\.refineCoarsePipelines\.get\(size\)/,
     "coarse cooperative refinement covers the full domain, including retired tiles");
-  assert.match(rebuild, /dispatchRetiredCandidates\(this\.balanceRetiredPipeline\)/);
-  assert.match(octreeProjectionShader, /fn retiredTopologyCell/);
+  assert.match(rebuild, /dispatchCandidates\(this\.balancePipeline,this\.balanceDeltaPipeline\)/);
+  assert.match(octreeProjectionShader, /fn deltaTileOrigin/);
   // Retired tile indices follow the active tile capacity in the copied list.
-  assert.match(octreeProjectionShader, /topologyTileCell\(workgroup, local, 4u, 5u, 16u \+ tx \* ty \* tz\)/);
-  assert.match(octreeProjectionShader, /fn resetTopologyRetired/);
-  assert.match(octreeProjectionShader, /fn refineTopologyRetired/);
-  assert.match(octreeProjectionShader, /fn balanceTopologyRetired/);
-});
-
-test("sparse fluid tail exposes separate residency and publication timestamp ranges", () => {
-  const encode = OctreeSparseBrickWorld.prototype.encode.toString();
-  assert.match(encode, /Fluid brick residency/);
-  assert.match(encode, /Sparse brick publication/);
-  const publish = WebGPUOctreeProjection.prototype.encodeSparseBrickWorld.toString();
-  assert.match(publish, /timings/);
-  assert.match(publish, /this\.topologyWorklistReady\s*=\s*true/,
-    "direct-paged analytic topology remains ready because rejected GPU generations retain its last-good worklist");
+  assert.match(octreeProjectionShader,
+    /let retired = slot >= compaction\[0\][\s\S]*select\(16u, retiredTileIndexBase\(\), retired\)/);
+  assert.doesNotMatch(octreeProjectionShader, /Topology(?:Active|Retired)/,
+    "separate active/retired topology programs must stay deleted");
 });

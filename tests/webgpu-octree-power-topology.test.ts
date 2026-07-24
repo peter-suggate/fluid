@@ -6,15 +6,16 @@ import {
   decodeGeneratedOctreePowerCatalog,
   OCTREE_GENERATED_POWER_CATALOG_MANIFEST,
 } from "../lib/generated/octree-power-catalog";
+import { PassBroker } from "../lib/webgpu-pass-broker";
 import {
   OCTREE_POWER_TOPOLOGY_ERROR,
-  OCTREE_POWER_TOPOLOGY_BOUNDARY_MASK,
-  OCTREE_POWER_TOPOLOGY_VALID,
+  OCTREE_POWER_REGULAR_DESCRIPTOR,
   WebGPUOctreePowerTopology,
   octreePowerTopologyShader,
   planOctreePowerTopology,
   powerCellSpacingIsotropic,
 } from "../lib/webgpu-octree-power-topology";
+import { createColdPowerRowPublication } from "./webgpu-octree-power-row-delta-fixture";
 
 function catalogViews() {
   const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
@@ -29,7 +30,7 @@ test("power topology planner accounts only compact rows and fixed catalog", () =
   assert.equal(shallow.entryCount, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount);
   assert.equal(shallow.lookupCount, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount);
   assert.equal(shallow.metricBytes, 1_600);
-  assert.equal(shallow.catalogBytes, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.byteCount - 24 * 4);
+  assert.equal(shallow.catalogBytes, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.byteCount - 26 * 4);
   assert.ok(shallow.allocatedBytes < 16 * 1024 * 1024);
 });
 
@@ -47,14 +48,50 @@ test("power authority accepts only physically isotropic finest cells", () => {
   assert.equal(powerCellSpacingIsotropic([1, 0, 1]), false);
 });
 
-test("power topology WGSL exposes direct bounded quotient lookup and fail-closed metrics", () => {
+test("power topology WGSL resolves affected rows and compacts exact publication rows in parallel", () => {
   assert.match(octreePowerTopologyShader, /fn resolveDescriptor/);
+  assert.match(octreePowerTopologyShader,
+    /geometry==REGULAR_DESCRIPTOR&&boundary==0u\)\{return vec2u\(params\.regularPacked&0xffffu,params\.regularPacked>>16u\)/);
   assert.match(octreePowerTopologyShader, /index<arrayLength\(&sameOrCoarserDirect\)/);
   assert.match(octreePowerTopologyShader, /index<arrayLength\(&sameOrFinerDirect\)/);
   assert.match(octreePowerTopologyShader, /fn resolveBoundaryEntry/);
   assert.match(octreePowerTopologyShader, /transformBoundaryMask/);
-  assert.match(octreePowerTopologyShader, /fn publishPowerTopology/);
+  assert.match(octreePowerTopologyShader, /fn deltaAccepted/);
+  assert.match(octreePowerTopologyShader, /fn stagePowerTopologyDelta/);
+  assert.match(octreePowerTopologyShader, /fn prefixPowerTopologyDelta/);
+  assert.match(octreePowerTopologyShader, /fn scatterPowerTopologyDelta/);
+  assert.match(octreePowerTopologyShader, /fn commitPowerTopology/);
+  assert.match(octreePowerTopologyShader,
+    /candidate\.resolvedCount!=requestedRows\(\)\|\|candidate\.version!=params\.catalogVersion/);
+  assert.doesNotMatch(octreePowerTopologyShader,
+    /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
+    "row-owned metric status and singleton publication replace recurring topology atomics");
+  assert.match(octreePowerTopologyShader, /let row=affectedRow\(item\)/);
+  assert.match(octreePowerTopologyShader,
+    /if\(old!=row\)\{metrics\[row\]=metric;status\|=STATUS_PUBLISH;\}/);
+  assert.match(octreePowerTopologyShader,
+    /commitDispatch=dispatchFor\(published\)/);
+  assert.doesNotMatch(octreePowerTopologyShader,
+    /carryPowerTopology|summarizePowerTopology|publishPowerTopology|controlArena\.moved/);
+  assert.doesNotMatch(octreePowerTopologyShader, /for\(var row=0u;row<requested/);
+  assert.match(octreePowerTopologyShader, /workgroupBarrier/);
   assert.match(octreePowerTopologyShader, /PowerRowMetric\(INVALID/);
+});
+
+test("power topology resolve dispatch is sourced from the exact row delta", () => {
+  const source = readFileSync(new URL("../lib/webgpu-octree-power-topology.ts", import.meta.url), "utf8");
+  assert.match(source,
+    /copyBufferToBuffer\(rowDelta\.rows,\s*\(rowDelta\.controlOffsetWords \+ 12\) \* 4,\s*this\.workDispatch,\s*0,\s*12\)/,
+    "row-delta control words 12-14 are the producer-owned affected-row dispatch");
+  assert.doesNotMatch(source,
+    /copyBufferToBuffer\(this\.control,\s*OCTREE_POWER_TOPOLOGY_CONTROL_BYTES,\s*this\.workDispatch,\s*0,\s*12\)/,
+    "topology control byte 32 is retained authority, not a resolve dispatch");
+  assert.match(source,
+    /copyBufferToBuffer\(this\.control,\s*64,\s*this\.workDispatch,\s*0,\s*12\)/,
+    "the topology-owned block dispatch is at control byte 64");
+  assert.match(source,
+    /copyBufferToBuffer\(this\.control,\s*80,\s*this\.workDispatch,\s*0,\s*12\)/,
+    "the topology-owned compact commit dispatch is at aligned control byte 80");
 });
 
 test("Dawn resolves generated catalog descriptors and rejects misses/anisotropy", {
@@ -64,7 +101,8 @@ test("Dawn resolves generated catalog descriptors and rejects misses/anisotropy"
   Object.assign(globalThis, dawn.globals);
   const gpu = dawn.create(["backend=metal"]);
   const adapter = await gpu.requestAdapter(); assert.ok(adapter);
-  const device = await adapter.requestDevice();
+  assert.ok(adapter.limits.maxStorageBuffersPerShaderStage >= 10);
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } });
   const validationErrors: string[] = [];
   device.addEventListener("uncapturederror", (event: unknown) => {
     validationErrors.push((event as { error: { message: string } }).error.message);
@@ -78,52 +116,56 @@ test("Dawn resolves generated catalog descriptors and rejects misses/anisotropy"
   const canonicalDescriptors = new Set(Array.from({ length: lookupCount }, (_, index) => catalog.lookup[index * 3]));
   const nonCanonicalDescriptor = Array.from({ length: 1 << 18 }, (_, descriptor) => descriptor)
     .find((descriptor) => !canonicalDescriptors.has(descriptor))!;
-  const validDescriptors = [(catalog.lookup[0] | 0x0700_0000) >>> 0, nonCanonicalDescriptor, catalog.lookup[(lookupCount - 1) * 3]];
+  // Geometry 961's canonical entry has the reflected -X boundary selector in
+  // the immutable catalog (entry 1021, canonical mask 32).
+  const validDescriptors = [(961 | 0x0100_0000) >>> 0, nonCanonicalDescriptor, OCTREE_POWER_REGULAR_DESCRIPTOR];
   const missingDescriptor = 0x7fff_ffff;
+  const cold = createColdPowerRowPublication(device, 4, 4, 1);
   assert.equal(validDescriptors.includes(missingDescriptor), false);
+  const run = async (spacing: readonly [number, number, number]) => {
+    const readback = device.createBuffer({ size: 96, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = device.createCommandEncoder();
+    const broker = new PassBroker(encoder);
+    topology.encode(broker, descriptors, cold.rowCount, spacing, cold.rowDelta);
+    broker.fence();
+    encoder.copyBufferToBuffer(topology.control, 0, readback, 0, 32);
+    encoder.copyBufferToBuffer(topology.metrics, 0, readback, 32, 64);
+    device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+    await readback.mapAsync(GPUMapMode.READ);
+    const bytes = readback.getMappedRange().slice(0); readback.unmap(); readback.destroy();
+    return bytes;
+  };
+
+  device.queue.writeBuffer(descriptors, 0, new Uint32Array(4).fill(OCTREE_POWER_REGULAR_DESCRIPTOR));
+  const accepted = await run([1, 1, 1]);
+  const acceptedWords = new Uint32Array(accepted), acceptedFloats = new Float32Array(accepted);
+  assert.deepEqual([...acceptedWords.slice(0, 5)],
+    [0, 0xffff_ffff, 0, 4, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.version]);
+  const regularPacked = catalog.sameOrFinerDirect[OCTREE_POWER_REGULAR_DESCRIPTOR];
+  const regularEntry = regularPacked & 0xffff;
+  for (let row = 0; row < 4; row += 1) {
+    const offset = 8 + row * 4;
+    assert.equal(acceptedWords[offset], regularEntry);
+    assert.equal(acceptedWords[offset + 1], (0x8000_0000 | (regularPacked >>> 16)) >>> 0);
+    assert.equal(acceptedFloats[offset + 2], catalog.entryVolumes[regularEntry]);
+    assert.equal(acceptedWords[offset + 3], 0);
+  }
+
   device.queue.writeBuffer(descriptors, 0, new Uint32Array([
     validDescriptors[0], validDescriptors[1], missingDescriptor, validDescriptors[2],
   ]));
-  const readback = device.createBuffer({ size: 96, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  const encoder = device.createCommandEncoder();
-  topology.encode(encoder, descriptors, 4, [1, 1, 1]);
-  encoder.copyBufferToBuffer(topology.control, 0, readback, 0, 32);
-  encoder.copyBufferToBuffer(topology.metrics, 0, readback, 32, 64);
-  device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-  await readback.mapAsync(GPUMapMode.READ);
-  const resolvedBytes = readback.getMappedRange().slice(0); readback.unmap();
+  const resolvedBytes = await run([1, 1, 1]);
   const words = new Uint32Array(resolvedBytes);
-  const floats = new Float32Array(resolvedBytes);
   assert.deepEqual([...words.slice(0, 5)], [1, 2, 2, 3, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.version]);
-  validDescriptors.forEach((descriptor, metricIndex) => {
-    const metricRow = metricIndex < 2 ? metricIndex : 3;
-    const metricOffset = 8 + metricRow * 4;
-    const geometryDescriptor = (descriptor & 0x8000_0000) !== 0 ? (descriptor & 0x8000_01ff) >>> 0 : descriptor & 0x3ffff;
-    const packed = (geometryDescriptor & 0x8000_0000) !== 0
-      ? catalog.sameOrCoarserDirect[geometryDescriptor & 0x1ff]
-      : catalog.sameOrFinerDirect[geometryDescriptor];
-    const entry = packed & 0xffff;
-    assert.equal(words[metricOffset], entry);
-    const boundary = (descriptor >>> 16) & OCTREE_POWER_TOPOLOGY_BOUNDARY_MASK;
-    assert.equal(words[metricOffset + 1], (OCTREE_POWER_TOPOLOGY_VALID | boundary | (packed >>> 16)) >>> 0);
-    assert.equal(floats[metricOffset + 2], catalog.entryVolumes[entry]);
-  });
-  assert.deepEqual([...words.slice(16, 20)], [0xffff_ffff, 0, 0, OCTREE_POWER_TOPOLOGY_ERROR.lookupMiss]);
+  assert.deepEqual([...words.slice(8, 24)], [...acceptedWords.slice(8, 24)],
+    "a rejected generation must retain the previous immutable metrics");
 
-  const anisotropicReadback = device.createBuffer({ size: 96, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  const anisotropicEncoder = device.createCommandEncoder();
-  topology.encode(anisotropicEncoder, descriptors, 4, [1, 1.1, 1]);
-  anisotropicEncoder.copyBufferToBuffer(topology.control, 0, anisotropicReadback, 0, 32);
-  anisotropicEncoder.copyBufferToBuffer(topology.metrics, 0, anisotropicReadback, 32, 64);
-  device.queue.submit([anisotropicEncoder.finish()]); await device.queue.onSubmittedWorkDone();
-  await anisotropicReadback.mapAsync(GPUMapMode.READ);
-  const anisotropic = new Uint32Array(anisotropicReadback.getMappedRange().slice(0)); anisotropicReadback.unmap();
+  const anisotropic = new Uint32Array(await run([1, 1.1, 1]));
   assert.deepEqual([...anisotropic.slice(0, 5)], [4, 0, OCTREE_POWER_TOPOLOGY_ERROR.anisotropicCell, 0,
     OCTREE_GENERATED_POWER_CATALOG_MANIFEST.version]);
-  for (let row = 0; row < 4; row += 1) {
-    assert.deepEqual([...anisotropic.slice(8 + row * 4, 12 + row * 4)],
-      [0xffff_ffff, 0, 0, OCTREE_POWER_TOPOLOGY_ERROR.anisotropicCell]);
-  }
+  assert.deepEqual([...anisotropic.slice(8, 24)], [...acceptedWords.slice(8, 24)],
+    "a rejected anisotropic generation must leave immutable authority untouched");
   assert.deepEqual(validationErrors, []);
-  topology.destroy(); descriptors.destroy(); readback.destroy(); anisotropicReadback.destroy(); device.destroy();
+  cold.destroy(); topology.destroy(); descriptors.destroy();
+  device.destroy();
 });

@@ -1,110 +1,39 @@
 import { create } from "zustand";
 import type { EffectiveRendererStatus, GPUStatus } from "../webgpu-renderer";
-import type { GPUEulerianInfo, GPUPhysicsStageId } from "../webgpu-eulerian";
+import type { GPUEulerianInfo } from "../webgpu-eulerian";
 import type { EulerianDiagnostics, EulerianRenderState } from "../eulerian-solver";
 import type { RigidBodyState, RigidStepDiagnostics } from "../rigid-body";
 import type { CouplingDiagnostics } from "../fluid-rigid-coupling";
 import type { MetricSample } from "../model";
 import type { WaterSurfacePresentationDiagnostics } from "../webgpu-water-pipeline";
+import type { PerformanceTrace } from "../performance-trace";
 
-export interface PerformanceSnapshot {
+export interface PerformanceReport {
   methodId: string;
-  /** Effective renderer for this exact sample; requested SVO may have fallen back to raster. */
-  effectiveRenderMode: "svo" | "raster";
-  renderTimingContext?: string;
-  renderTimingEpoch: number;
-  renderTimingSampleId: number;
-  gpuPhysicsTimingAvailable: boolean;
-  gpuPhysicsTimingSampleId: number;
-  gpuPhysicsTimingSimulation_s: number;
-  gpuPhysicsTimingReadbackWall_ms: number;
-  gpuTelemetryWall_ms: number;
-  gpuRenderTimestampSupported: boolean;
-  gpuRenderTimingAvailable: boolean;
-  cpuSimulation_ms: number;
-  cpuFrame_ms: number;
-  cpuPhysicsSubmit_ms: number;
-  cpuDataUpload_ms: number;
-  cpuRenderEncode_ms: number;
-  adaptiveRebuildWall_ms: number;
-  adaptiveRebuildPending: boolean;
-  adaptiveInlineTopology: boolean;
-  adaptiveRebuildBlockedFrames: number;
-  adaptiveRebuildCompletedCount: number;
-  adaptiveGPUConstructionKernel_ms: number;
-  adaptiveGPUSparsePack_ms: number;
-  adaptiveCPUTopologyPack_ms: number;
-  adaptiveCPURedistance_ms: number;
-  adaptiveCPUQuadtreeDecode_ms: number;
-  adaptiveCPUTallGrid_ms: number;
-  adaptiveCPUVariationalAssembly_ms: number;
-  adaptiveCPUSystemPack_ms: number;
-  adaptiveCPUICFactorization_ms: number;
-  adaptiveCPUResourceUpload_ms: number;
-  gpuActiveStages: GPUPhysicsStageId[];
-  gpuPreparation_ms: number;
-  gpuAdvection_ms: number;
-  gpuLayerConstruction_ms: number;
-  gpuConditioning_ms: number;
-  gpuRemeshing_ms: number;
-  gpuPressure_ms: number;
-  gpuPowerAssembly_ms: number;
-  gpuPressureSolve_ms: number;
-  gpuProjection_ms: number;
-  gpuPowerProjection_ms: number;
-  gpuVelocityProjection_ms: number;
-  gpuFaceBand_ms: number;
-  gpuFaceMarch_ms: number;
-  gpuPowerPublication_ms: number;
-  gpuExtrapolation_ms: number;
-  gpuMaterialization_ms: number;
-  gpuSurfaceUpdate_ms: number;
-  gpuFineTopology_ms: number;
-  gpuFineTransport_ms: number;
-  gpuFineRedistance_ms: number;
-  gpuRigid_ms: number;
-  gpuSpraySimulation_ms: number;
-  gpuFluidResidency_ms: number;
-  gpuSparsePublication_ms: number;
-  gpuDiagnostics_ms: number;
-  gpuOverhead_ms: number;
-  gpuRender_ms: number;
-  gpuSurfaceExtraction_ms: number;
-  gpuCaustics_ms: number;
-  gpuDryScene_ms: number;
-  gpuSvoTemporal_ms: number;
-  gpuInterfaceFront_ms: number;
-  gpuInterfaceBack_ms: number;
-  gpuInterfaces_ms: number;
-  gpuSprayFront_ms: number;
-  gpuSprayBack_ms: number;
-  gpuSprayRender_ms: number;
-  gpuOpticalComposite_ms: number;
-  gpuUpscale_ms: number;
-  gpuOverlays_ms: number;
+  context: string;
+  capturedAt_ms: number;
+  cpu?: PerformanceTrace;
+  physics?: PerformanceTrace;
+  presentation?: PerformanceTrace;
 }
 
-export const emptyPerformance: PerformanceSnapshot = { methodId: "", effectiveRenderMode: "raster", renderTimingEpoch: 0, renderTimingSampleId: 0, gpuPhysicsTimingAvailable: false, gpuPhysicsTimingSampleId: 0, gpuPhysicsTimingSimulation_s: 0, gpuPhysicsTimingReadbackWall_ms: 0, gpuTelemetryWall_ms: 0, gpuRenderTimestampSupported: false, gpuRenderTimingAvailable: false, cpuSimulation_ms: 0, cpuFrame_ms: 0, cpuPhysicsSubmit_ms: 0, cpuDataUpload_ms: 0, cpuRenderEncode_ms: 0, adaptiveRebuildWall_ms: 0, adaptiveRebuildPending: false, adaptiveInlineTopology: false, adaptiveRebuildBlockedFrames: 0, adaptiveRebuildCompletedCount: 0, adaptiveGPUConstructionKernel_ms: 0, adaptiveGPUSparsePack_ms: 0, adaptiveCPUTopologyPack_ms: 0, adaptiveCPURedistance_ms: 0, adaptiveCPUQuadtreeDecode_ms: 0, adaptiveCPUTallGrid_ms: 0, adaptiveCPUVariationalAssembly_ms: 0, adaptiveCPUSystemPack_ms: 0, adaptiveCPUICFactorization_ms: 0, adaptiveCPUResourceUpload_ms: 0, gpuActiveStages: [], gpuPreparation_ms: 0, gpuLayerConstruction_ms: 0, gpuAdvection_ms: 0, gpuConditioning_ms: 0, gpuRemeshing_ms: 0, gpuPressure_ms: 0, gpuPowerAssembly_ms: 0, gpuPressureSolve_ms: 0, gpuProjection_ms: 0, gpuPowerProjection_ms: 0, gpuVelocityProjection_ms: 0, gpuFaceBand_ms: 0, gpuFaceMarch_ms: 0, gpuPowerPublication_ms: 0, gpuExtrapolation_ms: 0, gpuMaterialization_ms: 0, gpuSurfaceUpdate_ms: 0, gpuFineTopology_ms: 0, gpuFineTransport_ms: 0, gpuFineRedistance_ms: 0, gpuRigid_ms: 0, gpuSpraySimulation_ms: 0, gpuFluidResidency_ms: 0, gpuSparsePublication_ms: 0, gpuDiagnostics_ms: 0, gpuOverhead_ms: 0, gpuRender_ms: 0, gpuSurfaceExtraction_ms: 0, gpuCaustics_ms: 0, gpuDryScene_ms: 0, gpuSvoTemporal_ms: 0, gpuInterfaceFront_ms: 0, gpuInterfaceBack_ms: 0, gpuInterfaces_ms: 0, gpuSprayFront_ms: 0, gpuSprayBack_ms: 0, gpuSprayRender_ms: 0, gpuOpticalComposite_ms: 0, gpuOverlays_ms: 0, gpuUpscale_ms: 0 };
+export const emptyPerformanceReport: PerformanceReport = {
+  methodId: "",
+  context: "",
+  capturedAt_ms: 0,
+};
 
-/** Sum only measurements that were actually produced by timestamp queries. */
-export function measuredGPUTime_ms(sample: PerformanceSnapshot) {
-  const physics = sample.gpuPhysicsTimingAvailable
-    ? sample.gpuPreparation_ms + sample.gpuLayerConstruction_ms + sample.gpuAdvection_ms
-      + sample.gpuConditioning_ms + sample.gpuRemeshing_ms + sample.gpuPressure_ms
-      + sample.gpuProjection_ms + sample.gpuExtrapolation_ms + sample.gpuMaterialization_ms
-      + sample.gpuSurfaceUpdate_ms + sample.gpuRigid_ms + sample.gpuSpraySimulation_ms
-      + sample.gpuFluidResidency_ms + sample.gpuSparsePublication_ms
-      + sample.gpuDiagnostics_ms + sample.gpuOverhead_ms
-    : 0;
-  return physics + (sample.gpuRenderTimingAvailable ? sample.gpuRender_ms : 0);
-}
-
-export const emptyCoupling: CouplingDiagnostics = { displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 };
+export const emptyCoupling: CouplingDiagnostics = {
+  displacedVolume_m3: 0,
+  bodyImpulse_N_s: { x: 0, y: 0, z: 0 },
+  fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 },
+  momentumClosureError_N_s: 0,
+  coupledBodyCount: 0,
+};
 
 /**
- * Read-only outputs of the running simulation, published by the controller at
- * step/readback cadence. Panels subscribe selectively so per-frame churn does
- * not re-render the whole shell.
+ * Read-only outputs of the running simulation. Performance data is stored as
+ * complete lane traces; individual phases are never copied into flat fields.
  */
 interface DiagnosticsStore {
   bodies: RigidBodyState[];
@@ -119,10 +48,10 @@ interface DiagnosticsStore {
   frameMs: number;
   resolution: string;
   samples: MetricSample[];
-  performanceSnapshot: PerformanceSnapshot;
-  performanceHistory: PerformanceSnapshot[];
+  performanceReport: PerformanceReport;
+  performanceReports: PerformanceReport[];
   set: (patch: Partial<DiagnosticsStore>) => void;
-  pushPerformance: (snapshot: PerformanceSnapshot, sample?: MetricSample) => void;
+  pushPerformanceReport: (report: PerformanceReport, sample?: MetricSample) => void;
 }
 
 export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
@@ -133,17 +62,21 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   couplingState: emptyCoupling,
   gpuStatus: { state: "initializing", label: "Initializing WebGPU" },
   gpuInfo: null,
-  effectiveRendererStatus: { requestedMode: "svo", effectiveMode: "raster", fallbackReason: "missing-source" },
+  effectiveRendererStatus: {
+    requestedMode: "svo",
+    effectiveMode: "raster",
+    fallbackReason: "missing-source",
+  },
   waterSurfacePresentation: null,
   frameMs: 0,
   resolution: "—",
   samples: [],
-  performanceSnapshot: emptyPerformance,
-  performanceHistory: [],
+  performanceReport: emptyPerformanceReport,
+  performanceReports: [],
   set: (patch) => set(patch),
-  pushPerformance: (snapshot, sample) => set((state) => ({
-    performanceSnapshot: snapshot,
-    performanceHistory: [...state.performanceHistory.slice(-119), snapshot],
-    samples: sample ? [...state.samples.slice(-79), sample] : state.samples
-  }))
+  pushPerformanceReport: (report, sample) => set((state) => ({
+    performanceReport: report,
+    performanceReports: [...state.performanceReports.slice(-239), report],
+    samples: sample ? [...state.samples.slice(-79), sample] : state.samples,
+  })),
 }));

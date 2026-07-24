@@ -308,7 +308,7 @@ export interface SparseVoxelRenderSource extends SparseVoxelSceneRenderSource {
   materials: GPUBufferBinding;
   voxelCapacity: number;
   brickCapacity: number;
-  /** Filled tank panes may conceal page-native fluid cells in raw inspection. */
+  /** Filled tank panes may conceal compact fluid cells in raw inspection. */
   drawContainerGlass?: boolean;
   /**
    * Producer-owned switch for the expanded voxel/brick inspection records.

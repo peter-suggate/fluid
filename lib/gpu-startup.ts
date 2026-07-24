@@ -28,17 +28,6 @@ export function safeBrowserGPUBringupEnabled(search: string): boolean {
   return new URLSearchParams(search).get("gpu") === "safe";
 }
 
-/**
- * Explicitly request phase-by-phase sparse-authority fences for driver
- * diagnosis. Timestamp-capable devices also select those fences inside the
- * solver because their instrumented queue needs the same t=0 ordering guard;
- * this query remains useful on timestamp-free devices and in safe bring-up.
- */
-export function fencedSparseAuthorityBringupEnabled(search: string): boolean {
-  const query = new URLSearchParams(search);
-  return query.get("gpu") === "safe" || query.get("safeBringup") === "1";
-}
-
 /** Any reset/rebuild epoch after consent invalidates the one-shot session. */
 export function safeBrowserSimulationEpochChanged(
   safeMode: boolean,
@@ -61,7 +50,6 @@ export interface SafeBrowserGPUBringupConfig {
   readonly diagnosticsOpen: boolean;
   readonly rightPanel: string | null;
   readonly gridOverlayAxis: string;
-  readonly stageCapturePhase: string;
   readonly search: string;
 }
 
@@ -92,12 +80,8 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     config.diagnosticsOpen && "diagnostics panel must remain closed",
     config.rightPanel !== null && "all right-side panels must remain closed",
     config.gridOverlayAxis !== "off" && "grid overlays must remain off",
-    config.stageCapturePhase !== "idle" && "GPU stage capture/readback must be idle",
     unapprovedQueryKeys.length > 0 && `unapproved safe-mode query flags: ${unapprovedQueryKeys.join(", ")}`,
-    (query.get("diagnostics") === "1" || query.get("panel") === "diagnostics" || query.get("waterdiag") === "1")
-      && "diagnostic GPU readback flags must be absent",
     query.get("gpuRecovery") === "1" && "automatic GPU recovery must be off",
-    query.get("gpuTimestamps") === "1" && "GPU timestamps must be off",
   ].filter((value): value is string => typeof value === "string");
 }
 
@@ -171,19 +155,10 @@ export function automaticGPURecoveryEnabled(search: string): boolean {
   return new URLSearchParams(search).get("gpuRecovery") === "1";
 }
 
-/**
- * Keep normal browser sessions on the same timestamp-free correctness path as
- * the authored Dawn scenarios. Hardware timestamps are an explicit profiling
- * opt-in because enabling them changes sparse-authority startup scheduling on
- * timestamp-capable devices; a default instrumentation choice must not change
- * the simulation being validated.
- */
-export function optionalBrowserTimestampFeatures(
-  search: string,
+/** Request the single device feature required by exhaustive GPU traces. */
+export function performanceTraceDeviceFeatures(
   features: { has(feature: string): boolean },
 ): GPUFeatureName[] {
-  const query = new URLSearchParams(search);
-  if (query.get("gpu") === "safe" || query.get("gpuTimestamps") !== "1") return [];
   return features.has("timestamp-query") ? ["timestamp-query"] : [];
 }
 

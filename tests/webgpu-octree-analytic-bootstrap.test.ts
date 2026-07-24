@@ -8,9 +8,10 @@ import {
 } from "../lib/webgpu-octree-analytic-bootstrap";
 import {
   octreeAnalyticOwnerBootstrapPageCount,
-  octreeSimulationOwnerPageLifecycleShader,
+  octreeDeterministicOwnerPageLifecycleShader,
   WebGPUOctreeSimulationOwnerPages,
 } from "../lib/webgpu-octree-owner-pages";
+import { PassBroker } from "../lib/webgpu-pass-broker";
 
 test("analytic cold topology publishes the resident worklist ABI entirely on GPU", () => {
   assert.equal(OCTREE_ANALYTIC_BOOTSTRAP_PARAMETER_BYTES, 32);
@@ -26,12 +27,14 @@ test("analytic cold topology publishes the resident worklist ABI entirely on GPU
     "production bootstrap must not read topology decisions back to the CPU");
   assert.doesNotMatch(encode, /dims\.nx|dims\.ny|dims\.nz/,
     "bootstrap emission must cover compact tile bounds rather than the finest lattice");
-  assert.match(octreeSimulationOwnerPageLifecycleShader,
-    /fn activateAnalyticTopologyPages[\s\S]*worklist\[HEADER \+ tileSlot\][\s\S]*analyticOwnerWord\(origin, size\)/,
-    "cold owner pages must consume the bounded analytic tile stream and seed real coarse owners");
+  assert.match(octreeDeterministicOwnerPageLifecycleShader,
+    /fn candidatePageKey[\s\S]*fn ownerPageWord\(cell: vec3u, origin: vec3u, size: u32\)[\s\S]*fn buildOwnerPageCandidate[\s\S]*ownerPageWord\(cell,origin,size\)/,
+    "cold owner pages must consume the bounded analytic tile stream and seed brick-relative owner records");
   const ownerEncode = WebGPUOctreeSimulationOwnerPages.prototype.encodeAnalyticBootstrap.toString();
   assert.doesNotMatch(ownerEncode, /mapAsync|getMappedRange|copyBufferToBuffer/,
     "production owner bootstrap remains GPU-only");
+  assert.equal((ownerEncode.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 3);
+  assert.doesNotMatch(ownerEncode, /dispatchWorkgroupsIndirect|sortCandidates|indirect/);
 });
 
 test("analytic owner capacity covers exactly the clipped 16/32 cold tile pages", () => {
@@ -83,6 +86,46 @@ test("Dawn emits deterministic clipped analytic tile indices and resident dispat
   readback.destroy(); builder.destroy(); tileWorklist.destroy(); tileStates.destroy(); device.destroy();
 });
 
+test("Dawn analytic bootstrap publishes sparse key-plus-one tile membership", {
+  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for GPU analytic-bootstrap checks",
+}, async (t) => {
+  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
+    create(options: string[]): GPU; globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, dawn.globals);
+  const gpu = dawn.create(["backend=metal"]); const adapter = await gpu.requestAdapter(); assert.ok(adapter);
+  const device = await adapter.requestDevice();
+  device.pushErrorScope("validation");
+  const tileWorklist = device.createBuffer({ size: (16 + 8) * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  const tileStates = device.createBuffer({ size: 8 * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  const builder = new WebGPUOctreeAnalyticBootstrapWorklist(device, tileWorklist, tileStates, {
+    tileDimensions: [2, 2, 1], activeTileLimits: [2, 2, 1],
+    tileSizeCells: 16, activeTileCount: 4, sparseStateCapacity: 4,
+  });
+  const readback = device.createBuffer({ size: (16 + 4 + 8) * 4,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder(); builder.encode(encoder);
+  encoder.copyBufferToBuffer(tileWorklist, 0, readback, 0, 20 * 4);
+  encoder.copyBufferToBuffer(tileStates, 0, readback, 20 * 4, 8 * 4);
+  device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+  const validationError = await device.popErrorScope(); assert.equal(validationError, null);
+  await readback.mapAsync(GPUMapMode.READ);
+  const words = new Uint32Array(readback.getMappedRange().slice(0)); readback.unmap();
+  if (words.slice(0, 16).every((value) => value === 0)) {
+    readback.destroy(); builder.destroy(); tileWorklist.destroy(); tileStates.destroy(); device.destroy();
+    t.skip("local Dawn Metal runtime completed a validated compute submission as a no-op");
+    return;
+  }
+  assert.deepEqual([...words.slice(0, 16)], [4, 256, 1, 1, 0, 0, 1, 1, 32, 1, 1, 0, 0, 1, 1, 1]);
+  assert.deepEqual([...words.slice(16, 20)], [0, 1, 2, 3]);
+  const records = [...words.slice(20)];
+  assert.equal(records.filter((_, index) => (index & 1) === 0 && records[index] !== 0).length, 4);
+  assert.deepEqual(records.filter((_, index) => (index & 1) === 1).sort(), [1, 1, 1, 1]);
+  readback.destroy(); builder.destroy(); tileWorklist.destroy(); tileStates.destroy(); device.destroy();
+});
+
 test("Dawn analytic cold bootstrap publishes genuine max-leaf-16/32 owner censuses", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for GPU analytic owner-page checks",
 }, async (t) => {
@@ -100,14 +143,12 @@ test("Dawn analytic cold bootstrap publishes genuine max-leaf-16/32 owner census
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const tileStates = device.createBuffer({ size: 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    const residencyWorklist = device.createBuffer({ size: 32 * 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const builder = new WebGPUOctreeAnalyticBootstrapWorklist(device, tileWorklist, tileStates, {
       tileDimensions: [1, 1, 1], activeTileLimits: [1, 1, 1],
       tileSizeCells: maximumLeaf, activeTileCount: 1,
     });
     const pageCount = (maximumLeaf / 8) ** 3;
-    const pages = new WebGPUOctreeSimulationOwnerPages(device, dimensions, residencyWorklist,
+    const pages = new WebGPUOctreeSimulationOwnerPages(device, dimensions,
       { maximumPages: pageCount }, {
         tileWorklist, tileSizeCells: maximumLeaf,
         activeTileLimits: [1, 1, 1], activeTileCount: 1,
@@ -115,9 +156,12 @@ test("Dawn analytic cold bootstrap publishes genuine max-leaf-16/32 owner census
     const readback = device.createBuffer({ size: pages.plan.allocatedBytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = device.createCommandEncoder();
-    builder.encode(encoder); pages.encodeAnalyticBootstrap(encoder);
-    encoder.copyBufferToBuffer(pages.arena, 0, readback, 0, pages.plan.allocatedBytes);
-    device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+    builder.encode(encoder);
+    const broker = new PassBroker(encoder); pages.encodeAnalyticBootstrap(broker);
+    assert.equal(broker.computePassCount, 3,
+      "analytic scan, exclusive payload publication, and generation commit remain separate runtime passes");
+    broker.copyBufferToBuffer(pages.arena, 0, readback, 0, pages.plan.allocatedBytes);
+    device.queue.submit([broker.finish()]); await device.queue.onSubmittedWorkDone();
     await readback.mapAsync(GPUMapMode.READ);
     const words = new Uint32Array(readback.getMappedRange().slice(0)); readback.unmap();
     if (words[1] === 0) {
@@ -138,7 +182,7 @@ test("Dawn analytic cold bootstrap publishes genuine max-leaf-16/32 owner census
         `the cold owner census contains one genuine ${maximumLeaf}-cubed leaf`);
     }
     readback.destroy(); pages.destroy(); builder.destroy();
-    residencyWorklist.destroy(); tileStates.destroy(); tileWorklist.destroy();
+    tileStates.destroy(); tileWorklist.destroy();
     if (poisoned) break;
   }
   const validationError = await device.popErrorScope(); assert.equal(validationError, null);

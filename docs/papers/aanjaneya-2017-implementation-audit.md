@@ -25,7 +25,7 @@ on advecting the full old-mesh velocity at each new power-face centroid before
 projection onto the new face normal; PCG convergence alone cannot establish
 transport fidelity.
 
-## Reproduced symptom
+## Historical reproduced symptom (pre-cutover)
 
 The isolated `minimal-power-dam-break` run reached 0.5 s (125 fixed 0.004 s
 steps) with MGPCG relative residual about `5.5e-5` and maximum reported
@@ -61,12 +61,13 @@ through it.
 | Free-surface and solid embedded boundaries may cut adaptive cells near T-junctions | lines 283--301 | Partial. Free-surface coefficients now require a strict current liquid/air crossing. Mandatory unit wall/interface refinement remains a policy gap. |
 | Active/ghost SPGrid pyramid with `GhostValuePropagate` and `GhostValueAccumulate` | lines 319--373, 578--613 | Not implemented faithfully. The GPU V-cycle emits one origin ghost per pressure row, lacks the paper's face/edge ghost aliases and explicit propagate/accumulate operators, and drops mapped non-axis off-diagonals from its coarse stencil. |
 | Section 4.3 hybrid: 8 L2 Jacobi sweeps near boundaries/transitions, L1 V-cycle, 8 symmetric post-sweeps | lines 379--409 | Broad schedule implemented. Boundary rows are now explicitly marked, including closed/cut solids. The middle L1 V-cycle is not the paper operator and lacks numerical GPU SPD proof. |
-| Separate factor-4/factor-8 fine SPGrid narrow band plus coarse octree phi | lines 410--478 | Partial. Two main authorities exist, but a legacy adaptive surface continues as an evolving oracle/seed source. |
+| Explicit non-paper pressure alternative | n/a | The default UI option supplies an immutable full-domain trilinear Galerkin hierarchy, imports current compact native-L2 rows on GPU, refreshes `P^T L2 P` by parent-owned gathers, and fails closed at relative L2 residual `1e-4`. Section 4.3 MGPCG remains separately selectable and is never a fallback. |
+| Separate factor-4/factor-8 fine SPGrid narrow band plus coarse octree phi | lines 410--478 | Implemented as the sole production surface representation. The duplicate row-attached adaptive page lifecycle/transport/redistance/volume/dense-publication lane and its runtime bindings are deleted; compact leaf records remain only as topology seeds, recurring phi comes from committed factor-m fine bricks and their restricted coarse publication, and analytic phi is `t=0`-only. |
 | Rebuild fine topology from interface cells, interface blocks plus block one-ring, then FMM activation | lines 430--462 | Recurring external seeds are now restricted to explicitly tagged endpoint support; ordinary cold affine CORE seeds no longer repopulate the whole fine grid. Pre-dilation still allocates the full backtrace/interpolation/redistance width rather than FMM activating it progressively. |
-| `m` segmented backtrace steps and local cube/Delaunay scalar interpolation | lines 435--495 | Segmented fine-phi backtrace exists. |
-| Advect a full vector at every new power-face centroid, then dot with the new normal | lines 480--495, 583--586 | Missing. Current transport advects regular-axis scalars and transfers/reconstructs power values afterward. |
-| On topology change, trace new face locations into the old mesh; avoid separate transfer | lines 578--586 | Missing. Current copy/child-average/parent-injection transfer can change energy. |
-| Ordered local Delaunay FMM and face-based closest-interface velocity extrapolation | lines 450--495 | Partial. Production redistance is JFA/CPT; small ordered FMM is diagnostic-only. Whole-domain face propagation was removed and is now bounded by the authored narrow band. |
+| `m` segmented backtrace steps and local cube/Delaunay scalar interpolation | lines 435--495 | Implemented in one fused factor-`m` characteristic kernel; each substep resamples the local cube/Delaunay velocity interpolant before the terminal fine-phi sample. |
+| Advect a full vector at every new power-face centroid, then dot with the new normal | lines 480--495, 583--586 | Implemented by tracing each new generalized-face centroid through the retained old cell-vector mesh, interpolating the full vector, and projecting once onto the new face normal. |
+| On topology change, trace new face locations into the old mesh; avoid separate transfer | lines 578--586 | Implemented as the sole recurring face authority. Exact carried identities retain their scalar; new faces sample the old mesh. The copy/child-average/parent-injection transfer module and runtime path are deleted. |
+| Ordered local Delaunay redistance target and face-based closest-interface velocity extrapolation | lines 450--495 | Implemented with an explicit algorithmic substitution: production redistance is fail-closed JFA-CPT over the sparse fine band, and the FMM implementation/runtime selector are deleted. Face propagation is bounded by the authored narrow band and uses the paper's regular-face graph with local cube/Delaunay support. |
 | Every face/edge ring is exclusively same-or-one-coarser or same-or-one-finer | lines 518--565 | Mixed-ring repair exists. Sparse owner lookup now fails closed instead of synthesizing a coarse owner for missing/stale pages. A required global all-leaf publication audit is still missing. |
 | Row-local Delaunay tetrahedra with current-row solid angle below pi/2 | lines 463--479, 542--565 | Implemented for every same/coarser descriptor. The catalog now includes co-spherical sites touching at a Voronoi vertex and searches deterministic non-crossing link triangulations; all six formerly rejected masks are strictly acute without topology refinement. |
 
@@ -135,30 +136,29 @@ refinement and runtime rejection paths have been removed.
    Jacobi--M1--eight-sweep composition has a CPU algebra test for linearity,
    symmetry, and positivity, but that proof is conditional on a faithful SPD
    M1 and does not validate the current GPU pyramid.
-2. Advect velocity as the paper specifies: retain the old generalized mesh,
-   backtrace every new power-face centroid, interpolate the old full vector
-   with cube/local-Delaunay interpolation, and project onto the new normal.
-   Remove the separate topology transfer from the authoritative path.
-3. Make ordered FMM/ordered-upwind the production fine redistance method, or
-   establish a long-run differential bound proving the parallel replacement
-   preserves zero crossing, Eikonal error, and volume.
-4. Reduce fine-page allocation to interface blocks plus their one-ring and let
-   marching activate only the required valid band. Page count must scale with
-   interface area times fixed width, not domain volume. Mapping only compact
-   rows was tested but correctly failed staged t=0 because its present support
-   closure exhausted capacity and left 690 faces disconnected; that experiment
-   was reverted rather than weakening publication gates.
-5. Decouple coarse octree sizing from mandatory unit refinement at every wall
+
+   A direct trilinear `P^T L2 P` oracle, packed parent-owned RAP gathers, live
+   compact-row import, and a bounded GPU V-cycle now exist as an experimental
+   comparison. They do not satisfy Section 4.3 by themselves: production must
+   retain CG on `L2`, the matching boundary-only `L2` sweeps, and a faithful
+   first-order `M1`, unless an explicitly non-paper solver is selected and
+   separately validated.
+2. Establish a long-run differential bound proving the JFA-CPT substitution
+   preserves zero crossing, Eikonal error, and volume relative to analytic
+   fixtures and an offline ordered reference. FMM is not a runtime option.
+3. Reduce the active global-fine brick set to interface blocks plus the exact
+   characteristic/interpolation/redistance support closure. Brick count must
+   scale with interface area times fixed width, not domain volume; insufficient
+   closure rejects the candidate rather than weakening publication gates.
+4. Decouple coarse octree sizing from mandatory unit refinement at every wall
    and free-surface crossing. Add authored source/object/boundary refinement
    regions and keep valid coarse pressure cells across embedded boundaries.
-6. Remove the independently evolving legacy fine-surface authority after
-   bootstrap; rollback should preserve the prior global-fine generation.
-7. Add an all-live-leaf publication audit for face and edge 2:1 balance,
+5. Add an all-live-leaf publication audit for face and edge 2:1 balance,
    exclusive same/coarser versus same/finer rings, reciprocal current owners,
    and a valid row-local catalog entry.
-8. Turn final metric energy into before-projection, after-projection, and
+6. Turn final metric energy into before-advection, after-projection, and
    after-regrid budgets. The current final proxy cannot yet localize energy
-   loss between projection, transfer, and advection.
+   loss between projection, redistance, and full-vector advection.
 
 ## Required Dawn tranche
 
@@ -176,15 +176,19 @@ Run only through the repository's isolated/staged Dawn launchers.
    alternating refine/coarsen steps; measure flux and energy discontinuity.
 5. Independently recompute committed generalized-face Eq. (4) residual and
    the face metric energy before/after projection and topology change.
-6. Compare production redistance with an ordered FMM oracle for planes and
-   spheres over hundreds of steps.
+6. Compare production redistance with analytic plane/sphere distance and an
+   offline ordered reference over hundreds of steps. No validation oracle may
+   become a production selector or fallback.
 
 ## Verification notes
 
-Focused non-Dawn tests are safe to run without `WEBGPU_NODE_MODULE`. Directly
-combining multiple Dawn test files previously ended in a native teardown
-`SIGSEGV`; that is invalid orchestration under `docs/SAFE_WEBGPU_BRINGUP.md`
-and is not solver evidence.
+Focused non-Dawn tests are safe to run without `WEBGPU_NODE_MODULE`. The native
+teardown `SIGSEGV` was an ownership bug in the Node tests: a temporary
+`dawn.create(...).requestAdapter()` expression allowed the Dawn factory to be
+collected while its adapter/device remained live. Every pressure-solver Dawn
+test now retains that factory through `device.destroy()`. Dawn stages still run
+sequentially under `docs/SAFE_WEBGPU_BRINGUP.md`; a process crash is never
+accepted as solver evidence or hidden by a fallback.
 
 The full isolated bring-up sequence passed after the catalog, pressure, and
 strict-owner corrections. The 125-step dam-break then failed closed at target

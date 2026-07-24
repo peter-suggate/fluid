@@ -10,8 +10,10 @@ import {
   validateSVOBaselineAdapterLimits,
   type SVOBaselineAdapterObservation,
 } from "./svo-baseline-contract";
+import { performanceTraceIsExact, type PerformanceTrace } from "../lib/performance-trace";
+import type { PerformanceReport } from "../lib/stores/diagnostics-store";
 
-export const SVO_BENCHMARK_SCHEMA_VERSION = 2;
+export const SVO_BENCHMARK_SCHEMA_VERSION = 3;
 
 export interface SVOBenchmarkResolution {
   readonly width: number;
@@ -67,15 +69,8 @@ export interface SVOBenchmarkFrameObservation {
   readonly requestedMode: SVOBaselineRenderer;
   readonly effectiveMode: SVOBaselineRenderer;
   readonly fallbackReason: string | null;
-  readonly renderTimingContext: string;
-  readonly renderTimingEpoch: number;
-  /** Accepted timestamp-query identity; collectors must not duplicate cached values. */
-  readonly renderTimingSampleId: number | null;
-  readonly gpuRenderTimingAvailable: boolean;
-  readonly cpuFrame_ms: number;
-  readonly gpuRender_ms: number | null;
-  readonly gpuDryScene_ms: number | null;
-  readonly gpuSvoTemporal_ms: number | null;
+  /** Complete generic CPU/GPU lane report captured for this frame. */
+  readonly performance: PerformanceReport;
   readonly rendererOwnedBytes: number;
 }
 
@@ -111,13 +106,11 @@ export interface SVOBenchmarkRunResult {
   readonly equivalence: SVOBenchmarkEquivalenceObservation;
   readonly effectiveMode: SVOBaselineRenderer;
   readonly fallbackReason: null;
-  readonly renderTimingContext: string;
-  readonly renderTimingEpoch: number;
-  readonly timestampQueriesAvailable: boolean;
-  readonly cpuFrame_ms: SVOBenchmarkDistribution;
-  readonly gpuRender_ms: SVOBenchmarkDistribution | null;
-  readonly gpuDryScene_ms: SVOBenchmarkDistribution | null;
-  readonly gpuSvoTemporal_ms: SVOBenchmarkDistribution | null;
+  readonly performanceContext: string;
+  readonly presentationTracesAvailable: boolean;
+  readonly cpuTotal_ms: SVOBenchmarkDistribution;
+  readonly presentationTotal_ms: SVOBenchmarkDistribution | null;
+  readonly dryScene_ms: SVOBenchmarkDistribution | null;
   readonly rendererOwnedBytes: SVOBenchmarkDistribution;
   /** Warmup and measured observations are retained verbatim for re-analysis. */
   readonly rawFrames: readonly SVOBenchmarkFrameObservation[];
@@ -130,8 +123,8 @@ export interface SVOBenchmarkPairResult {
   readonly rasterRunId: string;
   readonly svoRunId: string;
   readonly equivalenceValidated: true;
-  readonly cpuFrameP95RatioSvoToRaster: number;
-  readonly gpuRenderP95RatioSvoToRaster: number | null;
+  readonly cpuTotalP95RatioSvoToRaster: number;
+  readonly presentationTotalP95RatioSvoToRaster: number | null;
   readonly peakMemoryRatioSvoToRaster: number;
 }
 
@@ -144,11 +137,10 @@ export interface SVOBenchmarkAggregateResult {
   readonly quality: SVOBaselineQuality;
   readonly outputResolution: SVOBenchmarkResolution;
   readonly internalResolution: SVOBenchmarkResolution;
-  readonly timestampQueriesAvailable: boolean;
-  readonly cpuFrame_ms: SVOBenchmarkDistribution;
-  readonly gpuRender_ms: SVOBenchmarkDistribution | null;
-  readonly gpuDryScene_ms: SVOBenchmarkDistribution | null;
-  readonly gpuSvoTemporal_ms: SVOBenchmarkDistribution | null;
+  readonly presentationTracesAvailable: boolean;
+  readonly cpuTotal_ms: SVOBenchmarkDistribution;
+  readonly presentationTotal_ms: SVOBenchmarkDistribution | null;
+  readonly dryScene_ms: SVOBenchmarkDistribution | null;
   readonly rendererOwnedBytes: SVOBenchmarkDistribution;
 }
 
@@ -208,6 +200,10 @@ function distribution(values: readonly number[], label: string): SVOBenchmarkDis
 function runOrder(pairIndex: number): readonly [SVOBaselineRenderer, SVOBaselineRenderer] {
   return pairIndex % 2 === 0 ? ["raster", "svo"] : ["svo", "raster"];
 }
+
+const phaseTotal_ms = (trace: PerformanceTrace, id: PerformanceTrace["phases"][number]["id"]) =>
+  trace.phases.filter((phase) => phase.id === id)
+    .reduce((sum, phase) => sum + phase.duration_ms, 0);
 
 export function buildSVOBenchmarkPlan(options: {
   readonly revision: string;
@@ -270,8 +266,8 @@ export function buildSVOBenchmarkPlan(options: {
       "Reset timing history before every run and publish the exact per-run resetToken.",
       "Retain every warmup and measured frame in sequence; do not pre-average samples.",
       "Record requested/effective renderer and fallback identity on every frame.",
-      "Append a timing frame only when renderTimingSampleId advances; cached 250 ms telemetry is not an independent sample.",
-      "Record scene, SVO-temporal (zero only when explicitly idle), total, mode context, epoch, adapter, and exact output/internal resolution.",
+      "Append a timing frame only when the generic presentation trace sampleId advances; cached telemetry is not an independent sample.",
+      "Record the complete PerformanceReport, adapter, and exact output/internal resolution.",
       "Use the canonical checkpoint and camera identity unchanged for both members of each raster/SVO pair.",
     ]),
   });
@@ -294,11 +290,11 @@ function validateRunObservation(plan: SVOBenchmarkRunPlan, observation: SVOBench
   const expectedFrames = plan.warmupFrames + plan.measuredFrames;
   if (observation.frames.length !== expectedFrames) throw new Error(`${plan.id} has ${observation.frames.length} frames; exactly ${expectedFrames} are required`);
   let previousTimestamp = plan.captureNotBeforeUnixMs;
-  let previousTimingSampleId = -1;
-  const renderTimingContext = nonEmpty(observation.frames[0]?.renderTimingContext ?? "", `${plan.id} render timing context`);
-  const renderTimingEpoch = integer(observation.frames[0]?.renderTimingEpoch ?? -1, 1, `${plan.id} render timing epoch`);
-  if (!renderTimingContext.endsWith(`:${plan.requestedMode}:epoch-${renderTimingEpoch}`)) {
-    throw new Error(`${plan.id} render timing context does not identify ${plan.requestedMode} epoch ${renderTimingEpoch}`);
+  let previousCpuSampleId = -1;
+  let previousPresentationSampleId = -1;
+  const performanceContext = nonEmpty(observation.frames[0]?.performance.context ?? "", `${plan.id} performance context`);
+  if (!performanceContext.includes(`:${plan.requestedMode}:`)) {
+    throw new Error(`${plan.id} performance context does not identify ${plan.requestedMode}`);
   }
   for (let index = 0; index < observation.frames.length; index += 1) {
     const frame = observation.frames[index];
@@ -312,29 +308,35 @@ function validateRunObservation(plan: SVOBenchmarkRunPlan, observation: SVOBench
     if (frame.effectiveMode !== plan.requestedMode || frame.fallbackReason !== null) {
       throw new Error(`${plan.id} frame ${index} effective renderer/fallback mismatch: ${frame.effectiveMode}/${frame.fallbackReason ?? "none"}`);
     }
-    if (frame.renderTimingContext !== renderTimingContext || frame.renderTimingEpoch !== renderTimingEpoch) {
-      throw new Error(`${plan.id} frame ${index} timing mode/epoch changed during the run`);
+    if (frame.performance.context !== performanceContext) {
+      throw new Error(`${plan.id} frame ${index} performance context changed during the run`);
     }
-    finiteNonNegative(frame.cpuFrame_ms, `${plan.id} CPU frame`);
+    if (frame.performance.methodId !== "octree") throw new Error(`${plan.id} frame ${index} method mismatch`);
+    const cpu = frame.performance.cpu;
+    if (!cpu || cpu.domain !== "cpu" || cpu.lane !== "main-thread" || !performanceTraceIsExact(cpu)) {
+      throw new Error(`${plan.id} frame ${index} has no exact CPU trace`);
+    }
+    if (cpu.sampleId <= previousCpuSampleId) throw new Error(`${plan.id} frame ${index} repeats a CPU trace`);
+    previousCpuSampleId = cpu.sampleId;
+    finiteNonNegative(cpu.total_ms, `${plan.id} CPU total`);
     finiteNonNegative(frame.rendererOwnedBytes, `${plan.id} renderer memory`);
-    if (frame.gpuRenderTimingAvailable) {
-      const sampleId = integer(frame.renderTimingSampleId ?? -1, 1, `${plan.id} timestamp sample ID`);
-      if (sampleId <= previousTimingSampleId) throw new Error(`${plan.id} frame ${index} repeats a cached timestamp sample`);
-      previousTimingSampleId = sampleId;
-      finiteNonNegative(frame.gpuRender_ms ?? Number.NaN, `${plan.id} GPU render`);
-      finiteNonNegative(frame.gpuDryScene_ms ?? Number.NaN, `${plan.id} GPU dry scene`);
-      finiteNonNegative(frame.gpuSvoTemporal_ms ?? Number.NaN, `${plan.id} GPU SVO temporal`);
-      if (plan.requestedMode === "raster" && frame.gpuSvoTemporal_ms !== 0) {
-        throw new Error(`${plan.id} frame ${index} raster mode must report temporal as explicitly idle`);
+    const presentation = frame.performance.presentation;
+    if (presentation) {
+      if (presentation.domain !== "gpu" || presentation.lane !== "presentation"
+        || !performanceTraceIsExact(presentation)) {
+        throw new Error(`${plan.id} frame ${index} has an invalid presentation trace`);
       }
-    } else if (frame.renderTimingSampleId !== null || frame.gpuRender_ms !== null || frame.gpuDryScene_ms !== null || frame.gpuSvoTemporal_ms !== null) {
-      throw new Error(`${plan.id} frame ${index} reports unavailable timestamps with timing values`);
+      if (presentation.sampleId <= previousPresentationSampleId) {
+        throw new Error(`${plan.id} frame ${index} repeats a cached presentation trace`);
+      }
+      previousPresentationSampleId = presentation.sampleId;
+      finiteNonNegative(presentation.total_ms, `${plan.id} presentation total`);
     }
   }
   const measured = observation.frames.slice(plan.warmupFrames);
-  const timestampQueriesAvailable = measured.every(({ gpuRenderTimingAvailable }) => gpuRenderTimingAvailable);
-  if (!timestampQueriesAvailable && measured.some(({ gpuRenderTimingAvailable }) => gpuRenderTimingAvailable)) {
-    throw new Error(`${plan.id} timestamp availability changed during measured frames`);
+  const presentationTracesAvailable = measured.every(({ performance }) => performance.presentation !== undefined);
+  if (!presentationTracesAvailable && measured.some(({ performance }) => performance.presentation !== undefined)) {
+    throw new Error(`${plan.id} presentation trace availability changed during measured frames`);
   }
   return Object.freeze({
     plan,
@@ -342,13 +344,15 @@ function validateRunObservation(plan: SVOBenchmarkRunPlan, observation: SVOBench
     equivalence: observation.equivalence,
     effectiveMode: plan.requestedMode,
     fallbackReason: null,
-    renderTimingContext,
-    renderTimingEpoch,
-    timestampQueriesAvailable,
-    cpuFrame_ms: distribution(measured.map(({ cpuFrame_ms }) => cpuFrame_ms), `${plan.id} CPU frame`),
-    gpuRender_ms: timestampQueriesAvailable ? distribution(measured.map(({ gpuRender_ms }) => gpuRender_ms!), `${plan.id} GPU render`) : null,
-    gpuDryScene_ms: timestampQueriesAvailable ? distribution(measured.map(({ gpuDryScene_ms }) => gpuDryScene_ms!), `${plan.id} GPU dry scene`) : null,
-    gpuSvoTemporal_ms: timestampQueriesAvailable ? distribution(measured.map(({ gpuSvoTemporal_ms }) => gpuSvoTemporal_ms!), `${plan.id} GPU SVO temporal`) : null,
+    performanceContext,
+    presentationTracesAvailable,
+    cpuTotal_ms: distribution(measured.map(({ performance }) => performance.cpu!.total_ms), `${plan.id} CPU total`),
+    presentationTotal_ms: presentationTracesAvailable
+      ? distribution(measured.map(({ performance }) => performance.presentation!.total_ms), `${plan.id} presentation total`)
+      : null,
+    dryScene_ms: presentationTracesAvailable
+      ? distribution(measured.map(({ performance }) => phaseTotal_ms(performance.presentation!, "dry-scene")), `${plan.id} dry scene`)
+      : null,
     rendererOwnedBytes: distribution(measured.map(({ rendererOwnedBytes }) => rendererOwnedBytes), `${plan.id} renderer memory`),
     rawFrames: Object.freeze([...observation.frames]),
   });
@@ -382,9 +386,9 @@ function validatePair(
     rasterRunId: raster.plan.id,
     svoRunId: svo.plan.id,
     equivalenceValidated: true,
-    cpuFrameP95RatioSvoToRaster: svo.cpuFrame_ms.p95 / Math.max(raster.cpuFrame_ms.p95, Number.EPSILON),
-    gpuRenderP95RatioSvoToRaster: raster.gpuRender_ms && svo.gpuRender_ms
-      ? svo.gpuRender_ms.p95 / Math.max(raster.gpuRender_ms.p95, Number.EPSILON)
+    cpuTotalP95RatioSvoToRaster: svo.cpuTotal_ms.p95 / Math.max(raster.cpuTotal_ms.p95, Number.EPSILON),
+    presentationTotalP95RatioSvoToRaster: raster.presentationTotal_ms && svo.presentationTotal_ms
+      ? svo.presentationTotal_ms.p95 / Math.max(raster.presentationTotal_ms.p95, Number.EPSILON)
       : null,
     peakMemoryRatioSvoToRaster: svo.rendererOwnedBytes.maximum / Math.max(raster.rendererOwnedBytes.maximum, Number.EPSILON),
   });
@@ -397,7 +401,7 @@ function aggregateRuns(results: readonly SVOBenchmarkRunResult[]): readonly SVOB
     const grouped = results.filter(({ plan }) => plan.baselineId === baselineId && plan.renderer === renderer);
     const first = grouped[0];
     const measured = grouped.flatMap((run) => run.rawFrames.slice(run.plan.warmupFrames));
-    const timestampQueriesAvailable = grouped.every(({ timestampQueriesAvailable }) => timestampQueriesAvailable);
+    const presentationTracesAvailable = grouped.every(({ presentationTracesAvailable }) => presentationTracesAvailable);
     return Object.freeze({
       baselineId,
       renderer,
@@ -407,16 +411,13 @@ function aggregateRuns(results: readonly SVOBenchmarkRunResult[]): readonly SVOB
       quality: first.plan.quality,
       outputResolution: first.plan.outputResolution,
       internalResolution: first.plan.internalResolution,
-      timestampQueriesAvailable,
-      cpuFrame_ms: distribution(measured.map(({ cpuFrame_ms }) => cpuFrame_ms), `${baselineId} ${renderer} aggregate CPU frame`),
-      gpuRender_ms: timestampQueriesAvailable
-        ? distribution(measured.map(({ gpuRender_ms }) => gpuRender_ms!), `${baselineId} ${renderer} aggregate GPU render`)
+      presentationTracesAvailable,
+      cpuTotal_ms: distribution(measured.map(({ performance }) => performance.cpu!.total_ms), `${baselineId} ${renderer} aggregate CPU total`),
+      presentationTotal_ms: presentationTracesAvailable
+        ? distribution(measured.map(({ performance }) => performance.presentation!.total_ms), `${baselineId} ${renderer} aggregate presentation total`)
         : null,
-      gpuDryScene_ms: timestampQueriesAvailable
-        ? distribution(measured.map(({ gpuDryScene_ms }) => gpuDryScene_ms!), `${baselineId} ${renderer} aggregate GPU dry scene`)
-        : null,
-      gpuSvoTemporal_ms: timestampQueriesAvailable
-        ? distribution(measured.map(({ gpuSvoTemporal_ms }) => gpuSvoTemporal_ms!), `${baselineId} ${renderer} aggregate GPU SVO temporal`)
+      dryScene_ms: presentationTracesAvailable
+        ? distribution(measured.map(({ performance }) => phaseTotal_ms(performance.presentation!, "dry-scene")), `${baselineId} ${renderer} aggregate dry scene`)
         : null,
       rendererOwnedBytes: distribution(measured.map(({ rendererOwnedBytes }) => rendererOwnedBytes), `${baselineId} ${renderer} aggregate memory`),
     });

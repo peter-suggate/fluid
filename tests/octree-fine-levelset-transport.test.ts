@@ -12,6 +12,7 @@ import {
   redistanceFineLevelSet,
   traceFineLevelSetDeparture,
 } from "../lib/octree-fine-levelset-transport";
+import { WebGPUFineLevelSetTransport } from "../lib/webgpu-octree-fine-levelset-transport";
 
 function oracle(fineFactor: 4 | 8 = 4) {
   const plan = planFineLevelSetBricks({
@@ -61,6 +62,12 @@ test("piecewise trace resamples injected octree velocity once per fine-ratio seg
   assert.equal(samples, 4);
   assert.equal(trace.segments, 4);
   assert.ok(Math.abs(trace.departure[0] - 0.31640625) < 1e-12);
+});
+
+test("WebGPU transport publishes the physical transport band in parameter word 26", () => {
+  const source = WebGPUFineLevelSetTransport.prototype.encode.toString();
+  assert.match(source, /floats\[26\]\s*=\s*transportBandCells\s*\*\s*this\.source\.plan\.fineCellWidth/);
+  assert.doesNotMatch(source, /floats\[25\]\s*=\s*transportBandCells/);
 });
 
 test("fine advection uses at least factor segments and commits atomically", () => {

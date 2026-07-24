@@ -44,7 +44,7 @@ test("the water pipeline replacement callback is fail-safe and replaces rather t
   const sampledTargetView = {} as GPUTextureView;
   const replacement: DrySceneReplacementEncoder = () => ({ encoded: true, sampledTargetView });
   assert.deepEqual(replacement({} as GPUCommandEncoder, {} as GPUTexture), { encoded: true, sampledTargetView });
-  expectSource(waterSource, /drySceneReplacement\?\.\(encoder, this\.sceneTexture, timestamps\?\.scene\) \?\? false/,
+  expectSource(waterSource, /drySceneReplacement\?\.\(encoder, this\.sceneTexture, tracePhase\) \?\? false/,
     "water pipeline must let the replacement explicitly accept or reject a frame");
   expectSource(waterSource, /if \(!sparseSceneResult\) \{[^]*label:"Dry scene"/,
     "the analytic pass is encoded only when no replacement accepted the frame");
@@ -61,7 +61,7 @@ test("the direct renderer exposes a source-aware replacement texture contract", 
     "direct renderer class must be public to the presentation owner");
   expectSource(drySceneSource, /setSource\(source: SparseVoxelSceneRenderSource \| undefined, scene: SparseVoxelDrySceneData \| undefined\)/,
     "the renderer accepts structural arenas, their parent material table, and analytic-owner data together");
-  expectSource(drySceneSource, /encode\([^)]*encoder: GPUCommandEncoder[^)]*target: GPUTexture \| GPUTextureView[^)]*timestampWrites\?: TimestampRange[^)]*\): DrySceneReplacementResult \| false/,
+  expectSource(drySceneSource, /encode\([^)]*encoder: GPUCommandEncoder[^)]*target: GPUTexture \| GPUTextureView[^)]*\): DrySceneReplacementResult \| false/,
     "encode must report both successful ownership and the texture the next stage should sample");
   expectSource(drySceneSource, /if \(!this\.pipeline \|\| !this\.bindGroup\) return false/,
     "an absent or unpublished source must trigger the raster fallback");

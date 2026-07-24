@@ -10,7 +10,7 @@ const source = readFileSync(new URL("../lib/webgpu-octree-voxel-inspection.ts", 
 const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 
-test("page-native raw voxels materialize directly from live pressure-grid rows", () => {
+test("compact raw voxels materialize directly from live pressure-grid rows", () => {
   assert.match(compactOctreeVoxelInspectionShader, /struct LeafHeader/);
   assert.match(compactOctreeVoxelInspectionShader, /let live=row<min\(rowCount\[0\],params\.shape\.x\)&&header\.size>0u/);
   assert.match(compactOctreeVoxelInspectionShader, /let header=headers\[row\]/);
@@ -26,21 +26,24 @@ test("page-native raw voxels materialize directly from live pressure-grid rows",
     "inspection must not recreate or read back the retired dense level-set volume");
 });
 
-test("compact inspection stays lazy and republishes with page-native simulation frames", () => {
+test("compact inspection stays lazy and republishes with global-fine simulation frames", () => {
   assert.match(source, /createSparseVoxelInspectionPublicationController\(false/,
     "smooth rendering allocates no expanded records");
   assert.match(source, /drawContainerGlass: false/,
-    "page-native fluid inspection is not hidden behind filled tank panes");
+    "compact fluid inspection is not hidden behind filled tank panes");
   assert.match(source, /pass\.dispatchWorkgroups\(Math\.ceil\(this\.rowCapacity \/ 64\)\)/);
   assert.match(projection, /leafHeaders: \{ buffer: this\.leafHeaders \}/);
   assert.match(projection, /rowCount: \{ buffer: this\.compaction \}/);
-  assert.match(projection, /this\.topologyWorklistReady = false;[\s\S]*this\.encodeInlineRebuild\(encoder\);[\s\S]*this\.encodeFrontierRows\(encoder, "Octree inspection frontier rows"[\s\S]*this\.compactVoxelInspection\.encode\(encoder\);/,
-    "the first paused inspection captures transient pressure rows in the same rebuild submission");
-  const pagedBranch = projection.slice(
-    projection.indexOf("if (this.surfacePagesBootstrapped && this.adaptiveSurfaceAdapter)"),
-    projection.indexOf("if (!this.sparseBrickWorld)", projection.indexOf("if (this.surfacePagesBootstrapped && this.adaptiveSurfaceAdapter)")),
+  assert.match(projection, /this\.encodeFrontierRows\(encoder, "Octree inspection frontier rows"[\s\S]*this\.compactVoxelInspection\.encode\(encoder\);/,
+    "the first inspection captures the current immutable pressure rows in one submission");
+  assert.doesNotMatch(projection,
+    /get sparseVoxelRenderSource[\s\S]*this\.topologyWorklistReady = false;[\s\S]*this\.encodeInlineRebuild\(encoder\)/,
+    "diagnostic inspection must not revive the cold full-domain topology path");
+  const globalFineBranch = projection.slice(
+    projection.indexOf("if (this.globalFineBootstrapped && this.fineSeedAdapter)"),
+    projection.indexOf("if (!this.sparseBrickWorld)", projection.indexOf("if (this.globalFineBootstrapped && this.fineSeedAdapter)")),
   );
-  assert.match(pagedBranch, /this\.compactVoxelInspection\?\.encode\(encoder\)/,
+  assert.match(globalFineBranch, /this\.compactVoxelInspection\?\.encode\(encoder\)/,
     "running fluid updates the raw view from the same compact generation");
 });
 

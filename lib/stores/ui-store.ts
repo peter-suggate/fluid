@@ -47,8 +47,6 @@ interface UIStore {
   svoMaximumTraversalDepth: number;
   svoMaximumNodeVisits: number;
   svoOverlayOpacity: number;
-  /** Recurring profiler/query readbacks. Disable for maximum simulation throughput. */
-  performanceReadbacksEnabled: boolean;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   selectBody: (bodyId?: string) => void;
   setSceneModalOpen: (open: boolean) => void;
@@ -67,7 +65,6 @@ interface UIStore {
   setSvoMaximumTraversalDepth: (depth: number) => void;
   setSvoMaximumNodeVisits: (visits: number) => void;
   setSvoOverlayOpacity: (opacity: number) => void;
-  setPerformanceReadbacksEnabled: (enabled: boolean) => void;
 }
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -89,7 +86,6 @@ export const useUIStore = create<UIStore>((set) => ({
   svoMaximumTraversalDepth: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumTraversalDepth,
   svoMaximumNodeVisits: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumNodeVisits,
   svoOverlayOpacity: DEFAULT_SVO_RENDER_DIAGNOSTICS.overlayOpacity,
-  performanceReadbacksEnabled: true,
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   selectBody: (selectedBodyId) => set({ selectedBodyId }),
   setSceneModalOpen: (sceneModalOpen) => set({ sceneModalOpen }),
@@ -132,5 +128,4 @@ export const useUIStore = create<UIStore>((set) => ({
       overlayOpacity: svoOverlayOpacity,
     }).overlayOpacity,
   })),
-  setPerformanceReadbacksEnabled: (performanceReadbacksEnabled) => set({ performanceReadbacksEnabled }),
 }));

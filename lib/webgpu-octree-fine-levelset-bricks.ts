@@ -4,13 +4,12 @@ import {
   type FineLevelSetGPUGenerationData,
 } from "./octree-fine-levelset-bricks";
 
-/** GPU-resident mirror of one domain-global fine level-set generation. */
+/** GPU-resident authority for one domain-global fine level-set generation. */
 export interface WebGPUFineLevelSetBrickSource {
   plan: FineLevelSetBrickPlan;
   generation: number;
   generationSlot: 0 | 1;
   params: GPUBuffer;
-  hash: GPUBuffer;
   metadata: GPUBuffer;
   worklist: GPUBuffer;
   flags: GPUBuffer;
@@ -20,12 +19,12 @@ export interface WebGPUFineLevelSetBrickSource {
   /**
    * Transactional copy of the last published signed phi. Topology rollback
    * must not alias either work buffer: transport uses workA and the Section 5
-   * fast march uses both workA (distance) and workB (page requests).
+   * JFA-CPT uses both work channels for closest-point ping-pong.
    */
   rollbackPhi: GPUBuffer;
   /** GPU-published compact coarse-octree phi directory used outside fine validity. */
   coarsePhiDirectory?: GPUBuffer;
-  coarsePhiHashCapacity?: number;
+  coarsePhiRowCapacity?: number;
   /** Publication provenance; consumers use topology control only to validate coarse/fine epoch pairing. */
   topologyControl?: GPUBuffer;
   /** Diagnostic-only seed transaction control. */
@@ -49,20 +48,19 @@ function uploadArray(queue: GPUQueue, target: GPUBuffer, data: ArrayBufferView<A
 }
 
 /**
- * Owns two bounded hash/metadata generations and one capacity-checked payload
+ * Owns two sorted worklist/metadata generations and one capacity-checked payload
  * pool.  Publishing to a slot is explicit; callers must retire command buffers
  * that reference an old slot before repurposing an old-only physical page.
  */
 export class WebGPUFineLevelSetBricks {
   readonly plan: FineLevelSetBrickPlan;
-  /** Payload/page-table plan plus both persistent 80-byte parameter blocks. */
+  /** Payload/directory plan plus both persistent 80-byte parameter blocks. */
   readonly allocatedBytes: number;
   readonly flags: GPUBuffer;
   readonly phi: GPUBuffer;
   readonly workA: GPUBuffer;
   readonly workB: GPUBuffer;
   readonly rollbackPhi: GPUBuffer;
-  readonly hashes: readonly [GPUBuffer, GPUBuffer];
   readonly metadata: readonly [GPUBuffer, GPUBuffer];
   readonly worklists: readonly [GPUBuffer, GPUBuffer];
   readonly params: readonly [GPUBuffer, GPUBuffer];
@@ -72,7 +70,7 @@ export class WebGPUFineLevelSetBricks {
     this.plan = plan;
     const sampleWords = plan.maximumResidentBricks * plan.samplesPerBrick;
     // `plan.allocatedBytes` contains the four paper-facing payload channels
-    // (flags, phi, and two fast-march work channels). Rollback is a separate
+    // (flags, phi, and two closest-point work channels). Rollback is a separate
     // publication-transaction cost, shared by both A/B page-table slots.
     this.allocatedBytes = plan.allocatedBytes + sampleWords * 4 + 2 * 80;
     this.flags = storageBuffer(device, sampleWords * 4, "fine-levelset flags");
@@ -80,10 +78,6 @@ export class WebGPUFineLevelSetBricks {
     this.workA = storageBuffer(device, sampleWords * 4, "fine-levelset work A");
     this.workB = storageBuffer(device, sampleWords * 4, "fine-levelset work B");
     this.rollbackPhi = storageBuffer(device, sampleWords * 4, "fine-levelset signed-phi rollback snapshot");
-    this.hashes = [
-      storageBuffer(device, plan.hashCapacity * 8, "fine-levelset hash generation 0"),
-      storageBuffer(device, plan.hashCapacity * 8, "fine-levelset hash generation 1"),
-    ];
     this.metadata = [
       storageBuffer(device, plan.maximumResidentBricks * 40, "fine-levelset metadata generation 0"),
       storageBuffer(device, plan.maximumResidentBricks * 40, "fine-levelset metadata generation 1"),
@@ -107,7 +101,6 @@ export class WebGPUFineLevelSetBricks {
       throw new RangeError("Fine level-set GPU publication exceeds capacity or has a mismatched worklist");
     }
     const sampleWords = this.plan.maximumResidentBricks * this.plan.samplesPerBrick;
-    assertLength(data.hashPairs.length, this.plan.hashCapacity * 2, "Fine level-set hash");
     assertLength(data.metadataWords.length, this.plan.maximumResidentBricks * 10, "Fine level-set metadata");
     assertLength(data.worklistWords.length, 5 + this.plan.maximumResidentBricks, "Fine level-set worklist");
     assertLength(data.flags.length, sampleWords, "Fine level-set flags");
@@ -117,7 +110,6 @@ export class WebGPUFineLevelSetBricks {
     const slot = (data.generation & 1) as 0 | 1;
     const parameterBytes = this.parameterBytes(data.generation, data.activeCount);
     this.device.queue.writeBuffer(this.params[slot], 0, parameterBytes);
-    uploadArray(this.device.queue, this.hashes[slot], data.hashPairs);
     uploadArray(this.device.queue, this.metadata[slot], data.metadataWords);
     uploadArray(this.device.queue, this.worklists[slot], data.worklistWords);
     uploadArray(this.device.queue, this.flags, data.flags);
@@ -156,7 +148,7 @@ export class WebGPUFineLevelSetBricks {
       throw new RangeError("Fine level-set generation parity must match its page-table slot");
     }
     if (source.plan !== this.plan || source.params !== this.params[slot]
-      || source.hash !== this.hashes[slot] || source.metadata !== this.metadata[slot]
+      || source.metadata !== this.metadata[slot]
       || source.worklist !== this.worklists[slot] || source.flags !== this.flags
       || source.phi !== this.phi || source.workA !== this.workA || source.workB !== this.workB
       || source.rollbackPhi !== this.rollbackPhi) {
@@ -167,14 +159,16 @@ export class WebGPUFineLevelSetBricks {
     source.generation = generation;
   }
 
-  /** Empty hash/worklist bootstrap; contains no CPU-authored surface samples. */
+  /** Empty valid worklist bootstrap; contains no CPU-authored surface samples. */
   initializeEmptyGPUGeneration(generation: number): WebGPUFineLevelSetBrickSource {
     const source = this.prepareGPUGeneration(generation);
-    const emptyHash = new Uint32Array(this.plan.hashCapacity * 2).fill(FINE_LEVELSET_INVALID);
     const emptyMetadata = new Uint32Array(this.plan.maximumResidentBricks * 10).fill(FINE_LEVELSET_INVALID);
-    uploadArray(this.device.queue, source.hash, emptyHash);
     uploadArray(this.device.queue, source.metadata, emptyMetadata);
-    this.device.queue.writeBuffer(source.worklist, 0, new Uint32Array(5 + this.plan.maximumResidentBricks));
+    const emptyWorklist = new Uint32Array(5 + this.plan.maximumResidentBricks);
+    emptyWorklist[1] = generation;
+    emptyWorklist[3] = 1;
+    emptyWorklist[4] = 1;
+    this.device.queue.writeBuffer(source.worklist, 0, emptyWorklist);
     return source;
   }
 
@@ -188,8 +182,8 @@ export class WebGPUFineLevelSetBricks {
     u32[7] = this.plan.samplesPerBrick;
     f32.set(this.plan.domainOrigin, 8);
     f32[11] = this.plan.fineCellWidth;
-    u32[12] = this.plan.hashCapacity;
-    u32[13] = this.plan.maximumHashProbes;
+    u32[12] = this.plan.maximumResidentBricks;
+    u32[13] = 5;
     u32[14] = this.plan.maximumResidentBricks;
     u32[15] = generation;
     u32[16] = activeCount;
@@ -203,7 +197,7 @@ export class WebGPUFineLevelSetBricks {
     const generation = this.generations[slot];
     if (generation === 0) throw new RangeError(`Fine level-set generation slot ${slot} has not been published`);
     return {
-      plan: this.plan, generation, generationSlot: slot, params: this.params[slot], hash: this.hashes[slot],
+      plan: this.plan, generation, generationSlot: slot, params: this.params[slot],
       metadata: this.metadata[slot], worklist: this.worklists[slot], flags: this.flags,
       phi: this.phi, workA: this.workA, workB: this.workB, rollbackPhi: this.rollbackPhi,
     };
@@ -218,8 +212,35 @@ export class WebGPUFineLevelSetBricks {
 
   destroy(): void {
     this.flags.destroy(); this.phi.destroy(); this.workA.destroy(); this.workB.destroy(); this.rollbackPhi.destroy();
-    for (const buffer of [...this.hashes, ...this.metadata, ...this.worklists, ...this.params]) buffer.destroy();
+    for (const buffer of [...this.metadata, ...this.worklists, ...this.params]) buffer.destroy();
   }
+}
+
+/** Exact lookup shared by every global-fine consumer.
+ * The five-word publication header is validated before a bounded lower_bound
+ * over IDs sorted by `metadata[id * 10 + 1]`. */
+export function makeFineLevelSetSortedWorklistLookupWGSL(
+  params: string,
+  metadata: string,
+  worklist: string,
+  functionName = "lookupFineBrick",
+): string {
+  return /* wgsl */ `
+fn ${functionName}(key:u32)->u32 {
+  if(${params}.worklistHeaderWords!=5u||arrayLength(&${worklist})<5u||${worklist}[1]!=${params}.generation
+    ||${worklist}[3]!=1u||${worklist}[4]!=1u){return INVALID;}
+  let count=min(${worklist}[0],min(${params}.worklistCapacity,${params}.pageCapacity));
+  if(5u+count>arrayLength(&${worklist})){return INVALID;}var low=0u;var high=count;
+  for(var step=0u;step<32u&&low<high;step+=1u){
+    let middle=low+(high-low)/2u;let physicalId=${worklist}[5u+middle];let base=physicalId*10u;
+    if(physicalId>=${params}.pageCapacity||base+2u>=arrayLength(&${metadata})
+      ||${metadata}[base]!=physicalId||${metadata}[base+2u]!=${params}.generation){return INVALID;}
+    if(${metadata}[base+1u]<key){low=middle+1u;}else{high=middle;}
+  }
+  if(low>=count){return INVALID;}let physicalId=${worklist}[5u+low];let base=physicalId*10u;
+  return select(INVALID,physicalId,physicalId<${params}.pageCapacity&&base+2u<arrayLength(&${metadata})
+    &&${metadata}[base]==physicalId&&${metadata}[base+1u]==key&&${metadata}[base+2u]==${params}.generation);
+}`;
 }
 
 /**
@@ -238,8 +259,8 @@ struct Params {
   samplesPerBrick:u32,
   domainOrigin:vec3f,
   fineCellWidth:f32,
-  hashCapacity:u32,
-  maximumHashProbes:u32,
+  worklistCapacity:u32,
+  worklistHeaderWords:u32,
   pageCapacity:u32,
   generation:u32,
   activeCount:u32,
@@ -251,35 +272,16 @@ struct Query { position:vec3f, coarsePhi:f32 }
 struct Result { phi:f32, found:u32, physicalId:u32, localIndex:u32 }
 
 @group(0) @binding(0) var<uniform> params:Params;
-@group(0) @binding(1) var<storage,read> pageHash:array<u32>;
+@group(0) @binding(1) var<storage,read> worklist:array<u32>;
 @group(0) @binding(2) var<storage,read> metadata:array<u32>;
 @group(0) @binding(3) var<storage,read> sampleFlags:array<u32>;
 @group(0) @binding(4) var<storage,read> phi:array<f32>;
 @group(0) @binding(5) var<storage,read> queries:array<Query>;
 @group(0) @binding(6) var<storage,read_write> results:array<Result>;
 
-fn hashKey(key:u32)->u32 {
-  return ((key^(key>>16u))*0x9e3779b1u)&(params.hashCapacity-1u);
-}
+${makeFineLevelSetSortedWorklistLookupWGSL("params", "metadata", "worklist", "lookupBrick")}
 fn packBrick(coord:vec3u)->u32 {
   return coord.x+params.brickDimensions.x*(coord.y+params.brickDimensions.y*coord.z);
-}
-fn lookupBrick(key:u32)->u32 {
-  let start=hashKey(key);
-  for(var probe=0u;probe<32u;probe+=1u) {
-    if(probe>=params.maximumHashProbes){break;}
-    let slot=(start+probe)&(params.hashCapacity-1u);
-    let stored=pageHash[slot*2u];
-    if(stored==key){
-      let physicalId=pageHash[slot*2u+1u];
-      if(physicalId>=params.pageCapacity){return INVALID;}
-      let base=physicalId*10u;
-      if(metadata[base]!=physicalId||metadata[base+1u]!=key||metadata[base+2u]!=params.generation){return INVALID;}
-      return physicalId;
-    }
-    if(stored==INVALID){return INVALID;}
-  }
-  return INVALID;
 }
 fn sampleFine(position:vec3f,coarsePhi:f32)->Result {
   let relative=(position-params.domainOrigin)/params.fineCellWidth;

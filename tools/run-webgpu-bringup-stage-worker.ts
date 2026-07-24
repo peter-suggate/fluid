@@ -4,7 +4,7 @@ import { initializeRigidBodies } from "../lib/rigid-body";
 import type { GPUInitializationProgress, GPUSolverInstance, MethodParamValues } from "../lib/methods/types";
 import { octreeMethod } from "../lib/methods/octree";
 import { viewportFailureIndicator } from "../lib/viewport-failure-diagnostics";
-import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { createSmokeScenario, isSmokeScenarioId } from "./webgpu-smoke-scenarios";
 import {
   parseWebGPUBringupStage,
@@ -45,11 +45,11 @@ async function assertComputeSentinel(device: GPUDevice): Promise<number> {
   const output = device.createBuffer({ label: "Bring-up compute sentinel", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const readback = device.createBuffer({ label: "Bring-up compute sentinel readback", size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   try {
-    const module = device.createShaderModule({
+    const shaderModule = device.createShaderModule({
       label: "Bring-up compute sentinel",
       code: "@group(0) @binding(0) var<storage, read_write> output: array<u32>; @compute @workgroup_size(1) fn sentinel() { output[0] = 0x4f435452u; }",
     });
-    const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "sentinel" } });
+    const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: shaderModule, entryPoint: "sentinel" } });
     const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: output } }] });
     const encoder = device.createCommandEncoder({ label: "Bring-up compute sentinel" });
     const pass = encoder.beginComputePass();
@@ -90,8 +90,7 @@ try {
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("Dawn did not expose a WebGPU adapter");
   const requiredFeatures: GPUFeatureName[] = [
-    ...(adapter.features.has("timestamp-query") && process.env.FLUID_DISABLE_TIMESTAMPS !== "1" ? ["timestamp-query" as GPUFeatureName] : []),
-    ...optionalFluidDeviceFeatures(adapter.features),
+    ...(adapter.features.has("timestamp-query") ? ["timestamp-query" as GPUFeatureName] : []),
   ];
   device = await adapter.requestDevice({ requiredFeatures, requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
   void device.lost.then((info) => { lost = info; });
@@ -117,10 +116,6 @@ try {
         if (stage === "solver-resources" && reachedSolverResourceBoundary(snapshot)) throw new SolverResourceBoundary();
       };
       try {
-        // The UI's safe startup fences every authority phase. Dawn must use
-        // the identical ordering or a browser-only initialization defect can
-        // hide inside the combined-command-buffer product path.
-        process.env.FLUID_SAFE_BRINGUP = "1";
         solver = await octreeMethod.createSolverAsync!(device, scenario.scene, "balanced", solverValues(), undefined, progress);
       } catch (error) {
         if (!(error instanceof SolverResourceBoundary)) throw error;

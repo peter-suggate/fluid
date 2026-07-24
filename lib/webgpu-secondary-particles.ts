@@ -806,20 +806,14 @@ export class WebGPUSecondaryParticleSystem {
     this.writeParameters(dt, source);
   }
 
-  encode(encoder: GPUCommandEncoder, timestampWrites?: GPUComputePassTimestampWrites) {
+  encode(encoder: GPUCommandEncoder) {
     if (!this.updatePipeline || !this.spawnPipeline) return;
-    const update = encoder.beginComputePass({
-      label: "Advect spray droplets",
-      ...(timestampWrites?.beginningOfPassWriteIndex !== undefined ? { timestampWrites: { querySet: timestampWrites.querySet, beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex } } : {})
-    });
+    const update = encoder.beginComputePass({ label: "Advect spray droplets" });
     update.setPipeline(this.updatePipeline);
     update.setBindGroup(0, this.bindGroup);
     update.dispatchWorkgroups(Math.ceil(this.renderSource.capacity / 64));
     update.end();
-    const spawn = encoder.beginComputePass({
-      label: "Seed escaped spray droplets",
-      ...(timestampWrites?.endOfPassWriteIndex !== undefined ? { timestampWrites: { querySet: timestampWrites.querySet, endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex } } : {})
-    });
+    const spawn = encoder.beginComputePass({ label: "Seed escaped spray droplets" });
     spawn.setPipeline(this.spawnPipeline);
     spawn.setBindGroup(0, this.bindGroup);
     spawn.dispatchWorkgroups(Math.ceil(this.grid.nx / 4), Math.ceil(this.grid.ny / 4), Math.ceil(this.grid.nz / 4));

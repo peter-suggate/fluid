@@ -3,7 +3,12 @@
 import { FINE_LEVELSET_SAMPLE_FLAGS, type FineLevelSetBrickOracle,
   unpackFineLevelSetBrickKey } from "./octree-fine-levelset-bricks";
 import type { OctreeCoarsePhiLeaf } from "./octree-coarse-levelset";
-import type { OctreeFinePhiContribution } from "./webgpu-octree-coarse-levelset";
+
+export interface OctreeFinePhiContribution {
+  readonly phi: number;
+  readonly distanceSquared: number;
+  readonly valid?: boolean;
+}
 
 export interface FineToCoarsePhiCSR {
   readonly rowOffsets: Uint32Array;

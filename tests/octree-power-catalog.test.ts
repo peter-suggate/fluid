@@ -139,6 +139,7 @@ test("generated exhaustive catalog decodes within the fixed budget and proven bo
   assert.equal(views.sameOrFinerDirect.length, 1 << 18);
   assert.equal(views.sameOrCoarserDirect.length, 1 << 9);
   assert.equal(views.tetrahedronHeaders.length, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount * 3);
+  assert.equal(views.coefficientData.length, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount * 19);
   assert.ok(views.tetrahedronData.length > 0);
   assert.equal(views.tetrahedronVertexData.length, 75 * 4);
   assert.ok([...views.sameOrFinerDirect].every((packed) => packed !== 0xffff_ffff

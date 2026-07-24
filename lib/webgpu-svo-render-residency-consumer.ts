@@ -383,7 +383,8 @@ export class WebGPUSvoRenderResidencyConsumer {
     this.layout = svoRenderResidencyConsumerLayout(options.capacity);
     const make = (label: string, size: number, usage: GPUBufferUsageFlags) => device.createBuffer({ label, size, usage });
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-    this.control = make("SVO renderer residency counters and indirect dispatches", this.layout.controlByteLength, storage | GPUBufferUsage.INDIRECT);
+    this.control = make("SVO renderer residency counters and dispatch publication", this.layout.controlByteLength,
+      storage);
     this.entries = make("SVO renderer residency compact requests and releases", this.layout.entryByteLength, storage);
     this.seenAttempt = make("SVO renderer residency duplicate stamps", (sourceCapacity + structural.capacities.leaves) * 4, storage);
     this.dispatch = make("SVO renderer residency input dispatch staging", 24, GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST);

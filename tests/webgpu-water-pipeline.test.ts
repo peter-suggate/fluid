@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { OCTREE_SURFACE_LEAF_RECORD_BYTES } from "../lib/webgpu-octree-surface-pages";
 import {
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES,
 } from "../lib/webgpu-octree-power-coarse-levelset";
-import { SPARSE_SURFACE_CONTROL_BYTES } from "../lib/webgpu-sparse-surface-band";
 import {
   activeCubeCapacity,
   compositeShader,
@@ -16,11 +14,10 @@ import {
   shouldResolveRigidContact,
   shouldUpdateWaterSurface,
   surfaceExtractionDispatchPlan,
-  surfaceExtractionRepresentation,
   surfaceExtractionShader,
   surfaceRasterShader,
   surfaceVertexCapacity,
-  WATER_SPARSE_FALLBACK_BYTES,
+  WATER_DISABLED_STORAGE_BYTES,
   WATER_INTERFACE_CULL_MODES
 } from "../lib/webgpu-water-pipeline";
 
@@ -39,8 +36,10 @@ test("the optical composite locally refines rigid contacts and terminates water 
   assert.match(compositeShader, /opaqueSolidExit=true/, "refracted water rays terminate on submerged rigid bodies");
   assert.match(compositeShader, /var liquidField:texture_3d<f32>/);
   assert.match(compositeShader, /var<storage,read> bodies:array<BodyGPU,12>/);
-  assert.match(compositeShader, /if\(!adaptiveSurface&&u\.gridInfo\.w>/,
-    "adaptive presentation must not read the dense contact field");
+  assert.match(compositeShader, /if\(u\.gridInfo\.w>/,
+    "octree presentation must gate dense contact refinement");
+  assert.doesNotMatch(compositeShader, /adaptiveSurface/,
+    "the deleted page renderer must not leave a presentation switch behind");
 });
 
 test("outward water triangles preserve camera-entry interfaces after framebuffer Y inversion", () => {
@@ -98,48 +97,31 @@ test("extraction is split into a lean classify sweep and a compacted polygonise 
   assert.match(surfaceExtractionShader, new RegExp(`@compute @workgroup_size\\(${EXTRACTION_POLYGONISE_WORKGROUP}\\)\\s*\\nfn polygoniseMain`));
 });
 
-test("adaptive octree pages drive the production mesh without a dense publication sweep", () => {
-  assert.match(surfaceExtractionShader, /fn extractAdaptiveMain/);
-  assert.match(surfaceExtractionShader, /fn extractAdaptiveLeafMain/);
-  assert.match(surfaceExtractionShader, /adaptiveArena\[adaptiveParams\.offsets1\.x\+4u\+item\]/);
-  assert.match(surfaceExtractionShader, /adaptiveLeafOrigin\(leaf\)\*resolution\+local/);
-  assert.match(surfaceExtractionShader, /classifyCubeScaled\(vec3i\(adaptiveLeafOrigin\(leaf\)\*resolution\),max\(1u,leaf\.size\*resolution\)\)/);
-  const leafExtraction = surfaceExtractionShader.match(/fn extractAdaptiveLeafMain[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(leafExtraction, /\(leaf\.flags&32u\)==0u/,
-    "all live affine leaves are presentation-authoritative even without a CORE residency hint");
-  assert.doesNotMatch(leafExtraction, /leaf\.flags&2u/);
-  assert.equal(surfaceExtractionRepresentation(true, true), "adaptive-octree");
-  assert.equal(surfaceExtractionRepresentation(false, true), "sparse-band");
-  assert.equal(surfaceExtractionRepresentation(false, false), "dense-texture");
-  assert.doesNotMatch(surfaceExtractionShader.match(/fn extractAdaptiveMain[\s\S]*?\n\}/)?.[0] ?? "", /textureLoad\(volume/);
-  assert.match(surfaceExtractionShader, /activeCubes: array<vec2u>/, "adaptive owner propagation must retain the 8-byte worklist record");
-  assert.match(surfaceExtractionShader, /adaptiveOwnerRow = \(packedCube\.x >> 26u\)/, "polygonisation must restore the classifier's owner row from the existing record");
+test("the deleted row-attached page renderer has no shader or class fallback", () => {
+  const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(surfaceExtractionShader,
+    /extractAdaptive|adaptiveArena|adaptiveParams|adaptiveLeaf|adaptiveOwnerRow/);
+  assert.doesNotMatch(source, /setAdaptiveOctree|adaptiveSurface|octreeSurfacePages/);
 });
 
-test("disabled water storage satisfies sparse-control, adaptive-leaf, and coarse-directory ABIs", () => {
-  assert.equal(SPARSE_SURFACE_CONTROL_BYTES, 16 * 4,
-    "the real allocator control and its stats readback publish sixteen words");
-  assert.equal(OCTREE_SURFACE_LEAF_RECORD_BYTES, 64,
-    "one adaptive leaf contains eight scalar words plus phi and motion vec4s");
+test("disabled water storage satisfies only the compact coarse-directory ABI", () => {
   assert.equal(
     OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES
       + OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
     64,
     "the compact coarse directory requires its header and at least one runtime-sized entry",
   );
-  assert.equal(WATER_SPARSE_FALLBACK_BYTES,
+  assert.equal(WATER_DISABLED_STORAGE_BYTES,
     Math.max(
-      SPARSE_SURFACE_CONTROL_BYTES,
-      OCTREE_SURFACE_LEAF_RECORD_BYTES,
+      64,
       OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES
         + OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
     ));
   const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
   assert.match(source,
-    /Water sparse-control fallback"\s*,\s*size:\s*WATER_SPARSE_FALLBACK_BYTES/,
-    "the buffer bound at adaptive-leaf binding 13 must not retain the obsolete 48-byte record size");
-  assert.match(source,
-    /binding:\s*13,\s*resource:\s*adaptive\?\.leaves\s*\?\?\s*\{\s*buffer:\s*this\.fallbackSparseControl\s*\}/);
+    /Water disabled storage binding"\s*,\s*size:\s*WATER_DISABLED_STORAGE_BYTES/,
+    "the optional coarse directory must have a valid disabled binding");
+  assert.doesNotMatch(source, /OCTREE_FINE_SEED_LEAF_RECORD_BYTES|adaptive\?\.leaves/);
 });
 
 test("the prepare kernel sizes the indirect polygonise dispatch from the worklist", () => {
@@ -147,6 +129,39 @@ test("the prepare kernel sizes the indirect polygonise dispatch from the worklis
   assert.match(extractionPrepareShader, /@workgroup_size\(1\)/);
   assert.match(extractionPrepareShader, new RegExp(`\\+ ${EXTRACTION_POLYGONISE_WORKGROUP - 1}u\\) / ${EXTRACTION_POLYGONISE_WORKGROUP}u`), "ceiling division must match the polygonise workgroup size");
   assert.match(extractionPrepareShader, /min\(drawArgs\.activeCubeCount, arrayLength\(&activeCubes\)\)/, "an overflowing worklist must clamp instead of dispatching past the buffer");
+  assert.doesNotMatch(extractionPrepareShader, /globalFineAuthorityLatch/,
+    "the generic prepare kernel must not retain a zero-work global-fine switch");
+  const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8")
+    .replace(/\s+/g, "");
+  const scopeBoundary = source.indexOf("constprepareAndPolygonise=");
+  assert.ok(scopeBoundary >= 0);
+  const helper = source.slice(scopeBoundary, source.indexOf("constglobalFine=", scopeBoundary));
+  assert.match(helper,
+    /compute\.setPipeline\(this\.preparePipeline!\)[\s\S]*compute\.dispatchWorkgroups\(1\);compute\.end\(\);compute=encoder\.beginComputePass/,
+    "writable polygonise preparation must end its usage scope before indirect consumption");
+  assert.match(helper,
+    /compute\.dispatchWorkgroupsIndirect\(this\.polygoniseDispatchBuffer!,0\)/);
+});
+
+test("global-fine presentation compiles and encodes only the combined mesh path", () => {
+  const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8")
+    .replace(/\s+/g, "");
+  assert.doesNotMatch(source, /globalFineClassifiedEmitShaders|polygoniseGlobalFineEmitPipelines/,
+    "the six unused per-tetrahedron modules and pipelines must stay deleted");
+  assert.match(source, /consttotal=15/,
+    "pipeline progress must count only the fifteen pipelines that are actually constructed");
+
+  const globalStart = source.indexOf("if(globalFine){");
+  const volumeStart = source.indexOf("}else{", globalStart);
+  const extractionEnd = source.indexOf("this.encodeSurfaceDiagnostics(encoder)", volumeStart);
+  assert.ok(globalStart >= 0 && volumeStart > globalStart && extractionEnd > volumeStart);
+  const globalBranch = source.slice(globalStart, volumeStart);
+  assert.match(globalBranch, /polygoniseGlobalFineScanPipeline/);
+  assert.match(globalBranch, /polygoniseGlobalFineEmitPipeline/);
+  assert.doesNotMatch(globalBranch, /prepareAndPolygonise|preparePipeline|dispatchWorkgroupsIndirect/,
+    "global-fine authority must end after its direct scan/emit path");
+  assert.match(source.slice(volumeStart, extractionEnd), /prepareAndPolygonise\(this\.polygonisePipeline,this\.extractBindGroup\)/,
+    "the generic volume representation must retain its indirect polygonise path");
 });
 
 test("buffer capacities keep the worklist aligned with the vertex allocation", () => {

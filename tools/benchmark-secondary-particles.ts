@@ -4,6 +4,7 @@ import {
   SecondaryParticleRenderPipeline,
   type GPUSecondaryParticleSource
 } from "../lib/webgpu-secondary-particles";
+import { DynamicGPUPerformanceTraceRecorder } from "../lib/performance-trace";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
@@ -21,7 +22,7 @@ const width = Math.max(64, Number(process.env.FLUID_SPRAY_WIDTH ?? 1280));
 const height = Math.max(64, Number(process.env.FLUID_SPRAY_HEIGHT ?? 720));
 const capacity = Math.max(1, Math.min(65_536, Number(process.env.FLUID_SPRAY_CAPACITY ?? 16_384)));
 const activeFraction = Math.max(0, Math.min(1, Number(process.env.FLUID_SPRAY_ACTIVE_FRACTION ?? 1)));
-const iterations = Math.max(10, Number(process.env.FLUID_SPRAY_ITERATIONS ?? 120));
+const iterations = Math.max(10, Math.round(Number(process.env.FLUID_SPRAY_ITERATIONS ?? 120)));
 const shapeMode = process.env.FLUID_SPRAY_SHAPE === "sphere" ? "sphere" : "ellipsoid";
 const activeCount = Math.floor(capacity * activeFraction);
 
@@ -106,14 +107,13 @@ const normal = device.createTexture({ size: [width, height], format: "rgba16floa
 const depth = device.createTexture({ size: [width, height], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
 const positionView = position.createView(), normalView = normal.createView(), depthView = depth.createView();
 
-function encodeSide(encoder: GPUCommandEncoder, side: "front" | "back", timestampWrites?: GPURenderPassTimestampWrites) {
+function encodeSide(encoder: GPUCommandEncoder, side: "front" | "back") {
   const pass = encoder.beginRenderPass({
     colorAttachments: [
       { view: positionView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
       { view: normalView, clearValue: { r: 0, g: 1, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }
     ],
-    depthStencilAttachment: { view: depthView, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
-    ...(timestampWrites ? { timestampWrites } : {})
+    depthStencilAttachment: { view: depthView, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" }
   });
   if (shapeMode === "ellipsoid") pipeline.encodeOpticalInterface(pass, side);
   else {
@@ -132,25 +132,29 @@ for (let warmup = 0; warmup < 12; warmup += 1) {
 }
 await device.queue.onSubmittedWorkDone();
 
-const querySet = device.createQuerySet({ type: "timestamp", count: iterations * 4 });
-const resolve = device.createBuffer({ size: iterations * 4 * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-const readback = device.createBuffer({ size: iterations * 4 * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
 const encoder = device.createCommandEncoder();
+const recorder = new DynamicGPUPerformanceTraceRecorder(
+  device,
+  1,
+  "presentation",
+  `secondary-particles:${shapeMode}:${width}x${height}:${activeCount}`,
+  iterations * 2 + 1,
+);
+recorder.begin(encoder);
 for (let iteration = 0; iteration < iterations; iteration += 1) {
-  const query = iteration * 4;
-  encodeSide(encoder, "front", { querySet, beginningOfPassWriteIndex: query, endOfPassWriteIndex: query + 1 });
-  encodeSide(encoder, "back", { querySet, beginningOfPassWriteIndex: query + 2, endOfPassWriteIndex: query + 3 });
+  encodeSide(encoder, "front");
+  recorder.completePhase(encoder, { id: "water-interfaces", label: `Particle front interface ${iteration + 1}` });
+  encodeSide(encoder, "back");
+  recorder.completePhase(encoder, { id: "water-interfaces", label: `Particle back interface ${iteration + 1}` });
 }
-encoder.resolveQuerySet(querySet, 0, iterations * 4, resolve, 0);
-encoder.copyBufferToBuffer(resolve, 0, readback, 0, iterations * 4 * 8);
+recorder.resolve(encoder);
 device.queue.submit([encoder.finish()]);
-await readback.mapAsync(GPUMapMode.READ);
-const timestamps = new BigUint64Array(readback.getMappedRange());
+const trace = await recorder.read();
+if (!trace) throw new Error("Generic particle presentation trace did not resolve");
 const front: number[] = [], back: number[] = [], total: number[] = [];
 for (let iteration = 0; iteration < iterations; iteration += 1) {
-  const query = iteration * 4;
-  const front_ms = Number(timestamps[query + 1] - timestamps[query]) / 1e6;
-  const back_ms = Number(timestamps[query + 3] - timestamps[query + 2]) / 1e6;
+  const front_ms = trace.phases[iteration * 2].duration_ms;
+  const back_ms = trace.phases[iteration * 2 + 1].duration_ms;
   front.push(front_ms); back.push(back_ms); total.push(front_ms + back_ms);
 }
 const summary = (samples: number[]) => {
@@ -163,9 +167,9 @@ console.log(JSON.stringify({
   resolution: [width, height], capacity, activeCount, iterations, shapeMode,
   particleStrideBytes: SECONDARY_PARTICLE_STRIDE_BYTES,
   particleStorageMiB: particleFloats.byteLength / (1024 * 1024),
-  front: summary(front), back: summary(back), combined: summary(total)
+  front: summary(front), back: summary(back), combined: summary(total),
+  performanceTrace: trace,
 }, null, 2));
 
-readback.unmap();
-for (const resource of [readback, resolve, querySet, position, normal, depth, particleBuffer, uniformBuffer]) resource.destroy();
+for (const resource of [position, normal, depth, particleBuffer, uniformBuffer]) resource.destroy();
 device.destroy();

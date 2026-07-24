@@ -74,23 +74,18 @@ test("uniform capillary force skips zero-gradient bulk cells and reuses centre c
     "the expensive centre curvature stencil should be shared by all three faces");
 });
 
-test("shared force kernel subtracts only a fixed vertical rest-surface reference", () => {
+test("shared force kernel has one gravity and occupancy path", () => {
   const occupancy = legacyUniformComputeShader.slice(
     legacyUniformComputeShader.indexOf("fn buildOccupancy"),
-    legacyUniformComputeShader.indexOf("fn buildSparseOccupancy"),
+    legacyUniformComputeShader.indexOf("fn nearInflow"),
   );
-  assert.match(occupancy, /if\(!hydrostaticSplit\(\)\)/);
   assert.match(occupancy, /for\(var y:i32=d\.y-1;y>=0;y-=1\)/,
     "the ordinary path should retain its cheap top-down early exit");
   const forces = legacyUniformComputeShader.slice(
     legacyUniformComputeShader.indexOf("fn applyVelocityForces"),
     legacyUniformComputeShader.indexOf("@compute @workgroup_size(4,4,4)\nfn buildTransport"),
   );
-  assert.match(legacyUniformComputeShader, /fn fixedHydrostaticPotentialAtY\(yCells:f32\)/);
-  assert.match(legacyUniformComputeShader, /params\.inflowTiming\.z-yCells/);
-  assert.match(forces, /if\(hydrostaticSplit\(\)\)\{v\.y\+=fixedHydrostaticAcceleration\(id\)\*dt;\}/);
-  assert.match(forces, /else\{v\.y\+=params\.cellGravity\.w\*dt;\}/,
-    "the disabled path must not eagerly evaluate the connected-column reference");
-  assert.doesNotMatch(forces, /v\.[xz]\+=.*fixedHydrostatic/,
-    "the fixed datum must not inject a local free-surface-slope acceleration");
+  assert.match(forces, /if\(centerLiquid\|\|yLiquid\)\{v\.y\+=params\.cellGravity\.w\*dt;\}/);
+  assert.doesNotMatch(legacyUniformComputeShader,
+    /hydrostaticSplit|fixedHydrostatic|hydrostaticColumnContains/);
 });

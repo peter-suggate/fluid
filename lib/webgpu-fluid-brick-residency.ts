@@ -7,6 +7,7 @@
  * bricks are emitted to the worklist, and dry bricks retire after a short
  * hysteresis window.
  */
+import { PassBroker } from "./webgpu-pass-broker";
 
 export const FLUID_BRICK_RESIDENT = 1;
 export const FLUID_BRICK_CORE = 2;
@@ -76,15 +77,15 @@ export interface FluidBrickResidencyOptions {
    * valid: worklists/states are complete while bounded leaf publication is a
    * deliberate no-op for every nonzero identity leaf.
    */
-  surfaceCandidatesOnly?: boolean;
+  fineSeedCandidatesOnly?: boolean;
   /**
-   * Physical sparse-key slots retained by direct surface-candidate authority.
+   * Physical sparse-key slots retained by direct fine-seed-candidate authority.
    * Logical brick coordinates remain unchanged; exhaustion rejects the whole
    * candidate generation and preserves the previous publication.
    */
-  surfaceCandidateBrickCapacity?: number;
-  /** Sparse topology-tile key slots. See `surfaceCandidateBrickCapacity`. */
-  surfaceCandidateTileCapacity?: number;
+  fineSeedCandidateBrickCapacity?: number;
+  /** Sparse topology-tile key slots. See `fineSeedCandidateBrickCapacity`. */
+  fineSeedCandidateTileCapacity?: number;
 }
 
 export interface FluidBrickResidencyAllocationPlan {
@@ -92,7 +93,7 @@ export interface FluidBrickResidencyAllocationPlan {
   readonly tileCapacity: number;
   readonly leafCapacity: number;
   readonly identityMapping: "implicit" | "explicit";
-  readonly surfaceCandidatesOnly: boolean;
+  readonly fineSeedCandidatesOnly: boolean;
   readonly sparseKeyPools: boolean;
   readonly brickStateCapacity: number;
   readonly tileStateCapacity: number;
@@ -103,7 +104,7 @@ export interface FluidBrickResidencyAllocationPlan {
   readonly leafIndexBytes: number;
   readonly leafStateBytes: number;
   readonly parameterBytes: number;
-  /** A/B scratch state, worklists, and the GPU commit predicate. */
+  /** A/B scratch state and worklists. The tile header owns the commit predicate. */
   readonly transactionalBytes: number;
   readonly allocatedBytes: number;
   /** Bytes avoided by the sentinel-backed implicit identity mapping. */
@@ -129,9 +130,9 @@ export function planFluidBrickResidencyAllocation(
   tileDimensions: readonly [number, number, number],
   leafCapacity: number,
   explicitLeafMapping = false,
-  surfaceCandidatesOnly = false,
-  surfaceCandidateBrickCapacity?: number,
-  surfaceCandidateTileCapacity?: number,
+  fineSeedCandidatesOnly = false,
+  fineSeedCandidateBrickCapacity?: number,
+  fineSeedCandidateTileCapacity?: number,
 ): FluidBrickResidencyAllocationPlan {
   const volume = (value: readonly [number, number, number], label: string) => {
     value.forEach((component) => {
@@ -142,23 +143,23 @@ export function planFluidBrickResidencyAllocation(
   const brickCapacity = volume(brickDimensions, "Brick");
   const tileCapacity = volume(tileDimensions, "Topology tile");
   if (!Number.isSafeInteger(leafCapacity) || leafCapacity < 1) throw new RangeError("Leaf capacity must be a positive integer");
-  if (surfaceCandidatesOnly && explicitLeafMapping) {
-    throw new RangeError("Surface-candidate-only residency requires implicit brick/leaf identity");
+  if (fineSeedCandidatesOnly && explicitLeafMapping) {
+    throw new RangeError("Fine-seed-candidate-only residency requires implicit brick/leaf identity");
   }
-  const sparseKeyPools = surfaceCandidatesOnly && surfaceCandidateBrickCapacity !== undefined;
+  const sparseKeyPools = fineSeedCandidatesOnly && fineSeedCandidateBrickCapacity !== undefined;
   const sparseCapacity = (value: number | undefined, logical: number, label: string) => {
     if (value === undefined) return logical;
     if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} capacity must be a positive integer`);
     return Math.min(logical, value);
   };
-  if (surfaceCandidateTileCapacity !== undefined && !sparseKeyPools) {
-    throw new RangeError("Sparse tile capacity requires a sparse surface-candidate brick capacity");
+  if (fineSeedCandidateTileCapacity !== undefined && !sparseKeyPools) {
+    throw new RangeError("Sparse tile capacity requires a sparse fine-seed-candidate brick capacity");
   }
   const brickStateCapacity = sparseKeyPools
-    ? sparseCapacity(surfaceCandidateBrickCapacity, brickCapacity, "Surface-candidate brick") : brickCapacity;
+    ? sparseCapacity(fineSeedCandidateBrickCapacity, brickCapacity, "Fine-seed-candidate brick") : brickCapacity;
   const tileStateCapacity = sparseKeyPools
-    ? sparseCapacity(surfaceCandidateTileCapacity ?? brickStateCapacity * 27, tileCapacity,
-      "Surface-candidate topology tile") : tileCapacity;
+    ? sparseCapacity(fineSeedCandidateTileCapacity ?? brickStateCapacity * 27, tileCapacity,
+      "Fine-seed-candidate topology tile") : tileCapacity;
   // Sparse records store key-plus-one and lifecycle state. Dense compatibility
   // stores only the state because its array index is the logical key.
   const stateBytes = brickStateCapacity * (sparseKeyPools ? 8 : FLUID_BRICK_STATE_STRIDE_BYTES);
@@ -166,9 +167,9 @@ export function planFluidBrickResidencyAllocation(
   const tileWorklistBytes = (FLUID_TILE_WORKLIST_HEADER_WORDS + tileStateCapacity * 2) * 4;
   const tileStateBytes = tileStateCapacity * (sparseKeyPools ? 8 : 4);
   const leafIndexBytes = explicitLeafMapping ? brickCapacity * 4 : 4;
-  const leafStateBytes = surfaceCandidatesOnly ? 4 : leafCapacity * 4;
+  const leafStateBytes = fineSeedCandidatesOnly ? 4 : leafCapacity * 4;
   const parameterBytes = 64;
-  const transactionalBytes = stateBytes + worklistBytes + tileWorklistBytes + tileStateBytes + 16;
+  const transactionalBytes = stateBytes + worklistBytes + tileWorklistBytes + tileStateBytes;
   const allocatedBytes = stateBytes + worklistBytes + tileWorklistBytes + tileStateBytes
     + leafIndexBytes + leafStateBytes + parameterBytes + transactionalBytes;
   const denseSchedulerBytes = 2 * ((brickCapacity * 4
@@ -181,7 +182,7 @@ export function planFluidBrickResidencyAllocation(
     tileCapacity,
     leafCapacity,
     identityMapping: explicitLeafMapping ? "explicit" : "implicit",
-    surfaceCandidatesOnly,
+    fineSeedCandidatesOnly,
     sparseKeyPools,
     brickStateCapacity,
     tileStateCapacity,
@@ -195,7 +196,7 @@ export function planFluidBrickResidencyAllocation(
     transactionalBytes,
     allocatedBytes,
     savedIdentityBytes: explicitLeafMapping ? 0 : brickCapacity * 4 - 4,
-    savedLeafStateBytes: surfaceCandidatesOnly ? leafCapacity * 4 - 4 : 0,
+    savedLeafStateBytes: fineSeedCandidatesOnly ? leafCapacity * 4 - 4 : 0,
     savedSchedulerBytes: Math.max(0, -schedulerByteDelta),
     schedulerByteDelta,
   };
@@ -211,7 +212,7 @@ export interface FluidBrickResidencyStats {
   capacity: number;
 }
 
-export interface SurfaceCandidateResidencyPoolPlan {
+export interface FineSeedCandidateResidencyPoolPlan {
   readonly brickCapacity: number;
   readonly tileCapacity: number;
   readonly logicalBrickCount: number;
@@ -229,14 +230,14 @@ export interface SurfaceCandidateResidencyPoolPlan {
  * The active analytic t=0 tile count is an explicit lower bound so cold-start
  * authority cannot be truncated by the steady-state estimate.
  */
-export function planSurfaceCandidateResidencyPools(
+export function planFineSeedCandidateResidencyPools(
   brickDimensions: readonly [number, number, number],
   tileDimensions: readonly [number, number, number],
   brickSize: number,
   haloCells: number,
   producerRowCapacity: number,
   minimumTileCapacity = 1,
-): SurfaceCandidateResidencyPoolPlan {
+): FineSeedCandidateResidencyPoolPlan {
   const checkedVolume = (dims: readonly [number, number, number], label: string) => {
     if (!dims.every((value) => Number.isSafeInteger(value) && value > 0)) {
       throw new RangeError(`${label} dimensions must be positive integers`);
@@ -246,7 +247,7 @@ export function planSurfaceCandidateResidencyPools(
   if (!Number.isSafeInteger(brickSize) || brickSize < 1 || !Number.isFinite(haloCells) || haloCells < 0
     || !Number.isSafeInteger(producerRowCapacity) || producerRowCapacity < 1
     || !Number.isSafeInteger(minimumTileCapacity) || minimumTileCapacity < 0) {
-    throw new RangeError("Surface-candidate residency pool inputs are invalid");
+    throw new RangeError("Fine-seed-candidate residency pool inputs are invalid");
   }
   const logicalBrickCount = checkedVolume(brickDimensions, "Brick");
   const logicalTileCount = checkedVolume(tileDimensions, "Topology tile");
@@ -644,96 +645,219 @@ fn finalize() {
 }
 `;
 
-/**
- * Compact surface candidates -> legacy brick/tile scheduler ABI.
- *
- * All mutation is staged in candidate buffers. `commitSurfaceCandidates`
- * copies them into the stable publication only when the producer generation
- * is complete, newer, in-bounds, and fault-free. A valid zero-count producer
- * consequently commits an empty/retired generation, while failed zero-count
- * producers leave the previous worklists and both state tables untouched.
- */
-export const surfaceCandidateResidencyShader = /* wgsl */ `
+const fineSeedCandidateShaderPrelude = /* wgsl */ `
 struct Params { dimsBrick:vec4u, brickDimsCapacity:vec4u, settings:vec4f, tiling:vec4u }
-struct SurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
+struct FineSeedLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct Candidate { row:u32,flags:u32 }
 @group(0) @binding(0) var<storage,read> publishedStates:array<u32>;
-@group(0) @binding(1) var<storage,read_write> states:array<atomic<u32>>;
-@group(0) @binding(2) var<storage,read_write> worklist:array<atomic<u32>>;
+@group(0) @binding(1) var<storage,read_write> states:array<u32>;
+@group(0) @binding(2) var<storage,read_write> worklist:array<u32>;
 @group(0) @binding(3) var<storage,read> publishedTileStates:array<u32>;
-@group(0) @binding(4) var<storage,read_write> tileStates:array<atomic<u32>>;
-@group(0) @binding(5) var<storage,read_write> tileWorklist:array<atomic<u32>>;
-@group(0) @binding(6) var<storage,read> leaves:array<SurfaceLeaf>;
+@group(0) @binding(4) var<storage,read_write> tileStates:array<u32>;
+@group(0) @binding(5) var<storage,read_write> tileWorklist:array<u32>;
+@group(0) @binding(6) var<storage,read> leaves:array<FineSeedLeaf>;
 @group(0) @binding(7) var<storage,read> candidates:array<Candidate>;
 @group(0) @binding(8) var<storage,read> candidateControl:array<u32>;
-@group(0) @binding(9) var<storage,read_write> transaction:array<atomic<u32>>;
+@group(0) @binding(9) var<storage,read> publishedTileWorklist:array<u32>;
 @group(0) @binding(10) var<uniform> params:Params;
-const RESIDENT=1u;const CORE=2u;const HALO=4u;const ACTIVATED=8u;const LIVE=32u;const WAS_RESIDENT=32u;const HEADER=16u;const INVALID=0xffffffffu;
-fn origin(p:u32)->vec3u{return vec3u(p&1023u,(p>>10u)&1023u,(p>>20u)&1023u);}
+const RESIDENT=1u;const CORE=2u;const HALO=4u;const ACTIVATED=8u;const LIVE=32u;
+const WAS_RESIDENT=32u;const HEADER=16u;const INVALID=0xffffffffu;const COMMIT=0xc01117edu;
 fn dispatch2(n:u32)->vec2u{let x=min(n,65535u);return vec2u(x,select(1u,(n+x-1u)/x,x>0u));}
-fn producerAccepted()->bool{return candidateControl[5]==1u&&candidateControl[6]==0u&&candidateControl[7]==arrayLength(&candidates)&&candidateControl[4]>atomicLoad(&tileWorklist[15]);}
-@compute @workgroup_size(64) fn beginSurfaceCandidates(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;if(!producerAccepted()||i>=params.brickDimsCapacity.w){return;}let old=publishedStates[i];let was=(old&RESIDENT)!=0u;atomicStore(&states[i],select(0u,WAS_RESIDENT,was)|(min(0xffffu,(old>>16u)+1u)<<16u));}
-@compute @workgroup_size(64) fn beginPressureTiles(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;let cap=params.tiling.y*params.tiling.z*params.tiling.w;if(!producerAccepted()||i>=cap){return;}atomicStore(&tileStates[i],0u);}
-// Aanjaneya et al. (2017), Section 4.2: power faces can join octree edge
-// neighbours, so the active/ghost pressure pyramid needs the complete local
-// face-and-edge 1-ring. This pressure support is deliberately independent of
-// Section 5's narrower fine-phi brick set.
-@compute @workgroup_size(64) fn markPressureTiles(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;if(!producerAccepted()||row>=arrayLength(&leaves)){return;}let leaf=leaves[row];if((leaf.flags&LIVE)==0u||leaf.size==0u){return;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);if(any(a>=params.dimsBrick.xyz)){atomicStore(&transaction[0],9u);return;}let tileCells=params.dimsBrick.w*params.tiling.x;let td=vec3i(params.tiling.yzw);let first=vec3i(a/tileCells);let last=vec3i(min(params.dimsBrick.xyz-vec3u(1u),a+vec3u(leaf.size-1u))/tileCells);for(var tz=first.z-1;tz<=last.z+1;tz++){for(var ty=first.y-1;ty<=last.y+1;ty++){for(var tx=first.x-1;tx<=last.x+1;tx++){let q=vec3i(tx,ty,tz);if(any(q<vec3i(0))||any(q>=td)){continue;}let key=u32(q.x)+params.tiling.y*(u32(q.y)+params.tiling.z*u32(q.z));atomicStore(&tileStates[key],1u);}}}}
-@compute @workgroup_size(64) fn markSurfaceCandidates(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;if(!producerAccepted()||i>=candidateControl[0]){return;}if(i>=arrayLength(&candidates)){atomicStore(&transaction[0],1u);return;}let c=candidates[i];if(c.row>=arrayLength(&leaves)){atomicStore(&transaction[0],2u);return;}let leaf=leaves[c.row];if(leaf.size==0u){atomicStore(&transaction[0],3u);return;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);if(any(a>=params.dimsBrick.xyz)){atomicStore(&transaction[0],4u);return;}let first=a/params.dimsBrick.w;let last=min(params.brickDimsCapacity.xyz-vec3u(1u),(a+vec3u(leaf.size-1u))/params.dimsBrick.w);let bits=select(HALO,CORE,(c.flags&CORE)!=0u);for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){let b=x+params.brickDimsCapacity.x*(y+params.brickDimsCapacity.y*z);atomicOr(&states[b],bits);}}}}
-@compute @workgroup_size(64) fn resolveSurfaceCandidates(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;let cap=params.brickDimsCapacity.w;if(!producerAccepted()||atomicLoad(&transaction[0])!=0u||i>=cap){return;}let marked=atomicLoad(&states[i]);let desired=(marked&(CORE|HALO))!=0u;let was=(marked&WAS_RESIDENT)!=0u;let dry=select(marked>>16u,0u,desired);let persistent=params.settings.w>0.5;let resident=select(desired||(was&&dry<=u32(params.settings.y)),was||desired,persistent);let core=(marked&CORE)!=0u;let flags=select(0u,RESIDENT,resident)|select(0u,CORE,core)|select(0u,HALO,resident&&!core)|select(0u,ACTIVATED,resident&&!was)|select(0u,WAS_RESIDENT,was);atomicStore(&states[i],flags|(dry<<16u));if(resident){let slot=atomicAdd(&worklist[0],1u);if(slot<cap){atomicStore(&worklist[HEADER+slot*2u],i);atomicStore(&worklist[HEADER+slot*2u+1u],i);}if(core){atomicAdd(&worklist[8],1u);}else{atomicAdd(&worklist[9],1u);}if(!was){atomicAdd(&worklist[10],1u);}}else if(was){let slot=atomicAdd(&worklist[4],1u);if(slot<cap){atomicStore(&worklist[HEADER+cap*2u+slot*2u],i);atomicStore(&worklist[HEADER+cap*2u+slot*2u+1u],i);}atomicAdd(&worklist[11],1u);}}
-fn tileResident(q:vec3i)->bool{let td=vec3i(params.tiling.yzw);if(any(q<vec3i(0))||any(q>=td)){return false;}let f=params.tiling.x;for(var z=0u;z<f;z++){for(var y=0u;y<f;y++){for(var x=0u;x<f;x++){let b=vec3u(q)*f+vec3u(x,y,z);if(any(b>=params.brickDimsCapacity.xyz)){continue;}let i=b.x+params.brickDimsCapacity.x*(b.y+params.brickDimsCapacity.y*b.z);if((atomicLoad(&states[i])&RESIDENT)!=0u){return true;}}}}return false;}
-@compute @workgroup_size(64) fn emitTiles(@builtin(global_invocation_id) gid:vec3u){let cap=params.tiling.y*params.tiling.z*params.tiling.w;let i=gid.x;if(!producerAccepted()||atomicLoad(&transaction[0])!=0u||i>=cap){return;}let q=vec3i(vec3u(i%params.tiling.y,(i/params.tiling.y)%params.tiling.z,i/(params.tiling.y*params.tiling.z)));var live=atomicLoad(&tileStates[i])!=0u;for(var z=-1;z<=1&&!live;z++){for(var y=-1;y<=1&&!live;y++){for(var x=-1;x<=1&&!live;x++){live=tileResident(q+vec3i(x,y,z));}}}let was=publishedTileStates[i]!=0u;atomicStore(&tileStates[i],select(0u,1u,live));if(live){let slot=atomicAdd(&tileWorklist[0],1u);if(slot<cap){atomicStore(&tileWorklist[HEADER+slot],i);}}else if(was){let slot=atomicAdd(&tileWorklist[4],1u);if(slot<cap){atomicStore(&tileWorklist[HEADER+cap+slot],i);}}}
-@compute @workgroup_size(1) fn finalize(){if(!producerAccepted()||atomicLoad(&transaction[0])!=0u){return;}let cap=params.brickDimsCapacity.w;let tc=params.tiling.y*params.tiling.z*params.tiling.w;let rawResident=atomicLoad(&worklist[0]);let rawRetired=atomicLoad(&worklist[4]);let rawActiveTiles=atomicLoad(&tileWorklist[0]);let rawRetiredTiles=atomicLoad(&tileWorklist[4]);if(rawResident>cap||rawRetired>cap||rawActiveTiles>tc||rawRetiredTiles>tc){atomicStore(&transaction[0],5u);return;}let voxels=params.dimsBrick.w*params.dimsBrick.w*params.dimsBrick.w;let a=dispatch2((rawResident*voxels+255u)/256u);atomicStore(&worklist[1],a.x);atomicStore(&worklist[2],a.y);atomicStore(&worklist[3],1u);let s=dispatch2((rawResident*voxels+63u)/64u);atomicStore(&worklist[12],s.x);atomicStore(&worklist[13],s.y);atomicStore(&worklist[14],1u);let r=dispatch2((rawRetired*voxels+255u)/256u);atomicStore(&worklist[5],r.x);atomicStore(&worklist[6],r.y);atomicStore(&worklist[7],1u);atomicStore(&worklist[15],candidateControl[4]);let bg=select(1u,8u,params.dimsBrick.w==8u);let g=params.tiling.x*params.tiling.x*params.tiling.x*bg;let ad=dispatch2(rawActiveTiles*g);atomicStore(&tileWorklist[1],ad.x);atomicStore(&tileWorklist[2],ad.y);atomicStore(&tileWorklist[3],1u);let rd=dispatch2(rawRetiredTiles*g);atomicStore(&tileWorklist[5],rd.x);atomicStore(&tileWorklist[6],rd.y);atomicStore(&tileWorklist[7],1u);let cg=max(1u,g/8u);let ac=dispatch2(rawActiveTiles*cg);atomicStore(&tileWorklist[8],ac.x);atomicStore(&tileWorklist[9],ac.y);atomicStore(&tileWorklist[10],1u);let rc=dispatch2(rawRetiredTiles*cg);atomicStore(&tileWorklist[12],rc.x);atomicStore(&tileWorklist[13],rc.y);atomicStore(&tileWorklist[14],1u);atomicStore(&tileWorklist[15],candidateControl[4]);atomicStore(&transaction[1],1u);}
+fn producerAccepted()->bool{return candidateControl[5]==1u&&candidateControl[6]==0u
+  &&candidateControl[7]==arrayLength(&candidates)&&candidateControl[4]>publishedTileWorklist[15];}
+fn clearScratch(){for(var i=0u;i<arrayLength(&worklist);i++){worklist[i]=0u;}
+  for(var i=0u;i<arrayLength(&tileWorklist);i++){tileWorklist[i]=0u;}}
+fn finishHeaders(){
+  let resident=worklist[0];let retired=worklist[4];let voxels=params.dimsBrick.w*params.dimsBrick.w*params.dimsBrick.w;
+  let a=dispatch2((resident*voxels+255u)/256u);worklist[1]=a.x;worklist[2]=a.y;worklist[3]=1u;
+  let s=dispatch2((resident*voxels+63u)/64u);worklist[12]=s.x;worklist[13]=s.y;worklist[14]=1u;
+  let r=dispatch2((retired*voxels+255u)/256u);worklist[5]=r.x;worklist[6]=r.y;worklist[7]=1u;
+  worklist[15]=candidateControl[4];
+  let bg=select(1u,8u,params.dimsBrick.w==8u);let groups=params.tiling.x*params.tiling.x*params.tiling.x*bg;
+  let ad=dispatch2(tileWorklist[0]*groups);tileWorklist[1]=ad.x;tileWorklist[2]=ad.y;tileWorklist[3]=1u;
+  let rd=dispatch2(tileWorklist[4]*groups);tileWorklist[5]=rd.x;tileWorklist[6]=rd.y;tileWorklist[7]=1u;
+  let candidatesPerTile=max(1u,groups/8u);let ac=dispatch2(tileWorklist[0]*candidatesPerTile);
+  tileWorklist[8]=ac.x;tileWorklist[9]=ac.y;tileWorklist[10]=1u;
+  let rc=dispatch2(tileWorklist[4]*candidatesPerTile);tileWorklist[12]=rc.x;tileWorklist[13]=rc.y;tileWorklist[14]=1u;
+  tileWorklist[15]=candidateControl[4];tileWorklist[11]=COMMIT;
+}
 `;
 
 /**
- * Producer-bounded counterpart of `surfaceCandidateResidencyShader`.
- *
- * Candidate brick and topology-tile keys live in open-addressed physical
- * pools. A key is stored as logical+1, leaving zero as the empty sentinel.
- * Every stage writes generation B and the final commit copies it over A only
- * after all capacity/status checks pass. Thus a saturated pool cannot publish
- * a partial topology or silently drop a retirement.
+ * Dense compact-candidate publisher. One invocation owns the complete A/B
+ * schedule in deterministic logical-key order, so no recurring synchronization
+ * atomics, host clears, generation copies, or inter-stage dispatches exist.
  */
-export const sparseSurfaceCandidateResidencyShader = /* wgsl */ `
-struct Params { dimsBrick:vec4u, brickDimsCapacity:vec4u, settings:vec4f, tiling:vec4u }
-struct SurfaceLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
-struct Candidate { row:u32,flags:u32 }
-@group(0) @binding(0) var<storage,read> publishedStates:array<u32>;
-@group(0) @binding(1) var<storage,read_write> states:array<atomic<u32>>;
-@group(0) @binding(2) var<storage,read_write> worklist:array<atomic<u32>>;
-@group(0) @binding(3) var<storage,read> publishedTileStates:array<u32>;
-@group(0) @binding(4) var<storage,read_write> tileStates:array<atomic<u32>>;
-@group(0) @binding(5) var<storage,read_write> tileWorklist:array<atomic<u32>>;
-@group(0) @binding(6) var<storage,read> leaves:array<SurfaceLeaf>;
-@group(0) @binding(7) var<storage,read> candidates:array<Candidate>;
-@group(0) @binding(8) var<storage,read> candidateControl:array<u32>;
-@group(0) @binding(9) var<storage,read_write> transaction:array<atomic<u32>>;
-@group(0) @binding(10) var<uniform> params:Params;
-const RESIDENT=1u;const CORE=2u;const HALO=4u;const ACTIVATED=8u;const LIVE=32u;const WAS_RESIDENT=32u;const HEADER=16u;const INVALID=0xffffffffu;
-fn origin(p:u32)->vec3u{return vec3u(p&1023u,(p>>10u)&1023u,(p>>20u)&1023u);}
-fn dispatch2(n:u32)->vec2u{let x=min(n,65535u);return vec2u(x,select(1u,(n+x-1u)/x,x>0u));}
-fn producerAccepted()->bool{return candidateControl[5]==1u&&candidateControl[6]==0u&&candidateControl[7]==arrayLength(&candidates)&&candidateControl[4]>atomicLoad(&tileWorklist[15]);}
+export const fineSeedCandidateResidencyShader = fineSeedCandidateShaderPrelude + /* wgsl */ `
+fn markTileRing(key:u32){
+  let td=vec3i(params.tiling.yzw);let q=vec3i(i32(key%params.tiling.y),
+    i32((key/params.tiling.y)%params.tiling.z),i32(key/(params.tiling.y*params.tiling.z)));
+  for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
+    let n=q+vec3i(x,y,z);if(any(n<vec3i(0))||any(n>=td)){continue;}
+    let logical=u32(n.x)+params.tiling.y*(u32(n.y)+params.tiling.z*u32(n.z));tileStates[logical]=1u;
+  }}}
+}
+@compute @workgroup_size(1) fn publishFineSeedCandidateResidency(){
+  clearScratch();if(!producerAccepted()){return;}var error=0u;
+  let brickCap=params.brickDimsCapacity.w;let tileCap=params.tiling.y*params.tiling.z*params.tiling.w;
+  for(var i=0u;i<brickCap;i++){let old=publishedStates[i];let was=(old&RESIDENT)!=0u;
+    states[i]=select(0u,WAS_RESIDENT,was)|(min(0xffffu,(old>>16u)+1u)<<16u);}
+  for(var i=0u;i<tileCap;i++){tileStates[i]=0u;}
+  // Aanjaneya et al. (2017), Section 4.2 requires the complete local
+  // face-and-edge pressure-support ring, independently of the fine-phi band.
+  let tileCells=params.dimsBrick.w*params.tiling.x;let td=vec3i(params.tiling.yzw);
+  for(var row=0u;row<arrayLength(&leaves)&&error==0u;row++){let leaf=leaves[row];
+    if((leaf.flags&LIVE)==0u||leaf.size==0u){continue;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
+    if(any(a>=params.dimsBrick.xyz)){error=9u;break;}let first=vec3i(a/tileCells);
+    let last=vec3i(min(params.dimsBrick.xyz-vec3u(1u),a+vec3u(leaf.size-1u))/tileCells);
+    for(var z=first.z-1;z<=last.z+1;z++){for(var y=first.y-1;y<=last.y+1;y++){
+      for(var x=first.x-1;x<=last.x+1;x++){let q=vec3i(x,y,z);
+        if(any(q<vec3i(0))||any(q>=td)){continue;}
+        tileStates[u32(q.x)+params.tiling.y*(u32(q.y)+params.tiling.z*u32(q.z))]=1u;
+      }}}
+  }
+  for(var i=0u;i<candidateControl[0]&&error==0u;i++){
+    if(i>=arrayLength(&candidates)){error=1u;break;}let c=candidates[i];
+    if(c.row>=arrayLength(&leaves)){error=2u;break;}let leaf=leaves[c.row];
+    if(leaf.size==0u){error=3u;break;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
+    if(any(a>=params.dimsBrick.xyz)){error=4u;break;}let first=a/params.dimsBrick.w;
+    let last=min(params.brickDimsCapacity.xyz-vec3u(1u),(a+vec3u(leaf.size-1u))/params.dimsBrick.w);
+    let bits=select(HALO,CORE,(c.flags&CORE)!=0u);
+    for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
+      let logical=x+params.brickDimsCapacity.x*(y+params.brickDimsCapacity.y*z);states[logical]|=bits;
+    }}}
+  }
+  for(var logical=0u;logical<brickCap&&error==0u;logical++){let marked=states[logical];
+    let desired=(marked&(CORE|HALO))!=0u;let was=(marked&WAS_RESIDENT)!=0u;
+    let dry=select(marked>>16u,0u,desired);let persistent=params.settings.w>0.5;
+    let resident=select(desired||(was&&dry<=u32(params.settings.y)),was||desired,persistent);
+    let core=(marked&CORE)!=0u;let flags=select(0u,RESIDENT,resident)|select(0u,CORE,core)
+      |select(0u,HALO,resident&&!core)|select(0u,ACTIVATED,resident&&!was)|select(0u,WAS_RESIDENT,was);
+    states[logical]=flags|(dry<<16u);
+    if(resident){let output=worklist[0];if(output>=brickCap){error=5u;break;}
+      worklist[HEADER+output*2u]=logical;worklist[HEADER+output*2u+1u]=logical;worklist[0]=output+1u;
+      worklist[8+select(1u,0u,core)]+=1u;if(!was){worklist[10]+=1u;}
+    }else if(was){let output=worklist[4];if(output>=brickCap){error=5u;break;}
+      worklist[HEADER+brickCap*2u+output*2u]=logical;worklist[HEADER+brickCap*2u+output*2u+1u]=logical;
+      worklist[4]=output+1u;worklist[11]+=1u;}
+  }
+  for(var item=0u;item<worklist[0]&&error==0u;item++){let logical=worklist[HEADER+item*2u];
+    let b=vec3u(logical%params.brickDimsCapacity.x,(logical/params.brickDimsCapacity.x)%params.brickDimsCapacity.y,
+      logical/(params.brickDimsCapacity.x*params.brickDimsCapacity.y));
+    let key=(b.x/params.tiling.x)+params.tiling.y*((b.y/params.tiling.x)+params.tiling.z*(b.z/params.tiling.x));
+    markTileRing(key);
+  }
+  for(var key=0u;key<tileCap&&error==0u;key++){let live=tileStates[key]!=0u;let was=publishedTileStates[key]!=0u;
+    if(live){let output=tileWorklist[0];if(output>=tileCap){error=5u;break;}
+      tileWorklist[HEADER+output]=key;tileWorklist[0]=output+1u;
+    }else if(was){let output=tileWorklist[4];if(output>=tileCap){error=5u;break;}
+      tileWorklist[HEADER+tileCap+output]=key;tileWorklist[4]=output+1u;}
+  }
+  if(error==0u){finishHeaders();}
+}
+`;
+
+/**
+ * Sparse-key counterpart. The same single-owner schedule rebuilds the
+ * open-addressed records deterministically and leaves tombstones intact, so a
+ * saturated brick or tile pool rejects the entire candidate generation.
+ */
+export const sparseFineSeedCandidateResidencyShader = fineSeedCandidateShaderPrelude + /* wgsl */ `
 fn hashKey(key:u32)->u32{var x=key*747796405u+2891336453u;x=((x>>((x>>28u)+4u))^x)*277803737u;return (x>>22u)^x;}
-fn brickSlots()->u32{return arrayLength(&states)/2u;}
-fn tileSlots()->u32{return arrayLength(&tileStates)/2u;}
+fn brickSlots()->u32{return arrayLength(&states)/2u;}fn tileSlots()->u32{return arrayLength(&tileStates)/2u;}
 fn worklistCapacity()->u32{return (arrayLength(&worklist)-HEADER)/4u;}
 fn tileWorklistCapacity()->u32{return (arrayLength(&tileWorklist)-HEADER)/2u;}
-fn claimBrick(logical:u32)->u32{let encoded=logical+1u;let cap=brickSlots();if(encoded==0u||encoded==INVALID||cap==0u){return INVALID;}let start=hashKey(logical)%cap;for(var attempt=0u;attempt<cap;attempt++){var claimSlot=INVALID;var expected=0u;for(var probe=0u;probe<cap;probe++){let slot=(start+probe)%cap;let key=atomicLoad(&states[slot*2u]);if(key==encoded){return slot;}if(key==INVALID&&claimSlot==INVALID){claimSlot=slot;expected=INVALID;}if(key==0u){if(claimSlot==INVALID){claimSlot=slot;expected=0u;}break;}}if(claimSlot==INVALID){break;}loop{let result=atomicCompareExchangeWeak(&states[claimSlot*2u],expected,encoded);if(result.exchanged){return claimSlot;}if(result.old_value!=expected){break;}}}atomicStore(&transaction[0],6u);return INVALID;}
-fn claimTile(logical:u32)->u32{let encoded=logical+1u;let cap=tileSlots();if(encoded==0u||encoded==INVALID||cap==0u){return INVALID;}let start=hashKey(logical)%cap;for(var attempt=0u;attempt<cap;attempt++){var claimSlot=INVALID;var expected=0u;for(var probe=0u;probe<cap;probe++){let slot=(start+probe)%cap;let key=atomicLoad(&tileStates[slot*2u]);if(key==encoded){return slot;}if(key==INVALID&&claimSlot==INVALID){claimSlot=slot;expected=INVALID;}if(key==0u){if(claimSlot==INVALID){claimSlot=slot;expected=0u;}break;}}if(claimSlot==INVALID){break;}loop{let result=atomicCompareExchangeWeak(&tileStates[claimSlot*2u],expected,encoded);if(result.exchanged){return claimSlot;}if(result.old_value!=expected){break;}}}atomicStore(&transaction[0],7u);return INVALID;}
-@compute @workgroup_size(64) fn beginSurfaceCandidates(@builtin(global_invocation_id) gid:vec3u){let slot=gid.x;if(!producerAccepted()||slot>=brickSlots()){return;}let encoded=publishedStates[slot*2u];let old=publishedStates[slot*2u+1u];atomicStore(&states[slot*2u],encoded);if(encoded==0u||encoded==INVALID){atomicStore(&states[slot*2u+1u],0u);return;}let was=(old&RESIDENT)!=0u;atomicStore(&states[slot*2u+1u],select(0u,WAS_RESIDENT,was)|(min(0xffffu,(old>>16u)+1u)<<16u));}
-@compute @workgroup_size(64) fn beginSparseTiles(@builtin(global_invocation_id) gid:vec3u){let slot=gid.x;if(!producerAccepted()||slot>=tileSlots()){return;}atomicStore(&tileStates[slot*2u],publishedTileStates[slot*2u]);atomicStore(&tileStates[slot*2u+1u],0u);}
-// Same Section 4.2 pressure-support transaction as the dense scheduler above;
-// hashing here is only sparse storage addressing, not a numerical method.
-@compute @workgroup_size(64) fn markPressureTiles(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;if(!producerAccepted()||atomicLoad(&transaction[0])!=0u||row>=arrayLength(&leaves)){return;}let leaf=leaves[row];if((leaf.flags&LIVE)==0u||leaf.size==0u){return;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);if(any(a>=params.dimsBrick.xyz)){atomicStore(&transaction[0],9u);return;}let tileCells=params.dimsBrick.w*params.tiling.x;let td=vec3i(params.tiling.yzw);let first=vec3i(a/tileCells);let last=vec3i(min(params.dimsBrick.xyz-vec3u(1u),a+vec3u(leaf.size-1u))/tileCells);for(var tz=first.z-1;tz<=last.z+1;tz++){for(var ty=first.y-1;ty<=last.y+1;ty++){for(var tx=first.x-1;tx<=last.x+1;tx++){let q=vec3i(tx,ty,tz);if(any(q<vec3i(0))||any(q>=td)){continue;}let key=u32(q.x)+params.tiling.y*(u32(q.y)+params.tiling.z*u32(q.z));let slot=claimTile(key);if(slot!=INVALID){atomicStore(&tileStates[slot*2u+1u],1u);}}}}}
-@compute @workgroup_size(64) fn markSurfaceCandidates(@builtin(global_invocation_id) gid:vec3u){let i=gid.x;if(!producerAccepted()||i>=candidateControl[0]){return;}if(i>=arrayLength(&candidates)){atomicStore(&transaction[0],1u);return;}let c=candidates[i];if(c.row>=arrayLength(&leaves)){atomicStore(&transaction[0],2u);return;}let leaf=leaves[c.row];if(leaf.size==0u){atomicStore(&transaction[0],3u);return;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);if(any(a>=params.dimsBrick.xyz)){atomicStore(&transaction[0],4u);return;}let first=a/params.dimsBrick.w;let last=min(params.brickDimsCapacity.xyz-vec3u(1u),(a+vec3u(leaf.size-1u))/params.dimsBrick.w);let bits=select(HALO,CORE,(c.flags&CORE)!=0u);for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){let logical=x+params.brickDimsCapacity.x*(y+params.brickDimsCapacity.y*z);let slot=claimBrick(logical);if(slot!=0xffffffffu){atomicOr(&states[slot*2u+1u],bits);}}}}}
-@compute @workgroup_size(64) fn resolveSurfaceCandidates(@builtin(global_invocation_id) gid:vec3u){let slot=gid.x;if(!producerAccepted()||atomicLoad(&transaction[0])!=0u||slot>=brickSlots()){return;}let encoded=atomicLoad(&states[slot*2u]);if(encoded==0u||encoded==INVALID){return;}let logical=encoded-1u;if(logical>=params.brickDimsCapacity.w){atomicStore(&transaction[0],8u);return;}let marked=atomicLoad(&states[slot*2u+1u]);let desired=(marked&(CORE|HALO))!=0u;let was=(marked&WAS_RESIDENT)!=0u;let dry=select(marked>>16u,0u,desired);let persistent=params.settings.w>0.5;let resident=select(desired||(was&&dry<=u32(params.settings.y)),was||desired,persistent);let core=(marked&CORE)!=0u;let flags=select(0u,RESIDENT,resident)|select(0u,CORE,core)|select(0u,HALO,resident&&!core)|select(0u,ACTIVATED,resident&&!was)|select(0u,WAS_RESIDENT,was);atomicStore(&states[slot*2u+1u],flags|(dry<<16u));let cap=worklistCapacity();if(resident){let output=atomicAdd(&worklist[0],1u);if(output<cap){atomicStore(&worklist[HEADER+output*2u],logical);atomicStore(&worklist[HEADER+output*2u+1u],logical);}if(core){atomicAdd(&worklist[8],1u);}else{atomicAdd(&worklist[9],1u);}if(!was){atomicAdd(&worklist[10],1u);}}else if(was){let output=atomicAdd(&worklist[4],1u);if(output<cap){atomicStore(&worklist[HEADER+cap*2u+output*2u],logical);atomicStore(&worklist[HEADER+cap*2u+output*2u+1u],logical);}atomicAdd(&worklist[11],1u);atomicStore(&states[slot*2u+1u],0u);atomicStore(&states[slot*2u],INVALID);}else{atomicStore(&states[slot*2u+1u],0u);atomicStore(&states[slot*2u],INVALID);}}
-@compute @workgroup_size(64) fn markSparseTiles(@builtin(global_invocation_id) gid:vec3u){let item=gid.x;if(!producerAccepted()||atomicLoad(&transaction[0])!=0u||item>=atomicLoad(&worklist[0])||item>=worklistCapacity()){return;}let logical=atomicLoad(&worklist[HEADER+item*2u]);let b=vec3u(logical%params.brickDimsCapacity.x,(logical/params.brickDimsCapacity.x)%params.brickDimsCapacity.y,logical/(params.brickDimsCapacity.x*params.brickDimsCapacity.y));let q=vec3i(b/params.tiling.x);let td=vec3i(params.tiling.yzw);for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){let n=q+vec3i(x,y,z);if(any(n<vec3i(0))||any(n>=td)){continue;}let key=u32(n.x)+params.tiling.y*(u32(n.y)+params.tiling.z*u32(n.z));let slot=claimTile(key);if(slot!=0xffffffffu){atomicStore(&tileStates[slot*2u+1u],1u);}}}}}
-@compute @workgroup_size(64) fn emitTiles(@builtin(global_invocation_id) gid:vec3u){let slot=gid.x;if(!producerAccepted()||atomicLoad(&transaction[0])!=0u||slot>=tileSlots()){return;}let encoded=atomicLoad(&tileStates[slot*2u]);if(encoded==0u||encoded==INVALID){return;}let key=encoded-1u;let live=atomicLoad(&tileStates[slot*2u+1u])!=0u;let oldEncoded=publishedTileStates[slot*2u];let was=oldEncoded==encoded;let cap=tileWorklistCapacity();if(live){let output=atomicAdd(&tileWorklist[0],1u);if(output<cap){atomicStore(&tileWorklist[HEADER+output],key);}}else if(was){let output=atomicAdd(&tileWorklist[4],1u);if(output<cap){atomicStore(&tileWorklist[HEADER+cap+output],key);}atomicStore(&tileStates[slot*2u+1u],0u);atomicStore(&tileStates[slot*2u],INVALID);}else{atomicStore(&tileStates[slot*2u+1u],0u);atomicStore(&tileStates[slot*2u],INVALID);}}
-@compute @workgroup_size(1) fn finalize(){if(!producerAccepted()||atomicLoad(&transaction[0])!=0u){return;}let cap=worklistCapacity();let tc=tileWorklistCapacity();let rawResident=atomicLoad(&worklist[0]);let rawRetired=atomicLoad(&worklist[4]);let rawActiveTiles=atomicLoad(&tileWorklist[0]);let rawRetiredTiles=atomicLoad(&tileWorklist[4]);if(rawResident>cap||rawRetired>cap||rawActiveTiles>tc||rawRetiredTiles>tc){atomicStore(&transaction[0],5u);return;}let voxels=params.dimsBrick.w*params.dimsBrick.w*params.dimsBrick.w;let a=dispatch2((rawResident*voxels+255u)/256u);atomicStore(&worklist[1],a.x);atomicStore(&worklist[2],a.y);atomicStore(&worklist[3],1u);let s=dispatch2((rawResident*voxels+63u)/64u);atomicStore(&worklist[12],s.x);atomicStore(&worklist[13],s.y);atomicStore(&worklist[14],1u);let r=dispatch2((rawRetired*voxels+255u)/256u);atomicStore(&worklist[5],r.x);atomicStore(&worklist[6],r.y);atomicStore(&worklist[7],1u);atomicStore(&worklist[15],candidateControl[4]);let bg=select(1u,8u,params.dimsBrick.w==8u);let g=params.tiling.x*params.tiling.x*params.tiling.x*bg;let ad=dispatch2(rawActiveTiles*g);atomicStore(&tileWorklist[1],ad.x);atomicStore(&tileWorklist[2],ad.y);atomicStore(&tileWorklist[3],1u);let rd=dispatch2(rawRetiredTiles*g);atomicStore(&tileWorklist[5],rd.x);atomicStore(&tileWorklist[6],rd.y);atomicStore(&tileWorklist[7],1u);let cg=max(1u,g/8u);let ac=dispatch2(rawActiveTiles*cg);atomicStore(&tileWorklist[8],ac.x);atomicStore(&tileWorklist[9],ac.y);atomicStore(&tileWorklist[10],1u);let rc=dispatch2(rawRetiredTiles*cg);atomicStore(&tileWorklist[12],rc.x);atomicStore(&tileWorklist[13],rc.y);atomicStore(&tileWorklist[14],1u);atomicStore(&tileWorklist[15],candidateControl[4]);atomicStore(&transaction[1],1u);}
+fn claimBrick(logical:u32)->u32{let encoded=logical+1u;let cap=brickSlots();if(encoded==0u||encoded==INVALID||cap==0u){return INVALID;}
+  let start=hashKey(logical)%cap;var tombstone=INVALID;
+  for(var probe=0u;probe<cap;probe++){let slot=(start+probe)%cap;let key=states[slot*2u];
+    if(key==encoded){return slot;}if(key==INVALID&&tombstone==INVALID){tombstone=slot;}
+    if(key==0u){let destination=select(slot,tombstone,tombstone!=INVALID);states[destination*2u]=encoded;return destination;}}
+  if(tombstone!=INVALID){states[tombstone*2u]=encoded;return tombstone;}return INVALID;
+}
+fn claimTile(logical:u32)->u32{let encoded=logical+1u;let cap=tileSlots();if(encoded==0u||encoded==INVALID||cap==0u){return INVALID;}
+  let start=hashKey(logical)%cap;var tombstone=INVALID;
+  for(var probe=0u;probe<cap;probe++){let slot=(start+probe)%cap;let key=tileStates[slot*2u];
+    if(key==encoded){return slot;}if(key==INVALID&&tombstone==INVALID){tombstone=slot;}
+    if(key==0u){let destination=select(slot,tombstone,tombstone!=INVALID);tileStates[destination*2u]=encoded;return destination;}}
+  if(tombstone!=INVALID){tileStates[tombstone*2u]=encoded;return tombstone;}return INVALID;
+}
+fn markTileRing(key:u32)->bool{
+  let td=vec3i(params.tiling.yzw);let q=vec3i(i32(key%params.tiling.y),
+    i32((key/params.tiling.y)%params.tiling.z),i32(key/(params.tiling.y*params.tiling.z)));
+  for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
+    let n=q+vec3i(x,y,z);if(any(n<vec3i(0))||any(n>=td)){continue;}
+    let logical=u32(n.x)+params.tiling.y*(u32(n.y)+params.tiling.z*u32(n.z));let slot=claimTile(logical);
+    if(slot==INVALID){return false;}tileStates[slot*2u+1u]=1u;
+  }}}return true;
+}
+@compute @workgroup_size(1) fn publishFineSeedCandidateResidency(){
+  clearScratch();if(!producerAccepted()){return;}var error=0u;
+  for(var slot=0u;slot<brickSlots();slot++){let encoded=publishedStates[slot*2u];let old=publishedStates[slot*2u+1u];
+    states[slot*2u]=encoded;let was=encoded!=0u&&encoded!=INVALID&&(old&RESIDENT)!=0u;
+    states[slot*2u+1u]=select(0u,WAS_RESIDENT,was)|(min(0xffffu,(old>>16u)+1u)<<16u);}
+  for(var slot=0u;slot<tileSlots();slot++){tileStates[slot*2u]=publishedTileStates[slot*2u];tileStates[slot*2u+1u]=0u;}
+  let tileCells=params.dimsBrick.w*params.tiling.x;let td=vec3i(params.tiling.yzw);
+  for(var row=0u;row<arrayLength(&leaves)&&error==0u;row++){let leaf=leaves[row];
+    if((leaf.flags&LIVE)==0u||leaf.size==0u){continue;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
+    if(any(a>=params.dimsBrick.xyz)){error=9u;break;}let first=vec3i(a/tileCells);
+    let last=vec3i(min(params.dimsBrick.xyz-vec3u(1u),a+vec3u(leaf.size-1u))/tileCells);
+    for(var z=first.z-1;z<=last.z+1&&error==0u;z++){for(var y=first.y-1;y<=last.y+1&&error==0u;y++){
+      for(var x=first.x-1;x<=last.x+1;x++){let q=vec3i(x,y,z);if(any(q<vec3i(0))||any(q>=td)){continue;}
+        let key=u32(q.x)+params.tiling.y*(u32(q.y)+params.tiling.z*u32(q.z));let slot=claimTile(key);
+        if(slot==INVALID){error=7u;break;}tileStates[slot*2u+1u]=1u;
+      }}}
+  }
+  for(var i=0u;i<candidateControl[0]&&error==0u;i++){
+    if(i>=arrayLength(&candidates)){error=1u;break;}let c=candidates[i];
+    if(c.row>=arrayLength(&leaves)){error=2u;break;}let leaf=leaves[c.row];
+    if(leaf.size==0u){error=3u;break;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
+    if(any(a>=params.dimsBrick.xyz)){error=4u;break;}let first=a/params.dimsBrick.w;
+    let last=min(params.brickDimsCapacity.xyz-vec3u(1u),(a+vec3u(leaf.size-1u))/params.dimsBrick.w);
+    let bits=select(HALO,CORE,(c.flags&CORE)!=0u);
+    for(var z=first.z;z<=last.z&&error==0u;z++){for(var y=first.y;y<=last.y&&error==0u;y++){
+      for(var x=first.x;x<=last.x;x++){let logical=x+params.brickDimsCapacity.x*(y+params.brickDimsCapacity.y*z);
+        let slot=claimBrick(logical);if(slot==INVALID){error=6u;break;}states[slot*2u+1u]|=bits;
+      }}}
+  }
+  let cap=worklistCapacity();
+  for(var slot=0u;slot<brickSlots()&&error==0u;slot++){let encoded=states[slot*2u];
+    if(encoded==0u||encoded==INVALID){continue;}let logical=encoded-1u;
+    if(logical>=params.brickDimsCapacity.w){error=8u;break;}let marked=states[slot*2u+1u];
+    let desired=(marked&(CORE|HALO))!=0u;let was=(marked&WAS_RESIDENT)!=0u;
+    let dry=select(marked>>16u,0u,desired);let persistent=params.settings.w>0.5;
+    let resident=select(desired||(was&&dry<=u32(params.settings.y)),was||desired,persistent);
+    let core=(marked&CORE)!=0u;let flags=select(0u,RESIDENT,resident)|select(0u,CORE,core)
+      |select(0u,HALO,resident&&!core)|select(0u,ACTIVATED,resident&&!was)|select(0u,WAS_RESIDENT,was);
+    states[slot*2u+1u]=flags|(dry<<16u);
+    if(resident){let output=worklist[0];if(output>=cap){error=5u;break;}
+      worklist[HEADER+output*2u]=logical;worklist[HEADER+output*2u+1u]=logical;worklist[0]=output+1u;
+      worklist[8+select(1u,0u,core)]+=1u;if(!was){worklist[10]+=1u;}
+    }else{if(was){let output=worklist[4];if(output>=cap){error=5u;break;}
+        worklist[HEADER+cap*2u+output*2u]=logical;worklist[HEADER+cap*2u+output*2u+1u]=logical;
+        worklist[4]=output+1u;worklist[11]+=1u;}
+      states[slot*2u+1u]=0u;states[slot*2u]=INVALID;}
+  }
+  for(var item=0u;item<worklist[0]&&error==0u;item++){let logical=worklist[HEADER+item*2u];
+    let b=vec3u(logical%params.brickDimsCapacity.x,(logical/params.brickDimsCapacity.x)%params.brickDimsCapacity.y,
+      logical/(params.brickDimsCapacity.x*params.brickDimsCapacity.y));
+    let key=(b.x/params.tiling.x)+params.tiling.y*((b.y/params.tiling.x)+params.tiling.z*(b.z/params.tiling.x));
+    if(!markTileRing(key)){error=7u;}
+  }
+  let tc=tileWorklistCapacity();
+  for(var slot=0u;slot<tileSlots()&&error==0u;slot++){let encoded=tileStates[slot*2u];
+    if(encoded==0u||encoded==INVALID){continue;}let key=encoded-1u;let live=tileStates[slot*2u+1u]!=0u;
+    let was=publishedTileStates[slot*2u]==encoded;
+    if(live){let output=tileWorklist[0];if(output>=tc){error=5u;break;}
+      tileWorklist[HEADER+output]=key;tileWorklist[0]=output+1u;
+    }else{if(was){let output=tileWorklist[4];if(output>=tc){error=5u;break;}
+        tileWorklist[HEADER+tc+output]=key;tileWorklist[4]=output+1u;}
+      tileStates[slot*2u+1u]=0u;tileStates[slot*2u]=INVALID;}
+  }
+  if(error==0u){finishHeaders();}
+}
 `;
 
-export const surfaceCandidateCommitShader = /* wgsl */ `
+export const fineSeedCandidateCommitShader = /* wgsl */ `
 struct Params { dimsBrick:vec4u, brickDimsCapacity:vec4u, settings:vec4f, tiling:vec4u }
 @group(0) @binding(0) var<storage,read_write> publishedStates:array<u32>;
 @group(0) @binding(1) var<storage,read> candidateStates:array<u32>;
@@ -743,9 +867,14 @@ struct Params { dimsBrick:vec4u, brickDimsCapacity:vec4u, settings:vec4f, tiling
 @group(0) @binding(5) var<storage,read> candidateTileStates:array<u32>;
 @group(0) @binding(6) var<storage,read_write> publishedTileWorklist:array<u32>;
 @group(0) @binding(7) var<storage,read> candidateTileWorklist:array<u32>;
-@group(0) @binding(8) var<storage,read> transaction:array<u32>;
-@group(0) @binding(9) var<uniform> params:Params;
-@compute @workgroup_size(64) fn commitSurfaceCandidates(@builtin(global_invocation_id) gid:vec3u){if(transaction[1]!=1u){return;}let i=gid.x;if(i<arrayLength(&publishedStates)){publishedStates[i]=candidateStates[i];}if(i<arrayLength(&publishedWorklist)){publishedWorklist[i]=candidateWorklist[i];}if(i<arrayLength(&publishedTileStates)){publishedTileStates[i]=candidateTileStates[i];}if(i<arrayLength(&publishedTileWorklist)){publishedTileWorklist[i]=candidateTileWorklist[i];}}
+const COMMIT=0xc01117edu;
+@compute @workgroup_size(64) fn commitFineSeedCandidates(@builtin(global_invocation_id) gid:vec3u){
+  if(candidateTileWorklist[11]!=COMMIT){return;}let i=gid.x;
+  if(i<arrayLength(&publishedStates)){publishedStates[i]=candidateStates[i];}
+  if(i<arrayLength(&publishedWorklist)){publishedWorklist[i]=candidateWorklist[i];}
+  if(i<arrayLength(&publishedTileStates)){publishedTileStates[i]=candidateTileStates[i];}
+  if(i<arrayLength(&publishedTileWorklist)){publishedTileWorklist[i]=select(candidateTileWorklist[i],0u,i==11u);}
+}
 `;
 
 export class GPUFluidBrickResidency {
@@ -773,30 +902,21 @@ export class GPUFluidBrickResidency {
   private readonly candidateWorklist: GPUBuffer;
   private readonly candidateTileStates: GPUBuffer;
   private readonly candidateTileWorklist: GPUBuffer;
-  private readonly candidateTransaction: GPUBuffer;
-  private leafIndices: GPUBuffer;
-  private leafStatesBuffer: GPUBuffer;
-  private currentAllocationPlan: FluidBrickResidencyAllocationPlan;
-  private candidateOnly: boolean;
+  private readonly leafIndices: GPUBuffer;
+  private readonly leafStatesBuffer: GPUBuffer;
+  private readonly currentAllocationPlan: FluidBrickResidencyAllocationPlan;
   private readonly params: GPUBuffer;
   private readonly layout: GPUBindGroupLayout;
-  private readonly surfaceCandidateLayout: GPUBindGroupLayout;
-  private readonly surfaceCandidateCommitLayout: GPUBindGroupLayout;
+  private readonly fineSeedCandidateLayout: GPUBindGroupLayout;
+  private readonly fineSeedCandidateCommitLayout: GPUBindGroupLayout;
   private readonly classifyPipeline: GPUComputePipeline;
   private readonly classifySweptPipeline: GPUComputePipeline;
   private readonly expandDownstreamPipeline: GPUComputePipeline;
   private readonly emitWorklistPipeline: GPUComputePipeline;
   private readonly emitTopologyTilesPipeline: GPUComputePipeline;
   private readonly finalizePipeline: GPUComputePipeline;
-  private readonly beginSurfaceCandidatesPipeline: GPUComputePipeline;
-  private readonly markPressureTopologyTilesPipeline: GPUComputePipeline;
-  private readonly markSurfaceCandidatesPipeline: GPUComputePipeline;
-  private readonly resolveSurfaceCandidatesPipeline: GPUComputePipeline;
-  private readonly emitSurfaceCandidateTilesPipeline: GPUComputePipeline;
-  private readonly beginSurfaceCandidateTilesPipeline?: GPUComputePipeline;
-  private readonly markSurfaceCandidateTilesPipeline?: GPUComputePipeline;
-  private readonly finalizeSurfaceCandidatesPipeline: GPUComputePipeline;
-  private readonly commitSurfaceCandidatesPipeline: GPUComputePipeline;
+  private readonly publishFineSeedCandidatesPipeline: GPUComputePipeline;
+  private readonly commitFineSeedCandidatesPipeline: GPUComputePipeline;
   private destroyed = false;
 
   constructor(
@@ -812,10 +932,10 @@ export class GPUFluidBrickResidency {
     for (const value of cellSize) if (!(value > 0) || !Number.isFinite(value)) throw new RangeError("Fluid cell size must be positive and finite");
     this.brickDimensions = dimensions.map((value) => Math.ceil(value / this.brickSize)) as [number, number, number];
     this.capacity = this.brickDimensions[0] * this.brickDimensions[1] * this.brickDimensions[2];
-    this.candidateOnly = options.surfaceCandidatesOnly === true;
+    const candidateOnly = options.fineSeedCandidatesOnly === true;
     const explicitMapping = options.leafIndices;
-    if (this.candidateOnly && explicitMapping) {
-      throw new RangeError("Surface-candidate-only residency requires implicit brick/leaf identity");
+    if (candidateOnly && explicitMapping) {
+      throw new RangeError("Fine-seed-candidate-only residency requires implicit brick/leaf identity");
     }
     if (explicitMapping && explicitMapping.length !== this.capacity) throw new RangeError("Fluid brick leaf mapping must cover every solver brick");
     let maximumMappedLeaf = 0;
@@ -840,9 +960,9 @@ export class GPUFluidBrickResidency {
       this.tileDimensions,
       leafCapacity,
       explicitMapping !== undefined,
-      this.candidateOnly,
-      options.surfaceCandidateBrickCapacity,
-      options.surfaceCandidateTileCapacity,
+      candidateOnly,
+      options.fineSeedCandidateBrickCapacity,
+      options.fineSeedCandidateTileCapacity,
     );
     this.publicationCapacity = this.currentAllocationPlan.brickStateCapacity;
     this.tilePublicationCapacity = this.currentAllocationPlan.tileStateCapacity;
@@ -856,15 +976,18 @@ export class GPUFluidBrickResidency {
     // the Section 4.2 owner-support transaction.
     this.tileWorklist = buffer("Topology tile active and retired worklists", tileWorklistWords * 4,
       GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
-    this.tileStates = buffer("Persistent topology tile activity", this.currentAllocationPlan.tileStateBytes, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
+    // COPY_SRC is failure-only QA: recurring topology rejection must be able
+    // to prove that compact dirty-tile membership and the published worklist
+    // name the same generation without perturbing either authority.
+    this.tileStates = buffer("Persistent topology tile activity", this.currentAllocationPlan.tileStateBytes,
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
     this.candidateStates = buffer("Candidate fluid brick page states", this.currentAllocationPlan.stateBytes, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     this.candidateWorklist = buffer("Candidate fluid brick worklists", worklistWords * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     this.candidateTileStates = buffer("Candidate topology tile activity", this.currentAllocationPlan.tileStateBytes, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     this.candidateTileWorklist = buffer("Candidate topology tile worklists", tileWorklistWords * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
-    this.candidateTransaction = buffer("Surface candidate publication transaction", 16, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     this.leafIndices = buffer("Fluid brick to sparse leaf mapping", mapping.byteLength, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, mapping);
     this.leafStatesBuffer = buffer(
-      this.candidateOnly ? "Unused sparse leaf residency fallback" : "Sparse leaf fluid residency",
+      candidateOnly ? "Unused sparse leaf residency fallback" : "Sparse leaf fluid residency",
       this.currentAllocationPlan.leafStateBytes,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     );
@@ -898,7 +1021,7 @@ export class GPUFluidBrickResidency {
     this.emitWorklistPipeline = device.createComputePipeline({ label: "Emit fluid brick worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "emitWorklist" } });
     this.emitTopologyTilesPipeline = device.createComputePipeline({ label: "Emit topology tile worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "emitTopologyTiles" } });
     this.finalizePipeline = device.createComputePipeline({ label: "Finalize fluid brick worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "finalize" } });
-    this.surfaceCandidateLayout=device.createBindGroupLayout({label:"Adaptive surface brick residency candidate layout",entries:[
+    this.fineSeedCandidateLayout=device.createBindGroupLayout({label:"Fine-seed brick residency candidate layout",entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
@@ -908,25 +1031,16 @@ export class GPUFluidBrickResidency {
       {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
-      {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
     ]});
-    const surfaceModule=device.createShaderModule({label:"Adaptive surface brick residency shader",code:this.currentAllocationPlan.sparseKeyPools?sparseSurfaceCandidateResidencyShader:surfaceCandidateResidencyShader});
-    const surfaceLayout=device.createPipelineLayout({bindGroupLayouts:[this.surfaceCandidateLayout]});
-    const surfacePipeline=(label:string,entryPoint:string)=>device.createComputePipeline({label,layout:surfaceLayout,compute:{module:surfaceModule,entryPoint}});
-    this.beginSurfaceCandidatesPipeline=surfacePipeline("Begin surface-candidate brick residency","beginSurfaceCandidates");
-    this.markPressureTopologyTilesPipeline=surfacePipeline("Mark live pressure topology tiles","markPressureTiles");
-    this.markSurfaceCandidatesPipeline=surfacePipeline("Mark surface-candidate brick residency","markSurfaceCandidates");
-    this.resolveSurfaceCandidatesPipeline=surfacePipeline("Resolve surface-candidate brick residency","resolveSurfaceCandidates");
-    this.emitSurfaceCandidateTilesPipeline=surfacePipeline("Emit surface-candidate topology tiles","emitTiles");
-    if(this.currentAllocationPlan.sparseKeyPools){
-      this.beginSurfaceCandidateTilesPipeline=surfacePipeline("Begin sparse surface-candidate topology tiles","beginSparseTiles");
-      this.markSurfaceCandidateTilesPipeline=surfacePipeline("Mark sparse surface-candidate topology tiles","markSparseTiles");
-    }else{
-      this.beginSurfaceCandidateTilesPipeline=surfacePipeline("Begin dense pressure topology tiles","beginPressureTiles");
-    }
-    this.finalizeSurfaceCandidatesPipeline=surfacePipeline("Finalize surface-candidate residency","finalize");
-    this.surfaceCandidateCommitLayout=device.createBindGroupLayout({label:"Adaptive surface brick residency commit layout",entries:[
+    const surfaceModule=device.createShaderModule({label:"Fine-seed brick residency shader",code:this.currentAllocationPlan.sparseKeyPools?sparseFineSeedCandidateResidencyShader:fineSeedCandidateResidencyShader});
+    const surfaceLayout=device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidateLayout]});
+    this.publishFineSeedCandidatesPipeline=device.createComputePipeline({
+      label:"Publish deterministic fine-seed-candidate residency",layout:surfaceLayout,
+      compute:{module:surfaceModule,entryPoint:"publishFineSeedCandidateResidency"},
+    });
+    this.fineSeedCandidateCommitLayout=device.createBindGroupLayout({label:"Fine-seed brick residency commit layout",entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
@@ -935,11 +1049,9 @@ export class GPUFluidBrickResidency {
       {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
-      {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
-      {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
     ]});
-    const commitModule=device.createShaderModule({label:"Adaptive surface brick residency commit shader",code:surfaceCandidateCommitShader});
-    this.commitSurfaceCandidatesPipeline=device.createComputePipeline({label:"Commit surface-candidate residency",layout:device.createPipelineLayout({bindGroupLayouts:[this.surfaceCandidateCommitLayout]}),compute:{module:commitModule,entryPoint:"commitSurfaceCandidates"}});
+    const commitModule=device.createShaderModule({label:"Fine-seed brick residency commit shader",code:fineSeedCandidateCommitShader});
+    this.commitFineSeedCandidatesPipeline=device.createComputePipeline({label:"Commit fine-seed-candidate residency",layout:device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidateCommitLayout]}),compute:{module:commitModule,entryPoint:"commitFineSeedCandidates"}});
     // The texture binding changes with the projection's ping-pong surface and
     // is therefore created in encode(). Keep the common resources resident.
   }
@@ -949,39 +1061,8 @@ export class GPUFluidBrickResidency {
   /** Persistent topology-tile state, shared with the analytic cold publisher. */
   get topologyTileStateBuffer(): GPUBuffer { return this.tileStates; }
   get leafStates(): GPUBuffer { return this.leafStatesBuffer; }
-  get surfaceCandidatesOnly(): boolean { return this.candidateOnly; }
   get allocationPlan(): FluidBrickResidencyAllocationPlan { return this.currentAllocationPlan; }
   get allocatedBytes(): number { return this.currentAllocationPlan.allocatedBytes; }
-
-  /**
-   * Permanently retire legacy leaf mirrors once compact surface candidates are
-   * authoritative. Existing submitted commands retain WebGPU resource
-   * lifetime. Dense classification remains usable for bootstrap worklists.
-   */
-  cutoverToSurfaceCandidatesOnly(): number {
-    if (this.destroyed || this.candidateOnly) return 0;
-    if (this.currentAllocationPlan.identityMapping !== "implicit") {
-      throw new Error("Explicit brick/leaf mappings cannot cut over to surface-candidate-only residency");
-    }
-    const previousBytes = this.currentAllocationPlan.allocatedBytes;
-    const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-    const leafIndexFallback = this.device.createBuffer({ label: "Unused fluid brick leaf-index fallback", size: 4, usage });
-    const leafStateFallback = this.device.createBuffer({ label: "Unused sparse leaf residency fallback", size: 4, usage });
-    this.device.queue.writeBuffer(leafIndexFallback, 0, new Uint32Array([0xffff_ffff]));
-    this.leafIndices.destroy();
-    this.leafStatesBuffer.destroy();
-    this.leafIndices = leafIndexFallback;
-    this.leafStatesBuffer = leafStateFallback;
-    this.candidateOnly = true;
-    this.currentAllocationPlan = planFluidBrickResidencyAllocation(
-      this.brickDimensions,
-      this.tileDimensions,
-      this.currentAllocationPlan.leafCapacity,
-      false,
-      true,
-    );
-    return previousBytes - this.currentAllocationPlan.allocatedBytes;
-  }
 
   encode(
     encoder: GPUCommandEncoder,
@@ -997,8 +1078,9 @@ export class GPUFluidBrickResidency {
     // complete deep-liquid volume.
     this.device.queue.writeBuffer(this.params, 40, new Float32Array([Math.max(0, options.dt_s ?? 0)]));
     // Preserve word 15 as a monotonically increasing GPU generation counter.
-    encoder.clearBuffer(this.worklist, 0, (FLUID_BRICK_WORKLIST_HEADER_WORDS - 1) * 4);
-    encoder.clearBuffer(this.tileWorklist, 0, FLUID_TILE_WORKLIST_HEADER_WORDS * 4);
+    const broker = new PassBroker(encoder);
+    broker.clearBuffer(this.worklist, 0, (FLUID_BRICK_WORKLIST_HEADER_WORDS - 1) * 4);
+    broker.clearBuffer(this.tileWorklist, 0, FLUID_TILE_WORKLIST_HEADER_WORDS * 4);
     const bindGroup = this.device.createBindGroup({ label: "Fluid brick residency bindings", layout: this.layout, entries: [
       { binding: 0, resource: levelSet.createView() },
       { binding: 1, resource: { buffer: this.states } },
@@ -1012,7 +1094,7 @@ export class GPUFluidBrickResidency {
       { binding: 7, resource: { buffer: this.tileWorklist } },
       { binding: 8, resource: { buffer: this.tileStates } },
     ] });
-    const classify = encoder.beginComputePass({ label: "Classify evolving fluid bricks" });
+    const classify = broker.compute({ label: "Classify evolving fluid bricks" });
     classify.setBindGroup(0, bindGroup);
     const bricks = Math.ceil(this.capacity / 64);
     if (preActivation) {
@@ -1026,63 +1108,46 @@ export class GPUFluidBrickResidency {
     // runs after classification (and after downstream expansion when on).
     classify.setPipeline(this.emitTopologyTilesPipeline);
     classify.dispatchWorkgroups(Math.ceil(this.tileCapacity / 64));
-    classify.end();
-    const finalize = encoder.beginComputePass({ label: "Finalize evolving fluid brick worklists" });
+    const finalize = broker.compute({ label: "Finalize evolving fluid brick worklists" });
     finalize.setPipeline(this.finalizePipeline);
     finalize.setBindGroup(0, bindGroup);
     finalize.dispatchWorkgroups(1);
-    finalize.end();
+    broker.fence("fluid brick worklists published");
   }
 
-  /** Derive the legacy brick/tile scheduler ABI from compact surface leaves. */
-  encodeSurfaceCandidates(
+  /** Derive the brick/tile scheduler ABI from compact fine-seed leaves. */
+  encodeFineSeedCandidates(
     encoder: GPUCommandEncoder,
     leaves: GPUBuffer,
     candidates: GPUBuffer,
     candidateControl: GPUBuffer,
   ): void {
     if (this.destroyed) return;
-    // Preserve the stable publication and stage generation B independently.
-    // Header word 15 carries generation and is copied before clearing all
-    // other candidate counters/dispatches. No candidate producer buffer is
-    // used as INDIRECT while it is storage-bound in this encoding scope.
-    encoder.copyBufferToBuffer(this.worklist, 15 * 4, this.candidateWorklist, 15 * 4, 4);
-    encoder.copyBufferToBuffer(this.tileWorklist, 15 * 4, this.candidateTileWorklist, 15 * 4, 4);
-    encoder.clearBuffer(this.candidateWorklist, 0, (FLUID_BRICK_WORKLIST_HEADER_WORDS - 1) * 4);
-    encoder.clearBuffer(this.candidateTileWorklist, 0, (FLUID_TILE_WORKLIST_HEADER_WORDS - 1) * 4);
-    encoder.clearBuffer(this.candidateTransaction);
-    const bindGroup=this.device.createBindGroup({label:"Adaptive surface brick residency candidate bindings",layout:this.surfaceCandidateLayout,entries:[
+    // The deterministic schedule overwrites generation B completely. Failed,
+    // stale, malformed, or capacity-exhausted generations never publish the
+    // commit marker and therefore leave generation A byte-for-byte untouched.
+    const broker = new PassBroker(encoder);
+    const bindGroup=this.device.createBindGroup({label:"Fine-seed brick residency candidate bindings",layout:this.fineSeedCandidateLayout,entries:[
       {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
       {binding:2,resource:{buffer:this.candidateWorklist}},{binding:3,resource:{buffer:this.tileStates}},
       {binding:4,resource:{buffer:this.candidateTileStates}},{binding:5,resource:{buffer:this.candidateTileWorklist}},
       {binding:6,resource:{buffer:leaves}},{binding:7,resource:{buffer:candidates}},
-      {binding:8,resource:{buffer:candidateControl}},{binding:9,resource:{buffer:this.candidateTransaction}},
+      {binding:8,resource:{buffer:candidateControl}},{binding:9,resource:{buffer:this.tileWorklist}},
       {binding:10,resource:{buffer:this.params}},
     ]});
-    const bricks=Math.ceil(this.publicationCapacity/64);
-    const tiles=Math.ceil(this.tilePublicationCapacity/64);
-    const stage=(label:string,pipeline:GPUComputePipeline,workgroups:number)=>{const pass=encoder.beginComputePass({label});pass.setBindGroup(0,bindGroup);pass.setPipeline(pipeline);pass.dispatchWorkgroups(workgroups);pass.end();};
-    stage("Begin adaptive surface brick residency",this.beginSurfaceCandidatesPipeline,bricks);
-    if(this.beginSurfaceCandidateTilesPipeline) stage("Begin adaptive sparse topology tiles",this.beginSurfaceCandidateTilesPipeline,tiles);
-    stage("Mark live pressure topology tiles",this.markPressureTopologyTilesPipeline,
-      Math.ceil(Math.max(1,leaves.size/64)/64));
-    stage("Mark adaptive surface brick residency",this.markSurfaceCandidatesPipeline,Math.ceil(Math.max(1,candidates.size/8)/64));
-    stage("Resolve adaptive surface brick residency",this.resolveSurfaceCandidatesPipeline,bricks);
-    if(this.markSurfaceCandidateTilesPipeline) stage("Mark adaptive sparse topology tiles",this.markSurfaceCandidateTilesPipeline,bricks);
-    stage("Emit adaptive surface topology tiles",this.emitSurfaceCandidateTilesPipeline,tiles);
-    const finalize=encoder.beginComputePass({label:"Finalize adaptive surface brick worklists"});
-    finalize.setPipeline(this.finalizeSurfaceCandidatesPipeline);finalize.setBindGroup(0,bindGroup);finalize.dispatchWorkgroups(1);finalize.end();
-    const commitGroup=this.device.createBindGroup({label:"Adaptive surface brick residency commit bindings",layout:this.surfaceCandidateCommitLayout,entries:[
+    const publish=broker.compute({label:"Publish deterministic fine-seed brick residency"});
+    publish.setPipeline(this.publishFineSeedCandidatesPipeline);publish.setBindGroup(0,bindGroup);publish.dispatchWorkgroups(1);
+    const commitGroup=this.device.createBindGroup({label:"Fine-seed brick residency commit bindings",layout:this.fineSeedCandidateCommitLayout,entries:[
       {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
       {binding:2,resource:{buffer:this.worklist}},{binding:3,resource:{buffer:this.candidateWorklist}},
       {binding:4,resource:{buffer:this.tileStates}},{binding:5,resource:{buffer:this.candidateTileStates}},
       {binding:6,resource:{buffer:this.tileWorklist}},{binding:7,resource:{buffer:this.candidateTileWorklist}},
-      {binding:8,resource:{buffer:this.candidateTransaction}},{binding:9,resource:{buffer:this.params}},
     ]});
-    const commit=encoder.beginComputePass({label:"Commit adaptive surface brick residency"});
-    commit.setPipeline(this.commitSurfaceCandidatesPipeline);commit.setBindGroup(0,commitGroup);
+    const commit=broker.compute({label:"Commit fine-seed brick residency"});
+    commit.setPipeline(this.commitFineSeedCandidatesPipeline);commit.setBindGroup(0,commitGroup);
     commit.dispatchWorkgroups(Math.ceil(Math.max(this.worklistByteLength,this.tileWorklistByteLength,
-      this.currentAllocationPlan.stateBytes,this.currentAllocationPlan.tileStateBytes)/4/64));commit.end();
+      this.currentAllocationPlan.stateBytes,this.currentAllocationPlan.tileStateBytes)/4/64));
+    broker.fence("fine-seed brick residency committed");
   }
 
   async readStats(): Promise<FluidBrickResidencyStats> {
@@ -1112,7 +1177,6 @@ export class GPUFluidBrickResidency {
     this.candidateWorklist.destroy();
     this.candidateTileStates.destroy();
     this.candidateTileWorklist.destroy();
-    this.candidateTransaction.destroy();
     this.leafIndices.destroy();
     this.leafStatesBuffer.destroy();
     this.params.destroy();

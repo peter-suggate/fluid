@@ -7,11 +7,11 @@ export const OCTREE_GENERATED_POWER_CATALOG_MANIFEST = Object.freeze({
   "maximumFaceIncidence": 30,
   "maximumNeighborRows": 36,
   "maximumTetrahedra": 68,
-  "byteCount": 9472424,
+  "byteCount": 10086740,
   "worstFloat32GeometryError": 5.739706909757558e-8,
-  "generatorVersion": 4,
-  "generatorHash": "b078bab2fce14342da38c83955ca27f2f8bf8e48d7dfdb8cb4dfc5ef5098989f",
-  "binarySha256": "671d5c8092440d6fb898feddd52c414e7bd2f1c6da3c62f1bb768985c67a79ac"
+  "generatorVersion": 5,
+  "generatorHash": "00e6022739521e360c9d981dbc29e1562a7c83fd8c5fe037989eccf07d217896",
+  "binarySha256": "0db57ced9b50f4890c9234f2b1fe399e35230453f0c8f443de4dd87f405cf5e2"
 } as const);
 
 export interface GeneratedOctreePowerCatalogViews {
@@ -30,19 +30,21 @@ export interface GeneratedOctreePowerCatalogViews {
   readonly tetrahedronData: Uint32Array;
   /** Global byte-selector table: canonical offset xyz and size ratio. */
   readonly tetrahedronVertexData: Float32Array;
+  /** Section 6.3: diagonal followed by eighteen canonical face-slot coefficients per entry. */
+  readonly coefficientData: Float32Array;
 }
 
 export function decodeGeneratedOctreePowerCatalog(data: ArrayBuffer): GeneratedOctreePowerCatalogViews {
   if (data.byteLength !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.byteCount) throw new RangeError("Generated power catalog byte count mismatch");
-  const h = new Uint32Array(data, 0, 24);
+  const h = new Uint32Array(data, 0, 26);
   if (h[0] !== OCTREE_GENERATED_POWER_CATALOG_MAGIC || h[1] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.version) {
     throw new Error("Generated power catalog version mismatch");
   }
   if (h[2] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount
     || h[3] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount || h[7] !== data.byteLength
     || h[13] !== 262144 || h[15] !== 512
-    || h[19] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra || h[20] !== 24
-    || h[22] > 256 || h[23] !== 4) {
+    || h[19] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra || h[20] !== 26
+    || h[22] > 256 || h[23] !== 4 || h[25] !== 19) {
     throw new Error("Generated power catalog manifest mismatch");
   }
   return {
@@ -55,6 +57,7 @@ export function decodeGeneratedOctreePowerCatalog(data: ArrayBuffer): GeneratedO
     tetrahedronHeaders: new Uint32Array(data, h[16], h[2] * 3),
     tetrahedronData: new Uint32Array(data, h[17], h[18]),
     tetrahedronVertexData: new Float32Array(data, h[21], h[22] * h[23]),
+    coefficientData: new Float32Array(data, h[24], h[2] * h[25]),
   };
 }
 

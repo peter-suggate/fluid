@@ -82,8 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         metalView.metricsChanged = { [weak self] value, grid in
             DispatchQueue.main.async {
                 self?.metrics.stringValue = String(
-                    format: "GPU frame  %.2f ms\nCPU frame  %.2f ms\nSimulation  %.3f s\nSimulation rate  %.2f×\nVolume drift  %.3f%%\nMax speed  %.2f m/s\n\n%@",
-                    value.renderMS, value.frameMS, value.simulationTime, value.simulatedPerWallSecond, value.volumeDrift * 100, value.maxSpeed, grid.label
+                    format: "Simulation  %.3f s\nVolume drift  %.3f%%\nMax speed  %.2f m/s\n\n%@",
+                    value.simulationTime, value.volumeDrift * 100, value.maxSpeed, grid.label
                 )
                 if let solver = self?.metalView.solver, self?.bodyPopup.indexOfSelectedItem != solver.selectedBodyIndex {
                     self?.bodyPopup.selectItem(at: solver.selectedBodyIndex)
@@ -150,8 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status.textColor = .secondaryLabelColor
         let hint = NSTextField(wrappingLabelWithString: "Drag to orbit · ⌥ drag selected body\nScroll to zoom · ⌘O open scene")
         let validate = NSButton(title: "Validate", target: self, action: #selector(showValidation))
-        let profile = NSButton(title: "Performance", target: self, action: #selector(showPerformance))
-        let buttons = NSStackView(views: [play, step, reset, validate, profile])
+        let buttons = NSStackView(views: [play, step, reset, validate])
         buttons.orientation = .horizontal
         buttons.distribution = .fillEqually
         buttons.spacing = 8
@@ -200,7 +199,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func resetSimulation() { try? metalView.solver?.reset() }
     @objc private func singleStep() { metalView.solver?.requestSingleStep() }
     @objc private func showValidation() { let alert=NSAlert();alert.messageText="Eulerian contract";alert.informativeText="Shared scene/schema: PASS\nMetal library and pipelines: PASS\nRigid primitives: \(metalView.solver?.bodies.count ?? 0) active\nFinite GPU diagnostics are monitored live.";alert.runModal() }
-    @objc private func showPerformance() { guard let value=metalView.solver?.metrics else{return};let alert=NSAlert();alert.messageText="Metal performance";alert.informativeText=String(format:"GPU command buffer %.2f ms\nCPU frame %.2f ms\nSimulation rate %.2fx\nVolume drift %.3f%%\nMax velocity %.2f m/s",value.renderMS,value.frameMS,value.simulatedPerWallSecond,value.volumeDrift*100,value.maxSpeed);alert.runModal() }
     private func configureBodyPopup() {
         bodyPopup.removeAllItems(); (metalView?.solver?.bodies ?? []).forEach { bodyPopup.addItem(withTitle: $0.description.name) }
         bodyPopup.selectItem(at: metalView?.solver?.selectedBodyIndex ?? 0)
@@ -221,7 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scene.container.depth_m = max(0.1, depthField.floatValue)
         scene.container.fillFraction = min(1, max(0, fillField.floatValue))
         scene.container.fluidWallMode = wallPopup.titleOfSelectedItem ?? "no-slip"
-        scene.container.top = topPopup.titleOfSelectedItem ?? "open"
+        scene.container.top = topPopup.titleOfSelectedItem ?? "closed"
         scene.fluid.initialCondition = initialPopup.titleOfSelectedItem ?? "dam-break"
         scene.fluid.gravity_m_s2.y = gravityField.floatValue
         scene.fluid.dynamicViscosity_Pa_s = max(0, viscosityField.floatValue)
@@ -252,7 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = "fluid-metal-run.json"
         if panel.runModal() == .OK, let url = panel.url, let solver = metalView.solver {
             let bodyValues = solver.bodies.map { ["id": $0.description.id, "position": [$0.position.x,$0.position.y,$0.position.z], "velocity": [$0.linearVelocity.x,$0.linearVelocity.y,$0.linearVelocity.z]] as [String: Any] }
-            let payload: [String: Any] = ["build":"native-metal-1", "gpu":metalView.device?.name ?? "Metal", "quality":quality.rawValue, "simulationTime_s":solver.metrics.simulationTime, "gpuFrame_ms":solver.metrics.renderMS, "volumeDrift":solver.metrics.volumeDrift, "bodies":bodyValues]
+            let payload: [String: Any] = ["build":"native-metal-1", "gpu":metalView.device?.name ?? "Metal", "quality":quality.rawValue, "simulationTime_s":solver.metrics.simulationTime, "volumeDrift":solver.metrics.volumeDrift, "bodies":bodyValues]
             if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted,.sortedKeys]) { try? data.write(to: url) }
         }
     }

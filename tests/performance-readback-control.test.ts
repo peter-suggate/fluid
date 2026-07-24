@@ -1,47 +1,37 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { useUIStore } from "../lib/stores/ui-store";
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 
-test("performance readbacks are user-switchable and default on", () => {
-  const initial = useUIStore.getState().performanceReadbacksEnabled;
-  assert.equal(initial, true);
-  useUIStore.getState().setPerformanceReadbacksEnabled(false);
-  assert.equal(useUIStore.getState().performanceReadbacksEnabled, false);
-  useUIStore.getState().setPerformanceReadbacksEnabled(initial);
+test("the old profiler toggle and stage-capture UI are absent", () => {
+  const sources = [
+    read("../lib/stores/ui-store.ts"),
+    read("../components/WebGPUViewport.tsx"),
+    read("../components/PerformancePanel.tsx"),
+    read("../lib/webgpu-renderer.ts"),
+    read("../lib/webgpu-water-pipeline.ts"),
+  ].join("\n");
+  assert.doesNotMatch(sources, /performanceReadbacksEnabled|setPerformanceReadbacksEnabled|gpuStageCapture/);
 });
 
-test("maximum-throughput mode gates every recurring profiler readback at encode or submit time", () => {
+test("new accounting uses one generic trace schema", () => {
+  const source = read("../lib/performance-trace.ts");
+  assert.match(source, /interface PerformanceTrace/);
+  assert.match(source, /decodeGPUTimestampPartition/);
+  assert.match(source, /Performance intervals overlap/);
+});
+
+test("GPU lanes fall back to explicit queue-wall samples without timestamp-query", () => {
+  const recorder = read("../lib/performance-trace.ts");
   const renderer = read("../lib/webgpu-renderer.ts");
   const uniform = read("../lib/webgpu-uniform-eulerian.ts");
-  const tallCell = read("../lib/webgpu-eulerian.ts");
-  const water = read("../lib/webgpu-water-pipeline.ts");
-  const viewport = read("../components/WebGPUViewport.tsx");
-  const panel = read("../components/PerformancePanel.tsx");
-
-  assert.match(renderer, /this\.performanceReadbacksEnabled&&now_ms-this\.lastGPUReadbackAt_ms>=250/,
-    "solver statistics polling must stop");
-  assert.match(renderer, /sampleRenderGPU=Boolean\(this\.performanceReadbacksEnabled&&this\.renderQuerySet/,
-    "presentation timestamps and their resolve must not be encoded");
-  assert.match(uniform, /if \(!this\.performanceReadbacksEnabled \|\| !this\.querySet/,
-    "uniform and octree timing ranges must not be allocated");
-  assert.match(uniform, /const productionPhaseProbeActive = this\.performanceReadbacksEnabled/,
-    "queue-boundary command-buffer splitting must remain disabled in maximum-throughput mode");
-  assert.match(uniform, /productionPhaseProbeActive \? \(phase, completedEncoder, detail\) =>/,
-    "the octree surface must receive no split callback outside an active intrusive sample");
-  assert.match(uniform, /if \(!this\.performanceReadbacksEnabled \|\| \(this\.info\.encodedSteps/,
-    "uniform and octree diagnostic maps must return before encoding copies");
-  assert.match(tallCell, /if\(!this\.performanceReadbacksEnabled\|\|!this\.querySet/,
-    "restricted tall-cell timing ranges must not be allocated");
-  assert.match(tallCell, /if\(!this\.performanceReadbacksEnabled\|\|this\.stepIndex===0\)return this\.info/,
-    "restricted tall-cell diagnostic maps must return before encoding copies");
-  assert.match(water, /if \(!this\.performanceReadbacksEnabled \|\| this\.adaptiveDiagnosticPending/,
-    "adaptive presentation diagnostic copies must not be encoded");
-  assert.match(viewport, /renderer\.setPerformanceReadbacksEnabled\(ui\.performanceReadbacksEnabled\)/,
-    "the live UI state must reach the renderer before each draw");
-  assert.match(viewport, /simulation\.backend === "webgpu" && rendererRef\.current && useUIStore\.getState\(\)\.performanceReadbacksEnabled/,
-    "GPU picking must fall back to the CPU bounds path rather than map a result");
-  assert.match(panel, /OFF · MAX SPEED/);
+  const tall = read("../lib/webgpu-eulerian.ts");
+  assert.match(recorder, /class GPUQueueWallPerformanceTraceRecorder/);
+  assert.match(recorder, /measurementSource: "gpu-queue-wall"/);
+  for (const source of [renderer, uniform, tall]) {
+    assert.match(source, /GPUQueueWallPerformanceTraceRecorder/);
+    assert.match(source, /QueueTraceRead/);
+    assert.match(source, /trace\s*\?\?\s*.*QueueTraceRead/);
+  }
 });

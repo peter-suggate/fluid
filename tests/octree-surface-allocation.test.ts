@@ -6,49 +6,36 @@ import { pathToFileURL } from "node:url";
 import { planOctreeSurfaceStateAllocation } from "../lib/octree-surface-allocation";
 import { WebGPUQuadtreeSurfaceState } from "../lib/webgpu-quadtree-builder";
 
-test("adaptive surface authority retains one publication phi and removes every legacy volume-scaled auxiliary", () => {
-  const plan = planOctreeSurfaceStateAllocation([320, 96, 80], true);
+test("adaptive surface authority retains one publication phi", () => {
+  const plan = planOctreeSurfaceStateAllocation([320, 96, 80]);
   assert.equal(plan.cellCount, 2_457_600);
   assert.equal(plan.publicationBytes, 9_830_400);
-  assert.equal(plan.denseBaselineBytes, 78_643_200);
   assert.equal(plan.allocatedBytes, plan.publicationBytes);
   assert.equal(plan.persistentAllocatedBytes, plan.publicationBytes);
-  assert.equal(plan.savedBytes, 68_812_800);
-  assert.equal(plan.legacyAuxiliaryBytes, 3 * plan.publicationBytes + 2 * plan.cellCount * 8);
 });
 
 test("direct paged authority retains only one format-compatible phi texel after bootstrap", () => {
-  const plan = planOctreeSurfaceStateAllocation([320, 96, 80], true, true);
+  const plan = planOctreeSurfaceStateAllocation([320, 96, 80], true);
   assert.equal(plan.publicationBytes, 9_830_400);
   assert.equal(plan.persistentPublicationBytes, 4);
   assert.equal(plan.allocatedBytes, 9_830_400, "bootstrap peak includes the uploaded dense field");
   assert.equal(plan.persistentAllocatedBytes, 4);
-  assert.equal(plan.savedBytes, plan.denseBaselineBytes - 4);
 });
 
 test("analytic sparse bootstrap never allocates the box-sized publication peak", () => {
-  const plan = planOctreeSurfaceStateAllocation([320, 96, 80], true, true, true);
-  assert.equal(plan.publicationBytes, 9_830_400, "dense compatibility size remains measurable");
+  const plan = planOctreeSurfaceStateAllocation([320, 96, 80], true, true);
+  assert.equal(plan.publicationBytes, 9_830_400, "transient imported-bootstrap size remains measurable");
   assert.equal(plan.allocatedBytes, 4);
   assert.equal(plan.persistentAllocatedBytes, 4);
-  assert.equal(plan.savedBytes, plan.denseBaselineBytes - 4);
 });
 
-test("surface-state savings scale with volume for the large target domain", () => {
-  const medium = planOctreeSurfaceStateAllocation([320, 96, 80], true);
-  const large = planOctreeSurfaceStateAllocation([640, 192, 160], true);
+test("surface-state publication scales with volume for the large target domain", () => {
+  const medium = planOctreeSurfaceStateAllocation([320, 96, 80]);
+  const large = planOctreeSurfaceStateAllocation([640, 192, 160]);
   assert.equal(large.cellCount, medium.cellCount * 8);
   assert.equal(large.publicationBytes, 78_643_200);
-  assert.equal(large.denseBaselineBytes, 629_145_600);
-  assert.equal(large.savedBytes, 550_502_400);
-  assert.equal(large.savedBytes, medium.savedBytes * 8);
-});
-
-test("legacy mode accounts all four phi textures and both seed arenas", () => {
-  const plan = planOctreeSurfaceStateAllocation([7, 5, 3], false);
-  assert.equal(plan.allocatedBytes, 7 * 5 * 3 * 32);
-  assert.equal(plan.savedBytes, 0);
-  assert.throws(() => planOctreeSurfaceStateAllocation([0, 5, 3], true), RangeError);
+  assert.equal(large.allocatedBytes, medium.allocatedBytes * 8);
+  assert.throws(() => planOctreeSurfaceStateAllocation([0, 5, 3]), RangeError);
 });
 
 test("presentation-only dense phi is released exactly once after bootstrap submission", async () => {
@@ -84,34 +71,26 @@ test("format-only phi placeholder remains live until solver destruction", async 
   assert.equal(state.presentationTextureReleased, false);
 });
 
-test("solver retires bootstrap phi only after submission and exposes the 1x1 fallback", () => {
+test("solver retires bootstrap phi only after compact cutover and exposes the 1x1 fallback", () => {
   const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
   assert.match(uniform, /queue\.submit\(\[encoder\.finish\(\)\]\);[\s\S]*?releaseDenseBootstrapPhi\(\)/,
     "the dense bootstrap texture must remain alive through submission");
   assert.match(octree, /get levelSetTexture\(\) \{ return this\.denseBootstrapPhiReleased \? this\.levelSetFallbackTexture! : this\.surfaceState\.texture; \}/);
-  assert.match(octree, /this\.pagedPhiDifferential \|\| this\.diagnosticGroups[\s\S]*?this\.globalFineLevelSet && !this\.globalFineBootstrapped[\s\S]*?this\.scene\.rigidBodies\.length > 0 \|\| sceneHasTerrain\(this\.scene\)/,
-    "dense-only diagnostic and solid-coupling paths must retain their publication");
+  assert.match(octree, /incompatibleDenseConsumer: Boolean\(this\.diagnosticGroups[\s\S]*!this\.globalFineBootstrapped[\s\S]*this\.scene\.rigidBodies\.length > 0 \|\| sceneHasTerrain\(this\.scene\)/,
+    "dense-only diagnostics and solid coupling must retain their publication");
   assert.match(octree,
-    /if \(this\.directPagedTopology && !this\.surfacePagesBootstrapped && this\.pagedGroups\)/,
-    "global-fine mode must perform the same one-texel paged-phi rebinding before release");
+    /fineSeedCoarseNative: this\.fineSeedAdapter\?\.hasCoarsePhiBindings === true/);
+  assert.doesNotMatch(octree, /createCouplingGroup|couplingGroups/,
+    "the retired dense coupling bind groups must not retain destroyed texture views");
   assert.doesNotMatch(octree,
-    /this\.directPagedTopology && !this\.globalFineLevelSet && !this\.surfacePagesBootstrapped/);
-  assert.match(octree,
-    /this\.adaptiveSurfacePages\?\.releaseDensePublicationBinding\(\);[\s\S]*this\.surfaceState\.releasePresentationTexture\(\)/,
-    "the one-shot dense publication bind group must be dropped before destroying its texture");
-  assert.match(octree,
-    /this\.couplingGroups = \{[\s\S]*this\.createCouplingGroup\(this\.pressureA, this\.levelSetFallbackTexture!\)[\s\S]*this\.createCouplingGroup\(this\.pressureB, this\.levelSetFallbackTexture!\)/,
-    "dormant no-body coupling groups must not retain views of the destroyed dense texture");
-  const couplingGroup = octree.slice(octree.indexOf("private createCouplingGroup"), octree.indexOf("private descriptor"));
-  assert.match(couplingGroup, /binding: 6, resource: levelSet\.createView\(\)/);
-  assert.equal((couplingGroup.match(/\{ binding:/g) ?? []).length, 9,
-    "fallback rebinding must reuse the nine-binding coupling layout without increasing stage limits");
+    /pagedPhi|pagedGroups|surfacePagesBootstrapped|adaptiveSurfacePages|setSurfacePageSource/,
+    "the deleted page authority must have no release-time bindings or compatibility API");
 });
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 
-test("Dawn presentation-only surface state allocates no legacy transport volumes or seeds", {
+test("Dawn presentation-only surface state allocates no retired transport volumes or seeds", {
   skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU surface allocation checks",
 }, async () => {
   const { create, globals } = await import(pathToFileURL(modulePath!).href) as {

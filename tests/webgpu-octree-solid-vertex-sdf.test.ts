@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   materializeOctreeTerrainVertexSdf,
@@ -48,13 +49,24 @@ test("terrain vertex publication rejects malformed sparse owners", () => {
 
 test("GPU publication is generation-tagged and fail-closed", () => {
   assert.match(octreeSolidVertexSdfShader, /solid vertex SDF|publishSolidVertexSdf/i);
-  assert.match(octreeSolidVertexSdfShader, /atomicStore\(&arena\.control\[4\],params\.publication\.x\)/);
-  assert.match(octreeSolidVertexSdfShader, /atomicLoad\(&arena\.control\[3\]\)==count\*8u/);
-  assert.match(octreeSolidVertexSdfShader, /atomicStore\(&arena\.control\[5\],VALID\)/);
+  assert.match(octreeSolidVertexSdfShader, /arena\.control\[4\]=params\.publication\.x/);
+  assert.match(octreeSolidVertexSdfShader, /arena\.control\[3\]=count\*8u/);
+  assert.match(octreeSolidVertexSdfShader, /arena\.control\[5\]=VALID/);
   assert.match(octreeSolidVertexSdfShader, /rollbackSeedControl\[5\]==params\.publication\.x/);
+  assert.doesNotMatch(octreeSolidVertexSdfShader,
+    /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
+    "each row owns its eight samples and singleton publication reduces row sentinels deterministically");
   assert.doesNotMatch(octreeSolidVertexSdfShader, /dims\.x\*params\.dims\.y\*params\.dims\.z\*8u/,
     "storage must remain compact-row-scaled");
   assert.doesNotMatch(octreeSolidVertexSdfShader, /bitcast<f32>\(0x7fc00000u\)/,
     "portable WGSL must not construct a constant NaN in an unreachable texture guard");
   assert.match(octreeSolidVertexSdfShader, /if\(any\(extent<=vec2i\(0\)\)\)\{return 0\.0;\}/);
+});
+
+test("solid vertex publication shares the caller's ordered compute pass", () => {
+  const source = readFileSync(new URL("../lib/webgpu-octree-solid-vertex-sdf.ts", import.meta.url), "utf8");
+  const encode = source.slice(source.indexOf("encode(broker: PassBroker"), source.indexOf("get source:"));
+  assert.ok(encode.length > 0);
+  assert.doesNotMatch(encode, /new PassBroker|broker\.fence|beginComputePass/,
+    "solid vertex observation must not manufacture a routine pass boundary");
 });

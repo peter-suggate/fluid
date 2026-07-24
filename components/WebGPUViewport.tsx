@@ -14,10 +14,9 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { advancePresentationClock, presentationFrameDue, presentationStateChanged } from "@/lib/frame-pacing";
 import { getScenePreset } from "@/lib/scenes";
-import { gpuStageCapture } from "@/lib/gpu-stage-capture";
 import { SVO_COST_OVERLAY_LABELS } from "@/lib/svo-render-diagnostics";
-import { recordPresentedFrame } from "@/lib/presentation-frame-rate";
 import { projectViewportFailure, viewportFailureIndicator } from "@/lib/viewport-failure-diagnostics";
+import { dawnReproductionForGPUFailure } from "@/lib/webgpu-failure-reproduction";
 import {
   acquireBrowserGPULease,
   GPU_MANUAL_START_EVENT,
@@ -115,7 +114,6 @@ export function WebGPUViewport() {
       (time_s) => simulation.gpuAdvanceCompleted(time_s),
       (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus })
     );
-    renderer.setPerformanceReadbacksEnabled(useUIStore.getState().performanceReadbacksEnabled);
     let safeSimulationEpoch: number | undefined;
     const syncRunState = (runState: ReturnType<typeof useRuntimeStore.getState>["runState"]) => {
       const submittedTime_s = renderer.setSimulationRunning(runState === "running");
@@ -156,7 +154,6 @@ export function WebGPUViewport() {
         diagnosticsOpen: ui.diagnosticsOpen,
         rightPanel: ui.rightPanel,
         gridOverlayAxis: ui.gridOverlayAxis,
-        stageCapturePhase: gpuStageCapture.getSnapshot().phase,
         search: window.location.search,
       });
     };
@@ -169,12 +166,13 @@ export function WebGPUViewport() {
       if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: "Stopping WebGPU; waiting for initialization and solver tasks to drain" } });
       const pendingLease = leaseAcquisition;
       const releasedLabel = label.includes("device released") ? label : `${label}; device released — safe to close this tab`;
+      const reproduction = dawnReproductionForGPUFailure(label);
       stopPromise = (async () => {
         await shutdownBrowserGPUSession(renderer, pendingLease, releaseGPULease);
         releaseGPULease = undefined;
         stopping = false;
         stopped = true;
-        if (publishStatus) diagnostics.set({ gpuStatus: { state: "unavailable", label: releasedLabel } });
+        if (publishStatus) diagnostics.set({ gpuStatus: { state: "unavailable", label: releasedLabel, reproduction } });
       })();
       return stopPromise;
     }
@@ -228,8 +226,7 @@ export function WebGPUViewport() {
         const method = useMethodStore.getState();
         const state = useDiagnosticsStore.getState();
         const runtime = useRuntimeStore.getState();
-        renderer.setPerformanceReadbacksEnabled(ui.performanceReadbacksEnabled);
-        // A profiler needs newly completed submissions, not repeated snapshots
+        // A trace needs newly completed submissions, not repeated snapshots
         // of the last on-change frame. Static dry scenes have no fluid solver
         // and are paused by design, so keep presenting while PERF is visible.
         // FluidLabRenderer still admits only one presentation at a time.
@@ -238,7 +235,6 @@ export function WebGPUViewport() {
         const pausedPresentation = runtime.runState === "paused" && !continuousPerformancePresentation ? [
           sceneState, ui, method, state.bodies, state.fluidRenderState, state.gpuInfo,
           simulation.time(), renderer.presentationRevision,
-          gpuStageCapture.getSnapshot().revision,
           canvas.clientWidth, canvas.clientHeight, window.devicePixelRatio
         ] : undefined;
         if (pausedPresentation && !presentationStateChanged(lastPausedPresentation, pausedPresentation)) return;
@@ -270,11 +266,9 @@ export function WebGPUViewport() {
           return;
         }
         simulation.recordFrame(metrics, renderer.presentationResolution);
-        if (metrics.cpuRenderEncode_ms > 0) recordPresentedFrame(now_ms);
-        // A pending presentation returns zero encode time. Retry that same
-        // paused state on the next paced callback instead of considering it
-        // painted before any command buffer was submitted.
-        if (pausedPresentation && metrics.cpuRenderEncode_ms > 0) lastPausedPresentation = pausedPresentation;
+        // Retry a pending paused presentation instead of considering it
+        // painted before a command buffer was submitted.
+        if (pausedPresentation && metrics.presentationSubmitted) lastPausedPresentation = pausedPresentation;
       };
       frame = requestAnimationFrame(render);
       }).catch((error: unknown) => {
@@ -295,7 +289,6 @@ export function WebGPUViewport() {
     const unsubscribeSafeScene = useSceneStore.subscribe(enforceSafeConfiguration);
     const unsubscribeSafeMethod = useMethodStore.subscribe(enforceSafeConfiguration);
     const unsubscribeSafeUI = useUIStore.subscribe(enforceSafeConfiguration);
-    const unsubscribeSafeCapture = gpuStageCapture.subscribe(enforceSafeConfiguration);
     const manualStop = () => { void stopGPU(); };
     window.addEventListener(GPU_MANUAL_STOP_EVENT, manualStop);
     const pageHide = () => { void stopGPU("WebGPU stopped during page close", false); };
@@ -304,7 +297,7 @@ export function WebGPUViewport() {
       diagnostics.set({ gpuStatus: { state: "manual", label: "WebGPU is waiting for explicit startup" } });
       window.addEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
     } else beginInitialization();
-    return () => { alive = false; running = false; window.removeEventListener(GPU_MANUAL_START_EVENT, beginInitialization); window.removeEventListener(GPU_MANUAL_STOP_EVENT, manualStop); window.removeEventListener("pagehide", pageHide); unsubscribeAutomaticStart(); unsubscribeSafeScene(); unsubscribeSafeMethod(); unsubscribeSafeUI(); unsubscribeSafeCapture(); unsubscribeRunState(); cancelAnimationFrame(frame); if(rendererRef.current===renderer)rendererRef.current=null; void stopGPU("WebGPU stopped during component cleanup", false); };
+    return () => { alive = false; running = false; window.removeEventListener(GPU_MANUAL_START_EVENT, beginInitialization); window.removeEventListener(GPU_MANUAL_STOP_EVENT, manualStop); window.removeEventListener("pagehide", pageHide); unsubscribeAutomaticStart(); unsubscribeSafeScene(); unsubscribeSafeMethod(); unsubscribeSafeUI(); unsubscribeRunState(); cancelAnimationFrame(frame); if(rendererRef.current===renderer)rendererRef.current=null; void stopGPU("WebGPU stopped during component cleanup", false); };
   }, []);
 
   const pointerRay = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -354,7 +347,7 @@ export function WebGPUViewport() {
       const ray = pointerRay(event);
       const grab = sliceGrabHit(ray.origin, ray.direction);
       if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
-      if (simulation.backend === "webgpu" && rendererRef.current && useUIStore.getState().performanceReadbacksEnabled) {
+      if (simulation.backend === "webgpu" && rendererRef.current) {
         const pointerId=event.pointerId,timeStamp=event.timeStamp,x=event.clientX,y=event.clientY;
         pointerRef.current={id:pointerId,x,y,action:"pick"};
         const rect=event.currentTarget.getBoundingClientRect();

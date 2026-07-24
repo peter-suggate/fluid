@@ -128,13 +128,15 @@ test("nonzero solver origin remaps active and retired bricks into the structural
   assert.equal(publication.stats.retired, 1);
   assert.equal(lifecycle.slot(34), undefined);
   const arena = new Uint32Array(plan.allocatedWords);
+  const sorted = [...lifecycle.pageTable.entries()].filter(([, encoded]) => encoded !== 0);
+  arena[1] = sorted.length;
+  let record = 0;
   for (let logical = 0; logical < lifecycle.pageTable.length; logical += 1) {
     const encodedPage = lifecycle.pageTable[logical];
     if (encodedPage === 0) continue;
-    let hashSlot = (Math.imul(logical, 0x9e37_79b1) >>> 0) % plan.pageHashCapacity;
-    while (arena[plan.pageTableOffsetWords + hashSlot] !== 0) hashSlot = (hashSlot + 1) % plan.pageHashCapacity;
-    arena[plan.pageTableOffsetWords + hashSlot] = logical + 1;
-    arena[plan.pageTableValueOffsetWords + hashSlot] = encodedPage;
+    arena[plan.ownerRecordKeyOffsetWords + record] = logical + 1;
+    arena[plan.ownerRecordPageOffsetWords + record] = encodedPage;
+    record += 1;
   }
   const cell = [16, 8, 8] as const; // structural brick (2,1,1), logical 32
   const slot = lifecycle.slot(32)!;
@@ -227,6 +229,12 @@ test("WebGPU consumer owns outputs, binds producer arenas read-only, and encodes
   assert.deepEqual(calls.filter((call) => call[0] === "copy").map((call) => [call[2], call[4], call[5]]), [[80, 0, 12], [96, 12, 12]]);
   assert.deepEqual(calls.filter((call) => call[1] === "indirect").map((call) => call[3]), [0, 12]);
   assert.equal(calls.filter((call) => call[1] === "end").length, 3, "pass boundaries make storage-authored indirect metadata visible");
+  const control = created.find((buffer) => buffer.label === "SVO renderer residency counters and dispatch publication")!;
+  const dispatch = created.find((buffer) => buffer.label === "SVO renderer residency input dispatch staging")!;
+  assert.equal(control.usage & GPUBufferUsage.INDIRECT, 0,
+    "writable residency publication must not retain a legacy indirect usage");
+  assert.equal(dispatch.usage, GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
+    "indirect consumption uses a dedicated immutable staging buffer");
   consumer.destroy(); consumer.destroy();
   assert.equal(created.filter((buffer) => buffer.destroyed).length, 5);
   assert.equal((data.structural.publication.state.buffer as unknown as { destroyed?: boolean }).destroyed, undefined, "producer buffers remain externally owned");

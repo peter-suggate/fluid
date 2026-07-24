@@ -56,22 +56,24 @@ test("GPU queue stays dense around presentation without admitting a physics burs
     "a presentation must not add a fresh window on top of already queued physics");
 });
 
-test("completion wall time backs adapters without timestamp queries", () => {
-  assert.equal(observedGPUAdvanceTime_ms(3.5, 12), 3.5);
-  assert.equal(observedGPUAdvanceTime_ms(undefined, 12), 12);
-  assert.equal(observedGPUAdvanceTime_ms(undefined, undefined), undefined);
+test("the exact generic physics partition drives presentation admission", () => {
+  const trace = {
+    sampleId: 1, domain: "gpu", lane: "physics", context: "test", capturedAt_ms: 0,
+    total_ms: 3.5, phases: [{ id: "other", label: "test", duration_ms: 3.5 }],
+  } satisfies NonNullable<Parameters<typeof observedGPUAdvanceTime_ms>[0]>;
+  assert.equal(observedGPUAdvanceTime_ms(trace), 3.5);
+  assert.equal(observedGPUAdvanceTime_ms({ ...trace, lane: "presentation" }), undefined);
+  assert.equal(observedGPUAdvanceTime_ms(undefined), undefined);
 });
 
-test("renderer retains end-to-end advance wall time across paused redraws", () => {
+test("renderer does not synthesize a second wall-clock timing system", () => {
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const submit = renderer.slice(
     renderer.indexOf("private submitPreparedGPUFluid"),
     renderer.indexOf("/** Keep the GPU occupied", renderer.indexOf("private submitPreparedGPUFluid")),
   );
-  assert.match(submit, /encodeStartedAt_ms = performance\.now\(\)[\s\S]*submitNextPreparedGPUAdvance/);
-  assert.match(submit, /cpuAdvanceEncode_ms = encodeCompletedAt_ms - encodeStartedAt_ms/);
-  assert.match(submit, /physicsQueueWall_ms = Math\.max\(0, completedAt_ms - queueReadyAt_ms\)/);
-  assert.match(submit, /gpuAdvanceWall_ms = cpuAdvanceEncode_ms \+ physicsQueueWall_ms/);
+  assert.match(submit, /submitNextPreparedGPUAdvance/);
+  assert.doesNotMatch(submit, /queueReadyAtPromise|cpuAdvanceEncode_ms|physicsQueueWall_ms|gpuAdvanceWall_ms/);
 });
 
 test("paused solver attachment and raw publication each request exactly one presentation", () => {
@@ -181,21 +183,22 @@ test("reset replacement attaches only after complete t=0 sparse authority is res
 
   const authority = octree.slice(
     octree.indexOf("encodeInitialSparseAuthorityPhase"),
-    octree.indexOf("encodeInitialSparseAuthority(encoder", octree.indexOf("encodeInitialSparseAuthorityPhase")),
+    octree.indexOf("retireSubmittedEncoder", octree.indexOf("encodeInitialSparseAuthorityPhase")),
   );
-  const cold = authority.indexOf("encodeColdBootstrapRebuild(encoder)");
-  const csr = authority.indexOf("this.encode(encoder", cold);
-  const surface = authority.indexOf("this.encodeSurface(encoder, 0)", csr);
-  const faceTopology = authority.indexOf('this.encodeGlobalFineFaceBandPhase(encoder, "topology-build")', surface);
-  const faceTransitions = authority.indexOf('this.encodeGlobalFineFaceBandPhase(encoder, "transition-adjacency")', faceTopology);
-  const faceMarch = authority.indexOf('this.encodeGlobalFineFaceBandPhase(encoder, "fast-march")', faceTransitions);
-  const facePowerPublication = authority.indexOf(
-    'this.encodeGlobalFineFaceBandPhase(encoder, "power-publication")', faceMarch,
+  const compactAuthority = authority.replace(/\s+/g, "");
+  const cold = compactAuthority.indexOf("encodeColdBootstrapRebuild(encoder)");
+  const csr = compactAuthority.indexOf("this.encode(encoder", cold);
+  const surface = compactAuthority.indexOf("this.encodeSurface(encoder,0)", csr);
+  const faceTopology = compactAuthority.indexOf('this.encodeGlobalFineFaceBandPhase(broker,"topology-build")', surface);
+  const faceTransitions = compactAuthority.indexOf('this.encodeGlobalFineFaceBandPhase(broker,"transition-adjacency")', faceTopology);
+  const faceClosestPoint = compactAuthority.indexOf('this.encodeGlobalFineFaceBandPhase(broker,"closest-point-extension")', faceTransitions);
+  const facePowerPublication = compactAuthority.indexOf(
+    'this.encodeGlobalFineFaceBandPhase(broker,"power-publication")', faceClosestPoint,
   );
-  const residency = authority.indexOf("this.encodeSparseBrickWorld(encoder)", facePowerPublication);
+  const residency = compactAuthority.indexOf("this.encodeSparseBrickWorld(encoder)", facePowerPublication);
   assert.ok(cold >= 0 && csr > cold && surface > csr && faceTopology > surface
-    && faceTransitions > faceTopology && faceMarch > faceTransitions
-    && facePowerPublication > faceMarch && residency > facePowerPublication,
+    && faceTransitions > faceTopology && faceClosestPoint > faceTransitions
+    && facePowerPublication > faceClosestPoint && residency > facePowerPublication,
   "reset warmup must publish topology, power/operator, fine authority, the four paper-ordered Section 5 phases, and render world in dependency order");
 
   const transaction = renderer.slice(
@@ -279,7 +282,11 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
   assert.deepEqual(statuses.at(-1), { state: "lost", label: "GPU device lost: test device loss" });
 
   const metrics = renderer.draw(0, {} as never, {} as never, [], undefined, undefined, "webgpu", { methodId: "tall-cell", quality: "balanced", values: {} });
-  assert.deepEqual(metrics, { cpuFrame_ms: 0, cpuPhysicsSubmit_ms: 0, cpuDataUpload_ms: 0, cpuRenderEncode_ms: 0 });
+  assert.equal(metrics.methodId, "tall-cell");
+  assert.equal(metrics.context, "tall-cell");
+  assert.equal(metrics.presentationSubmitted, false);
+  assert.equal(metrics.cpu?.lane, "main-thread");
+  assert.ok((metrics.cpu?.total_ms ?? -1) >= 0);
   assert.equal(submitCount, 0, "a lost device must never receive another queue submission");
 
   renderer.destroy();

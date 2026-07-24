@@ -23,7 +23,7 @@ function healthyInfo(patch: Partial<GPUEulerianInfo> = {}): GPUEulerianInfo {
     maximumNeighborDelta: 1, gridKind: "octree", cellSize_m: 1 / 16,
     pressureIterations: 4, pressureSolver: "Section 4.3 hybrid MGPCG",
     allocatedBytes: 1, initialSparseAuthorityReady: true,
-    powerDiagramProjection: "authoritative", powerDiagramReady: true,
+    powerDiagramReady: true,
     powerDiagramAuthoritative: true, powerDiagramGeneration: 7,
     pressureRequiredRows: 12, pressureRequiredEntries: 24,
     pressureCapacityOverflow: false, pressureRelativeResidual: 1e-5,
@@ -156,15 +156,6 @@ test("a recorded failed face is converted from grid coordinates to world space",
   assert.equal(result.locationLabel, "first failed face 91");
 });
 
-test("an acute-grading row supplies a cell-centred world-space witness", () => {
-  const rowCell = 2 + 16 * (3 + 16 * 4);
-  const result = viewportFailureLocation(healthyInfo({
-    globalFineFaceBandAcuteGradingFailure: { band: 5, rowCell, rowSize: 2, descriptor: 1, coarseMask: 4 },
-  }), scene);
-  assert.deepEqual(result.location_m, { x: -0.3125, y: 0.25, z: -0.1875 });
-  assert.equal(result.locationLabel, `first failed row ${rowCell.toLocaleString()}`);
-});
-
 test("the exact transport witness maps from solver-local metres into world space", () => {
   const result = viewportFailureLocation(healthyInfo({
     globalFineTransportFirstInvalidVelocityLocalIndex: 73,
@@ -218,7 +209,8 @@ test("the WebGPU viewport renders the failure alert, spatial marker, and diagnos
 
 test("Dawn power failures decode the same stable viewport stage, detail, and location packet", () => {
   const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
-  assert.match(smoke, /viewportFailureIndicator\(\{ \.\.\.await solver\.readStats\(\) \}, undefined, scene\)/);
+  assert.match(smoke,
+    /const rejectedStats = await solver\.readStats\(\);[\s\S]*viewportFailureIndicator\(\{ \.\.\.rejectedStats \}, undefined, scene\)/);
   assert.match(smoke, /JSON\.stringify\(\{ uiFailure, \.\.\.audit/);
   assert.match(smoke, /firstInvalidRow: face\[4\], firstInvalidPad3: face\[15\]/,
     "Dawn must use the ordered failure row rather than the stage-specific pad as its location");

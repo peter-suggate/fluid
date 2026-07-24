@@ -244,8 +244,6 @@ export function VisualPanel() {
         {overlayActive && <div className="segmented compact" role="group" aria-label="Diagnostic field">
           <button className={gridOverlayMode === "structure" ? "active" : ""} onClick={() => selectOverlayMode("structure")}>Structure</button>
           {adaptive && <button className={gridOverlayMode === "resolution" ? "active" : ""} onClick={() => selectOverlayMode("resolution")}>Cell scale</button>}
-          {octree && <button className={gridOverlayMode === "surface" ? "active" : ""} onClick={() => selectOverlayMode("surface")}>Surface band</button>}
-          {octree && <button className={gridOverlayMode === "faces" ? "active" : ""} onClick={() => selectOverlayMode("faces")}>Velocity faces</button>}
           {quadtreeTall && <button className={gridOverlayMode === "optical" ? "active" : ""} onClick={() => selectOverlayMode("optical")}>Optical layer</button>}
           <button className={gridOverlayMode === "cfl" ? "active" : ""} onClick={() => selectOverlayMode("cfl")}>CFL load</button>
           <button className={gridOverlayMode === "speed" ? "active" : ""} onClick={() => selectOverlayMode("speed")}>Speed</button>
@@ -269,7 +267,7 @@ export function VisualPanel() {
             <button className={gridOverlayMode === "octree-lifecycle" ? "active" : ""} onClick={() => selectOverlayMode("octree-lifecycle")}>Octree lifecycle</button>
             <button className={gridOverlayMode === "fine-band-lifecycle" ? "active" : ""} aria-label="Inspect fine band and interface seeds" onClick={() => selectOverlayMode("fine-band-lifecycle")}>Fine band</button>
             <button className={gridOverlayMode === "global-fine-phi" ? "active" : ""} aria-label="Inspect global fine phi values and Eikonal residual" onClick={() => { setGridOverlayMode("global-fine-phi"); if (gridOverlayAxis === "volume") setGridOverlayAxis("z"); }}>Fine φ values</button>
-            <button className={gridOverlayMode === "section5-face-band" ? "active" : ""} aria-label="Inspect Section 5 face march" onClick={() => selectOverlayMode("section5-face-band")}>Face march</button>
+            <button className={gridOverlayMode === "section5-face-band" ? "active" : ""} aria-label="Inspect Section 5 closest-point extension" onClick={() => selectOverlayMode("section5-face-band")}>Closest points</button>
           </div>
           <small className="control-hint" data-testid="fine-publication-gates">{finePublicationGates.map((gate) =>
             `${gate.state === "ready" ? "✓" : gate.state === "failed" ? "✕" : gate.state === "not-required" ? "–" : "…"} ${gate.label}${gate.state === "failed" ? ` (${gate.detail})` : ""}`
@@ -289,7 +287,7 @@ export function VisualPanel() {
     </section>
 
     {overlayActive && <section className="panel-section grid-key" data-testid="grid-legend">
-      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {volumeOverlay ? "FULL VOLUME" : `${gridOverlayAxis.toUpperCase()} SLICE`}{gridOverlayMode !== "structure" ? ` · ${{ resolution: "COMPACT LEAF LEVEL", surface: "SPARSE SURFACE BAND", faces: "SPARSE VELOCITY FACES", optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: octree ? "PRESSURE POTENTIAL dt·p/ρ" : "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU", "power-cells": "POWER SITES / CELLS", "power-faces": "POWER PRIMAL-DUAL GEOMETRY", "delaunay-tetrahedra": "LOCAL DELAUNAY TETRAHEDRA", "transition-band": "BOUNDARY / LEVEL TRANSITIONS", "power-operator": "POWER LAPLACIAN COEFFICIENTS", "octree-lifecycle": "OCTREE REBUILD LIFECYCLE", "fine-band-lifecycle": "FINE-BAND PUBLICATION LIFECYCLE", "global-fine-phi": "PAPER FINE φ / |∇φ|−1", "section5-face-band": "SECTION 5 REGULAR-FACE MARCH", "operator-diagonal": "OPERATOR DIAGONAL", "operator-rhs": "OPERATOR RIGHT-HAND SIDE", "operator-reciprocity": "FACE RECIPROCITY AUDIT", "operator-open-fraction": "FACE OPEN FRACTION", "tetra-validity": "TETRAHEDRON VALIDITY" }[gridOverlayMode]}` : ""}</strong>
+      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {volumeOverlay ? "FULL VOLUME" : `${gridOverlayAxis.toUpperCase()} SLICE`}{gridOverlayMode !== "structure" ? ` · ${{ resolution: "COMPACT LEAF LEVEL", optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: octree ? "PRESSURE POTENTIAL dt·p/ρ" : "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU", "power-cells": "POWER SITES / CELLS", "power-faces": "POWER PRIMAL-DUAL GEOMETRY", "delaunay-tetrahedra": "LOCAL DELAUNAY TETRAHEDRA", "transition-band": "BOUNDARY / LEVEL TRANSITIONS", "power-operator": "POWER LAPLACIAN COEFFICIENTS", "octree-lifecycle": "OCTREE REBUILD LIFECYCLE", "fine-band-lifecycle": "FINE-BAND PUBLICATION LIFECYCLE", "global-fine-phi": "PAPER FINE φ / |∇φ|−1", "section5-face-band": "SECTION 5 CLOSEST-POINT EXTENSION", "operator-diagonal": "OPERATOR DIAGONAL", "operator-rhs": "OPERATOR RIGHT-HAND SIDE", "operator-reciprocity": "FACE RECIPROCITY AUDIT", "operator-open-fraction": "FACE OPEN FRACTION", "tetra-validity": "TETRAHEDRON VALIDITY" }[gridOverlayMode]}` : ""}</strong>
       {gridOverlayMode === "structure" && <>
         {tall && <span><i className="sw sw-tall" />tall cell · liquid</span>}
         {tall && <span><i className="sw sw-tall-dry" />tall cell · air</span>}
@@ -307,29 +305,8 @@ export function VisualPanel() {
         <span><i className="sw" style={{ background: "#55a8ba" }} />intermediate dyadic cell</span>
         <span><i className="sw" style={{ background: "#152e7a" }} />coarsest compact leaf · {(gpuInfo?.quadtreeMaximumFluidScale ?? "max")}³</span>
         {octree && <span><i className="sw" style={{ background: "#ff05b8" }} />magenta · no compact owner for this represented cell</span>}
-        {octree && <span><i className="sw" style={{ background: "#f7a314" }} />orange · pressure row exists but disagrees with the surface leaf generation</span>}
+        {octree && <span><i className="sw" style={{ background: "#f7a314" }} />orange · pressure row exists but disagrees with the global-fine generation</span>}
         {octree && <span><i className="sw" style={{ background: "#ff0303" }} />red · compact surface arena reported a global fault</span>}
-      </>}
-      {gridOverlayMode === "surface" && <>
-        <span><i className="sw" style={{ background: "#ff087f" }} />pink · detail-selected core at |φ| ≤ 1.5h</span>
-        <span><i className="sw" style={{ background: "#6b309e" }} />violet · allocated core-page support away from φ=0</span>
-        <span><i className="sw" style={{ background: "#1fb8d1" }} />cyan · interpolation and transport halo</span>
-        <span><i className="sw" style={{ background: "#f5d619" }} />yellow · newly activated page</span>
-        <span><i className="sw" style={{ background: "#f59214" }} />orange · desired page not resident</span>
-        <span><i className="sw" style={{ background: "#ff05b8" }} />magenta · no compact owner row</span>
-        <span><i className="sw" style={{ background: "#f7a314" }} />orange · pressure/surface row generation mismatch</span>
-        <span><i className="sw" style={{ background: "#ff0303" }} />red · arena fault or page/state mismatch</span>
-        <span><i className="sw" style={{ background: "#0d1f59" }} />blue · valid compact coarse authority outside fine allocation</span>
-        <span>In Full volume, page colors expose the complete lifecycle: desired → newly activated → resident core/halo → valid coarse authority or fault.</span>
-        <span>{gpuInfo?.adaptiveSurfaceActivePages ?? 0}/{gpuInfo?.adaptiveSurfacePageCapacity ?? 0} resident · {gpuInfo?.adaptiveSurfaceAdapterCandidateRows ?? 0} adapter rows/{gpuInfo?.adaptiveSurfaceAdapterDispatchX ?? 0} groups · {gpuInfo?.adaptiveSurfaceCandidatePages ?? 0} arena candidates · {gpuInfo?.adaptiveSurfaceFinestResidentPages ?? 0} finest · {gpuInfo?.adaptiveSurfaceCoarseResidentPages ?? 0} coarse · max {gpuInfo?.adaptiveSurfaceMaximumResidentLeafSize ?? 0}³ · {gpuInfo?.adaptiveSurfaceDepartureFallbacks ?? 0} departures · fault {gpuInfo?.adaptiveSurfaceOverflowCode ?? 0}</span>
-      </>}
-      {gridOverlayMode === "faces" && <>
-        <span><i className="sw" style={{ background: "#159578" }} />green · complete x/y/z compact-face neighborhood</span>
-        <span><i className="sw" style={{ background: "#8c38c7" }} />violet · high coarse/fine incidence count</span>
-        <span><i className="sw" style={{ background: "#ff05b8" }} />magenta · no compact owner row</span>
-        <span><i className="sw" style={{ background: "#f7a314" }} />orange · missing velocity axis or pressure/surface row mismatch</span>
-        <span><i className="sw" style={{ background: "#ff0303" }} />red · face overflow, invalid index, or non-finite velocity</span>
-        <span>CFL and Speed also reconstruct directly from these sparse faces; faults are red in wet cells.</span>
       </>}
       {gridOverlayMode === "power-cells" && <>
         <span><i className="sw" style={{ background: "#159578" }} />green · regular Cartesian power cell</span>
@@ -369,10 +346,9 @@ export function VisualPanel() {
       </>}
       {gridOverlayMode === "fine-band-lifecycle" && <>
         <span><i className="sw" style={{ background: "#ff168f" }} />pink · interface core</span>
-        <span><i className="sw" style={{ background: "#ffe10b" }} />yellow · fast-march trial/frontier sample</span>
-        <span><i className="sw" style={{ background: "#15c8db" }} />cyan · known redistanced support sample</span>
-        <span><i className="sw" style={{ background: "#793ab8" }} />violet · resident sample awaiting a valid/known state</span>
-        <span><i className="sw" style={{ background: "#ff7a12" }} />orange · newly activated sample or desired page not resident</span>
+        <span><i className="sw" style={{ background: "#15c8db" }} />cyan · valid redistanced sample</span>
+        <span><i className="sw" style={{ background: "#793ab8" }} />violet · clipped or invalid resident sample</span>
+        <span><i className="sw" style={{ background: "#ff7a12" }} />orange · desired page not resident</span>
         <span><i className="sw" style={{ background: "#10255e" }} />dark blue · valid compact coarse authority outside fine allocation</span>
         <span><i className="sw" style={{ background: "#ff1738" }} />red · failed, stale, or inconsistent publication</span>
         <span>Colors come from the live sparse hash, page metadata, worklist, sample flags, and transaction controls.</span>
@@ -389,11 +365,10 @@ export function VisualPanel() {
         <span><i className="sw" style={{ background: "#f5610c" }} />orange · first support closure</span>
         <span><i className="sw" style={{ background: "#8a34c2" }} />violet · deeper Delaunay support</span>
         <span><i className="sw" style={{ background: "#297ae0" }} />blue · terminal endpoint with committed parent-edge φ</span>
-        <span><i className="sw" style={{ background: "#ffe10b" }} />yellow · trial face on the fast-march frontier</span>
-        <span><i className="sw" style={{ background: "#15c8b0" }} />cyan · accepted face velocity</span>
+        <span><i className="sw" style={{ background: "#15c8b0" }} />cyan · closest-point-resolved face velocity</span>
         <span><i className="sw" style={{ background: "#e31fb8" }} />magenta · unresolved or invalid-φ face</span>
         <span><i className="sw" style={{ background: "#ff0610" }} />red · first reported row/face key or malformed publication</span>
-        <span>Direct GPU view of the regular-face rows, incidence list, φ ordering and march state used before republishing to power faces. The spatial audit reports the exact unresolved split: heap-bound trial, accepted-predecessor scheduler defect, or disconnected.</span>
+        <span>Direct GPU view of the regular-face rows, incidence list, φ ordering and closest-point extension used before republishing to power faces. The spatial audit reports closest-point and liquid-only interpolation failures directly.</span>
       </>}
       {gridOverlayMode === "operator-diagonal" && <>
         <span><i className="sw" style={{ background: "linear-gradient(90deg,#15489a,#18bf8c,#ed2d12)" }} />positive pressure diagonal · blue low, teal mid, red high</span>

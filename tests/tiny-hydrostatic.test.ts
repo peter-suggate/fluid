@@ -14,7 +14,7 @@ test("tiny hydrostatic oracle is an exact 16-cubed body-free settled tank", () =
     height_m: 0.8,
     depth_m: 0.8,
     fillFraction: 0.75,
-    top: "open",
+    top: "closed",
     fluidWallMode: "free-slip",
   });
   assert.equal(scene.fluid.initialCondition, "tank-fill");

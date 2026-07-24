@@ -9,20 +9,21 @@ import { WebGPUOctreePowerVelocity } from "../lib/webgpu-octree-power-velocity";
 import {
   OCTREE_POWER_PREPASS_TARGET_QUERY_CAPACITY,
   WebGPUOctreePowerVelocityPrepass,
-  buildPowerTrajectoryQueriesWGSL,
   makePowerVelocityPrepassBuilderWGSL,
   planOctreePowerVelocityChunkCapacity,
   planOctreePowerVelocityPrepass,
 } from "../lib/webgpu-octree-power-velocity-prepass";
 import {
-  fineLevelSetGPUQueryTransportWGSL,
+  fineLevelSetFusedTransportPublicationWGSL,
   planFineLevelSetGPUTransport,
   planFineLevelSetGPUTransportPasses,
 } from "../lib/webgpu-octree-fine-levelset-transport";
+import { PassBroker } from "../lib/webgpu-pass-broker";
 
 test("trajectory prepass is bounded GPU-only Stage-B work", () => {
-  assert.match(buildPowerTrajectoryQueriesWGSL, /sampleDirectPowerVelocity/);
-  assert.doesNotMatch(buildPowerTrajectoryQueriesWGSL, /texture|readback/i);
+  const directSampler = makePowerVelocityPrepassBuilderWGSL();
+  assert.match(directSampler, /sampleDirectPowerVelocity/);
+  assert.doesNotMatch(directSampler, /texture|readback/i);
   const productionBuilder = makePowerVelocityPrepassBuilderWGSL();
   assert.doesNotMatch(productionBuilder, /nearestOwner|nearestFallback|vertexStart/,
     "missing containing owners must be resolved only by the Section 5 face-band publication");
@@ -34,8 +35,8 @@ test("trajectory prepass is bounded GPU-only Stage-B work", () => {
     "direct Stage B must not materialize 76 velocity vectors per query");
   assert.doesNotMatch(productionBuilder, /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
     "recurring direct Stage B must use immutable reads and deterministic reductions, never atomics");
-  assert.match(productionBuilder, /var<storage,read>sites:array<SI>/,
-    "the cold-built site hash is immutable during recurring transport");
+  assert.match(productionBuilder, /var<storage,read>rowDirectory:array<DirectoryEntry>/,
+    "the canonical sorted row directory is immutable during recurring transport");
   assert.deepEqual(planOctreePowerVelocityPrepass(4096, 256), {
     queryCapacity: 4096,
     rowCapacity: 1,
@@ -78,17 +79,19 @@ test("factor-4 small dam break batches paper Section 5 transport within portable
   assert.deepEqual(planFineLevelSetGPUTransportPasses(previous, 4), {
     chunkCount: 108,
     segmentCount: 4,
-    passesPerSegment: 5,
-    passesPerChunk: 23,
-    encodedPasses: 2_487,
+    passesPerSegment: 0,
+    passesPerChunk: 2,
+    encodedPasses: 219,
   });
   assert.deepEqual(planFineLevelSetGPUTransportPasses(current, 4), {
     chunkCount: 1,
     segmentCount: 4,
-    passesPerSegment: 5,
-    passesPerChunk: 23,
-    encodedPasses: 26,
+    passesPerSegment: 0,
+    passesPerChunk: 2,
+    encodedPasses: 5,
   });
+  assert.equal(planFineLevelSetGPUTransportPasses(current, 4).passesPerSegment, 0,
+    "the fused cutover has no staged per-segment sampling passes");
 });
 
 test("non-divisible final transport chunk keeps its tail inactive without dropping paper segments", () => {
@@ -103,13 +106,18 @@ test("non-divisible final transport chunk keeps its tail inactive without droppi
     finalChunkLive: 49_152,
     finalChunkInactive: 16_384,
   });
-  assert.equal(planFineLevelSetGPUTransportPasses(transport, 4).encodedPasses, 164);
+  assert.equal(transport.dispatchArgumentsOffsetBytes, (8 + transport.chunkCount) * 4);
+  assert.equal(transport.indirectBytes, (2 * transport.chunkCount + 2) * 12);
+  assert.equal(transport.dispatchMetadataBytes,
+    transport.dispatchArgumentsOffsetBytes + transport.indirectBytes);
+  assert.equal(planFineLevelSetGPUTransportPasses(transport, 4).encodedPasses, 17);
 
-  // Every chunk first zeros its complete fixed-capacity position arena. The
-  // activeSample(flat) guard then leaves the non-divisible tail at w=0, and
-  // the Stage-B builder rejects that sentinel before any owner/hash query.
-  assert.match(fineLevelSetGPUQueryTransportWGSL,
-    /positions\[local\]=vec4f\(0\);outcomes\[local\]=vec2u\(0u,INVALID\);let flat=chunk\.base\+local;let a=activeSample\(flat\);if\(a\.x==INVALID\)\{return;\}/);
+  // GPU-authored indirect arguments launch only the live final prefix. The
+  // final workgroup's unavoidable SIMD tail is rejected by activeSample
+  // before any owner or catalog query.
+  assert.doesNotMatch(fineLevelSetFusedTransportPublicationWGSL,
+    /prepareFineTrajectories|advanceFineTrajectories|sampleFineDepartures/,
+    "the split trajectory kernels must not remain behind the fused cutover");
   assert.match(makePowerVelocityPrepassBuilderWGSL(),
     /if\(x\.w<=0\.\)\{results\[i\]=vec4f\(0\.,0\.,0\.,1\.\);statuses\[i\]=VALID\|INACTIVE;/);
 });
@@ -130,6 +138,42 @@ test("velocity chunk planning respects tighter binding and offset limits", () =>
     "a single final batch does not need a following aligned slice");
 });
 
+test("direct Stage-B sample, summary, and publication share one compute pass", () => {
+  Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, UNIFORM: 8 } });
+  const buffer = (size: number) => ({ size, usage: 15, destroy() {} }) as unknown as GPUBuffer;
+  const device = { limits: { minStorageBufferOffsetAlignment: 256, maxComputeWorkgroupsPerDimension: 65_535 },
+    queue: { writeBuffer() {}, submit() {} }, createBuffer: ({ size }: { size: number }) => buffer(size),
+    createCommandEncoder: () => ({ copyBufferToBuffer() {}, finish: () => ({}) }),
+    createShaderModule: () => ({}),
+    createComputePipeline: ({ compute }: { compute: { entryPoint: string } }) => ({
+      entryPoint: compute.entryPoint, getBindGroupLayout: () => ({}),
+    }), createBindGroup: () => ({}),
+  } as unknown as GPUDevice;
+  const topology = { plan: { rowCapacity: 8 }, metrics: buffer(128), catalogTetrahedronHeaders: buffer(64),
+    catalogTetrahedra: buffer(64), catalogTetrahedronVertices: buffer(64) };
+  const faces = { plan: { rowDirectoryCapacity: 16 }, rowDirectory: buffer(256), control: buffer(64) };
+  const prepass = new WebGPUOctreePowerVelocityPrepass(device, 8, topology as never, faces as never);
+  const passes: string[][] = [];
+  const encoder = { copyBufferToBuffer() {}, beginComputePass() { const stages: string[] = []; passes.push(stages); return {
+    setPipeline(pipeline: { entryPoint: string }) { stages.push(pipeline.entryPoint); }, setBindGroup() {},
+    dispatchWorkgroups() {}, end() {},
+  }; } } as unknown as GPUCommandEncoder;
+  let broker = new PassBroker(encoder);
+  prepass.encodeFromPositions(broker, buffer(128), buffer(384), buffer(128), {
+    dimensions: [2, 2, 2], physicalCellSize: 1, maximumLeafSize: 1, queryCount: 8,
+  });
+  assert.deepEqual(passes, [["sampleDirectPowerVelocity", "summarizeDirectPowerVelocitySamples",
+    "publishDirectPowerVelocitySamples"]]);
+  passes.length = 0;
+  broker = new PassBroker(encoder);
+  prepass.encodeFromPositions(broker, buffer(128), buffer(384), buffer(128), {
+    dimensions: [2, 2, 2], physicalCellSize: 1, maximumLeafSize: 1, queryCount: 0,
+  });
+  assert.deepEqual(passes, [["publishDirectPowerVelocitySamples"]],
+    "zero-query publication retains one pass and resets control semantics");
+  prepass.destroy();
+});
+
 async function runSegmentQueries(segmentCount: 4 | 8): Promise<void> {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
     create(options: string[]): GPU; globals: Record<string, unknown>;
@@ -147,39 +191,39 @@ async function runSegmentQueries(segmentCount: 4 | 8): Promise<void> {
   const prepass = new WebGPUOctreePowerVelocityPrepass(device, segmentCount, topology.source, faces.source);
   const entry = catalog.sameOrFinerDirect[0x3ffff] & 0xffff;
   const metrics = new Uint32Array(32), headers = new Uint32Array(96), values = new Float32Array(32);
-  const hash = new Uint32Array(faces.plan.hashCapacity * 4);
-  const hashFn = (cell: number, size: number) => { let value = (cell ^ Math.imul(size, 0x9e3779b9)) >>> 0;
-    value = Math.imul((value ^ (value >>> 16)) >>> 0, 0x7feb352d) >>> 0;
-    value = Math.imul((value ^ (value >>> 15)) >>> 0, 0x846ca68b) >>> 0; return (value ^ (value >>> 16)) >>> 0; };
+  const rowDirectory = new Uint32Array(faces.plan.rowDirectoryCapacity * 4);
   for (let row = 0; row < 8; row += 1) {
     metrics[row * 4] = entry; metrics[row * 4 + 1] = OCTREE_POWER_TOPOLOGY_VALID;
     headers[row * 12] = row; headers[row * 12 + 3] = 1;
     values.set([(row & 1) + 0.5, ((row >> 1) & 1) + 0.5, ((row >> 2) & 1) + 0.5, 1], row * 4);
-    let slot = hashFn(row, 1) & (faces.plan.hashCapacity - 1);
-    while (hash[slot * 4] !== 0) slot = (slot + 1) & (faces.plan.hashCapacity - 1);
-    hash.set([row + 1, 1, row, 0], slot * 4);
+    rowDirectory.set([row + 1, 1, row, row], row * 4);
   }
   device.queue.writeBuffer(topology.metrics, 0, metrics); device.queue.writeBuffer(velocity.velocities, 0, values);
-  device.queue.writeBuffer(faces.siteIndex, 0, hash);
+  device.queue.writeBuffer(faces.rowDirectory, 0, rowDirectory);
   const upload = (data: ArrayBufferView<ArrayBuffer>) => { const buffer = device.createBuffer({ size: data.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(buffer, 0, data); return buffer; };
   const headerBuffer = upload(headers), positionData = new Float32Array(segmentCount * 4);
   for (let segment = 0; segment < segmentCount; segment += 1) {
     positionData.set([0.5 + 0.5 * (segment + 1) / segmentCount, 1, 1, 1], segment * 4);
   }
-  const positions = upload(positionData), readback = device.createBuffer({ size: segmentCount * 16,
+  const positions = upload(positionData), readback = device.createBuffer({ size: segmentCount * 16 + 32,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
-  prepass.encodeRowDescriptors(encoder, headerBuffer);
-  prepass.encodeFromPositions(encoder, positions, headerBuffer, velocity.velocities,
+  const broker = new PassBroker(encoder);
+  prepass.encodeRowDescriptors(broker, headerBuffer);
+  prepass.encodeFromPositions(broker, positions, headerBuffer, velocity.velocities,
     { dimensions: [2, 2, 2], physicalCellSize: 1, maximumLeafSize: 1, queryCount: segmentCount });
-  encoder.copyBufferToBuffer(prepass.source.results, 0, readback, 0, segmentCount * 16);
-  device.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ);
+  broker.copyBufferToBuffer(prepass.source.results, 0, readback, 0, segmentCount * 16);
+  broker.copyBufferToBuffer(prepass.source.control, 0, readback, segmentCount * 16, 32);
+  device.queue.submit([broker.finish()]); await readback.mapAsync(GPUMapMode.READ);
   const result = new Float32Array(readback.getMappedRange().slice(0)); readback.unmap();
   for (let segment = 0; segment < segmentCount; segment += 1) {
     assert.ok(Math.abs(result[segment * 4] - positionData[segment * 4]) < 1e-5);
     assert.deepEqual(Array.from(result.slice(segment * 4 + 1, segment * 4 + 4)), [1, 1, 1]);
   }
+  assert.deepEqual(Array.from(new Uint32Array(result.buffer, segmentCount * 16, 8)),
+    [0x8000_0000, 0xffff_ffff, segmentCount, segmentCount, segmentCount, 0, 0, 0],
+    "fused publication must retain exact direct-sampler status totals");
   readback.destroy(); positions.destroy(); headerBuffer.destroy(); prepass.destroy(); velocity.destroy(); faces.destroy(); topology.destroy(); device.destroy();
 }
 
@@ -208,15 +252,10 @@ test("Dawn fails closed when a trajectory query has no containing power owner", 
   const metrics = new Uint32Array([entry, OCTREE_POWER_TOPOLOGY_VALID, 0, 0]);
   const headers = new Uint32Array(12); headers[3] = 1;
   const values = new Float32Array([0.5, 0.25, -0.125, 1]);
-  const hash = new Uint32Array(faces.plan.hashCapacity * 4);
-  let mixed = Math.imul(1, 0x9e3779b9) >>> 0;
-  mixed = Math.imul((mixed ^ (mixed >>> 16)) >>> 0, 0x7feb352d) >>> 0;
-  mixed = Math.imul((mixed ^ (mixed >>> 15)) >>> 0, 0x846ca68b) >>> 0;
-  const slot = (mixed ^ (mixed >>> 16)) & (faces.plan.hashCapacity - 1);
-  hash.set([1, 1, 0, 0], slot * 4);
+  const rowDirectory = new Uint32Array([1, 1, 0, 0]);
   device.queue.writeBuffer(topology.metrics, 0, metrics);
   device.queue.writeBuffer(velocity.velocities, 0, values);
-  device.queue.writeBuffer(faces.siteIndex, 0, hash);
+  device.queue.writeBuffer(faces.rowDirectory, 0, rowDirectory);
   const upload = (data: ArrayBufferView<ArrayBuffer>) => { const buffer = device.createBuffer({
     size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   }); device.queue.writeBuffer(buffer, 0, data); return buffer; };
@@ -226,13 +265,14 @@ test("Dawn fails closed when a trajectory query has no containing power owner", 
   const positions = upload(new Float32Array([1.5, 0.5, 0.5, 1]));
   const readback = device.createBuffer({ size: 20, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
-  prepass.encodeRowDescriptors(encoder, headerBuffer);
-  prepass.encodeFromPositions(encoder, positions, headerBuffer, velocity.velocities, {
+  const broker = new PassBroker(encoder);
+  prepass.encodeRowDescriptors(broker, headerBuffer);
+  prepass.encodeFromPositions(broker, positions, headerBuffer, velocity.velocities, {
     dimensions: [2, 1, 1], physicalCellSize: 1, maximumLeafSize: 1, queryCount: 1,
   });
-  encoder.copyBufferToBuffer(prepass.source.results, 0, readback, 0, 16);
-  encoder.copyBufferToBuffer(prepass.source.statuses, 0, readback, 16, 4);
-  device.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ);
+  broker.copyBufferToBuffer(prepass.source.results, 0, readback, 0, 16);
+  broker.copyBufferToBuffer(prepass.source.statuses, 0, readback, 16, 4);
+  device.queue.submit([broker.finish()]); await readback.mapAsync(GPUMapMode.READ);
   const bytes = readback.getMappedRange().slice(0); readback.unmap();
   assert.deepEqual(Array.from(new Float32Array(bytes, 0, 4)), [0, 0, 0, 0]);
   const status = new Uint32Array(bytes, 16, 1)[0];

@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.
 test("uniform and adaptive rigid coupling stays resident while telemetry remains pooled", () => {
   const statsHelper = source.slice(source.indexOf("private statsReadback()"), source.indexOf("private retireQuadtreeProjection"));
   const stats = source.slice(source.indexOf("async readStats()"), source.indexOf("\n  destroy()"));
-  const advance = source.slice(source.indexOf("advanceTo(time_s"), source.indexOf("private applyPhysicsTimingReadback"));
+  const advance = source.slice(source.indexOf("advanceTo(time_s"), source.indexOf("async readStats()"));
 
   assert.match(statsHelper, /this\.statsReadbackBuffer \?\?=/, "statistics lazily allocate one staging buffer");
   assert.doesNotMatch(stats, /createBuffer\(/, "each statistics poll must not allocate a GPU buffer");
@@ -20,14 +20,15 @@ test("uniform and adaptive rigid coupling stays resident while telemetry remains
   assert.match(stats, /finally \{[\s\S]*this\.readbackPending = false/, "failed quadtree diagnostics release the pooled readback slot");
 });
 
-test("compact octree velocity telemetry bypasses dense velocity reduction", () => {
+test("compact octree never constructs or dispatches dense velocity telemetry", () => {
   const stats = source.slice(source.indexOf("async readStats()"), source.indexOf("\n  destroy()"));
-  const advance = source.slice(source.indexOf("advanceTo(time_s"), source.indexOf("private applyPhysicsTimingReadback"));
-  assert.match(advance, /if \(!this\.adaptiveFaceVelocityCutover\)[\s\S]*this\.reductionPipeline/, "dense velocity reduction is disabled after compact-face cutover");
-  assert.match(stats, /readAdaptiveFaceVelocityDiagnostics\(\)/, "telemetry reads the compact face reduction");
-  assert.match(stats, /this\.info\.maxSpeed_m_s = faceVelocityDiagnostics\.maxSpeed_m_s/);
-  assert.match(stats, /this\.info\.maxComponentCfl = faceVelocityDiagnostics\.maxComponentCfl/);
-  assert.match(stats, /this\.info\.nonFiniteCount = faceVelocityDiagnostics\.nonFiniteCount/);
+  const advance = source.slice(source.indexOf("advanceTo(time_s"), source.indexOf("async readStats()"));
+  assert.match(advance, /if \(this\.hostAllocation\) \{[\s\S]*this\.reductionPipeline/,
+    "only a real dense host may dispatch the dense reduction");
+  assert.match(stats,
+    /this\.info\.maxSpeed_m_s = this\.octreeProjection\s*\?\s*undefined\s*:/,
+    "cleared dense scratch must not masquerade as octree velocity telemetry");
+  assert.doesNotMatch(`${advance}\n${stats}`, /adaptiveFaceVelocityCutover/);
 });
 
 test("compact octree volume telemetry accepts only the current committed publication", () => {
@@ -50,6 +51,9 @@ test("compact octree volume telemetry accepts only the current committed publica
   assert.equal(accepted.referenceVolumeCells, 3000);
   assert.ok(Math.abs(accepted.volumeCells - 2700) < 1e-3);
   assert.ok(Math.abs(accepted.drift + 0.1) < 1e-6);
+  words[7] = 0;
+  assert.ok(publishedGlobalFineVolumeCells({ ...diagnostics, volumeControl: Array.from(words) }, 0.001),
+    "paper-path volume measurement is valid telemetry without claiming a global correction");
   assert.equal(publishedGlobalFineVolumeCells({ ...diagnostics, rolledBack: true }, 0.001), undefined,
     "the shared control describes a rejected candidate after rollback");
   assert.equal(publishedGlobalFineVolumeCells({ ...diagnostics, generation: 8 }, 0.001), undefined,
@@ -79,6 +83,6 @@ test("compact octree readback never reports the cleared dense volume reduction",
   assert.match(stats, /compactFineExpected/);
   assert.match(stats, /publishedGlobalFineVolumeCells\(globalFineDiagnostics/);
   assert.match(stats, /this\.info\.volumeCellSum=compactVolume\?\.volumeCells/);
-  assert.match(stats, /if\(!this\.adaptiveFaceVelocityCutover\)\{this\.info\.front_m/,
+  assert.match(stats, /if\(!this\.octreeProjection\)\{this\.info\.front_m/,
     "compact transport must not publish the cleared dense front reduction");
 });

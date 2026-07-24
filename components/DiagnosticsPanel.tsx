@@ -1,6 +1,6 @@
 "use client";
 
-import { MetricCard, Sparkline, formatNumber } from "./controls";
+import { MetricCard, formatNumber } from "./controls";
 import { length } from "@/lib/math";
 import { getMethod } from "@/lib/methods";
 import { BUILD_ID } from "@/lib/model";
@@ -33,18 +33,19 @@ export function DiagnosticsPanel() {
   const runState = useRuntimeStore((state) => state.runState);
   const simulationTime = useRuntimeStore((state) => state.simulationTime);
   const selectedBodyId = useUIStore((state) => state.selectedBodyId);
-  const { bodies, rigidState, fluidState, fluidRenderState, couplingState, gpuInfo, frameMs, samples, waterSurfacePresentation } = useDiagnosticsStore();
+  const { bodies, rigidState, fluidState, fluidRenderState, couplingState, gpuInfo, waterSurfacePresentation } = useDiagnosticsStore();
   const method = getMethod(methodId);
   const backend = simulation.backend;
   const selectedBody = bodies.find((body) => body.description.id === selectedBodyId);
   const requestedGlobalFineFactor = Number(methodValues.globalFineLevelSetFactor);
   const globalFineRequested = requestedGlobalFineFactor === 4 || requestedGlobalFineFactor === 8;
-  const powerAuthorityRequested = methodValues.powerDiagramProjection === "authoritative";
   const powerCSRPublished = Boolean(gpuInfo?.powerDiagramAuthoritative)
     && (gpuInfo?.pressureRequiredRows ?? 0) > 0
     && (gpuInfo?.pressureRequiredEntries ?? 0) > 0;
   const publishedPowerSolver = gpuInfo?.pressureSolver?.includes("Section 4.3 hybrid")
     ? "POWER + SECTION 4.3"
+    : gpuInfo?.pressureSolver?.includes("fixed native-L2 Galerkin")
+      ? "POWER + FIXED GALERKIN"
     : gpuInfo?.pressureSolver?.includes("Chebyshev") ? "POWER + CHEBYSHEV" : "POWER PUBLISHED";
   const octreePressurePotential = gpuInfo?.gridKind === "octree";
   const globalFineVolumeEstimate = gpuInfo?.volumeTelemetrySource === "global-fine";
@@ -65,7 +66,6 @@ export function DiagnosticsPanel() {
         <MetricCard label="Simulation time" value={simulationTime.toFixed(3)} unit="s" />
         <MetricCard label="GPU completed time" value={gpuInfo?.completedTime_s !== undefined ? gpuInfo.completedTime_s.toFixed(3) : "—"} unit="s · queue-confirmed" tone={gpuInfo?.completedTime_s !== undefined && Math.abs(gpuInfo.completedTime_s - simulationTime) < 1e-6 ? "good" : "warn"} />
         <MetricCard label="Fixed validation dt" value={scene.numerics.fixedDt_s.toFixed(4)} unit="s" />
-        <MetricCard label="Render encode" value={frameMs.toFixed(2)} unit="ms CPU" tone={frameMs < 4 ? "good" : "warn"} />
         <MetricCard label="Rigid bodies" value={String(bodies.length)} unit={`${rigidState?.contactCount ?? 0} contact solves`} />
         {fluidState && fluidRenderState && <MetricCard label="MAC grid" value={`${fluidRenderState.nx} × ${fluidRenderState.ny} × ${fluidRenderState.nz}`} unit={`${fluidState.pressureIterations} PCG iterations`} tone={fluidState.pressureConverged ? "good" : "warn"} />}
         {fluidState && <MetricCard label="Dam front" value={fluidState.damFront_m.toFixed(3)} unit="m" />}
@@ -85,20 +85,6 @@ export function DiagnosticsPanel() {
           unit={`${gpuInfo.fluidBrickResidentCount ?? "—"} / ${gpuInfo.fluidBrickCapacity ?? "—"} resident · +${gpuInfo.fluidBrickActivatedCount ?? 0} −${gpuInfo.fluidBrickRetiredCount ?? 0} latest update`}
           tone={gpuInfo.fluidBrickResidentCount !== undefined && gpuInfo.fluidBrickCapacity !== undefined && gpuInfo.fluidBrickResidentCount < gpuInfo.fluidBrickCapacity ? "good" : "warn"}
         />}
-        {gpuInfo?.gridKind === "octree" && gpuInfo.sparseSurfacePageCapacity !== undefined && <MetricCard
-          label="Fine detail pages"
-          value={`${gpuInfo.sparseSurfaceCorePages ?? 0} core · ${gpuInfo.sparseSurfaceHaloPages ?? 0} halo`}
-          unit={`${gpuInfo.sparseSurfaceResidentPages ?? 0} / ${gpuInfo.sparseSurfacePageCapacity} resident · peak ${gpuInfo.sparseSurfacePeakPages ?? 0} · overflow ${gpuInfo.sparseSurfaceOverflow ?? 0}`}
-          tone={(gpuInfo.sparseSurfaceOverflow ?? 0) === 0 && (gpuInfo.sparseSurfaceResidentPages ?? 0) < gpuInfo.sparseSurfacePageCapacity ? "good" : "warn"}
-        />}
-        {gpuInfo?.gridKind === "octree" && gpuInfo.adaptiveSurfacePageCapacity !== undefined && <MetricCard
-          label="Surface adapter publication"
-          value={`${gpuInfo.adaptiveSurfaceActivePages ?? 0} / ${gpuInfo.adaptiveSurfacePageCapacity}`}
-          unit={`${gpuInfo.adaptiveSurfaceAdapterCandidateRows ?? 0} adapter rows / ${gpuInfo.adaptiveSurfaceAdapterDispatchX ?? 0} groups · ${gpuInfo.adaptiveSurfaceCandidatePages ?? 0} arena candidates · ${gpuInfo.adaptiveSurfaceFinestResidentPages ?? 0} finest · ${gpuInfo.adaptiveSurfaceCoarseResidentPages ?? 0} coarse · max ${gpuInfo.adaptiveSurfaceMaximumResidentLeafSize ?? 0}³ · ${gpuInfo.adaptiveSurfaceDepartureFallbacks ?? 0} departures · fault ${gpuInfo.adaptiveSurfaceOverflowCode ?? 0}`}
-          tone={gpuInfo.adaptiveSurfaceOverflow || (gpuInfo.adaptiveSurfaceDepartureFallbacks ?? 0) > 0
-            ? "warn"
-            : (gpuInfo.adaptiveSurfaceActivePages ?? 0) > 0 ? "good" : "neutral"}
-        />}
         {gpuInfo?.gridKind === "octree" && (globalFineRequested || gpuInfo.globalFineLevelSetEnabled !== undefined) && <MetricCard
           label="Global fine narrow band"
           value={gpuInfo.globalFineLevelSetEnabled
@@ -106,7 +92,7 @@ export function DiagnosticsPanel() {
             : globalFineRequested ? `${requestedGlobalFineFactor}× PENDING` : "OFF"}
           unit={gpuInfo.globalFineLevelSetEnabled
             ? `${gpuInfo.globalFineSeedCount ?? 0} seeds / fault ${gpuInfo.globalFineSeedError ?? 0} · ${gpuInfo.globalFineInterfaceBricks ?? 0} interface → ${gpuInfo.globalFineDesiredBricks ?? 0} desired → ${gpuInfo.globalFineActiveBricks ?? 0} active · gen ${gpuInfo.globalFineGeneration ?? 0} ${gpuInfo.globalFinePublished ? (gpuInfo.globalFineRolledBack ? "ROLLBACK" : "PUBLISHED") : "PROVISIONAL"} · topology fault ${gpuInfo.globalFineTopologyFlags ?? 0} / downstream ${gpuInfo.globalFineDownstreamFinalizeReason ?? 0} · redistance ${gpuInfo.globalFineRedistanceCommitted ? "OK" : `REJECTED (${gpuInfo.globalFineRedistanceUnresolvedCells ?? 0} unresolved / ${gpuInfo.globalFineRedistanceSeeds ?? 0} seeds)`} · volume 0x${(gpuInfo.globalFineVolumeFlags ?? 0).toString(16)} · transport ${gpuInfo.globalFineTransportCommitted ? "OK" : `REJECTED (${gpuInfo.globalFineTransportDepartureOutsideBand ?? 0} outside / ${gpuInfo.globalFineTransportVelocityUnavailable ?? 0} unavailable / ${gpuInfo.globalFineTransportFaceBandUnavailable ?? 0} face-band)`} · Section 5 faults band/transition/power/transient/point ${gpuInfo.globalFineFaceBandFlags ?? 0}/${gpuInfo.globalFineFaceBandTransitionFlags ?? 0}/${gpuInfo.globalFineFaceBandPowerPublicationFlags ?? 0}/${gpuInfo.globalFineFaceBandTransientPowerFlags ?? 0}/${gpuInfo.globalFineFaceBandPointFieldFlags ?? 0} · ${gpuInfo.globalFineLevelSetResidentBrickCapacity?.toLocaleString() ?? "—"} capacity · ${((gpuInfo.globalFineLevelSetAllocatedBytes ?? 0) / 1048576).toFixed(1)} MiB`
-            : globalFineRequested ? "awaiting first valid sparse generation" : "leaf-page compatibility"}
+            : globalFineRequested ? "awaiting first valid sparse generation" : "not requested"}
           tone={gpuInfo.globalFineLevelSetEnabled && ((gpuInfo.globalFineSeedError ?? 0) !== 0
             || (gpuInfo.globalFineTopologyFlags ?? 0) !== 0 || gpuInfo.globalFinePublished === false)
             ? "warn"
@@ -126,16 +112,15 @@ export function DiagnosticsPanel() {
             testId="water-surface-presentation-source"
             label="Rendered water geometry"
             value={waterSurfacePresentation.surfaceGeometrySource === "global-fine-coarse" ? `GLOBAL FINE / COARSE${waterRasterGenerationCurrent ? "" : " · STALE GEN"}`
-              : waterSurfacePresentation.surfaceGeometrySource === "adaptive-fallback" ? "ADAPTIVE FALLBACK"
-                : waterSurfacePresentation.surfaceGeometrySource === "retained-previous" ? "RETAINED PREVIOUS MESH"
-                  : waterSurfacePresentation.surfaceGeometrySource === "adaptive-octree" ? "ADAPTIVE OCTREE" : "EMPTY"}
+              : waterSurfacePresentation.surfaceGeometrySource === "retained-previous" ? "RETAINED PREVIOUS MESH"
+                : waterSurfacePresentation.surfaceGeometrySource === "volume" ? "VOLUME FIELD" : "EMPTY"}
             unit={waterSurfacePresentation.globalFineCrossingPublished
               ? `${waterRasterGenerationCurrent ? "current" : "unproven/current mismatch"} fine/coarse crossing · attached gen ${waterSurfacePresentation.globalFineAttachedGeneration ?? "?"} · mesh gen ${waterSurfacePresentation.meshPublicationGeneration ?? "?"} · sampled gen ${gpuInfo?.globalFineGeneration ?? "?"}`
               : waterSurfacePresentation.presentationFallbackActive
                 ? "presentation fallback only · solver authority unchanged"
                 : waterSurfacePresentation.globalFineAttached
                   ? "no current crossing · no fallback geometry"
-                  : "adaptive presentation source"}
+                  : "volume presentation source"}
             tone={(waterSurfacePresentation.surfaceGeometrySource === "global-fine-coarse" && !waterRasterGenerationCurrent)
               || waterSurfacePresentation.presentationFallbackActive || waterSurfacePresentation.surfaceGeometrySource === "empty"
               ? "warn" : "good"}
@@ -146,24 +131,20 @@ export function DiagnosticsPanel() {
         <MetricCard label="GPU extrapolated-air speed" value={gpuInfo?.maxAirSpeed_m_s !== undefined ? gpuInfo.maxAirSpeed_m_s.toFixed(3) : "—"} unit={`m/s at ${formatGridLocation(gpuInfo?.maxAirSpeedLocation)}`} />
         <MetricCard label="GPU divergence pre → post" value={gpuInfo?.maxDivergenceBefore_s !== undefined && gpuInfo.maxDivergenceAfter_s !== undefined ? `${gpuInfo.maxDivergenceBefore_s.toExponential(2)} → ${gpuInfo.maxDivergenceAfter_s.toExponential(2)}` : "—"} unit={`s⁻¹ · ratio ${gpuInfo?.projectionDivergenceRatio?.toExponential(2) ?? "—"} · post ${formatGridLocation(gpuInfo?.maxDivergenceAfterLocation)}`} tone={gpuInfo?.lastDt_s && gpuInfo?.maxDivergenceAfter_s !== undefined && gpuInfo.maxDivergenceAfter_s * gpuInfo.lastDt_s > 0.5 ? "warn" : "neutral"} />
         <MetricCard label="GPU pressure residual" value={gpuInfo?.pressureRelativeResidual !== undefined ? gpuInfo.pressureRelativeResidual.toExponential(2) : "—"} unit={`relative L∞ · raw ${gpuInfo?.pressureResidual?.toExponential(2) ?? "—"} at ${formatGridLocation(gpuInfo?.maxPressureResidualLocation)}`} tone={gpuInfo?.pressureRelativeResidual !== undefined && gpuInfo.pressureRelativeResidual <= 0.1 ? "good" : "warn"} />
-        {gpuInfo?.gridKind === "octree" && gpuInfo.powerDiagramProjection !== undefined && <MetricCard
+        {gpuInfo?.gridKind === "octree" && <MetricCard
           label="Power pressure authority"
           value={powerCSRPublished
             ? publishedPowerSolver
-            : powerAuthorityRequested && (gpuInfo.encodedSteps ?? 0) > 0
+            : (gpuInfo.encodedSteps ?? 0) > 0
               ? "POWER PUBLICATION FAILED"
-              : powerAuthorityRequested ? "POWER PENDING" : gpuInfo.powerDiagramReady ? "AXIS ROLLBACK" : "POWER UNAVAILABLE"}
-          unit={`${gpuInfo.pressureRequiredRows?.toLocaleString() ?? "—"} CSR rows · ${gpuInfo.pressureRequiredEntries?.toLocaleString() ?? "—"} entries · ${gpuInfo.pressureSolver ?? "solver pending"}${gpuInfo.powerDiagramFallbackReason ? ` · ${gpuInfo.powerDiagramFallbackReason}` : ""}`}
-          tone={powerAuthorityRequested
-            ? powerCSRPublished && !gpuInfo.pressureCapacityOverflow ? "good" : (gpuInfo.encodedSteps ?? 0) > 0 ? "warn" : "neutral"
-            : "neutral"}
+              : "POWER PENDING"}
+          unit={`${gpuInfo.pressureRequiredRows?.toLocaleString() ?? "—"} CSR rows · ${gpuInfo.pressureRequiredEntries?.toLocaleString() ?? "—"} entries · ${gpuInfo.pressureSolver ?? "solver pending"}`}
+          tone={powerCSRPublished && !gpuInfo.pressureCapacityOverflow ? "good" : (gpuInfo.encodedSteps ?? 0) > 0 ? "warn" : "neutral"}
         />}
         <MetricCard label={octreePressurePotential ? "GPU pressure-potential maximum" : "GPU pressure maximum"} value={gpuInfo?.maxPressure_Pa !== undefined ? gpuInfo.maxPressure_Pa.toExponential(2) : "—"} unit={`${octreePressurePotential ? "m²/s · stored dt·p/ρ" : "Pa"} at ${formatGridLocation(gpuInfo?.maxPressureLocation)}`} />
         <MetricCard label="GPU component CFL" value={gpuInfo?.maxComponentCfl !== undefined ? gpuInfo.maxComponentCfl.toFixed(3) : "—"} unit={`${gpuInfo?.highCflCellCount ?? 0} wet samples above 1`} tone={gpuInfo?.maxComponentCfl !== undefined && gpuInfo.maxComponentCfl <= 4 && (gpuInfo.highCflCellCount ?? 0) < 32 ? "good" : "warn"} />
         <MetricCard label="Phi transport substeps" value={gpuInfo?.lastSubsteps !== undefined ? `${gpuInfo.lastSubsteps}×` : "—"} unit={gpuInfo?.lastDt_s !== undefined ? `${(gpuInfo.lastDt_s * 1000).toFixed(2)} ms interface dt · latest stats sample` : "GPU-governed · latest stats sample"} tone={gpuInfo?.lastSubsteps !== undefined && gpuInfo.lastSubsteps <= 1 ? "good" : "warn"} />
         <MetricCard label="GPU NaN / infinity" value={gpuInfo?.nonFiniteCount !== undefined ? String(gpuInfo.nonFiniteCount) : "—"} unit="across pre-pressure, pressure, and projected fields" tone={gpuInfo?.nonFiniteCount === 0 ? "good" : "warn"} />
-        <MetricCard label="GPU step" value={gpuInfo?.gpuStep_ms !== undefined ? gpuInfo.gpuStep_ms.toFixed(2) : "—"} unit="ms · timestamp query" tone={gpuInfo?.gpuStep_ms !== undefined && gpuInfo.gpuStep_ms < 16.7 ? "good" : "neutral"} />
-        <MetricCard label="GPU completion cadence" value={(gpuInfo?.gpuCompletionProductionWall_ms ?? gpuInfo?.gpuCompletionWall_ms) && gpuInfo.gpuCompletionSimulation_s ? (gpuInfo.gpuCompletionSimulation_s * 1000 / (gpuInfo.gpuCompletionProductionWall_ms ?? gpuInfo.gpuCompletionWall_ms)!).toFixed(2) : gpuInfo?.gpuQueueWall_ms && gpuInfo.gpuQueueSimulation_s ? (gpuInfo.gpuQueueSimulation_s * 1000 / gpuInfo.gpuQueueWall_ms).toFixed(2) : "—"} unit={gpuInfo?.gpuBatchWall_ms !== undefined ? `× realtime · ${gpuInfo.gpuPendingBatches ?? 0} batches pending · ${gpuInfo.gpuBatchWall_ms.toFixed(1)} ms batch wall` : "queue-confirmed completion"} tone={(gpuInfo?.gpuCompletionProductionWall_ms ?? gpuInfo?.gpuCompletionWall_ms) && gpuInfo.gpuCompletionSimulation_s && gpuInfo.gpuCompletionSimulation_s * 1000 >= (gpuInfo.gpuCompletionProductionWall_ms ?? gpuInfo.gpuCompletionWall_ms)! ? "good" : "neutral"} />
         <MetricCard label={globalFineVolumeEstimate ? "GPU pre-correction occupancy drift" : scene.fluid.inflow ? "GPU net mass change" : "GPU mass drift"} value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}${globalFineVolumeEstimate ? " · smoothed occupancy estimate" : ""}`} tone={scene.fluid.inflow ? "neutral" : gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
         {!representedVolumeAliasesPrimary && <MetricCard label="GPU represented-volume drift" value={gpuInfo?.representedVolumeDrift !== undefined ? (gpuInfo.representedVolumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}`} tone={gpuInfo?.representedVolumeDrift !== undefined && Math.abs(gpuInfo.representedVolumeDrift) < 0.05 ? "good" : "warn"} />}
         <MetricCard label={octreePressurePotential && gpuInfo?.volumeControl ? "Global φ-shift supplement" : "Global correction"} value={gpuInfo?.gridKind === "restricted-tall-cell" ? `${gpuInfo.volumeCorrectionDivergenceRate_s?.toFixed(3) ?? "0.000"}` : gpuInfo?.volumeControl ? `${gpuInfo.volumeCorrectionNormalSpeed_cells_s?.toFixed(2) ?? "0.00"}` : "None"} unit={gpuInfo?.gridKind === "restricted-tall-cell" ? `s⁻¹ CM12 divergence rate · ${gpuInfo.phiInterfaceCellCount?.toFixed(0) ?? "—"} wet interface cells` : gpuInfo?.volumeControl ? `cells/s normal speed · ${gpuInfo.phiInterfaceCellCount?.toFixed(0) ?? "—"} interface cells${octreePressurePotential ? " · engineering supplement, not paper §5" : ""}` : "pairwise conservative face flux"} tone={gpuInfo?.gridKind === "restricted-tall-cell" || gpuInfo?.volumeControl ? "neutral" : "good"} />
@@ -193,11 +174,6 @@ export function DiagnosticsPanel() {
         </div>
         <small className="diagnostic-footnote">* collision impulse divided by the current fixed step · {backend === "webgpu" ? "GPU moving-solid penalization with conservative impulse readback" : "deterministic primitive quadrature"}</small>
       </section>}
-      <section className="panel-section chart-section">
-        <div className="section-heading"><h2>Presentation frame</h2><span>CPU encode · ms</span></div>
-        <Sparkline samples={samples} />
-        <div className="chart-legend"><span><i className="legend-teal" />encode time</span><span>physics GPU {gpuInfo?.gpuStep_ms?.toFixed(2) ?? "—"} ms</span></div>
-      </section>
       {rigidState && <section className="panel-section">
         <div className="section-heading"><h2>Rigid system</h2><span>CPU binary64</span></div>
         <div className="invariant-list">

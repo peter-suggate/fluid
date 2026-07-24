@@ -7,6 +7,8 @@
  * topology decision is read back to the CPU.
  */
 
+import { PassBroker } from "./webgpu-pass-broker";
+
 export const OCTREE_ANALYTIC_BOOTSTRAP_PARAMETER_BYTES = 32;
 
 export interface OctreeAnalyticBootstrapWorklistPlan {
@@ -160,10 +162,11 @@ export class WebGPUOctreeAnalyticBootstrapWorklist {
     // The active stream is published transactionally: clear the complete
     // header, produce its dispatch words on-GPU, then emit deterministic tile
     // indices. The retired stream is empty for the first generation.
-    encoder.clearBuffer(this.tileWorklist, 0, 16 * 4);
-    encoder.clearBuffer(this.tileStates);
+    const broker = new PassBroker(encoder);
+    broker.clearBuffer(this.tileWorklist, 0, 16 * 4);
+    broker.clearBuffer(this.tileStates);
     if (this.plan.activeTileCount > 0) {
-      const pass = encoder.beginComputePass({ label: "Build analytic octree bootstrap worklist" });
+      const pass = broker.compute({ label: "Build analytic octree bootstrap worklist" });
       pass.setBindGroup(0, this.group);
       pass.setPipeline(this.emit);
       pass.dispatchWorkgroups(
@@ -171,7 +174,7 @@ export class WebGPUOctreeAnalyticBootstrapWorklist {
         Math.ceil(this.plan.activeTileLimits[1] / 4),
         Math.ceil(this.plan.activeTileLimits[2] / 4),
       );
-      pass.end();
+      broker.fence("analytic octree bootstrap worklist complete");
     }
   }
 

@@ -2,10 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   octreeDiagnosticShader,
-  octreePressureCouplingShader,
   octreeProjectionShader,
 } from "../lib/webgpu-octree";
-import { octreeSurfacePageShader } from "../lib/webgpu-octree-surface-pages";
 
 function wgslFunction(source: string, name: string): string {
   const start = source.indexOf(`fn ${name}`);
@@ -41,7 +39,6 @@ function firstLoop(fn: string): string {
 test("octree owner fallback loops do not append unreachable tail returns", () => {
   for (const [label, source] of [
     ["projection", octreeProjectionShader],
-    ["pressure coupling", octreePressureCouplingShader],
     ["diagnostic overlay", octreeDiagnosticShader],
   ] as const) {
     const fn = wgslFunction(source, "canonicalOwner");
@@ -51,15 +48,6 @@ test("octree owner fallback loops do not append unreachable tail returns", () =>
   }
 });
 
-test("octree lock-free free-list loops do not append unreachable tail returns", () => {
-  const ownerPop = wgslFunction(octreeProjectionShader, "popOwnerPage");
-  assert.match(ownerPop, /loop\s*\{/);
-  assert.doesNotMatch(firstLoop(ownerPop), /\breturn\b/);
-  assert.match(ownerPop, /var physical = 0xffffffffu;/);
-  assert.equal(occurrences(ownerPop, "return physical;"), 1);
-
-  const surfacePop = wgslFunction(octreeSurfacePageShader, "popFree");
-  assert.match(surfacePop, /loop\s*\{/);
-  assert.doesNotMatch(firstLoop(surfacePop), /\breturn\b/);
-  assert.equal(occurrences(surfacePop, "return slot;"), 1);
+test("retired lock-free owner allocator stays deleted", () => {
+  assert.doesNotMatch(octreeProjectionShader, /fn popOwnerPage/);
 });

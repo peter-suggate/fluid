@@ -28,8 +28,9 @@ const outputDirectory = join(root, "lib", "generated");
 const binaryPath = join(outputDirectory, "octree-power-catalog.bin");
 const modulePath = join(outputDirectory, "octree-power-catalog.ts");
 const MAGIC = 0x504f_5743;
-const HEADER_WORDS = 24;
-const GENERATOR_VERSION = 4;
+const HEADER_WORDS = 26;
+const GENERATOR_VERSION = 5;
+const COEFFICIENT_CHANNELS = 19;
 
 const interiorConfigurations: OctreePowerTopologyConfiguration[] = enumerateCanonicalSameOrFinerPowerDescriptors().map((descriptor) => ({
   descriptor,
@@ -182,6 +183,28 @@ for (let descriptor = 0; descriptor < 512; descriptor += 1) {
   const record = lookupByDescriptor.get((OCTREE_POWER_SAME_OR_COARSER_FLAG | descriptor) >>> 0);
   if (record) sameOrCoarserDirect[descriptor] = packLookup(record.entry, record.transform);
 }
+// Paper Section 6.3: channel zero is the canonical diagonal and channels
+// 1..18 are catalog-face coefficients in the exact canonical face order.
+// Float32 products and accumulation are forced here in the same left-to-right
+// order used by the GPU assembly. Entries with more than eighteen faces still
+// receive their exact diagonal, but are deliberately ineligible for the fixed
+// width bulk path and remain on dynamic cut-row assembly.
+const coefficientData = new Float32Array(catalog.entries.length * COEFFICIENT_CHANNELS);
+for (let entry = 0; entry < catalog.entries.length; entry += 1) {
+  const firstFace = catalog.entryHeaders[entry * 2];
+  const faceCount = catalog.entryHeaders[entry * 2 + 1];
+  let diagonal = Math.fround(0);
+  for (let slot = 0; slot < faceCount; slot += 1) {
+    const face = (firstFace + slot) * OCTREE_POWER_CATALOG_FACE_FLOATS;
+    const coefficient = Math.fround(Math.fround(catalog.faceData[face + 4])
+      * Math.fround(catalog.faceData[face + 11]));
+    diagonal = Math.fround(diagonal + coefficient);
+    if (slot < COEFFICIENT_CHANNELS - 1) {
+      coefficientData[entry * COEFFICIENT_CHANNELS + 1 + slot] = coefficient;
+    }
+  }
+  coefficientData[entry * COEFFICIENT_CHANNELS] = diagonal;
+}
 const headerBytes = HEADER_WORDS * 4;
 const entryHeadersOffset = headerBytes;
 const entryVolumesOffset = entryHeadersOffset + catalog.entryHeaders.byteLength;
@@ -192,7 +215,8 @@ const sameOrCoarserDirectOffset = sameOrFinerDirectOffset + sameOrFinerDirect.by
 const tetrahedronHeadersOffset = sameOrCoarserDirectOffset + sameOrCoarserDirect.byteLength;
 const tetrahedronDataOffset = tetrahedronHeadersOffset + catalog.tetrahedronHeaders.byteLength;
 const tetrahedronVertexDataOffset = tetrahedronDataOffset + catalog.tetrahedronData.byteLength;
-const byteLength = tetrahedronVertexDataOffset + catalog.tetrahedronVertexData.byteLength;
+const coefficientDataOffset = tetrahedronVertexDataOffset + catalog.tetrahedronVertexData.byteLength;
+const byteLength = coefficientDataOffset + coefficientData.byteLength;
 const binary = new Uint8Array(byteLength);
 const header = new Uint32Array(binary.buffer, 0, HEADER_WORDS);
 header.set([
@@ -203,6 +227,7 @@ header.set([
   tetrahedronHeadersOffset, tetrahedronDataOffset, catalog.tetrahedronData.length,
   catalog.manifest.maximumTetrahedra, HEADER_WORDS,
   tetrahedronVertexDataOffset, catalog.tetrahedronVertexData.length / 4, 4,
+  coefficientDataOffset, COEFFICIENT_CHANNELS,
 ]);
 binary.set(new Uint8Array(catalog.entryHeaders.buffer), entryHeadersOffset);
 binary.set(new Uint8Array(catalog.entryVolumes.buffer), entryVolumesOffset);
@@ -213,6 +238,7 @@ binary.set(new Uint8Array(sameOrCoarserDirect.buffer), sameOrCoarserDirectOffset
 binary.set(new Uint8Array(catalog.tetrahedronHeaders.buffer), tetrahedronHeadersOffset);
 binary.set(new Uint8Array(catalog.tetrahedronData.buffer), tetrahedronDataOffset);
 binary.set(new Uint8Array(catalog.tetrahedronVertexData.buffer), tetrahedronVertexDataOffset);
+binary.set(new Uint8Array(coefficientData.buffer), coefficientDataOffset);
 
 const hash = createHash("sha256");
 for (const relative of [
@@ -243,6 +269,8 @@ export interface GeneratedOctreePowerCatalogViews {
   readonly tetrahedronData: Uint32Array;
   /** Global byte-selector table: canonical offset xyz and size ratio. */
   readonly tetrahedronVertexData: Float32Array;
+  /** Section 6.3: diagonal followed by eighteen canonical face-slot coefficients per entry. */
+  readonly coefficientData: Float32Array;
 }
 
 export function decodeGeneratedOctreePowerCatalog(data: ArrayBuffer): GeneratedOctreePowerCatalogViews {
@@ -255,7 +283,7 @@ export function decodeGeneratedOctreePowerCatalog(data: ArrayBuffer): GeneratedO
     || h[3] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount || h[7] !== data.byteLength
     || h[13] !== ${OCTREE_POWER_SAME_OR_FINER_MASK + 1} || h[15] !== 512
     || h[19] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra || h[20] !== ${HEADER_WORDS}
-    || h[22] > 256 || h[23] !== 4) {
+    || h[22] > 256 || h[23] !== 4 || h[25] !== ${COEFFICIENT_CHANNELS}) {
     throw new Error("Generated power catalog manifest mismatch");
   }
   return {
@@ -268,6 +296,7 @@ export function decodeGeneratedOctreePowerCatalog(data: ArrayBuffer): GeneratedO
     tetrahedronHeaders: new Uint32Array(data, h[16], h[2] * 3),
     tetrahedronData: new Uint32Array(data, h[17], h[18]),
     tetrahedronVertexData: new Float32Array(data, h[21], h[22] * h[23]),
+    coefficientData: new Float32Array(data, h[24], h[2] * h[25]),
   };
 }
 

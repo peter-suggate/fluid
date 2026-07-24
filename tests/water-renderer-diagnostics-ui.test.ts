@@ -17,20 +17,30 @@ test("renderer presentation source reaches the diagnostics store and panel with 
     assert.match(renderer, new RegExp(field), `${field} must cross the renderer metrics boundary`);
   }
   assert.match(controller, /waterSurfacePresentation:\s*metrics\.waterSurfacePresentation\s*\?\?\s*null/);
-  assert.match(pipeline, /get adaptiveDiagnosticsReadbackEnabled\(\) \{ return this\.performanceReadbacksEnabled; \}/,
-    "the ordinary UI receives presentation failures unless the explicit maximum-throughput switch disables readbacks");
-  assert.match(pipeline, /lastAdaptiveDiagnosticEncodeAt_ms < 250/,
+  assert.doesNotMatch(pipeline, /surfaceDiagnosticsReadbackEnabled|performanceReadbacksEnabled|setPerformanceReadbacksEnabled/,
+    "functional presentation evidence must not be controlled by retired performance instrumentation");
+  assert.match(pipeline, /if \(this\.surfaceDiagnosticPending \|\| !this\.indirectBuffer\) return;/,
+    "bounded presentation evidence remains available independently of performance traces");
+  assert.match(pipeline, /lastSurfaceDiagnosticEncodeAt_ms < 250/,
     "the ordinary presentation proof must use the same bounded cadence as solver telemetry");
-  assert.match(pipeline, /adaptiveDiagnosticsFullRateRequested/,
+  assert.match(pipeline, /surfaceDiagnosticsFullRateRequested/,
     "explicit diagnostics and Dawn captures may request per-capture presentation evidence");
+  assert.match(pipeline, /query\.get\("panel"\) === "diagnostics"/,
+    "the diagnostics panel is the browser authority for full-rate presentation evidence");
+  assert.doesNotMatch(pipeline, /query\.get\("(?:waterdiag|diagnostics)"\)/,
+    "retired browser switches must not retain renderer behavior");
   assert.match(panel, /testId="water-surface-presentation-source"/);
   assert.match(panel, /GLOBAL FINE \/ COARSE/);
-  assert.match(panel, /ADAPTIVE FALLBACK/);
+  assert.match(panel, /VOLUME FIELD/);
+  assert.doesNotMatch(panel, /ADAPTIVE FALLBACK/);
   assert.match(panel, /RETAINED PREVIOUS MESH/);
   assert.match(panel, /presentation fallback only · solver authority unchanged/);
   assert.match(panel, /pressureSolver\?\.includes\("Section 4\.3 hybrid"\)/);
   assert.match(panel, /POWER \+ SECTION 4\.3/,
-    "the balanced authoritative solver must not be mislabeled as Chebyshev in acceptance diagnostics");
+    "the separately selected paper solver must not be mislabeled as Chebyshev");
+  assert.match(panel, /pressureSolver\?\.includes\("fixed native-L2 Galerkin"\)/);
+  assert.match(panel, /POWER \+ FIXED GALERKIN/,
+    "the default fixed hierarchy must be visible as its own pressure authority");
   assert.match(panel, /authoritative global-fine field/);
   assert.match(panel, /unavailable — no authoritative field published/);
   assert.match(panel, /frontTelemetrySource/);

@@ -1,4 +1,8 @@
-import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
+import {
+  makeFineLevelSetSortedWorklistLookupWGSL,
+  type WebGPUFineLevelSetBrickSource,
+} from "./webgpu-octree-fine-levelset-bricks";
+import { PassBroker } from "./webgpu-pass-broker";
 
 export const OCTREE_ENERGY_LEDGER_RECORD_BYTES = 32;
 export const OCTREE_ENERGY_LEDGER_VALID = 0x8000_0000;
@@ -207,7 +211,7 @@ export class WebGPUOctreeEnergyLedger {
     return { buffer: this.parameters, offset, size: 64 };
   }
 
-  encodeFaceMetric(encoder: GPUCommandEncoder, stage: Extract<OctreeEnergyLedgerStage,
+  encodeFaceMetric(broker: PassBroker, stage: Extract<OctreeEnergyLedgerStage,
     "oldFaceCapture" | "postRemap" | "postGravity" | "postSolidConstraint" | "postProjection" | "postFaceBandPublication">,
   generation: number, source: FaceSource): void {
     if (this.destroyed) throw new Error("Energy ledger is destroyed");
@@ -219,15 +223,16 @@ export class WebGPUOctreeEnergyLedger {
     const finalizeGroup = this.device.createBindGroup({ layout: this.faceFinalizePipeline.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: params }, { binding: 1, resource: { buffer: this.records } },
         { binding: 2, resource: { buffer: this.control } }, { binding: 3, resource: { buffer: this.scratch } }] });
-    let pass = encoder.beginComputePass({ label: `Power energy ledger · ${stage} partials` });
+    let pass = broker.compute({ label: `Power energy ledger · ${stage} partials` });
     pass.setPipeline(this.facePartialPipeline); pass.setBindGroup(0, partialGroup);
-    pass.dispatchWorkgroups(this.plan.facePartialCount); pass.end();
-    pass = encoder.beginComputePass({ label: `Power energy ledger · ${stage} finalize` });
+    pass.dispatchWorkgroups(this.plan.facePartialCount);
+    pass = broker.compute({ label: `Power energy ledger · ${stage} finalize` });
     pass.setPipeline(this.faceFinalizePipeline); pass.setBindGroup(0, finalizeGroup);
-    pass.dispatchWorkgroups(1); pass.end();
+    pass.dispatchWorkgroups(1);
   }
 
-  encodeFinePotential(encoder: GPUCommandEncoder, stage: Extract<OctreeEnergyLedgerStage,
+  /** Append an observational fine reduction without splitting publication. */
+  encodeFinePotential(broker: PassBroker, stage: Extract<OctreeEnergyLedgerStage,
     "preFineTransport" | "postFineTransport" | "postFineTopology" | "postFineRedistance" | "postFineVolumeCorrection">,
   source: WebGPUFineLevelSetBrickSource): void {
     if (this.destroyed) throw new Error("Energy ledger is destroyed");
@@ -242,16 +247,16 @@ export class WebGPUOctreeEnergyLedger {
     const finalizeGroup = this.device.createBindGroup({ layout: this.fineFinalizePipeline.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: params }, { binding: 1, resource: { buffer: this.records } },
         { binding: 2, resource: { buffer: this.control } }, { binding: 3, resource: { buffer: this.scratch } }] });
-    let pass = encoder.beginComputePass({ label: `Power energy ledger · ${stage} partials` });
+    let pass = broker.compute({ label: `Power energy ledger · ${stage} partials` });
     pass.setPipeline(this.finePartialPipeline); pass.setBindGroup(0, partialGroup);
-    pass.dispatchWorkgroups(partialCount); pass.end();
-    pass = encoder.beginComputePass({ label: `Power energy ledger · ${stage} finalize` });
+    pass.dispatchWorkgroups(partialCount);
+    pass = broker.compute({ label: `Power energy ledger · ${stage} finalize` });
     pass.setPipeline(this.fineFinalizePipeline); pass.setBindGroup(0, finalizeGroup);
-    pass.dispatchWorkgroups(1); pass.end();
+    pass.dispatchWorkgroups(1);
   }
 
   /** Capture the transported old field before topology can reuse shared payload pages. */
-  encodeFineCommonCapture(encoder: GPUCommandEncoder, source: WebGPUFineLevelSetBrickSource): void {
+  encodeFineCommonCapture(broker: PassBroker, source: WebGPUFineLevelSetBrickSource): void {
     if (this.destroyed) throw new Error("Energy ledger is destroyed");
     const itemCapacity = source.plan.maximumResidentBricks * source.plan.samplesPerBrick;
     if (itemCapacity !== this.plan.fineSampleCapacity) {
@@ -267,16 +272,16 @@ export class WebGPUOctreeEnergyLedger {
       { binding: 12, resource: { buffer: this.commonLocalOrTarget } },
       { binding: 13, resource: { buffer: this.commonPrePhi } },
     ] });
-    const pass = encoder.beginComputePass({ label: "Power energy ledger · capture pre-topology common candidates" });
+    const pass = broker.compute({ label: "Power energy ledger · capture pre-topology common candidates" });
     pass.setPipeline(this.captureCommonPipeline); pass.setBindGroup(0, group);
-    pass.dispatchWorkgroups(this.plan.finePartialCount); pass.end();
+    pass.dispatchWorkgroups(this.plan.finePartialCount);
   }
 
   /**
    * Freeze the exact coordinate intersection after topology publication and
    * emit both sides of the topology comparison from that one support.
    */
-  encodeFineCommonTopologyPair(encoder: GPUCommandEncoder, previous: WebGPUFineLevelSetBrickSource,
+  encodeFineCommonTopologyPair(broker: PassBroker, previous: WebGPUFineLevelSetBrickSource,
     target: WebGPUFineLevelSetBrickSource): void {
     if (this.destroyed) throw new Error("Energy ledger is destroyed");
     const itemCapacity = target.plan.maximumResidentBricks * target.plan.samplesPerBrick;
@@ -290,16 +295,16 @@ export class WebGPUOctreeEnergyLedger {
       { binding: 10, resource: { buffer: target.phi } },
       { binding: 11, resource: { buffer: this.commonKeys } },
       { binding: 12, resource: { buffer: this.commonLocalOrTarget } },
-      { binding: 14, resource: { buffer: target.hash } },
+      { binding: 8, resource: { buffer: target.worklist } },
     ] });
-    const pass = encoder.beginComputePass({ label: "Power energy ledger · freeze topology common support" });
+    const pass = broker.compute({ label: "Power energy ledger · freeze topology common support" });
     pass.setPipeline(this.buildCommonPipeline); pass.setBindGroup(0, group);
-    pass.dispatchWorkgroups(this.plan.finePartialCount); pass.end();
-    this.encodeFineCommonPotential(encoder, "preFineTopologyCommon", previous.generation, target);
-    this.encodeFineCommonPotential(encoder, "postFineTopologyCommon", target.generation, target);
+    pass.dispatchWorkgroups(this.plan.finePartialCount);
+    this.encodeFineCommonPotential(broker, "preFineTopologyCommon", previous.generation, target);
+    this.encodeFineCommonPotential(broker, "postFineTopologyCommon", target.generation, target);
   }
 
-  encodeFineCommonPotential(encoder: GPUCommandEncoder, stage: Extract<OctreeEnergyLedgerStage,
+  encodeFineCommonPotential(broker: PassBroker, stage: Extract<OctreeEnergyLedgerStage,
     "preFineTopologyCommon" | "postFineTopologyCommon" | "postFineRedistanceCommon">,
   generation: number, target: WebGPUFineLevelSetBrickSource): void {
     if (this.destroyed) throw new Error("Energy ledger is destroyed");
@@ -318,12 +323,12 @@ export class WebGPUOctreeEnergyLedger {
     const finalizeGroup = this.device.createBindGroup({ layout: this.fineFinalizePipeline.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: params }, { binding: 1, resource: { buffer: this.records } },
         { binding: 2, resource: { buffer: this.control } }, { binding: 3, resource: { buffer: this.scratch } }] });
-    let pass = encoder.beginComputePass({ label: `Power energy ledger · ${stage} partials` });
+    let pass = broker.compute({ label: `Power energy ledger · ${stage} partials` });
     pass.setPipeline(this.commonPartialPipeline); pass.setBindGroup(0, partialGroup);
-    pass.dispatchWorkgroups(this.plan.finePartialCount); pass.end();
-    pass = encoder.beginComputePass({ label: `Power energy ledger · ${stage} finalize` });
+    pass.dispatchWorkgroups(this.plan.finePartialCount);
+    pass = broker.compute({ label: `Power energy ledger · ${stage} finalize` });
     pass.setPipeline(this.fineFinalizePipeline); pass.setBindGroup(0, finalizeGroup);
-    pass.dispatchWorkgroups(1); pass.end();
+    pass.dispatchWorkgroups(1);
   }
 
   async read(): Promise<OctreeEnergyLedgerSnapshot> {
@@ -352,10 +357,10 @@ export const octreeEnergyLedgerWGSL = /* wgsl */ `
 struct Params{step:u32,slot:u32,stage:u32,generation:u32,stepCapacity:u32,partialCount:u32,itemCapacity:u32,kind:u32,gravity:vec3f,pad:f32}
 struct Record{step:u32,generation:u32,stage:u32,flags:u32,value:f32,volume:f32,samples:u32,invalid:u32}
 struct PowerFace{negativeRow:u32,positiveRow:u32,geometryCode:u32,flags:u32,normalVelocity:f32,area:f32,inverseDistance:f32,openFraction:f32}
-struct FineParams{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,domainOrigin:vec3f,fineCellWidth:f32,hashCapacity:u32,maximumHashProbes:u32,pageCapacity:u32,generation:u32,activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32}
+struct FineParams{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,domainOrigin:vec3f,fineCellWidth:f32,worklistCapacity:u32,worklistHeaderWords:u32,pageCapacity:u32,generation:u32,activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32}
 @group(0)@binding(0)var<uniform>p:Params;
 @group(0)@binding(1)var<storage,read_write>records:array<Record>;
-@group(0)@binding(2)var<storage,read_write>control:array<atomic<u32>>;
+@group(0)@binding(2)var<storage,read_write>control:array<u32>;
 @group(0)@binding(3)var<storage,read_write>partials:array<vec4u>;
 @group(0)@binding(4)var<storage,read>faces:array<PowerFace>;
 @group(0)@binding(5)var<storage,read>faceControl:array<u32>;
@@ -367,7 +372,6 @@ struct FineParams{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec
 @group(0)@binding(11)var<storage,read_write>commonKeys:array<u32>;
 @group(0)@binding(12)var<storage,read_write>commonLocalOrTarget:array<u32>;
 @group(0)@binding(13)var<storage,read_write>commonPrePhi:array<f32>;
-@group(0)@binding(14)var<storage,read>targetHash:array<u32>;
 var<workgroup>sum0:array<f32,64>;var<workgroup>sum1:array<f32,64>;
 var<workgroup>count0:array<u32,64>;var<workgroup>count1:array<u32,64>;
 const VALID:u32=0x80000000u;
@@ -379,17 +383,18 @@ fn reduceLocal(local:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride
  let index=wid.x*64u+lid.x;let faceCount=select(0u,min(faceControl[1],p.itemCapacity),arrayLength(&faceControl)>1u);var energy=0.;var samples=0u;var invalid=0u;
  if(index<faceCount&&index<arrayLength(&faces)){let f=faces[index];if(!finite(f.normalVelocity)||!finite(f.area)||!finite(f.inverseDistance)||!finite(f.openFraction)||f.area<=0.||f.inverseDistance<=0.||f.openFraction<0.||f.openFraction>1.){invalid=1u;}else{if(f.openFraction>0.){energy=.5*f.area/(f.openFraction*f.inverseDistance)*f.normalVelocity*f.normalVelocity;}samples=1u;}}
  sum0[lid.x]=energy;sum1[lid.x]=0.;count0[lid.x]=samples;count1[lid.x]=invalid;reduceLocal(lid.x);if(lid.x==0u){partials[wid.x]=vec4u(bitcast<u32>(sum0[0]),0u,count0[0],count1[0]);}}
-@compute @workgroup_size(1)fn finalizeFaceMetric(){var energy=0.;var samples=0u;var invalid=0u;for(var i=0u;i<p.partialCount;i+=1u){let q=partials[i];energy+=bitcast<f32>(q.x);samples+=q.z;invalid+=q.w;}let flags=VALID;records[recordIndex()]=Record(p.step,p.generation,p.stage,flags,energy,0.,samples,invalid);atomicMax(&control[1],p.step+1u);}
-fn activeSample(flat:u32)->vec2u{let liveCount=min(worklist[0],fp.pageCapacity);if(flat>=liveCount*fp.samplesPerBrick){return vec2u(0xffffffffu);}let w=flat/fp.samplesPerBrick;let local=flat-w*fp.samplesPerBrick;let id=worklist[5u+w];if(id>=fp.pageCapacity||metadata[id*10u+2u]!=fp.generation){return vec2u(0xffffffffu);}return vec2u(id,local);}
+@compute @workgroup_size(1)fn finalizeFaceMetric(){var energy=0.;var samples=0u;var invalid=0u;for(var i=0u;i<p.partialCount;i+=1u){let q=partials[i];energy+=bitcast<f32>(q.x);samples+=q.z;invalid+=q.w;}let flags=VALID;records[recordIndex()]=Record(p.step,p.generation,p.stage,flags,energy,0.,samples,invalid);control[1]=max(control[1],p.step+1u);}
+fn liveFineCount()->u32{if(fp.worklistHeaderWords!=5u||arrayLength(&worklist)<5u||worklist[1]!=fp.generation||worklist[3]!=1u||worklist[4]!=1u||worklist[0]>fp.worklistCapacity||worklist[0]>fp.pageCapacity||5u+worklist[0]>arrayLength(&worklist)){return 0u;}return worklist[0];}
+fn activeSample(flat:u32)->vec2u{let liveCount=liveFineCount();if(flat>=liveCount*fp.samplesPerBrick){return vec2u(INVALID);}let w=flat/fp.samplesPerBrick;let local=flat-w*fp.samplesPerBrick;let id=worklist[5u+w];let base=id*10u;if(id>=fp.pageCapacity||base+2u>=arrayLength(&metadata)||metadata[base]!=id||metadata[base+2u]!=fp.generation){return vec2u(INVALID);}return vec2u(id,local);}
 fn unpackBrick(key:u32)->vec3u{let xy=fp.brickDimensions.x*fp.brickDimensions.y;let z=key/xy;let r=key-z*xy;let y=r/fp.brickDimensions.x;return vec3u(r-y*fp.brickDimensions.x,y,z);}
 fn localCoord(local:u32)->vec3u{let r=fp.brickResolution;let z=local/(r*r);let q=local-z*r*r;let y=q/r;return vec3u(q-y*r,y,z);}
 @compute @workgroup_size(64)fn reduceFinePotentialPartials(@builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){
- let flat=wid.x*64u+lid.x;var energy=0.;var volume=0.;var samples=0u;var invalid=0u;let liveSampleCount=min(worklist[0],fp.pageCapacity)*fp.samplesPerBrick;
+ let flat=wid.x*64u+lid.x;var energy=0.;var volume=0.;var samples=0u;var invalid=0u;let liveSampleCount=liveFineCount()*fp.samplesPerBrick;
  if(flat<p.itemCapacity&&flat<liveSampleCount){let a=activeSample(flat);if(a.x==0xffffffffu){invalid=1u;}else{let index=a.x*fp.samplesPerBrick+a.y;let brick=unpackBrick(metadata[a.x*10u+1u]);let q=brick*fp.brickResolution+localCoord(a.y);if(all(q<fp.sampleDimensions)){if(index>=arrayLength(&phi)||index>=arrayLength(&sampleFlags)||(sampleFlags[index]&1u)==0u){invalid=1u;}else{let value=phi[index];if(!finite(value)){invalid=1u;}else{let h=fp.fineCellWidth;let alpha=clamp(.5-value/h,0.,1.);let cellVolume=h*h*h;let position=fp.domainOrigin+(vec3f(q)+.5)*h;volume=alpha*cellVolume;energy=-dot(p.gravity,position)*volume;samples=1u;}}}}}
  sum0[lid.x]=energy;sum1[lid.x]=volume;count0[lid.x]=samples;count1[lid.x]=invalid;reduceLocal(lid.x);if(lid.x==0u){partials[wid.x]=vec4u(bitcast<u32>(sum0[0]),bitcast<u32>(sum1[0]),count0[0],count1[0]);}}
 @compute @workgroup_size(64)fn captureFineCommonCandidates(@builtin(global_invocation_id)g:vec3u){let flat=g.x;if(flat>=arrayLength(&commonKeys)||flat>=arrayLength(&commonLocalOrTarget)||flat>=arrayLength(&commonPrePhi)){return;}commonKeys[flat]=INVALID;commonLocalOrTarget[flat]=INVALID;commonPrePhi[flat]=0.;let a=activeSample(flat);if(a.x==INVALID){return;}let index=a.x*fp.samplesPerBrick+a.y;if(index>=arrayLength(&phi)||index>=arrayLength(&sampleFlags)||(sampleFlags[index]&1u)==0u){return;}let value=phi[index];if(!finite(value)){return;}let key=metadata[a.x*10u+1u];let q=unpackBrick(key)*fp.brickResolution+localCoord(a.y);if(any(q>=fp.sampleDimensions)){return;}commonKeys[flat]=key;commonLocalOrTarget[flat]=a.y;commonPrePhi[flat]=value;}
-fn lookupTargetBrick(key:u32)->u32{if(fp.hashCapacity==0u){return INVALID;}let start=((key^(key>>16u))*0x9e3779b1u)&(fp.hashCapacity-1u);for(var probe=0u;probe<32u;probe+=1u){if(probe>=fp.maximumHashProbes){break;}let slot=(start+probe)&(fp.hashCapacity-1u);if(slot*2u+1u>=arrayLength(&targetHash)){return INVALID;}let stored=targetHash[slot*2u];if(stored==key){let id=targetHash[slot*2u+1u];if(id>=fp.pageCapacity||id*10u+2u>=arrayLength(&metadata)||metadata[id*10u]!=id||metadata[id*10u+1u]!=key||metadata[id*10u+2u]!=fp.generation){return INVALID;}return id;}if(stored==INVALID){return INVALID;}}return INVALID;}
+${makeFineLevelSetSortedWorklistLookupWGSL("fp", "metadata", "worklist", "lookupTargetBrick")}
 @compute @workgroup_size(64)fn buildFineCommonSupport(@builtin(global_invocation_id)g:vec3u){let flat=g.x;if(flat>=arrayLength(&commonKeys)||flat>=arrayLength(&commonLocalOrTarget)){return;}let key=commonKeys[flat];let local=commonLocalOrTarget[flat];commonLocalOrTarget[flat]=INVALID;if(key==INVALID||local>=fp.samplesPerBrick){return;}let id=lookupTargetBrick(key);if(id==INVALID){return;}let index=id*fp.samplesPerBrick+local;if(index>=arrayLength(&phi)||index>=arrayLength(&sampleFlags)||(sampleFlags[index]&1u)==0u||!finite(phi[index])){return;}commonLocalOrTarget[flat]=index;}
 @compute @workgroup_size(64)fn reduceFineCommonPotentialPartials(@builtin(local_invocation_id)lid:vec3u,@builtin(workgroup_id)wid:vec3u){let flat=wid.x*64u+lid.x;var energy=0.;var volume=0.;var samples=0u;var invalid=0u;if(flat<p.itemCapacity&&flat<arrayLength(&commonLocalOrTarget)&&flat<arrayLength(&commonPrePhi)){let index=commonLocalOrTarget[flat];if(index!=INVALID){if(index>=arrayLength(&phi)||index>=arrayLength(&sampleFlags)){invalid=1u;}else{let id=index/fp.samplesPerBrick;let local=index-id*fp.samplesPerBrick;if(id>=fp.pageCapacity||id*10u+2u>=arrayLength(&metadata)||metadata[id*10u+2u]!=fp.generation){invalid=1u;}else{var value=commonPrePhi[flat];if(p.stage!=${OCTREE_ENERGY_LEDGER_STAGES.indexOf("preFineTopologyCommon")}u){if((sampleFlags[index]&1u)==0u){invalid=1u;}else{value=phi[index];}}if(invalid==0u&&!finite(value)){invalid=1u;}if(invalid==0u){let brick=unpackBrick(metadata[id*10u+1u]);let q=brick*fp.brickResolution+localCoord(local);if(any(q>=fp.sampleDimensions)){invalid=1u;}else{let h=fp.fineCellWidth;let alpha=clamp(.5-value/h,0.,1.);let cellVolume=h*h*h;let position=fp.domainOrigin+(vec3f(q)+.5)*h;volume=alpha*cellVolume;energy=-dot(p.gravity,position)*volume;samples=1u;}}}}}}sum0[lid.x]=energy;sum1[lid.x]=volume;count0[lid.x]=samples;count1[lid.x]=invalid;reduceLocal(lid.x);if(lid.x==0u){partials[wid.x]=vec4u(bitcast<u32>(sum0[0]),bitcast<u32>(sum1[0]),count0[0],count1[0]);}}
-@compute @workgroup_size(1)fn finalizeFinePotential(){var energy=0.;var volume=0.;var samples=0u;var invalid=0u;for(var i=0u;i<p.partialCount;i+=1u){let q=partials[i];energy+=bitcast<f32>(q.x);volume+=bitcast<f32>(q.y);samples+=q.z;invalid+=q.w;}let flags=VALID|p.kind;records[recordIndex()]=Record(p.step,p.generation,p.stage,flags,energy,volume,samples,invalid);atomicMax(&control[1],p.step+1u);}
+@compute @workgroup_size(1)fn finalizeFinePotential(){var energy=0.;var volume=0.;var samples=0u;var invalid=0u;for(var i=0u;i<p.partialCount;i+=1u){let q=partials[i];energy+=bitcast<f32>(q.x);volume+=bitcast<f32>(q.y);samples+=q.z;invalid+=q.w;}let flags=VALID|p.kind;records[recordIndex()]=Record(p.step,p.generation,p.stage,flags,energy,volume,samples,invalid);control[1]=max(control[1],p.step+1u);}
 `;

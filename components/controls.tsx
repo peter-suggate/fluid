@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import type { MetricSample } from "@/lib/model";
+import { useState } from "react";
 
 export function formatNumber(value: number, digits = 3) {
   if (Math.abs(value) < 0.001 && value !== 0) return value.toExponential(2);
@@ -105,39 +104,4 @@ export function Segmented<T extends string>({ value, options, onChange, ariaLabe
 
 export function MetricCard({ label, value, unit, tone = "neutral", testId }: { label: string; value: string; unit?: string; tone?: "neutral" | "good" | "warn"; testId?: string }) {
   return <div className={`metric-card tone-${tone}`} data-testid={testId}><span>{label}</span><strong>{value}</strong>{unit && <small>{unit}</small>}</div>;
-}
-
-export function Sparkline({ samples }: { samples: MetricSample[] }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ratio = Math.min(window.devicePixelRatio || 1, 2);
-    const width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
-    const height = Math.max(1, Math.floor(canvas.clientHeight * ratio));
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, width, height);
-    ctx.strokeStyle = "rgba(145, 242, 213, .13)";
-    ctx.lineWidth = ratio;
-    for (let i = 1; i < 4; i += 1) {
-      const y = (height * i) / 4;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-    }
-    if (samples.length < 2) return;
-    const values = samples.map((sample) => sample.frame_ms);
-    const max = Math.max(16.7, ...values);
-    ctx.strokeStyle = "#83f1d1";
-    ctx.lineWidth = 1.5 * ratio;
-    ctx.beginPath();
-    values.forEach((value, index) => {
-      const x = (index / Math.max(values.length - 1, 1)) * width;
-      const y = height - (value / max) * (height - 4 * ratio) - 2 * ratio;
-      if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-  }, [samples]);
-  return <canvas ref={canvasRef} className="sparkline" aria-label="Presentation frame time history" />;
 }

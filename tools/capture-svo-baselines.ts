@@ -3,7 +3,7 @@ import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { canonicalScene } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
-import type { PerformanceSnapshot } from "../lib/stores/diagnostics-store";
+import type { PerformanceReport } from "../lib/stores/diagnostics-store";
 import {
   SVO_BASELINE_ADAPTER_ASSUMPTIONS,
   SVO_BASELINE_REQUIRED_LIMITS,
@@ -19,7 +19,7 @@ import { createSmokeScenario } from "./webgpu-smoke-scenarios";
 interface CaptureObservation {
   jobId: string;
   adapter: SVOBaselineAdapterObservation;
-  performanceSamples: Pick<PerformanceSnapshot, "cpuFrame_ms" | "gpuRender_ms" | "gpuDryScene_ms" | "gpuRenderTimingAvailable">[];
+  performanceSamples: PerformanceReport[];
   rendererOwnedBytes: number;
   colorFile: string;
   signalFiles?: Partial<Record<"depth" | "geometricNormal" | "identityMedia" | "energy", string>>;

@@ -10,9 +10,9 @@ import {
 } from "../lib/webgpu-octree-power-coarse-levelset";
 
 const header = {
-  state: OCTREE_POWER_COARSE_LEVELSET_VALID, generation: 7, hashCapacity: 32,
+  state: OCTREE_POWER_COARSE_LEVELSET_VALID, generation: 7, rowCount: 12,
   maximumLeafSize: 8, dimensions: [16, 8, 4] as const, physicalCellSize: 0.25,
-  actualHashCapacity: 32,
+  actualRowCapacity: 32,
 };
 
 test("coarse directory authority rejects stale, unpublished, malformed, and dimension-mismatched headers", () => {
@@ -20,34 +20,29 @@ test("coarse directory authority rejects stale, unpublished, malformed, and dime
   assert.equal(octreePowerCoarseDirectoryIsAuthoritative({ ...header, state: 0 }, 7, [16, 8, 4], 0.25), false);
   assert.equal(octreePowerCoarseDirectoryIsAuthoritative({ ...header, generation: 6 }, 7, [16, 8, 4], 0.25), false);
   assert.equal(octreePowerCoarseDirectoryIsAuthoritative(header, 7, [16, 8, 5], 0.25), false);
-  assert.equal(octreePowerCoarseDirectoryIsAuthoritative({ ...header, actualHashCapacity: 16 }, 7,
+  assert.equal(octreePowerCoarseDirectoryIsAuthoritative({ ...header, actualRowCapacity: 8 }, 7,
     [16, 8, 4], 0.25), false);
   assert.equal(octreePowerCoarseDirectoryIsAuthoritative({ ...header, maximumLeafSize: 6 }, 7,
     [16, 8, 4], 0.25), false);
 });
 
-test("binding 15 cutover preserves bulk worklists only in extrapolation and paged rollback paths", () => {
+test("binding 15 cutover keeps only compact coarse authority", () => {
   const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-  assert.match(source, /ab: this\.createProjectionGroup[\s\S]*this\.pressureA, this\.pressureB, undefined, coarseDirectory\)/);
-  assert.match(source, /extrapolateOut: this\.groups\.extrapolateOut/);
-  assert.match(source, /extrapolateScratch: this\.groups\.extrapolateScratch/);
-  assert.equal((octreeProjectionShader.match(/bulkResidentCell\(/g) ?? []).length, 4,
-    "one definition plus exactly the three sparse extrapolation wrappers");
-  assert.match(octreeProjectionShader,
-    /fn pagedSurfaceBindings\(\) -> bool \{ return \(params\.pressureCapacity\.w & 2u\) != 0u; \}/,
-    "the paged bit selects binding ABI only");
-  assert.match(octreeProjectionShader,
-    /fn pagedSurfaceAuthority\(\)[\s\S]*atomicLoad\(&solidOrSurface\[3\]\) == 0u[\s\S]*atomicLoad\(&solidOrSurface\[6\]\) > 0u[\s\S]*atomicLoad\(&solidOrSurface\[7\]\) > 0u/,
-    "page-backed phi requires a fault-free, non-empty GPU-published generation");
-  assert.match(source, /\(this\.pressureWarmStart \? 1 : 0\) \| \(generation << 2\)/,
-    "global-fine generation packing cannot enable the paged bit");
+  assert.match(source, /ab: this\.createProjectionGroup[\s\S]*this\.pressureA, this\.pressureB, coarseDirectory\)/);
+  assert.doesNotMatch(source, /pagedGroups|pagedPhi|SurfacePage/);
+  assert.doesNotMatch(source, /extrapolateOut|extrapolateScratch/);
+  assert.doesNotMatch(octreeProjectionShader, /bulkResidentCell|extrapolateSeedSparse|extrapolateSparse/,
+    "Section 5 compact face extension supersedes texture-space sparse extrapolation");
+  assert.match(source, /const flags = 1 \| \(generation << 2\)/,
+    "global-fine generation packing always selects the optimized warm-start lane");
+  assert.doesNotMatch(source, /pressureWarmStart/,
+    "the power-octree warm-start policy must not remain configurable");
 });
 
 test("packed coarse generation cannot alter any pre-existing pressure-capacity flag consumer", () => {
   const uses = [...octreeProjectionShader.matchAll(/params\.pressureCapacity\.w[^;\n]*/g)].map((match) => match[0]);
-  assert.equal(uses.length, 3);
+  assert.equal(uses.length, 2);
   assert.ok(uses.some((use) => use.includes(">>2u")));
-  assert.ok(uses.some((use) => use.includes("& 2u")));
   assert.ok(uses.some((use) => use.includes("& 1u")));
   assert.ok(uses.every((use) => !use.includes("!= 0u") || use.includes("&")), uses.join("\n"));
 });
@@ -57,51 +52,78 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
     /if\(coarse\.authority&&coarse\.leafSize==owner\.size\)\{return coarse\.phi<0\.0;\}/,
     "a coarse interval may classify only its exact pressure leaf, never all newly refined children");
   assert.match(octreeProjectionShader,
-    /if\(coarse\.authority&&coarse\.leafSize==0u\)\{return false;\}[\s\S]*if\(coarse\.authority&&coarse\.maximumPhi<0\.0\)\{return true;\}[\s\S]*return legacyOwnerPhiPoint\(sampleCentre\)<0\.0;/,
-    "resized interface leaves recover their own page-native centre sign while directory misses remain explicit air");
-  assert.match(octreeProjectionShader,
-    /Topology renewal runs while the persistent frontier hash is being[\s\S]*return max\(params\.cellRelax\.x/,
-    "interface classification must not read the frontier hash while appendFrontier mutates it");
+    /fn liquidOwner\(owner: Owner\)[\s\S]*if\(analyticInitialPhiEnabled\(\)\)\{return analyticInitialPhi\(centre\)<0\.0;\}[\s\S]*if\(coarse\.authority&&coarse\.leafSize==0u\)\{return false;\}[\s\S]*if\(coarse\.authority&&coarse\.maximumPhi<0\.0\)\{return true;\}/,
+    "the authored first solve is exclusive; after cutover, directory misses remain explicit air");
   assert.match(octreeProjectionShader,
     /let fine=fineLeafSummary\(origin,owner\.size\);[\s\S]*if\(fine\.found\)\{[\s\S]*fine\.centerValid[\s\S]*else if\(fine\.complete&&!fine\.coarseAuthority\)/,
     "recurring frontier phase selection consumes a current centre stencil independently of complete sparse coverage");
   const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
   assert.match(rebuild,
-    /setBindGroup\(0,\s*active\s*\?\s*this\.fineSummarySizingGroup\s*:\s*this\.groups\.ab\)[\s\S]*filterFrontierPipeline[\s\S]*appendFrontierActivePipeline/,
+    /setBindGroup\(0,\s*active\s*\?\s*this\.fineSummarySizingGroup\s*:\s*this\.groups\.ab\)[\s\S]*classifyFrontierCandidates[\s\S]*emitFrontierCandidates/,
     "frontier filtering and insertion both consume current fine-summary authority");
-  assert.match(fineLevelSetSummaryWGSL, /mergeCoarsePhiSummaries/);
-  assert.match(fineLevelSetSummaryWGSL, /coarse\.state!=PUBLISHED[\s\S]*coarse\.generation&0x3fffffffu/);
-  assert.match(fineLevelSetSummaryWGSL, /atomicOr\(&directory\[base\+6u\],COARSE_AUTHORITY\)/,
+  assert.match(fineLevelSetSummaryWGSL,
+    /fn buildFineSummaryDelta[\s\S]*for\(var row=lid;row<coarseCount[\s\S]*coarseHierarchyKey\(coarseDirtyIdentity\(row\)\)/,
+    "the persistent exact transaction builder consumes corrected-coarse delta rows directly");
+  assert.match(fineLevelSetSummaryWGSL,
+    /fn coarseAuthoritative[\s\S]*coarse\.state==PUBLISHED[\s\S]*coarseControl\[2\]/,
+    "coarse live-prefix work is admitted only from the immutable current publication");
+  assert.match(fineLevelSetSummaryWGSL, /Entry\(key,ordered\(e\.minimumPhi\)[\s\S]*COARSE_AUTHORITY/,
     "an exact corrected-coarse leaf marks the unified summary authoritative");
   assert.match(octreeProjectionShader, /result\.coarseAuthority = \(entryFlags & 0x80000000u\) != 0u/);
   assert.match(octreeProjectionShader,
     /else if\(fine\.complete&&!fine\.coarseAuthority\)\{/,
     "coarse-only summaries must preserve the exact coarse cell-centre phase used by power-boundary sampling");
   assert.match(fineLevelSetSummaryWGSL,
-    /let next=bitcast<u32>\(bitcast<f32>\(old\)\+centerPhi\);let sumResult=atomicCompareExchangeWeak\(&directory\[base\+7u\],old,next\)/,
-    "interval propagation retains its bounded centre accumulator before the exact node-centre overwrite");
+    /fn publicDirtySummary[\s\S]*committedFineAt\(key\)[\s\S]*coarseSummaryAt\(key\)[\s\S]*combineSummary/,
+    "public dirty rows combine the exact private fine tree with current corrected-coarse contributions");
   assert.match(fineLevelSetSummaryWGSL,
-    /fn summarizeFineCenters[\s\S]*let span=brickSide\*resolution;let centerLow=coord\*span\+vec3u\(span\/2u-1u\)[\s\S]*mask==0xffu[\s\S]*CENTER_COMPLETE/,
-    "every dyadic node receives an exact eight-sample current-fine centre stencil");
-  assert.match(WebGPUFineLevelSetSummaries.prototype.encode.toString(),
-    /this\.centerPipeline[\s\S]*source\.metadata[\s\S]*source\.flags[\s\S]*source\.phi[\s\S]*source\.hash/,
-    "exact centres are sampled from the current fine generation before topology renewal");
+    /fn stageFineOnlyCarry[\s\S]*fineDirtyContains[\s\S]*fn stageFineOnlyDirty/,
+    "the private fine-only tree carries untouched rows and compacts changed ancestors independently");
   assert.match(fineLevelSetSummaryWGSL,
-    /centreMask\|=1u<<\(delta\.x\+2u\*delta\.y\+4u\*delta\.z\)[\s\S]*centerMasks\[l\.x\]\|=centerMasks\[l\.x\+stride\][\s\S]*centerMasks\[0\]<<CENTER_SHIFT/,
-    "all eight centre corners remain attributable across factor-4 and factor-8 brick hierarchy merges");
-  assert.match(octreeProjectionShader, /if \(!fineSummary\.complete\)[\s\S]*legacyPhi/,
-    "a missing exact coarse/fine summary remains inconclusive and executes the rollback scan");
-  assert.match(octreeProjectionShader, /if\(coarse\.authority\)\{return coarseClassificationPhi\(coarse\);\}[\s\S]*return legacyPhi\(p\);/);
+    /fn stageFineOnlyDirty[\s\S]*let fineDirty=first&&key!=INVALID&&fineDirtyContains\(key\)[\s\S]*dirtySummaryAt\(key\)/,
+    "duplicate fine/coarse delta keys must query fine authority instead of trusting unstable equal-key sort order");
+  assert.match(fineLevelSetSummaryWGSL,
+    /fn coarseDirtyIdentity[\s\S]*coarseDelta\.items\[row\][\s\S]*fn buildFineSummaryDelta[\s\S]*records\[output\]=Entry/,
+    "recurring corrected coarse work emits only the compact value/phase delta");
+  assert.doesNotMatch(fineLevelSetSummaryWGSL,
+    /sourceSlot|hashCapacity|maximumHashProbes/,
+    "summary merging must consume the exact published row count, never scan unused directory capacity");
+  const summaryEncodeOrder = WebGPUFineLevelSetSummaries.prototype.encode.toString();
+  assert.ok(
+    summaryEncodeOrder.indexOf('run("buildFineSummaryDelta"')
+      < summaryEncodeOrder.indexOf("broker.updateIndirectBuffer"),
+    "fine and coarse delta records are built persistently before the exact recompute extent is published",
+  );
+  assert.match(summaryEncodeOrder, /runIndirect\("recomputeFineSummaryBase"/);
+  assert.doesNotMatch(fineLevelSetSummaryWGSL,
+    /prepareFineSummaryWork|summarizeFineBricks|mergeCoarsePhiSummaries|scanFineSummarySegments/);
+  assert.match(fineLevelSetSummaryWGSL,
+    /fn entryPresent[\s\S]*COARSE_AUTHORITY\|CENTER_COMPLETE[\s\S]*fn centerSummary[\s\S]*let span=\(1u<<p\.level\)\*resolution[\s\S]*index>=arrayLength\(&c\)\|\|index>=arrayLength\(&d\)[\s\S]*mask==0xffu[\s\S]*CENTER_COMPLETE/,
+    "every dyadic node retains an exact finite eight-sample centre phase independently of narrow-band membership");
+  const summaryEncode = WebGPUFineLevelSetSummaries.prototype.encode.toString();
+  for (const field of ["source.metadata", "source.worklist", "source.flags", "source.phi"]) {
+    assert.ok(summaryEncode.includes(field), `summary update must bind current fine ${field}`);
+  }
+  assert.doesNotMatch(fineLevelSetSummaryWGSL, /pageHash|finePageHash|hashProbe/,
+    "fine summary lookup must use the canonical sorted worklist");
+  assert.doesNotMatch(fineLevelSetSummaryWGSL,
+    /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
+    "fine-summary construction and publication must be fully atomic-free");
+  assert.doesNotMatch(octreeProjectionShader, /legacyPhi|pagedSurface|surfacePagePhi/,
+    "missing compact authority must fail closed instead of reviving a deleted page/dense fallback");
   assert.match(octreeProjectionShader, /coarseWord\(0u\)!=0x80000000u[\s\S]*coarseWord\(1u\)&0x3fffffffu\)!=expected/);
 });
 
-test("published-directory miss is air only after every requested live row inserted successfully", () => {
+test("published-directory miss is air only after every requested sorted row publishes successfully", () => {
   assert.match(octreePowerCoarseLevelSetShader,
-    /fn publishPowerCoarsePhi[\s\S]*row>=requested\(\)[\s\S]*publishSample\(row,output\)/);
+    /fn publishPowerCoarsePhi[\s\S]*slot>=requested\(\)[\s\S]*descriptor=rowDirectory\[slot\][\s\S]*candidateDirectory\.entries\[slot\]=SampleEntry/);
   assert.match(octreePowerCoarseLevelSetShader,
-    /fn publishSample[\s\S]*fail\(row,128u\)/);
+    /descriptor\.morton==morton\(header\.cell\)[\s\S]*directoryLess\(level\(prior\.size\),prior\.morton,level\(descriptor\.size\),descriptor\.morton\)/);
   assert.match(octreePowerCoarseLevelSetShader,
-    /fn finalizePowerCoarsePhi\(\)\{if\(rejectedFine\(\)\)\{return;\}let complete=control\.rowCount>0u[\s\S]*atomicLoad\(&control\.advected\)==control\.rowCount[\s\S]*atomicStore\(&sampleDirectory\.state,VALID\)[\s\S]*atomicStore\(&sampleDirectory\.state,0u\)/,
-    "an empty or partially advected compact row set must remain an unpublished coarse directory");
+    /fn finalizePowerCoarsePhi[\s\S]*reduceAdvected\[0\]==count&&reduceDirectoryRows\[0\]==count[\s\S]*candidateDirectory\.state=VALID[\s\S]*candidateDirectory\.state=0u[\s\S]*publishPowerCoarsePhiDeltaAndCommit[\s\S]*sampleDirectory\.state=VALID/,
+    "a malformed candidate must leave the prior coarse directory immutable");
+  assert.doesNotMatch(octreePowerCoarseLevelSetShader,
+    /hash|probe|atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/i,
+    "coarse publication must be a fixed-record sorted reduction, not a hash or atomic append");
   assert.match(octreeProjectionShader, /A miss in a valid directory is the[\s\S]*explicit positive-air complement/);
 });

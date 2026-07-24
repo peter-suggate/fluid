@@ -1,5 +1,11 @@
 import { makeOctreePowerCoarseLevelSetSampleWGSL } from "./webgpu-octree-power-coarse-levelset";
 
+// The tagged sharp-corner polygonizer clips its two cap owners at exactly half
+// a cube. Admit only scalar data whose four corresponding zero crossings agree
+// with that geometry; moving approximate corners use the ordinary conforming
+// tetrahedralization.
+export const GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON = 1e-3;
+
 /**
  * Binding-minimal classifier for the Section 5 global narrow-band level set.
  * Fine phi is authoritative for every valid tagged sample. Missing or stale
@@ -8,13 +14,12 @@ import { makeOctreePowerCoarseLevelSetSampleWGSL } from "./webgpu-octree-power-c
  */
 export const globalFineSurfaceClassificationShader = /* wgsl */ `
 struct Uniforms{viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f}
-struct IndirectArgs{vertexCount:atomic<u32>,instanceCount:u32,firstVertex:u32,firstInstance:u32,activeCubeCount:atomic<u32>,vertexAllocator:atomic<u32>,globalFineAuthorityLatch:atomic<u32>}
+struct IndirectArgs{vertexCount:atomic<u32>,instanceCount:u32,firstVertex:u32,firstInstance:u32,activeCubeCount:atomic<u32>,vertexAllocator:atomic<u32>,globalFineAuthorityLatch:atomic<u32>,meshPublicationGeneration:atomic<u32>}
 struct FineParams{sampleDimensions:vec3u,brickResolution:u32,brickDimensions:vec3u,samplesPerBrick:u32,table:vec4u,settings:vec4f,cellAndDt:vec4f,sizing:vec4f,physical:vec4f}
 @group(0)@binding(0)var<uniform>u:Uniforms;
 @group(0)@binding(4)var<storage,read_write>drawArgs:IndirectArgs;
 @group(0)@binding(5)var<storage,read_write>activeCubes:array<vec2u>;
 @group(0)@binding(6)var<storage,read_write>cubeValues:array<vec4f>;
-@group(0)@binding(7)var<storage,read>pageTable:array<u32>;
 @group(0)@binding(8)var<storage,read>fineWorklist:array<u32>;
 @group(0)@binding(9)var<storage,read>finePhi:array<f32>;
 @group(0)@binding(10)var<uniform>params:FineParams;
@@ -23,32 +28,40 @@ struct FineParams{sampleDimensions:vec3u,brickResolution:u32,brickDimensions:vec
 ${makeOctreePowerCoarseLevelSetSampleWGSL(16)}
 @group(0)@binding(17)var<storage,read>fineTopologyControl:array<u32>;
 const INVALID:u32=0xffffffffu;
+const SHARP_CORNER_HALF_CELL_EPSILON:f32=${GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON};
 fn validCurrentPublication()->bool{
   if(arrayLength(&fineTopologyControl)<8u||arrayLength(&fineWorklist)<5u){return false;}
   let clean=fineTopologyControl[0]==0u&&fineTopologyControl[4]==1u&&fineTopologyControl[5]==0u&&fineTopologyControl[7]==0u;
   let count=fineWorklist[0];let generation=params.table.w&0x3fffffffu;
-  let finePublished=count<=params.table.z&&(fineWorklist[1]&0x3fffffffu)==generation
+  let finePublished=params.table.y==5u&&count<=params.table.x&&count<=params.table.z
+    &&5u+count<=arrayLength(&fineWorklist)&&(fineWorklist[1]&0x3fffffffu)==generation
     &&fineWorklist[2]==(count+63u)/64u&&fineWorklist[3]==1u&&fineWorklist[4]==1u;
-  let capacity=min(powerCoarseSamples.hashCapacity,arrayLength(&powerCoarseSamples.entries));
+  let rowCount=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));
   let expectedWidth=params.settings.w*max(1.0,params.cellAndDt.x);
   let coarsePublished=powerCoarseSamples.state==0x80000000u
     &&(powerCoarseSamples.generation&0x3fffffffu)==generation
-    &&capacity>0u&&powerCoarseSamples.hashCapacity==capacity&&(capacity&(capacity-1u))==0u
+    &&rowCount>0u&&powerCoarseSamples.rowCount==rowCount
     &&powerCoarseSamples.maximumLeafSize>0u&&(powerCoarseSamples.maximumLeafSize&(powerCoarseSamples.maximumLeafSize-1u))==0u
     &&all(powerCoarseSamples.dimensions*max(1u,u32(round(params.cellAndDt.x)))==params.sampleDimensions)
     &&powerCoarseSamples.physicalCellSize>0.0
     &&abs(powerCoarseSamples.physicalCellSize-expectedWidth)<=1e-5*max(powerCoarseSamples.physicalCellSize,expectedWidth);
   return clean&&finePublished&&coarsePublished;
 }
-fn pageHash(key:u32)->u32{return ((key^(key>>16u))*0x9e3779b1u)&(params.table.x-1u);}
 fn pageLookup(key:u32)->u32{
-  if(params.table.x==0u||(params.table.x&(params.table.x-1u))!=0u){return INVALID;}
-  let start=pageHash(key);for(var probe=0u;probe<min(params.table.y,params.table.x);probe+=1u){
-    let slot=(start+probe)&(params.table.x-1u);if(slot*2u+1u>=arrayLength(&pageTable)){return INVALID;}
-    let stored=pageTable[slot*2u];if(stored==key){let id=pageTable[slot*2u+1u];
-      if(id<params.table.z&&id*10u+2u<arrayLength(&metadata)&&metadata[id*10u+1u]==key&&metadata[id*10u+2u]==params.table.w){return id;}return INVALID;}
-    if(stored==INVALID){return INVALID;}
-  }return INVALID;
+  if(params.table.y!=5u||arrayLength(&fineWorklist)<5u||fineWorklist[1]!=params.table.w
+    ||fineWorklist[3]!=1u||fineWorklist[4]!=1u){return INVALID;}
+  let count=min(fineWorklist[0],min(params.table.x,params.table.z));
+  if(5u+count>arrayLength(&fineWorklist)){return INVALID;}
+  var low=0u;var high=count;
+  for(var step=0u;step<32u&&low<high;step+=1u){
+    let middle=low+(high-low)/2u;let id=fineWorklist[5u+middle];let base=id*10u;
+    if(id>=params.table.z||base+2u>=arrayLength(&metadata)||metadata[base]!=id
+      ||metadata[base+2u]!=params.table.w){return INVALID;}
+    if(metadata[base+1u]<key){low=middle+1u;}else{high=middle;}
+  }
+  if(low>=count){return INVALID;}let id=fineWorklist[5u+low];let base=id*10u;
+  return select(INVALID,id,id<params.table.z&&base+2u<arrayLength(&metadata)
+    &&metadata[base]==id&&metadata[base+1u]==key&&metadata[base+2u]==params.table.w);
 }
 fn coarsePhi(q:vec3i)->f32{return sampleCoarseOctreePhi(params.settings.xyz+(vec3f(q)+vec3f(0.5))*params.settings.w);}
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
@@ -100,6 +113,11 @@ fn classifyScaledForWall(base:vec3i,scale:i32,wallMode:u32){
 fn cubeCornerIndex(x:u32,y:u32,z:u32)->u32{
   if(z==0u){return select(x,3u-x,y==1u);}return select(4u+x,7u-x,y==1u);
 }
+fn halfCellCrossing(inside:f32,outside:f32)->bool{
+  let denominator=outside-inside;
+  return finite(inside)&&finite(outside)&&inside<0.0&&outside>0.0&&denominator>0.0
+    &&abs((-inside/denominator)-0.5)<=SHARP_CORNER_HALF_CELL_EPSILON;
+}
 // A signed distance to an axis-aligned liquid box has one inside x/z corner,
 // two equally distant side samples, and an extruded profile in y. A single
 // tetrahedral scalar cube rounds that exact L-shaped zero set into the
@@ -115,8 +133,11 @@ fn classifySharpInteriorXZCorner(base:vec3i,scale:i32)->bool{
   for(var q=0u;q<4u;q+=1u){let sx=q^1u;let sz=q^2u;let sd=q^3u;
     let extruded=abs(raw[bottom[q]]-raw[top[q]])<=tolerance&&abs(raw[bottom[sx]]-raw[top[sx]])<=tolerance&&abs(raw[bottom[sz]]-raw[top[sz]])<=tolerance&&abs(raw[bottom[sd]]-raw[top[sd]])<=tolerance;
     let sharp=raw[bottom[q]]<0.0&&raw[top[q]]<0.0&&raw[bottom[sx]]>0.0&&raw[top[sx]]>0.0&&raw[bottom[sz]]>0.0&&raw[top[sz]]>0.0&&raw[bottom[sd]]>0.0&&raw[top[sd]]>0.0;
-    let symmetric=abs(raw[bottom[q]]+raw[bottom[sx]])<=tolerance&&abs(raw[bottom[q]]+raw[bottom[sz]])<=tolerance&&abs(raw[bottom[sx]]-raw[bottom[sz]])<=tolerance;
-    if(extruded&&sharp&&symmetric){inside=q;break;}
+    let halfClipped=halfCellCrossing(raw[bottom[q]],raw[bottom[sx]])
+      &&halfCellCrossing(raw[bottom[q]],raw[bottom[sz]])
+      &&halfCellCrossing(raw[top[q]],raw[top[sx]])
+      &&halfCellCrossing(raw[top[q]],raw[top[sz]]);
+    if(extruded&&sharp&&halfClipped){inside=q;break;}
   }
   if(inside==INVALID){return false;}
   let insideX=inside&1u;let insideZ=(inside>>1u)&1u;var vx=array<f32,8>();var vz=array<f32,8>();var xlo=1.0;var xhi=0.0;var zlo=1.0;var zhi=0.0;
@@ -138,16 +159,17 @@ fn classifyScaled(base:vec3i,scale:i32){
 @compute @workgroup_size(256)
 fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   if(!validCurrentPublication()){return;}
-  let stream=gid.x+gid.y*65535u*256u;let samples=params.samplesPerBrick;let id=stream/max(1u,samples);
-  if(id>=params.table.z||id*10u+2u>=arrayLength(&metadata)||metadata[id*10u+2u]!=params.table.w){return;}
+  let stream=gid.x+gid.y*65535u*256u;let samples=params.samplesPerBrick;let work=stream/max(1u,samples);
+  if(work>=fineWorklist[0]){return;}let id=fineWorklist[5u+work];let metadataBase=id*10u;
+  if(id>=params.table.z||metadataBase+2u>=arrayLength(&metadata)||metadata[metadataBase]!=id||metadata[metadataBase+2u]!=params.table.w){return;}
   let key=metadata[id*10u+1u];let xy=max(1u,params.brickDimensions.x*params.brickDimensions.y);let bz=key/xy;let rem=key-bz*xy;let by=rem/params.brickDimensions.x;let bx=rem-by*params.brickDimensions.x;
-  let localIndex=stream-id*samples;let r=max(1u,params.brickResolution);let local=vec3u(localIndex%r,(localIndex/r)%r,localIndex/max(1u,r*r));let q=vec3u(bx,by,bz)*r+local;
+  let localIndex=stream-work*samples;let r=max(1u,params.brickResolution);let local=vec3u(localIndex%r,(localIndex/r)%r,localIndex/max(1u,r*r));let q=vec3u(bx,by,bz)*r+local;
   if(any(q>=params.sampleDimensions)){return;}let index=id*samples+localIndex;if(index>=arrayLength(&fineFlags)||index>=arrayLength(&finePhi)||(fineFlags[index]&1u)==0u||!finite(finePhi[index])){return;}let xb=array<i32,2>(i32(q.x+1u),0);let yb=array<i32,2>(i32(q.y+1u),0);let zb=array<i32,2>(i32(q.z+1u),0);
   let xn=select(1u,2u,q.x==0u);let yn=select(1u,2u,q.y==0u);let zn=select(1u,2u,q.z==0u);
   for(var zi=0u;zi<zn;zi+=1u){for(var yi=0u;yi<yn;yi+=1u){for(var xi=0u;xi<xn;xi+=1u){classifyScaled(vec3i(xb[xi],yb[yi],zb[zi]),1);}}}
 }
 @compute @workgroup_size(256)
-fn extractGlobalCoarseMain(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)local:u32){let slot=group.x+group.y*65535u;if(!validCurrentPublication()){return;}if(slot>=min(powerCoarseSamples.hashCapacity,arrayLength(&powerCoarseSamples.entries))){return;}let entry=powerCoarseSamples.entries[slot];if(entry.cellPlusOne==0u||(entry.flags&1u)==0u||entry.size==0u){return;}let d=powerCoarseSamples.dimensions;let cell=entry.cellPlusOne-1u;let origin=vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));let factor=max(1u,u32(round(params.cellAndDt.x)));let scale=entry.size*factor;let base=vec3i(origin*factor+vec3u(1u));
+fn extractGlobalCoarseMain(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)local:u32){let slot=group.x+group.y*65535u;if(!validCurrentPublication()){return;}if(slot>=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries))){return;}let entry=powerCoarseSamples.entries[slot];if(entry.cellPlusOne==0u||(entry.flags&1u)==0u||entry.size==0u){return;}let d=powerCoarseSamples.dimensions;let cell=entry.cellPlusOne-1u;let origin=vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));let factor=max(1u,u32(round(params.cellAndDt.x)));let scale=entry.size*factor;let base=vec3i(origin*factor+vec3u(1u));
   // Coarse fallback is sampled on the same unit fine lattice as the narrow
   // band. Emitting one scaled tetrahedral cube beside unit fine cubes creates
   // non-conforming diagonals and visible T-junction slits. Each coarse leaf

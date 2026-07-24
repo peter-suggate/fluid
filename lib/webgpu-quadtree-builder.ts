@@ -520,7 +520,7 @@ export class WebGPUQuadtreeSurfaceState {
   private readonly ownedSparseFallback?: GPUBuffer;
   private presentationTextureReleased = false;
 
-  constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, velocity: GPUTexture, initialPhi: Float32Array, cache?: WebGPUQuadtreeSurfaceCache, reconcileVolume?: GPUTexture, private readonly debrisCulling = false, reconcileEnabled = reconcileVolume !== undefined, private readonly gpuVolumeCorrection = false, private readonly monotoneLevelSetTransport = false, private readonly solidFractions?: GPUBuffer, private readonly sparseExecution?: SparseSurfaceExecutionSource, private readonly presentationOnly = false, private readonly placeholderOnly = false) {
+  constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, velocity: GPUTexture | undefined, initialPhi: Float32Array, cache?: WebGPUQuadtreeSurfaceCache, reconcileVolume?: GPUTexture, private readonly debrisCulling = false, reconcileEnabled = reconcileVolume !== undefined, private readonly gpuVolumeCorrection = false, private readonly monotoneLevelSetTransport = false, private readonly solidFractions?: GPUBuffer, private readonly sparseExecution?: SparseSurfaceExecutionSource, private readonly presentationOnly = false, private readonly placeholderOnly = false) {
     this.cache = presentationOnly ? cache : ensureSurfaceCache(device, cache);
     this.hasReconcileVolume = reconcileVolume !== undefined;
     this.reconcileEnabled = reconcileEnabled && reconcileVolume !== undefined;
@@ -535,10 +535,11 @@ export class WebGPUQuadtreeSurfaceState {
     this.referenceVolumeCells = initialPhi.reduce((sum, value) => sum + Math.max(0, Math.min(1, 0.5 - value / volumeBand)), 0);
     this.volumeCells = this.referenceVolumeCells;
     this.interfaceCells = initialPhi.reduce((sum, value) => sum + (Math.abs(value) < 1.5 * Math.min(cell.x, cell.y, cell.z) ? 1 : 0), 0);
-    // Adaptive surface pages own transport, redistance, and volume control.
+    // Global-fine storage owns transport, redistance, and volume control.
     // Retain only the topology/render publication texture; in particular do
     // not hide box-sized scratch allocations behind unused bind groups.
     if (presentationOnly) return;
+    if (!velocity) throw new Error("A transported surface state requires a dense velocity texture");
     this.scratch = device.createTexture({ label: "Resident quadtree level-set advection scratch", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
     this.predicted = device.createTexture({ label: "Resident quadtree level-set MacCormack prediction", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
     this.reversed = device.createTexture({ label: "Resident quadtree level-set MacCormack reversal", size: [dims.nx, dims.ny, dims.nz], dimension: "3d", format: "r32float", usage: textureUsage });
@@ -593,7 +594,7 @@ export class WebGPUQuadtreeSurfaceState {
     };
   }
 
-  encode(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState, finalTimestampWrites?: GPUComputePassTimestampWrites) {
+  encode(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState) {
     if (this.presentationOnly) return;
     const cache = this.cache!, params = this.params!, groups = this.groups!, reductions = this.reductions!;
     const { nx, ny, nz } = this.dims;
@@ -634,24 +635,15 @@ export class WebGPUQuadtreeSurfaceState {
     else encoder.clearBuffer(reductions);
     // Dependent texture stages use separate passes and explicit command
     // ordering for both dense and sparse execution.
-    const timedSurface = !this.debrisCulling ? finalTimestampWrites : undefined;
-    const beginningTimestamp = timedSurface?.beginningOfPassWriteIndex === undefined ? undefined : {
-      querySet: timedSurface.querySet,
-      beginningOfPassWriteIndex: timedSurface.beginningOfPassWriteIndex,
-    };
-    const endingTimestamp = timedSurface?.endOfPassWriteIndex === undefined ? undefined : {
-      querySet: timedSurface.querySet,
-      endOfPassWriteIndex: timedSurface.endOfPassWriteIndex,
-    };
-    const surfaceDispatch = (label: string, pipeline: GPUComputePipeline, group: GPUBindGroup, offset = 0, timestampWrites?: GPUComputePassTimestampWrites) => {
-      const pass = encoder.beginComputePass({ label, ...(timestampWrites ? { timestampWrites } : {}) });
+    const surfaceDispatch = (label: string, pipeline: GPUComputePipeline, group: GPUBindGroup, offset = 0) => {
+      const pass = encoder.beginComputePass({ label });
       dispatch(pass, pipeline, group, offset);
       pass.end();
     };
     if (this.monotoneLevelSetTransport) {
-      surfaceDispatch("Quadtree surface level-set advection", cache.pipelines.advectLevelSet, groups.advect, 0, beginningTimestamp);
+      surfaceDispatch("Quadtree surface level-set advection", cache.pipelines.advectLevelSet, groups.advect);
     } else {
-      surfaceDispatch("Quadtree surface advection predictor", cache.pipelines.advectPredict, groups.predict, 0, beginningTimestamp);
+      surfaceDispatch("Quadtree surface advection predictor", cache.pipelines.advectPredict, groups.predict);
       surfaceDispatch("Quadtree surface advection reverse", cache.pipelines.advectReverse, groups.reverse);
       surfaceDispatch("Quadtree surface advection correction", cache.pipelines.advectCorrect, groups.correct);
     }
@@ -668,14 +660,12 @@ export class WebGPUQuadtreeSurfaceState {
       "Quadtree surface finalize distance",
       cache.pipelines.finalizeDistance,
       this.jumps.length % 2 === 0 ? groups.finalizeA : groups.finalizeB,
-      0,
-      endingTimestamp,
     );
     if (this.debrisCulling) {
       const cullPass = encoder.beginComputePass({ label: "Quadtree surface debris cull" });
       dispatch(cullPass, cache.pipelines.cullDebris, groups.cull); cullPass.end();
       encoder.copyTextureToTexture({ texture: this.scratch! }, { texture: this.texture }, [nx, ny, nz]);
-      const reductionPass = encoder.beginComputePass({ label: "Quadtree surface post-cull reduction", ...(finalTimestampWrites ? { timestampWrites: finalTimestampWrites } : {}) });
+      const reductionPass = encoder.beginComputePass({ label: "Quadtree surface post-cull reduction" });
       dispatch(reductionPass, cache.pipelines.reduceVolume, groups.reduce); reductionPass.end();
     }
     // Consume the most recent phi-volume reduction entirely on the GPU. When
@@ -735,7 +725,7 @@ export class WebGPUQuadtreeSurfaceState {
   addReferenceVolumeCells(cells: number) { if (Number.isFinite(cells) && cells > 0) this.referenceVolumeCells += cells; }
 
   /**
-   * Compact surface pages only need the dense level set to seed their first
+   * Global-fine storage only needs the dense level set to seed its first
    * command submission. WebGPU keeps resources alive for work that was
    * already submitted, so the owner may release this compatibility texture
    * immediately after that submission without a CPU/GPU fence.
@@ -787,7 +777,6 @@ export interface WebGPUQuadtreeConstructionCache {
     staticParams: GPUBuffer; levelSetOut: GPUBuffer; distanceSeedA: GPUBuffer; distanceSeedB: GPUBuffer;
     passBuffer: GPUBuffer; readback: GPUBuffer;
     columnProfiles: GPUBuffer; profileReadback: GPUBuffer;
-    querySet?: GPUQuerySet; queryResolve?: GPUBuffer;
     /** Identity memo for the last CPU arrays uploaded, so per-step rebuilds skip re-sending constant data. */
     uploadedRootMap?: Uint32Array; uploadedExplicit?: Float32Array;
   };
@@ -801,10 +790,6 @@ export interface GPUQuadtreeBuildResult {
   packedCells: Uint32Array;
   diagnostics: Float32Array;
   mismatchFraction: number;
-  /** Timestamp-query duration of only the adaptive construction kernels. */
-  gpuKernel_ms?: number;
-  /** Submit-to-map wall time, including older work already queued on the device. */
-  gpuWall_ms: number;
 }
 
 export const quadtreeConstructionShader = /* wgsl */ `
@@ -1232,9 +1217,7 @@ export class WebGPUQuadtreeBuilder {
     const topologyOffset = 0;
     const opticalOffset = align(topologyOffset + topologyBytes, 8);
     const diagnosticOffset = align(opticalOffset + opticalBytes, 8);
-    const queryOffset = align(diagnosticOffset + inputs.diagnosticBytes, 8);
-    const hasTimestamps = this.device.features.has("timestamp-query");
-    const readbackBytes = queryOffset + (hasTimestamps ? 16 : 0);
+    const readbackBytes = diagnosticOffset + inputs.diagnosticBytes;
     const workspaceKey = `${nx}x${ny}x${nz}:${passData.byteLength}:${readbackBytes}`;
     if (this.cache.workspace?.key !== workspaceKey) {
       WebGPUQuadtreeBuilder.destroyWorkspace(this.cache.workspace);
@@ -1253,12 +1236,10 @@ export class WebGPUQuadtreeBuilder {
         readback: this.device.createBuffer({ label: "GPU quadtree compact readback", size: Math.max(8, readbackBytes), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
         columnProfiles: this.device.createBuffer({ label: "GPU quadtree conservative phi profiles", size: Math.max(4, profileCapacityBytes), usage }),
         profileReadback: this.device.createBuffer({ label: "GPU quadtree phi-profile readback", size: Math.max(4, profileCapacityBytes), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
-        querySet: hasTimestamps ? this.device.createQuerySet({ type: "timestamp", count: 2 }) : undefined,
-        queryResolve: hasTimestamps ? this.device.createBuffer({ label: "GPU quadtree timestamp resolve", size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : undefined
       };
     }
     const workspace = this.cache.workspace!;
-    const { topologyA, topologyB, sizing, explicit, rootSeed, staticParams, levelSetOut, distanceSeedA, distanceSeedB, passBuffer, columnProfiles, querySet } = workspace;
+    const { topologyA, topologyB, sizing, explicit, rootSeed, staticParams, levelSetOut, distanceSeedA, distanceSeedB, passBuffer, columnProfiles } = workspace;
     // The root map re-seeds the coarse forest before every subdivision ladder,
     // but its contents are constant per grid: upload it once and re-seed with
     // a GPU-side copy. The explicit sizing array is memoized by the inline
@@ -1296,7 +1277,7 @@ export class WebGPUQuadtreeBuilder {
     ] });
     const groupAB = group(topologyA, topologyB, distanceSeedA, distanceSeedB), groupBA = group(topologyB, topologyA, distanceSeedB, distanceSeedA);
     {
-      const pass = encoder.beginComputePass(querySet ? { timestampWrites: { querySet, beginningOfPassWriteIndex: 0 } } : undefined); pass.setPipeline(this.cache.pipelines.advectLevelSet); pass.setBindGroup(0, groupAB, [0]);
+      const pass = encoder.beginComputePass(); pass.setPipeline(this.cache.pipelines.advectLevelSet); pass.setBindGroup(0, groupAB, [0]);
       pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)); pass.end();
     }
     {
@@ -1320,8 +1301,7 @@ export class WebGPUQuadtreeBuilder {
       // device's bulk-copy path. The compute kernel then only overwrites leaves
       // that split, allowing one elected invocation to analyze each leaf.
       encoder.copyBufferToBuffer(currentIsA ? topologyA : topologyB, 0, currentIsA ? topologyB : topologyA, 0, topologyBytes);
-      const last = index === operations.length - 1;
-      const pass = encoder.beginComputePass(last && querySet ? { timestampWrites: { querySet, endOfPassWriteIndex: 1 } } : undefined); pass.setPipeline(this.cache.pipelines[operation.entry]); pass.setBindGroup(0, currentIsA ? groupAB : groupBA, [index * passStride]);
+      const pass = encoder.beginComputePass(); pass.setPipeline(this.cache.pipelines[operation.entry]); pass.setBindGroup(0, currentIsA ? groupAB : groupBA, [index * passStride]);
       pass.dispatchWorkgroups(Math.ceil(nx / 8), Math.ceil(nz / 8)); pass.end(); currentIsA = !currentIsA;
     });
     this.lastProfileGroup = groupAB;
@@ -1345,33 +1325,26 @@ export class WebGPUQuadtreeBuilder {
     const finalTopology = this.encodeConstruction(encoder, inputs);
     const groupAB = this.lastProfileGroup!;
     const workspace = this.cache.workspace!;
-    const { readback, columnProfiles, profileReadback, querySet, queryResolve, passBuffer, explicit } = workspace;
+    const { readback, columnProfiles, profileReadback, passBuffer, explicit } = workspace;
     const align = (value: number, alignment: number) => Math.ceil(value / alignment) * alignment;
     const topologyBytes = cellCount2 * 4, opticalBytes = cellCount2 * 16, topologyOffset = 0;
     const opticalOffset = align(topologyOffset + topologyBytes, 8);
     const diagnosticOffset = align(opticalOffset + opticalBytes, 8);
-    const queryOffset = align(diagnosticOffset + inputs.diagnosticBytes, 8);
     encoder.copyBufferToBuffer(finalTopology, 0, readback, topologyOffset, topologyBytes);
     if (this.lastOpticalLayer) encoder.copyBufferToBuffer(this.lastOpticalLayer, 0, readback, opticalOffset, opticalBytes);
     encoder.copyBufferToBuffer(inputs.diagnosticBuffer, 0, readback, diagnosticOffset, inputs.diagnosticBytes);
-    if (querySet && queryResolve) {
-      encoder.resolveQuerySet(querySet, 0, 2, queryResolve, 0);
-      encoder.copyBufferToBuffer(queryResolve, 0, readback, queryOffset, 16);
-    }
-    const submittedAt = performance.now(); this.device.queue.submit([encoder.finish()]);
+    this.device.queue.submit([encoder.finish()]);
     await readback.mapAsync(GPUMapMode.READ);
-    let packedCells: Uint32Array, opticalColumns: Uint32Array, diagnostics: Float32Array, gpuKernel_ms: number | undefined;
+    let packedCells: Uint32Array, opticalColumns: Uint32Array, diagnostics: Float32Array;
     try {
       const mapped = readback.getMappedRange();
       packedCells = new Uint32Array(mapped, topologyOffset, topologyBytes / 4).slice();
       opticalColumns = this.lastOpticalLayer ? new Uint32Array(mapped, opticalOffset, opticalBytes / 4).slice() : new Uint32Array(0);
       diagnostics = new Float32Array(mapped, diagnosticOffset, inputs.diagnosticBytes / 4).slice();
-      const timestamps = querySet ? new BigUint64Array(mapped, queryOffset, 2) : undefined;
-      gpuKernel_ms = timestamps ? Number(timestamps[1] - timestamps[0]) / 1e6 : undefined;
     } finally {
       readback.unmap();
     }
-    if (inputs.readLeafProfiles === false) return { columnProfiles: new Float32Array(0), opticalColumns, packedCells, diagnostics, mismatchFraction: 0, gpuKernel_ms, gpuWall_ms: performance.now() - submittedAt };
+    if (inputs.readLeafProfiles === false) return { columnProfiles: new Float32Array(0), opticalColumns, packedCells, diagnostics, mismatchFraction: 0 };
     const leafWords = Uint32Array.from(new Set(packedCells));
     const profileBytes = leafWords.length * ny * 3 * 4;
     this.device.queue.writeBuffer(explicit, 0, leafWords);
@@ -1387,7 +1360,7 @@ export class WebGPUQuadtreeBuilder {
     let profiles: Float32Array;
     try { profiles = new Float32Array(profileReadback.getMappedRange(0, profileBytes)).slice(); }
     finally { profileReadback.unmap(); }
-    return { columnProfiles: profiles, opticalColumns, packedCells, diagnostics, mismatchFraction: 0, gpuKernel_ms, gpuWall_ms: performance.now() - submittedAt };
+    return { columnProfiles: profiles, opticalColumns, packedCells, diagnostics, mismatchFraction: 0 };
   }
 
   /** Adaptive column data remains GPU-resident for the sparse pack. */
@@ -1395,8 +1368,7 @@ export class WebGPUQuadtreeBuilder {
 
   private static destroyWorkspace(workspace?: WebGPUQuadtreeConstructionCache["workspace"]) {
     if (!workspace) return;
-    for (const buffer of [workspace.topologyA, workspace.topologyB, workspace.sizing, workspace.explicit, workspace.rootSeed, workspace.staticParams, workspace.levelSetOut, workspace.distanceSeedA, workspace.distanceSeedB, workspace.passBuffer, workspace.readback, workspace.columnProfiles, workspace.profileReadback, workspace.queryResolve]) buffer?.destroy();
-    workspace.querySet?.destroy();
+    for (const buffer of [workspace.topologyA, workspace.topologyB, workspace.sizing, workspace.explicit, workspace.rootSeed, workspace.staticParams, workspace.levelSetOut, workspace.distanceSeedA, workspace.distanceSeedB, workspace.passBuffer, workspace.readback, workspace.columnProfiles, workspace.profileReadback]) buffer.destroy();
   }
 
   static destroyCache(cache?: WebGPUQuadtreeConstructionCache) {

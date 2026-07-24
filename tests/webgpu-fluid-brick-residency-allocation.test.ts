@@ -5,10 +5,10 @@ import test from "node:test";
 import {
   fluidBrickResidencyShader,
   planFluidBrickResidencyAllocation,
-  planSurfaceCandidateResidencyPools,
-  sparseSurfaceCandidateResidencyShader,
-  surfaceCandidateCommitShader,
-  surfaceCandidateResidencyShader,
+  planFineSeedCandidateResidencyPools,
+  sparseFineSeedCandidateResidencyShader,
+  fineSeedCandidateCommitShader,
+  fineSeedCandidateResidencyShader,
 } from "../lib/webgpu-fluid-brick-residency";
 
 test("direct-paged identity residency stores one sentinel instead of a box-sized identity map", () => {
@@ -31,16 +31,16 @@ test("direct-paged identity residency stores one sentinel instead of a box-sized
       + implicit.transactionalBytes);
 });
 
-test("surface-candidate-only mode collapses both unused legacy leaf buffers", () => {
+test("fine-seed-candidate-only mode collapses both unused legacy leaf buffers", () => {
   const candidateOnly = planFluidBrickResidencyAllocation([40, 12, 10], [10, 3, 3], 4_800, false, true);
   const general = planFluidBrickResidencyAllocation([40, 12, 10], [10, 3, 3], 4_800);
 
-  assert.equal(candidateOnly.surfaceCandidatesOnly, true);
+  assert.equal(candidateOnly.fineSeedCandidatesOnly, true);
   assert.equal(candidateOnly.identityMapping, "implicit");
   assert.equal(candidateOnly.leafIndexBytes, 4);
   assert.equal(candidateOnly.leafStateBytes, 4);
   assert.equal(candidateOnly.savedLeafStateBytes, 19_196);
-  assert.equal(candidateOnly.allocatedBytes, 194_504);
+  assert.equal(candidateOnly.allocatedBytes, 194_488);
   assert.equal(general.allocatedBytes - candidateOnly.allocatedBytes, 19_196);
   assert.throws(
     () => planFluidBrickResidencyAllocation([1, 1, 1], [1, 1, 1], 1, true, true),
@@ -59,10 +59,10 @@ test("direct-page scheduler storage follows producer key pools rather than logic
   assert.equal(sparse.tileStateCapacity, 24_000);
   assert.equal(sparse.stateBytes, 120_000 * 8, "sparse state records are key + lifecycle state");
   assert.equal(sparse.tileStateBytes, 24_000 * 8);
-  assert.equal(sparse.allocatedBytes, 6_528_344);
+  assert.equal(sparse.allocatedBytes, 6_528_328);
   assert.equal(sparse.savedSchedulerBytes, 187_272_000);
 
-  const pools = planSurfaceCandidateResidencyPools(
+  const pools = planFineSeedCandidateResidencyPools(
     [400, 120, 100], [100, 30, 25], 8, 4, 120_000, 100,
   );
   assert.deepEqual(pools, {
@@ -77,22 +77,22 @@ test("direct-page scheduler storage follows producer key pools rather than logic
 });
 
 test("production-sized sparse scheduler accounting exposes both deep-domain savings and small-grid overhead", () => {
-  const oceanPools = planSurfaceCandidateResidencyPools([40, 12, 10], [10, 3, 3], 8, 4, 384_768);
+  const oceanPools = planFineSeedCandidateResidencyPools([40, 12, 10], [10, 3, 3], 8, 4, 384_768);
   const ocean = planFluidBrickResidencyAllocation(
     [40, 12, 10], [10, 3, 3], 4_800, false, true,
     oceanPools.brickCapacity, oceanPools.tileCapacity,
   );
   assert.equal(oceanPools.brickCapacity, 3_000);
-  assert.equal(ocean.allocatedBytes, 147_224);
+  assert.equal(ocean.allocatedBytes, 147_208);
   assert.equal(ocean.savedSchedulerBytes, 47_280);
   assert.equal(ocean.schedulerByteDelta, -47_280);
 
-  const damPools = planSurfaceCandidateResidencyPools([8, 6, 5], [2, 2, 2], 8, 4, 41_472);
+  const damPools = planFineSeedCandidateResidencyPools([8, 6, 5], [2, 2, 2], 8, 4, 41_472);
   const dam = planFluidBrickResidencyAllocation(
     [8, 6, 5], [2, 2, 2], 240, false, true,
     damPools.brickCapacity, damPools.tileCapacity,
   );
-  assert.equal(dam.allocatedBytes, 12_120);
+  assert.equal(dam.allocatedBytes, 12_104);
   assert.equal(dam.savedSchedulerBytes, 0);
   assert.equal(dam.schedulerByteDelta, 1_984,
     "key records have an explicit small-domain cost when the pool clamps to the logical domain");
@@ -111,35 +111,51 @@ test("implicit identity is reconstructed by the GPU while explicit mappings reta
   assert.match(source, /explicitMapping \?\? new Uint32Array\(\[0xffff_ffff\]\)/);
   assert.match(source, /explicitMapping !== undefined/);
   assert.match(source, /get allocatedBytes\(\): number \{ return this\.currentAllocationPlan\.allocatedBytes; \}/);
-  assert.doesNotMatch(source, /Surface-candidate-only residency cannot classify dense level-set textures/,
+  assert.doesNotMatch(source, /Fine-seed-candidate-only residency cannot classify dense level-set textures/,
     "bootstrap classification is safe because leaf-state publication is bounds checked");
   assert.match(fluidBrickResidencyShader, /if \(leafIndex < arrayLength\(&leafStates\)\)/);
-  assert.match(source, /this\.candidateOnly \? "Unused sparse leaf residency fallback"/);
-  assert.match(source, /cutoverToSurfaceCandidatesOnly\(\): number/);
-  assert.match(source, /this\.leafIndices\.destroy\(\);\s*this\.leafStatesBuffer\.destroy\(\)/);
+  assert.match(source, /candidateOnly \? "Unused sparse leaf residency fallback"/);
+  assert.doesNotMatch(source, /cutoverToFineSeedCandidatesOnly|candidateTransaction/,
+    "the immutable candidate-authority plan has no legacy runtime cutover or transaction buffer");
 });
 
-test("surface-candidate publication is GPU-transactional and count-independent", () => {
-  assert.match(surfaceCandidateResidencyShader, /fn producerAccepted\(\)->bool/);
-  assert.match(surfaceCandidateResidencyShader, /candidateControl\[5\]==1u&&candidateControl\[6\]==0u/);
-  assert.match(surfaceCandidateResidencyShader, /candidateControl\[4\]>atomicLoad\(&tileWorklist\[15\]\)/,
+test("fine-seed-candidate publication is deterministic, fail-closed, and count-independent", () => {
+  assert.match(fineSeedCandidateResidencyShader, /fn producerAccepted\(\)->bool/);
+  assert.match(fineSeedCandidateResidencyShader, /candidateControl\[5\]==1u&&candidateControl\[6\]==0u/);
+  assert.match(fineSeedCandidateResidencyShader, /candidateControl\[4\]>publishedTileWorklist\[15\]/,
     "stale or unpublished candidate generations must preserve the prior bounded worklist");
-  assert.match(surfaceCandidateResidencyShader, /atomicStore\(&transaction\[1\],1u\)/);
-  assert.match(surfaceCandidateCommitShader, /if\(transaction\[1\]!=1u\)\{return;\}/,
+  assert.match(fineSeedCandidateResidencyShader, /tileWorklist\[11\]=COMMIT/);
+  assert.match(fineSeedCandidateCommitShader, /if\(candidateTileWorklist\[11\]!=COMMIT\)\{return;\}/,
     "candidate states and worklists mutate only behind the GPU commit predicate");
-  assert.doesNotMatch(surfaceCandidateResidencyShader, /candidateControl\[0\]==0u/,
+  assert.doesNotMatch(fineSeedCandidateResidencyShader, /candidateControl\[0\]==0u/,
     "zero count is a valid-empty publication, not a failed-empty proxy");
+  assert.doesNotMatch(fineSeedCandidateResidencyShader, /\batomic(?:Add|And|CompareExchangeWeak|Exchange|Load|Max|Min|Or|Store|Sub|Xor)\b/);
+  assert.deepEqual([...fineSeedCandidateResidencyShader.matchAll(
+    /@compute\s+@workgroup_size\([^)]*\)\s+fn\s+([A-Za-z0-9_]+)/g,
+  )].map((match) => match[1]), ["publishFineSeedCandidateResidency"]);
 });
 
 test("sparse candidate scheduler fails closed on brick or tile key-pool exhaustion", () => {
-  assert.match(sparseSurfaceCandidateResidencyShader, /logical\+1u/);
-  assert.match(sparseSurfaceCandidateResidencyShader, /atomicCompareExchangeWeak\(&states\[claimSlot\*2u\],expected,encoded\)/);
-  assert.match(sparseSurfaceCandidateResidencyShader, /atomicStore\(&states\[slot\*2u\],INVALID\)/,
+  assert.match(sparseFineSeedCandidateResidencyShader, /logical\+1u/);
+  assert.match(sparseFineSeedCandidateResidencyShader, /states\[slot\*2u\]=INVALID/,
     "retired keys leave tombstones so collision chains remain searchable");
-  assert.match(sparseSurfaceCandidateResidencyShader, /atomicStore\(&transaction\[0\],6u\)/);
-  assert.match(sparseSurfaceCandidateResidencyShader, /atomicStore\(&transaction\[0\],7u\)/);
-  assert.match(sparseSurfaceCandidateResidencyShader, /if\(!producerAccepted\(\)\|\|atomicLoad\(&transaction\[0\]\)!=0u\)\{return;\}/);
-  assert.match(sparseSurfaceCandidateResidencyShader, /atomicStore\(&transaction\[1\],1u\)/);
+  assert.match(sparseFineSeedCandidateResidencyShader, /slot==INVALID\)\{error=6u/);
+  assert.match(sparseFineSeedCandidateResidencyShader, /slot==INVALID\)\{error=7u/);
+  assert.match(sparseFineSeedCandidateResidencyShader, /if\(error==0u\)\{finishHeaders\(\);\}/);
+  assert.doesNotMatch(sparseFineSeedCandidateResidencyShader,
+    /\batomic(?:Add|And|CompareExchangeWeak|Exchange|Load|Max|Min|Or|Store|Sub|Xor)\b/);
+  assert.deepEqual([...sparseFineSeedCandidateResidencyShader.matchAll(
+    /@compute\s+@workgroup_size\([^)]*\)\s+fn\s+([A-Za-z0-9_]+)/g,
+  )].map((match) => match[1]), ["publishFineSeedCandidateResidency"]);
+});
+
+test("candidate residency encoding is two dispatches with no recurring host clears or copies", () => {
+  const source = readFileSync(new URL("../lib/webgpu-fluid-brick-residency.ts", import.meta.url), "utf8");
+  const body = source.match(/encodeFineSeedCandidates\([\s\S]*?async readStats/)?.[0] ?? "";
+  assert.equal((body.match(/dispatchWorkgroups\(/g) ?? []).length, 2);
+  assert.doesNotMatch(body, /clearBuffer|copyBufferToBuffer/);
+  assert.doesNotMatch(source,
+    /beginFineSeedCandidatesPipeline|markPressureTopologyTilesPipeline|markFineSeedCandidatesPipeline|resolveFineSeedCandidatesPipeline|emitFineSeedCandidateTilesPipeline|finalizeFineSeedCandidatesPipeline/);
 });
 
 test("allocation planner rejects malformed domains", () => {

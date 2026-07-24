@@ -3,8 +3,13 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { octreeMethod } from "../lib/methods/octree";
-import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { decodeOctreeOwnerWord, encodeOctreeOwnerWord, planOctreeLeafFrontierAllocation, planOctreeOwnerAllocation } from "../lib/webgpu-octree";
+import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { planOctreeLeafFrontierAllocation } from "../lib/webgpu-octree";
+import {
+  lookupOctreeOwnerPage,
+  type OctreeOwnerLeafSize,
+  type OctreeOwnerPagePlan,
+} from "../lib/webgpu-octree-owner-pages";
 import { WebGPUUniformEulerianSolver } from "../lib/webgpu-uniform-eulerian";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
@@ -36,7 +41,6 @@ async function createDevice() {
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   assert.ok(adapter);
   const device = await adapter.requestDevice({
-    requiredFeatures: optionalFluidDeviceFeatures(adapter.features),
     requiredLimits: requiredFluidDeviceLimits(adapter.limits),
   });
   const validationErrors: string[] = [];
@@ -59,33 +63,17 @@ async function readBufferBytes(device: GPUDevice, source: GPUBuffer, byteLength:
 interface OctreeInternals {
   octreeProjection: {
     topology: GPUBuffer;
+    ownerPages: { plan: OctreeOwnerPagePlan };
     pressureA: GPUBuffer;
     pressureB: GPUBuffer;
     compaction: GPUBuffer;
-    resources: { velocityOut: GPUTexture };
   };
-}
-
-async function readVelocityTexture(device: GPUDevice, texture: GPUTexture, dims: readonly [number, number, number]) {
-  const bytesPerRow = Math.ceil((dims[0] * 16) / 256) * 256;
-  const byteLength = bytesPerRow * dims[1] * dims[2];
-  const readback = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  const encoder = device.createCommandEncoder();
-  encoder.copyTextureToBuffer({ texture }, { buffer: readback, bytesPerRow, rowsPerImage: dims[1] }, dims);
-  device.queue.submit([encoder.finish()]);
-  await readback.mapAsync(GPUMapMode.READ);
-  const values = new Float32Array(readback.getMappedRange().slice(0));
-  readback.unmap(); readback.destroy();
-  return values;
 }
 
 async function runCalmDeepSolve(device: GPUDevice, maximumLeafSize: "8" | "32") {
   const scene = calmDeepScene();
   const values = Object.fromEntries(octreeMethod.params.map((parameter) => [parameter.key, "default" in parameter ? parameter.default : 0])) as Record<string, string | number | boolean>;
   values.maximumLeafSize = maximumLeafSize;
-  // This test reads the legacy dense projection texture directly. Keep that
-  // compatibility representation authoritative rather than the compact faces.
-  values.faceVelocityTransport = "off";
   values.secondaryParticles = "off";
   const solver = octreeMethod.createSolver!(device, scene, "balanced", values, undefined) as unknown as {
     advanceTo(time_s: number, bodies: never[]): boolean;
@@ -101,13 +89,16 @@ async function runCalmDeepSolve(device: GPUDevice, maximumLeafSize: "8" | "32") 
   }
   await device.queue.onSubmittedWorkDone();
   const internals = (solver as unknown as OctreeInternals).octreeProjection;
-  const count = dims[0] * dims[1] * dims[2];
-  const owners = new Uint32Array(await readBufferBytes(device, internals.topology, count * 4));
+  const owners = new Uint32Array(await readBufferBytes(device, internals.topology, internals.topology.size));
   const pressureA = new Float32Array(await readBufferBytes(device, internals.pressureA, internals.pressureA.size));
   const pressureB = new Float32Array(await readBufferBytes(device, internals.pressureB, internals.pressureB.size));
-  const velocity = await readVelocityTexture(device, internals.resources.velocityOut, dims);
   const compaction = new Uint32Array(await readBufferBytes(device, internals.compaction, 8));
-  return { solver, dims, owners, pressureA, pressureB, velocity, liquidLeafRows: compaction[0], matrixEntries: compaction[1] };
+  return {
+    solver, dims, owners, ownerPlan: internals.ownerPages.plan,
+    maximumLeafSize: Number(maximumLeafSize) as OctreeOwnerLeafSize,
+    pressureA, pressureB,
+    liquidLeafRows: compaction[0], matrixEntries: compaction[1],
+  };
 }
 
 test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and finite pressure", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU octree checks" }, async () => {
@@ -115,12 +106,11 @@ test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and 
   try {
     const run32 = await runCalmDeepSolve(device, "32");
     const [nx, ny, nz] = run32.dims;
-    const index = (x: number, y: number, z: number) => x + nx * (y + ny * z);
-    const ownerAt = (x: number, y: number, z: number) => decodeOctreeOwnerWord(run32.owners[index(x, y, z)], [x, y, z]);
+    const ownerAt = (x: number, y: number, z: number) =>
+      lookupOctreeOwnerPage(run32.owners, run32.ownerPlan, [x, y, z], run32.maximumLeafSize);
     const sizeCounts = new Map<number, number>();
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
-      const cell = index(x, y, z);
-      const { origin, size } = decodeOctreeOwnerWord(run32.owners[cell], [x, y, z]);
+      const { origin, size } = ownerAt(x, y, z);
       assert.ok([1, 2, 4, 8, 16, 32].includes(size), `cell ${x},${y},${z} has invalid leaf size ${size}`);
       assert.ok(origin[0] === Math.floor(x / size) * size && origin[1] === Math.floor(y / size) * size && origin[2] === Math.floor(z / size) * size,
         `cell ${x},${y},${z} owner origin ${origin} is not its aligned ${size}-block`);
@@ -145,13 +135,11 @@ test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and 
     // budget (6 faces x at most 4 subfaces under 2:1) with no saturation.
     const neighborCounts = new Map<string, Set<string>>();
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
-      const cell = index(x, y, z);
       for (const [dx, dy, dz] of [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const) {
         const xx = x + dx, yy = y + dy, zz = z + dz;
         if (xx >= nx || yy >= ny || zz >= nz) continue;
-        const other = index(xx, yy, zz);
-        const leftOwner = decodeOctreeOwnerWord(run32.owners[cell], [x, y, z]);
-        const rightOwner = decodeOctreeOwnerWord(run32.owners[other], [xx, yy, zz]);
+        const leftOwner = ownerAt(x, y, z);
+        const rightOwner = ownerAt(xx, yy, zz);
         const left = leftOwner.origin.join(","), right = rightOwner.origin.join(",");
         if (left === right) continue;
         if (!neighborCounts.has(left)) neighborCounts.set(left, new Set());
@@ -169,13 +157,6 @@ test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and 
       assert.ok(Number.isFinite(value), "pressure must remain finite at maximum leaf 32");
       maximumMagnitude = Math.max(maximumMagnitude, Math.abs(value));
     }
-    let maximumVelocity = 0;
-    for (let cell = 0; cell < nx * ny * nz; cell += 1) for (let component = 0; component < 3; component += 1) {
-      const value = run32.velocity[cell * 4 + component];
-      assert.ok(Number.isFinite(value), "sparse frontier projection must publish finite dense-compatible velocity");
-      maximumVelocity = Math.max(maximumVelocity, Math.abs(value));
-    }
-    assert.ok(maximumVelocity > 0 && maximumVelocity <= 50.001, "projected velocity must be nonzero and respect the solver clamp");
     assert.ok(maximumMagnitude > 0, "the calm pool must carry a non-trivial (hydrostatic) pressure field");
     assert.ok(run32.liquidLeafRows > 0, "the compacted solve must emit liquid leaf rows");
     run32.solver.destroy();
@@ -198,18 +179,6 @@ test("maximum leaf 32 coarsens a calm deep interior with intact 2:1 balance and 
   }
 });
 
-test("packed owner authority removes one persistent word per finest cell", () => {
-  const ocean = planOctreeOwnerAllocation(320 * 96 * 80);
-  assert.equal(ocean.allocatedBytes, 9_830_400);
-  assert.equal(ocean.legacyDenseBytes, 19_660_800);
-  assert.equal(ocean.savedBytes, 9_830_400);
-  for (const size of [1, 2, 4, 8, 16, 32]) {
-    const origin = [1_500_032 - size, 1_250_016 - size, 1_100_000 - size] as const;
-    const cell = [origin[0] + size - 1, origin[1] + size - 1, origin[2] + size - 1] as const;
-    assert.deepEqual(decodeOctreeOwnerWord(encodeOctreeOwnerWord(origin, size), cell), { origin: [...origin], size });
-  }
-});
-
 test("compact frontier overflow fails closed with bounded lists and a dense origin map", { skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU octree checks" }, async () => {
   const { device, validationErrors } = await createDevice();
   try {
@@ -217,8 +186,6 @@ test("compact frontier overflow fails closed with bounded lists and a dense orig
     const solver = new WebGPUUniformEulerianSolver(device, scene, "balanced", undefined, {
       secondaryParticles: false,
       octree: {
-        pressureIterations: 8,
-        faceVelocityTransport: true,
         maximumLeafSize: 32,
         adaptivity: 1,
         interfaceRefinementBandCells: 4,
@@ -240,7 +207,7 @@ test("compact frontier overflow fails closed with bounded lists and a dense orig
     }).octreeProjection;
     const count = solver.info.nx * solver.info.ny * solver.info.nz;
     assert.equal(projection.info.pressureRowCapacity, 256, "the explicit row override remains scan-block aligned");
-    assert.equal(projection.leafFrontier.size, planOctreeLeafFrontierAllocation(count, 256, true).allocatedBytes);
+    assert.equal(projection.leafFrontier.size, planOctreeLeafFrontierAllocation(count, 256).allocatedBytes);
     const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
     while (!solver.advanceTo(2 * scene.numerics.fixedDt_s!, [])) await nextTurn();
     await device.queue.onSubmittedWorkDone();

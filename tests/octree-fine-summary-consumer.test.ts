@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { octreeProjectionShader } from "../lib/webgpu-octree";
+import { octreeProjectionShader, WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import {
   FINE_LEVELSET_SUMMARY_CENTER_COMPLETE,
   FINE_LEVELSET_SUMMARY_COARSE_AUTHORITY,
@@ -54,13 +54,16 @@ test("summary sizing aliases binding 4 without adding storage bindings or pressu
   assert.match(octreeProjectionShader,
     /fn fineSummaryWord\(index: u32\) -> u32 \{ return bitcast<u32>\(pressureIn\[index\]\); \}/);
 
-  const sizing = source.slice(source.indexOf("const dispatchCoarse ="), source.indexOf("pass.end();",
-    source.indexOf("const dispatchCoarse =")));
+  const sizing = source.slice(source.indexOf("const dispatchCoarse ="),
+    source.indexOf("broker.fence(\"octree topology and frontier publication complete\")",
+      source.indexOf("const dispatchCoarse =")));
   const uses = sizing.split("\n").filter((line) => line.includes("fineSummarySizingGroup"));
-  assert.equal(uses.length, 3);
+  assert.equal(uses.length, 5);
   assert.match(uses[0], /refineCoarsePipelines/);
-  assert.match(uses[1], /dispatchCandidates\(level\.full, level\.active/);
-  assert.match(uses[2], /dispatchRetiredCandidates\(level\.retired/);
+  assert.match(uses[1], /dispatchCandidates\(level\.full, level\.delta/);
+  assert.match(uses[2], /candidates\.setBindGroup/);
+  assert.match(uses[3], /candidateSort\.setBindGroup/);
+  assert.match(uses[4], /merge\.setBindGroup/);
   const callGraph = octreeProjectionShader.slice(octreeProjectionShader.indexOf("struct FineLeafSummary"),
     octreeProjectionShader.indexOf("fn balanceTopologyAt"));
   assert.equal((callGraph.match(/pressureIn\[/g) ?? []).length, 1,
@@ -77,6 +80,51 @@ test("summary sizing aliases binding 4 without adding storage bindings or pressu
   assert.match(octreeProjectionShader,
     /if\(fine\.found\)\{[\s\S]*if\(fine\.centerValid\)\{wet=fine\.centerPhi<0\.0;\}/,
     "recurring pressure leaves of every size consume their current complete centre stencil");
+});
+
+test("incremental topology separates structural refinement from wet frontier decisions", () => {
+  const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  const signature = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn classifyTopologyTileSignature"),
+    octreeProjectionShader.indexOf("fn currentRigidWord"),
+  );
+  const dirty = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn buildDirtyTileDelta"),
+    octreeProjectionShader.indexOf("// -----------------------------------------------------------------------------",
+      octreeProjectionShader.indexOf("fn buildDirtyTileDelta")));
+  assert.match(signature,
+    /let structuralDecision = cell \^ \(owner\.size[\s\S]*let frontierDecision = structuralDecision \^ select[\s\S]*TILE_SIGNATURE_VALID_MAGIC/,
+    "persistent signatures must independently hash structural identity and wet/dry membership");
+  assert.match(signature,
+    /let structuralUnchanged = valid && all\([\s\S]*let frontierUnchanged = frontierValid && all\([\s\S]*TILE_SIGNATURE_STRUCTURAL_CHANGED[\s\S]*TILE_SIGNATURE_FRONTIER_CHANGED/,
+    "raw fine-value changes must not alter the structural signature bit");
+  assert.match(dirty,
+    /let changed = compaction\[tileSignatureChangedBase\(\) \+ slot\][\s\S]*changed & TILE_SIGNATURE_STRUCTURAL_CHANGED[\s\S]*appendDirtyTileRing\(tileIndex/,
+    "only structural signature changes may enter reset/refine/balance");
+  assert.match(dirty,
+    /fn buildDirtyFrontierDelta\(\)[\s\S]*changed & TILE_SIGNATURE_FRONTIER_CHANGED[\s\S]*tileFrontierChangeFlagsBase\(\) \+ tileIndex[\s\S]*compaction\[dirtyListBase\(\) \+ dirtyCount\] = tileIndex/,
+    "wet membership changes must feed only the compact liquid frontier");
+  assert.doesNotMatch(dirty,
+    /if \(wet\) \{ compaction\[tileChangeFlagsBase\(\)/,
+    "wet-only changes must not enter the structural topology/residency stamps");
+  assert.match(dirty,
+    /compaction\[signature \+ 4u\] = 0u[\s\S]*compaction\[frontierSignature \+ 4u\] = 0u[\s\S]*appendDirtyTileRing\(tileIndex/,
+    "retirement must invalidate both persistent signatures and dirty surviving neighbors");
+  assert.doesNotMatch(dirty, /deltaWord|fineDelta|finePageTopologyTile/,
+    "fine payload-refresh deltas must not masquerade as structural dirtiness");
+
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString().replace(/\s+/g, "");
+  assert.match(rebuild,
+    /this\.topologyDecisionGroup/);
+  assert.match(rebuild,
+    /signatures\.setPipeline\(this\.classifyTopologyTileSignaturePipeline\).*signatures\.dispatchWorkgroupsIndirect\(this\.solveDispatch,48\).*mark\.setPipeline\(this\.buildDirtyTileDeltaPipeline\).*mark\.dispatchWorkgroups\(1\).*frontierDelta\.setPipeline\(this\.buildDirtyFrontierDeltaPipeline\)/,
+    "decision comparison must be active-tile-sized before the compact singleton publication");
+  assert.match(source,
+    /this\.topologyDecisionGroup = this\.createProjectionGroup\([\s\S]*globalFineSummaries\?\.directory[\s\S]*topologyTileStateBuffer[\s\S]*coarseDirectory/,
+    "the stable decision group must retain fine classification, residency, and coarse fallback");
+  assert.doesNotMatch(source, /FLUID_OCTREE_(?:INCREMENTAL|CHANGE_DRIVEN)/,
+    "the exact incremental path has no legacy runtime escape hatch");
+  assert.doesNotMatch(source, /if \(this\.globalFineSummaries\) return false/,
+    "fine-summary publication must no longer force a full active-tile rebuild");
 });
 
 test("Dawn compiles summary-consuming refinement at the portable ten-storage-buffer limit", {
@@ -100,16 +148,24 @@ test("Dawn compiles summary-consuming refinement at the portable ten-storage-buf
     { binding: 14, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "read-write", format: "r32float", viewDimension: "3d" } },
     { binding: 15, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
   ] });
-  const module = device.createShaderModule({ code: octreeProjectionShader });
+  const shaderModule = device.createShaderModule({ code: octreeProjectionShader });
   device.pushErrorScope("validation");
-  // All six wrappers have the same transitive resource set; the static gate
-  // above proves their dispatch set and this representative pipeline asks
-  // Dawn to validate that resource set against the portable limit.
-  for (const entryPoint of ["refineTopology"]) {
+  // Compile the summary consumer plus the recurring dirty-coarse and
+  // GPU-authored frontier scheduling entry points at the portable limit.
+  for (const entryPoint of [
+    "refineTopology",
+    "refineTopologyCoarseDelta",
+    "balanceTopologyCoarseDelta",
+    "prepareFrontierDispatch",
+    "sortFrontierCandidatesLocal",
+  ]) {
     device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-      compute: { module, entryPoint, constants: { targetRefinementSize: 2 } } });
+      compute: { module: shaderModule, entryPoint, constants: {
+        targetRefinementSize: entryPoint.includes("Coarse") ? 16 : 2,
+      } } });
   }
-  assert.equal(await device.popErrorScope(), null);
+  const validationError = await device.popErrorScope();
+  assert.equal(validationError, null, validationError?.message);
   await device.queue.onSubmittedWorkDone();
   device.destroy();
 });

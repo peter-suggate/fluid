@@ -46,7 +46,7 @@ test("container glass preserves the existing stable material/no-owner identity",
   assert.ok(glass.descriptors.every(({ materialId }) => materialId === VOXEL_MATERIAL_IDS.containerGlass));
   assert.ok(glass.descriptors.every(({ ownerId }) => ownerId === SPARSE_BRICK_NO_OWNER));
   const unpacked = unpackSvoThinGlassPanes(glass.packedRecords);
-  assert.deepEqual(unpacked.map(({ paneId }) => paneId), [0x1000, 0x1001, 0x1002, 0x1003, 0x1004]);
+  assert.deepEqual(unpacked.map(({ paneId }) => paneId), [0x1000, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005]);
   assert.ok(unpacked.every(({ materialId, ownerId }) => materialId === 1 && ownerId === 0xffff));
 });
 

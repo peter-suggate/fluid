@@ -243,13 +243,12 @@ export interface PowerNormalSample {
 export interface PowerVelocityReconstruction {
   readonly velocity: PowerVec3;
   readonly determinant: number;
-  readonly usedFallback: boolean;
+  readonly valid: boolean;
 }
 
 /** Area-weighted least-squares fit of a Cartesian vector to general normals. */
 export function reconstructPowerVelocity(
   samples: readonly PowerNormalSample[],
-  fallback: PowerVec3 = [0, 0, 0],
   determinantTolerance = 1e-10,
 ): PowerVelocityReconstruction {
   const m = [0, 0, 0, 0, 0, 0]; // xx, xy, xz, yy, yz, zz
@@ -276,7 +275,7 @@ export function reconstructPowerVelocity(
   const determinant = xx * c00 + xy * c01 + xz * c02;
   const scale = Math.max(1, xx + yy + zz);
   if (!Number.isFinite(determinant) || determinant <= determinantTolerance * scale ** 3) {
-    return { velocity: [...fallback], determinant, usedFallback: true };
+    return { velocity: [0, 0, 0], determinant, valid: false };
   }
   return {
     velocity: [
@@ -285,7 +284,7 @@ export function reconstructPowerVelocity(
       (c02 * b[0] + c12 * b[1] + c22 * b[2]) / determinant,
     ],
     determinant,
-    usedFallback: false,
+    valid: true,
   };
 }
 

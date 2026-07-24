@@ -4,8 +4,7 @@ import {
   acquireBrowserGPULease,
   automaticGPURecoveryEnabled,
   BROWSER_GPU_LOCK_NAME,
-  fencedSparseAuthorityBringupEnabled,
-  optionalBrowserTimestampFeatures,
+  performanceTraceDeviceFeatures,
   resolveGPUStartupMode,
   safeBrowserGPUBringupEnabled,
   safeBrowserGPUBringupViolations,
@@ -28,13 +27,6 @@ test("GPU startup query has explicit safe, manual, and automatic modes", () => {
   assert.equal(resolveGPUStartupMode("?gpu=unexpected", dam), "manual", "unknown input must not bypass the safe default");
 });
 
-test("sparse authority phase fencing is diagnostic-only", () => {
-  assert.equal(fencedSparseAuthorityBringupEnabled(""), false);
-  assert.equal(fencedSparseAuthorityBringupEnabled("?gpu=on"), false);
-  assert.equal(fencedSparseAuthorityBringupEnabled("?gpu=safe"), true);
-  assert.equal(fencedSparseAuthorityBringupEnabled("?safeBringup=1"), true);
-});
-
 test("safe browser bring-up fails closed when the bounded workload drifts", () => {
   assert.equal(safeBrowserGPUBringupEnabled("?gpu=safe"), true);
   assert.equal(safeBrowserGPUBringupEnabled("?gpu=manual"), false);
@@ -51,7 +43,6 @@ test("safe browser bring-up fails closed when the bounded workload drifts", () =
     diagnosticsOpen: false,
     rightPanel: null,
     gridOverlayAxis: "off",
-    stageCapturePhase: "idle",
     search: "?gpu=safe",
   } as const;
   assert.deepEqual(safeBrowserGPUBringupViolations(valid), []);
@@ -61,15 +52,22 @@ test("safe browser bring-up fails closed when the bounded workload drifts", () =
     methodValues: { ...valid.methodValues, unexpectedSpatialControl: 768, pressureIterations: 400, sparseSurfaceBandCells: 16, sparseSurfacePageFraction: 1 },
     diagnosticsOpen: true,
     rightPanel: "performance",
-    stageCapturePhase: "reading",
-    search: "?gpu=safe&gpuTimestamps=1&panel=performance",
+    search: "?gpu=safe&panel=performance",
   });
   for (const expected of [
     "quality must be balanced", "diagnostics panel must remain closed",
-    "all right-side panels must remain closed", "GPU stage capture/readback must be idle", "GPU timestamps must be off",
+    "all right-side panels must remain closed",
   ]) assert.ok(violations.includes(expected), `missing violation: ${expected}`);
   assert.ok(violations.some((value) => value.includes("unexpectedSpatialControl") && value.includes("pressureIterations") && value.includes("sparseSurfaceBandCells") && value.includes("sparseSurfacePageFraction")));
-  assert.ok(violations.some((value) => value.includes("gpuTimestamps") && value.includes("panel")));
+  assert.ok(violations.some((value) => value.includes("panel")));
+
+  const retiredSwitches = safeBrowserGPUBringupViolations({
+    ...valid,
+    search: "?gpu=safe&waterdiag=1&diagnostics=1",
+  });
+  assert.deepEqual(retiredSwitches, [
+    "unapproved safe-mode query flags: waterdiag, diagnostics",
+  ], "retired switches are inert input rejected only by the canonical safe-mode allowlist");
 });
 
 test("safe browser session invalidates any reset or rebuild epoch", () => {
@@ -220,13 +218,10 @@ test("automatic device recovery is opt-in", () => {
   assert.equal(automaticGPURecoveryEnabled("?gpuRecovery=1"), true);
 });
 
-test("browser timestamp queries are explicit so normal UI and Dawn use the same correctness path", () => {
+test("browser requests timestamp queries whenever exhaustive traces are supported", () => {
   const supported = new Set(["timestamp-query"]);
-  assert.deepEqual(optionalBrowserTimestampFeatures("", supported), []);
-  assert.deepEqual(optionalBrowserTimestampFeatures("?gpuTimestamps=0", supported), []);
-  assert.deepEqual(optionalBrowserTimestampFeatures("?gpuTimestamps=1", supported), ["timestamp-query"]);
-  assert.deepEqual(optionalBrowserTimestampFeatures("?gpu=safe", supported), []);
-  assert.deepEqual(optionalBrowserTimestampFeatures("?gpuTimestamps=1", new Set()), []);
+  assert.deepEqual(performanceTraceDeviceFeatures(supported), ["timestamp-query"]);
+  assert.deepEqual(performanceTraceDeviceFeatures(new Set()), []);
 });
 
 test("gpu=off returns before requesting a WebGPU adapter", async (t) => {

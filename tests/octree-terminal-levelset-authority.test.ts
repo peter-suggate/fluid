@@ -10,12 +10,49 @@ import {
 import type { GPUEulerianInfo } from "../lib/webgpu-eulerian";
 
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+const powerFaceSource = readFileSync(new URL("../lib/webgpu-octree-power-faces.ts", import.meta.url), "utf8");
 
 function compact(value: string | Function): string {
   return value.toString().replace(/\s+/g, "");
 }
 
-test("production surface recurrence advects, redistances, and fine-corrects compact coarse phi", () => {
+test("recurring coarse restriction uses candidate rows without changing committed power source", () => {
+  const surface = compact(WebGPUOctreeProjection.prototype.encodeSurface);
+  const restriction = surface.indexOf("this.fineToPowerCoarseLevelSet.encode");
+  const summaries = surface.indexOf("this.globalFineSummaries?.encode", restriction);
+  assert.ok(restriction >= 0 && summaries > restriction);
+  assert.equal(surface.slice(restriction, summaries)
+    .split("rowDirectory:this.powerFaces.candidateRowDirectoryForCoarse").length - 1, 2,
+  "fine restriction and recurring coarse publication must share the current candidate row identities");
+
+  const sourceGetter = compact(powerFaceSource.slice(
+    powerFaceSource.indexOf("get source(): OctreePowerFaceSource"),
+    powerFaceSource.indexOf("get candidateRowDirectoryForCoarse"),
+  ));
+  assert.match(sourceGetter, /rowDirectory:this\.rowDirectory/,
+    "the public power-face source retains the immutable committed row directory");
+  assert.doesNotMatch(sourceGetter, /candidateRowDirectory/,
+    "the candidate directory cannot leak into admitted downstream consumers");
+  assert.match(compact(powerFaceSource),
+    /getcandidateRowDirectoryForCoarse\(\):GPUBuffer\{returnthis\.candidateRowDirectory;\}/,
+    "the pre-commit coarse transaction has an explicit candidate-only directory authority");
+});
+
+test("fine redistance retains the outer pressure-centre trilinear shell", () => {
+  const source = compact(octreeSource);
+  const surface = compact(WebGPUOctreeProjection.prototype.encodeSurface);
+  assert.match(source,
+    /constredistanceBandFineCells=Math\.min\(256,transportBandFineCells\+globalFineFactor\+3\)/,
+    "allocation planning must reserve one cell beyond the backtrace and trilinear reach");
+  assert.match(surface,
+    /constredistanceBandCells=Math\.min\(256,bandCells\+this\.globalFineLevelSet\.plan\.fineFactor\+3\)/,
+    "recurring redistance must retain the same pressure-centre support shell");
+  assert.match(surface,
+    /redistanceBandFineCells:redistanceBandCells[\s\S]*publicationRedistance\.encode\(redistanceBroker,\{bandCells:redistanceBandCells/,
+    "topology allocation and redistance must consume the identical authored radius");
+});
+
+test("production surface recurrence advects, redistances, conserves volume, and fine-corrects compact coarse phi", () => {
   const surface = compact(WebGPUOctreeProjection.prototype.encodeSurface);
   const bootstrap = surface.indexOf("this.powerCoarseLevelSet.encodeBootstrapFromSurfaceLeaves");
   const bootstrapSchedule = surface.indexOf("this.powerCoarseLevelSetSchedule.encode", bootstrap);
@@ -36,11 +73,19 @@ test("production surface recurrence advects, redistances, and fine-corrects comp
     && publicationGate > fineVolume && restriction > publicationGate
     && recurringSchedule > restriction && summaries > recurringSchedule,
   "fine evolution -> atomic publication -> fine restriction -> recurring coarse evolution -> merged summary must remain ordered in one command stream");
-  assert.match(surface.slice(fineTopologyEncode, fineRedistance), /,true\)/,
+  assert.match(surface.slice(fineTopologyEncode, fineRedistance), /,true,(?:this\.)?globalFineBootstrapped/,
     "fine topology must remain provisional until redistance and volume validation finish");
+  assert.match(surface.slice(fineRedistance, publicationGate),
+    /publicationVolume\?\.encode\(redistanceBroker\)/,
+    "production must apply and remeasure the bounded volume correction before admitting the fine generation");
+  assert.doesNotMatch(surface.slice(fineRedistance, publicationGate), /encodeMeasurement/,
+    "telemetry-only measurement cannot satisfy the mini-dam conservation gate");
   assert.match(surface.slice(publicationGate, restriction), /redistance:publicationRedistance\.control/);
   assert.match(surface.slice(restriction, recurringSchedule), /topologyControl:publicationTopology\.control/,
     "fine restriction must consume the exact topology transaction that produced its source");
+  assert.match(surface.slice(bootstrapSchedule, fineTopologyAB),
+    /rowDirectory:this\.powerFaces\.source\.rowDirectory/,
+    "cold bootstrap continues to consume the last admitted row directory");
   assert.doesNotMatch(surface, /globalFineBootstrapped\?undefined:this\.globalFineSeeds/,
     "cold bootstrap seeds must be retryable after a GPU-rejected first generation");
   assert.match(surface.slice(recurringSchedule), /fineCorrection:\{rowOffsets:correction\.rowOffsets/);
@@ -51,17 +96,10 @@ test("production surface recurrence advects, redistances, and fine-corrects comp
     "cold bootstrap coarse phi is an initialization dependency, not a substitute for restricting the accepted fine generation");
   assert.match(surface.slice(recurringSchedule), /generation:correctedFine\.generation&1073741823/,
     "the compact-coarse publication epoch must come from the fine source it restricts, not an optimistic host counter");
-  assert.match(surface,
-    /constredistanceBandCells=Math\.min\(256,bandCells\+this\.globalFineLevelSet\.plan\.fineFactor\+2\)/,
-    "the resident band must include the transported band, complete backtrace, and the sqrt(3)-cell trilinear stencil");
-  assert.match(surface,
-    /redistanceBandFineCells:redistanceBandCells[\s\S]*publicationRedistance\.encode\(encoder,\{bandCells:redistanceBandCells/,
-    "topology allocation and redistance must use the same authored Section 5 band radius");
-
   const schedule = compact(WebGPUOctreePowerCoarseLevelSet.prototype.encode);
   const migrate = schedule.indexOf('dispatch("migrate"');
   const prepare = schedule.indexOf('dispatch("prepare",1)');
-  const clear = schedule.indexOf('dispatch("clearSamples"');
+  const clear = schedule.indexOf('dispatch("clearStatus"');
   const advect = schedule.indexOf('dispatch("advect"');
   const redistance = schedule.indexOf('dispatch("redistance"');
   const validate = schedule.indexOf('dispatch("validateFine"');
@@ -136,29 +174,49 @@ test("global-fine QA diagnostics read the published GPU controls without steerin
     "the stable redistance prefix remains available at its established packet offset");
   assert.match(diagnostics, /this\.globalFineVolumeA\.control,0,readback,240,64/,
     "volume rejection telemetry must retain its complete shared control");
-  assert.match(diagnostics, /this\.globalFineFaceFastMarch\.transitionControl,0,readback,496,64/,
+  assert.match(diagnostics, /this\.globalFineFaceExtension\.transitionControl,0,readback,496,64/,
     "face-band rejection telemetry must retain the catalog-Delaunay gate preceding face emission");
-  assert.match(diagnostics, /redistance\.control,0,readback,720,48/,
-    "redistance rejection telemetry must retain its complete twelve-word control");
-  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:932/,
-    "the compact evidence packet accounts for transport detail, the Section 5 seed prefix, and march completion diagnostics");
+  assert.match(diagnostics,
+    /redistance\.control,0,readback,720,FINE_LEVELSET_REDISTANCE_CONTROL_BYTES/,
+    "redistance rejection telemetry must retain its complete ten-word control");
+  assert.match(diagnostics, /label:"GlobalfineQAdiagnostics",size:1540/,
+    "the compact evidence packet accounts for transport detail, Section 5 completion, and native Power construction controls");
+  assert.match(diagnostics, /this\.globalFineFaceExtension\.control,64,readback,768,32/,
+    "the packet retains direct closest-point and liquid-interpolation metrics without legacy scheduler controls");
+  assert.match(diagnostics, /this\.globalFineFaceExtension\.control,96,readback,900,16/,
+    "the packet appends the four mutually exclusive CPT interpolation-failure reasons");
+  assert.match(diagnostics, /this\.globalFineFaceExtension\.control,112,readback,1108,16/,
+    "the packet appends direct face slots for every CPT interpolation-failure reason");
+  assert.match(diagnostics, /this\.powerDescriptor\.control,0,readback,1124,64/,
+    "the packet attributes rejected native descriptors without a second diagnostic transaction");
+  assert.match(diagnostics, /this\.powerTopology\.control,0,readback,1188,64/,
+    "the packet attributes rejected native topology metrics without a second diagnostic transaction");
+  assert.match(diagnostics,
+    /this\.globalFineFaceExtension\.candidateControlForDiagnostics,0,readback,1252,128/,
+    "the packet preserves the rejected Section 5 candidate rather than reporting an empty retained authority");
+  assert.match(diagnostics,
+    /this\.globalFineFaceExtension\.candidateTransitionControlForDiagnostics,0,readback,1380,160/,
+    "the packet preserves the complete rejected transition candidate");
+  assert.match(diagnostics,
+    /faceBandControl:\[\.\.\.words\.slice\(76,92\),\.\.\.words\.slice\(192,200\),\.\.\.words\.slice\(225,229\),\.\.\.words\.slice\(277,281\)\]/,
+    "the face-band decoder includes the appended CPT reason suffix");
   assert.match(diagnostics, /topology\.control,32,readback,896,4/,
     "the pre-dilation interface prefix is attributable without moving the stable topology header");
-  assert.match(diagnostics, /this\.globalFineFaceFastMarch\.pointFieldControl,0,readback,560,32/,
+  assert.match(diagnostics, /this\.globalFineFaceExtension\.pointFieldControl,0,readback,560,32/,
     "final cell-centre LS failures must be attributable independently of graph construction");
-  assert.match(diagnostics, /this\.globalFineFaceFastMarch\.transientPowerControl,0,readback,592,64/,
+  assert.match(diagnostics, /this\.globalFineFaceExtension\.transientPowerControl,0,readback,592,64/,
     "all-band physical graph failures must retain their complete fixed header");
-  assert.match(diagnostics, /this\.globalFineFaceFastMarch\.transitionControl,64,readback,656,64/,
+  assert.match(diagnostics, /this\.globalFineFaceExtension\.transitionControl,64,readback,656,64/,
     "the first exact-owner mismatch must be available without a second unbounded diagnostic scan");
   assert.match(diagnostics, /published:words\[6\]!==0,rolledBack:words\[7\]!==0/);
   assert.match(diagnostics, /interfaceSeedBricks:words\[224\]/);
   assert.match(diagnostics, /activeBricks:words\[10\],generation:words\[11\]/);
   assert.match(diagnostics,
-    /coarseDirectoryState:words\[16\],coarseDirectoryGeneration:words\[17\][\s\S]*coarseControlGeneration:words\[35\],coarseControlValid:words\[36\]/);
+    /coarseDirectoryState:words\[16\],coarseDirectoryGeneration:words\[17\][\s\S]*coarseControlGeneration:words\[34\],coarseControlValid:words\[35\]/);
   assert.match(diagnostics,
     /fineRestrictionCount:words\[40\][\s\S]*fineRestrictionFlags:words\[42\][\s\S]*fineRestrictionValid:words\[45\]/);
   assert.match(diagnostics,
-    /transportControl:this\.lastGlobalFineTransport\?\[\.\.\.words\.slice\(48,56\),\.\.\.words\.slice\(216,224\)\]:Array\.from\(words\.slice\(48,56\)\)[\s\S]*redistanceControl:Array\.from\(words\.slice\(56,60\)\)[\s\S]*redistanceControlDetailed:Array\.from\(words\.slice\(180,192\)\)[\s\S]*volumeControl:Array\.from\(words\.slice\(60,76\)\)[\s\S]*faceBandTransitionControl:Array\.from\(words\.slice\(124,140\)\)[\s\S]*faceBandTransitionOwnerFailure:Array\.from\(words\.slice\(164,180\)\)[\s\S]*faceBandPointFieldControl:Array\.from\(words\.slice\(140,148\)\)[\s\S]*faceBandTransientPowerControl:Array\.from\(words\.slice\(148,164\)\)/);
+    /transportControl:this\.lastGlobalFineTransport\?\[\.\.\.words\.slice\(48,56\),\.\.\.words\.slice\(216,224\)\]:Array\.from\(words\.slice\(48,56\)\)[\s\S]*redistanceControl:Array\.from\(words\.slice\(56,60\)\)[\s\S]*redistanceControlDetailed:Array\.from\(words\.slice\(180,190\)\)[\s\S]*volumeControl:Array\.from\(words\.slice\(60,76\)\)[\s\S]*faceBandTransitionControl:Array\.from\(words\.slice\(124,140\)\)[\s\S]*faceBandTransitionOwnerFailure:Array\.from\(words\.slice\(164,180\)\)[\s\S]*faceBandPointFieldControl:Array\.from\(words\.slice\(140,148\)\)[\s\S]*faceBandTransientPowerControl:Array\.from\(words\.slice\(148,164\)\)/);
   assert.match(diagnostics,
     /faceBandPointField:unpackOctreeFaceBandPointFieldControl\(words\.slice\(140,148\)\)[\s\S]*faceBandTransientPower:unpackOctreeFaceBandTransientPowerControl\(words\.slice\(148,164\)\)/,
     "raw evidence must also expose decoded stage attribution without granting CPU authority");

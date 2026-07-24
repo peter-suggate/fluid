@@ -4,7 +4,7 @@
  * (`createSvoDryConeMarcherWGSL`). Compiles the baseline and optimized marcher
  * variants from the same builder in one process, proves bit-identical
  * per-ray results (transmittance bits, valid, step count) plus morton/find
- * probe parity, then times the variants with interleaved timestamp queries.
+ * probe parity, then times the variants with interleaved generic GPU traces.
  *
  * Rerun: node --import tsx tools/benchmark-svo-cone-gpu.ts
  * Note: dawn-node occasionally segfaults mid-run on repeated dispatch/readback
@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
 import {
   SVO_NODE_MIP_LAYOUT,
   createSvoNodeMipPageWithApron,
@@ -245,8 +246,8 @@ const probeReadback = device.createBuffer({ size: probeResultBytes, usage: GPUBu
 interface Target { ray: GPUComputePipeline; probe: GPUComputePipeline; rayBind: GPUBindGroup; probeBind: GPUBindGroup }
 const targets = new Map<VariantName, Target>();
 for (const variant of VARIANTS) {
-  const module = device.createShaderModule({ label: `cone marcher ${variant.name}`, code: harnessShader(variant.options) });
-  const info = await module.getCompilationInfo();
+  const shaderModule = device.createShaderModule({ label: `cone marcher ${variant.name}`, code: harnessShader(variant.options) });
+  const info = await shaderModule.getCompilationInfo();
   assert.deepEqual(info.messages.filter(({ type }) => type === "error").map(({ lineNum, linePos, message }) => ({ lineNum, linePos, message })), [], `${variant.name} failed to compile`);
   // Auto layouts keep only the bindings each entry point statically uses.
   const bindEntries = (pipeline: GPUComputePipeline, output: 0 | 1): GPUBindGroup => device.createBindGroup({
@@ -260,8 +261,8 @@ for (const variant of VARIANTS) {
       { binding: 18, resource: visible.directoryView },
     ],
   });
-  const ray = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "benchmarkMain" } });
-  const probe = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "probeMain" } });
+  const ray = device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint: "benchmarkMain" } });
+  const probe = device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint: "probeMain" } });
   targets.set(variant.name, { ray, probe, rayBind: bindEntries(ray, 0), probeBind: bindEntries(probe, 1) });
 }
 
@@ -331,44 +332,39 @@ function histogram(rays: Uint32Array): { steps: number; fetches: number; searchI
 }
 
 // ---------------------------------------------------------------------------
-// Interleaved timestamp timing.
+// Interleaved generic GPU trace timing.
 // ---------------------------------------------------------------------------
 process.stderr.write("parity: bit-exact across variants\n");
 for (let warmup = 0; warmup < warmups; warmup += 1) for (const variant of VARIANTS) await run(variant.name, "ray");
-const timestampCount = cycles * VARIANTS.length * 2;
-const querySet = device.createQuerySet({ type: "timestamp", count: timestampCount });
-const resolve = device.createBuffer({ size: timestampCount * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-const queryReadback = device.createBuffer({ size: timestampCount * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-const labels: VariantName[] = [];
-let query = 0;
-// One submit per cycle: a single command buffer holding every timed pass can
-// exceed the Metal command-buffer watchdog and take the device down.
+const samples = new Map<VariantName, number[]>(VARIANTS.map(({ name }) => [name, []]));
+let traceSampleId = 0;
+// Serialize one generic trace per sample. Independent in-flight passes can
+// overlap on Metal, and a large combined command buffer can trip its watchdog.
 for (let cycle = 0; cycle < cycles; cycle += 1) {
-  const cycleEncoder = device.createCommandEncoder();
   const order = cycle % 2 === 0 ? [...VARIANTS] : [...VARIANTS].reverse();
   for (const variant of order) {
+    const encoder = device.createCommandEncoder();
     const target = targets.get(variant.name)!;
-    const pass = cycleEncoder.beginComputePass({ timestampWrites: { querySet, beginningOfPassWriteIndex: query, endOfPassWriteIndex: query + 1 } });
+    const recorder = new GPUPerformanceTraceRecorder(
+      device,
+      ++traceSampleId,
+      "presentation",
+      `svo-cone:${variant.name}:cycle-${cycle}`,
+      [{ id: "dry-scene", label: `SVO cone marcher ${variant.name}` }],
+    );
+    recorder.boundary(encoder, `${variant.name} trace start`);
+    const pass = encoder.beginComputePass();
     pass.setPipeline(target.ray);
     pass.setBindGroup(0, target.rayBind);
     for (let dispatch = 0; dispatch < dispatches; dispatch += 1) pass.dispatchWorkgroups(Math.ceil(rayCount / 64));
     pass.end();
-    labels.push(variant.name);
-    query += 2;
+    recorder.boundary(encoder, `${variant.name} trace complete`);
+    recorder.resolve(encoder);
+    device.queue.submit([encoder.finish()]);
+    const trace = await recorder.read();
+    assert.ok(trace, `${variant.name} GPU trace was invalid`);
+    samples.get(variant.name)!.push(trace.total_ms / dispatches);
   }
-  device.queue.submit([cycleEncoder.finish()]);
-  await device.queue.onSubmittedWorkDone();
-}
-const encoder = device.createCommandEncoder();
-encoder.resolveQuerySet(querySet, 0, timestampCount, resolve, 0);
-encoder.copyBufferToBuffer(resolve, 0, queryReadback, 0, timestampCount * 8);
-device.queue.submit([encoder.finish()]);
-await queryReadback.mapAsync(GPUMapMode.READ);
-const timestamps = new BigUint64Array(queryReadback.getMappedRange().slice(0));
-queryReadback.unmap();
-const samples = new Map<VariantName, number[]>(VARIANTS.map(({ name }) => [name, []]));
-for (let index = 0; index < labels.length; index += 1) {
-  samples.get(labels[index])!.push(Number(timestamps[index * 2 + 1] - timestamps[index * 2]) / 1e6 / dispatches);
 }
 await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, []);
@@ -406,6 +402,5 @@ console.log(JSON.stringify({
   })),
 }, null, 2));
 
-querySet.destroy(); resolve.destroy(); queryReadback.destroy();
 rayResults.destroy(); probeResults.destroy(); rayReadback.destroy(); probeReadback.destroy();
 paramsBuffer.destroy(); publicationBuffer.destroy(); pyramid.destroy(); device.destroy();

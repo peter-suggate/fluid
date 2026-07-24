@@ -37,40 +37,39 @@ test("strip width covers both the paper boundary support and configured trajecto
   assert.throws(() => planOctreePowerBoundaryStrip({ nx: 1, ny: 1, nz: 1 }, -1), /interface band/);
 });
 
-test("power pressure capacity reserves the wall strip without charging rollback mode", () => {
+test("power pressure capacity always reserves the authoritative wall strip", () => {
   const dims = { nx: 288, ny: 96, nz: 64 };
-  const rollback = planOctreePressureCapacity(dims, 16, 4);
   const wall = planOctreePowerBoundaryStrip(dims, 4, false);
-  const power = planOctreePressureCapacity(dims, 16, 4, undefined, true, false);
-  const closedPower = planOctreePressureCapacity(dims, 16, 4, undefined, true, true);
+  const power = planOctreePressureCapacity(dims, 16, 4);
+  const closedPower = planOctreePressureCapacity(dims, 16, 4, undefined, true);
   assert.ok(power.rowCapacity >= wall.unitCellUpperBound);
-  assert.ok(power.rowCapacity > rollback.rowCapacity);
   assert.ok(closedPower.rowCapacity > power.rowCapacity);
-  assert.equal(planOctreePressureCapacity(dims, 16, 4, 1024, true, true).rowCapacity, 1024,
+  assert.equal(planOctreePressureCapacity(dims, 16, 4, 1024, true).rowCapacity, 1024,
     "an explicit diagnostic override remains authoritative and fail-closed on overflow");
 });
 
 test("topology forces authoritative closed walls to unit owners before phi sizing", () => {
   assert.match(octreeProjectionShader,
     /fn powerClosedWallStripIntersects\(origin: vec3u, size: u32\) -> bool/);
-  assert.match(octreeProjectionShader, /if \(\(flags & 4u\) == 0u\) \{ return false; \}/,
-    "rollback topology must not pay for the power-only strip");
+  assert.doesNotMatch(octreeProjectionShader, /\(flags & 4u\)/,
+    "the sole native topology must not retain a power-vs-rollback selector");
   assert.match(octreeProjectionShader,
     /let width = max\(3u,[\s\S]*u32\(ceil\(max\(0\.0, params\.solve\.w\)\)\)\);/);
   assert.match(octreeProjectionShader,
     /origin\.x < min\(width, d\.x\)[\s\S]*origin\.z < min\(width, d\.z\)[\s\S]*origin\.y < min\(width, d\.y\)[\s\S]*\(flags & 2u\) != 0u/);
   assert.match(octreeProjectionShader,
-    /fn leafNeedsRefinement[\s\S]*if \(powerClosedWallStripIntersects\(origin, size\)\) \{ return true; \}[\s\S]*let fineSummary/,
+    /fn leafNeedsRefinement[\s\S]*if \(powerClosedWallStripIntersects\(origin, size\)\) \{ return true; \}[\s\S]*var minimumSolid/,
     "wall refinement must precede sparse-phi absence and pure-solid early exits");
 });
 
-test("host flags distinguish terrain, closed ceiling, and power strip", () => {
+test("host flags encode only terrain and closed ceiling", () => {
   assert.match(source,
-    /const containerFlags = \(sceneHasTerrain\(this\.scene\) \? 1 : 0\)[\s\S]*container\.top === "closed" \? 2 : 0[\s\S]*powerPolicy\.authoritative \? 4 : 0/);
+    /const containerFlags = \(sceneHasTerrain\(this\.scene\) \? 1 : 0\)[\s\S]*container\.top === "closed" \? 2 : 0\);/);
+  assert.doesNotMatch(source, /container\.top === "closed" \? 2 : 0\)[\s\S]*\| 4/);
   assert.match(octreeProjectionShader,
     /\(u32\(round\(params\.container\.w\)\) & 1u\) != 0u[\s\S]*textureLoad\(terrainIn/,
-    "closed-top and power bits must not accidentally enable terrain sampling");
+    "the closed-top bit must not accidentally enable terrain sampling");
   assert.match(source,
-    /planOctreePressureCapacity\([\s\S]*this\.powerPolicy\.authoritative,[\s\S]*scene\.container\.top === "closed"/,
+    /planOctreePressureCapacity\([\s\S]*options\.pressureRowCapacity,[\s\S]*scene\.container\.top === "closed"/,
     "the allocation bound must use the same ceiling policy as the shader");
 });

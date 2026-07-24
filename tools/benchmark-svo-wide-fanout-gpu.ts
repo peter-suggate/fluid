@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
 import { planSvoWideFanout } from "../lib/svo-wide-fanout";
 import { packSvoWideFanout, createWebgpuSvoWideFanoutTraversalWGSL, validateSvoWidePackedPlan } from "../lib/webgpu-svo-wide-fanout";
 import { webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
@@ -153,19 +154,27 @@ for (let i = 0; i < warmups; i += 1) for (const variant of ["canonical", "wide"]
   pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup); for (let dispatch = 0; dispatch < dispatchesPerSample; dispatch += 1) pass.dispatchWorkgroups(Math.ceil(invocationCount / 128)); pass.end(); device.queue.submit([encoder.finish()]);
 }
 await device.queue.onSubmittedWorkDone();
-const querySet = device.createQuerySet({ type: "timestamp", count: cycles * 4 });
-const resolve = device.createBuffer({ size: cycles * 32, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-const timing = device.createBuffer({ size: cycles * 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-let query = 0; const encoder = device.createCommandEncoder();
-for (let cycle = 0; cycle < cycles; cycle += 1) for (const variant of (cycle % 2 ? ["wide", "canonical"] : ["canonical", "wide"]) as Variant[]) {
-  const target = targets.get(variant)!; const pass = encoder.beginComputePass({ timestampWrites: { querySet, beginningOfPassWriteIndex: query, endOfPassWriteIndex: query + 1 } });
-  pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup); for (let dispatch = 0; dispatch < dispatchesPerSample; dispatch += 1) pass.dispatchWorkgroups(Math.ceil(invocationCount / 128)); pass.end(); query += 2;
-}
-encoder.resolveQuerySet(querySet, 0, cycles * 4, resolve, 0); encoder.copyBufferToBuffer(resolve, 0, timing, 0, cycles * 32); device.queue.submit([encoder.finish()]);
-await timing.mapAsync(GPUMapMode.READ); const stamps = new BigUint64Array(timing.getMappedRange()); query = 0;
 const samples: Record<Variant, number[]> = { canonical: [], wide: [] };
+let traceSampleId = 0;
 for (let cycle = 0; cycle < cycles; cycle += 1) for (const variant of (cycle % 2 ? ["wide", "canonical"] : ["canonical", "wide"]) as Variant[]) {
-  samples[variant].push(Number(stamps[query + 1] - stamps[query]) / 1e6 / dispatchesPerSample); query += 2;
+  const encoder = device.createCommandEncoder();
+  const target = targets.get(variant)!;
+  const recorder = new GPUPerformanceTraceRecorder(
+    device,
+    ++traceSampleId,
+    "presentation",
+    `svo-wide-fanout:${variant}:cycle-${cycle}`,
+    [{ id: "dry-scene", label: `SVO ${variant} traversal` }],
+  );
+  recorder.boundary(encoder, `${variant} trace start`);
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup); for (let dispatch = 0; dispatch < dispatchesPerSample; dispatch += 1) pass.dispatchWorkgroups(Math.ceil(invocationCount / 128)); pass.end();
+  recorder.boundary(encoder, `${variant} trace complete`);
+  recorder.resolve(encoder);
+  device.queue.submit([encoder.finish()]);
+  const trace = await recorder.read();
+  assert.ok(trace, `${variant} GPU trace was invalid`);
+  samples[variant].push(trace.total_ms / dispatchesPerSample);
 }
 const canonicalMs = median(samples.canonical), wideMs = median(samples.wide);
 console.log(JSON.stringify({ phase: "svo-wide-fanout-gpu-benchmark", adapter: adapter.info, invocationCount, cycles, dispatchesPerSample, originX, productionFallback, rayProfile, malformedWidePage,
@@ -181,4 +190,5 @@ console.log(JSON.stringify({ phase: "svo-wide-fanout-gpu-benchmark", adapter: ad
     effectiveStructuralReductionPercent: (1 - wideVisits / canonicalVisits) * 100 },
   timing: { canonicalMedian_ms: canonicalMs, wideMedian_ms: wideMs, speedup: canonicalMs / wideMs, improvementPercent: (1 - wideMs / canonicalMs) * 100 } }, null, 2));
 assert.deepEqual(validationErrors, []);
-timing.unmap(); for (const resource of [control, nodes, leaves, pages, descriptors, ...outputs.values(), ...readbacks.values(), resolve, timing]) resource.destroy(); querySet.destroy(); device.destroy();
+for (const resource of [control, nodes, leaves, pages, descriptors, ...outputs.values(), ...readbacks.values()]) resource.destroy();
+device.destroy();

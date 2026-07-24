@@ -19,7 +19,6 @@ import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PerformancePanel } from "./PerformancePanel";
 import { TransportBar } from "./TransportBar";
 import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
-import { FrameRateCounter } from "./FrameRateCounter";
 import type { GPUStatus } from "@/lib/webgpu-renderer";
 import { getEnvironmentPreset } from "@/lib/environments";
 import { getScenePreset } from "@/lib/scenes";
@@ -181,7 +180,7 @@ export function FluidLab() {
           <button className={rightPanel === "visual" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visual" ? null : "visual")} aria-expanded={rightPanel === "visual"} title="Render and debug controls">RENDER</button>
           <button className={rightPanel === "bodies" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "bodies" ? null : "bodies")} aria-expanded={rightPanel === "bodies"} title="Rigid body controls">BODIES</button>
           <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAGNOSTICS</button>
-          <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Live performance profiler">PERFORMANCE</button>
+          <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Measured work and paper fields">PERFORMANCE</button>
         </nav>
         {gpuStatus.state === "initializing" && <GPUInitializationPanel status={gpuStatus} />}
         {gpuStatus.state === "manual" && <div className="gpu-fallback gpu-manual-start" role="status">
@@ -194,7 +193,13 @@ export function FluidLab() {
             ? "This browser can exclude other Fluid Lab tabs, but cannot observe Dawn's local filesystem lease."
             : <>Use <code>gpu=off</code> for UI-only inspection or <code>gpu=on</code> to restore automatic startup.</>}</small>
         </div>}
-        {gpuStatus.state === "unavailable" && <div className="gpu-fallback"><strong>3D renderer unavailable</strong><p>{gpuStatus.label}</p><small>The scene editor, serialization, and CPU validation remain available.</small></div>}
+        {gpuStatus.state === "unavailable" && <div className="gpu-fallback"><strong>3D renderer unavailable</strong><p>{gpuStatus.label}</p>
+          {gpuStatus.reproduction && <div data-testid="gpu-failure-reproduction">
+            <small>Dawn case <strong>{gpuStatus.reproduction.caseId}</strong> · validated · serialized</small>
+            <code>{gpuStatus.reproduction.command}</code>
+          </div>}
+          <small>The scene editor, serialization, and CPU validation remain available.</small>
+        </div>}
       </section>
 
       {rightPanel && <RightPanelResizer />}
@@ -206,7 +211,6 @@ export function FluidLab() {
 
       <RecordingPlaybackModal />
       <SceneConfigPopover />
-      <FrameRateCounter />
     </main>
   );
 }

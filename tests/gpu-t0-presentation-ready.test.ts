@@ -2,33 +2,30 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { initialRasterPresentationReadiness, requiresFencedInitialRasterPresentation } from "../lib/gpu-t0-presentation";
-import type { AdaptiveWaterRenderDiagnostics } from "../lib/webgpu-water-pipeline";
+import type { WaterRenderDiagnostics } from "../lib/webgpu-water-pipeline";
 
 const base = {
   solverAttached: true,
   initialSparseAuthorityReady: true,
   globalFineAttached: true,
-  adaptiveSurfaceAttached: true,
+  surfaceSourceAttached: true,
   surfaceExtractionSubmitted: true,
   presentationFenceCompleted: true,
   diagnosticsRequired: false,
 } as const;
 
 function diagnostic(
-  surfaceGeometrySource: AdaptiveWaterRenderDiagnostics["surfaceGeometrySource"],
+  surfaceGeometrySource: WaterRenderDiagnostics["surfaceGeometrySource"],
   vertexCount: number,
-): AdaptiveWaterRenderDiagnostics {
+): WaterRenderDiagnostics {
   return {
-    leafCapacity: 1, pageCapacity: 1, pageResolution: 4, samplesPerPage: 64,
-    surfaceFreePages: 0, surfaceAllocatedPages: 1, surfaceCandidatePages: 1, surfaceActivePages: 1,
-    surfaceOverflow: 0, finestResidentPages: 1, coarseResidentPages: 0, maximumResidentLeafSize: 1,
-    surfaceDispatch: [1, 1, 1], vertexCount, activeCubeCount: vertexCount > 0 ? 1 : 0,
-    vertexAllocator: surfaceGeometrySource === "adaptive-fallback" ? vertexCount : 0xffff_ffff,
+    vertexCount, activeCubeCount: vertexCount > 0 ? 1 : 0,
+    vertexAllocator: 0xffff_ffff,
     globalFineAuthorityLatch: surfaceGeometrySource === "global-fine-coarse" ? 1 : 0,
     surfaceGeometrySource,
     globalFineAttached: true,
     globalFineCrossingPublished: surfaceGeometrySource === "global-fine-coarse",
-    presentationFallbackActive: surfaceGeometrySource === "adaptive-fallback" || surfaceGeometrySource === "retained-previous",
+    presentationFallbackActive: surfaceGeometrySource === "retained-previous",
   };
 }
 
@@ -42,7 +39,7 @@ test("only the power octree requires the sparse t=0 raster fence", () => {
 test("paused t=0 stays locked until every solver, source, extraction, and fence prerequisite completes", () => {
   for (const key of [
     "solverAttached", "initialSparseAuthorityReady", "globalFineAttached",
-    "adaptiveSurfaceAttached", "surfaceExtractionSubmitted", "presentationFenceCompleted",
+    "surfaceSourceAttached", "surfaceExtractionSubmitted", "presentationFenceCompleted",
   ] as const) {
     const result = initialRasterPresentationReadiness({ ...base, [key]: false });
     assert.equal(result.ready, false, key);
@@ -60,9 +57,9 @@ test("diagnostics mode confirms only a current fine/coarse crossing", () => {
     diagnostics: diagnostic("global-fine-coarse", 12) });
   assert.equal(fine.ready, true); assert.equal(fine.state, "crossing-confirmed");
 
-  const fallback = initialRasterPresentationReadiness({ ...base, diagnosticsRequired: true,
-    diagnostics: diagnostic("adaptive-fallback", 6) });
-  assert.equal(fallback.ready, false); assert.equal(fallback.state, "failed-closed");
+  const volume = initialRasterPresentationReadiness({ ...base, diagnosticsRequired: true,
+    diagnostics: diagnostic("volume", 6) });
+  assert.equal(volume.ready, false); assert.equal(volume.state, "failed-closed");
 
   for (const source of ["empty", "retained-previous"] as const) {
     const failed = initialRasterPresentationReadiness({ ...base, diagnosticsRequired: true,
@@ -72,30 +69,14 @@ test("diagnostics mode confirms only a current fine/coarse crossing", () => {
   assert.equal(initialRasterPresentationReadiness({ ...base, diagnosticsRequired: true }).state, "pending");
 });
 
-test("coarse-only octree reaches t=0 readiness without allocating a global-fine source", () => {
-  const coarse = { ...base, globalFineRequired: false, globalFineAttached: false } as const;
-  assert.deepEqual(initialRasterPresentationReadiness(coarse), {
-    ready: true,
-    state: "gpu-authoritative",
-    label: "WebGPU t=0 ready · coarse-octree raster publication fenced",
+test("the retired coarse-only presentation switch and backing path stay deleted", () => {
+  assert.deepEqual(initialRasterPresentationReadiness({ ...base, globalFineAttached: false }), {
+    ready: false,
+    state: "pending",
+    label: "Waiting for global-fine renderer source",
   });
-
-  const confirmed = initialRasterPresentationReadiness({
-    ...coarse,
-    diagnosticsRequired: true,
-    diagnostics: diagnostic("adaptive-octree", 12),
-  });
-  assert.equal(confirmed.ready, true);
-  assert.equal(confirmed.state, "crossing-confirmed");
-  assert.match(confirmed.label, /coarse-octree raster crossing confirmed/);
-
-  const empty = initialRasterPresentationReadiness({
-    ...coarse,
-    diagnosticsRequired: true,
-    diagnostics: diagnostic("empty", 0),
-  });
-  assert.equal(empty.ready, false);
-  assert.equal(empty.state, "failed-closed");
+  const source = readFileSync(new URL("../lib/gpu-t0-presentation.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /globalFineRequired|coarse-only mode|coarse-octree raster/);
 });
 
 test("renderer publishes ready only after first raster submission completion and controller retains both locks", () => {
@@ -109,12 +90,13 @@ test("renderer publishes ready only after first raster submission completion and
   assert.match(renderer, /fencedInitialRaster=requiresFencedInitialRasterPresentation\(config\.methodId\)/);
   assert.match(renderer, /WebGPU direct-field solver ready/);
   assert.match(renderer, /initialRasterSubmission[\s\S]*queue\.onSubmittedWorkDone\(\)\.then\(async\(\)=>[\s\S]*settleInitialRasterPresentation/);
-  assert.match(renderer, /adaptiveDiagnosticsCompletion=await adaptiveDiagnosticsCompletion[\s\S]*settleInitialRasterPresentation|initialDiagnostics=await adaptiveDiagnosticsCompletion[\s\S]*settleInitialRasterPresentation/,
+  assert.match(renderer, /initialDiagnostics=await surfaceDiagnosticsCompletion[\s\S]*settleInitialRasterPresentation/,
     "diagnostics mode must settle from the readback belonging to the fenced t=0 submission");
   assert.match(renderer, /state: "blocked", label: outcome\.label/,
     "an empty or retained raster diagnostic must remain attached but fail transport closed");
-  assert.match(renderer, /initialRasterGlobalFineRequired[\s\S]*readyGPUFluid\.globalFineLevelSetSource/);
-  assert.match(renderer, /this\.adaptiveWaterAttached[\s\S]*rasterResult\.surfaceUpdated/);
+  assert.doesNotMatch(renderer, /initialRasterGlobalFineRequired|globalFineRequired/);
+  assert.match(renderer, /readyGPUFluid\.initialSparseAuthorityReady === true[\s\S]*Boolean\(readyGPUFluid\.globalFineLevelSetSource\)/);
+  assert.match(renderer, /this\.globalFineWaterAttached[\s\S]*rasterResult\.surfaceUpdated/);
   assert.match(controller, /initialSparseAuthorityReady === true[\s\S]*initialRasterSurfaceReady === true/);
   assert.match(transport, /initialSparseAuthorityReady === true[\s\S]*initialRasterSurfaceReady === true/);
   assert.match(viewport, /status\.state === "lost" \|\| status\.state === "unavailable"/);

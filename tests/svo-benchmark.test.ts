@@ -57,23 +57,44 @@ function observationForPlan(plan: SVOBenchmarkPlan): SVOBenchmarkObservationBund
       simulatedTime_s: baseline.checkpoint.simulatedTime_s,
       stepCount: baseline.checkpoint.stepCount,
     },
-    frames: Array.from({ length: run.warmupFrames + run.measuredFrames }, (_, frameIndex): SVOBenchmarkFrameObservation => ({
-      frameIndex,
-      sampledAtUnixMs: run.captureNotBeforeUnixMs + frameIndex,
-      resetToken: run.resetToken,
-      requestedMode: run.requestedMode,
-      effectiveMode: run.requestedMode,
-      fallbackReason: null,
-      renderTimingContext: `octree:${run.quality}:smooth:${run.requestedMode}:epoch-${run.sequenceIndex + 1}`,
-      renderTimingEpoch: run.sequenceIndex + 1,
-      renderTimingSampleId: run.sequenceIndex * 1_000 + frameIndex + 1,
-      gpuRenderTimingAvailable: true,
-      cpuFrame_ms: frameIndex,
-      gpuRender_ms: frameIndex / 10,
-      gpuDryScene_ms: frameIndex / 20,
-      gpuSvoTemporal_ms: run.requestedMode === "svo" ? frameIndex / 40 : 0,
-      rendererOwnedBytes: 1_000 + frameIndex,
-    })),
+    frames: Array.from({ length: run.warmupFrames + run.measuredFrames }, (_, frameIndex): SVOBenchmarkFrameObservation => {
+      const context = `octree:${run.quality}:smooth:${run.requestedMode}:running`;
+      return {
+        frameIndex,
+        sampledAtUnixMs: run.captureNotBeforeUnixMs + frameIndex,
+        resetToken: run.resetToken,
+        requestedMode: run.requestedMode,
+        effectiveMode: run.requestedMode,
+        fallbackReason: null,
+        performance: {
+          methodId: "octree",
+          context,
+          capturedAt_ms: frameIndex,
+          cpu: {
+            sampleId: run.sequenceIndex * 1_000 + frameIndex + 1,
+            domain: "cpu",
+            lane: "main-thread",
+            context,
+            capturedAt_ms: frameIndex,
+            total_ms: frameIndex,
+            phases: [{ id: "frame-control", label: "Frame control", duration_ms: frameIndex }],
+          },
+          presentation: {
+            sampleId: run.sequenceIndex * 1_000 + frameIndex + 1,
+            domain: "gpu",
+            lane: "presentation",
+            context,
+            capturedAt_ms: frameIndex,
+            total_ms: frameIndex / 10,
+            phases: [
+              { id: "dry-scene", label: "Dry scene", duration_ms: frameIndex / 20 },
+              { id: "present", label: "Present", duration_ms: frameIndex / 20 },
+            ],
+          },
+        },
+        rendererOwnedBytes: 1_000 + frameIndex,
+      };
+    }),
   }));
   return { schemaVersion: SVO_BENCHMARK_SCHEMA_VERSION, runs };
 }
@@ -102,22 +123,20 @@ test("aggregation excludes warmups and retains p50/p95/max plus every raw frame"
   const plan = benchmarkPlan(1);
   const report = aggregateSVOBenchmarkObservations(plan, observationForPlan(plan), [baseline]);
   assert.equal(report.runs.length, 2);
-  assert.deepEqual(report.runs[0].cpuFrame_ms, { p50: 89.5, p95: 143.05, maximum: 149 });
-  assert.ok(Math.abs(report.runs[0].gpuRender_ms!.p50 - 8.95) < 1e-12);
-  assert.ok(Math.abs(report.runs[0].gpuDryScene_ms!.p95 - 7.1525) < 1e-12);
-  assert.equal(report.runs[0].gpuSvoTemporal_ms!.p95, 0);
-  assert.ok(report.runs[1].gpuSvoTemporal_ms!.p95 > 0);
+  assert.deepEqual(report.runs[0].cpuTotal_ms, { p50: 89.5, p95: 143.05, maximum: 149 });
+  assert.ok(Math.abs(report.runs[0].presentationTotal_ms!.p50 - 8.95) < 1e-12);
+  assert.ok(Math.abs(report.runs[0].dryScene_ms!.p95 - 7.1525) < 1e-12);
   assert.deepEqual(report.runs[0].rendererOwnedBytes, { p50: 1089.5, p95: 1143.05, maximum: 1149 });
   assert.equal(report.runs[0].rawFrames.length, 150);
-  assert.equal(report.runs[0].timestampQueriesAvailable, true);
+  assert.equal(report.runs[0].presentationTracesAvailable, true);
   assert.equal(report.runs[0].effectiveMode, "raster");
   assert.equal(report.runs[1].effectiveMode, "svo");
   assert.equal(report.pairs[0].equivalenceValidated, true);
-  assert.equal(report.pairs[0].gpuRenderP95RatioSvoToRaster, 1);
+  assert.equal(report.pairs[0].presentationTotalP95RatioSvoToRaster, 1);
   assert.equal(report.aggregates.length, 2);
   assert.deepEqual(report.aggregates.map(({ renderer }) => renderer), ["raster", "svo"]);
   assert.equal(report.aggregates[0].runIds.length, 1);
-  assert.deepEqual(report.aggregates[0].gpuRender_ms, report.runs[0].gpuRender_ms);
+  assert.deepEqual(report.aggregates[0].presentationTotal_ms, report.runs[0].presentationTotal_ms);
   assert.equal(report.aggregates[0].adapterId, "apple-m3-max-metal");
   assert.deepEqual(report.aggregates[0].adapter, adapter);
 });
@@ -156,55 +175,58 @@ test("revision, renderer fallback, and raster/SVO state inequivalence are reject
   }), [baseline]), /renderer-equivalence mismatch/);
 });
 
-test("timestamp unavailability is explicit, while mixed measured availability is invalid", () => {
+test("presentation-trace unavailability is explicit, while mixed measured availability is invalid", () => {
   const plan = benchmarkPlan(1);
   const original = observationForPlan(plan);
   const unavailable = {
     ...original.runs[0],
     frames: original.runs[0].frames.map((frame) => ({
       ...frame,
-      gpuRenderTimingAvailable: false,
-      renderTimingSampleId: null,
-      gpuRender_ms: null,
-      gpuDryScene_ms: null,
-      gpuSvoTemporal_ms: null,
+      performance: { ...frame.performance, presentation: undefined },
     })),
   };
   const report = aggregateSVOBenchmarkObservations(plan, replaceRun(original, 0, unavailable), [baseline]);
-  assert.equal(report.runs[0].timestampQueriesAvailable, false);
-  assert.equal(report.runs[0].gpuRender_ms, null);
-  assert.equal(report.runs[0].gpuDryScene_ms, null);
+  assert.equal(report.runs[0].presentationTracesAvailable, false);
+  assert.equal(report.runs[0].presentationTotal_ms, null);
+  assert.equal(report.runs[0].dryScene_ms, null);
 
   const mixedFrames = unavailable.frames.map((frame, index) => index === plan.runs[0].warmupFrames
-    ? { ...frame, gpuRenderTimingAvailable: true, renderTimingSampleId: 999_999, gpuRender_ms: 1, gpuDryScene_ms: .5, gpuSvoTemporal_ms: 0 }
+    ? { ...frame, performance: { ...frame.performance, presentation: original.runs[0].frames[index].performance.presentation } }
     : frame);
   assert.throws(() => aggregateSVOBenchmarkObservations(plan, replaceRun(original, 0, {
     ...unavailable, frames: mixedFrames,
-  }), [baseline]), /timestamp availability changed/);
+  }), [baseline]), /presentation trace availability changed/);
 });
 
-test("cached timing samples and mode-epoch drift are rejected", () => {
+test("cached presentation traces and performance-context drift are rejected", () => {
   const plan = benchmarkPlan(1);
   const original = observationForPlan(plan);
   const run = original.runs[0];
   assert.throws(() => aggregateSVOBenchmarkObservations(plan, replaceRun(original, 0, {
     ...run,
     frames: run.frames.map((frame, index) => index === 40
-      ? { ...frame, renderTimingSampleId: run.frames[39].renderTimingSampleId }
+      ? { ...frame, performance: {
+        ...frame.performance,
+        presentation: { ...frame.performance.presentation!, sampleId: run.frames[39].performance.presentation!.sampleId },
+      } }
       : frame),
-  }), [baseline]), /repeats a cached timestamp sample/);
+  }), [baseline]), /repeats a cached presentation trace/);
   assert.throws(() => aggregateSVOBenchmarkObservations(plan, replaceRun(original, 0, {
     ...run,
     frames: run.frames.map((frame, index) => index === 40
-      ? { ...frame, renderTimingEpoch: frame.renderTimingEpoch + 1 }
+      ? { ...frame, performance: { ...frame.performance, context: `${frame.performance.context}:changed` } }
       : frame),
-  }), [baseline]), /timing mode\/epoch changed/);
+  }), [baseline]), /performance context changed/);
 });
 
-test("GPU traversal benchmark retains an opt-in isolated Morton-decode comparison", () => {
+test("GPU traversal benchmark compares the clean expansion cutover and retains isolated Morton decode", () => {
   const source = readFileSync(new URL("../tools/benchmark-svo-traversal-gpu.ts", import.meta.url), "utf8");
-  assert.match(source, /FLUID_SVO_TRAVERSAL_COMPARISON \?\? "parent-bounds"/,
-    "the historical parent-bounds comparison must remain the default");
+  assert.match(source, /FLUID_SVO_TRAVERSAL_COMPARISON \?\? "expansion"/,
+    "the current candidate-expansion implementation must be the default comparison");
+  assert.match(source, /comparison ".*" was retired:[^]*pre-carried-bounds traversal/,
+    "the benchmark must reject comparisons backed by deleted traversal implementations");
+  assert.match(source, /return expansionBaselineTraversalWGSL\(\)/,
+    "the default must isolate candidate expansion without restoring legacy traversal");
   assert.match(source, /comparison === "morton-decode"[\s\S]*mortonDecodeBaselineTraversalWGSL/,
     "the opt-in baseline must replace only the production Morton decoder");
   assert.match(source, /decodeSample < \$\{amplifiedMortonDecodesPerTraversal\}u[\s\S]*svoDecodeMorton\(keyLow, keyHigh, 21u\)/,
@@ -213,8 +235,8 @@ test("GPU traversal benchmark retains an opt-in isolated Morton-decode compariso
     "decoded coordinates must participate in the bit-equivalence result");
   assert.match(source, /phase: "svo-traversal-gpu-benchmark",\s*comparison,/,
     "machine-readable output must identify the selected comparison");
-  assert.match(source, /comparison === "carried-bounds"[\s\S]*carriedBoundsBaselineTraversalWGSL/,
-    "the traversal-heavy mode must compare the carried-bounds stack against identical decode-based traversal");
+  assert.doesNotMatch(source, /carriedBoundsBaselineTraversalWGSL|parentBoundsBaselineTraversalWGSL/,
+    "deleted traversal implementations must not survive as benchmark-only legacy code");
   assert.match(source, /FLUID_SVO_TRAVERSAL_FIXTURE \?\? "dense"/,
     "the historical dense fixture must remain the default while allowing a deep sparse chain");
   assert.match(source, /baselineStackEntryBytes:[\s\S]*optimizedStackEntryBytes:/,

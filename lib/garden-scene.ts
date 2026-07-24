@@ -68,6 +68,7 @@ export function applyGardenPool(source: SceneDescription, options: { fillFractio
   scene.container.width_m = GARDEN_CONTAINER.width_m;
   scene.container.height_m = GARDEN_CONTAINER.height_m;
   scene.container.depth_m = GARDEN_CONTAINER.depth_m;
+  scene.container.top = "open";
   // The garden is authored on a scene-level lattice. Fluid and dry lighting
   // variants share it; renderer quality no longer changes spatial identity.
   scene.voxelDomain = { finestCellSize_m: 0.025, brickSize_cells: 8 };

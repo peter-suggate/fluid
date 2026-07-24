@@ -114,7 +114,7 @@ test("query state preserves a full-volume paper-technique diagnostic", () => {
 
 test("query state preserves compact hierarchy and paper-technique diagnostic modes", () => {
   for (const mode of [
-    "resolution", "surface", "faces",
+    "resolution",
     "power-cells", "power-faces", "delaunay-tetrahedra", "transition-band", "power-operator",
     "octree-lifecycle", "fine-band-lifecycle", "operator-diagonal", "operator-rhs",
     "operator-reciprocity", "operator-open-fraction", "tetra-validity",
@@ -166,10 +166,46 @@ test("invalid external query values fall back to validated defaults", () => {
   assert.equal(parsed.ui.rightPanel, null);
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality, parsed.overrides[parsed.methodId] ?? {});
   assert.equal(parsed.scene.voxelDomain.finestCellSize_m, 0.05);
-  assert.equal(values.faceVelocityTransport, "on");
   assert.equal(values.globalFineLevelSetFactor, "4");
-  assert.equal(values.powerDiagramProjection, "authoritative");
-  assert.equal(values.leafSolver, "auto");
+});
+
+test("retired octree authority switches cannot re-enter through shared links", () => {
+  const parsed = parseQueryState(
+    "?param.octree.faceVelocityTransport=off"
+    + "&param.octree.powerDiagramProjection=axis"
+    + "&param.octree.leafSolver=jacobi"
+    + "&param.octree.globalFineLevelSetFactor=off"
+  );
+  assert.equal(parsed.overrides.octree, undefined);
+
+  const query = serializeQueryState(
+    "?param.octree.faceVelocityTransport=off"
+    + "&param.octree.powerDiagramProjection=axis"
+    + "&param.octree.leafSolver=jacobi"
+    + "&param.octree.globalFineLevelSetFactor=off",
+    { presetId: parsed.presetId, scene: parsed.scene },
+    { methodId: parsed.methodId, quality: parsed.quality, overrides: parsed.overrides },
+    parsed.ui,
+  );
+  const params = new URLSearchParams(query);
+  assert.equal(params.has("param.octree.faceVelocityTransport"), false);
+  assert.equal(params.has("param.octree.powerDiagramProjection"), false);
+  assert.equal(params.has("param.octree.leafSolver"), false);
+  assert.equal(params.has("param.octree.globalFineLevelSetFactor"), false);
+});
+
+test("retired sparse-surface overlay modes cannot re-enter through shared links", () => {
+  for (const mode of ["surface", "faces"]) {
+    const parsed = parseQueryState(`?grid=z&gridMode=${mode}`);
+    assert.equal(parsed.ui.gridOverlayMode, "structure");
+    const query = serializeQueryState(
+      `?grid=z&gridMode=${mode}`,
+      { presetId: parsed.presetId, scene: parsed.scene },
+      { methodId: parsed.methodId, quality: parsed.quality, overrides: parsed.overrides },
+      parsed.ui,
+    );
+    assert.equal(new URLSearchParams(query).has("gridMode"), false);
+  }
 });
 
 test("background is fixed by the scene and legacy environment overrides are removed", () => {
@@ -300,6 +336,25 @@ test("viewport utility panels round-trip through one mutually exclusive query st
   assert.equal(parseQueryState(query).ui.rightPanel, "visual");
 });
 
+test("diagnostics uses the same sole panel query authority as every other sidebar", () => {
+  const initialUI = useUIStore.getInitialState();
+  const query = serializeQueryState("?diagnostics=1&performance=1", {
+    presetId: "water-box-dam-break",
+    scene: getScenePreset("water-box-dam-break").create()
+  }, {
+    methodId: "octree",
+    quality: "balanced",
+    overrides: {}
+  }, { ...initialUI, rightPanel: "diagnostics", diagnosticsOpen: true });
+
+  const params = new URLSearchParams(query);
+  assert.equal(params.get("panel"), "diagnostics");
+  assert.equal(params.has("diagnostics"), false);
+  assert.equal(params.has("performance"), false);
+  assert.equal(parseQueryState(query).ui.rightPanel, "diagnostics");
+  assert.equal(parseQueryState(query).ui.diagnosticsOpen, true);
+});
+
 test("right panel width round-trips through the query state", () => {
   const parsed = parseQueryState("?panel=bodies&panelWidth=734");
   assert.equal(parsed.ui.rightPanel, "bodies");
@@ -318,11 +373,12 @@ test("right panel width round-trips through the query state", () => {
   assert.equal(parseQueryState("?panelWidth=2000").ui.rightPanelWidth, 620);
 });
 
-test("legacy performance query links open the performance sidebar and canonicalize", () => {
-  const parsed = parseQueryState("?performance=1");
-  assert.equal(parsed.ui.rightPanel, "performance");
+test("retired sidebar switches are ignored and removed from canonical links", () => {
+  const parsed = parseQueryState("?performance=1&diagnostics=1&waterdiag=1");
+  assert.equal(parsed.ui.rightPanel, null);
+  assert.equal(parsed.ui.diagnosticsOpen, false);
 
-  const query = serializeQueryState("?performance=1", {
+  const query = serializeQueryState("?performance=1&diagnostics=1&waterdiag=1", {
     presetId: parsed.presetId,
     scene: parsed.scene
   }, {
@@ -331,6 +387,8 @@ test("legacy performance query links open the performance sidebar and canonicali
     overrides: parsed.overrides
   }, parsed.ui);
   const params = new URLSearchParams(query);
-  assert.equal(params.get("panel"), "performance");
+  assert.equal(params.has("panel"), false);
   assert.equal(params.has("performance"), false);
+  assert.equal(params.has("diagnostics"), false);
+  assert.equal(params.has("waterdiag"), false);
 });

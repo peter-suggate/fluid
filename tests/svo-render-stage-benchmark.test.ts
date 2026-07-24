@@ -20,7 +20,7 @@ test("render-stage plan rotates fixed-resolution shadow and temporal isolation v
   assert.match(plan.runs[0].url, /svoShadows=1/);
   assert.match(plan.runs[0].url, /svoAO=1/);
   assert.match(plan.runs[0].url, /svoTemporal=1/);
-  assert.equal(plan.runs[2].expectedTimingContextFragment, "shadow-off:ao-off:temporal-off:lighting-cone:smooth:svo");
+  assert.equal(plan.runs[2].expectedPerformanceContextFragment, "shadow-off:ao-off:temporal-off:lighting-cone:smooth:svo");
   assert.match(plan.captureInstructions[0], /1280x720/);
 });
 

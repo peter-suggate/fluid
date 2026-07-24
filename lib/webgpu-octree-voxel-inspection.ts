@@ -6,9 +6,10 @@ import {
   type SparseVoxelRenderSource,
 } from "./webgpu-voxel-debug";
 import { VOXEL_MATERIAL_IDS, packVoxelDebugMaterialTable } from "./voxel-scene";
+import { PassBroker } from "./webgpu-pass-broker";
 
 /**
- * Expanded inspection records for the page-native octree path.
+ * Expanded inspection records for the compact octree path.
  *
  * This is deliberately lazy and debug-only. The simulation remains compact:
  * one 48-byte record is allocated per compact leaf only after Raw voxels or
@@ -160,11 +161,12 @@ export class CompactOctreeVoxelInspection {
 
   encode(encoder: GPUCommandEncoder): void {
     if (this.destroyed || !this.publication.enabled) return;
-    const pass = encoder.beginComputePass({ label: "Publish compact octree voxel inspection" });
+    const broker = new PassBroker(encoder);
+    const pass = broker.compute({ label: "Publish compact octree voxel inspection" });
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.dispatchWorkgroups(Math.ceil(this.rowCapacity / 64));
-    pass.end();
+    broker.fence("compact octree voxel inspection publication complete");
     this.publication.markEncoded();
   }
 

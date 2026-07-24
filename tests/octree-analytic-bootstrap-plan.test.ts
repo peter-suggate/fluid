@@ -16,7 +16,6 @@ const tank: OctreeAnalyticBootstrapInput = {
   initialCondition: "tank-fill",
   fillFraction: 0.22,
   interfaceBandCells: 4,
-  surfaceDetailStrength: 0,
 };
 
 test("tank-fill bootstrap is a bounded slab plus the exact grading tile ring", () => {
@@ -62,6 +61,8 @@ test("every missing tile is analytically proven non-negative while deep liquid k
     publishedCoarseAuthority: "positive-air",
   });
   assert.ok(sampleOctreeAnalyticBootstrapPhi(input, [-50, 20, -50]) < 0, "deep reservoir sign must remain negative");
+  assert.ok(sampleOctreeAnalyticBootstrapPhi(input, [-63.5, 20, -63.5]) < -1,
+    "closed-wall contact must extend liquid phi instead of inventing a free surface");
   const active = new Set(plan.activeTileIndices);
   for (let z = 0; z < plan.tileDimensions[2]; z += 1) for (let y = 0; y < plan.tileDimensions[1]; y += 1) {
     for (let x = 0; x < plan.tileDimensions[0]; x += 1) {
@@ -77,17 +78,6 @@ test("every missing tile is analytically proven non-negative while deep liquid k
   }
 });
 
-test("surface-detail support widens before the independent grading dilation", () => {
-  const baseline = planOctreeAnalyticBootstrap({ ...tank, dimensions: [128, 128, 128], containerSize: [128, 128, 128], fillFraction: 0.3 });
-  const detailed = planOctreeAnalyticBootstrap({
-    ...tank, dimensions: [128, 128, 128], containerSize: [128, 128, 128], fillFraction: 0.3, surfaceDetailStrength: 1,
-  });
-  assert.equal(baseline.interfaceSupportCells, 4);
-  assert.equal(detailed.interfaceSupportCells, 12);
-  assert.ok(detailed.interfaceTileCount > baseline.interfaceTileCount);
-  assert.ok(detailed.activeTileCount > baseline.activeTileCount);
-});
-
 test("constant-time bounds exactly match the enumerated oracle across analytic configurations", () => {
   const grids = [
     { dimensions: [60, 45, 40], containerSize: [1.2, 0.9, 0.8] },
@@ -95,8 +85,8 @@ test("constant-time bounds exactly match the enumerated oracle across analytic c
   ] as const;
   for (const grid of grids) for (const initialCondition of ["dam-break", "tank-fill"] as const) {
     for (const fillFraction of [0, 0.1, 0.22, 0.5, 1]) for (const interfaceBandCells of [0, 1, 4, 12]) {
-      for (const tileSizeCells of [8, 16, 32]) for (const surfaceDetailStrength of [0, 0.35, 1]) {
-        const input = { ...grid, initialCondition, fillFraction, interfaceBandCells, tileSizeCells, surfaceDetailStrength };
+      for (const tileSizeCells of [8, 16, 32]) {
+        const input = { ...grid, initialCondition, fillFraction, interfaceBandCells, tileSizeCells };
         const compact = planOctreeAnalyticBootstrapBounds(input);
         const oracle = planOctreeAnalyticBootstrap(input);
         assert.deepEqual(compact.activeTileLimits, oracle.activeTileLimits);
@@ -128,6 +118,25 @@ test("zero-width interfaces remain discoverable and full/empty signs are explici
   assert.equal(sampleOctreeAnalyticBootstrapPhi({ ...tank, fillFraction: 0 }, [0, 0.2, 0]), 0.2);
 });
 
+test("dam phi has only the three exposed faces", () => {
+  const input = { ...tank, initialCondition: "dam-break" as const, fillFraction: 0.22 };
+  const plan = planOctreeAnalyticBootstrapBounds(input);
+  const maximum = [
+    -0.5 * input.containerSize[0] + plan.damBreak.width * input.containerSize[0],
+    plan.damBreak.height * input.containerSize[1],
+    -0.5 * input.containerSize[2] + plan.damBreak.depth * input.containerSize[2],
+  ] as const;
+  assert.ok(sampleOctreeAnalyticBootstrapPhi(input,
+    [-0.5 * input.containerSize[0], 0.1, -0.5 * input.containerSize[2]]) < 0,
+  "the three tank-contact planes are closed-wall extensions");
+  for (let axis = 0; axis < 3; axis += 1) {
+    const point = [...maximum] as [number, number, number];
+    point[axis] += 0.01;
+    assert.ok(sampleOctreeAnalyticBootstrapPhi(input, point) > 0,
+      `exposed dam face ${axis} must retain positive air`);
+  }
+});
+
 test("planner rejects values that cannot form a bounded WebGPU worklist", () => {
   assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, dimensions: [0, 45, 40] }), /dimensions/);
   assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, containerSize: [1.2, Number.NaN, 0.8] }), /container size/);
@@ -135,5 +144,4 @@ test("planner rejects values that cannot form a bounded WebGPU worklist", () => 
   assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, fillFraction: 1.1 }), /fill fraction/);
   assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, interfaceBandCells: -1 }), /interface band/);
   assert.throws(() => planOctreeAnalyticBootstrapBounds({ ...tank, containerSize: [Number.MAX_VALUE, 0.9, 0.8], interfaceBandCells: Number.MAX_VALUE }), /support/);
-  assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, surfaceDetailStrength: 2 }), /surface detail/);
 });

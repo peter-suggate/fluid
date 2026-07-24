@@ -51,8 +51,7 @@ test("Dawn performance reproduction reaches the UI's evolved third profiler samp
   assert.match(command, /FLUID_WEBGPU_DAWN_FEATURES=skip_validation/,
     "performance calibration must use release-like Dawn command processing; correctness gates retain validation");
   assert.match(command, /FLUID_PERFORMANCE_PROFILE=1/);
-  assert.match(command, /FLUID_PERFORMANCE_READBACKS=1/);
-  assert.doesNotMatch(command, /FLUID_DISABLE_TIMESTAMPS=1/);
+  assert.doesNotMatch(command, /FLUID_PERFORMANCE_READBACKS/);
   assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
 });
 
@@ -75,10 +74,9 @@ test("exact UI Dawn reproduction has a profiler-free warm-throughput lane", () =
     assert.match(command, /FLUID_PERFORMANCE_PROFILE=1/);
     assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
   }
-  assert.match(profiler, /FLUID_PERFORMANCE_READBACKS=1/);
-  assert.match(throughput, /FLUID_PERFORMANCE_READBACKS=0/);
+  assert.doesNotMatch(profiler, /FLUID_PERFORMANCE_READBACKS/);
+  assert.doesNotMatch(throughput, /FLUID_PERFORMANCE_READBACKS/);
   assert.match(throughput, /FLUID_GPU_COMMAND_AUDIT=1/);
-  assert.match(throughput, /FLUID_DISABLE_TIMESTAMPS=0/);
 });
 
 test("minimal power dam has separate timestamp-enabled profiler and warm-throughput Dawn contracts", () => {
@@ -96,13 +94,11 @@ test("minimal power dam has separate timestamp-enabled profiler and warm-through
     assert.match(command, /FLUID_EXPECT_GRID=16,16,16/);
     assert.match(command, /FLUID_WEBGPU_ADAPTER='Apple M1 Max'/);
     assert.match(command, /FLUID_WEBGPU_DAWN_FEATURES=skip_validation/);
-    assert.match(command, /FLUID_DISABLE_TIMESTAMPS=0/,
-      "this contract matches an explicit ?gpuTimestamps=1 browser session");
     assert.match(command, /FLUID_GPU_COMMAND_AUDIT=1/);
     assert.doesNotMatch(command, /FLUID_CHECKPOINT_EVERY_S|FLUID_POWER_GENERATION_AUDIT|FLUID_RASTER_CHECKPOINTS=1/);
   }
-  assert.match(profiler, /FLUID_PERFORMANCE_READBACKS=1/);
-  assert.match(throughput, /FLUID_PERFORMANCE_READBACKS=0/);
+  assert.doesNotMatch(profiler, /FLUID_PERFORMANCE_READBACKS/);
+  assert.doesNotMatch(throughput, /FLUID_PERFORMANCE_READBACKS/);
 });
 
 test("single-tall-cell differential separates the probe stencil from the far field", () => {

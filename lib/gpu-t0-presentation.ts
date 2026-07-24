@@ -1,4 +1,4 @@
-import type { AdaptiveWaterRenderDiagnostics } from "./webgpu-water-pipeline";
+import type { WaterRenderDiagnostics } from "./webgpu-water-pipeline";
 
 export type InitialRasterSurfaceState =
   | "pending"
@@ -9,17 +9,13 @@ export type InitialRasterSurfaceState =
 export interface InitialRasterPresentationPrerequisites {
   readonly solverAttached: boolean;
   readonly initialSparseAuthorityReady: boolean;
-  /** The paper surface path requires a global-fine source. Coarse-only octree
-   * mode intentionally has no such allocation and publishes its adaptive
-   * coarse surface directly instead. */
-  readonly globalFineRequired?: boolean;
   readonly globalFineAttached: boolean;
-  readonly adaptiveSurfaceAttached: boolean;
+  readonly surfaceSourceAttached: boolean;
   readonly surfaceExtractionSubmitted: boolean;
   readonly presentationFenceCompleted: boolean;
   /** Normal diagnostics observes the bounded draw-argument readback. Safe mode does not. */
   readonly diagnosticsRequired: boolean;
-  readonly diagnostics?: AdaptiveWaterRenderDiagnostics;
+  readonly diagnostics?: WaterRenderDiagnostics;
 }
 
 export interface InitialRasterPresentationReadiness {
@@ -39,32 +35,28 @@ export function requiresFencedInitialRasterPresentation(methodId: string): boole
 /**
  * CPU mirror of the paused t=0 presentation gate. Without an opt-in readback,
  * completion relies on the renderer's GPU-only draw-argument transaction. The
- * paper path requires the global crossing latch; coarse-only mode deliberately
- * has no global-fine allocation and accepts a non-empty adaptive coarse mesh.
+ * The paper path requires the global crossing latch. The retired coarse-only
+ * presentation branch has no backing solver authority.
  */
 export function initialRasterPresentationReadiness(
   input: InitialRasterPresentationPrerequisites,
 ): InitialRasterPresentationReadiness {
   if (!input.solverAttached) return { ready: false, state: "pending", label: "Waiting for warmed solver attachment" };
   if (!input.initialSparseAuthorityReady) return { ready: false, state: "pending", label: "Waiting for fenced sparse authority" };
-  const globalFineRequired = input.globalFineRequired !== false;
-  if (globalFineRequired && !input.globalFineAttached) return { ready: false, state: "pending", label: "Waiting for global-fine renderer source" };
-  if (!input.adaptiveSurfaceAttached) return { ready: false, state: "pending", label: "Waiting for adaptive raster fallback source" };
+  if (!input.globalFineAttached) return { ready: false, state: "pending", label: "Waiting for global-fine renderer source" };
+  if (!input.surfaceSourceAttached) return { ready: false, state: "pending", label: "Waiting for global-fine raster source" };
   if (!input.surfaceExtractionSubmitted) return { ready: false, state: "pending", label: "Waiting for t=0 raster extraction submission" };
   if (!input.presentationFenceCompleted) return { ready: false, state: "pending", label: "Waiting for t=0 presentation fence" };
 
   const diagnostic = input.diagnostics;
   if (diagnostic) {
-    const currentCrossing = globalFineRequired
-      ? diagnostic.globalFineCrossingPublished && diagnostic.surfaceGeometrySource === "global-fine-coarse"
-      : diagnostic.surfaceGeometrySource === "adaptive-octree";
+    const currentCrossing = diagnostic.globalFineCrossingPublished
+      && diagnostic.surfaceGeometrySource === "global-fine-coarse";
     if (diagnostic.vertexCount > 0 && currentCrossing) {
       return {
         ready: true,
         state: "crossing-confirmed",
-        label: globalFineRequired
-          ? "WebGPU t=0 ready · global-fine/coarse raster crossing confirmed"
-          : "WebGPU t=0 ready · coarse-octree raster crossing confirmed",
+        label: "WebGPU t=0 ready · global-fine/coarse raster crossing confirmed",
       };
     }
     return {
@@ -80,8 +72,6 @@ export function initialRasterPresentationReadiness(
   return {
     ready: true,
     state: "gpu-authoritative",
-    label: globalFineRequired
-      ? "WebGPU t=0 ready · GPU raster publication fenced"
-      : "WebGPU t=0 ready · coarse-octree raster publication fenced",
+    label: "WebGPU t=0 ready · GPU raster publication fenced",
   };
 }

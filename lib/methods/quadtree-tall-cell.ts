@@ -69,7 +69,6 @@ export const quadtreeTallCellMethod: SimulationMethod = {
       polynomialDegree: typeof values.polynomialDegree === "number" ? values.polynomialDegree : 2,
       vofReconciliation: values.vofReconciliation !== "off" && values.vofReconciliation !== false,
       debrisCulling: values.debrisCulling === true,
-      debugPressureTimings: values.debugPressureTimings === true
     }
   }),
   createSolverAsync: (device, scene, quality, values, onRigidLoads, onProgress) => WebGPUUniformEulerianSolver.createAsync(device, scene, quality, onRigidLoads, {
@@ -96,7 +95,6 @@ export const quadtreeTallCellMethod: SimulationMethod = {
       polynomialDegree: typeof values.polynomialDegree === "number" ? values.polynomialDegree : 2,
       vofReconciliation: values.vofReconciliation !== "off" && values.vofReconciliation !== false,
       debrisCulling: values.debrisCulling === true,
-      debugPressureTimings: values.debugPressureTimings === true
     }
   }, (label, completed, total) => onProgress({ phase: label.startsWith("Building adaptive") ? "adaptive-topology" : "solver-pipelines", label, completed, total }))
 };

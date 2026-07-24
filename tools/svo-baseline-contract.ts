@@ -1,4 +1,4 @@
-import type { PerformanceSnapshot } from "../lib/stores/diagnostics-store";
+import type { PerformanceReport } from "../lib/stores/diagnostics-store";
 import {
   SVO_BASELINE_CASES,
   canonicalSVOBaselineCase,
@@ -145,10 +145,10 @@ export interface SVOBaselineAdapterObservation {
 export interface SVOBaselineTimingSummary {
   readonly warmupFrames: number;
   readonly measuredFrames: number;
-  readonly timestampQueriesAvailable: boolean;
-  readonly gpuRender_ms: Readonly<{ minimum: number; median: number; p95: number; maximum: number }> | null;
-  readonly gpuDryScene_ms: Readonly<{ minimum: number; median: number; p95: number; maximum: number }> | null;
-  readonly cpuFrame_ms: Readonly<{ minimum: number; median: number; p95: number; maximum: number }>;
+  readonly presentationTracesAvailable: boolean;
+  readonly presentationTotal_ms: Readonly<{ minimum: number; median: number; p95: number; maximum: number }> | null;
+  readonly dryScene_ms: Readonly<{ minimum: number; median: number; p95: number; maximum: number }> | null;
+  readonly cpuTotal_ms: Readonly<{ minimum: number; median: number; p95: number; maximum: number }>;
 }
 
 export interface SVOBaselineCaptureJob {
@@ -200,21 +200,22 @@ function distribution(values: readonly number[]) {
 }
 
 export function summarizeSVOBaselineTimings(
-  samples: readonly Pick<PerformanceSnapshot, "cpuFrame_ms" | "gpuRender_ms" | "gpuDryScene_ms" | "gpuRenderTimingAvailable">[],
+  samples: readonly PerformanceReport[],
   warmupFrames: number = SVO_BASELINE_TOLERANCES.performance.warmupFrames,
 ): SVOBaselineTimingSummary {
   if (!Number.isInteger(warmupFrames) || warmupFrames < 0 || samples.length <= warmupFrames) {
     throw new RangeError("Timing samples must extend beyond a non-negative integer warmup");
   }
   const measured = samples.slice(warmupFrames);
-  const timestampQueriesAvailable = measured.every((sample) => sample.gpuRenderTimingAvailable);
+  const presentationTracesAvailable = measured.every((sample) => sample.presentation !== undefined);
   return Object.freeze({
     warmupFrames,
     measuredFrames: measured.length,
-    timestampQueriesAvailable,
-    gpuRender_ms: timestampQueriesAvailable ? distribution(measured.map((sample) => sample.gpuRender_ms)) : null,
-    gpuDryScene_ms: timestampQueriesAvailable ? distribution(measured.map((sample) => sample.gpuDryScene_ms)) : null,
-    cpuFrame_ms: distribution(measured.map((sample) => sample.cpuFrame_ms)),
+    presentationTracesAvailable,
+    presentationTotal_ms: presentationTracesAvailable ? distribution(measured.map((sample) => sample.presentation!.total_ms)) : null,
+    dryScene_ms: presentationTracesAvailable ? distribution(measured.map((sample) =>
+      sample.presentation!.phases.find((phase) => phase.id === "dry-scene")?.duration_ms ?? 0)) : null,
+    cpuTotal_ms: distribution(measured.map((sample) => sample.cpu?.total_ms ?? 0)),
   });
 }
 

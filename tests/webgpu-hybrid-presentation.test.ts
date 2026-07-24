@@ -19,8 +19,8 @@ test("octree smooth presentation keeps analytic solids and glass", () => {
     "the tank glass path must be selected from scene semantics, not representation mode");
   assert.doesNotMatch(rendererSource, /voxelSceneActive|voxelScenePipeline|Compiling voxel scene materials/,
     "smooth presentation must not instantiate or encode sparse voxel cubes as production solids");
-  assert.match(rendererSource, /readyGPUFluid\.initialSparseAuthorityReady[^]*adaptiveWaterReady !== this\.adaptiveWaterAttached/,
-    "t=0 must attach compact pages only after the complete initial sparse-authority fence");
+  assert.match(rendererSource, /readyGPUFluid\.initialSparseAuthorityReady[^]*globalFineWaterReady !== this\.globalFineWaterAttached/,
+    "t=0 must attach global-fine geometry only after the complete initial sparse-authority fence");
   assert.doesNotMatch(rendererSource, /\(gpuInfo\?\.encodedSteps \?\? 0\) > 0/,
     "a completed physics step must not be used as a proxy for the warmed t=0 authority");
 });
@@ -39,11 +39,11 @@ test("raw voxel and brick-grid inspection retain the GPU sparse source", () => {
   assert.deepEqual(OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.map(({ id }) => id), [
     "cold-topology", "power-operator-authority", "surface-global-fine",
     "section5-face-band-topology", "section5-face-band-transitions",
-    "section5-face-band-fast-march", "section5-face-band-power-publication",
+    "section5-face-band-closest-point", "section5-face-band-power-publication",
     "sparse-render-world",
-  ], "t=0 must publish compact topology, coarse power phi, fine pages, transition face band, and indexed narrow-band authority in dependency order");
+  ], "t=0 must publish compact topology, coarse power phi, global fine, transition face band, and indexed narrow-band authority in dependency order");
   assert.match(octreeProjectionSource,
-    /case "cold-topology": this\.encodeColdBootstrapRebuild\(encoder\)[\s\S]*case "power-operator-authority": this\.encode\(encoder[\s\S]*case "surface-global-fine": this\.encodeSurface\(encoder, 0\)[\s\S]*case "section5-face-band-topology": this\.encodeGlobalFineFaceBandPhase\(encoder, "topology-build"\)[\s\S]*case "section5-face-band-power-publication": this\.encodeGlobalFineFaceBandPhase\(encoder, "power-publication"\)[\s\S]*case "sparse-render-world": this\.encodeSparseBrickWorld\(encoder\)/,
+    /case "cold-topology": this\.encodeColdBootstrapRebuild\(encoder\)[\s\S]*case "power-operator-authority": this\.encode\(\s*encoder[\s\S]*case "surface-global-fine": this\.encodeSurface\(encoder, 0\)[\s\S]*case "section5-face-band-topology":[\s\S]*this\.encodeGlobalFineFaceBandPhase\(broker, "topology-build"\)[\s\S]*case "section5-face-band-power-publication":[\s\S]*this\.encodeGlobalFineFaceBandPhase\(broker, "power-publication"\)[\s\S]*case "sparse-render-world": this\.encodeSparseBrickWorld\(encoder\)/,
     "each ordered checkpoint must dispatch its corresponding sparse-authority stage");
   assert.doesNotMatch(rendererSource, /mode: "smooth", colorTarget/,
     "the renderer must never send smooth mode through the cube inspection pipeline");

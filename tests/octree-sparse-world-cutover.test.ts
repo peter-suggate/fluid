@@ -6,17 +6,22 @@ import { fileURLToPath } from "node:url";
 import { octreeSparseWorldRequired } from "../lib/webgpu-octree";
 
 const source = readFileSync(fileURLToPath(new URL("../lib/webgpu-octree.ts", import.meta.url)), "utf8");
+const sparseWorldSource = readFileSync(
+  fileURLToPath(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url)),
+  "utf8",
+);
+const staticSvoSource = readFileSync(
+  fileURLToPath(new URL("../lib/webgpu-static-svo-scene.ts", import.meta.url)),
+  "utf8",
+);
 
 test("body-free direct-page authority omits the compatibility sparse world", () => {
-  assert.equal(octreeSparseWorldRequired(true, true, false, 0), false);
-  assert.equal(octreeSparseWorldRequired(false, true, false, 0), true, "dense topology still needs bootstrap publication");
-  assert.equal(octreeSparseWorldRequired(true, false, false, 0), true, "no page authority keeps compatibility");
-  assert.equal(octreeSparseWorldRequired(true, true, true, 0), true, "terrain remains unsupported");
-  assert.equal(octreeSparseWorldRequired(true, true, false, 1), true, "body scenes remain unsupported");
-  assert.equal(octreeSparseWorldRequired(true, true, false, 0, true), true, "raw/compatibility mode is explicit");
+  assert.equal(octreeSparseWorldRequired(false, 0), false);
+  assert.equal(octreeSparseWorldRequired(true, 0), true, "terrain requires sparse solid/world support");
+  assert.equal(octreeSparseWorldRequired(false, 1), true, "body scenes require sparse solid/world support");
 });
 
-test("worldless allocation owns one scheduler and exposes page-native inspection instead of a stale renderer source", () => {
+test("worldless allocation owns one scheduler and exposes compact inspection instead of a stale renderer source", () => {
   assert.match(source, /if \(allocateSparseWorld\) this\.sparseBrickWorld = new OctreeSparseBrickWorld/);
   assert.match(source, /this\.topologyResidency = this\.sparseBrickWorld\?\.topologyResidency \?\? new GPUFluidBrickResidency/);
   assert.match(source, /\(this\.sparseBrickWorld\?\.allocatedBytes \?\? this\.topologyResidency\.allocatedBytes\)/);
@@ -27,6 +32,16 @@ test("worldless allocation owns one scheduler and exposes page-native inspection
 });
 
 test("post-bootstrap topology scheduling comes directly from adaptive candidates", () => {
-  assert.match(source, /this\.topologyResidency\.encodeSurfaceCandidates\([\s\S]*source\.leaves, source\.candidates\.candidates, source\.candidates\.countAndDispatch/);
+  assert.match(source, /this\.topologyResidency\.encodeFineSeedCandidates\([\s\S]*source\.leaves, source\.candidates\.candidates, source\.candidates\.countAndDispatch/);
   assert.match(source, /if \(!this\.sparseBrickWorld\) \{[\s\S]*this\.topologyResidency\.encode\(encoder, this\.levelSetTexture/);
+});
+
+test("deep-liquid residency is explicit and the retired dense atlas cannot be selected", () => {
+  assert.match(source, /bulkResidency: true/);
+  assert.match(sparseWorldSource, /bulkResidency\?: boolean/);
+  assert.match(sparseWorldSource, /if \(options\.bulkResidency\)/);
+  assert.doesNotMatch(source + sparseWorldSource + staticSvoSource,
+    /brickAtlas|bulkResidencyOnly|WebGPUFluidBrickAtlas|atlasSamplingSource|readAtlasStats/);
+  assert.match(staticSvoSource, /brickPreActivation: false/,
+    "static SVO publication retains its non-advecting residency behavior");
 });

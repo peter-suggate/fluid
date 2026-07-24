@@ -17,7 +17,6 @@ export interface OctreeAnalyticBootstrapInput {
   readonly initialCondition: OctreeAnalyticBootstrapCondition;
   readonly fillFraction: number;
   readonly interfaceBandCells: number;
-  readonly surfaceDetailStrength?: number;
 }
 
 export interface OctreeAnalyticBootstrapTileLimits {
@@ -95,10 +94,6 @@ function validateInput(input: OctreeAnalyticBootstrapInput): void {
   if (!Number.isFinite(input.interfaceBandCells) || input.interfaceBandCells < 0) {
     throw new RangeError("Analytic bootstrap interface band must be finite and non-negative");
   }
-  const detail = input.surfaceDetailStrength ?? 0;
-  if (!Number.isFinite(detail) || detail < 0 || detail > 1) {
-    throw new RangeError("Analytic bootstrap surface detail strength must be in [0, 1]");
-  }
 }
 
 function intersects(a: Bounds3, b: Bounds3, inclusive = false): boolean {
@@ -108,10 +103,6 @@ function intersects(a: Bounds3, b: Bounds3, inclusive = false): boolean {
     } else if (a.maximum[axis] <= b.minimum[axis] || a.minimum[axis] >= b.maximum[axis]) return false;
   }
   return true;
-}
-
-function containedIn(a: Bounds3, b: Bounds3): boolean {
-  return [0, 1, 2].every((axis) => a.minimum[axis] >= b.minimum[axis] && a.maximum[axis] <= b.maximum[axis]);
 }
 
 function tileBoundsWorld(
@@ -140,19 +131,6 @@ function analyticBounds(input: OctreeAnalyticBootstrapInput, damBreak: DamBreakF
       -0.5 * depth + damBreak.depth * depth,
     ],
   };
-}
-
-function expanded(bounds: Bounds3, radius: number): Bounds3 {
-  return {
-    minimum: bounds.minimum.map((value) => value - radius) as unknown as OctreeAnalyticBootstrapVec3,
-    maximum: bounds.maximum.map((value) => value + radius) as unknown as OctreeAnalyticBootstrapVec3,
-  };
-}
-
-function contracted(bounds: Bounds3, radius: number): Bounds3 | undefined {
-  const minimum = bounds.minimum.map((value) => value + radius) as unknown as OctreeAnalyticBootstrapVec3;
-  const maximum = bounds.maximum.map((value) => value - radius) as unknown as OctreeAnalyticBootstrapVec3;
-  return [0, 1, 2].every((axis) => minimum[axis] < maximum[axis]) ? { minimum, maximum } : undefined;
 }
 
 function flatten(tile: OctreeAnalyticBootstrapVec3, tileDimensions: OctreeAnalyticBootstrapVec3): number {
@@ -202,8 +180,7 @@ export function planOctreeAnalyticBootstrapBounds(
   if (!Number.isSafeInteger(tileCapacity) || tileCapacity > UINT32_MAX) {
     throw new RangeError("Analytic bootstrap tile capacity must fit a WebGPU uint");
   }
-  const detail = input.surfaceDetailStrength ?? 0;
-  const interfaceSupportCells = input.interfaceBandCells + 8 * detail;
+  const interfaceSupportCells = input.interfaceBandCells;
   // The sparse worklist is a conservative outer bound for the anisotropic
   // signed-distance classifier. Using the widest physical cell prevents an
   // axis with larger h from escaping a band expressed in finest-grid cells.
@@ -257,7 +234,12 @@ export function planOctreeAnalyticBootstrapBounds(
   };
 }
 
-/** Signed distance used until the first coarse analytic rows are published. */
+/**
+ * Signed distance used until the first coarse analytic rows are published.
+ * The reservoir is anchored to three closed tank walls. Those contact planes
+ * are not free surface, so the liquid extends through the wall for level-set
+ * purposes and only the three exposed upper faces contribute to phi.
+ */
 export function sampleOctreeAnalyticBootstrapPhi(
   input: Pick<OctreeAnalyticBootstrapInput, "containerSize" | "initialCondition" | "fillFraction">,
   point: OctreeAnalyticBootstrapVec3,
@@ -268,9 +250,7 @@ export function sampleOctreeAnalyticBootstrapPhi(
     ...input,
     dimensions: [1, 1, 1], tileSizeCells: 1, interfaceBandCells: 0,
   }, damBreak);
-  const center = bounds.minimum.map((value, axis) => 0.5 * (value + bounds.maximum[axis]));
-  const half = bounds.minimum.map((value, axis) => 0.5 * (bounds.maximum[axis] - value));
-  const q = point.map((value, axis) => Math.abs(value - center[axis]) - half[axis]);
+  const q = point.map((value, axis) => value - bounds.maximum[axis]);
   return Math.hypot(Math.max(q[0], 0), Math.max(q[1], 0), Math.max(q[2], 0))
     + Math.min(Math.max(q[0], q[1], q[2]), 0);
 }
@@ -288,8 +268,6 @@ export function planOctreeAnalyticBootstrap(input: OctreeAnalyticBootstrapInput)
   const boundsPlan = planOctreeAnalyticBootstrapBounds(input);
   const { cellSize, tileDimensions, damBreak, interfaceSupportWorld } = boundsPlan;
   const liquid = analyticBounds(input, damBreak);
-  const outer = expanded(liquid, interfaceSupportWorld);
-  const inner = contracted(liquid, interfaceSupportWorld);
   const liquidIndices: number[] = [], interfaceIndices: number[] = [];
 
   for (let z = 0; z < tileDimensions[2]; z += 1) for (let y = 0; y < tileDimensions[1]; y += 1) {
@@ -301,13 +279,16 @@ export function planOctreeAnalyticBootstrap(input: OctreeAnalyticBootstrapInput)
       if (intersects(bounds, liquid)) liquidIndices.push(flatten(tile, tileDimensions));
       // Tank phi is a plane rather than the SDF of its wall-bounded liquid
       // slab. Only the horizontal free surface belongs to its interface shell.
-      // Dam phi is the authored box SDF; its L-infinity shell is a conservative
-      // superset of |boxSdf| <= radius. Inclusive contact also keeps a
-      // zero-width interface discoverable.
+      // Dam phi is the SDF of the three exposed upper faces; its three
+      // wall-contact planes extend negatively through the closed container.
+      // This conservative shell therefore approaches only the upper extent.
       const interfaceTile = input.initialCondition === "tank-fill"
         ? bounds.minimum[1] <= liquid.maximum[1] + interfaceSupportWorld
           && bounds.maximum[1] >= liquid.maximum[1] - interfaceSupportWorld
-        : intersects(bounds, outer, true) && (!inner || !containedIn(bounds, inner));
+        : intersects(bounds, { minimum: liquid.minimum,
+          maximum: liquid.maximum.map((value) => value + interfaceSupportWorld) as unknown as OctreeAnalyticBootstrapVec3 }, true)
+          && [0, 1, 2].some((axis) => bounds.minimum[axis] <= liquid.maximum[axis] + interfaceSupportWorld
+            && bounds.maximum[axis] >= liquid.maximum[axis] - interfaceSupportWorld);
       if (interfaceTile) {
         interfaceIndices.push(flatten(tile, tileDimensions));
       }

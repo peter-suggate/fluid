@@ -2,13 +2,6 @@
 
 import type { PowerVec3 } from "./octree-power-geometry";
 
-/** @deprecated Every graded same/coarser mask now has a strict acute catalog triangulation. */
-export const OCTREE_POWER_STRICTLY_OBTUSE_COARSE_MASKS: readonly number[] = Object.freeze([]);
-
-export function octreePowerCoarseMaskNeedsAcuteRepair(mask: number): boolean {
-  return false;
-}
-
 export interface OctreeTopologyLeaf {
   readonly key: string;
   readonly origin: PowerVec3;
@@ -41,9 +34,6 @@ export interface OctreePowerTopologyAudit {
   readonly sameOrFinerLeaves: number;
   readonly sameOrCoarserLeaves: number;
   readonly mixedFinerAndCoarserLeaves: number;
-  readonly strictlyObtuseSameOrCoarserLeaves: number;
-  /** Coarse face leaves that must split to satisfy the Section 5 simplex gate. */
-  readonly acuteRepairCoarseLeaves: readonly string[];
   readonly maximumFaceNeighborLevelDifference: number;
   readonly maximumEdgeNeighborLevelDifference: number;
   readonly countsBySize: Readonly<Record<string, number>>;
@@ -145,8 +135,6 @@ export function auditOctreePowerTopology(input: readonly OctreeTopologyLeaf[]): 
     sameOrFinerLeaves: leafAudit.filter((leaf) => leaf.gradingCase === "same-finer" || leaf.gradingCase === "same-only").length,
     sameOrCoarserLeaves: leafAudit.filter((leaf) => leaf.gradingCase === "same-coarser" || leaf.gradingCase === "same-only").length,
     mixedFinerAndCoarserLeaves,
-    strictlyObtuseSameOrCoarserLeaves: 0,
-    acuteRepairCoarseLeaves: [],
     maximumFaceNeighborLevelDifference,
     maximumEdgeNeighborLevelDifference,
     countsBySize,

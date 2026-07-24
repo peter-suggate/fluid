@@ -12,7 +12,7 @@ import {
   voxelDebugRenderShader
 } from "../lib/webgpu-voxel-debug";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
-import { optionalFluidDeviceFeatures, requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 
@@ -199,7 +199,7 @@ test("voxel debug rendering uses indirect draws and destroys only owned buffers 
   ]);
 });
 
-test("page-native raw inspection can omit filled tank panes", async (t) => {
+test("compact raw inspection can omit filled tank panes", async (t) => {
   const previousBufferUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
   const previousShaderStage = Object.getOwnPropertyDescriptor(globalThis, "GPUShaderStage");
   Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true, value: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4, INDIRECT: 8 } });
@@ -245,7 +245,6 @@ async function createDevice() {
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   assert.ok(adapter);
   const device = await adapter.requestDevice({
-    requiredFeatures: optionalFluidDeviceFeatures(adapter.features),
     requiredLimits: requiredFluidDeviceLimits(adapter.limits),
   });
   const validationErrors: string[] = [];

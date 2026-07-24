@@ -5,6 +5,14 @@ import { pathToFileURL } from "node:url";
 import {
   decodeGeneratedOctreePowerCatalog,
 } from "../lib/generated/octree-power-catalog";
+import { PassBroker } from "../lib/webgpu-pass-broker";
+import {
+  OCTREE_OWNER_ARENA_MAGIC,
+  OCTREE_OWNER_PAGE_CONTROL_WORDS,
+  OCTREE_OWNER_PAGE_PUBLICATION_STATUS,
+  packOctreeOwnerPageWord,
+  planOctreeOwnerPages,
+} from "../lib/webgpu-octree-owner-pages";
 import {
   OCTREE_POWER_SAME_OR_COARSER_FLAG,
   enumerateCanonicalSameOrFinerPowerDescriptors,
@@ -18,19 +26,48 @@ import {
   OCTREE_POWER_DESCRIPTOR_BOUNDARY_SHIFT,
   OCTREE_POWER_DESCRIPTOR_INVALID,
   WebGPUOctreePowerDescriptor,
-  decodeDenseOctreePowerOwner,
+  assertOctreePowerRowDeltaLayout,
   decodePagedOctreePowerOwner,
   describeOctreePowerRow,
   octreePowerDescriptorShader,
-  packDenseOctreePowerOwner,
+  octreePowerOwnerArenaPublicationIsValid,
   planOctreePowerDescriptors,
   unpackOctreePowerDescriptorControl,
   type OctreePowerOwner,
 } from "../lib/webgpu-octree-power-descriptor";
+import { createColdPowerRowPublication } from "./webgpu-octree-power-row-delta-fixture";
 
 const dimensions = [32, 32, 32] as const;
 const linear = (p: readonly [number, number, number], d: readonly [number, number, number] = dimensions) =>
   p[0] + d[0] * (p[1] + d[1] * p[2]);
+
+function singletonOwnerPageArena(d: readonly [number, number, number]): Uint32Array<ArrayBuffer> {
+  const plan = planOctreeOwnerPages(d);
+  assert.equal(plan.capacity, 1);
+  const arena = new Uint32Array(new ArrayBuffer(plan.allocatedBytes));
+  arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.freeCount] = 0;
+  arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.residentCount] = 1;
+  arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.capacity] = 1;
+  arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.logicalBrickCount] = 1;
+  arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.ownerRecordPageOffsetWords] = plan.ownerRecordPageOffsetWords;
+  arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.ownerPagesOffsetWords] = plan.ownerPagesOffsetWords;
+  arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.acceptedGeneration] = 1;
+  arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.status] = OCTREE_OWNER_PAGE_PUBLICATION_STATUS.ready;
+  arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.observedGeneration] = 1;
+  arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.magic] = OCTREE_OWNER_ARENA_MAGIC;
+  arena[plan.ownerRecordKeyOffsetWords] = 1;
+  arena[plan.ownerRecordPageOffsetWords] = 1;
+  for (let z = 0; z < 8; z += 1) {
+    for (let y = 0; y < 8; y += 1) {
+      for (let x = 0; x < 8; x += 1) {
+        const cell = [x, y, z] as const;
+        arena[plan.ownerPagesOffsetWords + x + 8 * (y + 8 * z)] =
+          packOctreeOwnerPageWord(cell, cell, 1);
+      }
+    }
+  }
+  return arena;
+}
 
 function catalogViews() {
   const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
@@ -43,12 +80,31 @@ test("power descriptor planner is compact-row proportional and exposes the exact
     descriptorBytes: 400,
     controlBytes: 32,
     dispatchBytes: 12,
-    allocatedBytes: 480,
+    allocatedBytes: 2_232,
   });
   assert.deepEqual(unpackOctreePowerDescriptorControl([3, 2, 1, 2, 4, 2, 0, 19]), {
     rowCount: 3, validCount: 2, errorCount: 1, firstInvalid: 2,
     flags: 4, sameOrFinerCount: 2, sameOrCoarserCount: 0, generation: 19,
   });
+});
+
+test("exact row-delta ABI rejects truncated or mismatched publications before encoding", () => {
+  const exact = {
+    rows: { size: 96 } as GPUBuffer,
+    rowCapacity: 2,
+    controlOffsetWords: 0,
+    newToOldOffsetWords: 16,
+    oldToNewOffsetWords: 18,
+    dirtyRowsOffsetWords: 20,
+    affectedRowsOffsetWords: 22,
+  };
+  assert.doesNotThrow(() => assertOctreePowerRowDeltaLayout(exact, 2, "Fixture"));
+  assert.throws(() => assertOctreePowerRowDeltaLayout(
+    { ...exact, rows: { size: 92 } as GPUBuffer }, 2, "Fixture",
+  ), /row-delta layout is invalid/);
+  assert.throws(() => assertOctreePowerRowDeltaLayout(
+    { ...exact, rowCapacity: 1 }, 2, "Fixture",
+  ), /row-delta layout is invalid/);
 });
 
 test("CPU descriptor generation reproduces every uniquely graded immutable catalog key", () => {
@@ -183,53 +239,104 @@ test("uniform descriptor constrains face and edge owners but not refined corner-
     "the eight corner-only cells remain outside the paper's 18-bit neighborhood contract");
 });
 
-test("dense owner helpers match the production owner word and reject malformed words", () => {
-  const word = packDenseOctreePowerOwner([8, 12, 16], 4);
-  assert.deepEqual(decodeDenseOctreePowerOwner(word, [9, 14, 18], dimensions, 32), {
-    origin: [8, 12, 16], size: 4,
-  });
-  assert.deepEqual(decodeDenseOctreePowerOwner(0x8000_0000, [3, 2, 1], dimensions, 32), {
-    origin: [3, 2, 1], size: 1,
-  });
-  assert.equal(decodeDenseOctreePowerOwner(0, [3, 2, 1], dimensions, 32).invalid, true);
-  assert.equal(decodeDenseOctreePowerOwner(0xffff_ffff, [3, 2, 1], dimensions, 32).invalid, true);
-});
-
 test("paged descriptor decoding fails closed on missing and reserved owner words", () => {
   const rowCell = [0, 8, 10] as const;
-  const rowWord = 1; // simulation pages store the bare size exponent
+  const rowWord = packOctreeOwnerPageWord(rowCell, rowCell, 2);
   assert.deepEqual(decodePagedOctreePowerOwner(rowWord, rowCell, [60, 45, 40], 4), {
     origin: rowCell, size: 2,
   });
-  for (const word of [0, 0xffff_ffff, 0x8000_0123, 6, 0x0000_0102]) {
+  for (const word of [0, 0xffff_ffff, 0x801c_0000, 6, 0x0000_0102]) {
     assert.equal(decodePagedOctreePowerOwner(word, rowCell, [60, 45, 40], 4).invalid, true,
       `reserved owner word ${word.toString(16)}`);
   }
-  assert.deepEqual(decodePagedOctreePowerOwner(0x8000_0000, rowCell, [60, 45, 40], 4), {
+  assert.deepEqual(decodePagedOctreePowerOwner(packOctreeOwnerPageWord(rowCell, rowCell, 1),
+    rowCell, [60, 45, 40], 4), {
     origin: rowCell, size: 1,
   });
-  assert.match(octreePowerDescriptorShader, /word==0u\|\|word==INVALID/);
+  assert.match(octreePowerDescriptorShader, /\(word&OWNER_VALID\)==0u/);
   assert.match(octreePowerDescriptorShader,
-    /!found\|\|encoded==0u\|\|encoded==INVALID\|\|encoded>capacity\)\{return Owner\(cell,1u,1u\)/,
+    /encoded==0u\|\|encoded==INVALID\|\|encoded>capacity/,
     "a missing, reserved, or out-of-range page must invalidate descriptor publication");
   assert.match(octreePowerDescriptorShader,
-    /owners\[7\]==0u\|\|owners\[7\]!=params\.rowCountGenerationModeCapacity\.y/,
-    "the sparse owner arena must be from the descriptor's requested generation");
+    /fn pagedOwnerPublicationValid\(\)->bool\{[\s\S]*accepted!=0u&&owners\[OWNER_PUBLICATION_STATUS\]==OWNER_PUBLICATION_READY[\s\S]*owners\[OWNER_OBSERVED_GENERATION\]==accepted&&owners\[OWNER_CANDIDATE_ERROR\]==0u[\s\S]*owners\[OWNER_INVALID_ENTRY_COUNT\]==0u&&resident<=capacity[\s\S]*owners\[OWNER_FREE_COUNT\]==capacity-resident/,
+    "paged lookup admits only one internally complete immutable owner publication");
+  assert.doesNotMatch(octreePowerDescriptorShader,
+    /owners\[OWNER_ACCEPTED_GENERATION\]\s*[!=]=\s*generation\(\)|generation\(\)\s*[!=]=\s*owners\[OWNER_ACCEPTED_GENERATION\]|owners\[OWNER_ACCEPTED_GENERATION\]\s*[+-]\s*1u/,
+    "owner-topology and power-descriptor generations are independent namespaces with no adjacent-generation fallback");
   assert.doesNotMatch(octreePowerDescriptorShader, /fn canonicalOwner/,
     "descriptor probes must not synthesize owners for incomplete topology pages");
-  assert.match(octreePowerDescriptorShader,
-    /fn indexedOwner[\s\S]*return Owner\(cell,max\(1u,preferredSize\),1u\);\}/,
-    "the bounded live-index substitute must also invalidate a miss instead of synthesizing topology");
-  assert.match(octreePowerDescriptorShader, /return decodePagedOwner\(word,cell\)/);
+  assert.doesNotMatch(octreePowerDescriptorShader, /indexedOwner|hashSite|hashCapacity/,
+    "legacy hash and live-index owner lookups are deleted");
+  assert.match(octreePowerDescriptorShader, /return decodePagedOwner\(owners\[at\],cell\)/);
 });
 
-test("descriptor WGSL has bounded 18-slot queries and fail-closed indirect publication", () => {
+test("paged descriptor authority is the owner arena's exact self-publication", () => {
+  const control = new Uint32Array(16);
+  control[OCTREE_OWNER_PAGE_CONTROL_WORDS.freeCount] = 9;
+  control[OCTREE_OWNER_PAGE_CONTROL_WORDS.residentCount] = 3;
+  control[OCTREE_OWNER_PAGE_CONTROL_WORDS.candidateError] = 0;
+  control[OCTREE_OWNER_PAGE_CONTROL_WORDS.capacity] = 12;
+  control[OCTREE_OWNER_PAGE_CONTROL_WORDS.acceptedGeneration] = 41;
+  control[OCTREE_OWNER_PAGE_CONTROL_WORDS.status] = OCTREE_OWNER_PAGE_PUBLICATION_STATUS.ready;
+  control[OCTREE_OWNER_PAGE_CONTROL_WORDS.observedGeneration] = 41;
+  control[OCTREE_OWNER_PAGE_CONTROL_WORDS.invalidEntryCount] = 0;
+  control[OCTREE_OWNER_PAGE_CONTROL_WORDS.magic] = OCTREE_OWNER_ARENA_MAGIC;
+  assert.equal(octreePowerOwnerArenaPublicationIsValid(control), true,
+    "a clean topology generation remains authoritative when a later power generation consumes it");
+
+  for (const [word, value] of [
+    [OCTREE_OWNER_PAGE_CONTROL_WORDS.freeCount, 8], // free + resident no longer equals capacity
+    [OCTREE_OWNER_PAGE_CONTROL_WORDS.candidateError, 1], // a newer candidate was rejected
+    [OCTREE_OWNER_PAGE_CONTROL_WORDS.acceptedGeneration, 0], // no committed topology generation
+    [OCTREE_OWNER_PAGE_CONTROL_WORDS.status, 0], // publication is not ready
+    [OCTREE_OWNER_PAGE_CONTROL_WORDS.observedGeneration, 40], // observed/accepted transaction is torn
+    [OCTREE_OWNER_PAGE_CONTROL_WORDS.invalidEntryCount, 1], // owner entry validation failed
+    [OCTREE_OWNER_PAGE_CONTROL_WORDS.magic, 0], // not an owner arena
+  ] as const) {
+    const malformed = new Uint32Array(control);
+    malformed[word] = value;
+    assert.equal(octreePowerOwnerArenaPublicationIsValid(malformed), false,
+      `owner control word ${word} must fail the self-publication gate`);
+  }
+  const overflowing = new Uint32Array(control);
+  overflowing[1] = 13;
+  assert.equal(octreePowerOwnerArenaPublicationIsValid(overflowing), false);
+  assert.equal(octreePowerOwnerArenaPublicationIsValid(control.subarray(0, 15)), false,
+    "truncated control cannot fall back to dense or a prior generation");
+});
+
+test("descriptor WGSL has bounded 18-slot queries and exact delta publication", () => {
   assert.match(octreePowerDescriptorShader, /const DIRECTIONS:array<vec3i,18>/);
   assert.match(octreePowerDescriptorShader, /for\(var bit=0u;bit<18u;bit\+=1u\)/);
-  assert.match(octreePowerDescriptorShader, /probe<hashCapacity/);
-  assert.match(octreePowerDescriptorShader, /atomicOr\(&control\.flags,CAPACITY\)/);
+  assert.match(octreePowerDescriptorShader, /while\(low<high\)/);
+  assert.doesNotMatch(octreePowerDescriptorShader, /fn structuralChange\(\)->bool/);
+  assert.match(octreePowerDescriptorShader, /fn stagePowerDescriptorDelta/);
+  assert.match(octreePowerDescriptorShader, /fn prefixPowerDescriptorDelta/);
+  assert.match(octreePowerDescriptorShader, /fn scatterPowerDescriptorDelta/);
+  assert.match(octreePowerDescriptorShader,
+    /if\(old!=row\)\{descriptors\[row\]=descriptor;status\|=STATUS_PUBLISH;\}/);
+  assert.match(octreePowerDescriptorShader,
+    /commitDispatch=dispatchFor\(published\)/);
+  assert.doesNotMatch(octreePowerDescriptorShader,
+    /carryPowerDescriptors|summarizePowerDescriptors|publishPowerDescriptors|controlArena\.moved/);
+  assert.doesNotMatch(octreePowerDescriptorShader,
+    /for\(var row=0u;row<requested/);
+  assert.doesNotMatch(octreePowerDescriptorShader, /atomic|compareExchange/);
   assert.match(octreePowerDescriptorShader, /indirectDispatch\[0\]=0u/);
   assert.doesNotMatch(octreePowerDescriptorShader, /texture_/);
+});
+
+test("descriptor production source has only exact delta work and deterministic publication", () => {
+  const source = readFileSync(new URL("../lib/webgpu-octree-power-descriptor.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /\batomic(?:Add|Load|Min|Or|Store)?\b|compareExchange|clearBuffer|workControl/);
+  assert.doesNotMatch(source, /live-index|indexedOwner|hashSite|hashCapacity|ownerMode.*auto/);
+  assert.match(source, /copyBufferToBuffer\(delta\.rows, \(delta\.controlOffsetWords \+ 12\) \* 4/);
+  assert.match(source, /dispatchWorkgroupsIndirect\(this\.workDispatch, 0\)/);
+  assert.match(source, /controlArena\.authority=candidate/);
+  assert.doesNotMatch(source,
+    /rowStatusBytes|summaryBytes|carryPipeline|summarizePipeline|dispatchDirect\(pass,\s*this\.plan\.rowCapacity/);
+  assert.match(source, /Stage exact power descriptor carry and affected rows/);
+  assert.match(source, /scatterPowerDescriptorDelta/);
 });
 
 test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails capacity/malformed arenas closed", {
@@ -241,13 +348,15 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   // collected before the Metal device has drained can tear down Dawn early.
   const gpu = dawn.create(["backend=metal"]);
   const adapter = await gpu.requestAdapter(); assert.ok(adapter);
-  const device = await adapter.requestDevice();
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } });
   const shaderModule = device.createShaderModule({ code: octreePowerDescriptorShader });
   assert.deepEqual((await shaderModule.getCompilationInfo()).messages.filter((message) => message.type === "error"), []);
 
   const d = [4, 4, 4] as const;
-  const owners = device.createBuffer({ size: 4 * 4 * 4 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(owners, 0, new Uint32Array(64).fill(0x8000_0000));
+  const ownerArena = singletonOwnerPageArena(d);
+  const owners = device.createBuffer({ size: ownerArena.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(owners, 0, ownerArena);
   const headerWords = new Uint32Array(24);
   headerWords.set([linear([1, 1, 1], d), 0, 0, 1], 0);
   headerWords.set([linear([0, 0, 0], d), 0, 0, 1], 12);
@@ -256,7 +365,14 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   const generator = new WebGPUOctreePowerDescriptor(device, 2);
   const readback = device.createBuffer({ size: 52, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
-  generator.encode(encoder, headers, owners, { dimensions: d, maximumLeafSize: 4, rowCount: 2, generation: 7, ownerMode: "dense" });
+  const broker = new PassBroker(encoder);
+  const cold = createColdPowerRowPublication(device, 2, 2, 7);
+  generator.encode(broker, headers, owners,
+    {
+      dimensions: d, maximumLeafSize: 4, rowCountBuffer: cold.rowCount,
+      generation: 7, rowDelta: cold.rowDelta,
+    });
+  broker.fence();
   encoder.copyBufferToBuffer(generator.descriptors, 0, readback, 0, 8);
   encoder.copyBufferToBuffer(generator.control, 0, readback, 8, 32);
   encoder.copyBufferToBuffer(generator.dispatch, 0, readback, 40, 12);
@@ -268,25 +384,53 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   assert.deepEqual([...words.slice(2, 10)], [2, 2, 0, 0xffff_ffff, 0, 2, 0, 7]);
   assert.deepEqual([...words.slice(10, 13)], [1, 1, 1]);
 
+  // Poison the current header after a valid publication. The exact row-delta
+  // carries row zero from the immutable generation and resolves no dirty row:
+  // the reused descriptor must remain immutable while its generation advances.
   const gpuCount = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   device.queue.writeBuffer(gpuCount, 0, new Uint32Array([1]));
-  const gpuCountReadback = device.createBuffer({ size: 44, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  const gpuCountEncoder = device.createCommandEncoder();
-  generator.encode(gpuCountEncoder, headers, owners, {
-    dimensions: d, maximumLeafSize: 4, rowCountBuffer: gpuCount, generation: 8, ownerMode: "dense",
+  const deltaWords = new Uint32Array(24);
+  deltaWords.set([1, 2, 1, 0, 1, 0, 0, 9, 0x5244_4c54, 0, 1, 1, 0, 1, 1, 0], 0);
+  deltaWords[16] = 1;
+  const rowDelta = device.createBuffer({ size: deltaWords.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(rowDelta, 0, deltaWords);
+  const malformedHeader = new Uint32Array(headerWords); malformedHeader[3] = 3;
+  device.queue.writeBuffer(headers, 0, malformedHeader);
+  const reuseReadback = device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const reuseEncoder = device.createCommandEncoder();
+  const reuseBroker = new PassBroker(reuseEncoder);
+  generator.encode(reuseBroker, headers, owners, {
+    dimensions: d, maximumLeafSize: 4, rowCountBuffer: gpuCount, generation: 9,
+    rowDelta: {
+      rows: rowDelta, rowCapacity: 2, controlOffsetWords: 0, newToOldOffsetWords: 16,
+      oldToNewOffsetWords: 18, dirtyRowsOffsetWords: 20, affectedRowsOffsetWords: 22,
+    },
   });
-  gpuCountEncoder.copyBufferToBuffer(generator.control, 0, gpuCountReadback, 0, 32);
-  gpuCountEncoder.copyBufferToBuffer(generator.dispatch, 0, gpuCountReadback, 32, 12);
-  device.queue.submit([gpuCountEncoder.finish()]); await device.queue.onSubmittedWorkDone();
-  await gpuCountReadback.mapAsync(GPUMapMode.READ);
-  const gpuCountWords = new Uint32Array(gpuCountReadback.getMappedRange().slice(0)); gpuCountReadback.unmap();
-  assert.deepEqual([...gpuCountWords.slice(0, 8)], [1, 1, 0, 0xffff_ffff, 0, 1, 0, 8]);
-  assert.deepEqual([...gpuCountWords.slice(8, 11)], [1, 1, 1]);
+  reuseBroker.fence();
+  reuseEncoder.copyBufferToBuffer(generator.descriptors, 0, reuseReadback, 0, 4);
+  reuseEncoder.copyBufferToBuffer(generator.control, 0, reuseReadback, 4, 32);
+  reuseEncoder.copyBufferToBuffer(generator.dispatch, 0, reuseReadback, 36, 12);
+  device.queue.submit([reuseEncoder.finish()]); await device.queue.onSubmittedWorkDone();
+  await reuseReadback.mapAsync(GPUMapMode.READ);
+  const reused = new Uint32Array(reuseReadback.getMappedRange().slice(0)); reuseReadback.unmap();
+  assert.equal(reused[0], 0x3ffff);
+  assert.deepEqual([...reused.slice(1, 9)], [1, 1, 0, 0xffff_ffff, 0, 1, 0, 9]);
+  assert.deepEqual([...reused.slice(9, 12)], [1, 1, 1]);
+  device.queue.writeBuffer(headers, 0, headerWords);
 
   const capacityGenerator = new WebGPUOctreePowerDescriptor(device, 1);
   const capacityReadback = device.createBuffer({ size: 44, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const capacityEncoder = device.createCommandEncoder();
-  capacityGenerator.encode(capacityEncoder, headers, owners, { dimensions: d, maximumLeafSize: 4, rowCount: 2, ownerMode: "dense" });
+  const capacityBroker = new PassBroker(capacityEncoder);
+  const overflowingCold = createColdPowerRowPublication(device, 1, 1, 0);
+  device.queue.writeBuffer(overflowingCold.rowCount, 0, new Uint32Array([2]));
+  capacityGenerator.encode(capacityBroker, headers, owners,
+    {
+      dimensions: d, maximumLeafSize: 4, rowCountBuffer: overflowingCold.rowCount,
+      rowDelta: overflowingCold.rowDelta,
+    });
+  capacityBroker.fence();
   capacityEncoder.copyBufferToBuffer(capacityGenerator.control, 0, capacityReadback, 0, 32);
   capacityEncoder.copyBufferToBuffer(capacityGenerator.dispatch, 0, capacityReadback, 32, 12);
   device.queue.submit([capacityEncoder.finish()]); await device.queue.onSubmittedWorkDone();
@@ -302,7 +446,14 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   device.queue.writeBuffer(paged, 0, malformedArena);
   const malformedReadback = device.createBuffer({ size: 44, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const malformedEncoder = device.createCommandEncoder();
-  capacityGenerator.encode(malformedEncoder, headers, paged, { dimensions: d, maximumLeafSize: 4, rowCount: 1, ownerMode: "auto" });
+  const malformedBroker = new PassBroker(malformedEncoder);
+  const malformedCold = createColdPowerRowPublication(device, 1, 1, 0);
+  capacityGenerator.encode(malformedBroker, headers, paged,
+    {
+      dimensions: d, maximumLeafSize: 4, rowCountBuffer: malformedCold.rowCount,
+      rowDelta: malformedCold.rowDelta,
+    });
+  malformedBroker.fence();
   malformedEncoder.copyBufferToBuffer(capacityGenerator.control, 0, malformedReadback, 0, 32);
   malformedEncoder.copyBufferToBuffer(capacityGenerator.dispatch, 0, malformedReadback, 32, 12);
   device.queue.submit([malformedEncoder.finish()]); await device.queue.onSubmittedWorkDone();
@@ -310,4 +461,5 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   const malformedWords = new Uint32Array(malformedReadback.getMappedRange().slice(0)); malformedReadback.unmap();
   assert.ok((malformedWords[4] & OCTREE_POWER_DESCRIPTOR_ERROR.malformedOwner) !== 0);
   assert.deepEqual([...malformedWords.slice(8, 11)], [0, 1, 1]);
+  cold.destroy(); overflowingCold.destroy(); malformedCold.destroy();
 });

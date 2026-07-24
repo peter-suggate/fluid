@@ -39,7 +39,6 @@ export interface OctreeTechniqueDebugSource {
    */
   readonly fineBandLifecycle?: {
     readonly params: GPUBufferBinding;
-    readonly hash: GPUBufferBinding;
     readonly metadata: GPUBufferBinding;
     readonly worklist: GPUBufferBinding;
     readonly sampleFlags: GPUBufferBinding;
@@ -48,15 +47,14 @@ export interface OctreeTechniqueDebugSource {
     readonly topologyControl: GPUBufferBinding;
     readonly redistanceControl: GPUBufferBinding;
   };
-  /** Paper Section 5 regular-face march, exposed from the already-live band
-   * graph. The dedicated overlay reads these buffers directly and remains
+  /** Paper Section 5 closest-point face extension, exposed from the already-live band.
+   * The dedicated overlay reads these buffers directly and remains
    * below the portable storage-binding limit. */
   readonly section5FaceBand?: {
-    readonly rowHash: GPUBufferBinding;
+    readonly rowDirectory: GPUBufferBinding;
     readonly rows: GPUBufferBinding;
     readonly faces: GPUBufferBinding;
     readonly incidence: GPUBufferBinding;
-    readonly states: GPUBufferBinding;
     readonly control: GPUBufferBinding;
     readonly transitionControl: GPUBufferBinding;
   };
