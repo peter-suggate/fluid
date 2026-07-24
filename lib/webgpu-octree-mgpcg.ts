@@ -14,6 +14,10 @@ export const OCTREE_SECTION43_SMALL_DOMAIN_PCG_ITERATIONS = 12;
  * dam operator put 804 ms in this serial workgroup. Keep the persistent lane
  * to one row per lane; normal production capacities use parallel PCG. */
 export const OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY = 64;
+/** A barrier-batched Jacobi half is profitable only while every compact row
+ * has a dedicated lane. Above this bound, one workgroup serializes sparse
+ * neighbor gathers and loses the latency hiding of the row-parallel path. */
+export const OCTREE_SINGLE_WORKGROUP_HYBRID_MAXIMUM_ROW_CAPACITY = 256;
 /** x, r, z, d, A*d, four hybrid f32 fields, and two band u32 fields.  A
  * combined persistent shader must pack these channels into one binding to
  * fit beside the live L2 rows and SPGrid topology/state under WebGPU's ten
@@ -237,7 +241,13 @@ export class WebGPUOctreeMGPCG {
     if (this.executionMode === "persistent-small-domain") {
       return 1 + (this.source.firstOrderVCycle.encodedSetupDispatchCount ?? 3) + 1;
     }
-    const preconditionerPasses = 4 + 2 * this.boundarySmoothingIterations
+    // Tiny staged solves retain the barrier-batched smoother. Production
+    // solves use row-parallel synchronous sweeps, but fold the zero first
+    // sweep and final publication into useful work.
+    const smoothingPasses = this.plan.rowCapacity
+      <= OCTREE_SINGLE_WORKGROUP_HYBRID_MAXIMUM_ROW_CAPACITY
+      ? 2 : 2 * this.boundarySmoothingIterations;
+    const preconditionerPasses = 2 + smoothingPasses
       + this.source.firstOrderVCycle.encodedCorrectionDispatchCount;
     const setupPasses = this.source.firstOrderVCycle.encodedSetupDispatchCount ?? 3;
     // initialize + direct residual + band classification/dilation + M*r +
@@ -246,7 +256,7 @@ export class WebGPUOctreeMGPCG {
     const initialize = 2 + 4 + preconditionerPasses + 1;
     const iterations = 2 * OCTREE_SECTION43_LARGE_DOMAIN_PCG_ITERATIONS
       + (OCTREE_SECTION43_LARGE_DOMAIN_PCG_ITERATIONS - 1) * (preconditionerPasses + 1);
-    return 1 + setupPasses + initialize + iterations + 2;
+    return 1 + setupPasses + initialize + iterations + 1;
   }
 
   /** Hierarchy publication must end before its dispatch records can become
@@ -328,21 +338,22 @@ export class WebGPUOctreeMGPCG {
     this.stages = Object.freeze({
       initialize: pipeline("initializeMGPCG", [0, 1, 2, 3, 4, 5, 6, 7, 11, 12]),
       residual: pipeline("formInitialResidual", [0, 1, 2, 3, 5, 7, 11, 12]),
-      clearHybridPreconditioner: pipeline("clearHybridPreconditioner", [0, 3, 11, 13]),
       classifyHybridBand: pipeline("classifyHybridBand", [0, 1, 2, 3, 11, 17]),
       dilateHybridBandAtoB: pipeline("dilateHybridBandAtoB", [0, 1, 2, 3, 11, 17, 18]),
       dilateHybridBandBtoA: pipeline("dilateHybridBandBtoA", [0, 1, 2, 3, 11, 17, 18]),
+      prepareHybridSmoothing: pipeline("prepareHybridSmoothing", [0, 1, 2, 3, 5, 11, 13, 14, 18]),
+      smoothHybridZeroToB: pipeline("smoothHybridZeroToB", [0, 1, 2, 3, 5, 11, 14, 18]),
       smoothHybridAtoB: pipeline("smoothHybridAtoB", [0, 1, 2, 3, 5, 11, 13, 14, 18]),
       smoothHybridBtoA: pipeline("smoothHybridBtoA", [0, 1, 2, 3, 5, 11, 13, 14, 18]),
       formHybridL1Residual: pipeline("formHybridL1Residual", [0, 1, 2, 3, 5, 11, 13, 14, 15]),
       addHybridL1Correction: pipeline("addHybridL1Correction", [0, 3, 11, 13, 14, 16]),
-      publishHybridPreconditioner: pipeline("publishHybridPreconditioner", [0, 3, 6, 11, 14]),
+      finishHybridSmoothing: pipeline("finishHybridSmoothing", [0, 1, 2, 3, 5, 6, 11, 13, 14, 18]),
+      smoothHybridAtoBAndPublish: pipeline("smoothHybridAtoBAndPublish", [0, 1, 2, 3, 5, 6, 11, 13, 14, 18]),
       initialReduction: pipeline("initializePCGReduction", [0, 1, 3, 5, 6, 7, 11]),
       preparePCGStep: pipeline("preparePCGStep", [0, 1, 2, 3, 7, 8, 11, 12]),
       updatePCGState: pipeline("updatePCGStateAndReduceResidual", [0, 3, 5, 7, 8, 11, 12]),
       finishPCGIteration: pipeline("finishPCGIteration", [0, 3, 5, 6, 7, 11]),
-      finalize: pipeline("finalizeMGPCG", [3, 11]),
-      publish: pipeline("publishMGPCG", [0, 3, 4, 10, 11, 12]),
+      finalizeAndPublish: pipeline("finalizeAndPublishMGPCG", [0, 3, 4, 10, 11, 12]),
     });
   }
 
@@ -416,8 +427,7 @@ export class WebGPUOctreeMGPCG {
     }
     // The final residual gate is authoritative. An unconverged bounded PCG
     // solve is failed closed below; no CPU readback or fallback is involved.
-    single(this.stages.finalize);
-    rows(this.stages.publish);
+    single(this.stages.finalizeAndPublish);
     broker.fence("MGPCG pressure publication");
   }
 
@@ -440,12 +450,21 @@ export class WebGPUOctreeMGPCG {
     buffers: readonly (GPUBuffer | undefined)[]): void {
     const cycle = this.source.firstOrderVCycle;
     const pass = broker.compute();
-    this.run(pass, this.stages.clearHybridPreconditioner, this.plan.dispatch, buffers);
-
-    // p0=0; k=8 damped-Jacobi iterations of L2 p=q inside the fixed band.
-    for (let i = 0; i < this.boundarySmoothingIterations; i += 1) {
-      this.run(pass, i % 2 === 0 ? this.stages.smoothHybridAtoB : this.stages.smoothHybridBtoA,
+    const singleWorkgroup = this.plan.rowCapacity
+      <= OCTREE_SINGLE_WORKGROUP_HYBRID_MAXIMUM_ROW_CAPACITY;
+    if (singleWorkgroup) {
+      // With at most one row per lane, barriers remove launch overhead without
+      // serializing sparse gathers.
+      this.run(pass, this.stages.prepareHybridSmoothing, [1, 1, 1], buffers);
+    } else {
+      // The first Jacobi sweep is exactly the zero-vector sweep, so compute it
+      // directly in parallel instead of clearing A in a separate dispatch.
+      this.run(pass, this.stages.smoothHybridZeroToB, this.plan.dispatch, buffers);
+      for (let iteration = 1; iteration < this.boundarySmoothingIterations; iteration += 1) {
+        this.run(pass, iteration % 2 === 0
+          ? this.stages.smoothHybridAtoB : this.stages.smoothHybridBtoA,
         this.plan.dispatch, buffers);
+      }
     }
     // k is even, so p1 is in A. Form r1=q-L2*p1 and apply the required SPD L1
     // V-cycle. The interface owns its sparse first-order operator/transfers.
@@ -460,11 +479,18 @@ export class WebGPUOctreeMGPCG {
     });
     // p2=p1+delta starts in B, followed by the matching k post-iterations.
     this.run(pass, this.stages.addHybridL1Correction, this.plan.dispatch, buffers);
-    for (let i = 0; i < this.boundarySmoothingIterations; i += 1) {
-      this.run(pass, i % 2 === 0 ? this.stages.smoothHybridBtoA : this.stages.smoothHybridAtoB,
+    if (singleWorkgroup) {
+      this.run(pass, this.stages.finishHybridSmoothing, [1, 1, 1], buffers);
+    } else {
+      for (let iteration = 0; iteration + 1 < this.boundarySmoothingIterations; iteration += 1) {
+        this.run(pass, iteration % 2 === 0
+          ? this.stages.smoothHybridBtoA : this.stages.smoothHybridAtoB,
         this.plan.dispatch, buffers);
+      }
+      // k is even, so the final post-sweep is A -> B. Publishing the same
+      // value in this row kernel needs no additional dependency boundary.
+      this.run(pass, this.stages.smoothHybridAtoBAndPublish, this.plan.dispatch, buffers);
     }
-    this.run(pass, this.stages.publishHybridPreconditioner, this.plan.dispatch, buffers);
   }
 
   private run(pass: GPUComputePassEncoder, stage: Stage, dispatch: readonly [number, number, number],
@@ -573,17 +599,19 @@ fn applyHybridL2(row:u32,useB:bool)->f32{let h=headers[row];if(!finite(h.diagona
 fn smoothHybridValue(row:u32,useB:bool)->f32{let current=hybridValue(row,useB);if(hybridBandB[row]==0u){return current;}
   let diagonal=headers[row].diagonal;let next=current+hybridOmega()*(residual[row]-applyHybridL2(row,useB))/diagonal;
   if(!finite(next)){reportAt(NONFINITE,3u,row,next);return current;}return next;}
+// This is the ordinary A -> B Jacobi expression with every A input equal to
+// the initialized +0.0 value. Keeping the multiply/subtract sequence makes
+// the specialized first sweep bit-identical while deleting its clear launch.
+fn smoothHybridZeroValue(row:u32)->f32{if(hybridBandB[row]==0u){return 0.0;}
+  let h=headers[row];var value=h.diagonal*0.0;for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];
+    if(e.row>=liveRows()||!finite(e.coefficient)){report(INVALID_ROW_ERROR);continue;}value-=e.coefficient*0.0;}
+  let next=0.0+hybridOmega()*(residual[row]-value)/h.diagonal;
+  if(!finite(next)){reportAt(NONFINITE,3u,row,next);return 0.0;}return next;}
 @compute @workgroup_size(64) fn initializeMGPCG(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()){return;}
   let h=headers[row];if(h.entryStart+h.entryCount>arrayLength(&entries)||!finite(h.diagonal)||h.diagonal<=0.0||!finite(h.rhs)){report(INVALID_ROW_ERROR);return;}
   var seed=pressureSeed[row];if(!finite(seed)){reportAt(NONFINITE,1u,row,seed);seed=0.0;}pressure[row]=seed;residual[row]=0.0;preconditioned[row]=0.0;direction[row]=0.0;}
 @compute @workgroup_size(64) fn formInitialResidual(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!failed()){
   let r=-headers[row].rhs-applyA(row,false);if(!finite(r)){reportAt(NONFINITE,2u,row,r);}else{residual[row]=r;}}}
-
-// Only A must be initialized. The first pre-sweep overwrites every live B
-// value, formHybridL1Residual overwrites RHS, and the V-cycle publishes every
-// live correction. Clearing four capacity-sized vectors here was dead traffic.
-@compute @workgroup_size(64) fn clearHybridPreconditioner(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
-  hybridA[row]=0.0;}
 
 @compute @workgroup_size(64) fn classifyHybridBand(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||failed()){return;}
   let h=headers[row];var offDiagonalSum=0.0;var transition=false;
@@ -598,14 +626,44 @@ fn smoothHybridValue(row:u32,useB:bool)->f32{let current=hybridValue(row,useB);i
 @compute @workgroup_size(64) fn dilateHybridBandBtoA(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||failed()){return;}
   var bandValue=hybridBandB[row];let h=headers[row];for(var j=0u;j<h.entryCount&&bandValue==0u;j+=1u){let neighbor=entries[h.entryStart+j].row;
     if(neighbor>=liveRows()){report(INVALID_ROW_ERROR);continue;}bandValue=max(bandValue,hybridBandB[neighbor]);}hybridBandA[row]=bandValue;}
-@compute @workgroup_size(64) fn smoothHybridAtoB(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!stopped()){hybridB[row]=smoothHybridValue(row,false);}}
-@compute @workgroup_size(64) fn smoothHybridBtoA(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row<liveRows()&&!stopped()){hybridA[row]=smoothHybridValue(row,true);}}
+// The compact power rows are small enough for one 256-lane workgroup to own a
+// complete synchronous smoothing half. Each storage barrier is the exact
+// dependency boundary formerly provided by a separate dispatch: every B row
+// is visible before an A sweep begins and vice versa. No dot-product reduction
+// or per-row floating-point expression changes.
+@compute @workgroup_size(256) fn prepareHybridSmoothing(@builtin(local_invocation_index) lid:u32){
+  let n=liveRows();if(!stopped()){for(var row=lid;row<n;row+=256u){hybridA[row]=0.0;}}storageBarrier();
+  for(var iteration=0u;iteration<params.solve.w;iteration+=1u){
+    if(!stopped()){for(var row=lid;row<n;row+=256u){
+      if((iteration&1u)==0u){hybridB[row]=smoothHybridValue(row,false);}
+      else{hybridA[row]=smoothHybridValue(row,true);}
+    }}storageBarrier();
+  }
+}
+@compute @workgroup_size(64) fn smoothHybridZeroToB(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);
+  if(row<liveRows()&&!stopped()){hybridB[row]=smoothHybridZeroValue(row);}}
+@compute @workgroup_size(64) fn smoothHybridAtoB(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);
+  if(row<liveRows()&&!stopped()){hybridB[row]=smoothHybridValue(row,false);}}
+@compute @workgroup_size(64) fn smoothHybridBtoA(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);
+  if(row<liveRows()&&!stopped()){hybridA[row]=smoothHybridValue(row,true);}}
 @compute @workgroup_size(64) fn formHybridL1Residual(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
   let next=residual[row]-applyHybridL2(row,false);if(!finite(next)){reportAt(NONFINITE,4u,row,next);}else{hybridRhs[row]=next;}}
 @compute @workgroup_size(64) fn addHybridL1Correction(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
   let next=hybridA[row]+hybridCorrection[row];if(!finite(next)){reportAt(NONFINITE,5u,row,next);}else{hybridB[row]=next;}}
-@compute @workgroup_size(64) fn publishHybridPreconditioner(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);if(row>=liveRows()||stopped()){return;}
-  let value=hybridB[row];if(!finite(value)){reportAt(NONFINITE,6u,row,value);}else{preconditioned[row]=value;}}
+@compute @workgroup_size(256) fn finishHybridSmoothing(@builtin(local_invocation_index) lid:u32){
+  let n=liveRows();for(var iteration=0u;iteration<params.solve.w;iteration+=1u){
+    if(!stopped()){for(var row=lid;row<n;row+=256u){
+      if((iteration&1u)==0u){hybridA[row]=smoothHybridValue(row,true);}
+      else{hybridB[row]=smoothHybridValue(row,false);}
+    }}storageBarrier();
+  }
+  if(!stopped()){for(var row=lid;row<n;row+=256u){let value=hybridB[row];
+    if(!finite(value)){reportAt(NONFINITE,6u,row,value);}else{preconditioned[row]=value;}
+  }}
+}
+@compute @workgroup_size(64) fn smoothHybridAtoBAndPublish(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);
+  if(row>=liveRows()||stopped()){return;}let value=smoothHybridValue(row,false);hybridB[row]=value;
+  if(!stopped()){if(!finite(value)){reportAt(NONFINITE,6u,row,value);}else{preconditioned[row]=value;}}}
 
 var<workgroup> sums:array<vec4f,256>;
 @compute @workgroup_size(256) fn initializePCGReduction(@builtin(local_invocation_index) lid:u32){var sum=vec4f(0.0);let n=liveRows();
@@ -649,10 +707,13 @@ var<workgroup> sums:array<vec4f,256>;
     else{atomicStore(&control[8],bitcast<u32>(next/previous));atomicStore(&control[6],bitcast<u32>(next));}}
   workgroupBarrier();if(solving&&!failed()){let beta=bitcast<f32>(atomicLoad(&control[8]));for(var row=lid;row<liveRows();row+=256u){
     let next=preconditioned[row]+beta*direction[row];if(!finite(next)){reportAt(NONFINITE,11u,row,next);}else{direction[row]=next;}}}}
-@compute @workgroup_size(1) fn finalizeMGPCG(){if(atomicLoad(&control[1])==0u&&atomicLoad(&control[0])==0u){report(NONCONVERGENCE);}
-  if(arrayLength(&counts)>=2u){let tail=arrayLength(&counts);let success=atomicLoad(&control[0])==0u&&atomicLoad(&control[1])!=0u;
-    counts[tail-2u]=select(0x7fc00000u,atomicLoad(&control[4]),success);counts[tail-1u]=select(0x7fc00000u,atomicLoad(&control[5]),success);}}
-@compute @workgroup_size(64) fn publishMGPCG(@builtin(global_invocation_id) gid:vec3u){let row=rowIndex(gid);let n=liveRows();if(row>=n){return;}
-  let success=atomicLoad(&control[0])==0u&&atomicLoad(&control[1])!=0u;let seed=select(0.0,pressureSeed[row],finite(pressureSeed[row]));
-  pressureOut[row]=select(seed,pressure[row],success&&finite(pressure[row]));}
+@compute @workgroup_size(256) fn finalizeAndPublishMGPCG(@builtin(local_invocation_index) lid:u32){
+  if(lid==0u){if(atomicLoad(&control[1])==0u&&atomicLoad(&control[0])==0u){report(NONCONVERGENCE);}
+    if(arrayLength(&counts)>=2u){let tail=arrayLength(&counts);let success=atomicLoad(&control[0])==0u&&atomicLoad(&control[1])!=0u;
+      counts[tail-2u]=select(0x7fc00000u,atomicLoad(&control[4]),success);
+      counts[tail-1u]=select(0x7fc00000u,atomicLoad(&control[5]),success);}}
+  storageBarrier();let success=atomicLoad(&control[0])==0u&&atomicLoad(&control[1])!=0u;
+  for(var row=lid;row<liveRows();row+=256u){let seed=select(0.0,pressureSeed[row],finite(pressureSeed[row]));
+    pressureOut[row]=select(seed,pressure[row],success&&finite(pressure[row]));}
+}
 `;

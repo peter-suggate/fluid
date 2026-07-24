@@ -585,13 +585,15 @@ test("fine topology binds exactly the resources reachable from every compute ent
   }
 });
 
-test("fine-brick sampling WGSL uses bounded sorted lookup, exact generation validation, and explicit coarse fallback", () => {
-  assert.match(fineLevelSetBrickSamplingWGSL, /step<32u&&low<high/);
+test("fine-brick sampling WGSL uses a flat direct lookup, exact generation validation, and explicit coarse fallback", () => {
+  assert.match(fineLevelSetBrickSamplingWGSL, /let directoryBase=5u\+params\.worklistCapacity/);
   assert.match(fineLevelSetBrickSamplingWGSL, /worklist\[1\]!=params\.generation/);
-  assert.match(fineLevelSetBrickSamplingWGSL, /metadata\[base\+1u\]<key/);
-  assert.match(fineLevelSetBrickSamplingWGSL, /metadata\[base\+2u\]!=params\.generation/);
+  assert.match(fineLevelSetBrickSamplingWGSL,
+    /let physicalId=worklist\[directoryBase\+key\];let base=physicalId\*10u/);
+  assert.match(fineLevelSetBrickSamplingWGSL,
+    /metadata\[base\]==physicalId&&metadata\[base\+1u\]==key&&metadata\[base\+2u\]==params\.generation/);
   assert.match(fineLevelSetBrickSamplingWGSL, /Result\(coarsePhi,0u/);
-  assert.doesNotMatch(fineLevelSetBrickSamplingWGSL, /hash|probe/i);
+  assert.doesNotMatch(fineLevelSetBrickSamplingWGSL, /while|binary|middle|low<high|hash|probe/i);
   assert.doesNotMatch(fineLevelSetBrickSamplingWGSL, /octree.*row/i);
 });
 
@@ -607,13 +609,25 @@ test("production transport is fused across every factor-ratio segment", () => {
   assert.match(source, /segment>=params\.fineFactor/);
   assert.match(source, /params\.timestep\/f32\(params\.fineFactor\)/);
   assert.match(source,
-    /abs\(phi\[index\]\)>=pack\.transportBandDistance/,
+    /abs\(sourcePhi\)>=pack\.transportBandDistance/,
     "transport must leave the outer valid band available only as backtrace/interpolation support");
   assert.match(source, /pack\.closedDomainBoundary==0u/,
     "wall ghosts require an explicit closed-domain or authored open-top policy");
   assert.match(source,
-    /workA\[index\]=phi\[index\];if\(abs\(phi\[index\]\)>=pack\.transportBandDistance\)\{return;\}/,
+    /let sourcePhi=phi\[index\];workA\[index\]=sourcePhi;if\(abs\(sourcePhi\)>=pack\.transportBandDistance\)\{return;\}/,
     "support-only samples must preserve phi before the shared scratch is committed");
+  assert.match(source,
+    /struct DirectHint\{row:u32,descriptor:DirectRow\}[\s\S]*fn sampleCompleteVelocity\(world:vec3f,directHint:DirectHint,ownerCache:ptr<function,vec3u>\)[\s\S]*if\(!directRowContains\(hint\.row,hint\.descriptor,world\)\)\{hint=loadDirectHint\(directOwner\(world\)\);\}[\s\S]*directHint=complete\.directHint/,
+    "piecewise segments must retain the immutable adaptive descriptor without repeating its directory search or row load");
+  assert.match(source,
+    /ownerAtCached\(vec3u\(floor\(grid\)\),ownerCache\)[\s\S]*var ownerCache=vec3u\(0u\)[\s\S]*sampleCompleteVelocity\(position,directHint,&ownerCache\)/,
+    "air completion must retain the exact owner publication/page hint across Factor-m segments");
+  assert.match(source,
+    /var<workgroup>finePageIds:array<u32,27>[\s\S]*fn prepareFinePageCache[\s\S]*fn cachedFinePage[\s\S]*let id=cachedFinePage\(brick\)/,
+    "a brick workgroup must resolve its bounded departure-page neighborhood once for final interpolation");
+  assert.match(source,
+    /prepareFinePageCache\(pack\.chunkBase\+local-lid,lid\);if\(local>=arrayLength/,
+    "every invocation must participate in page-cache publication before any lane returns");
   assert.match(source,
     /STATUS_FACE_UNAVAILABLE[\s\S]*flags\|=FACE_UNAVAILABLE[\s\S]*flags\|=INVALID_STATUS\|VELOCITY_UNAVAILABLE/,
     "transport diagnostics must distinguish face-band coverage from unavailable Stage-B velocity");
@@ -629,6 +643,12 @@ test("production transport is fused across every factor-ratio segment", () => {
   assert.match(fineLevelSetFusedTransportPublicationWGSL,
     /let interfaceBefore=\(previous&PAGE_INTERFACE\)!=0u\|\|pageOldInterface\[0\]!=0u;let interfaceNow=pageInterface\[0\]!=0u;[\s\S]*let membershipChanged=pageChanged\[0\]!=0u\|\|interfaceBefore\|\|interfaceNow;[\s\S]*topologyDelta\[8u\+work\]=select\(INVALID,metadata\[id\*10u\+1u\],membershipChanged\)/,
     "every old or current interface page must refresh trilinear pressure-membership summaries even when no lattice sample flips sign");
+  assert.match(fineLevelSetFusedTransportPublicationWGSL,
+    /var<workgroup>pageNeighbors:array<u32,6>[\s\S]*if\(lid<6u\)[\s\S]*pageNeighbors\[lid\]=neighbor[\s\S]*let q=localCoord\(local\);for\(var direction=0u;direction<6u/,
+    "commit must publish neighbor pages once per brick and decode each local coordinate once");
+  assert.match(fineLevelSetFusedTransportPublicationWGSL,
+    /@compute @workgroup_size\(256\)fn publishFineTransportTopologyDelta[\s\S]*let chunk=\(livePages\+255u\)\/256u[\s\S]*deltaCounts\[lid\]\+=addCount[\s\S]*topologyDelta\[8u\+capacity\+output\]=candidate/,
+    "the sorted topology delta must use a deterministic parallel prefix instead of one serial page sweep");
   assert.doesNotMatch(fineLevelSetFusedTransportPublicationWGSL,
     /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
     "recurring fine transport must reduce deterministic per-query outcomes without atomics");
@@ -755,6 +775,12 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
     /fn sampleIndex\(q:vec3u\)[\s\S]*supportPageOf\(packBrick\(q\/p\.brickResolution\)\)/,
     "all JFA seed/flood/validation neighbors must be restricted to the exact support publication");
   assert.match(fineLevelSetJFACPTWGSL,
+    /var<workgroup>floodPageIds:array<u32,27>[\s\S]*fn prepareFloodPageIds[\s\S]*if\(lid<27u\)\{floodPageIds\[lid\]=page;\}workgroupBarrier\(\)[\s\S]*fn cachedFloodSampleIndex[\s\S]*let id=floodPageIds\[/,
+    "each JFA workgroup must resolve its 27 generation-fixed support pages once");
+  assert.doesNotMatch(fineLevelSetJFACPTWGSL,
+    /fn flood\([^}]*sampleIndex\(/,
+    "the 27-tap flood must not repeat page-directory resolution in every lane");
+  assert.match(fineLevelSetJFACPTWGSL,
     /fn deltaRecordError[\s\S]*publishedPageOf\(key\)!=id[\s\S]*!support&&supportPageOf\(key\)!=id/,
     "dirty/support records must be sorted, published, generation-current, and dirty must be a support subset");
   assert.doesNotMatch(fineLevelSetJFACPTWGSL,
@@ -863,11 +889,13 @@ test("fine redistance binds exactly the resources reachable from each compute en
   }
 
   const expected: Record<string, number[]> = {
-    seedClosestPoints: [0, 1, 2, 3, 4, 5, 6, 7, 9],
-    jumpFloodAToB: [0, 2, 3, 4, 5, 6, 7], jumpFloodBToA: [0, 2, 3, 4, 5, 6, 7],
+    publishSupportPageMask: [0, 2, 3, 10],
+    seedClosestPoints: [0, 1, 2, 3, 4, 5, 6, 7, 9, 10],
+    jumpFloodAToB: [0, 1, 2, 3, 4, 5, 6, 7, 10],
+    jumpFloodBToA: [0, 1, 2, 3, 4, 5, 6, 7, 10],
     resolveClosestPointsAToB: [0, 2, 3, 4, 5, 6, 7, 9],
     resolveClosestPointsBToCanonical: [0, 2, 3, 4, 5, 6, 7, 9],
-    validateJFADistances: [0, 1, 2, 3, 4, 5, 7, 9],
+    validateJFADistances: [0, 1, 2, 3, 4, 5, 7, 9, 10],
     finalizeAndCommitJFADistances: [0, 2, 3, 4, 5, 6, 7, 8, 9],
   };
   assert.deepEqual(Object.fromEntries([...observed].map(([entryPoint, bindings]) =>
@@ -996,17 +1024,18 @@ test("factor-4 JFA-CPT redistance is one pass over topology-published delta disp
   assert.equal(passes.length, 1);
   assert.deepEqual(copies, [],
     "JFA must consume topology's immutable command publication without recurring copies");
-  assert.deepEqual(indirectOffsets, [60, 60, 60, 60, 60, 60, 60, 60, 60, 84],
-    "seed/flood/resolve consume JFA support while validation alone touches the dirty dispatch");
+  assert.deepEqual(indirectOffsets, [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 84],
+    "support-mask publication plus seed/flood/resolve consume JFA support while validation alone touches the dirty dispatch");
   assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
     /updateIndirectBuffer|dispatchWorkgroupsIndirect\(this\.delta\.pageDelta/,
     "the writable page-delta transaction must never be consumed as an indirect command buffer");
-  assert.deepEqual(passes[0], ["seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA",
+  assert.deepEqual(passes[0], ["publishSupportPageMask",
+    "seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA",
     "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB", "jumpFloodBToA",
     "jumpFloodAToB", "resolveClosestPointsBToCanonical", "validateJFADistances",
     "finalizeAndCommitJFADistances"]);
-  assert.equal(passes[0].length, 11,
-    "the clean-cut schedule must remove five of the former sixteen factor-4 dispatches");
+  assert.equal(passes[0].length, 12,
+    "generation-stamped direct support membership needs one bounded publication and no capacity clear");
   assert.match(fineLevelSetJFACPTWGSL, /override JFA_STRIDE:u32=1u/);
   assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
     /jfaParams|initializeJFAControl|reduceJFASeedStats|reduceJFAResolveStats|reduceJFAValidationStats|finalizeJFADistances|commitJFADistances/,

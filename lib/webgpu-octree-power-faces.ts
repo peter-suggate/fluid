@@ -865,9 +865,11 @@ fn rowAffectedFlag(row:u32)->bool{
   return params.delta.y+row<arrayLength(&rowDelta)&&(rowDelta[params.delta.y+row]&ROW_DELTA_AFFECTED)!=0u;
 }
 fn rowAffected(row:u32)->bool{
-  var low=0u;var high=affectedCount();while(low<high){let middle=low+(high-low)/2u;
-    if(affectedRow(middle)<row){low=middle+1u;}else{high=middle;}}
-  return low<affectedCount()&&affectedRow(low)==row;
+  // The exact new-to-old publication already carries the affected bit for
+  // every row. The prepare transaction validates the compact affected list
+  // against these bits before any consumer runs, so repeated binary searches
+  // of that same immutable list add no authority.
+  return rowAffectedFlag(row);
 }
 fn cellCoord(cell:u32)->vec3u{let d=dims();return vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));}
 fn rowHeaderValid(row:u32)->bool{if(row>=arrayLength(&headers)){return false;}let h=headers[row];let d=dims();if(h.size==0u||h.cell>=d.x*d.y*d.z){return false;}let o=cellCoord(h.cell);return all(o%vec3u(h.size)==vec3u(0u))&&all(vec3u(h.size)<=d)&&all(o<=d-vec3u(h.size));}

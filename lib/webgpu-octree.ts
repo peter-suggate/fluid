@@ -2725,16 +2725,6 @@ export class WebGPUOctreeProjection {
     group = this.groups.ab,
   ): void {
     const broker = new PassBroker(encoder);
-    const deltaPrepare = broker.compute({ label: `${label} row-delta prepare` });
-    deltaPrepare.setBindGroup(0, group);
-    deltaPrepare.setPipeline(this.prepareRowDeltaPipeline);
-    deltaPrepare.dispatchWorkgroupsIndirect(this.topologyCandidateDispatch, 12);
-    const deltaClassify = broker.compute({ label: `${label} exact row-delta classification` });
-    deltaClassify.setBindGroup(0, group);
-    deltaClassify.setPipeline(this.classifyRowDeltaPipeline);
-    deltaClassify.dispatchWorkgroupsIndirect(this.topologyCandidateDispatch, 12);
-    deltaClassify.setPipeline(this.finalizeRowDeltaClassificationPipeline);
-    deltaClassify.dispatchWorkgroups(1);
     const dirty = broker.compute({ label: `${label} dirty-row deterministic scan` });
     dirty.setBindGroup(0, group);
     dirty.setPipeline(this.scanDirtyRowDeltaBlocksPipeline);
@@ -3992,9 +3982,12 @@ export class WebGPUOctreeProjection {
     this.topologyResidency.encodeFineSeedCandidates(
       encoder, source.leaves, source.candidates.candidates, source.candidates.countAndDispatch,
     );
-    this.sparseBrickWorld?.bulkResidency?.encodeFineSeedCandidates(
-      encoder, source.leaves, source.candidates.candidates, source.candidates.countAndDispatch,
-    );
+    const bulkResidency = this.sparseBrickWorld?.bulkResidency;
+    if (bulkResidency && bulkResidency !== this.topologyResidency) {
+      bulkResidency.encodeFineSeedCandidates(
+        encoder, source.leaves, source.candidates.candidates, source.candidates.countAndDispatch,
+      );
+    }
     // Publication is GPU-transactional. Failed, stale, and overflowing
     // generations retain the last good (including analytic t=0) tile stream;
     // a published zero-count generation is the distinct valid-empty case.
@@ -5740,6 +5733,10 @@ fn rowDeltaExclusiveScan(value:u32,lid:u32)->u32{
 fn classifyFrontierCarry(@builtin(global_invocation_id)gid:vec3u){
   let row=gid.x;let previous=frontierCurrent();let previousCount=frontierCount(previous);
   if(row>=previousCount){return;}
+  // The sorted merge below is the exact old/new identity join. Clear the
+  // reverse map here so retired identities remain explicitly unmapped without
+  // a second capacity-sized preparation/classification pass.
+  frontier[rowDeltaOldToNewBase()+row]=0u;
   let cell=frontierCell(previous,row);let old=leafHeaders[row];
   let dirty=rowAuthorityDirtyGeneration(cell,frontierGeneration()+1u);
   let owner=ownerAtIndex(cell);
@@ -5806,7 +5803,13 @@ fn mergeFrontierRows(@builtin(global_invocation_id)gid:vec3u){
   if(slot<previousCount&&(compaction[rowDeltaFlagsBase()+slot]&1u)!=0u){
     let cell=frontierCell(previous,slot);let size=leafHeaders[slot].size;
     let output=keptRowsBefore(slot,previousCount)+candidateLowerBound(cell,size,candidateCount);
-    if(output<frontierListCapacity()){frontier[frontierBase(next)+output]=cell;}
+    if(output<frontierListCapacity()){
+      frontier[frontierBase(next)+output]=cell;
+      let dirty=output!=slot;
+      frontier[rowDeltaNewToOldBase()+output]=(slot+1u)
+        |select(0u,ROW_DELTA_AFFECTED,dirty);
+      frontier[rowDeltaOldToNewBase()+slot]=output+1u;
+    }
   }
   if(slot<candidateCount){
     let cell=frontier[frontierCandidateBase()+slot];let size=ownerAtIndex(cell).size;
@@ -5818,7 +5821,16 @@ fn mergeFrontierRows(@builtin(global_invocation_id)gid:vec3u){
       &&leafHeaders[old].size==size&&(compaction[rowDeltaFlagsBase()+old]&1u)!=0u;
     if(!cleanCollision){
       let output=slot+keptRowsBefore(old,previousCount);
-      if(output<frontierListCapacity()){frontier[frontierBase(next)+output]=cell;}
+      if(output<frontierListCapacity()){
+        frontier[frontierBase(next)+output]=cell;
+        let exact=old<previousCount&&frontierCell(previous,old)==cell
+          &&leafHeaders[old].size==size;
+        let dirty=!exact||old!=output
+          ||rowAuthorityDirtyGeneration(cell,frontierGeneration()+1u);
+        frontier[rowDeltaNewToOldBase()+output]=select(old+1u,0u,!exact)
+          |select(0u,ROW_DELTA_AFFECTED,dirty);
+        if(exact){frontier[rowDeltaOldToNewBase()+old]=output+1u;}
+      }
     }
   }
 }
@@ -5846,6 +5858,11 @@ fn finalizeFrontier(@builtin(local_invocation_index)lid:u32){
       invalid|=select(0u,1u,reason!=0u);
       firstFailure=min(firstFailure,select(0xffffffffu,row*16u+reason,reason!=0u));
       exactFailures+=select(0u,1u,(reason&7u)!=0u);
+      if(row>0u){
+        let cell=frontierCell(previous,row);let prior=frontierCell(previous,row-1u);
+        invalid|=select(0u,1u,!rowIdentityLess(
+          prior,leafHeaders[row-1u].size,cell,leafHeaders[row].size));
+      }
     }
     for(var row=lid;row<boundedCandidates;row+=256u){
       let cell=frontier[frontierCandidateBase()+row];let size=ownerAtIndex(cell).size;
@@ -5902,6 +5919,11 @@ fn finalizeFrontier(@builtin(local_invocation_index)lid:u32){
     compaction[12]=0u;compaction[13]=1u;compaction[14]=1u;return;
   }
   frontier[next]=required;frontier[2]=next;frontier[3]+=1u;
+  let base=rowDeltaControlBase();
+  frontier[base]=required;frontier[base+1u]=previousCount;
+  frontier[base+2u]=carried;frontier[base+3u]=added;
+  frontier[base+4u]=retired;frontier[base+7u]=frontier[3];
+  frontier[base+15u]=1u;
   let blocks=(required+255u)/256u;compaction[8]=blocks;
   let x=min(blocks,65535u);var y=1u;if(x>0u){y=(blocks+x-1u)/x;}
   compaction[12]=x;compaction[13]=y;compaction[14]=1u;
@@ -5981,8 +6003,9 @@ fn finalizeRowDeltaClassification(@builtin(local_invocation_index)lid:u32){
 fn scanRowDeltaBlock(affected:bool,wid:u32,lid:u32){
   let row=wid*256u+lid;let count=frontier[rowDeltaControlBase()];
   var flag=0u;
-  if(row<count){flag=select(compaction[rowDeltaFlagsBase()+row]&1u,
-    select(0u,1u,(frontier[rowDeltaNewToOldBase()+row]&ROW_DELTA_AFFECTED)!=0u),affected);}
+  if(row<count){
+    flag=select(0u,1u,(frontier[rowDeltaNewToOldBase()+row]&ROW_DELTA_AFFECTED)!=0u);
+  }
   let rank=rowDeltaExclusiveScan(flag,lid);
   if(row<count){compaction[rowDeltaPrefixBase()+row]=rank;}
   if(lid==0u){compaction[rowDeltaBlockTotalsBase()+wid]=rowDeltaScanTotal;}
@@ -6009,7 +6032,7 @@ fn prefixDirtyRowDeltaBlocks(@builtin(local_invocation_index)lid:u32){prefixRowD
 @compute @workgroup_size(256)
 fn scatterDirtyRowDelta(@builtin(global_invocation_id)gid:vec3u){
   let row=gid.x;let count=frontier[rowDeltaControlBase()];
-  if(row<count&&compaction[rowDeltaFlagsBase()+row]!=0u){
+  if(row<count&&(frontier[rowDeltaNewToOldBase()+row]&ROW_DELTA_AFFECTED)!=0u){
     let output=compaction[rowDeltaPrefixBase()+row]
       +compaction[rowDeltaBlockTotalsBase()+row/256u];
     frontier[rowDeltaDirtyRowsBase()+output]=row;
@@ -6034,7 +6057,8 @@ fn markRowDeltaRing(@builtin(global_invocation_id)gid:vec3u){
       if(nonzero==0u||nonzero==3u){continue;}let d=vec3i(x,y,z);var probe=vec3i(0);
       for(var axis=0u;axis<3u;axis+=1u){probe[axis]=select(select(i32(origin[axis]+h.size/2u),i32(origin[axis]+h.size),d[axis]>0),i32(origin[axis])-1,d[axis]<0);}
       if(!valid(probe)){continue;}let owner=ownerAt(probe);let neighbor=frontierRow(index(unpackOrigin(owner.packedOrigin)));
-      if(neighbor!=0xffffffffu&&compaction[rowDeltaFlagsBase()+neighbor]!=0u){affected=true;}
+      if(neighbor!=0xffffffffu
+        &&(frontier[rowDeltaNewToOldBase()+neighbor]&ROW_DELTA_AFFECTED)!=0u){affected=true;}
     }}}
     if(affected){frontier[rowDeltaNewToOldBase()+row]|=ROW_DELTA_AFFECTED;}
   }

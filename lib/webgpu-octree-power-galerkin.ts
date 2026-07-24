@@ -36,7 +36,7 @@ struct LiveLeafEntry { row:u32,coefficient:f32 }
 @group(0) @binding(9) var<storage,read> authorityControl:array<u32>;
 @group(0) @binding(10) var<storage,read_write> compactCorrection:array<f32>;
 @group(0) @binding(11) var<storage,read_write> residualScratch:array<vec2f>;
-var<workgroup> refreshPartial:array<f32,64>;
+var<workgroup> refreshPartial:array<f32,256>;
 var<workgroup> cgDirection:array<f32,64>;
 const MEASURE_PARTIAL_WORKGROUPS=32u;
 const RHS=0u;const A=1u;const B=2u;
@@ -125,6 +125,7 @@ fn smoothSource(row:u32,src:u32)->f32{
   sourceMatrix[sourceEntryBase(entry)+1u]=bitcast<u32>(0.0);
  }
  setSourceF(RHS,row,0.0);
+ setSourceF(A,row,0.0);setSourceF(B,row,0.0);
 }
 
 // Import changing coefficients/RHS from compact live rows into the immutable
@@ -175,21 +176,28 @@ fn smoothSource(row:u32,src:u32)->f32{
 }
 
 // P is immutable, so the packed refresh matrix bakes P(left)*P(right) into
-// target-major [fineEntry, weight] records. One workgroup owns a target entry:
-// lanes stream long rows in parallel and reduce without numeric atomics.
-@compute @workgroup_size(64) fn refreshGalerkinTarget(
+// target-major [fineEntry, weight] records. Four isolated 64-lane tiles share
+// each workgroup: every target retains the exact lane assignment and reduction
+// tree of the former one-target workgroup while paying one quarter as many
+// workgroup launches.
+@compute @workgroup_size(256) fn refreshGalerkinTarget(
  @builtin(workgroup_id) group:vec3u,
  @builtin(num_workgroups) groups:vec3u,
  @builtin(local_invocation_index) lane:u32,
 ){
- let targetEntry=group.x+groups.x*group.y;if(targetEntry>=targetEntries()){return;}
- let first=topology[refreshOffsetBase()+targetEntry];
- let end=topology[refreshOffsetBase()+targetEntry+1u];
- if(first>end||end>refreshRecordCount()||refreshRecordStride()!=2u){
-  if(lane==0u){report(INVALID_ROW_ERROR);}return;
+ let tile=lane>>6u;let tileLane=lane&63u;
+ let targetEntry=4u*(group.x+groups.x*group.y)+tile;
+ var valid=targetEntry<targetEntries();
+ var first=0u;var end=0u;
+ if(valid){
+  first=topology[refreshOffsetBase()+targetEntry];
+  end=topology[refreshOffsetBase()+targetEntry+1u];
+  if(first>end||end>refreshRecordCount()||refreshRecordStride()!=2u){
+   if(tileLane==0u){report(INVALID_ROW_ERROR);}valid=false;
+  }
  }
  var sum=0.0;
- for(var cursor=first+lane;cursor<end;cursor+=64u){
+ for(var cursor=first+tileLane;valid&&cursor<end;cursor+=64u){
   let base=refreshRecordBase()+2u*cursor;
   let fineEntry=topology[base];let weight=bitcast<f32>(topology[base+1u]);
   if(fineEntry>=sourceEntries()||!finite(weight)){report(INVALID_ROW_ERROR);continue;}
@@ -198,11 +206,11 @@ fn smoothSource(row:u32,src:u32)->f32{
  refreshPartial[lane]=sum;
  workgroupBarrier();
  for(var stride=32u;stride>0u;stride/=2u){
-  if(lane<stride){refreshPartial[lane]+=refreshPartial[lane+stride];}
+  if(tileLane<stride){refreshPartial[lane]+=refreshPartial[lane+stride];}
   workgroupBarrier();
  }
- if(lane==0u){
-  let total=refreshPartial[0];
+ if(tileLane==0u&&valid){
+  let total=refreshPartial[64u*tile];
   if(!finite(total)){report(NONFINITE);}
   else{targetMatrix[targetEntryBase(targetEntry)+1u]=bitcast<u32>(total);}
  }
@@ -220,21 +228,26 @@ fn smoothSource(row:u32,src:u32)->f32{
 }
 
 // R=P^T gathers the final even pre-sweep defect and initializes the coarse
-// correction vectors. One workgroup owns a coarse row: shallow coarse levels
-// have too few rows for thread-per-row occupancy, so lanes stream the row's
-// restriction records in parallel and reduce without numeric atomics.
-@compute @workgroup_size(64) fn restrictSourceDefect(
+// correction vectors. Four isolated 64-lane tiles share each workgroup:
+// shallow coarse levels retain their row-local reduction order without paying
+// one whole workgroup launch per row.
+@compute @workgroup_size(256) fn restrictSourceDefect(
  @builtin(workgroup_id) group:vec3u,
  @builtin(num_workgroups) groups:vec3u,
  @builtin(local_invocation_index) lane:u32,
 ){
- let coarse=group.x+groups.x*group.y;if(coarse>=targetCount()){return;}
- let first=topology[restrictionOffsetBase()+coarse];
- let end=topology[restrictionOffsetBase()+coarse+1u];
- if(first>end){if(lane==0u){report(INVALID_ROW_ERROR);}return;}
+ let tile=lane>>6u;let tileLane=lane&63u;
+ let coarse=4u*(group.x+groups.x*group.y)+tile;
+ var valid=coarse<targetCount();
+ var first=0u;var end=0u;
+ if(valid){
+  first=topology[restrictionOffsetBase()+coarse];
+  end=topology[restrictionOffsetBase()+coarse+1u];
+  if(first>end){if(tileLane==0u){report(INVALID_ROW_ERROR);}valid=false;}
+ }
  var sum=0.0;
- if(!stopped()){
-  for(var cursor=first+lane;cursor<end;cursor+=64u){
+ if(valid&&!stopped()){
+  for(var cursor=first+tileLane;cursor<end;cursor+=64u){
    let record=topology[restrictionRecordBase()+cursor];
    if(record>=pCount()||pCoarse(record)!=coarse){report(INVALID_ROW_ERROR);continue;}
    let fine=pFine(record);if(fine>=sourceCount()){report(INVALID_ROW_ERROR);continue;}
@@ -244,11 +257,11 @@ fn smoothSource(row:u32,src:u32)->f32{
  refreshPartial[lane]=sum;
  workgroupBarrier();
  for(var stride=32u;stride>0u;stride>>=1u){
-  if(lane<stride){refreshPartial[lane]+=refreshPartial[lane+stride];}
+  if(tileLane<stride){refreshPartial[lane]+=refreshPartial[lane+stride];}
   workgroupBarrier();
  }
- if(lane==0u&&!stopped()){
-  let total=refreshPartial[0];
+ if(tileLane==0u&&valid&&!stopped()){
+  let total=refreshPartial[64u*tile];
   if(!finite(total)){report(NONFINITE);}
   else{setTargetF(RHS,coarse,total);setTargetF(A,coarse,0.0);setTargetF(B,coarse,0.0);}
  }
@@ -368,12 +381,12 @@ var<workgroup> residualSums:array<vec2f,256>;
  if(lane==0u&&!stopped()){
   atomicStore(&control[4],bitcast<u32>(residualSums[0].x));
   atomicStore(&control[5],bitcast<u32>(residualSums[0].y));
+  publishSourceResidualValues(residualSums[0].x,residualSums[0].y);
  }
 }
-@compute @workgroup_size(1) fn publishSourceResidual(){
+fn publishSourceResidualValues(rr:f32,bb:f32){
  if(stopped()){return;}
  let cycle=atomicLoad(&control[2])+1u;atomicStore(&control[2],cycle);
- let rr=bitcast<f32>(atomicLoad(&control[4]));let bb=bitcast<f32>(atomicLoad(&control[5]));
  let relative=sqrt(rr/max(bb,1e-30));atomicStore(&control[6],bitcast<u32>(relative));
  let relativeBudget=params.numerics.y*params.numerics.y*bb;
  // importFineOperator publishes the authoritative compact liquid-row count
@@ -384,6 +397,12 @@ var<workgroup> residualSums:array<vec2f,256>;
  if(!finite(relative)||!finite(residualBudget)){report(NONFINITE);}
  else if(rr<=residualBudget){atomicStore(&control[1],1u);}
  else if(cycle>=u32(params.numerics.z)){report(NONCONVERGED);}
+}
+// Retained as a standalone diagnostic/test entry point. The recurring solve
+// publishes directly from measureSourceResidualReduce and does not pay this
+// extra dispatch.
+@compute @workgroup_size(1) fn publishSourceResidual(){
+ publishSourceResidualValues(bitcast<f32>(atomicLoad(&control[4])),bitcast<f32>(atomicLoad(&control[5])));
 }
 @compute @workgroup_size(64) fn exportLiveCorrection(@builtin(global_invocation_id) gid:vec3u){
  let liveRow=gid.x;if(liveRow>=liveCount()||atomicLoad(&control[0])!=0u
@@ -573,7 +592,7 @@ export class WebGPUOctreePowerGalerkin {
       prolongateTargetCorrection: [0, 2, 3, 4, 5],
       solveTargetCoarsest: [1, 2, 4, 5],
       measureSourceResidualPartials: [0, 2, 3, 5, 11],
-      measureSourceResidualReduce: [5, 11],
+      measureSourceResidualReduce: [5, 6, 11],
       publishSourceResidual: [5, 6],
       exportLiveCorrection: [2, 3, 5, 7, 9, 10],
     };
@@ -727,11 +746,10 @@ export class WebGPUOctreePowerGalerkin {
       pass.dispatchWorkgroups(width, height);
     };
     dispatch(0, "initializeFineOperator", finestCount);
-    dispatch(0, "clearSourceCorrection", finestCount);
     this.encodeFineOperatorImport(broker, solve.liveOperator.leafHeaders, solve.liveOperator.leafEntries,
       solve.liveOperator.authorityControl, solve.initialCorrection ?? this.zeroCompactCorrection);
     for (let level = 0; level < this.topologies.length; level += 1) {
-      dispatch(level, "refreshGalerkinTarget", this.entryCounts[level + 1], true);
+      dispatch(level, "refreshGalerkinTarget", Math.ceil(this.entryCounts[level + 1] / 4), true);
     }
     if (this.persistent3Pipeline && this.persistent3Group) {
       const persistent = broker.compute({ label: "Persistent three-level Power Galerkin V-cycles" });
@@ -744,7 +762,7 @@ export class WebGPUOctreePowerGalerkin {
           dispatch(level, "smoothSourceAtoB", this.nodeCounts[level]);
           dispatch(level, "smoothSourceBtoA", this.nodeCounts[level]);
         }
-        dispatch(level, "restrictSourceDefect", this.nodeCounts[level + 1], true);
+        dispatch(level, "restrictSourceDefect", Math.ceil(this.nodeCounts[level + 1] / 4), true);
       }
       const bottomPair = this.topologies.length - 1;
       dispatch(bottomPair, "solveTargetCoarsest", 1);
@@ -758,7 +776,6 @@ export class WebGPUOctreePowerGalerkin {
       dispatch(0, "measureSourceResidualPartials",
         OCTREE_POWER_GALERKIN_MEASURE_PARTIAL_WORKGROUPS, true);
       dispatch(0, "measureSourceResidualReduce", 1);
-      dispatch(0, "publishSourceResidual", 1);
     }
     if (solve.correction) {
       const source = solve.liveOperator;

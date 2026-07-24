@@ -20,8 +20,9 @@ not a physics or shader-validation failure.
 | Do not scan every fine sample for optional diagnostics | 363.44 / 363.52 ms | **−33.2 ms, −8.4%** | restriction 17–27 ms |
 | Changed-seed halo scatter + immutable-domain publication | 301.39 / 300.65 ms | **−62.5 ms, −17.2%** | fine topology 3.29–3.57 ms, **~17× phase speedup** |
 | Direct reciprocal endpoint scatter | 287.95 / 288.23 ms | **−12.7 ms, −4.2%** | transition adjacency 69.6–69.8 ms |
+| Shared immutable live-face work package + mutable-φ frontier | 224.66 / 224.84 ms | **−63.3 ms, −22.0%** | transition adjacency 73.3→26.8 ms; closest-point 31.6→5.9 ms |
 
-Net: **396.66 → ~288.1 ms/advance, −108.6 ms/advance (27.4%)**. This is a
+Net: **396.66 → ~224.75 ms/advance, −171.9 ms/advance (43.3%)**. This is a
 realized gain, not a dispatch-count proxy. Final authority remained exact:
 generation 18, 5,981 active fine pages, 3,392 face-band rows, 7,791 regular
 faces, 16,800 incidences, 1,624 transient power rows, pressure convergence in
@@ -44,6 +45,18 @@ The two transformational shader changes establish the reusable algorithm:
    directly into each endpoint's fixed 36-slot range. A bounded per-endpoint
    insertion sort restores deterministic source order:
    `O(edges + endpoints × 36²)`.
+3. The face arena has fixed row-owned addresses but is sparse: the measured
+   transaction has 7,791 LIVE faces in an 82,944-slot capacity. The existing
+   deterministic face-count walk now emits one canonical dense face-slot list
+   and one indirect count, at no extra pass. Fine/coarse phi sampling,
+   closest-point seeding and extension, all eight repair waves, and terminal
+   diagnostics pass this same immutable package through the transaction instead
+   of rescanning sparse capacity. A second GPU-built list contains only mutable
+   band-phi rows (225 of 3,392 at final authority) for the 16 dependency waves.
+   Its storage and indirect triplet are dedicated: an early implementation
+   correctly solved phi but accidentally reused indirect slot 54, truncating
+   later full-row consumers. Moving it to byte offset 252 fixed the complete
+   downstream authority.
 
 The immutable-state rule is precise: physical page identity, row identity,
 fixed face/adjacency slot addresses, and committed generation metadata are

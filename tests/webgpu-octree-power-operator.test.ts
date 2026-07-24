@@ -201,6 +201,14 @@ test("GPU power shader codifies one shared coefficient and fail-closed publicati
   assert.match(octreePowerOperatorShader, /item\.face<=previousFace/);
   assert.match(octreePowerOperatorShader, /control\.flags=ASSEMBLED/);
   assert.match(octreePowerOperatorShader, /control\.flags!=ASSEMBLED/);
+  assert.match(octreePowerOperatorShader,
+    /@compute @workgroup_size\(256\) fn scanPowerRowEntries\(@builtin\(local_invocation_index\) lane:u32\)/);
+  assert.match(octreePowerOperatorShader,
+    /@compute @workgroup_size\(256\) fn publishPowerRows\(@builtin\(local_invocation_index\) lane:u32\)/);
+  assert.match(octreePowerOperatorShader,
+    /@compute @workgroup_size\(256\) fn publishPowerProjection\(@builtin\(local_invocation_index\) lane:u32\)/);
+  assert.doesNotMatch(octreePowerOperatorShader,
+    /@compute @workgroup_size\(1\) fn (?:scanPowerRowEntries|publishPowerRows|publishPowerProjection)/);
   assert.doesNotMatch(octreePowerOperatorShader,
     /\batomic(?:Add|And|CompareExchangeWeak|Exchange|Load|Max|Min|Or|Store|Sub|Xor)\b|atomic<[ui]32>/,
     "the recurring operator must reduce fixed diagnostic records without synchronization atomics");

@@ -40,7 +40,7 @@ test("fine-seed-candidate-only mode collapses both unused legacy leaf buffers", 
   assert.equal(candidateOnly.leafIndexBytes, 4);
   assert.equal(candidateOnly.leafStateBytes, 4);
   assert.equal(candidateOnly.savedLeafStateBytes, 19_196);
-  assert.equal(candidateOnly.allocatedBytes, 194_488);
+  assert.equal(candidateOnly.allocatedBytes, 194_492);
   assert.equal(general.allocatedBytes - candidateOnly.allocatedBytes, 19_196);
   assert.throws(
     () => planFluidBrickResidencyAllocation([1, 1, 1], [1, 1, 1], 1, true, true),
@@ -125,23 +125,45 @@ test("fine-seed-candidate publication is deterministic, fail-closed, and count-i
   assert.match(fineSeedCandidateResidencyShader, /candidateControl\[4\]>publishedTileWorklist\[15\]/,
     "stale or unpublished candidate generations must preserve the prior bounded worklist");
   assert.match(fineSeedCandidateResidencyShader, /tileWorklist\[11\]=COMMIT/);
+  assert.match(fineSeedCandidateResidencyShader,
+    /storageBarrier\(\);workgroupBarrier\(\);commitCandidateGeneration\(lid,256u\)/,
+    "the validated dense generation is committed by its final publication workgroup");
   assert.match(fineSeedCandidateCommitShader, /if\(candidateTileWorklist\[11\]!=COMMIT\)\{return;\}/,
-    "candidate states and worklists mutate only behind the GPU commit predicate");
+    "the sparse compatibility publisher retains its separate GPU commit predicate");
   assert.doesNotMatch(fineSeedCandidateResidencyShader, /candidateControl\[0\]==0u/,
     "zero count is a valid-empty publication, not a failed-empty proxy");
-  assert.doesNotMatch(fineSeedCandidateResidencyShader, /\batomic(?:Add|And|CompareExchangeWeak|Exchange|Load|Max|Min|Or|Store|Sub|Xor)\b/);
+  assert.match(fineSeedCandidateResidencyShader,
+    /@compute @workgroup_size\(256\) fn publishFineSeedCandidateResidency/);
+  assert.match(fineSeedCandidateResidencyShader, /atomicOr\(&states\[logical\],bits\)/,
+    "parallel candidate marks must be idempotent and order independent");
+  assert.match(fineSeedCandidateResidencyShader,
+    /activePrefix\[lane\]=a;retiredPrefix\[lane\]=r[\s\S]*worklist\[0\]=a;worklist\[4\]=r/,
+    "the bounded lane-prefix pass must preserve canonical logical-key ordering");
   assert.deepEqual([...fineSeedCandidateResidencyShader.matchAll(
     /@compute\s+@workgroup_size\([^)]*\)\s+fn\s+([A-Za-z0-9_]+)/g,
-  )].map((match) => match[1]), ["publishFineSeedCandidateResidency"]);
+  )].map((match) => match[1]), [
+    "prepareFineSeedCandidateResidency",
+    "markFineSeedCandidateResidency",
+    "resolveFineSeedCandidateResidency",
+    "publishFineSeedCandidateResidency",
+  ]);
 });
 
 test("sparse candidate scheduler fails closed on brick or tile key-pool exhaustion", () => {
   assert.match(sparseFineSeedCandidateResidencyShader, /logical\+1u/);
   assert.match(sparseFineSeedCandidateResidencyShader, /states\[slot\*2u\]=INVALID/,
     "retired keys leave tombstones so collision chains remain searchable");
-  assert.match(sparseFineSeedCandidateResidencyShader, /slot==INVALID\)\{error=6u/);
-  assert.match(sparseFineSeedCandidateResidencyShader, /slot==INVALID\)\{error=7u/);
-  assert.match(sparseFineSeedCandidateResidencyShader, /if\(error==0u\)\{finishHeaders\(\);\}/);
+  assert.match(sparseFineSeedCandidateResidencyShader,
+    /brickClaimKeys\[cache\]==encoded[\s\S]*let slot=claimBrick\(logical\)/,
+    "duplicate brick marks may bypass probing, while cache misses retain canonical insertion order");
+  assert.match(sparseFineSeedCandidateResidencyShader,
+    /tileRingKeys\[ringCache\]==encodedCenter[\s\S]*tileRingKeys\[ringCache\]=encodedCenter/,
+    "an already completed tile ring may be reused without changing partial-failure behavior");
+  assert.match(sparseFineSeedCandidateResidencyShader, /slot==INVALID\)\{sparseError=6u/);
+  assert.match(sparseFineSeedCandidateResidencyShader, /slot==INVALID\)\{sparseError=7u/);
+  assert.match(sparseFineSeedCandidateResidencyShader,
+    /@workgroup_size\(256\)[\s\S]*brickChunk[\s\S]*sparsePrefix0\[lane\]=a[\s\S]*if\(lid==0u\)\{finishHeaders\(\);\}/,
+    "pool lifecycle and publication use stable contiguous lane prefixes while hash insertion remains ordered");
   assert.doesNotMatch(sparseFineSeedCandidateResidencyShader,
     /\batomic(?:Add|And|CompareExchangeWeak|Exchange|Load|Max|Min|Or|Store|Sub|Xor)\b/);
   assert.deepEqual([...sparseFineSeedCandidateResidencyShader.matchAll(
@@ -149,10 +171,17 @@ test("sparse candidate scheduler fails closed on brick or tile key-pool exhausti
   )].map((match) => match[1]), ["publishFineSeedCandidateResidency"]);
 });
 
-test("candidate residency encoding is two dispatches with no recurring host clears or copies", () => {
+test("candidate residency encoding stages dense work across the device with no recurring host clears or copies", () => {
   const source = readFileSync(new URL("../lib/webgpu-fluid-brick-residency.ts", import.meta.url), "utf8");
   const body = source.match(/encodeFineSeedCandidates\([\s\S]*?async readStats/)?.[0] ?? "";
-  assert.equal((body.match(/dispatchWorkgroups\(/g) ?? []).length, 2);
+  assert.match(body, /fineSeedCandidatePipelines\.slice\(0,3\)\.forEach/);
+  assert.match(body, /fineSeedCandidatePublishLayout[\s\S]*finalPublishGroup[\s\S]*dispatchWorkgroups\(1\)/,
+    "the dense final publisher uses a reachability-minimal layout within the ten-storage-buffer device limit");
+  assert.match(body, /Math\.ceil\(prepareWords \/ 256\)/);
+  assert.match(body, /Math\.ceil\(markItems \/ 256\)/);
+  assert.match(body, /Math\.ceil\(this\.publicationCapacity \/ 256\)/);
+  assert.match(body, /if \(this\.currentAllocationPlan\.sparseKeyPools\) \{[\s\S]*const commitGroup=/,
+    "only sparse-key publication pays for a separate commit bind group and dispatch");
   assert.doesNotMatch(body, /clearBuffer|copyBufferToBuffer/);
   assert.doesNotMatch(source,
     /beginFineSeedCandidatesPipeline|markPressureTopologyTilesPipeline|markFineSeedCandidatesPipeline|resolveFineSeedCandidatesPipeline|emitFineSeedCandidateTilesPipeline|finalizeFineSeedCandidatesPipeline/);

@@ -12,6 +12,7 @@ import { useMethodStore, resolvedMethodValues } from "../stores/method-store";
 import type { MethodParamValue } from "../methods";
 import { useRuntimeStore } from "../stores/runtime-store";
 import { useDiagnosticsStore, emptyPerformanceReport } from "../stores/diagnostics-store";
+import { usePerformanceInstrumentationStore } from "../stores/performance-instrumentation-store";
 import { useUIStore } from "../stores/ui-store";
 import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
@@ -123,11 +124,13 @@ class SimulationController {
   /** Prepare every fixed step owed by the wall clock. GPU admission is renderer-budgeted. */
   tick(now: number) {
     const method = useMethodStore.getState();
-    const cpuTrace = new CPUPerformanceTrace(
-      ++this.cpuTickTraceSampleId,
-      `${method.methodId}:${method.quality}`,
-      { id: "frame-control", label: "Simulation clock + admission" },
-    );
+    const cpuTrace = usePerformanceInstrumentationStore.getState().enabled
+      ? new CPUPerformanceTrace(
+        ++this.cpuTickTraceSampleId,
+        `${method.methodId}:${method.quality}`,
+        { id: "frame-control", label: "Simulation clock + admission" },
+      )
+      : undefined;
     try {
     if (this.lastClock === null) this.lastClock = now;
     const elapsed = Math.max(0, (now - this.lastClock) / 1000);
@@ -166,7 +169,7 @@ class SimulationController {
     let diagnostics: RigidStepDiagnostics | undefined;
     let fluidDiagnostics: ReturnType<EulerianFluidSolver["step"]> | undefined;
     let latestCoupling: CouplingDiagnostics | undefined;
-    cpuTrace.transition({
+    cpuTrace?.transition({
       id: backend === "cpu-reference" ? "velocity-advection" : "frame-control",
       label: backend === "cpu-reference" ? "CPU reference simulation + coupling" : "GPU target-clock control",
     });
@@ -214,7 +217,7 @@ class SimulationController {
       this.rateWallClock = now; this.rateSimTime = committedTime;
     }
     } finally {
-      this.pendingCpuTickTrace = cpuTrace.finish();
+      this.pendingCpuTickTrace = cpuTrace?.finish();
     }
   }
 
@@ -465,20 +468,28 @@ class SimulationController {
     const diagnostics = useDiagnosticsStore.getState();
     const methodId = metrics.methodId ?? useMethodStore.getState().methodId;
     const context = metrics.context ?? methodId;
-    const capturedAt_ms = performance.now();
     diagnostics.set({
       frameMs: metrics.cpu?.total_ms ?? 0,
       resolution,
       waterSurfacePresentation: metrics.waterSurfacePresentation ?? null,
     });
+    const instrumentation = usePerformanceInstrumentationStore.getState();
+    if (!instrumentation.enabled) {
+      this.pendingCpuTickTrace = undefined;
+      return;
+    }
+    const capturedAt_ms = performance.now();
     const reportDue = context !== this.lastPerformanceReportContext
       || capturedAt_ms - this.lastPerformanceReportAt_ms >= 100;
     if (!reportDue) return;
     this.lastPerformanceReportAt_ms = capturedAt_ms;
     this.lastPerformanceReportContext = context;
     const physicsTrace = diagnostics.gpuInfo?.physicsTrace;
-    const rendererCPU = performanceTraceMatchesLane(metrics.cpu, "cpu", "main-thread") ? metrics.cpu : undefined;
-    const controllerCPU = performanceTraceMatchesLane(this.pendingCpuTickTrace, "cpu", "main-thread")
+    const rendererCPU = metrics.cpu && metrics.cpu.capturedAt_ms >= instrumentation.enabledAt_ms
+      && performanceTraceMatchesLane(metrics.cpu, "cpu", "main-thread") ? metrics.cpu : undefined;
+    const controllerCPU = this.pendingCpuTickTrace
+      && this.pendingCpuTickTrace.capturedAt_ms >= instrumentation.enabledAt_ms
+      && performanceTraceMatchesLane(this.pendingCpuTickTrace, "cpu", "main-thread")
       ? this.pendingCpuTickTrace
       : undefined;
     this.pendingCpuTickTrace = undefined;
@@ -491,8 +502,10 @@ class SimulationController {
       context,
       capturedAt_ms,
       cpu,
-      physics: performanceTraceMatchesLane(physicsTrace, "gpu", "physics") ? physicsTrace : undefined,
-      presentation: performanceTraceMatchesLane(metrics.presentation, "gpu", "presentation") ? metrics.presentation : undefined,
+      physics: physicsTrace && physicsTrace.capturedAt_ms >= instrumentation.enabledAt_ms
+        && performanceTraceMatchesLane(physicsTrace, "gpu", "physics") ? physicsTrace : undefined,
+      presentation: metrics.presentation && metrics.presentation.capturedAt_ms >= instrumentation.enabledAt_ms
+        && performanceTraceMatchesLane(metrics.presentation, "gpu", "presentation") ? metrics.presentation : undefined,
     };
     diagnostics.pushPerformanceReport(report);
   }

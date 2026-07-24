@@ -426,6 +426,7 @@ export class WebGPUFineLevelSetTopology {
   private readonly compactSparseDesiredPipeline: GPUComputePipeline;
   private readonly publishDesiredBricksPipeline: GPUComputePipeline;
   private readonly publishRecurringSparseBandPipeline: GPUComputePipeline;
+  private readonly clearPageDirectoryPipeline: GPUComputePipeline;
   private readonly snapshotPipeline: GPUComputePipeline;
   private readonly classifyIdentityPipeline: GPUComputePipeline;
   private readonly scanIdentityRecordsPipeline: GPUComputePipeline;
@@ -574,6 +575,8 @@ export class WebGPUFineLevelSetTopology {
     this.publishDesiredBricksPipeline = pipeline("Publish sorted sparse fine topology", "publishDesiredBricks");
     this.publishRecurringSparseBandPipeline = pipeline(
       "Publish compact recurring fine topology band", "publishRecurringSparseBand");
+    this.clearPageDirectoryPipeline = pipeline(
+      "Clear direct fine page directory", "clearFinePageDirectory");
     this.snapshotPipeline = pipeline("Snapshot exact fine topology rollback pages", "snapshotDeltaPayload");
     this.classifyIdentityPipeline = pipeline("Classify exact fine identity records", "classifyDesiredPageIdentities");
     this.scanIdentityRecordsPipeline = pipeline("Scan exact fine identity records", "scanIdentityRecords");
@@ -795,6 +798,8 @@ export class WebGPUFineLevelSetTopology {
       runIdentity(this.publishRecurringSparseBandPipeline, discoverEntries,
         1, 1, [0, 6, 7, 8, 14, 16, 19, 21, 23]);
     }
+    run(this.clearPageDirectoryPipeline, deltaEntries, "Clear direct global fine page directory",
+      Math.ceil(plan.logicalBrickCount / 64), [0, 4]);
     if (publication.kind === "bootstrap") {
       run(this.clearTopologyErrorsPipeline, deltaEntries, "Clear fixed global fine lifecycle errors",
         Math.ceil(plan.maximumResidentBricks / 64), [0, 21]);
@@ -1028,6 +1033,7 @@ fn producerChangedContains(key:u32)->bool{if(params.recurringDelta==0u||arrayLen
 	fn writeIndirectDispatch(slot:u32,count:u32){let record=dispatchRecord(count);let base=3u*slot;indirectDispatch[base]=record.x;indirectDispatch[base+1u]=record.y;indirectDispatch[base+2u]=record.z;}
 	@compute @workgroup_size(64) fn clearFinePageDelta(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let item=linearInvocation(wid,nwg,local);if(item<16u){pageDelta[item]=0u;}if(item<21u){pageDelta[lifecycleDispatchOffset()+item]=0u;}if(item<24u){indirectDispatch[item]=0u;}if(item==1u){pageDelta[1]=params.nextGeneration;}}
 @compute @workgroup_size(64) fn clearDesiredGeneration(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let item=linearInvocation(wid,nwg,local);if(item<5u+params.pageCapacity){targetB[item]=0u;}if(item<9u&&item!=6u){control[item]=0u;}if(item==6u){control[6]=params.dilationBrickRings;}}
+@compute @workgroup_size(64) fn clearFinePageDirectory(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let key=linearInvocation(wid,nwg,local);if(key<desiredLogicalCount()){sourceD[5u+params.pageCapacity+key]=INVALID;}}
 @compute @workgroup_size(64) fn clearTopologyErrors(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);if(work<params.pageCapacity){atomicStore(&topologyErrors[work],0u);}}
 @compute @workgroup_size(64) fn discoverInterfaceBricks(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);if(work>=params.pageCapacity){return;}desiredCandidates[work]=INVALID;let activeCount=min(sourceB[0],params.pageCapacity);if(work>=activeCount){return;}let id=sourceB[5u+work];if(id>=params.pageCapacity||sourceA[id*10u+2u]!=params.currentGeneration){atomicOr(&topologyErrors[work],MALFORMED);return;}var interfaceBrick=false;var malformed=false;for(var sample=0u;sample<params.samplesPerBrick&&!interfaceBrick;sample+=1u){let index=id*params.samplesPerBrick+sample;if((sourceC[index]&VALID)==0u){continue;}let center=bitcast<f32>(sourceD[index]);if(!finite(center)){malformed=true;continue;}for(var direction=0u;direction<6u;direction+=1u){let neighbor=currentNeighbor(id,sample,direction);if(neighbor==INVALID||(sourceC[neighbor]&VALID)==0u){continue;}let other=bitcast<f32>(sourceD[neighbor]);if(finite(other)&&(other<0.0)!=(center<0.0)){interfaceBrick=true;break;}}}desiredCandidates[work]=select(INVALID,sourceA[id*10u+1u],interfaceBrick);if(malformed){desiredCandidates[work]=INVALID;atomicOr(&topologyErrors[work],MALFORMED);}}
 @compute @workgroup_size(64) fn insertExternalSeeds(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let recurring=currentFinePopulated();let seed=linearInvocation(wid,nwg,local);if(seed>=params.pageCapacity){return;}let output=params.pageCapacity+seed;desiredCandidates[output]=INVALID;if(arrayLength(&externalSeeds)<4u){return;}let rawCount=externalSeeds[0];let available=arrayLength(&externalSeeds)-4u;if(seed>=min(rawCount,min(params.pageCapacity,available))){return;}if(externalSeeds[1]!=0u||rawCount>params.pageCapacity||rawCount>available){atomicOr(&topologyErrors[seed],MALFORMED);return;}let key=externalSeeds[4u+seed];let tagged=externalSeedTaggedValue(key);let endpoint=tagged!=INVALID&&(tagged&RECURRING_SUPPORT)!=0u;if(recurring&&!endpoint){return;}if(!recurring&&!endpoint&&!externalAffineInterfaceBrick(key)){return;}if(key<params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z){desiredCandidates[output]=key;}else{atomicOr(&topologyErrors[seed],MALFORMED);}}
@@ -1441,11 +1447,11 @@ fn identityTotal(stream:u32,count:u32)->u32{
  let work=linearInvocation(wid,nwg,local);let desiredCount=min(control[2],params.pageCapacity);
  if(work>=desiredCount||control[0]!=0u||pageDelta[15]!=VALID){return;}let key=pageDelta[desiredKeysOffset()+work];
  let old=carriedPage(key);if(old!=INVALID){let base=old*10u;for(var word=0u;word<10u;word+=1u){sourceC[base+word]=currentMetadata[base+word];}
-  sourceC[base+2u]=params.nextGeneration;sourceD[5u+work]=old;
+  sourceC[base+2u]=params.nextGeneration;sourceD[5u+work]=old;sourceD[5u+params.pageCapacity+key]=old;
  }else{let rank=desiredCandidates[work];let id=pageDelta[supportPagesOffset()+rank];let base=id*10u;
   sourceC[base]=id;sourceC[base+1u]=key;sourceC[base+2u]=params.nextGeneration;sourceC[base+3u]=1u;
   for(var direction=0u;direction<6u;direction+=1u){sourceC[base+4u+direction]=INVALID;}
-  sourceD[5u+work]=id;pageDelta[addedPagesOffset()+rank]=id;}
+  sourceD[5u+work]=id;sourceD[5u+params.pageCapacity+key]=id;pageDelta[addedPagesOffset()+rank]=id;}
  desiredCandidates[work]=0u;
 }
 @compute @workgroup_size(1) fn finalizeDesiredPageIdentityAssignment(){
@@ -1570,7 +1576,7 @@ fn publishFineSettlementDispatch(){writeIndirectDispatch(0u,fineSettlementWorkgr
  let currentCount=select(0u,min(currentWorklist[0],params.pageCapacity),currentPublished);
  if(work<currentCount){let id=currentWorklist[5u+work];if(id<params.pageCapacity&&currentMetadata[id*10u+2u]==params.currentGeneration){
    if(local<10u){let base=id*10u;sourceC[base+local]=currentMetadata[base+local];if(local==2u){sourceC[base+2u]=params.nextGeneration;}}
-   if(local==0u){sourceD[5u+work]=id;}}}
+   if(local==0u){let key=currentMetadata[id*10u+1u];sourceD[5u+work]=id;if(key<desiredLogicalCount()){sourceD[5u+params.pageCapacity+key]=id;}}}}
  if(work<pageDelta[11]){let id=pageDelta[addedPagesOffset()+work];if(id<params.pageCapacity&&currentMetadata[id*10u+2u]!=params.currentGeneration&&local<10u){sourceC[id*10u+local]=INVALID;}}
  if(work<pageDelta[14]&&local<params.samplesPerBrick){let id=pageDelta[rollbackPagesOffset()+work];let index=id*params.samplesPerBrick+local;
   let value=payloadSnapshot[index];if(finite(value)){targetA[index]=VALID|select(0u,16u,value<0.0);targetB[index]=bitcast<u32>(value);}}

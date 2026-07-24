@@ -73,7 +73,7 @@ test("fine-summary recurring publication is delta-only and caller-brokered", () 
   assert.match(encode, /runIndirect\("recomputeFineSummaryParents"/);
   assert.equal([...encode.matchAll(/\brun\("/g)].length, 2,
     "one persistent builder and one persistent publisher are the only direct recurring dispatches");
-  const buildAt = encode.indexOf('run("buildFineSummaryDelta"');
+  const buildAt = encode.indexOf('run("prepareFineSummaryDelta"');
   const baseAt = encode.indexOf('runIndirect("recomputeFineSummaryBase"');
   const parentsAt = encode.indexOf('runIndirect("recomputeFineSummaryParents"');
   const publishAt = encode.indexOf('run("publishFineSummaryDelta"');
@@ -86,7 +86,7 @@ test("fine-summary recurring publication is delta-only and caller-brokered", () 
     /fineDirtyContains[\s\S]*stageFineOnlyCarry[\s\S]*publicDirtySummary/,
     "private fine-only carry and public corrected-coarse union must remain separate");
   assert.match(fineLevelSetSummaryWGSL,
-    /fn recomputeFineSummaryBase[\s\S]*let fineRecord=inLevel;[\s\S]*fn recomputeFineSummaryParents[\s\S]*if\(key<p\.levelOffset\|\|key>=p\.levelOffset\+p\.levelKeyCount\)\{return;\}/,
+    /fn recomputeFineSummaryBase[\s\S]*let fineRecord=inLevel;[\s\S]*fn recomputeFineSummaryParents[\s\S]*let inLevel=enabled&&key>=p\.levelOffset&&key<p\.levelOffset\+p\.levelKeyCount/,
     "coarse-dirty base and ancestor keys must refresh the live fine cache before the corrected-coarse union");
   assert.match(fineLevelSetSummaryWGSL,
     /fn coarseSummaryAt[\s\S]*COARSE_AUTHORITY\|CENTER_COMPLETE,bitcast<u32>\(e\.phi\)[\s\S]*fn publicDirtySummary[\s\S]*fineCenterComplete=\(value\.flags&CENTER_COMPLETE\)==CENTER_COMPLETE[\s\S]*select\(coarseValue\.centerPhi,fineCenter,fineCenterComplete\)/,
@@ -98,29 +98,47 @@ test("fine-summary recurring publication is delta-only and caller-brokered", () 
     /prepareFineSummaryWork|summarizeFineBricks|mergeCoarsePhiSummaries|scanFineSummarySegments|publishFineSummaryRuns/,
     "the deleted full-live rebuild path must not remain as a fallback");
   assert.match(fineLevelSetSummaryWGSL,
-    /buildFineSummaryDelta[\s\S]*summaryBuildState\[3\]=count[\s\S]*summaryBuildState\[4\]=padded[\s\S]*workgroupUniformLoad\(&summaryBuildState\[3\]\)[\s\S]*workgroupUniformLoad\(&summaryBuildState\[4\]\)[\s\S]*for\(var index=count\+lid;index<padded[\s\S]*for\(var width=2u;width<=padded;width<<=1u\)/,
-    "the persistent builder emits and sorts only the exact power-of-two compact prefix");
-  const buildBody = fineLevelSetSummaryWGSL.match(
-    /fn buildFineSummaryDelta[\s\S]*?\n\}(?=\nfn combineSummary)/,
-  )?.[0] ?? "";
-  assert.match(buildBody, /storageBarrier\(\);workgroupBarrier\(\)/,
-    "bitonic stages require both storage visibility and workgroup execution convergence");
-  assert.doesNotMatch(buildBody,
-    /let (?:count|padded)=workState\[[34]\][\s\S]*workgroupBarrier/,
-    "a storage-derived count must never directly control a barrier-containing loop");
+    /prepareFineSummaryDelta[\s\S]*workState\[3\]=count;workState\[4\]=padded[\s\S]*publishSortDispatch\(padded\)/,
+    "the builder publishes the exact power-of-two compact prefix as an indirect extent");
+  assert.match(fineLevelSetSummaryWGSL,
+    /sortFineSummaryTiles[\s\S]*sortTile\[lid\][\s\S]*mergeFineSummaryRuns[\s\S]*mergeRunPartition/,
+    "sorting uses parallel shared-memory tiles and deterministic merge-path passes");
+  assert.match(fineLevelSetSummaryWGSL,
+    /publishSortDispatch\(items:u32\)[\s\S]*items>runWidth[\s\S]*writeSortDispatch\(1u\+passIndex,select\(0u,groups,enabled\)\)[\s\S]*\(activeMerges&1u\)!=0u/,
+    "inactive merge widths must publish zero-work indirect dispatches and canonicalize only odd ping-pong parity");
+  assert.match(fineLevelSetSummaryWGSL,
+    /mergeFineSummaryScratchToRecords[\s\S]*records\[index\]=sortScratch\[index\]/,
+    "odd active merge counts restore the exact sorted prefix to the canonical records arena");
+  assert.match(encode,
+    /dispatchWorkgroupsIndirect\(this\.indirect,24\+index\*12\)[\s\S]*24\+this\.plan\.mergePassCount\*12/,
+    "every merge width and the conditional canonicalization use their own GPU-authored extent");
   assert.doesNotMatch(fineLevelSetSummaryWGSL,
-    /@compute[^]*?fn (?:prepareFineSummaryDelta|emitFineSummaryDirtyAncestors|emitCorrectedCoarseDirtySummaries|sortFineSummaryDelta|compactFineOnlySummaryCarry|compactFineOnlySummaryDirty|prepareFineOnlySummaryMerge|mergeFineOnlySummaryCandidate|validateAndCommitFineOnlySummaryCandidate|compactFineSummaryCarry|compactFineSummaryDirty|prepareFineSummaryMerge|mergeFineSummaryCandidate|validateAndCommitFineSummaryCandidate)\b/,
+    /@compute[^]*?fn (?:emitFineSummaryDirtyAncestors|emitCorrectedCoarseDirtySummaries|sortFineSummaryDelta|compactFineOnlySummaryCarry|compactFineOnlySummaryDirty|prepareFineOnlySummaryMerge|mergeFineOnlySummaryCandidate|validateAndCommitFineOnlySummaryCandidate|compactFineSummaryCarry|compactFineSummaryDirty|prepareFineSummaryMerge|mergeFineSummaryCandidate|validateAndCommitFineSummaryCandidate)\b/,
     "all serial/mutable setup and publication entry points must stay deleted");
   assert.match(fineLevelSetSummaryWGSL,
     /publishFineSummaryDelta[\s\S]*stageValidateFineOnlyCandidate\(lid\);storageBarrier\(\);workgroupBarrier\(\);[\s\S]*stageGlobalCarry/,
     "the private fine commit must become visible before the corrected-coarse union is built");
   assert.match(fineLevelSetSummaryWGSL, /let fineRecord=inLevel;/,
     "coarse-dirty keys must refresh the private fine cache before the public fine/coarse merge");
+  assert.match(fineLevelSetSummaryWGSL,
+    /fn recomputeFineSummaryParents[\s\S]*if\(lid<8u\)[\s\S]*parentChildren\[lid\]=item[\s\S]*workgroupBarrier\(\)[\s\S]*for\(var child=0u;child<8u/,
+    "parent summary children and center taps must use eight lanes before the exact ordered fold");
+  assert.doesNotMatch(fineLevelSetSummaryWGSL,
+    /fn recomputeFineSummaryParents[\s\S]*?\{if\(lid!=0u\)\{return;\}/,
+    "parent summary workgroups must not leave 63 lanes idle");
   assert.doesNotMatch(fineLevelSetSummaryWGSL,
     /histogramFineSummaryDelta|prefixFineSummaryDelta|scatterFineSummaryDelta|SortP|sortP|histograms/,
     "radix pipelines and their backing storage must stay deleted");
   assert.match(fineLevelSetSummaryWGSL, /pageDelta\[15\]==PAGE_DELTA_VALID/,
     "recurring summaries consume the topology producer's one-valued delta sentinel");
+  assert.match(fineLevelSetSummaryWGSL,
+    /fn finePage\(key:u32\)[\s\S]*directoryBase=5u\+p\.pageCapacity[\s\S]*b\[directoryBase\+key\]/,
+    "base and center summaries use the generation-validated direct page directory");
+  const finePageBody = fineLevelSetSummaryWGSL.match(
+    /fn finePage\(key:u32\)->u32\{[\s\S]*?\n\}/,
+  )?.[0] ?? "";
+  assert.doesNotMatch(finePageBody, /var low=|while\(low<high\)/,
+    "summary taps must not repeatedly binary-search the compact fine worklist");
   assert.doesNotMatch(fineLevelSetSummaryWGSL, /pageDelta\[15\]==PUBLISHED/,
     "the topology page-delta ABI cannot inherit the summary directory's high-bit sentinel");
   assert.doesNotMatch(fineLevelSetSummaryWGSL,
@@ -173,7 +191,8 @@ test("every fine-summary pipeline binds exactly its transitively reachable resou
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
     else Reflect.deleteProperty(globalThis, "GPUBufferUsage");
   }
-  assert.equal(observed.size, 4, "the audit must exercise the complete clean-cut fine-summary pipeline set");
+  assert.equal(observed.size, 6,
+    "the small audit plan must exercise prepare, emit, tiled-sort, recompute, and publication");
   for (const [entryPoint, bindings] of observed) {
     assert.deepEqual(bindings, reachableSummaryBindings(entryPoint),
       `${entryPoint} host bindings must equal transitive WGSL reachability`);

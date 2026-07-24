@@ -377,8 +377,10 @@ test("unchanged octree generations zero every bulk topology and frontier schedul
     /classifyFrontierCarryPipeline[\s\S]*topologyCandidateDispatch,\s*12[\s\S]*mergeFrontierRowsPipeline[\s\S]*topologyCandidateDispatch,\s*24/);
   assert.doesNotMatch(rebuild, /dispatchWorkgroups\(this\.linearBlocks\)/,
     "the topology stage must not retain capacity-sized direct launches");
-  assert.equal((rows.match(/dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch, 12\)/g) ?? []).length, 8,
+  assert.equal((rows.match(/dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch, 12\)/g) ?? []).length, 6,
     "every row-sized delta stage consumes the live or identity-reuse schedule");
+  assert.doesNotMatch(rows, /prepareRowDeltaPipeline|classifyRowDeltaPipeline|finalizeRowDeltaClassificationPipeline/,
+    "the canonical sorted frontier merge must publish exact row maps without a second binary-search join");
   assert.doesNotMatch(rows, /dispatchWorkgroups\(this\.linearBlocks\)/);
   assert.match(octreeProjectionShader,
     /let reuse = compaction\[dirtyAuthorityBase\(\)\] == DIRTY_TILE_VALID_MAGIC[\s\S]*compaction\[0\] == 0u && compaction\[4\] == 0u/);

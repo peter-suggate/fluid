@@ -62,7 +62,7 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
     /setBindGroup\(0,\s*active\s*\?\s*this\.fineSummarySizingGroup\s*:\s*this\.groups\.ab\)[\s\S]*classifyFrontierCandidates[\s\S]*emitFrontierCandidates/,
     "frontier filtering and insertion both consume current fine-summary authority");
   assert.match(fineLevelSetSummaryWGSL,
-    /fn buildFineSummaryDelta[\s\S]*for\(var row=lid;row<coarseCount[\s\S]*coarseHierarchyKey\(coarseDirtyIdentity\(row\)\)/,
+    /fn emitFineSummaryDelta[\s\S]*let row=index-fineRecords;let key=coarseHierarchyKey\(coarseDirtyIdentity\(row\)\)/,
     "the persistent exact transaction builder consumes corrected-coarse delta rows directly");
   assert.match(fineLevelSetSummaryWGSL,
     /fn coarseAuthoritative[\s\S]*coarse\.state==PUBLISHED[\s\S]*coarseControl\[2\]/,
@@ -83,14 +83,14 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
     /fn stageFineOnlyDirty[\s\S]*let fineDirty=first&&key!=INVALID&&fineDirtyContains\(key\)[\s\S]*dirtySummaryAt\(key\)/,
     "duplicate fine/coarse delta keys must query fine authority instead of trusting unstable equal-key sort order");
   assert.match(fineLevelSetSummaryWGSL,
-    /fn coarseDirtyIdentity[\s\S]*coarseDelta\.items\[row\][\s\S]*fn buildFineSummaryDelta[\s\S]*records\[output\]=Entry/,
+    /fn coarseDirtyIdentity[\s\S]*coarseDelta\.items\[row\][\s\S]*fn emitFineSummaryDelta[\s\S]*records\[index\]=Entry/,
     "recurring corrected coarse work emits only the compact value/phase delta");
   assert.doesNotMatch(fineLevelSetSummaryWGSL,
     /sourceSlot|hashCapacity|maximumHashProbes/,
     "summary merging must consume the exact published row count, never scan unused directory capacity");
   const summaryEncodeOrder = WebGPUFineLevelSetSummaries.prototype.encode.toString();
   assert.ok(
-    summaryEncodeOrder.indexOf('run("buildFineSummaryDelta"')
+    summaryEncodeOrder.indexOf('run("prepareFineSummaryDelta"')
       < summaryEncodeOrder.indexOf("broker.updateIndirectBuffer"),
     "fine and coarse delta records are built persistently before the exact recompute extent is published",
   );
@@ -98,7 +98,7 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
   assert.doesNotMatch(fineLevelSetSummaryWGSL,
     /prepareFineSummaryWork|summarizeFineBricks|mergeCoarsePhiSummaries|scanFineSummarySegments/);
   assert.match(fineLevelSetSummaryWGSL,
-    /fn entryPresent[\s\S]*COARSE_AUTHORITY\|CENTER_COMPLETE[\s\S]*fn centerSummary[\s\S]*let span=\(1u<<p\.level\)\*resolution[\s\S]*index>=arrayLength\(&c\)\|\|index>=arrayLength\(&d\)[\s\S]*mask==0xffu[\s\S]*CENTER_COMPLETE/,
+    /fn entryPresent[\s\S]*COARSE_AUTHORITY\|CENTER_COMPLETE[\s\S]*fn centerSampleAt[\s\S]*let span=\(1u<<p\.level\)\*resolution[\s\S]*index>=arrayLength\(&c\)\|\|index>=arrayLength\(&d\)[\s\S]*fn finishCenterSummary[\s\S]*mask==0xffu[\s\S]*CENTER_COMPLETE/,
     "every dyadic node retains an exact finite eight-sample centre phase independently of narrow-band membership");
   const summaryEncode = WebGPUFineLevelSetSummaries.prototype.encode.toString();
   for (const field of ["source.metadata", "source.worklist", "source.flags", "source.phi"]) {

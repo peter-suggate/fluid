@@ -45,6 +45,7 @@ import {
   type GPUTimestampPhase,
   type PerformanceTrace,
 } from "./performance-trace";
+import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 export const MAX_PRESENTATION_GAP_MS = 1000 / 60;
@@ -819,9 +820,15 @@ export class FluidLabRenderer {
 
   private currentFrameMetrics(methodId: string, context: string, presentationSubmitted: boolean, cpu?: PerformanceTrace): RendererFrameMetrics {
     const water = this.waterPipeline?.surfaceRenderDiagnostics;
+    const instrumentation = usePerformanceInstrumentationStore.getState();
+    const presentation = instrumentation.enabled
+      && this.latestPresentationTrace
+      && this.latestPresentationTrace.capturedAt_ms >= instrumentation.enabledAt_ms
+      ? this.latestPresentationTrace
+      : undefined;
     return {
       cpu,
-      presentation: this.latestPresentationTrace,
+      presentation,
       context,
       methodId,
       presentationSubmitted,
@@ -1097,14 +1104,17 @@ export class FluidLabRenderer {
   }
 
   draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE, svoLightingMode: SvoLightingMode = DEFAULT_SVO_LIGHTING_MODE, svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS): RendererFrameMetrics {
-    const cpuTrace = new CPUPerformanceTrace(
-      ++this.cpuTraceSampleId,
-      `${config.methodId}:${config.quality}`,
-      { id: "frame-control", label: "Frame control + physics submission" },
-    );
-    if (!this.device || this.disposed || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace.finish());
+    const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
+    const cpuTrace = measurementInstrumentationEnabled
+      ? new CPUPerformanceTrace(
+        ++this.cpuTraceSampleId,
+        `${config.methodId}:${config.quality}`,
+        { id: "frame-control", label: "Frame control + physics submission" },
+      )
+      : undefined;
+    if (!this.device || this.disposed || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     this.resize(this.rasterRenderScale);
-    if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace.finish());
+    if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     if (svoRenderMode !== "svo" || voxelRenderMode !== "smooth") { this.svoPickingAvailable = false; this.lastSvoPickingBodies = []; }
     const requestedSvoDiagnostics = normalizeSvoRenderDiagnostics(svoDiagnostics);
     const activeSvoDiagnostics = requestedSvoDiagnostics.overlay === "off" || svoRenderMode !== "svo" || voxelRenderMode !== "smooth"
@@ -1145,9 +1155,9 @@ export class FluidLabRenderer {
       this.voxelDebugSourceGeneration = requestedVoxelDebugGeneration;
     }
     if (readyGPUFluid) { this.preparedGPUTime_s = Math.max(this.preparedGPUTime_s, time_s); this.preparedGPUBodies = bodies; }
-    if (this.presentationPending) return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace.finish());
-    const observedStep_ms=observedGPUAdvanceTime_ms(readyGPUFluid?.info.physicsTrace);
-    const renderBeforePhysics = backend === "webgpu" && !presentationHasPhysicsSlack(this.lastPresentationCompletedAt_ms, performance.now(), observedStep_ms, this.latestPresentationTrace?.total_ms ?? 0);
+    if (this.presentationPending) return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
+    const observedStep_ms=measurementInstrumentationEnabled?observedGPUAdvanceTime_ms(readyGPUFluid?.info.physicsTrace):undefined;
+    const renderBeforePhysics = backend === "webgpu" && !presentationHasPhysicsSlack(this.lastPresentationCompletedAt_ms, performance.now(), observedStep_ms, measurementInstrumentationEnabled ? this.latestPresentationTrace?.total_ms ?? 0 : 0);
     let gpuInfo = readyGPUFluid?.info;
     const explicitPausedAdvance = readyGPUFluid && pausedTargetRequiresGPUAdvance(this.simulationRunning, time_s, readyGPUFluid.info.submittedTime_s ?? 0);
     if (readyGPUFluid && (explicitPausedAdvance || !renderBeforePhysics)) gpuInfo = this.submitPreparedGPUFluid(readyGPUFluid, time_s, bodies);
@@ -1173,7 +1183,7 @@ export class FluidLabRenderer {
       );
     }
     if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const compactSurface=Boolean(this.gpuFluid.globalFineLevelSetSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture);}
-    cpuTrace.transition({ id: "scene-upload", label: "Scene and field uploads" });
+    cpuTrace?.transition({ id: "scene-upload", label: "Scene and field uploads" });
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const cameraStabilityKey = [
       basis.position.x, basis.position.y, basis.position.z,
@@ -1262,10 +1272,11 @@ export class FluidLabRenderer {
     // Reduced-rate cone lighting is the production default: half-resolution
     // prepass + guided upsample, measured within the visibility-error gates.
     this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: 0.5 });
-    cpuTrace.transition({ id: "command-encoding", label: "Presentation command encoding" });
-    const traceRequestedAt_ms = performance.now();
+    cpuTrace?.transition({ id: "command-encoding", label: "Presentation command encoding" });
+    const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
     const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
-    const shouldTracePresentation = !this.presentationTracePending
+    const shouldTracePresentation = measurementInstrumentationEnabled
+      && !this.presentationTracePending
       && traceRequestedAt_ms - this.lastPresentationTraceAt_ms >= 250;
     const presentationTraceSampleId = shouldTracePresentation
       ? ++this.presentationTraceSampleId
@@ -1450,7 +1461,9 @@ export class FluidLabRenderer {
       this.presentationTracePending = true;
       const sampledContext = presentationContext;
       void presentationTraceRead.then((trace) => {
-        if (!trace || this.disposed || this.deviceLost || this.presentationContext !== sampledContext) return;
+        const instrumentation = usePerformanceInstrumentationStore.getState();
+        if (!trace || this.disposed || this.deviceLost || this.presentationContext !== sampledContext
+          || !instrumentation.enabled || instrumentation.enabledAt_ms > traceRequestedAt_ms) return;
         this.latestPresentationTrace = trace;
         if (!this.simulationRunning) this.pausedPresentationRevision += 1;
       }).catch(() => {
@@ -1475,9 +1488,9 @@ export class FluidLabRenderer {
       if(this.gpuFluid)this.continuePreparedGPUWork(this.gpuFluid,this.gpuFluidGeneration);
     }).catch(()=>{this.presentationPending=false;});
     if(readyGPUFluid&&this.simulationRunning){
-      cpuTrace.transition({ id: "other", label: "Post-submit physics scheduling" });
-      const observedPostPresentationStep_ms=observedGPUAdvanceTime_ms(readyGPUFluid.info.physicsTrace);
-      const postPresentationDepth=presentationPhysicsQueueDepth(observedPostPresentationStep_ms,this.latestPresentationTrace?.total_ms??0);
+      cpuTrace?.transition({ id: "other", label: "Post-submit physics scheduling" });
+      const observedPostPresentationStep_ms=measurementInstrumentationEnabled?observedGPUAdvanceTime_ms(readyGPUFluid.info.physicsTrace):undefined;
+      const postPresentationDepth=presentationPhysicsQueueDepth(observedPostPresentationStep_ms,measurementInstrumentationEnabled?this.latestPresentationTrace?.total_ms??0:0);
       // postPresentationDepth is a ceiling, not an increment. Adding the
       // current pending count here admitted another full window every frame,
       // so slow 16/32-leaf solvers accumulated seconds of work that Reset then
@@ -1489,7 +1502,7 @@ export class FluidLabRenderer {
         if((readyGPUFluid.info.submittedTime_s??0)<=before)break;
       }
     }
-    return this.currentFrameMetrics(config.methodId, presentationContext, true, cpuTrace.finish());
+    return this.currentFrameMetrics(config.methodId, presentationContext, true, cpuTrace?.finish());
   }
 
   destroy(): void {

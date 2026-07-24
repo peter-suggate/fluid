@@ -316,10 +316,13 @@ test("power publication transaction buffers match WGSL alignment exactly", () =>
   for (const producer of [descriptor, topology]) {
     assert.match(producer, /CONTROL_ARENA_BYTES = 112/);
     assert.match(producer, /size: OCTREE_POWER_(?:DESCRIPTOR|TOPOLOGY)_CONTROL_ARENA_BYTES/);
-    assert.match(producer,
-      /copyBufferToBuffer\(this\.control,\s*80,\s*this\.workDispatch,\s*0,/,
-      "the second vec3u starts at the next 16-byte WGSL alignment boundary");
   }
+  assert.match(descriptor,
+    /copyBufferToBuffer\(this\.control,\s*80,\s*this\.workDispatch,\s*0,/,
+    "the descriptor commit vec3u starts at the next 16-byte WGSL alignment boundary");
+  assert.doesNotMatch(topology,
+    /copyBufferToBuffer\(this\.control,\s*80,\s*this\.workDispatch,\s*0,/,
+    "topology scatter owns its changed rows and needs no second indirect dispatch");
   assert.match(faces, /OCTREE_POWER_FACE_CONTROL_BYTES = 64/);
   assert.match(faces, /OCTREE_POWER_FACE_PARAMETER_BYTES = 112/);
   assert.match(faces, /OCTREE_POWER_FACE_BOUNDARY_QUERY_BYTES = 32/);

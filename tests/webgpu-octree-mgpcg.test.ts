@@ -147,16 +147,16 @@ test("large-domain PCG fuses scalar reductions with adjacent vector work", () =>
     /finishPCGIteration[\s\S]*rz\+=residual\[row\]\*preconditioned\[row\][\s\S]*preconditioned\[row\]\+beta\*direction\[row\]/,
     "r·z reduction and direction update must share one workgroup dispatch");
   assert.match(octreeMGPCGShader,
-    /clearHybridPreconditioner[\s\S]*row>=liveRows\(\)[\s\S]*hybridA\[row\]=0\.0/,
-    "preconditioner initialization must touch one live vector only");
-  const clear = octreeMGPCGShader.slice(octreeMGPCGShader.indexOf("fn clearHybridPreconditioner"),
-    octreeMGPCGShader.indexOf("fn classifyHybridBand"));
-  assert.doesNotMatch(clear, /hybridB|hybridRhs|hybridCorrection/,
-    "vectors overwritten later in the preconditioner must not be cleared");
+    /prepareHybridSmoothing[\s\S]*for\(var row=lid;row<n;row\+=256u\)\{hybridA\[row\]=0\.0;\}\}storageBarrier\(\)/,
+    "persistent pre-smoothing must initialize exactly the live A rows before its first barrier");
+  const prepareSmoothing = octreeMGPCGShader.slice(octreeMGPCGShader.indexOf("fn prepareHybridSmoothing"),
+    octreeMGPCGShader.indexOf("storageBarrier()", octreeMGPCGShader.indexOf("fn prepareHybridSmoothing")));
+  assert.doesNotMatch(prepareSmoothing, /hybridB|hybridRhs|hybridCorrection/,
+    "vectors overwritten by later sweeps and the V-cycle must not be cleared");
   const encode = WebGPUOctreeMGPCG.prototype.encode.toString();
   const prepare = encode.indexOf("single(this.stages.preparePCGStep)");
   const deviceGate = encode.indexOf("single(this.stages.updatePCGState)", prepare);
-  const finalize = encode.indexOf("single(this.stages.finalize)", deviceGate);
+  const finalize = encode.indexOf("single(this.stages.finalizeAndPublish)", deviceGate);
   assert.ok(prepare >= 0 && prepare < deviceGate && deviceGate < finalize,
     "every PCG update must reach the device residual gate before fail-closed publication");
   assert.doesNotMatch(encode, /mapAsync|getMappedRange/,
@@ -251,8 +251,26 @@ test("Section 4.3 hybrid has a three-layer band and symmetry-locked paired L2 sm
   assert.match(octreeMGPCGShader, /dilateHybridBandAtoB/);
   assert.match(octreeMGPCGShader, /dilateHybridBandBtoA/);
   assert.match(octreeMGPCGShader,
-    /clearHybridPreconditioner[\s\S]*row>=liveRows\(\)\|\|stopped\(\)/,
-    "PCG preconditioning must not clear row-capacity hybrid vectors");
+    /prepareHybridSmoothing[\s\S]*for\(var row=lid;row<n;row\+=256u\)\{hybridA\[row\]=0\.0;\}/,
+    "PCG preconditioning must initialize only live compact rows");
+  assert.match(octreeMGPCGShader,
+    /prepareHybridSmoothing[\s\S]*storageBarrier\(\)[\s\S]*params\.solve\.w[\s\S]*storageBarrier\(\)/,
+    "persistent pre-smoothing must preserve a storage dependency barrier between Jacobi sweeps");
+  assert.match(octreeMGPCGShader,
+    /finishHybridSmoothing[\s\S]*params\.solve\.w[\s\S]*storageBarrier\(\)[\s\S]*preconditioned\[row\]=value/,
+    "persistent post-smoothing must publish only after its final synchronous sweep");
+  assert.match(octreeMGPCGShader,
+    /smoothHybridZeroValue[\s\S]*h\.diagonal\*0\.0[\s\S]*value-=e\.coefficient\*0\.0[\s\S]*residual\[row\]-value/,
+    "large row sets must compute the exact zero-vector first sweep without a serial clear");
+  assert.match(octreeMGPCGShader,
+    /smoothHybridAtoBAndPublish[\s\S]*smoothHybridValue\(row,false\)[\s\S]*hybridB\[row\]=value[\s\S]*preconditioned\[row\]=value/,
+    "the final parallel post-sweep must publish its identical row value without another launch");
+  const hybridEncode = (WebGPUOctreeMGPCG.prototype as unknown as {
+    applySection43HybridPreconditioner: () => void;
+  }).applySection43HybridPreconditioner.toString();
+  assert.match(hybridEncode,
+    /rowCapacity[\s\S]*OCTREE_SINGLE_WORKGROUP_HYBRID_MAXIMUM_ROW_CAPACITY[\s\S]*smoothHybridZeroToB/,
+    "production row capacities must select the latency-hiding parallel smoother");
   assert.match(octreeMGPCGShader, /formHybridL1Residual/);
   assert.match(octreeMGPCGShader, /addHybridL1Correction/);
   const source = WebGPUOctreeMGPCG.toString();
@@ -333,6 +351,14 @@ test("large-domain command stream contains only bounded parallel PCG", () => {
     OCTREE_SECTION43_LARGE_DOMAIN_PCG_ITERATIONS);
   assert.equal(events.filter((stage) => stage === "finishPCGIteration").length,
     OCTREE_SECTION43_LARGE_DOMAIN_PCG_ITERATIONS - 1);
+  assert.equal(events.filter((stage) => stage === "prepareHybridSmoothing").length,
+    OCTREE_SECTION43_LARGE_DOMAIN_PCG_ITERATIONS,
+    "each preconditioner must encode one persistent pre-smoothing dispatch");
+  assert.equal(events.filter((stage) => stage === "finishHybridSmoothing").length,
+    OCTREE_SECTION43_LARGE_DOMAIN_PCG_ITERATIONS,
+    "each preconditioner must encode one persistent post-smoothing/publication dispatch");
+  assert.equal(events.some((stage) => stage === "smoothHybridAtoB" || stage === "smoothHybridBtoA"), false,
+    "the fixed Jacobi sweep count must execute behind storage barriers, not host dispatches");
   assert.equal(events.some((stage) => /Chebyshev|Spectrum|Power/.test(stage)), false,
     "the encoded large-domain command stream must have no polynomial or spectral-estimation tail");
   assert.equal(solver.iterationBudget, OCTREE_SECTION43_LARGE_DOMAIN_PCG_ITERATIONS,
@@ -371,7 +397,7 @@ test("large-domain Section 4.3 PCG uses GPU-only fail-closed convergence", () =>
   const encodeSource = WebGPUOctreeMGPCG.prototype.encode.toString();
   const update = encodeSource.indexOf("single(this.stages.preparePCGStep)");
   const residualGate = encodeSource.indexOf("single(this.stages.updatePCGState)", update);
-  const finalize = encodeSource.indexOf("single(this.stages.finalize)", residualGate);
+  const finalize = encodeSource.indexOf("single(this.stages.finalizeAndPublish)", residualGate);
   assert.ok(update >= 0 && update < residualGate && residualGate < finalize,
     "PCG must test its updated residual before fail-closed publication");
   assert.equal(octreeMGPCGShader.match(/atomicAdd\(&control\[2\],1u\)/g)?.length, 1,
@@ -430,7 +456,9 @@ test("fixed PCG replay retains immutable bind groups instead of rebuilding descr
     "reported pressure dispatch count must equal the command stream actually emitted");
   solver.encode(new PassBroker(encoder), pressureA, pressureB, authorityControl);
   assert.equal(passes, firstPasses * 2, "a second replay should add the same two pass transitions");
-  assert.ok(firstDispatches > firstGroups * 10, `${firstDispatches} dispatches should share ${firstGroups} descriptors`);
+  assert.ok(firstDispatches > firstGroups * 5, `${firstDispatches} dispatches should share ${firstGroups} descriptors`);
+  assert.ok(firstDispatches < 100,
+    "persistent hybrid smoothing must delete the former sixteen launches per preconditioner");
   assert.equal(bindGroups, firstGroups, "a second fixed replay must allocate no bind groups");
   solver.destroy();
 });
@@ -478,7 +506,7 @@ test("large-domain PCG auto-layout lists exactly match transitive WGSL resources
   )) {
     declared.set(match[1], match[2].split(",").map(Number).sort((left, right) => left - right));
   }
-  assert.equal(declared.size, 17, "every large-domain PCG entry point must declare one immutable binding list");
+  assert.equal(declared.size, 18, "every large-domain PCG entry point must declare one immutable binding list");
   for (const [entryPoint, bindings] of declared) {
     assert.deepEqual(bindings, transitiveBindings(entryPoint),
       `${entryPoint} must bind exactly its transitively reachable auto-layout resources`);
@@ -512,11 +540,13 @@ test("Dawn accepts the authoritative large-domain PCG entry points", {
   const errors = info.messages.filter((message) => message.type === "error");
   assert.deepEqual(errors.map((message) => `${message.lineNum}:${message.linePos} ${message.message}`), []);
   for (const entryPoint of [
-    "initializeMGPCG", "formInitialResidual", "clearHybridPreconditioner",
-    "classifyHybridBand", "dilateHybridBandAtoB", "dilateHybridBandBtoA", "smoothHybridAtoB",
-    "smoothHybridBtoA", "formHybridL1Residual", "addHybridL1Correction", "publishHybridPreconditioner",
+    "initializeMGPCG", "formInitialResidual", "prepareHybridSmoothing",
+    "classifyHybridBand", "dilateHybridBandAtoB", "dilateHybridBandBtoA",
+    "smoothHybridZeroToB", "smoothHybridAtoB", "smoothHybridBtoA",
+    "formHybridL1Residual", "addHybridL1Correction", "finishHybridSmoothing",
+    "smoothHybridAtoBAndPublish",
     "initializePCGReduction", "preparePCGStep", "updatePCGStateAndReduceResidual", "finishPCGIteration",
-    "finalizeMGPCG", "publishMGPCG",
+    "finalizeAndPublishMGPCG",
   ]) device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint } });
   const validationError = await device.popErrorScope();
   assert.equal(validationError, null, validationError?.message); device.destroy();

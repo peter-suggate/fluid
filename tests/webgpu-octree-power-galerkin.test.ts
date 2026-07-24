@@ -14,7 +14,12 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
   assert.match(refreshKernel,
     /workgroup_id[\s\S]*refreshRecordBase\(\)\+2u\*cursor[\s\S]*sum\+=sourceCoefficient\(fineEntry\)\*weight/);
   assert.match(refreshKernel,
-    /cursor=first\+lane[\s\S]*cursor\+=64u[\s\S]*refreshPartial\[lane\][\s\S]*workgroupBarrier/);
+    /tile=lane>>6u[\s\S]*cursor=first\+tileLane[\s\S]*cursor\+=64u[\s\S]*refreshPartial\[lane\][\s\S]*workgroupBarrier/);
+  assert.match(refreshKernel,
+    /targetEntry=4u\*[\s\S]*refreshPartial\[64u\*tile\]/,
+    "four 64-lane refresh tiles must retain the audited per-entry reduction tree");
+  assert.match(octreePowerGalerkinShader,
+    /@compute @workgroup_size\(256\) fn refreshGalerkinTarget/);
   assert.doesNotMatch(refreshKernel, /pWeight|contributionIndex|left|right/,
     "numeric RAP refresh must consume baked combined weights without P-record indirections");
   assert.match(octreePowerGalerkinShader,
@@ -22,7 +27,7 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
   assert.match(octreePowerGalerkinShader,
     /importFineOperator[\s\S]*fixedRow\(other\.cell,other\.size\)[\s\S]*sourceColumn\(candidate\)==column[\s\S]*bitcast<u32>\(-entry\.coefficient\)/);
   assert.match(octreePowerGalerkinShader,
-    /initializeFineOperator[\s\S]*bitcast<u32>\(0\.0\)/,
+    /initializeFineOperator[\s\S]*bitcast<u32>\(0\.0\)[\s\S]*setSourceF\(A,row,0\.0\);setSourceF\(B,row,0\.0\)/,
     "inactive fixed rows must be zero equations and must not contaminate P^T*A*P with identity mass");
   assert.match(octreePowerGalerkinShader, /smoothSource[\s\S]*diagonal==0\.0/);
   assert.match(octreePowerGalerkinShader,
@@ -33,7 +38,7 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
     "measureSourceResidualPartials", "measureSourceResidualReduce",
   ]) {
     assert.match(octreePowerGalerkinShader,
-      new RegExp(`fn ${entryPoint}\\b[\\s\\S]{0,420}stopped\\(\\)`),
+      new RegExp(`fn ${entryPoint}\\b[\\s\\S]{0,900}stopped\\(\\)`),
       `${entryPoint} must skip the statically encoded tail after convergence`);
   }
   assert.match(octreePowerGalerkinShader,
@@ -42,10 +47,19 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
   assert.match(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
     /encodeFineOperatorImport[\s\S]*solve\.liveOperator\.leafHeaders/);
   assert.match(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
-    /refreshGalerkinTarget[\s\S]*true/,
-    "refresh dispatch must assign one workgroup to each target entry");
+    /refreshGalerkinTarget[\s\S]*Math\.ceil\(this\.entryCounts\[level\+1\]\/4\)[\s\S]*true/,
+    "refresh dispatch must assign one 64-lane workgroup tile to each target entry");
   assert.match(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
-    /for\s*\(let cycle[\s\S]*measureSourceResidual[\s\S]*publishSourceResidual[\s\S]*\}\s*if\s*\(solve\.correction\)/);
+    /restrictSourceDefect[\s\S]*Math\.ceil\(this\.nodeCounts\[level\+1\]\/4\)[\s\S]*true/,
+    "restriction dispatch must assign one 64-lane workgroup tile to each target row");
+  assert.match(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
+    /for\s*\(let cycle[\s\S]*measureSourceResidualPartials[\s\S]*measureSourceResidualReduce[\s\S]*\}\s*if\s*\(solve\.correction\)/);
+  assert.doesNotMatch(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
+    /dispatch\(0,\s*"publishSourceResidual"/,
+    "the bounded partial reduction must publish convergence without another singleton dispatch");
+  assert.doesNotMatch(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
+    /dispatch\(0,\s*"clearSourceCorrection"/,
+    "fine operator initialization must clear correction channels without another full-row dispatch");
   assert.equal("writeFineRhs" in WebGPUOctreePowerGalerkin.prototype, false,
     "the GPU solve must not retain a host-uploaded RHS fallback");
   assert.deepEqual([...OCTREE_POWER_GALERKIN_PIPELINES], [

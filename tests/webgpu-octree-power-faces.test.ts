@@ -254,8 +254,10 @@ test("power free-surface coefficients use strict current signed cell-centre cros
     "an unpublished coarse directory still rejects the generation instead of estimating phi");
   assert.match(sampler, /worklist\[1\]!=fineParams\.generation\|\|worklist\[3\]!=1u\|\|worklist\[4\]!=1u/,
     "fine pressure sampling must require the current all-or-nothing GPU publication header");
-  assert.match(sampler, /letmiddle=low\+\(high-low\)\/2u/,
-    "fine pressure sampling must use the immutable sorted worklist directory");
+  assert.match(sampler, /letdirectoryBase=5u\+fineParams\.worklistCapacity[\s\S]*worklist\[directoryBase\+key\]/,
+    "fine pressure sampling must use the immutable direct brick-to-page directory");
+  assert.doesNotMatch(sampler, /letmiddle=low\+\(high-low\)\/2u/,
+    "fine pressure sampling must not binary-search the published page list");
   assert.doesNotMatch(sampler, /pageHash|hashCapacity|maximumHashProbes|hashKey/,
     "the removed open-hash page table must not survive in the pressure-boundary sampler");
   assert.match(octreeProjectionSource,
@@ -554,8 +556,11 @@ test("face publication uses exact row-delta carry and deletes legacy whole-topol
     "legacy whole-topology reuse and its switch must be deleted");
   assert.match(shader, /fnmapOldFace\(source:u32\)->AffectedFaceResult\{[\s\S]*oldNegative=oldToNew\(face\.negativeRow\)[\s\S]*fnremappedOldFace[\s\S]*rowAffected\(face\.negativeRow\)/,
     "unchanged faces must be carried only through exact endpoint remapping and affected-row authority");
-  assert.match(shader, /fnrowAffected\(row:u32\)->bool\{varlow=0u;varhigh=affectedCount\(\);while\(low<high\)/,
-    "the immutable sorted affected list, not a broad capacity scan or stale map bit, defines the one-ring workset");
+  assert.match(shader,
+    /fnrowAffectedFlag\(row:u32\)->bool\{[\s\S]*ROW_DELTA_AFFECTED[\s\S]*fnrowAffected\(row:u32\)->bool\{[\s\S]*returnrowAffectedFlag\(row\)/,
+    "the exact new-to-old row publication must provide O(1) affected membership to every one-ring consumer");
+  assert.doesNotMatch(shader, /fnrowAffected\(row:u32\)->bool\{[\s\S]{0,200}while\(low<high\)/,
+    "affected-row membership must not re-search the immutable compact list for every face and incidence");
   assert.match(shader, /fnrowIncidenceIdentity[\s\S]*RowIncidenceResult\([\s\S]*,1,1u\)[\s\S]*,-1,1u\)/,
     "candidate incidence must be reconstructed from reciprocal catalog identity and sorted by public face ID");
   assert.match(shader, /fnmergePowerFaceIdentityDelta[\s\S]*outputCount!=carried\+added\|\|outputCount\+retired!=previousCount\+added/,

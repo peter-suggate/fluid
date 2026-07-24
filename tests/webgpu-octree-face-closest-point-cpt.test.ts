@@ -67,6 +67,6 @@ test("closest-point CPT rejection is fail-closed and never scans the row arena",
     "the carrier cannot scan rows, consume power-cell velocity, or observe a concurrently extended dry face");
 
   assert.match(resolver,
-    /carrierEligible=direct\.reason==CPT_MISSING_VERTEX.*bestCarrier=closestSeededFaceCarrier\(initialAnchor,pointGrid\).*carrierEligible&&bestRow==INVALID.*closestSeededFaceCarrier\(candidate,pointGrid\).*if\(bestRow!=INVALID\)\{returnbest;\}if\(bestCarrier\.face!=INVALID\)\{returnLiquidInterpolation\(bestCarrier\.value,0u\);\}returndirect/s,
-    "only an empty positive-weight stencil may copy the closest seed, and every valid bounded fan wins first");
+    /carrierEligible=localFanGap.*bestCarrier=closestSeededFaceCarrier\(initialAnchor,pointGrid\).*carrierEligible&&bestRow==INVALID.*closestSeededFaceCarrier\(candidate,pointGrid\).*if\(bestRow!=INVALID\)\{returnbest;\}if\(bestCarrier\.face!=INVALID\)\{returnLiquidInterpolation\(bestCarrier\.value,0u\);\}returndirect/s,
+    "only an exhausted local-fan gap may copy the closest seed, and every valid bounded fan wins first");
 });

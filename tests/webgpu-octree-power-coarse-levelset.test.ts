@@ -23,11 +23,13 @@ test("WP8 planner is compact-row bounded and exposes independent coarse/fine dia
   const source = readFileSync(new URL("../lib/webgpu-octree-power-coarse-levelset.ts", import.meta.url), "utf8");
   const encode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(encode, /^encode\(broker,input,options\)/);
-  assert.doesNotMatch(encode, /newPassBroker|broker\.fence/,
-    "coarse publication must return its final compute pass to the caller");
+  assert.doesNotMatch(encode, /newPassBroker/);
+  assert.match(encode, /broker\.fence\("powercoarselevel-setschedulecomplete"\)/,
+    "redistance passes require command-buffer ordering before a later caller resumes the broker");
   assert.match(encode, /broker\.copyBufferToBuffer/,
     "GPU-authored counts must use the broker's required copy boundary");
   assert.equal(plan.scratchBytes, 32 * 16 * 2);
+  assert.equal(plan.selectorRowBytes, 32 * 256 * 4);
   assert.ok(plan.allocatedBytes < 128_000,
     "the aligned encoder-local parameter arena remains a small row-independent allocation");
   assert.match(octreePowerCoarseLevelSetShader, /redistancePowerCoarsePhi/);
@@ -94,29 +96,31 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
     /@compute\s+@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z_]\w*)/g,
   )].map((match) => match[1]), [
     "preparePowerCoarsePhiSchedule",
+    "buildPowerCoarseSelectorRows",
     "advectPowerCoarsePhiSchedule",
     "correctPowerCoarsePhiSchedule",
-    "redistancePowerCoarsePhiSchedule",
+    "redistancePowerCoarsePhiPass",
     "publishPowerCoarsePhiSchedule",
     "commitPowerCoarsePhiSchedule",
-  ], "six portable ownership phases replace the deleted eighteen-stage host schedule");
+  ], "portable ownership kernels replace the deleted eighteen-stage host schedule");
   assert.match(octreePowerCoarseLevelSetShader,
     /fn finalizePowerCoarsePhi[\s\S]{0,220}coarseFinalizeEnabled=select\(0u,1u,!rejectedFine\(\)\)[\s\S]*workgroupUniformLoad\(&coarseFinalizeEnabled\)/,
     "coarse finalization must broadcast rejected fine authority before its reduction barriers");
   assert.match(octreePowerCoarseLevelSetShader,
-    /fn publishPowerCoarsePhiDeltaAndCommit[\s\S]{0,260}if\(lid==0u\)\{let enabled=!rejectedFine\(\)&&control\.valid==VALID&&candidateDirectory\.state==VALID;[\s\S]*workgroupUniformLoad\(&coarseDeltaCommitState\[0\]\)/,
+    /fn publishPowerCoarsePhiDeltaAndCommit[\s\S]{0,320}if\(lid==0u\)\{let rejected=rejectedFine\(\);let enabled=!rejected&&control\.valid==VALID&&candidateDirectory\.state==VALID;[\s\S]*workgroupUniformLoad\(&coarseDeltaCommitState\[0\]\)/,
     "delta publication must broadcast its fail-closed gate before touching the prior immutable directory");
   assert.doesNotMatch(octreePowerCoarseLevelSetShader,
     /fn publishPowerCoarsePhiDeltaAndCommit[\s\S]{0,260}if\([^)]*(?:rejectedFine|control\.valid|candidateDirectory\.state)[^)]*\)\{return;\}[\s\S]*workgroupBarrier/,
     "storage-derived authority must not let any lane bypass a later commit barrier");
   const encode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
-  assert.equal((encode.match(/pass\.dispatchWorkgroups\(1\)/g) ?? []).length, 1,
-    "one fixed host loop emits the six portable persistent phases");
-  assert.match(encode, /this\.pipelines\.forEach\(\(pipeline,phase\)=>/,
-    "the host schedule is a fixed pipeline table, not the deleted per-iteration stage machine");
+  assert.match(encode,
+    /constrowWorkgroups=Math\.max\(1,Math\.ceil\(maximumRows\/256\)\);constselectorWorkgroups=Math\.max\(1,Math\.ceil\(maximumRows\*this\.selectorCount\/64\)\);run\(this\.buildSelectorRowsPipeline,phaseBindings\[1\],selectorWorkgroups\);run\(this\.advectPipeline,phaseBindings\[2\],rowWorkgroups\);run\(this\.correctPipeline,phaseBindings\[3\],rowWorkgroups\);for\(constredistanceofthis\.redistancePipelines\)\{run\(redistance,phaseBindings\[4\],rowWorkgroups\)\}/,
+    "each fixed redistance pass must occupy the full row-parallel device schedule");
+  assert.equal((encode.match(/run\(this\.(?:prepare|advect|correct|publish|commit)Pipeline/g) ?? []).length, 5,
+    "the non-iterative ownership phases remain explicit and fixed");
   assert.doesNotMatch(encode,
-    /dispatch\("(?:migrate|prepare|clearStatus|advect|validateFine|applyFine|redistance|publish|finalize|publishDelta)"|for\(letiteration=/,
-    "the host-staged pipeline family and iteration schedule must stay deleted");
+    /dispatch\("(?:migrate|prepare|clearStatus|advect|validateFine|applyFine|redistance|publish|finalize|publishDelta)"/,
+    "the legacy string-addressed host stage machine must stay deleted");
   assert.match(octreePowerCoarseLevelSetShader,
     /migratePowerCoarsePhiSource[\s\S]*previousSampleAtCurrentLeaf\(header\)/,
     "recurring coarse phi must be sampled by spatial leaf identity before row-indexed advection");
@@ -131,8 +135,11 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
     "a fine correction cannot bypass invalid topology validation");
   const scheduleEncode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString();
   assert.match(octreePowerCoarseLevelSetShader,
-    /validatePowerCoarseFineCorrection\(row\);applyExactFineCorrection\(row\);[\s\S]*for\(var iteration=0u;iteration<params\.redistancePasses;iteration\+=1u\)/,
-    "fine correction validation and seeding must precede the persistent Delaunay redistance loop");
+    /validatePowerCoarseFineCorrection\(gid\.x\);applyExactFineCorrection\(gid\.x\);[\s\S]*override REDISTANCE_ITERATION:u32=0u;[\s\S]*redistancePowerCoarsePhi\(gid\.x,REDISTANCE_ITERATION\)/,
+    "fine correction validation and seeding must precede the inter-dispatch Delaunay redistance passes");
+  assert.match(scheduleEncode,
+    /run\(this\.correctPipeline[\s\S]*for\s*\(const redistance of this\.redistancePipelines\)/,
+    "the host must preserve correction-before-redistance command ordering");
   assert.match(scheduleEncode, /Power coarse level set [^"]*persistent schedule/,
     "command attribution must identify the single persistent coarse transaction");
 });

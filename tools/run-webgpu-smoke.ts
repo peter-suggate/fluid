@@ -4087,6 +4087,21 @@ async function runGPU(
           solver.info.pressureSolver,
           mgpcgDiagnostics,
         )
+        // This is the same transport transaction that drives the viewport's
+        // WATER UPDATE REJECTED state. A later healthy/final generation must
+        // not hide a transient invalid velocity sample from the Dawn audit.
+        || (audit.section5.fineTransport !== undefined
+          && (!audit.section5.fineTransport.committed
+            || audit.section5.fineTransport.nonfiniteVelocity !== 0
+            || audit.section5.fineTransport.faceBandUnavailable !== 0
+            || audit.section5.fineTransport.velocityUnavailable !== 0
+            || (audit.section5.fineTransport.invalidVelocityStatus ?? 0) !== 0
+            || (audit.section5.fineTransport.nonpositiveVelocityResult ?? 0) !== 0))
+        // A predecessor is a legal short-lived consumer fallback, but a Dawn
+        // generation audit must still catch the producer that failed to advance
+        // it. Otherwise the next step turns that hidden lag into the UI-visible
+        // two-generation rejection.
+        || audit.section5.faceBand.generation !== audit.faces.generation
         || section5GenerationFailures.length !== 0
         || audit.faces.generation <= previousAuditedPowerGeneration;
       if (failure) {
@@ -4952,8 +4967,43 @@ async function runGPU(
         const transientPositiveCandidateRow = transientPositiveRow < transientDiagnostic.rowCount
           ? await transientFailureReader.readGlobalFineCandidateBandRowFailure?.(transientPositiveRow)
           : undefined;
+        let faceBandCandidateFailure: unknown;
+        const candidateSolver = solver as GPUSolverInstance;
+        if (candidateSolver.globalFineFaceBandCandidateControl) {
+          const bytes = await readBufferBinding(device, {
+            buffer: candidateSolver.globalFineFaceBandCandidateControl,
+          }, 128);
+          const control = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+          const decoded = unpackOctreeFaceBandControl(control);
+          if (!decoded.valid) {
+            let slot = decoded.stageFirstFailures.faceEmission;
+            let reason = control[7] & 0x0fff;
+            if (slot === 0xffff_ffff && reason !== 34) {
+              for (const [candidate, candidateReason, count] of [
+                [control[28], 1, control[24]],
+                [control[29], 2, control[25]],
+                [control[30], 3, control[26]],
+                [control[31], 4, control[27]],
+              ] as const) {
+                if (count !== 0 && candidate < slot) {
+                  slot = candidate;
+                  reason = candidateReason;
+                }
+              }
+            }
+            faceBandCandidateFailure = {
+              control: Array.from(control),
+              decoded,
+              slot,
+              reason,
+              detail: slot < (candidateSolver.globalFineFaceBandPlan?.faceCapacity ?? 0)
+                ? await candidateSolver.readGlobalFineCandidateBandFaceFailure?.(slot)
+                : undefined,
+            };
+          }
+        }
         throw new Error(`power generation audit failed at step ${steps}: ${JSON.stringify({ uiFailure, ...audit, section5GenerationFailures, transientFailureFace, transientPositiveCandidateRow, oldMeshFailure, retainedBandFailure, coarsePhiFailure, duplicateSite, invalidGeometry, reciprocalFace, axisIncidence,
-          rowPublicationFailure,
+          rowPublicationFailure, faceBandCandidateFailure,
           diagnosticBuffers: { rowDirectory: Boolean(rowDirectory), rowDirectorySize: rowDirectory?.size, leafHeaders: Boolean(leafHeaders) } })}`);
       }
       // Retain the first cross-scale generation only to diagnose when a live
@@ -6033,6 +6083,16 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
         if (envelope) {
           fail(envelope.maximumExactVolumeDrift <= 0.01,
             `minimal dam transient exact-volume drift ${envelope.maximumExactVolumeDrift} exceeds 1%`);
+          const mechanical = octree.checkpoints.flatMap((checkpoint) =>
+            checkpoint.compactMechanicalEnergy ? [checkpoint.compactMechanicalEnergy] : []);
+          if ((octree.info.simulatedTime_s ?? 0) >= 1 && checkpointEvery_s > 0) {
+            fail(mechanical.length > 0,
+              "minimal dam emitted no compact mechanical-energy checkpoints");
+            const maximumRetention = Math.max(0,
+              ...mechanical.map((sample) => sample.mechanicalEnergyRetentionRatio));
+            fail(maximumRetention <= 1.05,
+              `minimal dam compact mechanical energy grew to ${maximumRetention} of its t=0 value`);
+          }
           // This QA field is the reconstructed 16^3 occupancy thresholded at
           // one half, not the fine level-set topology.  A single thresholded
           // spray cell must not trigger a topology-closing repair: Section 5

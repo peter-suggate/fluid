@@ -131,8 +131,14 @@ test("fine summary budgets exact two-generation deltas and immutable publication
   assert.equal(summary.sortCapacity & (summary.sortCapacity - 1), 0,
     "the bounded cooperative summary transaction uses a power-of-two arena");
   assert.equal(summary.directoryBytes, 64 + summary.entryCapacity * 32);
-  assert.equal(summary.indirectBytes, 12,
-    "fine-summary recurring work publishes only the exact recompute extent");
+  assert.equal(summary.mergePassCount, Math.log2(summary.sortCapacity) - 8);
+  assert.equal(summary.indirectBytes,
+    12 * (2 + summary.mergePassCount + (summary.mergePassCount > 0 ? 1 : 0)),
+    "fine-summary recurring work publishes exact recompute, sort, active merge, and parity-copy extents");
+  assert.equal(summary.workStateBytes,
+    Math.max(144, (32 + 3 * (1 + summary.mergePassCount
+      + (summary.mergePassCount > 0 ? 1 : 0))) * 4),
+    "the work-state budget includes every GPU-authored indirect command");
   assert.equal(summary.allocatedBytes,
     4 * summary.directoryBytes + 2 * summary.recordBytes
       + summary.carryBytes + summary.workStateBytes + summary.indirectBytes + summary.parameterBytes);

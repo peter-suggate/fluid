@@ -16,6 +16,7 @@ export interface FineLevelSetGPUSummaryPlan {
   readonly maximumResidentBricks: number; readonly maximumLevel: number;
   readonly fineEntryCapacity: number; readonly coarseEntryCapacity: number; readonly entryCapacity: number;
   readonly hierarchyKeyCapacity: number; readonly recordCapacity: number; readonly sortCapacity: number;
+  readonly mergePassCount: number;
   readonly directoryBytes: number; readonly recordBytes: number;
   readonly carryBytes: number; readonly workStateBytes: number; readonly indirectBytes: number;
   readonly parameterBytes: number; readonly allocatedBytes: number;
@@ -151,18 +152,20 @@ export function planFineLevelSetGPUSummaries(
   const recordCapacity = 2 * plan.maximumResidentBricks * levelOffsets.length + 2 * coarseEntryCapacity;
   let sortCapacity = 256;
   while (sortCapacity < recordCapacity) sortCapacity *= 2;
+  const mergePassCount = Math.log2(sortCapacity) - 8;
   const directoryBytes = 64 + Math.max(1, entryCapacity) * 32;
   const recordBytes = sortCapacity * 32;
   const carryBytes = Math.max(1, entryCapacity) * 32;
-  const workStateBytes = 128;
-  // The persistent transaction builder publishes one exact recompute extent.
-  // The former fine/coarse emitter extents were consumed only by their own
-  // recurring dispatches and are deliberately absent.
-  const indirectBytes = 12;
+  // Words 16..18 hold the recompute dispatch. Words 32 onward hold the tile
+  // sort, every bounded merge width, and (when merges exist) the parity-driven
+  // scratch-to-records canonicalization dispatch.
+  const sortDispatchCount = 1 + mergePassCount + (mergePassCount > 0 ? 1 : 0);
+  const workStateBytes = Math.max(144, (32 + 3 * sortDispatchCount) * 4);
+  const indirectBytes = 12 * (1 + sortDispatchCount);
   const parameterBytes = levelOffsets.length * 112 + 4 * 16;
   return { maximumResidentBricks: plan.maximumResidentBricks, maximumLevel: levelOffsets.length - 1,
     fineEntryCapacity, coarseEntryCapacity, entryCapacity,
-    hierarchyKeyCapacity, recordCapacity, sortCapacity,
+    hierarchyKeyCapacity, recordCapacity, sortCapacity, mergePassCount,
     directoryBytes, recordBytes, carryBytes, workStateBytes, indirectBytes, parameterBytes,
     allocatedBytes: 4 * directoryBytes + 2 * recordBytes + carryBytes + workStateBytes
       + indirectBytes
@@ -184,6 +187,7 @@ export class WebGPUFineLevelSetSummaries {
   private readonly indirect: GPUBuffer;
   private readonly params: readonly GPUBuffer[];
   private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
+  private readonly mergePipelines: readonly GPUComputePipeline[];
   private destroyed = false;
 
   /** Rejection-only bounded buffers. They never participate in scheduling or
@@ -227,14 +231,22 @@ export class WebGPUFineLevelSetSummaries {
     }));
     const module = device.createShaderModule({ label: "global fine delta summary hierarchy",
       code: fineLevelSetSummaryWGSL });
-    const pipeline = (entryPoint: string) => device.createComputePipeline({
-      label: entryPoint, layout: "auto", compute: { module, entryPoint },
+    const pipeline = (entryPoint: string, constants?: Record<string, number>) => device.createComputePipeline({
+      label: entryPoint, layout: "auto", compute: { module, entryPoint, ...(constants ? { constants } : {}) },
     });
     this.pipelines = Object.freeze(Object.fromEntries([
-      "buildFineSummaryDelta",
-      "recomputeFineSummaryBase", "recomputeFineSummaryParents",
+      "prepareFineSummaryDelta", "emitFineSummaryDelta", "sortFineSummaryTiles",
+      "mergeFineSummaryScratchToRecords", "recomputeFineSummaryBase", "recomputeFineSummaryParents",
       "publishFineSummaryDelta",
     ].map((entryPoint) => [entryPoint, pipeline(entryPoint)])));
+    const mergePasses: GPUComputePipeline[] = [];
+    let readScratch = 0;
+    for (let width = 256; width < this.plan.sortCapacity; width *= 2) {
+      mergePasses.push(pipeline("mergeFineSummaryRuns",
+        { SORT_WIDTH: width, SORT_READ_SCRATCH: readScratch }));
+      readScratch ^= 1;
+    }
+    this.mergePipelines = Object.freeze(mergePasses);
   }
 
   encode(broker: PassBroker, source: WebGPUFineLevelSetBrickSource,
@@ -264,13 +276,16 @@ export class WebGPUFineLevelSetSummaries {
       throw new RangeError("Fine summary coarse-delta ABI is invalid");
     }
     const coarseDelta = coarse.delta;
-    const bind = (name: string, params: GPUBuffer | undefined,
+    const bindPipeline = (pipeline: GPUComputePipeline, params: GPUBuffer | undefined,
       buffers: readonly (readonly [number, GPUBuffer])[]) => this.device.createBindGroup({
-      layout: this.pipelines[name].getBindGroupLayout(0), entries: [
+      layout: pipeline.getBindGroupLayout(0), entries: [
         ...(params ? [{ binding: 0, resource: { buffer: params } }] : []),
         ...buffers.map(([binding, buffer]) => ({ binding, resource: { buffer } })),
       ],
     });
+    const bind = (name: string, params: GPUBuffer | undefined,
+      buffers: readonly (readonly [number, GPUBuffer])[]) =>
+      bindPipeline(this.pipelines[name], params, buffers);
     const run = (name: string, group: GPUBindGroup, groups: number, label: string) => {
       const pass = broker.compute({ label }); pass.setPipeline(this.pipelines[name]); pass.setBindGroup(0, group);
       const dispatch = planFineLevelSetDispatch2D(Math.max(1, groups),
@@ -281,12 +296,36 @@ export class WebGPUFineLevelSetSummaries {
       const pass = broker.compute({ label }); pass.setPipeline(this.pipelines[name]); pass.setBindGroup(0, group);
       pass.dispatchWorkgroupsIndirect(this.indirect, offset);
     };
-    run("buildFineSummaryDelta", bind("buildFineSummaryDelta", this.params[0], [
+    run("prepareFineSummaryDelta", bind("prepareFineSummaryDelta", this.params[0], [
       [2, source.worklist], [5, this.directory], [6, coarseDirectory], [12, this.workState],
-      [1, source.metadata], [8, this.records], [14, coarseDelta], [16, coarseControl],
-      [17, delta], [18, this.candidateDirectory],
-    ]), 1, "Build and sort exact global fine summary delta");
-    broker.updateIndirectBuffer(this.workState, 16 * 4, this.indirect, 0, this.plan.indirectBytes);
+      [14, coarseDelta], [16, coarseControl], [17, delta], [18, this.candidateDirectory],
+    ]), 1, "Prepare exact global fine summary delta");
+    broker.updateIndirectBuffer(this.workState, 16 * 4, this.indirect, 0, 12);
+    broker.updateIndirectBuffer(this.workState, 32 * 4, this.indirect, 12,
+      this.plan.indirectBytes - 12);
+    const emitInputs = [[1, source.metadata], [2, source.worklist], [6, coarseDirectory],
+      [8, this.records], [12, this.workState],
+      [14, coarseDelta], [17, delta]] as const;
+    runIndirect("emitFineSummaryDelta",
+      bind("emitFineSummaryDelta", this.params[0], emitInputs), 12,
+      "Emit exact global fine summary delta");
+    runIndirect("sortFineSummaryTiles",
+      bind("sortFineSummaryTiles", undefined, [[8, this.records], [12, this.workState]]), 12,
+      "Sort global fine summary delta tiles");
+    for (const [index, pipeline] of this.mergePipelines.entries()) {
+      const pass = broker.compute({ label: `Merge global fine summary runs pass ${index}` });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindPipeline(pipeline, undefined,
+        [[8, this.records], [10, this.recordScratch], [12, this.workState]]));
+      pass.dispatchWorkgroupsIndirect(this.indirect, 24 + index * 12);
+    }
+    if (this.plan.mergePassCount > 0) {
+      runIndirect("mergeFineSummaryScratchToRecords",
+        bind("mergeFineSummaryScratchToRecords", undefined,
+          [[8, this.records], [10, this.recordScratch], [12, this.workState]]),
+        24 + this.plan.mergePassCount * 12,
+        "Canonicalize exact global fine summary sort");
+    }
     const summaryInputs = [[1, source.metadata], [2, source.worklist], [3, source.flags],
       [4, source.phi], [8, this.records], [12, this.workState]] as const;
     runIndirect("recomputeFineSummaryBase", bind("recomputeFineSummaryBase", this.params[0], summaryInputs),
@@ -352,12 +391,21 @@ struct CoarseDelta{count:u32,generation:u32,flags:u32,valid:u32,pad:array<u32,12
 @group(0)@binding(21)var<storage,read_write>fineCandidate:array<u32>;
 var<workgroup>minimumPhi:array<f32,64>;var<workgroup>maximumPhi:array<f32,64>;
 var<workgroup>minimumAbsolutePhi:array<f32,64>;var<workgroup>validSamples:array<u32,64>;var<workgroup>errors:array<u32,64>;
+var<workgroup>parentChildren:array<Entry,8>;var<workgroup>centerSampleBits:array<u32,8>;var<workgroup>centerSampleStates:array<u32,8>;
 var<workgroup>reductionValues:array<u32,256>;
-var<workgroup>summaryBuildState:array<u32,5>;
+var<workgroup>sortTile:array<Entry,256>;
+override SORT_WIDTH:u32=256u;override SORT_READ_SCRATCH:u32=0u;
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn ordered(v:f32)->u32{let bits=bitcast<u32>(v);return select(bits^0x80000000u,~bits,(bits&0x80000000u)!=0u);}
 fn validFineWorklist()->bool{return p.worklistHeaderWords==5u&&arrayLength(&b)>=5u&&b[1]==p.generation&&b[3]==1u&&b[4]==1u&&b[0]<=p.pageCapacity&&5u+b[0]<=arrayLength(&b);}
-fn finePage(key:u32)->u32{if(!validFineWorklist()){return INVALID;}let count=b[0];var low=0u;var high=count;for(var step=0u;step<32u&&low<high;step+=1u){let middle=low+(high-low)/2u;let id=b[5u+middle];let base=id*10u;if(id>=p.pageCapacity||base+2u>=arrayLength(&a)||a[base]!=id||a[base+2u]!=p.generation){return INVALID;}if(a[base+1u]<key){low=middle+1u;}else{high=middle;}}if(low>=count){return INVALID;}let id=b[5u+low];let base=id*10u;return select(INVALID,id,id<p.pageCapacity&&base+2u<arrayLength(&a)&&a[base]==id&&a[base+1u]==key&&a[base+2u]==p.generation);}
+fn finePage(key:u32)->u32{
+ if(!validFineWorklist()){return INVALID;}
+ let logicalCount=p.baseDims.x*p.baseDims.y*p.baseDims.z;let directoryBase=5u+p.pageCapacity;
+ if(key>=logicalCount||directoryBase+key>=arrayLength(&b)){return INVALID;}
+ let id=b[directoryBase+key];let base=id*10u;
+ return select(INVALID,id,id<p.pageCapacity&&base+2u<arrayLength(&a)
+  &&a[base]==id&&a[base+1u]==key&&a[base+2u]==p.generation);
+}
 fn invalidEntry()->Entry{return Entry(INVALID,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,0u,0u);}
 fn entryBase(index:u32)->u32{return 16u+index*8u;}
 fn writeDirectory(index:u32,value:Entry){let base=entryBase(index);directory[base]=value.key;directory[base+1u]=value.minimumPhi;directory[base+2u]=value.maximumPhi;directory[base+3u]=value.minimumAbsolutePhi;directory[base+4u]=value.samples;directory[base+5u]=value.bricks;directory[base+6u]=value.flags;directory[base+7u]=value.centerPhi;}
@@ -366,18 +414,50 @@ fn writeCandidate(index:u32,value:Entry){let base=16u+index*8u;candidate[base]=v
 fn fineEntryBase(index:u32)->u32{return 16u+index*8u;}
 fn readFineDirectory(index:u32)->Entry{let base=fineEntryBase(index);return Entry(fineDirectory[base],fineDirectory[base+1u],fineDirectory[base+2u],fineDirectory[base+3u],fineDirectory[base+4u],fineDirectory[base+5u],fineDirectory[base+6u],fineDirectory[base+7u]);}
 fn writeFineCandidate(index:u32,value:Entry){let base=fineEntryBase(index);fineCandidate[base]=value.key;fineCandidate[base+1u]=value.minimumPhi;fineCandidate[base+2u]=value.maximumPhi;fineCandidate[base+3u]=value.minimumAbsolutePhi;fineCandidate[base+4u]=value.samples;fineCandidate[base+5u]=value.bricks;fineCandidate[base+6u]=value.flags;fineCandidate[base+7u]=value.centerPhi;}
-fn publishRecomputeDispatch(groups:u32){let width=min(groups,p.pad0);workState[16]=width;workState[17]=select(1u,(groups+width-1u)/width,width!=0u);workState[18]=1u;}
+fn publishRecomputeDispatch(groups:u32){let width=min(groups,p.pad0);let safeWidth=max(1u,width);workState[16]=width;workState[17]=select(1u,(groups+safeWidth-1u)/safeWidth,width!=0u);workState[18]=1u;}
+fn writeSortDispatch(slot:u32,groups:u32){let width=min(groups,p.pad0);let safeWidth=max(1u,width);let base=32u+slot*3u;workState[base]=width;workState[base+1u]=select(1u,(groups+safeWidth-1u)/safeWidth,width!=0u);workState[base+2u]=1u;}
+fn publishSortDispatch(items:u32){
+ let groups=(items+255u)/256u;writeSortDispatch(0u,groups);var passIndex=0u;var activeMerges=0u;var runWidth=256u;
+ while(runWidth<p.sortCapacity){let enabled=items>runWidth;writeSortDispatch(1u+passIndex,select(0u,groups,enabled));activeMerges+=select(0u,1u,enabled);passIndex+=1u;runWidth<<=1u;}
+ if(passIndex>0u){writeSortDispatch(1u+passIndex,select(0u,groups,(activeMerges&1u)!=0u));}
+}
 fn coarseAuthoritative()->bool{let current=p.generation&0x3fffffffu;return p.coarseEntryCapacity==0u||(arrayLength(&coarseControl)>=12u&&coarse.state==PUBLISHED&&(coarse.generation&0x3fffffffu)==current&&coarse.rowCount==coarseControl[2]&&coarse.rowCount<=arrayLength(&coarse.entries)&&all(coarse.dimensions==p.finestDims)&&coarseControl[0]==0u&&(coarseControl[10]&0x3fffffffu)==current&&coarseControl[11]==PUBLISHED&&coarseDelta.flags==0u&&coarseDelta.valid==PUBLISHED&&(coarseDelta.generation&0x3fffffffu)==current&&coarseDelta.count<=arrayLength(&coarseDelta.items)&&coarseDelta.count<=2u*p.coarseEntryCapacity);}
 fn hierarchyKey(baseKey:u32,targetLevel:u32)->u32{let xy=p.baseDims.x*p.baseDims.y;let z=baseKey/xy;let rem=baseKey-z*xy;let y=rem/p.baseDims.x;var coord=vec3u(rem-y*p.baseDims.x,y,z);var dims=p.baseDims;var offset=0u;for(var level=0u;level<targetLevel;level+=1u){offset+=dims.x*dims.y*dims.z;dims=(dims+vec3u(1u))/2u;coord/=2u;}return offset+coord.x+dims.x*(coord.y+dims.y*coord.z);}
 fn coarseDirtyIdentity(row:u32)->vec2u{if(workState[0]==1u){if(row>=coarse.rowCount||row>=arrayLength(&coarse.entries)){return vec2u(0u);}let e=coarse.entries[row];return vec2u(e.cellPlusOne,e.size);}if(row>=coarseDelta.count||row>=arrayLength(&coarseDelta.items)){return vec2u(0u);}let e=coarseDelta.items[row];return vec2u(e.cellPlusOne,e.size);}
 fn coarseHierarchyKey(identity:vec2u)->u32{let ratio=p.baseDims/p.finestDims;if(identity.x==0u||identity.y==0u||(identity.y&(identity.y-1u))!=0u||ratio.x==0u||any(ratio!=vec3u(ratio.x))){return INVALID;}let cell=identity.x-1u;if(cell>=p.finestDims.x*p.finestDims.y*p.finestDims.z){return INVALID;}let side=identity.y*ratio.x;if(side==0u||(side&(side-1u))!=0u){return INVALID;}let origin=vec3u(cell%p.finestDims.x,(cell/p.finestDims.x)%p.finestDims.y,cell/(p.finestDims.x*p.finestDims.y));let brickOrigin=origin*ratio.x;if(any(brickOrigin%vec3u(side)!=vec3u(0u))){return INVALID;}var level=0u;var remaining=side;loop{if(remaining==1u){break;}level+=1u;remaining>>=1u;}let baseKey=brickOrigin.x+p.baseDims.x*(brickOrigin.y+p.baseDims.y*brickOrigin.z);return hierarchyKey(baseKey,level);}
-@compute @workgroup_size(256)fn buildFineSummaryDelta(@builtin(local_invocation_index)lid:u32){
- if(lid==0u){let fineValid=validFineWorklist();let cold=directory[9]!=PUBLISHED;let coarseValid=coarseAuthoritative();let deltaValid=arrayLength(&pageDelta)>p.changedKeysOffset&&pageDelta[1]==p.generation&&pageDelta[15]==PAGE_DELTA_VALID&&pageDelta[0]<=2u*p.pageCapacity&&p.changedKeysOffset+pageDelta[0]<=arrayLength(&pageDelta);let mode=select(0u,select(2u,1u,cold),fineValid&&coarseValid&&(cold||deltaValid));let fineCount=select(0u,select(pageDelta[0],b[0],cold),mode!=0u);let coarseCount=select(0u,select(coarseDelta.count,coarse.rowCount,cold),p.coarseEntryCapacity!=0u&&mode!=0u);let requested=fineCount*(p.maximumLevel+1u)+coarseCount;let error=select(STALE,0u,mode!=0u)|select(0u,CAPACITY,requested>p.recordCapacity||requested>p.sortCapacity||coarseCount>2u*p.coarseEntryCapacity);let count=min(requested,p.sortCapacity);var padded=1u;while(padded<count){padded<<=1u;}padded=min(p.sortCapacity,max(1u,padded));summaryBuildState[0]=mode;summaryBuildState[1]=fineCount;summaryBuildState[2]=coarseCount;summaryBuildState[3]=count;summaryBuildState[4]=padded;workState[0]=mode;workState[1]=fineCount;workState[2]=coarseCount;workState[3]=count;workState[4]=padded;workState[5]=0u;workState[6]=error;workState[7]=0u;workState[8]=0u;workState[9]=0u;workState[10]=0u;workState[11]=0u;workState[12]=INVALID;workState[13]=INVALID;workState[14]=0u;workState[15]=INVALID;workState[19]=arrayLength(&pageDelta);workState[20]=pageDelta[0];workState[21]=select(INVALID,pageDelta[1],arrayLength(&pageDelta)>1u);workState[22]=select(INVALID,pageDelta[15],arrayLength(&pageDelta)>15u);workState[23]=p.changedKeysOffset;workState[24]=p.generation;workState[25]=select(0u,1u,fineValid);workState[26]=select(0u,1u,coarseValid);workState[27]=select(0u,1u,cold);workState[28]=select(0u,1u,deltaValid);workState[29]=select(INVALID,b[1],arrayLength(&b)>1u);workState[30]=select(INVALID,pageDelta[1],arrayLength(&pageDelta)>1u);workState[31]=coarse.generation;publishRecomputeDispatch(count);candidate[0]=error;candidate[1]=p.generation;candidate[2]=0u;candidate[3]=p.entryCapacity;candidate[4]=p.baseDims.x;candidate[5]=p.baseDims.y;candidate[6]=p.baseDims.z;candidate[7]=p.maximumLevel;candidate[8]=0u;candidate[9]=0u;candidate[10]=p.hierarchyKeyCapacity;candidate[11]=p.samplesPerBrick;}
- workgroupBarrier();let mode=workgroupUniformLoad(&summaryBuildState[0]);let fineCount=workgroupUniformLoad(&summaryBuildState[1]);let coarseCount=workgroupUniformLoad(&summaryBuildState[2]);let count=workgroupUniformLoad(&summaryBuildState[3]);let padded=workgroupUniformLoad(&summaryBuildState[4]);let levels=p.maximumLevel+1u;let fineRecords=fineCount*levels;
- for(var index=lid;index<fineRecords;index+=256u){let sourceIndex=index/levels;let level=index%levels;var key=INVALID;if(mode==1u){let id=b[5u+sourceIndex];if(id<p.pageCapacity&&id*10u+2u<arrayLength(&a)&&a[id*10u]==id&&a[id*10u+2u]==p.generation){key=a[id*10u+1u];}}else if(mode==2u){key=pageDelta[p.changedKeysOffset+sourceIndex];}if(key<p.baseDims.x*p.baseDims.y*p.baseDims.z){records[index]=Entry(hierarchyKey(key,level),0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,0u,0u);}else{records[index]=Entry(INVALID,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,STALE,0u);}}
- for(var row=lid;row<coarseCount;row+=256u){let output=fineRecords+row;let key=coarseHierarchyKey(coarseDirtyIdentity(row));records[output]=Entry(key,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,select(COARSE_DIRTY,STALE,key==INVALID),0u);}
- for(var index=count+lid;index<padded;index+=256u){records[index]=invalidEntry();}storageBarrier();workgroupBarrier();
- for(var width=2u;width<=padded;width<<=1u){for(var stride=width>>1u;stride>0u;stride>>=1u){for(var index=lid;index<padded;index+=256u){let partner=index^stride;if(partner>index){let left=records[index];let right=records[partner];let descending=(index&width)!=0u;let greater=left.key>right.key;if(greater!=descending){records[index]=right;records[partner]=left;}}}storageBarrier();workgroupBarrier();}}
+@compute @workgroup_size(1)fn prepareFineSummaryDelta(){
+ let fineValid=validFineWorklist();let cold=directory[9]!=PUBLISHED;let coarseValid=coarseAuthoritative();
+ let deltaValid=arrayLength(&pageDelta)>p.changedKeysOffset&&pageDelta[1]==p.generation&&pageDelta[15]==PAGE_DELTA_VALID&&pageDelta[0]<=2u*p.pageCapacity&&p.changedKeysOffset+pageDelta[0]<=arrayLength(&pageDelta);
+ let mode=select(0u,select(2u,1u,cold),fineValid&&coarseValid&&(cold||deltaValid));let fineCount=select(0u,select(pageDelta[0],b[0],cold),mode!=0u);
+ let coarseCount=select(0u,select(coarseDelta.count,coarse.rowCount,cold),p.coarseEntryCapacity!=0u&&mode!=0u);
+ let requested=fineCount*(p.maximumLevel+1u)+coarseCount;let error=select(STALE,0u,mode!=0u)|select(0u,CAPACITY,requested>p.recordCapacity||requested>p.sortCapacity||coarseCount>2u*p.coarseEntryCapacity);
+ let count=min(requested,p.sortCapacity);var padded=1u;while(padded<count){padded<<=1u;}padded=min(p.sortCapacity,max(1u,padded));
+ workState[0]=mode;workState[1]=fineCount;workState[2]=coarseCount;workState[3]=count;workState[4]=padded;workState[5]=0u;workState[6]=error;workState[7]=0u;workState[8]=0u;workState[9]=0u;workState[10]=0u;workState[11]=0u;workState[12]=INVALID;workState[13]=INVALID;workState[14]=0u;workState[15]=INVALID;
+ workState[19]=arrayLength(&pageDelta);workState[20]=pageDelta[0];workState[21]=select(INVALID,pageDelta[1],arrayLength(&pageDelta)>1u);workState[22]=select(INVALID,pageDelta[15],arrayLength(&pageDelta)>15u);workState[23]=p.changedKeysOffset;workState[24]=p.generation;workState[25]=select(0u,1u,fineValid);workState[26]=select(0u,1u,coarseValid);workState[27]=select(0u,1u,cold);workState[28]=select(0u,1u,deltaValid);workState[29]=select(INVALID,b[1],arrayLength(&b)>1u);workState[30]=select(INVALID,pageDelta[1],arrayLength(&pageDelta)>1u);workState[31]=coarse.generation;
+ publishRecomputeDispatch(count);publishSortDispatch(padded);candidate[0]=error;candidate[1]=p.generation;candidate[2]=0u;candidate[3]=p.entryCapacity;candidate[4]=p.baseDims.x;candidate[5]=p.baseDims.y;candidate[6]=p.baseDims.z;candidate[7]=p.maximumLevel;candidate[8]=0u;candidate[9]=0u;candidate[10]=p.hierarchyKeyCapacity;candidate[11]=p.samplesPerBrick;
+}
+@compute @workgroup_size(256)fn emitFineSummaryDelta(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){
+ let index=fineLinearWorkgroup(w,n)*256u+lid;if(index>=workState[4]){return;}let fineCount=workState[1];let levels=p.maximumLevel+1u;let fineRecords=fineCount*levels;
+ if(index<fineRecords){let sourceIndex=index/levels;let level=index%levels;var key=INVALID;if(workState[0]==1u){let id=b[5u+sourceIndex];if(id<p.pageCapacity&&id*10u+2u<arrayLength(&a)&&a[id*10u]==id&&a[id*10u+2u]==p.generation){key=a[id*10u+1u];}}else if(workState[0]==2u){key=pageDelta[p.changedKeysOffset+sourceIndex];}
+  if(key<p.baseDims.x*p.baseDims.y*p.baseDims.z){records[index]=Entry(hierarchyKey(key,level),0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,0u,0u);}else{records[index]=Entry(INVALID,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,STALE,0u);}return;}
+ if(index<workState[3]){let row=index-fineRecords;let key=coarseHierarchyKey(coarseDirtyIdentity(row));records[index]=Entry(key,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,select(COARSE_DIRTY,STALE,key==INVALID),0u);return;}
+ records[index]=invalidEntry();
+}
+@compute @workgroup_size(256)fn sortFineSummaryTiles(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){
+ let index=fineLinearWorkgroup(w,n)*256u+lid;sortTile[lid]=invalidEntry();if(index<workState[4]){sortTile[lid]=records[index];}workgroupBarrier();
+ for(var width=2u;width<=256u;width<<=1u){for(var stride=width>>1u;stride>0u;stride>>=1u){let partner=lid^stride;if(partner>lid){let left=sortTile[lid];let right=sortTile[partner];let descending=(lid&width)!=0u;let greater=left.key>right.key;if(greater!=descending){sortTile[lid]=right;sortTile[partner]=left;}}workgroupBarrier();}}
+ if(index<workState[4]){records[index]=sortTile[lid];}
+}
+fn sortRead(index:u32)->Entry{if(SORT_READ_SCRATCH!=0u){return sortScratch[index];}return records[index];}
+fn mergeRunPartition(k:u32,base:u32,aCount:u32,bCount:u32)->u32{var lo=select(0u,k-bCount,k>bCount);var hi=min(k,aCount);while(lo<hi){let ai=lo+(hi-lo)/2u;let bi=k-ai;if(ai<aCount&&bi>0u&&sortRead(base+SORT_WIDTH+bi-1u).key>=sortRead(base+ai).key){lo=ai+1u;}else{hi=ai;}}return lo;}
+@compute @workgroup_size(256)fn mergeFineSummaryRuns(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){
+ let index=fineLinearWorkgroup(w,n)*256u+lid;let count=workState[4];if(index>=count){return;}let run=2u*SORT_WIDTH;let base=(index/run)*run;let k=index-base;
+ let aCount=min(SORT_WIDTH,count-base);let bBase=min(count,base+SORT_WIDTH);let bCount=min(SORT_WIDTH,count-bBase);let ai=mergeRunPartition(k,base,aCount,bCount);let bi=k-ai;
+ var value:Entry;if(ai<aCount&&(bi>=bCount||sortRead(base+ai).key<=sortRead(bBase+bi).key)){value=sortRead(base+ai);}else{value=sortRead(bBase+bi);}
+ if(SORT_READ_SCRATCH!=0u){records[index]=value;}else{sortScratch[index]=value;}
+}
+@compute @workgroup_size(256)fn mergeFineSummaryScratchToRecords(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){
+ let index=fineLinearWorkgroup(w,n)*256u+lid;if(index<workState[4]){records[index]=sortScratch[index];}
 }
 fn combineSummary(left:Entry,right:Entry)->Entry{return Entry(left.key,min(left.minimumPhi,right.minimumPhi),max(left.maximumPhi,right.maximumPhi),min(left.minimumAbsolutePhi,right.minimumAbsolutePhi),left.samples+right.samples,left.bricks+right.bricks,left.flags|right.flags,0u);}
 fn recordLowerBound(key:u32)->u32{var lo=0u;var hi=workState[3];while(lo<hi){let mid=lo+(hi-lo)/2u;if(records[mid].key<key){lo=mid+1u;}else{hi=mid;}}return lo;}
@@ -392,9 +472,47 @@ fn entryPresent(value:Entry)->bool{return value.samples!=0u||value.bricks!=0u||(
 // The exact eight-sample centre phase drives dynamic pressure topology and is
 // therefore independent of that band-membership bit. Min/max and completeness
 // below remain VALID-gated; this path publishes only the centre value.
-fn centerSummary(key:u32,value:Entry)->Entry{var result=value;result.flags&=~CENTER_COMPLETE;result.centerPhi=0u;if(key<p.levelOffset||key>=p.levelOffset+p.levelKeyCount){return result;}let localKey=key-p.levelOffset;let xy=p.levelDims.x*p.levelDims.y;let z=localKey/xy;let rem=localKey-z*xy;let y=rem/p.levelDims.x;let coord=vec3u(rem-y*p.levelDims.x,y,z);let resolution=select(4u,8u,p.samplesPerBrick==512u);let span=(1u<<p.level)*resolution;let centerLow=coord*span+vec3u(span/2u-1u);var center=0.0;var mask=0u;for(var corner=0u;corner<8u;corner+=1u){let delta=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);let q=centerLow+delta;let brick=q/resolution;if(any(brick>=p.baseDims)){continue;}let pageKey=brick.x+p.baseDims.x*(brick.y+p.baseDims.y*brick.z);let id=finePage(pageKey);if(id==INVALID){continue;}let within=q-brick*resolution;let index=id*p.samplesPerBrick+within.x+resolution*(within.y+resolution*within.z);if(index>=arrayLength(&c)||index>=arrayLength(&d)){continue;}let sample=bitcast<f32>(d[index]);if(!finite(sample)){result.flags|=NONFINITE;continue;}center+=0.125*sample;mask|=1u<<corner;}if(mask==0xffu){result.centerPhi=bitcast<u32>(center);result.flags|=CENTER_COMPLETE;}return result;}
-@compute @workgroup_size(64)fn recomputeFineSummaryBase(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let recordIndex=fineLinearWorkgroup(w,n);let enabled=recordIndex<workState[3];let key=select(INVALID,records[recordIndex].key,enabled);let inLevel=enabled&&key>=p.levelOffset&&key<p.levelOffset+p.levelKeyCount;let fineRecord=inLevel;var lo=3.402823e38;var hi=-3.402823e38;var ma=3.402823e38;var count=0u;var failure=0u;let id=select(INVALID,finePage(key),fineRecord);if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;if(index>=arrayLength(&c)||index>=arrayLength(&d)){failure|=CAPACITY;continue;}if((c[index]&VALID)==0u){continue;}let sample=bitcast<f32>(d[index]);if(!finite(sample)){failure|=NONFINITE;continue;}lo=min(lo,sample);hi=max(hi,sample);ma=min(ma,abs(sample));count+=1u;}}minimumPhi[lid]=lo;maximumPhi[lid]=hi;minimumAbsolutePhi[lid]=ma;validSamples[lid]=count;errors[lid]=failure;workgroupBarrier();for(var stride=32u;stride>0u;stride>>=1u){if(lid<stride){minimumPhi[lid]=min(minimumPhi[lid],minimumPhi[lid+stride]);maximumPhi[lid]=max(maximumPhi[lid],maximumPhi[lid+stride]);minimumAbsolutePhi[lid]=min(minimumAbsolutePhi[lid],minimumAbsolutePhi[lid+stride]);validSamples[lid]+=validSamples[lid+stride];errors[lid]|=errors[lid+stride];}workgroupBarrier();}if(lid==0u&&fineRecord){var value=Entry(key,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,errors[0],0u);if(validSamples[0]>0u){value=Entry(key,ordered(minimumPhi[0]),ordered(maximumPhi[0]),bitcast<u32>(minimumAbsolutePhi[0]),validSamples[0],1u,errors[0],0u);}records[recordIndex]=centerSummary(key,value);}}
-@compute @workgroup_size(64)fn recomputeFineSummaryParents(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){if(lid!=0u){return;}let recordIndex=fineLinearWorkgroup(w,n);if(recordIndex>=workState[3]){return;}let key=records[recordIndex].key;if(key<p.levelOffset||key>=p.levelOffset+p.levelKeyCount){return;}let localKey=key-p.levelOffset;let xy=p.levelDims.x*p.levelDims.y;let z=localKey/xy;let rem=localKey-z*xy;let y=rem/p.levelDims.x;let coord=vec3u(rem-y*p.levelDims.x,y,z);var childDims=p.baseDims;var childOffset=0u;for(var level=0u;level+1u<p.level;level+=1u){childOffset+=childDims.x*childDims.y*childDims.z;childDims=(childDims+vec3u(1u))/2u;}var value=Entry(key,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,0u,0u);for(var child=0u;child<8u;child+=1u){let q=coord*2u+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);if(any(q>=childDims)){continue;}let childKey=childOffset+q.x+childDims.x*(q.y+childDims.y*q.z);let item=dirtySummaryAt(childKey);if(entryPresent(item)){value=combineSummary(value,item);}}records[recordIndex]=centerSummary(key,value);}
+fn centerSampleAt(key:u32,corner:u32)->vec2u{
+ if(key<p.levelOffset||key>=p.levelOffset+p.levelKeyCount){return vec2u(0u);}
+ let localKey=key-p.levelOffset;let xy=p.levelDims.x*p.levelDims.y;let z=localKey/xy;let rem=localKey-z*xy;let y=rem/p.levelDims.x;
+ let coord=vec3u(rem-y*p.levelDims.x,y,z);let resolution=select(4u,8u,p.samplesPerBrick==512u);
+ let span=(1u<<p.level)*resolution;let centerLow=coord*span+vec3u(span/2u-1u);
+ let q=centerLow+vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);let brick=q/resolution;
+ if(any(brick>=p.baseDims)){return vec2u(0u);}let pageKey=brick.x+p.baseDims.x*(brick.y+p.baseDims.y*brick.z);
+ let id=finePage(pageKey);if(id==INVALID){return vec2u(0u);}let within=q-brick*resolution;
+ let index=id*p.samplesPerBrick+within.x+resolution*(within.y+resolution*within.z);
+ if(index>=arrayLength(&c)||index>=arrayLength(&d)){return vec2u(0u);}
+ let sample=bitcast<f32>(d[index]);if(!finite(sample)){return vec2u(0u,NONFINITE);}
+ return vec2u(bitcast<u32>(sample),1u);
+}
+fn finishCenterSummary(value:Entry)->Entry{
+ var result=value;result.flags&=~CENTER_COMPLETE;result.centerPhi=0u;var center=0.0;var mask=0u;
+ for(var corner=0u;corner<8u;corner+=1u){let state=centerSampleStates[corner];result.flags|=state&NONFINITE;
+  if((state&1u)!=0u){center+=0.125*bitcast<f32>(centerSampleBits[corner]);mask|=1u<<corner;}}
+ if(mask==0xffu){result.centerPhi=bitcast<u32>(center);result.flags|=CENTER_COMPLETE;}return result;
+}
+@compute @workgroup_size(64)fn recomputeFineSummaryBase(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){
+ let recordIndex=fineLinearWorkgroup(w,n);let enabled=recordIndex<workState[3];let key=select(INVALID,records[recordIndex].key,enabled);
+ let inLevel=enabled&&key>=p.levelOffset&&key<p.levelOffset+p.levelKeyCount;let fineRecord=inLevel;var lo=3.402823e38;var hi=-3.402823e38;var ma=3.402823e38;var count=0u;var failure=0u;
+ let id=select(INVALID,finePage(key),fineRecord);if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;if(index>=arrayLength(&c)||index>=arrayLength(&d)){failure|=CAPACITY;continue;}if((c[index]&VALID)==0u){continue;}let sample=bitcast<f32>(d[index]);if(!finite(sample)){failure|=NONFINITE;continue;}lo=min(lo,sample);hi=max(hi,sample);ma=min(ma,abs(sample));count+=1u;}}
+ minimumPhi[lid]=lo;maximumPhi[lid]=hi;minimumAbsolutePhi[lid]=ma;validSamples[lid]=count;errors[lid]=failure;workgroupBarrier();
+ for(var stride=32u;stride>0u;stride>>=1u){if(lid<stride){minimumPhi[lid]=min(minimumPhi[lid],minimumPhi[lid+stride]);maximumPhi[lid]=max(maximumPhi[lid],maximumPhi[lid+stride]);minimumAbsolutePhi[lid]=min(minimumAbsolutePhi[lid],minimumAbsolutePhi[lid+stride]);validSamples[lid]+=validSamples[lid+stride];errors[lid]|=errors[lid+stride];}workgroupBarrier();}
+ if(lid<8u){let center=centerSampleAt(key,lid);centerSampleBits[lid]=center.x;centerSampleStates[lid]=center.y;}workgroupBarrier();
+ if(lid==0u&&fineRecord){var value=Entry(key,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,errors[0],0u);if(validSamples[0]>0u){value=Entry(key,ordered(minimumPhi[0]),ordered(maximumPhi[0]),bitcast<u32>(minimumAbsolutePhi[0]),validSamples[0],1u,errors[0],0u);}records[recordIndex]=finishCenterSummary(value);}
+}
+@compute @workgroup_size(64)fn recomputeFineSummaryParents(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){
+ let recordIndex=fineLinearWorkgroup(w,n);let enabled=recordIndex<workState[3];let key=select(INVALID,records[recordIndex].key,enabled);
+ let inLevel=enabled&&key>=p.levelOffset&&key<p.levelOffset+p.levelKeyCount;var coord=vec3u(0u);
+ if(inLevel){let localKey=key-p.levelOffset;let xy=p.levelDims.x*p.levelDims.y;let z=localKey/xy;let rem=localKey-z*xy;let y=rem/p.levelDims.x;coord=vec3u(rem-y*p.levelDims.x,y,z);}
+ var childDims=p.baseDims;var childOffset=0u;for(var level=0u;level+1u<p.level;level+=1u){childOffset+=childDims.x*childDims.y*childDims.z;childDims=(childDims+vec3u(1u))/2u;}
+ if(lid<8u){var item=invalidEntry();let q=coord*2u+vec3u(lid&1u,(lid>>1u)&1u,(lid>>2u)&1u);
+  if(inLevel&&!any(q>=childDims)){let childKey=childOffset+q.x+childDims.x*(q.y+childDims.y*q.z);item=dirtySummaryAt(childKey);}
+  parentChildren[lid]=item;let center=centerSampleAt(key,lid);centerSampleBits[lid]=center.x;centerSampleStates[lid]=center.y;
+ }workgroupBarrier();
+ if(lid==0u&&inLevel){var value=Entry(key,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,0u,0u);
+  for(var child=0u;child<8u;child+=1u){let item=parentChildren[child];if(entryPresent(item)){value=combineSummary(value,item);}}
+  records[recordIndex]=finishCenterSummary(value);}
+}
 fn reductionRange(count:u32,lid:u32)->vec2u{let width=count/256u;let remainder=count%256u;let begin=lid*width+min(lid,remainder);return vec2u(begin,begin+width+select(0u,1u,lid<remainder));}
 fn lanePrefix(value:u32,lid:u32)->u32{reductionValues[lid]=value;workgroupBarrier();for(var stride=1u;stride<256u;stride<<=1u){var add=0u;if(lid>=stride){add=reductionValues[lid-stride];}workgroupBarrier();reductionValues[lid]+=add;workgroupBarrier();}return reductionValues[lid]-value;}
 fn dirtyContains(key:u32)->bool{let at=recordLowerBound(key);return at<workState[3]&&records[at].key==key;}

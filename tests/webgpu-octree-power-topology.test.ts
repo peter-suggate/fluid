@@ -60,13 +60,21 @@ test("power topology WGSL resolves affected rows and compacts exact publication 
   assert.match(octreePowerTopologyShader, /fn stagePowerTopologyDelta/);
   assert.match(octreePowerTopologyShader, /fn prefixPowerTopologyDelta/);
   assert.match(octreePowerTopologyShader, /fn scatterPowerTopologyDelta/);
-  assert.match(octreePowerTopologyShader, /fn commitPowerTopology/);
+  assert.doesNotMatch(octreePowerTopologyShader, /fn commitPowerTopology/);
+  assert.match(octreePowerTopologyShader,
+    /lookupArena\[publicationBase\(\)\+output\]=row;committedMetrics\[row\]=metrics\[row\]/,
+    "row-owned scatter must commit the same changed row without a redundant compact dispatch");
   assert.match(octreePowerTopologyShader,
     /candidate\.resolvedCount!=requestedRows\(\)\|\|candidate\.version!=params\.catalogVersion/);
   assert.doesNotMatch(octreePowerTopologyShader,
     /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
     "row-owned metric status and singleton publication replace recurring topology atomics");
   assert.match(octreePowerTopologyShader, /let row=affectedRow\(item\)/);
+  assert.match(octreePowerTopologyShader, /lookupArena\[statusBase\(\)\+row\]=STATUS_LISTED/);
+  assert.match(octreePowerTopologyShader,
+    /let listed=\(lookupArena\[statusBase\(\)\+row\]&STATUS_LISTED\)!=0u/);
+  assert.doesNotMatch(octreePowerTopologyShader, /fn rowListedAffected/,
+    "the exact affected-list proof must not binary-search the list once per live row");
   assert.match(octreePowerTopologyShader,
     /if\(old!=row\)\{metrics\[row\]=metric;status\|=STATUS_PUBLISH;\}/);
   assert.match(octreePowerTopologyShader,
@@ -89,9 +97,9 @@ test("power topology resolve dispatch is sourced from the exact row delta", () =
   assert.match(source,
     /copyBufferToBuffer\(this\.control,\s*64,\s*this\.workDispatch,\s*0,\s*12\)/,
     "the topology-owned block dispatch is at control byte 64");
-  assert.match(source,
+  assert.doesNotMatch(source,
     /copyBufferToBuffer\(this\.control,\s*80,\s*this\.workDispatch,\s*0,\s*12\)/,
-    "the topology-owned compact commit dispatch is at aligned control byte 80");
+    "row-owned scatter must not copy or launch a redundant compact commit dispatch");
 });
 
 test("Dawn resolves generated catalog descriptors and rejects misses/anisotropy", {

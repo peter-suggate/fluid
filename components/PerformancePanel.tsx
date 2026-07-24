@@ -9,8 +9,9 @@ import {
   type PerformanceTrace,
 } from "@/lib/performance-trace";
 import { isOctreeTechniqueOverlayMode } from "@/lib/octree-technique-debug";
-import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
+import { emptyPerformanceReport, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore } from "@/lib/stores/method-store";
+import { usePerformanceInstrumentationStore } from "@/lib/stores/performance-instrumentation-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import type { GridOverlayConfig, GridOverlayMode } from "@/lib/webgpu-renderer";
 
@@ -328,6 +329,8 @@ export function PerformancePanel() {
   const reports = useDiagnosticsStore((state) => state.performanceReports);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const methodId = useMethodStore((state) => state.methodId);
+  const instrumentationEnabled = usePerformanceInstrumentationStore((state) => state.enabled);
+  const setInstrumentationEnabled = usePerformanceInstrumentationStore((state) => state.setEnabled);
   const overlayMode = useUIStore((state) => state.gridOverlayMode);
   const overlayAxis = useUIStore((state) => state.gridOverlayAxis);
   const overlaySlice = useUIStore((state) => state.gridOverlaySlice);
@@ -356,14 +359,36 @@ export function PerformancePanel() {
   const volumeCapable = isOctreeTechniqueOverlayMode(overlayMode) && overlayMode !== "global-fine-phi";
   const traces = [cpu, physics, presentation].filter((trace): trace is PerformanceTrace => trace !== undefined);
   const allExact = traces.length === 3 && traces.every(performanceTraceIsExact);
+  const toggleInstrumentation = () => {
+    const enabled = !instrumentationEnabled;
+    setInstrumentationEnabled(enabled);
+    useDiagnosticsStore.getState().set({
+      performanceReport: emptyPerformanceReport,
+      performanceReports: [],
+    });
+  };
 
   return <aside id="performance-panel" className="right-panel panel-scroll performance-panel performance-v2" aria-label="Performance and paper field observatory" data-testid="performance-panel" data-method={methodId}>
     <header className="trace-header">
       <div><span>POWER LIQUIDS OBSERVATORY</span><h2>Measured work + live fields</h2></div>
-      <div className={`trace-integrity ${allExact ? "valid" : "invalid"}`}><i />{allExact ? "CLOSED ACCOUNTING" : "AWAITING VALID TRACE"}</div>
+      <div className="trace-header-actions">
+        <button
+          type="button"
+          className={`measurement-toggle ${instrumentationEnabled ? "active" : ""}`}
+          role="switch"
+          aria-checked={instrumentationEnabled}
+          onClick={toggleInstrumentation}
+          title="Disable timestamp queries, marker passes, trace readbacks, and measurement-only queue fences"
+        >
+          <span>MEASUREMENT LOAD</span><b>{instrumentationEnabled ? "ON" : "OFF"}</b><i />
+        </button>
+        <div className={`trace-integrity ${instrumentationEnabled && allExact ? "valid" : "invalid"}`}><i />{
+          !instrumentationEnabled ? "INSTRUMENTATION OFF" : allExact ? "CLOSED ACCOUNTING" : "AWAITING VALID TRACE"
+        }</div>
+      </div>
     </header>
 
-    <section className="trace-summary">
+    {instrumentationEnabled ? <><section className="trace-summary">
       <div><small>CPU MAIN THREAD</small><strong>{cpu ? formatMs(cpu.total_ms) : "—"}</strong></div>
       <div><small>GPU PHYSICS</small><strong>{physics ? formatMs(physics.total_ms) : "—"}</strong></div>
       <div><small>GPU PRESENTATION</small><strong>{presentation ? formatMs(presentation.total_ms) : "—"}</strong></div>
@@ -377,6 +402,10 @@ export function PerformancePanel() {
     <TraceLane trace={physics} title="GPU · POWER LIQUIDS ADVANCE" sampleCount={lanes.physics.sampleCount} />
     <TraceLane trace={presentation} title="GPU · PRESENTATION" sampleCount={lanes.presentation.sampleCount} />
     <TraceLane trace={cpu} title="CPU · MAIN-THREAD FRAME WORK" sampleCount={lanes.cpu.sampleCount} />
+    </> : <div className="trace-disabled-notice">
+      <strong>Running without measurement instrumentation</strong>
+      <span>Timestamp queries, marker dispatches, forced encoder breaks, trace-buffer resolves/readbacks, and measurement-only queue fences are bypassed. Correctness synchronization remains active.</span>
+    </div>}
 
     <section className="paper-observatory">
       <header><div><h3>Paper field observatory</h3><small>LIVE GPU PUBLICATIONS · NO FIELD READBACK</small></div><span>{methodId === "octree" ? "OCTREE AUTHORITY" : "SELECT OCTREE FOR FULL SET"}</span></header>

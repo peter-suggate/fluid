@@ -172,12 +172,13 @@ export const EXTRACTION_POLYGONISE_WORKGROUP = 64;
  *
  * Marching tetrahedra emits more vertices per crossing cube than marching
  * cubes, and a ratio-two transported surface can retain transient sheets whose
- * area is several times the tank footprint. 64 vertices per lattice-area unit
- * covers that normal fine-band case while the byte ceiling remains absolute.
+ * area is several times the tank footprint. 80 vertices per lattice-area unit
+ * covers the mini dam-break's folded front through its two-second acceptance
+ * window while the byte ceiling remains absolute.
  */
 export function surfaceVertexCapacity(nx: number, ny: number, nz: number) {
   const area = nx * ny + nx * nz + ny * nz;
-  return Math.max(262_144, Math.min(2_097_152, area * 64));
+  return Math.max(262_144, Math.min(2_097_152, area * 80));
 }
 
 /**

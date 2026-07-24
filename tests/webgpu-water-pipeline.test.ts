@@ -167,7 +167,9 @@ test("global-fine presentation compiles and encodes only the combined mesh path"
 test("buffer capacities keep the worklist aligned with the vertex allocation", () => {
   assert.equal(surfaceVertexCapacity(16, 16, 16), 262_144, "small grids use the floor allocation");
   assert.equal(surfaceVertexCapacity(512, 512, 512), 2_097_152, "large grids hit the 64 MiB ceiling");
-  assert.equal(surfaceVertexCapacity(80, 160, 60), (80 * 160 + 80 * 60 + 160 * 60) * 64, "mid-size grids scale with transported surface area");
+  assert.equal(surfaceVertexCapacity(64, 64, 64), 983_040,
+    "the mini dam global-fine mesh keeps headroom above its two-second 839,490-vertex peak");
+  assert.equal(surfaceVertexCapacity(60, 120, 50), (60 * 120 + 60 * 50 + 120 * 50) * 80, "mid-size grids scale with transported surface area");
   assert.equal(activeCubeCapacity(262_144), 87_382, "every appended cube emits at least one triangle, so capacity/3 entries suffice");
   assert.equal(activeCubeCapacity(2_097_152), 699_051);
 });

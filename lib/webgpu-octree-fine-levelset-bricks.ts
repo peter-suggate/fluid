@@ -72,7 +72,11 @@ export class WebGPUFineLevelSetBricks {
     // `plan.allocatedBytes` contains the four paper-facing payload channels
     // (flags, phi, and two closest-point work channels). Rollback is a separate
     // publication-transaction cost, shared by both A/B page-table slots.
-    this.allocatedBytes = plan.allocatedBytes + sampleWords * 4 + 2 * 80;
+    // Each generation carries a flat logical-key -> physical-page directory
+    // after the compact worklist. The domain is only 4,096 words in the paper
+    // path and removes a lower_bound from every fine interpolation tap.
+    this.allocatedBytes = plan.allocatedBytes + sampleWords * 4 + 2 * 80
+      + 2 * plan.logicalBrickCount * 4;
     this.flags = storageBuffer(device, sampleWords * 4, "fine-levelset flags");
     this.phi = storageBuffer(device, sampleWords * 4, "fine-levelset phi");
     this.workA = storageBuffer(device, sampleWords * 4, "fine-levelset work A");
@@ -83,8 +87,10 @@ export class WebGPUFineLevelSetBricks {
       storageBuffer(device, plan.maximumResidentBricks * 40, "fine-levelset metadata generation 1"),
     ];
     this.worklists = [
-      storageBuffer(device, (5 + plan.maximumResidentBricks) * 4, "fine-levelset worklist generation 0"),
-      storageBuffer(device, (5 + plan.maximumResidentBricks) * 4, "fine-levelset worklist generation 1"),
+      storageBuffer(device, (5 + plan.maximumResidentBricks + plan.logicalBrickCount) * 4,
+        "fine-levelset worklist and direct page directory generation 0"),
+      storageBuffer(device, (5 + plan.maximumResidentBricks + plan.logicalBrickCount) * 4,
+        "fine-levelset worklist and direct page directory generation 1"),
     ];
     this.params = [0, 1].map((slot) => device.createBuffer({
       label: `fine-levelset parameters generation ${slot}`,
@@ -112,6 +118,17 @@ export class WebGPUFineLevelSetBricks {
     this.device.queue.writeBuffer(this.params[slot], 0, parameterBytes);
     uploadArray(this.device.queue, this.metadata[slot], data.metadataWords);
     uploadArray(this.device.queue, this.worklists[slot], data.worklistWords);
+    const direct = new Uint32Array(this.plan.logicalBrickCount).fill(FINE_LEVELSET_INVALID);
+    for (let work = 0; work < data.activeCount; work += 1) {
+      const physicalId = data.worklistWords[5 + work]!;
+      const key = data.metadataWords[physicalId * 10 + 1]!;
+      if (physicalId >= this.plan.maximumResidentBricks || key >= direct.length) {
+        throw new RangeError("Fine level-set publication contains an invalid direct-page identity");
+      }
+      direct[key] = physicalId;
+    }
+    this.device.queue.writeBuffer(this.worklists[slot],
+      (5 + this.plan.maximumResidentBricks) * 4, direct);
     uploadArray(this.device.queue, this.flags, data.flags);
     uploadArray(this.device.queue, this.phi, data.phi);
     uploadArray(this.device.queue, this.workA, data.workA);
@@ -169,6 +186,9 @@ export class WebGPUFineLevelSetBricks {
     emptyWorklist[3] = 1;
     emptyWorklist[4] = 1;
     this.device.queue.writeBuffer(source.worklist, 0, emptyWorklist);
+    this.device.queue.writeBuffer(source.worklist,
+      (5 + this.plan.maximumResidentBricks) * 4,
+      new Uint32Array(this.plan.logicalBrickCount).fill(FINE_LEVELSET_INVALID));
     return source;
   }
 
@@ -216,28 +236,27 @@ export class WebGPUFineLevelSetBricks {
   }
 }
 
-/** Exact lookup shared by every global-fine consumer.
- * The five-word publication header is validated before a bounded lower_bound
- * over IDs sorted by `metadata[id * 10 + 1]`. */
+/** Exact O(1) lookup shared by every global-fine consumer.
+ * The direct table follows the compact sorted worklist in the same binding, so
+ * consumers need no extra bind slot. Metadata still validates identity and
+ * generation before the physical page becomes visible. */
 export function makeFineLevelSetSortedWorklistLookupWGSL(
   params: string,
   metadata: string,
   worklist: string,
   functionName = "lookupFineBrick",
+  brickDimensions = "brickDimensions",
 ): string {
   return /* wgsl */ `
 fn ${functionName}(key:u32)->u32 {
   if(${params}.worklistHeaderWords!=5u||arrayLength(&${worklist})<5u||${worklist}[1]!=${params}.generation
     ||${worklist}[3]!=1u||${worklist}[4]!=1u){return INVALID;}
   let count=min(${worklist}[0],min(${params}.worklistCapacity,${params}.pageCapacity));
-  if(5u+count>arrayLength(&${worklist})){return INVALID;}var low=0u;var high=count;
-  for(var step=0u;step<32u&&low<high;step+=1u){
-    let middle=low+(high-low)/2u;let physicalId=${worklist}[5u+middle];let base=physicalId*10u;
-    if(physicalId>=${params}.pageCapacity||base+2u>=arrayLength(&${metadata})
-      ||${metadata}[base]!=physicalId||${metadata}[base+2u]!=${params}.generation){return INVALID;}
-    if(${metadata}[base+1u]<key){low=middle+1u;}else{high=middle;}
-  }
-  if(low>=count){return INVALID;}let physicalId=${worklist}[5u+low];let base=physicalId*10u;
+  let logicalCount=${params}.${brickDimensions}.x*${params}.${brickDimensions}.y*${params}.${brickDimensions}.z;
+  let directoryBase=5u+${params}.worklistCapacity;
+  if(5u+count>arrayLength(&${worklist})||key>=logicalCount
+    ||directoryBase+key>=arrayLength(&${worklist})){return INVALID;}
+  let physicalId=${worklist}[directoryBase+key];let base=physicalId*10u;
   return select(INVALID,physicalId,physicalId<${params}.pageCapacity&&base+2u<arrayLength(&${metadata})
     &&${metadata}[base]==physicalId&&${metadata}[base+1u]==key&&${metadata}[base+2u]==${params}.generation);
 }`;

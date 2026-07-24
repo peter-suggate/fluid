@@ -519,6 +519,7 @@ const STATUS_VALID:u32=0x80000000u;
 const STATUS_COARSER:u32=0x40000000u;
 const STATUS_PUBLISH:u32=0x20000000u;
 const STATUS_AFFECTED:u32=0x10000000u;
+const STATUS_LISTED:u32=0x08000000u;
 const DIRECTIONS:array<vec3i,18>=array<vec3i,18>(
   vec3i(-1,0,0),vec3i(0,-1,0),vec3i(0,0,-1),vec3i(0,0,1),vec3i(0,1,0),vec3i(1,0,0),
   vec3i(-1,-1,0),vec3i(-1,0,-1),vec3i(-1,0,1),vec3i(-1,1,0),vec3i(0,-1,-1),vec3i(0,-1,1),
@@ -609,11 +610,6 @@ fn prefixBase()->u32{return statusBase()+params.rowCountGenerationCapacityReserv
 fn publicationBase()->u32{return prefixBase()+params.rowCountGenerationCapacityReserved.z;}
 fn blockOffsetBase()->u32{return publicationBase()+params.rowCountGenerationCapacityReserved.z;}
 fn blockSummaryBase()->u32{return blockOffsetBase()+blockCount()+1u;}
-fn rowListedAffected(row:u32)->bool{
-  var low=0u;var high=affectedCount();
-  while(low<high){let middle=low+(high-low)/2u;if(affectedRow(middle)<row){low=middle+1u;}else{high=middle;}}
-  return low<affectedCount()&&affectedRow(low)==row;
-}
 fn rejectCandidate(row:u32,flags:u32){
   controlArena.candidate.errorCount+=1u;
   controlArena.candidate.firstInvalid=min(controlArena.candidate.firstInvalid,row);
@@ -650,6 +646,7 @@ var<workgroup> publicationFailures:array<vec4u,256>;
   let item=(wid.x+wid.y*workgroups.x)*64u+lid;if(item>=affectedCount()){return;}
   let row=affectedRow(item);let requested=controlArena.candidate.rowCount;
   if(row>=requested||row>=arrayLength(&headers)||row>=arrayLength(&descriptors)){return;}
+  indirectDispatch[statusBase()+row]=STATUS_LISTED;
   if((item>0u&&affectedRow(item-1u)>=row)||(rowDelta[params.delta.y+row]&ROW_DELTA_AFFECTED)==0u){
     failRow(row,CAPACITY,0u);return;
   }
@@ -696,7 +693,8 @@ var<workgroup> publicationFailures:array<vec4u,256>;
   var status=0u;
   if(row<requested&&controlArena.candidate.flags==0u){
     let encoded=rowDelta[params.delta.y+row];let flagged=(encoded&ROW_DELTA_AFFECTED)!=0u;
-    let listed=rowListedAffected(row);let oldPlusOne=encoded&0x7fffffffu;var descriptor=INVALID;var flags=0u;
+    let listed=(indirectDispatch[statusBase()+row]&STATUS_LISTED)!=0u;
+    let oldPlusOne=encoded&0x7fffffffu;var descriptor=INVALID;var flags=0u;
     if(flagged!=listed){flags|=CAPACITY;}
     if(flagged){descriptor=descriptors[row];status|=STATUS_AFFECTED|STATUS_PUBLISH;}
     else if(oldPlusOne==0u){flags|=CAPACITY;}

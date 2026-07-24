@@ -169,7 +169,12 @@ export function planFluidBrickResidencyAllocation(
   const leafIndexBytes = explicitLeafMapping ? brickCapacity * 4 : 4;
   const leafStateBytes = fineSeedCandidatesOnly ? 4 : leafCapacity * 4;
   const parameterBytes = 64;
-  const transactionalBytes = stateBytes + worklistBytes + tileWorklistBytes + tileStateBytes;
+  // Dense multi-dispatch publication uses one trailing atomic word in its
+  // candidate tile-state arena to carry fail-closed validation across dispatch
+  // boundaries. The published arena retains the exact public ABI.
+  const candidateControlBytes = sparseKeyPools ? 0 : 4;
+  const transactionalBytes = stateBytes + worklistBytes + tileWorklistBytes + tileStateBytes
+    + candidateControlBytes;
   const allocatedBytes = stateBytes + worklistBytes + tileWorklistBytes + tileStateBytes
     + leafIndexBytes + leafStateBytes + parameterBytes + transactionalBytes;
   const denseSchedulerBytes = 2 * ((brickCapacity * 4
@@ -645,21 +650,22 @@ fn finalize() {
 }
 `;
 
-const fineSeedCandidateShaderPrelude = /* wgsl */ `
+const makeFineSeedCandidateShaderPrelude = (atomicCandidateState = false) => /* wgsl */ `
 struct Params { dimsBrick:vec4u, brickDimsCapacity:vec4u, settings:vec4f, tiling:vec4u }
 struct FineSeedLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct Candidate { row:u32,flags:u32 }
-@group(0) @binding(0) var<storage,read> publishedStates:array<u32>;
-@group(0) @binding(1) var<storage,read_write> states:array<u32>;
+@group(0) @binding(0) var<storage,read_write> publishedStates:array<u32>;
+@group(0) @binding(1) var<storage,read_write> states:array<${atomicCandidateState ? "atomic<u32>" : "u32"}>;
 @group(0) @binding(2) var<storage,read_write> worklist:array<u32>;
-@group(0) @binding(3) var<storage,read> publishedTileStates:array<u32>;
-@group(0) @binding(4) var<storage,read_write> tileStates:array<u32>;
+@group(0) @binding(3) var<storage,read_write> publishedTileStates:array<u32>;
+@group(0) @binding(4) var<storage,read_write> tileStates:array<${atomicCandidateState ? "atomic<u32>" : "u32"}>;
 @group(0) @binding(5) var<storage,read_write> tileWorklist:array<u32>;
 @group(0) @binding(6) var<storage,read> leaves:array<FineSeedLeaf>;
 @group(0) @binding(7) var<storage,read> candidates:array<Candidate>;
 @group(0) @binding(8) var<storage,read> candidateControl:array<u32>;
-@group(0) @binding(9) var<storage,read> publishedTileWorklist:array<u32>;
+@group(0) @binding(9) var<storage,read_write> publishedTileWorklist:array<u32>;
 @group(0) @binding(10) var<uniform> params:Params;
+@group(0) @binding(11) var<storage,read_write> publishedWorklist:array<u32>;
 const RESIDENT=1u;const CORE=2u;const HALO=4u;const ACTIVATED=8u;const LIVE=32u;
 const WAS_RESIDENT=32u;const HEADER=16u;const INVALID=0xffffffffu;const COMMIT=0xc01117edu;
 fn dispatch2(n:u32)->vec2u{let x=min(n,65535u);return vec2u(x,select(1u,(n+x-1u)/x,x>0u));}
@@ -681,79 +687,143 @@ fn finishHeaders(){
   let rc=dispatch2(tileWorklist[4]*candidatesPerTile);tileWorklist[12]=rc.x;tileWorklist[13]=rc.y;tileWorklist[14]=1u;
   tileWorklist[15]=candidateControl[4];tileWorklist[11]=COMMIT;
 }
+fn commitCandidateGeneration(lane:u32,stride:u32){
+  for(var i=lane;i<arrayLength(&publishedStates);i+=stride){
+    publishedStates[i]=${atomicCandidateState ? "atomicLoad(&states[i])" : "states[i]"};
+  }
+  for(var i=lane;i<arrayLength(&publishedWorklist);i+=stride){publishedWorklist[i]=worklist[i];}
+  for(var i=lane;i<arrayLength(&publishedTileStates);i+=stride){
+    publishedTileStates[i]=${atomicCandidateState ? "atomicLoad(&tileStates[i])" : "tileStates[i]"};
+  }
+  for(var i=lane;i<arrayLength(&publishedTileWorklist);i+=stride){
+    publishedTileWorklist[i]=select(tileWorklist[i],0u,i==11u);
+  }
+}
 `;
 
 /**
- * Dense compact-candidate publisher. One invocation owns the complete A/B
- * schedule in deterministic logical-key order, so no recurring synchronization
- * atomics, host clears, generation copies, or inter-stage dispatches exist.
+ * Dense compact-candidate publisher. Expensive initialization, marking, and
+ * lifecycle resolution occupy the full device. A final 256-lane stable-prefix
+ * publication preserves deterministic logical-key order without a serial
+ * capacity walk.
  */
-export const fineSeedCandidateResidencyShader = fineSeedCandidateShaderPrelude + /* wgsl */ `
+export const fineSeedCandidateResidencyShader = makeFineSeedCandidateShaderPrelude(true) + /* wgsl */ `
+fn tileCapacity()->u32{return params.tiling.y*params.tiling.z*params.tiling.w;}
+fn recordDenseError(code:u32){atomicOr(&tileStates[tileCapacity()],code);}
 fn markTileRing(key:u32){
   let td=vec3i(params.tiling.yzw);let q=vec3i(i32(key%params.tiling.y),
     i32((key/params.tiling.y)%params.tiling.z),i32(key/(params.tiling.y*params.tiling.z)));
   for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
     let n=q+vec3i(x,y,z);if(any(n<vec3i(0))||any(n>=td)){continue;}
-    let logical=u32(n.x)+params.tiling.y*(u32(n.y)+params.tiling.z*u32(n.z));tileStates[logical]=1u;
+    let logical=u32(n.x)+params.tiling.y*(u32(n.y)+params.tiling.z*u32(n.z));
+    atomicOr(&tileStates[logical],1u);
   }}}
 }
-@compute @workgroup_size(1) fn publishFineSeedCandidateResidency(){
-  clearScratch();if(!producerAccepted()){return;}var error=0u;
-  let brickCap=params.brickDimsCapacity.w;let tileCap=params.tiling.y*params.tiling.z*params.tiling.w;
-  for(var i=0u;i<brickCap;i++){let old=publishedStates[i];let was=(old&RESIDENT)!=0u;
-    states[i]=select(0u,WAS_RESIDENT,was)|(min(0xffffu,(old>>16u)+1u)<<16u);}
-  for(var i=0u;i<tileCap;i++){tileStates[i]=0u;}
+@compute @workgroup_size(256) fn prepareFineSeedCandidateResidency(@builtin(global_invocation_id)gid:vec3u){
+  let i=gid.x;let brickCap=params.brickDimsCapacity.w;let tileCap=tileCapacity();
+  if(i<arrayLength(&worklist)){worklist[i]=0u;}
+  if(i<arrayLength(&tileWorklist)){tileWorklist[i]=0u;}
+  if(i<brickCap){let old=publishedStates[i];let was=(old&RESIDENT)!=0u;
+    atomicStore(&states[i],select(0u,WAS_RESIDENT,was)|(min(0xffffu,(old>>16u)+1u)<<16u));}
+  if(i<=tileCap){atomicStore(&tileStates[i],0u);}
+}
+@compute @workgroup_size(256) fn markFineSeedCandidateResidency(@builtin(global_invocation_id)gid:vec3u){
+  if(!producerAccepted()){return;}let i=gid.x;
   // Aanjaneya et al. (2017), Section 4.2 requires the complete local
   // face-and-edge pressure-support ring, independently of the fine-phi band.
   let tileCells=params.dimsBrick.w*params.tiling.x;let td=vec3i(params.tiling.yzw);
-  for(var row=0u;row<arrayLength(&leaves)&&error==0u;row++){let leaf=leaves[row];
-    if((leaf.flags&LIVE)==0u||leaf.size==0u){continue;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
-    if(any(a>=params.dimsBrick.xyz)){error=9u;break;}let first=vec3i(a/tileCells);
-    let last=vec3i(min(params.dimsBrick.xyz-vec3u(1u),a+vec3u(leaf.size-1u))/tileCells);
-    for(var z=first.z-1;z<=last.z+1;z++){for(var y=first.y-1;y<=last.y+1;y++){
-      for(var x=first.x-1;x<=last.x+1;x++){let q=vec3i(x,y,z);
-        if(any(q<vec3i(0))||any(q>=td)){continue;}
-        tileStates[u32(q.x)+params.tiling.y*(u32(q.y)+params.tiling.z*u32(q.z))]=1u;
-      }}}
+  if(i<arrayLength(&leaves)){let leaf=leaves[i];
+    if((leaf.flags&LIVE)!=0u&&leaf.size!=0u){let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
+      if(any(a>=params.dimsBrick.xyz)){recordDenseError(9u);}else{let first=vec3i(a/tileCells);
+      let last=vec3i(min(params.dimsBrick.xyz-vec3u(1u),a+vec3u(leaf.size-1u))/tileCells);
+      for(var z=first.z-1;z<=last.z+1;z++){for(var y=first.y-1;y<=last.y+1;y++){
+        for(var x=first.x-1;x<=last.x+1;x++){let q=vec3i(x,y,z);
+          if(any(q<vec3i(0))||any(q>=td)){continue;}
+          atomicOr(&tileStates[u32(q.x)+params.tiling.y*(u32(q.y)+params.tiling.z*u32(q.z))],1u);
+        }}}}
+    }
   }
-  for(var i=0u;i<candidateControl[0]&&error==0u;i++){
-    if(i>=arrayLength(&candidates)){error=1u;break;}let c=candidates[i];
-    if(c.row>=arrayLength(&leaves)){error=2u;break;}let leaf=leaves[c.row];
-    if(leaf.size==0u){error=3u;break;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
-    if(any(a>=params.dimsBrick.xyz)){error=4u;break;}let first=a/params.dimsBrick.w;
+  if(i<candidateControl[0]){
+    if(i>=arrayLength(&candidates)){recordDenseError(1u);return;}let c=candidates[i];
+    if(c.row>=arrayLength(&leaves)){recordDenseError(2u);return;}let leaf=leaves[c.row];
+    if(leaf.size==0u){recordDenseError(3u);return;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
+    if(any(a>=params.dimsBrick.xyz)){recordDenseError(4u);return;}let first=a/params.dimsBrick.w;
     let last=min(params.brickDimsCapacity.xyz-vec3u(1u),(a+vec3u(leaf.size-1u))/params.dimsBrick.w);
     let bits=select(HALO,CORE,(c.flags&CORE)!=0u);
     for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
-      let logical=x+params.brickDimsCapacity.x*(y+params.brickDimsCapacity.y*z);states[logical]|=bits;
+      let logical=x+params.brickDimsCapacity.x*(y+params.brickDimsCapacity.y*z);
+      atomicOr(&states[logical],bits);
     }}}
   }
-  for(var logical=0u;logical<brickCap&&error==0u;logical++){let marked=states[logical];
+}
+@compute @workgroup_size(256) fn resolveFineSeedCandidateResidency(@builtin(global_invocation_id)gid:vec3u){
+  if(!producerAccepted()){return;}let logical=gid.x;let brickCap=params.brickDimsCapacity.w;
+  if(logical<brickCap){let marked=atomicLoad(&states[logical]);
     let desired=(marked&(CORE|HALO))!=0u;let was=(marked&WAS_RESIDENT)!=0u;
     let dry=select(marked>>16u,0u,desired);let persistent=params.settings.w>0.5;
     let resident=select(desired||(was&&dry<=u32(params.settings.y)),was||desired,persistent);
     let core=(marked&CORE)!=0u;let flags=select(0u,RESIDENT,resident)|select(0u,CORE,core)
       |select(0u,HALO,resident&&!core)|select(0u,ACTIVATED,resident&&!was)|select(0u,WAS_RESIDENT,was);
-    states[logical]=flags|(dry<<16u);
-    if(resident){let output=worklist[0];if(output>=brickCap){error=5u;break;}
-      worklist[HEADER+output*2u]=logical;worklist[HEADER+output*2u+1u]=logical;worklist[0]=output+1u;
-      worklist[8+select(1u,0u,core)]+=1u;if(!was){worklist[10]+=1u;}
-    }else if(was){let output=worklist[4];if(output>=brickCap){error=5u;break;}
-      worklist[HEADER+brickCap*2u+output*2u]=logical;worklist[HEADER+brickCap*2u+output*2u+1u]=logical;
-      worklist[4]=output+1u;worklist[11]+=1u;}
-  }
-  for(var item=0u;item<worklist[0]&&error==0u;item++){let logical=worklist[HEADER+item*2u];
-    let b=vec3u(logical%params.brickDimsCapacity.x,(logical/params.brickDimsCapacity.x)%params.brickDimsCapacity.y,
+    atomicStore(&states[logical],flags|(dry<<16u));
+    if(resident){let b=vec3u(logical%params.brickDimsCapacity.x,
+      (logical/params.brickDimsCapacity.x)%params.brickDimsCapacity.y,
       logical/(params.brickDimsCapacity.x*params.brickDimsCapacity.y));
-    let key=(b.x/params.tiling.x)+params.tiling.y*((b.y/params.tiling.x)+params.tiling.z*(b.z/params.tiling.x));
-    markTileRing(key);
+      let key=(b.x/params.tiling.x)+params.tiling.y*((b.y/params.tiling.x)+params.tiling.z*(b.z/params.tiling.x));
+      markTileRing(key);}
   }
-  for(var key=0u;key<tileCap&&error==0u;key++){let live=tileStates[key]!=0u;let was=publishedTileStates[key]!=0u;
-    if(live){let output=tileWorklist[0];if(output>=tileCap){error=5u;break;}
-      tileWorklist[HEADER+output]=key;tileWorklist[0]=output+1u;
-    }else if(was){let output=tileWorklist[4];if(output>=tileCap){error=5u;break;}
-      tileWorklist[HEADER+tileCap+output]=key;tileWorklist[4]=output+1u;}
+}
+var<workgroup> activePrefix:array<u32,256>;var<workgroup> retiredPrefix:array<u32,256>;
+var<workgroup> corePrefix:array<u32,256>;var<workgroup> haloPrefix:array<u32,256>;
+var<workgroup> activatedPrefix:array<u32,256>;var<workgroup> tileActivePrefix:array<u32,256>;
+var<workgroup> tileRetiredPrefix:array<u32,256>;
+var<workgroup> densePublishAccepted:u32;
+@compute @workgroup_size(256) fn publishFineSeedCandidateResidency(@builtin(local_invocation_index)lid:u32){
+  let brickCap=params.brickDimsCapacity.w;let tileCap=tileCapacity();
+  if(lid==0u){densePublishAccepted=select(0u,1u,
+    producerAccepted()&&atomicLoad(&tileStates[tileCap])==0u);}
+  workgroupBarrier();if(workgroupUniformLoad(&densePublishAccepted)==0u){return;}
+  let brickChunk=(brickCap+255u)/256u;let brickFirst=min(brickCap,lid*brickChunk);
+  let brickEnd=min(brickCap,brickFirst+brickChunk);var activeCount=0u;var retired=0u;
+  var core=0u;var halo=0u;var activated=0u;
+  for(var logical=brickFirst;logical<brickEnd;logical+=1u){let marked=atomicLoad(&states[logical]);
+    let resident=(marked&RESIDENT)!=0u;let was=(marked&WAS_RESIDENT)!=0u;
+    activeCount+=select(0u,1u,resident);retired+=select(0u,1u,!resident&&was);
+    core+=select(0u,1u,resident&&(marked&CORE)!=0u);
+    halo+=select(0u,1u,resident&&(marked&CORE)==0u);
+    activated+=select(0u,1u,resident&&!was);
   }
-  if(error==0u){finishHeaders();}
+  let tileChunk=(tileCap+255u)/256u;let tileFirst=min(tileCap,lid*tileChunk);
+  let tileEnd=min(tileCap,tileFirst+tileChunk);var tileActive=0u;var tileRetired=0u;
+  for(var key=tileFirst;key<tileEnd;key+=1u){let live=atomicLoad(&tileStates[key])!=0u;
+    let was=publishedTileStates[key]!=0u;tileActive+=select(0u,1u,live);
+    tileRetired+=select(0u,1u,!live&&was);
+  }
+  activePrefix[lid]=activeCount;retiredPrefix[lid]=retired;corePrefix[lid]=core;haloPrefix[lid]=halo;
+  activatedPrefix[lid]=activated;tileActivePrefix[lid]=tileActive;tileRetiredPrefix[lid]=tileRetired;
+  workgroupBarrier();
+  if(lid==0u){var a=0u;var r=0u;var c=0u;var h=0u;var n=0u;var ta=0u;var tr=0u;
+    for(var lane=0u;lane<256u;lane+=1u){let ac=activePrefix[lane];let rc=retiredPrefix[lane];
+      let cc=corePrefix[lane];let hc=haloPrefix[lane];let nc=activatedPrefix[lane];
+      let tac=tileActivePrefix[lane];let trc=tileRetiredPrefix[lane];
+      activePrefix[lane]=a;retiredPrefix[lane]=r;corePrefix[lane]=c;haloPrefix[lane]=h;
+      activatedPrefix[lane]=n;tileActivePrefix[lane]=ta;tileRetiredPrefix[lane]=tr;
+      a+=ac;r+=rc;c+=cc;h+=hc;n+=nc;ta+=tac;tr+=trc;}
+    worklist[0]=a;worklist[4]=r;worklist[8]=c;worklist[9]=h;worklist[10]=n;worklist[11]=r;
+    tileWorklist[0]=ta;tileWorklist[4]=tr;
+  }
+  workgroupBarrier();var activeAt=activePrefix[lid];var retiredAt=retiredPrefix[lid];
+  for(var logical=brickFirst;logical<brickEnd;logical+=1u){let marked=atomicLoad(&states[logical]);
+    let resident=(marked&RESIDENT)!=0u;let was=(marked&WAS_RESIDENT)!=0u;
+    if(resident){worklist[HEADER+activeAt*2u]=logical;worklist[HEADER+activeAt*2u+1u]=logical;activeAt+=1u;}
+    else if(was){worklist[HEADER+brickCap*2u+retiredAt*2u]=logical;
+      worklist[HEADER+brickCap*2u+retiredAt*2u+1u]=logical;retiredAt+=1u;}
+  }
+  var tileActiveAt=tileActivePrefix[lid];var tileRetiredAt=tileRetiredPrefix[lid];
+  for(var key=tileFirst;key<tileEnd;key+=1u){let live=atomicLoad(&tileStates[key])!=0u;
+    let was=publishedTileStates[key]!=0u;if(live){tileWorklist[HEADER+tileActiveAt]=key;tileActiveAt+=1u;}
+    else if(was){tileWorklist[HEADER+tileCap+tileRetiredAt]=key;tileRetiredAt+=1u;}}
+  workgroupBarrier();if(lid==0u){finishHeaders();}
+  storageBarrier();workgroupBarrier();commitCandidateGeneration(lid,256u);
 }
 `;
 
@@ -762,11 +832,21 @@ fn markTileRing(key:u32){
  * open-addressed records deterministically and leaves tombstones intact, so a
  * saturated brick or tile pool rejects the entire candidate generation.
  */
-export const sparseFineSeedCandidateResidencyShader = fineSeedCandidateShaderPrelude + /* wgsl */ `
+export const sparseFineSeedCandidateResidencyShader = makeFineSeedCandidateShaderPrelude() + /* wgsl */ `
 fn hashKey(key:u32)->u32{var x=key*747796405u+2891336453u;x=((x>>((x>>28u)+4u))^x)*277803737u;return (x>>22u)^x;}
 fn brickSlots()->u32{return arrayLength(&states)/2u;}fn tileSlots()->u32{return arrayLength(&tileStates)/2u;}
 fn worklistCapacity()->u32{return (arrayLength(&worklist)-HEADER)/4u;}
 fn tileWorklistCapacity()->u32{return (arrayLength(&tileWorklist)-HEADER)/2u;}
+// The sparse publisher deliberately retains a single owner for insertion:
+// first occurrence still determines every open-addressed slot and tombstone
+// choice. Compact fine leaves repeatedly name the same brick/tile, though, so
+// memoize successful probes for this publication. A collision merely evicts a
+// memo entry and falls back to the canonical probe below; it cannot alter the
+// table or publication order.
+const CLAIM_CACHE_SIZE=128u;
+var<workgroup> brickClaimKeys:array<u32,128>;var<workgroup> brickClaimSlots:array<u32,128>;
+var<workgroup> tileClaimKeys:array<u32,128>;var<workgroup> tileClaimSlots:array<u32,128>;
+var<workgroup> tileRingKeys:array<u32,128>;
 fn claimBrick(logical:u32)->u32{let encoded=logical+1u;let cap=brickSlots();if(encoded==0u||encoded==INVALID||cap==0u){return INVALID;}
   let start=hashKey(logical)%cap;var tombstone=INVALID;
   for(var probe=0u;probe<cap;probe++){let slot=(start+probe)%cap;let key=states[slot*2u];
@@ -781,79 +861,131 @@ fn claimTile(logical:u32)->u32{let encoded=logical+1u;let cap=tileSlots();if(enc
     if(key==0u){let destination=select(slot,tombstone,tombstone!=INVALID);tileStates[destination*2u]=encoded;return destination;}}
   if(tombstone!=INVALID){tileStates[tombstone*2u]=encoded;return tombstone;}return INVALID;
 }
+fn claimBrickCached(logical:u32)->u32{
+  let encoded=logical+1u;let cache=hashKey(logical)&(CLAIM_CACHE_SIZE-1u);
+  if(brickClaimKeys[cache]==encoded){let slot=brickClaimSlots[cache];
+    if(slot<brickSlots()&&states[slot*2u]==encoded){return slot;}}
+  let slot=claimBrick(logical);if(slot!=INVALID){brickClaimKeys[cache]=encoded;brickClaimSlots[cache]=slot;}return slot;
+}
+fn claimTileCached(logical:u32)->u32{
+  let encoded=logical+1u;let cache=hashKey(logical)&(CLAIM_CACHE_SIZE-1u);
+  if(tileClaimKeys[cache]==encoded){let slot=tileClaimSlots[cache];
+    if(slot<tileSlots()&&tileStates[slot*2u]==encoded){return slot;}}
+  let slot=claimTile(logical);if(slot!=INVALID){tileClaimKeys[cache]=encoded;tileClaimSlots[cache]=slot;}return slot;
+}
 fn markTileRing(key:u32)->bool{
+  let encodedCenter=key+1u;let ringCache=hashKey(key)&(CLAIM_CACHE_SIZE-1u);
+  if(tileRingKeys[ringCache]==encodedCenter){return true;}
   let td=vec3i(params.tiling.yzw);let q=vec3i(i32(key%params.tiling.y),
     i32((key/params.tiling.y)%params.tiling.z),i32(key/(params.tiling.y*params.tiling.z)));
   for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
     let n=q+vec3i(x,y,z);if(any(n<vec3i(0))||any(n>=td)){continue;}
-    let logical=u32(n.x)+params.tiling.y*(u32(n.y)+params.tiling.z*u32(n.z));let slot=claimTile(logical);
+    let logical=u32(n.x)+params.tiling.y*(u32(n.y)+params.tiling.z*u32(n.z));let slot=claimTileCached(logical);
     if(slot==INVALID){return false;}tileStates[slot*2u+1u]=1u;
-  }}}return true;
+  }}}tileRingKeys[ringCache]=encodedCenter;return true;
 }
-@compute @workgroup_size(1) fn publishFineSeedCandidateResidency(){
-  clearScratch();if(!producerAccepted()){return;}var error=0u;
-  for(var slot=0u;slot<brickSlots();slot++){let encoded=publishedStates[slot*2u];let old=publishedStates[slot*2u+1u];
-    states[slot*2u]=encoded;let was=encoded!=0u&&encoded!=INVALID&&(old&RESIDENT)!=0u;
+var<workgroup> sparsePrefix0:array<u32,256>;var<workgroup> sparsePrefix1:array<u32,256>;
+var<workgroup> sparsePrefix2:array<u32,256>;var<workgroup> sparsePrefix3:array<u32,256>;
+var<workgroup> sparsePrefix4:array<u32,256>;var<workgroup> sparseErrors:array<u32,256>;
+var<workgroup> sparseError:u32;var<workgroup> sparseAccepted:u32;
+@compute @workgroup_size(256) fn publishFineSeedCandidateResidency(@builtin(local_invocation_index)lid:u32){
+  for(var i=lid;i<arrayLength(&worklist);i+=256u){worklist[i]=0u;}
+  for(var i=lid;i<arrayLength(&tileWorklist);i+=256u){tileWorklist[i]=0u;}
+  if(lid<CLAIM_CACHE_SIZE){brickClaimKeys[lid]=0u;brickClaimSlots[lid]=INVALID;
+    tileClaimKeys[lid]=0u;tileClaimSlots[lid]=INVALID;tileRingKeys[lid]=0u;}
+  if(lid==0u){sparseError=0u;sparseAccepted=select(0u,1u,producerAccepted());}
+  workgroupBarrier();if(workgroupUniformLoad(&sparseAccepted)==0u){return;}
+  for(var slot=lid;slot<brickSlots();slot+=256u){let encoded=publishedStates[slot*2u];
+    let old=publishedStates[slot*2u+1u];states[slot*2u]=encoded;
+    let was=encoded!=0u&&encoded!=INVALID&&(old&RESIDENT)!=0u;
     states[slot*2u+1u]=select(0u,WAS_RESIDENT,was)|(min(0xffffu,(old>>16u)+1u)<<16u);}
-  for(var slot=0u;slot<tileSlots();slot++){tileStates[slot*2u]=publishedTileStates[slot*2u];tileStates[slot*2u+1u]=0u;}
-  let tileCells=params.dimsBrick.w*params.tiling.x;let td=vec3i(params.tiling.yzw);
-  for(var row=0u;row<arrayLength(&leaves)&&error==0u;row++){let leaf=leaves[row];
-    if((leaf.flags&LIVE)==0u||leaf.size==0u){continue;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
-    if(any(a>=params.dimsBrick.xyz)){error=9u;break;}let first=vec3i(a/tileCells);
-    let last=vec3i(min(params.dimsBrick.xyz-vec3u(1u),a+vec3u(leaf.size-1u))/tileCells);
-    for(var z=first.z-1;z<=last.z+1&&error==0u;z++){for(var y=first.y-1;y<=last.y+1&&error==0u;y++){
-      for(var x=first.x-1;x<=last.x+1;x++){let q=vec3i(x,y,z);if(any(q<vec3i(0))||any(q>=td)){continue;}
-        let key=u32(q.x)+params.tiling.y*(u32(q.y)+params.tiling.z*u32(q.z));let slot=claimTile(key);
-        if(slot==INVALID){error=7u;break;}tileStates[slot*2u+1u]=1u;
-      }}}
-  }
-  for(var i=0u;i<candidateControl[0]&&error==0u;i++){
-    if(i>=arrayLength(&candidates)){error=1u;break;}let c=candidates[i];
-    if(c.row>=arrayLength(&leaves)){error=2u;break;}let leaf=leaves[c.row];
-    if(leaf.size==0u){error=3u;break;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
-    if(any(a>=params.dimsBrick.xyz)){error=4u;break;}let first=a/params.dimsBrick.w;
-    let last=min(params.brickDimsCapacity.xyz-vec3u(1u),(a+vec3u(leaf.size-1u))/params.dimsBrick.w);
-    let bits=select(HALO,CORE,(c.flags&CORE)!=0u);
-    for(var z=first.z;z<=last.z&&error==0u;z++){for(var y=first.y;y<=last.y&&error==0u;y++){
-      for(var x=first.x;x<=last.x;x++){let logical=x+params.brickDimsCapacity.x*(y+params.brickDimsCapacity.y*z);
-        let slot=claimBrick(logical);if(slot==INVALID){error=6u;break;}states[slot*2u+1u]|=bits;
-      }}}
-  }
-  let cap=worklistCapacity();
-  for(var slot=0u;slot<brickSlots()&&error==0u;slot++){let encoded=states[slot*2u];
+  for(var slot=lid;slot<tileSlots();slot+=256u){tileStates[slot*2u]=publishedTileStates[slot*2u];
+    tileStates[slot*2u+1u]=0u;}storageBarrier();workgroupBarrier();
+  if(lid==0u){let tileCells=params.dimsBrick.w*params.tiling.x;let td=vec3i(params.tiling.yzw);
+    for(var row=0u;row<arrayLength(&leaves)&&sparseError==0u;row++){let leaf=leaves[row];
+      if((leaf.flags&LIVE)==0u||leaf.size==0u){continue;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
+      if(any(a>=params.dimsBrick.xyz)){sparseError=9u;break;}let first=vec3i(a/tileCells);
+      let last=vec3i(min(params.dimsBrick.xyz-vec3u(1u),a+vec3u(leaf.size-1u))/tileCells);
+      for(var z=first.z-1;z<=last.z+1&&sparseError==0u;z++){for(var y=first.y-1;y<=last.y+1&&sparseError==0u;y++){
+        for(var x=first.x-1;x<=last.x+1;x++){let q=vec3i(x,y,z);if(any(q<vec3i(0))||any(q>=td)){continue;}
+          let key=u32(q.x)+params.tiling.y*(u32(q.y)+params.tiling.z*u32(q.z));let slot=claimTile(key);
+          if(slot==INVALID){sparseError=7u;break;}tileStates[slot*2u+1u]=1u;
+        }}}
+    }
+    for(var i=0u;i<candidateControl[0]&&sparseError==0u;i++){
+      if(i>=arrayLength(&candidates)){sparseError=1u;break;}let c=candidates[i];
+      if(c.row>=arrayLength(&leaves)){sparseError=2u;break;}let leaf=leaves[c.row];
+      if(leaf.size==0u){sparseError=3u;break;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
+      if(any(a>=params.dimsBrick.xyz)){sparseError=4u;break;}let first=a/params.dimsBrick.w;
+      let last=min(params.brickDimsCapacity.xyz-vec3u(1u),(a+vec3u(leaf.size-1u))/params.dimsBrick.w);
+      let bits=select(HALO,CORE,(c.flags&CORE)!=0u);
+      for(var z=first.z;z<=last.z&&sparseError==0u;z++){for(var y=first.y;y<=last.y&&sparseError==0u;y++){
+        for(var x=first.x;x<=last.x;x++){let logical=x+params.brickDimsCapacity.x*(y+params.brickDimsCapacity.y*z);
+          let slot=claimBrickCached(logical);if(slot==INVALID){sparseError=6u;break;}states[slot*2u+1u]|=bits;
+        }}}
+    }
+  }storageBarrier();workgroupBarrier();if(workgroupUniformLoad(&sparseError)!=0u){return;}
+  let brickChunk=(brickSlots()+255u)/256u;let brickFirst=min(brickSlots(),lid*brickChunk);
+  let brickEnd=min(brickSlots(),brickFirst+brickChunk);var activeCount=0u;var retired=0u;
+  var coreCount=0u;var haloCount=0u;var activated=0u;var localError=0u;
+  for(var slot=brickFirst;slot<brickEnd;slot++){let encoded=states[slot*2u];
     if(encoded==0u||encoded==INVALID){continue;}let logical=encoded-1u;
-    if(logical>=params.brickDimsCapacity.w){error=8u;break;}let marked=states[slot*2u+1u];
+    if(logical>=params.brickDimsCapacity.w){localError=8u;continue;}let marked=states[slot*2u+1u];
     let desired=(marked&(CORE|HALO))!=0u;let was=(marked&WAS_RESIDENT)!=0u;
     let dry=select(marked>>16u,0u,desired);let persistent=params.settings.w>0.5;
     let resident=select(desired||(was&&dry<=u32(params.settings.y)),was||desired,persistent);
     let core=(marked&CORE)!=0u;let flags=select(0u,RESIDENT,resident)|select(0u,CORE,core)
       |select(0u,HALO,resident&&!core)|select(0u,ACTIVATED,resident&&!was)|select(0u,WAS_RESIDENT,was);
-    states[slot*2u+1u]=flags|(dry<<16u);
-    if(resident){let output=worklist[0];if(output>=cap){error=5u;break;}
-      worklist[HEADER+output*2u]=logical;worklist[HEADER+output*2u+1u]=logical;worklist[0]=output+1u;
-      worklist[8+select(1u,0u,core)]+=1u;if(!was){worklist[10]+=1u;}
-    }else{if(was){let output=worklist[4];if(output>=cap){error=5u;break;}
-        worklist[HEADER+cap*2u+output*2u]=logical;worklist[HEADER+cap*2u+output*2u+1u]=logical;
-        worklist[4]=output+1u;worklist[11]+=1u;}
+    states[slot*2u+1u]=flags|(dry<<16u);activeCount+=select(0u,1u,resident);
+    retired+=select(0u,1u,!resident&&was);coreCount+=select(0u,1u,resident&&core);
+    haloCount+=select(0u,1u,resident&&!core);activated+=select(0u,1u,resident&&!was);
+  }
+  sparsePrefix0[lid]=activeCount;sparsePrefix1[lid]=retired;sparsePrefix2[lid]=coreCount;
+  sparsePrefix3[lid]=haloCount;sparsePrefix4[lid]=activated;sparseErrors[lid]=localError;
+  storageBarrier();workgroupBarrier();
+  if(lid==0u){var a=0u;var r=0u;var c=0u;var h=0u;var n=0u;
+    for(var lane=0u;lane<256u;lane++){let ac=sparsePrefix0[lane];let rc=sparsePrefix1[lane];
+      let cc=sparsePrefix2[lane];let hc=sparsePrefix3[lane];let nc=sparsePrefix4[lane];
+      sparsePrefix0[lane]=a;sparsePrefix1[lane]=r;a+=ac;r+=rc;c+=cc;h+=hc;n+=nc;
+      if(sparseErrors[lane]!=0u&&sparseError==0u){sparseError=sparseErrors[lane];}}
+    if(a>worklistCapacity()||r>worklistCapacity()){sparseError=5u;}
+    worklist[0]=a;worklist[4]=r;worklist[8]=c;worklist[9]=h;worklist[10]=n;worklist[11]=r;
+  }workgroupBarrier();if(workgroupUniformLoad(&sparseError)!=0u){return;}
+  var activeAt=sparsePrefix0[lid];var retiredAt=sparsePrefix1[lid];let cap=worklistCapacity();
+  for(var slot=brickFirst;slot<brickEnd;slot++){let encoded=states[slot*2u];
+    if(encoded==0u||encoded==INVALID){continue;}let logical=encoded-1u;let marked=states[slot*2u+1u];
+    if((marked&RESIDENT)!=0u){worklist[HEADER+activeAt*2u]=logical;
+      worklist[HEADER+activeAt*2u+1u]=logical;activeAt+=1u;}
+    else{if((marked&WAS_RESIDENT)!=0u){worklist[HEADER+cap*2u+retiredAt*2u]=logical;
+      worklist[HEADER+cap*2u+retiredAt*2u+1u]=logical;retiredAt+=1u;}
       states[slot*2u+1u]=0u;states[slot*2u]=INVALID;}
-  }
-  for(var item=0u;item<worklist[0]&&error==0u;item++){let logical=worklist[HEADER+item*2u];
-    let b=vec3u(logical%params.brickDimsCapacity.x,(logical/params.brickDimsCapacity.x)%params.brickDimsCapacity.y,
-      logical/(params.brickDimsCapacity.x*params.brickDimsCapacity.y));
-    let key=(b.x/params.tiling.x)+params.tiling.y*((b.y/params.tiling.x)+params.tiling.z*(b.z/params.tiling.x));
-    if(!markTileRing(key)){error=7u;}
-  }
-  let tc=tileWorklistCapacity();
-  for(var slot=0u;slot<tileSlots()&&error==0u;slot++){let encoded=tileStates[slot*2u];
+  }storageBarrier();workgroupBarrier();
+  if(lid==0u){for(var item=0u;item<worklist[0]&&sparseError==0u;item++){
+      let logical=worklist[HEADER+item*2u];
+      let b=vec3u(logical%params.brickDimsCapacity.x,(logical/params.brickDimsCapacity.x)%params.brickDimsCapacity.y,
+        logical/(params.brickDimsCapacity.x*params.brickDimsCapacity.y));
+      let key=(b.x/params.tiling.x)+params.tiling.y*((b.y/params.tiling.x)+params.tiling.z*(b.z/params.tiling.x));
+      if(!markTileRing(key)){sparseError=7u;}}
+  }storageBarrier();workgroupBarrier();if(workgroupUniformLoad(&sparseError)!=0u){return;}
+  let tileChunk=(tileSlots()+255u)/256u;let tileFirst=min(tileSlots(),lid*tileChunk);
+  let tileEnd=min(tileSlots(),tileFirst+tileChunk);var tileActive=0u;var tileRetired=0u;
+  for(var slot=tileFirst;slot<tileEnd;slot++){let encoded=tileStates[slot*2u];
+    if(encoded==0u||encoded==INVALID){continue;}let live=tileStates[slot*2u+1u]!=0u;
+    let was=publishedTileStates[slot*2u]==encoded;tileActive+=select(0u,1u,live);
+    tileRetired+=select(0u,1u,!live&&was);}
+  sparsePrefix0[lid]=tileActive;sparsePrefix1[lid]=tileRetired;workgroupBarrier();
+  if(lid==0u){var a=0u;var r=0u;for(var lane=0u;lane<256u;lane++){
+      let ac=sparsePrefix0[lane];let rc=sparsePrefix1[lane];sparsePrefix0[lane]=a;sparsePrefix1[lane]=r;
+      a+=ac;r+=rc;}if(a>tileWorklistCapacity()||r>tileWorklistCapacity()){sparseError=5u;}
+    tileWorklist[0]=a;tileWorklist[4]=r;
+  }workgroupBarrier();if(workgroupUniformLoad(&sparseError)!=0u){return;}
+  var tileActiveAt=sparsePrefix0[lid];var tileRetiredAt=sparsePrefix1[lid];let tc=tileWorklistCapacity();
+  for(var slot=tileFirst;slot<tileEnd;slot++){let encoded=tileStates[slot*2u];
     if(encoded==0u||encoded==INVALID){continue;}let key=encoded-1u;let live=tileStates[slot*2u+1u]!=0u;
-    let was=publishedTileStates[slot*2u]==encoded;
-    if(live){let output=tileWorklist[0];if(output>=tc){error=5u;break;}
-      tileWorklist[HEADER+output]=key;tileWorklist[0]=output+1u;
-    }else{if(was){let output=tileWorklist[4];if(output>=tc){error=5u;break;}
-        tileWorklist[HEADER+tc+output]=key;tileWorklist[4]=output+1u;}
-      tileStates[slot*2u+1u]=0u;tileStates[slot*2u]=INVALID;}
-  }
-  if(error==0u){finishHeaders();}
+    let was=publishedTileStates[slot*2u]==encoded;if(live){tileWorklist[HEADER+tileActiveAt]=key;tileActiveAt+=1u;}
+    else{if(was){tileWorklist[HEADER+tc+tileRetiredAt]=key;tileRetiredAt+=1u;}
+      tileStates[slot*2u+1u]=0u;tileStates[slot*2u]=INVALID;}}
+  storageBarrier();workgroupBarrier();if(lid==0u){finishHeaders();}
 }
 `;
 
@@ -908,6 +1040,7 @@ export class GPUFluidBrickResidency {
   private readonly params: GPUBuffer;
   private readonly layout: GPUBindGroupLayout;
   private readonly fineSeedCandidateLayout: GPUBindGroupLayout;
+  private readonly fineSeedCandidatePublishLayout: GPUBindGroupLayout;
   private readonly fineSeedCandidateCommitLayout: GPUBindGroupLayout;
   private readonly classifyPipeline: GPUComputePipeline;
   private readonly classifySweptPipeline: GPUComputePipeline;
@@ -915,7 +1048,7 @@ export class GPUFluidBrickResidency {
   private readonly emitWorklistPipeline: GPUComputePipeline;
   private readonly emitTopologyTilesPipeline: GPUComputePipeline;
   private readonly finalizePipeline: GPUComputePipeline;
-  private readonly publishFineSeedCandidatesPipeline: GPUComputePipeline;
+  private readonly fineSeedCandidatePipelines: readonly GPUComputePipeline[];
   private readonly commitFineSeedCandidatesPipeline: GPUComputePipeline;
   private destroyed = false;
 
@@ -983,7 +1116,9 @@ export class GPUFluidBrickResidency {
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
     this.candidateStates = buffer("Candidate fluid brick page states", this.currentAllocationPlan.stateBytes, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     this.candidateWorklist = buffer("Candidate fluid brick worklists", worklistWords * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
-    this.candidateTileStates = buffer("Candidate topology tile activity", this.currentAllocationPlan.tileStateBytes, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
+    this.candidateTileStates = buffer("Candidate topology tile activity",
+      this.currentAllocationPlan.tileStateBytes + (this.currentAllocationPlan.sparseKeyPools ? 0 : 4),
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     this.candidateTileWorklist = buffer("Candidate topology tile worklists", tileWorklistWords * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
     this.leafIndices = buffer("Fluid brick to sparse leaf mapping", mapping.byteLength, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, mapping);
     this.leafStatesBuffer = buffer(
@@ -1022,24 +1157,43 @@ export class GPUFluidBrickResidency {
     this.emitTopologyTilesPipeline = device.createComputePipeline({ label: "Emit topology tile worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "emitTopologyTiles" } });
     this.finalizePipeline = device.createComputePipeline({ label: "Finalize fluid brick worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "finalize" } });
     this.fineSeedCandidateLayout=device.createBindGroupLayout({label:"Fine-seed brick residency candidate layout",entries:[
-      {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+      {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
-      {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+      {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
-      {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+      {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+    ]});
+    this.fineSeedCandidatePublishLayout=device.createBindGroupLayout({label:"Fine-seed brick residency final publication layout",entries:[
+      {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+      {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+      {binding:11,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
     ]});
     const surfaceModule=device.createShaderModule({label:"Fine-seed brick residency shader",code:this.currentAllocationPlan.sparseKeyPools?sparseFineSeedCandidateResidencyShader:fineSeedCandidateResidencyShader});
     const surfaceLayout=device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidateLayout]});
-    this.publishFineSeedCandidatesPipeline=device.createComputePipeline({
-      label:"Publish deterministic fine-seed-candidate residency",layout:surfaceLayout,
-      compute:{module:surfaceModule,entryPoint:"publishFineSeedCandidateResidency"},
-    });
+    const surfacePublishLayout=device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidatePublishLayout]});
+    const fineSeedCandidateEntryPoints = this.currentAllocationPlan.sparseKeyPools
+      ? ["publishFineSeedCandidateResidency"]
+      : ["prepareFineSeedCandidateResidency", "markFineSeedCandidateResidency",
+        "resolveFineSeedCandidateResidency", "publishFineSeedCandidateResidency"];
+    this.fineSeedCandidatePipelines = fineSeedCandidateEntryPoints.map((entryPoint,index) =>
+      device.createComputePipeline({
+        label:`${entryPoint} · deterministic fine-seed-candidate residency`,
+        layout:!this.currentAllocationPlan.sparseKeyPools&&index===3?surfacePublishLayout:surfaceLayout,
+        compute:{module:surfaceModule,entryPoint},
+      }));
     this.fineSeedCandidateCommitLayout=device.createBindGroupLayout({label:"Fine-seed brick residency commit layout",entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -1136,17 +1290,44 @@ export class GPUFluidBrickResidency {
       {binding:10,resource:{buffer:this.params}},
     ]});
     const publish=broker.compute({label:"Publish deterministic fine-seed brick residency"});
-    publish.setPipeline(this.publishFineSeedCandidatesPipeline);publish.setBindGroup(0,bindGroup);publish.dispatchWorkgroups(1);
-    const commitGroup=this.device.createBindGroup({label:"Fine-seed brick residency commit bindings",layout:this.fineSeedCandidateCommitLayout,entries:[
-      {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
-      {binding:2,resource:{buffer:this.worklist}},{binding:3,resource:{buffer:this.candidateWorklist}},
-      {binding:4,resource:{buffer:this.tileStates}},{binding:5,resource:{buffer:this.candidateTileStates}},
-      {binding:6,resource:{buffer:this.tileWorklist}},{binding:7,resource:{buffer:this.candidateTileWorklist}},
-    ]});
-    const commit=broker.compute({label:"Commit fine-seed brick residency"});
-    commit.setPipeline(this.commitFineSeedCandidatesPipeline);commit.setBindGroup(0,commitGroup);
-    commit.dispatchWorkgroups(Math.ceil(Math.max(this.worklistByteLength,this.tileWorklistByteLength,
-      this.currentAllocationPlan.stateBytes,this.currentAllocationPlan.tileStateBytes)/4/64));
+    publish.setBindGroup(0,bindGroup);
+    if (this.currentAllocationPlan.sparseKeyPools) {
+      publish.setPipeline(this.fineSeedCandidatePipelines[0]!);publish.dispatchWorkgroups(1);
+    } else {
+      const prepareWords = Math.max(this.worklistByteLength, this.tileWorklistByteLength,
+        this.currentAllocationPlan.stateBytes, this.currentAllocationPlan.tileStateBytes + 4) / 4;
+      const markItems = Math.max(leaves.size / 48, candidates.size / 8);
+      const dispatches = [
+        Math.max(1, Math.ceil(prepareWords / 256)),
+        Math.max(1, Math.ceil(markItems / 256)),
+        Math.max(1, Math.ceil(this.publicationCapacity / 256)),
+      ];
+      this.fineSeedCandidatePipelines.slice(0,3).forEach((pipeline, index) => {
+        publish.setPipeline(pipeline);publish.dispatchWorkgroups(dispatches[index]!);
+      });
+      const finalPublishGroup=this.device.createBindGroup({label:"Fine-seed brick residency final publication bindings",layout:this.fineSeedCandidatePublishLayout,entries:[
+        {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
+        {binding:2,resource:{buffer:this.candidateWorklist}},{binding:3,resource:{buffer:this.tileStates}},
+        {binding:4,resource:{buffer:this.candidateTileStates}},{binding:5,resource:{buffer:this.candidateTileWorklist}},
+        {binding:8,resource:{buffer:candidateControl}},{binding:9,resource:{buffer:this.tileWorklist}},
+        {binding:10,resource:{buffer:this.params}},{binding:11,resource:{buffer:this.worklist}},
+      ]});
+      publish.setPipeline(this.fineSeedCandidatePipelines[3]!);
+      publish.setBindGroup(0,finalPublishGroup);
+      publish.dispatchWorkgroups(1);
+    }
+    if (this.currentAllocationPlan.sparseKeyPools) {
+      const commitGroup=this.device.createBindGroup({label:"Fine-seed brick residency commit bindings",layout:this.fineSeedCandidateCommitLayout,entries:[
+        {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
+        {binding:2,resource:{buffer:this.worklist}},{binding:3,resource:{buffer:this.candidateWorklist}},
+        {binding:4,resource:{buffer:this.tileStates}},{binding:5,resource:{buffer:this.candidateTileStates}},
+        {binding:6,resource:{buffer:this.tileWorklist}},{binding:7,resource:{buffer:this.candidateTileWorklist}},
+      ]});
+      const commit=broker.compute({label:"Commit fine-seed brick residency"});
+      commit.setPipeline(this.commitFineSeedCandidatesPipeline);commit.setBindGroup(0,commitGroup);
+      commit.dispatchWorkgroups(Math.ceil(Math.max(this.worklistByteLength,this.tileWorklistByteLength,
+        this.currentAllocationPlan.stateBytes,this.currentAllocationPlan.tileStateBytes)/4/64));
+    }
     broker.fence("fine-seed brick residency committed");
   }
 

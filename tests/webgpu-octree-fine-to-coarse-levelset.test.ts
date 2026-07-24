@@ -21,8 +21,10 @@ test("fine-to-coarse restriction rejects an unpublished or stale fine source", (
   assert.match(shader,
     /fnpublishRestriction[\s\S]*if\(control\.flags==0u\)[\s\S]*else\{control\.count=0xffffffffu/,
     "a rejected fine source must poison the downstream coarse correction rather than publish an empty correction");
-  assert.match(encode, /prepare:\[0,2,7,8,9,12,13,14\]/,
-    "the prepare pass must bind the fine worklist and topology transaction it validates");
+  assert.match(encode, /prepare:\[0,2,7,9,13,14\]/,
+    "the scalar prepare pass must bind the fine worklist and topology transaction it validates");
+  assert.doesNotMatch(encode, /finalizeRestrictionRows|run\("finalize"/,
+    "row owners publish accepted aggregates directly without a second capacity-wide pass");
   assert.match(encode, /if\(input\.diagnoseUnownedFineSamples\)run\("diagnose",1\)/,
     "the capacity-wide unowned-sample scan must remain an explicit QA opt-in");
 });
@@ -64,8 +66,10 @@ test("fine-to-coarse restriction is row-owned and synchronization-atomic-free", 
     /fnrestrictCoarseRows[\s\S]*letr=fineLinearWorkgroup\(w,n\)[\s\S]*aggregates\[r\]=Aggregate/,
     "one workgroup exclusively owns each coarse-row reduction");
   assert.match(shader,
-    /fnfinePage\(key:u32\)[\s\S]*while\(low<high\)/,
-    "row-owned gathers use the canonical sorted fine-page publication");
+    /fnfinePage\(key:u32\)[\s\S]*directoryBase=5u\+p\.pageCapacity[\s\S]*worklist\[directoryBase\+key\]/,
+    "row-owned gathers use the generation-validated direct fine-page publication");
+  assert.doesNotMatch(shader, /fnfinePage\(key:u32\)[\s\S]*while\(low<high\)/,
+    "row-owned gathers must not binary-search the compact worklist for every covered brick");
   assert.match(encode,
     /run\("restrict",rows\.x,rows\.y\)[\s\S]*if\(input\.diagnoseUnownedFineSamples\)run\("diagnose",1\)/,
     "production schedules only row-owned restriction; the deterministic capacity scan is opt-in");

@@ -50,6 +50,7 @@ export interface OctreePowerTopologySource {
   readonly catalogTetrahedronHeaders?: GPUBuffer;
   readonly catalogTetrahedra?: GPUBuffer;
   readonly catalogTetrahedronVertices?: GPUBuffer;
+  readonly catalogTetrahedronVertexCount?: number;
   readonly catalogLookup: GPUBuffer;
   readonly sameOrFinerDirect: GPUBuffer;
   readonly sameOrCoarserDirect: GPUBuffer;
@@ -137,6 +138,7 @@ export class WebGPUOctreePowerTopology {
   readonly catalogTetrahedronHeaders: GPUBuffer;
   readonly catalogTetrahedra: GPUBuffer;
   readonly catalogTetrahedronVertices: GPUBuffer;
+  readonly catalogTetrahedronVertexCount: number;
   readonly catalogLookup: GPUBuffer;
   readonly sameOrFinerDirect: GPUBuffer;
   readonly sameOrCoarserDirect: GPUBuffer;
@@ -147,7 +149,6 @@ export class WebGPUOctreePowerTopology {
   private readonly stagePipeline: GPUComputePipeline;
   private readonly prefixPipeline: GPUComputePipeline;
   private readonly scatterPipeline: GPUComputePipeline;
-  private readonly commitPipeline: GPUComputePipeline;
   private readonly finalizePipeline: GPUComputePipeline;
   private readonly layout: GPUBindGroupLayout;
   private readonly device: GPUDevice;
@@ -160,6 +161,7 @@ export class WebGPUOctreePowerTopology {
     this.plan = planOctreePowerTopology(rowCapacity, catalog);
     this.regularPacked = catalog.sameOrFinerDirect[OCTREE_POWER_REGULAR_DESCRIPTOR];
     this.regularVolume = catalog.entryVolumes[this.regularPacked & 0xffff];
+    this.catalogTetrahedronVertexCount = catalog.tetrahedronVertexData.length / 4;
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const upload = (label: string, data: ArrayBufferView) => {
       const buffer = device.createBuffer({
@@ -224,7 +226,6 @@ export class WebGPUOctreePowerTopology {
       compute: { module: shaderModule, entryPoint: "prefixPowerTopologyDelta" } });
     this.scatterPipeline = device.createComputePipeline({ label: "Scatter exact octree power topology publication rows", layout: pipelineLayout,
       compute: { module: shaderModule, entryPoint: "scatterPowerTopologyDelta" } });
-    this.commitPipeline = device.createComputePipeline({ label: "Commit changed octree power topology rows", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "commitPowerTopology" } });
     this.finalizePipeline = device.createComputePipeline({ label: "Finalize octree power topology", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "finalizePowerTopology" } });
   }
 
@@ -267,11 +268,6 @@ export class WebGPUOctreePowerTopology {
     pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
     pass.setPipeline(this.prefixPipeline); pass.dispatchWorkgroups(1);
     pass.setPipeline(this.scatterPipeline); pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
-    broker.copyBufferToBuffer(this.control, 80,
-      this.workDispatch, 0, 12);
-    pass = broker.compute({ label: "Commit power topology delta" });
-    pass.setPipeline(this.commitPipeline); pass.setBindGroup(0, group);
-    pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
     pass.setPipeline(this.finalizePipeline); pass.dispatchWorkgroups(1);
   }
 
@@ -281,6 +277,7 @@ export class WebGPUOctreePowerTopology {
       catalogCoefficients: this.catalogCoefficients,
       catalogTetrahedronHeaders: this.catalogTetrahedronHeaders, catalogTetrahedra: this.catalogTetrahedra,
       catalogTetrahedronVertices: this.catalogTetrahedronVertices,
+      catalogTetrahedronVertexCount: this.catalogTetrahedronVertexCount,
       sameOrFinerDirect: this.sameOrFinerDirect, sameOrCoarserDirect: this.sameOrCoarserDirect };
   }
 
@@ -333,6 +330,7 @@ const REGULAR_DESCRIPTOR:u32=0x3ffffu;
 const STATUS_VALID:u32=0x80000000u;
 const STATUS_PUBLISH:u32=0x40000000u;
 const STATUS_AFFECTED:u32=0x20000000u;
+const STATUS_LISTED:u32=0x10000000u;
 fn powerTransformVector(value:vec3i,code:u32)->vec3i{
   let signs=vec3i(select(1,-1,(code&1u)!=0u),select(1,-1,(code&2u)!=0u),select(1,-1,(code&4u)!=0u));let permutation=(code/8u)%6u;var q=value;
   if(permutation==1u){q=value.xzy;}else if(permutation==2u){q=value.yxz;}else if(permutation==3u){q=value.yzx;}else if(permutation==4u){q=value.zxy;}else if(permutation==5u){q=value.zyx;}return q*signs;
@@ -357,7 +355,6 @@ fn prefixBase()->u32{return statusBase()+params.rowCount;}
 fn publicationBase()->u32{return prefixBase()+params.rowCount;}
 fn blockOffsetBase()->u32{return publicationBase()+params.rowCount;}
 fn blockSummaryBase()->u32{return blockOffsetBase()+controlArena.blockCount+1u;}
-fn rowListedAffected(row:u32)->bool{var low=0u;var high=affectedCount();while(low<high){let middle=low+(high-low)/2u;if(affectedRow(middle)<row){low=middle+1u;}else{high=middle;}}return low<affectedCount()&&affectedRow(low)==row;}
 fn rejectCandidate(row:u32,flags:u32){controlArena.candidate.invalidCount+=1u;controlArena.candidate.firstInvalid=min(controlArena.candidate.firstInvalid,row);controlArena.candidate.flags|=flags;}
 var<workgroup> publicationScan:array<u32,256>;
 var<workgroup> publicationCounts:array<vec4u,256>;
@@ -383,7 +380,8 @@ var<workgroup> publicationAux:array<vec2u,256>;
 @compute @workgroup_size(64) fn resolvePowerTopology(@builtin(local_invocation_index) lid:u32,@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) workgroups:vec3u){
   let item=linearItem(wid,lid,workgroups);if(item>=affectedCount()||controlArena.candidate.flags!=0u){return;}
   let row=affectedRow(item);let requested=requestedRows();let available=min(requested,min(arrayLength(&descriptors),arrayLength(&metrics)));
-  if(row>=available){return;}if(params.anisotropic!=0u){fail(row,ANISOTROPIC);return;}
+  if(row>=available){return;}lookupArena[statusBase()+row]=STATUS_LISTED;
+  if(params.anisotropic!=0u){fail(row,ANISOTROPIC);return;}
   if((item>0u&&affectedRow(item-1u)>=row)||(rowDelta[params.delta.y+row]&ROW_DELTA_AFFECTED)==0u){fail(row,CAPACITY);return;}
   let descriptor=descriptors[row];let found=resolveDescriptor(descriptor);
   if(found.x==INVALID||found.x>=arrayLength(&volumes)){fail(row,LOOKUP_MISS);return;}
@@ -397,7 +395,8 @@ var<workgroup> publicationAux:array<vec2u,256>;
   let block=wid.x+wid.y*workgroups.x;let row=block*256u+lane;let requested=requestedRows();var status=0u;
   if(row<requested&&controlArena.candidate.flags==0u){
     let encoded=rowDelta[params.delta.y+row];let flagged=(encoded&ROW_DELTA_AFFECTED)!=0u;
-    let listed=rowListedAffected(row);let oldPlusOne=encoded&0x7fffffffu;var metric=PowerRowMetric(INVALID,0u,0.0,CAPACITY);var flags=0u;
+    let listed=(lookupArena[statusBase()+row]&STATUS_LISTED)!=0u;
+    let oldPlusOne=encoded&0x7fffffffu;var metric=PowerRowMetric(INVALID,0u,0.0,CAPACITY);var flags=0u;
     if(flagged!=listed){flags|=CAPACITY;}
     if(flagged){metric=metrics[row];status|=STATUS_AFFECTED|STATUS_PUBLISH;}
     else if(oldPlusOne==0u){flags|=CAPACITY;}
@@ -411,15 +410,15 @@ var<workgroup> publicationAux:array<vec2u,256>;
     workgroupBarrier();publicationScan[lane]+=add;workgroupBarrier();}
   if(row<requested){lookupArena[prefixBase()+row]=publicationScan[lane]-publish;}
   let flags=status&255u;publicationCounts[lane]=vec4u(select(0u,1u,(status&STATUS_VALID)!=0u),
-    select(0u,1u,flags!=0u),flags,select(0u,1u,(status&STATUS_AFFECTED)!=0u));workgroupBarrier();
+    select(0u,1u,flags!=0u),flags,select(0u,1u,(status&STATUS_AFFECTED)!=0u));
+  publicationAux[lane]=vec2u(select(INVALID,row,flags!=0u),0u);workgroupBarrier();
   for(var stride=128u;stride>0u;stride/=2u){if(lane<stride){publicationCounts[lane].x+=publicationCounts[lane+stride].x;
       publicationCounts[lane].y+=publicationCounts[lane+stride].y;publicationCounts[lane].z|=publicationCounts[lane+stride].z;
-      publicationCounts[lane].w+=publicationCounts[lane+stride].w;}workgroupBarrier();}
-  publicationScan[lane]=select(INVALID,row,flags!=0u);workgroupBarrier();
-  for(var stride=128u;stride>0u;stride/=2u){if(lane<stride){publicationScan[lane]=min(publicationScan[lane],publicationScan[lane+stride]);}workgroupBarrier();}
+      publicationCounts[lane].w+=publicationCounts[lane+stride].w;
+      publicationAux[lane].x=min(publicationAux[lane].x,publicationAux[lane+stride].x);}workgroupBarrier();}
   if(lane==0u){let at=blockSummaryBase()+6u*block;let counts=publicationCounts[0];
     lookupArena[at]=counts.x;lookupArena[at+1u]=counts.y;lookupArena[at+2u]=counts.z;
-    lookupArena[at+3u]=publicationScan[0];lookupArena[at+4u]=lookupArena[prefixBase()+min(requested-1u,block*256u+255u)]+select(0u,1u,(lookupArena[statusBase()+min(requested-1u,block*256u+255u)]&STATUS_PUBLISH)!=0u);
+    lookupArena[at+3u]=publicationAux[0].x;lookupArena[at+4u]=lookupArena[prefixBase()+min(requested-1u,block*256u+255u)]+select(0u,1u,(lookupArena[statusBase()+min(requested-1u,block*256u+255u)]&STATUS_PUBLISH)!=0u);
     lookupArena[at+5u]=counts.w;}
 }
 @compute @workgroup_size(256) fn prefixPowerTopologyDelta(@builtin(local_invocation_index) lane:u32){
@@ -453,14 +452,9 @@ var<workgroup> publicationAux:array<vec2u,256>;
   let block=wid.x+wid.y*workgroups.x;let row=block*256u+lane;if(row>=requestedRows()){return;}
   if((lookupArena[statusBase()+row]&STATUS_PUBLISH)==0u){return;}
   let output=lookupArena[blockOffsetBase()+block]+lookupArena[prefixBase()+row];
-  if(output<controlArena.publicationCount){lookupArena[publicationBase()+output]=row;}
-}
-@compute @workgroup_size(64) fn commitPowerTopology(@builtin(local_invocation_index) lid:u32,@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) workgroups:vec3u){
-  if(controlArena.candidate.invalidCount!=0u||controlArena.candidate.flags!=0u){return;}
-  let item=linearItem(wid,lid,workgroups);if(item>=controlArena.publicationCount){return;}
-  let row=lookupArena[publicationBase()+item];
-  if(row>=arrayLength(&metrics)||row>=arrayLength(&committedMetrics)){return;}
-  committedMetrics[row]=metrics[row];
+  if(output<controlArena.publicationCount&&row<arrayLength(&metrics)&&row<arrayLength(&committedMetrics)){
+    lookupArena[publicationBase()+output]=row;committedMetrics[row]=metrics[row];
+  }
 }
 @compute @workgroup_size(1) fn finalizePowerTopology(){
   let candidate=controlArena.candidate;

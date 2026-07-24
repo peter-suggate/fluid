@@ -346,6 +346,37 @@ fn reduceDiagnostics(base:u32,count:u32,extrema:bool){
     let error=arena[at];if(error!=0u){reject(error,arena[at+1u]);}
     if(extrema){control.pad0=max(control.pad0,arena[at+2u]);control.pad1=max(control.pad1,arena[at+3u]);}}
 }
+var<workgroup> reductionFlags:array<u32,256>;
+var<workgroup> reductionFirst:array<u32,256>;
+var<workgroup> reductionBefore:array<u32,256>;
+var<workgroup> reductionAfter:array<u32,256>;
+var<workgroup> scanTotals:array<u32,256>;
+var<workgroup> scanBulkTotals:array<u32,256>;
+var<workgroup> scanOverflowRows:array<u32,256>;
+fn reduceLaneDiagnostics(lane:u32){
+  for(var width=128u;width>0u;width>>=1u){
+    workgroupBarrier();
+    if(lane<width){
+      reductionFlags[lane]|=reductionFlags[lane+width];
+      reductionFirst[lane]=min(reductionFirst[lane],reductionFirst[lane+width]);
+      reductionBefore[lane]=max(reductionBefore[lane],reductionBefore[lane+width]);
+      reductionAfter[lane]=max(reductionAfter[lane],reductionAfter[lane+width]);
+    }
+  }
+  workgroupBarrier();
+}
+fn collectDiagnostics(base:u32,count:u32,lane:u32,extrema:bool){
+  var flags=0u;var first=INVALID;var before=0u;var after=0u;
+  for(var slot=lane;slot<count;slot+=256u){
+    let at=base+slot*4u;
+    if(at+3u>=arrayLength(&arena)){flags|=CAPACITY;first=min(first,slot);break;}
+    let error=arena[at];
+    if(error!=0u){flags|=error;first=min(first,arena[at+1u]);}
+    if(extrema){before=max(before,arena[at+2u]);after=max(after,arena[at+3u]);}
+  }
+  reductionFlags[lane]=flags;reductionFirst[lane]=first;
+  reductionBefore[lane]=before;reductionAfter[lane]=after;
+}
 fn begin(row:u32)->u32{return incidenceRows[row].incidenceOffset;}fn end(row:u32)->u32{return incidenceRows[row+1u].incidenceOffset;}
 fn neighbor(face:PowerFaceRecord,row:u32)->u32{return select(face.negativeRow,face.positiveRow,face.negativeRow==row);}
 fn catalogCoefficient(face:PowerFaceRecord)->f32{
@@ -383,12 +414,48 @@ fn validFace(face:PowerFaceRecord)->bool{return face.negativeRow<rowCount()&&fac
     if(first){unique+=1u;}
   }let bulkRow=bulk&&unique<=18u;arena[entryOffsetBase()+row]=unique;arena[row*4u+3u]=select(0u,BULK_ROW,bulkRow);
 }
-@compute @workgroup_size(1) fn scanPowerRowEntries(){if(control.flags!=0u){return;}
-  reduceDiagnostics(rowDiagnosticBase(),rowCount(),false);if(control.flags!=0u){return;}var total=0u;var bulkRows=0u;
-  for(var row=0u;row<rowCount();row+=1u){let count=arena[entryOffsetBase()+row];arena[entryOffsetBase()+row]=total;total+=count;
-    if(arena[row*4u+3u]==BULK_ROW){bulkRows+=1u;}
-    if(total>entryCapacity()){reject(ENTRY_OVERFLOW,row);return;}}
-  arena[entryOffsetBase()+rowCount()]=total;control.entryCount=total;control.reserved=bulkRows;}
+// One workgroup performs a deterministic two-level scan. Each lane owns one
+// contiguous row chunk, then the workgroup scans only the 256 chunk totals.
+// This preserves the exact canonical CSR order while removing the former
+// single-invocation walk over every live row.
+@compute @workgroup_size(256) fn scanPowerRowEntries(@builtin(local_invocation_index) lane:u32){
+  collectDiagnostics(rowDiagnosticBase(),rowCount(),lane,false);
+  reduceLaneDiagnostics(lane);
+  if(lane==0u&&reductionFlags[0]!=0u){reject(reductionFlags[0],reductionFirst[0]);}
+  workgroupBarrier();storageBarrier();
+  let chunk=(rowCount()+255u)/256u;let firstRow=lane*chunk;let lastRow=min(firstRow+chunk,rowCount());
+  var laneTotal=0u;var laneBulk=0u;
+  for(var row=firstRow;row<lastRow;row+=1u){
+    laneTotal+=arena[entryOffsetBase()+row];
+    laneBulk+=select(0u,1u,arena[row*4u+3u]==BULK_ROW);
+  }
+  scanTotals[lane]=laneTotal;scanBulkTotals[lane]=laneBulk;
+  for(var width=1u;width<256u;width<<=1u){
+    workgroupBarrier();
+    var addTotal=0u;var addBulk=0u;
+    if(lane>=width){addTotal=scanTotals[lane-width];addBulk=scanBulkTotals[lane-width];}
+    workgroupBarrier();
+    scanTotals[lane]+=addTotal;scanBulkTotals[lane]+=addBulk;
+  }
+  workgroupBarrier();
+  var total=0u;if(lane!=0u){total=scanTotals[lane-1u];}var overflow=INVALID;
+  for(var row=firstRow;row<lastRow;row+=1u){
+    let count=arena[entryOffsetBase()+row];arena[entryOffsetBase()+row]=total;total+=count;
+    if(total>entryCapacity()){overflow=min(overflow,row);}
+  }
+  scanOverflowRows[lane]=overflow;
+  for(var width=128u;width>0u;width>>=1u){
+    workgroupBarrier();if(lane<width){scanOverflowRows[lane]=min(scanOverflowRows[lane],scanOverflowRows[lane+width]);}
+  }
+  workgroupBarrier();
+  if(lane==0u){
+    if(scanOverflowRows[0]!=INVALID){reject(ENTRY_OVERFLOW,scanOverflowRows[0]);}
+    else{
+      let grandTotal=scanTotals[255u];arena[entryOffsetBase()+rowCount()]=grandTotal;
+      control.entryCount=grandTotal;control.reserved=scanBulkTotals[255u];
+    }
+  }
+}
 @compute @workgroup_size(64) fn emitBulkPowerRows(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;if(row>=rowCount()||control.flags!=0u||arena[row*4u+3u]!=BULK_ROW){return;}
   let metric=metrics[row];let size=f32(leafHeaders[row].size);let volume=metric.volume*size*size*size*params.physical.y;
   if(!finite(volume)||volume<=0.0){rowFailure(row,INVALID_VOLUME,row);return;}
@@ -412,8 +479,14 @@ fn validFace(face:PowerFaceRecord)->bool{return face.negativeRow<rowCount()&&fac
     arena[entryBase()+output*2u]=other;arena[entryBase()+output*2u+1u]=bitcast<u32>(coefficient);diagonal+=coefficient;local+=1u;
   }if(!finite(rhs)||!finite(diagonal)){rowFailure(row,NONFINITE_FACE,row);return;}let base=row*4u;arena[base]=bitcast<u32>(diagonal);
   arena[base+1u]=bitcast<u32>(rhs);arena[base+2u]=bitcast<u32>(volume);arena[base+3u]=rowFlags;}
-@compute @workgroup_size(1) fn publishPowerRows(){reduceDiagnostics(rowDiagnosticBase(),rowCount(),false);
-  if(control.flags==0u){control.flags=ASSEMBLED;}}
+@compute @workgroup_size(256) fn publishPowerRows(@builtin(local_invocation_index) lane:u32){
+  collectDiagnostics(rowDiagnosticBase(),rowCount(),lane,false);
+  reduceLaneDiagnostics(lane);
+  if(lane==0u){
+    if(reductionFlags[0]!=0u){reject(reductionFlags[0],reductionFirst[0]);}
+    if(control.flags==0u){control.flags=ASSEMBLED;}
+  }
+}
 @compute @workgroup_size(64) fn publishPowerLeafRows(@builtin(global_invocation_id) gid:vec3u){let row=gid.x;
   if(control.flags!=ASSEMBLED||row>=rowCount()||row>=arrayLength(&leafHeaders)){return;}
   let start=arena[entryOffsetBase()+row];let finish=arena[entryOffsetBase()+row+1u];
@@ -446,9 +519,28 @@ fn preparePowerProjectionState(){let old=control.flags;control.pad2=old;control.
   var integrated=0.0;for(var cursor=begin(row);cursor<end(row);cursor+=1u){let item=incidences[cursor];integrated+=f32(item.sign)*faces[item.face].area*bitcast<f32>(arena[projectedBase()+item.face]);}
   let volume=bitcast<f32>(arena[row*4u+2u]);let value=integrated/volume;if(!finite(value)){rowFailure(row,INVALID_PRESSURE,row);return;}
   arena[divergenceBase()+row]=bitcast<u32>(value);}
-@compute @workgroup_size(1) fn publishPowerProjection(){
-  reduceDiagnostics(faceDiagnosticBase(),faceCount(),true);reduceDiagnostics(rowDiagnosticBase(),rowCount(),false);
-  if(control.flags==0u){control.flags=ASSEMBLED|PROJECTED;control.projectedCount=faceCount();}}
+@compute @workgroup_size(256) fn publishPowerProjection(@builtin(local_invocation_index) lane:u32){
+  var flags=0u;var first=INVALID;var before=0u;var after=0u;
+  for(var face=lane;face<faceCount();face+=256u){
+    let at=faceDiagnosticBase()+face*4u;
+    if(at+3u>=arrayLength(&arena)){flags|=CAPACITY;first=min(first,face);break;}
+    let error=arena[at];if(error!=0u){flags|=error;first=min(first,arena[at+1u]);}
+    before=max(before,arena[at+2u]);after=max(after,arena[at+3u]);
+  }
+  for(var row=lane;row<rowCount();row+=256u){
+    let at=rowDiagnosticBase()+row*4u;
+    if(at+3u>=arrayLength(&arena)){flags|=CAPACITY;first=min(first,row);break;}
+    let error=arena[at];if(error!=0u){flags|=error;first=min(first,arena[at+1u]);}
+  }
+  reductionFlags[lane]=flags;reductionFirst[lane]=first;
+  reductionBefore[lane]=before;reductionAfter[lane]=after;
+  reduceLaneDiagnostics(lane);
+  if(lane==0u){
+    control.pad0=max(control.pad0,reductionBefore[0]);control.pad1=max(control.pad1,reductionAfter[0]);
+    if(reductionFlags[0]!=0u){reject(reductionFlags[0],reductionFirst[0]);}
+    if(control.flags==0u){control.flags=ASSEMBLED|PROJECTED;control.projectedCount=faceCount();}
+  }
+}
 @compute @workgroup_size(64) fn commitPowerProjection(@builtin(global_invocation_id) gid:vec3u){let index=gid.x;
   if(control.flags!=(ASSEMBLED|PROJECTED)||index>=faceCount()||index>=arrayLength(&faces)){return;}
   faces[index].normalVelocity=bitcast<f32>(arena[projectedBase()+index]);}

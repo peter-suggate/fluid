@@ -103,11 +103,12 @@ export function planOctreePowerGalerkinExecution(
   const smoothing = Math.max(2, Math.min(4, Math.round(smoothingIterations / 2) * 2));
   const adjacent = levelCount - 1;
   const numericRefreshDispatches = adjacent;
-  // Each statically encoded cycle ends with a residual checkpoint (two-stage
-  // partial/reduce measurement plus publication). Once that checkpoint
-  // publishes convergence, later cycle dispatches remain encoded but their
-  // kernels skip device work through the shared solve control.
-  const dispatchesPerCycle = 2 * adjacent * (smoothing + 1) + 4;
+  // Each statically encoded cycle ends with a two-stage residual checkpoint.
+  // The bounded partial reduction now publishes convergence in its final
+  // lane, so publication no longer costs a third singleton dispatch. Once the
+  // checkpoint publishes convergence, later cycle dispatches remain encoded
+  // but their kernels skip device work through the shared solve control.
+  const dispatchesPerCycle = 2 * adjacent * (smoothing + 1) + 3;
   return Object.freeze({
     levelCount,
     cycles: boundedCycles,
@@ -117,9 +118,10 @@ export function planOctreePowerGalerkinExecution(
     numericRefreshDispatches,
     dispatchesPerCycle,
     correctionExportDispatches: 1,
-    // Initialize/import, refresh, clear correction, checkpointed cycles, and
-    // export the accepted correction.
-    encodedDispatches: 2 + numericRefreshDispatches + boundedCycles * dispatchesPerCycle + 2,
+    // Fine initialization clears the correction channels in the same row
+    // dispatch; import, refresh, checkpointed cycles, and accepted-correction
+    // export account for the remaining commands.
+    encodedDispatches: 2 + numericRefreshDispatches + boundedCycles * dispatchesPerCycle + 1,
   });
 }
 

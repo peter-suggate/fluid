@@ -6,6 +6,7 @@ import {
   GPUSegmentedQueueWallPerformanceTraceRecorder,
   type GPUTimestampPhase,
 } from "./performance-trace";
+import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
 import { initializeRigidBodies, type RigidBodyState } from "./rigid-body";
 import {
   GPU_RIGID_EXCHANGE_BYTES,
@@ -1524,14 +1525,17 @@ export class WebGPUUniformEulerianSolver {
     this.octreeProjection?.setTimestep(dt);
     const activeBodies = bodies.slice(0, 12);
     this.rigidSystem.syncBodies(activeBodies); this.info.encodedSteps = (this.info.encodedSteps ?? 0) + substeps;
-    const traceRequestedAt_ms = performance.now();
+    const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
+    const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
     const timestampTraceUnavailable = !GPUPerformanceTraceRecorder.supported(this.device)
       || this.hardwarePhysicsTraceInvalid;
-    const shouldSegmentPhysics = Boolean(this.octreeProjection)
+    const shouldSegmentPhysics = measurementInstrumentationEnabled
+      && Boolean(this.octreeProjection)
       && !this.physicsTracePending
       && timestampTraceUnavailable
       && traceRequestedAt_ms - this.lastSegmentedPhysicsTraceAt_ms >= SEGMENTED_QUEUE_TRACE_CADENCE_MS;
-    const shouldTracePhysics = !this.physicsTracePending
+    const shouldTracePhysics = measurementInstrumentationEnabled
+      && !this.physicsTracePending
       && (shouldSegmentPhysics || traceRequestedAt_ms - this.lastPhysicsTraceAt_ms >= 250);
     this.octreeProjection?.setCouplingBodies(activeBodies.length, activeBodies.some((body) => body.inverseMass_kg > 0));
     const inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;
@@ -1735,7 +1739,9 @@ export class WebGPUUniformEulerianSolver {
         this.device.queue,
         (submittedEncoder) => this.octreeProjection?.retireSubmittedEncoder(submittedEncoder),
       ).then((trace) => {
-        if (trace && !this.disposed) this.info.physicsTrace = trace;
+        const instrumentation = usePerformanceInstrumentationStore.getState();
+        if (trace && !this.disposed && instrumentation.enabled
+          && instrumentation.enabledAt_ms <= traceRequestedAt_ms) this.info.physicsTrace = trace;
       }).finally(() => {
         this.octreeProjection?.releaseDenseBootstrapPhi();
         this.physicsTracePending = false;
@@ -1764,7 +1770,9 @@ export class WebGPUUniformEulerianSolver {
         this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;
         this.physicsTracePending = true;
         void physicsTraceRead.then((trace) => {
-          if (trace && !this.disposed) this.info.physicsTrace = trace;
+          const instrumentation = usePerformanceInstrumentationStore.getState();
+          if (trace && !this.disposed && instrumentation.enabled
+            && instrumentation.enabledAt_ms <= traceRequestedAt_ms) this.info.physicsTrace = trace;
         }).catch(() => {
           physicsTrace?.destroy();
         }).finally(() => {

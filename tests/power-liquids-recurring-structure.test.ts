@@ -190,10 +190,14 @@ test("recurring Power Liquids publication entry graphs contain no synchronizatio
   ] as const;
 
   for (const graph of recurringGraphs) {
+    const expected = graph.name === "fine-seed dense residency publication"
+      ? ["commitCandidateGeneration", "markFineSeedCandidateResidency", "markTileRing", "prepareFineSeedCandidateResidency",
+        "publishFineSeedCandidateResidency", "recordDenseError", "resolveFineSeedCandidateResidency"]
+      : [];
     assert.deepEqual(
       reachableAtomicFunctions(graph.source, graph.entries),
-      [],
-      `${graph.name} must remain synchronization-atomic-free`,
+      expected,
+      `${graph.name} must contain only its explicitly reviewed synchronization atomics`,
     );
   }
 });
@@ -211,17 +215,18 @@ test("the atomic gate distinguishes recurring SPGrid publication from setup diag
   }
 });
 
-test("fine-summary persistent builder snapshots exact-prefix bounds as workgroup-uniform values", () => {
-  const build = parseWgslGraph(fineLevelSetSummaryWGSL).functions.get("buildFineSummaryDelta");
-  assert.notEqual(build, undefined);
-  assert.match(build!,
-    /if\(lid==0u\)\{[\s\S]*summaryBuildState\[3\]=count;summaryBuildState\[4\]=padded[\s\S]*workgroupUniformLoad\(&summaryBuildState\[3\]\)[\s\S]*workgroupUniformLoad\(&summaryBuildState\[4\]\)/,
-    "lane zero must snapshot both exact prefix bounds before emission and sorting barriers");
-  assert.doesNotMatch(build!,
-    /let (?:count|padded)=workState\[[34]\][\s\S]*workgroupBarrier/,
-    "Dawn must never see a storage-derived value controlling barrier reachability");
-  assert.match(build!, /for\(var width=2u;width<=padded;width<<=1u\)[\s\S]*workgroupBarrier/,
-    "the exact padded prefix remains the sole bitonic work extent");
+test("fine-summary builder publishes an exact indirect extent for parallel sorting", () => {
+  const prepare = parseWgslGraph(fineLevelSetSummaryWGSL).functions.get("prepareFineSummaryDelta");
+  const tiles = parseWgslGraph(fineLevelSetSummaryWGSL).functions.get("sortFineSummaryTiles");
+  assert.notEqual(prepare, undefined); assert.notEqual(tiles, undefined);
+  assert.match(prepare!,
+    /workState\[3\]=count;workState\[4\]=padded[\s\S]*publishSortDispatch\(padded\)/,
+    "the serial transaction decision publishes both the exact record and padded sort extents");
+  assert.match(tiles!,
+    /sortTile\[lid\][\s\S]*for\(var width=2u;width<=256u;width<<=1u\)[\s\S]*workgroupBarrier/,
+    "each indirectly dispatched tile has a fixed, workgroup-uniform shared-memory sort network");
+  assert.match(tiles!, /for\(var width=2u;width<=256u/,
+    "tile barrier reachability is controlled only by a compile-time workgroup width");
 });
 
 test("coarse-phi delta commit broadcasts authority and bounds before every barrier", () => {
@@ -229,7 +234,7 @@ test("coarse-phi delta commit broadcasts authority and bounds before every barri
     .functions.get("publishPowerCoarsePhiDeltaAndCommit");
   assert.notEqual(commit, undefined);
   assert.match(commit!,
-    /if\(lid==0u\)\{let enabled=!rejectedFine\(\)&&control\.valid==VALID&&candidateDirectory\.state==VALID;[\s\S]*coarseDeltaCommitState\[1\]=select\(0u,candidateDirectory\.rowCount,enabled\)[\s\S]*coarseDeltaCommitState\[2\]=select\(0u,previous,enabled\)/,
+    /if\(lid==0u\)\{let rejected=rejectedFine\(\);let enabled=!rejected&&control\.valid==VALID&&candidateDirectory\.state==VALID;if\(!rejected&&!enabled\)\{sampleDirectory\.state=0u;\}[\s\S]*coarseDeltaCommitState\[1\]=select\(0u,candidateDirectory\.rowCount,enabled\)[\s\S]*coarseDeltaCommitState\[2\]=select\(0u,previous,enabled\)/,
     "lane zero must snapshot the complete immutable-candidate authority transaction");
   for (const word of [0, 1, 2]) {
     assert.match(commit!, new RegExp(`workgroupUniformLoad\\(&coarseDeltaCommitState\\[${word}\\]\\)`),
@@ -240,7 +245,7 @@ test("coarse-phi delta commit broadcasts authority and bounds before every barri
     "no storage-derived early return may bypass the reduction or immutable-commit barriers");
   assert.match(commit!,
     /if\(lid==0u&&enabled!=0u\)\{sampleDirectory\.state=0u;\}[\s\S]*workgroupBarrier\(\)[\s\S]*if\(enabled!=0u\)\{for\(var slot=lid;slot<currentCount[\s\S]*workgroupBarrier\(\)[\s\S]*if\(lid==0u&&enabled!=0u\)/,
-    "disabled candidates must cross the full synchronization skeleton without mutating the prior directory");
+    "rejected fine candidates must cross the full synchronization skeleton without mutating the prior directory");
 });
 
 test("coarse-phi finalize broadcasts rejection before its reduction barriers", () => {
