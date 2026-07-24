@@ -40,7 +40,7 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
 
   const encode = WebGPUFineLevelSetRedistance.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(encode, /fineFactor!==4&&this\.source\.plan\.fineFactor!==8/);
-  assert.match(encode, /this\.encodeJFA\(broker,bytes,options\.bandCells\)/,
+  assert.match(encode, /this\.encodeJFA\(broker,bytes,options\.bandCells,tolerance\)/,
     "factor-8 uses the same mandatory fixed-resident JFA-CPT path as factor-4");
   assert.doesNotMatch(encode, /method===|fast-sweeping/,
     "the retired redistance selector must stay deleted");

@@ -78,6 +78,7 @@ export interface OctreePowerGalerkinExecutionPlan {
   readonly smoothingIterations: number;
   readonly fineInitializationDispatches: 1;
   readonly fineImportDispatches: 1;
+  readonly fineOperatorChangeDetectionDispatches: 1;
   readonly numericRefreshDispatches: number;
   readonly dispatchesPerCycle: number;
   readonly correctionExportDispatches: 1;
@@ -115,13 +116,14 @@ export function planOctreePowerGalerkinExecution(
     smoothingIterations: smoothing,
     fineInitializationDispatches: 1,
     fineImportDispatches: 1,
+    fineOperatorChangeDetectionDispatches: 1,
     numericRefreshDispatches,
     dispatchesPerCycle,
     correctionExportDispatches: 1,
     // Fine initialization clears the correction channels in the same row
     // dispatch; import, refresh, checkpointed cycles, and accepted-correction
     // export account for the remaining commands.
-    encodedDispatches: 2 + numericRefreshDispatches + boundedCycles * dispatchesPerCycle + 1,
+    encodedDispatches: 3 + numericRefreshDispatches + boundedCycles * dispatchesPerCycle + 1,
   });
 }
 

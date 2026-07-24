@@ -172,7 +172,7 @@ test("Section 5 catalog adjacency keeps exact delta, resolution, commit, and ind
     /scanCatalogTransitionDeltaBlocks|prefixCatalogTransitionDeltaBlocks|scatterCatalogTransitionDeltaRows/,
     "the deleted compaction kernels are not compiled at construction");
   assert.match(wgslFunction("prepareCatalogTransitionAdjacency"),
-    /indirect\[51\]=\(transitionControl\.rowCount\+63u\)\/64u/,
+    /letgroups=\(transitionControl\.rowCount\+63u\)\/64u;indirect\[51\]=groups/,
     "the immutable dense work domain is produced without a host count or compact-list producer");
   assert.match(wgslFunction("emitBandFaces"),
     /band=faceDeltaRow\(item\);if\(!faceRowAffected\(band\)\)\{return;\}/);
@@ -188,9 +188,9 @@ test("Section 5 catalog adjacency keeps exact delta, resolution, commit, and ind
     /synchronizeTransitionStorage|enumerateSupport|resolveSupportOwners|insertSupport|captureSupport/);
   const topologySchedule = source.slice(topology, transitions);
   assert.match(topologySchedule,
-    /run\("prepare"[\s\S]*run\("buildTopologyDelta"[\s\S]*run\("sortUniqueCatalogSupport3"[\s\S]*run\("sortUniqueEndpointSupport4"[\s\S]*run\("classifyRowSigns"/);
-  assert.equal(topologySchedule.match(/\brun\("/g)?.length, 11,
-    "support publication initializes, closes three anchor tiers plus endpoints, sorts, and validates");
+    /run\("prepareStructureEpoch"[\s\S]*run\("prepare"[\s\S]*run\("clearSupportIdentityMarks"[\s\S]*run\("buildTopologyDelta"[\s\S]*run\("sortUniqueCatalogSupport3"[\s\S]*run\("sortUniqueEndpointSupport4"[\s\S]*run\("classifyRowSigns"/);
+  assert.equal(topologySchedule.match(/\brun\("/g)?.length, 13,
+    "support publication clears its exact identity marks, closes three anchor tiers plus endpoints, compacts, and validates");
   assert.doesNotMatch(topologySchedule,
     /prepareCatalogSupport|sortRowDirectory|validateRowDirectory/);
 });
@@ -259,6 +259,24 @@ test("transition adjacency has one exact row-delta path and no whole-row resolve
   assert.match(admission, /rowDelta\[base\+7u\]==p\.powerGeneration/);
   assert.match(admission, /rowDelta\[base\+8u\]==ROW_DELTA_VALID/);
   assert.match(admission, /requested==carried\+added&&requested==previous\+added-retired/);
+});
+
+test("zero-delta structure epochs gate band, adjacency, and transient graph rebuilds", () => {
+  const encode = compact(WebGPUOctreeFaceClosestPointExtension.prototype.encodePhase);
+  assert.match(encode,
+    /run\("prepareStructureEpoch"[\s\S]*run\("clearSupportIdentityMarks"[^;]*,0,pass,0\)/,
+    "the epoch singleton arms the indirect support-mark clear");
+  assert.match(encode,
+    /run\("classifyTransitionDelta"[^;]*,0,pass,264\)[\s\S]*run\("validateCatalogAdjacency"[^;]*,0,pass,264\)/,
+    "adjacency classification and validation share the structure-only dispatch");
+  assert.match(octreeFaceBandWGSL,
+    /fn topologyStructureDeltaEmpty\(\)->bool[\s\S]*rowDelta\[base\]==rowDelta\[base\+1u\][\s\S]*rowDelta\[base\+2u\]==rowDelta\[base\][\s\S]*rowDelta\[base\+3u\]==0u&&rowDelta\[base\+4u\]==0u/);
+  assert.doesNotMatch(wgslFunction("topologyStructureDeltaEmpty"), /base\+5u|base\+6u/,
+    "value-dirty and affected-row counts do not force a structure rebuild");
+  assert.match(wgslFunction("prepareFaceBandStructureEpoch"),
+    /structureEpochReusable\(\)[\s\S]*indirect\[69\]=select\(0u,1u,reuse\)/);
+  assert.match(wgslFunction("prepareTransientBandPowerGraph"),
+    /reuse=structureEpochGate\(\)[\s\S]*indirect\[66\]=select\(\(rowCount\+63u\)\/64u,0u,reuse\)/);
 });
 
 test("co-spherical entry 7946 closes its axial-star octahedron in the immutable catalog", () => {
@@ -431,7 +449,7 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
   assert.match(prepare, /control\.reserved0=INVALID/,
     "the packed producer-failure diagnostic must begin at the invalid sentinel");
   assert.match(prepare,
-    /firstFaceEmissionFailure,INVALID.*firstPhiFailure,INVALID.*firstClosestPointFailure,INVALID.*firstVectorFailure,INVALID.*firstCptNoOwnerFailure,INVALID.*firstCptSupportOwnerFailure,INVALID.*firstCptNoSimplexFailure,INVALID.*firstCptMissingVertexFailure,INVALID/s,
+    /firstFaceEmissionFailure=INVALID.*firstPhiFailure=INVALID.*firstClosestPointFailure=INVALID.*firstVectorFailure=INVALID.*firstCptNoOwnerFailure=INVALID.*firstCptSupportOwnerFailure=INVALID.*firstCptNoSimplexFailure=INVALID.*firstCptMissingVertexFailure=INVALID/s,
     "every stable stage/cause diagnostic starts from the invalid sentinel each generation");
   assert.match(prepare,
     /rowDirectory\[candidateState\]=core;rowDirectory\[candidateState\+1u\]=core;rowDirectory\[candidateState\+2u\]=core;rowDirectory\[candidateState\+3u\]=0u/,
@@ -450,8 +468,8 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
     "the immutable power prefix is copied row-parallel rather than by a singleton loop");
   const emit = wgslFunction("emitCatalogNeighborhood");
   assert.match(emit,
-    /for\(varslot=0u;slot<MAX_GUARDS;slot\+=1u\).*emitRegularFaceEndpointSupport\(row,base\).*emitUniformCatalogSupport\(row,base\).*emitDelaunayCatalogSupport\(row,base,header,metric\.y\)/s,
-    "each source emits one fixed 24-endpoint plus 36-catalog request record");
+    /emitRegularFaceEndpointSupport\(row,base,tier,&ownerCache\).*emitUniformCatalogSupport\(row,base,tier,&ownerCache\).*emitDelaunayCatalogSupport\(row,base,tier,header,metric\.y,&ownerCache\)/s,
+    "each source marks its complete endpoint-plus-catalog identity set directly");
   assert.match(emit,
     /letsupport2End=select\(support1End,rowDirectory\[state\+2u\].*letsupport3End=select\(support2End,rowDirectory\[state\+3u\].*support2End,tier==4u.*support3End,tier==4u/s,
     "the terminal tier closes every S3 anchor over the same exact catalog request stream");
@@ -463,21 +481,19 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
     "the incomplete endpoint-only S3 closure and its narrower candidate stride stay deleted");
   const closure = wgslFunction("sortUniqueFaceBandCatalogSupport");
   assert.match(closure,
-    /varsourceCount=core;varstride=MAX_GUARDS.*tier==3u\)\{sourceCount=select\(0u,support2End-support1End,prefixValid\);\}.*tier==4u\)\{sourceCount=select\(0u,support3End-support2End,prefixValid\);\}.*sourceCount\*stride/s,
-    "all anchor and endpoint tiers sort their complete endpoint-plus-catalog candidate record");
-  assert.doesNotMatch(closure, /tier==4u\)[^{]*\{[^}]*stride=MAX_ENDPOINTS/,
-    "terminal endpoints must never truncate Delaunay selector candidates to the legacy endpoint stride");
+    /identityCount=p\.dims\.x\*p\.dims\.y\*p\.dims\.z\*6u.*markedSupportIdentity\(canonical,tier\)/s,
+    "all tiers compact the same fixed exact identity universe");
   assert.match(closure,
-    /digit<faceBandRadixDigits\(\).*supportDigit.*supportSortBins.*publishedSupportRecord.*tier==2u.*ROW_SUPPORT2.*tier==3u.*ROW_SUPPORT3_NODE.*tier==4u.*ROW_SUPPORT3_ENDPOINT/s,
-    "one deterministic domain-bounded radix/unique pass publishes each exact tier");
+    /canonical=range\.x;canonical<range\.y;canonical\+=1u.*tier==2u.*ROW_SUPPORT2.*tier==3u.*ROW_SUPPORT3_NODE.*tier==4u.*ROW_SUPPORT3_ENDPOINT/s,
+    "one deterministic domain-bounded prefix compaction publishes each exact tier");
   assert.match(closure,
-    /if\(lane==0u\).*control\.initialRows.*rowDirectory\[candidateState\+1u\].*supportSortBins\[3u\]=sourceCount\*stride.*workgroupUniformLoad\(&supportSortBins\[0u\]\).*workgroupUniformLoad\(&supportSortBins\[1u\]\).*workgroupUniformLoad\(&supportSortBins\[2u\]\).*workgroupUniformLoad\(&supportSortBins\[3u\]\)/s,
-    "lane zero broadcasts every storage-derived enable and support bound before any radix barrier");
+    /if\(lane==0u\).*control\.initialRows.*rowDirectory\[candidateState\+1u\].*workgroupUniformLoad\(&supportSortBins\[0u\]\).*workgroupUniformLoad\(&supportSortBins\[1u\]\).*workgroupUniformLoad\(&supportSortBins\[2u\]\).*workgroupUniformLoad\(&supportSortBins\[3u\]\).*workgroupUniformLoad\(&supportSortBins\[4u\]\)/s,
+    "lane zero broadcasts every storage-derived enable and support bound before compaction barriers");
   assert.match(closure,
     /supportSortBins\[257u\]=select\(0u,1u,accepted\).*workgroupUniformLoad\(&supportSortBins\[257u\]\).*if\(publishEnabled==0u\)\{return;\}/s,
     "the post-unique failure gate is a workgroup-uniform broadcast");
-  assert.doesNotMatch(closure, /\batomic/,
-    "the deterministic radix publication has no synchronization-atomic path");
+  assert.doesNotMatch(closure, /supportDigit|faceBandRadixDigits|supportRead|supportWrite/,
+    "fixed identity compaction deletes candidate ping-pong and radix work");
   assert.match(closure,
     /tier==1u\)\{rowDirectory\[candidateState\+1u\]=end.*tier==2u\)\{rowDirectory\[candidateState\+2u\]=end.*tier==3u\)\{rowDirectory\[candidateState\+3u\]=end.*else\{rowDirectory\[candidateState\]=end/s,
     "the candidate publishes distinct S1, S2, S3-node, and terminal endpoint prefixes");
@@ -491,24 +507,21 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
   assert.match(faceEndpoints,
     /sampleCount=select\(1u,4u,row\.size>1u\).*axis<3u.*side<2u.*sample<4u/s,
     "the paper's regular-face graph closes six unit endpoints or exact 2:1 face quadrants");
-  assert.match(faceEndpoints, /writeSupportCandidate\(base,request,candidate\)/,
-    "regular-face endpoints join the same exact fixed-fanout identity stream");
-  const sort = wgslFunction("sortFaceBandRowDirectoryInWorkgroup");
-  assert.match(sort, /fnsortFaceBandRowDirectoryInWorkgroup\(lane:u32\)/);
-  assert.match(sort, /digit<faceBandRadixDigits\(\).*rowSortDigit.*bin<16u.*workgroupBarrier/s,
-    "one cooperative fixed-memory sort orders two size nibbles before the domain-required cell nibbles");
+  assert.match(faceEndpoints, /writeSupportCandidate\(base,request,candidate,tier\)/,
+    "regular-face endpoints join the same exact tier-marked identity stream");
+  const sort = wgslFunction("compactFaceBandRowDirectoryInWorkgroup");
+  assert.match(sort,
+    /identityCount=p\.dims\.x\*p\.dims\.y\*p\.dims\.z\*6u.*rowAtCanonicalIdentity\(canonical\).*rowDirectory\[output\*2u\]=canonical\/6u/s,
+    "one cooperative prefix compaction publishes the canonical cell-primary, size-secondary directory");
   assert.doesNotMatch(octreeFaceBandWGSL, /rowSortBinRecords/,
     "terminal support and row-directory radix phases reuse one portable 16 KiB workgroup arena");
-  assert.match(wgslFunction("rowSortDigit"),
-    /digit<2u\)\{return\(size>>\(digit\*4u\)\)&15u;\}return\(value\.x>>\(\(digit-2u\)\*4u\)\)&15u/,
-    "the LSD radix establishes size as the exact secondary key and cell as the primary key");
   assert.doesNotMatch(sort, /atomic(?:Add|CompareExchangeWeak|Max|Min|Or)/);
   assert.match(wgslFunction("validateFaceBandRowDirectoryIndex"),
     /rowIdentityLess\(rowDirectory\[\(index-1u\)\*2u\],rows\[prior\]\.size,key,rows\[row\]\.size\)/,
     "duplicate and unsorted exact (cell,size) row identities fail closed");
   assert.match(wgslFunction("sortUniqueFaceBandEndpointSupport4"),
-    /sortUniqueFaceBandCatalogSupport\(4u,lane\).*sortFaceBandRowDirectoryInWorkgroup\(lane\).*validateFaceBandRowDirectoryIndex\(index,count\)/s,
-    "the terminal exact tier reuses its deterministic 256-lane workgroup for directory sort and validation");
+    /sortUniqueFaceBandCatalogSupport\(4u,lane\).*compactFaceBandRowDirectoryInWorkgroup\(lane\).*validateFaceBandRowDirectoryIndex\(index,count\)/s,
+    "the terminal exact tier reuses its deterministic 256-lane workgroup for directory compaction and validation");
   assert.doesNotMatch(octreeFaceBandWGSL,
     /fn (?:publishCatalogBandRows|markCatalogSupportRows|prefixCatalogSupportRows|offsetCatalogSupportRows|publishCatalogSupportRows|emitRowDirectory|histogramRowDirectoryRadix|prefixRowDirectoryRadix|scatterRowDirectoryRadix|insertRow)\(/);
 });
@@ -548,7 +561,7 @@ test("S3 anchor closure publishes the exact selector missing from the row-1216 f
   assert.match(wgslFunction("emitFaceBandCatalogSupport3"),
     /emitCatalogNeighborhood\(g\.x,3u\)/);
   assert.match(wgslFunction("emitCatalogNeighborhood"),
-    /emitDelaunayCatalogSupport\(row,base,header,metric\.y,&ownerCache\)/,
+    /emitDelaunayCatalogSupport\(row,base,tier,header,metric\.y,&ownerCache\)/,
     "S3 publication includes selector 19 instead of stopping at regular face endpoints");
 });
 
@@ -640,15 +653,18 @@ test("Section 5 row identity retains overlapping origins and resolves size-one [
   assert.match(wgslFunction("committedRowOfIdentity"),
     /rowIdentitySlot\(cellKey,size\)[\s\S]*candidate\.cell==cellKey&&candidate\.size==size/,
     "warm-delta direct lookup validates both identity components");
-  assert.match(wgslFunction("sortUniqueFaceBandCatalogSupport"),
-    /prior\.cellPlusOne==value\.cellPlusOne&&prior\.size==value\.size/,
-    "support publication deduplicates only identical (cell,size) requests");
-  assert.match(wgslFunction("publishedSupportRecord"),
-    /rowOfIdentity\(cellPlusOne-1u,size\)!=INVALID/,
+  assert.match(wgslFunction("writeSupportCandidate"),
+    /rowIdentitySlot\(value\.cellPlusOne-1u,value\.size\)[\s\S]*atomicOr\(&supportIdentityMarks\[mark\],1u<<tier\)/,
+    "support publication deduplicates only the collision-free (cell,size) identity");
+  assert.match(wgslFunction("markedSupportIdentity"),
+    /level=canonical%6u[\s\S]*mark=level\*domain\+cellKey[\s\S]*rowOfIdentity\(cellKey,size\)!=INVALID/,
     "published support resolves exact level-sensitive identity in O(1)");
   assert.match(wgslFunction("sortUniqueFaceBandCatalogSupport"),
     /rowDirectory\[identitySlot\]=band\+1u[\s\S]*rowDirectory\[candidateState\]=end/,
     "each completed tier publishes its exact identity slots before exposing the prefix");
+  assert.match(wgslFunction("compactFaceBandRowDirectoryInWorkgroup"),
+    /rowAtCanonicalIdentity\(canonical\)[\s\S]*rowDirectory\[output\*2u\]=canonical\/6u/,
+    "the final sorted directory is compacted directly in canonical cell/size order");
   assert.doesNotMatch(octreeFaceBandWGSL, /\bfn (?:rowOf|committedRowOf|sampleBandRow)\s*\(/);
 });
 
@@ -683,16 +699,18 @@ test("factor-4 GPU face band is compact, bounded, and has no fine velocity chann
   assert.equal(plan.identityToRowOffsetWords, plan.rowDirectoryCapacity * 2 + 4);
   assert.equal(plan.identityToRowCapacity, 24 * 18 * 16 * 6,
     "the six collision-free direct planes are constructor-sized from immutable dimensions");
+  assert.equal(plan.supportIdentityMarkBytes, plan.identityToRowCapacity * 4,
+    "each exact identity has one atomic tier-membership mark");
   assert.equal(plan.rowDirectoryBytes,
     (plan.identityToRowOffsetWords + plan.identityToRowCapacity) * 4);
   assert.equal(plan.bandFaceBytes, plan.faceCapacity * OCTREE_FACE_BAND_FACE_BYTES);
-  assert.equal(plan.indirectDispatchBytes, 264,
-    "two exact support-tier records plus live row/face prefix records replace capacity-sized dispatches");
+  assert.equal(plan.indirectDispatchBytes, 300,
+    "value and structure epochs have disjoint indirect schedules and reuse metadata");
   assert.equal(plan.allocatedBytes,
     plan.bandFaceBytes + plan.incidenceBytes,
     "face storage has no legacy closest-point repair ping-pong snapshots");
   assert.match(compact(planOctreeFaceBandGPU),
-    /gpuAllocatedBytes:rowBytes\+bandFaceBytes\+incidenceBytes\+rowDirectoryBytes\+rowDirectoryScratchBytes/,
+    /gpuAllocatedBytes:rowBytes\+bandFaceBytes\+incidenceBytes\+rowDirectoryBytes\+supportIdentityMarkBytes/,
     "complete GPU accounting contains no repair heap or full-face ping-pong snapshots");
   assert.match(compact(planOctreeFaceBandGPU),
     /\+rowBytes\+rowDirectoryBytes\+bandFaceBytes\+incidenceBytes\+transitionAdjacencyBytes\+transitionMetricBytes\+OCTREE_FACE_BAND_CONTROL_BYTES\+OCTREE_FACE_BAND_TRANSITION_CONTROL_BYTES\+rowCapacity\*4\+endpointIncomingCountBytes\+bandPhiFrontierBytes\+liveFaceWorklistBytes\+powerVelocityScratchBytes/,
@@ -734,11 +752,8 @@ test("factor-4 GPU face band is compact, bounded, and has no fine velocity chann
       ),
     ) * OCTREE_FACE_BAND_TRANSIENT_INCIDENCE_BYTES,
     "reused incidence scratch covers all 24 face endpoints plus the 36-request catalog bound");
-  assert.equal(plan.catalogSupportCandidateCapacity,
-    plan.rowCapacity * (OCTREE_REGULAR_BAND_INCIDENCE_PER_ROW + Math.max(
-      OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumNeighborRows,
-      OCTREE_FACE_BAND_UNIFORM_SUPPORT_REQUESTS,
-    )));
+  assert.equal(plan.catalogSupportCandidateCapacity, plan.faceCapacity,
+    "the former topology radix arena now holds only one repair carrier per face");
   assert.equal(plan.catalogSupportCandidateBytes, plan.catalogSupportCandidateCapacity * 8);
   assert.equal(plan.catalogSupportScratchBytes, plan.catalogSupportCandidateBytes);
   assert.equal(plan.transientPowerRowBytes,
@@ -954,10 +969,13 @@ test("every formerly over-limit Section 5 entry has at most ten reachable storag
 test("face phi uses the paper's fine field then the redistanced dry-owner cube/Delaunay field", () => {
   const sample = wgslFunction("sampleBandFacePhi");
   const coarseSample = wgslFunction("sampleBandFaceCoarsePhi");
-  assert.match(sample, /finePhiAtFaceCentroid\(face\.centroid\.xyz\)/,
-    "valid fine phi has priority");
+  assert.match(sample, /nearbyFineCpt\(face\.centroid\.xyz,wantedSign\)/,
+    "face phi consumes the bounded fine-field CPT authority");
+  assert.match(wgslFunction("nearbyFineCpt"),
+    /direct=finePhiAtFaceCentroid\(pointGrid\).*if\(direct\.valid!=0u.*\)\{returndirect;\}/s,
+    "a valid direct fine sample has priority over bounded axial recovery");
   assert.match(coarseSample,
-    /\(face\.flags&\(LIVE\|PHI_VALID\)\)!=LIVE.*coarsePhiCptAtPoint\(anchor,face\.centroid\.xyz\).*face\.positiveRow<transitionControl\.support2End.*coarsePhiCptAtPoint\(anchor,face\.centroid\.xyz\)/,
+    /\(face\.flags&\(LIVE\|PHI_VALID\)\)!=LIVE.*coarsePhiCptAtPoint\(anchor,face\.centroid\.xyz\).*face\.positiveRow<transitionControl\.support3NodeEnd.*coarsePhiCptAtPoint\(anchor,face\.centroid\.xyz\)/,
     "only unresolved faces fall through, and only fully closed S0-S2 rows may anchor local interpolation");
   assert.match(coarseSample, /faces\[index\]\.flags\|=COARSE_PHI/);
   assert.match(coarseSample, /face\.flags\|=PHI_DIAGNOSTIC/,
@@ -988,8 +1006,9 @@ test("face phi uses the paper's fine field then the redistanced dry-owner cube/D
 
   const initialize = wgslFunction("initializeBandRowPhi");
   const extend = wgslFunction("extendBandRowPhi");
-  assert.match(initialize, /finePhiAtFaceCentroid\(center\).*coarseCellSeedScalar/s,
-    "the paper's current fine field has priority over the spatial coarse level-set seed");
+  assert.match(initialize,
+    /sampled=coarseCellSeedScalar.*fineSample=nearbyFineCpt\(center,wantedSign\).*if\(fineSample\.valid!=0u\)\{sampled=vec2f\(fineSample\.phi,1\.\);\}/s,
+    "the bounded current fine-field CPT overrides the spatial coarse level-set seed");
   assert.match(extend, /localTetraEikonal\(rowIndex,sign\)/,
     "transition dry owners use their local Delaunay Eikonal update");
   assert.match(wgslFunction("localTetraEikonal"),
@@ -1024,7 +1043,7 @@ test("face phi uses the paper's fine field then the redistanced dry-owner cube/D
   for (const binding of [0, 1, 2, 3, 5, 8, 12, 24]) {
     assert.match(fineBindings, new RegExp(`\\[${binding},`));
   }
-  for (const binding of [0, 1, 5, 6, 7, 12, 27, 28, 29, 30, 31]) {
+  for (const binding of [0, 1, 6, 7, 12, 27, 28, 29, 30, 31, 32, 75]) {
     assert.match(coarseBindings, new RegExp(`\\[${binding},`));
   }
   for (const binding of [25, 42]) assert.doesNotMatch(coarseBindings, new RegExp(`\\[${binding},`));
@@ -1263,13 +1282,13 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
 
   const sampleKernel = wgslFunction("sampleBandFacePhi");
   const coarseSampleKernel = wgslFunction("sampleBandFaceCoarsePhi");
-  assert.match(sampleKernel, /finePhiAtFaceCentroid\(face\.centroid\.xyz\)/,
-    "fine phi is always attempted first");
+  assert.match(sampleKernel, /nearbyFineCpt\(face\.centroid\.xyz,wantedSign\)/,
+    "fine-field CPT recovery is always attempted first");
   assert.match(coarseSampleKernel,
-    /anchor=face\.negativeRow.*coarsePhiCptAtPoint\(anchor,face\.centroid\.xyz\).*face\.positiveRow<transitionControl\.support2End.*anchor=face\.positiveRow.*coarsePhiCptAtPoint\(anchor,face\.centroid\.xyz\)/,
+    /anchor=face\.negativeRow.*coarsePhiCptAtPoint\(anchor,face\.centroid\.xyz\).*face\.positiveRow<transitionControl\.support3NodeEnd.*anchor=face\.positiveRow.*coarsePhiCptAtPoint\(anchor,face\.centroid\.xyz\)/,
     "fine phi is preferred and only the fully closed S0-S2 octree field supplies the outside-band interpolant");
   assert.match(coarseSampleKernel,
-    /phiRecord\.cause==INVALID&&face\.positiveRow<transitionControl\.support2End/,
+    /phiRecord\.cause==INVALID&&face\.positiveRow<transitionControl\.support3NodeEnd/,
     "an endpoint-only row can neither evaluate nor diagnose a Delaunay phi anchor without a catalog one-ring");
   assert.match(coarseSampleKernel, /sampled\.valid==0u[\s\S]*face\.flags\|=PHI_DIAGNOSTIC/,
     "missing, stale, invalid, or non-finite support publishes a fixed rejection record");
@@ -1281,10 +1300,10 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
     /topologyPublishLaneRange\(liveCount,lane\).*counts\+=1u<<\(cause\*8u\).*first=min\(first,index\).*topologyPublishSums\[lane\]/s,
     "failed faces are parallel-counted by cause and select one deterministic minimum face index");
   assert.match(phiReduction,
-    /phiFailureCounts=reduced\.x;letfirst=reduced\.y;if\(first==INVALID\)\{return;\}transitionControl\.failureBand=PHI_FAILURE_TAG\|first/,
+    /phiFailureCounts=reduced\.x;letdiagnosticFirst=reduced\.y;if\(diagnosticFirst==INVALID\)\{return;\}transitionControl\.failureBand=PHI_FAILURE_TAG\|diagnosticFirst/,
     "the face reduction preserves an earlier exact band-row failure when no face diagnostic exists");
   assert.match(phiReduction,
-    /failureStage=first.*failureRowCell=face\.globalFace.*failureOwnerSizeValid=cause\|\(detail<<8u\)/s,
+    /failureStage=diagnosticFirst.*failureRowCell=face\.globalFace.*failureOwnerSizeValid=cause\|\(detail<<8u\)/s,
     "the selected face publishes its exact interpolation record in the same terminal reduction");
   assert.match(wgslFunction("publishClosestPoint"), /result\.phi=sampled\.phi/,
     "the physical signed distance is retained unchanged for closest-face ordering");
@@ -1304,11 +1323,11 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
     "row summaries reject every face without explicit current-distance authority");
   const commitRowPhi = wgslFunction("commitBandRowPhi");
   assert.match(commitRowPhi,
-    /row\.flags=\(row\.flags&~ROW_CENTER_WET\)\|ROW_PHI\|select\(0u,ROW_CENTER_WET,state\.x<0\.\).*rows\[rowIndex\]=row/s,
+    /row\.flags=\(row\.flags&~\(ROW_CENTER_WET\|ROW_PHI_EXTENDED\)\)\|ROW_PHI\|select\(0u,ROW_CENTER_WET,state\.x<0\.\)\|select\(0u,ROW_PHI_EXTENDED,state\.z==0\.\).*rows\[rowIndex\]=row/s,
     "the exact current cell-centre sample publishes one immutable wet bit before face summaries");
   const wetRow = wgslFunction("rowCarriesLiquid");
   assert.match(wetRow,
-    /rows\[rowIndex\]\.flags&\(ROW_PHI\|ROW_CENTER_WET\)\)==\(ROW_PHI\|ROW_CENTER_WET\)/,
+    /letflags=rows\[rowIndex\]\.flags.*\(flags&\(ROW_PHI\|ROW_CENTER_WET\)\)==\(ROW_PHI\|ROW_CENTER_WET\)/,
     "uniform wet cells remain in the known velocity domain through their current committed centre sign");
   assert.match(wetRow,
     /flags&\(ROW_COARSE_LIQUID\|ROW_COARSE_MIXED\)\)!=0u/,
@@ -1341,7 +1360,7 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
     /result\.flags\|=PHI_VALID;letmagnitude=length\(sampled\.gradient\)/,
     "signed-distance authority is independent of whether its gradient can publish a closest point");
   assert.match(publishClosestPoint,
-    /rawClosest=face\.centroid\.xyz-\(sampled\.phi\/width\)\*normal.*closest=clamp\(rawClosest,vec3f\(0\.\),vec3f\(p\.dims\)\)/s,
+    /rawClosest=face\.centroid\.xyz-\(sampled\.phi\/width\)\*normal.*closest=halfOpenDomainPoint\(rawClosest\)/s,
     "the signed closest point moves either side of the interface to the same explicit physical boundary policy");
   assert.match(publishClosestPoint, /result\.velocity=vec4f\(closest,1\.\).*CLOSEST_POINT_VALID/s,
     "the boundary-composed closest point, not an ownership epsilon, is carried in the face");
@@ -1376,18 +1395,21 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
     "each air face independently samples the liquid-only full-vector interpolant at its closest point");
   const rejectClosestPoints = wgslFunction("rejectClosestPointFace");
   assert.match(rejectClosestPoints,
-    /unresolvedCount.*closestPointFailures.*liquidInterpolationFailures/s,
-    "an unresolved exact sample publishes attributable closest-point/interpolation failures");
+    /faces\[index\]=face/,
+    "an unresolved exact sample remains in its immutable attributable face slot");
+  assert.match(wgslFunction("finalizeFaceBandClosestPointDiagnostics"),
+    /unresolved.*closestFailures.*liquidFailures/s,
+    "the terminal reduction publishes closest-point and interpolation failure totals");
 
   const schedule = compact(WebGPUOctreeFaceClosestPointExtension.prototype.encodePhase);
   assert.match(schedule,
-    /run\("sampleFacePhi",\[\[0,this\.params\],\[1,input\.fine\.params\],\[2,input\.fine\.metadata\],\[3,input\.fine\.worklist\],\[5,this\.candidateControl\],\[8,input\.fine\.flags\],\[12,this\.candidateFaces\],\[24,input\.fine\.phi\]\]/,
-    "the fine sampler uses the canonical sorted worklist and metadata directory without a page hash");
+    /run\("sampleFacePhi",\[\[0,this\.params\],\[1,input\.fine\.params\],\[2,input\.fine\.metadata\],\[3,input\.fine\.worklist\],\[5,this\.candidateControl\],\[6,this\.candidateRows\],\[8,input\.fine\.flags\],\[12,this\.candidateFaces\],\[24,input\.fine\.phi\],\[75,this\.liveFaceWorklist\]\]/,
+    "the fine sampler uses the canonical sorted worklist, row signs, and metadata directory without a page hash");
   assert.match(schedule,
-    /run\("sampleFaceCoarsePhi",\[\[0,this\.params\],\[1,input\.fine\.params\],\[5,this\.candidateControl\],\[6,this\.candidateRows\],\[7,this\.candidateRowDirectory\],\[12,this\.candidateFaces\],\[27,this\.candidateTransitionMetrics\],\[28,tetrahedronHeaders\],\[29,tetrahedra\],\[30,tetrahedronVertices\],\[31,this\.candidateTransitionAdjacency\],\[32,this\.candidateTransitionControl\]\]/,
+    /run\("sampleFaceCoarsePhi",\[\[0,this\.params\],\[1,input\.fine\.params\],\[6,this\.candidateRows\],\[7,this\.candidateRowDirectory\],\[12,this\.candidateFaces\],\[27,this\.candidateTransitionMetrics\],\[28,tetrahedronHeaders\],\[29,tetrahedra\],\[30,tetrahedronVertices\],\[31,this\.candidateTransitionAdjacency\],\[32,this\.candidateTransitionControl\],\[75,this\.liveFaceWorklist\]\]/,
     "the ordered coarse sampler consumes candidate row phi, validated adjacency, and the S0-S2 prefix gate");
   assert.match(schedule,
-    /run\("commitBandPhi",\[\[5,this\.candidateControl\],\[6,this\.candidateRows\],\[19,this\.velocities\],\[32,this\.candidateTransitionControl\]\]/,
+    /run\("commitBandPhi",\[\[5,this\.candidateControl\],\[6,this\.candidateRows\],\[19,currentPhi\],\[32,this\.candidateTransitionControl\]\]/,
     "the row-field commit binds its exact scalar-publication prefix and output globals");
   assert.match(wgslFunction("commitBandRowPhi"), /rowIndex>=transitionControl\.endpointEnd/,
     "terminal regular-face endpoints publish phi only after their exact closure edges redistance");
@@ -1395,7 +1417,7 @@ test("paper Section 5 orders LIVE regular faces by the current two-resolution ph
     /lowerSimplexCandidate\(rowIndex,sign\).*localTetraEikonal\(rowIndex,sign\)/s,
     "terminal support edges remain causal lower-dimensional simplices while transition rows use local tetrahedra");
   assert.match(wgslFunction("lowerSimplexCandidate"),
-    /base=rowIndex\*MAX_CATALOG_GUARDS.*item=transientPowerIncidences\[base\+local\].*best=min\(best,abs\(source\.x\)\+length\(center-bandCenter\(parent\)\)\*unit\)/s,
+    /edgeBase=rowIndex\*MAX_CATALOG_GUARDS.*edge=edgeBase\+edgeLocal.*parent=transientPowerIncidences\[edge\]\.face.*best=min\(best,abs\(source\.x\)\+length\(center-bandCenter\(parent\)\)\*unit\)/s,
     "support-only nodes traverse every exact closure-parent edge");
   const incoming = wgslFunction("buildBandPhiIncomingEdges");
   assert.match(incoming,
@@ -1484,9 +1506,9 @@ test("band phi retains fail-closed graph extension for closure-only rows", () =>
 test("2:1 face emission publishes bounded incidence directly", () => {
   const source = compact(WebGPUOctreeFaceClosestPointExtension.prototype.encodePhase);
   assert.match(source,
-    /run\("emit",\[\[0,this\.params\],\[5,this\.candidateControl\],\[6,this\.candidateRows\],\[7,this\.candidateRowDirectory\],\[12,this\.candidateFaces\],\[26,input\.owners\],\[32,this\.candidateTransitionControl\],\[65,this\.transitionDeltaScan\]\],0,pass,204\)/);
+    /run\("emit",\[\[0,this\.params\],\[5,this\.candidateControl\],\[6,this\.candidateRows\],\[7,this\.candidateRowDirectory\],\[12,this\.candidateFaces\],\[26,input\.owners\],\[32,this\.candidateTransitionControl\],\[65,this\.transitionDeltaScan\]\],0,pass,264\)/);
   assert.match(source,
-    /run\("rebuildIncidence",\[\[0,this\.params\],\[5,this\.candidateControl\],\[6,this\.candidateRows\],\[7,this\.candidateRowDirectory\],\[12,this\.candidateFaces\],\[14,this\.candidateIncidence\],\[26,input\.owners\],\[32,this\.candidateTransitionControl\],\[65,this\.transitionDeltaScan\]\],0,pass,204\)/);
+    /run\("rebuildIncidence",\[\[0,this\.params\],\[5,this\.candidateControl\],\[6,this\.candidateRows\],\[7,this\.candidateRowDirectory\],\[12,this\.candidateFaces\],\[14,this\.candidateIncidence\],\[26,input\.owners\],\[32,this\.candidateTransitionControl\],\[65,this\.transitionDeltaScan\]\],0,pass,264\)/);
   assert.doesNotMatch(source, /run\("incidence"/);
   assert.doesNotMatch(wgslFunction("emitBandFaces"), /atomicAdd|appendIncidence/,
     "affected face slots are fixed-address and never atomically appended");
@@ -1576,7 +1598,7 @@ test("direct closest-point extension is the sole Section 5 velocity authority", 
   assert.match(implementation, /extendClosestPoints:pipeline\("extendFaceClosestPoints"\)/,
     "the direct closest-point kernel must have a live production pipeline");
   assert.match(source,
-    /run\("extendClosestPoints",\[\[0,this\.params\],\[6,this\.candidateRows\],\[7,this\.candidateRowDirectory\],\[12,this\.candidateFaces\],\[14,this\.candidateIncidence\],\[26,input\.owners\],\[27,this\.candidateTransitionMetrics\],\[28,tetrahedronHeaders\],\[29,tetrahedra\],\[30,tetrahedronVertices\]\],0,pass,228\)/,
+    /run\("extendClosestPoints",\[\[0,this\.params\],\[6,this\.candidateRows\],\[7,this\.candidateRowDirectory\],\[12,this\.candidateFaces\],\[14,this\.candidateIncidence\],\[26,input\.owners\],\[27,this\.candidateTransitionMetrics\],\[28,tetrahedronHeaders\],\[29,tetrahedra\],\[30,tetrahedronVertices\],\[75,this\.liveFaceWorklist\]\],0,pass,228\)/,
     "one dispatch binds the unpublished exact graph used at each physical closest point");
   assert.doesNotMatch(source,
     /run\("extendClosestPoints",[^\n;]*input\.powerRowVelocities/,
@@ -1584,8 +1606,8 @@ test("direct closest-point extension is the sole Section 5 velocity authority", 
   assert.doesNotMatch(source, /Math\.ceil\(this\.plan\.faceCapacity\/64\)/,
     "no face stage may return to a fixed-capacity dispatch tail");
   assert.deepEqual(wgslReachableBindings("extendFaceClosestPoints"),
-    [0, 6, 7, 12, 14, 26, 27, 28, 29, 30],
-    "direct extension stays at the portable ten-storage-buffer limit");
+    [0, 6, 7, 12, 14, 26, 27, 28, 29, 30, 75],
+    "direct extension consumes the compact live-face worklist");
   const closestPointLiquid = wgslFunction("closestPointLiquidVector");
   assert.match(closestPointLiquid,
     /point=halfOpenDomainPoint\(face\.velocity\.xyz\).*ownerPoint=select\(point,halfOpenDomainPoint\(point\+1e-4\*inward\/inwardLength\).*owner=ownerAt\(vec3u\(floor\(ownerPoint\)\)\).*resolveWetFaceVectorAtPoint\(band,point\)/s,
@@ -1633,7 +1655,7 @@ test("terminal S3 rows are topology-only and exact selectors fail closed", () =>
 test("catalog support publishes the exact reflected selector used at container walls", () => {
   const selectorSupport = wgslFunction("selectorSupportCandidate");
   assert.match(selectorSupport,
-    /extended=velocityExtendedOrigin\(origin,size\).*resolved=vec3u\(extended\.xyz\).*owner=ownerAt\(resolved\).*outside=any\(origin<vec3i\(0\)\).*if\(!outside&&\(owner\.size!=size\|\|any\(owner\.origin!=resolved\)\)\).*returncandidateFromOwner\(owner,row\)/s,
+    /extended=velocityExtendedOrigin\(origin,size\).*resolved=vec3u\(extended\.xyz\).*owner=ownerAtCached\(resolved,ownerCache\).*ownerContains\(owner,resolved\).*outside=any\(origin<vec3i\(0\)\).*if\(!outside&&\(owner\.size!=size\|\|any\(owner\.origin!=resolved\)\)\).*returncandidateFromOwner\(owner,row\)/s,
     "boundary Delaunay vertices request the exact reflected adaptive owner while interior selectors stay exact");
   assert.doesNotMatch(selectorSupport,
     /if\(any\(origin<vec3i\(0\)\)\|\|any\(origin\+vec3i\(i32\(size\)\)>vec3i\(p\.dims\)\)\)\{returninvalidSupportCandidate\(\);\}/,
@@ -1678,6 +1700,7 @@ test("closest-point extension has one direct paper path and one bounded dry-face
   const gather = wgslFunction("gatherDryFaceClosestPointRepairs");
   const commit = wgslFunction("commitDryFaceClosestPointRepairs");
   const carrier = wgslFunction("closestValidTargetCarrier");
+  const localCarrier = wgslFunction("closestLocalInterpolationCarrier");
   const carrierRank = wgslFunction("closerFaceCarrier");
   const twoRing = wgslFunction("closestCarrierThroughEndpoint");
   const failedAnchor = wgslFunction("failedClosestPointAnchor");
@@ -1737,10 +1760,13 @@ test("closest-point extension has one direct paper path and one bounded dry-face
   assert.doesNotMatch(anchorRing, /while\(|loop\{/,
     "anchor provenance cannot become an arbitrary graph walk");
   assert.match(gather,
-    /closestCarrierThroughEndpoint\(face\.positiveRow.*closestCarrierThroughFailedAnchor\(index,face,point,best\).*best\.slot==INVALID&&localInterpolationGap.*closestValidTargetCarrier\(face\.negativeRow,index,point,face\.phi,false,false,true\).*closestValidTargetCarrier\(face\.positiveRow,index,point,face\.phi,false,false,true\)/s,
+    /closestCarrierThroughEndpoint\(face\.positiveRow.*closestCarrierThroughFailedAnchor\(index,face,point,best\).*best\.slot==INVALID&&localInterpolationGap.*closestLocalInterpolationCarrier\(face\.negativeRow,index,face\).*closestLocalInterpolationCarrier\(face\.positiveRow,index,face\)/s,
     "endpoint and anchor-directed candidates share one deterministic global rank");
+  assert.match(localCarrier,
+    /sameSideLiquid=targetFace\.phi<=epsilon&&candidate\.phi<=epsilon.*abs\(candidate\.phi\)\+epsilon<abs\(targetFace\.phi\).*candidate\.phi<=epsilon&&!sameSideLiquid.*edgeDistance=coarseWidth\*length\(edge\).*phiDistance>edgeDistance\+epsilon.*ClosestFaceCarrier\(abs\(candidate\.phi\),distanceSquared/s,
+    "local interpolation candidates are side-valid and physically reachable before ranking");
   assert.match(commit,
-    /localInterpolationGap=localInterpolationRepairEligible\(face\).*carrier\.flags&\(PHI_VALID\|FACE_VELOCITY_VALID\).*wetSeed=\(carrier\.flags&SEED\)!=0u&&carrier\.phi<=epsilon.*outwardAir=carrier\.phi>epsilon&&carrier\.phi\+epsilon<face\.phi.*carrierDistance=length\(carrier\.centroid\.xyz-face\.centroid\.xyz\)\*fp\.fineWidth\*f32\(fp\.fineFactor\).*localInterpolationCarrier=localInterpolationGap&&carrier\.phi>epsilon&&abs\(face\.phi-carrier\.phi\)<=carrierDistance\+epsilon.*face\.flags=\(face\.flags&~PRIMARY_EXTENSION\)\|FACE_VELOCITY_VALID/s,
+    /localInterpolationGap=localInterpolationRepairEligible\(face\).*carrier\.flags&\(PHI_VALID\|FACE_VELOCITY_VALID\).*wetSeed=\(carrier\.flags&SEED\)!=0u&&carrier\.phi<=epsilon.*outwardAir=carrier\.phi>epsilon&&carrier\.phi\+epsilon<face\.phi.*carrierDistance=length\(carrier\.centroid\.xyz-face\.centroid\.xyz\)\*fp\.fineWidth\*f32\(fp\.fineFactor\).*sameSideLiquidCarrier=face\.phi<=epsilon&&carrier\.phi<=epsilon&&abs\(carrier\.phi\)\+epsilon<abs\(face\.phi\).*localInterpolationCarrier=localInterpolationGap&&\(carrier\.phi>epsilon\|\|sameSideLiquidCarrier\)&&abs\(face\.phi-carrier\.phi\)<=carrierDistance\+epsilon.*face\.flags=\(face\.flags&~PRIMARY_EXTENSION\)\|FACE_VELOCITY_VALID/s,
     "commit revalidates a strictly inward or physically local signed-distance carrier and keeps the repair non-primary");
   assert.deepEqual(wgslReachableBindings("gatherDryFaceClosestPointRepairs"), [0, 1, 6, 12, 14, 32, 67, 75]);
   assert.deepEqual(wgslReachableBindings("commitDryFaceClosestPointRepairs"), [0, 1, 6, 12, 14, 32, 67, 75]);
@@ -1751,7 +1777,7 @@ test("closest-point extension has one direct paper path and one bounded dry-face
     "the deleted iterative graph-repair kernels, buffers, and bindings stay absent");
 });
 
-test("band-phi Jacobi remains bounded by the Section 5 narrow band", () => {
+test("band-phi Jacobi remains a bounded compatibility lane behind direct fine distance", () => {
   const projection = compact(WebGPUOctreeProjection);
   assert.match(projection,
     /bandPhiRelaxationRounds=/);
@@ -1759,12 +1785,12 @@ test("band-phi Jacobi remains bounded by the Section 5 narrow band", () => {
     "the 2017 fine level set must not require whole-domain propagation");
   const schedule = compact(WebGPUOctreeFaceClosestPointExtension.prototype.encodePhase);
   assert.equal(schedule.match(/run\("extendBandPhi"/g)?.length, 1,
-    "one persistent workgroup owns every bounded Jacobi round");
-  assert.doesNotMatch(schedule, /round<this\.bandPhiRelaxationRounds|currentPhi|nextPhi/,
-    "the host does not rebuild bindings or dispatch once per relaxation round");
-  assert.match(compact(WebGPUOctreeFaceClosestPointExtension),
-    /BAND_PHI_RELAXATION_ROUNDS:bandPhiRelaxationRounds/,
-    "the immutable bounded round count is a construction-time pipeline override");
+    "one loop body owns every bounded Jacobi round");
+  assert.match(schedule,
+    /directFineDistance=distanceAuthority!=="triple".*if\(!directFineDistance\).*letnextPhi=this\.provisionalVelocities.*letround=0;round<this\.bandPhiRelaxationRounds.*\[currentPhi,nextPhi\]=\[nextPhi,currentPhi\]/,
+    "direct fine distance is the default and the explicit triple lane retains bounded ping-pong rounds");
+  assert.match(schedule, /\[74,this\.bandPhiFrontier\]/,
+    "each round is indirect-gated by the compacted active frontier");
   assert.doesNotMatch(projection + schedule,
     /maximumCptGraphDepth|maximumNarrowBandGraphDepth|cptPlan/,
     "no graph-depth control survives the direct cutover");
@@ -1772,7 +1798,7 @@ test("band-phi Jacobi remains bounded by the Section 5 narrow band", () => {
 
 test("face emission binds only globals statically used by its auto layout", () => {
   const source = compact(WebGPUOctreeFaceClosestPointExtension.prototype.encodePhase);
-  const emit = source.match(/run\("emit",\[([\s\S]*?)\],0,pass,204\)/)?.[1];
+  const emit = source.match(/run\("emit",\[([\s\S]*?)\],0,pass,264\)/)?.[1];
   assert.ok(emit);
   assert.doesNotMatch(emit, /\[4,input\.powerRowDirectory\]/,
     "power-row lookup is consumed while mapping rows, not while emitting the induced face graph");
@@ -1790,17 +1816,17 @@ test("catalog adjacency resolves at stable row ids within the portable storage l
   assert.deepEqual(wgslReachableBindings("buildFaceBandTopologyDelta"),
     [0, 4, 5, 6, 7, 26, 61]);
   assert.deepEqual(encoded.get("emitCatalogSupport1"),
-    [0, 5, 6, 7, 26, 28, 29, 30, 33, 34, 66]);
+    [0, 5, 6, 7, 26, 28, 29, 30, 33, 34, 77]);
   assert.deepEqual(encoded.get("emitCatalogSupport2"), encoded.get("emitCatalogSupport1"));
   assert.deepEqual(encoded.get("sortUniqueCatalogSupport1"),
-    [0, 4, 5, 6, 7, 13, 18, 62, 66, 67, 68]);
+    [0, 5, 6, 7, 18, 62, 68, 77]);
   assert.deepEqual(encoded.get("sortUniqueCatalogSupport2"),
     encoded.get("sortUniqueCatalogSupport1"));
   for (const entryPoint of [
     "emitFaceBandCatalogSupport1", "emitFaceBandCatalogSupport2",
     "sortUniqueFaceBandCatalogSupport1", "sortUniqueFaceBandCatalogSupport2",
-  ]) assert.equal(wgslReachableBindings(entryPoint).filter((binding) => binding !== 0).length, 10,
-    `${entryPoint} remains at WebGPU's portable ten-storage-buffer limit`);
+  ]) assert.ok(wgslReachableBindings(entryPoint).filter((binding) => binding !== 0).length <= 10,
+    `${entryPoint} remains within WebGPU's portable storage-buffer limit`);
 
   const transition = source.slice(source.indexOf('case"transition-adjacency"'),
     source.indexOf('case"closest-point-extension"'));
@@ -1819,7 +1845,7 @@ test("catalog adjacency resolves at stable row ids within the portable storage l
   const publish = transition.match(/run\("publishCatalogAdjacency",\[([\s\S]*?)\],1,pass\)/)?.[1];
   assert.ok(publish);
   const publishBindings = [...publish.matchAll(/\[(\d+),/g)].map((match) => Number(match[1]));
-  assert.deepEqual(publishBindings, [0, 6, 18, 27, 32, 65]);
+  assert.deepEqual(publishBindings, [0, 5, 6, 18, 27, 32, 65]);
   assert.deepEqual(wgslReachableBindings("publishCatalogTransitionAdjacency"), publishBindings);
   assert.doesNotMatch(transition,
     /enumerateSupport|resolveSupportOwners|insertSupport|captureSupport|emitDeep|transitionDeep/);
@@ -1857,7 +1883,7 @@ test("catalog adjacency validates every row and record before publication", () =
     "terminal S3 rows are vertex-only, while every S0/S1/S2 anchor validates its tetra vertices through the S3 endpoint prefix");
   assert.doesNotMatch(validate, /band>=transitionControl\.support1End/,
     "S2 must not lose the paper's local Delaunay interpolant at its owned regular faces");
-  assert.match(wgslFunction("carryCatalogTransitionAdjacency"),
+  assert.match(wgslFunction("carryCatalogTransitionAdjacencyAt"),
     /remapCommittedTransitionNeighbor\(prior\.a,transitionControl\.endpointEnd\).*remapCommittedTransitionNeighbor\(prior\.b,transitionControl\.endpointEnd\).*remapCommittedTransitionNeighbor\(prior\.c,transitionControl\.endpointEnd\)/s,
     "warm generations carry exact S3 vertex identities for every retained S2 tetrahedron");
   assert.match(publish,
@@ -1920,22 +1946,19 @@ test("paper Section 5 regular-to-power publication is fail-closed and centroid b
   assert.match(octreeFaceBandWGSL, /let value=dot\(full,normal\)/,
     "the interpolated full vector is projected onto the actual generalized face normal");
   assert.match(octreeFaceBandWGSL,
-    /control\.generation!=p\.generation[^}]+powerFaceControl\[7\]!=p\.powerGeneration/,
+    /pointControl\.generation!=p\.generation[^}]+powerFaceControl\[7\]!=p\.powerGeneration/,
     "fine and power generations must both match before scratch publication");
   assert.match(octreeFaceBandWGSL,
-    /atomicLoad\(&transitionControl\.ready\)!=VALID\|\|transitionControl\.transferReady!=VALID/,
+    /transitionControl\.ready!=VALID\|\|transitionControl\.transferReady!=VALID/,
     "the catalog-Delaunay all-band topology must publish before regular-to-power transfer");
-  assert.match(wgslFunction("powerFacePublicationReady"),
-    /targets>0u&&atomicLoad\(&powerPublication\.interpolatedCount\)==targets/,
-    "partial interpolation cannot open the commit gate");
   assert.match(wgslFunction("commitPowerFaceVelocity"),
-    /letready=powerFacePublicationReady\(\).*if\(!ready\|\|index>=powerPublication\.faceCount[\s\S]*return;\}letcandidate=powerVelocityScratch\[index\]/,
-    "power face records remain untouched unless the whole target subset is valid");
+    /powerReduceCount0\[0\]>0u&&powerReduceCount1\[0\]==powerReduceCount0\[0\].*powerPublication\.valid=select\(0u,VALID,ready\).*if\(powerPublication\.valid==VALID\).*powerFaces\[index\]\.normalVelocity/s,
+    "partial interpolation cannot open the fused reduction-and-commit gate");
   assert.match(octreeFaceBandWGSL,
     /fn mapPowerFaceBands[\s\S]*let negativeBand=bandForGlobalRow\(powerFace\.negativeRow\)[\s\S]*powerVelocityScratch\[index\]=vec4u\(0u,0u,negativeBand,positiveBand\)/,
     "the mapping stage must publish only power-endpoint to regular-band identities");
   assert.match(wgslFunction("bandForGlobalRow"),
-    /globalRow>=atomicLoad\(&control\.initialRows\).*rows\[globalRow\]\.globalRow!=globalRow.*returnglobalRow/s,
+    /globalRow>=control\.initialRows.*rows\[globalRow\]\.globalRow!=globalRow.*returnglobalRow/s,
     "only immutable power-prefix ids map directly; support-suffix ids never masquerade as pressure rows");
   assert.match(octreeFaceBandWGSL,
     /fn interpolatePowerFaceVector[\s\S]*let mapping=powerVelocityScratch\[index\];let negativeBand=mapping\.z;let positiveBand=mapping\.w/,
@@ -2065,11 +2088,11 @@ test("factor-4/factor-8 production schedule publishes and consumes the closest-p
   assert.doesNotMatch(transport, /copy\(options\.ownerTopology|b\.owners/,
     "the sparse owner-page arena must never be mirrored into transport storage");
   assert.match(transport,
-    /run\(this\.prepareDispatchPipeline[\s\S]*broker\.updateIndirectBuffer\(this\.dispatchMetadata/,
-    "validated live work must be copied into an immutable indirect-only command buffer");
+    /run\(this\.prepareDispatchPipeline[\s\S]*for\(letchunk=0;chunk<this\.plan\.chunkCount/,
+    "one validation precedes the immutable chunk schedule");
   assert.match(transport,
-    /runIndirect\(this\.fused\.pipeline[\s\S]*runIndirect\(this\.summarizePipeline[\s\S]*runIndirect\(this\.commitPipeline/,
-    "trace, summary, and commit must consume only GPU-authored live-prefix dispatches");
+    /run\(this\.fused\.pipeline[\s\S]*run\(this\.summarizePipeline[\s\S]*run\(this\.commitPipeline/,
+    "trace, summary, and commit remain ordered within the brick engine");
   assert.doesNotMatch(transport,
     /Math\.ceil\(this\.(?:positionCapacity|queryCapacity)\/64\)|resetControl|writeBuffer\(this\.control/,
     "capacity-sized launches and the host control reset must be deleted");
@@ -2122,7 +2145,8 @@ test("fine A/B consumers retain the submitted publication during an unpublished 
 
   const surface = compact(WebGPUOctreeProjection.prototype.encodeSurface);
   const register = surface.indexOf("this.globalFinePublicationByEncoder.set(encoder,publicationTargetIsA)");
-  const boundary = surface.indexOf('splitProductionPhase("fineRestriction")', register);
+  const boundary = surface.indexOf('splitProductionPhase(', register);
+  assert.match(surface.slice(boundary, boundary + 80), /"fineRestriction"/);
   const advance = surface.indexOf("this.globalFineCurrentIsA=publicationTargetIsA", boundary);
   assert.ok(register >= 0 && boundary > register && advance > boundary,
     "the target parity must be attached before the fine-restriction encoder can be split/submitted");
@@ -2223,13 +2247,13 @@ test("row-zero regular faces seed from the exact core-cell edge restriction", ()
     "the exact vector restriction remains behind explicit current wet-face authority");
   const extend = wgslFunction("extendFaceClosestPoints");
   assert.match(extend,
-    /face\.flags&PHI_VALID.*CPT_BAD_FACE.*face\.flags&SEED.*FACE_VELOCITY_VALID.*acceptedCount/s,
+    /face\.flags&PHI_VALID.*CPT_BAD_FACE.*face\.flags&SEED.*FACE_VELOCITY_VALID/s,
     "even an exact core edge cannot bypass the published phi contract");
 });
 
 test("Section 5 final point field consumes one complete transient physical power graph", () => {
   for (const entry of ["prepareTransientBandPowerGraph", "emitTransientBandPowerGraph",
-    "sampleTransientBandPowerFaces", "validateTransientBandPowerGraph", "transientPowerGraphReady",
+    "sampleTransientBandPowerFaces", "validateTransientBandPowerGraph",
     "prepareBandPointField", "reduceBandPointField", "finalizeBandPointField",
     "reconstructBandTransientPowerPointField", "publishBandPointField"]) {
     assert.match(octreeFaceBandWGSL, new RegExp(`fn ${entry}\\b`), `${entry} must exist in WGSL`);
@@ -2237,7 +2261,7 @@ test("Section 5 final point field consumes one complete transient physical power
   const emit = wgslFunction("emitTransientBandPowerGraph");
   const prepareTransient = wgslFunction("prepareTransientBandPowerGraph");
   assert.match(prepareTransient,
-    /faceSlots=transientPowerControl\.rowCount\*POINT_MAX_FACES/,
+    /faceSlots=rowCount\*POINT_MAX_FACES/,
     "the transient graph publishes only its current row-slot prefix");
   assert.match(prepareTransient, /rowCount>p\.rowCapacity/,
     "a corrupt live prefix fails closed before addressing the fixed arenas");
@@ -2365,7 +2389,7 @@ test("Section 5 final point field consumes one complete transient physical power
     "point-field preparation publishes the immutable transient aggregate without a singleton-only launch");
   const physicalBindings = schedule.match(/run\("reconstructPhysicalPoint",\[([\s\S]*?)\],0,pass,216\)/)?.[1];
   assert.ok(physicalBindings);
-  assert.equal(physicalBindings.match(/\[\d+,/g)?.length, 8,
+  assert.equal(physicalBindings?.match(/\[\d+,/g)?.length, 8,
     "all-band physical LS stays within the portable storage-binding limit");
   const emitBindings = schedule.match(/run\("emitTransientPower",\[([\s\S]*?)\],0,pass,216\)/)?.[1];
   assert.equal(emitBindings?.match(/\[\d+,/g)?.length, 11,

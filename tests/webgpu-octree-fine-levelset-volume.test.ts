@@ -14,6 +14,7 @@ test("fine volume classifies compact-air overlap only through the authoritative 
   const shader = fineLevelSetVolumeCorrectionWGSL.replace(/\s+/g, "");
   const encode = WebGPUFineLevelSetVolumeCorrection.prototype.encode.toString().replace(/\s+/g, "");
   const measure = WebGPUFineLevelSetVolumeCorrection.prototype.encodeMeasurement.toString().replace(/\s+/g, "");
+  const implementation = WebGPUFineLevelSetVolumeCorrection.toString().replace(/\s+/g, "");
   assert.match(encode, /^encode\(broker\)/);
   assert.doesNotMatch(encode, /newPassBroker|broker\.fence/,
     "volume correction must remain inside the caller-owned publication pass");
@@ -46,16 +47,25 @@ test("fine volume classifies compact-air overlap only through the authoritative 
   assert.match(shader,
     /elseif\(ownership\.y!=OWNER_FOUND\)\{lookupFailure=1u;errors\|=ERROR_OWNER;\}/,
     "malformed and probe-exhausted directory queries remain publication-fatal");
+  assert.match(shader,
+    /if\(all\(firstGrid==lastGrid\)\)\{fineBrickHasSingleOwner=1u;fineBrickOwner=owner\(firstPosition\);\}[\s\S]*varownership=fineBrickOwner;if\(fineBrickHasSingleOwner==0u\)\{ownership=owner\(position\);\}/,
+    "a B4 page wholly inside one finest coarse cell must resolve its owner once while unaligned pages retain exact sampling");
   assert.doesNotMatch(shader, /OWNER_ABSENT\)\{if\(value>=0\.0\)/,
     "fine-only liquid must not be confused with an uncertain owner lookup");
   assert.match(shader,
-    /letflat=fineLinearWorkgroup\(w,n\)\*64u\+lid;if\(flat==0u\)\{control\.corrected=1u;\}leta=activeSample\(flat\)/,
-    "the completed correction pass must publish independently of whether sparse sample zero is valid");
+    /fnapplyFineVolumeCorrection[\s\S]*phi\[index\]\+=control\.correction/,
+    "the production correction pass must touch only valid fine values");
+  assert.match(shader,
+    /fnfinalizeAnalyticVolume\(updateCorrection:bool\)[\s\S]*letdelta=control\.correction\*control\.interfaceArea[\s\S]*control\.fineVolume=correctedFine;control\.currentVolume=correctedTotal;control\.corrected=1u/,
+    "the uniform bounded shift must update volume analytically without another lattice measurement");
+  assert.match(implementation,
+    /FLUID_FULL_VOLUME_REMEASURE[\s\S]*if\(!this\.fullRemeasure\)[\s\S]*this\.analyticApplyPipeline[\s\S]*this\.analyticFinalizePipeline[\s\S]*this\.analyticApplyPipeline[\s\S]*this\.analyticMeasuredFinalizePipeline[\s\S]*return/,
+    "full corrected-field remeasurement must remain an explicit debug path");
   assert.match(shader, /fnoccupancy\(value:f32,width:f32\)->f32\{returnclamp\(\.5-value\/width,0\.,1\.\);\}/,
     "the conservative controller must use the same compact-field Heaviside width as the published-field QA");
   assert.match(shader,
     /@compute@workgroup_size\(256\)fnfinalizeMeasuredFineVolume\(@builtin\(local_invocation_index\)lid:u32\)\{finalizeCorrectedMeasurement\(false,lid\);\}/,
-    "publication telemetry must be remeasured after both bounded correction passes");
+    "the debug path retains exact post-correction remeasurement");
   assert.match(shader,
     /fnbalancedReductionRange\(count:u32,lid:u32\)->vec2u\{letwidth=count\/256u;letremainder=count%256u;letbegin=lid\*width\+min\(lid,remainder\)/,
     "final reductions must partition the partial arena into deterministic contiguous lane ranges");
@@ -152,13 +162,15 @@ test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces
       } device.queue.writeBuffer(records, 0, coarseWords);
       const correction = source.generationSlot === sourceA.generationSlot ? volumeA : volumeB;
       const readback = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-      const encoder = device.createCommandEncoder(); correction.encode(new PassBroker(encoder));
+      const encoder = device.createCommandEncoder(); const broker = new PassBroker(encoder);
+      correction.encode(broker); broker.fence("volume correction readback");
       encoder.copyBufferToBuffer(correction.control, 0, readback, 0, 64); device.queue.submit([encoder.finish()]);
       await device.queue.onSubmittedWorkDone(); await readback.mapAsync(GPUMapMode.READ);
       let control = unpackFineLevelSetGPUVolumeControl(readback.getMappedRange().slice(0)); readback.unmap(); readback.destroy();
       if (phase > 0) {
         const verify = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-        const verifyEncoder = device.createCommandEncoder(); correction.encode(new PassBroker(verifyEncoder));
+        const verifyEncoder = device.createCommandEncoder(); const verifyBroker = new PassBroker(verifyEncoder);
+        correction.encode(verifyBroker); verifyBroker.fence("volume correction verification");
         verifyEncoder.copyBufferToBuffer(correction.control, 0, verify, 0, 64); device.queue.submit([verifyEncoder.finish()]);
         await device.queue.onSubmittedWorkDone(); await verify.mapAsync(GPUMapMode.READ);
         control = unpackFineLevelSetGPUVolumeControl(verify.getMappedRange().slice(0)); verify.unmap(); verify.destroy();
@@ -204,7 +216,8 @@ test("Dawn total volume is invariant to translating factor-4/factor-8 interfaces
   });
   const readAirControl = async () => {
     const readback = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    const encoder = device.createCommandEncoder(); airVolume.encode(new PassBroker(encoder));
+    const encoder = device.createCommandEncoder(); const broker = new PassBroker(encoder);
+    airVolume.encode(broker); broker.fence("air volume correction readback");
     encoder.copyBufferToBuffer(airVolume.control, 0, readback, 0, 64); device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone(); await readback.mapAsync(GPUMapMode.READ);
     const control = unpackFineLevelSetGPUVolumeControl(readback.getMappedRange().slice(0));

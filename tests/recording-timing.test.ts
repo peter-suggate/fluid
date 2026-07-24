@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SIMULATION_VIDEO_FRAME_DURATION_S, realTimePlaybackRate, simulationFramesDue, sourceDurationForPlayback } from "../lib/recording-timing";
+import { SIMULATION_VIDEO_FRAME_DURATION_S, realTimePlaybackRate, recordingElapsedBudget, simulationFramesDue, sourceDurationForPlayback } from "../lib/recording-timing";
 
 test("recording playback maps wall-clock capture duration onto simulation time", () => {
   assert.equal(realTimePlaybackRate(12, 3), 4);
@@ -25,4 +25,13 @@ test("30 fps capture samples every crossed 0.033 simulation seconds", () => {
   assert.equal(simulationFramesDue(5.02, next), 0);
   assert.equal(simulationFramesDue(next, next), 1);
   assert.equal(simulationFramesDue(5.1, next), 3);
+});
+
+test("recording clock never accumulates more than one uncaptured video frame", () => {
+  const close = (actual: number, expected: number) => assert.ok(Math.abs(actual - expected) < 1e-12);
+  close(recordingElapsedBudget(0.2, 0, 4, 4), SIMULATION_VIDEO_FRAME_DURATION_S);
+  close(recordingElapsedBudget(0.2, 0.01, 4, 4), SIMULATION_VIDEO_FRAME_DURATION_S - 0.01);
+  close(recordingElapsedBudget(0.2, 0, 4.02, 4), SIMULATION_VIDEO_FRAME_DURATION_S - 0.02);
+  assert.equal(recordingElapsedBudget(0.2, 0, 4.04, 4), 0);
+  assert.equal(recordingElapsedBudget(0.01, 0, 4, 4), 0.01);
 });

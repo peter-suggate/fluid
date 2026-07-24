@@ -36,8 +36,11 @@ struct LiveLeafEntry { row:u32,coefficient:f32 }
 @group(0) @binding(9) var<storage,read> authorityControl:array<u32>;
 @group(0) @binding(10) var<storage,read_write> compactCorrection:array<f32>;
 @group(0) @binding(11) var<storage,read_write> residualScratch:array<vec2f>;
+@group(0) @binding(12) var<storage,read_write> previousFineCoefficients:array<u32>;
 var<workgroup> refreshPartial:array<f32,256>;
 var<workgroup> cgDirection:array<f32,64>;
+var<workgroup> cgActive:atomic<u32>;
+var<workgroup> refreshActive:atomic<u32>;
 const MEASURE_PARTIAL_WORKGROUPS=32u;
 const RHS=0u;const A=1u;const B=2u;
 const INVALID_ROW_ERROR=1u;const NONFINITE=4u;const NONPOSITIVE=8u;const NONCONVERGED=16u;
@@ -70,6 +73,7 @@ fn setTargetF(channel:u32,row:u32,value:f32){targetVectors[channel*targetCount()
 fn finite(value:f32)->bool{return value==value&&abs(value)<=3.402823e38;}
 fn report(flag:u32){atomicOr(&control[0],flag);}
 fn stopped()->bool{return atomicLoad(&control[0])!=0u||atomicLoad(&control[1])!=0u;}
+fn operatorChanged()->bool{return atomicLoad(&control[7])!=0u;}
 fn liveCount()->u32{return select(0u,authorityControl[2],arrayLength(&authorityControl)>=3u);}
 fn fixedRow(cell:u32,size:u32)->u32{
  if(cell>=fineCellCount()||size==0u||(size&(size-1u))!=0u){return 0xffffffffu;}
@@ -122,6 +126,8 @@ fn smoothSource(row:u32,src:u32)->f32{
  let first=sourceMatrix[row];let end=sourceMatrix[row+1u];
  if(first>end||end>sourceEntries()){report(INVALID_ROW_ERROR);return;}
  for(var entry=first;entry<end;entry+=1u){
+  if(entry>=arrayLength(&previousFineCoefficients)){report(INVALID_ROW_ERROR);return;}
+  previousFineCoefficients[entry]=sourceMatrix[sourceEntryBase(entry)+1u];
   sourceMatrix[sourceEntryBase(entry)+1u]=bitcast<u32>(0.0);
  }
  setSourceF(RHS,row,0.0);
@@ -175,6 +181,19 @@ fn smoothSource(row:u32,src:u32)->f32{
  }
 }
 
+// Exact bitwise change detection gates the expensive recurring RAP gathers.
+// initializeFineOperator snapshots every old fine coefficient while it clears
+// the live system, then importFineOperator reconstructs the new system. A
+// bitwise-equal fine matrix has a bitwise-equal deterministic RAP hierarchy,
+// so retaining the previous coarse matrices is exact rather than heuristic.
+@compute @workgroup_size(64) fn detectFineOperatorChange(@builtin(global_invocation_id) gid:vec3u){
+ let entry=gid.x;if(entry>=sourceEntries()||operatorChanged()){return;}
+ if(entry>=arrayLength(&previousFineCoefficients)){report(INVALID_ROW_ERROR);return;}
+ if(sourceMatrix[sourceEntryBase(entry)+1u]!=previousFineCoefficients[entry]){
+  atomicStore(&control[7],1u);
+ }
+}
+
 // P is immutable, so the packed refresh matrix bakes P(left)*P(right) into
 // target-major [fineEntry, weight] records. Four isolated 64-lane tiles share
 // each workgroup: every target retains the exact lane assignment and reduction
@@ -185,6 +204,8 @@ fn smoothSource(row:u32,src:u32)->f32{
  @builtin(num_workgroups) groups:vec3u,
  @builtin(local_invocation_index) lane:u32,
 ){
+ if(lane==0u){atomicStore(&refreshActive,select(0u,1u,operatorChanged()));}
+ if(workgroupUniformLoad(&refreshActive)==0u){return;}
  let tile=lane>>6u;let tileLane=lane&63u;
  let targetEntry=4u*(group.x+groups.x*group.y)+tile;
  var valid=targetEntry<targetEntries();
@@ -296,8 +317,8 @@ fn cgReduce(lane:u32)->f32{
  return total;
 }
 // The hierarchy contract bounds the last level to 64 rows. Lanes cooperate:
-// one row per lane, workgroup-reduced dot products, and a constant 64-step
-// schedule whose inactive steps are exact no-ops so barriers stay uniform.
+// one row per lane and workgroup-reduced dot products. A workgroup-uniform
+// residual test exits the bounded 64-step loop without crossing a barrier.
 // The former single-lane serial CG walked every matrix entry sequentially and
 // was a measured latency elephant in each cycle.
 @compute @workgroup_size(64) fn solveTargetCoarsest(@builtin(local_invocation_index) lane:u32){
@@ -314,6 +335,12 @@ fn cgReduce(lane:u32)->f32{
  var live=1.0;
  if(!finite(rr)){if(lane==0u){report(NONFINITE);}live=0.0;}
  for(var iteration=0u;iteration<64u;iteration+=1u){
+  if(lane==0u){
+   atomicStore(&cgActive,select(0u,1u,
+     live>0.0&&iteration<count&&rr>max(initialRR*1e-12,1e-30)));
+  }
+  let stepActive=workgroupUniformLoad(&cgActive)!=0u;
+  if(!stepActive){break;}
   cgDirection[lane]=direction;
   workgroupBarrier();
   var applied=0.0;
@@ -326,7 +353,6 @@ fn cgReduce(lane:u32)->f32{
   }
   refreshPartial[lane]=select(0.0,direction*applied,owner);
   let pAp=cgReduce(lane);
-  let stepActive=live>0.0&&iteration<count&&rr>max(initialRR*1e-12,1e-30);
   var alpha=0.0;
   if(stepActive){
    if(!(pAp>0.0)||!finite(pAp)){if(lane==0u){report(NONPOSITIVE);}live=0.0;}
@@ -420,6 +446,7 @@ fn publishSourceResidualValues(rr:f32,bb:f32){
 export const OCTREE_POWER_GALERKIN_PIPELINES = Object.freeze([
   "initializeFineOperator",
   "importFineOperator",
+  "detectFineOperatorChange",
   "refreshGalerkinTarget",
   "clearSourceCorrection",
   "smoothSourceAtoB",
@@ -471,10 +498,10 @@ export interface WebGPUOctreePowerGalerkinSolve {
 /**
  * Experimental executable GPU V-cycle for a prebuilt symbolic hierarchy.
  *
- * Matrix zero owns the externally refreshed fine coefficients. Every coarser
- * matrix is recomputed on device by deterministic RAP gathers before solving.
- * The symbolic hierarchy is immutable and therefore reusable until topology
- * generation changes.
+ * Matrix zero owns the externally refreshed fine coefficients. Coarser
+ * matrices are recomputed by deterministic RAP gathers only when the imported
+ * fine operator changes. The symbolic hierarchy is immutable and therefore
+ * reusable until topology generation changes.
  */
 export class WebGPUOctreePowerGalerkin {
   readonly plan: OctreePowerGalerkinExecutionPlan;
@@ -493,6 +520,7 @@ export class WebGPUOctreePowerGalerkin {
   private readonly params: GPUBuffer;
   private readonly zeroCompactCorrection: GPUBuffer;
   private readonly residualScratch: GPUBuffer;
+  private readonly previousFineCoefficients: GPUBuffer;
   private readonly persistent3Pipeline?: GPUComputePipeline;
   private readonly persistent3Group?: GPUBindGroup;
   private importedSource?: Readonly<{
@@ -565,6 +593,11 @@ export class WebGPUOctreePowerGalerkin {
       size: OCTREE_POWER_GALERKIN_MEASURE_PARTIAL_WORKGROUPS * 8,
       usage: GPUBufferUsage.STORAGE,
     });
+    this.previousFineCoefficients = device.createBuffer({
+      label: "Power Galerkin previous fine coefficients",
+      size: Math.max(4, this.entryCounts[0] * Uint32Array.BYTES_PER_ELEMENT),
+      usage: storage,
+    });
     const damping = Math.max(0.05, Math.min(0.95, options.damping ?? 2 / 3));
     const relativeTolerance = Math.max(1e-4, Math.min(0.5, options.relativeTolerance ?? 0.02));
     const absoluteRmsTolerance = Math.max(1e-12, Math.min(1, options.absoluteRmsTolerance ?? 1e-7));
@@ -582,8 +615,9 @@ export class WebGPUOctreePowerGalerkin {
       }),
     ])) as unknown as Readonly<Record<OctreePowerGalerkinPipelineName, GPUComputePipeline>>;
     const bindings: Readonly<Record<OctreePowerGalerkinPipelineName, readonly number[]>> = {
-      initializeFineOperator: [0, 2, 3, 5],
+      initializeFineOperator: [0, 2, 3, 5, 12],
       importFineOperator: [0, 2, 3, 5, 7, 8, 9, 10],
+      detectFineOperatorChange: [0, 2, 5, 12],
       refreshGalerkinTarget: [0, 1, 2, 5],
       clearSourceCorrection: [3],
       smoothSourceAtoB: [0, 2, 3, 5, 6],
@@ -600,7 +634,7 @@ export class WebGPUOctreePowerGalerkin {
       const resources: Readonly<Record<number, GPUBuffer>> = {
         0: this.matrices[level], 1: this.matrices[level + 1], 2: this.topologies[level],
         3: this.vectors[level], 4: this.vectors[level + 1], 5: this.control, 6: this.params,
-        11: this.residualScratch,
+        11: this.residualScratch, 12: this.previousFineCoefficients,
       };
       return Object.fromEntries(OCTREE_POWER_GALERKIN_PIPELINES
         .filter((name) => name !== "importFineOperator" && name !== "exportLiveCorrection").map((name) => [name,
@@ -675,6 +709,7 @@ export class WebGPUOctreePowerGalerkin {
       + packed.reduce((sum, level) => sum + level.topologyWords.byteLength, 0)
       + hierarchy.levels.reduce((sum, level) => sum + 3 * level.nodeCount * 4, 0)
       + hierarchy.levels[0].nodeCount * 4
+      + this.entryCounts[0] * 4
       + OCTREE_POWER_GALERKIN_CONTROL_BYTES + 16;
   }
 
@@ -748,6 +783,7 @@ export class WebGPUOctreePowerGalerkin {
     dispatch(0, "initializeFineOperator", finestCount);
     this.encodeFineOperatorImport(broker, solve.liveOperator.leafHeaders, solve.liveOperator.leafEntries,
       solve.liveOperator.authorityControl, solve.initialCorrection ?? this.zeroCompactCorrection);
+    dispatch(0, "detectFineOperatorChange", this.entryCounts[0]);
     for (let level = 0; level < this.topologies.length; level += 1) {
       dispatch(level, "refreshGalerkinTarget", Math.ceil(this.entryCounts[level + 1] / 4), true);
     }
@@ -815,5 +851,6 @@ export class WebGPUOctreePowerGalerkin {
     this.params.destroy();
     this.zeroCompactCorrection.destroy();
     this.residualScratch.destroy();
+    this.previousFineCoefficients.destroy();
   }
 }

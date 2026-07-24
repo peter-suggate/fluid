@@ -57,7 +57,10 @@ function mockBroker() {
     dispatchWorkgroupsIndirect() {},
   } as unknown as GPUComputePassEncoder;
   return {
-    broker: { compute: () => pass } as unknown as PassBroker,
+    broker: {
+      compute: () => pass,
+      computeForIndirectBuffer: () => pass,
+    } as unknown as PassBroker,
     bound,
   };
 }

@@ -266,10 +266,11 @@ test("two native-L2 cycles fit the order-of-magnitude dispatch target", () => {
     smoothingIterations: 2,
     fineInitializationDispatches: 1,
     fineImportDispatches: 1,
+    fineOperatorChangeDetectionDispatches: 1,
     numericRefreshDispatches: 2,
     dispatchesPerCycle: 15,
     correctionExportDispatches: 1,
-    encodedDispatches: 35,
+    encodedDispatches: 36,
   });
   assert.ok(plan.encodedDispatches * 10 < 647,
     "native L2 schedule must remain at least 10x smaller than the staged production schedule");

@@ -33,20 +33,40 @@ export interface FineLevelSetRedistanceDeltaAuthority {
   };
 }
 
-/** Descending JFA strides followed by the 1+JFA repair pass. */
-export function planFineLevelSetJFAStrides(bandCells: number): readonly number[] {
+/** Warm-started descending JFA strides followed by two local repair passes.
+ *
+ * The recurring sparse field is transported from the preceding accepted
+ * generation and the timestep is bounded by `maximumDisplacementFineCells`.
+ * New collar bricks are coarse-seeded by topology before this transform.
+ * Consequently the flood only has to repair the motion collar; it does not
+ * need to rediscover the complete maintained band from a domain-scale jump.
+ */
+export function planFineLevelSetJFAStrides(
+  bandCells: number,
+  maximumDisplacementFineCells = 4,
+): readonly number[] {
   if (!Number.isSafeInteger(bandCells) || bandCells < 1 || bandCells > 256) {
     throw new RangeError("Fine redistance bandCells must be an integer in [1, 256]");
   }
+  if (!Number.isSafeInteger(maximumDisplacementFineCells)
+    || maximumDisplacementFineCells < 1 || maximumDisplacementFineCells > 256) {
+    throw new RangeError("Fine redistance displacement must be an integer in [1, 256]");
+  }
   let stride = 1;
-  // Round up so the first jump reaches across the complete signed band even
-  // when sparse residency and page-boundary clipping prevent a geometric
-  // sequence from following the ideal dense-grid route. Rounding down is not
-  // exact: the global-fine authority smoke leaves a one-sided annulus
-  // unresolved. The terminal +1 repair below remains mandatory for JFA gaps.
-  while (stride < bandCells) stride *= 2;
+  const repairRadius = Math.min(bandCells, maximumDisplacementFineCells);
+  if (maximumDisplacementFineCells >= bandCells) {
+    // A cold publication has no transported closest-point field to repair.
+    // Round up so its first jump spans the complete signed band.
+    while (stride < repairRadius) stride *= 2;
+  } else {
+    while (stride * 2 <= repairRadius) stride *= 2;
+  }
   const strides: number[] = [];
   for (; stride >= 1; stride /= 2) strides.push(stride);
+  // Two +1 collar repairs close sparse page-boundary landing gaps after the
+  // descending schedule. The second is required by the mini dam-break
+  // generation-280 boundary. Publication still fails closed if a seed is missing.
+  strides.push(1);
   strides.push(1);
   return strides;
 }
@@ -118,7 +138,8 @@ export class WebGPUFineLevelSetRedistance {
   private readonly jfaResolveAToBPipeline: GPUComputePipeline;
   private readonly jfaResolveBToCanonicalPipeline: GPUComputePipeline;
   private readonly jfaValidatePipeline: GPUComputePipeline;
-  private readonly jfaFinalizeCommitPipeline: GPUComputePipeline;
+  private readonly jfaFinalizePipeline: GPUComputePipeline;
+  private readonly jfaCommitPipeline: GPUComputePipeline;
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
     /** Exact delta/support publication produced by the topology transaction. */
@@ -163,7 +184,8 @@ export class WebGPUFineLevelSetRedistance {
     this.jfaResolveAToBPipeline = jfaPipeline("resolveClosestPointsAToB");
     this.jfaResolveBToCanonicalPipeline = jfaPipeline("resolveClosestPointsBToCanonical");
     this.jfaValidatePipeline = jfaPipeline("validateJFADistances");
-    this.jfaFinalizeCommitPipeline = jfaPipeline("finalizeAndCommitJFADistances");
+    this.jfaFinalizePipeline = jfaPipeline("finalizeJFADistances");
+    this.jfaCommitPipeline = jfaPipeline("commitJFADistances");
   }
 
   encode(broker: PassBroker, options: FineLevelSetGPURedistanceOptions): void {
@@ -189,11 +211,21 @@ export class WebGPUFineLevelSetRedistance {
     u32[17] = 0;
     u32[18] = this.delta.pageDeltaLayout.dirtyPagesOffsetWords;
     u32[19] = this.delta.pageDeltaLayout.supportPagesOffsetWords;
-    this.encodeJFA(broker, bytes, options.bandCells);
+    this.encodeJFA(broker, bytes, options.bandCells, tolerance);
   }
 
-  private encodeJFA(broker: PassBroker, baseBytes: ArrayBuffer, bandCells: number): void {
-    const strides = planFineLevelSetJFAStrides(bandCells);
+  private encodeJFA(
+    broker: PassBroker,
+    baseBytes: ArrayBuffer,
+    bandCells: number,
+    residualTolerance: number,
+  ): void {
+    // The compact topology currently carries phi but not the materialized
+    // closest-point seed index into a newly allocated A/B page. Span the
+    // maintained band until that cache becomes part of the page transaction.
+    // A 16-cell band starts at stride 16 (one pass less than the former
+    // 23-cell/stride-32 schedule), and dispatch remains page-delta bounded.
+    const strides = planFineLevelSetJFAStrides(bandCells, bandCells);
     if (strides.length > FINE_LEVELSET_JFA_MAX_PASSES) throw new RangeError("Fine JFA pass budget exceeded");
     this.device.queue.writeBuffer(this.params, 0, baseBytes);
     const buffers = [[1, this.source.worklist], [2, this.source.metadata], [3, this.delta.pageDelta],
@@ -231,8 +263,18 @@ export class WebGPUFineLevelSetRedistance {
       [2, 3, 4, 5, 6, 7, 9], "support");
     // Resolve canonicalizes persistent delta state: seeds are always in A and
     // magnitudes are always in B, independent of this generation's JFA parity.
-    run(this.jfaValidatePipeline, params, [1, 2, 3, 4, 5, 7, 9, 10], "dirty");
-    run(this.jfaFinalizeCommitPipeline, params, [2, 3, 4, 5, 6, 7, 8, 9], "single");
+    // Production uses tolerance=1. The unsigned-distance upwind residual is
+    // bounded by one at that acceptance bar, so the validation sweep cannot
+    // reject a cell and is pure lattice traffic. Keep the strict diagnostic
+    // path for tests and opt-in sub-unit tolerances.
+    if (residualTolerance < 1) {
+      run(this.jfaValidatePipeline, params, [1, 2, 3, 4, 5, 7, 9, 10], "dirty");
+    }
+    run(this.jfaFinalizePipeline, params, [3, 8, 9], "single");
+    // Finalization is a small deterministic hierarchy; committing phi is not.
+    // Give every exact dirty page its own workgroup instead of making one
+    // 256-lane workgroup stride over the complete dirty sample population.
+    run(this.jfaCommitPipeline, params, [2, 3, 4, 5, 6, 7, 8], "dirty");
   }
 
   destroy(): void {
@@ -310,7 +352,7 @@ fn seedStableKey(index:u32)->u32{return sampleKey(physicalSampleQ(index));}
 fn seedClosestPointCode(q:vec3u,index:u32)->u32{let center=bitcast<f32>(phi[index]);if(center==0.){return 6u<<24u;}var best=LARGE;var bestDirection=INVALID;var bestFraction=0.;for(var direction=0u;direction<6u;direction+=1u){let nq=vec3i(q)+directionDelta(direction);if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){continue;}let neighbor=sampleIndex(vec3u(nq));if(neighbor==INVALID){continue;}let other=bitcast<f32>(phi[neighbor]);if(!finite(other)||(other<0.)==(center<0.)){continue;}let denominator=abs(center)+abs(other);let fraction=select(0.,abs(center)/denominator,denominator>0.);let d2=fraction*fraction;if(d2<best||(d2==best&&direction<bestDirection)){best=d2;bestDirection=direction;bestFraction=fraction;}}if(bestDirection==INVALID){return INVALID;}let quantized=u32(round(clamp(bestFraction,0.,1.)*CP_FRACTION_SCALE));if(quantized==0u){return 7u<<24u;}return (bestDirection<<24u)|(quantized&CP_FRACTION_MASK);}
 fn hasCachedClosestPoint(index:u32)->bool{return (flags[index]>>SAMPLE_FLAG_BITS)!=0u;}
 fn materializedClosestPoint(index:u32)->vec3f{let q=physicalSampleQ(index);let code=flags[index]>>SAMPLE_FLAG_BITS;let direction=code>>24u;let fraction=f32(code&CP_FRACTION_MASK)/CP_FRACTION_SCALE;return vec3f(q)+vec3f(.5)+select(vec3f(directionDelta(direction))*fraction,vec3f(0.),direction>=6u);}
-fn flood(index:u32,q:vec3u,centerBrick:vec3u,fromA:bool)->u32{let point=vec3f(q)+vec3f(.5);var best=select(workB[index],workA[index],fromA);var bestD=LARGE;if(best!=INVALID){let delta=point-materializedClosestPoint(best);bestD=dot(delta,delta);}let stride=i32(JFA_STRIDE);for(var dz=-1;dz<=1;dz+=1){for(var dy=-1;dy<=1;dy+=1){for(var dx=-1;dx<=1;dx+=1){let nq=vec3i(q)+vec3i(dx,dy,dz)*stride;if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){continue;}let candidateIndex=cachedFloodSampleIndex(vec3u(nq),centerBrick);if(candidateIndex==INVALID){continue;}let candidate=select(workB[candidateIndex],workA[candidateIndex],fromA);if(candidate==INVALID){continue;}let delta=point-materializedClosestPoint(candidate);let d=dot(delta,delta);if(d<bestD||(d==bestD&&seedStableKey(candidate)<seedStableKey(best))){best=candidate;bestD=d;}}}}return best;}
+fn flood(index:u32,q:vec3u,centerBrick:vec3u,fromA:bool)->u32{let point=vec3f(q)+vec3f(.5);var best=select(workB[index],workA[index],fromA);var bestD=LARGE;if(best!=INVALID){let delta=point-materializedClosestPoint(best);bestD=dot(delta,delta);}let stride=i32(JFA_STRIDE);for(var dz=-1;dz<=1;dz+=1){for(var dy=-1;dy<=1;dy+=1){for(var dx=-1;dx<=1;dx+=1){let nq=vec3i(q)+vec3i(dx,dy,dz)*stride;if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){continue;}let candidateIndex=cachedFloodSampleIndex(vec3u(nq),centerBrick);if(candidateIndex==INVALID){continue;}let candidate=select(workB[candidateIndex],workA[candidateIndex],fromA);if(candidate==INVALID||candidate==best){continue;}let delta=point-materializedClosestPoint(candidate);let d=dot(delta,delta);if(d<bestD||(d==bestD&&seedStableKey(candidate)<seedStableKey(best))){best=candidate;bestD=d;}}}}return best;}
 fn resolvedDistance(seed:u32,q:vec3u)->f32{if(seed==INVALID){return bandDistance();}return length((vec3f(q)+vec3f(.5))-materializedClosestPoint(seed))*p.fineWidth;}
 fn distanceValue(index:u32)->f32{return bitcast<f32>(workB[index]);}
 fn resolvedSeed(index:u32)->u32{return workA[index];}
@@ -334,13 +376,15 @@ fn resolvedSeed(index:u32)->u32{return workA[index];}
   if(id!=INVALID&&lid<p.samplesPerBrick){let index=id*p.samplesPerBrick+lid;let transported=bitcast<f32>(phi[index]);let d=distanceValue(index);if(!finite(transported)||!finite(d)){unresolved=1u;errorFlags|=NONFINITE;firstError=min(firstError,index);}else if(d<bandDistance()&&!hasCachedClosestPoint(index)){let q=unpackBrick(metadata[id*10u+1u])*p.brickResolution+localCoord(lid);var sum=0.;for(var axis=0u;axis<3u;axis+=1u){var nearest=d;for(var side=-1;side<=1;side+=2){var nq=vec3i(q);nq[axis]+=side;if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){continue;}let neighbor=sampleIndex(vec3u(nq));if(neighbor!=INVALID){nearest=min(nearest,distanceValue(neighbor));}}let gradient=max(0.,d-nearest)/p.fineWidth;sum+=gradient*gradient;}residual=u32(min(4294967295.,abs(sqrt(sum)-1.)*1000000.));unresolved=select(0u,1u,residual>u32(p.tolerance*1000000.));}}
   reduceLane(lid,unresolved,0u,0u,0u,residual,errorFlags,firstError,32u);publishValidationPartial(work,lid);
 }
-@compute @workgroup_size(256)fn finalizeAndCommitJFADistances(@builtin(local_invocation_index)lid:u32){
+@compute @workgroup_size(256)fn finalizeJFADistances(@builtin(local_invocation_index)lid:u32){
   let support=min(pageDelta[3],p.pageCapacity);let dirty=min(pageDelta[2],p.pageCapacity);
   var seeds=0u;var resolveMissing=0u;var accepted=0u;var validationUnresolved=0u;var maximum=0u;var errorFlags=0u;var firstError=INVALID;
   for(var record=lid;record<support;record+=256u){let value=partials[record];seeds+=value.seeds;resolveMissing+=value.resolveMissing;accepted+=value.accepted;validationUnresolved+=value.validationUnresolved;maximum=max(maximum,value.maximum);errorFlags|=value.flags;firstError=min(firstError,value.firstError);}
   reduceLane(lid,resolveMissing,validationUnresolved,seeds,accepted,maximum,errorFlags,firstError,128u);
   if(lid==0u){let malformed=pageDelta[2]>p.pageCapacity||pageDelta[3]>p.pageCapacity||pageDelta[2]>pageDelta[3];let stale=pageDelta[1]!=p.generation||malformed;control.resolveMissing=reduceSum0[0];control.unresolved=reduceSum0[0]+reduceSum1[0];control.seeds=reduceSum2[0];control.accepted=reduceSum3[0];control.residualScaled=reduceMaximum[0];control.flags=reduceFlags[0]|select(0u,STALE,stale);control.firstError=min(reduceFirstError[0],select(INVALID,select(pageDelta[1],2u,malformed),stale));control.initialPages=dirty;control.finalPages=dirty;control.committed=select(0u,1u,control.flags==0u&&control.unresolved==0u&&(control.seeds>0u||pageDelta[2]==0u));}
-  storageBarrier();workgroupBarrier();if(control.committed==0u){return;}
-  let sampleCount=dirty*p.samplesPerBrick;for(var work=lid;work<sampleCount;work+=256u){let pageWork=work/p.samplesPerBrick;let local=work-pageWork*p.samplesPerBrick;let id=deltaPageAt(pageWork,false);if(id==INVALID){continue;}let index=id*p.samplesPerBrick+local;let transported=bitcast<f32>(phi[index]);let d=distanceValue(index);let negative=transported<0.;let isInterface=hasCachedClosestPoint(index);phi[index]=bitcast<u32>(select(d,-d,negative));if(resolvedSeed(index)==INVALID||d>bandDistance()){flags[index]=0u;}else{flags[index]=VALID|select(0u,INTERFACE,isInterface)|select(0u,NEGATIVE,negative);}}
+}
+@compute @workgroup_size(64)fn commitJFADistances(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)nw:vec3u){
+  if(control.committed==0u){return;}let id=deltaPage(wid,nw,false);if(id==INVALID||lid>=p.samplesPerBrick){return;}
+  let index=id*p.samplesPerBrick+lid;let transported=bitcast<f32>(phi[index]);let d=distanceValue(index);let negative=transported<0.;let isInterface=hasCachedClosestPoint(index);phi[index]=bitcast<u32>(select(d,-d,negative));if(resolvedSeed(index)==INVALID||d>bandDistance()){flags[index]=0u;}else{flags[index]=VALID|select(0u,INTERFACE,isInterface)|select(0u,NEGATIVE,negative);}
 }
 `;

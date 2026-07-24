@@ -87,7 +87,7 @@ export function TransportBar() {
     event.target.value = "";
   };
   const toggleRecording = () => {
-    if (recordingStatus === "recording") simulationRecording.stop(simulation.time());
+    if (recordingStatus === "recording") simulationRecording.stop(useRuntimeStore.getState().simulationTime);
     else {
       setRunState("running");
       simulationRecording.start(simulation.time());
@@ -99,7 +99,7 @@ export function TransportBar() {
         <button disabled={transportLocked || browserSafetyLocked} className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : staticRenderScene ? "Fluid simulation is disabled for this renderer validation scene" : safeBringup ? "Continuous play is disabled during bounded GPU bring-up" : transportLocked ? "Simulation controls unlock after the initial GPU scene is ready" : runState === "running" ? "Pause simulation" : "Play simulation"}>{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
         <button disabled={browserPolicyPending || transportLocked || safeStepLocked} onClick={() => { if (safeBringup) setSafeStepRequested(true); simulation.singleStep(); }} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : transportLocked ? "Single step unavailable until the initial GPU scene is ready" : safeStepLocked ? "The bounded browser GPU step has already been requested" : "Single fluid clock step"}>STEP</button>
         <button disabled={browserSafetyLocked} onClick={() => {
-          if (recordingStatus === "recording") simulationRecording.stop(simulation.time());
+          if (recordingStatus === "recording") simulationRecording.stop(useRuntimeStore.getState().simulationTime);
           simulation.reset();
         }}>RESET</button>
         <button
@@ -115,7 +115,7 @@ export function TransportBar() {
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
         {simRate !== null && <small className="sim-rate" title={webgpu ? "Queue-confirmed simulated seconds completed per wall-clock second" : "Simulated seconds completed per wall-clock second"}>ACTUAL ×{simRate.toFixed(2)}</small>}
         {lagged && <small className="lag-chip" title="Simulation time currently admitted to the bounded GPU feed window.">GPU −{gpuLag.toFixed(1)} s</small>}
-        {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
+        {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {Math.max(0, simulationTime - recordingStart).toFixed(2)} s</small>}
         <div className="transport-timing" aria-label="Simulation timestep controls">
           <TimingSlider disabled={transportLocked || browserSafetyLocked} key={`fixed-${fixedDt}`} label="FIXED STEP" unit="Hz" value={fixedRate_hz} min={Math.min(30, fixedRate_hz)} max={Math.max(2000, fixedRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms rigid`} onCommit={commitFixedRate} />
           <TimingSlider disabled={transportLocked || browserSafetyLocked} key={`gpu-${fixedDt}-${maxDt}`} label="GPU STEP" unit="Hz" value={gpuStepRate_hz} min={1} max={fixedRate_hz} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms max`} onCommit={commitGpuStepRate} />

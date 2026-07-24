@@ -263,10 +263,10 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     /fnpublishRecurringSparseBand[\s\S]*recurringProducerChanged\(item\)[\s\S]*currentMetadata\[id\*10u\+3u\]&2u[\s\S]*RECURRING_SUPPORT/,
     "recurring seeds are the compact current interface union explicit Section 5 endpoints");
   assert.match(wgsl,
-    /fnrecurringScatterMembership[\s\S]*atomicOr\(&topologyErrors\[output\],2u\|select\(0u,1u,exact\)\)[\s\S]*fnrecurringPublishScatteredDomain[\s\S]*atomicLoad\(&topologyErrors\[key\]\)[\s\S]*sparseCandidates\[params\.sparseCandidateCapacity\+output\]=key/,
-    "compact seeds scatter bounded halos into a direct identity mask which emits canonical keys once");
+    /fnrecurringMarkSeed[\s\S]*atomicOr\(&topologyErrors\[key\],3u\)[\s\S]*fnrecurringDilateDenseDomain[\s\S]*recurringDilatedMembership\(key,fromAtomic\)[\s\S]*fnrecurringPublishScatteredDomain[\s\S]*atomicLoad\(&topologyErrors\[key\]\)[\s\S]*sparseCandidates\[params\.sparseCandidateCapacity\+output\]=key/,
+    "compact seeds use exact ping-pong dense dilation before the direct identity mask emits canonical keys once");
   assert.match(wgsl,
-    /if\(desiredLogicalCount\(\)<=min\(params\.sparseCandidateCapacity,arrayLength\(&topologyErrors\)\)\)\{recurringPublishScatteredDomain\(local\);\}else\{[\s\S]*recurringSort\(local\)/,
+    /if\(desiredLogicalCount\(\)<=min\(params\.sparseCandidateCapacity,arrayLength\(&topologyErrors\)\)\)\{recurringDilateDenseDomain\(local\);recurringPublishScatteredDomain\(local\);\}else\{[\s\S]*recurringSort\(local\)/,
     "oversized logical domains retain a deterministic sparse closure without weakening publication");
   assert.match(wgsl,
     /letrecurringErrorFlags=workgroupUniformLoad\(&recurringFlags\);if\(recurringErrorFlags==0u\)/,
@@ -279,8 +279,8 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     "the scalar resident walk, per-output membership search, old full fringe, and quadratic rank sort are deleted");
   assert.match(wgsl, /topologyErrors:array<atomic<u32>>/,
     "the direct identity mask uses a dedicated atomic word per logical brick");
-  assert.match(wgsl, /atomicStore\(&topologyErrors\[item\],0u\)[\s\S]*recurringScatterMembership/,
-    "membership storage is deterministically reset before compact seeds scatter");
+  assert.match(wgsl, /atomicStore\(&topologyErrors\[item\],0u\)[\s\S]*recurringMarkSeed/,
+    "membership storage is deterministically reset before compact seeds are marked");
 
   assert.match(encode, /dilationBrickRings=bandPlan\.dilationBrickRings/,
     "topology must allocate transport, interpolation, redistance, and safety support before redistance");
@@ -318,7 +318,7 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     "publication validation authors one exact settlement dispatch before the semantic publication fence");
 });
 
-test("direct recurring identity scatter exactly matches per-output membership", () => {
+test("dense recurring identity dilation exactly matches per-output membership", () => {
   const fixtures = [
     { dimensions: [24, 18, 16] as const, radius: 1,
       seeds: [0, 1, 1, 23, 24, 431, 432, 3455, 6911] },
@@ -349,23 +349,31 @@ test("direct recurring identity scatter exactly matches per-output membership", 
         ) <= fixture.radius;
       })) reference.push(key);
     }
-    const mask = new Uint8Array(logical);
+    let mask = new Uint8Array(logical);
     for (const seed of fixture.seeds) {
       if (seed < 0 || seed >= logical) continue;
-      const [sx, sy, sz] = unpack(seed);
-      for (let z = -fixture.radius; z <= fixture.radius; z += 1) {
-        for (let y = -fixture.radius; y <= fixture.radius; y += 1) {
-          for (let x = -fixture.radius; x <= fixture.radius; x += 1) {
-            const qx = sx + x, qy = sy + y, qz = sz + z;
-            if (qx < 0 || qx >= nx || qy < 0 || qy >= ny || qz < 0 || qz >= nz) continue;
-            mask[qx + nx * (qy + ny * qz)] |= 2 | Number(x === 0 && y === 0 && z === 0);
+      mask[seed] |= 3;
+    }
+    for (let ring = 0; ring < fixture.radius; ring += 1) {
+      const next = new Uint8Array(logical);
+      for (let key = 0; key < logical; key += 1) {
+        const [sx, sy, sz] = unpack(key);
+        next[key] |= mask[key] & 1;
+        for (let z = -1; z <= 1; z += 1) {
+          for (let y = -1; y <= 1; y += 1) {
+            for (let x = -1; x <= 1; x += 1) {
+              const qx = sx + x, qy = sy + y, qz = sz + z;
+              if (qx < 0 || qx >= nx || qy < 0 || qy >= ny || qz < 0 || qz >= nz) continue;
+              if ((mask[qx + nx * (qy + ny * qz)] & 2) !== 0) next[key] |= 2;
+            }
           }
         }
       }
+      mask = next;
     }
-    const scattered = [...mask.keys()].filter((key) => (mask[key] & 2) !== 0);
-    assert.deepEqual(scattered, reference,
-      `direct scatter must preserve exact radius-${fixture.radius} membership`);
+    const dilated = [...mask.keys()].filter((key) => (mask[key] & 2) !== 0);
+    assert.deepEqual(dilated, reference,
+      `dense dilation must preserve exact radius-${fixture.radius} membership`);
     assert.equal([...mask].filter((value) => (value & 1) !== 0).length, uniqueSeeds.size,
       "idempotent exact-seed bits must deduplicate repeated producer identities");
   }
@@ -471,8 +479,8 @@ test("fine topology keeps cold failure unpublished and separates recurring suppo
     /letcurrentCount=select\(0u,min\(currentWorklist\[0\],params\.pageCapacity\),currentPublished\)[\s\S]*sourceD\[3\]=select\(0u,1u,currentPublished\);sourceD\[4\]=select\(0u,1u,currentPublished\);control\[4\]=select\(0u,1u,currentPublished\);control\[5\]=1u/,
     "parallel rollback keeps a cold failure unpublished and only republishes a validated current generation");
   assert.match(shader,
-    /fnrecurringScatterMembership[\s\S]*atomicOr\(&topologyErrors\[output\],[\s\S]*fnrecurringPublishScatteredDomain[\s\S]*atomicLoad\(&topologyErrors\[key\]\)/,
-    "recurring topology uses bounded idempotent direct-mask atomics instead of dependent membership searches");
+    /fnrecurringMarkSeed[\s\S]*atomicOr\(&topologyErrors\[key\],[\s\S]*fnrecurringDilateDenseDomain[\s\S]*fnrecurringPublishScatteredDomain[\s\S]*atomicLoad\(&topologyErrors\[key\]\)/,
+    "recurring topology uses bounded idempotent seed atomics and exact dense dilation instead of dependent membership searches");
 });
 
 test("fine topology binds exactly the resources reachable from every compute entry point", () => {
@@ -617,8 +625,8 @@ test("production transport is fused across every factor-ratio segment", () => {
     /let sourcePhi=phi\[index\];workA\[index\]=sourcePhi;if\(abs\(sourcePhi\)>=pack\.transportBandDistance\)\{return;\}/,
     "support-only samples must preserve phi before the shared scratch is committed");
   assert.match(source,
-    /struct DirectHint\{row:u32,descriptor:DirectRow\}[\s\S]*fn sampleCompleteVelocity\(world:vec3f,directHint:DirectHint,ownerCache:ptr<function,vec3u>\)[\s\S]*if\(!directRowContains\(hint\.row,hint\.descriptor,world\)\)\{hint=loadDirectHint\(directOwner\(world\)\);\}[\s\S]*directHint=complete\.directHint/,
-    "piecewise segments must retain the immutable adaptive descriptor without repeating its directory search or row load");
+    /struct DirectHint\{row:u32,descriptor:DirectRow\}[\s\S]*fn sampleCompleteVelocity\(world:vec3f,directHint:DirectHint,ownerCache:ptr<function,vec3u>\)[\s\S]*if\(!directRowContains\(hint\.row,hint\.descriptor,world\)\)\{hint=loadDirectHint\(directOwner\(world,ownerCache\)\);\}[\s\S]*directHint=complete\.directHint/,
+    "piecewise segments must retain the immutable adaptive descriptor and owner-page hint without repeating row resolution");
   assert.match(source,
     /ownerAtCached\(vec3u\(floor\(grid\)\),ownerCache\)[\s\S]*var ownerCache=vec3u\(0u\)[\s\S]*sampleCompleteVelocity\(position,directHint,&ownerCache\)/,
     "air completion must retain the exact owner publication/page hint across Factor-m segments");
@@ -672,23 +680,23 @@ test("production transport is fused across every factor-ratio segment", () => {
 test("production fused transport resolves retained rows by exact cell and size identity", () => {
   const source = makeFineLevelSetProductionFusedTransportWGSL().replace(/\s+/g, "");
   assert.match(source,
-    /fnrowOfIdentity\(cellKey:u32,size:u32\)->u32\{[\s\S]*letrow=airAuthority\[at\+1u\];if\(row>=pack\.bandRowCount\)\{returnINVALID;\}[\s\S]*letrowSize=loadBandRow\(row\)\.size;if\(bandRowIdentityLess\(key,rowSize,cellKey,size\)\)/,
-    "binary search must compare the referenced packed row size when cell origins collide");
+    /fndirectIdentityRow\(cellKey:u32,size:u32\)->u32\{[\s\S]*letband=rowOfIdentity\(cellKey,size\)[\s\S]*letpublished=loadBandRow\(band\);letrow=published\.globalRow[\s\S]*direct\.cell==cellKey&&direct\.size==size/,
+    "the dense band identity table must map an exact owner identity to its validated direct row");
   assert.match(source,
     /candidate\.cell==cellKey&&candidate\.size==size/,
-    "a directory hit must publish only the exact row identity");
+    "a band identity hit must publish only the exact row identity");
   assert.match(source,
     /fnretainedBandAnchor[\s\S]*letband=rowOfIdentity\(cell\(origin\),size\)/,
     "the containing-row search must query every known octree size exactly");
-  assert.doesNotMatch(source, /fnrowOf\(cellKey:u32\)/,
-    "the packed recurring consumer must not retain the ambiguous cell-only lookup");
+  assert.doesNotMatch(source, /fnrowOf\(cellKey:u32\)|fndirectFind|fnloadDirectDirectory/,
+    "the packed recurring consumer must not retain ambiguous or binary direct-row lookup");
 });
 
 test("fine redistance applies its inclusive residual tolerance at telemetry precision", () => {
   assert.match(fineLevelSetJFACPTWGSL,
     /residual=u32\([\s\S]*unresolved=select\(0u,1u,residual>u32\(p\.tolerance\*1000000\.\)\)/);
   assert.match(fineLevelSetJFACPTWGSL,
-    /finalizeAndCommitJFADistances[\s\S]*control\.residualScaled=reduceMaximum\[0\]/);
+    /finalizeJFADistances[\s\S]*control\.residualScaled=reduceMaximum\[0\]/);
   assert.doesNotMatch(fineLevelSetJFACPTWGSL, /if\(residual>p\.tolerance\)/);
   assert.doesNotMatch(fineLevelSetJFACPTWGSL,
     /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
@@ -719,9 +727,12 @@ test("fine redistance construction requires the topology-authored delta ABI", ()
 });
 
 test("fine redistance is fixed-pass JFA-CPT", () => {
-  assert.deepEqual(planFineLevelSetJFAStrides(21), [32, 16, 8, 4, 2, 1, 1]);
-  assert.deepEqual(planFineLevelSetJFAStrides(1), [1, 1]);
-  assert.deepEqual(planFineLevelSetJFAStrides(2), [2, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(21), [4, 2, 1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(21, 8), [8, 4, 2, 1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(21, 21), [32, 16, 8, 4, 2, 1, 1, 1],
+    "the cold generation spans the complete signed band before local repair");
+  assert.deepEqual(planFineLevelSetJFAStrides(1), [1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(2), [2, 1, 1, 1]);
   assert.match(fineLevelSetJFACPTWGSL,
     /d<bestD\|\|\(d==bestD&&seedStableKey\(candidate\)<seedStableKey\(best\)\)/,
     "equal-distance propagation must choose the stable global sample key");
@@ -896,7 +907,8 @@ test("fine redistance binds exactly the resources reachable from each compute en
     resolveClosestPointsAToB: [0, 2, 3, 4, 5, 6, 7, 9],
     resolveClosestPointsBToCanonical: [0, 2, 3, 4, 5, 6, 7, 9],
     validateJFADistances: [0, 1, 2, 3, 4, 5, 7, 9, 10],
-    finalizeAndCommitJFADistances: [0, 2, 3, 4, 5, 6, 7, 8, 9],
+    finalizeJFADistances: [0, 3, 8, 9],
+    commitJFADistances: [0, 2, 3, 4, 5, 6, 7, 8],
   };
   assert.deepEqual(Object.fromEntries([...observed].map(([entryPoint, bindings]) =>
     [entryPoint, [...bindings].sort((a, b) => a - b)])), expected);
@@ -961,9 +973,10 @@ test("recurring fine redistance canonicalizes opposite flood parities on the sam
     entryPoint === "seedClosestPoints" || entryPoint.startsWith("jumpFlood")
       || entryPoint.startsWith("resolveClosestPoints")));
   assert.deepEqual(recurrence, [
-    ["seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB",
-      "resolveClosestPointsBToCanonical"],
-    ["seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA", "resolveClosestPointsAToB"],
+    ["seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA",
+      "jumpFloodAToB", "jumpFloodBToA", "resolveClosestPointsAToB"],
+    ["seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA",
+      "jumpFloodAToB", "resolveClosestPointsBToCanonical"],
   ]);
   assert.equal(parameterWrites, 2,
     "each recurring encode uploads one parameter block, independent of the JFA stride count");
@@ -1014,7 +1027,7 @@ test("factor-4 JFA-CPT redistance is one pass over topology-published delta disp
     const broker = new PassBroker(encoder);
     new WebGPUFineLevelSetRedistance(
       device, source as never, redistanceDeltaAuthority(buffer, 1)).encode(broker,
-      { bandCells: 21 });
+      { bandCells: 21, residualTolerance: 1 });
     broker.fence("redistance test inspection");
   } finally {
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
@@ -1024,26 +1037,26 @@ test("factor-4 JFA-CPT redistance is one pass over topology-published delta disp
   assert.equal(passes.length, 1);
   assert.deepEqual(copies, [],
     "JFA must consume topology's immutable command publication without recurring copies");
-  assert.deepEqual(indirectOffsets, [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 84],
-    "support-mask publication plus seed/flood/resolve consume JFA support while validation alone touches the dirty dispatch");
+  assert.deepEqual(indirectOffsets, [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 84],
+    "cold support publication plus seed/flood/resolve consume JFA support while page commit touches the dirty dispatch");
   assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
     /updateIndirectBuffer|dispatchWorkgroupsIndirect\(this\.delta\.pageDelta/,
     "the writable page-delta transaction must never be consumed as an indirect command buffer");
   assert.deepEqual(passes[0], ["publishSupportPageMask",
     "seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA",
     "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB", "jumpFloodBToA",
-    "jumpFloodAToB", "resolveClosestPointsBToCanonical", "validateJFADistances",
-    "finalizeAndCommitJFADistances"]);
-  assert.equal(passes[0].length, 12,
+    "jumpFloodAToB", "jumpFloodBToA", "resolveClosestPointsAToB",
+    "finalizeJFADistances", "commitJFADistances"]);
+  assert.equal(passes[0].length, 13,
     "generation-stamped direct support membership needs one bounded publication and no capacity clear");
   assert.match(fineLevelSetJFACPTWGSL, /override JFA_STRIDE:u32=1u/);
   assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
-    /jfaParams|initializeJFAControl|reduceJFASeedStats|reduceJFAResolveStats|reduceJFAValidationStats|finalizeJFADistances|commitJFADistances/,
-    "mutable stride buffers and the retired scalar/reduction/publication pipelines must stay deleted");
+    /jfaParams|initializeJFAControl|reduceJFASeedStats|reduceJFAResolveStats|reduceJFAValidationStats/,
+    "mutable stride buffers and the retired standalone reduction pipelines must stay deleted");
   assert.equal(passes[0].filter((entryPoint) =>
     entryPoint === "seedClosestPoints" || entryPoint.startsWith("jumpFlood")
-      || entryPoint.startsWith("resolveClosestPoints")).length, 9,
-    "the 21-cell distance transform is one seed, seven floods, and one resolve dispatch");
+      || entryPoint.startsWith("resolveClosestPoints")).length, 10,
+    "the cold transform is one seed, eight floods, and one resolve dispatch");
 });
 
 test("opt-in Dawn backend reproducer: sparse diagonal JFA support gap dispatch", {

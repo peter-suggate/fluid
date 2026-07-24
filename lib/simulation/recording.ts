@@ -25,7 +25,7 @@ class SimulationRecordingController {
   private frameError: unknown = null;
   private frameCount = 0;
   private nextFrameSimulation_s = 0;
-  private frameLoop = 0;
+  private acceptingSimulationFrames = false;
 
   get supported(): boolean {
     if (typeof window === "undefined") return false;
@@ -75,26 +75,28 @@ class SimulationRecordingController {
     this.frameQueue = Promise.resolve();
     this.frameError = null;
     this.frameCount = 0;
+    // The controller's requested clock can already be ahead of the last GPU
+    // completion when Record is pressed. Begin after that pre-recording debt
+    // so draining slow work cannot appear as a burst of duplicate frames.
     this.startedAtSimulation_s = simulationTime_s;
-    this.nextFrameSimulation_s = simulationTime_s + SIMULATION_VIDEO_FRAME_DURATION_S;
-    const capture = () => {
-      if (!this.frameOutput || !this.frameSource) return;
-      const currentSimulation_s = useRuntimeStore.getState().simulationTime;
-      const due = simulationFramesDue(currentSimulation_s, this.nextFrameSimulation_s);
-      for (let index = 0; index < due; index += 1) {
-        this.enqueueSimulationFrame(canvas);
-      }
-      this.nextFrameSimulation_s += due * SIMULATION_VIDEO_FRAME_DURATION_S;
-      this.frameLoop = requestAnimationFrame(capture);
-    };
-    this.frameLoop = requestAnimationFrame(capture);
+    this.nextFrameSimulation_s = this.startedAtSimulation_s + SIMULATION_VIDEO_FRAME_DURATION_S;
+    this.acceptingSimulationFrames = true;
     useRecordingStore.getState().set({
       status: "recording",
-      startedAtSimulation_s: simulationTime_s,
+      startedAtSimulation_s: this.startedAtSimulation_s,
       modalOpen: false,
       error: null
     });
     useRuntimeStore.getState().setNotice("Capturing one frame every 0.033 simulated seconds · native 30 fps output");
+  }
+
+  /** Called only after the GPU confirms that a presentation has completed, so
+   * each encoded sample owns a fully rendered simulation state. */
+  capturePresentedFrame(canvas: HTMLCanvasElement, simulationTime_s: number): void {
+    if (!this.acceptingSimulationFrames || !this.frameOutput || !this.frameSource) return;
+    const due = simulationFramesDue(simulationTime_s, this.nextFrameSimulation_s);
+    for (let index = 0; index < due; index += 1) this.enqueueSimulationFrame(canvas);
+    this.nextFrameSimulation_s += due * SIMULATION_VIDEO_FRAME_DURATION_S;
   }
 
   private enqueueSimulationFrame(canvas: HTMLCanvasElement) {
@@ -213,8 +215,7 @@ class SimulationRecordingController {
     const output = this.frameOutput;
     const source = this.frameSource;
     if (!output || !source) return;
-    cancelAnimationFrame(this.frameLoop);
-    this.frameLoop = 0;
+    this.acceptingSimulationFrames = false;
     useRecordingStore.getState().set({ status: "processing", startedAtSimulation_s: null, error: null });
     try {
       await this.frameQueue;
@@ -284,8 +285,7 @@ class SimulationRecordingController {
   }
 
   private async releaseFrameCapture(cancel: boolean): Promise<void> {
-    cancelAnimationFrame(this.frameLoop);
-    this.frameLoop = 0;
+    this.acceptingSimulationFrames = false;
     const output = this.frameOutput;
     this.frameOutput = null;
     this.frameSource = null;

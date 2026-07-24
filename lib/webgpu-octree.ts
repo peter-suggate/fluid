@@ -153,16 +153,58 @@ export interface OctreeProjectionOptions {
   energyLedgerStepCapacity?: number;
 }
 
-/** Semantic checkpoints consumed by the generic adjacent-boundary trace. */
-export type OctreeSemanticPhase = "mgpcgSolve" | "pressureLeafCompactionL1Capture"
-  | "powerDescriptorTopologyFaces" | "powerFaceRegularCompletion"
-  | "powerOperatorRhsAssembly" | "finalPressureRowAssembly"
-  | "powerProjectionPublication" | "faceBandTopologyBuild" | "faceBandTransitionAdjacency"
-  | "faceBandClosestPointExtension" | "faceBandPowerPublicationCapture" | "powerProjectionTail";
+/** The seven data-domain boundaries of the collapsed recurring frame. */
+export const OCTREE_ENGINE_PHASES = [
+  "structureEpoch",
+  "rowEngineA",
+  "solveEngine",
+  "rowEngineB",
+  "brickEngineA",
+  "closestPointWaves",
+  "brickEngineB",
+] as const;
+export type OctreeEnginePhase = typeof OCTREE_ENGINE_PHASES[number];
+
+/** Fine-grained checkpoints retained for attribution compatibility. */
+export const OCTREE_FINE_SEMANTIC_PHASES = [
+  "pressureLeafCompactionL1Capture",
+  "powerDescriptorTopologyFaces",
+  "powerFaceRegularCompletion",
+  "powerOperatorRhsAssembly",
+  "finalPressureRowAssembly",
+  "mgpcgSolve",
+  "powerProjectionPublication",
+  "faceBandTopologyBuild",
+  "faceBandTransitionAdjacency",
+  "faceBandClosestPointExtension",
+  "faceBandPowerPublicationCapture",
+  "powerProjectionTail",
+  "finePreparation",
+  "fineTransport",
+  "fineTopology",
+  "fineRedistance",
+  "fineRestriction",
+] as const;
+export type OctreeFineSemanticPhase = typeof OCTREE_FINE_SEMANTIC_PHASES[number];
+/** Semantic checkpoints consumed by the generic adjacent-boundary trace.
+ * Production emits engine phases by default. `FLUID_ENGINE_SPLIT=fine`
+ * substitutes the historical fine-grained phases at their original seams. */
+export type OctreeSemanticPhase = OctreeEnginePhase | OctreeFineSemanticPhase;
 export type OctreeSemanticBoundary = (
   phase: OctreeSemanticPhase,
   encoder: GPUCommandEncoder,
 ) => GPUCommandEncoder;
+
+/** Read at encode time so benchmark processes can select attribution without
+ * changing construction or numerical behavior. Browser bundles without a
+ * process shim always use the production collapsed graph. */
+export function octreeFineEngineSplitsEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_ENGINE_SPLIT === "fine";
+}
 
 export function octreeSparseWorldRequired(
   hasTerrain: boolean,
@@ -1194,9 +1236,10 @@ export class WebGPUOctreeProjection {
         new Float64Array(hierarchy.fineOffDiagonalEntries.length),
       );
       this.galerkin = new WebGPUOctreePowerGalerkin(device, hierarchy, operators, {
-        // Newly refined/coarsened rows can exceed eight cycles in the
-        // mini-dam even with an exact remapped warm start. The GPU convergence
-        // latch makes the encoded tail a no-op for ordinary short solves.
+        // Keep the full transition ceiling. The GPU residual latch turns the
+        // encoded tail into exact no-ops on ordinary frames, while difficult
+        // refinement transitions retain enough cycles to publish rather than
+        // poisoning downstream authority with a rejected pressure solve.
         cycles: 20,
         // Measured wall-neutral on the isolated Dawn benchmark (glue kernels,
         // not smoothers, own the cycle cost) while roughly halving the cycles
@@ -1206,11 +1249,10 @@ export class WebGPUOctreeProjection {
         // spectral bound. One quarter remains stable through both normal- and
         // mini-dam topology transitions; one half amplifies the normal dam.
         damping: 0.25,
-        // The experimental single-dispatch three-level lane is not yet a
-        // publication-equivalent replacement for the staged Galerkin cycle:
-        // it can reject an otherwise valid mini-dam solve after a topology
-        // transition. Keep the UI/default constructor on the audited staged
-        // path until that lane has its own full-generation acceptance.
+        // The single-dispatch three-level lane still has a separate
+        // publication contract and has previously rejected valid topology
+        // transitions. These optimizations target the audited staged lane;
+        // do not silently switch algorithms while changing its schedule.
         persistentThreeLevel: false,
         relativeTolerance: scene.numerics.pressureRelativeTolerance,
       });
@@ -2197,11 +2239,12 @@ export class WebGPUOctreeProjection {
   private encodeGlobalFineFaceBand(
     encoder: GPUCommandEncoder,
     productionBoundary?: OctreeSemanticBoundary,
+    fineEngineSplits = octreeFineEngineSplitsEnabled(),
   ): GPUCommandEncoder {
     let broker = new PassBroker(encoder);
     for (const phase of OCTREE_FACE_BAND_ENCODE_PHASES) {
       this.encodeGlobalFineFaceBandPhase(broker, phase);
-      if (productionBoundary) {
+      if (productionBoundary && fineEngineSplits) {
         const semanticPhase: OctreeSemanticPhase = phase === "topology-build"
           ? "faceBandTopologyBuild"
           : phase === "transition-adjacency" ? "faceBandTransitionAdjacency"
@@ -2498,6 +2541,7 @@ export class WebGPUOctreeProjection {
     encoder: GPUCommandEncoder,
     productionBoundary?: OctreeSemanticBoundary,
     sharedBroker?: PassBroker,
+    fineEngineSplits = octreeFineEngineSplitsEnabled(),
   ): GPUCommandEncoder {
     const descriptor = this.powerDescriptor, topology = this.powerTopology, faces = this.powerFaces;
     const operator = this.powerOperator, volumes = this.powerVolumes;
@@ -2514,15 +2558,17 @@ export class WebGPUOctreeProjection {
     let broker = sharedBroker ?? new PassBroker(encoder);
     this.energyLedger?.encodeFaceMetric(broker, "oldFaceCapture", oldPowerGeneration, faces.source);
     const splitProductionPhase = (
-      phase: OctreeSemanticPhase,
+      enginePhase: OctreeEnginePhase | undefined,
+      finePhase: OctreeFineSemanticPhase,
       closeForRawContinuation = false,
     ) => {
-      if (productionBoundary) {
+      const phase = fineEngineSplits ? finePhase : enginePhase;
+      if (productionBoundary && phase) {
         broker.fence(`production phase ${phase}`);
         encoder = productionBoundary(phase, encoder);
         broker = new PassBroker(encoder);
       } else if (closeForRawContinuation) {
-        broker.fence(`raw continuation after ${phase}`);
+        broker.fence(`raw continuation after ${finePhase}`);
       }
     };
     const dimensions: [number, number, number] = [this.dims.nx, this.dims.ny, this.dims.nz];
@@ -2604,7 +2650,7 @@ export class WebGPUOctreeProjection {
     });
     topology.encode(broker, descriptor.descriptors, this.compaction, spacing, this.powerRowDelta);
     faces.encode(broker, this.leafHeaders, faceOptions);
-    splitProductionPhase("powerDescriptorTopologyFaces");
+    splitProductionPhase("structureEpoch", "powerDescriptorTopologyFaces");
     // Cold generation 1 is initialized from the authored regular field.  On
     // every recurring generation Aanjaneya et al. (2017), Section 5 instead
     // traces each new generalized-face centroid into the captured OLD power
@@ -2666,7 +2712,7 @@ export class WebGPUOctreeProjection {
       pressureImpulseScale: this.powerTimestep_s,
     });
     this.energyLedger?.encodeFaceMetric(broker, "postSolidConstraint", this.powerGeneration, faces.source);
-    splitProductionPhase("powerFaceRegularCompletion");
+    splitProductionPhase(undefined, "powerFaceRegularCompletion");
     const pass = broker.compute({ label: "Publish physical power-cell volumes" });
     pass.setPipeline(volumePipeline); pass.setBindGroup(0, volumeGroup);
     pass.dispatchWorkgroupsIndirect(
@@ -2676,9 +2722,9 @@ export class WebGPUOctreeProjection {
     operator.encodeAssemblyFromControl(broker, faces.faces, faces.source, faces.control,
       this.powerFaceSeed?.control,
       this.powerSolidFaces?.control);
-    splitProductionPhase("powerOperatorRhsAssembly");
+    splitProductionPhase(undefined, "powerOperatorRhsAssembly");
     operator.encodeLeafRowPublication(broker, this.leafHeaders, this.leafEntries);
-    splitProductionPhase("finalPressureRowAssembly", true);
+    splitProductionPhase("rowEngineA", "finalPressureRowAssembly", true);
     return encoder;
   }
 
@@ -2772,8 +2818,13 @@ export class WebGPUOctreeProjection {
     const solveBudget = this.mgpcg?.iterationBudget ?? this.galerkin?.plan.cycles ?? 0;
     this.info.pressureIterationBudget = solveBudget;
     this.info.pressureIterationHardBudget = solveBudget;
-    const splitProductionPhase = (phase: OctreeSemanticPhase) => {
-      if (options?.productionBoundary) {
+    const fineEngineSplits = octreeFineEngineSplitsEnabled();
+    const splitProductionPhase = (
+      enginePhase: OctreeEnginePhase | undefined,
+      finePhase: OctreeFineSemanticPhase,
+    ) => {
+      const phase = fineEngineSplits ? finePhase : enginePhase;
+      if (options?.productionBoundary && phase) {
         encoder = options.productionBoundary(phase, encoder);
       }
     };
@@ -2791,14 +2842,15 @@ export class WebGPUOctreeProjection {
     pressure.setPipeline(this.assembleCoarsePipeline);
     pressure.dispatchWorkgroupsIndirect(this.solveDispatch, 12);
     this.firstOrderVCycle?.encodeCapture(pressureBroker);
-    if (options?.productionBoundary) {
+    if (options?.productionBoundary && fineEngineSplits) {
       pressureBroker.fence("pressure capture trace boundary");
     }
-    splitProductionPhase("pressureLeafCompactionL1Capture");
+    splitProductionPhase(undefined, "pressureLeafCompactionL1Capture");
     encoder = this.encodeNativePowerAssembly(
       encoder,
       options?.productionBoundary,
-      options?.productionBoundary ? undefined : pressureBroker,
+      options?.productionBoundary && fineEngineSplits ? undefined : pressureBroker,
+      fineEngineSplits,
     );
     const pressureIn = initialInA ? this.pressureA : this.pressureB;
     const pressureOut = initialInA ? this.pressureB : this.pressureA;
@@ -2825,7 +2877,7 @@ export class WebGPUOctreeProjection {
     // poll then reads the staging buffer without racing the next rebuild.
     solveBroker.copyBufferToBuffer(
       this.compaction, this.compactionByteLength - 32, this.solveStats, 0, 32);
-    splitProductionPhase("mgpcgSolve");
+    splitProductionPhase("solveEngine", "mgpcgSolve");
     const finalInA = this.latestPressureInA;
     const projectionBroker = new PassBroker(encoder);
     this.encodeNativePowerProjection(
@@ -2844,8 +2896,10 @@ export class WebGPUOctreeProjection {
     // reconstructed onto regular octree faces, constrained at solids, then
     // extended from physical closest points before factor-m
     // trajectories are traced.
-    splitProductionPhase("powerProjectionPublication");
-    encoder = this.encodeGlobalFineFaceBand(encoder, options?.productionBoundary);
+    splitProductionPhase(undefined, "powerProjectionPublication");
+    encoder = this.encodeGlobalFineFaceBand(
+      encoder, options?.productionBoundary, fineEngineSplits,
+    );
     const projectionTailBroker = new PassBroker(encoder);
     if (this.powerFaces) this.energyLedger?.encodeFaceMetric(
       projectionTailBroker, "postFaceBandPublication", this.powerGeneration, this.powerFaces.source,
@@ -2854,7 +2908,7 @@ export class WebGPUOctreeProjection {
     projectionTailBroker.fence("projection diagnostics and solid pressure exchange published");
     this.encodeOverlayMaterialization(encoder, finalInA);
     if (this.powerTimestep_s > 0) this.powerAdvancingPressureSteps += 1;
-    splitProductionPhase("powerProjectionTail");
+    splitProductionPhase("rowEngineB", "powerProjectionTail");
     return encoder;
   }
 
@@ -2877,11 +2931,15 @@ export class WebGPUOctreeProjection {
    * supplying productionBoundary must continue encoding on the returned
    * encoder, never on the argument. */
   encodeSurface(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState,
-    _maximumDt_s?: number, productionBoundary?: (phase: "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance"
-      | "fineRestriction", encoder: GPUCommandEncoder) => GPUCommandEncoder): GPUCommandEncoder {
-    const splitProductionPhase = (phase: "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance"
-      | "fineRestriction") => {
-      if (productionBoundary) encoder = productionBoundary(phase, encoder);
+    _maximumDt_s?: number, productionBoundary?: OctreeSemanticBoundary): GPUCommandEncoder {
+    const fineEngineSplits = octreeFineEngineSplitsEnabled();
+    const splitProductionPhase = (
+      enginePhase: OctreeEnginePhase | undefined,
+      finePhase: Extract<OctreeFineSemanticPhase,
+        "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance" | "fineRestriction">,
+    ) => {
+      const phase = fineEngineSplits ? finePhase : enginePhase;
+      if (productionBoundary && phase) encoder = productionBoundary(phase, encoder);
     };
     if (this.fineSeedAdapter) {
       let coarseBootstrappedThisStep = false;
@@ -2933,17 +2991,24 @@ export class WebGPUOctreeProjection {
           resource: { buffer: this.powerCoarseLevelSetSchedule!.sampleSource.directory } };
         const bandCells = Math.min(256, Math.max(4,
           this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4)));
-        // Match allocation planning above. The final three cells cover the
-        // complete 3-D trilinear stencil and its centre on the closed cutoff.
-        const redistanceBandCells = Math.min(256,
-          bandCells + this.globalFineLevelSet!.plan.fineFactor + 3);
+        // Topology already publishes the motion/interpolation collar around
+        // this complete maintained band. The compact page transaction does
+        // not yet retain closest-point indices, so JFA still spans the whole
+        // authored band rather than using the planned warm-started collar.
+        const redistanceBandCells = bandCells;
+        // Characteristic tracing needs a complete departure stencil inside
+        // the maintained redistance field. Reserve one trilinear corner plus
+        // the enforced fineFactor displacement collar instead of tracing the
+        // collar itself; JFA reconstructs that outer distance-only region.
+        const transportBandCells = Math.max(4, redistanceBandCells
+          - (this.globalFineLevelSet?.plan.fineFactor ?? 4) - 1);
         const transport = this.globalFineCurrentIsA ? this.globalFineTransportA : this.globalFineTransportB;
         let transportEncoded = false;
         // Adapter publication, coarse bootstrap and compact interface seeding
         // precede characteristic transport. Keep them out of the transport
         // bucket so the generic trace names the measured work.
         seedBroker.fence("fine interface seed publication complete");
-        splitProductionPhase("finePreparation");
+        splitProductionPhase(undefined, "finePreparation");
         if (this.globalFineBootstrapped && transport && this.powerFaceSeed && this.powerVelocity) {
           const transportBroker = new PassBroker(encoder);
           this.energyLedger?.encodeFinePotential(transportBroker, "preFineTransport", transport.source);
@@ -2960,8 +3025,7 @@ export class WebGPUOctreeProjection {
             generation: this.powerGeneration,
             boundaryPolicy: "closed-neumann",
             openTopBoundary: this.scene.container.top !== "closed",
-            transportBandCells: Math.min(256, Math.max(4,
-              this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4))),
+            transportBandCells,
           });
           this.energyLedger?.encodeFinePotential(completedTransportBroker, "postFineTransport", transport.source);
           // Topology may reuse the shared physical payload pool. Capture the
@@ -2970,7 +3034,7 @@ export class WebGPUOctreeProjection {
           this.energyLedger?.encodeFineCommonCapture(completedTransportBroker, transport.source);
           encoder = completedTransportBroker.commandEncoder();
           transportEncoded = true;
-          splitProductionPhase("fineTransport");
+          splitProductionPhase(undefined, "fineTransport");
         }
         let publicationTopology: WebGPUFineLevelSetTopology;
         let publicationRedistance: WebGPUFineLevelSetRedistance;
@@ -3003,7 +3067,7 @@ export class WebGPUOctreeProjection {
             topologyBroker, publicationTransport.source, this.globalFineSourceB!,
           );
           encoder = topologyBroker.commandEncoder();
-          splitProductionPhase("fineTopology");
+          splitProductionPhase("brickEngineA", "fineTopology");
           const redistanceBroker = new PassBroker(encoder);
           publicationRedistance.encode(redistanceBroker, { bandCells: redistanceBandCells, residualTolerance: 1 });
           this.energyLedger?.encodeFinePotential(redistanceBroker, "postFineRedistance", this.globalFineSourceB!);
@@ -3011,12 +3075,12 @@ export class WebGPUOctreeProjection {
             redistanceBroker, "postFineRedistanceCommon",
             this.globalFineSourceB!.generation, this.globalFineSourceB!,
           );
-          publicationVolume?.encode(redistanceBroker);
+          publicationVolume?.encodeMeasurement(redistanceBroker);
           this.energyLedger?.encodeFinePotential(
-            redistanceBroker, "postFineVolumeCorrection", this.globalFineSourceB!,
+            redistanceBroker, "postFineVolumeMeasurement", this.globalFineSourceB!,
           );
           encoder = redistanceBroker.commandEncoder();
-          splitProductionPhase("fineRedistance");
+          splitProductionPhase("closestPointWaves", "fineRedistance");
         } else {
           this.globalFineGeneration += 1;
           this.globalFineLevelSet!.repurposeGPUGeneration(this.globalFineSourceA!, this.globalFineGeneration);
@@ -3037,7 +3101,7 @@ export class WebGPUOctreeProjection {
             topologyBroker, publicationTransport.source, this.globalFineSourceA!,
           );
           encoder = topologyBroker.commandEncoder();
-          splitProductionPhase("fineTopology");
+          splitProductionPhase("brickEngineA", "fineTopology");
           const redistanceBroker = new PassBroker(encoder);
           publicationRedistance.encode(redistanceBroker, { bandCells: redistanceBandCells, residualTolerance: 1 });
           this.energyLedger?.encodeFinePotential(redistanceBroker, "postFineRedistance", this.globalFineSourceA!);
@@ -3045,12 +3109,12 @@ export class WebGPUOctreeProjection {
             redistanceBroker, "postFineRedistanceCommon",
             this.globalFineSourceA!.generation, this.globalFineSourceA!,
           );
-          publicationVolume?.encode(redistanceBroker);
+          publicationVolume?.encodeMeasurement(redistanceBroker);
           this.energyLedger?.encodeFinePotential(
-            redistanceBroker, "postFineVolumeCorrection", this.globalFineSourceA!,
+            redistanceBroker, "postFineVolumeMeasurement", this.globalFineSourceA!,
           );
           encoder = redistanceBroker.commandEncoder();
-          splitProductionPhase("fineRedistance");
+          splitProductionPhase("closestPointWaves", "fineRedistance");
         }
         const restrictionBroker = new PassBroker(encoder);
         publicationTopology.encodeFinalizePublication(restrictionBroker, {
@@ -3100,7 +3164,10 @@ export class WebGPUOctreeProjection {
         // production boundary can finish and replace it. Public parity moves
         // only when retireSubmittedEncoder sees this exact encoder submitted.
         this.globalFinePublicationByEncoder.set(encoder, publicationTargetIsA);
-        splitProductionPhase("fineRestriction");
+        // In collapsed mode Brick Engine B remains open through the sparse
+        // residency/publication work encoded by the frame owner. Fine mode
+        // retains the historical restriction seam here.
+        splitProductionPhase(undefined, "fineRestriction");
         this.globalFineCurrentIsA = publicationTargetIsA;
         this.globalFineBootstrapped = true;
       } else {

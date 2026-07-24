@@ -88,14 +88,14 @@ test("authoritative stage hooks are ordered and remain opt-in", () => {
   assert.match(smoke, /await \(solver as GPUSolverInstance\)\.readPowerEnergyLedger\?\.\(\)/);
 });
 
-test("fine ledger brackets transport, topology, redistance, and correction", () => {
+test("fine ledger brackets transport, topology, redistance, and volume measurement", () => {
   const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   for (const stage of ["preFineTransport", "postFineTransport", "postFineTopology",
-    "postFineRedistance", "postFineVolumeCorrection"] as const) {
+    "postFineRedistance", "postFineVolumeMeasurement"] as const) {
     assert.match(source, new RegExp(`encodeFinePotential\\([^,]+,\\s*\\"${stage}\\"`));
   }
   assert.match(source,
-    /preFineTransport[\s\S]*transport\.encode[\s\S]*postFineTransport[\s\S]*publicationTopology\.encode[\s\S]*postFineTopology[\s\S]*publicationRedistance\.encode[\s\S]*postFineRedistance[\s\S]*publicationVolume\?\.encode[\s\S]*postFineVolumeCorrection/);
+    /preFineTransport[\s\S]*transport\.encode[\s\S]*postFineTransport[\s\S]*publicationTopology\.encode[\s\S]*postFineTopology[\s\S]*publicationRedistance\.encode[\s\S]*postFineRedistance[\s\S]*publicationVolume\?\.encodeMeasurement[\s\S]*postFineVolumeMeasurement/);
   assert.match(source,
     /postFineTransport[\s\S]*encodeFineCommonCapture[\s\S]*publicationTopology\.encode[\s\S]*encodeFineCommonTopologyPair[\s\S]*publicationRedistance\.encode[\s\S]*postFineRedistanceCommon/,
     "the immutable old sample capture must precede topology and its frozen support must survive redistance");

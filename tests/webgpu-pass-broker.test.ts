@@ -52,6 +52,29 @@ test("PassBroker copy, clear, and indirect update close compute first", () => {
   ]);
 });
 
+test("indirect buffer roles fence only on actual storage-command transitions", () => {
+  const events: string[] = [];
+  const broker = new PassBroker(fakeEncoder(events));
+  const indirect = {} as GPUBuffer;
+  const other = {} as GPUBuffer;
+  const writer = broker.computeForIndirectBuffer(indirect, "storage-write", { label: "writer" });
+  assert.equal(broker.computeForIndirectBuffer(indirect, "storage-write"), writer,
+    "adjacent GPU command producers stay in one pass");
+  assert.equal(broker.computeForIndirectBuffer(other, "indirect"), writer,
+    "an unrelated indirect buffer does not create a false dependency");
+  const consumer = broker.computeForIndirectBuffer(indirect, "indirect", { label: "consumer" });
+  assert.notEqual(consumer, writer);
+  assert.equal(broker.computeForIndirectBuffer(indirect, "indirect"), consumer,
+    "adjacent indirect consumers stay in one pass");
+  broker.computeForIndirectBuffer(indirect, "storage-write", { label: "next writer" });
+  assert.equal(broker.computePassCount, 3);
+  assert.deepEqual(events, [
+    "begin:writer", "end:1",
+    "begin:consumer", "end:2",
+    "begin:next writer",
+  ]);
+});
+
 test("raw command encoder access is an explicit pass boundary", () => {
   const events: string[] = [];
   const encoder = fakeEncoder(events);
@@ -144,10 +167,10 @@ test("PassBroker cutover has no raw-encoder adapter or proxy facade", () => {
   assert.doesNotMatch(octreeSource, /faces\.encodeRowDirectory/,
     "the retired duplicate face-directory prepass must stay deleted");
   assert.match(octreeSource,
-    /operator\.encodeAssemblyFromControl\(broker,[\s\S]*splitProductionPhase\("powerOperatorRhsAssembly"\);[\s\S]*operator\.encodeLeafRowPublication\(broker,/,
+    /operator\.encodeAssemblyFromControl\(broker,[\s\S]*splitProductionPhase\(undefined, "powerOperatorRhsAssembly"\);[\s\S]*operator\.encodeLeafRowPublication\(broker,/,
     "normal recurring assembly and leaf-row publication must share the pressure-spine broker");
   assert.doesNotMatch(octreeSource,
-    /splitProductionPhase\("powerOperatorRhsAssembly", true\)/,
+    /splitProductionPhase\(undefined, "powerOperatorRhsAssembly", true\)/,
     "intrusive phase attribution must not impose a routine production fence");
   assert.doesNotMatch(octreeSource, /this\.faceMirror|this\.faceTransport|this\.solidFaces/,
     "the deleted Cartesian face lane must not remain in the pressure spine");

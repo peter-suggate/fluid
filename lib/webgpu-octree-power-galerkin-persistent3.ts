@@ -24,6 +24,7 @@ const RHS=0u;const A=1u;const B=2u;
 const INVALID_ROW_ERROR=1u;const NONFINITE=4u;const NONPOSITIVE=8u;const NONCONVERGED=16u;
 var<workgroup> partial:array<f32,64>;
 var<workgroup> directionRows:array<f32,64>;
+var<workgroup> bottomActive:atomic<u32>;
 
 fn finite(value:f32)->bool{return value==value&&abs(value)<=3.402823e38;}
 fn report(flag:u32){atomicOr(&control[0],flag);}
@@ -208,6 +209,12 @@ fn solveBottom(lane:u32){
  var rr=reduce(lane);let initialRR=rr;var live=select(0.0,1.0,valid&&!stopped());
  if(!finite(rr)){if(lane==0u){report(NONFINITE);}live=0.0;}
  for(var iteration=0u;iteration<LANES;iteration+=1u){
+  if(lane==0u){
+   atomicStore(&bottomActive,select(0u,1u,
+     live>0.0&&iteration<bottomCount&&rr>max(initialRR*1e-12,1e-30)));
+  }
+  let stepActive=workgroupUniformLoad(&bottomActive)!=0u;
+  if(!stepActive){break;}
   directionRows[lane]=direction;
   workgroupBarrier();
   var product=0.0;
@@ -224,7 +231,6 @@ fn solveBottom(lane:u32){
   }
   partial[lane]=select(0.0,direction*product,owner);
   let pAp=reduce(lane);
-  let stepActive=live>0.0&&iteration<bottomCount&&rr>max(initialRR*1e-12,1e-30);
   var alpha=0.0;
   if(stepActive){
    if(!(pAp>0.0)||!finite(pAp)){if(lane==0u){report(NONPOSITIVE);}live=0.0;}

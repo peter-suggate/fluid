@@ -96,6 +96,7 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
     /@compute\s+@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z_]\w*)/g,
   )].map((match) => match[1]), [
     "preparePowerCoarsePhiSchedule",
+    "preparePowerCoarseSelectorRows",
     "buildPowerCoarseSelectorRows",
     "advectPowerCoarsePhiSchedule",
     "correctPowerCoarsePhiSchedule",
@@ -114,8 +115,11 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
     "storage-derived authority must not let any lane bypass a later commit barrier");
   const encode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(encode,
-    /constrowWorkgroups=Math\.max\(1,Math\.ceil\(maximumRows\/256\)\);constselectorWorkgroups=Math\.max\(1,Math\.ceil\(maximumRows\*this\.selectorCount\/64\)\);run\(this\.buildSelectorRowsPipeline,phaseBindings\[1\],selectorWorkgroups\);run\(this\.advectPipeline,phaseBindings\[2\],rowWorkgroups\);run\(this\.correctPipeline,phaseBindings\[3\],rowWorkgroups\);for\(constredistanceofthis\.redistancePipelines\)\{run\(redistance,phaseBindings\[4\],rowWorkgroups\)\}/,
-    "each fixed redistance pass must occupy the full row-parallel device schedule");
+    /constdirectFineDistance=fine\?\.aggregated===true&&distanceAuthority!=="triple";constredistancePasses=directFineDistance\?0:this\.plan\.redistancePasses[\s\S]*for\(constredistanceofdirectFineDistance\?\[\]:this\.redistancePipelines\)\{run\(redistance,phaseBindings\[5\],rowWorkgroups\)\}/,
+    "the fine-CPT authority must delete duplicate coarse Eikonal passes while the legacy A/B arm retains them");
+  assert.match(octreePowerCoarseLevelSetShader.replace(/\s+/g, ""),
+    /if\(params\.hasFine==2u&&params\.redistancePasses==0u\)\{scratchA\[row\]=source;rowStatus\[row\]\.advected=1u;return;\}/,
+    "collapsed distance authority must freeze migrated far-field values before exact fine restriction");
   assert.equal((encode.match(/run\(this\.(?:prepare|advect|correct|publish|commit)Pipeline/g) ?? []).length, 5,
     "the non-iterative ownership phases remain explicit and fixed");
   assert.doesNotMatch(encode,
@@ -138,8 +142,8 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
     /validatePowerCoarseFineCorrection\(gid\.x\);applyExactFineCorrection\(gid\.x\);[\s\S]*override REDISTANCE_ITERATION:u32=0u;[\s\S]*redistancePowerCoarsePhi\(gid\.x,REDISTANCE_ITERATION\)/,
     "fine correction validation and seeding must precede the inter-dispatch Delaunay redistance passes");
   assert.match(scheduleEncode,
-    /run\(this\.correctPipeline[\s\S]*for\s*\(const redistance of this\.redistancePipelines\)/,
-    "the host must preserve correction-before-redistance command ordering");
+    /run\(this\.correctPipeline[\s\S]*for\s*\(const redistance of directFineDistance\s*\?\s*\[\]\s*:\s*this\.redistancePipelines\)/,
+    "the host must preserve correction-before-legacy-redistance ordering without re-solving fine-restricted distance");
   assert.match(scheduleEncode, /Power coarse level set [^"]*persistent schedule/,
     "command attribution must identify the single persistent coarse transaction");
 });
@@ -152,6 +156,28 @@ test("coarse publication snapshots physical power-cell volume with phi authority
     "the directory must remain a complete volume snapshot after pressure rows rebuild");
   assert.match(octreePowerCoarseLevelSetShader,
     /rowStatus\[row\]\.physicalVolume=physicalVolume[\s\S]*SampleEntry\([^)]*rowStatus\[row\]\.physicalVolume\)/);
+});
+
+test("structure epoch gates selector adjacency on the exact affected-row delta", () => {
+  const source = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
+  assert.match(source,
+    /prepareSelectorRowsPipeline[\s\S]*dispatchWorkgroupsIndirect\(this\.selectorDispatch,0\)/,
+    "selector searches are launched only through the GPU-authored epoch dispatch");
+  assert.match(octreePowerCoarseLevelSetShader,
+    /fn selectorDeltaAccepted\(\)->bool[\s\S]*dirty<=affected&&affected<=current/);
+  assert.match(octreePowerCoarseLevelSetShader,
+    /fn selectorEpochCount\(\)->u32[\s\S]*rowDelta\[params\.pad0\+6u\]/);
+  assert.match(octreePowerCoarseLevelSetShader,
+    /fn prepareSelectorRows\(\)[\s\S]*selectorDispatch\[0\]=\(count\*selectorCount\+63u\)\/64u/);
+});
+
+test("coarse value deltas ignore sub-epsilon float churn but retain phase changes", () => {
+  assert.match(octreePowerCoarseLevelSetShader,
+    /fn phiValueChanged\(a:f32,b:f32\)->bool[\s\S]*abs\(a-b\)>2e-6\*scale/);
+  assert.match(octreePowerCoarseLevelSetShader,
+    /valueChanged=phiValueChanged\(old\.phi,entry\.phi\)\|\|phiValueChanged\(old\.minimumPhi,entry\.minimumPhi\)\|\|phiValueChanged\(old\.maximumPhi,entry\.maximumPhi\)/);
+  assert.match(octreePowerCoarseLevelSetShader,
+    /phaseChanged=\(\(old\.flags\^entry\.flags\)&\(PHI_INTERFACE\|PHI_CORRECTED\)\)!=0u/);
 });
 
 test("every coarse schedule bind group equals transitive WGSL reachability", () => {
@@ -194,7 +220,8 @@ test("every coarse schedule bind group equals transitive WGSL reachability", () 
   const coarse = { plan: { rowCapacity: 1 }, records: buffer } as unknown as WebGPUOctreeCoarseLevelSet;
   const topology = { metrics: buffer, catalogTetrahedronHeaders: buffer, catalogTetrahedra: buffer,
     catalogTetrahedronVertices: buffer };
-  const pass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} };
+  const pass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {},
+    dispatchWorkgroupsIndirect() {}, end() {} };
   const encoder = { beginComputePass: () => pass, copyBufferToBuffer() {} } as unknown as GPUCommandEncoder;
   const previousUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
   Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true,

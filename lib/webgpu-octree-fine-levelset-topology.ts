@@ -1126,24 +1126,50 @@ fn recurringExternalCount()->u32{
 var<workgroup> recurringFlags:u32;
 var<workgroup> recurringCount:u32;
 var<workgroup> recurringSeedCount:u32;
-// The logical brick key is already a perfect dense address. Scatter each
-// compact seed's bounded Chebyshev halo into that address space: bit zero is
-// exact seed membership and bit one is desired-band membership. Atomic OR is
-// idempotent, so overlapping halos are deduplicated at the point of insertion
-// without a sort, hash probe, or per-output search.
-fn recurringScatterMembership(key:u32){
- if(key>=desiredLogicalCount()){return;}
- let center=vec3i(unpackBrick(key));let radius=i32(params.dilationBrickRings);
- for(var z=-radius;z<=radius;z+=1){
-  for(var y=-radius;y<=radius;y+=1){
-   for(var x=-radius;x<=radius;x+=1){
+// The logical brick key is already a perfect dense address. Seed membership
+// is therefore an idempotent O(seed-count) scatter, followed by an exact
+// Chebyshev one-ring dilation over the bounded logical lattice. Ping-ponging
+// the two masks is essential: in-place propagation would make one ring cover
+// an invocation-order-dependent distance. Bit zero remains exact seed
+// membership and bit one is desired-band membership.
+fn recurringMarkSeed(key:u32){
+ if(key<desiredLogicalCount()){atomicOr(&topologyErrors[key],3u);}
+}
+fn recurringMembershipFromAtomic(key:u32)->u32{return atomicLoad(&topologyErrors[key]);}
+fn recurringMembershipFromScratch(key:u32)->u32{return sparseCandidates[key];}
+fn recurringDilatedMembership(key:u32,fromAtomic:bool)->u32{
+ let exact=select(recurringMembershipFromScratch(key),recurringMembershipFromAtomic(key),fromAtomic)&1u;
+ let center=vec3i(unpackBrick(key));var present=false;
+ for(var z=-1;z<=1&&!present;z+=1){
+  for(var y=-1;y<=1&&!present;y+=1){
+   for(var x=-1;x<=1;x+=1){
     let point=center+vec3i(x,y,z);
     if(any(point<vec3i(0))||any(point>=vec3i(params.brickDimensions))){continue;}
-    let output=packBrick(vec3u(point));
-    let exact=x==0&&y==0&&z==0;
-    atomicOr(&topologyErrors[output],2u|select(0u,1u,exact));
+    let neighbor=packBrick(vec3u(point));
+    let membership=select(recurringMembershipFromScratch(neighbor),
+      recurringMembershipFromAtomic(neighbor),fromAtomic);
+    if((membership&2u)!=0u){present=true;break;}
    }
   }
+ }
+ return exact|select(0u,2u,present);
+}
+fn recurringDilateDenseDomain(local:u32){
+ let count=desiredLogicalCount();
+ for(var ring=0u;ring<params.dilationBrickRings;ring+=1u){
+  let fromAtomic=(ring&1u)==0u;
+  for(var key=local;key<count;key+=256u){
+   let membership=recurringDilatedMembership(key,fromAtomic);
+   if(fromAtomic){sparseCandidates[key]=membership;}
+   else{atomicStore(&topologyErrors[key],membership);}
+  }
+  storageBarrier();workgroupBarrier();
+ }
+ if((params.dilationBrickRings&1u)!=0u){
+  for(var key=local;key<count;key+=256u){
+   atomicStore(&topologyErrors[key],sparseCandidates[key]);
+  }
+  storageBarrier();workgroupBarrier();
  }
 }
 // Dense key order is canonical row order, so one bounded linear pass is both
@@ -1245,11 +1271,13 @@ fn recurringExpandedAxisKey(item:u32,axis:u32)->u32{
    if(key>=desiredLogicalCount()||tagged==INVALID){localError|=MALFORMED;}
    else if((tagged&RECURRING_SUPPORT)!=0u){endpointKey=key;}
   }
-  sparseCandidates[item]=interfaceKey;
-  sparseCandidates[params.pageCapacity+item]=endpointKey;
-  if(desiredLogicalCount()<=min(params.sparseCandidateCapacity,arrayLength(&topologyErrors))){
-   if(interfaceKey!=INVALID){recurringScatterMembership(interfaceKey);}
-   if(endpointKey!=INVALID){recurringScatterMembership(endpointKey);}
+  let denseClosure=desiredLogicalCount()<=min(params.sparseCandidateCapacity,arrayLength(&topologyErrors));
+  if(denseClosure){
+   if(interfaceKey!=INVALID){recurringMarkSeed(interfaceKey);}
+   if(endpointKey!=INVALID){recurringMarkSeed(endpointKey);}
+  }else{
+   sparseCandidates[item]=interfaceKey;
+   sparseCandidates[params.pageCapacity+item]=endpointKey;
   }
  }
  errorOrLanes[local]=localError;workgroupBarrier();var width=128u;
@@ -1260,6 +1288,7 @@ fn recurringExpandedAxisKey(item:u32,axis:u32)->u32{
  let recurringErrorFlags=workgroupUniformLoad(&recurringFlags);
  if(recurringErrorFlags==0u){
   if(desiredLogicalCount()<=min(params.sparseCandidateCapacity,arrayLength(&topologyErrors))){
+   recurringDilateDenseDomain(local);
    recurringPublishScatteredDomain(local);
   }else{
    recurringSort(local);recurringCompact(local);

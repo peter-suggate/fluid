@@ -46,6 +46,9 @@ export interface PowerDamPerformanceSummary {
     readonly computePassesByStage: Readonly<Record<string, number>>;
     /** Raw descriptor labels retained for contributor-level drill-down. */
     readonly computePassesByLabel: Readonly<Record<string, number>>;
+    /** Dispatch work normalized by the enclosing raw pass label. This pairs
+     * each wall-time claim with the work that actually disappeared. */
+    readonly dispatchesByPassLabel: Readonly<Record<string, number>>;
     /** True only when every audited pass maps through the closed ownership
      * table and the label buckets exactly reconcile with the total counter. */
     readonly computePassAttributionComplete: boolean;
@@ -198,6 +201,9 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
       computePassesPerAdvance: perAdvance(audit.computePasses, result.steps),
       computePassesByStage: passCounts.byStage,
       computePassesByLabel: passCounts.byLabel,
+      dispatchesByPassLabel: Object.fromEntries(Object.entries(
+        audit.dispatchesByPassLabel ?? {},
+      ).map(([label, bucket]) => [label, perAdvance(bucket.calls, result.steps)])),
       computePassAttributionComplete,
       unattributedComputePassesPerAdvance: perAdvance(unattributedComputePasses, result.steps),
       unownedComputePassLabels: passCounts.unownedLabels,

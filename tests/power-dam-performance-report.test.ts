@@ -31,6 +31,8 @@ test("UI throughput command enforces the final Power Liquids authority gates", (
     "the throughput command has no sampled physics trace; profile acceptance owns the pressure-system gate");
   assert.match(packageJson.scripts["profile:power-dam-ui"],
     /FLUID_MAX_PRESSURE_NON_SOLVE_MS=\$\{FLUID_MAX_PRESSURE_NON_SOLVE_MS:-4\}/);
+  assert.match(packageJson.scripts["profile:power-dam-ui"], /FLUID_ENGINE_SPLIT=fine/,
+    "the sampled pressure-system gate requires fine checkpoint attribution");
   assert.match(packageJson.scripts["test:power-liquids-structure"],
     /^npx tsc --noEmit && npm run test:water-shaders && node --import tsx --test .*power-liquids-clean-cut\.test\.ts.*webgpu-pass-broker\.test\.ts.*power-dam-performance-report\.test\.ts$/,
     "phase acceptance must fail before Dawn on type, WGSL, clean-cut, pass-broker, or budget-contract regressions");
