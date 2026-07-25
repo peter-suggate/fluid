@@ -26,7 +26,11 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
   assert.doesNotMatch(refreshKernel, /pWeight|contributionIndex|left|right/,
     "numeric RAP refresh must consume baked combined weights without P-record indirections");
   assert.match(octreePowerGalerkinShader,
-    /restrictSourceDefect[\s\S]*pWeight\(record\)\*\(sourceF\(RHS,fine\)-sourceApplied\(fine,A\)\)/);
+    /cacheSourceDefect[\s\S]*sourceF\(RHS,row\)-sourceApplied\(row,A\)[\s\S]*setSourceF\(B,row,defect\)/,
+    "the fine sparse product must be evaluated once per row into the dead B channel");
+  assert.match(octreePowerGalerkinShader,
+    /restrictSourceDefect[\s\S]*pWeight\(record\)\*sourceF\(B,pFine\(record\)\)/,
+    "restriction must gather cached defects instead of repeating a sparse product per P record");
   assert.match(octreePowerGalerkinShader,
     /importFineOperator[\s\S]*fixedRow\(other\.cell,other\.size\)[\s\S]*sourceColumn\(candidate\)==column[\s\S]*bitcast<u32>\(-entry\.coefficient\)/);
   assert.match(octreePowerGalerkinShader,
@@ -49,7 +53,7 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
   assert.match(octreePowerGalerkinShader,
     /fn stopped\(\)->bool[\s\S]*control\[1\][\s\S]*smoothSourceAtoB[\s\S]*!stopped\(\)/);
   for (const entryPoint of [
-    "smoothSourceAtoB", "smoothSourceBtoA", "restrictSourceDefect",
+    "smoothSourceAtoB", "smoothSourceBtoA", "cacheSourceDefect", "restrictSourceDefect",
     "prolongateTargetCorrection", "solveTargetCoarsest",
     "measureSourceResidualPartials", "measureSourceResidualReduce",
   ]) {
@@ -69,7 +73,7 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
     /refreshGalerkinTarget[\s\S]*Math\.ceil\(this\.entryCounts\[level\+1\]\/4\)[\s\S]*true/,
     "refresh dispatch must assign one 64-lane workgroup tile to each target entry");
   assert.match(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
-    /restrictSourceDefect[\s\S]*Math\.ceil\(this\.nodeCounts\[level\+1\]\/4\)[\s\S]*true/,
+    /cacheSourceDefect[\s\S]*this\.nodeCounts\[level\][\s\S]*restrictSourceDefect[\s\S]*Math\.ceil\(this\.nodeCounts\[level\+1\]\/4\)[\s\S]*true/,
     "restriction dispatch must assign one 64-lane workgroup tile to each target row");
   assert.match(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
     /for\s*\(let cycle[\s\S]*measureSourceResidualPartials[\s\S]*measureSourceResidualReduce[\s\S]*\}\s*if\s*\(solve\.correction\)/);
@@ -83,7 +87,7 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
     "the GPU solve must not retain a host-uploaded RHS fallback");
   assert.deepEqual([...OCTREE_POWER_GALERKIN_PIPELINES], [
     "initializeFineOperator", "importFineOperator", "refreshGalerkinTarget", "clearSourceCorrection",
-    "smoothSourceAtoB", "smoothSourceBtoA",
+    "smoothSourceAtoB", "smoothSourceBtoA", "cacheSourceDefect",
     "restrictSourceDefect", "prolongateTargetCorrection", "solveTargetCoarsest",
     "measureSourceResidualPartials", "measureSourceResidualReduce",
     "publishSourceResidual", "exportLiveCorrection",

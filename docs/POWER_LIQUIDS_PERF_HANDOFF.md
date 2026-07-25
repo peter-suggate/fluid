@@ -71,6 +71,43 @@ Regression authority: exact two-step and full **500-step / 2 s** minimal-dam
 gates pass. The long run ends with generation 501, 1,372 power rows, 5,263
 faces, 8,320 incidences, converged MGPCG, and no validation errors.
 
+## 2026-07-25 Galerkin defect cache and invariant cleanup
+
+The pressure solve was the next arithmetic bottleneck. Restriction previously
+evaluated the same fine-row sparse matrix product once for every incident
+transfer record: 888,264 CSR-entry visits per V-cycle in the fixed mini
+hierarchy, versus 156,136 for one rowwise product. The final even pre-sweep
+leaves channel A authoritative and channel B dead, so a rowwise kernel now
+caches `rhs - A*x` in B once and restriction gathers only `weight * B[fine]`.
+Over the observed seven-cycle profile this removes roughly **5.1 million
+repeated CSR-entry visits**.
+
+The same batch deletes recurring validation of constructor-packed immutable
+CSR offsets, columns, transfer records, RAP records, and diagonal indices.
+Changing live headers, entries, coefficients, RAP totals, residuals, and
+corrections retain their fail-closed checks. This distinction matters: the
+invariant branches were nested in the hottest matrix/transfer loops even though
+the packed topology cannot change after construction.
+
+| Metric | Before | After | Result |
+|---|---:|---:|---:|
+| Power Galerkin solve | ~15.60 ms | 10.88 ms | **−4.72 ms, −30.3%** |
+| Mini-dam advance | 62.15 ms | 58.39 ms | **−3.76 ms, −6.0%** |
+| Encoded dispatches | 792 | 832 | +40 fixed-tail cache dispatches |
+| Compute passes | 50 | 50 | unchanged |
+
+The extra dispatches expose the next optimization directly: the 20-cycle
+schedule usually converges in 6–8 cycles, but later direct dispatch commands
+still launch and return through `stopped()`. Zero-work indirect dispatch
+arguments can retain the hard 20-cycle safety ceiling while eliminating that
+post-convergence launch tail.
+
+All five focused Dawn Galerkin tests, TypeScript, the exact two-step dam, and
+the full 500-step / 2 s gate pass. The two-step result remains six cycles with
+the same residual and field hashes. The long run covers cycles 2–16, ends at
+generation 501 with 1,372 rows / 5,263 faces / 8,320 incidences, and reports
+zero validation errors.
+
 ## 2026-07-24 implementation log — UI throughput authority
 
 All values below are repeated free-running `benchmark:power-dam-ui` measurements

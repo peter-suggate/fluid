@@ -44,12 +44,11 @@ const RHS=0u;const A=1u;const B=2u;const DIAGONAL=3u;
 const INVALID_ROW_ERROR=1u;const NONFINITE=4u;const NONPOSITIVE=8u;const NONCONVERGED=16u;
 const ASSEMBLED=0x80000000u;const PROJECTED=0x40000000u;
 fn sourceCount()->u32{return topology[0];}fn targetCount()->u32{return topology[1];}
-fn sourceEntries()->u32{return topology[2];}fn targetEntries()->u32{return topology[3];}
-fn pBase()->u32{return topology[4];}fn pCount()->u32{return topology[5];}
+fn targetEntries()->u32{return topology[3];}
+fn pBase()->u32{return topology[4];}
 fn pOffsetBase()->u32{return topology[12];}
 fn restrictionOffsetBase()->u32{return topology[6];}fn restrictionRecordBase()->u32{return topology[7];}
 fn refreshOffsetBase()->u32{return topology[8];}fn refreshRecordBase()->u32{return topology[9];}
-fn refreshRecordCount()->u32{return topology[10];}fn refreshRecordStride()->u32{return topology[11];}
 fn sourceDiagonalBase()->u32{return topology[13];}
 fn targetDiagonalBase()->u32{return topology[21];}
 fn fineCellToRowBase()->u32{return topology[14];}
@@ -90,10 +89,9 @@ fn fixedRow(cell:u32,size:u32)->u32{
 }
 fn sourceApplied(row:u32,channel:u32)->f32{
  var value=0.0;let first=sourceMatrix[row];let end=sourceMatrix[row+1u];
- if(first>end||end>sourceEntries()){report(INVALID_ROW_ERROR);return 0.0;}
- for(var entry=first;entry<end;entry+=1u){let column=sourceColumn(entry);let coefficient=sourceCoefficient(entry);
-  if(column>=sourceCount()||!finite(coefficient)){report(INVALID_ROW_ERROR);continue;}
-  value+=coefficient*sourceF(channel,column);}
+ for(var entry=first;entry<end;entry+=1u){
+  value+=sourceCoefficient(entry)*sourceF(channel,sourceColumn(entry));
+ }
  return value;
 }
 fn smoothSource(row:u32,src:u32)->f32{
@@ -117,16 +115,12 @@ fn smoothSource(row:u32,src:u32)->f32{
 @compute @workgroup_size(64) fn initializeFineOperator(@builtin(global_invocation_id) gid:vec3u){
  let row=gid.x;if(row>=sourceCount()){return;}
  let first=sourceMatrix[row];let end=sourceMatrix[row+1u];
- if(first>end||end>sourceEntries()){report(INVALID_ROW_ERROR);return;}
  // At the end of every accepted import, exactly the live fixed rows have
  // nonzero diagonals. An inactive row was cleared when it last left that set
  // and remains an exact zero equation, so recurring initialization only needs
  // to revisit the prior live subset. The constructor's seeded unit diagonal
  // deliberately makes the cold publication clear the complete arena once.
  let diagonalEntry=topology[sourceDiagonalBase()+row];
- if(diagonalEntry>=sourceEntries()||sourceColumn(diagonalEntry)!=row){
-  report(INVALID_ROW_ERROR);return;
- }
  if(sourceCoefficient(diagonalEntry)==0.0){return;}
  for(var entry=first;entry<end;entry+=1u){
   sourceMatrix[sourceEntryBase(entry)+1u]=bitcast<u32>(0.0);
@@ -156,9 +150,6 @@ fn smoothSource(row:u32,src:u32)->f32{
   report(INVALID_ROW_ERROR);return;
  }
  let diagonalEntry=topology[sourceDiagonalBase()+row];
- if(diagonalEntry>=sourceEntries()||sourceColumn(diagonalEntry)!=row){
-  report(INVALID_ROW_ERROR);return;
- }
  sourceMatrix[sourceEntryBase(diagonalEntry)+1u]=bitcast<u32>(header.diagonal);
  sourceVectors[row]=-header.rhs;
  setSourceF(DIAGONAL,row,header.diagonal);
@@ -200,15 +191,11 @@ fn smoothSource(row:u32,src:u32)->f32{
  if(valid){
   first=topology[refreshOffsetBase()+targetEntry];
   end=topology[refreshOffsetBase()+targetEntry+1u];
-  if(first>end||end>refreshRecordCount()||refreshRecordStride()!=2u){
-   if(tileLane==0u){report(INVALID_ROW_ERROR);}valid=false;
-  }
  }
  var sum=0.0;
  for(var cursor=first+tileLane;valid&&cursor<end;cursor+=64u){
   let base=refreshRecordBase()+2u*cursor;
   let fineEntry=topology[base];let weight=bitcast<f32>(topology[base+1u]);
-  if(fineEntry>=sourceEntries()||!finite(weight)){report(INVALID_ROW_ERROR);continue;}
   sum+=sourceCoefficient(fineEntry)*weight;
  }
  refreshPartial[lane]=sum;
@@ -223,12 +210,8 @@ fn smoothSource(row:u32,src:u32)->f32{
   else{
    targetMatrix[targetEntryBase(targetEntry)+1u]=bitcast<u32>(total);
    let column=targetColumn(targetEntry);
-   if(column>=targetCount()){report(INVALID_ROW_ERROR);}
-   else{
-    let diagonalEntry=topology[targetDiagonalBase()+column];
-    if(diagonalEntry>=targetEntries()){report(INVALID_ROW_ERROR);}
-    else if(diagonalEntry==targetEntry){setTargetF(DIAGONAL,column,total);}
-   }
+   let diagonalEntry=topology[targetDiagonalBase()+column];
+   if(diagonalEntry==targetEntry){setTargetF(DIAGONAL,column,total);}
   }
  }
 }
@@ -244,8 +227,18 @@ fn smoothSource(row:u32,src:u32)->f32{
  let row=gid.x;if(row<sourceCount()&&!stopped()){setSourceF(A,row,smoothSource(row,B));}
 }
 
-// R=P^T gathers the final even pre-sweep defect and initializes the coarse
-// correction vectors. Four isolated 64-lane tiles share each workgroup:
+// The final even pre-sweep leaves A authoritative and B dead until the first
+// post-prolongation smoother. Cache each fine defect in B exactly once instead
+// of recomputing the same sparse row product for every incident P record.
+@compute @workgroup_size(64) fn cacheSourceDefect(@builtin(global_invocation_id) gid:vec3u){
+ let row=gid.x;if(row>=sourceCount()||stopped()){return;}
+ if(sourceF(DIAGONAL,row)==0.0){setSourceF(B,row,0.0);return;}
+ let defect=sourceF(RHS,row)-sourceApplied(row,A);
+ if(!finite(defect)){report(NONFINITE);}else{setSourceF(B,row,defect);}
+}
+
+// R=P^T gathers the cached final even pre-sweep defect and initializes the
+// coarse correction vectors. Four isolated 64-lane tiles share each workgroup:
 // shallow coarse levels retain their row-local reduction order without paying
 // one whole workgroup launch per row.
 @compute @workgroup_size(256) fn restrictSourceDefect(
@@ -260,15 +253,12 @@ fn smoothSource(row:u32,src:u32)->f32{
  if(valid){
   first=topology[restrictionOffsetBase()+coarse];
   end=topology[restrictionOffsetBase()+coarse+1u];
-  if(first>end){if(tileLane==0u){report(INVALID_ROW_ERROR);}valid=false;}
  }
  var sum=0.0;
  if(valid&&!stopped()){
   for(var cursor=first+tileLane;cursor<end;cursor+=64u){
    let record=topology[restrictionRecordBase()+cursor];
-   if(record>=pCount()||pCoarse(record)!=coarse){report(INVALID_ROW_ERROR);continue;}
-   let fine=pFine(record);if(fine>=sourceCount()){report(INVALID_ROW_ERROR);continue;}
-   sum+=pWeight(record)*(sourceF(RHS,fine)-sourceApplied(fine,A));
+   sum+=pWeight(record)*sourceF(B,pFine(record));
   }
  }
  refreshPartial[lane]=sum;
@@ -292,10 +282,8 @@ fn smoothSource(row:u32,src:u32)->f32{
  if(sourceF(DIAGONAL,fine)==0.0){setSourceF(A,fine,0.0);return;}
  var correction=sourceF(A,fine);
  let first=topology[pOffsetBase()+fine];let end=topology[pOffsetBase()+fine+1u];
- if(first>end||end>pCount()){report(INVALID_ROW_ERROR);return;}
- for(var record=first;record<end;record+=1u){let coarse=pCoarse(record);
-  if(coarse>=targetCount()){report(INVALID_ROW_ERROR);continue;}
-  correction+=pWeight(record)*targetF(A,coarse);
+ for(var record=first;record<end;record+=1u){
+  correction+=pWeight(record)*targetF(A,pCoarse(record));
  }
  if(!finite(correction)){report(NONFINITE);}else{setSourceF(A,fine,correction);}
 }
@@ -342,9 +330,7 @@ fn cgReduce(lane:u32)->f32{
   var applied=0.0;
   if(owner){
    for(var entry=targetMatrix[lane];entry<targetMatrix[lane+1u];entry+=1u){
-    let column=targetColumn(entry);
-    if(column>=count){report(INVALID_ROW_ERROR);}
-    else{applied+=targetCoefficient(entry)*cgDirection[column];}
+    applied+=targetCoefficient(entry)*cgDirection[targetColumn(entry)];
    }
   }
   refreshPartial[lane]=select(0.0,direction*applied,owner);
@@ -446,6 +432,7 @@ export const OCTREE_POWER_GALERKIN_PIPELINES = Object.freeze([
   "clearSourceCorrection",
   "smoothSourceAtoB",
   "smoothSourceBtoA",
+  "cacheSourceDefect",
   "restrictSourceDefect",
   "prolongateTargetCorrection",
   "solveTargetCoarsest",
@@ -604,13 +591,14 @@ export class WebGPUOctreePowerGalerkin {
       }),
     ])) as unknown as Readonly<Record<OctreePowerGalerkinPipelineName, GPUComputePipeline>>;
     const bindings: Readonly<Record<OctreePowerGalerkinPipelineName, readonly number[]>> = {
-      initializeFineOperator: [0, 2, 3, 5],
+      initializeFineOperator: [0, 2, 3],
       importFineOperator: [0, 2, 3, 5, 7, 8, 9, 10],
       refreshGalerkinTarget: [0, 1, 2, 4, 5],
       clearSourceCorrection: [3],
       smoothSourceAtoB: [0, 2, 3, 5, 6],
       smoothSourceBtoA: [0, 2, 3, 5, 6],
-      restrictSourceDefect: [0, 2, 3, 4, 5],
+      cacheSourceDefect: [0, 2, 3, 5],
+      restrictSourceDefect: [2, 3, 4, 5],
       prolongateTargetCorrection: [2, 3, 4, 5],
       solveTargetCoarsest: [1, 2, 4, 5],
       measureSourceResidualPartials: [0, 2, 3, 5, 11],
@@ -784,6 +772,7 @@ export class WebGPUOctreePowerGalerkin {
           dispatch(level, "smoothSourceAtoB", this.nodeCounts[level]);
           dispatch(level, "smoothSourceBtoA", this.nodeCounts[level]);
         }
+        dispatch(level, "cacheSourceDefect", this.nodeCounts[level]);
         dispatch(level, "restrictSourceDefect", Math.ceil(this.nodeCounts[level + 1] / 4), true);
       }
       const bottomPair = this.topologies.length - 1;
