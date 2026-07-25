@@ -108,6 +108,35 @@ the same residual and field hashes. The long run covers cycles 2–16, ends at
 generation 501 with 1,372 rows / 5,263 faces / 8,320 incidences, and reports
 zero validation errors.
 
+## 2026-07-25 ownership-only power-face counting
+
+Affected power faces were still running the complete reciprocal-slot,
+shared-geometry, intersection, and polygon-clipping path twice: once to count
+the output and again to publish it. Counting now validates the row authority,
+slot reconstruction, world plane, neighbor lookup, and canonical ownership
+only. Publication remains the sole full-geometry authority and retains all
+reciprocal and polygon validation before transaction acceptance.
+
+| Metric | Before | After | Result |
+|---|---:|---:|---:|
+| Affected power-face phase | ~3.08 ms | 1.835 ms | **−1.245 ms, −40.4%** |
+| Mini-dam advance | 58.39 ms | 57.02 ms | **−1.37 ms, −2.3%** |
+| Encoded dispatches | 832 | 832 | unchanged |
+| Compute passes | 50 | 50 | unchanged |
+
+TypeScript, the focused static shader tests, the exact two-step dam, and the
+full 500-step / 2 s gate pass. The long gate again ends at generation 501 with
+1,372 rows / 5,263 faces / 8,320 incidences, a converged pressure solve, valid
+face and incidence topology, and zero validation errors.
+
+An indirect-dispatch experiment also established an M1-specific scheduling
+constraint: batching convergence-controlled cycles behind additional compute
+pass boundaries regressed the Galerkin phase even when it removed stopped
+launches. Four-cycle batches reached 11.60 ms and eight-cycle batches
+11.21 ms, both slower than the 10.88 ms direct fixed-tail schedule. Empty
+post-convergence launches are cheaper here than extra pass boundaries, so the
+next solve cut must reduce active arithmetic without splitting the pass.
+
 ## 2026-07-24 implementation log — UI throughput authority
 
 All values below are repeated free-running `benchmark:power-dam-ui` measurements

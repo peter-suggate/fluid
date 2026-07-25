@@ -1118,6 +1118,31 @@ fn stagePayloadSource(output:u32,sourcePlusOne:u32)->bool{
   storageBarrier();workgroupBarrier();
 }
 struct AffectedFaceResult { face:PowerFaceRecord, emit:u32 }
+fn countAffectedFace(row:u32,slot:u32)->u32{
+  if(row>=params.dimensionsRowCount.w||!rowHeaderValid(row)){fail(row,INVALID_HEADER);return 0u;}
+  if(row>=arrayLength(&metrics)){fail(row,INVALID_METRIC);return 0u;}let metric=metrics[row];
+  if((metric.transformAndFlags&TOPOLOGY_VALID)==0u||metric.topologyCode>=arrayLength(&entries)
+    ||!finite(metric.volume)||metric.volume<=0.0){fail(row,INVALID_METRIC);return 0u;}
+  let entry=entries[metric.topologyCode];
+  if(entry.firstFace>arrayLength(&catalogFaces)
+    ||entry.faceCount>arrayLength(&catalogFaces)-entry.firstFace
+    ||entry.faceCount>${OCTREE_POWER_FACE_ROW_MAX}u){fail(row,INVALID_CATALOG);return 0u;}
+  let geometry=reconstructSlot(row,slot);let reconstructionFailure=reconstructionError(geometry);
+  if(reconstructionFailure!=0u){
+    failGeometryTopology(row,slot,4096u|reconstructionFailure,metric.topologyCode,metric.transformAndFlags);
+    return 0u;
+  }
+  if(geometry.neighborSize==0.0){
+    let world=worldBoundaryBitFromNormal(geometry.normal);
+    if(world==0u||((((metric.transformAndFlags>>8u)&63u)&world)==0u)){
+      failGeometry(row,slot,8192u);return 0u;
+    }
+    return 1u;
+  }
+  let neighbor=findNeighbor(geometry.neighborCenter,geometry.neighborSize).x;
+  if(neighbor==row){failSite(row,slot,neighbor,16u);return 0u;}
+  return select(0u,1u,neighbor==INVALID||row<neighbor);
+}
 fn affectedFace(row:u32,slot:u32)->AffectedFaceResult{
   let empty=PowerFaceRecord(0u,0u,0u,0u,0.0,0.0,0.0,0.0);
   if(row>=params.dimensionsRowCount.w||!rowHeaderValid(row)){fail(row,INVALID_HEADER);return AffectedFaceResult(empty,0u);}
@@ -1158,7 +1183,7 @@ fn affectedFace(row:u32,slot:u32)->AffectedFaceResult{
     if((metric.transformAndFlags&TOPOLOGY_VALID)!=0u&&metric.topologyCode<arrayLength(&entries)){
       let entry=entries[metric.topologyCode];
       for(var slot=0u;slot<entry.faceCount&&slot<${OCTREE_POWER_FACE_ROW_MAX}u;slot+=1u){
-        emitted+=affectedFace(row,slot).emit;
+        emitted+=countAffectedFace(row,slot);
       }
     }else{fail(row,INVALID_METRIC);}
     rows[row]=RowWork(emitted,0u,0u,0u);

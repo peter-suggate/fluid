@@ -448,6 +448,22 @@ test("power-face WGSL builds, merges, and publishes CSR in parallel without atom
   assert.match(octreePowerFaceShader, /@compute @workgroup_size\(64\) fn countAffectedPowerFaceRows/);
   assert.match(octreePowerFaceShader, /@compute @workgroup_size\(256\) fn prefixAffectedPowerFaceRows/);
   assert.match(octreePowerFaceShader, /@compute @workgroup_size\(64\) fn publishAffectedPowerFaceRows/);
+  const affectedCountHelper = octreePowerFaceShader.match(
+    /fn countAffectedFace\([^]*?(?=\nfn affectedFace\()/,
+  )?.[0] ?? "";
+  const affectedCountKernel = octreePowerFaceShader.match(
+    /fn countAffectedPowerFaceRows\([^]*?(?=\n@compute @workgroup_size\(256\) fn prefixAffectedPowerFaceRows)/,
+  )?.[0] ?? "";
+  const affectedPublishKernel = octreePowerFaceShader.match(
+    /fn publishAffectedPowerFaceRows\([^]*?(?=\nfn mapOldFace)/,
+  )?.[0] ?? "";
+  assert.match(affectedCountKernel, /emitted\+=countAffectedFace\(row,slot\)/,
+    "affected-row counting must use the ownership-only face path");
+  assert.doesNotMatch(affectedCountHelper,
+    /\baffectedFace\(|\breciprocalSlot\(|\bsharedGeometry\(|\breciprocalIntersection\(|\bclipPowerPolygon\(/,
+    "counting must not repeat reciprocal search or clipped-polygon construction");
+  assert.match(affectedPublishKernel, /let result=affectedFace\(row,slot\)/,
+    "publication must retain full reciprocal and geometry validation");
   assert.match(octreePowerFaceShader, /@compute @workgroup_size\(256\) fn compactPowerFaceIdentityDelta/);
   assert.match(octreePowerFaceShader, /@compute @workgroup_size\(256\) fn mergePowerFaceIdentityDelta/);
   assert.match(octreePowerFaceShader, /@compute @workgroup_size\(64\) fn preparePowerFaceCandidateCSR/);
