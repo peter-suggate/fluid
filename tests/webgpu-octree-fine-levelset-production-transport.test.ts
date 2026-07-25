@@ -73,6 +73,22 @@ test("production fused transport accepts only the physical input clock or its ex
     "extrapolated publication must recheck the bounded clock predicate");
 });
 
+test("fused characteristic transport writes only live terminal outputs", () => {
+  const trace = wgslFunction(makeFineLevelSetProductionFusedTransportWGSL(),
+    "transportFineCharacteristic");
+  assert.doesNotMatch(trace, /positions\[local\]=vec4f\(0\)|positions\[local\]\.w=/,
+    "trajectory positions must not be initialized or rewritten when diagnostics never consume them");
+  assert.equal(trace.match(/positions\[local\]=/g)?.length, 2,
+    "only invalid-status and departure terminals may publish a diagnostic position");
+  assert.match(trace,
+    /INVALID_STATUS\|VELOCITY_UNAVAILABLE.*outcomes\[local\]=.*positions\[local\]=vec4f\(position,-1\.\);return/s);
+  assert.match(trace,
+    /flags\|=DEPARTURE;workA\[index\]=sourcePhi;outcomes\[local\]=.*positions\[local\]=vec4f\(position,-1\.\);return/s);
+  assert.doesNotMatch(trace,
+    /letsourcePhi=phi\[index\];workA\[index\]=sourcePhi/,
+    "the transported narrow band must not write source phi before overwriting it at a terminal");
+});
+
 test("production fused transport maps exact owners through the direct identity table", () => {
   const shader = makeFineLevelSetProductionFusedTransportWGSL();
   const owner = wgslFunction(shader, "directOwner");

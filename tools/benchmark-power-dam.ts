@@ -113,6 +113,11 @@ else {
       console.log(`GPU pass: ${label}: ${bucket.totalPerAdvance_ms.toFixed(3)} ms/advance · ${bucket.mean_ms.toFixed(3)} ms mean · ${bucket.samples} samples`);
     }
   }
+  if (summary.dataFlow) {
+    const dispatches = summary.dataFlow.passes.reduce((sum, pass) => sum + pass.dispatches, 0);
+    console.log(`GPU data flow: schema v${summary.dataFlow.schemaVersion} · ${summary.dataFlow.passes.length} pass labels · ${summary.dataFlow.buffers.length} buffers · ${dispatches} sampled dispatches`);
+    console.log("GPU data flow detail is retained in --json output; byte counts are binding-range upper bounds");
+  }
   console.log(`validation errors: ${summary.validationErrorCount}`);
   for (const failure of failures) console.error(`performance gate: ${failure}`);
   console.log(`acceptance: benchmark:power-dam-ui ${lane === "ui" ? "recorded above" : "required separately"}; zero validation errors ${summary.validationErrorCount === 0 ? "PASS" : "FAIL"}; performance gates ${failures.length === 0 ? "PASS" : "FAIL"}`);

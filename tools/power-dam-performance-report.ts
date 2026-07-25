@@ -4,6 +4,7 @@ import {
   type PaperPhaseId,
   type PerformanceTrace,
 } from "../lib/performance-trace";
+import type { GPUDataFlowManifest } from "./webgpu-data-flow-manifest";
 
 export interface PowerDamCommandBucket {
   readonly calls: number;
@@ -45,6 +46,7 @@ export interface PowerDamResultRecord {
   readonly validationErrors?: readonly string[];
   readonly gpuCommandAudit?: PowerDamCommandAudit;
   readonly gpuFineTimestamps?: PowerDamFineTimestampReport;
+  readonly gpuDataFlowManifest?: GPUDataFlowManifest;
   readonly physicsTrace?: PerformanceTrace;
 }
 
@@ -84,6 +86,9 @@ export interface PowerDamPerformanceSummary {
       readonly totalPerAdvance_ms: number;
     }>>;
   };
+  /** Machine-readable lineage captured from actual pipeline/bind-group/dispatch
+   * state during the same advances as fine GPU timestamps. */
+  readonly dataFlow?: GPUDataFlowManifest;
   /** Exact, exclusive generic physics accounting from one sampled advance. */
   readonly physicsTrace?: {
     readonly sampleId: number;
@@ -255,6 +260,7 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
         }],
       )),
     } } : {}),
+    ...(result.gpuDataFlowManifest ? { dataFlow: result.gpuDataFlowManifest } : {}),
     ...(trace ? { physicsTrace: {
       sampleId: trace.sampleId,
       measurementSource: trace.measurementSource,

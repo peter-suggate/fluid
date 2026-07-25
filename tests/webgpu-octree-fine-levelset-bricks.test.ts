@@ -614,8 +614,8 @@ test("production transport is fused across every factor-ratio segment", () => {
   assert.match(source, /pack\.closedDomainBoundary==0u/,
     "wall ghosts require an explicit closed-domain or authored open-top policy");
   assert.match(source,
-    /let sourcePhi=phi\[index\];workA\[index\]=sourcePhi;if\(abs\(sourcePhi\)>=pack\.transportBandDistance\)\{return;\}/,
-    "support-only samples must preserve phi before the shared scratch is committed");
+    /let sourcePhi=phi\[index\];\s*if\(abs\(sourcePhi\)>=pack\.transportBandDistance\)\{\s*workA\[index\]=sourcePhi;outcomes\[local\]=vec2u\(0u,INVALID\);return;/,
+    "support-only samples must preserve phi exactly once before the shared scratch is committed");
   assert.match(source,
     /struct DirectHint\{row:u32,descriptor:DirectRow\}[\s\S]*fn sampleCompleteVelocity\(world:vec3f,directHint:DirectHint,ownerCache:ptr<function,vec3u>\)[\s\S]*if\(!directRowContains\(hint\.row,hint\.descriptor,world\)\)\{hint=loadDirectHint\(directOwner\(world,ownerCache\)\);\}[\s\S]*directHint=complete\.directHint/,
     "piecewise segments must retain the immutable adaptive descriptor without repeating its directory search or row load");
@@ -626,7 +626,7 @@ test("production transport is fused across every factor-ratio segment", () => {
     /var<workgroup>finePageIds:array<u32,27>[\s\S]*fn prepareFinePageCache[\s\S]*fn cachedFinePage[\s\S]*let id=cachedFinePage\(brick\)/,
     "a brick workgroup must resolve its bounded departure-page neighborhood once for final interpolation");
   assert.match(source,
-    /prepareFinePageCache\(pack\.chunkBase\+local-lid,lid\);if\(local>=arrayLength/,
+    /prepareFinePageCache\(pack\.chunkBase\+local-lid,lid\);\s*if\(local>=arrayLength/,
     "every invocation must participate in page-cache publication before any lane returns");
   assert.match(source,
     /STATUS_FACE_UNAVAILABLE[\s\S]*flags\|=FACE_UNAVAILABLE[\s\S]*flags\|=INVALID_STATUS\|VELOCITY_UNAVAILABLE/,

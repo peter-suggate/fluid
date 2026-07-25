@@ -46,6 +46,12 @@ import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sce
 import { compactOctreeFieldEvidenceIsAcceptable, compactOctreePublicationHeaderEvidence,
   reconstructCompactOctreeOccupancyField,
   type CompactOctreeFieldEvidence } from "./webgpu-smoke-compact-field";
+import {
+  GPUDataFlowAudit,
+  type GPUDataFlowEncoderSession,
+  type GPUDataFlowManifest,
+  type GPUDataFlowPassRecorder,
+} from "./webgpu-data-flow-manifest";
 import { exactSection5GenerationAuditFailures, finalPerformanceAuthorityFailures }
   from "./webgpu-smoke-section5-audit";
 import { decodeOctreeMGPCGDiagnostics, octreePowerPressureDiagnosticsAreAcceptable,
@@ -2587,14 +2593,43 @@ function writtenByteLength(data: GPUAllowSharedBufferSource, dataOffset = 0, siz
   return Math.max(0, byteLength - dataOffset);
 }
 
-function auditComputePass(pass: GPUComputePassEncoder, audit: GPUCommandAudit,
-  passLabel: string): GPUComputePassEncoder {
+function auditComputePass(pass: GPUComputePassEncoder, audit: GPUCommandAudit | undefined,
+  passLabel: string, dataFlow?: GPUDataFlowPassRecorder): GPUComputePassEncoder {
   return new Proxy(pass, { get(target, property) {
+    if (property === "setPipeline") return (pipeline: GPUComputePipeline) => {
+      dataFlow?.setPipeline(pipeline);
+      return target.setPipeline(pipeline);
+    };
+    if (property === "setBindGroup") return (
+      index: number,
+      bindGroup: GPUBindGroup | null,
+      dynamicOffsets?: Iterable<number>,
+      dynamicOffsetsDataStart?: number,
+      dynamicOffsetsDataLength?: number,
+    ) => {
+      const offsets = dynamicOffsets === undefined ? undefined : Array.from(dynamicOffsets);
+      const start = dynamicOffsetsDataStart ?? 0;
+      const length = dynamicOffsetsDataLength ?? Math.max(0, (offsets?.length ?? 0) - start);
+      dataFlow?.setBindGroup(index, bindGroup, offsets?.slice(start, start + length));
+      if (dynamicOffsetsDataStart !== undefined && dynamicOffsets instanceof Uint32Array) {
+        return target.setBindGroup(
+          index, bindGroup, dynamicOffsets,
+          dynamicOffsetsDataStart,
+          dynamicOffsetsDataLength ?? Math.max(0, dynamicOffsets.length - dynamicOffsetsDataStart),
+        );
+      }
+      if (dynamicOffsets !== undefined) return target.setBindGroup(index, bindGroup, dynamicOffsets);
+      return target.setBindGroup(index, bindGroup);
+    };
     if (property === "dispatchWorkgroups") return (...args: Parameters<GPUComputePassEncoder["dispatchWorkgroups"]>) => {
-      audit.recordDispatch(passLabel, false); return Reflect.apply(target.dispatchWorkgroups, target, args);
+      audit?.recordDispatch(passLabel, false);
+      dataFlow?.direct(args[0], args[1], args[2]);
+      return Reflect.apply(target.dispatchWorkgroups, target, args);
     };
     if (property === "dispatchWorkgroupsIndirect") return (...args: Parameters<GPUComputePassEncoder["dispatchWorkgroupsIndirect"]>) => {
-      audit.recordDispatch(passLabel, true); return Reflect.apply(target.dispatchWorkgroupsIndirect, target, args);
+      audit?.recordDispatch(passLabel, true);
+      dataFlow?.indirect(args[0], Number(args[1]));
+      return Reflect.apply(target.dispatchWorkgroupsIndirect, target, args);
     };
     const value = Reflect.get(target, property, target);
     return typeof value === "function" ? value.bind(target) : value;
@@ -2605,6 +2640,7 @@ function auditCommandEncoder(
   encoder: GPUCommandEncoder,
   audit?: GPUCommandAudit,
   fineTimestamps?: GPUFineTimestampEncoderSession,
+  dataFlow?: GPUDataFlowEncoderSession,
 ): GPUCommandEncoder {
   return new Proxy(encoder, { get(target, property) {
     if (property === "clearBuffer") return (buffer: GPUBuffer, offset = 0, size?: number) => {
@@ -2618,9 +2654,10 @@ function auditCommandEncoder(
     };
     if (property === "beginComputePass") return (descriptor?: GPUComputePassDescriptor) => {
       audit?.recordComputePass(descriptor);
+      const label = descriptor?.label?.trim() || "<unlabeled compute pass>";
       const pass = target.beginComputePass(fineTimestamps?.instrument(descriptor) ?? descriptor);
-      return audit ? auditComputePass(pass, audit,
-        descriptor?.label?.trim() || "<unlabeled compute pass>") : pass;
+      const flowPass = dataFlow?.beginPass(label);
+      return audit || flowPass ? auditComputePass(pass, audit, label, flowPass) : pass;
     };
     if (property === "finish") return (descriptor?: GPUCommandBufferDescriptor) => {
       fineTimestamps?.resolve(target);
@@ -2674,6 +2711,7 @@ interface GPUSmokeResult {
   steps: number;
   gpuCommandAudit?: GPUCommandAuditReport;
   gpuFineTimestamps?: GPUFineTimestampReport;
+  gpuDataFlowManifest?: GPUDataFlowManifest;
   /** Accepted steps whose live power topology, faces, transfer, and MGPCG publication passed the generation audit. */
   powerGenerationAuditedSteps: number;
   /** Last exact owner-page self-publication observed by the per-generation
@@ -3284,6 +3322,7 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     scenario, method: result.method, phase: "result", construction_ms: Math.round(result.construction_ms), runtime_ms: Math.round(result.runtime_ms), simulationWall_ms: Math.round(result.simulationWall_ms), steps: result.steps,
     gpuCommandAudit: result.gpuCommandAudit,
     gpuFineTimestamps: result.gpuFineTimestamps,
+    gpuDataFlowManifest: result.gpuDataFlowManifest,
     powerGenerationAuditedSteps: result.powerGenerationAuditedSteps,
     ownerArenaAudit: result.ownerArenaAudit,
     mgpcgIterationAudit: result.mgpcgIterationAudit,
@@ -3429,6 +3468,7 @@ async function runGPU(
   const fineTimestampAudit = fineGPUTimestampsRequested
     ? new GPUFineTimestampAudit(device)
     : undefined;
+  const dataFlowAudit = fineGPUTimestampsRequested ? new GPUDataFlowAudit() : undefined;
   const instrumentedQueue = commandAudit ? new Proxy(device.queue, {
     get(target, property) {
       if (property === "writeBuffer") return (buffer: GPUBuffer, bufferOffset: number,
@@ -3456,22 +3496,40 @@ async function runGPU(
     get(target, property) {
       if (property === "queue") return instrumentedQueue;
       if (property === "createBuffer") return (descriptor: GPUBufferDescriptor) => {
-        commandAudit?.recordBufferAllocation(descriptor); return target.createBuffer(descriptor);
+        commandAudit?.recordBufferAllocation(descriptor);
+        const buffer = target.createBuffer(descriptor);
+        dataFlowAudit?.registry.recordBuffer(buffer, descriptor);
+        return buffer;
+      };
+      if (property === "createShaderModule") return (descriptor: GPUShaderModuleDescriptor) => {
+        const module = target.createShaderModule(descriptor);
+        dataFlowAudit?.registry.recordShader(module, descriptor);
+        return module;
       };
       if (property === "createBindGroup") return (descriptor: GPUBindGroupDescriptor) => {
-        commandAudit?.recordBindGroup(); return target.createBindGroup(descriptor);
+        commandAudit?.recordBindGroup();
+        const bindGroup = target.createBindGroup(descriptor);
+        dataFlowAudit?.registry.recordBindGroup(bindGroup, descriptor);
+        return bindGroup;
       };
       if (property === "createCommandEncoder") return (descriptor?: GPUCommandEncoderDescriptor) => {
         commandAudit?.recordCommandEncoder(descriptor);
         const encoder = target.createCommandEncoder(descriptor);
         const fineTimestamps = fineTimestampAudit?.createEncoderSession();
-        return commandAudit || fineTimestamps
-          ? auditCommandEncoder(encoder, commandAudit, fineTimestamps)
+        const dataFlow = dataFlowAudit?.createEncoderSession();
+        return commandAudit || fineTimestamps || dataFlow
+          ? auditCommandEncoder(encoder, commandAudit, fineTimestamps, dataFlow)
           : encoder;
       };
       if (property === "createComputePipeline") return (descriptor: GPUComputePipelineDescriptor) => {
         const started = performance.now(), result = target.createComputePipeline(descriptor);
+        dataFlowAudit?.registry.recordPipeline(result, descriptor);
         console.log(JSON.stringify({ scenario: scenarioId, method: method.id, phase: "pipeline", entryPoint: descriptor.compute.entryPoint, elapsed_ms: Math.round(performance.now() - started) }));
+        return result;
+      };
+      if (property === "createComputePipelineAsync") return async (descriptor: GPUComputePipelineDescriptor) => {
+        const result = await target.createComputePipelineAsync(descriptor);
+        dataFlowAudit?.registry.recordPipeline(result, descriptor);
         return result;
       };
       const value = Reflect.get(target, property, target);
@@ -3688,6 +3746,7 @@ async function runGPU(
   // profiler/readback activity after the initialized solver is warm.
   commandAudit?.reset();
   fineTimestampAudit?.start();
+  dataFlowAudit?.start();
   const runStarted = performance.now();
   let steps = 0, samplingWall_ms = 0, matched: Awaited<ReturnType<typeof readCubicVolumeField>> | undefined;
   // The perturbed cadence remains exclusive to the quadtree dam-break
@@ -3779,6 +3838,7 @@ async function runGPU(
     }
     steps += 1;
     if (fineTimestampAudit && steps >= fineGPUTimestampAdvances) fineTimestampAudit.stop();
+    if (dataFlowAudit && steps >= fineGPUTimestampAdvances) dataFlowAudit.stop();
     if (physicsTraceLogRequested) {
       const trace = (solver.info as { physicsTrace?: {
         sampleId: number; context: string; total_ms: number;
@@ -5485,9 +5545,14 @@ async function runGPU(
   }
   const simulationWall_ms = Math.max(0, performance.now() - runStarted - samplingWall_ms);
   fineTimestampAudit?.stop();
+  dataFlowAudit?.stop();
   await awaitAdvanceCompletion();
   const gpuFineTimestamps = await fineTimestampAudit?.read(
     Math.min(steps, fineGPUTimestampAdvances),
+  );
+  const gpuDataFlowManifest = dataFlowAudit?.report(
+    Math.min(steps, fineGPUTimestampAdvances),
+    gpuFineTimestamps?.byLabel,
   );
   if (performanceProfileRequested && scenarioId === "dam-break-ui" && method.id === "octree") {
     const authority = solver as GPUSolverInstance & {
@@ -5791,6 +5856,7 @@ async function runGPU(
     construction_ms, runtime_ms: performance.now() - runStarted, simulationWall_ms, steps,
     gpuCommandAudit: commandAudit?.snapshot(),
     gpuFineTimestamps,
+    gpuDataFlowManifest,
     powerGenerationAuditedSteps,
     ownerArenaAudit: lastOwnerArenaAudit,
     mgpcgIterationAudit: powerGenerationAuditedSteps > 0 ? {

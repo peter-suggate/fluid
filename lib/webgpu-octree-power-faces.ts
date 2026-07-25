@@ -985,12 +985,6 @@ fn invalidatePowerFace(faceIndex:u32,flag:u32,detail:u32){
   face.flags|=FACE_FAILURE;face.normalVelocity=bitcast<f32>(detail);
   face.openFraction=bitcast<f32>(flag);powerFaces[faceIndex]=face;
 }
-fn reduceRowFailures(count:u32){
-  for(var row=0u;row<count&&row<arrayLength(&rowDiagnostics);row+=1u){let failure=rowDiagnostics[row];if(failure.flag==0u){continue;}
-    control.flags|=failure.flag;control.invalidCount+=1u;
-    if(control.firstInvalid==INVALID){control.firstInvalid=row;control.pad0=failure.slot;control.pad1=failure.neighbor;
-      control.pad2=failure.detail;control.pad3=row;}}
-}
 fn parallelInclusiveScan(lane:u32,value:u32)->u32{
   parallelScan[lane]=value;workgroupBarrier();
   for(var offset=1u;offset<256u;offset*=2u){
@@ -1403,25 +1397,53 @@ fn rowIncidenceIdentity(row:u32,slot:u32)->RowIncidenceResult{
     // previously published coefficient.
     boundaryPhiQueries[faceIndex]=BoundaryPhiQuery(vec4f(rowCenter(face.negativeRow),geometry.inverseDistance),vec4f(geometry.neighborCenter,1.0));
 }
-@compute @workgroup_size(1) fn finalizeAndPublishPowerFaces(){
-  reduceRowFailures(min(control.rowCount,arrayLength(&rowDiagnostics)));
-  if(control.flags==0u){
-    if(arrayLength(&deltaStats)<4u||deltaStats[3]!=FACE_DELTA_VALID||control.faceCount>arrayLength(&powerFaces)){fail(0u,CAPACITY);}
-    else{for(var faceIndex=0u;faceIndex<control.faceCount;faceIndex+=1u){let face=powerFaces[faceIndex];
-      if((face.flags&FACE_FAILURE)!=0u){let failureFlag=bitcast<u32>(face.openFraction);
-        control.flags|=failureFlag;control.invalidCount+=1u;
-        if(control.firstInvalid==INVALID){control.firstInvalid=face.negativeRow;control.pad0=face.geometryCode&0xffffu;
-          control.pad1=face.positiveRow;control.pad2=bitcast<u32>(face.normalVelocity);control.pad3=faceIndex;}break;}
-      if((face.flags&FACE_VALID)==0u){fail(face.negativeRow,ASYMMETRIC_FACE);break;}
-    }}
+@compute @workgroup_size(256) fn finalizeAndPublishPowerFaces(@builtin(local_invocation_index) lane:u32){
+  // Geometry publication may invalidate any live face. Reduce both the
+  // generation-local row diagnostics and the face validity prefix in this
+  // already-required workgroup instead of serially walking them on one lane.
+  reduceRowFailuresParallel(lane,min(control.rowCount,arrayLength(&rowDiagnostics)));
+  let deltaFailure=uniformParallelEnable(lane,control.flags==0u&&
+    (arrayLength(&deltaStats)<4u||deltaStats[3]!=FACE_DELTA_VALID||control.faceCount>arrayLength(&powerFaces)));
+  if(lane==0u&&deltaFailure!=0u){
+    fail(0u,CAPACITY);
   }
-  reduceRowFailures(min(control.rowCount,arrayLength(&rowDiagnostics)));
-  let terminal=control.rowCount;let terminalValid=terminal<arrayLength(&rows)&&rows[terminal].faceCount==FACE_VALID;
-  let nonempty=control.rowCount>0u&&control.faceCount>0u&&control.incidenceCount>0u;
-  if(control.flags==0u&&control.invalidCount==0u&&terminalValid&&nonempty&&
-      arrayLength(&deltaStats)>=4u&&deltaStats[3]==FACE_DELTA_VALID){control.valid=FACE_VALID;control.pad2=0u;}
-  else{if(!nonempty){control.flags|=INVALID_HEADER;control.firstInvalid=min(control.firstInvalid,0u);control.invalidCount+=1u;}
-    control.faceCount=0u;control.incidenceCount=0u;control.valid=0u;if(arrayLength(&liveFaceDispatch)>=6u){liveFaceDispatch[3]=0u;}}
+  storageBarrier();workgroupBarrier();
+  let enabled=uniformParallelEnable(lane,control.flags==0u&&deltaFailure==0u);
+  let faceCount=uniformParallelInputA(lane,control.faceCount);
+  var firstInvalidFace=INVALID;
+  if(enabled!=0u){
+    for(var faceIndex=lane;faceIndex<faceCount;faceIndex+=256u){
+      let face=powerFaces[faceIndex];
+      if((face.flags&FACE_FAILURE)!=0u||(face.flags&FACE_VALID)==0u){
+        firstInvalidFace=min(firstInvalidFace,faceIndex);
+      }
+    }
+  }
+  parallelRows[lane]=firstInvalidFace;workgroupBarrier();
+  for(var stride=128u;stride>0u;stride/=2u){
+    if(lane<stride){parallelRows[lane]=min(parallelRows[lane],parallelRows[lane+stride]);}
+    workgroupBarrier();
+  }
+  if(lane==0u&&enabled!=0u&&parallelRows[0]!=INVALID){
+    let faceIndex=parallelRows[0];let face=powerFaces[faceIndex];
+    if((face.flags&FACE_FAILURE)!=0u){
+      let failureFlag=bitcast<u32>(face.openFraction);control.flags|=failureFlag;control.invalidCount+=1u;
+      if(control.firstInvalid==INVALID){control.firstInvalid=face.negativeRow;control.pad0=face.geometryCode&0xffffu;
+        control.pad1=face.positiveRow;control.pad2=bitcast<u32>(face.normalVelocity);control.pad3=faceIndex;}
+    }else{fail(face.negativeRow,ASYMMETRIC_FACE);}
+  }
+  storageBarrier();workgroupBarrier();
+  // Preserve the original failure-path ABI: a missing FACE_VALID bit is
+  // published through its row diagnostic, including INVALID slot/neighbor.
+  reduceRowFailuresParallel(lane,min(control.rowCount,arrayLength(&rowDiagnostics)));
+  if(lane==0u){
+    let terminal=control.rowCount;let terminalValid=terminal<arrayLength(&rows)&&rows[terminal].faceCount==FACE_VALID;
+    let nonempty=control.rowCount>0u&&control.faceCount>0u&&control.incidenceCount>0u;
+    if(control.flags==0u&&control.invalidCount==0u&&terminalValid&&nonempty&&
+        arrayLength(&deltaStats)>=4u&&deltaStats[3]==FACE_DELTA_VALID){control.valid=FACE_VALID;control.pad2=0u;}
+    else{if(!nonempty){control.flags|=INVALID_HEADER;control.firstInvalid=min(control.firstInvalid,0u);control.invalidCount+=1u;}
+      control.faceCount=0u;control.incidenceCount=0u;control.valid=0u;if(arrayLength(&liveFaceDispatch)>=6u){liveFaceDispatch[3]=0u;}}
+  }
 }
 @compute @workgroup_size(64) fn commitPowerFaceGeometry(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) workgroups:vec3u){
   if(control.valid!=FACE_VALID||control.flags!=0u){return;}

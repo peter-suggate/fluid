@@ -509,8 +509,16 @@ test("power-face WGSL builds, merges, and publishes CSR in parallel without atom
   assert.doesNotMatch(octreePowerFaceShader, /\batomic(?:Add|And|CompareExchangeWeak|Exchange|Load|Max|Min|Or|Store|Sub|Xor)\b|atomic<u32>/,
     "fixed row/face records and deterministic reductions must eliminate every power-face synchronization atomic");
   assert.match(octreePowerFaceShader.replace(/\s+/g, ""),
-    /fninvalidatePowerFace\(faceIndex:u32,flag:u32,detail:u32\)[\s\S]*face\.openFraction=bitcast<f32>\(flag\)[\s\S]*fnfinalizeAndPublishPowerFaces\(\)[\s\S]*letfailureFlag=bitcast<u32>\(face\.openFraction\);control\.flags\|=failureFlag/,
+    /fninvalidatePowerFace\(faceIndex:u32,flag:u32,detail:u32\)[\s\S]*face\.openFraction=bitcast<f32>\(flag\)[\s\S]*fnfinalizeAndPublishPowerFaces\(@builtin\(local_invocation_index\)lane:u32\)[\s\S]*letfailureFlag=bitcast<u32>\(face\.openFraction\);control\.flags\|=failureFlag/,
     "face-parallel failures must publish one deterministic error flag/detail record for finalization");
+  assert.match(octreePowerFaceShader.replace(/\s+/g, ""),
+    /@compute@workgroup_size\(256\)fnfinalizeAndPublishPowerFaces[\s\S]*for\(varfaceIndex=lane;faceIndex<faceCount;faceIndex\+=256u\)[\s\S]*parallelRows\[lane\]=firstInvalidFace/,
+    "final publication must validate the live face prefix cooperatively");
+  assert.doesNotMatch(octreePowerFaceShader, /fn reduceRowFailures\(/,
+    "the removed serial row-diagnostic walker must not remain in the production shader");
+  assert.match(octreePowerFaceShader.replace(/\s+/g, ""),
+    /\}else\{fail\(face\.negativeRow,ASYMMETRIC_FACE\);\}[\s\S]*reduceRowFailuresParallel\(lane,min\(control\.rowCount,arrayLength\(&rowDiagnostics\)\)\)/,
+    "a missing FACE_VALID bit must retain the row-diagnostic failure ABI");
   assert.match(octreePowerFaceShader, /let faceGroups=\(faceTotal\+63u\)\/64u;liveFaceDispatch\[0\]=faceGroups;liveFaceDispatch\[1\]=1u/,
     "compact face consumers must launch only the published live prefix");
   assert.match(octreePowerFaceShader,
