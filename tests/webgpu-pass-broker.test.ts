@@ -144,10 +144,10 @@ test("PassBroker cutover has no raw-encoder adapter or proxy facade", () => {
   assert.doesNotMatch(octreeSource, /faces\.encodeRowDirectory/,
     "the retired duplicate face-directory prepass must stay deleted");
   assert.match(octreeSource,
-    /operator\.encodeAssemblyFromControl\(broker,[\s\S]*splitProductionPhase\("powerOperatorRhsAssembly"\);[\s\S]*operator\.encodeLeafRowPublication\(broker,/,
+    /operator\.encodeAssemblyFromControl\(broker,[\s\S]*splitProductionPhase\(undefined, "powerOperatorRhsAssembly"\);[\s\S]*operator\.encodeLeafRowPublication\(broker,/,
     "normal recurring assembly and leaf-row publication must share the pressure-spine broker");
   assert.doesNotMatch(octreeSource,
-    /splitProductionPhase\("powerOperatorRhsAssembly", true\)/,
+    /splitProductionPhase\(undefined, "powerOperatorRhsAssembly", true\)/,
     "intrusive phase attribution must not impose a routine production fence");
   assert.doesNotMatch(octreeSource, /this\.faceMirror|this\.faceTransport|this\.solidFaces/,
     "the deleted Cartesian face lane must not remain in the pressure spine");

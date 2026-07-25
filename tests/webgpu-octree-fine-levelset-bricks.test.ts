@@ -617,7 +617,7 @@ test("production transport is fused across every factor-ratio segment", () => {
     /let sourcePhi=phi\[index\];workA\[index\]=sourcePhi;if\(abs\(sourcePhi\)>=pack\.transportBandDistance\)\{return;\}/,
     "support-only samples must preserve phi before the shared scratch is committed");
   assert.match(source,
-    /struct DirectHint\{row:u32,descriptor:DirectRow\}[\s\S]*fn sampleCompleteVelocity\(world:vec3f,directHint:DirectHint,ownerCache:ptr<function,vec3u>\)[\s\S]*if\(!directRowContains\(hint\.row,hint\.descriptor,world\)\)\{hint=loadDirectHint\(directOwner\(world\)\);\}[\s\S]*directHint=complete\.directHint/,
+    /struct DirectHint\{row:u32,descriptor:DirectRow\}[\s\S]*fn sampleCompleteVelocity\(world:vec3f,directHint:DirectHint,ownerCache:ptr<function,vec3u>\)[\s\S]*if\(!directRowContains\(hint\.row,hint\.descriptor,world\)\)\{hint=loadDirectHint\(directOwner\(world,ownerCache\)\);\}[\s\S]*directHint=complete\.directHint/,
     "piecewise segments must retain the immutable adaptive descriptor without repeating its directory search or row load");
   assert.match(source,
     /ownerAtCached\(vec3u\(floor\(grid\)\),ownerCache\)[\s\S]*var ownerCache=vec3u\(0u\)[\s\S]*sampleCompleteVelocity\(position,directHint,&ownerCache\)/,
@@ -672,10 +672,10 @@ test("production transport is fused across every factor-ratio segment", () => {
 test("production fused transport resolves retained rows by exact cell and size identity", () => {
   const source = makeFineLevelSetProductionFusedTransportWGSL().replace(/\s+/g, "");
   assert.match(source,
-    /fnrowOfIdentity\(cellKey:u32,size:u32\)->u32\{[\s\S]*letrow=airAuthority\[at\+1u\];if\(row>=pack\.bandRowCount\)\{returnINVALID;\}[\s\S]*letrowSize=loadBandRow\(row\)\.size;if\(bandRowIdentityLess\(key,rowSize,cellKey,size\)\)/,
-    "binary search must compare the referenced packed row size when cell origins collide");
+    /fnbandIdentitySlot\(cellKey:u32,size:u32\)->u32\{[\s\S]*letlevel=31u-countLeadingZeros\(size\);[\s\S]*returnrelative\+cellKey;\}/,
+    "the level-major identity table must map exact cell and size identities in O(1)");
   assert.match(source,
-    /candidate\.cell==cellKey&&candidate\.size==size/,
+    /fnrowOfIdentity[\s\S]*candidate\.cell==cellKey&&candidate\.size==size/,
     "a directory hit must publish only the exact row identity");
   assert.match(source,
     /fnretainedBandAnchor[\s\S]*letband=rowOfIdentity\(cell\(origin\),size\)/,
@@ -688,7 +688,7 @@ test("fine redistance applies its inclusive residual tolerance at telemetry prec
   assert.match(fineLevelSetJFACPTWGSL,
     /residual=u32\([\s\S]*unresolved=select\(0u,1u,residual>u32\(p\.tolerance\*1000000\.\)\)/);
   assert.match(fineLevelSetJFACPTWGSL,
-    /finalizeAndCommitJFADistances[\s\S]*control\.residualScaled=reduceMaximum\[0\]/);
+    /finalizeJFADistances[\s\S]*control\.residualScaled=reduceMaximum\[0\]/);
   assert.doesNotMatch(fineLevelSetJFACPTWGSL, /if\(residual>p\.tolerance\)/);
   assert.doesNotMatch(fineLevelSetJFACPTWGSL,
     /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
@@ -719,9 +719,10 @@ test("fine redistance construction requires the topology-authored delta ABI", ()
 });
 
 test("fine redistance is fixed-pass JFA-CPT", () => {
-  assert.deepEqual(planFineLevelSetJFAStrides(21), [32, 16, 8, 4, 2, 1, 1]);
-  assert.deepEqual(planFineLevelSetJFAStrides(1), [1, 1]);
-  assert.deepEqual(planFineLevelSetJFAStrides(2), [2, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(21), [4, 2, 1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(21, 21), [32, 16, 8, 4, 2, 1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(1), [1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(2), [2, 1, 1, 1]);
   assert.match(fineLevelSetJFACPTWGSL,
     /d<bestD\|\|\(d==bestD&&seedStableKey\(candidate\)<seedStableKey\(best\)\)/,
     "equal-distance propagation must choose the stable global sample key");
@@ -896,7 +897,8 @@ test("fine redistance binds exactly the resources reachable from each compute en
     resolveClosestPointsAToB: [0, 2, 3, 4, 5, 6, 7, 9],
     resolveClosestPointsBToCanonical: [0, 2, 3, 4, 5, 6, 7, 9],
     validateJFADistances: [0, 1, 2, 3, 4, 5, 7, 9, 10],
-    finalizeAndCommitJFADistances: [0, 2, 3, 4, 5, 6, 7, 8, 9],
+    finalizeJFADistances: [0, 3, 8, 9],
+    commitJFADistances: [0, 2, 3, 4, 5, 6, 7, 8],
   };
   assert.deepEqual(Object.fromEntries([...observed].map(([entryPoint, bindings]) =>
     [entryPoint, [...bindings].sort((a, b) => a - b)])), expected);
@@ -962,8 +964,9 @@ test("recurring fine redistance canonicalizes opposite flood parities on the sam
       || entryPoint.startsWith("resolveClosestPoints")));
   assert.deepEqual(recurrence, [
     ["seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB",
+      "jumpFloodBToA", "resolveClosestPointsAToB"],
+    ["seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB",
       "resolveClosestPointsBToCanonical"],
-    ["seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA", "resolveClosestPointsAToB"],
   ]);
   assert.equal(parameterWrites, 2,
     "each recurring encode uploads one parameter block, independent of the JFA stride count");
@@ -1024,25 +1027,25 @@ test("factor-4 JFA-CPT redistance is one pass over topology-published delta disp
   assert.equal(passes.length, 1);
   assert.deepEqual(copies, [],
     "JFA must consume topology's immutable command publication without recurring copies");
-  assert.deepEqual(indirectOffsets, [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 84],
-    "support-mask publication plus seed/flood/resolve consume JFA support while validation alone touches the dirty dispatch");
+  assert.deepEqual(indirectOffsets, [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 84, 84],
+    "support-mask publication plus seed/flood/resolve consume JFA support while validation and parallel commit touch the dirty dispatch");
   assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
     /updateIndirectBuffer|dispatchWorkgroupsIndirect\(this\.delta\.pageDelta/,
     "the writable page-delta transaction must never be consumed as an indirect command buffer");
   assert.deepEqual(passes[0], ["publishSupportPageMask",
     "seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA",
     "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB", "jumpFloodBToA",
-    "jumpFloodAToB", "resolveClosestPointsBToCanonical", "validateJFADistances",
-    "finalizeAndCommitJFADistances"]);
-  assert.equal(passes[0].length, 12,
+    "jumpFloodAToB", "jumpFloodBToA", "resolveClosestPointsAToB", "validateJFADistances",
+    "finalizeJFADistances", "commitJFADistances"]);
+  assert.equal(passes[0].length, 14,
     "generation-stamped direct support membership needs one bounded publication and no capacity clear");
   assert.match(fineLevelSetJFACPTWGSL, /override JFA_STRIDE:u32=1u/);
   assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
-    /jfaParams|initializeJFAControl|reduceJFASeedStats|reduceJFAResolveStats|reduceJFAValidationStats|finalizeJFADistances|commitJFADistances/,
-    "mutable stride buffers and the retired scalar/reduction/publication pipelines must stay deleted");
+    /jfaParams|initializeJFAControl|reduceJFASeedStats|reduceJFAResolveStats|reduceJFAValidationStats/,
+    "mutable stride buffers and the retired scalar reduction pipelines must stay deleted");
   assert.equal(passes[0].filter((entryPoint) =>
     entryPoint === "seedClosestPoints" || entryPoint.startsWith("jumpFlood")
-      || entryPoint.startsWith("resolveClosestPoints")).length, 9,
+      || entryPoint.startsWith("resolveClosestPoints")).length, 10,
     "the 21-cell distance transform is one seed, seven floods, and one resolve dispatch");
 });
 

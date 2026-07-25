@@ -21,7 +21,7 @@ export const OCTREE_ENERGY_LEDGER_STAGES = [
   "postFineTopologyCommon",
   "postFineRedistance",
   "postFineRedistanceCommon",
-  "postFineVolumeCorrection",
+  "postFineVolumeMeasurement",
 ] as const;
 
 export type OctreeEnergyLedgerStage = typeof OCTREE_ENERGY_LEDGER_STAGES[number];
@@ -233,7 +233,7 @@ export class WebGPUOctreeEnergyLedger {
 
   /** Append an observational fine reduction without splitting publication. */
   encodeFinePotential(broker: PassBroker, stage: Extract<OctreeEnergyLedgerStage,
-    "preFineTransport" | "postFineTransport" | "postFineTopology" | "postFineRedistance" | "postFineVolumeCorrection">,
+    "preFineTransport" | "postFineTransport" | "postFineTopology" | "postFineRedistance" | "postFineVolumeMeasurement">,
   source: WebGPUFineLevelSetBrickSource): void {
     if (this.destroyed) throw new Error("Energy ledger is destroyed");
     const itemCapacity = source.plan.maximumResidentBricks * source.plan.samplesPerBrick;

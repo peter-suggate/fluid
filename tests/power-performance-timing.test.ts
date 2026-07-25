@@ -22,10 +22,34 @@ test("authoritative power work maps onto semantic adjacent-boundary phases", () 
   assert.match(solver, /physicsTrace\?\.resolve\(encoder\)/);
 });
 
+test("all seven collapsed engine phases map to timestamp categories", () => {
+  for (const phase of [
+    "structureEpoch",
+    "rowEngineA",
+    "solveEngine",
+    "rowEngineB",
+    "brickEngineA",
+    "closestPointWaves",
+    "brickEngineB",
+  ] as const) {
+    assert.match(
+      solver,
+      new RegExp(`${phase}: \\{ id: "[^"]+", label: "\\[engine:[^\\]]+\\]`),
+      `${phase} must retain a machine-visible engine timestamp category`,
+    );
+  }
+  assert.match(
+    solver,
+    /encodeSurface\(encoder, dt, surfaceInflow[^]*OCTREE_SEMANTIC_TRACE_PHASE\[phase\]/,
+    "surface checkpoints must use the same exhaustive semantic timestamp map",
+  );
+});
+
 test("topology, every CFL rebuild, and adaptive surface publication close generic phases", () => {
   assert.match(solver, /encodeInlineRebuild\(encoder\)[^]*completePhysicsPhase\(encoder, this\.adaptiveProjection/);
   assert.match(solver, /substep > 0[^]*encodeInlineRebuild\(encoder\)[^]*CFL substep topology refresh/);
-  assert.match(solver, /encodeSurface\(encoder, dt, surfaceInflow[^]*completePhysicsPhase\(completedEncoder, mapped\)/);
+  assert.match(solver,
+    /encodeSurface\(encoder, dt, surfaceInflow[^]*completePhysicsPhase\(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE\[phase\]\)/);
   assert.doesNotMatch(solver + octree, /timing start|timing end|beginRange\(|endRange\(/);
 });
 

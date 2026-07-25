@@ -40,7 +40,7 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
 
   const encode = WebGPUFineLevelSetRedistance.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(encode, /fineFactor!==4&&this\.source\.plan\.fineFactor!==8/);
-  assert.match(encode, /this\.encodeJFA\(broker,bytes,options\.bandCells\)/,
+  assert.match(encode, /this\.encodeJFA\(broker,bytes,options\.bandCells,tolerance\)/,
     "factor-8 uses the same mandatory fixed-resident JFA-CPT path as factor-4");
   assert.doesNotMatch(encode, /method===|fast-sweeping/,
     "the retired redistance selector must stay deleted");
@@ -279,8 +279,8 @@ test("Dawn production-width factor-8 topology publishes the complete twelve-ring
   // production physical-band capacity planner.
   // At factor eight each leaf covers 2^3 globally keyed bricks; the topology
   // pass must deduplicate these and add the complete production support: the
-  // factor-8 default has 8 backtrace + 1 interpolation + 32 redistance cells,
-  // rounded to eleven B4 rings plus one publication-safety ring.
+  // factor-8 default has max(8 backtrace + 1 interpolation, 43 redistance)
+  // cells, rounded to eleven B4 rings plus one publication-safety ring.
   const leafCount = 60 * 45; const leafBytes = new ArrayBuffer(leafCount * 64);
   const words = new Uint32Array(leafBytes); const floats = new Float32Array(leafBytes);
   for (let y = 0; y < 45; y += 1) for (let x = 0; x < 60; x += 1) {
@@ -301,7 +301,7 @@ test("Dawn production-width factor-8 topology publishes the complete twelve-ring
   topology.encode(broker, seeds.encodeFromAllInterfaceLeaves(broker, { buffer: leaves }, { buffer: rowCount }), [], {
     maximumBacktraceFineCells: 8,
     interpolationSupportFineCells: 1,
-    redistanceBandFineCells: 32,
+    redistanceBandFineCells: 43,
     safetyBrickRings: 1,
   });
   encoder.copyBufferToBuffer(topology.control, 0, headerReadback, 0, 36);
@@ -312,8 +312,8 @@ test("Dawn production-width factor-8 topology publishes the complete twelve-ring
   const control = unpackFineLevelSetGPUTopologyControl(header);
   assert.equal(control.flags, 0, JSON.stringify({ header: [...header], control }));
   assert.equal(control.published, true); assert.equal(control.rolledBack, false);
-  assert.equal(control.interfaceBricks, 0,
-    "interfaceBricks counts reused current-generation sign changes; this cold checkpoint is seeded externally");
+  assert.equal(control.interfaceBricks, 21_600,
+    "the cold checkpoint must retain the exact externally seeded interface-brick population");
   assert.equal(control.desiredBricks, 280_800,
     "a maximum-area x/y factor-8 plane dilated by twelve rings occupies exactly 120 x 90 x 26 bricks");
   assert.equal(control.requiredDesiredBricks, control.desiredBricks);
@@ -321,7 +321,9 @@ test("Dawn production-width factor-8 topology publishes the complete twelve-ring
   assert.equal(control.dilationBrickRings, 12);
   assert.equal(maximumResidentBricks - control.desiredBricks, 56_700);
   assert.ok(control.desiredBricks <= maximumResidentBricks);
-  assert.equal(header[8], control.desiredBricks); assert.equal(header[9], 2);
+  assert.equal(header[8], control.interfaceSeedBricks);
+  assert.equal(header[9], control.desiredBricks);
+  assert.equal(header[10], 2, "published worklist must carry generation 2");
 
   headerReadback.destroy(); topology.destroy(); seeds.destroy(); leaves.destroy(); rowCount.destroy();
   owner.destroy(); device.destroy();

@@ -65,6 +65,13 @@ export interface WebGPUUniformEulerianOptions { pressureIterations?: number; vel
 const uniformPipelineCache = new WeakMap<GPUDevice, Map<UniformVelocityTransport, GPUComputePipeline[]>>();
 
 const OCTREE_SEMANTIC_TRACE_PHASE: Readonly<Record<OctreeSemanticPhase, GPUTimestampPhase>> = {
+  structureEpoch: { id: "coarse-grid", label: "[engine:structure-epoch] Structure epoch" },
+  rowEngineA: { id: "velocity-advection", label: "[engine:row-a] Coarse values + face completion" },
+  solveEngine: { id: "pressure-solve", label: "[engine:solve] Galerkin pressure solve" },
+  rowEngineB: { id: "velocity-extrapolation", label: "[engine:row-b] Projection + velocity extension" },
+  brickEngineA: { id: "fine-sdf-advection", label: "[engine:brick-a] Fine transport + topology" },
+  closestPointWaves: { id: "fine-sdf-redistance", label: "[engine:cpt-waves] Closest-point waves" },
+  brickEngineB: { id: "adaptive-publication", label: "[engine:brick-b] Fine harvest + epoch gate" },
   pressureLeafCompactionL1Capture: { id: "pressure-system", label: "Liquid rows + L1 capture" },
   powerDescriptorTopologyFaces: { id: "power-topology", label: "Power topology + physical faces" },
   powerFaceRegularCompletion: { id: "velocity-advection", label: "Generalized-face velocity completion" },
@@ -77,12 +84,6 @@ const OCTREE_SEMANTIC_TRACE_PHASE: Readonly<Record<OctreeSemanticPhase, GPUTimes
   faceBandClosestPointExtension: { id: "velocity-extrapolation", label: "Closest-point velocity extension" },
   faceBandPowerPublicationCapture: { id: "velocity-extrapolation", label: "Extended power-face publication" },
   powerProjectionTail: { id: "velocity-projection", label: "Solid impulse + projection publication" },
-};
-
-const FINE_TRACE_PHASE: Readonly<Record<
-  "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance" | "fineRestriction",
-  GPUTimestampPhase
->> = {
   finePreparation: { id: "fine-sdf-advection", label: "Fine SDF seed + transport preparation" },
   fineTransport: { id: "fine-sdf-advection", label: "Factor-m fine SDF advection" },
   fineTopology: { id: "coarse-grid", label: "Fine narrow-band topology" },
@@ -1672,9 +1673,7 @@ export class WebGPUUniformEulerianSolver {
           // continuing on the stale reference would finish it a second time.
           encoder = this.octreeProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s,
             physicsTrace || segmentedPhysicsTrace ? (phase, completedEncoder) => {
-              const mapped = FINE_TRACE_PHASE[phase as keyof typeof FINE_TRACE_PHASE]
-                ?? { id: "adaptive-publication" as const, label: "Fine surface publication" };
-              return completePhysicsPhase(completedEncoder, mapped);
+              return completePhysicsPhase(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE[phase]);
             } : undefined);
         } else {
           this.adaptiveProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s);
