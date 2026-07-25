@@ -120,6 +120,8 @@ test("compute-pass attribution aggregates indexed native labels into stable owni
   computePassesByLabel["Prepare global fine trajectory chunk 2/4"] = { calls: 2, bytes: 0 };
   computePassesByLabel["Publish grouped Stage-B and face-band transport authorities"] =
     { calls: 2, bytes: 0 };
+  computePassesByLabel["Publish complete global fine velocity cache 1/1"] =
+    { calls: 2, bytes: 0 };
   computePassesByLabel["Summarize global fine departure chunk 1/1"] = { calls: 2, bytes: 0 };
   computePassesByLabel["Finalize global fine departure chunk 1/1"] = { calls: 2, bytes: 0 };
   computePassesByLabel["Rank fixed octree fine-seed candidate records"] = { calls: 2, bytes: 0 };
@@ -132,6 +134,7 @@ test("compute-pass attribution aggregates indexed native labels into stable owni
     "Section 5 face band · catalog adjacency": 2,
     "Fine transport · prepare trajectory chunks": 2,
     "Fine transport · grouped authorities": 1,
+    "Fine transport · velocity cache": 1,
     "Fine transport · summarize departure chunks": 1,
     "Fine transport · finalize departure summaries": 1,
     "Fine seed adapter": 2,
@@ -141,6 +144,8 @@ test("compute-pass attribution aggregates indexed native labels into stable owni
 
 test("compute-pass attribution is a closed ownership table", () => {
   assert.equal(powerDamComputePassStage("Prepare exact owner-page delta dispatch"), "Octree owner pages");
+  assert.equal(powerDamComputePassStage("Publish complete global fine velocity cache 1/1"),
+    "Fine transport · velocity cache");
   assert.equal(powerDamComputePassStage("A newly introduced mystery pass"), undefined);
 
   const summary = summarizePowerDamPerformance({

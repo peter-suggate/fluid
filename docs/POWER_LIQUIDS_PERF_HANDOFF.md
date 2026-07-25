@@ -1,10 +1,40 @@
 # Power Liquids Performance Handoff
 
-**Date:** 2026-07-24 · **Tree:** `903ce08` + uncommitted work · **Scene:** mini dam break 16³ (Dawn, M1 Max) and UI lane (`octree:sim-0.148000`)
+**Date:** 2026-07-25 · **Scene:** mini dam break 16³ (Dawn, M1 Max) and UI lane (`octree:sim-0.148000`)
 
 ## TLDR
 
 The pipeline is not missing one clever optimization. It has a structural disease: **every phase pays a fixed, scene-size-independent cost** because the discretization is re-derived from scratch every step. The uniform solver being ~100x faster is the expected consequence — it does direct array indexing over a fixed dispatch list; this pipeline rebuilds topology, re-meshes the face band, and hash-probes directories per row per step. The plan that works is **deletions and direct lookups, not fusions** (dispatch-count cuts measured wall-neutral).
+
+## 2026-07-25 characteristic-cache experiment
+
+The M1 Max single-chunk lane now reuses the dormant velocity-prepass
+result/status arena to publish complete velocity once per live fine node. A
+fast trace interpolates that cache only in positive air farther than one
+maximum characteristic displacement from the interface. Liquid, protected
+interface samples, mixed direct/extrapolated cells, domain departures, and
+cache misses run the original exact arbitrary-point Section-5 sampler.
+Multi-chunk devices retain the exact path.
+
+| Variant | Total | Complete-velocity cache | Cached trace | Exact fallback | Characteristic total |
+|---|---:|---:|---:|---:|---:|
+| Committed exact baseline | 69.44 ms | — | — | 15.48 ms | 15.48 ms |
+| Mode-consistent cache, no interface guard | 63.85 ms | 4.72 ms | 0.39 ms | 5.18 ms | 10.29 ms |
+| Protected positive-air cache | 66.92 ms | 4.65 ms | 0.20 ms | 6.82 ms | 11.67 ms |
+
+The unguarded result is deliberately not the accepted number: its 500-step
+run completed without non-finite values but crossed the strict connectivity
+gate (98.48% dominant component versus the 99% minimum). The protected
+variant retains a **2.52 ms/advance (3.6%)** total gain and a **24.6%**
+characteristic-stage gain while keeping interface and liquid samples exact.
+The exact two-step and 500-step gates pass; the latter reproduces the committed
+baseline stability envelope exactly. Treat that full gate as mandatory
+authority before changing the guard or accepting a faster variant.
+
+Fine timestamp attribution owns all three new passes independently and the
+compute-pass table is again closed. The cache adds two passes and two
+dispatches per advance (50/796 versus 48/794) without allocating another
+arena.
 
 ## 2026-07-24 implementation log — UI throughput authority
 

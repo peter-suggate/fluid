@@ -101,8 +101,8 @@ test("factor-4 small dam break batches paper Section 5 transport within portable
     chunkCount: 1,
     segmentCount: 4,
     passesPerSegment: 0,
-    passesPerChunk: 2,
-    encodedPasses: 5,
+    passesPerChunk: 4,
+    encodedPasses: 7,
   });
   assert.equal(planFineLevelSetGPUTransportPasses(current, 4).passesPerSegment, 0,
     "the fused cutover has no staged per-segment sampling passes");

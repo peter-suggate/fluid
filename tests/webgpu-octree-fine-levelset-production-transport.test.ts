@@ -35,8 +35,24 @@ test("fused air transport consumes the retained power-generation clock", () => {
 test("fine GPU timestamps attribute authorities, tracing, summaries, and commits separately", () => {
   const source = WebGPUFineLevelSetTransport.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(source,
-    /PublishgroupedStage-Bandface-bandtransportauthorities.*encodeFusedAuthority.*encodeFusedAuthority.*groupedtransportauthoritiespublished.*Validateandpublishliveglobalfinedispatches.*finetransportdispatchesvalidated.*Traceandsampleglobalfinecharacteristic.*finecharacteristictraced.*Summarizeglobalfinedeparturechunk.*finedeparturechunksummarized.*Publishglobalfinetransport.*finetransportstatuspublished.*Commitglobalfinetransportphasemasks.*finetransportphasemaskscommitted/s,
+    /PublishgroupedStage-Bandface-bandtransportauthorities.*encodeFusedAuthority.*encodeFusedAuthority.*groupedtransportauthoritiespublished.*Validateandpublishliveglobalfinedispatches.*finetransportdispatchesvalidated.*Publishcompleteglobalfinevelocitycache.*completefinevelocitycachepublished.*Tracecachedglobalfinecharacteristic.*cachedfinecharacteristictraced.*Traceexactglobalfinecharacteristicfallback.*finecharacteristictraced.*Summarizeglobalfinedeparturechunk.*finedeparturechunksummarized.*Publishglobalfinetransport.*finetransportstatuspublished.*Commitglobalfinetransportphasemasks.*finetransportphasemaskscommitted/s,
     "each expensive transport substage must own an independently timestampable compute pass");
+});
+
+test("cached fine tracing protects the interface and falls back on mixed velocity modes", () => {
+  const shader = makeFineLevelSetProductionFusedTransportWGSL();
+  const interpolate = wgslFunction(shader, "trilinearCachedVelocity");
+  const trace = wgslFunction(shader, "transportFineCharacteristicCached");
+  const exact = wgslFunction(shader, "transportFineCharacteristic");
+  assert.match(interpolate, /sampleMode=sampled\.status&STATUS_EXTRAPOLATED.*sampleMode!=mode/s,
+    "direct and extrapolated complete-velocity modes must never be blended");
+  assert.match(trace,
+    /interfaceGuard=f32\(params\.fineFactor\)\*params\.fineCellWidth.*sourcePhi<=interfaceGuard.*PENDING_EXACT/s);
+  assert.match(trace,
+    /value\.x<=interfaceGuard.*PENDING_EXACT/s,
+    "cached transport must not author liquid or the protected air-side zero-level-set neighborhood");
+  assert.match(exact, /pack\.pad0!=0u.*PENDING_EXACT.*==0u.*return/s,
+    "the exact kernel must revisit only cache misses when the cache path is enabled");
 });
 
 test("fine departure diagnostics use a deterministic parallel two-level reduction", () => {
@@ -147,9 +163,11 @@ test("Dawn accepts the direct-identity fused transport pipeline", {
     const errors=info.messages.filter((message)=>message.type==="error");
     if(errors.length)throw new Error(errors.map((message)=>
       message.lineNum+":"+message.linePos+" "+message.message).join("\\n"));
-    device.createComputePipeline({layout:"auto",compute:{
-      module,entryPoint:"transportFineCharacteristic",
-    }});
+    for(const entryPoint of [
+      "publishFineVelocityCache",
+      "transportFineCharacteristicCached",
+      "transportFineCharacteristic",
+    ])device.createComputePipeline({layout:"auto",compute:{module,entryPoint}});
     const validation=await device.popErrorScope();
     if(validation)throw validation;
     device.destroy();

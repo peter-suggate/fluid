@@ -136,10 +136,11 @@ export interface FineLevelSetTransportTopologyDelta {
 
 /**
  * Static command-count contract for Section 5's piecewise-linear trace.
- * Production packs the minimum portable direct/air sampler publications, then
- * one dense kernel performs every m sample and final phi interpolation. The
- * owner-page publication is consumed directly; outcome reduction/publication
- * remains dense and atomic-free.
+ * A single-chunk transport can reuse the dormant prepass result/status arena
+ * as a complete fine-lattice velocity cache. It publishes that cache, traces
+ * the cache-safe far field, and runs an exact sparse fallback before the
+ * existing deterministic reduction. Multi-chunk devices retain the original
+ * exact fused trace because their prepass arena cannot hold the full lattice.
  */
 export function planFineLevelSetGPUTransportPasses(
   plan: Pick<FineLevelSetGPUTransportPlan, "chunkCount">,
@@ -149,7 +150,7 @@ export function planFineLevelSetGPUTransportPasses(
     throw new RangeError("Fine transport pass plan requires at least one chunk");
   }
   const passesPerSegment = 0;
-  const passesPerChunk = 2;
+  const passesPerChunk = plan.chunkCount === 1 ? 4 : 2;
   return {
     chunkCount: plan.chunkCount,
     segmentCount,
@@ -176,9 +177,13 @@ export function unpackFineLevelSetGPUTransportControl(words: ArrayLike<number>):
 }
 
 /**
- * Paper section 5 transport on the global uniform fine lattice.  Trajectory
- * positions stay GPU-resident and Stage-B octree velocity is queried again
- * before every one of the m=fineFactor piecewise-linear segments.
+ * Paper section 5 transport on the global uniform fine lattice. Trajectory
+ * positions stay GPU-resident. On single-chunk devices, complete velocity is
+ * materialized once at fine nodes and interpolated only in the positive-air
+ * field beyond one maximum characteristic displacement; liquid, mixed
+ * direct/extrapolated cells, boundary samples, and the protected interface
+ * band query the exact Stage-B octree interpolant for all m=fineFactor
+ * segments.
  */
 export class WebGPUFineLevelSetTransport {
   readonly control: GPUBuffer;
@@ -203,8 +208,11 @@ export class WebGPUFineLevelSetTransport {
     readonly directAuthority: GPUBuffer;
     readonly airAuthority: GPUBuffer;
     readonly params: readonly GPUBuffer[];
-    readonly pipeline: GPUComputePipeline;
+    readonly cachePipeline: GPUComputePipeline;
+    readonly cachedTracePipeline: GPUComputePipeline;
+    readonly exactFallbackPipeline: GPUComputePipeline;
   };
+  private readonly useCompleteVelocityCache: boolean;
   private destroyed = false;
 
   constructor(
@@ -226,6 +234,7 @@ export class WebGPUFineLevelSetTransport {
     }
     this.plan = planFineLevelSetGPUTransport(this.queryCapacity, velocityPrepass.source.queryCapacity,
       source.plan.maximumResidentBricks);
+    this.useCompleteVelocityCache = velocityPrepass.source.queryCapacity >= this.queryCapacity;
     this.positions = device.createBuffer({ label: "fine-levelset trajectory positions",
       size: this.plan.positionBytes, usage: GPUBufferUsage.STORAGE });
     this.outcomes = device.createBuffer({ label: "fine-levelset trajectory outcomes",
@@ -283,7 +292,11 @@ export class WebGPUFineLevelSetTransport {
       const fusedModule = device.createShaderModule({ label: "Fused production fine characteristic",
         code: makeFineLevelSetProductionFusedTransportWGSL() });
       this.fused = { plan: packed, directAuthority: direct.authority, airAuthority: air.authority, params: fusedParams,
-        pipeline: device.createComputePipeline({ label: "Trace and sample complete fine characteristic",
+        cachePipeline: device.createComputePipeline({ label: "Publish complete fine velocity cache",
+          layout: "auto", compute: { module: fusedModule, entryPoint: "publishFineVelocityCache" } }),
+        cachedTracePipeline: device.createComputePipeline({ label: "Trace cached fine characteristic",
+          layout: "auto", compute: { module: fusedModule, entryPoint: "transportFineCharacteristicCached" } }),
+        exactFallbackPipeline: device.createComputePipeline({ label: "Trace exact fine characteristic fallback",
           layout: "auto", compute: { module: fusedModule, entryPoint: "transportFineCharacteristic" } }) };
     }
   }
@@ -386,8 +399,9 @@ export class WebGPUFineLevelSetTransport {
         // Pack words 23..26 are chunkBase, closed, open-top, and band
         // distance. Keep the float after both boundary-policy words.
         floats[26] = transportBandCells * this.source.plan.fineCellWidth;
+        words[27] = this.useCompleteVelocityCache ? 1 : 0;
         this.device.queue.writeBuffer(this.fused.params[chunk], 0, data);
-        run(this.fused.pipeline, [
+        const exactEntries: GPUBindGroupEntry[] = [
           { binding: 0, resource: binding(this.source.params) },
           { binding: 2, resource: binding(this.source.metadata) },
           { binding: 3, resource: binding(this.source.worklist) },
@@ -403,8 +417,48 @@ export class WebGPUFineLevelSetTransport {
           { binding: 17, resource: binding(this.faceBand.fusedSamplerSource.params) },
           { binding: 18, resource: binding(this.faceBand.fusedSamplerSource.sampleParams) },
           { binding: 19, resource: binding(options.ownerTopology) },
-        ], `Trace and sample global fine characteristic ${chunk + 1}/${this.plan.chunkCount}`,
-        Math.ceil(this.plan.velocityChunkCapacity / 64));
+        ];
+        if (this.useCompleteVelocityCache) {
+          run(this.fused.cachePipeline, [
+            { binding: 0, resource: binding(this.source.params) },
+            { binding: 2, resource: binding(this.source.metadata) },
+            { binding: 3, resource: binding(this.source.worklist) },
+            { binding: 4, resource: binding(this.source.flags) },
+            { binding: 13, resource: binding(this.fused.directAuthority) },
+            { binding: 14, resource: binding(this.fused.airAuthority) },
+            { binding: 15, resource: binding(this.fused.params[chunk]) },
+            { binding: 16, resource: binding(this.velocityPrepass.fusedSamplerSource.params) },
+            { binding: 17, resource: binding(this.faceBand.fusedSamplerSource.params) },
+            { binding: 18, resource: binding(this.faceBand.fusedSamplerSource.sampleParams) },
+            { binding: 19, resource: binding(options.ownerTopology) },
+            { binding: 20, resource: binding(this.velocityPrepass.source.results) },
+            { binding: 21, resource: binding(this.velocityPrepass.source.statuses) },
+          ], `Publish complete global fine velocity cache ${chunk + 1}/${this.plan.chunkCount}`,
+          Math.ceil(this.plan.velocityChunkCapacity / 64));
+          broker.fence("complete fine velocity cache published");
+          run(this.fused.cachedTracePipeline, [
+            { binding: 0, resource: binding(this.source.params) },
+            { binding: 2, resource: binding(this.source.metadata) },
+            { binding: 3, resource: binding(this.source.worklist) },
+            { binding: 4, resource: binding(this.source.flags) },
+            { binding: 5, resource: binding(this.source.phi) },
+            { binding: 6, resource: binding(this.source.workA) },
+            { binding: 10, resource: binding(this.positions) },
+            { binding: 12, resource: binding(this.outcomes) },
+            { binding: 15, resource: binding(this.fused.params[chunk]) },
+            { binding: 20, resource: binding(this.velocityPrepass.source.results) },
+            { binding: 21, resource: binding(this.velocityPrepass.source.statuses) },
+          ], `Trace cached global fine characteristic ${chunk + 1}/${this.plan.chunkCount}`,
+          Math.ceil(this.plan.velocityChunkCapacity / 64));
+          broker.fence("cached fine characteristic traced");
+          run(this.fused.exactFallbackPipeline, exactEntries,
+            `Trace exact global fine characteristic fallback ${chunk + 1}/${this.plan.chunkCount}`,
+            Math.ceil(this.plan.velocityChunkCapacity / 64));
+        } else {
+          run(this.fused.exactFallbackPipeline, exactEntries,
+            `Trace and sample global fine characteristic ${chunk + 1}/${this.plan.chunkCount}`,
+            Math.ceil(this.plan.velocityChunkCapacity / 64));
+        }
         broker.fence("fine characteristic traced");
         run(this.summarizePipeline, [
           { binding: 0, resource: binding(this.source.params) },

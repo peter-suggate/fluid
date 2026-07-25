@@ -53,7 +53,7 @@ ${fineLevelSetLinearWorkgroupWGSL}
 const INVALID:u32=0xffffffffu;const VALID_FINE:u32=1u;const VELOCITY_VALID:u32=0x80000000u;const LARGE:f32=3.402823e38;
 const STATUS_EXTRAPOLATED:u32=0x10000000u;const STATUS_FACE_UNAVAILABLE:u32=0x08000000u;
 const VALID:u32=0x80000000u;const ROW_CORE:u32=4u;const ROW_SUPPORT2:u32=16u;const ROW_SUPPORT3_NODE:u32=32u;const ROW_SUPPORT3_ENDPOINT:u32=64u;
-const DEPARTURE:u32=1u;const NONFINITE:u32=2u;const PROCESSED:u32=4u;const FACE_UNAVAILABLE:u32=8u;const VELOCITY_UNAVAILABLE:u32=16u;const INVALID_STATUS:u32=32u;const NONPOSITIVE:u32=64u;
+const DEPARTURE:u32=1u;const NONFINITE:u32=2u;const PROCESSED:u32=4u;const FACE_UNAVAILABLE:u32=8u;const VELOCITY_UNAVAILABLE:u32=16u;const INVALID_STATUS:u32=32u;const NONPOSITIVE:u32=64u;const PENDING_EXACT:u32=128u;
 struct FineParams{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,domainOrigin:vec3f,fineCellWidth:f32,worklistCapacity:u32,worklistHeaderWords:u32,pageCapacity:u32,generation:u32,activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32}
 struct DirectP{count:u32,capacity:u32,directoryCount:u32,rowCapacity:u32,dimensions:vec3u,maximumLeafSize:u32,reserved:u32,generation:u32,cellSize:f32,pad:u32}
 struct P{dims:vec3u,maximumLeaf:u32,rowCapacity:u32,faceCapacity:u32,rowDirectoryCapacity:u32,reservedDirectory:u32,powerDirectoryCapacity:u32,powerRowCapacity:u32,generation:u32,maximumRounds:u32,ownersPerBrick:u32,powerGeneration:u32,axisStride:u32,ownedFacesPerRow:u32,closedBoundaryMask:u32,pad0:u32,pad1:u32,pad2:u32}
@@ -70,6 +70,7 @@ struct CompleteVelocitySample{sample:VelocitySample,directHint:DirectHint}
 @group(0)@binding(0)var<uniform>params:FineParams;@group(0)@binding(2)var<storage,read>metadata:array<u32>;@group(0)@binding(3)var<storage,read>worklist:array<u32>;@group(0)@binding(4)var<storage,read>sampleFlags:array<u32>;@group(0)@binding(5)var<storage,read>phi:array<f32>;@group(0)@binding(6)var<storage,read_write>workA:array<f32>;
 @group(0)@binding(10)var<storage,read_write>positions:array<vec4f>;@group(0)@binding(12)var<storage,read_write>outcomes:array<vec2u>;@group(0)@binding(13)var<storage,read>directAuthority:array<u32>;@group(0)@binding(14)var<storage,read>airAuthority:array<u32>;
 @group(0)@binding(15)var<uniform>pack:Pack;@group(0)@binding(16)var<uniform>dp:DirectP;@group(0)@binding(17)var<uniform>p:P;@group(0)@binding(18)var<uniform>sp:SampleP;@group(0)@binding(19)var<storage,read>owners:array<u32>;
+@group(0)@binding(20)var<storage,read_write>cachedVelocity:array<vec4f>;@group(0)@binding(21)var<storage,read_write>cachedVelocityStatus:array<u32>;
 fn af(i:u32)->f32{return bitcast<f32>(airAuthority[i]);}fn df(i:u32)->f32{return bitcast<f32>(directAuthority[i]);}
 fn loadDirectRow(i:u32)->DirectRow{let b=pack.directRowOffset+4u*i;return DirectRow(directAuthority[b],directAuthority[b+1u],directAuthority[b+2u],directAuthority[b+3u]);}
 fn loadDirectVelocity(i:u32)->vec4f{let b=pack.directVelocityOffset+4u*i;return vec4f(df(b),df(b+1u),df(b+2u),df(b+3u));}
@@ -115,10 +116,42 @@ fn prepareFinePageCache(flatBase:u32,lid:u32){if(lid==0u){fineCacheValid=0u;let 
 fn cachedFinePage(brick:vec3u)->u32{if(fineCacheValid!=0u){let delta=vec3i(brick)-vec3i(fineCacheCenter);if(all(delta>=vec3i(-1))&&all(delta<=vec3i(1))){let slot=u32(delta.x+1i)+3u*(u32(delta.y+1i)+3u*u32(delta.z+1i));return finePageIds[slot];}}return lookupFine(packBrick(brick));}
 fn loadFine(q:vec3i)->vec3f{if(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions))){return vec3f(0.,0.,1.);}let uq=vec3u(q);let brick=uq/params.brickResolution;let local=uq-brick*params.brickResolution;let id=cachedFinePage(brick);if(id==INVALID){return vec3f(0.,0.,2.);}let i=id*params.samplesPerBrick+local.x+params.brickResolution*(local.y+params.brickResolution*local.z);if((sampleFlags[i]&VALID_FINE)==0u){return vec3f(0.,0.,3.);}let v=phi[i];if(v!=v||abs(v)>=LARGE){return vec3f(0.,0.,4.);}return vec3f(v,1.,0.);}
 fn trilinear(x:vec3f)->vec3f{let raw=(x-params.domainOrigin)/params.fineCellWidth-vec3f(.5);let wall=vec3f(params.sampleDimensions)-vec3f(.5);let below=raw<vec3f(-.501);let above=raw>wall+vec3f(.001);if(pack.closedDomainBoundary==0u&&(any(below)||above.x||above.z||(above.y&&pack.openTopBoundary==0u))){return vec3f(0.,0.,1.);}let sampleMax=vec3f(params.sampleDimensions)-vec3f(1.);if(pack.closedDomainBoundary==0u&&(any(raw<vec3f(0.))||raw.x>sampleMax.x||raw.z>sampleMax.z||(raw.y>sampleMax.y&&pack.openTopBoundary==0u))){return vec3f(0.,0.,1.);}let extend=pack.closedDomainBoundary!=0u||pack.openTopBoundary!=0u;let lattice=select(raw,clamp(raw,vec3f(0),sampleMax),extend);let base=vec3i(floor(lattice));let f=fract(lattice);var v=0.;for(var z=0;z<2;z+=1){for(var y=0;y<2;y+=1){for(var x0=0;x0<2;x0+=1){let w=select(1.-f.x,f.x,x0==1)*select(1.-f.y,f.y,y==1)*select(1.-f.z,f.z,z==1);if(w==0.){continue;}let q=loadFine(base+vec3i(x0,y,z));if(q.y==0.){return q;}v+=w*q.x;}}}return vec3f(v,1.,0.);}
+fn loadCachedVelocity(q:vec3i)->VelocitySample{if(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions))){return VelocitySample(vec4f(0),0u);}let uq=vec3u(q);let brick=uq/params.brickResolution;let local=uq-brick*params.brickResolution;let id=cachedFinePage(brick);if(id==INVALID){return VelocitySample(vec4f(0),0u);}let i=id*params.samplesPerBrick+local.x+params.brickResolution*(local.y+params.brickResolution*local.z);if(i>=arrayLength(&cachedVelocity)||i>=arrayLength(&cachedVelocityStatus)||(sampleFlags[i]&VALID_FINE)==0u){return VelocitySample(vec4f(0),0u);}let status=cachedVelocityStatus[i];let value=cachedVelocity[i];if((status&VELOCITY_VALID)==0u||value.w<=0.||!finite3(value.xyz)){return VelocitySample(vec4f(0),status);}return VelocitySample(value,status);}
+fn trilinearCachedVelocity(x:vec3f)->VelocitySample{let raw=(x-params.domainOrigin)/params.fineCellWidth-vec3f(.5);let sampleMax=vec3f(params.sampleDimensions)-vec3f(1.);if(any(raw<vec3f(0.))||any(raw>sampleMax)){return VelocitySample(vec4f(0),0u);}let base=vec3i(floor(raw));let f=fract(raw);var value=vec3f(0.);var combined=0u;var mode=INVALID;for(var z=0;z<2;z+=1){for(var y=0;y<2;y+=1){for(var x0=0;x0<2;x0+=1){let w=select(1.-f.x,f.x,x0==1)*select(1.-f.y,f.y,y==1)*select(1.-f.z,f.z,z==1);if(w==0.){continue;}let sampled=loadCachedVelocity(base+vec3i(x0,y,z));if((sampled.status&VELOCITY_VALID)==0u){return sampled;}let sampleMode=sampled.status&STATUS_EXTRAPOLATED;if(mode!=INVALID&&sampleMode!=mode){return VelocitySample(vec4f(0),0u);}mode=sampleMode;combined|=sampled.status;value+=w*sampled.value.xyz;}}}if(!finite3(value)){return VelocitySample(vec4f(0),0u);}return VelocitySample(vec4f(value,1.),VELOCITY_VALID|(combined&(STATUS_EXTRAPOLATED|STATUS_FACE_UNAVAILABLE)));}
+@compute @workgroup_size(64)fn publishFineVelocityCache(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){
+  let local=fineLinearWorkgroup(wg,n)*64u+lid;let flat=pack.chunkBase+local;if(local>=arrayLength(&cachedVelocity)||local>=arrayLength(&cachedVelocityStatus)){return;}
+  let a=activeSample(flat);if(a.x==INVALID){return;}let index=a.x*params.samplesPerBrick+a.y;
+  if(index>=arrayLength(&cachedVelocity)||index>=arrayLength(&cachedVelocityStatus)){return;}
+  if((sampleFlags[index]&VALID_FINE)==0u){cachedVelocityStatus[index]=0u;return;}
+  let brick=unpackBrick(metadata[a.x*10u+1u]);let q=brick*params.brickResolution+localCoord(a.y);let world=params.domainOrigin+(vec3f(q)+.5)*params.fineCellWidth;
+  var ownerCache=vec3u(0u);let complete=sampleCompleteVelocity(world,DirectHint(INVALID,DirectRow(0u,0u,0u,0u)),&ownerCache);
+  cachedVelocity[index]=complete.sample.value;cachedVelocityStatus[index]=complete.sample.status;
+}
+@compute @workgroup_size(64)fn transportFineCharacteristicCached(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){
+  let local=fineLinearWorkgroup(wg,n)*64u+lid;prepareFinePageCache(pack.chunkBase+local-lid,lid);
+  if(local>=arrayLength(&positions)||local>=arrayLength(&outcomes)){return;}let flat=pack.chunkBase+local;let a=activeSample(flat);
+  if(a.x==INVALID){outcomes[local]=vec2u(0u,INVALID);return;}let index=a.x*params.samplesPerBrick+a.y;
+  if((sampleFlags[index]&VALID_FINE)==0u){outcomes[local]=vec2u(0u,INVALID);return;}let sourcePhi=phi[index];
+  if(abs(sourcePhi)>=pack.transportBandDistance){workA[index]=sourcePhi;outcomes[local]=vec2u(0u,INVALID);return;}
+  let interfaceGuard=f32(params.fineFactor)*params.fineCellWidth;
+  if(sourcePhi<=interfaceGuard){outcomes[local]=vec2u(PENDING_EXACT,0u);return;}
+  let brick=unpackBrick(metadata[a.x*10u+1u]);let q=brick*params.brickResolution+localCoord(a.y);
+  let origin=params.domainOrigin+(vec3f(q)+.5)*params.fineCellWidth;var position=origin;
+  var flags=0u;var extrapolated=0u;let segmentDt=params.timestep/f32(params.fineFactor);var segment=0u;
+  loop{if(segment>=params.fineFactor){break;}let sampled=trilinearCachedVelocity(position);let status=sampled.status;
+    if((status&VELOCITY_VALID)==0u){outcomes[local]=vec2u(PENDING_EXACT,status);return;}
+    if((status&STATUS_FACE_UNAVAILABLE)!=0u){flags|=FACE_UNAVAILABLE;}if((status&STATUS_EXTRAPOLATED)!=0u){extrapolated+=1u;}
+    position-=segmentDt*sampled.value.xyz;if(!finite3(position)){outcomes[local]=vec2u(PENDING_EXACT,0u);return;}segment+=1u;}
+  let displacement=u32(ceil(length(position-origin)/params.fineCellWidth));let value=trilinear(position);
+  if(value.y==0.){outcomes[local]=vec2u(PENDING_EXACT,0u);return;}
+  if(value.x<=interfaceGuard){outcomes[local]=vec2u(PENDING_EXACT,0u);return;}
+  flags|=PROCESSED;workA[index]=value.x;outcomes[local]=vec2u(packOutcome(flags,extrapolated,displacement),INVALID);
+}
 @compute @workgroup_size(64)fn transportFineCharacteristic(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){
   let local=fineLinearWorkgroup(wg,n)*64u+lid;
   prepareFinePageCache(pack.chunkBase+local-lid,lid);
   if(local>=arrayLength(&positions)||local>=arrayLength(&outcomes)){return;}
+  if(pack.pad0!=0u&&(outcomeFlags(outcomes[local].x)&PENDING_EXACT)==0u){return;}
   let flat=pack.chunkBase+local;let a=activeSample(flat);
   if(a.x==INVALID){outcomes[local]=vec2u(0u,INVALID);return;}
   let index=a.x*params.samplesPerBrick+a.y;

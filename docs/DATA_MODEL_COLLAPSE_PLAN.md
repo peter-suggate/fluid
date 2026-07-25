@@ -29,6 +29,13 @@ surface gates:
 - **Work reduction:** staged Galerkin CG uses a workgroup-uniform active flag
   to stop its fixed encoded tail after convergence; no extra stage, buffer,
   or dispatch was introduced.
+- **D2, scratch reuse slice:** the single-chunk M1 lane aliases the dormant
+  velocity-prepass result/status arena as a per-advance complete fine-velocity
+  cache. Only protected positive-air samples may consume interpolated cache
+  values; liquid, interface, mixed-mode, boundary, and unavailable samples
+  retain the exact Section-5 arbitrary-point fallback. This removes repeated
+  air-resolution work without adding a second velocity authority or a
+  persistent generation clock.
 - **Regression authority:** the full two-second minimal dam gate now measures
   front-surface terracing and enclosed front/back surface holes in both
   raster directions, in addition to its energy, component, publication, and
