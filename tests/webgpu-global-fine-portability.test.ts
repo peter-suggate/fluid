@@ -128,7 +128,7 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
     // JFA-CPT declares its immutable page, closest-point work, phi, flag, and
     // transaction-control inputs. No individual entry point exceeds the
     // portable ten-storage limit.
-    topology: 23, velocityPrepass: 10, transport: 12, fusedTransport: 12, redistance: 10,
+    topology: 23, velocityPrepass: 10, transport: 11, fusedTransport: 10, redistance: 10,
     // Summary declares disjoint fine, compact-coarse, sorting, and indirect
     // arenas in one module. Its largest entry point reaches six storage
     // bindings; no entry point sees all module declarations at once.

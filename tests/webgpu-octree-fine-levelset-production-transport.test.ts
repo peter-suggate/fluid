@@ -35,24 +35,49 @@ test("fused air transport consumes the retained power-generation clock", () => {
 test("fine GPU timestamps attribute authorities, tracing, summaries, and commits separately", () => {
   const source = WebGPUFineLevelSetTransport.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(source,
-    /PublishgroupedStage-Bandface-bandtransportauthorities.*encodeFusedAuthority.*encodeFusedAuthority.*groupedtransportauthoritiespublished.*Validateandpublishliveglobalfinedispatches.*finetransportdispatchesvalidated.*Publishcompleteglobalfinevelocitycache.*completefinevelocitycachepublished.*Tracecachedglobalfinecharacteristic.*cachedfinecharacteristictraced.*Traceexactglobalfinecharacteristicfallback.*finecharacteristictraced.*Summarizeglobalfinedeparturechunk.*finedeparturechunksummarized.*Publishglobalfinetransport.*finetransportstatuspublished.*Commitglobalfinetransportphasemasks.*finetransportphasemaskscommitted/s,
+    /PublishgroupedStage-Bandface-bandtransportauthorities.*encodeFusedAuthority.*encodeFusedAuthority.*groupedtransportauthoritiespublished.*Validateandpublishliveglobalfinedispatches.*finetransportdispatchesvalidated.*Publishcompleteglobalfinevelocitycache.*completefinevelocitycachepublished.*Tracecachedglobalfinecharacteristic.*cachedfinecharacteristictraced.*Traceexactbrick-classifiedfinecharacteristicfallback.*finecharacteristictraced.*Summarizeglobalfinedeparturechunk.*finedeparturechunksummarized.*Publishglobalfinetransport.*finetransportstatuspublished.*Commitglobalfinetransportphasemasks.*finetransportphasemaskscommitted/s,
     "each expensive transport substage must own an independently timestampable compute pass");
 });
 
 test("cached fine tracing protects the interface and falls back on mixed velocity modes", () => {
   const shader = makeFineLevelSetProductionFusedTransportWGSL();
+  const publish = wgslFunction(shader, "publishFineVelocityCache");
   const interpolate = wgslFunction(shader, "trilinearCachedVelocity");
   const trace = wgslFunction(shader, "transportFineCharacteristicCached");
+  const exactLane = wgslFunction(shader, "transportFineCharacteristicExact");
   const exact = wgslFunction(shader, "transportFineCharacteristic");
+  assert.match(publish,
+    /interfaceGuard=f32\(params\.fineFactor\)\*params\.fineCellWidth.*sourcePhi=phi\[index\].*sourcePhi<=interfaceGuard\|\|sourcePhi>=pack\.transportBandDistance\+interfaceGuard.*cachedVelocity\[index\]\.w=bitcast<f32>\(0u\).*return/s,
+    "the cache must not run the exact sampler for protected samples the cached trace cannot consume");
+  assert.doesNotMatch(shader, /cachedVelocityStatus/,
+    "cached velocity and its exact mode/status must share one packed vec4 arena");
+  assert.match(wgslFunction(shader, "loadCachedVelocity"),
+    /packed=cachedVelocity\[i\].*status=bitcast<u32>\(packed\.w\)/s,
+    "cached status must be recovered bit-exactly from the packed velocity word");
   assert.match(interpolate, /sampleMode=sampled\.status&STATUS_EXTRAPOLATED.*sampleMode!=mode/s,
     "direct and extrapolated complete-velocity modes must never be blended");
   assert.match(trace,
-    /interfaceGuard=f32\(params\.fineFactor\)\*params\.fineCellWidth.*sourcePhi<=interfaceGuard.*PENDING_EXACT/s);
+    /interfaceGuard=f32\(params\.fineFactor\)\*params\.fineCellWidth.*sourcePhi<=interfaceGuard.*deferExact\(local,0u\)/s);
   assert.match(trace,
-    /value\.x<=interfaceGuard.*PENDING_EXACT/s,
+    /value\.x<=interfaceGuard.*deferExact\(local,0u\)/s,
     "cached transport must not author liquid or the protected air-side zero-level-set neighborhood");
-  assert.match(exact, /pack\.pad0!=0u.*PENDING_EXACT.*==0u.*return/s,
-    "the exact kernel must revisit only cache misses when the cache path is enabled");
+  assert.match(trace,
+    /VELOCITY_VALID\)==0u.*deferExact\(local,status\)/s,
+    "cache misses and mixed velocity modes must publish an exact-lane marker");
+  assert.match(exact, /transportFineCharacteristicExact\(local,index,sourcePhi,origin\)/,
+    "cache-disabled and multi-chunk devices must retain the standalone exact entry point");
+  assert.match(exact,
+    /trajectoryPending\(lane\).*exactGroupPending=pending.*workgroupUniformLoad\(&exactGroupPending\)==0u.*return.*prepareFinePageCache/s,
+    "brick groups with no exact lanes must return before the 27-page cache is prepared");
+  assert.match(exact,
+    /pack\.pad0!=0u&&trajectoryPending\(local\)==0u.*return/s,
+    "a classified exact brick must still run only its marked lanes");
+  assert.match(exactLane,
+    /segment>=params\.fineFactor.*sampleCompleteVelocity\(position,directHint,&ownerCache\)/s,
+    "the hybrid helper must retain the exact m-segment Section 5 trace");
+  assert.match(wgslFunction(shader, "deferExact"),
+    /writeTrajectoryPending\(local,1u\).*writeTrajectoryOutcome\(local,PENDING_EXACT,status\)/s,
+    "pending state and the brick marker must share the packed trajectory arena");
 });
 
 test("fine departure diagnostics use a deterministic parallel two-level reduction", () => {
@@ -91,15 +116,15 @@ test("production fused transport accepts only the physical input clock or its ex
 
 test("fused characteristic transport writes only live terminal outputs", () => {
   const trace = wgslFunction(makeFineLevelSetProductionFusedTransportWGSL(),
-    "transportFineCharacteristic");
-  assert.doesNotMatch(trace, /positions\[local\]=vec4f\(0\)|positions\[local\]\.w=/,
+    "transportFineCharacteristicExact");
+  assert.doesNotMatch(trace, /writeTrajectoryPosition\(local,vec3f\(0\)/,
     "trajectory positions must not be initialized or rewritten when diagnostics never consume them");
-  assert.equal(trace.match(/positions\[local\]=/g)?.length, 2,
+  assert.equal(trace.match(/writeTrajectoryPosition\(local,position\)/g)?.length, 2,
     "only invalid-status and departure terminals may publish a diagnostic position");
   assert.match(trace,
-    /INVALID_STATUS\|VELOCITY_UNAVAILABLE.*outcomes\[local\]=.*positions\[local\]=vec4f\(position,-1\.\);return/s);
+    /INVALID_STATUS\|VELOCITY_UNAVAILABLE.*writeTrajectoryOutcome\(local,.*writeTrajectoryPosition\(local,position\);return/s);
   assert.match(trace,
-    /flags\|=DEPARTURE;workA\[index\]=sourcePhi;outcomes\[local\]=.*positions\[local\]=vec4f\(position,-1\.\);return/s);
+    /flags\|=DEPARTURE;workA\[index\]=sourcePhi;writeTrajectoryOutcome\(local,.*writeTrajectoryPosition\(local,position\);return/s);
   assert.doesNotMatch(trace,
     /letsourcePhi=phi\[index\];workA\[index\]=sourcePhi/,
     "the transported narrow band must not write source phi before overwriting it at a terminal");

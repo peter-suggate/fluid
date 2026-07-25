@@ -201,6 +201,34 @@ combined Dawn run aborted in bind-group/layout lookup before producing an
 authority record. It was reverted. Do not count it as a gain; reintroduce only
 one reducer at a time behind a standalone runtime test.
 
+## Characteristic transport working-set cut (2026-07-25)
+
+The stable mini-dam profile moved from **57.02 to 55.85 ms/advance** without
+changing its 832 dispatches or 50 passes. The characteristic velocity-cache
+publication fell from roughly **4.59 to 3.02 ms** (~34%). Exact two-step output
+remained bit-identical, and the 500-step / 2-second smoke mini-dam completed
+with `passedInvariants=true` and no validation errors.
+
+The retained changes reduce bytes and arithmetic rather than launches:
+
+1. Cache publication now excludes both the guarded interface and source samples
+   farther into air than the transport band can reach in one characteristic.
+2. Cached velocity and status share one `vec4f`; trajectory outcomes and
+   diagnostic positions share one arena. This removes two storage bindings and
+   one unused indirect-dispatch allocation while preserving fail-closed status.
+3. Cached tracing leaves a per-lane exact-fallback marker in that arena. Exact
+   workgroups scan their contiguous 4x4x4 brick first and return before preparing
+   page data when no lane needs fallback.
+
+Two measured designs were rejected. Putting cached and exact tracing in one
+kernel regressed to **57.94 ms** through divergence/register pressure. Building
+a compact indirect list of fallback bricks added more compaction cost than it
+saved because almost every resident brick contained at least one exact lane.
+That is the important temporal-coherence result: **brick occupancy is the wrong
+delta granularity**. The next persistent representation should cache changed
+owner/identity/authority or interpolation rows, not merely compact active
+bricks.
+
 ## Measurements (keep these)
 
 ### Probe inflation — discount the UI panel numbers
