@@ -381,7 +381,6 @@ export class FluidLabRenderer {
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
   private gpuRigidLoadCallback?: (loads: GPURigidLoad[]) => void;
   private gpuAdvanceCompletedCallback?: (time_s: number) => void;
-  private presentationCompletedCallback?: (time_s: number) => void;
   private effectiveRendererStatusCallback?: (status: EffectiveRendererStatus) => void;
   private lastEffectiveRendererStatus?: EffectiveRendererStatus;
   private svoPickingAvailable = false;
@@ -443,7 +442,7 @@ export class FluidLabRenderer {
 
   get presentationRevision(): number { return this.pausedPresentationRevision; }
 
-  constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void, onPresentationCompleted?: (time_s: number) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; this.presentationCompletedCallback = onPresentationCompleted; }
+  constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; }
 
   private publishEffectiveRendererStatus(status: EffectiveRendererStatus) {
     const previous = this.lastEffectiveRendererStatus;
@@ -1449,9 +1448,6 @@ export class FluidLabRenderer {
     presentationTrace?.resolve(encoder);
     detailedPresentationTrace?.resolve(encoder);
     presentationQueueTrace?.begin();
-    const presentedSimulationTime_s = backend === "webgpu"
-      ? readyGPUFluid?.info.submittedTime_s ?? readyGPUFluid?.info.completedTime_s ?? time_s
-      : time_s;
     this.device.queue.submit([encoder.finish()]);
     const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
     const hardwarePresentationTrace = detailedPresentationTrace ?? presentationTrace;
@@ -1484,7 +1480,6 @@ export class FluidLabRenderer {
       if(this.disposed||this.deviceLost||this.device!==presentationDevice)return;
       const completedAt_ms=performance.now();
       this.presentationPending=false;this.lastPresentationCompletedAt_ms=completedAt_ms;
-      this.presentationCompletedCallback?.(presentedSimulationTime_s);
       if(initialStaticSvoSubmission)this.settleStaticSvoPresentation(initialStaticSvoSubmission);
       if(initialRasterSubmission){
         const initialDiagnostics=await surfaceDiagnosticsCompletion;

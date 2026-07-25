@@ -955,15 +955,7 @@ fn physicalFacePolygon(face:PowerFaceRecord)->SharedPolygon{
   if(reciprocal==INVALID){var empty:array<vec3f,16>;return SharedPolygon(empty,0u);}
   return reciprocalIntersection(face.negativeRow,slot,face.positiveRow,reciprocal);
 }
-fn geometryFromPolygon(geometryValue:ReconstructedPowerFace,polygon:SharedPolygon)->ReconstructedPowerFace{
-  var geometry=geometryValue;if(polygon.count<3u){geometry.area=0.0;return geometry;}
-  var area=0.0;var centroid=vec3f(0.0);
-  for(var i=1u;i+1u<polygon.count;i+=1u){let crossValue=cross(polygon.vertices[i]-polygon.vertices[0],polygon.vertices[i+1u]-polygon.vertices[0]);let triangleArea=max(0.0,0.5*dot(crossValue,geometry.normal));area+=triangleArea;centroid+=triangleArea*(polygon.vertices[0]+polygon.vertices[i]+polygon.vertices[i+1u])/3.0;}
-  geometry.area=area;if(area>1e-12){geometry.centroid=centroid/area;}return geometry;
-}
-fn sharedGeometry(row:u32,slot:u32,neighbor:u32,reverseSlot:u32)->ReconstructedPowerFace{
-  return geometryFromPolygon(reconstructSlot(row,slot),reciprocalIntersection(row,slot,neighbor,reverseSlot));
-}
+fn sharedGeometry(row:u32,slot:u32,neighbor:u32,reverseSlot:u32)->ReconstructedPowerFace{var geometry=reconstructSlot(row,slot);let polygon=reciprocalIntersection(row,slot,neighbor,reverseSlot);if(polygon.count<3u){geometry.area=0.0;return geometry;}var area=0.0;var centroid=vec3f(0.0);for(var i=1u;i+1u<polygon.count;i+=1u){let crossValue=cross(polygon.vertices[i]-polygon.vertices[0],polygon.vertices[i+1u]-polygon.vertices[0]);let triangleArea=max(0.0,0.5*dot(crossValue,geometry.normal));area+=triangleArea;centroid+=triangleArea*(polygon.vertices[0]+polygon.vertices[i]+polygon.vertices[i+1u])/3.0;}geometry.area=area;if(area>1e-12){geometry.centroid=centroid/area;}return geometry;}
 fn worldBoundaryBit(center:vec3f)->u32{let maximum=vec3f(dims())*params.physical.x;if(center.x<0.0){return 1u;}if(center.y<0.0){return 2u;}if(center.z<0.0){return 4u;}if(center.z>maximum.z){return 8u;}if(center.y>maximum.y){return 16u;}if(center.x>maximum.x){return 32u;}return 0u;}
 fn worldBoundaryBitFromNormal(normal:vec3f)->u32{if(normal.x< -0.9999){return 1u;}if(normal.y< -0.9999){return 2u;}if(normal.z< -0.9999){return 4u;}if(normal.z>0.9999){return 8u;}if(normal.y>0.9999){return 16u;}if(normal.x>0.9999){return 32u;}return 0u;}
 fn boundaryFlags(metric:PowerRowMetric,geometry:ReconstructedPowerFace)->u32{let world=select(worldBoundaryBit(geometry.neighborCenter),worldBoundaryBitFromNormal(geometry.normal),geometry.neighborSize==0.0);let declared=(metric.transformAndFlags>>8u)&63u;let geometricWorld=world&declared;if(geometricWorld!=0u){let open=select(OPEN_BOUNDARY,0u,(params.boundaryPolicy.x&geometricWorld)!=0u);return BOUNDARY|open|(geometricWorld<<WORLD_BOUNDARY_SHIFT);}return BOUNDARY|OPEN_BOUNDARY;}
@@ -1358,12 +1350,9 @@ fn rowIncidenceIdentity(row:u32,slot:u32)->RowIncidenceResult{
   var face=powerFaces[faceIndex];if((face.flags&FACE_DELTA_CARRIED)!=0u){return;}
   boundaryPhiQueries[faceIndex]=BoundaryPhiQuery(vec4f(0.0),vec4f(0.0));
   let slot=face.geometryCode&0xffffu;var geometry=reconstructSlot(face.negativeRow,slot);
-  // The clipped polygon is also the exact source of shared area/centroid.
-  // Materialize it once for this added face instead of rebuilding the same
-  // reciprocal intersection again for quadrature.
-  let polygon=physicalFacePolygon(face);
-  if(face.positiveRow!=INVALID){geometry=geometryFromPolygon(geometry,polygon);}
+  if(face.positiveRow!=INVALID){let reciprocal=reciprocalSlot(face.negativeRow,face.positiveRow);if(reciprocal!=INVALID){geometry=sharedGeometry(face.negativeRow,slot,face.positiveRow,reciprocal);}}
   faceNormals[faceIndex]=vec4f(geometry.normal,0.0);faceCentroids[faceIndex]=vec4f(geometry.centroid,0.0);
+  let polygon=physicalFacePolygon(face);
   if(polygon.count<3u||!finite(geometry.area)||geometry.area<=1e-12){invalidatePowerFace(faceIndex,INVALID_GEOMETRY,64u);return;}
   var triangleAreas:array<f32,14>;var totalArea=0.0;
   for(var triangle=0u;triangle+2u<polygon.count;triangle+=1u){let area=0.5*abs(dot(cross(polygon.vertices[triangle+1u]-polygon.vertices[0],polygon.vertices[triangle+2u]-polygon.vertices[0]),geometry.normal));triangleAreas[triangle]=area;totalArea+=area;}

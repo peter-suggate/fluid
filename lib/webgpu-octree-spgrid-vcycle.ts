@@ -365,15 +365,8 @@ export function solveSPGridBottomLDLT(operator: readonly (readonly number[])[], 
 export interface OctreeSPGridVCyclePlan {
   readonly rowCapacity: number;
   readonly levelCount: number;
-  /** Maximum of the exact per-level capacities. Kept as the direct-dispatch
-   * bound; arena addressing uses levelCapacities/levelOffsets instead. */
   readonly levelStride: number;
   readonly transferStride: number;
-  readonly levelCapacities: readonly number[];
-  readonly levelOffsets: readonly number[];
-  readonly totalLevelSlots: number;
-  readonly transferCapacities: readonly number[];
-  readonly transferOffsets: readonly number[];
   readonly topologyBytes: number;
   readonly stateBytes: number;
   readonly dispatchBytes: number;
@@ -556,39 +549,14 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
   }
   const levelCount = Math.max(2, requiredLevels);
   // A balanced 2:1 leaf can expose all eight children as distinct contact
-  // ghosts. The former layout reserved that finest-level bound at every
-  // level. A level cannot contain more unique coordinates than its domain,
-  // so cap each power-of-two hash arena by that exact domain cardinality.
-  // This preserves the <50% finest-level hash bound where the domain is
-  // larger, while eliminating coarse-level padding.
-  const maximumSparseSlots = nextPowerOfTwo(rowCapacity * 16);
-  const levelCapacities = Array.from({ length: levelCount }, (_, level) => {
-    const scale = 2 ** level;
-    const domainCells = options.dimensions
-      .map((value) => Math.ceil(value / scale))
-      .reduce((product, value) => product * value, 1);
-    return nextPowerOfTwo(Math.min(maximumSparseSlots, domainCells));
-  });
-  const levelOffsets: number[] = [];
-  let totalLevelSlots = 0;
-  for (const capacity of levelCapacities) {
-    levelOffsets.push(totalLevelSlots);
-    totalLevelSlots += capacity;
-  }
-  const levelStride = Math.max(...levelCapacities);
-  const transferStride = rowCapacity * 8;
-  const transferCapacities = levelCapacities.slice(0, -1)
-    .map((capacity) => Math.min(transferStride, capacity * 8));
-  const transferOffsets: number[] = [];
-  let transferWords = 0;
-  for (let level = 0; level < transferCapacities.length; level += 1) {
-    transferOffsets.push(transferWords);
-    transferWords += transferCapacities[level] * 4 + 4 * levelCapacities[level];
-  }
-  const rowMapWords = levelCount * rowCapacity, worklistWords = totalLevelSlots;
+  // ghosts.  Reserve twice that worst-case population so the open-addressed
+  // table stays below 50% occupancy; overflow remains fail-closed.
+  const levelStride = nextPowerOfTwo(rowCapacity * 16), transferStride = rowCapacity * 8;
+  const rowMapWords = levelCount * rowCapacity, worklistWords = levelCount * levelStride;
   // Four immutable words per transfer (fine, coarse, weight, next), followed
   // by parent head/tail slots for deterministic restriction and fine
   // head/count slots for direct indexed prolongation.
+  const transferWords = (levelCount - 1) * (transferStride * 4 + 4 * levelStride);
   let brickCount = 0;
   for (let level = 0; level < levelCount; level += 1) {
     const scale = 2 ** level;
@@ -597,26 +565,21 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
   }
   // Sixteen publication words, four words per 4^3 brick (generation, two
   // occupancy masks, ranked base), and one compact ranked slot vector/level.
-  const directoryWords = 16 + 4 * brickCount + totalLevelSlots;
-  const stencilNeighbourWords = 18 * totalLevelSlots;
+  const directoryWords = 16 + 4 * brickCount + levelCount * levelStride;
+  const stencilNeighbourWords = 18 * levelCount * levelStride;
   const directoryBytes = directoryWords * 4;
   const topologyBytes = (TOPOLOGY_HEADER_WORDS + rowMapWords + worklistWords
     + transferWords + directoryWords + stencilNeighbourWords) * 4;
-  const stateBytes = STATE_CHANNELS * totalLevelSlots * 4;
+  const stateBytes = STATE_CHANNELS * levelCount * levelStride * 4;
   const dispatchBytes = levelCount * DISPATCH_RECORD_BYTES_PER_LEVEL + DISPATCH_LIFECYCLE_BYTES;
   const levelDeltaBytes = levelCount * LEVEL_DELTA_WORDS * 4;
   const capturePageCount = Math.ceil(rowCapacity / CAPTURE_PAGE_ROWS);
   const capturePageStateBytes = (CAPTURE_PUBLICATION_WORDS + 4 * capturePageCount) * 4;
-  return { rowCapacity, levelCount, levelStride, transferStride,
-    levelCapacities: Object.freeze(levelCapacities),
-    levelOffsets: Object.freeze(levelOffsets), totalLevelSlots,
-    transferCapacities: Object.freeze(transferCapacities),
-    transferOffsets: Object.freeze(transferOffsets),
-    topologyBytes, stateBytes, dispatchBytes,
+  return { rowCapacity, levelCount, levelStride, transferStride, topologyBytes, stateBytes, dispatchBytes,
     // Storage-authored counts and indirect arguments must be separate WebGPU
     // buffers; the final term is the per-level uniform parameter storage.
     allocatedBytes: topologyBytes + stateBytes + 2 * dispatchBytes
-      + capturePageStateBytes + levelDeltaBytes + levelCount * 80,
+      + capturePageStateBytes + levelDeltaBytes + levelCount * 64,
     levelDeltaBytes, brickCount, directoryBytes,
     capturePageStateBytes, capturePageCount,
     rowDispatch: dispatchFor(rowCapacity), slotDispatch: dispatchFor(levelStride), transferDispatch: dispatchFor(transferStride),
@@ -633,9 +596,9 @@ export type OctreeSPGridVCyclePipelineName = "beginL1CapturePlan"
 
 export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePipelineName, readonly number[]>> = Object.freeze({
   beginL1CapturePlan: [0, 3, 6, 13, 14, 18],
-  planL1CaptureDelta: [0, 1, 2, 3, 6, 11, 12, 13, 14, 18],
-  commitChangedL1: [0, 1, 2, 3, 6, 11, 12, 13, 18],
-  finalizeL1CapturePublication: [0, 3, 6, 13, 18],
+  planL1CaptureDelta: [0, 1, 2, 3, 11, 12, 13, 14, 18],
+  commitChangedL1: [0, 1, 2, 3, 11, 12, 13, 18],
+  finalizeL1CapturePublication: [0, 3, 13, 18],
   buildCandidateLevelDeltas: [0, 3, 4, 5, 6, 11, 12, 14, 15, 16, 17],
   validateCandidateHierarchy: [0, 6, 7, 13, 14, 17],
   commitCandidateLevels: [0, 4, 5, 6, 13, 14, 15, 16, 17],
@@ -990,7 +953,7 @@ const STATE_CHANNELS=25u;
 const PX=0u;const PR=1u;const PZ=2u;const PD=3u;const PQ=4u;const HA=5u;const HB=6u;const HRHS=7u;const HCORR=8u;const BAND_A=9u;const BAND_B=10u;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn capacity()->u32{return p.dimsCapacity.w;}fn rows()->u32{return min(select(0u,rowCounts[0],arrayLength(&rowCounts)>0u),capacity());}
-fn levels()->u32{return p.hierarchySolve.x;}fn maxStride()->u32{return p.hierarchySolve.y;}
+fn levels()->u32{return p.hierarchySolve.x;}fn stride()->u32{return p.hierarchySolve.y;}
 fn boundarySweeps()->u32{return p.hierarchySolve.w;}fn tolerance()->f32{return p.numerics.x;}fn epsilon()->f32{return p.numerics.y;}
 fn failed()->bool{return control[0]!=0u;}fn stopped()->bool{return failed()||control[1]!=0u;}
 var<private> persistentLane:u32;
@@ -1008,60 +971,54 @@ fn sync(){storageBarrier();workgroupBarrier();if(persistentLane==0u){var flags=0
   control[10]=record.y;control[11]=record.z;control[12]=record.w;}}storageBarrier();workgroupBarrier();}
 fn pv(channel:u32,row:u32)->f32{return packed[channel*capacity()+row];}fn storePV(channel:u32,row:u32,value:f32){packed[channel*capacity()+row]=value;}
 fn pu(channel:u32,row:u32)->u32{return bitcast<u32>(pv(channel,row));}fn storePU(channel:u32,row:u32,value:u32){storePV(channel,row,bitcast<f32>(value));}
-fn dims(l:u32)->vec3u{let scale=1u<<l;return(p.dimsCapacity.xyz+vec3u(scale-1u))/scale;}
-fn levelCapacity(l:u32)->u32{let d=dims(l);let limit=min(maxStride(),d.x*d.y*d.z);var result=1u;
- while(result<limit){result<<=1u;}return result;}
-fn levelBase(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=levelCapacity(k);}return result;}
-fn totalLevelSlots()->u32{return levelBase(levels());}
-fn at(channel:u32,l:u32,slot:u32)->u32{return channel*totalLevelSlots()+levelBase(l)+slot;}
+fn at(channel:u32,l:u32,slot:u32)->u32{return(channel*levels()+l)*stride()+slot;}
 fn loadf(channel:u32,l:u32,slot:u32)->f32{return bitcast<f32>(state[at(channel,l,slot)]);}
 fn storef(channel:u32,l:u32,slot:u32,value:f32){state[at(channel,l,slot)]=bitcast<u32>(value);}
 fn rowMapBase()->u32{return 16u;}fn workBase()->u32{return rowMapBase()+levels()*capacity();}
 fn rowMap(l:u32,row:u32)->u32{return topology[rowMapBase()+l*capacity()+row];}
-fn workSlot(l:u32,index:u32)->u32{return topology[workBase()+levelBase(l)+index];}
+fn workSlot(l:u32,index:u32)->u32{return topology[workBase()+l*stride()+index];}
 fn count(l:u32)->u32{return dispatchMeta[l*8u];}
+fn dims(l:u32)->vec3u{let scale=1u<<l;return(p.dimsCapacity.xyz+vec3u(scale-1u))/scale;}
 fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;return vec3u(v%d.x,(v/d.x)%d.y,v/(d.x*d.y));}
 fn coordKey(q:vec3u,l:u32)->u32{let d=dims(l);return q.x+d.x*(q.y+d.y*q.z)+1u;}
-fn transferBase()->u32{return workBase()+totalLevelSlots();}fn transferStride()->u32{return capacity()*8u;}
-fn transferCapacity(l:u32)->u32{return min(transferStride(),levelCapacity(l)*8u);}
-fn transferLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){
- result+=transferCapacity(k)*4u+4u*levelCapacity(k);}return result;}
+fn transferBase()->u32{return workBase()+levels()*stride();}fn transferStride()->u32{return capacity()*8u;}
+fn transferLevelWords()->u32{return transferStride()*4u+4u*stride();}
 fn transferCount(l:u32)->u32{return dispatchMeta[l*8u+1u];}
-fn transferWord(l:u32,i:u32,w:u32)->u32{return transferBase()+transferLevelOffset(l)+i*4u+w;}
-fn parentHeadBase(l:u32)->u32{return transferBase()+transferLevelOffset(l)+transferCapacity(l)*4u;}
-fn fineHeadBase(l:u32)->u32{return parentHeadBase(l)+2u*levelCapacity(l);}
-fn fineCountBase(l:u32)->u32{return fineHeadBase(l)+levelCapacity(l);}
-fn directoryBase()->u32{return transferBase()+transferLevelOffset(levels()-1u);}
+fn transferWord(l:u32,i:u32,w:u32)->u32{return transferBase()+l*transferLevelWords()+i*4u+w;}
+fn parentHeadBase(l:u32)->u32{return transferBase()+l*transferLevelWords()+transferStride()*4u;}
+fn fineHeadBase(l:u32)->u32{return parentHeadBase(l)+2u*stride();}
+fn fineCountBase(l:u32)->u32{return fineHeadBase(l)+stride();}
+fn directoryBase()->u32{return transferBase()+(levels()-1u)*transferLevelWords();}
 fn brickDims(l:u32)->vec3u{return(dims(l)+vec3u(3u))/4u;}fn brickCount(l:u32)->u32{let d=brickDims(l);return d.x*d.y*d.z;}
 fn brickLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=brickCount(k);}return result;}
 fn totalBrickCount()->u32{return brickLevelOffset(levels());}fn rankedSlotsBase()->u32{return directoryBase()+16u+totalBrickCount()*4u;}
-fn neighbourBase()->u32{return rankedSlotsBase()+totalLevelSlots();}
-fn neighbourAt(k:u32,l:u32,s:u32)->u32{return neighbourBase()+k*totalLevelSlots()+levelBase(l)+s;}
+fn neighbourBase()->u32{return rankedSlotsBase()+levels()*stride();}
+fn neighbourAt(k:u32,l:u32,s:u32)->u32{return neighbourBase()+(k*levels()+l)*stride()+s;}
 fn find(l:u32,q:vec3u)->u32{if(l>=levels()||any(q>=dims(l))){return INVALID;}
  let generation=topology[directoryBase()+2u+l];if(generation==0u){report(OVERFLOW);return INVALID;}let d=brickDims(l);let b=q/4u;
  let record=directoryBase()+16u+(brickLevelOffset(l)+b.x+d.x*(b.y+d.y*b.z))*4u;if(topology[record]!=generation){report(OVERFLOW);return INVALID;}
  let local=q&vec3u(3u);let bit=local.x+4u*local.y+16u*local.z;let word=topology[record+1u+(bit>>5u)];if((word&(1u<<(bit&31u)))==0u){return INVALID;}
  let low=topology[record+1u];let high=topology[record+2u];let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);
  var rank=countOneBits(low&lower);if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}let ranked=topology[record+3u]+rank;
- if(ranked>=count(l)||ranked>=levelCapacity(l)){report(OVERFLOW);return INVALID;}let slot=topology[rankedSlotsBase()+levelBase(l)+ranked];
- if(slot>=levelCapacity(l)||state[at(KEY,l,slot)]!=coordKey(q,l)){report(OVERFLOW);return INVALID;}return slot;}
+ if(ranked>=count(l)||ranked>=stride()){report(OVERFLOW);return INVALID;}let slot=topology[rankedSlotsBase()+l*stride()+ranked];
+ if(slot>=stride()||state[at(KEY,l,slot)]!=coordKey(q,l)){report(OVERFLOW);return INVALID;}return slot;}
 fn smoothable(l:u32,slot:u32)->bool{return(state[at(FLAGS,l,slot)]&GHOST)==0u;}
 // Verbatim staged stencil semantics, with level passed explicitly because one
 // persistent invocation traverses the entire pyramid.
 fn persistentApplied(l:u32,slot:u32,source:u32)->f32{var value=loadf(DIAG,l,slot)*loadf(source,l,slot);
  for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}
-  let other=topology[neighbourAt(k,l,slot)];if(other>=levelCapacity(l)){report(OVERFLOW);continue;}
+  let other=topology[neighbourAt(k,l,slot)];if(other>=stride()){report(OVERFLOW);continue;}
   value-=c*loadf(source,l,other);}return value;}
 fn persistentRelaxJacobi(l:u32,slot:u32,src:u32,dst:u32){if(!smoothable(l,slot)){storef(dst,l,slot,loadf(src,l,slot));return;}
  let d=loadf(DIAG,l,slot);if(!(d>0.0)){report(NONPOSITIVE);return;}let x=loadf(src,l,slot)+p.numerics.z*(loadf(RHS,l,slot)-persistentApplied(l,slot,src))/d;
  if(!finite(x)){report(NONFINITE);}else{storef(dst,l,slot,x);}}
 fn correctionTransfer(l:u32,fine:u32,corner:u32)->TransferTarget{
- if(l+1u>=levels()||fine>=levelCapacity(l)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
+ if(l+1u>=levels()||fine>=stride()){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
  let first=topology[fineHeadBase(l)+fine];let n=topology[fineCountBase(l)+fine];
  if(first==INVALID||corner>=n||first+corner>=transferCount(l)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
  let record=first+corner;if(topology[transferWord(l,record,0u)]!=fine){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
  let coarse=topology[transferWord(l,record,1u)];let weight=bitcast<f32>(topology[transferWord(l,record,2u)]);
- if(coarse>=levelCapacity(l+1u)||!finite(weight)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
+ if(coarse>=stride()||!finite(weight)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
  return TransferTarget(coarse,weight);}
 fn l2Value(row:u32,channel:u32)->f32{return pv(channel,row);}
 fn applyL2(row:u32,channel:u32)->f32{let h=headers[row];var value=h.diagonal*l2Value(row,channel);for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];value-=e.coefficient*l2Value(e.row,channel);}return value;}
@@ -1193,35 +1150,29 @@ const RHS=21u;const A=22u;const B=23u;const OWNER=24u;
 const STATE_CHANNELS=25u;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn stopped()->bool{return atomicLoad(&control[0])!=0u||atomicLoad(&control[1])!=0u;}
 fn report(flag:u32){atomicOr(&control[0],flag);}fn rows()->u32{return min(rowCounts[0],p.capacity.x);}fn level()->u32{return p.dimsLevel.w;}
-fn maxStride()->u32{return p.capacity.z;}fn levels()->u32{return p.capacity.y;}fn transferStride()->u32{return p.capacity.w;}
-fn levelCapacity(l:u32)->u32{let d=dims(l);let limit=min(maxStride(),d.x*d.y*d.z);var result=1u;
- while(result<limit){result<<=1u;}return result;}
-fn levelBase(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=levelCapacity(k);}return result;}
-fn totalLevelSlots()->u32{return levelBase(levels());}
-fn transferCapacity(l:u32)->u32{return min(transferStride(),levelCapacity(l)*8u);}
-fn transferLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){
- result+=transferCapacity(k)*4u+4u*levelCapacity(k);}return result;}
+fn stride()->u32{return p.capacity.z;}fn levels()->u32{return p.capacity.y;}fn transferStride()->u32{return p.capacity.w;}
 fn rowIndex(g:vec3u)->u32{return g.x+g.y*p.dispatchSmooth.x*64u;}fn slotIndex(g:vec3u)->u32{return g.x+g.y*p.dispatchSmooth.y*64u;}
 fn boundedLinearIndex(g:vec3u)->u32{return g.x+g.y*65535u*64u;}
-fn transferIndex(g:vec3u)->u32{return g.x+g.y*p.dispatchSmooth.z*64u;}fn at(c:u32,l:u32,s:u32)->u32{return c*totalLevelSlots()+levelBase(l)+s;}
+fn transferIndex(g:vec3u)->u32{return g.x+g.y*p.dispatchSmooth.z*64u;}fn at(c:u32,l:u32,s:u32)->u32{return(c*levels()+l)*stride()+s;}
 fn loadf(c:u32,l:u32,s:u32)->f32{return bitcast<f32>(state[at(c,l,s)]);}fn storef(c:u32,l:u32,s:u32,v:f32){state[at(c,l,s)]=bitcast<u32>(v);}
 fn rowMapBase()->u32{return 16u;}fn workBase()->u32{return rowMapBase()+levels()*p.capacity.x;}
-fn transferBase()->u32{return workBase()+totalLevelSlots();}fn rowMap(l:u32,r:u32)->u32{return topology[rowMapBase()+l*p.capacity.x+r];}
-fn workSlot(l:u32,i:u32)->u32{return topology[workBase()+levelBase(l)+i];}
-fn transferWord(l:u32,i:u32,w:u32)->u32{return transferBase()+transferLevelOffset(l)+i*4u+w;}
-fn parentHeadBase(l:u32)->u32{return transferBase()+transferLevelOffset(l)+transferCapacity(l)*4u;}
-fn parentTailBase(l:u32)->u32{return parentHeadBase(l)+levelCapacity(l);}
-fn fineHeadBase(l:u32)->u32{return parentTailBase(l)+levelCapacity(l);}
-fn fineCountBase(l:u32)->u32{return fineHeadBase(l)+levelCapacity(l);}
-fn directoryBase()->u32{return transferBase()+transferLevelOffset(levels()-1u);}
+fn transferBase()->u32{return workBase()+levels()*stride();}fn rowMap(l:u32,r:u32)->u32{return topology[rowMapBase()+l*p.capacity.x+r];}
+fn workSlot(l:u32,i:u32)->u32{return topology[workBase()+l*stride()+i];}
+fn transferLevelWords()->u32{return transferStride()*4u+4u*stride();}
+fn transferWord(l:u32,i:u32,w:u32)->u32{return transferBase()+l*transferLevelWords()+i*4u+w;}
+fn parentHeadBase(l:u32)->u32{return transferBase()+l*transferLevelWords()+transferStride()*4u;}
+fn parentTailBase(l:u32)->u32{return parentHeadBase(l)+stride();}
+fn fineHeadBase(l:u32)->u32{return parentTailBase(l)+stride();}
+fn fineCountBase(l:u32)->u32{return fineHeadBase(l)+stride();}
+fn directoryBase()->u32{return transferBase()+(levels()-1u)*transferLevelWords();}
 fn brickDims(l:u32)->vec3u{return(dims(l)+vec3u(3u))/4u;}fn brickCount(l:u32)->u32{let d=brickDims(l);return d.x*d.y*d.z;}
 fn brickLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=brickCount(k);}return result;}
 fn totalBrickCount()->u32{return brickLevelOffset(levels());}
 fn brickRecord(l:u32,q:vec3u)->u32{let d=brickDims(l);let b=q/4u;let dense=b.x+d.x*(b.y+d.y*b.z);
  return directoryBase()+16u+(brickLevelOffset(l)+dense)*4u;}
 fn rankedSlotsBase()->u32{return directoryBase()+16u+totalBrickCount()*4u;}
-fn neighbourBase()->u32{return rankedSlotsBase()+totalLevelSlots();}
-fn neighbourAt(k:u32,l:u32,s:u32)->u32{return neighbourBase()+k*totalLevelSlots()+levelBase(l)+s;}
+fn neighbourBase()->u32{return rankedSlotsBase()+levels()*stride();}
+fn neighbourAt(k:u32,l:u32,s:u32)->u32{return neighbourBase()+(k*levels()+l)*stride()+s;}
 fn localBit(q:vec3u)->u32{let local=q&vec3u(3u);return local.x+4u*local.y+16u*local.z;}
 fn count(l:u32)->u32{return dispatchMeta[l*8u];}fn transferCount(l:u32)->u32{return dispatchMeta[l*8u+1u];}
 fn lifecycleBase()->u32{return levels()*8u;}fn previousValid()->bool{return dispatchMeta[lifecycleBase()]==1u;}
@@ -1250,11 +1201,6 @@ fn deltaControl(word:u32)->u32{return sourceDelta[p.delta.y+word];}
 fn deltaOldRow(row:u32)->u32{let encoded=sourceDelta[p.delta.z+row]&0x7fffffffu;
  return select(INVALID,encoded-1u,encoded!=0u);}
 fn deltaDirtyRow(index:u32)->u32{return sourceDelta[p.delta.w+index];}
-// The producer's structure epoch proof is consumed once for the whole
-// dispatch. Queue ordering makes all per-page revalidation redundant when
-// the published row count and retained hierarchy lifecycle agree.
-fn exactStructureReuse()->bool{return arrayLength(&rowCounts)>7u&&rowCounts[7]!=0u
- &&previousValid()&&previousRows()==rows();}
 fn deltaAccepted(n:u32)->bool{
  if(p.delta.x!=p.capacity.x||p.delta.y+16u>arrayLength(&sourceDelta)
   ||p.delta.z+p.delta.x>arrayLength(&sourceDelta)||p.delta.w+p.delta.x>arrayLength(&sourceDelta)){return false;}
@@ -1264,7 +1210,7 @@ fn deltaAccepted(n:u32)->bool{
   &&carried<=min(n,previous)&&n==carried+added&&n==previous+added-retired&&dirty<=n;
 }
 fn captureBootstrap()->bool{return capturePages.bootstrap!=0u;}
-fn captureWorkCount()->u32{return select(select(deltaControl(5u),captureExpectedPages(),captureBootstrap()),0u,exactStructureReuse());}
+fn captureWorkCount()->u32{return select(deltaControl(5u),captureExpectedPages(),captureBootstrap());}
 fn captureWorkPage(work:u32)->u32{return select(deltaDirtyRow(work)/CAPTURE_PAGE_ROWS,work,captureBootstrap());}
 fn captureWorkUnique(work:u32,page:u32)->bool{
  return captureBootstrap()||work==0u||deltaDirtyRow(work-1u)/CAPTURE_PAGE_ROWS!=page;
@@ -1284,15 +1230,15 @@ var<workgroup> captureLaneRange:array<vec2u,64>;
 var<workgroup> captureLaneChanged:array<u32,64>;
 fn dims(l:u32)->vec3u{let s=1u<<l;return (p.dimsLevel.xyz+vec3u(s-1u))/s;}fn coordKey(q:vec3u,l:u32)->u32{let d=dims(l);return q.x+d.x*(q.y+d.y*q.z)+1u;}
 fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;return vec3u(v%d.x,(v/d.x)%d.y,v/(d.x*d.y));}
-fn insertionHash(key:u32,l:u32)->u32{var h=key*0x9e3779b1u;h=(h^(h>>16u))*0x7feb352du;return(h^(h>>15u))&(levelCapacity(l)-1u);}
+fn insertionHash(key:u32)->u32{var h=key*0x9e3779b1u;h=(h^(h>>16u))*0x7feb352du;return(h^(h>>15u))&(stride()-1u);}
 fn directoryLookup(l:u32,q:vec3u,requirePublication:bool)->u32{if(l>=levels()||any(q>=dims(l))){return INVALID;}
  let generation=topology[directoryBase()+2u+l];if(generation==0u){report(OVERFLOW);return INVALID;}
  let record=brickRecord(l,q);if(topology[record]!=generation){report(OVERFLOW);return INVALID;}let bit=localBit(q);let word=topology[record+1u+(bit>>5u)];
  let flag=1u<<(bit&31u);if((word&flag)==0u){return INVALID;}let low=topology[record+1u];let high=topology[record+2u];
  let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);
  if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}let ranked=topology[record+3u]+rank;
- if(ranked>=count(l)||ranked>=levelCapacity(l)){report(OVERFLOW);return INVALID;}let slot=topology[rankedSlotsBase()+levelBase(l)+ranked];
- if(slot>=levelCapacity(l)||state[at(KEY,l,slot)]!=coordKey(q,l)){report(OVERFLOW);return INVALID;}return slot;}
+ if(ranked>=count(l)||ranked>=stride()){report(OVERFLOW);return INVALID;}let slot=topology[rankedSlotsBase()+l*stride()+ranked];
+ if(slot>=stride()||state[at(KEY,l,slot)]!=coordKey(q,l)){report(OVERFLOW);return INVALID;}return slot;}
 fn find(l:u32,q:vec3u)->u32{return directoryLookup(l,q,true);}
 fn originOf(h:LeafHeader)->vec3u{return vec3u(h.cell%p.dimsLevel.x,(h.cell/p.dimsLevel.x)%p.dimsLevel.y,h.cell/(p.dimsLevel.x*p.dimsLevel.y));}
 fn contactCoord(own:LeafHeader,other:LeafHeader,l:u32)->vec3u{let scale=1u<<l;let begin=originOf(own);let finish=begin+vec3u(own.size);
@@ -1371,7 +1317,7 @@ fn contactCoord(own:LeafHeader,other:LeafHeader,l:u32)->vec3u{let scale=1u<<l;le
    totalFlags|=captureLaneFlags[i];affectedBegin=min(affectedBegin,captureLaneRange[i].x);affectedEnd=max(affectedEnd,captureLaneRange[i].y);}
   if(captureFailed()||generation==0u||captureExpectedPages()!=(rows()+CAPTURE_PAGE_ROWS-1u)/CAPTURE_PAGE_ROWS
    ||captureExpectedPages()>capturePageCount()||(totalFlags&DELTA_ERROR)!=0u){captureReport(OVERFLOW);return;}
-  if(!exactStructureReuse()&&(captureBootstrap()||deltaControl(3u)!=0u||deltaControl(4u)!=0u)){
+  if(captureBootstrap()||deltaControl(3u)!=0u||deltaControl(4u)!=0u){
    firstLevel=0u;totalFlags=DELTA_TOPOLOGY|DELTA_STENCIL;affectedBegin=0u;affectedEnd=rows();}
   if(firstLevel<levels()){markDirtyFrom(firstLevel,totalFlags,affectedBegin,affectedEnd);}
   capturePages.validatedPages=totalChanged;capturePages.changedPages=totalChanged;capturePages.readyGeneration=generation;
@@ -1406,9 +1352,9 @@ fn contactCoord(own:LeafHeader,other:LeafHeader,l:u32)->vec3u{let scale=1u<<l;le
  }
 }
 @compute @workgroup_size(64) fn clearCorrection(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){outputCorrection[r]=0.0;}}
-fn cAt(c:u32,l:u32,s:u32)->u32{return c*totalLevelSlots()+levelBase(l)+s;}
+fn cAt(c:u32,l:u32,s:u32)->u32{return(c*levels()+l)*stride()+s;}
 fn cCount(l:u32)->u32{return candidateDispatch[l*8u];}
-fn cWorkSlot(l:u32,i:u32)->u32{return candidateTopology[workBase()+levelBase(l)+i];}
+fn cWorkSlot(l:u32,i:u32)->u32{return candidateTopology[workBase()+l*stride()+i];}
 fn cRowMap(l:u32,r:u32)->u32{return candidateTopology[rowMapBase()+l*p.capacity.x+r];}
 fn cLoadf(c:u32,l:u32,s:u32)->f32{return bitcast<f32>(candidateState[cAt(c,l,s)]);}
 fn cStoref(c:u32,l:u32,s:u32,v:f32){candidateState[cAt(c,l,s)]=bitcast<u32>(v);}
@@ -1416,12 +1362,12 @@ fn candidateReport(l:u32){levelDelta[deltaAt(l,4u)]|=DELTA_ERROR;}
 fn cMergeClass(index:u32,incoming:u32){let old=candidateState[index];var merged=MG_ONLY;
  if((old&ACTIVE)!=0u||(incoming&ACTIVE)!=0u){merged=ACTIVE;}else if((old&GHOST)!=0u||(incoming&GHOST)!=0u){merged=GHOST;}
  candidateState[index]=merged;}
-fn cInsert(l:u32,q:vec3u,flags:u32)->u32{let key=coordKey(min(q,dims(l)-vec3u(1u)),l);var slot=insertionHash(key,l);
+fn cInsert(l:u32,q:vec3u,flags:u32)->u32{let key=coordKey(min(q,dims(l)-vec3u(1u)),l);var slot=insertionHash(key);
  for(var probe=0u;probe<256u;probe+=1u){let index=cAt(KEY,l,slot);let old=candidateState[index];
   if(old==key){cMergeClass(cAt(FLAGS,l,slot),flags);return slot;}if(old==0u){candidateState[index]=key;
-   cMergeClass(cAt(FLAGS,l,slot),flags);let w=cCount(l);if(w>=levelCapacity(l)){candidateReport(l);return INVALID;}
-   candidateDispatch[l*8u]=w+1u;candidateTopology[workBase()+levelBase(l)+w]=slot;return slot;}
-  slot=(slot+1u)&(levelCapacity(l)-1u);}candidateReport(l);return INVALID;}
+   cMergeClass(cAt(FLAGS,l,slot),flags);let w=cCount(l);if(w>=stride()){candidateReport(l);return INVALID;}
+   candidateDispatch[l*8u]=w+1u;candidateTopology[workBase()+l*stride()+w]=slot;return slot;}
+  slot=(slot+1u)&(stride()-1u);}candidateReport(l);return INVALID;}
 fn cInsertOwned(l:u32,q:vec3u,flags:u32,owner:u32)->u32{let slot=cInsert(l,q,flags);if(slot==INVALID){return INVALID;}
  let encoded=owner+1u;let old=candidateState[cAt(OWNER,l,slot)];if(old==encoded){return slot;}
  if(old!=0u){candidateReport(l);return INVALID;}candidateState[cAt(OWNER,l,slot)]=encoded;return slot;}
@@ -1430,7 +1376,7 @@ fn selectedWorkSlot(l:u32,i:u32)->u32{return select(workSlot(l,i),cWorkSlot(l,i)
 fn selectedRowMap(l:u32,r:u32)->u32{return select(rowMap(l,r),cRowMap(l,r),topologyDirty(l));}
 fn selectedState(c:u32,l:u32,s:u32)->u32{return select(state[at(c,l,s)],candidateState[cAt(c,l,s)],topologyDirty(l));}
 fn cAppendTransfer(l:u32,fine:u32,coarse:u32,weight:f32){let i=candidateDispatch[l*8u+1u];
- if(i>=transferCapacity(l)){candidateReport(l);return;}candidateDispatch[l*8u+1u]=i+1u;
+ if(i>=transferStride()){candidateReport(l);return;}candidateDispatch[l*8u+1u]=i+1u;
  candidateTopology[transferWord(l,i,0u)]=fine;candidateTopology[transferWord(l,i,1u)]=coarse;
  candidateTopology[transferWord(l,i,2u)]=bitcast<u32>(weight);candidateTopology[transferWord(l,i,3u)]=INVALID;
  let fineHead=fineHeadBase(l)+fine;let fineCount=fineCountBase(l)+fine;let owned=candidateTopology[fineCount];
@@ -1443,9 +1389,9 @@ fn cDirectoryLookup(l:u32,q:vec3u)->u32{if(l>=levels()||any(q>=dims(l))){return 
  let bit=localBit(q);let word=candidateTopology[record+1u+(bit>>5u)];let flag=1u<<(bit&31u);if((word&flag)==0u){return INVALID;}
  let low=candidateTopology[record+1u];let high=candidateTopology[record+2u];let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);
  var rank=countOneBits(low&lower);if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}
- let ranked=candidateTopology[record+3u]+rank;if(ranked>=cCount(l)||ranked>=levelCapacity(l)){candidateReport(l);return INVALID;}
- let slot=candidateTopology[rankedSlotsBase()+levelBase(l)+ranked];
- if(slot>=levelCapacity(l)||candidateState[cAt(KEY,l,slot)]!=coordKey(q,l)){candidateReport(l);return INVALID;}return slot;}
+ let ranked=candidateTopology[record+3u]+rank;if(ranked>=cCount(l)||ranked>=stride()){candidateReport(l);return INVALID;}
+ let slot=candidateTopology[rankedSlotsBase()+l*stride()+ranked];
+ if(slot>=stride()||candidateState[cAt(KEY,l,slot)]!=coordKey(q,l)){candidateReport(l);return INVALID;}return slot;}
 fn cOwnedContactSlot(l:u32,row:u32,other:u32)->u32{let h=sourceHeaders[row];let native=firstTrailingBit(h.size);
  if(l>=native){return cRowMap(l,row);}let slot=cDirectoryLookup(l,contactCoord(h,sourceHeaders[other],l));
  if(slot==INVALID||candidateState[cAt(OWNER,l,slot)]!=row+1u){return INVALID;}return slot;}
@@ -1462,9 +1408,9 @@ fn cAddFace(l:u32,own:u32,other:u32,a:vec3u,b:vec3u,c:f32)->bool{let d=vec3i(b)-
 
 fn rebuildCandidateLevelSetFor(l:u32){
  if(!topologyDirty(l)){return;}levelDelta[deltaAt(l,4u)]=0u;
- for(var s=0u;s<levelCapacity(l);s+=1u){candidateState[cAt(KEY,l,s)]=0u;
+ for(var s=0u;s<stride();s+=1u){candidateState[cAt(KEY,l,s)]=0u;
   candidateState[cAt(FLAGS,l,s)]=0u;candidateState[cAt(OWNER,l,s)]=0u;
-  candidateTopology[workBase()+levelBase(l)+s]=INVALID;}
+  candidateTopology[workBase()+l*stride()+s]=INVALID;}
  for(var r=0u;r<p.capacity.x;r+=1u){candidateTopology[rowMapBase()+l*p.capacity.x+r]=INVALID;}
  for(var w=0u;w<8u;w+=1u){candidateDispatch[l*8u+w]=0u;}
  for(var r=0u;r<rows();r+=1u){let h=sourceHeaders[r];let native=firstTrailingBit(h.size);
@@ -1476,7 +1422,7 @@ fn rebuildCandidateLevelSetFor(l:u32){
 }
 fn rebuildCandidateTransferFor(l:u32){
  if(l+1u>=levels()||!(topologyDirty(l)||topologyDirty(l+1u))){return;}
- candidateDispatch[l*8u+1u]=0u;for(var s=0u;s<levelCapacity(l);s+=1u){
+ candidateDispatch[l*8u+1u]=0u;for(var s=0u;s<stride();s+=1u){
   candidateTopology[parentHeadBase(l)+s]=INVALID;candidateTopology[parentTailBase(l)+s]=INVALID;
   candidateTopology[fineHeadBase(l)+s]=INVALID;candidateTopology[fineCountBase(l)+s]=0u;}
  for(var i=0u;i<selectedCount(l);i+=1u){let fine=selectedWorkSlot(l,i);let q=decode(selectedState(KEY,l,fine),l);
@@ -1506,7 +1452,7 @@ fn rebuildCandidateDirectoryFor(l:u32){
   let record=brickRecord(l,q);let bit=localBit(q);let low=candidateTopology[record+1u];let high=candidateTopology[record+2u];
   let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);
   if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}
-  candidateTopology[rankedSlotsBase()+levelBase(l)+candidateTopology[record+3u]+rank]=slot;}
+  candidateTopology[rankedSlotsBase()+l*stride()+candidateTopology[record+3u]+rank]=slot;}
  candidateTopology[directoryBase()+2u+l]=generation;
 }
 fn rebuildCandidateStencilFor(l:u32){
@@ -1539,7 +1485,7 @@ fn rebuildCandidateStencilFor(l:u32){
 @compute @workgroup_size(1) fn validateCandidateHierarchy(){
  if(captureFailed()){report(OVERFLOW);return;}for(var l=0u;l<levels();l+=1u){
   if((levelDirty(l)&&levelDelta[deltaAt(l,4u)]!=0u)
-   ||(topologyDirty(l)&&(levelDelta[deltaAt(l,6u)]!=captureGeneration()||cCount(l)>levelCapacity(l)))){
+   ||(topologyDirty(l)&&(levelDelta[deltaAt(l,6u)]!=captureGeneration()||cCount(l)>stride()))){
    captureReport(OVERFLOW);report(OVERFLOW);return;}}
  if(selectedCount(levels()-1u)!=1u){captureReport(OVERFLOW);report(OVERFLOW);}
 }
@@ -1547,17 +1493,17 @@ fn commitCandidateLevelAt(l:u32,i:u32){
  let topologyChanged=topologyDirty(l);let transferChanged=topologyChanged||(l+1u<levels()&&topologyDirty(l+1u));
  if(!topologyChanged&&!stencilDirty(l)&&!transferChanged){return;}
  if(captureFailed()||levelDelta[deltaAt(l,4u)]!=0u){return;}
- if(stencilDirty(l)&&i<levelCapacity(l)){for(var c=DIAG;c<=YZMM;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}
+ if(stencilDirty(l)&&i<stride()){for(var c=DIAG;c<=YZMM;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}
   for(var k=0u;k<18u;k+=1u){topology[neighbourAt(k,l,i)]=candidateTopology[neighbourAt(k,l,i)];}}
- if(topologyChanged&&i<levelCapacity(l)){for(var c=0u;c<STATE_CHANNELS;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}
-  topology[workBase()+levelBase(l)+i]=candidateTopology[workBase()+levelBase(l)+i];
-  topology[rankedSlotsBase()+levelBase(l)+i]=candidateTopology[rankedSlotsBase()+levelBase(l)+i];}
+ if(topologyChanged&&i<stride()){for(var c=0u;c<STATE_CHANNELS;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}
+  topology[workBase()+l*stride()+i]=candidateTopology[workBase()+l*stride()+i];
+  topology[rankedSlotsBase()+l*stride()+i]=candidateTopology[rankedSlotsBase()+l*stride()+i];}
  if(topologyChanged&&i<p.capacity.x){topology[rowMapBase()+l*p.capacity.x+i]=candidateTopology[rowMapBase()+l*p.capacity.x+i];}
- if(transferChanged&&l+1u<levels()&&i<levelCapacity(l)){topology[parentHeadBase(l)+i]=candidateTopology[parentHeadBase(l)+i];
+ if(transferChanged&&l+1u<levels()&&i<stride()){topology[parentHeadBase(l)+i]=candidateTopology[parentHeadBase(l)+i];
   topology[parentTailBase(l)+i]=candidateTopology[parentTailBase(l)+i];
   topology[fineHeadBase(l)+i]=candidateTopology[fineHeadBase(l)+i];
   topology[fineCountBase(l)+i]=candidateTopology[fineCountBase(l)+i];}
- if(transferChanged&&l+1u<levels()&&i<transferCapacity(l)){for(var w=0u;w<4u;w+=1u){
+ if(transferChanged&&l+1u<levels()&&i<transferStride()){for(var w=0u;w<4u;w+=1u){
   topology[transferWord(l,i,w)]=candidateTopology[transferWord(l,i,w)];}}
  if(topologyChanged&&i<brickCount(l)){let record=directoryBase()+16u+(brickLevelOffset(l)+i)*4u;
   for(var w=0u;w<4u;w+=1u){topology[record+w]=candidateTopology[record+w];}}
@@ -1584,7 +1530,7 @@ fn commitCandidateLevelAt(l:u32,i:u32){
  if(!finite(v)){report(NONFINITE);}else{storef(RHS,native,rowMap(native,r),v);}}}
 fn applied(slot:u32,source:u32)->f32{let l=level();var value=loadf(DIAG,l,slot)*loadf(source,l,slot);
  for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}
-  let other=topology[neighbourAt(k,l,slot)];if(other>=levelCapacity(l)){report(OVERFLOW);continue;}
+  let other=topology[neighbourAt(k,l,slot)];if(other>=stride()){report(OVERFLOW);continue;}
   value-=c*loadf(source,l,other);}return value;}
 fn smoothable(l:u32,s:u32)->bool{return(state[at(FLAGS,l,s)]&GHOST)==0u;}
 fn relaxJacobi(slot:u32,src:u32,dst:u32){let l=level();if(!smoothable(l,slot)){storef(dst,l,slot,loadf(src,l,slot));return;}
@@ -1597,12 +1543,12 @@ fn relaxJacobi(slot:u32,src:u32,dst:u32){let l=level();if(!smoothable(l,slot)){s
 // Restriction consumes the same records through its parent-owned chains, so
 // E and E^T cannot diverge.
 fn correctionTransfer(l:u32,fine:u32,corner:u32)->TransferTarget{
- if(l+1u>=levels()||fine>=levelCapacity(l)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
+ if(l+1u>=levels()||fine>=stride()){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
  let first=topology[fineHeadBase(l)+fine];let n=topology[fineCountBase(l)+fine];
  if(first==INVALID||corner>=n||first+corner>=transferCount(l)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
  let record=first+corner;if(topology[transferWord(l,record,0u)]!=fine){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
  let coarse=topology[transferWord(l,record,1u)];let weight=bitcast<f32>(topology[transferWord(l,record,2u)]);
- if(coarse>=levelCapacity(l+1u)||!finite(weight)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
+ if(coarse>=stride()||!finite(weight)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
  return TransferTarget(coarse,weight);}
 // Section 4.2 GhostValueAccumulate is E^T: one coarse owner traverses its
 // immutable fine-major chain, so no destination synchronization is required.

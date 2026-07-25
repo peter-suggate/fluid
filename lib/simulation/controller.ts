@@ -11,14 +11,12 @@ import { useSceneStore } from "../stores/scene-store";
 import { useMethodStore, resolvedMethodValues } from "../stores/method-store";
 import type { MethodParamValue } from "../methods";
 import { useRuntimeStore } from "../stores/runtime-store";
-import { useRecordingStore } from "../stores/recording-store";
 import { useDiagnosticsStore, emptyPerformanceReport } from "../stores/diagnostics-store";
 import { usePerformanceInstrumentationStore } from "../stores/performance-instrumentation-store";
 import { useUIStore } from "../stores/ui-store";
 import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
 import { planSceneRuntime } from "../scene-runtime";
-import { recordingElapsedBudget } from "../recording-timing";
 import {
   combineMainThreadPerformanceTraces,
   CPUPerformanceTrace,
@@ -135,7 +133,7 @@ class SimulationController {
       : undefined;
     try {
     if (this.lastClock === null) this.lastClock = now;
-    const wallElapsed = Math.max(0, (now - this.lastClock) / 1000);
+    const elapsed = Math.max(0, (now - this.lastClock) / 1000);
     this.lastClock = now;
     const runtime = useRuntimeStore.getState();
     if (!planSceneRuntime(useSceneStore.getState().scene).fluidSolver) {
@@ -159,15 +157,6 @@ class SimulationController {
     }
     const scene = useSceneStore.getState().scene;
     const backend = this.backend;
-    const recordingStatus = useRecordingStore.getState().status;
-    const elapsed = recordingStatus === "recording" || recordingStatus === "processing"
-      ? recordingElapsedBudget(
-        wallElapsed,
-        this.accumulator,
-        this.simulationTime,
-        backend === "webgpu" ? this.gpuCompletedTime : this.simulationTime,
-      )
-      : wallElapsed;
     if (backend === "webgpu" && !this.webgpuTransportReady()) {
       this.accumulator = 0;
       if (runtime.simRate !== null) runtime.setSimRate(null);

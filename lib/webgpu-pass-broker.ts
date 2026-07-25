@@ -9,7 +9,6 @@ export class PassBroker {
   private openComputePass?: GPUComputePassEncoder;
   private openedComputePassCount = 0;
   private latestFence?: string;
-  private readonly indirectBufferRoles = new Map<GPUBuffer, number>();
 
   constructor(private readonly encoder: GPUCommandEncoder) {}
 
@@ -22,34 +21,12 @@ export class PassBroker {
     return this.openComputePass;
   }
 
-  /**
-   * Acquire the compute pass while respecting WebGPU's pass-wide prohibition
-   * on using one buffer as both writable storage and indirect commands.
-   * Consecutive users of the same role remain collapsed into the open pass;
-   * only an actual role transition creates a synchronization boundary.
-   */
-  computeForIndirectBuffer(
-    buffer: GPUBuffer,
-    role: "storage-write" | "indirect",
-    descriptor?: GPUComputePassDescriptor,
-  ): GPUComputePassEncoder {
-    const bit = role === "storage-write" ? 1 : 2;
-    const prior = this.indirectBufferRoles.get(buffer) ?? 0;
-    if (prior !== 0 && (prior & bit) === 0) {
-      this.fence("indirect buffer storage/command role transition");
-    }
-    const pass = this.compute(descriptor);
-    this.indirectBufferRoles.set(buffer, (this.indirectBufferRoles.get(buffer) ?? 0) | bit);
-    return pass;
-  }
-
   /** End the current pass. `reason` documents semantic boundaries at callers. */
   fence(reason?: string): void {
     const pass = this.openComputePass;
     if (!pass) return;
     this.openComputePass = undefined;
     this.latestFence = reason;
-    this.indirectBufferRoles.clear();
     pass.end();
   }
 

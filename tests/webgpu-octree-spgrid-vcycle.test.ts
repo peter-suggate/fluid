@@ -88,20 +88,11 @@ function reachableWGSLBindings(shader: string, entryPoint: string): number[] {
 test("native sparse pyramid allocation is bounded by row capacity, not dense domain volume", () => {
   const narrow = planOctreeSPGridVCycle({ dimensions: [64, 48, 32], rowCapacity: 5_000 });
   const wide = planOctreeSPGridVCycle({ dimensions: [1_024, 48, 32], rowCapacity: 5_000 });
-  assert.ok(wide.levelStride >= narrow.levelStride);
+  assert.equal(narrow.levelStride, wide.levelStride);
   assert.equal(narrow.transferStride, 40_000);
   assert.ok(wide.levelCount > narrow.levelCount);
-  assert.equal(wide.stateBytes, 25 * wide.totalLevelSlots * 4);
-  assert.deepEqual(wide.levelOffsets,
-    wide.levelCapacities.map((_, level) => wide.levelCapacities.slice(0, level)
-      .reduce((sum, capacity) => sum + capacity, 0)));
-  assert.ok(wide.levelCapacities.every((capacity, level) =>
-    level === 0 || capacity <= wide.levelCapacities[level - 1]));
-  assert.equal(wide.transferOffsets.length, wide.levelCount - 1);
+  assert.equal(wide.stateBytes, 25 * wide.levelCount * wide.levelStride * 4);
   const ui = planOctreeSPGridVCycle({ dimensions: [24, 18, 16], rowCapacity: 6_912 });
-  assert.deepEqual(ui.levelCapacities, [8_192, 1_024, 128, 32, 4, 1]);
-  assert.ok(ui.stateBytes < 1024 * 1024,
-    "rank-indexed per-level arenas must not retain finest-level padding");
   assert.ok(ui.stateBytes <= 128 * 1024 * 1024);
   assert.ok(ui.topologyBytes <= 128 * 1024 * 1024);
   assert.equal(wide.dispatchBytes, wide.levelCount * 32 + 8);
@@ -350,9 +341,9 @@ test("persistent shader preserves host-recorded V-cycle ghost residuals, Jacobi,
 
 test("every SPGrid auto-layout binds the complete reachable resource ABI", () => {
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.beginL1CapturePlan, [0, 3, 6, 13, 14, 18]);
-  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.planL1CaptureDelta, [0, 1, 2, 3, 6, 11, 12, 13, 14, 18]);
-  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.commitChangedL1, [0, 1, 2, 3, 6, 11, 12, 13, 18]);
-  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.finalizeL1CapturePublication, [0, 3, 6, 13, 18]);
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.planL1CaptureDelta, [0, 1, 2, 3, 11, 12, 13, 14, 18]);
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.commitChangedL1, [0, 1, 2, 3, 11, 12, 13, 18]);
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.finalizeL1CapturePublication, [0, 3, 13, 18]);
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.buildCandidateLevelDeltas,
     [0, 3, 4, 5, 6, 11, 12, 14, 15, 16, 17],
     "the ordered candidate builder remains within the portable ten-storage-buffer limit");
@@ -554,8 +545,8 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   assert.doesNotMatch(octreeSPGridVCycleShader, /fn validateL1CapturePages|fn finalizeL1CapturePlan/,
     "the recurring all-page compare/reduce kernels must be deleted");
   assert.match(octreeSPGridVCycleShader,
-    /fn exactStructureReuse\(\)->bool[\s\S]*fn captureWorkCount\(\)->u32\{return select\(select\(deltaControl\(5u\),captureExpectedPages\(\),captureBootstrap\(\)\),0u,exactStructureReuse\(\)\);\}/,
-    "one structure-epoch proof must bypass both warm page validation and cold bootstrap enumeration");
+    /fn captureWorkCount\(\)->u32\{return select\(deltaControl\(5u\),captureExpectedPages\(\),captureBootstrap\(\)\);\}/,
+    "only explicit cold bootstrap may enumerate every page");
   const captureTransaction = octreeSPGridVCycleShader.slice(
     octreeSPGridVCycleShader.indexOf("fn beginL1CapturePlan"),
     octreeSPGridVCycleShader.indexOf("fn clearCorrection"));
@@ -757,21 +748,19 @@ test("Dawn exact-reuse setup preserves prior hierarchy and changed capture recop
   stateRead.unmap(); publicationRead.unmap();
 
   // Remove only the authoritative reuse proof. The same warm capture now
-  // plans over live rows; the transactional setup validates the dependent
-  // hierarchy before replacing the retained L1 header publication.
+  // dispatches over live rows and replaces the retained header publication.
   device.pushErrorScope("validation");
   countWords[7] = 0; device.queue.writeBuffer(rowCount, 0, countWords);
-  sourceWords[0] = 4; device.queue.writeBuffer(headers, 0, sourceWords);
+  sourceWords[0] = 3; device.queue.writeBuffer(headers, 0, sourceWords);
   const captureRead = device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   encoder = device.createCommandEncoder(); const captureBroker = new PassBroker(encoder);
   cycle.encodeCapture(captureBroker);
-  cycle.encodeSetup(captureBroker, { solverControl: control, rowCount });
   captureBroker.fence("capture complete");
   encoder.copyBufferToBuffer(internal.capturedHeaders, 0, captureRead, 0, 48);
   device.queue.submit([encoder.finish()]);
   await captureRead.mapAsync(GPUMapMode.READ);
-  assert.equal(new Uint32Array(captureRead.getMappedRange())[0], 4,
-    "an unproven generation must recapture its live L1 header at the validated flip");
+  assert.equal(new Uint32Array(captureRead.getMappedRange())[0], 3,
+    "an unproven generation must recapture its live L1 header");
   validationError = await device.popErrorScope();
   assert.equal(validationError, null, validationError?.message);
   captureRead.unmap(); cycle.destroy();

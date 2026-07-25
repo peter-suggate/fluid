@@ -4,11 +4,6 @@ import { OCTREE_COARSE_PHI_BYTES, OCTREE_COARSE_PHI_FLAG } from "./octree-coarse
 import { OCTREE_FINE_PHI_CONTRIBUTION_BYTES, type OctreeCoarsePhiCorrectionInput,
   type WebGPUOctreeCoarseLevelSet } from "./webgpu-octree-coarse-levelset";
 import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
-import {
-  OCTREE_POWER_ROW_DELTA_VALID,
-  assertOctreePowerRowDeltaLayout,
-  type OctreePowerRowDeltaSource,
-} from "./webgpu-octree-power-descriptor";
 import { PassBroker } from "./webgpu-pass-broker";
 
 export const OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES = 64;
@@ -49,9 +44,6 @@ export interface OctreePowerCoarseLevelSetInput {
   readonly rowDirectory: GPUBuffer;
   /** CPU count or GPU buffer whose first u32 is the compact live-row count. */
   readonly rowCount: number | GPUBuffer;
-  /** Exact topology-epoch delta. A zero affected-row count gates selector
-   * adjacency construction while coarse values continue to advance. */
-  readonly rowDelta?: OctreePowerRowDeltaSource;
   readonly fineCorrection?: OctreeCoarsePhiCorrectionInput & {
     /** Numeric counts for host-authored tests, or a GPU buffer with
      * `(contributionCount, maximumContributionsPerRow)` at byte zero. */
@@ -151,7 +143,6 @@ export function planOctreePowerCoarseLevelSet(rowCapacityValue: number, redistan
     parameterArenaBytes,
     allocatedBytes: scratchBytes + rowStatusBytes + 2 * sampleDirectoryBytes + deltaBytes + selectorRowBytes
       + OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES + parameterArenaBytes + 32
-      + 64 + 12
       + (rowCapacity + 1) * 4 + OCTREE_FINE_PHI_CONTRIBUTION_BYTES };
 }
 
@@ -175,10 +166,7 @@ export class WebGPUOctreePowerCoarseLevelSet {
   private readonly rowStatus: GPUBuffer;
   private readonly emptyOffsets: GPUBuffer; private readonly emptyContributions: GPUBuffer;
   private readonly validFineControl: GPUBuffer;
-  private readonly emptyRowDelta: GPUBuffer;
-  private readonly selectorDispatch: GPUBuffer;
   private readonly preparePipeline: GPUComputePipeline;
-  private readonly prepareSelectorRowsPipeline: GPUComputePipeline;
   private readonly buildSelectorRowsPipeline: GPUComputePipeline;
   private readonly advectPipeline: GPUComputePipeline;
   private readonly correctPipeline: GPUComputePipeline;
@@ -230,13 +218,6 @@ export class WebGPUOctreePowerCoarseLevelSet {
     this.emptyContributions = device.createBuffer({ label: "Empty fine correction contribution", size: OCTREE_FINE_PHI_CONTRIBUTION_BYTES, usage: storage });
     this.validFineControl = device.createBuffer({ label: "Valid host fine-correction control", size: 32, usage: storage });
     device.queue.writeBuffer(this.validFineControl, 20, new Uint32Array([OCTREE_POWER_COARSE_LEVELSET_VALID]));
-    this.emptyRowDelta = device.createBuffer({
-      label: "Power coarse phi disabled structure delta", size: 64, usage: storage,
-    });
-    this.selectorDispatch = device.createBuffer({
-      label: "Power coarse phi selector epoch dispatch", size: 12,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-    });
     const shaderModule = device.createShaderModule({ label: "Power coarse phi schedule", code: octreePowerCoarseLevelSetShader });
     const pipeline = (label: string, entryPoint = label, constants?: Record<string, number>) =>
       device.createComputePipeline({
@@ -245,7 +226,6 @@ export class WebGPUOctreePowerCoarseLevelSet {
       compute: { module: shaderModule, entryPoint, ...(constants ? { constants } : {}) },
     });
     this.preparePipeline = pipeline("preparePowerCoarsePhiSchedule");
-    this.prepareSelectorRowsPipeline = pipeline("preparePowerCoarseSelectorRows");
     this.buildSelectorRowsPipeline = pipeline("buildPowerCoarseSelectorRows");
     this.advectPipeline = pipeline("advectPowerCoarsePhiSchedule");
     this.correctPipeline = pipeline("correctPowerCoarsePhiSchedule");
@@ -294,30 +274,10 @@ export class WebGPUOctreePowerCoarseLevelSet {
       ? u32(fine.contributionCount, "Fine correction contribution count") : 0;
     const maximumPerRow = positiveInteger(fine?.maximumContributionsPerRow ?? 1, "Fine correction row bound");
     const generation = u32(options.generation ?? 0, "Power coarse-phi generation");
-    if (input.rowDelta) {
-      assertOctreePowerRowDeltaLayout(input.rowDelta, this.plan.rowCapacity,
-        "Power coarse-phi selector");
-    }
-    const distanceAuthority = typeof process !== "undefined"
-      ? process.env?.FLUID_DISTANCE_AUTHORITY : undefined;
-    if (distanceAuthority !== undefined
-      && distanceAuthority !== "triple" && distanceAuthority !== "cpt") {
-      throw new RangeError("FLUID_DISTANCE_AUTHORITY must be triple or cpt");
-    }
-    // The accepted fine CPT already supplies current signed distance for
-    // every row in its maintained band. Under the collapsed authority the
-    // compact coarse field freezes its migrated far-field values and replaces
-    // in-band rows from the exact fine restriction below; running another
-    // eight Eikonal sweeps would solve the same quantity a second time.
-    const directFineDistance = fine?.aggregated === true
-      && distanceAuthority !== "triple";
-    const redistancePasses = directFineDistance ? 0 : this.plan.redistancePasses;
     const data = new ArrayBuffer(64), words = new Uint32Array(data), floats = new Float32Array(data);
     words.set([...dimensions, this.plan.rowCapacity, maximumRows, contributionCount, maximumPerRow, generation]);
-    floats.set([options.physicalCellSize, options.dt], 8); words.set([redistancePasses, rowDirectoryCapacity,
+    floats.set([options.physicalCellSize, options.dt], 8); words.set([this.plan.redistancePasses, rowDirectoryCapacity,
       fine ? (fine.aggregated ? 2 : 1) : 0, maximumLeafSize], 10);
-    words[14] = input.rowDelta?.controlOffsetWords ?? 0xffff_ffff;
-    words[15] = input.rowDelta?.affectedRowsOffsetWords ?? 0;
     this.device.queue.writeBuffer(arena.params, invocationBase, data);
     if (typeof input.rowCount !== "number") {
       broker.copyBufferToBuffer(input.rowCount, 0, arena.params, invocationBase + 16, 4);
@@ -333,13 +293,10 @@ export class WebGPUOctreePowerCoarseLevelSet {
       [8, binding(this.coarse.records)], [9, binding(this.scratch)], [11, binding(offsets)], [12, binding(contributions)],
       [13, binding(this.control)], [15, binding(this.sampleDirectory)], [16, binding(fineControl)],
       [17, binding(this.rowStatus)], [18, binding(this.candidateSampleDirectory)],
-      [19, binding(this.delta)], [20, binding(this.selectorRows)],
-      [21, binding(this.selectorDispatch)],
-      [22, binding(input.rowDelta?.rows ?? this.emptyRowDelta)]]);
+      [19, binding(this.delta)], [20, binding(this.selectorRows)]]);
     const phaseBindings = [
       [0, 1, 8, 13, 15, 16, 17, 18, 19],
-      [0, 5, 13, 21, 22],
-      [0, 1, 2, 5, 6, 13, 20, 22],
+      [0, 1, 2, 5, 6, 13, 20],
       [0, 1, 2, 5, 7, 8, 9, 13, 17, 20],
       [0, 9, 11, 12, 13, 17],
       [0, 1, 2, 3, 4, 5, 9, 13, 17, 20],
@@ -361,18 +318,17 @@ export class WebGPUOctreePowerCoarseLevelSet {
       pass.dispatchWorkgroups(groups);
     };
     run(this.preparePipeline, phaseBindings[0]);
-    run(this.prepareSelectorRowsPipeline, phaseBindings[1]);
     const rowWorkgroups = Math.max(1, Math.ceil(maximumRows / 256));
-    pass.setPipeline(this.buildSelectorRowsPipeline);
-    pass.setBindGroup(0, bindGroup(this.buildSelectorRowsPipeline, phaseBindings[2]));
-    pass.dispatchWorkgroupsIndirect(this.selectorDispatch, 0);
-    run(this.advectPipeline, phaseBindings[3], rowWorkgroups);
-    run(this.correctPipeline, phaseBindings[4], rowWorkgroups);
-    for (const redistance of directFineDistance ? [] : this.redistancePipelines) {
-      run(redistance, phaseBindings[5], rowWorkgroups);
+    const selectorWorkgroups = Math.max(1, Math.ceil(
+      maximumRows * this.selectorCount / 64));
+    run(this.buildSelectorRowsPipeline, phaseBindings[1], selectorWorkgroups);
+    run(this.advectPipeline, phaseBindings[2], rowWorkgroups);
+    run(this.correctPipeline, phaseBindings[3], rowWorkgroups);
+    for (const redistance of this.redistancePipelines) {
+      run(redistance, phaseBindings[4], rowWorkgroups);
     }
-    run(this.publishPipeline, phaseBindings[6], rowWorkgroups);
-    run(this.commitPipeline, phaseBindings[7]);
+    run(this.publishPipeline, phaseBindings[5], rowWorkgroups);
+    run(this.commitPipeline, phaseBindings[6]);
     broker.fence("power coarse level-set schedule complete");
   }
 
@@ -403,8 +359,7 @@ export class WebGPUOctreePowerCoarseLevelSet {
     this.candidateSampleDirectory.destroy(); this.delta.destroy(); this.rowStatus.destroy();
     this.liveParameterArenas.forEach((buffer) => buffer.destroy()); this.liveParameterArenas.clear();
     this.freeParameterArenas.length = 0;
-    this.emptyOffsets.destroy(); this.emptyContributions.destroy(); this.validFineControl.destroy();
-    this.emptyRowDelta.destroy(); this.selectorDispatch.destroy(); }
+    this.emptyOffsets.destroy(); this.emptyContributions.destroy(); this.validFineControl.destroy(); }
 }
 
 /**
@@ -456,8 +411,6 @@ struct DeltaRecord { cellPlusOne:u32, size:u32, row:u32, flags:u32 }
 struct DeltaPublication { count:u32, generation:u32, flags:u32, valid:u32, pad:array<u32,12>, records:array<DeltaRecord> }
 @group(0) @binding(19) var<storage,read_write> coarseDeltaPublication:DeltaPublication;
 @group(0) @binding(20) var<storage,read_write> selectorRows:array<u32>;
-@group(0) @binding(21) var<storage,read_write> selectorDispatch:array<u32>;
-@group(0) @binding(22) var<storage,read> rowDelta:array<u32>;
 const INVALID:u32=0xffffffffu;const VALID:u32=0x80000000u;const CAPACITY:u32=1u;const INVALID_ROW:u32=2u;const INVALID_VELOCITY:u32=4u;const INVALID_CATALOG:u32=8u;const INVALID_FINE_OFFSETS:u32=16u;const INVALID_FINE_SAMPLE:u32=32u;const FINE_BOUND:u32=64u;const INVALID_SOURCE:u32=256u;const NO_CAUSAL_SIMPLEX:u32=512u;
 const PHI_VALID:u32=${OCTREE_COARSE_PHI_FLAG.valid}u;const PHI_CORRECTED:u32=${OCTREE_COARSE_PHI_FLAG.correctedFromFine}u;const PHI_INTERFACE:u32=${OCTREE_COARSE_PHI_FLAG.containsInterface}u;const PHI_FINITE:u32=${OCTREE_COARSE_PHI_FLAG.finite}u;const MIGRATED_AIR:u32=16u;const UNIFORM:u32=1u;
 fn finite(v:f32)->bool{return (bitcast<u32>(v)&0x7f800000u)!=0x7f800000u;}fn sourceRequested()->u32{return min(params.countsGeneration.x,params.dimensionsCapacity.w);}fn requested()->u32{return sourceRequested();}fn rejectedFine()->bool{return params.hasFine!=0u&&(arrayLength(&fineControl)<6u||fineControl[0]==INVALID||fineControl[5]!=VALID);}fn dims()->vec3u{return params.dimensionsCapacity.xyz;}
@@ -469,11 +422,7 @@ fn level(size:u32)->u32{return 31u-countLeadingZeros(size);}
 fn directoryLess(aLevel:u32,aMorton:u32,bLevel:u32,bMorton:u32)->bool{return aLevel<bLevel||(aLevel==bLevel&&aMorton<bMorton);}
 fn findSite(c:vec3f,s:f32)->u32{let grid=s/params.physical.x;let o=c/params.physical.x-0.5*grid;let rounded=round(o);if(abs(grid-round(grid))>2e-4||any(abs(o-rounded)>vec3f(2e-4))||any(rounded<vec3f(0.0))||any(rounded>=vec3f(dims()))){return INVALID;}let q=vec3u(rounded);let cell=q.x+dims().x*(q.y+dims().y*q.z);let wantedSize=u32(round(grid));let wantedLevel=level(wantedSize);let wantedMorton=morton(cell);let count=min(sourceRequested(),min(params.rowDirectoryCapacity,arrayLength(&rowDirectory)));var low=0u;var high=count;while(low<high){let middle=low+(high-low)/2u;let candidate=rowDirectory[middle];if(directoryLess(level(candidate.size),candidate.morton,wantedLevel,wantedMorton)){low=middle+1u;}else{high=middle;}}if(low<count){let candidate=rowDirectory[low];if(candidate.cellPlusOne==cell+1u&&candidate.size==wantedSize){return candidate.row;}}return INVALID;}
 fn selectorRow(row:u32,selector:u32)->u32{let index=row*${OCTREE_POWER_COARSE_LEVELSET_SELECTOR_STRIDE}u+selector;if(selector>=${OCTREE_POWER_COARSE_LEVELSET_SELECTOR_STRIDE}u||index>=arrayLength(&selectorRows)){return INVALID;}return selectorRows[index];}
-fn selectorDeltaAccepted()->bool{if(params.pad0==INVALID){return false;}let base=params.pad0;if(base>arrayLength(&rowDelta)||arrayLength(&rowDelta)-base<16u){return false;}let current=rowDelta[base];let previous=rowDelta[base+1u];let carried=rowDelta[base+2u];let added=rowDelta[base+3u];let retired=rowDelta[base+4u];let dirty=rowDelta[base+5u];let affected=rowDelta[base+6u];return current==requested()&&rowDelta[base+7u]==params.countsGeneration.w&&rowDelta[base+8u]==${OCTREE_POWER_ROW_DELTA_VALID}u&&params.pad1<=arrayLength(&rowDelta)&&affected<=arrayLength(&rowDelta)-params.pad1&&dirty<=affected&&affected<=current&&carried<=previous&&current==carried+added&&current==previous+added-retired;}
-fn selectorEpochCount()->u32{if(!selectorDeltaAccepted()){return requested();}return rowDelta[params.pad0+6u];}
-fn selectorEpochRow(item:u32)->u32{if(!selectorDeltaAccepted()){return item;}return rowDelta[params.pad1+item];}
-fn prepareSelectorRows(){let selectorCount=min(arrayLength(&vertices),${OCTREE_POWER_COARSE_LEVELSET_SELECTOR_STRIDE}u);let count=select(0u,selectorEpochCount(),control.pad0!=0u&&selectorCount!=0u&&params.redistancePasses!=0u);control.pad1=count;if(arrayLength(&selectorDispatch)>=3u){selectorDispatch[0]=(count*selectorCount+63u)/64u;selectorDispatch[1]=1u;selectorDispatch[2]=1u;}}
-fn buildSelectorRow(item:u32){let selectorCount=min(arrayLength(&vertices),${OCTREE_POWER_COARSE_LEVELSET_SELECTOR_STRIDE}u);if(selectorCount==0u){return;}let work=item/selectorCount;let selector=item%selectorCount;if(work>=control.pad1){return;}let row=selectorEpochRow(work);let output=row*${OCTREE_POWER_COARSE_LEVELSET_SELECTOR_STRIDE}u+selector;if(control.pad0==0u||row>=requested()||row>=arrayLength(&headers)||row>=arrayLength(&metrics)||output>=arrayLength(&selectorRows)){return;}let metric=metrics[row];let vertex=vertices[selector].offsetSize;let c=center(row)+size(row)*inverseTransform(vertex.xyz,metric.transformAndFlags&63u);selectorRows[output]=findSite(c,size(row)*vertex.w);}
+fn buildSelectorRow(item:u32){let selectorCount=min(arrayLength(&vertices),${OCTREE_POWER_COARSE_LEVELSET_SELECTOR_STRIDE}u);if(selectorCount==0u){return;}let row=item/selectorCount;let selector=item%selectorCount;let output=row*${OCTREE_POWER_COARSE_LEVELSET_SELECTOR_STRIDE}u+selector;if(control.pad0==0u||row>=requested()||row>=arrayLength(&headers)||row>=arrayLength(&metrics)||output>=arrayLength(&selectorRows)){return;}let metric=metrics[row];let vertex=vertices[selector].offsetSize;let c=center(row)+size(row)*inverseTransform(vertex.xyz,metric.transformAndFlags&63u);selectorRows[output]=findSite(c,size(row)*vertex.w);}
 fn fail(row:u32,flag:u32){if(row<arrayLength(&rowStatus)){rowStatus[row].flags|=flag;}}fn solveGradient(m:mat3x3f,b:vec3f)->vec4f{let xx=m[0].x;let xy=m[0].y;let xz=m[0].z;let yy=m[1].y;let yz=m[1].z;let zz=m[2].z;let c00=yy*zz-yz*yz;let c01=xz*yz-xy*zz;let c02=xy*yz-xz*yy;let c11=xx*zz-xz*xz;let c12=xy*xz-xx*yz;let c22=xx*yy-xy*xy;let detValue=xx*c00+xy*c01+xz*c02;if(!finite(detValue)||abs(detValue)<=1e-9){return vec4f(0.0);}return vec4f(vec3f(c00*b.x+c01*b.y+c02*b.z,c01*b.x+c11*b.y+c12*b.z,c02*b.x+c12*b.y+c22*b.z)/detValue,1.0);}
 fn previousSampleSlot(cell:u32,s:u32)->u32{let count=min(sampleDirectory.rowCount,arrayLength(&sampleDirectory.entries));let wantedLevel=level(s);let wantedMorton=morton(cell);var low=0u;var high=count;while(low<high){let middle=low+(high-low)/2u;let entry=sampleDirectory.entries[middle];let entryMorton=morton(entry.cellPlusOne-1u);if(directoryLess(level(entry.size),entryMorton,wantedLevel,wantedMorton)){low=middle+1u;}else{high=middle;}}if(low<count){let entry=sampleDirectory.entries[low];if(entry.cellPlusOne==cell+1u&&entry.size==s){return low;}}return INVALID;}
 fn candidateSampleSlot(cell:u32,s:u32)->u32{let count=min(candidateDirectory.rowCount,arrayLength(&candidateDirectory.entries));let wantedLevel=level(s);let wantedMorton=morton(cell);var low=0u;var high=count;while(low<high){let middle=low+(high-low)/2u;let entry=candidateDirectory.entries[middle];let entryMorton=morton(entry.cellPlusOne-1u);if(directoryLess(level(entry.size),entryMorton,wantedLevel,wantedMorton)){low=middle+1u;}else{high=middle;}}if(low<count){let entry=candidateDirectory.entries[low];if(entry.cellPlusOne==cell+1u&&entry.size==s){return low;}}return INVALID;}
@@ -484,7 +433,7 @@ fn previousSampleAtCurrentLeaf(header:LeafHeader)->CoarsePhi{var slot=previousSa
 fn migratePowerCoarsePhiSource(row:u32){if(sampleDirectory.state!=VALID||sampleDirectory.rowCount>arrayLength(&sampleDirectory.entries)){return;}let count=sourceRequested();if(row>=count||row>=params.dimensionsCapacity.w||row>=arrayLength(&headers)||row>=arrayLength(&coarse)){return;}let header=headers[row];if(header.size==0u||header.cell>=dims().x*dims().y*dims().z){return;}coarse[row]=previousSampleAtCurrentLeaf(header);}
 fn preparePowerCoarsePhi(){let count=sourceRequested();control=Control(select(0u,CAPACITY,params.countsGeneration.x>params.dimensionsCapacity.w),0xffffffffu,count,0u,0u,0u,params.redistancePasses,0u,0u,params.countsGeneration.y,params.countsGeneration.w,0u,0u,0u,0u,0u);candidateDirectory.state=0u;candidateDirectory.generation=params.countsGeneration.w;candidateDirectory.rowCount=count;candidateDirectory.maximumLeafSize=params.maximumLeafSize;candidateDirectory.dimensions=params.dimensionsCapacity.xyz;candidateDirectory.physicalCellSize=params.physical.x;coarseDeltaPublication.count=0u;coarseDeltaPublication.generation=params.countsGeneration.w;coarseDeltaPublication.flags=0u;coarseDeltaPublication.valid=0u;}
 fn clearPowerCoarsePhiRowStatus(row:u32){if(row<arrayLength(&rowStatus)){rowStatus[row]=RowStatus(0u,0u,0u,0u,0u,0u,0.0,0u);}}
-fn advectPowerCoarsePhi(row:u32){if(row>=requested()||row>=params.dimensionsCapacity.w){return;}if(row>=arrayLength(&headers)||row>=arrayLength(&metrics)||row>=arrayLength(&velocities)||row>=arrayLength(&coarse)||row>=arrayLength(&scratchA)||row>=arrayLength(&rowStatus)){fail(row,CAPACITY);return;}let metric=metrics[row];if((metric.transformAndFlags&VALID)==0u){fail(row,INVALID_ROW);return;}let extent=f32(headers[row].size)*params.physical.x;let physicalVolume=metric.volume*extent*extent*extent;if(!finite(physicalVolume)||physicalVolume<=0.0){fail(row,INVALID_ROW);return;}rowStatus[row].physicalVolume=physicalVolume;let source=coarse[row];if((source.flags&(PHI_VALID|PHI_FINITE))!=(PHI_VALID|PHI_FINITE)||!finite(source.phi)||!finite(source.minimumPhi)||!finite(source.maximumPhi)||source.minimumPhi>source.maximumPhi||source.phi<source.minimumPhi||source.phi>source.maximumPhi){fail(row,INVALID_SOURCE);return;}if(params.hasFine==2u&&params.redistancePasses==0u){scratchA[row]=source;rowStatus[row].advected=1u;return;}let velocity=velocities[row];if(params.physical.y>0.0&&(!finite(velocity.x)||!finite(velocity.y)||!finite(velocity.z)||velocity.w<=0.0)){fail(row,INVALID_VELOCITY);return;}var matrix=mat3x3f(vec3f(0.0),vec3f(0.0),vec3f(0.0));var rhs=vec3f(0.0);for(var selector=0u;selector<arrayLength(&vertices);selector+=1u){let neighbor=selectorRow(row,selector);if(neighbor==INVALID||neighbor>=requested()||neighbor>=arrayLength(&headers)||neighbor>=arrayLength(&metrics)||neighbor>=arrayLength(&coarse)){continue;}let delta=center(neighbor)-center(row);let length2=dot(delta,delta);let other=coarse[neighbor];if((other.flags&(PHI_VALID|PHI_FINITE))!=(PHI_VALID|PHI_FINITE)||length2<=1e-12||!finite(other.phi)){continue;}let weight=1.0/length2;matrix+=weight*mat3x3f(delta*delta.x,delta*delta.y,delta*delta.z);rhs+=weight*delta*(other.phi-source.phi);}let gradient=solveGradient(matrix,rhs);var value=source.phi;if(params.physical.y>0.0&&gradient.w>0.0){value-=params.physical.y*dot(velocity.xyz,gradient.xyz);}let shift=value-source.phi;let shiftedMinimum=min(value,source.minimumPhi+shift);let shiftedMaximum=max(value,source.maximumPhi+shift);scratchA[row]=CoarsePhi(value,shiftedMinimum,shiftedMaximum,(source.flags&(~PHI_CORRECTED))|PHI_VALID|PHI_FINITE);rowStatus[row].advected=1u;}
+fn advectPowerCoarsePhi(row:u32){if(row>=requested()||row>=params.dimensionsCapacity.w){return;}if(row>=arrayLength(&headers)||row>=arrayLength(&metrics)||row>=arrayLength(&velocities)||row>=arrayLength(&coarse)||row>=arrayLength(&scratchA)||row>=arrayLength(&rowStatus)){fail(row,CAPACITY);return;}let metric=metrics[row];if((metric.transformAndFlags&VALID)==0u){fail(row,INVALID_ROW);return;}let extent=f32(headers[row].size)*params.physical.x;let physicalVolume=metric.volume*extent*extent*extent;if(!finite(physicalVolume)||physicalVolume<=0.0){fail(row,INVALID_ROW);return;}rowStatus[row].physicalVolume=physicalVolume;let velocity=velocities[row];if(params.physical.y>0.0&&(!finite(velocity.x)||!finite(velocity.y)||!finite(velocity.z)||velocity.w<=0.0)){fail(row,INVALID_VELOCITY);return;}let source=coarse[row];if((source.flags&(PHI_VALID|PHI_FINITE))!=(PHI_VALID|PHI_FINITE)||!finite(source.phi)||!finite(source.minimumPhi)||!finite(source.maximumPhi)||source.minimumPhi>source.maximumPhi||source.phi<source.minimumPhi||source.phi>source.maximumPhi){fail(row,INVALID_SOURCE);return;}var matrix=mat3x3f(vec3f(0.0),vec3f(0.0),vec3f(0.0));var rhs=vec3f(0.0);for(var selector=0u;selector<arrayLength(&vertices);selector+=1u){let neighbor=selectorRow(row,selector);if(neighbor==INVALID||neighbor>=requested()||neighbor>=arrayLength(&headers)||neighbor>=arrayLength(&metrics)||neighbor>=arrayLength(&coarse)){continue;}let delta=center(neighbor)-center(row);let length2=dot(delta,delta);let other=coarse[neighbor];if((other.flags&(PHI_VALID|PHI_FINITE))!=(PHI_VALID|PHI_FINITE)||length2<=1e-12||!finite(other.phi)){continue;}let weight=1.0/length2;matrix+=weight*mat3x3f(delta*delta.x,delta*delta.y,delta*delta.z);rhs+=weight*delta*(other.phi-source.phi);}let gradient=solveGradient(matrix,rhs);var value=source.phi;if(params.physical.y>0.0&&gradient.w>0.0){value-=params.physical.y*dot(velocity.xyz,gradient.xyz);}let shift=value-source.phi;let shiftedMinimum=min(value,source.minimumPhi+shift);let shiftedMaximum=max(value,source.maximumPhi+shift);scratchA[row]=CoarsePhi(value,shiftedMinimum,shiftedMaximum,(source.flags&(~PHI_CORRECTED))|PHI_VALID|PHI_FINITE);rowStatus[row].advected=1u;}
 fn solveTranspose(a:vec3f,b:vec3f,c:vec3f,rhs:vec3f)->vec4f{let d=dot(a,cross(b,c));if(!finite(d)||abs(d)<=1e-10){return vec4f(0.0);}return vec4f((rhs.x*cross(b,c)+rhs.y*cross(c,a)+rhs.z*cross(a,b))/d,1.0);}fn solveColumns(a:vec3f,b:vec3f,c:vec3f,rhs:vec3f)->vec4f{let d=dot(a,cross(b,c));if(!finite(d)||abs(d)<=1e-10){return vec4f(0.0);}return vec4f(dot(rhs,cross(b,c)),dot(a,cross(rhs,c)),dot(a,cross(b,rhs)),d);}fn nonobtuse(a:vec3f,b:vec3f,c:vec3f)->bool{let den=length(a)*length(b)*length(c)+dot(a,b)*length(c)+dot(a,c)*length(b)+dot(b,c)*length(a);let num=abs(dot(a,cross(b,c)));return den+2e-6*max(1.,max(abs(den),num))>=num;}
 fn causalTetraCandidate(q:mat3x3f,known:vec3f)->f32{let unavailable=1e30;let av=solveTranspose(q[0],q[1],q[2],known);let bv=solveTranspose(q[0],q[1],q[2],vec3f(1.0));if(av.w==0.0||bv.w==0.0){return unavailable;}let aa=dot(bv.xyz,bv.xyz);let bb=dot(av.xyz,bv.xyz);let cc=dot(av.xyz,av.xyz)-1.0;let disc=bb*bb-aa*cc;if(!finite(aa)||aa<=1e-12||!finite(disc)||disc<0.0){return unavailable;}let candidate=(bb+sqrt(disc))/aa;if(!finite(candidate)||candidate+2e-6<max(known.x,max(known.y,known.z))){return unavailable;}let ray=solveColumns(q[0],q[1],q[2],-(av.xyz-candidate*bv.xyz));if(ray.w==0.0){return unavailable;}let coefficients=ray.xyz/ray.w;let sum=coefficients.x+coefficients.y+coefficients.z;if(!finite(sum)||sum<=2e-6||any(coefficients/sum<vec3f(-2e-6))){return unavailable;}return candidate;}
 fn causalTriangleCandidate(a:vec3f,b:vec3f,known:vec2f)->f32{let unavailable=1e30;let g00=dot(a,a);let g01=dot(a,b);let g11=dot(b,b);let determinant=g00*g11-g01*g01;if(!finite(determinant)||determinant<=1e-12||g01+2e-6*max(1.0,sqrt(g00*g11))<0.0){return unavailable;}let av=a*((g11*known.x-g01*known.y)/determinant)+b*((g00*known.y-g01*known.x)/determinant);let bv=a*((g11-g01)/determinant)+b*((g00-g01)/determinant);let aa=dot(bv,bv);let bb=dot(av,bv);let cc=dot(av,av)-1.0;let disc=bb*bb-aa*cc;if(!finite(aa)||aa<=1e-12||!finite(disc)||disc<0.0){return unavailable;}let candidate=(bb+sqrt(disc))/aa;if(!finite(candidate)||candidate+2e-6<max(known.x,known.y)){return unavailable;}let delta=vec2f(candidate)-known;let coefficients=vec2f(g11*delta.x-g01*delta.y,g00*delta.y-g01*delta.x)/determinant;let sum=coefficients.x+coefficients.y;if(!finite(sum)||sum<=2e-6||any(coefficients/sum<vec2f(-2e-6))){return unavailable;}return candidate;}
@@ -535,8 +484,7 @@ var<workgroup> reduceFlags:array<u32,256>;var<workgroup> reduceFirst:array<u32,2
 fn finalizePowerCoarsePhi(lid:u32){if(lid==0u){coarseFinalizeEnabled=select(0u,1u,!rejectedFine());}let enabled=workgroupUniformLoad(&coarseFinalizeEnabled);var flags=0u;var first=INVALID;var advected=0u;var uniform=0u;var transition=0u;var corrected=0u;var interfaces=0u;var directoryRows=0u;let count=select(0u,requested(),enabled!=0u);for(var row=lid;row<count;row+=256u){if(row>=arrayLength(&rowStatus)||row>=arrayLength(&candidateDirectory.entries)){flags|=CAPACITY;first=min(first,row);continue;}let status=rowStatus[row];flags|=status.flags;if(status.flags!=0u){first=min(first,row);}advected+=status.advected;uniform+=status.uniform;transition+=status.transition;corrected+=status.corrected;interfaces+=status.interfaceRow;let entry=candidateDirectory.entries[row];let entryValid=entry.cellPlusOne!=0u&&entry.size!=0u&&(entry.flags&(PHI_VALID|PHI_FINITE))==(PHI_VALID|PHI_FINITE);directoryRows+=select(0u,1u,entryValid);if(!entryValid&&status.flags==0u){flags|=INVALID_ROW;first=min(first,row);}}reduceFlags[lid]=flags;reduceFirst[lid]=first;reduceAdvected[lid]=advected;reduceUniform[lid]=uniform;reduceTransition[lid]=transition;reduceCorrected[lid]=corrected;reduceInterfaces[lid]=interfaces;reduceDirectoryRows[lid]=directoryRows;workgroupBarrier();for(var stride=128u;stride>0u;stride>>=1u){if(lid<stride){reduceFlags[lid]|=reduceFlags[lid+stride];reduceFirst[lid]=min(reduceFirst[lid],reduceFirst[lid+stride]);reduceAdvected[lid]+=reduceAdvected[lid+stride];reduceUniform[lid]+=reduceUniform[lid+stride];reduceTransition[lid]+=reduceTransition[lid+stride];reduceCorrected[lid]+=reduceCorrected[lid+stride];reduceInterfaces[lid]+=reduceInterfaces[lid+stride];reduceDirectoryRows[lid]+=reduceDirectoryRows[lid+stride];}workgroupBarrier();}if(lid==0u&&enabled!=0u){let complete=count>0u&&count<=params.dimensionsCapacity.w&&reduceAdvected[0]==count&&reduceDirectoryRows[0]==count;control.flags|=reduceFlags[0];control.firstError=reduceFirst[0];control.advected=reduceAdvected[0];control.uniform=reduceUniform[0];control.transition=reduceTransition[0];control.corrected=reduceCorrected[0];control.interfaces=reduceInterfaces[0];if(control.flags==0u&&complete){control.valid=VALID;candidateDirectory.state=VALID;}else{control.valid=0u;candidateDirectory.state=0u;}}}
 var<workgroup> deltaPrefix:array<u32,256>;
 var<workgroup> coarseDeltaCommitState:array<u32,3>;
-fn phiValueChanged(a:f32,b:f32)->bool{let scale=max(1.0,max(abs(a),abs(b)));return !finite(a)||!finite(b)||abs(a-b)>2e-6*scale;}
-fn deltaCandidate(index:u32,currentCount:u32,previousCount:u32)->vec4u{if(index<currentCount){let entry=candidateDirectory.entries[index];let oldSlot=previousSampleSlot(entry.cellPlusOne-1u,entry.size);var changed=oldSlot==INVALID;var flags=1u;if(oldSlot!=INVALID){let old=sampleDirectory.entries[oldSlot];let valueChanged=phiValueChanged(old.phi,entry.phi)||phiValueChanged(old.minimumPhi,entry.minimumPhi)||phiValueChanged(old.maximumPhi,entry.maximumPhi);let phaseChanged=((old.flags^entry.flags)&(PHI_INTERFACE|PHI_CORRECTED))!=0u;changed=valueChanged||phaseChanged;flags|=select(0u,4u,valueChanged)|select(0u,8u,phaseChanged);}return vec4u(entry.cellPlusOne,entry.size,entry.row,select(0u,flags,changed));}let old=sampleDirectory.entries[index-currentCount];let retired=candidateSampleSlot(old.cellPlusOne-1u,old.size)==INVALID;return vec4u(old.cellPlusOne,old.size,INVALID,select(0u,2u,retired));}
+fn deltaCandidate(index:u32,currentCount:u32,previousCount:u32)->vec4u{if(index<currentCount){let entry=candidateDirectory.entries[index];let oldSlot=previousSampleSlot(entry.cellPlusOne-1u,entry.size);var changed=oldSlot==INVALID;var flags=1u;if(oldSlot!=INVALID){let old=sampleDirectory.entries[oldSlot];let valueChanged=bitcast<u32>(old.phi)!=bitcast<u32>(entry.phi)||bitcast<u32>(old.minimumPhi)!=bitcast<u32>(entry.minimumPhi)||bitcast<u32>(old.maximumPhi)!=bitcast<u32>(entry.maximumPhi);let phaseChanged=((old.flags^entry.flags)&(PHI_INTERFACE|PHI_CORRECTED))!=0u;changed=valueChanged||phaseChanged;flags|=select(0u,4u,valueChanged)|select(0u,8u,phaseChanged);}return vec4u(entry.cellPlusOne,entry.size,entry.row,select(0u,flags,changed));}let old=sampleDirectory.entries[index-currentCount];let retired=candidateSampleSlot(old.cellPlusOne-1u,old.size)==INVALID;return vec4u(old.cellPlusOne,old.size,INVALID,select(0u,2u,retired));}
 fn publishPowerCoarsePhiDeltaAndCommit(lid:u32){if(lid==0u){let rejected=rejectedFine();let enabled=!rejected&&control.valid==VALID&&candidateDirectory.state==VALID;if(!rejected&&!enabled){sampleDirectory.state=0u;}coarseDeltaCommitState[0]=select(0u,1u,enabled);coarseDeltaCommitState[1]=select(0u,candidateDirectory.rowCount,enabled);let previous=select(0u,min(sampleDirectory.rowCount,arrayLength(&sampleDirectory.entries)),sampleDirectory.state==VALID);coarseDeltaCommitState[2]=select(0u,previous,enabled);}let enabled=workgroupUniformLoad(&coarseDeltaCommitState[0]);let currentCount=workgroupUniformLoad(&coarseDeltaCommitState[1]);let previousCount=workgroupUniformLoad(&coarseDeltaCommitState[2]);let count=currentCount+previousCount;let width=count/256u;let remainder=count%256u;let begin=lid*width+min(lid,remainder);let end=begin+width+select(0u,1u,lid<remainder);var local=0u;for(var index=begin;index<end;index+=1u){local+=select(0u,1u,deltaCandidate(index,currentCount,previousCount).w!=0u);}deltaPrefix[lid]=local;workgroupBarrier();for(var stride=1u;stride<256u;stride<<=1u){var add=0u;if(lid>=stride){add=deltaPrefix[lid-stride];}workgroupBarrier();deltaPrefix[lid]+=add;workgroupBarrier();}var cursor=deltaPrefix[lid]-local;for(var index=begin;index<end;index+=1u){let item=deltaCandidate(index,currentCount,previousCount);if(item.w!=0u&&cursor<arrayLength(&coarseDeltaPublication.records)){coarseDeltaPublication.records[cursor]=DeltaRecord(item.x,item.y,item.z,item.w);cursor+=1u;}}let changed=deltaPrefix[255u];let overflow=changed>arrayLength(&coarseDeltaPublication.records);if(lid==0u&&enabled!=0u){sampleDirectory.state=0u;}workgroupBarrier();if(enabled!=0u){for(var slot=lid;slot<currentCount;slot+=256u){sampleDirectory.entries[slot]=candidateDirectory.entries[slot];}}workgroupBarrier();if(lid==0u&&enabled!=0u){sampleDirectory.generation=candidateDirectory.generation;sampleDirectory.rowCount=currentCount;sampleDirectory.maximumLeafSize=candidateDirectory.maximumLeafSize;sampleDirectory.dimensions=candidateDirectory.dimensions;sampleDirectory.physicalCellSize=candidateDirectory.physicalCellSize;sampleDirectory.state=VALID;coarseDeltaPublication.count=min(changed,arrayLength(&coarseDeltaPublication.records));coarseDeltaPublication.generation=candidateDirectory.generation;coarseDeltaPublication.flags=select(0u,CAPACITY,overflow);coarseDeltaPublication.valid=select(0u,VALID,!overflow);}}
 var<workgroup> coarseScheduleEnabled:u32;
 fn scheduleEnabled(lid:u32)->u32{if(lid==0u){coarseScheduleEnabled=select(0u,1u,control.pad0==1u);}
@@ -551,7 +499,6 @@ fn scheduleEnabled(lid:u32)->u32{if(lid==0u){coarseScheduleEnabled=select(0u,1u,
  storageBarrier();workgroupBarrier();
  for(var row=lid;row<arrayLength(&rowStatus);row+=256u){clearPowerCoarsePhiRowStatus(row);}
 }
-@compute @workgroup_size(1) fn preparePowerCoarseSelectorRows(){prepareSelectorRows();}
 @compute @workgroup_size(64) fn buildPowerCoarseSelectorRows(@builtin(global_invocation_id)gid:vec3u){
  buildSelectorRow(gid.x);
 }

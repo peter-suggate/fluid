@@ -79,7 +79,7 @@ export function octreePowerPressureEnvelopeIsAcceptable(
   maximumRelativeResidual: number | undefined,
   maximumResidualRms: number | undefined,
   relativeTolerance = 1e-4,
-  galerkinAbsoluteRmsTolerance = 1.1e-7,
+  galerkinAbsoluteRmsTolerance = 1e-7,
 ): boolean {
   const relativeAccepted = Number.isFinite(maximumRelativeResidual)
     && maximumRelativeResidual! >= 0

@@ -7,7 +7,6 @@ import { canonicalScene } from "@/lib/model";
 import { add, cameraBasis, dot, length, normalize, orbit, pan, scale, sub, zoom } from "@/lib/math";
 import { boundingRadius, type RigidBodyState } from "@/lib/rigid-body";
 import { simulation } from "@/lib/simulation/controller";
-import { simulationRecording } from "@/lib/simulation/recording";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
@@ -113,8 +112,7 @@ export function WebGPUViewport() {
       (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
       undefined,
       (time_s) => simulation.gpuAdvanceCompleted(time_s),
-      (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus }),
-      (time_s) => simulationRecording.capturePresentedFrame(canvas, time_s)
+      (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus })
     );
     let safeSimulationEpoch: number | undefined;
     const syncRunState = (runState: ReturnType<typeof useRuntimeStore.getState>["runState"]) => {

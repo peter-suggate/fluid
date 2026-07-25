@@ -50,9 +50,9 @@ test("the isolated smoke identifies the same case only from the exact UI contrac
   }
   assert.deepEqual(dawnReproductionForSmokeEnvironment({
     ...exactEnvironment,
-    FLUID_TARGET_S: "2.232",
-    FLUID_ORACLE_STEPS: "279",
-    FLUID_EXPECT_EXACT_STEPS: "279",
+    FLUID_TARGET_S: "0.496",
+    FLUID_ORACLE_STEPS: "62",
+    FLUID_EXPECT_EXACT_STEPS: "62",
   }), DAM_UI_RUNTIME_DAWN_REPRODUCTION);
 });
 
@@ -68,7 +68,7 @@ test("the UI and isolated launcher expose the shared case without a debug switch
   assert.match(launcher, /\.\.\.\(reproduction \? \{ reproduction \} : \{\}\)/);
   const packageJson = readFileSync(new URL("../package.json", import.meta.url), "utf8");
   assert.match(packageJson,
-    /"test:webgpu:dam-ui-runtime":\s*"[^"]*FLUID_TARGET_S=2\.232[^"]*FLUID_EXPECT_EXACT_STEPS=279/);
+    /"test:webgpu:dam-ui-runtime":\s*"[^"]*FLUID_TARGET_S=0\.496[^"]*FLUID_EXPECT_EXACT_STEPS=62/);
   assert.doesNotMatch(packageJson.match(/"test:webgpu:dam-ui-runtime":[^\n]*/)?.[0] ?? "",
     /skip_validation/,
     "the UI runtime reproducer must retain Dawn validation");

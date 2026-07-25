@@ -10,24 +10,6 @@ export function simulationFramesDue(currentSimulation_s: number, nextFrameSimula
 }
 
 /**
- * While recording, let the simulation prepare at most one output-frame window
- * beyond its last completed state. Slow work therefore stretches wall time
- * instead of accumulating catch-up debt that would skip visible states.
- */
-export function recordingElapsedBudget(
-  elapsed_s: number,
-  accumulator_s: number,
-  requestedSimulation_s: number,
-  completedSimulation_s: number,
-): number {
-  if (!Number.isFinite(elapsed_s) || elapsed_s <= 0) return 0;
-  if (!Number.isFinite(accumulator_s) || !Number.isFinite(requestedSimulation_s) || !Number.isFinite(completedSimulation_s)) return 0;
-  const available_s = completedSimulation_s + SIMULATION_VIDEO_FRAME_DURATION_S
-    - requestedSimulation_s - Math.max(0, accumulator_s);
-  return Math.min(elapsed_s, Math.max(0, available_s));
-}
-
-/**
  * Maps a wall-clock-paced canvas recording back onto the simulation clock.
  *
  * A solver that needs 12 seconds to calculate 3 seconds of physics should be

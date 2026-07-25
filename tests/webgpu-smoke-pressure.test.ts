@@ -74,9 +74,9 @@ test("Galerkin smoke acceptance honors its absolute RMS floor without weakening 
 test("Galerkin stability envelopes use the same absolute RMS floor as production", () => {
   const galerkin = "Octree power fixed native-L2 Galerkin · 4 levels";
   const mgpcg = "Octree power persistent PCG · Section 4.3 hybrid";
-  assert.equal(octreePowerPressureEnvelopeIsAcceptable(galerkin, 3e-3, 1.09e-7), true);
+  assert.equal(octreePowerPressureEnvelopeIsAcceptable(galerkin, 3e-3, 9.9e-8), true);
   assert.equal(octreePowerPressureEnvelopeIsAcceptable(mgpcg, 3e-3, 9.9e-8), false);
   assert.equal(octreePowerPressureEnvelopeIsAcceptable(galerkin, 9.9e-5, 2e-7), true);
-  assert.equal(octreePowerPressureEnvelopeIsAcceptable(galerkin, 3e-3, 1.11e-7), false);
+  assert.equal(octreePowerPressureEnvelopeIsAcceptable(galerkin, 3e-3, 1.01e-7), false);
   assert.equal(octreePowerPressureEnvelopeIsAcceptable(galerkin, Number.NaN, Number.NaN), false);
 });

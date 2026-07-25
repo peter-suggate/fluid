@@ -10,9 +10,6 @@ test("persistent three-level Galerkin shader is one workgroup with explicit stab
     /for\(var row=lane;row<count\(level\);row\+=LANES\)/);
   assert.match(octreePowerGalerkinPersistent3Shader,
     /smoothLevel\(0u,lane\)[\s\S]*restrictDefect\(0u,lane\)[\s\S]*solveBottom\(lane\)[\s\S]*measureAndPublish\(lane\)/);
-  assert.match(octreePowerGalerkinPersistent3Shader,
-    /solveBottom[\s\S]*atomicStore\(&bottomActive[\s\S]*workgroupUniformLoad\(&bottomActive\)[\s\S]*if\(!stepActive\)\{break;\}/,
-    "the persistent bottom CG must exit uniformly when its residual converges");
 });
 
 test("Dawn persistent three-level Galerkin matches the staged solver", {

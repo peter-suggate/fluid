@@ -1,11 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import {
-  OCTREE_ENGINE_PHASES,
-  OCTREE_FINE_SEMANTIC_PHASES,
-  octreeFineEngineSplitsEnabled,
-} from "../lib/webgpu-octree";
 
 const source = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 const octree = source("../lib/webgpu-octree.ts");
@@ -27,59 +22,10 @@ test("authoritative power work maps onto semantic adjacent-boundary phases", () 
   assert.match(solver, /physicsTrace\?\.resolve\(encoder\)/);
 });
 
-test("production instrumentation closes exactly seven engine-tagged domains", () => {
-  const enginePhases = [
-    "structureEpoch",
-    "rowEngineA",
-    "solveEngine",
-    "rowEngineB",
-    "brickEngineA",
-    "closestPointWaves",
-    "brickEngineB",
-  ] as const;
-  assert.deepEqual(OCTREE_ENGINE_PHASES, enginePhases);
-  for (const phase of enginePhases) {
-    assert.match(solver, new RegExp(`${phase}: \\{ id: "[^"]+", label: "\\[engine:[^\\]]+\\]`),
-      `${phase} must retain a machine-visible engine tag`);
-  }
-  assert.match(octree,
-    /splitProductionPhase\("structureEpoch", "powerDescriptorTopologyFaces"\)/);
-  assert.match(octree,
-    /splitProductionPhase\("rowEngineA", "finalPressureRowAssembly", true\)/);
-  assert.match(octree, /splitProductionPhase\("solveEngine", "mgpcgSolve"\)/);
-  assert.match(octree, /splitProductionPhase\("rowEngineB", "powerProjectionTail"\)/);
-  assert.match(octree, /splitProductionPhase\("brickEngineA", "fineTopology"\)/);
-  assert.match(octree, /splitProductionPhase\("closestPointWaves", "fineRedistance"\)/);
-  assert.match(octree, /splitProductionPhase\(undefined, "fineRestriction"\)/);
-  assert.match(solver,
-    /this\.octreeProjection && !fineEngineSplits[\s\S]*OCTREE_SEMANTIC_TRACE_PHASE\.brickEngineB/);
-});
-
-test("fine engine split mode restores historical attribution seams only on explicit opt-in", () => {
-  assert.equal(OCTREE_FINE_SEMANTIC_PHASES.length, 17,
-    "the 17 octree-local seams plus final frame publication reproduce the 18-way trace");
-  assert.equal(octreeFineEngineSplitsEnabled({}), false);
-  assert.equal(octreeFineEngineSplitsEnabled({ FLUID_ENGINE_SPLIT: "collapsed" }), false);
-  assert.equal(octreeFineEngineSplitsEnabled({ FLUID_ENGINE_SPLIT: "fine" }), true);
-  assert.match(octree,
-    /const phase = fineEngineSplits \? finePhase : enginePhase;/);
-  assert.match(octree,
-    /productionBoundary && fineEngineSplits[\s\S]*faceBandTopologyBuild/);
-  assert.match(octree,
-    /options\?\.productionBoundary && fineEngineSplits \? undefined : pressureBroker/,
-    "collapsed tracing must keep the pressure broker shared across removed seams");
-  assert.match(solver,
-    /this\.octreeProjection && !fineEngineSplits[\s\S]*OCTREE_SEMANTIC_TRACE_PHASE\.brickEngineB[\s\S]*Residency \+ sparse publication \+ diagnostics/,
-    "fine mode must retain the historical eighteenth frame-publication seam");
-});
-
-test("topology folds into the structure engine unless fine attribution is enabled", () => {
-  assert.match(solver,
-    /if \(!this\.octreeProjection \|\| fineEngineSplits\) \{[^]*Adaptive coarse-grid topology/);
-  assert.match(solver,
-    /substep > 0[^]*encodeInlineRebuild\(encoder\)[^]*if \(fineEngineSplits\)[^]*CFL substep topology refresh/);
-  assert.match(solver,
-    /encodeSurface\(encoder, dt, surfaceInflow[^]*completePhysicsPhase\(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE\[phase\]\)/);
+test("topology, every CFL rebuild, and adaptive surface publication close generic phases", () => {
+  assert.match(solver, /encodeInlineRebuild\(encoder\)[^]*completePhysicsPhase\(encoder, this\.adaptiveProjection/);
+  assert.match(solver, /substep > 0[^]*encodeInlineRebuild\(encoder\)[^]*CFL substep topology refresh/);
+  assert.match(solver, /encodeSurface\(encoder, dt, surfaceInflow[^]*completePhysicsPhase\(completedEncoder, mapped\)/);
   assert.doesNotMatch(solver + octree, /timing start|timing end|beginRange\(|endRange\(/);
 });
 

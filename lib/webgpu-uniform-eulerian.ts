@@ -21,7 +21,7 @@ import { createTallCellLayout } from "./tall-cell-grid";
 import { planGPUAdvance } from "./tall-cell-diagnostics";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "./inflow-boundary";
 import { quadtreeChebyshevSpectrum, WebGPUQuadtreeTallCellProjection, type QuadtreeTallCellProjectionOptions } from "./webgpu-quadtree-tall-cell";
-import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeFineEngineSplitsEnabled, WebGPUOctreeProjection,
+import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, WebGPUOctreeProjection,
   type OctreeSemanticPhase, type OctreeProjectionOptions } from "./webgpu-octree";
 import { buildFixedAdaptiveOctreePowerGalerkinHierarchy } from "./octree-power-galerkin";
 import {
@@ -65,13 +65,6 @@ export interface WebGPUUniformEulerianOptions { pressureIterations?: number; vel
 const uniformPipelineCache = new WeakMap<GPUDevice, Map<UniformVelocityTransport, GPUComputePipeline[]>>();
 
 const OCTREE_SEMANTIC_TRACE_PHASE: Readonly<Record<OctreeSemanticPhase, GPUTimestampPhase>> = {
-  structureEpoch: { id: "coarse-grid", label: "[engine:structure-epoch] Structure epoch" },
-  rowEngineA: { id: "velocity-advection", label: "[engine:row-a] Coarse values + face completion" },
-  solveEngine: { id: "pressure-solve", label: "[engine:solve] Galerkin pressure solve" },
-  rowEngineB: { id: "velocity-extrapolation", label: "[engine:row-b] Projection + velocity extension" },
-  brickEngineA: { id: "fine-sdf-advection", label: "[engine:brick-a] Fine transport + topology" },
-  closestPointWaves: { id: "fine-sdf-redistance", label: "[engine:cpt-waves] Closest-point waves" },
-  brickEngineB: { id: "adaptive-publication", label: "[engine:brick-b] Fine harvest + epoch gate" },
   pressureLeafCompactionL1Capture: { id: "pressure-system", label: "Liquid rows + L1 capture" },
   powerDescriptorTopologyFaces: { id: "power-topology", label: "Power topology + physical faces" },
   powerFaceRegularCompletion: { id: "velocity-advection", label: "Generalized-face velocity completion" },
@@ -84,6 +77,12 @@ const OCTREE_SEMANTIC_TRACE_PHASE: Readonly<Record<OctreeSemanticPhase, GPUTimes
   faceBandClosestPointExtension: { id: "velocity-extrapolation", label: "Closest-point velocity extension" },
   faceBandPowerPublicationCapture: { id: "velocity-extrapolation", label: "Extended power-face publication" },
   powerProjectionTail: { id: "velocity-projection", label: "Solid impulse + projection publication" },
+};
+
+const FINE_TRACE_PHASE: Readonly<Record<
+  "finePreparation" | "fineTransport" | "fineTopology" | "fineRedistance" | "fineRestriction",
+  GPUTimestampPhase
+>> = {
   finePreparation: { id: "fine-sdf-advection", label: "Fine SDF seed + transport preparation" },
   fineTransport: { id: "fine-sdf-advection", label: "Factor-m fine SDF advection" },
   fineTopology: { id: "coarse-grid", label: "Fine narrow-band topology" },
@@ -1579,7 +1578,6 @@ export class WebGPUUniformEulerianSolver {
       physicsTrace?.completePhase(completedEncoder, phase);
       return segmentedPhysicsTrace?.completePhase(completedEncoder, phase) ?? completedEncoder;
     };
-    const fineEngineSplits = octreeFineEngineSplitsEnabled();
     encoder.clearBuffer(this.rigidExchangeBuffer);
     // Narita Algorithm 1: regenerate the quadtree at the top of every step.
     // The fully GPU-resident rebuild encodes ahead of advection in the same
@@ -1591,15 +1589,9 @@ export class WebGPUUniformEulerianSolver {
     } else if (this.octreeProjection) {
       inlineRebuildEncoded = this.octreeProjection.encodeInlineRebuild(encoder);
     }
-    // The collapsed octree structure engine closes after frontier,
-    // descriptor, topology, and physical-face publication below. Keep the
-    // historical early topology checkpoint only for attribution mode (and for
-    // solvers which do not own that engine boundary).
-    if (!this.octreeProjection || fineEngineSplits) {
-      encoder = completePhysicsPhase(encoder, this.adaptiveProjection
-        ? { id: "coarse-grid", label: "Adaptive coarse-grid topology" }
-        : { id: "other", label: "Advance setup" });
-    }
+    encoder = completePhysicsPhase(encoder, this.adaptiveProjection
+      ? { id: "coarse-grid", label: "Adaptive coarse-grid topology" }
+      : { id: "other", label: "Advance setup" });
     for (let substep = 0; substep < substeps; substep += 1) {
       // The first rebuild was encoded above so topology is ready before any
       // dynamics. If CFL control subdivides this advance, phi moves after each
@@ -1607,11 +1599,7 @@ export class WebGPUUniformEulerianSolver {
       // interface can never remain inside a coarse pressure leaf.
       if (substep > 0 && this.octreeProjection) {
         this.octreeProjection.encodeInlineRebuild(encoder);
-        if (fineEngineSplits) {
-          encoder = completePhysicsPhase(
-            encoder, { id: "coarse-grid", label: "CFL substep topology refresh" },
-          );
-        }
+        encoder = completePhysicsPhase(encoder, { id: "coarse-grid", label: "CFL substep topology refresh" });
       }
       // U3 compact-face authority owns advection, forces, divergence, and
       // projection inside WebGPUOctreeProjection. The shared dense kernels are
@@ -1684,7 +1672,9 @@ export class WebGPUUniformEulerianSolver {
           // continuing on the stale reference would finish it a second time.
           encoder = this.octreeProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s,
             physicsTrace || segmentedPhysicsTrace ? (phase, completedEncoder) => {
-              return completePhysicsPhase(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE[phase]);
+              const mapped = FINE_TRACE_PHASE[phase as keyof typeof FINE_TRACE_PHASE]
+                ?? { id: "adaptive-publication" as const, label: "Fine surface publication" };
+              return completePhysicsPhase(completedEncoder, mapped);
             } : undefined);
         } else {
           this.adaptiveProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s);
@@ -1693,13 +1683,6 @@ export class WebGPUUniformEulerianSolver {
           encoder = completePhysicsPhase(
             encoder,
             { id: "fine-sdf-redistance", label: "Surface transport + redistance" },
-          );
-        } else if (!fineEngineSplits && substep + 1 < substeps) {
-          // The final Brick-B boundary is deferred through sparse-world
-          // publication below. Intermediate CFL substeps have no such tail,
-          // so close their harvest before the next structure epoch begins.
-          encoder = completePhysicsPhase(
-            encoder, OCTREE_SEMANTIC_TRACE_PHASE.brickEngineB,
           );
         }
       } else {
@@ -1747,12 +1730,7 @@ export class WebGPUUniformEulerianSolver {
       const pass = encoder.beginComputePass({ label: "Uniform diagnostics reduction" });
       this.dispatch(pass, this.reductionPipeline, this.reductionGroup); pass.end();
     }
-    encoder = completePhysicsPhase(
-      encoder,
-      this.octreeProjection && !fineEngineSplits
-        ? OCTREE_SEMANTIC_TRACE_PHASE.brickEngineB
-        : { id: "adaptive-publication", label: "Residency + sparse publication + diagnostics" },
-    );
+    encoder = completePhysicsPhase(encoder, { id: "adaptive-publication", label: "Residency + sparse publication + diagnostics" });
     if (segmentedPhysicsTrace) {
       this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;
       this.lastSegmentedPhysicsTraceAt_ms = traceRequestedAt_ms;

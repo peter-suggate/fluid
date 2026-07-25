@@ -20,9 +20,6 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
     "four 64-lane refresh tiles must retain the audited per-entry reduction tree");
   assert.match(octreePowerGalerkinShader,
     /@compute @workgroup_size\(256\) fn refreshGalerkinTarget/);
-  assert.match(octreePowerGalerkinShader,
-    /initializeFineOperator[\s\S]*previousFineCoefficients\[entry\]=sourceMatrix[\s\S]*detectFineOperatorChange[\s\S]*atomicStore\(&control\[7\],1u\)[\s\S]*refreshGalerkinTarget[\s\S]*atomicStore\(&refreshActive,select\(0u,1u,operatorChanged\(\)\)\)[\s\S]*workgroupUniformLoad\(&refreshActive\)/,
-    "bitwise-identical fine operators must retain the exact previous RAP hierarchy");
   assert.doesNotMatch(refreshKernel, /pWeight|contributionIndex|left|right/,
     "numeric RAP refresh must consume baked combined weights without P-record indirections");
   assert.match(octreePowerGalerkinShader,
@@ -45,15 +42,12 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
       `${entryPoint} must skip the statically encoded tail after convergence`);
   }
   assert.match(octreePowerGalerkinShader,
-    /solveTargetCoarsest[\s\S]*atomicStore\(&cgActive[\s\S]*workgroupUniformLoad\(&cgActive\)[\s\S]*if\(!stepActive\)\{break;\}[\s\S]*targetMatrix\[lane\]/,
-    "the bounded coarsest CG tail must exit uniformly after residual convergence");
-  assert.match(octreePowerGalerkinShader,
     /publishSourceResidual[\s\S]*control\[2\]\)\+1u[\s\S]*rr<=residualBudget[\s\S]*cycle>=u32\(params\.numerics\.z\)/);
   assert.doesNotMatch(octreePowerGalerkinShader, /atomicAdd|atomicCompareExchange|hash|probe|find\(/i);
   assert.match(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
     /encodeFineOperatorImport[\s\S]*solve\.liveOperator\.leafHeaders/);
   assert.match(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
-    /detectFineOperatorChange[\s\S]*refreshGalerkinTarget[\s\S]*Math\.ceil\(this\.entryCounts\[level\+1\]\/4\)[\s\S]*true/,
+    /refreshGalerkinTarget[\s\S]*Math\.ceil\(this\.entryCounts\[level\+1\]\/4\)[\s\S]*true/,
     "refresh dispatch must assign one 64-lane workgroup tile to each target entry");
   assert.match(WebGPUOctreePowerGalerkin.prototype.encode.toString(),
     /restrictSourceDefect[\s\S]*Math\.ceil\(this\.nodeCounts\[level\+1\]\/4\)[\s\S]*true/,
@@ -69,8 +63,7 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
   assert.equal("writeFineRhs" in WebGPUOctreePowerGalerkin.prototype, false,
     "the GPU solve must not retain a host-uploaded RHS fallback");
   assert.deepEqual([...OCTREE_POWER_GALERKIN_PIPELINES], [
-    "initializeFineOperator", "importFineOperator", "detectFineOperatorChange",
-    "refreshGalerkinTarget", "clearSourceCorrection",
+    "initializeFineOperator", "importFineOperator", "refreshGalerkinTarget", "clearSourceCorrection",
     "smoothSourceAtoB", "smoothSourceBtoA",
     "restrictSourceDefect", "prolongateTargetCorrection", "solveTargetCoarsest",
     "measureSourceResidualPartials", "measureSourceResidualReduce",
@@ -287,106 +280,6 @@ test("Dawn adaptive Galerkin imports and solves adjacent live size-2 rows", {
     }
     solver.destroy();liveHeaders.destroy();liveEntries.destroy();authority.destroy();
     initialCorrection.destroy();compactCorrection.destroy();readback.destroy();device.destroy();
-  `;
-  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
-    cwd: process.cwd(), env: process.env, encoding: "utf8",
-  });
-  assert.equal(result.status, 0, `signal=${result.signal}\n${result.stdout}\n${result.stderr}`);
-});
-
-test("Dawn Galerkin refreshes RAP only when imported coefficients change", {
-  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for numerical GPU validation",
-}, async () => {
-  const script = `
-    import {pathToFileURL} from "node:url";
-    import {
-      buildFixedAdaptiveOctreePowerGalerkinHierarchy,
-      refreshOctreePowerGalerkinOperators,
-    } from "./lib/octree-power-galerkin.ts";
-    import {WebGPUOctreePowerGalerkin} from "./lib/webgpu-octree-power-galerkin.ts";
-    import {PassBroker} from "./lib/webgpu-pass-broker.ts";
-    const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE).href);
-    Object.assign(globalThis,dawn.globals);
-    const hierarchy=buildFixedAdaptiveOctreePowerGalerkinHierarchy(
-      [4,4,4],2,{transfer:"trilinear",coarsestNodeLimit:8},
-    );
-    const finest=hierarchy.levels[0];
-    const operators=refreshOctreePowerGalerkinOperators(
-      hierarchy,
-      new Float64Array(finest.nodeCount).fill(1),
-      new Float64Array(hierarchy.fineOffDiagonalEntries.length),
-    );
-    const gpu=dawn.create(["backend="+(process.env.WEBGPU_BACKEND??"metal")]);
-    const adapter=await gpu.requestAdapter();
-    if(!adapter)throw new Error("Dawn adapter unavailable");
-    const device=await adapter.requestDevice();
-    const solver=new WebGPUOctreePowerGalerkin(device,hierarchy,operators,{
-      cycles:2,relativeTolerance:0.02,persistentThreeLevel:false,
-    });
-    const headerWords=new Uint32Array(2*12);
-    const headerFloats=new Float32Array(headerWords.buffer);
-    for(let row=0;row<2;row++){
-      headerWords[row*12]=row===0?0:2;
-      headerWords[row*12+1]=row;
-      headerWords[row*12+2]=1;
-      headerWords[row*12+3]=2;
-      headerFloats[row*12+4]=2;
-      headerFloats[row*12+5]=0;
-    }
-    const entryWords=new Uint32Array(2*2);
-    const entryFloats=new Float32Array(entryWords.buffer);
-    entryWords[0]=1;entryFloats[1]=1;
-    entryWords[2]=0;entryFloats[3]=1;
-    const storage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC;
-    const upload=(words)=>{
-      const buffer=device.createBuffer({size:words.byteLength,usage:storage});
-      device.queue.writeBuffer(buffer,0,words);
-      return buffer;
-    };
-    const liveHeaders=upload(headerWords);
-    const liveEntries=upload(entryWords);
-    const authority=device.createBuffer({size:64,usage:storage});
-    device.queue.writeBuffer(authority,0,new Uint32Array([0x80000000,0,2]));
-    const coarseMatrices=solver.matrices.slice(1);
-    const run=async()=>{
-      const encoder=device.createCommandEncoder(),broker=new PassBroker(encoder);
-      solver.encode(broker,{liveOperator:{
-        leafHeaders:liveHeaders,leafEntries:liveEntries,authorityControl:authority,
-      }});
-      const controlRead=device.createBuffer({size:64,
-        usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-      const matrixReads=coarseMatrices.map((matrix)=>device.createBuffer({
-        size:matrix.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ,
-      }));
-      broker.copyBufferToBuffer(solver.control,0,controlRead,0,64);
-      coarseMatrices.forEach((matrix,index)=>
-        broker.copyBufferToBuffer(matrix,0,matrixReads[index],0,matrix.size));
-      device.queue.submit([broker.finish()]);
-      await Promise.all([controlRead,...matrixReads].map((buffer)=>buffer.mapAsync(GPUMapMode.READ)));
-      const control=Uint32Array.from(new Uint32Array(controlRead.getMappedRange()));
-      const matrices=matrixReads.map((buffer)=>Uint32Array.from(new Uint32Array(buffer.getMappedRange())));
-      controlRead.unmap();controlRead.destroy();
-      matrixReads.forEach((buffer)=>{buffer.unmap();buffer.destroy();});
-      return {control,matrices};
-    };
-    const first=await run();
-    if(first.control[7]!==1)throw new Error("first solve did not initialize RAP");
-    // RHS is deliberately outside the operator snapshot and must not arm RAP.
-    headerFloats[5]=1;headerFloats[17]=-1;
-    device.queue.writeBuffer(liveHeaders,0,headerWords);
-    const rhsOnly=await run();
-    if(rhsOnly.control[7]!==0)throw new Error("RHS-only change refreshed RAP");
-    if(JSON.stringify(rhsOnly.matrices)!==JSON.stringify(first.matrices)){
-      throw new Error("RHS-only change modified retained coarse matrices");
-    }
-    headerFloats[4]=3;
-    device.queue.writeBuffer(liveHeaders,0,headerWords);
-    const coefficient=await run();
-    if(coefficient.control[7]!==1)throw new Error("coefficient delta did not refresh RAP");
-    if(JSON.stringify(coefficient.matrices)===JSON.stringify(rhsOnly.matrices)){
-      throw new Error("coefficient delta left all coarse matrices stale");
-    }
-    solver.destroy();liveHeaders.destroy();liveEntries.destroy();authority.destroy();device.destroy();
   `;
   const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
     cwd: process.cwd(), env: process.env, encoding: "utf8",

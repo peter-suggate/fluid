@@ -45,14 +45,14 @@ test("fine redistance retains the outer pressure-centre trilinear shell", () => 
     /constredistanceBandFineCells=Math\.min\(256,transportBandFineCells\+globalFineFactor\+3\)/,
     "allocation planning must reserve one cell beyond the backtrace and trilinear reach");
   assert.match(surface,
-    /constredistanceBandCells=bandCells/,
-    "recurring redistance must retain the authored band without the unstable full-collar expansion");
+    /constredistanceBandCells=Math\.min\(256,bandCells\+this\.globalFineLevelSet\.plan\.fineFactor\+3\)/,
+    "recurring redistance must retain the same pressure-centre support shell");
   assert.match(surface,
     /redistanceBandFineCells:redistanceBandCells[\s\S]*publicationRedistance\.encode\(redistanceBroker,\{bandCells:redistanceBandCells/,
     "topology allocation and redistance must consume the identical authored radius");
 });
 
-test("production surface recurrence advects, redistances, measures volume, and fine-corrects compact coarse phi", () => {
+test("production surface recurrence advects, redistances, conserves volume, and fine-corrects compact coarse phi", () => {
   const surface = compact(WebGPUOctreeProjection.prototype.encodeSurface);
   const bootstrap = surface.indexOf("this.powerCoarseLevelSet.encodeBootstrapFromSurfaceLeaves");
   const bootstrapSchedule = surface.indexOf("this.powerCoarseLevelSetSchedule.encode", bootstrap);
@@ -60,7 +60,7 @@ test("production surface recurrence advects, redistances, measures volume, and f
   const fineTopologyBA = surface.indexOf("publicationTopology=this.globalFineTopologyBA", fineTopologyAB);
   const fineTopologyEncode = surface.indexOf("publicationTopology.encode", fineTopologyBA);
   const fineRedistance = surface.indexOf("publicationRedistance.encode", fineTopologyEncode);
-  const fineVolume = surface.indexOf("publicationVolume?.encodeMeasurement", fineRedistance);
+  const fineVolume = surface.indexOf("publicationVolume?.encode", fineRedistance);
   const publicationGate = surface.indexOf("publicationTopology.encodeFinalizePublication", fineVolume);
   const restriction = surface.indexOf("this.fineToPowerCoarseLevelSet.encode", publicationGate);
   const recurringSchedule = surface.indexOf("this.powerCoarseLevelSetSchedule.encode", bootstrapSchedule + 1);
@@ -76,11 +76,10 @@ test("production surface recurrence advects, redistances, measures volume, and f
   assert.match(surface.slice(fineTopologyEncode, fineRedistance), /,true,(?:this\.)?globalFineBootstrapped/,
     "fine topology must remain provisional until redistance and volume validation finish");
   assert.match(surface.slice(fineRedistance, publicationGate),
-    /publicationVolume\?\.encodeMeasurement\(redistanceBroker\)/,
-    "production must measure the accepted field without globally shifting every fine sample");
-  assert.doesNotMatch(surface.slice(fineRedistance, publicationGate),
     /publicationVolume\?\.encode\(redistanceBroker\)/,
-    "the paper path must not restore the project-specific whole-field volume shift");
+    "production must apply and remeasure the bounded volume correction before admitting the fine generation");
+  assert.doesNotMatch(surface.slice(fineRedistance, publicationGate), /encodeMeasurement/,
+    "telemetry-only measurement cannot satisfy the mini-dam conservation gate");
   assert.match(surface.slice(publicationGate, restriction), /redistance:publicationRedistance\.control/);
   assert.match(surface.slice(restriction, recurringSchedule), /topologyControl:publicationTopology\.control/,
     "fine restriction must consume the exact topology transaction that produced its source");
@@ -98,18 +97,18 @@ test("production surface recurrence advects, redistances, measures volume, and f
   assert.match(surface.slice(recurringSchedule), /generation:correctedFine\.generation&1073741823/,
     "the compact-coarse publication epoch must come from the fine source it restricts, not an optimistic host counter");
   const schedule = compact(WebGPUOctreePowerCoarseLevelSet.prototype.encode);
-  const prepare = schedule.indexOf("run(this.preparePipeline");
-  const prepareSelectors = schedule.indexOf("run(this.prepareSelectorRowsPipeline", prepare);
-  const selectors = schedule.indexOf("pass.dispatchWorkgroupsIndirect(this.selectorDispatch", prepareSelectors);
-  const advect = schedule.indexOf("run(this.advectPipeline", selectors);
-  const correct = schedule.indexOf("run(this.correctPipeline", advect);
-  const redistance = schedule.indexOf("for(constredistanceofdirectFineDistance?[]:this.redistancePipelines)", correct);
-  const publish = schedule.indexOf("run(this.publishPipeline", redistance);
-  const finalize = schedule.indexOf("run(this.commitPipeline", publish);
-  assert.ok(prepare >= 0 && prepare < prepareSelectors && prepareSelectors < selectors
-    && selectors < advect && advect < correct && correct < redistance
-    && redistance < publish && publish < finalize,
-  "coarse evolution must remain prepare -> selector epoch -> advect/correct -> optional legacy redistance -> publish/commit");
+  const migrate = schedule.indexOf('dispatch("migrate"');
+  const prepare = schedule.indexOf('dispatch("prepare",1)');
+  const clear = schedule.indexOf('dispatch("clearStatus"');
+  const advect = schedule.indexOf('dispatch("advect"');
+  const redistance = schedule.indexOf('dispatch("redistance"');
+  const validate = schedule.indexOf('dispatch("validateFine"');
+  const publish = schedule.indexOf('dispatch("publish"');
+  const finalize = schedule.indexOf('dispatch("finalize",1)');
+  assert.ok(migrate >= 0 && migrate < prepare && prepare < clear && clear < advect
+    && advect < validate && validate < redistance
+    && validate < publish && publish < finalize,
+  "coarse evolution must remain spatial migrate -> prepare/clear -> advect -> validate fine -> redistance -> publish -> finalize");
 });
 
 test("production substep keeps topology, pressure/power projection, and fine surface recurrence in one command stream", () => {
@@ -121,10 +120,11 @@ test("production substep keeps topology, pressure/power projection, and fine sur
     "each production substep must rebuild coarse topology, solve/project power rows, then transport fine phi");
   assert.doesNotMatch(advance.slice(rebuild, surface), /queue\.submit|mapAsync|getMappedRange/,
     "the vertical slice must rely on command-stream ordering rather than a CPU authority handoff");
-  const finish = advance.indexOf("constsubmittedEncoder=encoder", surface);
-  const submit = advance.indexOf("this.device.queue.submit([submittedEncoder.finish()])", finish);
+  const submitCall = advance.indexOf('submitCurrentEncoder("publicationDiagnostics",false)', surface);
+  const finish = advance.indexOf("constcommandBuffer=submittedEncoder.finish()");
+  const submit = advance.indexOf("this.device.queue.submit([commandBuffer])", finish);
   const retire = advance.indexOf("this.octreeProjection?.retireSubmittedEncoder(submittedEncoder)", submit);
-  assert.ok(finish > surface && submit > finish && retire > submit,
+  assert.ok(submitCall > surface && finish >= 0 && submit > finish && retire > submit,
     "invocation-stable coarse parameters may be reused only after the owning encoder is submitted");
 });
 
