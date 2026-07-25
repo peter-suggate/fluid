@@ -2721,9 +2721,13 @@ export class WebGPUOctreeProjection {
     );
     operator.encodeAssemblyFromControl(broker, faces.faces, faces.source, faces.control,
       this.powerFaceSeed?.control,
-      this.powerSolidFaces?.control);
+      this.powerSolidFaces?.control,
+      faces.source.liveFaceDispatch);
     splitProductionPhase(undefined, "powerOperatorRhsAssembly");
-    operator.encodeLeafRowPublication(broker, this.leafHeaders, this.leafEntries);
+    operator.encodeLeafRowPublication(broker,
+      this.leafHeaders, this.leafEntries,
+      faces.source.liveFaceDispatch,
+    );
     splitProductionPhase("rowEngineA", "finalPressureRowAssembly", true);
     return encoder;
   }
@@ -2738,7 +2742,7 @@ export class WebGPUOctreeProjection {
     const solverControl = this.galerkin?.control ?? this.mgpcg?.control;
     if (!solverControl) throw new Error("Power projection requires one immutable pressure solver");
     this.powerOperator.encodeProjectionFromControl(broker, this.powerFaces.faces, this.powerFaces.source,
-      pressure, this.powerFaces.control, 1, solverControl);
+      pressure, this.powerFaces.control, 1, solverControl, this.powerFaces.source.liveFaceDispatch);
     // Ordered compute dispatches publish the projected face field directly to
     // the diagnostic and solid consumers below; no pass transition is needed.
     this.energyLedger?.encodeFaceMetric(broker, "postProjection", this.powerGeneration, this.powerFaces.source);

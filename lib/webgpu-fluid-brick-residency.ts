@@ -146,20 +146,32 @@ export function planFluidBrickResidencyAllocation(
   if (fineSeedCandidatesOnly && explicitLeafMapping) {
     throw new RangeError("Fine-seed-candidate-only residency requires implicit brick/leaf identity");
   }
-  const sparseKeyPools = fineSeedCandidatesOnly && fineSeedCandidateBrickCapacity !== undefined;
   const sparseCapacity = (value: number | undefined, logical: number, label: string) => {
     if (value === undefined) return logical;
     if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} capacity must be a positive integer`);
     return Math.min(logical, value);
   };
-  if (fineSeedCandidateTileCapacity !== undefined && !sparseKeyPools) {
+  if (fineSeedCandidateTileCapacity !== undefined
+    && !(fineSeedCandidatesOnly && fineSeedCandidateBrickCapacity !== undefined)) {
     throw new RangeError("Sparse tile capacity requires a sparse fine-seed-candidate brick capacity");
   }
-  const brickStateCapacity = sparseKeyPools
-    ? sparseCapacity(fineSeedCandidateBrickCapacity, brickCapacity, "Fine-seed-candidate brick") : brickCapacity;
-  const tileStateCapacity = sparseKeyPools
-    ? sparseCapacity(fineSeedCandidateTileCapacity ?? brickStateCapacity * 27, tileCapacity,
-      "Fine-seed-candidate topology tile") : tileCapacity;
+  const requestedBrickStateCapacity = fineSeedCandidatesOnly && fineSeedCandidateBrickCapacity !== undefined
+    ? sparseCapacity(fineSeedCandidateBrickCapacity, brickCapacity, "Fine-seed-candidate brick")
+    : brickCapacity;
+  const requestedTileStateCapacity = fineSeedCandidatesOnly && fineSeedCandidateBrickCapacity !== undefined
+    ? sparseCapacity(fineSeedCandidateTileCapacity ?? requestedBrickStateCapacity * 27, tileCapacity,
+      "Fine-seed-candidate topology tile")
+    : tileCapacity;
+  // A key pool which covers the complete logical domain has no sparse-memory
+  // benefit. Use the dense logical-key representation in that case: its
+  // device-wide mark/resolve dispatches replace the sparse publisher's
+  // single-lane hash insertion and active-brick tile-ring scan. This is common
+  // for small domains (including mini dam) where the surface budget clamps to
+  // the domain volume.
+  const sparseKeyPools = fineSeedCandidatesOnly
+    && (requestedBrickStateCapacity < brickCapacity || requestedTileStateCapacity < tileCapacity);
+  const brickStateCapacity = sparseKeyPools ? requestedBrickStateCapacity : brickCapacity;
+  const tileStateCapacity = sparseKeyPools ? requestedTileStateCapacity : tileCapacity;
   // Sparse records store key-plus-one and lifecycle state. Dense compatibility
   // stores only the state because its array index is the logical key.
   const stateBytes = brickStateCapacity * (sparseKeyPools ? 8 : FLUID_BRICK_STATE_STRIDE_BYTES);
@@ -1176,6 +1188,7 @@ export class GPUFluidBrickResidency {
       {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
@@ -1309,7 +1322,8 @@ export class GPUFluidBrickResidency {
         {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
         {binding:2,resource:{buffer:this.candidateWorklist}},{binding:3,resource:{buffer:this.tileStates}},
         {binding:4,resource:{buffer:this.candidateTileStates}},{binding:5,resource:{buffer:this.candidateTileWorklist}},
-        {binding:8,resource:{buffer:candidateControl}},{binding:9,resource:{buffer:this.tileWorklist}},
+        {binding:7,resource:{buffer:candidates}},{binding:8,resource:{buffer:candidateControl}},
+        {binding:9,resource:{buffer:this.tileWorklist}},
         {binding:10,resource:{buffer:this.params}},{binding:11,resource:{buffer:this.worklist}},
       ]});
       publish.setPipeline(this.fineSeedCandidatePipelines[3]!);

@@ -66,6 +66,7 @@ import {
 } from "./raster-surface-metrics";
 import { viewportFailureIndicator } from "../lib/viewport-failure-diagnostics";
 import type { PaperPhaseId, PerformanceTrace } from "../lib/performance-trace";
+import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
 import {
   compareScalarFields,
   compareSingleTallCellNeighborhood,
@@ -189,6 +190,20 @@ const includeFinalFieldStats = process.env.FLUID_FIELD_STATS !== "0";
  * is not part of simulationWall_ms and can independently reject a measurable
  * run when an upstream publication generation is stale. */
 const performanceProfileRequested = process.env.FLUID_PERFORMANCE_PROFILE === "1";
+const performanceTraceRequested =
+  process.env.FLUID_PERFORMANCE_TRACES === undefined
+    ? performanceProfileRequested
+    : process.env.FLUID_PERFORMANCE_TRACES === "1";
+usePerformanceInstrumentationStore.getState().setEnabled(performanceTraceRequested);
+/** Attach begin/end timestamp pairs to each real compute pass. Metal may
+ * execute independent pass encoders with overlapping timestamp intervals, so
+ * these pairs are decoded independently instead of requiring one globally
+ * monotonic boundary chain. Intended for isolated smoke diagnostics only. */
+const fineGPUTimestampsRequested = process.env.FLUID_GPU_FINE_TIMESTAMPS === "1";
+const fineGPUTimestampAdvances = Math.max(
+  1,
+  Math.floor(Number(process.env.FLUID_GPU_FINE_TIMESTAMP_ADVANCES ?? 1)),
+);
 /** Emit every GPU physics phase trace the solver captures as a JSON line.
  * The dynamic recorder throttles itself to one in-flight sample per 250 ms,
  * so slow advances are sampled near-continuously and fast advances sparsely. */
@@ -2280,6 +2295,189 @@ interface GPUCommandAuditReport {
   indirectDispatchesByPassLabel: Record<string, GPUCommandAuditBucket>;
 }
 
+interface GPUFineTimestampBucket {
+  samples: number;
+  total_ms: number;
+  mean_ms: number;
+  minimum_ms: number;
+  maximum_ms: number;
+}
+
+interface GPUFineTimestampReport {
+  measuredAdvances: number;
+  measuredPasses: number;
+  invalidPasses: number;
+  summedPass_ms: number;
+  byLabel: Record<string, GPUFineTimestampBucket>;
+}
+
+interface GPUFineTimestampEntry {
+  label: string;
+  beginIndex: number;
+  endIndex: number;
+}
+
+/**
+ * Diagnostic-only pass timer. Each command encoder gets private query and
+ * readback storage so its resolve can be appended immediately before finish.
+ * Per-pass pairs remain valid on Dawn/Metal even when timestamps belonging to
+ * distinct passes overlap and therefore cannot form a monotonic chain.
+ */
+class GPUFineTimestampAudit {
+  private active = false;
+  private readonly completed: GPUFineTimestampEncoderSession[] = [];
+
+  constructor(private readonly device: GPUDevice) {}
+
+  start(): void { this.active = true; }
+  stop(): void { this.active = false; }
+
+  createEncoderSession(): GPUFineTimestampEncoderSession | undefined {
+    return this.active ? new GPUFineTimestampEncoderSession(this.device, this.completed) : undefined;
+  }
+
+  async read(measuredAdvances: number): Promise<GPUFineTimestampReport> {
+    const buckets = new Map<string, {
+      samples: number;
+      total_ms: number;
+      minimum_ms: number;
+      maximum_ms: number;
+    }>();
+    let measuredPasses = 0;
+    let invalidPasses = 0;
+    let summedPass_ms = 0;
+    for (const session of this.completed) {
+      const samples = await session.read();
+      for (const sample of samples) {
+        if (sample.duration_ms === undefined) {
+          invalidPasses += 1;
+          continue;
+        }
+        measuredPasses += 1;
+        summedPass_ms += sample.duration_ms;
+        const bucket = buckets.get(sample.label) ?? {
+          samples: 0,
+          total_ms: 0,
+          minimum_ms: Number.POSITIVE_INFINITY,
+          maximum_ms: 0,
+        };
+        bucket.samples += 1;
+        bucket.total_ms += sample.duration_ms;
+        bucket.minimum_ms = Math.min(bucket.minimum_ms, sample.duration_ms);
+        bucket.maximum_ms = Math.max(bucket.maximum_ms, sample.duration_ms);
+        buckets.set(sample.label, bucket);
+      }
+    }
+    return {
+      measuredAdvances,
+      measuredPasses,
+      invalidPasses,
+      summedPass_ms,
+      byLabel: Object.fromEntries(Array.from(buckets.entries())
+        .sort((left, right) => right[1].total_ms - left[1].total_ms || left[0].localeCompare(right[0]))
+        .map(([label, bucket]) => [label, {
+          ...bucket,
+          mean_ms: bucket.total_ms / Math.max(1, bucket.samples),
+        }])),
+    };
+  }
+}
+
+class GPUFineTimestampEncoderSession {
+  private static readonly MAXIMUM_PASSES = 256;
+  private readonly querySet: GPUQuerySet;
+  private readonly resolveBuffer: GPUBuffer;
+  private readonly readBuffer: GPUBuffer;
+  private readonly entries: GPUFineTimestampEntry[] = [];
+  private finished = false;
+
+  constructor(
+    device: GPUDevice,
+    private readonly completed: GPUFineTimestampEncoderSession[],
+  ) {
+    const bytes = GPUFineTimestampEncoderSession.MAXIMUM_PASSES * 2 * 8;
+    this.querySet = device.createQuerySet({
+      type: "timestamp",
+      count: GPUFineTimestampEncoderSession.MAXIMUM_PASSES * 2,
+    });
+    this.resolveBuffer = device.createBuffer({
+      label: "Fine GPU pass timestamps resolve",
+      size: bytes,
+      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+    });
+    this.readBuffer = device.createBuffer({
+      label: "Fine GPU pass timestamps readback",
+      size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+  }
+
+  instrument(descriptor?: GPUComputePassDescriptor): GPUComputePassDescriptor | undefined {
+    // Keep a recorder that already owns timestamps intact (for example the
+    // semantic physics trace markers).
+    if (descriptor?.timestampWrites) return descriptor;
+    if (this.entries.length >= GPUFineTimestampEncoderSession.MAXIMUM_PASSES) {
+      throw new Error("Fine GPU timestamp pass capacity exceeded for one command encoder");
+    }
+    const beginIndex = this.entries.length * 2;
+    const endIndex = beginIndex + 1;
+    this.entries.push({
+      label: descriptor?.label?.trim() || "<unlabeled compute pass>",
+      beginIndex,
+      endIndex,
+    });
+    return {
+      ...descriptor,
+      timestampWrites: {
+        querySet: this.querySet,
+        beginningOfPassWriteIndex: beginIndex,
+        endOfPassWriteIndex: endIndex,
+      },
+    };
+  }
+
+  resolve(encoder: GPUCommandEncoder): void {
+    if (this.finished) return;
+    this.finished = true;
+    if (this.entries.length === 0) {
+      this.destroy();
+      return;
+    }
+    const queryCount = this.entries.length * 2;
+    const bytes = queryCount * 8;
+    encoder.resolveQuerySet(this.querySet, 0, queryCount, this.resolveBuffer, 0);
+    encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, bytes);
+    this.completed.push(this);
+  }
+
+  async read(): Promise<Array<{ label: string; duration_ms?: number }>> {
+    try {
+      await this.readBuffer.mapAsync(GPUMapMode.READ);
+      const timestamps = new BigUint64Array(
+        this.readBuffer.getMappedRange(0, this.entries.length * 16).slice(0),
+      );
+      return this.entries.map((entry) => {
+        const begin = timestamps[entry.beginIndex];
+        const end = timestamps[entry.endIndex];
+        const duration_ms = begin !== undefined && end !== undefined
+          && begin !== 0n && end >= begin
+          ? Number(end - begin) / 1e6
+          : undefined;
+        return { label: entry.label, duration_ms };
+      });
+    } finally {
+      if (this.readBuffer.mapState === "mapped") this.readBuffer.unmap();
+      this.destroy();
+    }
+  }
+
+  private destroy(): void {
+    this.querySet.destroy();
+    this.resolveBuffer.destroy();
+    this.readBuffer.destroy();
+  }
+}
+
 class GPUCommandAudit {
   private writeBuffer = { calls: 0, bytes: 0 };
   private writeTexture = { calls: 0, bytes: 0 };
@@ -2403,24 +2601,31 @@ function auditComputePass(pass: GPUComputePassEncoder, audit: GPUCommandAudit,
   } }) as GPUComputePassEncoder;
 }
 
-function auditCommandEncoder(encoder: GPUCommandEncoder, audit: GPUCommandAudit): GPUCommandEncoder {
+function auditCommandEncoder(
+  encoder: GPUCommandEncoder,
+  audit?: GPUCommandAudit,
+  fineTimestamps?: GPUFineTimestampEncoderSession,
+): GPUCommandEncoder {
   return new Proxy(encoder, { get(target, property) {
     if (property === "clearBuffer") return (buffer: GPUBuffer, offset = 0, size?: number) => {
-      const bytes = size ?? Math.max(0, buffer.size - offset); audit.recordClearBuffer(buffer, bytes);
+      const bytes = size ?? Math.max(0, buffer.size - offset); audit?.recordClearBuffer(buffer, bytes);
       return target.clearBuffer(buffer, offset, size);
     };
     if (property === "copyBufferToBuffer") return (source: GPUBuffer, sourceOffset: number, destination: GPUBuffer,
       destinationOffset: number, size: number) => {
-      audit.recordCopyBuffer(source, destination, size);
+      audit?.recordCopyBuffer(source, destination, size);
       return target.copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size);
     };
     if (property === "beginComputePass") return (descriptor?: GPUComputePassDescriptor) => {
-      audit.recordComputePass(descriptor);
-      return auditComputePass(target.beginComputePass(descriptor), audit,
-        descriptor?.label?.trim() || "<unlabeled compute pass>");
+      audit?.recordComputePass(descriptor);
+      const pass = target.beginComputePass(fineTimestamps?.instrument(descriptor) ?? descriptor);
+      return audit ? auditComputePass(pass, audit,
+        descriptor?.label?.trim() || "<unlabeled compute pass>") : pass;
     };
     if (property === "finish") return (descriptor?: GPUCommandBufferDescriptor) => {
-      audit.recordCommandBuffer(); return target.finish(descriptor);
+      fineTimestamps?.resolve(target);
+      audit?.recordCommandBuffer();
+      return target.finish(descriptor);
     };
     const value = Reflect.get(target, property, target);
     return typeof value === "function" ? value.bind(target) : value;
@@ -2468,6 +2673,7 @@ interface GPUSmokeResult {
   simulationWall_ms: number;
   steps: number;
   gpuCommandAudit?: GPUCommandAuditReport;
+  gpuFineTimestamps?: GPUFineTimestampReport;
   /** Accepted steps whose live power topology, faces, transfer, and MGPCG publication passed the generation audit. */
   powerGenerationAuditedSteps: number;
   /** Last exact owner-page self-publication observed by the per-generation
@@ -3077,6 +3283,7 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
   console.log(JSON.stringify({
     scenario, method: result.method, phase: "result", construction_ms: Math.round(result.construction_ms), runtime_ms: Math.round(result.runtime_ms), simulationWall_ms: Math.round(result.simulationWall_ms), steps: result.steps,
     gpuCommandAudit: result.gpuCommandAudit,
+    gpuFineTimestamps: result.gpuFineTimestamps,
     powerGenerationAuditedSteps: result.powerGenerationAuditedSteps,
     ownerArenaAudit: result.ownerArenaAudit,
     mgpcgIterationAudit: result.mgpcgIterationAudit,
@@ -3210,12 +3417,18 @@ async function runGPU(
   ];
   const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
   const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
+  if (fineGPUTimestampsRequested && !device.features.has("timestamp-query")) {
+    throw new Error("FLUID_GPU_FINE_TIMESTAMPS requires timestamp-query support");
+  }
   await assertComputeSentinel(device);
   let lost: GPUDeviceLostInfo | undefined;
   void device.lost.then((info) => { lost = info; });
   const validationErrors: string[] = [];
   device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
   const commandAudit = gpuCommandAuditRequested ? new GPUCommandAudit() : undefined;
+  const fineTimestampAudit = fineGPUTimestampsRequested
+    ? new GPUFineTimestampAudit(device)
+    : undefined;
   const instrumentedQueue = commandAudit ? new Proxy(device.queue, {
     get(target, property) {
       if (property === "writeBuffer") return (buffer: GPUBuffer, bufferOffset: number,
@@ -3251,7 +3464,10 @@ async function runGPU(
       if (property === "createCommandEncoder") return (descriptor?: GPUCommandEncoderDescriptor) => {
         commandAudit?.recordCommandEncoder(descriptor);
         const encoder = target.createCommandEncoder(descriptor);
-        return commandAudit ? auditCommandEncoder(encoder, commandAudit) : encoder;
+        const fineTimestamps = fineTimestampAudit?.createEncoderSession();
+        return commandAudit || fineTimestamps
+          ? auditCommandEncoder(encoder, commandAudit, fineTimestamps)
+          : encoder;
       };
       if (property === "createComputePipeline") return (descriptor: GPUComputePipelineDescriptor) => {
         const started = performance.now(), result = target.createComputePipeline(descriptor);
@@ -3471,6 +3687,7 @@ async function runGPU(
   // below measures only recurring advance work and explicitly requested
   // profiler/readback activity after the initialized solver is warm.
   commandAudit?.reset();
+  fineTimestampAudit?.start();
   const runStarted = performance.now();
   let steps = 0, samplingWall_ms = 0, matched: Awaited<ReturnType<typeof readCubicVolumeField>> | undefined;
   // The perturbed cadence remains exclusive to the quadtree dam-break
@@ -3561,6 +3778,7 @@ async function runGPU(
       continue;
     }
     steps += 1;
+    if (fineTimestampAudit && steps >= fineGPUTimestampAdvances) fineTimestampAudit.stop();
     if (physicsTraceLogRequested) {
       const trace = (solver.info as { physicsTrace?: {
         sampleId: number; context: string; total_ms: number;
@@ -5266,7 +5484,11 @@ async function runGPU(
     if (lost) throw new Error(`${method.id} device lost: ${lost.message || lost.reason}`);
   }
   const simulationWall_ms = Math.max(0, performance.now() - runStarted - samplingWall_ms);
+  fineTimestampAudit?.stop();
   await awaitAdvanceCompletion();
+  const gpuFineTimestamps = await fineTimestampAudit?.read(
+    Math.min(steps, fineGPUTimestampAdvances),
+  );
   if (performanceProfileRequested && scenarioId === "dam-break-ui" && method.id === "octree") {
     const authority = solver as GPUSolverInstance & {
       powerFaceControl?: GPUBuffer;
@@ -5568,6 +5790,7 @@ async function runGPU(
     finalTallVolumeGaps: final?.tallVolumeGaps, validationErrors,
     construction_ms, runtime_ms: performance.now() - runStarted, simulationWall_ms, steps,
     gpuCommandAudit: commandAudit?.snapshot(),
+    gpuFineTimestamps,
     powerGenerationAuditedSteps,
     ownerArenaAudit: lastOwnerArenaAudit,
     mgpcgIterationAudit: powerGenerationAuditedSteps > 0 ? {

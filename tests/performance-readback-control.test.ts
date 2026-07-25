@@ -25,7 +25,7 @@ test("performance panel can bypass every trace producer without disabling correc
   assert.match(panel, /role="switch"/);
   assert.match(panel, /MEASUREMENT LOAD/);
   assert.match(panel, /Correctness synchronization remains active/);
-  assert.match(store, /enabled: true/);
+  assert.match(store, /enabled: false/);
   for (const source of [controller, renderer, uniform, tall]) {
     assert.match(source, /usePerformanceInstrumentationStore\.getState\(\)\.enabled/);
   }

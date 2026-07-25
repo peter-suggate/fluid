@@ -1,6 +1,10 @@
 /** Scalable GPU assembly and projection for generalized octree power faces. */
 
 import { OCTREE_POWER_FACE_RECORD_BYTES, OCTREE_POWER_INVALID_ROW } from "./octree-power-operator";
+import {
+  OCTREE_POWER_FACE_LIVE_FACE_DISPATCH_OFFSET_BYTES,
+  OCTREE_POWER_FACE_LIVE_ROW_DISPATCH_OFFSET_BYTES,
+} from "./webgpu-octree-power-faces";
 import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
 import type { PassBroker } from "./webgpu-pass-broker";
 
@@ -178,6 +182,7 @@ export class WebGPUOctreePowerOperator {
     countControl: GPUBuffer,
     velocitySeedControl?: GPUBuffer,
     solidControl?: GPUBuffer,
+    liveDispatch?: GPUBuffer,
   ): void {
     this.assertLive();
     this.device.queue.writeBuffer(this.assembleParams, 0, new Uint32Array([this.plan.maximumIncidencePerRow, 0, 0, 0,
@@ -190,10 +195,13 @@ export class WebGPUOctreePowerOperator {
       this.coefficients.leafHeaders, this.coefficients.leafHeaders, this.coefficients.leafHeaders,
       this.coefficients.topology.metrics, this.coefficients.topology.catalogCoefficients];
     this.run(broker, this.pipelines.prepare, 1, bindings);
-    this.run(broker, this.pipelines.count, Math.ceil(this.plan.rowCapacity / 64), bindings);
+    this.runScheduled(broker, this.pipelines.count, Math.ceil(this.plan.rowCapacity / 64),
+      bindings, liveDispatch, OCTREE_POWER_FACE_LIVE_ROW_DISPATCH_OFFSET_BYTES);
     this.run(broker, this.pipelines.scan, 1, bindings);
-    this.run(broker, this.pipelines.emitBulk, Math.ceil(this.plan.rowCapacity / 64), bindings);
-    this.run(broker, this.pipelines.emitCut, Math.ceil(this.plan.rowCapacity / 64), bindings);
+    this.runScheduled(broker, this.pipelines.emitBulk, Math.ceil(this.plan.rowCapacity / 64),
+      bindings, liveDispatch, OCTREE_POWER_FACE_LIVE_ROW_DISPATCH_OFFSET_BYTES);
+    this.runScheduled(broker, this.pipelines.emitCut, Math.ceil(this.plan.rowCapacity / 64),
+      bindings, liveDispatch, OCTREE_POWER_FACE_LIVE_ROW_DISPATCH_OFFSET_BYTES);
     this.run(broker, this.pipelines.publish, 1, bindings);
   }
 
@@ -230,6 +238,7 @@ export class WebGPUOctreePowerOperator {
     broker: PassBroker,
     leafHeaders: GPUBuffer,
     leafEntries: GPUBuffer,
+    liveDispatch?: GPUBuffer,
   ): void {
     this.assertLive();
     if (leafHeaders.size < this.plan.rowCapacity * 48) {
@@ -240,7 +249,8 @@ export class WebGPUOctreePowerOperator {
     }
     const bindings = [this.assembleParams, this.arena, this.arena, this.arena, this.arena,
       this.arena, this.control, leafHeaders, leafEntries];
-    this.run(broker, this.pipelines.publishLeafRows, Math.ceil(this.plan.rowCapacity / 64), bindings);
+    this.runScheduled(broker, this.pipelines.publishLeafRows, Math.ceil(this.plan.rowCapacity / 64),
+      bindings, liveDispatch, OCTREE_POWER_FACE_LIVE_ROW_DISPATCH_OFFSET_BYTES);
   }
 
   /** Projects using the first three WP4 control words without a CPU count readback. */
@@ -252,6 +262,7 @@ export class WebGPUOctreePowerOperator {
     countControl: GPUBuffer,
     pressureScale = 1,
     solverControl?: GPUBuffer,
+    liveDispatch?: GPUBuffer,
   ): void {
     this.assertLive();
     if (!Number.isFinite(pressureScale)) throw new RangeError("Power projection scale must be finite");
@@ -262,10 +273,13 @@ export class WebGPUOctreePowerOperator {
     const bindings = [this.projectParams, faces, csr.incidenceRows, csr.incidence, pressure, this.arena, this.control,
       this.arena, this.arena, solverControl ?? this.control];
     this.run(broker, solverControl ? this.pipelines.prepareProjectMGPCG : this.pipelines.prepareProject, 1, bindings);
-    this.run(broker, this.pipelines.project, Math.ceil(this.plan.faceCapacity / 64), bindings);
-    this.run(broker, this.pipelines.divergence, Math.ceil(this.plan.rowCapacity / 64), bindings);
+    this.runScheduled(broker, this.pipelines.project, Math.ceil(this.plan.faceCapacity / 64),
+      bindings, liveDispatch, OCTREE_POWER_FACE_LIVE_FACE_DISPATCH_OFFSET_BYTES);
+    this.runScheduled(broker, this.pipelines.divergence, Math.ceil(this.plan.rowCapacity / 64),
+      bindings, liveDispatch, OCTREE_POWER_FACE_LIVE_ROW_DISPATCH_OFFSET_BYTES);
     this.run(broker, this.pipelines.publishProject, 1, bindings);
-    this.run(broker, this.pipelines.commitProject, Math.ceil(this.plan.faceCapacity / 64), bindings);
+    this.runScheduled(broker, this.pipelines.commitProject, Math.ceil(this.plan.faceCapacity / 64),
+      bindings, liveDispatch, OCTREE_POWER_FACE_LIVE_FACE_DISPATCH_OFFSET_BYTES);
   }
 
   get source(): OctreePowerGPUOperatorSource { return { plan: this.plan, arena: this.arena, control: this.control }; }
@@ -275,6 +289,22 @@ export class WebGPUOctreePowerOperator {
       entries: stage.bindings.map((binding) => ({ binding, resource: { buffer: buffers[binding] } })) });
     const pass = broker.compute({ label: stage.pipeline.label || "Octree power operator" });
     pass.setPipeline(stage.pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(groups);
+  }
+
+  private runScheduled(
+    broker: PassBroker,
+    stage: { pipeline: GPUComputePipeline; bindings: readonly number[] },
+    groups: number,
+    buffers: readonly GPUBuffer[],
+    dispatch?: GPUBuffer,
+    dispatchOffset = 0,
+  ): void {
+    const group = this.device.createBindGroup({ layout: stage.pipeline.getBindGroupLayout(0),
+      entries: stage.bindings.map((binding) => ({ binding, resource: { buffer: buffers[binding] } })) });
+    const pass = broker.compute({ label: stage.pipeline.label || "Octree power operator" });
+    pass.setPipeline(stage.pipeline); pass.setBindGroup(0, group);
+    if (dispatch) pass.dispatchWorkgroupsIndirect(dispatch, dispatchOffset);
+    else pass.dispatchWorkgroups(groups);
   }
 
   private validateCounts(rowCount: number, faceCount: number, incidenceCount: number): void {

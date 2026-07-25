@@ -15,6 +15,7 @@ const laneValue = process.argv.find((argument) => argument.startsWith("--lane=")
 if (laneValue !== "mini" && laneValue !== "ui") throw new Error("--lane must be mini or ui");
 const lane = laneValue as Lane;
 const traceProfile = args.has("--profile");
+const fineTimestamps = args.has("--fine-timestamps");
 const jsonOnly = args.has("--json");
 const root = fileURLToPath(new URL("..", import.meta.url));
 const runner = fileURLToPath(new URL("./run-webgpu-smoke-isolated.ts", import.meta.url));
@@ -48,6 +49,8 @@ const child = spawn(process.execPath, ["--import", "tsx", runner], {
     FLUID_METHOD: "octree",
     FLUID_QUALITY: "balanced",
     FLUID_PERFORMANCE_PROFILE: "1",
+    FLUID_PERFORMANCE_TRACES: traceProfile ? "1" : "0",
+    FLUID_GPU_FINE_TIMESTAMPS: fineTimestamps ? "1" : "0",
     FLUID_GPU_COMMAND_AUDIT: traceProfile ? "0" : "1",
     FLUID_CPU_ORACLE: "0", FLUID_FIELD_STATS: "0", FLUID_SPARSE_STATS: "0",
     FLUID_RASTER_CHECKPOINTS: "0", FLUID_WEBGPU_SMOKE_TIMEOUT_MS: "240000",
@@ -97,9 +100,17 @@ else {
   }
   if (summary.physicsTrace) {
     const trace = summary.physicsTrace;
-    console.log(`physics trace: ${trace.total_ms.toFixed(2)} ms total; ${trace.exact ? "exact" : "INEXACT"} accounting (${trace.accounted_ms.toFixed(2)} ms attributed)`);
+    console.log(`physics trace: ${trace.total_ms.toFixed(2)} ms total; ${trace.exact ? "exact" : "INEXACT"} accounting (${trace.accounted_ms.toFixed(2)} ms attributed) · ${trace.measurementSource ?? "unknown source"}`);
     for (const phase of trace.phases) {
       console.log(`physics phase: ${phase.id} · ${phase.label}: ${phase.duration_ms.toFixed(2)} ms`);
+    }
+  }
+  if (summary.fineTimestamps) {
+    console.log(`fine GPU timestamps: ${summary.fineTimestamps.measuredPasses} passes measured, ${summary.fineTimestamps.invalidPasses} invalid; ${summary.fineTimestamps.summedPassPerAdvance_ms.toFixed(2)} ms/advance summed pass occupancy`);
+    for (const [label, bucket] of Object.entries(summary.fineTimestamps.byLabel)
+      .sort((left, right) => right[1].totalPerAdvance_ms - left[1].totalPerAdvance_ms)
+      .slice(0, 20)) {
+      console.log(`GPU pass: ${label}: ${bucket.totalPerAdvance_ms.toFixed(3)} ms/advance · ${bucket.mean_ms.toFixed(3)} ms mean · ${bucket.samples} samples`);
     }
   }
   console.log(`validation errors: ${summary.validationErrorCount}`);

@@ -24,6 +24,7 @@ import {
   classifyOctreeFaceBandBoundaryCrossing,
   makeOctreeFaceBandAirSampleWGSL,
   octreeFaceBandCoarseGenerationPairIsValid,
+  octreeFaceBandSupportScatterWGSL,
   octreeFaceBandWGSL,
   planOctreeFaceBandGPU,
   unpackOctreeFaceBandControl,
@@ -103,14 +104,22 @@ function wgslReachableBindings(entryPoint: string, wgsl = octreeFaceBandWGSL): n
   return [...bindings].sort((a, b) => a - b);
 }
 
-function faceBandPipelineEntryPoints(): Map<string, string> {
+function faceBandPipelineEntryPoints(): Map<string, {
+  readonly entryPoint: string;
+  readonly wgsl: string;
+}> {
   const source = compact(WebGPUOctreeFaceClosestPointExtension);
   const start = source.indexOf("constpipelines={");
   const end = source.indexOf("};this.pipelines=", start);
   assert.ok(start >= 0 && end > start, "face-band pipeline table must remain statically inspectable");
-  const result = new Map<string, string>();
+  const result = new Map<string, { readonly entryPoint: string; readonly wgsl: string }>();
   for (const match of source.slice(start, end).matchAll(/([A-Za-z_]\w*):pipeline\("([A-Za-z_]\w*)"/g)) {
-    result.set(match[1], match[2]);
+    result.set(match[1], { entryPoint: match[2], wgsl: octreeFaceBandWGSL });
+  }
+  for (const match of source.slice(start, end).matchAll(
+    /([A-Za-z_]\w*):supportPipeline\("([A-Za-z_]\w*)"/g,
+  )) {
+    result.set(match[1], { entryPoint: match[2], wgsl: octreeFaceBandSupportScatterWGSL });
   }
   return result;
 }
@@ -139,8 +148,9 @@ test("every Section 5 encode pipeline binds exactly its transitively reachable W
   const uniformBindings = new Set([0, 1, 20]);
   assert.deepEqual([...encoded.keys()].sort(), [...pipelines.keys()].sort(),
     "every encodePhase pipeline key must have one audited run call");
-  for (const [key, entryPoint] of pipelines) {
-    const reachable = wgslReachableBindings(entryPoint);
+  for (const [key, pipeline] of pipelines) {
+    const { entryPoint, wgsl } = pipeline;
+    const reachable = wgslReachableBindings(entryPoint, wgsl);
     assert.deepEqual(encoded.get(key), reachable,
       `${key} (${entryPoint}) host bindings must exactly equal transitive WGSL reachability`);
     const storageBindings = reachable.filter(binding => !uniformBindings.has(binding));
@@ -188,11 +198,11 @@ test("Section 5 catalog adjacency keeps exact delta, resolution, commit, and ind
     /synchronizeTransitionStorage|enumerateSupport|resolveSupportOwners|insertSupport|captureSupport/);
   const topologySchedule = source.slice(topology, transitions);
   assert.match(topologySchedule,
-    /run\("prepare"[\s\S]*run\("buildTopologyDelta"[\s\S]*run\("sortUniqueCatalogSupport3"[\s\S]*run\("sortUniqueEndpointSupport4"[\s\S]*run\("classifyRowSigns"/);
-  assert.equal(topologySchedule.match(/\brun\("/g)?.length, 11,
-    "support publication initializes, closes three anchor tiers plus endpoints, sorts, and validates");
-  assert.doesNotMatch(topologySchedule,
-    /prepareCatalogSupport|sortRowDirectory|validateRowDirectory/);
+    /run\("prepare"[\s\S]*run\("clearSupportIdentityMarks"[\s\S]*run\("buildTopologyDelta"[\s\S]*run\("markSupport1"[\s\S]*run\("scatterSupport1"[\s\S]*run\("markSupport3"[\s\S]*run\("scatterSupport4"[\s\S]*run\("markPublishedSupportRows"[\s\S]*run\("scatterCanonicalRowDirectory"[\s\S]*run\("validateRowDirectory"[\s\S]*run\("classifyRowSigns"/);
+  assert.equal(topologySchedule.match(/\brun\("/g)?.length, 33,
+    "support publication initializes, closes four exact tiers, scans the identity plane, and validates");
+  assert.doesNotMatch(topologySchedule, /sortUniqueCatalogSupport|sortUniqueEndpointSupport|sortValidateRowDirectory/,
+    "the retired single-workgroup radix schedule must not survive");
 });
 
 test("transition adjacency has one exact row-delta path and no whole-row resolve launch", () => {
@@ -415,12 +425,9 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
   const topology = source.slice(source.indexOf('case"topology-build"'),
     source.indexOf('case"transition-adjacency"'));
   assert.match(topology,
-    /run\("prepare"[\s\S]*run\("buildTopologyDelta"[\s\S]*run\("emitCatalogSupport1"[\s\S]*run\("sortUniqueCatalogSupport1"[\s\S]*run\("emitCatalogSupport2"[\s\S]*run\("sortUniqueCatalogSupport2"[\s\S]*run\("emitCatalogSupport3"[\s\S]*run\("sortUniqueCatalogSupport3"[\s\S]*run\("sortUniqueEndpointSupport4"[\s\S]*run\("classifyRowSigns"/);
+    /run\("prepare"[\s\S]*run\("clearSupportIdentityMarks"[\s\S]*run\("buildTopologyDelta"[\s\S]*run\("emitCatalogSupport1"[\s\S]*run\("markSupport1"[\s\S]*run\("finalizeSupport1"[\s\S]*run\("scatterSupport1"[\s\S]*run\("emitCatalogSupport2"[\s\S]*run\("markSupport2"[\s\S]*run\("scatterSupport2"[\s\S]*run\("emitCatalogSupport3"[\s\S]*run\("markSupport3"[\s\S]*run\("scatterSupport3"[\s\S]*run\("emitEndpointSupport4"[\s\S]*run\("markSupport4"[\s\S]*run\("scatterSupport4"[\s\S]*run\("markPublishedSupportRows"[\s\S]*run\("scatterCanonicalRowDirectory"[\s\S]*run\("validateRowDirectory"[\s\S]*run\("classifyRowSigns"/);
   assert.doesNotMatch(topology,
-    /prepareCatalogSupport|sortRowDirectory|validateRowDirectory/,
-    "support-state initialization and terminal directory work stay fused with existing exact stages");
-  assert.doesNotMatch(topology,
-    /publishCatalogRows|markCatalogSupportRows|prefixCatalogSupportRows|offsetCatalogSupportRows|publishCatalogSupportRows|rowHistogram|rowScatter/);
+    /sortUniqueCatalogSupport|sortUniqueEndpointSupport|sortValidateRowDirectory/);
   assert.match(wgslFunction("findSiteInCount"), /while\(low<high\).*powerKeyLess/s,
     "power rows are resolved by the producer's canonical sorted directory");
   assert.doesNotMatch(wgslFunction("findSiteInCount"), /probe|siteHash/,
@@ -461,26 +468,26 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
   assert.match(wgslFunction("emitFaceBandEndpointSupport4"), /emitCatalogNeighborhood\(g\.x,4u\)/);
   assert.doesNotMatch(octreeFaceBandWGSL, /fn emitEndpointNeighborhood\(/,
     "the incomplete endpoint-only S3 closure and its narrower candidate stride stay deleted");
-  const closure = wgslFunction("sortUniqueFaceBandCatalogSupport");
-  assert.match(closure,
-    /varsourceCount=core;varstride=MAX_GUARDS.*tier==3u\)\{sourceCount=select\(0u,support2End-support1End,prefixValid\);\}.*tier==4u\)\{sourceCount=select\(0u,support3End-support2End,prefixValid\);\}.*sourceCount\*stride/s,
-    "all anchor and endpoint tiers sort their complete endpoint-plus-catalog candidate record");
-  assert.doesNotMatch(closure, /tier==4u\)[^{]*\{[^}]*stride=MAX_ENDPOINTS/,
-    "terminal endpoints must never truncate Delaunay selector candidates to the legacy endpoint stride");
-  assert.match(closure,
-    /digit<faceBandRadixDigits\(\).*supportDigit.*supportSortBins.*publishedSupportRecord.*tier==2u.*ROW_SUPPORT2.*tier==3u.*ROW_SUPPORT3_NODE.*tier==4u.*ROW_SUPPORT3_ENDPOINT/s,
-    "one deterministic domain-bounded radix/unique pass publishes each exact tier");
-  assert.match(closure,
-    /if\(lane==0u\).*control\.initialRows.*rowDirectory\[candidateState\+1u\].*supportSortBins\[3u\]=sourceCount\*stride.*workgroupUniformLoad\(&supportSortBins\[0u\]\).*workgroupUniformLoad\(&supportSortBins\[1u\]\).*workgroupUniformLoad\(&supportSortBins\[2u\]\).*workgroupUniformLoad\(&supportSortBins\[3u\]\)/s,
-    "lane zero broadcasts every storage-derived enable and support bound before any radix barrier");
-  assert.match(closure,
-    /supportSortBins\[257u\]=select\(0u,1u,accepted\).*workgroupUniformLoad\(&supportSortBins\[257u\]\).*if\(publishEnabled==0u\)\{return;\}/s,
-    "the post-unique failure gate is a workgroup-uniform broadcast");
-  assert.doesNotMatch(closure, /\batomic/,
-    "the deterministic radix publication has no synchronization-atomic path");
-  assert.match(closure,
-    /tier==1u\)\{rowDirectory\[candidateState\+1u\]=end.*tier==2u\)\{rowDirectory\[candidateState\+2u\]=end.*tier==3u\)\{rowDirectory\[candidateState\+3u\]=end.*else\{rowDirectory\[candidateState\]=end/s,
+  const mark = wgslFunction("markSupportSource", octreeFaceBandSupportScatterWGSL);
+  assert.match(mark,
+    /source\*MAX_GUARDS.*slot<MAX_GUARDS.*identityRank\(cellKey,value\.size\).*alreadyPublished\(cellKey,value\.size\).*atomicStore\(&supportScratch\[rank\],1u\)/s,
+    "every tier atomically marks the collision-free identity of its complete fixed-fanout request stream");
+  const blockScan = wgslFunction("scanSupportIdentityBlocks", octreeFaceBandSupportScatterWGSL);
+  assert.match(blockScan,
+    /workgroup_size\(256\).*scanValues\[lane\]=value.*offset<256u.*prefixBase\(\)\+rank.*blockTotalBase\(\)\+wid\.x/s,
+    "support identity marks are scanned in parallel 256-entry blocks");
+  const prefix = wgslFunction("prefixSupportIdentityBlocks", octreeFaceBandSupportScatterWGSL);
+  assert.match(prefix,
+    /laneBlockRange\(lane\).*localTotal.*scanValues\[lane\].*blockTotalBase\(\)\+blockCount\(\)/s,
+    "one bounded block-total scan publishes the exact global support count");
+  const finalize = wgslFunction("finalizeTier", octreeFaceBandSupportScatterWGSL);
+  assert.match(finalize,
+    /tier==1u\).*state\+1u.*tier==2u\).*state\+2u.*tier==3u\).*state\+3u.*controlWords\[2u\]=end/s,
     "the candidate publishes distinct S1, S2, S3-node, and terminal endpoint prefixes");
+  const scatter = wgslFunction("scatterTier", octreeFaceBandSupportScatterWGSL);
+  assert.match(scatter,
+    /rank\/6u.*rank%6u.*tierFlag\(tier\).*committedRowOfIdentity.*rowDirectory\[identity\]=band\+1u/s,
+    "canonical identity rank deterministically scatters each unique row and retains prior-row linkage");
   assert.doesNotMatch(octreeFaceBandWGSL,
     /addCurrentSupportRing|retirePriorSupportRing|topologyRingProbe|retireSupportIdentity/,
     "the serial geometric one-ring/carry implementation and its backing reference counts stay deleted");
@@ -493,24 +500,16 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
     "the paper's regular-face graph closes six unit endpoints or exact 2:1 face quadrants");
   assert.match(faceEndpoints, /writeSupportCandidate\(base,request,candidate\)/,
     "regular-face endpoints join the same exact fixed-fanout identity stream");
-  const sort = wgslFunction("sortFaceBandRowDirectoryInWorkgroup");
-  assert.match(sort, /fnsortFaceBandRowDirectoryInWorkgroup\(lane:u32\)/);
-  assert.match(sort, /digit<faceBandRadixDigits\(\).*rowSortDigit.*bin<16u.*workgroupBarrier/s,
-    "one cooperative fixed-memory sort orders two size nibbles before the domain-required cell nibbles");
-  assert.doesNotMatch(octreeFaceBandWGSL, /rowSortBinRecords/,
-    "terminal support and row-directory radix phases reuse one portable 16 KiB workgroup arena");
-  assert.match(wgslFunction("rowSortDigit"),
-    /digit<2u\)\{return\(size>>\(digit\*4u\)\)&15u;\}return\(value\.x>>\(\(digit-2u\)\*4u\)\)&15u/,
-    "the LSD radix establishes size as the exact secondary key and cell as the primary key");
-  assert.doesNotMatch(sort, /atomic(?:Add|CompareExchangeWeak|Max|Min|Or)/);
+  const directory = wgslFunction("scatterCanonicalRowDirectory", octreeFaceBandSupportScatterWGSL);
+  assert.match(directory,
+    /position=atomicLoad.*cellKey=rank\/6u.*size=1u<<\(rank%6u\).*rowDirectory\[position\*2u\]=cellKey.*rowDirectory\[position\*2u\+1u\]=row/s,
+    "the same cell-major, size-minor identity rank directly publishes the canonical directory");
   assert.match(wgslFunction("validateFaceBandRowDirectoryIndex"),
     /rowIdentityLess\(rowDirectory\[\(index-1u\)\*2u\],rows\[prior\]\.size,key,rows\[row\]\.size\)/,
     "duplicate and unsorted exact (cell,size) row identities fail closed");
-  assert.match(wgslFunction("sortUniqueFaceBandEndpointSupport4"),
-    /sortUniqueFaceBandCatalogSupport\(4u,lane\).*sortFaceBandRowDirectoryInWorkgroup\(lane\).*validateFaceBandRowDirectoryIndex\(index,count\)/s,
-    "the terminal exact tier reuses its deterministic 256-lane workgroup for directory sort and validation");
-  assert.doesNotMatch(octreeFaceBandWGSL,
-    /fn (?:publishCatalogBandRows|markCatalogSupportRows|prefixCatalogSupportRows|offsetCatalogSupportRows|publishCatalogSupportRows|emitRowDirectory|histogramRowDirectoryRadix|prefixRowDirectoryRadix|scatterRowDirectoryRadix|insertRow)\(/);
+  assert.match(wgslFunction("validateFaceBandRowDirectory"),
+    /index<count.*validateFaceBandRowDirectoryIndex\(index,count\)/s,
+    "the parallel directory publication retains fail-closed validation over every live row");
 });
 
 test("S3 anchor closure publishes the exact selector missing from the row-1216 failure", () => {
@@ -740,7 +739,11 @@ test("factor-4 GPU face band is compact, bounded, and has no fine velocity chann
       OCTREE_FACE_BAND_UNIFORM_SUPPORT_REQUESTS,
     )));
   assert.equal(plan.catalogSupportCandidateBytes, plan.catalogSupportCandidateCapacity * 8);
-  assert.equal(plan.catalogSupportScratchBytes, plan.catalogSupportCandidateBytes);
+  const identityCount = 24 * 18 * 16 * 6;
+  assert.equal(plan.catalogSupportScratchBytes, Math.max(
+    plan.catalogSupportCandidateBytes,
+    (identityCount * 2 + Math.ceil(identityCount / 256) + 1) * 4,
+  ), "support scratch covers parallel marks, local prefixes, block totals, and later face repair");
   assert.equal(plan.transientPowerRowBytes,
     (plan.rowCapacity + 1) * OCTREE_FACE_BAND_TRANSIENT_ROW_BYTES);
   assert.equal(OCTREE_FACE_BAND_TRANSIENT_CONTROL_BYTES, 64);
@@ -1792,15 +1795,19 @@ test("catalog adjacency resolves at stable row ids within the portable storage l
   assert.deepEqual(encoded.get("emitCatalogSupport1"),
     [0, 5, 6, 7, 26, 28, 29, 30, 33, 34, 66]);
   assert.deepEqual(encoded.get("emitCatalogSupport2"), encoded.get("emitCatalogSupport1"));
-  assert.deepEqual(encoded.get("sortUniqueCatalogSupport1"),
-    [0, 4, 5, 6, 7, 13, 18, 62, 66, 67, 68]);
-  assert.deepEqual(encoded.get("sortUniqueCatalogSupport2"),
-    encoded.get("sortUniqueCatalogSupport1"));
+  assert.deepEqual(encoded.get("markSupport1"), [0, 5, 6, 7, 66, 67]);
+  assert.deepEqual(encoded.get("markSupport2"), encoded.get("markSupport1"));
+  assert.deepEqual(encoded.get("scanSupportIdentityBlocks"), [0, 67]);
+  assert.deepEqual(encoded.get("scatterSupport1"), [0, 5, 6, 7, 13, 62, 67, 68]);
   for (const entryPoint of [
     "emitFaceBandCatalogSupport1", "emitFaceBandCatalogSupport2",
-    "sortUniqueFaceBandCatalogSupport1", "sortUniqueFaceBandCatalogSupport2",
   ]) assert.equal(wgslReachableBindings(entryPoint).filter((binding) => binding !== 0).length, 10,
     `${entryPoint} remains at WebGPU's portable ten-storage-buffer limit`);
+  for (const entryPoint of ["markSupport1", "scatterSupport1"]) {
+    assert.ok(wgslReachableBindings(entryPoint, octreeFaceBandSupportScatterWGSL)
+      .filter((binding) => binding !== 0).length <= 10,
+    `${entryPoint} remains within WebGPU's portable storage-buffer limit`);
+  }
 
   const transition = source.slice(source.indexOf('case"transition-adjacency"'),
     source.indexOf('case"closest-point-extension"'));

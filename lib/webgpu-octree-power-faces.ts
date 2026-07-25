@@ -24,6 +24,8 @@ export const OCTREE_POWER_FACE_CONTROL_BYTES = 64;
 export const OCTREE_POWER_FACE_PARAMETER_BYTES = 112;
 export const OCTREE_POWER_FACE_BOUNDARY_QUERY_BYTES = 32;
 export const OCTREE_POWER_FACE_EMPTY_FINE_BINDINGS_BYTES = 160;
+/** Committed-publication workgroup counts in the indirect-only source arena. */
+export const OCTREE_POWER_FACE_LIVE_FACE_DISPATCH_OFFSET_BYTES = 12;
 /** Byte offset of the GPU-authored `(ceil(liveRows / 64), 1, 1)` record. */
 export const OCTREE_POWER_FACE_LIVE_ROW_DISPATCH_OFFSET_BYTES = 24;
 export const OCTREE_POWER_FACE_QUADRATURE_SAMPLES = 16;

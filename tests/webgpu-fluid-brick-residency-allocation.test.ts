@@ -92,10 +92,12 @@ test("production-sized sparse scheduler accounting exposes both deep-domain savi
     [8, 6, 5], [2, 2, 2], 240, false, true,
     damPools.brickCapacity, damPools.tileCapacity,
   );
-  assert.equal(dam.allocatedBytes, 12_104);
+  assert.equal(dam.sparseKeyPools, false,
+    "a full-domain key budget uses parallel logical-key publication instead of serial sparse hashing");
+  assert.equal(dam.allocatedBytes, 10_124);
   assert.equal(dam.savedSchedulerBytes, 0);
-  assert.equal(dam.schedulerByteDelta, 1_984,
-    "key records have an explicit small-domain cost when the pool clamps to the logical domain");
+  assert.equal(dam.schedulerByteDelta, 0,
+    "full-domain pools avoid both sparse key-record overhead and the single-owner publisher");
 });
 
 test("implicit identity is reconstructed by the GPU while explicit mappings retain compatibility", () => {

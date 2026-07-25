@@ -84,6 +84,33 @@ test("power dam throughput summary normalizes command costs per advance", () => 
   });
 });
 
+test("fine GPU pass timestamps normalize by sampled advances, not the full smoke length", () => {
+  const summary = summarizePowerDamPerformance({
+    scenario: "minimal-power-dam-break",
+    method: "octree",
+    phase: "result",
+    steps: 62,
+    simulationWall_ms: 620,
+    gpuFineTimestamps: {
+      measuredAdvances: 1,
+      measuredPasses: 2,
+      invalidPasses: 0,
+      summedPass_ms: 12,
+      byLabel: {
+        "Fine topology": {
+          samples: 2,
+          total_ms: 12,
+          mean_ms: 6,
+          minimum_ms: 5,
+          maximum_ms: 7,
+        },
+      },
+    },
+  });
+  assert.equal(summary.fineTimestamps?.summedPassPerAdvance_ms, 12);
+  assert.equal(summary.fineTimestamps?.byLabel["Fine topology"]?.totalPerAdvance_ms, 12);
+});
+
 test("compute-pass attribution aggregates indexed native labels into stable owning stages", () => {
   const computePassesByLabel: Record<string, { calls: number; bytes: number }> = {
     "Resolve Section 5 catalog adjacency": { calls: 2, bytes: 0 },

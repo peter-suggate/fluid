@@ -12,6 +12,7 @@ import {
   makePowerVelocityPrepassBuilderWGSL,
   planOctreePowerVelocityChunkCapacity,
   planOctreePowerVelocityPrepass,
+  powerVelocityFusedAuthorityWGSL,
 } from "../lib/webgpu-octree-power-velocity-prepass";
 import {
   fineLevelSetFusedTransportPublicationWGSL,
@@ -47,6 +48,19 @@ test("trajectory prepass is bounded GPU-only Stage-B work", () => {
     samplerBytes: 84_080,
     allocatedBytes: 84_336,
   });
+});
+
+test("grouped Stage-B authority copies one complete record per live row", () => {
+  assert.match(powerVelocityFusedAuthorityWGSL, /let word=i\*4u/);
+  for (const component of ["", "+1u", "+2u", "+3u"]) {
+    assert.match(powerVelocityFusedAuthorityWGSL,
+      new RegExp(`authority\\[p\\.directoryOffset\\+word${component.replace("+", "\\+")}\\]`));
+    assert.match(powerVelocityFusedAuthorityWGSL,
+      new RegExp(`authority\\[p\\.velocityOffset\\+word${component.replace("+", "\\+")}\\]`));
+  }
+  const source = WebGPUOctreePowerVelocityPrepass.toString().replace(/\s+/g, "");
+  assert.match(source, /rowDescriptorGroups=newWeakMap/);
+  assert.match(source, /fusedAuthorityGroups=newWeakMap/);
 });
 
 test("factor-4 small dam break batches paper Section 5 transport within portable limits", () => {

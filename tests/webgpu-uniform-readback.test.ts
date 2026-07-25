@@ -81,6 +81,9 @@ test("compact analytic surface telemetry restores the physical t=0 reference", (
 test("compact octree readback never reports the cleared dense volume reduction", () => {
   const stats = source.slice(source.indexOf("async readStats()"), source.indexOf("\n  destroy()"));
   assert.match(stats, /compactFineExpected/);
+  assert.match(stats,
+    /surfaceDiagnosticsPromise\s*=\s*compactFineExpected\s*\?\s*undefined\s*:/,
+    "committed compact-fine telemetry must not also submit the obsolete adaptive-surface readback");
   assert.match(stats, /publishedGlobalFineVolumeCells\(globalFineDiagnostics/);
   assert.match(stats, /this\.info\.volumeCellSum=compactVolume\?\.volumeCells/);
   assert.match(stats, /if\(!this\.octreeProjection\)\{this\.info\.front_m/,

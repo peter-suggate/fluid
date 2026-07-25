@@ -1826,7 +1826,15 @@ export class WebGPUUniformEulerianSolver {
     if (this.reductionBuffer) encoder.copyBufferToBuffer(this.reductionBuffer, 0, buffer, 0, 16);
     this.device.queue.submit([encoder.finish()]);
     const mapPromise = buffer.mapAsync(GPUMapMode.READ);
-    const quadtreeDiagnostics = this.adaptiveProjection?.readSolveDiagnostics(); const surfaceDiagnosticsPromise = this.adaptiveProjection?.readSurfaceDiagnostics(); const globalFineDiagnosticsPromise = this.octreeProjection?.readGlobalFineLevelSetDiagnostics();
+    const compactFineExpected = Boolean(this.octreeProjection?.globalFineLevelSetSource);
+    const quadtreeDiagnostics = this.adaptiveProjection?.readSolveDiagnostics();
+    // Once compact global-fine volume is authoritative, the adaptive surface
+    // diagnostic is both obsolete and ignored below. Avoid a separate queue
+    // submission/map every 250 ms for data that cannot be selected.
+    const surfaceDiagnosticsPromise = compactFineExpected
+      ? undefined
+      : this.adaptiveProjection?.readSurfaceDiagnostics();
+    const globalFineDiagnosticsPromise = this.octreeProjection?.readGlobalFineLevelSetDiagnostics();
     try {
       await mapPromise;
       const [, , surfaceDiagnostics, globalFineDiagnostics, fluidBrickStats, fluidBulkBrickStats] = await Promise.all([
@@ -1841,7 +1849,6 @@ export class WebGPUUniformEulerianSolver {
       : new Uint32Array(4);
     const initial = Math.max(1, this.info.initialVolumeCellSum ?? 1);
     const conservativeVolumeCells=words[3]/2048;this.info.rawVolumeDrift=this.transportConservativeVolume?(conservativeVolumeCells-initial)/initial:undefined;
-    const compactFineExpected=Boolean(this.octreeProjection?.globalFineLevelSetSource);
     const c=this.scene.container,baseCellVolume_m3=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);
     const compactVolume=compactFineExpected&&globalFineDiagnostics?publishedGlobalFineVolumeCells(globalFineDiagnostics,baseCellVolume_m3):undefined;
     if(compactVolume){

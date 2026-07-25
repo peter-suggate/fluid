@@ -12,6 +12,7 @@
 
 import {
   OCTREE_POWER_FACE_DELTA_CARRIED,
+  OCTREE_POWER_FACE_LIVE_FACE_DISPATCH_OFFSET_BYTES,
   type OctreePowerFaceSource,
 } from "./webgpu-octree-power-faces";
 import type { PassBroker } from "./webgpu-pass-broker";
@@ -127,14 +128,14 @@ export class WebGPUOctreePowerFaceSeed {
       [[0, this.params], [4, this.power.control], [5, this.power.faces],
         [6, this.power.faceNormals], [9, this.control],
         [15, this.velocityScratch], [16, this.faceStatus]]);
-    this.run(broker, "Seed native generalized power-face velocities", this.seedPipeline,
-      Math.ceil(this.plan.faceCapacity / 64),
+    this.runIndirect(broker, "Seed native generalized power-face velocities", this.seedPipeline,
+      this.power.liveFaceDispatch, OCTREE_POWER_FACE_LIVE_FACE_DISPATCH_OFFSET_BYTES,
       [[5, this.power.faces], [6, this.power.faceNormals], [9, this.control],
         [15, this.velocityScratch], [16, this.faceStatus]]);
     this.run(broker, "Publish native power-face velocity seed", this.publishPipeline, 1,
       [[9, this.control], [15, this.velocityScratch], [16, this.faceStatus]]);
-    this.run(broker, "Commit native power-face velocity seed", this.commitPipeline,
-      Math.ceil(this.plan.faceCapacity / 64),
+    this.runIndirect(broker, "Commit native power-face velocity seed", this.commitPipeline,
+      this.power.liveFaceDispatch, OCTREE_POWER_FACE_LIVE_FACE_DISPATCH_OFFSET_BYTES,
       [[5, this.power.faces], [9, this.control], [15, this.velocityScratch]]);
   }
 
@@ -154,15 +155,17 @@ export class WebGPUOctreePowerFaceSeed {
       this.accelerationPreparePipeline, 1,
       [[0, this.params], [4, this.power.control], [5, this.power.faces], [6, this.power.faceNormals],
         [9, this.control], [15, this.velocityScratch], [16, this.faceStatus]]);
-    this.run(broker, "Apply acceleration to generalized power faces",
-      this.accelerationPipeline, Math.ceil(this.plan.faceCapacity / 64),
+    this.runIndirect(broker, "Apply acceleration to generalized power faces",
+      this.accelerationPipeline, this.power.liveFaceDispatch,
+      OCTREE_POWER_FACE_LIVE_FACE_DISPATCH_OFFSET_BYTES,
       [[5, this.power.faces], [6, this.power.faceNormals], [9, this.control],
         [14, this.accelerationParams], [15, this.velocityScratch], [16, this.faceStatus]]);
     this.run(broker, "Publish authoritative power-face acceleration",
       this.accelerationPublishPipeline, 1,
       [[9, this.control], [15, this.velocityScratch], [16, this.faceStatus]]);
-    this.run(broker, "Commit authoritative power-face acceleration",
-      this.commitPipeline, Math.ceil(this.plan.faceCapacity / 64),
+    this.runIndirect(broker, "Commit authoritative power-face acceleration",
+      this.commitPipeline, this.power.liveFaceDispatch,
+      OCTREE_POWER_FACE_LIVE_FACE_DISPATCH_OFFSET_BYTES,
       [[5, this.power.faces], [9, this.control], [15, this.velocityScratch]]);
   }
 
@@ -183,6 +186,26 @@ export class WebGPUOctreePowerFaceSeed {
       })),
     }));
     pass.dispatchWorkgroups(groups);
+  }
+
+  private runIndirect(
+    broker: PassBroker,
+    label: string,
+    pipeline: GPUComputePipeline,
+    dispatch: GPUBuffer,
+    dispatchOffset: number,
+    bindings: readonly [number, GPUBuffer][],
+  ): void {
+    const pass = broker.compute({ label });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: bindings.map(([binding, buffer]) => ({
+        binding,
+        resource: { buffer },
+      })),
+    }));
+    pass.dispatchWorkgroupsIndirect(dispatch, dispatchOffset);
   }
 
   destroy(): void {

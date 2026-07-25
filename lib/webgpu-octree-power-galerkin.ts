@@ -715,7 +715,7 @@ export class WebGPUOctreePowerGalerkin {
         }),
       });
     }
-    const pass = broker.compute();
+    const pass = broker.compute({ label: "Power Galerkin live fine operator import" });
     pass.setPipeline(this.pipelines.importFineOperator);
     pass.setBindGroup(0, this.importedSource.bindGroup);
     pass.dispatchWorkgroups(Math.ceil(this.nodeCounts[0] / 64));
@@ -736,7 +736,7 @@ export class WebGPUOctreePowerGalerkin {
       count: number,
       oneWorkgroupPerItem = false,
     ) => {
-      const pass = broker.compute();
+      const pass = broker.compute({ label: "Power Galerkin solve" });
       pass.setPipeline(this.pipelines[name]);
       const bindGroup = this.bindGroups[level][name];
       if (!bindGroup) throw new Error(`power Galerkin ${name} requires a dynamic binding`);
@@ -804,7 +804,7 @@ export class WebGPUOctreePowerGalerkin {
           }),
         });
       }
-      const pass = broker.compute();
+      const pass = broker.compute({ label: "Power Galerkin correction export" });
       pass.setPipeline(this.pipelines.exportLiveCorrection);
       pass.setBindGroup(0, this.exportedCorrection.bindGroup);
       pass.dispatchWorkgroups(Math.max(1, Math.ceil(finestCount / 64)));

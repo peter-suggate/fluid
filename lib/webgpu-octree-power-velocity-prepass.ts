@@ -1,7 +1,10 @@
 /** GPU-only direct Stage-B sampling for fine-level-set trajectories. */
 import { OCTREE_POWER_CATALOG_ENTRY_UNIFORM } from "./octree-power-catalog";
 import { fineLevelSetLinearWorkgroupWGSL, planFineLevelSetDispatch2D } from "./webgpu-fine-levelset-dispatch";
-import type { OctreePowerFaceSource } from "./webgpu-octree-power-faces";
+import {
+  OCTREE_POWER_FACE_LIVE_ROW_DISPATCH_OFFSET_BYTES,
+  type OctreePowerFaceSource,
+} from "./webgpu-octree-power-faces";
 import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
 import type { PassBroker } from "./webgpu-pass-broker";
 
@@ -125,6 +128,8 @@ export class WebGPUOctreePowerVelocityPrepass {
   private readonly samplePipeline: GPUComputePipeline;
   private readonly summarizePipeline: GPUComputePipeline;
   private readonly publishPipeline: GPUComputePipeline;
+  private readonly rowDescriptorGroups = new WeakMap<GPUBuffer, GPUBindGroup>();
+  private readonly fusedAuthorityGroups = new WeakMap<GPUBuffer, GPUBindGroup>();
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, queryCapacityValue: number,
@@ -210,12 +215,17 @@ export class WebGPUOctreePowerVelocityPrepass {
     const pipeline = this.rowDescriptorPipeline;
     const pass = broker.compute({ label: "Pack direct Stage-B row descriptors" });
     pass.setPipeline(pipeline);
-    pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: headers } },
-      { binding: 1, resource: { buffer: this.topology.metrics } },
-      { binding: 2, resource: { buffer: this.fusedAuthority,
-        offset: this.fusedRegions.rows.offsetBytes, size: this.fusedRegions.rows.sizeBytes } },
-    ] }));
+    let group = this.rowDescriptorGroups.get(headers);
+    if (!group) {
+      group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: headers } },
+        { binding: 1, resource: { buffer: this.topology.metrics } },
+        { binding: 2, resource: { buffer: this.fusedAuthority,
+          offset: this.fusedRegions.rows.offsetBytes, size: this.fusedRegions.rows.sizeBytes } },
+      ] });
+      this.rowDescriptorGroups.set(headers, group);
+    }
+    pass.setBindGroup(0, group);
     pass.dispatchWorkgroups(Math.ceil(this.topology.plan.rowCapacity / 64));
   }
 
@@ -228,14 +238,27 @@ export class WebGPUOctreePowerVelocityPrepass {
     const pipeline = this.fusedPackPipeline;
     const pass = broker.compute({ label: "Publish grouped direct Stage-B transport authority" });
     pass.setPipeline(pipeline);
-    pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: this.fusedPackParams } },
-      { binding: 1, resource: { buffer: this.faces.rowDirectory } },
-      { binding: 2, resource: { buffer: rowVelocities } },
-      { binding: 3, resource: { buffer: this.fusedAuthority } },
-    ] }));
-    const words = Math.max(this.fusedRegions.rowDirectory.sizeBytes, rowVelocities.size) / 4;
-    pass.dispatchWorkgroups(Math.ceil(words / 64));
+    let group = this.fusedAuthorityGroups.get(rowVelocities);
+    if (!group) {
+      group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: this.fusedPackParams } },
+        { binding: 1, resource: { buffer: this.faces.rowDirectory } },
+        { binding: 2, resource: { buffer: rowVelocities } },
+        { binding: 3, resource: { buffer: this.fusedAuthority } },
+      ] });
+      this.fusedAuthorityGroups.set(rowVelocities, group);
+    }
+    pass.setBindGroup(0, group);
+    // Both recurrent regions contain one 16-byte record per committed power
+    // row. The face transaction already publishes the exact live-row prefix,
+    // so do not stream the unused capacity tail through this packed binding.
+    // One invocation copies both records as four contiguous words; the former
+    // scalar/capacity launch used four times as many invocations even when the
+    // live topology occupied only a small prefix.
+    pass.dispatchWorkgroupsIndirect(
+      this.faces.liveFaceDispatch,
+      OCTREE_POWER_FACE_LIVE_ROW_DISPATCH_OFFSET_BYTES,
+    );
   }
 
   encodeFromPositions(broker: PassBroker, positions: GPUBuffer | GPUBufferBinding,
@@ -341,11 +364,20 @@ struct P{directoryOffset:u32,directoryWords:u32,velocityOffset:u32,velocityWords
 @group(0)@binding(3)var<storage,read_write>authority:array<u32>;
 @compute @workgroup_size(64)fn publishDirectFusedAuthority(@builtin(global_invocation_id)id:vec3u){
  let i=id.x;
- if(i<p.directoryWords&&i<arrayLength(&rowDirectory)&&p.directoryOffset+i<arrayLength(&authority)){
-  authority[p.directoryOffset+i]=rowDirectory[i];
+ let word=i*4u;
+ if(word+3u<p.directoryWords&&word+3u<arrayLength(&rowDirectory)
+    &&p.directoryOffset+word+3u<arrayLength(&authority)){
+  authority[p.directoryOffset+word]=rowDirectory[word];
+  authority[p.directoryOffset+word+1u]=rowDirectory[word+1u];
+  authority[p.directoryOffset+word+2u]=rowDirectory[word+2u];
+  authority[p.directoryOffset+word+3u]=rowDirectory[word+3u];
  }
- if(i<p.velocityWords&&i<arrayLength(&velocities)&&p.velocityOffset+i<arrayLength(&authority)){
-  authority[p.velocityOffset+i]=velocities[i];
+ if(word+3u<p.velocityWords&&word+3u<arrayLength(&velocities)
+    &&p.velocityOffset+word+3u<arrayLength(&authority)){
+  authority[p.velocityOffset+word]=velocities[word];
+  authority[p.velocityOffset+word+1u]=velocities[word+1u];
+  authority[p.velocityOffset+word+2u]=velocities[word+2u];
+  authority[p.velocityOffset+word+3u]=velocities[word+3u];
  }
 }`;
 

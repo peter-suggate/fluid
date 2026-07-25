@@ -140,6 +140,10 @@ export class WebGPUFineLevelSetRedistance {
   private readonly jfaValidatePipeline: GPUComputePipeline;
   private readonly jfaFinalizePipeline: GPUComputePipeline;
   private readonly jfaCommitPipeline: GPUComputePipeline;
+  /** Every resource bound by redistance is construction-stable. Retain one
+   * group per immutable pipeline instead of rebuilding 12–14 auto-layout
+   * groups on the host for every accepted simulation step. */
+  private readonly bindGroups = new Map<GPUComputePipeline, GPUBindGroup>();
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
     /** Exact delta/support publication produced by the topology transaction. */
@@ -235,11 +239,19 @@ export class WebGPUFineLevelSetRedistance {
     const run = (pipeline: GPUComputePipeline, params: GPUBuffer, wanted: readonly number[],
       dispatch: "support" | "dirty" | "single" | "capacity") => {
       pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: params } },
-        ...buffers.filter(([binding]) => wanted.includes(binding)).map(([binding, buffer]) =>
-          ({ binding, resource: { buffer } })),
-      ] }));
+      let bindGroup = this.bindGroups.get(pipeline);
+      if (!bindGroup) {
+        bindGroup = this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: params } },
+            ...buffers.filter(([binding]) => wanted.includes(binding)).map(([binding, buffer]) =>
+              ({ binding, resource: { buffer } })),
+          ],
+        });
+        this.bindGroups.set(pipeline, bindGroup);
+      }
+      pass.setBindGroup(0, bindGroup);
       if (dispatch === "single") pass.dispatchWorkgroups(1);
       else if (dispatch === "capacity") {
         pass.dispatchWorkgroups(Math.ceil(this.source.plan.maximumResidentBricks / 64));

@@ -59,6 +59,7 @@
     "benchmark:power-dam-mini": "node --import tsx tools/benchmark-power-dam.ts --lane=mini",
     "benchmark:power-dam-ui": "FLUID_MAX_ADVANCE_MS=${FLUID_MAX_ADVANCE_MS:-15} FLUID_MAX_DISPATCHES_PER_ADVANCE=${FLUID_MAX_DISPATCHES_PER_ADVANCE:-300} FLUID_MAX_PASSES_PER_ADVANCE=${FLUID_MAX_PASSES_PER_ADVANCE:-60} node --import tsx tools/benchmark-power-dam.ts --lane=ui",
     "profile:power-dam-mini": "node --import tsx tools/benchmark-power-dam.ts --lane=mini --profile",
+    "profile:power-dam-mini:fine": "node --import tsx tools/benchmark-power-dam.ts --lane=mini --fine-timestamps",
     "profile:power-dam-ui": "FLUID_MAX_PRESSURE_NON_SOLVE_MS=${FLUID_MAX_PRESSURE_NON_SOLVE_MS:-4} node --import tsx tools/benchmark-power-dam.ts --lane=ui --profile",
     "test:power-liquids-structure": "npx tsc --noEmit && npm run test:water-shaders && node --import tsx --test tests/power-liquids-clean-cut.test.ts tests/power-liquids-recurring-structure.test.ts tests/webgpu-pass-broker.test.ts tests/power-dam-performance-report.test.ts",
     "acceptance:power-liquids-phase": "npm run test:power-liquids-structure && npm run test:webgpu:dam-ui-construction && npm run test:webgpu:dam-ui-two-step && npm run benchmark:power-dam-ui && npm run profile:power-dam-ui && npm run test:webgpu:minimal-power-dam-two-step && npm run test:webgpu:minimal-power-dam-break",

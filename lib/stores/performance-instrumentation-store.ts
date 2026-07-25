@@ -12,8 +12,12 @@ interface PerformanceInstrumentationStore {
  * and presentation completion tracking are intentionally outside this switch.
  */
 export const usePerformanceInstrumentationStore = create<PerformanceInstrumentationStore>((set) => ({
-  enabled: true,
-  enabledAt_ms: -Infinity,
+  // Hardware timestamp support is adapter-dependent, and the portable
+  // segmented fallback deliberately serializes semantic phases. Keep that
+  // measurement load opt-in so normal simulation throughput is never changed
+  // merely by opening the application.
+  enabled: false,
+  enabledAt_ms: Infinity,
   setEnabled: (enabled) => set((state) => {
     if (enabled === state.enabled) return state;
     return {

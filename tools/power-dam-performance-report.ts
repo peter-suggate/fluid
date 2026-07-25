@@ -20,6 +20,22 @@ export interface PowerDamCommandAudit {
   readonly dispatchesByPassLabel?: Readonly<Record<string, PowerDamCommandBucket>>;
 }
 
+export interface PowerDamFineTimestampBucket {
+  readonly samples: number;
+  readonly total_ms: number;
+  readonly mean_ms: number;
+  readonly minimum_ms: number;
+  readonly maximum_ms: number;
+}
+
+export interface PowerDamFineTimestampReport {
+  readonly measuredAdvances: number;
+  readonly measuredPasses: number;
+  readonly invalidPasses: number;
+  readonly summedPass_ms: number;
+  readonly byLabel: Readonly<Record<string, PowerDamFineTimestampBucket>>;
+}
+
 export interface PowerDamResultRecord {
   readonly scenario: string;
   readonly method: string;
@@ -28,6 +44,7 @@ export interface PowerDamResultRecord {
   readonly simulationWall_ms: number;
   readonly validationErrors?: readonly string[];
   readonly gpuCommandAudit?: PowerDamCommandAudit;
+  readonly gpuFineTimestamps?: PowerDamFineTimestampReport;
   readonly physicsTrace?: PerformanceTrace;
 }
 
@@ -57,9 +74,20 @@ export interface PowerDamPerformanceSummary {
     readonly clearBytesPerAdvance: number;
     readonly copyBytesPerAdvance: number;
   };
+  readonly fineTimestamps?: {
+    readonly measuredAdvances: number;
+    readonly measuredPasses: number;
+    readonly invalidPasses: number;
+    readonly summedPass_ms: number;
+    readonly summedPassPerAdvance_ms: number;
+    readonly byLabel: Readonly<Record<string, PowerDamFineTimestampBucket & {
+      readonly totalPerAdvance_ms: number;
+    }>>;
+  };
   /** Exact, exclusive generic physics accounting from one sampled advance. */
   readonly physicsTrace?: {
     readonly sampleId: number;
+    readonly measurementSource?: PerformanceTrace["measurementSource"];
     readonly total_ms: number;
     readonly accounted_ms: number;
     readonly exact: boolean;
@@ -89,7 +117,7 @@ interface PowerDamComputePassOwnershipRule {
 const POWER_DAM_COMPUTE_PASS_OWNERSHIP: readonly PowerDamComputePassOwnershipRule[] = [
   { stage: "Octree owner pages", label: /owner[- ]page|owner pages|analytic octree owner generation/i },
   { stage: "Power energy ledger", label: /^Power energy ledger\b/i },
-  { stage: "Fine seed adapter", label: /octree fine-seed|octree interface candidates|FineSeedLeaf to global fine seeds|Seed global fine bricks from (?:FineSeedLeaf candidates|every interface leaf)/i },
+  { stage: "Fine seed adapter", label: /octree fine-seed|octree interface candidates|FineSeedLeaf to global fine seeds|Seed global fine bricks from (?:FineSeedLeaf candidates|every interface leaf)|fine-seed brick residency/i },
   { stage: "Section 5 face band · catalog adjacency", label: /^(?:Classify exact Section 5 catalog-adjacency delta|Resolve (?:exact affected )?Section 5 catalog adjacency|Validate and publish Section 5 catalog adjacency)$/i },
   { stage: "Section 5 face band · topology", label: /^(?:Build exact Section 5 support-row delta|Publish Section 5 regular-face topology)$/i },
   { stage: "Section 5 face band · extrapolation", label: /^(?:Extrapolate Section 5 regular-face velocities|Publish grouped face-band transport authority)$/i },
@@ -108,10 +136,10 @@ const POWER_DAM_COMPUTE_PASS_OWNERSHIP: readonly PowerDamComputePassOwnershipRul
   { stage: "Power faces", label: /(?:power[- ]face|Power faces|power face control|power site index|power boundary phi)/i },
   { stage: "Power velocity", label: /(?:power velocity|Stage-B row descriptors|direct Stage-B catalog authority)/i },
   { stage: "Power coarse level set", label: /(?:Power coarse level set|power coarse phi|coarse phi from fine-seed)/i },
-  { stage: "Power operator / pressure rows", label: /(?:power operator|leaf pressure assembly|projected divergence|physical power-cell volumes|physical octree power volumes)/i },
-  { stage: "MGPCG solve", label: /(?:MGPCG|Chebyshev)/i },
+  { stage: "Power operator / pressure rows", label: /(?:power operator|leaf pressure assembly|projected divergence|physical power-cell volumes|physical octree power volumes|preparePowerRows)/i },
+  { stage: "MGPCG solve", label: /(?:MGPCG|Chebyshev|Power Galerkin)/i },
   { stage: "SPGrid V-cycle", label: /^SPGrid V-cycle\b/i },
-  { stage: "Octree topology / frontier", label: /(?:octree reset and refinement|compact topology-tile|persistent octree leaf frontier|dirty-tile frontier|dirty frontier candidates|old\/new frontier merge|octree leaf compaction|analytic octree bootstrap worklist|topology lifecycle membership|Cold octree topology)/i },
+  { stage: "Octree topology / frontier", label: /(?:octree reset and refinement|compact topology-tile|topology-tile refinement signatures|wet-frontier tile|persistent octree leaf frontier|dirty-tile frontier|dirty frontier candidates|old\/new frontier merge|octree leaf compaction|analytic octree bootstrap worklist|topology lifecycle membership|Cold octree topology)/i },
   { stage: "Power solid coupling", label: /(?:power solid|solid pressure reactions|owner-vertex solid SDF)/i },
   { stage: "Sparse octree publication", label: /(?:octree raw voxel records|octree sparse brick records|sparse voxel structural|sparse brick records)/i },
   { stage: "Diagnostics / overlays", label: /(?:octree overlay|voxel inspection|QA diagnostics|diagnostic fields)/i },
@@ -206,8 +234,28 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
       clearBytesPerAdvance: perAdvance(audit.clearBuffer?.bytes, result.steps),
       copyBytesPerAdvance: perAdvance(audit.copyBufferToBuffer?.bytes, result.steps),
     } } : {}),
+    ...(result.gpuFineTimestamps ? { fineTimestamps: {
+      measuredAdvances: result.gpuFineTimestamps.measuredAdvances,
+      measuredPasses: result.gpuFineTimestamps.measuredPasses,
+      invalidPasses: result.gpuFineTimestamps.invalidPasses,
+      summedPass_ms: result.gpuFineTimestamps.summedPass_ms,
+      summedPassPerAdvance_ms: perAdvance(
+        result.gpuFineTimestamps.summedPass_ms,
+        result.gpuFineTimestamps.measuredAdvances,
+      ),
+      byLabel: Object.fromEntries(Object.entries(result.gpuFineTimestamps.byLabel).map(
+        ([label, bucket]) => [label, {
+          ...bucket,
+          totalPerAdvance_ms: perAdvance(
+            bucket.total_ms,
+            result.gpuFineTimestamps!.measuredAdvances,
+          ),
+        }],
+      )),
+    } } : {}),
     ...(trace ? { physicsTrace: {
       sampleId: trace.sampleId,
+      measurementSource: trace.measurementSource,
       total_ms: trace.total_ms,
       accounted_ms: performanceTraceAccounted_ms(trace),
       exact: performanceTraceIsExact(trace),
