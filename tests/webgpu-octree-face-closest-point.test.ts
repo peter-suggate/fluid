@@ -198,9 +198,12 @@ test("Section 5 catalog adjacency keeps exact delta, resolution, commit, and ind
     /synchronizeTransitionStorage|enumerateSupport|resolveSupportOwners|insertSupport|captureSupport/);
   const topologySchedule = source.slice(topology, transitions);
   assert.match(topologySchedule,
-    /run\("prepare"[\s\S]*run\("clearSupportIdentityMarks"[\s\S]*run\("buildTopologyDelta"[\s\S]*run\("markSupport1"[\s\S]*run\("scatterSupport1"[\s\S]*run\("markSupport3"[\s\S]*run\("scatterSupport4"[\s\S]*run\("markPublishedSupportRows"[\s\S]*run\("scatterCanonicalRowDirectory"[\s\S]*run\("validateRowDirectory"[\s\S]*run\("classifyRowSigns"/);
-  assert.equal(topologySchedule.match(/\brun\("/g)?.length, 33,
-    "support publication initializes, closes four exact tiers, scans the identity plane, and validates");
+    /run\("prepare"[\s\S]*run\("clearSupportIdentityMarks"[\s\S]*run\("buildTopologyDelta"[\s\S]*run\("markSupport1"[\s\S]*run\("scatterSupport1"[\s\S]*run\("markSupport3"[\s\S]*run\("scatterSupport4"/);
+  assert.equal(topologySchedule.match(/\brun\("/g)?.length, 27,
+    "support publication initializes and closes four exact identity-table tiers without a post-publication sign sweep");
+  assert.doesNotMatch(topologySchedule,
+    /markPublishedSupportRows|scatterCanonicalRowDirectory|validateRowDirectory/,
+    "the O(1) identity authority must not be re-sorted into a duplicate diagnostic directory");
   assert.doesNotMatch(topologySchedule, /sortUniqueCatalogSupport|sortUniqueEndpointSupport|sortValidateRowDirectory/,
     "the retired single-workgroup radix schedule must not survive");
 });
@@ -425,7 +428,7 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
   const topology = source.slice(source.indexOf('case"topology-build"'),
     source.indexOf('case"transition-adjacency"'));
   assert.match(topology,
-    /run\("prepare"[\s\S]*run\("clearSupportIdentityMarks"[\s\S]*run\("buildTopologyDelta"[\s\S]*run\("emitCatalogSupport1"[\s\S]*run\("markSupport1"[\s\S]*run\("finalizeSupport1"[\s\S]*run\("scatterSupport1"[\s\S]*run\("emitCatalogSupport2"[\s\S]*run\("markSupport2"[\s\S]*run\("scatterSupport2"[\s\S]*run\("emitCatalogSupport3"[\s\S]*run\("markSupport3"[\s\S]*run\("scatterSupport3"[\s\S]*run\("emitEndpointSupport4"[\s\S]*run\("markSupport4"[\s\S]*run\("scatterSupport4"[\s\S]*run\("markPublishedSupportRows"[\s\S]*run\("scatterCanonicalRowDirectory"[\s\S]*run\("validateRowDirectory"[\s\S]*run\("classifyRowSigns"/);
+    /run\("prepare"[\s\S]*run\("clearSupportIdentityMarks"[\s\S]*run\("buildTopologyDelta"[\s\S]*run\("emitCatalogSupport1"[\s\S]*run\("markSupport1"[\s\S]*run\("finalizeSupport1"[\s\S]*run\("scatterSupport1"[\s\S]*run\("emitCatalogSupport2"[\s\S]*run\("markSupport2"[\s\S]*run\("scatterSupport2"[\s\S]*run\("emitCatalogSupport3"[\s\S]*run\("markSupport3"[\s\S]*run\("scatterSupport3"[\s\S]*run\("emitEndpointSupport4"[\s\S]*run\("markSupport4"[\s\S]*run\("scatterSupport4"/);
   assert.doesNotMatch(topology,
     /sortUniqueCatalogSupport|sortUniqueEndpointSupport|sortValidateRowDirectory/);
   assert.match(wgslFunction("findSiteInCount"), /while\(low<high\).*powerKeyLess/s,
@@ -438,7 +441,7 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
   assert.match(prepare, /control\.reserved0=INVALID/,
     "the packed producer-failure diagnostic must begin at the invalid sentinel");
   assert.match(prepare,
-    /firstFaceEmissionFailure,INVALID.*firstPhiFailure,INVALID.*firstClosestPointFailure,INVALID.*firstVectorFailure,INVALID.*firstCptNoOwnerFailure,INVALID.*firstCptSupportOwnerFailure,INVALID.*firstCptNoSimplexFailure,INVALID.*firstCptMissingVertexFailure,INVALID/s,
+    /firstFaceEmissionFailure=INVALID.*firstPhiFailure=INVALID.*firstClosestPointFailure=INVALID.*firstVectorFailure=INVALID.*firstCptNoOwnerFailure=INVALID.*firstCptSupportOwnerFailure=INVALID.*firstCptNoSimplexFailure=INVALID.*firstCptMissingVertexFailure=INVALID/s,
     "every stable stage/cause diagnostic starts from the invalid sentinel each generation");
   assert.match(prepare,
     /rowDirectory\[candidateState\]=core;rowDirectory\[candidateState\+1u\]=core;rowDirectory\[candidateState\+2u\]=core;rowDirectory\[candidateState\+3u\]=0u/,
@@ -455,9 +458,11 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
   const build = wgslFunction("buildFaceBandTopologyDelta");
   assert.match(build, /@builtin\(global_invocation_id\)g.*letband=g\.x.*band>=core/s,
     "the immutable power prefix is copied row-parallel rather than by a singleton loop");
+  assert.match(build, /ROW_COARSE\|ROW_CORE\|coarseEntrySignFlag\(band\)/,
+    "core rows inherit their coarse sign while the exact coarse entry is already resident");
   const emit = wgslFunction("emitCatalogNeighborhood");
   assert.match(emit,
-    /for\(varslot=0u;slot<MAX_GUARDS;slot\+=1u\).*emitRegularFaceEndpointSupport\(row,base\).*emitUniformCatalogSupport\(row,base\).*emitDelaunayCatalogSupport\(row,base,header,metric\.y\)/s,
+    /for\(varslot=0u;slot<MAX_GUARDS;slot\+=1u\).*emitRegularFaceEndpointSupport\(row,base,&ownerCache\).*emitUniformCatalogSupport\(row,base,&ownerCache\).*emitDelaunayCatalogSupport\(row,base,header,metric\.y,&ownerCache\)/s,
     "each source emits one fixed 24-endpoint plus 36-catalog request record");
   assert.match(emit,
     /letsupport2End=select\(support1End,rowDirectory\[state\+2u\].*letsupport3End=select\(support2End,rowDirectory\[state\+3u\].*support2End,tier==4u.*support3End,tier==4u/s,
@@ -470,12 +475,12 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
     "the incomplete endpoint-only S3 closure and its narrower candidate stride stay deleted");
   const mark = wgslFunction("markSupportSource", octreeFaceBandSupportScatterWGSL);
   assert.match(mark,
-    /source\*MAX_GUARDS.*slot<MAX_GUARDS.*identityRank\(cellKey,value\.size\).*alreadyPublished\(cellKey,value\.size\).*atomicStore\(&supportScratch\[rank\],1u\)/s,
-    "every tier atomically marks the collision-free identity of its complete fixed-fanout request stream");
+    /source\*MAX_GUARDS.*slot<MAX_GUARDS.*identityRank\(cellKey,value\.size\).*alreadyPublished\(cellKey,value\.size\).*atomicOr\(&supportScratch\[word\],1u<<\(rank&31u\)\)/s,
+    "every tier atomically sets the packed collision-free identity of its complete fixed-fanout request stream");
   const blockScan = wgslFunction("scanSupportIdentityBlocks", octreeFaceBandSupportScatterWGSL);
   assert.match(blockScan,
-    /workgroup_size\(256\).*scanValues\[lane\]=value.*offset<256u.*prefixBase\(\)\+rank.*blockTotalBase\(\)\+wid\.x/s,
-    "support identity marks are scanned in parallel 256-entry blocks");
+    /countOneBits\(atomicLoad\(&supportScratch\[word\]\)\).*scanValues\[lane\]=value.*offset<256u.*prefixBase\(\)\+word.*blockTotalBase\(\)\+wid\.x/s,
+    "packed support identity marks are popcount-scanned in parallel 256-word blocks");
   const prefix = wgslFunction("prefixSupportIdentityBlocks", octreeFaceBandSupportScatterWGSL);
   assert.match(prefix,
     /laneBlockRange\(lane\).*localTotal.*scanValues\[lane\].*blockTotalBase\(\)\+blockCount\(\)/s,
@@ -484,10 +489,13 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
   assert.match(finalize,
     /tier==1u\).*state\+1u.*tier==2u\).*state\+2u.*tier==3u\).*state\+3u.*controlWords\[2u\]=end/s,
     "the candidate publishes distinct S1, S2, S3-node, and terminal endpoint prefixes");
-  const scatter = wgslFunction("scatterTier", octreeFaceBandSupportScatterWGSL);
+  const scatter = wgslFunction("scatterIdentity", octreeFaceBandSupportScatterWGSL);
   assert.match(scatter,
-    /rank\/6u.*rank%6u.*tierFlag\(tier\).*committedRowOfIdentity.*rowDirectory\[identity\]=band\+1u/s,
-    "canonical identity rank deterministically scatters each unique row and retains prior-row linkage");
+    /rank\/6u.*rank%6u.*committedRowOfIdentity.*tierFlag\(tier\)\|inheritedSignFlag\(cellKey,size\).*rowDirectory\[identity\]=band\+1u/s,
+    "canonical identity rank scatters each unique row, inherits the published coarse sign, and retains prior-row linkage");
+  assert.match(wgslFunction("scatterTier", octreeFaceBandSupportScatterWGSL),
+    /countTrailingZeros\(marked\).*scatterIdentity\(word\*32u\+bit,tier,position\).*marked&=marked-1u/s,
+    "set bits publish in ascending canonical identity order without scanning absent identities");
   assert.doesNotMatch(octreeFaceBandWGSL,
     /addCurrentSupportRing|retirePriorSupportRing|topologyRingProbe|retireSupportIdentity/,
     "the serial geometric one-ring/carry implementation and its backing reference counts stay deleted");
@@ -500,10 +508,8 @@ test("topology publishes three exact catalog-closed anchor tiers plus terminal e
     "the paper's regular-face graph closes six unit endpoints or exact 2:1 face quadrants");
   assert.match(faceEndpoints, /writeSupportCandidate\(base,request,candidate\)/,
     "regular-face endpoints join the same exact fixed-fanout identity stream");
-  const directory = wgslFunction("scatterCanonicalRowDirectory", octreeFaceBandSupportScatterWGSL);
-  assert.match(directory,
-    /position=atomicLoad.*cellKey=rank\/6u.*size=1u<<\(rank%6u\).*rowDirectory\[position\*2u\]=cellKey.*rowDirectory\[position\*2u\+1u\]=row/s,
-    "the same cell-major, size-minor identity rank directly publishes the canonical directory");
+  assert.doesNotMatch(octreeFaceBandSupportScatterWGSL, /scatterCanonicalRowDirectory/,
+    "the duplicate canonical directory rebuild must not retain shader code");
   assert.match(wgslFunction("validateFaceBandRowDirectoryIndex"),
     /rowIdentityLess\(rowDirectory\[\(index-1u\)\*2u\],rows\[prior\]\.size,key,rows\[row\]\.size\)/,
     "duplicate and unsorted exact (cell,size) row identities fail closed");
@@ -740,9 +746,10 @@ test("factor-4 GPU face band is compact, bounded, and has no fine velocity chann
     )));
   assert.equal(plan.catalogSupportCandidateBytes, plan.catalogSupportCandidateCapacity * 8);
   const identityCount = 24 * 18 * 16 * 6;
+  const identityWordCount = Math.ceil(identityCount / 32);
   assert.equal(plan.catalogSupportScratchBytes, Math.max(
     plan.catalogSupportCandidateBytes,
-    (identityCount * 2 + Math.ceil(identityCount / 256) + 1) * 4,
+    (identityWordCount * 2 + Math.ceil(identityWordCount / 256) + 1) * 4,
   ), "support scratch covers parallel marks, local prefixes, block totals, and later face repair");
   assert.equal(plan.transientPowerRowBytes,
     (plan.rowCapacity + 1) * OCTREE_FACE_BAND_TRANSIENT_ROW_BYTES);
@@ -1791,7 +1798,7 @@ test("catalog adjacency resolves at stable row ids within the portable storage l
   assert.match(topology, /run\("buildTopologyDelta".*0,pass,240\)/,
     "the core copy consumes the exact indirect row count");
   assert.deepEqual(wgslReachableBindings("buildFaceBandTopologyDelta"),
-    [0, 4, 5, 6, 7, 26, 61]);
+    [0, 4, 5, 6, 7, 25, 26, 61]);
   assert.deepEqual(encoded.get("emitCatalogSupport1"),
     [0, 5, 6, 7, 26, 28, 29, 30, 33, 34, 66]);
   assert.deepEqual(encoded.get("emitCatalogSupport2"), encoded.get("emitCatalogSupport1"));

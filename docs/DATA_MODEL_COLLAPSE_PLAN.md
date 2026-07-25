@@ -26,6 +26,13 @@ surface gates:
   than the former 78,643,200-byte state arena).
 - **D2, geometry slice:** power-face publication materializes each physical
   polygon once and reuses it for area, centroid, and quadrature derivation.
+- **D1, Section-5 support slice:** support-row membership is a packed
+  `(cell, level)` bitset with popcount prefix and canonical set-bit scatter.
+  The duplicate canonical-directory rebuild and its validation sweep are
+  deleted; support rows inherit coarse sign authority during publication.
+- **D2, power-face delta slice:** exact affected rows count, prefix, and
+  publish power-face geometry in parallel. On the M1 Max mini dam this reduces
+  affected face publication from about 8.45 ms to 3.08 ms.
 - **Work reduction:** staged Galerkin CG uses a workgroup-uniform active flag
   to stop its fixed encoded tail after convergence; no extra stage, buffer,
   or dispatch was introduced.

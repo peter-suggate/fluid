@@ -228,7 +228,7 @@ test("cold dam-UI frontier candidates cover every finest cell exactly once", () 
   assert.match(octreeProjectionShader,
     /candidateLaneBase[\s\S]*for\(var octant=0u;octant<8u;octant\+=1u\)/,
     "each 4³ candidate lane must enumerate its complete 2³ sub-block");
-  assert.match(octreeProjectionShader, /if\(all\(base<dims\(\)\)\)\{cell=frontierCandidateAt\(base\+offset\);\}/,
+  assert.match(octreeProjectionShader, /if\(all\(base<dims\(\)\)\)\{cell=frontierCandidateAt\(base\+offset,deltaMode\);\}/,
     "rounded indirect workgroups must reject the invalid lane base before octant addition can wrap");
 });
 
@@ -313,6 +313,18 @@ test("compact scan and coarse-task scratch follows pressure and active-tile boun
   assert.match(octreeProjectionShader,
     /let cellMatches=old\.cell==cell;[\s\S]*let sizeMatches=old\.size==owner\.size;[\s\S]*let originMatches=isOrigin[\s\S]*let exact=cellMatches&&sizeMatches&&originMatches/,
     "carried identity must be exact (cell, level), never positional or origin-only");
+  assert.match(octreeProjectionShader,
+    /fn previousFrontierHasExactIdentity[\s\S]*previousLowerBound[\s\S]*leafHeaders\[old\]\.cell==cell[\s\S]*fn frontierCandidateAt\(gid:vec3u,additionsOnly:bool\)[\s\S]*additionsOnly&&previousFrontierHasExactIdentity/,
+    "recurring candidate generation must filter exact previous identities before sorting");
+  assert.match(octreeProjectionShader,
+    /let keep=exact&&wet;[\s\S]*select\(0u,32u,dirty\)/,
+    "dirty exact identities must retain previous sort order while remaining affected");
+  assert.match(octreeProjectionShader,
+    /let dirty=output!=slot\|\|\(compaction\[rowDeltaFlagsBase\(\)\+slot\]&32u\)!=0u;[\s\S]*ROW_DELTA_AFFECTED/,
+    "temporally carried dirty rows must still enter downstream affected-row work");
+  assert.match(octreeProjectionShader,
+    /let carried=frontier\[5\];[\s\S]*let added=candidateCount;[\s\S]*rowDeltaReduce\[0\]\.x==0u/,
+    "the recurring merge must count every sorted candidate as a genuine addition");
   assert.match(octreeProjectionShader,
     /fn sortFrontierCandidates\([\s\S]*frontierSortStageCount\(count\)[\s\S]*candidateSortStore\(/,
     "large dirty candidate sets retain deterministic parallel merge sorting");

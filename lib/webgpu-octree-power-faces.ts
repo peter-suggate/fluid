@@ -383,6 +383,8 @@ export class WebGPUOctreePowerFaces {
   private readonly params: GPUBuffer;
   private readonly preparePipeline: GPUComputePipeline;
   private readonly buildAffectedRowsPipeline: GPUComputePipeline;
+  private readonly prefixAffectedRowsPipeline: GPUComputePipeline;
+  private readonly publishAffectedRowsPipeline: GPUComputePipeline;
   private readonly compactIdentityDeltaPipeline: GPUComputePipeline;
   private readonly mergeIdentityDeltaPipeline: GPUComputePipeline;
   private readonly prepareCandidateCSRPipeline: GPUComputePipeline;
@@ -466,7 +468,9 @@ export class WebGPUOctreePowerFaces {
       label, layout: "auto", compute: { module: shaderModule, entryPoint },
     });
     this.preparePipeline = pipeline("Prepare octree power faces", "preparePowerFaces");
-    this.buildAffectedRowsPipeline = pipeline("Build affected octree power-face rows in parallel", "buildAffectedPowerFaceRows");
+    this.buildAffectedRowsPipeline = pipeline("Count affected octree power-face rows in parallel", "countAffectedPowerFaceRows");
+    this.prefixAffectedRowsPipeline = pipeline("Prefix affected octree power-face rows", "prefixAffectedPowerFaceRows");
+    this.publishAffectedRowsPipeline = pipeline("Publish affected octree power-face rows in parallel", "publishAffectedPowerFaceRows");
     this.compactIdentityDeltaPipeline = pipeline("Compact octree power-face identity delta in parallel", "compactPowerFaceIdentityDelta");
     this.mergeIdentityDeltaPipeline = pipeline("Merge octree power-face identity delta in parallel", "mergePowerFaceIdentityDelta");
     this.prepareCandidateCSRPipeline = pipeline("Prepare octree power-face candidate CSR in parallel", "preparePowerFaceCandidateCSR");
@@ -600,16 +604,33 @@ export class WebGPUOctreePowerFaces {
       pass.setPipeline(pipeline); pass.setBindGroup(0, group(pipeline, bindings));
       pass.dispatchWorkgroupsIndirect(this.workDispatch, offset);
     };
-    run("Prepare exact affected power-face publication", this.preparePipeline, 1,
-      [params, control, liveFaceDispatch, diagnostics, rowDelta, committedControl, deltaStats]);
-    run("Build affected power-face rows in parallel", this.buildAffectedRowsPipeline, 1,
-      [params, headers, metrics, entries, catalog, rows, control, rowDelta, diagnostics, deltaFaceScratch]);
+    broker.copyBufferToBuffer(options.rowDelta.rows, (options.rowDelta.controlOffsetWords + 12) * 4,
+      this.workDispatch, 0, 12);
+    {
+      const pass = broker.compute({ label: "Prepare and build exact affected power-face publication" });
+      pass.setPipeline(this.preparePipeline);
+      pass.setBindGroup(0, group(this.preparePipeline,
+        [params, control, diagnostics, rowDelta, committedControl]));
+      pass.dispatchWorkgroups(1);
+      pass.setPipeline(this.buildAffectedRowsPipeline);
+      pass.setBindGroup(0, group(this.buildAffectedRowsPipeline,
+        [params, headers, metrics, entries, catalog, rows, control, rowDelta, diagnostics]));
+      pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
+      pass.setPipeline(this.prefixAffectedRowsPipeline);
+      pass.setBindGroup(0, group(this.prefixAffectedRowsPipeline,
+        [params, rows, control, rowDelta, diagnostics, deltaFaceScratch]));
+      pass.dispatchWorkgroups(1);
+      pass.setPipeline(this.publishAffectedRowsPipeline);
+      pass.setBindGroup(0, group(this.publishAffectedRowsPipeline,
+        [params, headers, metrics, entries, catalog, rows, control, rowDelta, diagnostics, deltaFaceScratch]));
+      pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
+    }
     run("Compact immutable power-face identity delta in parallel", this.compactIdentityDeltaPipeline, 1,
       [params, control, diagnostics, committedFaces, rowDelta, committedControl, deltaStats,
         deltaOldFaceScratch, deltaSources, deltaFaceScratch]);
     run("Merge immutable power-face identity delta in parallel", this.mergeIdentityDeltaPipeline, 1,
       [params, faces, control, diagnostics, deltaStats, boundaryQueries,
-        deltaOldFaceScratch, deltaSources, deltaFaceScratch]);
+        deltaOldFaceScratch, deltaSources, deltaFaceScratch, liveFaceDispatch]);
     broker.fence("power face CSR work dispatch publication");
     broker.updateIndirectBuffer(
       this.liveFaceDispatch,
@@ -1065,30 +1086,36 @@ fn stagePayloadSource(output:u32,sourcePlusOne:u32)->bool{
     rowDiagnostics[row]=RowDiagnostic(0u,INVALID,INVALID,0u);
   }
   workgroupBarrier();
-  if(lane!=0u){return;}
   let requested=params.dimensionsRowCount.w;
-  let lookupSteps=select(0u,32u-countLeadingZeros(requested),requested>0u);
-  control=Control(requested,0u,0u,0u,INVALID,0u,0u,params.capacitiesGeneration.w,
-    0u,0u,lookupSteps,0u,INVALID,INVALID,0u,INVALID);
-  if(arrayLength(&deltaStats)>=4u){deltaStats[0]=0u;deltaStats[1]=0u;deltaStats[2]=0u;deltaStats[3]=0u;}
-  if(arrayLength(&liveFaceDispatch)>=6u){
-    for(var slot=0u;slot<4u;slot+=1u){liveFaceDispatch[slot*3u]=0u;liveFaceDispatch[slot*3u+1u]=1u;liveFaceDispatch[slot*3u+2u]=1u;}
-    let rowGroups=(requested+63u)/64u;liveFaceDispatch[6]=rowGroups;liveFaceDispatch[7]=1u;
-    let blockGroups=(requested+255u)/256u;liveFaceDispatch[9]=blockGroups;liveFaceDispatch[10]=1u;
+  var invalid=select(1u,0u,deltaAccepted(requested));
+  if(invalid==0u){
+    let base=params.delta.x;let previous=rowDelta[base+1u];
+    let dirty=rowDelta[base+5u];let affected=rowDelta[base+6u];
+    if(previous>0u&&(committedControl.valid!=FACE_VALID||committedControl.flags!=0u
+      ||committedControl.rowCount!=previous)){invalid=1u;}
+    for(var item=lane;item<affected;item+=256u){
+      let row=affectedRow(item);
+      var prior=INVALID;if(item>0u){prior=affectedRow(item-1u);}
+      if(row>=requested||(item>0u&&row<=prior)||!rowAffectedFlag(row)){invalid=1u;}
+    }
+    for(var item=lane;item<dirty;item+=256u){
+      let row=rowDelta[params.phiPolicy.w+item];
+      var prior=INVALID;if(item>0u){prior=rowDelta[params.phiPolicy.w+item-1u];}
+      if(row>=requested||(item>0u&&row<=prior)||!rowAffected(row)){invalid=1u;}
+    }
   }
-  var accepted=deltaAccepted(requested);
-  if(accepted){
-    let base=params.delta.x;let previous=rowDelta[base+1u];let dirty=rowDelta[base+5u];let affected=rowDelta[base+6u];
-    if(previous>0u&&(committedControl.valid!=FACE_VALID||committedControl.flags!=0u||committedControl.rowCount!=previous)){accepted=false;}
-    var prior=INVALID;
-    for(var item=0u;item<affected;item+=1u){let row=affectedRow(item);
-      if(row>=requested||(item>0u&&row<=prior)||!rowAffectedFlag(row)){accepted=false;break;}prior=row;}
-    prior=INVALID;
-    for(var item=0u;item<dirty;item+=1u){let row=rowDelta[params.phiPolicy.w+item];
-      if(row>=requested||(item>0u&&row<=prior)||!rowAffected(row)){accepted=false;break;}prior=row;}
+  parallelFlags[lane]=invalid;workgroupBarrier();
+  for(var stride=128u;stride>0u;stride/=2u){
+    if(lane<stride){parallelFlags[lane]|=parallelFlags[lane+stride];}
+    workgroupBarrier();
   }
-  if(!accepted){control.flags=CAPACITY;control.firstInvalid=0u;control.invalidCount=1u;
-    if(arrayLength(&liveFaceDispatch)>=6u){liveFaceDispatch[0]=0u;liveFaceDispatch[3]=0u;}}
+  if(lane==0u){
+    let lookupSteps=select(0u,32u-countLeadingZeros(requested),requested>0u);
+    control=Control(requested,0u,0u,0u,INVALID,0u,0u,params.capacitiesGeneration.w,
+      0u,0u,lookupSteps,0u,INVALID,INVALID,0u,INVALID);
+    if(parallelFlags[0]!=0u){control.flags=CAPACITY;control.firstInvalid=0u;control.invalidCount=1u;}
+  }
+  storageBarrier();workgroupBarrier();
 }
 struct AffectedFaceResult { face:PowerFaceRecord, emit:u32 }
 fn affectedFace(row:u32,slot:u32)->AffectedFaceResult{
@@ -1120,24 +1147,57 @@ fn affectedFace(row:u32,slot:u32)->AffectedFaceResult{
   return AffectedFaceResult(PowerFaceRecord(row,neighbor,(slot&0xffffu)|((metric.transformAndFlags&63u)<<16u),
     flags,0.0,geometry.area,geometry.inverseDistance,1.0),1u);
 }
-@compute @workgroup_size(256) fn buildAffectedPowerFaceRows(@builtin(local_invocation_index) lane:u32){
+@compute @workgroup_size(64) fn countAffectedPowerFaceRows(
+  @builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32,
+  @builtin(num_workgroups) workgroups:vec3u){
+  if(control.flags!=0u){return;}
+  let item=(wid.x+wid.y*workgroups.x)*64u+lane;let count=affectedCount();if(item>=count){return;}
+  let row=affectedRow(item);var emitted=0u;
+  if(row<arrayLength(&rows)&&row<arrayLength(&metrics)){
+    let metric=metrics[row];
+    if((metric.transformAndFlags&TOPOLOGY_VALID)!=0u&&metric.topologyCode<arrayLength(&entries)){
+      let entry=entries[metric.topologyCode];
+      for(var slot=0u;slot<entry.faceCount&&slot<${OCTREE_POWER_FACE_ROW_MAX}u;slot+=1u){
+        emitted+=affectedFace(row,slot).emit;
+      }
+    }else{fail(row,INVALID_METRIC);}
+    rows[row]=RowWork(emitted,0u,0u,0u);
+  }else{
+    let requested=params.dimensionsRowCount.w;
+    fail(min(row,select(0u,requested-1u,requested>0u)),CAPACITY);
+  }
+}
+@compute @workgroup_size(256) fn prefixAffectedPowerFaceRows(@builtin(local_invocation_index) lane:u32){
   if(uniformParallelEnable(lane,control.flags==0u)==0u){return;}
   let count=uniformParallelInputA(lane,affectedCount());
   if(lane==0u){parallelBase=0u;}workgroupBarrier();
-  for(var chunk=0u;chunk<count;chunk+=256u){let item=chunk+lane;var emitted=0u;var row=INVALID;
-    if(item<count){row=affectedRow(item);if(row<arrayLength(&rows)&&row<arrayLength(&metrics)){let metric=metrics[row];
-        if((metric.transformAndFlags&TOPOLOGY_VALID)!=0u&&metric.topologyCode<arrayLength(&entries)){
-          let entry=entries[metric.topologyCode];for(var slot=0u;slot<entry.faceCount&&slot<${OCTREE_POWER_FACE_ROW_MAX}u;slot+=1u){emitted+=affectedFace(row,slot).emit;}}
-        else{fail(row,INVALID_METRIC);}}else{fail(min(row,params.dimensionsRowCount.w-1u),CAPACITY);}}
+  for(var chunk=0u;chunk<count;chunk+=256u){
+    let item=chunk+lane;var emitted=0u;var row=INVALID;
+    if(item<count){row=affectedRow(item);if(row<arrayLength(&rows)){emitted=rows[row].faceCount;}}
     let localOffset=parallelInclusiveScan(lane,emitted);let chunkItems=min(256u,count-chunk);
-    if(lane==0u){parallelChunkBase=parallelBase;parallelBase+=parallelScan[chunkItems-1u];}workgroupBarrier();
-    if(item<count&&row<arrayLength(&rows)){rows[row]=RowWork(emitted,0u,parallelChunkBase+localOffset,0u);
-      if(parallelBase<=params.capacitiesGeneration.y&&parallelBase<=arrayLength(&deltaFaces)){var output=parallelChunkBase+localOffset;
-        let entry=entries[metrics[row].topologyCode];for(var slot=0u;slot<entry.faceCount&&slot<${OCTREE_POWER_FACE_ROW_MAX}u;slot+=1u){
-          let result=affectedFace(row,slot);if(result.emit!=0u){deltaFaces[output]=result.face;output+=1u;}}}}
+    if(lane==0u){parallelChunkBase=parallelBase;parallelBase+=parallelScan[chunkItems-1u];}
+    workgroupBarrier();
+    if(item<count&&row<arrayLength(&rows)){rows[row].faceOffset=parallelChunkBase+localOffset;}
     workgroupBarrier();
   }
-  if(lane==0u){control.faceCount=parallelBase;if(parallelBase>params.capacitiesGeneration.y||parallelBase>arrayLength(&deltaFaces)){fail(0u,CAPACITY);}}
+  if(lane==0u){
+    control.faceCount=parallelBase;
+    if(parallelBase>params.capacitiesGeneration.y||parallelBase>arrayLength(&deltaFaces)){fail(0u,CAPACITY);}
+  }
+  storageBarrier();workgroupBarrier();
+  reduceRowFailuresParallel(lane,min(params.dimensionsRowCount.w,arrayLength(&rowDiagnostics)));
+}
+@compute @workgroup_size(64) fn publishAffectedPowerFaceRows(
+  @builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32,
+  @builtin(num_workgroups) workgroups:vec3u){
+  if(control.flags!=0u){return;}
+  let item=(wid.x+wid.y*workgroups.x)*64u+lane;let count=affectedCount();if(item>=count){return;}
+  let row=affectedRow(item);if(row>=arrayLength(&rows)||row>=arrayLength(&metrics)){return;}
+  var output=rows[row].faceOffset;let entry=entries[metrics[row].topologyCode];
+  for(var slot=0u;slot<entry.faceCount&&slot<${OCTREE_POWER_FACE_ROW_MAX}u;slot+=1u){
+    let result=affectedFace(row,slot);
+    if(result.emit!=0u){if(output<arrayLength(&deltaFaces)){deltaFaces[output]=result.face;}output+=1u;}
+  }
 }
 fn mapOldFace(source:u32)->AffectedFaceResult{
   var face=committedFaces[source];let oldNegative=oldToNew(face.negativeRow);if(oldNegative==INVALID){return AffectedFaceResult(face,0u);}
@@ -1156,7 +1216,9 @@ fn remappedOldFace(source:u32,candidateCount:u32)->AffectedFaceResult{
   return AffectedFaceResult(face,select(0u,1u,!touched));
 }
 @compute @workgroup_size(256) fn compactPowerFaceIdentityDelta(@builtin(local_invocation_index) lane:u32){
-  if(uniformParallelEnable(lane,arrayLength(&deltaStats)>=4u)==0u){return;}storageBarrier();workgroupBarrier();
+  if(uniformParallelEnable(lane,arrayLength(&deltaStats)>=4u)==0u){return;}
+  if(lane==0u){deltaStats[0]=0u;deltaStats[1]=0u;deltaStats[2]=0u;deltaStats[3]=0u;}
+  storageBarrier();workgroupBarrier();
   reduceRowFailuresParallel(lane,min(params.dimensionsRowCount.w,arrayLength(&rowDiagnostics)));
   if(uniformParallelEnable(lane,control.flags==0u)==0u){return;}
   let candidateCount=uniformParallelInputA(lane,control.faceCount);
@@ -1210,6 +1272,12 @@ fn remappedOldFace(source:u32,candidateCount:u32)->AffectedFaceResult{
   if(lane==0u){deltaStats[0]=survivorCount;deltaStats[1]=exactCount;deltaStats[2]=previousCount;deltaStats[3]=FACE_DELTA_COMPACT_VALID;}
 }
 @compute @workgroup_size(256) fn mergePowerFaceIdentityDelta(@builtin(local_invocation_index) lane:u32){
+  if(lane==0u&&arrayLength(&liveFaceDispatch)>=6u){
+    for(var slot=0u;slot<4u;slot+=1u){liveFaceDispatch[slot*3u]=0u;liveFaceDispatch[slot*3u+1u]=1u;liveFaceDispatch[slot*3u+2u]=1u;}
+    let requested=params.dimensionsRowCount.w;
+    let rowGroups=(requested+63u)/64u;liveFaceDispatch[6]=rowGroups;liveFaceDispatch[7]=1u;
+    let blockGroups=(requested+255u)/256u;liveFaceDispatch[9]=blockGroups;liveFaceDispatch[10]=1u;
+  }
   if(uniformParallelEnable(lane,control.flags==0u&&arrayLength(&deltaStats)>=4u&&deltaStats[3]==FACE_DELTA_COMPACT_VALID)==0u){return;}
   let candidateCount=uniformParallelInputA(lane,control.faceCount);
   let survivorCount=uniformParallelInputB(lane,deltaStats[0]);

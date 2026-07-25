@@ -445,7 +445,9 @@ test("power-face WGSL builds, merges, and publishes CSR in parallel without atom
     assert.ok(reachableStorageBindings(octreePowerFaceShader, entryPoint).length <= 10,
       `${entryPoint} must fit the portable WebGPU limit of ten storage buffers`);
   }
-  assert.match(octreePowerFaceShader, /@compute @workgroup_size\(256\) fn buildAffectedPowerFaceRows/);
+  assert.match(octreePowerFaceShader, /@compute @workgroup_size\(64\) fn countAffectedPowerFaceRows/);
+  assert.match(octreePowerFaceShader, /@compute @workgroup_size\(256\) fn prefixAffectedPowerFaceRows/);
+  assert.match(octreePowerFaceShader, /@compute @workgroup_size\(64\) fn publishAffectedPowerFaceRows/);
   assert.match(octreePowerFaceShader, /@compute @workgroup_size\(256\) fn compactPowerFaceIdentityDelta/);
   assert.match(octreePowerFaceShader, /@compute @workgroup_size\(256\) fn mergePowerFaceIdentityDelta/);
   assert.match(octreePowerFaceShader, /@compute @workgroup_size\(64\) fn preparePowerFaceCandidateCSR/);
@@ -461,12 +463,15 @@ test("power-face WGSL builds, merges, and publishes CSR in parallel without atom
     /fn uniformParallelEnable[\s\S]*workgroupUniformLoad\(&parallelEnabled\)/,
     "storage-backed transaction state must be broadcast uniformly before any barrier-containing stage");
   for (const entryPoint of [
-    "buildAffectedPowerFaceRows", "compactPowerFaceIdentityDelta", "mergePowerFaceIdentityDelta",
+    "prefixAffectedPowerFaceRows", "compactPowerFaceIdentityDelta",
   ]) {
     assert.match(octreePowerFaceShader,
       new RegExp(`fn ${entryPoint}\\([\\s\\S]*?\\{\\s*if\\(uniformParallelEnable\\(lane,`),
       `${entryPoint} must make its enable decision workgroup-uniform`);
   }
+  assert.match(octreePowerFaceShader,
+    /fn mergePowerFaceIdentityDelta\([\s\S]*?liveFaceDispatch[\s\S]*?if\(uniformParallelEnable\(lane,/,
+    "merge must publish the invalid-path indirect defaults before its workgroup-uniform enable decision");
   for (const entryPoint of ["scanPowerFaceCandidateCSR", "prefixPowerFaceCandidateCSR"]) {
     assert.match(octreePowerFaceShader,
       new RegExp(`fn ${entryPoint}\\([\\s\\S]*?\\{\\s*let enabled=uniformParallelEnable\\(lane,control\\.flags==0u\\);[\\s\\S]*?parallelInclusiveScanPair`),
@@ -476,8 +481,8 @@ test("power-face WGSL builds, merges, and publishes CSR in parallel without atom
     /fn (?:buildAffectedPowerFaces|mergePowerFaceDelta|buildPowerFaceCandidateCSR)\b/,
     "the three deleted singleton transactions must not retain shader backing code");
   assert.match(powerFaceSource.replace(/\s+/g, ""),
-    /run\("Buildaffectedpower-facerowsinparallel",this\.buildAffectedRowsPipeline,1,\[params,headers,metrics,entries,catalog,rows,control,rowDelta,diagnostics,deltaFaceScratch\]\)/,
-    "one cooperative workgroup must consume the exact affected-row delta directly");
+    /pass\.dispatchWorkgroupsIndirect\(this\.workDispatch,0\)[\s\S]*pass\.setPipeline\(this\.prefixAffectedRowsPipeline\)[\s\S]*pass\.dispatchWorkgroups\(1\)[\s\S]*pass\.setPipeline\(this\.publishAffectedRowsPipeline\)[\s\S]*pass\.dispatchWorkgroupsIndirect\(this\.workDispatch,0\)/,
+    "affected rows must count and emit across the exact GPU-authored row delta around one deterministic prefix");
   assert.doesNotMatch(powerFaceSource,
     /countAffectedPipeline|scanAffected|addAffected|emitAffected|boundaryQueryScan|boundaryQueryCompact/,
     "the deleted row-scan and cut-face-compaction schedules must not retain host backing code");

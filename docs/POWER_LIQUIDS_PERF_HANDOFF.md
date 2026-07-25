@@ -36,6 +36,41 @@ compute-pass table is again closed. The cache adds two passes and two
 dispatches per advance (50/796 versus 48/794) without allocating another
 arena.
 
+## 2026-07-25 Section-5 rows and power-face publication
+
+The next mini-dam batch reduced the accepted protected-cache lane from roughly
+**67.4 to 62.15 ms/advance** (about **7.8%**) with zero validation errors.
+The final schedule has **792 dispatches in 50 compute passes**.
+
+| Cut | Before | After | Result |
+|---|---:|---:|---:|
+| Affected power-face publication | ~8.45 ms | 3.08 ms | **−5.37 ms, −63.6%** |
+| Section-5 support-row aggregate | ~13.17 ms | 12.85 ms | −0.32 ms |
+| Recurring dispatches | 796 | 792 | −4 |
+
+Power-face geometry is now counted, prefixed, and published row-parallel from
+the exact affected-row delta. The former single-workgroup row walk was the
+dominant cost. Compact/merge semantics and deterministic CSR order remain
+unchanged.
+
+Section-5 support identities now use a packed bitset instead of one `u32` per
+possible `(cell, level)`. Marking uses `atomicOr`, scans popcount 256-word
+blocks, and scatter enumerates set bits in canonical order. The duplicate
+post-publication mark/scan/canonical-directory rebuild and validation launches
+are deleted. Coarse signs are attached while core rows are copied and inherited
+as support rows are scattered, deleting the separate full-row sign sweep.
+
+The wall result also records a profiling lesson: a temporary fence before the
+sign sweep made the next merged pass's ~10 ms occupancy appear under the sign
+label. Removing the sign dispatch merely moved that time to
+`Classify exact Section 5 catalog-adjacency delta`, proving it was attribution,
+not execution, from the sign kernel. Fine timing must fence both sides of a
+kernel before treating a merged pass's leading label as kernel authority.
+
+Regression authority: exact two-step and full **500-step / 2 s** minimal-dam
+gates pass. The long run ends with generation 501, 1,372 power rows, 5,263
+faces, 8,320 incidences, converged MGPCG, and no validation errors.
+
 ## 2026-07-24 implementation log — UI throughput authority
 
 All values below are repeated free-running `benchmark:power-dam-ui` measurements

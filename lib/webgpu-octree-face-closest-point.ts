@@ -773,14 +773,16 @@ export function planOctreeFaceBandGPU(
     throw new RangeError("Face-band catalog scratch cannot stage one repair carrier per face");
   }
   const catalogSupportCandidateBytes = catalogSupportCandidateCapacity * 8;
-  // Support publication uses a collision-free (cell, dyadic-level) identity
-  // plane.  Two dense planes retain the mark and block-local exclusive
-  // prefix; the small tail stores one total per 256-entry block plus the
-  // global total.  The same allocation is reused later by dry-face repair.
+  // Support publication packs its collision-free (cell, dyadic-level)
+  // identity marks into bits. Two word planes retain the marks and
+  // block-local exclusive popcount prefix; the small tail stores one total
+  // per 256-word block plus the global total. The same allocation is reused
+  // later by dry-face repair.
   const supportIdentityCount = domainOwnerCapacity * 6;
-  const supportIdentityBlockCount = Math.ceil(supportIdentityCount / 256);
+  const supportIdentityWordCount = Math.ceil(supportIdentityCount / 32);
+  const supportIdentityBlockCount = Math.ceil(supportIdentityWordCount / 256);
   const catalogSupportScatterBytes =
-    (supportIdentityCount * 2 + supportIdentityBlockCount + 1) * 4;
+    (supportIdentityWordCount * 2 + supportIdentityBlockCount + 1) * 4;
   const catalogSupportScratchBytes = Math.max(
     catalogSupportCandidateBytes,
     catalogSupportScatterBytes,
@@ -1119,7 +1121,6 @@ export class WebGPUOctreeFaceClosestPointExtension {
       markSupport2: supportPipeline("markSupport2"),
       markSupport3: supportPipeline("markSupport3"),
       markSupport4: supportPipeline("markSupport4"),
-      markPublishedSupportRows: supportPipeline("markPublishedSupportRows"),
       scanSupportIdentityBlocks: supportPipeline("scanSupportIdentityBlocks"),
       prefixSupportIdentityBlocks: supportPipeline("prefixSupportIdentityBlocks"),
       finalizeSupport1: supportPipeline("finalizeSupport1"),
@@ -1130,9 +1131,6 @@ export class WebGPUOctreeFaceClosestPointExtension {
       scatterSupport2: supportPipeline("scatterSupport2"),
       scatterSupport3: supportPipeline("scatterSupport3"),
       scatterSupport4: supportPipeline("scatterSupport4"),
-      scatterCanonicalRowDirectory: supportPipeline("scatterCanonicalRowDirectory"),
-      validateRowDirectory: pipeline("validateFaceBandRowDirectory"),
-      classifyRowSigns: pipeline("classifyFaceBandRowSigns"),
       carryFaceTopology: pipeline("carryFaceBandTopology"),
       carryFaceIncidence: pipeline("carryFaceBandIncidence"),
       rebuildIncidence: pipeline("rebuildFaceBandIncidence"),
@@ -1294,20 +1292,24 @@ export class WebGPUOctreeFaceClosestPointExtension {
           input.rowDelta.affectedRowsOffsetWords, 1, input.rowDelta.oldToNewOffsetWords,
           input.rowDelta.dirtyRowsOffsetWords], 17);
         this.device.queue.writeBuffer(this.params, 0, words);
-        computePass("Build exact Section 5 support-row delta", (pass) => {
+        const identityCount = dims[0] * dims[1] * dims[2] * 6;
+        const identityWordWorkgroups = Math.ceil(Math.ceil(identityCount / 32) / 256);
+        computePass("Prepare exact Section 5 support-row delta", (pass) => {
           run("prepare", [[0, this.params], [1, input.fine.params], [2, input.fine.metadata],
             [3, input.fine.worklist], [4, input.powerRowDirectory], [5, this.candidateControl],
             [7, this.candidateRowDirectory], [8, input.fine.flags],
             [9, input.powerVelocityControl], [18, this.indirect],
+            [25, input.coarsePhiDirectory],
             [61, input.rowDelta.rows]], 1, pass);
-          const identityCount = dims[0] * dims[1] * dims[2] * 6;
-          const identityWorkgroups = Math.ceil(identityCount / 256);
           run("clearSupportIdentityMarks", [[0, this.params],
-            [67, this.catalogSupportScratch]], identityWorkgroups, pass);
+            [67, this.catalogSupportScratch]], identityWordWorkgroups, pass);
           run("buildTopologyDelta", [[0, this.params], [4, input.powerRowDirectory],
             [5, this.candidateControl], [6, this.candidateRows],
             [7, this.candidateRowDirectory], [26, input.owners],
+            [25, input.coarsePhiDirectory],
             [61, input.rowDelta.rows]], 0, pass, 240);
+        });
+        computePass("Close exact Section 5 support tier 1", (pass) => {
           run("emitCatalogSupport1", [[0, this.params], [5, this.candidateControl],
             [6, this.candidateRows], [7, this.candidateRowDirectory],
             [26, input.owners],
@@ -1320,7 +1322,7 @@ export class WebGPUOctreeFaceClosestPointExtension {
             [66, this.transientPowerIncidence],
             [67, this.catalogSupportScratch]], 0, pass, 240);
           run("scanSupportIdentityBlocks", [[0, this.params],
-            [67, this.catalogSupportScratch]], identityWorkgroups, pass);
+            [67, this.catalogSupportScratch]], identityWordWorkgroups, pass);
           run("prefixSupportIdentityBlocks", [[0, this.params],
             [67, this.catalogSupportScratch]], 1, pass);
           run("finalizeSupport1", [[0, this.params], [5, this.candidateControl],
@@ -1330,7 +1332,9 @@ export class WebGPUOctreeFaceClosestPointExtension {
             [6, this.candidateRows], [7, this.candidateRowDirectory],
             [13, this.rowDirectoryScratch], [62, this.rows],
             [67, this.catalogSupportScratch], [68, this.rowDirectory]],
-          identityWorkgroups, pass);
+          identityWordWorkgroups, pass);
+        });
+        computePass("Close exact Section 5 support tier 2", (pass) => {
           run("emitCatalogSupport2", [[0, this.params], [5, this.candidateControl],
             [6, this.candidateRows], [7, this.candidateRowDirectory],
             [26, input.owners],
@@ -1343,7 +1347,7 @@ export class WebGPUOctreeFaceClosestPointExtension {
             [66, this.transientPowerIncidence],
             [67, this.catalogSupportScratch]], 0, pass, 252);
           run("scanSupportIdentityBlocks", [[0, this.params],
-            [67, this.catalogSupportScratch]], identityWorkgroups, pass);
+            [67, this.catalogSupportScratch]], identityWordWorkgroups, pass);
           run("prefixSupportIdentityBlocks", [[0, this.params],
             [67, this.catalogSupportScratch]], 1, pass);
           run("finalizeSupport2", [[0, this.params], [5, this.candidateControl],
@@ -1353,7 +1357,9 @@ export class WebGPUOctreeFaceClosestPointExtension {
             [6, this.candidateRows], [7, this.candidateRowDirectory],
             [13, this.rowDirectoryScratch], [62, this.rows],
             [67, this.catalogSupportScratch], [68, this.rowDirectory]],
-          identityWorkgroups, pass);
+          identityWordWorkgroups, pass);
+        });
+        computePass("Close exact Section 5 support tier 3", (pass) => {
           run("emitCatalogSupport3", [[0, this.params], [5, this.candidateControl],
             [6, this.candidateRows], [7, this.candidateRowDirectory],
             [26, input.owners],
@@ -1366,7 +1372,7 @@ export class WebGPUOctreeFaceClosestPointExtension {
             [66, this.transientPowerIncidence],
             [67, this.catalogSupportScratch]], 0, pass, 240);
           run("scanSupportIdentityBlocks", [[0, this.params],
-            [67, this.catalogSupportScratch]], identityWorkgroups, pass);
+            [67, this.catalogSupportScratch]], identityWordWorkgroups, pass);
           run("prefixSupportIdentityBlocks", [[0, this.params],
             [67, this.catalogSupportScratch]], 1, pass);
           run("finalizeSupport3", [[0, this.params], [5, this.candidateControl],
@@ -1376,7 +1382,9 @@ export class WebGPUOctreeFaceClosestPointExtension {
             [6, this.candidateRows], [7, this.candidateRowDirectory],
             [13, this.rowDirectoryScratch], [62, this.rows],
             [67, this.catalogSupportScratch], [68, this.rowDirectory]],
-          identityWorkgroups, pass);
+          identityWordWorkgroups, pass);
+        });
+        computePass("Close exact Section 5 endpoint support tier 4", (pass) => {
           run("emitEndpointSupport4", [[0, this.params], [5, this.candidateControl],
             [6, this.candidateRows], [7, this.candidateRowDirectory],
             [26, input.owners],
@@ -1389,7 +1397,7 @@ export class WebGPUOctreeFaceClosestPointExtension {
             [66, this.transientPowerIncidence],
             [67, this.catalogSupportScratch]], 0, pass, 252);
           run("scanSupportIdentityBlocks", [[0, this.params],
-            [67, this.catalogSupportScratch]], identityWorkgroups, pass);
+            [67, this.catalogSupportScratch]], identityWordWorkgroups, pass);
           run("prefixSupportIdentityBlocks", [[0, this.params],
             [67, this.catalogSupportScratch]], 1, pass);
           run("finalizeSupport4", [[0, this.params], [5, this.candidateControl],
@@ -1399,23 +1407,7 @@ export class WebGPUOctreeFaceClosestPointExtension {
             [6, this.candidateRows], [7, this.candidateRowDirectory],
             [13, this.rowDirectoryScratch], [62, this.rows],
             [67, this.catalogSupportScratch], [68, this.rowDirectory]],
-          identityWorkgroups, pass);
-          run("markPublishedSupportRows", [[0, this.params],
-            [5, this.candidateControl], [6, this.candidateRows],
-            [67, this.catalogSupportScratch]], 0, pass, 12);
-          run("scanSupportIdentityBlocks", [[0, this.params],
-            [67, this.catalogSupportScratch]], identityWorkgroups, pass);
-          run("prefixSupportIdentityBlocks", [[0, this.params],
-            [67, this.catalogSupportScratch]], 1, pass);
-          run("scatterCanonicalRowDirectory", [[0, this.params],
-            [5, this.candidateControl], [6, this.candidateRows],
-            [7, this.candidateRowDirectory], [67, this.catalogSupportScratch]],
-          identityWorkgroups, pass);
-          run("validateRowDirectory", [[5, this.candidateControl],
-            [6, this.candidateRows], [7, this.candidateRowDirectory]], 0, pass, 12);
-          run("classifyRowSigns", [[0, this.params],
-            [5, this.candidateControl], [6, this.candidateRows],
-            [25, input.coarsePhiDirectory], [26, input.owners]], 0, pass, 12);
+          identityWordWorkgroups, pass);
         });
         return;
       }
@@ -2384,6 +2376,10 @@ const ROW_SUPPORT1:u32=8u;
 const ROW_SUPPORT2:u32=16u;
 const ROW_SUPPORT3_NODE:u32=32u;
 const ROW_SUPPORT3_ENDPOINT:u32=64u;
+const ROW_COARSE_AIR:u32=128u;
+const ROW_COARSE_LIQUID:u32=256u;
+const ROW_COARSE_MIXED:u32=512u;
+const ROW_COARSE_SIGN:u32=ROW_COARSE_AIR|ROW_COARSE_LIQUID|ROW_COARSE_MIXED;
 const COMMITTED_TRANSITION_VALID:u32=0x54524e53u;
 const MAX_GUARDS:u32=${OCTREE_REGULAR_BAND_INCIDENCE_PER_ROW
     + Math.max(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumNeighborRows,
@@ -2392,9 +2388,10 @@ var<workgroup>scanValues:array<u32,256>;
 
 fn domainCount()->u32{return p.dims.x*p.dims.y*p.dims.z;}
 fn identityCount()->u32{return domainCount()*6u;}
-fn prefixBase()->u32{return identityCount();}
-fn blockTotalBase()->u32{return identityCount()*2u;}
-fn blockCount()->u32{return (identityCount()+255u)/256u;}
+fn markWordCount()->u32{return (identityCount()+31u)/32u;}
+fn prefixBase()->u32{return markWordCount();}
+fn blockTotalBase()->u32{return markWordCount()*2u;}
+fn blockCount()->u32{return (markWordCount()+255u)/256u;}
 fn coord(cellKey:u32)->vec3u{
  return vec3u(cellKey%p.dims.x,(cellKey/p.dims.x)%p.dims.y,
    cellKey/(p.dims.x*p.dims.y));
@@ -2451,6 +2448,31 @@ fn committedRowOfIdentity(cellKey:u32,size:u32)->u32{
  let candidate=committedRows[row];
  return select(INVALID,row,candidate.cell==cellKey&&candidate.size==size);
 }
+fn publishedSignFlag(cellKey:u32,size:u32)->u32{
+ let slot=identitySlot(cellKey,size);
+ if(slot==INVALID){return 0u;}
+ let encoded=rowDirectory[slot];
+ if(encoded==0u){return 0u;}
+ let row=encoded-1u;
+ if(row>=currentRowCount()||row>=arrayLength(&rows)){return 0u;}
+ let candidate=rows[row];
+ if(candidate.cell!=cellKey||candidate.size!=size){return 0u;}
+ return candidate.flags&ROW_COARSE_SIGN;
+}
+fn inheritedSignFlag(cellKey:u32,size:u32)->u32{
+ let origin=coord(cellKey);
+ let q=min(origin+vec3u(size/2u),p.dims-vec3u(1u));
+ var scale=1u;
+ loop{
+   let priorOrigin=(q/vec3u(scale))*vec3u(scale);
+   let sign=publishedSignFlag(
+     priorOrigin.x+p.dims.x*(priorOrigin.y+p.dims.y*priorOrigin.z),scale);
+   if(sign!=0u){return sign;}
+   if(scale>=p.maximumLeaf){break;}
+   scale*=2u;
+ }
+ return ROW_COARSE_MIXED;
+}
 fn tierBegin(tier:u32)->u32{
  let state=p.rowDirectoryCapacity*2u;
  if(tier==1u){return controlWords[11u];}
@@ -2471,9 +2493,9 @@ fn fail(code:u32,detail:u32){
 
 @compute @workgroup_size(256)fn clearSupportIdentityMarks(
  @builtin(global_invocation_id)g:vec3u){
- let rank=g.x;
- if(rank<identityCount()&&rank<arrayLength(&supportScratch)){
-   atomicStore(&supportScratch[rank],0u);
+ let word=g.x;
+ if(word<markWordCount()&&word<arrayLength(&supportScratch)){
+   atomicStore(&supportScratch[word],0u);
  }
 }
 fn markSupportSource(source:u32){
@@ -2488,9 +2510,10 @@ fn markSupportSource(source:u32){
    if(value.cellPlusOne==INVALID||value.cellPlusOne==0u||value.size==0u){continue;}
    let cellKey=value.cellPlusOne-1u;
    let rank=identityRank(cellKey,value.size);
-   if(rank==INVALID||rank>=arrayLength(&supportScratch)
+   let word=rank/32u;
+   if(rank==INVALID||word>=arrayLength(&supportScratch)
       ||alreadyPublished(cellKey,value.size)){continue;}
-   atomicStore(&supportScratch[rank],1u);
+   atomicOr(&supportScratch[word],1u<<(rank&31u));
  }
 }
 @compute @workgroup_size(64)fn markSupport1(@builtin(global_invocation_id)g:vec3u){
@@ -2505,23 +2528,12 @@ fn markSupportSource(source:u32){
 @compute @workgroup_size(64)fn markSupport4(@builtin(global_invocation_id)g:vec3u){
  markSupportSource(g.x);
 }
-@compute @workgroup_size(64)fn markPublishedSupportRows(
- @builtin(global_invocation_id)g:vec3u){
- let row=g.x;
- if(controlWords[0u]!=0u||row>=controlWords[2u]||row>=arrayLength(&rows)){return;}
- let candidate=rows[row];
- let rank=identityRank(candidate.cell,candidate.size);
- if(rank<identityCount()&&rank<arrayLength(&supportScratch)){
-   atomicStore(&supportScratch[rank],1u);
- }
-}
-
 @compute @workgroup_size(256)fn scanSupportIdentityBlocks(
  @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lane:u32){
- let rank=wid.x*256u+lane;
+ let word=wid.x*256u+lane;
  var value=0u;
- if(rank<identityCount()&&rank<arrayLength(&supportScratch)){
-   value=atomicLoad(&supportScratch[rank]);
+ if(word<markWordCount()&&word<arrayLength(&supportScratch)){
+   value=countOneBits(atomicLoad(&supportScratch[word]));
  }
  scanValues[lane]=value;
  workgroupBarrier();
@@ -2532,8 +2544,8 @@ fn markSupportSource(source:u32){
    scanValues[lane]+=addend;
    workgroupBarrier();
  }
- let prefixAt=prefixBase()+rank;
- if(rank<identityCount()&&prefixAt<arrayLength(&supportScratch)){
+ let prefixAt=prefixBase()+word;
+ if(word<markWordCount()&&prefixAt<arrayLength(&supportScratch)){
    atomicStore(&supportScratch[prefixAt],scanValues[lane]-value);
  }
  if(lane==255u){
@@ -2598,15 +2610,9 @@ fn finalizeTier(tier:u32){
 @compute @workgroup_size(1)fn finalizeSupport3(){finalizeTier(3u);}
 @compute @workgroup_size(1)fn finalizeSupport4(){finalizeTier(4u);}
 
-fn scatterTier(rank:u32,tier:u32){
- if(rank>=identityCount()||rank>=arrayLength(&supportScratch)){return;}
- let marked=atomicLoad(&supportScratch[rank]);
- if(marked==0u){return;}
- atomicStore(&supportScratch[rank],0u);
+fn scatterIdentity(rank:u32,tier:u32,position:u32){
+ if(rank>=identityCount()){return;}
  if(controlWords[0u]!=0u){return;}
- let block=rank/256u;
- let position=atomicLoad(&supportScratch[prefixBase()+rank])
-   +atomicLoad(&supportScratch[blockTotalBase()+block]);
  let band=tierBegin(tier)+position;
  let cellKey=rank/6u;
  let level=rank%6u;
@@ -2618,7 +2624,8 @@ fn scatterTier(rank:u32,tier:u32){
  }
  let old=committedRowOfIdentity(cellKey,size);
  let priorEncoded=select(0u,old+1u,old!=INVALID);
- rows[band]=Row(cellKey,band+1u,ROW_COARSE|tierFlag(tier),size,
+ rows[band]=Row(cellKey,band+1u,
+   ROW_COARSE|tierFlag(tier)|inheritedSignFlag(cellKey,size),size,
    0.,0.,0.,bitcast<f32>(priorEncoded));
  rowDirectory[band*2u]=cellKey;
  rowDirectory[band*2u+1u]=band;
@@ -2628,6 +2635,21 @@ fn scatterTier(rank:u32,tier:u32){
    rowDirectoryScratch[position*3u]=cellKey+1u;
    rowDirectoryScratch[position*3u+1u]=size;
    rowDirectoryScratch[position*3u+2u]=tier;
+ }
+}
+fn scatterTier(word:u32,tier:u32){
+ if(word>=markWordCount()||word>=arrayLength(&supportScratch)){return;}
+ var marked=atomicLoad(&supportScratch[word]);
+ if(marked==0u){return;}
+ atomicStore(&supportScratch[word],0u);
+ let block=word/256u;
+ var position=atomicLoad(&supportScratch[prefixBase()+word])
+   +atomicLoad(&supportScratch[blockTotalBase()+block]);
+ while(marked!=0u){
+   let bit=countTrailingZeros(marked);
+   scatterIdentity(word*32u+bit,tier,position);
+   position+=1u;
+   marked&=marked-1u;
  }
 }
 @compute @workgroup_size(256)fn scatterSupport1(@builtin(global_invocation_id)g:vec3u){
@@ -2641,29 +2663,6 @@ fn scatterTier(rank:u32,tier:u32){
 }
 @compute @workgroup_size(256)fn scatterSupport4(@builtin(global_invocation_id)g:vec3u){
  scatterTier(g.x,4u);
-}
-@compute @workgroup_size(256)fn scatterCanonicalRowDirectory(
- @builtin(global_invocation_id)g:vec3u){
- let rank=g.x;
- if(rank>=identityCount()||rank>=arrayLength(&supportScratch)
-    ||atomicLoad(&supportScratch[rank])==0u){return;}
- atomicStore(&supportScratch[rank],0u);
- if(controlWords[0u]!=0u){return;}
- let block=rank/256u;
- let position=atomicLoad(&supportScratch[prefixBase()+rank])
-   +atomicLoad(&supportScratch[blockTotalBase()+block]);
- let cellKey=rank/6u;
- let size=1u<<(rank%6u);
- let slot=identitySlot(cellKey,size);
- if(position>=controlWords[2u]||position*2u+1u>=arrayLength(&rowDirectory)
-    ||slot==INVALID){return;}
- let encoded=rowDirectory[slot];
- if(encoded==0u){return;}
- let row=encoded-1u;
- if(row>=controlWords[2u]||row>=arrayLength(&rows)
-    ||rows[row].cell!=cellKey||rows[row].size!=size){return;}
- rowDirectory[position*2u]=cellKey;
- rowDirectory[position*2u+1u]=row;
 }
 `;
 
@@ -2777,7 +2776,7 @@ fn coarseEntryRecord(slot:u32)->vec4f{if(slot==INVALID||slot>=arrayLength(&coars
 // below by the paper's local cube/Delaunay closest-point extension.
 fn coarseCellSeedRecordValid(origin:vec3u,size:u32)->vec4f{if(size==0u||any(origin+vec3u(size)>p.dims)){return vec4f(0.);}let exact=coarseEntryRecord(coarseSlot(cell(origin),size));if(exact.w!=0.){return exact;}let q=min(origin+vec3u(size/2u),p.dims-vec3u(1u));var scale=1u;loop{let priorOrigin=(q/vec3u(scale))*vec3u(scale);let prior=coarseEntryRecord(coarseSlot(cell(priorOrigin),scale));if(prior.w!=0.){return prior;}if(scale>=coarsePhi.maximumLeafSize){break;}scale*=2u;}return vec4f(0.);}
 fn coarseCellSeedRecord(origin:vec3u,size:u32)->vec4f{if(!validCoarse()){return vec4f(0.);}return coarseCellSeedRecordValid(origin,size);}
-fn coarseSignFlag(owner:Owner)->u32{if(!validCatalogCoarse()||owner.valid==0u){return 0u;}let entry=coarseCellSeedRecordValid(owner.origin,owner.size);if(entry.w==0.){return ROW_COARSE_MIXED;}if(entry.z<0.){return ROW_COARSE_LIQUID;}if(entry.y>0.){return ROW_COARSE_AIR;}return ROW_COARSE_MIXED;}
+fn coarseEntrySignFlag(slot:u32)->u32{let entry=coarseEntryRecord(slot);if(entry.w==0.){return ROW_COARSE_MIXED;}if(entry.z<0.){return ROW_COARSE_LIQUID;}if(entry.y>0.){return ROW_COARSE_AIR;}return ROW_COARSE_MIXED;}
 fn committedStateBase()->u32{return p.rowDirectoryCapacity*2u;}
 fn committedStateWord(word:u32)->u32{let at=committedStateBase()+word;if(at>=arrayLength(&committedRowDirectory)){return 0u;}return committedRowDirectory[at];}
 fn committedCoreEnd()->u32{return committedStateWord(0u);}
@@ -3035,7 +3034,7 @@ fn emitCatalogNeighborhood(source:u32,tier:u32){
  indirect[0]=0u;indirect[1]=1u;indirect[2]=1u;indirect[3]=0u;indirect[4]=1u;indirect[5]=1u;
  indirect[60]=0u;indirect[61]=1u;indirect[62]=1u;
  indirect[63]=0u;indirect[64]=1u;indirect[65]=1u;
- if(fineBandBrickCount()==INVALID||!validPowerVelocity()||!validPowerDirectory()
+ if(fineBandBrickCount()==INVALID||!validPowerVelocity()||!validPowerDirectory()||!validCatalogCoarse()
    ||!topologyDeltaAccepted()){fail(SOURCE,0u);return;}
  let core=powerVelocityControl[2];if(core==0u||core>p.rowCapacity||core>p.powerRowCapacity
    ||core>p.rowDirectoryCapacity){fail(CAPACITY,core);return;}
@@ -3061,7 +3060,8 @@ fn emitCatalogNeighborhood(source:u32,tier:u32){
  if(entry.morton!=powerMorton(cellKey)||!ownerContains(owner,origin)
     ||owner.size!=entry.size||any(owner.origin!=origin)){fail(BAD_ROW,band);return;}
  let priorEncoded=rowDelta[p.rowDeltaNewToOld+band]&0x7fffffffu;
- rows[band]=Row(cellKey,band,ROW_COARSE|ROW_CORE,entry.size,0.,0.,0.,bitcast<f32>(priorEncoded));
+ rows[band]=Row(cellKey,band,ROW_COARSE|ROW_CORE|coarseEntrySignFlag(band),
+   entry.size,0.,0.,0.,bitcast<f32>(priorEncoded));
  rowDirectory[band*2u]=cellKey;rowDirectory[band*2u+1u]=band;
  let identitySlot=rowIdentitySlot(cellKey,entry.size);
  if(identitySlot==INVALID){fail(BAD_DIRECTORY,band);return;}
@@ -3278,14 +3278,6 @@ fn sortUniqueFaceBandCatalogSupport(tier:u32,lane:u32){
  let index=g.x;
  let count=control.rowCount;
  if(index<count){validateFaceBandRowDirectoryIndex(index,count);}
-}
-@compute @workgroup_size(64)fn classifyFaceBandRowSigns(@builtin(global_invocation_id)g:vec3u){
- let band=g.x;let count=control.rowCount;if(band>=count||band>=arrayLength(&rows)){return;}
- var row=rows[band];let origin=coord(row.cell);let owner=ownerAt(origin);
- if(!ownerContains(owner,origin)||owner.size!=row.size||any(owner.origin!=origin)){
-   fail(BAD_ROW,row.cell);return;}
- let signFlag=coarseSignFlag(owner);if(signFlag==0u){fail(SOURCE,band);return;}
- row.flags|=signFlag;rows[band]=row;
 }
 fn rowSortRead(position:u32,side:u32)->vec2u{
  return select(vec2u(rowDirectory[position*2u],rowDirectory[position*2u+1u]),

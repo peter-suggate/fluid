@@ -5458,11 +5458,26 @@ fn currentPressureOwnerWet(owner: Owner) -> bool {
   return wet;
 }
 
-fn frontierCandidateAt(gid:vec3u)->u32{
+fn previousFrontierHasExactIdentity(cell:u32,size:u32)->bool{
+  let previous=frontierCurrent();let previousCount=frontierCount(previous);
+  let old=previousLowerBound(cell,size,previous,previousCount);
+  return old<previousCount&&frontierCell(previous,old)==cell
+    &&old<arrayLength(&leafHeaders)&&leafHeaders[old].cell==cell
+    &&leafHeaders[old].size==size;
+}
+
+fn frontierCandidateAt(gid:vec3u,additionsOnly:bool)->u32{
   if(any(gid>=dims())){return 0xffffffffu;}
   let cell = index(gid);
   let owner = ownerAtIndex(cell);
   if(!isOrigin(gid,owner)||!currentPressureOwnerWet(owner)){return 0xffffffffu;}
+  // A recurring dirty tile usually republishes the same wet leaves. Preserve
+  // those identities in the already-sorted previous frontier and sort only
+  // genuine additions. The carried row remains marked affected below, so
+  // value/operator consumers still recompute it from the current generation.
+  if(additionsOnly&&previousFrontierHasExactIdentity(cell,owner.size)){
+    return 0xffffffffu;
+  }
   return cell;
 }
 
@@ -5490,7 +5505,7 @@ fn classifyFrontierCandidateBlock(wid:vec3u,lid:vec3u,deltaMode:bool){
   for(var octant=0u;octant<8u;octant+=1u){
     let offset=vec3u(octant&1u,(octant>>1u)&1u,(octant>>2u)&1u);
     var cell=0xffffffffu;
-    if(all(base<dims())){cell=frontierCandidateAt(base+offset);}
+    if(all(base<dims())){cell=frontierCandidateAt(base+offset,deltaMode);}
     count+=select(0u,1u,cell!=0xffffffffu);
   }
   frontierCandidateScan[local]=count;
@@ -5540,7 +5555,7 @@ fn emitFrontierCandidateBlock(wid:vec3u,lid:vec3u,deltaMode:bool){
   for(var octant=0u;octant<8u;octant+=1u){
     let offset=vec3u(octant&1u,(octant>>1u)&1u,(octant>>2u)&1u);
     var cell=0xffffffffu;
-    if(all(base<dims())){cell=frontierCandidateAt(base+offset);}
+    if(all(base<dims())){cell=frontierCandidateAt(base+offset,deltaMode);}
     laneCandidates[octant]=cell;
     laneCount+=select(0u,1u,cell!=0xffffffffu);
   }
@@ -5810,7 +5825,10 @@ fn classifyFrontierCarry(@builtin(global_invocation_id)gid:vec3u){
   let originMatches=isOrigin(cellCoord(cell),owner);
   let exact=cellMatches&&sizeMatches&&originMatches;
   let wet=currentPressureOwnerWet(owner);
-  let keep=!dirty&&exact&&wet;
+  // Exact wet identities retain their previous canonical order even when
+  // their authority tile is dirty. Dirty is an affected-payload bit, not a
+  // reason to discard and re-sort an otherwise unchanged row identity.
+  let keep=exact&&wet;
   // A supposedly clean identity is never silently retired. That indicates
   // incomplete dirty evidence and rejects the candidate generation.
   let reason=select(0u,1u,!cellMatches)|select(0u,2u,!sizeMatches)
@@ -5870,7 +5888,7 @@ fn mergeFrontierRows(@builtin(global_invocation_id)gid:vec3u){
     let output=keptRowsBefore(slot,previousCount)+candidateLowerBound(cell,size,candidateCount);
     if(output<frontierListCapacity()){
       frontier[frontierBase(next)+output]=cell;
-      let dirty=output!=slot;
+      let dirty=output!=slot||(compaction[rowDeltaFlagsBase()+slot]&32u)!=0u;
       frontier[rowDeltaNewToOldBase()+output]=(slot+1u)
         |select(0u,ROW_DELTA_AFFECTED,dirty);
       frontier[rowDeltaOldToNewBase()+slot]=output+1u;
@@ -5879,12 +5897,12 @@ fn mergeFrontierRows(@builtin(global_invocation_id)gid:vec3u){
   if(slot<candidateCount){
     let cell=frontier[frontierCandidateBase()+slot];let size=ownerAtIndex(cell).size;
     let old=previousLowerBound(cell,size,previous,previousCount);
-    // A candidate must replace a dirty old identity, never collide with a
-    // clean carried row. Leave that destination to the carried writer; the
-    // final validator rejects the overlap without a storage race.
-    let cleanCollision=old<previousCount&&frontierCell(previous,old)==cell
+    // Recurring candidates are additions only and must never collide with a
+    // carried exact identity. Leave any malformed collision to the carried
+    // writer; the final validator rejects it without a storage race.
+    let carriedCollision=old<previousCount&&frontierCell(previous,old)==cell
       &&leafHeaders[old].size==size&&(compaction[rowDeltaFlagsBase()+old]&1u)!=0u;
-    if(!cleanCollision){
+    if(!carriedCollision){
       let output=slot+keptRowsBefore(old,previousCount);
       if(output<frontierListCapacity()){
         frontier[frontierBase(next)+output]=cell;
@@ -5936,7 +5954,9 @@ fn finalizeFrontier(@builtin(local_invocation_index)lid:u32){
       let old=previousLowerBound(cell,size,previous,previousCount);
       let exact=old<previousCount&&frontierCell(previous,old)==cell&&leafHeaders[old].size==size;
       matched+=select(0u,1u,exact);
-      invalid|=select(0u,1u,exact&&(compaction[rowDeltaFlagsBase()+old]&1u)!=0u);
+      // Delta candidate generation filters every exact previous identity.
+      // Seeing one here means the temporal-coherence partition was malformed.
+      invalid|=select(0u,1u,exact);
     }
     for(var row=lid;row<min(required,frontierListCapacity());row+=256u){
       let cell=frontier[frontierBase(next)+row];let size=ownerAtIndex(cell).size;
@@ -5963,10 +5983,10 @@ fn finalizeFrontier(@builtin(local_invocation_index)lid:u32){
     compaction[1]=blocks;compaction[2]=1u;compaction[3]=1u;
     return;
   }
-  let carried=frontier[5]+rowDeltaReduce[0].x;
-  let added=select(candidateCount-rowDeltaReduce[0].x,0u,rowDeltaReduce[0].x>candidateCount);
+  let carried=frontier[5];
+  let added=candidateCount;
   let retired=select(previousCount-carried,0u,carried>previousCount);
-  let valid=rowDeltaReduce[0].y==0u&&carried<=previousCount
+  let valid=rowDeltaReduce[0].x==0u&&rowDeltaReduce[0].y==0u&&carried<=previousCount
     &&required==carried+added&&required==previousCount+added-retired;
   if(!valid){
     let control=pressureControlBase();compaction[control]=4u;
