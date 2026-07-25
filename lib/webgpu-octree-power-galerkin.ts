@@ -38,6 +38,7 @@ struct LiveLeafEntry { row:u32,coefficient:f32 }
 @group(0) @binding(11) var<storage,read_write> residualScratch:array<vec2f>;
 var<workgroup> refreshPartial:array<f32,256>;
 var<workgroup> cgDirection:array<f32,64>;
+var<workgroup> cgActive:atomic<u32>;
 const MEASURE_PARTIAL_WORKGROUPS=32u;
 const RHS=0u;const A=1u;const B=2u;
 const INVALID_ROW_ERROR=1u;const NONFINITE=4u;const NONPOSITIVE=8u;const NONCONVERGED=16u;
@@ -296,8 +297,8 @@ fn cgReduce(lane:u32)->f32{
  return total;
 }
 // The hierarchy contract bounds the last level to 64 rows. Lanes cooperate:
-// one row per lane, workgroup-reduced dot products, and a constant 64-step
-// schedule whose inactive steps are exact no-ops so barriers stay uniform.
+// one row per lane and workgroup-reduced dot products. A workgroup-uniform
+// residual test exits the bounded 64-step loop without crossing a barrier.
 // The former single-lane serial CG walked every matrix entry sequentially and
 // was a measured latency elephant in each cycle.
 @compute @workgroup_size(64) fn solveTargetCoarsest(@builtin(local_invocation_index) lane:u32){
@@ -314,6 +315,12 @@ fn cgReduce(lane:u32)->f32{
  var live=1.0;
  if(!finite(rr)){if(lane==0u){report(NONFINITE);}live=0.0;}
  for(var iteration=0u;iteration<64u;iteration+=1u){
+  if(lane==0u){
+   atomicStore(&cgActive,select(0u,1u,
+     live>0.0&&iteration<count&&rr>max(initialRR*1e-12,1e-30)));
+  }
+  let stepActive=workgroupUniformLoad(&cgActive)!=0u;
+  if(!stepActive){break;}
   cgDirection[lane]=direction;
   workgroupBarrier();
   var applied=0.0;
@@ -326,7 +333,6 @@ fn cgReduce(lane:u32)->f32{
   }
   refreshPartial[lane]=select(0.0,direction*applied,owner);
   let pAp=cgReduce(lane);
-  let stepActive=live>0.0&&iteration<count&&rr>max(initialRR*1e-12,1e-30);
   var alpha=0.0;
   if(stepActive){
    if(!(pAp>0.0)||!finite(pAp)){if(lane==0u){report(NONPOSITIVE);}live=0.0;}

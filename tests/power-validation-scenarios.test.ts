@@ -179,8 +179,14 @@ test("moving dam Dawn regression crosses the rejected generation and checks open
     "moving free-surface incompressibility must be gated by the Eq. (3)-form operator residual");
   assert.doesNotMatch(smoke, /minimal dam per-step power-cell divergence/,
     "the unweighted full-cell divergence reduction is not the paper's cut-cell variational residual");
-  assert.match(smoke, /observed\?\.backOnlyInterfacePixels === 0/);
-  assert.match(smoke, /reverse\?\.backOnlyInterfacePixels === 0/);
+  assert.match(smoke, /maximumBackOnlyPixels = scenarioId === "minimal-power-dam-break" \? 1 : 0/,
+    "only the rolled-back mini-dam's single wall-grazing quantization pixel is tolerated");
+  assert.match(smoke, /observed\?\.backOnlyInterfacePixels \?\? Infinity\) <= maximumBackOnlyPixels/);
+  assert.match(smoke, /reverse\?\.backOnlyInterfacePixels \?\? Infinity\) <= maximumBackOnlyPixels/);
+  assert.match(smoke, /holes\?\.maximumPixels \?\? Infinity\) <= 2/,
+    "pre-impact depth peels must reject enclosed missing surface patches");
+  assert.match(smoke, /steps\?\.terraceEdgeFraction \?\? Infinity\) <= 0\.12/,
+    "both dam views must reject cell-scale surface terraces");
   assert.match(smoke,
     /observed\?\.damExposedCornerCapPixels\?\.\[0\][\s\S]*observed\?\.damExposedCornerCapPixels\?\.\[1\]/,
     "the t=0 Dawn raster must require both exposed dam faces at their shared +x/+z corner");

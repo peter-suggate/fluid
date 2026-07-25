@@ -493,6 +493,17 @@ test("power-face WGSL builds, merges, and publishes CSR in parallel without atom
   assert.match(octreePowerFaceShader,
     /PowerFaceRecord\(row,neighbor,\s*\(slot&0xffffu\)\|\(\(metric\.transformAndFlags&63u\)<<16u\),\s*flags,0\.0,geometry\.area,geometry\.inverseDistance,1\.0\)/);
   assert.match(octreePowerFaceShader, /fn publishAddedPowerFaceGeometry/);
+  assert.match(octreePowerFaceShader,
+    /fn geometryFromPolygon\(geometryValue:ReconstructedPowerFace,polygon:SharedPolygon\)->ReconstructedPowerFace/,
+    "shared face geometry must be derived from an already-materialized clipped polygon");
+  const addedGeometryPublication = octreePowerFaceShader.match(
+    /fn publishAddedPowerFaceGeometry\([^]*?\n}\n@compute/,
+  )?.[0] ?? "";
+  assert.match(addedGeometryPublication,
+    /let polygon=physicalFacePolygon\(face\);[\s\S]*geometry=geometryFromPolygon\(geometry,polygon\)/,
+    "added-face publication must reuse one clipped polygon for area, centroid, and quadrature");
+  assert.doesNotMatch(addedGeometryPublication, /\bsharedGeometry\(|\breciprocalIntersection\(/,
+    "added-face publication must not reconstruct its clipped polygon a second time");
   assert.match(octreePowerFaceShader, /fn carryPowerFacePayload/);
   assert.doesNotMatch(octreePowerFaceShader, /scanPowerBoundaryPhiQueryFlags|compactPowerBoundaryPhiQueries/);
   assert.doesNotMatch(octreePowerFaceShader, /\batomic(?:Add|And|CompareExchangeWeak|Exchange|Load|Max|Min|Or|Store|Sub|Xor)\b|atomic<u32>/,

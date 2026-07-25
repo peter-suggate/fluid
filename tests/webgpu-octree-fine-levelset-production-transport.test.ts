@@ -48,6 +48,77 @@ test("production fused transport accepts only the physical input clock or its ex
     "extrapolated publication must recheck the bounded clock predicate");
 });
 
+test("production fused transport maps exact owners through the direct identity table", () => {
+  const shader = makeFineLevelSetProductionFusedTransportWGSL();
+  const owner = wgslFunction(shader, "directOwner");
+  assert.match(owner,
+    /ownerAtCached\(q,ownerCache\).*ownerContains\(owner,q\).*directIdentityRow\(cell\(owner\.origin\),owner\.size\)/s,
+    "the independently published owner payload must provide the exact row origin and size");
+  assert.doesNotMatch(owner, /loop|while|directFind|maximumLeafSize\)\{break/,
+    "direct owner resolution must not retry every leaf size or search the sorted row directory");
+
+  const identity = wgslFunction(shader, "directIdentityRow");
+  assert.match(identity,
+    /rowOfIdentity\(cellKey,size\).*bandControl\(11u\).*published\.globalRow.*ROW_CORE.*direct\.cell==cellKey&&direct\.size==size/s,
+    "the dense band identity table must map only core rows to an exact packed direct descriptor");
+  assert.doesNotMatch(identity, /while|loop|directFind|directDirectory/,
+    "exact identity resolution must remain O(1)");
+  assert.doesNotMatch(shader, /fn directFind|fn directMorton|loadDirectDirectory/,
+    "the recurring transport shader must not retain its obsolete binary direct-row directory");
+
+  assert.match(wgslFunction(shader, "directNeighbor"), /directIdentityRow\(/,
+    "Delaunay neighbor vectors must use the exact direct identity path");
+  assert.match(wgslFunction(shader, "sampleDirectDescriptor"), /letnr=directIdentityRow\(/,
+    "uniform-cube corners must use the exact direct identity path");
+});
+
+test("direct identity transport validates owner and power publications on independent clocks", () => {
+  const shader = makeFineLevelSetProductionFusedTransportWGSL();
+  const authority = wgslFunction(shader, "directIdentityAuthorityValid");
+  assert.match(authority,
+    /dp\.generation==p\.powerGeneration.*pagedOwnerPublicationValid\(\).*bandControl\(0u\)==0u.*bandControl\(6u\)==VALID.*fusedBandGenerationValid\(\).*transitionWord\(5u\)==VALID.*transitionWord\(6u\)==VALID/s,
+    "the direct map must validate every authority using that authority's own publication contract");
+  assert.doesNotMatch(authority, /owners\[[^\]]+\]==p\.powerGeneration|p\.powerGeneration==owners\[/,
+    "the independently advancing owner epoch must never be compared with the power-face epoch");
+  assert.match(wgslFunction(shader, "ownerAtCached"),
+    /if\(\(\*cache\)\.y==key\).*else\{.*while\(low<high\)/s,
+    "the owner-page ABI may search only when a trajectory enters another 8-cubed page");
+});
+
+test("Dawn accepts the direct-identity fused transport pipeline", {
+  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for WGSL validation",
+}, () => {
+  const script = `
+    import {pathToFileURL} from "node:url";
+    import {makeFineLevelSetProductionFusedTransportWGSL} from
+      "./lib/webgpu-octree-fine-levelset-fused-transport.ts";
+    const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE).href);
+    Object.assign(globalThis,dawn.globals);
+    const gpu=dawn.create(["backend="+(process.env.WEBGPU_BACKEND??"metal")]);
+    const adapter=await gpu.requestAdapter();
+    if(!adapter)throw new Error("Dawn adapter unavailable");
+    const device=await adapter.requestDevice({
+      requiredLimits:{maxStorageBuffersPerShaderStage:10},
+    });
+    device.pushErrorScope("validation");
+    const module=device.createShaderModule({code:makeFineLevelSetProductionFusedTransportWGSL()});
+    const info=await module.getCompilationInfo();
+    const errors=info.messages.filter((message)=>message.type==="error");
+    if(errors.length)throw new Error(errors.map((message)=>
+      message.lineNum+":"+message.linePos+" "+message.message).join("\\n"));
+    device.createComputePipeline({layout:"auto",compute:{
+      module,entryPoint:"transportFineCharacteristic",
+    }});
+    const validation=await device.popErrorScope();
+    if(validation)throw validation;
+    device.destroy();
+  `;
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    cwd: process.cwd(), env: process.env, encoding: "utf8",
+  });
+  assert.equal(result.status, 0, `signal=${result.signal}\n${result.stdout}\n${result.stderr}`);
+});
+
 test("transport reconstructs both old and new interface-page membership", () => {
   const source = fineLevelSetFusedTransportPublicationWGSL.replace(/\s+/g, "");
   assert.match(source, /pageOldInterface/,

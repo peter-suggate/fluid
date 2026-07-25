@@ -42,6 +42,9 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
       `${entryPoint} must skip the statically encoded tail after convergence`);
   }
   assert.match(octreePowerGalerkinShader,
+    /solveTargetCoarsest[\s\S]*atomicStore\(&cgActive[\s\S]*workgroupUniformLoad\(&cgActive\)[\s\S]*if\(!stepActive\)\{break;\}[\s\S]*targetMatrix\[lane\]/,
+    "the coarsest CG must uniformly skip its algebraically inactive iteration tail");
+  assert.match(octreePowerGalerkinShader,
     /publishSourceResidual[\s\S]*control\[2\]\)\+1u[\s\S]*rr<=residualBudget[\s\S]*cycle>=u32\(params\.numerics\.z\)/);
   assert.doesNotMatch(octreePowerGalerkinShader, /atomicAdd|atomicCompareExchange|hash|probe|find\(/i);
   assert.match(WebGPUOctreePowerGalerkin.prototype.encode.toString(),

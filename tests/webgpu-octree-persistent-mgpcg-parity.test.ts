@@ -295,9 +295,14 @@ test("persistent small-domain MGPCG matches staged captured-topology PCG and res
       assert.ok(publication[base + 2] > 0 && publication[base + 2] <= 65_535
         && publication[base + 3] > 0 && publication[base + 4] === 1,
       `${label} level ${level} slot indirect record`);
-      assert.ok(publication[base + 5] > 0 && publication[base + 5] <= 65_535
-        && publication[base + 6] > 0 && publication[base + 7] === 1,
-      `${label} level ${level} transfer indirect record`);
+      if (level + 1 < cycle.plan.levelCount) {
+        assert.ok(publication[base + 5] > 0 && publication[base + 5] <= 65_535
+          && publication[base + 6] > 0 && publication[base + 7] === 1,
+        `${label} level ${level} transfer indirect record`);
+      } else {
+        assert.deepEqual([...publication.slice(base + 5, base + 8)], [0, 1, 1],
+          `${label} coarsest level has no parent-transfer dispatch`);
+      }
     }
     const lifecycle = cycle.plan.levelCount * 8;
     assert.deepEqual([...publication.slice(lifecycle, lifecycle + 2)], [1, ROW_COUNT],

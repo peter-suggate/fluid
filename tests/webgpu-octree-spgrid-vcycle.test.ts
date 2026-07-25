@@ -88,11 +88,22 @@ function reachableWGSLBindings(shader: string, entryPoint: string): number[] {
 test("native sparse pyramid allocation is bounded by row capacity, not dense domain volume", () => {
   const narrow = planOctreeSPGridVCycle({ dimensions: [64, 48, 32], rowCapacity: 5_000 });
   const wide = planOctreeSPGridVCycle({ dimensions: [1_024, 48, 32], rowCapacity: 5_000 });
-  assert.equal(narrow.levelStride, wide.levelStride);
+  assert.ok(wide.levelStride >= narrow.levelStride);
   assert.equal(narrow.transferStride, 40_000);
   assert.ok(wide.levelCount > narrow.levelCount);
-  assert.equal(wide.stateBytes, 25 * wide.levelCount * wide.levelStride * 4);
+  assert.equal(wide.stateBytes, 25 * wide.totalLevelSlots * 4);
+  assert.deepEqual(wide.levelOffsets,
+    wide.levelCapacities.map((_, level) => wide.levelCapacities.slice(0, level)
+      .reduce((sum, capacity) => sum + capacity, 0)));
+  assert.ok(wide.levelCapacities.every((capacity, level) =>
+    level === 0 || capacity <= wide.levelCapacities[level - 1]));
+  assert.equal(wide.transferOffsets.length, wide.levelCount - 1);
   const ui = planOctreeSPGridVCycle({ dimensions: [24, 18, 16], rowCapacity: 6_912 });
+  assert.deepEqual(ui.levelCapacities, [16_384, 2_048, 256, 64, 8, 2]);
+  assert.ok(ui.stateBytes < 2 * 1024 * 1024,
+    "per-level arenas must retain the candidate hash table's 50% load proof without finest-level padding");
+  assert.ok(Math.max(...ui.transferCapacities) > ui.levelStride,
+    "the UI plan exercises transfer publication beyond the largest level arena");
   assert.ok(ui.stateBytes <= 128 * 1024 * 1024);
   assert.ok(ui.topologyBytes <= 128 * 1024 * 1024);
   assert.equal(wide.dispatchBytes, wide.levelCount * 32 + 8);
@@ -101,6 +112,57 @@ test("native sparse pyramid allocation is bounded by row capacity, not dense dom
   assert.ok(!("cellCount" in wide));
   assert.throws(() => planOctreeSPGridVCycle({ dimensions: [16, 16, 16],
     rowCapacity: SPGRID_MAXIMUM_ROW_CAPACITY + 1 }), /bounded/);
+});
+
+test("compact SPGrid level and transfer arenas preserve exact layout and hash headroom", () => {
+  for (const dimensions of [
+    [2_048, 2_048, 2_048],
+    [2_048, 1, 1],
+    [16, 16, 16],
+    [24, 18, 16],
+  ] as const) {
+    const rowCapacity = dimensions[0] === 24 ? 6_912 : 5_000;
+    const plan = planOctreeSPGridVCycle({ dimensions, rowCapacity });
+    let levelPrefix = 0;
+    for (let level = 0; level < plan.levelCount; level += 1) {
+      assert.equal(plan.levelOffsets[level], levelPrefix);
+      const scale = 2 ** level;
+      const domainCells = dimensions.map((value) => Math.ceil(value / scale))
+        .reduce((product, value) => product * value, 1);
+      const worstCells = Math.min(rowCapacity * 8, domainCells);
+      assert.ok(plan.levelCapacities[level] >= 2 * worstCells,
+        `level ${level} must remain at most half full`);
+      assert.equal(plan.levelCapacities[level] & (plan.levelCapacities[level] - 1), 0,
+        `level ${level} capacity must remain a power of two`);
+      levelPrefix += plan.levelCapacities[level];
+    }
+    assert.equal(plan.totalLevelSlots, levelPrefix);
+    let transferPrefix = 0;
+    for (let level = 0; level < plan.levelCount - 1; level += 1) {
+      assert.equal(plan.transferOffsets[level], transferPrefix);
+      transferPrefix += 4 * plan.transferCapacities[level] + 4 * plan.levelCapacities[level];
+    }
+    const directoryWords = 16 + 4 * plan.brickCount + plan.totalLevelSlots;
+    const expectedTopologyWords = 16 + plan.levelCount * rowCapacity + plan.totalLevelSlots
+      + transferPrefix + directoryWords + 18 * plan.totalLevelSlots;
+    assert.equal(plan.topologyBytes, expectedTopologyWords * 4);
+  }
+});
+
+test("compact SPGrid addressing and commit dispatch cover every variable arena", () => {
+  for (const shader of [octreeSPGridVCycleShader, octreeSPGridPersistentMGPCGShader]) {
+    assert.doesNotMatch(shader,
+      /\(c\*levels\(\)\+l\)\*(?:maxS|s)tride\(\)|l\*transferLevelWords\(\)|rankedSlotsBase\(\)\+l\*(?:maxS|s)tride\(\)/,
+      "no shader may retain fixed finest-level padding in state, transfer, or rank addressing");
+    assert.match(shader, /fn levelBase\(l:u32\)->u32/);
+    assert.match(shader, /fn transferLevelOffset\(l:u32\)->u32/);
+    assert.match(shader,
+      /threshold=maxStride\(\)\/2u[\s\S]*d\.y>threshold\/cells[\s\S]*d\.z>threshold\/cells/,
+      "host-equivalent capped multiplication must prevent dense-domain u32 overflow");
+  }
+  assert.match(WebGPUOctreeSPGridVCycle.prototype.encodeSetup.toString(),
+    /Math\.max\(this\.plan\.levelStride,this\.plan\.brickCount,\.\.\.this\.plan\.transferCapacities\)/,
+    "candidate publication must cover the largest level, brick, or transfer arena");
 });
 
 test("4^3 brick masks rank every occupied bit exactly and reject malformed publication", () => {
@@ -689,7 +751,7 @@ test("Dawn constructs every production native V-cycle setup bind group", {
   device.destroy();
 });
 
-test("Dawn exact-reuse setup preserves prior hierarchy and changed capture recopies live L1", {
+test("Dawn compact-arena setup replaces stale hierarchy and changed capture recopies live L1", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for GPU lifecycle checks",
 }, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
@@ -716,7 +778,7 @@ test("Dawn exact-reuse setup preserves prior hierarchy and changed capture recop
   const cycle = new WebGPUOctreeSPGridVCycle(device, { leafHeaders: headers, leafEntries: entries, rowDelta },
     { dimensions: [4, 4, 4], rowCapacity: 4, finestCellWidth: 1 });
   type Internals = { dispatchMeta: GPUBuffer; indirectDispatch: GPUBuffer;
-    state: GPUBuffer; capturedHeaders: GPUBuffer };
+    state: GPUBuffer; capturedHeaders: GPUBuffer; capturePageState: GPUBuffer };
   const internal = cycle as unknown as Internals;
   const publication = new Uint32Array(cycle.plan.dispatchBytes / 4);
   for (let level = 0; level < cycle.plan.levelCount; level += 1) {
@@ -741,30 +803,47 @@ test("Dawn exact-reuse setup preserves prior hierarchy and changed capture recop
   device.queue.submit([encoder.finish()]);
   await Promise.all([stateRead.mapAsync(GPUMapMode.READ), publicationRead.mapAsync(GPUMapMode.READ)]);
   let validationError = await device.popErrorScope(); assert.equal(validationError, null, validationError?.message);
-  assert.equal(new Uint32Array(stateRead.getMappedRange())[0], 0x1234abcd,
-    "zero-work reuse must not retire or rewrite any prior hierarchy slot");
-  assert.deepEqual([...new Uint32Array(publicationRead.getMappedRange())], [...publication],
-    "reuse must preserve prior counts, correction dispatches, and lifecycle publication exactly");
+  assert.notEqual(new Uint32Array(stateRead.getMappedRange())[0], 0x1234abcd,
+    "a dirty cold setup must replace stale state in the compact level-zero arena");
+  const rebuiltPublication = new Uint32Array(publicationRead.getMappedRange());
+  assert.equal(rebuiltPublication[lifecycle], 1);
+  assert.equal(rebuiltPublication[lifecycle + 1], 4,
+    "the compact hierarchy must publish the complete validated L1 row count");
   stateRead.unmap(); publicationRead.unmap();
 
-  // Remove only the authoritative reuse proof. The same warm capture now
-  // dispatches over live rows and replaces the retained header publication.
+  // The same warm capture dispatches over the producer's dirty rows and
+  // replaces the retained header publication.
   device.pushErrorScope("validation");
-  countWords[7] = 0; device.queue.writeBuffer(rowCount, 0, countWords);
-  sourceWords[0] = 3; device.queue.writeBuffer(headers, 0, sourceWords);
+  deltaWords.fill(0);
+  deltaWords.set([4, 4, 4, 0, 0, 1, 1, 2, 0x52444c54, 1, 1, 1, 1, 1, 1, 1]);
+  deltaWords.set([1, 2, 3, 4], rowDelta.newToOldOffsetWords);
+  deltaWords[rowDelta.dirtyRowsOffsetWords] = 0;
+  device.queue.writeBuffer(rowDelta.rows, 0, deltaWords);
+  sourceWords[0] = 4; device.queue.writeBuffer(headers, 0, sourceWords);
   const captureRead = device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const captureStateRead = device.createBuffer({ size: cycle.plan.capturePageStateBytes,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const controlRead = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   encoder = device.createCommandEncoder(); const captureBroker = new PassBroker(encoder);
   cycle.encodeCapture(captureBroker);
+  cycle.encodeSetup(captureBroker, { solverControl: control, rowCount });
   captureBroker.fence("capture complete");
   encoder.copyBufferToBuffer(internal.capturedHeaders, 0, captureRead, 0, 48);
+  encoder.copyBufferToBuffer(internal.capturePageState, 0, captureStateRead, 0, cycle.plan.capturePageStateBytes);
+  encoder.copyBufferToBuffer(control, 0, controlRead, 0, 64);
   device.queue.submit([encoder.finish()]);
-  await captureRead.mapAsync(GPUMapMode.READ);
-  assert.equal(new Uint32Array(captureRead.getMappedRange())[0], 3,
+  await Promise.all([captureRead.mapAsync(GPUMapMode.READ), captureStateRead.mapAsync(GPUMapMode.READ),
+    controlRead.mapAsync(GPUMapMode.READ)]);
+  const captureState = new Uint32Array(captureStateRead.getMappedRange());
+  const controlState = new Uint32Array(controlRead.getMappedRange());
+  assert.equal(captureState[8], 0, `warm capture failed: ${JSON.stringify([...captureState])}`);
+  assert.equal(controlState[0], 0, `warm hierarchy failed with control flags ${controlState[0]}`);
+  assert.equal(new Uint32Array(captureRead.getMappedRange())[0], 4,
     "an unproven generation must recapture its live L1 header");
   validationError = await device.popErrorScope();
   assert.equal(validationError, null, validationError?.message);
-  captureRead.unmap(); cycle.destroy();
-  for (const buffer of [headers, entries, rowCount, control, stateRead, publicationRead, captureRead,
+  captureRead.unmap(); captureStateRead.unmap(); controlRead.unmap(); cycle.destroy();
+  for (const buffer of [headers, entries, rowCount, control, stateRead, publicationRead, captureRead, captureStateRead, controlRead,
     rowDelta.rows]) buffer.destroy();
   device.destroy();
 });
