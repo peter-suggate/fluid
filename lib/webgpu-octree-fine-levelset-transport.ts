@@ -367,7 +367,9 @@ export class WebGPUFineLevelSetTransport {
         const data = new ArrayBuffer(128), words = new Uint32Array(data), floats = new Float32Array(data);
         words.set([
           a.rows.offsetBytes / 4, a.rows.sizeBytes / 16,
-          a.rowDirectory.offsetBytes / 4, a.rowDirectory.sizeBytes / 16,
+          // Retired duplicate direct row-directory slots remain zero in the
+          // shared 128-byte ABI. Identity comes from the face-band directory.
+          0, 0,
           a.velocities.offsetBytes / 4, options.rowVelocities.size / 16,
           a.tetraHeaders.offsetBytes / 4, a.tetraHeaders.sizeBytes / 12,
           a.tetraVertices.offsetBytes / 4, a.tetraVertices.sizeBytes / 16,

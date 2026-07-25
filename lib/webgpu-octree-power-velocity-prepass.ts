@@ -66,12 +66,12 @@ export interface OctreePowerVelocityPrepassSource {
 }
 
 /** Producer-owned grouped direct authority consumed in place by fine transport.
- * Dynamic directory/velocity regions are published once per advance; immutable
- * catalog regions are installed once when this producer is constructed. */
+ * Dynamic velocity records are published once per advance; immutable catalog
+ * regions are installed once when this producer is constructed. */
 export interface OctreePowerVelocityFusedSamplerSource {
   readonly params: GPUBuffer;
   readonly authority: GPUBuffer;
-  readonly regions: Readonly<Record<"rows" | "rowDirectory" | "velocities"
+  readonly regions: Readonly<Record<"rows" | "velocities"
     | "tetraHeaders" | "tetraVertices" | "tetrahedra", { readonly offsetBytes: number; readonly sizeBytes: number }>>;
 }
 
@@ -143,7 +143,6 @@ export class WebGPUOctreePowerVelocityPrepass {
       device.limits.minStorageBufferOffsetAlignment, topology.plan.rowCapacity);
     const regionSizes = {
       rows: basePlan.rowDescriptorBytes,
-      rowDirectory: faces.rowDirectory.size,
       velocities: topology.plan.rowCapacity * 16,
       tetraHeaders: topology.catalogTetrahedronHeaders.size,
       tetraVertices: topology.catalogTetrahedronVertices.size,
@@ -167,11 +166,10 @@ export class WebGPUOctreePowerVelocityPrepass {
     this.fusedAuthority = device.createBuffer({ label: "Grouped direct Stage-B transport authority",
       size: fusedBytes, usage: storage });
     this.fusedPackParams = device.createBuffer({ label: "Grouped direct Stage-B authority parameters",
-      size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.fusedPackParams, 0, new Uint32Array([
-      fusedRegions.rowDirectory.offsetBytes / 4, fusedRegions.rowDirectory.sizeBytes / 4,
       fusedRegions.velocities.offsetBytes / 4, fusedRegions.velocities.sizeBytes / 4,
-      0, 0, 0, 0,
+      0, 0,
     ]));
     this.results = device.createBuffer({ label: "Octree power sampled velocities",
       size: this.queryCapacity * 16, usage: storage });
@@ -242,19 +240,15 @@ export class WebGPUOctreePowerVelocityPrepass {
     if (!group) {
       group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: this.fusedPackParams } },
-        { binding: 1, resource: { buffer: this.faces.rowDirectory } },
-        { binding: 2, resource: { buffer: rowVelocities } },
-        { binding: 3, resource: { buffer: this.fusedAuthority } },
+        { binding: 1, resource: { buffer: rowVelocities } },
+        { binding: 2, resource: { buffer: this.fusedAuthority } },
       ] });
       this.fusedAuthorityGroups.set(rowVelocities, group);
     }
     pass.setBindGroup(0, group);
-    // Both recurrent regions contain one 16-byte record per committed power
-    // row. The face transaction already publishes the exact live-row prefix,
-    // so do not stream the unused capacity tail through this packed binding.
-    // One invocation copies both records as four contiguous words; the former
-    // scalar/capacity launch used four times as many invocations even when the
-    // live topology occupied only a small prefix.
+    // One 16-byte velocity record is published per committed power row. The
+    // fused sampler resolves identity through the face-band table, so the old
+    // duplicate 64 KiB sorted directory is deliberately absent.
     pass.dispatchWorkgroupsIndirect(
       this.faces.liveFaceDispatch,
       OCTREE_POWER_FACE_LIVE_ROW_DISPATCH_OFFSET_BYTES,
@@ -357,21 +351,13 @@ export class WebGPUOctreePowerVelocityPrepass {
 }
 
 export const powerVelocityFusedAuthorityWGSL = /* wgsl */ `
-struct P{directoryOffset:u32,directoryWords:u32,velocityOffset:u32,velocityWords:u32,p0:u32,p1:u32,p2:u32,p3:u32}
+struct P{velocityOffset:u32,velocityWords:u32,p0:u32,p1:u32}
 @group(0)@binding(0)var<uniform>p:P;
-@group(0)@binding(1)var<storage,read>rowDirectory:array<u32>;
-@group(0)@binding(2)var<storage,read>velocities:array<u32>;
-@group(0)@binding(3)var<storage,read_write>authority:array<u32>;
+@group(0)@binding(1)var<storage,read>velocities:array<u32>;
+@group(0)@binding(2)var<storage,read_write>authority:array<u32>;
 @compute @workgroup_size(64)fn publishDirectFusedAuthority(@builtin(global_invocation_id)id:vec3u){
  let i=id.x;
  let word=i*4u;
- if(word+3u<p.directoryWords&&word+3u<arrayLength(&rowDirectory)
-    &&p.directoryOffset+word+3u<arrayLength(&authority)){
-  authority[p.directoryOffset+word]=rowDirectory[word];
-  authority[p.directoryOffset+word+1u]=rowDirectory[word+1u];
-  authority[p.directoryOffset+word+2u]=rowDirectory[word+2u];
-  authority[p.directoryOffset+word+3u]=rowDirectory[word+3u];
- }
  if(word+3u<p.velocityWords&&word+3u<arrayLength(&velocities)
     &&p.velocityOffset+word+3u<arrayLength(&authority)){
   authority[p.velocityOffset+word]=velocities[word];

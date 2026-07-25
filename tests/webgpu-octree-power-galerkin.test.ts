@@ -18,6 +18,9 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
   assert.match(refreshKernel,
     /targetEntry=4u\*[\s\S]*refreshPartial\[64u\*tile\]/,
     "four 64-lane refresh tiles must retain the audited per-entry reduction tree");
+  assert.match(refreshKernel,
+    /targetColumn\(targetEntry\)[\s\S]*topology\[targetDiagonalBase\(\)\+column\][\s\S]*diagonalEntry==targetEntry[\s\S]*setTargetF\(DIAGONAL,column,total\)/,
+    "numeric RAP must publish each target diagonal into its vector cache in the existing refresh dispatch");
   assert.match(octreePowerGalerkinShader,
     /@compute @workgroup_size\(256\) fn refreshGalerkinTarget/);
   assert.doesNotMatch(refreshKernel, /pWeight|contributionIndex|left|right/,
@@ -27,12 +30,22 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
   assert.match(octreePowerGalerkinShader,
     /importFineOperator[\s\S]*fixedRow\(other\.cell,other\.size\)[\s\S]*sourceColumn\(candidate\)==column[\s\S]*bitcast<u32>\(-entry\.coefficient\)/);
   assert.match(octreePowerGalerkinShader,
-    /initializeFineOperator[\s\S]*bitcast<u32>\(0\.0\)[\s\S]*setSourceF\(A,row,0\.0\);setSourceF\(B,row,0\.0\)/,
+    /initializeFineOperator[\s\S]*bitcast<u32>\(0\.0\)[\s\S]*setSourceF\(A,row,0\.0\);setSourceF\(B,row,0\.0\);setSourceF\(DIAGONAL,row,0\.0\)/,
     "inactive fixed rows must be zero equations and must not contaminate P^T*A*P with identity mass");
   assert.match(octreePowerGalerkinShader,
     /initializeFineOperator[\s\S]*sourceCoefficient\(diagonalEntry\)==0\.0\)\{return;\}[\s\S]*for\(var entry=first/,
     "recurring initialization must skip fixed rows already known to be exact zero equations");
-  assert.match(octreePowerGalerkinShader, /smoothSource[\s\S]*diagonal==0\.0/);
+  assert.match(octreePowerGalerkinShader,
+    /importFineOperator[\s\S]*setSourceF\(DIAGONAL,row,header\.diagonal\)/,
+    "fine import must populate the cached diagonal alongside the matrix coefficient");
+  assert.match(octreePowerGalerkinShader,
+    /fn smoothSource[\s\S]*sourceF\(DIAGONAL,row\)[\s\S]*diagonal==0\.0/,
+    "smoothing must consume the cached diagonal without a topology/matrix lookup");
+  assert.match(octreePowerGalerkinShader,
+    /fn prolongateTargetCorrection[\s\S]*sourceF\(DIAGONAL,fine\)==0\.0/,
+    "prolongation must consume the same cached active-row predicate");
+  assert.doesNotMatch(octreePowerGalerkinShader, /fn sourceDiagonal\(/,
+    "the recurring matrix-backed diagonal helper must not survive the cache migration");
   assert.match(octreePowerGalerkinShader,
     /fn stopped\(\)->bool[\s\S]*control\[1\][\s\S]*smoothSourceAtoB[\s\S]*!stopped\(\)/);
   for (const entryPoint of [

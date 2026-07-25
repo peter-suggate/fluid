@@ -50,14 +50,14 @@ test("trajectory prepass is bounded GPU-only Stage-B work", () => {
   });
 });
 
-test("grouped Stage-B authority copies one complete record per live row", () => {
+test("grouped Stage-B authority copies only one live velocity record per row", () => {
   assert.match(powerVelocityFusedAuthorityWGSL, /let word=i\*4u/);
   for (const component of ["", "+1u", "+2u", "+3u"]) {
     assert.match(powerVelocityFusedAuthorityWGSL,
-      new RegExp(`authority\\[p\\.directoryOffset\\+word${component.replace("+", "\\+")}\\]`));
-    assert.match(powerVelocityFusedAuthorityWGSL,
       new RegExp(`authority\\[p\\.velocityOffset\\+word${component.replace("+", "\\+")}\\]`));
   }
+  assert.doesNotMatch(powerVelocityFusedAuthorityWGSL, /rowDirectory|directoryOffset|directoryWords/,
+    "the face-band identity table replaces the retired duplicate direct directory");
   const source = WebGPUOctreePowerVelocityPrepass.toString().replace(/\s+/g, "");
   assert.match(source, /rowDescriptorGroups=newWeakMap/);
   assert.match(source, /fusedAuthorityGroups=newWeakMap/);

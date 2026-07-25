@@ -765,7 +765,10 @@ export function packOctreePowerGalerkinLevel(
     );
   });
 
-  const headerWords = 21;
+  // Header word 21 points at the target diagonal-entry map. Keeping both
+  // adjacent-level maps in the immutable topology lets numeric refresh publish
+  // each refreshed target diagonal into its vector cache without another pass.
+  const headerWords = 22;
   const pOffsetBase = headerWords;
   const pBase = pOffsetBase + pOffsets.length;
   const restrictionOffsetBase = pBase + 3 * pColumns.length;
@@ -773,27 +776,33 @@ export function packOctreePowerGalerkinLevel(
   const contributionOffsetBase = restrictionRecordBase + restrictionRecords.length;
   const contributionBase = contributionOffsetBase + contributionOffsets.length;
   const contributionEnd = contributionBase + 2 * contributionTargets.length;
-  // Every recurring smoother/prolongation lookup needs the source diagonal.
-  // Pack its CSR index once per row instead of linearly searching the row in
-  // every sweep (coarse Galerkin rows are substantially wider than L0).
-  const sourceDiagonalEntries = new Uint32Array(source.nodeCount);
-  for (let row = 0; row < source.nodeCount; row += 1) {
-    let diagonal = 0xffff_ffff;
-    for (let entry = source.rowOffsets[row]; entry < source.rowOffsets[row + 1]; entry += 1) {
-      if (source.columns[entry] === row) {
-        if (diagonal !== 0xffff_ffff) {
-          throw new RangeError(`power Galerkin source row ${row} has duplicate diagonals`);
+  const diagonalEntries = (level: OctreePowerGalerkinLevel, label: string): Uint32Array => {
+    const entries = new Uint32Array(level.nodeCount);
+    for (let row = 0; row < level.nodeCount; row += 1) {
+      let diagonal = 0xffff_ffff;
+      for (let entry = level.rowOffsets[row]; entry < level.rowOffsets[row + 1]; entry += 1) {
+        if (level.columns[entry] === row) {
+          if (diagonal !== 0xffff_ffff) {
+            throw new RangeError(`power Galerkin ${label} row ${row} has duplicate diagonals`);
+          }
+          diagonal = entry;
         }
-        diagonal = entry;
       }
+      if (diagonal === 0xffff_ffff) {
+        throw new RangeError(`power Galerkin ${label} row ${row} has no diagonal`);
+      }
+      entries[row] = diagonal;
     }
-    if (diagonal === 0xffff_ffff) {
-      throw new RangeError(`power Galerkin source row ${row} has no diagonal`);
-    }
-    sourceDiagonalEntries[row] = diagonal;
-  }
+    return entries;
+  };
+  // Smoothing and prolongation repeatedly need source diagonals. RAP refresh
+  // also needs to recognize each target diagonal exactly once. Pack both CSR
+  // indices once, preserving the original matrix-entry validation contract.
+  const sourceDiagonalEntries = diagonalEntries(source, "source");
+  const targetDiagonalEntries = diagonalEntries(target, "target");
   const sourceDiagonalBase = contributionEnd;
-  const fineCellToRowBase = levelIndex === 0 ? sourceDiagonalBase + sourceDiagonalEntries.length : 0;
+  const targetDiagonalBase = sourceDiagonalBase + sourceDiagonalEntries.length;
+  const fineCellToRowBase = levelIndex === 0 ? targetDiagonalBase + targetDiagonalEntries.length : 0;
   const fineCellCount = hierarchy.dimensions[0] * hierarchy.dimensions[1] * hierarchy.dimensions[2];
   const fineLookupLevelCount = levelIndex === 0
     ? Math.max(...source.geometry.map((node) => Math.log2(node.span))) + 1
@@ -801,7 +810,7 @@ export function packOctreePowerGalerkinLevel(
   const fineCellToRowWords = fineCellCount * fineLookupLevelCount;
   const fineGeometryBase = levelIndex === 0 ? fineCellToRowBase + fineCellToRowWords : 0;
   const topologyWords = new Uint32Array(
-    contributionEnd + sourceDiagonalEntries.length
+    contributionEnd + sourceDiagonalEntries.length + targetDiagonalEntries.length
       + (levelIndex === 0 ? fineCellToRowWords + 2 * source.geometry.length : 0),
   );
   topologyWords.set([
@@ -812,6 +821,7 @@ export function packOctreePowerGalerkinLevel(
     ...hierarchy.dimensions,
     fineCellCount,
     fineLookupLevelCount,
+    targetDiagonalBase,
   ]);
   const topologyFloats = new Float32Array(topologyWords.buffer);
   topologyWords.set(pOffsets, pOffsetBase);
@@ -829,6 +839,7 @@ export function packOctreePowerGalerkinLevel(
     topologyFloats[base + 1] = refreshWeights[contribution];
   }
   topologyWords.set(sourceDiagonalEntries, sourceDiagonalBase);
+  topologyWords.set(targetDiagonalEntries, targetDiagonalBase);
   if (levelIndex === 0) {
     for (let row = 0; row < source.geometry.length; row += 1) {
       const node = source.geometry[row];

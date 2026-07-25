@@ -191,17 +191,26 @@ test("parent-owned packed RAP gather reproduces every coarse coefficient without
   for (let level = 0; level + 1 < hierarchy.levels.length; level += 1) {
     const packed = packOctreePowerGalerkinLevel(hierarchy, operators, level);
     const source = hierarchy.levels[level];
+    const target = hierarchy.levels[level + 1];
     const diagonalBase = packed.topologyWords[13];
+    const targetDiagonalBase = packed.topologyWords[21];
     assert.ok(diagonalBase > 0);
+    assert.equal(targetDiagonalBase, diagonalBase + source.nodeCount);
     for (let row = 0; row < source.nodeCount; row += 1) {
       const entry = packed.topologyWords[diagonalBase + row];
       assert.ok(entry >= source.rowOffsets[row] && entry < source.rowOffsets[row + 1]);
       assert.equal(source.columns[entry], row);
     }
+    for (let row = 0; row < target.nodeCount; row += 1) {
+      const entry = packed.topologyWords[targetDiagonalBase + row];
+      assert.ok(entry >= target.rowOffsets[row] && entry < target.rowOffsets[row + 1]);
+      assert.equal(target.columns[entry], row);
+    }
     if (level === 0) {
       const cellToRowBase = packed.topologyWords[14];
       const geometryBase = packed.topologyWords[15];
-      assert.ok(diagonalBase > 0 && cellToRowBase > diagonalBase && geometryBase > cellToRowBase);
+      assert.ok(diagonalBase > 0 && targetDiagonalBase > diagonalBase
+        && cellToRowBase > targetDiagonalBase && geometryBase > cellToRowBase);
       assert.deepEqual([...packed.topologyWords.slice(16, 19)], [...hierarchy.dimensions]);
       assert.deepEqual(
         packed.topologyWords.slice(diagonalBase, diagonalBase + hierarchy.fineDiagonalEntries.length),

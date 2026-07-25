@@ -4,7 +4,7 @@ import { makeFineLevelSetSortedWorklistLookupWGSL } from "./webgpu-octree-fine-l
 
 export interface FineTransportPackedRegion { readonly offsetBytes: number; readonly sizeBytes: number }
 export interface FineTransportPackedSamplerPlan {
-  readonly direct: Readonly<Record<"rows" | "rowDirectory" | "velocities" | "tetraHeaders" | "tetraVertices" | "tetrahedra", FineTransportPackedRegion>>;
+  readonly direct: Readonly<Record<"rows" | "velocities" | "tetraHeaders" | "tetraVertices" | "tetrahedra", FineTransportPackedRegion>>;
   readonly air: Readonly<Record<"control" | "rows" | "rowDirectory" | "velocities" | "metrics" | "transition" | "point", FineTransportPackedRegion>>;
   readonly directBytes: number;
   readonly airBytes: number;

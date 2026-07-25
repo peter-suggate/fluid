@@ -40,7 +40,7 @@ var<workgroup> refreshPartial:array<f32,256>;
 var<workgroup> cgDirection:array<f32,64>;
 var<workgroup> cgActive:atomic<u32>;
 const MEASURE_PARTIAL_WORKGROUPS=32u;
-const RHS=0u;const A=1u;const B=2u;
+const RHS=0u;const A=1u;const B=2u;const DIAGONAL=3u;
 const INVALID_ROW_ERROR=1u;const NONFINITE=4u;const NONPOSITIVE=8u;const NONCONVERGED=16u;
 const ASSEMBLED=0x80000000u;const PROJECTED=0x40000000u;
 fn sourceCount()->u32{return topology[0];}fn targetCount()->u32{return topology[1];}
@@ -51,6 +51,7 @@ fn restrictionOffsetBase()->u32{return topology[6];}fn restrictionRecordBase()->
 fn refreshOffsetBase()->u32{return topology[8];}fn refreshRecordBase()->u32{return topology[9];}
 fn refreshRecordCount()->u32{return topology[10];}fn refreshRecordStride()->u32{return topology[11];}
 fn sourceDiagonalBase()->u32{return topology[13];}
+fn targetDiagonalBase()->u32{return topology[21];}
 fn fineCellToRowBase()->u32{return topology[14];}
 fn fineGeometryBase()->u32{return topology[15];}
 fn fineCellCount()->u32{return topology[19];}
@@ -95,13 +96,8 @@ fn sourceApplied(row:u32,channel:u32)->f32{
   value+=coefficient*sourceF(channel,column);}
  return value;
 }
-fn sourceDiagonal(row:u32)->f32{
- let entry=topology[sourceDiagonalBase()+row];
- if(entry<sourceEntries()&&sourceColumn(entry)==row){return sourceCoefficient(entry);}
- report(INVALID_ROW_ERROR);return 0.0;
-}
 fn smoothSource(row:u32,src:u32)->f32{
- let diagonal=sourceDiagonal(row);let current=sourceF(src,row);
+ let diagonal=sourceF(DIAGONAL,row);let current=sourceF(src,row);
  // Fixed hierarchy rows outside the current liquid operator are exact zero
  // equations. They must not become identity mass in P^T*A*P, and smoothing
  // must leave their zero correction alone without poisoning the solve.
@@ -136,7 +132,7 @@ fn smoothSource(row:u32,src:u32)->f32{
   sourceMatrix[sourceEntryBase(entry)+1u]=bitcast<u32>(0.0);
  }
  setSourceF(RHS,row,0.0);
- setSourceF(A,row,0.0);setSourceF(B,row,0.0);
+ setSourceF(A,row,0.0);setSourceF(B,row,0.0);setSourceF(DIAGONAL,row,0.0);
 }
 
 // Import changing coefficients/RHS from compact live rows into the immutable
@@ -165,6 +161,7 @@ fn smoothSource(row:u32,src:u32)->f32{
  }
  sourceMatrix[sourceEntryBase(diagonalEntry)+1u]=bitcast<u32>(header.diagonal);
  sourceVectors[row]=-header.rhs;
+ setSourceF(DIAGONAL,row,header.diagonal);
  var initial=compactCorrection[liveRow];
  if(!finite(initial)){report(NONFINITE);initial=0.0;}
  setSourceF(A,row,initial);
@@ -223,12 +220,21 @@ fn smoothSource(row:u32,src:u32)->f32{
  if(tileLane==0u&&valid){
   let total=refreshPartial[64u*tile];
   if(!finite(total)){report(NONFINITE);}
-  else{targetMatrix[targetEntryBase(targetEntry)+1u]=bitcast<u32>(total);}
+  else{
+   targetMatrix[targetEntryBase(targetEntry)+1u]=bitcast<u32>(total);
+   let column=targetColumn(targetEntry);
+   if(column>=targetCount()){report(INVALID_ROW_ERROR);}
+   else{
+    let diagonalEntry=topology[targetDiagonalBase()+column];
+    if(diagonalEntry>=targetEntries()){report(INVALID_ROW_ERROR);}
+    else if(diagonalEntry==targetEntry){setTargetF(DIAGONAL,column,total);}
+   }
+  }
  }
 }
 
 @compute @workgroup_size(64) fn clearSourceCorrection(@builtin(global_invocation_id) gid:vec3u){
- let count=arrayLength(&sourceVectors)/3u;let row=gid.x;
+ let count=arrayLength(&sourceVectors)/4u;let row=gid.x;
  if(row<count){sourceVectors[count+row]=0.0;sourceVectors[2u*count+row]=0.0;}
 }
 @compute @workgroup_size(64) fn smoothSourceAtoB(@builtin(global_invocation_id) gid:vec3u){
@@ -283,7 +289,7 @@ fn smoothSource(row:u32,src:u32)->f32{
  // A zero diagonal identifies a fixed row outside the current operator.
  // Prolongating into it would manufacture a nonzero value for a zero equation
  // and then make the following smoother reject an otherwise valid solve.
- if(sourceDiagonal(fine)==0.0){setSourceF(A,fine,0.0);return;}
+ if(sourceF(DIAGONAL,fine)==0.0){setSourceF(A,fine,0.0);return;}
  var correction=sourceF(A,fine);
  let first=topology[pOffsetBase()+fine];let end=topology[pOffsetBase()+fine+1u];
  if(first>end||end>pCount()){report(INVALID_ROW_ERROR);return;}
@@ -556,7 +562,7 @@ export class WebGPUOctreePowerGalerkin {
       upload(`Power Galerkin L${level} matrix`, words, storage));
     this.vectors = hierarchy.levels.map((level, index) => device.createBuffer({
       label: `Power Galerkin L${index} vectors`,
-      size: Math.max(4, 3 * level.nodeCount * Float32Array.BYTES_PER_ELEMENT),
+      size: Math.max(4, 4 * level.nodeCount * Float32Array.BYTES_PER_ELEMENT),
       usage: storage,
     }));
     this.topologies = packed.map((level, index) =>
@@ -600,12 +606,12 @@ export class WebGPUOctreePowerGalerkin {
     const bindings: Readonly<Record<OctreePowerGalerkinPipelineName, readonly number[]>> = {
       initializeFineOperator: [0, 2, 3, 5],
       importFineOperator: [0, 2, 3, 5, 7, 8, 9, 10],
-      refreshGalerkinTarget: [0, 1, 2, 5],
+      refreshGalerkinTarget: [0, 1, 2, 4, 5],
       clearSourceCorrection: [3],
       smoothSourceAtoB: [0, 2, 3, 5, 6],
       smoothSourceBtoA: [0, 2, 3, 5, 6],
       restrictSourceDefect: [0, 2, 3, 4, 5],
-      prolongateTargetCorrection: [0, 2, 3, 4, 5],
+      prolongateTargetCorrection: [2, 3, 4, 5],
       solveTargetCoarsest: [1, 2, 4, 5],
       measureSourceResidualPartials: [0, 2, 3, 5, 11],
       measureSourceResidualReduce: [5, 6, 11],
@@ -689,7 +695,7 @@ export class WebGPUOctreePowerGalerkin {
     this.finestVectors = this.vectors[0];
     this.allocatedBytes = matrixWords.reduce((sum, words) => sum + words.byteLength, 0)
       + packed.reduce((sum, level) => sum + level.topologyWords.byteLength, 0)
-      + hierarchy.levels.reduce((sum, level) => sum + 3 * level.nodeCount * 4, 0)
+      + hierarchy.levels.reduce((sum, level) => sum + 4 * level.nodeCount * 4, 0)
       + hierarchy.levels[0].nodeCount * 4
       + OCTREE_POWER_GALERKIN_CONTROL_BYTES + 16;
   }
