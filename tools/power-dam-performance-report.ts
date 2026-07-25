@@ -127,6 +127,8 @@ const POWER_DAM_COMPUTE_PASS_OWNERSHIP: readonly PowerDamComputePassOwnershipRul
   { stage: "Fine transport · advance trajectories", label: /^Advance global fine trajectories \d+\/\d+$/i },
   { stage: "Fine transport · sample departure chunks", label: /^Sample global fine departure chunk \d+\/\d+$/i },
   { stage: "Fine transport · summarize departure chunks", label: /^Summarize global fine departure chunk \d+\/\d+$/i },
+  { stage: "Fine transport · finalize departure summaries", label: /^Finalize global fine departure chunk \d+\/\d+$/i },
+  { stage: "Fine transport · grouped authorities", label: /^Publish grouped Stage-B and face-band transport authorities$/i },
   { stage: "Fine transport", label: /(?:fine characteristic|fine trajector|fine departure|global fine (?:transport|dispatches)|direct Stage-B transport|grouped direct Stage-B|power trajectory Stage-B)/i },
   { stage: "Fine summaries", label: /fine summar/i },
   { stage: "Fine redistance / volume", label: /(?:Fine redistance|fine level-set JFA|JFA closest-point redistance|global (?:fine )?volume|compact coarse volume|fine overlap|Fine volume correction)/i },

@@ -14,6 +14,9 @@ import {
 import type { PassBroker } from "./webgpu-pass-broker";
 
 export const FINE_LEVELSET_TRANSPORT_CONTROL_BYTES = 64;
+/** Each summary workgroup reduces this many trajectory outcomes before a
+ * deterministic second-level chunk reduction. */
+export const FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP = 4_096;
 
 export interface FineLevelSetGPUTransportControl {
   departureOutsideBand: number;
@@ -61,6 +64,8 @@ export interface FineLevelSetGPUTransportPlan {
   readonly positionBytes: number;
   readonly outcomeBytes: number;
   readonly summaryBytes: number;
+  readonly partialSummaryBytes: number;
+  readonly partialSummaryGroupsPerChunk: number;
   readonly dispatchMetadataBytes: number;
   readonly dispatchArgumentsOffsetBytes: number;
   readonly indirectBytes: number;
@@ -93,6 +98,11 @@ export function planFineLevelSetGPUTransport(queryCapacity: number,
   const outcomeBytes = positionCapacity * 8;
   const chunkCount = Math.ceil(queryCapacity / velocityChunkCapacity);
   const summaryBytes = chunkCount * FINE_LEVELSET_TRANSPORT_CONTROL_BYTES;
+  const partialSummaryGroupsPerChunk = Math.ceil(
+    velocityChunkCapacity / FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP,
+  );
+  const partialSummaryBytes = chunkCount * partialSummaryGroupsPerChunk
+    * FINE_LEVELSET_TRANSPORT_CONTROL_BYTES;
   const dispatchArgumentsOffsetBytes = (8 + chunkCount) * 4;
   // Trace/summary records are followed by the sample commit and one page
   // commit record. The latter lets the producer publish one phase mask per
@@ -102,10 +112,11 @@ export function planFineLevelSetGPUTransport(queryCapacity: number,
   const topologyDeltaBytes = pageCapacity === 0 ? 0 : (8 + 2 * pageCapacity) * 4;
   const chunkParameterStride = 128, chunkParameterBytes = chunkCount * chunkParameterStride;
   return { queryCapacity, velocityChunkCapacity, positionCapacity, positionBytes, outcomeBytes, summaryBytes,
+    partialSummaryBytes, partialSummaryGroupsPerChunk,
     dispatchMetadataBytes, dispatchArgumentsOffsetBytes, indirectBytes, topologyDeltaBytes,
     chunkCount, chunkParameterStride, chunkParameterBytes,
     controlBytes: FINE_LEVELSET_TRANSPORT_CONTROL_BYTES,
-    allocatedBytes: positionBytes + outcomeBytes + summaryBytes + chunkParameterBytes
+    allocatedBytes: positionBytes + outcomeBytes + summaryBytes + partialSummaryBytes + chunkParameterBytes
       + dispatchMetadataBytes + indirectBytes + topologyDeltaBytes
       + 16 + FINE_LEVELSET_TRANSPORT_CONTROL_BYTES };
 }
@@ -177,11 +188,13 @@ export class WebGPUFineLevelSetTransport {
   private readonly positions: GPUBuffer;
   private readonly outcomes: GPUBuffer;
   private readonly chunkSummaries: GPUBuffer;
+  private readonly partialSummaries: GPUBuffer;
   private readonly dispatchMetadata: GPUBuffer;
   private readonly indirectDispatch: GPUBuffer;
   private readonly dispatchParams: GPUBuffer;
   private readonly prepareDispatchPipeline: GPUComputePipeline;
   private readonly summarizePipeline: GPUComputePipeline;
+  private readonly finalizeSummaryPipeline: GPUComputePipeline;
   private readonly publishPipeline: GPUComputePipeline;
   private readonly commitPipeline: GPUComputePipeline;
   private readonly publishTopologyDeltaPipeline: GPUComputePipeline;
@@ -219,6 +232,8 @@ export class WebGPUFineLevelSetTransport {
       size: this.plan.outcomeBytes, usage: GPUBufferUsage.STORAGE });
     this.chunkSummaries = device.createBuffer({ label: "fine-levelset transport chunk summaries",
       size: this.plan.summaryBytes, usage: GPUBufferUsage.STORAGE });
+    this.partialSummaries = device.createBuffer({ label: "fine-levelset transport parallel summary partials",
+      size: this.plan.partialSummaryBytes, usage: GPUBufferUsage.STORAGE });
     this.dispatchMetadata = device.createBuffer({ label: "fine-levelset validated live dispatch publication",
       size: this.plan.dispatchMetadataBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     this.indirectDispatch = device.createBuffer({ label: "fine-levelset immutable live dispatches",
@@ -246,6 +261,8 @@ export class WebGPUFineLevelSetTransport {
     this.prepareDispatchPipeline = pipeline("prepareFineTransportDispatch",
       "Publish validated fine transport dispatches");
     this.summarizePipeline = pipeline("summarizeFineTransportChunk", "Summarize fine transport chunk");
+    this.finalizeSummaryPipeline = pipeline("finalizeFineTransportChunkSummary",
+      "Finalize fine transport chunk summary");
     this.publishPipeline = pipeline("publishFineTransport", "Publish fine transport status");
     this.commitPipeline = pipeline("commitFineTransport", "Commit fine transport");
     this.publishTopologyDeltaPipeline = pipeline("publishFineTransportTopologyDelta",
@@ -322,8 +339,13 @@ export class WebGPUFineLevelSetTransport {
         fineGeneration: this.source.generation,
         powerTopology: options.powerTopology,
       });
+      // Keep authority publication and characteristic work in distinct GPU
+      // passes. Besides making timestamp attribution honest, this gives Metal
+      // an explicit producer/consumer boundary for the packed storage arenas.
+      broker.compute({ label: "Publish grouped Stage-B and face-band transport authorities" });
       this.velocityPrepass.encodeFusedAuthority(broker, options.rowVelocities);
       this.faceBand.encodeFusedAuthority(broker);
+      broker.fence("grouped transport authorities published");
     }
     run(this.prepareDispatchPipeline, [
       { binding: 0, resource: binding(this.source.params) },
@@ -332,6 +354,7 @@ export class WebGPUFineLevelSetTransport {
       { binding: 14, resource: binding(this.dispatchMetadata) },
       { binding: 16, resource: binding(this.dispatchParams) },
     ], "Validate and publish live global fine dispatches", 1);
+    broker.fence("fine transport dispatches validated");
     // The resident narrow band is normally within a few percent of its fixed
     // allocation (4,024 of 4,096 pages in the UI dam). Replaying its compact
     // GPU-authored indirect records added a pass boundary and, on the current
@@ -380,13 +403,22 @@ export class WebGPUFineLevelSetTransport {
           { binding: 19, resource: binding(options.ownerTopology) },
         ], `Trace and sample global fine characteristic ${chunk + 1}/${this.plan.chunkCount}`,
         Math.ceil(this.plan.velocityChunkCapacity / 64));
+        broker.fence("fine characteristic traced");
         run(this.summarizePipeline, [
           { binding: 0, resource: binding(this.source.params) },
           { binding: 10, resource: binding(this.positions) }, { binding: 12, resource: binding(this.outcomes) },
+          { binding: 14, resource: binding(this.dispatchMetadata) },
+          { binding: 15, resource: binding(this.fused.params[chunk]) },
+          { binding: 18, resource: binding(this.partialSummaries) },
+        ], `Summarize global fine departure chunk ${chunk + 1}/${this.plan.chunkCount}`,
+        this.plan.partialSummaryGroupsPerChunk);
+        run(this.finalizeSummaryPipeline, [
           { binding: 13, resource: binding(this.chunkSummaries) },
           { binding: 14, resource: binding(this.dispatchMetadata) },
           { binding: 15, resource: binding(this.fused.params[chunk]) },
-        ], `Summarize global fine departure chunk ${chunk + 1}/${this.plan.chunkCount}`, 1);
+          { binding: 18, resource: binding(this.partialSummaries) },
+        ], `Finalize global fine departure chunk ${chunk + 1}/${this.plan.chunkCount}`, 1);
+        broker.fence("fine departure chunk summarized");
       }
     }
     run(this.publishPipeline, [{ binding: 0, resource: binding(this.source.params) },
@@ -394,6 +426,7 @@ export class WebGPUFineLevelSetTransport {
       { binding: 13, resource: binding(this.chunkSummaries) },
       { binding: 14, resource: binding(this.dispatchMetadata) }],
       "Publish global fine transport", 1);
+    broker.fence("fine transport status published");
     run(this.commitPipeline, [
       { binding: 0, resource: binding(this.source.params) },
       { binding: 2, resource: binding(this.source.metadata) },
@@ -403,6 +436,7 @@ export class WebGPUFineLevelSetTransport {
       { binding: 7, resource: binding(this.control) },
       { binding: 17, resource: binding(this.topologyDelta.buffer) }],
     "Commit global fine transport phase masks", this.source.plan.maximumResidentBricks);
+    broker.fence("fine transport phase masks committed");
     run(this.publishTopologyDeltaPipeline, [
       { binding: 0, resource: binding(this.source.params) },
       { binding: 2, resource: binding(this.source.metadata) },
@@ -419,6 +453,7 @@ export class WebGPUFineLevelSetTransport {
     this.positions.destroy();
     this.outcomes.destroy();
     this.chunkSummaries.destroy();
+    this.partialSummaries.destroy();
     this.dispatchMetadata.destroy();
     this.indirectDispatch.destroy();
     this.dispatchParams.destroy();
@@ -454,6 +489,7 @@ struct DispatchP{chunkCapacity:u32,chunkCount:u32,maxDispatchX:u32,argsWordOffse
 @group(0)@binding(15)var<uniform>pack:Pack;
 @group(0)@binding(16)var<uniform>dispatchP:DispatchP;
 @group(0)@binding(17)var<storage,read_write>topologyDelta:array<u32>;
+@group(0)@binding(18)var<storage,read_write>partialSummaries:array<u32>;
 const DEPARTURE:u32=1u;const NONFINITE:u32=2u;const PROCESSED:u32=4u;const FACE_UNAVAILABLE:u32=8u;const VELOCITY_UNAVAILABLE:u32=16u;const INVALID_STATUS:u32=32u;const NONPOSITIVE:u32=64u;
 const PAGE_INTERFACE:u32=2u;const PAGE_PHASE_DIRTY:u32=4u;
 fn finiteScalar(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
@@ -471,7 +507,8 @@ fn writeDispatch(record:u32,items:u32){let base=dispatchP.argsWordOffset+record*
 var<workgroup>s0:array<u32,64>;var<workgroup>s1:array<u32,64>;var<workgroup>s2:array<u32,64>;var<workgroup>s4:array<u32,64>;var<workgroup>s5:array<u32,64>;var<workgroup>s6:array<u32,64>;var<workgroup>s7:array<u32,64>;var<workgroup>s8:array<u32,64>;var<workgroup>s9:array<u32,64>;var<workgroup>s10:array<u32,64>;var<workgroup>s11:array<u32,64>;var<workgroup>s12:array<u32,64>;var<workgroup>s13:array<u32,64>;var<workgroup>s14:array<u32,64>;var<workgroup>s15:array<u32,64>;
 fn reduceLane(lid:u32){var stride=32u;loop{if(stride==0u){break;}if(lid<stride){s0[lid]+=s0[lid+stride];s1[lid]+=s1[lid+stride];s2[lid]+=s2[lid+stride];s4[lid]+=s4[lid+stride];s5[lid]=max(s5[lid],s5[lid+stride]);s6[lid]+=s6[lid+stride];s7[lid]+=s7[lid+stride];s8[lid]+=s8[lid+stride];s9[lid]+=s9[lid+stride];s10[lid]|=s10[lid+stride];if(s12[lid+stride]<s12[lid]){s11[lid]=s11[lid+stride];s12[lid]=s12[lid+stride];s13[lid]=s13[lid+stride];s14[lid]=s14[lid+stride];s15[lid]=s15[lid+stride];}}workgroupBarrier();stride/=2u;}}
 fn initializeSummaryLane(lid:u32,departure:u32,nonfinite:u32,processed:u32,extrapolated:u32,displacement:u32,faceUnavailable:u32,velocityUnavailable:u32,invalidStatus:u32,nonpositive:u32,reasonOr:u32,firstStatus:u32,firstIndex:u32,x:u32,y:u32,z:u32){s0[lid]=departure;s1[lid]=nonfinite;s2[lid]=processed;s4[lid]=extrapolated;s5[lid]=displacement;s6[lid]=faceUnavailable;s7[lid]=velocityUnavailable;s8[lid]=invalidStatus;s9[lid]=nonpositive;s10[lid]=reasonOr;s11[lid]=firstStatus;s12[lid]=firstIndex;s13[lid]=x;s14[lid]=y;s15[lid]=z;}
-@compute @workgroup_size(64)fn summarizeFineTransportChunk(@builtin(local_invocation_index)lid:u32){var departure=0u;var nonfinite=0u;var processed=0u;var extrapolated=0u;var displacement=0u;var faceUnavailable=0u;var velocityUnavailable=0u;var invalidStatus=0u;var nonpositive=0u;var reasonOr=0u;var firstStatus=INVALID;var firstIndex=INVALID;var firstX=0u;var firstY=0u;var firstZ=0u;let chunk=pack.chunkBase/dispatchMetadata[4];let live=select(0u,dispatchMetadata[8u+chunk],dispatchMetadata[0]==1u&&dispatchMetadata[1]==params.generation&&chunk<dispatchMetadata[3]);for(var i=lid;i<live;i+=64u){let outcome=outcomes[i];let flags=outcomeFlags(outcome.x);departure+=select(0u,1u,(flags&DEPARTURE)!=0u);nonfinite+=select(0u,1u,(flags&NONFINITE)!=0u);processed+=select(0u,1u,(flags&PROCESSED)!=0u);extrapolated+=outcomeExtrapolated(outcome.x);displacement=max(displacement,outcomeDisplacement(outcome.x));faceUnavailable+=select(0u,1u,(flags&FACE_UNAVAILABLE)!=0u);velocityUnavailable+=select(0u,1u,(flags&VELOCITY_UNAVAILABLE)!=0u);invalidStatus+=select(0u,1u,(flags&INVALID_STATUS)!=0u);nonpositive+=select(0u,1u,(flags&NONPOSITIVE)!=0u);if((flags&INVALID_STATUS)!=0u){reasonOr|=outcome.y;}if((flags&(INVALID_STATUS|DEPARTURE))!=0u&&pack.chunkBase+i<firstIndex){firstIndex=pack.chunkBase+i;firstStatus=outcome.y;firstX=bitcast<u32>(positions[i].x);firstY=bitcast<u32>(positions[i].y);firstZ=bitcast<u32>(positions[i].z);}}initializeSummaryLane(lid,departure,nonfinite,processed,extrapolated,displacement,faceUnavailable,velocityUnavailable,invalidStatus,nonpositive,reasonOr,firstStatus,firstIndex,firstX,firstY,firstZ);workgroupBarrier();reduceLane(lid);if(lid==0u){let base=chunk*16u;if(base+15u<arrayLength(&chunkSummaries)){chunkSummaries[base]=s0[0];chunkSummaries[base+1u]=s1[0];chunkSummaries[base+2u]=s2[0];chunkSummaries[base+3u]=0u;chunkSummaries[base+4u]=s4[0];chunkSummaries[base+5u]=s5[0];chunkSummaries[base+6u]=s6[0];chunkSummaries[base+7u]=s7[0];chunkSummaries[base+8u]=s8[0];chunkSummaries[base+9u]=s9[0];chunkSummaries[base+10u]=s10[0];chunkSummaries[base+11u]=s11[0];chunkSummaries[base+12u]=s12[0];chunkSummaries[base+13u]=s13[0];chunkSummaries[base+14u]=s14[0];chunkSummaries[base+15u]=s15[0];}}}
+@compute @workgroup_size(64)fn summarizeFineTransportChunk(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){var departure=0u;var nonfinite=0u;var processed=0u;var extrapolated=0u;var displacement=0u;var faceUnavailable=0u;var velocityUnavailable=0u;var invalidStatus=0u;var nonpositive=0u;var reasonOr=0u;var firstStatus=INVALID;var firstIndex=INVALID;var firstX=0u;var firstY=0u;var firstZ=0u;let chunk=pack.chunkBase/dispatchMetadata[4];let live=select(0u,dispatchMetadata[8u+chunk],dispatchMetadata[0]==1u&&dispatchMetadata[1]==params.generation&&chunk<dispatchMetadata[3]);let groups=(dispatchMetadata[4]+${FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP - 1}u)/${FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP}u;let begin=wg.x*${FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP}u;let end=min(begin+${FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP}u,live);for(var i=begin+lid;i<end;i+=64u){let outcome=outcomes[i];let flags=outcomeFlags(outcome.x);departure+=select(0u,1u,(flags&DEPARTURE)!=0u);nonfinite+=select(0u,1u,(flags&NONFINITE)!=0u);processed+=select(0u,1u,(flags&PROCESSED)!=0u);extrapolated+=outcomeExtrapolated(outcome.x);displacement=max(displacement,outcomeDisplacement(outcome.x));faceUnavailable+=select(0u,1u,(flags&FACE_UNAVAILABLE)!=0u);velocityUnavailable+=select(0u,1u,(flags&VELOCITY_UNAVAILABLE)!=0u);invalidStatus+=select(0u,1u,(flags&INVALID_STATUS)!=0u);nonpositive+=select(0u,1u,(flags&NONPOSITIVE)!=0u);if((flags&INVALID_STATUS)!=0u){reasonOr|=outcome.y;}if((flags&(INVALID_STATUS|DEPARTURE))!=0u&&pack.chunkBase+i<firstIndex){firstIndex=pack.chunkBase+i;firstStatus=outcome.y;firstX=bitcast<u32>(positions[i].x);firstY=bitcast<u32>(positions[i].y);firstZ=bitcast<u32>(positions[i].z);}}initializeSummaryLane(lid,departure,nonfinite,processed,extrapolated,displacement,faceUnavailable,velocityUnavailable,invalidStatus,nonpositive,reasonOr,firstStatus,firstIndex,firstX,firstY,firstZ);workgroupBarrier();reduceLane(lid);if(lid==0u&&wg.x<groups){let base=(chunk*groups+wg.x)*16u;if(base+15u<arrayLength(&partialSummaries)){partialSummaries[base]=s0[0];partialSummaries[base+1u]=s1[0];partialSummaries[base+2u]=s2[0];partialSummaries[base+3u]=0u;partialSummaries[base+4u]=s4[0];partialSummaries[base+5u]=s5[0];partialSummaries[base+6u]=s6[0];partialSummaries[base+7u]=s7[0];partialSummaries[base+8u]=s8[0];partialSummaries[base+9u]=s9[0];partialSummaries[base+10u]=s10[0];partialSummaries[base+11u]=s11[0];partialSummaries[base+12u]=s12[0];partialSummaries[base+13u]=s13[0];partialSummaries[base+14u]=s14[0];partialSummaries[base+15u]=s15[0];}}}
+@compute @workgroup_size(64)fn finalizeFineTransportChunkSummary(@builtin(local_invocation_index)lid:u32){var departure=0u;var nonfinite=0u;var processed=0u;var extrapolated=0u;var displacement=0u;var faceUnavailable=0u;var velocityUnavailable=0u;var invalidStatus=0u;var nonpositive=0u;var reasonOr=0u;var firstStatus=INVALID;var firstIndex=INVALID;var firstX=0u;var firstY=0u;var firstZ=0u;let chunk=pack.chunkBase/dispatchMetadata[4];let groups=(dispatchMetadata[4]+${FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP - 1}u)/${FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP}u;for(var group=lid;group<groups;group+=64u){let base=(chunk*groups+group)*16u;if(base+15u>=arrayLength(&partialSummaries)){continue;}departure+=partialSummaries[base];nonfinite+=partialSummaries[base+1u];processed+=partialSummaries[base+2u];extrapolated+=partialSummaries[base+4u];displacement=max(displacement,partialSummaries[base+5u]);faceUnavailable+=partialSummaries[base+6u];velocityUnavailable+=partialSummaries[base+7u];invalidStatus+=partialSummaries[base+8u];nonpositive+=partialSummaries[base+9u];reasonOr|=partialSummaries[base+10u];if(partialSummaries[base+12u]<firstIndex){firstStatus=partialSummaries[base+11u];firstIndex=partialSummaries[base+12u];firstX=partialSummaries[base+13u];firstY=partialSummaries[base+14u];firstZ=partialSummaries[base+15u];}}initializeSummaryLane(lid,departure,nonfinite,processed,extrapolated,displacement,faceUnavailable,velocityUnavailable,invalidStatus,nonpositive,reasonOr,firstStatus,firstIndex,firstX,firstY,firstZ);workgroupBarrier();reduceLane(lid);if(lid==0u){let base=chunk*16u;if(base+15u<arrayLength(&chunkSummaries)){chunkSummaries[base]=s0[0];chunkSummaries[base+1u]=s1[0];chunkSummaries[base+2u]=s2[0];chunkSummaries[base+3u]=0u;chunkSummaries[base+4u]=s4[0];chunkSummaries[base+5u]=s5[0];chunkSummaries[base+6u]=s6[0];chunkSummaries[base+7u]=s7[0];chunkSummaries[base+8u]=s8[0];chunkSummaries[base+9u]=s9[0];chunkSummaries[base+10u]=s10[0];chunkSummaries[base+11u]=s11[0];chunkSummaries[base+12u]=s12[0];chunkSummaries[base+13u]=s13[0];chunkSummaries[base+14u]=s14[0];chunkSummaries[base+15u]=s15[0];}}}
 @compute @workgroup_size(64)fn publishFineTransport(@builtin(local_invocation_index)lid:u32){var departure=0u;var nonfinite=0u;var processed=0u;var extrapolated=0u;var displacement=0u;var faceUnavailable=0u;var velocityUnavailable=0u;var invalidStatus=0u;var nonpositive=0u;var reasonOr=0u;var firstStatus=INVALID;var firstIndex=INVALID;var firstX=0u;var firstY=0u;var firstZ=0u;let dispatchValid=dispatchMetadata[0]==1u&&dispatchMetadata[1]==params.generation;let count=select(0u,min(dispatchMetadata[3],arrayLength(&chunkSummaries)/16u),dispatchValid);for(var i=lid;i<count;i+=64u){let base=i*16u;departure+=chunkSummaries[base];nonfinite+=chunkSummaries[base+1u];processed+=chunkSummaries[base+2u];extrapolated+=chunkSummaries[base+4u];displacement=max(displacement,chunkSummaries[base+5u]);faceUnavailable+=chunkSummaries[base+6u];velocityUnavailable+=chunkSummaries[base+7u];invalidStatus+=chunkSummaries[base+8u];nonpositive+=chunkSummaries[base+9u];reasonOr|=chunkSummaries[base+10u];if(chunkSummaries[base+12u]<firstIndex){firstStatus=chunkSummaries[base+11u];firstIndex=chunkSummaries[base+12u];firstX=chunkSummaries[base+13u];firstY=chunkSummaries[base+14u];firstZ=chunkSummaries[base+15u];}}initializeSummaryLane(lid,departure,nonfinite,processed,extrapolated,displacement,faceUnavailable,velocityUnavailable,invalidStatus,nonpositive,reasonOr,firstStatus,firstIndex,firstX,firstY,firstZ);workgroupBarrier();reduceLane(lid);if(lid==0u){control.departureOutsideBand=s0[0];control.nonfiniteVelocity=s1[0];control.processed=s2[0];control.committed=select(0u,1u,dispatchValid&&s0[0]==0u&&s1[0]==0u&&s7[0]==0u);control.extrapolatedVelocity=s4[0];control.maximumDisplacementFineCells=s5[0];control.faceBandUnavailable=s6[0];control.velocityUnavailable=s7[0];control.invalidVelocityStatus=s8[0];control.nonpositiveVelocityResult=s9[0];control.velocityStatusReasonOr=s10[0];control.firstInvalidVelocityStatus=s11[0];control.firstInvalidVelocityLocalIndex=s12[0];control.firstInvalidVelocityX=s13[0];control.firstInvalidVelocityY=s14[0];control.firstInvalidVelocityZ=s15[0];}}
 var<workgroup>pageChanged:array<u32,64>;var<workgroup>pageOldInterface:array<u32,64>;var<workgroup>pageInterface:array<u32,64>;var<workgroup>pageNeighbors:array<u32,6>;
 fn localCoord(local:u32)->vec3u{let x=local%params.brickResolution;let yz=local/params.brickResolution;return vec3u(x,yz%params.brickResolution,yz/params.brickResolution);}

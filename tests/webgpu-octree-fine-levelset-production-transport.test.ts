@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
+  FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP,
   fineLevelSetFusedTransportPublicationWGSL,
+  planFineLevelSetGPUTransport,
   WebGPUFineLevelSetTransport,
 } from "../lib/webgpu-octree-fine-levelset-transport";
 import {
@@ -28,6 +30,29 @@ test("fused air transport consumes the retained power-generation clock", () => {
   assert.match(source,
     /fineGeneration:this\.source\.generation/,
     "air-side extrapolation must validate the retained Section 5 face band, not the successor fine generation");
+});
+
+test("fine GPU timestamps attribute authorities, tracing, summaries, and commits separately", () => {
+  const source = WebGPUFineLevelSetTransport.prototype.encode.toString().replace(/\s+/g, "");
+  assert.match(source,
+    /PublishgroupedStage-Bandface-bandtransportauthorities.*encodeFusedAuthority.*encodeFusedAuthority.*groupedtransportauthoritiespublished.*Validateandpublishliveglobalfinedispatches.*finetransportdispatchesvalidated.*Traceandsampleglobalfinecharacteristic.*finecharacteristictraced.*Summarizeglobalfinedeparturechunk.*finedeparturechunksummarized.*Publishglobalfinetransport.*finetransportstatuspublished.*Commitglobalfinetransportphasemasks.*finetransportphasemaskscommitted/s,
+    "each expensive transport substage must own an independently timestampable compute pass");
+});
+
+test("fine departure diagnostics use a deterministic parallel two-level reduction", () => {
+  const queryCapacity = 24 * 18 * 16 * 4 ** 3;
+  const plan = planFineLevelSetGPUTransport(queryCapacity, queryCapacity);
+  assert.equal(FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP, 4_096);
+  assert.equal(plan.partialSummaryGroupsPerChunk, 108);
+  assert.equal(plan.partialSummaryBytes, 108 * 64);
+  const partial = wgslFunction(fineLevelSetFusedTransportPublicationWGSL,
+    "summarizeFineTransportChunk");
+  const finalize = wgslFunction(fineLevelSetFusedTransportPublicationWGSL,
+    "finalizeFineTransportChunkSummary");
+  assert.match(partial, /begin=wg\.x\*4096u.*partialSummaries/s);
+  assert.match(finalize, /for\(vargroup=lid;group<groups;group\+=64u\).*chunkSummaries/s);
+  assert.doesNotMatch(partial + finalize, /atomic/,
+    "summary ordering and first-error payload selection must remain deterministic");
 });
 
 test("production fused transport accepts only the physical input clock or its exact band predecessor", () => {

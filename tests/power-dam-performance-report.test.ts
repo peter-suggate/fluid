@@ -118,6 +118,10 @@ test("compute-pass attribution aggregates indexed native labels into stable owni
   };
   computePassesByLabel["Prepare global fine trajectory chunk 1/4"] = { calls: 2, bytes: 0 };
   computePassesByLabel["Prepare global fine trajectory chunk 2/4"] = { calls: 2, bytes: 0 };
+  computePassesByLabel["Publish grouped Stage-B and face-band transport authorities"] =
+    { calls: 2, bytes: 0 };
+  computePassesByLabel["Summarize global fine departure chunk 1/1"] = { calls: 2, bytes: 0 };
+  computePassesByLabel["Finalize global fine departure chunk 1/1"] = { calls: 2, bytes: 0 };
   computePassesByLabel["Rank fixed octree fine-seed candidate records"] = { calls: 2, bytes: 0 };
   computePassesByLabel["Finalize octree fine-seed candidate publication"] = { calls: 2, bytes: 0 };
   const summary = summarizePowerDamPerformance({
@@ -127,6 +131,9 @@ test("compute-pass attribution aggregates indexed native labels into stable owni
   assert.deepEqual(summary.commands?.computePassesByStage, {
     "Section 5 face band · catalog adjacency": 2,
     "Fine transport · prepare trajectory chunks": 2,
+    "Fine transport · grouped authorities": 1,
+    "Fine transport · summarize departure chunks": 1,
+    "Fine transport · finalize departure summaries": 1,
     "Fine seed adapter": 2,
   });
   assert.equal(summary.commands?.computePassesByLabel["Resolve Section 5 catalog adjacency"], 1);

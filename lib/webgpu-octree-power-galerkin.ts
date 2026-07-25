@@ -122,6 +122,16 @@ fn smoothSource(row:u32,src:u32)->f32{
  let row=gid.x;if(row>=sourceCount()){return;}
  let first=sourceMatrix[row];let end=sourceMatrix[row+1u];
  if(first>end||end>sourceEntries()){report(INVALID_ROW_ERROR);return;}
+ // At the end of every accepted import, exactly the live fixed rows have
+ // nonzero diagonals. An inactive row was cleared when it last left that set
+ // and remains an exact zero equation, so recurring initialization only needs
+ // to revisit the prior live subset. The constructor's seeded unit diagonal
+ // deliberately makes the cold publication clear the complete arena once.
+ let diagonalEntry=topology[sourceDiagonalBase()+row];
+ if(diagonalEntry>=sourceEntries()||sourceColumn(diagonalEntry)!=row){
+  report(INVALID_ROW_ERROR);return;
+ }
+ if(sourceCoefficient(diagonalEntry)==0.0){return;}
  for(var entry=first;entry<end;entry+=1u){
   sourceMatrix[sourceEntryBase(entry)+1u]=bitcast<u32>(0.0);
  }

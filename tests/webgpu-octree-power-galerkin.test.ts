@@ -29,6 +29,9 @@ test("native L2 Galerkin kernels use parent-owned gathers without probes or nume
   assert.match(octreePowerGalerkinShader,
     /initializeFineOperator[\s\S]*bitcast<u32>\(0\.0\)[\s\S]*setSourceF\(A,row,0\.0\);setSourceF\(B,row,0\.0\)/,
     "inactive fixed rows must be zero equations and must not contaminate P^T*A*P with identity mass");
+  assert.match(octreePowerGalerkinShader,
+    /initializeFineOperator[\s\S]*sourceCoefficient\(diagonalEntry\)==0\.0\)\{return;\}[\s\S]*for\(var entry=first/,
+    "recurring initialization must skip fixed rows already known to be exact zero equations");
   assert.match(octreePowerGalerkinShader, /smoothSource[\s\S]*diagonal==0\.0/);
   assert.match(octreePowerGalerkinShader,
     /fn stopped\(\)->bool[\s\S]*control\[1\][\s\S]*smoothSourceAtoB[\s\S]*!stopped\(\)/);
