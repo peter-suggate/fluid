@@ -600,7 +600,16 @@ fn advect(cls:u32,index:u32,transition:bool){
   var adv=invalidVector();
   if(useTransition){adv=transitionSample(row,x);}else{adv=regularSample(row,x);}
   if(!vectorValid(adv)){transportMetrics[handle]=adv;rejectVector(1u,handle,adv,cls);return;}
-  let departure=x-p.physical.y*adv.xyz;
+  // Second-order midpoint backtrace, as main's old-mesh advection performed
+  // (v0 at the face, vm at the half-step, departure from vm). A first-order
+  // Euler trace dissipates O(dt^2*|v|*|grad v|) per step, which measured as
+  // mechanical-energy retention decaying to 0.83 by t=0.24 s on the mini dam
+  // while the midpoint scheme holds ~0.99.
+  let midpoint=x-.5*p.physical.y*adv.xyz;
+  var middle=invalidVector();
+  if(useTransition){middle=transitionSample(row,midpoint);}else{middle=regularSample(row,midpoint);}
+  if(!vectorValid(middle)){transportMetrics[handle]=middle;rejectVector(1u,handle,middle,cls);return;}
+  let departure=x-p.physical.y*middle.xyz;
   var transported=invalidVector();
   if(useTransition){transported=transitionSample(row,departure);}else{transported=regularSample(row,departure);}
   if(!vectorValid(transported)){transportMetrics[handle]=transported;rejectVector(2u,handle,transported,cls);return;}

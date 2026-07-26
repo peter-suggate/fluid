@@ -764,7 +764,7 @@ test("rediscretized A2 owns coarse-fine contacts through spatial pages", () => {
     /fn rebuildCandidateGhostsFor[\s\S]*catalogCoefficients\[base\+1u\+channel\][\s\S]*cLookup\(l\+1u,vec3u\(targetQ\)\/2u\)/,
     "catalog directions must spawn fine aliases only when the physical target resolves to a coarse active owner");
   assert.match(spgridVCycleSource,
-    /fn finerAdjoint[\s\S]*pageSlot\(fine,ghostPage,ghostQ,vec3u\(activeQ\)\)[\s\S]*coefficientForDirection\(other,otherMetric,delta\)/,
+    /fn finerAdjoint[\s\S]*pageSlot\(fine,ghostPage,ghostQ,vec3u\(activeQ\),row\)[\s\S]*coefficientForDirection\(other,otherMetric,delta\)/,
     "destination-owned E^T must gather coarse-fine contacts through physical page adjacency");
   assert.match(spgridVCycleSource,
     /fn applyRow[\s\S]*section63Coefficients\[base\+1u\+channel\][\s\S]*value\+=c\*\(x-inputVector\[encoded-1u\]\)/,

@@ -791,7 +791,8 @@ export type OctreeSPGridVCyclePipelineName = "beginL1CapturePlan"
   | "probeCandidateSkip" | "applyCandidateSkip" | "publishCommittedInputs"
   | "clearCandidateLevels" | "buildCandidateLevelSets"
   | "detectCandidateGhosts" | "insertCandidateGhosts"
-  | "buildCandidateLevelDeltas"
+  | "buildCandidateLevelDeltas" | "countCandidateTransfers" | "scanCandidateTransfers"
+  | "writeCandidateTransfers" | "linkCandidateParentChains"
   | "markCandidateBrickOccupancy" | "rankCandidateBricks" | "scatterCandidateRankedSlots"
   | "markCandidatePageOccupancy" | "compactCandidatePages" | "linkCandidatePageNeighbours"
   | "buildCandidateStencils" | "publishCandidateSpectralBounds"
@@ -815,6 +816,10 @@ export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePi
   detectCandidateGhosts: [0, 1, 3, 14, 16, 20, 21, 22],
   insertCandidateGhosts: [0, 1, 3, 14, 15, 16, 17, 20, 22],
   buildCandidateLevelDeltas: [0, 1, 3, 4, 5, 6, 14, 15, 16, 17],
+  countCandidateTransfers: [0, 1, 3, 4, 5, 6, 14, 15, 16, 17],
+  scanCandidateTransfers: [0, 4, 6, 14, 15, 17],
+  writeCandidateTransfers: [0, 1, 4, 5, 6, 14, 15, 16, 17],
+  linkCandidateParentChains: [0, 14, 15, 17],
   markCandidateBrickOccupancy: [0, 14, 15, 16],
   rankCandidateBricks: [0, 14, 15, 17],
   scatterCandidateRankedSlots: [0, 14, 15, 16],
@@ -1160,7 +1165,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // separated by dispatch order rather than by statement order in one thread,
     // the candidate validator, and five transactional publication dispatches.
     // Keep this exact for command and active/scheduled accounting.
-    this.encodedSetupDispatchCount = 2 + 2 + 1 + 13 + 1 + 5;
+    this.encodedSetupDispatchCount = 2 + 2 + 1 + 17 + 1 + 5;
     // One compact 8x8x4 page dispatch stages the one-cell halo and executes
     // the complete even-degree Chebyshev polynomial in workgroup memory.
     // Post-smoothing consumes the weights in reverse order, retaining the
@@ -1231,6 +1236,10 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.run(pass, "detectCandidateGhosts", 0, input, this.plan.rowDispatch, geometry);
     this.run(pass, "insertCandidateGhosts", 0, input, this.levelDispatch, geometry);
     this.run(pass, "buildCandidateLevelDeltas", 0, input, [1, 1, 1], geometry);
+    this.run(pass, "countCandidateTransfers", 0, input, this.plan.slotDispatch, geometry);
+    this.run(pass, "scanCandidateTransfers", 0, input, this.levelDispatch, geometry);
+    this.run(pass, "writeCandidateTransfers", 0, input, this.plan.slotDispatch, geometry);
+    this.run(pass, "linkCandidateParentChains", 0, input, this.levelDispatch, geometry);
     this.run(pass, "markCandidateBrickOccupancy", 0, input, this.plan.brickDispatch, geometry);
     this.run(pass, "rankCandidateBricks", 0, input, this.levelDispatch, geometry);
     this.run(pass, "scatterCandidateRankedSlots", 0, input, this.plan.brickDispatch, geometry);
@@ -1991,15 +2000,13 @@ fn selectedCount(l:u32)->u32{return select(count(l),cCount(l),topologyDirty(l));
 fn selectedWorkSlot(l:u32,i:u32)->u32{return select(workSlot(l,i),cWorkSlot(l,i),topologyDirty(l));}
 fn selectedRowMap(l:u32,r:u32)->u32{return select(rowMap(l,r),cRowMap(l,r),topologyDirty(l));}
 fn selectedState(c:u32,l:u32,s:u32)->u32{return select(state[at(c,l,s)],candidateState[cAt(c,l,s)],topologyDirty(l));}
-fn cAppendTransfer(l:u32,fine:u32,coarse:u32,weight:f32){let i=candidateDispatch[l*DISPATCH_WORDS+1u];
- if(i>=transferCapacity(l)){candidateReport(l);return;}candidateDispatch[l*DISPATCH_WORDS+1u]=i+1u;
- candidateTopology[transferWord(l,i,0u)]=fine;candidateTopology[transferWord(l,i,1u)]=coarse;
- candidateTopology[transferWord(l,i,2u)]=bitcast<u32>(weight);candidateTopology[transferWord(l,i,3u)]=INVALID;
- let fineHead=fineHeadBase(l)+fine;let fineCount=fineCountBase(l)+fine;let owned=candidateTopology[fineCount];
- if(owned==0u){candidateTopology[fineHead]=i;}else if(candidateTopology[fineHead]+owned!=i){candidateReport(l);return;}
- candidateTopology[fineCount]=owned+1u;
- let tail=candidateTopology[parentTailBase(l)+coarse];if(tail==INVALID){candidateTopology[parentHeadBase(l)+coarse]=i;}
- else{candidateTopology[transferWord(l,tail,3u)]=i;}candidateTopology[parentTailBase(l)+coarse]=i;}
+// One immutable transfer record. The record index is no longer a running
+// counter: it is the exclusive prefix sum of the per-fine fan-out, so the
+// contiguous fine range and the ascending parent chain are identical to the
+// former append order without any cross-invocation serialization.
+fn cAppendTransfer(l:u32,record:u32,fine:u32,coarse:u32,weight:f32){
+ candidateTopology[transferWord(l,record,0u)]=fine;candidateTopology[transferWord(l,record,1u)]=coarse;
+ candidateTopology[transferWord(l,record,2u)]=bitcast<u32>(weight);candidateTopology[transferWord(l,record,3u)]=INVALID;}
 fn cDirectoryLookup(l:u32,q:vec3u)->u32{if(l>=levels()||any(q>=dims(l))){return INVALID;}
  let generation=levelDelta[deltaAt(l,6u)];let record=brickRecord(l,q);if(candidateTopology[record]!=generation){candidateReport(l);return INVALID;}
  let bit=localBit(q);let word=candidateTopology[record+1u+(bit>>5u)];let flag=1u<<(bit&31u);if((word&flag)==0u){return INVALID;}
@@ -2094,28 +2101,105 @@ fn rebuildCandidateGhostsFor(r:u32){
    _=cInsertOwned(l,vec3u(targetQ),GHOST,owner-1u);}
  }
 }
+struct CoarseCorner{coordinate:vec3u,weight:f32}
+// One shared definition of the cell-centred trilinear corner, so the ordered
+// insertion and the parallel record writer cannot disagree on either the target
+// coordinate or the exact float multiply order that forms the weight.
+fn cornerTarget(q:vec3u,corner:u32)->CoarseCorner{
+ let origin=q/2u;let side=vec3i(select(-1,1,(q.x&1u)!=0u),select(-1,1,(q.y&1u)!=0u),select(-1,1,(q.z&1u)!=0u));
+ var targetCoord=vec3i(origin);var weight=1.0;
+ for(var axis=0u;axis<3u;axis+=1u){if((corner&(1u<<axis))!=0u){targetCoord[axis]+=side[axis];weight*=0.25;}else{weight*=0.75;}}
+ return CoarseCorner(vec3u(max(targetCoord,vec3i(0))),weight);}
+// Read side of cInsert: the same boundary clamp, so a coordinate resolves to
+// the slot the ordered insertion claimed for it.
+fn cResolve(l:u32,q:vec3u)->u32{if(l>=levels()){return INVALID;}return cLookup(l,min(q,dims(l)-vec3u(1u)));}
+// Exact fan-out of one fine slot: one record for a resolvable ghost alias,
+// eight for a trilinear interior cell, none for a rejected owner. This is the
+// per-fine count the former append counter produced.
+fn transferFanOut(l:u32,fine:u32,flags:u32,q:vec3u)->u32{
+ if((flags&GHOST)==0u){return 8u;}
+ let encodedOwner=selectedState(OWNER,l,fine);
+ if(encodedOwner==0u||encodedOwner>rows()){return 0u;}
+ let owner=encodedOwner-1u;var coarse=INVALID;
+ if(l+1u==firstTrailingBit(geometry(owner).y)){coarse=selectedRowMap(l+1u,owner);}
+ else{coarse=cResolve(l+1u,q/2u);}
+ return select(0u,1u,coarse!=INVALID);}
+fn transferLive(l:u32)->bool{return l+1u<levels()&&(topologyDirty(l)||topologyDirty(l+1u));}
+// Phase 5a. The only genuinely coupled step: the fine sweep of level l inserts
+// coarse aliases into level l+1, and that insertion order defines level l+1's
+// workset order, which in turn fixes every downstream summation order. It keeps
+// one ordered owner, but now performs only the hash insertion - no record
+// stores, no chain updates, no capacity counter.
 fn rebuildCandidateTransferFor(l:u32){
- if(l+1u>=levels()||!(topologyDirty(l)||topologyDirty(l+1u))){return;}
+ if(!transferLive(l)){return;}
  let selected=selectedCount(l);
- for(var i=0u;i<selected;i+=1u){let fine=selectedWorkSlot(l,i);let q=decode(selectedState(KEY,l,fine),l);
-  let flags=selectedState(FLAGS,l,fine);if((flags&GHOST)!=0u){let encodedOwner=selectedState(OWNER,l,fine);
+ for(var i=0u;i<selected;i+=1u){let fine=selectedWorkSlot(l,i);
+  let flags=selectedState(FLAGS,l,fine);let q=decode(selectedState(KEY,l,fine),l);
+  if((flags&GHOST)!=0u){let encodedOwner=selectedState(OWNER,l,fine);
    if(encodedOwner==0u||encodedOwner>rows()){candidateReport(l);continue;}let owner=encodedOwner-1u;
-   let native=firstTrailingBit(geometry(owner).y);var coarse=INVALID;
-   if(l+1u==native){coarse=selectedRowMap(l+1u,owner);}else{coarse=cInsertOwned(l+1u,q/2u,GHOST,owner);}
-   if(coarse!=INVALID){cAppendTransfer(l,fine,coarse,1.0);}}
-  else{let base=q/2u;let side=vec3i(select(-1,1,(q.x&1u)!=0u),select(-1,1,(q.y&1u)!=0u),select(-1,1,(q.z&1u)!=0u));
-   for(var corner=0u;corner<8u;corner+=1u){var targetCoord=vec3i(base);var weight=1.0;
-    for(var axis=0u;axis<3u;axis+=1u){if((corner&(1u<<axis))!=0u){targetCoord[axis]+=side[axis];weight*=0.25;}else{weight*=0.75;}}
-    let coarse=cInsert(l+1u,vec3u(max(targetCoord,vec3i(0))),MG_ONLY);if(coarse!=INVALID){cAppendTransfer(l,fine,coarse,weight);}}
-  }
+   if(l+1u!=firstTrailingBit(geometry(owner).y)){_=cInsertOwned(l+1u,q/2u,GHOST,owner);}}
+  else{for(var corner=0u;corner<8u;corner+=1u){_=cInsert(l+1u,cornerTarget(q,corner).coordinate,MG_ONLY);}}
  }
 }
-// Phase 5. Transfers are the one phase whose levels are genuinely coupled: the
-// fine sweep of level l inserts coarse aliases into level l+1, and the record
-// order fixes both the contiguous fine range and the ascending parent chain the
-// restriction sums in. It therefore stays a single ordered invocation.
 @compute @workgroup_size(1) fn buildCandidateLevelDeltas(){
  for(var l=0u;l+1u<levels();l+=1u){rebuildCandidateTransferFor(l);}
+}
+// Phase 5b (slot parallel). Publish the exact per-fine record fan-out.
+@compute @workgroup_size(64) fn countCandidateTransfers(@builtin(global_invocation_id) g:vec3u){
+ let i=boundedLinearIndex(g);
+ for(var l=0u;l+1u<levels();l+=1u){
+  if(!transferLive(l)||i>=selectedCount(l)){continue;}
+  let fine=selectedWorkSlot(l,i);
+  candidateTopology[fineCountBase(l)+fine]=transferFanOut(l,fine,selectedState(FLAGS,l,fine),
+   decode(selectedState(KEY,l,fine),l));}
+}
+// Phase 5c (one invocation per level). Exclusive prefix sum over the fan-out in
+// workset order. This reproduces the former append counter exactly, and the
+// capacity rejection stays fail closed instead of writing past the arena.
+@compute @workgroup_size(1) fn scanCandidateTransfers(@builtin(workgroup_id) wg:vec3u){
+ let l=wg.x;if(!transferLive(l)){return;}
+ let selected=selectedCount(l);let capacity=transferCapacity(l);var base=0u;
+ for(var i=0u;i<selected;i+=1u){let fine=selectedWorkSlot(l,i);
+  let owned=candidateTopology[fineCountBase(l)+fine];if(owned==0u){continue;}
+  if(base+owned>capacity){candidateReport(l);candidateTopology[fineCountBase(l)+fine]=0u;continue;}
+  candidateTopology[fineHeadBase(l)+fine]=base;base+=owned;}
+ candidateDispatch[l*DISPATCH_WORDS+1u]=base;
+}
+// Phase 5d (slot parallel). Each fine slot owns a disjoint contiguous record
+// range, so the immutable records are written without contention.
+@compute @workgroup_size(64) fn writeCandidateTransfers(@builtin(global_invocation_id) g:vec3u){
+ let i=boundedLinearIndex(g);
+ for(var l=0u;l+1u<levels();l+=1u){
+  if(!transferLive(l)||i>=selectedCount(l)){continue;}
+  let fine=selectedWorkSlot(l,i);let owned=candidateTopology[fineCountBase(l)+fine];
+  if(owned==0u){continue;}
+  let base=candidateTopology[fineHeadBase(l)+fine];
+  if(base==INVALID||base+owned>transferCapacity(l)){candidateReport(l);continue;}
+  let flags=selectedState(FLAGS,l,fine);let q=decode(selectedState(KEY,l,fine),l);
+  if((flags&GHOST)!=0u){let owner=selectedState(OWNER,l,fine)-1u;var coarse=INVALID;
+   if(l+1u==firstTrailingBit(geometry(owner).y)){coarse=selectedRowMap(l+1u,owner);}
+   else{coarse=cResolve(l+1u,q/2u);}
+   if(coarse==INVALID){candidateReport(l);}
+   cAppendTransfer(l,base,fine,coarse,1.0);}
+  else{if(owned!=8u){candidateReport(l);continue;}
+   for(var corner=0u;corner<8u;corner+=1u){let parent=cornerTarget(q,corner);
+    let coarse=cResolve(l+1u,parent.coordinate);
+    if(coarse==INVALID){candidateReport(l);}
+    cAppendTransfer(l,base+corner,fine,coarse,parent.weight);}}
+ }
+}
+// Phase 5e (one invocation per level). The parent chain is the ascending record
+// order restricted to one coarse slot; walking the published records in index
+// order reproduces it exactly, and the levels run concurrently.
+@compute @workgroup_size(1) fn linkCandidateParentChains(@builtin(workgroup_id) wg:vec3u){
+ let l=wg.x;if(!transferLive(l)){return;}
+ let n=min(candidateDispatch[l*DISPATCH_WORDS+1u],transferCapacity(l));let limit=levelCapacity(l+1u);
+ for(var j=0u;j<n;j+=1u){let coarse=candidateTopology[transferWord(l,j,1u)];
+  if(coarse>=limit){candidateReport(l);continue;}
+  let tail=candidateTopology[parentTailBase(l)+coarse];
+  if(tail==INVALID){candidateTopology[parentHeadBase(l)+coarse]=j;}
+  else{candidateTopology[transferWord(l,tail,3u)]=j;}
+  candidateTopology[parentTailBase(l)+coarse]=j;}
 }
 fn brickOfIndex(index:u32)->vec2u{
  var l=levels();var local=0u;

@@ -454,10 +454,11 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     .map((match) => Number(match[1]));
   assert.equal(new Set(bindings).size, bindings.length,
     "every WGSL binding must have exactly one module-scope declaration");
-  assert.match(octreeSPGridVCycleShader, /cAppendTransfer\(l,fine,coarse,weight\)/);
+  assert.match(octreeSPGridVCycleShader, /cAppendTransfer\(l,base\+corner,fine,coarse,parent\.weight\)/);
   assert.match(octreeSPGridVCycleShader, /fn correctionTransfer/);
   assert.match(octreeSPGridVCycleShader,
-    /cAppendTransfer[\s\S]*fineHeadBase\(l\)\+fine[\s\S]*fineCountBase\(l\)\+fine/);
+    /fn scanCandidateTransfers[\s\S]*fineCountBase\(l\)\+fine[\s\S]*candidateTopology\[fineHeadBase\(l\)\+fine\]=base;base\+=owned/,
+    "the record index must be the exclusive prefix sum of the per-fine fan-out");
   const correctionTransfer = octreeSPGridVCycleShader.slice(
     octreeSPGridVCycleShader.indexOf("fn correctionTransfer("),
     octreeSPGridVCycleShader.indexOf("fn restrictAndGhostAccumulate"),
@@ -753,7 +754,9 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   // invocation. Only the two genuinely order-defining phases keep a serial
   // owner, and each owns one level rather than the whole hierarchy.
   const candidatePhases = ["clearCandidateLevels", "buildCandidateLevelSets", "detectCandidateGhosts",
-    "insertCandidateGhosts", "buildCandidateLevelDeltas", "markCandidateBrickOccupancy",
+    "insertCandidateGhosts", "buildCandidateLevelDeltas", "countCandidateTransfers",
+    "scanCandidateTransfers", "writeCandidateTransfers", "linkCandidateParentChains",
+    "markCandidateBrickOccupancy",
     "rankCandidateBricks", "scatterCandidateRankedSlots", "markCandidatePageOccupancy",
     "compactCandidatePages", "linkCandidatePageNeighbours", "buildCandidateStencils",
     "publishCandidateSpectralBounds"];
@@ -768,7 +771,8 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   assert.deepEqual(candidateOrder, [...candidateOrder].sort((a, b) => a - b),
     "the encoded phase order must match the derived dependency order");
   assert.ok(candidateOrder.every((index) => index > 0), "every candidate phase must be encoded");
-  for (const parallel of ["clearCandidateLevels", "detectCandidateGhosts", "markCandidateBrickOccupancy",
+  for (const parallel of ["clearCandidateLevels", "detectCandidateGhosts", "countCandidateTransfers",
+    "writeCandidateTransfers", "markCandidateBrickOccupancy",
     "scatterCandidateRankedSlots", "markCandidatePageOccupancy", "linkCandidatePageNeighbours",
     "buildCandidateStencils"]) {
     assert.match(octreeSPGridVCycleShader, new RegExp(`@compute @workgroup_size\\(64\\)[\\s\\S]{0,80}fn ${parallel}\\(`),
@@ -789,8 +793,11 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   assert.doesNotMatch(levelSetBuild, /for\(var c=0u;c<STATE_CHANNELS/,
     "topology identity reset must not clear solver payload channels capacity-wide");
   assert.match(octreeSPGridVCycleShader,
-    /rebuildCandidateTransfer[\s\S]*topologyDirty\(l\)\|\|topologyDirty\(l\+1u\)/,
+    /fn transferLive\(l:u32\)->bool\{return l\+1u<levels\(\)&&\(topologyDirty\(l\)\|\|topologyDirty\(l\+1u\)\);\}/,
     "the retained fine endpoint transfer must rebuild with the changed coarse suffix");
+  assert.match(octreeSPGridVCycleShader,
+    /fn rebuildCandidateTransferFor[\s\S]*if\(!transferLive\(l\)\)\{return;\}/,
+    "the ordered transfer owner must consume the shared dirty predicate");
   assert.match(octreeSPGridVCycleShader,
     /@workgroup_size\(64\) fn planL1CaptureDelta[\s\S]*validSection63Row\(r\)[\s\S]*deltaOldRow\(r\)[\s\S]*var topologyChanged=true/,
     "compact producer dirty rows directly invalidate their dependent sparse suffix");
@@ -930,7 +937,9 @@ test("Dawn accepts the native sparse V-cycle shader", {
     "commitChangedL1", "finalizeL1CapturePublication",
     "probeCandidateSkip", "applyCandidateSkip", "publishCommittedInputs",
     "clearCandidateLevels", "buildCandidateLevelSets", "detectCandidateGhosts", "insertCandidateGhosts",
-    "buildCandidateLevelDeltas", "markCandidateBrickOccupancy", "rankCandidateBricks",
+    "buildCandidateLevelDeltas", "countCandidateTransfers", "scanCandidateTransfers",
+    "writeCandidateTransfers", "linkCandidateParentChains",
+    "markCandidateBrickOccupancy", "rankCandidateBricks",
     "scatterCandidateRankedSlots", "markCandidatePageOccupancy", "compactCandidatePages",
     "linkCandidatePageNeighbours", "buildCandidateStencils", "publishCandidateSpectralBounds",
     "validateCandidateHierarchy", "commitCandidateLevels",
