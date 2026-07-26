@@ -144,8 +144,25 @@ test("transition and regular demand slots are fixed and physical exterior stays 
 
 test("Section 5 chain is power-face seeded, persistently marched, and reconstructed at power centroids", () => {
   const shader = compact(octreeAirVelocitySupportPublicationWGSL);
-  assert.match(shader, /fnprojectedPowerVector[\s\S]*structuredAuthority\[handleAt\][\s\S]*p\.valuesOffset\+handle[\s\S]*p\.reconstructionOffset/);
-  assert.match(shader, /fnseedAirSupportFaces[\s\S]*projectedPowerVector\(faceRow\)[\s\S]*adjacencyPositive\(faceRow,axis,local%4u\)/);
+  const faceValue = shader.slice(shader.indexOf("fnprojectedAxisFaceValue"), shader.indexOf("fnneighborIdentity"));
+  assert.match(faceValue, /structuredAuthority\[handleAt\][\s\S]*p\.valuesOffset\+handle[\s\S]*catalogFaces\[global\]/,
+    "the seed source must be the accepted projected power-face samples with their catalog geometry");
+  assert.match(faceValue, /abs\(aligned\)>=0\.999/, "only axis-normal power faces may seed an ordinary axis face");
+  assert.match(faceValue, /abs\(centroid\[axis\]-patchCenter\[axis\]\)<=tolerance/,
+    "the seeding power face must be coplanar with the seeded patch");
+  assert.match(faceValue, /bestLocal==INVALID\|\|separation<bestDistance/,
+    "nearest-face selection is strict-less so the lowest local slot index wins exact ties");
+  assert.doesNotMatch(shader, /fnprojectedPowerVector/,
+    "no cell-centred reconstructed vector may masquerade as a face seed");
+  const seed = shader.slice(shader.indexOf("fnseedAirSupportFaces"), shader.indexOf("fnbetterFace"));
+  assert.match(seed, /projectedAxisFaceValue\(faceRow,axis,patchCenter\)/);
+  assert.match(seed, /adjacencyPositive\(faceRow,axis,local%4u\)/);
+  assert.match(seed, /projectedAxisFaceValue\(otherRow,axis,patchCenter\)/,
+    "an air-owned patch seeds from its positive liquid neighbour's coincident face");
+  assert.doesNotMatch(seed, /sum\/f32\(weight\)|sum\+=|weight\+=/,
+    "the seed copies one exact face value and never averages adjacent liquid cells");
+  assert.match(seed, /vec4u\(bitcast<u32>\(seed\.x\),0u,item,1u\)/,
+    "the seed distance origin remains the seeding face patch centre");
   const publication = shader.slice(shader.indexOf("fnresolveAirSupportFaceAdjacency"), shader.indexOf("var<workgroup>seedCounts"));
   assert.match(publication, /catalogNeighbor\(cell,header\.x\+localFace\)[\s\S]*faceRowForIdentity\(identity\)/,
     "T-junction catalog incidence must be resolved during topology publication");
@@ -248,7 +265,7 @@ test("entry bind sets exactly match the reachable staging transaction", () => {
     publishAirSupportOwnerDirectory: [0,2,3,7,8,9,11],
     prepareAirSupportFaces: [0,7],
     resolveAirSupportFaceAdjacency: [0,2,3,7,8,11,15,16,23],
-    seedAirSupportFaces: [0,1,2,7,8,16,18,19,21,23],
+    seedAirSupportFaces: [0,1,2,7,8,15,16,18,19,21,23],
     extendAirSupportFacesAtoB: [0,2,7,8,19,20,23],
     extendAirSupportFacesBtoA: [0,2,7,8,19,20,23],
     marchAirSupportFacesToFixedPoint: [0,2,7,8,19,20,23],

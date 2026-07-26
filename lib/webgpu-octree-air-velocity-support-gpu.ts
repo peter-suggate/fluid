@@ -3,8 +3,9 @@
  * Section 5 face-velocity extrapolation path.
  *
  * The producer completes the Section 5 chain: it publishes deduplicated cell
- * identities, seeds ordinary octree faces from the accepted projected power
- * field, copies the closest-interface value through the face graph, and then
+ * identities, seeds ordinary octree faces by copying the coplanar accepted
+ * projected power-face samples, copies the closest-interface value through
+ * the face graph, and then
  * reconstructs regular/power-cell vectors.  The suffix publication is
  * committed only after every demanded support vector validates.
  */
@@ -105,7 +106,7 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   publishAirSupportOwnerDirectory: Object.freeze([0,2,3,7,8,9,11]),
   prepareAirSupportFaces: Object.freeze([0,7]),
   resolveAirSupportFaceAdjacency: Object.freeze([0,2,3,7,8,11,15,16,23]),
-  seedAirSupportFaces: Object.freeze([0,1,2,7,8,16,18,19,21,23]),
+  seedAirSupportFaces: Object.freeze([0,1,2,7,8,15,16,18,19,21,23]),
   extendAirSupportFacesAtoB: Object.freeze([0,2,7,8,19,20,23]),
   extendAirSupportFacesBtoA: Object.freeze([0,2,7,8,19,20,23]),
   marchAirSupportFacesToFixedPoint: Object.freeze([0,2,7,8,19,20,23]),
@@ -1065,22 +1066,39 @@ fn bitsf(index:u32)->f32{return bitcast<f32>(denseCatalog[index]);}
 fn caseHeader(caseId:u32)->vec2u{let at=p.templateHeaderOffset+4u*caseId;
   if(caseId>=p.catalogEntryCount||at+1u>=arrayLength(&denseCatalog)){return vec2u(INVALID);}
   return vec2u(denseCatalog[at],denseCatalog[at+1u]);}
-// Reconstruct directly from the accepted projected power-face normal samples.
-// The ordinary-face seed never treats a cached row-vector component as a face.
-fn projectedPowerVector(row:u32)->vec4f{if(row>=s(2u)){return vec4f(0.);}let cell=faceCell(row);
-  let header=caseHeader(cell.z);if(header.x==INVALID||header.y>p.maxSlots){return vec4f(0.);}
-  let bank=s(4u)*p.authorityBankStride;let rowBase=row*p.maxSlots;var canonical=vec3f(0.);
+// Section 5 seed source: the exact accepted projected power-face normal sample
+// whose power face is coplanar with the requested ordinary-face patch. The
+// paper's extension copies face values; the seed therefore selects ONE face
+// (nearest coplanar axis-normal face, lowest local slot on exact ties) and
+// never averages, and never treats a reconstructed cell-centred vector as a
+// face quantity. Returns (axis component, status): status 1 found, 0 no
+// coplanar axis-normal face, -1 authority/catalog fault.
+fn projectedAxisFaceValue(row:u32,axis:u32,patchCenter:vec3f)->vec2f{if(row>=s(2u)){return vec2f(0.,-1.);}
+  let cell=faceCell(row);let header=caseHeader(cell.z);if(header.x==INVALID||header.y>p.maxSlots){return vec2f(0.,-1.);}
+  let bank=s(4u)*p.authorityBankStride;let rowBase=row*p.maxSlots;let transform=cell.w&63u;
+  let anchorCenter=vec3f(coord(cell.x))+.5*f32(cell.y);let tolerance=2e-4*f32(cell.y);
+  var bestLocal=INVALID;var bestDistance=0.;var bestValue=0.;
   for(var local=0u;local<header.y;local+=1u){let localAt=rowBase+local;
     let handleAt=bank+p.rowHandleOffset+localAt;let signAt=bank+p.rowSignOffset+localAt;
     let catalogAt=bank+p.rowCatalogOffset+localAt;if(handleAt>=arrayLength(&structuredAuthority)
-        ||signAt>=arrayLength(&structuredAuthority)||catalogAt>=arrayLength(&structuredAuthority)){return vec4f(0.);}
+        ||signAt>=arrayLength(&structuredAuthority)||catalogAt>=arrayLength(&structuredAuthority)){return vec2f(0.,-1.);}
     let handle=structuredAuthority[handleAt];let global=structuredAuthority[catalogAt];
-    let valueAt=bank+p.valuesOffset+handle;let coefficient=p.reconstructionOffset+3u*global;
-    if(handle>=accepted.slotCount||valueAt>=arrayLength(&structuredAuthority)
-        ||coefficient+2u>=arrayLength(&denseCatalog)){return vec4f(0.);}
-    let sample=f32(bitcast<i32>(structuredAuthority[signAt]))*bitcast<f32>(structuredAuthority[valueAt]);
-    canonical+=vec3f(bitsf(coefficient),bitsf(coefficient+1u),bitsf(coefficient+2u))*sample;}
-  let result=inverseTransform(canonical,cell.w&63u);return vec4f(result,select(0.,1.,all(result==result)));}
+    let valueAt=bank+p.valuesOffset+handle;if(handle>=accepted.slotCount
+        ||valueAt>=arrayLength(&structuredAuthority)||global>=arrayLength(&catalogFaces)){return vec2f(0.,-1.);}
+    let slot=catalogFaces[global];let normal=normalize(inverseTransform(slot.normalInverseDistance.xyz,transform));
+    // Positive comparisons so a NaN normal or centroid rejects the slot.
+    let aligned=normal[axis];if(!(abs(aligned)>=0.999)){continue;}
+    let centroid=anchorCenter+f32(cell.y)*inverseTransform(slot.areaCentroid.yzw,transform);
+    if(!(abs(centroid[axis]-patchCenter[axis])<=tolerance)){continue;}
+    let separation=distance(centroid,patchCenter);if(!finiteValue(separation)){continue;}
+    // Strict less-than keeps the lowest local slot index on exact ties: the
+    // same stable index discipline betterFace applies during the march.
+    if(bestLocal==INVALID||separation<bestDistance){
+      let sample=f32(bitcast<i32>(structuredAuthority[signAt]))*bitcast<f32>(structuredAuthority[valueAt]);
+      bestLocal=local;bestDistance=separation;bestValue=select(sample,-sample,aligned<0.);}}
+  if(bestLocal==INVALID){return vec2f(0.,0.);}
+  if(!finiteValue(bestValue)){return vec2f(0.,-1.);}
+  return vec2f(bestValue,1.);}
 fn neighborIdentity(cell:vec4u,direction:vec3i)->vec2u{let origin=coord(cell.x);var probe=vec3i(0);for(var axis=0u;axis<3u;axis+=1u){
   probe[axis]=select(select(i32(origin[axis]+cell.y/2u),i32(origin[axis]+cell.y),direction[axis]>0),i32(origin[axis])-1,direction[axis]<0);}
   if(any(probe<vec3i(0))||any(probe>=vec3i(p.dimensions))){return vec2u(INVALID);}let owner=octreeOwnerPageLookup(probe);
@@ -1136,25 +1154,31 @@ fn adjacencyPositive(faceRow:u32,axis:u32,quadrant:u32)->u32{
     faceAdjacency[base+${1 + OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence + STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+patchIndex]=faceRowForIdentity(positive);
   }}}
 
+fn faceCenter(item:u32)->vec3f{let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
+  let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;let quadrant=local%4u;
+  let cell=faceCell(faceRow);let origin=vec3f(coord(cell.x));let extent=f32(cell.y);var center=origin+vec3f(.5*extent);
+  center[axis]=origin[axis]+extent;var transverse=0u;for(var a=0u;a<3u;a+=1u){if(a==axis){continue;}
+    center[a]=origin[a]+select(.25,.75,(quadrant&(1u<<transverse))!=0u)*extent;transverse+=1u;}return center;}
+
 var<workgroup> seedCounts:array<u32,256>;
 @compute @workgroup_size(256)fn seedAirSupportFaces(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);var seeded=0u;
   if(item<s(29u)&&s(0u)==0u){faceA[item]=vec4u(0u,INVALID,INVALID,0u);let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
     let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;let cell=faceCell(faceRow);
     if(cell.x==INVALID){failTopology(7u,item);}else{if(faceRow<s(2u)&&liquidRow(faceRow)){atomicOr(&scratch[p.directoryFlagOffset+cell.x],0x80000000u);}
-      var sum=0.;var weight=0u;var valid=true;if(faceRow<s(2u)&&liquidRow(faceRow)){let value=projectedPowerVector(faceRow);
-        if(!validVector(value)){fail(item,ERROR_SOURCE);valid=false;}else{sum+=value[axis];weight+=1u;}}
-      let otherRow=adjacencyPositive(faceRow,axis,local%4u);if(otherRow!=INVALID&&otherRow<s(2u)&&liquidRow(otherRow)){
-        let value=projectedPowerVector(otherRow);if(!validVector(value)){fail(item,ERROR_SOURCE);valid=false;}else{sum+=value[axis];weight+=1u;}}
-      if(valid&&weight>0u){faceA[item]=vec4u(bitcast<u32>(sum/f32(weight)),0u,item,1u);seeded=1u;}}}
+      // Paper Section 5: seed each patch by COPYING the exact projected
+      // power-face value on its plane — the owning liquid row's face first,
+      // else the positive liquid neighbour's coincident face. The distance
+      // origin stays this patch centre so the march still orders sources by
+      // proximity to the free surface.
+      let patchCenter=faceCenter(item);var seed=vec2f(0.,0.);
+      if(faceRow<s(2u)&&liquidRow(faceRow)){seed=projectedAxisFaceValue(faceRow,axis,patchCenter);}
+      if(seed.y==0.){let otherRow=adjacencyPositive(faceRow,axis,local%4u);
+        if(otherRow!=INVALID&&otherRow<s(2u)&&liquidRow(otherRow)){seed=projectedAxisFaceValue(otherRow,axis,patchCenter);}}
+      if(seed.y<0.){fail(item,ERROR_SOURCE);}
+      else if(seed.y>0.){faceA[item]=vec4u(bitcast<u32>(seed.x),0u,item,1u);seeded=1u;}}}
   seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
   if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
-
-fn faceCenter(item:u32)->vec3f{let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
-  let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;let quadrant=local%4u;
-  let cell=faceCell(faceRow);let origin=vec3f(coord(cell.x));let extent=f32(cell.y);var center=origin+vec3f(.5*extent);
-  center[axis]=origin[axis]+extent;var transverse=0u;for(var a=0u;a<3u;a+=1u){if(a==axis){continue;}
-    center[a]=origin[a]+select(.25,.75,(quadrant&(1u<<transverse))!=0u)*extent;transverse+=1u;}return center;}
 fn betterFace(candidate:vec4u,best:vec4u)->bool{let candidateDistance=bitcast<f32>(candidate.y);let bestDistance=bitcast<f32>(best.y);
   return candidate.w!=0u&&finiteValue(candidateDistance)&&(best.w==0u||candidateDistance<bestDistance
     ||(candidateDistance==bestDistance&&candidate.z<best.z));}
