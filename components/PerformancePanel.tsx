@@ -12,6 +12,7 @@ import { isOctreeTechniqueOverlayMode } from "@/lib/octree-technique-debug";
 import { emptyPerformanceReport, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore } from "@/lib/stores/method-store";
 import { usePerformanceInstrumentationStore } from "@/lib/stores/performance-instrumentation-store";
+import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import type { GridOverlayConfig, GridOverlayMode } from "@/lib/webgpu-renderer";
 
@@ -329,6 +330,7 @@ export function PerformancePanel() {
   const methodId = useMethodStore((state) => state.methodId);
   const instrumentationEnabled = usePerformanceInstrumentationStore((state) => state.enabled);
   const setInstrumentationEnabled = usePerformanceInstrumentationStore((state) => state.setEnabled);
+  const runState = useRuntimeStore((state) => state.runState);
   const overlayMode = useUIStore((state) => state.gridOverlayMode);
   const overlayAxis = useUIStore((state) => state.gridOverlayAxis);
   const overlaySlice = useUIStore((state) => state.gridOverlaySlice);
@@ -339,12 +341,22 @@ export function PerformancePanel() {
   const lanes = useMemo(() => {
     const matching = reports.filter((candidate) =>
       candidate.methodId === methodId && candidate.context === report.context);
-    return {
-      cpu: averagedLane(matching.flatMap((sample) => sample.cpu ? [sample.cpu] : []), windowSize),
-      physics: averagedLane(matching.flatMap((sample) => sample.physics ? [sample.physics] : []), windowSize),
-      presentation: averagedLane(matching.flatMap((sample) => sample.presentation ? [sample.presentation] : []), windowSize),
+    const methodReports = reports.filter((candidate) => candidate.methodId === methodId);
+    const samples = (lane: "cpu" | "physics" | "presentation") => {
+      const current = matching.flatMap((sample) => sample[lane] ? [sample[lane]] : []);
+      if (current.length > 0 || runState !== "paused") return { traces: current, held: false };
+      const held = methodReports.findLast((sample) => sample[lane] !== undefined)?.[lane];
+      return { traces: held ? [held] : [], held: held !== undefined };
     };
-  }, [reports, methodId, report.context, windowSize]);
+    const cpuSamples = samples("cpu");
+    const physicsSamples = samples("physics");
+    const presentationSamples = samples("presentation");
+    return {
+      cpu: { ...averagedLane(cpuSamples.traces, windowSize), held: cpuSamples.held },
+      physics: { ...averagedLane(physicsSamples.traces, windowSize), held: physicsSamples.held },
+      presentation: { ...averagedLane(presentationSamples.traces, windowSize), held: presentationSamples.held },
+    };
+  }, [reports, methodId, report.context, runState, windowSize]);
   const cpu = lanes.cpu.trace;
   const physics = lanes.physics.trace;
   const presentation = lanes.presentation.trace;
@@ -357,6 +369,7 @@ export function PerformancePanel() {
   const volumeCapable = isOctreeTechniqueOverlayMode(overlayMode) && overlayMode !== "global-fine-phi";
   const traces = [cpu, physics, presentation].filter((trace): trace is PerformanceTrace => trace !== undefined);
   const allExact = traces.length === 3 && traces.every(performanceTraceIsExact);
+  const holdingPausedMeasurements = lanes.cpu.held || lanes.physics.held || lanes.presentation.held;
   const toggleInstrumentation = () => {
     const enabled = !instrumentationEnabled;
     setInstrumentationEnabled(enabled);
@@ -366,7 +379,7 @@ export function PerformancePanel() {
     });
   };
 
-  return <aside id="performance-panel" className="right-panel panel-scroll performance-panel performance-v2" aria-label="Performance and paper field observatory" data-testid="performance-panel" data-method={methodId}>
+  return <aside id="performance-panel" className="right-panel panel-scroll performance-panel performance-v2" aria-label="Performance and paper field observatory" data-testid="performance-panel" data-method={methodId} data-traces-exact={allExact}>
     <header className="trace-header">
       <div><span>POWER LIQUIDS OBSERVATORY</span><h2>Measured work + live fields</h2></div>
       <div className="trace-header-actions">
@@ -380,9 +393,6 @@ export function PerformancePanel() {
         >
           <span>MEASUREMENT LOAD</span><b>{instrumentationEnabled ? "ON" : "OFF"}</b><i />
         </button>
-        <div className={`trace-integrity ${instrumentationEnabled && allExact ? "valid" : "invalid"}`}><i />{
-          !instrumentationEnabled ? "INSTRUMENTATION OFF" : allExact ? "CLOSED ACCOUNTING" : "AWAITING VALID TRACE"
-        }</div>
       </div>
     </header>
 
@@ -396,6 +406,9 @@ export function PerformancePanel() {
     <div className="trace-notice">
       CPU and GPU are independent ledgers and are never added together. Each lane is one adjacent-boundary partition; phase rows sum exactly to that lane&apos;s measured total.
     </div>
+    {holdingPausedMeasurements && <div className="trace-notice">
+      PAUSED · Holding the last completed measurements until a fresh sample for this view is available.
+    </div>}
 
     <TraceLane trace={physics} title="GPU · POWER LIQUIDS ADVANCE" sampleCount={lanes.physics.sampleCount} />
     <TraceLane trace={presentation} title="GPU · PRESENTATION" sampleCount={lanes.presentation.sampleCount} />

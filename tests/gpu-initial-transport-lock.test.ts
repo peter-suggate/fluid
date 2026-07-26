@@ -32,6 +32,13 @@ test("WebGPU transport stays locked until the fenced structured t=0 authority is
     /case "sparse-render-world"[\s\S]*encodeSparseBrickWorld\(encoder\)[\s\S]*encodeInactiveTopologyCandidate\(encoder\)/);
   assert.doesNotMatch(authoritySwitch, /face-band|power-publication|closest-point-extension/i);
   assert.match(solverSource, /initialSparseAuthorityReady: this\.initialSparseAuthorityPublished/);
+  const t0Validation = solverSource.slice(
+    solverSource.indexOf("private async validateInitialSparseAuthority"),
+    solverSource.indexOf("/** Publish a complete t=0 scene", solverSource.indexOf("private async validateInitialSparseAuthority")),
+  );
+  assert.match(t0Validation,
+    /if \(!structuredReady \|\| !boundaryReady\)[\s\S]*throw new Error[\s\S]*this\.applyGlobalFineDiagnostics\(fine!\)/,
+    "the accepted queue-fenced t=0 controls must replace stale dynamic-step diagnostics");
   assert.match(rendererSource, /solver\.initialSparseAuthorityReady!==true\)\{solver\.destroy\(\);throw new Error/);
   assert.match(viewportSource, /status\.label === "WebGPU renderer ready"[\s\S]*preparing fenced t=0 solver authority/);
 });

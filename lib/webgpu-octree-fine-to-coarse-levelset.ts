@@ -28,7 +28,13 @@ export interface FineToCoarseGPUResult {
 
 export interface FineToCoarseGPUControl {
   readonly contributionCount: number; readonly maximumContributionsPerRow: number;
-  readonly flags: number; readonly unownedSamples: number; readonly rowCount: number; readonly valid: boolean;
+  readonly flags: number;
+  /** Live rows whose eight corner samples were not all resident-and-valid, so no
+   * fine correction was published for them. Never an error: a row outside the
+   * fine narrow band is legitimately uncorrected. It is the coverage regression
+   * signal for a band-width change, which is otherwise silent because an
+   * unaccepted row raises no flag and writes no contribution. */
+  readonly unacceptedRows: number; readonly rowCount: number; readonly valid: boolean;
   readonly firstUnownedLiquidLogical?: number; readonly maximumUnownedLiquidMagnitude?: number;
 }
 
@@ -47,7 +53,7 @@ export function unpackFineToCoarseGPUControl(words: ArrayLike<number>): FineToCo
   const phi = words.length >= 8
     ? new Float32Array(new Uint32Array([Number(words[7]) >>> 0]).buffer)[0] : undefined;
   return { contributionCount: Number(words[0]) >>> 0, maximumContributionsPerRow: Number(words[1]) >>> 0,
-    flags: Number(words[2]) >>> 0, unownedSamples: Number(words[3]) >>> 0,
+    flags: Number(words[2]) >>> 0, unacceptedRows: Number(words[3]) >>> 0,
     rowCount: Number(words[4]) >>> 0, valid: Number(words[5]) !== 0,
     ...(words.length >= 8 ? { firstUnownedLiquidLogical: Number(words[6]) >>> 0,
       maximumUnownedLiquidMagnitude: phi } : {}) };
@@ -160,7 +166,7 @@ ${fineLevelSetLinearWorkgroupWGSL}
 struct P{brickDims:vec3u,brickResolution:u32,sampleDims:vec3u,samplesPerBrick:u32,origin:vec3f,fineWidth:f32,
  pageCapacity:u32,generation:u32,rowCapacity:u32,sampleCapacity:u32,directoryCapacity:u32,reserved:u32,dimensions:vec3u,maxLeaf:u32,cellWidth:f32}
 struct H{cell:u32,a:u32,b:u32,size:u32,x:f32,y:f32,z:u32,w:u32,g:vec4f}
-struct C{count:u32,maximumPerRow:u32,flags:u32,unowned:u32,rowCount:u32,valid:u32,firstUnownedLiquid:u32,maximumUnownedLiquidMagnitude:u32}
+struct C{count:u32,maximumPerRow:u32,flags:u32,unacceptedRows:u32,rowCount:u32,valid:u32,firstUnownedLiquid:u32,maximumUnownedLiquidMagnitude:u32}
 struct Aggregate{centerPhi:f32,minimumPhi:f32,maximumPhi:f32,valid:u32,sampleCount:u32,error:u32,pad:array<u32,6>}
 struct Contribution{centerPhi:f32,minimumPhi:f32,maximumPhi:f32,valid:u32}struct Sample{positionPhi:vec4f,logical:u32,valid:u32}
 @group(0)@binding(0)var<uniform>p:P;@group(0)@binding(1)var<storage,read>metadata:array<u32>;@group(0)@binding(2)var<storage,read>worklist:array<u32>;
@@ -170,6 +176,7 @@ struct Contribution{centerPhi:f32,minimumPhi:f32,maximumPhi:f32,valid:u32}struct
 @group(0)@binding(12)var<storage,read_write>out:array<Contribution>;@group(0)@binding(13)var<storage,read_write>control:C;@group(0)@binding(14)var<storage,read>topologyControl:array<u32>;
 @group(0)@binding(15)var<storage,read_write>rowDispatch:array<u32>;
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const CAPACITY:u32=1u;const UNOWNED:u32=2u;const NONFINITE:u32=4u;const UNPUBLISHED_SOURCE:u32=8u;
+const DOWNSTREAM_ROLLBACK:u32=16u;
 fn finite(v:f32)->bool{return (bitcast<u32>(v)&0x7f800000u)!=0x7f800000u;}fn packBrick(q:vec3u)->u32{return q.x+p.brickDims.x*(q.y+p.brickDims.y*q.z);}
 fn unpackBrick(key:u32)->vec3u{let xy=p.brickDims.x*p.brickDims.y;let z=key/xy;let r=key-z*xy;let y=r/p.brickDims.x;return vec3u(r-y*p.brickDims.x,y,z);}
 fn localCoord(local:u32)->vec3u{let r=p.brickResolution;let z=local/(r*r);let q=local-z*r*r;let y=q/r;return vec3u(q-y*r,y,z);}
@@ -194,7 +201,23 @@ var<workgroup> rowCounts:array<u32,64>;var<workgroup> rowErrors:array<u32,64>;
 var<workgroup> rowMasks:array<u32,64>;var<workgroup> rowCombinedMasks:array<u32,64>;var<workgroup> rowCorners:array<f32,512>;
 var<workgroup> diagnosticCounts:array<u32,64>;var<workgroup> diagnosticFirst:array<u32,64>;
 var<workgroup> diagnosticMagnitude:array<f32,64>;var<workgroup> diagnosticErrors:array<u32,64>;
-@compute @workgroup_size(64)fn prepareRestriction(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i==0u){control.count=0u;control.maximumPerRow=1u;control.flags=0u;control.unowned=0u;control.rowCount=min(rowCountSource[0],p.rowCapacity);if(control.rowCount<arrayLength(&rowOffsets)){rowOffsets[control.rowCount]=control.rowCount;}else{control.flags|=CAPACITY;}control.valid=0u;control.firstUnownedLiquid=INVALID;control.maximumUnownedLiquidMagnitude=0u;var topologyReady=false;if(arrayLength(&topologyControl)>=8u){let committed=topologyControl[4]==1u;let provisional=p.reserved!=0u&&topologyControl[3]>0u&&topologyControl[4]==0u;topologyReady=topologyControl[0]==0u&&(committed||provisional)&&topologyControl[5]==0u&&topologyControl[7]==0u;}if(arrayLength(&worklist)<7u||!topologyReady){control.flags|=UNPUBLISHED_SOURCE;}else if(worklist[0]!=p.generation||worklist[2]!=p.pageCapacity||(worklist[3]&3u)!=3u||worklist[5]!=1u||worklist[6]!=1u){control.flags|=UNPUBLISHED_SOURCE;}let count=select(control.rowCount,0u,control.flags!=0u);let x=min(count,65535u);rowDispatch[0]=x;rowDispatch[1]=select(1u,(count+x-1u)/x,x>0u);rowDispatch[2]=1u;}}
+@compute @workgroup_size(64)fn prepareRestriction(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i==0u){control.count=0u;control.maximumPerRow=1u;control.flags=0u;control.unacceptedRows=0u;control.rowCount=min(rowCountSource[0],p.rowCapacity);if(control.rowCount<arrayLength(&rowOffsets)){rowOffsets[control.rowCount]=control.rowCount;}else{control.flags|=CAPACITY;}control.valid=0u;control.firstUnownedLiquid=INVALID;control.maximumUnownedLiquidMagnitude=0u;var topologyReady=false;if(arrayLength(&topologyControl)>=8u){let committed=topologyControl[4]==1u;let provisional=p.reserved!=0u&&topologyControl[3]>0u&&topologyControl[4]==0u;
+ // A downstream-rejected target is replaced in-place by the prior complete
+ // fine publication and retagged for this generation. Restricting that exact
+ // rollback field is required to republish the paper's separate coarse
+ // octree level set; it does not admit any sample from the rejected target.
+ let rollback=topologyControl[0]==DOWNSTREAM_ROLLBACK&&topologyControl[4]==1u
+  &&topologyControl[5]==1u&&topologyControl[7]!=0u;
+ topologyReady=(topologyControl[0]==0u&&(committed||provisional)&&topologyControl[5]==0u&&topologyControl[7]==0u)||rollback;}if(arrayLength(&worklist)<7u||!topologyReady){control.flags|=UNPUBLISHED_SOURCE;}else if(worklist[0]!=p.generation||worklist[2]!=p.pageCapacity||(worklist[3]&3u)!=3u||worklist[5]!=1u||worklist[6]!=1u){control.flags|=UNPUBLISHED_SOURCE;}let count=select(control.rowCount,0u,control.flags!=0u);let x=min(count,65535u);rowDispatch[0]=x;rowDispatch[1]=select(1u,(count+x-1u)/x,x>0u);rowDispatch[2]=1u;}}
 @compute @workgroup_size(64)fn restrictCoarseRows(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let r=fineLinearWorkgroup(w,n);if(lid==0u&&r<p.rowCapacity){if(r<arrayLength(&aggregates)){aggregates[r]=Aggregate(0.,0.,0.,0u,0u,0u,array<u32,6>());}if(r<arrayLength(&out)){out[r]=Contribution(0.,0.,0.,0u);}if(r<arrayLength(&rowOffsets)){rowOffsets[r]=r;}}var minimum=3.402823e38;var maximum=-3.402823e38;var count=0u;var error=0u;var mask=0u;for(var corner=0u;corner<8u;corner+=1u){rowCorners[lid*8u+corner]=0.;}if(r<control.rowCount&&r<arrayLength(&headers)){let h=headers[r];let ratioF=p.cellWidth/p.fineWidth;let ratio=u32(round(ratioF));if(h.size==0u||ratio==0u||abs(f32(ratio)-ratioF)>1e-5){error=CAPACITY;}else{let o=vec3u(h.cell%p.dimensions.x,(h.cell/p.dimensions.x)%p.dimensions.y,h.cell/(p.dimensions.x*p.dimensions.y));let first=o*ratio;let last=min((o+vec3u(h.size))*ratio,p.sampleDims);let firstBrick=first/p.brickResolution;let lastBrick=(last+vec3u(p.brickResolution-1u))/p.brickResolution;let extent=lastBrick-firstBrick;let brickCount=extent.x*extent.y*extent.z;let center=(vec3f(o)+.5*f32(h.size))*p.cellWidth;for(var ordinal=0u;ordinal<brickCount;ordinal+=1u){let bx=ordinal%extent.x;let yz=ordinal/extent.x;let brick=firstBrick+vec3u(bx,yz%extent.y,yz/extent.y);let id=finePage(packBrick(brick));if(id==INVALID){continue;}for(var local=lid;local<p.samplesPerBrick;local+=64u){let q=brick*p.brickResolution+localCoord(local);if(any(q<first)||any(q>=last)){continue;}let index=id*p.samplesPerBrick+local;if((flags[index]&VALID)==0u){continue;}let value=phi[index];if(!finite(value)){error|=NONFINITE;continue;}count+=1u;minimum=min(minimum,value);maximum=max(maximum,value);let x=p.origin+(vec3f(q)+.5)*p.fineWidth;let d=x-center;let centerDelta=abs(abs(d)-vec3f(.5*p.fineWidth));let tolerance=2e-5*max(p.cellWidth,p.fineWidth);if(all(centerDelta<=vec3f(tolerance))){let corner=select(0u,1u,d.x>0.)+select(0u,2u,d.y>0.)+select(0u,4u,d.z>0.);mask|=1u<<corner;rowCorners[lid*8u+corner]=value;}}}}}rowMinimum[lid]=minimum;rowMaximum[lid]=maximum;rowCounts[lid]=count;rowErrors[lid]=error;rowMasks[lid]=mask;rowCombinedMasks[lid]=mask;workgroupBarrier();var width=32u;loop{if(width==0u){break;}if(lid<width){rowMinimum[lid]=min(rowMinimum[lid],rowMinimum[lid+width]);rowMaximum[lid]=max(rowMaximum[lid],rowMaximum[lid+width]);rowCounts[lid]+=rowCounts[lid+width];rowErrors[lid]|=rowErrors[lid+width];rowCombinedMasks[lid]|=rowCombinedMasks[lid+width];}workgroupBarrier();width>>=1u;}if(lid==0u&&r<control.rowCount&&r<arrayLength(&aggregates)){var centerPhi=0.;if(rowCombinedMasks[0]==255u){for(var corner=0u;corner<8u;corner+=1u){var cornerPhi=0.;for(var lane=0u;lane<64u;lane+=1u){if((rowMasks[lane]&(1u<<corner))!=0u){cornerPhi=rowCorners[lane*8u+corner];}}centerPhi+=.125*cornerPhi;}}let accepted=rowErrors[0]==0u&&rowCounts[0]>0u&&rowCombinedMasks[0]==255u;let aggregate=Aggregate(centerPhi,rowMinimum[0],rowMaximum[0],select(0u,1u,accepted),rowCounts[0],rowErrors[0],array<u32,6>());aggregates[r]=aggregate;if(accepted&&r<arrayLength(&out)){out[r]=Contribution(aggregate.centerPhi,aggregate.minimumPhi,aggregate.maximumPhi,1u);}}}
-@compute @workgroup_size(64)fn publishRestriction(@builtin(local_invocation_index)lid:u32){var errors=0u;for(var r=lid;r<control.rowCount;r+=64u){errors|=aggregates[r].error;}diagnosticErrors[lid]=errors;workgroupBarrier();var width=32u;loop{if(width==0u){break;}if(lid<width){diagnosticErrors[lid]|=diagnosticErrors[lid+width];}workgroupBarrier();width>>=1u;}if(lid==0u){control.flags|=diagnosticErrors[0];if(control.flags==0u){control.count=control.rowCount;control.maximumPerRow=1u;control.valid=0x80000000u;}else{control.count=0xffffffffu;control.maximumPerRow=1u;}}}
+// A row is accepted only when all eight corner samples are resident and valid.
+// An unaccepted row raises no error, writes no contribution, and leaves the
+// coarse level set uncorrected, so narrowing the fine band silently deletes the
+// fine correction wherever the band recedes. Publish the unaccepted-row count
+// beside the accepted count: coverage loss then shows up as a number rather
+// than as an unexplained free surface. It is a diagnostic only and never sets a
+// flag, because an uncorrected dry row is legitimate. The count is meaningful
+// only when the prepared source was accepted; a rejected source dispatches zero
+// row workgroups, so the aggregates it would read belong to a prior command.
+@compute @workgroup_size(64)fn publishRestriction(@builtin(local_invocation_index)lid:u32){let sourceRejected=control.flags!=0u;var errors=0u;var unaccepted=0u;for(var r=lid;r<control.rowCount;r+=64u){errors|=aggregates[r].error;unaccepted+=select(1u,0u,aggregates[r].valid!=0u);}diagnosticErrors[lid]=errors;diagnosticCounts[lid]=unaccepted;workgroupBarrier();var width=32u;loop{if(width==0u){break;}if(lid<width){diagnosticErrors[lid]|=diagnosticErrors[lid+width];diagnosticCounts[lid]+=diagnosticCounts[lid+width];}workgroupBarrier();width>>=1u;}if(lid==0u){control.flags|=diagnosticErrors[0];control.unacceptedRows=select(diagnosticCounts[0],0u,sourceRejected);if(control.flags==0u){control.count=control.rowCount;control.maximumPerRow=1u;control.valid=0x80000000u;}else{control.count=0xffffffffu;control.maximumPerRow=1u;}}}
 `;

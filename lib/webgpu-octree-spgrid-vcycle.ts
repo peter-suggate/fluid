@@ -5,6 +5,7 @@ import {
 } from "./webgpu-octree-section43-contract";
 import { PassBroker } from "./webgpu-pass-broker";
 import type { OctreePipelinedWorksetLinearOperator } from "./webgpu-octree-pipelined-mgpcg";
+import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
 
 /** Native sparse-level cell roles from Setaluri et al., section 5. */
 export const SPGRID_CELL_FLAG = Object.freeze({
@@ -1214,6 +1215,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
 
   private encodeSetupCandidate(broker: PassBroker, input: OctreeSPGridSetupSource): void {
     this.assertLive();
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic before SPGrid candidate hierarchy rebuild");
+    }
     const prepared = this.preparedCaptureSource;
     if (!prepared || prepared.rowCount !== input.rowCount
       || prepared.sourceControl !== input.sourceControl
@@ -1249,6 +1253,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.run(pass, "buildCandidateStencils", 0, input, this.plan.slotDispatch, geometry);
     this.run(pass, "publishCandidateSpectralBounds", 0, input, this.levelDispatch, geometry);
     this.run(pass, "validateCandidateHierarchy", 0, input, [1, 1, 1]);
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after SPGrid candidate hierarchy rebuild");
+    }
     this.candidateSetupInput = input;
     this.preparedCaptureSource = undefined;
   }
@@ -1398,6 +1405,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       pass.setBindGroup(0, cached.classGroups[rowClass]);
       pass.dispatchWorkgroupsIndirect(this.accurateClassDispatch, index * 12);
     }
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after accurate A2 class apply");
+    }
   }
 
   private encodeAccurateMergedBandWorkset(
@@ -1411,6 +1421,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     mergedDispatchOffsetBytes: number,
   ): void {
     this.assertLive();
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic before merged-band A2 apply");
+    }
     if (input.size < this.plan.rowCapacity * 4 || output.size < this.plan.rowCapacity * 4) {
       throw new RangeError("SPGrid accurate A2 vectors are smaller than row capacity");
     }
@@ -1440,6 +1453,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     const pass = broker.compute({ label: "SPGrid Section 6.3 · destination-owned merged band" });
     pass.setPipeline(this.accurateMergedBandPipeline); pass.setBindGroup(0, cached.mergedBandGroup);
     pass.dispatchWorkgroupsIndirect(mergedDispatch, mergedDispatchOffsetBytes);
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after merged-band A2 apply");
+    }
   }
 
   private accurateBinding(

@@ -1,7 +1,7 @@
 "use client";
 
 import { EDITOR_TOOLS, getEditorTool } from "@/lib/editor-tools";
-import type { RigidShape } from "@/lib/model";
+import type { RigidShape, ScenePropShape } from "@/lib/model";
 import { simulation } from "@/lib/simulation/controller";
 import { useEditorHistoryStore } from "@/lib/stores/history-store";
 import { useUIStore } from "@/lib/stores/ui-store";
@@ -11,6 +11,12 @@ const PLACEMENT_SHAPES: ReadonlyArray<{ shape: RigidShape; label: string }> = [
   { shape: "box", label: "Box" },
   { shape: "capsule", label: "Capsule" },
   { shape: "cylinder", label: "Cylinder" },
+];
+
+const PROP_SHAPES: ReadonlyArray<{ shape: ScenePropShape; label: string }> = [
+  { shape: "box", label: "Box" },
+  { shape: "cylinder", label: "Post" },
+  { shape: "ellipsoid", label: "Blob" },
 ];
 
 /**
@@ -25,6 +31,8 @@ export function EditorToolbar() {
   const setActiveTool = useUIStore((state) => state.setActiveTool);
   const placementShape = useUIStore((state) => state.placementShape);
   const setPlacementShape = useUIStore((state) => state.setPlacementShape);
+  const propShape = useUIStore((state) => state.propShape);
+  const setPropShape = useUIStore((state) => state.setPropShape);
   const canUndo = useEditorHistoryStore((state) => state.past.length > 0);
   const canRedo = useEditorHistoryStore((state) => state.future.length > 0);
   const spec = getEditorTool(activeTool);
@@ -53,6 +61,22 @@ export function EditorToolbar() {
         <button type="button" disabled={!canUndo} title="Undo (⌘Z)" onClick={() => simulation.undo()}>UNDO</button>
         <button type="button" disabled={!canRedo} title="Redo (⇧⌘Z)" onClick={() => simulation.redo()}>REDO</button>
       </div>
+      {activeTool === "prop-place" && (
+        <div className="editor-tool-options" role="group" aria-label="Prop shape">
+          {PROP_SHAPES.map(({ shape, label }) => (
+            <button
+              key={shape}
+              type="button"
+              className={propShape === shape ? "active" : ""}
+              aria-pressed={propShape === shape}
+              title={`Place a ${label.toLowerCase()} prop`}
+              onClick={() => setPropShape(shape)}
+            >
+              <i className={`body-shape-icon shape-${shape === "ellipsoid" ? "sphere" : shape}`} aria-hidden="true" /><span>{label}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {activeTool === "body-place" && (
         <div className="editor-tool-options" role="group" aria-label="Placement shape">
           {PLACEMENT_SHAPES.map(({ shape, label }) => (

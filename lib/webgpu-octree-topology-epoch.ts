@@ -34,6 +34,8 @@ export interface OctreeTopologyEpochGPUResources {
   readonly descriptorCandidateControl: GPUBuffer;
   readonly topologyCandidateControl: GPUBuffer;
   readonly structuredCandidateControl: GPUBuffer;
+  /** Last GPU-accepted structured publication; owns the retained row count. */
+  readonly structuredAcceptedControl: GPUBuffer;
   readonly boundaryCandidateControl: GPUBuffer;
   readonly spgridCandidateControl: GPUBuffer;
   readonly candidateLeafHeaders: GPUBuffer;
@@ -80,8 +82,6 @@ export class WebGPUOctreeTopologyEpoch {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.state = device.createBuffer({ label: "Coupled octree topology epoch state",
       size: OCTREE_TOPOLOGY_EPOCH_STATE_BYTES, usage: storage });
-    // reserved[1] is the accepted compact-row count restored by a rejected
-    // first attempt; initialize it explicitly instead of relying on allocation clearing.
     device.queue.writeBuffer(this.state, 0, new Uint32Array(16));
     this.params = device.createBuffer({ label: "Coupled octree topology epoch parameters", size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -138,6 +138,7 @@ export class WebGPUOctreeTopologyEpoch {
         { binding: 13, resource: { buffer: resources.pressureA } },
         { binding: 14, resource: { buffer: resources.pressureB } },
         { binding: 15, resource: { buffer: resources.rowCountControl } },
+        { binding: 17, resource: { buffer: resources.structuredAcceptedControl } },
       ] });
   }
 
@@ -196,6 +197,7 @@ struct Epoch{activeEpoch:u32,activeGeneration:u32,readyEpoch:u32,readyGeneration
 @group(0)@binding(14)var<storage,read_write>pressureB:array<f32>;
 @group(0)@binding(15)var<storage,read_write>rowCountControl:array<u32>;
 @group(0)@binding(16)var<storage,read_write>commitRowsDispatch:array<u32>;
+@group(0)@binding(17)var<storage,read>acceptedStructured:array<u32>;
 const STALE:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.staleEpoch}u;const GENERATION:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.generationMismatch}u;
 const REJECTED:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.publisherRejected}u;const CAPACITY:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.capacity}u;
 const SUPPORT:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.supportClosure}u;const CATALOG:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.catalogVersion}u;
@@ -203,7 +205,7 @@ const EMPTY:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.emptyPublication}u;const RECIPROCI
 const GRADING:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.grading}u;const COEFFICIENT:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.coefficientPositivity}u;
 const HIERARCHY:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.hierarchy}u;const INDIRECT:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.indirectDispatch}u;
 const OWNER_READY:u32=0x80000000u;const STRUCTURED_READY:u32=0x5356454cu;
-fn poison(error:u32){ownerCandidate[28u]=0u;frontier[6u]=0u;frontier[9u]=error;
+fn poison(error:u32){epoch.reserved[1u]=structured[0u];epoch.reserved[2u]=structured[1u];ownerCandidate[28u]=0u;frontier[6u]=0u;frontier[9u]=error;
  descriptor[2u]|=error;descriptor[4u]|=error;
  topology[2u]|=error;structured[0u]=error;boundary[0u]|=error;spgrid[8u]|=error;}
 fn candidateCount()->u32{let selector=frontier[7u];return select(p.rowCapacity+1u,frontier[selector],selector<=1u);}
@@ -237,13 +239,20 @@ fn candidateErrors()->u32{var error=0u;let count=candidateCount();let generation
  if(error!=0u){epoch.error=error;epoch.ready=0u;poison(error);return;}epoch.activeEpoch=epoch.readyEpoch;
  epoch.activeGeneration=epoch.readyGeneration;epoch.ready=0u;epoch.reserved[0u]=1u;}
 @compute @workgroup_size(1)fn prepareCandidateRowCommitDispatch(){
- commitRowsDispatch[0u]=select(0u,(epoch.rowCount+63u)/64u,epoch.reserved[0u]==1u);
+ // A rejected candidate still dispatches lane zero so commitCandidateRows can
+ // restore the retained accepted row count. All candidate row copies remain
+ // gated by the successful commit token.
+ commitRowsDispatch[0u]=select(1u,(epoch.rowCount+63u)/64u,epoch.reserved[0u]==1u);
  commitRowsDispatch[1u]=1u;commitRowsDispatch[2u]=1u;
 }
 @compute @workgroup_size(64)fn commitCandidateRows(@builtin(global_invocation_id)gid:vec3u){
  let row=gid.x;let commit=epoch.reserved[0u]==1u;
- if(row==0u){rowCountControl[0u]=select(epoch.reserved[1u],epoch.rowCount,commit);
-   if(commit){epoch.reserved[1u]=epoch.rowCount;}}
+ // A rejected candidate retains the accepted Section 4 row authority. Read
+ // its row count directly: reserved words are rejection forensics and may be
+ // overwritten repeatedly while a failed candidate is retried.
+ if(row==0u){let retained=select(0u,acceptedStructured[2u],arrayLength(&acceptedStructured)>=6u
+   &&acceptedStructured[0u]==0u&&acceptedStructured[3u]!=0u);
+   rowCountControl[0u]=select(retained,epoch.rowCount,commit);}
  if(!commit||row>=epoch.rowCount){return;}
  let base=row*12u;for(var word=0u;word<12u;word+=1u){acceptedHeaders[base+word]=candidateHeaders[base+word];}
  let seed=candidatePressure[row];pressureA[row]=seed;pressureB[row]=seed;

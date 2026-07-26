@@ -53,6 +53,31 @@ test("next-epoch topology and adaptive surface publication close generic phases"
   assert.doesNotMatch(solver + octree, /timing start|timing end|beginRange\(|endRange\(/);
 });
 
+test("physics checkpoints follow performed command stages at their trailing seams", () => {
+  assert.match(solver,
+    /encodeReadyTopologyFlip\(encoder\);[^]*Accepted topology epoch \+ Section 5 air support/);
+  assert.match(octree,
+    /settled t=0 fine-demand air support published[^]*productionBoundary\("structuredProjectionTail", encoder\)/);
+  assert.doesNotMatch(solver, /pressureLeafCompactionL1Capture/);
+  assert.match(solver,
+    /encodeBodyImpulseExchange[^]*Rigid-body impulse exchange \+ integration/);
+  assert.match(solver,
+    /encodeSparseBrickWorld\(encoder, dt\);[^]*Sparse-brick residency \+ publication/);
+  assert.match(solver,
+    /Uniform diagnostics reduction[^]*Diagnostics reduction/);
+});
+
+test("physics sampling is enabled by default and runs at debugging cadence", () => {
+  const store = source("../lib/stores/performance-instrumentation-store.ts");
+  const tall = source("../lib/webgpu-eulerian.ts");
+  assert.match(store, /enabled: false/,
+    "the default UI simulation path must match the uninstrumented Dawn lane");
+  assert.match(solver, /const PHYSICS_TRACE_CADENCE_MS = 100/);
+  assert.match(solver, /const SEGMENTED_QUEUE_TRACE_CADENCE_MS = 1_000/);
+  assert.match(tall, /lastPhysicsTraceAt_ms>=100/);
+  assert.match(tall, /Substep planning \+ advance setup/);
+});
+
 test("invalid timestamps fall back to sparse measured phase probes", () => {
   assert.match(solver, /GPUSegmentedQueueWallPerformanceTraceRecorder/);
   assert.match(solver, /hardwarePhysicsTraceInvalid = !trace/);

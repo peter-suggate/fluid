@@ -101,13 +101,14 @@ test("GPU row publication is candidate-isolated and requires the successful epoc
     "a shared host uniform cannot identify separate invocations in one command buffer");
   assert.match(octreeTopologyEpochWGSL, /age>=0x80000000u/);
   assert.match(octreeTopologyEpochWGSL,
-    /prepareCandidateRowCommitDispatch[\s\S]*\(epoch\.rowCount\+63u\)\/64u/,
+    /prepareCandidateRowCommitDispatch[\s\S]*select\(1u,\(epoch\.rowCount\+63u\)\/64u/,
     "accepted row publication must dispatch from the GPU-validated live count");
   assert.match(octreeTopologyEpochWGSL,
     /acceptedHeaders\[base\+word\]=candidateHeaders\[base\+word\]/);
   assert.match(octreeTopologyEpochWGSL, /pressureA\[row\]=seed;pressureB\[row\]=seed/);
   assert.match(octreeTopologyEpochWGSL,
-    /rowCountControl\[0u\]=select\(epoch\.reserved\[1u\],epoch\.rowCount,commit\)/);
+    /retained=select\(0u,acceptedStructured\[2u\][\s\S]*rowCountControl\[0u\]=select\(retained,epoch\.rowCount,commit\)/,
+    "a rejected candidate must restore the row count from accepted Section 4 authority, not rejection scratch");
 });
 
 test("coupled validation decodes descriptor and SPGrid candidate control ABIs exactly", () => {
@@ -148,7 +149,7 @@ test("every topology-epoch pipeline binds its own reflected auto layout and exac
   const resources = {
     ownerArena: buffer(), ownerCandidate: buffer(), frontier: buffer(),
     descriptorCandidateControl: buffer(), topologyCandidateControl: buffer(),
-    structuredCandidateControl: buffer(), boundaryCandidateControl: buffer(),
+    structuredCandidateControl: buffer(), structuredAcceptedControl: buffer(), boundaryCandidateControl: buffer(),
     spgridCandidateControl: buffer(), candidateLeafHeaders: buffer(), acceptedLeafHeaders: buffer(),
     candidatePressure: buffer(), pressureA: buffer(), pressureB: buffer(), rowCountControl: buffer(),
   };
@@ -164,7 +165,7 @@ test("every topology-epoch pipeline binds its own reflected auto layout and exac
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
     [1, 3, 4, 5, 6, 7, 8, 9],
     [1, 16],
-    [1, 10, 11, 12, 13, 14, 15],
+    [1, 10, 11, 12, 13, 14, 15, 17],
   ]);
   epoch.destroy();
 });

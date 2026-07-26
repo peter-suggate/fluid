@@ -170,7 +170,7 @@ test("outer redistance support is copied without velocity and failures retain bo
   assert.match(shader,
     /if\(work==INVALID\)\{control\.nonfinite\+=1u;control\.invalidStatus\+=1u;continue;\}/,
     "classification rejection must fail closed without decoding the INVALID marker as two 65535 counters");
-  assert.match(shader, /state\[base\+2u\]&65535u/,
+  assert.match(shader, /letpacked=state\[base\+2u\];[\s\S]*packed&65535u/,
     "summary displacement must ignore the packed first-failure half-word");
 });
 
@@ -190,7 +190,7 @@ test("every trajectory reselects regular or transition interpolation m times and
   assert.match(regularCommon, /letv=transitionSample\(x\)/);
   assert.match(regularRare, /letv=transitionSample\(x\).*extended\+=select\(0u,1u,air\)/s);
   assert.match(shader,
-    /fntransitionSample\(x:vec3f\)->vec4f.*if\(caseId==0u\)\{letregular=regularSampleExact\(x,owner\);if\(regular\.exact!=0u\)\{returnregular\.value;\}\}.*letweights=tetraWeights/s,
+    /fntransitionSample\(x:vec3f\)->vec4f.*letsampleX=velocityDomainPoint\(x\).*if\(caseId==0u\)\{letregular=regularSampleExact\(sampleX,owner\);if\(regular\.exact!=0u\)\{returnregular\.value;\}\}.*letweights=tetraWeights/s,
     "each Euler step fuses its eight exact cube-owner proofs with the trilinear gather and otherwise retains case-zero tetrahedra");
   assert.doesNotMatch(shader, /regularCubeExact|fnregularSample\(/,
     "the regular path must not repeat owner-directory lookups in a proof pass and a gather pass");
@@ -199,6 +199,17 @@ test("every trajectory reselects regular or transition interpolation m times and
   assert.equal([...shader.matchAll(/sampleFine\(/g)].length, 2,
     "WGSL must contain one sampleFine declaration and one final-trajectory invocation");
   assert.match(shader, /fnfinishSample.*if\(d\.good!=0u\)\{sampled=sampleFine\(x\);\}/s);
+});
+
+test("missing sparse phi support remains a fail-closed sentinel", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  assert.match(shader, /fnfinite\(v:f32\)->bool\{returnv==v&&abs\(v\)<3\.402823e38;\}/,
+    "FLT_MAX must not pass the scalar validity predicate used by finishSample");
+  assert.doesNotMatch(shader, /abs\(v\)<=3\.402823e38/,
+    "the missing-stencil sentinel must never be committed as transported phi");
+  assert.match(shader,
+    /fnsampleFine.*returnselect\(3\.402823e38,.*weight>0\.999\).*fnfinishSample.*acceptedSample=d\.good!=0u&&finite\(sampled\).*if\(acceptedSample\)\{nextPhi\[index\]=sampled;\}else\{nextPhi\[index\]=old;\}/s,
+    "an incomplete trilinear stencil must preserve the previous finite phi and reject publication telemetry");
 });
 
 test("transition interpolation rejects missing positive-weight support", () => {
@@ -223,6 +234,22 @@ test("transition interpolation rejects missing positive-weight support", () => {
     "a non-finite or degenerate tetrahedron determinant must fail closed");
   assert.doesNotMatch(shader, /returnselect\(vec3f\(0\),rowV\(other\),other!=INVALID\)/,
     "fine transport must not retain the retired zero substitute");
+});
+
+test("open-domain characteristics sample cube and transition velocity on the same boundary point", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  assert.match(shader,
+    /fnvelocityDomainPoint\(x:vec3f\)->vec3f\{returnclamp\(x,p\.origin\+vec3f\(\.5\*p\.physical\),p\.origin\+vec3f\(p\.dimensions\)\*p\.physical-vec3f\(\.5\*p\.physical\)\);\}/,
+    "velocity continuation must project a departed characteristic to the nearest octree cell centre");
+  assert.match(shader,
+    /fnregularSampleExact.*letclamped=velocityDomainPoint\(x\)/s,
+    "regular cube interpolation must use the shared boundary continuation");
+  assert.match(shader,
+    /fntransitionSample.*letsampleX=velocityDomainPoint\(x\).*airOwnerAtPosition\(sampleX\).*regularSampleExact\(sampleX,owner\).*powerTransform\(\(sampleX-center\)\/extent,transform\)/s,
+    "power-tetra interpolation must locate and interpolate the same projected boundary point");
+  assert.match(shader,
+    /fnfinishSample.*if\(!insideDomain\(x\)\)\{outside=1u.*sampleFine\(x\)/s,
+    "boundary velocity continuation must not erase final departure and phi-support diagnostics");
 });
 
 test("fine phi commit publishes old and new interface membership atomically", () => {

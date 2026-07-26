@@ -5,7 +5,7 @@ import { FineLevelSetBrickOracle, packFineLevelSetBrickKey,
   planFineLevelSetBricks } from "../lib/octree-fine-levelset-bricks";
 import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
 import { FINE_TO_COARSE_LEVELSET_ERROR, fineToCoarseLevelSetWGSL,
-  WebGPUFineToCoarseLevelSet } from "../lib/webgpu-octree-fine-to-coarse-levelset";
+  unpackFineToCoarseGPUControl, WebGPUFineToCoarseLevelSet } from "../lib/webgpu-octree-fine-to-coarse-levelset";
 import { PassBroker } from "../lib/webgpu-pass-broker";
 
 test("fine-to-coarse restriction rejects an unpublished or stale fine source", () => {
@@ -18,8 +18,11 @@ test("fine-to-coarse restriction rejects an unpublished or stale fine source", (
     "restriction must close its final compute pass before caller readback or downstream copies");
   assert.equal(FINE_TO_COARSE_LEVELSET_ERROR.unpublishedSource, 8);
   assert.match(shader,
-    /letcommitted=topologyControl\[4\]==1u;letprovisional=p\.reserved!=0u&&topologyControl\[3\]>0u&&topologyControl\[4\]==0u;topologyReady=topologyControl\[0\]==0u&&\(committed\|\|provisional\)&&topologyControl\[5\]==0u&&topologyControl\[7\]==0u/,
-    "restriction accepts only committed input or the explicit validated/deferred same-command candidate");
+    /letrollback=topologyControl\[0\]==DOWNSTREAM_ROLLBACK&&topologyControl\[4\]==1u&&topologyControl\[5\]==1u&&topologyControl\[7\]!=0u/,
+    "restriction accepts the exact prior field retagged by a completed downstream rollback");
+  assert.match(shader,
+    /topologyReady=\(topologyControl\[0\]==0u&&\(committed\|\|provisional\)&&topologyControl\[5\]==0u&&topologyControl\[7\]==0u\)\|\|rollback/,
+    "restriction rejects arbitrary stale input while allowing committed, provisional, or exact rollback authority");
   assert.match(encode, /input\.allowValidatedProvisional\?1:0/,
     "pre-force correction must opt into provisional input rather than weakening the default publication gate");
   assert.match(shader,
@@ -51,6 +54,26 @@ test("fine-to-coarse restriction evaluates phi at the octree cell center", () =>
     "a partial fine stencil must not claim a valid exact cell-center correction");
   assert.doesNotMatch(shader, /nearestDistance|nearestLogical|NearestPhi/);
   assert.doesNotMatch(encode, /selectRestrictionLogicalId|emitRestrictionNearestPhi/);
+});
+
+test("fine-to-coarse restriction publishes lost coverage instead of dropping it silently", () => {
+  const shader = fineToCoarseLevelSetWGSL.replace(/\s+/g, "");
+  // An unaccepted row raises no flag and writes no contribution, so a fine band
+  // that no longer reaches a coarse row deletes that row's correction without a
+  // trace. The count is the only signal a band-width change has lost coverage.
+  assert.match(shader,
+    /fnpublishRestriction[\s\S]*unaccepted\+=select\(1u,0u,aggregates\[r\]\.valid!=0u\)/,
+    "publication must count the live rows whose eight-corner stencil was incomplete");
+  assert.match(shader,
+    /fnpublishRestriction[\s\S]*diagnosticCounts\[lid\]\+=diagnosticCounts\[lid\+width\][\s\S]*control\.unacceptedRows=/,
+    "the unaccepted-row count must be reduced in the existing publication workgroup");
+  assert.match(shader, /letsourceRejected=control\.flags!=0u[\s\S]*control\.unacceptedRows=select\(diagnosticCounts\[0\],0u,sourceRejected\)/,
+    "a rejected source dispatches no row workgroups, so its stale aggregates must not be counted");
+  const publish = shader.slice(shader.indexOf("fnpublishRestriction"));
+  assert.deepEqual(publish.match(/control\.flags\|=\w+/g), ["control.flags|=diagnosticErrors"],
+    "uncorrected dry rows are legitimate and must never poison the coarse transaction");
+  assert.equal(unpackFineToCoarseGPUControl([0, 1, 0, 7, 9, 0]).unacceptedRows, 7,
+    "the count occupies the already-read-back control word so no new readback is needed");
 });
 
 test("fine-to-coarse restriction is row-owned and synchronization-atomic-free", () => {
@@ -150,6 +173,9 @@ test("Dawn builds deterministic factor-4/factor-8 cell-center aggregates with O(
     encoder.copyBufferToBuffer(result.counts, 0, readback, 0, 24);
     device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
     await readback.mapAsync(GPUMapMode.READ); const words = new Uint32Array(readback.getMappedRange().slice(0)); readback.unmap();
+    // count, maximumPerRow, flags, unacceptedRows, rowCount, valid. The single
+    // live row's eight corners lie inside the published interface brick, so the
+    // fine correction is complete and the coverage counter must stay at zero.
     assert.deepEqual([...words], [1, 1, 0, 0, 1, 0x8000_0000]);
     readback.destroy(); topologyControl.destroy(); rowCount.destroy(); headers.destroy(); restriction.destroy(); owner.destroy();
   }

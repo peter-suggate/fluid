@@ -55,6 +55,26 @@ test("always-visible health flags expose rejected fine publication", () => {
   assert.ok(flags.includes("2017-fine-rejected"));
 });
 
+test("structured telemetry is pending at t=0 but rejects after a dynamic attempt", () => {
+  const base = info({
+    initialSparseAuthorityReady: true,
+    powerDiagramAuthoritative: true,
+    pressureRequiredRows: 10,
+    structuredVelocityValid: false,
+    structuredBoundaryValid: false,
+  });
+  const preflight = paperPipelineStages({ ...base, encodedSteps: 0 }, undefined)
+    .find((stage) => stage.id === "extrapolation");
+  assert.equal(preflight?.state, "WAITING");
+  assert.equal(preflight?.tone, "pending");
+  assert.match(preflight?.detail ?? "", /t=0 preflight is fenced/);
+
+  const dynamic = paperPipelineStages({ ...base, encodedSteps: 1 }, undefined)
+    .find((stage) => stage.id === "extrapolation");
+  assert.equal(dynamic?.state, "REJECTED");
+  assert.equal(dynamic?.tone, "rejected");
+});
+
 test("fine and coarse-phi flags render high bits as unsigned hexadecimal", () => {
   const fine = paperPipelineStages(info({
     initialSparseAuthorityReady: true, globalFinePublished: false,

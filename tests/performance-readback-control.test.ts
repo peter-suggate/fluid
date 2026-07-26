@@ -25,7 +25,9 @@ test("performance panel can bypass every trace producer without disabling correc
   assert.match(panel, /role="switch"/);
   assert.match(panel, /MEASUREMENT LOAD/);
   assert.match(panel, /Correctness synchronization remains active/);
-  assert.match(store, /enabled: false/);
+  assert.match(store, /enabled: false/,
+    "measurement work is opt-in so ordinary UI simulation keeps Dawn's lean submission path");
+  assert.match(store, /enabledAt_ms: -Infinity/);
   for (const source of [controller, renderer, uniform, tall]) {
     assert.match(source, /usePerformanceInstrumentationStore\.getState\(\)\.enabled/);
   }

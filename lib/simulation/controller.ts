@@ -18,6 +18,14 @@ import { useUIStore } from "../stores/ui-store";
 import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
 import { planSceneRuntime } from "../scene-runtime";
+import { addProp, createPropAt, findProp, propSelectionId, removeProp, updateProp } from "../editor-props";
+import type { ScenePropDescription, ScenePropShape } from "../model";
+import {
+  browserSceneLibraryStorage,
+  loadSceneFromLibrary,
+  saveSceneToLibrary,
+  type SceneLibraryEntry,
+} from "../scene-library";
 import {
   combineMainThreadPerformanceTraces,
   CPUPerformanceTrace,
@@ -381,8 +389,17 @@ class SimulationController {
     this.pendingEdit = { label, snapshot: this.documentSnapshot(label) };
   }
 
-  /** Close the gesture; a patch that changed nothing records no undo entry. */
-  commitEdit(patch?: Partial<SceneDescription>) {
+  /**
+   * Close the gesture; a patch that changed nothing records no undo entry.
+   *
+   * `reseed` re-seeds the solver from the edited document. Scene fields that
+   * are absent from `gpuSceneSolverKey` — terrain most importantly — reach the
+   * solver no other way, and an edit that the renderer shows but the physics
+   * ignores is the worst possible outcome for a WYSIWYG editor. Today that is
+   * an epoch bump and a full rebuild; Phase 1 replaces this one call with a
+   * warm re-seed and the cost goes away without the call sites changing.
+   */
+  commitEdit(patch?: Partial<SceneDescription>, options: { reseed?: boolean } = {}) {
     const pending = this.pendingEdit;
     this.pendingEdit = undefined;
     const sceneStore = useSceneStore.getState();
@@ -391,6 +408,13 @@ class SimulationController {
     const changed = canonicalScene(useSceneStore.getState().scene) !== canonicalScene(pending.snapshot.scene);
     if (!changed) return false;
     useEditorHistoryStore.getState().record(pending.snapshot);
+    if (options.reseed) {
+      // reset() re-selects the first body; an editor gesture must keep the
+      // thing the user is still holding selected.
+      const selection = useUIStore.getState().selection;
+      this.reset();
+      useUIStore.getState().select(selection);
+    }
     useRuntimeStore.getState().setNotice(pending.label);
     return true;
   }
@@ -613,6 +637,65 @@ class SimulationController {
   }
 
   // ---- persistence -------------------------------------------------------
+
+  // ---- render-only props ---------------------------------------------------
+
+  /**
+   * Props extend the sparse render domain but never enter the solve, so they
+   * are the one authoring action that does not need a re-seed.
+   */
+  addProp(shape: ScenePropShape, point_m: RigidBodyState["position_m"], normal: RigidBodyState["position_m"]) {
+    const sceneStore = useSceneStore.getState();
+    const prop = createPropAt(sceneStore.scene, shape, point_m, normal);
+    this.recordHistory(`place ${shape} prop`);
+    sceneStore.patchScene({ props: addProp(sceneStore.scene, prop) });
+    useUIStore.getState().select({ kind: "prop", id: propSelectionId(prop.id) });
+    useRuntimeStore.getState().setNotice(`${prop.name} placed`);
+    return prop;
+  }
+
+  removeProp(id: string) {
+    const sceneStore = useSceneStore.getState();
+    if (!findProp(sceneStore.scene, id)) return;
+    this.recordHistory("remove prop");
+    const remaining = removeProp(sceneStore.scene, id);
+    const { props: _dropped, ...rest } = sceneStore.scene;
+    sceneStore.setScene(remaining ? { ...rest, props: remaining } : rest, sceneStore.presetId);
+    useUIStore.getState().select(undefined);
+    useRuntimeStore.getState().setNotice("Prop removed");
+  }
+
+  updateProp(id: string, patch: Partial<ScenePropDescription>, coalesceKey = `prop:${id}:${Object.keys(patch).sort().join(",")}`) {
+    const sceneStore = useSceneStore.getState();
+    this.recordHistory("prop edit", coalesceKey);
+    sceneStore.patchScene({ props: updateProp(sceneStore.scene, id, patch) });
+  }
+
+  // ---- named scene library ------------------------------------------------
+
+  /** Save the live document under a name, replacing an entry of the same name. */
+  saveNamedScene(name: string) {
+    const sceneStore = useSceneStore.getState();
+    const { entries, entry } = saveSceneToLibrary(
+      browserSceneLibraryStorage(), name, sceneStore.scene, sceneStore.presetId, { savedAt_ms: Date.now() },
+    );
+    useRuntimeStore.getState().setNotice(`Saved “${entry.name}”`);
+    return entries;
+  }
+
+  /** Load a library entry as a scene edit, so it is undoable like any other. */
+  loadNamedScene(entry: SceneLibraryEntry): boolean {
+    try {
+      const scene = loadSceneFromLibrary(entry);
+      this.recordHistory(`load ${entry.name}`);
+      this.reset(scene, entry.presetId);
+      useRuntimeStore.getState().setNotice(`Loaded “${entry.name}”`);
+      return true;
+    } catch (error) {
+      useRuntimeStore.getState().setNotice(error instanceof Error ? error.message : "Stored scene failed validation", "warn");
+      return false;
+    }
+  }
 
   loadLocalScene(): boolean {
     const stored = localStorage.getItem("fluid-lab.scene.v1");

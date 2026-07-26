@@ -3,6 +3,7 @@ import { fineLevelSetLinearWorkgroupWGSL,
   planFineLevelSetDispatch2D } from "./webgpu-fine-levelset-dispatch";
 import { PassBroker } from "./webgpu-pass-broker";
 import type { FineLevelSetTransportTopologyDelta } from "./webgpu-octree-fine-levelset-transport";
+import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
 
 export const FINE_LEVELSET_TOPOLOGY_ERROR = Object.freeze({
   capacity: 1 << 0,
@@ -47,6 +48,34 @@ export interface FineLevelSetTopologyBand {
   redistanceBandFineCells: number;
   /** Whole-brick publication guard required by Section 18.6. */
   safetyBrickRings?: number;
+  /** Surface-tracking transport width, in fine cells. Supplying it lets the
+   * plan assert the residency floor instead of trusting the caller's arithmetic.
+   * This is deliberately NOT the pressure `interfaceRefinementBandCells`; see
+   * `lib/methods/octree.ts`, which states the two bands are distinct. */
+  transportBandFineCells?: number;
+}
+
+/**
+ * Residency floor, in fine cells, that a dilation must physically cover.
+ *
+ * A departure query reads `transport + backtrace + interpolation` cells from
+ * the interface, and every one of those samples must be resident or the
+ * trilinear stencil fails closed and rolls the whole publication back. This is
+ * a strictly stronger requirement than the redistance width, which only has to
+ * be *valid* where it is read and explicitly invalidates past its own cutoff.
+ *
+ * Measured on the mini lane (transport 12, backtrace 4, interpolation 1 => 17):
+ * 5 rings give 20 cells and run clean; 4 rings give 16, and the band overflows
+ * into the INVALID sentinel, the pressure solve executes zero iterations, and
+ * the acceptance gate still reports success. Keep this exact.
+ */
+export function fineLevelSetResidencyFloorCells(
+  transportBandFineCells: number,
+  maximumBacktraceFineCells: number,
+  interpolationSupportFineCells: number,
+): number {
+  return transportBandFineCells + maximumBacktraceFineCells
+    + interpolationSupportFineCells;
 }
 
 /** Bootstrap is the only authority permitted to discover/dilate the complete
@@ -57,9 +86,12 @@ export type FineLevelSetTopologyPublication =
   | { readonly kind: "bootstrap" }
   | { readonly kind: "delta"; readonly producer: FineLevelSetTransportTopologyDelta };
 
-export interface FineLevelSetTopologyBandPlan extends Required<FineLevelSetTopologyBand> {
+export interface FineLevelSetTopologyBandPlan
+  extends Required<Omit<FineLevelSetTopologyBand, "transportBandFineCells">> {
   readonly requiredFineCells: number;
   readonly dilationBrickRings: number;
+  /** Present only when the caller supplied it for the residency assertion. */
+  readonly transportBandFineCells?: number;
 }
 
 export interface FineLevelSetLeafBrickBounds {
@@ -131,8 +163,26 @@ export function planFineLevelSetTopologyBand(
     band.maximumBacktraceFineCells + band.interpolationSupportFineCells,
     band.redistanceBandFineCells,
   );
-  return { ...band, safetyBrickRings, requiredFineCells,
-    dilationBrickRings: Math.ceil(requiredFineCells / brickResolution) + safetyBrickRings };
+  const dilationBrickRings = Math.ceil(requiredFineCells / brickResolution)
+    + safetyBrickRings;
+  // Fail loudly on an under-provisioned band. When the dilation cannot cover
+  // the residency floor the trilinear stencil fails closed, the publication
+  // rolls back, the resident-brick count degrades to the INVALID sentinel and
+  // the pressure solve silently executes zero iterations -- while the smoke
+  // harness still reports `validation errors: 0` and a passing gate. A
+  // configuration that computes nothing must not be reachable by accident.
+  if (band.transportBandFineCells !== undefined) {
+    const floor = fineLevelSetResidencyFloorCells(band.transportBandFineCells,
+      band.maximumBacktraceFineCells, band.interpolationSupportFineCells);
+    if (dilationBrickRings * brickResolution < floor) {
+      throw new RangeError(`Fine topology dilation of ${dilationBrickRings} brick rings `
+        + `covers ${dilationBrickRings * brickResolution} fine cells but the departure `
+        + `stencil needs ${floor} (transport ${band.transportBandFineCells} + backtrace `
+        + `${band.maximumBacktraceFineCells} + interpolation `
+        + `${band.interpolationSupportFineCells})`);
+    }
+  }
+  return { ...band, safetyBrickRings, requiredFineCells, dilationBrickRings };
 }
 
 export interface FineLevelSetGPUSeedSource { readonly buffer: GPUBuffer; readonly affineValues?: boolean; }
@@ -772,8 +822,8 @@ export class WebGPUFineLevelSetTopology {
         dispatchWord * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES);
     };
     const runIdentity = (pipeline: GPUComputePipeline, entries: GPUBindGroupEntry[],
-      x: number, y: number, used: readonly number[]) => {
-      const pass = broker.compute();
+      x: number, y: number, used: readonly number[], label?: string) => {
+      const pass = broker.compute(label ? { label } : undefined);
       pass.setPipeline(pipeline); pass.setBindGroup(0, this.cachedBindGroup(pipeline, entries, used));
       pass.dispatchWorkgroups(x, y);
     };
@@ -846,12 +896,17 @@ export class WebGPUFineLevelSetTopology {
       // Mark the compact producer delta, then rank the dense logical identity
       // in parallel and scatter directly in canonical key order. Ring count
       // affects mark radius only; cold sorting is absent from recurring work.
+      const algorithmDiagnostics = octreeAlgorithmDiagnosticsEnabled();
+      if (algorithmDiagnostics) broker.fence("algorithm diagnostic before recurring fine-band scatter");
       runIdentity(this.publishRecurringSparseBandPipeline, discoverEntries,
-        1, 1, [0, 6, 7, 14, 16, 21, 23]);
+        1, 1, [0, 6, 7, 14, 16, 21, 23],
+        "Publish recurring sparse fine band (single workgroup cubic scatter)");
+      if (algorithmDiagnostics) broker.fence("algorithm diagnostic after recurring fine-band scatter");
       const recurringBlocks = Math.ceil(plan.logicalBrickCount / 256);
       const recurringSuperBlocks = Math.ceil(recurringBlocks / 256);
       runIdentity(this.scanRecurringDesiredPipeline, discoverEntries,
-        recurringBlocks, 1, [0, 7, 20, 21]);
+        recurringBlocks, 1, [0, 7, 20, 21],
+        "Scan and compact recurring fine-band logical identity");
       runIdentity(this.scanSparseGroupsPipeline, discoverEntries,
         recurringSuperBlocks, 1, [0, 7, 20]);
       runIdentity(this.scanSparseSuperGroupsPipeline, discoverEntries,
@@ -866,6 +921,7 @@ export class WebGPUFineLevelSetTopology {
         1, 1, [0, 7, 20, 21]);
       runIdentity(this.scatterRecurringSparseBandPipeline, discoverEntries,
         recurringBlocks, 1, [0, 6, 7, 20, 21]);
+      if (algorithmDiagnostics) broker.fence("algorithm diagnostic after recurring fine-band scan");
     }
     if (publication.kind === "bootstrap") {
       run(this.clearTopologyErrorsPipeline, deltaEntries, "Clear fixed global fine lifecycle errors",
@@ -913,6 +969,9 @@ export class WebGPUFineLevelSetTopology {
     runIndirect(this.classifyAffectedPagesPipeline, deltaEntries,
       "Classify exact changed-key dirty and support pages",
       3, [0, 3, 4, 7, 15, 16, 21]);
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after changed-key affected-page classification");
+    }
     runIdentity(this.scanIdentityRecordsPipeline, deltaEntries, identityBlocks, 3, [0, 7, 15, 18]);
     runIdentity(this.scanIdentityGroupsPipeline, deltaEntries, identitySuperBlocks, 3, [0, 15]);
     runIdentity(this.scanIdentitySuperGroupsPipeline, deltaEntries, 1, 3, [0, 15]);

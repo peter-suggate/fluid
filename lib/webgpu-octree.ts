@@ -122,7 +122,19 @@ export interface OctreeProjectionWorkAccountingCapture {
   readonly snapshot: OctreeWorkSnapshot;
 }
 
-async function loadGeneratedOctreePowerCatalog(): Promise<GeneratedOctreePowerCatalogViews> {
+/**
+ * The generated catalog is a 14 MB device-independent constant, so fetching,
+ * decoding and re-viewing it once per solver build is pure waste — an editor
+ * session rebuilds many times per minute. Memoizing the in-flight promise also
+ * collapses concurrent builds onto one decode.
+ *
+ * Safe because the views are read-only inputs: nothing mutates them, and the
+ * asset is fixed for the lifetime of the module (it is checked in and
+ * version-guarded by `verify:octree-power-catalog`).
+ */
+let generatedOctreePowerCatalog: Promise<GeneratedOctreePowerCatalogViews> | undefined;
+
+async function readGeneratedOctreePowerCatalog(): Promise<GeneratedOctreePowerCatalogViews> {
   const url = new URL("./generated/octree-power-catalog.bin", import.meta.url);
   if (url.protocol !== "file:") return fetchGeneratedOctreePowerCatalog(url);
   // Node's fetch deliberately rejects file: URLs. Keep the browser asset path
@@ -132,6 +144,13 @@ async function loadGeneratedOctreePowerCatalog(): Promise<GeneratedOctreePowerCa
   const { readFile } = await import(nodeFs) as { readFile(path: URL): Promise<Uint8Array> };
   const bytes = await readFile(url);
   return decodeGeneratedOctreePowerCatalog(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+}
+
+function loadGeneratedOctreePowerCatalog(): Promise<GeneratedOctreePowerCatalogViews> {
+  // A failed load must not be cached, or one transient error poisons the
+  // session; clear the memo so the next build retries.
+  return generatedOctreePowerCatalog ??= readGeneratedOctreePowerCatalog()
+    .catch((error: unknown) => { generatedOctreePowerCatalog = undefined; throw error; });
 }
 interface OctreePipelineCacheEntry {
   base: GPUComputePipeline[];
@@ -171,7 +190,6 @@ export type OctreeEnginePhase = typeof OCTREE_ENGINE_PHASES[number];
 
 /** Fine-grained checkpoints for direct structured attribution. */
 export const OCTREE_FINE_SEMANTIC_PHASES = [
-  "pressureLeafCompactionL1Capture",
   "powerDescriptorTopology",
   "structuredAdvectionBoundaryRhs",
   "structuredVolumeCapture",
@@ -187,8 +205,8 @@ export const OCTREE_FINE_SEMANTIC_PHASES = [
 ] as const;
 export type OctreeFineSemanticPhase = typeof OCTREE_FINE_SEMANTIC_PHASES[number];
 /** Semantic checkpoints consumed by the generic adjacent-boundary trace.
- * Production emits engine phases by default. `FLUID_ENGINE_SPLIT=fine`
- * substitutes fine-grained phases at their numerical seams. */
+ * Instrumented runs use numerical seams by default. Set
+ * `FLUID_ENGINE_SPLIT=collapsed` only for the seven-bucket engine view. */
 export type OctreeSemanticPhase = OctreeEnginePhase | OctreeFineSemanticPhase;
 export type OctreeSemanticBoundary = (
   phase: OctreeSemanticPhase,
@@ -206,14 +224,13 @@ interface PendingFinePublication {
 }
 
 /** Read at encode time so benchmark processes can select attribution without
- * changing construction or numerical behavior. Browser bundles without a
- * process shim always use the production collapsed graph. */
+ * changing construction or numerical behavior. */
 export function octreeFineEngineSplitsEnabled(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_ENGINE_SPLIT === "fine";
+  return resolved?.FLUID_ENGINE_SPLIT !== "collapsed";
 }
 
 export function octreeSparseWorldRequired(
@@ -1009,7 +1026,9 @@ export class WebGPUOctreeProjection {
 
   constructor(
     private readonly device: GPUDevice,
-    private readonly scene: SceneDescription,
+    // Not readonly: `applySceneUniforms` swaps in scalar-only scene revisions
+    // so a density or gravity edit is a uniform write, not a rebuild.
+    private scene: SceneDescription,
     private readonly dims: { nx: number; ny: number; nz: number },
     private readonly resources: OctreeProjectionResources,
     options: OctreeProjectionOptions,
@@ -1456,12 +1475,13 @@ export class WebGPUOctreeProjection {
           // valid when that centre itself lands on the outer support shell.
           // An unreachable cutoff sentinel is still rejected by seed identity.
           const redistanceBandFineCells = Math.min(256,
-            transportBandFineCells + globalFineFactor + 3);
+            transportBandFineCells + 2 * globalFineFactor + 3);
           const physicalBand = planFineLevelSetTopologyBand(brickResolution, {
             maximumBacktraceFineCells: globalFineFactor,
             interpolationSupportFineCells: 1,
             redistanceBandFineCells,
             safetyBrickRings: 1,
+            transportBandFineCells,
           });
           const defaultCapacity = estimateGlobalFineNarrowBandBrickCapacity(
             brickDimensions, physicalBand.dilationBrickRings,
@@ -2033,6 +2053,7 @@ export class WebGPUOctreeProjection {
       descriptorCandidateControl: this.powerDescriptor.control,
       topologyCandidateControl: this.powerTopology.control,
       structuredCandidateControl: structured.candidateControl,
+      structuredAcceptedControl: structured.control,
       boundaryCandidateControl: this.structuredBoundary.candidateControl,
       spgridCandidateControl: this.firstOrderVCycle.candidateControl,
       candidateLeafHeaders: this.candidateLeafHeaders,
@@ -2185,6 +2206,44 @@ export class WebGPUOctreeProjection {
       await tasks[index].run(signal);
       onProgress(tasks[index].label, index + 1, tasks.length);
     }
+  }
+
+  /**
+   * Adopt scalar-only scene revisions. Every consumer of these values either
+   * reads `this.scene` when encoding a step or reads the params buffer, so
+   * re-writing params is the whole update; no allocation, seed, or topology
+   * depends on them.
+   */
+  applySceneUniforms(scene: SceneDescription) {
+    this.scene = scene;
+    this.writeParams();
+  }
+
+  /**
+   * Warm re-seed: adopt a new scene and overwrite the resident level set in
+   * place, leaving every allocation, pipeline, and arena as-is. The caller
+   * re-runs the fenced cold-bootstrap phases afterwards, which is what turns
+   * the new phi into topology, structured authority, and a render world.
+   *
+   * Returns false when the seed cannot be produced against the existing
+   * allocations, so the caller can fall back to a full rebuild rather than
+   * running the solver on a stale or half-written seed.
+   */
+  reseed(scene: SceneDescription): boolean {
+    const surfaceState = this.surfaceState;
+    if (!surfaceState) return false;
+    // Cell size derives only from container extent and dims, both of which are
+    // in the structural tier — a re-seed cannot have changed them.
+    const cell = {
+      x: scene.container.width_m / this.dims.nx,
+      y: scene.container.height_m / this.dims.ny,
+      z: scene.container.depth_m / this.dims.nz,
+    };
+    const phi = initialOctreeLevelSet(scene, this.dims, cell);
+    if (!surfaceState.reseedLevelSet(this.device, phi)) return false;
+    this.scene = scene;
+    this.writeParams();
+    return true;
   }
 
   private writeParams() {
@@ -2586,6 +2645,12 @@ export class WebGPUOctreeProjection {
       this.powerRowDelta);
     structured.encodeCandidate(broker, generation, 0, topology.candidateMetrics,
       this.candidateLeafHeaders);
+    if (!this.structuredDynamics) {
+      throw new Error("Inactive topology candidate requires structured velocity transfer");
+    }
+    this.structuredDynamics.encodeTopologyTransferCandidate(broker);
+    structured.encodeCandidateReconstruction(broker, topology.candidateMetrics,
+      this.candidateLeafHeaders);
     this.powerSolidVertices?.encode(broker, { dimensions, physicalSpacing: spacing, generation,
       terrainEnabled: sceneHasTerrain(this.scene), bodyCount: this.scene.rigidBodies.length });
     boundary.encodeCandidate(broker, fine, structured.candidateControl);
@@ -2673,9 +2738,9 @@ export class WebGPUOctreeProjection {
         broker.fence(`raw continuation after ${finePhase}`);
       }
     };
-    // The direct structured topology was committed at the beginning of this
-    // substep. Active dynamics never rebuild rows/pages in the solve graph.
-    splitProductionPhase("structureEpoch", "powerDescriptorTopology");
+    // The direct structured topology was committed and timestamped at the
+    // beginning-of-substep seam. Active dynamics never rebuild rows/pages in
+    // the solve graph, so no synthetic boundary belongs here.
     // The t=0 authority warmup reconstructs, solves, and projects but has no
     // transport interval. Its exact advection map is identity; invoking the
     // departure sampler here can only reject boundary stencils that no
@@ -2779,10 +2844,6 @@ export class WebGPUOctreeProjection {
     // only through the coupled beginning-of-substep commit.
     const initialInA = !this.latestPressureInA;
     const pressureBroker = new PassBroker(encoder);
-    if (options?.productionBoundary && fineEngineSplits) {
-      pressureBroker.fence("canonical pressure-row capture boundary");
-    }
-    splitProductionPhase(undefined, "pressureLeafCompactionL1Capture");
     encoder = this.encodeNativePowerAssembly(
       encoder,
       options?.productionBoundary,
@@ -3010,7 +3071,7 @@ export class WebGPUOctreeProjection {
         // Match allocation planning above. The final three cells cover the
         // complete 3-D trilinear stencil and its centre on the closed cutoff.
         const redistanceBandCells = Math.min(256,
-          bandCells + this.globalFineLevelSet!.plan.fineFactor + 3);
+          bandCells + 2 * this.globalFineLevelSet!.plan.fineFactor + 3);
         const transport = this.globalFineCurrentIsA ? this.globalFineTransportA : this.globalFineTransportB;
         let transportEncoded = false;
         // Adapter publication, coarse bootstrap and compact interface seeding
@@ -3116,6 +3177,9 @@ export class WebGPUOctreeProjection {
             this.globalFineCurrentIsA ? 0 : 1);
           supportBroker.fence("settled t=0 fine-demand air support published");
           encoder = supportBroker.commandEncoder();
+          if (productionBoundary) {
+            encoder = productionBoundary("structuredProjectionTail", encoder);
+          }
         }
       } else {
         throw new Error("Authoritative Section 5 fine-band pipeline is incomplete");
@@ -3414,7 +3478,7 @@ export class WebGPUOctreeProjection {
   async readPowerFrontierFailure() {
     const readback = this.device.createBuffer({
       label: "Octree power-frontier failure readback",
-      size: 1440,
+      size: 2464,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const encoder = this.device.createCommandEncoder({
@@ -3449,6 +3513,18 @@ export class WebGPUOctreeProjection {
     if (fineTopology) {
       encoder.copyBufferToBuffer(fineTopology.pageDelta, 0, readback, 1376, 64);
     }
+    // Keep the first descriptor wave beside its exact row-delta inputs. A
+    // malformed compact-list publication otherwise gets overwritten by the
+    // coupled poison flag before a failure-only inspection can distinguish
+    // list ordering from descriptor geometry.
+    encoder.copyBufferToBuffer(this.leafFrontier,
+      this.frontierAllocation.rowDeltaNewToOldOffsetWords * 4, readback, 1440, 256);
+    encoder.copyBufferToBuffer(this.leafFrontier,
+      this.frontierAllocation.rowDeltaAffectedRowsOffsetWords * 4, readback, 1696, 256);
+    encoder.copyBufferToBuffer(this.powerDescriptor!.candidateDescriptors,
+      0, readback, 1952, 256);
+    encoder.copyBufferToBuffer(this.powerDescriptor!.dispatch,
+      4 * 4, readback, 2208, 256);
     this.device.queue.submit([encoder.finish()]);
     let result: {
       frontier: number[];
@@ -3468,6 +3544,10 @@ export class WebGPUOctreeProjection {
       coarseDirectory: number[];
       coarseDelta: number[];
       finePageDelta: number[];
+      rowDeltaNewToOld: number[];
+      rowDeltaAffectedRows: number[];
+      descriptorCandidates: number[];
+      descriptorStatuses: number[];
       boundaryFailureRow?: unknown;
       coarseFailureRow?: unknown;
     };
@@ -3492,6 +3572,10 @@ export class WebGPUOctreeProjection {
         coarseDirectory: Array.from(words.slice(320, 328)),
         coarseDelta: Array.from(words.slice(328, 344)),
         finePageDelta: Array.from(words.slice(344, 360)),
+        rowDeltaNewToOld: Array.from(words.slice(360, 424)),
+        rowDeltaAffectedRows: Array.from(words.slice(424, 488)),
+        descriptorCandidates: Array.from(words.slice(488, 552)),
+        descriptorStatuses: Array.from(words.slice(552, 616)),
       };
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
@@ -3999,7 +4083,7 @@ export class WebGPUOctreeProjection {
     const fine = this.globalFinePublishedIsA ? this.globalFineSourceA : this.globalFineSourceB;
     const topology = this.globalFinePublishedIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
     if (!fine || !topology || !this.globalFineSeeds) return undefined;
-    const readback = this.device.createBuffer({ label: "Global fine structured QA diagnostics", size: 576,
+    const readback = this.device.createBuffer({ label: "Global fine structured QA diagnostics", size: 672,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read global fine structured QA diagnostics" });
     encoder.copyBufferToBuffer(this.globalFineSeeds.buffer, 0, readback, 0, 8);
@@ -4053,6 +4137,14 @@ export class WebGPUOctreeProjection {
     if (this.globalFineVolumeA) {
       encoder.copyBufferToBuffer(this.globalFineVolumeA.control, 0, readback, 512, 64);
     }
+    if (this.airVelocitySupport) {
+      // Exact terminal wave counts and row/support cardinalities from the most
+      // recent Section 5 transaction. This is diagnostic-only, after the
+      // measured simulation, and never feeds scheduling.
+      encoder.copyBufferToBuffer(this.airVelocitySupport.scratch, 32 * 4,
+        readback, 576, 32);
+    }
+    encoder.copyBufferToBuffer(topology.pageDelta, 0, readback, 608, 64);
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
@@ -4076,6 +4168,8 @@ export class WebGPUOctreeProjection {
         precedingAirSupportTerminal: Array.from(words.slice(123, 126)),
         firstAirSupportFailure: Array.from(words.slice(126, 128)),
         fineVolumeControl: Array.from(words.slice(128, 144)),
+        airSupportTerminalScratch: Array.from(words.slice(144, 152)),
+        finePageDeltaHeader: Array.from(words.slice(152, 168)),
         configuredFineGeneration: fine.generation, fineGenerationSlot: fine.generationSlot,
         scheduledFineGeneration: this.globalFineGeneration, currentFineIsA: this.globalFinePublishedIsA };
     } finally {
@@ -5191,11 +5285,12 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   if (inflowProtectionIntersects(origin, size)) { return true; }
   let summary = fineLeafSummary(origin, size);
   if (!summary.found) { return false; }
-  // The fine-summary values and cell spacing are physical.  Two authored
+  // The fine-summary values and cell spacing are physical. Two authored
   // bands are retained here: the requested interface band and one additional
-  // maximum-leaf displacement/support ring.  This spatial retention is the
+  // maximum-leaf displacement/support ring. This spatial retention is the
   // pressure-side coarsening hysteresis and prevents alternating split/carry
-  // decisions as the zero set crosses a dyadic boundary.
+  // decisions as the zero set crosses a dyadic boundary. It also keeps the
+  // coarse and fine publication clocks coherent across transported frames.
   let cellWidth = max(params.cellRelax.x, max(params.cellRelax.y, params.cellRelax.z));
   let protectionWidth = (max(1.0, params.solve.w) + f32(params.dimsMax.w)) * cellWidth;
   let crossesInterface = summary.minimumPhi <= 0.0 && summary.maximumPhi >= 0.0;

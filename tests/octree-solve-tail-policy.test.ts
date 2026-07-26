@@ -56,10 +56,10 @@ test("solve-tail policy encodes the paper upper envelope and keeps scene score a
 
 test("paper k=8 shell has deterministic five-level command counts", () => {
   const expectedCounts = new Map<OctreeSolveTailSceneProfile, number>([
-    [PROFILES.miniDam, 871],
-    [PROFILES.uiDam, 871],
-    [PROFILES.quiescent, 871],
-    [PROFILES.river, 871],
+    [PROFILES.miniDam, 872],
+    [PROFILES.uiDam, 872],
+    [PROFILES.quiescent, 872],
+    [PROFILES.river, 872],
   ]);
   for (const profile of Object.values(PROFILES)) {
     const policy = planOctreeSolveTail(profile);
@@ -81,7 +81,7 @@ test("paper k=8 shell has deterministic five-level command counts", () => {
     firstOrderSetupDispatches: 10,
     firstOrderCorrectionDispatches: 26,
     boundarySmoothingIterations: OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
-  }).encodedPressureDispatches, 871,
+  }).encodedPressureDispatches, 872,
   "the maximum encoded envelope includes the paper k=8 matching shell");
 });
 

@@ -26,10 +26,51 @@ export interface TerrainFeature {
   flat?: number;
 }
 
+/**
+ * Sampled ground heights on a regular lattice, for brush sculpting that the
+ * 8-feature analytic form cannot express.
+ *
+ * Heights sit at node positions `origin_m + (i, j) * spacing_m`, row-major
+ * `i + nx * j` — the same layout `terrainColumnHeights` bakes, so solvers need
+ * no kernel change: they already consume terrain as baked column heights.
+ */
+export interface TerrainGrid {
+  kind: "grid";
+  /** World position of sample (0, 0), container-centred like features. */
+  origin_m: { x: number; z: number };
+  spacing_m: number;
+  size: { nx: number; nz: number };
+  /** Row-major heights in metres above the container floor. */
+  heights_m: number[];
+}
+
+/** Bound on an authored grid, keeping documents loadable and JSON sane. */
+export const MAX_TERRAIN_GRID_SAMPLES = 262_144;
+export const MIN_TERRAIN_GRID_SIZE = 2;
+
 export interface TerrainDescription {
   /** Ground level in metres above the container floor before features. */
   baseHeight_m: number;
   features: TerrainFeature[];
+  /**
+   * Sculpted heights. When present this *supersedes* `baseHeight_m` and
+   * `features` for every height query — the analytic fields are retained only
+   * as provenance for the bake that produced the grid.
+   */
+  grid?: TerrainGrid;
+}
+
+/** Bilinear sample with clamped edges; the exact form the WGSL mirror must use. */
+export function sampleTerrainGrid(grid: TerrainGrid, x: number, z: number): number {
+  const { nx, nz } = grid.size;
+  const fx = Math.min(nx - 1, Math.max(0, (x - grid.origin_m.x) / grid.spacing_m));
+  const fz = Math.min(nz - 1, Math.max(0, (z - grid.origin_m.z) / grid.spacing_m));
+  const x0 = Math.min(nx - 2, Math.floor(fx)), z0 = Math.min(nz - 2, Math.floor(fz));
+  const tx = fx - x0, tz = fz - z0;
+  const at = (i: number, j: number) => grid.heights_m[i + nx * j] ?? 0;
+  const lower = at(x0, z0) * (1 - tx) + at(x0 + 1, z0) * tx;
+  const upper = at(x0, z0 + 1) * (1 - tx) + at(x0 + 1, z0 + 1) * tx;
+  return Math.max(0, lower * (1 - tz) + upper * tz);
 }
 
 /** Uniform-buffer capacity shared with the WGSL evaluators. */
@@ -61,6 +102,7 @@ function featureWeight(feature: TerrainFeature, x: number, z: number): number {
 /** Ground height in metres above the container floor at world (x, z). */
 export function terrainHeightAt(terrain: TerrainDescription | undefined, x: number, z: number): number {
   if (!terrain) return 0;
+  if (terrain.grid) return sampleTerrainGrid(terrain.grid, x, z);
   let mounds = 0;
   let carvePower = 0;
   for (const feature of terrain.features) {
@@ -82,7 +124,12 @@ export function terrainNormalAt(terrain: TerrainDescription | undefined, x: numb
 
 export function sceneHasTerrain(scene: Pick<SceneDescription, "terrain">): boolean {
   const terrain = scene.terrain;
-  return !!terrain && (terrain.baseHeight_m > 0 || terrain.features.length > 0);
+  return !!terrain && (terrain.baseHeight_m > 0 || terrain.features.length > 0 || !!terrain.grid);
+}
+
+/** True when the ground is sculpted rather than analytic. */
+export function terrainIsSculpted(terrain: TerrainDescription | undefined): terrain is TerrainDescription & { grid: TerrainGrid } {
+  return !!terrain?.grid;
 }
 
 /**
@@ -112,6 +159,87 @@ export function terrainCellSolidFraction(columnHeight_m: number, cellBottom_m: n
   return Math.max(0, Math.min(1, (columnHeight_m - cellBottom_m) / cellSize_m));
 }
 
+/**
+ * One-way bake of the analytic form onto a lattice, so the first brush stroke
+ * on an authored preset starts from exactly the ground that was being drawn.
+ * The lattice spans the container footprint with a one-sample margin on each
+ * side, so edge columns are sampled rather than extrapolated.
+ */
+export function bakeTerrainGrid(
+  terrain: TerrainDescription | undefined,
+  container: Pick<SceneDescription["container"], "width_m" | "height_m" | "depth_m">,
+  spacing_m: number,
+): TerrainGrid {
+  if (!(spacing_m > 0)) throw new RangeError("Terrain grid spacing must be positive");
+  const nx = Math.max(MIN_TERRAIN_GRID_SIZE, Math.ceil(container.width_m / spacing_m) + 1);
+  const nz = Math.max(MIN_TERRAIN_GRID_SIZE, Math.ceil(container.depth_m / spacing_m) + 1);
+  if (nx * nz > MAX_TERRAIN_GRID_SAMPLES) throw new RangeError(`Terrain grid ${nx}x${nz} exceeds ${MAX_TERRAIN_GRID_SAMPLES} samples`);
+  const origin_m = { x: -0.5 * container.width_m, z: -0.5 * container.depth_m };
+  const heights_m = new Array<number>(nx * nz);
+  for (let j = 0; j < nz; j += 1) for (let i = 0; i < nx; i += 1) {
+    const height = terrainHeightAt(terrain, origin_m.x + i * spacing_m, origin_m.z + j * spacing_m);
+    heights_m[i + nx * j] = Math.min(container.height_m, Math.max(0, height));
+  }
+  return { kind: "grid", origin_m, spacing_m, size: { nx, nz }, heights_m };
+}
+
+/**
+ * Radial brush stroke. The falloff is the same smoothstep the analytic
+ * features use, so a sculpted rim reads like an authored one. Heights stay in
+ * [0, container height] — the range every solver's column texture assumes.
+ */
+export function applyTerrainBrush(
+  grid: TerrainGrid,
+  centerX_m: number,
+  centerZ_m: number,
+  radius_m: number,
+  delta_m: number,
+  maximumHeight_m: number,
+): TerrainGrid {
+  if (!(radius_m > 0)) return grid;
+  const { nx, nz } = grid.size;
+  const heights_m = grid.heights_m.slice();
+  const first = (value: number, origin: number) => Math.max(0, Math.floor((value - radius_m - origin) / grid.spacing_m));
+  const last = (value: number, origin: number, count: number) => Math.min(count - 1, Math.ceil((value + radius_m - origin) / grid.spacing_m));
+  for (let j = first(centerZ_m, grid.origin_m.z); j <= last(centerZ_m, grid.origin_m.z, nz); j += 1) {
+    for (let i = first(centerX_m, grid.origin_m.x); i <= last(centerX_m, grid.origin_m.x, nx); i += 1) {
+      const dx = grid.origin_m.x + i * grid.spacing_m - centerX_m;
+      const dz = grid.origin_m.z + j * grid.spacing_m - centerZ_m;
+      const distance = Math.hypot(dx, dz) / radius_m;
+      if (distance >= 1) continue;
+      const s = 1 - distance;
+      const weight = s * s * (3 - 2 * s);
+      const index = i + nx * j;
+      heights_m[index] = Math.min(maximumHeight_m, Math.max(0, heights_m[index] + delta_m * weight));
+    }
+  }
+  return { ...grid, heights_m };
+}
+
+function validateTerrainGrid(
+  grid: TerrainGrid,
+  container: Pick<SceneDescription["container"], "width_m" | "height_m" | "depth_m">,
+): string[] {
+  const errors: string[] = [];
+  if (grid.kind !== "grid") errors.push("Terrain grid kind must be \"grid\"");
+  if (!Number.isFinite(grid.origin_m?.x) || !Number.isFinite(grid.origin_m?.z)) errors.push("Terrain grid origin must be finite");
+  if (!(grid.spacing_m > 0) || !Number.isFinite(grid.spacing_m)) errors.push("Terrain grid spacing must be positive and finite");
+  const nx = grid.size?.nx, nz = grid.size?.nz;
+  if (!Number.isInteger(nx) || !Number.isInteger(nz) || nx < MIN_TERRAIN_GRID_SIZE || nz < MIN_TERRAIN_GRID_SIZE) {
+    errors.push(`Terrain grid size must be at least ${MIN_TERRAIN_GRID_SIZE} samples per axis`);
+    return errors;
+  }
+  if (nx * nz > MAX_TERRAIN_GRID_SAMPLES) errors.push(`Terrain grid exceeds ${MAX_TERRAIN_GRID_SAMPLES} samples`);
+  if (!Array.isArray(grid.heights_m) || grid.heights_m.length !== nx * nz) {
+    errors.push("Terrain grid heights must be a row-major array of nx * nz samples");
+    return errors;
+  }
+  if (!grid.heights_m.every((height) => Number.isFinite(height) && height >= 0 && height <= container.height_m)) {
+    errors.push("Terrain grid heights must be finite and inside [0, container height]");
+  }
+  return errors;
+}
+
 export function validateTerrain(
   terrain: TerrainDescription,
   container: Pick<SceneDescription["container"], "width_m" | "height_m" | "depth_m">
@@ -120,6 +248,7 @@ export function validateTerrain(
   if (!(terrain.baseHeight_m >= 0) || terrain.baseHeight_m >= container.height_m) {
     errors.push("Terrain base height must be inside [0, container height)");
   }
+  if (terrain.grid) errors.push(...validateTerrainGrid(terrain.grid, container));
   if (!Array.isArray(terrain.features)) {
     errors.push("Terrain features must be an array");
     return errors;

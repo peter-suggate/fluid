@@ -43,6 +43,11 @@ const sceneQueryPaths = [
   "fluid.gravity_m_s2.z",
   "fluid.initialCondition",
   "fluid.inflow",
+  // Painted water and analytic terrain round-trip as atomic blobs. A sculpted
+  // terrain grid is far too large for a URL and belongs to the scene library.
+  "fluid.initialBrickSeeds_m",
+  "fluid.initialBrickSeedsAdditive",
+  "terrain",
   "nominalResolution.length_m",
   "numerics.fixedDt_s",
   "numerics.maxDt_s",
@@ -140,11 +145,23 @@ function numberParam(query: URLSearchParams, key: string, fallback: number, min 
 /** Parse external URL input into a complete, validated store snapshot. */
 export function parseQueryState(search: string): QueryState {
   const query = new URLSearchParams(search);
-  const methodId = exactMethod(query.get("method"))?.id ?? defaultMethodId;
+  const preset = exactPreset(query.get("scene")) ?? getScenePreset(defaultScenePresetId);
+  // A validation preset authors the solver settings its scene is only valid at,
+  // and the scene picker applies them through `applyProfile`. Hydration has to
+  // start from that same baseline: otherwise a bare `?scene=<profiled preset>`
+  // — the first load, any reload, or a shared link — silently runs the preset
+  // at the method's generic quality defaults, which is a different solver
+  // configuration than the one the scene was authored and validated against.
+  const profile = preset.methodProfile;
+  const methodId = exactMethod(query.get("method"))?.id ?? profile?.methodId ?? defaultMethodId;
   const qualityCandidate = query.get("quality") as GPUQuality | null;
-  const quality = qualityCandidate && qualities.includes(qualityCandidate) ? qualityCandidate : "balanced";
-  const overrides: Record<string, MethodParamValues> = {};
+  const quality = qualityCandidate && qualities.includes(qualityCandidate)
+    ? qualityCandidate : profile?.quality ?? "balanced";
+  const overrides: Record<string, MethodParamValues> = profile
+    ? { [profile.methodId]: { ...profile.overrides } } : {};
 
+  // Explicit `param.*` keys are deliberate tuning and win per key, so an A/B
+  // link can still vary one parameter of a profiled scene.
   for (const method of simulationMethods) {
     const values: MethodParamValues = {};
     for (const spec of method.params) {
@@ -153,10 +170,11 @@ export function parseQueryState(search: string): QueryState {
       const value = parseMethodValue(method.id, spec.key, raw);
       if (value !== undefined) values[spec.key] = value;
     }
-    if (Object.keys(values).length > 0) overrides[method.id] = values;
+    if (Object.keys(values).length > 0) {
+      overrides[method.id] = { ...overrides[method.id], ...values };
+    }
   }
 
-  const preset = exactPreset(query.get("scene")) ?? getScenePreset(defaultScenePresetId);
   const baseScene = preset.create();
   const scene = cloneScene(baseScene);
   for (const path of sceneQueryPaths) {

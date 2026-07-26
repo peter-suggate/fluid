@@ -64,6 +64,8 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
   assert.match(panel, /new Map\(traces\.map/);
   assert.match(panel, /latest\.capturedAt_ms - latestHardware\.capturedAt_ms <= 2_000/);
   assert.match(panel, /AVG \{sampleCount\} · LATEST/);
+  assert.match(panel, /runState !== "paused"/);
+  assert.match(panel, /Holding the last completed measurements/);
   assert.match(panel, /CPU and GPU are independent ledgers and are never added together/);
   assert.doesNotMatch(panel, /cpu\.total_ms\s*\+\s*physics\.total_ms|physics\.total_ms\s*\+\s*presentation\.total_ms/);
 });

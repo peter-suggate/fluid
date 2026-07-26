@@ -82,6 +82,22 @@ test("a retained raster remains visible even when simulation products are health
   assert.equal(failure?.title, "WATER MESH STALE");
 });
 
+test("missing structured telemetry at t=0 does not masquerade as a water update rejection", () => {
+  const current: WaterSurfacePresentationDiagnostics = {
+    surfaceGeometrySource: "global-fine-coarse", globalFineAttached: true,
+    globalFineAttachedGeneration: 9, meshPublicationGeneration: 9,
+    globalFineCrossingPublished: true, presentationFallbackActive: false,
+  };
+  const preflight = healthyInfo({
+    encodedSteps: 0, structuredVelocityValid: false, structuredBoundaryValid: false,
+  });
+  assert.equal(viewportFailureIndicator(preflight, current, scene), undefined);
+
+  const dynamic = viewportFailureIndicator({ ...preflight, encodedSteps: 1 }, current, scene);
+  assert.equal(dynamic?.id, "pipeline-extrapolation");
+  assert.equal(dynamic?.title, "WATER UPDATE REJECTED");
+});
+
 test("the exact transport witness maps from solver-local metres into world space", () => {
   const result = viewportFailureLocation(healthyInfo({
     globalFineTransportFirstInvalidVelocityLocalIndex: 73,

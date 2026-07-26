@@ -17,6 +17,33 @@ import {
   type GizmoAxis,
 } from "@/lib/editor-gizmo";
 import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover";
+import {
+  aimInflow,
+  createInflowAt,
+  inflowHandles,
+  moveInflow,
+  INFLOW_SELECTION_ID,
+  type InflowHandleKind,
+} from "@/lib/editor-inflow";
+import {
+  editorFluidLattice,
+  eraseFluidBrick,
+  fillFractionForHeight,
+  fillLevelHandlePosition,
+  fluidBrickCenter,
+  fluidBrickIndexAt,
+  fluidBrickKey,
+  fluidPaintPatch,
+  paintFluidBrick,
+} from "@/lib/editor-fluid";
+import {
+  applyTerrainFeatureDrag,
+  terrainFeatureAt,
+  terrainFeatureHandles,
+  terrainFeatureIndex,
+  terrainFeatureSelectionId,
+  type TerrainHandleKind,
+} from "@/lib/editor-terrain";
 import { SelectionFlyout } from "./SelectionFlyout";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
@@ -67,6 +94,10 @@ export function WebGPUViewport() {
     // Editor gizmo drags preview on runtime state only and commit on release.
     | { id: number; action: "gizmo-axis"; bodyId: string; axis: GizmoAxis; axisOrigin: Vec3; grabOffset: Vec3; lastPosition: Vec3 }
     | { id: number; action: "gizmo-free"; bodyId: string; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3 }
+    | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
+    | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
+    | { id: number; action: "fill-level" }
+    | { id: number; action: "inflow-handle"; kind: InflowHandleKind; anchor: Vec3 }
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
   >(null);
@@ -75,6 +106,25 @@ export function WebGPUViewport() {
     : undefined;
   const gizmo = selectedBody && activeTool === "select"
     ? projectGizmo(selectedBody.position_m, camera, viewportSize.width, viewportSize.height)
+    : undefined;
+  const fluidToolArmed = activeTool === "fluid-paint" || activeTool === "fluid-erase";
+  const fillHandle = fluidToolArmed && scene.fluid.initialCondition === "tank-fill"
+    ? projectToViewport(fillLevelHandlePosition(scene), camera, viewportSize.width, viewportSize.height)
+    : undefined;
+  const inflowGizmo = scene.fluid.inflow && selection?.kind === "inflow" && (activeTool === "select" || activeTool === "inflow")
+    ? inflowHandles(scene.fluid.inflow).map((handle) => ({
+      ...handle,
+      projection: projectToViewport(handle.position_m, camera, viewportSize.width, viewportSize.height),
+    }))
+    : undefined;
+  const selectedTerrainFeature = selection?.kind === "terrain-feature" && activeTool === "select"
+    ? terrainFeatureIndex(selection.id, scene.terrain)
+    : undefined;
+  const terrainHandles = selectedTerrainFeature !== undefined && scene.terrain
+    ? terrainFeatureHandles(scene.terrain, selectedTerrainFeature).map((handle) => ({
+      ...handle,
+      projection: projectToViewport(handle.position_m, camera, viewportSize.width, viewportSize.height),
+    }))
     : undefined;
   const hoverProjection = hover ? projectToViewport(hover.position_m, camera, viewportSize.width, viewportSize.height) : undefined;
 
@@ -398,6 +448,126 @@ export function WebGPUViewport() {
     return true;
   };
 
+  const TERRAIN_HANDLE_TOLERANCE_PX = 12;
+  const FILL_HANDLE_TOLERANCE_PX = 12;
+  const INFLOW_HANDLE_TOLERANCE_PX = 12;
+
+  /** Grab the hose body or its aim arrow. */
+  const beginInflowHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const ui = useUIStore.getState();
+    const inflow = useSceneStore.getState().scene.fluid.inflow;
+    if (!inflow || ui.selection?.kind !== "inflow") return false;
+    if (ui.activeTool !== "select" && ui.activeTool !== "inflow") return false;
+    const rect = event.currentTarget.getBoundingClientRect();
+    let best: { kind: InflowHandleKind; anchor: Vec3; distance_px: number } | undefined;
+    for (const handle of inflowHandles(inflow)) {
+      const projection = projectToViewport(handle.position_m, ui.camera, rect.width, rect.height);
+      if (!(projection.depth_m > 1e-6)) continue;
+      const distance_px = Math.hypot(
+        event.clientX - rect.left - projection.leftFraction * rect.width,
+        event.clientY - rect.top - projection.topFraction * rect.height,
+      );
+      if (distance_px <= INFLOW_HANDLE_TOLERANCE_PX && (!best || distance_px < best.distance_px)) {
+        best = { kind: handle.kind, anchor: handle.position_m, distance_px };
+      }
+    }
+    if (!best) return false;
+    pointerRef.current = { id: event.pointerId, action: "inflow-handle", kind: best.kind, anchor: best.anchor };
+    simulation.beginEdit(best.kind === "center" ? "Moved the hose" : "Aimed the hose");
+    return true;
+  };
+
+  /** Place (or re-place) the single nozzle on the surface under the cursor. */
+  const placeInflowAt = (ray: { origin: Vec3; direction: Vec3 }) => {
+    const sceneStore = useSceneStore.getState();
+    const scene = sceneStore.scene;
+    const hit = hoverSceneAt(scene, useDiagnosticsStore.getState().bodies, ray);
+    if (!hit) return;
+    simulation.beginEdit(scene.fluid.inflow ? "Moved the hose" : "Placed a hose");
+    sceneStore.patchFluid({ inflow: createInflowAt(hit.position_m, hit.normal, scene) });
+    useUIStore.getState().select({ kind: "inflow", id: INFLOW_SELECTION_ID });
+    simulation.commitEdit(undefined, { reseed: true });
+  };
+
+  /** The tank-fill surface rides a corner post, clear of painting targets. */
+  const beginFillLevelDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const ui = useUIStore.getState();
+    const scene = useSceneStore.getState().scene;
+    if (ui.activeTool !== "fluid-paint" && ui.activeTool !== "fluid-erase") return false;
+    if (scene.fluid.initialCondition !== "tank-fill") return false;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const projection = projectToViewport(fillLevelHandlePosition(scene), ui.camera, rect.width, rect.height);
+    if (!(projection.depth_m > 1e-6)) return false;
+    const distance_px = Math.hypot(
+      event.clientX - rect.left - projection.leftFraction * rect.width,
+      event.clientY - rect.top - projection.topFraction * rect.height,
+    );
+    if (distance_px > FILL_HANDLE_TOLERANCE_PX) return false;
+    pointerRef.current = { id: event.pointerId, action: "fill-level" };
+    simulation.beginEdit("Set fill level");
+    return true;
+  };
+
+  /** Terrain feature handles are grabbed in screen space, like the body gizmo. */
+  const beginTerrainHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const ui = useUIStore.getState();
+    const terrain = useSceneStore.getState().scene.terrain;
+    if (ui.activeTool !== "select" || ui.selection?.kind !== "terrain-feature" || !terrain) return false;
+    const index = terrainFeatureIndex(ui.selection.id, terrain);
+    if (index === undefined) return false;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    let best: { kind: TerrainHandleKind; anchor: Vec3; distance_px: number } | undefined;
+    for (const handle of terrainFeatureHandles(terrain, index)) {
+      const projection = projectToViewport(handle.position_m, ui.camera, rect.width, rect.height);
+      if (!(projection.depth_m > 1e-6)) continue;
+      const distance_px = Math.hypot(pointer.x - projection.leftFraction * rect.width, pointer.y - projection.topFraction * rect.height);
+      if (distance_px <= TERRAIN_HANDLE_TOLERANCE_PX && (!best || distance_px < best.distance_px)) {
+        best = { kind: handle.kind, anchor: handle.position_m, distance_px };
+      }
+    }
+    if (!best) return false;
+    pointerRef.current = { id: event.pointerId, action: "terrain-handle", index, kind: best.kind, anchor: best.anchor };
+    simulation.beginEdit(`Shaped terrain ${terrain.features[index]?.kind ?? "feature"}`);
+    return true;
+  };
+
+  /**
+   * Constrain the pointer to the handle's own surface: the ground plane for
+   * centre and radius, the vertical axis for amount.
+   */
+  const terrainHandlePoint = (
+    active: { kind: TerrainHandleKind; anchor: Vec3 },
+    ray: { origin: Vec3; direction: Vec3 },
+  ) => active.kind === "amount"
+    ? closestPointOnAxis(ray.origin, ray.direction, active.anchor, GIZMO_AXIS_DIRECTIONS.y)
+    : planeHit(ray.origin, ray.direction, active.anchor, { x: 0, y: 1, z: 0 });
+
+  /**
+   * Paint or erase the brick under the pointer. Returns the brick key so a
+   * drag only touches the document when it crosses into a new brick.
+   */
+  const paintFluidAt = (ray: { origin: Vec3; direction: Vec3 }, erase: boolean, lastBrickKey?: string) => {
+    const sceneStore = useSceneStore.getState();
+    const scene = sceneStore.scene;
+    const hit = hoverSceneAt(scene, useDiagnosticsStore.getState().bodies, ray);
+    // Paint onto whatever surface is under the cursor; with nothing there,
+    // fall back to the fill-level plane so open air is still paintable.
+    const point = hit?.position_m
+      ?? planeHit(ray.origin, ray.direction, { x: 0, y: fillLevelHandlePosition(scene).y, z: 0 }, { x: 0, y: 1, z: 0 });
+    const lattice = editorFluidLattice(scene);
+    const index = fluidBrickIndexAt(lattice, point);
+    if (!index) return lastBrickKey;
+    const key = fluidBrickKey(index);
+    if (key === lastBrickKey) return key;
+    // A surface hit sits on the boundary of the brick behind it; nudging into
+    // the brick centre keeps a stroke on the surface from seeding solids.
+    const target = erase ? point : fluidBrickCenter(lattice, index);
+    const result = erase ? eraseFluidBrick(scene, target) : paintFluidBrick(scene, target);
+    if (result) sceneStore.patchScene({ fluid: fluidPaintPatch(scene, result) });
+    return key;
+  };
+
   /** Drop the armed placement shape onto whatever the cursor is over. */
   const placeBodyAt = (ray: { origin: Vec3; direction: Vec3 }) => {
     const ui = useUIStore.getState();
@@ -421,10 +591,38 @@ export function WebGPUViewport() {
     setHover(null);
     if (event.button === 0 && !event.shiftKey) {
       const ray = pointerRay(event);
+      if (beginTerrainHandleDrag(event)) return;
+      if (beginInflowHandleDrag(event)) return;
       if (beginGizmoDrag(event, ray)) return;
+      if (useUIStore.getState().activeTool === "inflow") { placeInflowAt(ray); return; }
       // Armed tools claim the click before the slice/pick/orbit fallback so a
       // placement never orbits the camera instead.
       if (useUIStore.getState().activeTool === "body-place") { placeBodyAt(ray); return; }
+      if (useUIStore.getState().activeTool === "prop-place") {
+        const target = hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray);
+        if (target) simulation.addProp(useUIStore.getState().propShape, target.position_m, target.normal);
+        return;
+      }
+      if (beginFillLevelDrag(event)) return;
+      const paintTool = useUIStore.getState().activeTool;
+      if (paintTool === "fluid-paint" || paintTool === "fluid-erase") {
+        const erase = paintTool === "fluid-erase";
+        simulation.beginEdit(erase ? "Erased water" : "Painted water");
+        pointerRef.current = { id: event.pointerId, action: "fluid-paint", erase, lastBrickKey: paintFluidAt(ray, erase) };
+        return;
+      }
+      // Clicking the ground selects the terrain feature under the cursor, so
+      // basins and mounds are addressable without a roster.
+      if (useUIStore.getState().activeTool === "select") {
+        const ground = hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray);
+        if (ground?.kind === "terrain") {
+          const feature = terrainFeatureAt(useSceneStore.getState().scene.terrain, ground.position_m.x, ground.position_m.z);
+          if (feature !== undefined) {
+            useUIStore.getState().select({ kind: "terrain-feature", id: terrainFeatureSelectionId(feature) });
+            return;
+          }
+        }
+      }
       const grab = sliceGrabHit(ray.origin, ray.direction);
       if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
       if (simulation.backend === "webgpu" && rendererRef.current) {
@@ -465,6 +663,44 @@ export function WebGPUViewport() {
     }
     if (active.id !== event.pointerId) return;
     if (active.action === "pick") return;
+    if (active.action === "inflow-handle") {
+      const ray = pointerRay(event);
+      const sceneStore = useSceneStore.getState();
+      const inflow = sceneStore.scene.fluid.inflow;
+      if (!inflow) return;
+      // Both handles drag in the camera plane through their own anchor, so a
+      // hose can be aimed in any direction rather than only along an axis.
+      const point = planeHit(ray.origin, ray.direction, active.anchor, cameraBasis(useUIStore.getState().camera).forward);
+      sceneStore.patchFluid({ inflow: active.kind === "center"
+        ? moveInflow(inflow, point, sceneStore.scene.container)
+        : aimInflow(inflow, point) });
+      return;
+    }
+    if (active.action === "fluid-paint") {
+      pointerRef.current = { ...active, lastBrickKey: paintFluidAt(pointerRay(event), active.erase, active.lastBrickKey) };
+      return;
+    }
+    if (active.action === "fill-level") {
+      const ray = pointerRay(event);
+      const sceneStore = useSceneStore.getState();
+      const corner = fillLevelHandlePosition(sceneStore.scene);
+      const point = closestPointOnAxis(ray.origin, ray.direction, corner, GIZMO_AXIS_DIRECTIONS.y);
+      if (!point) return;
+      sceneStore.patchContainer({ fillFraction: fillFractionForHeight(sceneStore.scene, point.y) });
+      return;
+    }
+    if (active.action === "terrain-handle") {
+      const point = terrainHandlePoint(active, pointerRay(event));
+      if (!point) return;
+      const sceneStore = useSceneStore.getState();
+      const terrain = sceneStore.scene.terrain;
+      if (!terrain) return;
+      // Terrain is absent from gpuSceneSolverKey, so patching the document
+      // mid-drag repaints the ground without churning the solver. The commit
+      // is what re-seeds it.
+      sceneStore.patchScene({ terrain: applyTerrainFeatureDrag(terrain, active.index, active.kind, point, sceneStore.scene.container) });
+      return;
+    }
     if (active.action === "gizmo-axis" || active.action === "gizmo-free") {
       const ray = pointerRay(event);
       const position = active.action === "gizmo-axis"
@@ -510,6 +746,15 @@ export function WebGPUViewport() {
     if (active?.id !== event.pointerId) return;
     pointerRef.current = null;
     if (active.action === "body") { simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end"); return; }
+    // Terrain reaches the solver only through a re-seed.
+    if (active.action === "terrain-handle") { simulation.commitEdit(undefined, { reseed: true }); return; }
+    // Brick seeds and fill fraction are already in the solver key, so the
+    // document write alone invalidates it; the reseed makes the edit start
+    // from a defined t=0 instead of mid-flight.
+    if (active.action === "fluid-paint" || active.action === "fill-level" || active.action === "inflow-handle") {
+      simulation.commitEdit(undefined, { reseed: true });
+      return;
+    }
     if (active.action === "gizmo-axis" || active.action === "gizmo-free") {
       // Commit-on-release: one document write and one undo entry per gesture.
       simulation.manipulateBody(active.bodyId, active.lastPosition, "end");
@@ -558,6 +803,47 @@ export function WebGPUViewport() {
         cy={gizmo.origin.topFraction * viewportSize.height}
         r={5}
       />
+    </svg>}
+    {fillHandle?.visible && <div
+      className="editor-fill-handle"
+      data-testid="editor-fill-handle"
+      style={{ left: `${fillHandle.leftFraction * 100}%`, top: `${fillHandle.topFraction * 100}%` }}
+      aria-hidden="true"
+    >
+      <i /><span>FILL {(scene.container.fillFraction * 100).toFixed(0)}%</span>
+    </div>}
+    {inflowGizmo && inflowGizmo.every((handle) => handle.projection.depth_m > 1e-6) && <svg
+      className="editor-gizmo editor-inflow-gizmo"
+      data-testid="editor-inflow-gizmo"
+      width={viewportSize.width}
+      height={viewportSize.height}
+      aria-hidden="true"
+    >
+      <line
+        x1={inflowGizmo[0]!.projection.leftFraction * viewportSize.width}
+        y1={inflowGizmo[0]!.projection.topFraction * viewportSize.height}
+        x2={inflowGizmo[1]!.projection.leftFraction * viewportSize.width}
+        y2={inflowGizmo[1]!.projection.topFraction * viewportSize.height}
+      />
+      <circle className="inflow-center" cx={inflowGizmo[0]!.projection.leftFraction * viewportSize.width} cy={inflowGizmo[0]!.projection.topFraction * viewportSize.height} r={6} />
+      <circle className="inflow-nozzle" cx={inflowGizmo[1]!.projection.leftFraction * viewportSize.width} cy={inflowGizmo[1]!.projection.topFraction * viewportSize.height} r={5} />
+    </svg>}
+    {terrainHandles && <svg
+      className="editor-gizmo editor-terrain-gizmo"
+      data-testid="editor-terrain-gizmo"
+      width={viewportSize.width}
+      height={viewportSize.height}
+      aria-hidden="true"
+    >
+      {terrainHandles.filter((handle) => handle.projection.depth_m > 1e-6).map((handle) => (
+        <circle
+          key={handle.kind}
+          className={`terrain-handle handle-${handle.kind}`}
+          cx={handle.projection.leftFraction * viewportSize.width}
+          cy={handle.projection.topFraction * viewportSize.height}
+          r={handle.kind === "center" ? 6 : 5}
+        />
+      ))}
     </svg>}
     {selectedBody && gizmo?.origin.visible && <SelectionFlyout
       body={selectedBody}

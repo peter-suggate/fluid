@@ -137,6 +137,21 @@ export interface GPUSolverInstance {
   readonly gridDivergenceTexture?: GPUTexture;
   /** Lazily allocate dense adaptive fields when a scientific grid slice needs them. */
   ensureGridDiagnosticTextures?(): void;
+  /**
+   * Adopt scene scalars that no lattice or seed depends on — density,
+   * viscosity, surface tension, gravity. Solvers read these from the retained
+   * scene when they write per-step params, so adopting a new scene is a
+   * uniform write rather than a rebuild. Implementing this is what lets
+   * `gpuSceneUniformKey` stay out of the rebuild trigger.
+   */
+  applySceneUniforms?(scene: SceneDescription): void;
+  /**
+   * Re-seed t=0 in place for a scene that differs only in the seed tier,
+   * reusing every allocation, arena, and compiled pipeline. Resolves false
+   * when the seed cannot be honoured, in which case the caller must take the
+   * full rebuild — the solver is left usable but not re-seeded.
+   */
+  reseed?(scene: SceneDescription): Promise<boolean>;
   /** Apply configuration explicitly classified as runtime-safe by the method. */
   applyRuntimeValues?(values: MethodParamValues): void;
   /** Resolves after an intrusive, serially-fenced advance has submitted and

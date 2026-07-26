@@ -776,11 +776,11 @@ test("rediscretized A2 owns coarse-fine contacts through spatial pages", () => {
 
 test("structured boundary rows use exact fine-over-coarse level-set crossings", () => {
   assert.match(structuredBoundarySource,
-    /let loPoint=x-half\*n;let hiPoint=x\+half\*n[\s\S]*let plo=fineSample\(loPoint,clo\.x\);let phi=fineSample\(hiPoint,chi\.x\)/,
-    "each structured contact must sample both sides from fine phi with coarse phi as its explicit authority");
+    /let loPoint=rowCenter\(lo\);let world=worldBoundaryBit\(h\)!=0u;var hiPoint=handleCenter\(h\);if\(hi!=INVALID\)\{hiPoint=rowCenter\(hi\);\}else if\(!world\)[\s\S]*let plo=fineSample\(loPoint,clo\.x\);let phi=fineSample\(hiPoint,chi\.x\)/,
+    "each structured contact must sample both actual power-cell centres from fine phi with coarse phi as its explicit authority");
   assert.match(structuredBoundarySource,
-    /let theta=clamp\(-liquidPhi\/max\(airPhi-liquidPhi,1e-20\),\.01,1\.\);scale=1\.\/theta/,
-    "the pressure boundary must be placed at the signed-distance zero crossing");
+    /if\(!world&&\(hi==INVALID\|\|\(\(plo\.x<0\.\)!=\(phi\.x<0\.\)\)\)\)[\s\S]*let theta=-plo\.x\/\(phi\.x-plo\.x\);[\s\S]*scale=1\.\/theta/,
+    "the pressure boundary must use main's exact, uncapped signed-distance zero crossing");
   assert.doesNotMatch(octreeProjectionShader,
     /fn reconstructGradients|fn storeReconstructedGradient|fn projectedComponentCached/,
     "affine dense projection was superseded by the compact power-face operator");
@@ -842,13 +842,20 @@ test("structured solve dispatches are class-exact and convergence gated", () => 
     "the deleted variable-row executor must not return to the topology shader");
 });
 
-test("pressure topology unions evidence with decaying three-generation protection", () => {
+test("pressure topology retains published fine-interface support across generations", () => {
   assert.match(octreeProjectionShader,
-    /fn pressureRefinementEvidence\(origin: vec3u, size: u32\)[\s\S]*inflowProtectionIntersects[\s\S]*fineLeafSummary[\s\S]*minimumAbsolutePhi <= protectionWidth/,
-    "current evidence must follow transported interface and authored inflow support");
+    /fn pressureRefinementEvidence\(origin: vec3u, size: u32\)[\s\S]*inflowProtectionIntersects\(origin, size\)/,
+    "authored pressure apertures must retain local topology protection");
+  const refinementEvidence = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn pressureRefinementEvidence"),
+    octreeProjectionShader.indexOf("fn pressureRetentionAt"),
+  );
+  assert.match(refinementEvidence,
+    /fineLeafSummary\(origin, size\)[\s\S]*summary\.complete[\s\S]*crossesInterface \|\| summary\.minimumAbsolutePhi <= protectionWidth/,
+    "the accepted Section 5 summary must retain the pressure-side interface and hysteresis band");
   assert.match(octreeProjectionShader,
     /classifyTopologyTileSignature[\s\S]*pressureRefinementEvidence\(unpackOrigin\(owner\.packedOrigin\), owner\.size\)[\s\S]*priorRetention - 1u[\s\S]*PRESSURE_RETENTION_GENERATIONS[\s\S]*retention << 24u/,
-    "the structural signature must refresh only from evidence and otherwise decay retention");
+    "the structural signature must refresh from current pressure evidence and otherwise decay retention");
   assert.match(octreeProjectionShader,
     /fn pressureRefinementProtected[\s\S]*pressureRefinementEvidence\(origin, size\) \|\| pressureRetentionAt\(origin\) > 0u/,
     "refinement protection must union current evidence with retained history without self-refresh");

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { bodySelection, DEFAULT_EDITOR_TOOL, selectedBodyIdOf, type EditorSelection, type EditorTool } from "../editor-tools";
-import { defaultCamera, type CameraState, type RigidShape } from "../model";
+import { defaultCamera, type CameraState, type RigidShape, type ScenePropShape } from "../model";
 import {
   DEFAULT_SVO_LIGHTING_MODE,
   DEFAULT_SVO_LIGHTING_OPTIONS,
@@ -37,6 +37,8 @@ interface UIStore {
   selectedBodyId?: string;
   /** Shape the body-place tool drops on the next click. */
   placementShape: RigidShape;
+  /** Shape the prop-place tool rests on the next surface. */
+  propShape: ScenePropShape;
   sceneModalOpen: boolean;
   diagnosticsOpen: boolean;
   rightPanel: RightPanel;
@@ -63,6 +65,7 @@ interface UIStore {
   select: (selection?: EditorSelection) => void;
   selectBody: (bodyId?: string) => void;
   setPlacementShape: (shape: RigidShape) => void;
+  setPropShape: (shape: ScenePropShape) => void;
   setSceneModalOpen: (open: boolean) => void;
   setDiagnosticsOpen: (open: boolean) => void;
   setRightPanel: (panel: RightPanel) => void;
@@ -87,6 +90,7 @@ export const useUIStore = create<UIStore>((set) => ({
   selection: undefined,
   selectedBodyId: undefined,
   placementShape: "sphere",
+  propShape: "box",
   sceneModalOpen: false,
   diagnosticsOpen: false,
   rightPanel: null,
@@ -108,6 +112,7 @@ export const useUIStore = create<UIStore>((set) => ({
   select: (selection) => set({ selection, selectedBodyId: selectedBodyIdOf(selection) }),
   selectBody: (selectedBodyId) => set({ selectedBodyId, selection: bodySelection(selectedBodyId) }),
   setPlacementShape: (placementShape) => set({ placementShape }),
+  setPropShape: (propShape) => set({ propShape }),
   setSceneModalOpen: (sceneModalOpen) => set({ sceneModalOpen }),
   setDiagnosticsOpen: (diagnosticsOpen) => set((state) => ({
     diagnosticsOpen,

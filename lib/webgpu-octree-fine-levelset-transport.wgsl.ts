@@ -48,8 +48,10 @@ const HEADER_WORDS:u32=7u; const HEADER_BASE:u32=4u; const STATUS_BASE:u32=128u;
 const SUPPORT_TAG:u32=${OCTREE_AIR_SUPPORT_TAG}u;
 const SUPPORT_VALID:u32=${OCTREE_AIR_SUPPORT_VALID}u;
 const SUPPORT_VERSION:u32=${OCTREE_AIR_SUPPORT_LAYOUT_VERSION}u;
-fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
-fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<=vec3f(3.402823e38));}
+// FLT_MAX is the fail-closed value returned by sampleFine. Keep the bound
+// strict so a missing sparse trilinear stencil cannot be committed as phi.
+fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
+fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<vec3f(3.402823e38));}
 fn inTransportBand(value:f32)->bool{return finite(value)&&abs(value)<=f32(p.bandCells)*p.h;}
 fn structuredValid()->bool{return arrayLength(&accepted)>=6u&&accepted[0]==0u&&accepted[2]>0u&&accepted[3]!=0u&&accepted[4]<=1u;}
 fn activeBank()->u32{return accepted[4]&1u;} fn rbase()->u32{return state[33u]*p.rowStride;}
@@ -142,10 +144,16 @@ fn taggedVelocity(tag:u32)->vec4f{if(tag==INVALID){return vec4f(0,0,0,-1);}if((t
   let support=tag&0x7fffffffu;if(support>=state[39]||support>=p.supportCapacity){return vec4f(0,0,0,-1);}
   let at=p.supportVectorOffset/4u+support;if(at>=arrayLength(&airSupport)){return vec4f(0,0,0,-1);}let value=airSupport[at];
   return select(vec4f(0,0,0,-1),vec4f(value.xyz,1),value.w>0.&&finite3(value.xyz));}
+// Characteristics may leave the cell-centred octree domain before their final
+// fine-phi gather. Continue the already extrapolated Section 5 velocity with a
+// zero-normal-gradient boundary value; both cube and power-tetra interpolation
+// must use the same nearest valid octree sample point.
+fn velocityDomainPoint(x:vec3f)->vec3f{return clamp(x,p.origin+vec3f(.5*p.physical),
+  p.origin+vec3f(p.dimensions)*p.physical-vec3f(.5*p.physical));}
 struct RegularAttempt{value:vec4f,exact:u32}
 fn regularSampleExact(x:vec3f,anchor:AirOwner)->RegularAttempt{
   let invalid=RegularAttempt(vec4f(0,0,0,-1),1u);
-  let clamped=clamp(x,vec3f(.5*p.physical),vec3f(p.dimensions)*p.physical-vec3f(.5*p.physical));
+  let clamped=velocityDomainPoint(x);
   let h=f32(anchor.size)*p.physical;if(!finite(h)||h<=0.){return invalid;}
   let center=vec3f(cellCoord(anchor.cell))*p.physical+.5*h;var lowOffset=vec3i(0);for(var axis=0u;axis<3u;axis+=1u){if(clamped[axis]<center[axis]){lowOffset[axis]=-1;}}
   let lowCenter=center+vec3f(lowOffset)*h;let t=clamp((clamped-lowCenter)/h,vec3f(0),vec3f(1));var result=vec3f(0);
@@ -178,16 +186,17 @@ fn selectorVelocity(owner:AirOwner,selectorIndex:u32,selector:vec4f)->vec4f{if(o
   return taggedVelocity(owner.tag);}
 fn tetraWeights(point:vec3f,x:vec3f,y:vec3f,z:vec3f)->vec4f{let d=dot(x,cross(y,z));if(!finite(d)||abs(d)<1e-10){return vec4f(-2);}let a0=dot(point,cross(y,z))/d;let a1=dot(x,cross(point,z))/d;let a2=dot(x,cross(y,point))/d;return vec4f(1.-a0-a1-a2,a0,a1,a2);}
 fn transitionSample(x:vec3f)->vec4f{
-  let invalid=vec4f(0,0,0,-1);if(!finite3(x)){return invalid;}let owner=airOwnerAtPosition(x);if(owner.tag==INVALID){return invalid;}
+  let invalid=vec4f(0,0,0,-1);if(!finite3(x)){return invalid;}let sampleX=velocityDomainPoint(x);
+  let owner=airOwnerAtPosition(sampleX);if(owner.tag==INVALID){return invalid;}
   let caseId=owner.caseTransform&0xffffu;let transform=(owner.caseTransform>>16u)&63u;if(transform>=48u){return invalid;}
-  if(caseId==0u){let regular=regularSampleExact(x,owner);if(regular.exact!=0u){return regular.value;}}
+  if(caseId==0u){let regular=regularSampleExact(sampleX,owner);if(regular.exact!=0u){return regular.value;}}
   let words=arrayLength(&catalog);if(p.tetraVertexOffset>words||p.tetraVertexCount==0u
       ||p.tetraVertexCount>(words-p.tetraVertexOffset)/4u){return invalid;}
   if(caseId>(0xffffffffu-p.tetraHeaderOffset)/3u){return invalid;}let thAt=p.tetraHeaderOffset+3u*caseId;
   if(thAt>words||words-thAt<3u||p.tetraOffset>words){return invalid;}let first=catalog[thAt];let count=catalog[thAt+1u];
   if(first>words-p.tetraOffset||count>words-p.tetraOffset-first){return invalid;}
   let extent=f32(owner.size)*p.physical;if(!finite(extent)||extent<=0.){return invalid;}
-  let center=vec3f(cellCoord(owner.cell))*p.physical+.5*extent;let local=powerTransform((x-center)/extent,transform);
+  let center=vec3f(cellCoord(owner.cell))*p.physical+.5*extent;let local=powerTransform((sampleX-center)/extent,transform);
   for(var ti=0u;ti<count;ti+=1u){let packed=catalog[p.tetraOffset+first+ti];let s=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);
     if(any(s>=vec3u(p.tetraVertexCount))){return invalid;}let va=p.tetraVertexOffset+4u*s.x;let vb=p.tetraVertexOffset+4u*s.y;let vc=p.tetraVertexOffset+4u*s.z;
     let a=vec4f(bitsf(va),bitsf(va+1u),bitsf(va+2u),bitsf(va+3u));let b=vec4f(bitsf(vb),bitsf(vb+1u),bitsf(vb+2u),bitsf(vb+3u));let c=vec4f(bitsf(vc),bitsf(vc+1u),bitsf(vc+2u),bitsf(vc+3u));
@@ -221,7 +230,7 @@ fn runTransitionRare(work:u32,lid:u32){let original=workItem(TRANSITION_RARE,wor
 @compute @workgroup_size(64)fn transportTransitionCommonPhi(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){runTransitionCommon(wg.x,lid);}
 @compute @workgroup_size(64)fn transportRegularRarePhi(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){runRegularRare(wg.x,lid);}
 @compute @workgroup_size(64)fn transportTransitionRarePhi(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){runTransitionRare(wg.x,lid);}
-@compute @workgroup_size(1)fn summarizeStructuredFineTransport(){control=Control(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,INVALID,INVALID,0u,0u,0u);if(state[0]!=0u||state[1]==0u){control.authorityUnavailable=1u;control.maxDisplacement=state[3];return;}let count=min(worklist[1],p.pageCapacity);for(var i=0u;i<count;i+=1u){let base=statusBase(i);let errors=state[base];let work=state[base+1u];if(work==INVALID){control.nonfinite+=1u;control.invalidStatus+=1u;continue;}control.outside+=errors&65535u;control.nonfinite+=errors>>16u;control.processed+=work&65535u;control.extended+=work>>16u;control.maxDisplacement=max(control.maxDisplacement,state[base+2u]&65535u);}control.velocityUnavailable=control.nonfinite;control.committed=select(0u,1u,control.nonfinite==0u);}
+@compute @workgroup_size(1)fn summarizeStructuredFineTransport(){control=Control(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,INVALID,INVALID,0u,0u,0u);if(state[0]!=0u||state[1]==0u){control.authorityUnavailable=1u;control.maxDisplacement=state[3];return;}let count=min(worklist[1],p.pageCapacity);for(var i=0u;i<count;i+=1u){let base=statusBase(i);let errors=state[base];let work=state[base+1u];if(work==INVALID){control.nonfinite+=1u;control.invalidStatus+=1u;continue;}control.outside+=errors&65535u;control.nonfinite+=errors>>16u;control.processed+=work&65535u;control.extended+=work>>16u;let packed=state[base+2u];control.maxDisplacement=max(control.maxDisplacement,packed&65535u);let firstLocal=packed>>16u;if(control.firstIndex==INVALID&&firstLocal!=65535u){let id=worklist[7u+i];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){let q=unpackBrick(metadata[id*10u+1u])*p.r+localCoord(firstLocal);let x=p.origin+(vec3f(q)+vec3f(.5))*p.h;control.firstIndex=firstLocal;control.firstX=bitcast<u32>(x.x);control.firstY=bitcast<u32>(x.y);control.firstZ=bitcast<u32>(x.z);}}}control.velocityUnavailable=control.nonfinite;control.committed=select(0u,1u,control.nonfinite==0u);}
 var<workgroup> neighborPages:array<u32,6>;var<workgroup> pageChanged:array<u32,64>;var<workgroup> pageOldInterface:array<u32,64>;var<workgroup> pageNewInterface:array<u32,64>;
 fn neighborIndex(id:u32,local:u32,q:vec3u,dir:u32)->u32{var n=vec3i(q);let axis=dir/2u;n[axis]+=select(-1,1,(dir&1u)!=0u);if(n[axis]>=0&&n[axis]<i32(p.r)){return id*p.samplesPerBrick+u32(n.x)+p.r*(u32(n.y)+p.r*u32(n.z));}let other=neighborPages[dir];if(other==INVALID){return INVALID;}n[axis]=select(i32(p.r)-1,0,n[axis]>=i32(p.r));return other*p.samplesPerBrick+u32(n.x)+p.r*(u32(n.y)+p.r*u32(n.z));}
 @compute @workgroup_size(64)fn commitStructuredFineTransport(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){let work=wg.x;var live=control.committed!=0u&&work<min(worklist[1],p.pageCapacity);var id=INVALID;if(live){id=worklist[7u+work];live=id<p.pageCapacity&&metadata[id*10u+2u]==p.generation;}if(lid<6u){var n=INVALID;if(live){let q=metadata[id*10u+4u+lid];if(q<p.pageCapacity&&metadata[q*10u+2u]==p.generation){n=q;}}neighborPages[lid]=n;}workgroupBarrier();var changed=0u;var oldInterface=0u;var newInterface=0u;if(live){for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;if((flags[index]&VALID)==0u){continue;}let old=phi[index];let fresh=nextPhi[index];if(!finite(old)||!finite(fresh)){changed=1u;continue;}changed|=select(0u,1u,(old<0.)!=(fresh<0.));let q=localCoord(local);for(var dir=0u;dir<6u;dir+=1u){let ni=neighborIndex(id,local,q,dir);if(ni==INVALID||(flags[ni]&VALID)==0u){continue;}let oldN=phi[ni];let newN=nextPhi[ni];oldInterface|=select(0u,1u,finite(oldN)&&(old<0.)!=(oldN<0.));newInterface|=select(0u,1u,finite(newN)&&(fresh<0.)!=(newN<0.));}}}pageChanged[lid]=changed;pageOldInterface[lid]=oldInterface;pageNewInterface[lid]=newInterface;workgroupBarrier();for(var width=32u;width>0u;width>>=1u){if(lid<width){pageChanged[lid]|=pageChanged[lid+width];pageOldInterface[lid]|=pageOldInterface[lid+width];pageNewInterface[lid]|=pageNewInterface[lid+width];}workgroupBarrier();}if(live&&lid==0u){let before=(metadata[id*10u+3u]&PAGE_INTERFACE)!=0u||pageOldInterface[0]!=0u;let after=pageNewInterface[0]!=0u;let membership=pageChanged[0]!=0u||before||after;metadata[id*10u+3u]=VALID|select(0u,PAGE_INTERFACE,after)|select(0u,PAGE_DIRTY,membership);delta[8u+id]=select(INVALID,metadata[id*10u+1u],membership);}workgroupBarrier();if(live){for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;if((flags[index]&VALID)!=0u){phi[index]=nextPhi[index];}}}}

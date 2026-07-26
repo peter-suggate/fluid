@@ -15,6 +15,7 @@ import {
 import type { PassBroker } from "./webgpu-pass-broker";
 export { structuredFineLevelSetTransportWGSL } from "./webgpu-octree-fine-levelset-transport.wgsl";
 import { structuredFineLevelSetTransportWGSL } from "./webgpu-octree-fine-levelset-transport.wgsl";
+import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
 
 export const FINE_LEVELSET_TRANSPORT_CONTROL_BYTES = 64;
 export const FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP = 4_096;
@@ -251,7 +252,8 @@ export class WebGPUFineLevelSetTransport {
       [21, air?.boundaryControl ?? structured.control],
     ]);
     const group = (pipeline: GPUComputePipeline, bindings: readonly number[]) =>
-      device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: bindings.map((binding) => ({
+      device.createBindGroup({ label: `${pipeline.label} fine transport bindings ${bindings.join(",")}`,
+        layout: pipeline.getBindGroupLayout(0), entries: bindings.map((binding) => ({
         binding, resource: { buffer: all.get(binding)! },
       })) });
     this.planGroup = group(this.planPipeline, [0,2,6,9,12,13,14,20,21]);
@@ -259,7 +261,12 @@ export class WebGPUFineLevelSetTransport {
     this.publishWorksetsGroup = group(this.publishWorksetsPipeline, [0,2,9,13]);
     this.transportGroups = this.transportPipelines.map((pipeline, index) => group(pipeline,
       FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS[index]!));
-    this.summarizeGroup = group(this.summarizePipeline, [0,2,7,13]);
+    // Bindings must match what the entry point statically uses: these
+    // pipelines are created with `layout: "auto"`, so the derived layout omits
+    // any binding the entry point does not reference, and supplying an extra
+    // one makes the whole bind group invalid. Summary uses metadata only to
+    // retain the first rejected sample's stable fine-lattice position.
+    this.summarizeGroup = group(this.summarizePipeline, [0,1,2,7,13]);
     this.commitGroup = group(this.commitPipeline, [0,1,2,3,4,5,7,8]);
     this.deltaGroup = group(this.deltaPipeline, [0,2,7,8]);
   }
@@ -312,6 +319,9 @@ export class WebGPUFineLevelSetTransport {
     const classify = broker.compute({ label: "Classify direct structured fine transport blocks" });
     classify.setPipeline(this.classifyPipeline); classify.setBindGroup(0, this.classifyGroup);
     classify.dispatchWorkgroupsIndirect(this.indirectDispatch, 160);
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after fine transport block classification");
+    }
     run(this.publishWorksetsPipeline, this.publishWorksetsGroup,
       "Publish direct structured fine transport worksets", 1);
     // Storage dependencies are ordered between dispatches in one compute pass.
@@ -325,10 +335,19 @@ export class WebGPUFineLevelSetTransport {
       transport.dispatchWorkgroupsIndirect(this.indirectDispatch,
         (4 + 7 * FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES[index]! + 4) * 4);
     });
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after fine characteristic transport");
+    }
     run(this.summarizePipeline, this.summarizeGroup, "Publish structured fine transport status", 1);
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after serial fine transport summary");
+    }
     const commit = broker.compute({ label: "Commit structured fine phi and phase delta" });
     commit.setPipeline(this.commitPipeline); commit.setBindGroup(0, this.commitGroup);
     commit.dispatchWorkgroupsIndirect(this.indirectDispatch, 160);
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after fine transport commit");
+    }
     run(this.deltaPipeline, this.deltaGroup, "Compact structured fine topology delta", 1);
     return broker;
   }

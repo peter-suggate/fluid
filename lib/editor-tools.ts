@@ -14,6 +14,7 @@
 export type EditorTool =
   | "select"
   | "body-place"
+  | "prop-place"
   | "terrain-raise"
   | "terrain-lower"
   | "fluid-paint"
@@ -53,12 +54,25 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     status: "active",
   },
   {
+    id: "prop-place",
+    label: "PROP",
+    shortcut: "p",
+    hint: "click a surface to rest decorative geometry on it · props never enter the solve",
+    status: "active",
+  },
+  // The sculpting schema, evaluators, bake, and brush maths are implemented and
+  // tested (lib/terrain.ts); solvers consume a sculpted ground today because
+  // they read baked column heights. The blocker is rendering: both WGSL terrain
+  // evaluators read the 8-feature analytic uniform, so a sculpted ground would
+  // be simulated but not drawn. Arming these tools waits on a heights texture
+  // in the SVO dry scene and the raster environment shader.
+  {
     id: "terrain-raise",
     label: "RAISE",
     shortcut: "e",
     hint: "brush the ground upward",
     status: "planned",
-    phase: "Phase 3 — terrain editing",
+    phase: "Phase 3 — needs the grid heights texture in both terrain shaders",
   },
   {
     id: "terrain-lower",
@@ -66,31 +80,31 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     shortcut: "r",
     hint: "brush the ground downward",
     status: "planned",
-    phase: "Phase 3 — terrain editing",
+    phase: "Phase 3 — needs the grid heights texture in both terrain shaders",
   },
   {
     id: "fluid-paint",
     label: "WATER",
     shortcut: "t",
-    hint: "paint initial water bricks",
-    status: "planned",
-    phase: "Phase 4 — fluid authoring",
+    hint: "click to add a water brick · drag to paint a body of water",
+    status: "active",
   },
   {
     id: "fluid-erase",
     label: "ERASE",
     shortcut: "y",
-    hint: "erase initial water bricks",
-    status: "planned",
-    phase: "Phase 4 — fluid authoring",
+    hint: "click or drag to remove painted water bricks",
+    status: "active",
   },
+  // One nozzle, not a roster: `inflowBoundaryWGSL` resolves a single dominant
+  // axis and three solvers pack the nozzle into fixed params lanes, so
+  // `fluid.inflows[]` is a solver change rather than a schema change.
   {
     id: "inflow",
     label: "HOSE",
     shortcut: "u",
-    hint: "place an inflow nozzle on a surface",
-    status: "planned",
-    phase: "Phase 4 — fluid authoring",
+    hint: "click a surface to aim the hose there · drag its arrow to set direction and speed",
+    status: "active",
   },
 ] as const satisfies readonly EditorToolSpec[]);
 
@@ -115,7 +129,7 @@ export function editorToolForShortcut(key: string): EditorTool | undefined {
   return EDITOR_TOOLS.find((tool) => tool.shortcut === normalized)?.id;
 }
 
-export type EditorSelectionKind = "body" | "terrain-feature" | "inflow";
+export type EditorSelectionKind = "body" | "terrain-feature" | "inflow" | "prop";
 
 /**
  * Generalization of the original `selectedBodyId`. Later phases add terrain

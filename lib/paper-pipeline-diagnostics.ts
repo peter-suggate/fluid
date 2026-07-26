@@ -90,13 +90,16 @@ export function paperPipelineStages(
   const structuredGeneration = info.structuredVelocityGeneration;
   const structuredCurrent = structuredGeneration === undefined || powerGeneration === undefined
     || structuredGeneration === powerGeneration;
+  const dynamicStructuredAttempted = (info.encodedSteps ?? 0) > 0;
   stages.push(structuredValid && structuredCurrent
     ? { id: "extrapolation", section: "§5", label: "Structured velocity extension", state: "PUBLISHED", tone: "healthy", generation: generation(structuredGeneration), detail: `${info.structuredVelocityRows ?? 0} rows · ${info.structuredVelocitySlots ?? 0} six-family slots · projected full-vector CPT seeds published` }
     : structuredValid
       ? { id: "extrapolation", section: "§5", label: "Structured velocity extension", state: "STALE", tone: "stale", generation: generation(structuredGeneration), detail: `Structured generation ${structuredGeneration ?? "?"} does not match topology generation ${powerGeneration ?? "?"}.` }
-      : t0Ready
+      : t0Ready && dynamicStructuredAttempted
         ? { id: "extrapolation", section: "§5", label: "Structured velocity extension", state: "REJECTED", tone: "rejected", generation: generation(structuredGeneration), detail: "The direct structured velocity or dynamic-boundary publication is invalid." }
-        : pending("extrapolation", "§5", "Structured velocity extension", "Waiting for the direct six-family authority."));
+        : pending("extrapolation", "§5", "Structured velocity extension", t0Ready
+          ? "The t=0 preflight is fenced; waiting for its structured diagnostic receipt or the first dynamic extension."
+          : "Waiting for the direct six-family authority."));
 
   const transportFaults = (info.globalFineTransportDepartureOutsideBand ?? 0)
     + (info.globalFineTransportNonfiniteVelocity ?? 0)

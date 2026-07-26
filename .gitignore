@@ -13,3 +13,5 @@ coverage/
 .build/
 native/.build/
 tmp/
+artifacts/algorithm-diagnostics/
+artifacts/octree-regression/

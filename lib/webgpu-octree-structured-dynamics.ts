@@ -11,6 +11,7 @@ import {
   type OctreeAirVelocitySupportLayout,
 } from "./webgpu-octree-air-velocity-support";
 import type { PassBroker } from "./webgpu-pass-broker";
+import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
 
 const ROW_CLASSES = [0, 1, 2, 3] as const;
 const FAMILY_CLASSES = [5, 6, 7, 8] as const;
@@ -107,7 +108,7 @@ export interface StructuredDynamicsResources {
  * dedicated air-support producer after projection.
  */
 export class WebGPUStructuredVelocityDynamics {
-  readonly encodedAdvectionDispatchCount = 5;
+  readonly encodedAdvectionDispatchCount = 9;
   readonly encodedForceDivergenceDispatchCount = 10;
   readonly encodedProjectionDispatchCount = 9;
   readonly allocatedBytes: number;
@@ -126,7 +127,9 @@ export class WebGPUStructuredVelocityDynamics {
   readonly dispatch: GPUBuffer;
   private readonly params: readonly [GPUBuffer, GPUBuffer, GPUBuffer];
   private readonly prepare: GPUComputePipeline;
+  private readonly topologyTransfer: GPUComputePipeline;
   private readonly advection: readonly GPUComputePipeline[];
+  private readonly advectionCommit: readonly GPUComputePipeline[];
   private readonly force: readonly GPUComputePipeline[];
   private readonly divergence: readonly GPUComputePipeline[];
   private readonly projection: readonly GPUComputePipeline[];
@@ -205,12 +208,16 @@ export class WebGPUStructuredVelocityDynamics {
     words[51] = resources.airSupportLayout.controlOffsetWords;
     words[52] = resources.airSupportLayout.supportVectorOffsetWords;
     words[53] = resources.airSupportLayout.supportCapacity;
+    words[54] = resources.airSupportLayout.ownerDirectoryOffsetWords;
+    words[55] = resources.airSupportLayout.ownerDirectoryCellCapacity;
     for (const buffer of this.params) device.queue.writeBuffer(buffer, 0, words.buffer);
     const shaderModule = device.createShaderModule({ label: "Structured velocity dynamics", code: structuredVelocityDynamicsWGSL });
     const make = (name: string) => device.createComputePipeline({ label: name,
       layout: "auto", compute: { module: shaderModule, entryPoint: name } });
     this.prepare = make("prepareStructuredDynamics");
+    this.topologyTransfer = make("transferStructuredTopologyCandidate");
     this.advection = FAMILY_CLASSES.map((value) => make(`advectStructuredClass${value}`));
+    this.advectionCommit = FAMILY_CLASSES.map((value) => make(`commitAdvectedStructuredClass${value}`));
     this.force = FAMILY_CLASSES.map((value) => make(`forceStructuredClass${value}`));
     this.divergence = ROW_CLASSES.map((value) => make(`divergenceStructuredClass${value}`));
     this.projection = FAMILY_CLASSES.map((value) => make(`projectStructuredClass${value}`));
@@ -239,7 +246,8 @@ export class WebGPUStructuredVelocityDynamics {
       6: this.catalog, 11: this.resources.boundaryWorksets,
       12: this.dispatch, 13: pressure, 14: divergenceRhs, 16: liquidMask,
       17: this.resources.boundaryControl, 18: this.transportMetrics,
-      22: this.resources.solidNormalVelocities, 23: this.projectionEnergyStats };
+      22: this.resources.solidNormalVelocities, 23: this.projectionEnergyStats,
+      24: structured.candidateControl };
   }
 
   private group(pipeline: GPUComputePipeline, entries: readonly number[], params: GPUBuffer,
@@ -250,12 +258,26 @@ export class WebGPUStructuredVelocityDynamics {
     if (!byPressure) { byPressure = new WeakMap(); byParams.set(params, byPressure); }
     const cached = byPressure.get(pressure); if (cached) return cached;
     const resources = this.entries(params, pressure);
-    const group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: entries.map((binding) => ({
+    const group = this.device.createBindGroup({ label: `${pipeline.label} bindings ${entries.join(",")}`,
+      layout: pipeline.getBindGroupLayout(0), entries: entries.map((binding) => ({
       binding, resource: { buffer: resources[binding]! },
     })) });
     byPressure.set(pressure, group); return group;
   }
 
+  /**
+   * Do not hoist this to run once per substep. The three call sites look
+   * redundant because the kernel reads no per-stage parameter word, but the
+   * argument it publishes is gated on `acc(0u)==0u`, and `accepted` is the
+   * read_write structured control that every class kernel ORs a rejection code
+   * into. Re-preparing is what fail-closes the rest of the substep: an
+   * advection that rejects a sample zeroes the force, divergence, projection
+   * and reconstruction dispatch arguments. One shared prepare would let those
+   * stages keep running over a field already known to be invalid.
+   *
+   * The fence is required for the usual reason: this writes `this.dispatch` as
+   * storage and `encodeClasses` reads the same buffer as an indirect argument.
+   */
   private encodePrepare(broker: PassBroker, params: GPUBuffer): void {
     const pass = broker.compute({ label: "Prepare accepted structured dynamics worksets" });
     pass.setPipeline(this.prepare); pass.setBindGroup(0, this.group(this.prepare, [0, 1, 11, 12, 17], params));
@@ -288,6 +310,33 @@ export class WebGPUStructuredVelocityDynamics {
     const params = this.update(0, dt, 1, [0, 0, 0]); this.encodePrepare(broker, params);
     this.encodeClasses(broker, this.advection, FAMILY_CLASSES, [0, 1, 2, 3, 4, 5, 6, 11, 17, 18, 22], params,
       "Advect structured family class");
+    // The staggered regular sampler reads neighbouring face degrees of
+    // freedom while every lane produces its own destination, so destinations
+    // stage into the inactive authority bank and become the accepted values
+    // only after this fence closes the intra-dispatch race window.
+    broker.fence("structured advected destinations staged");
+    this.encodeClasses(broker, this.advectionCommit, FAMILY_CLASSES, [0, 1, 2, 11, 17, 18], params,
+      "Commit advected structured family class");
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after structured advection commit");
+    }
+  }
+
+  /** Transfer the accepted projected field onto faces created by a split,
+   * merge, or changed interface stencil. Exact face identities are preserved
+   * bit-for-bit by the publisher and bypass this interpolation. */
+  encodeTopologyTransferCandidate(broker: PassBroker): void {
+    if (this.destroyed) throw new Error("Structured dynamics is destroyed");
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic before topology velocity transfer");
+    }
+    const params = this.params[0];
+    const pass = broker.compute({ label: "Transfer accepted velocity to changed topology faces" });
+    pass.setPipeline(this.topologyTransfer);
+    pass.setBindGroup(0, this.group(this.topologyTransfer,
+      [0, 1, 2, 3, 4, 5, 6, 17, 18, 24], params));
+    pass.dispatchWorkgroups(Math.ceil(this.resources.structured.plan.slotCapacity / 64));
+    broker.fence("changed topology face velocities transferred");
   }
 
   // The divergence RHS is dimensional: rhs = rho*flux/dt. `encodeProjection`
@@ -300,9 +349,15 @@ export class WebGPUStructuredVelocityDynamics {
     gravity: readonly [number, number, number]): void {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
     const params = this.update(1, dt, density, gravity); this.encodePrepare(broker, params);
-    this.encodeClasses(broker, this.force, FAMILY_CLASSES, [0, 1, 2, 11, 17, 22], params,
+    this.encodeClasses(broker, this.force, FAMILY_CLASSES, [0, 1, 2, 11, 16, 17, 22], params,
       "Force and constrain structured family class");
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic before pre-projection energy summary");
+    }
     this.encodeProjectionEnergy(broker, params, "pre");
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after pre-projection energy summary");
+    }
     this.encodeClasses(broker, this.divergence, ROW_CLASSES, [0, 1, 2, 5, 6, 11, 14, 16, 17, 22], params,
       "Fuse structured divergence RHS class");
   }
@@ -314,7 +369,13 @@ export class WebGPUStructuredVelocityDynamics {
     this.encodeClasses(broker, this.projection, FAMILY_CLASSES,
       [0, 1, 2, 11, 13, 16, 17, 22], params,
       "Project structured family class", pressure);
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic before post-projection energy summary");
+    }
     this.encodeProjectionEnergy(broker, params, "post");
+    if (octreeAlgorithmDiagnosticsEnabled()) {
+      broker.fence("algorithm diagnostic after post-projection energy summary");
+    }
     this.encodeClasses(broker, this.reconstruct, ROW_CLASSES,
       [0, 1, 2, 4, 5, 6, 11, 17], params,
       "Reconstruct projected structured rows");
@@ -329,7 +390,7 @@ export class WebGPUStructuredVelocityDynamics {
 }
 
 export const structuredVelocityDynamicsWGSL = /* wgsl */ `
-struct P{rowCapacity:u32,slotCapacity:u32,maxSlots:u32,authorityWords:u32,worksetStride:u32,worksetBankStride:u32,dimensionX:u32,dimensionY:u32,dimensionZ:u32,closedMask:u32,denseOffset:u32,slotGeometryOffset:u32,tetraHeaderOffset:u32,tetraVertexOffset:u32,tetraOffset:u32,tetraVertexCount:u32,templateHeaderOffset:u32,reconstructionOffset:u32,valuesOffset:u32,ownerOffset:u32,neighborOffset:u32,metadataOffset:u32,areaOffset:u32,inverseOffset:u32,fractionOffset:u32,pressureScaleOffset:u32,normalOffset:u32,centroidOffset:u32,rowNeighborOffset:u32,rowReciprocalOffset:u32,rowOwnerMetadataOffset:u32,rowHandleOffset:u32,rowSignOffset:u32,rowCatalogOffset:u32,rowAxisOffset:u32,rowFamilyPrefixOffset:u32,rowFamilyHandleOffset:u32,rowFamilySlotOffset:u32,padA:u32,padB:u32,physical:vec4f,gravity:vec4f,selectorOffsetWords:u32,selectorStride:u32,regularTagOffsetWords:u32,supportControlOffsetWords:u32,supportVectorOffsetWords:u32,supportCapacity:u32}
+struct P{rowCapacity:u32,slotCapacity:u32,maxSlots:u32,authorityWords:u32,worksetStride:u32,worksetBankStride:u32,dimensionX:u32,dimensionY:u32,dimensionZ:u32,closedMask:u32,denseOffset:u32,slotGeometryOffset:u32,tetraHeaderOffset:u32,tetraVertexOffset:u32,tetraOffset:u32,tetraVertexCount:u32,templateHeaderOffset:u32,reconstructionOffset:u32,valuesOffset:u32,ownerOffset:u32,neighborOffset:u32,metadataOffset:u32,areaOffset:u32,inverseOffset:u32,fractionOffset:u32,pressureScaleOffset:u32,normalOffset:u32,centroidOffset:u32,rowNeighborOffset:u32,rowReciprocalOffset:u32,rowOwnerMetadataOffset:u32,rowHandleOffset:u32,rowSignOffset:u32,rowCatalogOffset:u32,rowAxisOffset:u32,rowFamilyPrefixOffset:u32,rowFamilyHandleOffset:u32,rowFamilySlotOffset:u32,padA:u32,padB:u32,physical:vec4f,gravity:vec4f,selectorOffsetWords:u32,selectorStride:u32,regularTagOffsetWords:u32,supportControlOffsetWords:u32,supportVectorOffsetWords:u32,supportCapacity:u32,ownerDirectoryOffsetWords:u32,ownerDirectoryCellCapacity:u32}
 struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 struct SlotGeometry{neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInverseDistance:vec4f}
 
@@ -349,12 +410,14 @@ struct SlotGeometry{neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInverseDis
 @group(0)@binding(18)var<storage,read_write>transportMetrics:array<vec4f>;
 @group(0)@binding(22)var<storage,read>solidNormalVelocities:array<f32>;
 @group(0)@binding(23)var<storage,read_write>projectionEnergyStats:array<u32>;
+@group(0)@binding(24)var<storage,read_write>candidate:array<atomic<u32>>;
 
 const INVALID:u32=0xffffffffu;
 const ERROR_SAMPLE:u32=${OCTREE_STRUCTURED_GPU_ERROR.carry}u;
 const SUPPORT_TAG:u32=0x80000000u;
 const SUPPORT_VALID:u32=${OCTREE_AIR_SUPPORT_VALID}u;
 const SUPPORT_LAYOUT_VERSION:u32=${OCTREE_AIR_SUPPORT_LAYOUT_VERSION}u;
+const CANDIDATE_VALID:u32=${0x5356_454c}u;
 
 fn acc(index:u32)->u32{return atomicLoad(&accepted[index]);}
 fn rejectSample(stage:u32,index:u32){
@@ -452,6 +515,25 @@ fn taggedVelocity(tag:u32)->vec4f{
   let sample=transportMetrics[at];
   return select(invalidVector(),vec4f(sample.xyz,1.),vectorValid(sample));
 }
+// Section 5 extrapolates the projected velocity outside the liquid before
+// level-set transport. A newly wet pressure row therefore initializes from
+// that accepted extended field when no old liquid row contains its face. The
+// dense finest-cell directory names the exact octree owner and its published
+// row/support vector; this is the same authority consumed by fine transport.
+fn extendedOwnerVelocity(point:vec3f)->vec4f{
+  if(!finite3(point)||!supportPublicationValid()){return invalidVector();}
+  let d=dimensions();let volume=d.x*d.y*d.z;
+  if(volume==0u||p.ownerDirectoryCellCapacity<volume){return invalidVector();}
+  let upper=max(vec3f(d)-vec3f(1e-4),vec3f(0.));
+  let q=vec3u(floor(clamp(point/p.physical.x,vec3f(0.),upper)));
+  let cell=q.x+d.x*(q.y+d.y*q.z);let at=p.ownerDirectoryOffsetWords+4u*cell;
+  if(at>4u*arrayLength(&transportMetrics)||4u*arrayLength(&transportMetrics)-at<4u){return invalidVector();}
+  let tag=supportWord(at);let origin=supportWord(at+1u);let size=supportWord(at+2u);
+  if(tag==INVALID||origin==INVALID||size==0u){return invalidVector();}
+  let oq=vec3u(origin%d.x,(origin/d.x)%d.y,origin/(d.x*d.y));
+  if(any(q<oq)||any(q>=oq+vec3u(size))){return invalidVector();}
+  return taggedVelocity(tag);
+}
 fn axisNeighbor(row:u32,axis:u32,positive:bool)->u32{
   if(row>=acc(2u)||axis>=3u){return INVALID;}
   let direction=2u*axis+select(0u,1u,positive);
@@ -464,7 +546,145 @@ fn regularTag(row:u32,offset:vec3i)->u32{
   let local=u32(offset.x+1)+3u*u32(offset.y+1)+9u*u32(offset.z+1);
   return supportWord(p.regularTagOffsetWords+27u*row+local);
 }
-fn regularSample(anchor:u32,x:vec3f)->vec4f{
+// Aanjaneya et al. 2017, Section 5: "For improved efficiency and accuracy in
+// regular regions away from level transitions, we revert to standard per-axis
+// face-based velocity interpolation." The cell-vector trilinear basis below
+// (cellSample) averages a row's same-axis faces before it blends, so sampling
+// at a face centre returned a [1,2,1]/4 filter of the neighbouring face
+// values instead of the face's own degree of freedom, low-passing the whole
+// velocity field on every substep even as CFL approaches zero. The staggered
+// basis reproduces each face's own value exactly (weight one) at its centre.
+fn regularFaceHandle(row:u32,axis:u32,positive:bool)->u32{
+  if(row>=acc(2u)||axis>=3u){return INVALID;}
+  var world=vec3f(0.);world[axis]=select(-1.,1.,positive);
+  let canonical=powerTransform(world,metrics[row].transformAndFlags&63u);
+  let magnitude=abs(canonical);
+  let family=select(select(2u,1u,magnitude.y>magnitude.z),0u,magnitude.x>max(magnitude.y,magnitude.z));
+  let orientation=select(0u,1u,canonical[family]>0.);
+  // Publisher-resolved O(1) family-slot base: classify wrote
+  // rowFamilyHandles[6*row+family] and the Section 6.3 publication filled
+  // rowFamilySlots[base+orientation] for every incident side of the face.
+  let slotBase=a[abase()+p.rowFamilyHandleOffset+6u*row+family];
+  if(slotBase+orientation>=48u*p.rowCapacity){return INVALID;}
+  return a[abase()+p.rowFamilySlotOffset+slotBase+orientation];
+}
+fn faceAxisValue(handle:u32,axis:u32)->vec2f{
+  if(handle==INVALID||handle>=acc(5u)){return vec2f(0.,0.);}
+  let n=normal(handle);
+  let magnitude=abs(n);
+  if(magnitude[axis]<=.9999||dot(magnitude,vec3f(1.))-magnitude[axis]>1e-4){return vec2f(0.,0.);}
+  let sample=value(handle);
+  if(!finite(sample)){return vec2f(0.,0.);}
+  // The stored degree of freedom is u dot n for the face's own world normal;
+  // recover the signed world-axis component exactly, never an average.
+  return vec2f(select(-sample,sample,n[axis]>0.),1.);
+}
+// One axis-normal face plane of the staggered stencil. The face's published
+// degree of freedom is authoritative whenever an incident cell is a live
+// same-size regular row; an incident Section 5 support cell contributes its
+// published extended vector component instead. An in-domain cell that
+// resolves to a transition row, a different size, or no publication makes
+// the whole sample ineligible (status 0) so the caller falls back to the
+// paper's cube/tetra interpolant rather than substituting zero or an average.
+fn staggeredPlaneValue(anchor:u32,rg:vec4u,origin:vec3f,h:f32,axis:u32,plane:i32,transverse:vec3i)->vec2f{
+  var faceFound=false;var face=0.;
+  var supportFound=false;var support=0.;
+  let d=dimensions();
+  for(var candidate=0u;candidate<2u;candidate+=1u){
+    let cellAt=plane-i32(candidate);
+    if(cellAt<-1||cellAt>1){continue;}
+    let centerAt=origin[axis]+(f32(cellAt)+.5)*h;
+    if(centerAt<0.||centerAt>f32(d[axis])*p.physical.x){continue;}
+    var offset=transverse;offset[axis]=cellAt;
+    let tag=regularTag(anchor,offset);
+    if(tag==INVALID){return vec2f(0.,0.);}
+    if((tag&SUPPORT_TAG)!=0u){
+      let extended=taggedVelocity(tag);
+      if(!vectorValid(extended)){return vec2f(0.,0.);}
+      if(!supportFound){support=extended[axis];supportFound=true;}
+      continue;
+    }
+    if(tag>=acc(2u)||metrics[tag].caseId!=0u||rowGeometry[rbase()+tag].y!=rg.y){return vec2f(0.,0.);}
+    let resolved=faceAxisValue(regularFaceHandle(tag,axis,candidate==1u),axis);
+    if(resolved.y==0.){return vec2f(0.,0.);}
+    if(!faceFound){face=resolved.x;faceFound=true;}
+  }
+  if(faceFound){return vec2f(face,1.);}
+  if(supportFound){return vec2f(support,1.);}
+  return vec2f(0.,0.);
+}
+fn staggeredComponent(anchor:u32,rg:vec4u,origin:vec3f,h:f32,x:vec3f,axis:u32)->vec2f{
+  let d=dimensions();
+  var sample=x;
+  // The axis-normal face lattice reaches the domain walls exactly (wall
+  // faces are published boundary faces of interior rows); transverse axes
+  // keep the cell-centred .5*h constant physical-boundary extension.
+  sample[axis]=clamp(sample[axis],0.,f32(d[axis])*p.physical.x);
+  for(var other=0u;other<3u;other+=1u){
+    if(other==axis){continue;}
+    sample[other]=clamp(sample[other],.5*h,f32(d[other])*p.physical.x-.5*h);
+  }
+  let along=(sample[axis]-origin[axis])/h;
+  let plane=clamp(i32(floor(along)),-1,1);
+  var tAlong=clamp(along-f32(plane),0.,1.);
+  // Measure-zero snap: a face centre must keep weight one on its own value
+  // under floating-point dust, mirroring the old-mesh epsilon discipline at
+  // interpolation-element boundaries.
+  if(tAlong<1e-5){tAlong=0.;}else if(tAlong>1.-1e-5){tAlong=1.;}
+  let center=origin+vec3f(.5*h);
+  var low=vec3i(0);
+  var tTransverse=vec3f(0.);
+  for(var other=0u;other<3u;other+=1u){
+    if(other==axis){continue;}
+    if(sample[other]<center[other]){low[other]=-1;}
+    let lowCenter=center[other]+f32(low[other])*h;
+    var t=clamp((sample[other]-lowCenter)/h,0.,1.);
+    if(t<1e-5){t=0.;}else if(t>1.-1e-5){t=1.;}
+    tTransverse[other]=t;
+  }
+  var result=0.;
+  for(var corner=0u;corner<8u;corner+=1u){
+    var weight=select(1.-tAlong,tAlong,(corner&1u)!=0u);
+    var offset=vec3i(0);
+    var bit=1u;
+    for(var other=0u;other<3u;other+=1u){
+      if(other==axis){continue;}
+      let high=(corner&(1u<<bit))!=0u;
+      weight*=select(1.-tTransverse[other],tTransverse[other],high);
+      offset[other]=low[other]+select(0,1,high);
+      bit+=1u;
+    }
+    if(weight<=0.){continue;}
+    for(var other=0u;other<3u;other+=1u){
+      if(other==axis){continue;}
+      let requested=center[other]+f32(offset[other])*h;
+      if(requested<.5*h||requested>f32(d[other])*p.physical.x-.5*h){offset[other]=0;}
+    }
+    let resolved=staggeredPlaneValue(anchor,rg,origin,h,axis,plane+i32(corner&1u),offset);
+    if(resolved.y==0.){return vec2f(0.,0.);}
+    result+=weight*resolved.x;
+  }
+  if(!finite(result)){return vec2f(0.,0.);}
+  return vec2f(result,1.);
+}
+fn staggeredSample(anchor:u32,x:vec3f)->vec4f{
+  if(anchor>=acc(2u)||metrics[anchor].caseId!=0u||!finite3(x)){return invalidVector();}
+  let rg=rowGeometry[rbase()+anchor];
+  let h=f32(rg.y)*p.physical.x;
+  if(!finite(h)||h<=0.){return invalidVector();}
+  let d=dimensions();
+  let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
+  let origin=vec3f(q)*p.physical.x;
+  var result=vec3f(0.);
+  for(var axis=0u;axis<3u;axis+=1u){
+    let component=staggeredComponent(anchor,rg,origin,h,x,axis);
+    if(component.y==0.){return invalidVector();}
+    result[axis]=component.x;
+  }
+  if(!finite3(result)){return invalidVector();}
+  return vec4f(result,1.);
+}
+fn cellSample(anchor:u32,x:vec3f)->vec4f{
   if(anchor>=acc(2u)||!finite3(x)){return invalidVector();}
   let rg=rowGeometry[rbase()+anchor];
   let d=dimensions();let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
@@ -496,6 +716,15 @@ fn regularSample(anchor:u32,x:vec3f)->vec4f{
   }
   if(!finite3(result)){return invalidVector();}
   return vec4f(result,1.);
+}
+fn regularSample(anchor:u32,x:vec3f)->vec4f{
+  // Per-axis face-based interpolation first; the cell-vector cube basis
+  // remains the mandated fallback wherever the staggered stencil touches a
+  // level transition or an unextended region, and its reject paths remain
+  // the fail-closed terminus when both bases are unavailable.
+  let staggered=staggeredSample(anchor,x);
+  if(vectorValid(staggered)){return staggered;}
+  return cellSample(anchor,x);
 }
 fn selectorVelocity(row:u32,selectorIndex:u32,selector:vec4f)->vec4f{
   if(row>=acc(2u)||selectorIndex>=p.tetraVertexCount||selectorIndex>=p.selectorStride
@@ -576,14 +805,102 @@ fn transitionSample(row:u32,x:vec3f)->vec4f{
   }
   return vec4f(255.,24.,f32(count),-1.);
 }
-fn advect(cls:u32,index:u32,transition:bool){
+
+// Resolve the accepted leaf containing a physical point. The row directory is
+// ordered by (level, Morton), so split children can find their old parent and
+// merged parents can find the appropriate old child without a row identity.
+fn mortonPart10(v:u32)->u32{var q=v&1023u;q=(q|(q<<16u))&0x030000ffu;q=(q|(q<<8u))&0x0300f00fu;q=(q|(q<<4u))&0x030c30c3u;q=(q|(q<<2u))&0x09249249u;return q;}
+fn mortonCell(cell:u32)->u32{let d=dimensions();let q=vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));return mortonPart10(q.x)|(mortonPart10(q.y)<<1u)|(mortonPart10(q.z)<<2u);}
+fn directoryLevel(size:u32)->u32{return 31u-countLeadingZeros(size);}
+fn directoryLess(entry:vec4u,level:u32,morton:u32)->bool{let oldLevel=directoryLevel(entry.y);let oldMorton=mortonCell(entry.x);return oldLevel<level||(oldLevel==level&&oldMorton<morton);}
+fn acceptedDirectoryFind(cell:u32,size:u32)->u32{
+  let wantedLevel=directoryLevel(size);let wantedMorton=mortonCell(cell);var low=0u;var high=min(acc(2u),p.rowCapacity);
+  while(low<high){let middle=low+(high-low)/2u;let entry=rowGeometry[rbase()+middle];if(directoryLess(entry,wantedLevel,wantedMorton)){low=middle+1u;}else{high=middle;}}
+  if(low<acc(2u)){let entry=rowGeometry[rbase()+low];if(entry.x==cell&&entry.y==size){return low;}}
+  return INVALID;
+}
+fn acceptedRowContaining(point:vec3f)->u32{
+  if(!finite3(point)){return INVALID;}let d=dimensions();let upper=max(vec3f(d)-vec3f(1e-4),vec3f(0.));let grid=clamp(point/p.physical.x,vec3f(0.),upper);let maximum=max(d.x,max(d.y,d.z));var size=1u;
+  for(var level=0u;level<31u;level+=1u){if(size>maximum){break;}let origin=vec3u(floor(grid/f32(size)))*size;let cell=origin.x+d.x*(origin.y+d.y*origin.z);let row=acceptedDirectoryFind(cell,size);if(row!=INVALID){return row;}size<<=1u;}
+  return INVALID;
+}
+fn candidateRowCenter(candidateBank:u32,row:u32)->vec3f{
+  if(row>=p.rowCapacity){return vec3f(3.402823e38);}
+  let rg=rowGeometry[candidateBank*p.rowCapacity+row];let d=dimensions();let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
+  return (vec3f(q)+.5*f32(rg.y))*p.physical.x;
+}
+fn oldFieldAt(anchor:u32,point:vec3f)->vec4f{
+  if(anchor==INVALID){return invalidVector();}var sample=invalidVector();if(metrics[anchor].caseId!=0u){sample=transitionSample(anchor,point);}else{sample=regularSample(anchor,point);}
+  // Interpolation can leave its local closure at a newly exposed face. The
+  // already projected row vector is the bounded piecewise-constant fallback;
+  // zero is never presented as a successful topology transfer.
+  if(!vectorValid(sample)){sample=velocitySample(anchor);}return sample;
+}
+fn oldAnchor(candidateBank:u32,candidateRow:u32,n:vec3f)->u32{
+  let center=candidateRowCenter(candidateBank,candidateRow);var row=acceptedRowContaining(center);if(row!=INVALID){return row;}
+  // A newly wet candidate centre can lie just beyond the old liquid frontier.
+  // Search back into its owner side by a bounded CFL support distance; the
+  // accepted Section 5 closure then evaluates the new face point itself.
+  for(var step=1u;step<=4u;step+=1u){row=acceptedRowContaining(center-f32(step)*.5*p.physical.x*n);if(row!=INVALID){return row;}}
+  // The interface can enter a cell transverse to this particular face normal.
+  // Section 5 guarantees a one-ring extended old field, so choose the nearest
+  // accepted carrier in the bounded 5^3 neighbourhood and evaluate the new
+  // centroid through that carrier's regular/tetrahedral closure.
+  var nearest=INVALID;var nearestDistance=0x7fffffffi;
+  for(var dz=-2i;dz<=2i;dz+=1i){for(var dy=-2i;dy<=2i;dy+=1i){for(var dx=-2i;dx<=2i;dx+=1i){
+    let offset=vec3i(dx,dy,dz);if(all(offset==vec3i(0))){continue;}let candidateRow=acceptedRowContaining(center+vec3f(offset)*p.physical.x);if(candidateRow==INVALID){continue;}
+    let distance=dx*dx+dy*dy+dz*dz;if(distance<nearestDistance||(distance==nearestDistance&&candidateRow<nearest)){nearest=candidateRow;nearestDistance=distance;}
+  }}}
+  return nearest;
+}
+fn candidateClosedWorld(point:vec3f,n:vec3f)->bool{
+  let grid=point/p.physical.x;let d=dimensions();
+  for(var axis=0u;axis<3u;axis+=1u){
+    if(n[axis]<-.5&&grid[axis]<=1e-4&&(p.closedMask&(1u<<(2u*axis)))!=0u){return true;}
+    if(n[axis]>.5&&grid[axis]>=f32(d[axis])-1e-4&&(p.closedMask&(1u<<(2u*axis+1u)))!=0u){return true;}
+  }
+  return false;
+}
+fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAMPLE);return handle<atomicMin(&candidate[1],handle);}
+@compute @workgroup_size(64)fn transferStructuredTopologyCandidate(@builtin(global_invocation_id)g:vec3u){
+  let handle=g.x;if(arrayLength(&candidate)<7u||atomicLoad(&candidate[0])!=CANDIDATE_VALID||atomicLoad(&candidate[6])==0u||handle>=atomicLoad(&candidate[3])){return;}
+  let candidateBank=atomicLoad(&candidate[5])&1u;let base=candidateBank*p.authorityWords;let marker=bitcast<f32>(a[base+p.centroidOffset+4u*handle+3u]);if(marker>0.5){return;}
+  let at=base+p.centroidOffset+4u*handle;let point=vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));let nt=base+p.normalOffset+4u*handle;let n=vec3f(bitcast<f32>(a[nt]),bitcast<f32>(a[nt+1u]),bitcast<f32>(a[nt+2u]));
+  if(!finite3(point)||!finite3(n)){_ = rejectCandidateTransfer(handle);return;}
+  if(candidateClosedWorld(point,n)){a[base+p.valuesOffset+handle]=bitcast<u32>(0.);return;}
+  let candidateOwner=a[base+p.ownerOffset+handle];let candidateNeighbor=a[base+p.neighborOffset+handle];
+  let ownerAnchor=oldAnchor(candidateBank,candidateOwner,n);let ownerField=oldFieldAt(ownerAnchor,point);var neighborAnchor=INVALID;var neighborField=invalidVector();
+  if(candidateNeighbor!=INVALID){neighborAnchor=oldAnchor(candidateBank,candidateNeighbor,-n);if(neighborAnchor!=ownerAnchor){neighborField=oldFieldAt(neighborAnchor,point);}}
+  var old=ownerField;if(vectorValid(ownerField)&&vectorValid(neighborField)){old=vec4f(.5*(ownerField.xyz+neighborField.xyz),1.);}else if(!vectorValid(ownerField)){old=neighborField;}
+  if(!vectorValid(old)){old=extendedOwnerVelocity(point);}
+  if(!vectorValid(old)){if(rejectCandidateTransfer(handle)&&arrayLength(&candidate)>=16u){atomicStore(&candidate[9],candidateOwner);atomicStore(&candidate[10],candidateNeighbor);atomicStore(&candidate[11],ownerAnchor);atomicStore(&candidate[12],neighborAnchor);atomicStore(&candidate[13],bitcast<u32>(point.x));atomicStore(&candidate[14],bitcast<u32>(point.y));atomicStore(&candidate[15],bitcast<u32>(point.z));}return;}let projected=dot(old.xyz,n);if(!finite(projected)){_ = rejectCandidateTransfer(handle);return;}a[base+p.valuesOffset+handle]=bitcast<u32>(projected);
+}
+
+// Characteristic sources must be this substep's prior face values: the
+// staggered sampler reads neighbouring face degrees of freedom, so writing a
+// destination into the accepted bank mid-dispatch would race those reads and
+// advect some faces through a partially updated field. Every destination
+// therefore stages into the inactive authority value bank (rewritten
+// wholesale by each future candidate publication) and the fenced commit
+// kernels copy the staged words back bit-exactly.
+fn nextValueAt(handle:u32)->u32{return (1u-bank())*p.authorityWords+p.valuesOffset+handle;}
+fn setNextValue(handle:u32,v:f32){a[nextValueAt(handle)]=bitcast<u32>(v);}
+fn advect(cls:u32,index:u32){
   let handle=workItem(cls,index);
   if(handle==INVALID||handle>=acc(5u)){return;}
   if(!supportPublicationValid()){transportMetrics[handle]=invalidVector();rejectSample(1u,handle);return;}
   let row=owner(handle);
-  let useTransition=metrics[row].caseId!=0u;
+  // Follow the exact owner-local closure committed by the Section 5 producer.
+  // A face class is transition when either incident row is nonuniform, so it
+  // cannot choose this owner's basis. Conversely, a nominal case-zero owner
+  // with a body-diagonal coarse neighbour has no cube tags and uses the
+  // retained case-zero Delaunay fan. The centre cube tag is the producer's
+  // unambiguous marker: every complete regular closure publishes the row id.
+  let centerTag=regularTag(row,vec3i(0));
+  let useTransition=metrics[row].caseId!=0u||centerTag!=row;
   let x=centroid(handle);
   let prior=value(handle);
+  setNextValue(handle,prior);
   let aperture=bitcast<f32>(a[abase()+p.fractionOffset+handle]);
   if(!finite(aperture)||aperture<0.||aperture>1.){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
   // A fully prescribed face has no transported degree of freedom. Publish
@@ -593,7 +910,7 @@ fn advect(cls:u32,index:u32,transition:bool){
     let n=normal(handle);
     let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
     if(!finite(solid)||!finite3(n)||!finite(area)||area<=0.||!finite(prior)){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
-    setValue(handle,solid);
+    setNextValue(handle,solid);
     transportMetrics[handle]=vec4f(solid*n*area,.5*area*max(0.,prior*prior-solid*solid));
     return;
   }
@@ -617,13 +934,26 @@ fn advect(cls:u32,index:u32,transition:bool){
   let projected=dot(transported.xyz,n);
   let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
   if(!finite(projected)||!finite(area)||area<=0.||!finite(prior)){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
-  setValue(handle,projected);
+  setNextValue(handle,projected);
   transportMetrics[handle]=vec4f(projected*n*area,.5*area*max(0.,prior*prior-projected*projected));
 }
-@compute @workgroup_size(64)fn advectStructuredClass5(@builtin(global_invocation_id)g:vec3u){advect(5u,g.x,false);}
-@compute @workgroup_size(64)fn advectStructuredClass6(@builtin(global_invocation_id)g:vec3u){advect(6u,g.x,true);}
-@compute @workgroup_size(64)fn advectStructuredClass7(@builtin(global_invocation_id)g:vec3u){advect(7u,g.x,false);}
-@compute @workgroup_size(64)fn advectStructuredClass8(@builtin(global_invocation_id)g:vec3u){advect(8u,g.x,true);}
+@compute @workgroup_size(64)fn advectStructuredClass5(@builtin(global_invocation_id)g:vec3u){advect(5u,g.x);}
+@compute @workgroup_size(64)fn advectStructuredClass6(@builtin(global_invocation_id)g:vec3u){advect(6u,g.x);}
+@compute @workgroup_size(64)fn advectStructuredClass7(@builtin(global_invocation_id)g:vec3u){advect(7u,g.x);}
+@compute @workgroup_size(64)fn advectStructuredClass8(@builtin(global_invocation_id)g:vec3u){advect(8u,g.x);}
+
+fn commitAdvected(cls:u32,index:u32){
+  let handle=workItem(cls,index);
+  if(handle==INVALID||handle>=acc(5u)){return;}
+  // Mirror the advect gate exactly: a lane that staged nothing must not copy
+  // stale inactive-bank words over the accepted values.
+  if(!supportPublicationValid()){return;}
+  a[abase()+p.valuesOffset+handle]=a[nextValueAt(handle)];
+}
+@compute @workgroup_size(64)fn commitAdvectedStructuredClass5(@builtin(global_invocation_id)g:vec3u){commitAdvected(5u,g.x);}
+@compute @workgroup_size(64)fn commitAdvectedStructuredClass6(@builtin(global_invocation_id)g:vec3u){commitAdvected(6u,g.x);}
+@compute @workgroup_size(64)fn commitAdvectedStructuredClass7(@builtin(global_invocation_id)g:vec3u){commitAdvected(7u,g.x);}
+@compute @workgroup_size(64)fn commitAdvectedStructuredClass8(@builtin(global_invocation_id)g:vec3u){commitAdvected(8u,g.x);}
 
 var<workgroup> projectionEnergyPartial:array<f32,128>;
 var<workgroup> projectionEnergyCount:array<u32,128>;
@@ -714,6 +1044,17 @@ fn forceFamily(cls:u32,index:u32){
   let solid=solidVelocityAt(handle);
   if(!finite(aperture)||aperture<0.||aperture>1.||!finite(solid)){rejectSample(10u,handle);return;}
   if(aperture==0.){setValue(handle,solid);return;}
+  // Gravity is a body force on the liquid. Dry faces only carry Section 5
+  // extended and advected air values; integrating gravity into them built a
+  // field that grew by g*dt every substep in air, which the projection never
+  // sees and the extension march never resets, and which the staggered
+  // regular sampler would ingest at the free surface. Every face the
+  // divergence RHS integrates is wet by construction (its owner is liquid).
+  let lo=owner(handle);
+  let hi=neighbor(handle);
+  if(lo>=acc(2u)||(hi!=INVALID&&hi>=acc(2u))){rejectSample(12u,handle);return;}
+  let wet=liquidAt(lo)!=0u||(hi!=INVALID&&liquidAt(hi)!=0u);
+  if(!wet){return;}
   let forced=value(handle)+p.physical.y*dot(p.gravity.xyz,normal(handle));
   if(!finite(forced)){rejectSample(11u,handle);return;}
   setValue(handle,forced);

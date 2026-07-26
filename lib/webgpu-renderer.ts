@@ -217,9 +217,52 @@ export function canInitializeGPUSceneSource(scene: SceneDescription, methodId: s
   return !planSceneRuntime(scene, { methodId }).fluidSolver || Boolean(method.createSolver || method.createSolverAsync);
 }
 
-/** Content identity for every construction-time input captured by the GPU scene source. */
+/**
+ * Construction-time identity, split into the three tiers of
+ * docs/WYSIWYG_EDITOR_PLAN.md Phase 1b.
+ *
+ * `structuralKey` fixes the lattice shape and arena capacities: a mismatch can
+ * only be answered by building a new solver. `seedKey` covers scene-derived
+ * GPU inputs — the phi seed, solids, terrain, inflow — which a warm re-seed
+ * will eventually refresh in place against the existing allocations.
+ * `uniformKey` is pure scalars that a hot uniform write could carry with no
+ * reset at all.
+ *
+ * Only the tier boundaries exist today; `gpuSceneSolverKey` still concatenates
+ * all three, so behaviour is unchanged apart from the terrain fix below. The
+ * warm-reset path replaces the seed tier's response, and the uniform tier's
+ * response, without moving these boundaries again.
+ */
+export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
+  return `fluid-${planSceneRuntime(scene, { methodId: config.methodId }).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment ?? "default"}:${JSON.stringify(scene.lighting ?? null)}:${JSON.stringify(scene.voxelDomain)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.top}:${scene.container.fluidWallMode}`;
+}
+
+/**
+ * Scene-derived solver inputs. `scene.terrain` belongs here and was previously
+ * absent from the key entirely, so a terrain edit never reached the solver —
+ * the editor's terrain handles depend on this being fixed.
+ */
+export function gpuSceneSeedKey(scene: SceneDescription): string {
+  return `${scene.container.fillFraction}:${JSON.stringify(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.terrain ?? null)}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
+}
+
+/** Pure scalars; no lattice or seed depends on them. */
+export function gpuSceneUniformKey(scene: SceneDescription): string {
+  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}`;
+}
+
+/**
+ * Content identity for every input that requires a new solver.
+ *
+ * The uniform tier is deliberately absent: those scalars are adopted by the
+ * live solver through `applySceneUniforms`, so editing density or gravity is a
+ * uniform write rather than a ~350-pipeline rebuild. A method that does not
+ * implement `applySceneUniforms` gets the uniform tier folded back in by
+ * `solverKey` below, so it keeps the old rebuild behaviour instead of silently
+ * ignoring the edit.
+ */
 export function gpuSceneSolverKey(scene: SceneDescription, config: SimulationRunConfig): string {
-  return `${config.simulationEpoch ?? 0}:fluid-${planSceneRuntime(scene, { methodId: config.methodId }).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment ?? "default"}:${JSON.stringify(scene.lighting ?? null)}:${JSON.stringify(scene.voxelDomain)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.fillFraction}:${scene.container.top}:${scene.container.fluidWallMode}:${JSON.stringify(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
+  return `${config.simulationEpoch ?? 0}:${gpuSceneStructuralKey(scene, config)}:${gpuSceneSeedKey(scene)}`;
 }
 
 export type GPUStatus =
@@ -668,6 +711,7 @@ export class FluidLabRenderer {
       this.pendingInitialRasterPresentation = undefined;
       this.pendingStaticSvoPresentation = undefined;
       this.gpuFluidKey = "";
+      this.attachedStructuralKey = "";
       this.gpuFluidPendingKey = "";
       this.gpuFluidInitializationAbort?.abort();
       this.gpuFluidInitializationAbort = undefined;
@@ -780,6 +824,55 @@ export class FluidLabRenderer {
   }
 
   private solverKey(scene:SceneDescription,config:SimulationRunConfig){return gpuSceneSolverKey(scene,config);}
+  /** Scalars already adopted by the live solver; empty until one is attached. */
+  private appliedSceneUniformKey="";
+  private reseedInFlight=false;
+
+  /**
+   * Attempt a warm re-seed of the live solver. Only legal when the structural
+   * tier is unchanged — a different lattice or method has to be built, not
+   * re-seeded. Returns true when an attempt is under way, in which case the
+   * caller must skip this frame; the attempt either promotes the solver to the
+   * new key or leaves the ordinary rebuild to run on a later frame.
+   */
+  private tryReseedGPUFluid(scene:SceneDescription,config:SimulationRunConfig,key:string):boolean{
+    const solver=this.gpuFluid;
+    if(!solver?.reseed||this.reseedInFlight)return false;
+    if(gpuSceneStructuralKey(scene,config)!==this.attachedStructuralKey)return false;
+    const generation=this.gpuFluidGeneration,requestGeneration=this.gpuFluidRequestGeneration;
+    this.reseedInFlight=true;
+    this.onStatus({state:"initializing",label:"Re-seeding fenced t=0 solver authority",phase:"warmup",completed:0,total:1,startedAt_ms:performance.now(),kind:"rebuild",retainingPrevious:false});
+    void solver.reseed(scene).then((reseeded)=>{
+      // Anything that replaced or invalidated the solver mid-flight wins.
+      if(this.disposed||this.gpuFluid!==solver||this.gpuFluidGeneration!==generation
+        ||this.gpuFluidRequestGeneration!==requestGeneration)return;
+      if(!reseeded){this.beginGPUFluidInitialization(scene,config,key);return;}
+      this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.resetGPUQueueTracking();this.lastGPUInfoPollAt_ms=-Infinity;
+      // reset() intentionally clears the diagnostics store. A warm re-seed
+      // must therefore republish its authority just like a replacement attach,
+      // then earn a fresh raster fence before transport unlocks. Merely moving
+      // gpuFluidKey leaves the renderer ready while the UI waits forever for
+      // initialSparseAuthorityReady/initialRasterSurfaceReady to reappear.
+      solver.info.initialRasterSurfaceReady=false;
+      solver.info.initialRasterSurfaceState="pending";
+      solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication after re-seed";
+      this.globalFineWaterAttached=false;
+      this.pendingInitialRasterPresentation={solver,solverGeneration:generation,requestGeneration,submitted:false};
+      this.gpuInfoCallback?.({...solver.info});
+      this.onStatus({state:"initializing",label:"Re-seeded solver ready; publishing fenced t=0 raster surface",phase:"presentation",completed:0,total:1,startedAt_ms:performance.now(),kind:"rebuild",retainingPrevious:false});
+    }).catch(()=>{
+      if(!this.disposed&&this.gpuFluid===solver&&this.gpuFluidGeneration===generation
+        &&this.gpuFluidRequestGeneration===requestGeneration)this.beginGPUFluidInitialization(scene,config,key);
+    }).finally(()=>{
+      this.reseedInFlight=false;
+      // Both success and failure need another paused draw: success submits the
+      // t=0 raster fence; failure falls through to the full rebuild path.
+      if(!this.disposed)this.pausedPresentationRevision+=1;
+    });
+    return true;
+  }
+  /** Structural identity of the attached solver, gating warm re-seeds. */
+  private attachedStructuralKey="";
 
   private resetGPUQueueTracking() {
     this.gpuPendingBatches = 0;
@@ -911,7 +1004,7 @@ export class FluidLabRenderer {
       if(config.methodId==="octree"&&solver.initialSparseAuthorityReady!==true){solver.destroy();throw new Error("Octree solver returned before fenced sparse t=0 authority");}
       report({phase:"attach",taskId:"solver.attach",label:"Attach warmed solver",completed:reportedCompleted,total:reportedTotal+1});
       solver.applyRuntimeValues?.(config.values);
-      this.gpuFluid=solver;this.gpuFluidKey=key;this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUInfoPollAt_ms=-Infinity;this.globalFineWaterAttached=false;
+      this.gpuFluid=solver;this.gpuFluidKey=key;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUInfoPollAt_ms=-Infinity;this.globalFineWaterAttached=false;
       const staticRenderScene=!planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver;
       const fencedInitialRaster=requiresFencedInitialRasterPresentation(config.methodId);
       if(staticRenderScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Static SVO scene ready; fluid authority intentionally bypassed";this.pendingInitialRasterPresentation=undefined;this.pendingStaticSvoPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,startedAt_ms,attached:false,submitted:false};}
@@ -964,10 +1057,32 @@ export class FluidLabRenderer {
     if (!this.device || this.disposed || this.deviceLost) return undefined;
     if (!canInitializeGPUSceneSource(scene, config.methodId)) return undefined;
     const key=this.solverKey(scene,config);
-    if(!this.gpuFluid||key!==this.gpuFluidKey){if(this.gpuFluidPendingKey!==key)this.beginGPUFluidInitialization(scene,config,key);return undefined;}
+    if(!this.gpuFluid||key!==this.gpuFluidKey){
+      // A change confined to the seed tier can re-seed the live solver instead
+      // of rebuilding it. The attempt is fire-and-forget against a generation
+      // guard; if it declines or the solver moved on, the ordinary rebuild
+      // below still runs, so this can only make the path faster, never wrong.
+      if(this.gpuFluid&&this.gpuFluidPendingKey!==key&&this.tryReseedGPUFluid(scene,config,key))return undefined;
+      if(this.gpuFluidPendingKey!==key)this.beginGPUFluidInitialization(scene,config,key);
+      return undefined;
+    }
     // A timeline reset is represented by simulationEpoch in the key above.
     // Never turn a timestamp anomaly into an unplanned second solver build.
     if (time_s < (this.gpuFluid.info.submittedTime_s ?? 0)) return undefined;
+    // Scene scalars are absent from the rebuild key, so they are adopted here
+    // instead. A method without applySceneUniforms would otherwise ignore the
+    // edit outright, so it falls back to the rebuild it used to take.
+    const sceneUniformKey = gpuSceneUniformKey(scene);
+    if (sceneUniformKey !== this.appliedSceneUniformKey) {
+      if (this.gpuFluid.applySceneUniforms) {
+        this.gpuFluid.applySceneUniforms(scene);
+        this.appliedSceneUniformKey = sceneUniformKey;
+      } else if (this.appliedSceneUniformKey) {
+        const rebuildKey = `${key}:${sceneUniformKey}`;
+        if (this.gpuFluidPendingKey !== rebuildKey) this.beginGPUFluidInitialization(scene, config, rebuildKey);
+        return undefined;
+      } else this.appliedSceneUniformKey = sceneUniformKey;
+    }
     this.gpuFluid.applyRuntimeValues?.(config.values);
     this.secondaryParticlePipeline?.setSource(this.gpuFluid.secondaryParticles);
     return this.gpuFluid;

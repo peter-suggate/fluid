@@ -90,6 +90,9 @@ export function planOctreeSolveTail(
   // Section 4.3 reports a 6--10 iteration range, not a scene-metadata formula
   // for predicting a safe numerical cap. Encode that upper envelope once and
   // let the same-step GPU residual gate eliminate every unused iteration.
+  // The mini-dam impact is the important counterexample: its authored score is
+  // only six, but some transient steps need the remaining tail to preserve the
+  // projected pressure distribution and wall-climbing jet.
   const encodedOuterIterations = OCTREE_SOLVE_TAIL_MAXIMUM_ENCODED_OUTER_ITERATIONS;
   return Object.freeze({
     encodedOuterIterations,
@@ -136,7 +139,11 @@ export function countOctreePressureCommands(
   if ((shape.boundarySmoothingIterations & 1) !== 0) {
     throw new RangeError("Section 4.3 shell depth must be even for matching halves");
   }
-  const preconditionerSetupDispatches = shape.firstOrderSetupDispatches + 7;
+  // The encoder adds `5 + OCTREE_SECTION43_BOUNDARY_BAND_LAYERS` (= 8), and
+  // `encodeSetup` emits exactly that many: resetBandWorksets,
+  // prepareCorrectionDispatches, classifyBand, three dilate sweeps,
+  // compactBandIntersections, finalizeBandWorksets. This mirror said 7.
+  const preconditionerSetupDispatches = shape.firstOrderSetupDispatches + 8;
   const preconditionerCorrectionDispatches = shape.firstOrderCorrectionDispatches
     + 2 * shape.boundarySmoothingIterations + 4
     + shape.fullOperatorDispatches

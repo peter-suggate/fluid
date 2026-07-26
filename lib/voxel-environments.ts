@@ -130,6 +130,26 @@ class ProxyBuilder {
   }
 }
 
+/**
+ * Convert authored `scene.props` into proxies on the shared builder, so they
+ * receive owner indices from the same sequence as procedural scenery and are
+ * indistinguishable to every downstream consumer.
+ */
+function addScenePropProxies(builder: ProxyBuilder, scene: SceneDescription): void {
+  for (const prop of scene.props ?? []) {
+    const color = C(prop.colorLinear[0], prop.colorLinear[1], prop.colorLinear[2]);
+    const key = `prop/${prop.id}`;
+    const emission = prop.emission ?? 0;
+    if (prop.shape === "box") {
+      builder.box(key, "prop", prop.position_m, prop.halfSize_m, color, emission, ["prop", "authored"]);
+    } else if (prop.shape === "cylinder") {
+      builder.cylinder(key, "prop", prop.position_m, prop.halfSize_m.x, prop.halfSize_m.y, color, emission, ["prop", "authored"]);
+    } else {
+      builder.ellipsoid(key, "prop", prop.position_m, prop.halfSize_m, color, emission, ["prop", "authored"]);
+    }
+  }
+}
+
 const roomMaterialModels: Record<Exclude<EnvironmentId, "default" | "garden">, EnvironmentProxyShell["materialModel"]> = {
   conservatory: "conservatory", courtyard: "courtyard", "night-lab": "night-lab", "concrete-gallery": "gallery",
   bathhouse: "bathhouse", "research-station": "station"
@@ -382,6 +402,12 @@ export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmen
   else if (environmentId === "bathhouse") buildBathhouse(b, s);
   else if (environmentId === "research-station") buildStation(b, s, floorY, roomHalf);
   else if (environmentId === "garden") buildGarden(b, scene, s);
+
+  // Authored props append to the procedural catalog rather than replacing it,
+  // so presets keep their hand-built scenery while the editor can add to it.
+  // They enter every downstream consumer (SVO records, static mips, coverage,
+  // sparse domain) through this one list, and never enter the solve.
+  addScenePropProxies(b, scene);
 
   return { environmentId, environmentIndex: environmentIndex(environmentId), scale_m: s, floorY_m: floorY, shell, primitives: b.props };
 }

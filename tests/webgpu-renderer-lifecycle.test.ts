@@ -123,6 +123,24 @@ test("timeline reset invalidates old completions and cannot trigger a timestamp 
     "the renderer must be invalidated by the synchronous runtime-store reset edge");
 });
 
+test("warm reset republishes t=0 authority and requests its paused raster fence", () => {
+  const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+  const start = renderer.indexOf("private tryReseedGPUFluid");
+  const end = renderer.indexOf("/** Structural identity", start);
+  const reseed = renderer.slice(start, end);
+
+  assert.match(reseed, /state:"initializing",label:"Re-seeding fenced t=0 solver authority"/,
+    "reset must stop advertising the old ready state while the t=0 seed is rebuilt");
+  assert.match(reseed, /solver\.info\.initialRasterSurfaceReady=false[\s\S]*pendingInitialRasterPresentation=\{solver,solverGeneration:generation,requestGeneration,submitted:false\}/,
+    "a re-seed must earn a new renderer raster fence instead of reusing the old ready bit");
+  assert.match(reseed, /pendingInitialRasterPresentation[\s\S]*gpuInfoCallback\?\.\(\{\.\.\.solver\.info\}\)/,
+    "reset clears the diagnostics store, so the live solver authority must be republished");
+  assert.match(reseed, /finally\(\(\)=>\{[\s\S]*pausedPresentationRevision\+=1/,
+    "a paused reset must explicitly wake the draw that submits its raster fence");
+  assert.match(reseed, /if\(!reseeded\)\{this\.beginGPUFluidInitialization\(scene,config,key\);return;\}/,
+    "a declined warm re-seed must proceed directly to replacement instead of retrying forever");
+});
+
 test("timeline reset drains and destroys the previous solver before replacement allocation", () => {
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const begin = renderer.indexOf("private beginGPUFluidInitialization");
@@ -280,8 +298,8 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
   assert.equal(metrics.methodId, "tall-cell");
   assert.equal(metrics.context, "tall-cell");
   assert.equal(metrics.presentationSubmitted, false);
-  assert.equal(metrics.cpu?.lane, "main-thread");
-  assert.ok((metrics.cpu?.total_ms ?? -1) >= 0);
+  assert.equal(metrics.cpu, undefined,
+    "the default lean UI path must not synthesize CPU timing while measurement instrumentation is off");
   assert.equal(submitCount, 0, "a lost device must never receive another queue submission");
 
   renderer.destroy();

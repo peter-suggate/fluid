@@ -20,6 +20,7 @@ import {
   planOctreeAirVelocitySupport,
   positiveOctreeAirSupportSelectors,
 } from "../lib/webgpu-octree-air-velocity-support";
+import { octreeAirVelocitySupportPublicationWGSL } from "../lib/webgpu-octree-air-velocity-support-gpu";
 
 const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
 const catalog = decodeGeneratedOctreePowerCatalog(
@@ -68,6 +69,18 @@ test("air-support publication exclusively owns selector and regular tags", () =>
     "standalone coarse publication retains its exact direct-row adjacency path");
   assert.doesNotMatch(coarseSource, /selectorRows\[output\]=(?:row|0u);/,
     "a missing in-domain identity must never become an owner or zero-row fallback");
+});
+
+test("a rejected topology candidate refreshes support from the retained accepted epoch", () => {
+  assert.doesNotMatch(octreeAirVelocitySupportPublicationWGSL,
+    /accepted\.epoch!=p\.expectedEpoch/,
+    "the host attempt stamp must not invalidate a clean GPU-retained topology");
+  assert.match(octreeAirVelocitySupportPublicationWGSL,
+    /ownerPageArena\[\d+u\]!=accepted\.epoch/,
+    "owner pages must match the GPU-accepted epoch");
+  assert.match(octreeAirVelocitySupportPublicationWGSL,
+    /boundary!=accepted\.epoch/,
+    "boundary support must match the same GPU-accepted epoch");
 });
 
 test("case 7949 selector 67 resolves to a distinct in-domain +z support row", () => {

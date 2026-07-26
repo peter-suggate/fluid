@@ -12,6 +12,7 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import { WebGPUViewport } from "./WebGPUViewport";
 import { EditorToolbar } from "./EditorToolbar";
 import { ScenePanel } from "./ScenePanel";
+import { SceneLibraryPanel } from "./SceneLibraryPanel";
 import { SceneConfigPopover } from "./SceneConfigPopover";
 import { MethodPanel } from "./MethodPanel";
 import { RigidBodyPanel } from "./RigidBodyTray";
@@ -147,6 +148,7 @@ export function FluidLab() {
       <aside className="left-panel panel-scroll">
         <div className="brand"><span className="brand-mark">FL</span><div><strong>Fluid Lab</strong><small>WEBGPU CFD WORKBENCH</small></div></div>
         <ScenePanel />
+        <SceneLibraryPanel />
         <MethodPanel />
       </aside>
 

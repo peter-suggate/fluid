@@ -247,6 +247,6 @@ test("fine-to-coarse capacity diagnostics decode fail-closed control words", () 
     { capacity: 1, unowned: 2, nonfinite: 4, unpublishedSource: 8 });
   assert.deepEqual(unpackFineToCoarseGPUControl([17, 5, 3, 2, 9, 0]), {
     contributionCount: 17, maximumContributionsPerRow: 5, flags: 3,
-    unownedSamples: 2, rowCount: 9, valid: false,
+    unacceptedRows: 2, rowCount: 9, valid: false,
   });
 });

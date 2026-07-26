@@ -43,7 +43,8 @@ function slotBankBase(wgsl: string, bank: number, slotCapacity: number): number 
 
 const entries = ["prepareStructuredDynamics",
   "summarizeStructuredPreProjectionEnergy", "summarizeStructuredPostProjectionEnergy",
-  ...[5, 6, 7, 8].flatMap((value) => [`advectStructuredClass${value}`, `forceStructuredClass${value}`,
+  ...[5, 6, 7, 8].flatMap((value) => [`advectStructuredClass${value}`,
+    `commitAdvectedStructuredClass${value}`, `forceStructuredClass${value}`,
     `projectStructuredClass${value}`]),
   ...[0, 1, 2, 3].flatMap((value) => [`divergenceStructuredClass${value}`,
     `reconstructStructuredClass${value}`]),
@@ -217,6 +218,23 @@ test("projection leaves Section 5 extrapolation to the committed face producer",
     /extendAtoB|extendBtoA|rowExtensionScratch/);
 });
 
+test("newly wet topology faces inherit the accepted Section 5 air extension", () => {
+  assert.match(dynamicsHost,
+    /words\[54\] = resources\.airSupportLayout\.ownerDirectoryOffsetWords;[\s\S]*words\[55\] = resources\.airSupportLayout\.ownerDirectoryCellCapacity;/,
+    "topology transfer must receive the same dense owner directory as fine transport");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn extendedOwnerVelocity\(point:vec3f\)[\s\S]*supportPublicationValid\(\)[\s\S]*ownerDirectoryOffsetWords\+4u\*cell[\s\S]*taggedVelocity\(tag\)/,
+    "a new liquid face must resolve its old value from the accepted extrapolated owner vector");
+  const transfer = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn transferStructuredTopologyCandidate("),
+    structuredVelocityDynamicsWGSL.indexOf("// Characteristic sources"));
+  assert.match(transfer,
+    /if\(!vectorValid\(old\)\)\{old=extendedOwnerVelocity\(point\);\}[\s\S]*if\(!vectorValid\(old\)\).*rejectCandidateTransfer/,
+    "the extended field is used only after exact old-row transfer fails, and missing support still rejects");
+  assert.doesNotMatch(transfer, /old=vec4f\(0/,
+    "newly wet faces must never be admitted with an invented zero velocity");
+});
+
 test("momentum advection consumes the projected extended field on air rows", () => {
   assert.match(structuredVelocityDynamicsWGSL,
     /fn velocitySample\([\s\S]*sample=rowVelocity\[rbase\(\)\+row\]/,
@@ -226,6 +244,194 @@ test("momentum advection consumes the projected extended field on air rows", () 
     structuredVelocityDynamicsWGSL.indexOf("fn forceFamily("));
   assert.doesNotMatch(advection, /rowCpt|liquidAt/,
     "the hot advection call graph must not add separate CPT/liquid storage bindings");
+});
+
+test("regular advection sampling is per-axis face-based with the cube basis as fallback", () => {
+  // Aanjaneya et al. 2017, Section 5: regular regions away from level
+  // transitions use standard staggered per-axis face interpolation. The
+  // cell-vector cube basis alone applied a [1,2,1]/4 filter to every face's
+  // own value each substep, which measured as ~17% mechanical-energy loss by
+  // t=0.24 s on the mini dam break.
+  assert.match(structuredVelocityDynamicsWGSL, /fn staggeredSample\(/);
+  assert.match(structuredVelocityDynamicsWGSL, /fn cellSample\(/);
+  const wrapper = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn regularSample("),
+    structuredVelocityDynamicsWGSL.indexOf("fn selectorVelocity"));
+  assert.match(wrapper, /staggeredSample\(anchor,x\)/,
+    "regular samples must try the staggered face basis first");
+  assert.match(wrapper, /return cellSample\(anchor,x\);/,
+    "the paper's cube/tetra interpolant remains the transition/unextended fallback");
+  const advection = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn advect("),
+    structuredVelocityDynamicsWGSL.indexOf("fn forceFamily("));
+  for (const site of ["adv=regularSample(row,x)", "middle=regularSample(row,midpoint)",
+    "transported=regularSample(row,departure)"]) {
+    assert.ok(advection.includes(site),
+      `all three characteristic samples must route regular rows through the staggered-first sampler (${site})`);
+  }
+  assert.match(advection,
+    /let centerTag=regularTag\(row,vec3i\(0\)\);[\s\S]*let useTransition=metrics\[row\]\.caseId!=0u\|\|centerTag!=row/,
+    "the owner must consume the cube or Delaunay closure that the Section 5 producer actually published");
+  // (row, axis, side) resolves through the publisher's O(1) family-slot map,
+  // never a per-slot scan: classifyStructuredCatalogSlots writes
+  // rowFamilyHandles[6*row+family] and publishSection63Rows fills
+  // rowFamilySlots[base+orientation] for both incident sides of every face.
+  assert.match(structuredVelocityDynamicsWGSL, /p\.rowFamilyHandleOffset\+6u\*row\+family/);
+  assert.match(structuredVelocityDynamicsWGSL, /p\.rowFamilySlotOffset\+slotBase\+orientation/);
+  const handleResolver = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn regularFaceHandle("),
+    structuredVelocityDynamicsWGSL.indexOf("fn faceAxisValue("));
+  assert.doesNotMatch(handleResolver, /for\s*\(/,
+    "the family-slot handle lookup must stay O(1)");
+  // The stored degree of freedom is u dot n; the world-axis component must be
+  // recovered with the face's own normal sign, exactly.
+  assert.match(structuredVelocityDynamicsWGSL, /select\(-sample,sample,n\[axis\]>0\.\)/);
+  const planeResolver = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn staggeredPlaneValue("),
+    structuredVelocityDynamicsWGSL.indexOf("fn staggeredComponent("));
+  assert.match(planeResolver, /metrics\[tag\]\.caseId!=0u\|\|rowGeometry\[rbase\(\)\+tag\]\.y!=rg\.y\)\{return vec2f\(0\.,0\.\);\}/,
+    "a transition row or size mismatch anywhere in the stencil disqualifies the staggered basis");
+  assert.match(planeResolver, /taggedVelocity\(tag\)/,
+    "an air support cell contributes its published Section 5 extended vector");
+  assert.match(planeResolver, /if\(!vectorValid\(extended\)\)\{return vec2f\(0\.,0\.\);\}/,
+    "air without a valid published extension disqualifies the sample instead of substituting zero");
+  assert.doesNotMatch(planeResolver, /vec2f\(0\.,1\.\)|return vec2f\(support\/|\(face\+support\)/,
+    "no averaged or zeroed face value may be presented as valid");
+});
+
+/** CPU transcription of `staggeredComponent`'s weight/topology enumeration
+ * (clamping, snapping, corner weights); the WGSL lines it mirrors are pinned
+ * by regex below so the two cannot drift apart silently. */
+function staggeredCorners(origin: readonly number[], h: number, extent: readonly number[],
+  x: readonly number[], axis: number): readonly { plane: number; offset: number[]; weight: number }[] {
+  const sample = [...x];
+  sample[axis] = Math.min(Math.max(sample[axis]!, 0), extent[axis]!);
+  for (let other = 0; other < 3; other += 1) {
+    if (other === axis) continue;
+    sample[other] = Math.min(Math.max(sample[other]!, 0.5 * h), extent[other]! - 0.5 * h);
+  }
+  const along = (sample[axis]! - origin[axis]!) / h;
+  const plane = Math.min(Math.max(Math.floor(along), -1), 1);
+  let tAlong = Math.min(Math.max(along - plane, 0), 1);
+  if (tAlong < 1e-5) tAlong = 0; else if (tAlong > 1 - 1e-5) tAlong = 1;
+  const center = origin.map((value) => value + 0.5 * h);
+  const low = [0, 0, 0]; const tTransverse = [0, 0, 0];
+  for (let other = 0; other < 3; other += 1) {
+    if (other === axis) continue;
+    if (sample[other]! < center[other]!) low[other] = -1;
+    let t = Math.min(Math.max((sample[other]! - (center[other]! + low[other]! * h)) / h, 0), 1);
+    if (t < 1e-5) t = 0; else if (t > 1 - 1e-5) t = 1;
+    tTransverse[other] = t;
+  }
+  const corners: { plane: number; offset: number[]; weight: number }[] = [];
+  for (let corner = 0; corner < 8; corner += 1) {
+    let weight = (corner & 1) !== 0 ? tAlong : 1 - tAlong;
+    const offset = [0, 0, 0]; let bit = 1;
+    for (let other = 0; other < 3; other += 1) {
+      if (other === axis) continue;
+      const high = (corner & (1 << bit)) !== 0;
+      weight *= high ? tTransverse[other]! : 1 - tTransverse[other]!;
+      offset[other] = low[other]! + (high ? 1 : 0);
+      bit += 1;
+    }
+    if (weight <= 0) continue;
+    corners.push({ plane: plane + (corner & 1), offset, weight });
+  }
+  return corners;
+}
+
+test("staggered weights reproduce a face's own value exactly at its centre", () => {
+  // Pin the WGSL arithmetic the CPU transcription mirrors.
+  assert.match(structuredVelocityDynamicsWGSL, /let along=\(sample\[axis\]-origin\[axis\]\)\/h;/);
+  assert.match(structuredVelocityDynamicsWGSL, /let plane=clamp\(i32\(floor\(along\)\),-1,1\);/);
+  assert.match(structuredVelocityDynamicsWGSL,
+    /if\(tAlong<1e-5\)\{tAlong=0\.;\}else if\(tAlong>1\.-1e-5\)\{tAlong=1\.;\}/,
+    "the measure-zero snap keeps weight one on a face's own value under floating-point dust");
+  assert.match(structuredVelocityDynamicsWGSL, /var weight=select\(1\.-tAlong,tAlong,\(corner&1u\)!=0u\);/);
+  assert.match(structuredVelocityDynamicsWGSL,
+    /sample\[axis\]=clamp\(sample\[axis\],0\.,f32\(d\[axis\]\)\*p\.physical\.x\);/,
+    "the axis-normal face lattice reaches the domain walls exactly");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /sample\[other\]=clamp\(sample\[other\],\.5\*h,f32\(d\[other\]\)\*p\.physical\.x-\.5\*h\);/,
+    "transverse axes keep the cell-centred .5h constant physical-boundary extension");
+
+  const origin = [3, 2, 5], h = 1, extent = [16, 16, 16];
+  // Sampling AT the +x face centre: weight 1 on that face, nothing else.
+  // This self-consistency is exactly what removes the per-substep filter.
+  const own = staggeredCorners(origin, h, extent, [4, 2.5, 5.5], 0);
+  assert.deepEqual(own, [{ plane: 1, offset: [0, 0, 0], weight: 1 }]);
+  // Floating-point dust at the centre must snap back to the exact face.
+  const dusty = staggeredCorners(origin, h, extent, [4 + 1e-7, 2.5 - 1e-7, 5.5], 0);
+  assert.deepEqual(dusty, [{ plane: 1, offset: [0, 0, 0], weight: 1 }]);
+  // The transverse component at that face centre is the standard MAC average
+  // of the four transverse faces of the two incident cells.
+  const transverse = staggeredCorners(origin, h, extent, [4, 2.5, 5.5], 1);
+  assert.equal(transverse.length, 4);
+  for (const corner of transverse) assert.ok(Math.abs(corner.weight - 0.25) < 1e-12);
+  assert.deepEqual(transverse.map((corner) => [corner.plane, corner.offset[0]]).sort(),
+    [[0, 0], [0, 1], [1, 0], [1, 1]]);
+  // A quarter-cell characteristic displacement splits 3:1 between the two
+  // bracketing same-axis face planes.
+  const quarter = staggeredCorners(origin, h, extent, [4.25, 2.5, 5.5], 0);
+  assert.deepEqual(quarter.map((corner) => [corner.plane, corner.weight]),
+    [[1, 0.75], [2, 0.25]]);
+  // Weights always partition unity, including at the clamped domain margin.
+  for (const point of [[3.3, 2.9, 5.1], [4, 2.5, 5.5], [3.01, 0.01, 15.99]] as const) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      const total = staggeredCorners(origin, h, extent, point, axis)
+        .reduce((sum, corner) => sum + corner.weight, 0);
+      assert.ok(Math.abs(total - 1) < 1e-12, `axis ${axis} at ${point.join(",")}`);
+    }
+  }
+});
+
+test("advection destinations stage into the inactive bank and commit after a fence", () => {
+  // The staggered sampler reads neighbouring face degrees of freedom, so a
+  // lane writing its destination into the accepted bank mid-dispatch would
+  // race the reads and advect some faces through a partially updated field.
+  const advection = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn advect("),
+    structuredVelocityDynamicsWGSL.indexOf("fn commitAdvected("));
+  assert.doesNotMatch(advection, /setValue\(/,
+    "advect must never write the accepted value bank it samples from");
+  for (const staged of ["setNextValue(handle,prior);", "setNextValue(handle,solid);",
+    "setNextValue(handle,projected);"]) {
+    assert.ok(advection.includes(staged), `every advect outcome must stage (${staged})`);
+  }
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn nextValueAt\(handle:u32\)->u32\{return \(1u-bank\(\)\)\*p\.authorityWords\+p\.valuesOffset\+handle;\}/,
+    "staging must use the inactive authority bank, which every future candidate publication rewrites");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn commitAdvected\([\s\S]*?if\(!supportPublicationValid\(\)\)\{return;\}[\s\S]*?a\[abase\(\)\+p\.valuesOffset\+handle\]=a\[nextValueAt\(handle\)\];/,
+    "commit mirrors the advect gate and copies the staged words back bit-exactly");
+  const encodeAdvection = dynamicsHost.slice(dynamicsHost.indexOf("encodeAdvection("),
+    dynamicsHost.indexOf("encodeForcesAndDivergence("));
+  const advectAt = encodeAdvection.indexOf("Advect structured family class");
+  const fenceAt = encodeAdvection.indexOf("broker.fence(");
+  const commitAt = encodeAdvection.indexOf("Commit advected structured family class");
+  assert.ok(advectAt >= 0 && fenceAt > advectAt && commitAt > fenceAt,
+    "the commit dispatches must sit behind a fence that closes the race window");
+  assert.match(encodeAdvection, /this\.advectionCommit, FAMILY_CLASSES, \[0, 1, 2, 11, 17, 18\]/,
+    "commit binds exactly the workset, authority, and support-control interface");
+});
+
+test("gravity is a body force on the liquid, never on dry extension-carrier faces", () => {
+  // Dry faces only carry Section 5 extended/advected air values. Integrating
+  // gravity into them built a field growing by g*dt every substep in air --
+  // never projected, never reset by the extension march -- which the
+  // staggered stencil would ingest at the free surface.
+  assert.match(structuredVelocityDynamicsWGSL,
+    /let wet=liquidAt\(lo\)!=0u\|\|\(hi!=INVALID&&liquidAt\(hi\)!=0u\);\s*if\(!wet\)\{return;\}/,
+    "only faces with a liquid incident row may integrate gravity");
+  const force = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn forceFamily("),
+    structuredVelocityDynamicsWGSL.indexOf("fn divergenceRow("));
+  assert.ok(force.indexOf("if(aperture==0.){setValue(handle,solid);return;}")
+    < force.indexOf("let wet="),
+    "prescribed solid faces keep their exact value before any wetness gate");
+  assert.match(dynamicsHost,
+    /this\.force, FAMILY_CLASSES, \[0, 1, 2, 11, 16, 17, 22\], params/,
+    "the force stage must bind the accepted liquid classification it gates on");
 });
 
 test("moving-solid flux is mandatory and liquid classification follows the accepted bank", () => {
@@ -358,8 +564,10 @@ test("structured boundary advection is explicit and each class runs once", () =>
 test("projection adds no row-average extension dispatches or pass boundary", () => {
   const projection = dynamicsHost.slice(dynamicsHost.indexOf("encodeProjection("),
     dynamicsHost.indexOf("destroy(): void"));
-  assert.doesNotMatch(projection, /extend|layer|broker\.fence\(/,
+  assert.doesNotMatch(projection, /extend|layer/,
     "the dedicated face producer owns extrapolation and its publication boundaries");
+  assert.doesNotMatch(projection, /broker\.fence\("(?!algorithm diagnostic)/,
+    "production projection must not add a pass boundary; opt-in timestamp partitions are diagnostic-only");
 });
 
 test("Dawn Metal compiles all structured dynamics variants", {

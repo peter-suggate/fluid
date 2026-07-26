@@ -112,6 +112,9 @@ export interface DirectStructuredVelocitySource {
   readonly params: GPUBuffer;
   readonly authority: GPUBuffer;
   readonly control: GPUBuffer;
+  /** Inactive publication control. Candidate-only consumers may populate the
+   * inactive value bank before the coupled epoch validator accepts it. */
+  readonly candidateControl: GPUBuffer;
   readonly rowVelocities: GPUBuffer;
   /** Fixed vec4u: cell-linear, size-in-finest-cells, physical page, local cell. */
   readonly rowGeometry: GPUBuffer;
@@ -273,7 +276,8 @@ export class WebGPUDirectStructuredVelocityAuthority {
       && candidate.bindings.every((binding, index) => binding === bindings[index]
         && candidate.buffers[index] === buffers[index]));
     if (hit) return hit.group;
-    const group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+    const group = this.device.createBindGroup({ label: `${pipeline.label} direct structured publication bindings`,
+      layout: pipeline.getBindGroupLayout(0), entries });
     cached.push({ bindings, buffers, group });
     return group;
   }
@@ -313,6 +317,13 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 9, resource: resource(this.candidateControl) },
     ]));
     pass.dispatchWorkgroupsIndirect(this.liveRowDispatch, 0);
+    // NOTE: WebGPU already orders dispatches inside one pass, so on paper these
+    // authority/control hand-offs need no boundary and only the storage-write
+    // -> indirect-read of `liveRowDispatch` in `begin`/`finalize` does.
+    // Collapsing them measured under 1 ms on a 96 ms frame and coincided with
+    // an authoritative resolved-row publication being rejected in-app, so the
+    // fences stay until that is understood. Launch structure is not this
+    // frame's cost -- see docs/OCTREE_PHASE0_BASELINE.md.
     broker.fence("structured catalog slots classified");
     pass = broker.compute({ label: "Prefix six structured velocity families" });
     pass.setPipeline(this.prefixPipeline);
@@ -351,6 +362,9 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 11, resource: resource(this.inputs.topology.catalogCoefficients) },
     ]));
     pass.dispatchWorkgroupsIndirect(this.liveRowDispatch, 0);
+    // Required: `finalize` rebinds `liveRowDispatch` as storage (binding 25)
+    // and rewrites the class arguments the dispatches above are still reading
+    // as indirect. Keep the write-after-read out of a shared pass.
     broker.fence("direct Section 6.3 rows published");
     pass = broker.compute({ label: "Finalize direct structured publication" });
     pass.setPipeline(this.finalizePipeline);
@@ -364,8 +378,24 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 25, resource: resource(this.liveRowDispatch) },
     ]));
     pass.dispatchWorkgroups(1);
+    // Required: `finalize` writes the class arguments that the reconstruction
+    // below consumes with `dispatchWorkgroupsIndirect`. A storage write feeding
+    // an indirect read is the one ordering WebGPU does not give us for free.
     broker.fence("direct structured publication finalized");
-    pass = broker.compute({ label: "Reconstruct direct structured cell velocities" });
+    this.encodeCandidateReconstruction(broker, topologyMetrics, leafHeaders);
+  }
+
+  /** Rebuild the inactive row-vector field after a candidate-only face-value
+   * transfer. Calling this twice is intentional: the first publication makes
+   * candidate geometry available, while the second observes transferred
+   * values before the coupled epoch can be accepted. */
+  encodeCandidateReconstruction(broker: PassBroker,
+    topologyMetrics: GPUBuffer = this.inputs.topology.metrics,
+    leafHeaders: GPUBuffer = this.inputs.leafHeaders): void {
+    if (this.destroyed) throw new Error("Direct structured velocity authority is destroyed");
+    const authority = this.authorityA;
+    const resource = (buffer: GPUBuffer) => ({ buffer });
+    const pass = broker.compute({ label: "Reconstruct direct structured cell velocities" });
     pass.setPipeline(this.reconstructPipeline);
     pass.setBindGroup(0, this.group(this.reconstructPipeline, [
       { binding: 0, resource: resource(this.params) },
@@ -404,7 +434,8 @@ export class WebGPUDirectStructuredVelocityAuthority {
       offset: index * this.plan.worksetStrideWords * 4,
       size: this.plan.worksetStrideWords * 4 });
     return {
-      plan: this.plan, params: this.params, authority, control: this.control, rowVelocities,
+      plan: this.plan, params: this.params, authority, control: this.control,
+      candidateControl: this.candidateControl, rowVelocities,
       rowGeometry: this.rowGeometry,
       authorityBankStrideWords: this.plan.authorityWords,
       rowBankStrideWords: this.plan.rowCapacity,
@@ -560,12 +591,14 @@ var<workgroup> familyLane:array<u32,384>;
   workgroupBarrier();for(var family=0u;family<6u;family+=1u){var prefix=select(0u,familyLane[family*64u+lane-1u],lane>0u);for(var row=first;row<last;row+=1u){let index=p.rowFamilyPrefixOffset+familyIndex(row,family);let count=authority[candidateAuthorityBase()+index];authority[candidateAuthorityBase()+index]=prefix;prefix+=count;}}}
 
 fn oldRow(newRow:u32)->u32{if(p.newToOldOffset+newRow>=arrayLength(&rowDelta)){return INVALID;}let encoded=rowDelta[p.newToOldOffset+newRow]&0x7fffffffu;return select(INVALID,encoded-1u,encoded!=0u);}fn candidateEpoch()->u32{return select(0u,rowDelta[p.deltaControlOffset+7u],p.deltaControlOffset+7u<arrayLength(&rowDelta));}
-fn carryValue(row:u32,neighbor:u32,family:u32,orientation:u32)->f32{if(control.projected==0u){return 0.0;}let oldOwner=oldRow(row);if(oldOwner==INVALID){return 0.0;}let oldNeighbor=select(INVALID,oldRow(neighbor),neighbor!=INVALID);if(neighbor!=INVALID&&oldNeighbor==INVALID){return 0.0;}
-  for(var local=0u;local<p.maxSlots;local+=1u){let handle=authority[acceptedAuthorityBase()+p.rowHandleOffset+rowBase(oldOwner)+local];if(handle==INVALID||handle>=p.slotCapacity){continue;}let slotMetadata=authority[acceptedAuthorityBase()+p.metadataOffset+handle];if((slotMetadata&7u)!=family||((slotMetadata>>3u)&7u)!=orientation){continue;}let other=authority[acceptedAuthorityBase()+p.neighborOffset+handle];if(other==oldNeighbor){return bitcast<f32>(authority[acceptedAuthorityBase()+p.valuesOffset+handle]);}}return 0.0;}
+// x is the carried value; y marks an exact face identity. Changed topology
+// faces remain pending for the old-field transfer instead of becoming zero.
+fn carryValue(row:u32,neighbor:u32,family:u32,orientation:u32)->vec2f{if(control.projected==0u){return vec2f(0.0);}let oldOwner=oldRow(row);if(oldOwner==INVALID){return vec2f(0.0);}let oldNeighbor=select(INVALID,oldRow(neighbor),neighbor!=INVALID);if(neighbor!=INVALID&&oldNeighbor==INVALID){return vec2f(0.0);}
+  for(var local=0u;local<p.maxSlots;local+=1u){let handle=authority[acceptedAuthorityBase()+p.rowHandleOffset+rowBase(oldOwner)+local];if(handle==INVALID||handle>=p.slotCapacity){continue;}let slotMetadata=authority[acceptedAuthorityBase()+p.metadataOffset+handle];if((slotMetadata&7u)!=family||((slotMetadata>>3u)&7u)!=orientation){continue;}let other=authority[acceptedAuthorityBase()+p.neighborOffset+handle];if(other==oldNeighbor){return vec2f(bitcast<f32>(authority[acceptedAuthorityBase()+p.valuesOffset+handle]),1.0);}}return vec2f(0.0);}
 
 @compute @workgroup_size(64)fn scatterStructuredFamilySlots(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=0u){return;}let m=metrics[row];let h=caseHeader(m.caseId);var ranks:array<u32,6>;
   for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let ownerMeta=authority[candidateAuthorityBase()+p.rowOwnerMetadataOffset+at];if(((ownerMeta>>6u)&1u)==0u){continue;}let family=ownerMeta&7u;let orientation=(ownerMeta>>3u)&7u;let handle=control.familyOffsets[family]+authority[candidateAuthorityBase()+p.rowFamilyPrefixOffset+familyIndex(row,family)]+ranks[family];ranks[family]+=1u;if(handle>=control.slotCount){fail(row,ERROR_CAPACITY);continue;}let neighbor=authority[candidateAuthorityBase()+p.rowNeighborOffset+at];let geo=geometry(row,local);let global=authority[candidateAuthorityBase()+p.rowCatalogOffset+at];
-    authority[candidateAuthorityBase()+p.rowHandleOffset+at]=handle;authority[candidateAuthorityBase()+p.valuesOffset+handle]=bitcast<u32>(carryValue(row,neighbor,family,orientation));authority[candidateAuthorityBase()+p.ownerOffset+handle]=row;authority[candidateAuthorityBase()+p.neighborOffset+handle]=neighbor;authority[candidateAuthorityBase()+p.metadataOffset+handle]=family|(orientation<<3u)|(global<<6u)|(((ownerMeta>>7u)&1u)<<30u);authority[candidateAuthorityBase()+p.areaOffset+handle]=bitcast<u32>(geo.area);authority[candidateAuthorityBase()+p.inverseOffset+handle]=bitcast<u32>(geo.inverseDistance);authority[candidateAuthorityBase()+p.fractionOffset+handle]=bitcast<u32>(1.0);authority[candidateAuthorityBase()+p.pressureScaleOffset+handle]=bitcast<u32>(1.0);authority[candidateAuthorityBase()+p.normalOffset+4u*handle]=bitcast<u32>(geo.normal.x);authority[candidateAuthorityBase()+p.normalOffset+4u*handle+1u]=bitcast<u32>(geo.normal.y);authority[candidateAuthorityBase()+p.normalOffset+4u*handle+2u]=bitcast<u32>(geo.normal.z);authority[candidateAuthorityBase()+p.normalOffset+4u*handle+3u]=0u;authority[candidateAuthorityBase()+p.centroidOffset+4u*handle]=bitcast<u32>(geo.centroid.x);authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+1u]=bitcast<u32>(geo.centroid.y);authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+2u]=bitcast<u32>(geo.centroid.z);authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+3u]=0u;}}
+    let carried=carryValue(row,neighbor,family,orientation);authority[candidateAuthorityBase()+p.rowHandleOffset+at]=handle;authority[candidateAuthorityBase()+p.valuesOffset+handle]=bitcast<u32>(carried.x);authority[candidateAuthorityBase()+p.ownerOffset+handle]=row;authority[candidateAuthorityBase()+p.neighborOffset+handle]=neighbor;authority[candidateAuthorityBase()+p.metadataOffset+handle]=family|(orientation<<3u)|(global<<6u)|(((ownerMeta>>7u)&1u)<<30u);authority[candidateAuthorityBase()+p.areaOffset+handle]=bitcast<u32>(geo.area);authority[candidateAuthorityBase()+p.inverseOffset+handle]=bitcast<u32>(geo.inverseDistance);authority[candidateAuthorityBase()+p.fractionOffset+handle]=bitcast<u32>(1.0);authority[candidateAuthorityBase()+p.pressureScaleOffset+handle]=bitcast<u32>(1.0);authority[candidateAuthorityBase()+p.normalOffset+4u*handle]=bitcast<u32>(geo.normal.x);authority[candidateAuthorityBase()+p.normalOffset+4u*handle+1u]=bitcast<u32>(geo.normal.y);authority[candidateAuthorityBase()+p.normalOffset+4u*handle+2u]=bitcast<u32>(geo.normal.z);authority[candidateAuthorityBase()+p.normalOffset+4u*handle+3u]=0u;authority[candidateAuthorityBase()+p.centroidOffset+4u*handle]=bitcast<u32>(geo.centroid.x);authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+1u]=bitcast<u32>(geo.centroid.y);authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+2u]=bitcast<u32>(geo.centroid.z);authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+3u]=bitcast<u32>(carried.y);}}
 
 @compute @workgroup_size(64)fn publishSection63Rows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=0u){return;}let m=metrics[row];let h=caseHeader(m.caseId);
   for(var axisSlot=0u;axisSlot<6u;axisSlot+=1u){authority[candidateAuthorityBase()+p.rowAxisOffset+6u*row+axisSlot]=INVALID;}for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let neighbor=authority[candidateAuthorityBase()+p.rowNeighborOffset+at];let ownerMeta=authority[candidateAuthorityBase()+p.rowOwnerMetadataOffset+at];var handle=authority[candidateAuthorityBase()+p.rowHandleOffset+at];var sign=1;if(((ownerMeta>>6u)&1u)==0u){let reverse=authority[candidateAuthorityBase()+p.rowReciprocalOffset+at];if(neighbor==INVALID||reverse==INVALID){atomicOr(&control.flags,ERROR_RECIPROCITY);continue;}handle=authority[candidateAuthorityBase()+p.rowHandleOffset+rowBase(neighbor)+reverse];sign=-1;}if(handle==INVALID||handle>=control.slotCount){atomicOr(&control.flags,ERROR_CAPACITY);continue;}authority[candidateAuthorityBase()+p.rowHandleOffset+at]=handle;authority[candidateAuthorityBase()+p.rowSignOffset+at]=bitcast<u32>(sign);let family=ownerMeta&7u;let orientation=(ownerMeta>>3u)&7u;authority[candidateAuthorityBase()+p.rowFamilySlotOffset+authority[candidateAuthorityBase()+p.rowFamilyHandleOffset+familyIndex(row,family)]+orientation]=handle;let localGeometry=geometry(row,local);let worldNormal=localGeometry.normal;if(neighbor!=INVALID&&headers[neighbor].size==headers[row].size){let absoluteNormal=abs(worldNormal);let axis=select(select(2u,1u,absoluteNormal.y>absoluteNormal.z),0u,absoluteNormal.x>max(absoluteNormal.y,absoluteNormal.z));let transverse=dot(absoluteNormal,vec3f(1.0))-absoluteNormal[axis];if(absoluteNormal[axis]>.9999&&transverse<1e-4){let direction=2u*axis+select(0u,1u,worldNormal[axis]>0.0);authority[candidateAuthorityBase()+p.rowAxisOffset+6u*row+direction]=neighbor;}}}

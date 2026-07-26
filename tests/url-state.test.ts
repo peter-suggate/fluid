@@ -169,6 +169,49 @@ test("invalid external query values fall back to validated defaults", () => {
   assert.equal(values.globalFineLevelSetFactor, "4");
 });
 
+/**
+ * A profiled preset is only valid at the solver settings it authors. The scene
+ * picker applies them via `applyProfile`, so a bare link, a reload, or the very
+ * first load must resolve to the same configuration — otherwise the UI runs a
+ * validation scene at the method's generic quality defaults (leaf 16 / band 4
+ * instead of the authored leaf 2 / band 3) while every panel claims the scene
+ * is loaded, and no Dawn lane reproduces what the UI is actually running.
+ */
+test("a bare link to a profiled preset resolves to that preset's authored method profile", () => {
+  const profile = getScenePreset("minimal-power-dam-break").methodProfile;
+  assert.ok(profile, "the minimal dam break preset must author a method profile");
+
+  const parsed = parseQueryState("?scene=minimal-power-dam-break");
+  assert.equal(parsed.methodId, profile.methodId);
+  assert.equal(parsed.quality, profile.quality);
+  assert.deepEqual(parsed.overrides[profile.methodId], { ...profile.overrides });
+
+  const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
+    parsed.overrides[parsed.methodId] ?? {});
+  assert.equal(values.maximumLeafSize, "2");
+  assert.equal(values.interfaceRefinementBandCells, 3);
+  assert.equal(values.globalFineLevelSetFactor, "4");
+
+  // The resolved profile must survive the round trip the app performs on every
+  // store write, so a reload cannot silently drop back to the method defaults.
+  const rehydrated = parseQueryState(`?${serializeQueryState("",
+    { presetId: parsed.presetId, scene: parsed.scene },
+    { methodId: parsed.methodId, quality: parsed.quality, overrides: parsed.overrides },
+    parsed.ui)}`);
+  assert.deepEqual(rehydrated.overrides[profile.methodId], { ...profile.overrides });
+});
+
+test("an explicit param key overrides one value of a profiled preset", () => {
+  const parsed = parseQueryState(
+    "?scene=minimal-power-dam-break&param.octree.interfaceRefinementBandCells=5");
+  const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
+    parsed.overrides[parsed.methodId] ?? {});
+  assert.equal(values.interfaceRefinementBandCells, 5);
+  // Every other authored setting is still the profile's.
+  assert.equal(values.maximumLeafSize, "2");
+  assert.equal(values.globalFineLevelSetFactor, "4");
+});
+
 test("retired octree authority switches cannot re-enter through shared links", () => {
   const parsed = parseQueryState(
     "?param.octree.faceVelocityTransport=off"

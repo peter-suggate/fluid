@@ -65,6 +65,18 @@ test("rejected structured candidates can mutate only inactive-bank and candidate
     "candidate validation is the sole gate allowed to mutate accepted control");
 });
 
+test("changed topology faces remain pending for old-field transfer while exact carries are marked", () => {
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn carryValue\([^)]*\)->vec2f[\s\S]*return vec2f\(bitcast<f32>\([\s\S]*?valuesOffset[\s\S]*?\),1\.0\);/,
+    "an exact old face identity must carry its value and publish the transfer-skip marker");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /centroidOffset\+4u\*handle\+3u\]=bitcast<u32>\(carried\.y\)/,
+    "the otherwise-unused centroid lane owns the candidate-only carry marker");
+  assert.doesNotMatch(directStructuredVelocityPublicationWGSL,
+    /fn carryValue\([^)]*\)->f32/,
+    "zero must no longer be indistinguishable from an exactly carried physical zero");
+});
+
 test("Dawn Metal compiles every direct structured publication stage", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for WGSL validation",
 }, async () => {

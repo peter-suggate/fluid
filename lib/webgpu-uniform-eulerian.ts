@@ -69,14 +69,13 @@ const OCTREE_SEMANTIC_TRACE_PHASE: Readonly<Record<OctreeSemanticPhase, GPUTimes
   brickEngineA: { id: "fine-sdf-advection", label: "[engine:brick-a] Fine transport + topology" },
   closestPointWaves: { id: "fine-sdf-redistance", label: "[engine:cpt-waves] Closest-point waves" },
   brickEngineB: { id: "adaptive-publication", label: "[engine:brick-b] Fine harvest + epoch gate" },
-  pressureLeafCompactionL1Capture: { id: "pressure-system", label: "Liquid rows + L1 capture" },
   powerDescriptorTopology: { id: "power-topology", label: "Power topology publication" },
   structuredAdvectionBoundaryRhs: { id: "velocity-advection", label: "Structured advection + boundary RHS" },
   structuredVolumeCapture: { id: "pressure-system", label: "Structured physical-volume capture" },
   finalPressureRowAssembly: { id: "pressure-system", label: "Final pressure row assembly" },
   mgpcgSolve: { id: "pressure-solve", label: "Selected power pressure solve" },
   structuredProjection: { id: "velocity-projection", label: "Structured pressure projection + CPT seeds" },
-  structuredProjectionTail: { id: "velocity-projection", label: "Structured projection publication" },
+  structuredProjectionTail: { id: "velocity-extrapolation", label: "Air support + projection publication" },
   finePreparation: { id: "fine-sdf-advection", label: "Fine SDF seed + transport preparation" },
   fineTransport: { id: "fine-sdf-advection", label: "Factor-m fine SDF advection" },
   fineTopology: { id: "coarse-grid", label: "Fine narrow-band topology" },
@@ -86,7 +85,8 @@ const OCTREE_SEMANTIC_TRACE_PHASE: Readonly<Record<OctreeSemanticPhase, GPUTimes
 
 /** Serial queue probes are deliberately sparse because they trade throughput
  * for portable, per-phase measurements when timestamp queries fail. */
-const SEGMENTED_QUEUE_TRACE_CADENCE_MS = 3_000;
+const PHYSICS_TRACE_CADENCE_MS = 100;
+const SEGMENTED_QUEUE_TRACE_CADENCE_MS = 1_000;
 
 /** Explicit capillary-wave stability bound for a finest cell. */
 export function capillaryStableDt_s(
@@ -401,7 +401,8 @@ export class WebGPUUniformEulerianSolver {
   private profiledAdvanceCompletion?: Promise<void>;
   private validationChecked = false;
   private validationPromise?: Promise<void>;
-  private readonly inflowBoundary?: InflowGridBoundary;
+  // Not readonly: a warm re-seed rebuilds the boundary for the new nozzle.
+  private inflowBoundary?: InflowGridBoundary;
   private readonly velocityTransport: UniformVelocityTransport;
   private readonly densitySharpening: boolean;
   private readonly hostAllocation?: UniformHostAllocationPlan;
@@ -430,7 +431,8 @@ export class WebGPUUniformEulerianSolver {
 
   constructor(
     private device: GPUDevice,
-    readonly scene: SceneDescription,
+    // Not readonly: `applySceneUniforms` swaps in scalar-only scene revisions.
+    public scene: SceneDescription,
     quality: GPUQuality,
     private onRigidLoads?: (loads: GPURigidLoad[]) => void,
     options: WebGPUUniformEulerianOptions = {}
@@ -826,6 +828,12 @@ export class WebGPUUniformEulerianSolver {
         + "; frontier=" + JSON.stringify(frontier)
         + "; owner=" + JSON.stringify(owner));
     }
+    // The same queue-fenced controls that admit t=0 are also the authoritative
+    // diagnostics receipt. Dynamic readStats() applies this record after each
+    // encoded step, but it deliberately does not run at encodedSteps === 0.
+    // Publish it here so a reset cannot retain the previous step's rejection
+    // (or leave the fields undefined) after this preflight has succeeded.
+    this.applyGlobalFineDiagnostics(fine!);
     const pressure = initialPowerPressureReadiness({ authoritative: projection.info.powerDiagramAuthoritative,
       solverLabel: projection.pressureSolverLabel, pressureRows: projection.info.pressureRequiredRows ?? 0,
       capacityOverflow: projection.info.pressureCapacityOverflow ?? false, mgpcgControl: mgpcg });
@@ -934,6 +942,73 @@ export class WebGPUUniformEulerianSolver {
   get velocityTexture() { return this.octreeProjection ? undefined : this.velocityA; }
   get secondaryParticles() { return undefined; }
   applyRuntimeValues(_values: Record<string, string | number | boolean>) {}
+  /**
+   * Adopt scene scalars that no lattice, arena, or seed depends on. This
+   * solver reads them from `this.scene` when it writes per-step params, so the
+   * swap alone is enough; the octree projection keeps its own params buffer
+   * and is refreshed explicitly.
+   */
+  applySceneUniforms(scene: SceneDescription) {
+    this.scene = scene;
+    this.octreeProjection?.applySceneUniforms(scene);
+  }
+
+  /**
+   * Bake `this.scene`'s terrain into the r32float column texture, in cell
+   * units. Mirrors the constructor's upload so a warm re-seed refreshes the
+   * ground without reallocating the texture every consumer already binds.
+   */
+  private uploadTerrainColumns() {
+    const { nx, ny, nz } = this.info;
+    const cellHeight = this.scene.container.height_m / ny;
+    const heights = terrainColumnHeights(this.scene, nx, nz);
+    const cells = new Float32Array(nx * nz);
+    for (let index = 0; index < cells.length; index += 1) cells[index] = heights[index]! / cellHeight;
+    const rowBytes = nx * 4, padded = Math.ceil(rowBytes / 256) * 256;
+    const packed = new Uint8Array(padded * nz), source = new Uint8Array(cells.buffer);
+    for (let k = 0; k < nz; k += 1) packed.set(source.subarray(rowBytes * k, rowBytes * (k + 1)), padded * k);
+    this.device.queue.writeTexture({ texture: this.terrainTexture }, packed, { bytesPerRow: padded, rowsPerImage: nz }, { width: nx, height: nz });
+  }
+
+  /**
+   * Warm re-seed: adopt a scene that differs only in the seed tier (terrain,
+   * bodies, initial condition, brick seeds, fill fraction, inflow) and re-run
+   * the same four fenced t=0 phases against the existing allocations, arenas,
+   * and compiled pipelines. This is the plan's "re-run the cold branch with a
+   * new phi seed", not "build a new solver".
+   *
+   * Returns false — leaving the solver untouched and usable — whenever the new
+   * seed cannot be honoured in place. The caller must then take the full
+   * rebuild. Failing closed matters more than the speedup: a half-applied seed
+   * would run the solver on state that matches no scene.
+   */
+  async reseed(scene: SceneDescription): Promise<boolean> {
+    if (!this.octreeProjection) return false;
+    const [nx, ny, nz] = [this.info.nx, this.info.ny, this.info.nz];
+    // The seed tier cannot change the lattice; if it somehow has, this is a
+    // structural change wearing a seed change's clothes.
+    if (Math.max(8, Math.round(scene.container.width_m / scene.voxelDomain.finestCellSize_m)) !== nx) return false;
+    try {
+      this.scene = scene;
+      this.inflowBoundary = scene.fluid.inflow
+        ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [nx, ny, nz])
+        : undefined;
+      // Rigid poses are pushed per step by syncBodies, so a re-seed only has
+      // to refresh the ground the solver and contacts read.
+      this.uploadTerrainColumns();
+      if (!this.octreeProjection.reseed(scene)) return false;
+      await this.publishInitialSparseScene();
+      this.lastTime = 0;
+      this.info.submittedTime_s = 0;
+      this.info.simulatedTime_s = 0;
+      this.info.simulationLag_s = 0;
+      return true;
+    } catch {
+      // A throw here has already disturbed GPU state, so the caller must not
+      // keep using this solver; report failure and let it rebuild.
+      return false;
+    }
+  }
   get gridPressureSamplesTexture() { return this.adaptiveProjection?.pressureSamplesTexture; }
   get gridPressureTexture() { return this.adaptiveProjection?.pressureTexture; }
   get gridDivergenceTexture() { return this.octreeProjection ? undefined : this.quadtreeProjection?.divergenceTexture; }
@@ -1274,7 +1349,8 @@ export class WebGPUUniformEulerianSolver {
       && traceRequestedAt_ms - this.lastSegmentedPhysicsTraceAt_ms >= SEGMENTED_QUEUE_TRACE_CADENCE_MS;
     const shouldTracePhysics = measurementInstrumentationEnabled
       && !this.physicsTracePending
-      && (shouldSegmentPhysics || traceRequestedAt_ms - this.lastPhysicsTraceAt_ms >= 250);
+      && (shouldSegmentPhysics
+        || traceRequestedAt_ms - this.lastPhysicsTraceAt_ms >= PHYSICS_TRACE_CADENCE_MS);
     this.octreeProjection?.setCouplingBodies(activeBodies.length, activeBodies.some((body) => body.inverseMass_kg > 0));
     const inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;
     if(this.adaptiveProjection&&this.inflowBoundary){const cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);this.adaptiveProjection.addSurfaceReferenceVolumeCells(this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume);}
@@ -1324,13 +1400,19 @@ export class WebGPUUniformEulerianSolver {
     if (this.quadtreeProjection && this.rebuildQuadtreeEachStep && this.quadtreeInlineRebuild && !this.quadtreeRebuildPending && !this.quadtreeReadyProjection && this.quadtreeProjection.canEncodeInlineRebuild) {
       inlineRebuildEncoded = this.quadtreeProjection.encodeInlineRebuild(encoder);
     }
-    encoder = completePhysicsPhase(encoder, this.adaptiveProjection
+    encoder = completePhysicsPhase(encoder, inlineRebuildEncoded
       ? { id: "coarse-grid", label: "Adaptive coarse-grid topology" }
       : { id: "other", label: "Advance setup" });
     for (let substep = 0; substep < substeps; substep += 1) {
       // The active epoch is immutable for the entire substep. A ready
       // candidate from the prior tail may flip only at this boundary.
       this.octreeProjection?.encodeReadyTopologyFlip(encoder);
+      if (this.octreeProjection) {
+        encoder = completePhysicsPhase(
+          encoder,
+          { id: "power-topology", label: "Accepted topology epoch + Section 5 air support" },
+        );
+      }
       // U3 compact-face authority owns advection, forces, divergence, and
       // projection inside WebGPUOctreeProjection. The shared dense kernels are
       // not merely redundant here: dispatching them would address the 1x1
@@ -1452,19 +1534,30 @@ export class WebGPUUniformEulerianSolver {
       this.quadtreeProjection?.encodeBodyImpulseExchange(encoder, this.rigidExchangeBuffer);
       const cellVolume = c.width_m * c.height_m * c.depth_m / (this.info.nx * this.info.ny * this.info.nz);
       this.rigidSystem.encode(encoder, delta, cellVolume, substeps, c.height_m / this.info.ny);
+      encoder = completePhysicsPhase(
+        encoder,
+        { id: "other", label: "Rigid-body impulse exchange + integration" },
+      );
     }
     // Publish the final substep's resident fields into the shared sparse-brick
     // world. The topology and payload stay GPU-resident; rendering consumes
     // compact debug records and subsequent voxel kernels consume the same ABI.
     if (this.octreeProjection) {
       this.octreeProjection.encodeSparseBrickWorld(encoder, dt);
+      encoder = completePhysicsPhase(
+        encoder,
+        { id: "adaptive-publication", label: "Sparse-brick residency + publication" },
+      );
     }
     if (this.hostAllocation) {
       encoder.clearBuffer(this.reductionBuffer!);
       const pass = encoder.beginComputePass({ label: "Uniform diagnostics reduction" });
       this.dispatch(pass, this.reductionPipeline, this.reductionGroup); pass.end();
+      encoder = completePhysicsPhase(
+        encoder,
+        { id: "other", label: "Diagnostics reduction" },
+      );
     }
-    encoder = completePhysicsPhase(encoder, { id: "adaptive-publication", label: "Residency + sparse publication + diagnostics" });
     if (segmentedPhysicsTrace) {
       this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;
       this.lastSegmentedPhysicsTraceAt_ms = traceRequestedAt_ms;

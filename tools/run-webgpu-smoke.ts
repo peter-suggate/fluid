@@ -195,9 +195,15 @@ const includeFinalFieldStats = process.env.FLUID_FIELD_STATS !== "0";
 const performanceProfileRequested = process.env.FLUID_PERFORMANCE_PROFILE === "1";
 const regressionArtifactRequested = process.env.FLUID_REGRESSION_ARTIFACT === "1";
 const genericPhaseTraceRequested = process.env.FLUID_GPU_FINE_TIMESTAMPS === "1";
+/** One-shot, pass-local GPU timestamps for algorithm attribution. Unlike the
+ * semantic fallback tracer this does not split submissions or wait between
+ * phases: timestamp writes are attached to the compute passes the solver
+ * already opens, and the first recurring command buffer is resolved only
+ * after it has been submitted. */
+const gpuPassTimestampRequested = process.env.FLUID_GPU_PASS_TIMESTAMPS === "1";
 const performanceTraceRequested =
   process.env.FLUID_PERFORMANCE_TRACES === undefined
-    ? performanceProfileRequested || genericPhaseTraceRequested
+    ? true
     : process.env.FLUID_PERFORMANCE_TRACES === "1" || genericPhaseTraceRequested;
 usePerformanceInstrumentationStore.getState().setEnabled(performanceTraceRequested);
 /** Backward-compatible benchmark switch. Attribution is collected from the
@@ -1791,8 +1797,12 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
     try {
       reconstructed = reconstructCompactOctreeOccupancyField(compactSnapshot, [nx, ny, nz]);
     } catch (error) {
+      const candidateFailure = await (solver as GPUSolverInstance & { octreeProjection?: {
+        readPowerFrontierFailure(): Promise<unknown>;
+      } }).octreeProjection?.readPowerFrontierFailure();
       console.error(JSON.stringify({ phase: "compact-octree-field-publication-rejected", grid: [nx, ny, nz],
         ...compactOctreePublicationHeaderEvidence(compactSnapshot),
+        candidateFailure,
         error: error instanceof Error ? error.message : String(error) }));
       await dumpFineRedistancePageDeltaForensics(device, solver, source, compactSnapshot);
       throw error;
@@ -1859,6 +1869,7 @@ async function dumpFineRedistancePageDeltaForensics(
     worklist: Uint32Array;
     flags: Uint32Array;
     phi: Float32Array;
+    transportControl?: Uint32Array;
     redistanceControl?: Uint32Array;
   },
 ): Promise<void> {
@@ -1922,6 +1933,35 @@ async function dumpFineRedistancePageDeltaForensics(
       phiFirst8: Array.from(snapshot.phi.slice(sampleOffset, sampleOffset + 8)),
       flagsFirst8: Array.from(snapshot.flags.slice(sampleOffset, sampleOffset + 8)),
     };
+  }
+  const transportFirstError = snapshot.transportControl?.[12] ?? 0xffff_ffff;
+  let transportErrorSample: Record<string, unknown> | undefined;
+  if (transportFirstError !== 0xffff_ffff) {
+    const page = Math.floor(transportFirstError / source.plan.samplesPerBrick);
+    const local = transportFirstError % source.plan.samplesPerBrick;
+    if (page < debug.pageCapacity) {
+      const key = snapshot.metadata[page * 10 + 1];
+      const r = source.plan.brickResolution;
+      const localZ = Math.floor(local / (r * r));
+      const localRem = local - localZ * r * r;
+      const localY = Math.floor(localRem / r), localX = localRem - localY * r;
+      const bx = key % source.plan.brickDimensions[0];
+      const by = Math.floor(key / source.plan.brickDimensions[0])
+        % source.plan.brickDimensions[1];
+      const bz = Math.floor(key / (source.plan.brickDimensions[0]
+        * source.plan.brickDimensions[1]));
+      const nextBytes = await readBufferBinding(device,
+        { buffer: source.workA, offset: transportFirstError * 4 }, 4);
+      const next = new Float32Array(nextBytes.buffer, nextBytes.byteOffset, 1)[0];
+      transportErrorSample = {
+        index: transportFirstError, page, key, local,
+        fineSample: [bx * r + localX, by * r + localY, bz * r + localZ],
+        phi: Number.isFinite(snapshot.phi[transportFirstError])
+          ? snapshot.phi[transportFirstError] : null,
+        nextPhi: Number.isFinite(next) ? next : null,
+        flags: snapshot.flags[transportFirstError],
+      };
+    }
   }
   const [bx, by, bz] = source.plan.brickDimensions;
   const logicalCount = bx * by * bz;
@@ -1989,6 +2029,7 @@ async function dumpFineRedistancePageDeltaForensics(
     firstSupportPages: Array.from(support.slice(0, 16)),
     firstError,
     errorPageScratch,
+    transportErrorSample,
   }));
 }
 
@@ -2032,6 +2073,168 @@ interface GPUFineTimestampReport {
   invalidPasses: number;
   summedPass_ms: number;
   byLabel: Record<string, GPUFineTimestampBucket>;
+}
+
+interface GPUPassTimestampReport {
+  capturedCommandBuffers: number;
+  measuredPasses: number;
+  invalidPasses: number;
+  capacityOverflows: number;
+  summedPass_ms: number;
+  byLabel: Record<string, GPUFineTimestampBucket>;
+}
+
+class GPUPassTimestampEncoderSession {
+  private readonly querySet: GPUQuerySet;
+  private readonly resolveBuffer: GPUBuffer;
+  private readonly readBuffer: GPUBuffer;
+  private readonly labels: string[] = [];
+  private queryCount = 0;
+  private capacityOverflows = 0;
+
+  constructor(private readonly device: GPUDevice, private readonly capacity: number) {
+    this.querySet = device.createQuerySet({ type: "timestamp", count: capacity });
+    this.resolveBuffer = device.createBuffer({
+      label: "Algorithm pass timestamps resolve",
+      size: capacity * 8,
+      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+    });
+    this.readBuffer = device.createBuffer({
+      label: "Algorithm pass timestamps readback",
+      size: capacity * 8,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+  }
+
+  computePassDescriptor(descriptor?: GPUComputePassDescriptor): GPUComputePassDescriptor | undefined {
+    if (descriptor?.timestampWrites) {
+      // Never overwrite the solver's semantic recorder. Diagnostic runs turn
+      // that recorder off, but retaining this guard makes the two facilities
+      // composable and fail-closed.
+      return descriptor;
+    }
+    if (this.queryCount + 2 > this.capacity) {
+      this.capacityOverflows += 1;
+      return descriptor;
+    }
+    const label = descriptor?.label?.trim() || "<unlabeled compute pass>";
+    const beginningOfPassWriteIndex = this.queryCount;
+    const endOfPassWriteIndex = this.queryCount + 1;
+    this.queryCount += 2;
+    this.labels.push(label);
+    return {
+      ...descriptor,
+      timestampWrites: {
+        querySet: this.querySet,
+        beginningOfPassWriteIndex,
+        endOfPassWriteIndex,
+      },
+    };
+  }
+
+  resolve(encoder: GPUCommandEncoder): void {
+    if (this.queryCount === 0) return;
+    const bytes = this.queryCount * 8;
+    encoder.resolveQuerySet(this.querySet, 0, this.queryCount, this.resolveBuffer, 0);
+    encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, bytes);
+  }
+
+  async read(): Promise<{
+    buckets: Array<[string, number | undefined]>;
+    capacityOverflows: number;
+  }> {
+    try {
+      if (this.queryCount === 0) return { buckets: [], capacityOverflows: this.capacityOverflows };
+      const bytes = this.queryCount * 8;
+      await this.readBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
+      const timestamps = new BigUint64Array(this.readBuffer.getMappedRange(0, bytes).slice(0));
+      return {
+        buckets: this.labels.map((label, index) => {
+          const begin = timestamps[2 * index] ?? 0n;
+          const end = timestamps[2 * index + 1] ?? 0n;
+          return [label, begin > 0n && end >= begin ? Number(end - begin) / 1e6 : undefined];
+        }),
+        capacityOverflows: this.capacityOverflows,
+      };
+    } finally {
+      if (this.readBuffer.mapState === "mapped") this.readBuffer.unmap();
+      this.querySet.destroy();
+      this.resolveBuffer.destroy();
+      this.readBuffer.destroy();
+    }
+  }
+}
+
+/** Captures a bounded number of complete command buffers after `start()`. The
+ * smoke starts it only after construction/t=0 publication, so the first buffer
+ * is a real mini-dam recurring advance rather than shader warmup. */
+class GPUPassTimestampAudit {
+  private enabled = false;
+  private claimedCommandBuffers = 0;
+  private readonly submitted = new WeakMap<GPUCommandBuffer, GPUPassTimestampEncoderSession>();
+  private readonly reads: Promise<{
+    buckets: Array<[string, number | undefined]>;
+    capacityOverflows: number;
+  }>[] = [];
+
+  constructor(
+    private readonly device: GPUDevice,
+    private readonly maximumCommandBuffers = 1,
+    private readonly queryCapacity = 2048,
+  ) {}
+
+  start(): void { this.enabled = true; }
+
+  createEncoderSession(): GPUPassTimestampEncoderSession | undefined {
+    if (!this.enabled || this.claimedCommandBuffers >= this.maximumCommandBuffers) return undefined;
+    this.claimedCommandBuffers += 1;
+    return new GPUPassTimestampEncoderSession(this.device, this.queryCapacity);
+  }
+
+  attach(commandBuffer: GPUCommandBuffer, session: GPUPassTimestampEncoderSession): void {
+    this.submitted.set(commandBuffer, session);
+  }
+
+  afterSubmit(commandBuffers: readonly GPUCommandBuffer[]): void {
+    for (const commandBuffer of commandBuffers) {
+      const session = this.submitted.get(commandBuffer);
+      if (session) this.reads.push(session.read());
+    }
+  }
+
+  async report(): Promise<GPUPassTimestampReport> {
+    const captures = await Promise.all(this.reads);
+    const aggregates = new Map<string, Omit<GPUFineTimestampBucket, "mean_ms">>();
+    let invalidPasses = 0;
+    for (const capture of captures) for (const [label, duration] of capture.buckets) {
+      if (duration === undefined || !Number.isFinite(duration) || duration < 0) {
+        invalidPasses += 1;
+        continue;
+      }
+      const bucket = aggregates.get(label) ?? {
+        samples: 0, total_ms: 0, minimum_ms: Number.POSITIVE_INFINITY, maximum_ms: 0,
+      };
+      bucket.samples += 1;
+      bucket.total_ms += duration;
+      bucket.minimum_ms = Math.min(bucket.minimum_ms, duration);
+      bucket.maximum_ms = Math.max(bucket.maximum_ms, duration);
+      aggregates.set(label, bucket);
+    }
+    const byLabel = Object.fromEntries(Array.from(aggregates.entries())
+      .sort((left, right) => right[1].total_ms - left[1].total_ms || left[0].localeCompare(right[0]))
+      .map(([label, bucket]) => [label, {
+        ...bucket,
+        mean_ms: bucket.total_ms / Math.max(1, bucket.samples),
+      }]));
+    return {
+      capturedCommandBuffers: captures.length,
+      measuredPasses: Array.from(aggregates.values()).reduce((sum, bucket) => sum + bucket.samples, 0),
+      invalidPasses,
+      capacityOverflows: captures.reduce((sum, capture) => sum + capture.capacityOverflows, 0),
+      summedPass_ms: Array.from(aggregates.values()).reduce((sum, bucket) => sum + bucket.total_ms, 0),
+      byLabel,
+    };
+  }
 }
 
 class GPUCommandAudit {
@@ -2190,6 +2393,11 @@ function auditCommandEncoder(
   encoder: GPUCommandEncoder,
   audit?: GPUCommandAudit,
   dataFlow?: GPUDataFlowEncoderSession,
+  passTimestamps?: GPUPassTimestampEncoderSession,
+  attachPassTimestamps?: (
+    commandBuffer: GPUCommandBuffer,
+    session: GPUPassTimestampEncoderSession,
+  ) => void,
 ): GPUCommandEncoder {
   return new Proxy(encoder, { get(target, property) {
     if (property === "clearBuffer") return (buffer: GPUBuffer, offset = 0, size?: number) => {
@@ -2204,13 +2412,16 @@ function auditCommandEncoder(
     if (property === "beginComputePass") return (descriptor?: GPUComputePassDescriptor) => {
       audit?.recordComputePass(descriptor);
       const label = descriptor?.label?.trim() || "<unlabeled compute pass>";
-      const pass = target.beginComputePass(descriptor);
+      const pass = target.beginComputePass(passTimestamps?.computePassDescriptor(descriptor) ?? descriptor);
       const flowPass = dataFlow?.beginPass(label);
       return audit || flowPass ? auditComputePass(pass, audit, label, flowPass) : pass;
     };
     if (property === "finish") return (descriptor?: GPUCommandBufferDescriptor) => {
       audit?.recordCommandBuffer();
-      return target.finish(descriptor);
+      passTimestamps?.resolve(target);
+      const commandBuffer = target.finish(descriptor);
+      if (passTimestamps) attachPassTimestamps?.(commandBuffer, passTimestamps);
+      return commandBuffer;
     };
     const value = Reflect.get(target, property, target);
     return typeof value === "function" ? value.bind(target) : value;
@@ -2246,6 +2457,8 @@ interface GPUSmokeResult {
   firstStructuredRejectStep?: number;
   gpuCommandAudit?: GPUCommandAuditReport;
   gpuFineTimestamps?: GPUFineTimestampReport;
+  gpuPassTimestamps?: GPUPassTimestampReport;
+  algorithmDiagnostics?: Record<string, unknown>;
   gpuDataFlowManifest?: GPUDataFlowManifest;
   /** Accepted steps whose live power topology, faces, transfer, and MGPCG publication passed the generation audit. */
   powerGenerationAuditedSteps: number;
@@ -2416,6 +2629,8 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     structuredRejectSummary: info.structuredRejectSummary,
     gpuCommandAudit: result.gpuCommandAudit,
     gpuFineTimestamps: result.gpuFineTimestamps,
+    gpuPassTimestamps: result.gpuPassTimestamps,
+    algorithmDiagnostics: result.algorithmDiagnostics,
     gpuDataFlowManifest: result.gpuDataFlowManifest,
     powerGenerationAuditedSteps: result.powerGenerationAuditedSteps,
     mgpcgIterationAudit: result.mgpcgIterationAudit,
@@ -2553,24 +2768,31 @@ async function runGPU(
   device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
   const commandAudit = gpuCommandAuditRequested ? new GPUCommandAudit() : undefined;
   const dataFlowAudit = genericPhaseTraceRequested ? new GPUDataFlowAudit() : undefined;
-  const instrumentedQueue = commandAudit ? new Proxy(device.queue, {
+  const passTimestampAudit = gpuPassTimestampRequested
+    && device.features.has("timestamp-query")
+    ? new GPUPassTimestampAudit(device, Math.max(1,
+      Math.floor(Number(process.env.FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS ?? 1))))
+    : undefined;
+  const instrumentedQueue = commandAudit || passTimestampAudit ? new Proxy(device.queue, {
     get(target, property) {
       if (property === "writeBuffer") return (buffer: GPUBuffer, bufferOffset: number,
         data: GPUAllowSharedBufferSource, dataOffset = 0, size?: number) => {
-        commandAudit.recordWriteBuffer(buffer, writtenByteLength(data, dataOffset, size));
+        commandAudit?.recordWriteBuffer(buffer, writtenByteLength(data, dataOffset, size));
         return target.writeBuffer(buffer, bufferOffset, data, dataOffset, size);
       };
       if (property === "writeTexture") return (destination: GPUTexelCopyTextureInfo,
         data: GPUAllowSharedBufferSource, dataLayout: GPUTexelCopyBufferLayout, size: GPUExtent3D) => {
-        commandAudit.recordWriteTexture(writtenByteLength(data));
+        commandAudit?.recordWriteTexture(writtenByteLength(data));
         return target.writeTexture(destination, data, dataLayout, size);
       };
       if (property === "submit") return (commandBuffers: Iterable<GPUCommandBuffer>) => {
-        const submitted = Array.from(commandBuffers); commandAudit.recordSubmit(submitted.length);
-        return target.submit(submitted);
+        const submitted = Array.from(commandBuffers); commandAudit?.recordSubmit(submitted.length);
+        const result = target.submit(submitted);
+        passTimestampAudit?.afterSubmit(submitted);
+        return result;
       };
       if (property === "onSubmittedWorkDone") return () => {
-        commandAudit.recordFence(); return target.onSubmittedWorkDone();
+        commandAudit?.recordFence(); return target.onSubmittedWorkDone();
       };
       const value = Reflect.get(target, property, target);
       return typeof value === "function" ? value.bind(target) : value;
@@ -2600,8 +2822,10 @@ async function runGPU(
         commandAudit?.recordCommandEncoder(descriptor);
         const encoder = target.createCommandEncoder(descriptor);
         const dataFlow = dataFlowAudit?.createEncoderSession();
-        return commandAudit || dataFlow
-          ? auditCommandEncoder(encoder, commandAudit, dataFlow)
+        const passTimestamps = passTimestampAudit?.createEncoderSession();
+        return commandAudit || dataFlow || passTimestamps
+          ? auditCommandEncoder(encoder, commandAudit, dataFlow, passTimestamps,
+            (commandBuffer, session) => passTimestampAudit?.attach(commandBuffer, session))
           : encoder;
       };
       if (property === "createComputePipeline") return (descriptor: GPUComputePipelineDescriptor) => {
@@ -2832,6 +3056,7 @@ async function runGPU(
   // profiler/readback activity after the initialized solver is warm.
   commandAudit?.reset();
   dataFlowAudit?.start();
+  passTimestampAudit?.start();
   const runStarted = performance.now();
   let steps = 0, samplingWall_ms = 0, matched: Awaited<ReturnType<typeof readCubicVolumeField>> | undefined;
   // Retry accounting for the advance loop below. `rejectedAdvanceAttempts` is
@@ -3046,6 +3271,19 @@ async function runGPU(
     const captureCompactPowerStep = method.id === "octree"
       && (collectStabilityEnvelope || powerGenerationAuditRequested && auditThisPowerStep);
     if (captureCompactPowerStep) {
+      // A profiled advance submits its phases asynchronously, so on those steps
+      // `advanceTo` returns before any of the step's own command buffers reach
+      // the queue. Copying now would order the snapshot ahead of the work it is
+      // meant to observe and latch the previous step's generation, both on the
+      // GPU and in `fine.generation` (which only flips in retireSubmittedEncoder).
+      // Fence on the same admission boundary every other consumer uses, and
+      // charge the wait to sampling so per-advance timings stay comparable.
+      const pendingAdvance = (solver as GPUSolverInstance).pendingAdvanceCompletion;
+      if (pendingAdvance) {
+        const fencedAt_ms = performance.now();
+        await pendingAdvance;
+        samplingWall_ms += performance.now() - fencedAt_ms;
+      }
       const audited = solver as GPUSolverInstance & {
         structuredVelocityControl?: GPUBuffer;
         structuredBoundaryControl?: GPUBuffer;
@@ -3767,6 +4005,43 @@ async function runGPU(
   const capturedWorkAccounting = accountingOwner.captureWorkAccounting
     ? await accountingOwner.captureWorkAccounting()
     : undefined;
+  const gpuPassTimestamps = passTimestampAudit
+    ? await passTimestampAudit.report()
+    : undefined;
+  const diagnosticProjection = solver as GPUSolverInstance & {
+    octreeProjection?: {
+      readGlobalFineLevelSetDiagnostics(): Promise<{
+        topologyControl: readonly number[];
+        structuredVelocityControl: readonly number[];
+        structuredBoundaryControl: readonly number[];
+        airSupportControl: readonly number[];
+        airSupportTerminalScratch: readonly number[];
+        finePageDeltaHeader: readonly number[];
+      } | undefined>;
+    };
+    workAccountingPlan?: Record<string, unknown>;
+    globalFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
+  };
+  const terminalAlgorithmState = gpuPassTimestampRequested
+    ? await diagnosticProjection.octreeProjection?.readGlobalFineLevelSetDiagnostics()
+    : undefined;
+  const finePlan = diagnosticProjection.globalFineLevelSetSource?.plan;
+  const algorithmDiagnostics = terminalAlgorithmState ? {
+    topologyControl: terminalAlgorithmState.topologyControl,
+    structuredVelocityControl: terminalAlgorithmState.structuredVelocityControl,
+    structuredBoundaryControl: terminalAlgorithmState.structuredBoundaryControl,
+    airSupportControl: terminalAlgorithmState.airSupportControl,
+    airSupportTerminalScratch: terminalAlgorithmState.airSupportTerminalScratch,
+    finePageDeltaHeader: terminalAlgorithmState.finePageDeltaHeader,
+    finePlan: finePlan ? {
+      maximumResidentBricks: finePlan.maximumResidentBricks,
+      logicalBrickCount: finePlan.logicalBrickCount,
+      samplesPerBrick: finePlan.samplesPerBrick,
+      brickResolution: finePlan.brickResolution,
+      fineFactor: finePlan.fineFactor,
+    } : undefined,
+    pressurePlan: diagnosticProjection.workAccountingPlan,
+  } : undefined;
   const result: GPUSmokeResult = {
     method: resultMethod, info, grid: [info.nx, info.ny, info.nz], matchedField: matched.field,
     matchedSummary: matched.summary, compactFieldEvidence: matched.compactFieldEvidence,
@@ -3778,6 +4053,8 @@ async function runGPU(
     structuredRejectReports, firstStructuredRejectStep,
     gpuCommandAudit: commandAudit?.snapshot(),
     gpuFineTimestamps,
+    gpuPassTimestamps,
+    algorithmDiagnostics,
     gpuDataFlowManifest,
     powerGenerationAuditedSteps,
     mgpcgIterationAudit: powerGenerationAuditedSteps > 0 ? {

@@ -490,6 +490,26 @@ function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCach
 export class WebGPUQuadtreeSurfaceState {
   readonly cache?: WebGPUQuadtreeSurfaceCache;
   readonly texture: GPUTexture;
+  /** Retained so a warm re-seed can rewrite phi without rebuilding the state. */
+  private uploadedDimensions?: { nx: number; ny: number; nz: number };
+  private volumeBandForReseed = 0;
+  private cellForReseed?: { x: number; y: number; z: number };
+
+  /**
+   * Overwrite the resident level set in place for a warm re-seed, restoring the
+   * volume references to the t=0 values the fresh-build path would have set.
+   * The texture, its bindings, and every dependent allocation are untouched —
+   * only its contents change, which is what makes the re-seed cheap.
+   */
+  reseedLevelSet(device: GPUDevice, phi: Float32Array): boolean {
+    const dims = this.uploadedDimensions, cell = this.cellForReseed;
+    if (!dims || !cell || phi.length !== dims.nx * dims.ny * dims.nz) return false;
+    uploadLevelSetTexture(device, this.texture, phi, dims.nx, dims.ny, dims.nz);
+    this.referenceVolumeCells = phi.reduce((sum, value) => sum + Math.max(0, Math.min(1, 0.5 - value / this.volumeBandForReseed)), 0);
+    this.volumeCells = this.referenceVolumeCells;
+    this.interfaceCells = phi.reduce((sum, value) => sum + (Math.abs(value) < 1.5 * Math.min(cell.x, cell.y, cell.z) ? 1 : 0), 0);
+    return true;
+  }
   private readonly scratch?: GPUTexture;
   private readonly predicted?: GPUTexture;
   private readonly reversed?: GPUTexture;
@@ -531,10 +551,13 @@ export class WebGPUQuadtreeSurfaceState {
     const textureDimensions = placeholderOnly ? { nx: 1, ny: 1, nz: 1 } : dims;
     this.texture = device.createTexture({ label: placeholderOnly ? "Quadtree level-set format placeholder" : "Resident quadtree level set", size: [textureDimensions.nx, textureDimensions.ny, textureDimensions.nz], dimension: "3d", format: "r32float", usage: textureUsage });
     uploadLevelSetTexture(device, this.texture, initialPhi, textureDimensions.nx, textureDimensions.ny, textureDimensions.nz);
+    this.uploadedDimensions = textureDimensions;
     const volumeBand = 4 * cell.y;
     this.referenceVolumeCells = initialPhi.reduce((sum, value) => sum + Math.max(0, Math.min(1, 0.5 - value / volumeBand)), 0);
     this.volumeCells = this.referenceVolumeCells;
     this.interfaceCells = initialPhi.reduce((sum, value) => sum + (Math.abs(value) < 1.5 * Math.min(cell.x, cell.y, cell.z) ? 1 : 0), 0);
+    this.volumeBandForReseed = volumeBand;
+    this.cellForReseed = cell;
     // Global-fine storage owns transport, redistance, and volume control.
     // Retain only the topology/render publication texture; in particular do
     // not hide box-sized scratch allocations behind unused bind groups.

@@ -47,8 +47,21 @@ function reachableStorageBindings(entryPoint: string): number[] {
 test("structured boundary update is canonical, transactional, and face-graph free", () => {
   assert.doesNotMatch(structuredBoundaryCoefficientWGSL, /PowerFaceRecord|incidence|atomicAdd/i);
   assert.match(structuredBoundaryCoefficientWGSL, /fn fineSample\(/);
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /let lattice=\(x-fp\.origin\)\/fp\.width-vec3f\(\.5\)[\s\S]*for\(var corner=0u;corner<8u;corner\+=1u\)[\s\S]*if\(sample\.y==0\.\)\{return vec2f\(coarsePhi,0\.\);\}/,
+    "face pressure must use complete trilinear samples on the cell-centred fine lattice");
   assert.match(structuredBoundaryCoefficientWGSL, /fn solidAt\(/);
-  assert.match(structuredBoundaryCoefficientWGSL, /scale=1\.\/theta/);
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /if\(!world&&\(hi==INVALID\|\|\(\(plo\.x<0\.\)!=\(phi\.x<0\.\)\)\)\)[\s\S]*let theta=-plo\.x\/\(phi\.x-plo\.x\);[\s\S]*scale=1\.\/theta/,
+    "the ghost-fluid pressure scale must use main's exact dual-edge crossing");
+  assert.doesNotMatch(structuredBoundaryCoefficientWGSL, /clamp\([^;]*theta|theta=clamp/,
+    "the wall-impact pressure impulse must not be capped by a minimum theta");
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /let loPoint=rowCenter\(lo\);let world=worldBoundaryBit\(h\)!=0u;var hiPoint=handleCenter\(h\);if\(hi!=INVALID\)\{hiPoint=rowCenter\(hi\);\}else if\(!world\)\{let inv=[\s\S]*hiPoint=loPoint\+handleNormal\(h\)\/max\(inv,1e-20\);\}/,
+    "ghost-fluid theta must sample the two actual power-cell centres");
+  assert.doesNotMatch(structuredBoundaryCoefficientWGSL,
+    /let half=\.5\/max\(inv,1e-20\);let loPoint=x-half\*n;let hiPoint=x\+half\*n/,
+    "a power-face centroid is not generally the midpoint of its dual edge");
   assert.match(structuredBoundaryCoefficientWGSL, /resolveStructuredSolidSlots/);
   assert.match(structuredBoundaryCoefficientWGSL, /commitStructuredBoundarySlots/);
   assert.match(structuredBoundaryCoefficientWGSL,
@@ -101,7 +114,7 @@ test("every structured boundary entry point fits the hard ten-storage-buffer con
       `${entryPoint} reaches ${bindings.length} storage buffers: ${bindings.join(", ")}`);
   }
   assert.deepEqual(reachableStorageBindings("resolveStructuredBoundarySlots"),
-    [2, 4, 6, 7, 8, 9, 11, 16]);
+    [2, 3, 4, 6, 7, 8, 9, 11, 16]);
   assert.deepEqual(reachableStorageBindings("resolveStructuredSolidSlots"),
     [2, 3, 10, 11, 16, 19, 21]);
 });

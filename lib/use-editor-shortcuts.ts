@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { editorToolForShortcut, editorToolIsActive } from "./editor-tools";
+import { propIdFromSelection } from "./editor-props";
 import { simulation } from "./simulation/controller";
 import { useDiagnosticsStore } from "./stores/diagnostics-store";
 import { useUIStore } from "./stores/ui-store";
@@ -43,10 +44,10 @@ export function useEditorShortcuts(): void {
         ui.select(undefined);
         return;
       }
-      if ((event.key === "Delete" || event.key === "Backspace") && ui.selection?.kind === "body") {
-        event.preventDefault();
-        simulation.removeBody(ui.selection.id);
-        return;
+      if (event.key === "Delete" || event.key === "Backspace") {
+        if (ui.selection?.kind === "body") { event.preventDefault(); simulation.removeBody(ui.selection.id); return; }
+        const propId = ui.selection?.kind === "prop" ? propIdFromSelection(ui.selection.id) : undefined;
+        if (propId) { event.preventDefault(); simulation.removeProp(propId); return; }
       }
       if (event.key.toLowerCase() === "f" && ui.selection?.kind === "body") {
         const body = useDiagnosticsStore.getState().bodies.find((candidate) => candidate.description.id === ui.selection?.id);

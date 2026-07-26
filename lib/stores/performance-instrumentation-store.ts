@@ -12,12 +12,11 @@ interface PerformanceInstrumentationStore {
  * and presentation completion tracking are intentionally outside this switch.
  */
 export const usePerformanceInstrumentationStore = create<PerformanceInstrumentationStore>((set) => ({
-  // Hardware timestamp support is adapter-dependent, and the portable
-  // segmented fallback deliberately serializes semantic phases. Keep that
-  // measurement load opt-in so normal simulation throughput is never changed
-  // merely by opening the application.
+  // Match the Dawn production lane until the user explicitly asks to measure:
+  // no timestamp queries, trace readbacks, forced encoder splits, or
+  // measurement-only queue fences on the default simulation path.
   enabled: false,
-  enabledAt_ms: Infinity,
+  enabledAt_ms: -Infinity,
   setEnabled: (enabled) => set((state) => {
     if (enabled === state.enabled) return state;
     return {

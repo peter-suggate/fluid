@@ -38,6 +38,15 @@ export interface PowerDamFineTimestampReport {
   readonly byLabel: Readonly<Record<string, PowerDamFineTimestampBucket>>;
 }
 
+export interface PowerDamPassTimestampReport {
+  readonly capturedCommandBuffers: number;
+  readonly measuredPasses: number;
+  readonly invalidPasses: number;
+  readonly capacityOverflows: number;
+  readonly summedPass_ms: number;
+  readonly byLabel: Readonly<Record<string, PowerDamFineTimestampBucket>>;
+}
+
 export interface PowerDamResultRecord {
   readonly scenario: string;
   readonly method: string;
@@ -68,6 +77,8 @@ export interface PowerDamResultRecord {
   readonly validationErrors?: readonly string[];
   readonly gpuCommandAudit?: PowerDamCommandAudit;
   readonly gpuFineTimestamps?: PowerDamFineTimestampReport;
+  readonly gpuPassTimestamps?: PowerDamPassTimestampReport;
+  readonly algorithmDiagnostics?: Readonly<Record<string, unknown>>;
   readonly gpuDataFlowManifest?: GPUDataFlowManifest;
   readonly physicsTrace?: PerformanceTrace;
   /** Terminal state counters already published by the smoke runner. These are
@@ -143,6 +154,10 @@ export interface PowerDamPerformanceSummary {
       readonly totalPerAdvance_ms: number;
     }>>;
   };
+  /** Non-invasive beginning/end timestamps attached to the existing compute
+   * passes of a bounded number of recurring command buffers. */
+  readonly passTimestamps?: PowerDamPassTimestampReport;
+  readonly algorithmDiagnostics?: Readonly<Record<string, unknown>>;
   /** Machine-readable lineage captured from actual pipeline/bind-group/dispatch
    * state during the same advances as fine GPU timestamps. */
   readonly dataFlow?: GPUDataFlowManifest;
@@ -490,6 +505,8 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
         }],
       )),
     } } : {}),
+    ...(result.gpuPassTimestamps ? { passTimestamps: result.gpuPassTimestamps } : {}),
+    ...(result.algorithmDiagnostics ? { algorithmDiagnostics: result.algorithmDiagnostics } : {}),
     ...(result.gpuDataFlowManifest ? { dataFlow: result.gpuDataFlowManifest } : {}),
     ...(trace ? { physicsTrace: {
       sampleId: trace.sampleId,

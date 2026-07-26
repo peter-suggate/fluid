@@ -32,12 +32,15 @@ if (quiescent && requestedLane === "ui") {
 const lane = (requestedLane === "quiescent" ? "moving-interface" : requestedLane) as RuntimeLane;
 const traceProfile = args.has("--profile");
 const fineTimestamps = args.has("--fine-timestamps");
+const passTimestamps = args.has("--pass-timestamps") || args.has("--algorithm-diagnostics");
 if (quiescent && fineTimestamps) {
   throw new Error("--quiescent cannot use --fine-timestamps until the runner can timestamp only a trailing window");
 }
 const jsonOnly = args.has("--json");
 const artifactPath = process.argv.find((argument) => argument.startsWith("--artifact="))
   ?.slice("--artifact=".length);
+const diagnosticArtifactPath = process.argv.find((argument) =>
+  argument.startsWith("--diagnostic-artifact="))?.slice("--diagnostic-artifact=".length);
 const root = fileURLToPath(new URL("..", import.meta.url));
 const runner = fileURLToPath(new URL("./run-webgpu-smoke-isolated.ts", import.meta.url));
 
@@ -76,6 +79,8 @@ const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.Pr
     FLUID_PERFORMANCE_PROFILE: "1",
     FLUID_PERFORMANCE_TRACES: traceProfile || artifactPath ? "1" : "0",
     FLUID_GPU_FINE_TIMESTAMPS: fineTimestamps ? "1" : "0",
+    FLUID_GPU_PASS_TIMESTAMPS: passTimestamps ? "1" : "0",
+    FLUID_ALGORITHM_DIAGNOSTICS: args.has("--algorithm-diagnostics") ? "1" : "0",
     FLUID_GPU_COMMAND_AUDIT: "1",
     FLUID_STABILITY_ENVELOPE: artifactPath ? "1" : (process.env.FLUID_STABILITY_ENVELOPE ?? "0"),
     FLUID_REGRESSION_ARTIFACT: artifactPath ? "1" : "0",
@@ -128,6 +133,17 @@ if (quiescent) {
   }
   summary = quiescentSummary;
 }
+if (diagnosticArtifactPath) {
+  const absoluteDiagnosticPath = resolve(root, diagnosticArtifactPath);
+  mkdirSync(dirname(absoluteDiagnosticPath), { recursive: true });
+  writeFileSync(absoluteDiagnosticPath, `${JSON.stringify({
+    schemaVersion: 1,
+    lane: requestedLane,
+    capturedAt: new Date().toISOString(),
+    summary,
+  }, null, 2)}\n`);
+  if (!jsonOnly) console.log(`diagnostic artifact: ${absoluteDiagnosticPath}`);
+}
 if (artifactPath) {
   const artifact = buildOctreeRegressionArtifact({
     lane: requestedLane as OctreeRegressionLane,
@@ -153,12 +169,28 @@ const numericLimit = (name: string): number | undefined => {
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be positive and finite`);
   return value;
 };
-const failures = powerDamPerformanceFailures(summary, {
+const failures = [...powerDamPerformanceFailures(summary, {
   maximumAdvanceWall_ms: numericLimit("FLUID_MAX_ADVANCE_MS"),
   maximumDispatchesPerAdvance: numericLimit("FLUID_MAX_DISPATCHES_PER_ADVANCE"),
   maximumComputePassesPerAdvance: numericLimit("FLUID_MAX_PASSES_PER_ADVANCE"),
   maximumPressureNonSolve_ms: numericLimit("FLUID_MAX_PRESSURE_NON_SOLVE_MS"),
-});
+})];
+// A fine band that overflows its capacity degrades the resident-brick count to
+// the INVALID sentinel and leaves the pressure solve executing zero iterations
+// -- yet every gate above still reports success, because a solver that computes
+// nothing also produces no validation errors. Assert the run actually solved.
+{
+  const terminal = summary.terminalCounters;
+  const active = terminal?.activeFineBricks;
+  const logical = terminal?.logicalFineBricks;
+  if (active !== undefined && logical !== undefined && active > logical) {
+    failures.push(`fine band active-brick count ${active} exceeds the ${logical}-brick logical`
+      + " lattice -- the band overflowed capacity and the publication is invalid");
+  }
+  if (terminal?.pressureIterationsExecuted === 0) {
+    failures.push("pressure solve executed zero iterations -- the solver did no work");
+  }
+}
 if (jsonOnly) console.log(JSON.stringify(quiescent
   ? { lane: "quiescent", moving: summarizePowerDamPerformance(movingResult), quiescent: summary }
   : summary));
@@ -205,6 +237,15 @@ else {
       .sort((left, right) => right[1].totalPerAdvance_ms - left[1].totalPerAdvance_ms)
       .slice(0, 20)) {
       console.log(`GPU pass: ${label}: ${bucket.totalPerAdvance_ms.toFixed(3)} ms/advance · ${bucket.mean_ms.toFixed(3)} ms mean · ${bucket.samples} samples`);
+    }
+  }
+  if (summary.passTimestamps) {
+    const timestamps = summary.passTimestamps;
+    console.log(`compute-pass GPU timestamps: ${timestamps.measuredPasses} passes in ${timestamps.capturedCommandBuffers} command buffer(s), ${timestamps.invalidPasses} invalid, ${timestamps.capacityOverflows} capacity overflows; ${timestamps.summedPass_ms.toFixed(2)} ms summed pass occupancy`);
+    for (const [label, bucket] of Object.entries(timestamps.byLabel)
+      .sort((left, right) => right[1].total_ms - left[1].total_ms)
+      .slice(0, 40)) {
+      console.log(`GPU compute pass: ${label}: ${bucket.total_ms.toFixed(3)} ms · ${bucket.mean_ms.toFixed(3)} ms mean · ${bucket.samples} samples`);
     }
   }
   if (summary.dataFlow) {

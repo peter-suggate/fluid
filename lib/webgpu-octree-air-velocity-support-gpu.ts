@@ -754,10 +754,12 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
     &&atomicLoad(&supportArena[p.airControlOffset+2u])==accepted.epoch
     &&atomicLoad(&supportArena[p.airControlOffset+3u])==accepted.bank
     &&atomicLoad(&supportArena[p.airControlOffset+4u])==boundaryNow;
-  // The candidate generation is only a request. If the preceding GPU commit
-  // gate leaves the accepted epoch unchanged, retain the matching prior
-  // support transaction instead of exposing the rejected generation.
-  if((atomicLoad(&accepted.flags)!=0u||accepted.epoch!=p.expectedEpoch)&&existingReady){
+  // The candidate generation is only a request. If the accepted authority
+  // itself is invalid, preserve a matching prior receipt. A rejected candidate
+  // that leaves a clean older epoch is different: rebuild fine-band support
+  // against that accepted epoch and the new fine generation, so Section 5 can
+  // continue on one coherent (temporarily reused) power topology.
+  if(atomicLoad(&accepted.flags)!=0u&&existingReady){
     sw(0u,ERROR_SOURCE|ERROR_GENERATION);sw(1u,0u);sw(31u,2u);
     writeDispatch(10u,vec3u(0u,1u,1u));writeDispatch(13u,vec3u(0u,1u,1u));
     writeDispatch(16u,vec3u(0u,1u,1u));writeDispatch(19u,vec3u(0u,1u,1u));return;
@@ -766,12 +768,12 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   sw(4u,accepted.bank);var boundary=0u;if(p.boundaryEpochOffset<arrayLength(&boundaryEpoch)){boundary=boundaryEpoch[p.boundaryEpochOffset];}sw(5u,boundary);
   let candidates=p.candidateCapacity;let blocks=p.blockCapacity;sw(6u,candidates);sw(7u,blocks);sw(8u,0u);sw(9u,p.supportCapacity);
   sw(25u,0u);sw(26u,0u);sw(27u,0u);sw(28u,0u);sw(40u,p.expectedFineGeneration);
-  if(atomicLoad(&accepted.flags)!=0u||accepted.epoch==0u||accepted.epoch!=p.expectedEpoch||accepted.bank>1u
+  if(atomicLoad(&accepted.flags)!=0u||accepted.epoch==0u||accepted.bank>1u
       ||accepted.rowCount==0u||accepted.rowCount>p.rowCapacity||accepted.slotCount>p.slotCapacity){fail(0u,ERROR_SOURCE|ERROR_GENERATION);}
   let ownerStatus=ownerPageArena[${OCTREE_OWNER_PAGE_CONTROL_WORDS.status}u];
-  if(ownerPageArena[${OCTREE_OWNER_PAGE_CONTROL_WORDS.acceptedGeneration}u]!=p.expectedEpoch
+  if(ownerPageArena[${OCTREE_OWNER_PAGE_CONTROL_WORDS.acceptedGeneration}u]!=accepted.epoch
       ||(ownerStatus&OWNER_READY)==0u||(ownerStatus&OWNER_OVERFLOW)!=0u
-      ||ownerPageArena[${OCTREE_OWNER_PAGE_CONTROL_WORDS.invalidEntryCount}u]!=0u||boundary!=p.expectedEpoch){fail(0u,ERROR_GENERATION);}
+      ||ownerPageArena[${OCTREE_OWNER_PAGE_CONTROL_WORDS.invalidEntryCount}u]!=0u||boundary!=accepted.epoch){fail(0u,ERROR_GENERATION);}
   if(p.recordOffset+p.supportCapacity*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u>arrayLength(&recordArena)
       ||p.recordVectorOffset+p.supportCapacity*${STRUCTURED_AIR_SUPPORT_VECTOR_WORDS}u>arrayLength(&recordArena)
       ||p.airControlOffset+${OCTREE_AIR_SUPPORT_CONTROL_WORDS}u>arrayLength(&supportArena)){fail(0u,ERROR_CAPACITY);}
