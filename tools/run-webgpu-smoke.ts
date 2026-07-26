@@ -214,6 +214,22 @@ const physicsTraceLogRequested = process.env.FLUID_PHYSICS_TRACE_LOG === "1";
  * historical every-30-advances fence; per-step fencing (=1) lets the dynamic
  * physics trace resolve every advance for per-step phase attribution. */
 const completionFenceEverySteps = Math.max(1, Number(process.env.FLUID_AWAIT_EVERY_STEPS ?? 30));
+/** Optional bound on the deliberately unbounded `advanceTo` retry loop.
+ * `advanceTo` self-rejects while a profiled advance is in flight or a topology
+ * rebuild is blocked, and the harness simply retries. A solver that never
+ * accepts again therefore looks exactly like a slow one from the outside: the
+ * run just burns to `FLUID_WEBGPU_SMOKE_TIMEOUT_MS` and exits 124 with nothing
+ * naming the wedge. Setting this to a positive count converts that into a
+ * named abort. Unset or 0 keeps today's unbounded retry byte-for-byte. */
+const rejectedAdvanceWedgeLimitRaw = Number(process.env.FLUID_MAX_CONSECUTIVE_REJECTED_ADVANCES ?? 0);
+const rejectedAdvanceWedgeLimit = Number.isFinite(rejectedAdvanceWedgeLimitRaw)
+  && rejectedAdvanceWedgeLimitRaw > 0 ? Math.floor(rejectedAdvanceWedgeLimitRaw) : 0;
+/** Advance-loop heartbeat cadence. A line is emitted only once BOTH thresholds
+ * are met, i.e. at whichever of the two is the less frequent, so a fast run
+ * pays five seconds per line and a slow run pays twenty-five steps per line.
+ * The point is that a worker killed at its timeout still leaves a trail. */
+const PROGRESS_HEARTBEAT_WALL_MS = 5_000;
+const PROGRESS_HEARTBEAT_STEPS = 25;
 const gpuCommandAuditRequested = process.env.FLUID_GPU_COMMAND_AUDIT === "1";
 const requireSpatialField = process.env.FLUID_REQUIRE_SPATIAL_FIELD === "1";
 const runCPUOracle = process.env.FLUID_CPU_ORACLE !== "0";
@@ -2218,6 +2234,16 @@ interface GPUSmokeResult {
   /** Solver-loop wall time excluding deliberate full-field QA readbacks. */
   simulationWall_ms: number;
   steps: number;
+  /** `advanceTo` self-rejections retried by the advance loop. Rejections cost
+   * wall time but never increment `steps`, so without these two counters a
+   * wedged solver and a slow one produce identical result records. */
+  rejectedAdvanceAttempts: number;
+  maximumConsecutiveRejectedAdvances: number;
+  /** Distinct structured reject-carry summaries observed on `solver.info`. A
+   * latched carry zeroes every class dispatch, so every later step is a no-op;
+   * these come from the host publication and add no readback. */
+  structuredRejectReports: number;
+  firstStructuredRejectStep?: number;
   gpuCommandAudit?: GPUCommandAuditReport;
   gpuFineTimestamps?: GPUFineTimestampReport;
   gpuDataFlowManifest?: GPUDataFlowManifest;
@@ -2381,6 +2407,13 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
   const info = result.info;
   console.log(JSON.stringify({
     scenario, method: result.method, phase: "result", construction_ms: Math.round(result.construction_ms), runtime_ms: Math.round(result.runtime_ms), simulationWall_ms: Math.round(result.simulationWall_ms), steps: result.steps,
+    rejectedAdvanceAttempts: result.rejectedAdvanceAttempts,
+    maximumConsecutiveRejectedAdvances: result.maximumConsecutiveRejectedAdvances,
+    structuredRejectReports: result.structuredRejectReports,
+    firstStructuredRejectStep: result.firstStructuredRejectStep,
+    structuredRejectStage: info.structuredRejectStage,
+    structuredRejectIndex: info.structuredRejectIndex,
+    structuredRejectSummary: info.structuredRejectSummary,
     gpuCommandAudit: result.gpuCommandAudit,
     gpuFineTimestamps: result.gpuFineTimestamps,
     gpuDataFlowManifest: result.gpuDataFlowManifest,
@@ -2801,6 +2834,20 @@ async function runGPU(
   dataFlowAudit?.start();
   const runStarted = performance.now();
   let steps = 0, samplingWall_ms = 0, matched: Awaited<ReturnType<typeof readCubicVolumeField>> | undefined;
+  // Retry accounting for the advance loop below. `rejectedAdvanceAttempts` is
+  // monotone, so the exponential warning gate rides on it: a wedge drives it up
+  // continuously and still costs only log2(n) lines, whereas gating on the
+  // consecutive count would emit a line per rejection whenever accepts and
+  // rejections alternate (the ordinary profiled-advance-in-flight case).
+  let rejectedAdvanceAttempts = 0;
+  let consecutiveRejectedAdvances = 0;
+  let maximumConsecutiveRejectedAdvances = 0;
+  let nextRejectedAdvanceWarning = 1;
+  let lastReportedStructuredRejectSummary: string | undefined;
+  let structuredRejectReports = 0;
+  let firstStructuredRejectStep: number | undefined;
+  let lastProgressAt_ms = runStarted;
+  let lastProgressSteps = 0;
   // The perturbed cadence remains exclusive to the quadtree dam-break
   // regression; FLUID_STABILITY_ENVELOPE=1 collects the same envelope for any
   // scenario/method at the scene's fixed cadence.
@@ -2924,10 +2971,58 @@ async function runGPU(
     const requestedTime = Math.min(target_s, (solver.info.submittedTime_s ?? 0) + stepDt);
     const accepted = solver.advanceTo(requestedTime, bodies);
     if (!accepted) {
+      rejectedAdvanceAttempts += 1;
+      consecutiveRejectedAdvances += 1;
+      maximumConsecutiveRejectedAdvances = Math.max(maximumConsecutiveRejectedAdvances,
+        consecutiveRejectedAdvances);
+      if (rejectedAdvanceAttempts >= nextRejectedAdvanceWarning) {
+        nextRejectedAdvanceWarning = rejectedAdvanceAttempts * 2;
+        const emittedAt_ms = performance.now();
+        console.log(JSON.stringify({
+          scenario: scenarioId, method: method.id, record: "advance-rejected",
+          steps, requestedTime_s: requestedTime, dt_s: stepDt,
+          submittedTime_s: solver.info.submittedTime_s ?? 0,
+          rejectedAdvanceAttempts, consecutiveRejectedAdvances,
+          maximumConsecutiveRejectedAdvances,
+          wall_ms: Math.round(emittedAt_ms - runStarted),
+          structuredRejectStage: solver.info.structuredRejectStage,
+          structuredRejectIndex: solver.info.structuredRejectIndex,
+          structuredRejectSummary: solver.info.structuredRejectSummary,
+        }));
+        // Diagnostics, not solver work. Charging emission to the sampling
+        // account keeps simulationWall_ms — and every per-advance wall gate
+        // derived from it — identical with and without these lines.
+        samplingWall_ms += performance.now() - emittedAt_ms;
+      }
+      if (rejectedAdvanceWedgeLimit > 0
+        && consecutiveRejectedAdvances >= rejectedAdvanceWedgeLimit) {
+        throw new Error(`${method.id} ${scenarioId} advance wedged: advanceTo rejected ${consecutiveRejectedAdvances} consecutive attempts (${rejectedAdvanceAttempts} total) at step ${steps} requesting t=${requestedTime.toFixed(6)} s with submitted t=${(solver.info.submittedTime_s ?? 0).toFixed(6)} s; structured reject carry ${solver.info.structuredRejectSummary ?? "clean"}. Unset FLUID_MAX_CONSECUTIVE_REJECTED_ADVANCES or raise it above ${rejectedAdvanceWedgeLimit} to restore the unbounded retry.`);
+      }
       await new Promise((resolve) => setTimeout(resolve, 0));
       continue;
     }
+    consecutiveRejectedAdvances = 0;
     steps += 1;
+    // The reject carry is already decoded onto `solver.info` by the solver's own
+    // readStats path; reading the published field costs nothing. It latches, so
+    // report only transitions and the step that first observed one.
+    const structuredRejectSummary = solver.info.structuredRejectSummary;
+    if (structuredRejectSummary !== lastReportedStructuredRejectSummary) {
+      lastReportedStructuredRejectSummary = structuredRejectSummary;
+      if (structuredRejectSummary !== undefined) {
+        structuredRejectReports += 1;
+        firstStructuredRejectStep ??= steps;
+        const emittedAt_ms = performance.now();
+        console.log(JSON.stringify({
+          scenario: scenarioId, method: method.id, record: "structured-reject-carry",
+          steps, submittedTime_s: solver.info.submittedTime_s ?? 0,
+          structuredRejectStage: solver.info.structuredRejectStage,
+          structuredRejectIndex: solver.info.structuredRejectIndex,
+          structuredRejectSummary,
+        }));
+        samplingWall_ms += performance.now() - emittedAt_ms;
+      }
+    }
     captureGenericPhaseTrace();
     if (dataFlowAudit && steps >= genericPhaseTraceAdvances) dataFlowAudit.stop();
     if (physicsTraceLogRequested) {
@@ -3242,6 +3337,26 @@ async function runGPU(
         raster, globalFineGeneration, preProjectionVelocity, postProjectionVelocity, compactMechanicalEnergy });
       while (nextCheckpoint_s <= (solver.info.submittedTime_s ?? 0) + 1e-9) nextCheckpoint_s += checkpointEvery_s;
       samplingWall_ms += performance.now() - samplingStartedAt;
+    }
+    // Operator-clock heartbeat. Wall time here deliberately includes the QA
+    // readbacks excluded from simulationWall_ms: the question this answers is
+    // "is the run progressing at all", not "how fast is the solver".
+    const progressAt_ms = performance.now();
+    if (progressAt_ms - lastProgressAt_ms >= PROGRESS_HEARTBEAT_WALL_MS
+      && steps - lastProgressSteps >= PROGRESS_HEARTBEAT_STEPS) {
+      const windowSteps = steps - lastProgressSteps;
+      const windowWall_ms = progressAt_ms - lastProgressAt_ms;
+      lastProgressAt_ms = progressAt_ms;
+      lastProgressSteps = steps;
+      console.log(JSON.stringify({
+        scenario: scenarioId, method: method.id, record: "progress",
+        steps, submittedTime_s: solver.info.submittedTime_s ?? 0, targetTime_s: target_s,
+        wall_ms: Math.round(progressAt_ms - runStarted),
+        windowSteps, windowWallPerStep_ms: Number((windowWall_ms / windowSteps).toFixed(3)),
+        rejectedAdvanceAttempts, maximumConsecutiveRejectedAdvances,
+        structuredRejectSummary: solver.info.structuredRejectSummary,
+      }));
+      samplingWall_ms += performance.now() - progressAt_ms;
     }
     if (lost) throw new Error(`${method.id} device lost: ${lost.message || lost.reason}`);
   }
@@ -3659,6 +3774,8 @@ async function runGPU(
     finalSummary: final?.summary, finalTallCellActivity: final?.tallCellActivity,
     finalTallVolumeGaps: final?.tallVolumeGaps, validationErrors,
     construction_ms, runtime_ms: performance.now() - runStarted, simulationWall_ms, steps,
+    rejectedAdvanceAttempts, maximumConsecutiveRejectedAdvances,
+    structuredRejectReports, firstStructuredRejectStep,
     gpuCommandAudit: commandAudit?.snapshot(),
     gpuFineTimestamps,
     gpuDataFlowManifest,

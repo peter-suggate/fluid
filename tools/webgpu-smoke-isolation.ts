@@ -1,3 +1,4 @@
+import { rmSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 
 export const WEBGPU_EXCLUSIVE_LOCK = "/tmp/fluid-webgpu-exclusive.lock";
@@ -52,6 +53,19 @@ export async function acquireWebGPUExclusiveLock(
 
 export async function releaseWebGPUExclusiveLock(): Promise<void> {
   await rm(WEBGPU_EXCLUSIVE_LOCK, { recursive: true, force: true });
+}
+
+/**
+ * Release the lock from a signal handler.
+ *
+ * A supervisor SIGTERM is an ordinary termination, not a crash: the async
+ * `finally` in the worker never runs, so without this the timeout path leaks
+ * the lock and the *next* run fails with "Refusing concurrent GPU execution".
+ * Only the un-reapable SIGKILL path should leave the directory behind as owner
+ * evidence, which is what `run-webgpu-smoke-isolated.ts` already reports.
+ */
+export function releaseWebGPUExclusiveLockSync(): void {
+  rmSync(WEBGPU_EXCLUSIVE_LOCK, { recursive: true, force: true });
 }
 
 /** Parse the deliberately narrow wall-clock envelope before loading Dawn. */
